@@ -31,9 +31,10 @@
     "managed_schema": "managed-schema.json"
   },
   "host_permissions": [
-    "https://graph.microsoft.com/*",
     "https://login.microsoftonline.com/*",
-    "https://*/*"
+    "https://graph.microsoft.com/*",
+    "https://management.azure.com/*",
+    "https://knudsenmorten.github.io/PIM4EntraPS/*"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"

@@ -263,7 +263,7 @@ function New-PimSqlConnection {
 function Get-PimAzureSqlConnectionString {
     # Passwordless Azure SQL connection string (no credentials) -- auth is the MI
     # AccessToken set by New-PimSqlConnection. Launcher builds this + mints the token.
-    param([Parameter(Mandatory)][string]$Fqdn, [string]$Database = 'PIM4EntraPS')
+    param([Parameter(Mandatory)][string]$Fqdn, [string]$Database = 'PimPlatform')   # the v2 platform database (lead, 2026-09-18: PimPlatform is the default everywhere else)
     return "Server=tcp:$Fqdn,1433;Database=$Database;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
 }
 
@@ -275,8 +275,19 @@ function Get-PimSqlSecretFromKeyVault {
     param([Parameter(Mandatory)][string]$VaultName, [Parameter(Mandatory)][string]$SecretName, [string]$ApiVersion = '7.4')
     $token = $global:PIM_KeyVaultToken
     if (-not $token) {
-        $t = (Get-AzAccessToken -ResourceUrl 'https://vault.azure.net' -ErrorAction Stop).Token
-        $token = if ($t -is [securestring]) { [System.Net.NetworkCredential]::new('', $t).Password } else { $t }
+        if (Get-Command Get-AzAccessToken -ErrorAction SilentlyContinue) {
+            $t = (Get-AzAccessToken -ResourceUrl 'https://vault.azure.net' -ErrorAction Stop).Token
+            $token = if ($t -is [securestring]) { [System.Net.NetworkCredential]::new('', $t).Password } else { $t }
+        } elseif (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) {
+            # 🔴 REQ-F (2026-09-19): the hosted containers ship NO Az module, so Get-AzAccessToken does not exist
+            # there and every vault read through this function failed -- the emergency passphrase in particular
+            # (Resolve-PimEmergencyExpectedHash), which made break-glass activation impossible on every hosted
+            # Manager. PIM-Rest mints the vault token from the same identity the container already uses for
+            # Graph/ARM (its managed identity, or the engine SPN certificate).
+            $token = Get-PimRestToken -Resource 'https://vault.azure.net'
+        } else {
+            throw 'no way to obtain a Key Vault token in this runtime (neither the Az module nor PIM-Rest.ps1 is loaded)'
+        }
     }
     $uri = "https://$VaultName.vault.azure.net/secrets/$SecretName" + "?api-version=$ApiVersion"
     return (Invoke-RestMethod -Method GET -Uri $uri -Headers @{ Authorization = "Bearer $token" } -ErrorAction Stop).value
@@ -300,7 +311,7 @@ function Get-PimSqlConnectionString {
     # actually intended. The Azure SQL path (above) stays fully strict:
     # `Encrypt=True;TrustServerCertificate=False`.
     param([string]$Server, [string]$Database)
-    if (-not $Database) { $Database = if ($global:PIM_SqlDatabase) { "$($global:PIM_SqlDatabase)" } else { 'PIM4EntraPS' } }
+    if (-not $Database) { $Database = if ($global:PIM_SqlDatabase) { "$($global:PIM_SqlDatabase)" } else { 'PimPlatform' } }   # v2 platform database name (was the v1 'PIM4EntraPS')
     # BUG-30 (2026-08-08): an explicit -Server naming AZURE SQL must get the passwordless
     # token connection string, exactly like the ambient path below (:170) and the scenario
     # path (:159) already do. This branch used to return the Integrated string
@@ -558,6 +569,29 @@ function Add-PimSqlQueueChange {
 INSERT INTO pim.ChangeQueue (Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], Status, Kind, Origin, Justification)
 VALUES (@id, @e, @k, @op, @p, @enq, @by, 'pending', @kind, @origin, @just);
 "@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = [datetime]$Change.enqueuedUtc; by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just })
+}
+
+function Add-PimSqlQueueChangeIfAbsent {
+    <#
+      🔴 BUG-212 (§33.28) -- DE-DUPLICATED ENQUEUE. Discovery proposes the same items every day (discovery-entra
+      runs daily with -GetLiveRoles and proposed ~130 Creates each run); only COMMITTED rows are drained, so every
+      un-reviewed proposal was added again the next day and pending rows piled up. This inserts ONLY when no
+      OPEN entry (pending / committed / applying / failed -- anything not applied or discarded) exists for the same
+      Entity + Key + Op, in ONE statement (INSERT ... WHERE NOT EXISTS), so two runners cannot both insert it.
+      Returns $true when a row was added, $false when an open duplicate already exists. THROWS on a store error.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][object]$Change)
+    $payload = if ($null -ne $Change.payload) { $Change.payload | ConvertTo-Json -Depth 12 -Compress } else { $null }
+    $kind    = if ("$($Change.kind)".Trim())   { "$($Change.kind)" }   else { 'DesiredState' }
+    $origin  = if ("$($Change.origin)".Trim()) { "$($Change.origin)" } else { 'Proposal' }
+    $just    = if ("$($Change.justification)".Trim()) { "$($Change.justification)" } else { $null }
+    $n = Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
+INSERT INTO pim.ChangeQueue (Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], Status, Kind, Origin, Justification)
+SELECT @id, @e, @k, @op, @p, @enq, @by, 'pending', @kind, @origin, @just
+WHERE NOT EXISTS (SELECT 1 FROM pim.ChangeQueue WITH (UPDLOCK, HOLDLOCK)
+                  WHERE Entity=@e AND [Key]=@k AND Op=@op AND Status IN ('pending','committed','applying','failed'));
+"@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = [datetime]$Change.enqueuedUtc; by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just }
+    return ([int]$n -gt 0)
 }
 
 function Set-PimSqlQueueCommitted {
@@ -922,6 +956,28 @@ function Get-PimStoreRowKey {
     return $k
 }
 
+function Get-PimDuplicateStoreKeys {
+    # PURE (BUG-204, 2.4.371). The store keys that two or more of $Rows share for $Base. The full-set replace below
+    # upserts row by row into a case-insensitive map, so rows that share a key COLLAPSE: the last one wins and the
+    # others are silently dropped (a 2-role workload delegation kept only its last role -- the Workloads key is
+    # GroupTag alone). Returns @( @{ key; count; rows = @(1-based positions) } ), empty when every key is unique.
+    # Rows with no derivable key are not reported here (they are skipped by the store, a separate concern).
+    param([Parameter(Mandatory)][string]$Base, [AllowEmptyCollection()][object[]]$Rows = @())
+    $seen = @{}; $order = New-Object System.Collections.Generic.List[string]
+    $i = 0
+    foreach ($r in @($Rows)) {
+        $i++
+        if ($null -eq $r) { continue }
+        $k = Get-PimStoreRowKey -Base $Base -Row $r
+        if (-not $k) { continue }
+        if (-not $seen.ContainsKey($k)) { $seen[$k] = New-Object System.Collections.Generic.List[int]; $order.Add($k) }
+        $seen[$k].Add($i)
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($k in $order) { if ($seen[$k].Count -gt 1) { $out.Add([pscustomobject]@{ key = $k; count = $seen[$k].Count; rows = @($seen[$k].ToArray()) }) } }
+    return @($out.ToArray())
+}
+
 function Set-PimSqlEntityRows {
     # Full-set replace of an entity's rows (matches CSV file-write semantics):
     # upsert every submitted row by its natural key, delete current keys that are
@@ -1060,6 +1116,187 @@ WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @
     }
 }
 
+# --- UPSERT-ONLY: add or update by key, NEVER delete (REQ-G) --------------------
+# The full-set replace above is right for a grid save (the grid IS the whole set). An IMPORT is not the whole
+# set: a row the Manager added after go-live is not in the file, and must survive. These three are the store's
+# upsert-only path, so an importer does not have to carry a private MERGE of its own (Migrate-PimToSql did).
+
+function Compare-PimSqlRowContent {
+    # PURE. Does row A say exactly what row B says? Every column of either side is compared as text (a column one
+    # side lacks reads as blank), so a value the store holds that the new row does not carry is a DIFFERENCE --
+    # overwriting would drop it. pwsh 7's ConvertFrom-Json turns an ISO date into a [datetime]; the two are equal
+    # when they are the same instant. A dictionary is compared by its keys, like an object's properties.
+    # Returns @() when equal, else @( @{ column; file; store } ) ('file' = -FileRow, 'store' = -StoreRow).
+    # (The algorithm Migrate-PimToSql's REQ-G import compared rows with; it moved here with the upsert.)
+    param([Parameter(Mandatory)][object]$FileRow, [Parameter(Mandatory)][object]$StoreRow)
+    if ($FileRow -is [System.Collections.IDictionary]) { $FileRow = [pscustomobject]$FileRow }
+    if ($StoreRow -is [System.Collections.IDictionary]) { $StoreRow = [pscustomobject]$StoreRow }
+    $names = [ordered]@{}
+    foreach ($p in @($FileRow.PSObject.Properties) + @($StoreRow.PSObject.Properties)) { if (-not $names.Contains($p.Name.ToLowerInvariant())) { $names[$p.Name.ToLowerInvariant()] = $p.Name } }
+    $diff = New-Object System.Collections.Generic.List[object]
+    foreach ($n in @($names.Values)) {
+        $a = $FileRow.PSObject.Properties[$n]; $b = $StoreRow.PSObject.Properties[$n]
+        $av = if ($a -and $null -ne $a.Value) { $a.Value } else { '' }
+        $bv = if ($b -and $null -ne $b.Value) { $b.Value } else { '' }
+        if ($bv -is [datetime] -or $av -is [datetime]) {
+            $ad = $av; $bd = $bv
+            try { if ($ad -isnot [datetime]) { $ad = [datetime]::Parse("$ad", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } } catch { $ad = $null }
+            try { if ($bd -isnot [datetime]) { $bd = [datetime]::Parse("$bd", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } } catch { $bd = $null }
+            if ($null -ne $ad -and $null -ne $bd -and $ad.ToUniversalTime() -eq $bd.ToUniversalTime()) { continue }
+        }
+        if ("$av" -cne "$bv") { $diff.Add([ordered]@{ column = $n; file = "$av"; store = "$bv" }) | Out-Null }
+    }
+    return @($diff.ToArray())
+}
+
+function Get-PimSqlMergePlan {
+    <#
+      PURE. What an upsert-only write of -Rows / -Items would do to an entity that already holds -Existing.
+        -Rows      rows, keyed by Get-PimStoreRowKey -Base (a row with no derivable key is skipped + counted)
+        -Items     @( @{ key; row } ), already keyed by the caller (used instead of -Rows when given)
+        -Existing  @( @{ key; row } ), the entity's stored rows (row = parsed DataJson)
+      Keys match case-insensitively; two submitted rows with one key COLLAPSE to the last (counted), as the store
+      itself would keep them. Per key:
+        not stored                        -> add
+        stored, same content              -> unchanged (not written)
+        stored, DIFFERENT content         -> a key CONFLICT, decided by -OnKeyConflict:
+                                             Overwrite -> update (written under the STORED key's spelling)
+                                             KeepExisting -> kept (the store's row stays)
+                                             Refuse -> listed in conflicts; Merge-PimSqlEntityRows then writes NOTHING
+      Nothing is ever planned for a stored key that was not submitted: there is no delete in this plan.
+      Returns @{ add; update; unchanged; kept; conflicts; skippedNoKey; collapsed } (lists of @{ key; row [; columns] }).
+    #>
+    param(
+        [string]$Base,
+        [AllowEmptyCollection()][object[]]$Rows = @(),
+        [AllowEmptyCollection()][object[]]$Items,
+        [AllowEmptyCollection()][object[]]$Existing = @(),
+        [ValidateSet('Refuse','KeepExisting','Overwrite')][string]$OnKeyConflict = 'Overwrite'
+    )
+    $skippedNoKey = 0
+    $sub = [ordered]@{}; $nSub = 0
+    if ($PSBoundParameters.ContainsKey('Items')) {
+        foreach ($it in @($Items)) {
+            if ($null -eq $it) { continue }
+            $k = "$($it.key)".Trim()
+            if (-not $k) { $skippedNoKey++; continue }
+            $sub[$k.ToLowerInvariant()] = @{ key = "$($it.key)"; row = $it.row }; $nSub++
+        }
+    } else {
+        if (-not "$Base".Trim()) { throw 'Get-PimSqlMergePlan: -Base is required to key -Rows (or pass -Items already keyed).' }
+        foreach ($r in @($Rows)) {
+            if ($null -eq $r) { continue }
+            $k = Get-PimStoreRowKey -Base $Base -Row $r
+            if (-not $k) { $skippedNoKey++; continue }
+            $sub[$k.ToLowerInvariant()] = @{ key = $k; row = $r }; $nSub++
+        }
+    }
+    $have = @{}
+    foreach ($e in @($Existing)) { if ($null -ne $e -and "$($e.key)") { $have["$($e.key)".ToLowerInvariant()] = $e } }
+    $add = New-Object System.Collections.Generic.List[object]; $upd = New-Object System.Collections.Generic.List[object]
+    $same = New-Object System.Collections.Generic.List[object]; $kept = New-Object System.Collections.Generic.List[object]
+    $conf = New-Object System.Collections.Generic.List[object]
+    foreach ($lk in @($sub.Keys)) {
+        $s = $sub[$lk]
+        if (-not $have.ContainsKey($lk)) { $add.Add(@{ key = $s.key; row = $s.row }) | Out-Null; continue }
+        $cur = $have[$lk]
+        $rowObj = if ($null -ne $s.row) { $s.row } else { [pscustomobject]@{} }
+        $curObj = if ($null -ne $cur.row) { $cur.row } else { [pscustomobject]@{} }
+        $d = @(Compare-PimSqlRowContent -FileRow $rowObj -StoreRow $curObj)
+        if (-not $d.Count) { $same.Add(@{ key = "$($cur.key)"; row = $s.row }) | Out-Null; continue }
+        $one = @{ key = "$($cur.key)"; row = $s.row; columns = $d }
+        switch ($OnKeyConflict) {
+            'Overwrite'    { $upd.Add($one) | Out-Null }
+            'KeepExisting' { $kept.Add($one) | Out-Null }
+            default        { $conf.Add($one) | Out-Null }
+        }
+    }
+    return @{
+        add = @($add.ToArray()); update = @($upd.ToArray()); unchanged = @($same.ToArray()); kept = @($kept.ToArray())
+        conflicts = @($conf.ToArray()); skippedNoKey = $skippedNoKey; collapsed = ($nSub - $sub.Count)
+    }
+}
+
+function Merge-PimSqlEntityRows {
+    <#
+      UPSERT-ONLY, TRANSACTIONAL write of an entity's rows (REQ-G) -- Set-PimSqlEntityRowsTransactional WITHOUT
+      its delete half. A stored key that is not submitted is NEVER touched, so an import cannot remove a row the
+      Manager added after go-live, and there is no empty-set guard to need: submitting nothing changes nothing.
+      ONE connection, ONE transaction per entity (§52.18b: one session per entity, not per row): the stored rows
+      are read inside the transaction (UPDLOCK, HOLDLOCK -- nobody changes them between the compare and the
+      write), classified by Get-PimSqlMergePlan, and the adds + updates are MERGEd -- the same statement the
+      replace uses. A failure rolls the entity back whole.
+        -OnKeyConflict  a submitted key the store already holds with DIFFERENT content:
+                          Overwrite (default -- a plain upsert) = the submitted row wins;
+                          KeepExisting = the store's row stays, counted as kept;
+                          Refuse = THROW and roll back: nothing of this entity is written, and the keys are named.
+      Returns @{ submitted; added; updated; unchanged; kept; skippedNoKey; collapsed; conflicts }.
+      -FailAfter: TEST SEAM ONLY (as in the replace) -- throw after N writes to prove the rollback.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string]$Entity,
+        [AllowEmptyCollection()][object[]]$Rows = @(),
+        [AllowEmptyCollection()][object[]]$Items,
+        [string]$Base,
+        [ValidateSet('Refuse','KeepExisting','Overwrite')][string]$OnKeyConflict = 'Overwrite',
+        [int]$FailAfter = -1
+    )
+    $base = if ("$Base".Trim()) { $Base } else { $Entity }
+    $hasItems = $PSBoundParameters.ContainsKey('Items')
+    $nIn = if ($hasItems) { @($Items | Where-Object { $null -ne $_ }).Count } else { @($Rows | Where-Object { $null -ne $_ }).Count }
+    if (-not $nIn) { return @{ submitted = 0; added = 0; updated = 0; unchanged = 0; kept = 0; skippedNoKey = 0; collapsed = 0; conflicts = @() } }
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
+    $tx = $null
+    try {
+        $c.Open()
+        $tx = $c.BeginTransaction()
+        $curCmd = $c.CreateCommand(); $curCmd.Transaction = $tx
+        $curCmd.CommandText = "SELECT [Key], DataJson FROM pim.Rows WITH (UPDLOCK, HOLDLOCK) WHERE Entity=@e"
+        [void]$curCmd.Parameters.AddWithValue('@e', $Entity)
+        $rd = $curCmd.ExecuteReader(); $raw = New-Object System.Collections.Generic.List[object]
+        try { while ($rd.Read()) { $raw.Add(@{ key = "$($rd.GetValue(0))"; json = $(if ($rd.IsDBNull(1)) { '' } else { "$($rd.GetValue(1))" }) }) } } finally { $rd.Close() }
+        # parsed AFTER the reader is closed (one connection = one open reader); a row that will not parse THROWS --
+        # an unreadable stored row is not "different", and must not be overwritten on a guess
+        $existing = @($raw.ToArray() | ForEach-Object { @{ key = $_.key; row = $(if ("$($_.json)".Trim()) { $_.json | ConvertFrom-Json } else { [pscustomobject]@{} }) } })
+        $planArgs = @{ Base = $base; Existing = $existing; OnKeyConflict = $OnKeyConflict }
+        if ($hasItems) { $planArgs['Items'] = @($Items) } else { $planArgs['Rows'] = @($Rows) }
+        $plan = Get-PimSqlMergePlan @planArgs
+        if (@($plan.conflicts).Count) {
+            $names = @($plan.conflicts | Select-Object -First 5 | ForEach-Object { "'$($_.key)' ($(@($_.columns | ForEach-Object { $_.column }) -join ', '))" }) -join '; '
+            throw ("Merge-PimSqlEntityRows: {0} key conflict(s) in '{1}' -- the store holds these keys with DIFFERENT content: {2}{3}. -OnKeyConflict Refuse: NOTHING of this entity was written." -f `
+                   @($plan.conflicts).Count, $Entity, $names, $(if (@($plan.conflicts).Count -gt 5) { ' ...' } else { '' }))
+        }
+        $mergeSql = @"
+MERGE pim.Rows AS t USING (SELECT @e AS Entity, @k AS [Key]) AS s
+  ON t.Entity = s.Entity AND t.[Key] = s.[Key]
+WHEN MATCHED THEN UPDATE SET DataJson = @d, UpdatedUtc = SYSUTCDATETIME()
+WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @k, @d, SYSUTCDATETIME());
+"@
+        $n = 0
+        foreach ($it in @($plan.add) + @($plan.update)) {
+            $cmd = $c.CreateCommand(); $cmd.Transaction = $tx; $cmd.CommandText = $mergeSql
+            [void]$cmd.Parameters.AddWithValue('@e', $Entity)
+            [void]$cmd.Parameters.AddWithValue('@k', "$($it.key)")
+            [void]$cmd.Parameters.AddWithValue('@d', $(if ($null -ne $it.row) { $it.row | ConvertTo-Json -Depth 12 -Compress } else { '{}' }))
+            [void]$cmd.ExecuteNonQuery()
+            $n++
+            if ($FailAfter -ge 0 -and $n -ge $FailAfter) { throw "injected mid-commit failure after $n statement(s) (test seam)" }
+        }
+        $tx.Commit()
+        return @{
+            submitted = (@($plan.add).Count + @($plan.update).Count + @($plan.unchanged).Count + @($plan.kept).Count)
+            added = @($plan.add).Count; updated = @($plan.update).Count; unchanged = @($plan.unchanged).Count; kept = @($plan.kept).Count
+            skippedNoKey = [int]$plan.skippedNoKey; collapsed = [int]$plan.collapsed; conflicts = @()
+        }
+    } catch {
+        if ($tx) { try { $tx.Rollback() } catch { Write-Warning "  [sql] transaction rollback failed: $($_.Exception.Message)" } }
+        throw
+    } finally {
+        if ($c) { $c.Close(); $c.Dispose() }
+    }
+}
+
 # --- settings live in SQL (protected), not a readable JSON file -----------------
 # A hacker reading the JSON must not learn/modify the naming convention or policy.
 # The file is only an INITIAL SEED; ongoing management is in pim.Settings.
@@ -1071,8 +1308,13 @@ function Get-PimSqlSetting {
 }
 
 function Set-PimSqlSetting {
-    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Name, [object]$Value)
-    $json = if ($null -ne $Value) { $Value | ConvertTo-Json -Depth 12 -Compress } else { $null }
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Name, [object]$Value,
+          # IMP-39: the value ALREADY serialised. `$Value | ConvertTo-Json` UNROLLS an array through the
+          # pipeline, so a one-element list was stored as a bare string and an empty list as NULL -- a
+          # value that must be a JSON ARRAY (pim.Settings['BreakGlassAccounts']) needs the exact text.
+          [string]$ValueJson)
+    $json = if ($PSBoundParameters.ContainsKey('ValueJson')) { $ValueJson }
+            elseif ($null -ne $Value) { $Value | ConvertTo-Json -Depth 12 -Compress } else { $null }
     # 🔴 §70.8 (2026-09-13) -- WRITE ONLY WHAT CHANGED. Every save rewrote the whole value, changed or not.
     # On internal's Basic database the transaction log write rate is capped, and this MERGE averaged 5.9 s
     # (max 8 s, 396 runs in ~12 h; LOG_RATE_GOVERNOR the top wait at 2,152 s) -- mostly JobRunHistory
@@ -1362,6 +1604,18 @@ function Import-PimSettingsFromStore {
     if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
     $n = 0
     foreach ($k in @($loaded.Keys)) { $global:PIM_NamingConventions[$k] = $loaded[$k]; $n++ }
+    # 🔴 REQ-T (2.4.377): THE TENANT'S OWN NAMING NEVER REACHED THE ENGINE. The Settings page stores every naming key
+    # (PimGroupPattern, AdminAccountPattern, AdminAccountUpnSuffix, …) as ONE record, pim.Settings['NamingConventions'],
+    # and the loop above put that record under the key 'NamingConventions' -- where Get-PimNamingConvention, which reads
+    # flat keys, never looks. So every engine-side name (discovery auto-create, hybrid AD, the admin UPN domain) used the
+    # SHIPPED defaults whatever the customer had configured. The Manager flattens the same record
+    # (Get-PimManagerNamingSettings); the engine now does too. A key stored as its own setting row still wins.
+    $nc = $loaded['NamingConventions']
+    if ($nc) {
+        $pairs = if ($nc -is [System.Collections.IDictionary]) { @($nc.Keys | ForEach-Object { @{ k = "$_"; v = $nc[$_] } }) }
+                 else { @($nc.PSObject.Properties | ForEach-Object { @{ k = $_.Name; v = $_.Value } }) }
+        foreach ($p in $pairs) { if ($p.k -and -not $loaded.ContainsKey($p.k)) { $global:PIM_NamingConventions[$p.k] = $p.v } }
+    }
     # Apply the EmailControls record to the email globals the notify path reads (the
     # Manager does this in its PUT handler; do it here too so a cold process is covered).
     if ((Get-Command Set-PimEmailControlsGlobals -ErrorAction SilentlyContinue) -and $global:PIM_NamingConventions.ContainsKey('EmailControls')) {

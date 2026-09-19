@@ -278,18 +278,27 @@ function Get-PimDeployVerifyVerdict {
     )
     $smokeRan      = ($SmokeExitCode -ge 0)
     $validationRan = ($ValidationExitCode -ge 0)
+    # 🔴 BUG-216 -- the hosted smoke exits 2 when it SKIPPED checks (0 passed, 1 failed). That was read
+    # as a FAILURE here and rolled back a deploy nobody had proven broken. It is UNVERIFIED: not healthy,
+    # not failed, and never a rollback -- mirroring Get-PimVerifyVerdict's 'unverified' state.
+    $smokeUnverified = ($SmokeExitCode -eq 2)
     # a self-skip (exit < 0) is UNVERIFIED, not a fail. A ran-but-nonzero exit is a fail.
-    $smokeOk      = (-not $smokeRan)      -or ($SmokeExitCode -eq 0)
+    $smokeOk      = (-not $smokeRan)      -or ($SmokeExitCode -eq 0) -or $smokeUnverified
     $validationOk = (-not $validationRan) -or ($ValidationExitCode -eq 0)
-    $healthy = ($smokeOk -and $validationOk)
+    $failed  = -not ($smokeOk -and $validationOk)
+    $state   = if ($failed) { 'failed' } elseif ($smokeUnverified) { 'unverified' } else { 'healthy' }
+    $healthy = ($state -eq 'healthy')
 
     # build the rollback plan via the reused verifier when we can; else inline.
     $worstExit = 0
-    if ($smokeRan -and $SmokeExitCode -ne 0) { $worstExit = $SmokeExitCode }
+    if ($smokeRan -and $SmokeExitCode -ne 0 -and -not $smokeUnverified) { $worstExit = $SmokeExitCode }
     if ($validationRan -and $ValidationExitCode -ne 0) { $worstExit = $ValidationExitCode }
 
     $rb = $null
-    if (Get-Command Get-PimVerifyVerdict -ErrorAction SilentlyContinue) {
+    if ($state -eq 'unverified') {
+        $rb = [pscustomobject]@{ action='none'; revision=''; reason='the hosted smoke SKIPPED checks (exit 2) -- UNVERIFIED: not healthy, and not rolled back (nothing proved the deploy broken)' }
+    }
+    elseif (Get-Command Get-PimVerifyVerdict -ErrorAction SilentlyContinue) {
         $prev = if ($CodeStepRan) { $PreviousRevision } else { '' }   # only roll back code we deployed
         $v = Get-PimVerifyVerdict -ExitCode $worstExit -PreviousRevision $prev
         $rb = $v.rollback
@@ -302,6 +311,7 @@ function Get-PimDeployVerifyVerdict {
 
     return [pscustomobject]@{
         Healthy       = [bool]$healthy
+        State         = $state            # healthy | unverified | failed -- only 'failed' may roll back
         smokeRan      = $smokeRan
         validationRan = $validationRan
         rollback      = $rb
@@ -379,6 +389,8 @@ function Get-PimDeploySummary {
         if ($PlanOnly) { 'planned' }
         elseif ($RolledBack) { 'rolledback' }
         elseif ($failed.Count -gt 0) { 'failed' }
+        # BUG-216: an UNVERIFIED verdict (smoke exit 2) rolled nothing back -- never report it as 'rolledback'.
+        elseif ($Verdict -and "$($Verdict.State)" -eq 'unverified') { 'unverified' }
         elseif ($Verdict -and -not $Verdict.Healthy) { 'rolledback' }
         elseif ($Verdict -and -not $Verdict.smokeRan -and -not $Verdict.validationRan) { 'unverified' }
         else { 'success' }

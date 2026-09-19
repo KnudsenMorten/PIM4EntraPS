@@ -160,8 +160,9 @@ function Test-PimSqlSchemaFileSafe {
       🔴 THE SAME QUESTION, ASKED OF THE SHIPPED SCHEMA FILES.
 
       With a PRIVATE SQL server the base schema cannot be applied from the deploy host either --
-      there is no route -- so the in-cloud bootstrap applies sql/platform-schema.sql and
-      sql/local-schema.sql as well. That is a bigger footprint than creating users, and it runs
+      there is no route -- so the in-cloud bootstrap applies sql/platform-schema.sql as well
+      (the only shipped base-schema file since sql/local-schema.sql was retired 2026-09-18,
+      IMP-46). That is a bigger footprint than creating users, and it runs
       unattended against a customer's store, so it gets its own guard rather than inheriting the
       user-DDL one (which refuses CREATE TABLE and would be wrong here).
 
@@ -188,7 +189,7 @@ function Test-PimSqlSchemaFileSafe {
       🪤 INSERT is allowed, unlike in the user-DDL guard: a schema file legitimately seeds a lookup
       or a version row, and on an empty store that ADDS rather than overwrites.
 
-      🪤 COMMENTS ARE STRIPPED FIRST. Without that, sql/local-schema.sql was refused for
+      🪤 COMMENTS ARE STRIPPED FIRST. Without that, the (now retired) sql/local-schema.sql was refused for
       "BACKUP/RESTORE" because line 4 of its header prose contains the word "backup". A guard that
       fires on a comment gets switched off by the next person who hits it, and then protects nothing.
 

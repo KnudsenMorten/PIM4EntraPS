@@ -20,6 +20,14 @@
 
 Set-StrictMode -Off
 
+# 🔒 The ONE break-glass reader (pim.Settings['BreakGlassAccounts'] unioned with the legacy global/env).
+# The drain re-checks every revoke / session revoke against it at EXECUTION time (see
+# Get-PimQueueActionBreakGlassRefusal) -- so it must be loaded wherever this file is, not only in the Manager.
+if (-not (Get-Command Get-PimBreakGlassAccountStatus -ErrorAction SilentlyContinue)) {
+    $__qaBgLib = Join-Path $PSScriptRoot 'PIM-BreakGlassAccounts.ps1'
+    if (Test-Path -LiteralPath $__qaBgLib) { . $__qaBgLib }
+}
+
 # ---------------------------------------------------------------------------
 # The action catalog. One entry per thing the Manager can ask the engine to do.
 #
@@ -49,6 +57,10 @@ function Get-PimQueueActionCatalog {
            description='Revoke all sign-in sessions for an account'
            # No Graph read exists to confirm this. See the note above -- declared, not pretended.
            verifiable=$false }
+        # BUG-203 (§33.28): the Manager QUEUES a B2B guest invitation (New-PimGuestInviteAction); the engine sends it.
+        @{ type='guest-invite'
+           description='Invite an external person as a B2B guest (POST /invitations; verified by the invited user object)'
+           verifiable=$true }
     ) | ForEach-Object { [pscustomobject]$_ }
 }
 
@@ -180,13 +192,107 @@ function Invoke-PimQueueEligibleRevoke {
     return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail="no eligible revoke for '$Type'" }
 }
 
+function Get-PimQueueActionBreakGlassTypes {
+    # The action types that take access AWAY from a principal. A break-glass account must never lose it
+    # through the queue. (tap-reset issues a credential and guest-invite creates an account -- neither
+    # removes access, so neither is gated here.)
+    @('entra-role-revoke','group-assignment-revoke','azure-rbac-revoke','session-revoke')
+}
+
+function Get-PimQueueActionBreakGlassRefusal {
+    <#
+      🔴 §33.28 (integration): the Manager checked break-glass only when the item was QUEUED. The engine
+      executed whatever was committed -- so an account added to the break-glass list after the revoke was
+      queued (the exact moment an operator reaches for that list: an incident) was still revoked, and a
+      queue row written by anything other than the Manager's guarded path was never checked at all.
+      This is the EXECUTION-time check, against the same SQL list the engine guards read.
+
+      Returns $null when the action may proceed, otherwise the refusal result (the Invoke-PimQueueAction shape):
+        break-glass target          -> ok=$false, terminal=$true   (retrying cannot make it safe)
+        list UNREADABLE / no reader -> ok=$false, NOT terminal     (fail safe: nothing is executed; the next
+                                                                    drain tries again once the list is readable)
+        target's UPN unresolvable   -> ok=$false, NOT terminal     (an id-only payload against a UPN list
+                                                                    cannot be proven safe)
+      Nothing in the directory is changed on any refusal.
+    #>
+    param([Parameter(Mandatory)][object]$Payload, [string]$ConnectionString, [scriptblock]$Graph)
+    $p = $Payload
+    $type = "$($p.type)".Trim()
+    if ($type -notin (Get-PimQueueActionBreakGlassTypes)) { return $null }
+    $refuse = { param($terminal, $why) [pscustomobject]@{ ok=$false; terminal=[bool]$terminal; verification='none'; breakGlass=$true
+        detail="$type REFUSED at execution -- nothing was changed: $why" } }
+
+    if (-not (Get-Command Get-PimBreakGlassAccountStatus -ErrorAction SilentlyContinue)) {
+        return (& $refuse $false 'the break-glass account library (PIM-BreakGlassAccounts.ps1) is not loaded in this engine, so the target cannot be proven NOT to be a break-glass account. It will be retried.')
+    }
+    $st = $null
+    # -NoCache: an account added to the list a moment ago (mid-incident) must protect the very next drain.
+    try { $st = Get-PimBreakGlassAccountStatus -ConnectionString "$ConnectionString" -NoCache } catch { $st = $null }
+    if (-not $st) { return (& $refuse $false 'the break-glass account list could not be read. It will be retried.') }
+    if ($st.storeConfigured -and -not $st.storeOk) {
+        Write-Warning "  [queue] $type REFUSED: the break-glass account list is UNREADABLE ($($st.error)) -- nothing is revoked until it can be read."
+        return (& $refuse $false "the break-glass account list is UNREADABLE ($($st.error)), so the target cannot be proven NOT to be a break-glass account. It will be retried.")
+    }
+    $ids = @(@($st.accounts) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    if ($ids.Count -eq 0) { return $null }
+
+    # Every identifier the payload carries for its TARGET (never the queue entry's own id).
+    $cand = New-Object System.Collections.Generic.List[string]
+    foreach ($k in 'principalId','userId','principal','principalUpn','principalName','userPrincipalName','upn') {
+        $pp = $p.PSObject.Properties[$k]
+        if (-not $pp) { continue }
+        $v = "$($pp.Value)".Trim()
+        if (-not $v) { continue }
+        $cand.Add($v.ToLowerInvariant())
+        # principalName is stored as "Display Name (upn)" -- the UPN inside the brackets is the identifier.
+        if ($v -match '\(([^()\s]+@[^()\s]+)\)\s*$') { $cand.Add($Matches[1].ToLowerInvariant()) }
+    }
+    foreach ($c in $cand) {
+        if ($ids -contains $c) {
+            Write-Warning "  [queue] $type REFUSED: '$c' is a BREAK-GLASS account."
+            return (& $refuse $true "'$c' is a BREAK-GLASS account (pim.Settings BreakGlassAccounts). Break-glass accounts are never revoked by PIM -- remove it from the break-glass list first if this is really intended, then queue it again.")
+        }
+    }
+
+    # The list names accounts by UPN, the payload by object id only (an entry queued before names were
+    # stored, or one whose label is a display name): resolve the id's UPN before acting. A principal that
+    # is not a user (a group -- 404) cannot be a break-glass ACCOUNT; any other failure cannot be proven safe.
+    $guidRx = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    $listHasUpn = @($ids | Where-Object { $_ -notmatch $guidRx }).Count -gt 0
+    $haveUpn    = @($cand | Where-Object { $_ -match '@' }).Count -gt 0
+    $objId = "$($p.principalId)".Trim(); if (-not $objId) { $objId = "$($p.userId)".Trim() }
+    if ($listHasUpn -and -not $haveUpn -and $objId) {
+        if (-not $Graph) { return (& $refuse $false "the target '$objId' carries no UPN and there is no Graph client to resolve it against the break-glass list. It will be retried.") }
+        $u = $null; $notUser = $false
+        try { $u = & $Graph 'GET' ("/users/$objId`?`$select=id,userPrincipalName") $null }
+        catch {
+            if ("$($_.Exception.Message)" -match '(?i)Request_ResourceNotFound|ResourceNotFound|\b404\b|does not exist|not\s*found') { $notUser = $true }
+            else { return (& $refuse $false "the target '$objId' could not be resolved to a UPN to check it against the break-glass list ($($_.Exception.Message)). It will be retried.") }
+        }
+        if (-not $notUser) {
+            $upn = "$($u.userPrincipalName)".Trim().ToLowerInvariant()
+            if (-not $upn) {
+                if ($null -eq $u) { $notUser = $true }
+                else { return (& $refuse $false "the target '$objId' resolved without a UPN, so it cannot be checked against the break-glass list. It will be retried.") }
+            } elseif ($ids -contains $upn) {
+                Write-Warning "  [queue] $type REFUSED: '$objId' is the BREAK-GLASS account '$upn'."
+                return (& $refuse $true "'$upn' ($objId) is a BREAK-GLASS account (pim.Settings BreakGlassAccounts). Break-glass accounts are never revoked by PIM -- remove it from the break-glass list first if this is really intended, then queue it again.")
+            }
+        }
+    }
+    return $null
+}
+
 function Invoke-PimQueueAction {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][object]$Entry,
         [scriptblock]$GraphInvoker,
         [scriptblock]$ArmInvoker,
-        [scriptblock]$MailInvoker
+        [scriptblock]$MailInvoker,
+        # The store the break-glass list is read from (the drain passes its own). Empty = the process's
+        # configured store (Resolve-PimBreakGlassStore), which is what a bare call gets.
+        [string]$ConnectionString = ''
     )
     $p = $Entry.payload
     $type = "$($p.type)".Trim()
@@ -197,6 +303,17 @@ function Invoke-PimQueueAction {
         # not retryable: waiting cannot teach the engine a type it does not implement.
         return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'
             detail="unknown action type '$type' -- no applier is registered for it" }
+    }
+
+    # REQ-Y (operator 2026-09-19: "revoke is pro", hard): a queued revoke of a current delegation needs a Pro licence at
+    # EXECUTION too (the Manager refuses to queue one without it; this covers an entry queued before). Refused before any
+    # directory call -- nothing changes -- and terminal: waiting does not produce a licence; re-queue once licensed.
+    if ($type -in @('entra-role-revoke', 'azure-rbac-revoke', 'group-assignment-revoke') -and (Get-Command Test-PimFeatureProLicence -ErrorAction SilentlyContinue)) {
+        $plRev = Test-PimFeatureProLicence -Key 'revoke.current'
+        if ($plRev.required -and -not $plRev.ok) {
+            return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; licence=$true
+                detail="$type REFUSED -- nothing was changed: $($plRev.message)" }
+        }
     }
 
     # 🪤 THE 4th PARAMETER IS `-All`, AND IT IS NOT COSMETIC (carried from BUG-66's gate). A paged
@@ -211,6 +328,14 @@ function Invoke-PimQueueAction {
         }
     }
     $arm   = if ($ArmInvoker)   { $ArmInvoker }   else { { param($m,$path,$body,$all) Invoke-PimArm -Method $m -Path $path -Body $body } }
+
+    # 🔒 BREAK-GLASS, RE-CHECKED AT EXECUTION (the Manager's check at queue time is not enough -- see
+    # Get-PimQueueActionBreakGlassRefusal). Before ANY directory call; a refusal changes nothing.
+    $bgRefusal = $null
+    try { $bgRefusal = Get-PimQueueActionBreakGlassRefusal -Payload $p -ConnectionString $ConnectionString -Graph $graph }
+    catch { $bgRefusal = [pscustomobject]@{ ok=$false; terminal=$false; verification='none'; breakGlass=$true
+                detail="$type REFUSED at execution -- nothing was changed: the break-glass check itself failed ($($_.Exception.Message)). It will be retried." } }
+    if ($bgRefusal) { return $bgRefusal }
 
     # 68.6 row 27 (a): v1's revoker removed ELIGIBLE and ACTIVE assignments for Entra roles, Azure
     # resources and PIM for Groups (engine/PIM-Assignment-Revoker/PIM-Assignment-Revoker.ps1:623-781).
@@ -234,16 +359,53 @@ function Invoke-PimQueueAction {
             }
 
             'entra-role-revoke' {
-                $body = @{ action='adminRemove'; principalId="$($p.principalId)"; roleDefinitionId="$($p.roleDefinitionId)"
-                           directoryScopeId=$(if ("$($p.directoryScopeId)".Trim()) { "$($p.directoryScopeId)" } else { '/' })
-                           justification=$(if ("$($Entry.justification)".Trim()) { "$($Entry.justification)" } else { 'revoked via PIM queue' }) }
-                & $graph 'POST' '/roleManagement/directory/roleAssignmentScheduleRequests' $body | Out-Null
-                $still = @(& $graph 'GET' ("/roleManagement/directory/roleAssignments?`$filter=principalId eq '$($p.principalId)' and roleDefinitionId eq '$($p.roleDefinitionId)'") $null $true)
-                if ($null -eq $still) { return [pscustomobject]@{ ok=$true; verification='indeterminate'; detail='removal issued; the read-back could not be performed' } }
-                if (@($still).Count -eq 0) { return [pscustomobject]@{ ok=$true; verification='verified'; detail='assignment is gone' } }
-                # Entra is eventually consistent (§64.7 trap 3) -- still present is NOT proof of
-                # failure, so this stays retryable rather than terminal.
-                return [pscustomobject]@{ ok=$false; verification='indeterminate'; detail='assignment still present on read-back (directory may not have caught up)' }
+                # 🔴 REVOKE FIX (operator 2026-09-19, EFIF: "revoke is not working, remember to differ if delegated with pim or
+                # permanent (legacy)"). This always POSTed a PIM adminRemove at the payload's scope (or '/'). That removes ONLY
+                # a PIM-managed assignment at exactly that scope; a PERMANENT assignment made outside PIM (v1 / portal / the
+                # legacy roleAssignments API) has no PIM schedule to remove, and Graph answers 404 RoleAssignmentDoesNotExist
+                # -- the queue entry failed while the Exchange Administrator grant stayed. So READ what is live first:
+                #   * held through a GROUP (memberType Inherited/Group)  -> refused: revoke the group membership instead;
+                #   * an ACTIVATION of an eligible assignment            -> refused: revoke the eligibility (Eligible) instead;
+                #   * PIM-managed, Assigned                              -> adminRemove at its REAL scope;
+                #   * and when PIM says it does not exist (permanent / legacy) -> DELETE /roleAssignments/{id}.
+                # The detail names the path taken, so the queue shows WHICH kind of assignment it was.
+                $pid_ = "$($p.principalId)".Trim(); $rid = "$($p.roleDefinitionId)".Trim()
+                $wantScope = "$($p.directoryScopeId)".Trim()
+                $inst = @(@(& $graph 'GET' ("/roleManagement/directory/roleAssignmentScheduleInstances?`$filter=principalId eq '$pid_' and roleDefinitionId eq '$rid'") $null $true) | Where-Object { $_ })
+                if ($wantScope) { $inst = @($inst | Where-Object { "$($_.directoryScopeId)" -eq $wantScope }) }
+                $viaGroup = @($inst | Where-Object { "$($_.memberType)" -in @('Inherited','Group') })
+                if ($inst.Count -and $viaGroup.Count -eq $inst.Count) {
+                    return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'
+                        detail='NOT revoked -- nothing was changed: this principal holds the role THROUGH A GROUP (inherited). Revoke its membership of that group, or the group''s own role assignment.' }
+                }
+                $activated = @($inst | Where-Object { "$($_.assignmentType)" -eq 'Activated' -and "$($_.memberType)" -notin @('Inherited','Group') })
+                if ($inst.Count -and $activated.Count -eq $inst.Count) {
+                    return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'
+                        detail='NOT revoked -- nothing was changed: this Active role is an ACTIVATION of an eligible PIM assignment. Revoke the eligibility (queue the Eligible half), and the activation ends with it.' }
+                }
+                $scope = if ($wantScope) { $wantScope } else { "$(@($inst | Where-Object { "$($_.assignmentType)" -ne 'Activated' })[0].directoryScopeId)".Trim() }
+                if (-not $scope) { $scope = '/' }
+                $path = 'pim'
+                try {
+                    $body = @{ action='adminRemove'; principalId=$pid_; roleDefinitionId=$rid; directoryScopeId=$scope
+                               justification=$(if ("$($Entry.justification)".Trim()) { "$($Entry.justification)" } else { 'revoked via PIM queue' }) }
+                    & $graph 'POST' '/roleManagement/directory/roleAssignmentScheduleRequests' $body | Out-Null
+                } catch {
+                    $em = "$($_.Exception.Message)"
+                    if ($em -notmatch 'RoleAssignmentDoesNotExist|HTTP 404') { throw }
+                    # PERMANENT (legacy) -- not a PIM schedule. Delete the assignment object itself, at the same scope only.
+                    $path = 'legacy'
+                    $legacy = @(@(& $graph 'GET' ("/roleManagement/directory/roleAssignments?`$filter=principalId eq '$pid_' and roleDefinitionId eq '$rid'") $null $true) | Where-Object { $_ -and (-not "$($_.directoryScopeId)" -or "$($_.directoryScopeId)" -eq $scope) })
+                    if (-not $legacy.Count) {
+                        return [pscustomobject]@{ ok=$true; verification='verified'; detail="assignment is gone (neither a PIM schedule nor a permanent assignment exists at scope $scope)" }
+                    }
+                    foreach ($la in $legacy) { & $graph 'DELETE' ("/roleManagement/directory/roleAssignments/$($la.id)") $null | Out-Null }
+                }
+                $still = @(@(& $graph 'GET' ("/roleManagement/directory/roleAssignments?`$filter=principalId eq '$pid_' and roleDefinitionId eq '$rid'") $null $true) | Where-Object { $_ -and (-not "$($_.directoryScopeId)" -or "$($_.directoryScopeId)" -eq $scope) })
+                $how = if ($path -eq 'legacy') { 'PERMANENT (legacy, not PIM-managed) assignment deleted' } else { 'PIM-managed assignment removed (adminRemove)' }
+                if ($null -eq $still) { return [pscustomobject]@{ ok=$true; verification='indeterminate'; detail="$how; the read-back could not be performed" } }
+                if (@($still).Count -eq 0) { return [pscustomobject]@{ ok=$true; verification='verified'; detail="$how -- assignment is gone" } }
+                return [pscustomobject]@{ ok=$false; verification='indeterminate'; detail="$how, but it is still present on read-back (directory may not have caught up)" }
             }
 
             'group-assignment-revoke' {
@@ -324,6 +486,49 @@ function Invoke-PimQueueAction {
                 # Declared unverifiable in the catalog -- see the header note.
                 return [pscustomobject]@{ ok=$true; verification='none'; detail='sign-in sessions revoked (Graph exposes no read-back to confirm this)' }
             }
+
+            'guest-invite' {
+                # 🔴 BUG-203 (§33.28) -- guest onboarding had no sender at all: the Manager returned the
+                # invitation body and nothing POSTed it. The Manager now QUEUES it; this is the engine half.
+                # IDEMPOTENT (§65.8): a retry -- or an operator re-queueing the same person -- must not send a
+                # second invitation or turn "the guest already exists" into a failure. So the directory is
+                # asked FIRST; an existing account with that mail address is success, and nothing is sent.
+                # NEVER CLAIMS UNVERIFIED SUCCESS: success means Graph returned the invited user's object id
+                # (and, when the directory has caught up, a read of that user).
+                $email = "$($p.invitedUserEmailAddress)".Trim()
+                $inv = $p.invitation
+                if (-not $email -and $inv) { $email = "$($inv.invitedUserEmailAddress)".Trim() }
+                if (-not $email) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='guest-invite has no invitedUserEmailAddress' } }
+                if (-not $inv) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail="guest-invite for '$email' carries no invitation body -- re-queue it from the Manager" } }
+                if ("$($inv.invitedUserEmailAddress)".Trim() -and "$($inv.invitedUserEmailAddress)".Trim() -ine $email) {
+                    return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail="guest-invite payload is inconsistent: '$email' vs invitation '$($inv.invitedUserEmailAddress)' -- nothing sent" }
+                }
+                $q = [uri]::EscapeDataString($email.Replace("'", "''"))
+                $lookup = { @(& $graph 'GET' ("/users?`$filter=mail eq '$q'&`$select=id,userPrincipalName,userType,mail") $null $true) }
+                $existing = $null
+                try { $existing = & $lookup } catch { $existing = $null }
+                $hit = @($existing | Where-Object { $_ -and "$($_.id)".Trim() }) | Select-Object -First 1
+                if ($hit) {
+                    return [pscustomobject]@{ ok=$true; verification='verified'
+                        detail="'$email' already exists in the directory as $("$($hit.userType)".Trim()) $("$($hit.userPrincipalName)".Trim()) (id $($hit.id)) -- no second invitation was sent" }
+                }
+                $resp = & $graph 'POST' '/invitations' $inv
+                $uid = ''
+                if ($resp -and $resp.invitedUser) { $uid = "$($resp.invitedUser.id)".Trim() }
+                if (-not $uid) {
+                    # Retryable: the next attempt looks the user up first, so it cannot double-invite.
+                    return [pscustomobject]@{ ok=$false; verification='indeterminate'; detail="the invitation for '$email' returned no invited user id -- not confirmed; retrying looks the user up first" }
+                }
+                $readBack = $null
+                try { $readBack = & $graph 'GET' ("/users/$uid`?`$select=id,userType,mail,externalUserState") $null } catch { $readBack = $null }
+                if ($readBack -and "$($readBack.id)".Trim() -eq $uid) {
+                    return [pscustomobject]@{ ok=$true; verification='verified'; detail="guest invited: '$email' is user $uid ($("$($readBack.userType)".Trim()), $("$($readBack.externalUserState)".Trim()))" }
+                }
+                # Graph CREATED the user (it returned the object id) but a read-back is not visible yet (§64.7:
+                # the directory is eventually consistent). The id itself is Graph's confirmation, so this is
+                # verified by the invitation response -- and says the read-back is pending.
+                return [pscustomobject]@{ ok=$true; verification='verified'; detail="guest invited: '$email' is user $uid (confirmed by the invitation response; directory read-back not visible yet)" }
+            }
         }
     } catch {
         return [pscustomobject]@{ ok=$false; verification='none'; detail="$($_.Exception.Message)" }
@@ -368,7 +573,7 @@ UPDATE pim.ChangeQueue
             continue
         }
 
-        $r = Invoke-PimQueueAction -Entry $e -GraphInvoker $GraphInvoker -ArmInvoker $ArmInvoker -MailInvoker $MailInvoker
+        $r = Invoke-PimQueueAction -Entry $e -GraphInvoker $GraphInvoker -ArmInvoker $ArmInvoker -MailInvoker $MailInvoker -ConnectionString $ConnectionString
         $attempts = [int]$e.attempts + 1
         # 🔴 §70.15 LOG-03: the Manager audited only the REQUEST ("revoke.active-assignment" ok = QUEUED); the revoke,
         # TAP reset or session revoke the engine then EXECUTED left no audit event at all. One row per executed

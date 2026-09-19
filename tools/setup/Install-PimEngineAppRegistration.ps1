@@ -23,15 +23,19 @@
          (NOT delegated) RequiredResourceAccess + uploads the cert public key.
       3. Ensures the service principal exists.
       4. (-GrantConsent) Writes tenant-wide admin-consent appRoleAssignments for every
-         requested Graph (+ Exchange) permission.
-      5. (-IncludeExchange + -GrantConsent) Assigns the Exchange Administrator directory
-         role to the SP (Connect-ExchangeOnline app-only / mailbox management).
-      6. (-AzureRbac, default ON; -SkipAzureRbac to skip) Assigns User Access
-         Administrator at the root management group so the engine can manage Azure RBAC
-         PIM. Falls back to printed manual instructions when the caller is GA-not-owner.
+         requested Graph (+ Exchange) permission. The Graph list IS the engine map in
+         _PimSetupShared.ps1 (Get-PimEngineSpnGraphRoles, BUG-181) -- one source, no drift.
+      5. (-IncludeExchange + -GrantConsent) Activates the Exchange Administrator directory
+         role for the SP THROUGH PIM, TIME-BOUND (-ExchangeAdminDuration, default PT4H), and
+         reads it back (SEC-34). It is never a permanent assignment made outside PIM.
+      6. (-GrantRootUserAccessAdministrator, OPT-IN) Assigns User Access Administrator at the
+         ROOT management group so the engine can manage Azure RBAC PIM tenant-wide. Standing
+         tier-0 in Azure, so it is no longer done by default (SEC-34); grant it at the
+         narrowest scope the engine manages instead when you can.
       7. Writes the resolved tenantId / clientId / cert thumbprint into the engine
          launcher's LauncherConfig.custom.ps1 ($global:HighPriv_Modern_* contract),
-         unless -NoWriteLauncherConfig.
+         unless -NoWriteLauncherConfig. The block is REPLACED on every run, never appended
+         (IMP-49 p).
 
 .PARAMETER DisplayName
     App registration display name. Default 'PIM4EntraPS Engine'.
@@ -57,13 +61,23 @@
     'Grant admin consent' in the portal afterwards.
 
 .PARAMETER IncludeExchange
-    Also request Exchange.ManageAsApp + (with -GrantConsent) assign the Exchange
-    Administrator directory role.
+    Also request Exchange.ManageAsApp + (with -GrantConsent) activate the Exchange
+    Administrator directory role THROUGH PIM for -ExchangeAdminDuration. It EXPIRES on its
+    own: whatever the engine does in Exchange as this SPN stops working when it does, and
+    re-running this script re-activates it.
+
+.PARAMETER ExchangeAdminDuration
+    ISO 8601 duration of the time-bound Exchange Administrator activation, PT15M..PT24H.
+    Default PT4H (the same bound Initialize-PimMailSender.ps1 uses, IMP-31).
+
+.PARAMETER GrantRootUserAccessAdministrator
+    OPT-IN (SEC-34). Assign User Access Administrator at the ROOT management group to the
+    engine SPN (or -RuntimeMiObjectId). Without it nothing is assigned in Azure, and the
+    script says what the engine's Azure RBAC PIM needs.
 
 .PARAMETER SkipAzureRbac
-    Skip the Azure RBAC (User Access Administrator at root MG) step. By default the
-    script ATTEMPTS the assignment and degrades to manual instructions on failure
-    (GA-not-owner). Use -SkipAzureRbac when the engine will not manage Azure RBAC PIM.
+    Accepted for existing callers; the root-MG assignment is now opt-in
+    (-GrantRootUserAccessAdministrator), so this only wins over that switch.
 
 .PARAMETER LauncherConfigPath
     Path to the engine launcher's LauncherConfig.custom.ps1. Defaults to
@@ -81,10 +95,9 @@
 
 .NOTES
     Application permissions requested (all APPLICATION, not delegated):
-      Graph: RoleManagement.ReadWrite.Directory, Group.ReadWrite.All,
-             User.ReadWrite.All, Directory.Read.All, AdministrativeUnit.ReadWrite.All,
-             PrivilegedAccess.ReadWrite.AzureADGroup, RoleManagementPolicy.ReadWrite.Directory,
-             UserAuthenticationMethod.ReadWrite.All
+      Graph: exactly the engine map in tools/setup/_PimSetupShared.ps1 ($script:PimGraphAppRoles,
+             via Get-PimEngineSpnGraphRoles) -- the same set the hosted engine's managed identity
+             holds. Never Mail.Send (IMP-06e).
       Exchange (-IncludeExchange): Office 365 Exchange Online Exchange.ManageAsApp
 #>
 [CmdletBinding(SupportsShouldProcess)]
@@ -97,6 +110,10 @@ param(
     [switch]$MachineStore = $true,
     [switch]$GrantConsent,
     [switch]$IncludeExchange,
+    # SEC-34: the Exchange Administrator role is activated THROUGH PIM for this long, then expires on its own.
+    [string]$ExchangeAdminDuration = 'PT4H',
+    # SEC-34: User Access Administrator at the ROOT management group is standing tier-0 in Azure -- OPT-IN only.
+    [switch]$GrantRootUserAccessAdministrator,
     [switch]$SkipAzureRbac,
     # 🔴 §64.5 #3 -- WHICH PRINCIPAL GETS User Access Administrator AT THE ROOT MG.
     # This script creates the engine APP REGISTRATION, so it naturally assigned root-MG UAA to the
@@ -114,29 +131,25 @@ $ErrorActionPreference = 'Stop'
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
 . (Join-Path $here '_PimSetupShared.ps1')
+. (Join-Path $here '_PimMailSenderPlan.ps1')   # IMP-31 pure cores reused for SEC-34: time-bound PIM role request + active-grant read
 
 $graphAppId = '00000003-0000-0000-c000-000000000000'
 $exoAppId   = '00000002-0000-0ff1-ce00-000000000000'   # Office 365 Exchange Online
 
+# SEC-34: refuse a malformed or over-long Exchange Administrator window BEFORE anything is created.
+if ($IncludeExchange) {
+    $durCheck = Test-PimAssignmentDuration -Duration $ExchangeAdminDuration
+    if (-not $durCheck.ok) { throw "Install-PimEngineAppRegistration: -ExchangeAdminDuration $($durCheck.reason)" }
+}
+
 # Graph application app-role ids (stable, public; from the shared map + the EXO role).
 $graphRoleMap = Get-PimGraphAppRoleMap
-# The legacy SDK installer requested exactly these eight Graph roles; keep parity.
-$graphRolesWanted = @(
-    # 🔴 BUG-151 -- the BROAD RoleManagement.ReadWrite.Directory was here too, so this script
-    # re-granted it even after the map was narrowed (§65.5). It is the documented HIGHER-PRIVILEGED
-    # alternative to the schedule pair below; v1 used the pair and §64.2 proved it 403-free.
-    'RoleEligibilitySchedule.ReadWrite.Directory','RoleAssignmentSchedule.ReadWrite.Directory',
-    'Group.ReadWrite.All','User.ReadWrite.All',
-    'Directory.Read.All','AdministrativeUnit.ReadWrite.All','PrivilegedAccess.ReadWrite.AzureADGroup',
-    'RoleManagementPolicy.ReadWrite.Directory','UserAuthenticationMethod.ReadWrite.All',
-    'Policy.Read.All',   # tenant TAP policy (PIM-TapPolicy.ps1), 2026-09-12
-    # BUG-82: /domains needs Domain.Read.All specifically -- Directory.Read.All does NOT cover it.
-    # The managed-tenant downlink resolves the tenant's default verified domain to build synced
-    # admins' UPNs (IMP-12); without this the engine SPN gets 403 Authorization_RequestDenied and
-    # the downlink refuses to stage any admin rather than guess a domain. Measured on the
-    # greenfield slave, where the engine SPN held 100 app-roles and still could not read /domains.
-    'Domain.Read.All'
-)
+# 🔴 BUG-181 -- THE LIST IS THE ENGINE MAP, NOT A COPY OF IT. This used to be a hand-kept literal that had drifted behind
+# the map the managed identity is granted from: it lacked RoleManagement.ReadWrite.Directory (70.16: creating a
+# role-assignable ROLE-* group needs it), plus AppRoleAssignment / Application.Read / Defender / DeviceManagementRBAC /
+# the .Remove.* schedule roles -- so an engine running AS THIS SPN (the VM path, a master acting cross-tenant) was
+# 403-blind where the managed identity was not, and nothing reported it. tests/Test-PimGraphRoleMap.ps1 pins this.
+$graphRolesWanted = @(Get-PimEngineSpnGraphRoles)
 $exoRoleValue = 'Exchange.ManageAsApp'
 
 Show-PimSetupBanner -ScriptName 'Install-PimEngineAppRegistration' -SolutionRoot $solRoot
@@ -160,18 +173,23 @@ function Gr { param([string]$Method='GET',[string]$Path,[object]$Body)
 
 Write-Host "  Tenant      : $TenantId"
 Write-Host "  Display name: $DisplayName"
-Write-Host "  GrantConsent: $GrantConsent   Exchange: $IncludeExchange   AzureRbac: $(-not $SkipAzureRbac)"
+$doRootUaa = ([bool]$GrantRootUserAccessAdministrator -and -not $SkipAzureRbac)
+$script:rootUaaError = ''
+Write-Host "  GrantConsent: $GrantConsent   Exchange: $IncludeExchange$(if ($IncludeExchange) { " (through PIM, $ExchangeAdminDuration)" })   Root-MG UAA: $doRootUaa (opt-in)"
 Write-Host ''
 
 # --- Resolve resource SPs + app-role ids over REST -------------------------------
 $graphSp = (Gr -Path "servicePrincipals?`$filter=appId eq '$graphAppId'").value | Select-Object -First 1
 if (-not $graphSp) { throw "Microsoft Graph service principal not found in tenant." }
 foreach ($n in $graphRolesWanted) {
-    if (-not $graphRoleMap.ContainsKey($n)) {
-        $r = $graphSp.appRoles | Where-Object { $_.value -eq $n -and ($_.allowedMemberTypes -contains 'Application') } | Select-Object -First 1
-        if (-not $r) { throw "Graph app role '$n' not found / not application-assignable." }
-        $graphRoleMap[$n] = $r.id
+    $r = $graphSp.appRoles | Where-Object { $_.value -eq $n -and ($_.allowedMemberTypes -contains 'Application') } | Select-Object -First 1
+    if (-not $r) { throw "Graph app role '$n' not found / not application-assignable." }
+    # SEC-18's lesson, enforced here too: a hardcoded id is NEVER trusted over the live catalog. A map id that resolves
+    # to a DIFFERENT role would grant something nobody asked for (the PSTN call-records incident) -- refuse instead.
+    if ($graphRoleMap.ContainsKey($n) -and "$($graphRoleMap[$n])" -ne "$($r.id)") {
+        throw "Graph app role '$n': the engine map says id $($graphRoleMap[$n]) but the live catalog says $($r.id) -- REFUSING to grant a mismatched id (fix _PimSetupShared.ps1)."
     }
+    $graphRoleMap[$n] = $r.id
 }
 $exoSp = $null; $exoRoleId = $null
 if ($IncludeExchange) {
@@ -385,27 +403,57 @@ if ($GrantConsent -and $sp) {
 }
 
 # --- Exchange Administrator directory role (with -IncludeExchange) ----------------
+# 🔒 SEC-34 -- TIME-BOUND, THROUGH PIM, READ BACK. This POSTed roleManagement/directory/roleAssignments: a PERMANENT active
+# assignment made OUTSIDE PIM -- exactly the pattern IMP-31 removed from Initialize-PimMailSender.ps1 after EFIF and RIDE's
+# own alerting flagged it ("assigned outside of PIM") and the SPN holding it could not remove it again (Graph refuses a
+# self-removal). A privileged-access product must not leave the standing privilege it exists to prevent. Now: an ACTIVE
+# assignment through roleAssignmentScheduleRequests that EXPIRES by itself after -ExchangeAdminDuration, reusing IMP-31's
+# pure cores (New-PimRoleScheduleRequestBody / Select-PimActiveRoleGrant), and the summary says what is held until when.
+$script:exchAdmin = [ordered]@{ wanted = [bool]($IncludeExchange -and $GrantConsent); active = $false; kind = ''; endUtc = ''; error = '' }
 if ($IncludeExchange -and $GrantConsent -and $sp) {
     Write-Host ""
-    Write-Host "Assigning 'Exchange Administrator' directory role to the SP..." -ForegroundColor Cyan
+    Write-Host "Activating 'Exchange Administrator' for the SP THROUGH PIM, time-bound ($ExchangeAdminDuration)..." -ForegroundColor Cyan
+    $exchTemplate = '29232cdf-9323-42fd-ade2-1d097af3e4de'   # built-in; definition id == template id
     try {
         $roleDef = (Gr -Path "roleManagement/directory/roleDefinitions?`$filter=displayName eq 'Exchange Administrator'").value | Select-Object -First 1
-        if (-not $roleDef) { Write-Host "  [skip] role definition not found." -ForegroundColor Yellow }
-        else {
-            $has = (Gr -Path "roleManagement/directory/roleAssignments?`$filter=principalId eq '$($sp.id)'").value |
-                Where-Object { $_.roleDefinitionId -eq $roleDef.id }
-            if ($has) { Write-Host "  [skip] already assigned" -ForegroundColor DarkGray }
-            elseif ($PSCmdlet.ShouldProcess('Exchange Administrator','assign')) {
-                Gr -Method POST -Path 'roleManagement/directory/roleAssignments' `
-                    -Body @{ principalId = $sp.id; roleDefinitionId = $roleDef.id; directoryScopeId = '/' } | Out-Null
-                Write-Host "  [ok] Exchange Administrator assigned" -ForegroundColor Green
-            }
+        $exchRoleId = if ($roleDef) { "$($roleDef.id)" } else { $exchTemplate }
+        $readGrant = {
+            $inst = @((Gr -Path "roleManagement/directory/roleAssignmentScheduleInstances?`$filter=principalId eq '$($sp.id)'").value)
+            Select-PimActiveRoleGrant -Instances $inst -PrincipalId "$($sp.id)" -RoleDefinitionId $exchRoleId
         }
-    } catch { Write-Host "  [fail] $($_.Exception.Message)" -ForegroundColor Red }
+        $st = & $readGrant
+        if ($st.active -and $st.kind -eq 'permanent') {
+            Write-Host "  [warn] Exchange Administrator is ALREADY active as a PERMANENT assignment (standing privilege, made outside this run)." -ForegroundColor Red
+            Write-Host "         Remove it with a DIFFERENT administrator (an identity cannot remove its own directory role); re-run this to get the time-bound one." -ForegroundColor Red
+        } elseif ($st.active) {
+            Write-Host "  [skip] already active until $($st.endDateTime.ToString('u')) (time-bound, reused)" -ForegroundColor DarkGray
+        } elseif ($PSCmdlet.ShouldProcess('Exchange Administrator', "activate through PIM for $ExchangeAdminDuration")) {
+            $body = New-PimRoleScheduleRequestBody -PrincipalId "$($sp.id)" -RoleDefinitionId $exchRoleId -Duration $ExchangeAdminDuration `
+                        -Justification 'PIM4EntraPS engine app registration (Install-PimEngineAppRegistration.ps1): time-bound Exchange administration'
+            Wait-Graph -What 'Exchange Administrator schedule request' -Do { Gr -Method POST -Path 'roleManagement/directory/roleAssignmentScheduleRequests' -Body $body } | Out-Null
+            # READ BACK -- an accepted request is not yet an active role.
+            $seen = $false
+            for ($i = 0; $i -lt 24 -and -not $seen; $i++) { $st = & $readGrant; if ($st.active) { $seen = $true } else { Start-Sleep -Seconds 5 } }
+            if (-not $seen) { throw 'the time-bound Exchange Administrator request was accepted but the role is not active on read-back (120s)' }
+            Write-Host "  [ok] Exchange Administrator active until $($st.endDateTime.ToString('u')) through PIM (read back); it then EXPIRES on its own" -ForegroundColor Green
+        }
+        $script:exchAdmin.active = [bool]$st.active; $script:exchAdmin.kind = "$($st.kind)"
+        $script:exchAdmin.endUtc = $(if ($st.endDateTime) { $st.endDateTime.ToString('o') } else { '' })
+    } catch {
+        $script:exchAdmin.error = "$($_.Exception.Message) $($_.ErrorDetails.Message)".Trim()
+        Write-Host "  [fail] Exchange Administrator through PIM: $($script:exchAdmin.error)" -ForegroundColor Red
+    }
 }
 
-# --- Azure RBAC: User Access Administrator at root MG (default ON) ----------------
-if (-not $SkipAzureRbac -and $sp) {
+# --- Azure RBAC: User Access Administrator at root MG (OPT-IN, SEC-34) -------------
+if (-not $doRootUaa) {
+    Write-Host ""
+    Write-Host "Azure RBAC: User Access Administrator at the ROOT management group was NOT assigned (opt-in: -GrantRootUserAccessAdministrator)." -ForegroundColor DarkYellow
+    Write-Host "      It is standing tier-0 over every subscription. The engine's Azure RBAC PIM needs User Access Administrator (or" -ForegroundColor DarkYellow
+    Write-Host "      Owner) on the scopes it manages -- grant it at the NARROWEST such scope to the principal that runs the engine" -ForegroundColor DarkYellow
+    Write-Host "      (hosted: the tick job's managed identity, via Setup-PimContainers -AzureRbacRoles). Until then Azure RBAC PIM 403s." -ForegroundColor DarkYellow
+}
+if ($doRootUaa -and $sp) {
     Write-Host ""
     # 🔴 §64.5 #3 -- ASSIGN IT TO THE PRINCIPAL THAT ACTUALLY RUNS, not to whichever one this
     # script happens to have created. Hosted = the container MANAGED IDENTITY; non-hosted = the SPN.
@@ -442,14 +490,11 @@ if (-not $SkipAzureRbac -and $sp) {
             }
         }
     } catch {
+        $script:rootUaaError = "$($_.Exception.Message)"
         Write-Host "  [fail] $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "  Manual fallback (GA-not-owner): Azure portal -> root management group ->" -ForegroundColor Yellow
         Write-Host "    Access control (IAM) -> Add role assignment -> 'User Access Administrator' -> '$DisplayName'." -ForegroundColor Yellow
     }
-} elseif ($SkipAzureRbac) {
-    Write-Host ""
-    Write-Host "Note: -SkipAzureRbac set. Azure RBAC PIM management will fail until the SP gets" -ForegroundColor DarkYellow
-    Write-Host "      'User Access Administrator' (or equivalent) at the management group scope." -ForegroundColor DarkYellow
 }
 
 # --- Write the identity into the engine launcher config ---------------------------
@@ -458,8 +503,8 @@ if (-not $NoWriteLauncherConfig -and $app -and $app.appId) {
         $LauncherConfigPath = Join-Path $solRoot 'launcher\PIM-Baseline-Management-CSV\LauncherConfig.custom.ps1'
     }
     if ($PSCmdlet.ShouldProcess($LauncherConfigPath, 'write engine identity ($global:HighPriv_Modern_*)')) {
+        # (the begin/end markers are added by Update-PimLauncherIdentityBlock)
         $lines = @(
-            "# --- PIM4EntraPS engine identity (written by Install-PimEngineAppRegistration.ps1) ---",
             "`$global:AzureTenantID                                = '$TenantId'",
             "`$global:HighPriv_Modern_ApplicationID_Azure         = '$($app.appId)'",
             "`$global:HighPriv_Modern_CertificateThumbprint_Azure = '$certThumb'"
@@ -468,13 +513,16 @@ if (-not $NoWriteLauncherConfig -and $app -and $app.appId) {
             $lines += "`$global:HighPriv_Modern_ApplicationID_O365          = '$($app.appId)'"
             $lines += "`$global:HighPriv_Modern_CertificateThumbprint_O365 = '$certThumb'"
         }
-        $block = ($lines -join [Environment]::NewLine) + [Environment]::NewLine
         $dir = Split-Path -Parent $LauncherConfigPath
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        # Append (or create). UTF8 (no BOM via .NET to stay PS 5.1-safe).
-        [System.IO.File]::AppendAllText($LauncherConfigPath, $block, (New-Object System.Text.UTF8Encoding($false)))
+        # 🔴 IMP-49 p -- REPLACE, never append. AppendAllText added one more identity block per run (nine were found in one
+        # tree) and the LAST one silently won. Every earlier block -- marked or legacy unmarked -- is removed and exactly one
+        # written; everything else in the file is kept verbatim. UTF8 without BOM via .NET (PS 5.1-safe).
+        $prevText = if (Test-Path -LiteralPath $LauncherConfigPath) { [System.IO.File]::ReadAllText($LauncherConfigPath) } else { '' }
+        $newText = Update-PimLauncherIdentityBlock -Existing $prevText -Lines $lines
+        [System.IO.File]::WriteAllText($LauncherConfigPath, $newText, (New-Object System.Text.UTF8Encoding($false)))
         Write-Host ""
-        Write-Host "  wrote engine identity into $LauncherConfigPath" -ForegroundColor Green
+        Write-Host "  wrote engine identity into $LauncherConfigPath (one block, replaced)" -ForegroundColor Green
     }
 }
 
@@ -483,12 +531,18 @@ if (-not $NoWriteLauncherConfig -and $app -and $app.appId) {
 # over a run in which app-role grants had failed. Say plainly which ones did not land -- the
 # operator reads this banner, and a green word here is what stopped anyone looking further.
 Write-Host ""
-if ($GrantConsent -and $script:grantFail.Count) {
+$privFail = @()
+if ($script:exchAdmin.wanted -and $sp -and -not $WhatIfPreference -and -not $script:exchAdmin.active) { $privFail += "Exchange Administrator through PIM: $(if ($script:exchAdmin.error) { $script:exchAdmin.error } else { 'not active' })" }
+if ($doRootUaa -and "$($script:rootUaaError)") { $privFail += "User Access Administrator @ root MG: $($script:rootUaaError)" }
+if (($GrantConsent -and $script:grantFail.Count) -or $privFail.Count) {
     Write-Host "==========================================================================" -ForegroundColor Red
     Write-Host " PIM4EntraPS Engine app registration INCOMPLETE" -ForegroundColor Red
     Write-Host "==========================================================================" -ForegroundColor Red
-    Write-Host ("  {0} app-role grant(s) FAILED and are NOT in place:" -f $script:grantFail.Count) -ForegroundColor Red
-    foreach ($f in $script:grantFail) { Write-Host "    - $f" -ForegroundColor Red }
+    if ($GrantConsent -and $script:grantFail.Count) {
+        Write-Host ("  {0} app-role grant(s) FAILED and are NOT in place:" -f $script:grantFail.Count) -ForegroundColor Red
+        foreach ($f in $script:grantFail) { Write-Host "    - $f" -ForegroundColor Red }
+    }
+    foreach ($f in $privFail) { Write-Host "    - $f" -ForegroundColor Red }
     Write-Host "  Re-run this script: the grants are idempotent and a second pass repairs them." -ForegroundColor Yellow
 } else {
     Write-Host "==========================================================================" -ForegroundColor Green
@@ -499,6 +553,14 @@ Write-Host "  tenantId   : $TenantId"
 Write-Host "  clientId   : $(if ($app) { $app.appId } else { '<pending (WhatIf)>' })"
 Write-Host "  spObjectId : $(if ($sp) { $sp.id } else { '<pending (WhatIf)>' })"
 Write-Host "  thumbprint : $certThumb"
+# SEC-34 / IMP-31 -- SAY WHAT PRIVILEGE IS LEFT BEHIND, AND UNTIL WHEN.
+if ($script:exchAdmin.wanted) {
+    $exLine = if (-not $script:exchAdmin.active) { 'NOT active' }
+              elseif ($script:exchAdmin.kind -eq 'permanent') { 'ACTIVE, PERMANENT (standing privilege outside PIM -- remove it with a DIFFERENT administrator)' }
+              else { "active until $($script:exchAdmin.endUtc), then EXPIRES on its own (through PIM); re-run to renew" }
+    Write-Host "  Exchange Administrator (directory role) : $exLine" -ForegroundColor $(if ($script:exchAdmin.kind -eq 'permanent') { 'Red' } else { 'Yellow' })
+}
+Write-Host "  User Access Administrator @ root MG     : $(if ($doRootUaa) { if ("$($script:rootUaaError)") { 'FAILED' } else { 'assigned (opt-in)' } } else { 'not assigned (opt-in, -GrantRootUserAccessAdministrator)' })"
 if (-not $GrantConsent) {
     Write-Host ""
     Write-Host "Note: -GrantConsent not supplied. Grant admin consent in the Entra portal before the engine runs." -ForegroundColor DarkYellow
@@ -517,6 +579,8 @@ Write-Host ""
     # failed with a 404 minutes earlier. GraphRolesFailed is empty on a clean run.
     GraphRolesGranted   = if ($GrantConsent) { @($script:grantOk   | Where-Object { $_ -like 'Graph/*' } | ForEach-Object { $_ -replace '^Graph/','' }) } else { @() }
     GraphRolesFailed    = if ($GrantConsent) { @($script:grantFail | Where-Object { $_ -like 'Graph/*' } | ForEach-Object { $_ -replace '^Graph/','' }) } else { @() }
-    ExchangeRoleGranted = if ($GrantConsent -and $IncludeExchange) { 'Exchange.ManageAsApp + Exchange Administrator' } else { '' }
-    AzureRbacGranted    = if (-not $SkipAzureRbac) { 'User Access Administrator @ root MG (attempted)' } else { '' }
+    # OUTCOME again (SEC-34): the Exchange Administrator activation's kind + end, not the words "Exchange Administrator".
+    ExchangeRoleGranted = if ($script:exchAdmin.wanted -and $script:exchAdmin.active) { "Exchange.ManageAsApp + Exchange Administrator ($($script:exchAdmin.kind) until $($script:exchAdmin.endUtc))" } else { '' }
+    ExchangeAdminEndUtc = "$($script:exchAdmin.endUtc)"
+    AzureRbacGranted    = if ($doRootUaa -and -not "$($script:rootUaaError)") { 'User Access Administrator @ root MG (opt-in)' } else { '' }
 }

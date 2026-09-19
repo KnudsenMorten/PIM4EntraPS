@@ -15,12 +15,20 @@
       - Read the signed-in user's eligible PIM-for-Groups assignments
       - POST assignmentScheduleRequests to bulk-activate selected groups
 
-    The redirect URI is registered as a Public Client / native URI rather than
-    SPA. This is required because the token endpoint is called from the
-    extension's fetch context (no Origin: https://*.chromiumapp.org header),
-    and Entra rejects SPA-registered redirect URIs in that case with
-    AADSTS9002326 ("Cross-origin token redemption is permitted only for the
-    'Single-Page Application' client-type").
+    The redirect URIs are registered as SPA (Single-Page Application) URIs --
+    both https://<id>.chromiumapp.org/ (what launchWebAuthFlow intercepts) and
+    chrome-extension://<id>/ (the Origin the popup's token-endpoint fetch
+    sends). Entra validates that Origin against SPA-registered URIs; a Public
+    Client / native registration fails redemption with AADSTS9002326
+    ("Cross-origin token redemption is permitted only for the 'Single-Page
+    Application' client-type"). Any stale Public Client URI a previous install
+    left behind is cleared.
+
+    By default ONLY the released extension id is registered (-Channel
+    Released). The TEST build's id is added only when you ask for it
+    (-Channel Both / Test) -- never on a customer tenant: the app carries
+    tenant-wide consent for RoleManagement.ReadWrite.Directory, so every
+    registered redirect is a build that can hold those tokens.
 
     Required delegated permissions (resolved by displayName -> id at runtime):
       Microsoft Graph (00000003-0000-0000-c000-000000000000):
@@ -101,13 +109,14 @@ param(
     [string]$ExtensionId = 'eheocihmlppcophaeakmdenhgcookkab',
 
     # Which extension ids get redirect URIs registered (always merged, never replacing):
-    #   'Both' (DEFAULT) registers the released id AND the TEST id, so prod + test builds
-    #     both sign in from one run with no extra parameters.
-    #   'Released' registers ONLY the released id — a clean customer-tenant deploy with no
-    #     dev/test id.
+    #   'Released' (DEFAULT) registers ONLY the released id -- the customer-tenant deploy.
+    #     (SEC-37: the default used to be 'Both', which put the TEST build's redirect on
+    #     every customer app that holds tenant-wide RoleManagement.ReadWrite.Directory.)
+    #   'Both' registers the released id AND the TEST id, so prod + test builds both sign
+    #     in -- for the internal/dev tenant only; ask for it explicitly.
     #   'Test' is kept as an alias of 'Both' for back-compat.
     [ValidateSet('Both','Released','Test')]
-    [string]$Channel = 'Both',
+    [string]$Channel = 'Released',
 
     [string]$DisplayName = 'PIM Activator',
 
@@ -405,10 +414,10 @@ $redirectUri = "https://$ExtensionId.chromiumapp.org/"
 
 # Channel controls which extension ids get their redirect URIs registered on the app
 # (always MERGED with whatever is there — never replaces existing URIs):
-#   Both (DEFAULT) -> released $ExtensionId AND the TEST id, so prod + test builds both
-#                     sign in with one run, no extra parameters (operator 2026-06-22).
-#   Released       -> ONLY $ExtensionId (a clean customer-tenant deploy, no dev/test id).
-#   Test           -> same as Both (kept for back-compat).
+#   Released (DEFAULT) -> ONLY $ExtensionId (a clean customer-tenant deploy, no dev/test id).
+#   Both               -> released $ExtensionId AND the TEST id, so prod + test builds both
+#                         sign in (internal/dev tenant; must be asked for -- SEC-37).
+#   Test               -> same as Both (kept for back-compat).
 $TEST_EXT_ID = 'glldnbmjpdkjemcnficagdhgienfdpoo'
 $additionalExtIds = if ($Channel -ne 'Released' -and $ExtensionId -ne $TEST_EXT_ID) { @($TEST_EXT_ID) } else { @() }
 if ($additionalExtIds.Count -gt 0) { Write-Host "Channel = $Channel -> also registering redirect URIs for test id $TEST_EXT_ID" -ForegroundColor Yellow }

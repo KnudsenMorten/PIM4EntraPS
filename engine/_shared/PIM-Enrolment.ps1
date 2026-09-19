@@ -53,15 +53,17 @@ function New-PimEnrolmentRequest {
       🔒 It carries NO CREDENTIAL and NO SECRET. A knock is a claim of identity, not proof of one;
       the proof is the authenticated channel it arrives on (framework §8.2), and putting a secret in
       the body would make the document itself worth stealing.
-      🪤 `requestedRing` is what the slave ASKS FOR, and the name says so. The ring it GETS is the
-      operator's to decide -- a tenant that could choose its own ring could choose ring 0 and
-      receive the earliest, least-proven baseline, which is the opposite of what rings are for.
+      🔒 DOC-16b (2026-09-18) -- `localRing` is the slave's OWN ring, and it is AUTHORITATIVE. Every ring
+      is defined LOCALLY in the slave (DESIGN; operator 2026-09-18): the slave's downlink job gates its
+      pull with its own -SlaveRing, so the knock DECLARES that ring to the master; it does not ask for
+      one. (This used to say the opposite -- that the ring was the operator's and the slave's value was
+      ignored -- which inverted the rule. -RequestedRing is kept as an alias so old callers bind.)
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$TenantId,
         [Parameter(Mandatory)][string]$DisplayName,
-        [int]$RequestedRing = 3,
+        [Alias('RequestedRing')][int]$LocalRing = 2,
         [string]$Scenario = '',
         [string]$SubscriptionId = '',
         [string]$UplinkUri = '',
@@ -76,8 +78,8 @@ function New-PimEnrolmentRequest {
         version       = 1
         tenantId      = "$TenantId".Trim()
         displayName   = "$DisplayName".Trim()
-        # ASKED FOR, not granted. See the note above.
-        requestedRing = [int]$RequestedRing
+        # DECLARED, not requested: the slave's own local ring (0..2). See the note above.
+        localRing     = [int]$LocalRing
         scenario      = "$Scenario".Trim()
         subscriptionId = "$SubscriptionId".Trim()
         uplinkUri     = "$UplinkUri".Trim()
@@ -107,6 +109,11 @@ function Test-PimEnrolmentRequest {
     if (-not [guid]::TryParse($tid, [ref]$guid)) { return [ordered]@{ ok = $false; reason = "tenantId '$tid' is not a GUID" } }
     if (-not "$(Get-PimDownlinkValue -Object $Request -Key 'displayName')".Trim()) { return [ordered]@{ ok = $false; reason = 'the request names no displayName -- an operator approving it would be approving an id' } }
     if (-not "$(Get-PimDownlinkValue -Object $Request -Key 'nonce')".Trim()) { return [ordered]@{ ok = $false; reason = 'the request carries no nonce, so a replay could not be told from a retry' } }
+    # DOC-16b: the slave's own ring is part of what it declares. Missing or out of range fails CLOSED -- never defaulted,
+    # because a defaulted ring decides which admins a customer receives. (Legacy 'requestedRing' is read as the same value.)
+    $lr = "$(Get-PimDownlinkValue -Object $Request -Key 'localRing')".Trim()
+    if (-not $lr) { $lr = "$(Get-PimDownlinkValue -Object $Request -Key 'requestedRing')".Trim() }
+    if ($lr -notmatch '^[0-2]$') { return [ordered]@{ ok = $false; reason = "the request declares no valid local ring ('$lr'; expected 0, 1 or 2) -- the slave's own ring is not guessed" } }
     return [ordered]@{ ok = $true; reason = '' }
 }
 
@@ -120,8 +127,9 @@ function Get-PimEnrolmentDecision {
       reason -- "we have never heard of you" and "we said no" are different facts and an operator
       reading a log needs to tell them apart.
 
-      -Registry: the operator's decisions, @( @{ tenantId; state = approved|denied; ring } ).
-      Returns @{ enrolled; state; ring; reason }.
+      -Registry: the operator's decisions, @( @{ tenantId; state = approved|denied; ring } ). A registry `ring`
+      is only the MASTER'S COPY (reported as masterCopyRing; a mismatch is named) -- it never decides.
+      Returns @{ enrolled; state; ring; masterCopyRing; reason }, ring = the slave's declared LOCAL ring.
       PURE.
     #>
     [CmdletBinding()]
@@ -142,17 +150,21 @@ function Get-PimEnrolmentDecision {
         return [ordered]@{ enrolled = $false; state = $(if ($state) { $state } else { 'unknown' }); ring = $null
             reason = "tenant $tid is registered but not approved (state '$state')" }
     }
-    # 🔒 THE RING IS THE OPERATOR'S, NOT THE REQUESTER'S. Taken from the registry entry, and the
-    # requested ring is deliberately not consulted: a tenant that could pick its own ring could pick
-    # the earliest, least-proven baseline, which inverts what rings exist to do.
-    $ring = $null
+    # 🔒 DOC-16b -- THE RING IS THE SLAVE'S OWN (every ring is LOCAL in the slave; DESIGN, operator 2026-09-18).
+    # This used to take the ring from the registry and deliberately ignore the slave's -- the opposite of the rule.
+    # The approval gates ENROLMENT (whether this tenant receives anything at all); it does not assign a ring. The
+    # registry's ring is the master's COPY, kept for the master's previews: reported, and a mismatch named, never obeyed.
+    $lr = "$(Get-PimDownlinkValue -Object $Request -Key 'localRing')".Trim()
+    if (-not $lr) { $lr = "$(Get-PimDownlinkValue -Object $Request -Key 'requestedRing')".Trim() }
+    $ring = [int]$lr   # shape-checked (0..2) by Test-PimEnrolmentRequest above
+    $copy = $null
     $rawRing = Get-PimDownlinkValue -Object $hit[0] -Key 'ring'
-    if ($null -ne $rawRing -and "$rawRing".Trim() -ne '') { $ring = [int]"$rawRing" }
-    if ($null -eq $ring) {
-        return [ordered]@{ enrolled = $false; state = 'approved-without-ring'; ring = $null
-            reason = "tenant $tid is approved but no ring was assigned -- refusing rather than defaulting, because a defaulted ring decides which baseline a customer receives" }
+    if ($null -ne $rawRing -and "$rawRing".Trim() -match '^\d+$') { $copy = [int]"$rawRing".Trim() }
+    $note = ''
+    if ($null -ne $copy -and $copy -ne $ring) {
+        $note = "the master's copy of this tenant's ring is $copy but the tenant declares ring $ring -- the tenant's own ring decides; update the master's copy (Register-PimManagedTenant -Ring $ring) so its previews match"
     }
-    return [ordered]@{ enrolled = $true; state = 'approved'; ring = $ring; reason = '' }
+    return [ordered]@{ enrolled = $true; state = 'approved'; ring = $ring; masterCopyRing = $copy; reason = $note }
 }
 
 function New-PimEnrolmentGrant {
@@ -163,8 +175,9 @@ function New-PimEnrolmentGrant {
       The signed baseline bundle exists so a customer can verify what it received without trusting
       the transport; answering a knock with inline config would bypass exactly that guarantee and
       quietly create a second distribution channel with weaker properties than the first.
-      So the grant says: *you are enrolled, at this ring -- now go and PULL the signed bundle from
-      the channel you already verify.*
+      So the grant says: *you are enrolled -- now go and PULL the signed bundle from the channel you
+      already verify.* Its `ring` only ECHOES the ring the slave declared (DOC-16b: the ring is the
+      slave's own); the slave's pull keeps using its local -SlaveRing either way.
 
       🔒 It also does NOT carry a credential. The slave authenticates with its own identity, which
       is what MSP-3 established and what makes "the slave applies locally" true.

@@ -116,10 +116,10 @@ param(
     [string]$Recipient = "$($env:PIM_NotifyRecipient)",
     # Transcript directory. Defaults to <solution>\output\update-logs.
     [string]$LogDir,
-    # A scheduled task does not inherit your az login. These are the same two hooks
-    # Update-PimBaselineSas.ps1 exposes, for the same reason.
+    # A scheduled task does not inherit your az login. These are the same two hooks the (now retired, SEC-27)
+    # baseline SAS rotation exposed, for the same reason.
     [string]$AzureConfigDir,
-    # 🪤 A PATH, not a command line -- matching Update-PimBaselineSas.ps1, which Test-Paths it.
+    # 🪤 A PATH, not a command line -- and it is Test-Path'd.
     # Passing "script.ps1 -Arg x" here makes the wrapper run `& '<the whole string>'`, and
     # PowerShell then looks for a COMMAND whose NAME contains the arguments. Measured 2026-09-03:
     # "The term '...Connect-PimTenantAz.ps1 -TenantShortName ... -Quiet' is not recognized".
@@ -211,8 +211,8 @@ if ($LocalPull) {
 #    the same misdirection as ESTATE-14.
 # 2. NO CONTEXT UNDER THE SERVICE ACCOUNT. A scheduled task does not inherit your az login, and
 #    NETWORK SERVICE's profile is empty, so even the right subscription id would have had nothing
-#    to authenticate with. -PreAuthScript is the hook (same shape Update-PimBaselineSas.ps1 uses,
-#    and for the same reason).
+#    to authenticate with. -PreAuthScript is the hook (same shape the retired baseline SAS
+#    rotation used, and for the same reason).
 # 3. NO OUTPUT ANYWHERE. No transcript, no redirect. At 03:00 the entire record of a failed fleet
 #    update was a single integer. An unattended job that cannot say what it did is not operable.
 # ✅ -SubscriptionId IS forwarded now (§53.4, 2026-09-10). It previously was not, and the note here

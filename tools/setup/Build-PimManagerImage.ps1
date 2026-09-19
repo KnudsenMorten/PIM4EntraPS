@@ -82,12 +82,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-# ðŸ”´ SCOPE THE BUILD, DO NOT MUTATE THE MACHINE. -SubscriptionId was only ever applied inside the
-# SPN-login path via z account set, so a caller that was already logged in (the normal case)
-# passed a subscription that was silently ignored -- and z acr build then ran against the
+# 🔴 SCOPE THE BUILD, DO NOT MUTATE THE MACHINE. -SubscriptionId was only ever applied inside the
+# SPN-login path via `az account set`, so a caller that was already logged in (the normal case)
+# passed a subscription that was silently ignored -- and `az acr build` then ran against the
 # ambient default, which on mgmt1 is another company's. Measured: "the resource 'acrpimmfnpr'
 # could not be found in subscription 'ELDK Event Hub'".
-# ðŸ”’ Scoped PER CALL rather than by z account set, because this machine runs ~3 sessions at once
+# 🔒 Scoped PER CALL rather than by `az account set`, because this machine runs ~3 sessions at once
 # and flipping the shared default would break whichever of them is legitimately using the other
 # tenant. A build must not have side effects on somebody else's shell.
 $acrSubArgs = @()
@@ -175,9 +175,12 @@ if (Test-Path $bannerShared) { . $bannerShared; if (Get-Command Show-PimSetupBan
 
 Write-Host "=== PIM4EntraPS BUILD Manager image ($Source) -> $ImageRepo`:$ImageTag ===" -ForegroundColor Cyan
 
-# ---- compute the content hash of the pulled Manager GUI surface ---------------
-function Get-ManagerContentHash {
-    <#
+# ---- compute the content hash of the pulled Manager image ---------------------
+# 🔴 BUG-174: the file set is defined ONCE, in engine/_shared/PIM-UpdateLifecycle.ps1
+# (Get-PimSolutionContentHash), and this builder, the roller's PIM_MANAGER_CONTENT_HASH stamp and the
+# Invoke-PimUpdate detector all call it. Three private copies of the walk is how the roller came to stamp
+# a tools\pim-manager-only hash that never matched, so every host-side update rebuilt an identical image.
+<#
       🔴 HASH WHAT THE IMAGE CONTAINS, NOT ONE FOLDER INSIDE IT.
 
       This used to hash `tools/pim-manager` only. The Dockerfile copies the WHOLE solution --
@@ -198,22 +201,9 @@ function Get-ManagerContentHash {
       how this happened. Hash everything that ships and exclude only what CANNOT affect runtime, so
       a new directory is covered by default and the failure mode is an unnecessary rebuild rather
       than a missed one.
-    #>
-    param([string]$Dir)
-    if (-not (Test-Path $Dir)) { return '' }
-    # Excluded: documentation and screenshots (never executed), the test suites (not run in the
-    # container), build output, VCS/editor noise, per-customer files, and runtime caches.
-    $skip = '\\(docs|tests|output|\.git|\.vs|\.vscode|node_modules|cache)\\'
-    $files = @(Get-ChildItem -Path $Dir -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch $skip -and $_.Name -notmatch '\.custom\.' })
-    $digests = foreach ($f in $files) {
-        $rel = $f.FullName.Substring($Dir.Length).TrimStart('\','/')
-        [pscustomobject]@{ path = $rel; sha256 = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash }
-    }
-    Get-PimContentHash -FileDigests @($digests)
-}
+#>
 # The SOLUTION root -- what the Dockerfile copies -- not tools/pim-manager.
-$contentHash = Get-ManagerContentHash -Dir $solRoot
+$contentHash = Get-PimSolutionContentHash -SolutionRoot $solRoot
 Info "pulled Manager content hash: $contentHash"
 
 # 🔴 WHERE THE CODE COMES FROM IS NOT HOW THE IMAGE IS BUILT, AND CONFLATING THEM BROKE S6.

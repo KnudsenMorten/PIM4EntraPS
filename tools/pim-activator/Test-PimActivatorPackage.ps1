@@ -28,6 +28,8 @@
       BRANDING   required branding strings present (name, attribution footer).
       NOSECRET   no secrets / tenant ids / subscription ids hard-coded in the
                  shipped extension files.
+      HOSTS      manifest host_permissions are EXACTLY the allowed hosts (SEC-38) --
+                 no wildcard, nothing missing.
 
 .PARAMETER Path
     Folder holding the extension source. Defaults to the script's own folder.
@@ -57,6 +59,21 @@ $ErrorActionPreference = 'Stop'
 # public, deterministic value (already committed in manifest.json) -- not a
 # secret -- and pinning it here is how we detect accidental key drift.
 $script:CanonicalExtensionId = 'eheocihmlppcophaeakmdenhgcookkab'
+
+# SEC-38 (operator decision 2026-09-18): the ONLY hosts the extension may hold
+# permissions for -- every one of them is called from popup.js:
+#   login.microsoftonline.com   token endpoint (PKCE code + refresh redemption)
+#   graph.microsoft.com         PIM eligibility / activation / role reads
+#   management.azure.com        Azure RBAC eligibility / activation
+#   knudsenmorten.github.io/... Diagnostics "Run checks" reads the update feed
+# (window.open to github.com / the logout page and chrome.identity.launchWebAuthFlow
+# need no host permission.) Adding a host means adding it HERE, on purpose.
+$script:AllowedHostPermissions = @(
+    'https://login.microsoftonline.com/*'
+    'https://graph.microsoft.com/*'
+    'https://management.azure.com/*'
+    'https://knudsenmorten.github.io/PIM4EntraPS/*'
+)
 
 function Pick {
     # PS 5.1-safe ternary: Pick $cond $whenTrue $whenFalse
@@ -129,6 +146,20 @@ function Test-PimActivatorPackage {
                 "extension id resolves to $script:CanonicalExtensionId." `
                 "extension id DRIFTED to '$derivedId' (must be $script:CanonicalExtensionId). The 'key' in manifest.json was changed."))
         }
+
+        # ---- HOSTS (SEC-38) ------------------------------------------------
+        # host_permissions must be EXACTLY the hosts the extension talks to. The
+        # extension is force-installed on admin browsers holding privileged Graph /
+        # ARM tokens; a wildcard ('https://*/*', '<all_urls>') would let any code it
+        # ever ships read and call every site the admin is signed in to.
+        $hostPerms = @()
+        if ($manifest.PSObject.Properties.Name -contains 'host_permissions') { $hostPerms = @($manifest.host_permissions) }
+        $unexpected = @($hostPerms | Where-Object { $script:AllowedHostPermissions -notcontains $_ })
+        $missing    = @($script:AllowedHostPermissions | Where-Object { $hostPerms -notcontains $_ })
+        $hostsOk = ($unexpected.Count -eq 0) -and ($missing.Count -eq 0)
+        & $add (New-Finding -Check 'HOSTS' -Ok $hostsOk -Message (Pick $hostsOk `
+            "host_permissions are exactly the $($script:AllowedHostPermissions.Count) hosts the extension uses." `
+            ("host_permissions drifted -- unexpected: [{0}] missing: [{1}]. Allowed set: {2}" -f ($unexpected -join ', '), ($missing -join ', '), ($script:AllowedHostPermissions -join ', '))))
     }
 
     # ---- VERSION (badge consistency) ----------------------------------------
@@ -177,7 +208,7 @@ function Test-PimActivatorPackage {
     # ---- NOSECRET (shipped extension files only) -----------------------------
     # Real GUID tenant/subscription ids must never be baked into the extension.
     # Sample/placeholder all-zero or sequential GUIDs are allowed.
-    $shipped = @('popup.js', 'popup-config.js', 'popup-net.js', 'popup.html', 'background.js', 'version-badge.js', 'manifest.json', 'managed-schema.json')
+    $shipped = @('popup.js', 'popup-config.js', 'popup-net.js', 'popup-storage.js', 'popup-report.js', 'popup.html', 'background.js', 'version-badge.js', 'manifest.json', 'managed-schema.json')
     $guidRx  = '\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b'
     $secretHits = New-Object System.Collections.Generic.List[string]
     foreach ($f in $shipped) {

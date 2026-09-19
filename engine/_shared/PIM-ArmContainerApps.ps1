@@ -247,6 +247,73 @@ function Set-PimAcaJobImage {
     Invoke-PimArm -Method PATCH -Path $path -Body @{ properties = @{ template = $job.properties.template } } -ApiVersion $script:PimAcaApi
 }
 
+function Get-PimUpdaterFollowUpDecision {
+    <#
+      §71.44 (operator, 2026-09-18) -- PURE. Should the updater start ONE more run of itself?
+
+      🔴 WHY. An update run is executed by the updater image that was installed BEFORE it, so anything a
+      release changes in the updater takes effect one run LATE. Measured 2026-09-18: the 2.4.367 updater
+      rolled internal, EFIF and RIDE to 2.4.369, but the step that records the ring (§71.43) only exists
+      in 2.4.369 -- so all three Managers showed "update ring: not recorded" until the next 03:00. A
+      follow-up run on the NEW image closes that gap for this and every future updater change: it finds
+      the same version already running (a no-op roll) and does the new work -- recording, reporting.
+
+      Starts ONLY when this run moved the job onto a DIFFERENT image (stamped, and before != after).
+      The follow-up runs that new image, finds its own image already equal to the target, and so can
+      never start another: no loop by construction, not by a counter.
+      Returns @{ start = [bool]; reason = [string] }.
+    #>
+    param(
+        [AllowEmptyString()][AllowNull()][string]$SelfImageBefore,
+        [AllowEmptyString()][AllowNull()][string]$TargetImage,
+        [bool]$Stamped,
+        # PIM_UPDATE_NO_FOLLOWUP=1 -- an explicit off switch for an operator who needs it.
+        [AllowEmptyString()][AllowNull()][string]$Disable
+    )
+    if ("$Disable".Trim() -eq '1') { return @{ start = $false; reason = 'disabled (PIM_UPDATE_NO_FOLLOWUP=1)' } }
+    if (-not $Stamped) { return @{ start = $false; reason = 'this job did not move to a new image this run' } }
+    $b = "$SelfImageBefore".Trim(); $a = "$TargetImage".Trim()
+    if (-not $a) { return @{ start = $false; reason = 'no target image known' } }
+    if (-not $b) { return @{ start = $false; reason = 'the image this run started from is unknown -- not guessing' } }
+    if ($b -ieq $a) { return @{ start = $false; reason = 'already on the target image (this IS the follow-up, or nothing changed)' } }
+    return @{ start = $true; reason = "the updater moved $b -> $a; one follow-up run lets the NEW updater do its own work now, not at the next schedule" }
+}
+
+function Start-PimAcaJobExecution {
+    <#
+      §71.44 -- start ONE execution of a Container Apps job (ARM POST .../jobs/<name>/start).
+      🪤 It runs right after this same job PATCHED its own image, so the job is often still provisioning
+      and ARM answers 409 -- a wait, not a failure (the B8 lesson). Bounded backoff on 409 only.
+      NEVER throws: returns @{ ok; execution; reason }. A follow-up that could not start costs one
+      night's delay, and must never turn a successful update red.
+      -Invoke / -Sleep are test seams (default: Invoke-PimArm / Start-Sleep).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$ResourceGroup,
+        [Parameter(Mandatory)][string]$Name,
+        [int[]]$Waits = @(0, 10, 20, 40, 60),
+        [scriptblock]$Invoke,
+        [scriptblock]$Sleep
+    )
+    $path = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$Name/start"
+    if (-not $Invoke) { $Invoke = { param($p) Invoke-PimArm -Method POST -Path $p -ApiVersion $script:PimAcaApi -Body @{} } }
+    if (-not $Sleep)  { $Sleep  = { param($s) Start-Sleep -Seconds $s } }
+    $lastErr = ''
+    foreach ($w in $Waits) {
+        if ($w) { & $Sleep $w }
+        try {
+            $r = & $Invoke $path
+            $exec = if ($r -and $r.PSObject.Properties['name']) { "$($r.name)" } else { '' }
+            return @{ ok = $true; execution = $exec; reason = 'started' }
+        } catch {
+            $lastErr = "$($_.Exception.Message)"
+            if ($lastErr -notmatch '(?i)OperationInProgress|active provisioning operation|\b409\b') { break }
+        }
+    }
+    return @{ ok = $false; execution = ''; reason = $lastErr }
+}
+
 function Get-PimAcaImageRepo {
     <#
       The REPOSITORY half of a container image reference, with the tag or digest removed.
@@ -414,4 +481,53 @@ function Set-PimAcaJobEnvValue {
         }
     } catch { throw "Set-PimAcaJobEnvValue [$JobName]: $($_.Exception.Message)" }
     return $res
+}
+
+function Set-PimAcaAppEnvValue {
+    <#
+      Add or update ONE environment variable on a Container APP's container, leaving the rest alone, and READ IT BACK.
+      The app counterpart of Set-PimAcaJobEnvValue -- same rule, same reason: a fragment PATCH replaces the container
+      array and takes every other variable with it, so the app is GET, the one variable set inside what came back,
+      and the whole template written again. The write creates a new revision (that is how Container Apps applies
+      an env change). REQ-F: tools/setup/Set-PimEmergencyPassphrase.ps1 sets PIM_EmergencyVault on ca-pim-manager.
+      Returns @{ changed; value } -- changed=$false when the variable already held the value (nothing written).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$ResourceGroup,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$VariableName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value,
+        [string]$ContainerName
+    )
+    $path = Get-PimAcaAppId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name
+    $pick = {
+        param($appObj)
+        $cs = @($appObj.properties.template.containers)
+        if ("$ContainerName".Trim()) { return (@($cs | Where-Object { "$($_.name)" -eq "$ContainerName".Trim() }) | Select-Object -First 1) }
+        if ($cs.Count -eq 1) { return $cs[0] }
+        return $null
+    }
+    $app = Invoke-PimArm -Method GET -Path $path -ApiVersion $script:PimAcaApi
+    if (-not $app) { throw "Set-PimAcaAppEnvValue: container app '$Name' not found in $ResourceGroup." }
+    $target = & $pick $app
+    if (-not $target) { throw "Set-PimAcaAppEnvValue: pass -ContainerName; '$Name' has $(@($app.properties.template.containers).Count) containers. Refusing to guess." }
+    foreach ($v in @($target.env)) { if ($v -and "$($v.name)" -eq $VariableName -and "$($v.value)" -eq $Value -and -not "$($v.secretRef)".Trim()) { return [pscustomobject]@{ changed = $false; value = $Value } } }
+    $envList = New-Object System.Collections.Generic.List[object]
+    $found = $false
+    foreach ($v in @($target.env)) {
+        if (-not $v) { continue }
+        if ("$($v.name)" -eq $VariableName) { $envList.Add([pscustomobject]@{ name = $VariableName; value = $Value }) | Out-Null; $found = $true }
+        else { $envList.Add($v) | Out-Null }
+    }
+    if (-not $found) { $envList.Add([pscustomobject]@{ name = $VariableName; value = $Value }) | Out-Null }
+    $target | Add-Member -NotePropertyName 'env' -NotePropertyValue @($envList.ToArray()) -Force
+    [void](Invoke-PimArm -Method PATCH -Path $path -Body @{ properties = @{ template = $app.properties.template } } -ApiVersion $script:PimAcaApi)
+    $back = Invoke-PimArm -Method GET -Path $path -ApiVersion $script:PimAcaApi
+    $bt = & $pick $back
+    $stored = $null
+    foreach ($v in @($bt.env)) { if ($v -and "$($v.name)" -eq $VariableName) { $stored = "$($v.value)"; break } }
+    if ($null -eq $stored) { throw "Set-PimAcaAppEnvValue [$Name]: wrote $VariableName but it is ABSENT on read-back." }
+    if ($stored -ne $Value) { throw "Set-PimAcaAppEnvValue [$Name]: wrote $VariableName but read back a DIFFERENT value (wrote $($Value.Length) chars, read back $($stored.Length))." }
+    return [pscustomobject]@{ changed = $true; value = $stored }
 }

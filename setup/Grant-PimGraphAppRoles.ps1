@@ -41,27 +41,29 @@ param(
     # creates (New-ServicePrincipal + New-ManagementScope + New-ManagementRoleAssignment -App), and
     # adding Mail.Send back here would silently widen it to send-as-ANY-mailbox tenant-wide.
     # See docs/REQUIREMENTS.md IMP-06e.
-    # 🔴 BUG-151 -- THE BROAD ROLE IS REPLACED BY THE NARROW SCHEDULE PAIR, to match the MI map in
-    # tools/setup/_PimSetupShared.ps1. `RoleManagement.ReadWrite.Directory` is the documented
-    # HIGHER-PRIVILEGED ALTERNATIVE to these (MS Learn); v1 used the pair and §64.2 proved it 403-free.
-    # 🪤 THIS LIST AND THE MI MAP MUST NOT DRIFT (§63.3): they are two copies of one concept, and the
-    # last time they disagreed the AccessReviews provider was a permanent 403-no-op in every hosted
-    # environment while the doc that called the role "required" pointed at THIS list -- which is not
-    # the principal that executes. tests/Test-PimGraphRoleMap.ps1 asserts every role required here is
-    # also in the MI map; it is what caught this edit half-done.
-    [string[]]$Permissions = @(
-        'Directory.Read.All','User.ReadWrite.All','Group.ReadWrite.All',
-        'RoleEligibilitySchedule.ReadWrite.Directory','RoleAssignmentSchedule.ReadWrite.Directory',
-        'PrivilegedAccess.ReadWrite.AzureADGroup',
-        'RoleManagementPolicy.ReadWrite.Directory','RoleManagementPolicy.ReadWrite.AzureADGroup',
-        'AdministrativeUnit.ReadWrite.All','AccessReview.Read.All',
-        'Policy.Read.All'   # tenant TAP policy (PIM-TapPolicy.ps1), 2026-09-12
-    )
+    # 🔴 BUG-181 -- NO LIST HERE ANY MORE. This was a literal copy of the engine's role set whose own comment said "THIS
+    # LIST AND THE MI MAP MUST NOT DRIFT" -- and it had drifted: no RoleManagement.ReadWrite.Directory (70.16: creating a
+    # role-assignable ROLE-* group needs it), no UserAuthenticationMethod.ReadWrite.All (TAPs), no Domain.Read.All (the
+    # downlink's default domain), no AppRoleAssignment / Application.Read / Defender / DeviceManagementRBAC / .Remove.*.
+    # Omitted = EXACTLY the engine map in tools/setup/_PimSetupShared.ps1 (Get-PimEngineSpnGraphRoles), the one source the
+    # managed identity is granted from too. Pass -Permissions only for a deliberate, named extra grant; the run then says
+    # which engine roles that explicit list leaves out.
+    [string[]]$Permissions
 )
 $ErrorActionPreference = 'Stop'
 $here   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $shared = Resolve-Path "$here\..\engine\_shared"
 . "$shared\PIM-Rest.ps1"
+. (Join-Path $here '..\tools\setup\_PimSetupShared.ps1')   # Get-PimEngineSpnGraphRoles / Get-PimGraphAppRoleMap (BUG-181)
+$engineRoles = @(Get-PimEngineSpnGraphRoles)
+$engineMap   = Get-PimGraphAppRoleMap -RoleSet Engine
+if ($PSBoundParameters.ContainsKey('Permissions') -and @($Permissions).Count) {
+    $notAsked = @($engineRoles | Where-Object { @($Permissions) -notcontains $_ })
+    if ($notAsked.Count) { Write-Host "  NOTE: the explicit -Permissions list leaves out $($notAsked.Count) role(s) the ENGINE needs: $($notAsked -join ', ')" -ForegroundColor Yellow }
+    if (@($Permissions) -contains 'Mail.Send') { throw 'Mail.Send is REFUSED: a tenant-wide Mail.Send defeats the scoped Exchange RBAC send right.' }
+} else {
+    $Permissions = $engineRoles
+}
 $global:PIM_UseGraphSdk    = $false
 $global:PIM_TenantId       = $TenantId
 $global:PIM_ClientId       = $AdminClientId
@@ -85,6 +87,8 @@ $granted = 0; $already = 0; $failed = 0; $invalid = 0
 foreach ($p in $Permissions) {
     $rid = $roleByValue[$p]
     if (-not $rid)              { Write-Host "  ? $p (not a Graph application role)" -ForegroundColor Yellow; $invalid++; continue }
+    # SEC-18's lesson: the map id must BE the live id, or the map grants something else somewhere else. Refuse a mismatch.
+    if ($engineMap.ContainsKey($p) -and "$($engineMap[$p])" -ne "$rid") { Write-Host "  ! $p -- the engine map id $($engineMap[$p]) is not the live id $rid (fix _PimSetupShared.ps1); NOT granted" -ForegroundColor Red; $invalid++; continue }
     if ($haveIds -contains $rid){ Write-Host "  = $p (already granted)" -ForegroundColor DarkGray; $already++; continue }
     try {
         Invoke-PimGraph -Method POST -Path "/servicePrincipals/$spid/appRoleAssignments" -Body @{ principalId=$spid; resourceId=$graphSpId; appRoleId=$rid } | Out-Null
@@ -93,4 +97,5 @@ foreach ($p in $Permissions) {
 }
 Write-Host ("Done. granted=$granted already=$already failed=$failed invalid=$invalid") -ForegroundColor $(if ($failed) {'Yellow'} else {'Green'})
 if ($granted) { Write-Host "Restart any long-running engine process (it caches perms at token-mint time); allow a minute for propagation." -ForegroundColor Yellow }
-if ($failed)  { exit 1 }
+# A role that could not even be resolved is not granted either -- the engine is short of it, so this run did not succeed.
+if ($failed -or $invalid)  { exit 1 }

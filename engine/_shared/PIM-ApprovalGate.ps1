@@ -16,8 +16,8 @@
     * Maker/checker queue: New-/Get-/Approve-/Deny-PimApprovalRequest. An approval
       record (requestor, action, target, justification, ticket, requested-at, status,
       approver, decided-at, decision-note). Persisted via the existing settings/SQL
-      store (Set-PimSetting -> SQL pim.Settings; JSON-file fallback; in-mem last resort)
-      -- the SAME store chain the scheduler uses, so it is shared hosted + local.
+      store (Set-PimSetting -> SQL pim.Settings ONLY; IMP-41: no file, no in-memory
+      fallback -- a store failure THROWS) -- the SAME store the scheduler uses.
 
     * Offboarding-with-approval: Get-PimOffboardSequencePlan builds a guided sequence
       (disable -> revoke active -> schedule delete). Test-PimOffboardExecutionAllowed
@@ -71,32 +71,17 @@ function Write-PimApprovalAuditMiss {
 # identical copies today; the serialized GUI-wiring pass will collapse the Manager
 # onto these shared definitions. Defined only if not already present (idempotent;
 # never clobbers a host that already provides them).
-if (-not (Get-Command Get-PimBreakGlassIdentifiers -ErrorAction SilentlyContinue)) {
-    function Get-PimBreakGlassIdentifiers {
-        # Break-glass / emergency principals to NEVER auto-revoke/offboard. Identifiers
-        # may be UPNs and/or object (principal) ids; matching is case-insensitive.
-        # Sourced from $global:PIM_BreakGlassAccounts (string[] or ';'/',' separated
-        # string) or $env:PIM_BREAKGLASS_ACCOUNTS. Returns a lowercase string[].
-        $raw = $global:PIM_BreakGlassAccounts
-        if (-not $raw -and "$env:PIM_BREAKGLASS_ACCOUNTS") { $raw = "$env:PIM_BREAKGLASS_ACCOUNTS" }
-        if (-not $raw) { return @() }
-        $list = if ($raw -is [string]) { $raw -split '[;,]' } else { @($raw) }
-        return @($list | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
-    }
-}
-if (-not (Get-Command Test-PimRowIsBreakGlass -ErrorAction SilentlyContinue)) {
-    function Test-PimRowIsBreakGlass {
-        # TRUE when the row's principalId/UPN/label matches a configured break-glass id.
-        param([Parameter(Mandatory)]$Row, [string[]]$Identifiers)
-        if (-not $Identifiers -or $Identifiers.Count -eq 0) { return $false }
-        $cand = @()
-        foreach ($k in 'principalId','principal','principalUpn','principalName','target','UserPrincipalName','Username') {
-            $p = $Row.PSObject.Properties[$k]
-            if ($p -and "$($p.Value)".Trim()) { $cand += "$($p.Value)".Trim().ToLowerInvariant() }
-        }
-        foreach ($c in $cand) { if ($Identifiers -contains $c) { return $true } }
-        return $false
-    }
+# IMP-39 (§33.28): Get-PimBreakGlassIdentifiers / Test-PimRowIsBreakGlass have ONE definition,
+# PIM-BreakGlassAccounts.ps1 -- the list is pim.Settings['BreakGlassAccounts'] unioned with the legacy
+# global/env, and an unreadable store makes every row read as break-glass (fail safe).
+if (-not (Get-Command Get-PimBreakGlassAccountList -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-BreakGlassAccounts.ps1') }
+# 🔴 BUG-189 (§33.28): the offboard gate's GATE 3 (the DisableGuard composite) must apply in EVERY host,
+# not only in a host that happened to load the guard first. Load it here, so whether an approved offboard
+# is allowed can never depend on load order (the Manager's lazy Import-Module of PIM-Functions.psm1 used
+# to be what switched it on). Anything v1 enforced is ON by default in v2.
+if (-not (Get-Command Test-PimDisablePassAllowed -ErrorAction SilentlyContinue)) {
+    $__dgLib = Join-Path $PSScriptRoot 'PIM-DisableGuard.ps1'
+    if (Test-Path -LiteralPath $__dgLib) { . $__dgLib }
 }
 if (-not (Get-Command Get-PimRevokeGuardPlan -ErrorAction SilentlyContinue)) {
     function Get-PimRevokeGuardPlan {
@@ -369,56 +354,38 @@ function Test-PimApprovalApprovedFor {
     return $null
 }
 
-# ---- persistence adapter (settings/SQL store; JSON-file + in-mem fallback) ---
-# Mirrors PIM-Scheduler's run-history chain: prefer Set/Get-PimSetting (SQL
-# pim.Settings when wired), else a JSON file, else in-process. PS 5.1 ConvertFrom-Json
-# array-collapse is avoided via the temp-then-@() idiom.
-$script:PimApprovalRequestsMem = $null
-
-function Get-PimApprovalStorePath {
-    # JSON fallback file path (used only when Set/Get-PimSetting is not loaded). Derived
-    # from $global:PIM_ApprovalStatePath, else the scheduler state dir, else $env:TEMP.
-    if ("$($global:PIM_ApprovalStatePath)".Trim()) { return "$($global:PIM_ApprovalStatePath)" }
-    if ("$($global:PIM_SchedulerStatePath)".Trim()) {
-        $dir = Split-Path -Parent $global:PIM_SchedulerStatePath
-        if (-not $dir) { $dir = '.' }
-        return (Join-Path $dir 'pim-approval-requests.json')
+# ---- persistence adapter (SQL pim.Settings ONLY) -----------------------------
+# 🔴 IMP-41 (§33.28): this used to chain SQL -> a JSON FILE -> process memory. PIM v2 is SQL-only: a
+# file inside a container dies with the replica, and an in-memory approval dies with the process, so
+# both "fallbacks" turned a store failure into an approval that silently evaporated (or, worse, one
+# that existed in one replica and not the other). There is no fallback any more:
+#   * READ  -- no store, or a store that throws, THROWS. Every gate here already fails CLOSED on a
+#              missing approval; now it also fails LOUD, so "unreadable" is never shown as "none".
+#   * WRITE -- no store, or a store that rejects the write, THROWS. A maker/checker decision that was
+#              not persisted must never be reported as made.
+# The store is Get-/Set-PimSetting -- the SQL bridge every host defines over pim.Settings (the Manager's
+# Get-PimManagerSetting, the tick's Get-PimSqlSetting bridge). PS 5.1 ConvertFrom-Json array-collapse
+# is avoided via the temp-then-@() idiom.
+function Assert-PimApprovalStoreWired {
+    [CmdletBinding()] param([ValidateSet('read','write')][string]$For = 'read')
+    $cmd = if ($For -eq 'write') { 'Set-PimSetting' } else { 'Get-PimSetting' }
+    if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
+        throw "approval store unavailable: no SQL store (pim.Settings) is wired in this host, so approval requests cannot be $(if ($For -eq 'write') { 'saved' } else { 'read' }) (PIM v2 keeps approvals in SQL only)"
     }
-    # 🔴 NOT $env:TEMP -- IT IS EMPTY IN A LINUX CONTAINER, AND Join-Path THROWS ON EMPTY.
-    # This code ships inside the pim-manager image and runs on Linux (the ACA Manager, the tick
-    # Job, the S5/S6 downlink Job). $env:TEMP is a Windows convention; on Linux it is simply not
-    # set, so `Join-Path $env:TEMP 'x'` fails with
-    #     Cannot bind argument to parameter 'Path' because it is an empty string
-    # -- a message that names neither this function nor a temp directory, so it reads as a bug
-    # anywhere but here. [IO.Path]::GetTempPath() is the cross-platform form: it honours TEMP on
-    # Windows and returns /tmp on Linux.
-    $tmp = if ("$env:TEMP".Trim()) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
-    return (Join-Path $tmp 'pim-approval-requests.json')
 }
 
 function Get-PimApprovalRequests {
     # All approval requests (newest first). Optional filters: -Status, -Action, -Target.
+    # THROWS when the store is missing or unreadable (IMP-41) -- never an empty list in its place.
     [CmdletBinding()]
     param([string]$Status, [string]$Action, [string]$Target)
-    $all = $null
-    # IMP-03: a read that THROWS is remembered and reported only if the whole chain
-    # then yields nothing. An empty approval list is not neutral -- every gate here
-    # fails CLOSED on it, so an unreadable store looks exactly like "this action was
-    # never approved". Failing closed is right; doing it without a trace is not.
-    $readErr = $null
-    if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
-        try { $v = Get-PimSetting -Name $script:PimApprovalSettingName; if ($v) { $tmp = if ($v -is [string]) { $v | ConvertFrom-Json } else { $v }; $all = @($tmp) } } catch { $readErr = $_ }
-    }
-    if ($null -eq $all) {
-        $p = Get-PimApprovalStorePath
-        if ($p -and (Test-Path -LiteralPath $p)) { try { $tmp = (Get-Content -LiteralPath $p -Raw -Encoding UTF8) | ConvertFrom-Json; $all = @($tmp) } catch { $readErr = $_ } }
-    }
-    if ($null -eq $all) {
-        if ($readErr -and (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue)) {
-            Write-PimSwallowed -Scope 'approval-store-read' -ErrorRecord $readErr `
-                -Consequence 'approval requests fall back to the in-process list -- a persisted approval may be invisible, and every gate fails CLOSED on a missing approval'
-        }
-        $all = @($script:PimApprovalRequestsMem)
+    Assert-PimApprovalStoreWired -For read
+    $all = @()
+    try {
+        $v = Get-PimSetting -Name $script:PimApprovalSettingName
+        if ($v) { $tmp = if ($v -is [string]) { $v | ConvertFrom-Json } else { $v }; $all = @($tmp) }
+    } catch {
+        throw "approval store unreadable: pim.Settings['$($script:PimApprovalSettingName)'] could not be read -- $($_.Exception.Message)"
     }
     $all = @(@($all) | Where-Object { $_ })
     if ("$Status".Trim()) { $all = @($all | Where-Object { "$($_.status)" -eq "$Status" }) }
@@ -428,37 +395,15 @@ function Get-PimApprovalRequests {
 }
 
 function Save-PimApprovalRequests {
-    # Persist the full request list via the same chain (SQL setting -> JSON file -> mem).
+    # Persist the full request list to SQL pim.Settings. THROWS when the store is missing or rejects
+    # the write (IMP-41): the caller's transition (create / approve / deny / execute) then fails
+    # visibly instead of living on in a file or in memory.
     [CmdletBinding()] param([object[]]$Requests = @())
-    $script:PimApprovalRequestsMem = @($Requests)
-    $json = (@($Requests) | ConvertTo-Json -Depth 12)
-    if ($null -eq $json) { $json = '[]' }
-    # IMP-03: the SQL write failing and the file write catching it is a working
-    # fallback -- silent by design. BOTH failing is not: the decision then exists
-    # only in this process's memory and dies with it, and the caller is told nothing.
-    $writeErr = $null
-    if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { try { Set-PimSetting -Name $script:PimApprovalSettingName -Value $json | Out-Null; return } catch { $writeErr = $_ } }
-    $p = Get-PimApprovalStorePath
-    $persisted = $false
-    if ($p) {
-        # BUG-07: this New-Item was OUTSIDE the try. Under $ErrorActionPreference='Stop'
-        # (which the Manager and engine set) an uncreatable store directory made
-        # Save-PimApprovalRequests THROW -- and every caller here (Add-, Resolve-, Set-
-        # ...Executed) calls it unguarded, so an approve/deny/execute became an
-        # exception instead of degrading down the documented
-        # "SQL setting -> JSON file -> in-mem last resort" chain. The in-mem last
-        # resort could never be reached, which is the one thing it exists for.
-        $dir = Split-Path -Parent $p
-        try {
-            if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
-            Set-Content -LiteralPath $p -Value $json -Encoding UTF8 -ErrorAction Stop
-            $persisted = $true
-        } catch { $writeErr = $_ }
-    }
-    if (-not $persisted -and (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue)) {
-        Write-PimSwallowed -Scope 'approval-store-write' -ErrorRecord $writeErr `
-            -Consequence 'approval state kept IN MEMORY ONLY -- it is lost when this process ends, and a granted approval will read as never granted'
-    }
+    Assert-PimApprovalStoreWired -For write
+    $json = ConvertTo-Json -InputObject @(@($Requests) | Where-Object { $_ }) -Depth 12
+    if (-not $json -or $json -eq 'null') { $json = '[]' }
+    try { Set-PimSetting -Name $script:PimApprovalSettingName -Value $json | Out-Null }
+    catch { throw "approval store write FAILED: pim.Settings['$($script:PimApprovalSettingName)'] was NOT updated, so this approval change was NOT saved -- $($_.Exception.Message)" }
 }
 
 function Add-PimApprovalRequest {
@@ -595,31 +540,56 @@ function Test-PimOffboardExecutionAllowed {
     if (-not $appr) {
         return [pscustomobject]@{ allowed = $false; gate = 'no-approval'; reason = "no Approved (in-window, un-executed) offboard request for '$Target' -- maker/checker approval is required"; approval = $null }
     }
-    # GATE 2 -- break-glass exclusion (never bypassed, even with approval).
-    if (Get-Command Get-PimBreakGlassIdentifiers -ErrorAction SilentlyContinue) {
-        $bg = @(Get-PimBreakGlassIdentifiers)
-        $row = [pscustomobject]@{ principalId = "$Target"; principal = "$Target"; principalUpn = "$Target"; principalName = "$Target" }
-        if ((Get-Command Test-PimRowIsBreakGlass -ErrorAction SilentlyContinue) -and (Test-PimRowIsBreakGlass -Row $row -Identifiers $bg)) {
-            return [pscustomobject]@{ allowed = $false; gate = 'break-glass'; reason = "'$Target' is a protected break-glass/emergency account -- excluded from offboarding"; approval = $appr }
+    # GATE 2 -- break-glass exclusion (never bypassed, even with approval). IMP-39: the list is
+    # SQL-backed; an unreadable list makes EVERY target read as break-glass, so this holds (fail safe).
+    # A runtime without the predicate cannot prove the target is safe -> refused, never skipped.
+    if (-not (Get-Command Get-PimBreakGlassIdentifiers -ErrorAction SilentlyContinue) -or -not (Get-Command Test-PimRowIsBreakGlass -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ allowed = $false; gate = 'break-glass-unverifiable'; reason = "cannot verify that '$Target' is not a break-glass account in this runtime (the break-glass predicate is not loaded) -- refusing"; approval = $appr }
+    }
+    $bg = @(Get-PimBreakGlassIdentifiers)
+    $row = [pscustomobject]@{ principalId = "$Target"; principal = "$Target"; principalUpn = "$Target"; principalName = "$Target" }
+    if (Test-PimRowIsBreakGlass -Row $row -Identifiers $bg) {
+        if ($bg -contains '<break-glass-list-unreadable>') {
+            return [pscustomobject]@{ allowed = $false; gate = 'break-glass-unverifiable'; reason = "the break-glass account list could not be read from the store, so '$Target' cannot be confirmed as NOT break-glass -- refusing the offboard until it can"; approval = $appr }
         }
+        return [pscustomobject]@{ allowed = $false; gate = 'break-glass'; reason = "'$Target' is a protected break-glass/emergency account -- excluded from offboarding"; approval = $appr }
     }
     # GATE 3 -- the DisableGuard composite (circuit breaker / env / desired) -- NOT bypassed.
-    if (Get-Command Test-PimDisablePassAllowed -ErrorAction SilentlyContinue) {
-        $d = Test-PimDisablePassAllowed -ToDisable $ToDisable -Scanned $Scanned -Desired $Desired -DesiredResolved $DesiredResolved -FeatureOverride $FeatureOverride
-        if (-not $d.allowed) {
-            # BUG-01: the breaker tripping must be LOUD on every path, not just the engine's.
-            # This is an execution path (guard B, immediately before the offboard sequence
-            # runs), never a preview -- so the alert fires only on a real attempt that was
-            # stopped. Wrapped: blocking the offboard is the SAFE outcome, so a failing
-            # alert (mail down, audit unwritable) must never turn it into an exception --
-            # telling the operator is best-effort, stopping the offboard is not.
-            try {
-                if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) {
-                    Write-PimDisableAbortAlert -Scope ("offboard:" + "$Target") -Decision $d
-                }
-            } catch { Write-Warning "offboard gate: abort alert failed to send -- $($_.Exception.Message)" }
-            return [pscustomobject]@{ allowed = $false; gate = ("disable-guard:" + "$($d.tripped)"); reason = ("disable safety guard blocked the offboard: " + "$($d.reason)"); approval = $appr }
-        }
+    # 🔴 BUG-189 (§33.28): this gate used to apply only when Test-PimDisablePassAllowed HAPPENED to be
+    # loaded. The Manager does not load the guard file itself, but its lazy Import-Module of
+    # PIM-Functions.psm1 does, so the same approved offboard was allowed or refused depending on which
+    # page an operator had opened first. It is now ALWAYS evaluated (this file loads the guard -- see the
+    # top), and a runtime without it refuses instead of skipping.
+    # It is evaluated with the EXPLICIT-disable semantics (Test-PimExplicitDisablePassAllowed), because
+    # an approved offboard IS an explicit, named, per-row disable -- the same one v1 honoured on every run:
+    #   * G3 defaults ON for it; an EXPLICIT PIM_AccountDisableEnabled=false still refuses it;
+    #   * G2 keeps the ABSOLUTE cap and drops the population percentage (1 of 8 admins is 12.5%);
+    #   * G1: the named, approved target IS the positively-identified set for a single-target action,
+    #     so an empty -Desired is not "unresolved" -- but a caller that SAYS the read failed
+    #     (-DesiredResolved:$false) is still refused.
+    if (-not (Get-Command Test-PimDisablePassAllowed -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ allowed = $false; gate = 'disable-guard:unavailable'; reason = 'the account-disable safety guard is not loaded in this runtime -- refusing rather than skipping it'; approval = $appr }
+    }
+    $g3Desired = @(@($Desired) | Where-Object { $null -ne $_ })
+    if ($g3Desired.Count -eq 0 -and -not ($null -ne $DesiredResolved -and -not $DesiredResolved)) {
+        $g3Desired = @([pscustomobject]@{ UserPrincipalName = "$Target" })
+    }
+    $g3Feature = $FeatureOverride
+    if ($null -eq $g3Feature -and (Get-Command Resolve-PimExplicitDisableOverride -ErrorAction SilentlyContinue)) { $g3Feature = Resolve-PimExplicitDisableOverride }
+    $d = Test-PimDisablePassAllowed -ToDisable $ToDisable -Scanned $Scanned -Desired $g3Desired -DesiredResolved $DesiredResolved -FeatureOverride $g3Feature -MaxPercent 0
+    if (-not $d.allowed) {
+        # BUG-01: the breaker tripping must be LOUD on every path, not just the engine's.
+        # This is an execution path (guard B, immediately before the offboard sequence
+        # runs), never a preview -- so the alert fires only on a real attempt that was
+        # stopped. Wrapped: blocking the offboard is the SAFE outcome, so a failing
+        # alert (mail down, audit unwritable) must never turn it into an exception --
+        # telling the operator is best-effort, stopping the offboard is not.
+        try {
+            if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) {
+                Write-PimDisableAbortAlert -Scope ("offboard:" + "$Target") -Decision $d
+            }
+        } catch { Write-Warning "offboard gate: abort alert failed to send -- $($_.Exception.Message)" }
+        return [pscustomobject]@{ allowed = $false; gate = ("disable-guard:" + "$($d.tripped)"); reason = ("disable safety guard blocked the offboard: " + "$($d.reason)"); approval = $appr }
     }
     return [pscustomobject]@{ allowed = $true; gate = $null; reason = 'approved + within all safety gates'; approval = $appr }
 }

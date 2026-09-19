@@ -26,13 +26,16 @@
   certificates and none of their private keys are available locally to sign the addKey proof.
 
 .PARAMETER KeyVaultName
-  When given, the new thumbprint is written to `Modern-Thumbprint` so onboarding and
-  Setup-PimContainers pick the certificate up (certificate is PREFERRED over the client secret).
+  When given, the new thumbprint is written to `Modern-Thumbprint` so onboarding and the
+  host-side deploy steps authenticate the engine SPN with this certificate.
 
 .NOTES
-  The certificate is created in the LOCAL store; only the PUBLIC key is uploaded. A container cannot
-  use a store certificate, which is why the hosted path still falls back to the client secret --
-  this script serves the VM / mgmt-box path and any future cert-capable host.
+  The certificate is created in the LOCAL store; only the PUBLIC key is uploaded. It serves the
+  hosts that authenticate AS the engine SPN (a VM engine, a management host running deploy or
+  troubleshooting steps). DOC-17 l: it no longer says a client secret is "preferred against" or
+  "fallen back to" -- the HOSTED engine does not use this SPN's credentials at all: the containers
+  run as their MANAGED IDENTITY (no certificate and no secret in the container). The certificate is
+  the credential for everything this script serves; a client secret is never required by it.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -210,7 +213,7 @@ if ($result.ok -and "$KeyVaultName".Trim() -and "$BootstrapAppId".Trim() -and "$
             $kvTok = Get-PimRestToken -Resource 'https://vault.azure.net' -TenantId $TenantId -ClientId $BootstrapAppId -CertThumbprint $BootstrapThumbprint -Force
             Invoke-RestMethod -Method PUT -Uri "https://$KeyVaultName.vault.azure.net/secrets/Modern-Thumbprint`?api-version=7.4" `
                 -Headers @{Authorization="Bearer $kvTok"; 'Content-Type'='application/json'} -Body (@{ value=$cert.Thumbprint }|ConvertTo-Json) | Out-Null
-            Note "Modern-Thumbprint updated in $KeyVaultName -- the deploy path prefers the certificate over the secret" 'Green'
+            Note "Modern-Thumbprint updated in $KeyVaultName -- host-side steps authenticating as the engine SPN use this certificate" 'Green'
         } catch { Note "could not write Modern-Thumbprint: $(($_.Exception.Message -split "`n")[0])" 'Yellow' }
     }
 }

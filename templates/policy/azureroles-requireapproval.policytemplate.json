@@ -1,0 +1,44 @@
+{
+  "id": "AzureRoles_RequireApproval",
+  "name": "Azure resource roles -- approval required (high-privilege)",
+  "appliesTo": "AzureRole",
+  "extends": "AzureRoles_Standard",
+  "_origin": "Added 2026-09-19 with AzureRoles_Standard. Until then an Azure role that needed approval had to name EntraIDRoles_RequireApproval; this template carries exactly the same rules (Enablement, Approval, Notification), so a row that moves from that one to this one changes nothing in the tenant.",
+  "description": "For high-privilege Azure resource roles (Owner, User Access Administrator, Role Based Access Control Administrator at a management group or subscription, and similar): inherits the AzureRoles_Standard baseline and additionally requires an APPROVAL to activate. Activation therefore needs MFA + Justification AND an approver -- that combination, not an MFA rule on the admin path, is what actually protects a high-privilege role. Approvers: the ApproverUpns column on the PIM-Assignments-Azure-Resources row (pipe/;/, separated) when any row for that (scope, role) sets it; otherwise the OWNERS of every group assigned that role at that scope (Owners, else SponsorUpn, else the department's owners -- the same chain as a group's own approval). When neither resolves anybody, the engine writes NOTHING for that policy and reports AZ-POLICY-NO-APPROVER rather than switching on an approval nobody can grant. Mode Serial means the first approver decides and it escalates to the next after escalationHours, switch to Parallel for any-one-wins. Admin-Eligibility carries Justification (a human approver is in the loop, as on Groups_RequireApproval and EntraIDRoles_RequireApproval); neither admin path requires MFA and Admin-Assignment stays empty, for the BUG-21 reason recorded in AzureRoles_Standard. Expiration is inherited: activation PT8H, eligibility and admin assignment P365D.",
+  "rules": {
+    "Enablement": {
+      "EndUser_Assignment": ["MultiFactorAuthentication", "Justification"],
+      "Admin_Eligibility":  ["Justification"],
+      "Admin_Assignment":   []
+    },
+    "Approval": { "mode": "Serial", "approversSource": "ApproverUpns", "escalationHours": 4 },
+    "_notificationV1": "PARITY AUDIT #5 (2026-09-13): this template defines its own Notification list (single-level extends replaces the whole key), so it repeats v1's NINE rules first (CSV L615-694, same on/off values as EntraIDRoles_Standard). The two entries after them override by rule id when they resolve.",
+    "Notification": [
+      { "recipientType": "Admin",     "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Requestor", "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "Admin",   "level": "Eligibility", "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Admin",     "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Requestor", "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "Admin",   "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Admin",     "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      { "recipientType": "Requestor", "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
+      { "recipientType": "Approver",  "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true },
+      {
+        "recipientType": "Approver",
+        "level": "Assignment",
+        "notificationLevel": "All",
+        "defaultRecipientsEnabled": true,
+        "_noExplicitApproverRecipients": "🔴 NEVER ADD `recipientsSource` OR `recipients` HERE. AN EXPLICIT APPROVER RECIPIENT WRITE-LOCKS THE WHOLE POLICY, SILENTLY. Measured 2026-08-11 on a throwaway custom role in an isolated test tenant, all four combinations on a clean policy: defaults=true + no recipients -> writeable; defaults=false + no recipients -> writeable; defaults=TRUE + 2 recipients -> LOCKED; defaults=false + 2 recipients -> LOCKED. So the trigger is the NON-EMPTY RECIPIENT LIST ALONE and isDefaultRecipientsEnabled is irrelevant to it. The setting PATCH is ACCEPTED -- nothing fails at the time -- and from then on Entra refuses EVERY per-rule PATCH on that policy with 400 ActivationCustomApproversNotEmpty ('The activation custom approvers should be empty'), including rules that have nothing to do with approval (proven with Expiration_EndUser_Assignment) and including the PATCH that would remove the recipients. Entra treats an explicit Approver-notification recipient list AS the policy's 'activation custom approvers'. Recovery is PATCH /policies/roleManagementPolicies/{policyId} with a `rules` collection setting this rule back to an EMPTY recipient list -- the whole-policy route stays open when every /rules/{ruleId} route is refused. This template previously carried recipientsSource=ApproverUpns, which is precisely what locked a production role's policy (BUG-56) and then made that role the only one of 96 that could not receive template updates. Guarded by tests/Test-PimPolicyTemplateSatisfiable.ps1.",
+        "_why": "This rule therefore does only ONE thing: it keeps Entra's DEFAULT approver routing switched on, so the people who can approve are told there is something to approve. An approval nobody is told about is an outage, not a control. Naming the approvers as EXPLICIT recipients would be the stronger guarantee -- who-gets-told could not then diverge from who-can-approve -- and it is simply not available: see _noExplicitApproverRecipients. Default routing is what Entra offers here, and it is used deliberately rather than by omission."
+      },
+      {
+        "recipientType": "Admin",
+        "level": "Assignment",
+        "notificationLevel": "All",
+        "defaultRecipientsEnabled": false,
+        "recipientsSource": "NotifyUpns",
+        "_restored": "RESTORED 2026-08-11 (operator go-ahead). This rule was dropped from this template on 2026-08-10 because PATCHing Notification_Admin_EndUser_Assignment appeared to be refused with 400 ActivationCustomApproversNotEmpty whenever the role had custom approvers. That measurement was taken on the one production role whose policy was WRITE-LOCKED at the time (BUG-56), and a write-locked policy refuses EVERY rule PATCH -- so the refusal said nothing about this rule. Re-measured on a HEALTHY approval-enabled policy (throwaway custom role with a real custom approver group, isolated test tenant): the identical PATCH was ACCEPTED and the policy stayed writeable afterwards. The operator's 'activation notices must not go to every Global Administrator' rule therefore applies to approval roles too, which is where it matters most. Same opt-in shape as EntraIDRoles_Standard: recipients come from the NotifyUpns column and the provider SKIPS the rule entirely when NotifyUpns resolves to nothing, so a role with no declared audience keeps Entra's current behaviour rather than being switched to mailing nobody. Note this is the ADMIN recipient type -- defaultRecipientsEnabled=false is safe here and is NOT the poisoning pair, which only applies to the APPROVER rule above (measured separately, both directions)."
+      }
+    ]
+  }
+}

@@ -621,47 +621,137 @@ function Resolve-PimIntakeRouting {
     return [pscustomobject]@{ route = 'approve'; reason = "type '$type' not allowlisted -- human approval required" }
 }
 
-# ---- store-and-forward broker (file/SQL adapter; JSONL drop store now) ----------
-function Read-PimIntakeStore {
-    # Read pending intake records the external workflow has dropped (append-only JSONL,
-    # one record/line). Returns @() when the store does not exist. Storage-agnostic: the
-    # SQL adapter lands with the data layer; this file form proves the polling model.
-    param([Parameter(Mandatory)][string]$StoreFile)
-    if (-not (Test-Path -LiteralPath $StoreFile)) { return @() }
-    $out = New-Object System.Collections.Generic.List[object]
-    foreach ($line in (Get-Content -LiteralPath $StoreFile -Encoding UTF8)) {
-        if (-not "$line".Trim()) { continue }
-        try { $out.Add(("$line" | ConvertFrom-Json)) } catch {}
+# ---- store-and-forward broker: SQL pim.Settings['IntakeRequests'] ONLY ----------
+# 🔴 BUG-211 (§33.28): the drop store was a JSONL FILE ($global:PIM_IntakeStoreFile) -- a file PIM v2 does not have
+# in a container -- and the job returned ran=$true with routing DECISIONS that nothing acted on: an 'approve' never
+# became a request and an 'auto-apply' never became a change. Now:
+#   * the drop store is pim.Settings['IntakeRequests'] (Add-PimIntakeRecord appends; the store THROWS on failure);
+#   * Invoke-PimIntakeProcess ACTS on every received record and records the outcome ON the record, so a record is
+#     processed exactly once: 'reject' -> status rejected (+reason); 'approve' / 'auto-apply' -> a PENDING proposal in
+#     pim.ChangeQueue (de-duplicated) that an operator reviews and commits in Pending changes -> status queued.
+#     🔒 'auto-apply' is NOT committed by the machine: §65.7 -- origin never grants the right to apply, the commit does.
+#     The allowlist only changes the reason text ("allowlisted") so a reviewer can bulk-commit with confidence;
+#   * a request type PIM cannot map to a desired-state row -> status unsupported (+reason), and the job says so.
+# The integration is "configured" when the setting 'IntakeEnabled' is true. Resolution order:
+#   1. $global:PIM_IntakeEnabled (a runtime override: tests, a launcher);
+#   2. pim.Settings['IntakeEnabled'] (THE v2 home -- the store both containers read; true/false, or {"enabled":true});
+#   3. the policy value (Get-PimPolicySetting: the naming config key, or env PIM_IntakeEnabled on the container).
+# 🔴 §33.28 integration: this comment used to say "pim.Settings", but nothing read pim.Settings -- the only ways to turn
+# the intake on in a hosted tick were an env var or a config key. A store that cannot be read leaves the integration
+# OFF and says so (the job then reports "not enabled", never a silent drain of a store it cannot see).
+function Test-PimIntakeConfigured {
+    [CmdletBinding()] param()
+    if ($null -ne $global:PIM_IntakeEnabled -and "$($global:PIM_IntakeEnabled)".Trim()) { return ("$($global:PIM_IntakeEnabled)".Trim() -match '^(?i)(true|1|yes|on)$') }
+    if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
+        $sv = $null
+        try { $sv = Get-PimSetting -Name 'IntakeEnabled' }
+        catch { Write-Warning "[intake] pim.Settings['IntakeEnabled'] could not be read ($($_.Exception.Message)) -- ServiceNow intake stays OFF this run."; return $false }
+        if ($null -ne $sv) {
+            if ($sv -is [bool]) { return [bool]$sv }
+            if ($sv.PSObject -and $sv.PSObject.Properties['enabled']) { $sv = $sv.enabled }
+            if ("$sv".Trim()) { return ("$sv".Trim() -match '^(?i)(true|1|yes|on)$') }
+        }
     }
-    return $out.ToArray()
+    if (Get-Command Get-PimPolicySetting -ErrorAction SilentlyContinue) {
+        try { $v = Get-PimPolicySetting -Name 'IntakeEnabled' -Default $null; if ($null -ne $v) { return ("$v".Trim() -match '^(?i)(true|1|yes|on)$') } } catch { }
+    }
+    return $false
+}
+
+function Get-PimIntakeRequests {
+    # All intake records in the drop store. THROWS when no store is wired or it cannot be read.
+    [CmdletBinding()] param()
+    if (-not (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) { throw 'intake store unavailable: no SQL settings store (Get-PimSetting) is wired -- PIM v2 keeps intake requests in SQL only' }
+    $v = Get-PimSetting -Name 'IntakeRequests'
+    if ($null -eq $v) { return @() }
+    if ($v -is [string]) { if (-not "$v".Trim()) { return @() }; $v = $v | ConvertFrom-Json }
+    return @(@($v) | Where-Object { $null -ne $_ })
+}
+
+function Save-PimIntakeRequests {
+    [CmdletBinding()] param([object[]]$Records = @())
+    if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { throw 'intake store unavailable: no SQL settings store (Set-PimSetting) is wired' }
+    $json = ConvertTo-Json -InputObject @(@($Records) | Where-Object { $null -ne $_ }) -Depth 8 -Compress
+    if (-not $json -or $json -eq 'null') { $json = '[]' }
+    Set-PimSetting -Name 'IntakeRequests' -Value $json
 }
 
 function Add-PimIntakeRecord {
-    # Append a sanitised intake record to the drop store (what the EXTERNAL side would do;
-    # also used by the Manager to mark a record processed by re-writing the store).
-    param([Parameter(Mandatory)][string]$StoreFile, [Parameter(Mandatory)][object]$Record)
-    $dir = Split-Path -Parent $StoreFile
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    [System.IO.File]::AppendAllText($StoreFile, (($Record | ConvertTo-Json -Depth 8 -Compress) + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+    # Append a SANITISED intake record to the drop store (what the external side does). THROWS on a store failure.
+    param([Parameter(Mandatory)][object]$Record)
+    $clean = ConvertTo-PimIntakeRecord -Payload $Record
+    if (-not $clean) { throw 'intake record refused: requestType and requestor are mandatory' }
+    Save-PimIntakeRequests -Records (@(Get-PimIntakeRequests) + @($clean))
+    return $clean
 }
 
 function Invoke-PimIntakePoll {
-    # PURE-ish orchestration (no network, no apply): read the store, sanitise + route
-    # every pending record, and return the routing decisions. The CALLER turns an
-    # 'approve' into a New-PimApprovalRequest / approval mail and an 'auto-apply' into a
-    # change-queue entry -- this function never mutates anything itself, so it is safe to
-    # poll repeatedly and fully testable. Records already carrying a non-'received' status
-    # are skipped (idempotent).
-    param([Parameter(Mandatory)][string]$StoreFile, [datetime]$NowUtc = [datetime]::UtcNow, [string[]]$AutoApplyTypes)
+    # PURE routing over records (no store, no apply): sanitise + route every RECEIVED record. Records already
+    # carrying a non-'received' status are skipped (idempotent). -Records defaults to the SQL drop store.
+    param([object[]]$Records, [datetime]$NowUtc = [datetime]::UtcNow, [string[]]$AutoApplyTypes)
+    if (-not $PSBoundParameters.ContainsKey('Records')) { $Records = @(Get-PimIntakeRequests) }
     $results = New-Object System.Collections.Generic.List[object]
-    foreach ($raw in @(Read-PimIntakeStore -StoreFile $StoreFile)) {
+    foreach ($raw in @($Records)) {
+        if ($null -eq $raw) { continue }
         $st = (Get-PimNotifyField -Item $raw -Name 'status')
         if ($st -and $st -ne 'received') { continue }
-        # re-sanitise on the way in even if the producer already shaped it
         $rec = ConvertTo-PimIntakeRecord -Payload $raw -NowUtc $NowUtc
-        if (-not $rec) { $results.Add([pscustomobject]@{ route = 'reject'; reason = 'malformed record'; record = $raw }); continue }
+        if (-not $rec) { $results.Add([pscustomobject]@{ route = 'reject'; reason = 'malformed record'; record = $raw; source = $raw }); continue }
         $route = Resolve-PimIntakeRouting -Record $rec -AutoApplyTypes $AutoApplyTypes
-        $results.Add([pscustomobject]@{ route = $route.route; reason = $route.reason; record = $rec })
+        $results.Add([pscustomobject]@{ route = $route.route; reason = $route.reason; record = $rec; source = $raw })
     }
     return $results.ToArray()
+}
+
+function ConvertTo-PimIntakeChange {
+    # PURE-ish: an accepted intake record -> the desired-state row it asks for, or $null when PIM cannot map the
+    # request type. Supported: an admin into a PIM group (group-add / delegation-request / group-membership /
+    # admin-group-assignment) -> PIM-Assignments-Admins { Username; GroupTag; AssignmentType=Eligible }.
+    param([Parameter(Mandatory)][object]$Record, [string]$Justification = '')
+    $type = (Get-PimNotifyField -Item $Record -Name 'requestType').ToLowerInvariant()
+    $who  = (Get-PimNotifyField -Item $Record -Name 'targetAdmin').Trim()
+    $tag  = (Get-PimNotifyField -Item $Record -Name 'groupTag').Trim()
+    if ($type -notin @('group-add','delegation-request','group-membership','admin-group-assignment')) { return $null }
+    if (-not $who -or -not $tag) { return $null }
+    $row = [pscustomobject]@{ Username = $who; GroupTag = $tag; AssignmentType = 'Eligible' }
+    $key = if (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue) { Get-PimStoreRowKey -Base 'PIM-Assignments-Admins' -Row $row } else { "$who|$tag" }
+    if (-not "$key".Trim()) { return $null }
+    return (New-PimChange -Entity 'PIM-Assignments-Admins' -Key "$key" -Op Create -Payload $row -By 'servicenow-intake' -Justification $Justification)
+}
+
+function Invoke-PimIntakeProcess {
+    <#
+      BUG-211: poll the SQL drop store and ACT on every received record (see the block comment above). Returns
+      @{ ran; detail; queued; rejected; unsupported; duplicates }. THROWS when the store or the change queue cannot
+      be reached -- the job then FAILS; a record is marked only after its proposal is written.
+    #>
+    [CmdletBinding()] param([datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf, [string[]]$AutoApplyTypes)
+    $all = @(Get-PimIntakeRequests)
+    $decisions = @(Invoke-PimIntakePoll -Records $all -NowUtc $NowUtc -AutoApplyTypes $AutoApplyTypes)
+    $cnt = @{ queued = 0; rejected = 0; unsupported = 0; duplicates = 0 }
+    if (-not $decisions.Count) { return [pscustomobject]@{ ran = $false; nothingDue = $true; detail = ("intake: no new requests ({0} in the store)" -f $all.Count); queued = 0; rejected = 0; unsupported = 0; duplicates = 0 } }
+    if ($WhatIf) { return [pscustomobject]@{ ran = $true; whatIf = $true; detail = ("intake (whatif): {0} new request(s) would be processed" -f $decisions.Count); decisions = $decisions } }
+    $cs = "$($global:PIM_SqlConnectionString)"; if (-not $cs.Trim() -and "$($global:PIM_EngineSqlCs)".Trim()) { $cs = "$($global:PIM_EngineSqlCs)" }
+    foreach ($d in $decisions) {
+        $src = $d.source
+        $mark = @{ status = ''; processedUtc = $NowUtc.ToUniversalTime().ToString('o'); outcome = '' }
+        if ($d.route -eq 'reject') {
+            $mark.status = 'rejected'; $mark.outcome = "$($d.reason)"; $cnt.rejected++
+        } else {
+            $just = "ServiceNow $((Get-PimNotifyField -Item $d.record -Name 'externalId')): $((Get-PimNotifyField -Item $d.record -Name 'justification')) ($($d.reason))".Trim()
+            $ch = ConvertTo-PimIntakeChange -Record $d.record -Justification $just
+            if (-not $ch) {
+                $mark.status = 'unsupported'; $mark.outcome = "request type '$((Get-PimNotifyField -Item $d.record -Name 'requestType'))' (or its targetAdmin/groupTag) cannot be mapped to a desired-state change -- handle it by hand"; $cnt.unsupported++
+            } else {
+                if (-not $cs.Trim() -or -not (Get-Command Add-PimSqlQueueChangeIfAbsent -ErrorAction SilentlyContinue)) { throw 'intake: no SQL change queue is wired -- the request cannot be queued (nothing was marked processed)' }
+                $added = Add-PimSqlQueueChangeIfAbsent -ConnectionString $cs -Change $ch
+                if (-not $added) { $cnt.duplicates++ }
+                $mark.status = 'queued'; $mark.outcome = ("pending change {0}/{1} for review in Pending changes{2}" -f $ch.entity, $ch.key, $(if ($added) { '' } else { ' (already open -- not added again)' })); $cnt.queued++
+            }
+        }
+        foreach ($k in @($mark.Keys)) { $src | Add-Member -NotePropertyName $k -NotePropertyValue $mark[$k] -Force }
+    }
+    Save-PimIntakeRequests -Records $all
+    $detail = ("intake: queued={0} (for review -- never auto-committed) rejected={1} unsupported={2} duplicates={3}" -f $cnt.queued, $cnt.rejected, $cnt.unsupported, $cnt.duplicates)
+    return [pscustomobject]@{ ran = $true; detail = $detail; queued = $cnt.queued; rejected = $cnt.rejected; unsupported = $cnt.unsupported; duplicates = $cnt.duplicates }
 }

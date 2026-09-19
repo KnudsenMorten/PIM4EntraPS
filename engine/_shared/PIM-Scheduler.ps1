@@ -33,13 +33,18 @@ Set-StrictMode -Off
 # post-sync deploy hook (sync/_SyncDeploy.ps1) -- owns code+schema+GUI updates. Do NOT re-add a
 # 'sync-automateit' / 'update' job type here; that re-couples the update to the scheduler.
 # See docs/REQUIREMENTS.md "Update is SEPARATE from the PIM engine + job-scheduler".
-$script:PimJobTypes    = @('queue-apply','engine-delta','engine-full','msp-pull','reminders','escalations','discovery','scheduled-creation','daily-summary','tier-report','servicenow-intake','tenant-cache','verify-convergence','hybrid-ad-apply','active-assignments-snapshot','drift-snapshot')
+$script:PimJobTypes    = @('emergency-override','queue-apply','engine-delta','engine-full','msp-pull','reminders','escalations','discovery','scheduled-creation','daily-summary','tier-report','servicenow-intake','tenant-cache','verify-convergence','hybrid-ad-apply','active-assignments-snapshot','drift-snapshot')
 # 🔒 TICK-ONLY job types: their REAL handler is registered only by tools/pim-scheduler/Start-PimScheduler.ps1 (the
 # Manager initialises the same defaults, which are placeholders). "Run now" in the Manager QUEUES these for the tick
 # instead of running a placeholder in the web process. Operator, 2026-09-14, on verify-convergence: Run now recorded
 # "not implemented" and the job went red. A type added to Start-PimScheduler's registrations belongs here too --
 # tests/Test-PimJobsRunLogs.ps1 derives that set from the script and fails when this list falls behind.
-$script:PimTickOnlyJobTypes = @('engine-delta','engine-full','msp-pull','active-assignments-snapshot','drift-snapshot','verify-convergence','discovery')
+$script:PimTickOnlyJobTypes = @('emergency-override','engine-delta','engine-full','msp-pull','active-assignments-snapshot','drift-snapshot','verify-convergence','discovery')
+# REQ-I + REQ-U (Coverage & gaps page): 'coverage' compares the tenant caches with pim.Rows and stores the report in
+# pim.TenantCache 'coverage-report' (engine/_shared/PIM-Coverage.ps1). Its real handler is registered only by
+# Start-PimScheduler (it may read Power BI / Graph), so it is tick-only: Run now QUEUES it.
+$script:PimJobTypes += 'coverage'
+$script:PimTickOnlyJobTypes += 'coverage'
 function Get-PimTickOnlyJobTypes { @($script:PimTickOnlyJobTypes) }
 $script:PimJobHandlers = @{}      # type -> scriptblock(job, nowUtc, whatIf)
 $script:PimSchedState  = $null    # in-memory fallback for state
@@ -59,6 +64,11 @@ function Get-PimDefaultJobSchedule {
     # cadence so a change commits fast without a whole-tenant pass. Override 'JobSchedule'
     # in config to split finer (per workload, per customer tenant in MSP) or coarser.
     @(
+        # 🔴 BUG-185 (§33.28): the break-glass (emergency) override. FIRST, and due on EVERY tick (interval 1), so an
+        # activation is applied on the very next run -- the Manager kicks the tick on activate -- and an expired override
+        # has its linked approval policy restored before anything else runs. Invoke-PimEmergencyOverrideStep
+        # (PIM-EngineProviders.ps1); with no override it reports "no emergency override is active" and writes nothing.
+        [pscustomobject]@{ name='emergency-override'; type='emergency-override'; intervalMinutes=1;  enabled=$true  }
         [pscustomobject]@{ name='queue-apply';        type='queue-apply';  intervalMinutes=5;    enabled=$true  }
         # BUG-137: 'AdminAccounts' = Admins + AdminMembers. AdminMembers (which admins hold which
         # PIM group) was reached by NOTHING but the daily full-reconcile, so an admin assignment
@@ -110,6 +120,12 @@ function Get-PimDefaultJobSchedule {
         [pscustomobject]@{ name='discovery-entra';    type='discovery'; scope='Entra';   intervalMinutes=1440; enabled=$true  }
         [pscustomobject]@{ name='discovery-azure';    type='discovery'; scope='Azure';   intervalMinutes=1440; enabled=$true  }
         [pscustomobject]@{ name='discovery-powerbi';  type='discovery'; scope='PowerBI'; intervalMinutes=1440; enabled=$true  }
+        # REQ-U wave 2 (design point 6): the WORKLOAD role catalogs. Each reads the live role definitions (Defender XDR: Graph
+        # beta, every role with its full action strings; Intune: v1.0, built-in + custom), stores pim.TenantCache kind
+        # 'workload-roles:<service>' (the Coverage page reads it), and reports roles / Defender action namespaces no pack
+        # knows. A catalog that could NOT be read FAILS the job. Invoke-PimWorkloadRoleDiscoveryJob (PIM-WorkloadRoles.ps1).
+        [pscustomobject]@{ name='discovery-defender'; type='discovery'; scope='Defender'; service='defender'; intervalMinutes=1440; enabled=$true  }
+        [pscustomobject]@{ name='discovery-intune';   type='discovery'; scope='Intune';   service='intune';   intervalMinutes=1440; enabled=$true  }
         [pscustomobject]@{ name='reminders';          type='reminders';       intervalMinutes=720;  enabled=$true  }
         # §13 / #8 (2026-09-12): REPORT ONLY -- which admin rows wait for their ProvisionDate and which
         # TAPs wait for their lead window, read from SQL. Creation itself is delta-admins (Admins
@@ -125,7 +141,7 @@ function Get-PimDefaultJobSchedule {
         # reports that a hybrid worker is required, instead of planning in silence.
         [pscustomobject]@{ name='hybrid-ad-apply';    type='hybrid-ad-apply';  intervalMinutes=60; enabled=$true  }
         # 🔴 OFF BY DEFAULT (operator, 2026-09-10: "it must be disabled by default").
-        # This job can ONLY ever no-op until $global:PIM_IntakeStoreFile names a drop store, which
+        # This job can ONLY ever no-op until ServiceNow intake is ENABLED (setting IntakeEnabled; the drop store is SQL, BUG-211), which
         # is a deliberate integration nobody gets by accident. Shipped enabled, it put a permanent
         # row in every customer's Jobs list for an integration they do not have -- the same
         # complaint that produced BUG-92 ("i see references to failed jobs including servicenow, i
@@ -133,7 +149,7 @@ function Get-PimDefaultJobSchedule {
         # failure); it left the job switched on, so the row never went away.
         # 🔑 A default that can only ever do nothing should be off: a deployment that configures
         # the drop store turns it on, and every other deployment stops carrying it.
-        [pscustomobject]@{ name='servicenow-intake';  type='servicenow-intake'; intervalMinutes=10;   enabled=$false }  # poll the store-and-forward drop store (enable when PIM_IntakeStoreFile is configured)
+        [pscustomobject]@{ name='servicenow-intake';  type='servicenow-intake'; intervalMinutes=10;   enabled=$false }  # poll the store-and-forward drop store (enabled when the IntakeEnabled setting is on)
         [pscustomobject]@{ name='daily-summary';      type='daily-summary';   intervalMinutes=1440; enabled=$true  }
         [pscustomobject]@{ name='tier-report';        type='tier-report';     intervalMinutes=1440; enabled=$true  }
         # Tenant-list cache refresh: pull entra-roles / AUs / PIM-* groups / Azure
@@ -143,7 +159,7 @@ function Get-PimDefaultJobSchedule {
         # 24h freshness window the GUI badge + validator use. The Manager process
         # is read-only on this cache; the SCHEDULER owns the refresh.
         [pscustomobject]@{ name='tenant-cache';       type='tenant-cache';    intervalMinutes=720;  enabled=$true  }
-        # §70.1b option 2 (2026-09-13): the Revoke tab / "Review standing access" / Home expiring-access read.
+        # §70.1b option 2 (2026-09-13): the Revoke tab / "Review current delegations" / Home expiring-access read.
         # It used to run LIVE on the Manager's single request loop (140-170 s under Graph throttling) and froze
         # every user. It now runs HERE and lands in pim.TenantCache kind 'active-assignments'; the Manager only
         # reads that row, and its Refresh button queues a trigger for this job. Operator: a delay of a few hours
@@ -155,6 +171,10 @@ function Get-PimDefaultJobSchedule {
         # §70.22: every 4 h, not hourly -- the plan re-reads the whole tenant and holds the tick lease meanwhile (measured: a full
         # engine pass is 10-25 min on internal). The Drift page's Check now queues a run on demand.
         [pscustomobject]@{ name='drift-snapshot'; type='drift-snapshot'; intervalMinutes=240; enabled=$true }
+        # REQ-I + REQ-U (operator 2026-09-19: "see the difference between existing permission groups fx. against entra roles
+        # ... show gaps/missing roles"): the Coverage & gaps page. Reads caches + pim.Rows (cheap), so every 12 h -- the same
+        # cadence as the tenant-cache job it mostly reads. Check now on the page queues a run on demand.
+        [pscustomobject]@{ name='coverage'; type='coverage'; intervalMinutes=720; enabled=$true }
         # 🔑 THE TRUST JOB (operator, 2026-09-12: "it is critical that we can trust that the
         # delegation is actual deployed into the platform"). Every other job makes a FAILURE
         # visible; this one makes SUCCESS provable. It re-reads LIVE from the tenant and diffs it
@@ -188,7 +208,7 @@ function Disable-PimUnconfiguredIntegrationJobs {
       never reach it. The fix has to live where the schedule is RESOLVED, or it reaches only the
       deployments that did not need it.
 
-      servicenow-intake polls a store-and-forward drop store named by $global:PIM_IntakeStoreFile.
+      servicenow-intake polls the SQL drop store (pim.Settings IntakeRequests) once IntakeEnabled is on (BUG-211: no file).
       Without it the handler can only ever return no-op, so "enabled" is not a preference an
       operator can meaningfully hold -- it is a row in the Jobs list for an integration they do not
       have. That produced BUG-92's complaint ("i see references to failed jobs including
@@ -199,7 +219,7 @@ function Disable-PimUnconfiguredIntegrationJobs {
     param([object[]]$Schedule)
     $out = @()
     foreach ($j in @($Schedule)) {
-        if ($j -and "$($j.type)" -eq 'servicenow-intake' -and -not "$($global:PIM_IntakeStoreFile)".Trim()) {
+        if ($j -and "$($j.type)" -eq 'servicenow-intake' -and -not ($(if (Get-Command Test-PimIntakeConfigured -ErrorAction SilentlyContinue) { Test-PimIntakeConfigured } else { "$($global:PIM_IntakeEnabled)".Trim() -match '^(?i)(true|1|yes|on)$' }))) {
             # Copy, never mutate the caller's object: the stored schedule is also what the GUI
             # renders, and silently rewriting it here would make the GUI disagree with the store.
             $c = $j.PSObject.Copy()
@@ -804,17 +824,98 @@ function Initialize-PimDefaultJobHandlers {
     }
     Register-PimJobHandler -Type 'escalations' -Handler {
         param($job,$now,$whatIf)
-        if (Get-Command Build-PimLifecycleCalendar -ErrorAction SilentlyContinue) {
-            $items = @(); if ($global:PIM_LifecycleItems) { $items = @($global:PIM_LifecycleItems) }
-            $cal = Build-PimLifecycleCalendar -Items $items -NowUtc $now -NotifyLog ($(if ($global:PIM_LifecycleNotifyLog) { $global:PIM_LifecycleNotifyLog } else { @{} }))
-            $due = @($cal.escalations)
-            if ($due.Count -and (Get-Command Send-PimLifecycleEscalations -ErrorAction SilentlyContinue)) {
-                $send = Send-PimLifecycleEscalations -Calendar $cal -RecipientResolver $global:PIM_LifecycleRecipientResolver -NotifyLog ($(if ($global:PIM_LifecycleNotifyLog) { $global:PIM_LifecycleNotifyLog } else { @{} })) -WhatIf:$whatIf
-                $global:PIM_LifecycleNotifyLog = $send.notifyLog
-            }
-            return [pscustomobject]@{ ran=$true; detail="escalations-due=$($due.Count)"; calendar=$cal; whatIf=[bool]$whatIf }
+        # 🔴 BUG-191 (§33.28) -- HOLLOW JOB, the same defect 'reminders' had. It read $global:PIM_LifecycleItems
+        # (nothing sets it), resolved recipients through $global:PIM_LifecycleRecipientResolver (nothing sets it)
+        # and kept its notify log in a process global (lost with every cron process) -- so it reported
+        # ran=true "escalations-due=0" every hour over an empty list. Now:
+        #   * items   -- the DESIRED rows in SQL (Get-PimLifecycleItemsFromStore), exactly as 'reminders';
+        #   * log     -- pim.Settings['LifecycleEscalationLog'], so a stage is sent once and re-sent only on the
+        #                policy's reminder interval, across processes;
+        #   * send    -- Send-PimLifecycleEscalations with its default resolver (sponsor / Alerting recipients),
+        #                every result READ; a stage that reached nobody FAILS the job instead of reading "done".
+        # Cannot read the store -> unimplemented (cannot answer), never "nothing due".
+        # 🔴 2.4.371 LIVE MAIL SAFETY (BUG-191 follow-up; 2.4.370 ran this hourly on ring 1, unattended):
+        #   (a) it honours the Alerting event toggle 'expiring-access' (the same event the 'reminders' job and the
+        #       Manager raise for this mail). OFF -> nothing is read, sent or recorded; the job succeeds, "event disabled".
+        #   (b) the kill switch, the 'alerting.email' feature being off, a recipient not on the allowlist and no sender
+        #       are DELIBERATE operator states (Test-PimMailHoldReason): reported as skipped with the reason, never a
+        #       failed job, and the stage is NOT recorded -- it goes out once mail is enabled.
+        #   (c) NO FIRST-RUN STORM. Until pim.Settings['LifecycleEscalationBaseline'] exists, the run records every stage
+        #       that is ALREADY due as notified without sending (Add-PimLifecycleEscalationSeed), then writes the marker.
+        #       After that only NEW stage transitions (and the capped reminder, PIM-Lifecycle.ps1) are mailed.
+        #   One summary line per run (due / sent / skipped / seeded / failed), so the run is visible in the tick log --
+        #   on ring 1 the 2.4.370 job printed nothing of its own.
+        $say = { param([string]$t) Write-Host ("[scheduler] escalations: " + $t) }
+        foreach ($fn in 'Build-PimLifecycleCalendar','Get-PimLifecycleItemsFromStore','Send-PimLifecycleEscalations','Get-PimLifecycleEscalationLog',
+                        'Get-PimLifecycleEscalationBaseline','Add-PimLifecycleEscalationSeed','Test-PimMailHoldReason','Get-PimJobAlertingConfig') {
+            if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { & $say "not run -- $fn is not loaded"; return [pscustomobject]@{ ran=$false; detail="no-handler:$fn" } }
         }
-        return [pscustomobject]@{ ran=$false; detail='no-handler:Build-PimLifecycleCalendar' }
+        # (a) the event toggle, read from the SAME pim.Settings['Alerting'] the Manager writes.
+        $acs = $null
+        if (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) { try { $acs = Get-PimSqlSettingsConnectionString } catch { $acs = $null } }
+        $acfg = Get-PimJobAlertingConfig -ConnectionString $acs
+        $evOn = $true
+        if ($acfg -and $acfg.events -is [System.Collections.IDictionary] -and $acfg.events.Contains('expiring-access')) { $evOn = [bool]$acfg.events['expiring-access'] }
+        if (-not $evOn) {
+            & $say "event disabled -- the Alerting event 'expiring-access' is OFF; nothing sent, nothing recorded"
+            return [pscustomobject]@{ ran=$false; eventDisabled=$true; whatIf=[bool]$whatIf
+                detail="event disabled -- the Alerting event 'expiring-access' is switched off, so no escalation mail is sent" }
+        }
+        $src = Get-PimLifecycleItemsFromStore -NowUtc $now
+        if (-not $src.ok) {
+            & $say "cannot answer -- $($src.error)"
+            return [pscustomobject]@{ ran=$false; unimplemented=$true; whatIf=[bool]$whatIf
+                detail=("unimplemented:escalations -- {0} (cannot answer, not 'nothing due')" -f $src.error) }
+        }
+        $logMap = $null
+        try { $logMap = Get-PimLifecycleEscalationLog }
+        catch { & $say 'FAILED -- the escalation log could not be read; nothing sent'; throw "[scheduler] escalations: the escalation log (pim.Settings 'LifecycleEscalationLog') could not be read, so NOTHING was sent -- sending without it would repeat every stage: $($_.Exception.Message)" }
+        $baseline = $null
+        try { $baseline = Get-PimLifecycleEscalationBaseline }
+        catch { & $say 'FAILED -- the escalation baseline could not be read; nothing sent'; throw "[scheduler] escalations: the escalation baseline (pim.Settings 'LifecycleEscalationBaseline') could not be read, so NOTHING was sent -- without it a first run would mail every stage already due: $($_.Exception.Message)" }
+        $cal = Build-PimLifecycleCalendar -Items @($src.items) -NowUtc $now -KeyField 'Id' -NotifyLog $logMap
+        $due = @($cal.escalations)
+        # (c) first run after the upgrade: baseline, do not mail.
+        if ($null -eq $baseline) {
+            $seed = Add-PimLifecycleEscalationSeed -Calendar $cal -NotifyLog $logMap
+            if ($whatIf) {
+                & $say ("whatif -- would seed the baseline: {0} already-due stage(s) would NOT be mailed" -f $seed.seeded)
+                return [pscustomobject]@{ ran=$false; whatIf=$true; seeded=[int]$seed.seeded; calendar=$cal
+                    detail=("whatif: baseline not yet seeded -- would record {0} already-due stage(s) without mailing them" -f $seed.seeded) }
+            }
+            try {
+                Save-PimLifecycleEscalationLog -Log $seed.notifyLog -NowUtc $now
+                Save-PimLifecycleEscalationBaseline -NowUtc $now -Seeded ([int]$seed.seeded)   # AFTER the log: a lost marker only re-seeds
+            } catch { & $say 'FAILED -- the baseline could not be saved; nothing sent'; throw "[scheduler] escalations: the first-run baseline could NOT be saved, so NOTHING was sent (sending without it would mail every stage already due): $($_.Exception.Message)" }
+            $d = ("baseline seeded: {0} already-due stage(s) not mailed -- from the next run only NEWLY due stages are mailed ({1} lifecycle date(s) in SQL)" -f $seed.seeded, @($src.items).Count)
+            & $say ("due={0} sent=0 skipped=0 seeded={0} -- {1}" -f $seed.seeded, $d)
+            return [pscustomobject]@{ ran=$true; seeded=[int]$seed.seeded; sent=0; calendar=$cal; whatIf=$false; detail=$d }
+        }
+        if (-not $due.Count) {
+            & $say ("due=0 sent=0 skipped=0 seeded=0 -- nothing due ({0} lifecycle date(s) in SQL)" -f @($src.items).Count)
+            return [pscustomobject]@{ ran=$false; nothingDue=$true; calendar=$cal; whatIf=[bool]$whatIf
+                detail=("nothing due -- {0} lifecycle date(s) in SQL, no escalation stage crossed" -f @($src.items).Count) }
+        }
+        $send = Send-PimLifecycleEscalations -Calendar $cal -NotifyLog $logMap -WhatIf:$whatIf
+        $sentN  = @($send.results | Where-Object { $_.sent }).Count
+        $held   = @($send.results | Where-Object { (-not $_.sent) -and $_.PSObject.Properties['held'] -and $_.held })
+        $failed = @($send.results | Where-Object { (-not $_.sent) -and -not ($_.PSObject.Properties['held'] -and $_.held) -and "$($_.reason)" -ne 'whatif' })
+        if (-not $whatIf) {
+            try { Save-PimLifecycleEscalationLog -Log $send.notifyLog -NowUtc $now }
+            catch { & $say "FAILED -- $sentN sent but the log could not be saved"; throw "[scheduler] escalations: $sentN mail(s) sent, but the escalation log could NOT be saved -- the next run will send them AGAIN: $($_.Exception.Message)" }
+        }
+        $heldWhy = @($held | ForEach-Object { "$($_.reason)" } | Select-Object -Unique) -join ', '
+        $detail = ("escalations-due={0} sent={1} skipped={2}{3} failed={4} -- from SQL" -f $due.Count, $sentN, $held.Count, $(if ($held.Count) { " ($heldWhy; not recorded, sent once mail is enabled)" } else { '' }), $failed.Count)
+        if ($whatIf) { $detail = "whatif: $detail" }
+        & $say ("due={0} sent={1} skipped={2} seeded=0 failed={3}{4}" -f $due.Count, $sentN, $held.Count, $failed.Count, $(if ($held.Count) { " (skipped: $heldWhy)" } else { '' }))
+        if ($failed.Count -and -not $whatIf) {
+            $why = @($failed | Select-Object -First 5 | ForEach-Object { "$($_.key)/$($_.symbol)$(if ($_.recipient) { " -> $($_.recipient)" }): $($_.reason)" }) -join '; '
+            throw "[scheduler] escalations: $detail. Not delivered: $why"
+        }
+        if ($sentN -eq 0 -and $held.Count -and -not $whatIf) {
+            return [pscustomobject]@{ ran=$false; skipped=$true; skippedReason=$heldWhy; held=$held.Count; sent=0; calendar=$cal; whatIf=$false; detail=$detail }
+        }
+        return [pscustomobject]@{ ran=$true; detail=$detail; calendar=$cal; sent=$sentN; held=$held.Count; whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'scheduled-creation' -Handler {
         param($job,$now,$whatIf)
@@ -865,6 +966,14 @@ function Initialize-PimDefaultJobHandlers {
             detail='unimplemented:active-assignments-snapshot (wired by Start-PimScheduler; the Manager never runs the live read)'
             whatIf=[bool]$whatIf }
     }
+    Register-PimJobHandler -Type 'emergency-override' -Handler {
+        param($job,$now,$whatIf)
+        # BUG-185. The REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (it needs the engine
+        # providers and the Graph write path). Here (the Manager, offline tests) it declares itself unimplemented.
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:emergency-override (wired by Start-PimScheduler, which loads the engine providers)'
+            whatIf=[bool]$whatIf }
+    }
     Register-PimJobHandler -Type 'drift-snapshot' -Handler {
         param($job,$now,$whatIf)
         # Drift page (2026-09-14). The REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1
@@ -872,6 +981,15 @@ function Initialize-PimDefaultJobHandlers {
         # initialises these handlers too, and a full engine plan over every scope on its one request loop is the freeze this removes.
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:drift-snapshot (wired by Start-PimScheduler; the Manager never runs the drift plan)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'coverage' -Handler {
+        param($job,$now,$whatIf)
+        # REQ-I + REQ-U (Coverage & gaps page). The REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1
+        # (Invoke-PimCoverageJob, engine/_shared/PIM-Coverage.ps1). Deliberately NOT wired here: the Manager initialises these
+        # handlers too, and the job reads Power BI / Graph, which never runs on the Manager's request loop.
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:coverage (wired by Start-PimScheduler; the Manager never computes the coverage report)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'queue-apply' -Handler {
@@ -1007,14 +1125,17 @@ function Initialize-PimDefaultJobHandlers {
     # poll itself never mutates; routing decisions are returned for the caller/engine to apply.
     Register-PimJobHandler -Type 'servicenow-intake' -Handler {
         param($job,$now,$whatIf)
-        if (-not (Get-Command Invoke-PimIntakePoll -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ ran=$false; detail='no-handler:Invoke-PimIntakePoll' } }
-        $store = "$($global:PIM_IntakeStoreFile)".Trim()
-        if (-not $store) { return [pscustomobject]@{ ran=$false; detail='no PIM_IntakeStoreFile configured' } }
-        $decisions = @(Invoke-PimIntakePoll -StoreFile $store -NowUtc $now)
-        $approve = @($decisions | Where-Object { $_.route -eq 'approve' }).Count
-        $auto    = @($decisions | Where-Object { $_.route -eq 'auto-apply' }).Count
-        $reject  = @($decisions | Where-Object { $_.route -eq 'reject' }).Count
-        return [pscustomobject]@{ ran=$true; detail="intake poll approve=$approve auto-apply=$auto reject=$reject"; decisions=$decisions; whatIf=[bool]$whatIf }
+        # 🔴 BUG-211 (§33.28): this polled a JSONL FILE and returned ran=$true with routing decisions NOTHING acted on.
+        # Invoke-PimIntakeProcess (PIM-Notifications.ps1) reads the SQL drop store (pim.Settings 'IntakeRequests'),
+        # turns every accepted request into a PENDING, de-duplicated proposal in pim.ChangeQueue (never auto-committed),
+        # marks every record with its outcome, and THROWS when the store or the queue cannot be reached.
+        if (-not (Get-Command Invoke-PimIntakeProcess -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:servicenow-intake (PIM-Notifications.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf } }
+        if ((Get-Command Test-PimIntakeConfigured -ErrorAction SilentlyContinue) -and -not (Test-PimIntakeConfigured)) {
+            return [pscustomobject]@{ ran=$false; outOfScope=$true; detail='ServiceNow intake is not enabled (setting IntakeEnabled)'; whatIf=[bool]$whatIf }
+        }
+        $r = Invoke-PimIntakeProcess -NowUtc $now -WhatIf:$whatIf
+        $r | Add-Member -NotePropertyName whatIf -NotePropertyValue ([bool]$whatIf) -Force
+        return $r
     }
     # Tenant-list cache refresh. The real refresher (Invoke-PimTenantListRefresh)
     # lives in tools/pim-manager/_tenantSync.ps1; the scheduler launcher dot-sources
@@ -1030,14 +1151,26 @@ function Initialize-PimDefaultJobHandlers {
         # WhatIf = intent only; the live refresh writes the per-instance cache files.
         if ($whatIf) { return [pscustomobject]@{ ran=$true; detail='tenant-cache refresh (whatif: no write)'; whatIf=$true } }
         $r = Invoke-PimTenantListRefresh -Quiet
+        $counts = @()
+        if ($r.results) { foreach ($k in $r.results.Keys) { $counts += ("{0}={1}" -f $k, $(if (-not $r.results[$k].ok) { 'ERR' } elseif ($r.results[$k].skipped) { 'skipped' } else { $r.results[$k].count })) } }
         if ($r.ok) {
-            $counts = @()
-            if ($r.results) { foreach ($k in $r.results.Keys) { $counts += ("{0}={1}" -f $k, $(if ($r.results[$k].ok) { $r.results[$k].count } else { 'ERR' })) } }
             return [pscustomobject]@{ ran=$true; detail=("tenant-cache refreshed " + ($counts -join ' ')); result=$r; whatIf=$false }
         }
-        return [pscustomobject]@{ ran=$false; detail=("tenant-cache refresh skipped: " + ("$($r.reason)").Trim()); result=$r; whatIf=$false }
+        # Another refresh holding the single-flight lock is a skip; anything else is a FAILED refresh (IMP-49 b:
+        # it used to read ok when every step had failed, and was then recorded as a skip).
+        if ("$($r.reason)" -eq 'in-progress') { return [pscustomobject]@{ ran=$false; detail='tenant-cache refresh skipped: another refresh is in progress'; result=$r; whatIf=$false } }
+        throw ("[scheduler] tenant-cache refresh FAILED: " + ("$($r.reason)").Trim() + " (" + ($counts -join ' ') + ")")
     }
-    foreach ($t in 'engine-delta','engine-full','msp-pull') {
+    # 🔒 msp-pull IS NOT A TICK JOB (operator 2026-09-18, the pull cadence). The managed tenant's pull is its OWN Container
+    # Apps job (ca-pim-downlink-s6, tools/pim-engine/downlink-job-entry.ps1) with its own cadence, set in the Manager's Job
+    # schedule (DownlinkSchedule, PIM-JobCadence.ps1). This row only exists in the catalog; the tick must never run a
+    # second pull, and must never record one as done. It records a SKIP that names where the pull really runs.
+    Register-PimJobHandler -Type 'msp-pull' -Handler {
+        param($job,$now,$whatIf)
+        [pscustomobject]@{ ran=$false; outOfScope=$true; whatIf=[bool]$whatIf
+            detail='not run by the scheduler tick: the managed-tenant pull is its own job (ca-pim-downlink-s6, the Data Definition Updater); its cadence, last result and Run pull now are on the Job schedule page (Managed-tenant pull)' }
+    }
+    foreach ($t in 'engine-delta','engine-full') {
         Register-PimJobHandler -Type $t -Handler {
             param($job,$now,$whatIf)
             # The container/launcher registers the real engine handler; until then,
@@ -1118,6 +1251,24 @@ function Register-PimDiscoveryHandler {
         param($job,$now,$whatIf)
         $scope = if ($job.PSObject.Properties['scope']) { "$($job.scope)" } else { 'All' }
 
+        # REQ-U wave 2 (design point 6): the WORKLOAD role catalogs (Defender XDR / Intune). A job whose service -- or
+        # scope -- is Defender / Intune stores pim.TenantCache 'workload-roles:<service>' + mails what no pack knows
+        # (Invoke-PimWorkloadRoleDiscoveryJob). This REPLACES queueing them to PIM-Catalog-ServiceRoles, which nothing
+        # ever read. A catalog that could NOT be read fails the run (it is stored as not checked first).
+        $wlSvc = if ($job.PSObject.Properties['service'] -and "$($job.service)".Trim()) { "$($job.service)".Trim().ToLowerInvariant() } else { '' }
+        if (-not $wlSvc -and $scope -in @('Defender', 'Intune')) { $wlSvc = $scope.ToLowerInvariant() }
+        if ($wlSvc -in @('defender', 'intune')) {
+            if (-not (Get-Command Invoke-PimWorkloadRoleDiscoveryJob -ErrorAction SilentlyContinue)) {
+                return [pscustomobject]@{ ran=$false; unimplemented=$true; detail="unimplemented:discovery service '$wlSvc' (PIM-WorkloadRoles.ps1 is not loaded on this worker)"; whatIf=[bool]$whatIf }
+            }
+            $wr = Invoke-PimWorkloadRoleDiscoveryJob -Service $wlSvc -NowUtc $now -WhatIf:([bool]$whatIf)
+            if ($wr -and $wr.PSObject.Properties['notRead'] -and $wr.notRead) {
+                $what = if ($wr.PSObject.Properties['notReadWhat'] -and "$($wr.notReadWhat)") { "$($wr.notReadWhat)" } else { 'role catalog' }
+                throw "$what for '$wlSvc' NOT READ -- $($wr.reason) (stored as not checked in pim.TenantCache)"
+            }
+            return [pscustomobject]@{ ran=[bool]$wr.ran; unimplemented=[bool]($wr.PSObject.Properties['unimplemented'] -and $wr.unimplemented); detail="$($wr.detail)"; result=$wr; whatIf=[bool]$whatIf }
+        }
+
         # ENTRA scope = the role-CATALOG delta (new built-in roles), a different shape
         # from the Azure/PowerBI scope sweep. Wired only when -GetLiveRoles was supplied.
         if ($scope -eq 'Entra') {
@@ -1133,6 +1284,12 @@ function Register-PimDiscoveryHandler {
             }
             if ($whatIf) { $roleArgs['WhatIf'] = $true }
             $rr = Invoke-PimRoleCatalogJobSweep @roleArgs
+            # REQ-U (2.4.378): a role catalog that could NOT be read is a FAILED run, never a quiet success -- the job used to
+            # report ok with detail "NOT READ ...", which on the Jobs page is indistinguishable from "nothing new". The runner
+            # records a thrown error as ok=$false with its message (Invoke-PimScheduledJob).
+            if ($rr -and $rr.PSObject.Properties['notRead'] -and $rr.notRead) {
+                throw "role catalog for '$service' NOT READ -- $($rr.reason)$(if ("$($rr.endpoint)") { " ($($rr.endpoint))" })"
+            }
             return [pscustomobject]@{ ran=$true; detail="$($rr.detail)"; result=$rr; whatIf=[bool]$whatIf }
         }
 
@@ -1173,6 +1330,20 @@ function Get-PimJobFeatureKey {
     }
 }
 
+# REQ-Y (operator 2026-09-19, "Hard, like MSP"): the scheduled job types that ARE a Pro feature of the catalog. Each is
+# inert without a Pro licence (Invoke-PimScheduledJob). A job type may carry a kill-switch key (above) AND a Pro key.
+function Get-PimJobProFeatureKeys {
+    param([Parameter(Mandatory)][string]$Type)
+    switch ("$Type".ToLowerInvariant()) {
+        'discovery'     { return @('discovery.sweep') }
+        'coverage'      { return @('coverage.gaps') }
+        'tier-report'   { return @('reports.tier') }
+        # msp-pull is not here: the tick never pulls (its handler records a skip naming the pull job), and the pull
+        # job (tools/pim-engine/downlink-job-entry.ps1) gates itself on the MSP licence.
+        default         { return @() }
+    }
+}
+
 function Invoke-PimScheduledJob {
     param([Parameter(Mandatory)][object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf, [string]$CorrelationId = '')
     # BUG-92 -- OUT OF SCOPE IS NOT A FAILURE, and it is checked BEFORE the handler lookup.
@@ -1203,6 +1374,16 @@ function Invoke-PimScheduledJob {
     if (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) {
         if (-not (Test-PimFeatureAvailable -Key 'scheduler.jobs' -Quiet)) {
             return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; ran=$false; detail="feature 'scheduler.jobs' disabled -- skipped"; skippedFeature='scheduler.jobs'; ranUtc=$NowUtc.ToString('o') }
+        }
+        # REQ-Y: a job that IS a Pro feature (coverage, the tier-impact report, access review campaigns, discovery) is
+        # inert without a Pro licence -- recorded as skipped with the licence line (contact + register command), never as
+        # a failure. Asked BEFORE the kill switch: "you need a licence" is the answer that is true either way.
+        foreach ($pk in @(Get-PimJobProFeatureKeys -Type "$($Job.type)")) {
+            if (-not (Get-Command Test-PimFeatureProLicence -ErrorAction SilentlyContinue)) { break }
+            $pl = Test-PimFeatureProLicence -Key $pk
+            if ($pl.required -and -not $pl.ok) {
+                return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; ran=$false; detail="skipped -- $($pl.message)"; skippedFeature=$pk; licence=$true; ranUtc=$NowUtc.ToString('o') }
+            }
         }
         $fk = Get-PimJobFeatureKey -Type "$($Job.type)"
         if ($fk -and -not (Test-PimFeatureAvailable -Key $fk -Quiet)) {
@@ -1672,12 +1853,30 @@ function Get-PimJobOverdueState {
 # the run record, so the audit trail stays intact.
 $script:PimAckRunIds = $null
 
+function ConvertFrom-PimSchedulerStoredList {
+    # IMP-49 f (§33.28): one parse for a stored list. A value can come back as JSON text or already parsed
+    # (depending on which writer stored it) -- the old `$v | ConvertFrom-Json` inside a bare catch turned an
+    # already-parsed value into an exception, swallowed it, and silently served the in-process copy instead.
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return @() }
+    if ($Value -is [string]) {
+        $s = "$Value".Trim()
+        if (-not $s) { return @() }
+        # A one-element JSON array read back through ConvertFrom-Json arrives as its bare element -- not JSON.
+        if (-not ($s.StartsWith('[') -or $s.StartsWith('{') -or $s.StartsWith('"'))) { return @($s) }
+        # PS 5.1: ConvertFrom-Json emits a JSON array as ONE object -- assign first, then @() (the temp-then-@() idiom).
+        $tmp = $s | ConvertFrom-Json
+        return @(@($tmp) | Where-Object { $null -ne $_ })
+    }
+    return @(@($Value) | Where-Object { $null -ne $_ })
+}
 function Get-PimRunAcknowledgements {
     # Returns an array of acknowledged runIds (strings). SQL pim.Settings 'JobAcknowledgements',
     # else this process's memory copy (no file -- SQL-only).
     $all = $null
     if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
-        try { $v = Get-PimSetting -Name 'JobAcknowledgements'; if ($v) { $tmp = $v | ConvertFrom-Json; $all = @($tmp) } } catch {}
+        try { $all = @(ConvertFrom-PimSchedulerStoredList -Value (Get-PimSetting -Name 'JobAcknowledgements')) }
+        catch { Write-Warning "[scheduler] JobAcknowledgements could not be READ ($($_.Exception.Message)) -- only this process's acknowledgements are shown; acknowledged failures may re-appear." }
     }
     if ($null -eq $all) { $all = @($script:PimAckRunIds) }
     return @(@($all) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
@@ -2036,7 +2235,7 @@ function Write-PimJobRunRecord {
         # this deployment does not run has nothing to answer for either way (BUG-112).
         # 71.13: 'held' is a FIFTH outcome -- the run did its work and a safety breaker HELD a change set for an
         # operator's approval. Never 'completed' (that would hide the approval), never 'failed' (nothing broke).
-        status      = $(if ($Result.PSObject.Properties['outOfScope'] -and $Result.outOfScope) { 'skipped' } elseif ($unimplemented) { 'unimplemented' } elseif ($held) { 'held' } elseif ($Result.ok) { 'completed' } else { 'failed' })
+        status      = $(if (($Result.PSObject.Properties['outOfScope'] -and $Result.outOfScope) -or ($Result.ok -and $inner -and $inner.PSObject.Properties['outOfScope'] -and $inner.outOfScope)) { 'skipped' } elseif ($unimplemented) { 'unimplemented' } elseif ($held) { 'held' } elseif ($Result.ok) { 'completed' } else { 'failed' })
         held        = [bool]$held
         heldCount   = $(if ($held -and $inner.PSObject.Properties['heldCount']) { [int]$inner.heldCount } else { 0 })
         detail      = "$($Result.detail)"
@@ -2173,7 +2372,7 @@ function Invoke-PimJobForceStart {
         scope       = $(if ($Job.PSObject.Properties['scope']) { "$($Job.scope)" } else { '' })
         ok          = [bool]$res.ok
         ran         = $ran
-        status      = $(if ($res.PSObject.Properties['outOfScope'] -and $res.outOfScope) { 'skipped' } elseif ($unimpl) { 'unimplemented' } elseif ($heldF) { 'held' } elseif ($res.ok) { 'completed' } else { 'failed' })   # BUG-92 / BUG-114 / 71.13
+        status      = $(if (($res.PSObject.Properties['outOfScope'] -and $res.outOfScope) -or ($res.ok -and $inner -and $inner.PSObject.Properties['outOfScope'] -and $inner.outOfScope)) { 'skipped' } elseif ($unimpl) { 'unimplemented' } elseif ($heldF) { 'held' } elseif ($res.ok) { 'completed' } else { 'failed' })   # BUG-92 / BUG-114 / 71.13
         held        = [bool]$heldF
         heldCount   = $(if ($heldF -and $inner.PSObject.Properties['heldCount']) { [int]$inner.heldCount } else { 0 })
         detail      = "$($res.detail)"
@@ -2206,7 +2405,8 @@ function Invoke-PimJobForceStart {
 # the shared settings store so the MANAGER and SCHEDULER processes see the same queue.
 function Get-PimPendingTriggers {
     if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
-        try { $v = Get-PimSetting -Name 'SchedulerTriggers'; if ($v) { return @(@($v | ConvertFrom-Json) | Where-Object { $_ }) } } catch {}
+        try { return @(ConvertFrom-PimSchedulerStoredList -Value (Get-PimSetting -Name 'SchedulerTriggers')) }
+        catch { Write-Warning "[scheduler] SchedulerTriggers could not be READ ($($_.Exception.Message)) -- a requested 'Run now' is not visible to this run." }
     }
     if ($null -eq $script:PimTriggers) { return @() }
     return @(@($script:PimTriggers) | Where-Object { $_ })

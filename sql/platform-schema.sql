@@ -76,7 +76,7 @@ CREATE TABLE pim.CentralAdmins (
 -- ("this role goes to only 5 of the 28"). A semicolon/comma separated list, e.g.
 -- 'retail;vip'. The downlink never reads this table: a managed tenant has no credential
 -- for the master's registry, so the per-tenant tag map is carried IN the signed bundle
--- (New-PimBaselineBundle -> payload.tenantTags), exactly as the projection policy is and
+-- (the cloud publish job, PIM-BaselinePublish -> payload.tenantTags), exactly as the projection policy is and
 -- for the same reason. Signed, so a tenant cannot quietly re-tag itself into scope.
 -- Absent/empty = untagged = matches only '*' targets, which is today's behaviour.
 IF COL_LENGTH('platform.Tenants', 'Tags') IS NULL
@@ -105,9 +105,12 @@ IF COL_LENGTH('pim.CentralAdmins', 'Owner') IS NULL
 -- so it stays the MSP's declared intent rather than a constant buried in two code paths.
 --   CreateTap        1 = the managed tenant's own engine mints a TAP for this admin (default ON)
 --   TapLifetimeHours NULL = fall back to the downlink default (8h); the engine floors at 4h
---   ManagerEmail     where the TAP mail goes. WITHOUT IT THE TAP IS MINTED AND NEVER DELIVERED
---                    (Send-PimNotifyMail returns reason='no recipient'), which is the silent
---                    half of this gap -- CreateTAP alone does not produce a usable admin.
+--   ManagerEmail     LEGACY FALLBACK ONLY (DOC-17 g). Since 71.19 a TAP is delivered to the owners of
+--                    the admin's SPONSOR DEPARTMENT (the admin's Department -> that department's
+--                    Owners in PIM-Definitions-Departments, 62), not to this column. It is read only
+--                    when the admin names no sponsor department. With neither, the engine REFUSES to
+--                    mint a TAP it cannot deliver -- so set the admin's Department and give that
+--                    department Owners; CreateTap alone does not produce a usable admin.
 IF COL_LENGTH('pim.CentralAdmins', 'CreateTap') IS NULL
     ALTER TABLE pim.CentralAdmins ADD
         CreateTap        BIT           NOT NULL CONSTRAINT DF_CentralAdmins_CreateTap DEFAULT 1,
@@ -125,7 +128,7 @@ IF COL_LENGTH('pim.CentralAdmins', 'Target') IS NULL
 -- §71 / framework MSP-4 SURFACE (the replication target contract): Replicate = No | Yes | Follow.
 -- NULL = the documented default, which for a registry row is Yes (the registry holds MSP admins by
 -- construction) -- so every existing row keeps publishing exactly as before. 'No' keeps an admin in
--- the registry but out of the signed bundle (New-PimBaselineBundle / Select-PimBaselineBundleContent).
+-- the registry but out of the signed bundle (the cloud publish job, PIM-BaselinePublish / Select-PimBaselineBundleContent).
 -- Additive only.
 IF COL_LENGTH('pim.CentralAdmins', 'Replicate') IS NULL
     ALTER TABLE pim.CentralAdmins ADD Replicate NVARCHAR(10) NULL;
@@ -185,12 +188,10 @@ CREATE TABLE platform.AuditEvents (
 );
 
 -- MSP ring fan-out: which central admin deploys to which tenant.
--- Same semantics as the engine: an admin reaches a tenant when
--- admin.Ring <= tenant.Ring is FALSE -- careful: ring 0 = broadest reach.
--- Engine rule today: admin row deploys when admin.Ring <= tenant ring? No:
--- Select-PimAdminRowsByRing keeps rows where admin.Ring <= PIM_TenantRing,
--- i.e. a RING-0 admin (Ring=0) deploys EVERYWHERE (0 <= every tenant ring),
--- a ring-2 admin only reaches tenants whose ring is >= 2 (test tenants).
+-- DOC-17 p: ONE rule, the engine's (Select-PimAdminRowsByRing keeps rows where admin.Ring <= the
+-- tenant's ring), and this view's JOIN is the same comparison: a.Ring <= t.Ring.
+--   * a RING-0 admin (Ring = 0) reaches EVERY tenant (0 <= every tenant ring) -- ring 0 = broadest reach;
+--   * a ring-2 admin reaches only tenants whose ring is >= 2.
 --
 -- 🔴 §71.7 (d): THIS VIEW USED TO IGNORE Target AND Tags, so it OVERSTATED reach -- an admin targeted at
 -- 'tag:vip' was listed against every tenant its ring admitted, and the MSP fan-out (S5) reads exactly

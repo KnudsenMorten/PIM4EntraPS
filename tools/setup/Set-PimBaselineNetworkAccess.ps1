@@ -103,8 +103,22 @@ foreach ($a in @($plan.actions)) {
     }
     Note "$($a.op) $($a.value)"
     $ErrorActionPreference = 'Continue'
-    az @azArgs @sub -o none --only-show-errors
+    $out = az @azArgs @sub -o none --only-show-errors 2>&1
     $code = $LASTEXITCODE
+    # 🪤 MEASURED on EFIF 2026-09-18: on an EXISTING account, the container call straight after 'allow-blob-public-access'
+    # answers PublicAccessNotPermitted because the account setting has not propagated yet (it read back True seconds
+    # later). Retry only THAT error on only THAT step, bounded. A real policy refusal fails on the account update
+    # above, not here.
+    $tries = 0
+    $retryDelay = if ("$env:PIM_NETWORK_RETRY_SECONDS" -match '^\d+$') { [int]$env:PIM_NETWORK_RETRY_SECONDS } else { 10 }   # tests set 0
+    while ($code -ne 0 -and $a.op -eq 'container-public-access' -and "$out" -match 'PublicAccessNotPermitted' -and $tries -lt 12) {
+        $tries++
+        Note "the account's anonymous-access setting has not propagated yet -- retry $tries/12 in $($retryDelay)s"
+        Start-Sleep -Seconds $retryDelay
+        $out = az @azArgs @sub -o none --only-show-errors 2>&1
+        $code = $LASTEXITCODE
+    }
+    if ($code -ne 0 -and "$out".Trim()) { Write-Host "$out" -ForegroundColor Red }
     $ErrorActionPreference = 'Stop'
     if ($code -ne 0) {
         $hint = if ($a.op -eq 'allow-blob-public-access') { ' (an Azure Policy that forbids anonymous blob access on storage accounts refuses exactly this -- it needs an exemption for this one account)' }

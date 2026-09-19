@@ -20,13 +20,17 @@
          trap, not the work: Azure answers an unregistered provider with
          (SubscriptionNotFound) "Subscription <id> was not found", which reads as a
          permissions or wrong-tenant problem and sends you hunting in the wrong place.
-      2. CREATE the account + container. Standard_LRS is ample -- bundles are a few KB --
-         and public blob access is disabled: the SIGNATURE establishes trust, not the
-         network, and a slave reads with a SAS (BUG-73).
-      3. GRANT the PUBLISHING identity 'Storage Blob Data Contributor'. That is the
-         master's ENGINE SPN (Modern-AppId), NOT the bootstrap SPN -- the bootstrap SPN is
-         Key Vault data-plane only and will 401 here, which looks exactly like a missing
-         role assignment.
+      2. CREATE the account + container. Standard_LRS is ample -- bundles are a few KB. The
+         SIGNATURE establishes trust, not the network. There is NO SAS anywhere (71.34):
+         with -PublicSignedRead a managed tenant reads the bundle blob ANONYMOUSLY (blob
+         public access on, no listing) from a network the storage firewall allows
+         (default-action Deny); without it, public blob access stays OFF.
+      3. GRANT the PUBLISHING identity 'Storage Blob Data Contributor' -- unless
+         -NoHostPublisher: since 71.35 the publisher is the master's cloud publish job
+         (ca-pim-publish), whose own identity Deploy-PimBaselinePublishJob.ps1 grants on the
+         container. With a host publisher it is the identity that publishes, NOT the bootstrap
+         SPN -- the bootstrap SPN is Key Vault data-plane only and will 401 here, which looks
+         exactly like a missing role assignment.
       4. VERIFY by actually writing and reading a probe blob AS THAT IDENTITY. A deploy
          that reports its own success is the failure mode this whole solution keeps
          relearning; the only thing that proves a publish target works is a publish.
@@ -44,12 +48,11 @@
     resource group (rg-automateit-<token>), matching the estate's naming contract.
 
 .PARAMETER PublisherObjectId
-    Object id (NOT the app id) of the identity that will publish bundles -- the master's
-    engine SPN. Resolved from -PublisherAppId when omitted.
+    Object id (NOT the app id) of a HOST identity that will publish bundles. Not used with
+    -NoHostPublisher (the cloud publish job, 71.35). Resolved from -PublisherAppId when omitted.
 
 .PARAMETER PublisherAppId
-    App id of the publishing SPN; its object id is looked up. Use this when you have the
-    Modern-AppId from the tenant's Key Vault, which is the usual case.
+    App id of a host publishing SPN; its object id is looked up.
 
 .EXAMPLE
     ./New-PimBaselineStorage.ps1 -SubscriptionId <master-sub> -ResourceGroup rg-automateit-dp998 `
@@ -103,12 +106,14 @@ if ($StorageAccount -notmatch '^[a-z0-9]{3,24}$') {
 }
 
 # --- context must be the MASTER's subscription --------------------------------
-$acct = az account show --query id -o tsv 2>$null
-if ($LASTEXITCODE -ne 0 -or -not "$acct".Trim()) { throw "no az context. Log in to the master tenant first." }
+# Every call below passes --subscription, so what matters is that THIS subscription is reachable by the signed-in context --
+# not which subscription happens to be the machine-wide default. (The old check refused on the default and told the
+# operator to `az account set`, i.e. to change the default context every other session on the host uses.)
+$acct = az account show --subscription $SubscriptionId --query id -o tsv 2>$null
+if ($LASTEXITCODE -ne 0 -or -not "$acct".Trim()) { throw "no az context for subscription '$SubscriptionId'. Log in to the master tenant first." }
 if ("$acct".Trim() -ne "$SubscriptionId".Trim()) {
-    # Same family as ESTATE-14: "a context exists" is not "the right context", and on this host
-    # the default is routinely another tenant entirely.
-    throw "az context is subscription '$acct' but the master is '$SubscriptionId' -- refusing to create storage in the wrong subscription. Fix: az account set --subscription $SubscriptionId"
+    # Same family as ESTATE-14: "a context exists" is not "the right context".
+    throw "az resolved subscription '$acct', not the master '$SubscriptionId' -- refusing to create storage in the wrong subscription."
 }
 Note "az context verified: $acct"
 # 🔴 Every call below splats this. It was referenced by the create calls but never DEFINED, so it
@@ -135,7 +140,9 @@ elseif ($PSCmdlet.ShouldProcess($StorageAccount, 'create storage account')) {
     az storage account create @subArgs -n $StorageAccount -g $ResourceGroup -l $Location `
         --sku Standard_LRS --kind StorageV2 --allow-blob-public-access $(if ($PublicSignedRead) { 'true' } else { 'false' }) -o none 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "az storage account create failed (exit $LASTEXITCODE)." }
-    Note "created ($Location, Standard_LRS, public blob access DISABLED)"
+    # DOC-17 k: say what was actually created -- with -PublicSignedRead blob public access is ON (anonymous read of the
+    # signed bundle blob from the networks the firewall allows); it said "DISABLED" either way.
+    Note "created ($Location, Standard_LRS, public blob access $(if ($PublicSignedRead) { 'ENABLED (anonymous read of the signed bundle blob; the firewall names who can reach it)' } else { 'DISABLED' }))"
 }
 $saId = az storage account show @subArgs -n $StorageAccount -g $ResourceGroup --query id -o tsv 2>$null
 if (-not "$saId".Trim()) { throw "could not read the resource id of '$StorageAccount' after create." }
@@ -248,5 +255,5 @@ Note 'read OK, probe removed'
 
 Step 'Done.'
 Write-Host ("  publish target ready: https://{0}.blob.core.windows.net/{1}/" -f $StorageAccount, $Container) -ForegroundColor Green
-Write-Host  "  next: setup/New-PimBaselineBundle.ps1 -CentralServer <master sql> -Database PimPlatform -StorageAccount $StorageAccount -Container $Container -Scope fleet" -ForegroundColor DarkGray
+Write-Host  "  next: Deploy-PimBaselinePublishJob.ps1 (the ca-pim-publish job writes here), then Start-PimBaselinePublish.ps1 -SubscriptionId <subscription> -ResourceGroup <resource group>" -ForegroundColor DarkGray
 [pscustomobject]@{ StorageAccount = $StorageAccount; Container = $Container; ResourceId = $saId; PublisherObjectId = $PublisherObjectId }

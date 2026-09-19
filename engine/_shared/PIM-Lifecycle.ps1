@@ -71,6 +71,13 @@ function Get-PimDefaultEscalationPolicy {
             [pscustomobject]@{ atDays = 1;  recipients = @('owner','manager','admin') }
         )
         reminderIntervalDays = 3
+        # BUG-191 (§33.28, 2.4.371): the reminder was UNBOUNDED. A stage re-fired every reminderIntervalDays for as
+        # long as the item stayed in it, and the last stage (atDays 1) never ends -- a past-due item stays in it until
+        # it drops out of the store read 30 days later, so it was re-mailed ~10 times to the sponsor AND the Alerting
+        # recipients. Now: at most maxRemindersPerStage reminders per stage (so at most 2 mails per stage), and none
+        # once the date has passed (the stage mail already said "expired"; the engine acts on the date itself).
+        maxRemindersPerStage = 1
+        remindAfterExpiry    = $false
     }
 }
 
@@ -86,10 +93,14 @@ function Get-PimDueEscalation {
     # Which escalation notification is due NOW for an item with $DaysLeft, given the
     # policy + when it was last notified at which stage. Returns
     # @{ stage; recipients; isReminder } or $null (nothing due). A new stage fires
-    # immediately; the same stage re-fires only after reminderIntervalDays.
+    # immediately; the same stage re-fires only after reminderIntervalDays, at most
+    # maxRemindersPerStage times (-ReminderCount = reminders already sent for this stage),
+    # and never once the date has passed unless the policy sets remindAfterExpiry.
+    # A policy that does not carry the two cap fields (a stored EscalationPolicy written before
+    # 2.4.371) gets the defaults: 1 reminder, none after expiry -- the cap is ON by default.
     param(
         [Parameter(Mandatory)][int]$DaysLeft, [Parameter(Mandatory)][datetime]$NowUtc,
-        [object]$Policy, [Nullable[int]]$LastStageAtDays, [string]$LastNotifiedUtc
+        [object]$Policy, [Nullable[int]]$LastStageAtDays, [string]$LastNotifiedUtc, [int]$ReminderCount = 0
     )
     if (-not $Policy) { $Policy = Get-PimEscalationPolicy }
     # most-urgent crossed stage = smallest atDays that is still >= DaysLeft
@@ -103,6 +114,13 @@ function Get-PimDueEscalation {
         return [pscustomobject]@{ stage = $cur; recipients = @($current.recipients); isReminder = $false }
     }
     $interval = if ($Policy.reminderIntervalDays) { [int]$Policy.reminderIntervalDays } else { 0 }
+    $polField = { param($n) if ($Policy -is [System.Collections.IDictionary]) { if ($Policy.Contains($n)) { return $Policy[$n] } } elseif ($Policy.PSObject.Properties[$n]) { return $Policy.$n }; return $null }
+    $maxRem = 1
+    $v = & $polField 'maxRemindersPerStage'; if ($null -ne $v -and "$v".Trim()) { $maxRem = [int]"$v" }
+    $afterExp = $false
+    $v = & $polField 'remindAfterExpiry'; if ($null -ne $v) { $afterExp = ("$v" -match '^(?i)(true|1|yes)$') }
+    if ($ReminderCount -ge $maxRem) { return $null }
+    if ($DaysLeft -lt 0 -and -not $afterExp) { return $null }
     if ($interval -gt 0 -and "$LastNotifiedUtc".Trim()) {
         $last = Get-PimUtcStamp $LastNotifiedUtc   # IMP-02
         if ($null -ne $last) {
@@ -203,7 +221,11 @@ function Get-PimLifecycleItemsFromStore {
                 if ($null -eq $offUtc) { $bad++; continue }
                 $mgr = & $get @('ManagerEmail')
                 if ($offUtc -ge $floor) {
-                    [void]$items.Add([pscustomobject]@{ Id = "admin-offboard:$user"; Kind = 'admin-offboard'; UserName = $user; ExpiresUtc = $offUtc.ToString('o'); ManagerEmail = $mgr; Entity = $ent })
+                    # 2.4.371: the §71.19 routing fields ride along (sponsor Department + the per-admin forward override),
+                    # so the escalation mail goes where every other admin mail goes -- the sponsor department's owners --
+                    # with ManagerEmail only as the legacy fallback (Resolve-PimLifecycleEscalationRecipient).
+                    [void]$items.Add([pscustomobject]@{ Id = "admin-offboard:$user"; Kind = 'admin-offboard'; UserName = $user; ExpiresUtc = $offUtc.ToString('o'); ManagerEmail = $mgr
+                                                        Department = (& $get @('Department')); ForwardMailsToContact = (& $get @('ForwardMailsToContact')); MailForwardAddress = (& $get @('MailForwardAddress')); Entity = $ent })
                 }
                 # 🔴 71.21 -- NO 'admin-delete' REMINDER. It announced a date on which PIM would
                 # delete the account; PIM never deletes an account (operator, 2026-09-16), so the

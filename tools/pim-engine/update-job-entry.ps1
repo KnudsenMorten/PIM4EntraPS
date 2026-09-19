@@ -502,7 +502,11 @@ try {
             ([int]"$($rows[0].e)") -eq 1
         }
         $schemaFiles = @()
-        foreach ($rel in @('sql/platform-schema.sql', 'sql/local-schema.sql')) {
+        # 2026-09-18 (IMP-46): ONE shipped base-schema file. sql/local-schema.sql created only the dead
+        # pim.LocalAdmins / pim.LocalResources and was retired; existing stores keep those tables (nothing
+        # here drops anything). The locked schema below is now every table THIS file creates, so the
+        # "still absent" check after the apply proves a first install really got its base schema.
+        foreach ($rel in @('sql/platform-schema.sql')) {
             $sf = Join-Path $solRoot $rel
             if (-not (Test-Path -LiteralPath $sf)) { throw "base schema file '$rel' is missing from this payload." }
             $sqlText = [IO.File]::ReadAllText($sf)
@@ -618,6 +622,8 @@ $jobFailed = @()
 # failed update; this job failing to re-stamp ITSELF only defers which image its NEXT run starts
 # from, and must not turn a healthy, rolled environment into a red execution.
 $selfStampDeferred = ''
+# §71.44 -- what this run did to ITSELF, for the follow-up decision at the very end.
+$selfImageBefore = ''; $selfStamped = $false
 
 # ---- 2. the tick job --------------------------------------------------------------------------
 # Named explicitly rather than left to discovery: it is the one job whose skew from the Manager
@@ -708,6 +714,7 @@ if ($selfJob) {
             }
         }
         if (-not $stamped) { throw $lastErr }
+        $selfImageBefore = $selfNow; $selfStamped = $true
     } catch {
         # 🔑 AND IT MUST NOT CALL A ROLLED ENVIRONMENT "FAILED".
         # This stamp only decides which image the NEXT run of this job starts from; the update that
@@ -739,4 +746,25 @@ if ("$selfStampDeferred".Trim()) {
 # signal; that is why 'ok' is reported as loudly as 'failed'.
 # 📌 A deferred self-stamp (B8) is still an OK outcome: the environment rolled and is healthy.
 Send-PimUpdateOutcome -Action 'rolled' -Outcome 'ok' -ToVersion "$($roll.to)"
+
+# ---- 4. §71.44 -- ONE FOLLOW-UP RUN ON THE NEW UPDATER -------------------------------------------
+# 🔴 This run was executed by the PREVIOUS updater image, so whatever the new release changed in the
+# updater has not happened yet. Measured 2026-09-18: the 2.4.367 updater rolled three environments to
+# 2.4.369, whose new ring record (§71.43) therefore never got written, and every Manager said
+# "update ring: not recorded" until the next scheduled run. One follow-up on the NEW image does that
+# work now: it finds the version already running (no build, no roll) and records/reports as the new
+# release does. It can never chain -- its own image already equals the target (see the decision).
+# AFTER the outcome above on purpose: the follow-up's record is then the latest one. Never changes the
+# exit code -- a follow-up that could not start costs one night's delay, not a failed update.
+$fu = Get-PimUpdaterFollowUpDecision -SelfImageBefore $selfImageBefore -TargetImage $targetImg `
+        -Stamped $selfStamped -Disable "$($env:PIM_UPDATE_NO_FOLLOWUP)"
+if ($fu.start) {
+    Say "follow-up: $($fu.reason)" 'Cyan'
+    $st = Start-PimAcaJobExecution -SubscriptionId $sub -ResourceGroup $rg -Name $selfJob
+    if ($st.ok) { Say "follow-up: started $selfJob execution $($st.execution) on the new updater image" 'Cyan' }
+    else {
+        Say "  NOTE: the follow-up run could not be started: $($st.reason)" 'Yellow'
+        Say "        The environment DID update and is healthy; the new updater runs at its next schedule instead." 'Yellow'
+    }
+} else { Say "follow-up: none ($($fu.reason))" 'DarkGray' }
 exit 0

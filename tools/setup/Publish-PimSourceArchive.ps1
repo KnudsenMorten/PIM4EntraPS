@@ -58,7 +58,12 @@ param(
     # Community editions (S2/S4) already publish their source publicly, so a credential here
     # protects nothing and is one more thing to rotate. Anonymous blob read removes it entirely.
     [switch]$PublicRead,
-    [switch]$Verify
+    [switch]$Verify,
+    # SEC-23: the read link carries a SAS -- a credential -- so it is NEVER printed (it lands in
+    # transcripts, CI logs and screenshots). -PassThru returns it as an OBJECT on the pipeline instead:
+    #     $src = .\Publish-PimSourceArchive.ps1 ... -PassThru;  $src.SourceUrlTemplate
+    # Captured into a variable it never reaches the console.
+    [switch]$PassThru
 )
 if ("$CustomerId".Trim()) {
     # Container names: lowercase alphanumerics and dashes only.
@@ -69,6 +74,16 @@ if ("$CustomerId".Trim()) {
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $PSCommandPath
 . (Join-Path $here '_PimAz.ps1')
+
+function Hide-PimSourceUrlQuery {
+    <#
+      SEC-23. A URL with its query string (the SAS) replaced, and any stray sig= in free text withheld.
+      Everything this script prints about the read link goes through here.
+    #>
+    param([AllowEmptyString()][string]$Text)
+    $t = "$Text" -replace '(https://[^\s?"'']+)\?[^\s"'']*', '$1?<read-sas withheld>'
+    return ($t -replace '(?i)(sig=)[^&\s"'']+', '$1<withheld>')
+}
 
 function Get-PimTarGzEntryNames {
     <#
@@ -197,8 +212,8 @@ if ($StorageAccount -and -not $WhatIfPreference) {
     Step "upload $blob to $StorageAccount/$Container"
     # 🔑 THE KEY IS READ HERE AND NEVER LEAVES HERE. Reading it is a MANAGEMENT-plane call, which
     # the publishing identity can already make; what gets distributed is a read-only SAS to one
-    # blob, never the key. This follows the pattern Update-PimBaselineSas.ps1 already uses for the
-    # same job -- data-plane operations against a freshly-created account otherwise need a separate
+    # blob, never the key. This followed the pattern of the baseline SAS rotation (retired
+    # 2026-09-18, SEC-27) for the same job -- data-plane operations against a freshly-created account otherwise need a separate
     # RBAC grant on the caller, and a publish step that fails until somebody grants a role by hand
     # is a publish step nobody runs.
     # 🪤 Never write the key to a log, a file, or a variable that outlives this call.
@@ -209,8 +224,16 @@ if ($StorageAccount -and -not $WhatIfPreference) {
     # issued, so there is nothing to expire, leak or rotate -- the rotation question stops existing
     # rather than getting a better answer.
     $pubArgs = @(); if ($PublicRead) { $pubArgs = @('--public-access', 'blob') }
-    az storage container create --account-name $StorageAccount --name $Container `
-        --account-key $key @pubArgs -o none 2>$null
+    # SEC-23: the create used to be `... 2>$null` with no exit check, so a refusal (a policy that forbids
+    # public containers, a firewall, a wrong account) vanished and surfaced one line later as a baffling
+    # upload failure. An EXISTING container is not an error here (az answers created=false, exit 0).
+    $global:LASTEXITCODE = 0
+    $cOut = az storage container create --account-name $StorageAccount --name $Container `
+        --account-key $key @pubArgs -o none 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ("Publish-PimSourceArchive: could not create/ensure container '$Container' on '$StorageAccount' (exit $LASTEXITCODE): " +
+               (Hide-PimSourceUrlQuery (($cOut | Out-String).Trim())))
+    }
     $global:LASTEXITCODE = 0
     az storage blob upload --account-name $StorageAccount --container-name $Container `
         --name $blob --file $archive --overwrite --account-key $key -o none
@@ -243,8 +266,10 @@ if ($StorageAccount -and -not $WhatIfPreference) {
         } catch { Warn "the public link did NOT fetch: $($_.Exception.Message)" }
         Write-Host ''
         Write-Host '  PUBLIC source (no credential, nothing to rotate). Configure with:' -ForegroundColor DarkGray
-        Write-Host ("    PIM_UPDATE_SOURCE_URL = " + ($url -replace [regex]::Escape("pim-src-$Version.tar.gz"), 'pim-src-{version}.tar.gz')) -ForegroundColor White
+        $pubTpl = ($url -replace [regex]::Escape("pim-src-$Version.tar.gz"), 'pim-src-{version}.tar.gz')
+        Write-Host ("    PIM_UPDATE_SOURCE_URL = " + $pubTpl) -ForegroundColor White
         Write-Host "==> Source archive ready for $Version." -ForegroundColor Green
+        if ($PassThru) { [pscustomobject]@{ Version = $Version; SourceUrlTemplate = $pubTpl; Credential = 'none (public read)' } }
         exit 0
     }
 
@@ -278,7 +303,9 @@ if ($StorageAccount -and -not $WhatIfPreference) {
                 --policy-name $PolicyName --https-only --account-key $key `
                 -o tsv 2>$null)".Trim()
     if (-not $sas) {
-        Warn 'could not mint a user-delegation SAS -- the archive is uploaded; generate a read link by hand.'
+        # SEC-23: this is a CONTAINER SAS signed against the stored access policy -- not a
+        # user-delegation SAS, which is what this line used to call it.
+        Warn "could not mint the stored-policy ('$PolicyName') container SAS -- the archive is uploaded; generate a read link by hand (az storage container generate-sas --policy-name $PolicyName)."
     } else {
         $url = "https://$StorageAccount.blob.core.windows.net/$Container/$blob`?$sas"
         # 🪤 READ IT BACK. A link that does not actually fetch is discovered by a customer
@@ -286,14 +313,27 @@ if ($StorageAccount -and -not $WhatIfPreference) {
         try {
             $probe = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 60
             Note "verified: the link fetches (HTTP $($probe.StatusCode))"
-        } catch { Warn "the link did NOT fetch: $($_.Exception.Message)" }
+        } catch { Warn ("the link did NOT fetch: " + (Hide-PimSourceUrlQuery "$($_.Exception.Message)")) }
 
+        # 🔴 SEC-23 -- NEVER PRINT THE SAS. It is a read credential for every published source archive,
+        # valid for $SasDays days, and this output is exactly what ends up in a transcript or a CI log.
+        # Print the template with its query WITHHELD; hand the full value over as an OBJECT (-PassThru),
+        # which a caller captures into a variable without it ever reaching the console. Environments that
+        # already carry PIM_UPDATE_SOURCE_URL keep it across redeploys (Deploy-PimUpdateJob), so this is
+        # needed once per new environment, not per release.
+        $tpl = ($url -replace [regex]::Escape("pim-src-$Version.tar.gz"), 'pim-src-{version}.tar.gz')
         Write-Host ''
         Write-Host '  Configure an environment with the TEMPLATE (the version is substituted at run time):' -ForegroundColor DarkGray
-        Write-Host ("    PIM_UPDATE_SOURCE_URL = " + ($url -replace [regex]::Escape("pim-src-$Version.tar.gz"), 'pim-src-{version}.tar.gz')) -ForegroundColor White
+        Write-Host ("    PIM_UPDATE_SOURCE_URL = " + (Hide-PimSourceUrlQuery $tpl)) -ForegroundColor White
+        if ($PassThru) {
+            Write-Host '    (the full value, SAS included, is in the returned object: .SourceUrlTemplate)' -ForegroundColor DarkGray
+        } else {
+            Write-Host '    (the SAS is withheld from this output -- re-run with -PassThru and capture the returned object to get it)' -ForegroundColor DarkGray
+        }
         Write-Host ("    PIM_UPDATE_TARGET_VERSION = $Version") -ForegroundColor White
         Write-Host ''
         Write-Host '  ...and publish every version to the same container, so a ring that is behind can still fetch what it was approved for.' -ForegroundColor DarkGray
+        if ($PassThru) { [pscustomobject]@{ Version = $Version; SourceUrlTemplate = $tpl; Credential = "stored access policy '$PolicyName' on $Container" } }
     }
 }
 

@@ -33,7 +33,9 @@
     ring-2 consultant only reaches ring-2 (test) tenants.
 
 .PARAMETER ServerInstance
-    SQL instance holding the platform registry. Default: localhost\SQLEXPRESS.
+    SQL server holding the platform registry (the Azure SQL FQDN, with -UseAzureSql).
+    Default: $env:PIM_SqlServer. There is NO local default -- without a server the run is
+    REFUSED (BUG-178; SQL Express is not used, anywhere).
 
 .PARAMETER Database
     Default: PimPlatform.
@@ -47,18 +49,25 @@
     Default ON: connect + plan, change nothing. -WhatIfMode:$false applies.
 
 .EXAMPLE
-    .\Invoke-PimMspFanout.ps1                       # plan, local registry
-    .\Invoke-PimMspFanout.ps1 -WhatIfMode:$false    # apply
+    .\Invoke-PimMspFanout.ps1 -ServerInstance <server>.database.windows.net -UseAzureSql                       # plan
+    .\Invoke-PimMspFanout.ps1 -ServerInstance <server>.database.windows.net -UseAzureSql -WhatIfMode:$false    # apply
 #>
 [CmdletBinding()]
 param(
-    [string]$ServerInstance = 'localhost\SQLEXPRESS',
+    [string]$ServerInstance = $env:PIM_SqlServer,
     [string]$Database = 'PimPlatform',
     [switch]$UseAzureSql,
     [switch]$WhatIfMode = $true
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 🔴 BUG-178 -- NO `localhost\SQLEXPRESS` DEFAULT (operator 2026-08-28: "SQL Express is not used, anywhere"). This is the
+# MSP fan-out: it writes accounts into managed tenants. A default that aims it at whatever SQL happens to be on the box
+# is the silent-default class BUG-78 recorded; refuse instead, and say what to pass.
+if (-not "$ServerInstance".Trim()) {
+    throw 'REFUSED: no SQL server for the platform registry -- pass -ServerInstance <server>.database.windows.net (with -UseAzureSql) or set PIM_SqlServer. There is no local default: SQL Express is not a store this product uses.'
+}
 
 # Pure-REST auth + directory reads + account write (no Microsoft.Graph module).
 # PIM-Rest gives us Get-PimRestToken / Invoke-PimGraph against a per-tenant SPN +
@@ -248,7 +257,7 @@ foreach ($grp in $byTenant) {
             StatusChangeCode      = ''
             Ring                  = "$($a.AdminRing)"
             # MSP-2: this used to be hardcoded ''. The baseline bundle goes to the trouble of
-            # carrying + SIGNING Template (New-PimBaselineBundle selects it, the downlink stages
+            # carrying + SIGNING Template (Get-PimBaselineBundlePayload selects it, the downlink stages
             # it), and the fan-out then threw it away on arrival -- so the value could never
             # reach the slave no matter what the master published.
             Template              = "$($a.Template)"

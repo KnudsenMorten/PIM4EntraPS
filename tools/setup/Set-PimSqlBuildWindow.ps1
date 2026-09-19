@@ -40,8 +40,11 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 $sub = @('--subscription', "$SubscriptionId".Trim())
 $srv = ("$SqlServerName".Trim() -split '\.')[0]
-$acct = "$(az account show --query id -o tsv 2>$null)".Trim()
-if ($acct -ne "$SubscriptionId".Trim()) { throw "az context is '$acct', not '$SubscriptionId' -- refusing." }
+# BUG-215: every call below carries --subscription, so the DEFAULT context is irrelevant -- asserting
+# it (as this did) only pushed operators into `az account set`, which moves the machine-wide default
+# under every other session. Assert instead that THIS subscription is visible to the signed-in az.
+$acct = "$(az account show --subscription "$SubscriptionId".Trim() --query id -o tsv 2>$null)".Trim()
+if ($acct -ne "$SubscriptionId".Trim()) { throw "az cannot see subscription '$SubscriptionId' (read '$acct') -- refusing." }
 Write-Host "==> SQL build window: $Mode on $srv" -ForegroundColor Cyan
 $ErrorActionPreference = 'Continue'
 $readState = {
@@ -63,7 +66,11 @@ $shape = if (@($cur.privateEndpoints).Count) { 'privateEndpoint' } else { 'vnetO
 Note "now: shape=$shape publicNetworkAccess=$($cur.publicNetworkAccess) firewall=[$($cur.firewallRules -join ', ')] vnetRules=[$($cur.vnetRules -join ', ')] privateEndpoints=[$($cur.privateEndpoints -join ', ')]"
 if ($Mode -eq 'Show') { $v = Test-PimSqlBuildWindowState -State $cur -Want 'Closed'; Note "closed: $($v.ok) $($v.reasons -join '; ')"; return }
 if ($Mode -eq 'Open') {
-    if (-not "$HostIp".Trim()) { $HostIp = "$((Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 20).ip)".Trim() }
+    # IMP-49 t: SAY where the address comes from -- a third-party web service, unless -HostIp was given.
+    if (-not "$HostIp".Trim()) {
+        $HostIp = "$((Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 20).ip)".Trim()
+        Note "this host's egress IP: $HostIp -- read from https://api.ipify.org (a third-party service; pass -HostIp to skip the lookup)"
+    } else { Note "this host's egress IP: $HostIp (from -HostIp; no external lookup)" }
     if ("$HostIp" -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "could not determine this host's egress IP ('$HostIp')" }
     if ($shape -eq 'privateEndpoint') { Write-Warning "'$srv' has a private endpoint: this host can use the window only if its DNS resolves $srv.privatelink.database.windows.net (mgmt1's DNS does NOT -- measured 2026-09-17)." }
     if ($PSCmdlet.ShouldProcess($srv, "open build window for $HostIp")) {
@@ -74,7 +81,8 @@ if ($Mode -eq 'Open') {
     $fwIp = "$(az sql server firewall-rule show @sub -g $ResourceGroup -s $srv -n AllowSetupHost --query startIpAddress -o tsv --only-show-errors 2>$null)".Trim()
     Note "read back: publicNetworkAccess=$($after.publicNetworkAccess) AllowSetupHost=$fwIp"
     if ($after.publicNetworkAccess -ne 'Enabled' -or $fwIp -ne $HostIp) { throw 'build window did NOT open (see above)' }
-    Write-Host "    OPEN for $HostIp -- close it with -Mode Close (the build's last step does)" -ForegroundColor Yellow
+    Write-Host "    OPEN for $HostIp -- 'AllowSetupHost' STAYS until -Mode Close runs (the build's last step does). A build that stops early leaves it open for the resume; close it by hand if you do not resume:" -ForegroundColor Yellow
+    Write-Host "      Set-PimSqlBuildWindow.ps1 -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -SqlServerName $srv -Mode Close" -ForegroundColor Yellow
     Start-Sleep -Seconds 45   # SQL firewall changes take effect within ~a minute
     return
 }

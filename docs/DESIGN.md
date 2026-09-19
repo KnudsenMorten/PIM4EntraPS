@@ -223,9 +223,10 @@ PIM4EntraPS is **indirect-by-design** with one exception:
 | Daily admin work | Indirect (always) | Refactorable, auditable, offboard-safe. |
 | **Break-glass accounts** | Direct (1–2 total) | Must work when Graph/PIM is unavailable. Recovery path. |
 
-Break-glass accounts live in a small dedicated `Account-Definitions-BreakGlass.csv`
-and are wired by the launcher / bootstrap, not the baseline engine. Their
-existence is intentional design.
+Break-glass accounts are created outside the baseline engine. Their existence is
+intentional design. The list of accounts that PIM must **never** disable, revoke or
+offboard is stored in SQL (`pim.Settings['BreakGlassAccounts']`) and edited in the
+Manager's Settings (§17.9b).
 
 Why not direct for normal admins:
 
@@ -523,6 +524,22 @@ container, or from the scheduler with no `Connect-*` step.
      opt-in `PIM_AccountDisableEnabled` is explicitly set; with it off, zero accounts are ever
      disabled. (Defence-in-depth: the `Admins` provider's `ApplyRemove` re-checks this opt-in,
      so even a direct call cannot disable when the feature is off.)
+- **Removal budget (G4)** (`Test-PimRemoveBudgetAllowed`, `PIM-DisableGuard.ps1`). The breaker above
+  guards one provider class; the budget guards **every** scope. It is always on, whatever the
+  environment. When one scope pass would remove (or change the type of) more items than the budget,
+  the pass drops **all** of that scope's removals: nothing is partly removed. The budget is
+  `PIM_RemoveMaxCount`, default 5 with a hard ceiling of 5. An operator may lower it, and a higher
+  value is clamped with a warning. The check runs for a plan and for a real run, so a plan shows
+  the abort too. **Only a real run alerts** (`Write-PimRemoveBudgetAlert`): it writes the
+  `engine.remove.budget.exceeded` audit event and mails the operators. A plan (`-WhatIf`, such as
+  the read-only convergence check) logs the finding and sends nothing, because it could not have
+  removed anything (v2.4.371).
+- **Safety alerts are really sent.** The removal budget, the account-disable breaker and the policy
+  mass-change hold (§6) all alert through one sender, `Send-PimSafetyAlert`. It uses the
+  `alert-notice` mail template, sends to `PIM_AlertRecipient` together with the Manager's Alerting
+  recipients, and reads each send result. It reports `sent`, `partial`, `failed`, `no-recipient`,
+  `no-mailer` or `debounced`, and records the alert in the shared alert feed. The console says
+  "emailed" only when a mail was sent.
 - **Delta** — create/update everything that differs (no prune).
 - **Delta + `-FromQueue` / `-Changes`** — apply **only** the pending commit-queue
   `(entity,key)` pairs. A Manager commit enqueues changes; the engine applies just
@@ -547,16 +564,46 @@ top of the engine delta — it does NOT reimplement reconciliation.**
   (Admin+, the page's **Check now**) queues a `drift-snapshot` trigger (`Add-PimJobTrigger`,
   deduplicated by type + scope) and asks for an immediate tick start (§11.3). The page
   (**Reviews & controls › Drift: live vs desired**) renders one expandable row per scope.
-- **"Apply now" is the gated remediation.** `Get-PimDriftRemediationPlan` (pure) narrows the
-  report to ONLY the selected drift and returns the `(entity,key)` change list, which is applied
-  through the engine's change-restricted path via `-Changes` — `-Mode Delta` for the selected
-  missing/changed, and **`-Mode Full -Prune` only when a selected `extra` was explicitly opted
-  in** (`-AllowRemove`; an explicitly-selected extra without the opt-in is *refused*, never
-  silently dropped or removed). Remediation therefore inherits all the destructive-safety guards
-  above (empty-desired prune refusal, the account-disable circuit breaker, the approval gate), and
-  a single click can never destructively remove a live delegation. Wired as
-  `POST /api/drift/remediate` (Admin-gated, audited as `governance.drift.remediate`); detected
-  drift also raises the `drift` Manager alert.
+- **"Apply now" queues the engine; the Manager never runs it.** `POST /api/drift/remediate`
+  (Admin, and refused for a caller whose access a portal profile scopes, because the reconcile is
+  tenant-wide) queues an `engine-delta` trigger for scope `All` (`Add-PimJobTrigger`) and asks for
+  an immediate tick start, exactly like **Run now**. It answers `202 queued`. The engine then
+  re-applies the desired state under its own identity, and that corrects the selected
+  missing/changed drift. Removing an `extra` is **refused** (`409`, nothing queued): a scheduled
+  reconcile never prunes, so such an item is revoked through the queued revoke path, or given a
+  desired row if it should stay. The request is audited as `governance.drift.remediate.queued`.
+  (Before v2.4.370 the handler ran the engine inside the web process.) Detected drift also raises
+  the `drift` Manager alert.
+
+**Coverage & gaps — what PIM does not delegate yet (`PIM-Coverage.ps1`).** Drift compares what PIM
+manages; coverage compares what EXISTS with what PIM delegates, for every workload.
+
+- **The report is computed in the scheduler.** Job `coverage` (default every **720 min**) reads the
+  tenant caches (Entra role catalog, `workload-roles:intune` / `workload-roles:defender` from the
+  discovery jobs, Azure subscriptions + management groups, the active-assignments snapshot), reads
+  the Power BI workspace list through the admin API, and compares them with the definition and
+  binding rows. It stores ONE document in `pim.TenantCache` kind `coverage-report`. Each row is
+  **Covered**, **Gap**, **Orphan group** (a group PIM defines that holds nothing), **Unmanaged
+  binding** (a binding to a group PIM does not define), **Wrong permissions** (a live role whose
+  permissions differ from the stated ones), **Unmanaged privileged group** (a PIM for Groups group
+  no definition covers, with what it grants: Entra roles, app role assignments, licences) or **Not
+  checked** (the source could not be read, with the reason; never shown as covered).
+- **"Is it ours"** is decided by the definition rows, the GroupTag and the tenant's naming pattern,
+  never by a fixed prefix.
+- **Every Gap carries a proposal made of units.** A unit is one group plus its binding, named from
+  the tenant's pattern and levelled by the level rule: an Entra role mirrors the Entra pack (a
+  role-assignable group + an Eligible role binding, L0 for privileged roles, else L1); Intune and
+  Defender mirror their pack v2 (group + workload binding; managers/admins L3, operators L4,
+  readers L5, Defender readers L4); an Azure scope gets Reader (L4, Active) and Contributor (L3,
+  Eligible) groups at that scope. A group that is already defined gets the binding only.
+- **The page reads the stored report** (`GET /api/coverage`, any role; **Reviews & controls ›
+  Coverage & gaps**). **Check now** (`POST /api/coverage/check`, Admin+, audited) queues a
+  `coverage` trigger and starts the tick. Every gap unit is pre-selected; staging puts each selected
+  unit whole into Pending changes (a unit whose second row fails is taken back), and the normal
+  review and commit follow. Orphans and unmanaged groups are review-only.
+- **New findings are mailed.** New gaps, orphans, unmanaged bindings, wrong permissions or unmanaged
+  privileged groups since the previous report raise the `coverage` alert. The first report is the
+  baseline and mails nothing.
 
 **Precondition guard (fail-hard preflight).** Before any provider runs, the entrypoint
 (`Invoke-PimEngineCore.ps1`) verifies the inputs are real and refuses to proceed otherwise —
@@ -714,6 +761,12 @@ app-registration installer and the admin-consent grant are REST + certificate
 (no Microsoft.Graph SDK, **no device-code** — which managed Conditional Access
 blocks), and the MSP fan-out authenticates per-tenant and reads the tenant's
 default domain over REST.
+
+**Admin account domain (v2.4.377).**
+- **One setting:** each tenant's admin UPN domain is the naming key `AdminAccountUpnSuffix`, edited under **Settings → Admin account domain** (`GET` / `PUT /api/settings/admin-domain`).
+- **Saving:** SuperAdmin only, and audited as `settings.admin-domain.save`. Only blank or one of the tenant's verified domains is accepted. The domains are read live from Graph `/domains` and cached as the tenant-cache kind `tenant-domains`. When they cannot be read, only blank can be saved.
+- **Engine resolver:** `Get-PimAdminUpnDomain` checks, in order: an explicit per-run pin, then the setting, then the tenant's default verified domain. It is used for the create, for resolving a bare user name to an account (the setting's domain is tried first, then the default), and for offboarding.
+- **The engine now reads your naming:** `Import-PimSettingsFromStore` flattens the stored `NamingConventions` record into top-level keys, as the Manager already did. Before this, every engine-side name used the shipped defaults. A key stored as its own settings row still wins over the same key inside the record.
 
 **Admin-account writes over REST.** Creating and updating cloud admin accounts —
 the part the MSP fan-out and the local apply actually drive — runs on the same
@@ -878,6 +931,13 @@ The auto-disable date is visible and editable on the same screen: its own column
 whether it has already passed, whether it falls inside the next 14 days, and whether the row still
 uses the old column name — and an editable field per admin whose help text states the effect
 (disable, never delete). Saving it clears the old column, so an edit cannot create a conflict.
+**A date at or before now is an offboard, not a contract end** (v2.4.370): it would disable the
+account on the next run. `POST /api/admin-accounts/modify` therefore does not write it. It saves the
+other fields and holds the date. With a justification it raises an **offboard approval request**;
+without one, the response says the date was not saved and how to raise the request. A different
+administrator approves and executes that request, which stages the disable for commit. Either way
+the hold is audited (`admin.modify.offboard-held`). A date that cannot be read counts as immediate.
+A future date is saved as before.
 
 It runs on its own scheduler job (`admin-offboarding`, every 30 min) rather than only inside a
 daily prune. Gates, decided for the whole pass before anything is written:
@@ -899,7 +959,7 @@ template version and which are **Behind / Ahead / NeverApplied**. The pure matri
 builder `Get-PimScopeConformance` takes the desired versions (per scope) + the
 applied versions and returns one annotated row per scope; `Set`/
 `Get-PimScopeAppliedVersion` persist the applied version per `<tenant>|<scope>` in
-the **same local state file** as the template stamp (under a distinct
+the **same SQL document** as the template stamp, `pim.Settings['ConformanceTemplateState']` (under a distinct
 `scopeVersions` map — the per-template stamp is left intact). The version stays
 **local** (consistent with the ring-rollout model).
 
@@ -927,31 +987,40 @@ thinly:
   rollup behind a "roll v_N to ring R and below" wave (a deploy to ring R reaches
   every band with ring ≥ R; the GUI sums them).
 - **`Get-PimFleetStateForInstance`** (one read) resolves a single instance's standing
-  from its **local** `state/template-state.json`: every `<tenant>|<templateId>`
-  applied-version stamp, plus an optional root **`fleetRingByTenant`** ring stamp the
-  deploy writes (so the matrix knows the ring of an instance it is not the active one
-  for). It tolerates a missing/garbage file (empty maps, no throw), so a
-  never-deployed tenant is still a valid all-`NeverApplied` row.
+  from the template-state document in SQL, `pim.Settings['ConformanceTemplateState']`:
+  every `<tenant>|<templateId>` applied-version stamp, plus an optional root
+  **`fleetRingByTenant`** ring stamp the deploy writes (so the matrix knows the ring of an
+  instance it is not the active one for). It tolerates a missing or unreadable document
+  (empty maps, no throw), so a never-deployed tenant is still a valid all-`NeverApplied` row.
 
 The Manager exposes two **read-only** routes (no tenant write): `GET
-/api/conformance/fleet` (the matrix — built by reading **every** managed instance's
-local state file; the active instance contributes its **live** ring via
-`Get-PimTenantRing`, others use their stamped ring, defaulting to 0/production) and
-`GET /api/conformance/ring-plan?template=` (the ring bands). The single-tenant
-`deploy` handler now also stamps the active tenant's ring into `fleetRingByTenant` so
-later fleet reads have it. The **actual** per-tenant deploy is unchanged — it still
-goes through the proven, ring-gated `Get-PimRollForwardRows` +
-`Apply-PimWorkloadAssignments` path; the fleet view is the bird's-eye planner, never
-a second apply path. The Template Rollout tab carries a **This tenant / Fleet (all
-tenants)** toggle; the Fleet view renders the matrix + the ring-wide rollout picker.
+/api/conformance/fleet` (the matrix for the active SQL instance; the active instance
+contributes its **template-catalog ring**, derived from its update ring as described in the
+per-entry ring section below, and other instances use their stamped ring, defaulting to
+0/production) and `GET /api/conformance/ring-plan?template=` (the ring bands). The
+single-tenant `deploy` handler also stamps the active tenant's ring into `fleetRingByTenant`
+so later fleet reads have it.
+
+**Deploy writes desired state; the engine applies it** (v2.4.370). `POST /api/conformance/deploy`
+(SuperAdmin) computes the in-scope, non-exempt entries with `Get-PimRollForwardRows` and merges
+them into the `PIM-Assignments-Workloads` desired-state rows through the same safe-commit path
+as Review & Save (snapshot, replication gate, delta guard, audit). A roll-forward row that would
+overwrite a **different** binding stored under the same key is refused with `409` and nothing is
+written. `whatIf` previews without writing. The commit starts a tick, and the engine's workload
+connectors provider (`New-PimWorkloadConnectorsProvider`) applies the rows on its next run; the
+Manager itself changes nothing in the tenant. The applied-version stamp records what was
+committed. The fleet view is the bird's-eye planner, never a second apply path. The Template
+Rollout tab carries a **This tenant / Fleet (all tenants)** toggle; the Fleet view renders the
+matrix + the ring-wide rollout picker.
 
 ### 6.3a Exemption register — reviewable waivers with revoke
 
 An exemption is a deliberate, time-boxed waiver that turns one missing template
 binding from a **Gap** into **Exempt** until it expires (expiry is mandatory — an
 exemption always lapses, then the item is re-checked; see § workload conformance).
-Waivers are persisted per Manager instance in the exemptions store (a JSON file
-under the instance config root, falling back to the shipped sample). The same pure
+Waivers are persisted per Manager instance in SQL, `pim.Settings['ConformanceExemptions']`
+(never the shipped sample, which would otherwise act as a live waiver). The approver recorded
+on a waiver is the signed-in identity, never a value the request names. The same pure
 helpers that the reconcile uses now also drive a **reviewable register**, so waivers
 are no longer write-only:
 
@@ -985,7 +1054,7 @@ and an entry deploys to a tenant only when `entryRing <= tenantRing`
 (`Test-PimRingInScope`). `Set-PimEntryRing` (pure — clones the template, sets the
 named entry's `ring`, throws on an unknown key) is the engine primitive; the Manager
 exposes it as `POST /api/conformance/promote` (`{ templateId, key, ring }`,
-SuperAdmin-gated, writes the updated template file, `400` on an unknown entry). To
+SuperAdmin-gated, `400` on an unknown entry or a ring outside 0–9). To
 make the endpoint observable + drivable from the GUI (the "no dead functionality /
 GUI↔engine alignment" rule), the per-tenant conformance matrix endpoint
 (`GET /api/conformance`) now also returns a `rings` map (entry key → current ring),
@@ -995,6 +1064,38 @@ re-reads the matrix on success and snaps the dropdown back to its prior value on
 failure so the GUI never drifts from the saved template); a non-SuperAdmin sees the
 ring read-only. This is distinct from the **admin** ring (per-administrator rollout
 ring, §17.5) — this one is the **template-entry** rollout wave.
+
+**Where `tenantRing` comes from** (operator decision 2026-09-18, built in v2.4.370). The template
+catalog ring of an environment is derived from its **Platform Updates Ring** (§11.6.0):
+
+`tenantRing = 2 − updateRing`
+
+| Update ring (§11.6.0) | Template catalog `tenantRing` | Receives |
+|---|---|---|
+| 2 (customers) | 0 | only fully promoted entries (entry ring 0) |
+| 1 (internal release testing) | 1 | entries at ring 0–1 |
+| 0 (development) | 2 | entries at ring 0–2, which includes every entry left at the default ring 2 |
+| not recorded, unreadable, or outside 0–2 | 0 | the most restrictive set; the reason is reported |
+
+The inversion is deliberate. The template rule is `entryRing <= tenantRing`, so a **higher**
+tenant ring receives **more** entries. The update ring counts the other way: update ring 2 is the
+customer ring, which receives changes **last**. The update ring is read from the record the
+environment's own update job writes, `pim.Settings['UpdateState'].ring` (§11.6.0), so the ring
+stays local to the environment and no master sets it. `ConvertTo-PimTemplateCatalogRing` (pure)
+and `Get-PimTemplateCatalogRing` (`PIM-Conformance.ps1`) implement it. Every `/api/conformance*`
+answer carries `tenantRing` together with `tenantRingSource` (`update-ring N` or `not recorded`)
+and `tenantRingReason`, and the Template Rollout tab shows both. `Get-PimTenantRing` is not used
+here: it drives the admin↔tenant ring filter, which is a different axis (§13.19).
+
+**Approvals and promotions are a SQL overlay, never a file edit** (v2.4.370). The shipped
+templates under `workloads/templates` are read-only: they ship with the image and every update
+replaces them. `POST /api/conformance/approve` and `POST /api/conformance/promote` record their
+decision in one document, `pim.Settings['ConformanceTemplateOverlay']`
+(`Set-PimTemplateOverlayApproval`, `Set-PimTemplateOverlayRing`). `Read-PimApprovedTemplates`
+merges that overlay over each shipped template on every read (`Merge-PimTemplateOverlay`). An
+approval is bound to the template version it approved, and the approver is the signed-in identity
+(`401` when there is none). Both are audited (`conformance.template.approve` /
+`conformance.template.promote`).
 
 ### 6.4 Workload-RBAC providers — Defender XDR & Intune
 
@@ -1056,6 +1157,47 @@ rest of the engine manages. The pure key + value-resolution + body builders
 > until it runs against a real enterprise app with the engine SPN granted
 > `AppRoleAssignment.ReadWrite.All` (or app owner) and the POST/idempotent-re-run/prune
 > cycle is confirmed end-to-end.
+
+#### 6.4a A permission group and its workload role are one unit
+
+A workload permission group is only useful together with its workload role, so the
+two are handled as one unit (`engine/_shared/PIM-WorkloadRoles.ps1`):
+
+- **Import.** A delegation pack ships each group with its binding row
+  (`PIM-Assignments-Workloads`). `/api/templates` returns the pairs as `units`;
+  the Create page ticks and unticks a group and its binding together, and Import
+  refuses half a unit and says why.
+- **Create.** The Groups provider does not create a new workload group while its
+  binding cannot be applied: the workload connectors are switched off, or the
+  binding's live read was refused. The group is created on the first run where the
+  binding can follow. Existing groups are never changed by this.
+- **Defender XDR role spec.** A Defender binding row may carry `Permissions`
+  (allowed resource actions) and `DataSources` (app scope ids, blank = all). With a
+  spec, `DefenderXdrRoles` owns the custom role named exactly like the group. It
+  creates the role when it is missing and keeps its actions equal to the spec. It
+  assigns the role with the spec's data sources. A difference in actions or data
+  sources is an update. A data-source change is applied by removing the old
+  assignment first, and an assignment shared with other principals is refused. A
+  row without a spec binds an existing role by name, as before. A role name that
+  two live roles share is refused, never guessed. A tenant that refuses a
+  permission because its prerequisite is missing gets a failure item that names
+  the prerequisite script.
+- **Desired meets live.** Defender and Intune bindings are keyed by group tag and
+  role on both sides, so a group that already holds its role is `nochange`.
+- **Live orphan warnings.** The `DefenderXdrRoles` and `IntuneRoles` live reads
+  also report three kinds of warning: a PIM workload group that holds no workload
+  role, a workload role held by a principal PIM does not define, and a Defender
+  role whose actions or data sources differ from its spec. They travel in the scope
+  result's `findings`. The drift snapshot lists them as `warning` items and counts
+  them toward drift; a warning that is also a plan item is counted once. An area
+  that was not checked stays "not checked".
+- **Discovery.** The `discovery-defender` and `discovery-intune` jobs read the live
+  role catalog into `pim.TenantCache` (`workload-roles:<service>`:
+  `{ read, reason, readUtc, roles }`). Defender also reads Microsoft's permission
+  catalog (`workload-actions:defender`). The jobs report roles no pack binds, and
+  Defender permission groups no pack's `knownActionPrefixes` covers, through the
+  discovery notice mail. A catalog that cannot be read is stored as not read and
+  fails the job.
 
 ### 6.5 Hybrid on-prem AD provisioning + gMSA/sMSA (planner + hybrid-worker seam)
 
@@ -1243,6 +1385,14 @@ names colliding for anyone using the documented name. The portal pair is now nam
 — `New-PimPortalApprovalRequest` / `Resolve-PimPortalApprovalDecision` — so the two contracts have
 two names and neither can shadow the other in any load order.
 
+**The break-glass account list is NOT in this queue (2026-09-19).** A change to
+`pim.Settings['BreakGlassAccounts']` is also maker/checker, but through its own always-on gate
+(`PIM-BreakGlassChange.ps1`, its own request row, Settings → Break-glass accounts; §17.9b): this
+queue's endpoints sit behind the `approvalsPreview` flag, its checker honours
+`$global:PIM_AllowSelfApprove`, and its records are read by the engine's offboard / revoke gates —
+none of which may apply to the list that exempts accounts from those gates. No `breakglass` action
+was added here, so no consumer of this queue can see or act on such a change.
+
 ### Maker/checker on sensitive authoring/onboarding (2026-06-16)
 
 Sensitive **Authoring / Onboarding** commits get a second-person approval gate **layered on the
@@ -1339,7 +1489,7 @@ this into the **existing** `POST /api/revoke` commit handler (additive, no route
 `preview` now reports `approvalRequired`, and an over-threshold commit without an Approved request is
 blocked **409** with `gate=no-approval` and instructions to raise a `revoke` approval on the Approvals
 tab; on a successful over-threshold commit the Approved request is latched Executed. The **Maintenance**
-tab is renamed **Maintenance & Revoke** with a destructive tooltip + in-context guidance (today the screen is **Review standing access**, §18.1g). Covered
+tab is renamed **Maintenance & Revoke** with a destructive tooltip + in-context guidance (today the screen is **Review current delegations**, §18.1g). Covered
 offline by `tests/PIM.RevokeExecution.Tests.ps1` (6/6, mocked pipeline) + live-HTTP asserts in
 `tests/Test-PimManagerEndpoints.ps1` + the GUI↔engine alignment check; the hosted/SQL Manager GUI smoke
 remains the live gate.
@@ -1356,15 +1506,34 @@ templates.
 
 ### Policy templates
 
-`templates/policy/*.policytemplate.json` (+ `*.policytemplate.custom.json`, custom
-id wins), single-level `extends` merge. A definition's `PolicyTemplate` column
-selects one; **blank = `default`** for groups, **blank = `EntraIDRoles_Standard`**
-for directory roles. Four ship today, in two families:
+`templates/policy/*.policytemplate.json` (seeded into `pim.Settings['PolicyTemplates']`),
+single-level `extends` merge. A row's `PolicyTemplate` column selects one by its **id**;
+**blank = the kind's default** — `Groups_Standard` for groups, `EntraIDRoles_Standard` for
+directory roles, `AzureRoles_Standard` for Azure resource roles. Six ship, one **Standard** and
+one **RequireApproval** per kind of policy:
 
-| family | templates | approval | `Admin_Eligibility` |
-|---|---|---|---|
-| **standard** | `default` (groups), `EntraIDRoles_Standard` (directory roles) | none | *empty* |
-| **approval** | `approval-required`, `EntraIDRoles_RequireApproval` | required | `Justification` |
+| kind | standard (no approval, `Admin_Eligibility` *empty*) | approval (required, `Admin_Eligibility` `Justification`) |
+|---|---|---|
+| **PIM for Groups** | `Groups_Standard` (formerly `default`) | `Groups_RequireApproval` (formerly `approval-required`) |
+| **Entra ID roles** (`appliesTo DirectoryRole`) | `EntraIDRoles_Standard` | `EntraIDRoles_RequireApproval` |
+| **Azure resource roles** (`appliesTo AzureRole`) | `AzureRoles_Standard` | `AzureRoles_RequireApproval` |
+
+**Ids, names, former ids and per-kind defaults (2026-09-19).** A template's **id** is its key in the
+store and is immutable — rows, `extends` and the defaults point at it; its **name** is a display label
+a SuperAdmin can change on the Policy templates page (`POST /api/policy-templates/rename`), which moves
+no reference and is not desired state (the BUG-55 hash ignores `id` and `name`, and compares `extends`
+by current id, so a rename is a fingerprint no-op). A reference resolves by id, then by the current
+name of exactly one template, then by a **former id** — `default` → `Groups_Standard`,
+`approval-required` → `Groups_RequireApproval` — in the engine, the validator, the catalog and the
+GUI alike, so existing rows keep working unchanged. The store upgrade renames a stored former key to
+its current id once (content and customisations kept, audited `policy.template.renamed`) and adds
+shipped ids it lacks, never overwriting a stored one. The default per kind is a setting,
+`pim.Settings['PolicyTemplateDefaults']` = `{ group; directoryRole; azureRole }`, chosen per kind on the
+same page (`PUT /api/settings/policy-template-defaults`, SuperAdmin, each value a template of that
+kind); unset, the built-in defaults above apply, which is exactly the behaviour before the setting
+existed. `AzureRoles_*` carry the rules Azure policies had from `EntraIDRoles_*` until then, rule for
+rule, so the Azure default switch changed no policy; while a store has no `AzureRoles_Standard` yet,
+Azure falls back to `EntraIDRoles_Standard`.
 
 **Activation always requires MFA + justification** — that is the control that
 protects the privilege at the point of use, and it is untouched by everything
@@ -1376,8 +1545,9 @@ group-definition row — Roles, Services, Tasks, Processes, and now also `PIM-De
 purpose, because discovery auto-create writes every discovered Azure/Power BI resource there; that
 reason is about creating groups and says nothing about policy, so reading it here changes behaviour
 for exactly one kind of row — a Resources row whose template is **set**. A blank template still
-resolves to `default`, which is the same policy the baseline sweep already applies to a managed group
-with no definition row, so every existing row is unchanged.
+resolves to the group default (`Groups_Standard`, formerly `default`), which is the same policy the
+baseline sweep already applies to a managed group with no definition row, so every existing row is
+unchanged.
 
 **Choosing one in the Manager.** Both permission-group wizards offer a picker built from the
 tenant's OWN template store (`catalogs.policyTemplate` on `/api/settings/operational-policy`, read
@@ -1385,9 +1555,48 @@ from `pim.Settings['PolicyTemplates']` — never from the shipped files, so a cu
 template is offered and a template the engine could not find never is). **"Use default" is first and
 its value is empty**, which is what keeps a wizard run that does not touch the field byte-for-byte
 identical to before. A template is marked as needing approval from its own `Approval` rule, so no id
-is hard-coded in the page. An Azure permission group has no definition row of its own, so choosing a
-non-default template there stages a minimal `PIM-Definitions-Resources` row carrying the identity and
-the template — only when a non-default template was chosen.
+is hard-coded in the page. An Azure permission group is defined like every other permission group —
+by a `PIM-Definitions-Services` row (Workload `Azure`, the v1 model), which the engine creates the group
+from; its `PIM-Assignments-Azure-Resources` rows only bind it to a role at a scope. The template chosen
+for it is therefore stored on that Services row, like any other group's.
+
+**Seeing them, choosing per delegation, and Azure owners (REQ-L, 2026-09-19).** *Audit & Settings →
+Policy templates* is a read-only page (`GET /api/policy-templates`) that describes every template in
+the store in plain words — activation maximum, MFA / justification / ticket / authentication context,
+approval with its approvers and escalation, eligible and active expiry, the admin-path checks,
+notifications, the owner-role policy and any other rule — and lists the delegations that name it, how
+many get it as their type's default by leaving the column blank, and rows naming a template the store
+does not have. It resolves `extends`, former ids and the per-kind default (group definition →
+`Groups_Standard`; Entra role rows → `EntraIDRoles_Standard`; Azure role rows → `AzureRoles_Standard`;
+or what `PolicyTemplateDefaults` sets) exactly as the engine does, and a store or record type it cannot
+read is shown as not checked. A template's rules are not edited in the Manager; a SuperAdmin can rename
+it and set the per-kind defaults there. Every wizard that creates a group (the permission-group, Azure,
+target-first, Project and Role-group wizards) asks for its group policy, the Entra and Azure paths also
+for the role policy, each listing only its kind's templates. The role-assignment
+entities (`Roles-Groups`, `Roles-AUs`, `Azure-Resources`) carry `PolicyTemplate` and `ApproverUpns`
+columns, and the delegations table edits `PolicyTemplate` with a picker whose blank entry reads
+`[standard settings (<standard>)]`; an unknown stored value is kept and flagged, and the validator
+reports it (PIM-POL-001), as it does an approval template on an Entra role with no approvers
+(PIM-APR-001). An Azure permission group's **Owners** are staged on its `PIM-Definitions-Services`
+definition row, where the group-owners scope, the group's approval and the Azure role policy's approver
+fallback read them. The wizards, the target-first delegation and the Coverage & gaps proposals stage
+that definition and its `PIM-Assignments-Azure-Resources` binding(s) as one unit (a tag that is already
+defined gets the binding only); a binding alone names a group nothing defines, which the validator
+reports (PIM-FK-001) and the engine never creates. The engine also still honours owners named on a
+`PIM-Definitions-Resources` row — only on rows that name them, so a discovered resource is never given one.
+
+**Three policy kinds, chosen per delegation.** A delegation is governed by up to three policies, each
+stored where the engine reads it: the **group** policy (activating membership of the delegation group)
+on the group's definition row; the **Entra role** policy (activating the role while it is Eligible on the
+group) on its `Roles-Groups` / `Roles-AUs` rows; the **Azure role** policy (the same, for the Azure role at
+that scope) on its `Azure-Resources` rows. The target-first wizard asks for the group policy plus the
+Entra or Azure role policy (a workload delegation has the group policy only); the advanced Entra and
+Azure wizards do the same. Each picker lists only the templates written for its kind, blank reads
+`Use default (<standard>)` with that kind's standard template and stages nothing new, and a role picker says when the chosen
+assignment is Active and the role policy therefore does not apply. For existing delegations, *Delegations
+— edit in a table* also holds the permission-group definitions (Roles, Tasks, Services, Processes), so all
+three `PolicyTemplate` columns are edited in one place; each column offers only its kind's templates and
+keeps, marks and flags a stored value of the other kind.
 
 **Why `Admin_Eligibility` is empty on the standard family.** That rule governs what
 an admin must present when *granting* eligibility, and on a standard scope the
@@ -1583,6 +1792,12 @@ applies; it is never a delegation target.
   **group** holding `Owner` on a management group — a group, not an AU.
 - **Delegation = group membership only** (`AdminMembers` / `GroupMembers`). An
   admin never receives a role or an AU directly; they join a group.
+- **An AU-scoped role is a `PIM-Assignments-Roles-AUs` row**, the only entity the AU provider reads.
+  The `EntraRoles` provider grants at tenant scope. The "Create resource delegation" wizard therefore
+  stages an AU-scoped Entra delegation as a Roles-AUs row (v2.4.370; it used to stage a tenant-wide
+  row that only claimed an AU scope), stages nothing when an AU was asked for and the engine's
+  derivation did not scope to it, and shows in its
+  preview exactly the rows it will stage.
 
 ### 9.2 Delegated visibility & portal-admins (Manager)
 
@@ -1607,6 +1822,13 @@ columns, falling back to **parsing the group name** (the locked naming grammar) 
 so scoping works even before SQL columns are filled. Tier/level ceilings:
 `group.tier >= profile.tierMax`, `group.level >= profile.levelMax` (T0/L0 = most
 privileged = 0). SuperAdmin bypasses all.
+
+**The grid reads and writes only the caller's slice** (v2.4.370). `GET /api/csv/<entity>` returns
+only the rows the caller may see (`Get-PimManagerVisibleSlice`), not the whole stored set. The
+commit (`PUT /api/csv/<entity>`) **merges** what a scoped caller sends into the full stored set
+(`Merge-PimManagerVisibleSlice`): rows outside the caller's scope are kept untouched, and a
+submitted row that would overwrite one of them is refused (`403`, nothing saved). The gates, the
+delta guard, the commit and the audit all work on the merged set and its real diff (§18.1h).
 
 ### 9.3 Dev-mode "switch admin" (auth off) + the 4 personas
 
@@ -1848,16 +2070,16 @@ below is the **private-only** reference topology.
  └────────────────▲───────────────────────────────────────────▲────────────────────┘
         user sign-in │ (Easy Auth)              Graph/ARM REST  │ (app-only, PIM-Rest, no modules)
                      │                                          │
- ┌───────────────────┴──── VNet  vnet-platform 10.100.0.0/16 ───┴────────────────────┐
+ ┌───────────────────┴──── VNet  <platform-vnet> <address>   ───┴────────────────────┐
  │   ADMIN ACCESS BY LEVEL (private, from trusted subnets only)                        │
  │   ┌───────────────────────────────────────────────┐                                │
- │   │ PAW-tier0  10.100.8.0/24   L0/T0  ─ SuperAdmin │─┐                              │
- │   │ SAW-tier1  10.100.9.0/24   L1     ─ Admin      │ │  resolve private DNS         │
- │   │ mgmt       10.100.2.0/24   L2     ─ Reader/    │ ├──► pe-pim-manager ──► App     │
- │   │ (helpdesk)                          portal-adm │ │   (inbound PE)        Service │
- │   └───────────────────────────────────────────────┘ │                       B1      │
- │     remote admin ─ VPN / Bastion into the VNet ──────┘                       (Linux  │
- │                                                          App identity:        container)│
+ │   │ PAW-tier0  <paw-subnet>    L0/T0  ─ SuperAdmin │─┐                              │
+ │   │ SAW-tier1  <saw-subnet>    L1     ─ Admin      │ │  resolve private DNS         │
+ │   │ mgmt       <mgmt-subnet>   L2     ─ Reader/    │ ├──► pe-pim-manager ──► Manager │
+ │   │ (helpdesk)                          portal-adm │ │   (inbound PE)        (ACA app│
+ │   └───────────────────────────────────────────────┘ │                        on an  │
+ │     remote admin ─ VPN / Bastion into the VNet ──────┘                       internal│
+ │                                                          App identity:        env)      │
  │                                                          • system MI (passwordless)   │
  │                                                          • Easy Auth principal → RBAC  │
  │                                                            SuperAdmin/Admin/Reader     │
@@ -1870,7 +2092,7 @@ below is the **private-only** reference topology.
  │                                                       • pim.Rows / pim.Settings /      │
  │                                                         pim.ChangeQueue                │
  │                                   pe-pim-baseline ─► Storage (run staging)             │
- │   Private DNS: azurewebsites.net · database.windows.net · blob.core.windows.net        │
+ │   Private DNS: database.windows.net · blob.core.windows.net · vaultcore.azure.net      │
  └────────────────────────────────────────────────────────────────────────────────────┘
         ACR (container image, MI pull)        Key Vault (app-only cert/secret, MI-read)
 ```
@@ -1883,7 +2105,12 @@ below is the **private-only** reference topology.
 3. **Authorization** — the manager maps the signed-in principal to SuperAdmin /
    Admin / Reader, and **portal-admins** are delegated managers scoped by tier,
    level, service and scope (helpdesk L2 sees only its AU-scoped groups).
-   Fail-closed: unknown principal → Reader.
+   Fail-closed: a signed-in principal that no access source names → Reader; a request with no
+   authenticated principal → `401` (§11.5.2 E).
+
+The diagram shows the **private-only** variant. The Manager runs as a Container App (§11.4); on
+an internal-only environment its ingress is a static private IP inside the VNet. (The App Service
+hosting templates, which this topology was first drawn for, were retired in v2.4.370.)
 4. **Data** — the app reaches SQL only over the private endpoint via its managed
    identity (no password); SQL itself has no public access.
 
@@ -1903,7 +2130,7 @@ remain as a fallback for the local (on-box) edition where the modules exist.
 surfacing.** The live read takes minutes in a large tenant, so it never runs in the Manager's
 request loop. Scheduler job `active-assignments-snapshot` (default every **120 min**, editable on the
 Job schedule page; `PIM-ActiveAssignments.ps1`) performs the read and stores the result in SQL
-`pim.TenantCache` kind `active-assignments` with its timestamp. **Review standing access**, the
+`pim.TenantCache` kind `active-assignments` with its timestamp. **Review current delegations**, the
 revoke list and the Home expiring-access tile (`GET /api/active-assignments` →
 `Get-PimActiveAssignmentsCached`) serve that stored snapshot instantly, showing "as of" and flagging
 it stale when older than two cadences. **Refresh** queues an `active-assignments-snapshot` trigger
@@ -1993,20 +2220,18 @@ planes**, matching their trust levels (on-prem and Azure alike):
   fully compromised, it can only *request* template-shaped, in-scope changes that
   still pass approval.
 
-**Built reference (this environment, westeurope):** admin Manager host = App
-Service (`publicNetworkAccess=Disabled`), private endpoint in `vnet-platform/pim-pe`
-(10.100.20.0/24), inbound access-restricted to 10.100.2.0/24 (management) +
-10.100.8.0/24 (PAW) + 10.100.9.0/24 (SAW) + implicit deny-all. Registry SQL =
-serverless GP_S_Gen5_1, **Entra-only**, **public disabled**, private endpoint in
-the same `pim-pe` subnet; `privatelink.database.windows.net` zone linked to the
-VNet. Self-service app = a second App Service (private endpoint in a dedicated
-`pim-selfservice-pe` subnet, broad internal allow) — built with the §17.18
-delegation work.
+**Reference shape.** Admin Manager with no public network access, reached through a private
+endpoint and restricted inbound to the management, PAW and SAW subnets with an implicit deny-all.
+Registry SQL **Entra-only**, **public disabled**, private endpoint in the same subnet, with the
+`privatelink.database.windows.net` zone linked to the VNet. The self-service app is a second,
+separate app with its own private endpoint and a broad internal allow (§17.18). The first
+reference was built on App Service; the App Service hosting templates were **retired in v2.4.370**,
+and the product hosts on Container Apps only (§11.4).
 
-**DNS caveat (private endpoints):** a VNet using **custom DNS** (e.g. domain
-controllers `10.100.1.4/.5`) does not resolve the Azure `privatelink.*` zones.
+**DNS caveat (private endpoints):** a VNet using **custom DNS** (e.g. on-premises domain
+controllers) does not resolve the Azure `privatelink.*` zones.
 Production fix = a **conditional forwarder** (or **Azure DNS Private Resolver**) on
-the DCs sending `database.windows.net` / `azurewebsites.net` to `168.63.129.16` so
+the DCs sending `database.windows.net` / `blob.core.windows.net` / `vaultcore.azure.net` to `168.63.129.16` so
 the private zones resolve VNet-wide. Until then, the management host uses
 **hosts-file entries** to the private-endpoint IPs for bootstrap/testing.
 
@@ -2097,7 +2322,7 @@ Key semantics:
 | Engine **Full** run (whole-tenant reconcile) | scheduled (daily) | scheduler tick |
 | **Snapshots** (active assignments 120 min, drift 240 min) | scheduled **+** queued refresh | scheduler tick → `pim.TenantCache` |
 | **Verify convergence** (live vs desired, writes nothing) | scheduled (30 min) | scheduler tick |
-| **MSP pull** (templates MSP→local, by ring) | scheduled **+** on-demand | local scheduler pulls from the MSP store |
+| **MSP pull** (managed tenant) / **MSP publish** (master) | self-gated cadence set in the Job schedule (default daily) **+** Run now **+** publish on commit | their own Container Apps jobs, not the tick (§13.5b); the tick's `msp-pull` entry never pulls |
 | **Reminders** (upcoming expirations / renewals) | scheduled (12 h) | scheduler → templated mail |
 | **Escalations** (approvals aging past SLA) | scheduled (hourly) | scheduler → next approver layer + mail |
 | **Connectors** (workload role discover/apply) | invoked *by* the engine runs | in-process via PIM-Rest (not a separate scheduler) |
@@ -2232,6 +2457,16 @@ the read model without a new scheduler:
   here with its counts and can be approved (§17.7).
 - **Job schedule** — which job runs when, the area (scope) each covers, the mail jobs and their
   on/off state and cadence, visible by default with a plain-language explanation of every column.
+  On a managed tenant (S6) the **"Managed-tenant pull (Data Definition Updater)"** row, and on an MSP
+  master the **"Publish to managed tenants"** row, control a job that is not part of the tick
+  (§13.5b): on/off and an interval of 5–1440 minutes, saved as that job's own cadence
+  (`DownlinkSchedule` / `PublishSchedule`, audited `schedule.cadence.save`, stored only when it
+  changes), never into the tick's `JobSchedule`. The row shows what the job recorded — last run and
+  result, next due, a pending Run now — and **Run now** (`POST /api/job-schedule/run-now`, audited
+  `schedule.cadence.runnow`) sets the job's Run-now flag, so it runs on its next trigger (within 5
+  minutes) even when disabled. Changing either and Run now need **SuperAdmin**; Run now is refused
+  (`409`) where the job does not run from this environment. A cadence that cannot be read is shown as
+  an error, never as "daily, never run".
 
 `tools/pim-scheduler/Seed-PimSchedulerRuns.ps1` writes a representative state + history (incl. one
 in-progress run) so the pages are also pre-populated in a fresh/offline environment.
@@ -2262,25 +2497,28 @@ place:
   hosted SQL is **persistent** (serverless auto-pause disabled) so neither the health
   probe nor the first post-idle request cold-starts.
 - **VM** — runs the Manager + scheduler natively on a Windows VM as two restart-on-fail
-  scheduled tasks under a service account, sets the machine environment, opens the
-  firewall port, and (optionally) grants the VM's managed identity as a SQL
-  contained-DB-user — same MI-only, passwordless model as the container path.
-- **MSP** — deploys the container topology into the customer tenant, **imports the
-  centrally-built image into the customer registry** (build-once / import-per-customer;
-  the identity, SQL, license and config all stay local), and wires the ring-based
-  **pull-not-push** template sync onto the customer scheduler.
+  scheduled tasks under a service account, sets the machine environment, and (optionally)
+  grants the VM's managed identity as a SQL contained-DB-user — same MI-only, passwordless
+  model as the container path. A VM has no authentication edge, so the web Manager is deployed
+  **closed** unless a front end that forwards a signed Entra ID token is declared
+  (§11.5.2 C); only then is the firewall port opened.
+- **MSP** — the one-shot MSP build, `Invoke-PimMspBuild.ps1` (§13.5a), builds an MSP master or a
+  managed tenant from a machine-local file of ids and names, on the same container topology.
+  *(Retired in v2.4.370: the earlier per-customer MSP setup script, which deployed v1 worker apps
+  with a cross-tenant SQL connection string and named rings. The one-shot build replaces it.)*
 - **Engine app registration** — a REST + certificate installer (no PowerShell Graph/Az
   modules required) that creates/updates the engine app + service principal, issues or
-  reuses a self-signed certificate in the machine store, grants the engine Graph roles
-  + (optionally) Exchange app-only + Azure RBAC at the management-group root, and
-  writes the resolved identity into the engine launcher config.
+  reuses a self-signed certificate in the machine store, grants the engine Graph roles,
+  optionally activates Exchange Administrator **through PIM, time-bound**, optionally (opt-in)
+  assigns User Access Administrator at the management-group root, and writes the resolved
+  identity into the engine launcher config (§11.5.0).
 
 **Shared deploy library.** Every script prints a version banner (PowerShell / .NET /
 Azure CLI) up front, **refuses any region outside its EU allow-list** (West Europe, Denmark East,
 Sweden Central; France is explicitly denied for data residency), and
 ends by printing **exactly which DNS and private-link zones to add** for Entra Global
 Secure Access (Private Access) so cloud-only users reach the internal Manager without
-a VPN — the SQL `database.windows.net` zone, the App Service `azurewebsites.net` zone,
+a VPN — the SQL `database.windows.net` zone,
 the storage `blob.core.windows.net` and Key Vault `vaultcore.azure.net` zones, the
 GSA Private-Access app definition, and the conditional-forwarder needed when on-prem
 domain controllers are the VNet DNS. No real tenant, subscription, registry, SQL or
@@ -2334,12 +2572,21 @@ requires one (the Easy Auth sign-in registration). The mode only changes *where 
    `AdministrativeUnit.ReadWrite.All`, `PrivilegedAccess.ReadWrite.AzureADGroup`,
    `RoleManagementPolicy.ReadWrite.Directory`, `UserAuthenticationMethod.ReadWrite.All`,
    `Policy.Read.All`, `Domain.Read.All` — no Graph `Mail.Send`; sending is a scoped Exchange
-   assignment, §7), optionally Exchange `Exchange.ManageAsApp`, assigns **User Access
-   Administrator** at the root management group for Azure RBAC (to the runtime managed identity
-   when `-RuntimeMiObjectId` is given, which is the hosted case), and writes the
-   resolved tenant id / client id / cert thumbprint into the launcher config.
-   Add `-IncludeExchange` if the engine must set mailbox forwarding on new admin
-   accounts. *(A deprecated shim at `setup/Install-PimEngineAppRegistration.ps1`
+   assignment, §7), and writes the resolved tenant id / client id / cert thumbprint into the
+   launcher config. The Graph list is the same engine map the managed identities get
+   (`_PimSetupShared.ps1`), so the application and the managed identity cannot drift apart.
+   Two grants are **not** standing by default (v2.4.370):
+   - `-IncludeExchange` (with `-GrantConsent`), for an engine that must set mailbox forwarding on
+     new admin accounts: the **Exchange Administrator** role is activated for the service
+     principal **through PIM, time-bound** (`-ExchangeAdminDuration`, default `PT4H`), and read
+     back. It is never a permanent assignment made outside PIM.
+   - `-GrantRootUserAccessAdministrator` (**opt-in**) assigns **User Access Administrator** at the
+     root management group for Azure RBAC (to the runtime managed identity when
+     `-RuntimeMiObjectId` is given). That is standing tier 0 in Azure, so grant the narrowest
+     scope the engine manages instead when you can.
+
+   The installer ends by stating which privilege it left behind, and until when.
+   *(A deprecated shim at `setup/Install-PimEngineAppRegistration.ps1`
    forwards to this script for backward compatibility — use the `tools/setup/`
    one for new work.)*
 3. **A SQL store for the model.** **Azure SQL** (Entra/managed-identity auth
@@ -2412,9 +2659,10 @@ freshly staged copy of the public repository into an empty tenant.
    `-SkipAppReg`: the hosted engine uses its container's managed identity, so no separate
    engine application is needed. The **updater** step is skipped automatically for S2/S4
    without a published release feed — it reports how to update instead of failing (§11.6.2).
-   Optional: `-EasyAuthAllowedPrincipals` (assignment-required sign-in), `-Exposure internal`
-   (immutable once the environment exists), `-AzureRbacRoles 'User Access Administrator'`,
-   `-MailSender`.
+   Who may sign in is a required choice for a new Manager (§11.5.2 E): add
+   `-EasyAuthAllowedPrincipals <upn|group|objectId>,...` or `-EasyAuthAllowAllTenantUsers` (every
+   member account, never guests). Optional: `-Exposure internal` (immutable once the environment
+   exists), `-AzureRbacRoles 'User Access Administrator'`, `-MailSender`.
 
 4. **Verify.** Open the Manager address the deploy prints and sign in: the header shows the
    SQL store and the deployed version; **Jobs › Engine logs & errors** shows the engine job's
@@ -2447,9 +2695,19 @@ manager, scheduler, engine-delta/full, connector, delta-queue, discovery):
     -SubnetName snet-pim-aca -EnvName cae-pim `
     -AcrName <acr> -ImageRepo pim-manager -ImageTag <tag> `
     -SqlServerFqdn <server>.database.windows.net -SqlDatabase PimPlatform `
-    -SqlAdminClientId <aad-admin-spn> -SqlAdminClientSecret <secret> `
-    -DnsServer <ad-dns-host>
+    -AdminAppId <deploy-app-id> -AdminCertPem <deploy-cert.pem> `
+    -SqlAdminClientId <sql-admin-app-id> -SqlAdminCertThumbprint <thumbprint> `
+    -WorkerMode cron -DnsServer <ad-dns-host>
 ```
+
+The SQL admin step authenticates with a **certificate** (`-SqlAdminCertThumbprint`, found in the
+machine store) or as the signed-in administrator (`-UseSignedInAccount`, a member of the SQL admin
+group, §27.10); never pass a client secret. `-WorkerMode cron` replaces the always-on scheduler
+workers with the scheduled tick job (`ca-pim-tick`), the shape the one-shot deploy uses (§11.5.1).
+Since v2.4.373 `cron` is also this script's **default**. `-WorkerMode always-on` (the historical
+scheduler worker apps) is still accepted when passed explicitly. When `-WorkerMode` is not passed
+and the environment already runs those worker apps, the run keeps `always-on` and says so, so a
+direct re-run never reshapes an environment by itself.
 
 What it wires:
 - **`--ingress external`** → on an **external** environment (the default) the Manager is
@@ -2457,10 +2715,17 @@ What it wires:
   **private static IP** — the one ingress reachable from peered/hub/GSA clients.
   (`--ingress internal` is app-to-app only and would be unreachable from VNet clients — a
   multi-hour lesson baked into the script.)
+- **A new Manager is created closed** (v2.4.370). It is created on internal ingress, the closing
+  access restriction `pim-closed-until-easyauth` (whose only Allow rule is an address no client
+  has) is applied and read back, and only then is the ingress switched to external and read back
+  again. Any failure leaves the app internal or restricted, so it is never open without Easy Auth.
+  `Set-PimManagerEasyAuth.ps1` removes the restriction, last, once Easy Auth is configured, read
+  back and consented and the sign-in restriction is in place. Until then the address answers
+  `403`, and the deploy says so. An existing Manager is never re-closed by a redeploy.
 - **MI-only SQL** (`Grant-PimMiSql`): each worker's system-assigned managed
   identity becomes a **contained DB user**, with the SID derived from the MI's
   **appId** (not objectId), `TYPE=E`, `db_datareader`/`datawriter`/`ddladmin`.
-  The supplied `-SqlAdminClientId/-Secret` AAD-admin SPN is used **only** to
+  The SQL admin identity (certificate or signed-in administrator) is used **only** to
   create those users and is never stored in the apps. No SQL login, no
   Directory-Reader requirement.
 - **AcrPull** — after first create, each app pulls its image via its own managed
@@ -2474,48 +2739,71 @@ What it wires:
 **C. VM host (alternative) — `Setup-PimVM.ps1`.** Runs the Manager + scheduler
 natively on a Windows VM as two restart-on-fail scheduled tasks under a service
 account, sets the machine environment (`PIM_HOSTED=1`, `PIM_StorageBackend=sql`,
-SQL coordinates, `PIM_UseManagedIdentity=1` for the VM IMDS MI), opens the
-firewall port, and (with `-GrantSql -VmMiAppId … -SqlAdminClientId/-Secret`)
-grants the VM's MI as a contained DB user — the same passwordless model as the
-container path. Reachable directly on its IP:port from hub/peered/GSA clients —
-no ACA ingress quirks.
+SQL coordinates, `PIM_UseManagedIdentity=1` for the VM IMDS MI), and (with
+`-GrantSql -VmMiAppId …`) grants the VM's MI as a contained DB user — the same
+passwordless model as the container path.
+
+A VM has **no authentication edge**: nothing in front of it strips client-supplied identity
+headers. The script therefore sets the auth layer explicitly (`PIM_HOSTED_AUTH_LAYER`, see E):
+- `-AuthLayer None` (the default): the scheduler runs, and the web Manager is deployed **closed**.
+  Every identity header is refused and every request gets `401`. The firewall port is not opened.
+- `-AuthLayer SignedToken -TokenAudience <client id>`: for a front end that authenticates the user
+  and forwards a signed Entra ID token in `X-MS-TOKEN-AAD-ID-TOKEN`. Layer 2 is required, the
+  audience is pinned, and only then is the firewall port opened. The Manager is reached only
+  through that front end.
 
 ```powershell
 .\tools\setup\Setup-PimVM.ps1 `
     -SqlServerFqdn <server>.database.windows.net -SqlDatabase PimPlatform `
-    -TenantId <tenant-id> -Port 8080
+    -TenantId <tenant-id> -Port 8080 -AuthLayer SignedToken -TokenAudience <client-id>
 ```
 
-**D. MSP (per customer) — `Setup-PimMsp.ps1`.** Deploys the container topology
-**into the customer tenant** (it calls `Setup-PimContainers.ps1`), **imports the
-centrally-built image into the customer registry** (`az acr import`,
-build-once / import-per-customer; skip with `-SkipAcrImport`), and wires the
-ring-based **pull-not-push** template sync (the customer scheduler pulls only its
-ring's template rows from the MSP template DB — `-MspTemplateConn` stored as a
-container secret, `-Ring canary|broad|stable`). Identity, SQL, license and config
-all stay local to the customer; customer data never leaves the customer tenant.
-
-```powershell
-.\tools\setup\Setup-PimMsp.ps1 -CustomerName <slug> `
-    -SubscriptionId <sub-id> -TenantId <customer-tenant-id> -Location westeurope `
-    -ResourceGroup <rg> -VnetName <vnet> -VnetResourceGroup <vnet-rg> `
-    -AcrName <customer-acr> -ImageRepo pim-manager -ImageTag <tag> `
-    -SqlServerFqdn <customer-server>.database.windows.net -SqlDatabase PimPlatform `
-    -SqlAdminClientId <aad-admin-spn> -SqlAdminClientSecret <secret> `
-    -MspTemplateConn "<read-only conn string to MSP template DB>" -Ring stable
-```
+**D. MSP — `Invoke-PimMspBuild.ps1`.** The one-shot MSP build (§13.5a) builds an MSP master or
+a managed tenant from a machine-local file of ids and names: hosting through
+`Invoke-PimDeployAll` (managed identity only), the SQL admin group, hosting access, and on the
+master the registry, the signing key and the daily publish job; on a managed tenant the pull job.
+Identity, SQL, licence and configuration stay local to each tenant, and nothing crosses between
+tenants except the signed bundle (§13.7).
+*(Retired in v2.4.370: the earlier per-customer MSP setup script. It deployed v1 worker apps, stored
+a read-only connection string to an MSP template database in the customer, and used named rings.
+Nothing replaces the cross-tenant connection string: a managed tenant pulls a signed file.)*
 
 **E. Identity & access (Easy Auth, always; private-only optional).** The Manager is always
 behind **Easy Auth** (Entra interactive sign-in): the deploy's `easyauth` step creates (or reuses)
 the sign-in registration, wires it to the app, turns authentication on and **reads the
-configuration back**, failing the deploy rather than completing with an unprotected console. An
-optional `-EasyAuthAllowedPrincipals` list assigns the named users/groups, verifies the assignments,
-and only then sets *assignment required*, so the order can never lock everyone out; without it the
-deploy states that anyone in the organisation can open the Manager. For a **private-only**
+configuration back**, failing the deploy rather than completing with an unprotected console.
+
+**Who may sign in is an explicit choice** (v2.4.370). `Set-PimManagerEasyAuth.ps1` refuses, before
+it changes anything, unless it gets one of:
+- `-AllowedPrincipals <upn|group|objectId>,...` (`-EasyAuthAllowedPrincipals` on the deploy):
+  exactly these principals, plus the deploy identity; or
+- `-AllowAllTenantUsers` (`-EasyAuthAllowAllTenantUsers`): every **member** account, never a guest.
+  It is implemented as a dynamic security group whose rule is
+  `(user.userType -eq "Member") and (user.accountEnabled -eq true)`, assigned to the enterprise
+  application. A new dynamic group admits people only once Entra has evaluated it, so it fails
+  closed for the first few minutes.
+
+Either way the script assigns, verifies the assignments, and only then sets *assignment required*,
+so the order can never lock everyone out. The only exception is an application that is already
+assignment-required: its restriction was chosen earlier, is re-read, and is kept. As its last step
+the script opens a Manager that was created closed (B). For a **private-only**
 deployment additionally keep public network access disabled, the private endpoint inbound only,
 and inbound access restricted to the management / PAW / SAW subnets (the defense-in-depth layers of
 §11.1). The authenticated principal maps to Reader / Admin / SuperAdmin / Delegated (`ManagerAccess`
-in `pim.Settings`, §17.12); unknown principals fail closed to Reader.
+in `pim.Settings`, §17.12); a signed-in principal that no access source names is a Reader.
+
+**No principal is a `401`, never a Reader** (v2.4.370). A hosted request with no authenticated
+principal resolves to the role `None`, which ranks below Reader, and the `/api` gate answers `401`
+before any handler runs. The page token is one per process, so holding it proves nothing about who
+is calling; an `/api` call still needs its own principal.
+
+**The auth layer in front is an explicit fact** (`Get-PimHostedAuthLayer`, v2.4.370):
+
+| Layer | Meaning | Resolved when |
+|---|---|---|
+| `easyauth` | the platform edge strips client-supplied `X-MS-*` headers and injects its own | `PIM_HOSTED_AUTH_LAYER=easyauth`; or unset on Container Apps / App Service, the hosts that offer Easy Auth |
+| `signed-token` | layer 2 is **required**; with no edge headers at all, identity may come from the verified token alone, but only with the issuer **and** the audience pinned | `PIM_HOSTED_AUTH_LAYER=signed-token` |
+| `none` | nothing strips the headers, so **every** header identity is refused | unset on any other host; or any unrecognised value (a typo in a security setting fails closed) |
 
 **The hosted Manager VERIFIES that principal — it does not simply trust the
 header** (`engine/_shared/PIM-HostedAuth.ps1`, added 2026-08-05). Two layers:
@@ -2534,13 +2822,22 @@ header** (`engine/_shared/PIM-HostedAuth.ps1`, added 2026-08-05). Two layers:
   `alg:none` and HMAC alg-confusion are refused; a missing token or an
   unavailable JWKS **fails closed**. Opt-in because it requires the auth edge to
   store tokens; enabling it without that would lock the Manager out.
+  **The issuer is pinned to this tenant** (v2.4.370). Entra's signing keys are shared across
+  tenants, so a signature check alone would accept a token minted in any tenant. When
+  `PIM_HOSTED_AUTH_ISSUERS` is unset, the expected issuers are derived from
+  `PIM_HOSTED_AUTH_TENANT` or the Manager's tenant id (`Get-PimHostedDefaultIssuers`: the v2.0
+  and v1 issuer of that tenant). The audience is pinned by `PIM_HOSTED_EASYAUTH_AUD`.
 
 Be precise about what each layer buys: the `X-MS-CLIENT-PRINCIPAL*` headers
 carry no signature and **cannot** be cryptographically verified by the app —
 they are trustworthy only because the edge strips inbound copies. Layer 1
-therefore blocks spoofing but still *assumes* the edge is in front. Layer 2 is
+therefore blocks spoofing but still *assumes* the edge is in front, which is why an auth layer of
+`none` refuses the headers outright. Layer 2 is
 what makes spoofing cryptographically impossible. The Manager prints which layer
 is active at startup (`[auth] posture=edge-consistency|signed-token|local`).
+A local (loopback) Manager started with an interactive SQL sign-in, such as the break-glass
+console (`Start-PimEmergency.ps1`), acts as the UPN in that sign-in's token, not as the Windows
+account, so the access model and the audit trail key on the same identity.
 
 **`GET /` requires a trusted principal in hosted mode.** The SPA page embeds the
 `/api` bearer token in its HTML, so serving it unauthenticated made that token
@@ -2579,13 +2876,13 @@ fallback moved.
 **F. DNS / GSA / private-link.** Each setup script ends by printing **exactly
 which zones to add** so cloud-only admins reach the internal Manager without a
 VPN, via **Entra Global Secure Access (Private Access)**: the SQL
-`privatelink.database.windows.net` zone, the App Service
-`privatelink.azurewebsites.net` zone, the storage
+`privatelink.database.windows.net` zone, the storage
 `privatelink.blob.core.windows.net` and Key Vault `privatelink.vaultcore.azure.net`
 zones, the GSA Private-Access app definition, and the **conditional forwarder**
 needed when on-prem domain controllers are the VNet DNS (a custom-DNS VNet does
-not resolve the Azure `privatelink.*` zones — forward `database.windows.net` /
-`azurewebsites.net` to `168.63.129.16`). For the ACA internal env the Manager is
+not resolve the Azure `privatelink.*` zones — forward `database.windows.net`,
+`blob.core.windows.net` and `vaultcore.azure.net` to the Azure platform DNS address,
+`168.63.129.16`). For the ACA internal env the Manager is
 a **static private IP** behind an AD DNS A record (registered by `-DnsServer`),
 not a privatelink zone.
 
@@ -2719,6 +3016,43 @@ is decided by its **release ring**, never by "newest available":
   `-OverrideRingGate -Reason`, which is audited. A verified host-side roll of a ring 0/1 environment advances
   that ring in the channel, so the cloud job and the host task can never move an environment in opposite
   directions; ring ≥ 2 is never written automatically.
+- **No ring is not "no rules"** (v2.4.370). `Test-PimRollRingGate` (`tools/setup/_PimUpdateRing.ps1`, called
+  through `Assert-PimRollRingGate`) decides every host-side roll:
+
+  | The target environment | Host-side roll |
+  |---|---|
+  | nothing PIM is deployed in the resource group yet (greenfield) | allowed: a first install is not a roll |
+  | deployed, but no updater or no `PIM_UPDATE_RING` | **refused**, unless the same deploy run declares the ring it installs (`-PendingUpdateRing`), which is then gated exactly like a real ring |
+  | updater cannot be read | refused |
+  | ring 0 or 1 | allowed (those rings get every verified build) |
+  | ring ≥ 2 | allowed only for the version the ring approves; no source, an unreadable channel or no entry is a refusal |
+
+  An environment deployed before the ring existed therefore cannot be moved to an arbitrary version. The ways
+  past are named: give it a ring (`Deploy-PimUpdateJob.ps1 -UpdateRing <n>`), or roll exactly one version with
+  `-OverrideRingGate -Reason` **and** an explicit target version. An override never lets through "whatever
+  this run builds". Every reader of `PIM_UPDATE_RING` parses it through one function,
+  `ConvertTo-PimUpdateRingNumber` (range 0–3).
+- **Drift is measured against the ring** (v2.4.370). `Test-PimDeployedVersionDrift.ps1` expects each
+  environment to run the version **its ring approves** (`Get-PimRingVersion`), not the repository's
+  `VERSION`. It discovers the v2 apps and jobs in a required resource group, and its remedy names only the
+  approved version. It never tells anyone to move an environment backward. Exit `0` = every component runs
+  what its ring approves, `1` = drift, `2` = could not check (no ring, an app that could not be read, no
+  resource group). `2` is never read as either answer.
+- **The host-side sync targets the ring's version.** `Invoke-PimSyncAutomateIT.ps1` reads the environment's own
+  updater and rolls to the version its ring approves in `channel.json`, never to the newest tag in the
+  registry. No ring, an unreadable channel or nothing approved is a refusal, not a fallback. An environment
+  whose running image is pinned by a digest with no resolvable version tag is refused too, because a roll
+  that cannot prove it is forward does not happen.
+- **A backward ring fails the updater install** (v2.4.370). When `Deploy-PimUpdateJob.ps1` installs the
+  updater and the channel report says the ring approves a version **below** the one the environment runs
+  (`Get-PimUpdateRingChannelReport`, `backward = $true`), the deploy exits `1` and says so. It used to print
+  the warning and report the updater as installed.
+- **`channel.json` is written with Entra ID, and read however it is served** (v2.4.370/371).
+  `Update-PimRingChannelVersion` uploads with `az storage blob upload --auth-mode login`; no storage account
+  key is read. The identity in the az profile needs **Storage Blob Data Contributor** on the source container.
+  A channel blob served as `application/octet-stream` arrives as bytes; the readers decode it as UTF-8
+  before parsing. Before v2.4.371 such a channel read as "not valid JSON", and the drift check, the sync and
+  the updater installer all reported "nothing approved".
 
 #### 11.6.1 The flow
 
@@ -2815,8 +3149,13 @@ git pull
    advance the recorded baseline past what was actually shipped.
 4. **schema upgrade** — apply the idempotent CREATE/ALTER if the release needs
    it; additive and re-runnable.
-5. **smoke** — run `tests/live/Test-PimManagerHostedSmoke.ps1`. Healthy = exit 0,
-   zero failures.
+5. **smoke** — run `tests/live/Test-PimManagerHostedSmoke.ps1`. Its exit code has three
+   meanings (v2.4.370): `0` = every check that applies ran and passed (healthy), `1` = a check
+   failed, `2` = nothing failed but at least one check was **skipped**, so the gate did not run
+   in full. `2` is **never** healthy: `Invoke-PimUpdate` and `Invoke-PimDeployAll` report the run
+   as *unverified* (not rolled back, because the roll passed the roller's own release gate), and
+   the host-side sync (`Invoke-PimSyncAutomateIT`) rolls an unverified revision back exactly like
+   a failed one. `-AsReleaseGate` turns a skip into a failure.
 6. **rollback-on-fail** — on a real smoke failure, **auto-roll-back** to the
    captured pre-update revision (`Update-PimContainers.ps1 -Rollback` — an instant
    revision reactivate) and fail loudly.
@@ -2943,8 +3282,10 @@ step's runner.
   fact is treated as NEEDED (fail-safe — never silently skip a real change). `-WhatIf`
   (default) → every step `plan` only; `-ValidateOnly` → only the verify step runs.
 - `Get-PimDeployVerifyVerdict` — combines the smoke + validation exit codes into healthy /
-  unhealthy; a **self-skip** (exit `< 0`, e.g. no `az` / not logged in) is *UNVERIFIED, not
-  a fail*; reuses `Get-PimVerifyVerdict` for the rollback math.
+  unhealthy; a **self-skip** (exit `< 0`, e.g. no `az` / not logged in) and a smoke that
+  **skipped checks** (exit `2`, v2.4.370) are *UNVERIFIED, not a fail* and roll nothing back; a
+  verify in which neither the smoke nor the validation ran is also unverified, never `success`;
+  reuses `Get-PimVerifyVerdict` for the rollback math.
 - `Get-PimDeployRollbackPlan` — on a failed verify (or a failed step that halts the run),
   rolls back **only the code step**, in reverse run order, to the captured pre-deploy ACA
   revision. Schema upgrades are idempotent + non-destructive and are **never** auto-reverted;
@@ -2975,13 +3316,14 @@ onto the existing knobs (config variant, update-source profile, ring gating,
 active license edition, hosting location, SPN model) are **built and
 offline-verified**, and the update-source selector + license-tier gating are wired
 end-to-end through the entry points (`-Scenario S1..S6` on `Invoke-PimUpdate` /
-`Invoke-PimDeployAll` / `Build-PimManagerImage`). The **MSP-managed downlink/sync
-runtime (S5/S6)** — the ring-gated pull of the signed baseline *from the master*,
-the master→managed admin/permission sync, hosting-location branching, and SPN-model
-branching — is **plan-surfaced but not yet wired live**. None of S1–S6 is
-"delivered" in the §19 sense until it is verified against a live deployment; a
-**3-tenant materialization** (one master, two managed test tenants) is the
-release gate. The diagrams below mark every not-yet-live element with `⧗ pending`.
+`Invoke-PimDeployAll` / `Build-PimManagerImage`). The **locally hosted managed tenant
+(S6)** is **wired and verified live**: the master's publish job and the managed tenant's
+scheduled pull job ran on a live master / managed pair on 2026-09-15 (§13.5a: the reaching
+admins, groups, memberships and role binding arrived and were created, the rest did not), and
+again on 2026-09-18 on the public-but-signed transport with a pinned signing key, the central
+kill checked and the anti-rollback floor raised (§13.17). The **central-hosted managed tenant
+(S5)** is being decommissioned (below) and is not being wired further. The remaining `⧗ pending`
+marks in the diagrams below belong to S5 only.
 
 #### Scenario overview
 
@@ -2999,6 +3341,12 @@ solution can reuse the same descriptor and supply only its own bindings); only t
 | **S5** | MSP **managed** | Internal/AutomateIT | **from master, ring-gated** | **central** (MSP tenant) | **multi-tenant application** (crosses tenants) | admins + permissions | MSP — paid (Pro) edition, details to follow |
 | **S6** | MSP **managed** | Internal/AutomateIT | **from master, ring-gated** | **local** (managed tenant) | managed identity (hosted) | admins + permissions | MSP — paid (Pro) edition, details to follow |
 
+*"Update source: from master, ring-gated"* is the catalog value (`from-master-by-rings`). As built,
+what a managed tenant takes from the master is **data** — the signed bundle, filtered by the
+managed tenant's own local ring (§13.5a). Its **code** updates, like every hosted environment's,
+come through its own in-cloud updater and its local Platform Updates Ring (§11.6.0); the one-shot
+MSP build installs that updater on both roles.
+
 **Say the NAME, not the id.** Outside the scripts that still take `-Scenario`, a setup is named by
 **role + hosting**, because that is what actually differs and because `S5`/`S6` are both *managed*
 tenants (the provider is `S3`/`S4`) — a distinction the ids hide:
@@ -3007,7 +3355,7 @@ tenants (the provider is `S3`/`S4`) — a distinction the ids hide:
 |---|---|---|
 | **Single (tenant, local-hosted)** | S1, S2 | distribution edition only |
 | **Provider / master (MSP, local-hosted)** | S3, S4 | distribution edition only |
-| **Managed / slave (MSP, central-hosted)** | **S5** | portal + SQL live in the **provider's** tenant; multi-tenant application |
+| **Managed / slave (MSP, central-hosted)** | **S5** | portal + SQL live in the **provider's** tenant; multi-tenant application. **Being decommissioned** (operator decision 2026-09-18) |
 | **Managed / slave (MSP, local-hosted)** | **S6** | portal + SQL live in the **managed** tenant; local identity |
 
 *local-hosted* = portal + SQL live in that tenant itself; *central-hosted* = they live in the
@@ -3099,6 +3447,11 @@ managed-tenant pull, below).
 
 #### Topology — MSP managed, CENTRAL hosted, multi-tenant SPN (S5)
 
+> ⚠️ **S5 is being decommissioned** (operator decision 2026-09-18). No new central-hosted managed
+> tenant is set up, and S5-only divergences (its fan-out follows the master's copy of the ring,
+> not a local one) are not being fixed. The locally hosted managed tenant (S6) is the managed-tenant
+> shape. The description below is kept for reference until S5 is removed.
+
 A managed/slave customer tenant whose **GUI + SQL live centrally in the MSP
 tenant** and whose acting identity is a **multi-tenant SPN** that authenticates
 *into* the managed tenant. Updates and the admin/permission set are **pulled from
@@ -3122,16 +3475,17 @@ VNet** (see the hard constraint below).
  │  Ring-gated pull FROM master ⧗    │◄═══ private cross-tenant VNet only (never internet)
  └──────────────────────────────────┘
    UPDATE: from master, ring-gated  ·  LICENSE: MSP scenario — paid (Pro) edition
-   ⧗ pending = central-hosting / multi-tenant-SPN / sync-file / downlink runtime not yet wired live
+   ⧗ pending = not wired live; S5 is being decommissioned (§11.8)                                  
 ```
 
 #### Topology — MSP managed, LOCAL hosted, local SPN (S6)
 
-Same managed-tenant *intent* as S5 — updates + admins/permissions pulled from the
-master, ring-gated — but the **GUI + SQL live locally in the managed tenant** and a
-**local single-tenant SPN** is the acting identity. Sync files stage in **local**
-folders on the automation server *at the managed tenant*. This is the closest
-managed-tenant shape to the §13 "local plane" model.
+Same managed-tenant *intent* as S5 — admins and permissions pulled from the master,
+ring-gated — but the **GUI + SQL live locally in the managed tenant**, and the acting identities
+are the managed tenant's own **managed identities**: the scheduled pull job (§13.5a) and the engine
+tick. This is the §13 "local plane" model, and the managed-tenant shape that is built and verified
+live (§11.8 status). Its **code** updates come, like every hosted environment's, through its own
+in-cloud updater and its local Platform Updates Ring (§11.6.0), not from the master.
 
 ```
    MSP MASTER tenant                               MANAGED / slave tenant (LOCAL hosted)
@@ -3144,30 +3498,31 @@ managed-tenant shape to the §13 "local plane" model.
  │        │                      │                │                   ▼                    │
  └────────┼──────────────────────┘                │            Local SQL store (in tenant) │
           │                                        │                   ▲                    │
-          │  ring-gated PULL ⧗  (managed reads;    │      managed identity (hosted)         │
+          │  ring-gated PULL    (managed reads;    │      managed identity (hosted)         │
           ▼  master never writes downstream)       │                   │ apply              │
-   ═══ PRIVATE cross-tenant VNet only ════════════►│                   ▼                    │
-       (never the public internet)                 │       Entra ID / Azure RBAC (this tenant)│
-   Sync files: LOCAL folders ⧗  at the managed     │       ← MSP admins created HERE         │
-   tenant's automation server                      └──────────────────────────────────────┘
+   ═══ public-but-signed, or private ═════════════►│                   ▼                    │
+       (trust = signature + pinned key)            │       Entra ID / Azure RBAC (this tenant)│
+   Pull job: scheduled, runs as the managed        │       ← MSP admins created HERE         │
+   tenant's own managed identity                   └──────────────────────────────────────┘
    UPDATE: from master, ring-gated  ·  LICENSE: MSP scenario — paid (Pro) edition
-   ⧗ pending = local-hosting branch / sync-file resolution / downlink runtime not yet wired live
+   Verified live 2026-09-15 and 2026-09-18 (§11.8 status)                                       
 ```
 
-> 🚩 **Hard constraint — cross-tenant sync is PRIVATE, never public internet.**
-> For S5 and S6, *every byte* that crosses between the master and a managed tenant —
-> the ring-gated signed-baseline pull, the master→managed admin/permission sync, and
-> the staged sync files — MUST travel over **private cross-tenant VNet connectivity**
-> (VNet peering / private endpoints, internal addresses only). There is **no
-> publicly-reachable storage account, webhook, function, queue, or blob URL** in the
-> sync-data path (`publicNetworkAccess=Disabled` throughout). The RSA signature on the
-> baseline guarantees *integrity*; the **private VNet is the only transport channel**.
-> (SPN auth to Graph/ARM still uses Microsoft's public service endpoints — that is the
-> identity plane, not our sync-*data* plane; the constraint is that the sync **data**
-> never transits a public-exposed surface of ours.) This extends the standing MSP
-> tenet of *no exposed storage/webhook/function*, and — unlike the general §13.7
-> transport, which permits a *"public-but-signed + IP allowlist"* option for the
-> open-source MSP edition — the **scenario downlink (S5/S6) is private-only**.
+> 🚩 **Transport of the cross-tenant sync — as built (§13.7).** The only thing that crosses
+> between the master and a managed tenant is the **signed bundle**, and the managed tenant always
+> **pulls** it; the master never writes into or connects to a managed tenant. The trust is the
+> **signature**, checked against a signing key the managed tenant pins, never the network. Two
+> transports are built, and the one-shot MSP build selects between them:
+> - **public-but-signed (the default):** the bundle container allows anonymous read of blobs only,
+>   the storage firewall denies by default, and one allow rule names each managed tenant's
+>   Container Apps subnet. No SAS, no account key, nothing that expires;
+> - **private endpoint (the alternative)** for a pair whose networks the operators have connected:
+>   the store has no public endpoint, and each side resolves the name in its own private DNS zone.
+>
+> There is no webhook, function, queue or inbound endpoint in either direction. (An earlier version
+> of this document required the managed-tenant downlink to be private-only; the built product made
+> public-but-signed the default, on the grounds that the signature, not the network, establishes
+> trust.)
 
 #### Process — UPDATE / SYNC flow (detect → build → roll → verify → rollback)
 
@@ -3181,7 +3536,7 @@ auto-rollback on a failed verify. The scenario only selects the **source** and t
                          │                                                                │
    S1 / S3  ── internal AutomateIT ──►  sync-automateit:  az acr build ──► roll ACA revision
    S2 / S4  ── public GitHub ────────►  git-pull:         local build / package ──► relaunch
-   S5 / S6  ── from master (ring) ⧗ ──► from-master:      central ⇒ ACA roll · local ⇒ relaunch
+   S5 / S6  ── release ring ─────────►  in-cloud updater: build in own ACR ──► roll ACA (§11.6.0)
                          │                                  (never above the tenant's ring)
                          └────────────────────────────┬───────────────────────────────────┘
                                                        ▼
@@ -3204,15 +3559,15 @@ never rolls onto a tag it can't reason about and never re-rolls the tag it is
 already on. The hosted-smoke verify is a **release gate**: a
 self-skip (no `az` / not logged in / app unreachable) is UNVERIFIED, not green.
 
-#### Process — master → managed DOWNLINK SYNC (S5 / S6, pull-not-push) ⧗ pending
+#### Process — master → managed DOWNLINK SYNC (S5 / S6, pull-not-push)
 
-The managed tenant **pulls** the ring-approved, signed baseline from the master,
-verifies the signature, stages the sync files, and the **engine creates the MSP
-admins + permission rows in the managed tenant**. The master **never** writes into,
-or opens a connection into, the managed tenant — it only hosts + signs; the managed
-side reaches out. The whole transport is **private cross-tenant VNet** (the 🚩
-constraint above). This runtime is **plan-surfaced but not yet wired live** —
-marked `⧗ pending` — and the live 3-tenant materialization is the gate.
+The managed tenant **pulls** the signed baseline from the master, verifies it, plans
+with its own local ring, target and class vetoes, writes the rows that reach it into its
+own store, and its **engine creates the MSP admins + permission rows in the managed
+tenant**. The master **never** writes into, or opens a connection into, the managed
+tenant — it only hosts + signs; the managed side reaches out. The transport is
+public-but-signed by default or a private endpoint (the 🚩 note above). For S6 this
+runtime is **built and verified live** (§11.8 status); S5 is being decommissioned.
 
 ```
    MSP MASTER (admin plane)                              MANAGED tenant (initiates the pull)
@@ -3221,24 +3576,28 @@ marked `⧗ pending` — and the live 3-tenant materialization is the gate.
  │    + assign rollout RING      │                      │                                      │
  │ 2  Build versioned payload    │                      │                                      │
  │ 3  SIGN (private baseline key)│                      │                                      │
- │ 4  Stage signed bundle +      │                      │                                      │
- │    per-tenant sync files      │                      │                                      │
- │    (central S5 / pull-staged) │                      │                                      │
+ │ 4  Publish signed bundle      │                      │                                      │
+ │    (daily cloud publish job,  │                      │                                      │
+ │    Key Vault key; §13.7)      │                      │                                      │
  └───────────────┬──────────────┘                      └───────────────┬────────────────────┘
-                 │                                                      │ 5  ring filter: never
-                 │   ══════ PRIVATE cross-tenant VNet only ══════       │     pull a version above
-                 │           (no public internet, ever)                 │     THIS tenant's ring
+                 │                                                      │ 5  scheduled pull job,
+                 │   ══ public-but-signed (default) or private ══       │     own managed identity
+                 │      (trust = signature + pinned key)                │
                  │                                                      ▼
-                 └───────────────  managed PULLS  ◄──────────  6  GET signed bundle (private)
-                    (master never pushes)                       7  VERIFY signature (embedded
-                                                                   PUBLIC key) · product/kind ·
-                                                                   not expired · anti-rollback
-                                                                8  stage sync files (central S5 /
-                                                                   local S6 folder root)
-                                                                9  ENGINE APPLY in this tenant:
-                                                                   create MSP admins + permission
-                                                                   rows (Owner=MSP); local-owned
-                                                                   rows untouched
+                 └───────────────  managed PULLS  ◄──────────  6  GET signed bundle
+                    (master never pushes)                       7  VERIFY: signer not revoked ·
+                                                                   signature (pinned key) ·
+                                                                   central kill · product/kind ·
+                                                                   not expired · above the
+                                                                   anti-rollback floor
+                                                                8  PLAN with THIS tenant's local
+                                                                   ring · target · class vetoes
+                                                                9  write the reaching rows into
+                                                                   the local store (MSP-owned
+                                                                   only; local rows untouched);
+                                                                   raise the floor; the ENGINE
+                                                                   TICK creates the admins,
+                                                                   groups and role bindings
                                                                10  audit locally · emit signed
                                                                    status summary (counts only)
 ```
@@ -3246,7 +3605,9 @@ marked `⧗ pending` — and the live 3-tenant materialization is the gate.
 Provenance, not a permission gate: master-originated rows (Owner=MSP) are refreshed
 on each pull; rows the managed tenant owns locally (Owner=Local) stay autonomous.
 Tamper / forge / roll-back / replay are all rejected by the signature + version +
-expiry checks (§13.10). The managed tenant owns nothing it didn't get from the
+expiry checks (§13.10). The verify step also refuses a bundle from a revoked signer and stops the
+pull while a verified central kill stands; the anti-rollback floor is kept in the managed tenant's
+own store (§13.17). The managed tenant owns nothing it didn't get from the
 master *for the synced rows* — but keeps full autonomy over its local rows.
 
 #### Process — deploy / stand-up flow (per scenario)
@@ -3264,7 +3625,7 @@ the per-step bindings:
    │   Graph/Az     │  │   S1–S4: in-   │  │   idempotent │  │   deploy code│  │  hosted  │
    │   grants       │  │   tenant       │  │   guarded DDL│  │   (roll ACA  │  │  smoke + │
    │                │  │   S5: central  │  │   (non-      │  │   or relaunch│  │  deploy  │
-   │                │  │   S6: local ⧗  │  │   destructive)│ │   per source)│  │  valid.  │
+   │                │  │   S6: local    │  │   destructive)│ │   per source)│  │  valid.  │
    └────────────────┘  └────────────────┘  └──────────────┘  └──────────────┘  └────┬─────┘
         each step runs only when NEEDED (missing/drifted) AND -Apply;                 │
         an already-current step is a clean skip → a re-run IS the updater.       healthy?─► keep
@@ -3272,86 +3633,54 @@ the per-step bindings:
 ```
 
 The deploy script is parameterised for any tenant (no baked-in tenant / subscription
-/ SQL / RG / KV; cert-auth, unattended). For S5/S6 the infra step resolves to the
-central MSP store (S5) vs the local managed-tenant store (S6); that hosting-location
-branch is `⧗ pending` live-wiring. As everywhere, the **live deploy + validate
-against a real test tenant is the release gate**.
+/ SQL / RG / KV; cert-auth, unattended). A managed tenant (S6) is stood up in its own
+tenant with its own store, through the one-shot MSP build (§13.5a), which runs this deploy
+as its hosting step; S5's central-hosted branch is not being built (S5 is being
+decommissioned). Every scenario runs on Container Apps, so the code step always rolls
+Container Apps; the local relaunch path is detection-only (§12). As everywhere, the **live
+deploy + validate against a real test tenant is the release gate**.
 
 ---
 
 ## 12. Containers
 
-The engine can run as a **scheduled container** inside the customer's own VNet —
-no VM to build or patch. Files: `engine/container/Dockerfile`,
-`engine/container/Start-PimEngineContainer.ps1`. (Proven 2026-06-12: a container
-in the customer VNet resolved the MSP storage to the cross-tenant private-endpoint
-IP, pulled the **signed** baseline while storage was public-disabled, verified the
-signature, and **created accounts** in the customer's Entra —
-`SIGNATURE_VALID=True`, `CREATED Admin-CONTAINER-ID`.)
+The product runs as **one parameterised image** on Azure Container Apps (§11.4): the Manager is a
+Container App, and the engine runs as scheduled Container Apps **jobs** — the scheduler tick
+(`ca-pim-tick`), the nightly updater (`ca-pim-update`, §11.6.0), and on an MSP master the daily
+bundle publisher and on a managed tenant the scheduled pull (§13.5a). The job entry points live in
+`tools/pim-engine/` (`Invoke-PimEngineCore.ps1`, `update-job-entry.ps1`, `publish-job-entry.ps1`,
+`downlink-job-entry.ps1`, `dbinit-job-entry.ps1`). The jobs authenticate as managed identities
+and hold no secret (§27).
 
-### What the container does (per run)
-1. Acquire a Microsoft Graph token for the per-tenant identity.
-2. **Pull + verify** the MSP signed baseline over the (cross-tenant) private
-   endpoint — RSA-SHA256 against the embedded public cert, plus expiry +
-   anti-rollback.
-3. Read the customer's own local store (`Owner=Local` rows) — optional.
-4. **Merge** baseline (`Owner=MSP`) + local and create/maintain the accounts in
-   this tenant.
+**The image (`tools/pim-manager/Dockerfile`, v2.4.373).**
+- **Base images are pinned by digest.** Both base images are written as `image:tag@sha256:…`: the
+  .NET SDK stage that fetches the SQL driver assembly, and the PowerShell 7.4 Ubuntu 22.04 runtime.
+  The tag stays for readability; the build takes exactly the digest. A tag is re-pointed by its
+  publisher on every patch, so an unpinned file built a different image from one day to the next.
+  The digest is refreshed on purpose, for example for an OS or .NET security patch: read the
+  registry's `Docker-Content-Digest` for the tag, replace it in the Dockerfile and rebuild.
+- **The image runs as a non-root user (uid/gid 10001).** Until v2.4.373 it ran as root. Every entry
+  point the image runs was checked for what it writes at runtime. All of it lands in three places,
+  and all three belong to that user:
+  - the solution tree `/app/PIM4EntraPS` (the Manager's output root, the engine transcript, the
+    discovery and downlink state, the legacy config bootstrap);
+  - the downlink staging roots `/sync/central` and `/sync/local`;
+  - the temp directory.
 
-It is REST-based (no Graph SDK / SqlServer module) to stay small and avoid the
-Azure.Core assembly conflict.
+  Nothing at runtime needs root. There is no Azure CLI, no package manager and no module install;
+  the updater rolls over ARM, and the registry builds the image. The listener is on port 8080.
+  `tests/Test-PimContainerImage.ps1` keeps the Dockerfile and these write paths in agreement.
 
-### Identity (pick one, via `PIM_AUTH_MODE`)
-- **ManagedIdentity** (recommended) — ACI/Container Apps system-assigned MI,
-  granted the engine Graph app roles + Storage Blob Data Reader + (if used) SQL
-  `db_datareader`. No secret to manage.
-- **Certificate** — `PIM_CERT_PFX_B64` + `PIM_CERT_PFX_PWD`; the entrypoint builds
-  a client-assertion JWT. The per-tenant app trusts the cert.
-- **ClientSecret** — `PIM_CLIENT_SECRET` (inject as secure env / Key Vault
-  reference). Simplest; rotate regularly.
-
-### Environment variables
-| Var | Meaning |
-|---|---|
-| `PIM_TENANT_ID` / `PIM_CLIENT_ID` | customer tenant + per-tenant engine app id |
-| `PIM_AUTH_MODE` | `ManagedIdentity` \| `Certificate` \| `ClientSecret` |
-| `PIM_BASELINE_URL` | HTTPS URL of `baseline-latest.json` (resolves to the PE in-VNet) |
-| `PIM_BASELINE_PUBCERT` | base64 of the MSP baseline public cert (verification) |
-| `PIM_DEFAULT_DOMAIN` | tenant default domain for UPNs |
-| `PIM_WHATIF` | `true` (default, plan only) \| `false` (create) |
-| `PIM_LOCAL_SQL_SERVER` / `PIM_LOCAL_SQL_DB` | optional local store (default DB `PimLocal`) |
-
-### Build + push
-```
-docker build -t <acr>.azurecr.io/pim-engine:latest -f engine/container/Dockerfile .
-docker push <acr>.azurecr.io/pim-engine:latest
-```
-
-### Run as ACI in the customer VNet (proven shape)
-- Deploy into a subnet delegated to `Microsoft.ContainerInstance/containerGroups`.
-- Customer private DNS zone `privatelink.blob.core.windows.net` resolves the
-  baseline storage FQDN to the cross-tenant PE IP, so the pull stays on the
-  Microsoft backbone (no internet).
-- `RestartPolicy=Never` for a one-shot job.
-
-### Scheduling
-- **Container Apps Job** with a cron trigger (cleanest managed scheduler), or
-- **ACI** started by a Logic App / Automation timer, or
-- An on-prem scheduler invoking `az container start`.
-
-### On-prem (VMware) customers
-The identical `Start-PimEngineContainer.ps1` logic runs on a Windows VM instead —
-same code, different host. Container = zero-VM cloud-native option; VM = on-prem
-option. Both first-class.
-
-### Security
-- Storage stays `publicNetworkAccess=Disabled`; the container reaches it only via
-  the approved cross-tenant private endpoint (or a customer-hosted copy).
-- The baseline is **signed, not encrypted** — the container verifies with the
-  **public** cert (no secret at the receiver); tampering is rejected.
-- The container's identity lives in the **customer** tenant → customer-owned
-  Conditional Access, attribution, and revocation. The MSP never reaches into the
-  customer.
+> **Retired in v2.4.370: the proof-of-concept engine container.** An early stand-alone engine
+> container proved in 2026-06 that a container inside a customer VNet could pull the signed
+> baseline over a cross-tenant private endpoint, verify it and create accounts. Nothing deployed it
+> after that, and it bypassed what the product now enforces: it applied every MSP row with no ring,
+> target, `Replicate` or class veto, it claimed an anti-rollback check it did not have, it took its
+> trust anchor from an environment variable, it defaulted to client-secret authentication, and it
+> created admins with a random password instead of a TAP. It is deleted. **What replaces it:** the
+> managed tenant's scheduled pull job (§13.5a), which applies the bundle through the same
+> ring-, target- and class-gated plan (`Get-PimDownlinkPlan`) with its trust state in SQL (§13.17),
+> and the normal engine tick.
 
 ### Controlled auto-update (`sync-automateit`)
 
@@ -3362,8 +3691,10 @@ the orchestrator (`tools/setup/Invoke-PimSyncAutomateIT.ps1`) only gathers the f
 and acts on the plan the core returns.
 
 - **Version check (only update when newer).** The orchestrator reads the
-  currently-deployed image tag off the manager Container App and the newest released
-  tag in the registry, then asks the core. The compare is a **numeric** semantic-version
+  currently-deployed image tag off the manager Container App and **the version the
+  environment's ring approves** in `channel.json`, read through the environment's own
+  updater (§11.6.0; before v2.4.370 it took the newest tag in the registry), then asks the
+  core. No ring, an unreadable channel or nothing approved stops the run with the reason. The compare is a **numeric** semantic-version
   compare (so a higher patch like `…218` beats `…99`, which a string compare gets
   wrong), pre-release < release, and an **unparseable tag is never treated as newer** —
   so the deployment never rolls onto a tag it can't reason about, and never re-rolls the
@@ -3384,10 +3715,13 @@ and acts on the plan the core returns.
   creates a new revision and shifts traffic with a min-1 replica; apps pull via their
   AcrPull managed identity (no registry creds at update time).
 - **Post-update health check + auto-rollback.** After the roll it runs the existing
-  **hosted smoke** (`tests/live/Test-PimManagerHostedSmoke.ps1`) as the health check.
-  Healthy = exit 0 with zero failures. On a real failure it **auto-rolls-back** to the
+  **hosted smoke** (`tests/live/Test-PimManagerHostedSmoke.ps1`) as the health check, as a release
+  gate, with the app, resource group, subscription and expected version passed in.
+  Healthy = exit 0 with zero failures (`Get-PimSyncHealthState`). A failure (exit 1) **or a
+  skipped check (exit 2, unverified)** makes it **auto-roll-back** to the
   captured pre-update revision (`Update-PimContainers.ps1 -Rollback`) — an instant
-  revision reactivate — and fails loudly so the operator is alerted.
+  revision reactivate, or the pre-update image when the revision is gone — and fail loudly so
+  the operator is alerted. A skip is never kept as healthy.
 
 REST/cert + MI throughout (the orchestrator only shells `az`); PS 5.1-safe; EU allow-list
 region (West Europe, Denmark East, Sweden Central; inherited from the deployment); ACA workers via `--yaml`
@@ -3403,7 +3737,11 @@ verified, observed deployment — one coherent flow over **both** pull paths:
 
 - **community `git pull`** — local/VM; store is Azure SQL; the Manager
   runs locally. Build = local docker/podman build, or (no engine) package the pulled
-  `tools/pim-manager/` tree for a direct relaunch.
+  `tools/pim-manager/` tree for a direct relaunch. **Detection only since v2.4.370:** v2 runs on
+  Container Apps, so this local-relaunch profile is reported as not supported and
+  `-Apply` refuses it (`Assert-PimUpdateRuntimeSupported`) instead of building an image and
+  rolling nothing. A `-Scenario` (S1–S6, all Container Apps) corrects the profile to hosted.
+  A community installation updates by `git pull` plus re-running the one-shot deploy (§11.6.2).
 - **`sync-automateit` pull** — hosted; store is Azure SQL; the Manager runs on
   Container Apps. Build = `az acr build`; deploy = roll the ACA revision.
 
@@ -3419,10 +3757,14 @@ the zero-downtime roller, the hosted smoke, and the existing mailer — it adds 
 glue, not new copies. The six steps:
 
 1. **Detect.** `Get-PimGuiUpdatePlan` compares a **content hash** over the pulled
-   `tools/pim-manager/*` (a stable, order-independent SHA-256 of per-file digests —
+   solution (a stable, order-independent SHA-256 of per-file digests —
    the image is stamped with it at build time via a `PIM_MANAGER_CONTENT_HASH` build
    arg/env) against the running image's hash, and also honours a strictly-newer
-   VERSION. This catches GUI edits that never bumped a version. `Get-PimSqlUpdatePlan`
+   VERSION. This catches GUI edits that never bumped a version. **One file set, defined
+   once** (v2.4.370): `Get-PimSolutionContentHash` (`PIM-UpdateLifecycle.ps1`) is the hash
+   the detector, the image builder and the roller's stamp all call. The roller used to hash
+   only `tools/pim-manager`, so the two never matched and every update rebuilt an identical
+   image. `Get-PimSqlUpdatePlan`
    reads the deployed DB's actual columns per locked-SQL table, runs them through
    `Get-PimSchemaConformancePlan`, and also forces an upgrade on a strictly-newer
    schema-version marker (data-only migrations the column scan can't see). The
@@ -3475,19 +3817,23 @@ Azure SQL single store; EU allow-list regions (West Europe, Denmark East, Sweden
 The MSP edition lets one operator manage privileged access across many customer
 tenants without the customer giving up control of their own data, identities,
 logs, or Conditional Access. Design principle: **vary the edges, never the core.**
-Status: proof-of-concept built + tested on real cross-tenant infrastructure
-(2026-06-12).
+Status: the proof of concept was built and tested on real cross-tenant infrastructure
+(2026-06-12). The built product is the one-shot MSP build, the cloud publish job and the
+scheduled pull job of §13.5a / §13.7, verified on a live master / managed pair (2026-09-15).
+The proof-of-concept scripts named in earlier versions of this section were retired in
+v2.4.370.
 
 ### 13.1 The two planes
 
 | Plane | Who | Stores | Network posture |
 |---|---|---|---|
-| **Admin plane (MSP)** | MSP operators | Central registry SQL + signing keys | Private-endpoint only; inbound clamped to jumphost/PAW/SAW IPs |
-| **Local plane (per customer)** | the customer's local IT | The customer's own local SQL store | In the customer's own tenant/VNet; reached privately by the local engine |
+| **Admin plane (MSP)** | MSP operators | Central registry SQL + signing keys (Key Vault) + the bundle store | Manager and SQL restricted to the operators' networks. The bundle store is **public-but-signed by default** (anonymous blob read, firewall default Deny, one allow rule per managed tenant); a **private endpoint** is the alternative for pairs whose networks are connected (§13.7) |
+| **Local plane (per customer)** | the customer's local IT | The customer's own local SQL store | In the customer's own tenant/VNet; the local engine and pull job reach out, nothing reaches in |
 
-The two planes are **separate networks that never see each other.** Only **signed
-artifacts** cross the boundary (baseline bundle one way, status summary the
-other). No SQL-to-SQL link, no MSP standing connection into a customer, no foreign
+The two planes are **separate networks.** By default they never see each other; with the
+private-endpoint transport the operators connect them only so the managed tenant can read the
+bundle privately (§13.7). Only **signed artifacts** cross the boundary (baseline bundle one way,
+status summary the other). No SQL-to-SQL link, no MSP standing connection into a customer, no foreign
 acting identity in the customer tenant. There is **no single shared multi-tenant
 DB** — DB #1 = MSP DB (master templates / desired baseline + rings + fleet/version
 metadata), DB #2 = the customer's LOCAL DB (that tenant's actual config + run
@@ -3499,39 +3845,52 @@ state). Both Basic (~$5/mo each).
 - `Central registry SQL` — `platform.Tenants`, `platform.TenantApps`,
   `pim.CentralAdmins` (Owner=MSP baseline), `platform.AuditEvents`,
   `pim.vw_AdminTenantTargets`. Entra-only auth, public disabled, private endpoint.
-- `Baseline blob storage` — holds the signed baseline bundles. Public disabled,
-  private endpoint.
-- `Signing keys` (non-exportable, machine cert store, never distributed):
-  `CN=PIM4EntraPS-Licensing` (signs `.pimlicense`, Pro entitlement);
-  `CN=PIM4EntraPS-Baseline` (signs baseline bundles).
-- `setup/New-PimBaselineBundle.ps1` — **producer**: reads Owner=MSP rows → signs →
-  uploads.
+- `Baseline blob storage` — holds the signed baseline bundles, reached public-but-signed or
+  through a private endpoint (§13.7).
+- `Signing keys` (non-exportable, never distributed): a **Key Vault RSA key** that the publish
+  job signs with (§13.7), or the legacy machine-store certificate `CN=PIM4EntraPS-Baseline`;
+  `CN=PIM4EntraPS-Licensing` signs licences (Pro entitlement).
+- **Producer: the cloud publish job** (`publish-job-entry.ps1`, deployed by
+  `Deploy-PimBaselinePublishJob.ps1`; logic in `engine/_shared/PIM-BaselinePublish.ps1`,
+  `Invoke-PimBaselinePublishRun`). It builds the payload with the one producer function
+  `Get-PimBaselineBundlePayload`, signs it through Key Vault, uploads it and reads it back. A
+  projection table that cannot be read (anything other than genuinely absent) **refuses the
+  bundle**; it used to count as "absent" and project everything.
 - `setup/Invoke-PimMspFanout.ps1` — registry-driven multi-tenant account fan-out.
-- `Manager (admin)` — App Service, private-endpoint only, inbound = admin IPs.
+- `Manager (admin)` — a Container App, Easy Auth in front (§11.5.2).
 
 **Local plane (each customer tenant):**
-- `Local store SQL` (`PimLocal`) — `pim.LocalAdmins` (Owner=Local),
-  `pim.LocalResources`. Entra-only, in the customer's own subscription.
-- `Per-tenant engine SPN` + **certificate** — the acting identity, registered **in
-  the customer tenant** (Model B). Customer owns its CA, attribution, revocation.
-- `setup/Invoke-PimLocalApply.ps1` — **local engine apply**: reads the local
-  store, provisions accounts into the tenant.
-- `engine/_shared/PIM-Baseline.ps1` — **consumer**: pulls + verifies the signed
-  bundle (embedded PUBLIC baseline cert).
-- `engine/_shared/PIM-License.ps1` — offline signed-file verification helper
+- `Local store SQL` — the managed tenant's own store, the same base schema as every
+  environment (`sql/platform-schema.sql`, §14.2). Entra-only, in the customer's own subscription.
+  The pull writes only rows the MSP owns and never takes over a local row with the same key.
+- **Acting identity** — the managed tenant's own managed identities (the scheduled pull job and
+  the engine tick), or a per-tenant engine application with a **certificate** where a managed
+  identity cannot be used, registered **in the customer tenant** (Model B). The customer owns its
+  CA, attribution and revocation.
+- **Consumer: the scheduled pull job** (`downlink-job-entry.ps1`, deployed by
+  `Deploy-PimDownlinkJob.ps1`) → `setup/Invoke-PimScenarioRun.ps1` → `Invoke-PimManagedDownlink`
+  (`engine/_shared/PIM-Downlink.ps1`). It pulls and verifies the signed bundle
+  (`engine/_shared/PIM-Baseline.ps1`), plans with the tenant's own local ring, target and class
+  vetoes, and applies the synced rows into the local store; the engine tick then creates the
+  accounts, groups and assignments in the tenant.
+- `engine/_shared/PIM-License.ps1` — offline signed-document verification helper
   (embedded PUBLIC cert only; never signs).
-- `engine/_shared/PIM-Functions.psm1` — the declarative engine
-  (`CreateUpdate-Accounts-From-file-CSV`, merge, audit).
 
-**Shared contract (one core, pluggable edges):** auth profile = per-tenant cert
-(default) | GDAP (CSP niche) | on-prem gMSA; storage profile = CSV | local SQL |
-central partition.
+*(Retired in v2.4.370: the host-side bundle signer, the separate local-store tables
+`pim.LocalAdmins` / `pim.LocalResources` with their lab apply and simulation scripts, and the
+SAS-based transport with its renewal and pre-authorisation helpers. Existing tables are left in
+place; nothing is dropped, and nothing reads them.)*
+
+**Shared contract (one core, one pluggable edge):** auth profile = the environment's managed
+identity (hosted) or a per-tenant certificate application | GDAP (CSP niche) | on-prem gMSA
+(§13.12). Storage is not pluggable in v2: every tenant's store is its own Azure SQL database
+(§14.2).
 
 ### 13.3 Layers
 
 ```
   L4  Identity / RBAC : per-tenant SPN+cert (local) · signing keys (MSP) · customer CA
-  L3  Application     : Manager (admin) · engine apply (local) · producer/consumer (courier)
+  L3  Application     : Manager (admin) · engine apply (local) · publish job / pull job (courier)
   L2  Data            : central registry SQL (MSP) | local store SQL (customer)  -- NEVER linked
   L1  Transport       : signed artifacts only (bundle in / summary out) over HTTPS
   L0  Network         : private endpoints; separate VNets; no cross-tenant DB path
@@ -3551,24 +3910,24 @@ constraint was removed in v2.4.177 as over-reach.)
 ```
         MSP TENANT (admin plane)                       CUSTOMER TENANT (local plane)
    ┌───────────────────────────────────┐         ┌────────────────────────────────────┐
-   │  Central registry SQL  (Owner=MSP) │         │  Local store SQL  (Owner=Local)     │
-   │   private endpoint, Entra-only     │         │   in customer's own sub, Entra-only │
-   │            │ read Owner=MSP rows   │         │            ▲ read local rows        │
-   │            ▼                       │         │            │                        │
-   │  New-PimBaselineBundle.ps1         │         │  Invoke-PimLocalApply.ps1           │
-   │   • build payload (versioned)      │         │   • read local store (child proc)   │
-   │   • SIGN  (private baseline key)   │         │   • Connect-MgGraph (per-tenant SPN)│
-   │            ▼                       │         │   • MERGE: baseline + local         │
-   │  Baseline blob (private endpoint,  │         │   • create accounts IN THIS TENANT  │
-   │   public disabled) — signed bundle │         │            ▲ verified rows          │
-   │            │                       │         │  PIM-Baseline.ps1 (consumer)        │
-   └────────────┼───────────────────────┘         │   • HTTPS GET signed bundle         │
-                │                                  │   • VERIFY (embedded PUBLIC key)    │
-                │   LOCAL PULLS the signed bundle  │   • expiry + anti-rollback check    │
-                ◀──────────── HTTPS GET ───────────┤            ▼                        │
-                  (private door, or public+signed) │     Entra ID / Azure RBAC (tenant)  │
-                  MSP only hosts+signs; never       │     ← accounts, groups, scopes      │
-                  writes into / connects to cust.   └────────────────────────────────────┘
+   │  Central registry SQL (Owner=MSP) │         │ Local store SQL (own base schema)  │
+   │   Entra-only; the master's store  │         │  in the customer's sub, Entra-only │
+   │            │ read published rows  │         │           ▲ MSP-owned rows only    │
+   │            ▼                      │         │           │                        │
+   │  Publish job (cloud, daily, MI)   │         │ Pull job (scheduled, own MI)       │
+   │   • build payload (versioned)     │         │  • HTTPS GET signed bundle         │
+   │   • SIGN (non-exportable KV key)  │         │  • VERIFY (pinned / embedded key)  │
+   │   • upload + read back + verify   │         │  • signer not revoked · no kill    │
+   │            ▼                      │         │  • expiry + anti-rollback floor    │
+   │  Baseline blob — signed bundle    │         │  • plan: local ring·target·veto    │
+   │   (public-but-signed or private)  │         │           ▼ desired rows           │
+   └────────────┼──────────────────────┘         │ Engine tick (own MI)               │
+                │                                │  • create accounts IN THIS TENANT  │
+                │   LOCAL PULLS the signed bundle│           ▼                        │
+                ◀──────── HTTPS GET ─────────────┤    Entra ID / Azure RBAC (tenant)  │
+                (private door or public + signed)│    ← accounts, groups, scopes      │
+                  MSP only hosts + signs; never  └────────────────────────────────────┘
+                  writes into / connects to cust.
                                   ▲
                   status summary  │  (signed, counts only — local → MSP fleet view,
                                   │   ideally via the customer's own Log Analytics)
@@ -3576,22 +3935,23 @@ constraint was removed in v2.4.177 as over-reach.)
 
 ### 13.5 Flow A — MSP baseline distribution (build + sign + publish + pull + verify)
 
-1. MSP edits Owner=MSP baseline in the central registry (naming, rings, standard
-   templates).
-2. `New-PimBaselineBundle.ps1` reads `pim.CentralAdmins WHERE Owner='MSP'`, builds
-   a versioned payload (`version`, `generatedAtUtc`, `validToUtc`, `rows`).
-3. It **signs** the payload bytes RSA-SHA256 with the non-exportable
-   `CN=PIM4EntraPS-Baseline` private key → `{ payloadB64, signature, keyThumbprint }`.
-4. It uploads `baseline-v<ts>.json` + `baseline-latest.json` to the baseline blob
-   (private endpoint, public disabled).
+1. MSP edits the master's desired state (admins with `ManagementMode=msp`, the groups, nestings
+   and bindings they need, rings and targets, §13.5a).
+2. The master's **publish job** (on the cadence set in the master's Job schedule, default daily; on Run
+   now; and after a commit that changes what it publishes, §13.5b) builds a versioned payload
+   (`version`, `generatedAtUtc`, `validToUtc`, the rows) with `Get-PimBaselineBundlePayload`.
+3. It **signs** the payload bytes RSA-SHA256 through the Key Vault `sign` operation with a
+   non-exportable key (§13.7 implementation note).
+4. It uploads the bundle to the baseline container, reads it back over the managed tenants'
+   read path, and verifies it again.
 5. The bundle reaches the customer's network via one of the §13.7 transports.
-6. The local engine's `PIM-Baseline.ps1` does an **HTTPS GET** of the bundle (over
-   the customer's private endpoint).
-7. It **verifies**: signature against the embedded PUBLIC baseline cert;
-   `product/kind`; not expired; version ≥ last-applied (**anti-rollback**). Any
-   tamper → rejected, nothing applied.
-8. On success it returns the Owner=MSP rows for the merge, and records the applied
-   version.
+6. The managed tenant's scheduled pull job does an **HTTPS GET** of the bundle.
+7. It **verifies** (`Test-PimDownlinkBaseline`): the signer is not on this tenant's revoked
+   list; the signature against a key the tenant pins (or the embedded PUBLIC certificate);
+   `product/kind`; not expired; version above this tenant's **anti-rollback floor**. It also
+   checks the master's central kill (§13.17). Any failure → rejected, nothing applied.
+8. On success it applies the rows that reach this tenant into its own store and records the
+   applied version as the new floor in its own `pim.Settings` (§13.17).
 
 ### 13.5a Replication targeting — which master rows reach which managed tenants (2.4.360, verified offline)
 
@@ -3603,6 +3963,10 @@ admins (`Account-Definitions-Admins`, `pim.CentralAdmins`), admin → direct gro
 (`PIM-Assignments-Admins`), direct groups (role, organisation, department, project, cross-org), indirect permission
 groups (tasks, services, processes), nestings (`PIM-Assignments-Groups`), Entra role bindings, and the tenant-scoped
 resource bindings (AU-scoped roles, Azure resources, workloads).
+`Ring` is blank or **any whole number** (0, 1, 2, 3, 12 …); the master publishes a ring only when it is a whole number.
+A value that is not a whole number reaches **no** managed tenant: it under-grants, never widens to every tenant. The
+validator warns (`PIM-RING-001`, and `PIM-MSP-001` for an MSP-managed admin without a valid ring), and the shared
+authoring check `Test-PimReplicationRowFields` returns the same warning to the grid and the wizards (v2.4.372).
 `Target` is blank (every tenant the ring admits) or a comma list of `tag:<key:value>` (any-of), `tag:a+b` (the tenant
 must carry all) and `tenant:<id>`. Tenant tags are free `key:value` labels on the master's tenant registry, so a
 hierarchy is expressed as tags (`region:eu`, `region:eu-north`).
@@ -3620,13 +3984,16 @@ AND, never OR. The master's registry view `pim.vw_AdminTenantTargets` applies th
 needs its group, a nesting needs both groups, a binding needs its group — the needed row is included for T even if its
 own fields would exclude it, and the plan records a warning naming the row, the dependent and the tenant.
 
-**Producer.** `New-PimBaselineBundle.ps1` selects the bundle content through one pure function: the published admins,
+**Producer.** The publish job (§13.7) selects the bundle content through one pure function (`Get-PimBaselineBundlePayload`): the published admins,
 their memberships, `Yes` seeds, and the dependency closure (walked to a fixpoint) from every entity the engine builds
 groups from. `No`/`none` rows that nothing depends on are **not** put in the signed payload; the ones carried as a
 dependency are reported. With blank fields the payload is byte-identical to the previous producer's.
 
 **Per tenant.** `Get-PimDownlinkPlan` evaluates the rule for its own tenant, computes its own closure, reports
-`autoIncluded` and `notReplicated`, and still never retracts. The apply writes only rows the MSP owns, never takes over a
+`autoIncluded` and `notReplicated`, and still never retracts. The definitions step runs whenever the bundle carries
+definitions, **including when it carries no memberships at all**: an empty membership set is an empty projection, not
+"no projection" (until v2.4.376 a master with no replicated admins sent `Yes` seeds that no tenant ever received, and
+the reach preview, which runs this same plan, said "0 of N"). The apply writes only rows the MSP owns, never takes over a
 customer row with the same key, and strips the replication fields (they mean nothing inside a managed tenant).
 **Retraction is report-first:** a synced row that no longer reaches the tenant is reported as "would remove" (and in the
 acceptance record) and is removed only with `-AllowRetraction`, inside the removal budget. The scheduled pull job carries
@@ -3679,14 +4046,48 @@ mass-change approval is one of them, and is deliberately not automated.
 **Manager (MSP master only).** Every MSP sync surface follows the tenant mode the header shows (Single, MSP Master,
 Slave): on the master it is shown and editable; on a managed tenant only a read-only "received from the MSP master"
 indicator appears on the Accounts list; in Single mode it is absent — including the admin's "Sync to slaves" column,
-its management mode, ring and slave-tag fields, and the grid's admin Ring / Target columns. Every Create wizard has a Replication section on its Review step (Replicate, Ring, tag
+its management mode, ring and slave-tag fields, and the grid's admin Ring / Target columns. The pickers use plain words
+(v2.4.376): *Follow (default) — sent only when a replicated row needs it*, *Replicate to managed tenants* and *No
+replication to managed tenants — master tenant only* (admins: *Master tenant only* / *Replicate to managed tenants*;
+tenant-scoped resources default to *Master tenant only*). The ring labels say which way they narrow: Ring 0 reaches
+every managed tenant, Ring 1 rings 1–2, Ring 2 only ring-2 (pilot) tenants; each tenant checkbox shows the master's copy
+of its ring. Every Create wizard has a Replication section on its Review step (Replicate, Ring, tag
 chips with an all-of switch, a tenant picker, "This will reach: N of M tenant(s)" with names, and the dependency
 warnings); the grid shows `Replicate`/`Ring` pickers, a `Target` picker with a grammar check and a Reach count per row.
 Reach is computed by the server: it builds the bundle with the producer's selection, signs it with a throwaway key and
-runs the same plan every managed tenant runs, once per registered tenant. On a single tenant or a managed tenant the
+runs the same plan every managed tenant runs, once per registered tenant. **The ring the master previews with is only
+its copy** (`platform.Tenants.Ring`): every managed tenant's ring is set locally in that tenant and gates its real pull
+(§13.19). The reach preview, the MSP overview and the dry run therefore label the ring they used as **the master's
+copy** (`Get-PimMasterRingCopy`); a preview is right only while the two agree. The managed tenant reports the local ring
+that gated its run in its result (`slaveRing`, source `local`). On a single tenant or a managed tenant the
 columns are removed from the grid, the section never renders, and the Manager refuses a save that introduces or changes
 the fields. The validator refuses a `Replicate` value that is not `No`/`Yes`/`Follow` or that disagrees with the admin's
 `ManagementMode`.
+
+**Managed tenant registry and Replication overview (MSP master only).** Two pages sit next to *Managed tenants* under
+*Reviews & controls*. They are hidden until the tenant mode says MSP master, and every endpoint refuses on any other tenant.
+- *Managed tenant registry* (`GET/POST /api/msp/tenants`, `PUT /api/msp/tenants/{tenantId}`) lists every registered
+  tenant, enabled or not: name, tenant id, ring, tags, enabled, and whether the master's last recorded publish came after
+  the row last changed. The ring column reads "Ring (master's copy -- each managed tenant's own ring decides)".
+- Writes are SuperAdmin-only and audited (`msp.tenant.register` / `msp.tenant.update`, refusals too), and they request a
+  publish, because the tags travel in the signed bundle. They go through the one writer the setup script
+  `Register-PimManagedTenant.ps1` also uses (`Set-PimManagedTenantRegistration`, `engine/_shared/PIM-MspRegistry.ps1`).
+  It validates the values, runs the parameterised MERGE and reads the row back.
+- The writer refuses the master's own tenant (and any registration when the master's tenant id is unknown), a tenant
+  that is already registered, a name another tenant carries, and a tag a Target reserves (`all`, `none`, `tag:…`,
+  `tenant:…`). It never deletes: disabling keeps the row.
+- *Replication overview* (`GET /api/msp/replication/overview`, `engine/_shared/PIM-ReplicationOverview.ps1`) lists every
+  replicable row, grouped by kind: admins (registry and definitions), memberships, direct groups, permission groups,
+  nestings, Entra role bindings and resource bindings.
+- Each row shows its Replicate / Ring / Target in the plain picker words, the tenants it reaches and, for a row that
+  reaches none, why. It also shows the auto-included dependencies, the not-published list and the rows carried only as
+  a dependency.
+- Reach is the reach preview's own answer: the server runs the same plan every tenant runs, once per registered tenant,
+  with the master's copy of each ring, and the page says so. A tenant whose plan failed is shown as not checked, never as
+  "reaches none".
+- The result is cached for 30 seconds per store (*Recompute* runs the plan again, and a registry write clears the cache).
+  An answer with a failed tenant plan is not cached. The browser only filters the result: by tenant ("what does this
+  tenant get"), by kind, and to the rows that reach no tenant.
 
 **Verified on a live master / managed pair (2026-09-15).** A sample model on the master — admins targeted by one tag,
 by two tags together, by tenant id, one not replicated and one targeted at a tag the managed tenant does not carry, a
@@ -3702,22 +4103,97 @@ system-assigned managed identity — the scheduler job's shape. The deploy grant
 permissions and membership of the SQL admin group; the user-assigned identity stays attached only to pull the first
 container image. No client secret is needed.
 
+### 13.5b Cadence of the pull and the publish — set in the Manager, decided by the job (v2.4.372)
+
+Both MSP jobs used to run on a fixed Container Apps cron (the pull daily at 03:00 UTC, the publish daily at 04:00
+UTC), and nothing in the Manager could change it. Now each job's **trigger** fires every 5 minutes (`*/5 * * * *`,
+the default `-Cron` of `Deploy-PimDownlinkJob.ps1` and `Deploy-PimBaselinePublishJob.ps1`), and the job **gates
+itself** from its **own** store (`engine/_shared/PIM-JobCadence.ps1`). The cadence is local to the tenant that runs
+the job, the same principle as rings: a managed tenant sets its own pull, a master its own publish.
+
+| | Managed tenant (S6) — the pull | Master — the publish |
+|---|---|---|
+| Job | `ca-pim-downlink-s6` (`downlink-job-entry.ps1`) | `ca-pim-publish` (`publish-job-entry.ps1`) |
+| Cadence, written by the Manager | `pim.Settings['DownlinkSchedule']` | `pim.Settings['PublishSchedule']` |
+| Run now, written by the Manager | `pim.Settings['DownlinkRunNow']` | `pim.Settings['PublishRunNow']` |
+| Last run, written by the job | `pim.Settings['DownlinkLastRun']` | `pim.Settings['PublishLastRun']` |
+| Job schedule row | "Managed-tenant pull (Data Definition Updater)" (`msp-pull`) | "Publish to managed tenants" (`baseline-publish`) |
+
+A schedule is `{ enabled; intervalMinutes }`, 5–1440 minutes. The last run records its start, end, state
+(`running` / `succeeded` / `failed` / `held`), what triggered it, and the count of consecutive failures.
+
+**The gate runs first, and is cheap.** `Invoke-PimJobCadenceGate` loads only the cadence core, the token layer and
+the SQL store, reads the three rows and decides (`Get-PimJobCadenceDecision`, pure; first match wins):
+
+| Code | When | Runs? |
+|---|---|---|
+| `store-unreadable` | the store could not be read | **yes**, logged as an error: an unknown schedule must never stop the job, and an extra run is safe (the pull is signature-verified, the publish verified end to end) |
+| `retry` | this is the platform's retry of the same execution that failed or was killed | yes |
+| `in-progress` | another execution started less than 35 (pull) / 25 (publish) minutes ago and has not finished | no; an older `running` record counts as abandoned |
+| `run-now` | a Run-now request newer than the last start | yes, **even when disabled**: it is an explicit act |
+| `redeployed` | the job was redeployed after the last start (`PIM_CadenceDeployedUtc`, stamped into the job's environment by the deploy) | yes, once |
+| `disabled` | switched off in the Job schedule | no, and the log says where it was switched off |
+| `first-run` | no run recorded yet | yes |
+| `retry-after-failure` / `backoff` | the last run failed | the next three triggers retry; after that the delay doubles (10, 20, 40 … minutes), capped at the interval |
+| `due` / `not-due` | the interval since the last start has elapsed (with half a trigger of grace) | due runs |
+
+A skip logs exactly one `[cadence] SKIPPED: <code>` line and exits 0 without loading the engine; the deploys' verify
+steps read that marker, so a skip is never mistaken for a run. A run first **claims** the start with a
+compare-and-set on the last-run row, so two overlapping executions cannot both run. It then records the end
+(`Complete-PimJobCadenceRun`); a failure to record is logged, and never changes the job's own exit code.
+
+**Defaults — no silent change of behaviour.** Nothing stored means **daily (1440 minutes), enabled**: the cadence
+the jobs always had. The one change is the time of day. The deploy stamp makes a freshly deployed job run once on
+its next trigger, so the daily run moves from 03:00 / 04:00 UTC to "every 1440 minutes from the deploy". A stored
+interval outside 5–1440 is clamped, and an unreadable schedule falls back to the default; both are logged.
+
+**Why the cadence is not the tick's `msp-pull` entry.** The scheduler catalog has an `msp-pull` row (240 minutes,
+disabled), and every save of the Job schedule page writes the **whole** catalog, that row included. Reading the
+pull cadence from it would have switched the pull off on every environment whose schedule had ever been saved. The
+cadence therefore has its own settings, and the Manager never writes the cadence row into `JobSchedule`. The tick's
+`msp-pull` handler never pulls: it records a skip that names the separate job where the pull really runs.
+
+**Publish on commit.** On a master, a successful safe commit (§5.4) that actually changed an entity the producer
+ships (`Get-PimBaselinePublishedEntities`, the same list `Get-PimBaselineBundlePayload` reads), or a save of the
+per-relationship projection policy, sets the publish's Run-now flag
+(`Request-PimManagerPublishAfterCommit`). The publish then runs on its next trigger, within 5 minutes, instead of
+waiting for its cadence, so managed tenants get the change on their next pull. Several commits within one trigger
+window collapse into one publish. It does nothing when publishing is disabled in the Job schedule, and a failure to
+request it never fails the commit, which has already landed.
+
+**Least privilege for the publish identity.** `pim.Settings` also holds who is SuperAdmin, and the publish job's
+database user is a reader (§13.7). It therefore reaches its three cadence rows only through two views:
+`pim.vw_PublishJobControl` (SELECT: `PublishSchedule`, `PublishRunNow`, `PublishLastRun`) and
+`pim.vw_PublishJobLastRun` (SELECT / INSERT / UPDATE on `PublishLastRun` only, `WITH CHECK OPTION`, so it cannot
+write any other row). `Deploy-PimBaselinePublishJob.ps1` creates both views idempotently and grants exactly these
+rights; the identity has no right on `pim.Settings` itself. The pull job reads and writes `pim.Settings` directly,
+because its identity administers its own store.
+
+**A redeploy removes stale secrets.** `Deploy-PimDownlinkJob.ps1` lists the pull job's Container Apps secrets after
+the deploy and removes every one the deployed definition no longer references, always including the retired SAS
+transport's `pim-baseline-url`, then reads the list back (`Invoke-PimDownlinkJobSecretCleanup`). A list or removal
+that fails is reported; the deploy is never called clean by assumption.
+
 ### 13.6 Flow B — local apply (true env: local store → real accounts)
 
-1. `Invoke-PimLocalApply.ps1` runs for one tenant with that tenant's engine SPN
-   (cert).
-2. It reads `pim.LocalAdmins` from the local store **in a child process**
-   (SqlServer's Azure.Core would otherwise break Graph app-only).
-3. It `Connect-MgGraph` app-only as the per-tenant SPN and resolves the tenant
-   default domain.
-4. It **merges** the pulled-down MSP baseline (Flow A) with the Owner=Local rows.
-5. It runs the engine (`CreateUpdate-Accounts-From-file-CSV -OnlyID`) to **create
-   the accounts in this tenant** — both the MSP central admins (from the baseline)
-   and the local admins. Replication-404 on the post-create PATCH is retried.
-6. Every change is audited (`local.apply`) in the customer's own tenant.
+1. The managed tenant's pull job (Flow A) writes the rows that reach this tenant into its own
+   store as desired state: the MSP admins (`Invoke-PimDownlinkAdminApply`, with UPNs built at the
+   tenant's own **admin account domain** — its Settings value, the naming key `AdminAccountUpnSuffix`, read from
+   its own store by `Get-PimSlaveAdminUpnDomain`; blank = its default domain; the master's suffix is never carried),
+   then the groups, then the memberships and role bindings. Only
+   rows the MSP owns are written; a local row with the same key is never taken over.
+2. A step that fails makes the whole run **fail** and names the failed steps (partial when other
+   steps did apply). The anti-rollback floor is raised only after every apply step succeeded.
+3. The tenant's own engine tick (`Invoke-PimEngineCore.ps1`, its managed identity) then applies
+   the desired state like any other: it **creates the accounts in this tenant** — the MSP
+   admins together with the tenant's own local admins — and grants the groups and roles.
+4. Every change is audited in the customer's own store.
 
 The **MSP central admins are created IN the local tenant** — there is no central
 directory of admin objects; every admin materializes in the tenant it serves.
+*(Retired in v2.4.370: the lab apply script that read a separate `pim.LocalAdmins` table and ran the
+v1 account engine, and its simulation companion. Local admins are ordinary admin rows in the
+tenant's own store.)*
 
 ### 13.7 Transport — LOCAL PULLS MSP (one direction, always)
 
@@ -3775,7 +4251,9 @@ the PE, or MSP rejects / pulls RBAC. Content is signed regardless.
 An interim implementation handed each managed tenant a read-only SAS link to the bundle blob, renewed by a weekly
 scheduled task that needed a certificate identity in BOTH tenants. It expired, it put a master credential on the
 managed tenant's side, and it could not be deployed by a managed tenant's own administrator. It is removed from the
-build. The build now implements transport 2 above, with the network half made precise:
+build, and in v2.4.370 its scripts were deleted as well (the SAS renewal tool, the certificate sign-in configuration and
+the pre-authorisation helper, the pull job's SAS-link parameter, and the older MSP onboarding runbook). The build now
+implements transport 2 above, with the network half made precise:
 
 - **Trust = the signature.** Every pull verifies the RSA signature against the public certificate embedded in the
   product and refuses a bundle that does not verify, before anything is applied. The network never establishes trust.
@@ -3799,10 +4277,16 @@ build. The build now implements transport 2 above, with the network half made pr
 #### Implementation note (2026-09-17) — the master publishes from a cloud job, signed by a Key Vault key
 
 The bundle is no longer produced on a management host. The master runs a **Container Apps job** on its own environment
-(daily, and on demand) as its **system-assigned managed identity**. It holds no certificate, secret, SAS or account key:
+(on the cadence set in the master's Job schedule, default daily, and on demand; §13.5b) as its **system-assigned
+managed identity**. It holds no certificate, secret, SAS or account key:
 
-- **Read and build.** It reads the master store as a member of the SQL admin group and builds the payload with the same
-  producer function the host script uses, so what a managed tenant receives does not depend on the publisher.
+- **Read and build.** It reads the master store through its **own least-privilege database user** (v2.4.370): a
+  contained user created from its app id as a SID, with `SELECT` on exactly the tables the producer reads and no fixed
+  database role (a broader role an earlier run granted is taken back). The grant is read back, and only then is an
+  earlier version's SQL-admin-group membership removed, so the job is never without access. *(Built and tested offline;
+  it has not yet been run against a live store.)* It builds the payload with the one producer function
+  (`Get-PimBaselineBundlePayload`). The earlier host-side signer that shared that function was retired in v2.4.370. A
+  read error on an optional projection table that is not "the object is absent" **refuses** the bundle.
 - **Sign.** It signs through the Key Vault `sign` operation with a **non-exportable RSA key** (HSM-protected on a premium
   vault, software-protected on a standard vault; key operations limited to sign and verify). `RS256` is RSASSA-PKCS1-v1_5
   with SHA-256 over the digest — the same primitive, byte for byte, as the certificate signature, so the verifier's
@@ -3890,7 +4374,7 @@ privileged data) — ideally into the customer's **own Log Analytics** (via
   not encrypted** (transparency: the customer reads exactly what the MSP ships).
 - **Two approval types, kept separate:** delegation-time approval is ours
   (Manager/declarative); **activation approval is native Entra PIM policy** (which
-  the engine *configures*, e.g. `approval-required`, but does not mediate) — the
+  the engine *configures*, e.g. `Groups_RequireApproval`, but does not mediate) — the
   Manager is not in the activation path.
 
 ### 13.10 Security properties (what each control buys)
@@ -3899,8 +4383,9 @@ privileged data) — ideally into the customer's **own Log Analytics** (via
 |---|---|
 | Tamper with bundle in transit / at rest / on the distribution point | RSA-SHA256 signature → verify with embedded public key → rejected |
 | Forge a bundle | Impossible without the MSP private key (non-exportable: a Key Vault key, or the legacy machine-store certificate); a key the managed tenant does not pin is refused even with a valid signature |
-| Roll back to an old baseline | Version-monotonic check (`baseline-state.json`) |
+| Roll back to an old baseline | Version-monotonic check against the **anti-rollback floor in the managed tenant's own store** (`pim.Settings['DownlinkBaselineLastApplied']`), enforced on the scheduled pull (§13.17) |
 | Replay an expired baseline | `validToUtc` check |
+| A compromised signing key | The managed tenant revokes the signer (`pim.Settings['BaselineRevokedSigners']`); every bundle and kill manifest it signed is refused (§13.17) |
 | Hacker reaches the SQL | Private endpoint / public-disabled + Entra-only (no SQL logins) + (cross-tenant) firewall to known IP |
 | MSP over-reach into customer data | No standing connection; only signed artifacts cross; acting identity is customer-owned |
 | Local self-service abuse | Out of scope by design — activation stays behind native PIM MFA + approval |
@@ -3926,11 +4411,10 @@ the acting identity **local to the customer tenant**.
 
 - **One core (single implementation, profile-independent):** the declarative
   engine, the Owner-tag merge, the signed-baseline courier, the validator, the
-  Manager. None of it knows which auth or storage profile is underneath.
-- **Two pluggable edges:** an **auth profile** ("get a token for tenant X") and a
-  **storage profile** ("read/write these rows"). Both deliberately *thin* — if a
-  model can't be expressed behind those two contracts, it's trying to fork the
-  core and is rejected.
+  Manager. None of it knows which auth profile is underneath.
+- **Pluggable edge:** an **auth profile** ("get a token for tenant X"), deliberately *thin* — if
+  a model can't be expressed behind that contract, it's trying to fork the core and is rejected.
+  The store is not an edge in v2: it is always SQL (below).
 
 **Auth profiles:**
 
@@ -3940,10 +4424,18 @@ the acting identity **local to the customer tenant**.
 | **A — GDAP (option)** | multi-tenant partner app + GDAP relationship | indirect (cross-tenant trust); no local attribution | CSP-managed SMBs only |
 | **On-prem — Windows/gMSA** | domain service account / gMSA | AD/Kerberos + host/network controls | classic hybrid AD |
 
-**Storage profiles:** `Csv` (small installs), **local SQL in the customer's own
-Azure** (enterprise default), or a central SQL partition — behind one repository
-contract (`Get-PimRows` / `Save-PimRows`, `$global:PIM_DataStore`). `Csv` stays
-supported indefinitely.
+In a hosted v2 environment the acting identity inside the customer tenant is that environment's
+own **managed identity** (§27), which has the same customer-owned properties as profile B without
+a certificate to renew; the per-tenant certificate application is for hosts where a managed
+identity cannot be used.
+
+**Storage: SQL only in v2.** Every environment keeps its desired state, settings and audit in its
+**own Azure SQL store** (§14.2): the MSP master's store holds the central registry, and each managed
+tenant's store is its local plane. There is no CSV or file storage profile and no store switch: the
+engine reads desired rows through `Get-PimDesiredRows`, and the Manager reads and writes through
+`Get-PimSqlRows` / `Set-PimSqlRow` / `Set-PimSqlEntityRows` (`PIM-SqlStore.ps1`). A file-based
+installation is imported once (§5.3). CSV files remain only as the input shape of that import and
+of the shipped samples, and as the store of the unsupported v1 engine scripts that still ship.
 
 **Per-profile capability / tradeoff table (kept honest):**
 
@@ -3964,10 +4456,10 @@ expiry, an auto-renewal job, and expiry alerting.
 
 ### 13.13 Engine runtime — cloud-native container or VM
 
-The local engine does **not** need a VM in the customer's environment — it can run
-as a scheduled container inside the customer's VNet (§12) or as the identical code
-on an on-prem Windows VM. Container = zero-VM cloud-native option; VM = on-prem
-option. Both first-class.
+The local engine does **not** need a VM in the customer's environment: it runs as scheduled
+Container Apps jobs in the customer's own environment (§12). The VM host (§11.5.2 C) runs the same
+code on a Windows server. v2 updates only Container Apps deployments; an update on the VM path is
+detection-only (§12).
 
 ### 13.14 Same design for TenantManager
 
@@ -4002,30 +4494,78 @@ template MSP→local), `local-reads-msp` (read-only at run time), `sync-out-stat
 unknown model OR any model whose declared invariants would break the rules
 (`MspWritesLocal`/`DataLeaves` must both be false; every model is `Initiator=local`
 — pull-not-push). `Get-PimSyncModelPlan` maps the model to the concrete LOCAL
-scheduler job tokens (`baseline-pull` / `template-pull` / `status-rollup` / none),
-and `Setup-PimMsp.ps1 -SyncModel` wires exactly those jobs + `PIM_SyncModel`,
-skipping the MSP-template-conn secret for models that never read the MSP DB.
+scheduler job tokens (`baseline-pull` / `template-pull` / `status-rollup` / none).
+The deploy script that wired those jobs from the plan was retired in v2.4.370, so these two
+functions have **no deploy caller** today. The one-shot MSP build (§13.5a) deploys the one model
+it supports, `pull-baseline`, as the managed tenant's scheduled pull job.
 
 ### 13.17 Kill-switch + signed central kill — built
 
-Two layers, both verified with the **embedded public baseline cert** (no secret at
-the receiver), reusing the baseline crypto (`Test-PimBaselineDoc`, now
-`-AllowedKind`):
+Both layers are verified with the same keys as the bundle (a pinned signing key, or the
+**embedded public baseline cert**; no secret at the receiver), reusing the baseline crypto
+(`Test-PimBaselineDoc`, `-AllowedKind`). **The trust state is SQL, in the managed tenant's own
+store, never a file** (v2.4.370; `engine/_shared/PIM-Baseline.ps1`):
 
-1. **Revoke the signer (kill-switch).** `Set/Get-PimRevokedSigners` persist a local
-   revoked-thumbprint list; `Test-PimBaselineSignerAllowed` makes the consumer
-   reject **any** bundle whose signer thumbprint is revoked (separator/case
-   insensitive). Revoking the key is the off-switch for everything it signed.
-2. **Signed central kill (MSP-wide).** `Resolve-PimCentralKill` verifies a signed
-   `kind='central-kill'` manifest (signature, product, expiry, **and** a
-   revoked-signer refusal so a compromised key can't issue kills), then translates
-   each entry into the `AccountStatus=Disabled|Revoked` + `StatusChangeCode` rows
-   the **existing** engine kill-switch pipeline already authorizes
-   (`Test-PimAccountStatusChangeAuthorized`) and applies locally
-   (`Invoke-PimAccountStatusChange`). It is **signed desired-state**, not a new
-   write path — the local engine remains the only writer into the tenant, so the
-   "MSP never writes to a customer tenant" invariant holds even for an emergency
-   fleet-wide disable.
+| `pim.Settings` key | Holds | Written by |
+|---|---|---|
+| `DownlinkBaselineLastApplied` | the anti-rollback floor: `{ version; appliedAtUtc; signer; tenantId }` | the pull, after a real apply in which every step succeeded (`Set-PimBaselineApplied`: monotonic, read back) |
+| `BaselineRevokedSigners` | `{ signers = [ certificate thumbprint \| Key Vault key id ]; updatedAtUtc }` | the operator (`Set-PimRevokedSigners`: full set, refuses an entry that is neither kind, read back) |
+
+`Invoke-PimManagedDownlink` reads both **first**, on every pull. The effective floor is the higher
+of the stored floor and `-LastVersion`, so an older signed bundle that has not expired is refused.
+A store that cannot be read is a refusal: an unknown floor is not floor 0. A floor that cannot be
+recorded after an apply fails the run, because the next pull would otherwise still accept the
+bundle this one superseded. (Before v2.4.370 the scheduled pull passed floor 0 all the way down and
+the only floor was a file the container lost on every execution, and the revoked-signer list was
+a file nothing on the pull path read.)
+
+1. **Revoke the signer (kill-switch).** A bundle **or kill manifest** signed by a revoked signer is
+   refused before its signature is trusted (thumbprints compare separator- and case-insensitively,
+   Key Vault key ids exactly). Revoking the key is the off-switch for everything it signed.
+   `Test-PimBaselineSignerAllowed` answers the same question for other callers and refuses to say
+   "allowed" without a list. There is no Manager screen for the list yet.
+2. **Signed central kill (MSP-wide).** A master can publish a signed `kind='central-kill'` manifest
+   beside the bundle. The pull checks it **before** anything else (`Get-PimCentralKillSource`, then
+   the pure `Get-PimCentralKillState`):
+
+   | Kill source | State | Pull |
+   |---|---|---|
+   | `PIM_CentralKillUrl` set explicitly | read strictly: `404` = none; any other failure = **unknown** | unknown **refuses** |
+   | unset: the sibling of the bundle URL (`<container>/central-kill.json`) | `404` = none; `401`/`403` = **not checked** (the store is not publicly readable and nobody configured a kill location), reported loudly with how to enforce it (v2.4.371); any other failure = unknown | not checked proceeds; unknown refuses |
+   | `none`, or no bundle URL to derive from | not checked | proceeds, reported |
+   | a manifest that verifies, with entries | **active** | **refused**: nothing is taken from the master while it stands |
+   | a manifest that does not verify / is expired / verifies empty | invalid (refuses) / expired / none | — |
+
+   **Publishing a kill (v2.4.373).** The master publishes and withdraws the manifest with
+   `tools/setup/Publish-PimCentralKill.ps1`:
+   - It signs with the **same Key Vault key, signer and document shape as the bundle**, so the
+     managed tenants verify it with the key they already pin.
+   - Each entry names an account (`upn` or `userName`) and a status, `Disabled` or `Revoked`. The
+     manifest carries a reason and an expiry (72 hours by default), so a forgotten kill cannot stand
+     for ever.
+   - It is proven with the consumer's own code: `Get-PimCentralKillState` must say **active** before
+     anything is uploaded. It is then written to `central-kill.json` (plus a versioned audit copy),
+     read back anonymously through `Get-PimCentralKillSource` exactly as the pull reads it, and
+     checked again.
+   - `-Withdraw` deletes `central-kill.json`, and the location must then answer `404`, which the
+     consumer reads as **none**. `-WhatIf` prints the payload and signs nothing.
+   - The script signs as a certificate-authenticated service principal or a managed identity, never
+     with a secret. That identity needs *Key Vault Crypto User* on the signing key and *Storage Blob
+     Data Contributor* on the bundle container. It must run from a network the bundle store's
+     firewall allows (§13.7).
+
+   🟡 **What is not built yet.** `Resolve-PimCentralKill`, which verifies a manifest and
+   translates each entry into the `AccountStatus=Disabled|Revoked` + `StatusChangeCode` rows the
+   existing engine kill-switch pipeline authorizes (`Test-PimAccountStatusChangeAuthorized`) and
+   applies (`Invoke-PimAccountStatusChange`), has **no caller** in v2: an active kill stops the
+   pull, but the per-account flips it names are not applied. The design stays **signed
+   desired-state**, not a new write path, so the "MSP never writes to a customer tenant"
+   invariant holds even for an emergency fleet-wide disable.
+
+**A failed apply is a failed run** (v2.4.370). `Invoke-PimManagedDownlink` returns `ok = $false`,
+names the failed steps and says whether the run was partial when any apply step (admins,
+groups, roles) failed; the scenario runner stops there and the scheduled job exits non-zero. It
+used to return ok whatever the steps returned.
 
 ### 13.18 Image distribution — `az acr import` (built)
 
@@ -4036,8 +4576,9 @@ pure, unit-tested argument builder: it emits the cross-tenant **token** form (AC
 token convention — username = the all-zero GUID, password = the source token), the
 same-AAD **`--registry <resourceId>`** form, or a plain same-tenant import by login
 server. `Invoke-PimAcrImport` wraps it (honours `-WhatIf`, **redacts the token** in
-all output), and `Setup-PimMsp.ps1 -MspSourceAcr` runs the import **before** the
-container deploy so the destination ACR has the image when the workers start.
+all output). Its only deploy caller, the per-customer MSP setup script, was retired in
+v2.4.370, so both functions have **no caller** today: each environment builds its own image in
+its own registry from the release's source archive (§11.6.0).
 
 ### 13.19 Ring model — three axes, and which one the framework owns
 
@@ -4178,18 +4719,17 @@ cost.**
 
 **Definition CSVs** (the desired model):
 - `Account-Definitions-Admins` — admin accounts.
-- `Account-Definitions-BreakGlass.csv` — the 1–2 directly-assigned break-glass
-  accounts (separate concern; §3.2).
+- Break-glass accounts are not a desired-state table: the list of accounts PIM must never touch is
+  `pim.Settings['BreakGlassAccounts']` (§3.2, §17.9b).
 - `PIM-Definitions-Roles` — role groups (Tier-2).
 - `PIM-Definitions-{Tasks, Services, Processes, Resources, Departments,
   Organization}` — permission groups (Tier-3).
 - `PIM-Definitions-AU` — administrative units (scope containers only).
 - `PIM-Definitions-Departments` — `Department → Owners` (owner fallback chain,
   §6).
-- `PIM-Definitions-Contacts.custom.csv` — people directory for mail routing
-  (§17.17).
-- `PIM-Definitions-DelegationUnits.custom.csv` — self-service delegation envelopes
-  (§17.18).
+- *(Designed, not built: a people-directory table for mail routing (§17.17) and a
+  self-service delegation-envelope table (§17.18). Neither exists as an entity; mail routing
+  uses the department owners, §17.17.)*
 
 **Assignment CSVs** (the desired bindings):
 - `PIM-Assignments-Admins` — admin → role-group (eligible/active member).
@@ -4198,9 +4738,9 @@ cost.**
   scope).
 - `PIM-Assignments-Roles-AUs` — permission-group → AU-scoped Entra ID role.
 - `PIM-Assignments-Azure-Resources` — permission-group → Azure RBAC at a scope.
-- `PIM-Assignments-Workloads.custom.csv` — the 15th file; group → workload role
-  (§15).
-- `PIM-Assignments-FromIntake.custom.csv` — verified intake overlay (§17.15).
+- `PIM-Assignments-Workloads` — the 15th table; group → workload role (§15).
+- *(Designed, not built: an intake overlay table. ServiceNow intake queues its requests as
+  pending changes for review instead, §17.15.)*
 
 Per-column input strategies for every table are catalogued in §18 (Manager UX).
 
@@ -4236,8 +4776,23 @@ switching between CSV and SQL) has ended: the Manager, engine, scheduler and val
 write SQL only, the Manager refuses to start without its database, and no component falls back to
 files for settings, access, templates, audit, scheduler state or tenant caches. A file-based
 installation is brought in once with `setup/Migrate-PimToSql.ps1` (§5.3); its source files are read,
-never modified. Rows are stored as JSON keyed by column name, so there is no CSV header parsing in
+never modified. Re-running it skips an entity whose store already holds rows, because after go-live
+the Manager owns those rows and the import is a full-set replace that would delete every row added
+or edited since; `-ReplaceExistingEntityRows` is the explicit override for a deliberate re-seed
+(v2.4.370). Rows are stored as JSON keyed by column name, so there is no CSV header parsing in
 the running product.
+
+**One base schema, and the locked table set is derived from it** (v2.4.370). `sql/platform-schema.sql`
+is the only shipped base-schema file; the in-cloud database bootstrap and the updater apply it, and
+every object in it is guarded, so it is re-runnable. The **locked SQL schema** — the tables a store
+must have, which is also the signal that a first install needs its schema applied — is derived from
+that file: every `CREATE TABLE` in it is locked as present (`Get-PimBaseSchemaTables`,
+`Get-PimLockedSqlSchema`, `PIM-SchemaConformance.ps1`). A table added to the file is locked the day it
+is written, and a base schema that is missing or declares no table is a refusal, never "nothing is
+locked". *(Retired in v2.4.370: the separate local-store schema that created `pim.LocalAdmins` /
+`pim.LocalResources`. Nothing in v2 read those tables, yet `pim.LocalAdmins` had been the only locked
+table, so the first-install signal hung off a dead table. Existing stores keep the two tables;
+nothing drops them.)*
 
 ---
 
@@ -4298,6 +4853,23 @@ they load live, so when Microsoft adds roles, pickers and validation see them wi
 zero maintenance. For workloads without a role-listing API the connector may carry
 a static `"roles": [...]` array instead (same JSON file, still no code).
 
+**Where the platform has PIM, a connector makes the group ELIGIBLE, never a standing assignment.**
+Entra directory roles and Azure RBAC have their own PIM. On those two surfaces a permanent role
+assignment would bypass it: no activation, MFA, justification, approval or time limit. So their
+connectors (`pimModel: "eligible"`) create a PIM **eligibility**:
+- `entra-roles` posts a Graph `roleEligibilityScheduleRequests` (`adminAssign`, no expiry).
+- `azure-rbac` (v2.4.373) puts an ARM `Microsoft.Authorization/roleEligibilityScheduleRequests/{newId}`
+  (`api-version=2020-10-01`, `requestType: AdminAssign`, `expiration: NoExpiration`). It reads
+  `roleEligibilitySchedules` **at the row's scope only** (`$filter=atScope()`). Until then it made a
+  permanent `roleAssignments` PUT.
+
+The group's members still activate the role under that platform's PIM settings, and those settings
+decide whether a no-expiry eligibility is allowed. A `Remove` row on either connector is reported,
+not applied (an eligibility carries no "created by this tool" marker). The other workloads have no
+PIM of their own. For them, the group's PIM-for-Groups membership is the eligibility.
+`Test-PimWorkloadConnectors` fails if any shipped connector makes a standing assignment on a
+PIM-capable surface.
+
 ### 15.2 Layer 2 — desired state (per tenant, operator-edited)
 
 `config/PIM-Assignments-Workloads.custom.csv` — the 15th configuration file, same
@@ -4315,14 +4887,38 @@ Manager UX: the **Maintenance** tab has a Workload Delegation panel — pick wor
 (from connectors) → roles load LIVE via the connector → pick PIM group (groups
 cache) → stage the row. No typed role names.
 
+In the running product these rows are the `PIM-Assignments-Workloads` entity in SQL. **One role per
+workload delegation** (v2.4.372): the entity's store key is the `GroupTag` alone, so two roles bound
+to one group would collapse into one stored row. Until the key carries the role, the resource
+delegation wizard refuses a multi-role selection with that explanation, and the commit refuses any
+set of rows that share a store key (`400`, `duplicate-key`, §18.1h). The "Create resource
+delegation" wizard stages `Workload` / `RoleName` / `GroupTag` / `Scope` rows, the columns the engine
+reads, together with the group's definition row.
+
 ### 15.3 Layer 3 — engine applier
 
-`Apply-PimWorkloadAssignments` (PIM-Functions.psm1) runs as a launcher step:
-1. Read desired rows; resolve GroupTag → group objectId (cached).
-2. Per workload: acquire token via the auth adapter, list roles, list current
-   assignments, **diff** desired vs actual.
-3. Apply: POST missing assigns, DELETE rows marked `Action=Remove`. Idempotent;
-   honors `-WhatIfMode` (prints the plan); logs one line per change.
+In v2 the rows are applied by the engine's **`WorkloadConnectors` provider**
+(`New-PimWorkloadConnectorsProvider`, `engine/_shared/PIM-EngineProviders.ps1`, scope order 67, after the
+three dedicated workload providers; runtime in `PIM-WorkloadConnectors.ps1`). It runs in every engine
+pass like any other provider, gated by the feature `connectors.workload`, which is on whenever workload
+rows exist:
+1. Read the `PIM-Assignments-Workloads` desired rows and split them by `Action`
+   (`Get-PimWorkloadDesiredBindings`): `Assign` rows form the desired set, `Remove` rows are
+   targeted removals. A row without `Workload` / `RoleName` / `GroupTag` is not a binding and is
+   ignored, with a count.
+2. Resolve each row to its connector (by `Workload`), group, role and, for nested-membership
+   connectors, the container; read the live binding.
+3. Apply: create a missing `Assign` binding (idempotent); for a `Remove` row, detach a nested-membership
+   role, or delete a flat assignment **only when this tool created it** (otherwise it is reported and
+   left for a person). Removals go through the core's targeted removal, so they count against the
+   universal removal budget (§5.2). There is **no prune**: the live set is built only from desired rows.
+4. A row that cannot be applied (unknown connector, unresolved group, unknown role, no container, a
+   listing that failed) is a **failure item** with a catalogued code, not a skipped line. An active
+   workload exemption (`pim.Settings['WorkloadExemptions']`) excuses a missing `Assign` binding: it is
+   reported, not created.
+
+*(v1 applied the same rows with a launcher step, `Apply-PimWorkloadAssignments` in
+`PIM-Functions.psm1`, which the unsupported v1 engine still calls. Nothing in v2 calls it.)*
 
 ### 15.4 Auth adapters (the only code; small, stable)
 
@@ -4335,6 +4931,71 @@ cache) → stage the row. No typed role names.
 | `businesscentral` | BC service-to-service (admin + automation APIs) | BC supports Entra **security groups**: assign permission sets to the group via the automation API (`/api/microsoft/automation/v2.0/.../securityGroups`). Built as a **membership-model** connector (`business-central`): resolveContainer finds the BC security group by `azureGroupId == groupId`, permission sets attach to it. Per-row `Resource = tenantId/environment`. |
 | `devops` | Azure DevOps resource (`499b84ac-1321-427f-aa17-267ca6975798`) | Azure DevOps grants access by **nesting** the Entra group into an org/project security group (not a flat role). Built as a **membership-model** connector (`azure-devops`) using the Graph API: resolveContainer = the Entra group's subject descriptor (client-side `originId == groupId` match), `roles` = the org/project security groups, assign = `PUT memberships/{group}/{subject}`. Per-row `Resource = org`. |
 | `powerplatform` | `https://service.powerapps.com/` (BAP admin) | Power Platform **environment roles** (Environment Admin / Maker): flat `roleAssignments` on the BAP admin environment scope with the PIM group as principal. Built as a flat connector (`power-platform`) with static roles + per-row `Resource = environment id`. Pairs with `PIM-PowerPlatformDiscovery.ps1` (environment auto-detect → proposed PIM groups). |
+
+### 15.4a Workload prerequisites — one script per workload, a chip in the GUI
+
+Some workloads need tenant-side preparation before a connector can bind anything. That preparation is **not** in the
+permission templates (a pack stays pure rows); it is checked by one setup script, run per workload:
+
+`tools/setup/Initialize-PimWorkloadPrereqs.ps1 -Workload DefenderXdr | Intune | PowerBI | AzureRbac | EntraRoles`
+
+- **One catalog** (`engine/_shared/PIM-WorkloadPrereqs.ps1`) holds every prerequisite: a stable check id, whether an
+  API can check or fix it, the exact portal path when only a human can, and the Microsoft Learn link. The script, the
+  Manager and the tests read the same definitions; the pack → workload link (e.g. the Sentinel pack → Azure RBAC) lives
+  there too.
+- **Checks and fixes.** Defender XDR: the engine's `RoleManagement.ReadWrite.Defender` (granted), Unified RBAC answering
+  (beta `roleManagement/defender/roleDefinitions`), the activated workloads (portal only — reported as *inferred* from the
+  live roles), and for Data Operations the permission catalog (`resourceNamespaces`), Sentinel enabled on a workspace
+  (ARM `onboardingStates`) and the workspace connected to the Defender portal / data lake (portal only). Intune: the
+  engine's `DeviceManagementRBAC.ReadWrite.All` (granted) and the Intune RBAC read. Power BI: a security group (created),
+  the engine identity in it (added), no admin-consent Power BI application permission on it (reported), and the Fabric
+  tenant setting *Service principals can access read-only admin APIs* for that group (enabled through the Fabric admin API
+  when the caller may, keeping every group already listed). Azure RBAC: User Access Administrator (or Owner) for the
+  engine at every managed scope — assigned only with an explicit opt-in switch. Entra roles: the full Graph role map
+  (granted) and the P2 service plan. Every change is read back; `-WhatIf` changes nothing.
+- **Honest states.** A check the caller cannot read is *not checked* (never passed); a portal-only step stays pending until
+  the operator confirms it with `-ConfirmPortalStep <id>` (recorded as attested, not verified). An API-verified failure
+  cannot be confirmed away.
+- **Recorded in the store** as `pim.Settings['WorkloadPrereqs']` (per workload: run time, who, state, every check), read
+  back and audited. `GET /api/workload-prereqs` returns it with the exact command for this environment, and the GUI shows a
+  chip per workload on the permission-template cards, in the workload wizards and on the Coverage & gaps page:
+  **green** *prerequisites OK — checked &lt;when&gt;*, **amber** *not checked — run …* / *re-check* (older than 30 days) /
+  *incomplete*, **red** *prerequisites missing: &lt;checks&gt;* — each with the command, copyable.
+- **`-EnableSentinel` (opt-in).** For Defender Data Operations: enables Microsoft Sentinel on a dedicated, empty security
+  workspace (named, or created in the PIM resource group), registering `Microsoft.SecurityInsights` and
+  `Microsoft.OperationsManagement` first. PIM's own log workspace is refused (Sentinel would bill every log line).
+
+### 15.4b The assignment gate — groups always, workload assignments per workload (v2.4.380)
+
+A permission group is **always created**. Only a **new workload role assignment** waits for that workload's
+prerequisites. One pure rule, `Get-PimWorkloadAssignmentGate` (`PIM-WorkloadPrereqs.ps1`), is applied by the engine at the
+create step of the Intune, Defender XDR, workload-connector and Azure providers, by `/api/templates` and by the GUI's
+held note:
+
+- **held** when the workload's recorded state is failed, incomplete, never run or unreadable — the item is reported
+  *HELD* with the reasons and the command, counted as skipped, and the scope does not fail;
+- **not held** when it is ok or merely stale (a once-green workload keeps assigning after the 30-day re-check window);
+- **never** for Entra ID roles, and for **Azure** only when a prerequisite run actually found a problem (never checked
+  is not a hold — Azure assignments have always run without the script);
+- removals, updates and re-creates of a type change are **never** held.
+
+Staging is never blocked: the Templates cards, the wizards and the Coverage & gaps proposals show the held note instead.
+
+### 15.4c Permission templates imported by script (v2.4.380)
+
+`engine/_shared/PIM-TemplatePacks.ps1` is the pack planner (pure): tenant naming, the placeholder skip, the missing-row
+diff, whole units (a group definition + its workload binding) and **adoption** — a pack group the store already defines
+under the same tenant name or tag (in any definition entity) is not defined again, and the pack's rows for it are
+re-tagged to the store's tag. `tools/setup/Import-PimPermissionTemplate.ps1` applies a plan per entity the same way the
+Manager commits (snapshot → transactional apply of current + new rows → restore on failure → prune), reads every key
+back and audits `template.import`; a second run writes nothing. `tools/setup/Invoke-PimTenantPrep.ps1 -Config` drives
+many environments: per environment the build window (always closed in `finally`), the prerequisite script with its
+options, then the packs; Key Vault secret names only; one failure does not stop the others.
+
+**Defender XDR assignment body.** `POST /beta/roleManagement/defender/roleAssignments` carries
+`#microsoft.graph.unifiedRoleAssignmentMultiple` with `principalIds`, `roleDefinitionId`, `appScopeIds` (the data sources,
+`/` when blank) **and `directoryScopeIds: ['/']`** — without it Graph refuses the body. A custom-role POST that ends in an
+HTTPS→HTTP redirect is resolved by reading the role back by name (`Find-PimDefenderRoleIdByName`).
 
 ### 15.5 Discovery companions (same framework)
 
@@ -4668,7 +5329,7 @@ SQL `pim.Settings['MailTemplates']` (`engine/_shared/PIM-MailTemplateStore.ps1`)
 ```
 
 **GUI-driven, no rebuild.** An administrator (Admin+) edits a template body in
-**Settings → Mail templates** and clicks **Save**. The body is written to the store, so the
+**Audit & Settings → Mail templates** and clicks **Save**. The body is written to the store, so the
 customization **travels with the environment** and survives restarts and updates with **no image
 rebuild and no file copy**; the engine reads the same store. **Reset** (DELETE) returns the type to
 the shipped default. There is no file override layer: `<type>.mailtemplate.custom.html` files and
@@ -4695,22 +5356,27 @@ Bundle the existing `$global:<Role>_<Rule>_..._<Setting>` policy variables into
 named, linkable templates:
 
 ```
-templates/policy/default.policytemplate.json            # MFA + justification on enablement, expirations, notifications
-templates/policy/approval-required.policytemplate.json  # default + ApprovalRule (GA groups, tenant-root owner groups, PRA)
+templates/policy/groups-standard.policytemplate.json         # Groups_Standard (formerly 'default'): MFA + justification on activation, expirations, notifications
+templates/policy/groups-requireapproval.policytemplate.json  # Groups_RequireApproval (formerly 'approval-required'): + ApprovalRule (GA groups, tenant-root owner groups, PRA)
+templates/policy/entraidroles-*.policytemplate.json          # EntraIDRoles_Standard / EntraIDRoles_RequireApproval
+templates/policy/azureroles-*.policytemplate.json            # AzureRoles_Standard / AzureRoles_RequireApproval (2026-09-19)
 ```
 
 ```json
 {
-  "id": "approval-required",
-  "extends": "default",
+  "id": "Groups_RequireApproval",
+  "name": "PIM for Groups -- approval required (high-privilege)",
+  "extends": "Groups_Standard",
   "rules": {
-    "Enablement_EndUser_Assignment_enabledRules": ["MultiFactorAuthentication", "Justification"],
+    "Enablement": { "EndUser_Assignment": ["MultiFactorAuthentication", "Justification"], "Admin_Eligibility": ["Justification"], "Admin_Assignment": [] },
     "Approval": { "mode": "Serial", "approversSource": "Owners", "escalationHours": 4 }
   }
 }
 ```
 
-**Linking**: column **`PolicyTemplate`** on the definition rows. Blank = `default`.
+**Linking**: column **`PolicyTemplate`** on the definition rows, by template id (a former id such as
+`default` / `approval-required` still resolves). Blank = the group default (`Groups_Standard`, or what
+`pim.Settings['PolicyTemplateDefaults'].group` sets).
 Validator **PIM-POL-001**: referenced template must exist. **Engine re-apply**: the REST
 providers do not trust a stored "last applied" marker — they read the live policy and compare every
 managed rule against the template (below), so a policy changed in the portal is repaired and an
@@ -4818,8 +5484,8 @@ policy on a marker-fenced lab group (approver inherited from the group's departm
 
 ### 17.9 Emergency override (break-glass)
 
-For GA / PRA / tenant-root-owner groups protected by `approval-required`:
-- **Activation**: Manager **Settings → Emergency override (break-glass)** (SuperAdmin only)
+For GA / PRA / tenant-root-owner groups protected by `Groups_RequireApproval` (formerly `approval-required`):
+- **Activation**: Manager **Audit & Settings → Emergency access (break-glass)** (SuperAdmin only)
   → the administrator enters the **emergency passphrase**, verified server-side against the
   per-instance Key Vault secret `PIM-EmergencyPasscode` (never stored locally;
   in-memory comparison). On success the server writes the override to the shared store,
@@ -4827,13 +5493,49 @@ For GA / PRA / tenant-root-owner groups protected by `approval-required`:
   `{ active, scopeGroupTags[], activatedBy, activatedAt, expiresAt }` (a failed SQL write
   throws — it never falls back to a file the engine would not see) and the engine
   applies: ApprovalRule **disabled** on the scoped groups.
-- **Auto-restore**: TTL default 4h (max 24h). Every engine run reads the override;
-  expired → re-apply the linked policy template (the §17.7 live compare makes
-  this free) and record the restore in the audit trail.
+- **The v2 engine consumes it on every tick** (v2.4.370; `PIM-EngineProviders.ps1`). Before this,
+  only the v1 engine read the record, so in v2 break-glass did nothing. Three parts:
+  1. **Desired state follows the override.** While it is active, `Get-PimGroupsPolicyDesiredSet`
+     plans every approval-protected member policy in scope with approval **off** (flagged
+     `EmergencyOverride`). The GroupsPolicies provider therefore does not switch approval back on
+     during the window, and the mass-change hold (§6) leaves these rows out: a SuperAdmin with the
+     passphrase already authorised exactly this change. An empty scope means every
+     approval-protected group; otherwise a row matches by `GroupTag` or `GroupName`.
+  2. **The `emergency-override` job applies it at once.** It is the first job in the catalog, runs
+     every tick (interval 1 minute, tick-only), and calls `Invoke-PimEmergencyOverrideStep`: approval
+     rule off per scoped group, each one audited (`emergency.apply`), the owners notified, and the
+     applied groups recorded back in `pim.Settings['EmergencyOverride']`.
+  3. **Expiry restores the linked policy.** At expiry the same step re-applies the linked policy
+     template in full to **every** scoped group (not only the recorded ones), audits the restore
+     (`emergency.restore`) and clears the record (`active=false`, `restoredAtUtc`). A restore that
+     fails keeps the record, so the next tick retries it; approval is never left off silently. An
+     expiry that cannot be read counts as expired.
+
+  A record that cannot be read fails the job loudly; it is never read as "no override".
+- **Auto-restore**: TTL default 4h (max 24h), enforced by the step above.
 - **Audit**: activation, every policy change it caused, and restoration are all
   audit events — plus an immediate notice mail to all owners of the scoped groups.
 - Wrong passphrase: constant-time compare, 5 attempts → endpoint locks 15 min,
-  audit either way.
+  audit either way (a wrong passphrase is `emergency.passcode.failed`; a lockout or a missing
+  passphrase is `emergency.activate.refused`). Nothing is **granted**: responders still activate their
+  eligible membership through PIM, and Entra role and Azure resource policies are not touched.
+- **Provisioning the passphrase (2026-09-19).** Measured that day, no Manager had `PIM_EmergencyVault`
+  and no script provisioned the passphrase, so every activation was refused.
+  `tools/setup/Set-PimEmergencyPassphrase.ps1` (certificate SPN or signed-in; `-WhatIf`) takes the
+  passphrase as a SecureString (or a prompt, typed twice; min 12 characters, no leading/trailing
+  whitespace), stores its **SHA-256 hex** as the secret `PIM-EmergencyPasscode` in the environment's
+  own key vault (the verifier uses a 64-char hex as-is, so the clear passphrase is never in the vault
+  or on a command line), grants the Manager's managed identity **Key Vault Secrets User on that
+  secret only**, sets `PIM_EmergencyVault` on the Manager (ARM read-modify-write,
+  `Set-PimAcaAppEnvValue`), and reads each one back. All ARM / Key Vault REST, no az CLI. The Manager
+  maps the `PIM_EmergencyVault` / `PIM_EmergencyPasscodeSecret` env vars into the globals the
+  verifier reads, and `Get-PimSqlSecretFromKeyVault` mints its vault token through PIM-Rest when the
+  Az module is absent (the hosted containers ship none).
+- **Status on the card.** `GET /api/emergency-status` (Reader+) carries `passphrase` =
+  `Get-PimEmergencyPassphraseStatus` (configured / source / vault / secret name / reason — **never
+  the passphrase or its hash**). The Settings card shows *"Passphrase: configured in key vault …"* or
+  *"NOT configured — activation will be refused"* with the setup script, and disables the activate
+  button in the second case. The card's text states the steps above in operator language.
 - **Shared verify (pure, KV-backed).** The verify is extracted into
   `engine/_shared/PIM-Governance.ps1` so the Manager *and* any client-PC
   break-glass path use the identical logic. `Resolve-PimEmergencyExpectedHash`
@@ -4846,6 +5548,69 @@ For GA / PRA / tenant-root-owner groups protected by `approval-required`:
   (`Test-PimConstantTimeEqual`) → record a failure on miss; `Get-PimEmergencyTtlHours`
   clamps the requested TTL to 1–24h (default 4). All injected-time, no I/O in the
   core, fully offline-tested (`tests/Test-PimGovernance.ps1`).
+
+### 17.9b Break-glass accounts — the protected list (v2.4.370)
+
+The emergency **accounts** — the ones you recover with — are a separate thing from the emergency
+override above. PIM must never disable, revoke or offboard them.
+
+- **One list, in SQL.** `pim.Settings['BreakGlassAccounts']` holds a JSON array of UPNs and/or
+  object ids. The Manager and the engine read the same row, so a change takes effect in both
+  without touching either app. `engine/_shared/PIM-BreakGlassAccounts.ps1` is the one definition of
+  the reader (`Get-PimBreakGlassIdentifiers`, `Test-PimRowIsBreakGlass`) that the approval gate, the
+  session revoke, the disable guard, the queue and the Manager's revoke exclusion all use.
+- **The legacy value still counts.** `PIM_BREAKGLASS_ACCOUNTS` (or `$global:PIM_BreakGlassAccounts`)
+  is **unioned** with the SQL list, so nothing configured before this release loses protection. The
+  Settings screen shows those entries separately and suggests moving them into the list.
+- **Changed in Manager Settings by TWO SuperAdmins (maker/checker, 2026-09-19).** The list exempts
+  accounts from every guard, so one SuperAdmin must not be able to shield an account alone.
+  `GET /api/settings/breakglass-accounts` (Reader) returns the stored list, the legacy entries, the
+  effective list, its snapshot hash (`listHash`) and the current change request. `PUT` (SuperAdmin,
+  **justification** required, an empty list only with `confirmEmpty`) **no longer writes the list**:
+  it raises a PENDING request and answers `202 {pending, requestId, diff, expiresUtc}`. The request
+  (`engine/_shared/PIM-BreakGlassChange.ps1`) holds the proposed list (normalised exactly as
+  `Set-PimBreakGlassAccountList` validates it), the SHA-256 **snapshot hash** of the stored list the
+  maker saw (order- and case-insensitive), the diff (added / removed), the justification, the maker
+  and the created / expiry times (72 h). **One open request at a time:** a second `PUT` is `409`
+  and points at the open one. Then:
+  - `POST …/request/approve` — SuperAdmin and **not the maker** (compared case-insensitively on the
+    identity, as the rest of the Manager does; the maker gets `403`). It re-reads the stored list;
+    if its hash is no longer the request's snapshot the answer is `409` *"the list changed since the
+    request was made — raise a new request"* and the request closes as `stale`. Otherwise it claims
+    the request (compare-and-set, so two approvals or an approval racing a cancel cannot both win),
+    writes the list with `Set-PimBreakGlassAccountList -ExpectedSnapshotHash` (a compare-and-set on
+    the list row), **reads it back**, closes the request as `applied` and audits
+    `settings.breakglass-accounts.applied` with maker **and** checker. An expired request can never
+    be approved.
+  - `POST …/request/reject` — any other SuperAdmin; `POST …/request/cancel` — the maker only.
+  - `GET …/request` — the current request with its diff (Reader).
+  Every outcome is audited (`settings.breakglass-accounts.request / .applied / .stale / .expired /
+  .rejected / .cancelled`, refusals included). The request lives in its own row,
+  `pim.Settings['BreakGlassAccountsChange']` (the most recent request; the history is the audit
+  trail) — **not** the Approvals queue: that queue sits behind the `approvalsPreview` flag, honours
+  a self-approve switch, and is read by the engine's offboard / revoke gates, none of which may
+  apply to the tier-0 exemption list. **Always on:** the gate does not depend on the `makerchecker`
+  feature or the `approvalsPreview` preview. The Settings card shows the maker *"awaiting approval by
+  another SuperAdmin"* with the diff, the expiry and Cancel; another SuperAdmin Approve / Reject; a
+  Reader the request read-only; Home lists an open request as an attention item.
+- **The out-of-band route stays, for an environment with one SuperAdmin.**
+  `tools/setup/Set-PimBreakGlassAccounts.ps1` (the SQL admin app's certificate or the signed-in
+  user; `-WhatIf`; validates before it touches the store; compare-and-set against the list it read;
+  reads back) writes the list directly and audits it as `breakglass.accounts.set` with
+  `ActorSource = setup` and the justification. It is the documented emergency route: when no other
+  SuperAdmin exists (counted from the SQL ManagerAccess mapping plus `PIM_SuperAdmins`) the Manager
+  says so on the request and points at it. A request still open when the list is changed this way is
+  refused as stale.
+- **An unreadable list protects everyone.** When a store is configured but the list cannot be read,
+  the reader returns an "unreadable" marker, and every row counts as protected: nothing is disabled
+  or revoked on that run, and the run says so. It never reads a failure as "empty".
+- **Checked again when a queued action runs.** The Manager checks break-glass when an action is
+  queued, but an account can be added to the list afterwards. The queue drain therefore re-checks
+  at **execution** for every action type that takes access away
+  (`Get-PimQueueActionBreakGlassRefusal`, `PIM-QueueActions.ps1`): a break-glass target is refused
+  for good, and an unreadable list or a missing library refuses the action for now and retries it.
+  A queued TAP reset is deliberately not gated at execution: it issues a credential and removes no
+  access.
 
 ### 17.9a Lifecycle calendar & governance decision helpers (shared, pure)
 
@@ -4873,6 +5638,31 @@ primitives.
   `owner`/`manager`/`admin` recipients through a caller resolver (WhatIf-safe).
   The `reminders` and `escalations` scheduler jobs now drive these instead of the
   former stubs.
+- **The `escalations` job, as it runs** (hourly; v2.4.370, mail safety v2.4.372). It reads the
+  lifecycle dates from the desired rows in SQL and the per-stage notify log from
+  `pim.Settings['LifecycleEscalationLog']`, so a stage is sent once across processes. A store that
+  cannot be read means *cannot answer*, never "nothing due".
+  - **Gated by the Alerting event `expiring-access`**, the same event the `reminders` job raises.
+    With it off, nothing is read, sent or recorded, and the job says "event disabled".
+  - **No first-run storm.** Until `pim.Settings['LifecycleEscalationBaseline']` exists, the first run
+    records every stage that is **already** due as notified, without mailing it
+    (`Add-PimLifecycleEscalationSeed`), then writes the marker. After that only newly crossed
+    stages, and the capped reminder, are mailed. A baseline that cannot be read or saved sends
+    nothing.
+  - **Reminders are capped.** The default policy sends at most `maxRemindersPerStage = 1` reminder
+    per stage (so at most two mails per stage) and `remindAfterExpiry = false` (none once the date
+    has passed). A stored policy without these fields gets the defaults.
+  - **Operator holds are not failures.** When `Send-PimNotifyMail` refuses because of the email kill
+    switch, the `alerting.email` feature being off, a recipient not on the allowlist or no sender
+    (`Test-PimMailHoldReason`), the mail is reported as *skipped* with the reason, the job does not
+    fail, and the stage is **not** recorded, so it goes out once mail is enabled. Any other
+    undelivered stage fails the job.
+  - **Who receives it.** `owner` / `manager` / `sponsor` resolve to the owners of the admin's
+    **sponsor department** (or the per-admin forward override) through the same resolver the TAP and
+    every other admin mail use (`Get-PimAdminMailRecipientPlan`, §17.17); the row's `ManagerEmail` is
+    only a legacy fallback, and an item that resolves to nobody goes to the Alerting recipients.
+    `admin` is the Alerting recipients.
+  - **One summary line per run** in the tick log: due / sent / skipped / seeded / failed.
 - **Access-review feedback loop** — `Get-PimAccessReviewDecision` routes each
   assignment to `auto-extend` (the opt-in `AutoExtend` column — owners gate
   skipped) or `owner-approval` (owners parsed pipe-joined from `Owners`, falling
@@ -4959,8 +5749,10 @@ exportable read-only viewer (Reader role may view; §18.11).
 
 - **Identity**: hosted, the acting identity is the Easy Auth principal of the request (verified,
   §11.5.2 E); local/loopback, it is the Windows user that launched the Manager
-  (`[Security.Principal.WindowsIdentity]::GetCurrent()`). It is recorded on every mutation.
-  Hosted with no authenticated principal → Reader (fail closed).
+  (`[Security.Principal.WindowsIdentity]::GetCurrent()`), or the UPN of an interactive SQL sign-in
+  such as the break-glass console's. It is recorded on every mutation.
+  Hosted with no authenticated principal → role `None` and `401` (fail closed; v2.4.370 — it used to
+  be Reader, which served data to anonymous callers on a Manager with no Easy Auth in front).
 - **Mapping**: the access model lives in SQL, **`pim.Settings['ManagerAccess']`**:
   `{ "managerAccess": [ { "identity": "DOMAIN\\user | upn", "role": "Reader|Admin|SuperAdmin|Delegated" } ] }`,
   read live (cached ~15 s, so a grant applies within seconds) and consulted first; environment
@@ -5061,6 +5853,26 @@ Entra directly.
 
 ### 17.15 External request intake — ServiceNow et al. (design)
 
+**As built (v2.4.370).** The built intake is smaller than the design below, and SQL-only:
+- **Switched by `pim.Settings['IntakeEnabled']`** (true/false, or `{"enabled":true}`), read by both
+  containers (`Test-PimIntakeConfigured`). A runtime override (`$global:PIM_IntakeEnabled`) wins,
+  and the policy value (a config key or `PIM_IntakeEnabled` on the container) is the last source.
+  A setting that cannot be read leaves the intake **off** and says so. Nothing read this setting
+  before v2.4.370.
+- **The drop store is `pim.Settings['IntakeRequests']`**, not a file (`Add-PimIntakeRecord` appends;
+  a store failure throws).
+- **The `servicenow-intake` job** (every 10 minutes once enabled) runs `Invoke-PimIntakeProcess`. It
+  sanitises and routes every *received* record (`Resolve-PimIntakeRouting`: Tier 0/1 always needs a
+  human; self-targeting is rejected) and **acts** on it, recording the outcome on the record so it
+  is processed once: `rejected` with the reason; `queued` as a **pending proposal** in
+  `pim.ChangeQueue` (de-duplicated) that an operator reviews and commits in Pending changes; or
+  `unsupported` when the request type cannot be mapped to a desired-state row. The mapped type
+  today is an admin into a PIM group (`PIM-Assignments-Admins`, Eligible). **Nothing is committed
+  by the machine**, including an allow-listed "auto" type: origin never grants the right to apply;
+  the allow-list only changes the reason a reviewer sees.
+- The inbox directory, the signed request files and the intake overlay CSV described below were
+  **not built**.
+
 **Constraints**: pull-not-push; NO inbound endpoint, webhook, function, or
 internet-exposed storage; a compromised workflow must never create an admin or
 activate a role. **Direction**: requests flow FROM ServiceNow INTO the Manager —
@@ -5077,7 +5889,7 @@ account owns the folder and moves every file to `processed/` or
 decoupled from the Manager's lifetime. Processing is two-tier, routed per request
 type by `config/intake-routing.custom.json` (`Approve` = default | `Auto`):
 
-- **`Invoke-PimIntakeProcessor`** — a small headless scheduled task (~10 min; same
+- **A headless processor** (built as the `servicenow-intake` job above) — a small scheduled task (~10 min; same
   verification code the Manager uses; NOT a listener). `Auto`-routed verified
   requests become rows in a dedicated **intake overlay CSV**
   (`PIM-Assignments-FromIntake.custom.csv`) + audit + confirmation; the engine's
@@ -5101,7 +5913,7 @@ outbound-only both sides, drained by the same processor.)*
 2. **Typed allow-list**: `assignment.add`, `assignment.remove`, `admin.onboard`
    only. `admin.onboard` may ONLY reference a shipped/customer **admin template
    id** — SNOW instantiates pre-approved shapes, never arbitrary accounts.
-3. **High-priv hard deny**: any group whose `PolicyTemplate = approval-required`
+3. **High-priv hard deny**: any group whose `PolicyTemplate` is `Groups_RequireApproval` (or its former id `approval-required`)
    (GA, PRA, tenant-root owners) is NOT requestable through the intake, ever.
 4. **Activation out of scope by design**: the intake manages
    assignments/onboarding only. Activating a role stays exclusively behind PIM's
@@ -5764,11 +6576,11 @@ what the screen does, and an entry may deep-link to a *section* of a tab via `an
 | Menu | Entries |
 |---|---|
 | **Overview** | Home |
-| **Access** | Access map · Look up a role · Create access · Change existing access · Admin accounts & TAP · Invite a guest or consultant · Departments & owners (Settings section) · **Delegations — edit in a table** (§71.26: the records table scoped to the assignment entities) · All records (the raw view) |
+| **Access** | Access map · Look up a role · Create access · Change existing access · Admin accounts & TAP · Invite a guest or consultant · **Departments & owners** (its own page since 2026-09-19, §18.9) · **Delegations — edit in a table** (§71.26: the records table scoped to the assignment entities) · All records (the raw view) |
 | **Pending changes** | Check for problems · Review & commit queue (§18.1f) |
 | **Jobs** | Jobs & status · Engine logs & errors · Job schedule (§11.3a) |
-| **Reviews & controls** | Review standing access · Approvals · Drift: live vs desired (§5.2) · Access reviews · Tenant conformance · Reports · Managed tenants |
-| **Audit & Settings** | Audit trail · Settings · Newly discovered resources · Manager access & roles, Emergency override (break-glass), Mail templates (Settings sections) · Support |
+| **Reviews & controls** | Review current delegations · Approvals · Drift: live vs desired (§5.2) · **Coverage & gaps** · Access reviews · Tenant conformance · Reports · Managed tenants · **Managed tenant registry** and **Replication overview** (MSP master only) |
+| **Audit & Settings** | Audit trail · Settings · Newly discovered resources · **Manager access & roles** · **Emergency access (break-glass)** (the break-glass accounts and the emergency override, one page) · **Mail templates** · **Policy templates** (read-only) · Support. Each is its own page since 2026-09-19 — a menu item never deep-links into Settings, so each page can be permissioned on its own. |
 
 The former *Daily operations* menu is folded into Reviews & controls, and the former *Governance*
 ("Access & drift") tab is gone: drift became its own page, discovered resources moved to **Newly
@@ -5777,6 +6589,15 @@ schedule moved to Jobs, and the access list, emergency override, permission temp
 templates became Settings sections, visible by default with a plain-language explainer of every
 column. Deep links and alert links that pointed at the old tab resolve to the drift page. The page
 `<title>` is "PIM Manager (PIM4EntraPS)", which is what a bookmark shows.
+
+**All records layout (2026-09-19).** The records page is a two-column CSS grid, and `switchTab()`
+prepends the "What this is & how to use it" guide as the panel's first child. With no explicit
+placement the guide took the left column and the selected table wrapped into the narrow left column
+of a second row. Every child is now placed: the guide spans the top as one collapsed line, the entity
+picker is a 240 px sidebar with a **filter box** (case-insensitive, hides empty groups, says when
+nothing matches), and the table takes the whole remaining width (`minmax(0, 1fr)`); at 760 px and
+narrower the picker sits above the table. The last entity opened is remembered per browser
+(`localStorage` `pimGridBase`, like the rail's collapsed state) and re-opened on the next visit.
 
 **How it is built.** A declarative `NAV_GROUPS` array in `pim-manager.html` maps
 each group → an ordered list of existing `data-tab` keys. At boot, `buildNavGroups()`
@@ -5873,6 +6694,13 @@ Queue entries move `pending → committed → applying → applied | failed`, or
   of the freshly loaded data after a reload (a colleague's commit made in the meantime is kept). The
   page warns before unloading with uncommitted edits, and the restart notice says staged changes are
   kept. Nothing is ever committed automatically.
+- **A commit against changed data is refused, not merged over** (v2.4.370). The commit is a full-set
+  replace, so each commit carries the hash of the data it was built on, and the server refuses a
+  stale one with `409` (§18.1h). The page then offers a reload that keeps the staged edits.
+- **Pending-change highlighting is by row key**, not by position, so adding a row does not paint
+  every row below it as modified, and the badge counts real changes. A move or removal staged from
+  the map merges into the edits already staged instead of replacing them, and a validation
+  quick-fix acts on the row object the finding named, also after an earlier fix removed a row.
 - **The default view is queue AND recent commits, in one table** (2026-09-18, §33.26 BUG-168). A
   configuration commit and a directory action take **two different paths**: a configuration/delegation
   edit committed with *Commit all* goes `PUT /api/csv/<base>` → `Invoke-PimManagerSafeCommit` → the
@@ -5912,12 +6740,12 @@ Queue entries move `pending → committed → applying → applied | failed`, or
   **Engine logs & errors** (§11.3a) stage rows into this queue; nothing is applied until an
   administrator commits.
 
-### 18.1g Review standing access and the Drift page
+### 18.1g Review current delegations and the Drift page
 
-![Review standing access — active assignments from the snapshot, with the revoke-queued marker](img/manager-standing-access.png)
-*Review standing access, served from the scheduler's active-assignments snapshot, with queued revokes marked. (Synthetic demo data.)*
+![Review current delegations — active assignments from the snapshot, with the revoke-queued marker](img/manager-standing-access.png)
+*Review current delegations, served from the scheduler's active-assignments snapshot, with queued revokes marked. (Synthetic demo data.)*
 
-**Review standing access** (Reviews & controls) renders the stored active-assignments snapshot
+**Review current delegations** (Reviews & controls) renders the stored active-assignments snapshot
 (§11.1): the snapshot time and cadence, one row per active Entra role / Azure / PIM for Groups
 assignment, and the approval-gated bulk revoke (§6 approvals). Rows held by principals the directory
 no longer resolves are hidden by default; **show deleted principals (N)** reveals them and a
@@ -5956,8 +6784,9 @@ whole row is now posted through a declared contract (`REV_PAYLOAD_FIELDS`), and:
 renders one expandable row per engine scope with desired / live / in-sync counts; each item is
 labelled with names (e.g. `admin → member of group X (Eligible)`, `group A → member of group B`) and
 shows the technical key only when it adds something. **Check now** (Admin+) queues a fresh check and
-reports when a new result lands; **Apply now** applies the selected items through the gated
-remediation path.
+reports when a new result lands; **Apply now** queues an engine reconcile for the selected
+missing/changed items and starts the tick (§5.2) — the Manager itself changes nothing, and removing
+an extra is refused there (it goes through the queued revoke path).
 
 **Wizard helpers that prevent duplicates.** The Entra role picker hides roles that already have a
 delegation group in the role-assignment entities, with a toggle that shows and marks them. The shared
@@ -5966,6 +6795,53 @@ narrows only as the user types; the Workload field reads the definitions' `Workl
 direct groups carry a **type** (role, organisation, department, process, project, cross-org) that
 selects the entity they are stored in; the permission-group wizard no longer offers Department or
 Organization. Every onclick handler the page references is checked to exist by a static guard.
+
+### 18.1h Commit safety — boot data, concurrency, scoped slices (v2.4.370)
+
+The Manager's commit is a **full-set replace** of one entity (`PUT /api/csv/<base>` →
+`Invoke-PimManagerSafeCommit`). Four rules keep that from losing or leaking data:
+
+- **Boot data is script-safe.** `GET /` places the data, naming, tenant lists, instances, role,
+  feature flags and governance preview into an inline `<script>`. Every value goes through
+  `ConvertTo-PimScriptSafeJson`, which writes `<`, `>`, `&`, U+2028 and U+2029 as `\uXXXX` escapes (the
+  parsed value is identical, but the text can no longer close the script element), and the
+  placeholders are filled in **one** pass (`Expand-PimBootTemplate`), so a stored value that happens to
+  contain a placeholder name is not itself replaced. A group, account, administrative-unit or tenant
+  name written into desired state can therefore not run script in another administrator's browser.
+- **Optimistic concurrency.** The grid read returns `rowsHash`, the hash of the **full** stored set
+  (`Get-PimRowsHash`, before any scope filter). The commit sends it back as `baseRowsHash`; when the
+  stored set has changed since, the server answers `409` (`gate = 'concurrency'`) and writes
+  nothing. A commit without `baseRowsHash` (a script, a test) is accepted, and its audit event
+  records that it was **not** concurrency-checked. A successful commit returns the new hash.
+- **A scoped caller's slice is merged, never replaced.** A Delegated user or a portal-profile Admin
+  reads only the rows in their scope, and their commit is merged into the full stored set
+  (§9.2); a submitted row that would overwrite a row outside their scope is refused (`403`).
+- **One row per store key.** A commit in which two rows share a store key is refused with `400`
+  (`gate = 'duplicate-key'`) and nothing is written, because the store keeps one row per key and all
+  but the last would be lost silently. The workload wizard therefore stages **one role per workload
+  delegation** until the Workloads store key carries the role (§15.2).
+- **Disabling an admin needs a second administrator (v2.4.373).** An `Account-Definitions-Admins` change
+  that would disable the account on the next engine run is an offboard. That is a change to
+  `AccountStatus = Disabled | Revoked`, to `Lifecycle = Retire`, or to an `AutoDisableDate` (or the
+  legacy `OffboardDate`) that is today or earlier. Such a change goes through the **offboard
+  approval** instead of straight into the desired state. This applies to the commit and to the
+  account editor (`/api/admin-accounts/modify`), which use one rule (`Get-PimAdminDisableHolds` /
+  `Test-PimAdminDisablingValue`) and one outcome (`Request-PimManagerOffboardHold`).
+  - **Only the disabling value is held.** A modified row keeps every other column, and every other
+    row in the commit is saved.
+  - **An added row that carries a disabling value is held whole.** The offboard needs an existing
+    admin row, and writing the row without that value would create an enabled account.
+  - **The approval.** With a justification in the request, an offboard approval request is raised
+    for each held admin; a different administrator approves and executes it, which stages the
+    disable for commit.
+  - **The answer.** `202` when the other changes were saved, or when every held admin got an
+    approval. `409` when nothing else was pending and an approval could not be raised; the answer
+    says why for each admin.
+  - The Pending-changes page lists the held admins and offers **Raise offboard approval** for each.
+  - The maker/checker classifier (`Get-PimAuthoringSensitivity`) treats the same changes as sensitive.
+
+The **department** list (Access → Departments & owners) is a merge too (§18.9), and template approvals, promotions and
+deploys never write files (§6.3b).
 
 ### 18.2 UX goal — zero memorization
 
@@ -6181,7 +7057,7 @@ with an override toggle).
     and reports `preservedCount` — closing the wholesale-replace gap that motivated it.
 - **Validator**: missing-GroupTag detector, stale Entra-role detector, tier-safety
   lint, plus the PIM-* validator rules across the lifecycle features (§17).
-- **Review standing access**: active assignments + approval-gated revoke (§18.1g); Workload
+- **Review current delegations**: active assignments + approval-gated revoke (§18.1g); Workload
   Delegation panel (§15.2).
 - **Audit & Settings** (role-gated): audit trail, Settings sections for mail templates, emergency
   override and Manager access, Newly discovered resources, contacts/email-flow (§17.11–17.17).
@@ -6362,8 +7238,8 @@ audit.
 A **SuperAdmin-only "Settings" tab** lets an administrator view/edit the configuration
 that previously lived only in `config/*.ps1` / `config/*.json` — now managed
 **through the same store the engine uses** (no file editing, persisted + auditable).
-Besides the sections below it hosts Manager access & roles, the emergency override, permission
-template packs, mail templates, workload exemptions, feature customization and alerting. **Naming
+Besides the sections below it hosts permission template packs, workload exemptions, feature customization and
+alerting. Manager access & roles, Emergency access (the break-glass accounts, §17.9b, and the override) and mail templates are their own pages under Audit & Settings (2026-09-19). **Naming
 preview:** each naming pattern shows the name it produces for a sample, including the configurable
 admin word ("Admin", "adm", …), which does not loosen name validation. The core sections:
 
@@ -6375,10 +7251,25 @@ admin word ("Admin", "adm", …), which does not loosen name validation. The cor
   `requireAll` (markers every match must also contain). The engine's scriptblock
   defaults in `config/PIM4EntraPS.Filters.locked.ps1` remain the code fallback;
   the editable representation here is what an admin maintains.
-- **Departments (+owners)** — the source the delegation-approval workflow uses to
-  resolve **department → owner(s)**.
-- **Approvers / owners** — directory of people who can approve assignments / own
-  resources.
+
+**Departments & owners is its own page under Access (2026-09-19).** A department decides who
+approves and who is mailed for every delegation it sponsors (the owner chain Owners → SponsorUpn →
+the department), so it moved out of Settings to **Access → Departments & owners** (tab
+`departments`, `renderDepartmentsPage`): the departments table (owners/approvers, contact, notes),
+**Import departments from Entra** (name pattern) and **Import department owners/approvers from
+CSV** (owners per department, optional rename). Same endpoints, roles, gates and audit as before.
+The former **Approvers / owners** directory (`pim.Settings['Approvers']`) had no consumer — approvals
+and mail resolve department → owners and a delegation's own approvers — so it is retired:
+`PUT /api/settings/approvers` answers **410** with a pointer to the page, `GET /api/settings` still
+returns the stored list read-only, and the page shows those names once (dismissable) with *"add them
+as owners of a department if they should approve"*. Nothing is deleted from the store.
+
+**The Organisational dimension card is retired (2026-09-19).** It stored
+`NamingConventions.DirectGroupDimension`, which only re-worded the GUI ("role group" → "department
+group" …). Dimensions are parallel (§66) and departments, organisation, projects and cross-org are
+their own direct group types (§70.22), so the card is gone and the word is fixed to "role group". A
+`PUT /api/settings/naming` that **changes** the value answers **410** and saves nothing; a value
+already stored is kept by every other naming save and read by nothing.
 
 **Storage seam (one store, never a parallel one).** Reads/writes go through a
 single chokepoint — `Get-PimManagerSetting` / `Set-PimManagerSetting`:
@@ -6403,12 +7294,23 @@ role can't do):
 | Method + path | Role | Effect |
 |---|---|---|
 | `GET /api/settings` | any | bundle: naming, filters, departments, approvers + seeded flags + storage mode/instance (auto-seeds naming/filters if empty) |
-| `PUT /api/settings/naming` | SuperAdmin | replace the naming map (rejects an **empty** map → 400); mirrors into `$global:PIM_NamingConventions` so the same process's `Resolve-Pim*Name` helpers see it live |
+| `PUT /api/settings/naming` | SuperAdmin | replace the naming map (rejects an **empty** map → 400; a **change** of the retired `DirectGroupDimension` → 410, a stored value is kept); mirrors into `$global:PIM_NamingConventions` so the same process's `Resolve-Pim*Name` helpers see it live |
 | `PUT /api/settings/filters` | SuperAdmin | replace the filter list (rejects an **empty** list → 400) |
-| `PUT /api/settings/departments` | SuperAdmin | replace the department(+owner) list (empty allowed) |
-| `PUT /api/settings/approvers` | SuperAdmin | replace the approver/owner list (empty allowed) |
+| `PUT /api/settings/departments` | SuperAdmin | save the department(+owner) list from the **Departments & owners** page as a **merge** into the department definition rows (below; an empty list → 400) |
+| `PUT /api/settings/approvers` | — | **410 Gone** (the Approvers directory is retired; the stored list stays readable through `GET /api/settings`) |
 | `POST /api/settings/departments/import` | SuperAdmin | import departments from Entra groups matching a pattern (§15.5a); persists the merged dept list + chosen pattern; returns created/updated/skipped |
 | `POST /api/settings/approvers/import` | SuperAdmin | apply approvers/owners per department + rename from an uploaded CSV (§15.5b); persists the merged dept list; returns created/updated/renamed (rejects empty CSV → 400) |
+
+**Departments are definition rows, so a save merges** (v2.4.370). Departments are direct groups:
+their `PIM-Definitions-Departments` rows also carry `GroupName`, `GroupTag`,
+`AdministrativeUnitTag`, `IsRoleAssignable`, `Replicate`, `Ring`, `Target` and more, while the
+Departments & owners page edits only Department / Owners / Contact / Notes. `Merge-PimManagerDepartmentRows`
+(pure) therefore replaces only those four fields on an existing row and carries every other
+column over; a renamed department carries its row over under the new name; a new department gets a
+new row. The page's list is the full list, so a department removed there is removed; the two
+imports keep every department they do not name. A row with no department name is never touched.
+The delta guard's refusal is a `409` the screen can confirm. (Before v2.4.370 a save replaced the
+rows with the four fields only, and dropped the ring, target and replication settings.)
 
 Every write emits a `settings.<section>.save` audit event (imports emit
 `settings.departments.import` / `settings.approvers.import`). The AD OU placement
@@ -6487,10 +7389,18 @@ Each pack is one JSON document:
   available to delegate"). Adopting a pack stages those rows into the pending list; the
   engine remains the only writer to the tenant.
 - **Two pack shapes**, mirroring the providers:
-  - **Workload-group packs** (Defender XDR, Sentinel, Intune, Exchange Online) ship only
-    `PIM-Definitions-Services` rows — the workload assigns its **own** RBAC role directly to
-    the Entra group (no Entra directory role and no separate assignment row needed), exactly
-    like the Defender XDR v2 pack.
+  - **Workload-group packs** (Defender XDR, Sentinel, Intune, Exchange Online) ship
+    `PIM-Definitions-Services` rows for groups whose workload grants its **own** RBAC role to
+    the Entra group (no Entra directory role involved). That role grant is a **binding row**,
+    and a group without one holds no workload role at all — an orphan permission group. A
+    workload pack therefore ships each group **with its binding row** (Intune v2: a
+    `PIM-Assignments-Workloads` row per group, connector `intune`, naming the built-in role),
+    so the group and its role are imported as one unit; the validator warns about a workload
+    group with no binding and about a binding for a group no definition defines. Packs keyed
+    this way diff their binding rows too (`Workload|GroupTag|RoleName`; `GroupTag|RoleDefinitionName`
+    for the Intune / Defender binding entities). Group names in a pack are written in the
+    shipped `PIM-{Role}` convention and re-expressed in the tenant's own group naming pattern
+    when the pack is offered for import.
   - **Binding packs** (Azure RBAC, Entra ID roles) ship the definition rows **plus** the
     matching assignment rows (`PIM-Assignments-Azure-Resources` /
     `PIM-Assignments-Roles-Groups`), so adopting the pack is complete end-to-end. The Entra
@@ -6609,7 +7519,73 @@ The solution is fully offline and self-contained: no activation server, no licen
 no internet connection is required for licensing to work (a licence is a signed file verified
 offline, §19a).
 
+### 19b. Defaults in v2.4.380 — what an environment does before anyone changes a setting
+
+**Capabilities (the feature catalog, `engine/_shared/PIM-FeatureCatalog.ps1`).** *Default* is the catalog value before
+any stored setting or deploy baseline; *switches itself on* means it is on while rows of those entities exist, unless a
+`false` has been stored deliberately. Core capabilities are never switched off by the customization framework.
+
+| Capability (key) | Edition | Scope | Default | Switches itself on |
+|---|---|---|---|---|
+| Engine reconcile (`engine.reconcile`) | Free | single | **on** (core) | — |
+| Delegation map, read (`delegation.read`) | Free | single | **on** (core) | — |
+| Authoring / Review & Save (`authoring`) | Free | single | **on** (core) | — |
+| Email alerting (`alerting.email`) | Free | single | off | — |
+| Teams / webhook alerting (`alerting.webhook`) | Free | single | off | — |
+| Scheduled jobs (`scheduler.jobs`) | Free | single | off (the hosted deploy turns it on) | — |
+| Intune + Defender XDR connectors (`connectors.workload`) | Free | single | off | yes — `PIM-Assignments-Workloads` / `-Defender` / `-Intune` rows |
+| Coverage & gaps (`coverage.gaps`) | **Pro** | single | on (core) — **needs the licence** | — |
+| Revoke current delegations (`revoke.current`) | **Pro** | single | on (core) — **needs the licence** | — |
+| Access review campaigns (`reviews.campaigns`) | **Pro** | single | on (core) — **needs the licence** | — |
+| Delegated administration ceilings (`access.delegated`) | **Pro** | single | on (core) — **needs the licence** | — |
+| Tier-impact report (`reports.tier`) | **Pro** | single | on (core) — **needs the licence** | — |
+| Evidence / audit export (`reports.evidence`) | **Pro** | single | on (core) — **needs the licence** | — |
+| Second approver on sensitive changes (`makerchecker`) | **Pro** | single | off | — |
+| Discovery sweep (`discovery.sweep`) | **Pro** | single | off | — |
+| App-role / Azure DevOps / Dataverse / Business Central / Power Platform (`connectors.apps`) | **Pro** | single | off | yes — `PIM-Assignments-AppRole` / `-Workloads` rows (still needs the licence) |
+| Power BI (`connectors.powerbi`) | **Pro** | single | off | — |
+| Exchange Online (`connectors.exo`) | **Pro** | single | off | — |
+| MSP downlink / fan-out, MSP master / managed (`msp.downlink`) | **Pro** | multi | off | — |
+
+A Pro capability runs only with a valid (or in-grace) Pro licence bound to the tenant; without one it is inert and
+the portal says so. Settings › Licence and `GET /api/license` are never locked.
+
+**Policy templates.** The default per kind (Settings › Policy templates, `pim.Settings['PolicyTemplateDefaults']`):
+PIM for Groups → `Groups_Standard`, Entra ID roles → `EntraIDRoles_Standard`, Azure roles → `AzureRoles_Standard`. A row
+with no template uses its kind's default. The former ids `default` and `approval-required` resolve to `Groups_Standard`
+and `Groups_RequireApproval` for good.
+
+**Workload assignments.** Groups are always created. A new workload role assignment is held while its workload is
+failed, incomplete, never checked or unreadable; it is not held when ok or stale. Entra ID roles are never held; Azure
+is held only when a prerequisite run found a problem. Removals, updates and type-change re-creates are never held.
+
+**Workload prerequisites.** A recorded result is *stale* after **30 days** (amber *re-check*); stale still assigns.
+Opt-in switches are off unless passed: `-GrantAzureUserAccessAdministrator`, `-EnableSentinel`; `-SkipDataOperations`
+is off (Data Operations is checked). A portal-only step stays pending until confirmed with `-ConfirmPortalStep`.
+
+**Licences.** A licence runs until its `validTo`, then a **grace period** (the licence's `graceDays`, **30** when the
+file does not say) keeps the Pro capabilities running with a warning; after that they switch off. Free capabilities are
+never affected.
+
+**Template import by script.** Adds only what is missing; a second run writes nothing; groups are named by the
+tenant's own pattern; an existing group (same name or tag) is adopted; a group and its workload binding always go
+together (`-Only` is widened to whole units); every entity is snapshotted before it is written and the last **10**
+snapshots per entity are kept.
+
 ### 19a. Feature-customization & license framework
+
+> **Edition line, enforced from v2.4.380.** Each catalog entry declares its **edition** (`free` | `pro`) and **scope**
+> (`single` | `multi`); the older Pro list in `PIM-License.ps1` is kept equal to the catalog's Pro set (a test fails on
+> drift). **Pro, single tenant:** `coverage.gaps`, `discovery.sweep`, `connectors.apps` (app-role, Azure DevOps,
+> Dataverse, Business Central, Power Platform), `connectors.powerbi`, `connectors.exo`, `revoke.current`,
+> `reviews.campaigns`, `makerchecker`, `access.delegated`, `reports.tier`, `reports.evidence`. **Pro, multi tenant:**
+> `msp.downlink` and the MSP master / managed roles. `connectors.workload` (Intune + Defender XDR) and everything else
+> is free. Enforcement is **targeted**: the feature gate also checks for a valid (or in-grace) Pro licence bound to the
+> tenant, so a Pro capability is inert in the engine and jobs (skipped with the licence reason) and the Manager answers
+> 403 with the same text; `Test-PimMspLicense` gates the publish and downlink job entries (exit 2 with the contact and
+> the register command). The legacy global switch `PIM_EnforceProLicense` stays off. `GET /api/license` and Settings ›
+> Licence are never locked. Licences are registered with `tools/setup/Set-PimLicense.ps1` (verify → store in
+> `pim.Settings['License']` → read back).
 
 The framework lets a senior administrator decide, **per customer/tenant**, exactly
 which optional capabilities run — and gates them in the engine + jobs, not just the
@@ -6674,8 +7650,16 @@ now say so explicitly rather than implying the second from the first.
 | **Paid** — everything in free **plus the multi-tenant half**: define once and target tenants by tag and wave, signed definition sets verified on arrival, visibility of what reaches each tenant and what is withheld, per-customer rules, a read-only preview of what a tenant would receive, fleet conformance, rollout waves, central accounts whose lifecycle flows down, removals that stay the tenant's call, controlled release rings, the provider-hosted option, support with an agreed response time | paid | **not gated** |
 
 🔒 **Licence enforcement is switched OFF in the product.** `Test-PimFeatureLicensed` exists and is
-wired, but with no licence file present `Get-PimActiveEdition` reports `Core` and nothing is
-degraded, blocked or hidden. **The public docs must not imply a technical gate that does not
+wired, but with no licence stored `Get-PimActiveEdition` reports `Core` and nothing is
+degraded, blocked or hidden.
+
+**The licence lives in SQL** (v2.4.370). An issued licence document is stored in
+`pim.Settings['License']`, which both containers read (`Get-PimLicenseFromStore`). It used to be a
+file found by scanning `config/`, which the container image excludes, so a hosted environment could
+never see one. The operator imports it with `tools/setup/Set-PimLicense.ps1` (`-LicensePath` or
+`-LicenseJson`; `-WhatIf` supported): the document's signature is verified **before** the store is
+contacted, a tampered or foreign document is refused and never stored, and only its content is
+kept, not the file. **The public docs must not imply a technical gate that does not
 exist** — README's "Editions" section and `FEATURES.md` §29 both state the enforcement status in
 the same paragraph as the split, deliberately. The call to action for the licensed edition is a
 single mail address (`mok@mortenknudsen.net`) and nothing else: no phone number, no company
@@ -6718,6 +7702,17 @@ Two-stage rollout: (1) one-time per tenant —
 delegated permissions; (2) per PAW — `Deploy-PimActivatorClient.ps1` writes Edge
 enterprise policy keys (force-install + per-tenant config), Intune-deployable
 unattended.
+
+**Site access and token storage** (v2.4.370, **in the extension source**). The manifest's
+`host_permissions` are narrowed from every HTTPS site to the endpoints the extension uses: the
+Microsoft sign-in endpoint, Microsoft Graph, Azure Resource Manager and the extension's own update
+location. The sign-in tokens (refresh and access tokens, the signed-in account and the per-tenant
+token cache) are kept in `chrome.storage.session`, which lives in memory and is cleared when the
+browser closes, instead of `chrome.storage.local`, which is unencrypted on disk. The cost is a new
+sign-in after the browser restarts. Both changes reach users only with the **next signed extension
+release** (a repacked CRX published to the update location); the source is at manifest 1.6.127,
+not yet repacked. Values that are not credentials (the last justification and duration, the usual
+selection, the dismissed first-run tip) stay in local storage.
 
 **Bulk-activate confirm guard.** Activating many eligible roles in one click is
 powerful, and the list arrives partly pre-checked, so a fat-finger could elevate
@@ -7059,7 +8054,8 @@ authenticate — the container authenticates as nothing, and the deploy is still
 **Cross tenants.** A managed identity exists in one directory. An MSP *master* acting into a
 *managed* tenant needs a multi-tenant app registration with a credential — `S5`
 (`spnModel = multi-tenant-spn`). Every other shape (`S1`, `S3`, `S6`) acts only inside its own
-tenant, so managed identity covers them completely.
+tenant, so managed identity covers them completely. S5 is being decommissioned (§11.8), which
+leaves no shape that needs the cross-tenant credential.
 
 ### 27.5 System-assigned, and why that is the right choice here
 
@@ -7137,6 +8133,20 @@ environment whose admin cannot be used unattended can then never be fixed unatte
 | whoever was admin before converging | converging never takes access away |
 
 Entra-only authentication stays on. Contained users that already exist keep working.
+
+**The group is role-assignable, because it is tier 0** (v2.4.370). Membership of this group
+administers the store, and the store is the desired state the engine grants from — including Global
+Administrator. A plain security group can be changed by Groups or User Administrators and by its
+owners, which would let tier 1 raise itself to tier 0. A **new** group is therefore created with
+`isAssignableToRole = true`, so only a Privileged Role Administrator can change who is in it. That
+property can only be set when a group is created, and an existing plain group carries every
+member's access, so the step does **not** migrate it: it reports it on every run, loudly, as a
+**security finding** (`securityFindings`, printed as `[SECURITY FINDING]`) with how to migrate once,
+and otherwise proceeds as before. A finding is not a failure.
+
+**Not every job identity is a member.** The MSP master's publish job only reads, so it gets its own
+reader user instead of membership (§13.7), and a re-deploy removes a membership an earlier version
+added.
 
 **Converging** is one idempotent step, `tools/setup/Initialize-PimSqlAdminGroup.ps1` (the logic lives in
 `tools/setup/_PimSqlAdminGroup.ps1`): read the group, its members, the current admin and Entra-only; plan;

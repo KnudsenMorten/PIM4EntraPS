@@ -3,13 +3,20 @@
   Make a tenant's PIM SQL store usable by the environment's own identity. Unattended, idempotent.
 
 .DESCRIPTION
-  Between "an Azure SQL database exists" and "the PIM engine can use it" sit three steps that
+  Between "an Azure SQL database exists" and "the PIM engine can use it" sit the steps that
   were each done BY HAND while bringing the test estate up. They belong in a script, because a
   proof environment must be reachable only by automation:
 
-    1. the modern (Tier0) SPN needs a user in `master` with dbmanager -- Initialize-PimSqlDatabase
-       connects to master to test sys.databases, and without this it cannot;
-    2. it needs a contained user in the PIM database with db_owner;
+    1. (IMP-49 d) NOTHING in `master`. This used to give the modern SPN a master user with
+       **dbmanager** (create/drop ANY database on the server) "because Initialize-PimSqlDatabase
+       connects to master" -- but this script never calls Initialize-PimSqlDatabase, and nothing
+       in the engine does: the database already exists. A dbmanager membership an earlier run
+       granted is now DROPPED (least privilege is converged, not just granted).
+    2. a contained user in the PIM database -- created WITH SID from the app id, TYPE = E (never
+       FROM EXTERNAL PROVIDER) -- with db_datareader + db_datawriter + db_ddladmin: exactly the
+       set Grant-PimMiSql gives the hosted engine and Manager identities, proven sufficient there
+       (ddladmin covers the schema apply). It used to be **db_owner** (which also manages users,
+       permissions and can drop the database); a db_owner membership is now DROPPED. Read back.
     3. the pim schema (Rows / Settings / ChangeQueue) has to exist.
 
   Steps 1 and 2 connect as the server's Entra admin (the onboarding SPN). Step 3 connects AS
@@ -51,9 +58,12 @@ $shared = Resolve-Path (Join-Path $here '..\..\engine\_shared')
 . (Join-Path $shared 'PIM-Rest.ps1')
 . (Join-Path $shared 'PIM-ChangeQueue.ps1')
 . (Join-Path $shared 'PIM-SqlStore.ps1')
+. (Join-Path $here '_PimSetupShared.ps1')   # Get-PimSqlContainedUserSql + its read-back (IMP-49 d)
 
 if (-not $DbUserName) { $DbUserName = "AutomateIT-Modern-$(($SqlServerFqdn -split '\.')[0] -replace '^sql-ait-','')" }
-$sidHex = '0x' + ((([guid]$ModernAppId).ToByteArray() | ForEach-Object { $_.ToString('X2') }) -join '')
+# IMP-49 d: the engine's runtime set -- never db_owner, never dbmanager.
+$engineRoles = @('db_datareader', 'db_datawriter', 'db_ddladmin')
+$broadRoles  = @('db_owner')
 
 Write-Host "=== tenant store -- $SqlServerFqdn / $Database ===" -ForegroundColor Cyan
 Write-Host "  modern spn : $ModernAppId"
@@ -74,29 +84,39 @@ $adminTok = Get-PimRestToken -Resource 'https://database.windows.net' -TenantId 
 if (-not $adminTok) { throw 'could not obtain a SQL admin token for the onboarding SPN' }
 $type = Resolve-PimSqlClientType
 
-function Invoke-AsAdmin([string]$Db, [string]$Sql) {
+function Invoke-AsAdmin([string]$Db, [string]$Sql, [switch]$Row) {
     $c = $type::new("Server=tcp:$SqlServerFqdn,1433;Database=$Db;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30")
     $c.AccessToken = $adminTok
     $c.Open()
-    try { $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql; [void]$cmd.ExecuteNonQuery() } finally { $c.Close() }
+    try {
+        $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql
+        if (-not $Row) { [void]$cmd.ExecuteNonQuery(); return }
+        $rd = $cmd.ExecuteReader()
+        try {
+            if (-not $rd.Read()) { return $null }
+            $h = [ordered]@{}
+            for ($i = 0; $i -lt $rd.FieldCount; $i++) { $h[$rd.GetName($i)] = $(if ($rd.IsDBNull($i)) { $null } else { $rd.GetValue($i) }) }
+            return [pscustomobject]$h
+        } finally { $rd.Close() }
+    } finally { $c.Close() }
 }
 
-Write-Host "[1] master: user + dbmanager ..." -ForegroundColor Yellow
+# IMP-49 d: NO dbmanager. It let the engine identity create/drop ANY database on the server, for a code path
+# (Initialize-PimSqlDatabase) this script never takes. An earlier run's grant is taken back; nothing is created in master.
+Write-Host "[1] master: take back dbmanager if an earlier run granted it (nothing is created in master) ..." -ForegroundColor Yellow
 Invoke-AsAdmin 'master' @"
-IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$DbUserName')
-    CREATE USER [$DbUserName] WITH SID = $sidHex, TYPE = E;
-IF NOT EXISTS (SELECT 1 FROM sys.database_role_members rm
-               JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id AND r.name='dbmanager'
-               JOIN sys.database_principals m ON m.principal_id=rm.member_principal_id AND m.name=N'$DbUserName')
-    ALTER ROLE dbmanager ADD MEMBER [$DbUserName];
+IF EXISTS (SELECT 1 FROM sys.database_role_members rm
+           JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id AND r.name='dbmanager'
+           JOIN sys.database_principals m ON m.principal_id=rm.member_principal_id AND m.name=N'$($DbUserName.Replace("'", "''"))')
+    ALTER ROLE dbmanager DROP MEMBER [$($DbUserName.Replace(']', ']]'))];
 "@
 
-Write-Host "[2] $Database : contained user + db_owner ..." -ForegroundColor Yellow
-Invoke-AsAdmin $Database @"
-IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$DbUserName')
-    CREATE USER [$DbUserName] WITH SID = $sidHex, TYPE = E;
-ALTER ROLE db_owner ADD MEMBER [$DbUserName];
-"@
+Write-Host "[2] $Database : contained user (SID from app id) + $($engineRoles -join ' + ') -- db_owner taken back ..." -ForegroundColor Yellow
+Invoke-AsAdmin $Database (Get-PimSqlContainedUserSql -DbUserName $DbUserName -AppId $ModernAppId -Roles $engineRoles -RevokeRoles $broadRoles)
+$grantBack = Invoke-AsAdmin $Database (Get-PimSqlContainedUserReadBackSql -DbUserName $DbUserName -AppId $ModernAppId -Roles @($engineRoles + $broadRoles)) -Row
+$grantVerdict = Test-PimSqlContainedUserReadBack -Row $grantBack -Roles $engineRoles -RevokeRoles $broadRoles -DbUserName $DbUserName
+if (-not $grantVerdict.ok) { Write-Host "RESULT: FAILED -- the database user did not converge: $($grantVerdict.problems -join '; ')" -ForegroundColor Red; exit 1 }
+Write-Host "    read back: $DbUserName = $($engineRoles -join ' + '), not db_owner" -ForegroundColor DarkGray
 
 Write-Host "[3] pim schema, connecting AS the modern SPN (certificate) ..." -ForegroundColor Yellow
 $global:PIM_TenantId          = $TenantId

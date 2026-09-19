@@ -147,7 +147,16 @@ param(
     # update logs the user out and forces a full password re-auth. The scrub now
     # runs automatically only for CORRUPTED/disabled registrations (the case it
     # was actually meant to heal). Use this switch to force it for a stuck profile.
-    [switch]$ScrubRegistration
+    [switch]$ScrubRegistration,
+    # BUG-221: <profile>\Local Extension Settings\<id> IS the extension's
+    # chrome.storage.local (tenant catalog, active tenant, preferences, favourites).
+    # The flush used to delete it on EVERY run, wiping the user's setup. DEFAULT OFF
+    # now; opt in only to reset a profile whose extension storage is itself broken.
+    [switch]$DangerouslyWipeExtensionStorage,
+    # BUG-221: the flush refuses to evict cached binaries unless the live CRX's
+    # signing key is VERIFIED to match (Test-CrxSigningKey). Pass this only when you
+    # know the published CRX is right and the check cannot run (e.g. offline).
+    [switch]$SkipCrxKeyCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -159,6 +168,65 @@ function Write-Step { param([string]$Msg) Write-Host "`n>> $Msg" -ForegroundColo
 function Write-Ok   { param([string]$Msg) Write-Host "   $Msg" -ForegroundColor Green }
 function Write-Warn { param([string]$Msg) Write-Host "   $Msg" -ForegroundColor Yellow }
 function Write-Err  { param([string]$Msg) Write-Host "   $Msg" -ForegroundColor Red }
+
+# ---- Local State safety helpers (BUG-221: used by the -Repack kill; the flush
+# section below keeps its own equivalent inline code) -----------------------------
+# Count the profiles a Local State file lists (-1 = missing / unparseable).
+function Get-PimaLocalStateProfileCount {
+    param([Parameter(Mandatory)][string]$Path)
+    try { return @(((Get-Content -LiteralPath $Path -Raw -ErrorAction Stop) | ConvertFrom-Json).profile.info_cache.PSObject.Properties).Count }
+    catch { return -1 }
+}
+# Timestamped copy of <UserDataRoot>\Local State. THROWS when a copy cannot be made:
+# a browser kill that cannot be undone is not worth running.
+function Save-PimaLocalStateBackup {
+    param([Parameter(Mandatory)][string]$UserDataRoot, [string]$Label = 'browser')
+    $ls = Join-Path $UserDataRoot 'Local State'
+    if (-not (Test-Path -LiteralPath $ls)) { Write-Warn "${Label}: no Local State at $ls (fresh install?) -- nothing to back up"; return $null }
+    $backup = "$ls.bak.$((Get-Date).ToString('yyyyMMddHHmmss'))"
+    try { Copy-Item -LiteralPath $ls -Destination $backup -Force -ErrorAction Stop }
+    catch { throw "${Label}: could NOT back up Local State ($($_.Exception.Message)) -- refusing to close the browser without one." }
+    $n = Get-PimaLocalStateProfileCount -Path $backup
+    Write-Ok "${Label}: Local State backed up to $(Split-Path -Leaf $backup) ($n profile(s))"
+    return @{ Path = $backup; Count = $n }
+}
+# WM_CLOSE the main windows, wait up to 10s for the ORIGINAL processes, then
+# force-kill only the stragglers (renderers / GPU / utility -- they do not write
+# Local State). Same shape as the flush section's close.
+function Close-PimaBrowserGracefully {
+    param([Parameter(Mandatory)][string]$ExeName, [string]$Label = 'browser')
+    $procs = @(Get-Process $ExeName -ErrorAction SilentlyContinue)
+    if (-not $procs) { return }
+    $initialPids = @($procs | ForEach-Object { $_.Id })
+    foreach ($p in $procs) { try { if ($p.MainWindowHandle -ne 0) { [void]$p.CloseMainWindow() } } catch {} }
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline) {
+        if (@(Get-Process -Id $initialPids -ErrorAction SilentlyContinue).Count -eq 0) { break }
+        Start-Sleep -Milliseconds 300
+    }
+    $left = @(Get-Process $ExeName -ErrorAction SilentlyContinue)
+    if ($left) { $left | Stop-Process -Force -ErrorAction SilentlyContinue }
+    Write-Ok ("${Label}: closed ($($initialPids.Count) process(es); force-killed $($left.Count) straggler(s))")
+}
+# Put the backup back if Local State is now missing/unparseable or lists fewer
+# profiles -- only while the browser is NOT running.
+function Restore-PimaLocalStateIfRegressed {
+    param([Parameter(Mandatory)][string]$UserDataRoot, $Backup, [string]$ExeName = 'msedge', [string]$Label = 'browser')
+    if (-not $Backup -or $Backup.Count -le 0) { return }
+    $ls = Join-Path $UserDataRoot 'Local State'
+    $cur = Get-PimaLocalStateProfileCount -Path $ls
+    if ($cur -ge $Backup.Count) { return }
+    if (Get-Process $ExeName -ErrorAction SilentlyContinue) {
+        Write-Err "${Label}: Local State regressed ($cur of $($Backup.Count) profile(s)) but the browser is running -- close it and copy '$($Backup.Path)' over '$ls'."
+        return
+    }
+    try {
+        Copy-Item -LiteralPath $Backup.Path -Destination $ls -Force -ErrorAction Stop
+        Write-Warn "${Label}: Local State regressed ($cur of $($Backup.Count) profile(s)) -- restored from $(Split-Path -Leaf $Backup.Path)."
+    } catch {
+        Write-Err "${Label}: Local State regressed AND restore failed: $($_.Exception.Message). Copy '$($Backup.Path)' over '$ls' with the browser closed."
+    }
+}
 
 # Derive a Chromium extension id (+ the manifest "key" base64 SPKI) from a signing
 # key, generating the key on first use. Pure .NET (needs .NET Core 3+/PS7 for
@@ -202,12 +270,17 @@ function Get-TestPackId {
 # overrides the id / update URL / artifact names / key and packs a temp copy.
 $PAGES_BASE = 'https://knudsenmorten.github.io/PIM4EntraPS'
 $TEST_KEY_B64 = $null
+$TEST_EXT_ID = 'glldnbmjpdkjemcnficagdhgienfdpoo'
 if ($Channel -eq 'Test') {
     $ChannelKeyPath = "$env:USERPROFILE\.pim-activator\signing-key-test.pem"
     if ($Repack -or $PackOnly) {
         $test = Get-TestPackId -KeyPath $ChannelKeyPath
         $EXT_ID      = $test.Id
         $TEST_KEY_B64 = $test.KeyB64
+    } else {
+        # A flush-only Test run must target the TEST id. It used to keep the released
+        # id here, so "-Channel Test" evicted (and verified) the RELEASED extension.
+        $EXT_ID = $TEST_EXT_ID
     }
     $UPDATE_URL     = "$PAGES_BASE/updates-test.xml"
     $ChannelCrxName = 'pim-activator-test.crx'
@@ -225,7 +298,6 @@ if ($Channel -eq 'Test') {
 # pulls BOTH the released AND the test build, so a no-param run updates both pinned
 # icons in one go; -Channel Test flushes only the test id. (The fast-poll relaunch is
 # browser-wide; evicting both ids' cached binaries forces the re-download for both.)
-$TEST_EXT_ID = 'glldnbmjpdkjemcnficagdhgienfdpoo'
 if ($Channel -eq 'Test') {
     $FlushIds = @($EXT_ID)
 } else {
@@ -380,27 +452,24 @@ Test-PimActivatorCompliance
 # embedded extension id (SHA256 of the v3 header, first 16 bytes,
 # remapped from 0-15 -> 'a'-'p' per Chromium's id encoding), and refuse
 # to proceed if it doesn't match the policy id.
-function Test-CrxSigningKey {
-    # Pull the codebase URL out of updates.xml so we always probe the
-    # actual CRX the forcelist is pointing at (not a hardcoded URL).
-    try {
-        $u = Invoke-WebRequest -Uri $UPDATE_URL -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-    } catch {
-        Write-Warn "Could not fetch updates.xml ($UPDATE_URL): $($_.Exception.Message). Skipping CRX signing-key check."
-        return
-    }
-    if ($u.Content -notmatch "<updatecheck\b[^>]*\bcodebase\s*=\s*['""]([^'""]+)['""]") {
-        Write-Warn "Could not parse codebase URL out of updates.xml. Skipping CRX signing-key check."
-        return
-    }
-    $crxUrl = $Matches[1]
-    $crxTmp = Join-Path $env:TEMP "pim-activator-probe.crx"
-    try {
-        Invoke-WebRequest -Uri $crxUrl -OutFile $crxTmp -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-    } catch {
-        Write-Warn "Could not download CRX from $crxUrl. Skipping signing-key check."
-        return
-    }
+#
+# BUG-221 (2026-09-18): this check existed but was NEVER CALLED, although the note
+# below it said it gated the flush. It now runs at the top of the flush section,
+# once per extension id being flushed, BEFORE any browser is closed or any cached
+# binary deleted. Tri-state result:
+#   $true  -- the live CRX derives the expected id: safe to evict the cache.
+#   $false -- MISMATCH: evicting would brick the installed instance. Abort.
+#   $null  -- could not verify (offline, feed unparseable, not a v3 CRX). Abort too
+#             -- a flush that cannot be verified is the incident this exists for --
+#             unless the operator explicitly passes -SkipCrxKeyCheck.
+
+# Pure: the canonical Chromium extension id of a CRX (v3+) from its bytes, or $null
+# when the bytes are not a v3 CRX / carry no public key. Split out of
+# Test-CrxSigningKey so the derivation can be tested offline.
+function Get-CrxIdFromBytes {
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+    $bytes = $Bytes
+    if ($bytes.Length -lt 12) { return $null }
     # CORRECT CRX id derivation (replaced an earlier buggy version on 2026-06-10
     # that hashed the whole CrxFileHeader -- which produced a number unrelated
     # to the canonical Chromium id and caused a false-alarm cascade during the
@@ -412,12 +481,10 @@ function Test-CrxSigningKey {
     # We parse the protobuf header manually: scan for field 2 (sha256_with_rsa)
     # with wire_type 2 (length-delimited), descend into the AsymmetricKeyProof
     # submessage, find field 1 (public_key, wire_type 2), and hash THOSE bytes.
-    $bytes = [System.IO.File]::ReadAllBytes($crxTmp)
     $magic = -join ($bytes[0..3] | ForEach-Object { [char]$_ })
     $ver   = [System.BitConverter]::ToUInt32($bytes, 4)
     if ($magic -ne 'Cr24' -or $ver -lt 3) {
-        Write-Warn "CRX at $crxUrl is not a v3 (or higher) CRX -- can't derive id. magic=$magic, version=$ver"
-        return
+        return $null
     }
     $hdrLen  = [System.BitConverter]::ToUInt32($bytes, 8)
     $endIx   = 12 + $hdrLen
@@ -493,8 +560,7 @@ function Test-CrxSigningKey {
         }
     }
     if (-not $publicKey) {
-        Write-Warn "Could not extract public_key from CRX header. Skipping signing-key check."
-        return
+        return $null
     }
     $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($publicKey)
     $sb   = [System.Text.StringBuilder]::new()
@@ -505,24 +571,58 @@ function Test-CrxSigningKey {
         [void]$sb.Append([char](97 + $lo))
     }
     $derived = $sb.ToString()
+    return $derived
+}
+
+function Test-CrxSigningKey {
+    param(
+        [string]$UpdateUrl  = $UPDATE_URL,
+        [string]$ExpectedId = $EXT_ID
+    )
+    # Pull the codebase URL out of updates.xml so we always probe the
+    # actual CRX the forcelist is pointing at (not a hardcoded URL).
+    try {
+        $u = Invoke-WebRequest -Uri $UpdateUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+    } catch {
+        Write-Warn "Could not fetch updates.xml ($UpdateUrl): $($_.Exception.Message). CRX signing key NOT verified."
+        return $null
+    }
+    if ("$($u.Content)" -notmatch "<updatecheck\b[^>]*\bcodebase\s*=\s*['""]([^'""]+)['""]") {
+        Write-Warn "Could not parse a codebase URL out of $UpdateUrl. CRX signing key NOT verified."
+        return $null
+    }
+    $crxUrl = $Matches[1]
+    $crxTmp = Join-Path $env:TEMP ("pim-activator-probe-{0}.crx" -f $ExpectedId)
+    try {
+        Invoke-WebRequest -Uri $crxUrl -OutFile $crxTmp -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+    } catch {
+        Write-Warn "Could not download the CRX from $crxUrl. CRX signing key NOT verified."
+        return $null
+    }
+    $derived = $null
+    try { $derived = Get-CrxIdFromBytes -Bytes ([System.IO.File]::ReadAllBytes($crxTmp)) } catch { $derived = $null }
+    if (-not $derived) {
+        Write-Warn "The file at $crxUrl is not a v3 CRX with a public key -- cannot derive its id. CRX signing key NOT verified."
+        return $null
+    }
     Write-Step "Verifying gh-pages CRX signing key matches the policy-registered extension id"
     Write-Host ("   CRX URL                : {0}" -f $crxUrl) -ForegroundColor Cyan
     Write-Host ("   Derived extension id   : {0}" -f $derived) -ForegroundColor Cyan
-    Write-Host ("   Policy-registered id   : {0}" -f $EXT_ID) -ForegroundColor Cyan
-    if ($derived -eq $EXT_ID) {
+    Write-Host ("   Policy-registered id   : {0}" -f $ExpectedId) -ForegroundColor Cyan
+    if ($derived -eq $ExpectedId) {
         Write-Ok "CRX signing key matches the registered extension id. Updates will install correctly."
         return $true
     } else {
-        Write-Err "CRX SIGNING KEY MISMATCH -- the CRX on gh-pages is signed with a key that derives id '$derived', NOT '$EXT_ID'."
+        Write-Err "CRX SIGNING KEY MISMATCH -- the CRX on gh-pages is signed with a key that derives id '$derived', NOT '$ExpectedId'."
         Write-Err "Chromium will silently reject every update from this CRX. Flushing the cached binary on a box will BRICK the installed instance"
         Write-Err "(registered extension files deleted, replacement install blocked -> ERR_FILE_NOT_FOUND on icon click)."
         return $false
     }
 }
-# We DON'T call Test-CrxSigningKey here at top level -- pack/repack mode is
-# the recovery path for a wrong-key gh-pages CRX, and a top-level throw would
-# block the very command that fixes the situation. The check runs from inside
-# the flush section instead, so it gates the destructive cache delete only.
+# We DON'T call Test-CrxSigningKey at top level -- pack/repack mode is the
+# recovery path for a wrong-key gh-pages CRX, and a top-level throw would block
+# the very command that fixes the situation. It runs at the START of the flush
+# section instead ("Pre-flush gate"), so it gates the destructive cache delete.
 
 # ============================================================================
 # Repack mode (optional)
@@ -729,7 +829,18 @@ if ($Repack -or $PackOnly) {
     # only source of tenant id / client id (per browser profile).
 
     # msedge cannot pack while a running instance holds the source dir.
-    Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force
+    # BUG-221: this used to be a bare `Stop-Process -Force` on every msedge with NO
+    # Local State backup -- the exact kill-mid-write that reset the profile picker in
+    # the 2026-06-10 / 2026-06-22 incidents (the flush path below has had a backup +
+    # graceful close since then; the repack path never got it). Now: back up Local
+    # State FIRST (refuse to continue without one), close gracefully, force-kill only
+    # stragglers, and restore the backup if Local State regressed.
+    $edgeUserDataRoot = "$env:LOCALAPPDATA\Microsoft\Edge\User Data"
+    $edgeLsBackup = $null
+    if (Get-Process msedge -ErrorAction SilentlyContinue) {
+        $edgeLsBackup = Save-PimaLocalStateBackup -UserDataRoot $edgeUserDataRoot -Label 'Edge (pre-pack)'
+        Close-PimaBrowserGracefully -ExeName 'msedge' -Label 'Edge (pre-pack)'
+    }
     Start-Sleep -Seconds 2
 
     $crxOutput = "$packDir.crx"
@@ -744,6 +855,10 @@ if ($Repack -or $PackOnly) {
     }
     $crxSize = (Get-Item $crxOutput).Length
     Write-Ok "CRX packed: $crxSize bytes ($crxOutput)"
+    # The packer ran headless against the user's Edge install; if Local State came
+    # back with fewer profiles than the pre-pack backup, put the backup back now,
+    # while Edge is still closed (BUG-221).
+    if ($edgeLsBackup) { Restore-PimaLocalStateIfRegressed -UserDataRoot $edgeUserDataRoot -Backup $edgeLsBackup -ExeName 'msedge' -Label 'Edge (post-pack)' }
 
     # Sanity-check CRX magic
     $magic = -join ([System.IO.File]::ReadAllBytes($crxOutput) | Select-Object -First 4 | ForEach-Object { [char]$_ })
@@ -957,6 +1072,28 @@ function Get-BrowserProfiles($userDataRoot) {
     if (-not (Test-Path -LiteralPath $userDataRoot)) { return @() }
     Get-ChildItem -LiteralPath $userDataRoot -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^(Default|Profile \d+)$' }
+}
+
+# ============================================================================
+# Pre-flush gate: the live CRX must carry the RIGHT signing key (BUG-221)
+# ============================================================================
+# Runs BEFORE any browser is closed or any cached binary evicted. Evicting the
+# cached binary while gh-pages serves a CRX signed with another key leaves the
+# installed extension with no files and no installable replacement (the
+# 2026-06-10 fleet brick). Each flushed id is checked against ITS OWN feed.
+Write-Step "Pre-flush gate: verifying the published CRX signing key for each flushed extension id"
+$crxGateFailures = New-Object System.Collections.Generic.List[string]
+foreach ($extId in $FlushIds) {
+    $feed = if ($Channel -eq 'Test' -or $extId -ne $TEST_EXT_ID) { $UPDATE_URL } else { "$PAGES_BASE/updates-test.xml" }
+    $verdict = Test-CrxSigningKey -UpdateUrl $feed -ExpectedId $extId
+    if ($verdict -eq $true) { continue }
+    if ($verdict -eq $false) { $crxGateFailures.Add("$extId -- the CRX behind $feed is signed with a DIFFERENT key"); continue }
+    if ($SkipCrxKeyCheck) { Write-Warn "$extId -- signing key NOT verified; continuing because -SkipCrxKeyCheck was passed." ; continue }
+    $crxGateFailures.Add("$extId -- the signing key behind $feed could NOT be verified (pass -SkipCrxKeyCheck only if you know the published CRX is right)")
+}
+if ($crxGateFailures.Count -gt 0) {
+    foreach ($f in $crxGateFailures) { Write-Err $f }
+    throw "Flush aborted BEFORE touching any browser: evicting the cached extension without a verified, matching CRX can brick the installed instance. Fix the published CRX (re-run with -Repack using the correct key) and re-run."
 }
 
 Write-Step "Closing browser processes (graceful first, force-kill only stragglers)"
@@ -1270,17 +1407,29 @@ if ($DangerouslyPatchPreferences) {
     Write-Warn "Skipping Preferences JSON rewrite (default since 2026-06-09 -- pass -DangerouslyPatchPreferences to opt in)"
 }
 
-# Also clear secondary extension caches (Local Extension Settings, Sync, etc.)
-# across ALL profiles -- multi-profile fix 2026-06-10.
-Write-Step "Deleting secondary extension caches (across ALL profiles)"
+# Also clear secondary extension caches (Sync, State, Scripts, Rules) across ALL
+# profiles -- multi-profile fix 2026-06-10.
+# BUG-221: 'Local Extension Settings\<id>' is NOT a cache -- it is the extension's
+# chrome.storage.local (tenant catalog, active tenant, preferences). Deleting it on
+# every flush wiped the user's setup (and, before SEC-40 moved the tokens to
+# chrome.storage.session, signed them out -- contradicting the 2026-06-17 change
+# that stopped the registration scrub for exactly that reason). Opt-in only now.
+$secondary = @('Sync Extension Settings','Extension State','Extension Scripts','Extension Rules')
+if ($DangerouslyWipeExtensionStorage) {
+    Write-Warn "DangerouslyWipeExtensionStorage set -- ALSO deleting 'Local Extension Settings' (the extension's saved catalog + preferences)."
+    $secondary = @('Local Extension Settings') + $secondary
+}
+Write-Step "Deleting secondary extension caches (across ALL profiles; extension storage kept unless -DangerouslyWipeExtensionStorage)"
 foreach ($b in $browsers) {
     $profiles = @(Get-BrowserProfiles $b.UserDataRoot)
     foreach ($profile in $profiles) {
-        foreach ($sub in 'Local Extension Settings','Sync Extension Settings','Extension State','Extension Scripts','Extension Rules') {
-            $f = Join-Path $profile.FullName "$sub\$EXT_ID"
-            if (Test-Path -LiteralPath $f) {
-                try { Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction Stop; Write-Ok "$($b.Name) [$($profile.Name)]: removed $sub" }
-                catch { Write-Err "$($b.Name) [$($profile.Name)]: $sub - $($_.Exception.Message)" }
+        foreach ($extId in $FlushIds) {
+            foreach ($sub in $secondary) {
+                $f = Join-Path $profile.FullName "$sub\$extId"
+                if (Test-Path -LiteralPath $f) {
+                    try { Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction Stop; Write-Ok "$($b.Name) [$($profile.Name)]: removed $sub ($extId)" }
+                    catch { Write-Err "$($b.Name) [$($profile.Name)]: $sub ($extId) - $($_.Exception.Message)" }
+                }
             }
         }
     }

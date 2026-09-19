@@ -222,7 +222,11 @@ param(
     # ONE job, not one per domain, is deliberate: the single-runner lease (BUG-36) is global, so
     # parallel domain jobs would simply refuse each other. Serialised-and-cheap beats
     # parallel-and-contending, and an overrun tick is skipped, not doubled.
-    [ValidateSet('always-on','cron')][string]$WorkerMode = 'always-on',
+    # 🔴 §33.28 (2.4.373): the DEFAULT is 'cron' -- the v2 shape Invoke-PimDeployAll and Invoke-PimMspBuild already
+    # deploy. It was 'always-on', the v1-named scheduler worker matrix, so a direct run built the expensive historical
+    # shape. 'always-on' stays available (explicit -WorkerMode always-on), and an environment that already runs the
+    # worker matrix keeps it when -WorkerMode is not passed (see "Existing shape" after the az context check).
+    [ValidateSet('always-on','cron')][string]$WorkerMode = 'cron',
     [string]$TickCron        = '*/5 * * * *',     # UTC, 5 fields
     [string]$TickJobName     = 'ca-pim-tick',
     [int]$TickReplicaTimeout = 3600,              # a full reconcile must fit inside this
@@ -262,6 +266,20 @@ param(
     [string]$UpdateJobName = 'ca-pim-update',
     [switch]$OverrideRingGate,
     [string]$Reason,
+    # BUG-170 (via agent C1): the ring (and source) the SAME deploy run installs on an environment that
+    # carries none yet -- Invoke-PimDeployAll passes these when its updater step runs with an explicit
+    # -UpdateRing. The gate then judges this roll by that ring instead of refusing a ring-less environment.
+    # -1 = none (the gate's own behaviour: refuse a deployed environment that has no ring).
+    [ValidateRange(-1,3)][int]$PendingUpdateRing = -1,
+    [string]$PendingUpdateSourceUrl = '',
+
+    # --- 71.40: what the Manager's Downlink view verifies against -------------------------------
+    # The master signing key id(s) the MANAGER pins (PIM_BaselineTrustedKeys) and the PLAIN URL the master publishes
+    # the signed bundle to (PIM_BaselineDocUrl). Without them a hosted Manager said "no baseline document configured"
+    # on every environment, and could not verify a Key Vault signed bundle even when it had one. Manager only (the
+    # pull job carries its own pins, Deploy-PimDownlinkJob). Blank = not set, exactly as before.
+    [string[]]$BaselineTrustedKeys = @(),
+    [string]$BaselineDocUrl,
 
     # --- the worker matrix: deploy as many/few as you want -------------------
     # Ignored when -WorkerMode cron (the tick Job replaces the scheduler workers).
@@ -270,14 +288,29 @@ param(
     [object[]]$Workers = @(
         @{ name = 'ca-pim-manager';    ingress = 'external'; entry = 'manager';   jobs = '' }
         @{ name = 'ca-pim-scheduler';  ingress = 'none';     entry = 'scheduler'; jobs = 'queue-apply,reminders,escalations' }
-        @{ name = 'ca-pim-engine';     ingress = 'none';     entry = 'scheduler'; jobs = 'engine-delta,engine-full' }
+        @{ name = 'ca-pim-engine';     ingress = 'none';     entry = 'scheduler'; jobs = 'engine-delta,engine-full,drift-snapshot,coverage' }
         @{ name = 'ca-pim-connector';  ingress = 'none';     entry = 'scheduler'; jobs = 'connector-sync' }
         @{ name = 'ca-pim-deltaqueue'; ingress = 'none';     entry = 'scheduler'; jobs = 'delta-queue' }
-        @{ name = 'ca-pim-discovery';  ingress = 'none';     entry = 'scheduler'; jobs = 'discovery-entra,discovery-azure,discovery-powerbi' }
+        # 2.4.378: the two workload-role discovery jobs (REQ-U) run with the other discovery jobs; drift-snapshot + coverage are
+        # reads of the whole tenant and run on the engine worker. (The default hosting -- the tick Job -- runs every job.)
+        @{ name = 'ca-pim-discovery';  ingress = 'none';     entry = 'scheduler'; jobs = 'discovery-entra,discovery-azure,discovery-powerbi,discovery-defender,discovery-intune' }
     )
 )
 
 $ErrorActionPreference = 'Stop'
+# 🔴 BUG-215 -- THE CALLER'S az PROFILE IS PUT BACK ON EVERY EXIT. The sign-in below points
+# AZURE_CONFIG_DIR at an isolated profile; Invoke-PimDeployAll restores it after calling this script,
+# but a STANDALONE run left the operator's shell reading the deploy SPN's profile afterwards.
+$script:PimCallerAzureConfigDir    = $env:AZURE_CONFIG_DIR
+$script:PimCallerAzureConfigDirSet = [bool]$env:AZURE_CONFIG_DIR
+function Restore-PimCallerAzConfigDir {
+    if ($script:PimCallerAzureConfigDirSet) { $env:AZURE_CONFIG_DIR = $script:PimCallerAzureConfigDir }
+    # Unset the VARIABLE (never the directory: its config carries extension.use_dynamic_install).
+    elseif (Test-Path Env:\AZURE_CONFIG_DIR) { $env:AZURE_CONFIG_DIR = $null }
+}
+# A bare `throw` in a trap replaces the real error with "ScriptHalted" -- rethrow $_ (the lesson
+# Invoke-PimDeployAll recorded at a customer).
+trap { Restore-PimCallerAzConfigDir; throw $_ }
 function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m){ Write-Host "    $m" -ForegroundColor DarkGray }
 # 🔴 THIS WAS MISSING, AND IT TOOK DOWN STEP 6 OF EVERY ESTATE DEPLOY THAT PASSED A CERT.
@@ -302,6 +335,16 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
 # scheduled Job, and it already refuses inline secrets and validates the cron expression.
 . "$solRoot\engine\_shared\PIM-DownlinkJob.ps1"
 
+# 71.40 -- the Manager's baseline trust + document URL, decided and REFUSED here, before any Azure call: a malformed pin
+# would otherwise land as an env var that pins nothing and looks configured. Loaded only when asked for.
+$managerBaselineEnv = @()
+if (@($BaselineTrustedKeys | Where-Object { "$_".Trim() }).Count -or "$BaselineDocUrl".Trim()) {
+    . "$solRoot\engine\_shared\PIM-DownlinkManager.ps1"
+    $mbe = Get-PimManagerBaselineEnvPlan -TrustedKeys $BaselineTrustedKeys -DocUrl $BaselineDocUrl
+    if (-not $mbe.ok) { throw $mbe.reason }
+    $managerBaselineEnv = @($mbe.env)
+}
+
 Show-PimSetupBanner -ScriptName 'Setup-PimContainers' -SolutionRoot $solRoot
 $Location = Assert-PimSetupRegion -Location $Location   # West Europe / Denmark East only; refuse France
 
@@ -319,6 +362,7 @@ $subArgs = @('--subscription', $SubscriptionId)
 # ESTATE-06: in cron mode the scheduler WORKERS are replaced by one scheduled Job, so the app
 # set collapses to the Manager alone. Done here (not by asking the caller to pass -Workers)
 # so the mode is a single switch and the two shapes cannot drift apart.
+$workersAll = @($Workers)   # the full matrix, kept for an existing always-on environment (see "Existing shape" below)
 if ($WorkerMode -eq 'cron') {
     $cronCheck = Test-PimDownlinkJobCron -Cron $TickCron
     if (-not $cronCheck.ok) { throw "-TickCron is not a valid 5-field cron expression: $($cronCheck.reason)" }
@@ -326,6 +370,12 @@ if ($WorkerMode -eq 'cron') {
     if (-not $mgrOnly.Count) { throw "-WorkerMode cron still needs a manager entry in -Workers (the GUI front end)." }
     $Workers = $mgrOnly
 }
+# 🔴 IMP-49 n -- $ManagerApp WAS NEVER DEFINED IN THIS SCRIPT. Two places used it: the closing advice
+# printed `-n ` with nothing after it, and -- worse -- the line that publishes the Manager's managed
+# identity for the mail-sender step compared every app name with $null, so it NEVER published it and
+# an MI-only deploy fell through to a second lookup (or none). The Manager is the 'manager' entry.
+$ManagerApp = "$(@($Workers | Where-Object { $_.entry -eq 'manager' } | ForEach-Object { $_.name }) | Select-Object -First 1)".Trim()
+if (-not $ManagerApp) { $ManagerApp = 'ca-pim-manager' }
 
 Step "Target: sub $SubscriptionId / RG $ResourceGroup / env $EnvName / $Location"
 Note "image=$image  subnet=$SubnetName ($SubnetPrefix)  sql=$SqlServerFqdn/$SqlDatabase"
@@ -367,27 +417,63 @@ if ($AdminAppId -and ($AdminSecret -or $AdminCertPem)) {
         az login --service-principal -u $AdminAppId -p $AdminSecret --tenant $TenantId --only-show-errors -o none
     }
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az login failed for tenant $TenantId (exit $LASTEXITCODE)." }
+    # Our OWN isolated profile, created above for this run: setting its default touches nobody else.
+    az account set --subscription $SubscriptionId 2>$null | Out-Null
 }
-az account set --subscription $SubscriptionId 2>$null | Out-Null
+# 🔴 BUG-215 -- NEVER `az account set` IN THE CALLER'S PROFILE. It used to run here unconditionally,
+# so a run on the operator's own sign-in silently moved the MACHINE-WIDE default subscription under
+# every other shell and session on the host. Every ARM call below carries --subscription; the ones
+# that cannot (Graph via `az ad` / `az rest`) use the default ACCOUNT's tenant, so that tenant is
+# ASSERTED instead of changed -- and a mismatch is refused with the command to fix it.
 
 # FAIL FAST. Without this the script ran on with NO usable az context: every call failed
 # quietly, `env static IP =` printed empty, and the run only died four steps later inside a SQL
 # grant with "Cannot bind argument to parameter 'MiAppId' because it is an empty string" -- an
 # error that points at the wrong thing entirely. Prove the context BEFORE creating anything.
-$activeSub = az account show --query id -o tsv --only-show-errors 2>$null
-if (-not $activeSub -or $activeSub -ne $SubscriptionId) {
-    throw ("No usable az context for subscription $SubscriptionId (active: '$activeSub'). " +
+$activeSub = "$(az account show --subscription $SubscriptionId --query id -o tsv --only-show-errors 2>$null)".Trim()
+$activeTid = "$(az account show --subscription $SubscriptionId --query tenantId -o tsv --only-show-errors 2>$null)".Trim()
+if (-not $activeSub -or $activeSub -ne $SubscriptionId -or ($activeTid -and $activeTid -ne $TenantId)) {
+    throw ("No usable az context for subscription $SubscriptionId in tenant $TenantId (found: '$activeSub' in '$activeTid'). " +
            "Pass -AdminAppId with -AdminCertPem (or -AdminSecret) so this script can sign in, " +
            "or run 'az login' first. " +
            "Refusing to continue -- every subsequent az call would fail silently.")
 }
-Note "az context OK -> subscription $activeSub"
+$defaultTid = "$(az account show --query tenantId -o tsv --only-show-errors 2>$null)".Trim()
+if ($defaultTid -ne $TenantId) {
+    throw ("The DEFAULT az account is in tenant '$defaultTid', not $TenantId. The directory calls this script makes " +
+           "(managed-identity lookups, Graph grants) use the default account, so they would act on another tenant. " +
+           "This script does not change your default. Either pass -AdminAppId with -AdminCertPem to run in an isolated " +
+           "profile, or select it yourself first: az account set --subscription $SubscriptionId")
+}
+Note "az context OK -> subscription $activeSub (tenant $activeTid)"
+
+# ---- Existing shape: the cron default must not silently reshape an ALWAYS-ON environment ----------
+# 'cron' became the default (§33.28, 2.4.373: v2 and Invoke-PimMspBuild run the tick Job; the v1-named scheduler
+# workers are the historical shape). A DIRECT re-run on an environment that still runs the worker matrix would
+# otherwise add a tick Job NEXT TO the running workers and stop updating them. So when -WorkerMode was not passed
+# and any scheduler worker app of -Workers already exists here, this run keeps 'always-on' and says so; an
+# explicit -WorkerMode always wins (pass -WorkerMode cron to migrate, then delete the worker apps).
+if (-not $PSBoundParameters.ContainsKey('WorkerMode') -and $WorkerMode -eq 'cron') {
+    $schedNames = @($workersAll | Where-Object { $_.entry -eq 'scheduler' } | ForEach-Object { "$($_.name)" })
+    $existingApps = @(az containerapp list @subArgs -g $ResourceGroup --query "[].name" -o tsv --only-show-errors 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $liveWorkers = @($schedNames | Where-Object { $existingApps -contains $_ })
+    if ($liveWorkers.Count -gt 0) {
+        Warn ("this environment already runs the ALWAYS-ON worker matrix (" + ($liveWorkers -join ', ') + "), so this run keeps " +
+              "-WorkerMode always-on instead of the cron default. To move it to the on-demand shape, re-run with -WorkerMode cron " +
+              "and then delete those worker apps.")
+        $WorkerMode = 'always-on'
+        $Workers = $workersAll
+        Note ("mode: $WorkerMode (kept from the existing environment)")
+        Note ("apps: " + (($Workers | ForEach-Object { $_.name }) -join ', '))
+    }
+}
 
 # ---- 2026-09-13: the RING GATE, before anything in an existing environment is touched ----------
 . "$here\_PimUpdateRing.ps1"
 Step "Ring gate: may $ResourceGroup take $ImageTag?"
 [void](Assert-PimRollRingGate -ResourceGroup $ResourceGroup -SubscriptionArgs @('--subscription', $SubscriptionId) `
           -TargetVersion $ImageTag -UpdateJobName $UpdateJobName -OverrideRingGate:$OverrideRingGate -Reason $Reason `
+          -PendingUpdateRing $PendingUpdateRing -PendingUpdateSourceUrl $PendingUpdateSourceUrl `
           -Caller 'Setup-PimContainers')
 
 # --- BUG-40: resolve the image tag to its digest, and deploy THAT --------------
@@ -412,7 +498,7 @@ if (-not $WhatIfPreference) {
         $imageDigest = "$($global:PIM_LastBuiltDigest)".Trim()
         Note "digest from the build that just ran (registry not queried)"
     }
-    if (-not $imageDigest) { $imageDigest = Resolve-PimAcrImageDigest -AcrName $AcrName -Repository $ImageRepo -Tag $ImageTag }
+    if (-not $imageDigest) { $imageDigest = Resolve-PimAcrImageDigest -AcrName $AcrName -Repository $ImageRepo -Tag $ImageTag -SubscriptionId $SubscriptionId }
     $image = New-PimImageReference -Registry "$AcrName.azurecr.io" -Repository $ImageRepo -Digest $imageDigest
     Note "tag $ImageTag => $imageDigest"
     Note "deploying $image"
@@ -462,7 +548,7 @@ if ($PSCmdlet.ShouldProcess($EnvName,'create')) {
         Note ("ACA environment exposure: --internal-only $internalOnly" + $(if ($internalOnly -eq 'true') {
                   ' (VNet-private; reachable only from peered/hub clients -- and NOT changeable later)' }
               else { ' (external-capable; lock the Manager down later with `az containerapp ingress update --type internal`)' }))
-        $envCreateArgs = @('containerapp','env','create','-g',$ResourceGroup,'-n',$EnvName,
+        $envCreateArgs = @('containerapp','env','create') + $subArgs + @('-g',$ResourceGroup,'-n',$EnvName,
                            '--location',$Location,
                            '--infrastructure-subnet-resource-id',$subnetId,'--internal-only',$internalOnly,
                            '--enable-workload-profiles','--logs-destination','log-analytics')
@@ -498,7 +584,7 @@ if ($PSCmdlet.ShouldProcess($EnvName,'create')) {
                            "immutable, so the environment stays $actualInternal. To change it you must delete " +
                            "environment '$EnvName' and every app in it and redeploy. If you only need to change " +
                            "who can reach the Manager, use the APP instead: " +
-                           "az containerapp ingress update -g $ResourceGroup -n ca-pim-manager --type internal|external.")
+                           "az containerapp ingress update --subscription $SubscriptionId -g $ResourceGroup -n ca-pim-manager --type internal|external.")
         } else { Note "env exists (--internal-only=$actualInternal)" }
     }
 }
@@ -587,7 +673,7 @@ else {
     # it teaches the operator to ignore the next one, which will be right.
     Note ("no hub VNet given, and none is needed: this environment is EXTERNAL, so the Manager is " +
           "reachable without peering. Lock it down later with " +
-          "'az containerapp ingress update -g $ResourceGroup -n ca-pim-manager --type internal'.")
+          "'az containerapp ingress update --subscription $SubscriptionId -g $ResourceGroup -n ca-pim-manager --type internal'.")
 }
 
 if ($SkipPrivateDns) {
@@ -782,9 +868,9 @@ function Invoke-PimDbInitJob {
     # before the change too -- for a DIFFERENT script. A ratcheted gate that is already red cannot
     # report the next instance, which is the whole reason this defect reached a customer deploy.
     $entry    = '/app/PIM4EntraPS/tools/pim-engine/dbinit-job-entry.ps1'
-    $envId    = "$(az containerapp env show -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null)".Trim()
+    $envId    = "$(az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null)".Trim()
     if (-not $envId) { throw "Container Apps environment '$EnvName' not found in '$ResourceGroup' -- the bootstrap job has nowhere to run." }
-    $location = "$(az containerapp env show -g $ResourceGroup -n $EnvName --query location -o tsv 2>$null)".Trim()
+    $location = "$(az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query location -o tsv 2>$null)".Trim()
 
     # The job carries the SQL admin identity (to authenticate to the database) and, when they
     # differ, the pull identity (to get the image). Two identities, two jobs, neither able to do
@@ -831,25 +917,25 @@ function Invoke-PimDbInitJob {
     $yamlPath = Join-Path ([IO.Path]::GetTempPath()) ("pim-dbinit-job-{0}.yaml" -f ([guid]::NewGuid().ToString('N').Substring(0,8)))
     Set-Content -LiteralPath $yamlPath -Value (($y.ToArray()) -join "`n") -Encoding ascii
     try {
-        if ("$exists".Trim()) { az containerapp job update -g $ResourceGroup -n $DbInitJobName --yaml $yamlPath -o none 2>$null | Out-Null }
-        else                  { az containerapp job create -g $ResourceGroup -n $DbInitJobName --yaml $yamlPath -o none 2>$null | Out-Null }
+        if ("$exists".Trim()) { az containerapp job update @subArgs -g $ResourceGroup -n $DbInitJobName --yaml $yamlPath -o none 2>$null | Out-Null }
+        else                  { az containerapp job create @subArgs -g $ResourceGroup -n $DbInitJobName --yaml $yamlPath -o none 2>$null | Out-Null }
     } finally { Remove-Item -LiteralPath $yamlPath -Force -ErrorAction SilentlyContinue }
-    if (-not "$(az containerapp job show -g $ResourceGroup -n $DbInitJobName --query name -o tsv 2>$null)".Trim()) {
+    if (-not "$(az containerapp job show @subArgs -g $ResourceGroup -n $DbInitJobName --query name -o tsv 2>$null)".Trim()) {
         throw "the bootstrap job '$DbInitJobName' was NOT created -- see the failure above. Without it no database user can be created, because this host has no route to a private SQL server."
     }
 
-    $exec = "$(az containerapp job start -g $ResourceGroup -n $DbInitJobName --query name -o tsv 2>$null)".Trim()
+    $exec = "$(az containerapp job start @subArgs -g $ResourceGroup -n $DbInitJobName --query name -o tsv 2>$null)".Trim()
     if (-not $exec) { throw "could not start '$DbInitJobName'." }
     Note "execution $exec -- waiting"
     $status = ''
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Seconds 10
-        $status = "$(az containerapp job execution show -g $ResourceGroup -n $DbInitJobName --job-execution-name $exec --query properties.status -o tsv 2>$null)".Trim()
+        $status = "$(az containerapp job execution show @subArgs -g $ResourceGroup -n $DbInitJobName --job-execution-name $exec --query properties.status -o tsv 2>$null)".Trim()
         if ($status -in @('Succeeded','Failed','Degraded')) { break }
     }
     if ($status -ne 'Succeeded') {
         throw ("the database bootstrap '$exec' ended '$status'. Read its log:`n" +
-               "  az containerapp job logs show -g $ResourceGroup -n $DbInitJobName --execution $exec --container $DbInitJobName --tail 100`n" +
+               "  az containerapp job logs show --subscription $SubscriptionId -g $ResourceGroup -n $DbInitJobName --execution $exec --container $DbInitJobName --tail 100`n" +
                "Until it succeeds the apps have NO database users and will crash-loop on " +
                "'Login failed for user <token-identified principal>' -- so this deploy stops here rather than exposing that.")
     }
@@ -981,12 +1067,38 @@ function Get-PimContainerSecretsYaml {
     return "    secrets: [ $($items -join ', ') ]"
 }
 
+$script:PimManagerCreatedClosed = $false
+function Close-PimNewManagerUntilEasyAuth {
+    <#
+      SEC-31, the create half. The app was just created on INTERNAL ingress. Put the closing access
+      restriction on it (Set-PimManagerEasyAuth -CloseIngressOnly: one rule definition, applied and
+      read back), then switch the ingress to external, then READ BOTH BACK. Any failure throws with the
+      app still internal or still restricted -- closed either way, never open without Easy Auth.
+    #>
+    param([Parameter(Mandatory)][string]$App)
+    $ea = Join-Path $here 'Set-PimManagerEasyAuth.ps1'
+    if (-not (Test-Path -LiteralPath $ea)) { throw "Set-PimManagerEasyAuth.ps1 not found beside this script -- refusing to expose '$App' without the closing restriction (it stays on internal ingress)." }
+    $eaClose = @{ App = $App; ResourceGroup = $ResourceGroup; SubscriptionId = $SubscriptionId; TenantId = $TenantId; CloseIngressOnly = $true }
+    Step "SECURE BY DEFAULT: '$App' is created CLOSED and stays closed until Easy Auth is configured and verified"
+    & $ea @eaClose | Out-Host
+    az containerapp ingress update @subArgs -g $ResourceGroup -n $App --type external -o none
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "could not switch '$App' to external ingress (exit $LASTEXITCODE) -- it stays on INTERNAL ingress (closed)." }
+    $ext = "$(az containerapp show @subArgs -g $ResourceGroup -n $App --query properties.configuration.ingress.external -o tsv 2>$null)".Trim()
+    if ($ext -notmatch '(?i)^true$') { throw "read-back: '$App' ingress.external reads '$ext' after the switch -- refusing to continue." }
+    # The ingress switch rewrites the ingress block: prove the closing rule survived it (re-applied if not).
+    & $ea @eaClose | Out-Host
+    $script:PimManagerCreatedClosed = $true
+    Note "'$App' is on external ingress and CLOSED (access restriction 'pim-closed-until-easyauth'). Set-PimManagerEasyAuth.ps1 opens it once sign-in is in place."
+}
+
 foreach ($w in $Workers) {
     Step "Worker '$($w.name)'  entry=$($w.entry)  ingress=$($w.ingress)  jobs='$($w.jobs)'"
     if (-not $PSCmdlet.ShouldProcess($w.name,'deploy')) { continue }
 
     $envVars = @($commonEnv)
     if ($w.entry -eq 'scheduler' -and "$($w.jobs)".Trim()) { $envVars += "PIM_SCHED_JOBS=$($w.jobs)" }
+    # 71.40: the Manager alone gets the baseline pin + URL (validated above; empty when not asked for).
+    if ($w.entry -eq 'manager' -and $managerBaselineEnv.Count) { $envVars += $managerBaselineEnv }
 
     # create or update
     $exists = az containerapp show @subArgs -g $ResourceGroup -n $w.name --query name -o tsv 2>$null
@@ -995,11 +1107,21 @@ foreach ($w in $Workers) {
             # --system-assigned is kept in BOTH paths: the app still needs its own identity for
             # SQL + Graph. The user-assigned one is attached purely so the registry pull has a
             # principal that already holds AcrPull at create time.
-            $createArgs = @(
-                'containerapp','create','-g',$ResourceGroup,'-n',$w.name,'--environment',$EnvName,
+            # 🔴 SEC-31 -- CREATED CLOSED. The Manager used to be created with --ingress external and
+            # nothing in front of it until the Easy Auth step ran later -- and in hosted mode a caller
+            # with no principal is a READER, so every assignment and admin row was readable by anyone
+            # who found the URL, for as long as that took (or for good, if the Easy Auth step failed:
+            # the deploy rolled back CODE only). Now: create it on INTERNAL ingress (reachable only
+            # from inside the environment), put the closing access restriction on it, and only then
+            # switch it to the intended --ingress external. Set-PimManagerEasyAuth.ps1 removes the
+            # restriction once Easy Auth is configured AND verified -- nothing else does.
+            # An EXISTING Manager is never touched by this (the update path below), so a re-deploy of
+            # an environment that already has Easy Auth keeps serving exactly as before.
+            $createArgs = @('containerapp','create') + $subArgs + @(
+                '-g',$ResourceGroup,'-n',$w.name,'--environment',$EnvName,
                 '--workload-profile-name','Consumption','--image',$image,
                 '--registry-server',"$AcrName.azurecr.io",
-                '--ingress','external','--target-port','8080','--transport','http',
+                '--ingress','internal','--target-port','8080','--transport','http',
                 # min-replicas 0 = scale to zero: ACA keeps the HTTP scale rule and cold-starts
                 # the Manager on the first request. Safe here because the Manager holds NO state
                 # of its own -- it is a front end over the SQL store.
@@ -1018,6 +1140,8 @@ foreach ($w in $Workers) {
             }
             $createArgs += @('--env-vars') + $envVars + @('-o','none')
             az @createArgs
+            if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az containerapp create failed for '$($w.name)' (exit $LASTEXITCODE)." }
+            Close-PimNewManagerUntilEasyAuth -App $w.name
         } else {
             # worker via YAML (reliable command/args array) — same image, scheduler entrypoint
             $envId = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null
@@ -1073,6 +1197,18 @@ $envYaml
     } else {
         az containerapp update @subArgs -g $ResourceGroup -n $w.name --image $image -o none
         Note 'updated existing'
+        # 71.40: an EXISTING Manager gets the baseline pin + URL too -- the create path above is not the only way in.
+        # --set-env-vars MERGES (never --replace-env-vars). Safe through az.cmd: the values are validated key ids and a
+        # URL that carries no query string, so there is no '&' for cmd.exe to split (the B9 trap).
+        if ($w.entry -eq 'manager' -and $managerBaselineEnv.Count) {
+            az containerapp update @subArgs -g $ResourceGroup -n $w.name --set-env-vars @managerBaselineEnv -o none
+            if ($LASTEXITCODE -ne 0) { throw "could not set the baseline pin/URL on $($w.name) ($(@($managerBaselineEnv | ForEach-Object { ($_ -split '=', 2)[0] }) -join ', '))" }
+            $mbeNames = @($managerBaselineEnv | ForEach-Object { ($_ -split '=', 2)[0] })
+            $got = @(az containerapp show @subArgs -g $ResourceGroup -n $w.name --query "properties.template.containers[0].env[].name" -o tsv 2>$null)
+            $miss = @($mbeNames | Where-Object { $got -notcontains $_ })
+            if ($miss.Count) { throw "read-back: $($w.name) does not carry $($miss -join ', ') after the update" }
+            Note "baseline trust on $($w.name): $($mbeNames -join ', ') set and read back"
+        }
     }
     Assert-PimDeployedImage -Kind app -Name $w.name -Expected $image
 
@@ -1117,7 +1253,7 @@ $envYaml
     # §65.4 -- the Manager gets the READ-ONLY Graph set; everything else gets the engine set.
     # Keyed off the app name because that is what the workload list carries here; 'ca-pim-manager'
     # is identical in every environment (see the yaml note above), so this is stable across tenants.
-    Grant-PimMiGraph -MiObjectId $oid -RoleSet $(if ("$($w.name)" -match 'manager') { 'Manager' } else { 'Engine' })
+    Grant-PimMiGraph -MiObjectId $oid -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId -RoleSet $(if ("$($w.name)" -match 'manager') { 'Manager' } else { 'Engine' })
     # BUG-51: the Graph grant above covers the DIRECTORY half only. Without an ARM role this
     # identity sees an empty Azure -- azure-scopes=0, and managementGroups list 403s -- while
     # every directory read works perfectly. Same lesson as framework §10.0b, read backwards.
@@ -1245,7 +1381,7 @@ $envYamlJob
         # The Job then ran on schedule, every five minutes, reporting Succeeded and doing nothing.
         $jobAppId = Resolve-PimMiAppId -ObjectId $jobOid -What $TickJobName
         Grant-PimMiSqlHere -DbUserName $TickJobName -MiAppId $jobAppId
-        Grant-PimMiGraph -MiObjectId $jobOid
+        Grant-PimMiGraph -MiObjectId $jobOid -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId
         # BUG-51 was MEASURED on THIS identity: the tick ran, the directory half returned
         # entra-roles=146 aus=36 pim-groups=332, and the Azure half returned azure-scopes=0
         # azure-rbac-roles=0. The tick is the workload that actually reconciles, so an
@@ -1256,7 +1392,7 @@ $envYamlJob
                 -Roles $AzureRbacRoles -ManagementGroupId $AzureRbacManagementGroupId -Required:$RequireAzureRbac
         }
         Note "MI $jobAppId granted SQL (db user [$TickJobName]) + Graph app-roles + Azure RBAC"
-        Note "fire one now: az containerapp job start -g $ResourceGroup -n $TickJobName"
+        Note "fire one now: az containerapp job start --subscription $SubscriptionId -g $ResourceGroup -n $TickJobName"
     }
 }
 
@@ -1339,15 +1475,23 @@ Step 'Done.'
 # advice is the most expensive kind: it is the last thing the operator reads and the first thing
 # they act on.
 if ($mgrFqdn) {
+    if ($script:PimManagerCreatedClosed) {
+        # SEC-31: say what the operator will see, and what opens it -- a 403 from a Manager nobody
+        # told them was closed reads as a broken deploy.
+        Write-Host "The Manager was created CLOSED: https://$mgrFqdn/ answers 403 until Easy Auth is in front of it." -ForegroundColor Yellow
+        Write-Host "  Open it by configuring Easy Auth (Invoke-PimDeployAll does this as its easyauth step):" -ForegroundColor Yellow
+        Write-Host "  Set-PimManagerEasyAuth.ps1 -App $ManagerApp -ResourceGroup $ResourceGroup -SubscriptionId $SubscriptionId -TenantId $TenantId -AllowedPrincipals <upn-or-group>" -ForegroundColor White
+    }
     if ($Exposure -eq 'internal') {
-        Write-Host "Verify from a hub/VNet client:  curl https://$mgrFqdn/   (expect 200; /api needs the page-embedded token)" -ForegroundColor Green
+        Write-Host "Verify from a hub/VNet client:  curl https://$mgrFqdn/   (expect a redirect to sign-in once Easy Auth is on; /api needs the page-embedded token)" -ForegroundColor Green
     } else {
-        Write-Host "Verify from anywhere:  curl https://$mgrFqdn/   (expect 200; /api needs the page-embedded token)" -ForegroundColor Green
-        Write-Host "PUBLIC INGRESS: put Easy Auth in front before anyone opens it, and consider an IP allowlist:" -ForegroundColor Yellow
-        Write-Host "  az containerapp ingress access-restriction set -g $ResourceGroup -n $ManagerApp --rule-name office --ip-address <x.x.x.x/32> --action Allow" -ForegroundColor Yellow
-        Write-Host "  (to lock it down completely later, reversibly: az containerapp ingress update -g $ResourceGroup -n $ManagerApp --type internal)" -ForegroundColor DarkGray
+        Write-Host "Verify from anywhere:  curl https://$mgrFqdn/   (expect a redirect to sign-in once Easy Auth is on; /api needs the page-embedded token)" -ForegroundColor Green
+        Write-Host "PUBLIC INGRESS: Easy Auth is what lets people in; consider an IP allowlist as well:" -ForegroundColor Yellow
+        Write-Host "  az containerapp ingress access-restriction set --subscription $SubscriptionId -g $ResourceGroup -n $ManagerApp --rule-name office --ip-address <x.x.x.x/32> --action Allow" -ForegroundColor Yellow
+        Write-Host "  (to lock it down completely later, reversibly: az containerapp ingress update --subscription $SubscriptionId -g $ResourceGroup -n $ManagerApp --type internal)" -ForegroundColor DarkGray
     }
 }
+Restore-PimCallerAzConfigDir
 # GSA / Private Access + private-link / DNS guidance -- for a PRIVATE Manager only. On an external
 # environment none of it applies: the name resolves publicly, there is no private FQDN to publish
 # through Global Secure Access, and no privatelink zone for the app.

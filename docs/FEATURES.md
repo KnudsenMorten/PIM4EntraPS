@@ -187,16 +187,21 @@ deployment is a supported choice) and no credentials lying around.
   itself rather than a separate estimate. Narrowing a relationship refuses to "let in" a tenant
   that is actually held back by something else, and says which axis is really holding it, instead
   of writing a rule that would change nothing and report success.
+- **Replication settings in plain words.** ✅ 2026-09-19 Each row says *Follow (default) — sent only
+  when a replicated row needs it*, *Replicate to managed tenants*, or *No replication to managed
+  tenants — master tenant only*. Each ring option says which tenants it reaches (Ring 0 = every
+  managed tenant, Ring 2 = only the pilot ring), and every tenant is shown with its ring. A group set
+  to replicate on its own now reaches its tenants even before any administrator is replicated.
 - **Pull, never push.** In a managed-service setup, the provider never reaches into or
   writes to your tenant. Each tenant pulls a signed baseline into its own local database;
   your data never leaves your tenant and your local IT keeps full autonomy.
 - **Per-tenant isolation.** Each customer has its own data store with no cross-customer
   visibility, while the provider keeps only the central template.
-- **One engine image, mirrored into your own registry.** ✅ 2026-06-15 The engine container
-  is built once by the provider and **mirrored directly into your own container registry** —
-  a server-side registry-to-registry copy, so nothing is rebuilt per customer and no image
-  bytes travel through an intermediate host. The image carries **no secrets and no customer
-  data** (identity, database and configuration are all supplied locally at run time).
+- **One image, built in your own registry.** ✅ 2026-06-15 Each environment builds the one
+  PIM container image **in its own container registry** from the released source for its
+  version, so nothing is pulled from the provider's registry. The image carries **no secrets
+  and no customer data** (identity, database and configuration are all supplied locally at
+  run time).
 - **Choose the sync model that fits your governance.** ✅ 2026-06-15 You are not forced into a
   single managed-service shape. Pick how the central template reaches your tenant — pull a
   signed baseline, pull a versioned template by rollout ring, read the central template
@@ -646,8 +651,8 @@ deployment is a supported choice) and no credentials lying around.
 
   Every entry says in one line what the screen does, and each menu carries an attention dot and
   per-item count, so what needs action is visible without opening every screen. The former Daily
-  operations menu is folded into Reviews & controls; permission template packs and mail templates are
-  sections in Settings.
+  operations menu is folded into Reviews & controls; permission template packs are a section in Settings, and
+  access & roles, emergency access and mail templates are pages of their own.
 
   ![The six-menu navigation with a dropdown open](img/manager-nav.png)
   *The six top-level menus, each entry described in one line and carrying an attention count. (Synthetic demo data.)*
@@ -768,7 +773,7 @@ deployment is a supported choice) and no credentials lying around.
   assignments added ✅ 2026-06-17) — the **Reports**, **Delegation Map**, **Validate**, **Access Review**
   and **Audit** views each carry an **Export CSV** and **Print** action, so any screen can become evidence
   for a review, a ticket or a management report without re-keying. The same one-click export now also covers
-  the **Role Lookup** tab — in all four of its modes — and the "active assignments" list on **Review standing access**:
+  the **Role Lookup** tab — in all four of its modes — and the "active assignments" list on **Review current delegations**:
   - **Role permissions for a least-privilege ticket.** From *what a role can do*, export the role's concrete
     permissions (every allowed and excluded action, with its area) straight into a ticket — no retyping a
     permission set by hand.
@@ -778,7 +783,7 @@ deployment is a supported choice) and no credentials lying around.
   - **Who can activate a role — with the path.** From *who can activate a role*, export every person who can
     reach it together with the exact granting path, as genuine audit evidence.
   - **A role-vs-role split.** From *compare two roles*, export who can activate both versus only one.
-  - **Who has what is active right now.** From **Review standing access**, export the currently-active
+  - **Who has what is active right now.** From **Review current delegations**, export the currently-active
     privileged assignments shown (principal, role/group, scope, type, when it was activated and when it
     expires, and the justification) as a point-in-time "who has access" extract for a review or audit.
 
@@ -925,15 +930,15 @@ deployment is a supported choice) and no credentials lying around.
   estate with no preview and no record — exactly the class of incident the platform's mass-change safety
   brake exists to prevent; bulk revoke now gets the same human-approved, fully-recorded treatment as
   offboarding.
-- **Review standing access opens instantly — for everyone.** ✅ 2026-09-13 Reading every active Entra
+- **Review current delegations opens instantly — for everyone.** ✅ 2026-09-13 Reading every active Entra
   role, Azure and PIM for Groups assignment live takes minutes in a large tenant, and used to hold up
   every other Manager user while it ran. The scheduler now takes an **active-assignments snapshot every
-  2 hours** (the cadence is editable on the Job schedule page), and **Review standing access**, the
+  2 hours** (the cadence is editable on the Job schedule page), and **Review current delegations**, the
   revoke list and the Home expiring-access tile open from it at once, showing when it was taken.
   **Refresh** queues a fresh read for the scheduler instead of reading while you wait, and a completed
   revoke queues one automatically. A row you revoke is marked **revoke queued** until the next snapshot
   no longer contains it.
-- **Clean up access held by deleted accounts quickly.** ✅ 2026-09-14 Review standing access hides rows
+- **Clean up access held by deleted accounts quickly.** ✅ 2026-09-14 Review current delegations hides rows
   held by principals that no longer exist in the directory by default. Tick **show deleted principals**
   to list them, and a "deleted" filter selects only those rows for a bulk revoke.
 - **"Revoke selected" tells you what it staged — and refuses a row it cannot address, one row at a
@@ -947,8 +952,8 @@ deployment is a supported choice) and no credentials lying around.
   **staged as pending changes**, not that access is being removed: nothing is revoked until you commit,
   and the queued entries carry your justification and the real names of what they target.
 
-  ![Review standing access — active assignments from the snapshot, with the revoke-queued marker](img/manager-standing-access.png)
-  *Review standing access: who holds active privileged access, read from the scheduler's snapshot, with queued revokes marked. (Synthetic demo data.)*
+  ![Review current delegations — active assignments from the snapshot, with the revoke-queued marker](img/manager-standing-access.png)
+  *Review current delegations: who holds active privileged access, read from the scheduler's snapshot, with queued revokes marked. (Synthetic demo data.)*
 - **Onboarding panel.** ✅ 2026-06-15 — a dedicated **Onboarding** tab to **invite an external
   consultant as a guest** straight into the delegation model (it prepares the invitation and the
   account + group placement for you to review and commit) and to **enable or disable a managed
@@ -1099,6 +1104,14 @@ deployment is a supported choice) and no credentials lying around.
   discovery passes. Anything **currently running is shown at the top**; everything else shows **how often
   it runs, whether it's enabled, when it last ran and how that went, and when it's due next**. An
   administrator can switch a job on or off and change how often it runs.
+- **Choose the domain for admin accounts, per tenant.** ✅ 2026-09-19 **Settings → Admin account domain** is a
+  dropdown of your verified domains, with the tenant's default domain as the default. New admin accounts and the
+  New admin account wizard use it. In a managed-service setup, each managed tenant creates the administrators its
+  provider replicates at its *own* chosen domain, and every create wizard says whether what you create is replicated.
+- **Every menu item opens its own page.** ✅ 2026-09-19 *Manager access & roles*, *Emergency access
+  (break-glass)* — the break-glass accounts and the emergency override together — and *Mail templates*
+  are pages of their own under Audit & Settings rather than sections inside Settings. Menu badges
+  count only work that needs a person: the Pending changes count clears when you commit.
 - **Job schedule on its own page.** ✅ 2026-09-14 **Jobs › Job schedule** shows which job runs when, which
   area it covers, and the mail jobs, visible by default with a plain-language explanation of every column.
 - **Logs that show what the run actually did.** ✅ 2026-09-14 Each run's **Logs** button shows the run's own
@@ -1166,7 +1179,44 @@ deployment is a supported choice) and no credentials lying around.
   Owner / User Access Administrator at a scope you choose), and a common **Entra ID role** pack
   (Helpdesk, User, Authentication, Groups and License administrators, plus Global Reader). The
   workload packs bind the service's own roles directly to the group; the Azure and Entra packs
-  also include the matching role-to-group assignment so adopting the pack is complete.
+  also include the matching role-to-group assignment so adopting the pack is complete. **Show**
+  (✅ 2026-09-19) lists each new permission a pack would add, what it grants and where, with a tick box per
+  row, and **Import** stages only the ones you ticked.
+- **Permission templates imported by script — infrastructure as code.** ✅ 2026-09-19 One command imports named
+  packs into an environment: it adds only what is missing, names groups by that tenant's own convention, keeps a
+  group and its workload role together, and takes a snapshot and an audit entry for every change — a second run
+  changes nothing, and a dry run shows the plan. A group the environment already defines, under the same name or an
+  older tag, is **adopted** rather than defined a second time. A second command prepares many environments from one
+  configuration file: the workload prerequisites with the options you choose, then the packs, with one summary per
+  environment. Proven on three environments (Intune and Defender XDR packs).
+- **Coverage & gaps across every workload.** ✅ 2026-09-19 One page shows, for Entra ID roles, Intune, Defender
+  XDR, Power BI, Azure subscriptions and PIM for Groups, what is delegated through PIM and what is not: gaps,
+  groups without their role, roles held outside PIM, and privileged groups nobody defined. Each gap comes with a
+  ready proposal named by your own convention, and you pick which to stage. A scheduled check keeps it current
+  and mails new gaps.
+- **Defender XDR custom roles, managed end to end.** ✅ 2026-09-19 PIM creates each Defender custom role with
+  the permissions and data sources you specify, keeps it that way, and flags a role whose live permissions
+  drifted. The Defender template covers Security operations, Security posture, Authorization & settings and
+  Data operations.
+- **Workload prerequisites, checked and shown.** ✅ 2026-09-19 One script per workload checks what that
+  workload needs (permissions, activation, tenant settings), fixes what can be fixed automatically, and tells you
+  exactly what to do by hand. The Manager shows a green, amber or red status with the command to run. For Defender
+  Data Operations it can also enable Microsoft Sentinel on a dedicated, empty security workspace (opt-in).
+- **Your managed tenants and what they receive, in the Manager.** ✅ 2026-09-19 A provider registers and
+  edits its managed tenants (name, ring, tags) on a page, and a replication overview lists every delegation it
+  replicates and which tenants each one reaches.
+- **Policy templates you can read.** ✅ 2026-09-19 Every activation policy is listed in plain words with the
+  delegations that use it, and the delegations table lets you switch a delegation's policy.
+- **A Standard and a RequireApproval policy for every kind, renameable, with a default per kind.** ✅ 2026-09-19
+  PIM for Groups, Entra ID roles and Azure roles each have a Standard and a RequireApproval template. Every
+  template has a fixed id and a name you can change, so renaming never touches what is applied. Settings holds
+  one default per kind, and every delegation wizard and the delegations table offer only templates of the right
+  kind.
+- **Workload groups stay connected to their workload.** ✅ 2026-09-19 A permission group meant for Intune,
+  Defender XDR or another workload is flagged when it has no role in that workload, and a workload role held
+  by a group PIM does not define is flagged too. The Intune template now ships each group together with its
+  Intune role, so an import never leaves a group that grants nothing. An area the engine could not check (the
+  feature is off, or it lacks permission) says *not checked*, never *in sync*.
 - **More governance pre-flight checks.** ✅ 2026-06-14 — the Validate tab now also flags:
   roles/organisations with no accountable owner or sponsor; admins missing a strong
   (phishing-resistant) sign-in method; Azure assignments pointing at a subscription, resource
@@ -1506,33 +1556,38 @@ deployment is a supported choice) and no credentials lying around.
 
 ### Licensing — what is free and what is paid
 
-This is the **current commercial shape**. Read it together with the note at the end: the product
-does **not** enforce any of it today.
+✅ 2026-09-19 (v2.4.380). The line: **the community edition is free for a single tenant**; a **Pro licence** adds
+advanced single-tenant capabilities and the whole multi-tenant half. The product **enforces** it — in the engine,
+the scheduled jobs and the portal, which always says why a capability is off. Free capabilities never depend on the
+licence state.
 
-**Free — the community edition, for a single tenant.** Everything an organisation needs to govern
-its own tenant: the full portal; eligible, time-boxed access with approval and a complete audit
-trail; delegation by group, so access is granted by membership rather than by hand; drift detection;
-access reviews and reports; administrator accounts and first-time access passes; self-updating from
-the public release; and community support.
+**Free — the community edition, for a single tenant.** The full portal; eligible, time-boxed access with approval
+and a complete audit trail; Entra ID roles, PIM for Groups, administrative units and Azure RBAC; Intune and
+Defender XDR role delegation, including Defender custom roles; delegation by group; policy templates (a Standard and
+a RequireApproval template per kind, renameable, with a default per kind); drift detection; access reviews and
+reports; administrator accounts and first-time access passes; permission templates imported by script and tenant
+preparation from one configuration file; self-updating from the public release; and community support.
 
-**Paid — everything in free, plus the multi-tenant half.** For a service provider, or any
-organisation running more than one tenant: define once and target tenants by tag and by rollout
-wave; signed definition sets that are verified on arrival; a clear view of what reaches each tenant
-and what is held back; per-customer rules where one customer must differ; a read-only preview of
-exactly what a tenant would receive before it does; fleet conformance across tenants; rollout waves;
-central accounts whose lifecycle flows down to the tenants they belong to; removals that remain the
-tenant's own call; controlled release rings for the software itself; the provider-hosted option; and
-support with an agreed response time.
+**Pro — licensed capabilities for a single tenant.** Coverage & gaps and discovery across every workload; the
+Power BI, Exchange Online, enterprise-app role, Azure DevOps, Dataverse, Business Central and Power Platform
+connectors; revoking current delegations; access review campaigns; a second approver for sensitive changes;
+delegated administration (portal users limited to a tier, level, service or scope); the tier-impact report; and the
+evidence export. Without a licence the second approver is off too, so install the licence before relying on it.
 
-> **Licence enforcement is not switched on in the product today.** Nothing is technically restricted
-> by edition: every capability described in this catalog is available to every installation. The
-> edition an environment runs is recorded so the commercial basis is clear, but there is no gate in
-> the code that would stop you.
+**Pro — the multi-tenant half.** Define once and target tenants by tag and by rollout wave; signed definition sets
+verified on arrival; a clear view of what reaches each tenant and what is held back; per-customer rules; a read-only
+preview of what a tenant would receive; fleet conformance; rollout waves; central accounts whose lifecycle flows
+down; removals that remain the tenant's own call; controlled release rings; the provider-hosted option; and support
+with an agreed response time. A managing or managed tenant **requires** a Pro licence: without one its publishing
+and downlink jobs refuse to run, and the portal shows a red banner on its MSP pages.
 
-**Interested in the licensed (multi-tenant) edition?** Mail **mok@mortenknudsen.net** for
-information.
+**Settings › Licence** shows the licence status, the customer, the valid-until date and the tenant it is bound to,
+which Pro capabilities are on, and the command that registers a licence file:
+`tools\setup\Set-PimLicense.ps1 -LicensePath <file> ...` (verified first, stored in the environment's database, read
+back).
+
+**For a Pro licence, mail mok@mortenknudsen.net.**
 
 ---
-
 *Items still in progress or planned are tracked internally in REQUIREMENTS.md and are not
 listed here. Only delivered, verified capabilities appear in this catalog.*

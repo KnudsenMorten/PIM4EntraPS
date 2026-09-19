@@ -776,7 +776,7 @@ function Test-PimHybridAdPasswordMailReady {
     # the template -- asked explicitly, because a -WhatIf probe cannot see a missing sender.
     param([string]$Recipient)
     if (-not "$Recipient".Trim()) {
-        return @{ ok = $false; reason = 'the admin row has no office user email (MailForwardAddress with ForwardMailsToContact=TRUE) and no ManagerEmail, so there is nowhere to send the initial password' }
+        return @{ ok = $false; reason = 'no recipient resolved for this admin -- its mail goes to the owners of its SPONSOR DEPARTMENT (set Department on the admin and Owners on that department), or to an office user email (MailForwardAddress with ForwardMailsToContact=TRUE) -- so there is nowhere to send the initial password' }
     }
     if ((-not "$($global:PIM_MailSender)".Trim()) -and (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue)) {
         try { [void](Initialize-PimEmailControlsFromStore) } catch { }

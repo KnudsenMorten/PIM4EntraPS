@@ -153,7 +153,8 @@ function Get-PimJobAlertingConfig {
     [CmdletBinding()]
     param([string]$ConnectionString)
 
-    $catalog = @('engine-failure','drift','expiring-access','break-glass')
+    # 'coverage' (REQ-I + REQ-U): NEW gaps / orphans / unmanaged privileged groups found by the 'coverage' job.
+    $catalog = @('engine-failure','drift','expiring-access','break-glass','coverage')
     $events = @{}
     foreach ($e in $catalog) { $events[$e] = $true }
     $out = [ordered]@{ recipients = @(); events = $events }

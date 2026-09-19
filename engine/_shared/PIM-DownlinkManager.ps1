@@ -63,6 +63,28 @@ ELSE
     } catch { return @() }
 }
 
+# --- BUG-175: THE RING THE MASTER PREVIEWS WITH IS ONLY ITS COPY ---------------
+#
+# 🔒 Every ring is LOCAL in the slave (DESIGN; operator 2026-09-18). The real pull is gated by the managed tenant's
+# OWN -SlaveRing -- its downlink job argument, set in the slave -- and nothing reports it back to the master. What the
+# master holds is platform.Tenants.Ring, written by Register-PimManagedTenant: a COPY that can drift. So every preview
+# here ("reaches N tenants", the overview, the dry run) is labelled as computed from the master's copy, and the
+# value is never made authoritative. The slave reports the ring that actually decided in its own pull result and
+# acceptance record (slaveRing, slaveRingSource = 'local').
+# One parser for all three previews: they used to disagree on a missing value (the reach preview read it as ring 2,
+# the overview and the dry run as ring 0 -- `[int]("0" + '')`), so one view said "reaches" and another "held back".
+function Get-PimMasterRingCopy {
+    [CmdletBinding()] param([AllowNull()][object]$Value)
+    $s = "$Value".Trim()
+    $r = 0
+    if ($s -match '^\d+$' -and [int]::TryParse($s, [ref]$r)) {
+        return [ordered]@{ ring = $r; known = $true; source = 'master-copy'
+                           note = "ring $r is the MASTER'S COPY (platform.Tenants.Ring). The tenant's own local -SlaveRing gates its real pull; this preview is right only while the two agree." }
+    }
+    return [ordered]@{ ring = 2; known = $false; source = 'master-copy'
+                       note = "the master holds no readable ring for this tenant ('$s') -- previewed as ring 2 (the pull job's default). The tenant's own local -SlaveRing decides." }
+}
+
 # --- §71: THE REPLICATION REACH PREVIEW ---------------------------------------
 #
 # 🔑 "THIS WILL REACH N TENANTS" IS THE SIGNED BUNDLE'S OWN ANSWER, NOT A SECOND OPINION. The preview
@@ -113,11 +135,13 @@ function Get-PimReplicationPreview {
         if (-not $tid) { continue }
         $name = "$(Get-PimDownlinkValue -Object $t -Key 'name')"; if (-not $name) { $name = "$(Get-PimDownlinkValue -Object $t -Key 'DisplayName')" }; if (-not $name) { $name = $tid }
         $ringRaw = "$(Get-PimDownlinkValue -Object $t -Key 'ring')"; if (-not $ringRaw) { $ringRaw = "$(Get-PimDownlinkValue -Object $t -Key 'Ring')" }
-        $ring = 2; [void][int]::TryParse("$ringRaw".Trim(), [ref]$ring)
+        # BUG-175: the master's COPY of the ring, labelled as such (see Get-PimMasterRingCopy).
+        $rc = Get-PimMasterRingCopy -Value $ringRaw
+        $ring = [int]$rc.ring
         $tagsRaw = Get-PimDownlinkValue -Object $t -Key 'tags'; if ($null -eq $tagsRaw) { $tagsRaw = Get-PimDownlinkValue -Object $t -Key 'Tags' }
         $tags = @(@($tagsRaw) | ForEach-Object { "$_" -split '[;,]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
         if ($tags.Count) { $tagMap[$tid.ToLowerInvariant()] = $tags }
-        $tlist.Add([ordered]@{ tenantId = $tid; name = $name; ring = $ring; tags = $tags }) | Out-Null
+        $tlist.Add([ordered]@{ tenantId = $tid; name = $name; ring = $ring; ringKnown = [bool]$rc.known; ringSource = 'master-copy'; tags = $tags }) | Out-Null
     }
     $now = [datetime]::UtcNow
     $payload = New-PimBaselinePayload -Content $content -ProjectionPolicy $ProjectionPolicy -TenantTags $tagMap -Version 1 `
@@ -155,6 +179,9 @@ function Get-PimReplicationPreview {
     return [ordered]@{
         tenantCount        = $tlist.Count
         tenants            = @($tlist.ToArray())
+        # BUG-175: "reaches N tenants" is computed from the MASTER'S COPY of each tenant's ring.
+        ringSource         = 'master-copy'
+        ringNote           = "Computed with the master's copy of each tenant's ring (platform.Tenants.Ring). Each tenant's own local ring gates its real pull, so a tenant whose ring differs from the master's copy receives what ITS ring admits."
         reach              = $out
         warnings           = @($warnings.ToArray())
         notPublished       = @($content.report.notPublished)
@@ -180,7 +207,7 @@ function Get-PimReplicationRowReach {
 
 function Get-PimReplicationMasterModel {
     <#
-      The master's store, read the way New-PimBaselineBundle reads it, for the reach preview: registry
+      The master's store, read the way Get-PimBaselineBundlePayload reads it, for the reach preview: registry
       rows (+ Replicate), every replicable entity, the projection policy and the tenant registry.
       -Overlay: entity -> rows that REPLACE the stored rows of that entity (the grid's pending set).
       -Draft:   @( @{ entity; row } ) upserted by natural key (a wizard's not-yet-staged row).
@@ -216,7 +243,9 @@ function Get-PimReplicationMasterModel {
         }
     } catch { }
     $tenants = @(Get-PimManagerDownlinkTenants -ConnectionString $ConnectionString | ForEach-Object {
-        [ordered]@{ tenantId = "$($_.TenantId)"; name = "$($_.DisplayName)"; ring = [int]("0" + "$($_.Ring)"); tags = @("$($_.Tags)" -split '[;,]' | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+        # BUG-175: passed RAW -- Get-PimReplicationPreview parses it once (Get-PimMasterRingCopy), so a missing value is
+        # labelled "no readable ring" instead of silently becoming ring 0 here and ring 2 there.
+        [ordered]@{ tenantId = "$($_.TenantId)"; name = "$($_.DisplayName)"; ring = "$($_.Ring)".Trim(); tags = @("$($_.Tags)" -split '[;,]' | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
     })
     return @{ RegistryRows = $registry; RegistryReplicate = $repMap; Entities = $entities; Tenants = $tenants; ProjectionPolicy = $policy }
 }
@@ -330,19 +359,101 @@ function Set-PimManagerDownlinkPolicy {
 
 # --- the baseline the plan is computed from ----------------------------------
 
+function Test-PimBaselineDocUrl {
+    <#
+      PURE. 71.40 -- is this a URL the Manager may read the published bundle from? The PLAIN blob URL only: https, no query
+      string and no fragment. A '?' means a SAS (a credential) -- the public-but-signed / private-endpoint transport has
+      none, and a credential must never ride in a Manager env var. Returns @{ ok; reason }.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Url)
+    $u = "$Url".Trim()
+    if (-not $u) { return @{ ok = $false; reason = 'empty' } }
+    if ($u -match '\s') { return @{ ok = $false; reason = 'contains whitespace' } }
+    if ($u.Contains('?') -or $u.Contains('#')) { return @{ ok = $false; reason = "carries a query string or fragment -- a SAS is a credential; give the PLAIN blob URL (public-but-signed or private endpoint)" } }
+    $parsed = $null
+    if (-not [uri]::TryCreate($u, [UriKind]::Absolute, [ref]$parsed)) { return @{ ok = $false; reason = 'not an absolute URL' } }
+    if ($parsed.Scheme -ne 'https') { return @{ ok = $false; reason = "scheme '$($parsed.Scheme)' -- https only" } }
+    if (-not "$($parsed.AbsolutePath)".Trim('/')) { return @{ ok = $false; reason = 'names no blob (no path)' } }
+    return @{ ok = $true; reason = '' }
+}
+
+function Get-PimManagerBaselineEnvPlan {
+    <#
+      PURE. 71.40 -- the two Manager environment variables that let the hosted Downlink view verify what the master
+      publishes: PIM_BaselineTrustedKeys (the signing key id(s) this Manager pins) and PIM_BaselineDocUrl (the plain URL the
+      bundle is published to). Used by Setup-PimContainers (create + update of ca-pim-manager).
+      🔒 THE PIN CHECK IS THE PULL JOB'S, NOT A LOOSER COPY: Deploy-PimDownlinkJob.ps1 splits on , ; whitespace and REFUSES
+      any entry that is not 43 characters of base64url -- a typo would otherwise pin nothing and look configured. Same
+      split, same regex, same refusal here, so the Manager and the managed tenants reject the same inputs.
+      Returns @{ ok; reason; env = [string[]] 'NAME=value' pairs; keys; url }. Nothing given -> ok with no env.
+    #>
+    param([AllowNull()][AllowEmptyCollection()][string[]]$TrustedKeys = @(), [AllowNull()][AllowEmptyString()][string]$DocUrl)
+    $flat = @(@($TrustedKeys) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $bad  = @($flat | Where-Object { $_ -cnotmatch '^[A-Za-z0-9_-]{43}$' })
+    if ($bad.Count) {
+        return @{ ok = $false; env = @(); keys = @(); url = ''
+                  reason = "REFUSED: -BaselineTrustedKeys '$($bad -join ', ')' is not a signing key id (43 characters of base64url, as the master's signingkey step prints)." }
+    }
+    $keys = New-Object System.Collections.Generic.List[string]
+    foreach ($k in $flat) { if (-not $keys.Contains($k)) { $keys.Add($k) } }
+    $env = New-Object System.Collections.Generic.List[string]
+    if ($keys.Count) { $env.Add("PIM_BaselineTrustedKeys=$($keys.ToArray() -join ',')") }
+    $u = "$DocUrl".Trim()
+    if ($u) {
+        $chk = Test-PimBaselineDocUrl -Url $u
+        if (-not $chk.ok) { return @{ ok = $false; env = @(); keys = @(); url = ''; reason = "REFUSED: -BaselineDocUrl $($chk.reason)" } }
+        $env.Add("PIM_BaselineDocUrl=$u")
+    }
+    return @{ ok = $true; reason = ''; env = @($env.ToArray()); keys = @($keys.ToArray()); url = $u }
+}
+
 function Get-PimManagerBaselineDoc {
     <#
       The signed bundle the Manager plans against. Preference order:
         1. an explicit -Path / $global:PIM_BaselineDocPath (a staged local document)
         2. $env:PIM_BaselineDocPath
+        3. 71.40: an explicit -Url / $global:PIM_BaselineDocUrl / $env:PIM_BaselineDocUrl -- the PLAIN blob URL the master
+           publishes to (anonymous read, public-but-signed or over the private endpoint). This is what a HOSTED Manager
+           has: no local file ever exists in the container, so without it the Downlink view said "no baseline document
+           configured" on every hosted environment, whatever was pinned.
       Returns @{ doc; source; error }. NEVER fabricates a document -- a missing
       baseline is reported, because planning without one would report "nothing
       projects", which is indistinguishable from a correct empty answer.
+      🪤 A URL that cannot be fetched is NOT "no baseline configured": it is configured and unreachable, and the reason
+      says which (DNS, timeout, 403 ...). Reading it as "not configured" would send an operator to fix the wrong thing.
+      -Fetcher is a test seam: { param($url, $timeoutSec) <returns the body as a string> }.
     #>
-    [CmdletBinding()] param([string]$Path)
+    [CmdletBinding()] param([string]$Path, [string]$Url, [scriptblock]$Fetcher, [int]$TimeoutSec = 15)
     if (-not $Path) { $Path = "$($global:PIM_BaselineDocPath)" }
     if (-not $Path) { $Path = "$($env:PIM_BaselineDocPath)" }
-    if (-not "$Path".Trim()) { return @{ doc = $null; source = ''; error = 'no baseline document configured (set PIM_BaselineDocPath to the signed bundle the master publishes)' } }
+    if (-not "$Path".Trim()) {
+        if (-not $Url) { $Url = "$($global:PIM_BaselineDocUrl)" }
+        if (-not $Url) { $Url = "$($env:PIM_BaselineDocUrl)" }
+        if ("$Url".Trim()) {
+            $Url = "$Url".Trim()
+            $chk = Test-PimBaselineDocUrl -Url $Url
+            if (-not $chk.ok) { return @{ doc = $null; source = ''; error = "PIM_BaselineDocUrl refused: $($chk.reason)" } }
+            if (-not $Fetcher) {
+                $Fetcher = {
+                    param($u, $t)
+                    $r = Invoke-WebRequest -Uri $u -Method GET -UseBasicParsing -TimeoutSec $t -Headers @{ 'x-ms-version' = '2021-08-06' } -ErrorAction Stop
+                    if ($r.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($r.Content) } else { "$($r.Content)" }
+                }
+            }
+            $body = $null
+            try { $body = & $Fetcher $Url $TimeoutSec }
+            catch {
+                $m = "$($_.Exception.Message)"
+                return @{ doc = $null; source = $Url; error = "could not fetch the published baseline from ${Url}: $($m.Substring(0, [Math]::Min(300, $m.Length)))" }
+            }
+            $txt = "$body"
+            $br = $txt.IndexOf('{'); if ($br -gt 0) { $txt = $txt.Substring($br) }   # BOM / preamble
+            if (-not $txt.Trim()) { return @{ doc = $null; source = $Url; error = "the published baseline at $Url is empty" } }
+            try { return @{ doc = ($txt | ConvertFrom-Json); source = $Url; error = '' } }
+            catch { return @{ doc = $null; source = $Url; error = "the published baseline at $Url is not valid JSON: $($_.Exception.Message)" } }
+        }
+        return @{ doc = $null; source = ''; error = 'no baseline document configured (set PIM_BaselineDocUrl to the plain URL the master publishes to, or PIM_BaselineDocPath to a staged copy)' }
+    }
     if (-not (Test-Path -LiteralPath $Path)) { return @{ doc = $null; source = "$Path"; error = "baseline document not found at $Path" } }
     try {
         $doc = (Get-Content -LiteralPath $Path -Raw) | ConvertFrom-Json
@@ -431,22 +542,29 @@ function Get-PimManagerDownlinkOverview {
       carrying the PURE plan's own projected / excluded / unresolved lists (with the
       reason strings the core produced) plus the groups it would create vs defer.
     #>
-    [CmdletBinding()] param([string]$ConnectionString, [string]$BaselinePath)
+    # -BaselineFetcher: test seam, passed to Get-PimManagerBaselineDoc (71.40 URL read).
+    [CmdletBinding()] param([string]$ConnectionString, [string]$BaselinePath, [scriptblock]$BaselineFetcher)
     if (-not $ConnectionString) { $ConnectionString = Get-PimSqlConnectionString }
     $canWrite = $true
     if (Get-Command Test-PimManagerRoleAtLeast -ErrorAction SilentlyContinue) {
         try { $canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') } catch { $canWrite = $false }
     }
     $tenants = @(Get-PimManagerDownlinkTenants -ConnectionString $ConnectionString)
-    $bl = Get-PimManagerBaselineDoc -Path $BaselinePath
+    $blArgs = @{ Path = $BaselinePath }; if ($BaselineFetcher) { $blArgs['Fetcher'] = $BaselineFetcher }
+    $bl = Get-PimManagerBaselineDoc @blArgs
 
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($t in $tenants) {
         $tid = "$($t.TenantId)"
+        $rc = Get-PimMasterRingCopy -Value $t.Ring
         $entry = [ordered]@{
             tenantId       = $tid
             name           = "$($t.DisplayName)"
-            ring           = [int]("0" + "$($t.Ring)")
+            # BUG-175: the MASTER'S COPY of the ring -- labelled, never authoritative (the tenant's local ring gates its pull).
+            ring           = [int]$rc.ring
+            ringKnown      = [bool]$rc.known
+            ringSource     = 'master-copy'
+            ringNote       = "$($rc.note)"
             adminCount     = 0
             projected      = @(); excluded = @(); unresolved = @()
             # 🔴 THESE TWO WERE COMPUTED BY THE PLAN AND THROWN AWAY HERE, AND THAT MADE A REAL
@@ -522,6 +640,13 @@ function Get-PimManagerDownlinkOverview {
     return [ordered]@{
         relationships = @($out.ToArray())
         baseline      = $blInfo
+        # 71.40: why there is no baseline, kept even when "no managed tenants" wins the headline below -- an unreachable
+        # published bundle must stay visible to whoever reads the API, not only when a tenant is registered.
+        baselineError = "$($bl.error)"
+        baselineSource = "$($bl.source)"
+        # BUG-175: what every relationship above was planned with.
+        ringSource    = 'master-copy'
+        ringNote      = "Each relationship is previewed with the master's copy of its ring (platform.Tenants.Ring). The managed tenant's own local ring gates its real pull and is reported in its acceptance record (slaveRing)."
         canWrite      = $canWrite
         reason        = $(if (-not $tenants.Count) { 'No managed tenants are registered in platform.Tenants.' } elseif (-not $bl.doc) { "$($bl.error)" } else { '' })
     }
@@ -1006,17 +1131,20 @@ function Invoke-PimManagerDownlinkRun {
     # Omitting it makes the plan treat every tag the bundle defines as creatable, which is
     # the honest preview -- the tenant resolves the rest itself when it pulls.
     # 🔴 NOT $env:TEMP -- unset in the Linux container (see the sibling call above).
-    $planArgs = @{ Scenario = 'S6'; Doc = $bl.doc; TenantId = $TenantId; SlaveRing = [int]("0" + "$($t.Ring)"); LocalRoot = [System.IO.Path]::GetTempPath() }
+    # BUG-175: planned with the MASTER'S COPY of the ring, and the preview says so on its first lines.
+    $rc = Get-PimMasterRingCopy -Value $t.Ring
+    $planArgs = @{ Scenario = 'S6'; Doc = $bl.doc; TenantId = $TenantId; SlaveRing = [int]$rc.ring; LocalRoot = [System.IO.Path]::GetTempPath() }
     $plan = Get-PimDownlinkPlan @planArgs
-    if (-not $plan.ok) { return @{ ok = $false; detail = "refused: $($plan.reason)" } }
+    if (-not $plan.ok) { return @{ ok = $false; detail = "refused: $($plan.reason)"; ringSource = 'master-copy'; ringNote = "$($rc.note)" } }
 
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("PREVIEW for $($t.DisplayName) -- nothing was written.") | Out-Null
+    $lines.Add("ring used  : $($rc.note)") | Out-Null
     $lines.Add("$($plan.reason)") | Out-Null
     $lines.Add("admins offered : $(@($plan.admins).Count)") | Out-Null
     $lines.Add("roles offered  : $(@($plan.assignments).Count)") | Out-Null
     if ($plan.definitions) { $lines.Add("groups offered : $(@($plan.definitions.create).Count)") | Out-Null }
     foreach ($e in @($plan.projection.excluded))   { $lines.Add("held back  $($e.UserName) -> $($e.GroupTag): $($e.reason)") | Out-Null }
     foreach ($u in @($plan.projection.unresolved)) { $lines.Add("UNRESOLVED $($u.UserName) -> $($u.GroupTag): $($u.reason)") | Out-Null }
-    return @{ ok = $true; whatIf = $true; detail = ($lines.ToArray() -join "`n") }
+    return @{ ok = $true; whatIf = $true; detail = ($lines.ToArray() -join "`n"); ringSource = 'master-copy'; ringNote = "$($rc.note)" }
 }

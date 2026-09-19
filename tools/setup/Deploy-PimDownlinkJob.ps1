@@ -33,8 +33,11 @@
 
 .PARAMETER Scenario      S5 | S6 (placement + identity model).
 .PARAMETER TenantId      The managed/slave tenant id.
-.PARAMETER SlaveRing     The slave's registry ring (default 2 = test).
-.PARAMETER Cron          5-field cron expression (UTC). Default '0 3 * * *' (03:00 UTC daily).
+.PARAMETER SlaveRing     THE ring of this managed tenant (0..2, default 2 = test). LOCAL and authoritative: it is
+                         the pull job's own argument. The master's platform.Tenants.Ring is only its copy.
+.PARAMETER Cron          5-field cron expression (UTC) of the job's TRIGGER. Default '*/5 * * * *': the job gates itself
+                         against the cadence set in this tenant's Manager (Job schedule > Managed-tenant pull, 5-1440 min;
+                         nothing set = daily, the old '0 3 * * *' cadence) -- engine/_shared/PIM-JobCadence.ps1.
 .PARAMETER EnvName       ACA environment the Job runs in (S5: the central cae-pim; S6: the slave env).
 .PARAMETER ResourceGroup RG of the ACA environment + the Job.
 .PARAMETER AcrName       ACR holding the pim-manager image (pulled via MI AcrPull).
@@ -43,7 +46,9 @@
 .PARAMETER SubscriptionId Subscription to operate in.
 .PARAMETER JobName       The ACA Job name (default ca-pim-downlink-<scenario-lower>).
 .PARAMETER IdentityResourceId  A USER-assigned MI resource id to attach (else system-assigned MI).
-.PARAMETER BaselineUrl   Private-endpoint blob URL of the signed master baseline.
+.PARAMETER BaselineUrl   PLAIN blob URL of the signed master baseline (DESIGN 13.7: public-but-signed, or a private
+                         endpoint over peering). A URL with a query string is REFUSED: the SAS transport is retired
+                         (SEC-27, operator 2026-09-18) -- trust is the signature, reach is the network rule.
 .PARAMETER BaselineDocPath  Container path to a mounted/pulled signed bundle (alt to -BaselineUrl).
 .PARAMETER SqlServerFqdn / SqlDatabase  The platform registry the engine/fan-out read (MI-auth).
 .PARAMETER SyncRootCentral / SyncRootLocal  In-container sync-file staging roots.
@@ -52,11 +57,11 @@
 .PARAMETER WhatIf        Print the exact `az containerapp job` commands; invoke nothing.
 
 .EXAMPLE
-    # S5 central (cae-pim exists) -- deploy the cron Job, daily 03:00 UTC:
-    .\Deploy-PimDownlinkJob.ps1 -Scenario S5 -TenantId <managed-tenant> -SlaveRing 1 `
+    # S6 -- deploy the Job (trigger every 5 minutes; the cadence itself is set in the tenant's Manager, daily by default):
+    .\Deploy-PimDownlinkJob.ps1 -Scenario S6 -TenantId <managed-tenant> -SlaveRing 1 `
       -EnvName <aca-env> -ResourceGroup <resource-group> -AcrName <acr> `
       -SubscriptionId <subscription-id> -SqlServerFqdn <sql-server>.database.windows.net `
-      -BaselineUrl https://<priv-blob>/baselines/baseline-latest.json -Cron '0 3 * * *'
+      -BaselineUrl https://<store>.blob.core.windows.net/baselines/baseline-latest.json
 
 .EXAMPLE
     # fire one execution on demand (verification), then check it ran:
@@ -72,7 +77,9 @@ param(
     [Parameter(Mandatory)][ValidateSet('S5','S6')][string]$Scenario,
     [string]$TenantId,
     [ValidateRange(0,2)][int]$SlaveRing = 2,
-    [string]$Cron = '0 3 * * *',
+    # Every 5 minutes -- the finest interval the Manager's Job schedule allows. The job GATES ITSELF against this tenant's
+    # own DownlinkSchedule (PIM-JobCadence.ps1): nothing set there = daily, the cadence the old '0 3 * * *' gave.
+    [string]$Cron = '*/5 * * * *',
     [string]$EnvName,
     [Parameter(Mandatory)][string]$ResourceGroup,
     [string]$AcrName,
@@ -84,12 +91,9 @@ param(
     [string]$RegistryIdentity = '',   # '' = AUTO: the user-assigned MI if attached, else system (BUG-42)
     [string]$BaselineUrl,
     [string]$BaselineDocPath,
-    # BUG-73: a SAS-bearing baseline URL (DESIGN §13.7 transport 2). Use this INSTEAD of
-    # -BaselineUrl when the master's storage is not readable by the slave's identity -- which is
-    # every cross-tenant case, because a managed identity in the slave's tenant cannot authenticate
-    # to a storage account in the master's (measured: 401 "Server failed to authenticate the
-    # request"). Delivered as an ACA secret; never placed on the command line.
-    [string]$BaselineSasUrl,
+    # (SEC-27, operator 2026-09-18: -BaselineSasUrl is GONE. The SAS transport -- BUG-73's account-key read link and its
+    # weekly rotation -- is retired: the downlink is public-but-signed or private-endpoint (DESIGN 13.7), with no credential
+    # in the URL, and a -BaselineUrl carrying a query string is refused below.)
     # BUG-72: the engine's app-only identity INSIDE the container. Client id + SECRET -- NOT a cert
     # thumbprint: Resolve-PimCertificate searches only Cert:\CurrentUser\My and Cert:\LocalMachine\My,
     # which are empty on Linux, and setting a client id also disables the Managed Identity branch.
@@ -152,6 +156,7 @@ function Warn($m){ Write-Host "    $m" -ForegroundColor Yellow }
 $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # SOLUTIONS\PIM4EntraPS
 . (Join-Path $solRoot 'engine\_shared\PIM-DownlinkJob.ps1')
+. (Join-Path $solRoot 'engine\_shared\PIM-JobCadence.ps1')   # the cadence gate's skip marker (-Verify)
 
 # Shared setup helpers. NOT best-effort any more: this script now needs
 # Resolve-PimAcrImageDigest + the pure image-reference helpers it dot-sources (BUG-40), so a
@@ -203,18 +208,41 @@ function Invoke-Az {
         # script, and it is only invisible because bare `az` succeeds.
         throw "Invoke-Az called with NO arguments for '$What' -- refusing to run bare az and report success."
     }
-    $pretty = 'az ' + (@($AzArgs) -join ' ')
+    # BUG-215: every job create/update/delete/start is scoped to -SubscriptionId (the builder's arg sets carry none, and
+    # this script no longer moves the az default to make up for it).
+    $full = @($AzArgs)
+    if (@($script:subArgs).Count -and ($full -notcontains '--subscription')) { $full += @($script:subArgs) }
+    $pretty = 'az ' + (@($full) -join ' ')
     if ($WhatIfPreference) { Write-Host "WHATIF> $pretty" -ForegroundColor Yellow; return '' }
     if (-not $PSCmdlet.ShouldProcess($What, 'az')) { return '' }
     Note $pretty
-    $out = & az @AzArgs 2>&1
+    $out = & az @full 2>&1
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az failed (exit $LASTEXITCODE): $out" }
     return $out
 }
 
-if ("$SubscriptionId".Trim() -and -not $WhatIfPreference) { az account set --subscription $SubscriptionId 2>$null | Out-Null }
-# Scope each call explicitly when a subscription was given (unchanged behaviour when it was not).
+# 🔴 BUG-215 -- NEVER CHANGE THE MACHINE'S az DEFAULT. This line used to run `az account set --subscription` and never
+# restore it, so a standalone deploy silently moved every later az call on the box (other sessions included) to this
+# subscription -- the ELDK default-context hazard in reverse. Every az call below is scoped with --subscription instead.
+# 🪤 What --subscription CANNOT scope is a DIRECTORY call (az ad sp show, via Resolve-PimMiAppId): that follows the
+# default context's tenant. The old `account set` hid that by moving the default; now the deploy REFUSES when the
+# default context is a different tenant than the subscription's, instead of reading the wrong directory.
 $subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
+if ("$SubscriptionId".Trim() -and -not $WhatIfPreference) {
+    $subTenant = "$(az account show @subArgs --query tenantId -o tsv --only-show-errors 2>$null)".Trim()
+    $ctxTenant = "$(az account show --query tenantId -o tsv --only-show-errors 2>$null)".Trim()
+    if (-not $subTenant) {
+        throw ("REFUSED: subscription $SubscriptionId is not visible to the signed-in az context. Sign in to its tenant in an " +
+               'isolated AZURE_CONFIG_DIR (tools\setup\Connect-PimTenantAz.ps1) and re-run -- this script does not change the az default.')
+    }
+    if ($ctxTenant -ne $subTenant) {
+        throw ("REFUSED: the az DEFAULT context is tenant '$ctxTenant' but subscription $SubscriptionId belongs to tenant '$subTenant'. " +
+               'Directory calls in this deploy follow the default context, and this script does not switch it. ' +
+               'Select that tenant in an isolated AZURE_CONFIG_DIR (tools\setup\Connect-PimTenantAz.ps1) and re-run.')
+    }
+} elseif (-not "$SubscriptionId".Trim()) {
+    Warn 'no -SubscriptionId: every az call runs against the az DEFAULT context. Pass -SubscriptionId to scope them.'
+}
 
 # ---- UNREGISTER (delete) -------------------------------------------------------
 if ($Unregister) {
@@ -393,7 +421,7 @@ if (-not $WhatIfPreference) {
     $envLocation = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query location -o tsv 2>$null
     if (-not "$envId".Trim()) { throw "could not read the ACA environment '$EnvName' in RG $ResourceGroup -- cannot build the Job YAML." }
 
-    $digest = Resolve-PimAcrImageDigest -AcrName $AcrName -Repository $ImageRepo -Tag $ImageTag
+    $digest = Resolve-PimAcrImageDigest -AcrName $AcrName -Repository $ImageRepo -Tag $ImageTag -SubscriptionId "$SubscriptionId".Trim()
     $image  = New-PimImageReference -Registry $acrServer -Repository $ImageRepo -Digest $digest
     Note "tag $ImageTag => $digest"
     Note "deploying $image"
@@ -403,7 +431,7 @@ if (-not $WhatIfPreference) {
     Note "WhatIf -- the tag would be resolved to a digest here; plan shows $imageTagRef."
 }
 # 🔴 KEYED BY RESOURCE GROUP + PID. $JobName defaults per SCENARIO, not per tenant, so every S5
-# slave shares one filename -- and this yaml carries the engine credential and the baseline SAS.
+# slave shares one filename -- and this yaml can carry the engine credential.
 # Setup-PimContainers had the identical defect and it corrupted a concurrent estate deploy on
 # 2026-09-03 (see the Job-yaml note there). Fixed here at the same time rather than waiting for it
 # to happen a second time on the downlink path, where the file's contents are secrets.
@@ -456,6 +484,14 @@ if (-not "$SqlServerFqdn".Trim()) {
            "Pass -SqlServerFqdn <the slave's own server>.database.windows.net.")
 }
 
+# SEC-27 (operator 2026-09-18): NO SAS. The pull URL is the PLAIN blob URL (public-but-signed or private endpoint,
+# DESIGN 13.7). A query string is a credential riding in the job definition -- refused, not stored as a secret.
+if ("$BaselineUrl".Trim() -match '[?#]') {
+    throw ("REFUSED: -BaselineUrl carries a query string or fragment. The SAS transport is retired: pass the PLAIN " +
+           'blob URL, e.g. https://<master-store>.blob.core.windows.net/baselines/baseline-latest.json -- trust is the bundle signature, reach is the storage network rule.')
+}
+if ("$BaselineUrl".Trim() -and "$BaselineUrl".Trim() -notmatch '^https://') { throw "REFUSED: -BaselineUrl must be an https:// URL (got '$BaselineUrl')." }
+
 # 71.35: a pin that is not a key id is REFUSED here, not silently dropped by the env builder (a typo would pin nothing).
 $badPins = @(@($BaselineTrustedKeys) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -cnotmatch '^[A-Za-z0-9_-]{43}$' })
 if ($badPins.Count) { throw "REFUSED: -BaselineTrustedKeys '$($badPins -join ', ')' is not a signing key id (43 characters of base64url, as the master's signingkey step prints)." }
@@ -467,10 +503,11 @@ $plan = Get-PimDownlinkJobDeployPlan -Scenario $Scenario -TenantId $TenantId -Sl
     -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -SyncRootCentral $SyncRootCentral -SyncRootLocal $SyncRootLocal `
     -IdentityResourceId $IdentityResourceId -RegistryIdentity $RegistryIdentity -Exists $exists `
     -YamlPath $yamlPath -Location $envLocation -EnvironmentId $envId `
-    -EngineClientId $EngineClientId -EngineClientSecret $EngineClientSecret -BaselineSasUrl $BaselineSasUrl `
+    -EngineClientId $EngineClientId -EngineClientSecret $EngineClientSecret `
     -ManagedIdentityClientId $miClientId `
     -SlaveAdminPrefixes $SlaveAdminPrefixes -SystemAssigned:$engineSystemMi -AllowRetraction:$AllowRetraction `
-    -BaselineTrustedKeys $BaselineTrustedKeys
+    -BaselineTrustedKeys $BaselineTrustedKeys `
+    -DeployedUtc ([datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture))
 
 if (-not $plan.ok) { throw "deploy plan invalid: $($plan.reason)" }
 if ($AllowRetraction) { Warn 'retraction: ALLOWED on this job (-AllowRetraction) -- pulls remove rows that no longer reach this tenant, within the removal budget.' }
@@ -491,8 +528,8 @@ try {
     Invoke-Az -AzArgs $plan.jobArgs.args -What "$($plan.action) job $JobName" | Out-Null
 }
 finally {
-    # 🔒 BUG-72/73 -- THE YAML NOW CARRIES SECRET VALUES (the engine client secret and/or a
-    # SAS-bearing baseline URL), because that is what an ACA `secrets:` block is. It is written to
+    # 🔒 BUG-72 -- THE YAML MAY CARRY SECRET VALUES (the engine client secret, when one is given;
+    # the SAS-bearing baseline URL of BUG-73 is retired, SEC-27), because that is what an ACA `secrets:` block is. It is written to
     # $env:TEMP, which on a shared build/deploy host outlives this script and is world-readable to
     # anyone on the box. Shred it in `finally`, so a failed deploy does not leave the credential
     # behind precisely when someone is about to go poking around to find out what broke.
@@ -529,6 +566,22 @@ if (-not $WhatIfPreference) {
                'registry pull has no AcrPull on the ACR -- see BUG-71 above.')
     }
     Note "provisioningState verified: $prov"
+}
+
+# --- NO LEFTOVER SECRETS (lead 2026-09-18, measured on RIDE: "legacy leftovers are not allowed") -----------------------
+# `job update --yaml` leaves every secret the YAML does not list IN PLACE. So after a redeploy with the PLAIN -BaselineUrl,
+# the retired SAS transport's 'pim-baseline-url' (a SAS link -- a standing credential to the master's bundle store)
+# stayed on the job, referenced by nothing. Every secret the deployed definition does not reference is removed here
+# (`--yes`: the command prompts otherwise), and the removal is READ BACK: a secret still listed fails the deploy.
+if ($WhatIfPreference) {
+    Write-Host "WHATIF> az containerapp job secret list/remove: every secret on $JobName not referenced by this definition ($(@($plan.secretNames) -join ', ')) would be removed, pim-baseline-url always" -ForegroundColor Yellow
+} else {
+    # The az seam: Invoke-PimDownlinkJobSecretCleanup (PIM-DownlinkJob.ps1) is offline-tested with a mocked az.
+    $azSeam = { param([string[]]$AzArgs) $o = @(& az @AzArgs 2>$null); [pscustomobject]@{ exitCode = $LASTEXITCODE; output = ($o -join "`n") } }
+    $clean = Invoke-PimDownlinkJobSecretCleanup -JobName $JobName -ResourceGroup $ResourceGroup -SubscriptionId "$SubscriptionId".Trim() `
+                 -Referenced @($plan.secretNames) -Az $azSeam -Log { param($m) Note $m }
+    if (-not $clean.ok) { throw "secrets on ${JobName}: $($clean.reason)" }
+    if (@($clean.removed).Count) { Step "secrets on ${JobName}: $($clean.reason)" } else { Note "secrets on ${JobName}: $($clean.reason)" }
 }
 
 # After CREATE, grant the Job's MI AcrPull on the ACR (so the MI pull works) +
@@ -598,7 +651,14 @@ if (-not $WhatIfPreference -and $engineSystemMi) {
             Write-PimSqlAdminGroupReport -Result $gr
             if ($gr.ok -and -not $gr.blocked) { $sqlGroupMember = $true; Note "$JobName's identity is a member of '$SqlAdminGroupName', the Entra admin of $($srvRes.name) -- no contained user needed" }
             elseif ($gr.ok) { Note "not on the group model -- $JobName reaches SQL through a contained database user (next step)" }
-            else { Warn "could not make $JobName's identity a member of '$SqlAdminGroupName' -- the contained-user step below still runs" }
+            else {
+                # SEC-32: the SQL admin group is created ROLE-ASSIGNABLE (tier 0); only a Privileged Role Administrator or an identity
+                # holding Graph RoleManagement.ReadWrite.Directory can change its members -- a deploy identity normally holds neither.
+                $why = if ($gr.roleAssignable -eq $true -or $gr.permissionDenied) {
+                    "'$SqlAdminGroupName' is ROLE-ASSIGNABLE (tier 0): only a Privileged Role Administrator or an identity with RoleManagement.ReadWrite.Directory can add members, and this deploy identity cannot"
+                } else { "membership could not be added ($(@($gr.problems) -join '; '))" }
+                Warn "$JobName's identity ($jobOid) was NOT made a member of '$SqlAdminGroupName' -- $why. It reaches SQL through its own contained database user instead (next step). To use the group model, have a Privileged Role Administrator add $jobOid to the group."
+            }
         } catch { Warn "SQL admin group step skipped: $($_.Exception.Message) -- the contained-user step below still runs" }
     }
 }
@@ -659,7 +719,7 @@ if ($Start) {
 }
 
 Step 'Done.'
-Write-Host ("Schedule: {0} runs '{1}' (UTC) in env {2}. Fire now: -Start ; verify: -Verify ; remove: -Unregister" -f $JobName, $Cron, $EnvName) -ForegroundColor Green
+Write-Host ("Trigger: {0} fires '{1}' (UTC) in env {2}; the PULL CADENCE is set in this tenant's Manager (Job schedule > Managed-tenant pull; daily when nothing is set), and the next trigger pulls once because of this deploy. Fire now: -Start ; verify: -Verify ; remove: -Unregister" -f $JobName, $Cron, $EnvName) -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # VERIFICATION HELPER -- confirm a real EXECUTION ran (not just that the Job
@@ -684,16 +744,29 @@ function Get-PimDownlinkJobExecutionStatus {
     # min_by) is therefore unusable from here -- fetch the rows and sort in PowerShell instead.
     # Both values come from ONE call now: two calls also meant two chances to disagree.
     $execs = @()
-    try { $execs = @(az containerapp job execution list @subArgs -g $ResourceGroup -n $JobName -o json 2>$null | ConvertFrom-Json) } catch {}
-    $last     = $execs | Where-Object { $_ } | Sort-Object { try { [datetime]$_.properties.startTime } catch { [datetime]::MinValue } } -Descending | Select-Object -First 1
-    $execName = if ($last) { "$($last.name)" } else { '' }
-    $status   = if ($last) { "$($last.properties.status)" } else { '' }
-    $log = ''
-    if ("$execName".Trim()) {
-        try { $log = (az containerapp job logs show @subArgs -g $ResourceGroup -n $JobName --execution "$execName" --tail 200 2>$null) -join "`n" } catch {}
+    # 🪤 Joined, then parsed, then ENUMERATED: az prints the JSON over many lines, and Windows PowerShell 5.1 emits a JSON
+    # array from ConvertFrom-Json as ONE object -- piping either straight on handed the sort a single "execution" whose
+    # name was every name joined.
+    try { $parsed = (@(az containerapp job execution list @subArgs -g $ResourceGroup -n $JobName -o json 2>$null) -join "`n") | ConvertFrom-Json; foreach ($x in @($parsed)) { if ($x) { $execs += $x } } } catch {}
+    $sorted = @($execs | Where-Object { $_ } | Sort-Object { try { [datetime]$_.properties.startTime } catch { [datetime]::MinValue } } -Descending)
+    # 🔑 THE CADENCE GATE: the trigger fires every 5 minutes and most executions are a one-line "[cadence] SKIPPED:" exit 0
+    # (PIM-JobCadence.ps1). Verifying the NEWEST execution would judge a skip, which never carries downlink evidence -- so
+    # walk back (newest first, at most 12) to the newest execution that actually ran the pull, and say how many skips
+    # lay in front of it.
+    $execName = ''; $status = ''; $log = ''; $skips = @()
+    foreach ($e in @($sorted | Select-Object -First 12)) {
+        $n = "$($e.name)"; $st = "$($e.properties.status)"; $lg = ''
+        if ("$n".Trim()) { try { $lg = (az containerapp job logs show @subArgs -g $ResourceGroup -n $JobName --execution "$n" --tail 200 2>$null) -join "`n" } catch {} }
+        $sk = Get-PimJobCadenceSkipFromLog -LogText $lg
+        if ($sk.skipped -and $st -eq 'Succeeded') { $skips += "$n ($($sk.code))"; continue }
+        $execName = $n; $status = $st; $log = $lg; break
     }
     $verdict = Get-PimDownlinkJobExecutionVerdict -Status "$status" -LogText "$log"
+    if (-not "$execName".Trim() -and $skips.Count) {
+        $verdict['reason'] = "NO pull ran in the last $($skips.Count) execution(s) -- each was a cadence skip ($($skips -join ', ')). Use the Manager's Job schedule > Run pull now, or redeploy (a deploy runs the pull once), then -Verify again."
+    } elseif ($skips.Count) { $verdict['reason'] = "$($verdict['reason']) [newest pull: $execName; $($skips.Count) newer cadence skip(s) passed over]" }
     $verdict['execution'] = "$execName"
     $verdict['status']    = "$status"
+    $verdict['cadenceSkips'] = @($skips)
     return $verdict
 }

@@ -326,12 +326,90 @@ function Get-PimWorkloadConnectorKey {
     return (($parts -join '|').ToLowerInvariant())
 }
 
+# ---------------------------------------------------------------------------
+# REQ-U (2026-09-19) -- which definition Workloads have a WORKLOAD BINDING, and where it lives.
+# Operator: "otherwise we will end with orphaned permission groups that are not connected with the actual
+# workload". A definition row's Workload is free text ('Intune', 'Defender-XDR', 'PowerBI', ...); a binding row is
+# a PIM-Assignments-Intune / -Defender row, or a PIM-Assignments-Workloads row whose Workload is a connector id
+# ('intune', 'defender-xdr', 'powerbi', ...). Both spellings map to ONE kind here, so the Groups provider's gate
+# warning and the validator's PIM-WL-004 pair them the same way. Workloads bound by other entities (Entra-ID ->
+# PIM-Assignments-Roles-*, Azure-RBAC -> PIM-Assignments-Azure-Resources, Exchange, Sentinel) are not in scope: ''.
+# ---------------------------------------------------------------------------
+function ConvertTo-PimWorkloadBindingKind {
+    # PURE. A Workload value -> 'intune' | 'defender' | a generic connector id | '' (no workload binding).
+    param([AllowNull()][string]$Workload)
+    $w = ("$Workload".Trim().ToLowerInvariant()) -replace '[^a-z0-9]', ''
+    if (-not $w) { return '' }
+    if ($w -in @('intune', 'microsoftintune', 'endpointmanager', 'mem', 'intunerbac')) { return 'intune' }
+    if ($w -in @('defender', 'defenderxdr', 'microsoftdefender', 'microsoftdefenderxdr', 'm365defender', 'microsoft365defender', 'mde', 'defenderforendpoint')) { return 'defender' }
+    switch ($w) {
+        'powerbi'         { return 'powerbi' }
+        'azuredevops'     { return 'azure-devops' }
+        'azdevops'        { return 'azure-devops' }
+        'dataverse'       { return 'dataverse' }
+        'businesscentral' { return 'business-central' }
+        'powerplatform'   { return 'power-platform' }
+        'entraapprole'    { return 'entra-approle' }
+    }
+    return ''
+}
+
+function Get-PimWorkloadBindingEntities {
+    # PURE. The entities that can hold a binding row for a kind (ConvertTo-PimWorkloadBindingKind).
+    param([AllowNull()][string]$Kind)
+    switch ("$Kind") {
+        ''         { return @() }
+        'intune'   { return @('PIM-Assignments-Intune', 'PIM-Assignments-Workloads') }
+        'defender' { return @('PIM-Assignments-Defender', 'PIM-Assignments-Workloads') }
+        default    { return @('PIM-Assignments-Workloads') }
+    }
+}
+
+function Get-PimWorkloadGateWarnings {
+    <#
+      REQ-U. PURE over its inputs. Definition rows ({ GroupName; GroupTag; Workload }) whose Workload has a binding
+      provider -> one warning line per group whose workload ROLE is not assigned by this run, naming every reason:
+        * the binding provider is GATED OFF (-BindingAvailable $false, -Reason);
+        * REQ-W: NO binding row names the group (-BoundTagsByKind: kind -> tag(lower) -> $true; a kind absent from the
+          map is not judged);
+        * REQ-W: the kind's workload prerequisites are not green (-PrereqHeldByKind: kind -> the held gate, or $null).
+      REQ-W (operator 2026-09-19: "it should be possible to deploy groups"): the group is CREATED (or kept) either
+      way -- the REQ-U wave-2 create hold is gone. Without this line the group would exist with no workload role and
+      nobody told; the orphan / coverage warnings show the same gap from the live side.
+    #>
+    param([object[]]$Rows = @(), [bool]$BindingAvailable = $true, [string]$Reason = '', [hashtable]$BoundTagsByKind = @{}, [hashtable]$PrereqHeldByKind = @{})
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $kind = ConvertTo-PimWorkloadBindingKind -Workload "$(Get-PimWorkloadRowField -Row $r -Names @('Workload'))"
+        if (-not $kind) { continue }
+        $gn = Get-PimWorkloadRowField -Row $r -Names @('GroupName')
+        $gt = Get-PimWorkloadRowField -Row $r -Names @('GroupTag')
+        $ents = (Get-PimWorkloadBindingEntities -Kind $kind) -join ' / '
+        $why = New-Object System.Collections.Generic.List[string]
+        if (-not $BindingAvailable) { $why.Add($(if ("$Reason".Trim()) { "$Reason" } else { 'the workload connectors are gated off' })) }
+        if ($BoundTagsByKind -and $BoundTagsByKind.ContainsKey($kind) -and $BoundTagsByKind[$kind] -is [hashtable] -and -not ($gt -and $BoundTagsByKind[$kind].ContainsKey($gt.ToLowerInvariant()))) {
+            $why.Add("no binding row names it ($ents)")
+        }
+        $hg = if ($PrereqHeldByKind -and $PrereqHeldByKind.ContainsKey($kind)) { $PrereqHeldByKind[$kind] } else { $null }
+        if ($hg -and $hg.held) { $why.Add(("the {0} prerequisites are not green ({1}) -- run Initialize-PimWorkloadPrereqs.ps1 -Workload {0}" -f $hg.workload, $hg.state)) }
+        if (-not $why.Count) { continue }
+        $out.Add(("group '{0}' (tag '{1}', workload {2}) is created (an existing one is kept); its {2} role is NOT assigned by this run: {3}. It is assigned on the first run where its binding ({4}) can be applied." -f $gn, $gt, $kind, ($why.ToArray() -join '; '), $ents))
+    }
+    return @($out.ToArray())
+}
+
 function Resolve-PimWorkloadGroupId {
     <#
-      GroupTag -> live Entra group id. Exact names first (the tag's defined GroupName, the tag as a
-      name, 'PIM-' + tag -- v1 L2863), then v1's own last resort: the first cached group whose
-      display name contains the tag (v1 L2859-2861). Exact-first because a contains-match can pick
-      a different group whose name merely includes the tag.
+      GroupTag -> live Entra group id, by EXACT name only, in this order:
+        1. the GroupName the tag's DEFINITION ROW names ($TagToName, from the definition entities);
+        2. the tag itself as a name (v1 L2863 -- a v1 tag was often the full group name);
+        3. the tag under the TENANT's naming pattern (Resolve-PimGroupNameFromTag, PimGroupPattern).
+      REQ-U (2026-09-19). Step 3 used to be a hard-coded 'PIM-' + tag, and after the exact names came v1's
+      last resort: the first cached group whose display name CONTAINED the tag (v1 L2859-2861). That bound the
+      WRONG group whenever another name merely included the tag ('Intune-Reader' inside
+      'PIM-Intune-Reader-Legacy') -- a workload role granted to a group nobody asked for. "Is this ours" is
+      decided by the definition row / the tag, never by a substring or a generic prefix.
     #>
     param([string]$Tag, [hashtable]$TagToName = @{})
     $t = "$Tag".Trim()
@@ -339,13 +417,17 @@ function Resolve-PimWorkloadGroupId {
     $names = New-Object System.Collections.Generic.List[string]
     if ($TagToName -and $TagToName.ContainsKey($t.ToLowerInvariant()) -and "$($TagToName[$t.ToLowerInvariant()])".Trim()) { $names.Add("$($TagToName[$t.ToLowerInvariant()])".Trim()) }
     if (-not $names.Contains($t)) { $names.Add($t) }
-    if ($t -notlike 'PIM-*') { $names.Add("PIM-$t") }
+    if (Get-Command Resolve-PimGroupNameFromTag -ErrorAction SilentlyContinue) {
+        $byPattern = "$(Resolve-PimGroupNameFromTag -Tag $t)".Trim()
+        if ($byPattern -and -not $names.Contains($byPattern)) { $names.Add($byPattern) }
+    }
     if (Get-Command Resolve-PimLiveGroupIdByName -ErrorAction SilentlyContinue) {
         foreach ($n in $names) { $gid = Resolve-PimLiveGroupIdByName $n; if ($gid) { return "$gid" } }
-    }
-    foreach ($g in @($Global:Groups_All_ID)) {
-        if ($null -eq $g) { continue }
-        if ("$($g.DisplayName)" -match [regex]::Escape($t)) { return "$($g.Id)" }
+    } else {
+        foreach ($n in $names) {
+            $g = @($Global:Groups_All_ID) | Where-Object { $null -ne $_ -and "$($_.DisplayName)" -ieq $n } | Select-Object -First 1
+            if ($g) { return "$($g.Id)" }
+        }
     }
     return $null
 }
@@ -492,6 +574,13 @@ function Invoke-PimWorkloadBindingRemove {
             return [pscustomobject]@{ pimApplied = $false; reason = $msg }
         }
         $tokens['assignmentId'] = "$($ex.id)"
+    }
+    # A removal that is itself a REQUEST (PIM: adminRemove / AdminRemove schedule requests) has a body and, for ARM,
+    # a client-chosen request id -- the same shape as the assign.
+    $tokens['newId'] = [guid]::NewGuid().ToString()
+    if ($conn.api.remove -and $null -ne $conn.api.remove.body) {
+        $body = New-PimWorkloadConnectorBody -Template $conn.api.remove.body -Tokens $tokens
+        return (Invoke-PimWorkloadConnectorApi -Connector $conn -Op $conn.api.remove -Tokens $tokens -Body $body)
     }
     return (Invoke-PimWorkloadConnectorApi -Connector $conn -Op $conn.api.remove -Tokens $tokens)
 }

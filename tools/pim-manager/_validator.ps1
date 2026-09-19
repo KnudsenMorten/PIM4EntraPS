@@ -453,19 +453,28 @@ function Invoke-PimPreflightValidation {
     }
 
     # Admin UPNs (auto-derive if missing per the engine pattern).
-    $adminIndex = @{} # upn-lower -> @{ Row, TierLevel, TargetPlatform, CreateTAP, AccountStatus, StatusChangeCode, UserName, Upn }
+    $adminIndex = @{} # upn-lower (or UserName-lower when the row carries no UPN) -> @{ Row, TierLevel, TargetPlatform, CreateTAP, AccountStatus, StatusChangeCode, UserName, Upn }
+    $adminUserNames = New-Object System.Collections.Generic.HashSet[string]   # every admin UserName (lower) -- the identity
     $defaultDomain = if ($global:DefaultDomainUPN) { [string]$global:DefaultDomainUPN } else { $null }
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {
         $adminRows = $loaded['Account-Definitions-Admins'].rows
         for ($i = 0; $i -lt $adminRows.Count; $i++) {
             $r = $adminRows[$i]
             $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
+            $un0 = Get-PimRowValue -Row $r -Column 'UserName'
+            if ($un0) { [void]$adminUserNames.Add($un0.Trim().ToLowerInvariant()) }
             if (-not $upn) {
-                $un = Get-PimRowValue -Row $r -Column 'UserName'
-                if ($un -and $defaultDomain) { $upn = "$un@$defaultDomain" }
+                if ($un0 -and $defaultDomain) { $upn = "$un0@$defaultDomain" }
             }
-            if (-not $upn) { continue }
-            $key = $upn.ToLowerInvariant()
+            # 🔴 (2.4.377, operator 2026-09-19: "remember we need to separate the username and upn from each other, as we in
+            # pim v1 used username and then used domain pairing when creating"). The admin's IDENTITY is its UserName -- the
+            # store key (Get-PimStoreRowKey) and the engine's KeyOf -- and the UPN is only COMPOSED at create
+            # (UserName@<Admin account domain>, Get-PimAdminUpnDomain). A v1 row carries NO UserPrincipalName, and in the
+            # hosted Manager no domain is pinned, so this index skipped every such admin: all 15 EFIF memberships were
+            # refused as PIM-FK-002 "not defined" while the 6 admins were in the store. Index them by UserName instead.
+            $key = if ($upn) { $upn.ToLowerInvariant() } elseif ($un0) { $un0.Trim().ToLowerInvariant() } else { $null }
+            if (-not $key) { continue }
+            if (-not $upn) { $upn = $un0 }
             if (-not $adminIndex.ContainsKey($key)) {
                 $adminIndex[$key] = @{
                     Row = $i; Upn = $upn
@@ -604,6 +613,35 @@ function Invoke-PimPreflightValidation {
     }
 
     # ------------------------------------------------------------------
+    # PIM-FK-005 (2.4.378): a group defined ONLY by a PIM-Definitions-Resources row. PIM-FK-001 accepts it (the tag IS
+    # defined), but the engine never CREATES a group from that entity -- it is discovery's (Get-PimGroupDefinitionRows) --
+    # so an Azure binding on such a tag resolves to nothing and the delegation silently never lands. A WARNING, not an
+    # error: an existing environment may hold such rows, and blocking every commit over them would be worse than saying so.
+    # ------------------------------------------------------------------
+    if ($loaded.ContainsKey('PIM-Definitions-Resources') -and $loaded.ContainsKey('PIM-Assignments-Azure-Resources')) {
+        $creatable = New-Object System.Collections.Generic.HashSet[string]
+        foreach ($db in @($defGroupBases | Where-Object { $_ -ne 'PIM-Definitions-Resources' })) {
+            if (-not $loaded.ContainsKey($db)) { continue }
+            foreach ($r in $loaded[$db].rows) { $t = Get-PimRowValue -Row $r -Column 'GroupTag'; if ($t) { [void]$creatable.Add($t.ToLowerInvariant()) } }
+        }
+        $resOnly = New-Object System.Collections.Generic.HashSet[string]
+        foreach ($r in $loaded['PIM-Definitions-Resources'].rows) { $t = Get-PimRowValue -Row $r -Column 'GroupTag'; if ($t -and -not $creatable.Contains($t.ToLowerInvariant())) { [void]$resOnly.Add($t.ToLowerInvariant()) } }
+        $azRows = $loaded['PIM-Assignments-Azure-Resources'].rows
+        $warnedFk5 = New-Object System.Collections.Generic.HashSet[string]
+        for ($i = 0; $i -lt $azRows.Count; $i++) {
+            $r = $azRows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            if ((Get-PimRowValue -Row $r -Column 'Action') -ieq 'Remove') { continue }
+            $t = Get-PimRowValue -Row $r -Column 'GroupTag'
+            if (-not $t -or -not $resOnly.Contains($t.ToLowerInvariant()) -or -not $warnedFk5.Add($t.ToLowerInvariant())) { continue }
+            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-FK-005' -Csv 'PIM-Assignments-Azure-Resources' -Row $i -Column 'GroupTag' `
+                -Subject $t -Target $t `
+                -Message "Group '$t' is defined only in PIM-Definitions-Resources (the discovery entity). The engine never creates a group from it, so this Azure delegation cannot land." `
+                -Suggestion "Define '$t' in PIM-Definitions-Services (as the Azure wizards now do), or remove this binding."))
+        }
+    }
+
+    # ------------------------------------------------------------------
     # PIM-FK-002: every Username in PIM-Assignments-Admins exists as a UPN
     # in Account-Definitions-Admins (auto-deriving UPN where needed).
     # ------------------------------------------------------------------
@@ -617,6 +655,9 @@ function Invoke-PimPreflightValidation {
             if (-not $u) { continue }
             $key = $u.ToLowerInvariant()
             if ($adminIndex.ContainsKey($key)) { continue }
+            # A membership naming the admin by UserName, or by a full UPN whose local part is an admin's UserName, is a
+            # reference to that admin: the UPN is composed from the UserName at create (UserName vs UPN, 2.4.377).
+            if ($adminUserNames.Contains($key) -or ($key.Contains('@') -and $adminUserNames.Contains($key.Substring(0, $key.IndexOf('@'))))) { continue }
             # Try UPN-derivation match too (raw UserName -> UserName@defaultDomain).
             $derivedHit = $false
             if ($defaultDomain) {
@@ -644,7 +685,7 @@ function Invoke-PimPreflightValidation {
             $subj = "$(Get-PimRowValue -Row $r -Column 'GroupTag')"
             [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-FK-002' -Csv 'PIM-Assignments-Admins' -Row $i -Column 'Username' `
                 -Subject $subj -Target $u `
-                -Message "Username '$u' is not defined in Account-Definitions-Admins (UserPrincipalName)." -Suggestion $suggestion))
+                -Message "Username '$u' is not defined in Account-Definitions-Admins (no admin has this UserName or UserPrincipalName)." -Suggestion $suggestion))
         }
     }
 
@@ -901,7 +942,10 @@ function Invoke-PimPreflightValidation {
         }
         foreach ($key in $adminIndex.Keys) {
             if ("$($adminIndex[$key].TargetPlatform)".Trim() -ieq 'AD') { continue }   # AD-only admins get no PIM (Entra) reach by design
-            if (-not $usedAdmins.ContainsKey($key)) {
+            # REQ-G (2.4.376): a v1 assignment names the admin by bare UserName (PIM-FK-002 accepts that), so the UPN alone
+            # reported every imported admin as orphaned. Either spelling is a reference.
+            $un = "$($adminIndex[$key].UserName)".Trim().ToLowerInvariant()
+            if (-not $usedAdmins.ContainsKey($key) -and -not ($un -and $usedAdmins.ContainsKey($un))) {
                 $a = $adminIndex[$key]
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-ORPHAN-001' -Csv 'Account-Definitions-Admins' -Row $a.Row -Column 'UserPrincipalName' `
                     -Subject $a.Upn `
@@ -916,7 +960,62 @@ function Invoke-PimPreflightValidation {
     # "Outbound" = appears as SourceGroupTag in PIM-Assignments-Groups OR
     # as GroupTag in any PIM-Assignments-Roles-* / Azure CSV.
     # ------------------------------------------------------------------
+    # REQ-U (2026-09-19): the WORKLOAD binding entities. PIM-Assignments-Intune / -Defender are engine entities the
+    # Manager grid does not list (Get-PimCsvBases), so they are read here on their own; an entity that cannot be read
+    # is remembered, and every rule that needs it says "not checked" instead of guessing.
+    $wlBindUnread = @{}
+    foreach ($wb in @('PIM-Assignments-Intune', 'PIM-Assignments-Defender')) {
+        if ($loaded.ContainsKey($wb)) { continue }
+        if ($PendingRows -and $PendingRows.ContainsKey($wb)) {
+            $loaded[$wb] = @{ header = @(); rows = @($PendingRows[$wb]); source = 'pending'; path = $null }
+            continue
+        }
+        try { $loaded[$wb] = Read-PimRows -BaseName $wb }
+        catch { $wlBindUnread[$wb] = "$($_.Exception.Message)"; $loaded[$wb] = @{ header = @(); rows = @(); source = 'none'; path = $null } }
+    }
+    # The Workload -> binding-kind map (ONE definition: ConvertTo-PimWorkloadBindingKind, PIM-WorkloadConnectors.ps1).
+    # A host that has not loaded the engine runtime gets the same map inline.
+    $wlKindOf = {
+        param([string]$w)
+        if (Get-Command ConvertTo-PimWorkloadBindingKind -ErrorAction SilentlyContinue) { return (ConvertTo-PimWorkloadBindingKind -Workload $w) }
+        $n = ("$w".Trim().ToLowerInvariant()) -replace '[^a-z0-9]', ''
+        if (-not $n) { return '' }
+        if ($n -in @('intune', 'microsoftintune', 'endpointmanager', 'mem', 'intunerbac')) { return 'intune' }
+        if ($n -in @('defender', 'defenderxdr', 'microsoftdefender', 'microsoftdefenderxdr', 'm365defender', 'microsoft365defender', 'mde', 'defenderforendpoint')) { return 'defender' }
+        $gen = @{ powerbi = 'powerbi'; azuredevops = 'azure-devops'; azdevops = 'azure-devops'; dataverse = 'dataverse'; businesscentral = 'business-central'; powerplatform = 'power-platform'; entraapprole = 'entra-approle' }
+        if ($gen.ContainsKey($n)) { return $gen[$n] }
+        return ''
+    }
+    # kind -> { lower(GroupTag or group name) -> $true }, from every non-Remove binding row.
+    $wlBound = @{}
+    $wlAddBound = { param($kind, $val) if (-not $kind -or -not "$val".Trim()) { return }; if (-not $wlBound.ContainsKey($kind)) { $wlBound[$kind] = @{} }; $wlBound[$kind]["$val".Trim().ToLowerInvariant()] = $true }
+    foreach ($pair in @(@('PIM-Assignments-Intune', 'intune'), @('PIM-Assignments-Defender', 'defender'))) {
+        foreach ($r in @($loaded[$pair[0]].rows)) {
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            if ((Get-PimRowValue -Row $r -Column 'Action').Trim() -ieq 'Remove') { continue }
+            & $wlAddBound $pair[1] (Get-PimRowValue -Row $r -Column 'GroupTag')
+        }
+    }
+    if ($loaded.ContainsKey('PIM-Assignments-Workloads')) {
+        foreach ($r in @($loaded['PIM-Assignments-Workloads'].rows)) {
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            if ((Get-PimRowValue -Row $r -Column 'Action').Trim() -ieq 'Remove') { continue }
+            & $wlAddBound (& $wlKindOf (Get-PimRowValue -Row $r -Column 'Workload')) (Get-PimRowValue -Row $r -Column 'GroupTag')
+        }
+    }
+    # A binding row may name the group by its tag OR by its full name (the shipped Workloads sample does the latter).
+    $defNameToTag = @{}
+    foreach ($k in $groupTagIndex.Keys) { $gnm = "$($groupTagIndex[$k].GroupName)".Trim(); if ($gnm) { $defNameToTag[$gnm.ToLowerInvariant()] = $k } }
+
     $outboundTags = @{}
+    # REQ-U: a group bound by a WORKLOAD binding row (Intune / Defender / generic connector) has an outbound
+    # assignment -- PIM-ORPHAN-002 used to call every such workload group orphaned.
+    foreach ($kb in @($wlBound.Keys)) {
+        foreach ($v in @($wlBound[$kb].Keys)) {
+            $outboundTags[$v] = $true
+            if ($defNameToTag.ContainsKey($v)) { $outboundTags[$defNameToTag[$v]] = $true }
+        }
+    }
     if ($loaded.ContainsKey('PIM-Assignments-Groups')) {
         foreach ($r in $loaded['PIM-Assignments-Groups'].rows) {
             if (Test-PimRowIsBlank -Row $r) { continue }
@@ -937,8 +1036,8 @@ function Invoke-PimPreflightValidation {
         if ($g.Kind -ne 'permission-group') { continue }
         if (-not $outboundTags.ContainsKey($key)) {
             [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-ORPHAN-002' -Csv $g.Csv -Row $g.Row -Column 'GroupTag' `
-                -Message "Permission group '$($g.Tag)' has no outbound assignments (nothing targets it via PIM-Assignments-Groups SourceGroupTag, and it isn't bound to an Entra/Azure target)." `
-                -Suggestion "Either bind it to a target (PIM-Assignments-Roles-*/Azure-Resources) and/or nest it under a role group, or remove the definition."))
+                -Message "Permission group '$($g.Tag)' has no outbound assignments (nothing targets it via PIM-Assignments-Groups SourceGroupTag, and it isn't bound to an Entra/Azure target or a workload role)." `
+                -Suggestion "Either bind it to a target (PIM-Assignments-Roles-*/Azure-Resources, or a workload binding: PIM-Assignments-Intune/-Defender/-Workloads) and/or nest it under a role group, or remove the definition."))
         }
     }
 
@@ -1274,10 +1373,17 @@ function Invoke-PimPreflightValidation {
 
     # ------------------------------------------------------------------
     # PIM-RING-001: Ring column (deployment-ring rollout staging) must be
-    # blank, 0, 1, or 2. Anything else is treated as 0 by the engine (full
-    # reach) -- a typo like 'Ring=22' silently grants ALL tenants. Severity
-    # is WARNING by design (never blocks Save); the Validate tab's Fix-all
-    # repairs it to Ring=2 (least privilege).
+    # blank or a WHOLE NUMBER. DOC-16 a (§33.28): an invalid value UNDER-grants,
+    # it does not over-grant. The master publishes an admin only when Ring is a
+    # whole number (PIM-Downlink.ps1, '^\d+$'), and each slave's ring is set
+    # locally in the slave -- so a value that is not a whole number is not
+    # published at all: the admin reaches NO managed tenant and is silently not
+    # deployed. 2.4.371 (DOC-16 a vs c): ANY whole number is valid -- the grid,
+    # the account editor and the wizard accept 3, 7, 12 ... and the master
+    # publishes them -- so only a non-whole-number value is flagged here (the old
+    # 0/1/2 check contradicted the picker and the Fix-all "repaired" ring 3 to 2).
+    # Severity is WARNING by design (never blocks Save); the Validate tab's
+    # Fix-all offers Ring=2 or blank.
     # ------------------------------------------------------------------
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {
         $rows = $loaded['Account-Definitions-Admins'].rows
@@ -1287,11 +1393,11 @@ function Invoke-PimPreflightValidation {
             if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') { continue }   # AD-only: no Entra tenant rollout
             $ringVal = (Get-PimRowValue -Row $r -Column 'Ring').Trim()
             if (-not $ringVal) { continue }
-            if ($ringVal -notin @('0','1','2')) {
+            if ($ringVal -notmatch '^\d+$') {
                 $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-RING-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Ring' `
-                    -Message "Ring '$ringVal' for '$upn' is not a valid deployment ring (blank, 0, 1, or 2). The engine treats invalid values as 0 = ALL tenants -- a typo here silently over-grants." `
-                    -Suggestion "Use Fix-all (sets Ring=2, least privilege), or set Ring to 2 / 1 / 0 manually."))
+                    -Message "Ring '$ringVal' for '$upn' is not a whole number, so it is not a deployment ring. The master publishes only whole-number rings, so this admin reaches NO managed tenant -- it UNDER-grants: the admin is silently NOT deployed (it is never widened to all tenants)." `
+                    -Suggestion "Set Ring to the whole number you intend (an admin on ring N reaches the managed tenants whose own ring is N or higher), or use Fix-all (Ring=2 or blank)."))
             }
         }
     }
@@ -1313,10 +1419,11 @@ function Invoke-PimPreflightValidation {
             if (Test-PimRowIsBlank -Row $r) { continue }
             $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
             $mode = (Get-PimRowValue -Row $r -Column 'ManagementMode').Trim()
-            if ($mode -ieq 'msp' -and (Get-PimRowValue -Row $r -Column 'Ring').Trim() -notin @('0','1','2')) {
+            # DOC-16 a vs c (2.4.371): any WHOLE NUMBER is a valid ring (the downlink publishes ^\d+$); ring 3+ is not "no ring".
+            if ($mode -ieq 'msp' -and (Get-PimRowValue -Row $r -Column 'Ring').Trim() -notmatch '^\d+$') {
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Ring' `
-                    -Message "'$upn' is ManagementMode=msp (synced to slaves) but has no valid Ring -- the downlink sends it to NO slave." `
-                    -Suggestion "Set Ring 0 / 1 / 2 (which slaves receive it), or set ManagementMode=local if it should not be synced."))
+                    -Message "'$upn' is ManagementMode=msp (synced to slaves) but has no valid Ring (blank or not a whole number) -- the downlink sends it to NO slave." `
+                    -Suggestion "Set Ring to a whole number (0, 1, 2, ...: which slaves receive it), or set ManagementMode=local if it should not be synced."))
             }
             $tgt = (Get-PimRowValue -Row $r -Column 'Target').Trim()
             if ($tgt -and (Get-Command Test-PimAdminTargetSelector -ErrorAction SilentlyContinue)) {
@@ -1390,7 +1497,7 @@ function Invoke-PimPreflightValidation {
                 if ($repKind -ne 'admin') {
                     foreach ($w in @($chk.warnings)) {
                         if ("$w" -match '^Ring ') {
-                            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-005' -Csv $repEnt -Row $i -Column 'Ring' -Message "'$label' -- $w" -Suggestion 'Use Ring 0, 1 or 2, or leave it blank (not narrowed by ring).'))
+                            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-005' -Csv $repEnt -Row $i -Column 'Ring' -Message "'$label' -- $w" -Suggestion 'Use a whole-number Ring (0, 1, 2, ...), or leave it blank (not narrowed by ring).'))
                         } elseif ("$w" -match 'no managed tenant carries') {
                             [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-002' -Csv $repEnt -Row $i -Column 'Target' -Message "'$label' -- $w" -Suggestion "Pick tags from the managed tenants' tags."))
                         }
@@ -1540,6 +1647,7 @@ function Invoke-PimPreflightValidation {
     # the escalation has nowhere to go).
     # ------------------------------------------------------------------
     $policyTpls = @{}
+    $rawTpls = @{}
     try {
         # SQL ONLY: the same store the engine reads (Get-PimEnginePolicyTemplates). The hydrated
         # setting is used when present; otherwise it is read from the store.
@@ -1551,14 +1659,33 @@ function Invoke-PimPreflightValidation {
             foreach ($tid in @($rawTpls.Keys)) {
                 $pj = $rawTpls[$tid]
                 $apr = $null
-                if ($pj.extends -and $rawTpls.ContainsKey([string]$pj.extends) -and $rawTpls[[string]$pj.extends].rules -and $rawTpls[[string]$pj.extends].rules.Approval) {
-                    $apr = $rawTpls[[string]$pj.extends].rules.Approval
+                # 'extends' resolves like the engine: id, current name, former id ('default' -> Groups_Standard).
+                $ext = if (-not $pj.extends) { '' } elseif (Get-Command Resolve-PimPolicyTemplateKey -ErrorAction SilentlyContinue) { Resolve-PimPolicyTemplateKey -Map $rawTpls -Id ([string]$pj.extends) } elseif ($rawTpls.ContainsKey([string]$pj.extends)) { [string]$pj.extends } else { '' }
+                if ($ext -and $rawTpls[$ext].rules -and $rawTpls[$ext].rules.Approval) {
+                    $apr = $rawTpls[$ext].rules.Approval
                 }
                 if ($pj.rules -and $pj.rules.Approval) { $apr = $pj.rules.Approval }
                 $policyTpls[$tid] = @{ ApprovalMode = $(if ($apr -and $apr.mode) { [string]$apr.mode } else { 'None' }) }
             }
         }
     } catch { $policyTpls = @{} }
+    # 2026-09-19: a PolicyTemplate value resolves exactly as the engine resolves it -- the id, then the current name, then
+    # a former id ('default' -> Groups_Standard, 'approval-required' -> Groups_RequireApproval) -- so a row naming a former
+    # id is NOT PIM-POL-001. A BLANK value means the per-kind default (pim.Settings['PolicyTemplateDefaults'], else built-in).
+    $resolveTpl = {
+        param([string]$v)
+        if (-not "$v".Trim()) { return '' }
+        if (Get-Command Resolve-PimPolicyTemplateKey -ErrorAction SilentlyContinue) { return (Resolve-PimPolicyTemplateKey -Map $rawTpls -Id $v) }
+        if ($policyTpls.ContainsKey("$v".Trim())) { return "$v".Trim() }
+        return ''
+    }
+    $tplDefaults = [ordered]@{ group = 'Groups_Standard'; directoryRole = 'EntraIDRoles_Standard'; azureRole = 'AzureRoles_Standard' }
+    if ($policyTpls.Count -gt 0 -and (Get-Command Resolve-PimPolicyTemplateTypeDefaults -ErrorAction SilentlyContinue)) {
+        $defSet = $null
+        if ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains('PolicyTemplateDefaults')) { $defSet = $global:PIM_NamingConventions['PolicyTemplateDefaults'] }
+        elseif (Get-Command Get-PimManagerSetting -ErrorAction SilentlyContinue) { try { $defSet = Get-PimManagerSetting -Name 'PolicyTemplateDefaults' } catch { $defSet = $null } }
+        try { $tplDefaults = (Resolve-PimPolicyTemplateTypeDefaults -Setting $defSet -Map $rawTpls).defaults } catch { }
+    }
 
     # TEMPLATE-UPGRADE-AVAILABLE (info): a stored template that was CUSTOMISED is never overwritten by a
     # newer shipped version (Update-PimPolicyTemplateStore records it in upgradeAvailable). Say so, and
@@ -1590,20 +1717,24 @@ function Invoke-PimPreflightValidation {
                 $tplVal = (Get-PimRowValue -Row $r -Column 'PolicyTemplate').Trim()
                 $gName  = (Get-PimRowValue -Row $r -Column 'GroupName').Trim()
 
-                if ($tplVal -and -not $policyTpls.ContainsKey($tplVal)) {
+                $tplKey = & $resolveTpl $tplVal
+                if ($tplVal -and -not $tplKey) {
                     [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-POL-001' -Csv $defBase -Row $i -Column 'PolicyTemplate' `
                         -Message "PolicyTemplate '$tplVal' for '$gName' is not a policy template in the store -- the engine skips the row's policy apply." `
                         -Suggestion ("Available templates: " + (@($policyTpls.Keys | Sort-Object) -join ', ') + ".")))
                     continue
                 }
-                $effTpl = if ($tplVal) { $tplVal } else { 'default' }
+                $effTpl = if ($tplKey) { $tplKey } else { "$($tplDefaults['group'])" }
                 if (-not $policyTpls.ContainsKey($effTpl)) { continue }
                 $mode = $policyTpls[$effTpl].ApprovalMode
                 if ($mode -eq 'None') { continue }
 
                 $ownersRaw = (Get-PimRowValue -Row $r -Column 'Owners').Trim()
                 if (-not $ownersRaw) { $ownersRaw = (Get-PimRowValue -Row $r -Column 'SponsorUpn').Trim() }
-                $owners = @($ownersRaw -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                # BUG-192 (§33.28): the Manager stores Owners PIPE-joined ('a|b'); the engine splits on [|,;]
+                # (Invoke-PimGroupsPolicyApply). Splitting on [;,] only read 'a|b' as ONE owner, so a Serial
+                # approval with two owners was flagged as having one.
+                $owners = @($ownersRaw -split '[|;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
                 if ($owners.Count -eq 0) {
                     [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-APR-001' -Csv $defBase -Row $i -Column 'Owners' `
                         -Message "'$gName' links policy template '$effTpl' ($mode approval) but the row has NO owners -- there is nobody to approve, so the engine will not apply the approval rule." `
@@ -1614,6 +1745,55 @@ function Invoke-PimPreflightValidation {
                         -Suggestion "Add a second owner, or switch the template's approval mode to Parallel."))
                 }
             }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # REQ-L / §68.6 #37(c): the PolicyTemplate column on the ROLE-ASSIGNMENT entities (Roles-Groups, Roles-AUs,
+    # Azure-Resources). The engine reads it per role (Get-PimManagedRolePolicyTargets) and per Azure (scope, role)
+    # (Get-PimAzResPolicyTargets), blank = the per-kind default (EntraIDRoles_Standard for an Entra role, AzureRoles_Standard
+    # for an Azure role, unless pim.Settings['PolicyTemplateDefaults'] sets another), and SKIPS the policy of a row naming a
+    # template the store does not have (id, name or former id) -- PIM-POL-001, as for the definition rows above. A row
+    # naming a template written for ANOTHER kind (an Azure row still on EntraIDRoles_Standard) is NOT flagged: the engine
+    # applies it (same rules); the Manager marks it in the grid. An Entra role whose template needs
+    # approval takes its approvers from ApproverUpns ONLY, and the engine refuses to write an approval with none
+    # (EntraRolePolicies: "NO approver resolved") -- PIM-APR-001 when no row naming that role carries ApproverUpns.
+    # (An Azure role falls back to the owners of the groups assigned it, so it is not flagged here.)
+    # ------------------------------------------------------------------
+    if ($policyTpls.Count -gt 0) {
+        $roleApprovers = @{}; $roleApprovalRows = New-Object System.Collections.Generic.List[object]
+        foreach ($asgBase in @('PIM-Assignments-Roles-Groups', 'PIM-Assignments-Roles-AUs', 'PIM-Assignments-Azure-Resources')) {
+            if (-not $loaded.ContainsKey($asgBase)) { continue }
+            $rows = $loaded[$asgBase].rows
+            for ($i = 0; $i -lt $rows.Count; $i++) {
+                $r = $rows[$i]
+                if (Test-PimRowIsBlank -Row $r) { continue }
+                if ((Get-PimRowValue -Row $r -Column 'Action').Trim() -eq 'Remove') { continue }
+                $tplVal = (Get-PimRowValue -Row $r -Column 'PolicyTemplate').Trim()
+                $what = if ($asgBase -eq 'PIM-Assignments-Azure-Resources') { "Azure role '$((Get-PimRowValue -Row $r -Column 'AzScopePermission').Trim())' at $((Get-PimRowValue -Row $r -Column 'AzScope').Trim())" }
+                        else { "role '$((Get-PimRowValue -Row $r -Column 'RoleDefinitionName').Trim())'" }
+                $tplKey = & $resolveTpl $tplVal
+                if ($tplVal -and -not $tplKey) {
+                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-POL-001' -Csv $asgBase -Row $i -Column 'PolicyTemplate' -Subject (Get-PimRowValue -Row $r -Column 'GroupTag').Trim() -Target $tplVal `
+                        -Message "PolicyTemplate '$tplVal' on $what is not a policy template in the store -- the engine skips that role's policy apply." `
+                        -Suggestion ("Leave it blank for the standard template, or use one of: " + (@($policyTpls.Keys | Sort-Object) -join ', ') + ".")))
+                    continue
+                }
+                if ($asgBase -eq 'PIM-Assignments-Azure-Resources') { continue }
+                $rn = (Get-PimRowValue -Row $r -Column 'RoleDefinitionName').Trim().ToLowerInvariant()
+                if (-not $rn) { continue }
+                if ((Get-PimRowValue -Row $r -Column 'ApproverUpns').Trim()) { $roleApprovers[$rn] = $true }
+                $effTpl = if ($tplKey) { $tplKey } else { "$($tplDefaults['directoryRole'])" }
+                if ($policyTpls.ContainsKey($effTpl) -and $policyTpls[$effTpl].ApprovalMode -ne 'None') {
+                    [void]$roleApprovalRows.Add(@{ base = $asgBase; i = $i; rn = $rn; tpl = $effTpl; what = $what; tag = (Get-PimRowValue -Row $r -Column 'GroupTag').Trim() })
+                }
+            }
+        }
+        foreach ($x in $roleApprovalRows) {
+            if ($roleApprovers.ContainsKey($x.rn)) { continue }
+            [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-APR-001' -Csv $x.base -Row $x.i -Column 'ApproverUpns' -Subject $x.tag -Target $x.tpl `
+                -Message "$($x.what) links policy template '$($x.tpl)', which needs APPROVAL, but no row for that role names approvers in ApproverUpns -- the engine refuses to write an approval with nobody to approve, so the role keeps its current policy." `
+                -Suggestion "Put the approvers' UPNs in the ApproverUpns column (separated by |), or switch the row back to the standard template (blank)."))
         }
     }
 
@@ -1675,6 +1855,69 @@ function Invoke-PimPreflightValidation {
     }
 
     # ------------------------------------------------------------------
+    # PIM-WL-004 (REQ-U, 2026-09-19): a workload group and its workload binding are ONE unit. Operator:
+    # "otherwise we will end with orphaned permission groups that are not connected with the actual workload" /
+    # "you must have a warning if that is the case". Both directions, severity warning:
+    #   (a) a definition row whose Workload has a binding entity (Intune -> PIM-Assignments-Intune, Defender ->
+    #       PIM-Assignments-Defender, both + the generic PIM-Assignments-Workloads; the generic connectors ->
+    #       PIM-Assignments-Workloads) but NO binding row for its GroupTag (or its group name) -- the engine
+    #       creates the group and it never holds the workload role;
+    #   (b) a PIM-Assignments-Intune / -Defender row whose GroupTag no definition defines -- a workload role
+    #       for a group PIM does not define. (The same break in PIM-Assignments-Workloads is already an ERROR,
+    #       PIM-FK-001, so it is not reported twice.)
+    # This checks the DESIRED rows. The live check (does the group really hold the role) is the drift snapshot's.
+    # ------------------------------------------------------------------
+    foreach ($db in $defGroupBases) {
+        if (-not $loaded.ContainsKey($db)) { continue }
+        $rows = $loaded[$db].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            $wlv = (Get-PimRowValue -Row $r -Column 'Workload').Trim()
+            if (-not $wlv) { continue }
+            $kind = & $wlKindOf $wlv
+            if (-not $kind) { continue }
+            if ((Get-PimRowValue -Row $r -Column 'Lifecycle').Trim() -match '(?i)^retire') { continue }
+            $tag = (Get-PimRowValue -Row $r -Column 'GroupTag').Trim()
+            $gnm = (Get-PimRowValue -Row $r -Column 'GroupName').Trim()
+            if (-not $tag -and -not $gnm) { continue }
+            $ents = @(if (Get-Command Get-PimWorkloadBindingEntities -ErrorAction SilentlyContinue) { Get-PimWorkloadBindingEntities -Kind $kind }
+                      elseif ($kind -eq 'intune') { 'PIM-Assignments-Intune', 'PIM-Assignments-Workloads' }
+                      elseif ($kind -eq 'defender') { 'PIM-Assignments-Defender', 'PIM-Assignments-Workloads' }
+                      else { 'PIM-Assignments-Workloads' })
+            $bound = $wlBound.ContainsKey($kind) -and (($tag -and $wlBound[$kind].ContainsKey($tag.ToLowerInvariant())) -or ($gnm -and $wlBound[$kind].ContainsKey($gnm.ToLowerInvariant())))
+            if ($bound) { continue }
+            $unread = @($ents | Where-Object { $wlBindUnread.ContainsKey($_) })
+            if ($unread.Count) {
+                [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-WL-004' -Csv $db -Row $i -Column 'Workload' -Subject $tag -Target $tag `
+                    -Message "Workload group '$(if ($tag) { $tag } else { $gnm })' ($wlv): its binding could NOT be checked -- $($unread -join ', ') could not be read ($(@($unread | ForEach-Object { $wlBindUnread[$_] }) -join '; '))." `
+                    -Suggestion "Re-run Validate when the store answers."))
+                continue
+            }
+            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-WL-004' -Csv $db -Row $i -Column 'GroupTag' -Subject $tag -Target $tag `
+                -Message "Workload group '$(if ($tag) { $tag } else { $gnm })' has Workload '$wlv' but NO binding row in $($ents -join ' or ') -- the engine creates the group and never gives it a $kind role, so it is an orphan permission group." `
+                -Suggestion "Add its binding row (GroupTag '$tag' + the $kind role) so the group and its role are deployed as one unit, or clear Workload if this group is bound some other way."))
+        }
+    }
+    foreach ($pair in @(@('PIM-Assignments-Intune', 'Intune'), @('PIM-Assignments-Defender', 'Defender XDR'))) {
+        if ($wlBindUnread.ContainsKey($pair[0])) { continue }
+        $rows = @($loaded[$pair[0]].rows)
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            if ((Get-PimRowValue -Row $r -Column 'Action').Trim() -ieq 'Remove') { continue }
+            $bt = (Get-PimRowValue -Row $r -Column 'GroupTag').Trim()
+            if (-not $bt) { continue }
+            $btl = $bt.ToLowerInvariant()
+            if ($groupTagIndex.ContainsKey($btl) -or $defNameToTag.ContainsKey($btl)) { continue }
+            $role = (Get-PimRowValue -Row $r -Column 'RoleDefinitionName').Trim()
+            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-WL-004' -Csv $pair[0] -Row $i -Column 'GroupTag' -Subject $role -Target $bt `
+                -Message "$($pair[1]) binding '$role' names GroupTag '$bt', which no definition defines -- a workload role for a group PIM does not define (the engine cannot resolve it, or binds a group it does not manage)." `
+                -Suggestion "Define '$bt' in a Definitions entity (with Workload set), or remove this binding row."))
+        }
+    }
+
+    # ------------------------------------------------------------------
     # PIM-ROLE-OWNER-001: a role / org / task definition row should name an
     # accountable sponsor/owner (Owners or SponsorUpn) -- required for
     # validation/audit/renewal (REQUIREMENTS §13 "Role sponsor/owner",
@@ -1710,6 +1953,9 @@ function Invoke-PimPreflightValidation {
     # resistant authenticator OR passkey), overridable.
     #   PIM-AUTH-001 = admin has NONE of the required methods.
     #   PIM-AUTH-002 = admin has only weak methods (sms/voice) and no strong one.
+    #   BOTH ARE WARNINGS (operator 2026-09-19: "this must be a warning (non error), as it blocks everything"): they
+    #   describe the LIVE directory, not the rows being committed -- a newly created admin has no method until its TAP
+    #   is used -- and nothing in the grid can fix them, so an ERROR blocked every commit on the environment.
     # ------------------------------------------------------------------
     $authCache = $null
     if (Get-Command Read-PimTenantListCache -ErrorAction SilentlyContinue) {
@@ -1744,11 +1990,11 @@ function Invoke-PimPreflightValidation {
                 foreach ($m in $methods) { if ($reqLc -contains $m) { $hasStrong = $true; break } }
                 if (-not $hasStrong) {
                     if ($methods.Count -gt 0 -and (@($methods | Where-Object { $weakLc -contains $_ }).Count -eq $methods.Count)) {
-                        [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-AUTH-002' -Csv 'Account-Definitions-Admins' -Row $a.Row -Column 'UserPrincipalName' `
+                        [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-AUTH-002' -Csv 'Account-Definitions-Admins' -Row $a.Row -Column 'UserPrincipalName' `
                             -Message "Admin '$($a.Upn)' has only weak auth methods ($($methods -join ', ')) and no phishing-resistant method. Privileged accounts must use a strong method." `
                             -Suggestion "Register an authenticator / passkey / FIDO2 / WHfB for this admin (the required set is `$global:PIM_RequiredAuthMethods)."))
                     } else {
-                        [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-AUTH-001' -Csv 'Account-Definitions-Admins' -Row $a.Row -Column 'UserPrincipalName' `
+                        [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-AUTH-001' -Csv 'Account-Definitions-Admins' -Row $a.Row -Column 'UserPrincipalName' `
                             -Message "Admin '$($a.Upn)' has none of the required auth methods ($($required -join ', ')). Live methods: $(if ($methods.Count) { $methods -join ', ' } else { '(none registered)' })." `
                             -Suggestion "Register one of the required methods before granting privileged access."))
                     }

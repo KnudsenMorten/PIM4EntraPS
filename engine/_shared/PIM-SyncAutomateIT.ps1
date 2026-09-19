@@ -23,6 +23,7 @@
     * Compare-PimSemVer              -- -1/0/1 (pre-release < release; numeric, not string, compare)
     * Test-PimSyncUpdateNeeded       -- is Latest strictly newer than Current? (with pin gate)
     * Get-PimSyncDecision            -- the whole decision: update? which tag? rollback target?
+    * Get-PimSyncHealthState         -- smoke exit code -> healthy | unverified (skipped) | failed
     * Test-PimSyncHealthVerdict      -- turn a smoke result into pass/fail (rollback trigger)
     * Get-PimSyncRollbackPlan        -- on a failed health check, the revision to reactivate
 #>
@@ -142,17 +143,36 @@ function Get-PimSyncDecision {
 }
 
 # ---- post-update health verdict + rollback plan ---------------------------
+function Get-PimSyncHealthState {
+    <#
+      BUG-172: the hosted smoke (tests/live/Test-PimManagerHostedSmoke.ps1) ends with one of THREE
+      exit codes, and they mean three different things:
+        0 -> 'healthy'    every check that applies ran and passed
+        2 -> 'unverified' nothing failed, but a check was SKIPPED (the gate did not run in full).
+                          A skip is NOT a pass: it must never keep a new revision as "healthy".
+        anything else -> 'failed'
+      A positive -FailCount is 'failed' whatever the exit code says.
+    #>
+    param([int]$ExitCode = 0, [int]$FailCount = 0)
+    if ($FailCount -gt 0) { return 'failed' }
+    if ($ExitCode -eq 0) { return 'healthy' }
+    if ($ExitCode -eq 2) { return 'unverified' }
+    return 'failed'
+}
+
 function Test-PimSyncHealthVerdict {
     <#
       Turn a post-update health/smoke result into a boolean pass. We reuse the hosted smoke
       (tests/live/Test-PimManagerHostedSmoke.ps1) which prints "RESULT: N pass, M fail, K skip"
-      and exits non-zero on a real failure. This accepts EITHER:
-        -ExitCode  : the smoke's process exit code (0 = healthy / cleanly-skipped), or
+      and exits 0 (ran + passed), 1 (failed) or 2 (SKIPPED -- did not run in full). This accepts:
+        -ExitCode  : the smoke's process exit code, and/or
         -FailCount : the parsed fail count.
-      Healthy = exit 0 AND fail count == 0.
+      Healthy = exit 0 AND fail count == 0. Exit 2 is NOT healthy (BUG-172: this used to call a
+      skip "healthy / cleanly-skipped", because the smoke exited 0 on a skip, and the sync path kept
+      an unverified revision). Use Get-PimSyncHealthState to tell 'unverified' from 'failed'.
     #>
     param([int]$ExitCode = 0, [int]$FailCount = 0)
-    return (($ExitCode -eq 0) -and ($FailCount -le 0))
+    return ((Get-PimSyncHealthState -ExitCode $ExitCode -FailCount $FailCount) -eq 'healthy')
 }
 
 function Get-PimSyncRollbackPlan {
@@ -162,10 +182,12 @@ function Get-PimSyncRollbackPlan {
       reuses Update-PimContainers.ps1 -Rollback <revision> (instant revision reactivate).
         action : 'rollback' | 'none'
     #>
-    param([Parameter(Mandatory)][bool]$Healthy, [string]$PreviousRevision)
+    param([Parameter(Mandatory)][bool]$Healthy, [string]$PreviousRevision, [switch]$Unverified)
     if ($Healthy) { return [pscustomobject]@{ action='none'; revision=''; reason='health check passed -- keep the new revision' } }
+    # BUG-172: an unverified (skipped) check is not a pass -- the new revision is NOT kept as healthy.
+    $what = if ($Unverified) { 'health check did NOT RUN in full (skipped -- not a pass)' } else { 'health check FAILED' }
     if (-not "$PreviousRevision".Trim()) {
-        return [pscustomobject]@{ action='none'; revision=''; reason='health check FAILED but no previous revision captured -- manual rollback required' }
+        return [pscustomobject]@{ action='none'; revision=''; reason="$what but no previous revision captured -- manual rollback required" }
     }
-    return [pscustomobject]@{ action='rollback'; revision="$PreviousRevision".Trim(); reason="health check FAILED -- roll back to $PreviousRevision" }
+    return [pscustomobject]@{ action='rollback'; revision="$PreviousRevision".Trim(); reason="$what -- roll back to $PreviousRevision" }
 }

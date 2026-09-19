@@ -16,7 +16,7 @@ portal only**; those are called out below so nothing here is a fake stub.
 |-----------|------|--------|--------|
 | `entra-roles` | graph | Entra **directory roles** | **Live-tested** (145 roles listed) |
 | `entra-approle` | graph | **Generic gallery/SaaS app-role grant** — SAP, ServiceNow, Salesforce, and any enterprise app that publishes Entra app roles. Per-row `Resource` = target SP object id. This is the "100+ apps" connector. | Structure built; live-validation pending a target SP with app roles |
-| `azure-rbac` | arm | **Azure RBAC** role assignments at any ARM scope (subscription / RG / resource). Per-row `Scope`. | Structure built; live-validation pending an ARM token + writable scope |
+| `azure-rbac` | arm | **Azure RBAC** roles at any ARM scope (subscription / RG / resource), made **ELIGIBLE through PIM** (ARM role eligibility schedule request, no expiry) — never a standing role assignment. Per-row `Scope`. | Structure built; live-validation pending an ARM token + a scope where PIM eligibility can be managed |
 | `powerbi` | powerbi | Power BI / Fabric workspace roles | Structure built; pending a Power BI SP with workspace access |
 | `defender-xdr` | graph | Defender XDR Unified RBAC (once portal-activated) | Built; prereq = portal activation (no Graph activation endpoint) |
 | `intune` | graph | Intune RBAC (always-on, 10 built-in roles) | Built |

@@ -212,7 +212,9 @@ function Test-PimDownlinkAdminSynced {
     # no longer puts such a row in the bundle at all.)
     $repRaw = "$(Get-PimDownlinkValue -Object $Admin -Key 'Replicate')".Trim()
     if ($repRaw) {
-        $rm = Get-PimReplicateMode -Row $Admin -Kind 'admin'
+        # A BUNDLE row: the producer ships registry rows without ManagementMode and definition rows
+        # with ManagementMode='msp', so a row lacking the field here is a registry row (-AdminSource).
+        $rm = Get-PimReplicateMode -Row $Admin -Kind 'admin' -AdminSource Registry
         return @{ synced = ($rm.mode -eq 'Yes'); reason = "$($rm.reason)" }
     }
     if (-not $has) { return @{ synced = $true; reason = 'central registry row (MSP by construction)' } }
@@ -247,13 +249,16 @@ function Get-PimCentralAdminsFromDefinitions {
         # §71: Replicate must agree with ManagementMode, and Target=none keeps the admin MSP-local.
         # Both are decided by the shared rule; a row carrying neither reads exactly as before.
         $repRaw = "$(Get-PimDownlinkValue -Object $r -Key 'Replicate')".Trim()
-        $rm = Get-PimReplicateMode -Row $r -Kind 'admin'
+        $rm = Get-PimReplicateMode -Row $r -Kind 'admin' -AdminSource Definition
         if (($repRaw -or $mode -ieq 'msp') -and $rm.mode -ne 'Yes') {
             $notSynced.Add([ordered]@{ UserName = $un; reason = "$($rm.reason) -- not synced" }) | Out-Null
             continue
         }
         if ($mode -ine 'msp' -and -not $repRaw) {
-            $notSynced.Add([ordered]@{ UserName = $un; reason = "ManagementMode=$(if ($mode) { $mode } else { '(blank)' }) -- not synced" }) | Out-Null
+            # masterOnly marks a BLANK ManagementMode (the value empty or the field absent, as in a v1 CSV): the
+            # bundle reports it as not published, because Get-PimReplicateMode now reads it the same way (No).
+            # An explicit 'local' is the operator's own declaration and is not reported (unchanged).
+            $notSynced.Add([ordered]@{ UserName = $un; reason = "ManagementMode=$(if ($mode) { $mode } else { '(blank)' }) -- not synced"; masterOnly = (-not $mode) }) | Out-Null
             continue
         }
         if ("$(Get-PimDownlinkValue -Object $r -Key 'TargetPlatform')".Trim() -ieq 'AD') {
@@ -262,7 +267,7 @@ function Get-PimCentralAdminsFromDefinitions {
         }
         $ring = "$(Get-PimDownlinkValue -Object $r -Key 'Ring')".Trim()
         if ($ring -notmatch '^\d+$') {
-            $noRing.Add([ordered]@{ UserName = $un; reason = "ManagementMode=msp but Ring='$ring' -- no ring reaches no slave (set Ring 0/1/2)" }) | Out-Null
+            $noRing.Add([ordered]@{ UserName = $un; reason = "ManagementMode=msp but Ring='$ring' -- no ring reaches no slave (set Ring to a whole number: 0, 1, 2, ...)" }) | Out-Null
             continue
         }
         $tapLife = "$(Get-PimDownlinkValue -Object $r -Key 'TAPLifetimeHours')".Trim()
@@ -436,8 +441,13 @@ function Test-PimDownlinkRingGate {
 # -AllowedKind   : accepted payload.kind values (default 'baseline').
 # -NowUtc        : clock injection for expiry tests (default [datetime]::UtcNow).
 # -LastVersion   : anti-rollback floor (default 0; payload.version must be >=).
-# Returns @{ ok; reason; payload } -- ok=$false on any failure (never throws on a
-# bad sig/expiry/rollback; throws only on a structurally-broken doc).
+# -RevokedSigners: SEC-25 -- signer ids this tenant has revoked (its pim.Settings
+#                  'BaselineRevokedSigners'). The signer is the key that VERIFIES the
+#                  document (Get-PimBaselineDocSignerId), never its keyThumbprint claim.
+# Returns @{ ok; reason; payload; code; signer } -- ok=$false on any failure (never
+# throws on a bad sig/expiry/rollback/revoked; throws only on a structurally-broken
+# doc). `code` classifies a refusal for callers that must branch on it without
+# parsing prose: format | signature | revoked | product | kind | expired | rollback.
 # ---------------------------------------------------------------------------
 function Test-PimDownlinkBaseline {
     param(
@@ -445,12 +455,29 @@ function Test-PimDownlinkBaseline {
         [object]$PublicKey,
         [string[]]$AllowedKind = @('baseline'),
         [datetime]$NowUtc = ([datetime]::UtcNow),
-        [int64]$LastVersion = 0
+        [int64]$LastVersion = 0,
+        [AllowEmptyCollection()][string[]]$RevokedSigners = @()
     )
     $payloadB64 = "$(Get-PimDownlinkValue -Object $Doc -Key 'payloadB64')"
     $sigB64     = "$(Get-PimDownlinkValue -Object $Doc -Key 'signature')"
     if (-not $payloadB64.Trim() -or -not $sigB64.Trim()) {
-        return @{ ok = $false; reason = 'not a signed bundle (payloadB64/signature missing)'; payload = $null }
+        return @{ ok = $false; reason = 'not a signed bundle (payloadB64/signature missing)'; payload = $null; code = 'format'; signer = '' }
+    }
+    # SEC-25: the revoked-signer gate. Checked BEFORE the signature is trusted -- a revoked key is refused
+    # whether or not its signature still verifies (that is what revoking a compromised key means).
+    $signer = ''
+    if (Get-Command Get-PimBaselineDocSignerId -ErrorAction SilentlyContinue) {
+        try { $signer = "$(Get-PimBaselineDocSignerId -Doc $Doc -PublicKey $PublicKey)" } catch { $signer = '' }
+    }
+    $revokedNorm = @(@($RevokedSigners) | Where-Object { "$_".Trim() } | ForEach-Object {
+        if (Get-Command ConvertTo-PimBaselineSignerId -ErrorAction SilentlyContinue) { ConvertTo-PimBaselineSignerId -Value "$_" } else { "$_".Trim() } } | Where-Object { $_ })
+    if ($revokedNorm.Count) {
+        if (-not $signer) {
+            return @{ ok = $false; reason = 'SIGNER UNKNOWN -- the verifying key could not be identified, so the revocation list cannot be applied; refusing'; payload = $null; code = 'revoked'; signer = '' }
+        }
+        if ($revokedNorm -ccontains $signer) {
+            return @{ ok = $false; reason = "SIGNER REVOKED -- the bundle is signed by $signer, which this tenant has revoked (pim.Settings 'BaselineRevokedSigners'); nothing it signed is applied"; payload = $null; code = 'revoked'; signer = $signer }
+        }
     }
 
     $payloadBytes = $null; $sigBytes = $null
@@ -458,7 +485,7 @@ function Test-PimDownlinkBaseline {
         $payloadBytes = [Convert]::FromBase64String($payloadB64)
         $sigBytes     = [Convert]::FromBase64String($sigB64)
     } catch {
-        return @{ ok = $false; reason = "base64 decode failed: $($_.Exception.Message)"; payload = $null }
+        return @{ ok = $false; reason = "base64 decode failed: $($_.Exception.Message)"; payload = $null; code = 'format'; signer = $signer }
     }
 
     # Resolve the verifying RSA public key.
@@ -468,7 +495,7 @@ function Test-PimDownlinkBaseline {
         elseif ($PublicKey -is [System.Security.Cryptography.X509Certificates.X509Certificate2]) {
             $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($PublicKey)
         } else {
-            return @{ ok = $false; reason = 'unsupported -PublicKey type (need [RSA] or X509Certificate2)'; payload = $null }
+            return @{ ok = $false; reason = 'unsupported -PublicKey type (need [RSA] or X509Certificate2)'; payload = $null; code = 'format'; signer = $signer }
         }
     }
 
@@ -477,29 +504,33 @@ function Test-PimDownlinkBaseline {
         try {
             $ok = $rsa.VerifyData($payloadBytes, $sigBytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
         } catch {
-            return @{ ok = $false; reason = "signature verify threw: $($_.Exception.Message)"; payload = $null }
+            return @{ ok = $false; reason = "signature verify threw: $($_.Exception.Message)"; payload = $null; code = 'signature'; signer = $signer }
         }
-        if (-not $ok) { return @{ ok = $false; reason = 'SIGNATURE INVALID -- bundle tampered or signed by the wrong key'; payload = $null } }
+        if (-not $ok) { return @{ ok = $false; reason = 'SIGNATURE INVALID -- bundle tampered or signed by the wrong key'; payload = $null; code = 'signature'; signer = $signer } }
     } else {
         # No explicit key: defer to the embedded prod public cert via Test-PimBaselineDoc.
         if (-not (Get-Command Test-PimBaselineDoc -ErrorAction SilentlyContinue)) {
-            return @{ ok = $false; reason = 'no -PublicKey and Test-PimBaselineDoc (embedded cert) not loaded'; payload = $null }
+            return @{ ok = $false; reason = 'no -PublicKey and Test-PimBaselineDoc (embedded cert) not loaded'; payload = $null; code = 'signature'; signer = $signer }
         }
+        $p = $null
         try {
             $p = Test-PimBaselineDoc -Doc $Doc -AllowedKind $AllowedKind
-            # Test-PimBaselineDoc already enforced product/kind. Continue with expiry/rollback below.
-            $payloadObj = $p
-            return (Test-PimDownlinkBaselineFinish -PayloadObject $payloadObj -AllowedKind $AllowedKind -NowUtc $NowUtc -LastVersion $LastVersion)
         } catch {
-            return @{ ok = $false; reason = "embedded-cert verify failed: $($_.Exception.Message)"; payload = $null }
+            return @{ ok = $false; reason = "embedded-cert verify failed: $($_.Exception.Message)"; payload = $null; code = 'signature'; signer = $signer }
         }
+        # Test-PimBaselineDoc already enforced product/kind. Continue with expiry/rollback below.
+        $fin = Test-PimDownlinkBaselineFinish -PayloadObject $p -AllowedKind $AllowedKind -NowUtc $NowUtc -LastVersion $LastVersion
+        $fin['signer'] = $signer
+        return $fin
     }
 
     # Parse the now-trusted payload and run the shape/expiry/rollback gates.
     $payloadObj = $null
     try { $payloadObj = [System.Text.Encoding]::UTF8.GetString($payloadBytes) | ConvertFrom-Json }
-    catch { return @{ ok = $false; reason = "payload JSON parse failed: $($_.Exception.Message)"; payload = $null } }
-    return (Test-PimDownlinkBaselineFinish -PayloadObject $payloadObj -AllowedKind $AllowedKind -NowUtc $NowUtc -LastVersion $LastVersion)
+    catch { return @{ ok = $false; reason = "payload JSON parse failed: $($_.Exception.Message)"; payload = $null; code = 'format'; signer = $signer } }
+    $fin = Test-PimDownlinkBaselineFinish -PayloadObject $payloadObj -AllowedKind $AllowedKind -NowUtc $NowUtc -LastVersion $LastVersion
+    $fin['signer'] = $signer
+    return $fin
 }
 
 # Shared post-signature gates (product/kind/expiry/anti-rollback). Pure.
@@ -512,27 +543,123 @@ function Test-PimDownlinkBaselineFinish {
     )
     $p = $PayloadObject
     if ("$(Get-PimDownlinkValue -Object $p -Key 'product')" -ne 'PIM4EntraPS') {
-        return @{ ok = $false; reason = "unexpected bundle product '$(Get-PimDownlinkValue -Object $p -Key 'product')'"; payload = $null }
+        return @{ ok = $false; reason = "unexpected bundle product '$(Get-PimDownlinkValue -Object $p -Key 'product')'"; payload = $null; code = 'product' }
     }
     $kind = "$(Get-PimDownlinkValue -Object $p -Key 'kind')"
     if (@($AllowedKind) -notcontains $kind) {
-        return @{ ok = $false; reason = "unexpected bundle kind '$kind' (allowed: $($AllowedKind -join ', '))"; payload = $null }
+        return @{ ok = $false; reason = "unexpected bundle kind '$kind' (allowed: $($AllowedKind -join ', '))"; payload = $null; code = 'kind' }
     }
     $validTo = "$(Get-PimDownlinkValue -Object $p -Key 'validToUtc')"
     if ($validTo.Trim()) {
         $vt = $null
         try { $vt = [datetime]::Parse($validTo, [System.Globalization.CultureInfo]::InvariantCulture) } catch {}
         if ($vt -and $NowUtc.ToUniversalTime() -gt $vt.ToUniversalTime()) {
-            return @{ ok = $false; reason = "baseline bundle expired ($validTo)"; payload = $null }
+            return @{ ok = $false; reason = "baseline bundle expired ($validTo)"; payload = $null; code = 'expired' }
         }
     }
     $ver = 0
     $verRaw = Get-PimDownlinkValue -Object $p -Key 'version'
     if ($null -ne $verRaw -and "$verRaw".Trim()) { try { $ver = [int64]$verRaw } catch { $ver = 0 } }
     if ($ver -lt [int64]$LastVersion) {
-        return @{ ok = $false; reason = "baseline rollback refused: bundle version $ver < last-applied $LastVersion"; payload = $null }
+        return @{ ok = $false; reason = "baseline rollback refused: bundle version $ver < last-applied $LastVersion"; payload = $null; code = 'rollback' }
     }
-    return @{ ok = $true; reason = "verified (version $ver, kind $kind)"; payload = $p }
+    return @{ ok = $true; reason = "verified (version $ver, kind $kind)"; payload = $p; code = 'ok' }
+}
+
+# ---------------------------------------------------------------------------
+# SEC-25 -- THE CENTRAL KILL SWITCH ON THE PULL PATH (pure).
+#
+# The master publishes a SIGNED kind='central-kill' manifest (DESIGN 13.17) next to the bundle. It is
+# verified exactly like the bundle -- same keys, same revoked-signer list -- and an ACTIVE one stops the
+# downlink: nothing more is taken from the master while the kill stands, and the run says so, loudly,
+# naming what the manifest kills. (Applying the kills themselves is the engine kill-switch pipeline's
+# job -- Resolve-PimCentralKill -> AccountStatus flips -- and is not done here.)
+#   -Doc      : the pulled manifest, or $null when the master publishes none.
+#   -Checked  : $false when no source was consulted (e.g. a -BaselineDocPath run with no kill source) --
+#               reported as NOT CHECKED, never as "no kill".
+#   -FetchError : the transport failure text when the source could not be read (404 is "none", decided by
+#               the caller) -- that is a REFUSAL: a kill we could not read must not read as "no kill".
+# Returns @{ state = none|active|expired|invalid|unknown|notchecked; blocks; kills; reason; signer }.
+#   blocks=$true for active, invalid and unknown (fail closed); false for none, expired and notchecked.
+# ---------------------------------------------------------------------------
+function Get-PimCentralKillState {
+    param(
+        [AllowNull()][object]$Doc,
+        [bool]$Checked = $true,
+        [string]$FetchError = '',
+        [string]$NotCheckedReason = '',
+        [object]$PublicKey,
+        [AllowEmptyCollection()][string[]]$RevokedSigners = @(),
+        [datetime]$NowUtc = ([datetime]::UtcNow)
+    )
+    if ("$FetchError".Trim()) {
+        return @{ state = 'unknown'; blocks = $true; kills = @(); signer = ''
+                  reason = "CENTRAL KILL UNKNOWN -- the kill manifest could not be read ($FetchError); refusing to pull while a kill might be standing" }
+    }
+    if (-not $Checked) {
+        $why = if ("$NotCheckedReason".Trim()) { "$NotCheckedReason".Trim() } else { 'central kill NOT CHECKED -- no kill source for this run (a -BaselineDocPath run, or -CentralKillUrl none)' }
+        return @{ state = 'notchecked'; blocks = $false; kills = @(); signer = ''; reason = $why }
+    }
+    if ($null -eq $Doc) { return @{ state = 'none'; blocks = $false; kills = @(); signer = ''; reason = 'no central kill published' } }
+    $v = Test-PimDownlinkBaseline -Doc $Doc -PublicKey $PublicKey -AllowedKind @('central-kill') -NowUtc $NowUtc -RevokedSigners @($RevokedSigners)
+    if (-not $v.ok) {
+        if ("$($v.code)" -eq 'expired') {
+            return @{ state = 'expired'; blocks = $false; kills = @(); signer = "$($v.signer)"; reason = "central kill manifest present but EXPIRED -- not in force ($($v.reason))" }
+        }
+        # A manifest we cannot verify is refused -- and so is the pull. Whoever can write a bad manifest to the
+        # master's container can equally corrupt the bundle, so this costs no availability the bundle does not
+        # already cost, and it keeps "a kill we could not verify" from ever reading as "no kill".
+        return @{ state = 'invalid'; blocks = $true; kills = @(); signer = "$($v.signer)"; reason = "CENTRAL KILL MANIFEST INVALID -- $($v.reason); refusing to pull until it verifies or is withdrawn" }
+    }
+    $kills = @(@(Get-PimDownlinkValue -Object $v.payload -Key 'kills') | Where-Object { $null -ne $_ })
+    if (-not $kills.Count) {
+        return @{ state = 'none'; blocks = $false; kills = @(); signer = "$($v.signer)"; reason = 'central kill manifest verified and EMPTY -- no kill in force' }
+    }
+    $names = @($kills | ForEach-Object {
+        $u = "$(Get-PimDownlinkValue -Object $_ -Key 'upn')".Trim(); if (-not $u) { $u = "$(Get-PimDownlinkValue -Object $_ -Key 'userName')".Trim() }
+        "$u ($("$(Get-PimDownlinkValue -Object $_ -Key 'status')".Trim()))" })
+    return @{ state = 'active'; blocks = $true; kills = $kills; signer = "$($v.signer)"
+              reason = "CENTRAL KILL ACTIVE -- the master's signed kill manifest is in force ($($kills.Count) entr$(if ($kills.Count -eq 1) { 'y' } else { 'ies' }): $($names -join ', ')); this tenant takes NOTHING from the master until it is withdrawn" }
+}
+
+# ---------------------------------------------------------------------------
+# IMP-38 -- THE TEMPLATE VERSION GATE USES THE SLAVE'S **LOCAL** RING (pure).
+#
+# The template ring map (config/template-ring-map.sample.json) is written by the MASTER, and its
+# `assignments[<tenant>].<Template>.ring` / `default` would put the master in charge of which ring a
+# managed tenant is on. Every ring is LOCAL in the slave (DESIGN; operator 2026-09-18), so that half of
+# the map is IGNORED here: only `promotions` (which version the master approves FOR a ring) is read, and
+# the ring it is read for is this tenant's own -SlaveRing. A master assignment that disagrees is reported,
+# never obeyed. 📌 The gate stays INERT on the scheduled pull: downlink-job-entry passes no map, and a map
+# is armed only by an operator passing -TemplateRingMapPath/-Url to the slave-side entry scripts.
+# Returns @{ plan; ignoredMasterRing; note }.
+# ---------------------------------------------------------------------------
+function Get-PimLocalTemplateRingPlan {
+    param(
+        [Parameter(Mandatory)][object]$RingMap,
+        [Parameter(Mandatory)][string]$TenantId,
+        [Parameter(Mandatory)][int]$SlaveRing,
+        [string]$Template = 'Baseline',
+        [string]$Channel = 'managed'
+    )
+    $masterRing = $null
+    if (Get-Command Resolve-PimRingAssignment -ErrorAction SilentlyContinue) {
+        try {
+            $ma = Resolve-PimRingAssignment -Assignments (Get-PimDownlinkValue -Object $RingMap -Key 'assignments') -TenantId $TenantId `
+                      -Solution $Template -DefaultRing (Get-PimDownlinkValue -Object $RingMap -Key 'default')
+            if ($ma.Assigned) { $masterRing = [int]$ma.Ring }
+        } catch { $masterRing = $null }
+    }
+    $localAssign = [pscustomobject]@{ $TenantId = [pscustomobject]@{ $Template = [pscustomobject]@{ ring = [int]$SlaveRing } } }
+    $plan = Get-PimTemplateRingPlan -Template $Template -TenantId $TenantId -Assignments $localAssign `
+                -Promotions (Get-PimDownlinkValue -Object $RingMap -Key 'promotions') -Channel $Channel -DefaultRing $null
+    $note = "version gate keyed on this tenant's LOCAL ring $SlaveRing (the map's assignments/default are the master's and are not used)"
+    $ignored = $null
+    if ($null -ne $masterRing -and $masterRing -ne [int]$SlaveRing) {
+        $ignored = $masterRing
+        $note = "the master's map assigns ring $masterRing to this tenant -- IGNORED: the ring is local, and this tenant is on ring $SlaveRing"
+    }
+    return @{ plan = $plan; ignoredMasterRing = $ignored; note = $note }
 }
 
 # ---------------------------------------------------------------------------
@@ -681,7 +808,7 @@ function Test-PimArtifactTarget {
     $lower = { param($s) "$s".Trim().ToLowerInvariant() }
     # 'none' is checked FIRST and unconditionally: MSP-local must not be overridable by
     # another selector sitting beside it in the same expression.
-    foreach ($s in $sel) { if ((& $lower $s) -eq 'none') { return @{ match = $false; reason = 'MSP-local by declaration (target=none) -- never published' } } }
+    foreach ($s in $sel) { if ((& $lower $s) -eq 'none') { return @{ match = $false; reason = 'master tenant only by declaration (target=none) -- never replicated to managed tenants' } } }
 
     $tags = New-Object System.Collections.Generic.HashSet[string]
     foreach ($g in @($TenantTags)) { [void]$tags.Add((& $lower $g)) }
@@ -725,8 +852,11 @@ function Test-PimArtifactTarget {
 #
 # 🔒 BLANK = TODAY (v1->v2 no regression). Blank Replicate is the documented default for the row's
 # kind, and each default reproduces the behaviour before §71 byte for byte:
-#     admin       -> ManagementMode=msp => Yes (at its Ring), anything else => No; a pim.CentralAdmins
-#                    registry row (no ManagementMode field) is MSP by construction => Yes
+#     admin       -> ManagementMode=msp => Yes (at its Ring), anything else => No -- including an
+#                    Account-Definitions-Admins row with NO ManagementMode field (a v1 CSV import):
+#                    blank ManagementMode = master tenant only. Only a pim.CentralAdmins registry row
+#                    (Owner='MSP', which has no ManagementMode column) is MSP by construction => Yes,
+#                    and the CALLER says which one it holds (-AdminSource), never the row's shape.
 #     membership  -> Follow (follows its admin)
 #     group       -> Follow (included when a replicated row needs it)
 #     nesting     -> Follow (follows its role group)
@@ -765,8 +895,22 @@ function Get-PimReplicateMode {
       The EFFECTIVE Replicate of one row. Returns @{ mode = Yes|No|Follow; explicit; valid; reason }.
       `valid=$false` rows are FAIL-CLOSED to No, and the reason says why -- the validator and the PUT
       gate refuse them, but a row that slips past both must narrow, never widen.
+
+      -AdminSource (admins only) -- WHERE the admin row came from, declared by the caller:
+        Definition (default) = an Account-Definitions-Admins row (pim.Rows / a CSV / the grid). Blank
+                     ManagementMode -- the value empty OR the field absent, as in a v1 CSV -- is
+                     "master tenant only" => No, which is exactly what the bundle producer does
+                     (Get-PimCentralAdminsFromDefinitions never publishes it).
+        Registry   = a pim.CentralAdmins row (Owner='MSP'), or a bundle row the producer took from it.
+                     That table has no ManagementMode column and holds MSP admins only, so a row
+                     WITHOUT the field is MSP by construction => Yes.
+      The row's shape cannot tell the two apart (a registry row carries FirstName / DisplayName too),
+      so the signal is the caller's: only the registry probe in Select-PimBaselineBundleContent and
+      the slave-side gate over bundle rows (Test-PimDownlinkAdminSynced) pass Registry. The default is
+      the narrow reading, so a caller that forgets to say narrows -- never widens.
     #>
-    param([object]$Row, [Parameter(Mandatory)][ValidateSet('admin','membership','group','nesting','binding','resource')][string]$Kind)
+    param([object]$Row, [Parameter(Mandatory)][ValidateSet('admin','membership','group','nesting','binding','resource')][string]$Kind,
+          [ValidateSet('Definition','Registry')][string]$AdminSource = 'Definition')
     $raw = "$(Get-PimDownlinkValue -Object $Row -Key 'Replicate')".Trim()
     $norm = ''
     if ($raw) {
@@ -781,21 +925,26 @@ function Get-PimReplicateMode {
         if ($Row -is [System.Collections.IDictionary]) { $hasMm = $Row.Contains('ManagementMode') }
         elseif ($null -ne $Row) { $hasMm = [bool]$Row.PSObject.Properties['ManagementMode'] }
         $mm = "$(Get-PimDownlinkValue -Object $Row -Key 'ManagementMode')".Trim()
-        # no ManagementMode field = a pim.CentralAdmins registry row = MSP by construction
-        $mmMode = if (-not $hasMm) { 'Yes' } elseif ($mm -ieq 'msp') { 'Yes' } else { 'No' }
+        # no ManagementMode field on a REGISTRY row (pim.CentralAdmins, declared by the caller) = MSP by
+        # construction. On a definition row a missing field is blank = master tenant only.
+        $regByConstruction = (-not $hasMm) -and $AdminSource -eq 'Registry'
+        $mmMode = if ($regByConstruction) { 'Yes' } elseif ($mm -ieq 'msp') { 'Yes' } else { 'No' }
         if ($norm -eq 'Follow') {
             return @{ mode = 'No'; explicit = $true; valid = $false; reason = 'Replicate=Follow is not valid on an admin (nothing depends on an admin) -- use Yes or No' }
         }
-        if ($norm -and $hasMm -and $norm -ne $mmMode) {
+        # 2.4.378 (operator: "you decide"): a DEFINITION admin whose ManagementMode field is ABSENT (a v1 CSV) is held to the
+        # same rule as an empty one -- Replicate must agree with ManagementMode, so Replicate=Yes without ManagementMode=msp
+        # is REFUSED (fail closed), not published. Only a registry row (declared by the caller) is MSP by construction.
+        if ($norm -and ($hasMm -or $AdminSource -eq 'Definition') -and $norm -ne $mmMode) {
             $shown = if ($mm) { $mm } else { '(blank)' }
             return @{ mode = 'No'; explicit = $true; valid = $false; reason = "ManagementMode=$shown and Replicate=$norm disagree -- refused (msp goes with Yes, local/blank with No)" }
         }
         $mode = if ($norm) { $norm } else { $mmMode }
-        if ($mode -eq 'Yes' -and $isNone) { return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'MSP-local by declaration (Target=none) -- never published' } }
-        $why = if ($norm) { "Replicate=$norm" } elseif (-not $hasMm) { 'central registry row (MSP by construction)' } elseif ($mode -eq 'Yes') { 'ManagementMode=msp' } else { "ManagementMode=$(if ($mm) { $mm } else { '(blank)' }) -- not replicated" }
+        if ($mode -eq 'Yes' -and $isNone) { return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'master tenant only by declaration (Target=none) -- never published' } }
+        $why = if ($norm) { "Replicate=$norm" } elseif ($regByConstruction) { 'central registry row (MSP by construction)' } elseif ($mode -eq 'Yes') { 'ManagementMode=msp' } elseif (-not $mm) { 'ManagementMode blank -- master tenant only' } else { "ManagementMode=$mm -- not replicated" }
         return @{ mode = $mode; explicit = [bool]$norm; valid = $true; reason = $why }
     }
-    if ($isNone -and $norm -ne 'No') { return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'MSP-local by declaration (Target=none) -- never replicated' } }
+    if ($isNone -and $norm -ne 'No') { return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'master tenant only by declaration (Target=none) -- never replicated' } }
     if ($norm) {
         $why = if ($norm -eq 'No') { 'Replicate=No -- not replicated' } else { "Replicate=$norm" }
         return @{ mode = $norm; explicit = $true; valid = $true; reason = $why }
@@ -860,10 +1009,11 @@ function Test-PimReplicationRowFields {
     $errors = New-Object System.Collections.Generic.List[string]
     $warnings = New-Object System.Collections.Generic.List[string]
     if (-not $kind) { return @{ ok = $true; errors = @(); warnings = @() } }
-    $m = Get-PimReplicateMode -Row $Row -Kind $kind
+    # the only admin entity is Account-Definitions-Admins, so an admin row here is a DEFINITION row
+    $m = Get-PimReplicateMode -Row $Row -Kind $kind -AdminSource Definition
     if (-not $m.valid) { $errors.Add("$($m.reason)") | Out-Null }
     $ring = "$(Get-PimDownlinkValue -Object $Row -Key 'Ring')".Trim()
-    if ($ring -and $ring -notin @('0','1','2')) { $warnings.Add("Ring '$ring' is not 0, 1 or 2 -- it reaches no tenant") | Out-Null }
+    if ($ring -and $ring -notmatch '^\d+$') { $warnings.Add("Ring '$ring' is not a whole number -- it reaches no tenant") | Out-Null }   # DOC-16 a vs c (2.4.371): any whole number is a ring
     $tgt = "$(Get-PimDownlinkValue -Object $Row -Key 'Target')".Trim()
     if ($tgt) {
         $sel = Test-PimAdminTargetSelector -Target $tgt -KnownTags @($KnownTags) -TagsKnown:([bool]$TagsKnown)
@@ -942,7 +1092,7 @@ function Test-PimReplicationWriteAllowed {
 function Select-PimBaselineBundleContent {
     <#
       §71.6 -- WHAT GOES INTO THE ONE SIGNED BUNDLE (the producer's decision, as a PURE function so it
-      is testable offline and shared with the Manager's reach preview). setup/New-PimBaselineBundle.ps1
+      is testable offline and shared with the Manager's reach preview). Get-PimBaselineBundlePayload (PIM-BaselinePublish.ps1)
       does the SQL reads and the signing; this decides the rows.
 
       🔒 BYTE-FOR-BYTE FOR BLANK DATA. Field lists, key order and sort order are the pre-§71 producer's
@@ -986,7 +1136,8 @@ function Select-PimBaselineBundleContent {
         $rep = ''
         if ($RegistryReplicate.ContainsKey($un.ToLowerInvariant())) { $rep = "$($RegistryReplicate[$un.ToLowerInvariant()])" }
         $probe = [pscustomobject]@{ Replicate = $rep; Target = "$(Get-PimDownlinkValue -Object $r -Key 'Target')" }
-        $rm = Get-PimReplicateMode -Row $probe -Kind 'admin'
+        # a pim.CentralAdmins registry row -- MSP by construction unless its own Replicate / Target say otherwise
+        $rm = Get-PimReplicateMode -Row $probe -Kind 'admin' -AdminSource Registry
         if ($rm.mode -ne 'Yes') { $notPublished.Add([ordered]@{ kind = 'admin'; name = $un; reason = "$($rm.reason)" }) | Out-Null; continue }
         $rowList.Add($r) | Out-Null
     }
@@ -1003,6 +1154,9 @@ function Select-PimBaselineBundleContent {
     }
     foreach ($x in @($defAdmins.notSynced)) {
         if ("$($x.reason)" -match 'Replicate|Target=none|disagree') { $notPublished.Add([ordered]@{ kind = 'admin'; name = "$($x.UserName)"; reason = "$($x.reason)" }) | Out-Null }
+        # A definition admin with a BLANK ManagementMode (no Replicate) stays on the master, and Get-PimReplicateMode
+        # says No for it too -- listed, so "not replicated" is never silent (a v1 CSV admin has no ManagementMode).
+        elseif ($x.Contains('masterOnly') -and $x['masterOnly']) { $notPublished.Add([ordered]@{ kind = 'admin'; name = "$($x.UserName)"; reason = 'ManagementMode blank -- master tenant only' }) | Out-Null }
     }
 
     # 2. memberships of the published admins
@@ -1383,6 +1537,11 @@ function New-PimAcceptanceRecord {
         # WHAT ARRIVED
         baselineVersion  = $Plan.baselineVersion
         assignmentRing   = $Plan.ring
+        # BUG-175: THE SLAVE REPORTS ITS OWN RING. The ring that gated this run is the slave's LOCAL -SlaveRing (its job
+        # argument) -- authoritative. The master's platform.Tenants.Ring is only the master's copy and can drift; this
+        # field is what lets a reader of the record (and a future uplink) see the value that actually decided.
+        slaveRing        = $Plan.ring
+        slaveRingSource  = 'local'
         # THE OPERATOR'S GATE (RING-1 plane 2)
         ringAction       = $ringAction
         ring             = $ringNumber
@@ -2041,15 +2200,24 @@ function Get-PimDownlinkPlan {
         # IMP-13. The SLAVE's own admin naming prefixes (its AdminAccountPatterns). Absent =>
         # recognisability is NOT evaluated and the plan says so -- it is never assumed fine.
         # Available in S6 (the downlink runs inside the slave); typically unknown master-side.
-        [string[]]$SlaveAdminPrefixes = @()
+        [string[]]$SlaveAdminPrefixes = @(),
+        # SEC-25: the signer ids THIS tenant has revoked (its pim.Settings). A revoked signer is refused.
+        [AllowEmptyCollection()][string[]]$RevokedSigners = @(),
+        # SEC-25: a Get-PimCentralKillState result. blocks=$true (active / invalid / unknown) refuses the plan.
+        [object]$CentralKill
     )
     $ctx = Resolve-PimScenarioContext -Scenario $Scenario
     if (-not [bool]$ctx.syncAdminsPermissions) {
         return @{ ok = $false; reason = "scenario $($ctx.id) is not a managed/sync scenario (syncAdminsPermissions=false)"; scenarioId = "$($ctx.id)"; admins = @(); sync = $null; content = $null; baselineVersion = 0; verify = $null }
     }
 
-    # 1) verify the pulled baseline (sig + product/kind + expiry + anti-rollback).
-    $verify = Test-PimDownlinkBaseline -Doc $Doc -PublicKey $PublicKey -AllowedKind @('baseline') -NowUtc $NowUtc -LastVersion $LastVersion
+    # 0) SEC-25: the central kill switch. Checked FIRST -- while a kill stands nothing is taken from the master.
+    if ($null -ne $CentralKill -and [bool](Get-PimDownlinkValue -Object $CentralKill -Key 'blocks')) {
+        return @{ ok = $false; reason = "$(Get-PimDownlinkValue -Object $CentralKill -Key 'reason')"; scenarioId = "$($ctx.id)"; ring = $SlaveRing; admins = @(); sync = $null; content = $null; baselineVersion = 0; verify = $null; centralKill = $CentralKill }
+    }
+
+    # 1) verify the pulled baseline (sig + revoked signer + product/kind + expiry + anti-rollback).
+    $verify = Test-PimDownlinkBaseline -Doc $Doc -PublicKey $PublicKey -AllowedKind @('baseline') -NowUtc $NowUtc -LastVersion $LastVersion -RevokedSigners @($RevokedSigners)
     if (-not $verify.ok) {
         return @{ ok = $false; reason = "baseline verify failed: $($verify.reason)"; scenarioId = "$($ctx.id)"; ring = $SlaveRing; admins = @(); sync = $null; content = $null; baselineVersion = 0; verify = $verify }
     }
@@ -2181,6 +2349,11 @@ function Get-PimDownlinkPlan {
         $fromPayload = Get-PimDownlinkValue -Object $payload -Key 'assignments'
         if ($null -ne $fromPayload) { $srcAssign = @($fromPayload) }
     }
+    # 🔴 REQ-M (2.4.376): a bundle with group DEFINITIONS but no memberships ("assignments": [] -- which
+    # Get-PimDownlinkValue unrolls to $null) skipped the whole definitions plan below, so a Replicate=Yes
+    # group, nesting or binding -- a §71 SEED that stands on its own -- reached NO tenant while the master's
+    # preview said "0 of N". No memberships is an empty set, not "no projection".
+    if ($null -eq $srcAssign -and $null -ne (Get-PimDownlinkValue -Object $payload -Key 'definitions')) { $srcAssign = @() }
     # roles: same two narrowings, applied BEFORE the relationship policy so the plan can
     # tell "the customer declined role changes" from "the policy denied this tag".
     $roleClass = Test-PimDownlinkClassAllowed -Class 'roles' -BlockedCapabilities $BlockedCapabilities
@@ -2467,6 +2640,57 @@ function Get-PimScenarioRunPlan {
 # the admins IN the slave). The downlink only stages the ring's signed baseline.
 # =============================================================================
 
+# SEC-25 -- FETCH the master's signed central-kill manifest for the pull (thin I/O; the verdict is the pure
+# Get-PimCentralKillState). Where it lives: -CentralKillUrl, else the SIBLING of the bundle URL
+# (<container>/central-kill.json -- the same public-but-signed / private-endpoint transport, DESIGN 13.7).
+#   * 404          -> @{ checked = $true;  doc = $null }  (the master publishes no kill: none in force)
+#   * other failure-> @{ checked = $true;  error = '...' } (UNKNOWN -> the pull refuses: fail closed)
+#   * 'none', or no URL to derive one from -> @{ checked = $false } (reported NOT CHECKED, loudly)
+# -Fetcher is a test seam: { param($url, $headers) <parsed doc>; throw with .Exception.Response.StatusCode on HTTP errors }.
+function Get-PimCentralKillSource {
+    param(
+        [string]$CentralKillUrl,
+        [string]$BaselineUrl,
+        [string]$AccessToken,
+        [scriptblock]$Fetcher
+    )
+    $u = "$CentralKillUrl".Trim()
+    if ($u -ieq 'none') { return @{ checked = $false; doc = $null; error = ''; url = '' } }
+    $derived = $false
+    if (-not $u -and "$BaselineUrl".Trim()) {
+        $derived = $true
+        $b = ("$BaselineUrl".Trim() -replace '[?#].*$', '')
+        $slash = $b.LastIndexOf('/')
+        if ($slash -gt 8) { $u = $b.Substring(0, $slash + 1) + 'central-kill.json' }
+    }
+    if (-not $u) { return @{ checked = $false; doc = $null; error = ''; url = '' } }
+    if (-not $Fetcher) { $Fetcher = { param($url, $headers) Invoke-RestMethod -Method GET -Uri $url -Headers $headers -ErrorAction Stop } }
+    $headers = @{ 'x-ms-version' = '2021-08-06' }
+    if ("$AccessToken".Trim()) { $headers['Authorization'] = "Bearer $AccessToken" }
+    try {
+        $raw = & $Fetcher $u $headers
+        $doc = $raw
+        if ($raw -is [string]) { $br = $raw.IndexOf('{'); if ($br -gt 0) { $raw = $raw.Substring($br) }; $doc = $raw | ConvertFrom-Json }
+        return @{ checked = $true; doc = $doc; error = ''; url = $u }
+    } catch {
+        $code = 0
+        try { $resp = $_.Exception.Response; if ($resp) { $code = [int]$resp.StatusCode } } catch { $code = 0 }
+        if ($code -eq 404) { return @{ checked = $true; doc = $null; error = ''; url = $u } }
+        # 🪤 MEASURED LIVE on RIDE, 2026-09-18 (2.4.370): the DERIVED sibling of a bundle URL on a store that is NOT
+        # publicly readable answers 401/403. That is not "a kill might be standing". It is "nobody configured a
+        # kill location this identity can read", and it refused every pull. A location the operator did not
+        # configure is reported NOT CHECKED, loudly, with the way to enforce it. An EXPLICIT -CentralKillUrl
+        # (PIM_CentralKillUrl) stays strictly fail-closed on any non-404 failure.
+        if ($derived -and ($code -eq 401 -or $code -eq 403)) {
+            return @{ checked = $false; doc = $null; error = ''; url = $u
+                      note = "central kill NOT CHECKED -- the default location $($u) answered HTTP $code (the bundle store is not publicly readable, and the bundle link does not cover the kill manifest). Set PIM_CentralKillUrl to a location this job can read to enforce the check." }
+        }
+        $m = "$($_.Exception.Message)"
+        return @{ checked = $true; doc = $null; url = $u
+                  error = "GET $($u) failed$(if ($code) { " (HTTP $code)" }): $($m.Substring(0, [Math]::Min(300, $m.Length)))" }
+    }
+}
+
 # Invoke-PimManagedDownlink -- the ring-gated master->managed admin/permission
 # downlink for ONE managed tenant. Verifies + stages the sync files (pure plan),
 # then (unless -WhatIfMode) applies into the slave by composing Invoke-PimMspFanout.
@@ -2536,10 +2760,56 @@ function Invoke-PimManagedDownlink {
         # ('would remove') and withdrawn only with this opt-in, inside the removal budget. Declared
         # here AND on Sync-PimMasterToSlave -- PowerShell binds only declared names.
         [switch]$AllowRetraction,
+        # SEC-25: where the master's signed central-kill manifest came from, as the entry script found it:
+        # @{ checked = $bool; doc = <manifest or $null>; error = '<transport failure>' }. Unbound => the kill
+        # is reported NOT CHECKED (never "no kill"). Verified here, against THIS tenant's revoked signers.
+        [object]$CentralKillSource,
         [switch]$WhatIfMode = $true
     )
+    # 0) SEC-24 / SEC-25 -- THIS TENANT'S TRUST STATE, from its OWN store (pim.Settings; never a file).
+    #    * the anti-rollback floor: the last bundle version this tenant APPLIED. The effective floor is the
+    #      higher of it and -LastVersion, so an older signed bundle that has not expired is refused.
+    #    * the revoked signers: a bundle (or kill manifest) signed by one of them is refused.
+    #    🔴 Before this, the scheduled pull passed -LastVersion 0 all the way down and the only floor that
+    #    existed was a FILE the container lost on every execution -- anti-rollback did nothing, and a
+    #    compromised signing key could not be revoked at all.
+    #    A store that cannot be READ is a refusal: an unknown floor is not floor 0.
+    $trustFloor = [int64]0
+    $revoked = @()
+    $trustRead = $false
+    if ("$SlaveStoreConnectionString".Trim()) {
+        try {
+            $trustFloor = [int64](Get-PimBaselineAppliedVersion -ConnectionString $SlaveStoreConnectionString)
+            $revoked = @(Get-PimBaselineRevokedSignerIds -ConnectionString $SlaveStoreConnectionString)
+            $trustRead = $true
+        } catch {
+            $msg = "REFUSED: could not read this tenant's trust state (anti-rollback floor / revoked signers) from its store: $($_.Exception.Message)"
+            Write-Host "[downlink] $msg" -ForegroundColor Red
+            return ([pscustomobject]@{ ok = $false; reason = $msg; plan = $null; staged = @(); fanout = $null; slaveRing = $SlaveRing; slaveRingSource = 'local' })
+        }
+    }
+    $effFloor = [int64]$LastVersion
+    if ($trustFloor -gt $effFloor) { $effFloor = $trustFloor }
+    if ($trustRead) {
+        Write-Host ("[downlink] trust: anti-rollback floor v{0} (store v{1}, -LastVersion v{2}); {3} revoked signer(s)" -f $effFloor, $trustFloor, $LastVersion, @($revoked).Count) -ForegroundColor DarkGray
+    } else {
+        Write-Host ("[downlink] trust: NO slave store -- the anti-rollback floor is only -LastVersion v{0} and NO revoked-signer list was read; nothing from this bundle is applied to a store on this run" -f $LastVersion) -ForegroundColor Yellow
+    }
+    # SEC-25: the central kill, verified against the same keys + revoked list as the bundle.
+    $kill = $null
+    if ($PSBoundParameters.ContainsKey('CentralKillSource') -and $null -ne $CentralKillSource) {
+        $kc = Get-PimDownlinkValue -Object $CentralKillSource -Key 'checked'
+        $kill = Get-PimCentralKillState -Doc (Get-PimDownlinkValue -Object $CentralKillSource -Key 'doc') `
+                    -Checked ($null -eq $kc -or [bool]$kc) -FetchError "$(Get-PimDownlinkValue -Object $CentralKillSource -Key 'error')" `
+                    -NotCheckedReason "$(Get-PimDownlinkValue -Object $CentralKillSource -Key 'note')" `
+                    -PublicKey $PublicKey -RevokedSigners @($revoked) -NowUtc $NowUtc
+    } else {
+        $kill = Get-PimCentralKillState -Doc $null -Checked $false
+    }
+    Write-Host "[downlink] $($kill.reason)" -ForegroundColor $(if ($kill.blocks) { 'Red' } elseif ($kill.state -in @('notchecked', 'expired')) { 'Yellow' } else { 'DarkGray' })
+
     # 1) PURE plan: verify + ring-filter + resolve paths + build content.
-    $planArgs = @{}
+    $planArgs = @{ RevokedSigners = @($revoked); CentralKill = $kill }
     if ($PSBoundParameters.ContainsKey('RingPlan') -and $null -ne $RingPlan) { $planArgs['RingPlan'] = $RingPlan }
     if ($PSBoundParameters.ContainsKey('BaselineAssignments') -and $null -ne $BaselineAssignments) { $planArgs['BaselineAssignments'] = $BaselineAssignments }
     if ($PSBoundParameters.ContainsKey('SlaveGroupTags') -and $null -ne $SlaveGroupTags) { $planArgs['SlaveGroupTags'] = $SlaveGroupTags }
@@ -2553,7 +2823,7 @@ function Invoke-PimManagedDownlink {
     if ($PSBoundParameters.ContainsKey('SlaveAdminPrefixes') -and $null -ne $SlaveAdminPrefixes) { $planArgs['SlaveAdminPrefixes'] = $SlaveAdminPrefixes }
     $plan = Get-PimDownlinkPlan -Scenario $Scenario -Doc $Doc -PublicKey $PublicKey `
         -BaselineAdmins $BaselineAdmins -TenantId $TenantId -SlaveRing $SlaveRing `
-        -CentralRoot $CentralRoot -LocalRoot $LocalRoot -NowUtc $NowUtc -LastVersion $LastVersion @planArgs
+        -CentralRoot $CentralRoot -LocalRoot $LocalRoot -NowUtc $NowUtc -LastVersion $effFloor @planArgs
     if (-not $plan.ok) {
         Write-Host "[downlink] REFUSED: $($plan.reason)" -ForegroundColor Red
         # 🔑 A REFUSAL IS THE CASE THE OPERATOR MOST NEEDS TO SEE, so it is recorded on the way out
@@ -2571,7 +2841,8 @@ function Invoke-PimManagedDownlink {
             -BlockedCapabilities $BlockedCapabilities -NowUtc $NowUtc -WhatIfMode:$WhatIfMode
         $refPath = $null
         if ("$refFolder".Trim()) { $refPath = Write-PimAcceptanceRecord -Record $refRecord -Folder $refFolder }
-        return ([pscustomobject]@{ ok = $false; reason = $plan.reason; plan = $plan; staged = @(); fanout = $null; acceptance = $refRecord; acceptancePath = $refPath })
+        return ([pscustomobject]@{ ok = $false; reason = $plan.reason; plan = $plan; staged = @(); fanout = $null; acceptance = $refRecord; acceptancePath = $refPath
+                                   slaveRing = $SlaveRing; slaveRingSource = 'local'; trust = @{ floor = $effFloor; storeFloor = $trustFloor; revokedSigners = @($revoked).Count; read = $trustRead; centralKill = $kill } })
     }
     Write-Host "[downlink] $($plan.reason)" -ForegroundColor Cyan
 
@@ -2658,7 +2929,12 @@ function Invoke-PimManagedDownlink {
         # Resolve it from the ambient tenant when we are running inside it (S6), and REFUSE
         # rather than guess: a wrong domain creates accounts nobody can sign in to and
         # memberships that resolve to nothing.
-        $dom = "$SlaveDefaultDomain".Trim()
+        # 🔑 REQ-T (2.4.377): THIS TENANT'S OWN "Admin account domain" SETTING DECIDES, like every slave-side setting
+        # (ring included, DESIGN). The master's suffix is never carried: a replicated admin is <UserName>@<the domain
+        # THIS tenant chose>, and only when it chose none (blank = default domain, the v1 behaviour) do -SlaveDefaultDomain
+        # and then the ambient default domain apply.
+        $dom = "$(Get-PimSlaveAdminUpnDomain -ConnectionString $SlaveStoreConnectionString)".Trim()
+        if (-not $dom) { $dom = "$SlaveDefaultDomain".Trim() }
         if (-not $dom -and (Get-Command Get-PimTargetDefaultDomain -ErrorAction SilentlyContinue)) {
             try { $dom = "$(Get-PimTargetDefaultDomain)".Trim() } catch { $dom = '' }
         }
@@ -2714,6 +2990,30 @@ function Invoke-PimManagedDownlink {
         Write-Host "[downlink] $(@($plan.assignments).Count) role assignment(s) projected but NOT applied: no -SlaveStoreConnectionString supplied (staged to file only)." -ForegroundColor Yellow
     }
 
+    # SEC-24 -- RECORD THE APPLIED VERSION as this tenant's new anti-rollback floor (its OWN pim.Settings).
+    # Only after a real apply into the store (not WhatIf), and only when no apply step failed: a floor raised
+    # over a failed apply would mark a version as applied that is not. Monotonic + read back (Set-PimBaselineApplied).
+    # 🔒 A floor that cannot be RECORDED fails the run: the next pull would otherwise still accept the older bundle
+    # this one superseded, and a green run is the one nobody re-reads.
+    $floorRecorded = $null
+    if (-not $WhatIfMode -and $trustRead -and [int64]$plan.baselineVersion -gt 0) {
+        $applyFailed = @(@($adminApply, $defApply, $assignApply) | Where-Object { $null -ne $_ -and -not [bool]$_.ok })
+        if ($applyFailed.Count) {
+            Write-Host "[downlink] anti-rollback floor NOT advanced: $($applyFailed.Count) apply step(s) failed, so v$($plan.baselineVersion) is not recorded as applied" -ForegroundColor Yellow
+        } else {
+            try {
+                $floorRecorded = Set-PimBaselineApplied -ConnectionString $SlaveStoreConnectionString -Version ([int64]$plan.baselineVersion) `
+                                     -SignerId "$($plan.verify.signer)" -TenantId $TenantId
+                if ($floorRecorded.changed) { Write-Host "[downlink] anti-rollback floor raised v$($floorRecorded.previous) -> v$($floorRecorded.version) (pim.Settings)" -ForegroundColor DarkGray }
+            } catch {
+                $msg = "APPLIED, but the anti-rollback floor could NOT be recorded ($($_.Exception.Message)) -- an older signed bundle would still be accepted on the next pull"
+                Write-Host "[downlink] $msg" -ForegroundColor Red
+                return ([pscustomobject]@{ ok = $false; reason = $msg; plan = $plan; staged = @($staged.ToArray()); fanout = $fanout; admins = $adminApply; definitions = $defApply; assignments = $assignApply
+                                           slaveRing = $SlaveRing; slaveRingSource = 'local'; trust = @{ floor = $effFloor; storeFloor = $trustFloor; revokedSigners = @($revoked).Count; read = $trustRead; centralKill = $kill; recorded = $null } })
+            }
+        }
+    }
+
     # MSP-3 step 5 -- record what the two gates DECIDED, so the operator can tell a customer who
     # declined from a ring that held from a tenant that has simply stopped running. Emitted on
     # every managed run, WhatIf included (a plan is a decision too, and it is flagged as such in
@@ -2725,7 +3025,26 @@ function Invoke-PimManagedDownlink {
         $acceptancePath = Write-PimAcceptanceRecord -Record $acceptance -Folder $plan.sync.tenantFolder
     }
 
-    return ([pscustomobject]@{ ok = $true; reason = $plan.reason; plan = $plan; staged = @($staged.ToArray()); fanout = $fanout; admins = $adminApply; definitions = $defApply; assignments = $assignApply; acceptance = $acceptance; acceptancePath = $acceptancePath })
+    # 🔴 FAIL CLOSED ON A FAILED APPLY (2026-09-18). This used to return ok=$true whatever the admin / group / role apply
+    # returned, so a pull whose account apply FAILED logged "DOWNLINK APPLIED" and the scheduled job exited 0 -- a
+    # red step inside a green run, the shape nobody re-reads. A run with any failed apply step is now NOT ok and says
+    # which steps failed (partial = something else did apply); the caller (Invoke-PimScenarioDeploy) stops there.
+    $failedSteps = New-Object System.Collections.Generic.List[string]
+    foreach ($__ap in @(@('admins', $adminApply), @('groups', $defApply), @('roles', $assignApply))) {
+        if ($null -ne $__ap[1] -and -not [bool]$__ap[1].ok) { $failedSteps.Add("$($__ap[0]): $($__ap[1].detail)") | Out-Null }
+    }
+    if ($failedSteps.Count) {
+        $appliedCount = @(@($adminApply, $defApply, $assignApply) | Where-Object { $null -ne $_ -and [bool]$_.ok }).Count
+        $msg = "APPLY FAILED ($($failedSteps.Count) step(s)$(if ($appliedCount) { "; PARTIAL -- $appliedCount other step(s) applied" })): $($failedSteps.ToArray() -join ' | ')"
+        Write-Host "[downlink] $msg" -ForegroundColor Red
+        return ([pscustomobject]@{ ok = $false; partial = [bool]$appliedCount; failedSteps = @($failedSteps.ToArray()); reason = $msg; plan = $plan; staged = @($staged.ToArray()); fanout = $fanout
+                                   admins = $adminApply; definitions = $defApply; assignments = $assignApply; acceptance = $acceptance; acceptancePath = $acceptancePath
+                                   slaveRing = $SlaveRing; slaveRingSource = 'local'; trust = @{ floor = $effFloor; storeFloor = $trustFloor; revokedSigners = @($revoked).Count; read = $trustRead; centralKill = $kill; recorded = $floorRecorded } })
+    }
+
+    # BUG-175: slaveRing is the LOCAL ring that gated this run (authoritative), reported back in the result.
+    return ([pscustomobject]@{ ok = $true; partial = $false; failedSteps = @(); reason = $plan.reason; plan = $plan; staged = @($staged.ToArray()); fanout = $fanout; admins = $adminApply; definitions = $defApply; assignments = $assignApply; acceptance = $acceptance; acceptancePath = $acceptancePath
+                               slaveRing = $SlaveRing; slaveRingSource = 'local'; trust = @{ floor = $effFloor; storeFloor = $trustFloor; revokedSigners = @($revoked).Count; read = $trustRead; centralKill = $kill; recorded = $floorRecorded } })
 }
 
 # ---------------------------------------------------------------------------
@@ -2747,10 +3066,8 @@ function Invoke-PimManagedDownlink {
 #
 # 📌 OWNER IS THE PROJECT'S EXISTING PROVENANCE VOCABULARY -- do not invent another.
 # `Owner` = MSP | Local is the documented split (docs/REQUIREMENTS.md s4 + s19,
-# sql/local-schema.sql, sql/platform-schema.sql) and it is already implemented the
-# same way where the container merges a pulled baseline with the local store:
-# Start-PimEngineContainer.ps1:107-108 stamps baseline rows Owner='MSP' and
-# pim.LocalAdmins rows Owner='Local'. Crucially the tag is PROVENANCE, NOT A GATE --
+# sql/platform-schema.sql; the retired local store pim.LocalAdmins was Owner='Local'
+# provenance). Crucially the tag is PROVENANCE, NOT A GATE --
 # "local plane fully autonomous; Owner tag = provenance not a gate" (s4) -- which is
 # exactly how it is used here: it scopes what the SYNC may retract, and constrains
 # the customer not at all.
@@ -3070,6 +3387,25 @@ function Get-PimDownlinkRetractionBudget {
 # slave resolves the recipient exactly as the master does. Nothing here can compensate for a slave that cannot send mail
 # at all -- that is the sender-mailbox half of the same gap.
 # ---------------------------------------------------------------------------
+function Get-PimSlaveAdminUpnDomain {
+    # REQ-T: the managed tenant's OWN "Admin account domain" -- the naming key AdminAccountUpnSuffix in ITS store's
+    # pim.Settings['NamingConventions'] (a key stored as its own row wins). '' when unset or unreadable: the caller
+    # falls back to the default domain, it never guesses one. PURE apart from the one settings read.
+    param([string]$ConnectionString)
+    if (-not "$ConnectionString".Trim() -or -not (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) { return '' }
+    $v = ''
+    try {
+        $own = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'AdminAccountUpnSuffix'
+        if ($own -is [string]) { $v = $own }
+        if (-not "$v".Trim()) {
+            $nc = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'NamingConventions'
+            if ($nc -is [string]) { try { $nc = $nc | ConvertFrom-Json } catch { $nc = $null } }
+            if ($nc) { $v = if ($nc -is [System.Collections.IDictionary]) { "$($nc['AdminAccountUpnSuffix'])" } else { "$($nc.AdminAccountUpnSuffix)" } }
+        }
+    } catch { return '' }
+    return "$v".Trim().TrimStart('@')
+}
+
 function Invoke-PimDownlinkAdminApply {
     [CmdletBinding()]
     param(
@@ -3282,6 +3618,8 @@ function Sync-PimMasterToSlave {
         [switch]$AllowFullPrune,
         # §71: declared, or @PSBoundParameters could never carry the retraction opt-in through.
         [switch]$AllowRetraction,
+        # SEC-25: the central-kill source -- declared for the same reason (PowerShell binds only declared names).
+        [object]$CentralKillSource,
         [switch]$WhatIfMode = $true
     )
     Invoke-PimManagedDownlink @PSBoundParameters
@@ -3340,6 +3678,8 @@ function Invoke-PimScenarioDeploy {
         # (PIM_DOWNLINK_ALLOW_RETRACTION=true). Default OFF: retraction stays report-first, and ON is still capped by the
         # removal budget inside the apply functions.
         [switch]$AllowRetraction,
+        # SEC-25: the master's central-kill source (@{ checked; doc; error }), forwarded to the orchestrator.
+        [object]$CentralKillSource,
         [datetime]$NowUtc = ([datetime]::UtcNow),
         [int64]$LastVersion = 0,
         [switch]$WhatIfMode = $true
@@ -3427,6 +3767,7 @@ function Invoke-PimScenarioDeploy {
             if ($PSBoundParameters.ContainsKey('BlockedCapabilities') -and $null -ne $BlockedCapabilities) { $dlPass['BlockedCapabilities'] = $BlockedCapabilities }
             if ($PSBoundParameters.ContainsKey('SlaveAdminPrefixes') -and $null -ne $SlaveAdminPrefixes) { $dlPass['SlaveAdminPrefixes'] = $SlaveAdminPrefixes }
             if ($AllowRetraction) { $dlPass['AllowRetraction'] = $true }   # 71.14: only an explicit ON is forwarded
+            if ($PSBoundParameters.ContainsKey('CentralKillSource') -and $null -ne $CentralKillSource) { $dlPass['CentralKillSource'] = $CentralKillSource }
             $dl = Invoke-PimManagedDownlink -Scenario $Scenario -Doc $Doc -PublicKey $PublicKey `
                 -BaselineAdmins $BaselineAdmins -TenantId $TenantId -SlaveRing $SlaveRing `
                 -CentralRoot $CentralRoot -LocalRoot $LocalRoot -SqlServer $SqlServer -SqlDatabase $SqlDatabase `

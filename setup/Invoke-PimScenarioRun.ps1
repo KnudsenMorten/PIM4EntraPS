@@ -30,22 +30,32 @@
     Forwarded to Invoke-PimEngineCore (default All / Delta).
 
 .PARAMETER TenantId / SlaveRing / BaselineDocPath / BaselineUrl / BaselineAccessToken
-    Managed (S5/S6) downlink inputs -- the signed baseline + the slave tenant/ring.
+    Managed (S5/S6) downlink inputs -- the signed baseline + the slave tenant and its OWN
+    ring. -SlaveRing is LOCAL to the slave and authoritative (0..2, default 2); the master's
+    platform.Tenants.Ring is only the master's copy and is never read here.
+
+.PARAMETER CentralKillUrl
+    SEC-25: where the master's signed central-kill manifest is read from. Default: the
+    sibling of -BaselineUrl (<container>/central-kill.json). 'none' disables the check
+    (reported NOT CHECKED on every run). A 404 means no kill is published.
 
 .PARAMETER CentralRoot / LocalRoot / SqlServer / SqlDatabase
-    Staging roots + the platform registry (defaults from env / .\SQLEXPRESS).
+    Staging roots + the store (defaults from env PIM_SqlServer / PIM_SqlDatabase). There is
+    NO local default: without a SQL server the run is REFUSED (BUG-178; SQL Express is not
+    used, anywhere).
 
 .PARAMETER WhatIfMode
     Default ON: plan/preview, no live writes. -WhatIfMode:$false applies.
 
 .EXAMPLE
     # single-tenant (S1): engine apply only.
-    .\Invoke-PimScenarioRun.ps1 -Scenario S1 -WhatIfMode:$false
+    .\Invoke-PimScenarioRun.ps1 -Scenario S1 -SqlServer <server>.database.windows.net -WhatIfMode:$false
 
 .EXAMPLE
-    # managed local (S6): downlink-sync then engine apply.
-    .\Invoke-PimScenarioRun.ps1 -Scenario S6 -TenantId <tenant-id-2linkit> -SlaveRing 2 `
-        -BaselineDocPath C:\TMP\baseline-latest.json -WhatIfMode:$false
+    # managed local (S6), inside the managed tenant: downlink-sync then engine apply.
+    .\Invoke-PimScenarioRun.ps1 -Scenario S6 -TenantId <managed-tenant-id> -SlaveRing 2 `
+        -SqlServer <server>.database.windows.net `
+        -BaselineUrl https://<master-store>.blob.core.windows.net/baselines/baseline-latest.json -WhatIfMode:$false
 #>
 [CmdletBinding()]
 param(
@@ -59,6 +69,8 @@ param(
     [string]$BaselineDocPath,
     [string]$BaselineUrl,
     [string]$BaselineAccessToken,
+    # SEC-25: the master's signed central-kill manifest. Default = the bundle's sibling central-kill.json.
+    [string]$CentralKillUrl = $env:PIM_CentralKillUrl,
 
     [string]$CentralRoot = $env:PIM_SyncRootCentral,
     [string]$LocalRoot   = $env:PIM_SyncRootLocal,
@@ -92,6 +104,8 @@ param(
     # report-only ("WOULD REMOVE ..."); ON removes what no longer reaches this tenant, still within the removal budget.
     [switch]$AllowRetraction,
 
+    # SEC-24: an explicit EXTRA anti-rollback floor. The floor that matters is read by the orchestrator from this
+    # tenant's own pim.Settings (the last APPLIED version) and always applies; the higher of the two wins.
     [int64]$LastVersion = 0,
     [switch]$WhatIfMode = $true
 )
@@ -154,7 +168,13 @@ if ($env:PIM_ClientId -and -not $global:PIM_ClientId) {
     Write-Host '[scenario-run] identity: no PIM_ClientId -- Graph calls in this process will use the MANAGED IDENTITY, which may hold no app-roles.' -ForegroundColor Yellow
 }
 
-if (-not $SqlServer)   { $SqlServer = '.\SQLEXPRESS' }
+# 🔴 BUG-178 -- NO `.\SQLEXPRESS` DEFAULT (operator 2026-08-28: "SQL Express is not used, anywhere"). This line used
+# to set it BEFORE calling the downlink, which defeated the orchestrator's own refusal (PIM-Downlink.ps1, the S5
+# fan-out) -- the refusal checked for an empty server, and the runner made sure it never was. Same class as BUG-78
+# (PIM-ScenarioProfile.ps1): a silent default that outranks the missing configuration it should have reported.
+if (-not "$SqlServer".Trim()) {
+    throw 'REFUSED: no SQL server configured -- pass -SqlServer or set PIM_SqlServer to the Azure SQL FQDN (<server>.database.windows.net). There is no local default: SQL Express is not a store this product uses.'
+}
 if (-not $SqlDatabase) { $SqlDatabase = 'PimPlatform' }
 $global:PIM_SqlServer   = $SqlServer
 $global:PIM_SqlDatabase = $SqlDatabase
@@ -225,12 +245,15 @@ if ("$TemplateRingMapPath".Trim()) {
     else { $srRingMap = $srRawMap }
 }
 if ($srRingMap -and "$TenantId".Trim()) {
-    $srPlan = Get-PimTemplateRingPlan -Template $TemplateName -TenantId $TenantId `
-        -Assignments $srRingMap.assignments -Promotions $srRingMap.promotions `
-        -Channel $TemplateChannel -DefaultRing $srRingMap.default
+    # IMP-38: the version gate is keyed on THIS tenant's LOCAL ring. The map's assignments/default are the
+    # master's, so they are reported and never obeyed -- only its promotions (the approved version per ring) are read.
+    $srLocal = Get-PimLocalTemplateRingPlan -RingMap $srRingMap -TenantId $TenantId -SlaveRing $SlaveRing `
+        -Template $TemplateName -Channel $TemplateChannel
+    $srPlan = $srLocal.plan
     $srArgs['RingPlan'] = $srPlan
     Write-Host ("  ring plan: {0} -> {1}{2}" -f $TemplateName, $srPlan.Action,
         $(if ("$($srPlan.Version)".Trim()) { " approves v$($srPlan.Version)" } else { '' })) -ForegroundColor Cyan
+    Write-Host "             $($srLocal.note)" -ForegroundColor $(if ($null -ne $srLocal.ignoredMasterRing) { 'Yellow' } else { 'DarkGray' })
 } elseif ($run.runDownlink) {
     # 🪤 `$run.runDownlink` -- NOT `$sc.topology`, which does not exist. The first draft of this
     # line tested `$sc.topology -eq 'managed'` and would have been silently FALSE on every run:
@@ -243,6 +266,12 @@ if ($srRingMap -and "$TenantId".Trim()) {
     # Only worth saying on a run that actually pulls -- S1..S4 never do, so "no ring map" there is
     # not a gap, and a warning on every single-tenant run would train people to ignore it.
     Write-Host "  ring map: none supplied -- version gate INERT (pulls whatever version the master published)" -ForegroundColor DarkYellow
+}
+
+# (c) SEC-25: the master's signed central-kill manifest, fetched here (I/O) and VERIFIED by the orchestrator against
+#     this tenant's own revoked-signer list. Only a run that pulls a downlink needs it.
+if ($run.runDownlink) {
+    $srArgs['CentralKillSource'] = Get-PimCentralKillSource -CentralKillUrl $CentralKillUrl -BaselineUrl $BaselineUrl -AccessToken $BaselineAccessToken
 }
 
 if ($AllowRetraction) {

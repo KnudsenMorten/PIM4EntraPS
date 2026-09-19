@@ -4,11 +4,12 @@
   This is the REST counterpart of the legacy engine function
   CreateUpdate-Accounts-From-file-CSV (PIM-Functions.psm1) for the Entra-ID
   ("TargetPlatform = ID") branch -- the only branch the MSP fan-out
-  (Invoke-PimMspFanout.ps1) and the local apply (Invoke-PimLocalApply.ps1)
-  ever drive (both call the engine with -OnlyID). It creates / updates the
+  (setup/Invoke-PimMspFanout.ps1, its one remaining caller; it calls the engine
+  with -OnlyID) drives. (The local-apply lab script that also used it was retired
+  on 2026-09-18, IMP-45.) It creates / updates the
   cloud admin user object, links the manager, and (best-effort) sets mail
-  forwarding, entirely through Invoke-PimGraph -- so the fan-out / apply
-  launchers no longer need Connect-MgGraph, Get-MgDomain, New-MgBetaUser,
+  forwarding, entirely through Invoke-PimGraph -- so the fan-out
+  launcher no longer needs Connect-MgGraph, Get-MgDomain, New-MgBetaUser,
   Update-MgBetaUser, Set-MgUserManagerByRef or the Graph SDK at all.
 
   Constraints honoured:
@@ -98,7 +99,7 @@ function New-PimRestAdminAccount {
   .SYNOPSIS
     Create or update ONE Entra-ID admin user over Graph REST (idempotent),
     optionally link a manager and set mail forwarding. Pure REST -- the
-    Invoke-PimMspFanout / Invoke-PimLocalApply replacement for the ID branch
+    Invoke-PimMspFanout replacement for the ID branch
     of CreateUpdate-Accounts-From-file-CSV.
 
   .PARAMETER Row

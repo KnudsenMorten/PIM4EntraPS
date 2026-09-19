@@ -92,18 +92,16 @@ Use-Cfg 'PIM_SqlDatabase'    'PIM_SqlDatabase'
 # it here is the deploy-time half (onboarding bakes the sender into the container); the persisted
 # pim.Settings 'MailSender' key is the runtime half, and it overrides this when present.
 Use-Cfg 'PIM_MailSender'     'PIM_MailSender'
-# DESIRED store: the engine reads pim.Rows from SQL. Two first-class stores are supported
-# (Get-PimSqlConnectionString resolves either):
-#   * Azure SQL  -- $global:PIM_SqlServer is an FQDN (...database.windows.net); auth = MI /
-#                   SPN AccessToken. The HOSTED product path.
-#   * Local SQL  -- $global:PIM_SqlServer is a local instance (e.g. .\SQLEXPRESS) reached
-#                   with Integrated auth. The MGMT1 / on-prem / dev + emergency path: the
-#                   running identity is itself a DB user, so there is no cross-tenant token
-#                   or MI-not-a-DB-user blocker. This is the default when no server is set.
-# Only the DATABASE NAME is mandatory; the server defaults to .\SQLEXPRESS (local store).
-if (-not $global:PIM_SqlServer) {
-    $global:PIM_SqlServer = if ($env:PIM_SqlServer) { $env:PIM_SqlServer } else { '.\SQLEXPRESS' }
-    Write-Host "    Note   : PIM_SqlServer not set -- using local store '$($global:PIM_SqlServer)' (Integrated auth)." -ForegroundColor DarkYellow
+# DESIRED store: the engine reads pim.Rows from SQL -- the server NAMED in PIM_SqlServer (an Azure SQL FQDN,
+# ...database.windows.net, reached with MI / SPN AccessToken). Get-PimSqlConnectionString still accepts an explicitly
+# configured non-Azure server, but NOTHING defaults to one.
+# 🔴 BUG-178 -- NO `.\SQLEXPRESS` DEFAULT (operator 2026-08-28: "SQL Express is not used, anywhere"). This used to fall
+# back to .\SQLEXPRESS "the default" with a DarkYellow note, which is BUG-78's shape (PIM-ScenarioProfile.ps1): a
+# container that lost its PIM_SqlServer env ran against a store that cannot exist in the image and failed as a
+# connectivity error that pointed away from the missing setting. Both the server and the database are mandatory.
+if (-not "$($global:PIM_SqlServer)".Trim()) {
+    if ("$($env:PIM_SqlServer)".Trim()) { $global:PIM_SqlServer = "$($env:PIM_SqlServer)".Trim() }
+    else { throw "Engine config missing: set PIM_SqlServer (the desired-store SQL server, <server>.database.windows.net). There is no local default -- SQL Express is not a store this product uses." }
 }
 if (-not $global:PIM_SqlDatabase) { throw "Engine config missing: set PIM_SqlDatabase (the desired-store database name, e.g. PimPlatform)." }
 

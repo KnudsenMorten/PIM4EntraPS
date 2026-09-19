@@ -553,7 +553,13 @@ if (-not $WhatIfPreference -and -not $SkipSqlAdminGroup -and $storePlan.hasStore
         } elseif ($gr.ok) {
             Note 'not on the group model -- the updater reaches SQL through its contained database user (next step)'
         } else {
-            Warn "could not make the updater identity a member of '$SqlAdminGroupName' -- the contained-user step below still runs"
+            # SEC-32: the SQL admin group is created ROLE-ASSIGNABLE (tier 0). Only a Privileged Role Administrator -- or an
+            # identity holding Graph RoleManagement.ReadWrite.Directory -- can change its members, and a deploy identity
+            # normally holds neither. Say THAT, so the fallback reads as the designed path and not as a broken deploy.
+            $why = if ($gr.roleAssignable -eq $true -or $gr.permissionDenied) {
+                "'$SqlAdminGroupName' is ROLE-ASSIGNABLE (tier 0): only a Privileged Role Administrator or an identity with RoleManagement.ReadWrite.Directory can add members, and this deploy identity cannot"
+            } else { "membership could not be added ($(@($gr.problems) -join '; '))" }
+            Warn "the updater identity was NOT made a member of '$SqlAdminGroupName' -- $why. It reaches SQL through its own contained database user instead (next step). To use the group model, have a Privileged Role Administrator add it to the group."
         }
     } catch {
         Warn "SQL admin group step skipped: $($_.Exception.Message) -- the contained-user step below still runs"
@@ -688,6 +694,21 @@ switch ($chRep.level) {
 if ($sqlGrantProblem -or $storePlan.level -eq 'error') {
     Write-Host '==> STORE: this updater cannot verify schema yet, so it REFUSES every release that moves the version.' -ForegroundColor Red
     if ($sqlGrantProblem) { Write-Host "    $sqlGrantProblem" -ForegroundColor Red }
+}
+# 🔴 BUG-173 -- A BACKWARD RING IS A FAILED DEPLOY, NOT A YELLOW LINE ABOVE "installed".
+# The BUG-162 shape: a new ring-1 environment deployed without -UpdateRing 1 comes up on ring 2, whose
+# channel entry is OLDER than what the environment runs. This used to print the BACKWARD warning in
+# yellow and then "Nightly updater installed" and exit 0 -- so the deploy (and Invoke-PimDeployAll above
+# it) reported success on an environment whose updater points it at a version it has already passed.
+# The job IS deployed at this point (it is read back above); what fails is the claim that it is right.
+if ($chRep.backward) {
+    Write-Host "==> FAILED: '$JobName' is deployed, but ring $($ringPlan.ring) would move this environment BACKWARD." -ForegroundColor Red
+    Write-Host "    $($chRep.message)" -ForegroundColor Red
+    Write-Host '    Fix ONE of these before its next scheduled run, then re-run this script:' -ForegroundColor Red
+    Write-Host "      - the ring is wrong: re-run with -UpdateRing <the ring this environment belongs to> (internal/test = 1)" -ForegroundColor Red
+    Write-Host "      - the channel is behind: raise ring$($ringPlan.ring).version in channel.json (forward-only; ring 2 only with the operator's approval)" -ForegroundColor Red
+    Write-Host '    (The updater itself refuses to move backward, so nothing rolls meanwhile -- but this environment does not update either.)' -ForegroundColor DarkGray
+    exit 1
 }
 Write-Host "==> Nightly updater installed on ring $($ringPlan.ring). It runs $Cron (UTC)." -ForegroundColor Green
 Write-Host "    Trigger it now with:" -ForegroundColor DarkGray

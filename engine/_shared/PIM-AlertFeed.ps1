@@ -35,7 +35,7 @@ Set-StrictMode -Off
 # Canonical event types the feed understands (mirrors the Manager's
 # $script:PimAlertEventCatalog -- kept here so the engine/scheduler can validate
 # an event name without loading the Manager).
-$script:PimAlertFeedEventCatalog = @('engine-failure','drift','expiring-access','break-glass')
+$script:PimAlertFeedEventCatalog = @('engine-failure','drift','expiring-access','break-glass','coverage')   # 'coverage': REQ-I + REQ-U
 
 function Get-PimAlertFeedField {
     # Read a field from a hashtable OR a PSObject, returning '' when absent. (Same

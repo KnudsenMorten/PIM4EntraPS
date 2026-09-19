@@ -22,7 +22,13 @@
        that calls them) read the target environment's ring. Ring 0 and ring 1 get every verified build
        by design (the mgmt1 scheduled tasks ARE the ring-1 path). Ring 2 and above: REFUSE to roll to any
        version the ring does not approve, and refuse when the channel cannot be read. The only way past
-       is -OverrideRingGate -Reason '<why>', which is printed and audited. No ring = today's behaviour.
+       is -OverrideRingGate -Reason '<why>', which is printed and audited.
+       BUG-170 (2026-09-18): NO RING IS NOT "NO RULES". An environment that is deployed but carries no
+       PIM_UPDATE_RING -- or has no updater at all -- is REFUSED, exactly like an unreadable one: it
+       predates the ring, so nothing says which version it may take. The ways past are named and typed:
+       give it a ring (Deploy-PimUpdateJob -UpdateRing <n>), declare the ring the SAME deploy run is
+       installing (-PendingUpdateRing), or -OverrideRingGate -Reason for this one explicit version.
+       Only a resource group with nothing PIM in it yet (a first install) is not a roll and passes.
     7. After a verified ring-0/1 build, Invoke-PimUpdate advances THAT ring in channel.json, forward
        only, read back. Ring 2 and above are never written by any script.
     8. The updater carries the Manager's PIM_SqlServer / PIM_SqlDatabase and its identity gets a
@@ -40,6 +46,11 @@ $script:PimUpdateRingShared = Join-Path (Split-Path -Parent (Split-Path -Parent 
 . (Join-Path $script:PimUpdateRingShared 'PIM-ArmContainerApps.ps1')    # Set-PimAcaJobEnvValue (ARM read-modify-write)
 
 $script:PimUpdateRingDefault = 2
+# IMP-36: the Platform Updates Ring accepts 0..3, and EVERY reader of PIM_UPDATE_RING goes through
+# ConvertTo-PimUpdateRingNumber so the range is decided in one place (it was three copies of a regex).
+# The [ValidateRange(0,3)] on the -UpdateRing parameters of Deploy-PimUpdateJob / Enable-PimSelfUpdate /
+# Invoke-PimDeployAll must match this number.
+$script:PimUpdateRingMax = 3
 # Test seam: every wait goes through this, so the offline suite can count waits instead of sleeping.
 $script:PimUpdateRingSleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds }
 
@@ -51,6 +62,20 @@ function Hide-PimSasText {
     # Never let a signature reach a log, a transcript or an exception message.
     param([AllowEmptyString()][string]$Text)
     ("$Text" -replace '(?i)(sig=)[^&\s"'']+', '$1<withheld>')
+}
+
+function ConvertTo-PimUpdateRingNumber {
+    <#
+      PURE. A PIM_UPDATE_RING value ('2', 'ring2', ' Ring1 ') -> its ring number, or $null when it is
+      not a Platform Updates Ring (empty, out of range, not a number). The ONE definition of the range
+      (IMP-36): the deploy, the roll gate and the channel advance all read the ring through here.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Value)
+    $v = "$Value".Trim()
+    if ($v -notmatch '^(?i)(ring)?(\d{1,2})$') { return $null }
+    $n = [int]$Matches[2]
+    if ($n -lt 0 -or $n -gt $script:PimUpdateRingMax) { return $null }
+    return $n
 }
 
 function ConvertTo-PimJobEnvMap {
@@ -71,7 +96,15 @@ function ConvertTo-PimJobEnvMap {
          elseif ($cs.Count -eq 1) { $cs[0] } else { $null }
     if (-not $c -and $cs.Count -ge 1 -and "$ContainerName".Trim()) { $c = $null }
     if (-not $c) { return $map }
-    foreach ($e in @($c.env)) { if ($e -and "$($e.name)") { $map["$($e.name)"] = "$($e.value)" } }
+    # 🪤 pwsh 7's ConvertFrom-Json turns an ISO-8601 string VALUE into [datetime], and "$dt" prints it culture-formatted
+    # ("09/18/2026 20:58:28"), so a read-back of an env var holding a timestamp never matched what was written.
+    # Measured on EFIF 2026-09-18 (PIM_CadenceDeployedUtc). Render a parsed date back in the invariant ISO UTC form.
+    foreach ($e in @($c.env)) {
+        if (-not ($e -and "$($e.name)")) { continue }
+        $v = $e.value
+        if ($v -is [datetime]) { $v = $v.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture) }
+        $map["$($e.name)"] = "$v"
+    }
     return $map
 }
 
@@ -85,10 +118,9 @@ function Resolve-PimUpdateRingSetting {
       ring for an environment is exactly the decision this exists to take away from a script.
     #>
     param([int]$Requested = 2, [switch]$Explicit, [AllowEmptyString()][string]$Existing)
-    if ($Requested -lt 0 -or $Requested -gt 3) { throw "Resolve-PimUpdateRingSetting: ring $Requested is outside 0-3." }
+    if ($Requested -lt 0 -or $Requested -gt $script:PimUpdateRingMax) { throw "Resolve-PimUpdateRingSetting: ring $Requested is outside 0-$($script:PimUpdateRingMax)." }
     $e = "$Existing".Trim()
-    $eInt = $null
-    if ($e -match '^(?i)(ring)?([0-3])$') { $eInt = [int]$Matches[2] }
+    $eInt = ConvertTo-PimUpdateRingNumber $e
     if ($Explicit) {
         $msg = if (-not $e) { "ring $Requested (explicit -UpdateRing)" }
                elseif ($null -ne $eInt -and $eInt -eq $Requested) { "ring $Requested (explicit -UpdateRing; unchanged)" }
@@ -100,7 +132,7 @@ function Resolve-PimUpdateRingSetting {
             message = "keeping the existing ring $eInt -- -UpdateRing was not passed, and a redeploy never promotes or demotes an environment" }
     }
     if ($e) {
-        throw ("Resolve-PimUpdateRingSetting: the updater carries PIM_UPDATE_RING='$e', which is not a ring (0-3). " +
+        throw ("Resolve-PimUpdateRingSetting: the updater carries PIM_UPDATE_RING='$e', which is not a ring (0-$($script:PimUpdateRingMax)). " +
                'REFUSING to guess one -- pass -UpdateRing explicitly.')
     }
     return [pscustomobject]@{ ring = $Requested; source = 'default'; changed = $true
@@ -123,7 +155,7 @@ function Resolve-PimUpdateRingSourceTemplate {
                "through PIM_UPDATE_SOURCE_URL; without it the ring is skipped and nothing controls what this " +
                "environment takes. Pass -UpdateSourceUrlTemplate (Invoke-PimDeployAll) / -SourceUrlTemplate " +
                "(Deploy-PimUpdateJob, Enable-PimSelfUpdate), or set `$env:PIM_UPDATE_SOURCE_URL, to the fleet " +
-               "read-only template that tools/setup/Publish-PimSourceArchive.ps1 prints (container stored access " +
+               "read-only template that tools/setup/Publish-PimSourceArchive.ps1 -PassThru returns (container stored access " +
                "policy 'srcread'): https://<store>.blob.core.windows.net/pim-src/pim-src-{version}.tar.gz?<sas>")
     }
     if ($url -notmatch '^https://') { throw "Resolve-PimUpdateRingSourceTemplate: the source template must be https:// ($origin)." }
@@ -295,16 +327,23 @@ function Get-PimUpdateRingChannelReport {
       for it. level = ok | warn | error. Never silent: a missing channel or an unapproved ring is an
       error-level report (the environment will not update), and a move the environment would make on
       its next run is a warn-level report naming both versions.
+      backward = $true when the ring approves a version BELOW the one the environment is on (BUG-173):
+      a caller that installs an updater must FAIL on that, not print it in yellow and report success.
     #>
     param([AllowEmptyString()][string]$SourceUrlTemplate, [int]$Ring, [AllowEmptyString()][string]$CurrentVersion, [scriptblock]$Fetch)
     if (-not $Fetch) { $Fetch = { param($u) (Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 60).Content } }
-    $mk = { param($lvl, $appr, $msg) [pscustomobject]@{ ok = ($lvl -ne 'error'); level = $lvl; approved = $appr; message = $msg } }
+    $mk = { param($lvl, $appr, $msg, $back = $false) [pscustomobject]@{ ok = ($lvl -ne 'error'); level = $lvl; approved = $appr; message = $msg; backward = [bool]$back } }
     $url = Get-PimUpdateChannelUrl -SourceTemplate $SourceUrlTemplate
     if (-not $url) { return (& $mk 'error' '' "ring $Ring approves NOTHING: no channel URL can be derived (no source template) -- this environment will NOT update.") }
     $raw = $null
     try { $raw = & $Fetch $url } catch {
         return (& $mk 'error' '' ("channel.json could NOT be read (" + (Hide-PimSasText "$($_.Exception.Message)") + ") -- ring $Ring approves NOTHING until it can be; this environment will NOT update."))
     }
+    # An application/octet-stream blob arrives as byte[] (see Update-PimRingChannelVersion): decode it, or every
+    # report said "approves NOTHING" and the drift check, the sync and Deploy-PimUpdateJob all did nothing.
+    # A byte[] returned from a scriptblock is UNROLLED by the pipeline into object[] of [byte], so test both shapes.
+    if ($raw -is [array] -and -not ($raw -is [byte[]]) -and $raw.Count -gt 0 -and $raw[0] -is [byte]) { $raw = [byte[]]@($raw) }
+    if ($raw -is [byte[]]) { $raw = [Text.Encoding]::UTF8.GetString($raw).TrimStart([char]0xFEFF) }
     $ch = $null
     try { $ch = ("$raw" | ConvertFrom-Json) } catch { return (& $mk 'error' '' "channel.json is not valid JSON -- ring $Ring approves NOTHING; this environment will NOT update.") }
     $rv = Get-PimRingVersion -Channel $ch -Ring "$Ring" -CurrentVersion $CurrentVersion
@@ -316,7 +355,7 @@ function Get-PimUpdateRingChannelReport {
     $haveAppr = [version]::TryParse(($appr -replace '^v', ''), [ref]$av)
     if (-not $cur) { return (& $mk 'ok' $appr "ring $Ring approves $appr (this environment's current version is not known here).") }
     if ($haveCur -and $haveAppr -and $av -lt $cv) {
-        return (& $mk 'warn' $appr "BACKWARD: ring $Ring approves $appr but this environment is on $cur -- its next run would try to move it BACKWARD. Fix channel.json (forward-only) or pass the right -UpdateRing.")
+        return (& $mk 'warn' $appr "BACKWARD: ring $Ring approves $appr but this environment is on $cur -- its next run would try to move it BACKWARD. Fix channel.json (forward-only) or pass the right -UpdateRing." $true)
     }
     if ($appr -ne $cur) {
         return (& $mk 'warn' $appr "ring $Ring approves $appr; this environment is on $cur -- its next scheduled run WILL move it to $appr.")
@@ -327,7 +366,10 @@ function Get-PimUpdateRingChannelReport {
 function Test-PimRollRingGate {
     <#
       PURE (apart from the -Fetch seam). May a HOST-SIDE roll move this environment to -TargetVersion?
-        no updater / no ring        -> allowed, not gated (today's behaviour)
+        nothing deployed yet        -> allowed, not gated (-Greenfield: a first install is not a roll)
+        no updater / no ring        -> REFUSED (BUG-170: it predates the ring, so nothing approves ANY
+                                       version for it) -- unless -PendingRing names the ring this same
+                                       deploy run installs, which is then gated exactly like a real one
         updater unreadable          -> REFUSED (a roll that cannot prove it is approved does not happen)
         ring 0 or 1                 -> allowed: those rings get EVERY build by design (dev / internal +
                                        the operator's test estate). The mgmt1 Invoke-PimUpdate tasks
@@ -345,38 +387,63 @@ function Test-PimRollRingGate {
         [switch]$UpdaterMissing,
         [switch]$UpdaterUnreadable,
         [AllowEmptyString()][string]$UnreadableReason,
+        # Nothing PIM is deployed in the target resource group yet: a first install, not a roll.
+        [switch]$Greenfield,
+        # BUG-170: the ring the SAME deploy run is about to write onto the updater (Invoke-PimDeployAll
+        # with an explicit -UpdateRing). Used only when the environment carries no ring of its own --
+        # an existing ring always wins, because a redeploy never promotes or demotes. -1 = none.
+        [int]$PendingRing = -1,
+        [AllowEmptyString()][string]$PendingSourceUrl,
         [scriptblock]$Fetch
     )
     $r = { param($allowed, $gated, $ring, $appr, $reason) [pscustomobject]@{ allowed = [bool]$allowed; gated = [bool]$gated; ring = $ring; approved = $appr; reason = $reason } }
     if ($UpdaterUnreadable) {
         return (& $r $false $true $null '' ("the environment's update job could not be read ($UnreadableReason), so its ring cannot be checked -- REFUSING to roll (a roll that cannot prove it is approved does not happen)."))
     }
-    if ($UpdaterMissing -or $null -eq $UpdaterEnv -or -not $UpdaterEnv.Contains('PIM_UPDATE_RING') -or -not "$($UpdaterEnv['PIM_UPDATE_RING'])".Trim()) {
-        return (& $r $true $false $null '' 'no update ring configured on this environment -- the roll is not ring-gated (unchanged behaviour).')
+    $t = ("$TargetVersion".Trim() -replace '^v', '')
+    $haveEnv = (-not $UpdaterMissing) -and ($null -ne $UpdaterEnv)
+    $ringRaw = if ($haveEnv -and $UpdaterEnv.Contains('PIM_UPDATE_RING')) { "$($UpdaterEnv['PIM_UPDATE_RING'])".Trim() } else { '' }
+    $src     = if ($haveEnv -and $UpdaterEnv.Contains('PIM_UPDATE_SOURCE_URL')) { "$($UpdaterEnv['PIM_UPDATE_SOURCE_URL'])".Trim() } else { '' }
+    $how = ''
+    if (-not $ringRaw) {
+        if ($Greenfield) {
+            return (& $r $true $false $null '' 'nothing PIM is deployed in this resource group yet -- a first install is not a roll (the updater the deploy installs carries the ring from then on).')
+        }
+        if ($PendingRing -ge 0) {
+            # The ring this deploy is installing decides -- and it is gated exactly as if it were already there.
+            $ringRaw = "$PendingRing"
+            $how = ' (the ring this deploy run installs; the environment carries none yet)'
+            if (-not $src) { $src = "$PendingSourceUrl".Trim() }
+        } else {
+            $what = if ($UpdaterMissing -or -not $haveEnv) { 'this environment has NO in-cloud updater' } else { "this environment's updater carries NO PIM_UPDATE_RING" }
+            return (& $r $false $true $null '' ("$what, so no ring says which version it may take -- REFUSING to roll it to '$t' (an environment without a ring is not an environment without rules; it predates the ring). " +
+                    "Give it a ring first (Deploy-PimUpdateJob.ps1 -UpdateRing <0-$($script:PimUpdateRingMax)>; internal and test environments are ring 1, customers ring 2), " +
+                    "or roll exactly this version with -OverrideRingGate -Reason '<why>' (printed and audited)."))
+        }
     }
-    $ringRaw = "$($UpdaterEnv['PIM_UPDATE_RING'])".Trim()
-    if ($ringRaw -notmatch '^(?i)(ring)?([0-3])$') { return (& $r $false $true $ringRaw '' "the updater carries PIM_UPDATE_RING='$ringRaw', which is not a ring -- REFUSING to roll.") }
-    $ring = [int]$Matches[2]
+    $ring = ConvertTo-PimUpdateRingNumber $ringRaw
+    if ($null -eq $ring) { return (& $r $false $true $ringRaw '' "the updater carries PIM_UPDATE_RING='$ringRaw', which is not a ring (0-$($script:PimUpdateRingMax)) -- REFUSING to roll.") }
     if ($ring -lt 2) {
-        return (& $r $true $false $ring '' "ring $ring gets every build by design -- a host-side roll is allowed (Invoke-PimUpdate advances ring$ring in channel.json after it verifies the roll).")
+        return (& $r $true $false $ring '' "ring $ring$how gets every build by design -- a host-side roll is allowed (Invoke-PimUpdate advances ring$ring in channel.json after it verifies the roll).")
     }
-    $src = if ($UpdaterEnv.Contains('PIM_UPDATE_SOURCE_URL')) { "$($UpdaterEnv['PIM_UPDATE_SOURCE_URL'])".Trim() } else { '' }
-    if (-not $src) { return (& $r $false $true $ring '' "ring $ring is configured but the updater has NO PIM_UPDATE_SOURCE_URL, so what ring $ring approves cannot be read -- REFUSING to roll.") }
+    if (-not $src) { return (& $r $false $true $ring '' "ring $ring$how is configured but the updater has NO PIM_UPDATE_SOURCE_URL, so what ring $ring approves cannot be read -- REFUSING to roll.") }
     $rep = Get-PimUpdateRingChannelReport -SourceUrlTemplate $src -Ring $ring -CurrentVersion '' -Fetch $Fetch
     if (-not $rep.ok) { return (& $r $false $true $ring '' ("REFUSING to roll: " + $rep.message)) }
-    $t = ("$TargetVersion".Trim() -replace '^v', '')
     if ($t -ne $rep.approved) {
-        return (& $r $false $true $ring $rep.approved ("ring $ring approves $($rep.approved); this roll targets '$t' -- REFUSED. Nothing is released to ring $ring without the operator's approval: raise ring$ring.version in channel.json after approval, or pass -OverrideRingGate -Reason '<why>'."))
+        return (& $r $false $true $ring $rep.approved ("ring $ring$how approves $($rep.approved); this roll targets '$t' -- REFUSED. Nothing is released to ring $ring without the operator's approval: raise ring$ring.version in channel.json after approval, or pass -OverrideRingGate -Reason '<why>'."))
     }
-    return (& $r $true $true $ring $rep.approved "ring $ring approves $($rep.approved) -- the roll target; allowed.")
+    return (& $r $true $true $ring $rep.approved "ring $ring$how approves $($rep.approved) -- the roll target; allowed.")
 }
 
 function Assert-PimRollRingGate {
     <#
       The host-side gate every roller calls BEFORE it changes an environment. Reads the target
       environment's update job (az, subscription-scoped), decides with Test-PimRollRingGate, and either
-      returns (allowed) or throws. -OverrideRingGate needs -Reason; an override is printed and written to
-      the audit trail when this host has one (pim.AuditEvents via -SqlConnectionString).
+      returns (allowed) or throws. -OverrideRingGate needs -Reason AND an explicit -TargetVersion (an
+      override names the one version it lets through); it is printed and written to the audit trail when
+      this host has one (pim.AuditEvents via -SqlConnectionString).
+      -PendingUpdateRing / -PendingUpdateSourceUrl: the ring (and source) the SAME deploy run installs on
+      an environment that carries none yet -- see Test-PimRollRingGate -PendingRing (BUG-170).
     #>
     param(
         [Parameter(Mandatory)][string]$ResourceGroup,
@@ -387,6 +454,8 @@ function Assert-PimRollRingGate {
         [AllowEmptyString()][string]$Reason,
         [string]$Caller = 'roll',
         [AllowEmptyString()][string]$SqlConnectionString,
+        [int]$PendingUpdateRing = -1,
+        [AllowEmptyString()][string]$PendingUpdateSourceUrl,
         [scriptblock]$GetJobs,
         [scriptblock]$Fetch,
         [scriptblock]$Audit
@@ -394,11 +463,16 @@ function Assert-PimRollRingGate {
     if ($OverrideRingGate -and -not "$Reason".Trim()) {
         throw "$Caller`: -OverrideRingGate requires -Reason '<why this environment may take a version its ring does not approve>'."
     }
+    if ($OverrideRingGate -and -not "$TargetVersion".Trim()) {
+        throw "$Caller`: -OverrideRingGate needs an explicit target version -- an override lets exactly ONE named version through, never 'whatever this run builds'."
+    }
+    if ($PendingUpdateRing -gt $script:PimUpdateRingMax) { throw "$Caller`: -PendingUpdateRing $PendingUpdateRing is outside 0-$($script:PimUpdateRingMax)." }
     $upd = Get-PimEnvironmentUpdaterEnv -ResourceGroup $ResourceGroup -SubscriptionArgs $SubscriptionArgs -UpdateJobName $UpdateJobName -GetJobs $GetJobs
     $verdict = $null
+    $pend = @{ PendingRing = $PendingUpdateRing; PendingSourceUrl = "$PendingUpdateSourceUrl" }
     if (-not $upd.ok)        { $verdict = Test-PimRollRingGate -TargetVersion $TargetVersion -UpdaterUnreadable -UnreadableReason "$($upd.reason)" -Fetch $Fetch }
-    elseif (-not $upd.found) { $verdict = Test-PimRollRingGate -TargetVersion $TargetVersion -UpdaterMissing -Fetch $Fetch }
-    else                     { $verdict = Test-PimRollRingGate -TargetVersion $TargetVersion -UpdaterEnv $upd.env -Fetch $Fetch }
+    elseif (-not $upd.found) { $verdict = Test-PimRollRingGate -TargetVersion $TargetVersion -UpdaterMissing -Greenfield:(-not $upd.deployed) @pend -Fetch $Fetch }
+    else                     { $verdict = Test-PimRollRingGate -TargetVersion $TargetVersion -UpdaterEnv $upd.env @pend -Fetch $Fetch }
     if ($verdict.allowed) {
         if ($verdict.gated) { Write-Host "    ring gate: $($verdict.reason)" -ForegroundColor Green }
         else { Write-Host "    ring gate: $($verdict.reason)" -ForegroundColor DarkGray }
@@ -412,7 +486,11 @@ function Assert-PimRollRingGate {
                        approved = $verdict.approved; target = "$TargetVersion"; reason = "$Reason".Trim(); by = $who
                        utc = [datetime]::UtcNow.ToString('o'); refusal = $verdict.reason }
     Write-Host '    ============================================================================' -ForegroundColor Red
-    Write-Host "    RING GATE OVERRIDDEN ($Caller): target '$TargetVersion' is NOT what ring $($verdict.ring) approves ('$($verdict.approved)')." -ForegroundColor Red
+    if ($null -eq $verdict.ring) {
+        Write-Host "    RING GATE OVERRIDDEN ($Caller): target '$TargetVersion' on an environment that NO ring governs (or whose updater could not be read)." -ForegroundColor Red
+    } else {
+        Write-Host "    RING GATE OVERRIDDEN ($Caller): target '$TargetVersion' is NOT what ring $($verdict.ring) approves ('$($verdict.approved)')." -ForegroundColor Red
+    }
     Write-Host "    by: $who   reason: $("$Reason".Trim())" -ForegroundColor Red
     Write-Host '    ============================================================================' -ForegroundColor Red
     $audited = $false
@@ -433,7 +511,11 @@ function Get-PimEnvironmentUpdaterEnv {
       Read an environment's update job env (az, subscription-scoped). Returns
       @{ ok; found; env; reason } -- ok=$false means "could not read", which is NOT the same as
       "there is no updater" (found=$false). -GetJobs is the offline seam: it returns
-      @{ ok; jobs; reason } where jobs are job objects carrying properties.template.containers.
+      @{ ok; jobs; apps; reason } where jobs are job objects carrying properties.template.containers
+      and apps are container app NAMES.
+      deployed = something PIM (a job or app named ca-pim-*, or the update job) already runs in the
+      group. BUG-170: only a group where NOTHING is deployed is a first install; a deployed environment
+      without an updater is refused by the gate, never waved through as "no ring".
     #>
     param(
         [Parameter(Mandatory)][string]$ResourceGroup,
@@ -446,27 +528,38 @@ function Get-PimEnvironmentUpdaterEnv {
             $global:LASTEXITCODE = 0
             $raw = az containerapp job list @SubscriptionArgs -g $ResourceGroup -o json 2>$null
             $code = $LASTEXITCODE
-            $jobs = @(); $ok = ($code -eq 0)
+            $jobs = @(); $apps = @(); $ok = ($code -eq 0)
             if ($ok) { try { $jobs = @((($raw | Out-String) | ConvertFrom-Json)) } catch { $ok = $false } }
             $why = ''
+            $rgMissing = $false
             if (-not $ok) {
                 # A GREENFIELD install: the resource group does not exist yet, so there is no updater and
                 # nothing to gate. Only a listing failure against a group that EXISTS is "unreadable".
                 $global:LASTEXITCODE = 0
                 $rgExists = "$(az group exists --name $ResourceGroup @SubscriptionArgs 2>$null)".Trim()
-                if ($LASTEXITCODE -eq 0 -and $rgExists -eq 'false') { $ok = $true; $jobs = @() }
+                if ($LASTEXITCODE -eq 0 -and $rgExists -eq 'false') { $ok = $true; $jobs = @(); $rgMissing = $true }
                 else { $why = "az containerapp job list exit $code" }
             }
-            [pscustomobject]@{ ok = $ok; jobs = $jobs; reason = $why }
+            if ($ok -and -not $rgMissing) {
+                # The apps as well: an environment can run a Manager and no job at all (the always-on
+                # shape), and "no jobs" must not read as "nothing deployed".
+                $global:LASTEXITCODE = 0
+                $appRaw = az containerapp list @SubscriptionArgs -g $ResourceGroup --query "[].name" -o tsv 2>$null
+                if ($LASTEXITCODE -ne 0) { $ok = $false; $why = "az containerapp list exit $LASTEXITCODE" }
+                else { $apps = @(@($appRaw) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+            }
+            [pscustomobject]@{ ok = $ok; jobs = $jobs; apps = $apps; reason = $why }
         }
     }
     $res = & $GetJobs
-    if (-not $res -or -not $res.ok) { return [pscustomobject]@{ ok = $false; found = $false; env = [ordered]@{}; reason = "$($res.reason)" } }
+    if (-not $res -or -not $res.ok) { return [pscustomobject]@{ ok = $false; found = $false; deployed = $true; env = [ordered]@{}; reason = "$($res.reason)" } }
+    $names = @(@($res.jobs | Where-Object { $_ } | ForEach-Object { "$($_.name)" }) + @($res.apps | ForEach-Object { "$_" }))
+    $deployed = @($names | Where-Object { $_ -like 'ca-pim-*' -or $_ -eq $UpdateJobName }).Count -gt 0
     $job = @($res.jobs | Where-Object { $_ -and "$($_.name)" -eq $UpdateJobName }) | Select-Object -First 1
-    if (-not $job) { return [pscustomobject]@{ ok = $true; found = $false; env = [ordered]@{}; reason = "no '$UpdateJobName' in $ResourceGroup" } }
+    if (-not $job) { return [pscustomobject]@{ ok = $true; found = $false; deployed = $deployed; env = [ordered]@{}; reason = "no '$UpdateJobName' in $ResourceGroup" } }
     $envMap = ConvertTo-PimJobEnvMap -Job $job -ContainerName $UpdateJobName
     if (-not $envMap.Count) { $envMap = ConvertTo-PimJobEnvMap -Job $job }
-    return [pscustomobject]@{ ok = $true; found = $true; env = $envMap; reason = '' }
+    return [pscustomobject]@{ ok = $true; found = $true; deployed = $true; env = $envMap; reason = '' }
 }
 
 function Get-PimRingChannelAdvancePlan {
@@ -531,9 +624,11 @@ function Update-PimRingChannelVersion {
       the in-cloud updater (whose ring wins over its pin) does not roll the environment back the next
       night. Forward-only, read back, never fatal: returns @{ ok; action; reason } and the caller warns
       on ok=$false.
-      Write = storage account key (as Publish-PimSourceArchive) from -SubscriptionId, optionally in an
-      isolated az profile (-AzureConfigDir): the host running an estate update is often signed in to
-      the ENVIRONMENT's tenant, not to the one that owns the source store.
+      Write = Entra ID (--auth-mode login, IMP-36; the pattern New-PimBaselineStorage uses), scoped to
+      -SubscriptionId, optionally in an isolated az profile (-AzureConfigDir): the host running an estate
+      update is often signed in to the ENVIRONMENT's tenant, not to the one that owns the source store.
+      No account key is read: the writing identity needs 'Storage Blob Data Contributor' on the source
+      container, and without it the advance is SKIPPED with that reason (never fatal, never a key).
       Ring 2 and above: refused, always. After the write every ring >= 2 entry is compared with what
       was there before; any difference is reported loudly.
     #>
@@ -555,7 +650,14 @@ function Update-PimRingChannelVersion {
     $acct = $Matches['acct']; $ctr = $Matches['ctr']
     if (-not $Fetch) {
         $Fetch = { param($u)
-            try { [pscustomobject]@{ found = $true; content = (Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 60).Content } }
+            # 🪤 A blob served as application/octet-stream (how channel.json was uploaded before this tool set a
+            # content type) comes back from Invoke-WebRequest as byte[], not text, and the planner then refused
+            # it as "not valid JSON" -- so the ring advance was skipped on every run (measured 2026-09-18).
+            try {
+                $c = (Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 60).Content
+                if ($c -is [byte[]]) { $c = [Text.Encoding]::UTF8.GetString($c).TrimStart([char]0xFEFF) }
+                [pscustomobject]@{ found = $true; content = "$c" }
+            }
             catch {
                 $code = 0; try { $code = [int]$_.Exception.Response.StatusCode } catch { }
                 if ($code -eq 404) { [pscustomobject]@{ found = $false; content = '' } } else { throw }
@@ -567,11 +669,15 @@ function Update-PimRingChannelVersion {
             $saved = $env:AZURE_CONFIG_DIR
             try {
                 if ("$AzureConfigDir".Trim()) { $env:AZURE_CONFIG_DIR = "$AzureConfigDir".Trim() }
-                $key = "$(az storage account keys list --account-name $account --subscription $SubscriptionId --query '[0].value' -o tsv 2>$null)".Trim()
-                if (-not $key) { return "no storage key for '$account' in subscription $SubscriptionId from this az profile" }
+                # IMP-36: Entra ID, not the storage ACCOUNT KEY. A key is the whole account's master
+                # credential; the ring advance needs one blob in one container.
                 $global:LASTEXITCODE = 0
-                az storage blob upload --account-name $account --container-name $container --name channel.json --file $file --overwrite --content-type application/json --account-key $key -o none 2>$null
-                if ($LASTEXITCODE -ne 0) { return "az storage blob upload exit $LASTEXITCODE" }
+                $out = az storage blob upload --subscription $SubscriptionId --account-name $account --container-name $container --name channel.json --file $file --overwrite --content-type application/json --auth-mode login -o none 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    $txt = (Hide-PimSasText (($out | Out-String).Trim()))
+                    if ($txt.Length -gt 300) { $txt = $txt.Substring(0, 300) + '...' }
+                    return ("az storage blob upload (--auth-mode login) exit $LASTEXITCODE -- the identity in this az profile needs 'Storage Blob Data Contributor' on $account/$container. $txt").Trim()
+                }
                 return ''
             } finally { $env:AZURE_CONFIG_DIR = $saved }
         }

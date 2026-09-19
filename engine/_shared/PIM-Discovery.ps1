@@ -439,8 +439,9 @@ function Get-PimDiscoveryDelta {
 }
 
 # ===========================================================================
-# LIVE enumerators (REST; best-effort; @() on failure). Side-effecting, untested
-# offline -- the planners above carry the unit coverage.
+# LIVE enumerators (REST; best-effort; @() on failure -- EXCEPT Get-PimLiveServiceRoles, which returns
+# a read result that says "not read" on failure, REQ-U). Side-effecting; the planners above carry most
+# of the unit coverage.
 # ===========================================================================
 
 function Get-PimLivePowerBiWorkspaces {
@@ -486,19 +487,46 @@ function Get-PimLiveAzureScopes {
 }
 
 function Get-PimLiveServiceRoles {
-    # Built-in role definitions for a discoverable service, normalised to { id; name }.
-    # Supports the Graph-native services the engine already has scopes/connectors for.
-    # REST-only via Invoke-PimGraph. Best-effort -> @() on failure.
+    <#
+      Role definitions for a discoverable service, as ONE read result:
+        { PSTypeName='PimServiceRolesRead'; service; read; roles=@({ id; name }); reason; endpoint }
+      REST-only via Invoke-PimGraph.
+
+      🔴 REQ-U (2026-09-19, verified read-only against internal): the Defender read called Graph v1.0, which
+      answers roleManagement/defender with HTTP 400 -- the surface exists only on BETA (the engine's own
+      DefenderXdrRoles provider has always used -Beta). The error was swallowed to Write-Verbose and the function
+      returned @(), so the role-catalog sweep reported "0 new roles" for Defender every run: an EMPTY SUCCESS for
+      a read that never happened. Now:
+        * Defender reads BETA (Intune + Entra stay on v1.0, where they are served);
+        * a failed read is REPORTED -- a warning, and read=$false with the reason -- never an empty role list.
+      Invoke-PimRoleCatalogJobSweep unwraps this result and reports "NOT READ" instead of sweeping nothing.
+    #>
     [CmdletBinding()] param([Parameter(Mandatory)][ValidateSet('entra','defender','intune')][string]$Service)
+    $spec = switch ($Service) {
+        'entra'    { @{ path = '/roleManagement/directory/roleDefinitions?$select=id,displayName,isBuiltIn'; beta = $false } }
+        'defender' { @{ path = '/roleManagement/defender/roleDefinitions?$select=id,displayName'; beta = $true } }
+        'intune'   { @{ path = '/deviceManagement/roleDefinitions?$select=id,displayName'; beta = $false } }
+    }
+    $endpoint = "$(if ($spec.beta) { 'beta' } else { 'v1.0' })$($spec.path)"
     $out = New-Object System.Collections.Generic.List[object]
     try {
-        switch ($Service) {
-            'entra'    { foreach ($r in @(Invoke-PimGraph -Path '/roleManagement/directory/roleDefinitions?$select=id,displayName,isBuiltIn' -All)) { if ("$($r.id)") { $out.Add([pscustomobject]@{ id="$($r.id)"; name="$($r.displayName)" }) } } }
-            'defender' { foreach ($r in @(Invoke-PimGraph -Path '/roleManagement/defender/roleDefinitions?$select=id,displayName' -All)) { if ("$($r.id)") { $out.Add([pscustomobject]@{ id="$($r.id)"; name="$($r.displayName)" }) } } }
-            'intune'   { foreach ($r in @(Invoke-PimGraph -Path '/deviceManagement/roleDefinitions?$select=id,displayName' -All)) { if ("$($r.id)") { $out.Add([pscustomobject]@{ id="$($r.id)"; name="$($r.displayName)" }) } } }
-        }
-    } catch { Write-Verbose "service roles ($Service): $($_.Exception.Message)" }
-    return $out.ToArray()
+        $gArgs = @{ Path = $spec.path; All = $true }
+        if ($spec.beta) { $gArgs['Beta'] = $true }
+        foreach ($r in @(Invoke-PimGraph @gArgs)) { if ("$($r.id)") { $out.Add([pscustomobject]@{ id = "$($r.id)"; name = "$($r.displayName)" }) } }
+    } catch {
+        $why = "$($_.Exception.Message)"
+        Write-Warning "[discovery] the $Service role catalog could NOT be read ($endpoint): $why -- the role-catalog sweep reports it as not read, never as 'no new roles'"
+        return [pscustomobject]@{ PSTypeName = 'PimServiceRolesRead'; service = $Service; read = $false; roles = @(); reason = $why; endpoint = $endpoint }
+    }
+    return [pscustomobject]@{ PSTypeName = 'PimServiceRolesRead'; service = $Service; read = $true; roles = @($out.ToArray()); reason = ''; endpoint = $endpoint }
+}
+
+function Test-PimServiceRolesReadResult {
+    # PURE. Is this object a Get-PimLiveServiceRoles read result (as opposed to a bare role)?
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $false }
+    if (@($Value.PSObject.TypeNames) -contains 'PimServiceRolesRead') { return $true }
+    return ($null -ne $Value.PSObject.Properties['read'] -and $null -ne $Value.PSObject.Properties['roles'] -and $null -ne $Value.PSObject.Properties['service'])
 }
 
 # ===========================================================================
@@ -1203,6 +1231,24 @@ function Invoke-PimRoleCatalogJobSweep {
     $svc   = if ("$Service".Trim()) { "$Service".Trim().ToLowerInvariant() } else { 'entra' }
     $scope = "roles-$svc"
 
+    # REQ-U: -Live may be the Get-PimLiveServiceRoles READ RESULT. A read that failed is reported as NOT READ --
+    # nothing is diffed, nothing enqueued, and the handled set is NOT rolled forward (so the next good read still
+    # sees every role as new). It is never an empty "0 new roles" success.
+    $liveItems = @($Live | Where-Object { $null -ne $_ })
+    if ($liveItems.Count -eq 1 -and (Test-PimServiceRolesReadResult -Value $liveItems[0])) {
+        $rd = $liveItems[0]
+        if (-not [bool]$rd.read) {
+            $why = "$($rd.reason)"
+            Write-Warning "[discovery] roles-$svc NOT READ ($($rd.endpoint)): $why"
+            return [pscustomobject]@{
+                scope = 'Entra'; service = $svc; ok = $false; read = $false; notRead = $true; reason = $why; endpoint = "$($rd.endpoint)"
+                live = $null; freshCount = 0; enqueued = 0; fresh = @(); changes = @(); handled = @(); audited = 0; notified = $false; notice = $null
+                detail = ("discovery[Entra/{0} roles]: NOT READ -- the {0} role catalog could not be read ({1}): {2}" -f $svc, $rd.endpoint, $why)
+            }
+        }
+        $Live = @($rd.roles)
+    }
+
     # The previously-catalogued role objects (as {key}) -> Get-PimRoleCatalogDelta takes
     # role-shaped objects; the handled set is the list of stable keys we've seen. Convert
     # each handled key into a stub {id} so the delta keys line up (the key IS the id|name).
@@ -1259,6 +1305,7 @@ function Invoke-PimRoleCatalogJobSweep {
         scope         = "Entra"
         service       = $svc
         whatIf        = [bool]$WhatIf
+        read          = $true
         live          = @($Live).Count
         freshCount    = @($freshRoles).Count
         fresh         = $freshRoles

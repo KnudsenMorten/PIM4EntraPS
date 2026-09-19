@@ -2,7 +2,8 @@
 <#
 .SYNOPSIS
     71.35 -- deploy the MSP master's signed-baseline PUBLISH job (ca-pim-publish): a Container Apps job on the master's own
-    environment, daily cron + on demand, running as its SYSTEM-ASSIGNED managed identity. No certificate, no secret, no
+    environment, on the cadence set in the master's Manager (Job schedule; daily when nothing is set -- the job's trigger
+    fires every 5 minutes and it gates itself) + on demand, running as its SYSTEM-ASSIGNED managed identity. No certificate, no secret, no
     SAS, no account key -- in the job, in its environment variables, or on this host.
 
 .DESCRIPTION
@@ -15,8 +16,14 @@
       3. READ BACK: provisioningState Succeeded, the env carries exactly the planned values
       4. the identity's ONLY grants (Get-PimBaselinePublishJobGrants): Storage Blob Data Contributor on the bundle
          CONTAINER, Key Vault Crypto User on the signing KEY -- each read back
-      5. SQL: the identity joins grp-pim-sql-admins (members only; never creates the group or moves the admin)
+      5. SQL (SEC-39): the identity gets its OWN contained database user, created from its app id as a SID (never
+         FROM EXTERNAL PROVIDER), with SELECT on exactly the objects the job reads (Get-PimBaselinePublishSqlReads) and
+         no fixed role -- read back. It is NOT a member of grp-pim-sql-admins: that group is the server's Entra admin,
+         i.e. full administration of the store, and the job only reads. An identity an earlier version put in the
+         group is taken OUT of it (read back), after the reader user is proven.
     It does NOT start the job: the build's 'publish' step does (Start-PimBaselinePublish.ps1), after this has converged.
+    The SQL step connects from THIS host as the az context the build established (a member of the SQL admin group),
+    so this host must reach the SQL server -- the same requirement every other store step of the build has.
 
     NETWORK. The job runs in the master's Container Apps subnet. The bundle store's firewall allows that subnet (the
     build's publishnetwork + storage steps put the Microsoft.Storage service endpoint on it and the VNet rule on the
@@ -32,7 +39,9 @@ param(
     [string]$ImageTag,
     [string]$JobName = 'ca-pim-publish',
     [string]$ManagerApp = 'ca-pim-manager',
-    [string]$Cron = '0 4 * * *',
+    # Every 5 minutes (operator 2026-09-18: the cadence is set in the Manager's Job schedule). The job GATES ITSELF against
+    # the master's own PublishSchedule (engine/_shared/PIM-JobCadence.ps1); nothing set = daily, as the old '0 4 * * *'.
+    [string]$Cron = '*/5 * * * *',
     [Parameter(Mandatory)][string]$SqlServerFqdn,
     [string]$SqlDatabase = 'PimPlatform',
     [Parameter(Mandatory)][string]$StorageAccount,
@@ -44,10 +53,12 @@ param(
     [ValidateRange(2, 365)][int]$ValidDays = 30,
     [string]$Scope = 'fleet',
     [string]$RegistryIdentityResourceId,
+    # SEC-39: only used to take the job's identity OUT of the group if an earlier version put it there.
     [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
     # (71.33: no -UseSignedInAccount -- every call here runs as the az context the build established, the signed-in
     # administrator or the certificate identity alike; there is no identity choice to make.)
-    [switch]$SkipSqlAdminGroup
+    # Skip the SQL reader-user step (the job then cannot read the store until its user is created another way).
+    [Alias('SkipSqlAdminGroup')][switch]$SkipSqlGrant
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -96,7 +107,8 @@ if (-not "$RegistryIdentityResourceId".Trim()) {
 $spec = Get-PimBaselinePublishJobSpec -JobName $JobName -Image $image -EnvironmentId $envId -Location $location -Cron $Cron `
             -RegistryServer "$AcrName.azurecr.io" -RegistryIdentity $(if ("$RegistryIdentityResourceId".Trim()) { "$RegistryIdentityResourceId".Trim() } else { 'system' }) `
             -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -StorageAccount $StorageAccount -Container $Container `
-            -SigningKeyId $signingKeyId -ValidDays $ValidDays -Scope $Scope -Exists $exists
+            -SigningKeyId $signingKeyId -ValidDays $ValidDays -Scope $Scope -Exists $exists `
+            -DeployedUtc ([datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture))
 if (-not $spec.ok) { throw "REFUSED: $($spec.reason)" }
 Note ("env: " + ((@($spec.env.Keys) | ForEach-Object { "$_=$($spec.env[$_])" }) -join '  '))
 $yamlPath = Join-Path ([IO.Path]::GetTempPath()) ("pim-publish-job-{0}.yaml" -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
@@ -148,20 +160,80 @@ foreach ($gr in $grants) {
     Note 'granted + read back'
 }
 
-# ---- 5. SQL admin group (members only) ------------------------------------------------------------------------------
-if (-not $SkipSqlAdminGroup) {
-    Step "SQL admin group '$SqlAdminGroupName' -- $JobName's system identity"
-    . (Join-Path $here '_PimSqlAdminGroup.ps1')
+# ---- 5. SQL: its OWN least-privilege READER user -- never the SQL admin group (SEC-39) ------------------------------
+# SEC-39 -- THIS USED TO ADD THE JOB'S IDENTITY TO grp-pim-sql-admins, the SQL server's Entra ADMIN: full administration
+# of the master registry for a job that only SELECTs from four tables. A compromise of the publish job (or of anything
+# able to run as it) would then have been able to rewrite who is an MSP admin in every managed tenant. It now gets a
+# contained user created from its app id as a SID (FROM EXTERNAL PROVIDER fails on these servers), with SELECT on exactly
+# what the producer reads and NO fixed role (a broader role an older run granted is taken back). Read back, then -- and
+# only then -- an earlier version's group membership is removed, so the job is never without access.
+if (-not $SkipSqlGrant) {
+    . (Join-Path $here '_PimSetupShared.ps1')        # Get-PimSqlContainedUserSql / read-back / Get-PimBaselinePublishSqlReads / Resolve-PimMiAppId
+    . (Join-Path $here '_PimSqlAdminGroup.ps1')      # New-PimSqlAdminGroupInvokers (tenant-checked) / Remove-PimSqlAdminGroupMember
+    foreach ($dep in @('engine\_shared\PIM-Rest.ps1', 'engine\_shared\PIM-SqlStore.ps1')) { . (Join-Path $solRoot $dep) }   # Resolve-PimSqlClientType
+    $sqlReads = @(Get-PimBaselinePublishSqlReads)
+    # The cadence (PIM-JobCadence.ps1): SELECT on the two control views, INSERT/UPDATE on the one CHECK-OPTION view onto the
+    # job's own PublishLastRun row. Never a right on pim.Settings itself (it also holds who is SuperAdmin).
+    $ctl      = Get-PimPublishJobControlObjects
+    $sqlSel   = @(@($sqlReads) + @($ctl.select) | Select-Object -Unique)
+    $sqlWrite = @($ctl.write)
+    $revoke   = @('db_owner', 'db_datawriter', 'db_ddladmin', 'db_datareader')
+    Step "SQL: $JobName's identity gets a READER user on $SqlServerFqdn/$SqlDatabase (SELECT on $($sqlReads -join ', '); cadence views $($ctl.select -join ', '), INSERT/UPDATE on $($sqlWrite -join ', ')) -- not the SQL admin group"
     $inv = New-PimSqlAdminGroupInvokers -SubscriptionId $SubscriptionId
-    $srvRes = Resolve-PimSqlServerFromFqdn -Arm $inv.Arm -SubscriptionId $SubscriptionId -Server "$SqlServerFqdn"
-    if (-not $srvRes) { throw "SQL server '$SqlServerFqdn' is not in subscription $SubscriptionId." }
-    $g = Invoke-PimSqlAdminGroupStep -Graph $inv.Graph -Arm $inv.Arm -TenantId $inv.TenantId -SubscriptionId $SubscriptionId `
-             -ResourceGroup $ResourceGroup -SqlResourceGroup $srvRes.resourceGroup -SqlServerName $srvRes.name `
-             -GroupName $SqlAdminGroupName -UpdateJobName '' -ExtraMembers @([pscustomobject]@{ objectId = $oid; label = "publish job identity $JobName" }) `
-             -Mode membersOnly -NoDiscovery
-    Write-PimSqlAdminGroupReport -Result $g
-    if (-not $g.ok -or $g.blocked) { throw "$JobName's identity could not be made a member of '$SqlAdminGroupName' -- it cannot read the master store." }
-    Note "member of '$SqlAdminGroupName', the Entra admin of $($srvRes.name)"
+    $graphInv = $inv.Graph
+    # The app id through the TENANT-CHECKED Graph invoker (not an unscoped `az ad sp show`), bounded retry for a new identity.
+    $miAppId = Resolve-PimMiAppId -ObjectId $oid -What $JobName -Lookup {
+        param($id)
+        try { "$((& $graphInv -Method GET -Path ("/servicePrincipals/$id" + '?$select=appId')).appId)".Trim() } catch { '' }
+    }
+    if (-not "$miAppId".Trim()) { throw "could not resolve the app id of $JobName's identity ($oid) -- cannot create its database user." }
+    # A SQL token for the az context the build established -- scoped to THIS subscription, and its tenant checked.
+    $tokRaw = @(az account get-access-token --subscription $SubscriptionId --resource https://database.windows.net/ -o json 2>$null) -join "`n"
+    $tokObj = $null; try { $tokObj = $tokRaw | ConvertFrom-Json } catch { $tokObj = $null }
+    if (-not $tokObj -or -not "$($tokObj.accessToken)".Trim()) { throw "no Azure SQL token for subscription $SubscriptionId (sign in first) -- cannot create $JobName's database user." }
+    if ("$($tokObj.tenant)".Trim() -and "$($tokObj.tenant)".Trim().ToLowerInvariant() -ne "$($inv.TenantId)".Trim().ToLowerInvariant()) {
+        throw "the SQL token is for tenant '$($tokObj.tenant)', not '$($inv.TenantId)' -- REFUSING."
+    }
+    $grantSql = Get-PimSqlContainedUserSql -DbUserName $JobName -AppId $miAppId -SelectObjects $sqlSel -WriteObjects $sqlWrite -RevokeRoles $revoke
+    $readSql  = Get-PimSqlContainedUserReadBackSql -DbUserName $JobName -AppId $miAppId -Roles $revoke -SelectObjects $sqlSel -WriteObjects $sqlWrite
+    $rowBack = $null
+    $sqlType = Resolve-PimSqlClientType
+    $conn = $sqlType::new("Server=tcp:$SqlServerFqdn,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30")
+    $conn.AccessToken = "$($tokObj.accessToken)"
+    try {
+        $conn.Open()
+        # The two cadence views first (idempotent), so the grant below has objects to grant on.
+        $cmd = $conn.CreateCommand(); $cmd.CommandText = (Get-PimPublishJobControlViewSql); [void]$cmd.ExecuteNonQuery()
+        $cmd = $conn.CreateCommand(); $cmd.CommandText = $grantSql; [void]$cmd.ExecuteNonQuery()
+        $cmd = $conn.CreateCommand(); $cmd.CommandText = $readSql
+        $rd = $cmd.ExecuteReader()
+        try {
+            if ($rd.Read()) {
+                $h = [ordered]@{}
+                for ($i = 0; $i -lt $rd.FieldCount; $i++) { $h[$rd.GetName($i)] = $(if ($rd.IsDBNull($i)) { $null } else { $rd.GetValue($i) }) }
+                $rowBack = [pscustomobject]$h
+            }
+        } finally { $rd.Close() }
+    } catch {
+        throw ("could not create $JobName's database user on $SqlServerFqdn/$SqlDatabase from this host: $($_.Exception.Message). " +
+               'This host must reach the SQL server and its az identity must be a member of the SQL admin group (as for every store step of the build).')
+    } finally { $conn.Close(); $conn.Dispose(); $tokObj = $null }
+    # FAIL CLOSED on a missing table: the producer reads a SELECT that is refused exactly like a table that is absent, and
+    # for pim.TenantRoleProjection "absent" means "project everything". A master registry without these is not ready.
+    $absent = @()
+    if ($rowBack) { $absent = @($sqlSel | Where-Object { $p = $rowBack.PSObject.Properties["sel_$("$_".Replace('.', '_'))"]; $p -and ($null -eq $p.Value -or $p.Value -is [DBNull]) }) }
+    if ($absent.Count) { throw "the master store $SqlDatabase has no $($absent -join ', ') -- apply the registry schema (Initialize-PimMasterRegistry.ps1) first (the cadence views need pim.Settings, which the Manager creates); the job's reader user was NOT proven." }
+    $verdict = Test-PimSqlContainedUserReadBack -Row $rowBack -RevokeRoles $revoke -SelectObjects $sqlSel -WriteObjects $sqlWrite -DbUserName $JobName
+    if (-not $verdict.ok) { throw "read-back FAILED for $JobName's database user: $($verdict.problems -join '; ')" }
+    Note "read back: contained user '$JobName' (SID from app id $miAppId), SELECT on $($sqlSel -join ', '), INSERT/UPDATE on $($sqlWrite -join ', '), no fixed database role"
+
+    # An earlier version made the identity a member of the SQL admin group. Take it out -- the reader user above is proven.
+    $rm = Remove-PimSqlAdminGroupMember -Graph $inv.Graph -MemberObjectId $oid -GroupName $SqlAdminGroupName -Label "publish job identity $JobName"
+    if (-not $rm.ok) { throw "$JobName's identity is STILL a member of '$SqlAdminGroupName' (full SQL administration): $($rm.problem). Remove it by hand -- its reader user is in place." }
+    if ($rm.removed) { Note "removed from '$SqlAdminGroupName' (an earlier version's full-admin membership; read back)" }
+    else { Note "not a member of '$SqlAdminGroupName' (correct)" }
+} else {
+    Warn "-SkipSqlGrant: $JobName's identity got NO database user from this run -- the publish fails until it can SELECT what it reads (see Get-PimBaselinePublishSqlReads in _PimSetupShared.ps1)."
 }
 
 Write-Host "==> $JobName deployed: cron '$Cron' (UTC), signing key $KeyName, store $StorageAccount/$Container. Start it now: Start-PimBaselinePublish.ps1 (the build's publish step)." -ForegroundColor Green

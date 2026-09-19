@@ -1,7 +1,7 @@
 {
   "id": "consultant",
   "name": "Consultant (time-boxed)",
-  "description": "External consultant admin: provisions on the next engine run, TAP immediately, TAP mail sent to the admin's ManagerEmail contact, assignments expire after 90 days.",
+  "description": "External consultant admin: provisions on the next engine run, TAP immediately, TAP mail sent to the owners of the admin's sponsor department (ManagerEmail only as a legacy fallback), assignments expire after 90 days.",
   "prefill": {
     "Purpose": "Day2Day",
     "TargetUsage": "Cloud",

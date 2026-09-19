@@ -46,6 +46,31 @@
       - Microsoft Graph PowerShell SDK must be imported + authenticated.
 #>
 
+function Get-PimContextExtraGroupNames {
+    # IMP-49 i (ss33.28). The group names the DEFINITIONS manage that do NOT start with the lean-fetch prefix
+    # (e.g. DEPT-/PROJ- groups, or a non-'PIM-' naming convention). Unique, case-insensitive. Empty when the
+    # definition reader is not loaded (a bare context build) -- the on-demand by-name lookup still covers them.
+    param([string]$Prefix = 'PIM')
+    $rows = @()
+    try {
+        if (Get-Command Get-PimGroupPolicyDefinitionRows -ErrorAction SilentlyContinue) { $rows = @(Get-PimGroupPolicyDefinitionRows) }
+        elseif (Get-Command Get-PimGroupDefinitionRows -ErrorAction SilentlyContinue) { $rows = @(Get-PimGroupDefinitionRows) }
+    } catch { Write-Verbose "Get-PimContextExtraGroupNames: definitions unreadable: $($_.Exception.Message)"; return @() }
+    $seen = @{}
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $rows) {
+        if ($null -eq $r) { continue }
+        $n = ''
+        if ($r -is [System.Collections.IDictionary]) { if ($r.Contains('GroupName')) { $n = "$($r['GroupName'])".Trim() } }
+        elseif ($r.PSObject.Properties['GroupName']) { $n = "$($r.GroupName)".Trim() }
+        if (-not $n -or $n.StartsWith("$Prefix", [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        $k = $n.ToLowerInvariant()
+        if ($seen.ContainsKey($k)) { continue }
+        $seen[$k] = $true; $out.Add($n)
+    }
+    return $out.ToArray()
+}
+
 function Build-PimContext {
     [CmdletBinding()]
     param(
@@ -96,12 +121,44 @@ function Build-PimContext {
         # name prefix (not the whole directory); AUs + role definitions are bounded so they
         # stay bulk. Set $global:PIM_LeanContext=$false to force the old full-list behaviour.
         $lean = ($null -eq $global:PIM_LeanContext) -or [bool]$global:PIM_LeanContext
-        $prefix = if ("$($global:PIM_GroupNamePrefix)".Trim()) { "$($global:PIM_GroupNamePrefix)".Trim() } else { 'PIM' }
+        # REQ-U (2.4.378, operator: "customer can have different naming convention so you must make sure code uses the actual
+        # naming per tenant and not generic"): the prefix is the TENANT's (its PimGroupPattern's literal head), never a
+        # generic 'PIM'. A pattern with no literal head selects nothing by prefix -- the definition-named groups below
+        # (Get-PimContextExtraGroupNames) are then the whole managed set, which is exactly right for such a tenant.
+        $prefix = if ("$($global:PIM_GroupNamePrefix)".Trim()) { "$($global:PIM_GroupNamePrefix)".Trim() }
+                  elseif (Get-Command Get-PimGroupNamePrefix -ErrorAction SilentlyContinue) { "$(Get-PimGroupNamePrefix)".Trim() }
+                  else { 'PIM' }
         if ($lean) {
             Write-Host "[context] LEAN fetch (REST): users on-demand; groups startswith '$prefix'; AUs + roles bulk..."
             $Global:Users_All_ID  = @()   # resolved on-demand (no 500k bulk list)
             $hdr = @{ ConsistencyLevel = 'eventual' }
-            $Global:Groups_All_ID = @(Invoke-PimGraph -Headers $hdr -Path "/groups?`$filter=startswith(displayName,'$prefix')&`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description&`$count=true&`$top=999" -All | ConvertTo-PimSdkShape)
+            $Global:Groups_All_ID = if ($prefix) {
+                @(Invoke-PimGraph -Headers $hdr -Path "/groups?`$filter=startswith(displayName,'$($prefix -replace "'", "''")')&`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description&`$count=true&`$top=999" -All | ConvertTo-PimSdkShape)
+            } else {
+                Write-Host "[context] the tenant's group pattern has no literal prefix -- groups are resolved by the names the definitions give" -ForegroundColor DarkGray
+                @()
+            }
+            # IMP-49 i (ss33.28) -- VERIFIED: the lean fetch holds ONLY '$prefix*' groups, but a managed group need not
+            # carry that prefix (a naming convention that is not 'PIM-...', a department/project group named
+            # 'DEPT-...' / 'PROJ-...', a group adopted by name). Such a group was missing from the live set, so the
+            # Groups provider planned a CREATE for it on every run, and every by-name lookup paid a Graph round-trip.
+            # The groups the DEFINITIONS name outside the prefix are now resolved here too -- by exact displayName,
+            # 15 per request -- so the lean context holds every managed group and still never lists the directory.
+            try {
+                $extra = @(Get-PimContextExtraGroupNames -Prefix $prefix)
+                if ($extra.Count) {
+                    $have = @{}; foreach ($g in @($Global:Groups_All_ID)) { if ($g -and $g.Id) { $have["$($g.Id)"] = $true } }
+                    $added = 0
+                    for ($i = 0; $i -lt $extra.Count; $i += 15) {
+                        $slice = @($extra[$i..([Math]::Min($i + 14, $extra.Count - 1))])
+                        $in = (@($slice | ForEach-Object { "'" + ("$_" -replace "'", "''") + "'" }) -join ',')
+                        foreach ($g in @(Invoke-PimGraph -Headers $hdr -Path "/groups?`$filter=displayName in ($in)&`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description&`$count=true" -All | ConvertTo-PimSdkShape)) {
+                            if ($g -and $g.Id -and -not $have.ContainsKey("$($g.Id)")) { $Global:Groups_All_ID += $g; $have["$($g.Id)"] = $true; $added++ }
+                        }
+                    }
+                    Write-Host ("[context] + {0} managed group(s) outside the '{1}' prefix resolved by name ({2} named by the definitions)" -f $added, $prefix, $extra.Count)
+                }
+            } catch { Write-Warning "[context] groups named outside the '$prefix' prefix could not be resolved (they are resolved one by one on demand instead): $($_.Exception.Message)" }
         }
         else {
             Write-Host '[context] FULL fetch (REST): users + groups + AUs + roles...'

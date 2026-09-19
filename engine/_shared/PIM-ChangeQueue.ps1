@@ -131,32 +131,12 @@ function Get-PimRunSet {
     return @($out.ToArray() | Sort-Object { Get-PimEntityOrderRank $_.entity }, { "$($_.key)" })
 }
 
-# --- persistence adapter (JSON now; SQL via the Phase-6 data layer) -------------
-function Read-PimChangeQueue {
-    param([Parameter(Mandatory)][string]$QueueFile)
-    if (-not (Test-Path -LiteralPath $QueueFile)) { return @() }
-    try { return @((Get-Content -LiteralPath $QueueFile -Raw -Encoding UTF8 | ConvertFrom-Json).changes) } catch { return @() }
-}
-
-function Add-PimChangeToQueue {
-    param([Parameter(Mandatory)][string]$QueueFile, [Parameter(Mandatory)][object]$Change)
-    $dir = Split-Path -Parent $QueueFile
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $list = New-Object System.Collections.Generic.List[object]
-    foreach ($c in (Read-PimChangeQueue -QueueFile $QueueFile)) { $list.Add($c) }
-    $list.Add($Change)
-    @{ changes = $list.ToArray() } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $QueueFile -Encoding UTF8
-    return $list.Count
-}
-
-function Clear-PimChangeQueue {
-    # Drop the (applied) changes; optionally keep a specified set of ids pending.
-    param([Parameter(Mandatory)][string]$QueueFile, [string[]]$KeepIds = @())
-    $keep = @{}; foreach ($i in @($KeepIds)) { $keep["$i"] = $true }
-    $remaining = @(Read-PimChangeQueue -QueueFile $QueueFile | Where-Object { $keep.ContainsKey("$($_.id)") })
-    @{ changes = $remaining } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $QueueFile -Encoding UTF8
-    return $remaining.Count
-}
+# --- persistence: SQL pim.ChangeQueue ONLY ------------------------------------
+# 🔴 IMP-40 (§33.28): Read-/Add-/Clear-PimChangeQueue kept the queue in a JSON FILE. Nothing in v2 read it,
+# and the one writer -- the scheduler's discovery handler, on a SQL failure -- wrote proposals into a file that
+# is EPHEMERAL in a container and that queue-apply never drains, so they were lost while the job reported
+# success. PIM v2 is SQL-only: the queue is pim.ChangeQueue (Add-PimSqlQueueChange / Get-PimSqlQueue,
+# PIM-SqlStore.ps1), and a failed enqueue FAILS the job. The file functions are gone so nothing can reach for them.
 
 # SQL queue table DDL (Phase-6 SQL-only data layer will create this).
 function Get-PimChangeQueueDdl {

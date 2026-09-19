@@ -3,7 +3,7 @@
 <!-- Sent to an approver when an admin's DELEGATION (assignment to a delegation / permission group) needs their
      decision. This is DELEGATION-time approval, handled in our layer (PIM Manager / engine). ACTIVATION approval
      is a SEPARATE mechanism handled natively by Entra PIM per the group's role-management policy and is NEVER
-     sent by this engine. To customize: copy to approval-request.mailtemplate.custom.html and edit. -->
+     sent by this engine. To customize: edit it in the Manager (Settings > Mail templates); the edited copy is kept in SQL and is never overwritten by updates. -->
 <html>
 <body style="font-family:Segoe UI,Arial,sans-serif; color:#24292f; font-size:14px;">
   <p>Hello {{ApproverName}},</p>

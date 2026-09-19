@@ -1,13 +1,17 @@
 {
   "id": "azure-rbac",
-  "name": "Azure RBAC (ARM role assignments at a scope)",
+  "name": "Azure RBAC (Azure resource roles at a scope, ELIGIBLE through PIM)",
   "auth": "arm",
-  "status": "structure built v2.4.183 -- ARM roleAssignments PUT-with-client-GUID. Live-validation pending an ARM token + a scope the SPN can read/write role assignments on.",
-  "permissionsNeeded": ["Microsoft.Authorization/roleAssignments/write + /read at the target scope (e.g. the 'User Access Administrator' or 'Owner' role for the SPN), Microsoft.Authorization/roleDefinitions/read"],
+  "pimModel": "eligible",
+  "status": "structure built v2.4.183; eligible-through-PIM since v2.4.373 (was a permanent roleAssignments PUT). Live-validation pending an ARM token + a scope the SPN can manage PIM role eligibility on.",
+  "permissionsNeeded": ["Microsoft.Authorization/roleEligibilityScheduleRequests/write + Microsoft.Authorization/roleEligibilitySchedules/read at the target scope (e.g. the 'User Access Administrator' or 'Owner' role for the SPN), Microsoft.Authorization/roleDefinitions/read"],
   "prerequisites": {
-    "scopeIsArmPath": "Each row's Scope column = the ARM scope path the role applies at, e.g. /subscriptions/<sub> or /subscriptions/<sub>/resourceGroups/<rg> or a resource id. Role definitions + assignments are listed/created at that scope.",
-    "roleIdIsFullPath": "listRoles returns each role's full resource id (/subscriptions/.../roleDefinitions/<guid>); the assign body uses it verbatim as roleDefinitionId.",
-    "clientGuidPut": "ARM creates a role assignment with PUT to roleAssignments/<new-guid> -- the engine supplies a fresh {newId} per row.",
+    "scopeIsArmPath": "Each row's Scope column = the ARM scope path the role applies at, e.g. /subscriptions/<sub> or /subscriptions/<sub>/resourceGroups/<rg> or a resource id. Role definitions + eligibilities are listed/created at that scope.",
+    "roleIdIsFullPath": "listRoles returns each role's full resource id (/subscriptions/.../roleDefinitions/<guid>); the eligibility request body uses it verbatim as roleDefinitionId.",
+    "clientGuidPut": "ARM creates a role eligibility schedule request with PUT to roleEligibilityScheduleRequests/<new-guid> -- the engine supplies a fresh {newId} per row.",
+    "eligibleThroughPim": "This connector NEVER creates a permanent (standing) Azure role assignment. It used to PUT Microsoft.Authorization/roleAssignments -- a standing assignment made OUTSIDE PIM, the same class as SEC-45 for Entra directory roles. The group is now made ELIGIBLE through a PIM role eligibility schedule request (requestType AdminAssign, expiration NoExpiration; no startDateTime, which ARM documents as optional and starts now -- a date token would not survive the JSON round-trip the same way on both PowerShell hosts); its members still ACTIVATE the role under the resource's PIM role settings (MFA, justification, approval, maximum duration). The role settings decide whether a no-expiry eligibility is allowed; if they do not, ARM refuses the request and the engine reports the failure item.",
+    "atScopeOnly": "listAssignments reads the eligibility schedules AT the row's scope only ($filter=atScope()), so an eligibility inherited from a parent scope is not mistaken for this binding.",
+    "removal": "A Remove row is REPORTED, not applied: an eligibility carries no 'created by PIM4EntraPS' marker, so the workload runtime never deletes it (the v1 rule for flat assignments). Remove it in Azure -> Privileged Identity Management -> Azure resources, or manage Azure delegation through PIM-Assignments-Azure-Resources, which the engine applies and prunes itself.",
     "tokenAdapter": "auth=arm -> token for https://management.azure.com/ via $global:PIM_WorkloadTokens['arm'] (launcher-minted) or Get-AzAccessToken."
   },
   "api": {
@@ -22,7 +26,7 @@
     },
     "listAssignments": {
       "method": "GET",
-      "path": "{scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01",
+      "path": "{scope}/providers/Microsoft.Authorization/roleEligibilitySchedules?api-version=2020-10-01&$filter=atScope()",
       "itemsPath": "value",
       "assignmentId": "name",
       "roleId": "properties.roleDefinitionId",
@@ -30,18 +34,30 @@
     },
     "assign": {
       "method": "PUT",
-      "path": "{scope}/providers/Microsoft.Authorization/roleAssignments/{newId}?api-version=2022-04-01",
+      "path": "{scope}/providers/Microsoft.Authorization/roleEligibilityScheduleRequests/{newId}?api-version=2020-10-01",
       "body": {
         "properties": {
           "roleDefinitionId": "{roleId}",
           "principalId": "{groupId}",
-          "principalType": "Group"
+          "requestType": "AdminAssign",
+          "justification": "PIM4EntraPS workload connector: {groupTag} eligible for {roleName}",
+          "scheduleInfo": {
+            "expiration": { "type": "NoExpiration" }
+          }
         }
       }
     },
     "remove": {
-      "method": "DELETE",
-      "path": "{scope}/providers/Microsoft.Authorization/roleAssignments/{assignmentId}?api-version=2022-04-01"
+      "method": "PUT",
+      "path": "{scope}/providers/Microsoft.Authorization/roleEligibilityScheduleRequests/{newId}?api-version=2020-10-01",
+      "body": {
+        "properties": {
+          "roleDefinitionId": "{roleId}",
+          "principalId": "{groupId}",
+          "requestType": "AdminRemove",
+          "justification": "PIM4EntraPS workload connector: remove {groupTag} from {roleName}"
+        }
+      }
     }
   }
 }

@@ -84,15 +84,55 @@ function Get-PimLockedSchema {
     }
 }
 
-# SQL table locked spec (the LOCAL store). Same shape; required carries T-SQL types.
-function Get-PimLockedSqlSchema {
-    return @{
-        'pim.LocalAdmins' = @{
-            deprecated = @('TierLevel')
-            required   = @{ Purpose = "NVARCHAR(20) NOT NULL CONSTRAINT DF_LocalAdmins_Purpose DEFAULT 'Day2Day'" }
-            migrations = @(@{ from = 'TierLevel'; to = 'Purpose'; whenTargetBlank = $true; sqlCase = "CASE WHEN [TierLevel] LIKE '%T0%' OR [TierLevel] LIKE '%L0%' OR [TierLevel] LIKE '%Tier0%' THEN 'HighPriv' ELSE 'Day2Day' END" })
-        }
+# --- THE LOCKED SQL SCHEMA: every table the SHIPPED BASE SCHEMA creates ------------------------
+# 🔴 2026-09-18 (IMP-46, operator: retire the dead local-store tables). This used to list exactly ONE
+# table, pim.LocalAdmins -- a table nothing in v2 reads or writes, created by sql/local-schema.sql. It
+# was nevertheless LOAD-BEARING: it was the only entry here, so "a locked table is absent" -- the
+# signal Invoke-PimUpdate uses to apply the base schema on a FIRST install, the signal
+# Invoke-PimDeployAll reads (SqlUpdateRequired) to decide whether to run its schema step at all, and
+# the post-apply "still absent" check in update-job-entry -- all hung off a dead table.
+# Deleting that table without replacing the signal would have let a first install skip its schema.
+# 🔑 So the locked set is now DERIVED from sql/platform-schema.sql: every `CREATE TABLE` in it is
+# locked as PRESENT (no required/deprecated columns -- the file's own guarded ALTERs own the columns).
+# A store with no tables is therefore "missing N tables" by construction, and a table added to the
+# shipped file is locked the day it is written, with no second list to forget.
+# 🔒 Existing stores keep pim.LocalAdmins / pim.LocalResources: nothing drops them. They are simply no
+# longer part of the contract.
+# Resolved at load time, relative to this file (engine/_shared -> the solution root).
+# Two Join-Paths, no backslash literal: the container reads this with [IO.File] on Linux.
+$script:PimBaseSchemaDefaultPath = Join-Path (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'sql') 'platform-schema.sql'
+
+function Get-PimBaseSchemaTables {
+    <#
+      PURE. The tables a shipped schema file creates: every `CREATE TABLE <name>` outside comments,
+      brackets removed, in file order, de-duplicated. Views, indexes and ALTERs are not tables.
+    #>
+    param([AllowEmptyString()][string]$Sql)
+    $code = "$Sql" -replace '(?s)/\*.*?\*/', ' ' -replace '(?m)--.*$', ' '
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches($code, '(?im)\bCREATE\s+TABLE\s+([\w\.\[\]]+)')) {
+        $n = ($m.Groups[1].Value -replace '[\[\]]', '').Trim()
+        if ($n -and -not ($out | Where-Object { $_ -ieq $n })) { $out.Add($n) }
     }
+    return @($out.ToArray())
+}
+
+# SQL table locked spec. Same shape as the CSV spec; `required` would carry T-SQL types, but the base
+# tables are locked for PRESENCE only (see above). -BaseSchemaPath exists for tests.
+function Get-PimLockedSqlSchema {
+    param([string]$BaseSchemaPath = $script:PimBaseSchemaDefaultPath)
+    # Fail CLOSED: an unreadable base schema is not "nothing is locked" -- that is exactly the answer
+    # that would let a first install skip its schema.
+    if (-not "$BaseSchemaPath".Trim() -or -not (Test-Path -LiteralPath $BaseSchemaPath)) {
+        throw "Get-PimLockedSqlSchema: the shipped base schema '$BaseSchemaPath' is missing -- cannot say which tables the store must have."
+    }
+    $tables = Get-PimBaseSchemaTables -Sql ([IO.File]::ReadAllText($BaseSchemaPath))
+    if (-not @($tables).Count) {
+        throw "Get-PimLockedSqlSchema: '$BaseSchemaPath' declares no CREATE TABLE -- refusing an empty locked schema."
+    }
+    $locked = @{}
+    foreach ($t in $tables) { $locked[$t] = @{ deprecated = @(); required = @{}; migrations = @() } }
+    return $locked
 }
 
 # --- PURE PLANNER ---------------------------------------------------------------

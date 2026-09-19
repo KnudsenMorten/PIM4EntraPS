@@ -101,6 +101,29 @@ function Get-PimActiveAssignmentsGroupPrefix {
     return $pfx
 }
 
+function Select-PimActiveAssignmentsPimGroupCandidates {
+    # BUG-217 (§33.28). PURE. The groups whose PIM-for-Groups assignments the Revoke snapshot reads: EVERY group that
+    # can carry one -- security-enabled or Microsoft 365 -- whatever it is called. A mail-only distribution list is
+    # skipped (it cannot be onboarded to PIM); a group whose securityEnabled is UNKNOWN (an older cache shape) is kept,
+    # so nothing is dropped on a guess. Dynamic groups are skipped by the caller, which counts them.
+    param([object[]]$Groups = @())
+    @(@($Groups) | Where-Object {
+        if (-not $_ -or -not $_.Id) { return $false }
+        $types = @($_.GroupTypes)
+        $sec = $null
+        if ($_.PSObject.Properties['SecurityEnabled']) { $sec = $_.SecurityEnabled }
+        if ($null -eq $sec -or "$sec" -eq '') { return $true }
+        return ([bool]$sec -or ($types -contains 'Unified'))
+    })
+}
+
+function Test-PimGroupNotPimOnboardedError {
+    # BUG-217. PURE. A per-group assignmentSchedules error that only means "this group is not a PIM group" -- not a
+    # failed read. Anything else (401/403/5xx, throttling) is still counted as a failure.
+    param([string]$Message)
+    return ("$Message" -match '(?i)ResourceNotOnboarded|NotOnboarded|not onboarded|ResourceTypeNotSupported|RoleAssignmentDoesNotExist|GroupNotFound|Request_ResourceNotFound')
+}
+
 function Get-PimManagerLookupCaches {
     # Populate $script:PimManager_Users / Groups / Roles for principal +
     # role-display-name resolution in the active-assignments row builder.
@@ -149,9 +172,12 @@ function Get-PimManagerLookupCaches {
         if ((-not $restGraph) -and (Get-Command Get-PimGroupsFiltered -ErrorAction SilentlyContinue)) {
             $script:PimManager_Groups = @(Get-PimGroupsFiltered)
         } elseif ($restGraph) {
-            $pfx = Get-PimActiveAssignmentsGroupPrefix
-            $f =[uri]::EscapeDataString("startswith(displayName,'$pfx')")
-            $script:PimManager_Groups = @(Invoke-PimGraph -Path "/groups?`$filter=$f&`$select=id,displayName,description,groupTypes&`$top=999" -All | ConvertTo-PimSdkShape)
+            # 🔴 BUG-217 (§33.28, operator decision 2026-09-18): the Revoke snapshot covers EVERY PIM-for-Groups group,
+            # not only the ones named by our convention -- a legacy or hand-made PIM group's active grants are exactly
+            # what the revoke screen must show. So the cache is no longer prefix-filtered: ALL groups, paged 999 at a
+            # time (a 30k-group tenant is ~30 list calls), with the two fields the snapshot needs to skip groups that
+            # can never carry a PIM-for-Groups assignment (dynamic membership, mail-only distribution lists).
+            $script:PimManager_Groups = @(Invoke-PimGraph -Path "/groups?`$select=id,displayName,description,groupTypes,securityEnabled&`$top=999" -All | ConvertTo-PimSdkShape)
         } else {
             $script:PimManager_Groups = @(Get-MgGroup -All)
         }
@@ -587,8 +613,12 @@ function Invoke-PimActiveAssignmentsSnapshot {
     #   2. Queries go through /v1.0/$batch, 20 per round-trip -- a per-group
     #      sequential loop took >4 minutes on a real tenant.
     $pimGroupRows = @()
-    $pimPrefix = Get-PimActiveAssignmentsGroupPrefix
-    $pimGroupsToQuery = @($script:PimManager_Groups | Where-Object { $_ -and $_.Id -and $_.DisplayName -and ([string]$_.DisplayName).StartsWith($pimPrefix, [System.StringComparison]::OrdinalIgnoreCase) })
+    # 🔴 BUG-217 (§33.28): EVERY group that can be a PIM-for-Groups group -- not only the '<prefix>' ones. A group
+    # qualifies unless it is a mail-only distribution list (not security-enabled and not a Microsoft 365 group);
+    # dynamic groups are dropped just below. Cost stays bounded: one filtered read per group, 20 per $batch
+    # round-trip, run by the tick's snapshot job (never on the Manager's request loop). A group that is simply not
+    # onboarded to PIM answers with no schedules and is not a failure (Test-PimGroupNotPimOnboardedError).
+    $pimGroupsToQuery = @(Select-PimActiveAssignmentsPimGroupCandidates -Groups @($script:PimManager_Groups))
     # A DYNAMIC-membership group cannot carry a PIM-for-Groups assignment (Graph answers
     # ResourceTypeNotSupported), so its request can only fail. The lookup cache now selects groupTypes,
     # which lets the read skip them instead of spending a batch slot to collect a known error.
@@ -604,6 +634,7 @@ function Invoke-PimActiveAssignmentsSnapshot {
         for ($i = 0; $i -lt $pimGroupsToQuery.Count; $i++) {
             $gr = $gRes[$i]
             if ($gr -and $gr.ok) { foreach ($v in @($gr.items)) { if ($null -ne $v) { $pimGroupRows += $v } }; continue }
+            if ($gr -and (Test-PimGroupNotPimOnboardedError -Message "$($gr.error)")) { continue }   # BUG-217: not a PIM group -- nothing to list, not a failure
             $gFail++
             $errText = if ($gr) { "$($gr.error)" } else { 'no response' }
             if (-not $gFirstErr -and $gr -and ($gr.status -eq 401 -or $gr.status -eq 403 -or $errText -match 'HTTP (401|403)\b')) { $gFirstErr = $errText }
@@ -641,7 +672,7 @@ function Invoke-PimActiveAssignmentsSnapshot {
                 foreach ($br in @($resp.responses)) {
                     if ($br.status -ge 200 -and $br.status -lt 300 -and $br.body -and $br.body.value) {
                         foreach ($v in @($br.body.value)) { $pimGroupRows += $v }
-                    } elseif ($br.status -ge 400) {
+                    } elseif ($br.status -ge 400 -and -not (Test-PimGroupNotPimOnboardedError -Message "$(if ($br.body -and $br.body.error) { "$($br.body.error.code) $($br.body.error.message)" })")) {
                         $gFail++
                         $errCode = if ($br.body -and $br.body.error) { $br.body.error.code } else { $br.status }
                         $errMsg  = if ($br.body -and $br.body.error -and $br.body.error.message) { $br.body.error.message } else { "$errCode" }
@@ -668,7 +699,7 @@ function Invoke-PimActiveAssignmentsSnapshot {
         }
         Write-Host ("  [revoke] pim-for-groups: {0} active assignment(s) across {1} PIM group(s) ({2} batch round-trips)" -f $pimGroupRows.Count, $pimGroupsToQuery.Count, [Math]::Ceiling($pimGroupsToQuery.Count / 20)) -ForegroundColor DarkGray
     } else {
-        Write-Warning ("  [revoke] no '{0}'-prefixed groups in the lookup cache. PIM-for-Groups rows will be empty." -f $pimPrefix)
+        Write-Warning "  [revoke] no groups in the lookup cache that can carry a PIM-for-Groups assignment. PIM-for-Groups rows will be empty."
     }
     # Casing-tolerant property read: SDK objects are PascalCase, REST/$batch
     # bodies are camelCase. Returns the first present alias (or '').

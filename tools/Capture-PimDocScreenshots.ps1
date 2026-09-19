@@ -27,7 +27,7 @@
       manager-pending-changes.png  Pending changes > Review & commit queue
       manager-drift.png            Reviews & controls > Drift: live vs desired
       manager-jobs-logs.png        Jobs > Engine logs & errors (with a run's log open)
-      manager-standing-access.png  Reviews & controls > Review standing access
+      manager-standing-access.png  Reviews & controls > Review current delegations
       manager-reports.png          Reviews & controls > Reports
       manager-role-lookup.png      Access > Look up a role
       manager-settings.png         Audit & Settings > Settings

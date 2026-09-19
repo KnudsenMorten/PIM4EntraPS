@@ -215,8 +215,16 @@ function Get-PimWriteAffectedRows {
         if ($null -eq $m) { continue }
         # modify entries are @{ before; after; diffCols } -- validate the AFTER state,
         # and also the BEFORE (so a scoped caller can't MODIFY an out-of-scope row).
-        if ($m.PSObject.Properties['after']  -and $null -ne $m.after)  { [void]$out.Add($m.after) }
-        if ($m.PSObject.Properties['before'] -and $null -ne $m.before) { [void]$out.Add($m.before) }
+        # 🔴 §33.28 (found with BUG-198): Compare-PimRowSets builds each modify as an [ordered]
+        # DICTIONARY, and PSObject.Properties does not expose a dictionary's keys -- so this read
+        # nothing and EVERY modify was silently dropped from the scope check and the maker/checker
+        # classification. Read both shapes.
+        foreach ($side in @('after', 'before')) {
+            $v = $null
+            if ($m -is [System.Collections.IDictionary]) { if ($m.Contains($side)) { $v = $m[$side] } }
+            elseif ($m.PSObject.Properties[$side]) { $v = $m.PSObject.Properties[$side].Value }
+            if ($null -ne $v) { [void]$out.Add($v) }
+        }
     }
     foreach ($r in @($Diff.removes)) { if ($null -ne $r) { [void]$out.Add($r) } }
     return $out.ToArray()

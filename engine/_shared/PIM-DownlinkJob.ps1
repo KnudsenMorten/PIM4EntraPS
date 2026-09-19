@@ -159,8 +159,8 @@ function Get-PimDownlinkJobEnv {
         # value; the secret is referenced, never valued (see -EngineSecretRef).
         [string]$EngineClientId,
         [string]$EngineSecretRef,
-        # BUG-73: the baseline URL when it carries a SAS -- a credential, so it is referenced too.
-        [string]$BaselineUrlSecretRef,
+        # (SEC-27, 2026-09-18: -BaselineUrlSecretRef is GONE with the SAS transport. The pull URL is the PLAIN blob URL
+        # (public-but-signed / private endpoint, DESIGN 13.7) and carries no credential to reference.)
         # BUG-76: the USER-ASSIGNED MI's client id. Container Apps attaches a user-assigned
         # identity with no system identity alongside it, and the IDENTITY_ENDPOINT token call
         # cannot pick an identity on its own -- so without this the container gets NO token and
@@ -181,7 +181,10 @@ function Get-PimDownlinkJobEnv {
         [switch]$AllowRetraction,
         # 71.35 TRUST ANCHOR: the master signing key ids this tenant pins (RFC 7638 thumbprints, comma-separated in one env
         # value). Identifiers, not secrets. Absent => only bundles signed by the product's embedded certificate verify.
-        [AllowEmptyCollection()][string[]]$BaselineTrustedKeys = @()
+        [AllowEmptyCollection()][string[]]$BaselineTrustedKeys = @(),
+        # The cadence (PIM-JobCadence.ps1): when this definition was deployed (ISO UTC). The pull runs once on the next
+        # trigger after a redeploy, so the deploy's inputs take effect then and -Start verifies a real pull. Blank = none.
+        [string]$DeployedUtc = ''
     )
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
     $ev = New-Object System.Collections.Generic.List[string]
@@ -215,10 +218,6 @@ function Get-PimDownlinkJobEnv {
         $ev.Add("PIM_ClientId=$EngineClientId") | Out-Null
         if ("$EngineSecretRef".Trim()) { $ev.Add("AZURE_CLIENT_SECRET=secretref:$EngineSecretRef") | Out-Null }
     }
-    # BUG-73: a SAS-bearing baseline URL arrives as a secret reference and is read from the env by
-    # downlink-job-entry.ps1 ($BaselineUrl = $env:PIM_BaselineUrl). It is deliberately NOT put on
-    # the command line, where it would be readable in the job definition forever.
-    if ("$BaselineUrlSecretRef".Trim()) { $ev.Add("PIM_BaselineUrl=secretref:$BaselineUrlSecretRef") | Out-Null }
     # BUG-76: name the identity the IDENTITY_ENDPOINT call must ask for. Not a secret -- a client id.
     if ("$ManagedIdentityClientId".Trim()) { $ev.Add("PIM_ManagedIdentityClientId=$ManagedIdentityClientId") | Out-Null }
     # IMP-13: comma-separated, because an ACA env value is a single string.
@@ -227,7 +226,85 @@ function Get-PimDownlinkJobEnv {
     if ($AllowRetraction) { $ev.Add('PIM_DOWNLINK_ALLOW_RETRACTION=true') | Out-Null }
     $__pins = @(@($BaselineTrustedKeys) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ -cmatch '^[A-Za-z0-9_-]{43}$' } | Select-Object -Unique)
     if ($__pins.Count) { $ev.Add("PIM_BaselineTrustedKeys=$($__pins -join ',')") | Out-Null }
+    if ("$DeployedUtc".Trim() -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$') { $ev.Add("PIM_CadenceDeployedUtc=$("$DeployedUtc".Trim())") | Out-Null }
     return @($ev.ToArray())
+}
+
+# ---------------------------------------------------------------------------
+# PURE. Which ACA secrets a redeploy must REMOVE from the job (lead 2026-09-18, measured on RIDE: after a redeploy with the
+# PLAIN -BaselineUrl, the retired SAS transport's secret 'pim-baseline-url' -- a SAS link, i.e. a standing credential to
+# the master's bundle store -- stayed attached to the job, referenced by nothing). A `job update --yaml` leaves secrets it
+# does not list in place, so they have to be removed explicitly. Rule: every existing secret that the deployed definition
+# does not reference goes; the retired 'pim-baseline-url' always goes. Returns @{ remove; keep; reason }.
+# ---------------------------------------------------------------------------
+$script:PimDownlinkRetiredSecrets = @('pim-baseline-url')
+function Get-PimDownlinkJobSecretPrune {
+    param([AllowEmptyCollection()][string[]]$Existing = @(), [AllowEmptyCollection()][string[]]$Referenced = @())
+    $ref = @(@($Referenced) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $remove = New-Object System.Collections.Generic.List[string]; $keep = New-Object System.Collections.Generic.List[string]
+    foreach ($s in @(@($Existing) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)) {
+        $l = $s.ToLowerInvariant()
+        if ($script:PimDownlinkRetiredSecrets -contains $l -or $ref -notcontains $l) { $remove.Add($s) } else { $keep.Add($s) }
+    }
+    $why = if ($remove.Count) { "remove $($remove -join ', ') (not referenced by the deployed definition$(if (@($remove | Where-Object { $script:PimDownlinkRetiredSecrets -contains $_.ToLowerInvariant() }).Count) { '; pim-baseline-url is the retired SAS transport (SEC-27)' }))" } else { 'no unreferenced secret' }
+    return [pscustomobject]@{ remove = @($remove.ToArray()); keep = @($keep.ToArray()); reason = $why }
+}
+
+function Invoke-PimDownlinkJobSecretCleanup {
+    <#
+      List the job's secrets, remove every one Get-PimDownlinkJobSecretPrune says must go (`--yes`: the command prompts
+      otherwise), and READ BACK. The az call is injected (-Az param([string[]]$AzArgs) -> @{ exitCode; output }) so the
+      offline test drives this with a mocked az. Every call carries --subscription when one is given. A list that fails,
+      or a secret still attached after removal, is NOT ok -- never "clean" by assumption.
+      Returns @{ ok; removed; remaining; reason; calls }.
+    #>
+    param([Parameter(Mandatory)][string]$JobName, [Parameter(Mandatory)][string]$ResourceGroup, [string]$SubscriptionId = '',
+          [AllowEmptyCollection()][string[]]$Referenced = @(), [Parameter(Mandatory)][scriptblock]$Az, [scriptblock]$Log = { param($m) })
+    $sub = @(); if ("$SubscriptionId".Trim()) { $sub = @('--subscription', "$SubscriptionId".Trim()) }
+    $calls = New-Object System.Collections.Generic.List[string]
+    $list = {
+        $a = @('containerapp', 'job', 'secret', 'list', '-g', $ResourceGroup, '-n', $JobName, '-o', 'json', '--only-show-errors') + $sub
+        $calls.Add(($a -join ' '))
+        $r = & $Az $a
+        if ($null -eq $r -or [int]$r.exitCode -ne 0) { throw "could not list the secrets of job '$JobName' (az exit $(if ($r) { $r.exitCode } else { '?' }))" }
+        $txt = "$($r.output)".Trim()
+        if (-not $txt) { return , @() }
+        # 🪤 Windows PowerShell 5.1 emits a JSON ARRAY from ConvertFrom-Json as ONE object, so `@($txt | ConvertFrom-Json)`
+        # is a one-element array holding the whole list, and its .name is every name joined. Assign, then enumerate.
+        $parsed = $txt | ConvertFrom-Json
+        $names = New-Object System.Collections.Generic.List[string]
+        foreach ($x in @($parsed)) { if ($x -and "$($x.name)".Trim()) { $names.Add("$($x.name)".Trim()) } }
+        return , @($names.ToArray())
+    }
+    try { $existing = & $list } catch {
+        return [pscustomobject]@{ ok = $false; removed = @(); remaining = @(); calls = @($calls.ToArray())
+                                  reason = "$($_.Exception.Message) -- a retired credential may still be attached; refusing to report the deploy as clean" }
+    }
+    $prune = Get-PimDownlinkJobSecretPrune -Existing $existing -Referenced $Referenced
+    if (-not @($prune.remove).Count) {
+        return [pscustomobject]@{ ok = $true; removed = @(); remaining = @($existing); calls = @($calls.ToArray())
+                                  reason = "$(if (@($existing).Count) { @($existing) -join ', ' } else { 'none' }) -- every secret is referenced by the deployed definition" }
+    }
+    foreach ($s in @($prune.remove)) {
+        $a = @('containerapp', 'job', 'secret', 'remove', '-g', $ResourceGroup, '-n', $JobName, '--secret-names', $s, '--yes', '--only-show-errors') + $sub
+        $calls.Add(($a -join ' '))
+        & $Log "removing unreferenced secret '$s' from $JobName"
+        $r = & $Az $a
+        if ($null -eq $r -or [int]$r.exitCode -ne 0) {
+            return [pscustomobject]@{ ok = $false; removed = @(); remaining = @($existing); calls = @($calls.ToArray())
+                                      reason = "removing secret '$s' from $JobName FAILED (az exit $(if ($r) { $r.exitCode } else { '?' })): $("$($r.output)".Trim())" }
+        }
+    }
+    try { $after = & $list } catch {
+        return [pscustomobject]@{ ok = $false; removed = @(); remaining = @(); calls = @($calls.ToArray()); reason = "read-back FAILED: $($_.Exception.Message)" }
+    }
+    $still = @(@($prune.remove) | Where-Object { @($after) -contains $_ })
+    if ($still.Count) {
+        return [pscustomobject]@{ ok = $false; removed = @(); remaining = @($after); calls = @($calls.ToArray())
+                                  reason = "read-back FAILED: secret(s) $($still -join ', ') are STILL attached to $JobName after removal" }
+    }
+    return [pscustomobject]@{ ok = $true; removed = @($prune.remove); remaining = @($after); calls = @($calls.ToArray())
+                              reason = "$($prune.reason); read back: gone (secrets now: $(if (@($after).Count) { @($after) -join ', ' } else { 'none' }))" }
 }
 
 # ---------------------------------------------------------------------------
@@ -364,7 +441,7 @@ function Get-PimDownlinkJobYaml {
         $argsYaml = "        args: [" + ($quoted -join ',') + "]"
     }
     # env. A value of the form `secretref:<name>` renders as a secretRef, NEVER as a value --
-    # that is the whole mechanism by which the engine secret and a SAS-bearing baseline URL reach
+    # that is the whole mechanism by which the engine secret (when one is given) reaches
     # the container without ever appearing as readable text in the job definition. Same convention
     # as Setup-PimContainers (`AZURE_CLIENT_SECRET=secretref:pim-engine-client-secret`).
     $envLines = ''
@@ -566,8 +643,8 @@ function Get-PimDownlinkJobDeployPlan {
         # container has no cert store, see Get-PimDownlinkJobEnv).
         [string]$EngineClientId,
         [string]$EngineClientSecret,
-        # BUG-73: a SAS-bearing baseline URL. Delivered as an ACA secret, never on the command line.
-        [string]$BaselineSasUrl,
+        # (SEC-27, 2026-09-18: -BaselineSasUrl is GONE -- the SAS transport is retired. A -BaselineUrl carrying a query
+        # string is REFUSED below rather than stored: a credential must not ride in a job definition at all.)
         # BUG-76: client id of the user-assigned MI the container runs as.
         [string]$ManagedIdentityClientId,
         # (71.19: -DefaultManagerEmail removed; see Get-PimDownlinkJobEnv.)
@@ -586,32 +663,32 @@ function Get-PimDownlinkJobDeployPlan {
         # 71.14: default OFF; ON emits PIM_DOWNLINK_ALLOW_RETRACTION=true for the entry.
         [switch]$AllowRetraction,
         # 71.35: the pinned master signing key ids (forwarded to the env builder).
-        [AllowEmptyCollection()][string[]]$BaselineTrustedKeys = @()
+        [AllowEmptyCollection()][string[]]$BaselineTrustedKeys = @(),
+        # The cadence: the deploy stamp (forwarded to the env builder as PIM_CadenceDeployedUtc).
+        [string]$DeployedUtc = ''
     )
     if ($SystemAssigned) { $ManagedIdentityClientId = '' }
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
-    # 🔒 BUG-73: when the baseline URL carries a SAS it must NOT reach the command line -- the job
-    # definition is readable by anyone with Reader on the RG, and a SAS there is a standing
-    # credential to the master's bundle store. It travels as an ACA secret and the entrypoint picks
-    # it up from $env:PIM_BaselineUrl, which it already falls back to.
+    # 🔒 SEC-27 (2026-09-18): NO SAS. The job definition is readable by anyone with Reader on the RG, so a URL with a
+    # query string (a SAS is `?sv=...&sig=...`) would be a standing credential to the master's bundle store in plain
+    # sight. BUG-73 used to move it into an ACA secret; the transport is now public-but-signed / private-endpoint
+    # (DESIGN 13.7) and such a URL is refused outright.
+    if ("$BaselineUrl".Trim() -match '[?#]') {
+        return @{ ok = $false; reason = 'the baseline URL carries a query string or fragment -- the SAS transport is retired; give the PLAIN blob URL'
+                  action = ''; command = @(); envVars = @(); jobArgs = @{ ok = $false; args = @(); hasInlineSecret = $true; yaml = '' }; engineIdentity = '' }
+    }
     $secrets = New-Object System.Collections.Generic.List[string]
     $engineSecretRef = ''
-    $baselineUrlRef  = ''
     $cmdBaselineUrl  = $BaselineUrl
-    if ("$BaselineSasUrl".Trim()) {
-        $baselineUrlRef = 'pim-baseline-url'
-        $secrets.Add("$baselineUrlRef=$BaselineSasUrl") | Out-Null
-        $cmdBaselineUrl = ''    # the env carries it instead
-    }
     if ("$EngineClientId".Trim() -and "$EngineClientSecret".Trim()) {
         $engineSecretRef = 'pim-engine-client-secret'
         $secrets.Add("$engineSecretRef=$EngineClientSecret") | Out-Null
     }
     $command = Get-PimDownlinkJobCommand -EntryPath $EntryPath -Scenario $Scenario -TenantId $TenantId -SlaveRing $SlaveRing -BaselineUrl $cmdBaselineUrl -BaselineDocPath $BaselineDocPath
     $envVars = Get-PimDownlinkJobEnv -Scenario $Scenario -TenantId $TenantId -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -SyncRootCentral $SyncRootCentral -SyncRootLocal $SyncRootLocal `
-        -EngineClientId $EngineClientId -EngineSecretRef $engineSecretRef -BaselineUrlSecretRef $baselineUrlRef `
+        -EngineClientId $EngineClientId -EngineSecretRef $engineSecretRef `
         -ManagedIdentityClientId $ManagedIdentityClientId `
-        -SlaveAdminPrefixes $SlaveAdminPrefixes -AllowRetraction:$AllowRetraction -BaselineTrustedKeys $BaselineTrustedKeys
+        -SlaveAdminPrefixes $SlaveAdminPrefixes -AllowRetraction:$AllowRetraction -BaselineTrustedKeys $BaselineTrustedKeys -DeployedUtc $DeployedUtc
     $action = if ($Exists) { 'update' } else { 'create' }
     $jobArgs = Build-PimDownlinkJobArgs -Action $action -JobName $JobName -ResourceGroup $ResourceGroup `
         -EnvName $EnvName -Image $Image -AcrServer $AcrServer -Cron $Cron `
@@ -633,6 +710,9 @@ function Get-PimDownlinkJobDeployPlan {
         action    = $action
         engineIdentity = $engineIdentity
         allowRetraction = [bool]$AllowRetraction
+        # The ACA secret NAMES this definition references (never values) -- anything else on the job is removed after the
+        # deploy (Get-PimDownlinkJobSecretPrune).
+        secretNames = @(@($secrets.ToArray()) | ForEach-Object { ("$_" -split '=', 2)[0] } | Where-Object { $_ })
     }
 }
 

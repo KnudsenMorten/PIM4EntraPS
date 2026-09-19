@@ -44,7 +44,8 @@ param(
     [string]$CertThumbprint,        # thumbprint in LocalMachine\My; the private key never leaves it
     [string]$SqlServer,
     [string]$SqlDatabase,
-    [ValidateSet('','sql','file')][string]$StorageBackend = '',
+    # IMP-42 (§33.28): 'file' is gone -- PIM v2 is SQL-only; a caller still passing it fails at binding, loudly.
+    [ValidateSet('','sql')][string]$StorageBackend = '',
     # PIM_SCHED_JOBS. 🔴 Leaving this unset means RUN ALL JOBS, which includes the ones that send
     # mail (reminders / escalations / daily-summary / tier-report) and create accounts
     # (scheduled-creation). An external trigger that only wants the delta must say so.
@@ -88,6 +89,12 @@ $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
 . "$shared\PIM-DisableGuard.ps1"      # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-HybridAd.ps1"          # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
 . "$shared\PIM-EngineProviders.ps1"
+# REQ-U wave 2: the workload role catalogs (discovery-defender / discovery-intune -> Invoke-PimWorkloadRoleDiscoveryJob). The
+# providers file dot-sources it too; named here so the tick's gated capability is visibly loaded (Test-PimScheduler).
+. "$shared\PIM-WorkloadRoles.ps1"
+# REQ-W (2.4.380): the workload-prerequisite rule the providers apply before creating a workload role assignment
+# (Get-PimWorkloadAssignmentGate). The providers file dot-sources it too; named here for the same reason as above.
+. "$shared\PIM-WorkloadPrereqs.ps1"
 # 🔴 THE ENTRA ROLE CATALOG WAS NEVER LOADED IN THE TICK (found 2026-09-12). Invoke-PimEngineCore.ps1
 # loads PIM-ContextBuilder.ps1 + the filters; this runner -- which is what actually runs every
 # scheduled job in the cloud -- loaded neither. Build-PimContext therefore did not exist, the
@@ -131,6 +138,9 @@ $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
 # Drift page (2026-09-14): the live-vs-desired plan that used to run inside the Manager's GET /api/drift. Job
 # 'drift-snapshot' runs it here and stores pim.TenantCache kind 'drift'; the Manager only reads that row.
 . "$shared\PIM-DriftSnapshot.ps1"
+# REQ-I + REQ-U (Coverage & gaps page): job 'coverage' compares the tenant caches with pim.Rows here and stores
+# pim.TenantCache kind 'coverage-report'; the Manager only reads that row.
+. "$shared\PIM-Coverage.ps1"
 
 # Scheduler state + run history + acknowledgements live in SQL pim.Settings (SchedulerState /
 # JobRunHistory / JobAcknowledgements) -- the SAME store the Manager's Jobs tab reads. The old
@@ -256,6 +266,12 @@ Write-Host "[scheduler] active-assignments snapshot wired (pim.TenantCache/activ
 # Drift page: the REAL 'drift-snapshot' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
 Register-PimDriftSnapshotHandler
 Write-Host "[scheduler] drift snapshot wired (pim.TenantCache/drift; the Manager's Drift page reads it)" -ForegroundColor Cyan
+# REQ-I + REQ-U: the REAL 'coverage' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
+Register-PimJobHandler -Type 'coverage' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimCoverageJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
+Write-Host "[scheduler] coverage report wired (pim.TenantCache/coverage-report; the Manager's Coverage & gaps page reads it)" -ForegroundColor Cyan
 
 # Wire the per-scope engine-delta / engine-full jobs to the NEW REST engine.
 # WhatIf (intent/recalc) -> plan only; otherwise the provider applies via REST.
@@ -328,10 +344,26 @@ $engineHandler = {
         throw ("[scheduler] engine job '$($job.name)' FAILED: " + ($parts -join ' | '))
     }
     $sum = @($res) | ForEach-Object { "$($_.scope):c$($_.create)/u$($_.update)/r$($_.remove)" }
-    [pscustomobject]@{ ran=$true; detail=("engine $mode [$scope] " + ($sum -join ' ')); whatIf=[bool]$whatIf }
+    # REQ-U (2.4.378): scope WARNINGS (e.g. "group X has a Workload but its binding provider is turned off", or an area
+    # NOT CHECKED) reach the run's summary line -- the Jobs page and the run record -- not only the captured log.
+    $warns = @(@($res) | ForEach-Object { $sc = "$($_.scope)"; if ($_.PSObject.Properties['warnings']) { @($_.warnings) | Where-Object { "$_".Trim() } | ForEach-Object { "${sc}: $_" } } })
+    $notChk = @(@($res) | Where-Object { $_.PSObject.Properties['notChecked'] -and $_.notChecked } | ForEach-Object { "$($_.scope) NOT CHECKED ($($_.skippedReason)$($_.error))" })
+    $tail = ''
+    if ($notChk.Count) { $tail += ' | ' + ($notChk -join '; ') }
+    if ($warns.Count) { $tail += " | $($warns.Count) warning(s): " + (@($warns | Select-Object -First 5) -join '; ') + $(if ($warns.Count -gt 5) { "; +$($warns.Count - 5) more (see the run's log)" } else { '' }) }
+    [pscustomobject]@{ ran=$true; detail=("engine $mode [$scope] " + ($sum -join ' ') + $tail); warnings=@($warns); notChecked=@($notChk); whatIf=[bool]$whatIf }
 }
 Register-PimJobHandler -Type 'engine-delta' -Handler $engineHandler
 Register-PimJobHandler -Type 'engine-full'  -Handler $engineHandler
+
+# 🔴 BUG-185 (§33.28): the break-glass (emergency) override had NO v2 consumer -- the Manager recorded it and
+# nothing read it. Every tick now applies an active override (approval OFF on the scoped groups, audited, owners
+# notified) and restores the linked policy at expiry (Invoke-PimEmergencyOverrideStep, PIM-EngineProviders.ps1).
+Register-PimJobHandler -Type 'emergency-override' -Handler {
+    param($job,$now,$whatIf)
+    Invoke-PimEmergencyOverrideStep -NowUtc $now -WhatIf:$whatIf
+}
+Write-Host "[scheduler] emergency override wired (pim.Settings/EmergencyOverride -> approval off / restore at expiry)" -ForegroundColor Cyan
 
 # --- THE TRUST JOB: prove DESIRED == LIVE, cheaply, and keep proving it ---------
 # Operator, 2026-09-12: "it is critical that we can trust that the delegation is actual deployed
@@ -452,9 +484,7 @@ Write-Host "[scheduler] REST engine wired (scopes: $((Get-PimEngineScopes) -join
 # definition rows come from $global:PIM_DiscoveryExistingReader (a launcher hook that
 # knows the desired store) when present; absent -> empty (a fresh tenant just sees
 # all-create, still gated by the per-type auto-import rules). The discovered items use
-# the REST enumerators. The change queue file defaults next to the scheduler state.
-$discoQueueFile = if ("$($global:PIM_ChangeQueueFile)".Trim()) { "$($global:PIM_ChangeQueueFile)" }
-                  else { Join-Path (Join-Path (Resolve-Path "$here\..\..").Path 'output\scheduler') 'pim-change-queue.json' }
+# the REST enumerators. The queue is SQL pim.ChangeQueue only (IMP-40).
 Register-PimDiscoveryHandler `
     -GetDiscovered {
         param($scope)
@@ -482,23 +512,27 @@ Register-PimDiscoveryHandler `
     } `
     -EnqueueChange {
         param($change)
-        # 🔴 SQL FIRST -- the JSON queue file is EPHEMERAL in a container.
-        # `pim.ChangeQueue` has existed (and been used by the Manager's commit path) all along;
-        # this handler was still writing to a JSON file under output/, which in a scale-to-zero
-        # ACA container is destroyed with the replica. So every discovery proposal was written and
-        # then thrown away, and `queue-apply` drained a queue nobody had written to. Operator
-        # requirement, 2026-08-10: "everything SQL, no files at all."
-        if ($global:PIM_SqlConnectionString -and (Get-Command Add-PimSqlQueueChange -ErrorAction SilentlyContinue)) {
-            try { Add-PimSqlQueueChange -ConnectionString $global:PIM_SqlConnectionString -Change $change; return }
-            catch { Write-Warning "  [discovery] SQL enqueue failed, falling back to the JSON queue: $($_.Exception.Message)" }
+        # 🔴 IMP-40 (§33.28) -- SQL ONLY. This used to fall back to a JSON queue FILE on a SQL failure: EPHEMERAL in a
+        # container and never drained by queue-apply, so the proposals were lost while the job reported success.
+        # A proposal that cannot be written to pim.ChangeQueue now FAILS the discovery job (the throw propagates out of
+        # the sweep), so the operator sees it and the next run proposes it again.
+        # 🔴 BUG-212 -- DE-DUPLICATED. discovery-entra re-proposed the same ~130 Creates every day and pending rows piled
+        # up; Add-PimSqlQueueChangeIfAbsent adds nothing when an open entry for the same entity/key/op already exists.
+        if (-not "$($global:PIM_SqlConnectionString)".Trim()) {
+            throw "[discovery] no SQL store is wired -- the proposal '$($change.entity)/$($change.key)' cannot be queued (PIM v2 keeps the change queue in SQL only)"
         }
-        if (Get-Command Add-PimChangeToQueue -ErrorAction SilentlyContinue) {
-            Add-PimChangeToQueue -QueueFile $discoQueueFile -Change $change | Out-Null
+        try {
+            if (-not (Add-PimSqlQueueChangeIfAbsent -ConnectionString $global:PIM_SqlConnectionString -Change $change)) {
+                $script:__discoDupes++
+                Write-Verbose "  [discovery] '$($change.entity)/$($change.key)' ($($change.op)) is already open in the queue -- not added again"
+            }
+        } catch {
+            throw "[discovery] the proposal '$($change.entity)/$($change.key)' could NOT be written to pim.ChangeQueue -- it is NOT queued: $($_.Exception.Message)"
         }
     } `
     -AutoImportPowerBI:([bool]$global:PIM_DiscoveryAutoImportPowerBi)
-$_queueSink = if ($global:PIM_SqlConnectionString) { 'SQL pim.ChangeQueue' } else { "JSON file $discoQueueFile (EPHEMERAL in a container)" }
-Write-Host "[scheduler] discovery handler wired (Azure/PowerBI scope-discovery + Entra role-catalog -> change queue: $_queueSink)" -ForegroundColor Cyan
+$script:__discoDupes = 0
+Write-Host "[scheduler] discovery handler wired (Azure/PowerBI scope-discovery + Entra role-catalog -> change queue: SQL pim.ChangeQueue, de-duplicated)" -ForegroundColor Cyan
 
 # Worker-container scoping: $env:PIM_SCHED_JOBS (comma list of job types) makes this
 # container run only those jobs -- so the SAME image is deployed N times as

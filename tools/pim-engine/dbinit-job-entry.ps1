@@ -92,7 +92,7 @@ Say "blast-radius check: $(@($plan.users).Count) statement set(s), none touch ta
 
 # ---- THE BASE SCHEMA, for the same reason the users are created here ---------------------------
 # 🔑 A PRIVATE SQL SERVER HAS NO ROUTE FROM THE DEPLOY HOST, AND THAT APPLIES TO THE SCHEMA TOO.
-# Invoke-PimUpdate applies sql/platform-schema.sql + sql/local-schema.sql on a first install, from
+# Invoke-PimUpdate applies sql/platform-schema.sql on a first install, from
 # the deploy host, over a connection that simply cannot be opened in this topology. So the deploy
 # would stand up a perfectly healthy Manager against an EMPTY database -- the §50/BUG-50 shape the
 # updater's own comments call the worst one: every environment green, none of them functional.
@@ -101,7 +101,10 @@ Say "blast-radius check: $(@($plan.users).Count) statement set(s), none touch ta
 # the conformance work the nightly in-cloud updater does later runs as them.
 $schemaFiles = @()
 if ("$($env:PIM_DBINIT_SCHEMA)".Trim() -in @('1','true','yes','TRUE','Yes')) {
-    foreach ($rel in @('sql/platform-schema.sql', 'sql/local-schema.sql')) {
+    # 2026-09-18 (IMP-46): sql/local-schema.sql (only the dead pim.LocalAdmins / pim.LocalResources)
+    # was retired. The one shipped base-schema file is platform-schema.sql; the verify below still
+    # requires tables in 'pim' after it runs (it creates pim.CentralAdmins + pim.TenantRoleProjection).
+    foreach ($rel in @('sql/platform-schema.sql')) {
         $f = Join-Path $solRoot $rel
         if (-not (Test-Path -LiteralPath $f)) {
             Say "PIM_DBINIT_SCHEMA is set but '$rel' is missing from this image -- the store cannot be created." 'Red'

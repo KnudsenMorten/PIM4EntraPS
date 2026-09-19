@@ -165,6 +165,127 @@ function Test-PimRowIsGuest {
 }
 
 # ---------------------------------------------------------------------------
+# BUG-190 -- "WOULD THIS WRITE DISABLE AN ADMIN ON THE NEXT ENGINE RUN?" (PURE).
+# The ONE rule the Manager's two admin write paths share (POST /api/admin-accounts/modify and the
+# Review & Save PUT of Account-Definitions-Admins), and the classifier below. It mirrors what the
+# engine acts on (PIM-EngineProviders.ps1 Get-PimAdminStatusDecision / Test-PimAdminOffboarded):
+#   AccountStatus = Disabled | Revoked            -> disabled (Revoked also revokes sessions)
+#   Lifecycle     = Retire*                       -> offboarded (disable, sessions, memberships)
+#   AutoDisableDate / OffboardDate (legacy name) at or before NOW -> offboarded
+# Operator decision (2026-09-18): such a write IS an offboard, so it goes through the offboard
+# approval (a second administrator), never straight into the desired state.
+# ---------------------------------------------------------------------------
+$script:PimAdminDisablingColumns = @('AccountStatus', 'Lifecycle', 'AutoDisableDate', 'OffboardDate')
+
+function Test-PimAdminDisablingValue {
+    # PURE. Does this ONE admin-row cell, on its own, make the engine disable the account on its
+    # next run? Blank = no. An UNREADABLE date is treated as immediate (fail closed: an odd value
+    # must not slip past the approval gate); the Manager's own validation refuses such a value
+    # before it is ever stored, so this only decides which way an unreadable value falls.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Column, [AllowNull()][AllowEmptyString()][string]$Value, [datetime]$NowUtc = [datetime]::UtcNow)
+    $v = "$Value".Trim()
+    if (-not $v) { return $false }
+    $c = "$Column".Trim()
+    if ($c -ieq 'AccountStatus') { return ($v -match '(?i)^(disabled|revoked)$') }
+    if ($c -ieq 'Lifecycle')     { return ($v -match '(?i)^retire') }
+    if ($c -ieq 'AutoDisableDate' -or $c -ieq 'OffboardDate') {
+        $parsed = $null
+        if (Get-Command Resolve-PimDateExpression -ErrorAction SilentlyContinue) { try { $parsed = Resolve-PimDateExpression -Expression $v } catch { $parsed = $null } }
+        if (-not $parsed -and (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { try { $parsed = Get-PimUtcStamp $v } catch { $parsed = $null } }
+        if (-not $parsed) {
+            $d = [datetime]::MinValue
+            $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+            if ([datetime]::TryParse($v, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d)) { $parsed = $d }
+        }
+        if (-not $parsed) { return $true }
+        return (([datetime]$parsed).ToUniversalTime() -le $NowUtc.ToUniversalTime())
+    }
+    return $false
+}
+
+function Get-PimAdminDisableHolds {
+    # PURE. Given the STORED admin rows and the rows a commit would store, find every change that
+    # would disable an admin on the next engine run, and HOLD it:
+    #   * a MODIFIED row: each disabling column that CHANGED to a disabling value (and was not
+    #     already disabling) is put back to its stored value -- every other column of the row, and
+    #     every other row, is kept;
+    #   * an ADDED row that carries a disabling value is held WHOLE. There is no stored value to put
+    #     back, and writing it without that column would ask the engine to CREATE an enabled admin
+    #     the operator marked for disabling. (An offboard approval needs an existing row, so the
+    #     operator adds the admin first and offboards it through the approval.)
+    # Rows are matched by the store's natural key (Get-PimStoreRowKey). Returns
+    #   @{ rows = <the rows to store>; holds = @( @{ key; upn; kind = modify|add; fields = @{ col = held value };
+    #      restored = @{ col = stored value } } ) }
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyCollection()][object[]]$Before = @(),
+        [AllowNull()][AllowEmptyCollection()][object[]]$After = @(),
+        [string]$Base = 'Account-Definitions-Admins',
+        [datetime]$NowUtc = [datetime]::UtcNow
+    )
+    $keyOf = {
+        param($r)
+        $k = ''
+        if (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue) { try { $k = "$(Get-PimStoreRowKey -Base $Base -Row $r)" } catch { $k = '' } }
+        if (-not "$k".Trim()) {
+            $k = "$(Get-PimAuthoringCell $r 'UserPrincipalName')".Trim()
+            if (-not $k) { $k = "$(Get-PimAuthoringCell $r 'UserName')".Trim() }
+        }
+        return "$k".Trim().ToLowerInvariant()
+    }
+    $byKey = @{}
+    foreach ($b in @($Before)) {
+        if ($null -eq $b) { continue }
+        $k = & $keyOf $b
+        if ($k -and -not $byKey.ContainsKey($k)) { $byKey[$k] = $b }
+    }
+    $rows  = New-Object System.Collections.Generic.List[object]
+    $holds = New-Object System.Collections.Generic.List[object]
+    foreach ($a in @($After)) {
+        if ($null -eq $a) { continue }
+        $k = & $keyOf $a
+        $old = $null
+        if ($k -and $byKey.ContainsKey($k)) { $old = $byKey[$k] }
+        $held = [ordered]@{}; $restored = [ordered]@{}
+        foreach ($col in $script:PimAdminDisablingColumns) {
+            $nv = "$(Get-PimAuthoringCell $a $col)".Trim()
+            $ov = ''
+            if ($null -ne $old) { $ov = "$(Get-PimAuthoringCell $old $col)".Trim() }
+            if ($nv -ieq $ov) { continue }                                          # not changed
+            if (-not (Test-PimAdminDisablingValue -Column $col -Value $nv -NowUtc $NowUtc)) { continue }
+            # Already disabling before (a past date moved to another past date, Disabled -> Disabled):
+            # the account is already off; this write does not disable anybody. Disabled -> Revoked
+            # DOES escalate (sessions + memberships), so AccountStatus compares the value itself.
+            $wasOff = Test-PimAdminDisablingValue -Column $col -Value $ov -NowUtc $NowUtc
+            if ($wasOff -and ($col -ine 'AccountStatus' -or $nv -ieq 'Disabled')) { continue }
+            $held[$col] = $nv; $restored[$col] = $ov
+        }
+        $upn = "$(Get-PimAuthoringCell $a 'UserPrincipalName')".Trim()
+        if (-not $upn) { $upn = "$(Get-PimAuthoringCell $a 'UserName')".Trim() }
+        if ($held.Count -eq 0) { $rows.Add($a); continue }
+        if ($null -eq $old) {
+            $holds.Add([pscustomobject]@{ key = $k; upn = $upn; kind = 'add'; fields = $held; restored = $restored })
+            continue                                                                # the added row is held whole
+        }
+        # Put the held columns back to their STORED values on a copy (the caller's row is not mutated).
+        $copy = [ordered]@{}
+        if ($a -is [System.Collections.IDictionary]) { foreach ($kk in @($a.Keys)) { $copy[$kk] = $a[$kk] } }
+        else { foreach ($p in $a.PSObject.Properties) { $copy[$p.Name] = $p.Value } }
+        foreach ($col in @($held.Keys)) {
+            $orig = $null
+            if ($old -is [System.Collections.IDictionary]) { if ($old.Contains($col)) { $orig = $old[$col] } }
+            else { $op = $old.PSObject.Properties[$col]; if ($op) { $orig = $op.Value } }
+            if ($null -eq $orig) { $orig = '' }
+            $copy[$col] = $orig
+        }
+        $rows.Add($copy)
+        $holds.Add([pscustomobject]@{ key = $k; upn = $upn; kind = 'modify'; fields = $held; restored = $restored })
+    }
+    return [pscustomobject]@{ rows = $rows.ToArray(); holds = $holds.ToArray() }
+}
+
+# ---------------------------------------------------------------------------
 # Sensitivity classification (PURE).
 # ---------------------------------------------------------------------------
 function Get-PimAuthoringSensitivity {
@@ -224,6 +345,60 @@ function Get-PimAuthoringSensitivity {
     $isDisableOrOffboard = ($act -in @('disable','offboard'))
     if ($isDisableOrOffboard) {
         [void]$reasons.Add("account $act is a sensitive offboarding action requiring a second approver")
+    }
+
+    # (d) BUG-190 -- an ADMIN ROW that would disable the account on the next engine run (AccountStatus
+    #     Disabled/Revoked, Lifecycle Retire, an AutoDisableDate/OffboardDate at or before now) is an
+    #     offboard whatever action wrote it. A preview MODIFY counts only when it CHANGES a column into a
+    #     disabling value (Get-PimAdminDisableHolds), so editing the department of an admin who is already
+    #     disabled is not flagged; a preview ADD counts when it carries one; a REMOVE never does (removing
+    #     a row disables nothing -- 71.22). The plain $Rows are the action's proposed rows, except for
+    #     'review-save', whose rows mix adds with removes and whose PUT already HOLDS every disabling
+    #     change for the offboard approval before this gate runs.
+    $isAdminBase = ("$Base".Trim() -ieq 'Account-Definitions-Admins')
+    if ($isAdminBase) {
+        $disablingUpns = New-Object System.Collections.ArrayList
+        $noteUpn = {
+            param($r)
+            $u = "$(Get-PimAuthoringCell $r 'UserPrincipalName')".Trim()
+            if (-not $u) { $u = "$(Get-PimAuthoringCell $r 'UserName')".Trim() }
+            if (-not $u) { $u = '(unnamed row)' }
+            if (-not $disablingUpns.Contains($u)) { [void]$disablingUpns.Add($u) }
+        }
+        $rowDisables = {
+            param($r)
+            foreach ($col in $script:PimAdminDisablingColumns) {
+                if (Test-PimAdminDisablingValue -Column $col -Value "$(Get-PimAuthoringCell $r $col)") { return $true }
+            }
+            return $false
+        }
+        if ($act -ne 'review-save') {
+            foreach ($r in @($Rows)) { if ($null -ne $r -and (& $rowDisables $r)) { & $noteUpn $r } }
+        }
+        if ($null -ne $Preview) {
+            $pv = { param($name) if ($Preview -is [System.Collections.IDictionary]) { if ($Preview.Contains($name)) { return $Preview[$name] } } else { $pp = $Preview.PSObject.Properties[$name]; if ($pp) { return $pp.Value } }; return $null }
+            foreach ($it in @(& $pv 'adds')) {
+                if ($null -eq $it) { continue }
+                $row = $it
+                if ($it -is [System.Collections.IDictionary] -and $it.Contains('row')) { $row = $it['row'] }
+                elseif ($it -isnot [System.Collections.IDictionary] -and $it.PSObject.Properties['row']) { $row = $it.row }
+                if (& $rowDisables $row) { & $noteUpn $row }
+            }
+            foreach ($it in @(& $pv 'modifies')) {
+                if ($null -eq $it) { continue }
+                $bf = $null; $af = $null
+                if ($it -is [System.Collections.IDictionary]) { $bf = $it['before']; $af = $it['after'] }
+                else { if ($it.PSObject.Properties['before']) { $bf = $it.before }; if ($it.PSObject.Properties['after']) { $af = $it.after } }
+                if ($null -eq $af) { continue }
+                $bset = @(); if ($null -ne $bf) { $bset = @($bf) }
+                $h = Get-PimAdminDisableHolds -Before $bset -After @($af) -Base 'Account-Definitions-Admins'
+                if (@($h.holds).Count -gt 0) { & $noteUpn $af }
+            }
+        }
+        if ($disablingUpns.Count -gt 0) {
+            [void]$reasons.Add("disables $($disablingUpns.Count) admin account(s) on the next engine run (" + ((@($disablingUpns) | Select-Object -First 5) -join ', ') + ") -- an offboard, requiring a second approver")
+            $isDisableOrOffboard = $true
+        }
     }
 
     # (a) + (b) -- scan the touched rows.

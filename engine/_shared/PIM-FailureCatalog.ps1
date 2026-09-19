@@ -214,9 +214,43 @@ $script:PimFailureRules = @(
     @{ code = 'TAP-NO-RECIPIENT'
        match = { param($m, $row) $m -match '(?i)nowhere to deliver the TAP|no forwarding address \(MailForwardAddress\) and no ManagerEmail|no recipient \(office user email' }
        title = 'No one to send the Temporary Access Pass to'
-       cause = 'The admin row has no office-user email (ForwardMailsToContact + MailForwardAddress) and no ManagerEmail. A TAP is a sign-in credential and is delivered by mail only, so it is refused BEFORE anything is created -- nothing was changed.'
-       remedy = 'Set the office user email with Edit on the admin (Access > Admin accounts), commit, and the next run issues the TAP.'
+       cause = 'No recipient resolved for this admin. An admin''s mail (its TAP included) goes to the owners of its SPONSOR DEPARTMENT (71.19); a per-admin office-user email (ForwardMailsToContact + MailForwardAddress) overrides that. Neither resolved. A TAP is a sign-in credential and is delivered by mail only, so it is refused BEFORE anything is created -- nothing was changed.'
+       remedy = 'Set the admin''s Department and set Owners on that department (PIM-Definitions-Departments) -- or set an office user email with Edit on the admin (Access > Admin accounts) -- commit, and the next run issues the TAP.'
        retryable = $false; severity = 'data'
+       fixes = @() }
+
+    # SEC-30 (ss33.28): the engine REFUSES an AU-scoped role that sits in the tenant-wide entity.
+    @{ code = 'AU-SCOPE-REFUSED'
+       match = { param($m, $row) $m -match '(?i)AU-SCOPE-REFUSED' }
+       title = 'An AU-scoped role row is in the tenant-wide role entity -- refused'
+       cause = 'The row in PIM-Assignments-Roles-Groups carries PermissionScope ''AU:<name>''. That entity assigns roles over the WHOLE tenant, so applying it would have granted the role tenant-wide instead of over the administrative unit. Nothing was changed.'
+       remedy = 'Move the grant to PIM-Assignments-Roles-AUs (same GroupTag and role, AdministrativeUnitTag = the AU) and delete this row, then commit.'
+       retryable = $false; severity = 'data'
+       fixes = @() }
+
+    # ---- REQ-U wave 2: Defender XDR custom roles (DefenderXdrRoles, PIM-WorkloadRoles.ps1) -----------
+    @{ code = 'DEFENDER-PERMISSION-PREREQUISITE'
+       match = { param($m, $row) $m -match '(?i)DEFENDER-PERMISSION-PREREQUISITE' }
+       title = 'Defender XDR refused a permission its prerequisite is missing for'
+       cause = 'The tenant would not store the custom role with these permissions ("not a valid permission for storage"). A permission group whose prerequisite is not in place is refused -- Data Operations needs a Microsoft Sentinel workspace onboarded to Defender XDR. Nothing was created for this row.'
+       remedy = 'Run tools\setup\Initialize-PimWorkloadPrereqs.ps1 -Workload DefenderXdr (it checks the prerequisite and says what to fix); the next run creates the role and its assignment.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
+    @{ code = 'DEFENDER-ROLE-AMBIGUOUS'
+       match = { param($m, $row) $m -match '(?i)DEFENDER-ROLE-AMBIGUOUS' }
+       title = 'Two Defender XDR roles share this name -- PIM will not pick one'
+       cause = 'The row binds a Defender XDR role by name and more than one live role carries that name. Binding either could grant the wrong permissions, so nothing was assigned.'
+       remedy = 'Rename or delete the extra role in the Defender portal (Settings > Permissions > Roles); the next run binds the one that is left.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
+    @{ code = 'DEFENDER-ASSIGNMENT-SHARED'
+       match = { param($m, $row) $m -match '(?i)DEFENDER-ASSIGNMENT-SHARED' }
+       title = 'The Defender XDR assignment is shared with other principals'
+       cause = 'The group''s role assignment has the wrong data sources, but the same assignment also holds other principals. Re-creating it with the right data sources would remove their access, so nothing was changed.'
+       remedy = 'Give the group its own assignment (or split the shared one) in the Defender portal; the next run sets its data sources.'
+       retryable = $true; severity = 'environment'
        fixes = @() }
 
     # ---- environment problems: nothing in the row to fix ---------------------------------------
@@ -343,6 +377,10 @@ function Get-PimFailureItemLabel {
     if ($azPerm -or $azScope) { return "group $gdisp -> Azure role '$azPerm' at $(Format-PimAzureScopeLabel $azScope)$t" }
     $role = & $g 'RoleDefinitionName'
     if ($role) {
+        # REQ-U wave 2: a WORKLOAD binding (Defender XDR / Intune rows carry RoleDefinitionName + Workload) is not an
+        # Entra role -- it read "group X -> Entra role 'Security Operator'" on the Drift page.
+        $wlr = & $g 'Workload'
+        if ($wlr) { return "group $gdisp -> $wlr role '$role'$t" }
         $au = & $g 'AdministrativeUnitTag'
         return "group $gdisp -> Entra role '$role'$(if ($au) { " in administrative unit $au" })$t"
     }

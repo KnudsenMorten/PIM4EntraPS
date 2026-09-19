@@ -70,6 +70,19 @@ $ErrorActionPreference = 'Stop'
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 
+function Get-PimSqlFirewallBeltDecision {
+    <#
+      PURE (BUG-213). Is the 0.0.0.0 'AllowAzureServices' rule to be CREATED? Only when there is no
+      other path: it admits every Azure service of every tenant, so it is never re-opened on a server
+      whose environment already reaches it through its own subnet (the build window's closed shape).
+    #>
+    param([bool]$VnetRule, [bool]$ServiceEndpoint, [bool]$FirewallRulePresent, [string]$PublicNetworkAccess)
+    if ("$PublicNetworkAccess".Trim() -ieq 'Disabled') { return @{ create = $false; reason = 'not applicable -- public network access is Disabled (the route is the private endpoint; firewall rules cannot apply)' } }
+    if ($FirewallRulePresent) { return @{ create = $false; reason = 'present' } }
+    if ($VnetRule -and $ServiceEndpoint) { return @{ create = $false; reason = 'absent and NOT re-created -- the environment reaches the store through its subnet (VNet rule + Microsoft.Sql service endpoint), so opening SQL to every Azure service is not needed' } }
+    return @{ create = $true; reason = 'MISSING and there is no working VNet path -- creating it (the only way this environment can reach the store)' }
+}
+
 $result = @{ ok = $false; vnetRule = $false; firewallRule = $false; serviceEndpoint = $false; reason = ''
              notApplicable = $false }
 $sub    = @('--subscription', "$SubscriptionId".Trim())
@@ -156,26 +169,44 @@ if ("$SubnetId".Trim()) {
     Write-Warning '  could not resolve the ACA subnet, so no VNet rule can be created -- falling back to the firewall rule alone.'
 }
 
-# ---- 5. THE FIREWALL RULE PREREQ BELIEVES IT CREATED -- verify it ------------------------------
+# ---- 5. THE AZURE-SERVICES FIREWALL RULE -- a BELT, only where there is no VNet path -------------
 # This is the one that was missing at the customer, and its absence was invisible because the
 # create swallows its errors and prereq's own verify block checks a DIFFERENT rule.
+# 🔴 BUG-213 -- AND IT RE-OPENED WHAT A CLOSED BUILD WINDOW HAD CLOSED. 0.0.0.0 admits EVERY Azure
+# service, any tenant's. Set-PimSqlBuildWindow -Close deletes it deliberately (the store admits ONLY
+# the environment's subnet), and this always-run step then re-created it on the next standalone
+# deploy -- "prereq swallowed the failure" was the wrong inference: the rule had been REMOVED on
+# purpose. Decided now from what the server actually has: when the subnet's VNet rule AND its
+# Microsoft.Sql service endpoint are in place, that IS the path and the belt is not re-created.
+$pna = "$(az sql server show @sqlSubArgs -g $sqlRg -n $srv --query publicNetworkAccess -o tsv 2>$null)".Trim()
 $fw = "$(az sql server firewall-rule list @sqlSubArgs -g $sqlRg -s $srv --query "[?name=='AllowAzureServices'].name" -o tsv 2>$null)".Trim()
-if (-not $fw -and $PSCmdlet.ShouldProcess("$srv/AllowAzureServices", 'create the Azure-services firewall rule')) {
-    Note 'AllowAzureServices is MISSING -- creating it (prereq swallowed the failure)'
+$belt = Get-PimSqlFirewallBeltDecision -VnetRule ([bool]$result.vnetRule) -ServiceEndpoint ([bool]$result.serviceEndpoint) `
+            -FirewallRulePresent ([bool]$fw) -PublicNetworkAccess $pna
+Note "Azure-services rule: $($belt.reason)"
+if ($belt.create -and $PSCmdlet.ShouldProcess("$srv/AllowAzureServices", 'create the Azure-services firewall rule')) {
     az sql server firewall-rule create @sqlSubArgs -g $sqlRg -s $srv -n AllowAzureServices `
         --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0 -o none 2>$null
-    $fw = "$(az sql server firewall-rule list @sqlSubArgs -g $sqlRg -s $srv --query "[?name=='AllowAzureServices'].name" -o tsv 2>$null)".Trim()
 }
+# READ THE FINAL STATE BACK -- what is reported is what the server has now, not what was intended.
+$fw = "$(az sql server firewall-rule list @sqlSubArgs -g $sqlRg -s $srv --query "[?name=='AllowAzureServices'].name" -o tsv 2>$null)".Trim()
 $result.firewallRule = [bool]$fw
+if ("$SubnetId".Trim()) {
+    $result.vnetRule = [bool]"$(az sql server vnet-rule list @sqlSubArgs -g $sqlRg -s $srv --query "[?name=='$RuleName'].name" -o tsv 2>$null)".Trim()
+}
+$global:LASTEXITCODE = 0
 
-Note ("vnet-rule '{0}' {1}; firewall 'AllowAzureServices' {2}" -f $RuleName,
+Note ("final: vnet-rule '{0}' {1} (service endpoint {2}); firewall 'AllowAzureServices' {3}; public network access {4}" -f $RuleName,
       $(if ($result.vnetRule) { 'present' } else { 'ABSENT' }),
-      $(if ($result.firewallRule) { 'present' } else { 'ABSENT' }))
+      $(if ($result.serviceEndpoint) { 'present' } else { 'ABSENT' }),
+      $(if ($result.firewallRule) { 'present' } else { 'ABSENT' }),
+      $(if ($pna) { $pna } else { '(unread)' }))
 
 # ---- 6. THE VERDICT ---------------------------------------------------------------------------
 # Neither path in place means a Manager that will start, be refused, and die -- and the gate
 # afterwards will report a store problem it cannot see. Say it HERE, where the cause is visible.
-$result.ok = ($result.vnetRule -or $result.firewallRule)
+# 🪤 A VNet rule WITHOUT the subnet's service endpoint is inert (it was created with
+# --ignore-missing-endpoint), so it only counts together with the endpoint.
+$result.ok = (($result.vnetRule -and $result.serviceEndpoint) -or $result.firewallRule)
 if (-not $result.ok -and -not $WhatIfPreference) {
     # 🪤 REPORT, DO NOT THROW. The caller is the deploy's step runner, which reads a verdict object
     # and turns a false `ok` into a clean step failure -- with the rollback path intact. A throw

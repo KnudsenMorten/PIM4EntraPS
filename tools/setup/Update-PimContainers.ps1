@@ -121,11 +121,14 @@ param(
     # --- 2026-09-13: THE RING GATE (operator: "nothing releases to ring 2 without my approve") ------
     # Before anything is built or rolled, the environment's in-cloud updater is read. On ring >= 2 this
     # REFUSES to roll to any version channel.json does not approve for that ring (and refuses when the
-    # channel cannot be read). Ring 0/1 and environments with no ring roll exactly as before. The only
-    # way past is -OverrideRingGate with -Reason, which is printed and audited.
+    # channel cannot be read). Ring 0/1 roll exactly as before. BUG-170: a deployed environment with NO
+    # ring (or no updater) is REFUSED too -- it predates the ring. The way past is -OverrideRingGate with
+    # -Reason (printed and audited), or -PendingUpdateRing when this same deploy run installs the ring.
     [string]$UpdateJobName = 'ca-pim-update',
     [switch]$OverrideRingGate,
-    [string]$Reason
+    [string]$Reason,
+    [ValidateRange(-1,3)][int]$PendingUpdateRing = -1,
+    [string]$PendingUpdateSourceUrl = ''
 )
 
 # Built once, spliced into every az invocation. Empty => ambient (a single-directory machine),
@@ -150,6 +153,11 @@ $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvoca
 . "$here\_PimUpdateRing.ps1"    # Assert-PimRollRingGate -- the ring decides, not whoever runs this
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)        # ...\PIM4EntraPS
 $repoRoot = (Resolve-Path (Join-Path $here '..\..\..\..')).Path   # AutomateIT repo root
+# 🔴 §71.41 -- WHICH OTHER JOBS FOLLOW THE MANAGER is decided by the SAME pure function the in-cloud
+# updater uses (Get-PimAcaJobRollPlan, §53.5), loaded -- not copied -- so the host and the cloud roller
+# cannot disagree about it. Loaded before the dot-source guard so the offline test exercises THIS copy.
+# Only its pure functions are called from here; its ARM half (Invoke-PimArm) is never reached.
+. (Join-Path $solRoot 'engine\_shared\PIM-ArmContainerApps.ps1')
 # BUG-40: the TAG reference is provenance for humans. What is actually rolled is $image, which
 # is re-pointed at the immutable digest by the pre-roll guard below once az can resolve it.
 $imageTagRef = "$AcrName.azurecr.io/$ImageRepo`:$ImageTag"
@@ -272,6 +280,66 @@ function Get-PimAppRollPlan {
     return [pscustomobject]@{ roll=$roll; missing=$missing; ok=$true; reason='' }
 }
 
+function Invoke-PimRollSameRepoJobs {
+    <#
+      §71.41 -- roll every OTHER job in the resource group that runs the Manager's image REPOSITORY
+      onto -TargetImage, verify each by reading it back, and return @{ rolled; failed; checked }.
+
+      🔴 This roller used to roll the apps and the tick Job and nothing else, so `ca-pim-downlink-s6`
+      (a managed tenant's pull) and `ca-pim-publish` (the master's publisher) kept the tag they were
+      deployed with. A pull job left on a pre-§71.35 image refuses every Key Vault signed bundle
+      (SIGNATURE INVALID -- it only knows the certificate) while the Manager and tick report the new
+      version; a publish job never picks up producer fixes. The in-cloud updater already rolls them
+      (§53.5); this makes the SAME decision with the SAME function (Get-PimAcaJobRollPlan).
+      🔒 Same REPOSITORY only -- a customer's own job in this group is not ours to retag; a
+      multi-container job is skipped, never guessed at. Excluded by name: the tick Job (rolled -- or
+      deliberately skipped -- on its own) and the update job (it re-stamps itself and records its own
+      LAST_GOOD; Deploy-PimUpdateJob owns its configuration).
+      Every job is attempted, so one failure does not leave the rest behind too; the CALLER decides
+      what a failure means (fatal on a roll, loud but not fatal on a rollback -- like the tick Job).
+      🪤 "Could not look" is not "there was nothing else": a failed enumeration is a failure.
+    #>
+    param([Parameter(Mandatory)][string]$TargetImage, [string]$Label = '')
+    $out = [pscustomobject]@{ rolled = New-Object System.Collections.Generic.List[string]
+                              failed = New-Object System.Collections.Generic.List[string]; checked = $false }
+    $jobsJson = (@(az containerapp job list @subArgs -g $ResourceGroup -o json 2>$null) -join "`n")
+    $ok = ($LASTEXITCODE -eq 0 -and "$jobsJson".Trim())
+    $allJobs = @()
+    if ($ok) {
+        # 🪤 PS 5.1: ConvertFrom-Json emits a JSON array as ONE object; piping it enumerates the items.
+        try { $allJobs = @((ConvertFrom-Json $jobsJson) | ForEach-Object { $_ }) } catch { $ok = $false }
+    }
+    if (-not $ok) {
+        [void]$out.failed.Add("<job enumeration> -- az containerapp job list failed in $ResourceGroup, so jobs other than the tick Job were NOT checked")
+        return $out
+    }
+    $out.checked = $true
+    $plan = Get-PimAcaJobRollPlan -Jobs $allJobs -TargetImage $TargetImage -Exclude @("$TickJobName".Trim(), "$UpdateJobName".Trim())
+    foreach ($s in @($plan.skip)) { Write-Host "  skipping job $($s.name): $($s.reason)" -ForegroundColor DarkGray }
+    if (-not @($plan.roll).Count) { Write-Host "  no other job in $ResourceGroup runs $($plan.repo) -- nothing more to roll." -ForegroundColor DarkGray }
+    foreach ($j in @($plan.roll)) {
+        if ("$($j.from)".Trim() -ieq "$TargetImage".Trim()) {
+            [void]$out.rolled.Add($j.name)
+            Write-Host "  job '$($j.name)' is already on the target image (no skew)." -ForegroundColor Green
+            continue
+        }
+        if (-not $PSCmdlet.ShouldProcess($j.name, "job update --image $TargetImage")) { continue }
+        Step "Roll job $($j.name)$Label (same repository as the Manager)"
+        az containerapp job update @subArgs -g $ResourceGroup -n $j.name --image $TargetImage -o none
+        if ($LASTEXITCODE -ne 0) {
+            [void]$out.failed.Add("$($j.name) -- 'az containerapp job update' exit $LASTEXITCODE (still on $("$($j.from)" -replace '.*[@:]',''))")
+            continue
+        }
+        # Same evidence standard as the apps and the tick Job: a tag match is not proof (BUG-40).
+        $live = az containerapp job show @subArgs -g $ResourceGroup -n $j.name --query "properties.template.containers[0].image" -o tsv 2>$null
+        $jv = Test-PimImageDeployed -Expected $TargetImage -Running "$live".Trim()
+        if (-not $jv.ok) { [void]$out.failed.Add("$($j.name) -- post-roll verification FAILED: $($jv.reason)"); continue }
+        [void]$out.rolled.Add($j.name)
+        Write-Host "  job '$($j.name)' rolled $("$($j.from)" -replace '.*@','') -> $("$live".Trim() -replace '.*@','') and verified." -ForegroundColor Green
+    }
+    return $out
+}
+
 # Dot-sourced by the offline test -> stop before doing anything live.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
@@ -283,7 +351,8 @@ Show-PimSetupBanner -ScriptName 'Update-PimContainers' -SolutionRoot $solRoot
 # is broken — exactly the symptoms that shipped "green" before: render mode 'static
 # (read-only)' instead of SQL, GET /api/active-assignments 500, empty tenant cache,
 # "Templates need server mode", read-only GUI. A deploy is NOT "done" until this passes.
-# The smoke self-skips cleanly (exit 0) when az is unavailable / not logged in.
+# Run with -AsReleaseGate, so a check that cannot run (no az, not logged in) is a FAILURE here (exit 1);
+# ad hoc the smoke exits 2 for a skip -- never 0, which is reserved for "ran and passed".
 function Invoke-ManagerSmokeGate {
     <#
       BUG-57: RETURNS ITS VERDICT, and the caller must print that rather than a fixed string.
@@ -611,6 +680,16 @@ if ($Rollback -or "$RollbackImage".Trim()) {   # §53.6: EITHER anchor puts us i
                                    "DIFFERENT builds. Stamp it by hand: az containerapp job update -g $ResourceGroup -n $jn --image $wantImg")
                 }
             }
+            # §71.41 -- the pull / publish jobs follow the rollback too, or they stay on the build being rolled
+            # back while the Manager goes back (and the smoke gate's job-skew check fails the rollback).
+            # Loud but NOT fatal, like the tick Job above: the APPS are back, which is the point of a rollback.
+            if ($wantImg) {
+                $rbJobs = Invoke-PimRollSameRepoJobs -TargetImage $wantImg -Label ' back (rollback)'
+                foreach ($f in @($rbJobs.failed)) {
+                    Write-Warning ("  rollback: $f -- that job and the GUI are on DIFFERENT builds. Stamp it by hand: " +
+                                   "az containerapp job update -g $ResourceGroup -n <job> --image $wantImg")
+                }
+            }
         }
     }
     # A rollback is only "good" if the rolled-back Manager actually serves a healthy GUI.
@@ -626,7 +705,8 @@ if ($Rollback -or "$RollbackImage".Trim()) {   # §53.6: EITHER anchor puts us i
 # it is not gated. A ROLL is. On ring >= 2 the target must be exactly what channel.json approves.
 Step "Ring gate: may $ResourceGroup take $ImageTag?"
 [void](Assert-PimRollRingGate -ResourceGroup $ResourceGroup -SubscriptionArgs $subArgs -TargetVersion $ImageTag `
-          -UpdateJobName $UpdateJobName -OverrideRingGate:$OverrideRingGate -Reason $Reason -Caller 'Update-PimContainers')
+          -UpdateJobName $UpdateJobName -OverrideRingGate:$OverrideRingGate -Reason $Reason -Caller 'Update-PimContainers' `
+          -PendingUpdateRing $PendingUpdateRing -PendingUpdateSourceUrl $PendingUpdateSourceUrl)
 
 if (-not $SkipBuild) {
     Step "Build $image via Build-PimManagerImage (clean git-archive context)"
@@ -774,8 +854,15 @@ if ($script:PimShippedBaseline -and $script:PimShippedBaseline.count -gt 0) {
 # safe" is the correct behaviour for an unknown, so the defect hid behind a sensible-looking line.
 # 🪤 The image now BAKES the hash (Dockerfile ARG/ENV), but `az containerapp show` reports only the
 # env vars in the app TEMPLATE, not the ones inside the image -- so baking alone changed nothing.
-# The value has to be stamped where the reader actually looks. Same hash function and same source
-# directory the builder uses, so the two agree by construction rather than by convention.
+# The value has to be stamped where the reader actually looks.
+# 🔴 BUG-174 -- "SAME SOURCE DIRECTORY" WAS NOT TRUE. This stamp hashed tools\pim-manager only, while the
+# builder and the Invoke-PimUpdate detector hash the WHOLE solution (what the Dockerfile copies). The
+# running hash therefore never equalled the pulled one, GuiUpdateRequired was always True, and every
+# host-side update rebuilt an identical image. The file set is now defined ONCE
+# (Get-PimSolutionContentHash, PIM-UpdateLifecycle.ps1) and all three call it: agreement by construction.
+# 🪤 With -SkipBuild and an OLDER -ImageTag the local tree is not that image's content (the same honest
+# limitation as the baseline gate above); the detector still compares VERSION as well, so an older image
+# with a newer tree's hash is re-rolled on version, never skipped.
 # 🔴 THE BUG-55 POLICY-BASELINE GATE COULD NEVER RUN. It is guarded by
 # `Get-Command Get-PimPolicyBaselineFingerprint`, defined in PIM-PolicyBaseline.ps1, which this
 # file never loaded -- so every roll reported "no policy baseline recorded on the target yet --
@@ -787,16 +874,8 @@ try { . (Join-Path $solRoot 'engine\_shared\PIM-PolicyBaseline.ps1') } catch { }
 $mgrHashArgs = @()
 try {
     . (Join-Path $solRoot 'engine\_shared\PIM-UpdateLifecycle.ps1')
-    $mgrSrc = Join-Path $solRoot 'tools\pim-manager'
-    if (Test-Path -LiteralPath $mgrSrc) {
-        $digests = foreach ($f in @(Get-ChildItem -Path $mgrSrc -Recurse -File -ErrorAction SilentlyContinue |
-                                    Where-Object { $_.FullName -notmatch '\\cache\\' -and $_.Name -notmatch '\.custom\.' })) {
-            [pscustomobject]@{ path = $f.FullName.Substring($mgrSrc.Length).TrimStart('\','/')
-                               sha256 = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash }
-        }
-        $mgrHash = Get-PimContentHash -FileDigests @($digests)
-        if ("$mgrHash".Trim()) { $mgrHashArgs = @('--set-env-vars', "PIM_MANAGER_CONTENT_HASH=$mgrHash") }
-    }
+    $mgrHash = Get-PimSolutionContentHash -SolutionRoot $solRoot
+    if ("$mgrHash".Trim()) { $mgrHashArgs = @('--set-env-vars', "PIM_MANAGER_CONTENT_HASH=$mgrHash") }
 } catch { Write-Host "  (could not compute the Manager content hash: $($_.Exception.Message) -- the next deploy will rebuild)" -ForegroundColor DarkGray }
 
 $rolled = New-Object System.Collections.Generic.List[string]
@@ -903,6 +982,28 @@ if (-not $SkipTickJob) {
     }
 }
 
+# --- §71.41: EVERY OTHER JOB THAT RUNS THE MANAGER'S IMAGE follows it, off the same digest ---------
+# The decision and the read-back live in Invoke-PimRollSameRepoJobs (above), shared with the rollback
+# path. 🔴 On a ROLL a job left on the previous build is a FAILED deploy, not a warning -- the same
+# standard as the tick Job, and the same wording as the in-cloud updater ("NOT FULLY UPDATED").
+$otherJobsRolled = New-Object System.Collections.Generic.List[string]
+if ($rolled.Count -gt 0 -or $WhatIfPreference) {
+    Step "Roll every other job running the Manager's image repository"
+    $sameRepo = Invoke-PimRollSameRepoJobs -TargetImage $image -Label " -> $ImageTag"
+    foreach ($n in @($sameRepo.rolled)) {
+        [void]$otherJobsRolled.Add($n)
+        if ($script:PimShippedBaseline -and $script:PimShippedBaseline.count -gt 0) {
+            Set-PimRecordedBaseline -Kind 'job' -Name $n -Hash $script:PimShippedBaseline.hash
+        }
+    }
+    if (@($sameRepo.failed).Count -gt 0) {
+        throw ("Update-PimContainers: NOT FULLY UPDATED -- the apps are on $image but these jobs are still on the previous build: " +
+               (@($sameRepo.failed) -join '; ') + ". The engine's jobs and the GUI are now on DIFFERENT builds (a pull job on an old " +
+               "image can refuse every signed bundle); do NOT treat this deploy as done. Re-run this script, or stamp each by hand: " +
+               "az containerapp job update -g $ResourceGroup -n <job> --image $image")
+    }
+}
+
 # BUG-55: record the fingerprint ONLY after the roll has been verified. Recording it earlier would
 # mean a failed or partial deploy still moved the recorded baseline forward, and the next roll
 # would compare against a state that was never actually deployed -- the gate would then wave
@@ -919,5 +1020,5 @@ $smokeVerdict = Invoke-ManagerSmokeGate -RepoRoot $repoRoot -RolledApps @($rolle
 
 # BUG-57: print WHAT HAPPENED, never a fixed string. This line used to assert the gate passed even
 # on the four paths where it never ran.
-Step ("Done. {0} app(s) verified on {1}; post-deploy GUI smoke gate: {2} (rollback with -Rollback <oldRevision>)." -f `
-      $rolled.Count, $ImageTag, $smokeVerdict)
+Step ("Done. {0} app(s) verified on {1}; other job(s) verified on it: {2}; post-deploy GUI smoke gate: {3} (rollback with -Rollback <oldRevision>)." -f `
+      $rolled.Count, $ImageTag, $(if ($otherJobsRolled.Count) { $otherJobsRolled -join ', ' } else { 'none' }), $smokeVerdict)

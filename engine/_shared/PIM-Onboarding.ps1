@@ -86,10 +86,55 @@ function New-PimGuestInvitationBody {
 }
 
 function Send-PimGuestInvitation {
-    # Live B2B invitation (cloud only). Thin wrapper over Invoke-MgGraphRequest.
-    param([Parameter(Mandatory)][string]$Email, [string]$DisplayName, [string]$RedirectUrl = 'https://myapplications.microsoft.com', [string]$CustomMessage)
-    $body = New-PimGuestInvitationBody -Email $Email -DisplayName $DisplayName -RedirectUrl $RedirectUrl -CustomMessage $CustomMessage
-    return Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/invitations' -Body ($body | ConvertTo-Json -Depth 6) -ContentType 'application/json' -ErrorAction Stop
+    # Live B2B invitation (cloud only) -- for the ENGINE (the Manager never writes the directory, §65).
+    # 🔴 BUG-203: this used the Graph SDK (Invoke-MgGraphRequest), which the REST-only engine does not load,
+    # and nothing called it. It now goes through the engine's REST core (Invoke-PimGraph). The Manager
+    # QUEUES the invitation as a 'guest-invite' action (New-PimGuestInviteAction); the engine's queue-action
+    # drain is the caller.
+    param([Parameter(Mandatory)][string]$Email, [string]$DisplayName, [string]$RedirectUrl = 'https://myapplications.microsoft.com', [string]$CustomMessage,
+          [object]$Body = $null)
+    $b = $Body
+    if ($null -eq $b) { $b = New-PimGuestInvitationBody -Email $Email -DisplayName $DisplayName -RedirectUrl $RedirectUrl -CustomMessage $CustomMessage }
+    if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
+        throw 'Send-PimGuestInvitation: the REST Graph core (Invoke-PimGraph, PIM-Rest.ps1) is not loaded -- no invitation was sent.'
+    }
+    return Invoke-PimGraph -Method POST -Path '/invitations' -Body $b
+}
+
+function Test-PimGuestEmailExternal {
+    # PURE (BUG-203). A guest invitation is for someone OUTSIDE this tenant. Refuses a malformed address and
+    # an address in one of the tenant's OWN domains -- measured: the New-admin wizard composed the ADMIN name
+    # at the tenant's own domain and "invited" that, which can only ever create a junk guest.
+    # -OwnDomains = the tenant's domains (the caller derives them from its own member accounts' UPNs).
+    # Returns @{ ok; reason }.
+    param([string]$Email, [string[]]$OwnDomains = @())
+    $e = "$Email".Trim()
+    if ($e -notmatch '^[^@\s]+@([^@\s]+\.[^@\s]+)$') { return @{ ok = $false; reason = "'$e' is not an email address" } }
+    $dom = $Matches[1].ToLowerInvariant()
+    foreach ($d in @($OwnDomains)) {
+        if ("$d".Trim() -and $dom -eq "$d".Trim().ToLowerInvariant()) {
+            return @{ ok = $false; reason = "'$e' is in this tenant's own domain ($dom) -- a guest invitation is for an external person's own mailbox, not an account of this tenant" }
+        }
+    }
+    return @{ ok = $true; reason = 'ok' }
+}
+
+function New-PimGuestInviteAction {
+    # BUG-203: the invitation as a QUEUED ACTION (Kind=Action) for the engine's queue-action drain -- the same
+    # shape as tap-reset / session-revoke: pending until an operator commits it in the Queue tab, then sent by
+    # the engine under its own identity. Nothing is sent here.
+    param([Parameter(Mandatory)][object]$Invitation, [string]$DisplayName = '', [string]$By = "$env:USERNAME", [string]$Justification = '')
+    $email = "$($Invitation.invitedUserEmailAddress)".Trim()
+    if (-not $email) { throw 'New-PimGuestInviteAction: the invitation carries no invitedUserEmailAddress.' }
+    $payload = [pscustomobject]@{
+        type                    = 'guest-invite'
+        invitedUserEmailAddress = $email
+        invitation              = $Invitation
+        principalName           = $(if ("$DisplayName".Trim()) { "$DisplayName ($email)" } else { $email })
+        targetKind              = 'Guest invitation'
+    }
+    $just = if ("$Justification".Trim()) { "$Justification" } else { "B2B guest invitation for $email" }
+    return New-PimChange -Entity 'PIM-Action-GuestInvite' -Key $email -Op Create -Payload $payload -By $By -Kind 'Action' -Origin 'Authorised' -Justification $just
 }
 
 function New-PimAccountToggleChange {
@@ -98,29 +143,68 @@ function New-PimAccountToggleChange {
     # canonical column is AccountStatus (Enabled | Disabled) -- the engine flips the
     # Entra accountEnabled bit + audits it. GATE at the caller; this only builds the
     # change record (the engine stays the only writer to Entra).
+    # BUG-202: $AccountName must be the row's UserName (the entity KEY); -UserPrincipalName is carried too so
+    # the staged change names the account both ways.
     param(
         [Parameter(Mandatory)][string]$AccountName,
         [Parameter(Mandatory)][ValidateSet('enable','disable')][string]$Action,
-        [string]$By = "$env:USERNAME"
+        [string]$By = "$env:USERNAME",
+        [string]$UserPrincipalName = ''
     )
     $status = if ($Action -eq 'enable') { 'Enabled' } else { 'Disabled' }
-    return New-PimChange -Entity 'Account-Definitions-Admins' -Key "$AccountName" -Op Update -By $By -Payload ([pscustomobject]@{ UserName = "$AccountName"; AccountStatus = $status })
+    $payload = [ordered]@{ UserName = "$AccountName"; AccountStatus = $status }
+    if ("$UserPrincipalName".Trim()) { $payload['UserPrincipalName'] = "$UserPrincipalName".Trim() }
+    return New-PimChange -Entity 'Account-Definitions-Admins' -Key "$AccountName" -Op Update -By $By -Payload ([pscustomobject]$payload)
+}
+
+function Resolve-PimManagedAccountRow {
+    # PURE (BUG-202). The Account-Definitions-Admins row an operator named -- by UserName (the key) OR by
+    # UserPrincipalName (what the picker offers). $null when there is none.
+    param([AllowEmptyCollection()][object[]]$Rows = @(), [string]$Account)
+    $a = "$Account".Trim().ToLowerInvariant()
+    if (-not $a) { return $null }
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        foreach ($k in @('UserName', 'UserPrincipalName')) {
+            $v = ''
+            if ($r -is [System.Collections.IDictionary]) { if ($r.Contains($k)) { $v = "$($r[$k])" } }
+            elseif ($r.PSObject.Properties[$k]) { $v = "$($r.PSObject.Properties[$k].Value)" }
+            if ($v.Trim().ToLowerInvariant() -eq $a) { return $r }
+        }
+    }
+    return $null
 }
 
 function Resolve-PimSelfServiceToggle {
     # Generic end-to-end decision for the self-service endpoint: may this portal-
-    # admin enable/disable this managed account? Returns { allowed; change?; reason }.
+    # admin enable/disable this managed account? Returns { allowed; change?; reason; notFound }.
+    # 🔴 BUG-202: with -Rows, the named account is RESOLVED against the stored admin rows first (the picker sends
+    # the UPN, the entity is keyed by UserName). The change is then keyed by the row's real UserName, so it
+    # updates that row instead of staging a junk new one; an account with no row is refused (not found) rather
+    # than staged. Without -Rows the pre-BUG-202 behaviour is kept for existing callers.
     param(
         [AllowNull()][object]$Profile,
         [Parameter(Mandatory)][string]$AccountName,
         [Parameter(Mandatory)][ValidateSet('enable','disable')][string]$Action,
         [switch]$IsSuperAdmin,
-        [string]$By = "$env:USERNAME"
+        [string]$By = "$env:USERNAME",
+        [AllowNull()][object[]]$Rows = $null
     )
-    if (-not (Test-PimPortalCanEnableConsultant -Profile $Profile -AdminName $AccountName -IsSuperAdmin:$IsSuperAdmin)) {
-        return [pscustomobject]@{ allowed = $false; change = $null; reason = "not permitted: '$AccountName' is not one of your managed accounts (needs the enable-consultants capability)" }
+    $userName = "$AccountName".Trim(); $upn = ''
+    if ($null -ne $Rows) {
+        $row = Resolve-PimManagedAccountRow -Rows $Rows -Account $AccountName
+        if ($null -eq $row) {
+            return [pscustomobject]@{ allowed = $false; notFound = $true; change = $null; reason = "'$AccountName' is not a managed admin account in this store -- self-service enable/disable acts on existing accounts only" }
+        }
+        $userName = "$($row.UserName)".Trim(); $upn = "$($row.UserPrincipalName)".Trim()
+        if (-not $userName) { $userName = $upn }
     }
-    return [pscustomobject]@{ allowed = $true; change = (New-PimAccountToggleChange -AccountName $AccountName -Action $Action -By $By); reason = 'ok' }
+    $may = (Test-PimPortalCanEnableConsultant -Profile $Profile -AdminName $userName -IsSuperAdmin:$IsSuperAdmin)
+    if (-not $may -and $upn) { $may = (Test-PimPortalCanEnableConsultant -Profile $Profile -AdminName $upn -IsSuperAdmin:$IsSuperAdmin) }
+    if (-not $may) {
+        return [pscustomobject]@{ allowed = $false; notFound = $false; change = $null; reason = "not permitted: '$AccountName' is not one of your managed accounts (needs the enable-consultants capability)" }
+    }
+    return [pscustomobject]@{ allowed = $true; notFound = $false; change = (New-PimAccountToggleChange -AccountName $userName -Action $Action -By $By -UserPrincipalName $upn); reason = 'ok' }
 }
 
 # --- GUEST INVITE INTO THE DELEGATION MODEL -------------------------------------
