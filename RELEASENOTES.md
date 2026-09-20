@@ -14,6 +14,43 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.384 — the records screens stop calling themselves files, and policy templates can be edited
+
+**Your records are called what they are.** Every record type was still named after the file it used to
+live in — `PIM-Assignments-Roles-AUs` and the like — and the screen even called the list a "file list".
+They now read as what they hold: *Entra roles scoped to an administrative unit*, *Who gets which group*,
+*Administrator accounts*. The underlying name is unchanged and is shown if you hover, so nothing you
+have scripted or exported moves.
+
+**There is an Edit button.** You could always change a value by clicking the cell, but nothing said so
+and the only thing offered was a red Delete. Edit is now the main action and takes you straight to the
+first field on the row.
+
+**"Delete" said the wrong thing, so it no longer says it.** Removing a row never revoked anything: it
+takes the entry out of the desired state, and the group and the access it grants carry on exactly as
+before — just unmanaged. The button now says **Stop managing**, and the confirmation explains it and
+points at the way to actually remove access.
+
+**Searching explains itself.** The box above the record list filters the *list of record types*, not
+what is inside them — so searching it for a person or a role found nothing, with no hint why. It now
+matches the names you can see, and when nothing matches it says which search you want and takes you
+there with your text.
+
+**Policy templates can be changed.** The templates page was read-only, so the values customers most
+often want to tune — how long an activation, an eligibility or an active assignment may last — could not
+be changed here at all. Each template now has editable maximum durations. Approval and sign-in
+requirements stay read-only by design: one of them, if set on the eligible path, causes your directory
+to reject every eligibility this product creates. Changing a duration changes what the engine enforces,
+so the page says so, and your next automatic update will ask you to confirm it before rolling.
+
+**The template rollout page speaks plainly.** *Gap*, *OutOfRing* and *Drift (extra)* are now *Missing*,
+*Not due yet* and *Extra*; *Entry key* is *Required permission*; the rollout column is *Wave*, so it no
+longer collides with the update ring shown on the same screen; and "behind 8" reads as "8 newer versions
+approved".
+
+**Menu wording corrected.** One menu entry promised that nothing new is created on its page, while two
+of that page's four cards create groups and administrators. It is now named for what it does.
+
 ## v2.4.383 — the admin-domain list actually lists, the unattended updater checks desired state, and two layout faults
 
 **The admin account domain is a real list again.** On a tenant with many verified domains the picker

@@ -501,6 +501,14 @@
   .grid-action-bar button:hover { border-color:#0969da; }
   .grid-action-bar button.gab-danger { color:#fff; background:#cf222e; border-color:#cf222e; }
   .grid-action-bar button.gab-danger:hover { background:#a40e26; border-color:#a40e26; }
+  /* REQ-GRID: Edit leads (primary), "stop managing" follows as a quiet, bordered action. It is not
+     filled red any more -- it does not revoke anything, and dressing it as destruction taught the
+     wrong model of what it does. Still visually distinct, so it is never pressed by accident. */
+  .grid-action-bar button.gab-primary { color:#fff; background:#0969da; border-color:#0969da; font-weight:600; }
+  .grid-action-bar button.gab-primary:hover { background:#0757ba; border-color:#0757ba; }
+  .grid-action-bar button.gab-primary:disabled { background:#8c959f; border-color:#8c959f; cursor:not-allowed; }
+  .grid-action-bar button.gab-secondary-danger { color:#cf222e; background:#fff; border-color:#cf222e; }
+  .grid-action-bar button.gab-secondary-danger:hover { background:#ffebe9; }
   .grid-action-bar .gab-spacer { flex:1; }
 
   /* Save tab */
@@ -2013,7 +2021,15 @@
         // grants, creates or hands over access now lives under Access, and every label names the
         // screen it actually opens.
         { tab: 'new',        label: 'Create access',         desc: 'Guided wizards: create an administrator (with a future creation date and TAP start), build a direct group, or delegate a permission' },
-        { tab: 'authoring',  label: 'Change existing access',desc: 'Link, move and remove: people in groups, groups in permission groups. Nothing new is created here' },
+        // 🔴 REQ-GRID (operator 2026-09-20: "this name and page is also misleading"). This entry read
+        // "Change existing access ... Nothing new is created here" while the page it opens is headed
+        // "Create & change access" and two of its four cards CREATE: Duplicate an existing group makes
+        // groups, Import administrators makes admin rows. The menu and the page contradicted each
+        // other, and the menu was the one making a promise a customer would act on.
+        // Named for what it does. Creation genuinely lives in two places -- the guided wizards under
+        // "Create access" and the bulk/derived actions here -- so the description says which is which
+        // instead of denying that this one creates at all.
+        { tab: 'authoring',  label: 'Create & change access (bulk)',desc: 'Duplicate a group, import administrators, attach Entra roles, move an admin between groups. Guided one-at-a-time creation is under Create access' },
         { tab: 'accounts',   label: 'Admin accounts & TAP',  desc: 'The privileged accounts themselves: update one, issue or reset its Temporary Access Pass, flag it for offboarding' },
         { tab: 'onboarding', label: 'Invite a guest or consultant', desc: 'B2B guest invitation into the delegation model, and enable/disable a managed consultant account' },
         // Departments decide WHO APPROVES and WHO IS MAILED for everything above (the owner chain
@@ -4781,16 +4797,20 @@
     let c;
     try { c = await api('GET', '/api/conformance?template=' + encodeURIComponent(confSel)); }
     catch (e) { m.innerHTML = '<div style="color:#cf222e">' + esc(e.message) + '</div>'; return; }
-    document.getElementById('confMeta').innerHTML = `workload <code>${esc(c.workload)}</code> · v${c.templateVersion} · <b style="color:${c.status==='approved'?'#116329':'#cf222e'}">${esc(c.status)}</b>` + (c.behind>0?` · <span title="Behind = template versions newer than this tenant's deployed version. Deploy rolls it forward." style="border-bottom:1px dotted #57606a;cursor:help;">behind ${c.behind}</span>`:'');
+    document.getElementById('confMeta').innerHTML = `workload <code>${esc(c.workload)}</code> · v${c.templateVersion} · <b style="color:${c.status==='approved'?'#116329':'#cf222e'}">${esc(c.status)}</b>` + (c.behind>0?` · <span title="The approved template has moved on this many versions since this tenant last had it applied. Deploy brings it up to date." style="border-bottom:1px dotted #57606a;cursor:help;">${c.behind} newer version${c.behind === 1 ? '' : 's'} approved</span>`:'');
     confLastKeys = c.keys || [];
     const col = { UpToDate:'#dafbe1;color:#116329', Gap:'#ffebe9;color:#cf222e', Exempt:'#eaeef2;color:#57606a', DriftExtra:'#fff1e5;color:#bc4c00', OutOfRing:'#f6f8fa;color:#8c959f' };
     const gl = { UpToDate:'✓', Gap:'✗', Exempt:'⊘', DriftExtra:'!', OutOfRing:'·' };
+    // 🔴 REQ-CONF (operator 2026-09-20: "i dont understand this page"). The five status words --
+    // Gap, OutOfRing, DriftExtra, CatalogAhead, Entry key -- exist only on this page. The STATUS KEY
+    // stays (the server sends it, tests assert it); only what the operator reads changes.
+    const stWord = { UpToDate:'In place', Gap:'Missing', Exempt:'Exempted', DriftExtra:'Extra', OutOfRing:'Not due yet' };
     const tip = {
-      UpToDate:'Up to date — matches the approved template; nothing to roll forward.',
-      Gap:'Gap — the approved template requires this binding but it is missing here. Deploy rolls it forward.',
-      Exempt:'Exempt — a time-boxed waiver covers this item, so it is not flagged as a Gap (until the exemption expires).',
-      DriftExtra:'Drift (extra) — present on the tenant but not in the approved template.',
-      OutOfRing:'Out of ring — this entry is not in scope for this tenant\'s rollout ring, so it is not deployed here.' };
+      UpToDate:'In place — this tenant already has it. Nothing to do.',
+      Gap:'Missing — this tenant is supposed to have it and does not. This is what Deploy fixes.',
+      Exempt:'Exempted — deliberately allowed to be missing, until the exemption expires.',
+      DriftExtra:'Extra — the tenant has it, but it is not required here.',
+      OutOfRing:'Not due yet — it belongs to a later wave, so it is not supposed to be here yet. Not a problem.' };
     // Per-entry ring control (SuperAdmin only) -> POST /api/conformance/promote.
     // Lower ring = earlier wave; an entry deploys to this tenant only when its ring
     // <= the tenant's ring. SuperAdmins get a dropdown; everyone else sees the value
@@ -4798,7 +4818,10 @@
     confRings = c.rings || {};
     const canPromote = roleAtLeast('SuperAdmin');
     const ringTip = 'Ring = the rollout wave this entry is in. Promote it forward (2 -> 1 -> 0) to widen which tenants deploy it; only entries whose ring is at or below a tenant\'s ring deploy there.';
-    let html = '<table style="border-collapse:collapse;font-size:12.5px;"><tr><th style="text-align:left;padding:4px 8px;border-bottom:2px solid #d0d7de;">Entry key</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Status</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;" title="' + esc(ringTip) + '">Ring</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Exempt</th></tr>';
+    // REQ-CONF: "Entry key" and "Ring" are storage words. "Ring" is worse than jargon here -- it already
+    // means the UPDATE ring elsewhere in the product, so one word carried two unrelated meanings on a
+    // page that prints both. The column is the rollout WAVE; the value and the endpoint are unchanged.
+    let html = '<table style="border-collapse:collapse;font-size:12.5px;"><tr><th style="text-align:left;padding:4px 8px;border-bottom:2px solid #d0d7de;" title="A role binding the approved template says this tenant should have.">Required permission</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Status</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;" title="' + esc(ringTip) + '">Wave</th><th style="padding:4px 8px;border-bottom:2px solid #d0d7de;">Exempt</th></tr>';
     for (const k of confLastKeys) {
       const s = (c.statuses||{})[k] || 'OutOfRing';
       const rg = (confRings[k] === undefined || confRings[k] === null) ? 2 : Number(confRings[k]);
@@ -4811,7 +4834,7 @@
         ringCell = `<span title="${esc(ringTip)} (SuperAdmin to change)" style="cursor:help;border-bottom:1px dotted #57606a;">${rg}</span>`;
       }
       html += `<tr><td style="padding:4px 8px;border-bottom:1px solid #eef0f3;"><code>${esc(k)}</code></td>` +
-        `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;background:${col[s]||''};font-weight:600;cursor:help;" title="${esc(tip[s]||s)}">${gl[s]||'·'} ${s}</td>` +
+        `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;background:${col[s]||''};font-weight:600;cursor:help;" title="${esc(tip[s]||s)}">${gl[s]||'·'} ${esc(stWord[s]||s)}</td>` +
         `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;">${ringCell}</td>` +
         `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;"><button class="btn-sec confExempt" data-k="${esc(k)}" style="font-size:11px;padding:2px 8px;">exempt…</button></td></tr>`;
     }
@@ -4822,7 +4845,7 @@
     m.querySelectorAll('.confRing').forEach(sel => sel.onchange = () => confPromote(sel.dataset.k, sel.value, sel));
     const ca = c.catalogAhead || [];
     document.getElementById('confCatalog').innerHTML = ca.length
-      ? `<div style="padding:10px;background:#ddf4ff;border:1px solid #54aeff;border-radius:8px;font-size:12.5px;"><b>Catalog-ahead</b> — live roles no template covers yet (capability-watch): ${ca.map(esc).join(', ')}</div>`
+      ? `<div style="padding:10px;background:#ddf4ff;border:1px solid #54aeff;border-radius:8px;font-size:12.5px;"><b>Roles this tenant has that no template covers yet</b> — live roles no template covers yet (capability-watch): ${ca.map(esc).join(', ')}</div>`
       : '';
     loadExemptionRegister();
   }
@@ -9252,7 +9275,9 @@
     // Populate the clone source-file + row pickers from the definition CSVs.
     const defBases = (PIM_DATA.csvBases || []).filter(b => b.group === 'Definitions').map(b => b.base);
     const clBase = document.getElementById('aClBase');
-    clBase.innerHTML = defBases.map(b => `<option value="${esc(b)}">${esc(b)}</option>`).join('') || '<option value="">(no definition files)</option>';
+    // REQ-GRID: the picker showed storage keys ("Account-Definitions-Admins") and said "no definition
+    // FILES" when empty. The value stays the base -- only what the operator reads changes.
+    clBase.innerHTML = defBases.map(b => `<option value="${esc(b)}">${esc(entityLabel(b))}</option>`).join('') || '<option value="">(nothing defined yet)</option>';
     const clRow = document.getElementById('aClRow');
     async function loadCloneRows() {
       clRow.innerHTML = '<option value="">loading...</option>';
@@ -13116,6 +13141,49 @@
   // AU / admin / department entities and discovery's Resources stay under "All records".
   // 🪤 `var`, not `const`: renderGridList may run during init before this line (no TDZ).
   var PIM_DELEGATION_GROUP_ENTITIES = ['PIM-Definitions-Roles', 'PIM-Definitions-Tasks', 'PIM-Definitions-Services', 'PIM-Definitions-Processes'];
+
+  // ===================================================================
+  // REQ-GRID (operator 2026-09-20: "i hate this, as it looks like v1 csv files").
+  // 🔴 PIM v2 IS SQL-ONLY, AND THIS PAGE STILL NAMED ITS DATA AFTER THE v1 CSV FILES. The rail printed
+  // the storage key verbatim -- `PIM-Assignments-Roles-AUs` IS the old filename -- and the collapse
+  // toggle's tooltip said "file list". There was no display-name indirection anywhere, so nothing had
+  // ever renamed them.
+  // 🔒 THE BASE STAYS THE KEY. Every lookup, every pim.Rows Entity, every endpoint and every test still
+  // uses the base string; this maps base -> what a human is shown, and nothing else. A base with no
+  // entry falls back to a readable de-prefixed form rather than to the raw key, so a NEW entity is
+  // never worse off than before.
+  // ===================================================================
+  const PIM_ENTITY_LABELS = {
+    'Account-Definitions-Admins':     'Administrator accounts',
+    // 🪤 "Roles", not "Role groups": REQ-E fixed the organisational word to `role`, and
+    // gui-headless/dimension-vocabulary.js forbids the literal phrase in rendered text so the
+    // wording stays owned by dimWord() rather than re-hardcoded surface by surface.
+    'PIM-Definitions-Roles':          'Roles',
+    'PIM-Definitions-Tasks':          'Task groups',
+    'PIM-Definitions-Services':       'Service groups',
+    'PIM-Definitions-Processes':      'Process groups',
+    'PIM-Definitions-Resources':      'Azure resources',
+    'PIM-Definitions-Departments':    'Departments',
+    'PIM-Definitions-Organization':   'Organisation units',
+    'PIM-Definitions-Projects':       'Projects',
+    'PIM-Definitions-CrossOrg':       'Cross-organisation groups',
+    'PIM-Definitions-AU':             'Administrative units',
+    'PIM-Assignments-Admins':         'Who gets which group',
+    'PIM-Assignments-Groups':         'Group-in-group membership',
+    'PIM-Assignments-Roles-Groups':   'Entra roles on groups',
+    'PIM-Assignments-Roles-AUs':      'Entra roles scoped to an administrative unit',
+    'PIM-Assignments-Azure-Resources':'Azure roles on resources',
+    'PIM-Assignments-Workloads':      'Workload roles (Intune, Defender, …)'
+  };
+  // The group headings too: "Definitions" / "Assignments" are storage words, not user words.
+  const PIM_ENTITY_GROUP_LABELS = { 'Definitions': 'What exists', 'Assignments': 'Who gets what' };
+  function entityLabel(base) {
+    const b = String(base || '');
+    if (PIM_ENTITY_LABELS[b]) return PIM_ENTITY_LABELS[b];
+    // Fallback for an entity nobody has named yet: drop the storage prefix and the dashes.
+    return b.replace(/^(PIM|Account)-(Definitions|Assignments)-/, '').replace(/-/g, ' ') || b;
+  }
+  function entityGroupLabel(g) { return PIM_ENTITY_GROUP_LABELS[String(g || '')] || String(g || ''); }
   function gridScopeMatches(b) {
     if (!gridScope) return true;
     if (gridScope === 'delegations') return String(b.group || '') === 'Assignments' || (PIM_DELEGATION_GROUP_ENTITIES || []).indexOf(String(b.base || '')) >= 0;
@@ -13139,7 +13207,7 @@
     const tog = document.createElement('div');
     tog.id = 'railToggle';
     tog.textContent = collapsed ? '❯' : '❮';
-    tog.title = collapsed ? 'Expand file list' : 'Collapse file list';
+    tog.title = collapsed ? 'Expand the record list' : 'Collapse the record list';
     tog.onclick = () => {
       localStorage.setItem('pimRailCollapsed', tab.classList.contains('rail-collapsed') ? '0' : '1');
       renderGridList();
@@ -13150,8 +13218,8 @@
     srch.type = 'search';
     srch.id = 'gridSearch';
     srch.className = 'grid-search';
-    srch.placeholder = 'Filter records…';
-    srch.setAttribute('aria-label', 'Filter the record types');
+    srch.placeholder = 'Filter record types…';
+    srch.setAttribute('aria-label', 'Filter the record types -- not their contents; use the search box in the header for that');
     srch.value = gridListFilter;
     srch.oninput = () => { gridListFilter = String(srch.value || ''); applyGridListFilter(); };
     list.appendChild(srch);
@@ -13173,7 +13241,7 @@
       const h = document.createElement('div');
       h.className = 'group-hdr';
       h.dataset.group = g;
-      h.textContent = g;
+      h.textContent = entityGroupLabel(g);
       list.appendChild(h);
       for (const base of groups[g]) {
         const it = document.createElement('div');
@@ -13181,7 +13249,8 @@
         it.dataset.base = base;
         it.dataset.group = g;
         const dirty = isDirty(base);
-        it.innerHTML = `<span>${escapeHtml(base)}</span>` + (dirty ? '<span class="badge">mod</span>' : '');
+        it.title = base;   // REQ-GRID: the storage key stays discoverable on hover
+        it.innerHTML = `<span>${escapeHtml(entityLabel(base))}</span>` + (dirty ? '<span class="badge">mod</span>' : '');
         it.onclick = () => openGrid(base);
         list.appendChild(it);
       }
@@ -13207,14 +13276,33 @@
     const q = String(gridListFilter || '').trim().toLowerCase();
     const shownByGroup = {};
     list.querySelectorAll('.item').forEach(it => {
-      const show = !q || String(it.dataset.base || '').toLowerCase().indexOf(q) >= 0;
+      // REQ-GRID: match the LABEL the operator can see as well as the storage key behind it, so
+      // typing what the rail says finds it. Matching only the key made the visible text unsearchable.
+      const hay = (String(it.dataset.base || '') + ' ' + entityLabel(it.dataset.base)).toLowerCase();
+      const show = !q || hay.indexOf(q) >= 0;
       it.style.display = show ? '' : 'none';
       if (show) shownByGroup[it.dataset.group] = (shownByGroup[it.dataset.group] || 0) + 1;
     });
     list.querySelectorAll('.group-hdr[data-group]').forEach(h => { h.style.display = (!q || shownByGroup[h.dataset.group]) ? '' : 'none'; });
     const nm = list.querySelector('#gridNoMatch');
     const total = Object.keys(shownByGroup).reduce((a, k) => a + shownByGroup[k], 0);
-    if (nm) { nm.style.display = (q && !total) ? '' : 'none'; nm.textContent = 'No record type matches "' + String(gridListFilter || '').trim() + '".'; }
+    // 🔴 REQ-GRID: this box filters the LIST OF RECORD TYPES, not the records. The operator typed
+    // "glob" looking for Global Administrator and got a dead end -- a correct answer to a question
+    // nobody asked. Say which box searches contents, and make it clickable rather than a hint.
+    if (nm) {
+      const qs = String(gridListFilter || '').trim();
+      nm.style.display = (q && !total) ? '' : 'none';
+      nm.innerHTML = 'No record <b>type</b> is called “' + escapeHtml(qs) + '”.' +
+        '<div style="margin-top:4px;font-style:normal;">This box filters the list on the left. ' +
+        'To search <b>inside</b> the records — a person, group, role or scope — use ' +
+        '<a href="#" id="gridNoMatchGlobal">the search box at the top of the page</a>.</div>';
+      const g = nm.querySelector('#gridNoMatchGlobal');
+      if (g) g.onclick = (e) => {
+        e.preventDefault();
+        const box = document.getElementById('globalSearch');
+        if (box) { box.value = qs; box.focus(); box.dispatchEvent(new Event('input', { bubbles: true })); }
+      };
+    }
   }
 
   async function openGrid(base) {
@@ -13297,8 +13385,10 @@
     const html = [];
     html.push(`<div class="grid-header">
       <div>
-        <div class="grid-title">${escapeHtml(base)}</div>
-        <div class="grid-sub">store: <b>${escapeHtml(cache.source)}</b> &nbsp;|&nbsp; ${p.rows.length - p.deletes.size} row(s) ${isDirty(base) ? '<span style="color:#9a6700">(pending changes)</span>' : ''}</div>
+        <div class="grid-title">${escapeHtml(entityLabel(base))}</div>
+        <div class="grid-sub"><code style="font-size:10.5px;color:#8c959f;" title="The storage key -- what this is called in the database and in the API">${escapeHtml(base)}</code>
+          &nbsp;|&nbsp; ${p.rows.length - p.deletes.size} row(s) ${isDirty(base) ? '<span style="color:#9a6700">(pending changes)</span>' : ''}
+          &nbsp;|&nbsp; <span style="color:#57606a;">click any cell to edit</span></div>
       </div>
       <div class="toolbar">
         <button id="btnAddRow">+ Add row</button>
@@ -13337,8 +13427,19 @@
         html.push(`<span class="gab-label" style="color:#9a6700">${escapeHtml(p.ringNote)}</span>`);
       }
     }
-    html.push(`<button id="gabDelete" class="gab-danger">Delete ${selCount} selected row(s)</button>`);
+    // 🔴 REQ-GRID (operator 2026-09-20: "missing edit button" / "i asked for an option to CHANGE the
+    // delegation"). Editing was always possible -- the cells are contenteditable, or a <select> for a
+    // known option set -- but nothing said so, and the one offered action was a red Delete. The page
+    // read "select a row -> destroy it" when its actual purpose is "click a cell -> change it".
+    // Edit now leads and is primary; it focuses the row's first editable cell, which is the discovery
+    // problem solved rather than merely documented.
+    html.push(`<button id="gabEdit" class="gab-primary" title="Edit this row -- or just click any cell">Edit ${selCount === 1 ? 'this row' : 'the first selected row'}</button>`);
     html.push('<span class="gab-spacer"></span>');
+    // 🪤 AND IT IS NOT A REVOKE. Removing a row takes the binding out of DESIRED state; the live group
+    // and its access keep existing (group deletion is a separate path needing Lifecycle=Retire +
+    // EnableGroupRetirement + a prefix match + the budget guard). "Delete" therefore meant ABANDON --
+    // the reddest word on the page describing the wrong act. Demoted, and renamed to what it does.
+    html.push(`<button id="gabDelete" class="gab-secondary-danger" title="Takes these rows out of the desired state. It does NOT revoke live access.">Stop managing ${selCount} row(s)</button>`);
     html.push('<button id="gabClear">Clear selection</button>');
     html.push('</div>');
 
@@ -13608,14 +13709,43 @@
       };
     }
 
+    // REQ-GRID: Edit takes the operator straight to the first editable cell of the selected row. The
+    // capability existed; the discoverability did not, and a feature nobody can find is not shipped.
+    const gabEdit = document.getElementById('gabEdit');
+    if (gabEdit) {
+      gabEdit.onclick = () => {
+        const ids = Array.from(p.selection).filter(i => !p.deletes.has(i)).sort((a, b) => a - b);
+        if (!ids.length) return;
+        const tr = main.querySelector(`tr[data-idx="${ids[0]}"]`);
+        if (!tr) return;
+        const cell = tr.querySelector('td[contenteditable=true], td select.cell-select');
+        if (!cell) return;
+        cell.scrollIntoView({ block: 'center' });
+        cell.focus();
+        if (cell.tagName === 'TD') {
+          // Put the caret in the cell rather than merely focusing it, so typing replaces nothing by
+          // surprise and the operator can see where they are.
+          try {
+            const r = document.createRange(); r.selectNodeContents(cell);
+            const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          } catch (_) { }
+        }
+      };
+    }
+
     const gabDelete = document.getElementById('gabDelete');
     if (gabDelete) {
       gabDelete.onclick = async () => {
         const ids = Array.from(p.selection).filter(i => !p.deletes.has(i));
         if (ids.length === 0) return;
-        const msg = `<p>Delete <b>${ids.length}</b> row(s) from <b>${escapeHtml(base)}</b>?</p>` +
-          `<p style="color:#57606a">They go into pending; you can still cancel before committing on the <b>Review &amp; Save</b> tab.</p>`;
-        const ok = await showConfirm('Delete selected rows', msg, true);
+        // 🔴 SAY WHAT IT ACTUALLY DOES. The old text said "Delete N row(s)", which every operator reads
+        // as "revoke this access". It does not: the row leaves DESIRED state and the live group and its
+        // memberships carry on granting access, unmanaged. Naming that is the difference between an
+        // informed choice and a nasty surprise at the next audit.
+        const msg = `<p>Take <b>${ids.length}</b> row(s) out of <b>${escapeHtml(entityLabel(base))}</b>?</p>` +
+          `<p><b>This does not revoke anything.</b> PIM stops managing these bindings; the live group and the access it grants stay exactly as they are — they simply become unmanaged.</p>` +
+          `<p style="color:#57606a">To actually remove access, stage a <b>Remove</b> row instead. Either way nothing happens until you <b>Commit</b> on <b>Review &amp; Save</b>, and you can cancel before then.</p>`;
+        const ok = await showConfirm('Stop managing these rows', msg, true);
         if (!ok) return;
         for (const i of ids) p.deletes.add(i);
         p.selection.clear();
@@ -16682,6 +16812,31 @@
         msg('ptDefMsg', true, 'Saved. A blank PolicyTemplate now means the templates above; the engine applies them on its next run.');
       } catch (e) { saveDef.disabled = false; msg('ptDefMsg', false, 'Not saved: ' + String((e && e.message) || e)); }
     };
+    // REQ-GRID: save the expiration ceilings. Only the fields the operator actually changed are sent, so
+    // an untouched template is never rewritten (and its fingerprint never moves for nothing).
+    body.querySelectorAll('.pt-exp-btn').forEach(b => {
+      b.onclick = async () => {
+        const id = b.dataset.id;
+        const durations = {};
+        body.querySelectorAll('.pt-exp-input[data-id="' + id + '"]').forEach(i => {
+          const val = String(i.value || '').trim();
+          if (val && val !== String(i.defaultValue || '').trim()) durations[i.dataset.key] = val;
+        });
+        if (!Object.keys(durations).length) { msg('pt-exp-msg-' + id, false, 'Nothing changed.'); return; }
+        b.disabled = true;
+        try {
+          const r = await api('PUT', '/api/policy-templates/expiration', { id: id, durations: durations });
+          pimPolicyTplCache = null;
+          await renderPolicyTemplatesPage();
+          const m2 = body.querySelector('#pt-exp-msg-' + id);
+          if (m2) {
+            m2.style.color = '#1a7f37';
+            m2.textContent = 'Saved: ' + (r.changed || []).join(', ') +
+              (r.baselineMoved ? '. Desired state moved — the engine applies it on its next run, and the next unattended update will ask to accept it.' : '.');
+          }
+        } catch (e) { b.disabled = false; msg('pt-exp-msg-' + id, false, 'Not saved: ' + String((e && e.message) || e)); }
+      };
+    });
     body.querySelectorAll('.pt-rename-btn').forEach(b => {
       b.onclick = async () => {
         const id = b.dataset.id, inp = body.querySelector('.pt-rename-input[data-id="' + id + '"]');
@@ -16793,6 +16948,29 @@
         h.push('<div class="pt-rename" style="font-size:12px;margin-top:6px;"><label>Name <input class="pt-rename-input" data-id="' + esc(t.id) + '" value="' + esc(t.name || '') + '" maxlength="80" style="width:320px;font-size:12px;"></label> ' +
           '<button class="pt-rename-btn" data-id="' + esc(t.id) + '">Rename</button> <span id="pt-rename-msg-' + esc(t.id) + '" style="font-size:11px;"></span>' +
           '<div style="color:#57606a;font-size:11px;">Changes the display name only. The id stays, so every delegation keeps this template and nothing in the tenant changes.</div></div>');
+        // 🔴 REQ-GRID (operator 2026-09-20: "where can i modify the policy templates"). This page was
+        // READ-ONLY: rename and pick-a-default were the only writes, so the values customers most want to
+        // tune -- how long an activation, an eligibility or an active assignment may last -- could not be
+        // changed in the Manager at all.
+        // 🔒 EXPIRATION ONLY, and the server refuses anything else. `Enablement` is NOT editable here:
+        // BUG-21 -- requiring MFA on Admin_Eligibility makes Entra reject EVERY eligibility the engine
+        // creates, because the requester is an app-only certificate SPN whose token can never carry an MFA
+        // claim. A field that can switch off a tenant's core delegation path does not belong in a form.
+        // ⚠️ Unlike Rename, this DOES change the tenant: it moves desired state, the engine converges every
+        // managed scope onto it, and the next unattended update is refused by the desired-state gate until
+        // an operator accepts it. Said here, before the click, not discovered at 03:00.
+        const durIn = (lbl, k, cur, hint) =>
+          '<label style="margin-right:12px;display:inline-block;">' + esc(lbl) +
+          ' <input class="pt-exp-input" data-id="' + esc(t.id) + '" data-key="' + k + '" value="' + esc((cur && cur.maximumDuration) || '') +
+          '" size="8" style="font-family:Consolas,monospace;font-size:11.5px;" title="' + esc(hint) + '"></label>';
+        h.push('<div class="pt-exp" style="font-size:12px;margin-top:8px;padding:8px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;">' +
+          '<b>Maximum duration</b> <span style="color:#57606a;font-size:11px;">ISO-8601 — <code>PT8H</code> = 8 hours, <code>P90D</code> = 90 days, <code>P365D</code> = a year</span><div style="margin-top:6px;">' +
+          durIn('Activation', 'EndUser_Assignment', t.activation, 'How long one activation lasts.') +
+          durIn('Eligible', 'Admin_Eligibility', t.eligible, 'How long someone may stay eligible.') +
+          durIn('Active', 'Admin_Assignment', t.active, 'How long a standing active assignment may last.') +
+          '</div><div style="margin-top:6px;"><button class="pt-exp-btn" data-id="' + esc(t.id) + '">Save durations</button> ' +
+          '<span id="pt-exp-msg-' + esc(t.id) + '" style="font-size:11px;"></span></div>' +
+          '<div style="color:#7a5c00;font-size:11px;margin-top:6px;">⚠ This changes what the engine <b>wants</b>: it applies the new ceiling to every scope using this template on its next run, and the next unattended update will ask an operator to accept the change before it rolls. MFA/justification rules are not editable here — requiring MFA on the eligible path would make Entra reject every eligibility the engine creates.</div></div>');
       }
       h.push('<div style="font-size:12px;margin-top:6px;"><b>What it sets</b><ul class="pt-lines" style="margin:4px 0 0 18px;">' + (t.lines || []).map(l => '<li>' + esc(l) + '</li>').join('') + '</ul></div>');
       if (t.approval && t.approval.required) {
