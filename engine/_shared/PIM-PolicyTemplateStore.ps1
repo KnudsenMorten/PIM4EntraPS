@@ -226,6 +226,114 @@ function Set-PimPolicyTemplateName {
     return [ordered]@{ id = $key; before = $before; after = $new; fingerprintBefore = $fpBefore; fingerprintAfter = $fpAfter }
 }
 
+function Test-PimIso8601Duration {
+    <#
+      PURE. Is this an ISO-8601 duration Entra will accept for a PIM policy ceiling (PT8H / P1D / P365D)?
+      Deliberately NARROW: days and hours/minutes only, positive, no years/months (Entra rejects them on
+      these rules and "P1M" reads as one month to a human and one minute to nobody). '' is legal and means
+      "no rule" -- the caller decides whether blank is allowed, not this function.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Value)
+    $v = "$Value".Trim()
+    if (-not $v) { return $true }
+    return [bool]($v -match '^P(?!$)(\d+D)?(T(?!$)(\d+H)?(\d+M)?)?$')
+}
+
+function Set-PimPolicyTemplateExpiration {
+    <#
+      REQ-GRID (operator 2026-09-20: "where can i modify the policy templates"). The Policy templates page
+      was READ-ONLY: the store had a renamer and a per-kind default picker, and NOTHING that could change a
+      rule. So the one thing customers most want to tune -- how long an assignment or eligibility may last
+      -- could not be touched from the Manager at all.
+
+      Changes the Expiration ceilings of ONE template: EndUser_Assignment (activation), Admin_Assignment,
+      Admin_Eligibility. Only the keys passed are touched; the rest of the template is left byte-identical.
+
+      LOCKED -- IT WILL NOT TOUCH `Enablement`, AND THAT IS DELIBERATE. BUG-21: Admin_Eligibility must NEVER require
+      MultiFactorAuthentication -- the "admin" making that request is the engine's own app-only certificate
+      SPN, whose token can never carry an MFA claim, so Entra rejects EVERY eligibility the engine creates
+      (400 RoleAssignmentRequestPolicyValidationFailed / MfaRule). A/B tested live 2026-08-10. Exposing that
+      array to a GUI is how a tenant's core delegation path gets switched off by a well-meaning edit, so this
+      writer has no parameter for it.
+
+      WARNING -- THIS CHANGES DESIRED STATE. The engine converges every managed scope onto the template, and the
+      store fingerprint moves -- which is exactly what the BUG-55 gate refuses on the next update until an
+      operator accepts it. The caller is handed both fingerprints so it can say so rather than surprise
+      someone. Read back after the write; a write that did not land is not reported as success.
+      Returns @{ id; changed; before; after; fingerprintBefore; fingerprintAfter }.
+    #>
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string]$Id,
+        [hashtable]$Durations = @{},
+        [string]$Actor = 'system:policy-template-store',
+        [datetime]$NowUtc = [datetime]::UtcNow
+    )
+    $allowed = @('EndUser_Assignment', 'Admin_Assignment', 'Admin_Eligibility')
+    $want = [ordered]@{}
+    foreach ($k in @($Durations.Keys)) {
+        $kk = "$k".Trim()
+        if ($allowed -notcontains $kk) { throw "Set-PimPolicyTemplateExpiration: '$kk' is not an expiration rule this writer may change (allowed: $($allowed -join ', ')). The sign-in and approval rules are deliberately not editable here: requiring multi-factor authentication on the eligible path makes Entra reject every eligibility this product creates." }
+        $dv = "$($Durations[$k])".Trim()
+        if (-not $dv) { throw "Set-PimPolicyTemplateExpiration: '$kk' is blank. A ceiling of 'no rule' is not set from here; leave the key out to keep the current value." }
+        if (-not (Test-PimIso8601Duration -Value $dv)) { throw "Set-PimPolicyTemplateExpiration: '$dv' is not a supported ISO-8601 duration for '$kk'. Use days and/or hours, e.g. P90D, P365D, PT8H." }
+        $want[$kk] = $dv
+    }
+    if (-not $want.Count) { throw 'Set-PimPolicyTemplateExpiration: nothing to change.' }
+
+    $existing = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'PolicyTemplates'
+    $v = $existing; if ($v -is [string]) { $v = $v | ConvertFrom-Json }
+    $map = ConvertTo-PimPolicyTemplateMap -Value $v
+    if (-not $map.Count) { throw 'Set-PimPolicyTemplateExpiration: the template store is empty or unreadable -- nothing to change.' }
+    $key = ''; foreach ($k in @($map.Keys)) { if ("$k" -ieq "$Id".Trim()) { $key = "$k" } }
+    if (-not $key) { throw "Set-PimPolicyTemplateExpiration: no template with id '$Id' in the store." }
+
+    $fpBefore = (Get-PimPolicyTemplateStoreFingerprint -Value $v).hash
+    $tplObj = if ($v -is [System.Collections.IDictionary]) { $v['templates'] } else { $v.templates }
+    $t = if ($tplObj -is [System.Collections.IDictionary]) { $tplObj[$key] } else { $tplObj.PSObject.Properties[$key].Value }
+    $rules = if ($t -is [System.Collections.IDictionary]) { $t['rules'] } else { $t.rules }
+    if (-not $rules) { throw "Set-PimPolicyTemplateExpiration: template '$key' has no rules block." }
+    $exp = if ($rules -is [System.Collections.IDictionary]) { $rules['Expiration'] } else { $rules.Expiration }
+    if (-not $exp) { throw "Set-PimPolicyTemplateExpiration: template '$key' has no Expiration rules." }
+
+    $before = [ordered]@{}; $after = [ordered]@{}; $changed = @()
+    foreach ($kk in @($want.Keys)) {
+        $node = if ($exp -is [System.Collections.IDictionary]) { $exp[$kk] } else { $exp.PSObject.Properties[$kk].Value }
+        if (-not $node) { throw "Set-PimPolicyTemplateExpiration: template '$key' has no '$kk' expiration rule to change." }
+        $cur = if ($node -is [System.Collections.IDictionary]) { "$($node['maximumDuration'])" } else { "$($node.maximumDuration)" }
+        $before[$kk] = $cur
+        $after[$kk] = $want[$kk]
+        if ($cur -cne $want[$kk]) {
+            if ($node -is [System.Collections.IDictionary]) { $node['maximumDuration'] = $want[$kk] }
+            else { $node | Add-Member -NotePropertyName maximumDuration -NotePropertyValue $want[$kk] -Force }
+            $changed += $kk
+        }
+    }
+    if (-not $changed.Count) {
+        return [ordered]@{ id = $key; changed = @(); before = $before; after = $after; fingerprintBefore = $fpBefore; fingerprintAfter = $fpBefore }
+    }
+    $stamp = [ordered]@{ by = $Actor; utc = $NowUtc.ToUniversalTime().ToString('o'); changed = @($changed) }
+    if ($t -is [System.Collections.IDictionary]) { $t['_editedExpiration'] = $stamp }
+    else { $t | Add-Member -NotePropertyName _editedExpiration -NotePropertyValue ([pscustomobject]$stamp) -Force }
+    if ($v -is [System.Collections.IDictionary]) { $v['updatedUtc'] = $NowUtc.ToUniversalTime().ToString('o') }
+    elseif ($v.PSObject.Properties['updatedUtc']) { $v.updatedUtc = $NowUtc.ToUniversalTime().ToString('o') }
+
+    Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'PolicyTemplates' -Value $v
+    $back = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'PolicyTemplates'
+    if ($back -is [string]) { $back = $back | ConvertFrom-Json }
+    $bm = ConvertTo-PimPolicyTemplateMap -Value $back
+    $bk = ''; foreach ($k in @($bm.Keys)) { if ("$k" -ieq $key) { $bk = "$k" } }
+    if (-not $bk -or $bm.Count -ne $map.Count) { throw "Set-PimPolicyTemplateExpiration: read-back mismatch -- the store does not hold template '$key' as expected." }
+    $bRules = Get-PimTemplateProp $bm[$bk] 'rules'
+    $bExp = if ($bRules -is [System.Collections.IDictionary]) { $bRules['Expiration'] } else { $bRules.Expiration }
+    foreach ($kk in @($changed)) {
+        $n = if ($bExp -is [System.Collections.IDictionary]) { $bExp[$kk] } else { $bExp.PSObject.Properties[$kk].Value }
+        $got = if ($n -is [System.Collections.IDictionary]) { "$($n['maximumDuration'])" } else { "$($n.maximumDuration)" }
+        if ($got -cne $want[$kk]) { throw "Set-PimPolicyTemplateExpiration: read-back mismatch on '$kk' -- store holds '$got', expected '$($want[$kk])'." }
+    }
+    $fpAfter = (Get-PimPolicyTemplateStoreFingerprint -Value $back).hash
+    return [ordered]@{ id = $key; changed = @($changed); before = $before; after = $after; fingerprintBefore = $fpBefore; fingerprintAfter = $fpAfter }
+}
 function Get-PimPolicyTemplateStoreMeta {
     <# PURE: the metadata half of a stored PolicyTemplates value as plain hashtables:
        @{ source; seededUtc; fingerprint; fileNames = @{id=file}; shipped = @{id=@{fingerprint;file;recordedUtc}}; hasShippedRecord } #>

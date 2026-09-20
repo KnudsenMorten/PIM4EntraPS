@@ -9280,6 +9280,56 @@ function Handle-Request {
         # reference moves, no rule changes and the tenant is not touched (this is a pim.Settings write, like every
         # other configuration save; nothing is queued because nothing in the tenant changes). SuperAdmin; audited; read
         # back (Set-PimPolicyTemplateName) -- the response carries the store fingerprint before and after (equal).
+        # -------------------------------------------------------------------
+        # REQ-GRID (operator 2026-09-20: "where can i modify the policy templates"). The page was
+        # READ-ONLY -- rename and pick-a-default were the only writes -- so the thing customers most want
+        # to tune, how long an assignment or eligibility may last, could not be changed in the Manager.
+        # SuperAdmin, audited, verified-and-read-back by Set-PimPolicyTemplateExpiration.
+        # 🔒 EXPIRATION ONLY. The writer has no way to touch `Enablement`, on purpose: BUG-21 -- requiring
+        # MFA on Admin_Eligibility makes Entra reject EVERY eligibility the engine creates, because the
+        # requester is an app-only certificate SPN whose token can never carry an MFA claim.
+        # ⚠️ The reply carries both store fingerprints: this MOVES DESIRED STATE, the engine converges
+        # every managed scope onto it, and the next unattended update is refused by the BUG-55 gate until
+        # an operator accepts it. The GUI says so rather than letting it be discovered at 03:00.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/policy-templates/expiration' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'SuperAdmin role required to change a policy template.' }
+                return 403
+            }
+            if (-not (Get-Command Set-PimPolicyTemplateExpiration -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; error = 'the policy-template store library is not loaded in this Manager.' }
+                return 503
+            }
+            $body = Read-RequestJson -Request $req
+            $eid = if ($body -and $body.PSObject.Properties['id']) { "$($body.id)".Trim() } else { '' }
+            if (-not $eid) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'id is required.' }; return 400 }
+            $durs = @{}
+            if ($body -and $body.PSObject.Properties['durations'] -and $body.durations) {
+                foreach ($pr in $body.durations.PSObject.Properties) { if ("$($pr.Value)".Trim()) { $durs[$pr.Name] = "$($pr.Value)".Trim() } }
+            }
+            try {
+                $who = ''; try { $who = "$((Get-PimManagerRole).identity)" } catch { }
+                $res = Set-PimPolicyTemplateExpiration -ConnectionString $script:PimSqlCs -Id $eid -Durations $durs -Actor $(if ($who) { $who } else { 'manager' })
+                if ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains('PolicyTemplates')) {
+                    try { $global:PIM_NamingConventions['PolicyTemplates'] = Get-PimManagerSetting -Name 'PolicyTemplates' } catch { }
+                }
+                Write-PimManagerAuditEvent -Action 'policy.template.expiration' -Target "policytemplate:$($res.id)" `
+                    -Before ([ordered]@{ durations = ($res.before | ConvertTo-Json -Compress) }) `
+                    -After ([ordered]@{ durations = ($res.after | ConvertTo-Json -Compress); changed = (@($res.changed) -join ','); fingerprintBefore = "$($res.fingerprintBefore)"; fingerprintAfter = "$($res.fingerprintAfter)" }) -Result 'ok'
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    ok = $true; id = $res.id; changed = @($res.changed); before = $res.before; after = $res.after
+                    fingerprintBefore = $res.fingerprintBefore; fingerprintAfter = $res.fingerprintAfter
+                    baselineMoved = [bool]("$($res.fingerprintBefore)" -ne "$($res.fingerprintAfter)")
+                })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+                return 400
+            }
+        }
+
         if ($path -eq '/api/policy-templates/rename' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
