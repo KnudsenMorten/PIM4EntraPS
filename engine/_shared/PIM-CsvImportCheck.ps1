@@ -597,8 +597,12 @@ function Invoke-PimCsvImportCheck {
     $prevTags = $global:PIM_ValidatorKnownTenantTags; $prevDom = $global:DefaultDomainUPN
     $valFindings = @()
     try {
+        # 2026-09-20: the SHIPPED conventions come from code (Get-PimShippedNamingConventions), not from
+        # config\PIM4EntraPS.NamingConventions.locked.ps1 -- that file was a hand-synced duplicate of the
+        # same defaults and is gone. The intent is unchanged: judge the rows against what the PRODUCT
+        # ships, never against this environment's overrides, which is why the live map is cleared first.
         $global:PIM_NamingConventions = $null
-        . (Join-Path $solRoot 'config\PIM4EntraPS.NamingConventions.locked.ps1')
+        $global:PIM_NamingConventions = Get-PimShippedNamingConventions
         if ($global:PIM_NamingConventions -isnot [System.Collections.IDictionary]) { throw 'Invoke-PimCsvImportCheck: the shipped naming conventions did not load.' }
         $tpl = Read-PimShippedPolicyTemplates -TemplateDir (Join-Path $solRoot 'templates\policy')
         $global:PIM_NamingConventions['PolicyTemplates'] = @{ templates = $tpl }

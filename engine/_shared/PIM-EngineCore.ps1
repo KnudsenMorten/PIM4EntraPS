@@ -66,47 +66,33 @@ function Compare-PimDesiredVsLive {
     $remove = New-Object System.Collections.Generic.List[object]
     $claimed = @{}   # live keys already consumed by a type change or a targeted removal
 
-    # ---- TYPE CHANGE (68.6 row 25) ------------------------------------------------------
-    # Without this, switching a row Eligible -> Active planned a CREATE of Active and left the
-    # Eligible assignment in place: MORE privilege than the row asks for. The live item of the
-    # other type is paired with the desired row so it is removed, and never also pruned.
-    if ($TypeKeyOf) {
-        $liveByTk = @{}
-        foreach ($l in @($Live)) {
-            if ($null -eq $l) { continue }
-            $k = "$(& $KeyOf $l)".Trim(); $lk = $k.ToLowerInvariant()
-            if (-not $lk -or $desKeys.ContainsKey($lk)) { continue }
-            $tk = "$(& $TypeKeyOf $l)".Trim().ToLowerInvariant(); if (-not $tk) { continue }
-            if (-not $liveByTk.ContainsKey($tk)) { $liveByTk[$tk] = New-Object System.Collections.Generic.List[object] }
-            $liveByTk[$tk].Add([pscustomobject]@{ key=$k; lk=$lk; live=$l })
-        }
-        if ($liveByTk.Count) {
-            $keptCreate = New-Object System.Collections.Generic.List[object]
-            foreach ($c in $create.ToArray()) {
-                $tk = "$(& $TypeKeyOf $c.desired)".Trim().ToLowerInvariant()
-                $cands = if ($tk -and $liveByTk.ContainsKey($tk)) { @($liveByTk[$tk] | Where-Object { -not $claimed.ContainsKey($_.lk) }) } else { @() }
-                if ($cands.Count -eq 0) { $keptCreate.Add($c); continue }
-                $first = $cands[0]; $claimed[$first.lk] = $true
-                $update.Add([pscustomobject]@{ key=$c.key; desired=$c.desired; live=$first.live; typeChange=$true; replacesKey=$first.key })
-                foreach ($x in @($cands | Select-Object -Skip 1)) {
-                    $claimed[$x.lk] = $true
-                    $remove.Add([pscustomobject]@{ key=$x.key; live=$x.live; typeChange=$true; supersededBy=$c.key })
-                }
-            }
-            $create = $keptCreate
-            # Leftovers next to an already-correct assignment. Measured on the first 2.4.338 tick
-            # (2026-09-13): this removed 3 active org memberships and wanted 81 eligible Entra role
-            # assignments gone, none of them named by any row. Opt-in only.
-            $present = if ($RemoveTypeLeftovers) { @($update.ToArray() | Where-Object { -not $_.typeChange }) + @($nochange.ToArray()) } else { @() }
-            foreach ($e in $present) {
-                $tk = "$(& $TypeKeyOf $e.desired)".Trim().ToLowerInvariant()
-                if (-not $tk -or -not $liveByTk.ContainsKey($tk)) { continue }
-                foreach ($x in @($liveByTk[$tk] | Where-Object { -not $claimed.ContainsKey($_.lk) })) {
-                    $claimed[$x.lk] = $true
-                    $remove.Add([pscustomobject]@{ key=$x.key; live=$x.live; typeChange=$true; supersededBy=$e.key })
-                }
-            }
-        }
+    # ---- THE OTHER ASSIGNMENT TYPE IS A SEPARATE DELEGATION, NOT A REPLACEMENT ------------
+    # 🔴 OPERATOR, 2026-09-20 -- THE TYPE-CHANGE RULE IS WITHDRAWN. It used to work like this:
+    # a desired row with no live match of its OWN type, but whose group+role existed live with the
+    # OTHER type, was not a create -- it was paired with that live item as a "type change", and the
+    # orchestrator DELETED the live assignment before creating the new one (68.6 row 25).
+    #
+    # That made the engine decide, by itself, to destroy live privileged access. Two things are wrong
+    # with it, and the operator named both:
+    #   1. "we must support the same delegation in both active and eligible types, that is very common,
+    #      not a mistake, so dont replace that" -- e.g. Active at the AU (L2) and Eligible at L1 for the
+    #      same delegation. Both types coexisting is a SUPPORTED design, so the other type is never
+    #      evidence that this row supersedes it.
+    #   2. "engine can newer make such a judgement automatic. it can only be done from operator."
+    #      Nobody wrote "remove". The row carries a TYPE; the deletion was inferred from a mismatch --
+    #      and a mismatch has causes that are not a decision at all: an incomplete live read (MEASURED
+    #      on internal 2026-09-19 23:33, where a short preload turned 9 correct Eligible assignments
+    #      into 9 planned deletions), a wizard default, a v1 import, or Entra refusing Active on a
+    #      role-assignable group -- which mismatches FOREVER, so it retried the delete on every run.
+    #
+    # So a desired row whose own type is not live is simply a CREATE. The live item of the other type
+    # is left exactly as it is. The ONLY way a live assignment is removed is an explicit Action=Remove
+    # row the operator staged and committed (the -RemoveRows path below), which is unchanged.
+    # 🪤 -RemoveTypeLeftovers went with it: its whole job was to delete "the other type", which is the
+    # very thing that is now supported. It is accepted and IGNORED so an environment that still carries
+    # the setting keeps starting; tests/Test-PimAssignmentParity.ps1 pins that it removes nothing.
+    if ($TypeKeyOf -and $RemoveTypeLeftovers) {
+        Write-Host '  [engine] RemoveTypeLeftovers is set but is NO LONGER HONOURED: both assignment types for one delegation are supported, and only an Action=Remove row removes an assignment.' -ForegroundColor DarkYellow
     }
 
     # ---- TARGETED REMOVALS (68.6 row 24) ------------------------------------------------
@@ -693,7 +679,12 @@ function Invoke-PimEngineScope {
     $__heldCand = @(@(@($diff.remove) + $__retype) | Where-Object { $_ -and (($_.PSObject.Properties['targeted'] -and $_.targeted) -or ($_.PSObject.Properties['typeChange'] -and $_.typeChange)) })
     $__keepUpdate = @(@($diff.update) | Where-Object { -not ($_.PSObject.Properties['typeChange'] -and $_.typeChange) })
     if ($__rmTotal -gt 0 -and (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue)) {
-        $rb = Test-PimRemoveBudgetAllowed -ToRemove $__rmTotal -Scope $Scope -Scanned (@($live).Count) -Operation 'remove'
+        # The BREAKDOWN goes with the count: the alert must be able to say whether these are assignment
+        # type changes (which delete the old type first) or rows the operator marked Action=Remove.
+        # Without it the mail read as "the engine decided to delete 9 things" (operator, 2026-09-20).
+        $rb = Test-PimRemoveBudgetAllowed -ToRemove $__rmTotal -Scope $Scope -Scanned (@($live).Count) -Operation 'remove' `
+                -TypeChanges (@($__retype).Count + @(@($diff.remove) | Where-Object { $_ -and $_.PSObject.Properties['typeChange'] -and $_.typeChange }).Count) `
+                -RemoveRows  (@(@($diff.remove) | Where-Object { $_ -and $_.PSObject.Properties['targeted'] -and $_.targeted }).Count)
         if (-not $rb.allowed) {
             # A -WhatIf (plan / verify) run removes nothing: it is logged, never mailed as an engine failure.
             if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb -PlanOnly:([bool]$WhatIf) }
@@ -755,23 +746,16 @@ function Invoke-PimEngineScope {
                 # The correct repair is the one already in use: a handler that does not act SAYS SO
                 # with `pimApplied = $false`. Fixed that way in Admins.ApplyRemove (both guards) and
                 # HybridAdProvisioning.ApplyCreate; AdminOffboarding + AdminTap already did.
+                # 🔴 THE REMOVAL-FIRST TYPE CHANGE IS GONE (operator, 2026-09-20). It used to call
+                # ApplyRemove on the live assignment of the other type and only then ApplyCreate --
+                # i.e. it DELETED live privileged access that no row had asked to remove. Both types of
+                # one delegation are supported, so there is nothing to replace: see the diff above.
+                # $__isRetype can no longer be true (Get-PimEngineDiff emits no typeChange item); the
+                # guard stays as a tripwire so a re-introduction fails loudly instead of deleting again.
                 if ($__isRetype) {
-                    # 68.6 row 25 -- TYPE CHANGE, REMOVAL FIRST. The old type goes before the new one
-                    # is created, in both directions: if the second step fails the principal holds LESS
-                    # than the row asks for (the next run re-creates), never MORE. Create-first would
-                    # leave Eligible+Active (Eligible->Active) or keep Active (Active->Eligible) on a
-                    # failed removal -- the widening this exists to stop.
-                    $__rm = & $p.ApplyRemove ([pscustomobject]@{ key = "$($item.replacesKey)"; live = $item.live; typeChange = $true }) $Context
-                    $__refused = @(@($__rm) | Where-Object { $null -ne $_ -and $_.PSObject -and ($_.PSObject.Properties.Name -contains 'pimApplied') -and (-not $_.pimApplied) }).Count -gt 0
-                    if ($__refused) {
-                        $__r = [pscustomobject]@{ pimApplied = $false; reason = "the old type ($($item.replacesKey)) was not removed, so the new type was NOT created (removal-first)" }
-                    } else {
-                        try { $__r = & $p.ApplyCreate $item $Context }
-                        catch { throw ("type change: the old assignment '{0}' was REMOVED, but creating the new one failed (the next run retries the create): {1}" -f $item.replacesKey, $_.Exception.Message) }
-                    }
-                } else {
-                    $__r = & $p.$handlerName $item $Context
+                    throw ("REFUSED: a 'type change' reached the orchestrator for '{0}'. The engine does not replace one assignment type with the other -- both are supported, and only an Action=Remove row removes an assignment. This item was NOT applied." -f $item.key)
                 }
+                $__r = & $p.$handlerName $item $Context
                 $__reported = $false
                 foreach ($__o in @($__r)) {
                     if ($null -ne $__o -and $__o.PSObject -and ($__o.PSObject.Properties.Name -contains 'pimApplied') -and (-not $__o.pimApplied)) { $__reported = $true }
@@ -846,10 +830,23 @@ function Invoke-PimEngineScope {
     # "remove was to revoke a delegation which must be removed deleted so it doesnt reapply"; in the old
     # files the rows were forgotten after the first run). Deleted only when EVERY live item it names
     # (eligible and active) was revoked, or nothing was live. Held, failed or refused revokes keep the row.
+    # 🔴 2026-09-20 -- "ABSENT" IS ONLY TRUE IF THE LIVE READ WAS COMPLETE.
+    # An absent Remove row means "nothing of this delegation is live, so the revoke is already done" --
+    # and the row is then DELETED from pim.Rows. That verdict comes straight from the live set, so a
+    # read that was short by even one item silently throws away a revoke the operator staged and
+    # committed, and the revoke never happens. (The FULLY-DONE half is safe either way: those rows were
+    # observed live and really were removed by this run.) A provider that cannot prove its live read was
+    # complete sets __pimLiveIncomplete; absent rows are then kept and re-checked next run.
+    $__liveIncomplete = "$($Context['__pimLiveIncomplete'])".Trim()
     $__rowsDone = 0
     if (-not $WhatIf) {
         $__fullyDone = @(foreach ($__rk in @($script:__rowDone.Keys)) { if ([int]$script:__rowDone[$__rk] -ge [int]$__rowTotal[$__rk]) { $script:__rowObj[$__rk] } })
-        $__doneRows = @(@($__fullyDone) + @(@($__absent) | ForEach-Object { $_.row }) | Where-Object { $null -ne $_ })
+        $__absentRows = @(@($__absent) | ForEach-Object { $_.row })
+        if ($__liveIncomplete -and @($__absentRows).Count) {
+            Write-Warning ("  [engine] {0}: {1} Remove row(s) look already-done, but the live read was NOT proven complete ({2}) -- they are KEPT and re-checked next run, never deleted on an unproven 'absent'." -f $Scope, @($__absentRows).Count, $__liveIncomplete)
+            $__absentRows = @()
+        }
+        $__doneRows = @(@($__fullyDone) + @($__absentRows) | Where-Object { $null -ne $_ })
         if ($__doneRows.Count) {
             $__rdEnt = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
             $__rowsDone = Complete-PimRemoveRows -Entity $__rdEnt -Rows $__doneRows -Scope $Scope

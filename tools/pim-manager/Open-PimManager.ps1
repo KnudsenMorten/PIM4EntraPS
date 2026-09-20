@@ -616,6 +616,62 @@ function Get-PimManagerLocalIdentity {
     try { return [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { return "$env:USERNAME" }
 }
 
+function Get-PimManagerDelegatedCap {
+    <#
+      PURE. REQ-Y (operator 2026-09-20: "fix req-y 3 items"). What a RESOLVED Manager role becomes when the Pro
+      feature 'access.delegated' -- delegated administration ceilings -- is not licensed for this environment.
+
+      🔴 THE HOLE THIS CLOSES. 'Delegated' IS that Pro feature: a Delegated user is precisely "a Manager user
+      limited by tier / level / service / scope with named capabilities". POST /api/manager-access already refused
+      to CREATE one without a licence (Test-PimManagerProFeature -Key 'access.delegated', 403), but nothing checked
+      when a role was RESOLVED -- so both remaining doors stood open:
+        * env PIM_DelegatedAdmins granted Delegated with no licence check at all (the reported gap), and
+        * an entry already stored in pim.Settings['ManagerAccess'] -- written before the gate shipped, or restored
+          from a backup -- kept resolving to Delegated forever.
+      A write-only gate on a role that outlives the write is not a gate. This caps at RESOLUTION, so both sources
+      are covered by one rule and neither can drift from the other.
+
+      🔒 DOWNWARD ONLY. The cap is Reader -- never Admin -- so an unlicensed environment loses the ceiling feature
+      and grants NO extra authority. That is the same shape as the PIM_HostedDefaultRole cap a few lines below:
+      a role this environment may not express is capped, loudly, and the source string says why.
+      Returns @{ role; source; capped }.
+    #>
+    param([AllowEmptyString()][string]$Role, [AllowEmptyString()][string]$Source, [bool]$Licensed, [AllowEmptyString()][string]$Reason)
+    $r = "$Role".Trim()
+    if ($r -ne 'Delegated' -or $Licensed) { return @{ role = $r; source = "$Source"; capped = $false } }
+    $why = if ("$Reason".Trim()) { "$Reason".Trim() } else { 'no Pro licence covers delegated administration' }
+    return @{ role = 'Reader'; source = "$Source (Delegated capped at Reader -- $why)"; capped = $true }
+}
+
+function Limit-PimManagerRoleByLicence {
+    <#
+      REQ-Y. The LIVE half of Get-PimManagerDelegatedCap: verify 'access.delegated' for this environment and apply
+      the cap to one resolved @{ role; identity; source }. A no-op for every role but Delegated.
+      🪤 THE FAIL DIRECTION IS COPIED FROM Test-PimManagerProFeature ON PURPOSE, because the two gates must agree:
+      the verifier NOT LOADED in this process = allow (a Manager without the licence module cannot verify anything,
+      and locking it out would be a worse failure than the one being prevented); the verifier present but THROWING
+      = refuse. A resolution gate that allowed where the write gate refuses would hand out a role the same session
+      is then refused for using.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Resolved)
+    if ("$($Resolved.role)".Trim() -ne 'Delegated') { return $Resolved }
+    if (-not (Get-Command Test-PimFeatureProLicence -ErrorAction SilentlyContinue)) { return $Resolved }
+    $srv = "$($global:PIM_SqlServer)".Trim(); if (-not $srv) { $srv = "$env:PIM_SqlServer".Trim() }
+    $pl = $null
+    try { $pl = Test-PimFeatureProLicence -Key 'access.delegated' -TenantId "$($global:PIM_TenantId)".Trim() -SqlServer $srv } catch { $pl = $null }
+    $licensed = [bool]($pl -and $pl.ok)
+    $reason   = if ($pl) { "$($pl.reason)" } else { 'the licence check failed' }
+    $cap = Get-PimManagerDelegatedCap -Role "$($Resolved.role)" -Source "$($Resolved.source)" -Licensed $licensed -Reason $reason
+    if (-not $cap.capped) { return $Resolved }
+    # Once per process: this is a deployment fact, not a per-request event, and one line per gate check would bury it.
+    if (-not $script:PimDelegatedLicenceWarned) {
+        $script:PimDelegatedLicenceWarned = $true
+        Write-Warning ("  [rbac] Delegated administration is a Pro feature and is NOT licensed here -- every Delegated " +
+                       "identity resolves as Reader until a licence is registered ($($cap.source)). Contact mok@mortenknudsen.net.")
+    }
+    return @{ role = $cap.role; identity = $Resolved.identity; source = $cap.source }
+}
+
 function Get-PimManagerRole {
     # Hosted: the Easy Auth principal captured for THIS request. Local: the interactive sign-in's UPN
     # (break-glass console) or the Windows user -- Get-PimManagerLocalIdentity.
@@ -680,7 +736,9 @@ function Get-PimManagerRole {
                 if ("$($e.identity)".Trim().ToLowerInvariant() -eq $whoLc) {
                     $r = "$($e.role)".Trim()
                     if ($r -notin @('Reader','Admin','SuperAdmin','Delegated')) { $r = 'Reader' }
-                    return @{ role = $r; identity = $who; source = 'sql ManagerAccess' }
+                    # REQ-Y: a STORED Delegated entry is capped at Reader without a Pro licence, exactly as the env
+                    # var below is -- the write gate on POST /api/manager-access cannot reach a row written earlier.
+                    return (Limit-PimManagerRoleByLicence @{ role = $r; identity = $who; source = 'sql ManagerAccess' })
                 }
             }
             Write-Host ("  [rbac] SQL ManagerAccess holds {0} entr(y/ies); '{1}' is not one of them -- trying env vars." -f @($entries).Count, $who) -ForegroundColor DarkYellow
@@ -693,7 +751,9 @@ function Get-PimManagerRole {
     # Delegated (workload owner): sees ONLY the groups they own. Identity match here;
     # the data layer (Read-PimRows) scopes rows to groups whose Owners include them.
     $delegs = @("$env:PIM_DelegatedAdmins" -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
-    if ($delegs -contains $whoLc) { return @{ role = 'Delegated'; identity = $who; source = 'env PIM_DelegatedAdmins' } }
+    # REQ-Y: capped at Reader without a Pro licence for 'access.delegated' -- this env var was the one door into
+    # delegated administration that no licence check covered.
+    if ($delegs -contains $whoLc) { return (Limit-PimManagerRoleByLicence @{ role = 'Delegated'; identity = $who; source = 'env PIM_DelegatedAdmins' }) }
     if ("$env:PIM_HostedDefaultRole".Trim()) {
         # 🔴 IMP-49 m: a DEFAULT role is what every signed-in tenant user (guests included, SEC-44) gets
         # without being named anywhere. It used to accept Admin/SuperAdmin, which turned one env var into
@@ -2501,17 +2561,18 @@ function Get-PimNamingConventions {
     #    on every call used to wipe whatever the store had hydrated into this process.
     # 2) the customer's values from SQL pim.Settings['NamingConventions'] (what Settings edits).
     # 🔒 SQL-ONLY (2026-09-13): PIM4EntraPS.NamingConventions.custom.ps1 is NOT read here any more.
-    $locked = Join-Path $configRoot 'PIM4EntraPS.NamingConventions.locked.ps1'
-    if (Test-Path -LiteralPath $locked) {
-        $prevNc = $global:PIM_NamingConventions
+    # 2026-09-20: the shipped defaults come from CODE (Get-PimShippedNamingConventions). The
+    # config\PIM4EntraPS.NamingConventions.locked.ps1 dot-source is gone -- it was a hand-synced copy of
+    # the same values, and sourcing it assigned $global:PIM_NamingConventions wholesale, which is why it
+    # needed the save/restore dance on every call. A fresh store is SEEDED with these defaults at
+    # Initialize-PimSqlStore, so pim.Settings is the only per-customer home.
+    if (Get-Command Get-PimShippedNamingConventions -ErrorAction SilentlyContinue) {
         try {
-            $global:PIM_NamingConventions = $null
-            . $locked
-            if ($global:PIM_NamingConventions -is [System.Collections.IDictionary]) {
-                foreach ($k in @($global:PIM_NamingConventions.Keys)) { $defaults[$k] = $global:PIM_NamingConventions[$k] }
+            $shipped = Get-PimShippedNamingConventions
+            if ($shipped -is [System.Collections.IDictionary]) {
+                foreach ($k in @($shipped.Keys)) { $defaults[$k] = $shipped[$k] }
             }
-        } catch { Write-Warning "  failed to source $locked : $($_.Exception.Message)" }
-        finally { $global:PIM_NamingConventions = $prevNc }
+        } catch { Write-Warning "  shipped naming defaults unavailable: $($_.Exception.Message)" }
     }
     $stored = $null
     try { if ($script:PimSqlCs) { $stored = Get-PimManagerSetting -Name 'NamingConventions' } } catch { Write-Warning "  naming conventions: SQL read failed: $($_.Exception.Message)" }
@@ -3430,11 +3491,22 @@ function Get-PimFeatureFlags {
     # Always fully populated (defaults applied) even on an empty store.
     $raw = $null
     try { $raw = Get-PimManagerSetting -Name 'FeatureFlags' } catch {}
-    $res = Resolve-PimFeatureFlags -Raw $raw
+    # The Manager KNOWS the topology, so pass it: a surface that needs an MSP master resolves OFF and
+    # unavailable on a single tenant, and the catalog says so instead of offering a live checkbox
+    # (operator 2026-09-20: "should not be possible to select in single domain setup").
+    $isMaster = $false
+    try { $isMaster = [bool](Test-PimManagerIsMspMaster) } catch { $isMaster = $false }
+    $res = Resolve-PimFeatureFlags -Raw $raw -IsMspMaster $isMaster
+    $cat = @(Get-PimFeatureFlagCatalog)
+    foreach ($c in $cat) {
+        $e = $res.effective["$($c.id)"]
+        $c['available']         = $(if ($e) { [bool]$e.available } else { $true })
+        $c['unavailableReason'] = $(if ($e) { "$($e.unavailableReason)" } else { '' })
+    }
     return [ordered]@{
         flags     = $res.flags
         effective = $res.effective
-        catalog   = @(Get-PimFeatureFlagCatalog)
+        catalog   = @($cat)
         warnings  = @($res.warnings)
     }
 }
@@ -3445,7 +3517,9 @@ function Set-PimFeatureFlags {
     # under { flags = ... } -- the store never holds always-on or redundant values.
     # Returns the same shape as Get-PimFeatureFlags.
     param([object]$Flags)
-    $overrides = ConvertTo-PimFeatureFlagOverrides -Raw $Flags
+    $isMaster = $false
+    try { $isMaster = [bool](Test-PimManagerIsMspMaster) } catch { $isMaster = $false }
+    $overrides = ConvertTo-PimFeatureFlagOverrides -Raw $Flags -IsMspMaster $isMaster
     Set-PimManagerSetting -Name 'FeatureFlags' -Value ([ordered]@{ flags = $overrides })
     return (Get-PimFeatureFlags)
 }
@@ -3712,13 +3786,22 @@ function Get-PimManagerLicenseBody {
     # the error, so the Settings section says what went wrong instead of spinning.
     $srv = "$($global:PIM_SqlServer)".Trim(); if (-not $srv) { $srv = "$env:PIM_SqlServer".Trim() }
     $role = Get-PimManagerMspLicenseRole
-    try { return (Get-PimLicenseApiBody -MspRole $role -TenantId "$($global:PIM_TenantId)".Trim() -SqlServer $srv) }
+    # canWrite = may THIS caller register a licence here (PUT /api/license). The card shows the
+    # in-GUI Register control only then, so a Reader is never offered a button that would 403.
+    $canWrite = $false
+    try { $canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') } catch { $canWrite = $false }
+    try {
+        $b = Get-PimLicenseApiBody -MspRole $role -TenantId "$($global:PIM_TenantId)".Trim() -SqlServer $srv
+        $b['canWrite'] = $canWrite
+        return $b
+    }
     catch {
         $why = "the licence could not be read ($($_.Exception.Message))"
         return [ordered]@{ status = 'Invalid'; statusText = $why; reason = $why; mspRequired = [bool]$role
             mspRole = $(if ($role -eq 'Slave') { 'slave' } elseif ($role) { 'master' } else { '' }); mspOk = (-not $role)
             mspState = $(if ($role) { 'refused' } else { 'none' }); mspReason = $(if ($role) { $why } else { '' })
-            contact = 'mok@mortenknudsen.net'; command = 'pwsh -File tools\setup\Set-PimLicense.ps1 -LicensePath <file> -SqlServer <server>.database.windows.net -TenantId <tenant> -AdminAppId <app id> -AdminCertThumbprint <thumbprint>' }
+            contact = 'mok@mortenknudsen.net'; canWrite = $canWrite
+            command = 'pwsh -File tools\setup\Set-PimLicense.ps1 -LicensePath <file> -SqlServer <server>.database.windows.net -TenantId <tenant> -AdminAppId <app id> -AdminCertThumbprint <thumbprint>' }
     }
 }
 
@@ -4244,31 +4327,91 @@ function Get-PimManagerTenantContext {
 # connection exists (refreshing pim.TenantCache kind 'tenant-domains'), else the cached list, else
 # known=$false -- and the caller then REFUSES to save a domain it cannot verify, never guesses one.
 # ---------------------------------------------------------------------------
+function ConvertTo-PimTenantDomainList {
+    # PURE. Graph hands the same list back in two shapes -- /domains rows (name in 'id', with an
+    # 'isVerified' flag) and organization.verifiedDomains entries (name in 'name', verified by
+    # definition) -- so normalise both to ONE shape here: lower-cased, de-duplicated, unverified
+    # dropped, default first then alphabetical. No Graph, no store: this is the piece a test can drive.
+    param([object[]]$Rows, [string]$NameProperty = 'id')
+    $seen = @{}
+    $out  = @()
+    foreach ($r in @($Rows)) {
+        if (-not $r) { continue }
+        $n = "$($r.$NameProperty)".Trim().TrimStart('@').ToLowerInvariant()
+        if (-not $n) { continue }
+        # 'isVerified' exists on /domains only. Absent = verifiedDomains = verified. Never treat a
+        # missing property as unverified -- that would silently empty the list for the /organization source.
+        $hasVerified = if ($r -is [System.Collections.IDictionary]) { $r.Contains('isVerified') }
+                       else { [bool]($r.PSObject.Properties['isVerified']) }
+        if ($hasVerified -and -not $r.isVerified) { continue }
+        if ($seen.ContainsKey($n)) { continue }
+        $seen[$n] = $true
+        $out += , ([ordered]@{ id = $n; isDefault = [bool]$r.isDefault; isInitial = [bool]$r.isInitial })
+    }
+    return @(@($out) | Sort-Object @{ Expression = { -not $_.isDefault } }, @{ Expression = { $_.id } })
+}
+
+function Get-PimTenantDefaultDomain {
+    # PURE. THE one default domain of a list -- ALWAYS a single string, never a join and never $null.
+    # 🪤 2026-09-20: "Admin account domain" rendered every domain run together, because the default was
+    #    picked inline inside a "$(...)" and an array that got there interpolated as a space-joined string.
+    #    The pick lives here now, once, and a caller cannot get a list back by mistake.
+    # Entra marks exactly one domain default, but never depend on it: fall back to the .onmicrosoft.com
+    # initial domain, then the first entry, so a list ALWAYS yields a usable answer.
+    param([object[]]$Domains)
+    $d = @(@($Domains) | Where-Object { $_ -and $_.isDefault }) | Select-Object -First 1
+    if (-not $d) { $d = @(@($Domains) | Where-Object { $_ -and $_.isInitial }) | Select-Object -First 1 }
+    if (-not $d) { $d = @(@($Domains) | Where-Object { $_ }) | Select-Object -First 1 }
+    if (-not $d) { return '' }
+    return "$($d.id)"
+}
+
 function Get-PimManagerTenantDomains {
     $haveCache = [bool](Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue)
+    $reason = ''
     $canQuery = $script:PimManagerTenantConnected -or
                 ((Get-Command Test-PimRestTenantAuthAvailable -ErrorAction SilentlyContinue) -and (Test-PimRestTenantAuthAvailable))
+    if (-not $canQuery) { $reason = 'this Manager process has no tenant connection' }
+    elseif (-not (Get-Command Invoke-PimGraphGetAll -ErrorAction SilentlyContinue)) { $reason = 'the Graph client is not loaded in this process' }
     if ($canQuery -and (Get-Command Invoke-PimGraphGetAll -ErrorAction SilentlyContinue)) {
+        $list = @()
+        # (a) /domains -- the whole list, but it needs Domain.Read.All.
         try {
             $rows = @(Invoke-PimGraphGetAll -Uri 'https://graph.microsoft.com/v1.0/domains?$select=id,isDefault,isInitial,isVerified')
-            $list = @($rows | Where-Object { $_ -and $_.isVerified } | ForEach-Object { [ordered]@{ id = "$($_.id)"; isDefault = [bool]$_.isDefault; isInitial = [bool]$_.isInitial } } | Sort-Object { -not $_.isDefault }, { $_.id })
-            if ($list.Count) {
-                $val = [ordered]@{ domains = @($list); refreshedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
-                if ($haveCache) { try { [void](Set-PimTenantCacheEntry -Kind 'tenant-domains' -Value $val) } catch { Write-Verbose "tenant-domains cache write skipped: $($_.Exception.Message)" } }
-                return [ordered]@{ known = $true; source = 'live'; domains = @($list); refreshedUtc = $val.refreshedUtc }
-            }
-        } catch { Write-Verbose "tenant-domains live read skipped: $($_.Exception.Message)" }
+            $list = @(ConvertTo-PimTenantDomainList -Rows $rows -NameProperty 'id')
+            if (-not $list.Count) { $reason = 'Graph /domains returned no verified domain' }
+        } catch { $reason = "Graph /domains: $($_.Exception.Message)"; Write-Verbose "tenant-domains /domains read skipped: $($_.Exception.Message)" }
+        # (b) THE SAME LIST off the organization object -- verifiedDomains[] -- which the Manager already
+        #     reads for the tenant name, so it works on the permissions we know this process has
+        #     (Organization.Read.All / Directory.Read.All) rather than needing Domain.Read.All as well.
+        #     🔴 Operator 2026-09-20 ("i must be able to select it ... from a list"): with only source (a),
+        #     a tenant whose app is not consented Domain.Read.All got an EMPTY dropdown -- one option,
+        #     "Tenant default domain", nothing to choose. A second source is the difference between a
+        #     list and no list, and it costs one call that already succeeds elsewhere on this page.
+        if (-not $list.Count) {
+            try {
+                $orgs = @(Invoke-PimGraphGetAll -Uri 'https://graph.microsoft.com/v1.0/organization?$select=verifiedDomains')
+                $vd   = @(@($orgs) | ForEach-Object { $_.verifiedDomains } | Where-Object { $_ })
+                $list = @(ConvertTo-PimTenantDomainList -Rows $vd -NameProperty 'name')
+                if ($list.Count) { $reason = '' } elseif (-not $reason) { $reason = 'Graph /organization carried no verifiedDomains' }
+            } catch { if (-not $reason) { $reason = "Graph /organization: $($_.Exception.Message)" } }
+        }
+        if ($list.Count) {
+            $val = [ordered]@{ domains = @($list); refreshedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+            if ($haveCache) { try { [void](Set-PimTenantCacheEntry -Kind 'tenant-domains' -Value $val) } catch { Write-Verbose "tenant-domains cache write skipped: $($_.Exception.Message)" } }
+            return [ordered]@{ known = $true; source = 'live'; domains = @($list); refreshedUtc = $val.refreshedUtc; reason = '' }
+        }
     }
     if ($haveCache) {
         try {
             $c = Get-PimTenantCacheEntry -Kind 'tenant-domains'
             $cv = if ($c -and $c.PSObject.Properties['value']) { $c.value } else { $c }
             if ($cv -and @($cv.domains).Count) {
-                return [ordered]@{ known = $true; source = 'cache'; domains = @(@($cv.domains) | ForEach-Object { [ordered]@{ id = "$($_.id)"; isDefault = [bool]$_.isDefault; isInitial = [bool]$_.isInitial } }); refreshedUtc = "$($cv.refreshedUtc)" }
+                return [ordered]@{ known = $true; source = 'cache'; domains = @(ConvertTo-PimTenantDomainList -Rows @($cv.domains) -NameProperty 'id'); refreshedUtc = "$($cv.refreshedUtc)"; reason = '' }
             }
-        } catch { }
+        } catch { if (-not $reason) { $reason = "the cached domain list could not be read: $($_.Exception.Message)" } }
     }
-    return [ordered]@{ known = $false; source = 'none'; domains = @(); refreshedUtc = '' }
+    return [ordered]@{ known = $false; source = 'none'; domains = @(); refreshedUtc = ''; reason = $(if ($reason) { $reason } else { 'no source returned a verified domain' }) }
 }
 
 function Build-PimGraphData {
@@ -7226,10 +7369,11 @@ function Handle-Request {
             $cur = ''
             try { $cur = "$((Get-PimManagerNamingSettings).value['AdminAccountUpnSuffix'])".Trim() } catch { $cur = '' }
             $doms = Get-PimManagerTenantDomains
-            $def = "$(@(@($doms.domains) | Where-Object { $_.isDefault })[0].id)"
+            $def = Get-PimTenantDefaultDomain -Domains @($doms.domains)   # ONE string, never a join
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                 value = $cur; effective = $(if ($cur) { $cur.TrimStart('@') } else { $def }); defaultDomain = $def
                 known = [bool]$doms.known; source = "$($doms.source)"; domains = @($doms.domains)
+                reason = "$($doms.reason)"   # why the list is empty -- so the page can say it instead of just offering nothing
                 canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
             })
             return 200
@@ -7489,6 +7633,64 @@ function Handle-Request {
             } else {
                 Write-JsonResponse -Response $resp -Status 200 -Body @{ status = 'Missing'; statusText = 'Core (free)'; reason = 'license library not loaded' }
             }
+            return 200
+        }
+
+        # -------------------------------------------------------------------
+        # REGISTER AN ISSUED LICENCE FROM THE GUI (operator 2026-09-20: "i dont get this, how can a
+        # customer register a license when they dont have my admin cert").
+        # The page told every customer to run Set-PimLicense.ps1 with -AdminAppId / -AdminCertThumbprint
+        # -- credentials that reach the deployment's SQL store directly. Most customers do not have them
+        # and should not need them: the licence is a document WE signed, and the store already refuses a
+        # document that does not verify. So the supported path is: paste (or pick) the issued file here.
+        #   * SuperAdmin only, and audited like every other settings write.
+        #   * Set-PimLicense VERIFIES the signature BEFORE the store is written -- a tampered or
+        #     foreign-signed document is refused and NOTHING is stored. That is the whole safety of
+        #     letting a customer do this themselves; do not add a path that skips it.
+        #   * The reply is the re-read licence body, so the card shows what the store now holds rather
+        #     than what we hoped it would hold.
+        # The command line stays available for an operator who prefers it (it is still shown on the card).
+        # -------------------------------------------------------------------
+        # PUT only -- one verb, the one the GUI calls. Accepting POST as an alias would add a second
+        # entry point with no caller, which Test-PimGuiEngineAlignment correctly treats as an orphan.
+        if ($path -eq '/api/license' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = 'SuperAdmin role required to register a licence.' }
+                return 403
+            }
+            if (-not (Get-Command Set-PimLicense -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; error = 'the licence library is not loaded in this host, so nothing can be registered.' }
+                return 503
+            }
+            $body = Read-RequestJson -Request $req
+            $text = ''
+            foreach ($k in @('text', 'license', 'licence', 'value')) {
+                if ($body -and $body.PSObject.Properties[$k] -and "$($body.$k)".Trim()) { $text = "$($body.$k)"; break }
+            }
+            if (-not "$text".Trim()) {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'No licence document was sent. Paste the whole contents of the issued .pimlicense / .aitlicense file, or pick the file.' }
+                return 400
+            }
+            try {
+                $chk = Set-PimLicense -LicenseText "$text"
+            } catch {
+                # A refusal is the NORMAL outcome for a wrong file -- say which document was rejected and
+                # why, and be explicit that the store was not touched.
+                Write-PimManagerAuditEvent -Action 'settings.license.register' -Target 'settings:License' -After ([ordered]@{ accepted = $false; reason = "$($_.Exception.Message)" }) -Result 'refused'
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "$($_.Exception.Message)"; stored = $false }
+                return 400
+            }
+            Write-PimManagerAuditEvent -Action 'settings.license.register' -Target 'settings:License' -After ([ordered]@{
+                accepted = $true; customer = "$($chk.Customer)"; sku = "$($chk.Sku)"; status = "$($chk.Status)"
+                validTo = $(if ($chk.ValidTo) { $chk.ValidTo.ToString('yyyy-MM-dd') } else { '' })
+            }) -Result 'ok'
+            $after = if (Get-Command Get-PimManagerLicenseBody -ErrorAction SilentlyContinue) { Get-PimManagerLicenseBody } else { $null }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                ok = $true; stored = $true
+                detail = "Registered the licence for '$($chk.Customer)' ($($chk.Sku)) -- status $($chk.Status)."
+                license = $after
+            })
             return 200
         }
 

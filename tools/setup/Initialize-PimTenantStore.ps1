@@ -18,6 +18,40 @@
        (ddladmin covers the schema apply). It used to be **db_owner** (which also manages users,
        permissions and can drop the database); a db_owner membership is now DROPPED. Read back.
     3. the pim schema (Rows / Settings / ChangeQueue) has to exist.
+    4. (2026-09-20) the DEFAULT NAMING TEMPLATE is seeded into pim.Settings['NamingConventions'].
+       Initialize-PimSqlStore does it as part of step 3, and ONLY for a store with no rows yet --
+       an established estate was named by SOME convention, and writing the shipped default over it
+       would rename every admin account and group the next run computes. The engine REFUSES to run
+       without a stored convention rather than fall back to the defaults (Test-PimNamingConventionsUsable).
+
+  NAMING IS PER CUSTOMER, AND THESE ARE THE VARIABLES IT UNDERSTANDS
+  ------------------------------------------------------------------
+  The patterns live in pim.Settings and are edited in the Manager (Settings > Naming). The two
+  per-customer values have their own fields there ("Naming words"); everything else is a pattern
+  built from these tokens. The SAME list is the Manager's click-to-insert legend
+  (PIM_NAMING_TOKENS in tools/pim-manager/pim-manager.html), and
+  tests/Test-PimNamingTokenLegend.ps1 fails if this set and the engine's resolver ever disagree.
+
+    ADMIN ACCOUNT  (AdminAccountPattern / AdminAccountPatternHighPriv)
+      {AdminWord}         the word that marks an admin account -- setting `AdminWord`, default
+                          'Admin'; a customer may use any acronym ('adm', ...).
+      {TenantCommonName}  this tenant's short common name -- setting `TenantCommonName`, e.g.
+                          'EFIF' / 'RIDE'. Blank = the token vanishes with no double separator,
+                          so ONE template serves every tenant instead of baking the name in.
+      {AdminTypePrefix}   by admin-type (internal = none, external-adminuser = 'x-').
+      {Initial}           the owner's initials. {Owner} is the back-compat synonym.
+      {Platform}          environment suffix (Entra '-ID', AD '-AD'). {EnvironmentSuffix} is a synonym.
+    GROUP          (PimGroupPattern / PimGroupAuPattern)
+      {Role} {Department} {AdminUnit}
+    RESOURCE GROUP (ResourceGroupPattern)
+      {Workload} {Scope} {Permission} {Level} {Tier} {Plane} {Platform}
+
+    e.g. '{AdminTypePrefix}{AdminWord}-{TenantCommonName}-{Initial}{Platform}' with AdminWord='Admin'
+         and TenantCommonName='EFIF'  ->  admin-efif-mok-id
+  🪤 'Environment' in this convention means the PLATFORM (entra/ad), NOT the customer -- that is why
+  the per-tenant token is {TenantCommonName} and not {EnvName}.
+  🔴 AD OU placement (PathAdmins / PathAdminsL0T0) is OPTIONAL: on-premises AD only, blank for a
+  cloud-only tenant, and never required by the engine.
 
   Steps 1 and 2 connect as the server's Entra admin (the onboarding SPN). Step 3 connects AS
   THE MODERN SPN WITH ITS CERTIFICATE -- deliberately, because that is the identity the engine

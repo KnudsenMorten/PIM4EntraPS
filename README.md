@@ -1055,7 +1055,14 @@ downlink jobs refuse to run and the portal shows a red banner on its MSP pages.
 - **Settings › Licence** in the portal shows the status, the customer, the valid-until date and the tenant it is
   bound to, and which Pro capabilities are on.
 
-**Register a licence file** (it is stored in the environment's database, verified first and read back):
+**Register a licence — in the portal.** **Settings › Licence › Register a licence**: pick the issued licence
+file, or paste its contents, and save. It is checked against the signing certificate **before** anything is
+stored, so a file that does not verify is refused, nothing is written and the page says so. Registering needs
+the senior-administrator role and is recorded in the audit trail.
+
+**Or from a shell**, if you hold the environment's own database credentials (the application id and certificate
+below are **your** deployment's, not the vendor's). It is stored in the environment's database, verified first
+and read back:
 
 ```powershell
 pwsh -File tools\setup\Set-PimLicense.ps1 -LicensePath <file> -SqlServer <server>.database.windows.net `

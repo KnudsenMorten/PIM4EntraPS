@@ -202,11 +202,16 @@ function Import-PimMigrateFileStores {
         $row = [ordered]@{ store = 'NamingConventions (per key)'; file = $ncCustom; imported = $false; kept = $false; message = ''; error = '' }
         $prevNc = $global:PIM_NamingConventions
         try {
+            # The CUSTOMER's v1 file wins -- that is the convention their existing names were built with,
+            # and it is the whole point of a migration. 2026-09-20: when they have none, the fallback is
+            # the SHIPPED defaults in code, not the solution's config\...locked.ps1 (deleted: it was a
+            # hand-synced duplicate of those same defaults). A missing fallback used to leave the map EMPTY
+            # and every name resolve off the built-ins by accident.
             $locked = @{}
             $lockedFile = Join-Path $ConfigDir 'PIM4EntraPS.NamingConventions.locked.ps1'
-            if (-not (Test-Path -LiteralPath $lockedFile)) { $lockedFile = Join-Path (Split-Path -Parent $Shared) '..\config\PIM4EntraPS.NamingConventions.locked.ps1' }
             $global:PIM_NamingConventions = @{}
             if (Test-Path -LiteralPath $lockedFile) { . $lockedFile }
+            elseif (Get-Command Get-PimShippedNamingConventions -ErrorAction SilentlyContinue) { $global:PIM_NamingConventions = Get-PimShippedNamingConventions }
             if ($global:PIM_NamingConventions -is [System.Collections.IDictionary]) { foreach ($k in @($global:PIM_NamingConventions.Keys)) { $locked[$k] = $global:PIM_NamingConventions[$k] } }
             $global:PIM_NamingConventions = @{}
             foreach ($k in @($locked.Keys)) { $global:PIM_NamingConventions[$k] = $locked[$k] }

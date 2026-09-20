@@ -38,8 +38,73 @@ Set-StrictMode -Off
 # Convention lookup. Reads $global:PIM_NamingConventions if present, else the
 # shipped defaults (kept in 1:1 sync with the .locked.ps1). Never mutates global.
 # ---------------------------------------------------------------------------
+function Get-PimRequiredNamingConventionKeys {
+    <#
+      PURE. The convention keys that PRODUCE A NAME. If one of these is absent from the store, every
+      name the engine computes changes -- so the engine refuses to run rather than invent one.
+    #>
+    @('AdminAccountPattern', 'AdminAccountPatternHighPriv', 'PimGroupPattern', 'ResourceGroupPattern')
+}
+
+function Test-PimNamingConventionsUsable {
+    <#
+      🔴 PURE. Does the STORE carry a usable naming convention? (operator, 2026-09-20: *"naming is defined
+      at build time and goes into sql ... we can not have drifts here or sudden changes o admin accounts or
+      group names. that is a critical no-go"*, and *"refuse engine to run"*.)
+
+      Why refusing beats falling back: the shipped defaults are NOT a safe substitute for a customer's
+      convention. MSP-SETUP-GUIDE §5 records what happens when the name is wrong -- the managed tenant's
+      Admins provider builds its live set with startswith(userPrincipalName, <prefix>), so an account that
+      does not match is INVISIBLE to it, is never in the live set, and is therefore RE-CREATED on every
+      tick. Nothing errors; unmanaged privileged accounts just accumulate in the customer's directory
+      (IMP-13). A wrong name is not a cosmetic problem, so a guessed name is not an acceptable default.
+
+      -Stored = pim.Settings['NamingConventions'] as read (a map, an object, or $null).
+      Returns @{ ok; missing = @(keys); reason }.
+    #>
+    [CmdletBinding()] param([AllowNull()][object]$Stored)
+    $req = @(Get-PimRequiredNamingConventionKeys)
+    if ($null -eq $Stored) {
+        return @{ ok = $false; missing = $req
+                  reason = "pim.Settings['NamingConventions'] is not set in this environment's store" }
+    }
+    $have = @{}
+    if ($Stored -is [System.Collections.IDictionary]) { foreach ($k in @($Stored.Keys)) { $have["$k"] = $Stored[$k] } }
+    elseif ($Stored -is [System.Management.Automation.PSCustomObject]) { foreach ($p in $Stored.PSObject.Properties) { $have[$p.Name] = $p.Value } }
+    else { return @{ ok = $false; missing = $req; reason = "pim.Settings['NamingConventions'] is a $($Stored.GetType().Name), not a convention map" } }
+    $missing = @($req | Where-Object { -not $have.ContainsKey($_) -or -not "$($have[$_])".Trim() })
+    if ($missing.Count) {
+        return @{ ok = $false; missing = @($missing)
+                  reason = ("pim.Settings['NamingConventions'] is missing: " + ($missing -join ', ')) }
+    }
+    return @{ ok = $true; missing = @(); reason = 'the store carries a complete naming convention' }
+}
+
+function Get-PimShippedNamingConventions {
+    <#
+      🔴 THE ONE SHIPPED COPY OF THE NAMING DEFAULTS (operator, 2026-09-20).
+      There used to be THREE copies: this hashtable, config\PIM4EntraPS.NamingConventions.locked.ps1,
+      and pim.Settings. The file was a hand-maintained duplicate of what is already here -- the header
+      of this function literally said "kept in 1:1 sync with the .locked.ps1", which is the two-copies-
+      of one-list pattern BUG-181 was. They had ALREADY drifted: 'PathAdmins' / 'PathAdminsL0T0' existed
+      only in the file, never here -- and they are LIVE v2 settings (Resolve-PimHybridAdTargetOu routes a
+      new on-prem admin to its OU; Settings > "AD OU placement" edits them). They are deliberately NOT in
+      this shipped set and NOT in Get-PimRequiredNamingConventionKeys, because they are OPTIONAL: for
+      tenants with on-premises AD only (operator 2026-09-20: "this naming is optional, as not everyone
+      have ad"). A cloud-only tenant leaves them blank, so their absence must never block the engine.
+      Operator: *"naming convention are always per customer. if this are samples or default or initial,
+      then we should incude that in the deployment instead. i dont understand the purpose"* -- correct.
+      So: the DEFAULTS are here, in code; a customer's values live in pim.Settings (SQL) and are seeded
+      there at store init (Initialize-PimSqlStore); NO config file is a naming source any more.
+      Returns a FRESH copy, so no caller can mutate the shipped set.
+      tests/Test-PimNaming.ps1 fails if a config file ever becomes a naming source again.
+    #>
+    [CmdletBinding()] param()
+    return (Get-PimNamingConvention -ShippedOnly)
+}
+
 function Get-PimNamingConvention {
-    [CmdletBinding()] param([string]$Key)
+    [CmdletBinding()] param([string]$Key, [switch]$ShippedOnly)
     $defaults = @{
         # Admin name = {AdminTypePrefix} + 'Admin-{Initial}' core + {Platform}.
         # The prefix comes from the row's AdminType; the {Platform} suffix from its
@@ -48,7 +113,13 @@ function Get-PimNamingConvention {
         # internal Entra 'mok' -> 'admin-mok-id'; high-priv -> 'admin-mok-l0-t0-id'.
         AdminWord                     = 'Admin'
         AdminAccountPattern           = '{AdminTypePrefix}{AdminWord}-{Initial}{Platform}'
-        AdminAccountPatternHighPriv   = 'Admin-{Initial}-L0-T0{Platform}'
+        # 🔴 2026-09-20 -- {AdminWord}, NOT a literal 'Admin'. This is the drift the three-copy problem
+        # actually produced: v2.4.333 made the admin word configurable and tokenised it, the .locked.ps1
+        # copy was updated ('{AdminWord}-{Initial}-L0-T0{Platform}') and THIS copy was not. Deleting the
+        # file would have silently shipped the stale literal, so a customer with AdminWord='adm' would get
+        # 'adm-mok-id' day-to-day but 'Admin-mok-l0-t0-id' high-priv -- two conventions in one estate.
+        # PIM.Features.Tests.ps1 "17. Naming" caught it. Renders identically for the default word.
+        AdminAccountPatternHighPriv   = '{AdminWord}-{Initial}-L0-T0{Platform}'
         AdminAccountPatterns          = @('Admin-', 'x-Admin', 'g-Admin')
         # Per-admin-type prefix map (configurable). internal + external-guest = NO prefix.
         AdminTypePrefixes             = [ordered]@{
@@ -76,6 +147,13 @@ function Get-PimNamingConvention {
         ResourceGroupPattern          = 'PIM-{Workload}-{Scope}-{Permission}-L{Level}-T{Tier}-{Plane}-{Platform}'
     }
     $conv = $defaults.Clone()
+    # -ShippedOnly: the defaults as SHIPPED, ignoring this environment's stored values. The import
+    # validator and the template planner need exactly that -- they judge rows against the product's
+    # conventions, not against whatever a customer has overridden.
+    if ($ShippedOnly) {
+        if ($Key) { if ($conv.ContainsKey($Key)) { return $conv[$Key] }; return $null }
+        return $conv
+    }
     if ($global:PIM_NamingConventions -is [hashtable]) {
         foreach ($k in @($global:PIM_NamingConventions.Keys)) { $conv[$k] = $global:PIM_NamingConventions[$k] }
     }
@@ -241,6 +319,22 @@ function Resolve-PimAdminName {
         # without hand-editing the raw pattern in the advanced key/value table.
         # Defaults to 'Admin', so every existing tenant renders byte-identical names.
         AdminWord         = $(if ("$($conv.AdminWord)".Trim()) { "$($conv.AdminWord)".Trim() } else { 'Admin' })
+        # 🔑 {TenantCommonName} -- THE TENANT'S COMMON NAME (operator 2026-09-20: "add a name as
+        # variable per env that can be included also in naming like EFIF, RIDE").
+        # This is how EFIF's convention is expressed today, and it is hard-coded into the PATTERN:
+        # MSP-SETUP-GUIDE §5 ships '{AdminTypePrefix}Admin-efif-{Initial}{Platform}' in a per-deployment
+        # file, so 'efif' is baked into the template and the template cannot be shared between tenants.
+        # With this token the SAME pattern serves every environment --
+        # 🪤 NOT called EnvName/Environment*: in this convention 'Environment' already means the
+        # PLATFORM -- EnvironmentSuffixes maps entra -> '-ID' and ad -> '-AD', and EnvironmentDefault
+        # picks between them. A second meaning on the same word would be read wrong by whoever comes
+        # next (operator: "envname is someting diferent in the naming" / "use tenant common name").
+        #     '{AdminTypePrefix}{AdminWord}-{TenantCommonName}-{Initial}{Platform}' + TenantCommonName='efif'
+        # renders 'admin-efif-khrs-id' -- and the per-customer part is ONE editable value, which is what
+        # makes a naming TEMPLATE reusable across tenants.
+        # Empty by default, and the '--' collapse below removes the separator it leaves behind, so every
+        # existing tenant renders byte-identical names.
+        TenantCommonName  = (ConvertTo-PimNamePart "$($conv.TenantCommonName)")
     }
     # collapse any doubled separator a blank token may have left.
     $name = $name -replace '--+', '-'
@@ -468,6 +562,14 @@ function ConvertTo-PimAdminNameRegex {
                 '^\{AdminWord\}$' {
                     $aw = if ("$($conv.AdminWord)".Trim()) { "$($conv.AdminWord)".Trim() } else { 'Admin' }
                     [void]$sb.Append([regex]::Escape($aw))
+                }
+                # {TenantCommonName} is a configured literal too ('efif', 'ride', ...). Same reasoning as
+                # {AdminWord}: the generic class accepts dashes, so it would swallow the next segment
+                # and stop the rule from catching a name built for the WRONG environment. Empty =
+                # matches nothing extra, which is right for a tenant that does not use the token.
+                '^\{TenantCommonName\}$' {
+                    $ev = "$($conv.TenantCommonName)".Trim()
+                    if ($ev) { [void]$sb.Append([regex]::Escape($ev)) }
                 }
                 default                   { [void]$sb.Append('[A-Za-z0-9.\-]+') }
             }

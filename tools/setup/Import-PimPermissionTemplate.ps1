@@ -139,8 +139,9 @@ try {
     if ($wantAll -and $disabled.Count) { Note "all-active: skipping disabled pack(s) $((@($disabled.Keys) | Sort-Object) -join ', ')" }
 
     # --- the tenant's naming + the workload prerequisite view (read once) ------------------------------------------------
-    $tenantPattern = Get-PimTemplateTenantGroupPattern -Stored (Get-PimSqlSetting -ConnectionString $cs -Name 'NamingConventions') `
-                        -LockedConfigPath (Join-Path $solRoot 'config\PIM4EntraPS.NamingConventions.locked.ps1')
+    # 2026-09-20: no -LockedConfigPath. The shipped defaults come from code (Get-PimShippedNamingConventions);
+    # this environment's values come from pim.Settings['NamingConventions'], seeded at store init.
+    $tenantPattern = Get-PimTemplateTenantGroupPattern -Stored (Get-PimSqlSetting -ConnectionString $cs -Name 'NamingConventions')
     Step "Permission templates: $($ids -join ', ') (group pattern '$tenantPattern')"
     $prStored = $null; $prErr = ''
     try { $prStored = Get-PimSqlSetting -ConnectionString $cs -Name 'WorkloadPrereqs' } catch { $prErr = "$($_.Exception.Message)" }

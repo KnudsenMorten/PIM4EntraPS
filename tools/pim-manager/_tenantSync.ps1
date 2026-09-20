@@ -72,7 +72,14 @@
 # the Coverage page. read=false = NOT CHECKED (with its reason), never an empty catalog.
 # 'workload-actions:defender' (REQ-U wave 2): { read; reason; readUtc; actions:[{ id; name; description }] } -- Microsoft's Defender
 # XDR permission catalog (beta resourceNamespaces?$expand=resourceActions), written by 'discovery-defender'.
-$script:PimTenantCacheKinds = @('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','workload-roles:defender','workload-roles:intune','workload-actions:defender')
+# 'tenant-domains' (REQ-T): { refreshedUtc; domains:[{ id; isDefault; isInitial }] } -- this tenant's verified domains,
+# written/read by Get-PimManagerTenantDomains for the "Admin account domain" setting.
+# 🪤 THIS LIST IS AN ALLOW-LIST, AND AN UNLISTED KIND FAILS SILENTLY. Set-/Get-PimTenantCacheEntry validate
+#    -Kind against it, so a kind that is missing here makes BOTH calls throw -- and every caller wraps them in a
+#    best-effort try/catch, because a cache is a convenience. Measured 2026-09-20: 'tenant-domains' was never
+#    added when REQ-T shipped, so the domain cache was dead in both directions and the Settings dropdown had
+#    nothing to offer whenever the live Graph read was unavailable. ADD THE KIND IN THE SAME EDIT AS THE CACHE CALL.
+$script:PimTenantCacheKinds = @('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains')
 $script:PimTenantCacheMem   = @{}
 
 function Get-PimTenantCacheStoreCs {

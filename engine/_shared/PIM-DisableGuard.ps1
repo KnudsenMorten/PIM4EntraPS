@@ -556,14 +556,41 @@ function Get-PimAdminAccountPrefixes {
         $lc = $s.ToLowerInvariant()
         if (-not $out.Contains($lc)) { [void]$out.Add($lc) }
     }
+    # 🔴 2026-09-20 -- RESOLVE {AdminWord} AND {AdminTypePrefix} BEFORE TAKING THE LITERAL HEAD.
+    # Operator: "a customer must be able to choose any acronym for admin, like adm, admin, etc."
+    # $add takes the head up to the first '{', so a fully tokenised pattern such as
+    # '{AdminTypePrefix}{AdminWord}-{Initial}{Platform}' begins with '{' and contributed NOTHING --
+    # the prefix list then fell back to the shipped literals ('Admin-', 'x-Admin', 'g-Admin').
+    # For a customer using AdminWord='adm' that is the IMP-13 catastrophe in slow motion: their real
+    # accounts are 'adm-mok-id', no prefix matches, the Admins provider's live set is empty, and every
+    # admin is RE-CREATED on every tick -- silently accumulating unmanaged privileged accounts.
+    # Expanding the two tokens we actually know turns that pattern into 'adm-' and 'x-adm-', which is
+    # what a startswith filter needs. Unknown tokens ({Initial}, {Platform}) still end the head.
+    $expand = {
+        param($tpl)
+        $t = "$tpl"
+        if (-not $t.Trim()) { return @() }
+        $word = 'Admin'
+        try { if ("$($nc.AdminWord)".Trim()) { $word = "$($nc.AdminWord)".Trim() } } catch { }
+        $t = $t.Replace('{AdminWord}', $word)
+        if ($t -notmatch '\{AdminTypePrefix\}') { return @($t) }
+        # One candidate per configured admin-type prefix ('' , 'x-', ...), so every type is matchable.
+        $tp = $null
+        try { $tp = $nc.AdminTypePrefixes } catch { $tp = $null }
+        $vals = New-Object System.Collections.Generic.List[string]
+        if ($tp -is [System.Collections.IDictionary]) { foreach ($v in $tp.Values) { [void]$vals.Add("$v") } }
+        elseif ($tp -is [System.Management.Automation.PSCustomObject]) { foreach ($p in $tp.PSObject.Properties) { [void]$vals.Add("$($p.Value)") } }
+        if (-not $vals.Count) { [void]$vals.Add('') }
+        @($vals | ForEach-Object { $t.Replace('{AdminTypePrefix}', "$_") })
+    }
     if ($nc) {
         $pats = $null
         try { $pats = $nc.AdminAccountPatterns } catch { $pats = $null }
-        if ($pats -is [System.Collections.IDictionary]) { foreach ($v in $pats.Values) { & $add $v } }
-        elseif ($pats -is [string]) { & $add $pats }
-        elseif ($pats -is [System.Collections.IEnumerable]) { foreach ($v in $pats) { & $add $v } }
+        if ($pats -is [System.Collections.IDictionary]) { foreach ($v in $pats.Values) { foreach ($e in (& $expand $v)) { & $add $e } } }
+        elseif ($pats -is [string]) { foreach ($e in (& $expand $pats)) { & $add $e } }
+        elseif ($pats -is [System.Collections.IEnumerable]) { foreach ($v in $pats) { foreach ($e in (& $expand $v)) { & $add $e } } }
         foreach ($k in 'AdminAccountPattern','AdminAccountPatternHighPriv') {
-            try { if ("$($nc.$k)".Trim()) { & $add $nc.$k } } catch { }
+            try { if ("$($nc.$k)".Trim()) { foreach ($e in (& $expand $nc.$k)) { & $add $e } } } catch { }
         }
     }
     return $out.ToArray()
@@ -658,21 +685,28 @@ function Test-PimRemoveBudgetAllowed {
         [Parameter(Mandatory)][int]$ToRemove,
         [string]$Scope = '',
         [int]$Scanned = 0,
-        [string]$Operation = 'remove'
+        [string]$Operation = 'remove',
+        # WHAT the removals are, so the alert can say it (operator 2026-09-20: the mail read as though the
+        # engine had decided to delete things by itself). Optional: 0/0 keeps the old generic wording.
+        [int]$TypeChanges = 0,
+        [int]$RemoveRows = 0
     )
     $budget = Get-PimRemoveBudget
     if ($ToRemove -le 0) {
         return [pscustomobject]@{ allowed=$true; abort=$false; tripped=$null; reason='nothing to remove'
-                                  toRemove=$ToRemove; budget=$budget; scope=$Scope; operation=$Operation; scanned=$Scanned }
+                                  toRemove=$ToRemove; budget=$budget; scope=$Scope; operation=$Operation; scanned=$Scanned
+                                  typeChanges=$TypeChanges; removeRows=$RemoveRows }
     }
     if ($ToRemove -gt $budget) {
         return [pscustomobject]@{ allowed=$false; abort=$true; tripped='remove-budget'
             reason=("{0} would {1} {2} item(s) in scope '{3}' -- over the removal budget of {4}. Dropping ALL removals for this scope (never a partial mass-removal)." -f 'engine', $Operation, $ToRemove, $Scope, $budget)
-            toRemove=$ToRemove; budget=$budget; scope=$Scope; operation=$Operation; scanned=$Scanned }
+            toRemove=$ToRemove; budget=$budget; scope=$Scope; operation=$Operation; scanned=$Scanned
+            typeChanges=$TypeChanges; removeRows=$RemoveRows }
     }
     return [pscustomobject]@{ allowed=$true; abort=$false; tripped=$null
         reason=("{0} {1} item(s) is within the removal budget of {2}" -f $Operation, $ToRemove, $budget)
-        toRemove=$ToRemove; budget=$budget; scope=$Scope; operation=$Operation; scanned=$Scanned }
+        toRemove=$ToRemove; budget=$budget; scope=$Scope; operation=$Operation; scanned=$Scanned
+        typeChanges=$TypeChanges; removeRows=$RemoveRows }
 }
 
 # =============================================================================
@@ -715,7 +749,10 @@ function Send-PimSafetyAlert {
         [string]$Event = 'engine-failure',
         [string]$Tab = 'jobs',
         [string]$SwallowScope = 'safety-alert-mail',
-        [int]$DebounceMinutes = 60
+        [int]$DebounceMinutes = 60,
+        # The one-line verdict, and what the reader should DO. Optional: both default (see the tokens below).
+        [string]$Headline = '',
+        [string]$Action = ''
     )
     $res = [ordered]@{ status = ''; sent = 0; recipients = @(); failures = @(); detail = '' }
     try {
@@ -756,9 +793,13 @@ function Send-PimSafetyAlert {
             AlertEvent  = $Event
             AlertDetail = $Detail
             AlertTab    = $Tab
-            TenantName  = "$($global:PIM_TenantName)"
+            TenantName  = $(if ("$($global:PIM_TenantName)".Trim()) { "$($global:PIM_TenantName)" } else { 'this tenant' })
             Instance    = 'engine'
             WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+            # The verdict and the next step, kept OUT of the detail so the reader gets them first.
+            # Defaulted here so every existing caller keeps working without passing them.
+            AlertHeadline = $(if ("$Headline".Trim()) { "$Headline" } else { 'A PIM4EntraPS alert was raised for your privileged-access estate.' })
+            AlertAction   = $(if ("$Action".Trim()) { "$Action" } else { "Open the PIM Manager and review the $Tab view." })
         }
         $fails = New-Object System.Collections.Generic.List[string]
         foreach ($r in $to) {
@@ -826,6 +867,30 @@ function Write-PimRemoveBudgetAlert {
             $Decision.scope, 'the engine', $Decision.operation, $Decision.toRemove, $Decision.budget)
     try { Write-Host $msg -ForegroundColor Red } catch { }
     try { Write-Warning $msg } catch { }
+    # 🔑 2026-09-20 (operator: "text is wrong (budget ??) confusing") -- WHAT THE MAIL SAYS.
+    # The old mail was the console line verbatim, plus the same two numbers again:
+    #   "the engine would remove 9 item(s), budget 5. Removed NOTHING in this scope. Scanned: 247.
+    #    Budget: 5. Nothing was removed. Investigate the desired set before re-running."
+    # Three faults, all of which made a SAFE outcome read as a dangerous one:
+    #   1. "budget" is an internal term. Nothing told the reader it is a per-run safety ceiling.
+    #   2. "the engine would remove N items" reads as the engine deciding to delete things on its own.
+    #      It never does: a removal comes either from a row the operator marked Action=Remove, or from an
+    #      assignment TYPE CHANGE (Eligible <-> Active), which deletes the old type before writing the new.
+    #      The kind is known here and was simply not said.
+    #   3. The headline fact -- NOTHING WAS CHANGED -- came third, after the alarming part.
+    # The mail now leads with the verdict, names the kind, and gives one instruction.
+    $kinds = @()
+    if ($Decision.PSObject.Properties['typeChanges'] -and [int]$Decision.typeChanges -gt 0) { $kinds += ("{0} assignment type change(s) (Eligible/Active swap, which deletes the old type first)" -f [int]$Decision.typeChanges) }
+    if ($Decision.PSObject.Properties['removeRows'] -and [int]$Decision.removeRows -gt 0)   { $kinds += ("{0} row(s) marked Action=Remove" -f [int]$Decision.removeRows) }
+    $what = if ($kinds.Count) { ($kinds -join ' and ') } else { ("{0} item(s)" -f $Decision.toRemove) }
+    $headline = ("Nothing was changed. PIM4EntraPS stopped itself before deleting {0} in '{1}'." -f $Decision.toRemove, $Decision.scope)
+    $detail = ("A single engine run is allowed to delete at most {0} item(s) in one area -- a safety ceiling that exists so a bad " +
+               "read or a bulk edit can never clear out access in one pass. This run wanted to delete {1}, which is over that ceiling, " +
+               "so it applied NONE of them and left '{2}' exactly as it was. {3}") -f `
+               $Decision.budget, $what, $Decision.scope, $(if ($kinds.Count) { '' } else { 'Nothing else in this run was affected.' })
+    $action = ("Open Jobs > Engine logs &amp; errors and read the {0} held item(s) -- each one names exactly what it would have deleted. " +
+               "If they are all intended, apply them in batches of at most {1}. If they are NOT intended, nothing needs undoing: " +
+               "no change was made.") -f $Decision.toRemove, $Decision.budget
     try {
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
             Write-PimAuditEvent -Action 'engine.remove.budget.exceeded' -Target "$($Decision.scope)" -After @{
@@ -837,8 +902,8 @@ function Write-PimRemoveBudgetAlert {
         }
     }
     $r = Send-PimSafetyAlert -SwallowScope 'remove-budget-alert-mail' `
-            -Title ("REMOVAL BUDGET tripped -- scope '{0}' ({1} {2} blocked)" -f $Decision.scope, $Decision.toRemove, $Decision.operation) `
-            -Detail ($msg + " Scanned: $($Decision.scanned). Budget: $($Decision.budget). Nothing was removed. Investigate the desired set before re-running.")
+            -Title ("{0} deletion(s) in '{1}' were blocked -- nothing was changed" -f $Decision.toRemove, $Decision.scope) `
+            -Headline $headline -Detail $detail -Action $action
     if ($PassThru) { return $r }
 }
 

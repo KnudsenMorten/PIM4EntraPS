@@ -1324,8 +1324,17 @@
     <div style="position:absolute; top:5vh; left:50%; transform:translateX(-50%); width:min(880px,92vw); max-height:90vh; display:flex; flex-direction:column; background:#fff; border-radius:8px; box-shadow:0 12px 40px rgba(0,0,0,.35);">
       <div style="display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid #d0d7de;">
         <b id="jobLogTitle" style="flex:1 1 auto; font-size:14px;">Run log</b>
+        <!-- Operator 2026-09-20: copy the WHOLE log in one click -- selecting a long scrolling <pre>
+             by hand is exactly what you do not want to be doing while chasing a failed run. -->
+        <button id="jobLogCopy" class="ghost" style="font-size:12px;" title="Copy the whole log to the clipboard">Copy</button>
         <button id="jobLogRefresh" class="ghost" style="font-size:12px;">Refresh</button>
-        <label style="font-size:12px; color:#57606a; display:flex; align-items:center; gap:4px;"><input type="checkbox" id="jobLogTail"> live tail</label>
+        <!-- "live tail" = keep re-reading this run's log every 2s and stay pinned to the newest line
+             (the name comes from `tail -f`). It only means anything while the run is STILL GOING.
+             🪤 Operator 2026-09-20: "when i click it it goes away after 2 sec" -- on a FINISHED run the
+             poll's first tick saw status completed/failed and un-ticked the box, so the click looked
+             broken. A finished run now DISABLES the box and says why, instead of accepting the click
+             and silently undoing it two seconds later. -->
+        <label id="jobLogTailLabel" style="font-size:12px; color:#57606a; display:flex; align-items:center; gap:4px;" title="Re-read the log every 2 seconds while the run is still going, and keep the newest line in view."><input type="checkbox" id="jobLogTail"> <span id="jobLogTailText">live tail</span></label>
         <button id="jobLogClose" class="ghost" style="font-size:12px;">Close</button>
       </div>
       <pre id="jobLogBody" style="margin:0; padding:14px 16px; overflow:auto; flex:1 1 auto; font-family:ui-monospace,Consolas,monospace; font-size:12px; line-height:1.5; white-space:pre-wrap; background:#0d1117; color:#d1d9e0;">&hellip;</pre>
@@ -1632,6 +1641,7 @@
     { token: '{Owner}',           meaning: 'Backward-compat SYNONYM for {Initial} (still honoured).', example: 'mok', group: 'Admin account' },
     { token: '{AdminTypePrefix}', meaning: 'Prefix by admin-type (internal = none, external-adminuser = x-).', example: 'x-', group: 'Admin account' },
     { token: '{AdminWord}',       meaning: 'The word that marks an admin account (setting AdminWord, default Admin; some organisations use adm).', example: 'Admin', group: 'Admin account' },
+    { token: '{TenantCommonName}', meaning: 'This tenant’s short common name (setting TenantCommonName, e.g. EFIF / RIDE). Blank = the token disappears, leaving no double separator. Lets ONE naming template serve every tenant.', example: 'efif', group: 'Admin account' },
     { token: '{Platform}',        meaning: 'Environment suffix (Entra = -ID, AD = -AD). Synonym of {EnvironmentSuffix}.', example: '-ID', group: 'Admin account' },
     { token: '{EnvironmentSuffix}', meaning: 'Environment suffix (Entra = -ID, AD = -AD). Synonym of {Platform}.', example: '-ID', group: 'Admin account' },
     // --- group name patterns (PimGroupPattern / PimGroupAuPattern) ---
@@ -5129,13 +5139,18 @@
     let h = '';
     h += `<table class="set-table" id="setFeaturesTbl"><tr><th>Feature</th><th style="text-align:center;">Enabled</th><th>Default</th></tr>`;
     catalog.forEach(f => {
-      const on = Object.prototype.hasOwnProperty.call(flags, f.id) ? !!flags[f.id] : !!f.default;
+      // A surface this deployment cannot host (today: MSP Downlink on a single tenant) is not a
+      // choice -- locked OFF with the reason, the mirror of an always-on surface locked ON.
+      // Operator 2026-09-20: "should not be possible to select in single domain setup".
+      const na = Object.prototype.hasOwnProperty.call(f, 'available') ? !f.available : false;
+      const on = na ? false : (Object.prototype.hasOwnProperty.call(flags, f.id) ? !!flags[f.id] : !!f.default);
       const lock = !!f.alwaysOn;
-      const dis = (!canEdit || lock) ? ' disabled' : '';
-      const lockNote = lock ? ` <span style="font-size:10.5px;color:#57606a;">(always on)</span>` : '';
-      h += `<tr>` +
+      const dis = (!canEdit || lock || na) ? ' disabled' : '';
+      const lockNote = lock ? ` <span style="font-size:10.5px;color:#57606a;">(always on)</span>`
+                     : (na ? ` <span style="font-size:10.5px;color:#9a6700;">(not available here &mdash; ${esc(String(f.unavailableReason || 'this deployment cannot host it'))})</span>` : '');
+      h += `<tr${na ? ' style="opacity:.6;"' : ''}>` +
         `<td><b>${esc(f.label)}</b> <code style="color:#57606a;font-size:11px;">${esc(f.id)}</code>${lockNote}</td>` +
-        `<td style="text-align:center;"><input type="checkbox" class="setFeatToggle" data-id="${esc(f.id)}"${on?' checked':''}${dis}></td>` +
+        `<td style="text-align:center;"><input type="checkbox" class="setFeatToggle" data-id="${esc(f.id)}"${on?' checked':''}${dis}${na?' data-unavailable="1"':''}></td>` +
         `<td style="color:#57606a;font-size:11.5px;">${f.default ? 'on' : 'off'}</td>` +
         `</tr>`;
     });
@@ -5344,12 +5359,57 @@
       });
       h += '</table>';
     }
-    h += '<div style="margin-top:10px;font-size:12px;">To register a licence file, run:</div>' +
+    // 🔴 Operator 2026-09-20: "how can a customer register a license when they dont have my admin cert".
+    // Registering used to mean running Set-PimLicense.ps1 with -AdminAppId / -AdminCertThumbprint -- store
+    // credentials a customer does not have. Register it HERE instead: the server verifies OUR signature
+    // before it writes, so a wrong or tampered file is refused and nothing is stored. The command line
+    // stays below for an operator who has the store credentials and prefers it.
+    if (d.canWrite) {
+      h += '<div id="licImport" style="margin-top:12px;border-top:1px solid #d0d7de;padding-top:10px;">' +
+        '<div style="font-size:12px;font-weight:600;">Register a licence</div>' +
+        '<div style="font-size:11.5px;color:#57606a;margin:2px 0 6px;">Pick the issued <code>.pimlicense</code> / <code>.aitlicense</code> file, or paste its contents. It is checked against our signing certificate before anything is stored &mdash; a file that does not verify is refused and the installed licence is left alone.</div>' +
+        '<input type="file" id="licFile" accept=".pimlicense,.aitlicense,.json,.txt" style="font-size:11.5px;">' +
+        '<textarea id="licText" rows="3" placeholder="…or paste the licence document here" style="width:100%;margin-top:6px;font-family:monospace;font-size:11px;"></textarea>' +
+        '<div style="margin-top:6px;"><button class="btn" id="licRegister">Register licence</button> <span id="licImportMsg" style="font-size:12px;"></span></div>' +
+        '</div>';
+    }
+    h += '<div style="margin-top:10px;font-size:12px;color:#57606a;">Or, if you have the deployment&rsquo;s store credentials, register it from a shell:</div>' +
       '<div class="lic-cmd-row" style="display:flex;gap:6px;align-items:flex-start;margin-top:4px;min-width:0;">' +
       '<code class="lic-cmd" style="flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-size:11px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:4px 8px;">' + esc(d.command || '') + '</code>' +
-      '<button type="button" class="btn-sec lic-copy" style="font-size:11px;padding:2px 8px;">Copy</button></div>';
+      '<button type="button" class="btn-sec lic-copy" style="font-size:11px;padding:2px 8px;">Copy</button></div>' +
+      '<div style="font-size:11px;color:#57606a;margin-top:3px;"><code>-AdminAppId</code> / <code>-AdminCertThumbprint</code> are <b>this deployment&rsquo;s own</b> admin application and certificate &mdash; the identity that reaches its SQL store. They are not ours, and you do not need them if you register above.</div>';
     h += '<div id="licContact" style="margin-top:10px;font-size:12px;">Need a licence? Contact ' + licenceMailtoHtml(d) + '</div>';
     return h;
+  }
+  // Wire the Register control. Split out so licenceSectionHtml stays PURE (the harness renders it).
+  function wireLicenceImport(host, onDone) {
+    const btn = host && host.querySelector('#licRegister');
+    if (!btn) return;
+    const fileIn = host.querySelector('#licFile');
+    const textIn = host.querySelector('#licText');
+    const msg = host.querySelector('#licImportMsg');
+    if (fileIn) fileIn.onchange = () => {
+      const f = fileIn.files && fileIn.files[0];
+      if (!f) return;
+      const rd = new FileReader();
+      rd.onload = () => { if (textIn) textIn.value = String(rd.result || ''); };
+      rd.readAsText(f);
+    };
+    btn.onclick = async () => {
+      const text = String((textIn && textIn.value) || '').trim();
+      if (!text) { if (msg) { msg.style.color = '#cf222e'; msg.textContent = 'Pick the licence file, or paste its contents first.'; } return; }
+      btn.disabled = true;
+      if (msg) { msg.style.color = '#57606a'; msg.textContent = 'Checking the signature…'; }
+      try {
+        const r = await api('PUT', '/api/license', { text: text });
+        if (msg) { msg.style.color = '#1a7f37'; msg.textContent = (r && r.detail) || 'Registered.'; }
+        if (typeof onDone === 'function') onDone();
+      } catch (e) {
+        btn.disabled = false;
+        // A refusal means NOTHING was stored -- say so, or the operator will think they broke it.
+        if (msg) { msg.style.color = '#cf222e'; msg.textContent = 'Refused, nothing was stored: ' + String((e && e.message) || e); }
+      }
+    };
   }
   async function renderLicenceCard() {
     const body = document.getElementById('setLicenceBody');
@@ -5367,6 +5427,9 @@
       } catch (_) {}
       try { const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); done(); } catch (_) {}
     });
+    // Register-a-licence (SuperAdmin). On success re-read the card so it shows what the STORE now
+    // holds -- never the client's optimistic idea of it.
+    wireLicenceImport(body, () => { PIM_LICENCE_CACHE = null; renderLicenceCard(); });
     renderMspLicenceBanners();   // the same fresh answer for the banners
   }
 
@@ -6101,12 +6164,33 @@
     h += `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Patterns + tokens for admin / group / resource names. ` +
          `<b><code>{Initial}</code> (preferred) = the owning person's <u>initials</u></b> (e.g. <code>ABC</code>) — it is the admin account's owner identifier, <b>not</b> a list of approver UPNs. ` +
          `<code>{Owner}</code> is the backward-compat synonym for <code>{Initial}</code>. See the full token list below; click a token to insert it into the focused Value field.</div>`;
+    const naming = s.naming || {};   // declared HERE: the "Naming words" card below needs it BEFORE the table opens
+    // 🪤 THIS CARD MUST BE EMITTED *BEFORE* the naming <table> opens (setNamingTbl, below).
+    // Injecting a <div>/<table> INSIDE an already-open <table> is invalid HTML: the parser hoists
+    // it out and the pattern <tr> rows that follow are dropped, so the whole naming editor went
+    // blank (Test-PimGuiHeadless / naming-render caught it: every rendered cell came back null).
+    {
+      const _aw = (naming.AdminWord == null || String(naming.AdminWord).trim() === '') ? 'Admin' : String(naming.AdminWord);
+      const _ev = (naming.TenantCommonName == null) ? '' : String(naming.TenantCommonName);
+      h += `<div class="set-card" style="margin-bottom:10px;"><h3 style="margin:0 0 4px;font-size:14px;">Naming words</h3>`;
+      h += `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">The two per-customer values in the patterns below. Change them here rather than editing every pattern &mdash; the same naming template then works for any tenant.</div>`;
+      h += `<table class="set-table">` +
+        `<tr><td style="white-space:nowrap;font-weight:600;">Admin word</td>` +
+        `<td><input id="setNamingAdminWord" value="${esc(_aw)}"${ro} style="width:200px" placeholder="Admin"></td>` +
+        `<td style="color:#57606a;font-size:11.5px;">The acronym your admin accounts use &mdash; <code>Admin</code>, <code>adm</code>, anything you like. Replaces <code>{AdminWord}</code>.</td></tr>` +
+        `<tr><td style="white-space:nowrap;font-weight:600;">Tenant common name</td>` +
+        `<td><input id="setNamingTenantCommonName" value="${esc(_ev)}"${ro} style="width:200px" placeholder="(none)"></td>` +
+        `<td style="color:#57606a;font-size:11.5px;">Optional short name for this tenant &mdash; e.g. <code>EFIF</code>, <code>RIDE</code>. Replaces <code>{TenantCommonName}</code>; leave blank and the token disappears cleanly.</td></tr>` +
+        `</table>`;
+      h += `<div style="margin-top:6px;color:#57606a;font-size:11.5px;">Example: <code>{AdminTypePrefix}{AdminWord}-{TenantCommonName}-{Initial}{Platform}</code> &rarr; <b id="setNamingWordsExample" style="font-family:monospace;color:#24292f;"></b></div>`;
+      if (canEdit) h += `<div style="margin-top:8px;"><button class="btn" id="setNamingWordsSave">Save naming words</button> <span class="setMsg" id="setNamingWordsMsg"></span></div>`;
+      h += `</div>`;
+    }
     h += buildTokenLegend(PIM_NAMING_TOKENS, '#setNamingTbl .setNamingVal', {
       title: 'Supported naming tokens',
       note: 'These are the variables the engine expands when it generates names. <b>{Initial}</b> is preferred; <b>{Owner}</b> is the backward-compat synonym. <b>{Platform}</b> and <b>{EnvironmentSuffix}</b> both expand to the environment suffix (-ID / -AD). Unknown tokens are left unchanged.'
     });
     h += `<table class="set-table" id="setNamingTbl" style="margin-top:8px;"><tr><th>Key</th><th>Value</th><th title="The pattern with its tokens filled in (AdminWord, admin-type prefix and environment suffix from these settings; the other tokens with example values)">Renders as</th>${canEdit?'<th></th>':''}</tr>`;
-    const naming = s.naming || {};
     // The admin-type prefix map + environment suffix map have their own dedicated
     // editor below (they are nested maps, not flat strings) -- skip them here.
     // AD OU placement (PathAdmins / PathAdminsL0T0) has its own card below.
@@ -6115,7 +6199,12 @@
     const NAMING_MAP_KEYS = ['AdminTypePrefixes', 'EnvironmentSuffixes'];
     // DirectGroupDimension is RETIRED (REQ-E): hidden here and PRESERVED on save, so a value already stored is neither
     // shown as an editable pattern nor dropped -- nothing reads it any more.
-    const NAMING_HIDE_KEYS = ['PathAdmins', 'PathAdminsL0T0', 'TagPrefixToCsv', 'DirectGroupDimension'];
+    // AdminWord + EnvironmentName have their own dedicated fields directly above the raw table
+    // (operator 2026-09-20: "add a field to translate admin word, if needed" / "add a name as variable
+    // per env that can be included also in naming like EFIF, RIDE"). They are the two per-customer
+    // values in an otherwise shareable naming template, so they get real labels instead of being two
+    // rows in a key/value grid -- and are hidden here so there is exactly ONE editor for each.
+    const NAMING_HIDE_KEYS = ['PathAdmins', 'PathAdminsL0T0', 'TagPrefixToCsv', 'DirectGroupDimension', 'AdminWord', 'TenantCommonName'];
     Object.keys(naming).sort().forEach(k => {
       if (NAMING_MAP_KEYS.indexOf(k) >= 0) return;
       if (NAMING_HIDE_KEYS.indexOf(k) >= 0) return;
@@ -6187,13 +6276,16 @@
     // key isn't present yet (blank input, saved on first edit).
     const _path1 = (naming.PathAdmins != null) ? String(naming.PathAdmins) : '';
     const _path2 = (naming.PathAdminsL0T0 != null) ? String(naming.PathAdminsL0T0) : '';
-    h += `<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">AD OU placement (admin accounts)</h3>`;
-    h += `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">On-prem Active Directory OUs where new admin accounts are created (<code>New-ADUser -Path &lt;DN&gt;</code>). ` +
-         `<b>PathAdmins</b> = general admins (no L0/T0 marker); <b>PathAdminsL0T0</b> = high-priv admins whose UserName carries the <code>L0</code>/<code>T0</code> marker. ` +
-         `Leave blank to inherit the value configured in the naming-conventions file.</div>`;
+    // Operator 2026-09-20: "this naming is optional, as not everyone have ad" -- label the two fields by
+    // WHAT THEY ARE (the AD OU for each kind of admin), not by their internal setting key, and say plainly
+    // that the whole card is optional. The keys stay PathAdmins / PathAdminsL0T0 in the store.
+    h += `<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">AD OU placement (admin accounts) <span style="font-weight:400;color:#57606a;font-size:11.5px;">&mdash; optional</span></h3>`;
+    h += `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Only for tenants with <b>on-premises Active Directory</b>. These are the OUs where new admin accounts are created (<code>New-ADUser -Path &lt;DN&gt;</code>). ` +
+         `<b>Day2Day Admins</b> = general admins (no L0/T0 marker); <b>High Priv Admins</b> = admins whose UserName carries the <code>L0</code>/<code>T0</code> marker. ` +
+         `Cloud-only tenants leave both blank &mdash; nothing else depends on them.</div>`;
     h += `<table class="set-table" id="setOuTbl">` +
-         `<tr><td style="white-space:nowrap;font-weight:600;">PathAdmins</td><td><input id="setOuPathAdmins" value="${esc(_path1)}"${ro} style="width:520px" placeholder="OU=Admins,...,DC=example,DC=com"></td></tr>` +
-         `<tr><td style="white-space:nowrap;font-weight:600;">PathAdminsL0T0</td><td><input id="setOuPathAdminsL0T0" value="${esc(_path2)}"${ro} style="width:520px" placeholder="OU=Tier0-Admins,...,DC=example,DC=com"></td></tr>` +
+         `<tr><td style="white-space:nowrap;font-weight:600;">AD OU (Day2Day Admins)</td><td><input id="setOuPathAdmins" value="${esc(_path1)}"${ro} style="width:520px" placeholder="OU=Admins,...,DC=example,DC=com"></td></tr>` +
+         `<tr><td style="white-space:nowrap;font-weight:600;">AD OU (High Priv Admins)</td><td><input id="setOuPathAdminsL0T0" value="${esc(_path2)}"${ro} style="width:520px" placeholder="OU=Tier0-Admins,...,DC=example,DC=com"></td></tr>` +
          `</table>`;
     if (canEdit) h += `<div style="margin-top:8px;"><button class="btn" id="setOuSave">Save AD OU placement</button> <span class="setMsg" id="setOuMsg"></span></div>`;
     h += `</div>`;
@@ -6246,7 +6338,13 @@
     h += `<div class="set-card" id="setLicenceCard"><h3 style="margin:0 0 4px;font-size:14px;">Licence</h3>` +
          `<div id="setLicenceBody"><div style="color:#57606a;font-size:12px;">Loading licence&hellip;</div></div></div>`;
     h += `<div class="set-card" id="setEditionCard"><h3 style="margin:0 0 4px;font-size:14px;">Edition &amp; license</h3>` +
-         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Choose the active edition for this tenant. <b>Core</b> includes every essential PIM feature for free. <b>Pro</b> and <b>Pro (Design Partner)</b> cover the advanced integrations. <b>Licence enforcement is currently switched off, so every advanced feature is available at no cost</b> &mdash; the edition below is recorded for the commercial basis only and does not restrict anything. <b>The one exception: MSP master / managed tenant mode needs an installed Pro licence</b> (see Licence above). If enforcement is ever turned on, features that need Pro will be shown with a &ldquo;Requires Pro&rdquo; lock until the edition covers them.</div>` +
+         // 🔴 Operator 2026-09-20, on the live Manager: "why this text if it is enforced now".
+         // It said "licence enforcement is currently switched off, so every advanced feature is available
+         // at no cost". That stopped being true with REQ-Y: Test-PimProLicence is the ONE hard gate, it
+         // NEVER consults the old Test-PimProLicenseEnforced switch, and every Pro feature of the catalog
+         // runs through it (Test-PimFeatureProLicence). A settings page that tells the operator a gate is
+         // off while the gate is refusing calls is worse than no text at all.
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Choose the active edition for this tenant. <b>Core</b> includes every essential PIM feature for free &mdash; Core is never gated. <b>Pro</b> and <b>Pro (Design Partner)</b> cover the advanced integrations. <b>The Pro features listed under Licence above are enforced:</b> each one is allowed only while an installed Pro licence covers that feature and this tenant, and a feature that is not covered is refused with the reason (this includes MSP master / managed tenant mode). The edition you pick here records the commercial basis; what is actually unlocked is decided by the installed <b>licence</b>, not by this dropdown.</div>` +
          `<div id="setEditionBody"><div style="color:#57606a;font-size:12px;">Loading edition&hellip;</div></div></div>`;
 
     // --- Deployment scenario (REQUIREMENTS §31): which of the six supported
@@ -6335,6 +6433,13 @@
     const namingTbl = document.getElementById('setNamingTbl');
     if (namingTbl) namingTbl.addEventListener('input', () => {
       const cur = Object.assign({}, (SETTINGS_DATA && SETTINGS_DATA.naming) || {});
+      // AdminWord / TenantCommonName are edited in the "Naming words" card, not in this table, so take
+      // them from their own fields -- otherwise the live preview would keep rendering the STORED word
+      // while the operator is typing a new one, which is exactly the moment the preview matters.
+      const _awEl = document.getElementById('setNamingAdminWord');
+      const _tcEl = document.getElementById('setNamingTenantCommonName');
+      if (_awEl) { cur.AdminWord = (_awEl.value || '').trim() || 'Admin'; }
+      if (_tcEl) { cur.TenantCommonName = (_tcEl.value || '').trim(); }
       namingTbl.querySelectorAll('tr').forEach((tr, i) => { if (i === 0) return; const k = tr.querySelector('.setNamingKey'), v = tr.querySelector('.setNamingVal'); if (k && k.value.trim()) cur[k.value.trim()] = v ? v.value : ''; });
       namingTbl.querySelectorAll('tr').forEach((tr, i) => { if (i === 0) return; const v = tr.querySelector('.setNamingVal'), r = tr.querySelector('.setNamingRender'); if (v && r) r.textContent = renderNamingPatternExample(v.value, cur); });
     });
@@ -6393,6 +6498,36 @@
       if (!arr.length) { const m=document.getElementById('setFiltersMsg'); m.textContent='At least one filter is required.'; m.style.color='#cf222e'; return; }
       saveSection('filters', arr, 'setFiltersMsg');
     };
+    // Naming words (AdminWord / TenantCommonName): the two per-customer values. Merge into the FULL
+    // naming map and PUT the whole thing, exactly like the AD OU card below -- a partial PUT would
+    // drop every pattern the operator has not touched.
+    const _namingWordsExample = () => {
+      const el = document.getElementById('setNamingWordsExample'); if (!el) return;
+      const aw = ((document.getElementById('setNamingAdminWord') || {}).value || 'Admin').trim() || 'Admin';
+      const tc = ((document.getElementById('setNamingTenantCommonName') || {}).value || '').trim();
+      // mirrors Resolve-PimAdminName: render, collapse doubled separators, lower-case.
+      el.textContent = (`${aw}-${tc}-MOK-ID`).replace(/--+/g, '-').toLowerCase();
+    };
+    ['setNamingAdminWord', 'setNamingTenantCommonName'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.oninput = () => {
+        _namingWordsExample();
+        // ...and re-render the pattern table's "renders as" column, which reads these two fields.
+        const t = document.getElementById('setNamingTbl');
+        if (t) t.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+    });
+    _namingWordsExample();
+    const setNamingWordsBtn = document.getElementById('setNamingWordsSave');
+    if (setNamingWordsBtn) setNamingWordsBtn.onclick = () => {
+      const obj = {};
+      const cur = (SETTINGS_DATA && SETTINGS_DATA.naming) || {};
+      Object.keys(cur).forEach(k => { obj[k] = cur[k]; });
+      obj.AdminWord        = (document.getElementById('setNamingAdminWord').value || '').trim() || 'Admin';
+      obj.TenantCommonName = (document.getElementById('setNamingTenantCommonName').value || '').trim();
+      saveSection('naming', obj, 'setNamingWordsMsg');
+    };
+
     // AD OU placement (PathAdmins / PathAdminsL0T0): merge into the full naming map
     // (preserve every other key) and PUT to /api/settings/naming so it lands in the
     // same store the engine reads. Blank = clear (inherit the file-level value).
@@ -8386,12 +8521,22 @@
     (d.domains || []).forEach(x => { const id = String(x.id || ''); if (id) opts.push('<option value="' + esc(id) + '"' + (id.toLowerCase() === cur.toLowerCase() ? ' selected' : '') + '>' + esc(id) + (x.isDefault ? ' (default)' : '') + (x.isInitial ? ' (initial)' : '') + '</option>'); });
     // A stored value this tenant no longer verifies is KEPT and marked, never silently swapped for the default.
     if (cur && !(d.domains || []).some(x => String(x.id || '').toLowerCase() === cur.toLowerCase())) opts.push('<option value="' + esc(cur) + '" selected>' + esc(cur) + ' &mdash; not a verified domain of this tenant</option>');
-    h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><select id="setAdminDomainSel"' + (d.canWrite ? '' : ' disabled') + '>' + opts.join('') + '</select>' +
+    // The picker is a LIST of this tenant's verified domains (operator 2026-09-20: "i must be able to
+    // select it" / "from a list"). Count it in the label so an empty list is visible as a FAULT to fix,
+    // not as "there is only one domain" -- and Re-read retries after the permission is granted.
+    h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><select id="setAdminDomainSel" style="min-width:280px"' + (d.canWrite ? '' : ' disabled') + '>' + opts.join('') + '</select>' +
          (d.canWrite ? '<button id="setAdminDomainSave">Save</button>' : '<span style="font-size:11px;color:#57606a;">(SuperAdmin required to change)</span>') +
+         '<button class="btn-sec" id="setAdminDomainReload" title="Read this tenant’s verified domains again">Re-read domains</button>' +
          '<span id="setAdminDomainMsg" style="font-size:12px;"></span></div>';
+    const nDom = (d.domains || []).length;
     h += '<div style="font-size:11px;color:#57606a;margin-top:6px;">Now: new admins are created as <code>&lt;name&gt;@' + esc(String(d.effective || '?')) + '</code>. ' +
-         (d.known ? 'Domains read ' + (d.source === 'live' ? 'live from Entra ID' : 'from the cached list') + '.' : '<span style="color:#9a6700;">This tenant&rsquo;s verified domains could not be read &mdash; only the default can be chosen until they can.</span>') + '</div>';
+         (d.known ? nDom + ' verified domain' + (nDom === 1 ? '' : 's') + ' read ' + (d.source === 'live' ? 'live from Entra ID' : 'from the cached list') + '.'
+                  : '<span style="color:#9a6700;">This tenant&rsquo;s verified domains could not be read, so there is nothing to pick from yet' +
+                    (d.reason ? ' &mdash; ' + esc(String(d.reason)) : '') +
+                    '. Grant the app <code>Domain.Read.All</code> or <code>Organization.Read.All</code>, then Re-read.</span>') + '</div>';
     host.innerHTML = h + '</div>';
+    const rel = document.getElementById('setAdminDomainReload');
+    if (rel) rel.onclick = async () => { rel.disabled = true; window.PIM_ADMIN_DOMAIN = null; await renderAdminDomainSection(host); };
     const btn = document.getElementById('setAdminDomainSave');
     if (btn) btn.onclick = async () => {
       const msg = document.getElementById('setAdminDomainMsg');
@@ -11157,8 +11302,10 @@
     document.getElementById('jobLogTitle').textContent = 'Run log — ' + (name || runId);
     document.getElementById('jobLogOverlay').style.display = 'block';
     document.getElementById('jobLogBody').textContent = '…';
+    const cp = document.getElementById('jobLogCopy'); if (cp) cp.textContent = 'Copy';   // never open showing the last run's "Copied N lines"
     const tail = document.getElementById('jobLogTail');
     tail.checked = !!isRunning;
+    setJobLogTailAvailable(!!isRunning);
     loadJobLog(runId);
     setJobLogTail(tail.checked);
   }
@@ -11167,18 +11314,73 @@
     setJobLogTail(false);
     window._jobLogRunId = null;
   }
+  function setJobLogTailAvailable(canTail) {
+    // A finished run has nothing left to tail. Say so on the control instead of letting the click
+    // "work" and then undoing it on the next poll (which is what read as the checkbox going away).
+    const t = document.getElementById('jobLogTail');
+    const lbl = document.getElementById('jobLogTailLabel');
+    const txt = document.getElementById('jobLogTailText');
+    if (!t) return;
+    t.disabled = !canTail;
+    if (txt) txt.textContent = canTail ? 'live tail' : 'live tail (run finished)';
+    if (lbl) {
+      lbl.style.opacity = canTail ? '1' : '.55';
+      lbl.title = canTail
+        ? 'Re-read the log every 2 seconds while the run is still going, and keep the newest line in view.'
+        : 'This run has finished, so there is nothing more to follow. Use Refresh to re-read it.';
+    }
+  }
   function setJobLogTail(on) {
     if (window._jobLogTailTimer) { clearInterval(window._jobLogTailTimer); window._jobLogTailTimer = null; }
     if (on && window._jobLogRunId) {
       window._jobLogTailTimer = setInterval(async () => {
         if (document.getElementById('jobLogOverlay').style.display === 'none') { setJobLogTail(false); return; }
         const d = await loadJobLog(window._jobLogRunId);
-        if (d && (d.status === 'completed' || d.status === 'failed')) { const t = document.getElementById('jobLogTail'); t.checked = false; setJobLogTail(false); }
+        // The run ENDED while we were watching: stop, untick, and disable -- with the label saying why,
+        // so this reads as "it finished" rather than "the checkbox turned itself off".
+        if (d && (d.status === 'completed' || d.status === 'failed')) {
+          const t = document.getElementById('jobLogTail'); t.checked = false;
+          setJobLogTail(false);
+          setJobLogTailAvailable(false);
+        }
       }, 2000);
+    }
+  }
+  async function copyJobLog() {
+    // The whole log, including the part scrolled out of view -- textContent, never the selection.
+    const pre = document.getElementById('jobLogBody');
+    const btn = document.getElementById('jobLogCopy');
+    const text = pre ? (pre.textContent || '') : '';
+    if (!text.trim()) { if (btn) { btn.textContent = 'Nothing to copy'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); } return; }
+    // 🪤 navigator.clipboard is undefined on a NON-SECURE origin, and the local Manager is plain
+    // http://localhost. Without the fallback the button would do nothing at all, silently, exactly
+    // where an operator is most likely to use it. execCommand('copy') is deprecated but is the only
+    // thing that works there, so it stays as the second attempt.
+    let ok = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); ok = true; }
+    } catch (e) { ok = false; }
+    if (!ok) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select(); ta.setSelectionRange(0, ta.value.length);
+        ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch (e) { ok = false; }
+    }
+    if (btn) {
+      const lines = text.split('\n').length;
+      btn.textContent = ok ? ('Copied ' + lines + ' line' + (lines === 1 ? '' : 's')) : 'Copy failed';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1800);
     }
   }
   (function wireJobLogModal() {
     const close = document.getElementById('jobLogClose'); if (close) close.onclick = closeJobLog;
+    const cp = document.getElementById('jobLogCopy'); if (cp) cp.onclick = copyJobLog;
     const rf = document.getElementById('jobLogRefresh'); if (rf) rf.onclick = () => { if (window._jobLogRunId) loadJobLog(window._jobLogRunId); };
     const tail = document.getElementById('jobLogTail'); if (tail) tail.onchange = () => setJobLogTail(tail.checked);
     const ov = document.getElementById('jobLogOverlay'); if (ov) ov.onclick = (e) => { if (e.target === ov) closeJobLog(); };

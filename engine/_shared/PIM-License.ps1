@@ -52,8 +52,8 @@ $script:PimLicensePublicCertB64 = 'MIID+zCCAmOgAwIBAgIQZi8bo4EYqJ9PSvrXsI3orTANB
 
 # Editions: COMMUNITY (free) and PRO (licensed). One engine/manager/activator; Pro
 # unlocks the advanced capabilities below. (The free tier was historically called
-# 'Core'; it is surfaced as 'Community' now -- a license sku of 'Core' still maps
-# to Pro for back-compat.)
+# 'Core'; it is surfaced as 'Community' now. A licence SKU of 'Core' is NOT Pro --
+# REQ-Y 2026-09-20; see the sku match in Test-PimProLicence for why that changed.)
 $script:PimCommunityEditionName = 'Community'
 $script:PimProEditionName       = 'Pro'
 
@@ -417,7 +417,7 @@ Function Test-PimProLicence {
     .DESCRIPTION
         Returns @{ ok; status; grace; customer; sku; validTo; graceUntil; tenantIds; tenantId; label; reason; message;
         contact; command }.
-          ok     = licence Status Valid or Grace, sku Pro (Pro-<variant>, or the back-compat 'Core'), features '*' or one of
+          ok     = licence Status Valid or Grace, sku Pro or Pro-<variant> (nothing else -- 'Core' is refused), features '*' or one of
                    -FeatureNames, and a tenant binding that includes -TenantId (or no binding at all).
           grace  = ok, but in the licence's grace window: run, and say so.
           reason = plain words ("no Pro licence is installed", "the licence expired 2027-09-19 ...", "the licence is for
@@ -481,9 +481,18 @@ Function Test-PimProLicence {
             'NotYetValid' { $out.reason = "the licence only starts $($lic.ValidFrom.ToString('yyyy-MM-dd'))" }
             'Expired'     { $out.reason = "the licence expired $($out.validTo) (its grace period ended $($out.graceUntil))" }
             default {
-                # Pro, Pro-<variant> (Pro-DesignPartner); 'Core' is the documented back-compat sku that maps to Pro
-                # (see the edition note at the top). Community or anything else is not Pro.
-                if ("$($lic.Sku)".Trim() -notmatch '^(?i)(pro(-.+)?|core)$') {
+                # Pro, Pro-<variant> (Pro-DesignPartner). Anything else -- Community, or the old 'Core' -- is NOT Pro.
+                # 🔴 REQ-Y (operator 2026-09-20: "fix req-y 3 items") -- 'Core' NO LONGER UNLOCKS PRO.
+                # It was accepted as "documented back-compat", and that back-compat protected nothing: the ONLY issuer
+                # is TOOLS\New-AitLicense.ps1, whose -Sku is [ValidateSet('Pro','Community')], so no signing run can
+                # ever have produced a 'Core' licence -- and none exists (every issued licence, checked 2026-09-20,
+                # decodes to sku 'Pro'). What the clause DID do was make the word most likely to be typed by hand for
+                # the FREE tier -- 'Core' is this product's own historical name for it, still the internal edition name
+                # in PIM-FeatureCatalog.ps1 -- unlock every Pro feature instead of none of them. A licence that grants
+                # MORE the more it looks free is the wrong direction for a gate with no grace.
+                # 🪤 The EDITION 'Core' (Get-PimActiveEdition / $script:PimEditionNames) is a different thing and is
+                # unchanged: that is the free edition's internal name, not a licence sku.
+                if ("$($lic.Sku)".Trim() -notmatch '^(?i)pro(-.+)?$') {
                     $out.reason = "the licence is a '$("$($lic.Sku)".Trim())' licence, not Pro"
                 } elseif (-not $covers) {
                     $out.reason = "the licence does not include $word (features: $(($features -join ', ')))"
