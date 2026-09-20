@@ -146,6 +146,11 @@ if ($global:PIM_ActiveScenario) {
 . "$shared\PIM-AzureDiscovery.ps1"        # Azure scope reconcile planner (Power BI discovery mirrors its shape)
 . "$shared\PIM-Discovery.ps1"             # Power BI / service-role / auto-map / delta discovery layer (REST-only)
 . "$shared\PIM-ContextBuilder.ps1"
+# 🔴 2026-09-20 -- LOADED EXPLICITLY, because the PREFLIGHT below refuses to run without a stored naming
+# convention and that guard is written as `if (Get-Command Test-PimNamingConventionsUsable ...)`. This
+# entry point never dot-sourced PIM-Naming.ps1, so the Get-Command was false FOREVER and the refusal
+# could never fire -- the INERT-CAPABILITY class, caught by tests/Test-PimCodeAudit.ps1 before it shipped.
+. "$shared\PIM-Naming.ps1"
 . "$shared\PIM-License.ps1"                     # offline Core/Pro edition model (Get-PimEdition)
 . "$shared\PIM-FeatureCatalog.ps1"              # feature catalog + gates (Test-PimFeatureAvailable) -- s29/s30
 . "$shared\PIM-FailureCatalog.ps1"              # classified item failures (cause/remedy/auto-fix)
@@ -185,6 +190,27 @@ if (-not $env:PIM_SkipPreflight) {
         $desiredTotal += @(Get-PimSqlRows -ConnectionString $global:PIM_EngineSqlCs -Entity $e).Count
     }
     if ($desiredTotal -eq 0) { throw "Preflight FAILED: the desired store ($($global:PIM_SqlServer)/$($global:PIM_SqlDatabase)) has NO definition/admin rows. Refusing to run against a live tenant with an empty desired set (seed the store, or check PIM_SqlServer/PIM_SqlDatabase)." }
+    # 1b) 🔴 THE NAMING CONVENTION MUST COME FROM THE STORE -- OR THE ENGINE DOES NOT RUN.
+    # Operator 2026-09-20: "naming is defined at build time and goes into sql ... we can not have drifts
+    # here or sudden changes o admin accounts or group names. that is a critical no-go" -> "refuse engine
+    # to run". The shipped defaults are a SEED for a new store (Initialize-PimSqlStore), never a silent
+    # runtime substitute: MSP-SETUP-GUIDE §5 / IMP-13 measured what a wrong name does -- the Admins
+    # provider matches its live set by userPrincipalName prefix, so an account built from the wrong
+    # convention is invisible to it and is RE-CREATED every tick, quietly accumulating unmanaged
+    # privileged accounts. Refusing is loud; guessing is not recoverable.
+    if (Get-Command Test-PimNamingConventionsUsable -ErrorAction SilentlyContinue) {
+        $__ncStored = $null
+        try { $__ncStored = Get-PimSqlSetting -ConnectionString $global:PIM_EngineSqlCs -Name 'NamingConventions' }
+        catch { throw "Preflight FAILED: the naming convention could not be read from $($global:PIM_SqlServer)/$($global:PIM_SqlDatabase): $($_.Exception.Message). The engine does not run on a guessed naming convention." }
+        $__ncV = Test-PimNamingConventionsUsable -Stored $__ncStored
+        if (-not $__ncV.ok) {
+            throw ("Preflight FAILED: {0}. The engine REFUSES to run: naming is per customer and is defined at build time into SQL, " +
+                   "so falling back to the shipped defaults would silently rename the admin accounts and groups this tenant already has. " +
+                   "Seed it (tools\setup\Initialize-PimTenantStore.ps1 writes the default template on a new store) or set the tenant's own " +
+                   "convention in the Manager (Settings > Naming), then re-run.") -f $__ncV.reason
+        }
+        Write-Host "    Naming : from the store ($(@(Get-PimRequiredNamingConventionKeys).Count) required key(s) present)" -ForegroundColor DarkCyan
+    }
     # 2) Tenant identity actually works -- mint a Graph token + resolve the org, so a wrong/missing
     #    credential is caught here, not after a half-applied run.
     try {

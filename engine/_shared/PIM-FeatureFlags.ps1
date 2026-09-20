@@ -62,7 +62,17 @@ $script:PimFeatureFlagCatalog = @(
     # MSP-2 / control #1+#2. OFF by shipped default like every other advanced surface:
     # most deployments are single-tenant and have no managed relationships at all, so the
     # tab would render an empty view. An MSP turns it on deliberately.
-    [ordered]@{ id = 'downlink';    label = 'MSP Downlink';             default = $false; alwaysOn = $false })
+    # 🔴 `requires` (operator 2026-09-20: "should not be possible to select in single domain setup"):
+    # OFF-by-default was not enough -- on a SINGLE-tenant deployment the checkbox was still live, so the
+    # operator could switch on a surface that has nothing behind it and no write of which is legal here.
+    # A surface that needs a topology this tenant is NOT is not a choice: it is locked OFF with the
+    # reason, exactly the way an always-on surface is locked ON.
+    [ordered]@{ id = 'downlink';    label = 'MSP Downlink';             default = $false; alwaysOn = $false; requires = 'msp-master' })
+
+# What each `requires` value means, in one phrase -- shown on the locked toggle and in the refusal.
+$script:PimFeatureFlagRequirementText = @{
+    'msp-master' = 'an MSP master (this deployment manages no other tenants)'
+}
 
 function Get-PimFeatureFlagCatalog {
     # Return a fresh COPY of the catalog (ordered hashtables) so a caller can
@@ -74,9 +84,29 @@ function Get-PimFeatureFlagCatalog {
             label    = "$($f.label)"
             default  = [bool]$f.default
             alwaysOn = [bool]$f.alwaysOn
+            requires = "$($f.requires)"
         })
     }
     return @($out.ToArray())
+}
+
+function Test-PimFeatureFlagTopologyAllowed {
+    # PURE. May a surface with this `requires` value exist in a deployment with this topology?
+    # A flag with NO requirement is always allowed. An UNKNOWN requirement fails CLOSED -- a
+    # requirement we cannot evaluate must not silently become "no requirement".
+    param([AllowNull()][string]$Requires, [bool]$IsMspMaster)
+    $r = "$Requires".Trim().ToLowerInvariant()
+    if (-not $r) { return $true }
+    if ($r -eq 'msp-master') { return [bool]$IsMspMaster }
+    return $false
+}
+
+function Get-PimFeatureFlagRequirementText {
+    param([AllowNull()][string]$Requires)
+    $r = "$Requires".Trim().ToLowerInvariant()
+    if (-not $r) { return '' }
+    if ($script:PimFeatureFlagRequirementText.ContainsKey($r)) { return "$($script:PimFeatureFlagRequirementText[$r])" }
+    return "a deployment of type '$r'"
 }
 
 function Get-PimFeatureFlagValue {
@@ -102,9 +132,15 @@ function Resolve-PimFeatureFlags {
     #   - apply a persisted override ($true/$false) for a KNOWN flag id
     #   - an UNKNOWN flag id in the store is IGNORED (never invents a surface)
     #   - an always-on flag is forced ON regardless of the override (no lock-out)
+    #   - a flag whose `requires` this deployment does not satisfy is forced OFF and marked
+    #     unavailable -- but ONLY when the caller tells us the topology (-IsMspMaster). A caller
+    #     that does not know it passes nothing and gets exactly the old behaviour; the alternative,
+    #     guessing, would hide an MSP master's own Downlink tab the moment a read failed.
     # Returns @{ flags=<ordered id->bool>; effective=<id->object>; warnings=<string[]> }.
-    # `effective` carries per-flag id/label/enabled/default/alwaysOn for the GUI.
-    param([object]$Raw)
+    # `effective` carries per-flag id/label/enabled/default/alwaysOn/available/unavailableReason.
+    param([object]$Raw, [AllowNull()][object]$IsMspMaster = $null)
+    $topologyKnown = ($null -ne $IsMspMaster)
+    $isMaster = [bool]$IsMspMaster
 
     $warnings = New-Object System.Collections.Generic.List[string]
     $raw = $Raw
@@ -148,6 +184,17 @@ function Resolve-PimFeatureFlags {
             if (-not $enabled) { $warnings.Add("Feature '$id' is always-on and cannot be disabled; forced on.") }
             $enabled = $true
         }
+        # Topology guard: a surface this deployment cannot host is locked OFF, whatever is stored.
+        $available = $true
+        $unavailableReason = ''
+        if ($topologyKnown -and "$($f.requires)".Trim()) {
+            $available = Test-PimFeatureFlagTopologyAllowed -Requires "$($f.requires)" -IsMspMaster $isMaster
+            if (-not $available) {
+                $unavailableReason = "needs $(Get-PimFeatureFlagRequirementText -Requires "$($f.requires)")"
+                if ($enabled) { $warnings.Add("Feature '$id' $unavailableReason; forced off.") }
+                $enabled = $false
+            }
+        }
         $flags[$id] = $enabled
         $effective[$id] = [ordered]@{
             id       = $id
@@ -155,6 +202,9 @@ function Resolve-PimFeatureFlags {
             enabled  = $enabled
             default  = [bool]$f.default
             alwaysOn = [bool]$f.alwaysOn
+            requires = "$($f.requires)"
+            available = $available
+            unavailableReason = $unavailableReason
         }
     }
     return @{ flags = $flags; effective = $effective; warnings = @($warnings.ToArray()) }
@@ -167,8 +217,10 @@ function ConvertTo-PimFeatureFlagOverrides {
     # are dropped. This keeps pim.Settings small and means a future default change
     # flows through to any flag the operator never explicitly touched.
     # Returns an ordered id->bool map suitable for storing under { flags = ... }.
-    param([object]$Raw)
-    $resolved = Resolve-PimFeatureFlags -Raw $Raw
+    # With -IsMspMaster, a surface this deployment cannot host resolves OFF and therefore never
+    # reaches the store as an ON override -- the refusal is here, not only in the GUI's disabled box.
+    param([object]$Raw, [AllowNull()][object]$IsMspMaster = $null)
+    $resolved = Resolve-PimFeatureFlags -Raw $Raw -IsMspMaster $IsMspMaster
     $catalog = Get-PimFeatureFlagCatalog
     $defaults = @{}; $always = @{}
     foreach ($f in $catalog) { $defaults["$($f.id)"] = [bool]$f.default; $always["$($f.id)"] = [bool]$f.alwaysOn }

@@ -499,6 +499,65 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
 "@
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $ddl)
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimChangeQueueDdl))
+    [void](Initialize-PimNamingConventionSeed -ConnectionString $ConnectionString)
+}
+
+function Initialize-PimNamingConventionSeed {
+    <#
+      🔴 DEPLOY THE DEFAULT NAMING TEMPLATE INTO THE STORE (operator, 2026-09-20: *"naming convention are
+      always per customer. if this are samples or default or initial, then we should incude that in the
+      deployment instead"* / *"remember to add it to setup script also so we can deploy default naming
+      template"*).
+
+      Naming used to have THREE homes: the shipped defaults in code (PIM-Naming.ps1), a hand-synced copy in
+      config\PIM4EntraPS.NamingConventions.locked.ps1, and pim.Settings. The file is gone; this is what
+      replaces it -- every path that creates or opens a store (Initialize-PimTenantStore, the Manager's
+      boot, the updater's schema step, Invoke-PimUpdate) now SEEDS the shipped defaults into
+      pim.Settings['NamingConventions'], so a fresh environment has a complete, editable naming template on
+      day one and nothing has to read a file.
+
+      🔒 SEED, NEVER OVERWRITE. Naming is per customer: if the setting already exists -- even empty-ish --
+      it is left exactly as it is. Writing defaults over a customer's conventions would silently rename
+      every group and admin account the next run computes. Best-effort: a store that cannot take the seed
+      is not a reason to fail store initialisation, so this never throws.
+    #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$ConnectionString)
+    try {
+        if (-not (Get-Command Get-PimShippedNamingConventions -ErrorAction SilentlyContinue)) { return $false }
+        $existing = $null
+        try { $existing = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'NamingConventions' } catch { return $false }
+        if ($null -ne $existing) { return $false }          # already the customer's -- untouched
+        # 🔴 SEED A *NEW* STORE ONLY -- NEVER AN ESTABLISHED ONE.
+        # Absent is not the same as new. An environment that already holds admins and groups was named by
+        # SOME convention; if its setting is missing, writing the SHIPPED default here would declare the
+        # wrong convention and the engine would then happily run on it. MSP-SETUP-GUIDE §5 / IMP-13:
+        # EFIF's admins are 'admin-efif-{Initial}', so the shipped 'Admin-{Initial}' would make every one
+        # of them invisible to the Admins provider's prefix match -- re-created every tick, accumulating
+        # unmanaged privileged accounts. Seeding the wrong convention is WORSE than not seeding: on a
+        # populated store we leave it absent so the engine's preflight REFUSES and a human decides.
+        $populated = $true
+        try {
+            $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql 'SELECT TOP 1 1 AS x FROM pim.Rows')
+            $populated = [bool](@($rows).Count)
+        } catch { $populated = $true }                      # cannot tell => treat as established, do not seed
+        if ($populated) {
+            Write-Warning ("  [store] pim.Settings['NamingConventions'] is NOT set and this store already holds rows -- " +
+                           "NOT seeding the shipped default (it would declare the wrong convention for an estate that is already named). " +
+                           "Set this tenant's convention in the Manager (Settings > Naming); the engine refuses to run until it is there.")
+            return $false
+        }
+        $shipped = Get-PimShippedNamingConventions
+        if ($shipped -isnot [System.Collections.IDictionary] -or -not $shipped.Keys.Count) { return $false }
+        Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'NamingConventions' `
+            -ValueJson (ConvertTo-Json -InputObject $shipped -Depth 12 -Compress)
+        $back = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'NamingConventions'
+        if ($null -eq $back) { Write-Warning '  [store] the default naming template was written but did not read back.'; return $false }
+        Write-Host ("  [store] seeded the default naming template into pim.Settings['NamingConventions'] ({0} keys) -- edit it per customer in the Manager." -f $shipped.Keys.Count) -ForegroundColor DarkGray
+        return $true
+    } catch {
+        Write-Warning "  [store] could not seed the default naming template (the environment keeps the in-code defaults): $($_.Exception.Message)"
+        return $false
+    }
 }
 
 # --- tenant-list cache (pim.TenantCache) -------------------------------------------

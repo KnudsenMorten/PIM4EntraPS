@@ -14,6 +14,89 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.382 — the engine never replaces one assignment type with the other, and never plans from an incomplete read
+
+**A delegation may be both Eligible and Active, and PIM now leaves it that way.** Until this release, a
+row asking for one assignment type while the other type was live was treated as a *replacement*: the
+engine deleted the live assignment and created the other one. That is wrong — holding the same
+delegation as Active in one place and Eligible in another is a normal, supported design, not a mistake
+to be corrected. The engine now simply creates what a row asks for and leaves every other assignment
+alone. **The only thing that removes an assignment is a row you marked for removal and committed.**
+
+**No plan is ever made from a live read that did not finish.** Three places read the live state, and
+each of them used to keep whatever it had managed to collect when a read failed part-way — then compare
+it as though it were the whole tenant. An assignment that was simply missing from that short read looked
+like something to change. All three now discard an incomplete read, say so, and leave the affected area
+untouched for that run rather than acting on a half-picture.
+
+**A removal you asked for is never quietly dropped.** A pending removal whose target could not be seen
+used to count as "already done" and was deleted from your desired state — so on an incomplete read, a
+removal you had committed could disappear without ever being carried out. It is now kept and retried.
+
+**Upgrade note:** if any of your rows ask for an assignment type that is not live, the first run after
+upgrading will CREATE it (and keep the existing one). Nothing is deleted. If you do not want both, mark
+the one you want gone for removal and commit it.
+
+**The "removal blocked" email is rewritten.** It now opens with the fact that nothing was changed, says
+what the blocked items actually were, explains the per-run safety ceiling in plain words instead of
+repeating an unexplained number, and ends with one instruction. It also renders in the right typeface —
+the previous version fell back to a serif font in Outlook.
+
+**Run log: a Copy button**, which copies the whole log including the part scrolled out of view and
+confirms how many lines it took. **"Live tail"** now explains itself and is switched off, with the
+reason shown, on a run that has already finished — previously it accepted the click and silently
+un-ticked itself two seconds later.
+
+**Naming is yours, and the product no longer guesses it.** Your naming conventions live in the database,
+where you edit them — they are seeded once when a new environment's store is created and never overwritten
+afterwards. If they are missing, the engine now **stops and says which setting is absent** instead of falling
+back to built-in defaults: silently renaming the admin accounts and groups an environment already has is the
+one mistake that cannot be undone. Nothing is read from a configuration file any more.
+
+**Name your admin accounts whatever you call them.** The admin word is now a proper field in Settings →
+Naming — `Admin`, `adm`, anything — and it is honoured everywhere, including the high-privilege pattern and,
+importantly, the matching that decides which live accounts PIM manages. Previously a non-default word could
+leave PIM unable to recognise its own admin accounts, which meant creating them again on every run.
+
+**One naming template for every tenant.** A new `{TenantCommonName}` variable holds the short name of the
+tenant (for example `EFIF` or `RIDE`), so a single pattern serves every customer instead of the name being
+written into the pattern itself. Leave it blank and it disappears cleanly — existing names are unchanged.
+Both fields sit together in Settings → Naming with a live example, and every supported variable is listed,
+with its meaning, in the click-to-insert legend beside the pattern fields.
+
+**Clearer labels.** The AD OU placement fields are now "AD OU (Day2Day Admins)" and "AD OU (High Priv
+Admins)", and the card says plainly that it is optional and only for tenants with on-premises Active
+Directory.
+
+**Pick the admin account domain from a list.** Settings → Admin account domain offers this tenant's
+verified domains as a dropdown, and it now actually has something to offer. Two separate faults left it
+empty: the domain list was read from a single place that needs a permission not every deployment has
+been granted, and whatever was read could never be cached, so a later page load started from nothing. The domains are now also read from the tenant's organisation record, which needs only the
+permission the page already uses, the cache works, and when there is still nothing to show the page says
+**why** and offers a **Re-read**. The number of domains found is shown, so an empty list reads as a fault
+to fix rather than "this tenant has one domain".
+
+**Register your licence in the portal.** Settings → Licence now has **Register a licence**: pick the
+issued file or paste its contents. Previously the only documented way was a command line that needs the
+deployment's own database credentials, which most customers do not have. Your file is checked against our
+signing certificate **before** anything is stored — a file that does not verify is refused, nothing is
+written, and the page says so. The command line is still there for whoever prefers it, and the page now
+explains that the application id and certificate it asks for are **your** deployment's, not ours.
+
+**MSP Downlink cannot be switched on where it cannot work.** On a single-tenant deployment the feature
+toggle was live, so the tab could be turned on with nothing behind it. It is now locked off there, with
+the reason shown; the refusal is in the server, not only in the checkbox.
+
+**The edition page no longer says enforcement is off.** It said every advanced feature was free because
+enforcement was switched off. That stopped being true when Pro enforcement shipped: the Pro features
+listed under Licence are checked against your installed licence. The text now says what actually happens.
+
+**Licensing corrections.** A licence whose edition reads "Core" no longer unlocks Pro features; Pro means
+Pro. Delegated administration is a Pro capability and is now enforced wherever a delegated administrator
+is resolved, not only where one is created — without a licence such a user is a reader. The Exchange
+Online connector has been removed from the feature list: no version of the product applies it yet, and
+listing it offered a capability that does not exist.
+
 ## v2.4.381 — Defender XDR role assignments fixed (for real), and the Templates cards adopt existing groups
 
 **Defender XDR role assignments are created.** The v2.4.380 fix did not solve the problem: every new Defender XDR role assignment was still refused by Microsoft ("The roleAssignment field is required"). The cause was a type annotation in the request that the service rejects, even though Microsoft's own example includes it. It has been removed. Microsoft answers a successful assignment with a redirect that cannot be followed securely, so the assignment is now read back by group and role, and it counts as failed only when it cannot be found. After upgrading, the next engine run assigns every Defender XDR group that is waiting for its role.

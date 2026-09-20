@@ -503,13 +503,15 @@ function New-PimAdminsProvider {
                     try { [void](Import-PimSettingsFromStore) } catch { }                    # 2. persisted pim.Settings
                     & $merge (Get-PimAdminAccountPrefixes)
                 }
-                try {                                                                        # 3. the shipped locked config
-                    $cfg = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'config\PIM4EntraPS.NamingConventions.locked.ps1'
-                    if (Test-Path -LiteralPath $cfg) {
-                        $saved = $global:PIM_NamingConventions
-                        . $cfg
-                        & $merge (Get-PimAdminAccountPrefixes)
-                        if ($saved) { $global:PIM_NamingConventions = $saved }                # don't clobber the live config
+                try {                                                                        # 3. the shipped defaults (in code)
+                    # 2026-09-20: was a dot-source of config\PIM4EntraPS.NamingConventions.locked.ps1 --
+                    # a duplicate of the same defaults, now deleted. No file, and no clobbering of the
+                    # live map: the shipped set is read directly and merged.
+                    if (Get-Command Get-PimShippedNamingConventions -ErrorAction SilentlyContinue) {
+                        $shipped = Get-PimShippedNamingConventions
+                        if ($shipped -is [System.Collections.IDictionary] -and $shipped.Contains('AdminAccountPatterns')) {
+                            & $merge @($shipped['AdminAccountPatterns'])
+                        }
                     }
                 } catch { }
                 $prefixes = $acc.ToArray()
@@ -1170,6 +1172,12 @@ function New-PimEntraRolesProvider {
             $owned = Get-PimSolutionOwnedGroups
             $ctx['tagToGroupId'] = @{}
             foreach ($t in @($owned.byTag.Keys)) { $ctx['tagToGroupId'][$t] = $owned.byTag[$t] }
+            # 🔴 2026-09-20: an INCOMPLETE preload is not live state. Diffing against a short index turned
+            # 9 present-and-correct Eligible assignments into TYPE CHANGES (which delete the live Active
+            # one) on internal at 23:33 UTC. NOT CHECKED, nothing applied -- see Get-PimDirRoleSchedulePreload.
+            Get-PimDirRoleSchedulePreload
+            $__pe = Get-PimDirRoleScheduleReadError
+            if ($__pe) { $ctx['__pimLiveReadError'] = "the directory role schedule preload was INCOMPLETE ($__pe)"; return @() }
             $live = New-Object System.Collections.Generic.List[object]
             foreach ($gid in @($owned.byId.Keys)) {
                 $tag = "$($owned.byId[$gid].tag)"; if (-not $tag) { continue }
@@ -1603,9 +1611,17 @@ function Get-PimGroupSchedulePreload {
     # TENANT-WIDE preload of ALL PIM-for-Groups eligibility + assignment schedules, indexed
     # by groupId -- ported from Get-PimGroupSchedulesPreloaded (the func lib). One bulk read
     # (paged) instead of a per-group `$filter=groupId eq ...` round-trip. Cached 5 min.
+    # 🔴 2026-09-20 -- SAME RULE AS Get-PimDirRoleSchedulePreload: a PARTIAL preload is not live state.
+    # The catch used to warn and fall through to cache whatever had been collected, so an enumeration that
+    # threw mid-paging left a SHORT index that AdminMembers / GroupMembers diffed as the tenant. A missing
+    # live membership makes a targeted Action=Remove row look ALREADY GONE -- and an 'absent' Remove row is
+    # completed and DELETED from pim.Rows, so the operator's committed revoke is silently thrown away and
+    # never performed. Nothing is cached on failure, no time is stamped (the next call retries), and the
+    # consumers turn the recorded reason into __pimLiveReadError (NOT CHECKED, nothing applied).
     param([switch]$Force)
     if (-not $Force -and $script:PimGrpSchedAt -and ((Get-Date) - $script:PimGrpSchedAt).TotalMinutes -lt 5) { return }
     $elig = @{}; $act = @{}
+    $errs = New-Object System.Collections.Generic.List[string]
     foreach ($pair in @(@{ ep = 'eligibilitySchedules'; idx = $elig }, @{ ep = 'assignmentSchedules'; idx = $act })) {
         try {
             foreach ($s in @(Invoke-PimGraph -Path "/identityGovernance/privilegedAccess/group/$($pair.ep)" -All)) {
@@ -1613,8 +1629,15 @@ function Get-PimGroupSchedulePreload {
                 if (-not $pair.idx.ContainsKey($gid)) { $pair.idx[$gid] = New-Object System.Collections.ArrayList }
                 [void]$pair.idx[$gid].Add($s)
             }
-        } catch { Write-Warning "  [perf] group $($pair.ep) preload failed: $($_.Exception.Message)" }
+        } catch { $errs.Add("$($pair.ep): $($_.Exception.Message)") }
     }
+    if ($errs.Count) {
+        $script:PimGrpSchedError = ($errs -join ' | ')
+        $script:PimGrpElig = $null; $script:PimGrpAct = $null; $script:PimGrpSchedAt = $null
+        Write-Warning ("  [engine] group schedule preload INCOMPLETE -- nothing is cached and the dependent scopes are NOT CHECKED this run: $($script:PimGrpSchedError)")
+        return
+    }
+    $script:PimGrpSchedError = ''
     $script:PimGrpElig = $elig; $script:PimGrpAct = $act; $script:PimGrpSchedAt = Get-Date
     $ec = 0; foreach ($v in $elig.Values) { $ec += $v.Count }; $ac = 0; foreach ($v in $act.Values) { $ac += $v.Count }
     Write-Host ("  [perf] group schedules preloaded: $ec eligible + $ac active (tenant-wide)") -ForegroundColor DarkGray
@@ -1635,15 +1658,37 @@ function Get-PimLiveGroupMembership {
     if ($hit -is [hashtable] -and $hit.at -and ((Get-Date) - $hit.at).TotalMinutes -lt $ttl) {
         return @($hit.rows | ForEach-Object { $c = $_ | Select-Object *; $c.GroupTag = $GroupTag; $c })
     }
+    # 🔴 2026-09-20 -- THIS WAS THE QUIETEST INSTANCE OF THE PARTIAL-READ BUG. The catch was
+    # `Write-Verbose`, which is INVISIBLE by default: a failed read of a group's schedules became
+    # "this group holds no memberships", was CACHED for 5 minutes, and was diffed as live state --
+    # with nothing in the log at any level an operator sees. §70.21 already guards the NARROWED read
+    # ("a narrowed answer that FAILED would hide live memberships -- a Remove row would read 'already
+    # absent'"), and then falls back to THIS reader, which had the very defect the fallback exists to
+    # avoid. A failure is now recorded, is NOT cached, and the scope reports NOT CHECKED.
     $out = New-Object System.Collections.Generic.List[object]
+    $errs = New-Object System.Collections.Generic.List[string]
     foreach ($pair in $script:PimGroupSchedulePairs) {
         try {
             foreach ($s in @(Invoke-PimGraph -All -Path (Get-PimGroupSchedulePath -Endpoint $pair.ep -GroupId $GroupId))) {
                 $out.Add((ConvertTo-PimLiveGroupMembershipRow -Schedule $s -GroupId $GroupId -GroupTag $GroupTag -AssignmentType $pair.type))
             }
-        } catch { Write-Verbose "group membership ($GroupTag/$($pair.type)): $($_.Exception.Message)" }
+        } catch { $errs.Add("$GroupTag/$($pair.type): $($_.Exception.Message)") }
+    }
+    if ($errs.Count) {
+        $script:PimGrpMemError = (@(@("$($script:PimGrpMemError)".Trim()) + @($errs.ToArray())) | Where-Object { $_ }) -join ' | '
+        Write-Warning ("  [engine] live membership read FAILED for group '$GroupTag' -- not cached, and its scope is NOT CHECKED this run: " + ($errs -join '; '))
+        return @()      # never a partial list: an empty answer here would read as "no memberships"
     }
     $arr = $out.ToArray(); $script:PimGrpMemCache[$GroupId] = @{ at = (Get-Date); rows = $arr }; $arr
+}
+
+function Get-PimGroupScheduleReadError {
+    <# '' when both group-schedule readers completed, else why not. Reset per scope by Clear-PimGroupScheduleReadError. #>
+    return ((@("$($script:PimGrpSchedError)".Trim(), "$($script:PimGrpMemError)".Trim()) | Where-Object { $_ }) -join ' | ')
+}
+function Clear-PimGroupScheduleReadError {
+    <# Called by a scope's GetLive BEFORE it reads, so one scope's failure cannot mark the next one NOT CHECKED. #>
+    $script:PimGrpMemError = ''
 }
 
 $script:PimGroupSchedulePairs = @(@{ ep = 'eligibilitySchedules'; type = 'Eligible' }, @{ ep = 'assignmentSchedules'; type = 'Active' })
@@ -1873,9 +1918,26 @@ function Get-PimDirRoleSchedulePreload {
     # "17 things to do" -- on the scope that grants AU-scoped admin rights.
     # INSTANCES are also the semantically correct source for LIVE STATE: an instance is what is
     # currently in effect, whereas a schedule object can be expired or superseded (hence 602 < 613).
+    # 🔴 2026-09-20 -- A PARTIAL PRELOAD IS NOT LIVE STATE, AND IT USED TO BE TREATED AS ONE.
+    # The catch below only WARNED and then fell through to cache whatever had been collected so far,
+    # so an enumeration that threw MID-PAGING (throttling, a transient 5xx, a dropped nextLink) left a
+    # SHORT index that every consumer diffed as though it were the tenant.
+    # MEASURED on internal 2026-09-19 23:33 UTC: EntraRoles read live=247 where the runs at 23:07 and at
+    # 05:11/05:22/05:39 the next morning all read live=254 -- short by 7. Nine desired 'Eligible' rows on
+    # Entra-ID-Bundle-GlobalRoles-L1 therefore lost their live match, paired instead with their live
+    # 'Active' counterpart by the type-neutral key, and were planned as TYPE CHANGES -- each of which
+    # DELETES the live Active assignment first. The per-scope removal budget (5) stopped all 9 and mailed
+    # "REMOVAL BUDGET tripped -- 9 remove blocked". Nothing was removed, but only because 9 > 5: at 4 the
+    # engine would have deleted four real assignments, silently, on a read that was simply incomplete.
+    # 🔒 This is the rule Invoke-PimEngineScope already states for providers ("an empty live set is NOT
+    # 'nothing there'"): a live read that FAILED must say so, never hand back what it managed to collect.
+    # So a failure now caches NOTHING, stamps NO time (the next call retries) and records the reason; the
+    # three consumers (EntraRoles, RolesAUs, EntraRolesDirect) turn that into __pimLiveReadError, i.e. the
+    # scope is NOT CHECKED and applies nothing at all.
     param([switch]$Force)
     if (-not $Force -and $script:PimDirSchedAt -and ((Get-Date) - $script:PimDirSchedAt).TotalMinutes -lt 5) { return }
     $elig = @{}; $act = @{}
+    $errs = New-Object System.Collections.Generic.List[string]
     foreach ($pair in @(@{ ep = 'roleEligibilityScheduleInstances'; idx = $elig }, @{ ep = 'roleAssignmentScheduleInstances'; idx = $act })) {
         try {
             foreach ($s in @(Invoke-PimGraph -Path "/roleManagement/directory/$($pair.ep)?`$expand=roleDefinition" -All)) {
@@ -1883,16 +1945,40 @@ function Get-PimDirRoleSchedulePreload {
                 if (-not $pair.idx.ContainsKey($pp)) { $pair.idx[$pp] = New-Object System.Collections.ArrayList }
                 [void]$pair.idx[$pp].Add($s)
             }
-        } catch { Write-Warning "  [perf] dir $($pair.ep) preload failed: $($_.Exception.Message)" }
+        } catch { $errs.Add("$($pair.ep): $($_.Exception.Message)") }
     }
+    if ($errs.Count) {
+        $script:PimDirSchedError = ($errs -join ' | ')
+        # Drop any earlier cache too: a stale-but-complete index is still not THIS run's live state, and
+        # silently diffing against it is the same class of mistake by a different route.
+        $script:PimDirElig = $null; $script:PimDirAct = $null; $script:PimDirSchedAt = $null
+        Write-Warning ("  [engine] directory role schedule preload INCOMPLETE -- nothing is cached and the dependent scopes are NOT CHECKED this run: $($script:PimDirSchedError)")
+        return
+    }
+    $script:PimDirSchedError = ''
     $script:PimDirElig = $elig; $script:PimDirAct = $act; $script:PimDirSchedAt = Get-Date
     $ec = 0; foreach ($v in $elig.Values) { $ec += $v.Count }; $ac = 0; foreach ($v in $act.Values) { $ac += $v.Count }
     Write-Host ("  [perf] directory role schedules preloaded: $ec eligible + $ac active (tenant-wide)") -ForegroundColor DarkGray
 }
+
+function Get-PimDirRoleScheduleReadError {
+    <#
+      '' when the last directory role schedule preload completed, else why it did not. The scopes that
+      diff against the preload (EntraRoles, RolesAUs, EntraRolesDirect) read this and refuse to compare
+      rather than compare against a short index -- see Get-PimDirRoleSchedulePreload for the incident.
+    #>
+    return "$($script:PimDirSchedError)"
+}
 function Get-PimLiveDirRoleSchedules {
     # Directory role schedules for one principal (group) from the preload -> uniform rows.
+    # 🔴 THROWS when the preload did not complete. Returning an empty list would say "this group holds no
+    # role" to a caller that cannot tell that from "the read failed" -- and the diff turns that into
+    # removals. The three engine consumers check Get-PimDirRoleScheduleReadError BEFORE they call this and
+    # mark their scope NOT CHECKED; this throw is for every other caller, now and later.
     param([Parameter(Mandatory)][string]$PrincipalId)
     Get-PimDirRoleSchedulePreload
+    $__pe = Get-PimDirRoleScheduleReadError
+    if ($__pe) { throw "Get-PimLiveDirRoleSchedules: the directory role schedule preload is INCOMPLETE ($__pe) -- refusing to report live state for principal '$PrincipalId'." }
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($pair in @(@{ idx = $script:PimDirElig; type = 'Eligible' }, @{ idx = $script:PimDirAct; type = 'Active' })) {
         if ($pair.idx -and $pair.idx.ContainsKey($PrincipalId)) {
@@ -2326,7 +2412,13 @@ function New-PimAuMembersProvider {
                         if (-not $owned.byId.ContainsKey("$($m.id)")) { continue }
                         $out.Add([pscustomobject]@{ auId = "$($au.Id)"; auName = $auName; groupId = "$($m.id)"; GroupName = "$($owned.byId["$($m.id)"].name)" })
                     }
-                } catch { Write-Warning "  [engine] AdministrativeUnitMembers: could not read members of AU '$auName': $($_.Exception.Message)" }
+                } catch {
+                    # 2026-09-20: a partial live set must SAY it is partial. Without this the AU's members
+                    # read as absent, and a committed Action=Remove row for one of them counts as "already
+                    # done" and is DELETED from the desired state (Invoke-PimEngineScope, __pimLiveIncomplete).
+                    $ctx['__pimLiveIncomplete'] = "AdministrativeUnitMembers: AU '$auName' members could not be read"
+                    Write-Warning "  [engine] AdministrativeUnitMembers: could not read members of AU '$auName': $($_.Exception.Message)"
+                }
             }
             $out.ToArray()
         }
@@ -2487,6 +2579,7 @@ function New-PimAdminMembersProvider {
                 }
             }
             # One batched read of every owned group's schedules into the membership cache (Initialize-PimGroupMembershipCache).
+            Clear-PimGroupScheduleReadError
             $__tagById = @{}; foreach ($__g in @($owned.byId.Keys)) { $__tagById["$__g"] = "$($owned.byId[$__g].tag)" }
             [void](Initialize-PimGroupMembershipCache -GroupTagById $__tagById)
             foreach ($gid in @($owned.byId.Keys)) {
@@ -2505,6 +2598,10 @@ function New-PimAdminMembersProvider {
                     $live.Add($m)
                 }
             }
+            # 🔴 2026-09-20: if ANY group's read failed, this live set is short -- and a short set makes a
+            # committed Action=Remove row look already-gone, which completes and DELETES it. NOT CHECKED.
+            $__ge = Get-PimGroupScheduleReadError
+            if ($__ge) { $ctx['__pimLiveReadError'] = "the live group membership read was INCOMPLETE ($__ge)"; return @() }
             $live.ToArray()
         }
         KeyOf = { param($r) Get-PimAdminMembersKey -Row $r }
@@ -2651,6 +2748,7 @@ function New-PimGroupMembersProvider {
                 }
             }
             # One batched read of every owned group's schedules into the membership cache (Initialize-PimGroupMembershipCache).
+            Clear-PimGroupScheduleReadError
             $__tagById = @{}; foreach ($__g in @($owned.byId.Keys)) { $__tagById["$__g"] = "$($owned.byId[$__g].tag)" }
             [void](Initialize-PimGroupMembershipCache -GroupTagById $__tagById)
             foreach ($gid in @($owned.byId.Keys)) {
@@ -2670,6 +2768,10 @@ function New-PimGroupMembersProvider {
                     $live.Add($m)
                 }
             }
+            # 🔴 2026-09-20: if ANY group's read failed, this live set is short -- and a short set makes a
+            # committed Action=Remove row look already-gone, which completes and DELETES it. NOT CHECKED.
+            $__ge = Get-PimGroupScheduleReadError
+            if ($__ge) { $ctx['__pimLiveReadError'] = "the live group membership read was INCOMPLETE ($__ge)"; return @() }
             $live.ToArray()
         }
         KeyOf = { param($r) Get-PimGroupMembersKey -Row $r }
@@ -2773,6 +2875,10 @@ function New-PimRolesAUsProvider {
             # silently does nothing. Free here -- the schedules come from the tenant-wide
             # preload, so this is index lookups, not extra calls.
             $owned = Get-PimSolutionOwnedGroups
+            # 🔴 2026-09-20: same rule as EntraRoles -- an INCOMPLETE preload is NOT CHECKED, never a diff.
+            Get-PimDirRoleSchedulePreload
+            $__pe = Get-PimDirRoleScheduleReadError
+            if ($__pe) { $ctx['__pimLiveReadError'] = "the directory role schedule preload was INCOMPLETE ($__pe)"; return @() }
             $live = New-Object System.Collections.Generic.List[object]
             foreach ($gid in @($owned.byId.Keys)) {
                 foreach ($s in (Get-PimLiveDirRoleSchedules -PrincipalId $gid)) {
@@ -6440,7 +6546,11 @@ function New-PimAccessReviewsProvider {
         GetLive = {
             param($ctx)
             $live = New-Object System.Collections.Generic.List[object]
-            try { foreach ($d in @(Invoke-PimGraph -All -Path "/identityGovernance/accessReviews/definitions?`$select=id,displayName")) { if ("$($d.displayName)" -like 'PIM4EntraPS review - *') { $live.Add([pscustomobject]@{ GroupName = ("$($d.displayName)" -replace '^PIM4EntraPS review - ', '') }) } } } catch { Write-Warning "  [AccessReviews] list failed: $($_.Exception.Message)" }
+            try { foreach ($d in @(Invoke-PimGraph -All -Path "/identityGovernance/accessReviews/definitions?`$select=id,displayName")) { if ("$($d.displayName)" -like 'PIM4EntraPS review - *') { $live.Add([pscustomobject]@{ GroupName = ("$($d.displayName)" -replace '^PIM4EntraPS review - ', '') }) } } }
+            catch {
+                $ctx['__pimLiveIncomplete'] = 'AccessReviews: the review definitions could not be listed'   # 2026-09-20, see AdministrativeUnitMembers
+                Write-Warning "  [AccessReviews] list failed: $($_.Exception.Message)"
+            }
             $live.ToArray()
         }
         KeyOf = { param($r) (Get-PimRowProp -Row $r -Names @('GroupName')).ToLowerInvariant() }
@@ -6504,7 +6614,10 @@ function New-PimGroupOwnersProvider {
                     $gn = "$($grp.displayName)"; if (-not $gn) { continue }
                     foreach ($o in @($grp.owners)) { if ($o.id) { $live.Add([pscustomobject]@{ GroupName = $gn; OwnerId = "$($o.id)" }) } }
                 }
-            } catch { Write-Warning "  [GroupOwners] owners preload failed: $($_.Exception.Message)" }
+            } catch {
+                $ctx['__pimLiveIncomplete'] = "GroupOwners: the owners preload failed"   # 2026-09-20, see AdministrativeUnitMembers
+                Write-Warning "  [GroupOwners] owners preload failed: $($_.Exception.Message)"
+            }
             $live.ToArray()
         }
         KeyOf = { param($r) ("$(Get-PimRowProp -Row $r -Names @('GroupName'))").ToLowerInvariant() + '|' + "$(Get-PimRowProp -Row $r -Names @('OwnerId'))" }
@@ -6579,6 +6692,10 @@ function New-PimEntraRolesDirectProvider {
             $ctx['directRoleNameToId'] = Get-PimEntraRoleNameMap; $ctx['directUpnToId'] = @{}
             $desired = @(Get-PimDesiredRows -Entity 'PIM-Assignments-Roles-Direct')
             $upns = @($desired | ForEach-Object { Get-PimRowProp -Row $_ -Names @('UserPrincipalName','Username','UPN','upn') } | Where-Object { $_ } | Select-Object -Unique)
+            # 🔴 2026-09-20: same rule as EntraRoles -- an INCOMPLETE preload is NOT CHECKED, never a diff.
+            Get-PimDirRoleSchedulePreload
+            $__pe = Get-PimDirRoleScheduleReadError
+            if ($__pe) { $ctx['__pimLiveReadError'] = "the directory role schedule preload was INCOMPLETE ($__pe)"; return @() }
             $live = New-Object System.Collections.Generic.List[object]
             foreach ($upn in $upns) {
                 $uid = Resolve-PimPrincipalId $upn; if (-not $uid) { continue }
@@ -7463,14 +7580,32 @@ function New-PimDefenderXdrRolesProvider {
                 if ([int]$l.principalCount -gt 1) {
                     throw ("DEFENDER-ASSIGNMENT-SHARED: the assignment of role '{0}' (id {1}) also holds {2} other principal(s), so it cannot be re-created with the data sources [{3}] without taking their access. Split it in the Defender portal (or give the group its own assignment), then the next run corrects it." -f $rn, $l.assignmentId, ([int]$l.principalCount - 1), (@($spec.dataSources) -join '; '))
                 }
-                $gid = "$($l.principalId)"
-                if (-not $gid -or -not "$($l.assignmentId)") { throw "DefenderXdrRoles: no live assignment / group id to re-assign for '$($item.key)'" }
-                Invoke-PimGraph -Beta -Method DELETE -Path "/roleManagement/defender/roleAssignments/$($l.assignmentId)" | Out-Null
-                $disp = Get-PimRowProp -Row $d -Names @('AssignmentName'); if (-not $disp) { $disp = "PIM4EntraPS - $rn" }
-                $body = New-PimDefenderAssignmentBody -DisplayName $disp -RoleDefinitionId $rid -PrincipalId $gid -AppScopeIds @($spec.dataSources)
-                try { [void](Invoke-PimDefenderAssignmentCreate -Body $body) }
-                catch { throw ("data sources: the old assignment of '{0}' was REMOVED, but creating it with [{1}] failed (the next run retries the create): {2}" -f $rn, (@($spec.dataSources) -join '; '), $_.Exception.Message) }
-                $out.reassigned = $true
+                # 🔴 OPERATOR 2026-09-20: "we can NOT have removes except if coming from operator" /
+                # "any tings that maybe should be deleted must come in as warning for operator to decide,
+                # newer automatic." This branch used to DELETE the live Defender assignment and re-create
+                # it with the new data sources, because Graph offers no way to change appScopeIds in place.
+                # It was the worst remaining case of the automatic-removal class:
+                #   * nobody asked for a removal -- it was inferred from a data field differing, exactly
+                #     like the withdrawn type change; and
+                #   * it sits in ApplyUpdate, so the item NEVER enters $diff.remove. The per-scope removal
+                #     budget could not count it, cap it or alert on it. A delete the safety ceiling cannot
+                #     even see is the one an operator finds out about last.
+                # It now WARNS and changes nothing. The decision is the operator's: stage an Action=Remove
+                # row for this assignment and commit it, and the next run creates it with the data sources
+                # the row names -- the same committed path every other removal goes through.
+                $__dsMsg = ("DEFENDER-DATASOURCES-CHANGED: '{0}' is assigned for data source(s) [{1}] and the row asks for [{2}]. " +
+                            "Graph cannot change them in place, so applying this would DELETE the live assignment and re-create it. " +
+                            "NOTHING was changed -- PIM never removes an assignment nobody asked to remove. To apply it, stage an " +
+                            "Action=Remove row for this assignment and commit it; the next run then creates it with your data sources.") -f `
+                            $rn, (@($l.appScopeIds) -join '; '), (@($spec.dataSources) -join '; ')
+                Write-Warning ("  [DefenderXdrRoles] " + $__dsMsg)
+                if ($ctx -is [hashtable]) {
+                    if (-not ($ctx['__pimScopeWarnings'] -is [System.Collections.IList])) { $ctx['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string] }
+                    [void]$ctx['__pimScopeWarnings'].Add($__dsMsg)
+                }
+                $out.reassigned = $false
+                $out | Add-Member -NotePropertyName pimApplied -NotePropertyValue $false -Force
+                $out | Add-Member -NotePropertyName reason -NotePropertyValue $__dsMsg -Force
             }
             $out
         }
@@ -7833,7 +7968,10 @@ function New-PimEntraAppRoleProvider {
                         $pp = "$($a.principalId)"; if (-not $wantGids.ContainsKey($pp)) { continue }
                         $live.Add([pscustomobject]@{ principalId=$pp; resourceSpId="$($sp.id)"; appRoleId="$($a.appRoleId)"; assignmentId="$($a.id)" })
                     }
-                } catch { Write-Warning "  [EntraAppRole] appRoleAssignedTo list failed for '$($sp.displayName)' (engine SPN granted AppRoleAssignment.ReadWrite.All / app owner?): $($_.Exception.Message)" }
+                } catch {
+                    $ctx['__pimLiveIncomplete'] = "EntraAppRole: appRoleAssignedTo could not be read for '$($sp.displayName)'"   # 2026-09-20, see AdministrativeUnitMembers
+                    Write-Warning "  [EntraAppRole] appRoleAssignedTo list failed for '$($sp.displayName)' (engine SPN granted AppRoleAssignment.ReadWrite.All / app owner?): $($_.Exception.Message)"
+                }
             }
             $live.ToArray()
         }

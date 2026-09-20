@@ -374,23 +374,23 @@ function Select-PimTemplatePackPlanSubset {
 
 function Get-PimTemplateTenantGroupPattern {
     <#
-      The tenant's PimGroupPattern exactly as the Manager's Get-PimNamingConventions resolves it: the shipped defaults,
-      overlaid by config\PIM4EntraPS.NamingConventions.locked.ps1 (-LockedConfigPath; sourced with the global map saved
-      and restored), overlaid by the store's pim.Settings['NamingConventions'] (-Stored, parsed; an object or a map --
-      anything else is ignored, as ConvertTo-PimPlainHashtable does). No SQL here: the caller reads the setting.
+      The tenant's PimGroupPattern exactly as the Manager's Get-PimNamingConventions resolves it: the shipped defaults
+      (Get-PimShippedNamingConventions -- IN CODE), overlaid by the store's pim.Settings['NamingConventions'] (-Stored,
+      parsed; an object or a map -- anything else is ignored, as ConvertTo-PimPlainHashtable does). No SQL here: the
+      caller reads the setting.
+      🔴 2026-09-20: -LockedConfigPath is GONE. It sourced config\PIM4EntraPS.NamingConventions.locked.ps1, a
+      hand-synced duplicate of the very defaults this function already falls back to. The parameter is still ACCEPTED
+      and IGNORED so an older caller keeps working; nothing reads a config file for naming any more.
     #>
     param([AllowNull()][object]$Stored, [string]$LockedConfigPath)
     $pattern = 'PIM-{Role}-{Department}'
-    if ("$LockedConfigPath".Trim() -and (Test-Path -LiteralPath $LockedConfigPath)) {
-        $prevNc = $global:PIM_NamingConventions
+    if (Get-Command Get-PimShippedNamingConventions -ErrorAction SilentlyContinue) {
         try {
-            $global:PIM_NamingConventions = $null
-            . $LockedConfigPath
-            if ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains('PimGroupPattern')) {
-                $pattern = $global:PIM_NamingConventions['PimGroupPattern']
+            $shipped = Get-PimShippedNamingConventions
+            if ($shipped -is [System.Collections.IDictionary] -and $shipped.Contains('PimGroupPattern') -and "$($shipped['PimGroupPattern'])".Trim()) {
+                $pattern = "$($shipped['PimGroupPattern'])"
             }
-        } catch { Write-Warning "  failed to source $LockedConfigPath : $($_.Exception.Message)" }
-        finally { $global:PIM_NamingConventions = $prevNc }
+        } catch { }
     }
     if ($Stored -is [System.Collections.IDictionary]) { if ($Stored.Contains('PimGroupPattern')) { $pattern = $Stored['PimGroupPattern'] } }
     elseif ($Stored -is [System.Management.Automation.PSCustomObject]) { $p = $Stored.PSObject.Properties['PimGroupPattern']; if ($p) { $pattern = $p.Value } }

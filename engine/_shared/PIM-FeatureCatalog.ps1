@@ -118,7 +118,16 @@ $script:PimFeatureCatalog = @(
     [ordered]@{ key='connectors.workload'; label='Workload connectors: Intune + Defender XDR'; group='Integrations'; tier='advanced'; license='free'; scope='single'; defaultEnabled=$false; dependsOn=@('engine.reconcile'); proFeature=''; autoEnableWhenData=@('PIM-Assignments-Workloads','PIM-Assignments-Defender','PIM-Assignments-Intune'); description='Intune and Defender XDR role delegation (free). On automatically while their assignment rows exist; off = these providers no-op.' }
     [ordered]@{ key='connectors.apps';     label='Workload connectors: app-role, Azure DevOps, Dataverse, Business Central, Power Platform'; group='Integrations'; tier='advanced'; license='pro'; scope='single'; defaultEnabled=$false; dependsOn=@('engine.reconcile'); proFeature='WorkloadConnectors'; autoEnableWhenData=@('PIM-Assignments-AppRole','PIM-Assignments-Workloads'); description='Enterprise-app app-role and the workload connectors other than Intune / Defender XDR (Pro). On automatically while their assignment rows exist; off or unlicensed = these connectors no-op.' }
     [ordered]@{ key='connectors.powerbi';  label='Power BI integration';            group='Integrations'; tier='advanced'; license='pro'; scope='single'; defaultEnabled=$false; dependsOn=@('discovery.sweep');   proFeature='WorkloadConnectors'; description='Power BI workspace discovery + role reconcile. Off = Power BI is skipped by the discovery sweep.' }
-    [ordered]@{ key='connectors.exo';      label='Exchange Online integration';     group='Integrations'; tier='advanced'; license='pro'; scope='single'; defaultEnabled=$false; dependsOn=@('engine.reconcile');  proFeature='WorkloadConnectors'; description='Exchange Online role-group delegation (ManageAsApp). Off = EXO delegation is not applied.' }
+    # 🔴 REQ-Y (operator 2026-09-20: "fix req-y 3 items") -- 'connectors.exo' WAS REMOVED FROM THIS CATALOG.
+    # It declared "Exchange Online role-group delegation (ManageAsApp)" as a Pro feature, and v2 has NO code that
+    # applies it: no workloads\connectors\exchange-online.connector.json (the ten shipped manifests do not include
+    # one), no provider, and not one gate site anywhere outside this file. The only Exchange in v2 is mail SENDING
+    # (PIM-Notify.ps1, a per-mailbox Exchange RBAC assignment) -- a different thing entirely.
+    # 🪤 A catalog entry is not documentation, it is the product surface: this one rendered a Settings toggle that
+    # changed nothing, and -- being license='pro' -- told an unlicensed customer that a feature which does not exist
+    # "requires a Pro licence". Selling an absent feature is worse than not listing it. It is now a ◻ backlog item in
+    # docs\REQUIREMENTS.md; when EXO delegation is actually built, the entry comes back WITH its connector.
+    # The Pro feature NAME 'WorkloadConnectors' is unaffected -- connectors.apps and connectors.powerbi still use it.
 
     # ---- Governance / reporting (Pro, single tenant; operator 2026-09-19 "i agree to your proposals") ---------------
     # tier='core' + license='pro': not a kill switch (nothing to turn on), but inert without a Pro licence -- the engine,

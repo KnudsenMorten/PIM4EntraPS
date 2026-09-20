@@ -1104,10 +1104,15 @@ deployment is a supported choice) and no credentials lying around.
   discovery passes. Anything **currently running is shown at the top**; everything else shows **how often
   it runs, whether it's enabled, when it last ran and how that went, and when it's due next**. An
   administrator can switch a job on or off and change how often it runs.
-- **Choose the domain for admin accounts, per tenant.** ✅ 2026-09-19 **Settings → Admin account domain** is a
-  dropdown of your verified domains, with the tenant's default domain as the default. New admin accounts and the
-  New admin account wizard use it. In a managed-service setup, each managed tenant creates the administrators its
-  provider replicates at its *own* chosen domain, and every create wizard says whether what you create is replicated.
+- **Choose the domain for admin accounts, per tenant.** ✅ 2026-09-19, improved ✅ 2026-09-20
+  **Settings → Admin account domain** is a dropdown of your verified domains, with the tenant's default domain
+  as the default. New admin accounts and the New admin account wizard use it. In a managed-service setup, each
+  managed tenant creates the administrators its provider replicates at its *own* chosen domain, and every create
+  wizard says whether what you create is replicated. The domains are read from **two** places — the directory's
+  domain list and the tenant's organisation record — so the list is still offered where only one of the two
+  permissions has been granted, and the answer is remembered between page loads. The card shows **how many**
+  domains it found, so an empty list reads as something to fix rather than "this tenant has one domain"; when
+  it is empty it says **why**, names the permission to grant, and offers **Re-read**.
 - **Every menu item opens its own page.** ✅ 2026-09-19 *Manager access & roles*, *Emergency access
   (break-glass)* — the break-glass accounts and the emergency override together — and *Mail templates*
   are pages of their own under Audit & Settings rather than sections inside Settings. Menu badges
@@ -1523,23 +1528,41 @@ deployment is a supported choice) and no credentials lying around.
   outbound email off instantly (every alert, digest and notification becomes a no-op). You can also redirect
   every email to a single address (handy for testing) or restrict sending to an allowlist. These controls are
   honoured by every send path and every scheduled job.
-- **Editions: Core is free, and every advanced integration is currently free too.** ✅ 2026-06-17,
-  updated ✅ 2026-08-07 — choose the active edition per tenant. **Core** includes every essential PIM
-  capability at no cost, and **Pro** covers the advanced integrations (workload connectors, Power BI,
-  Exchange Online, MSP fan-out). **Licence enforcement is currently switched off, so nothing is restricted
-  by your edition today: every advanced capability is available to every install at no cost.** The edition
-  is recorded so the commercial basis is clear — design-partner customers receive the full Pro feature set
-  free — but it does not gate anything. A disabled capability is shown dimmed and labelled, never hidden, so everything
-  stays discoverable. Changing the edition or any feature switch is restricted to a senior administrator and
-  recorded in the audit trail.
+- **Editions: Core is free; Pro covers the advanced integrations and is enforced.** ✅ 2026-06-17,
+  updated ✅ 2026-09-20 — choose the active edition per tenant. **Core** includes every essential PIM
+  capability at no cost and is **never** gated. **Pro** covers the advanced integrations (workload
+  connectors, Power BI, coverage & gaps, revoking current delegations, access reviews, the second approver,
+  delegated administration, the tier-impact report and the evidence export) and the multi-tenant half
+  (managing and managed tenants). **Each Pro capability is allowed only while an installed Pro licence
+  covers that capability and this tenant** — otherwise it is refused, with the reason shown in plain words.
+  The edition you choose records the commercial basis; what is actually unlocked is decided by the installed
+  **licence**, not by the edition dropdown. A capability you are not licensed for is shown dimmed and
+  labelled, never hidden, so everything stays discoverable. Changing the edition or any feature switch is
+  restricted to a senior administrator and recorded in the audit trail.
+- **Register your licence from the portal — no database credentials needed.** ✅ 2026-09-20 — **Settings ▸
+  Licence** has a **Register a licence** control: pick the issued licence file or paste its contents. The
+  document is checked against our signing certificate **before** anything is stored, so a file that does not
+  verify is refused, nothing is written, and the page says so plainly. Previously the only documented route
+  was a command line needing your deployment's own database credentials — which most people do not have to
+  hand, and which read as though it needed *our* certificate. That command is still offered for whoever
+  prefers it, and the page now makes clear that the application id and certificate it asks for are **your**
+  deployment's. Registering is restricted to a senior administrator and both the acceptance and any refusal
+  are written to the audit trail.
+- **A capability that cannot work here cannot be switched on.** ✅ 2026-09-20 — the feature switches now know
+  the shape of your deployment. On a single-tenant install the **managed-tenant downlink** surface is locked
+  off with the reason shown, instead of offering a switch that would reveal a page with nothing behind it.
+  The refusal is enforced where the setting is saved, not only in the tick box, and a value stored before the
+  rule existed is ignored rather than acted on.
 - **Dependencies are surfaced.** ✅ 2026-06-17 — where one capability builds on another (for example Power BI
   needs the discovery sweep), the panel shows the prerequisite and warns if you enable a feature whose
   dependency isn't available yet.
-- **Pro is free by default — no nag screens, no blocked features, no phone-home.** ✅ 2026-06-17 — licence
-  enforcement ships **switched off**. With no licence file present at all, every Pro capability simply works
-  and the product reports itself as Core; nothing is degraded, interrupted or hidden while you evaluate it.
-  Turning enforcement on is a deliberate, explicit choice — it is never the default and it is never enabled
-  by an update.
+- **No nag screens, no phone-home — and Core is never touched.** ✅ 2026-06-17, updated ✅ 2026-09-20 —
+  licensing is verified **offline**, against a signed document you install; nothing calls home and nothing
+  is checked over the network. Without a licence the product reports itself as Core and **every essential
+  capability keeps working exactly as before** — reconcile, the delegation map, authoring, Entra ID roles,
+  PIM for Groups, administrative units, Azure RBAC, Intune, Defender XDR, policies, drift and the wizards.
+  What a missing licence changes is only the **Pro** capabilities listed above: they are refused, with the
+  reason shown, rather than failing quietly. There are no pop-ups, no countdowns and no interruptions.
 - **Your senior administrators can never be locked out by licensing.** ✅ 2026-06-17 — even with enforcement
   switched on and no valid licence, a super-administrator keeps full access. Licensing controls which optional
   capabilities are available; it can never become the reason you cannot get into your own environment and fix

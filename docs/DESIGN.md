@@ -764,7 +764,10 @@ default domain over REST.
 
 **Admin account domain (v2.4.377).**
 - **One setting:** each tenant's admin UPN domain is the naming key `AdminAccountUpnSuffix`, edited under **Settings → Admin account domain** (`GET` / `PUT /api/settings/admin-domain`).
-- **Saving:** SuperAdmin only, and audited as `settings.admin-domain.save`. Only blank or one of the tenant's verified domains is accepted. The domains are read live from Graph `/domains` and cached as the tenant-cache kind `tenant-domains`. When they cannot be read, only blank can be saved.
+- **Saving:** SuperAdmin only, and audited as `settings.admin-domain.save`. Only blank or one of the tenant's verified domains is accepted. When they cannot be read, only blank can be saved.
+- **Reading the list (2.4.382): TWO sources, one shape.** `Get-PimManagerTenantDomains` tries Graph `/v1.0/domains` (needs `Domain.Read.All`) and, if that yields nothing, `/v1.0/organization?$select=verifiedDomains` — the same list off the object the Manager already reads for the tenant name, so it works on `Organization.Read.All` / `Directory.Read.All` alone. Both shapes normalise through the pure `ConvertTo-PimTenantDomainList`: `/domains` carries the name in `id` plus an `isVerified` flag, `verifiedDomains` carries it in `name` with **no** `isVerified` — an absent flag must never be read as unverified, or the second source yields nothing. The result is cached as the tenant-cache kind `tenant-domains`; the endpoint also returns `reason`, which the card shows when the list is empty.
+- 🪤 **A tenant-cache kind is an ALLOW-LIST, and an unlisted kind fails silently.** `Set-`/`Get-PimTenantCacheEntry` validate `-Kind` against `$script:PimTenantCacheKinds`, and every caller wraps them in a best-effort `try/catch` because a cache is a convenience — so a kind missing from that list makes both calls throw into a swallowing handler. `'tenant-domains'` was never added when 2.4.377 shipped, so the domain cache was dead in both directions and nothing said so. **Register the kind in the same edit as the first cache call.**
+- 🪤 **The default domain is picked once, by a pure function.** `Get-PimTenantDefaultDomain` returns exactly one string for any input — the flagged default, else the `.onmicrosoft.com` initial domain, else the first entry, else `''`. It replaced an inline pick inside a `"$(…)"`, where an array interpolated as every domain run together.
 - **Engine resolver:** `Get-PimAdminUpnDomain` checks, in order: an explicit per-run pin, then the setting, then the tenant's default verified domain. It is used for the create, for resolving a bare user name to an account (the setting's domain is tried first, then the default), and for offboarding.
 - **The engine now reads your naming:** `Import-PimSettingsFromStore` flattens the stored `NamingConventions` record into top-level keys, as the Manager already did. Before this, every engine-side name used the shipped defaults. A key stored as its own settings row still wins over the same key inside the record.
 
@@ -7344,6 +7347,20 @@ value and returns the effective map.
   and a future default change still flows through to any flag the operator never
   explicitly touched.
 
+**Topology gating (2.4.382).** A catalog entry may declare `requires` — today only
+`downlink` → `msp-master`. 🪤 **`default = $false` is a starting value, not a gate:**
+`downlink` shipped OFF, and its checkbox was still live on a single-tenant install,
+so the tab could be switched on with nothing behind it. `Test-PimFeatureFlagTopologyAllowed`
+answers the question purely and **fails closed on an unknown requirement**.
+`Resolve-PimFeatureFlags -IsMspMaster` forces an unsatisfiable flag OFF, sets
+`available=$false` + `unavailableReason` on its `effective` entry and **warns**;
+`ConvertTo-PimFeatureFlagOverrides -IsMspMaster` then never lets it reach the store,
+so the refusal is server-side rather than a disabled tick box. The Manager supplies
+the topology from `Test-PimManagerIsMspMaster` on **both** the read and the save path.
+🔒 **`-IsMspMaster` is optional on purpose:** a caller that does not supply it gets the
+pre-2.4.382 behaviour unchanged. Guessing would hide a real MSP master's own Downlink
+tab the moment a scenario read failed — the opposite fault, and a worse one.
+
 **Wrappers + endpoints (`Open-PimManager.ps1`).** `Get-/Set-PimFeatureFlags` persist
 through the same `Get-/Set-PimManagerSetting` chokepoint. `GET /api/settings/feature-flags`
 returns `{flags, effective, catalog, warnings}`; `PUT` is **SuperAdmin-gated**,
@@ -7584,8 +7601,19 @@ snapshots per entity are kept.
 > tenant, so a Pro capability is inert in the engine and jobs (skipped with the licence reason) and the Manager answers
 > 403 with the same text; `Test-PimMspLicense` gates the publish and downlink job entries (exit 2 with the contact and
 > the register command). The legacy global switch `PIM_EnforceProLicense` stays off. `GET /api/license` and Settings ›
-> Licence are never locked. Licences are registered with `tools/setup/Set-PimLicense.ps1` (verify → store in
-> `pim.Settings['License']` → read back).
+> Licence are never locked. Licences are registered from **Settings › Licence › Register a licence**
+> (`PUT /api/license`, SuperAdmin, audited `settings.license.register` for both the acceptance and the refusal),
+> or with `tools/setup/Set-PimLicense.ps1` for whoever holds the store credentials. Both go through the same
+> `Set-PimLicense` (verify → store in `pim.Settings['License']` → read back), and the GUI route must never write
+> the setting directly: the signature check before the write is the whole reason a customer may do this themselves.
+> 🔴 **Why the GUI route exists (2.4.382):** the card's only instruction was the script, whose `-AdminAppId` /
+> `-AdminCertThumbprint` reach the deployment's SQL store — credentials most customers do not have, and which read
+> as though our certificate were needed. `GET /api/license` now also carries `canWrite`, so a Reader is never shown
+> a control that would 403.
+> 📌 **Not queued.** `pim.Queue` holds one-time **tenant-acting** operations the engine applies and verifies against
+> Graph (`Get-PimQueueActionCatalog`). A licence is a `pim.Settings` value: no tenant call, nothing to read back, so a
+> queue entry would be a permanently unverifiable action type. Staging it would need a settings-staging mechanism,
+> which does not exist.
 
 The framework lets a senior administrator decide, **per customer/tenant**, exactly
 which optional capabilities run — and gates them in the engine + jobs, not just the

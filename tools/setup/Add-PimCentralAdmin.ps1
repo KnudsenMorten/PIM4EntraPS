@@ -92,12 +92,13 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)
 # which is IMP-13's silent tick-loop, introduced by the very script meant to prevent it.
 # The custom file OVERRIDES the locked one and is loaded second, exactly as the locked file's own
 # header instructs.
-foreach ($__cfg in @('config\PIM4EntraPS.NamingConventions.locked.ps1',
-                     'config\PIM4EntraPS.NamingConventions.custom.ps1')) {
-    $__p = Join-Path $solRoot $__cfg
-    if (Test-Path -LiteralPath $__p) { . $__p }
-}
+# 2026-09-20: the shipped defaults are IN CODE (PIM-Naming.ps1 -> Get-PimShippedNamingConventions) and a
+# customer's values are in pim.Settings, seeded at store init. The locked config file is gone; the
+# .custom.ps1 is still honoured here because it is the operator's own per-environment override on a
+# deploy host (never read by the hosted Manager, which is SQL-only).
 . (Join-Path $solRoot 'engine\_shared\PIM-Naming.ps1')
+$__custom = Join-Path $solRoot 'config\PIM4EntraPS.NamingConventions.custom.ps1'
+if (Test-Path -LiteralPath $__custom) { . $__custom }
 
 # --- identity: the caller sets the standard PIM globals; we only VERIFY the token ------
 $tok = Get-PimRestToken -Resource 'https://database.windows.net'
