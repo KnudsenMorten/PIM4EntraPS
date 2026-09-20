@@ -240,3 +240,65 @@ function Compare-PimPolicyBaseline {
     $v.reason = "THIS IMAGE CHANGES THE POLICY BASELINE -- $($bits -join '; ')"
     return $v
 }
+
+function Get-PimPolicyBaselineFromArchive {
+    <#
+      BUG-231 -- the desired-state fingerprint of the version an IN-CLOUD update is about to roll,
+      read out of the source archive it builds from (`pim-src-<version>.tar.gz`).
+
+      🔴 WHY THIS HAS TO EXIST. `Update-PimContainers` can fingerprint a tree because it HAS one.
+      The in-cloud updater has only a tarball: it downloads the archive, hands it to ACR and never
+      extracts it. Without this it cannot answer "what will the new image WANT?", and so the BUG-55
+      desired-state gate -- the one that exists because 217 of 325 production group policies were
+      rewritten overnight -- could not run on the path that actually runs overnight.
+
+      Returns the SAME shape as Get-PimPolicyBaselineFingerprint (@{ hash; templates; count }), so
+      Compare-PimPolicyBaseline judges a tarball and a directory by one rule, not two.
+
+      🔒 NEVER THROWS, and an empty result means "could not tell", never "no templates". The caller
+      must treat hash='' as UNKNOWN (warn, proceed) rather than as a baseline that differs -- a
+      failed read must not look like a desired-state change and block a fleet at 03:00.
+    #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$ArchivePath)
+
+    $empty = @{ hash = ''; templates = @{}; count = 0 }
+    if (-not (Test-Path -LiteralPath $ArchivePath)) { return $empty }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("pim-bl-{0}" -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+    # 🪤 READ THE TAR WITH .NET, NOT THE `tar` BINARY. Two independent things bite the obvious
+    # implementation, and both were measured 2026-09-20:
+    #   1. GNU tar (the container image, powershell:7.4-ubuntu-22.04) needs `--wildcards` to match a
+    #      pattern; bsdtar (Windows, mgmt1) matches by default and REFUSES the flag. One code path
+    #      cannot satisfy both without probing.
+    #   2. PowerShell 7.3+ turns a NON-ZERO NATIVE EXIT into a TERMINATING error when
+    #      $ErrorActionPreference is 'Stop' ($PSNativeCommandUseErrorActionPreference). So the probe
+    #      for (1) THROWS, the catch returns empty, and a perfectly good archive fingerprints as
+    #      "could not tell" -- which reads as UNKNOWN and silently waves a roll through.
+    # System.Formats.Tar (.NET 7+; the image has .NET 8, mgmt1 .NET 10) has no exit codes, no
+    # pattern dialects and no child process. Entry names in a tar are ALWAYS forward-slashed,
+    # whatever the host, so one regex is correct everywhere.
+    try {
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $fs = $null; $gz = $null; $tr = $null
+        try {
+            $fs = [IO.File]::OpenRead($ArchivePath)
+            $gz = New-Object System.IO.Compression.GZipStream($fs, [System.IO.Compression.CompressionMode]::Decompress)
+            $tr = New-Object System.Formats.Tar.TarReader($gz)
+            while ($null -ne ($entry = $tr.GetNextEntry())) {
+                # Anchored on the solution's own templates dir, so an archive that also carries
+                # another solution's policy folder cannot contribute to PIM's fingerprint.
+                if ("$($entry.Name)" -notmatch 'SOLUTIONS/PIM4EntraPS/templates/policy/[^/]+\.policytemplate\.json$') { continue }
+                $leaf = [IO.Path]::GetFileName("$($entry.Name)")
+                if (-not $leaf) { continue }
+                $entry.ExtractToFile((Join-Path $tmp $leaf), $true)
+            }
+        } finally {
+            if ($tr) { $tr.Dispose() }; if ($gz) { $gz.Dispose() }; if ($fs) { $fs.Dispose() }
+        }
+        if (-not @(Get-ChildItem -LiteralPath $tmp -Filter '*.policytemplate.json' -File -ErrorAction SilentlyContinue).Count) { return $empty }
+        return (Get-PimPolicyBaselineFingerprint -TemplateDir $tmp)
+    } catch {
+        return $empty
+    } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

@@ -135,6 +135,18 @@ param(
     # Ring 2 and above are NEVER written automatically.
     [switch]$OverrideRingGate,
     [string]$Reason,
+    # 🔴 BUG-228 (measured 2026-09-20 rolling internal to 2.4.382). Update-PimContainers carries the
+    # BUG-55 desired-state gate: an image whose policy baseline differs from the one RECORDED on the
+    # app is refused, because within one tick it starts converging every managed scope onto the new
+    # baseline. Its refusal names -AcceptBaselineChange as the way past -- and this script, which the
+    # `code` step and the NIGHTLY IN-CLOUD UPDATER both go through, had no such parameter, so there
+    # was NO way to answer the gate from here. A blocked environment stays blocked forever.
+    # 🪤 The recording can also go stale on its own: on internal the tag still read the pre-2.4.380
+    # fingerprint while the store, the tree and the RUNNING image all agreed on the current one -- so
+    # the gate refused a roll that carried no desired-state change at all. Accepting then re-records
+    # the fingerprint, which is what makes the next roll honest again.
+    # 🔒 Forwarded, never defaulted: the whole point of the gate is that a human says yes.
+    [switch]$AcceptBaselineChange,
     # BUG-170: an environment with NO ring is refused (it predates the ring). When the SAME deploy run
     # installs the updater afterwards (Invoke-PimDeployAll with an explicit -UpdateRing), it passes that
     # ring here and the gate judges the roll by it -- ring 0/1 get every build, ring >= 2 only what
@@ -655,9 +667,27 @@ try {
             # BUG-128: $LASTEXITCODE is process-wide and reflects the last NATIVE command, not this
             # PowerShell script. Clear it first so a stale code from an earlier step cannot be read
             # back as "the build failed".
-            $global:LASTEXITCODE = 0
             $bldPool = @{}
             if ("$AcrAgentPool".Trim()) { $bldPool['AcrAgentPool'] = "$AcrAgentPool".Trim() }
+            # 🔴 BUG-227 (measured 2026-09-20 rolling internal to 2.4.382): -SubscriptionId reached the ring
+            # gate, the smoke, the rollback and the pin -- and NOT the build. `az acr build` therefore ran
+            # against whatever subscription was ambient and failed as
+            #     ERROR: The resource with name 'acrpimmfnpr' ... could not be found in subscription
+            #            'sg-visualstudio 2 (DEMO) (7e867037-...)'
+            # which names a missing REGISTRY and reads as "the registry is gone", when the registry was fine
+            # and the context was wrong -- the exact misreading Connect-PimTenantAz.ps1 exists to prevent.
+            # Both sides already had the parameter (Build-PimManagerImage scopes `az acr build` with it and
+            # deliberately does NOT mutate the machine context); only the call was missing it. Same shape as
+            # the AcrAgentPool gap above and as BUG-46: a value correct at the top of a script that never
+            # reached the call.
+            # 🪤 THE UNATTENDED PATH IS THE ONE THAT MATTERS: the nightly in-cloud updater goes through here
+            # with no command line and no one watching, so on any host whose ambient context is another
+            # subscription every 03:00 rebuild failed this way.
+            if ("$SubscriptionId".Trim()) { $bldPool['SubscriptionId'] = "$SubscriptionId".Trim() }
+            # 🔒 The clear stays IMMEDIATELY before the call on purpose (Test-PimUpdateContainers asserts
+            # the proximity): anything between them is another chance for a stale native exit code to be
+            # read back as "the build failed". Argument-building belongs above it, not between.
+            $global:LASTEXITCODE = 0
             & $builder -ImageTag $buildPlan.imageTag -Source $buildSource -AcrName $AcrName -ImageRepo $ImageRepo @bldPool
             if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Build-PimManagerImage.ps1 failed (exit $LASTEXITCODE)." }
             $built = $true
@@ -699,6 +729,9 @@ try {
             if ($PendingUpdateRing -ge 0) { $rollGate['PendingUpdateRing'] = $PendingUpdateRing; $rollGate['PendingUpdateSourceUrl'] = $PendingUpdateSourceUrl }
             if ("$SubscriptionId".Trim()) { $rollGate['SubscriptionId'] = "$SubscriptionId".Trim() }
             if ("$UpdateJobName".Trim()) { $rollGate['UpdateJobName'] = $UpdateJobName }
+            # BUG-228: the operator's answer to the BUG-55 desired-state gate, forwarded so the gate
+            # can be answered from the path the `code` step and the nightly updater actually use.
+            if ($AcceptBaselineChange) { $rollGate['AcceptBaselineChange'] = $true }
             if ($PSCmdlet.ShouldProcess("$($Apps -join ', ')", "roll -> $($buildPlan.imageTag)")) {
                 & $roller @rollGate -ImageTag $buildPlan.imageTag -SkipBuild -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps -TickJobName $TickJobName
                 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Update-PimContainers.ps1 (roll) failed (exit $LASTEXITCODE)." }

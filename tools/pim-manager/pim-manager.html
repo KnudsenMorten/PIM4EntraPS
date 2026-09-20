@@ -411,7 +411,19 @@
   #gridTab.active { display:grid; grid-template-columns: 240px minmax(0, 1fr); grid-template-rows: auto 1fr; align-items: start; }
   #gridTab > .tab-guide { grid-column: 1 / -1; grid-row: 1; margin:0 0 8px 0; }
   #gridTab > #gridList { grid-column: 1; grid-row: 2; position: sticky; top: 0; max-height: calc(100vh - 150px); }
-  #gridTab > #gridMain { grid-column: 2; grid-row: 2; min-width: 0; }
+  /* 🔴 THE GRID PANE MUST BE HEIGHT-CONSTRAINED OR IT DOES NOT SCROLL -- IT CLIPS.
+     `align-items:start` above (REQ-C, so the narrow rail does not stretch to the row height) applies
+     to EVERY item, so #gridMain also sized to its CONTENT instead of filling the `1fr` row. A box as
+     tall as its content has nothing to scroll: `overflow:auto` never engages, and the ancestor
+     `.tab-panel { overflow:hidden }` then cuts the table off at the viewport with NO scrollbar.
+     Measured 2026-09-20 on PIM-Definitions-Services: 285 rows rendered (renderGrid has no cap --
+     `p.rows.forEach` emits every one), ~24 reachable, the other ~261 unreachable and invisible.
+     🪤 Reading that as "the grid only loads the first page" sends you hunting a paging bug that does
+     not exist. The rows are in the DOM; the viewport is lying.
+     align-self:stretch opts this one item back into filling the row; min-height:0 lets it shrink
+     below its content (a grid/flex item's automatic minimum is its content size, which would
+     re-break it); max-height matches the rail so both panes scroll on the same line. */
+  #gridTab > #gridMain { grid-column: 2; grid-row: 2; min-width: 0; align-self: stretch; min-height: 0; max-height: calc(100vh - 150px); }
   #gridList .grid-search { display:block; box-sizing:border-box; width:calc(100% - 12px); margin:0 6px 6px 6px; padding:4px 8px; font-size:12px; border:1px solid #d0d7de; border-radius:5px; }
   #gridList .grid-nomatch { padding:6px 14px; color:#57606a; font-size:11.5px; font-style:italic; }
   /* Collapsed rail: thin strip with just the expand toggle -- gives the
@@ -2529,7 +2541,14 @@
       return;
     }
 
-    h += '<table class="set-table" style="max-width:1180px;"><tr>' +
+    // 🔴 WIDE SCREENS: this table was capped at 1180px while `.set-table` sets no width at all, so on a
+    // 2560px display it rendered as a cramped column with ~55% of the screen empty beside it -- ADMIN /
+    // AUTO-DISABLE wrapping onto two lines and every Actions cell wrapping its buttons, purely because
+    // the cap forced the columns narrower than their content wanted (operator 2026-09-20: "this page has
+    // become very cramped in layout on wide screens"). 1180px was a sensible cap when it was written and
+    // is simply too small now. width:100% makes the table USE the width it is given; the cap stays, far
+    // wider, so an ultrawide does not stretch rows to an unreadable line length.
+    h += '<table class="set-table" style="width:100%;max-width:1900px;"><tr>' +
          '<th>Admin</th><th>Type</th>' +
          // 🔴 71.24 (operator 2026-09-16: "in the admin overview i need to see which sponsor dept an
          // admin is linked to. this is considered the dept that sponsor him and define approval for
