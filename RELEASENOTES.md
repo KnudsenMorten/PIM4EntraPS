@@ -14,6 +14,28 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.383 — the admin-domain list actually lists, the unattended updater checks desired state, and two layout faults
+
+**The admin account domain is a real list again.** On a tenant with many verified domains the picker
+offered a single option whose name was every domain run together, and the page said it had found one
+domain. The domain list is now normalised whatever shape it arrives in, and a name that could not be a
+domain is discarded rather than offered.
+
+**The unattended update now refuses to change what the engine wants.** Updates that install themselves
+overnight rebuild the product from the approved source and roll it. If that release changes the
+activation-policy baseline, the engine starts applying the new policy to every managed scope within
+minutes. That check existed only for updates driven from an operator''s machine. It now runs where the
+update actually happens: the update stops, reports exactly what would change, and names the setting an
+operator sets on that environment to accept it. An update whose policy baseline is unchanged — the
+normal case — is unaffected, and a check that cannot run never blocks an update.
+
+**Records tables show all their rows again.** A table with hundreds of rows was cut off at the height of
+the window with no way to scroll. Every row was always loaded; the page simply clipped them.
+
+**Admin accounts fits the screen it is on.** The table was pinned to a fixed width, so on a wide display
+it sat in a narrow column — names, dates and buttons wrapping onto extra lines — with most of the screen
+empty beside it.
+
 ## v2.4.382 — the engine never replaces one assignment type with the other, and never plans from an incomplete read
 
 **A delegation may be both Eligible and Active, and PIM now leaves it that way.** Until this release, a

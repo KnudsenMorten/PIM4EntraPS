@@ -51,6 +51,13 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-SyncAutomateIT.ps1')   # the decision core (semver + pin gate)
 . (Join-Path $solRoot 'engine\_shared\PIM-AcrBuild.ps1')         # §55 build in the registry, over ARM
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateSource.ps1')     # §55 where this ring's source comes from
+# 🔴 BUG-231 -- LOAD-BEARING, AND ITS ABSENCE IS SILENT. The desired-state gate below calls
+# Get-PimPolicyBaselineFromArchive / Compare-PimPolicyBaseline behind a `Get-Command ... -ErrorAction
+# SilentlyContinue` guard. Without this line that guard is FALSE FOREVER: the gate reports
+# "SKIPPED -- the target version's policy templates could not be read" on every run and waves every
+# roll through, looking correct while protecting nothing. Caught by Test-PimCodeAudit's
+# INERT-CAPABILITY class, which exists because this exact shape shipped before.
+. (Join-Path $solRoot 'engine\_shared\PIM-PolicyBaseline.ps1')   # BUG-231 the desired-state gate's fingerprint + verdict
 # §56.4 -- the SCHEMA phase. Loaded HERE with the rest, not lazily next to the step that uses it:
 # a shared file this entry point never dot-sources makes every `Get-Command` guard around it false
 # forever, which is the audit's INERT-CAPABILITY class and reports "skipped" as though it were fine.
@@ -587,6 +594,66 @@ if (-not $schemaOk) {
     exit 1
 }
 
+# ---- 0b. THE DESIRED-STATE GATE (BUG-231) -----------------------------------------------------
+# 🔴 THE BUG-55 GATE EXISTED ONLY ON THE HOST-SIDE PATH, AND THAT IS THE PATH NOBODY RUNS ANY MORE.
+# `Update-PimContainers` refuses to roll an image whose policy baseline differs from the one recorded
+# on the app, because within one tick the engine starts converging EVERY managed scope onto the new
+# baseline -- that is how 217 of 325 production group policies were rewritten overnight. This job
+# rolls the same app, unattended, at 03:00, and had no such check at all.
+# WHAT IS COMPARED: the templates the TARGET version ships (read out of the source archive, the only
+# statement of that version's content this job ever holds) against the fingerprint recorded on the
+# Manager app. Same decision function as the host-side gate -- Compare-PimPolicyBaseline -- so there
+# is ONE rule, not a second copy that can drift from it.
+# 🔒 A CHANGED BASELINE REFUSES. The operator's way past is PIM_UPDATE_ACCEPT_BASELINE_CHANGE=1 on
+# THIS environment's update job -- deliberate, per environment, and named in the refusal. Same shape
+# as PIM_UPDATE_ALLOW_DOWNGRADE=1 above, for the same reason: an unattended process must not decide
+# on its own that a desired-state change is acceptable.
+# 🪤 UNKNOWN IS NOT CHANGED. No recording yet (first roll, or a resource older than the gate) and an
+# unreadable archive BOTH mean "cannot tell" -- they warn and PROCEED. Blocking on "cannot tell"
+# would freeze a fleet at 03:00 over a failed download, and would make the gate impossible to roll
+# out in the first place.
+$blAccept = ("$($env:PIM_UPDATE_ACCEPT_BASELINE_CHANGE)".Trim() -eq '1')
+try {
+    $tgtBaseline = $null
+    if ("$srcUrlTpl".Trim() -and (Get-Command Get-PimPolicyBaselineFromArchive -ErrorAction SilentlyContinue)) {
+        $blCtx = Join-Path ([IO.Path]::GetTempPath()) ("pim-bl-src-{0}.tar.gz" -f $plan.version)
+        try {
+            $blGot = Get-PimUpdateSourceArchive -Url (Resolve-PimUpdateSourceUrl -Template $srcUrlTpl -Version $plan.version) -OutFile $blCtx
+            if ($blGot.ok) { $tgtBaseline = Get-PimPolicyBaselineFromArchive -ArchivePath $blCtx }
+        } finally { Remove-Item -LiteralPath $blCtx -Force -ErrorAction SilentlyContinue }
+    }
+    if (-not $tgtBaseline -or -not "$($tgtBaseline.hash)".Trim()) {
+        Say '  desired-state check SKIPPED -- the target version''s policy templates could not be read (no source archive, or it could not be opened). Proceeding; the roll is not gated on a check that could not run.' 'Yellow'
+    } else {
+        $recBl = ''
+        try {
+            $appObj = Invoke-PimArm -Method GET -ApiVersion $script:PimAcaApi -Path "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/containerApps/$managerApp"
+            if ($appObj -and $appObj.tags) { $recBl = "$($appObj.tags.'pim-policy-baseline')".Trim() }
+            if ($recBl -eq 'None') { $recBl = '' }
+        } catch { $recBl = '' }
+        $blV = Compare-PimPolicyBaseline -Current $tgtBaseline -RecordedHash $recBl -RecordedTemplates @{} -Accept:$blAccept
+        Say ("desired-state check: {0} policy template(s), fingerprint {1}" -f $tgtBaseline.count, $tgtBaseline.hash) 'DarkGray'
+        if ($blV.unknown) {
+            Say "  $($blV.reason) -- rolling and RECORDING it, so the next run can answer this." 'Yellow'
+        } elseif ($blV.changed -and -not $blV.allowed) {
+            Say "NOT ROLLING: $($blV.reason)" 'Red'
+            Say '  This image changes what the engine WANTS, not just how it works: within one tick it would start' 'Red'
+            Say '  converging every managed scope onto the new baseline (BUG-55 -- 217 of 325 production group' 'Red'
+            Say '  policies were rewritten overnight).' 'Red'
+            Say "  If that is the point of this release, set PIM_UPDATE_ACCEPT_BASELINE_CHANGE=1 on $selfJob and re-run." 'Yellow'
+            Send-PimUpdateOutcome -Action 'none' -Outcome 'failed' -ToVersion "$($plan.version)" `
+                -ErrorText "refused: policy baseline would change ($($blV.reason)); set PIM_UPDATE_ACCEPT_BASELINE_CHANGE=1 to accept"
+            exit 1
+        } elseif ($blV.changed) {
+            Say "  $($blV.reason) -- PROCEEDING because PIM_UPDATE_ACCEPT_BASELINE_CHANGE=1. This roll WILL change desired state." 'Yellow'
+        } else {
+            Say "  $($blV.reason)" 'Green'
+        }
+    }
+} catch {
+    Say "  desired-state check could not run ($($_.Exception.Message)) -- proceeding; a check that failed is not a refusal." 'Yellow'
+}
+
 # ---- 1. the Manager ---------------------------------------------------------------------------
 Say "rolling $managerApp -> $targetImg"
 $roll = Invoke-PimAcaRoll -SubscriptionId $sub -ResourceGroup $rg -Name $managerApp -Image $targetImg `
@@ -612,6 +679,59 @@ if (-not $roll.rolled -and $roll.reason -notmatch 'already on this image') {
     Send-PimUpdateOutcome -Action 'rolled' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText "the Manager did not roll: $($roll.reason)"
     exit 1
 }
+
+# ---- 1b. RECORD THE DESIRED-STATE BASELINE THIS ROLL PUT IN PLACE (BUG-229) -------------------
+# 🔴 THE SELF-UPDATE PATH NEVER TOUCHED THE BUG-55 RECORDING, AND THAT IS WHY THE HOST-SIDE GATE
+# JAMS SHUT. `Update-PimContainers.ps1` writes the `pim-policy-baseline` tag after every verified
+# roll; this job rolls the very same app through ARM and wrote nothing -- so on every environment
+# that self-updates, the IMAGE moved while the TAG stayed frozen at whatever the last host-side
+# roll happened to record.
+# Measured 2026-09-20: internal ran 2.4.381 (templates `10b3bf2031bacf0c`) with the tag still at
+# `856bb5f1b9b009ec`; EFIF and RIDE both at `ff26419374c19ebb`. None of those three values matches
+# ANY released version -- the fingerprint is taken from the working tree at roll time, so a roll
+# from a mid-edit tree records a number no release ever had.
+# The consequence is not cosmetic: the host-side nightly then refuses every roll for the rest of
+# time. Measured 2026-09-13 on internal -- "recorded ff26419374c19ebb -> current aadd78a1d9338aec",
+# deployed=False -- and until BUG-228 there was no parameter with which to tell it to accept.
+# ⚠️ A gate that can never go green is a gate people learn to pass reflexively. That is how BUG-55
+# happened in the first place, so leaving the recording to rot is itself a safety regression.
+#
+# WHAT IS RECORDED: the fingerprint the NEWLY ROLLED Manager seeded into its own store
+# (`pim.Settings['PolicyTemplates'].fingerprint`) -- i.e. what this environment's desired state now
+# IS, which is precisely what the gate compares a tree against. Read AFTER the health check,
+# because the Manager writes it while it boots; retried briefly for the same reason.
+# 🔒 BEST EFFORT, ALWAYS. A recording that fails must never fail an update that already rolled and
+# is healthy -- it degrades to "unknown" on the next host-side roll, which WARNS rather than blocks.
+# 📌 STILL OPEN (operator decision): this records, it does not GATE. The BUG-55 refusal exists only
+# on the host-side path, so an unattended 03:00 self-update still rolls a baseline change with no
+# check at all. Gating here would block the fleet unattended, which is not a call to make silently.
+try {
+    $blFp = ''
+    if ("$csUpd".Trim() -and (Get-Command Invoke-PimSqlQuery -ErrorAction SilentlyContinue)) {
+        foreach ($attempt in 1..6) {
+            $raw = ''
+            try {
+                $r = @(Invoke-PimSqlQuery -ConnectionString $csUpd -Sql "SELECT CAST(ValueJson AS nvarchar(max)) AS v FROM pim.Settings WHERE [Name]='PolicyTemplates'")
+                if ($r.Count) { $raw = "$($r[0].v)" }
+            } catch { $raw = '' }
+            if ("$raw".Trim()) { try { $blFp = "$(($raw | ConvertFrom-Json).fingerprint)".Trim() } catch { $blFp = '' } }
+            if ($blFp) { break }
+            Start-Sleep -Seconds 10
+        }
+    }
+    if (-not $blFp) {
+        Say '  policy baseline NOT recorded: no template fingerprint in the store yet (the next host-side roll reports it as UNKNOWN, which warns rather than blocks).' 'Yellow'
+    } else {
+        $blScope = "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/containerApps/$managerApp"
+        # 🪤 Merge, never replace: a PATCH that sets `tags` wholesale would silently delete the
+        # customer's own cost-centre/owner tags as a side effect of an update. This is the same
+        # Microsoft.Resources/tags Merge operation `az tag update --operation Merge` performs.
+        [void](Invoke-PimArm -Method PATCH -ApiVersion '2021-04-01' `
+                 -Path "$blScope/providers/Microsoft.Resources/tags/default" `
+                 -Body @{ operation = 'Merge'; properties = @{ tags = @{ 'pim-policy-baseline' = $blFp } } })
+        Say "  recorded policy baseline $blFp on $managerApp" 'DarkGray'
+    }
+} catch { Say "  could not record the policy baseline (update unaffected): $($_.Exception.Message)" 'Yellow' }
 
 # 🔴 A COMPONENT LEFT ON THE OLD BUILD IS A FAILED UPDATE, NOT A WARNING.
 # Every job below used to swallow its own failure and let the run exit 0, so an environment could be

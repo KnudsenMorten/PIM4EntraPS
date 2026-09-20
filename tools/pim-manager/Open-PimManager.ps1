@@ -4335,10 +4335,28 @@ function ConvertTo-PimTenantDomainList {
     param([object[]]$Rows, [string]$NameProperty = 'id')
     $seen = @{}
     $out  = @()
-    foreach ($r in @($Rows)) {
+    # 🪤 FLATTEN FIRST. A caller can hand us a row that is ITSELF a collection -- `/organization`
+    # returns verifiedDomains as an array per organization, and that array does not always arrive
+    # unrolled. PowerShell then MEMBER-ENUMERATES it: `$r.name` on an array yields EVERY name, and
+    # "$(...)" joins them with spaces. The result is ONE entry called
+    # "a.com b.com c.com ..." -- which is exactly what shipped in 2.4.382: the Settings page read
+    # "1 verified domain read live from Entra ID" and offered the whole tenant as a single option.
+    # Flattening one level costs nothing and makes the shape of the input irrelevant.
+    $flat = New-Object System.Collections.Generic.List[object]
+    foreach ($r0 in @($Rows)) {
+        if ($null -eq $r0) { continue }
+        if ($r0 -is [System.Collections.IEnumerable] -and $r0 -isnot [string] -and $r0 -isnot [System.Collections.IDictionary]) {
+            foreach ($inner in $r0) { if ($null -ne $inner) { [void]$flat.Add($inner) } }
+        } else { [void]$flat.Add($r0) }
+    }
+    foreach ($r in $flat) {
         if (-not $r) { continue }
         $n = "$($r.$NameProperty)".Trim().TrimStart('@').ToLowerInvariant()
         if (-not $n) { continue }
+        # 🔒 A DNS name can never contain whitespace, so whitespace here is PROOF that a collection
+        # collapsed into one string rather than a real domain. Drop it: a bad entry that is silently
+        # kept becomes a selectable option that can never resolve, and (worse) the tenant's only one.
+        if ($n -match '\s') { continue }
         # 'isVerified' exists on /domains only. Absent = verifiedDomains = verified. Never treat a
         # missing property as unverified -- that would silently empty the list for the /organization source.
         $hasVerified = if ($r -is [System.Collections.IDictionary]) { $r.Contains('isVerified') }
