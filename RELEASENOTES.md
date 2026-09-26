@@ -14,6 +14,12 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.449 — Review mails reach reviewers who sign in with an admin account
+
+- **A reviewer who signs in with an admin account now gets the review mail.** Admin accounts have no mailbox, so the
+  review and reminder mails go where PIM sends all mail about that account: its forward address, or its department's
+  owners.
+
 ## v2.4.448 — Department access reviews run in PIM
 
 - **A department's review now covers its people, not a list of groups.** Each round lists every admin account of the

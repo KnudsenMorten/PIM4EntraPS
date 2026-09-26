@@ -236,7 +236,17 @@ function Invoke-PimAccessReviewCycleJob {
     $owners = @{}; foreach ($r in $deptRows) { $owners[$r.Department.ToLowerInvariant()] = @("$($r.Owners)" -split '[,;\s]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
     $log = New-Object System.Collections.Generic.List[string]; $errors = New-Object System.Collections.Generic.List[string]; $changed = $false
     $portal = "$(if (Get-Command Resolve-PimManagerMailUrl -ErrorAction SilentlyContinue) { try { Resolve-PimManagerMailUrl } catch { '' } })"
-    $mail = { param($to, $title, $body)
+    # A reviewer who is an ADMIN ACCOUNT has no mailbox of its own: its review mail goes where PIM sends all mail about that
+    # account (Get-PimAdminMailRecipientPlan: MailForwardAddress, else its department's owners). Anyone else: their own address.
+    $deptOwnerStr = @{}; foreach ($k in @($owners.Keys)) { $deptOwnerStr[$k] = (@($owners[$k]) -join '|') }
+    $mailTargets = { param($reviewer)
+        $row = @($admins | Where-Object { "$($_.UserName)$($_.Username)".Trim().ToLowerInvariant() -eq "$reviewer".Trim().ToLowerInvariant() -or "$($_.UserPrincipalName)".Trim().ToLowerInvariant() -eq "$reviewer".Trim().ToLowerInvariant() })[0]
+        if ($row -and (Get-Command Get-PimAdminMailRecipientPlan -ErrorAction SilentlyContinue)) {
+            try { $pl = Get-PimAdminMailRecipientPlan -Row $row -DepartmentOwners $deptOwnerStr; $rc = @(@($pl.recipients) | Where-Object { "$_".Trim() }); if ($rc.Count) { return $rc } } catch { }
+        }
+        return @("$reviewer") }
+    $mail = { param($reviewer, $title, $body) foreach ($to in @(& $mailTargets $reviewer)) { & $mailOne $to $title $body } }
+    $mailOne = { param($to, $title, $body)
         if ($WhatIf -or -not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { return }
         $tok = @{ AlertTitle = $title; AlertEvent = 'owner-review'; AlertDetail = $body; PortalTab = 'owner'; TenantName = "$($global:PIM_TenantName)"; Instance = 'scheduler'; WhenUtc = $NowUtc.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
         try { [void](Send-PimNotifyMail -Type 'alert-notice' -Tokens $tok -Recipient $to) } catch { $errors.Add("mail to $to failed: $($_.Exception.Message)") } }
