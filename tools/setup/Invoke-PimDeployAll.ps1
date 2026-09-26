@@ -2797,7 +2797,10 @@ if ($hosted -and -not $WhatIfPreference -and $summary.status -eq 'success') {
     Write-Host '      the full set of rows for every entity it imports. Drop -WhatIf to apply.' -ForegroundColor DarkGray
     # 2026-09-26 -- KEEPING IT CURRENT IS ONE COMMAND. Save the parameters this successful run used (never a secret), so
     # Update-PimCommunity.ps1 can pull the latest release and re-run exactly this deploy.
-    if ($Apply -and "$TenantId".Trim() -and "$ResourceGroup".Trim()) {
+    # 🪤 Never from a TEST: -StepRunner is the offline suites' seam (mocked steps). The first suite run after this block
+    # shipped wrote 'test-tenant-rg-test.json' into the operator's real profile folder, and the updater then refused to
+    # pick between two profiles. A run with an injected step runner is not an installation.
+    if ($Apply -and "$TenantId".Trim() -and "$ResourceGroup".Trim() -and -not $script:PimDeployBound.ContainsKey('StepRunner')) {
         try {
             . (Join-Path $PSScriptRoot '_PimDeployProfile.ps1')
             $verFile = Join-Path $solRoot 'VERSION'

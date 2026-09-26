@@ -154,10 +154,25 @@ $script:PimFailureRules = @(
     # role service, which answers 404 SubjectNotFound. Measured: a DIRECT role on a user created seconds earlier in the
     # run -- UNCLASSIFIED, and the whole run recorded FAILED; the next run applied it. Replication lag, not data.
     @{ code = 'PRINCIPAL-NOT-REPLICATED-YET'
-       match = { param($m, $row) $m -match '(?i)SubjectNotFound|The subject is not found' }
+       # 2026-09-26 (§78 live, ig798): the same lag also answers a plain 404 ResourceNotFound on the schedule-request POST
+       # ("POST .../roleEligibilityScheduleRequests -> HTTP 404 : ResourceNotFound"); the next run applied it. Only the
+       # role SCHEDULE-REQUEST endpoints -- a ResourceNotFound anywhere else is not this.
+       match = { param($m, $row) $m -match '(?i)SubjectNotFound|The subject is not found|role(Eligibility|Assignment)ScheduleRequests\S*\s*->\s*HTTP 404\b.{0,20}ResourceNotFound' }
        title = 'The account or group was created moments ago and PIM cannot see it yet'
        cause = 'Entra replicates a new user or group to the PIM service within minutes. An assignment made in the same run that created the principal is refused with "SubjectNotFound" until then.'
        remedy = 'Nothing to do: the next run applies it. If it persists for hours, check that the account or group in the row still exists.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
+    # 2026-09-26 (§78 MSP live, RIDE): a PIM-for-Groups policy rule PATCH on a group the engine created minutes earlier
+    # answered 400 "InvalidPolicyRule -- The policy rule is invalid." and the pull recorded FAILED; the next run applied it.
+    # Recorded three times before (§68.4, RIDE 2026-09-15, EFIF 2.4.392) and it converged every time. A still-failing item
+    # hours later is escalated back to a real failure by the waiting-window rule, so a genuinely invalid rule still surfaces.
+    @{ code = 'GROUP-POLICY-NOT-READY'
+       match = { param($m, $row) $m -match '(?i)GroupsPolicies\b.*rule PATCH.*InvalidPolicyRule -- The policy rule is invalid' }
+       title = 'The new group''s PIM policy is not ready for this rule yet'
+       cause = 'PIM creates the policy of a new group in the background. For a few minutes after the group is created, a single rule update can be refused as "InvalidPolicyRule" even though the value is valid; the next run applies it.'
+       remedy = 'Nothing to do if the group is new: the next run applies the rule. If it keeps failing for hours, the rule value itself is refused -- compare the rule in the message with the template.'
        retryable = $true; severity = 'transient'
        fixes = @() }
 

@@ -34,6 +34,7 @@ function ConvertTo-PimDeployProfile {
         $v = $Bound[$k]
         if ("$k" -match '(?i)secret|password|pwd') { $omitted += "$k"; continue }
         if ($v -is [securestring]) { $omitted += "$k"; continue }
+        if ($v -is [scriptblock]) { continue }   # a code hook (-StepRunner) is never a saved parameter
         if ($v -is [System.Management.Automation.SwitchParameter]) { $v = [bool]$v.IsPresent }
         $vals = @($v)
         if (@($vals | Where-Object { "$_" -match '(?i)(password|pwd)\s*=' }).Count) { $omitted += "$k"; continue }
