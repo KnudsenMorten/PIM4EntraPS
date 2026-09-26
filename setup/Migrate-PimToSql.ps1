@@ -440,6 +440,36 @@ foreach ($base in $byBase.Keys) {
     }
     $plans[$base] = $plan
 }
+# 🔒 THE IMPORTER NEVER FLUSHES A SUPER ADMIN (operator 2026-09-21: "the importer can never flush super admins ...
+# otherwise noone can login"). The Manager SuperAdmins and the break-glass accounts keep the row the store holds:
+# a file row for one of them never overwrites it (whatever -OnKeyConflict says), and -ReplaceExistingEntityRows
+# carries the stored row into the full set instead of deleting it. Not knowing who they are is not "nobody":
+# a store whose ManagerAccess cannot be read refuses the admins entity (fail closed).
+$script:PimMigrateProtectedAdmins = @()
+# (A store holding no admin rows has nothing an import could overwrite or remove -- a first import needs no read.)
+if ($plans.Contains('Account-Definitions-Admins') -and $plans['Account-Definitions-Admins'].existing -gt 0) {
+    $p = $plans['Account-Definitions-Admins']
+    $prot = $null
+    try {
+        $prot = Get-PimImportProtectedAdmins -ManagerAccess (Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'ManagerAccess') `
+                                             -BreakGlass (Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'BreakGlassAccounts')
+    } catch {
+        throw ("Migrate-PimToSql: could not read who the Manager SuperAdmins / break-glass accounts are ({0}) -- REFUSING to import admins, so an import can never remove the accounts that sign in. Nothing was written." -f $_.Exception.Message)
+    }
+    $isProt = { param($k) $prot.ContainsKey("$k".Trim().ToLowerInvariant()) }
+    $keptProt = @($p.update | Where-Object { & $isProt $_.key })
+    if ($keptProt.Count) { $p.update = [System.Collections.Generic.List[object]]@($p.update | Where-Object { -not (& $isProt $_.key) }) }
+    $storedProt = @()
+    if ($ReplaceExistingEntityRows) {
+        $storedProt = @(Read-PimMigrateStoreRows -ConnectionString $ConnectionString -Entity 'Account-Definitions-Admins' | Where-Object { & $isProt $_.key })
+        $fileRows = @($p.rows | Where-Object { -not (& $isProt (Get-PimStoreRowKey -Base 'Account-Definitions-Admins' -Row $_)) })
+        $p.rows = @($fileRows) + @($storedProt | ForEach-Object { $_.row })
+    }
+    $script:PimMigrateProtectedAdmins = @(@($keptProt | ForEach-Object { $_.key }) + @($storedProt | ForEach-Object { $_.key }) | Sort-Object -Unique)
+    if ($script:PimMigrateProtectedAdmins.Count) {
+        Write-Host ("  [migrate] Account-Definitions-Admins: {0} super admin / break-glass row(s) KEPT as the store holds them (never overwritten or removed by an import): {1}" -f $script:PimMigrateProtectedAdmins.Count, ($script:PimMigrateProtectedAdmins -join ', ')) -ForegroundColor Yellow
+    }
+}
 $script:PimMigrateCollisions = $collisions.ToArray()
 if ($collisions.Count) {
     Write-Host ''

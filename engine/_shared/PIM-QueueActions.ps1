@@ -32,9 +32,10 @@ if (-not (Get-Command Get-PimBreakGlassAccountStatus -ErrorAction SilentlyContin
 # The action catalog. One entry per thing the Manager can ask the engine to do.
 #
 # 🔑 `verifiable` IS A CONTRACT, NOT A CONVENIENCE. §65.8 says "applied" means re-read and
-# confirmed -- but `revokeSignInSessions` has no post-state to read: Graph exposes no "are this
-# user's sessions revoked?" query. Pretending otherwise would mean either (a) reporting an
-# unverified action as verified, or (b) retrying it forever because verification never passes.
+# confirmed. (session-revoke was once declared unverifiable here; BUG-252 found its post-state:
+# the user's signInSessionsValidFromDateTime.) For an action that truly has none, pretending otherwise
+# would mean either (a) reporting an unverified action as verified, or (b) retrying it forever because
+# verification never passes.
 # Both are worse than saying so. An unverifiable action is recorded `applied` with
 # verification='none', and that fact is RETAINED on the entry so a reader can see which actions
 # carry proof and which carry only an API acknowledgement.
@@ -54,12 +55,20 @@ function Get-PimQueueActionCatalog {
            description='Replace a Temporary Access Pass (delivered by mail, never shown in the GUI)'
            verifiable=$true }
         @{ type='session-revoke'
-           description='Revoke all sign-in sessions for an account'
-           # No Graph read exists to confirm this. See the note above -- declared, not pretended.
-           verifiable=$false }
+           description='Revoke all sign-in sessions for an account (verified by the user''s signInSessionsValidFromDateTime)'
+           # BUG-252: verifiable after all -- the revoke moves signInSessionsValidFromDateTime to its own moment.
+           verifiable=$true }
         # BUG-203 (§33.28): the Manager QUEUES a B2B guest invitation (New-PimGuestInviteAction); the engine sends it.
         @{ type='guest-invite'
            description='Invite an external person as a B2B guest (POST /invitations; verified by the invited user object)'
+           verifiable=$true }
+        # SEC-79-1 (operator 2026-09-25, "through the engine queue"): the Manager is READ-ONLY (§65.4); access-review
+        # writes it used to make itself are queued and carried out by the engine identity (AccessReview.ReadWrite.All).
+        @{ type='access-review-decision'
+           description='Record an access-review decision (Approve / Deny / DontKnow, with the justification; verified by reading the decision back)'
+           verifiable=$true }
+        @{ type='access-review-reviewers'
+           description='Set who reviews an access-review definition (verified by reading the definition''s reviewers back)'
            verifiable=$true }
     ) | ForEach-Object { [pscustomobject]$_ }
 }
@@ -280,6 +289,33 @@ function Get-PimQueueActionBreakGlassRefusal {
             }
         }
     }
+
+    # 🔴 R25-30 -- THE OTHER DIRECTION. The list names accounts by OBJECT ID (allowed, PIM-BreakGlassAccounts.ps1), the
+    # payload by UPN only -- the downlink session revoke sends '<key>@<dom>' and nothing else. Nothing above compares a
+    # UPN with an id, so a break-glass account listed by id was revoked. Resolve the UPN's id before acting; a UPN that
+    # is not a user (404) cannot be a break-glass account, any other failure cannot be proven safe.
+    $listHasId = @($ids | Where-Object { $_ -match $guidRx }).Count -gt 0
+    $haveId    = [bool]$objId -or @($cand | Where-Object { $_ -match $guidRx }).Count -gt 0   # an id the payload carries was compared above
+    $upnCand   = @($cand | Where-Object { $_ -match '^[^\s()@]+@[^\s()@]+$' }) | Select-Object -First 1
+    if ($listHasId -and -not $haveId -and $upnCand) {
+        if (-not $Graph) { return (& $refuse $false "the target '$upnCand' carries no object id and there is no Graph client to resolve it against the break-glass list. It will be retried.") }
+        $u = $null; $notUser = $false
+        try { $u = & $Graph 'GET' ("/users/$([uri]::EscapeDataString($upnCand))`?`$select=id,userPrincipalName") $null }
+        catch {
+            if ("$($_.Exception.Message)" -match '(?i)Request_ResourceNotFound|ResourceNotFound|\b404\b|does not exist|not\s*found') { $notUser = $true }
+            else { return (& $refuse $false "the target '$upnCand' could not be resolved to an object id to check it against the break-glass list ($($_.Exception.Message)). It will be retried.") }
+        }
+        if (-not $notUser) {
+            $rid = "$($u.id)".Trim().ToLowerInvariant()
+            if (-not $rid) {
+                if ($null -eq $u) { $notUser = $true }
+                else { return (& $refuse $false "the target '$upnCand' resolved without an object id, so it cannot be checked against the break-glass list. It will be retried.") }
+            } elseif ($ids -contains $rid) {
+                Write-Warning "  [queue] $type REFUSED: '$upnCand' is the BREAK-GLASS account '$rid'."
+                return (& $refuse $true "'$upnCand' ($rid) is a BREAK-GLASS account (pim.Settings BreakGlassAccounts). Break-glass accounts are never revoked by PIM -- remove it from the break-glass list first if this is really intended, then queue it again.")
+            }
+        }
+    }
     return $null
 }
 
@@ -371,6 +407,22 @@ function Invoke-PimQueueAction {
                 # The detail names the path taken, so the queue shows WHICH kind of assignment it was.
                 $pid_ = "$($p.principalId)".Trim(); $rid = "$($p.roleDefinitionId)".Trim()
                 $wantScope = "$($p.directoryScopeId)".Trim()
+                # BUG-254 (§78 live GUI, 2026-09-24): the Revoke screen lists a CACHED snapshot, so it can offer an assignment
+                # whose principal has since been DELETED. The removal then 404s, the legacy path's roleAssignments query 404s
+                # on the missing principal ("Resource '<id>' does not exist"), and the entry FAILED after three attempts. A
+                # principal that no longer exists holds no role: that is the revoke's goal, reached -- verified, not failed.
+                # Fail CLOSED: the 404 alone is not proof (a principal created minutes ago can 404 on replication lag, BUG-253),
+                # so the directory object itself must answer 404 too before "gone" is believed.
+                $principalGone = {
+                    param($m)
+                    if (-not ("$m" -match 'Request_ResourceNotFound' -and "$m" -match [regex]::Escape($pid_))) { return $false }
+                    try { & $graph 'GET' ("/directoryObjects/$pid_`?`$select=id") $null | Out-Null; return $false }
+                    catch { return ("$($_.Exception.Message)" -match 'Request_ResourceNotFound|HTTP 404') }
+                }
+                $readAssignments = {
+                    try { return @(@(& $graph 'GET' ("/roleManagement/directory/roleAssignments?`$filter=principalId eq '$pid_' and roleDefinitionId eq '$rid'") $null $true) | Where-Object { $_ }) }
+                    catch { if (& $principalGone $_.Exception.Message) { return 'PRINCIPAL-GONE' }; throw }
+                }
                 $inst = @(@(& $graph 'GET' ("/roleManagement/directory/roleAssignmentScheduleInstances?`$filter=principalId eq '$pid_' and roleDefinitionId eq '$rid'") $null $true) | Where-Object { $_ })
                 if ($wantScope) { $inst = @($inst | Where-Object { "$($_.directoryScopeId)" -eq $wantScope }) }
                 $viaGroup = @($inst | Where-Object { "$($_.memberType)" -in @('Inherited','Group') })
@@ -395,14 +447,20 @@ function Invoke-PimQueueAction {
                     if ($em -notmatch 'RoleAssignmentDoesNotExist|HTTP 404') { throw }
                     # PERMANENT (legacy) -- not a PIM schedule. Delete the assignment object itself, at the same scope only.
                     $path = 'legacy'
-                    $legacy = @(@(& $graph 'GET' ("/roleManagement/directory/roleAssignments?`$filter=principalId eq '$pid_' and roleDefinitionId eq '$rid'") $null $true) | Where-Object { $_ -and (-not "$($_.directoryScopeId)" -or "$($_.directoryScopeId)" -eq $scope) })
+                    $la0 = & $readAssignments
+                    if ("$la0" -eq 'PRINCIPAL-GONE') {
+                        return [pscustomobject]@{ ok=$true; verification='verified'; detail="the principal $pid_ no longer exists in the directory, so it holds no role -- nothing left to revoke" }
+                    }
+                    $legacy = @(@($la0) | Where-Object { $_ -and (-not "$($_.directoryScopeId)" -or "$($_.directoryScopeId)" -eq $scope) })
                     if (-not $legacy.Count) {
                         return [pscustomobject]@{ ok=$true; verification='verified'; detail="assignment is gone (neither a PIM schedule nor a permanent assignment exists at scope $scope)" }
                     }
                     foreach ($la in $legacy) { & $graph 'DELETE' ("/roleManagement/directory/roleAssignments/$($la.id)") $null | Out-Null }
                 }
-                $still = @(@(& $graph 'GET' ("/roleManagement/directory/roleAssignments?`$filter=principalId eq '$pid_' and roleDefinitionId eq '$rid'") $null $true) | Where-Object { $_ -and (-not "$($_.directoryScopeId)" -or "$($_.directoryScopeId)" -eq $scope) })
                 $how = if ($path -eq 'legacy') { 'PERMANENT (legacy, not PIM-managed) assignment deleted' } else { 'PIM-managed assignment removed (adminRemove)' }
+                $st0 = & $readAssignments
+                if ("$st0" -eq 'PRINCIPAL-GONE') { return [pscustomobject]@{ ok=$true; verification='verified'; detail="$how -- and the principal no longer exists, so it holds no role" } }
+                $still = @(@($st0) | Where-Object { $_ -and (-not "$($_.directoryScopeId)" -or "$($_.directoryScopeId)" -eq $scope) })
                 if ($null -eq $still) { return [pscustomobject]@{ ok=$true; verification='indeterminate'; detail="$how; the read-back could not be performed" } }
                 if (@($still).Count -eq 0) { return [pscustomobject]@{ ok=$true; verification='verified'; detail="$how -- assignment is gone" } }
                 return [pscustomobject]@{ ok=$false; verification='indeterminate'; detail="$how, but it is still present on read-back (directory may not have caught up)" }
@@ -422,11 +480,29 @@ function Invoke-PimQueueAction {
             'azure-rbac-revoke' {
                 $id = "$($p.roleAssignmentId)".Trim()
                 if (-not $id) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='azure-rbac-revoke has no roleAssignmentId' } }
-                & $arm 'DELETE' ("$id`?api-version=2022-04-01") $null | Out-Null
-                $still = & $arm 'GET' ("$id`?api-version=2022-04-01") $null
-                # 🔑 A 404 on the read-back is the SUCCESS case here, and the invoker signals it by
-                # returning $null. "Already gone" is success for a removal -- see the idempotence
-                # note at the top: a retry must not turn a completed revoke into a failure.
+                # 🔴 "ALREADY GONE" IS SUCCESS -- AND THE INVOKER THROWS IT (measured live on EFIF,
+                # 2026-09-22: four Cleanup revokes recorded FAILED, each with
+                # "HTTP 404 : RoleAssignmentNotFound -- The role assignment '<id>' is not found").
+                # The read-back below was written for an invoker that returns $null on 404; the real
+                # ARM invoker RAISES it, so a revoke whose target no longer exists -- the ordinary
+                # outcome of a re-run, or of somebody removing it in the portal first -- was reported
+                # as a failure the operator had to chase. Both calls now read a 404 as "it is gone".
+                $absent = { param($m) "$m" -match '(?i)RoleAssignmentNotFound|ResourceNotFound|DoesNotExist|\b404\b|not\s*found' }
+                try { & $arm 'DELETE' ("$id`?api-version=2022-04-01") $null | Out-Null }
+                catch {
+                    if (-not (& $absent $_.Exception.Message)) { throw }
+                    return [pscustomobject]@{ ok=$true; verification='verified'; detail='role assignment was already gone -- nothing to remove' }
+                }
+                $still = $null
+                try { $still = & $arm 'GET' ("$id`?api-version=2022-04-01") $null }
+                catch {
+                    if (-not (& $absent $_.Exception.Message)) { throw }
+                    $still = $null
+                }
+                # 🔑 A 404 on the read-back is the SUCCESS case here (the invoker may signal it by
+                # returning $null or by throwing; both are handled). "Already gone" is success for a
+                # removal -- see the idempotence note at the top: a retry must not turn a completed
+                # revoke into a failure.
                 if ($null -eq $still) { return [pscustomobject]@{ ok=$true; verification='verified'; detail='role assignment is gone' } }
                 return [pscustomobject]@{ ok=$false; verification='indeterminate'; detail='role assignment still present on read-back' }
             }
@@ -451,9 +527,9 @@ function Invoke-PimQueueAction {
                 foreach ($e in @($existing)) {
                     if ("$($e.id)".Trim()) { & $graph 'DELETE' "/users/$uid/authentication/temporaryAccessPassMethods/$($e.id)" $null | Out-Null }
                 }
-                $hrs = [int]"$(if ($p.lifetimeHours) { $p.lifetimeHours } else { 4 })"; if ($hrs -le 0) { $hrs = 4 }
+                $hrs = [int]"$(if ($p.lifetimeHours) { $p.lifetimeHours } else { 0 })"; $__tapMins = if ($hrs -gt 0) { $hrs*60 } else { -1 }   # 2026-09-21: none set = the tenant maximum
                 # s68.6 #21 (2026-09-12): the body follows the TENANT'S TAP POLICY (PIM-TapPolicy.ps1, Invoke-PimTapCreate) -- a one-time-only tenant answered 400 to isUsableOnce=false.
-                $tap = if (Get-Command Invoke-PimTapCreate -ErrorAction SilentlyContinue) { Invoke-PimTapCreate -LifetimeMinutes ($hrs*60) -UserLabel "$($p.userPrincipalName)" -PolicyReader { & $graph 'GET' '/policies/authenticationMethodsPolicy/authenticationMethodConfigurations/TemporaryAccessPass' $null } -Poster { param($b) & $graph 'POST' "/users/$uid/authentication/temporaryAccessPassMethods" $b } } else { & $graph 'POST' "/users/$uid/authentication/temporaryAccessPassMethods" @{ isUsableOnce=$false; lifetimeInMinutes=($hrs*60) } }
+                $tap = if (Get-Command Invoke-PimTapCreate -ErrorAction SilentlyContinue) { Invoke-PimTapCreate -LifetimeMinutes $__tapMins -UserLabel "$($p.userPrincipalName)" -PolicyReader { & $graph 'GET' '/policies/authenticationMethodsPolicy/authenticationMethodConfigurations/TemporaryAccessPass' $null } -Poster { param($b) & $graph 'POST' "/users/$uid/authentication/temporaryAccessPassMethods" $b } } else { & $graph 'POST' "/users/$uid/authentication/temporaryAccessPassMethods" @{ isUsableOnce=$false; lifetimeInMinutes=$(if ($hrs -gt 0) { $hrs*60 } else { 480 }) } }
                 if (-not "$($tap.temporaryAccessPass)".Trim()) {
                     return [pscustomobject]@{ ok=$false; verification='indeterminate'; detail='TAP create returned no pass' }
                 }
@@ -481,10 +557,68 @@ function Invoke-PimQueueAction {
 
             'session-revoke' {
                 $uid = "$($p.userId)".Trim()
-                if (-not $uid) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='session-revoke has no userId' } }
+                # §79.6: a revoke a MANAGED tenant queues from the master's signed intent knows the account by its UPN only
+                # (<UserName>@<this tenant's admin domain>). Graph takes a UPN wherever it takes an id, read-back included.
+                if (-not $uid) { $uid = "$($p.userPrincipalName)".Trim() }
+                if (-not $uid) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='session-revoke has no userId or userPrincipalName' } }
+                $callUtc = [datetime]::UtcNow
                 & $graph 'POST' "/users/$uid/revokeSignInSessions" @{} | Out-Null
-                # Declared unverifiable in the catalog -- see the header note.
-                return [pscustomobject]@{ ok=$true; verification='none'; detail='sign-in sessions revoked (Graph exposes no read-back to confirm this)' }
+                # BUG-252 (§78 live E2E, 2026-09-24): this was declared UNVERIFIABLE ("Graph exposes no read-back"). It
+                # does: revokeSignInSessions resets the user's signInSessionsValidFromDateTime to the moment of the
+                # revoke -- every session and refresh token issued before it is invalid. Read it back:
+                #   at/after the call (5 min clock tolerance)  -> verified
+                #   still BEFORE the call                      -> not taken yet: retry (the directory may be catching up)
+                #   unreadable                                 -> ok, indeterminate (never collapsed into "verified")
+                $u = $null
+                try { $u = & $graph 'GET' "/users/$($uid)?`$select=id,signInSessionsValidFromDateTime" $null } catch { $u = $null }
+                $rawVal = if ($null -eq $u) { $null } elseif ($u -is [System.Collections.IDictionary]) { $u['signInSessionsValidFromDateTime'] } else { $u.signInSessionsValidFromDateTime }
+                $vf = $null
+                # pwsh 7 returns an ISO string from Graph as a [datetime] already: take it AS a date (a Local one converted),
+                # never through text -- text re-parsed as local is the two-hour shift BUG-251 was about.
+                if ($rawVal -is [datetime]) { $vf = if ($rawVal.Kind -eq [DateTimeKind]::Local) { $rawVal.ToUniversalTime() } else { [datetime]::SpecifyKind($rawVal, [DateTimeKind]::Utc) } }
+                elseif ("$rawVal".Trim()) {
+                    try { $vf = [datetime]::Parse("$rawVal", [Globalization.CultureInfo]::InvariantCulture, ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)) } catch { $vf = $null }
+                }
+                if (-not $vf) { return [pscustomobject]@{ ok=$true; verification='indeterminate'; detail='sign-in sessions revoked; the read-back (signInSessionsValidFromDateTime) could not be read' } }
+                if ($vf -ge $callUtc.AddMinutes(-5)) { return [pscustomobject]@{ ok=$true; verification='verified'; detail=("sign-in sessions revoked: sessions issued before {0:yyyy-MM-dd HH:mm:ss} UTC are invalid (signInSessionsValidFromDateTime)" -f $vf) } }
+                return [pscustomobject]@{ ok=$false; verification='indeterminate'; detail=("signInSessionsValidFromDateTime is still {0:yyyy-MM-dd HH:mm:ss} UTC, before the revoke -- the directory may not have caught up; retried" -f $vf) }
+            }
+
+            'access-review-decision' {
+                # SEC-79-1: queued by the Manager (read-only), carried out here by the engine identity. Idempotent: the
+                # decision is read first and an already-recorded one is success; after the PATCH it is read back.
+                $d = "$($p.definitionId)".Trim(); $i = "$($p.instanceId)".Trim(); $x = "$($p.decisionId)".Trim()
+                $outcome = "$($p.outcome)".Trim(); $just = "$($p.justification)".Trim()
+                if (-not $d -or -not $i -or -not $x -or -not $outcome -or -not $just) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='access-review-decision needs definitionId, instanceId, decisionId, outcome and justification' } }
+                if (-not (Get-Command New-PimReviewDecisionPatch -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-AccessReviews.ps1') }
+                $patch = New-PimReviewDecisionPatch -Outcome $outcome -Justification $just -NowUtc ([datetime]::UtcNow) -DecidedBy "$($p.decidedBy)"
+                $want = "$($patch.body.decision)"
+                $path = "/identityGovernance/accessReviews/definitions/$d/instances/$i/decisions/$x"
+                $cur = $null; try { $cur = & $graph 'GET' "$path`?`$select=id,decision" $null } catch { $cur = $null }
+                if ($cur -and "$($cur.decision)" -eq $want) { return [pscustomobject]@{ ok=$true; verification='verified'; detail="decision $x already '$want' -- nothing to change" } }
+                & $graph 'PATCH' $path $patch.body | Out-Null
+                $back = $null; try { $back = & $graph 'GET' "$path`?`$select=id,decision" $null } catch { $back = $null }
+                if ($back -and "$($back.decision)" -eq $want) { return [pscustomobject]@{ ok=$true; verification='verified'; detail="decision $x recorded as '$want' (read back)" } }
+                if ($null -eq $back) { return [pscustomobject]@{ ok=$true; verification='indeterminate'; detail="decision $x sent as '$want'; the read-back could not be read" } }
+                return [pscustomobject]@{ ok=$false; verification='indeterminate'; detail="decision $x still reads '$($back.decision)' after recording '$want' -- retried" }
+            }
+
+            'access-review-reviewers' {
+                $d = "$($p.definitionId)".Trim(); $rv = @(@($p.reviewers) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+                if (-not $d -or -not $rv.Count) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='access-review-reviewers needs a definitionId and at least one reviewer' } }
+                if (-not (Get-Command New-PimReviewerAssignmentPatch -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-AccessReviews.ps1') }
+                $patch = New-PimReviewerAssignmentPatch -Reviewers $rv -NowUtc ([datetime]::UtcNow) -AssignedBy "$($p.assignedBy)"
+                $path = "/identityGovernance/accessReviews/definitions/$d"
+                # PUT with the WHOLE definition: PATCH is 404 on a definition (verified live 2026-09-25; live E2E 9b stayed
+                # 'retrying' on it). ConvertTo-PimReviewDefinitionPut copies what was read and replaces only the reviewers.
+                $full = & $graph 'GET' $path $null
+                if (-not $full) { return [pscustomobject]@{ ok=$false; verification='none'; detail="access-review definition $d could not be read -- retried" } }
+                & $graph 'PUT' $path (ConvertTo-PimReviewDefinitionPut -Definition $full -Reviewers $patch.body.reviewers) | Out-Null
+                $back = $null; try { $back = & $graph 'GET' "$path`?`$select=id,reviewers" $null } catch { $back = $null }
+                $want = @($patch.body.reviewers).Count
+                if ($back -and @($back.reviewers).Count -eq $want) { return [pscustomobject]@{ ok=$true; verification='verified'; detail="reviewers of $d set ($want, read back)" } }
+                if ($null -eq $back) { return [pscustomobject]@{ ok=$true; verification='indeterminate'; detail="reviewers of $d sent ($want); the read-back could not be read" } }
+                return [pscustomobject]@{ ok=$false; verification='indeterminate'; detail="definition $d reads $(@($back.reviewers).Count) reviewer(s) after setting $want -- retried" }
             }
 
             'guest-invite' {
@@ -512,7 +646,17 @@ function Invoke-PimQueueAction {
                     return [pscustomobject]@{ ok=$true; verification='verified'
                         detail="'$email' already exists in the directory as $("$($hit.userType)".Trim()) $("$($hit.userPrincipalName)".Trim()) (id $($hit.id)) -- no second invitation was sent" }
                 }
-                $resp = & $graph 'POST' '/invitations' $inv
+                # BUG-258 (§78 live run 7, 2026-09-24): a tenant whose External collaboration settings allow NO invitations
+                # answers 403 "Guest invitations not allowed for your company". That is a TENANT DECISION, not a transient
+                # fault -- it was retried three times and then read as an unexplained failure. Terminal, and say where to look.
+                try { $resp = & $graph 'POST' '/invitations' $inv }
+                catch {
+                    if ("$($_.Exception.Message)" -match '(?i)invitations? (are )?not allowed|Guest invitations not allowed') {
+                        return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'
+                            detail="NOT invited -- nothing was changed: this tenant does not allow guest invitations (Entra ID > External Identities > External collaboration settings > Guest invite settings). Allow invitations there, then re-queue the invitation for '$email'." }
+                    }
+                    throw
+                }
                 $uid = ''
                 if ($resp -and $resp.invitedUser) { $uid = "$($resp.invitedUser.id)".Trim() }
                 if (-not $uid) {

@@ -417,7 +417,11 @@ function Resolve-PimWorkloadGroupId {
     $names = New-Object System.Collections.Generic.List[string]
     if ($TagToName -and $TagToName.ContainsKey($t.ToLowerInvariant()) -and "$($TagToName[$t.ToLowerInvariant()])".Trim()) { $names.Add("$($TagToName[$t.ToLowerInvariant()])".Trim()) }
     if (-not $names.Contains($t)) { $names.Add($t) }
-    if (Get-Command Resolve-PimGroupNameFromTag -ErrorAction SilentlyContinue) {
+    # 2026-09-21: the pattern now fills its tokens, so a group named under the OLD rule (tokens deleted) carries a
+    # different name than the pattern gives today -- try both (Get-PimGroupNameCandidatesFromTag), current first.
+    if (Get-Command Get-PimGroupNameCandidatesFromTag -ErrorAction SilentlyContinue) {
+        foreach ($byPattern in @(Get-PimGroupNameCandidatesFromTag -Tag $t)) { if ($byPattern -and -not $names.Contains($byPattern)) { $names.Add($byPattern) } }
+    } elseif (Get-Command Resolve-PimGroupNameFromTag -ErrorAction SilentlyContinue) {
         $byPattern = "$(Resolve-PimGroupNameFromTag -Tag $t)".Trim()
         if ($byPattern -and -not $names.Contains($byPattern)) { $names.Add($byPattern) }
     }

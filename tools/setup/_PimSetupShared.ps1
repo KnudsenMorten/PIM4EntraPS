@@ -301,6 +301,16 @@ $script:PimGraphAppRoles = @{
     # it, so the AccessReviews provider 403s and is a permanent no-op in every hosted environment --
     # while the doc that calls it required points at the SPN list, which is not what executes.
     'AccessReview.Read.All'                    = 'd07a8cc0-3d51-4b77-b3b0-32704d1f69fa'
+    # 🔴 BUG-256 (§78 live run 7, 2026-09-24) -- "read is enough for the provider" (the note above the SEC-18 block) was
+    # wrong: the AccessReviews provider CREATES a review definition (POST /identityGovernance/accessReviews/definitions)
+    # for every group whose row has a ReviewCycle, and with Read.All alone every such run failed PERMISSION-DENIED.
+    # 2.4.421 granted AccessReview.ReadWrite.Membership as the "narrowest" role -- WRONG, measured live the same day: the
+    # POST still answered 403 "Attempted to perform an unauthorized operation". Microsoft's permission table for
+    # POST /identityGovernance/accessReviews/definitions lists ONE application permission, AccessReview.ReadWrite.All
+    # (no narrower one exists for this call). It is broader than the provider needs -- it can also read and change every
+    # review and decision -- and it is only granted where the hosting permissions are (re)granted.
+    # Id resolved from the LIVE Microsoft Graph service principal 2026-09-24.
+    'AccessReview.ReadWrite.All'               = 'ef5f7d5c-338f-44b0-86c3-351f46c8bb5f'
     'RoleManagementPolicy.ReadWrite.Directory' = '31e08e0a-d3f7-4ca2-ac39-7343fb83e8ad'
     'AdministrativeUnit.ReadWrite.All'         = '5eb59dd3-1da2-4329-8733-9dabdc435916'
     'UserAuthenticationMethod.ReadWrite.All'   = '50483e42-d915-4231-9639-7fdb7fd190e5'
@@ -591,7 +601,7 @@ function Grant-PimMiGraph {
     # 🔴 BUG-150 -- THIS MINTED A GRAPH TOKEN WITH NO TENANT PINNING, AND THEN GRANTED WITH IT.
     # `az account get-access-token` with no --subscription uses the CLI's DEFAULT context. On a host
     # that holds logins for more than one tenant -- which the build host does -- that default is
-    # frequently a DIFFERENT COMPANY's tenant (CLAUDE.md records it landing on ExpertsLiveDK, and
+    # frequently a DIFFERENT COMPANY's tenant (CLAUDE.md records it landing on another company's tenant, and
     # SEC-12 is the same failure in the engine's own token path). The best case is a confusing
     # failure; the worst is issuing app-role grants against the wrong directory.
     # 🔑 So: pin the subscription when the caller knows it, and ALWAYS decode the token and assert

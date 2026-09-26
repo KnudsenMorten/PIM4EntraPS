@@ -306,7 +306,7 @@ function New-PimCoverageWorkloadProposal {
     $existing = $Model -and ((Test-PimCoverageTagDefined -Model $Model -Tag $tag) -or $Model.definedNames.ContainsKey($name.ToLowerInvariant()))
     if (-not $existing) {
         $rows.Add([ordered]@{ entity = 'PIM-Definitions-Services'; row = [ordered]@{
-            GroupName = $name; GroupDescription = "$label0 - $RoleName"; GroupTag = $tag; AdministrativeUnitTag = 'PIM-L1'
+            GroupName = $name; GroupDescription = "$label0 - $RoleName"; GroupTag = $tag; AdministrativeUnitTag = $(if (Get-Command Get-PimPermissionGroupAdminUnit -ErrorAction SilentlyContinue) { Get-PimPermissionGroupAdminUnit 'L1' } else { 'PIM-L1' })
             IsRoleAssignable = 'FALSE'; Workload = $wl; Level = "L$level"; TierLevel = 'T1'; Plane = $plane; CPPlatform = 'ID'; Owners = '' } })
     }
     $rows.Add([ordered]@{ entity = 'PIM-Assignments-Workloads'; row = [ordered]@{
@@ -985,7 +985,7 @@ function Invoke-PimCoverageJob {
             if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
                 [void](Send-PimManagerAlert -Event $script:PimCoverageAlertEvent -Title $title -Detail $detail -LinkTab 'coverage')
             } elseif (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue) {
-                [void](Send-PimJobAlertViaNotify -Event $script:PimCoverageAlertEvent -Title $title -Detail $detail)
+                [void](Send-PimJobAlertViaNotify -Event $script:PimCoverageAlertEvent -Title $title -Detail $detail -LinkTab 'coverage')
             }
         } catch { Write-Warning "[$type] the coverage alert could not be raised: $($_.Exception.Message)" }
     }

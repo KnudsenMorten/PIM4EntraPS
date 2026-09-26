@@ -14,6 +14,1054 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.443 — Azure delegation levels follow your management-group layers
+
+- **The Create wizard sets the level of an Azure permission group from where its scope sits.** It uses the Cloud
+  Adoption Framework layers: the tenant root management group is L3, and each layer below it is one more. A subscription
+  is one below its management group and a resource group one below that, up to L9. The preview says where the level came
+  from. When the scope is not in the known tree, the wizard uses the role as before and says so.
+- **Changing who reviews an access review now works.** The change was sent in a form Microsoft does not accept for
+  review definitions. It now sends the whole definition with the new reviewers, and checks the result.
+- **An emergency override now ends on time** when its expiry falls while other work is running. Approval is put back
+  on the next run, not the one after.
+
+### Free and Pro
+
+- **The free edition now shows what Pro adds.** Every Pro page is listed in the menu, dimmed and marked **PRO**. Opening
+  one shows a comparison of the free and Pro editions, with a button to buy Pro and a link to register a licence file.
+  Pages that are free apart from one Pro function keep their notice on the page. Nothing changes on a licensed
+  installation.
+- **MSP is always part of Pro.** A managing (MSP) tenant can no longer be set up on the free community edition. An
+  installation that an older release recorded that way now runs as a free single tenant, and says so.
+- **Updates of the free edition are recognised from the installation itself.** A roll that no release ring governs is
+  allowed only when the environment holds no Pro licence, and it is recorded in the audit trail. A licensed environment
+  always follows its release ring.
+
+### Deployment fixes
+
+- **The community edition updates with one command.** `tools\setup\Update-PimCommunity.ps1 -Apply` pulls the latest
+  release from GitHub and re-runs your deploy with the parameters it was installed with. A successful deploy saves
+  those parameters on the machine that ran it (never a secret). Without `-Apply` it shows which version it would move
+  to and the plan, and changes nothing. A clone with local changes is left alone.
+
+- **A new installation now sets up its notification mailbox.** The one-command deploy stopped at the mailbox step
+  whenever a sender address was given, and the deploy identity lacked the right to give itself the short, time-bound
+  Exchange role it needs for that step. Both are fixed. A deploy identity created with an older release gets the missing
+  right on its next deploy, so nobody has to grant it by hand.
+- **Upgrade note:** the deploy identity now also holds `RoleManagement.ReadWrite.Directory`. Re-running
+  `New-PimDeployIdentity.ps1 -GrantGraph -Apply` adds it; the deploy also adds it by itself when it is missing.
+
+### Security and reliability fixes from a code review
+
+- **Delegated administrators are held to their ceiling by what a change grants, not by what it claims.** An assignment
+  is checked against the stored definition of every group it names and against the role or scope itself: a directory
+  role is tier 0, an Azure assignment's scope must sit under the department's scopes. Columns an entity does not have
+  are refused. A delegated administrator changing an admin account may only edit descriptive fields and extend the
+  end date within the owner limit; removing an admin goes through the offboard approval. An offboard raised by a
+  delegated administrator is checked before any approval is created.
+- **Staged changes lock their rows at commit too.** A commit that changes a row another administrator has staged is
+  refused, whatever the second-approver setting. With the second approver on "sensitive", direct edits are checked as
+  well. A staged removal, or a change that clears a field, is no longer counted as done too early. An administrator can
+  discard a colleague's staged change, with a reason that is recorded.
+- **Staged edits are no longer lost** when they are made while the page is sharing earlier edits, when someone else
+  staged first, or when a colleague holds one of the rows. Discard now says when it did not work.
+- **Break-glass accounts are protected in every direction.** A central session revoke that names an account by
+  sign-in name is checked against a break-glass list kept by object id. A managed tenant revokes sessions only for the
+  central admin it holds, never for its own admin with the same name.
+- **Choosing managed tenants is strict.** A tenant list with anything that is not a tenant id is refused instead of
+  reaching every tenant, a rename honours the list, and cancelling an authorisation cancels only the one chosen.
+- **Mail links use the Manager's own address,** never one taken from a request header.
+- **The daily target check no longer reports a subscription it cannot read as deleted,** and a failed read fails the
+  run instead of reporting "nothing checked".
+- Smaller fixes: the owner page reads owners separated by `|`; a scoped administrator's My people actions follow
+  their portal profile; pending changes, and every value the Manager saves, keep their dates exactly (a date and time
+  is no longer rewritten in the server's regional format); the engine's "nothing defined" safety stop no longer
+  ends the run with an error.
+
+## v2.4.442 — The Access map is tested at every option; reviews go through the engine
+
+- **The Access map is now checked in a real browser at every option**: every kind of box, the focus toggle, the
+  overview, search, the risk overlay, removing access, three screen widths, export and print. Each time, every line
+  must connect the right boxes and sit exactly on them.
+- **Access-review decisions and reviewer changes are carried out by the engine.** The Manager records the decision
+  and starts the engine, which applies it within moments and checks it took effect. The Manager itself no longer needs
+  permission to change access reviews, so a correctly set-up environment no longer refuses these buttons.
+
+## v2.4.441 — Two checks the Manager was silently skipping
+
+- **Fixed: acknowledging a warning is validated in full again.** The Manager checked only that a reason and an end
+  date were given; the complete check (the same one the engine applies) was never loaded. It is now.
+- **Fixed: the import check reads the tenant's cached lists** (roles, groups and scopes) as intended, instead of
+  skipping that step.
+- The whole test suite is green again.
+
+## v2.4.440 — The community edition installs as the README says
+
+- **Fixed: a new community installation no longer stops half-way.** It was refused at the code step as "deployed, but
+  no updater", although the community edition has no updater by design, and it then ended as failed because a check
+  that is not shipped publicly could not run. A community installation now finishes, and checks itself: the Manager
+  is running its latest revision, the page answers behind sign-in, and the engine job exists.
+- **The install command in the README now works as written.** It names who may sign in to the Manager, which is
+  required, and a dry run says so if you leave it out.
+- Proven end to end on a fresh tenant: installed from the README, the engine running every five minutes, and a first
+  delegation applied.
+
+## v2.4.439 — Delegated administration: department owners manage what is theirs
+
+- **Department owners can delegate on their own resources.** Give a department its Azure scopes (a subscription or a
+  management group) in the new **AzureScopes** column. Its owners can then create and change the Azure permission
+  groups of their department under those scopes — at level 3 and below — and stage and commit them themselves. They
+  cannot touch another department, anything at level 2 or above, tier 0, or who owns which department. Every refusal
+  is recorded in the audit trail.
+- A department owner needs no Manager administrator role for this; the portal shows them as **Delegated**. An
+  explicit delegated profile, where you have set one, still decides instead. Delegated administration is part of Pro.
+- A department with no Azure scopes gives its owners no Azure rights at all.
+
+## v2.4.438 — Department owners review their people
+
+- **Keep, Extend or Remove.** On **My people** a department owner can now confirm that a person still needs their
+  access (**Keep**), make it last longer (**Extend**), or ask for it to be taken away (**Remove**). A removal is a
+  request: a PIM administrator approves it, and until then nothing changes. The page shows when each person was last
+  confirmed and who is due for review.
+- **A regular review by mail.** The new **owner review** job mails each department's owners the list of their people
+  with a link to My people. It is **off** until you turn it on under **Jobs**; its interval (90 days by default) is the
+  review cycle.
+
+## v2.4.437 — Managed tenants act on the master's decisions again
+
+- **Fixed:** a managed tenant treated every removal, rename and session revoke from the MSP master as expired and
+  ignored it, even one made a minute earlier. They are now carried out; only decisions older than 30 days are
+  ignored, as designed.
+
+## v2.4.436 — Removing an administrator on the MSP master reaches the tenants you choose
+
+- **MSP: remove an administrator everywhere, in some tenants, or nowhere.** When you remove a replicated administrator
+  (or any replicated row) on the MSP master, the Manager asks whether to remove it in the managed tenants too — in
+  every tenant that has it, or only in the tenants you pick. A tenant that is not chosen keeps it and reports it.
+- A managed tenant now carries out the removal of an administrator, together with that administrator's memberships.
+  Before, only memberships were removed and the administrator was only reported.
+- An offboard (an auto-disable date) set on the master still reaches every managed tenant the administrator reaches,
+  without asking — the safe default when someone leaves.
+- **Upgrade note:** removals recorded on the master in the last 30 days are carried out on the next pull after this
+  release, including administrators.
+
+## v2.4.435 — My people: department owners extend access before it ends
+
+- **New page: My people.** A department owner sees the people in the departments they own and the day each
+  person's privileged access ends. If someone still needs it, the owner picks a later date (or +30 / +90 days) and
+  clicks Extend — no one else needs to approve an extension. An owner can only make access last longer, never
+  shorter, and at most a year ahead by default. Every extension is recorded in the audit trail.
+- **A reminder two days before.** The owner now also gets a reminder two days before a person's access ends, and the
+  mail's link opens My people at that person.
+- **Fixed: central removals, renames and session revokes now reach managed tenants.** The MSP master could not read
++
+  publish after this release, removals recorded on the master in the last 30 days are delivered and carried out.
+
+## v2.4.434 — A central session revoke is recorded the same way everywhere
+
+- A managed tenant now records a session revoke it has carried out under the same identity whichever PowerShell
+  edition it runs on, so it is never carried out twice.
+
+## v2.4.433 — Revoking an admin's sessions centrally reaches every managed tenant
+
+- **MSP: one revoke, every tenant.** When you revoke an administrator's sign-in sessions on the MSP master, the
+  Manager now asks whether to revoke them in the managed tenants as well. Say yes, and each managed tenant revokes
+  the sessions of its own account for that administrator the next time it collects the signed bundle — no approval
+  is needed in each tenant. This matters most when someone leaves.
+- Each tenant carries out a revoke once, and a later revoke of the same person is carried out again. Break-glass
+  accounts are still never revoked.
+- Removing the administrator right after revoking no longer cancels the revoke that is on its way.
+
+## v2.4.432 — A daily reminder of changes nobody committed
+
+- **New daily job: pending check.**
+  - It finds work that was started and never finished: changes staged under **Pending changes**, and queued actions
+    such as a TAP re-issue or a session revoke, that have waited for more than a day without being committed.
+  - It says who staged them and how long they have waited.
+- **Mail.** The list is mailed to your alert recipients with a link to **Pending changes**. You can switch the mail off
+  under **Alerting** ("Changes staged or queued more than a day ago and never committed").
+- **Your schedule.** A SuperAdmin can change the interval, or turn the job off, on the **Jobs** page.
+- Changes that were committed but have not reached the tenant are still checked every 30 minutes by the existing
+  convergence check.
+
+## v2.4.431 — A daily check that your delegations still point at things that exist
+
+- **New daily job: target check.**
+  - It checks that every Azure resource, resource group, subscription and management group your delegations point at
+    still exists, and that the Azure roles and Entra roles they grant still exist.
+  - Anything that no longer exists is listed at the top of **Coverage & gaps**, with the delegations that point at it.
+    You decide whether to remove them; PIM never removes anything by itself.
+  - Something PIM cannot read is shown as "could not be verified", never as gone.
+- **Mail when something disappears.** New findings are mailed once to your alert recipients. You can switch the mail off
+  under **Alerting** ("Delegations whose Azure resource or role no longer exists").
+- **Your schedule.** The job runs daily. A SuperAdmin can change the interval, or turn the job off, on the **Jobs**
+  page.
+
+## v2.4.430 — Every mail links to the right page; drift says what differs, and findings can be ignored
+
+- **Every PIM mail has an "Open in PIM Manager" button**, including mail templates you customised earlier. It opens
+  the page the mail is about: Drift, Coverage & gaps, Admin accounts, Access reviews, Approvals.
+  - The review reminder's "Review now" button now works.
+  - Mails that deliver a sign-in credential carry no link.
+  - A hosted Manager records its own address the first time someone signs in. You can set another address with the
+    `ManagerUrl` setting.
+- **Drift says what differs.** A "changed" finding now shows the field and its current and desired values, for example
+  `AssignmentType: Eligible -> Active`, on the Drift page. The drift alert mail now lists the findings themselves, not
+  only their counts.
+- **Ignore a drift finding.** An Admin can ignore a finding, and must give a reason. It then disappears from the counts,
+  the page and the drift mail. Ignored findings are listed separately, with who ignored them, when and why, and can be
+  un-ignored. PIM's own changes are not affected.
+
+## v2.4.429 — PIM only touches what you define; policy holds come with a change-board spreadsheet
+
+- **PIM changes only what your data defines.**
+  - Earlier versions applied the default policy template to every group with the managed name prefix and to every
+    directory role, even when nothing in your data named them. Next to an older engine, or next to groups and roles
+    managed by hand, that could overwrite policies someone else looks after.
+  - A policy is now changed only for a group your data defines, or a role an assignment names.
+  - Nothing can turn the old behaviour back on.
+- **An empty environment changes nothing.** When your data defines no admins, groups or assignments at all, the engine
+  skips every job step and writes nothing.
+- **A spreadsheet your change board can approve.**
+  - When a large policy change is held for approval, the alert mail now carries an Excel file with every policy and
+    setting: current value, new value, and whether it tightens or loosens.
+  - A summary sheet gives the totals, the reasons and how to approve.
+  - The same file can be downloaded from **Reviews & controls › Approvals** (**Download for change board**).
+- **Upgrade note:** when this version starts, policies on groups and roles your data does not define are no longer
+  managed and are left exactly as they are. A policy change that was held only because of those groups or roles
+  disappears from Approvals.
+
+## v2.4.428 — Pending changes are shared by every administrator, locked per row, with an optional second approver
+
+- **Pending changes are shared.**
+  - A staged change is now stored in the environment's database, not only in the browser that made it.
+  - Every administrator sees the same Pending changes, updated every few seconds without a reload.
+  - Each card says who staged each change.
+- **Locked per row.** When one administrator has staged a change to a row, nobody else can change or unstage that row
+  until it is committed or they discard it. You are told who holds it.
+- **Commit and discard.**
+  - A commit includes every staged change, and asks first when some were staged by colleagues.
+  - Committed changes leave everyone's view.
+  - **Cancel all pending** now discards only your own changes; your colleagues' stay.
+- **Optional second approver** (Pending changes, SuperAdmin):
+  - **off** (the default): anyone may commit what they staged.
+  - **sensitive**: a sensitive change must be committed by a different administrator than the one who staged it.
+  - **all**: every change must be committed by a different administrator than the one who staged it.
+  - A refused change stays staged and visible, so a colleague can review and commit it.
+- **Upgrade note:** changes you had staged in your browser before this version are sent to the shared queue the first
+  time you open the Manager.
+
+## v2.4.427 — The permission check reads the mail sender before judging it
+
+- **Overview › permission check no longer says "no mail sender configured" after the Manager restarts.**
+  - The sender mailbox is loaded from the store when it is first needed. The permission check ran before that
+    happened, so it read the sender as empty.
+  - The check now loads the sender first.
+- **Clearer wording when only mail is affected.** A mail problem is no longer described as the engine "missing
+  REQUIRED permissions".
+
+## v2.4.426 — Commits no longer blame "another administrator" for the engine's own work; the permission check stops false alarms
+
+- **Pending changes › Commit re-applies your edits automatically when the stored rows moved underneath you.**
+  - The stored rows can change without another person: for example, the engine clears a Remove row once it has
+    applied it, or a queued change lands.
+  - Your next commit was then refused with "another administrator changed …", and you had to reload the page.
+  - The Manager now re-reads the changed data, re-applies your edits on top and commits, with no reload and no
+    dialog.
+  - You are only asked when one of your own edits touches a row that really changed. It retries once, never in a
+    loop.
+- **Overview › permission check no longer reports false blockers.**
+  - **Azure:** it now asks Azure which roles the engine identity actually holds, including roles inherited from
+    management groups. It no longer says "no Azure role-management scope" when the engine has User Access
+    Administrator at the tenant root.
+  - **Mail:** it now counts mail as working when the most recent real alert was delivered, and as failing when the
+    most recent attempt failed. It no longer always says "not verified".
+
+## v2.4.425 — Access map lines stay put in a Remove session; admins scheduled for later no longer raise convergence failures
+
+- **Access map: clicking Remove access (or Give access) twice no longer throws the lines across the board.**
+  - The second click drew the lines while the panel under the board was briefly short. The panel then grew back to
+    the same height, so nothing redrew them.
+  - The lines were scaled into the wrong box and slid into the group column.
+  - The board now redraws its lines once more, after the layout has settled, and whenever its own size changes.
+- **Jobs › verify-convergence no longer fails for an admin who does not exist yet.**
+  - When an admin was scheduled to be created on a future date, their group memberships were planned straight away,
+    for an account that did not exist yet.
+  - After the grace window, the check reported them as "exist in the Manager but NOT in the tenant".
+  - Those memberships now wait for the account. They are applied on the first run after the account is created.
+
+## v2.4.424 — The permission check works on hosted environments and tells you how to fix it; the Access map keeps its lines
+
+- **Overview › permission check now actually checks.**
+  - On a hosted environment the check always said "Permissions could not be checked". The Manager could not work out
+    which identity it runs as, so it never read a single permission.
+  - It now finds the identity from its own sign-in token. It then checks the **engine's** identity, the one that
+    applies your changes, rather than the Manager's own read-only identity.
+  - When the check cannot run, the banner now says why.
+- **A way to fix missing permissions.** When the engine is missing a permission, the banner now shows a ready-to-run
+  PowerShell script with a **Copy** button. The script grants exactly the missing permissions to the engine identity.
+  A Global Administrator runs it once. The portal cannot grant permissions itself, on purpose: an identity that can
+  grant permissions could give itself anything.
+- **Access map: selecting a permission group shows the lines to the people.** After you clicked a box, the pointer
+  was still resting on it, and hovering only lit the lines touching that box. The lines from people to their groups
+  faded almost out of sight. Hovering a box now lights its whole path, from the people through to the permissions.
+
+## v2.4.423 — Approvals keeps its held changes; Reset TAP always answers
+
+- **Held policy changes stay visible under Approvals.**
+  - After anyone had opened Access reviews, the Approvals page stopped showing held policy changes. That lasted
+    until the Manager restarted, and no held change set could be approved from the page in the meantime.
+  - Opening Access reviews no longer affects the approval page.
+- **Reset TAP always answers.**
+  - Clicking Reset TAP in Accounts & TAP before the list below it had finished loading did nothing at all.
+  - It now finds the admin anyway. If the admin really cannot be found, it says so.
+
+## v2.4.422 — the rename works end to end; the right permission for access reviews
+
+- **Renaming a group now really reaches Entra ID.** 2.4.421 recorded the former name, but a step that prepares the
+  groups for the engine dropped it, so a rename still made a second group. The former name now reaches the engine,
+  and the engine renames the group it already has.
+- **Access reviews need `AccessReview.ReadWrite.All`.** 2.4.421 granted a narrower permission that Microsoft does
+  not accept for creating a review. The deployment now grants the one Microsoft documents for that call. It is
+  broader than the reviews PIM creates: it also covers reading and changing other reviews.
+  **Upgrade note:** it takes effect when the hosting permissions are granted again. Once granted, reviews are
+  created for every group with a review cycle, and they mail their reviewers.
+- **Reset TAP is no longer offered where it cannot work.** In Accounts & TAP, on an environment without a mail
+  sender, the button was enabled and the click was then refused. It is now disabled and says why: a pass is only
+  ever mailed, so it needs the sender mailbox.
+
+## v2.4.421 — a rename renames, and four quieter fixes
+
+- **Renaming a group or an Administrative Unit now renames it in Entra ID.**
+  - Until now, a new name reached Entra ID as a *second* group. The old group kept every membership and role it
+    held, and nothing managed it any more.
+  - The Manager now remembers the former name. That covers the Rename button in All records and a direct edit of
+    the name. The engine then renames the group or AU it already has: the same object, with its members and roles.
+  - **Upgrade note:** a group renamed on an earlier version has its old copy still in Entra ID. Remove the old one
+    by hand.
+- **Access reviews can be created.**
+  - The engine creates a quarterly (or other) review for every group whose row has a review cycle, but it was
+    only ever granted *read* access to reviews. Every such run failed with "the engine identity lacks a permission".
+  - The deployment now grants the narrowest permission that creates reviews of group membership.
+  - **Upgrade note:** existing environments get it when the hosting permissions are granted again. Once granted,
+    reviews are created, and they mail their reviewers.
+- **A new admin's Temporary Access Pass no longer fails the run.** The pass and the account are made by two jobs
+  on their own schedules. When the pass job came first, the run was marked failed. It now waits for the account
+  and issues the pass on its next run.
+- **A tenant that allows no guest invitations gets a clear answer.** The engine used to retry the invitation three
+  times and then report an unexplained failure. It now stops at once and names the External collaboration setting
+  to change.
+
+## v2.4.420 — what the new daily live test found, fixed
+
+A new end-to-end test drives every feature against a real test tenant, both through the engine and through the Manager
+in a browser. Its first runs found these, all fixed:
+
+- **A revoke is checked, not assumed.**
+  - **Sign-in session revoke:** the result is now confirmed by reading the moment from which the user's sessions are
+    valid. It used to be recorded as "not verifiable".
+  - **Deleted principal:** a revoke for an account or group deleted after the list was read now completes as done,
+    because a deleted principal holds no role. It used to fail after three attempts. It still fails if the object is
+    only temporarily not found.
+- **A brand-new account or group is no longer a failed run.** A role given to a principal created minutes earlier can
+  be refused while Entra ID catches up. The run now shows it as *waiting* and applies it on the next run. It used to
+  mark the whole run failed.
+- **Pending changes says what a change is.**
+  - Each changed row leads with its name.
+  - A group deletion says it "will be DELETED in Entra ID on the next engine run".
+  - Small change sets open their details.
+  - All records marks an edited record type as pending straight away.
+- **Times are right.** On a server set to a local time zone, queued changes showed times hours off, some "applied"
+  before they were requested. Every time is now stored in UTC and shown in one format, for example
+  "2026-09-24 04:06 UTC".
+- **The Home permission banner** no longer hangs on "Checking permissions…" when the check cannot run. It says nothing
+  was checked.
+- **Screens use the names in the menu.**
+  - Help text now says "Pending changes" and "Review current delegations", the names in the menu.
+  - Eight panels no longer squeeze their help into a thin column.
+  - An empty Access map says where to start.
+  - The wizard review counts every row it stages.
+- **First deployment into an empty tenant** no longer looks hung while the database server does not exist yet.
+
+## v2.4.419 — an environment with a private registry can update itself
+
+**Nightly updates now build on your private build pool.** If your container registry has public access turned off,
+the registry refuses Azure's shared build machines, and only a build pool inside your own network can build the new
+image. The deployment has always recorded that pool, but the nightly updater never used it, so every nightly build
+failed after a few seconds and the environment stayed on its old version. The updater now builds on the pool.
+**Upgrade note:** an environment still running an older updater cannot use this until it has been updated once. That
+first update has to be built on the pool by hand; after that it updates itself.
+
+## v2.4.418 — selecting a row no longer buries the grid
+
+**The "which one do I want?" table fits again.** Selecting a row in **All records** opens a bar with the four actions
+(stop managing, remove, revoke, delete) and a short table explaining each. On most screens the table's main
+column was squeezed to two or three words a line, so the table became very tall. The bar stays at the top of the
+page, so that tall table covered the rows you had just selected. The table now uses the full width and stays a few
+lines tall.
+
+## v2.4.417 — the Access map is back
+
+**The Access map is visible again.** With something selected, the map's toolbar carries four large Add and Remove
+buttons. Everything was forced onto one row, so the help text was squeezed into a narrow, very tall column. That
+pushed the map itself out of view at most window widths. The toolbar now wraps, the help text has its own line
+under the buttons, button labels stay on one line, and the map always keeps room to show.
+
+## v2.4.416 — a Temporary Access Pass is sent once, and again only when you ask
+
+**No more daily TAP mails.** Since v2.4.391, when an admin's Temporary Access Pass expired before they had set up
+a sign-in method of their own, the engine deleted the pass, created a new one and mailed it. Passes expire daily, so
+an admin who had not signed in yet was sent a new TAP every day. The engine now issues each admin **one** pass. When
+it expires, nothing happens automatically. To send a new one, click **Reset TAP** for that admin in the Manager.
+
+## v2.4.415 — a disabled button that says why, and an approval you can actually check
+
+**A greyed-out button now tells you why it is greyed out.** *Commit selected* on the change queue is off when
+nothing on the list is waiting for you — everything shown is already applied or saved. That was explained, but in
+a paragraph above the table, which is not where you are looking when the thing you clicked did nothing. The
+reason is now on the button itself.
+
+**"Already authorised" now says it needs nothing from you.** The panel listing the changes your managed tenants
+will receive read like something waiting for approval. It is the opposite — those are done, they travel on the
+next publish, and the only action is to cancel one if it was a mistake. It says so, and says explicitly that
+*Commit selected* does not apply to it.
+
+**An approval request now carries what it authorises — from every screen that raises one.** A request used to
+be able to say only *what kind* of change and *which entity*, so the approver saw "this request does not list
+its items" and was told, correctly, not to approve it. Requests raised from a refused **Review & Save** now list
+the staged changes in plain words (*stop managing… / REMOVE the access… / DELETE the group… / add… / change…*,
+with the fields that differ), and the manual **Raise a request** form now requires the same list — pre-filled
+from your staged changes when it can be. An approver cannot consent to a target name.
+
+**How to copy settings between tenants is now in the product.** The script that exports a setting from one
+tenant and imports it into another shipped in the previous release, and nothing on any screen mentioned it. The
+command is now on the **Naming conventions** card, together with the two things that make it safe to run: it is
+a dry run unless you ask it to apply, and it refuses the settings that name the tenant they came from.
+
+## v2.4.414 — delete, remove, revoke and stop managing: four words, defined once, and two of them now have a button
+
+**🔴 You can take a delegation away.** A delegation row now has a **⊖** that removes the access it grants: the
+engine takes that exact assignment away on its next run and then clears the row. Until now there was no control
+for this anywhere — the ✕ only stopped managing the row, and Maintenance & Revoke acts on the live assignment
+and leaves the delegation alone. Reported plainly: *"how can i remove the delegation - is that only done in the
+revoke or how ?"* … *"nobody knows how to do that"*.
+
+**🔴 Revoking alone does not make access stay away — and now the product says so.** A revoke acts on the live
+assignment only; the delegation that granted it is untouched, so if it still says *Assign* the engine creates
+the access again on its next run. The revoke screen now states this and points at the ⊖.
+
+**🔴 The Access map promised something it did not do.** Removing a link there deleted the delegation row and
+said *"the engine takes the access away on its next run"*. It did not: no scheduled job prunes, so a live
+assignment whose row has gone is reported and left alone — which is why removals there appeared to have no
+effect. The map now stages the act that really removes the access, and still draws the link struck through
+with a one-click undo.
+
+**The four words are defined once, and shown where you choose.** *Stop managing* (the row leaves, access stays),
+*Remove* (the access goes), *Revoke* (the live assignment goes now, but comes back unless you also Remove), and
+*Delete* (the group itself goes). Every list that offers them renders the same table, and every confirmation
+repeats it, so the four can no longer be read as the same thing.
+
+### Also in this release — "delete the group" now exists, and says what it does
+
+**🔴 You can delete a group from the Manager.** Every group-definition row gains a bin (🗑) that deletes the
+group in your directory: the directory roles it holds are removed, every member is taken out, and the group
+object is deleted. It is **refused** while any delegation row or any live assignment still gives somebody
+access through it — the refusal names them and offers to take you there — and the dialog tells you whether
+automatic group deletion is switched on in your environment, so you are never told something was deleted when
+it was not. Nothing happens until you commit.
+
+The product has always had this act; it was driven by a `Lifecycle` flag on the definition row, and that column
+was not on any grid — so it could not be set, seen or cleared from any screen. It is now on all of them.
+
+**"Stop managing 1 row(s)" is gone, and with it the confusion.** Reported plainly: *"if i want to delete this
+group, what to choose and what is the diff between delete and stop managing 1 row. noboddy understands what stop
+managing 1 row means"*. Two different acts were wearing each other's words — the ✕ asked *Delete "X"?* while
+deleting nothing, and the bulk button used an internal term. Now:
+
+- **✕ / the button above the list** — *take the row out of PIM*. The group stays, everyone keeps the access they
+  have, the product stops managing it. Its confirmation says exactly that, and points at the bin.
+- **🗑 on the row** — *delete the group*. Cannot be undone.
+
+A line above the list answers the question directly: which one do I want, and what survives each.
+
+### Also in this release — two fixes that only showed up on one of the two supported PowerShell hosts
+
+**The drift report's exclusion of our own SQL administrators group was host-dependent.** v2.4.412 leaves that
+group — the one the deployment creates and the product's own identities belong to — out of the drift report,
+because it is not something you can ever "fix". That worked on PowerShell 7, which is what a deployment runs, so
+no report you have seen was affected; on Windows PowerShell 5.1, which this product also supports, the exclusion
+did nothing at all and the group came back as drift. The same slip skipped the exclusion for any area whose
+*only* drift item was that group.
+
+**A misspelt administrator name lost its "did you mean" list**, on that same host. When exactly one close match
+existed — one character wrong in a name, which is the common case — the suggestion list was dropped and the
+message fell back to "add it, or delete this row". Four checks were affected, including the one that reports a
+delegation naming an administrator nobody defines.
+
+**Both had the same cause**, and it is now written down where the next reader will see it: on Windows
+PowerShell 5.1 a one-element result collapses to a single object with no count, so "is there anything here?"
+answered *no* for exactly one item. Both are now counted the way that works on both hosts, and the tests that
+cover them run on both hosts.
+
+**Test suite.** A batch of checks had drifted into asserting things that were deliberately changed — an old
+ring order, wording this release series replaced at your request, a character budget a growing page outgrew —
+and one of them named a function that does not exist. They now assert the current behaviour, so a real
+regression is visible again instead of being lost among known reds.
+
+## v2.4.413 — the administrator job runs again, and replicated administrators stop being reported as orphans
+
+**🔴 Fixes a crash that stopped administrators being created on a managed tenant.** The change in v2.4.412 that
+lets the engine read the accounts its own records name contained a PowerShell construct that throws the moment it
+runs (`Argument types do not match`). The effect on a managed tenant: the administrator job failed immediately,
+every run; the nine administrators sent by the provider were never created; and the access-pass job then failed
+nine times with *"user not found"*, which looked like a separate problem and was not. Upgrade if you are on
+v2.4.412 — the failure is silent apart from the failed job.
+
+**Why it got past the tests, and what now stops it.** This solution already has a scanner for exactly this
+construct, because it has caused three production failures before. It was not run before v2.4.412 shipped. Nothing
+about the scanner changed; the release checks now include it.
+
+**🔴 Administrators sent by your provider are recognised everywhere, not just by the engine.** On a managed tenant
+the administrators your provider governs are held separately from the tenant's own — they are read-only there. The
+**Pending changes** screen only looked at the tenant's own list, so every delegation that named a sent
+administrator was reported as an error pointing at a missing account: eleven of them on one live tenant, all false,
+each offering to either delete the delegation your provider sent or to create a local duplicate of an account your
+provider owns. Both would have made things worse. Sent administrators now count as defined, while a delegation that
+names an account nobody defines is still reported exactly as before.
+
+**A tenant's administrator naming now comes from the tenant's own settings.** It was additionally passed in at
+deployment time, so the two copies could disagree with nothing to reconcile them — which is how the v2.4.412
+problem arose in the first place. The tenant's own setting now wins, a deployment-time value is used only if the
+tenant has none, and a disagreement is written to the job log naming both values.
+
+## v2.4.412 — a name never decides who gets replicated
+
+**🔴 Admins are no longer withheld because their names look different.** A managed tenant's admin naming prefixes
+are a *local* setting: they tell that tenant's engine which accounts in its directory are admin accounts. They were
+also being used to decide **which administrators your provider is allowed to send you** — so on one live pair a
+deployment string (`Admin-,admin-`) silently dropped nine published accounts, and the run reported success. That is
+fixed: every admin the master publishes is sent, and a naming mismatch is **reported**, never acted on.
+
+**The reason it existed is fixed properly.** The guard was protecting against a real failure: an account whose name
+the tenant's engine cannot match is never in its live set, so it looks missing, gets recreated every run, and ends
+up unmanaged. The engine now **reads the accounts its own records name**, whatever they are called — so a centrally
+sent administrator is seen, managed and reconciled like any other, and nothing is recreated in a loop.
+
+**The pull's own explanation is kept.** How many administrators were sent, what was excluded by policy or ring, how
+many groups will be created — that sentence existed only in a container log that is gone minutes later. It is now
+stored with the run, so **Job schedule** shows it.
+
+**New: copy a setting from one tenant to another.** `tools/setup/Copy-PimSettings.ps1` exports a named setting
+(naming conventions, a schedule) and imports it into another tenant, with a backup of the target's current value
+taken first and a read-back afterwards. It **refuses** the settings that name the tenant they came from — who may
+use the Manager, trust pins, store pointers — because copying those points one tenant at another's identities.
+
+## v2.4.411 — you can see what you are approving, and a managed tenant can see what came from you
+
+**An approval says what it authorises.** A revoke batch used to reach the approver as a label and a justification —
+nothing about the assignments it covered. The request now carries **one readable line per assignment**, and the card
+lists them. Raise it straight from the revoke screen and it is filled in for you. A request that carries no items
+says so plainly and tells the approver not to approve what they cannot see.
+
+**On a managed tenant you can tell your provider's rows from your own.** Every record type that can be replicated
+now shows a **Source** column — *from the MSP master* or *local* — with the counts in the header line. Nothing is
+editable there that was not before; it simply answers "where did this come from?", which the hidden replication
+columns used to make impossible.
+
+**Fixing a validation error updates the status immediately.** Every fix button — and *Fix all auto-fixable errors* —
+re-takes the report against what your staged changes would produce, so the error count and the Save gate follow the
+fix. You no longer have to switch Block-Save off to commit.
+
+**Replication wording no longer offers a value that is not in the picker**, and only a row that really replicates
+needs a ring: a row that is merely carried along as a dependency does not, and is no longer flagged.
+
+## v2.4.410 — an admin can follow a delegation, bulk replication/ring, and several dead ends opened up
+
+**🔴 A delegation marked "Replicate to managed tenants" no longer goes nowhere.** If the person it names was a
+master-only admin, the delegation was dropped on the way out — silently. An admin account can now be set to
+**"Only where a delegation needs this admin"**: the account is created in a managed tenant exactly where a
+replicated delegation names it, and nowhere else. A delegation whose admin is still master-only is now **listed
+as not published, with the fix in the sentence**, instead of disappearing.
+
+**A row that replicates must name its ring.** Replicate = *yes* with an empty Ring reached nobody while looking
+finished. Saving such a row is now refused, and the bulk control counts how many of your selected rows would hit
+it.
+
+**Set replication and ring on many rows at once.** Tick the rows in **All records** and use **Set replication
+to…** and **Move to ring…** in the selection bar. The ring bulk action used to exist only for admin accounts.
+
+**Cloning a row no longer breaks the next commit.** A clone copied the group tag, and the store keeps one row per
+tag — so the commit was refused, for every staged change at once, long after the click. A clone now gets its own
+tag. And if you already have duplicates, the refusal lists them, offers **Show me these rows**, and can **give
+each row its own key** in one click.
+
+**"Remove this assignment" now updates the status immediately.** The validation report is re-taken against what
+your staged changes would produce, so the error count and the Save gate stop showing errors you have already
+fixed — you no longer have to switch Block-Save off to commit.
+
+**An Azure role assignment that is already gone is not a failure.** Re-running a cleanup (or removing something
+in the portal first) reported *RoleAssignmentNotFound* as a failed action; it now reads as done.
+
+**A job no longer fails because something it needs is created moments later.** A membership whose group is
+created by the *same* cycle reported *"The group this item needs does not exist yet"* as a **failed job**, and
+alerted on it every cycle. Such items are now reported as **waiting** — the run stays green and says how many
+are waiting and why. A real failure beside them still fails the run, and an item still waiting hours later
+becomes a failure again, because then what it waits for is not coming.
+
+**Smaller things you asked about:** the Access map's **+ / −** signs are legible on the coloured buttons; the map
+bar tells you where a group is **renamed or deleted**; an empty *Remove* list says *why* it is empty; **Commit
+selected** says why it is greyed out; **Backups / Undo** scrolls itself into view; the **msp-pull** job row
+explains that the definitions pull runs elsewhere and links to **Job schedule**; and a triggered engine run no
+longer stretches the history table with its whole scope list.
+
+## v2.4.409 — giving and removing are two different buttons, in two different colours
+
+**Giving access and taking it away are no longer the same control.** 2.4.408 let you remove a delegation on the
+Access map by clicking a link that already existed — but through the *same* button and the *same* list as giving,
+so you could not tell, before clicking, which of the two you were about to do. Each direction now has its own
+button: **➕ Give access / Add people / Add permissions** in blue, and **➖ Remove access / Remove people /
+Remove permissions** in red. The list each one opens shows only that direction's candidates — giving lists what
+the thing does **not** have yet, removing lists only what it **is linked to today** — so a click can never do the
+opposite of the button you pressed.
+
+**You can see which is which.** A staged addition is amber and says **"staged add"**; a staged removal is red,
+struck through, and says **"staged remove"**. While a removal session is open, the highlighted column, the list
+and the bar are red rather than blue. (Ctrl+click and drag still work on an existing link and still ask you to
+confirm by name.)
+
+**The selection bar no longer hides at the bottom of the page.** The bar that says what you have selected and
+carries these buttons now sticks to the bottom of the screen, tinted and outlined — blue while giving, red while
+removing — instead of sitting off-screen below a full-height board.
+
+**"Open PIM-Definitions-Services in Advanced View" now reads "Open Service groups in All records"** — the record
+type in the words the rest of the tool uses, and the page under the name it actually has.
+
+## v2.4.408 — sign-in fixed for names with spaces or accents, and you can remove a delegation where you can see it
+
+**🔴 Upgrade note — some administrators could not sign in at all.** If a person's display name contains a space or a
+non-English letter, the sign-in was rejected and the browser showed
+*"no authenticated principal — this app must be reached through its authentication edge"*. The authentication was
+working; the check that compares the two identity headers compared an encoded value with a decoded one and concluded
+they were different people. Nothing to change in your tenant — install this version and the sign-in works.
+
+**Remove a delegation on the Access map.** You could map people to groups and groups to permissions there, but not take
+one away — the board pointed you at *Review current delegations*, which lists the access that is **live in the tenant**
+and never held these rows. Now the same gesture works in both directions: Ctrl+click an existing link, drop on it, or
+click an **already linked** entry in the list, confirm by name, and the removal is staged — drawn red and struck through
+— until you commit it on **Review & Save**. Click it again to take it back.
+
+**"Cannot be deleted" now names what is in the way, and takes you there.** Deleting a group that is still used said
+only *"PIM-Assignments-Groups: 1"*. It now lists each delegation in words — who is in the group, which permissions it
+gets, which Entra role it holds — says these are delegation rows rather than live assignments, and offers to open
+exactly those rows, filtered, so you can remove them first.
+
+**Searching *Review current delegations* now understands group tags**, not only the display name the live assignment
+carries, so a search by tag stops coming back empty. And when nothing matches, the page explains the difference between
+a live assignment and a delegation instead of a bare "no rows", and offers to look for the same text on the Access map.
+
+**The audit trail stops saying "(none)".** A sign-in has nothing before it, so every field read
+*"role: (none) → SuperAdmin; mode: (none) → hosted"*. A login is now one sentence — *signed in as SuperAdmin (hosted
+Manager, role from sql ManagerAccess)* — and any other event that records a state simply states it.
+
+**PIM's own SQL admin group is no longer reported as drift.** `grp-pim-sql-admins` is created by the deployment and
+holds the identities the solution runs as, so it appeared as an extra object that could never be resolved. It is left
+out of the counts, and the page says how many items were left out and which object they were.
+
+## v2.4.407 — both schedules on one page, Run now on every managed tenant
+
+**You have two schedules, and now you can see both.** The **definitions pull** (how often a managed tenant fetches
+the configuration from the master) has always been editable on the Job schedule page. The **software update** — which
+builds and rolls the new version — is a separate, daily schedule that belongs to the deployment, and it was not shown
+anywhere. It is now listed beside the pull, with its cron, its ring and where it is changed. It stays read-only here,
+because it is set with the job, not on this page.
+
+**Run pull now works on every managed tenant.** It only appeared on locally-hosted managed tenants; a centrally-hosted
+one had no pull row at all — no cadence, no button — and the request was refused. Both kinds are managed tenants and
+both now show it. A tenant whose type was never recorded is recognised from the fact that it pulls.
+
+**"(blank)" in the replication column now reads "No replication to managed tenants (default)"**, which is what blank
+has always meant. Nothing was rewritten in your data: the value stays empty, the label says what it does.
+
+## v2.4.406 — revoking and renaming now reach the managed tenants
+
+Removing a row that is replicated to your managed tenants asks one question: **also remove it in the tenants that
+already have it?** Say yes and each tenant removes it on its next pull — no approval in 25 places, because the
+decision was made once, here. Say no and it simply stops being published: the tenants keep what they have and report
+it, as before.
+
+**Renaming a group tells them too.** A rename used to arrive as a *new* group, with the old one left behind. The
+tenants now rename the group they already have. A rename onto a name a tenant already uses is refused rather than
+merging two groups.
+
+**You can see and undo it.** Every authorised removal or rename is listed on **Pending changes** — what, where, and
+who decided it — with an ✕ to cancel it before it is published.
+
+Everything else is unchanged: a tenant still never removes something merely because it stopped arriving, and a
+configuration published with no such authorisations is byte-for-byte what it was before.
+
+## v2.4.405 — groundwork for revoking and renaming across managed tenants
+
+A managed tenant deliberately does **not** remove something just because it stopped arriving — it reports it and waits,
+because "it was revoked" and "the publish failed" look the same from there. That means a revoke you make centrally
+cannot reach the managed tenants by simply disappearing, and a rename sent as a new name arrives as a **second** group
+rather than a renamed one.
+
+This release adds the missing piece: the master can state, inside the signed configuration it publishes, exactly which
+removals and renames it authorised. A managed tenant then removes precisely those and nothing else, and applies a
+rename to the group it already has instead of creating another one. A rename onto a name the tenant already uses is
+refused rather than merging two groups.
+
+**Nothing changes yet:** the capability is in place and fully tested, but it is not switched on — publishing,
+pulling and the "also remove in the managed tenants?" prompt are wired in the next release. A configuration published
+today is byte-for-byte what it was before.
+
+## v2.4.404 — a group that is still in use cannot be deleted
+
+Deleting a group is now **refused** while anything in PIM still uses it, instead of offering to delete those rows with
+it. You are told how many rows use it and of which kind, and to remove them first — emptying a group decides somebody's
+access, so it is done deliberately, on those rows. Both what you have configured and the live PIM assignments in the
+tenant are checked, and the confirmation tells you whether that live check could run.
+
+## v2.4.403 — rename a group, delete one safely, and a replication choice with two answers
+
+**Rename a group or an AU from All records.** The rename action changes the name, the description **and the tag** —
+and because the tag is what every other row uses to address the group, every one of those rows is updated in the same
+change: memberships, group nesting, Entra role bindings, AU-scoped bindings, Azure and workload rows. A tag that
+another group already uses is refused, and so is an empty one. Nothing is written until you commit.
+
+**Deleting a group now tells you what else goes.** Removing a group used to leave the rows that pointed at it behind,
+addressing something that no longer exists. You are now told exactly what uses it — "used by 3 other row(s):
+memberships 1, nesting 1, role bindings 1" — and can remove them together, or cancel and change nothing.
+
+**The replication choice is two answers, not three.** *Follow* is gone. It meant the same as *No replication*: a row
+that something replicated depends on is sent either way, automatically. The choice is now **Replicate to managed
+tenants** or **No replication — master tenant only**, blank meaning no replication. Nothing about what is actually
+sent has changed.
+
+**Pulling from the master more often** is a setting, not a new feature: on a managed tenant, Job schedule → the pull
+job → set the interval (minimum 5 minutes, 30 for a half-hourly pull). It was already there, defaulting to daily.
+
+## v2.4.402 — new Entra roles are reported, not queued
+
+Discovering a new built-in Entra role used to add an entry to the change queue. Nothing in the product ever used those
+entries, so they were work for you and nothing else. A newly-appeared role is now simply **reported** — it is written
+to the audit trail and included in the discovery notice mail — and every role that no permission group grants is
+already listed as a **Gap** on **Coverage & gaps**, with a proposal for how to cover it. That is where to look.
+
+Because of that, **Entra role** is no longer listed under the auto-create policy on the Discovery page: auto-create
+means "stage a delegation group for a newly-found resource", and nobody creates a role Microsoft ships. The page now
+says where new roles show up instead.
+
+## v2.4.401 — undo a link, a faster Pending changes page, and discovery obeys its own policy
+
+**Undo a link you did not mean.** Ctrl+click a staged link again to take it back, drop on it again, or press the **×**
+that appears on a box you have staged to the selected one. A link that is already committed is refused with the
+reason — removing that one is a revoke, not an undo. The pick list marks a staged entry *staged — click to undo*.
+
+**The same link cannot be staged twice.** The check now reads what is actually staged rather than what the board
+happens to show, so repeating a click can never produce two identical rows. Repeated messages no longer stack up
+either — you get one.
+
+**Pending changes loads faster.** The page read every queue entry, including discarded history, and each entry
+carries the full detail of the change it made. Discarded entries are now fetched only when you tick *Show discarded*,
+and the counts still cover everything, so the page still tells you how many are hidden. Failed entries are never
+hidden.
+
+**Queue entries say what they are.** A row discovered in your tenant used to read *"Add PIM-Catalog-ServiceRoles row
+entra|124577f8-…"*. It now reads *"Catalogue the Entra ID role 'Attribute Assignment Administrator' — found in the
+tenant and not yet in PIM's catalogue (cataloguing it grants nobody access)"*. The technical key is still shown
+underneath for support.
+
+**Discovery honours the policy you set.** With *Entra role* set to **flag — log it, do nothing**, role discovery was
+still queueing every role it found (on a tenant with no baseline, that is all of them). It now reports what it found
+and queues nothing, and the job says which policy it used — so "nothing queued" is never confused with "nothing
+found". Choosing *pending* or *auto* also works properly now: the engine reads the saved policy, which it previously
+never loaded.
+
+## v2.4.400 — the groups you can link to stay on screen when you select someone
+
+Selecting a person or a group collapses the Access map to that item's path — which also removed every box you might
+want to link it to, so there was nothing to Ctrl+click or drag onto. Boxes you can link the selection to now stay
+where they are, drawn faded and dashed, and light up as you point at them. The path you selected is still the thing
+that stands out.
+
+## v2.4.399 — a link made by dragging now shows up like every other one
+
+Dropping one box on another did add the link, but the board did not redraw — so the dashed line and the amber
+**staged** marking did not appear, and the only way to see the change was to open Review & Save. Linking by dragging
+now leaves exactly the same visible trace as Ctrl+click: both boxes marked, the line drawn, and a line of text saying
+what was staged and where to commit it. The marking stays while you look at other parts of the map.
+
+## v2.4.398 — the lines on the Access map point at the right boxes again
+
+Selecting a person or a group drew the connecting lines before the detail bar at the bottom had finished re-drawing.
+That bar changes height with what you select, and the recent linking work made it taller — so the board shifted under
+lines that had already been drawn, and they appeared to connect the wrong rows. The lines are now drawn again once the
+bar is in place, and redrawn whenever it changes height (opening the pick list, a staged note appearing).
+
+## v2.4.397 — you can see which boxes have an uncommitted link
+
+On the Access map, both ends of a link you have added but not yet committed are now marked in amber, with the word
+**staged** on the box — the same amber as the dashed line between them. It tells you what you have changed in this
+session at a glance, even when the other end of the line is scrolled away. The mark disappears by itself once you
+commit on **Review & Save**.
+
+## v2.4.396 — link by Ctrl+click or by dragging, and the buttons are where the other buttons are
+
+**Ctrl+click.** Select the source — a person, or a group — then hold **Ctrl** (⌘ on a Mac) and click each target: the
+groups that person should be in, or the permissions that group should have. Each click adds one link and says so, and
+your selection stays put so you can keep clicking. A plain click still only selects, so nothing is linked by accident.
+
+**Drag and drop.** Drag a box onto another box. Only the boxes that can accept it light up, so you cannot drop a
+person onto a permission by mistake.
+
+**The buttons moved to where you look for them.** *Give access*, *Add people*, *Add permissions* and *Give to a group*
+now sit in the toolbar next to Risk overlay and Export CSV, named for whatever you have selected, and they lead the
+detail bar instead of trailing it. They open the searchable list, which now scrolls into view when it opens.
+
+However you do it — Ctrl+click, drag, the list, or clicking the highlighted column — it is the same change: a staged
+link, shown as a dashed line, committed on **Review & Save**.
+
+## v2.4.395 — pick what to link from a searchable list
+
+**A list to pick from.** When you start a link on the Access map, the candidates now appear as a list under the board:
+type to filter by name or tag, click an entry to add it, keep clicking to add more, then press Done. Clicking the
+highlighted boxes on the board still works — it is the same list, shown two ways.
+
+**You can see what is already linked.** Candidates the selected item already has are listed and marked *already
+linked* rather than hidden, so a group that looks missing really is missing.
+
+**Nothing is written by the board.** A pick becomes a pending change — the Pending changes badge updates and the new
+link is drawn as a dashed line — and **Review & Save** is where it is committed. The commit is backed up first and
+applied in one transaction, and the engine then applies it in your tenant on its next run, which the commit starts
+straight away.
+
+## v2.4.394 — map people into groups, and groups into permissions, straight from the Access map
+
+**The Access map now maps.** It showed who can reach what; it could not connect anything. Select a person and choose
+**+ Assign to a direct group** to put them into a job role, department, organisation or project group. Select one of
+those groups and choose **+ Add people**, or **+ Add permissions** to give the group a permission group's permissions.
+Select a permission group and choose **+ Give this to a direct group**. Either end of a link works, so you can start
+from the person, the group or the permission — whichever you are looking at.
+
+The column you can pick from lights up, and each click adds one change, shown at once as a dashed line on the board.
+Nothing reaches your tenant until you commit on **Review & Save**, exactly as with every other change. Permissions that
+carry a directory role are added as eligible, because Entra does not allow them any other way; everything else is added
+as active.
+
+**Nothing is removed from this board.** The map only adds, so it stays safe to hand to a reviewer. Removing access is
+still done on Maintenance & Revoke. Adding a link needs the Admin role; a Reader is not offered the buttons.
+
+**A directly assigned role keeps its identity.** "Who gets which role directly" rows are now identified by person, role
+and assignment type, so saving that table can no longer drop them.
+
+## v2.4.393 — settings apply at once, copy settings between environments, sort and filter the grid
+
+**A saved setting takes effect straight away.** Switching a feature off in Settings, such as the second-approver policy,
+used to take effect only after the Manager restarted. It now applies the moment you save.
+
+**Copy settings to another environment.** Settings › Copy settings exports the sections you pick (naming, filters,
+alerting, features, policy and mail templates, job schedule and more) to a file. On another environment, importing the
+file shows every setting as current → new, and only the settings you tick are written. Who may use the Manager,
+approvers, break-glass accounts, the licence, deployment rings and the admin account domain are never copied.
+
+**Sort, filter and resize in the grid.** Click a column header to sort, type in the filter box to show only matching
+rows, and drag a column's right edge to change its width. The list of record types shows how many changes are pending
+instead of "mod".
+
+**One way to name an admin in "Who gets which group".** Admins are stored by their UPN. Names written without a domain
+are converted the next time you commit that table. Memberships replicated from an MSP master keep the plain name, because
+each managed tenant adds its own domain.
+
+**"PIM policy" in the wizards.** The policy fields are labelled "PIM policy" instead of "Group policy", so they are not
+confused with Windows Group Policy.
+
+## v2.4.392 — jobs heal themselves, commits no longer fail after a template import, fewer false policy holds
+
+**Jobs show their real state.** A job is failing only while its latest run failed. The next run that doesn't fail clears
+it by itself, so there is nothing to acknowledge and the Ack button is gone. The Jobs page, the Overview tile, Engine logs
+& errors and the menu count now always agree. An earlier failure that a later run cleared is marked "healed".
+
+**Commit all works after a template import.** Two causes of failed commits are fixed. Pressing Commit all twice could run
+two commits at once, and the second one tried to empty a record type. Commit now runs once, and the server refuses a
+request that carries no rows. Importing a pack could also add a second row for a group that already had one. The import
+now skips rows whose group already has a row and tells you which ones it skipped.
+
+**Fewer policy approvals.** A policy nobody has ever changed, such as the policy of a group you just created, gets its
+template the first time without counting toward the approval limits. Policies someone has set are still held for approval
+as before.
+
+**Defender roles stop showing as changed on every run.** A permission that a wildcard in the same role already grants no
+longer counts as a difference.
+
+**Temporary Access Pass lifetime.** When no lifetime is set, a TAP lasts 8 hours (not 48, as v2.4.391 said), and never
+longer than the tenant allows.
+
+**Clearer messages.** A TAP that cannot be delivered is explained in one sentence with one fix. A held run lists three
+items and a count instead of every item. A policy change Microsoft Graph refuses shows the request ID, the rule the engine
+sent and the rule as it is set now.
+
+**Smaller fixes.** Settings › Permission template packs has an **Import…** button. A feature that is off no longer looks
+locked, and ticking it says it will be enabled when you save. The Managed tenants tab is on by default on an MSP master.
+The naming settings no longer show duplicated headings.
+
+## v2.4.391 — 48-hour TAP, TAP and Revoke for central admins on a slave, and errors you can see
+
+**Longer Temporary Access Pass.** When no lifetime is set on the admin, a TAP now lasts 48 hours instead of 4, which
+is enough time to sign in and set up many tenants. The TAP can never last longer than the tenant's own TAP policy
+allows. **Upgrade note:** Entra's default TAP policy maximum is 8 hours. Raise it in Entra › Authentication methods ›
+Temporary Access Pass if you want the full 48 hours.
+
+**A TAP keeps coming until the admin has signed in.** A new TAP is issued until the admin has registered a sign-in
+method of their own, such as a passkey, Microsoft Authenticator or Windows Hello.
+
+**Central admins on a slave.** A central admin replicated to a slave is a separate account in that tenant. Reset TAP,
+Revoke sessions and Access now work for it there.
+
+**Mail from slaves.** When an admin account is created or replicated and nobody else is set to receive its mail, the
+mail goes to the tenant's alert recipients (Home › Alerting).
+
+**Department owners show at once.** An owner saved on the Departments page now shows on Admin accounts straight away.
+
+**Create an admin account from the Create access page.** The page now has a card that opens the same wizard as
+**+ New admin**. The card next to it gives an existing admin access.
+
+**Errors you can see.** The Engine logs & errors menu item shows a red count of failed runs nobody has acknowledged.
+Failed runs are listed first, and the page never shows "Nothing is failing" while a run has failed. The Jobs page lists
+failing jobs first, and an approved policy hold no longer shows as a blocker.
+
+**Policy errors you can act on.** When Microsoft Graph rejects a policy rule with only "The policy rule is invalid", the
+run log now also shows the rule the engine sent, the rule as it is set now, and Graph's request ID. The difference
+between the two rules is the value Graph refused.
+
+## v2.4.390 — approve all held policy changes in one go, and the approval sticks
+
+**Approve all.** The Approvals page now shows every policy change the engine is holding — PIM for Groups, Entra
+roles and Azure roles — with one summary and one **Approve all** button. After you approve, the policy jobs start
+straight away.
+
+**An approval sticks.** An approval used to cover only the exact change set you saw, so a single new group created
+before the next run made it void, and the change was held again. Now an approval also covers later runs, as long as
+they don't weaken anything you haven't approved. A weakening you haven't seen, such as loosening a policy someone set
+by hand, is still held for you.
+
+**Clearer screens.** An approved change shows as "approved — applies next run" on the Jobs page instead of as a
+blocker. Each weakening policy is listed with its change, the WhatIf lists the affected policies one per line in
+readable form, and the confirmation says in plain words what happens next.
+
+**Admin names are checked without regard to case.** `adm-e-abcd-t0-c` now matches a convention written as
+`…-T0-…`. The warning shows the name the convention expects for that row.
+
+## v2.4.389 — one mail per held policy change, and approve it from the Approvals page
+
+**One mail per hold, not one per run.** When a run would change more policies than it may change at once, it holds
+the change and asks for approval. It used to mail on every run, and each mail named a change set that was already
+out of date by the next run. Now a hold is mailed once. It is mailed again only if it starts weakening more
+policies, or once a day while it still stands.
+
+**Approve it where you read it.** The mail now points to **Reviews & controls › Approvals**, which always shows the
+change set that is held now. **Approve this change set** sits at the top of the hold. Each affected policy is listed
+once, in its WhatIf group; the technical rule list is folded away.
+
+**Less text on the Policy templates page.** One line of introduction, a folded *How templates work*, and one card for
+the default template per kind.
+
+## v2.4.388 — one ring order everywhere (0 dev, 1 test, 2 broad), and tags live on the ring
+
+**The rings now run the way you expect.** Replication rings used to run the opposite way from the software update
+rings, where ring 0 already goes first. Both now use one order: **0 = dev, 1 = test, 2 = broad**. A new administrator
+starts on ring 0 and reaches only the dev tenants. Promote them to ring 1 to add the test tenants, and to ring 2 to
+reach every tenant. Template roll-out waves use the same order. Nothing changes for what you already have: every
+stored ring is converted once on upgrade, so each administrator, group and tenant keeps reaching exactly what it
+reached before.
+
+**Tags belong to the deployment ring, not the administrator.** The Managed tenant registry page has a new
+**Deployment rings** card. Name each ring there, and narrow a ring with a tag rule if you need to — for example
+*test = only the tenants tagged `wave:pilot`*. The card shows which tenants are on each ring and whether they match
+the rule. The tag boxes are gone from the new-admin wizard, the admin editor and the Replication section of every
+wizard. They keep only Replicate and Ring. A tag already set on an administrator is kept, still applied, and shown so
+you can move it to the ring.
+
+**Managed tenants on an older version keep working.** A tenant that reads a set published before this version, or
+whose pull job was set up before it, converts the old ring numbers itself.
+
+## v2.4.387 — policy templates: every setting on show, editable with dropdowns
+
+**See each setting.** Opening a policy template shows every setting it makes, one per line with its value, for the
+policy and — on a group template — the owner's policy. Settings that cannot be changed here (approval, and anything
+asked when an administrator assigns access) are shown too, with the reason.
+
+**Edit with dropdowns.** A SuperAdmin presses *Edit* on a template and changes how long an activation, an eligible or an
+active assignment may last, whether an assignment must end, what an activation asks for (MFA, a justification, a
+ticket number) and who is notified by default. Only what you change is saved. Saving changes the template, not the
+policies: the engine plans the change, and a change to many policies waits for your approval with its WhatIf.
+
+**See exactly where a template is used.** *Used by* now lists every delegation — the ones that name the template and
+the ones that get it as the default — and leads with the total. Templates are listed by kind, standard before
+approval-required.
+
+**Every admin has a UPN, and an import never removes a super admin.** An admin row without a user principal name is no
+longer accepted: the import fills it in from the tenant's domain (or refuses without one), the Manager flags any that are
+already stored instead of hiding them, and an import can never overwrite or remove the Manager's super admins or the
+break-glass accounts.
+
+## v2.4.386 — held policy changes on the Approvals page, and every group name follows your pattern
+
+**Approvals are where you look for them.** A policy change that is held for approval is now listed at the top of
+*Reviews & controls › Approvals*, with the change setting by setting and the Approve button — as well as under
+*Jobs › Engine logs & errors*.
+
+**Clones and re-added definitions follow your naming.** Cloning a group names the clone by your current group
+pattern, filled with the source group's department and tier, instead of editing the source group's name. The
+*Re-add definition* fix suggests the name your pattern gives.
+
+**Groups scoped to an administrative unit follow their own pattern.** Once you change the administrative-unit group
+pattern from its default, a permission group granted inside an administrative unit is named by it, with
+`{AdminUnit}` and the group's role part. With the default pattern, nothing changes.
+
+## v2.4.385 — names follow your naming conventions, and a held policy change shows exactly what it would do
+
+**Group names use every variable in your pattern.** A group pattern such as
+`grp-e-PIM_{Department}_{Role}-T{Tier}{Platform}` used to keep only the role part: the tier, the department and
+the environment suffix were dropped, and an empty department left a double underscore behind. Every variable is
+now filled from what the wizard knows, and one you leave empty disappears cleanly with its separator. Patterns
+that only use the role part give exactly the names they gave before, and existing groups keep their names.
+
+**The values that were built in are now settings.** The tag prefix and administrative unit of each group type,
+the administrative units of permission groups, the service names at the start of a permission-group tag and the
+name of an administrative unit the wizard creates are all in *Settings › Naming › Group naming values*, with
+the old values as defaults. Permission groups follow your permission-group pattern once you change it from the
+default. New variables: `{GroupTypePrefix}`, `{ShortName}`, `{Service}`, `{Name}`, `{Domain}`, and for admin
+accounts `{Company}` (for example `KONS-{Company}-{Initial}-T{Tier}-c` for consultants), `{Tier}` and `{Level}`.
+
+**Variables work inside a prefix or suffix,** such as an admin-type prefix `adm-{TenantCommonName}-`. Before,
+the same setting could produce different names from one run to the next.
+
+**The naming page is easier to use.** Wider fields, the prefix card moved above the patterns, the default admin
+type and environment are dropdowns, every setting explains what it does, and the suffix column says it is
+`{Platform}`. The admin wizard offers your own admin types and environments and starts on your defaults, and it
+uses your display-name suffix. A saved naming change reaches the wizards without reloading the page.
+
+**A held policy change shows its impact before you approve it.** When a run would change more policies than the
+safety limit allows, the approval panel now compares each policy's current settings with the new ones, setting by
+setting (*"Activation: maximum duration 8 hours → 4 hours"*), marks each as tightening, loosening or neutral, and
+groups policies that receive the same change.
+
+**Clearer job results.** A held change is reported as *needs approval* with its approval command, even when
+something else in the same run fails. A role name that does not exist in your tenant names the closest real role
+and the row that uses it. *Run now* shows its result on the job you pressed.
+
+**Readable alert mails.** The mail for a held policy change now says in one sentence what happened, lists the
+policies grouped by the change they would get, shows each setting as current → new, and tells you how to approve
+it. You get one mail per held change instead of two, and the approval command in it is no longer cut short.
+
+**Fixes.** Saving the naming table no longer erases the admin word and tenant common name. An admin account with
+a UPN suffix no longer gets the domain twice. The alerting page no longer says no sender is configured while
+alerts are being delivered.
+
+**Upgrade note.** If you saved *Settings › Naming conventions* on 2.4.382–2.4.384, check that your admin word
+and tenant common name are still set.
+
 ## v2.4.384 — the records screens stop calling themselves files, and policy templates can be edited
 
 **Your records are called what they are.** Every record type was still named after the file it used to

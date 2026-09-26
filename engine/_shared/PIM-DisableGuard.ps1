@@ -581,7 +581,19 @@ function Get-PimAdminAccountPrefixes {
         if ($tp -is [System.Collections.IDictionary]) { foreach ($v in $tp.Values) { [void]$vals.Add("$v") } }
         elseif ($tp -is [System.Management.Automation.PSCustomObject]) { foreach ($p in $tp.PSObject.Properties) { [void]$vals.Add("$($p.Value)") } }
         if (-not $vals.Count) { [void]$vals.Add('') }
-        @($vals | ForEach-Object { $t.Replace('{AdminTypePrefix}', "$_") })
+        # 2026-09-21 (operator: "make sure i can use any variables here"): a prefix may itself carry tokens
+        # ('adm-{TenantCommonName}-', '{AdminWord}-'). Expand the two we know AFTER inserting it, the way the name
+        # generator does (Expand-PimNamePattern now repeats until stable). {TenantCommonName} only when it is SET:
+        # blank, the generator collapses the '--' it leaves, and a head carrying '--' would match no real account --
+        # leaving the token in place instead ends the head at '{', which is broader and therefore safe.
+        $tcn = ''
+        # the SAME cleaning the generator applies (ConvertTo-PimNamePart): spaces -> '-', keep [A-Za-z0-9.-]
+        try { $tcn = (("$($nc.TenantCommonName)".Trim() -replace '\s+', '-') -replace '[^A-Za-z0-9.\-]', '') } catch { $tcn = '' }
+        @($vals | ForEach-Object {
+            $e = $t.Replace('{AdminTypePrefix}', "$_").Replace('{AdminWord}', $word)
+            if ($tcn) { $e = [regex]::Replace($e, '\{TenantCommonName\}', $tcn, 'IgnoreCase') }
+            $e -replace '--+', '-'
+        })
     }
     if ($nc) {
         $pats = $null
@@ -617,15 +629,25 @@ function Assert-PimAdminPopulationComparable {
       An ordinary user in the LIVE set is a hard stop -- that is the incident shape.
     #>
     [CmdletBinding()]
-    param([object[]]$Live = @(), [string[]]$Prefixes = @(), [string]$UpnProperty = 'userPrincipalName')
+    param([object[]]$Live = @(), [string[]]$Prefixes = @(), [string]$UpnProperty = 'userPrincipalName',
+          # 🔴 2026-09-22 (operator: "you can not block admins due to different name pattern"). Accounts
+          # a DESIRED ROW names are part of this population by definition -- PIM is already managing
+          # them, by the store, not by what they are called. On a managed tenant those rows come from
+          # the master and carry ITS naming, so without this the assertion would reject the very rows
+          # the tenant was told to hold. It does NOT widen discovery: the caller passes only the UPNs
+          # its desired set actually names, so an account no row asks for still cannot get in here.
+          [string[]]$AlsoAllowed = @())
     if (@($Prefixes).Count -eq 0) {
         return [pscustomobject]@{ ok=$false; offenders=@()
             reason='no admin naming prefix is configured -- refusing to treat the whole user population as admin candidates (set $global:PIM_NamingConventions.AdminAccountPatterns)' }
     }
+    $allow = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($a in @($AlsoAllowed)) { if ("$a".Trim()) { [void]$allow.Add("$a".Trim()) } }
     $bad = New-Object System.Collections.Generic.List[string]
     foreach ($l in @($Live)) {
         if ($null -eq $l) { continue }
         $upn = "$($l.$UpnProperty)"
+        if ($allow.Contains("$upn".Trim())) { continue }
         if (-not (Test-PimIsAdminAccountName -Name $upn -Prefixes $Prefixes)) { [void]$bad.Add($upn) }
     }
     if ($bad.Count -gt 0) {
@@ -752,7 +774,9 @@ function Send-PimSafetyAlert {
         [int]$DebounceMinutes = 60,
         # The one-line verdict, and what the reader should DO. Optional: both default (see the tokens below).
         [string]$Headline = '',
-        [string]$Action = ''
+        [string]$Action = '',
+        # §79.14: files for every recipient -- @{ name; contentType; bytes } (the CAB workbook of a policy hold).
+        [object[]]$Attachments = @()
     )
     $res = [ordered]@{ status = ''; sent = 0; recipients = @(); failures = @(); detail = '' }
     try {
@@ -805,7 +829,7 @@ function Send-PimSafetyAlert {
         foreach ($r in $to) {
             $why = ''
             try {
-                $m = Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $r
+                $m = Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $r -Attachments @($Attachments)
                 $ok = $false
                 if ($m -is [hashtable]) { $ok = [bool]$m['sent']; $why = "$($m['reason'])" }
                 elseif ($m -and $m.PSObject.Properties['sent']) { $ok = [bool]$m.sent; $why = "$($m.reason)" }

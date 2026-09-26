@@ -639,7 +639,7 @@ function Get-PimProFeatureStates {
         $a = @{ Key = "$($f.key)"; TenantId = $TenantId; SqlServer = $SqlServer }
         if ($PublicCertB64) { $a['PublicCertB64'] = $PublicCertB64 }
         $r = Test-PimFeatureProLicence @a
-        $out["$($f.key)"] = [ordered]@{ label = "$($f.label)"; scope = "$($f.scope)"; proFeature = "$($f.proFeature)"; ok = [bool]$r.ok; grace = [bool]$r.grace
+        $out["$($f.key)"] = [ordered]@{ label = "$($f.label)"; scope = "$($f.scope)"; description = "$($f.description)"; proFeature = "$($f.proFeature)"; ok = [bool]$r.ok; grace = [bool]$r.grace
             state = $(if (-not $r.ok) { 'locked' } elseif ($r.grace) { 'grace' } else { 'ok' }); reason = "$($r.reason)"; message = "$($r.message)" }
     }
     return $out

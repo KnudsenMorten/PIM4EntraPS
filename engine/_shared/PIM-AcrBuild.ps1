@@ -98,7 +98,12 @@ function Start-PimAcrDockerBuild {
         [Parameter(Mandatory)][string[]]$ImageNames,
         [string]$DockerFilePath = 'SOLUTIONS/PIM4EntraPS/tools/pim-manager/Dockerfile',
         [int]$TimeoutSeconds = 3600,
-        [hashtable]$Arguments = @{}
+        [hashtable]$Arguments = @{},
+        # 🔴 A registry with public access Disabled refuses ACR's SHARED build agents ("client with IP ... is
+        # not allowed access") -- only a dedicated agent pool inside the VNet can build into it. Measured on a
+        # customer 2026-09-23: every nightly build failed after 11 s, so a private-registry environment could
+        # never update itself. Empty = the shared agents (a public registry needs nothing).
+        [string]$AgentPoolName
     )
     $args2 = @()
     foreach ($k in $Arguments.Keys) {
@@ -118,6 +123,7 @@ function Start-PimAcrDockerBuild {
         timeout         = $TimeoutSeconds
     }
     if ($args2.Count) { $body['arguments'] = $args2 }
+    if ("$AgentPoolName".Trim()) { $body['agentPoolName'] = "$AgentPoolName".Trim() }
 
     $p = (Get-PimAcrRegistryPath -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName) + '/scheduleRun'
     $run = Invoke-PimArm -Method POST -Path $p -Body $body -ApiVersion $script:PimAcrTasksApi
@@ -192,13 +198,14 @@ function Invoke-PimAcrRestBuild {
         [string]$DockerFilePath = 'SOLUTIONS/PIM4EntraPS/tools/pim-manager/Dockerfile',
         [int]$TimeoutSeconds = 1800,
         [hashtable]$Arguments = @{},
-        [scriptblock]$OnPoll
+        [scriptblock]$OnPoll,
+        [string]$AgentPoolName    # see Start-PimAcrDockerBuild: required for a registry with public access Disabled
     )
     $slot  = Get-PimAcrBuildUploadSlot -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -RegistryName $RegistryName
     $bytes = Send-PimAcrBuildContext -UploadUrl $slot.uploadUrl -Path $ContextPath
     $run   = Start-PimAcrDockerBuild -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
                 -RegistryName $RegistryName -RelativePath $slot.relativePath -ImageNames $ImageNames `
-                -DockerFilePath $DockerFilePath -TimeoutSeconds $TimeoutSeconds -Arguments $Arguments
+                -DockerFilePath $DockerFilePath -TimeoutSeconds $TimeoutSeconds -Arguments $Arguments -AgentPoolName $AgentPoolName
     $runId = Get-PimAcrRunId -Run $run
     if (-not $runId) { throw "Invoke-PimAcrRestBuild: no run id came back for $($ImageNames -join ', ')." }
     $w = Wait-PimAcrRun -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `

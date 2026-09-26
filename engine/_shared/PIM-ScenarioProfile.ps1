@@ -134,20 +134,8 @@ function Get-PimScenarioCatalog {
             summary          = "MSP master. GUI + SQL hosted in the master tenant. Updates from the internal AutomateIT source. Operator's customers. Pro (Design Partner) license."
             bindings         = [pscustomobject]@{ configVariant = 'msp'; updateSourceProfile = 'sync-automateit'; ringGated = $false; activeEdition = 'Pro-DesignPartner'; grantBasis = 'design-partner' }
         },
-        [pscustomobject]@{
-            id               = 'S4'
-            label            = 'MSP master tenant -- Community edition'
-            role             = 'msp-master'
-            edition          = 'community'
-            updateSource     = 'github'
-            hostingLocation  = 'in-tenant'
-            syncFileLocation = 'central-msp'
-            spnModel         = 'local-spn'
-            syncModel        = 'none'
-            licenseTier      = 'Pro'
-            summary          = 'MSP master, Community build. GUI + SQL hosted in the master tenant. Updates from GitHub. MSP/master features require a Pro license.'
-            bindings         = [pscustomobject]@{ configVariant = 'msp'; updateSourceProfile = 'git-pull'; ringGated = $false; activeEdition = 'Pro'; grantBasis = 'paid' }
-        },
+        # S4 (MSP master -- Community edition) is RETIRED, not supported (operator 2026-09-26: "msp editions will not be made in a
+        # free edition, only pro/paid ... msp is always a paid solution"). Its id stays reserved -- scenario ids are never renumbered.
         [pscustomobject]@{
             id               = 'S5'
             label            = 'MSP managed/slave tenant -- CENTRAL hosted (multi-tenant SPN)'
@@ -196,11 +184,22 @@ function Get-PimScenarioValue {
     return $null
 }
 
+$script:PimRetiredScenarios = @{ 'S4' = 'MSP master on the free Community edition is not supported -- MSP is always a paid (Pro) solution; use S3 with a Pro licence' }
+function Get-PimRetiredScenarioReason {
+    # '' for a supported or unknown id; the reason for a retired one.
+    param([string]$Id)
+    $k = "$Id".Trim().ToUpperInvariant()
+    if ($script:PimRetiredScenarios -is [hashtable] -and $script:PimRetiredScenarios.ContainsKey($k)) { return "$($script:PimRetiredScenarios[$k])" }
+    if ($k -eq 'S4') { return 'MSP master on the free Community edition is not supported -- MSP is always a paid (Pro) solution; use S3 with a Pro licence' }   # literal floor: $script: can be $null in a child scope
+    return ''
+}
+
 function Get-PimScenario {
     # Return the descriptor for a scenario id ('S1'..'S6'), case-insensitive.
     # $null if unknown (fail-safe -- the caller must handle).
     param([Parameter(Mandatory)][string]$Id)
     $want = "$Id".Trim().ToUpperInvariant()
+    if (Get-PimRetiredScenarioReason -Id $want) { return $null }   # retired: not a scenario
     foreach ($s in (Get-PimScenarioCatalog)) {
         if ("$($s.id)".ToUpperInvariant() -eq $want) { return $s }
     }
@@ -239,6 +238,10 @@ function Get-PimActiveScenario {
         if ("$id".Trim()) {
             $s = Get-PimScenario -Id $id
             if ($s) { return $s }
+            # A RETIRED scenario stored by an older release (S4: MSP on the free edition) is never read as the internal S1:
+            # it runs as the free single tenant (S2) -- the least-privileged shape -- and says so every time it is read.
+            $why = Get-PimRetiredScenarioReason -Id $id
+            if ($why) { Write-Warning "[scenario] the stored scenario '$id' is not supported: $why -- running as S2 (single tenant, free) until it is set to a supported scenario (Set-PimScenario)."; return (Get-PimScenario -Id 'S2') }
         }
     }
     # Safest default: single tenant, internal edition, no MSP, no ring pull.
@@ -339,10 +342,9 @@ function Resolve-PimScenarioContext {
 #   grantBasis           '' | paid | design-partner
 #   editionPayload       @{ edition; grantBasis; note } -- persist under the 'Edition'
 #                        setting key so Get-PimActiveEdition / Test-PimFeatureAvailable
-#                        gate on the scenario's tier (S2=Core hides advanced; S4=Pro
-#                        unlocks MSP/master; S1/S3/S5/S6=Pro-DesignPartner unlock all).
-#   mspFeaturesRequirePro $true when MSP/master features must be Pro-gated (S4 only:
-#                        Community distribution but the master features need Pro).
+#                        gate on the scenario's tier (S2=Core hides advanced; S1/S3/S5/S6=Pro-DesignPartner unlock all).
+#   mspFeaturesRequirePro $true when MSP/master features must be Pro-gated on a Community build. Always $false since S4
+#                        (MSP on the free edition) was retired 2026-09-26 -- there is no Community MSP scenario left.
 # ---------------------------------------------------------------------------
 function Get-PimScenarioEntryPlan {
     param([Parameter(Mandatory)][object]$Scenario)
@@ -355,8 +357,7 @@ function Get-PimScenarioEntryPlan {
     # Edition payload (the exact shape Resolve-PimEdition reads under the 'Edition' key).
     $note = "set by deployment scenario $($ctx.id) ($($ctx.role), $($ctx.distributionEdition))"
     $editionPayload = @{ edition = "$($ctx.activeEdition)"; grantBasis = "$($ctx.grantBasis)"; note = $note }
-    # S4 is the ONLY Community-distribution scenario whose MSP/master features still
-    # require a Pro license -- so the gate must be pro even though the build is community.
+    # (was S4 only: a Community-distribution MSP master. S4 is retired -- no scenario is community AND MSP.)
     $mspFeaturesRequirePro = ("$($ctx.distributionEdition)" -eq 'community' -and "$($ctx.role)" -eq 'msp-master')
     return [pscustomobject]@{
         id                    = "$($ctx.id)"
@@ -544,7 +545,7 @@ function Set-PimScenarioContext {
     # an MSP master gating which template version its managed tenants may pull). It is not
     # the gate: the decision comes from the vendored platform core in PIM-RingGate.ps1,
     # which PIM consumes rather than redefines. Do NOT confuse this with the ADMIN ring
-    # (admin.Ring <= tenant.Ring in PIM-Downlink.ps1) -- that is assignment scoping, a
+    # (tenant.Ring <= admin.Ring in PIM-Downlink.ps1, §77.20) -- that is assignment scoping, a
     # different axis that RING-1 does not replace.
     $global:PIM_ScenarioRingGated = $ctx.ringGated
     # The active scenario id (so subsequent Get-PimActiveScenario is stable in-process).
@@ -610,4 +611,11 @@ function Test-PimScenarioDescriptor {
 if ($PSScriptRoot -and -not (Get-Command Invoke-PimManagedDownlink -ErrorAction SilentlyContinue)) {
     $__pimDownlink = Join-Path $PSScriptRoot 'PIM-Downlink.ps1'
     if (Test-Path -LiteralPath $__pimDownlink) { . $__pimDownlink }
+}
+# REQ-REV-DOWN-1 / REQ-REN-1: the pull reads the bundle's authorised withdrawals through these.
+# Loaded beside the downlink itself -- without them Invoke-PimManagedDownlink still runs and simply
+# withdraws nothing (Get-Command guards), which is the safe direction.
+if ($PSScriptRoot -and -not (Get-Command Select-PimDownlinkIntents -ErrorAction SilentlyContinue)) {
+    $__pimDlIntents = Join-Path $PSScriptRoot 'PIM-DownlinkIntents.ps1'
+    if (Test-Path -LiteralPath $__pimDlIntents) { . $__pimDlIntents }
 }

@@ -16,7 +16,7 @@
     equal to the slave's -SlaveRing, or those previews describe a ring the tenant is not on.
 
 .PARAMETER ManagedTenantId / DisplayName / Ring / Tags
-    The managed tenant. Ring 0..2 (2 = test, 1 = pilot, 0 = broad) -- the MASTER'S COPY of the ring the tenant set
+    The managed tenant. Ring 0..2 (0 = dev, 1 = test, 2 = broad -- §77.20) -- the MASTER'S COPY of the ring the tenant set
     locally (see above). Tags: 'region:eu;wave:pilot' or an array.
 
 .PARAMETER Disable
@@ -35,7 +35,7 @@ param(
     [string]$SqlDatabase = 'PimPlatform',
     [string]$ManagedTenantId,
     [string]$DisplayName,
-    [ValidateRange(0, 2)][int]$Ring = 2,
+    [ValidateRange(0, 2)][int]$Ring = 0,
     [string[]]$Tags = @(),
     [string]$Notes = '',
     [switch]$Disable,

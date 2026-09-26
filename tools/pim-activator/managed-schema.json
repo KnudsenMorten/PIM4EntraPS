@@ -15,6 +15,13 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 100
+    },
+    "autoActivateMaxGroups": {
+      "title": "Auto-activate: maximum groups per device",
+      "description": "Per-device cap on how many groups a user may mark 'auto' (activated automatically when the popup opens). Not set = no limit. 0 = auto-activation is turned off on this device. N = at most N groups: a tick past the cap is refused, and if more are already ticked only the first N are activated. Clamped to 0-100. Device policy only -- never a user setting and never read from tenantCatalog.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
     }
   }
 }

@@ -353,6 +353,14 @@ function Send-PimLifecycleEscalations {
             Instance    = 'scheduler'
             WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
         }
+        # §79.8: an auto-disable links the OWNER page at that person, where the department owner extends the date.
+        if ($kind -eq 'admin-offboard' -and [int]$e.daysLeft -ge 0) {
+            $who = if ($it -and $it.PSObject.Properties['UserName'] -and "$($it.UserName)".Trim()) { "$($it.UserName)".Trim() } else { ("$($e.key)" -replace '^admin-offboard:', '') }
+            $tokens['PortalTab']   = 'owner'
+            $tokens['PortalQuery'] = "person=$who"
+            $tokens['AlertTitle']  = ("{0} will be disabled in {1} day(s)" -f $who, [int]$e.daysLeft)
+            $tokens['AlertDetail'] = ("{0}'s access ends on {1}. If they still need it, open the link below and extend the date -- nothing else is needed. If they do not, no action is required." -f $who, $when)
+        }
         $anySent = $false; $seenRcpt = @{}
         foreach ($sym in @($e.recipients)) {
             $rcpts = @()

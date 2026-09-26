@@ -63,7 +63,7 @@ function New-PimEnrolmentRequest {
     param(
         [Parameter(Mandatory)][string]$TenantId,
         [Parameter(Mandatory)][string]$DisplayName,
-        [Alias('RequestedRing')][int]$LocalRing = 2,
+        [Alias('RequestedRing')][int]$LocalRing = 0,
         [string]$Scenario = '',
         [string]$SubscriptionId = '',
         [string]$UplinkUri = '',

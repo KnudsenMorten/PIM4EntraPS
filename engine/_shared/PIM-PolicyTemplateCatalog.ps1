@@ -336,6 +336,31 @@ function Get-PimPolicyTemplateDescription {
         $lines.Add("The group's OWNER role gets its own policy too: activation at most $(if ($osec.activation) { $osec.activation.text } else { '(not set)' })$(if ($osec.activationChecks) { ", $($osec.activationChecks) required" }). Approval is never managed on the owner policy.")
     }
 
+    # 2026-09-21 (operator: "i need a edit button ... so i can finetune the templates"): the EFFECTIVE raw values the
+    # Manager's template editor starts from -- per policy part (member; owner for a group template). Only what
+    # Set-PimPolicyTemplateRules may change: the three expirations, what ACTIVATION asks for, and the default-recipient
+    # switch of each notification rule that is not a named-people redirect. The admin-path enablement is not here.
+    $editPart = {
+        param($exp, $enab, $notif, $legacyAct)
+        $e = [ordered]@{}
+        foreach ($k in @('EndUser_Assignment', 'Admin_Eligibility', 'Admin_Assignment')) {
+            $nd = Get-PimPolicyTplProp $exp $k
+            if ($null -ne $nd) { $e[$k] = [ordered]@{ maximumDuration = "$(Get-PimPolicyTplProp $nd 'maximumDuration')"; isExpirationRequired = [bool](Get-PimPolicyTplProp $nd 'isExpirationRequired') } }
+        }
+        $chk = @(@(Get-PimPolicyTplProp $enab 'EndUser_Assignment') | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
+        if (-not $chk.Count -and $null -ne $legacyAct) { $chk = @(@($legacyAct) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() }) }
+        $ns = @(foreach ($n in @($notif)) {
+            if ($null -eq $n -or "$(Get-PimPolicyTplProp $n 'recipientsSource')".Trim()) { continue }
+            [ordered]@{ recipientType = "$(Get-PimPolicyTplProp $n 'recipientType')"; caller = "$(Get-PimPolicyTplProp $n 'caller')"; level = "$(Get-PimPolicyTplProp $n 'level')"
+                        defaultRecipientsEnabled = [bool](Get-PimPolicyTplProp $n 'defaultRecipientsEnabled') }
+        })
+        [ordered]@{ expiration = $e; activationChecks = @($chk); notifications = @($ns) }
+    }
+    $d.edit = [ordered]@{
+        member = (& $editPart $(if ($rules.Contains('Expiration')) { $rules['Expiration'] } else { $null }) $en $(if ($rules.Contains('Notification')) { $rules['Notification'] } else { $null }) $legacy)
+        owner  = $(if ($rules.Contains('Owner') -and $null -ne $rules['Owner']) { & $editPart (Get-PimPolicyTplProp $rules['Owner'] 'Expiration') (Get-PimPolicyTplProp $rules['Owner'] 'Enablement') (Get-PimPolicyTplProp $rules['Owner'] 'Notification') $null } else { $null })
+    }
+
     $known = @('Expiration', 'Enablement', 'Approval', 'Notification', 'Owner', 'Member_Enablement_EndUser_Assignment_enabledRules', 'AuthenticationContext', 'AuthenticationContext_EndUser_Assignment')
     $other = New-Object System.Collections.Generic.List[object]
     foreach ($k in @($rules.Keys)) {
@@ -429,6 +454,9 @@ function Get-PimPolicyTemplatesView {
 
     # Usage: explicit (the row names it) and by-default (blank -> the type's standard), per template id.
     $explicit = @{}; $byDefault = @{}; $unknown = @{}
+    # 2026-09-21 (operator: "i must see exactly where the policy is linked in the used by"): the delegations that get a
+    # template through the default (blank PolicyTemplate) are LISTED too, not only counted.
+    $defaultRows = @{}
     foreach ($ent in $ents) {
         $e = $ent.entity
         if (-not $RowsByEntity.ContainsKey($e)) { continue }
@@ -440,6 +468,8 @@ function Get-PimPolicyTemplatesView {
                 if (-not $byDefault.ContainsKey($did)) { $byDefault[$did] = [ordered]@{} }
                 if (-not $byDefault[$did].Contains($e)) { $byDefault[$did][$e] = 0 }
                 $byDefault[$did][$e]++
+                if (-not $defaultRows.ContainsKey($did)) { $defaultRows[$did] = New-Object System.Collections.Generic.List[object] }
+                [void]$defaultRows[$did].Add([ordered]@{ entity = $e; kind = $ent.kind; label = (Get-PimPolicyTemplateRowLabel -Entity $e -Row $r); fits = $true; byDefault = $true })
                 continue
             }
             $item = [ordered]@{ entity = $e; kind = $ent.kind; label = (Get-PimPolicyTemplateRowLabel -Entity $e -Row $r); fits = $true }
@@ -481,6 +511,8 @@ function Get-PimPolicyTemplatesView {
             misfits = @($rows | Where-Object { -not $_.fits }).Count
             byDefault = $bd
             byDefaultTotal = $bdTotal
+            defaultRows = @(if ($defaultRows.ContainsKey("$id")) { $defaultRows["$id"].ToArray() | Select-Object -First $MaxRowsPerTemplate })
+            defaultRowsTruncated = [bool]($defaultRows.ContainsKey("$id") -and $defaultRows["$id"].Count -gt $MaxRowsPerTemplate)
         }
         [void]$tpls.Add($desc)
     }

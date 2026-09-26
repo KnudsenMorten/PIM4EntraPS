@@ -251,6 +251,7 @@ function Get-PimTemplatePackPlan {
         }
     }
     $adoptedTags = @{}; foreach ($a in $adopted) { $adoptedTags["$($a.packTag)".ToLowerInvariant()] = $true }
+    $keyTaken = New-Object System.Collections.Generic.List[object]
     $retagRow = {
         param($Row)
         $cols = @('GroupTag', 'SourceGroupTag', 'TargetGroupTag')
@@ -270,10 +271,18 @@ function Get-PimTemplatePackPlan {
         if ($known -notcontains $base) { continue }
         if (-not $CurrentRowsByBase.ContainsKey($base)) { throw "Get-PimTemplatePackPlan: no current rows were given for '$base' (pack '$($tpl.id)') -- read the entity first; an unread entity is not an empty one." }
         $existing = @{}
+        # 🔴 §77.24 (EFIF 2026-09-21: "14 store key(s) of PIM-Assignments-Workloads are used by more than one row"): the
+        # pack is diffed on its own finer key (Workloads: Workload|GroupTag|RoleName) but the STORE keeps one row per
+        # Get-PimStoreRowKey (Workloads: GroupTag alone). A pack row whose store key an existing row already holds can
+        # never be added -- offering it staged a second row for the group and the commit was refused. Such rows are
+        # reported in keyTaken, not offered.
+        $storeKeyed = [bool](Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)
+        $storeKeys = @{}
         foreach ($r in @($CurrentRowsByBase[$base])) {
             if ($null -eq $r) { continue }
             $k = Get-PimTemplateRowKey -Base $base -Row ([pscustomobject]$r)
             if ($k -and $k -ne '|' ) { $existing[$k.ToLowerInvariant()] = $true }
+            if ($storeKeyed) { $sk = Get-PimStoreRowKey -Base $base -Row ([pscustomobject]$r); if ($sk) { $storeKeys[$sk.ToLowerInvariant()] = $true } }
         }
         $miss = New-Object System.Collections.ArrayList
         foreach ($tr in @($baseProp.Value)) {
@@ -287,10 +296,30 @@ function Get-PimTemplatePackPlan {
             $conv = & $retagRow $conv
             $k = Get-PimTemplateRowKey -Base $base -Row $conv
             if ($k -and -not $existing.ContainsKey($k.ToLowerInvariant())) {
+                $sk = if ($storeKeyed) { "$(Get-PimStoreRowKey -Base $base -Row $conv)".ToLowerInvariant() } else { '' }
+                if ($sk -and $storeKeys.ContainsKey($sk)) { $keyTaken.Add([ordered]@{ base = $base; storeKey = $sk; groupTag = "$($conv.GroupTag)" }); continue }
+                if ($sk) { $storeKeys[$sk] = $true }   # two pack rows sharing one store key: only the first is offered
                 [void]$miss.Add($conv)
             }
         }
         if ($miss.Count -gt 0) { $missing[$base] = $miss.ToArray(); $missingCount += $miss.Count }
+    }
+    # §77.24: a unit is never offered half -- when a group's workload BINDING was withheld (its store key taken), its
+    # DEFINITION is withheld too, or the import would create a group with no workload role (an orphan).
+    $takenBindTags = @{}
+    foreach ($kt in $keyTaken) { if (@('PIM-Assignments-Workloads', 'PIM-Assignments-Intune', 'PIM-Assignments-Defender') -contains $kt.base -and "$($kt.groupTag)".Trim()) { $takenBindTags["$($kt.groupTag)".Trim().ToLowerInvariant()] = $true } }
+    if ($takenBindTags.Count) {
+        foreach ($mb in @($missing.Keys)) {
+            if ("$mb" -notlike 'PIM-Definitions-*' -or "$mb" -eq 'PIM-Definitions-AU') { continue }
+            $keepRows = New-Object System.Collections.ArrayList
+            foreach ($dr in @($missing[$mb])) {
+                if ($takenBindTags.ContainsKey("$($dr.GroupTag)".Trim().ToLowerInvariant())) {
+                    $keyTaken.Add([ordered]@{ base = "$mb"; storeKey = "$($dr.GroupTag)".ToLowerInvariant(); groupTag = "$($dr.GroupTag)"; reason = 'its workload binding cannot be added (store key taken)' })
+                    $missingCount--
+                } else { [void]$keepRows.Add($dr) }
+            }
+            if ($keepRows.Count) { $missing[$mb] = $keepRows.ToArray() } else { $missing.Remove($mb) }
+        }
     }
     return [ordered]@{
         id = "$($tpl.id)"; name = "$($tpl.name)"; version = $tpl.version
@@ -298,6 +327,8 @@ function Get-PimTemplatePackPlan {
         totalRows = $totalCount; missingCount = $missingCount; missing = $missing
         units = @(Get-PimTemplateImportUnits -Missing $missing)
         placeholderSkipped = $placeholderSkipped
+        # §77.24: pack rows NOT offered because an existing row already holds their store key (one row per store key).
+        keyTaken = @($keyTaken.ToArray())
         # Pack groups the store already defines (by tag, or by tenant GroupName under another tag): not re-defined; the
         # pack's rows for them were re-tagged to storeTag.
         adopted = @($adopted.ToArray())

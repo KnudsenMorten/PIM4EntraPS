@@ -145,6 +145,19 @@ function Get-PimNamingConvention {
         # the group-name resolver): PIM-{Workload}-{Scope}-{Permission/Role}-{Level}-{Tier}-{Plane}-{Platform}
         # e.g. PIM-AzDevOps-OrgCollectionAdministrators-L2-T1-WDP-ID.
         ResourceGroupPattern          = 'PIM-{Workload}-{Scope}-{Permission}-L{Level}-T{Tier}-{Plane}-{Platform}'
+        # Operator 2026-09-21: "you must add them in the naming conventions so i can use them as variables" -- the
+        # values the wizards and the engine had HARD-CODED. Each default is exactly the value that was hard-coded, so
+        # a tenant that never touches them gets byte-identical tags, names and AUs.
+        # Direct-group types: the TAG prefix ({GroupTypePrefix}; the rest of the tag is {ShortName}) ...
+        GroupTypePrefixes             = [ordered]@{ role = 'ROLE-'; organisation = 'ORG-'; department = 'DEPT-'; project = 'PROJ-'; crossorg = 'CORG-' }
+        # ... and the administrative unit a new group of that type is placed in.
+        GroupTypeAdminUnits           = [ordered]@{ role = 'PIM-ROLES'; organisation = 'PIM-ORGANIZATION'; department = 'PIM-DEPARTMENTS'; project = 'PIM-PROJECTS'; crossorg = 'PIM-CROSSORG' }
+        # Permission groups: the AU by privilege level.
+        PermissionGroupAdminUnits     = [ordered]@{ L0 = 'PIM-L0'; L1 = 'PIM-L1'; L2 = 'PIM-L2' }
+        # Display name of an administrative unit the wizard creates ({AdminUnit} = its tag without 'PIM-').
+        AdminUnitNamePattern          = 'PIM-Groups-{AdminUnit}'
+        # The service segment at the start of a permission-group tag ({Service}).
+        ServiceNames                  = [ordered]@{ entra = 'Entra-ID'; azure = 'Azure'; powerbi = 'PowerBI'; powerplatform = 'PowerPlatform'; bundle = 'Bundle' }
     }
     $conv = $defaults.Clone()
     # -ShippedOnly: the defaults as SHIPPED, ignoring this environment's stored values. The import
@@ -265,10 +278,18 @@ function Expand-PimNamePattern {
         [Parameter(Mandatory)][string]$Pattern,
         [hashtable]$Tokens = @{}
     )
+    # Operator 2026-09-21: "make sure i can use any variables here" -- a token may sit INSIDE another token's
+    # value (an admin-type prefix 'adm-{TenantCommonName}-', a suffix '-{AdminWord}'). One pass in hashtable
+    # order expanded such a nested token only when its key happened to come later, so the same setting worked on
+    # one run and not the next. Repeat until nothing changes; the pass cap stops a value that names itself.
     $out = $Pattern
-    foreach ($k in @($Tokens.Keys)) {
-        $val = "$($Tokens[$k])"
-        $out = [regex]::Replace($out, [regex]::Escape('{' + $k + '}'), [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $val }, 'IgnoreCase')
+    for ($pass = 0; $pass -lt 5; $pass++) {
+        $before = $out
+        foreach ($k in @($Tokens.Keys)) {
+            $val = "$($Tokens[$k])"
+            $out = [regex]::Replace($out, [regex]::Escape('{' + $k + '}'), [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $val }, 'IgnoreCase')
+        }
+        if ($out -ceq $before) { break }
     }
     return $out
 }
@@ -294,7 +315,16 @@ function Resolve-PimAdminName {
         [string]$AdminType,                       # internal-adminuser | external-adminuser | external-guest
         [string]$Environment,                     # entra | ad
         [string]$Platform,                        # legacy alias for -Environment (ID/AD)
-        [switch]$HighPriv
+        [switch]$HighPriv,
+        # Operator 2026-09-21: "in the naming we need to have the {Company} as a variable to use - cnsultant naming
+        # could be KONS-{Company}-{Initial}-{Tier}-c". {Company} = the admin's OWN company (the row's Company
+        # column, which also becomes the account's companyName) -- per admin, unlike {TenantCommonName}. {Tier} /
+        # {Level} = the admin's tier / level, the same tokens group names already use ('1', not 'T1').
+        # All three are blank when not given, and a blank token disappears (the '--' collapse below), so every
+        # existing pattern renders byte-identical names.
+        [string]$Company,
+        [string]$Tier,
+        [string]$Level
     )
     $conv = Get-PimNamingConvention
     $pat  = if ($HighPriv) { "$($conv.AdminAccountPatternHighPriv)" } else { "$($conv.AdminAccountPattern)" }
@@ -335,9 +365,15 @@ function Resolve-PimAdminName {
         # Empty by default, and the '--' collapse below removes the separator it leaves behind, so every
         # existing tenant renders byte-identical names.
         TenantCommonName  = (ConvertTo-PimNamePart "$($conv.TenantCommonName)")
+        Company           = (ConvertTo-PimNamePart $Company)
+        # 'T1' / 'L2' are accepted and reduced to the number, because the pattern supplies the letter (T{Tier}).
+        Tier              = (ConvertTo-PimNamePart ("$Tier".Trim() -replace '^(?i)T(?=\d)', ''))
+        Level             = (ConvertTo-PimNamePart ("$Level".Trim() -replace '^(?i)L(?=\d)', ''))
     }
     # collapse any doubled separator a blank token may have left.
     $name = $name -replace '--+', '-'
+    # ...and one a blank token left at either end ('KONS-{Company}-...' with no company would otherwise start 'KONS--').
+    $name = $name.Trim('-')
     # operator convention: admin account names are lower-cased.
     $name = $name.ToLowerInvariant()
     $upnSuffix = "$($conv.AdminAccountUpnSuffix)".Trim()
@@ -408,29 +444,185 @@ function Get-PimGroupNameAffixes {
     return [pscustomobject]@{ prefix = $p.Substring(0, $i); suffix = $p.Substring($i + 1); pattern = $pat }
 }
 
+function Get-PimNamingMapValue {
+    # PURE-ish. One entry of a naming MAP setting (GroupTypePrefixes, ServiceNames, ...), case-insensitive key; the
+    # shipped default for that key when the tenant's map lacks it or holds a blank. Never throws.
+    param([Parameter(Mandatory)][string]$Map, [Parameter(Mandatory)][string]$Key)
+    $want = "$Key".ToLowerInvariant()
+    # 🪤 No intermediate list of (key, value) pairs: a ONE-entry map made it a single pair that PowerShell unrolled
+    # into two loose strings, so the key was never found and a tenant value silently lost to the default.
+    foreach ($src in @((Get-PimNamingConvention -Key $Map), (Get-PimNamingConvention -Key $Map -ShippedOnly))) {
+        if ($null -eq $src) { continue }
+        if ($src -is [System.Collections.IDictionary]) {
+            foreach ($k in @($src.Keys)) { if ("$k".ToLowerInvariant() -eq $want -and "$($src[$k])".Trim()) { return "$($src[$k])".Trim() } }
+        } else {
+            foreach ($pp in @($src.PSObject.Properties)) { if ("$($pp.Name)".ToLowerInvariant() -eq $want -and "$($pp.Value)".Trim()) { return "$($pp.Value)".Trim() } }
+        }
+    }
+    return ''
+}
+
+function Get-PimServiceName {
+    # The service segment of a permission-group tag ({Service}): pim.Settings NamingConventions.ServiceNames[<key>]
+    # (entra / azure / powerbi / powerplatform / bundle), defaulting to the value that used to be hard-coded.
+    param([Parameter(Mandatory)][string]$Key)
+    $v = Get-PimNamingMapValue -Map 'ServiceNames' -Key $Key
+    if ($v) { return $v }
+    return $Key
+}
+
+function Get-PimPermissionGroupAdminUnit {
+    # The AU a permission group of privilege level L<n> is placed in (PermissionGroupAdminUnits), default PIM-L<n>.
+    param([Parameter(Mandatory)][string]$Level)
+    $k = "L$("$Level".Trim() -replace '^(?i)L', '')"
+    $v = Get-PimNamingMapValue -Map 'PermissionGroupAdminUnits' -Key $k
+    if ($v) { return $v }
+    return "PIM-$k"
+}
+
+function Expand-PimGroupNamePattern {
+    <#
+      PURE. A GROUP-name pattern with its tokens filled from -Tokens (case-insensitive keys, values used verbatim).
+      Operator 2026-09-21 ("where is this extr underscore __ coming from" / "you must add them in the naming
+      conventions so i can use them as variables"): the old rule kept only {Role} and deleted every other token,
+      so 'grp-e-PIM_{Department}_{Role}-T{Tier}{Platform}' became 'grp-e-PIM__ROLE-x-T' -- a doubled '_', a bare
+      'T', no platform suffix. Now every token gets its value, and a token with NO value disappears cleanly:
+        * with ONE of the separators around it ('_{Department}_' -> '_'),
+        * with a single letter glued to it ('-T{Tier}' -> '-': T{Tier} / L{Level} are the convention),
+        * at either end, with the separator that joined it.
+      An UNKNOWN token (no key in -Tokens) is treated as blank -- the old rule deleted those too, so default
+      patterns ('PIM-{Role}-{Department}') render byte-identical names.
+    #>
+    [CmdletBinding()] param([Parameter(Mandatory)][AllowEmptyString()][string]$Pattern, [hashtable]$Tokens = @{})
+    $map = @{}
+    foreach ($k in @($Tokens.Keys)) { $map["$k".ToLowerInvariant()] = "$($Tokens[$k])" }
+    $blank = [string][char]2
+    $s = [regex]::Replace($Pattern, '\{([A-Za-z]+)\}', [System.Text.RegularExpressions.MatchEvaluator]{
+        param($m) $k = $m.Groups[1].Value.ToLowerInvariant(); if ($map.ContainsKey($k) -and "$($map[$k])" -ne '') { $map[$k] } else { $blank } })
+    $b = [regex]::Escape($blank)
+    $s = [regex]::Replace($s, "([-_.])[A-Za-z]$b", "`$1$blank")          # '-T{Tier}' with no tier -> '-'
+    for ($i = 0; $i -lt 10 -and $s.Contains($blank); $i++) {
+        $before = $s
+        $s = [regex]::Replace($s, "([-_.])(?:$b)+[-_.]", '$1')           # '_{X}_' -> '_'
+        $s = [regex]::Replace($s, "^(?:$b)+[-_.]?", '')                  # leading blank + its separator
+        $s = [regex]::Replace($s, "[-_.]?(?:$b)+$", '')                  # trailing blank + its separator
+        if ($s -ceq $before) { break }
+    }
+    $s = $s.Replace($blank, '')
+    $s = $s -replace '-{2,}', '-' -replace '_{2,}', '_'
+    return $s.Trim('-', '_')
+}
+
+function Get-PimGroupNameTokensFromTag {
+    <#
+      PURE. What a TAG alone says about the name tokens: {Role} = the tag; the tag grammar
+      '<Service>-<Name>-L<n>-T<n>-<Plane>-<Domain>' fills {Service} {Level} {Tier} {Plane} {Domain}; a direct-group
+      tag starting with a configured GroupTypePrefix fills {GroupTypePrefix} + {ShortName}; the tenant-level tokens
+      ({TenantCommonName}, {AdminWord}, {Platform} / {EnvironmentSuffix} of the default environment) always.
+    #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Tag)
+    $t = "$Tag".Trim()
+    $conv = Get-PimNamingConvention
+    $tok = @{ Role = $t }
+    $m = [regex]::Match($t, '(?i)^(?<svc>[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)-.*-L(?<lvl>\d+)-T(?<tier>\d+)-(?<code>[A-Za-z]+)-(?<dom>[A-Za-z]+)')
+    if ($m.Success) {
+        $tok.Service = $m.Groups['svc'].Value; $tok.Level = $m.Groups['lvl'].Value; $tok.Tier = $m.Groups['tier'].Value
+        $tok.Plane = $m.Groups['code'].Value; $tok.Domain = $m.Groups['dom'].Value
+    }
+    $gtp = $conv.GroupTypePrefixes
+    $vals = @()
+    if ($gtp -is [System.Collections.IDictionary]) { $vals = @($gtp.Values) } elseif ($gtp) { $vals = @($gtp.PSObject.Properties | ForEach-Object { $_.Value }) }
+    foreach ($p in @($vals | ForEach-Object { "$_" } | Where-Object { $_ } | Sort-Object Length -Descending)) {
+        if ($t.StartsWith($p, [System.StringComparison]::OrdinalIgnoreCase) -and $t.Length -gt $p.Length) {
+            $tok.GroupTypePrefix = $t.Substring(0, $p.Length); $tok.ShortName = $t.Substring($p.Length); break
+        }
+    }
+    $tok.TenantCommonName = ConvertTo-PimNamePart "$($conv.TenantCommonName)"
+    $tok.AdminWord = $(if ("$($conv.AdminWord)".Trim()) { "$($conv.AdminWord)".Trim() } else { 'Admin' })
+    $sfx = ''; try { $sfx = "$(Get-PimEnvironmentSuffix -Environment $null)" } catch { $sfx = '' }
+    $tok.Platform = $sfx; $tok.EnvironmentSuffix = $sfx
+    return $tok
+}
+
 function Resolve-PimGroupNameFromTag {
-    # PURE. GroupTag -> the group NAME under the tenant's pattern (or -Pattern). The tag is kept verbatim (no
-    # sanitising: it is already the tenant's identifier). Blank tag -> ''.
-    [CmdletBinding()] param([AllowNull()][string]$Tag, [string]$Pattern)
+    <#
+      PURE. GroupTag -> the group NAME under the tenant's pattern (or -Pattern). The tag is kept verbatim (it is
+      already the tenant's identifier). Blank tag -> ''.
+      -Tokens: values the CALLER knows (a wizard's department, tier, ...) -- they win over what the tag says.
+      -Legacy: the pre-2026-09-21 rule (only the text around {Role}, every other token deleted). Lookups of
+      EXISTING groups try it as well, so a group named under the old rule is still found.
+      A pattern WITHOUT {Role} keeps its old meaning: the literal text before the first token + the tag.
+    #>
+    [CmdletBinding()] param([AllowNull()][string]$Tag, [string]$Pattern, [hashtable]$Tokens = @{}, [switch]$Legacy)
     $t = "$Tag".Trim()
     if (-not $t) { return '' }
     $a = Get-PimGroupNameAffixes -Pattern $Pattern
-    return ("{0}{1}{2}" -f $a.prefix, $t, $a.suffix)
+    if ($Legacy -or "$($a.pattern)" -notmatch '(?i)\{Role\}') { return ("{0}{1}{2}" -f $a.prefix, $t, $a.suffix) }
+    $tok = Get-PimGroupNameTokensFromTag -Tag $t
+    foreach ($k in @($Tokens.Keys)) { if ($null -ne $Tokens[$k] -and "$($Tokens[$k])" -ne '') { $tok["$k"] = "$($Tokens[$k])" } }
+    $tok.Role = $t
+    return (Expand-PimGroupNamePattern -Pattern "$($a.pattern)" -Tokens $tok)
+}
+
+function Get-PimGroupNameCandidatesFromTag {
+    # PURE. Every name an EXISTING group for this tag may carry under the tenant's pattern: the current rule first,
+    # then the pre-2026-09-21 rule (tokens deleted) -- de-duplicated. For LOOKUPS; creation uses the first.
+    [CmdletBinding()] param([AllowNull()][string]$Tag, [string]$Pattern)
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($n in @((Resolve-PimGroupNameFromTag -Tag $Tag -Pattern $Pattern), (Resolve-PimGroupNameFromTag -Tag $Tag -Pattern $Pattern -Legacy))) {
+        $v = "$n".Trim(); if ($v -and -not $out.Contains($v)) { $out.Add($v) }
+    }
+    return $out.ToArray()
 }
 
 function ConvertFrom-PimGroupNameToTag {
-    # PURE. The inverse: strip the pattern's literal prefix/suffix from a NAME. A name that does not carry them is
-    # NOT this pattern's -> '' (there is deliberately no 'strip a leading PIM-' fallback: that is the generic
-    # assumption REQ-U removes).
+    <#
+      PURE. The inverse: the TAG inside a group NAME. A name that is not this pattern's -> '' (there is deliberately
+      no 'strip a leading PIM-' fallback: that is the generic assumption REQ-U removes).
+      1. the pre-2026-09-21 rule (strip the literal text around {Role}) -- how existing groups are named;
+      2. a regex built from the pattern (2026-09-21, tokens now carry values): tenant-level tokens as their
+         configured literals, {Platform} as one of the configured suffixes, every per-group token as an OPTIONAL
+         segment with its separator, {Role} as the tag. A tag that itself contains the separator a per-group token
+         uses can be ambiguous; rule 1 wins whenever it applies.
+    #>
     [CmdletBinding()] param([AllowNull()][string]$Name, [string]$Pattern)
     $n = "$Name".Trim()
     if (-not $n) { return '' }
     $a = Get-PimGroupNameAffixes -Pattern $Pattern
     $pre = "$($a.prefix)"; $suf = "$($a.suffix)"
-    if ($n.Length -le ($pre.Length + $suf.Length)) { return '' }
-    if ($pre -and -not $n.StartsWith($pre, [System.StringComparison]::OrdinalIgnoreCase)) { return '' }
-    if ($suf -and -not $n.EndsWith($suf, [System.StringComparison]::OrdinalIgnoreCase)) { return '' }
-    return $n.Substring($pre.Length, $n.Length - $pre.Length - $suf.Length)
+    if ($n.Length -gt ($pre.Length + $suf.Length) -and
+        (-not $pre -or $n.StartsWith($pre, [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $suf -or $n.EndsWith($suf, [System.StringComparison]::OrdinalIgnoreCase))) {
+        return $n.Substring($pre.Length, $n.Length - $pre.Length - $suf.Length)
+    }
+    $pat = "$($a.pattern)"
+    if ($pat -notmatch '(?i)\{Role\}') { return '' }
+    $conv = Get-PimNamingConvention
+    $tcn = ConvertTo-PimNamePart "$($conv.TenantCommonName)"
+    $aw  = if ("$($conv.AdminWord)".Trim()) { "$($conv.AdminWord)".Trim() } else { 'Admin' }
+    $sfxs = @()
+    $es = $conv.EnvironmentSuffixes
+    if ($es -is [System.Collections.IDictionary]) { $sfxs = @($es.Values) } elseif ($es) { $sfxs = @($es.PSObject.Properties | ForEach-Object { $_.Value }) }
+    $sfxAlt = (@($sfxs | ForEach-Object { "$_" } | Where-Object { $_ } | ForEach-Object { [regex]::Escape($_) }) -join '|')
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('^')
+    foreach ($m in [regex]::Matches($pat, '([-_.]?[A-Za-z]?)\{([A-Za-z]+)\}|([^{]+?)(?=[-_.]?[A-Za-z]?\{|$)')) {
+        if ($m.Groups[2].Success) {
+            $lead = [regex]::Escape($m.Groups[1].Value); $k = $m.Groups[2].Value.ToLowerInvariant()
+            switch ($k) {
+                'role'             { [void]$sb.Append("$lead(?<tag>.+?)") }
+                'tenantcommonname' { if ($tcn) { [void]$sb.Append("(?:$lead$([regex]::Escape($tcn)))?") } }
+                'adminword'        { [void]$sb.Append("(?:$lead$([regex]::Escape($aw)))?") }
+                { $_ -in 'platform','environmentsuffix' } { if ($sfxAlt) { [void]$sb.Append("(?:$lead(?:$sfxAlt))?") } }
+                default            { [void]$sb.Append("(?:$lead[A-Za-z0-9.]+)?") }
+            }
+        } elseif ($m.Groups[3].Success) { [void]$sb.Append([regex]::Escape($m.Groups[3].Value)) }
+    }
+    [void]$sb.Append('$')
+    $mm = $null
+    try { $mm = [regex]::Match($n, $sb.ToString(), 'IgnoreCase') } catch { return '' }
+    if ($mm -and $mm.Success -and $mm.Groups['tag'].Value) { return $mm.Groups['tag'].Value.Trim('-', '_') }
+    return ''
 }
 
 function Get-PimGroupNamePrefix {
@@ -539,7 +731,22 @@ function ConvertTo-PimAdminNameRegex {
         # alternation of the literal values; an empty value -> the alternative may be absent.
         $hasEmpty = $false
         $lits = New-Object System.Collections.Generic.List[string]
-        foreach ($v in $vals) { if ($v -eq '') { $hasEmpty = $true } else { [void]$lits.Add([regex]::Escape($v)) } }
+        # 2026-09-21 ("make sure i can use any variables here"): a prefix/suffix may carry tokens. Render it the way
+        # the generator does -- {AdminWord} / {TenantCommonName} as their configured literals, any other token as the
+        # generic class, doubled dashes collapsed -- instead of escaping the braces as literal text, which made every
+        # correctly generated name fail validation.
+        $aw  = if ("$($conv.AdminWord)".Trim()) { "$($conv.AdminWord)".Trim() } else { 'Admin' }
+        $tcn = ConvertTo-PimNamePart "$($conv.TenantCommonName)"
+        $mark = [string][char]1
+        foreach ($v in $vals) {
+            if ($v -eq '') { $hasEmpty = $true; continue }
+            $r = [regex]::Replace($v, '\{AdminWord\}', [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $aw }, 'IgnoreCase')
+            $r = [regex]::Replace($r, '\{TenantCommonName\}', [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $tcn }, 'IgnoreCase')
+            $r = [regex]::Replace($r, '\{[A-Za-z]+\}', $mark)
+            $r = $r -replace '--+', '-'
+            if ($r -eq '') { $hasEmpty = $true; continue }
+            [void]$lits.Add(([regex]::Escape($r)).Replace($mark, '[A-Za-z0-9.\-]*'))
+        }
         if ($lits.Count -eq 0) { return '' }   # nothing but empties -> token contributes nothing
         $alt = ($lits -join '|')
         if ($hasEmpty) { return "(?:$alt)?" } else { return "(?:$alt)" }

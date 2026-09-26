@@ -314,6 +314,36 @@ function Get-PimPrincipalNamesFromBlob {
     return @($out | Select-Object -Unique)
 }
 
+function ConvertFrom-PimEdgeHeaderValue {
+    <#
+      PURE. Every spelling an auth edge may have written a name claim into an ASCII-only HTTP header:
+      percent-encoded ('S%C3%B8rensen'), form-encoded with '+' for spaces, or both. Returns the decoded
+      forms (never the input, and never $null entries) -- the caller compares them ALONGSIDE the raw
+      value, so a decode that fails or changes nothing simply adds nothing.
+      🔒 Decoding is deliberately tolerant: a malformed escape returns no extra form rather than
+      throwing, because a header this function cannot read must fall through to the normal rejection,
+      not take the request down.
+    #>
+    [CmdletBinding()]
+    param([string]$Value = '')
+    $v = "$Value"
+    if (-not $v.Trim()) { return @() }
+    $out = New-Object System.Collections.Generic.List[string]
+    $try = {
+        param($s)
+        if ($null -eq $s -or "$s" -eq '' -or "$s" -eq $v) { return }
+        if (-not $out.Contains("$s")) { $out.Add("$s") }
+    }
+    # 1. percent-decoding only (a name that genuinely contains '+' must survive)
+    try { & $try ([System.Uri]::UnescapeDataString($v)) } catch { }
+    # 2. form-decoding: '+' means space as well
+    if ($v.IndexOf('+') -ge 0) {
+        try { & $try ([System.Uri]::UnescapeDataString($v.Replace('+', ' '))) } catch { }
+        try { & $try ($v.Replace('+', ' ')) } catch { }
+    }
+    return @($out.ToArray())
+}
+
 function Test-PimEdgeHeadersConsistent {
     # PURE -- LAYER 1. Given the raw header values, decide whether this request carries a
     # coherent auth-edge identity. Returns @{ trusted; identity; reason }.
@@ -356,8 +386,24 @@ function Test-PimEdgeHeadersConsistent {
     # -- see Get-PimPrincipalNamesFromBlob for the measured case. A header that matches NONE of the
     # blob's names is still rejected, which is the property this check exists for.
     $blobNames = @(Get-PimPrincipalNamesFromBlob -Blob $decoded)
+    # 🔴 THE HEADER IS URL-ENCODED, THE BLOB IS NOT (live, EFIF, 2026-09-22). An HTTP header may only
+    # carry ASCII, so the auth edge percent-encodes the name claim and writes spaces as '+':
+    #     header 'Kasper+Hjerrild+Rold+S%C3%B8rensen+(adm-e-khrs-t0-c)'
+    #     blob   'Kasper Hjerrild Rold Sørensen (adm-e-khrs-t0-c)'
+    # Compared literally those never match, so THIS CHECK LOCKED OUT every user whose display name
+    # carries a space or a non-ASCII letter -- the measured 401 was
+    #     "no authenticated principal -- this app must be reached through its authentication edge",
+    # which reads as a missing auth edge when the edge was working perfectly.
+    # 🔑 The decoded form is compared IN ADDITION to the raw one: decoding is a widening of what the
+    # check accepts for the same identity, never of WHICH identities it accepts -- a header that
+    # matches none of the blob's names, encoded or not, is still rejected.
+    $nameForms = @($name)
+    foreach ($dec in @(ConvertFrom-PimEdgeHeaderValue -Value $name)) { if ($dec -and $nameForms -notcontains $dec) { $nameForms += $dec } }
     $nameAgrees = $false
-    foreach ($bn in $blobNames) { if ("$bn".ToLowerInvariant() -eq $name.ToLowerInvariant()) { $nameAgrees = $true; break } }
+    foreach ($bn in $blobNames) {
+        foreach ($nf in $nameForms) { if ("$bn".ToLowerInvariant() -eq "$nf".ToLowerInvariant()) { $nameAgrees = $true; break } }
+        if ($nameAgrees) { break }
+    }
     if ($name -and -not $nameAgrees) {
         # List what the blob DID carry -- "disagrees with ('<one value>')" sent the last diagnosis
         # looking for a tampering that was not there, when the real answer was "the header is the

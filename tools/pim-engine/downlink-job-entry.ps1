@@ -21,7 +21,7 @@
       2. Composes the ring-gated downlink + the engine apply for the scenario by
          INVOKING the existing live wrapper setup/Invoke-PimScenarioRun.ps1, which:
             * managed (S5/S6) -> downlink-sync (pull the SIGNED master baseline ->
-              verify RSA-SHA256 -> ring-gate admin.Ring <= slave.Ring -> stage the
+              verify RSA-SHA256 -> ring-gate slave.Ring <= admin.Ring (§77.20) -> stage the
               per-tenant sync files -> APPLY into the slave via its own SPN) THEN
             * engine apply (admins + delegation groups/roles/AUs) -- which honours
               the mass-disable guard (empty desired never prunes; -Prune opt-in).
@@ -36,7 +36,7 @@
     local SPN). The cron Job's command always supplies this.
 
 .PARAMETER TenantId / SlaveRing
-    The managed/slave tenant id + the slave's OWN ring (0..2, default 2 = test). The ring
+    The managed/slave tenant id + the slave's OWN ring (0 = dev, 1 = test, 2 = broad; default 0). The ring
     is LOCAL: it is this job's argument, set in the slave, and it is authoritative. The
     master's platform.Tenants.Ring is only the master's copy and is never read here.
 
@@ -66,7 +66,14 @@
 param(
     [Parameter(Mandatory)][ValidateSet('S5','S6')][string]$Scenario,
     [Parameter(Mandatory)][string]$TenantId,
-    [ValidateRange(0,2)][int]$SlaveRing = 2,
+    # 🔑 A RING IS A SLAVE-LOCAL SETTING, so it must be settable WITHOUT rewriting the container's
+    # command line (operator, 2026-09-22: "ride must be ring 1 as today"). It was `-SlaveRing` only,
+    # so changing a tenant's ring meant editing the job's args -- a riskier edit than setting an
+    # environment variable, for the one value an operator is most likely to change.
+    # 🪤 An env-provided ring is ALWAYS in the dev-first order (0 dev, 1 test, 2 broad): the variable
+    # did not exist before that order did. It is therefore not $PSBoundParameters-bound, so the
+    # legacy conversion below correctly leaves it alone. An explicit -SlaveRing still wins.
+    [ValidateRange(0,2)][int]$SlaveRing = $(if ("$env:PIM_SlaveRing".Trim() -match '^[0-2]$') { [int]("$env:PIM_SlaveRing".Trim()) } else { 0 }),
     [string]$BaselineUrl     = $env:PIM_BaselineUrl,
     [string]$BaselineAccessToken = $env:PIM_BaselineAccessToken,
     [string]$BaselineDocPath = $env:PIM_BaselineDocPath,
@@ -96,7 +103,16 @@ $solRoot = (Resolve-Path (Join-Path $here '..\..')).Path
 $shared  = Join-Path $solRoot 'engine\_shared'
 
 JobLog "==== PIM4EntraPS scheduled downlink JOB starting ===="
-JobLog ("scenario={0} tenant={1} ring={2} mode={3}" -f $Scenario, $TenantId, $SlaveRing, $(if ($WhatIfMode) { 'WHATIF' } else { 'APPLY' }))
+# §77.20 -- THE RING ORDER (operator 2026-09-21: "ring 0 = dev, ring 1 = test, ring 2 = broad (all)"). A job built by
+# 2.4.388+ carries PIM_RingOrder=dev-first and its -SlaveRing is in that order. A job built earlier has no such variable:
+# its -SlaveRing is in the OLD order (0 = broad) and is converted here (new = 2 - old), so the tenant keeps exactly the
+# reach it had. Re-running the build (or setting PIM_RingOrder=dev-first with a dev-first -SlaveRing) ends the conversion.
+if ("$env:PIM_RingOrder".Trim() -ne 'dev-first' -and $PSBoundParameters.ContainsKey('SlaveRing')) {
+    $legacyRing = $SlaveRing
+    $SlaveRing = 2 - $legacyRing
+    JobLog ("ring: this job's -SlaveRing {0} is in the pre-2.4.388 order (0 = broad) -- read as ring {1} ({2}); set PIM_RingOrder=dev-first with -SlaveRing {1} to make it explicit" -f $legacyRing, $SlaveRing, @('dev', 'test', 'broad')[$SlaveRing]) 'WARN'
+}
+JobLog ("scenario={0} tenant={1} ring={2} ({4}) mode={3}" -f $Scenario, $TenantId, $SlaveRing, $(if ($WhatIfMode) { 'WHATIF' } else { 'APPLY' }), @('dev', 'test', 'broad')[$SlaveRing])
 
 # --- baseline source (a configuration check, no I/O): refuse if neither is present (fail-safe) -----------------------
 if (-not "$BaselineUrl".Trim() -and -not "$BaselineDocPath".Trim()) {
@@ -158,6 +174,8 @@ if (-not $mspLic.ok) { Stop-DownlinkJob -Code 2 -State failed -Detail "$($mspLic
 # Load the scenario + downlink + downlink-job cores (placement / verdict helpers).
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
 . (Join-Path $shared 'PIM-DownlinkJob.ps1')
+# §79.6: a central session revoke (signed intent) is QUEUED here as this tenant's own committed action -- New-PimChange.
+. (Join-Path $shared 'PIM-ChangeQueue.ps1')
 
 $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
 JobLog ("placement: {0}" -f $placement.reason)
@@ -217,11 +235,40 @@ $runArgs = @{
 }
 # IMP-13: arm the recognisability guard. Passed ONLY when known -- an empty list would look like
 # an explicit "no prefixes" rather than "not supplied", and the plan distinguishes the two.
+# 🔴 THE PREFIXES COME FROM THIS TENANT'S OWN SETTINGS (operator, 2026-09-22: "but why did we have an
+# orphaned pim_slaveadminprefixes" -> "it should reflect the settings").
+# PIM_SlaveAdminPrefixes was typed into the MSP build config at onboarding (PIM-MspBuild
+# `adminPrefixes`, validated only for BEING THERE) and pinned into this job's env. The tenant's real
+# admin naming lives in its own store, in `NamingConventions.AdminAccountPatterns` -- the value its
+# ENGINE uses. Two copies of one fact, nothing reconciling them: measured on the live pair, the env
+# said `Admin-,admin-` while the tenant's own setting said `adm-`, and the mismatch decided which
+# administrators were replicated. A deploy-time copy of a runtime setting can only drift.
+# 🔑 So the STORE wins, the env is a fallback for a store that has not been seeded yet, and a
+# disagreement is SAID rather than silently resolved.
+$__prefFromStore = @()
+try {
+    if (Get-Command Import-PimSettingsFromStore -ErrorAction SilentlyContinue) { [void](Import-PimSettingsFromStore) }
+    if (Get-Command Get-PimAdminAccountPrefixes -ErrorAction SilentlyContinue) {
+        $__prefFromStore = @(@(Get-PimAdminAccountPrefixes) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    }
+} catch { JobLog ("could not read this tenant's admin naming from its store: {0}" -f $_.Exception.Message) 'WARN' }
+$__prefFromEnv = @(@($SlaveAdminPrefixes) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+$__prefSource = ''
+if ($__prefFromStore.Count) {
+    $SlaveAdminPrefixes = $__prefFromStore
+    $__prefSource = "this tenant's own settings (NamingConventions.AdminAccountPatterns)"
+    if ($__prefFromEnv.Count -and (($__prefFromEnv -join ',') -ne ($__prefFromStore -join ','))) {
+        JobLog ("admin naming: the job's PIM_SlaveAdminPrefixes ({0}) DISAGREES with this tenant's own setting ({1}). The tenant's setting is used -- it is what its engine matches on. Remove the deploy-time value (or correct `adminPrefixes` in the build config) so there is one copy." -f ($__prefFromEnv -join ', '), ($__prefFromStore -join ', ')) 'WARN'
+    }
+} elseif ($__prefFromEnv.Count) {
+    $SlaveAdminPrefixes = $__prefFromEnv
+    $__prefSource = 'the job env (PIM_SlaveAdminPrefixes) -- this tenant has no AdminAccountPatterns in its store yet'
+}
 if (@($SlaveAdminPrefixes).Count) {
     $runArgs['SlaveAdminPrefixes'] = @($SlaveAdminPrefixes)
-    JobLog ("slave admin prefixes: {0} (IMP-13 recognisability guard ARMED)" -f (@($SlaveAdminPrefixes) -join ', '))
+    JobLog ("slave admin prefixes: {0} (from {1}) -- used to REPORT a naming mismatch; since 2.4.412 it never withholds an admin" -f (@($SlaveAdminPrefixes) -join ', '), $__prefSource)
 } else {
-    JobLog 'slave admin prefixes: NOT SUPPLIED -- the recognisability guard is INERT for this run, so an admin the slave cannot see would be recreated every tick. Set PIM_SlaveAdminPrefixes (Deploy-PimDownlinkJob -SlaveAdminPrefixes).' 'WARN'
+    JobLog 'slave admin prefixes: none known (no AdminAccountPatterns in this tenant''s store and no PIM_SlaveAdminPrefixes) -- a naming mismatch cannot be reported this run. Replication is unaffected.' 'WARN'
 }
 $retraction = Resolve-PimDownlinkRetractionOptIn -Value $AllowRetraction
 if ($retraction.allow) { $runArgs['AllowRetraction'] = $true; JobLog $retraction.reason 'WARN' }
@@ -287,7 +334,23 @@ $failedStep = ''
 foreach ($r in @($result)) { foreach ($s in @(Get-PimDownlinkJobValue -Object $r -Key 'steps')) { if ($s -and -not $s.ok -and -not $failedStep) { $failedStep = ("{0}: {1}" -f $s.step, $s.detail) } } }
 if ($ok) {
     JobLog ("==== downlink JOB SUCCEEDED ({0}) ====" -f $(if ($WhatIfMode) { 'planned' } else { 'applied' }))
-    Stop-DownlinkJob -Code 0 -State succeeded -Detail $(if ($WhatIfMode) { 'planned (WhatIf)' } else { 'pulled, verified and applied' })
+    # 🔴 THE REASON HAS TO SURVIVE THE CONTAINER (operator, 2026-09-22: "where in the logs can i find
+    # the reason"). The plan line -- how many admins were projected, what was excluded by policy or
+    # ring, how many groups will be created, which dependencies were auto-included -- was written to
+    # stdout only. A Container Apps execution keeps its replica for minutes, and this environment has
+    # no Log Analytics workspace, so an hour later the one sentence that explains the run is simply
+    # gone: the Manager showed "pulled, verified and applied" and nothing else. The downlink-sync
+    # step's own detail is now recorded WITH the result, so the Job schedule page can show it.
+    $__planDetail = ''
+    foreach ($r in @($result)) {
+        foreach ($s in @(Get-PimDownlinkJobValue -Object $r -Key 'steps')) {
+            if ($s -and "$($s.step)" -eq 'downlink-sync' -and "$($s.detail)".Trim()) { $__planDetail = "$($s.detail)".Trim() }
+        }
+    }
+    $__base = $(if ($WhatIfMode) { 'planned (WhatIf)' } else { 'pulled, verified and applied' })
+    # Capped: this lands in a stored result the page renders, not in a log file.
+    if ($__planDetail.Length -gt 900) { $__planDetail = $__planDetail.Substring(0, 897) + '...' }
+    Stop-DownlinkJob -Code 0 -State succeeded -Detail $(if ($__planDetail) { "$__base -- $__planDetail" } else { $__base })
 } else {
     JobLog "==== downlink JOB FAILED ====" 'ERROR'
     Stop-DownlinkJob -Code 1 -State failed -Detail $(if ($failedStep) { $failedStep } else { 'the scenario run reported failure (see the job log)' })

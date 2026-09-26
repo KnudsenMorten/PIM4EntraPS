@@ -289,12 +289,12 @@ function Get-PimManagedTenantRegistration {
     <#
       PURE. The registration of ONE managed tenant on the master (platform.Tenants): validated values + the parameterised
       MERGE. Replaces the documented hand SQL ("no product command registers a managed tenant", §71 gap 2).
-      Ring 0..2 (2 = test, 1 = pilot, 0 = broad). Tags as ConvertTo-PimTenantTags. Returns @{ ok; reason; sql; parameters }.
+      Ring 0..2 (0 = dev, 1 = test, 2 = broad -- §77.20). Tags as ConvertTo-PimTenantTags. Returns @{ ok; reason; sql; parameters }.
     #>
     param(
         [string]$TenantId,
         [string]$DisplayName,
-        [int]$Ring = 2,
+        [int]$Ring = 0,
         [object]$Tags,
         [bool]$Enabled = $true,
         [string]$Notes = ''
@@ -302,7 +302,7 @@ function Get-PimManagedTenantRegistration {
     $tid = "$TenantId".Trim()
     if ($tid -notmatch $script:PimMspGuid) { return @{ ok = $false; reason = "TenantId '$TenantId' is not a GUID" } }
     if (-not "$DisplayName".Trim()) { return @{ ok = $false; reason = 'DisplayName is required (it is what the Manager lists)' } }
-    if ($Ring -lt 0 -or $Ring -gt 2) { return @{ ok = $false; reason = "Ring $Ring is outside 0..2 (2 = test, 1 = pilot, 0 = broad)" } }
+    if ($Ring -lt 0 -or $Ring -gt 2) { return @{ ok = $false; reason = "Ring $Ring is outside 0..2 (0 = dev, 1 = test, 2 = broad)" } }
     $tg = ConvertTo-PimTenantTags -Tags $Tags
     if (-not $tg.ok) { return @{ ok = $false; reason = "malformed tag(s): $($tg.bad -join ', ') -- use word or key:value (letters, digits, - _ .); 'all', 'none', 'tag:...' and 'tenant:...' are reserved by the replication Target" } }
     $sql = @"
@@ -499,7 +499,7 @@ function Test-PimMspBuildConfig {
         # only its copy. A value that is set but not 0..2 used to fall silently to 2; a typo in the one authoritative ring
         # is refused instead.
         $sr = "$(& $V 'slaveRing')".Trim()
-        if (-not $sr) { $warnings.Add("'slaveRing' not set -- the pull job uses ring 2 (test). This value is THE ring of this tenant (local); the master's slaves[].ring is only its copy.") }
+        if (-not $sr) { $warnings.Add("'slaveRing' not set -- the pull job uses ring 0 (dev). This value is THE ring of this tenant (local); the master's slaves[].ring is only its copy.") }
         elseif ($sr -notmatch '^[0-2]$') { $errors.Add("'slaveRing' '$sr' is not a ring (0, 1 or 2) -- refusing rather than defaulting the tenant's own ring") }
         # 71.19: no fallback address here. A synced admin's mail/TAP recipient is its SPONSOR DEPARTMENT's owners,
         # replicated with the admin -- a build-level address would be the "manager on the person" §62 forbids.
@@ -815,7 +815,7 @@ function Get-PimMspBuildPlan {
             -Arguments @{ SubscriptionId = $sub; ResourceGroup = $rg; EnvName = $env; ServiceEndpoint = $endpoint; MasterStorageAccount = $mStore; MasterContainer = $mContainer } `
             -Why "the master's bundle store denies every network it has not named; it names this subnet"))
         }
-        $dl = @{ Scenario = 'S6'; TenantId = $tid; SlaveRing = $(if ("$(& $V 'slaveRing')" -match '^[0-2]$') { [int](& $V 'slaveRing') } else { 2 })
+        $dl = @{ Scenario = 'S6'; TenantId = $tid; SlaveRing = $(if ("$(& $V 'slaveRing')" -match '^[0-2]$') { [int](& $V 'slaveRing') } else { 0 })
                  ResourceGroup = $rg; EnvName = $env; AcrName = $acr; SubscriptionId = $sub; JobName = $job; BaselineUrl = (Get-PimBaselinePullUrl -StorageAccount $mStore -Container $mContainer)
                  SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; SlaveAdminPrefixes = @(& $V 'adminPrefixes' | Where-Object { "$_".Trim() })
                  # 71.35 TRUST ANCHOR: the pinned signing key id(s) -- config, not a secret, never read from the bundle store.

@@ -51,7 +51,7 @@ param(
     # s31: resolve the build source from a deployment SCENARIO (S1..S6). When set it OVERRIDES
     # -Source: the scenario's resolved build path maps to acr-build (central/hosted => sync-automateit)
     # or local-build (local/community => git-pull). from-master central=>sync-automateit, local=>git-pull.
-    [ValidateSet('S1','S2','S3','S4','S5','S6')][string]$Scenario,
+    [ValidateSet('S1','S2','S3','S5','S6')][string]$Scenario,
     [string]$AcrName,
     # Run the build on a dedicated agent pool inside the VNet. Required when the registry has no
     # public network access -- see the note at the $acrSubArgs assignment below.
@@ -86,7 +86,7 @@ $ErrorActionPreference = 'Stop'
 # SPN-login path via `az account set`, so a caller that was already logged in (the normal case)
 # passed a subscription that was silently ignored -- and `az acr build` then ran against the
 # ambient default, which on mgmt1 is another company's. Measured: "the resource 'acrpimmfnpr'
-# could not be found in subscription 'ELDK Event Hub'".
+# could not be found in subscription '<another company's subscription>'".
 # 🔒 Scoped PER CALL rather than by `az account set`, because this machine runs ~3 sessions at once
 # and flipping the shared default would break whichever of them is legitimately using the other
 # tenant. A build must not have side effects on somebody else's shell.

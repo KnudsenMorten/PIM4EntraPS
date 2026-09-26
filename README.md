@@ -236,6 +236,11 @@ Admin-ABC           --E->  Role-              --E--> Entra-ID-                  
 *The Access map renders the nesting as an interactive graph: pick a person and
 the board collapses to their path — role group, permission groups, and the Entra
 and Azure roles those grant. (Synthetic demo data.)*
+Every option on the map is tested in a real browser before each release. Each kind of box must draw its whole
+chain, with every line joining the right boxes.
+
+Access-review decisions and reviewer changes are carried out by the engine, and checked once applied. The
+Manager itself only reads.
 
 See **[docs/DESIGN.md](docs/DESIGN.md)** for the full philosophy: direct
 vs indirect delegation, naming convention, tier model, lifecycle states,
@@ -282,6 +287,10 @@ scheduled job that wakes every few minutes, does what is due, and stops.
   Manager is permitted to start the job — it starts right away rather than
   waiting for the next scheduled tick. Queued actions such as a TAP re-issue or a
   session revoke are applied between engine steps, not after a long run.
+- **PIM only touches what you define.** A group, admin, delegation or policy is
+  PIM's only when a row in your model defines it. A group that merely *looks*
+  like a PIM group keeps its members and policies, break-glass accounts are
+  never touched, and an empty model changes nothing at all.
 - **Your policies, identical to v1.** Entra role, Azure resource and PIM for
   Groups policies (including owner policies and the full notification set) follow
   your templates. A run that would change many policies at once, or weaken
@@ -445,6 +454,17 @@ creation:
   it's extended. A removal decision is **remembered**, so the engine never
   silently re-adds someone an owner just removed — the most recent decision
   always wins.
+- **Access reviews from a review cycle.** Give a group a review cycle and the
+  engine creates a recurring review of its members, reviewed by its owners.
+- **Rename a group or Administrative Unit, and keep the object.** Renaming in
+  *All records* renames the existing group or AU in Entra ID, with its members
+  and roles; every row that points at it is updated in the same change.
+- **Held policy changes are approved under Approvals**, one change set at a
+  time, each shown as current → new.
+- **Daily checks that report, never act.** Every day PIM checks that the Azure
+  resources and roles and the Entra roles your delegations name still exist, and
+  reminds you of changes staged or queued more than a day ago that nobody
+  committed — each mailed with a link to the page that fixes it.
 - **Admin lifecycle with v1 parity.** Disabled and revoked admins stay disabled;
   offboarding runs on its own schedule and resumes if it is interrupted; a Remove
   row revokes access first; accounts are created when they are due; every cloud
@@ -591,6 +611,15 @@ The Access map renders your nesting as an interactive graph: admin → direct gr
 Pick a person and the board collapses to their transitive path. Beyond the
 graph itself:
 
+- **You can map from here, not only read.** Select the source — a person, a direct
+  group or a permission group — then link it three ways, whichever suits you:
+  **Ctrl+click** each target (⌘ on a Mac), **drag** one box onto another (only
+  boxes that can accept it light up), or use the **➕ buttons in the toolbar**
+  (*Give access*, *Add people*, *Add permissions*, *Give to a group*), which open
+  a searchable list. Each pick adds one change and draws it as a dashed line, and
+  nothing reaches the tenant until you commit on **Review & Save**. The map only
+  ever adds — removing access lives on Maintenance & Revoke — and linking needs
+  the Admin role.
 - **The fourth column spells out the actual permissions.** Select any permission
   group or role group and **Permissions & Targets** shows exactly what it grants
   — Entra ID roles, AU-scoped roles and Azure RBAC at scope — with a short
@@ -875,6 +904,11 @@ environment's own database.
   installation: define once centrally, sign the definition set, and roll it out to
   customers in waves. The provider's own tenant is governed the same way as any
   other.
+- **Decisions travel with the definitions.** Revoking a person's sign-in sessions on
+  the provider can revoke them in every managed tenant too, and removing a replicated
+  administrator asks whether to remove it in all managed tenants, the ones you pick,
+  or none. Each tenant carries out only what names it, once, without a per-tenant
+  approval — which matters most when someone leaves.
 - **A managed tenant is a real environment, not a remote-control session.** It has
   its own engine, its own model and its own database, and it **pulls** the signed
   definition set from the provider — the provider never reaches into it and never
@@ -939,20 +973,24 @@ runs. The other decides **which definitions reach which managed tenants**.
 *This applies to a provider and the tenants it looks after. A single-tenant
 installation has no replication ring.*
 
-- **Every definition row carries a ring, and every managed tenant carries a ring.**
-  A row is admitted when its own ring is at or below the tenant's ring — so ring 0
-  rows reach every tenant, and a row on a higher ring reaches only the tenants that
-  have been moved up to it.
-- **The ring is never the whole answer.** A row reaches a tenant only when **all
-  three** hold: it is marked for replication at all, **and** the ring admits it,
-  **and** the tenant matches what the row is aimed at. It is *ring AND target*,
-  never either-or.
-- **A row is aimed at tenants by name or by tag.** Leave the target blank and it goes
-  to every tenant the ring admits; aim it at one named tenant; aim it at a tag; or
-  combine tags — several tags listed together mean *any of these*, while tags joined
-  into one term mean *all of these at once*. A row can also be marked as never
-  leaving the provider at all. Tags belong to the tenant record the provider keeps
-  and travel inside the signed set, so a tenant cannot tag itself into scope.
+- **Three rings, in the same order as the software rings: 0 = dev, 1 = test, 2 = broad.**
+  *(New in 2.4.388; the order used to be the reverse.)* Every managed tenant sets its
+  own ring, and every definition row carries one. A row reaches the tenants whose ring
+  is at or **below** its own: a new administrator starts on ring 0 and reaches the dev
+  tenants only, is promoted to ring 1 to add the test tenants, and to ring 2 to reach
+  every tenant. Existing rows and tenants were converted on upgrade, so each row
+  still reaches exactly the tenants it reached before.
+- **Tags belong to the ring, not to the row.** The provider names each ring and can
+  narrow it with a tag rule — for example *test = only the tenants tagged
+  `wave:pilot`* — once, on the ring. Tags joined into one term mean *all of these at
+  once*. A tenant that set itself to a ring but does not match that ring's rule
+  receives nothing ring-gated until it does. Tags live in the tenant record the
+  provider keeps and travel inside the signed set, so a tenant cannot tag itself
+  into scope.
+- **The ring is never the whole answer.** A row reaches a tenant only when it is
+  marked for replication at all **and** the ring admits the tenant. A row can also
+  be marked as never leaving the provider at all. A per-row target set before
+  2.4.388 still applies and is shown as one to move onto the ring.
 - **A row the ring does not admit is withheld, not retracted.** The tenant simply
   does not receive it, and **whatever that tenant already holds is left exactly as it
   is**. Widening the ring later releases it; nothing is taken away in the meantime.
@@ -969,9 +1007,10 @@ installation has no replication ring.*
   relationship policy or something the customer has switched off. The preview runs
   the same plan the managed tenant itself runs, so it is not a separate estimate.
 - **This is how a provider rolls a change to one wave of customers before the rest**
-  — and it is entirely separate from the software ring above. The two use the same
-  word and the same small numbers, but they are **not the same scale** and one never
-  implies the other.
+  — and it is a separate control from the software ring above. Both now run in the
+  same order (ring 0 first, ring 2 last and widest), but one never implies the other:
+  a tenant's software ring and the ring it receives definitions on are set
+  separately.
 
 ---
 
@@ -995,7 +1034,7 @@ Everything an organisation needs to govern its own tenant:
   membership rather than by hand;
 - **policy templates** — a Standard and a RequireApproval template per kind, renameable, with a default per kind;
 - **drift detection** — what exists in the directory versus what your model says;
-- **access reviews and reports**, including standing access and expiring access;
+- **reports**, including standing access and expiring access, and the **current delegations** list;
 - **administrator accounts and first-time access passes**, issued and tracked;
 - **permission templates imported by script** (`Import-PimPermissionTemplate.ps1`) and tenant preparation from one
   configuration file (`Invoke-PimTenantPrep.ps1`);
@@ -1010,8 +1049,8 @@ On top of the free edition, a Pro licence adds:
   scheduled jobs that find new roles, groups and resources;
 - the **other workload connectors** — Power BI, Exchange Online, enterprise-app roles, Azure DevOps, Dataverse,
   Business Central and Power Platform;
-- **revoking current delegations** from the portal;
-- **access review campaigns** with decisions recorded and enforced;
+- **revoking current delegations** from the portal (the list itself is free);
+- **access reviews** — campaigns with decisions recorded and enforced;
 - a **second approver** for sensitive changes (separation of duties);
 - **delegated administration** — portal users limited to a tier, level, service or scope;
 - the **tier-impact report** — everyone who can reach tier 0, including through nested groups;
@@ -1109,8 +1148,12 @@ command. What you end up with:
 | **Database** | Azure SQL (S0), passwordless (managed identities only) | the one always-on part |
 | **Registry + logs** | Azure Container Registry (Basic) and a Log Analytics workspace | builds the image from your clone |
 
-Everything is created in **one resource group** you name, so removing the
-installation is one resource-group delete.
+Everything is created in **one resource group** you name. To remove the
+installation, first run `.\tools\setup\Remove-PimContainerStack.ps1 -SubscriptionId
+<subscription-id> -ResourceGroup <rg> -Apply` — it removes the containers **and** the
+subscription-level role assignments their identities were given, which a
+resource-group delete alone leaves behind — then delete the resource group, and
+finally the two app registrations (the Manager sign-in and the deploy identity).
 
 ### What you need
 
@@ -1141,10 +1184,14 @@ $id = .\tools\setup\New-PimDeployIdentity.ps1 -TenantId <tenant-id> -Subscriptio
 ```
 
 This creates an app registration with a **certificate** (never a secret), gives it
-Owner on the subscription, and — with `-GrantGraph` — the three Microsoft Graph
-application permissions the deploy needs to grant the Manager and engine their own
+Owner on the subscription, and — with `-GrantGraph` — the seven Microsoft Graph
+application permissions the deploy needs: to grant the Manager and engine their own
 permissions (`Directory.Read.All`, `AppRoleAssignment.ReadWrite.All`,
-`Application.Read.All`). It proves the identity can sign in and read the directory
+`Application.Read.All`), to create the database administrators group
+(`Group.Create`, `GroupMember.ReadWrite.All`) and to consent the Manager's
+sign-in (`DelegatedPermissionGrant.ReadWrite.All`), and to give itself a short,
+time-bound Exchange Administrator role while it creates the notification mailbox
+(`RoleManagement.ReadWrite.Directory`). It proves the identity can sign in and read the directory
 before it returns. It is safe to run again.
 
 ### 3. Deploy everything with one command
@@ -1160,7 +1207,7 @@ before it returns. It is safe to run again.
     -SqlServerFqdn <globally-unique-sql-name>.database.windows.net -SqlDatabase PimPlatform `
     -SqlConnectionString 'Server=tcp:<globally-unique-sql-name>.database.windows.net,1433;Initial Catalog=PimPlatform;Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;' `
     -Exposure external -WorkerMode cron -ManagerMinReplicas 0 -AcrSku Basic `
-    -ManagerSuperAdmins <your-upn> -SkipAppReg
+    -ManagerSuperAdmins <your-upn> -EasyAuthAllowedPrincipals <your-upn> -SkipAppReg
 ```
 
 Run it **without `-Apply`** first to see the plan — nothing is changed. With
@@ -1169,10 +1216,15 @@ network, registry, logs, SQL server), the Manager image build from your clone, t
 Container Apps environment with the Manager and the engine job, database access
 and schema, the feature baseline, Entra sign-in in front of the Manager, and the
 Manager administrators. Allowed regions are West Europe, Denmark East and Sweden
-Central. Optional additions:
+Central.
 
-- `-EasyAuthAllowedPrincipals <upn-or-group>` limits **who may sign in** to the
-  Manager (assignment required) instead of every account in the tenant.
+**Who may sign in is required.** `-EasyAuthAllowedPrincipals <upn-or-group>[,...]`
+admits exactly those accounts or groups (assignment required). A new Manager is
+never deployed open to the whole tenant: without this parameter (or
+`-EasyAuthAllowAllTenantUsers`, which admits every member account, never guests)
+the deploy refuses before it builds anything, and the plan says so.
+
+Optional additions:
 - `-Exposure internal` builds a **private-only** environment instead; decide this on
   day one, because an environment's exposure cannot be changed after creation.
 - `-AzureRbacRoles 'User Access Administrator'` lets the engine manage Azure
@@ -1194,13 +1246,18 @@ engine applies it on its next run.
 
 ### Keeping it up to date
 
-A re-run of the same command **is** the updater: every step that is already
-current is skipped, and only what changed is rebuilt and rolled.
+One command brings the installation to the latest release:
 
 ```powershell
-git pull
-.\tools\setup\Invoke-PimDeployAll.ps1 -Scenario S2 -Apply ...   # the same parameters as step 3
+.\tools\setup\Update-PimCommunity.ps1            # shows which version it would move to, and the plan
+.\tools\setup\Update-PimCommunity.ps1 -Apply     # updates
 ```
+
+A successful step 3 saves the parameters it ran with (never a secret) on the machine
+that ran it, and prints where. The updater pulls the latest release from GitHub
+(fast-forward only; a clone with local changes is left alone and the update stops),
+then re-runs the deploy with those parameters. A re-run **is** the updater: every
+step that is already current is skipped, and only what changed is rebuilt and rolled.
 
 The database schema is upgraded additively before the new version rolls, and a
 failed health check rolls the Manager back to the previous version. (The unattended

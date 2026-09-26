@@ -79,6 +79,7 @@ function Get-PimRequiredGraphCapabilities {
         # all -- they are authorised inside each workload's own system -- so they never belonged in
         # this list. They live in Get-PimWorkloadConnectorRequirements, graded optional there.
         @{ role='AccessReview.Read.All';                                capability='Access reviews';                                  tier='mandatory'; connector='access-reviews' }
+        @{ role='AccessReview.ReadWrite.All';                           capability='Access reviews (create the group reviews, BUG-256)'; tier='mandatory'; connector='access-reviews' }
         @{ role='AppRoleAssignment.ReadWrite.All';                      capability='Enterprise-application roles';                    tier='mandatory'; connector='entra-approle' }
         @{ role='Application.Read.All';                                 capability='Enterprise-application roles (read target app)';  tier='mandatory'; connector='entra-approle' }
         @{ role='RoleManagement.ReadWrite.Defender';                    capability='Defender XDR roles';                              tier='mandatory'; connector='defender-xdr' }
@@ -267,7 +268,9 @@ function Get-PimPermissionHealth {
         if ($offConnectors.Count) { $d += "  These optional workloads are unavailable until their permission is granted: " + ($offConnectors -join ', ') + "." }
         $d
     } else {
-        $d = "$IdentityName is missing REQUIRED permissions, so the engine CANNOT complete work it reports as scheduled."
+        # Say "missing permissions" only when a permission IS missing -- a mail-only problem is not a permission gap.
+        $d = if ($missingReq.Count -or -not $azureOk) { "$IdentityName is missing REQUIRED permissions, so the engine CANNOT complete work it reports as scheduled." }
+             else { "$IdentityName holds every required Graph and Azure permission." }
         if ($caps.Count)   { $d += "  Blocked: " + ($caps -join '; ') + "." }
         if (-not $azureOk) { $d += "  Azure resource roles cannot be assigned at any scope (needs User Access Administrator, typically at the tenant root management group)." }
         if (-not $mailConfigured) { $d += "  No sender mailbox is configured, so TAP delivery and every notification are dead." }

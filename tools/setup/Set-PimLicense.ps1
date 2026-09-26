@@ -28,12 +28,15 @@
   A ready connection string to the store (e.g. a local SQL Server with Integrated security).
 .PARAMETER SqlServer
   The store's server instead of -ConnectionString. An Azure SQL FQDN connects with a token -- as the
-  admin app (-TenantId -AdminAppId -AdminCertThumbprint) or as the signed-in az user
+  admin app (-TenantId -AdminAppId with -AdminCertThumbprint or -AdminSecret) or as the signed-in az user
   (-UseSignedInAccount, a member of the SQL admin group) -- exactly like Set-PimManagerAccess.ps1.
 
 .EXAMPLE
   pwsh -File Set-PimLicense.ps1 -LicensePath .\Contoso.pimlicense -SqlServer sql-x.database.windows.net `
        -TenantId <t> -AdminAppId <appid> -AdminCertThumbprint <thumb>
+.EXAMPLE
+  pwsh -File Set-PimLicense.ps1 -LicensePath .\Contoso.pimlicense -SqlServer sql-x.database.windows.net `
+       -TenantId <t> -AdminAppId <appid> -AdminSecret <client secret>
 .EXAMPLE
   pwsh -File Set-PimLicense.ps1 -LicensePath .\Contoso.pimlicense -SqlServer sql-x.database.windows.net -TenantId <t> -UseSignedInAccount -WhatIf
 #>
@@ -47,6 +50,9 @@ param(
     [string]$TenantId,
     [string]$AdminAppId,
     [string]$AdminCertThumbprint,
+    # Operator 2026-09-23: customer environments have no certificate for the admin app on the setup host --
+    # a client secret is accepted instead (same parameter name as Initialize-PimMailSender / Initialize-PimTenantStore).
+    [string]$AdminSecret,
     # 71.33: reach the store as the SIGNED-IN az user (a member of the SQL admin group) instead of -AdminAppId.
     [switch]$UseSignedInAccount,
     [string]$OutFile
@@ -161,14 +167,19 @@ if ("$ConnectionString".Trim()) {
     if ($SqlServer -match '(?i)database\.windows\.net') {
         if (-not "$TenantId".Trim()) { Fail 'an Azure SQL store needs -TenantId (token auth)' }
         if ($UseSignedInAccount) {
-            if ("$AdminAppId".Trim() -or "$AdminCertThumbprint".Trim()) { Fail '-UseSignedInAccount cannot be combined with -AdminAppId/-AdminCertThumbprint' }
+            if ("$AdminAppId".Trim() -or "$AdminCertThumbprint".Trim() -or "$AdminSecret".Trim()) { Fail '-UseSignedInAccount cannot be combined with -AdminAppId/-AdminCertThumbprint/-AdminSecret' }
             . (Join-Path $here '_PimSignedIn.ps1')
             try { $who = Connect-PimSignedInSql -TenantId $TenantId; Note "store identity: signed-in user $($who.userName)" 'DarkGray' } catch { Fail "$($_.Exception.Message)" }
         } else {
-            if (-not "$AdminAppId".Trim() -or -not "$AdminCertThumbprint".Trim()) { Fail 'supply -AdminAppId with -AdminCertThumbprint (certificate auth), or -UseSignedInAccount' }
+            if (-not "$AdminAppId".Trim()) { Fail 'supply -AdminAppId with -AdminCertThumbprint or -AdminSecret, or -UseSignedInAccount' }
+            if ("$AdminCertThumbprint".Trim() -and "$AdminSecret".Trim()) { Fail 'supply -AdminCertThumbprint OR -AdminSecret, not both' }
+            if (-not "$AdminCertThumbprint".Trim() -and -not "$AdminSecret".Trim()) { Fail 'supply -AdminAppId with -AdminCertThumbprint (certificate) or -AdminSecret (client secret)' }
             $global:PIM_TenantId       = $TenantId
             $global:PIM_ClientId       = $AdminAppId
+            # Set only the credential supplied and CLEAR the other: a stale global of the opposite kind would win
+            # inside Get-PimRestToken's chain (same two lines as Initialize-PimMailSender / Grant-PimMiSql).
             $global:PIM_CertThumbprint = $AdminCertThumbprint
+            $global:PIM_ClientSecret   = $AdminSecret
         }
     }
     try { $cs = Get-PimSqlConnectionString -Server $SqlServer -Database $Database }

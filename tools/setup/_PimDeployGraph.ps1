@@ -19,6 +19,8 @@
       * AppRoleAssignment.ReadWrite.All -- grant the managed identities their Graph app roles
       * Application.Read.All            -- read the target service principals while doing so
       * DelegatedPermissionGrant.ReadWrite.All -- consent the Manager's sign-in scopes (BUG-169)
+      * Group.Create + GroupMember.ReadWrite.All -- converge the SQL admin group (71.18)
+      * RoleManagement.ReadWrite.Directory -- the mail-sender step's time-bound Exchange Administrator
     The ids are the SAME values _PimSetupShared.ps1 grants; the test pins that they agree.
 #>
 
@@ -75,6 +77,11 @@ function Get-PimDeployIdentityGraphRoles {
         'Group.Create'                           = 'bf7b1a76-6e77-406b-b258-bf5c7720e98f'
         'GroupMember.ReadWrite.All'              = 'dbaae8cf-10b5-4b86-a4a1-f871c94c6695'
         'DelegatedPermissionGrant.ReadWrite.All' = '8e8e4742-1d95-4f68-9d56-6ee75648c72a'
+        # 🔴 2026-09-26 (env 27, the 13th recurrence of "MAIL SENDER NOT PROVISIONED"): the mailsender step runs AS the
+        # deploy identity, reads its own roleAssignmentScheduleInstances and activates a TIME-BOUND Exchange
+        # Administrator for itself through PIM. Both need this role; without it every public install ended mail-mute
+        # (403 on the read). Initialize-PimMailSender also self-heals an identity created before this line.
+        'RoleManagement.ReadWrite.Directory'     = '9e3f62cf-ca93-4989-b6ce-bf83c28f9fe8'
     }
 }
 

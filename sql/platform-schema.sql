@@ -188,10 +188,10 @@ CREATE TABLE platform.AuditEvents (
 );
 
 -- MSP ring fan-out: which central admin deploys to which tenant.
--- DOC-17 p: ONE rule, the engine's (Select-PimAdminRowsByRing keeps rows where admin.Ring <= the
--- tenant's ring), and this view's JOIN is the same comparison: a.Ring <= t.Ring.
---   * a RING-0 admin (Ring = 0) reaches EVERY tenant (0 <= every tenant ring) -- ring 0 = broadest reach;
---   * a ring-2 admin reaches only tenants whose ring is >= 2.
+-- DOC-17 p + §77.20 (2.4.388): ONE rule, the engine's (Test-PimRingReaches: tenant ring <= admin ring), and this
+-- view's JOIN is the same comparison: t.Ring <= a.Ring. Ring 0 = dev, 1 = test, 2 = broad (the update-ring order):
+--   * a ring-0 admin (a new hire) reaches only ring-0 (dev) tenants;
+--   * a ring-2 admin reaches EVERY tenant (every tenant ring <= 2).
 --
 -- 🔴 §71.7 (d): THIS VIEW USED TO IGNORE Target AND Tags, so it OVERSTATED reach -- an admin targeted at
 -- 'tag:vip' was listed against every tenant its ring admitted, and the MSP fan-out (S5) reads exactly
@@ -212,7 +212,7 @@ IF (SELECT compatibility_level FROM sys.databases WHERE database_id = DB_ID()) >
 EXEC('CREATE VIEW pim.vw_AdminTenantTargets AS
 SELECT a.UserName, a.Upn, a.Ring AS AdminRing, t.TenantId, t.DisplayName AS TenantName, t.Ring AS TenantRing
 FROM pim.CentralAdmins a
-JOIN platform.Tenants t ON a.Ring <= t.Ring
+JOIN platform.Tenants t ON t.Ring <= a.Ring
 WHERE a.Enabled = 1 AND t.Enabled = 1
   AND ISNULL(LTRIM(RTRIM(a.Replicate)), '''') <> ''No''
   AND NOT EXISTS (SELECT 1 FROM STRING_SPLIT(REPLACE(ISNULL(a.Target, ''''), '';'', '',''), '','') n
@@ -237,7 +237,7 @@ ELSE
 EXEC('CREATE VIEW pim.vw_AdminTenantTargets AS
 SELECT a.UserName, a.Upn, a.Ring AS AdminRing, t.TenantId, t.DisplayName AS TenantName, t.Ring AS TenantRing
 FROM pim.CentralAdmins a
-JOIN platform.Tenants t ON a.Ring <= t.Ring
+JOIN platform.Tenants t ON t.Ring <= a.Ring
 WHERE a.Enabled = 1 AND t.Enabled = 1
   AND ISNULL(LTRIM(RTRIM(a.Replicate)), '''') <> ''No''
   AND '','' + REPLACE(REPLACE(ISNULL(a.Target, ''''), '' '', ''''), '';'', '','') + '','' NOT LIKE ''%,none,%''

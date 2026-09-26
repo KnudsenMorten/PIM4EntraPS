@@ -45,6 +45,16 @@ $script:PimTickOnlyJobTypes = @('emergency-override','engine-delta','engine-full
 # Start-PimScheduler (it may read Power BI / Graph), so it is tick-only: Run now QUEUES it.
 $script:PimJobTypes += 'coverage'
 $script:PimTickOnlyJobTypes += 'coverage'
+# §79.1 (operator 2026-09-25): 'target-check' asks the tenant whether the Azure scopes and roles the delegation rows point at
+# still exist, and reports the ones that do not (engine/_shared/PIM-TargetCheck.ps1). Tick-only like 'coverage' (ARM + Graph).
+$script:PimJobTypes += 'target-check'
+$script:PimTickOnlyJobTypes += 'target-check'
+# §79.2 (operator 2026-09-25): 'pending-check' reports staged changes and queued actions nobody committed (PIM-PendingCheck.ps1).
+$script:PimJobTypes += 'pending-check'
+$script:PimTickOnlyJobTypes += 'pending-check'
+# §79.7 (operator 2026-09-25): 'owner-review' mails each department's owners their people to Keep / Extend / Remove (PIM-OwnerPortal.ps1).
+$script:PimJobTypes += 'owner-review'
+$script:PimTickOnlyJobTypes += 'owner-review'
 function Get-PimTickOnlyJobTypes { @($script:PimTickOnlyJobTypes) }
 $script:PimJobHandlers = @{}      # type -> scriptblock(job, nowUtc, whatIf)
 $script:PimSchedState  = $null    # in-memory fallback for state
@@ -175,6 +185,15 @@ function Get-PimDefaultJobSchedule {
         # ... show gaps/missing roles"): the Coverage & gaps page. Reads caches + pim.Rows (cheap), so every 12 h -- the same
         # cadence as the tenant-cache job it mostly reads. Check now on the page queues a run on demand.
         [pscustomobject]@{ name='coverage'; type='coverage'; intervalMinutes=720; enabled=$true }
+        # §79.1: daily -- do the delegations still point at Azure resources and roles that exist? Reports only (§74); cadence
+        # and on/off on the Jobs page (the schedule is SuperAdmin), mail under Alerting > 'target-missing'.
+        [pscustomobject]@{ name='target-check'; type='target-check'; intervalMinutes=1440; enabled=$true }
+        # §79.2: daily -- staged changes / queued actions older than a day that nobody committed. On/off + cadence on the Jobs
+        # page (SuperAdmin schedule); mail under Alerting > 'pending-uncommitted'.
+        [pscustomobject]@{ name='pending-check'; type='pending-check'; intervalMinutes=1440; enabled=$true }
+        # §79.7: every 90 days -- each department's owners get their people to Keep / Extend / Remove on My people. OFF by
+        # default: it mails people outside IT, so a SuperAdmin turns it on (and sets the cadence) on the Jobs page.
+        [pscustomobject]@{ name='owner-review'; type='owner-review'; intervalMinutes=129600; enabled=$false }
         # 🔑 THE TRUST JOB (operator, 2026-09-12: "it is critical that we can trust that the
         # delegation is actual deployed into the platform"). Every other job makes a FAILURE
         # visible; this one makes SUCCESS provable. It re-reads LIVE from the tenant and diffs it
@@ -816,7 +835,7 @@ function Initialize-PimDefaultJobHandlers {
         if ($whatIf) { $alert = 'whatif' }
         elseif (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue) {
             $sent = $false
-            try { $sent = [bool](Send-PimJobAlertViaNotify -Event 'expiring-access' -Title ("{0} access lifecycle date(s) due within {1} days" -f ($upcoming.Count + $overdue.Count), $horizon) -Detail ($lines -join '; ') -DebounceMinutes 1440) } catch { $sent = $false }
+            try { $sent = [bool](Send-PimJobAlertViaNotify -Event 'expiring-access' -Title ("{0} access lifecycle date(s) due within {1} days" -f ($upcoming.Count + $overdue.Count), $horizon) -Detail ($lines -join '; ') -DebounceMinutes 1440 -LinkTab 'accounts') } catch { $sent = $false }
             $alert = if ($sent) { 'raised' } else { 'not-raised (event off, no recipients, or debounced)' }
         }
         return [pscustomobject]@{ ran=$true; whatIf=[bool]$whatIf; calendar=$cal; upcoming=$upcoming.Count; overdue=$overdue.Count
@@ -981,6 +1000,28 @@ function Initialize-PimDefaultJobHandlers {
         # initialises these handlers too, and a full engine plan over every scope on its one request loop is the freeze this removes.
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:drift-snapshot (wired by Start-PimScheduler; the Manager never runs the drift plan)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'owner-review' -Handler {
+        param($job,$now,$whatIf)
+        # §79.7: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimOwnerReviewJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:owner-review (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'pending-check' -Handler {
+        param($job,$now,$whatIf)
+        # §79.2: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimPendingCheckJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:pending-check (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'target-check' -Handler {
+        param($job,$now,$whatIf)
+        # §79.1: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimTargetCheckJob,
+        # engine/_shared/PIM-TargetCheck.ps1) -- it reads ARM + Graph, which never runs on the Manager's request loop.
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:target-check (wired by Start-PimScheduler; the Manager never runs the target check)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'coverage' -Handler {
@@ -1277,10 +1318,38 @@ function Register-PimDiscoveryHandler {
             }
             $service = if ($job.PSObject.Properties['service'] -and "$($job.service)") { "$($job.service)" } else { 'entra' }
             $live = @(& $script:PimDiscoveryGetLiveRoles $service)
+            # 🔴 BUG-243 -- THE POLICY ON SCREEN DID NOT GATE THIS PRODUCER (operator, 2026-09-22:
+            # "funny enough the entra role discovey ran, even though it is not enabled"). Settings >
+            # Discovery offers an auto-create policy per resource type, with **Entra role = flag --
+            # log it, do nothing** by default; the Azure / Power BI path honours it
+            # (Invoke-PimDiscoveryAutoCreate -PolicyMap), and this branch passed -EnqueueChange
+            # unconditionally. On a tenant with no baseline every built-in role is "new", so it
+            # queued 145 catalog rows that the operator had explicitly told it not to create.
+            # 🪤 And the policy was never READ in this process at all: $global:PIM_DiscoveryAutoCreate
+            # is set by the Manager when the policy is saved, in the MANAGER's process -- the tick
+            # never loads it, so even the Azure path was judging against an empty map. It is now read
+            # from the store (pim.Settings 'DiscoveryAutoCreate') on first use, so choosing 'auto'
+            # also does what it says.
+            # 🔴 REPORT-ONLY, AND NOTHING IS QUEUED (operator decision, 2026-09-22: *"i dont understand
+            # the purpose of serviceroles, explain? if nothing reads it why did you build it"* ->
+            # option (a): route it the way Defender/Intune were routed in REQ-U wave 2).
+            # 2.4.401 gated this producer on the auto-create policy (BUG-243). Looking at WHY it
+            # existed showed the gate was treating the symptom:
+            #   * §8's ask is "know when a new built-in role appears". The sweep already delivers
+            #     that -- a `resource.discovered` audit event and one opt-in discovery-notice mail.
+            #   * The Entra role CATALOGUE is already cached (pim.TenantCache 'entra-roles', written
+            #     by the tenant-cache job) and already surfaced: Coverage & gaps lists every role as
+            #     Covered (naming the group that grants it) or Gap ("no permission group grants this
+            #     built-in role"), with a proposal. That IS the governance answer.
+            #   * PIM-Catalog-ServiceRoles has NO reader anywhere in the product. Defender/Intune
+            #     were moved off it for exactly that reason ("nothing ever consumed that queue
+            #     entity", PIM-WorkloadRoles.ps1); the Entra caller was missed.
+            # So the queue write is gone. An auto-create policy never made sense here either: you do
+            # not "create" a role Microsoft ships -- which is why 'EntraRole' is no longer offered on
+            # the Discovery page.
             $roleArgs = @{
                 Service       = $service
                 Live          = $live
-                EnqueueChange = $script:PimDiscoveryEnqueueChange
             }
             if ($whatIf) { $roleArgs['WhatIf'] = $true }
             $rr = Invoke-PimRoleCatalogJobSweep @roleArgs
@@ -1290,7 +1359,10 @@ function Register-PimDiscoveryHandler {
             if ($rr -and $rr.PSObject.Properties['notRead'] -and $rr.notRead) {
                 throw "role catalog for '$service' NOT READ -- $($rr.reason)$(if ("$($rr.endpoint)") { " ($($rr.endpoint))" })"
             }
-            return [pscustomobject]@{ ran=$true; detail="$($rr.detail)"; result=$rr; whatIf=[bool]$whatIf }
+            # Say where the answer is. "0 queued" must never read as "nothing found", and a run that
+            # reports without queueing has to point at the page that shows the result.
+            return [pscustomobject]@{ ran=$true; reportOnly=$true; result=$rr; whatIf=[bool]$whatIf
+                detail="$($rr.detail) reported only (audit + notice mail); new and undelegated roles are listed on Coverage & gaps -- nothing is queued" }
         }
 
         if ($scope -ne 'Azure' -and $scope -ne 'PowerBI') {
@@ -2086,8 +2158,23 @@ function Get-PimJobsStatus {
         $lastGood = @($recentWindow | Where-Object { [bool]$_.ok -and "$($_.status)" -eq 'completed' }) | Select-Object -First 1
         $lastGoodAt = if ($lastGood) { Get-PimUtcStamp "$($lastGood.startedUtc)" } else { $null }
         $isRecovered = { param($run) if ($null -eq $lastGoodAt) { return $false }; $t = Get-PimUtcStamp "$($run.startedUtc)"; return ($null -ne $t -and $t -lt $lastGoodAt) }
-        $recoveredFails = @($recentFails | Where-Object { & $isRecovered $_ })
-        $unackedFails = @($recentFails | Where-Object { -not ($acks -contains "$($_.runId)") -and -not (& $isRecovered $_) })
+        # 🔴 2026-09-21 (operator: "we should NOT acknowledge something manually. it must show the real time state of the
+        # jobs and self-heal"): a job is failing ONLY while its LATEST run failed -- the unbroken run of failures at the
+        # head of its history. Any later run that did not fail (completed, or held for approval) ends it by itself; no
+        # Ack is consulted. Before this, a failure stayed "failing" until a later COMPLETED run, so a job whose newest
+        # run was HELD showed "1 failing" + "1 needs approval" while the Overview (last run) said 0.
+        # A placeholder ('unimplemented') / skipped run and a no-handler record say nothing about the job's health, so
+        # they are stepped over, not treated as a recovery.
+        $headFails = New-Object System.Collections.Generic.List[object]
+        foreach ($r in $recentWindow) {
+            $st = "$($r.status)"
+            if ($st -in @('unimplemented', 'skipped') -or "$($r.detail)" -match '^no-handler') { continue }
+            if ([bool]$r.ok -or $st -eq 'held') { break }
+            [void]$headFails.Add($r)
+        }
+        $headIds = @($headFails.ToArray() | ForEach-Object { "$($_.runId)" })
+        $recoveredFails = @($recentFails | Where-Object { "$($_.runId)" -notin $headIds })
+        $unackedFails = [object[]]$headFails.ToArray()
         # BUG-112: a job this deployment does not run has no failures to answer for. Its
         # history is real and stays readable under History -- but it must not demand an Ack or
         # be counted as failing, or the operator is asked to acknowledge a bug we already fixed.
@@ -2100,6 +2187,30 @@ function Get-PimJobsStatus {
         # attention until a LATER completed run shows the approved plan applied -- the same recovery rule as a failure.
         $heldRuns = @($recentWindow | Where-Object { "$($_.status)" -eq 'held' })
         $standingHeld = @($heldRuns | Where-Object { -not (& $isRecovered $_) })
+        # 2026-09-21 (operator: "i approved but it still says this" / "approval shows as blocker"): a held run whose
+        # change set(s) someone has ALREADY APPROVED is waiting for its next run, not for a person. Every plan hash the
+        # latest held run names must carry a recorded approval (Get-PimPolicyMassChangeApproval) -- then it is
+        # "approved, applies on the next run" and is not counted as needing approval.
+        $approvedPending = $false
+        if ($standingHeld.Count -and (Get-Command Get-PimPolicyMassChangeApproval -ErrorAction SilentlyContinue)) {
+            $latestHeld = $standingHeld | Select-Object -First 1
+            $hashes = @([regex]::Matches("$($latestHeld.detail)", '(?i)PlanHash\s+([0-9a-f]{64})') | ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() } | Select-Object -Unique)
+            if ($hashes.Count) {
+                # A hash counts as dealt with when it is APPROVED, or when it is no longer ANY provider's current hold (it was
+                # approved and applied by another job's run -- operator 2026-09-21: "i stil have 2 jobs that needs approval":
+                # the pull job and delta-policies both named the same RIDE hold; one applied it and cleared the approval, the
+                # other still showed "needs approval" until its own next run).
+                $approved = @{}; $stillHeld = @{}; $holdKnown = $true
+                foreach ($prov in 'GroupsPolicies', 'EntraRolePolicies', 'AzResPolicies') {
+                    try { $ap = Get-PimPolicyMassChangeApproval -Provider $prov; if ($ap -and "$($ap.planHash)".Trim()) { $approved["$($ap.planHash)".Trim().ToLowerInvariant()] = $true } } catch { }
+                    if (Get-Command Get-PimPolicyMassHold -ErrorAction SilentlyContinue) {
+                        try { $ch = Get-PimPolicyMassHold -Provider $prov; if ($ch -and "$($ch.planHash)".Trim()) { $stillHeld["$($ch.planHash)".Trim().ToLowerInvariant()] = $true } } catch { $holdKnown = $false }
+                    } else { $holdKnown = $false }
+                }
+                $approvedPending = -not @($hashes | Where-Object { -not $approved.ContainsKey($_) -and -not ($holdKnown -and -not $stillHeld.ContainsKey($_)) }).Count
+            }
+        }
+        if ($approvedPending) { $standingHeld = @() }
         if ($outOfScope) { $recentFails = @(); $unackedFails = @(); $recoveredFails = @(); $unrunnable = @(); $unimplemented = @(); $heldRuns = @(); $standingHeld = @() }
         $rows.Add([pscustomobject]@{
             name            = $name
@@ -2154,12 +2265,15 @@ function Get-PimJobsStatus {
             # 71.13: held runs (awaiting an operator's approval), and whether one is still standing.
             heldCount          = $heldRuns.Count
             needsApproval      = [bool]($standingHeld.Count -gt 0)
+            approvedPending    = [bool]$approvedPending   # held, but every change set it named is approved -- applies on the next run
             heldDetail         = $(if ($standingHeld.Count) { "$(@($standingHeld)[0].detail)" } else { '' })
         })
     }
-    # in-progress first, then by last activity (newest first), then name
+    # Running first, then what needs a person -- FAILED (unacknowledged), then NEEDS APPROVAL, then overdue -- then the rest
+    # (operator 2026-09-21: "maybe sort the jobs so failed are top in list" / "hard to go through all"); within each group
+    # by last activity (newest first), then name.
     $sorted = @($rows | Sort-Object `
-        @{ Expression = { if ($_.inProgress) { 0 } else { 1 } } }, `
+        @{ Expression = { if ($_.inProgress) { 0 } elseif ($_.unackedFailureCount -gt 0) { 1 } elseif ($_.needsApproval) { 2 } elseif ($_.overdue) { 3 } else { 4 } } }, `
         @{ Expression = { "$($_.lastRunUtc)" }; Descending = $true }, `
         @{ Expression = { $_.name } })
     return [pscustomobject]@{
@@ -2424,10 +2538,19 @@ function Save-PimJobTriggers {
 function Add-PimJobTrigger {
     # Enqueue an on-demand run. Call from the manager right after it writes a change,
     # or from a monitor that detects a SQL change. Deduped by type+scope.
-    param([Parameter(Mandatory)][string]$Type, [string]$Scope = 'All', [string]$Reason = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    # -JobName (BUG-235, 77.4): the scheduled job a "Run now" was pressed on. The drain records the run under THAT
+    # name, so the job's own row shows the run; without it the run is recorded as 'trigger:<type>:<scope>'.
+    param([Parameter(Mandatory)][string]$Type, [string]$Scope = 'All', [string]$Reason = '', [string]$JobName = '', [datetime]$NowUtc = [datetime]::UtcNow)
     $t = @(Get-PimPendingTriggers)
-    if (-not ($t | Where-Object { "$($_.type)" -eq $Type -and "$($_.scope)" -eq $Scope })) {
-        $t += [pscustomobject]@{ type = $Type; scope = $Scope; reason = $Reason; requestedUtc = $NowUtc.ToUniversalTime().ToString('o') }
+    $same = @($t | Where-Object { "$($_.type)" -eq $Type -and "$($_.scope)" -eq $Scope })
+    if (-not $same.Count) {
+        $o = [ordered]@{ type = $Type; scope = $Scope; reason = $Reason; requestedUtc = $NowUtc.ToUniversalTime().ToString('o') }
+        if ("$JobName".Trim()) { $o['job'] = "$JobName".Trim() }
+        $t += [pscustomobject]$o
+        Save-PimJobTriggers -Triggers $t
+    } elseif ("$JobName".Trim() -and -not @($same | Where-Object { $_.PSObject.Properties['job'] -and "$($_.job)".Trim() }).Count) {
+        # already queued anonymously (e.g. by a commit): name it, so the run still lands on the job the operator pressed
+        $same[0] | Add-Member -NotePropertyName job -NotePropertyValue "$JobName".Trim() -Force
         Save-PimJobTriggers -Triggers $t
     }
     return $t.Count
@@ -2747,15 +2870,21 @@ function Invoke-PimSchedulerTriggerDrain {
     # nothing else, so a caller can collect the output straight into its results list.
     param([datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
     $now = $NowUtc
+    # 🔴 each trigger gets ITS OWN now: the caller's clock advanced by the wall time spent in this drain. One clock for
+    # the whole drain let a trigger queued mid-tick judge an expiry against the tick's START (live E2E 2026-09-25: an
+    # emergency override that had expired 25 s earlier was kept ACTIVE, approval stayed off until the next tick).
+    $drainWall = [datetime]::UtcNow
     $out = New-Object System.Collections.Generic.List[object]
     $triggers = @(Get-PimPendingTriggers)
     if ($triggers.Count) {
         foreach ($tg in $triggers) {
-            $tjob = [pscustomobject]@{ name = "trigger:$($tg.type):$($tg.scope)"; type = "$($tg.type)"; scope = "$($tg.scope)"; enabled = $true }
+            # BUG-235 (77.4): a Run-now trigger carries the job it was pressed on -- record the run under that name.
+            $tname = if ($tg.PSObject.Properties['job'] -and "$($tg.job)".Trim()) { "$($tg.job)".Trim() } else { "trigger:$($tg.type):$($tg.scope)" }
+            $tjob = [pscustomobject]@{ name = $tname; type = "$($tg.type)"; scope = "$($tg.scope)"; enabled = $true }
             $started = [datetime]::UtcNow
             $tRunId = [guid]::NewGuid().ToString('N')
             if (-not $WhatIf) { [void](Write-PimJobRunningRecord -Job $tjob -RunId $tRunId -StartedUtc $started -Trigger -Reason "$($tg.reason)") }
-            $r = Invoke-PimScheduledJob -Job $tjob -NowUtc $now -WhatIf:$WhatIf -CorrelationId $tRunId
+            $r = Invoke-PimScheduledJob -Job $tjob -NowUtc ($now.Add($started - $drainWall)) -WhatIf:$WhatIf -CorrelationId $tRunId
             $r | Add-Member -NotePropertyName trigger -NotePropertyValue $true -Force
             $r | Add-Member -NotePropertyName reason  -NotePropertyValue "$($tg.reason)" -Force
             $out.Add($r)
@@ -2923,7 +3052,7 @@ function Invoke-PimSchedulerTick {
 
     # (b) TRIGGERS: run on-demand requests NOW (event-driven), then clear them.
     # Invoke-PimSchedulerTriggerDrain is this block, moved verbatim so (c) can call it between jobs.
-    foreach ($tr in @(Invoke-PimSchedulerTriggerDrain -NowUtc $now -WhatIf:$WhatIf)) { if ($null -ne $tr) { $results.Add($tr) } }
+    foreach ($tr in @(Invoke-PimSchedulerTriggerDrain -NowUtc ($now.Add([datetime]::UtcNow - $wallStart)) -WhatIf:$WhatIf)) { if ($null -ne $tr) { $results.Add($tr) } }
 
     $interJobPickup = {
         $picked = 0
@@ -2933,7 +3062,8 @@ function Invoke-PimSchedulerTick {
         # committed queue actions (not yet attempted; retrying ones keep queue-apply's cadence + backoff) -- see $queuePickup
         try { $picked += [int](@(& $queuePickup) | Select-Object -Last 1) } catch { }
         try {
-            foreach ($tr in @(Invoke-PimSchedulerTriggerDrain -NowUtc $now)) { if ($null -ne $tr) { $results.Add($tr); $picked++ } }
+            # the drain BETWEEN jobs runs minutes after the tick started: hand it the advanced clock, like $jobStart below
+            foreach ($tr in @(Invoke-PimSchedulerTriggerDrain -NowUtc ($now.Add([datetime]::UtcNow - $wallStart)))) { if ($null -ne $tr) { $results.Add($tr); $picked++ } }
         } catch { Write-Warning "[scheduler] in-tick trigger drain failed: $($_.Exception.Message)" }
         $picked
     }

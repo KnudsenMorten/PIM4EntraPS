@@ -6,7 +6,7 @@ if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-
 #
 # Same model as the TenantManager conformance engine, applied to PIM WORKLOAD
 # templates (a versioned set of PIM-group -> workload-role bindings):
-#   - Rings drive rollout (entryRing <= tenantRing); templateVersion is a
+#   - Rings drive rollout (tenantRing <= entryRing, §77.20); templateVersion is a
 #     changelog label, not the rollout control.
 #   - Only status:"approved" templates are pullable/deployable; drafts never go.
 #   - Absent desired binding = GAP unless an ACTIVE exemption -> EXEMPT.
@@ -142,7 +142,7 @@ function Merge-PimTemplateOverlay {
     if ($entry.PSObject.Properties['rings'] -and $entry.rings) {
         foreach ($p in @($entry.rings.PSObject.Properties)) {
             $r = 0
-            if (-not [int]::TryParse("$($p.Value)", [ref]$r) -or $r -lt 0 -or $r -gt 9) { continue }
+            if (-not [int]::TryParse("$($p.Value)", [ref]$r) -or $r -lt 0 -or $r -gt 2) { continue }   # 77.20: rings are 0..2
             foreach ($e in @($t.entries)) { if ("$($e.key)" -ieq "$($p.Name)") { Set-PimConfProp -Object $e -Name 'ring' -Value $r } }
         }
     }
@@ -169,7 +169,7 @@ function Set-PimTemplateOverlayApproval {
 function Set-PimTemplateOverlayRing {
     # Record a per-entry ring promotion in SQL. Throws when the template has no such entry (same message as
     # Set-PimEntryRing, so the endpoint's 400 stays). Returns the effective (merged) template.
-    param([Parameter(Mandatory)][object]$Template, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][ValidateRange(0,9)][int]$Ring)
+    param([Parameter(Mandatory)][object]$Template, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][ValidateRange(0,2)][int]$Ring)
     if (-not (@($Template.entries) | Where-Object { "$($_.key)" -ieq "$Key" })) {
         throw "Set-PimEntryRing: template '$($Template.templateId)' has no entry '$Key'."
     }
@@ -211,13 +211,13 @@ function Read-PimApprovedTemplates {
 }
 
 # --- WHERE THE TEMPLATE-CATALOG RING COMES FROM (BUG-179, operator decision 2026-09-18) --------------
-# The template rule is entryRing <= tenantRing: a HIGHER tenant ring receives MORE entries. The platform
-# UPDATE ring runs the other way: update ring 2 (customers) receives changes LAST. So the catalog ring is
-# the environment's update ring INVERTED:  tenantRing = 2 - updateRing
-#     update ring 2 (customers) -> 0   only fully promoted entries
+# §77.20 (operator 2026-09-21: "ring 0 = dev, ring 1 = test, ring 2 = broad" / "make it consistent"): ONE ring
+# order everywhere. An entry on ring E reaches a tenant on ring T when T <= E -- the same rule as an admin reaching
+# a slave (Test-PimRingReaches). The catalog ring IS the environment's update ring, no inversion any more:
+#     update ring 0 (dev)       -> 0   everything, pilots included
 #     update ring 1 (internal)  -> 1
-#     update ring 0 (dev)       -> 2   everything, pilots included
-# Not recorded, unparseable or out of range -> 0 (the most restrictive), and the reason is reported.
+#     update ring 2 (customers) -> 2   only fully promoted entries
+# Not recorded, unparseable or out of range -> 2 (the most restrictive), and the reason is reported.
 # 🪤 Get-PimTenantRing (PIM-Functions.psm1) is deliberately NOT used or changed: it also drives the
 # admin<->tenant ring filter (Select-PimAdminRowsByRing), which is a different axis.
 # The update ring is read from the record the UPDATE JOB writes (pim.Settings['UpdateState'].ring,
@@ -227,14 +227,14 @@ function ConvertTo-PimTemplateCatalogRing {
     [CmdletBinding()]
     param([AllowEmptyString()][AllowNull()][string]$UpdateRing)
     $raw = "$UpdateRing".Trim()
-    if (-not $raw) { return [pscustomobject]@{ ring = 0; valid = $false; updateRing = $raw; reason = 'update ring not recorded -- most restrictive template ring 0' } }
+    if (-not $raw) { return [pscustomobject]@{ ring = 2; valid = $false; updateRing = $raw; reason = 'update ring not recorded -- most restrictive template ring 2' } }
     # Same normalisation as Get-PimUpdateRingLabel / the channel: 'ring2', 'ring 2', 'ring-2' and '2' are one ring.
     $n = $raw -replace '^(?i)ring[\s_-]*', ''
     $u = 0
     if (-not [int]::TryParse($n, [ref]$u) -or $u -lt 0 -or $u -gt 2) {
-        return [pscustomobject]@{ ring = 0; valid = $false; updateRing = $raw; reason = "update ring '$raw' is not 0, 1 or 2 -- most restrictive template ring 0" }
+        return [pscustomobject]@{ ring = 2; valid = $false; updateRing = $raw; reason = "update ring '$raw' is not 0, 1 or 2 -- most restrictive template ring 2" }
     }
-    return [pscustomobject]@{ ring = (2 - $u); valid = $true; updateRing = $raw; reason = "update ring $u" }
+    return [pscustomobject]@{ ring = $u; valid = $true; updateRing = $raw; reason = "update ring $u" }
 }
 
 function Get-PimTemplateCatalogRing {
@@ -254,25 +254,26 @@ function Get-PimTemplateCatalogRing {
         elseif ($rec.PSObject -and $rec.PSObject.Properties['ring']) { $ringRaw = "$($rec.ring)" }
     }
     $m = ConvertTo-PimTemplateCatalogRing -UpdateRing $ringRaw
-    $src = if ($m.valid) { "update-ring $(2 - [int]$m.ring)" } else { 'not recorded' }
-    $why = if ($null -eq $rec) { 'no update record in pim.Settings[UpdateState] -- most restrictive template ring 0' } else { "$($m.reason)" }
+    $src = if ($m.valid) { "update-ring $([int]$m.ring)" } else { 'not recorded' }
+    $why = if ($null -eq $rec) { 'no update record in pim.Settings[UpdateState] -- most restrictive template ring 2' } else { "$($m.reason)" }
     return [pscustomobject]@{ ring = [int]$m.ring; source = $src; updateRing = "$ringRaw".Trim(); reason = $why }
 }
 
-# --- ring scope (self-contained; entryRing <= tenantRing) ------------------------
+# --- ring scope (self-contained; tenantRing <= entryRing, §77.20) ---------------
+# An entry with no ring is on ring 0 (dev): a new entry reaches dev tenants first and is promoted 0 -> 1 -> 2.
 function Get-PimTemplateEntryRing {
     param([AllowNull()][object]$Entry)
-    $r = 2
+    $r = 0
     if ($Entry -and $null -ne $Entry.PSObject.Properties['ring'] -and "$($Entry.ring)" -ne '') {
-        $parsed = 2
-        if ([int]::TryParse("$($Entry.ring)", [ref]$parsed) -and $parsed -ge 0 -and $parsed -le 9) { $r = $parsed }
+        $parsed = 0
+        if ([int]::TryParse("$($Entry.ring)", [ref]$parsed) -and $parsed -ge 0 -and $parsed -le 2) { $r = $parsed }
     }
     return $r
 }
 
 function Test-PimRingInScope {
     param([Parameter(Mandatory)][int]$EntryRing, [Parameter(Mandatory)][int]$TenantRing)
-    return ($EntryRing -le $TenantRing)
+    return ($TenantRing -le $EntryRing)
 }
 
 function Select-PimInScopeEntries {
@@ -508,7 +509,7 @@ function Approve-PimTemplate {
 }
 
 function Set-PimEntryRing {
-    param([Parameter(Mandatory)][object]$Template, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][ValidateRange(0,9)][int]$Ring)
+    param([Parameter(Mandatory)][object]$Template, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][ValidateRange(0,2)][int]$Ring)
     $t = Copy-PimConfObject -Object $Template
     $hit = $false
     foreach ($e in @($t.entries)) { if ("$($e.key)" -ieq "$Key") { Set-PimConfProp -Object $e -Name 'ring' -Value $Ring; $hit = $true } }
@@ -535,7 +536,7 @@ function Set-PimEntryRingInJson {
     param(
         [Parameter(Mandatory)][string]$Json,
         [Parameter(Mandatory)][string]$Key,
-        [Parameter(Mandatory)][ValidateRange(0,9)][int]$Ring
+        [Parameter(Mandatory)][ValidateRange(0,2)][int]$Ring
     )
     $tpl = ConvertTo-PimTemplate -Json $Json
     if (-not (@($tpl.entries) | Where-Object { "$($_.key)" -ieq "$Key" })) {
@@ -817,9 +818,9 @@ function Get-PimFleetConformance {
     foreach ($tn in @($Tenants)) {
         if ($null -eq $tn) { continue }
         $tid = "$($tn.tenantId)"
-        $ring = 0
+        $ring = 2   # 77.20: an unknown tenant ring is the most restrictive (2 = broad, fully promoted only)
         if ($null -ne $tn.ring -and "$($tn.ring)" -ne '') {
-            $pr = 0; if ([int]::TryParse("$($tn.ring)", [ref]$pr) -and $pr -ge 0 -and $pr -le 9) { $ring = $pr }
+            $pr = 0; if ([int]::TryParse("$($tn.ring)", [ref]$pr) -and $pr -ge 0 -and $pr -le 2) { $ring = $pr }
         }
         $applied = @{}
         if ($tn.appliedVersions) {
@@ -917,7 +918,7 @@ function Get-PimFleetConformance {
 # --- RING-WIDE rollout plan (PURE) -- REQUIREMENTS.md s28 [H8] ------------------
 # "Ring-wide deploy" view: for ONE approved template, which tenants would a deploy to
 # a chosen ring touch, and where does each stand? A deploy to ring R reaches every
-# tenant whose rollout ring is >= R (entryRing <= tenantRing is the per-entry rule;
+# tenant whose rollout ring is <= R (tenantRing <= entryRing is the per-entry rule, §77.20;
 # here we group tenants by ring so an MSP can drive a wave -- "roll v3 to ring 1 and
 # below" -- and see, per ring band, how many tenants are behind. This is the planning
 # rollup; the actual per-tenant deploy still goes through the ring-gated
@@ -926,7 +927,7 @@ function Get-PimFleetConformance {
 # Returns, for the template, one band per distinct tenant ring present in the fleet,
 # each with the tenants in that band + their behind/status, plus a fleet total. A
 # tenant only appears in the band equal to its own ring (bands are exclusive); the
-# "reached by a deploy to ring R" set is every band with ring >= R (the GUI sums them).
+# "reached by a deploy to ring R" set is every band with ring <= R (the GUI sums them).
 function Get-PimRingRolloutPlan {
     [CmdletBinding()]
     param(
@@ -941,9 +942,9 @@ function Get-PimRingRolloutPlan {
     $perTenant = New-Object System.Collections.Generic.List[object]
     foreach ($tn in @($Tenants)) {
         if ($null -eq $tn) { continue }
-        $ring = 0
+        $ring = 2   # 77.20: an unknown tenant ring is the most restrictive (2 = broad, fully promoted only)
         if ($null -ne $tn.ring -and "$($tn.ring)" -ne '') {
-            $pr = 0; if ([int]::TryParse("$($tn.ring)", [ref]$pr) -and $pr -ge 0 -and $pr -le 9) { $ring = $pr }
+            $pr = 0; if ([int]::TryParse("$($tn.ring)", [ref]$pr) -and $pr -ge 0 -and $pr -le 2) { $ring = $pr }
         }
         $have = 0
         if ($tn.appliedVersions) {

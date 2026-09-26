@@ -1,4 +1,4 @@
-﻿# =============================================================================
+# =============================================================================
 # 🔴 71.23 -- Get-PimAdminAutoDisableDate (PIM-DateSafe.ps1) decides which column carries an admin's
 # auto-disable date, and REFUSES a row that carries both names with different dates. The downlink
 # publishes that decision into the bundle, so it must never fall back to reading a column itself --
@@ -123,10 +123,12 @@ function ConvertTo-PimDownlinkLifecycleText {
 #   item 3 refers to. It is genuinely PIM's own, RING-1 does not replace it, and
 #   it must NOT be merged into either version-selection plane.
 #
-#   Engine ring semantics (matches pim.vw_AdminTenantTargets `a.Ring <= t.Ring`
-#   and the seeder's Get-ExpectedAdminsForSlave): a ring-0 admin is BROAD and
-#   reaches every slave; a ring-2 admin only reaches ring>=2 (test) slaves.
-#   => an admin reaches the slave when admin.Ring <= slave.Ring.
+#   Ring order (§77.20, operator 2026-09-21: "ring 0 = dev, ring 1 = test, ring 2 = broad (all)") -- the SAME
+#   direction as the update rings, where ring 0 also goes first. A slave sets its own ring; an admin on ring N
+#   reaches every slave whose ring is <= N: a new hire on ring 0 reaches only dev slaves, a ring-2 admin reaches
+#   every slave. ONE rule, Test-PimRingReaches, used by this filter, the replication overview, conformance and
+#   (as the same comparison) pim.vw_AdminTenantTargets. Until 2.4.388 the order was the reverse (0 = broad);
+#   Convert-PimLegacyRing is the one conversion (new = 2 - old).
 # Input rows may be hashtables OR PSCustomObjects (UserName + Ring). Returns the
 # filtered subset (same shape) sorted by Ring then UserName for determinism.
 # ---------------------------------------------------------------------------
@@ -215,7 +217,11 @@ function Test-PimDownlinkAdminSynced {
         # A BUNDLE row: the producer ships registry rows without ManagementMode and definition rows
         # with ManagementMode='msp', so a row lacking the field here is a registry row (-AdminSource).
         $rm = Get-PimReplicateMode -Row $Admin -Kind 'admin' -AdminSource Registry
-        return @{ synced = ($rm.mode -eq 'Yes'); reason = "$($rm.reason)" }
+        # 2026-09-22: a FOLLOW admin is a candidate, not a refusal -- it is in the bundle only because
+        # some tenant's replicated delegation needs it, and WHICH tenants those are is decided per
+        # tenant (Get-PimDownlinkPlan step 3b2 keeps it only where a reaching membership names
+        # it). Saying "not synced" here would drop it everywhere and make Follow unusable.
+        return @{ synced = ($rm.mode -eq 'Yes' -or $rm.mode -eq 'Follow'); follow = ($rm.mode -eq 'Follow'); reason = "$($rm.reason)" }
     }
     if (-not $has) { return @{ synced = $true; reason = 'central registry row (MSP by construction)' } }
     $mode = "$(Get-PimDownlinkValue -Object $Admin -Key 'ManagementMode')".Trim()
@@ -240,6 +246,9 @@ function Get-PimCentralAdminsFromDefinitions {
     $notSynced = New-Object System.Collections.Generic.List[object]
     $noRing = New-Object System.Collections.Generic.List[object]
     $adOnly = New-Object System.Collections.Generic.List[object]
+    # 2026-09-22: admins the master marked Replicate=Follow -- shaped exactly like a synced one, but
+    # handed back separately so the producer ships them ONLY when a replicated delegation names them.
+    $follow = New-Object System.Collections.Generic.List[object]
     foreach ($r in @($Rows)) {
         if ($null -eq $r) { continue }
         $un = "$(Get-PimDownlinkValue -Object $r -Key 'UserName')".Trim()
@@ -250,11 +259,12 @@ function Get-PimCentralAdminsFromDefinitions {
         # Both are decided by the shared rule; a row carrying neither reads exactly as before.
         $repRaw = "$(Get-PimDownlinkValue -Object $r -Key 'Replicate')".Trim()
         $rm = Get-PimReplicateMode -Row $r -Kind 'admin' -AdminSource Definition
-        if (($repRaw -or $mode -ieq 'msp') -and $rm.mode -ne 'Yes') {
+        $isFollow = ($rm.mode -eq 'Follow')
+        if (-not $isFollow -and ($repRaw -or $mode -ieq 'msp') -and $rm.mode -ne 'Yes') {
             $notSynced.Add([ordered]@{ UserName = $un; reason = "$($rm.reason) -- not synced" }) | Out-Null
             continue
         }
-        if ($mode -ine 'msp' -and -not $repRaw) {
+        if (-not $isFollow -and $mode -ine 'msp' -and -not $repRaw) {
             # masterOnly marks a BLANK ManagementMode (the value empty or the field absent, as in a v1 CSV): the
             # bundle reports it as not published, because Get-PimReplicateMode now reads it the same way (No).
             # An explicit 'local' is the operator's own declaration and is not reported (unchanged).
@@ -266,8 +276,8 @@ function Get-PimCentralAdminsFromDefinitions {
             continue
         }
         $ring = "$(Get-PimDownlinkValue -Object $r -Key 'Ring')".Trim()
-        if ($ring -notmatch '^\d+$') {
-            $noRing.Add([ordered]@{ UserName = $un; reason = "ManagementMode=msp but Ring='$ring' -- no ring reaches no slave (set Ring to a whole number: 0, 1, 2, ...)" }) | Out-Null
+        if ($ring -notmatch '^[0-2]$') {
+            $noRing.Add([ordered]@{ UserName = $un; reason = "ManagementMode=msp but Ring='$ring' -- not a ring, so it reaches no slave (set Ring to 0 dev, 1 test or 2 broad)" }) | Out-Null
             continue
         }
         $tapLife = "$(Get-PimDownlinkValue -Object $r -Key 'TAPLifetimeHours')".Trim()
@@ -297,8 +307,12 @@ function Get-PimCentralAdminsFromDefinitions {
             AutoDisableDate  = ConvertTo-PimDownlinkLifecycleText (Get-PimAdminAutoDisableDate -Row $r).raw
             ManagementMode   = 'msp'
         }
-        # carried only when the master set it, so a row authored before §71 ships the same bytes
-        if ($repRaw) { $one['Replicate'] = 'Yes' }
+        # carried only when the master set it, so a row authored before §71 ships the same bytes.
+        # A FOLLOW admin ships as Follow, because WHICH tenants need it is decided per tenant
+        # (Get-PimDownlinkPlan step 3b2) -- shipping it as Yes would create the account in every
+        # tenant its ring admits, including the ones where no delegation names it.
+        if ($isFollow) { $one['Replicate'] = 'Follow' }
+        elseif ($repRaw) { $one['Replicate'] = 'Yes' }
         # 71.15 -- THE ADMIN LIFECYCLE FIELDS the slave's engine reads, taken from the master's definition (governance
         # follows the SOURCE, row 35). Only AccountStatus/AutoDisableDate/TAPLifetimeHours were published, so the slave apply
         # filled the rest with its own defaults (ProvisionDate Now, no TAPStartDate).
@@ -315,9 +329,99 @@ function Get-PimCentralAdminsFromDefinitions {
             $lv = ConvertTo-PimDownlinkLifecycleText (Get-PimDownlinkValue -Object $r -Key $lf)
             if ($lv) { $one[$lf] = $lv }
         }
-        $synced.Add($one) | Out-Null
+        if ($isFollow) { $follow.Add($one) | Out-Null } else { $synced.Add($one) | Out-Null }
     }
-    return @{ synced = $synced.ToArray(); notSynced = $notSynced.ToArray(); mspWithoutRing = $noRing.ToArray(); adOnly = $adOnly.ToArray() }
+    return @{ synced = $synced.ToArray(); notSynced = $notSynced.ToArray(); mspWithoutRing = $noRing.ToArray(); adOnly = $adOnly.ToArray(); follow = $follow.ToArray() }
+}
+
+function Test-PimRingReaches {
+    # THE ring rule (§77.20): a row on ring $AdminRing reaches a slave on ring $SlaveRing when SlaveRing <= AdminRing.
+    # ring 0 = dev (receives every ring's rows first), 1 = test, 2 = broad (receives only ring-2 rows).
+    param([Parameter(Mandatory)][int]$AdminRing, [Parameter(Mandatory)][int]$SlaveRing)
+    # Only 0..2 are rings. A value outside them reaches NOTHING (fail closed): with `SlaveRing <= AdminRing`, a stray
+    # ring 5 would otherwise reach every tenant.
+    if ($AdminRing -lt 0 -or $AdminRing -gt 2 -or $SlaveRing -lt 0 -or $SlaveRing -gt 2) { return $false }
+    return ($SlaveRing -le $AdminRing)
+}
+
+function Convert-PimLegacyRing {
+    # Until 2.4.388 ring 0 was BROAD and ring 2 the narrowest (reach = admin <= slave). new = 2 - old keeps every row's
+    # reach exactly as it was. Only 0..2 convert; anything else is returned as $null (not a ring -- reaches nothing).
+    param([object]$Value)
+    $s = "$Value".Trim()
+    if ($s -notmatch '^[0-2]$') { return $null }
+    return (2 - [int]$s)
+}
+
+function ConvertFrom-PimLegacyRingPayload {
+    <#
+      §77.20: a bundle from a master older than 2.4.388 carries every Ring in the OLD order (0 = broad). Returns the payload
+      with each Ring converted (new = 2 - old; a value outside 0..2 becomes blank = reaches nothing) on rows, assignments
+      and every definitions list, stamped ringOrder='dev-first'. A stamped payload is returned unchanged. The signature was
+      verified on the original bytes before this runs; nothing here is re-signed.
+    #>
+    param([object]$Payload)
+    if ($null -eq $Payload) { return $Payload }
+    if ("$(Get-PimDownlinkValue -Object $Payload -Key 'ringOrder')".Trim() -eq 'dev-first') { return $Payload }
+    $conv = {
+        param($o)
+        if ($null -eq $o) { return $o }
+        $c = [ordered]@{}
+        if ($o -is [System.Collections.IDictionary]) { foreach ($k in $o.Keys) { $c[$k] = $o[$k] } } else { foreach ($p in $o.PSObject.Properties) { $c[$p.Name] = $p.Value } }
+        if ($c.Contains('Ring') -and "$($c['Ring'])".Trim()) { $v = Convert-PimLegacyRing -Value $c['Ring']; $c['Ring'] = $(if ($null -eq $v) { '' } else { "$v" }) }
+        return [pscustomobject]$c
+    }
+    $out = [ordered]@{}
+    if ($Payload -is [System.Collections.IDictionary]) { foreach ($k in $Payload.Keys) { $out[$k] = $Payload[$k] } } else { foreach ($p in $Payload.PSObject.Properties) { $out[$p.Name] = $p.Value } }
+    foreach ($k in 'rows', 'assignments') { if ($out.Contains($k) -and $null -ne $out[$k]) { $out[$k] = @(@($out[$k]) | ForEach-Object { & $conv $_ }) } }
+    if ($out.Contains('definitions') -and $null -ne $out['definitions']) {
+        $d = $out['definitions']; $dn = [ordered]@{}
+        if ($d -is [System.Collections.IDictionary]) { foreach ($k in $d.Keys) { $dn[$k] = $d[$k] } } else { foreach ($p in $d.PSObject.Properties) { $dn[$p.Name] = $p.Value } }
+        foreach ($k in @($dn.Keys)) { if ($dn[$k] -is [System.Collections.IEnumerable] -and $dn[$k] -isnot [string]) { $dn[$k] = @(@($dn[$k]) | ForEach-Object { & $conv $_ }) } }
+        $out['definitions'] = [pscustomobject]$dn
+    }
+    $out['ringOrder'] = 'dev-first'
+    return [pscustomobject]$out
+}
+
+function ConvertTo-PimDeploymentRings {
+    <#
+      §77.20 -- THE DEPLOYMENT RINGS (master's pim.Settings['DeploymentRings'], carried in the signed bundle): a name per
+      ring and an optional TAG RULE that narrows which slaves on that ring count as its members (blank = every slave
+      that set itself to that ring). The tag rule uses the Target grammar (tag:a, a+b, tenant:<id>). The slave still
+      sets its OWN ring (operator decision 2026-09-21); the rule only narrows. Always returns the three rings 0..2.
+    #>
+    param([object]$Value)
+    $v = $Value
+    # A stored value may be JSON text, or JSON text of JSON text (a string saved through -Value is encoded twice).
+    for ($i = 0; $i -lt 2 -and $v -is [string]; $i++) { if (-not "$v".Trim()) { $v = $null; break }; try { $v = $v | ConvertFrom-Json } catch { $v = $null } }
+    $list = @()
+    if ($null -ne $v) {
+        $inner = Get-PimDownlinkValue -Object $v -Key 'rings'
+        $list = if ($null -ne $inner) { @($inner) } else { @($v) }
+    }
+    $defaults = @{ 0 = 'Dev'; 1 = 'Test'; 2 = 'Broad' }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($n in 0, 1, 2) {
+        $e = @($list | Where-Object { $null -ne $_ -and "$(Get-PimDownlinkValue -Object $_ -Key 'ring')".Trim() -eq "$n" })[0]
+        $name = if ($e -and "$(Get-PimDownlinkValue -Object $e -Key 'name')".Trim()) { "$(Get-PimDownlinkValue -Object $e -Key 'name')".Trim() } else { $defaults[$n] }
+        $tags = if ($e) { "$(Get-PimDownlinkValue -Object $e -Key 'tags')".Trim() } else { '' }
+        $out.Add([ordered]@{ ring = $n; name = $name; tags = $tags }) | Out-Null
+    }
+    return @($out.ToArray())
+}
+
+function Test-PimDeploymentRingMember {
+    # Is this slave a member of the ring it set itself to? Blank tag rule = yes. A slave outside its ring's rule
+    # receives NOTHING ring-gated (withheld and reported, never retracted) -- narrowing, never widening.
+    param([object[]]$Rings = @(), [Parameter(Mandatory)][int]$SlaveRing, [Parameter(Mandatory)][string]$TenantId, [string[]]$TenantTags = @())
+    $def = @(@($Rings) | Where-Object { $null -ne $_ -and "$(Get-PimDownlinkValue -Object $_ -Key 'ring')" -eq "$SlaveRing" })[0]
+    $name = if ($def) { "$(Get-PimDownlinkValue -Object $def -Key 'name')" } else { "ring $SlaveRing" }
+    $rule = if ($def) { "$(Get-PimDownlinkValue -Object $def -Key 'tags')".Trim() } else { '' }
+    if (-not $rule) { return @{ member = $true; reason = "ring $SlaveRing ($name) has no tag rule -- every slave on it is a member" } }
+    $t = Test-PimArtifactTarget -Target $rule -TenantId $TenantId -TenantTags @($TenantTags)
+    if ($t.match) { return @{ member = $true; reason = "matches ring $SlaveRing ($name) tag rule '$rule'" } }
+    return @{ member = $false; reason = "this tenant set itself to ring $SlaveRing ($name) but does not match the ring's tag rule '$rule' -- nothing ring-gated is sent until it does (fix the tenant's tags or the ring's rule)" }
 }
 
 function Select-PimDownlinkAdmins {
@@ -331,8 +435,8 @@ function Select-PimDownlinkAdmins {
         if (-not (Test-PimDownlinkAdminSynced -Admin $a).synced) { continue }   # row 35: the master's row must say msp
         $ringRaw = Get-PimDownlinkValue -Object $a -Key 'Ring'
         if ($null -eq $ringRaw -or "$ringRaw".Trim() -eq '') { continue }   # no ring => not eligible (fail-safe)
-        $ring = [int]$ringRaw
-        if ($ring -le $SlaveRing) { $keep.Add($a) | Out-Null }
+        if ("$ringRaw".Trim() -notmatch '^[0-2]$') { continue }                # not a ring (0..2) => reaches nothing
+        if (Test-PimRingReaches -AdminRing ([int]"$ringRaw".Trim()) -SlaveRing $SlaveRing) { $keep.Add($a) | Out-Null }
     }
     $sorted = @($keep.ToArray() | Sort-Object `
         @{ Expression = { [int](Get-PimDownlinkValue -Object $_ -Key 'Ring') } }, `
@@ -382,24 +486,25 @@ function Test-PimDownlinkRingGate {
         $names[$r] = @(@($RingRows[$r]) | ForEach-Object { "$(Get-PimDownlinkValue -Object $_ -Key 'UserName')" })
     }
 
-    # 1. MONOTONIC across each adjacent pair.
+    # §77.20: a LOWER slave ring receives MORE (ring 0 = dev gets every ring's admins; ring 2 = broad only ring-2 ones).
+    # 1. MONOTONIC across each adjacent pair: what the higher (narrower) slave ring selects, the lower one selects too.
     for ($i = 0; $i -lt ($rings.Count - 1); $i++) {
         $lo = $rings[$i]; $hi = $rings[$i + 1]
-        $lost = @($names[$lo] | Where-Object { $names[$hi] -notcontains $_ })
-        if ($lost.Count) { $failures.Add("ring $lo selected admin(s) that the wider ring $hi did not -- not a monotonic gate: $($lost -join ', ')") | Out-Null }
+        $lost = @($names[$hi] | Where-Object { $names[$lo] -notcontains $_ })
+        if ($lost.Count) { $failures.Add("ring $hi selected admin(s) that the wider ring $lo did not -- not a monotonic gate: $($lost -join ', ')") | Out-Null }
     }
 
-    # 2. EXCLUSION: nothing above the ring may be selected at it.
+    # 2. EXCLUSION: an admin whose ring is BELOW the slave's ring must not be selected at it.
     foreach ($r in $rings) {
         $over = @(@($RingRows[$r]) | Where-Object {
                     $rv = Get-PimDownlinkValue -Object $_ -Key 'Ring'
-                    ($null -ne $rv) -and ("$rv".Trim() -ne '') -and ([int]$rv -gt $r)
+                    ($null -ne $rv) -and ("$rv".Trim() -ne '') -and ([int]$rv -lt $r)
                  } | ForEach-Object { "$(Get-PimDownlinkValue -Object $_ -Key 'UserName')(ring $(Get-PimDownlinkValue -Object $_ -Key 'Ring'))" })
-        if ($over.Count) { $failures.Add("RING LEAK at ring ${r}: selected admin(s) above the ring: $($over -join ', ')") | Out-Null }
+        if ($over.Count) { $failures.Add("RING LEAK at ring ${r}: selected admin(s) below the ring: $($over -join ', ')") | Out-Null }
     }
 
-    # 3. BOTH DIRECTIONS on one customer.
-    $lowest = $rings[0]; $highest = $rings[$rings.Count - 1]
+    # 3. BOTH DIRECTIONS on one customer: the widest slave ring is the LOWEST number.
+    $lowest = $rings[$rings.Count - 1]; $highest = $rings[0]
     $gained = @($names[$highest] | Where-Object { $names[$lowest] -notcontains $_ })
     $vacuous = ($gained.Count -eq 0)
 
@@ -413,7 +518,7 @@ function Test-PimDownlinkRingGate {
         $vacuousReason = if (@($names[$highest]).Count -eq 0) {
             "the baseline carries NO admin rows at all (0 selected even at the widest ring $highest) -- this is an EMPTY/BROKEN baseline input, not an estate shape. Check that the signed bundle was generated AFTER the estate was seeded."
         } else {
-            "every one of the $(@($names[$highest]).Count) baseline admin(s) already reaches the narrowest ring $lowest, so widening the ring adds nobody and the exclusion direction cannot be exercised. Seed an admin above ring $lowest to make this measurable."
+            "every one of the $(@($names[$highest]).Count) baseline admin(s) already reaches the narrowest ring $lowest, so widening the ring adds nobody and the exclusion direction cannot be exercised. Seed an admin on a ring below $lowest to make this measurable."
         }
     }
 
@@ -929,8 +1034,24 @@ function Get-PimReplicateMode {
         # construction. On a definition row a missing field is blank = master tenant only.
         $regByConstruction = (-not $hasMm) -and $AdminSource -eq 'Registry'
         $mmMode = if ($regByConstruction) { 'Yes' } elseif ($mm -ieq 'msp') { 'Yes' } else { 'No' }
+        if ($norm -eq 'Follow' -and $isNone) {
+            # Target=none is the operator's own declaration that this account stays on the master. A
+            # declaration beats a dependency: a delegation cannot drag an admin into a tenant the
+            # master said it must never leave.
+            return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'master tenant only by declaration (Target=none) -- never published, even as a dependency' }
+        }
         if ($norm -eq 'Follow') {
-            return @{ mode = 'No'; explicit = $true; valid = $false; reason = 'Replicate=Follow is not valid on an admin (nothing depends on an admin) -- use Yes or No' }
+            # 🔴 2026-09-22 (operator, pointing at a delegation marked "Replicate to managed tenants"
+            # whose admin was not replicated: "this delegation should include the admin account to be
+            # replicated" -> "=follow"). SOMETHING DOES depend on an admin: a replicated DELEGATION
+            # names one, and without that account in the managed tenant the delegation cannot be
+            # applied there -- the producer used to drop such a membership silently (see
+            # Select-PimBaselineBundleContent step 2). Follow is therefore valid on an admin and
+            # means exactly what it means everywhere else: carried ONLY where a replicated row needs
+            # it. It is NOT gated on ManagementMode -- "only if needed" is a narrowing of Yes, and an
+            # MSP-local admin stays out unless a replicated delegation names them.
+            return @{ mode = 'Follow'; explicit = $true; valid = $true
+                      reason = 'Replicate=Follow -- sent only to a tenant where a replicated delegation names this admin' }
         }
         # 2.4.378 (operator: "you decide"): a DEFINITION admin whose ManagementMode field is ABSENT (a v1 CSV) is held to the
         # same rule as an empty one -- Replicate must agree with ManagementMode, so Replicate=Yes without ManagementMode=msp
@@ -962,9 +1083,9 @@ function Test-PimReplicationRingAdmits {
         if ($Kind -eq 'admin') { return @{ admits = $false; reason = 'no Ring -- an admin without a ring reaches no slave' } }
         return @{ admits = $true; reason = 'no Ring set -- not narrowed by ring' }
     }
-    if ($r -notmatch '^\d+$') { return @{ admits = $false; reason = "Ring='$r' is not a ring number -- reaches no tenant (fail closed)" } }
-    if ([int]$r -le $TenantRing) { return @{ admits = $true; reason = "ring $r admits tenant ring $TenantRing" } }
-    return @{ admits = $false; reason = "its Ring $r is above this tenant's ring $TenantRing" }
+    if ($r -notmatch '^[0-2]$') { return @{ admits = $false; reason = "Ring='$r' is not a ring (0 dev, 1 test, 2 broad) -- reaches no tenant (fail closed)" } }
+    if (Test-PimRingReaches -AdminRing ([int]$r) -SlaveRing $TenantRing) { return @{ admits = $true; reason = "ring $r admits tenant ring $TenantRing" } }
+    return @{ admits = $false; reason = "its Ring $r is below this tenant's ring $TenantRing (ring 0 = dev, 1 = test, 2 = broad: promote the row to reach it)" }
 }
 
 function Test-PimReplicationReach {
@@ -978,12 +1099,18 @@ function Test-PimReplicationReach {
         [Parameter(Mandatory)][ValidateSet('admin','membership','group','nesting','binding','resource')][string]$Kind,
         [Parameter(Mandatory)][string]$TenantId,
         [Parameter(Mandatory)][int]$TenantRing,
-        [string[]]$TenantTags = @()
+        [string[]]$TenantTags = @(),
+        # §77.20: the deployment-ring definitions; omitted = no ring narrows by tag
+        [object[]]$DeploymentRings = @()
     )
     $m = Get-PimReplicateMode -Row $Row -Kind $Kind
     if ($m.mode -eq 'No') { return @{ reach = $false; mode = 'No'; axis = 'replicate'; reason = "$($m.reason)" } }
     $rg = Test-PimReplicationRingAdmits -Row $Row -Kind $Kind -TenantRing $TenantRing
     if (-not $rg.admits) { return @{ reach = $false; mode = $m.mode; axis = 'ring'; reason = "$($rg.reason)" } }
+    if (@($DeploymentRings).Count -and "$(Get-PimDownlinkValue -Object $Row -Key 'Ring')".Trim()) {
+        $mem = Test-PimDeploymentRingMember -Rings @($DeploymentRings) -SlaveRing $TenantRing -TenantId $TenantId -TenantTags @($TenantTags)
+        if (-not $mem.member) { return @{ reach = $false; mode = $m.mode; axis = 'ring'; reason = "$($mem.reason)" } }
+    }
     $tv = Test-PimArtifactTarget -Target "$(Get-PimDownlinkValue -Object $Row -Key 'Target')" -TenantId $TenantId -TenantTags @($TenantTags)
     if (-not $tv.match) { return @{ reach = $false; mode = $m.mode; axis = 'target'; reason = "$($tv.reason)" } }
     return @{ reach = $true; mode = $m.mode; axis = ''; reason = "$($tv.reason)" }
@@ -1013,7 +1140,25 @@ function Test-PimReplicationRowFields {
     $m = Get-PimReplicateMode -Row $Row -Kind $kind -AdminSource Definition
     if (-not $m.valid) { $errors.Add("$($m.reason)") | Out-Null }
     $ring = "$(Get-PimDownlinkValue -Object $Row -Key 'Ring')".Trim()
-    if ($ring -and $ring -notmatch '^\d+$') { $warnings.Add("Ring '$ring' is not a whole number -- it reaches no tenant") | Out-Null }   # DOC-16 a vs c (2.4.371): any whole number is a ring
+    # §77.20: the rings are 0 (dev), 1 (test), 2 (broad) -- nothing else reaches a tenant
+    if ($ring -and $ring -notmatch '^[0-2]$') { $errors.Add("Ring '$ring' is not a ring -- use 0 (dev), 1 (test) or 2 (broad)") | Out-Null }
+    # 🔴 A ROW THAT REPLICATES MUST NAME ITS RING (operator, 2026-09-22: "this should not be possible -
+    # people must define ring, otherwise nothing happens - result of using blank as default").
+    # Replicate=Yes with a blank Ring is the combination that READS as done and does nothing: on an
+    # admin the rule has always been "no Ring -- reaches no slave", and on the other kinds a blank
+    # ring silently means "every ring", so the same blank meant opposite things on two rows of the
+    # same page. Authoring refuses it; stored rows are untouched until they are next written, and the
+    # validator reports them.
+    # 🪤 ONLY AN EXPLICIT "YES" (measured 2026-09-22: the first build of this rule also demanded a ring
+    # from every FOLLOW row, which lit up rows that were never broken -- a follower is carried BECAUSE
+    # something else reaches that tenant, so its own ring narrows nothing and a blank one is correct).
+    # Requiring it there produced errors the operator could not clear by doing the right thing.
+    # 🔑 An ADMIN that follows is the exception: the admin ring rule fails CLOSED ("no Ring -- an admin
+    # without a ring reaches no slave"), so a follower admin with a blank ring reaches nobody however
+    # many delegations name them. That one does need a ring.
+    if (-not $ring -and (($m.mode -eq 'Yes' -and $m.explicit) -or ($kind -eq 'admin' -and $m.mode -eq 'Follow'))) {
+        $errors.Add("Replicate=$($m.mode) needs a Ring -- use 0 (dev), 1 (test) or 2 (broad). Without one this row reaches no managed tenant.") | Out-Null
+    }
     $tgt = "$(Get-PimDownlinkValue -Object $Row -Key 'Target')".Trim()
     if ($tgt) {
         $sel = Test-PimAdminTargetSelector -Target $tgt -KnownTags @($KnownTags) -TagsKnown:([bool]$TagsKnown)
@@ -1142,6 +1287,7 @@ function Select-PimBaselineBundleContent {
         $rowList.Add($r) | Out-Null
     }
     $adminByLower = @{}
+    $dependencyAdmins = New-Object System.Collections.Generic.List[object]   # Follow admins carried for a delegation
     foreach ($r in $rowList.ToArray()) { $adminByLower["$(Get-PimDownlinkValue -Object $r -Key 'UserName')".Trim().ToLowerInvariant()] = "$(Get-PimDownlinkValue -Object $r -Key 'UserName')".Trim() }
     $defAdmins = Get-PimCentralAdminsFromDefinitions -Rows @(& $getEnt 'Account-Definitions-Admins')
     $added = 0
@@ -1160,6 +1306,15 @@ function Select-PimBaselineBundleContent {
     }
 
     # 2. memberships of the published admins
+    # 🔴 2026-09-22 (operator: "this delegation should include the admin account to be replicated" ->
+    # "=follow"). A delegation whose admin was not published used to be dropped here SILENTLY
+    # ($skipped++), so a row the grid showed as "Replicate to managed tenants" reached nobody and said
+    # nothing. Now: an admin marked Replicate=Follow is carried into the bundle BECAUSE this
+    # membership needs it (each tenant then keeps it only where a delegation actually reaches --
+    # Get-PimDownlinkPlan step 3b2), and an admin that is genuinely master-only makes the
+    # membership a REPORTED omission with the fix in its reason.
+    $followAdmins = @{}
+    foreach ($f in @($defAdmins.follow)) { $followAdmins["$($f.UserName)".Trim().ToLowerInvariant()] = $f }
     $assignObjs = New-Object System.Collections.Generic.List[object]
     $skipped = 0
     foreach ($j in (& $getEnt 'PIM-Assignments-Admins')) {
@@ -1168,7 +1323,22 @@ function Select-PimBaselineBundleContent {
         if ("$($j.Action)" -eq 'Remove') { continue }
         $local = $u; $at = $u.IndexOf('@'); if ($at -gt 0) { $local = $u.Substring(0, $at) }
         $key = $local.ToLowerInvariant()
-        if (-not $adminByLower.ContainsKey($key)) { $skipped++; continue }
+        if (-not $adminByLower.ContainsKey($key)) {
+            $jm = Get-PimReplicateMode -Row $j -Kind 'membership'
+            if ($jm.mode -ne 'No' -and $followAdmins.ContainsKey($key)) {
+                $fa = $followAdmins[$key]
+                $rowList.Add([pscustomobject]$fa) | Out-Null
+                $adminByLower[$key] = "$($fa.UserName)".Trim()
+                $dependencyAdmins.Add([ordered]@{ kind = 'admin'; name = "$($fa.UserName)"
+                    reason = "Replicate=Follow -- carried because a replicated delegation ($($fa.UserName) -> $($j.GroupTag)) needs this account; each tenant keeps it only where such a delegation reaches" }) | Out-Null
+            } else {
+                $skipped++
+                $why = if ($followAdmins.ContainsKey($key)) { "its delegation is $($jm.reason)" }
+                       else { 'its admin account is not replicated -- set the admin''s Replicate to Follow (sent where a delegation needs it) or Yes' }
+                $notPublished.Add([ordered]@{ kind = 'membership'; name = "$local -> $($j.GroupTag)"; reason = $why }) | Out-Null
+                continue
+            }
+        }
         $mm = Get-PimReplicateMode -Row $j -Kind 'membership'
         if ($mm.mode -eq 'No') { $notPublished.Add([ordered]@{ kind = 'membership'; name = "$($adminByLower[$key]) -> $($j.GroupTag)"; reason = "$($mm.reason)" }) | Out-Null; continue }
         $a = [ordered]@{
@@ -1278,6 +1448,7 @@ function Select-PimBaselineBundleContent {
 
     $dependencyIncluded = New-Object System.Collections.Generic.List[object]
     foreach ($dd in $deptDeps.ToArray()) { $dependencyIncluded.Add($dd) | Out-Null }   # 71.19 sponsor departments
+    foreach ($da in $dependencyAdmins.ToArray()) { $dependencyIncluded.Add($da) | Out-Null }   # 2026-09-22 Follow admins
     $defArr = @($allDefs.ToArray() | Where-Object { $need.ContainsKey((& $lc $_.GroupTag)) } | ForEach-Object {
         if ((Get-PimReplicateMode -Row $_ -Kind 'group').mode -eq 'No') {
             $dependencyIncluded.Add([ordered]@{ kind = 'group'; name = "$($_.GroupTag)"; reason = 'Replicate=No, but a replicated row depends on it -- carried so each tenant can auto-include it (warned per tenant)' }) | Out-Null
@@ -1355,7 +1526,9 @@ function New-PimBaselinePayload {
         [int64]$Version = 0,
         [string]$Scope = 'fleet',
         [string]$GeneratedAtUtc = '',
-        [string]$ValidToUtc = ''
+        [string]$ValidToUtc = '',
+        # §77.20: the master's Deployment rings (pim.Settings DeploymentRings); omitted = the three rings, no tag rule
+        [object]$DeploymentRings = $null
     )
     return [ordered]@{
         product          = 'PIM4EntraPS'
@@ -1369,6 +1542,8 @@ function New-PimBaselinePayload {
         definitions      = $Content.definitions
         projectionPolicy = $ProjectionPolicy
         tenantTags       = $TenantTags
+        ringOrder        = 'dev-first'
+        deploymentRings  = @(ConvertTo-PimDeploymentRings -Value $DeploymentRings)
     }
 }
 
@@ -1767,8 +1942,10 @@ function Select-PimProjectedAssignments {
         $mark = { param($list, $why) $r = [ordered]@{ UserName = $user; GroupTag = $tag; reason = $why }; $list.Add($r) | Out-Null }
 
         if (-not $user -or -not $tag) { & $mark $excluded 'malformed row (missing UserName or GroupTag)'; continue }
-        # the admin must have survived the ring gate for this slave
-        if ($allowed.Count -and -not $allowed.Contains($user.ToLowerInvariant())) {
+        # the admin must have survived the ring gate for this slave. An EMPTY set means NO admin reached it -- then no
+        # membership may project either (2.4.388: `$allowed.Count -and` used to skip the gate exactly then, so a tenant
+        # outside its ring's tag rule, or one every admin was withheld from, still received every role assignment).
+        if (-not $allowed.Contains($user.ToLowerInvariant())) {
             if ($notTargetedAdmins.Contains($user.ToLowerInvariant())) {
                 & $mark $excluded "admin '$user' is not TARGETED at this tenant -- their roles do not project either"
             } else {
@@ -2079,7 +2256,13 @@ function New-PimDownlinkSyncContent {
         # no assignments file is produced and the manifest reports 0, which is
         # exactly the pre-control-#2 behaviour (so an old master that publishes no
         # assignments keeps working unchanged).
-        [hashtable]$Projection
+        [hashtable]$Projection,
+        # REQ-REV-DOWN-1 / REQ-REN-1 (2026-09-22): the AUTHORISED absences. A slave is report-first
+        # about anything that disappears from the bundle (see Invoke-PimDownlinkAssignmentApply), and
+        # that rule stays -- these name the removals and renames the master really decided, so the
+        # slave can act on exactly those and keep holding everything else. Omitted => the bundle is
+        # byte-identical to before, which is what keeps an older master working unchanged.
+        [object[]]$Intents = @()
     )
     $adminRows = @(@($Admins) | ForEach-Object {
         [ordered]@{
@@ -2122,6 +2305,9 @@ function New-PimDownlinkSyncContent {
         assignmentCount           = $projRows.Count
         assignmentExcludedCount   = $exclRows.Count
         assignmentUnresolvedCount = $unresRows.Count
+        # counted in the manifest too, so a pull log can say "3 authorised withdrawals" without
+        # opening the intents file, and a bundle that carries none says so explicitly.
+        intentCount               = @($Intents).Count
     }
     $out = @{
         admins   = ($adminsDoc   | ConvertTo-Json -Depth 8)
@@ -2142,6 +2328,21 @@ function New-PimDownlinkSyncContent {
             unresolved  = $unresRows
         }
         $out['assignments'] = ($assignDoc | ConvertTo-Json -Depth 8)
+    }
+    # The intents file is produced ONLY when there are intents: a master with nothing to withdraw
+    # publishes exactly the bytes it published before this feature existed.
+    if (@($Intents).Count) {
+        $intentDoc = [ordered]@{
+            product   = 'PIM4EntraPS'
+            kind      = 'downlink-intents'
+            tenantId  = "$TenantId"
+            slaveRing = [int]$SlaveRing
+            version   = [int64]$BaselineVersion
+            scope     = "$Scope"
+            # withdraw = this row may be removed here; rename = this key became that key.
+            intents   = @($Intents)
+        }
+        $out['intents'] = ($intentDoc | ConvertTo-Json -Depth 8)
     }
     return $out
 }
@@ -2221,7 +2422,7 @@ function Get-PimDownlinkPlan {
     if (-not $verify.ok) {
         return @{ ok = $false; reason = "baseline verify failed: $($verify.reason)"; scenarioId = "$($ctx.id)"; ring = $SlaveRing; admins = @(); sync = $null; content = $null; baselineVersion = 0; verify = $verify }
     }
-    $payload = $verify.payload
+    $payload = ConvertFrom-PimLegacyRingPayload -Payload $verify.payload
     $blVersion = 0
     $vr = Get-PimDownlinkValue -Object $payload -Key 'version'
     if ($null -ne $vr -and "$vr".Trim()) { try { $blVersion = [int64]$vr } catch { $blVersion = 0 } }
@@ -2263,7 +2464,9 @@ function Get-PimDownlinkPlan {
     if ($PSBoundParameters.ContainsKey('BaselineAdmins') -and $null -ne $BaselineAdmins) { $src = @($BaselineAdmins) }
     else { $src = @(Get-PimDownlinkValue -Object $payload -Key 'rows') }
 
-    # 3) ring-gate to admin.Ring <= slave.Ring -- after the row-35 mode gate, whose skips are
+    $deploymentRings = @(ConvertTo-PimDeploymentRings -Value (Get-PimDownlinkValue -Object $payload -Key 'deploymentRings'))
+
+    # 3) ring-gate to SlaveRing <= admin.Ring (§77.20) -- after the row-35 mode gate, whose skips are
     #    REPORTED (never silent): an admin the master no longer marks msp is not sent, and the
     #    slave-side apply withdraws it only inside the retraction budget.
     $notSynced = New-Object System.Collections.Generic.List[object]
@@ -2316,6 +2519,12 @@ function Get-PimDownlinkPlan {
         }
         $admins = @($keepAdmins.ToArray())
     }
+    # §77.20: the slave set its own ring; the ring's tag rule (master's Deployment rings) decides whether it counts.
+    $ringMember = Test-PimDeploymentRingMember -Rings $deploymentRings -SlaveRing $SlaveRing -TenantId $TenantId -TenantTags $effTags
+    if (-not $ringMember.member) {
+        foreach ($a in @($admins)) { $targetSkips.Add([ordered]@{ kind = 'admin'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; UserName = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; GroupTag = ''; reason = $ringMember.reason }) | Out-Null }
+        $admins = @()
+    }
 
     # IMP-13 -- WITHHOLD admins the slave's own engine could never see. Applied AFTER the ring and
     # targeting gates so it reports on what would actually have been created, and kept separate
@@ -2330,15 +2539,24 @@ function Get-PimDownlinkPlan {
     if ($adminRecog.checked -and @($adminRecog.unrecognised).Count) {
         $unrec = New-Object System.Collections.Generic.HashSet[string]
         foreach ($u in @($adminRecog.unrecognised)) { [void]$unrec.Add("$u".Trim().ToLowerInvariant()) }
-        $keepRecog = New-Object System.Collections.Generic.List[object]
+        # 🔴 A NAME NEVER DECIDES WHAT REPLICATES (operator, 2026-09-22: "you can not block admins due
+        # to different name pattern" / "but name pattern is not used to control replication").
+        # This used to WITHHOLD such an admin. Measured on RIDE the same day: the job carried
+        # PIM_SlaveAdminPrefixes='Admin-,admin-', so nine `adm-e-*` accounts the master had published
+        # were dropped -- a deployment string deciding who gets access in a customer tenant, which is
+        # not what that setting is for.
+        # 🔑 The harm IMP-13 was written for is real and is fixed at its source instead: the slave's
+        # Admins provider now reads the accounts its DESIRED ROWS name (PIM-EngineProviders, Admins
+        # GetLive), so a centrally-sent admin is in the live set whatever it is called -- no
+        # "not present" every tick, no recreate loop, no orphan. The mismatch is still REPORTED here,
+        # because a slave whose conventions disagree with its master is worth saying out loud.
         foreach ($a in @($admins)) {
             $un = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')".Trim()
             if ($unrec.Contains($un.ToLowerInvariant())) {
                 $unrecognisedAdmins.Add([ordered]@{ kind = 'admin'; name = $un; UserName = $un; GroupTag = ''
-                                                    reason = "the slave's admin naming prefixes ($($adminRecog.prefixes -join ', ')) do not match '$un' -- its engine would never see this account, so it would be recreated every tick and left unmanaged" }) | Out-Null
-            } else { $keepRecog.Add($a) | Out-Null }
+                                                    reason = "the slave's admin naming prefixes ($($adminRecog.prefixes -join ', ')) do not match '$un' -- it is still sent (its own row makes it managed); align the tenant's admin naming if this is unexpected" }) | Out-Null
+            }
         }
-        $admins = @($keepRecog.ToArray())
     }
 
     # 3b) MSP-2 / control #2: project the master's role memberships for exactly the
@@ -2366,13 +2584,39 @@ function Get-PimDownlinkPlan {
             foreach ($a in @($srcAssign)) {
                 # §71: the membership's own Replicate/Ring/Target (blank = Follow the admin). The reason for
                 # a plain Target miss is Test-PimArtifactTarget's own, word for word, as before.
-                $tv = Test-PimReplicationReach -Row $a -Kind 'membership' -TenantId $TenantId -TenantRing $SlaveRing -TenantTags $effTags
+                $tv = Test-PimReplicationReach -Row $a -Kind 'membership' -TenantId $TenantId -TenantRing $SlaveRing -TenantTags $effTags -DeploymentRings $deploymentRings
                 $tv['match'] = [bool]$tv.reach
                 if ($tv.match) { $keepA.Add($a) | Out-Null }
                 else { $targetSkips.Add([ordered]@{ kind = 'role'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName') -> $(Get-PimDownlinkValue -Object $a -Key 'GroupTag')"; UserName = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; GroupTag = "$(Get-PimDownlinkValue -Object $a -Key 'GroupTag')"; reason = $tv.reason }) | Out-Null }
             }
             $srcAssign = @($keepA.ToArray())
         }
+    }
+
+    # 🔴 3b2 -- A FOLLOW ADMIN IS KEPT ONLY WHERE A DELEGATION THAT REACHED THIS TENANT NAMES THEM
+    # (2026-09-22, operator: "this delegation should include the admin account to be replicated" ->
+    # "=follow"). Replicate=Follow on an admin means "carried as a dependency", so the bundle holds
+    # the account for every tenant that might need it and THIS tenant decides. Evaluated after the
+    # membership reach gate above, because the answer is the set of memberships that actually reach
+    # here -- and before the projection, whose AdminUserNames come from $admins.
+    # 🔒 Fail closed: no assignments in the bundle at all = nothing needs a follower here.
+    if (@($admins).Count) {
+        $neededByDelegation = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($a in @($srcAssign)) {
+            $un = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')".Trim()
+            if (-not $un) { $un = "$(Get-PimDownlinkValue -Object $a -Key 'Username')".Trim() }
+            if ($un) { [void]$neededByDelegation.Add($un) }
+        }
+        $keepFollow = New-Object System.Collections.Generic.List[object]
+        foreach ($a in @($admins)) {
+            $rm = Get-PimReplicateMode -Row $a -Kind 'admin' -AdminSource Registry
+            if ($rm.mode -ne 'Follow') { $keepFollow.Add($a) | Out-Null; continue }
+            $un = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')".Trim()
+            if ($neededByDelegation.Contains($un)) { $keepFollow.Add($a) | Out-Null; continue }
+            $targetSkips.Add([ordered]@{ kind = 'admin'; name = $un; UserName = $un; GroupTag = ''
+                reason = 'Replicate=Follow and no replicated delegation reaches this tenant for this admin -- the account is not created here (set the admin to Yes to send it regardless)' }) | Out-Null
+        }
+        $admins = @($keepFollow.ToArray())
     }
 
     $projection = $null
@@ -2506,7 +2750,7 @@ function Get-PimDownlinkPlan {
     # IMP-13: named in the reason, because the operator cannot fix this one from our side and the
     # symptom without it (an account recreated on every tick, forever) points nowhere near the cause.
     if ($unrecognisedAdmins.Count) {
-        $reason += "; $($unrecognisedAdmins.Count) admin(s) WITHHELD -- the slave's admin naming prefixes do not match them, so its engine would never see the accounts and would recreate them every tick (fix the CUSTOMER's AdminAccountPatterns)"
+        $reason += "; $($unrecognisedAdmins.Count) admin(s) do not match this tenant's admin naming prefixes -- SENT ANYWAY (their own rows make them managed here); align the tenant's admin naming if that is unexpected"
     }
 
     return @{
@@ -2845,6 +3089,35 @@ function Invoke-PimManagedDownlink {
                                    slaveRing = $SlaveRing; slaveRingSource = 'local'; trust = @{ floor = $effFloor; storeFloor = $trustFloor; revokedSigners = @($revoked).Count; read = $trustRead; centralKill = $kill } })
     }
     Write-Host "[downlink] $($plan.reason)" -ForegroundColor Cyan
+    # 🔴 REQ-REV-DOWN-1 / REQ-REN-1 -- THE AUTHORISED ABSENCES, READ FROM THE VERIFIED BUNDLE.
+    # Only reached after $plan.ok, i.e. after the signature, the expiry and the anti-rollback floor
+    # have all passed: an intent is an instruction to REMOVE something, so it must never be taken
+    # from a document this tenant has not verified. Stale intents are dropped here (and said), so a
+    # tenant that has not pulled for a month cannot be surprised by a month-old withdrawal.
+    $bundleIntents = @()
+    if (Get-Command Select-PimDownlinkIntents -ErrorAction SilentlyContinue) {
+        try {
+            $__pl = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("$($Doc.payloadB64)")) | ConvertFrom-Json
+            $__raw = @()
+            if ($__pl -and $__pl.PSObject.Properties['intents']) { $__raw = @($__pl.intents) }
+            if (@($__raw).Count) {
+                $__sel = Select-PimDownlinkIntents -Intents $__raw -NowUtc $NowUtc
+                $bundleIntents = @($__sel.intents)
+                foreach ($s in (Get-PimDownlinkIntentSummary -Intents $bundleIntents)) { Write-Host "[downlink]   authorised: $s" -ForegroundColor Cyan }
+                foreach ($d in @($__sel.dropped)) { Write-Host "[downlink]   [warn] ignoring a stale intent ($($d.op) $($d.entity) '$($d.key)', $($d.utc)) -- older than the intent lifetime" -ForegroundColor Yellow }
+            }
+        } catch {
+            # An unreadable intents list must never widen or narrow anything silently.
+            Write-Host "[downlink]   [warn] the bundle's authorised-withdrawal list could not be read ($($_.Exception.Message)) -- this run withdraws NOTHING and reports as usual" -ForegroundColor Yellow
+            $bundleIntents = @()
+        }
+    }
+    # §79.5: central admins the master removed and named (withdraw on Account-Definitions-Admins, key = UserName). Used by the
+    # admin apply (the central row) and the membership apply (that admin's memberships).
+    $adminWithdrawKeys = @()
+    if (@($bundleIntents).Count -and (Get-Command Get-PimDownlinkWithdrawalKeys -ErrorAction SilentlyContinue)) {
+        $adminWithdrawKeys = @((Get-PimDownlinkWithdrawalKeys -Intents $bundleIntents -Entity 'Account-Definitions-Admins' -TenantId $TenantId).Keys)
+    }
 
     # 2) STAGE the per-tenant sync files (idempotent: only rewrite on change).
     $staged = New-Object System.Collections.Generic.List[object]
@@ -2942,9 +3215,55 @@ function Invoke-PimManagedDownlink {
             $adminApply = Invoke-PimDownlinkAdminApply -ConnectionString $SlaveStoreConnectionString `
                 -Admins @($plan.admins) -DefaultDomain $dom `
                 -CreateTapDefault $CreateTapDefault -TapLifetimeHoursDefault $TapLifetimeHoursDefault `
-                -AllowFullPrune:$AllowFullPrune -AllowRetraction:$AllowRetraction -WhatIfMode:$WhatIfMode
+                -AllowFullPrune:$AllowFullPrune -AllowRetraction:$AllowRetraction -Withdrawals $adminWithdrawKeys -WhatIfMode:$WhatIfMode
             Write-Host "[downlink] admins (S6 pull, domain $dom): $($adminApply.detail)" -ForegroundColor $(if ($adminApply.ok) { 'Green' } else { 'Red' })
+            foreach ($x in @($adminApply.withdrawn)) { if ("$x".Trim()) { Write-Host "[downlink]   WITHDRAWN $x (removed on the master, authorised in the signed bundle)" -ForegroundColor Cyan } }
             foreach ($x in @($adminApply.wouldRetract)) { if ("$x".Trim()) { Write-Host "[downlink]   WOULD REMOVE $x (no longer reaches this tenant; reported only -- pass -AllowRetraction)" -ForegroundColor Yellow } }
+            # §79.6 (operator 2026-09-25: "verify that a reset sessions centrally in msp mode for an admin also resets the
+            # sessions in all slaves. important if person leaves msp"). The master's revoke travels as a SIGNED intent; this
+            # tenant queues a session revoke for ITS account of that admin (<UserName>@<this tenant's domain>), COMMITTED at
+            # once (the human decision was the central one -- "so we dont have to approve 25 tenants"), and records it as
+            # done so the same intent never revokes twice. The engine's queue-apply carries it out and verifies it.
+            if (@($bundleIntents).Count -and (Get-Command Get-PimDownlinkSessionRevokes -ErrorAction SilentlyContinue)) {
+                $appliedIds = @()
+                try { $ap = Get-PimSqlSetting -ConnectionString $SlaveStoreConnectionString -Name 'DownlinkIntentsApplied'; if ($ap) { $appliedIds = @(@(if ($ap -is [string]) { $ap | ConvertFrom-Json } else { $ap }).ids) } } catch { $appliedIds = @() }
+                $revokes = @(Get-PimDownlinkSessionRevokes -Intents $bundleIntents -TenantId $TenantId -Applied $appliedIds)
+                $doneNow = New-Object System.Collections.Generic.List[string]
+                # 🔴 R25-31: only a CENTRAL admin this tenant holds, never a customer's own admin of the same name. The rows
+                # are read after the admin apply above; an unreadable store revokes nothing now (retried on the next pull).
+                if ($revokes.Count) {
+                    $rvSel = $null
+                    try {
+                        $rvSel = Select-PimDownlinkSessionRevokeTargets -Revokes $revokes -Owner 'MSP' `
+                                    -CentralRows @(Get-PimSqlRows -ConnectionString $SlaveStoreConnectionString -Entity 'Account-Definitions-Admins-Central') `
+                                    -LocalRows @(Get-PimSqlRows -ConnectionString $SlaveStoreConnectionString -Entity 'Account-Definitions-Admins')
+                    } catch { Write-Host "[downlink]   the admin rows could not be read to check the session revoke(s): $($_.Exception.Message) -- nothing revoked now, retried on the next pull" -ForegroundColor Red; $revokes = @() }
+                    if ($rvSel) {
+                        # a clash with the customer's own admin is final (recorded, never retried); "not a central admin here (yet)" is
+                        # retried on the next pull -- the import may simply not have landed -- until the intent expires.
+                        foreach ($sk in @($rvSel.skipped)) { Write-Host "[downlink]   SKIPPED session revoke: $($sk.why)" -ForegroundColor Yellow; if ("$($sk.why)" -match 'OWN admin') { $doneNow.Add("$($sk.id)") } }
+                        $revokes = @($rvSel.revoke)
+                    }
+                }
+                foreach ($rv in $revokes) {
+                    $upn = "$($rv.key)@$dom"
+                    if ($WhatIfMode) { Write-Host "[downlink]   WOULD revoke the sign-in sessions of $upn (authorised centrally by $($rv.by))" -ForegroundColor Cyan; continue }
+                    try {
+                        $ch = New-PimChange -Entity 'PIM-Action-Sessions' -Key $upn -Op 'Update' `
+                                -Payload ([pscustomobject]@{ type = 'session-revoke'; userPrincipalName = $upn; principalName = $upn; targetKind = 'Sign-in sessions'; downlinkIntent = $rv.id }) `
+                                -By "msp-downlink ($($rv.by))" -Kind 'Action' -Origin 'Authorised' -Justification "revoked centrally on the MSP master: $($rv.reason)"
+                        Add-PimSqlQueueChange -ConnectionString $SlaveStoreConnectionString -Change $ch
+                        [void](Set-PimSqlQueueCommitted -ConnectionString $SlaveStoreConnectionString -Ids @("$($ch.id)") -By 'msp-downlink')
+                        $doneNow.Add($rv.id)
+                        Write-Host "[downlink]   QUEUED + committed: revoke the sign-in sessions of $upn (authorised centrally by $($rv.by))" -ForegroundColor Cyan
+                    } catch { Write-Host "[downlink]   the session revoke of $upn could NOT be queued: $($_.Exception.Message) -- retried on the next pull" -ForegroundColor Red }
+                }
+                if ($doneNow.Count) {
+                    $keep = @(@($appliedIds) + @($doneNow.ToArray()) | Select-Object -Last 500)
+                    try { Set-PimSqlSetting -ConnectionString $SlaveStoreConnectionString -Name 'DownlinkIntentsApplied' -Value ([pscustomobject]@{ ids = @($keep) }) }
+                    catch { Write-Host "[downlink]   the applied-intent record could not be saved ($($_.Exception.Message)) -- the revoke may be queued again next pull (harmless: a second revoke changes nothing)" -ForegroundColor Yellow }
+                }
+            }
         } else {
             Write-Host "[downlink] admins NOT staged: no slave default domain (-SlaveDefaultDomain, or an ambient tenant to read it from). Refusing to build UPNs at a guessed domain." -ForegroundColor Yellow
         }
@@ -2973,8 +3292,19 @@ function Invoke-PimManagedDownlink {
                     Write-Host "[downlink]   DEFERRED $($d.GroupTag): $($d.reason)" -ForegroundColor DarkGray
                 }
             }
+            # REQ-REV-DOWN-1 -- the master's AUTHORISED withdrawals, taken from the VERIFIED bundle
+            # (never from an argument a caller could invent). Named rows only; everything else still
+            # reports and holds. The keys are named in the master's terms: '<username>|<grouptag>'.
+            $withdrawKeys = @()
+            if (@($bundleIntents).Count -and (Get-Command Get-PimDownlinkWithdrawalKeys -ErrorAction SilentlyContinue)) {
+                $withdrawKeys = @((Get-PimDownlinkWithdrawalKeys -Intents $bundleIntents -Entity 'PIM-Assignments-Admins' -TenantId $TenantId).Keys)
+            }
             $assignApply = Invoke-PimDownlinkAssignmentApply -ConnectionString $SlaveStoreConnectionString `
-                -Assignments @($plan.assignments) -AllowFullPrune:$AllowFullPrune -AllowRetraction:$AllowRetraction -WhatIfMode:$WhatIfMode
+                -Assignments @($plan.assignments) -Withdrawals $withdrawKeys -WithdrawnAdmins $adminWithdrawKeys `
+                -AllowFullPrune:$AllowFullPrune -AllowRetraction:$AllowRetraction -WhatIfMode:$WhatIfMode
+            foreach ($x in @($assignApply.withdrawn)) {
+                if ("$x".Trim()) { Write-Host "[downlink]   WITHDRAWN $x (revoked on the master, authorised in the signed bundle)" -ForegroundColor Cyan }
+            }
             $col = if ($assignApply.ok) { 'Green' } else { 'Red' }
             Write-Host "[downlink] roles: $($assignApply.detail)" -ForegroundColor $col
             foreach ($u in @($plan.projection.unresolved)) {
@@ -3090,6 +3420,12 @@ function Invoke-PimDownlinkAssignmentApply {
         # and then only inside the removal budget (PIM_RemoveMaxCount). -AllowFullPrune (the deliberate
         # decouple) still withdraws everything.
         [switch]$AllowRetraction,
+        # REQ-REV-DOWN-1: the keys the MASTER authorised removing here (from the signed bundle's
+        # intents). Named rows only -- never a wildcard, never inferred from absence.
+        [string[]]$Withdrawals = @(),
+        # §79.5: central ADMINS the master removed (withdraw intent on Account-Definitions-Admins). Their memberships
+        # ('<username>|<grouptag>') are authorised with them -- a membership of a withdrawn admin has nothing to hang on.
+        [string[]]$WithdrawnAdmins = @(),
         [switch]$WhatIfMode = $true
     )
     $entity = 'PIM-Assignments-Admins'
@@ -3139,6 +3475,29 @@ function Invoke-PimDownlinkAssignmentApply {
     $stale = @($ownedKeys.Keys | Where-Object { -not $desiredKeys.ContainsKey($_) } | Sort-Object)
     $removed = 0; $wouldPrune = @(); $wouldRetract = @(); $retractHeld = @()
     $budget = Get-PimDownlinkRetractionBudget
+    # 🔴 REQ-REV-DOWN-1 -- AN AUTHORISED WITHDRAWAL IS NOT A GUESS (operator 2026-09-22: a central
+    # revoke of a replicated row must be able to reach the managed tenants, "auto-committed so we
+    # dont have to approve 25 tenants"). Report-first exists because the slave cannot tell "the
+    # master revoked it" from "the master failed to publish it" -- so the master now SAYS which, in
+    # the signed bundle. A key named by a withdraw intent is removed here even without the blanket
+    # -AllowRetraction, and it does NOT consume the removal budget: it is one named row, decided by
+    # a human, not a mass disappearance. Everything NOT named keeps today's behaviour exactly.
+    $authorised = @{}
+    if (@($Withdrawals).Count) {
+        foreach ($w in @($Withdrawals)) { $wk = "$w".Trim().ToLowerInvariant(); if ($wk) { $authorised[$wk] = $true } }
+    }
+    if (@($WithdrawnAdmins).Count) {
+        $wa = @{}; foreach ($w in @($WithdrawnAdmins)) { $wk = "$w".Trim().ToLowerInvariant(); if ($wk) { $wa[$wk] = $true } }
+        foreach ($s in @($stale)) { $u0 = ("$s" -split '\|', 2)[0].Trim().ToLowerInvariant(); if ($u0 -and $wa.ContainsKey($u0)) { $authorised["$s".ToLowerInvariant()] = $true } }
+    }
+    $withdrawn = @($stale | Where-Object { $authorised.ContainsKey("$_".ToLowerInvariant()) })
+    if ($withdrawn.Count) {
+        foreach ($k in $withdrawn) {
+            if (-not $WhatIfMode) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $entity -Key $k }
+            $removed++
+        }
+        $stale = @($stale | Where-Object { -not $authorised.ContainsKey("$_".ToLowerInvariant()) })
+    }
     if ($stale.Count) {
         if (@($Assignments).Count -eq 0 -and -not $AllowFullPrune) {
             $wouldPrune = $stale
@@ -3155,11 +3514,12 @@ function Invoke-PimDownlinkAssignmentApply {
     }
     # ${entity} braces are required: "$entity:" parses '$entity:' as a SCOPE qualifier.
     $detail = "${entity}: +$created ~$updated -$removed (left $foreign local row(s) untouched)"
+    if ($withdrawn.Count) { $detail += "; $($withdrawn.Count) row(s) withdrawn on the master's authorisation (revoked centrally)" }
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced row(s) because the projection was EMPTY -- pass -AllowFullPrune to withdraw them" }
     if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) synced row(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in)" }
     if ($retractHeld.Count) { $detail += "; HELD: $($retractHeld.Count) retraction(s) exceed the removal budget of $budget -- NOTHING withdrawn" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
-    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; wouldRetract = $wouldRetract; retractHeld = $retractHeld; retractionBudget = $budget; detail = $detail }
+    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; wouldRetract = $wouldRetract; retractHeld = $retractHeld; retractionBudget = $budget; withdrawn = @($withdrawn); detail = $detail }
 }
 
 # ---------------------------------------------------------------------------
@@ -3423,6 +3783,10 @@ function Invoke-PimDownlinkAdminApply {
         # on RIDE 2026-09-15): an admin that stops reaching this tenant is reported as 'would remove' and its
         # central row withdrawn only with this opt-in, inside the removal budget. -AllowFullPrune still wins.
         [switch]$AllowRetraction,
+        # §79.5 (operator 2026-09-25, "Prompt on remove only"): the central admins the master REMOVED and named in a signed
+        # withdraw intent (Account-Definitions-Admins, key = UserName). Removed here without -AllowRetraction and outside the
+        # budget -- one named row decided by a human -- exactly as REQ-REV-DOWN-1 does for memberships. Unnamed rows: unchanged.
+        [string[]]$Withdrawals = @(),
         [switch]$WhatIfMode = $true
     )
     # 🔑 REQUIREMENTS 68.6 row 35 (operator 2026-09-13): "slaves ... have their own admins.
@@ -3555,6 +3919,16 @@ function Invoke-PimDownlinkAdminApply {
     if (Get-Command Get-PimSafetyKnob -ErrorAction SilentlyContinue) {
         $kb = 0; if ([int]::TryParse("$(Get-PimSafetyKnob -Name 'PIM_RemoveMaxCount')", [ref]$kb) -and $kb -ge 0) { $budget = $kb }
     }
+    $withdrawnAdmins = @()
+    if (@($Withdrawals).Count -and $stale.Count) {
+        $authA = @{}; foreach ($w in @($Withdrawals)) { $wk = "$w".Trim().ToLowerInvariant(); if ($wk) { $authA[$wk] = $true } }
+        $withdrawnAdmins = @($stale | Where-Object { $authA.ContainsKey("$_".ToLowerInvariant()) })
+        foreach ($k in $withdrawnAdmins) {
+            if (-not $WhatIfMode) { Remove-PimSqlRow -ConnectionString $ConnectionString -Entity $entity -Key $k }
+            $removed++
+        }
+        $stale = @($stale | Where-Object { -not $authA.ContainsKey("$_".ToLowerInvariant()) })
+    }
     if ($stale.Count) {
         if (@($Admins).Count -eq 0 -and -not $AllowFullPrune) { $wouldPrune = $stale }
         elseif (-not $AllowFullPrune -and -not $AllowRetraction) { $wouldRetract = $stale }
@@ -3576,7 +3950,8 @@ function Invoke-PimDownlinkAdminApply {
     if ($tapIgnored) { $detail += "; NOTE CreateTAP=FALSE on $tapIgnored admin(s) was IGNORED -- a TAP is enforced for every Entra admin" }
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced admin(s) on an EMPTY baseline -- pass -AllowFullPrune" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
-    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; wouldRetract = @($wouldRetract | ForEach-Object { "$entity|$_" }); retractHeld = $retractHeld; retractionBudget = $budget; migrated = $migrated; entity = $entity; tapEnabled = $tapOn; tapWithoutRecipient = $tapNoRecipient; tapFalseIgnored = $tapIgnored; detail = $detail }
+    if ($withdrawnAdmins.Count) { $detail += "; WITHDRAWN $($withdrawnAdmins.Count) central admin(s) the master removed (authorised in the signed bundle)" }
+    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; withdrawn = @($withdrawnAdmins | ForEach-Object { "$entity|$_" }); wouldRetract = @($wouldRetract | ForEach-Object { "$entity|$_" }); retractHeld = $retractHeld; retractionBudget = $budget; migrated = $migrated; entity = $entity; tapEnabled = $tapOn; tapWithoutRecipient = $tapNoRecipient; tapFalseIgnored = $tapIgnored; detail = $detail }
 }
 
 # Sync-PimMasterToSlave -- alias-style entry the matrix also probes for. Thin

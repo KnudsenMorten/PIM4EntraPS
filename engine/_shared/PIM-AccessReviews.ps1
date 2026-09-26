@@ -948,10 +948,31 @@ function Set-PimAccessReviewReviewers {
     $patch = New-PimReviewerAssignmentPatch -Reviewers $Reviewers -NowUtc ([datetime]::UtcNow) -AssignedBy $AssignedBy
     $base = "/identityGovernance/accessReviews/definitions/$DefinitionId"
     if ($PSCmdlet.ShouldProcess($DefinitionId, "Assign $($patch.audit.count) reviewer(s)")) {
-        Invoke-PimGraph -Method PATCH -Path $base -Body $patch.body | Out-Null
+        # a definition is updated with PUT and the WHOLE object (PATCH is 404, verified live 2026-09-25)
+        $full = Invoke-PimGraph -Method GET -Path $base
+        Invoke-PimGraph -Method PUT -Path $base -Body (ConvertTo-PimReviewDefinitionPut -Definition $full -Reviewers $patch.body.reviewers) | Out-Null
         return [pscustomobject]@{ status = 'assigned'; definitionId = $DefinitionId; count = $patch.audit.count; reviewers = $patch.audit.reviewers; audit = $patch.audit }
     }
     return [pscustomobject]@{ status = 'skipped-whatif'; definitionId = $DefinitionId; count = $patch.audit.count; reviewers = $patch.audit.reviewers; audit = $patch.audit }
+}
+
+# PURE. The body that changes a review definition's reviewers. Graph updates an accessReviewScheduleDefinition with PUT
+# and the WHOLE object -- PATCH answers 404 (verified live on a test tenant 2026-09-25: PATCH 404 "No HTTP resource was
+# found", PUT with the full object applied and read back). So the definition as read is copied (the writable
+# properties only; server-set ones such as id / status / createdBy are left out) and only the reviewers are replaced.
+# The key list is a literal inside the function on purpose: a $script: default is $null in a child script (BUG-79-6b).
+function ConvertTo-PimReviewDefinitionPut {
+    param([Parameter(Mandatory)][object]$Definition, [Parameter(Mandatory)][object[]]$Reviewers)
+    $keys = @('displayName','descriptionForAdmins','descriptionForReviewers','scope','instanceEnumerationScope',
+              'reviewers','fallbackReviewers','backupReviewers','additionalNotificationRecipients','settings','stageSettings')
+    $body = [ordered]@{}
+    foreach ($k in $keys) {
+        $pr = $Definition.PSObject.Properties[$k]
+        if ($pr -and $null -ne $pr.Value) { $body[$k] = $pr.Value }
+    }
+    if (-not "$($body['displayName'])".Trim() -or -not $body.Contains('scope')) { throw 'the access-review definition read back without displayName / scope -- refusing to PUT a partial object' }
+    $body['reviewers'] = @($Reviewers)
+    $body
 }
 
 function Send-PimAccessReviewReminders {

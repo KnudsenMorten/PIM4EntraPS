@@ -83,7 +83,7 @@ param(
     # s31: resolve the update source + hosting from a deployment SCENARIO (S1..S6). When set, the
     # scenario's resolved updateSource (git-pull | sync-automateit | from-master) and managedHosting
     # (central|local) OVERRIDE -Source -- so one knob drives the whole update path.
-    [ValidateSet('S1','S2','S3','S4','S5','S6')][string]$Scenario,
+    [ValidateSet('S1','S2','S3','S5','S6')][string]$Scenario,
     [ValidateSet('central','local')][string]$ManagedHosting,   # only used for from-master (S5=central, S6=local); auto-set from -Scenario
     [switch]$DetectOnly,
     [switch]$Apply,
@@ -655,7 +655,7 @@ try {
         Step "   RING GATE: may $ResourceGroup take $($buildPlan.imageTag)?"
         [void](Assert-PimRollRingGate -ResourceGroup $ResourceGroup -SubscriptionArgs $azSubArgs -TargetVersion "$($buildPlan.imageTag)" `
                   -UpdateJobName $UpdateJobName -OverrideRingGate:$OverrideRingGate -Reason $Reason -Caller 'Invoke-PimUpdate' `
-                  -SqlConnectionString $SqlConnectionString -PendingUpdateRing $PendingUpdateRing -PendingUpdateSourceUrl $PendingUpdateSourceUrl)
+                  -SqlConnectionString $SqlConnectionString -PendingUpdateRing $PendingUpdateRing -PendingUpdateSourceUrl $PendingUpdateSourceUrl)   # R25-24: the edition comes from the store
     }
 
     # ---- STEP 2 -- BUILD (only if GUI update needed) -------------------------
@@ -727,6 +727,7 @@ try {
             # audited override here is not refused one level down.
             if ($OverrideRingGate) { $rollGate['OverrideRingGate'] = $true; $rollGate['Reason'] = $Reason }
             if ($PendingUpdateRing -ge 0) { $rollGate['PendingUpdateRing'] = $PendingUpdateRing; $rollGate['PendingUpdateSourceUrl'] = $PendingUpdateSourceUrl }
+            if ("$SqlConnectionString".Trim()) { $rollGate['SqlConnectionString'] = $SqlConnectionString }   # R25-24: the roller's re-check reads the same edition fact
             if ("$SubscriptionId".Trim()) { $rollGate['SubscriptionId'] = "$SubscriptionId".Trim() }
             if ("$UpdateJobName".Trim()) { $rollGate['UpdateJobName'] = $UpdateJobName }
             # BUG-228: the operator's answer to the BUG-55 desired-state gate, forwarded so the gate

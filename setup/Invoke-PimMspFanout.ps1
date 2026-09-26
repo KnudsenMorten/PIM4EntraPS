@@ -17,7 +17,7 @@
       2. Resolve the tenant's default domain -> $global:DefaultDomainUPN
          (each central admin gets a tenant-local UPN: <UserName>@<domain>).
       3. Build a temp Account-Definitions CSV from pim.CentralAdmins, ring-
-         filtered by pim.vw_AdminTenantTargets (admin.Ring <= tenant.Ring).
+         filtered by pim.vw_AdminTenantTargets (tenant.Ring <= admin.Ring, §77.20).
       4. -WhatIfMode (default ON): print the plan only.
          Live: provision the ID accounts over PURE REST
          (Invoke-PimRestAccountApply -> New-PimRestAdminAccount, Graph
@@ -29,8 +29,8 @@
     write -- is now pure REST (no Microsoft.Graph module). REQUIREMENTS.md §19
     write-path migration item closed for this launcher.
 
-    Ring semantics match the engine: a ring-0 admin reaches every tenant; a
-    ring-2 consultant only reaches ring-2 (test) tenants.
+    Ring semantics match the engine (§77.20): a ring-2 admin reaches every tenant; a
+    ring-0 consultant only reaches ring-0 (dev) tenants (0 dev, 1 test, 2 broad).
 
 .PARAMETER ServerInstance
     SQL server holding the platform registry (the Azure SQL FQDN, with -UseAzureSql).

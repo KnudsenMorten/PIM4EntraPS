@@ -80,16 +80,52 @@ function New-PimPermissionGroupName {
         [Parameter(Mandatory)][int]$Tier,
         [Parameter(Mandatory)][string]$Code,      # CP / MP / WDP / DP / APP / USER
         [Parameter(Mandatory)][string]$Domain,    # ID / RES / DAT
-        [string]$Au
+        [string]$Au,
+        # 2026-09-21: the parts ResourceGroupPattern names separately ({Scope}, {Permission}); blank = not known.
+        [string]$ScopeSegment,
+        [string]$PermissionSegment
     )
-    $auSeg = if ("$Au".Trim()) { "-AU-$($Au.Trim())" } else { '' }
-    # REQ-U (2026-09-19): the grammar above is the tenant-neutral TAG part; the NAME is the tenant's own
-    # PimGroupPattern around it (PIM-Naming.ps1 Resolve-PimGroupNameFromTag). This used to hard-code 'PIM-', so
-    # Azure / Power BI / Power Platform discovery proposed 'PIM-...' groups on a tenant whose convention is
-    # 'GRP-{Role}'. The shipped default pattern ('PIM-{Role}-{Department}') still yields 'PIM-<tag>'.
-    $tagPart = ("{0}-{1}{2}-L{3}-T{4}-{5}-{6}" -f $Service, $Name, $auSeg, $Level, $Tier, $Code, $Domain)
+    $tagPart = New-PimPermissionGroupTag -Service $Service -Name $Name -Level $Level -Tier $Tier -Code $Code -Domain $Domain -Au $Au
+    # 2026-09-21 (operator: "fix 1+2"): an AU-SCOPED group is named by the tenant's PimGroupAuPattern once it differs
+    # from the shipped one -- {Role} = the tag WITHOUT its '-AU-<au>' part, {AdminUnit} = the AU, every other token
+    # filled. It was shown and edited in Settings and read by nothing. The shipped value changes nothing.
+    if ("$Au".Trim()) {
+        $aup = "$(Get-PimNamingConvention -Key 'PimGroupAuPattern')".Trim()
+        $aupShipped = "$(Get-PimNamingConvention -Key 'PimGroupAuPattern' -ShippedOnly)".Trim()
+        if ($aup -and $aup -ne $aupShipped -and (Get-Command Expand-PimGroupNamePattern -ErrorAction SilentlyContinue)) {
+            $roleTag = New-PimPermissionGroupTag -Service $Service -Name $Name -Level $Level -Tier $Tier -Code $Code -Domain $Domain
+            $tok = Get-PimGroupNameTokensFromTag -Tag $roleTag
+            $tok.Role = $roleTag; $tok.AdminUnit = "$Au".Trim(); $tok.Workload = $Service; $tok.Service = $Service; $tok.Name = $Name
+            $tok.Scope = "$Au".Trim(); $tok.Permission = $(if ("$PermissionSegment".Trim()) { "$PermissionSegment".Trim() } else { $Name })
+            $tok.Level = "$Level"; $tok.Tier = "$Tier"; $tok.Plane = $Code; $tok.Domain = $Domain
+            return (Expand-PimGroupNamePattern -Pattern $aup -Tokens $tok)
+        }
+    }
+    # Operator 2026-09-21 ("you must add them in the naming conventions so i can use them as variables"): a tenant
+    # that has SET its own ResourceGroupPattern gets permission-group names from it, every token with its value.
+    # A tenant still on the shipped ResourceGroupPattern keeps the names it always had (PimGroupPattern around the
+    # tag), so nothing that exists is renamed by this change.
+    $rgp = "$(Get-PimNamingConvention -Key 'ResourceGroupPattern')".Trim()
+    $rgpShipped = "$(Get-PimNamingConvention -Key 'ResourceGroupPattern' -ShippedOnly)".Trim()
+    if ($rgp -and $rgp -ne $rgpShipped -and (Get-Command Expand-PimGroupNamePattern -ErrorAction SilentlyContinue)) {
+        $tok = Get-PimGroupNameTokensFromTag -Tag $tagPart
+        $tok.Workload = $Service; $tok.Service = $Service; $tok.Name = $Name
+        $tok.Scope = $(if ("$ScopeSegment".Trim()) { "$ScopeSegment".Trim() } elseif ("$Au".Trim()) { "$Au".Trim() } else { '' })
+        $tok.Permission = $(if ("$PermissionSegment".Trim()) { "$PermissionSegment".Trim() } else { $Name })
+        $tok.Level = "$Level"; $tok.Tier = "$Tier"; $tok.Plane = $Code; $tok.Domain = $Domain; $tok.AdminUnit = "$Au".Trim()
+        return (Expand-PimGroupNamePattern -Pattern $rgp -Tokens $tok)
+    }
     if (Get-Command Resolve-PimGroupNameFromTag -ErrorAction SilentlyContinue) { return (Resolve-PimGroupNameFromTag -Tag $tagPart) }
     return "PIM-$tagPart"
+}
+
+function New-PimPermissionGroupTag {
+    # The tenant-neutral TAG of a permission group -- '<Service>-<Name>[-AU-<au>]-L<n>-T<n>-<Code>-<Domain>'. Its
+    # shape is FIXED on purpose: the engine, the validators and the workload binding parse it (-L#-T#-code-domain).
+    param([Parameter(Mandatory)][string]$Service, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][int]$Level,
+          [Parameter(Mandatory)][int]$Tier, [Parameter(Mandatory)][string]$Code, [Parameter(Mandatory)][string]$Domain, [string]$Au)
+    $auSeg = if ("$Au".Trim()) { "-AU-$($Au.Trim())" } else { '' }
+    return ("{0}-{1}{2}-L{3}-T{4}-{5}-{6}" -f $Service, $Name, $auSeg, $Level, $Tier, $Code, $Domain)
 }
 
 # --- ENTRA derivation -----------------------------------------------------------
@@ -120,15 +156,16 @@ function Get-PimEntraDerivation {
         $level = 1                              # other entra roles -> L1
     }
     $nameSeg = if ($kind -eq 'permission-bundle') {
-        if ("$BundleName".Trim()) { ConvertTo-PimNameSegment $BundleName } else { 'Bundle-' + (ConvertTo-PimNameSegment ($roles[0])) }
+        if ("$BundleName".Trim()) { ConvertTo-PimNameSegment $BundleName } else { ((Get-PimServiceName 'bundle') + '-') + (ConvertTo-PimNameSegment ($roles[0])) }
     } else { ConvertTo-PimNameSegment $roles[0] }
-    $name = New-PimPermissionGroupName -Service 'Entra-ID' -Name $nameSeg -Level $level -Tier $tier -Code $code -Domain $domain -Au $au
+    $name = New-PimPermissionGroupName -Service (Get-PimServiceName 'entra') -Name $nameSeg -Level $level -Tier $tier -Code $code -Domain $domain -Au $au -PermissionSegment $nameSeg
+    $tag  = New-PimPermissionGroupTag  -Service (Get-PimServiceName 'entra') -Name $nameSeg -Level $level -Tier $tier -Code $code -Domain $domain -Au $au
     return [pscustomobject]@{
         target = 'entra'; kind = $kind; roles = $roles; roleCount = $roles.Count
         level = $level; tier = $tier; plane = $code; domain = $domain
         roleScope = $(if ($au) { "AU:$au" } else { 'Tenant' })
         auOffered = $auOffered; au = $au
-        nameSegment = $nameSeg; groupName = $name
+        nameSegment = $nameSeg; groupName = $name; groupTag = $tag
     }
 }
 
@@ -190,15 +227,16 @@ function Get-PimAzureDerivation {
     $domain = if ($plane -eq 'WDP' -and ($hay -match '(storage|sql|data)')) { 'DAT' } else { 'RES' }
     $scopeSeg = if ("$ScopeName".Trim()) { ConvertTo-PimNameSegment $ScopeName } else { ConvertTo-PimNameSegment $ScopeType }
     $roleSeg  = if ($kind -eq 'permission-bundle') {
-        if ("$BundleName".Trim()) { ConvertTo-PimNameSegment $BundleName } else { 'Bundle' }
+        if ("$BundleName".Trim()) { ConvertTo-PimNameSegment $BundleName } else { (Get-PimServiceName 'bundle') }
     } else { ConvertTo-PimNameSegment $roles[0] }
     $nameSeg = (@($scopeSeg, $roleSeg) | Where-Object { $_ }) -join '-'
-    $name = New-PimPermissionGroupName -Service 'Azure' -Name $nameSeg -Level $level -Tier $tier -Code $plane -Domain $domain
+    $name = New-PimPermissionGroupName -Service (Get-PimServiceName 'azure') -Name $nameSeg -Level $level -Tier $tier -Code $plane -Domain $domain -ScopeSegment $scopeSeg -PermissionSegment $roleSeg
+    $tag  = New-PimPermissionGroupTag  -Service (Get-PimServiceName 'azure') -Name $nameSeg -Level $level -Tier $tier -Code $plane -Domain $domain
     return [pscustomobject]@{
         target = 'azure'; kind = $kind; roles = $roles; roleCount = $roles.Count
         level = $level; tier = $tier; plane = $plane; domain = $domain
         roleScope = "$ScopeType`:$ScopePath"; scopeType = $ScopeType
-        nameSegment = $nameSeg; groupName = $name
+        nameSegment = $nameSeg; groupName = $name; groupTag = $tag
     }
 }
 
@@ -220,13 +258,14 @@ function Get-PimWorkloadDerivation {
     if ($roles.Count -eq 0) { throw "Get-PimWorkloadDerivation: at least one role is required." }
     $kind = Get-PimGroupKindFromRoleCount -RoleCount $roles.Count
     $svc  = ConvertTo-PimNameSegment $Workload
-    $roleSeg = if ($kind -eq 'permission-bundle') { if ("$BundleName".Trim()) { ConvertTo-PimNameSegment $BundleName } else { 'Bundle' } } else { ConvertTo-PimNameSegment $roles[0] }
-    $name = New-PimPermissionGroupName -Service $svc -Name $roleSeg -Level $Level -Tier $Tier -Code $Plane -Domain $Domain
+    $roleSeg = if ($kind -eq 'permission-bundle') { if ("$BundleName".Trim()) { ConvertTo-PimNameSegment $BundleName } else { (Get-PimServiceName 'bundle') } } else { ConvertTo-PimNameSegment $roles[0] }
+    $name = New-PimPermissionGroupName -Service $svc -Name $roleSeg -Level $Level -Tier $Tier -Code $Plane -Domain $Domain -ScopeSegment $(if ("$Scope".Trim()) { ConvertTo-PimNameSegment $Scope } else { '' }) -PermissionSegment $roleSeg
+    $tag  = New-PimPermissionGroupTag  -Service $svc -Name $roleSeg -Level $Level -Tier $Tier -Code $Plane -Domain $Domain
     return [pscustomobject]@{
         target = 'workload'; workload = $Workload; kind = $kind; roles = $roles; roleCount = $roles.Count
         level = $Level; tier = $Tier; plane = $Plane; domain = $Domain
         roleScope = $(if ("$Scope".Trim()) { "$Scope" } else { 'Service' })
-        nameSegment = $roleSeg; groupName = $name
+        nameSegment = $roleSeg; groupName = $name; groupTag = $tag
     }
 }
 
@@ -241,12 +280,22 @@ function Get-PimAdminDerivation {
         [Parameter(Mandatory)][string]$Owner,
         [string]$AdminType   = 'internal-adminuser',
         [string]$Environment = 'entra',
-        [switch]$HighPriv
+        [switch]$HighPriv,
+        # {Company} / {Tier} / {Level} for an admin pattern such as KONS-{Company}-{Initial}-{Tier}-c (2026-09-21)
+        [string]$Company,
+        [string]$Tier,
+        [string]$Level
     )
     if (-not (Get-Command Resolve-PimAdminName -ErrorAction SilentlyContinue)) {
         throw "Get-PimAdminDerivation: PIM-Naming.ps1 is not loaded (Resolve-PimAdminName missing)."
     }
-    $userName = Resolve-PimAdminName -Owner $Owner -AdminType $AdminType -Environment $Environment -HighPriv:$HighPriv
+    $userName = Resolve-PimAdminName -Owner $Owner -AdminType $AdminType -Environment $Environment -HighPriv:$HighPriv -Company $Company -Tier $Tier -Level $Level
+    # 🔴 BUG-238 (2026-09-21): with AdminAccountUpnSuffix set, Resolve-PimAdminName returns 'name@domain'. The
+    # wizard stores userName as the UserName column and APPENDS its UPN suffix -- so the account became
+    # UserName='name@domain', UPN='name@domain@domain'. The derivation returns the LOCAL part as userName and the
+    # full value, when there is one, as upn.
+    $upnFull = ''
+    if ("$userName" -match '^([^@]+)@(.+)$') { $upnFull = "$userName"; $userName = $Matches[1] }
     $prefix   = Get-PimAdminTypePrefix  -AdminType   $AdminType
     $suffix   = Get-PimEnvironmentSuffix -Environment $Environment
     return [pscustomobject]@{
@@ -258,6 +307,7 @@ function Get-PimAdminDerivation {
         prefix      = $prefix
         suffix      = $suffix
         userName    = $userName
+        upn         = $upnFull    # 'name@domain' when AdminAccountUpnSuffix is set, else '' (the GUI adds its suffix)
         groupName   = $userName   # alias so the GUI's generic "derived name" field works
         valid       = [bool](Test-PimAdminName -Name $userName -Purpose ($(if ($HighPriv) { 'HighPriv' } else { 'Day2Day' })))
     }
@@ -290,7 +340,8 @@ function Get-PimWizardDerivation {
         [string]$Owner,
         [string]$AdminType,
         [string]$Environment,
-        [switch]$HighPriv
+        [switch]$HighPriv,
+        [string]$Company   # admin: {Company}, the admin's own company (2026-09-21)
     )
     if ($Target -ne 'admin' -and (-not $Roles -or @($Roles).Count -eq 0)) {
         throw "Get-PimWizardDerivation: at least one role is required for target '$Target'."
@@ -300,7 +351,7 @@ function Get-PimWizardDerivation {
             if (-not "$Owner".Trim()) { throw "Get-PimWizardDerivation: -Owner is required for target 'admin'." }
             $at = if ("$AdminType".Trim())   { $AdminType }   else { 'internal-adminuser' }
             $ev = if ("$Environment".Trim()) { $Environment } else { 'entra' }
-            return Get-PimAdminDerivation -Owner $Owner -AdminType $at -Environment $ev -HighPriv:$HighPriv
+            return Get-PimAdminDerivation -Owner $Owner -AdminType $at -Environment $ev -HighPriv:$HighPriv -Company $Company -Tier $(if ($null -ne $Tier) { "$Tier" } else { '' }) -Level $(if ($null -ne $Level) { "$Level" } else { '' })
         }
         'entra' { return Get-PimEntraDerivation -Roles $Roles -AuScope $AuScope -BundleName $BundleName }
         'azure' {

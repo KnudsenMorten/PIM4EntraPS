@@ -98,6 +98,11 @@
         -DefaultDurationHours 4
 
 .EXAMPLE
+    # Server: cap auto-activation at 3 groups on THIS machine for the TEST extension, leaving the rest as is.
+    # 0 turns auto-activation off; -1 removes the cap again.
+    .\Deploy-PimActivatorClient.ps1 -Channel Test -AutoActivateMaxGroups 3
+
+.EXAMPLE
     # Uninstall (removes only OUR policy rows / entries; the extension
     # self-removes on next launch):
     .\Deploy-PimActivatorClient.ps1 `
@@ -183,6 +188,13 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [ValidateRange(1, 24)]
     [int]$DefaultDurationHours,
+
+    # Per-DEVICE cap on auto-activation (2026-09-23): writes ...\3rdparty\extensions\<id>\policy\
+    # autoActivateMaxGroups (REG_DWORD). 0 = auto-activation off on this machine; N = at most N groups;
+    # -1 = remove the value (no limit). Not passed = the machine's current value is left alone.
+    [Parameter(ParameterSetName = 'Install')]
+    [ValidateRange(-1, 100)]
+    [int]$AutoActivateMaxGroups,
 
     [Parameter(ParameterSetName = 'Install')]
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
@@ -563,6 +575,21 @@ foreach ($root in $policyRoots) {
             }
         } else {
             $catalogMissing.Add($root.Name)
+        }
+    }
+
+    # Per-DEVICE auto-activate cap (2026-09-23). Written independently of the catalog, so it also applies
+    # with -SkipTenantCatalog. Not passed = this device's current value is left alone; 0..100 = written as
+    # REG_DWORD; -1 = removed (no limit).
+    if ($PSBoundParameters.ContainsKey('AutoActivateMaxGroups')) {
+        $amKey = Join-Path $root.Path "3rdparty\extensions\$ExtensionId\policy"
+        if ($AutoActivateMaxGroups -ge 0) {
+            Set-Reg -Path $amKey -Name 'autoActivateMaxGroups' -Value $AutoActivateMaxGroups -Kind DWord
+            $amTxt = if ($AutoActivateMaxGroups -eq 0) { 'auto-activation OFF' } else { "at most $AutoActivateMaxGroups group(s)" }
+            Write-Host "    -> autoActivateMaxGroups = $AutoActivateMaxGroups ($amTxt) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor DarkGray
+        } else {
+            if (Test-Path -LiteralPath $amKey) { Remove-ItemProperty -LiteralPath $amKey -Name 'autoActivateMaxGroups' -ErrorAction SilentlyContinue }
+            Write-Host "    -> autoActivateMaxGroups removed (no limit) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor DarkGray
         }
     }
 }

@@ -79,7 +79,7 @@
 #    best-effort try/catch, because a cache is a convenience. Measured 2026-09-20: 'tenant-domains' was never
 #    added when REQ-T shipped, so the domain cache was dead in both directions and the Settings dropdown had
 #    nothing to offer whenever the live Graph read was unavailable. ADD THE KIND IN THE SAME EDIT AS THE CACHE CALL.
-$script:PimTenantCacheKinds = @('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains')
+$script:PimTenantCacheKinds = @('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','target-check','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains')
 $script:PimTenantCacheMem   = @{}
 
 function Get-PimTenantCacheStoreCs {
@@ -436,6 +436,51 @@ function Get-PimGroupsFromTenant {
     return ,@($items | Sort-Object { $_.displayName })
 }
 
+# §79.17 -- the management-group TREE, so the Create wizard can derive the level Lx from the CAF layer a scope sits in
+# (Tenant Root Group = L3, one level per layer below it). PURE: walks the answer of
+#   GET /providers/Microsoft.Management/managementGroups/{root}?$expand=children&$recurse=true
+# and returns @{ '<scope path, lower case>' = '<parent scope path>' } for every management group and subscription in
+# it; the root itself maps to ''.
+function ConvertFrom-PimMgTree {
+    param([object]$Root)
+    $map = @{}
+    if (-not $Root -or -not "$($Root.id)".Trim()) { return $map }
+    $map["$($Root.id)".ToLowerInvariant()] = ''
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($Root)
+    while ($stack.Count) {
+        $n = $stack.Pop()
+        $kids = if ($n.PSObject.Properties['properties'] -and $n.properties -and $n.properties.PSObject.Properties['children']) { @($n.properties.children) } else { @() }
+        foreach ($c in $kids) {
+            if (-not $c -or -not "$($c.id)".Trim()) { continue }
+            $map["$($c.id)".ToLowerInvariant()] = "$($n.id)"
+            # a child of the recursive expand carries its own children directly (no nested 'properties')
+            $cc = if ($c.PSObject.Properties['children']) { @($c.children) } else { @() }
+            if ($cc.Count) { $stack.Push([pscustomobject]@{ id = "$($c.id)"; properties = [pscustomobject]@{ children = $cc } }) }
+        }
+    }
+    $map
+}
+
+# Stamps parentId on each azure-scopes item from the tree ('' = the Tenant Root Group). A tree that cannot be read
+# (no read on the root management group) leaves the items as they were: the wizard then falls back to the role rule
+# and says so.
+function Add-PimAzureScopeParents {
+    param([System.Collections.IList]$Items)
+    if (-not $Items -or -not (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) { return }
+    $root = $null
+    foreach ($i in $Items) { if ("$($i.type)" -eq 'managementGroup' -and $i.Contains('isRoot') -and $i.isRoot) { $root = $i; break } }
+    if (-not $root) { return }
+    try {
+        $tree = Invoke-PimArm -Method GET -Path ("$($root.id)" + '?$expand=children&$recurse=true') -ApiVersion '2020-05-01'
+        $map = ConvertFrom-PimMgTree -Root $tree
+    } catch { Write-Warning ("  ARM management-group tree read failed (levels fall back to the role rule): {0}" -f $_.Exception.Message); return }
+    foreach ($i in $Items) {
+        $k = "$($i.scopePath)".ToLowerInvariant()
+        if ($map.ContainsKey($k)) { $i['parentId'] = $map[$k] }
+    }
+}
+
 function Get-PimAzureScopesFromTenant {
     # Returns subscriptions + management groups + their full ARM scope paths.
     # REST-first (hosted container, no Az module): the ARM REST API lists both
@@ -452,6 +497,7 @@ function Get-PimAzureScopesFromTenant {
                     displayName = "$($m.properties.displayName)"
                     type        = 'managementGroup'
                     scopePath   = "$($m.id)"
+                    isRoot      = ("$($m.name)" -and "$($m.name)" -eq "$($m.properties.tenantId)")   # §79.17 the Tenant Root Group
                 })
             }
         } catch { Write-Warning ("  ARM managementGroups list failed: {0}" -f $_.Exception.Message) }
@@ -466,6 +512,7 @@ function Get-PimAzureScopesFromTenant {
                 })
             }
         } catch { Write-Warning ("  ARM subscriptions list failed: {0}" -f $_.Exception.Message) }
+        Add-PimAzureScopeParents -Items $items   # §79.17
         return ,@($items)
     }
 
@@ -489,6 +536,7 @@ function Get-PimAzureScopesFromTenant {
                     displayName = $(if ("$($m.properties.displayName)".Trim()) { "$($m.properties.displayName)" } else { "$($m.name)" })
                     type        = 'managementGroup'
                     scopePath   = "$($m.id)"
+                    isRoot      = ("$($m.name)" -and "$($m.name)" -eq "$($m.properties.tenantId)")   # §79.17 the Tenant Root Group
                 })
             }
             $mgDone = $true
@@ -591,6 +639,7 @@ function Get-PimAzureScopesFromTenant {
         }
     }
 
+    Add-PimAzureScopeParents -Items $items   # §79.17
     return ,@($items)
 }
 

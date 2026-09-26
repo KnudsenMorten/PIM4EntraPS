@@ -203,7 +203,13 @@ param(
 
     [Parameter()]
     [ValidateRange(1, 100)]
-    [int]$BulkThreshold
+    [int]$BulkThreshold,
+
+    # Per-DEVICE auto-activate cap (2026-09-23): autoActivateMaxGroups DWORD. 0 = auto-activation off;
+    # N = at most N groups. Not passed = not written (no limit).
+    [Parameter()]
+    [ValidateRange(0, 100)]
+    [int]$AutoActivateMaxGroups
 )
 
 $ErrorActionPreference = 'Stop'
@@ -303,6 +309,7 @@ $planArgs = @{
     MinimumVersion = $MinimumVersion
 }
 if ($PSBoundParameters.ContainsKey('BulkThreshold')) { $planArgs['BulkThreshold'] = $BulkThreshold }
+if ($PSBoundParameters.ContainsKey('AutoActivateMaxGroups')) { $planArgs['AutoActivateMaxGroups'] = $AutoActivateMaxGroups }
 $plan = Get-PaHybridRegistryPlan @planArgs
 Write-Host ("Plan built   : {0} registry value(s) across {1}" -f $plan.Entries.Count, ($plan.Browsers -join ' + ')) -ForegroundColor Green
 Write-Host ("Forcelist    : {0}" -f $plan.ForcelistValue) -ForegroundColor Gray

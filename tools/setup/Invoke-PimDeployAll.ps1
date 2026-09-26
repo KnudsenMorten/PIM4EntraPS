@@ -99,7 +99,7 @@ param(
     # s31: stand up the right TOPOLOGY for a deployment SCENARIO (S1..S6). When set, the scenario's
     # resolved update source + managed hosting drive the deploy path (overrides -Source); it is also
     # passed through to Invoke-PimUpdate so the from-master (S5/S6) downlink is honoured end-to-end.
-    [ValidateSet('S1','S2','S3','S4','S5','S6')][string]$Scenario,
+    [ValidateSet('S1','S2','S3','S5','S6')][string]$Scenario,
     # The environment's deployment descriptor (bootstrap\platform-deploy.json). Optional and
     # non-breaking: without it this script behaves exactly as it did, which is what keeps every
     # environment deployed before the descriptor existed working (framework §5.4 -- descriptor
@@ -177,7 +177,7 @@ param(
     # active while every other step signs itself in. That is the BUG-23 class: a credential path
     # that succeeds while being wrong.
     # 🪤 MEASURED 2026-08-13 on the first real greenfield run: the ambient context was
-    # **ExpertsLiveDK -- a DIFFERENT COMPANY** (it is regularly the default on this machine), and
+    # **a DIFFERENT COMPANY's tenant** (it is regularly the default on this machine), and
     # the deploy stopped only because Setup-PimContainers refuses an unusable context. Without that
     # refusal it would have run against another company's tenant. These are CREDENTIALS, not
     # infrastructure values, so they do not belong in the descriptor and do not breach the
@@ -462,6 +462,8 @@ $ErrorActionPreference = 'Stop'
 # the updater already carries, and a NEW updater gets the documented default (-UpdateRing's own
 # default, stated on screen by Deploy-PimUpdateJob -- never silently).
 $script:PimDeployRingExplicit = $PSBoundParameters.ContainsKey('UpdateRing')
+# The deploy profile (Update-PimCommunity.ps1) is taken from the same script-scope $PSBoundParameters, for the same reason.
+$script:PimDeployBound = @{} + $PSBoundParameters
 
 # An array cannot cross `pwsh -File` (the S1 driver and the MSP build call this script that way), so
 # callers pass one comma-separated string -- which binds as ONE element. Split it here, once.
@@ -849,7 +851,7 @@ function Invoke-PimTenantGraphGet {
     <#
       🔴 BUG-215 -- A GRAPH READ PINNED TO -TenantId. `az rest` and `az ad` take no --subscription: they
       use the DEFAULT az account's tenant, which on a host signed in to more than one directory is
-      regularly ANOTHER COMPANY's (the ExpertsLiveDK default recorded in the repo rules). The token is
+      regularly ANOTHER COMPANY's (the other-company default recorded in the repo rules). The token is
       minted for THIS tenant by name instead. $null = "could not read", never "empty".
     #>
     param([Parameter(Mandatory)][string]$Path)
@@ -1145,6 +1147,25 @@ function Test-AcaEnvPresent {
         return $true
     } catch { return $null }
 }
+$script:PimSqlHostResolvable = $null
+function Test-PimSqlHostResolvable {
+    # 🪤 BUG-249 (live E2E build, 2026-09-23): on a GREENFIELD tenant the SQL server does not exist
+    # yet, and both DETECT probes below still ran Invoke-PimUpdate's column read -- one failed
+    # connect ("No such host is known") PER TABLE, each with SqlClient's retries. The deploy sat
+    # silent for many minutes before printing its plan, which reads exactly like a hang. A name that
+    # does not resolve cannot answer either probe, so both return "unknown" (=> needed) at once.
+    # Cached: asked once per run.
+    if ($null -ne $script:PimSqlHostResolvable) { return $script:PimSqlHostResolvable }
+    $h = "$SqlServerFqdn".Trim()
+    if (-not $h -and "$SqlConnectionString" -match '(?i)(?:Server|Data Source)\s*=\s*(?:tcp:)?([^,;]+)') { $h = $Matches[1].Trim() }
+    if (-not $h) { $script:PimSqlHostResolvable = $true; return $true }   # nothing to judge -- let the probe decide
+    try { [void][System.Net.Dns]::GetHostAddresses($h); $script:PimSqlHostResolvable = $true }
+    catch {
+        $script:PimSqlHostResolvable = $false
+        Write-Host "  sql: '$h' does not resolve (greenfield -- prereq creates it); schema + code probes skipped, both steps NEEDED." -ForegroundColor Yellow
+    }
+    return $script:PimSqlHostResolvable
+}
 function Test-SchemaConformant {
     # reuse Invoke-PimUpdate's SQL DETECT (it reads the deployed columns + builds the plan). We do
     # NOT duplicate that logic -- we call the detect-only path and read SqlUpdateRequired.
@@ -1153,6 +1174,7 @@ function Test-SchemaConformant {
     # timeout ON EVERY DEPLOY before answering "unknown" -- the same answer this line gives for
     # free. The schema step itself is owned by the in-cloud bootstrap in this topology.
     if ($SqlPrivateEndpoint) { return $null }
+    if (-not (Test-PimSqlHostResolvable)) { return $null }
     try {
         $upd = Join-Path $here 'Invoke-PimUpdate.ps1'
         $det = & $upd -Source $Source @scenarioArgs @sqlAuthArgs -DetectOnly -SqlConnectionString $SqlConnectionString `
@@ -1165,6 +1187,7 @@ function Test-SchemaConformant {
 function Test-ManagerImageCurrent {
     # reuse Invoke-PimUpdate's GUI DETECT (pulled content hash vs running image). Same as above:
     # detect-only, read GuiUpdateRequired. Unknown => run the code step.
+    if (-not (Test-PimSqlHostResolvable)) { return $null }   # BUG-249 -- greenfield: nothing to compare against
     try {
         $upd = Join-Path $here 'Invoke-PimUpdate.ps1'
         $det = & $upd -Source $Source @scenarioArgs @sqlAuthArgs -DetectOnly -SqlConnectionString $SqlConnectionString `
@@ -1335,6 +1358,14 @@ function Close-PimSetupHostWindow {
 # infrastructure had been built. So ask first. An EXISTING Manager is left to the step itself, which
 # keeps an application that is already assignment-required and refuses anything else.
 $easyAuthPlanned = @($plan.steps | Where-Object { "$($_.key)" -eq 'easyauth' -and $_.do }).Count -gt 0
+# §79.11 (community install proof, 2026-09-25): the PLAN said nothing about this, so the first -Apply of the README command
+# was refused -- after the operator had reviewed a clean plan. Say it in the plan too.
+$easyAuthInPlan = @($plan.steps | Where-Object { "$($_.key)" -eq 'easyauth' -and "$($_.action)" -ne 'skip-current' }).Count -gt 0
+if ($plan.whatIf -and $easyAuthInPlan -and -not $StepRunner -and
+    -not @($EasyAuthAllowedPrincipals | Where-Object { "$_".Trim() }).Count -and -not $EasyAuthAllowAllTenantUsers) {
+    Warn ("sign-in: on -Apply a NEW Manager is REFUSED until you say who may sign in -- add -EasyAuthAllowedPrincipals " +
+          "<upn-or-group>[,...] (recommended), or -EasyAuthAllowAllTenantUsers to admit every member account.")
+}
 if ($easyAuthPlanned -and -not $plan.whatIf -and -not $StepRunner -and
     -not @($EasyAuthAllowedPrincipals | Where-Object { "$_".Trim() }).Count -and -not $EasyAuthAllowAllTenantUsers) {
     $mgrExistsNow = ''
@@ -1763,7 +1794,14 @@ function Invoke-DefaultStepRunner {
             if ($PSCmdlet.ShouldProcess($TenantId, 'ensure the notification sender mailbox + send right')) {
                 $global:LASTEXITCODE = 0
                 $mailArgs = @{ TenantId = $TenantId; SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase }
-                if ($MailSender) { $mailArgs['MailSender'] = $MailSender }
+                # 🪤 Initialize-PimMailSender takes -MailboxName + -MailDomain, NOT -MailSender. Passing
+                # the address straight through threw "A parameter cannot be found that matches parameter
+                # name 'MailSender'" on EVERY deploy that supplied -MailSender (measured 2026-09-26, env 27).
+                if ("$MailSender".Trim()) {
+                    $mailParts = "$MailSender".Trim() -split '@', 2
+                    if ($mailParts[0]) { $mailArgs['MailboxName'] = $mailParts[0] }
+                    if ($mailParts.Count -eq 2 -and $mailParts[1]) { $mailArgs['MailDomain'] = $mailParts[1] }
+                }
                 # Without this the script THROWS on its own first line -- "one of -AdminSecret /
                 # -AdminCertThumbprint is required" -- and this step's deliberate
                 # non-fatality turned that into "MAIL SENDER NOT PROVISIONED" on every deploy,
@@ -2122,7 +2160,7 @@ function Invoke-DefaultStepRunner {
             # cleanly instead of failing the step and rolling back a working environment.
             switch (Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater) {
                 'skip-flag'      { return @{ ok=$true; ran=$false; detail='skipped by -SkipUpdater -- this environment will NOT update itself' } }
-                'skip-community' { return @{ ok=$true; ran=$false; detail="community edition ($Scenario): no published update feed, so no in-cloud updater -- update with 'git pull' and re-run this same command (a re-run is the updater)" } }
+                'skip-community' { return @{ ok=$true; ran=$false; detail="community edition ($Scenario): no published update feed, so no in-cloud updater -- update with tools\setup\Update-PimCommunity.ps1 -Apply (it runs 'git pull' and re-runs this same command with the parameters saved by this deploy -- a re-run is the updater)" } }
             }
             if (-not "$AcrName".Trim() -or -not "$EnvName".Trim()) {
                 return @{ ok=$true; ran=$false; detail='no -AcrName/-EnvName -- nightly updater not installed (environment will not update itself)' }
@@ -2269,6 +2307,56 @@ function Invoke-DefaultStepRunner {
 }
 
 
+# ---- §79.11 COMMUNITY VERIFY -- the check a PUBLIC install can run ------------------------------
+# The public edition ships without tests/ (SEC-20), so the hosted smoke and the deploy-validation tests do not exist
+# there. The verify step then had NOTHING to run and -- "a skip is not a pass" -- reported every community install as
+# FAILED (env 10 proof, 2026-09-25). This small check ships with the product instead: the Manager app is provisioned and
+# its latest revision is the ready one, the page is SERVED (Entra sign-in answers 401/302 -- never a 5xx or no answer),
+# and the engine's tick job exists. It proves the install came up; it is not the full smoke, and says so.
+function Get-PimCommunityVerifyVerdict {
+    # PURE. -Facts: @{ appState; latestRevision; readyRevision; httpStatus (int, 0 = no answer); tickState }.
+    # Returns @{ exit (0 pass / 1 fail); checks = [ @{ name; ok; detail } ] }.
+    param([Parameter(Mandatory)][hashtable]$Facts)
+    $c = New-Object System.Collections.Generic.List[object]
+    $add = { param($n, $ok, $d) $c.Add([pscustomobject]@{ name = $n; ok = [bool]$ok; detail = $d }) | Out-Null }
+    & $add 'manager provisioned' ("$($Facts.appState)" -eq 'Succeeded') "provisioningState=$($Facts.appState)"
+    & $add 'latest revision is ready' ("$($Facts.latestRevision)".Trim() -and "$($Facts.latestRevision)" -eq "$($Facts.readyRevision)") "latest=$($Facts.latestRevision) ready=$($Facts.readyRevision)"
+    $h = [int]$Facts.httpStatus
+    & $add 'page served behind sign-in' ($h -in @(200, 302, 401, 403)) $(if ($h) { "HTTP $h" } else { 'no answer' })
+    & $add 'engine tick job exists' ("$($Facts.tickState)" -eq 'Succeeded') "provisioningState=$($Facts.tickState)"
+    return @{ exit = $(if (@($c | Where-Object { -not $_.ok }).Count) { 1 } else { 0 }); checks = @($c.ToArray()) }
+}
+function Invoke-PimCommunityVerify {
+    $f = @{ appState = ''; latestRevision = ''; readyRevision = ''; httpStatus = 0; tickState = '' }
+    try {
+        $app = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp -o json 2>$null | ConvertFrom-Json
+        if ($app) {
+            $f.appState = "$($app.properties.provisioningState)"; $f.latestRevision = "$($app.properties.latestRevisionName)"; $f.readyRevision = "$($app.properties.latestReadyRevisionName)"
+            $fqdn = "$($app.properties.configuration.ingress.fqdn)".Trim()
+            if ($fqdn) {
+                # min replicas 0: the first request wakes the app -- give it up to ~3 minutes.
+                # HttpClient with redirects OFF: pwsh 7.6's Invoke-WebRequest -MaximumRedirection 0 THROWS on the very 302
+                # that proves the sign-in is there ("Operation is not valid due to the current state of the object").
+                $h = New-Object System.Net.Http.HttpClientHandler; $h.AllowAutoRedirect = $false
+                $hc = New-Object System.Net.Http.HttpClient($h); $hc.Timeout = [TimeSpan]::FromSeconds(60)
+                try {
+                    for ($i = 0; $i -lt 12 -and -not $f.httpStatus; $i++) {
+                        try {
+                            $code = [int]$hc.GetAsync("https://$fqdn/").GetAwaiter().GetResult().StatusCode
+                            if ($code -ge 500) { Start-Sleep -Seconds 15 } else { $f.httpStatus = $code }
+                        } catch { Start-Sleep -Seconds 15 }
+                    }
+                } finally { $hc.Dispose() }
+            }
+        }
+    } catch { }
+    try { $f.tickState = "$(az containerapp job show @azSubArgs -g $ResourceGroup -n $TickJobName --query properties.provisioningState -o tsv 2>$null)".Trim() } catch { }
+    $global:LASTEXITCODE = 0
+    $v = Get-PimCommunityVerifyVerdict -Facts $f
+    foreach ($ch in $v.checks) { if ($ch.ok) { Info "verify (community): PASS $($ch.name) -- $($ch.detail)" } else { Warn "verify (community): FAIL $($ch.name) -- $($ch.detail)" } }
+    return $v.exit
+}
+
 # ---- VERIFY: hosted smoke + deploy-validation tests (the test-tenant validation) ----
 $script:smokeExit = 0
 $script:validationExit = 0
@@ -2357,6 +2445,10 @@ function Invoke-DeployValidation {
             # BUG-216: the smoke's contract is 0 = passed, 1 = failed, 2 = SKIPPED checks (not a pass).
             if ($smokeExit -eq 2) { Warn 'verify: the hosted smoke SKIPPED checks (exit 2) -- UNVERIFIED, not a pass; nothing is rolled back for it.' }
         }
+    } elseif ($hosted -and -not (Test-Path $smoke) -and (Have 'az') -and "$ResourceGroup".Trim()) {
+        # §79.11: the public edition (no tests/) -- run the check that ships with it, as the smoke layer.
+        Info 'verify: the hosted smoke is not part of this edition -- running the community verify (Manager up, page served, engine job present)'
+        if ($PSCmdlet.ShouldProcess($ManagerApp, 'community verify')) { $smokeExit = Invoke-PimCommunityVerify }
     } else { Info 'verify: hosted smoke skipped (community/local or smoke not found)' }
 
     $val = Join-Path $solRoot 'tests\live\PIM.DeployValidation.Tests.ps1'
@@ -2703,6 +2795,21 @@ if ($hosted -and -not $WhatIfPreference -and $summary.status -eq 'success') {
     Write-Host ("          -ConnectionString `"{0}`" -WhatIf" -f $(if ("$SqlConnectionString".Trim()) { $SqlConnectionString } else { "Server=tcp:$SqlServerFqdn,1433;Initial Catalog=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=60;" })) -ForegroundColor White
     Write-Host '      Run it with -WhatIf first: it prints the row count per entity, and it REPLACES' -ForegroundColor DarkGray
     Write-Host '      the full set of rows for every entity it imports. Drop -WhatIf to apply.' -ForegroundColor DarkGray
+    # 2026-09-26 -- KEEPING IT CURRENT IS ONE COMMAND. Save the parameters this successful run used (never a secret), so
+    # Update-PimCommunity.ps1 can pull the latest release and re-run exactly this deploy.
+    if ($Apply -and "$TenantId".Trim() -and "$ResourceGroup".Trim()) {
+        try {
+            . (Join-Path $PSScriptRoot '_PimDeployProfile.ps1')
+            $verFile = Join-Path $solRoot 'VERSION'
+            $ver = if (Test-Path $verFile) { "$(Get-Content $verFile -Raw)".Trim() } else { '' }
+            $saved = Save-PimDeployProfile -Bound $script:PimDeployBound -TenantId $TenantId -ResourceGroup $ResourceGroup -Version $ver
+            Write-Host ''
+            Write-Host '  KEEP IT UP TO DATE' -ForegroundColor Green
+            Write-Host "      $PSScriptRoot\Update-PimCommunity.ps1 -Apply" -ForegroundColor White
+            Write-Host "      (pulls the latest release and re-runs this deploy with the parameters saved in $($saved.path))" -ForegroundColor DarkGray
+            if (@($saved.omitted).Count) { Write-Host "      not saved, because they carry a secret: $(@($saved.omitted) -join ', ') -- pass them to the updater yourself" -ForegroundColor Yellow }
+        } catch { Warn "could not save the deploy profile for Update-PimCommunity.ps1: $($_.Exception.Message)" }
+    }
     Write-Host ''
     Write-Host '  WHO CAN SIGN IN' -ForegroundColor Green
     if (@($EasyAuthAllowedPrincipals | Where-Object { "$_".Trim() }).Count) { Write-Host "      the named principal(s): $(@($EasyAuthAllowedPrincipals) -join ', ')" -ForegroundColor White }

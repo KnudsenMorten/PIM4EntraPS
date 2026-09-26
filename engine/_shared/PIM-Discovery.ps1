@@ -43,7 +43,7 @@ function Get-PimPowerBiWorkspaceDerivation {
     )
     $seg  = if ("$WorkspaceName".Trim()) { ConvertTo-PimNameSegment $WorkspaceName } else { ConvertTo-PimNameSegment $WorkspaceId }
     if (-not $seg) { $seg = 'Workspace' }
-    $name = New-PimPermissionGroupName -Service 'PowerBI' -Name ("WS-" + $seg) -Level $Level -Tier 1 -Code 'WDP' -Domain 'DAT'
+    $name = New-PimPermissionGroupName -Service $(if (Get-Command Get-PimServiceName -ErrorAction SilentlyContinue) { Get-PimServiceName 'powerbi' } else { 'PowerBI' }) -Name ("WS-" + $seg) -Level $Level -Tier 1 -Code 'WDP' -Domain 'DAT'
     return [pscustomobject]@{ level = $Level; tier = 1; plane = 'WDP'; domain = 'DAT'; workspaceId = "$WorkspaceId"; groupName = $name }
 }
 

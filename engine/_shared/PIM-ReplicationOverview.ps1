@@ -75,11 +75,11 @@ function Get-PimReplicationWording {
     $ringRaw = "$(Get-PimDownlinkValue -Object $Row -Key 'Ring')".Trim()
     $ringText = ''
     if (-not $ringRaw) { $ringText = if ($Kind -eq 'admin') { 'No ring -- an admin without a ring reaches no managed tenant' } else { 'Any ring -- not narrowed by ring' } }
-    elseif ($ringRaw -notmatch '^\d+$') { $ringText = "Ring '$ringRaw' is not a whole number -- reaches no managed tenant" }
-    elseif ($ringRaw -eq '0') { $ringText = 'Ring 0 -- every managed tenant (rings 0, 1, 2)' }
-    elseif ($ringRaw -eq '1') { $ringText = 'Ring 1 -- tenants on ring 1 or 2' }
-    elseif ($ringRaw -eq '2') { $ringText = 'Ring 2 -- only ring-2 (pilot) tenants' }
-    else { $ringText = "Ring $ringRaw -- tenants on ring $ringRaw or higher" }
+    elseif ($ringRaw -notmatch '^[0-2]$') { $ringText = "Ring '$ringRaw' is not a ring (0 dev, 1 test, 2 broad) -- reaches no managed tenant" }
+    elseif ($ringRaw -eq '0') { $ringText = 'Ring 0 (dev) -- dev tenants only' }
+    elseif ($ringRaw -eq '1') { $ringText = 'Ring 1 (test) -- dev + test tenants' }
+    elseif ($ringRaw -eq '2') { $ringText = 'Ring 2 (broad) -- every managed tenant' }
+    else { $ringText = "Ring $ringRaw -- not a ring" }
 
     $tgtRaw = "$(Get-PimDownlinkValue -Object $Row -Key 'Target')".Trim()
     $tgtText = 'Every tenant the ring admits'
@@ -113,18 +113,22 @@ function Get-PimReplicationWording {
 function Get-PimReplicationRowOwnReach {
     # PURE. Would this row's OWN fields admit the tenant (Replicate + Ring + Target, the rule Test-PimReplicationReach
     # applies)? Used only to EXPLAIN a row that reaches no tenant -- never to decide reach. Returns @{ reach; reason }.
-    param([object]$Row, [Parameter(Mandatory)][string]$Kind, [string]$AdminSource = 'Definition', [Parameter(Mandatory)][object]$Tenant)
+    param([object]$Row, [Parameter(Mandatory)][string]$Kind, [string]$AdminSource = 'Definition', [Parameter(Mandatory)][object]$Tenant, [object[]]$DeploymentRings = @())
     $tid = "$($Tenant.tenantId)"; $ring = [int]$Tenant.ring; $tags = @($Tenant.tags)
     if ($Kind -eq 'admin') {
         $m = Get-PimReplicateMode -Row $Row -Kind 'admin' -AdminSource $AdminSource
         if ($m.mode -eq 'No') { return @{ reach = $false; reason = "$($m.reason)" } }
         $rg = Test-PimReplicationRingAdmits -Row $Row -Kind 'admin' -TenantRing $ring
         if (-not $rg.admits) { return @{ reach = $false; reason = "$($rg.reason)" } }
+        if (@($DeploymentRings).Count) {
+            $mem = Test-PimDeploymentRingMember -Rings @($DeploymentRings) -SlaveRing $ring -TenantId $tid -TenantTags $tags
+            if (-not $mem.member) { return @{ reach = $false; reason = "$($mem.reason)" } }
+        }
         $tv = Test-PimArtifactTarget -Target "$(Get-PimDownlinkValue -Object $Row -Key 'Target')" -TenantId $tid -TenantTags $tags
         if (-not $tv.match) { return @{ reach = $false; reason = "$($tv.reason)" } }
         return @{ reach = $true; reason = '' }
     }
-    $r = Test-PimReplicationReach -Row $Row -Kind $Kind -TenantId $tid -TenantRing $ring -TenantTags $tags
+    $r = Test-PimReplicationReach -Row $Row -Kind $Kind -TenantId $tid -TenantRing $ring -TenantTags $tags -DeploymentRings @($DeploymentRings)
     return @{ reach = [bool]$r.reach; reason = "$($r.reason)" }
 }
 
@@ -161,7 +165,7 @@ function Get-PimReplicationOverview {
     $prev = $Preview
     if ($null -eq $prev) {
         $prev = Get-PimReplicationPreview -RegistryRows @($Model.RegistryRows) -RegistryReplicate $(if ($Model.RegistryReplicate) { $Model.RegistryReplicate } else { @{} }) `
-                    -Entities $(if ($Model.Entities) { $Model.Entities } else { @{} }) -Tenants @($Model.Tenants) -ProjectionPolicy $(if ($null -ne $Model.ProjectionPolicy) { $Model.ProjectionPolicy } else { [ordered]@{} })
+                    -Entities $(if ($Model.Entities) { $Model.Entities } else { @{} }) -Tenants @($Model.Tenants) -ProjectionPolicy $(if ($null -ne $Model.ProjectionPolicy) { $Model.ProjectionPolicy } else { [ordered]@{} }) -DeploymentRings @($Model.DeploymentRings)
     }
     $tenants = @($prev.tenants)
     $names = @{}; $idsByName = @{}
@@ -202,7 +206,7 @@ function Get-PimReplicationOverview {
             if (-not $tenants.Count) { $why = 'No managed tenant is registered (Managed tenant registry).' }
             elseif ($words.replicate.mode -eq 'No') { $why = "$($words.replicate.text). $($words.replicate.reason)" }
             else {
-                $own = @($checked | ForEach-Object { $x = Get-PimReplicationRowOwnReach -Row $rowForWords -Kind $kind -AdminSource $adminSrc -Tenant $_; if (-not $x.reach) { "$($_.name): $($x.reason)" } })
+                $own = @($checked | ForEach-Object { $x = Get-PimReplicationRowOwnReach -Row $rowForWords -Kind $kind -AdminSource $adminSrc -Tenant $_ -DeploymentRings @($Model.DeploymentRings); if (-not $x.reach) { "$($_.name): $($x.reason)" } })
                 if ($checked.Count -and $own.Count -eq $checked.Count) { $why = "Its own Ring / Target admit no tenant -- " + ($own -join '; ') }
                 elseif ($words.replicate.mode -eq 'Follow') { $why = 'Follow -- no replicated row needs it in any managed tenant.' }
                 else { $why = 'The plan sent it to no tenant: a row it depends on is not replicated, or the per-tenant projection policy on Managed tenants holds it back.' }

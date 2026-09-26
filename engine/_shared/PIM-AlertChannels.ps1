@@ -132,8 +132,11 @@ function New-PimWebhookPayload {
     $colour = $(if ($colourMap.ContainsKey($ev)) { $colourMap[$ev] } else { '57606A' })
     $link = ''
     if ("$LinkTab".Trim()) {
+        # §79.3: no caller passed -ManagerBaseUrl, so every card linked a bare '#tab'. The recorded Manager address is the
+        # default now, and the link is the '/?tab=<page>' form the Manager opens (a '#fragment' is lost across sign-in).
         $base = "$ManagerBaseUrl".Trim().TrimEnd('/')
-        $link = $(if ($base) { "$base/#$($LinkTab.Trim())" } else { "#$($LinkTab.Trim())" })
+        if (-not $base -and (Get-Command Get-PimPortalBaseUrl -ErrorAction SilentlyContinue)) { $base = "$(Get-PimPortalBaseUrl)" }
+        $link = $(if ($base) { "$base/?tab=$($LinkTab.Trim())" } else { "#$($LinkTab.Trim())" })
     }
     if ($Kind -eq 'teams') {
         $facts = New-Object System.Collections.Generic.List[object]

@@ -73,6 +73,55 @@ function Initialize-PimEmailControlsFromStore {
     return $false   # store unreachable -> leave globals as-is (fail-safe), retry next send
 }
 
+function Get-PimPortalBaseUrl {
+    <#
+      §79.3 -- the PIM Manager's address for links in mail. Order: the 'ManagerUrl' setting (pim.Settings, hydrated into
+      $global:PIM_NamingConventions; a hosted Manager records its own address there on its first request), else
+      $global:PIM_ManagerUrl, else env PIM_MANAGER_URL. '' when unknown -- a mail is then sent without a link, never with a
+      guessed one. Only https:// (or http://localhost for a local Manager) is accepted.
+    #>
+    $v = ''
+    if ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains('ManagerUrl')) { $v = "$($global:PIM_NamingConventions['ManagerUrl'])" }
+    if (-not $v.Trim() -and "$($global:PIM_ManagerUrl)".Trim()) { $v = "$($global:PIM_ManagerUrl)" }
+    if (-not $v.Trim() -and "$($env:PIM_MANAGER_URL)".Trim()) { $v = "$($env:PIM_MANAGER_URL)" }
+    $v = $v.Trim().Trim('"').TrimEnd('/')
+    if ($v -notmatch '^(?i)(https://[^\s/?#]+|http://(localhost|127\.0\.0\.1)(:\d+)?)$') { return '' }
+    return $v
+}
+
+function Get-PimPortalLink {
+    # §79.3 -- the deep link for one mail: base + '/?tab=<page>'. The page comes from the caller (Tokens.PortalTab, then
+    # Tokens.AlertTab) or the mail type's own page. Returns @{ base; url; tab } (url '' when no base is known).
+    param([string]$Type, [hashtable]$Tokens = @{})
+    # A credential delivery goes to a sponsor / department owner who usually has no Manager access -- no link there.
+    if ("$Type" -match '^(tap-delivery|ad-password-delivery)$') { return [pscustomobject]@{ base = ''; tab = ''; url = '' } }
+    $base = Get-PimPortalBaseUrl
+    $tab = ''
+    foreach ($k in 'PortalTab', 'AlertTab') { if (-not $tab -and $Tokens -and $Tokens.ContainsKey($k) -and "$($Tokens[$k])".Trim() -match '^[a-z0-9-]+$') { $tab = "$($Tokens[$k])".Trim() } }
+    if (-not $tab) {
+        $tab = switch -Regex ("$Type") {
+            '^access-review'   { 'accessreview'; break }
+            '^approval'        { 'approvals'; break }
+            '^(new-admin|offboarding|tap-delivery|ad-password)' { 'accounts'; break }
+            '^discovery'       { 'discovery'; break }
+            '^emergency'       { 'emergency'; break }
+            '^tier-report'     { 'reports'; break }
+            '^update-outcome'  { 'jobs'; break }
+            default            { 'home' }
+        }
+    }
+    # §79.8: Tokens.PortalQuery deep-links one record on that page (e.g. person=<upn> on the owner page). Each value is
+    # URL-encoded; a malformed query is dropped rather than shipped, so a link never carries caller-built text raw.
+    $q = ''
+    if ($Tokens -and $Tokens.ContainsKey('PortalQuery') -and "$($Tokens['PortalQuery'])".Trim()) {
+        $parts = foreach ($kv in ("$($Tokens['PortalQuery'])".Trim() -split '&')) {
+            if ($kv -match '^([a-z][a-z0-9]{0,30})=(.{1,200})$') { '{0}={1}' -f $Matches[1], [uri]::EscapeDataString($Matches[2]) }
+        }
+        if (@($parts).Count) { $q = '&' + (@($parts) -join '&') }
+    }
+    [pscustomobject]@{ base = $base; tab = $tab; url = $(if ($base) { "$base/?tab=$tab$q" } else { '' }) }
+}
+
 function Get-PimNotifyTemplateDir {
     if ($global:PIM_MailTemplateDir) { return "$($global:PIM_MailTemplateDir)" }
     if ($PSScriptRoot) { return (Join-Path (Resolve-Path "$PSScriptRoot\..\..").Path 'templates\mail') }
@@ -177,7 +226,9 @@ function Send-PimNotifyMail {
     # rendered; reason }. No send (returns rendered only) when -WhatIf / $global:WhatIfMode,
     # no sender configured, or no template -- so it is safe to call unconditionally.
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Type, [Parameter(Mandatory)][hashtable]$Tokens, [string]$Recipient, [switch]$WhatIf)
+    param([Parameter(Mandatory)][string]$Type, [Parameter(Mandatory)][hashtable]$Tokens, [string]$Recipient, [switch]$WhatIf,
+          # §79.14: files to attach -- each @{ name; contentType; bytes = [byte[]] } (a CAB workbook on a policy hold).
+          [object[]]$Attachments = @())
     $rcpt = $Recipient
 
     # --- AUTHORITATIVE EMAIL CONTROLS: hydrate from SQL pim.Settings before sending,
@@ -219,7 +270,22 @@ function Send-PimNotifyMail {
     }
     $tpl = Get-PimNotifyTemplateText -Type $Type
     if (-not $tpl) { return @{ sent = $false; recipient = $rcpt; reason = "no template '$Type'" } }
+    # §79.3 (operator 2026-09-25: "verify all emails include links to the portal"): the link is added HERE, at the one
+    # chokepoint, so every mail carries it -- including a template a customer edited in the store before the link existed.
+    $portal = Get-PimPortalLink -Type $Type -Tokens $Tokens
+    if ($portal.url) {
+        $Tokens = @{} + $Tokens; $Tokens['PortalUrl'] = $portal.base; $Tokens['PortalLink'] = $portal.url
+        # The review / approval templates carry their own button ({{ReviewUrl}} / {{ApprovalUrl}}) that no caller filled --
+        # a dead link in every reminder. An empty one now points at the same page.
+        foreach ($k in 'ReviewUrl', 'ApprovalUrl') { if (-not "$($Tokens[$k])".Trim()) { $Tokens[$k] = $portal.url } }
+    }
     $r = ConvertTo-PimNotifyRendering -TemplateText $tpl.text -Tokens $Tokens
+    if ($portal.url -and $r.BodyHtml -notmatch [regex]::Escape($portal.base)) {
+        $block = '<p style="margin:18px 0 0 0;font-family:''Segoe UI'',Helvetica,Arial,sans-serif;font-size:14px;"><a href="' + [System.Net.WebUtility]::HtmlEncode($portal.url) +
+                 '" style="display:inline-block;background:#0969da;color:#ffffff;text-decoration:none;padding:8px 14px;border-radius:6px;">Open in PIM Manager &rarr;</a></p>'
+        $r.BodyHtml = if ($r.BodyHtml -match '(?i)</body>') { [regex]::Replace($r.BodyHtml, '(?i)</body>', ($block -replace '\$', '$$$$') + '</body>', 1) } else { $r.BodyHtml + $block }
+        $r.BodyText = "$($r.BodyText)`r`n`r`nOpen in PIM Manager: $($portal.url)"
+    }
     $sender = "$($global:PIM_MailSender)".Trim()
     if ($WhatIf -or $global:WhatIfMode) { return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'whatif' } }
     if (-not $sender) { Write-Warning "  [Mail] `$global:PIM_MailSender not set -- rendered only, not sent."; return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'no sender' } }
@@ -227,6 +293,10 @@ function Send-PimNotifyMail {
     if (-not $rcptList.Count) { $rcptList = @($rcpt) }
     $body = @{ message = @{ subject = $r.Subject; body = @{ contentType = 'HTML'; content = $r.BodyHtml }
                             toRecipients = @($rcptList | ForEach-Object { @{ emailAddress = @{ address = $_ } } }) }; saveToSentItems = $false }
+    $att = @(@($Attachments) | Where-Object { $_ -and $_.bytes -and "$($_.name)".Trim() } | ForEach-Object {
+        @{ '@odata.type' = '#microsoft.graph.fileAttachment'; name = "$($_.name)"; contentType = $(if ("$($_.contentType)".Trim()) { "$($_.contentType)" } else { 'application/octet-stream' })
+           contentBytes = [Convert]::ToBase64String([byte[]]$_.bytes) } })
+    if ($att.Count) { $body.message['attachments'] = $att }
     $sendAs = Resolve-PimMailSendIdentity
     # Splat the switch only when it is set: offline suites stub Invoke-PimGraph with a fixed
     # parameter list, and an unconditional -UseManagedIdentity would break every one of them.
@@ -274,8 +344,11 @@ function Test-PimTapMailReady {
         # which is not the mechanism any more. -Reason carries the resolver's own sentence (which admin, which
         # department, what is missing) when the caller has it.
         $why = "$Reason".Trim()
-        return @{ ok = $false; reason = ("there is nowhere to deliver the TAP: " + $(if ($why) { $why } else { "this admin has no resolvable recipient" }) +
-                                         " -- an admin's mail goes to its SPONSOR DEPARTMENT's owners, so set the admin's Department and set Owners on that department (PIM-Definitions-Departments); a per-admin override is ForwardMailsToContact=TRUE + MailForwardAddress") }
+        # 2026-09-21 (operator, on the run log: "terrible error messages"): the resolver's sentence already says the
+        # department rule, and this appended it AGAIN -- every refusal read the same instruction twice. Say the missing
+        # thing once, then ONE fix line (which now includes the tenant's alert recipients, the last fallback).
+        $fix = "Fix: set the admin's Department and give that department Owners (PIM-Definitions-Departments), or set an alert recipient (Home > Alerting), or a per-admin MailForwardAddress."
+        return @{ ok = $false; reason = ("nobody to send the TAP to -- " + $(if ($why) { ($why -replace "\s*--\s*an admin's mail goes to its SPONSOR DEPARTMENT's owners, so set the admin's Department and give that department Owners\s*$", '') } else { "this admin has no resolvable recipient" }) + ". " + $fix) }
     }
     # 🔴 HYDRATE BEFORE JUDGING. Measured live on EFIF 2026-08-25: this guard refused ALL SIX admins
     # with "no notification sender is configured" while pim.Settings held a perfectly good

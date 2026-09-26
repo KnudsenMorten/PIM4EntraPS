@@ -122,7 +122,7 @@ function Get-PimDownlinkJobCommand {
         [string]$EntryPath = '/app/PIM4EntraPS/tools/pim-engine/downlink-job-entry.ps1',
         [Parameter(Mandatory)][ValidateSet('S5','S6')][string]$Scenario,
         [Parameter(Mandatory)][string]$TenantId,
-        [ValidateRange(0,2)][int]$SlaveRing = 2,
+        [ValidateRange(0,2)][int]$SlaveRing = 0,   # §77.20: 0 = dev, 1 = test, 2 = broad
         [string]$BaselineUrl,
         [string]$BaselineDocPath
     )
@@ -224,6 +224,9 @@ function Get-PimDownlinkJobEnv {
     $__pref = @(@($SlaveAdminPrefixes) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if ($__pref.Count) { $ev.Add("PIM_SlaveAdminPrefixes=$($__pref -join ',')") | Out-Null }
     if ($AllowRetraction) { $ev.Add('PIM_DOWNLINK_ALLOW_RETRACTION=true') | Out-Null }
+    # §77.20: this job's -SlaveRing is in the dev-first order (0 dev, 1 test, 2 broad). Without it the entrypoint reads the
+    # ring in the pre-2.4.388 order and converts it -- which is what keeps a job built earlier on its old reach.
+    $ev.Add('PIM_RingOrder=dev-first') | Out-Null
     $__pins = @(@($BaselineTrustedKeys) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ -cmatch '^[A-Za-z0-9_-]{43}$' } | Select-Object -Unique)
     if ($__pins.Count) { $ev.Add("PIM_BaselineTrustedKeys=$($__pins -join ',')") | Out-Null }
     if ("$DeployedUtc".Trim() -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$') { $ev.Add("PIM_CadenceDeployedUtc=$("$DeployedUtc".Trim())") | Out-Null }
@@ -617,7 +620,7 @@ function Get-PimDownlinkJobDeployPlan {
     param(
         [Parameter(Mandatory)][ValidateSet('S5','S6')][string]$Scenario,
         [Parameter(Mandatory)][string]$TenantId,
-        [ValidateRange(0,2)][int]$SlaveRing = 2,
+        [ValidateRange(0,2)][int]$SlaveRing = 0,   # §77.20: 0 = dev, 1 = test, 2 = broad
         [Parameter(Mandatory)][string]$JobName,
         [Parameter(Mandatory)][string]$ResourceGroup,
         [Parameter(Mandatory)][string]$EnvName,

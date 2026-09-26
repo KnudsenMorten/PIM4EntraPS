@@ -69,6 +69,11 @@
     .\Deploy-PimActivatorIntune.ps1 -Remove
 
 .EXAMPLE
+    # Cap auto-activation at 3 groups on every device the profile is assigned to (0 = off). Pass it on
+    # every run: the profile's values are rebuilt each time. Upgrades an older ingested ADMX in place.
+    .\Deploy-PimActivatorIntune.ps1 -Channel Test -AutoActivateMaxGroups 3
+
+.EXAMPLE
     # Force the org's activation defaults (justification + duration) on EVERY
     # tenant entry in the pushed catalog (file or auto-discovered):
     .\Deploy-PimActivatorIntune.ps1 -CatalogJsonPath .\catalog.json `
@@ -168,6 +173,16 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [ValidateRange(1, 24)]
     [int]$DefaultDurationHours,
+
+    # Per-DEVICE cap on auto-activation (operator 2026-09-23: "limit this to fx 2-5 so people dont
+    # activates 35 groups every day"). Written to the profile as the ADMX policy 'Auto-activate:
+    # maximum groups' -> ...\3rdparty\extensions\<id>\policy\autoActivateMaxGroups (REG_DWORD) on every
+    # device the profile is assigned to. 0 = auto-activation off; N = at most N groups.
+    # -1 (the default) = not written = no limit. This script REBUILDS the profile's values on every run,
+    # so pass it on every run that should keep the cap.
+    [Parameter(ParameterSetName = 'Install')]
+    [ValidateRange(-1, 100)]
+    [int]$AutoActivateMaxGroups = -1,
 
     # The pre-flight scan finds existing Intune policies that already manage
     # ExtensionInstallForcelist. Default behavior (v2.4.150): the profile is
@@ -450,8 +465,53 @@ try {
 }
 
 $availableRow = $admxRows | Where-Object { $_.status -in @('available', 'uploadCompleted') } | Select-Object -First 1
-if ($availableRow) {
-    Write-Host "ADMX '$admxFileName' already ingested (status=$($availableRow.status), id=$($availableRow.id)). Skipping upload." -ForegroundColor Gray
+# The ADMX carries its own revision (policyDefinitions revision="x.y"). Revision 1.1 (2026-09-23) adds the
+# auto-activate cap policies. A tenant that ingested 1.0 must get the NEW policies without losing its
+# profiles, so an older ingested revision is UPGRADED IN PLACE (Graph uploadNewVersion) -- never removed and
+# re-uploaded, which would orphan every profile built on the old definitions.
+$admxFileRevision = '1.0'
+try { if (Test-Path -LiteralPath $admxPath) { $admxFileRevision = "$(([xml](Get-Content -Raw -LiteralPath $admxPath)).policyDefinitions.revision)".Trim() } } catch { }
+if (-not $admxFileRevision) { $admxFileRevision = '1.0' }
+function Test-PaAdmxRevisionNewer {
+    param([string]$FileRevision, [string]$IngestedRevision)
+    $f = $null; $i = $null
+    if (-not [version]::TryParse("$FileRevision", [ref]$f)) { return $false }
+    if (-not [version]::TryParse("$IngestedRevision", [ref]$i)) { return $true }   # an ingested row with no readable revision is older by definition
+    return ($f -gt $i)
+}
+if ($availableRow -and (Test-PaAdmxRevisionNewer -FileRevision $admxFileRevision -IngestedRevision "$($availableRow.revision)")) {
+    Write-Host "ADMX '$admxFileName' is ingested at revision '$($availableRow.revision)'; this script carries $admxFileRevision -- uploading the new version in place (profiles are kept)..." -ForegroundColor Cyan
+    if (-not (Test-Path -LiteralPath $admlPath)) { throw "ADML file not found at '$admlPath' -- can't upgrade the ingested ADMX." }
+    $nvBody = @{
+        content                          = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($admxPath))
+        groupPolicyUploadedLanguageFiles = @(@{
+            '@odata.type' = '#microsoft.graph.groupPolicyUploadedLanguageFile'
+            fileName      = (Split-Path -Leaf $admlPath)
+            languageCode  = 'en-US'
+            content       = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($admlPath))
+        })
+    } | ConvertTo-Json -Depth 20
+    try {
+        Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($availableRow.id)/uploadNewVersion" -Body $nvBody -ContentType 'application/json' -ErrorAction Stop | Out-Null
+    } catch {
+        throw ("Intune refused the in-place ADMX upgrade to revision $($admxFileRevision): $($_.Exception.Message)`n" +
+               "Nothing was removed; the existing profiles still work at revision $($availableRow.revision). To get the new policies, " +
+               "upload intune\$admxFileName + en-US\$(Split-Path -Leaf $admlPath) as a new version in the Intune portal " +
+               "(Devices > Configuration > Import ADMX > the file's '...' menu), then re-run this script.")
+    }
+    $nvDeadline = (Get-Date).AddMinutes(5)
+    do {
+        Start-Sleep -Seconds 5
+        $chk = $null
+        try { $chk = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyUploadedDefinitionFiles/$($availableRow.id)" -ErrorAction Stop } catch { continue }
+        Write-Host "  status: $($chk.status)  revision: $($chk.revision)" -ForegroundColor Gray
+        if ($chk.status -in @('available', 'uploadCompleted') -and "$($chk.revision)" -eq $admxFileRevision) { break }
+        if ($chk.status -in @('uploadFailed')) { throw "Intune reports the in-place ADMX upgrade FAILED (status=uploadFailed). The previous revision stays in use; see the row in Devices > Configuration > Import ADMX." }
+    } while ((Get-Date) -lt $nvDeadline)
+    if (-not $chk -or "$($chk.revision)" -ne $admxFileRevision) { throw "The ADMX did not reach revision $admxFileRevision within 5 minutes (last status '$($chk.status)', revision '$($chk.revision)'). Re-run this script in a few minutes." }
+    Write-Host "[OK] ADMX upgraded in place to revision $admxFileRevision." -ForegroundColor Green
+} elseif ($availableRow) {
+    Write-Host "ADMX '$admxFileName' already ingested (status=$($availableRow.status), revision=$($availableRow.revision), id=$($availableRow.id)). Skipping upload." -ForegroundColor Gray
 } else {
     if (-not (Test-Path -LiteralPath $admxPath)) { throw "ADMX file not found at '$admxPath' -- can't auto-ingest. Place the .admx + .adml pair under .\intune\ next to this script." }
     if (-not (Test-Path -LiteralPath $admlPath)) { throw "ADML file not found at '$admlPath' -- can't auto-ingest." }
@@ -507,7 +567,7 @@ if ($availableRow) {
         targetPrefix                      = 'pimactivator'
         targetNamespace                   = $admxTargetNamespace
         policyType                        = 'admxIngested'
-        revision                          = '1.0'
+        revision                          = $admxFileRevision
         content                           = $admxBase64
         groupPolicyUploadedLanguageFiles  = @(@{
             '@odata.type' = '#microsoft.graph.groupPolicyUploadedLanguageFile'
@@ -790,18 +850,22 @@ $browsersToInclude = switch ($Browser) {
 $catCat    = if ($Channel -eq 'Test') { '\PIM4EntraPS (TEST)\PIM Activator TEST' } else { '\PIM4EntraPS\PIM Activator' }
 $catEdge   = if ($Channel -eq 'Test') { 'Tenant catalog (TEST) -- Microsoft Edge' } else { 'Tenant catalog -- Microsoft Edge' }
 $catChrome = if ($Channel -eq 'Test') { 'Tenant catalog (TEST) -- Google Chrome'  } else { 'Tenant catalog -- Google Chrome'  }
+$amxEdge   = if ($Channel -eq 'Test') { 'Auto-activate: maximum groups (TEST) -- Microsoft Edge' } else { 'Auto-activate: maximum groups -- Microsoft Edge' }
+$amxChrome = if ($Channel -eq 'Test') { 'Auto-activate: maximum groups (TEST) -- Google Chrome'  } else { 'Auto-activate: maximum groups -- Google Chrome'  }
 $policyMap = @{
     Edge   = @{
         Forcelist = @{ displayName = 'Control which extensions are installed silently';     categoryPath = '\Microsoft Edge\Extensions' }
         Sources   = @{ displayName = 'Configure extension and user script install sources'; categoryPath = '\Microsoft Edge\Extensions' }
         Settings  = @{ displayName = 'Extension management settings';                       categoryPath = '\Microsoft Edge\Extensions' }
         Catalog   = @{ displayName = $catEdge;                                              categoryPath = $catCat }
+        AutoMax   = @{ displayName = $amxEdge;                                              categoryPath = $catCat }
     }
     Chrome = @{
         Forcelist = @{ displayName = 'Configure the list of force-installed apps and extensions';        categoryPath = '\Google\Google Chrome\Extensions' }
         Sources   = @{ displayName = 'Configure extension, app, and user script install sources';        categoryPath = '\Google\Google Chrome\Extensions' }
         Settings  = @{ displayName = 'Extension management settings';                                    categoryPath = '\Google\Google Chrome\Extensions' }
         Catalog   = @{ displayName = $catChrome;                                                         categoryPath = $catCat }
+        AutoMax   = @{ displayName = $amxChrome;                                                         categoryPath = $catCat }
     }
 }
 
@@ -833,13 +897,15 @@ $resolved = @{}
 # runtime pre-grant on a fresh install (the permission-expansion gate only bites
 # on update-from-narrower-host-permissions, which a fresh TEST install isn't).
 $policyKeys = if ($Channel -eq 'Test') { @('Forcelist','Sources','Catalog') } else { @('Forcelist','Sources','Settings','Catalog') }
+if ($AutoActivateMaxGroups -ge 0) { $policyKeys += 'AutoMax' }   # only resolved (and required) when a cap is asked for
 foreach ($b in $browsersToInclude) {
     $resolved[$b] = @{}
     foreach ($k in $policyKeys) {
         $spec = $policyMap[$b][$k]
         $def  = Find-PolicyDef -DisplayNameLike $spec.displayName -CategoryPath $spec.categoryPath
         if (-not $def) {
-            $hint = if ($k -eq 'Catalog') { ' -- the custom ADMX is auto-ingested at the top of this script; if you see this error it means the ADMX upload itself failed. Re-run after addressing that.' } else { '' }
+            $hint = if ($k -eq 'Catalog') { ' -- the custom ADMX is auto-ingested at the top of this script; if you see this error it means the ADMX upload itself failed. Re-run after addressing that.' }
+                    elseif ($k -eq 'AutoMax') { " -- this policy is new in ADMX revision 1.1. The ingested ADMX is older and was not upgraded; check Devices > Configuration > Import ADMX, then re-run." } else { '' }
             throw "Could not find $b policy '$($spec.displayName)' under '$($spec.categoryPath)' (machine class)$hint."
         }
         $pres = Get-Presentations -DefinitionId $def.id
@@ -883,10 +949,16 @@ function New-DefValue {
     param(
         [Parameter(Mandatory)] $Definition,
         [Parameter(Mandatory)] $Presentation,
-        [Parameter(Mandatory)] [ValidateSet('Text','List')] [string]$Kind,
-        [Parameter(Mandatory)] [object]$Value      # string for Text, string[] for List
+        [Parameter(Mandatory)] [ValidateSet('Text','List','Decimal')] [string]$Kind,
+        [Parameter(Mandatory)] [object]$Value      # string for Text, string[] for List, integer for Decimal
     )
-    $presValue = if ($Kind -eq 'Text') {
+    $presValue = if ($Kind -eq 'Decimal') {
+        @{
+            '@odata.type'                = '#microsoft.graph.groupPolicyPresentationValueDecimal'
+            'presentation@odata.bind'    = "https://graph.microsoft.com/beta/deviceManagement/groupPolicyDefinitions('$($Definition.id)')/presentations('$($Presentation.id)')"
+            value                         = [int64]$Value
+        }
+    } elseif ($Kind -eq 'Text') {
         @{
             '@odata.type'                = '#microsoft.graph.groupPolicyPresentationValueText'
             'presentation@odata.bind'    = "https://graph.microsoft.com/beta/deviceManagement/groupPolicyDefinitions('$($Definition.id)')/presentations('$($Presentation.id)')"
@@ -966,6 +1038,17 @@ foreach ($b in $browsersToInclude) {
     $bodyTC = (New-DefValue -Definition $defTC -Presentation $prTC -Kind Text -Value $minifiedCatalog) | ConvertTo-Json -Depth 20
     Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues" -Body $bodyTC -ContentType 'application/json' -ErrorAction Stop | Out-Null
     Write-Host "  [OK] $b TenantCatalog set ($($minifiedCatalog.Length) chars)" -ForegroundColor Green
+
+    # Auto-activate cap (per device): only when -AutoActivateMaxGroups was given.
+    if ($AutoActivateMaxGroups -ge 0) {
+        $defAM = $resolved[$b]['AutoMax'].Definition
+        $prAM  = $resolved[$b]['AutoMax'].Presentations | Where-Object { $_.'@odata.type' -match 'Decimal' } | Select-Object -First 1
+        if (-not $prAM) { $prAM = $resolved[$b]['AutoMax'].Presentations | Select-Object -First 1 }
+        $bodyAM = (New-DefValue -Definition $defAM -Presentation $prAM -Kind Decimal -Value $AutoActivateMaxGroups) | ConvertTo-Json -Depth 20
+        Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/$profileId/definitionValues" -Body $bodyAM -ContentType 'application/json' -ErrorAction Stop | Out-Null
+        $amTxt = if ($AutoActivateMaxGroups -eq 0) { 'auto-activation OFF' } else { "at most $AutoActivateMaxGroups group(s)" }
+        Write-Host "  [OK] $b auto-activate cap set ($amTxt)" -ForegroundColor Green
+    }
 }
 
 # ---- 8. Optional assignment ---------------------------------------------

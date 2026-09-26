@@ -22,7 +22,7 @@
   Extension id is the canonical 'eheocihmlppcophaeakmdenhgcookkab' (derived
   from manifest.json "key" public key fingerprint).
 -->
-<policyDefinitions revision="1.0" schemaVersion="1.0"
+<policyDefinitions revision="1.1" schemaVersion="1.0"
                    xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"
                    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -106,6 +106,35 @@
       <supportedOn    ref="SUPPORTED_W10_Edge_Chrome" />
       <elements>
         <decimal id="BulkThreshold_Chrome_Value" valueName="bulkActivateConfirmThreshold" minValue="1" maxValue="100" required="false" />
+      </elements>
+    </policy>
+
+    <!-- Revision 1.1 (2026-09-23): per-DEVICE cap on auto-activation. Writes (REG_DWORD)
+         HKLM\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy\autoActivateMaxGroups
+         0 = auto-activation off on this device; N = at most N groups; Not configured = no limit. -->
+    <policy name="AutoActivateMax_Edge"
+            class="Machine"
+            displayName="$(string.AutoActivateMax_Edge)"
+            explainText="$(string.AutoActivateMax_Explain)"
+            presentation="$(presentation.AutoActivateMax_Edge_Presentation)"
+            key="SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy">
+      <parentCategory ref="PimActivator_Cat" />
+      <supportedOn    ref="SUPPORTED_W10_Edge_Chrome" />
+      <elements>
+        <decimal id="AutoActivateMax_Edge_Value" valueName="autoActivateMaxGroups" minValue="0" maxValue="100" required="true" />
+      </elements>
+    </policy>
+
+    <policy name="AutoActivateMax_Chrome"
+            class="Machine"
+            displayName="$(string.AutoActivateMax_Chrome)"
+            explainText="$(string.AutoActivateMax_Explain)"
+            presentation="$(presentation.AutoActivateMax_Chrome_Presentation)"
+            key="SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\eheocihmlppcophaeakmdenhgcookkab\policy">
+      <parentCategory ref="PimActivator_Cat" />
+      <supportedOn    ref="SUPPORTED_W10_Edge_Chrome" />
+      <elements>
+        <decimal id="AutoActivateMax_Chrome_Value" valueName="autoActivateMaxGroups" minValue="0" maxValue="100" required="true" />
       </elements>
     </policy>
 
