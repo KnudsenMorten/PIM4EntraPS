@@ -14,6 +14,13 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.450 — Access reviews list each account's access, and nobody reviews their own account
+
+- **Each person in a department review now shows the access it holds.** When an admin was defined by its short account
+  name, the review listed the person with no access and under a name a Remove could not act on. The review now names the
+  full sign-in name and finds its access.
+- **A reviewer can no longer decide on their own admin account.** Another reviewer or a SuperAdmin decides it.
+
 ## v2.4.449 — Review mails reach reviewers who sign in with an admin account
 
 - **A reviewer who signs in with an admin account now gets the review mail.** Admin accounts have no mailbox, so the
