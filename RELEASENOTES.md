@@ -14,6 +14,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.444 — Setup and engine fixes found by the live tests
+
+- **The notification mailbox step waits out a Microsoft delay.** Right after its permission is granted, Microsoft can
+  refuse the role check once. The step now retries for a few minutes before reporting the environment as unable to
+  send mail.
+- **A brand-new account or group no longer fails the engine run.** When the engine assigns a role to a principal it
+  created moments earlier, Microsoft can briefly answer "not found". This is now recognised as a short wait that the
+  next run completes, not as an unexplained failure. The same applies to a new group's PIM policy, which Microsoft can
+  refuse to update for a few minutes after the group is created.
+- **The community updater finds your installation reliably.** Test runs no longer leave a saved deployment behind, so
+  `Update-PimCommunity.ps1` never has to choose between your installation and a test.
+
 ## v2.4.443 — Azure delegation levels follow your management-group layers
 
 - **The Create wizard sets the level of an Azure permission group from where its scope sits.** It uses the Cloud

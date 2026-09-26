@@ -521,7 +521,25 @@ elseif ($PSCmdlet.ShouldProcess($AdminAppId, 'grant RoleManagement.ReadWrite.Dir
     }
     if (-not $claimSeen) { Fail 'RoleManagement.ReadWrite.Directory was granted but no fresh token carried it within 10 minutes -- re-run this step; the grant itself is in place' }
 }
-try { $exchAdminState = Read-ExchAdminGrant }
+# 🪤 A 403 HERE IS NOT FINAL (measured 2026-09-26, Community): RoleManagement.ReadWrite.Directory was held and IN the
+# token, and this read still answered 403 once -- then 200 on every later try. Entra makes a new app permission effective
+# on the role-management read path some time after the token already carries it. Retry a 403 with a FRESH token for up
+# to 5 minutes before calling the environment mail-mute; anything that is not a 403 still fails at once.
+$exchAdminState = $null; $exchReadErr = $null
+$exchReadUntil = (Get-Date).AddMinutes(5)
+while ($true) {
+    try { $exchAdminState = Read-ExchAdminGrant; $exchReadErr = $null; break }
+    catch {
+        $exchReadErr = $_
+        $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)"
+        if ($m -notmatch '\b403\b|Forbidden|Authorization_RequestDenied' -or (Get-Date) -ge $exchReadUntil) { break }
+        Note 'role read answered 403 -- retrying with a fresh token (a new permission takes effect on this path after the token carries it)' 'DarkYellow'
+        Start-Sleep -Seconds 20
+        $t = Get-PimRestToken -Resource 'graph' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force
+        $script:GH = @{ Authorization = "Bearer $t"; 'Content-Type' = 'application/json' }
+    }
+}
+try { if ($exchReadErr) { throw $exchReadErr } }
 catch { Fail "could not read the onboarding SPN's active directory roles, so cannot tell whether Exchange Administrator is already active -- refusing to guess: $($_.Exception.Message)" }
 if ($exchAdminState.active) {
     if ($exchAdminState.kind -eq 'permanent') {
