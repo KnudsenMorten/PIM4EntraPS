@@ -2399,8 +2399,8 @@
         { tab: 'settings', label: 'Settings',    desc: 'Naming, filters, operational policy, alerting and permission templates' },
         // 2026-09-14 (operator: "we need a new menu-item under audit and settings with Newly discovered resources and
         // relevant settings. they are the wrong place").
-        { tab: 'discovery', label: 'Newly discovered resources',
-          desc: 'New subscriptions, management groups, resource groups, Power BI workspaces and Entra roles found by discovery, and what the engine does with them' },
+        { tab: 'discovery', label: 'Discovery',
+          desc: 'What is new in the tenant -- Azure subscriptions and management groups, Power BI workspaces, new Entra, Defender XDR and Intune roles: create it in PIM or ignore it' },
         // REQ-S (operator 2026-09-19): every menu item opens its OWN page -- never an anchor into Settings, where a section
         // cannot be permissioned on its own. The two emergency items are ONE page ("why 2 emergency menu items"): the
         // override and the break-glass accounts (IMP-39, SQL) are one subject.
@@ -8903,93 +8903,119 @@
     }, 30000);
   }
 
-  // ----- Newly discovered resources (tab 'discovery') -------------------------------------------------------------------
+  // ----- Discovery (tab 'discovery') ------------------------------------------------------------------------------------
+  // REQ-DISC-2 (operator 2026-09-26: "i need a way to see them, and either ignore them or approve them (create)", "list
+  // with create and ignore", "must be fast and easy", "it must be possible to see ignored and re-add them"). ONE list of
+  // what is new, grouped by kind: every row has Create and Ignore, tick-boxes + "select all" per kind do many similar ones
+  // at once, and the Ignored view has Re-add. Create STAGES a permission-group definition (Azure scope / Power BI
+  // workspace -- review it under Review & commit) or ACCEPTS a new role into the catalog. Nothing is granted here.
+  let PIM_DISC_VIEW = 'new';
   async function renderDiscovery() {
     const body = document.getElementById('discoveryBody');
     if (!body) return;
-    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- discovered resources need the server.</div>'; return; }
+    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- discovery needs the server.</div>'; return; }
     const esc = escapeHtml;
-    let disc = { baselineMissing: true, newItems: [] }, discPolicy = null;
-    // BUG-193: a failed read is NOT "no baseline yet" / "nothing new" -- keep the reason and say it.
-    let discErr = '';
-    try { disc = await api('GET', '/api/discovered-resources'); } catch (e) { discErr = String((e && e.body && e.body.error) || (e && e.message) || e); }
-    try { discPolicy = await api('GET', '/api/discovery-policy'); } catch (_) {}
-    const discMissing = asList(disc && disc.cacheMissing).filter(Boolean);
-
+    let d = null, err = '';
+    try { d = await api('GET', '/api/discovery-inbox'); } catch (e) { err = String((e && e.body && e.body.error) || (e && e.message) || e); }
+    if (err || !d) { body.innerHTML = '<div class="discReadError" style="font-size:12.5px;color:#cf222e;">Discovery could not be read: ' + esc(err || 'no answer') + '</div>'; return; }
+    const items = asList(d.items);
+    const counts = d.counts || {};
+    const can = !!d.canDecide;
+    const ign = PIM_DISC_VIEW === 'ignored';
+    const shown = items.filter(x => ign ? x.state === 'ignored' : (x.state === 'new' || x.state === 'staged'));
+    const kinds = d.kinds || {};
     const h = [];
-    // Discovered resources (phase 9, Portal mode)
-    h.push('<div id="discResources" style="margin-bottom:16px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Discovered resources</span>');
-    h.push('<div style="color:#57606a;font-size:11.5px;margin:2px 0 6px;">Discovery compares the tenant with a <b>baseline</b> and lists what appeared since: Azure subscriptions, management groups, resource groups, Power BI workspaces and Entra roles. Nothing here is delegated automatically &mdash; the auto-create policy below decides what the engine does.</div>');
-    // BUG-193: the tenant cache these lists come from was NEVER refreshed for some kinds -- an empty list
-    // for those kinds means "not read", not "nothing new", and Acknowledge is refused until it is.
-    if (discMissing.length) {
-      h.push('<div class="discCacheMissing" style="margin:6px 0;padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;font-size:12px;">' +
-        '<b>The tenant cache has never been refreshed for: ' + discMissing.map(esc).join(', ') + '.</b> New resources of that kind cannot be shown yet (this is NOT &ldquo;nothing new&rdquo;). ' +
-        'Refresh the tenant lists first; acknowledging is refused until then.</div>');
-    }
-    if (discErr) {
-      h.push('<div class="discReadError" style="margin-top:6px;font-size:12.5px;color:#cf222e;">Discovered resources could not be read: ' + esc(discErr) + '</div>');
-    } else if (disc.baselineMissing) {
-      h.push(`<div style="margin-top:6px;font-size:12.5px;color:#57606a;">No discovery baseline yet${disc.currentCounts ? ` (current: ${disc.currentCounts.azureScopes} Azure scope(s), ${disc.currentCounts.entraRoles} Entra role(s))` : ''}.` +
-        `${PIM_ROLE !== 'Reader' ? ' <button id="govDiscAck">Set baseline from current state</button>' : ''} New subscriptions / roles appearing after the baseline show up here and in the engine run log (resource.discovered).</div>`);
-    } else if ((disc.newItems || []).length === 0) {
-      h.push(`<div style="margin-top:6px;font-size:12.5px;color:${discMissing.length ? '#9a6700' : '#1a7f37'};">No new resources since the baseline (${esc((disc.baselineAtUtc || '').substring(0, 16).replace('T', ' '))} UTC)${discMissing.length ? ' in the kinds that WERE read' : ''}.</div>`);
+    h.push('<div id="discInbox">');
+    h.push('<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">' +
+      '<span style="font-size:13px;font-weight:600;">Discovery</span>' +
+      '<button id="discViewNew" class="discView' + (ign ? '' : ' primary') + '" data-view="new">New (' + (Number(counts.new || 0) + Number(counts.staged || 0)) + ')</button>' +
+      '<button id="discViewIgnored" class="discView' + (ign ? ' primary' : '') + '" data-view="ignored">Ignored (' + Number(counts.ignored || 0) + ')</button>' +
+      '<span style="color:#57606a;font-size:11.5px;">What is in the tenant and not yet in PIM. <b>Create</b> adds it (you commit it under Review &amp; commit); <b>Ignore</b> hides it until you re-add it.</span></div>');
+    const miss = asList(d.cacheMissing).filter(Boolean);
+    if (miss.length) h.push('<div class="discCacheMissing" style="margin:4px 0 8px;padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;font-size:12px;">Not read yet: ' + miss.map(esc).join(', ') + ' -- refresh the tenant lists to see those kinds.</div>');
+    if (!shown.length) {
+      h.push('<div class="discEmpty" style="font-size:12.5px;color:#1a7f37;margin-top:6px;">' + (ign ? 'Nothing is ignored.' : 'Nothing new -- everything discovered is already in PIM, ignored or accepted.') + '</div>');
     } else {
-      h.push('<table class="grid" style="margin-top:6px;font-size:12px;"><thead><tr><th>Kind</th><th>Name</th><th>Id</th></tr></thead><tbody>');
-      for (const it of disc.newItems) {
-        h.push(`<tr><td>${esc(it.kind)}</td><td>${esc(it.displayName || '')}</td><td style="font-family:Consolas,monospace;font-size:11px;">${esc(it.id)}</td></tr>`);
+      if (can) h.push('<div class="discBulk" style="display:flex;gap:6px;align-items:center;margin:4px 0 8px;"><label style="font-size:12px;"><input type="checkbox" id="discAll"> Select all</label>' +
+        (ign ? '<button class="discBulkAct" data-act="readd">Re-add selected</button>'
+             : '<button class="discBulkAct primary" data-act="create">Create selected</button><button class="discBulkAct" data-act="ignore">Ignore selected</button>') +
+        '<span id="discSel" style="color:#57606a;font-size:11.5px;"></span></div>');
+      const order = Object.keys(kinds).length ? Object.keys(kinds) : Array.from(new Set(shown.map(x => x.kind)));
+      for (const k of order) {
+        const g = shown.filter(x => x.kind === k);
+        if (!g.length) continue;
+        const role = /-role$/.test(k);
+        h.push('<table class="grid discGroup" data-kind="' + esc(k) + '" style="font-size:12px;margin-bottom:10px;width:100%;"><thead><tr>' +
+          (can ? '<th style="width:22px;"><input type="checkbox" class="discKindAll" data-kind="' + esc(k) + '"></th>' : '') +
+          '<th>' + esc(kinds[k] || k) + ' (' + g.length + ')</th><th>' + (ign ? 'Ignored' : (role ? 'Create means' : 'Create adds')) + '</th>' + (can ? '<th style="width:170px;"></th>' : '') + '</tr></thead><tbody>');
+        for (const x of g) {
+          const what = ign ? esc(((x.decidedBy || '') + ' ' + String(x.decidedUtc || '').substring(0, 16).replace('T', ' ')).trim())
+            : (role ? 'accept into the role catalog' : ('permission group <b>' + esc(x.groupName || '') + '</b>' + (x.level != null ? ' (L' + esc(String(x.level)) + ')' : '')));
+          const staged = x.state === 'staged' ? ' <span style="color:#9a6700;font-size:11px;">staged -- in Review &amp; commit</span>' : '';
+          h.push('<tr data-key="' + esc(x.key) + '">' +
+            (can ? '<td><input type="checkbox" class="discPick" data-key="' + esc(x.key) + '" data-kind="' + esc(k) + '"></td>' : '') +
+            '<td><b>' + esc(x.name || x.id) + '</b>' + staged + '<div style="color:#57606a;font-size:11px;font-family:Consolas,monospace;">' + esc(x.path || x.id) + '</div></td>' +
+            '<td>' + what + '</td>' +
+            (can ? '<td style="white-space:nowrap;">' + (ign ? '<button class="discAct" data-act="readd" data-key="' + esc(x.key) + '">Re-add</button>'
+                 : '<button class="discAct primary" data-act="create" data-key="' + esc(x.key) + '">Create</button> <button class="discAct" data-act="ignore" data-key="' + esc(x.key) + '">Ignore</button>') + '</td>' : '') +
+            '</tr>');
+        }
+        h.push('</tbody></table>');
       }
-      h.push('</tbody></table>');
-      h.push(`<div style="margin-top:6px;font-size:12px;">Onboard them with the permission-group wizards under <b>Access &rsaquo; Create access</b>, then` +
-        `${PIM_ROLE !== 'Reader' ? ' <button id="govDiscAck">Acknowledge all (reset baseline)</button>' : ' acknowledge (Admin role required)'}.</div>`);
+      if (!can) h.push('<div style="color:#57606a;font-size:11.5px;">Create / Ignore need the Admin role.</div>');
     }
     h.push('</div>');
-    // Per-resource-type AUTO-CREATE policy. Drives $global:PIM_DiscoveryAutoCreate
-    // which the engine's discovery reconcile reads: flag (log only) / pending (stage
-    // a desired row for review) / auto (queue a create via the normal flow).
-    if (discPolicy && discPolicy.policy) {
-      const labels = { AzureSubscription:'Azure subscription', ManagementGroup:'Azure management group', ResourceGroup:'Azure resource group', PowerBIWorkspace:'Power BI workspace', EntraRole:'Entra role' };
-      const valHelp = { flag:'flag only (log it, do nothing)', pending:'stage a draft for review', auto:'auto-create via the normal flow' };
-      const canEditPol = (PIM_ROLE === 'SuperAdmin');
-      h.push('<div id="discPolicy" style="margin-top:12px;padding-top:8px;border-top:1px dashed #d0d7de;">' +
-        '<div style="font-size:12px;font-weight:600;color:#24292f;">Auto-create policy for newly-discovered resources</div>' +
-        '<div style="color:#57606a;font-size:11.5px;margin:2px 0 6px;">Per type, decide what the engine does when discovery finds a brand-new resource. ' +
-        'Default <b>flag</b> is safe (it never creates anything silently). <b>pending</b> stages a draft delegation group you review &amp; commit; ' +
-        '<b>auto</b> creates it through the normal change flow. A principal is never auto-mapped.</div>' +
-        // Operator, 2026-09-22: "i dont understand the purpose of serviceroles ... if nothing reads
-        // it why did you build it". Entra ROLES are not a resource you can create, and the queue row
-        // the old policy produced had no reader. Say where the answer actually is, on the page that
-        // used to offer the control.
-        '<div style="color:#57606a;font-size:11.5px;margin:0 0 6px;">Entra <b>roles</b> are not listed here: nobody creates a role Microsoft ships. ' +
-        'A new built-in role is <b>reported</b> (audit trail + the discovery notice mail), and every role that no permission group grants is listed as a ' +
-        '<b>Gap</b> on <b>Coverage &amp; gaps</b>, with a proposal.</div>');
-      h.push('<table class="grid" style="font-size:12px;"><thead><tr><th>Resource type</th><th>Policy</th></tr></thead><tbody>');
-      for (const t of (discPolicy.types || [])) {
-        const cur = discPolicy.policy[t] || 'flag';
-        const opts = (discPolicy.values || ['flag','pending','auto']).map(v => `<option value="${v}"${v===cur?' selected':''}>${esc(v)} &mdash; ${esc(valHelp[v]||v)}</option>`).join('');
-        h.push(`<tr><td>${esc(labels[t]||t)}</td><td>${canEditPol ? `<select class="govDiscPol" data-type="${esc(t)}">${opts}</select>` : `<b>${esc(cur)}</b>`}</td></tr>`);
-      }
-      h.push('</tbody></table>');
-      if (canEditPol) h.push('<div style="margin-top:6px;"><button id="govDiscPolSave">Save auto-create policy</button> <span id="govDiscPolMsg" style="color:#57606a;font-size:11.5px;"></span></div>');
-      h.push('</div>');
-    }
     body.innerHTML = h.join('');
-
-    const ack = document.getElementById('govDiscAck');
-    // BUG-193: a 409 (cache never refreshed) is shown in the server's words, and the page re-renders.
-    if (ack) ack.onclick = async () => { try { await api('POST', '/api/discovery-baseline'); } catch (e3) { alert('Not acknowledged: ' + ((e3 && e3.body && e3.body.error) || e3.message)); } renderDiscovery(); };
-    // ----- Discovery auto-create policy save (SuperAdmin) --------------------
-    const dpSave = document.getElementById('govDiscPolSave');
-    if (dpSave) dpSave.onclick = async () => {
-      const msg = document.getElementById('govDiscPolMsg');
-      const policy = {};
-      document.querySelectorAll('.govDiscPol').forEach(s => { policy[s.getAttribute('data-type')] = s.value; });
-      msg.textContent = 'Saving…'; msg.style.color = '#57606a';
-      try { await api('PUT', '/api/discovery-policy', { policy }); msg.textContent = 'Saved ✓'; msg.style.color = '#116329'; }
-      catch (e) { msg.textContent = e.message; msg.style.color = '#cf222e'; }
-    };
+    body.querySelectorAll('.discView').forEach(bt => bt.onclick = () => { PIM_DISC_VIEW = bt.getAttribute('data-view'); renderDiscovery(); });
+    const picks = () => Array.from(body.querySelectorAll('.discPick:checked')).map(c => c.getAttribute('data-key'));
+    const sel = () => { const s = document.getElementById('discSel'); if (s) { const n = picks().length; s.textContent = n ? (n + ' selected') : ''; } };
+    body.querySelectorAll('.discPick').forEach(c => c.onchange = sel);
+    body.querySelectorAll('.discKindAll').forEach(c => c.onchange = () => { body.querySelectorAll('.discPick[data-kind="' + c.getAttribute('data-kind') + '"]').forEach(x => { x.checked = c.checked; }); sel(); });
+    const all = document.getElementById('discAll');
+    if (all) all.onchange = () => { body.querySelectorAll('.discPick, .discKindAll').forEach(x => { x.checked = all.checked; }); sel(); };
+    body.querySelectorAll('.discAct').forEach(bt => bt.onclick = () => discDecide(bt.getAttribute('data-act'), [bt.getAttribute('data-key')]));
+    body.querySelectorAll('.discBulkAct').forEach(bt => bt.onclick = () => { const k = picks(); if (!k.length) { alert('Select one or more rows first.'); return; } discDecide(bt.getAttribute('data-act'), k); });
   }
-
+  // PURE (exported for the harness): the rows a Create stages, one per proposal, shaped by the entity's own header; a tag
+  // already pending in that entity is not staged twice.
+  function discStagePlan(stage, headers, pendingTags) {
+    const out = [];
+    for (const s of (stage || [])) {
+      const hdr = (headers && headers[s.base]) || Object.keys(s.row || {});
+      const tag = String((s.row && s.row.GroupTag) || '').toLowerCase();
+      const seen = (pendingTags && pendingTags[s.base]) || new Set();
+      if (tag && seen.has(tag)) continue;
+      if (tag) seen.add(tag);
+      const row = {};
+      for (const col of hdr) row[col] = (s.row && s.row[col] != null) ? String(s.row[col]) : '';
+      out.push({ base: s.base, row });
+    }
+    return out;
+  }
+  async function discDecide(action, keys) {
+    switch (action) { case 'create': case 'ignore': case 'readd': break; default: return; }   // the three data-act buttons; anything else is refused here
+    let r = null;
+    try { r = await api('POST', '/api/discovery-decisions', { action, keys }); }
+    catch (e) { alert('Not done: ' + ((e && e.body && e.body.error) || (e && e.message) || e)); renderDiscovery(); return; }
+    const stage = asList(r && r.stage);
+    if (action === 'create' && stage.length) {
+      const headers = {}, pendingTags = {};
+      for (const base of Array.from(new Set(stage.map(s => s.base)))) {
+        const data = await loadCsv(base);
+        ensurePending(base, data.header, data.rows);
+        headers[base] = pendingChanges[base].header;
+        pendingTags[base] = new Set(pendingChanges[base].rows.map(x => String((x && x.GroupTag) || '').toLowerCase()).filter(Boolean));
+      }
+      const plan = discStagePlan(stage, headers, pendingTags);
+      for (const s of plan) pendingChanges[s.base].rows.push(s.row);
+      markBadges();   // persists the draft and shares it (Review & commit)
+      try { valRevalidateAfterFix(); } catch (_) { }
+      sharedToast('Staged ' + plan.length + ' permission group(s) -- review and commit them under Review & commit');
+    } else {
+      sharedToast((action === 'ignore' ? 'Ignored ' : action === 'readd' ? 'Re-added ' : 'Accepted ') + keys.length + ' item(s)');
+    }
+    renderDiscovery();
+  }
   // ----- Job schedule (tab 'jobschedule') -------------------------------------------------------------------------------
   // Operator (2026-09-14) on the old "Scheduled mails & jobs" table: "i am not sure what does". So: plain words per job.
   const JOB_SCHEDULE_PLAIN = {

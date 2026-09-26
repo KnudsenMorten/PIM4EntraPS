@@ -444,6 +444,39 @@ function Get-PimDefenderDuplicateRolePlan {
     return [pscustomobject]@{ keep = "$($keep.id)"; delete = @($hs | Where-Object { "$($_.id)" -ne "$($keep.id)" } | ForEach-Object { "$($_.id)" }) }
 }
 
+function Repair-PimDefenderDuplicateRoles {
+    <#
+      WRITES. The duplicates the live read finds, healed BEFORE the provider plans: for every name a SPEC row names that the
+      catalog holds more than once, Get-PimDefenderDuplicateRolePlan decides; a healable name keeps its assigned copy and the
+      other PIM-made copies are DELETEd. Returns the names healed ('' list = nothing changed). Never throws: a failed read or
+      delete leaves the duplicate for the ambiguous-role warning, as before.
+      2026-09-26 (RIDE): the heal inside Resolve-PimDefenderSpecRole never ran there -- an ambiguous binding is reported as a
+      warning at READ time and no create/update item is planned, so the heal has to happen here.
+    #>
+    param([Parameter(Mandatory)]$Catalog, [string[]]$Names = @())
+    $healed = New-Object System.Collections.Generic.List[string]
+    if (-not $Catalog -or -not $Catalog.ok) { return @() }
+    $assigned = $null
+    foreach ($n in @($Names | Where-Object { "$_".Trim() } | Select-Object -Unique)) {
+        $k = "$n".ToLowerInvariant()
+        if (-not $Catalog.byName.ContainsKey($k)) { continue }
+        $hits = @($Catalog.byName[$k]); if ($hits.Count -lt 2) { continue }
+        if ($null -eq $assigned) {
+            try { $assigned = @(@(Invoke-PimGraph -Beta -All -Path '/roleManagement/defender/roleAssignments') | ForEach-Object { "$($_.roleDefinitionId)" }) }
+            catch { Write-Warning "DefenderXdrRoles: the role assignments could not be read, so duplicates are not healed this run: $($_.Exception.Message)"; return @() }
+        }
+        $plan = Get-PimDefenderDuplicateRolePlan -Hits $hits -AssignedRoleIds $assigned
+        if (-not $plan) { continue }
+        $ok = $true
+        foreach ($did in @($plan.delete)) {
+            try { Invoke-PimGraph -Beta -Method DELETE -Path "/roleManagement/defender/roleDefinitions/$did" | Out-Null; Write-Host ("    [-] Defender XDR role '{0}': deleted the duplicate {1} PIM created (kept {2})" -f $n, $did, $plan.keep) -ForegroundColor Yellow }
+            catch { $ok = $false; Write-Warning "DefenderXdrRoles: the duplicate '$n' ($did) could not be deleted: $($_.Exception.Message)" }
+        }
+        if ($ok) { $healed.Add("$n") }
+    }
+    return @($healed.ToArray())
+}
+
 function Get-PimDefenderCreatePending {
     # The names whose create was ANSWERED (redirect) but not yet listed, with when: pim.Settings['DefenderRoleCreatePending'].
     $h = @{}

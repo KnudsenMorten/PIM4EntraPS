@@ -287,6 +287,9 @@ if (Test-Path -LiteralPath $_permLib) { . $_permLib }
 # Reader who owns a department) stages and commits ONLY rows they own, inside their profile (derived: level 3+, tier 1+,
 # Azure only under their departments' AzureScopes).
 . (Join-Path $solutionRoot 'engine\_shared\PIM-DelegatedModel.ps1')
+# REQ-DISC-2 (operator 2026-09-26): the Discovery inbox -- one list of what is new, each item Create / Ignore / Re-add.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-AzureDiscovery.ps1')
+. (Join-Path $solutionRoot 'engine\_shared\PIM-DiscoveryInbox.ps1')
 # REQ-U (prereqs) -- the workload-prerequisite catalog + view (engine/_shared/PIM-WorkloadPrereqs.ps1): behind
 # GET /api/workload-prereqs, the green / amber / red chips that show whether tools\setup\Initialize-PimWorkloadPrereqs.ps1
 # has run for a workload. The same definitions the setup script and tests\Test-PimWorkloadPrereqs.ps1 use.
@@ -1157,6 +1160,53 @@ function Save-PimManagerReviewReminderMap {
     Set-PimManagerSettingObject -Name 'AccessReviewReminders' -Value $Map
 }
 
+function Get-PimManagerDiscoveryInbox {
+    <#
+      REQ-DISC-2 -- the Discovery inbox from the SQL tenant cache + what the store already defines + the operator's
+      decisions (pim.Settings 'DiscoveryDecisions'). A ROLE kind read for the first time records its baseline (every role
+      that exists then is known; only roles Microsoft adds later are new). The Entra baseline the old page acknowledged
+      (pim.Settings 'DiscoveryBaseline'.entraRoleIds) is reused, so nothing already acknowledged comes back.
+    #>
+    $read = { param($k) $e = $null; if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) { try { $e = Get-PimTenantCacheEntry -Kind $k } catch { $e = $null } }; $e }
+    $missing = New-Object System.Collections.Generic.List[string]
+    $az = & $read 'azure-scopes'; if ($null -eq $az) { $missing.Add('azure-scopes') }
+    $en = & $read 'entra-roles'; if ($null -eq $en) { $missing.Add('entra-roles') }
+    $df = & $read 'workload-roles:defender'; $it = & $read 'workload-roles:intune'; $pb = & $read 'powerbi-workspaces'
+    $scopes = @(if ($az) { @($az.items) | Where-Object { $_ } })
+    $items = ConvertTo-PimDiscoveryItems -AzureScopes $scopes -EntraRoles @(if ($en) { @($en.items) | Where-Object { $_ } }) `
+        -DefenderRoles @(if ($df -and $df.read) { @($df.roles) | Where-Object { $_ } }) -IntuneRoles @(if ($it -and $it.read) { @($it.roles) | Where-Object { $_ } }) `
+        -PowerBiWorkspaces @(if ($pb) { @($pb.items) | Where-Object { $_ } })
+    # what the store already defines
+    $names = New-Object System.Collections.Generic.List[string]; $tags = New-Object System.Collections.Generic.List[string]; $refs = New-Object System.Collections.Generic.List[string]
+    foreach ($e in @('PIM-Definitions-Services', 'PIM-Definitions-Resources', 'PIM-Definitions-Tasks', 'PIM-Definitions-Roles')) {
+        foreach ($r in @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $e)) {
+            $gn = "$($r.GroupName)".Trim(); if ($gn) { $names.Add($gn) }
+            $gt = "$($r.GroupTag)".Trim(); if ($gt) { $tags.Add($gt) }
+            foreach ($c in @('AzScope', 'ScopePath', 'scopePath', 'ResourceId')) { $v = "$($r.$c)".Trim(); if ($v) { $refs.Add($v) } }
+            foreach ($m in [regex]::Matches("$($r.GroupDescription)", '(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b')) { $refs.Add($m.Value) }
+        }
+    }
+    foreach ($r in @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Assignments-Azure-Resources')) { $v = "$($r.AzScope)".Trim(); if ($v) { $refs.Add($v) } }
+    $decRaw = Get-PimManagerSettingObject -Name 'DiscoveryDecisions'
+    $decisions = @{}; if ($decRaw) { if ($decRaw -is [System.Collections.IDictionary]) { foreach ($k in $decRaw.Keys) { $decisions["$k"] = $decRaw[$k] } } else { foreach ($p in $decRaw.PSObject.Properties) { $decisions[$p.Name] = $p.Value } } }
+    $blRaw = Get-PimManagerSettingObject -Name 'DiscoveryRoleBaseline'
+    $baseline = @{}; if ($blRaw) { foreach ($p in $blRaw.PSObject.Properties) { $baseline[$p.Name] = @(@($p.Value.ids) | ForEach-Object { "$_".ToLowerInvariant() }) } }
+    if (-not $baseline.ContainsKey('entra-role')) {
+        $old = $null; try { $old = Get-PimManagerSettingObject -Name 'DiscoveryBaseline' } catch { }
+        if ($old -and @($old.entraRoleIds).Count) {
+            # the old page's baseline holds role OBJECT ids; the inbox keys Entra roles by templateId (same value for built-ins)
+            $baseline['entra-role'] = @(@($old.entraRoleIds) | ForEach-Object { "$_".ToLowerInvariant() })
+        }
+    }
+    $inbox = Get-PimDiscoveryInbox -Items $items -Decisions $decisions -Baseline $baseline -Defined @{ names = @($names); tags = @($tags); refs = @($refs) } -Scopes $scopes
+    if (@($inbox.baselineNeeded).Count) {
+        $doc = [ordered]@{}; if ($blRaw) { foreach ($p in $blRaw.PSObject.Properties) { $doc[$p.Name] = $p.Value } }
+        foreach ($k in @($inbox.baselineNeeded)) { $doc[$k] = [ordered]@{ atUtc = [datetime]::UtcNow.ToString('o'); ids = @($items | Where-Object { $_.kind -eq $k } | ForEach-Object { $_.id.ToLowerInvariant() }) } }
+        try { Set-PimManagerSettingObject -Name 'DiscoveryRoleBaseline' -Value $doc } catch { Write-Warning "[discovery] the role baseline could not be saved: $($_.Exception.Message)" }
+    }
+    return [pscustomobject]@{ inbox = $inbox; items = $items; scopes = $scopes; decisions = $decisions; missing = @($missing.ToArray())
+        collected = [ordered]@{ azure = "$(if ($az) { $az.refreshedUtc })"; entra = "$(if ($en) { $en.refreshedUtc })"; defender = "$(if ($df) { $df.readUtc })"; intune = "$(if ($it) { $it.readUtc })"; powerbi = "$(if ($pb) { $pb.readUtc })" } }
+}
 function Get-PimManagerDiscoveryCurrent {
     # BUG-193 -- the CURRENT tenant resources for "Newly discovered resources", from the SQL tenant cache
     # (pim.TenantCache kinds 'azure-scopes' / 'entra-roles', written by _tenantSync). Returns
@@ -11917,6 +11967,59 @@ function Handle-Request {
         # cache/<instance>/discovery-baseline.json. Acknowledge = snapshot
         # the current state as the new baseline.
         # -------------------------------------------------------------------
+        if ($path -eq '/api/discovery-inbox' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            # REQ-DISC-2: the ONE list -- new items with Create / Ignore, the ignored ones with Re-add.
+            $d = $null
+            try { $d = Get-PimManagerDiscoveryInbox } catch {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "the discovery inbox could not be read: $($_.Exception.Message)" }
+                return 503
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ items = @($d.inbox.items); counts = $d.inbox.counts; cacheMissing = @($d.missing); collected = $d.collected
+                kinds = $script:PimDiscoveryKinds; canDecide = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin') }
+            return 200
+        }
+
+        if ($path -eq '/api/discovery-decisions' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to decide on discovered items.' }
+                return 403
+            }
+            if (-not (Test-PimManagerProFeature -Key 'discovery.sweep' -Response $resp)) { return 403 }
+            $body = Read-RequestJson -Request $req
+            $action = "$($body.action)".Trim().ToLowerInvariant()
+            $keys = @(@($body.keys) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ } | Select-Object -Unique)
+            if ($action -notin @('create', 'ignore', 'readd') -or -not $keys.Count) {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "body must be { action: create | ignore | readd, keys: [...] }" }
+                return 400
+            }
+            $d = Get-PimManagerDiscoveryInbox
+            $byKey = @{}; foreach ($x in @($d.items)) { $byKey[$x.key] = $x }
+            $unknown = @($keys | Where-Object { -not $byKey.ContainsKey($_) })
+            if ($unknown.Count) {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "not in the current discovery list: $($unknown -join ', ')" }
+                return 400
+            }
+            $dec = $d.decisions; $stage = New-Object System.Collections.Generic.List[object]; $by = ''; try { $by = "$((Get-PimManagerRole).identity)" } catch { }
+            foreach ($k in $keys) {
+                $it = $byKey[$k]
+                if ($action -eq 'ignore') { $dec = Set-PimDiscoveryDecision -Decisions $dec -Key $k -Action ignore -By $by }
+                elseif ($action -eq 'readd') { $dec = Set-PimDiscoveryDecision -Decisions $dec -Key $k -Action unignore -By $by }
+                elseif ($it.kind -in $script:PimDiscoveryRoleKinds) { $dec = Set-PimDiscoveryDecision -Decisions $dec -Key $k -Action accept -By $by }
+                else {
+                    $pr = Get-PimDiscoveryProposal -Item $it -Scopes $d.scopes
+                    if ($pr) { $stage.Add([pscustomobject]@{ key = $k; base = $pr.base; row = $pr.row; groupName = $pr.groupName }); $dec = Set-PimDiscoveryDecision -Decisions $dec -Key $k -Action stage -By $by }
+                }
+            }
+            try { Set-PimManagerSettingObject -Name 'DiscoveryDecisions' -Value $dec } catch {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; error = "the decision was NOT saved: $($_.Exception.Message)" }
+                return 503
+            }
+            Write-PimManagerAuditEvent -Action "discovery.$action" -Target $script:PimInstanceName -After @{ keys = @($keys); staged = @($stage | ForEach-Object { $_.groupName }) }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; action = $action; count = $keys.Count; stage = @($stage.ToArray()) }
+            return 200
+        }
         if ($path -eq '/api/discovered-resources' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             # 🔴 BUG-193: this read cache/<instance>/*.json FILES, which _tenantSync stopped writing on 2026-09-13

@@ -534,7 +534,17 @@ Register-PimDiscoveryHandler `
         param($scope)
         switch ($scope) {
             'Azure'   { try { @(Get-PimLiveAzureScopes -IncludeManagementGroups) } catch { @() } }
-            'PowerBI' { try { @(Get-PimLivePowerBiWorkspaces) } catch { @() } }
+            'PowerBI' {
+                try {
+                    $ws = @(Get-PimLivePowerBiWorkspaces)
+                    # REQ-DISC-2: the Discovery inbox lists workspaces from the tenant cache -- store what was read.
+                    if (Get-Command Set-PimTenantCacheEntry -ErrorAction SilentlyContinue) {
+                        try { [void](Set-PimTenantCacheEntry -Kind 'powerbi-workspaces' -Value ([ordered]@{ readUtc = [datetime]::UtcNow.ToString('o'); items = @($ws | ForEach-Object { [ordered]@{ workspaceId = "$($_.workspaceId)"; workspaceName = "$($_.workspaceName)" } }) })) }
+                        catch { Write-Warning "[discovery] the Power BI workspace list could not be stored for the Discovery page: $($_.Exception.Message)" }
+                    }
+                    $ws
+                } catch { @() }
+            }
             default   { @() }
         }
     } `

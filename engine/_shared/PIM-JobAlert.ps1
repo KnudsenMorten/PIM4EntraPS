@@ -148,6 +148,46 @@ function Get-PimJobAlertField {
 # ---------------------------------------------------------------------------
 # DISPATCH: raise the alert through whatever sender THIS process has.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# SETTLING (operator 2026-09-26: "dont send false alarms alerts or alerts during a commit where things are not fully rolled
+# out, then it is better to wait until fx all groups are created etc"). A commit is applied over several engine runs --
+# groups first, then memberships, owners and policies -- and an item that fails between them is not a problem yet. For
+# $script:PimAlertSettleMinutes after the last change to the desired state, failure and drift alerts are HELD (logged, not
+# mailed). A failure that is still there after the window is mailed then (it was never sent, so no debounce holds it).
+# A HOLD (a safety breaker waiting for approval) is never delayed: the rollout itself waits for it.
+# ---------------------------------------------------------------------------
+$script:PimAlertSettleMinutes = 45
+
+function Test-PimAlertSettling {
+    # PURE. Is a commit at $LastChangeUtc still rolling out at $NowUtc?
+    param([AllowNull()][object]$LastChangeUtc, [datetime]$NowUtc = [datetime]::UtcNow, [int]$SettleMinutes = $script:PimAlertSettleMinutes)
+    if ($null -eq $LastChangeUtc -or $SettleMinutes -le 0) { return $false }
+    $lc = ([datetime]$LastChangeUtc).ToUniversalTime()
+    $age = ($NowUtc.ToUniversalTime() - $lc).TotalMinutes
+    return ($age -ge 0 -and $age -lt $SettleMinutes)
+}
+
+function Get-PimLastDesiredChangeUtc {
+    <#
+      The last change to the desired state: the newest stored row (pim.Rows.UpdatedUtc), committed queued action
+      (pim.ChangeQueue.CommittedUtc) or committed row deletion (the 'delete-rows' audit event). $null when unknown.
+      Never throws -- an unknown last change never HOLDS an alert (fail open: an alert too many beats a silent failure).
+    #>
+    param([string]$ConnectionString)
+    $cs = $ConnectionString
+    if (-not "$cs".Trim() -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) { try { $cs = Get-PimSqlSettingsConnectionString } catch { $cs = $null } }
+    if (-not "$cs".Trim() -or -not (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue)) { return $null }
+    $sql = @"
+SELECT MAX(t) FROM (
+  SELECT MAX(UpdatedUtc) AS t FROM pim.Rows
+  UNION ALL SELECT MAX(CommittedUtc) FROM pim.ChangeQueue WHERE COL_LENGTH('pim.ChangeQueue','CommittedUtc') IS NOT NULL
+  UNION ALL SELECT MAX(Ts) FROM pim.AuditEvents WHERE Action IN ('delete-rows','queue.commit','delegated.commit')
+) x
+"@
+    try { $v = Invoke-PimSqlScalar -ConnectionString $cs -Sql $sql; if ($v -is [datetime]) { return [datetime]::SpecifyKind($v, 'Utc') } } catch { }
+    return $null
+}
+
 function Invoke-PimJobRunAlert {
     <#
       Called from Write-PimJobRunRecord for every finished run. Returns the sender
@@ -173,6 +213,14 @@ function Invoke-PimJobRunAlert {
     try {
         $d = Get-PimJobFailureAlert -Run $Run
         if (-not $d.fire) { return 'none' }
+        # SETTLING: a failure during a commit's rollout is held, not mailed (a HOLD is never delayed).
+        if ("$(Get-PimJobAlertField -Item $Run -Name 'status')".Trim().ToLowerInvariant() -ne 'held') {
+            $lastChange = Get-PimLastDesiredChangeUtc
+            if (Test-PimAlertSettling -LastChangeUtc $lastChange) {
+                Write-Host ("[alert] '{0}' failed while the commit of {1:u} is still rolling out -- not mailed now; mailed if it still fails after {2} minutes" -f (Get-PimJobAlertField -Item $Run -Name 'name'), $lastChange, $script:PimAlertSettleMinutes) -ForegroundColor DarkYellow
+                return 'settling'
+            }
+        }
 
         # 2026-09-21 (operator: "this email is impossible to read" / "this email needs more details, which policies and
         # what is the change"): the mail body is HTML and tokens go in RAW -- so the plain detail is ENCODED (its
