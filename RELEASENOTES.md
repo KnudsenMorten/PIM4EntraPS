@@ -14,6 +14,15 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.452 — Approvals are used once, and test runs are named as tests in the audit trail
+
+- **An approved policy change set is used once.** When the approved changes were applied by a run that no longer needed
+  the approval (for example because the limits had been raised in the meantime), the approval stayed in place and could
+  later cover a different change set nobody had reviewed. Any run that applies the change set now uses up the approval.
+- **Automated test runs no longer appear under a person's name.** A locally started Manager can be given a label, and every
+  record it writes (audit trail, approvals, queued actions, change history) then says it was that automation, acting as
+  the signed-in account. Permissions are unchanged, and a hosted Manager always records the real signed-in person.
+
 ## v2.4.451 — A managed tenant's first pull no longer reports a failure for something that is only waiting
 
 - **A managed tenant no longer records a failed pull when an item is only waiting.** On the first pull, a new group and

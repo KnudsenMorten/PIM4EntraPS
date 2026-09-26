@@ -6087,6 +6087,21 @@ function Format-PimGraphPolicyMassHoldMessage {
      "the next run applies it. If the plan changes first, the hash changes and the run holds again.")
 }
 
+function Test-PimPolicyApprovalClearDue {
+    <#
+      PURE (BUG-263). Is it time to CLEAR the provider's standing approval, after one planned policy was visited?
+      TRUE once every planned policy of a run that APPLIED (not held) was visited, when the run was approved by the
+      breaker OR an approval record was standing. Measured on ig798 2026-09-26: an approval set at 17:54 was applied at
+      17:55 by a run that was within the thresholds (so decision.approved was FALSE) -- the old rule cleared only on
+      decision.approved, the record stayed, and at 20:20 it silently covered a NEW change set nobody had seen. An applied
+      run applied the whole current change set, which contains whatever was approved: the approval has been used.
+    #>
+    param([object]$Decision, [bool]$ApprovalPresent, [int]$Visited, [int]$Planned, [bool]$AlreadyCleared)
+    if ($AlreadyCleared -or $null -eq $Decision -or $Decision.hold) { return $false }
+    if (-not ([bool]$Decision.approved -or $ApprovalPresent)) { return $false }
+    return ($Visited -ge $Planned)
+}
+
 function Set-PimGraphPolicyBreakerPlan {
     <#
       Called at the end of a Graph policy provider's GetLive: PLAN FIRST -- the whole change set and the
@@ -6096,9 +6111,10 @@ function Set-PimGraphPolicyBreakerPlan {
     if ($null -eq $Context) { return }
     $spec = Get-PimPolicyBreakerSpec -Provider $Provider
     $plan = Get-PimGraphPolicyChangePlan -Desired $Desired -Live $Live -KeyOf $KeyOf -Label $Label
-    $dec = Test-PimPolicyBreaker -Plan $plan -Approval (Get-PimPolicyMassChangeApproval -Provider $spec.Provider) -Provider $spec.Provider
+    $appr = Get-PimPolicyMassChangeApproval -Provider $spec.Provider
+    $dec = Test-PimPolicyBreaker -Plan $plan -Approval $appr -Provider $spec.Provider
     $Context["$($spec.Provider).plan"] = $plan; $Context["$($spec.Provider).breaker"] = $dec
-    $Context["$($spec.Provider).breakerState"] = @{ holdRecorded = $false; visited = @{}; approvalCleared = $false }
+    $Context["$($spec.Provider).breakerState"] = @{ holdRecorded = $false; visited = @{}; approvalCleared = $false; approvalPresent = [bool]$appr }
     $color = if ($dec.hold) { 'Red' } elseif ($dec.approved) { 'Yellow' } else { 'DarkCyan' }
     Write-Host ("    [breaker] {0}: N={1} change(s) of T={2} checked, W={3} weakening, planHash={4} -- {5}{6}" -f `
         $spec.Provider, $plan.changes, $plan.checked, $plan.weakening, $plan.planHash, $(if ($dec.hold) { 'HOLD: ' } elseif ($dec.approved) { 'APPROVED: ' } else { 'apply: ' }), $dec.reason) -ForegroundColor $color
@@ -6170,10 +6186,10 @@ function Invoke-PimGraphPolicyGuardedApply {
     finally {
         if ($pp) {
             $st.visited[$key] = $true
-            if ($dec.approved -and -not $st.approvalCleared -and @($st.visited.Keys).Count -ge @($plan.policies).Count) {
+            if (Test-PimPolicyApprovalClearDue -Decision $dec -ApprovalPresent ([bool]$st['approvalPresent']) -Visited @($st.visited.Keys).Count -Planned @($plan.policies).Count -AlreadyCleared ([bool]$st.approvalCleared)) {
                 $st.approvalCleared = $true
                 if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
-                    try { Set-PimSetting -Name "$($spec.Prefix)MassChangeApproval" -Value ''; Write-Host "    [engine] $($spec.Provider): approved plan $($plan.planHash) applied -- approval cleared" -ForegroundColor Green }
+                    try { Set-PimSetting -Name "$($spec.Prefix)MassChangeApproval" -Value ''; Write-Host "    [engine] $($spec.Provider): plan $($plan.planHash) applied -- the standing approval is used and cleared" -ForegroundColor Green }
                     catch { Write-Warning "  [engine] $($spec.Provider): the approval for plan $($plan.planHash) could NOT be cleared: $($_.Exception.Message)" }
                 }
             }
@@ -6377,10 +6393,10 @@ function Invoke-PimAzResPolicyUpdate {
     finally {
         if ($pp) {
             $st.visited[$key] = $true
-            if ($dec.approved -and -not $st.approvalCleared -and @($st.visited.Keys).Count -ge @($plan.policies).Count) {
+            if (Test-PimPolicyApprovalClearDue -Decision $dec -ApprovalPresent ([bool]$st['approvalPresent']) -Visited @($st.visited.Keys).Count -Planned @($plan.policies).Count -AlreadyCleared ([bool]$st.approvalCleared)) {
                 $st.approvalCleared = $true
                 if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
-                    try { Set-PimSetting -Name 'AzResPolicyMassChangeApproval' -Value ''; Write-Host "    [engine] AzResPolicies: approved plan $($plan.planHash) applied -- approval cleared" -ForegroundColor Green }
+                    try { Set-PimSetting -Name 'AzResPolicyMassChangeApproval' -Value ''; Write-Host "    [engine] AzResPolicies: plan $($plan.planHash) applied -- the standing approval is used and cleared" -ForegroundColor Green }
                     catch { Write-Warning "  [engine] AzResPolicies: the approval for plan $($plan.planHash) could NOT be cleared: $($_.Exception.Message)" }
                 }
             }
@@ -6412,8 +6428,10 @@ function New-PimAzResPoliciesProvider {
             $ctx['azResPolVerdicts'] = $verdicts
             # PLAN FIRST: the whole change set and the breaker decision exist before any ApplyUpdate runs.
             $plan = Get-PimAzResPolicyChangePlan -Desired $desired -Live $live.ToArray() -Verdicts $verdicts
-            $dec = Test-PimAzResPolicyBreaker -Plan $plan -Approval (Get-PimAzResPolicyMassChangeApproval)
+            $appr = Get-PimAzResPolicyMassChangeApproval
+            $dec = Test-PimAzResPolicyBreaker -Plan $plan -Approval $appr
             $ctx['azResPolPlan'] = $plan; $ctx['azResPolBreaker'] = $dec
+            if ($ctx['azResPol']) { $ctx['azResPol']['approvalPresent'] = [bool]$appr }   # BUG-263
             $color = if ($dec.hold) { 'Red' } elseif ($dec.approved) { 'Yellow' } else { 'DarkCyan' }
             Write-Host ("    [breaker] AzResPolicies: N={0} change(s) of T={1} checked, W={2} weakening, planHash={3} -- {4}{5}" -f `
                 $plan.changes, $plan.checked, $plan.weakening, $plan.planHash, $(if ($dec.hold) { 'HOLD: ' } elseif ($dec.approved) { 'APPROVED: ' } else { 'apply: ' }), $dec.reason) -ForegroundColor $color
