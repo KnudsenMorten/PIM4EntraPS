@@ -1,35 +1,42 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    REQ-AR-2 (operator 2026-09-26) -- access reviews PER DEPARTMENT, driven by review RULES in Settings. Job
+    REQ-AR-2 (operator 2026-09-26) -- access reviews PER DEPARTMENT, run BY PIM, driven by review RULES. Job
     'access-review-cycle'.
 
 .DESCRIPTION
-    Operator: "access reviews are never per permission group", "one review per department" (wizard), an undecided member
-    KEEPS access, "it must also be configured if one approver or 2 approvers are needed per dept. parallel or serial",
-    "implement access reviews in my internal env to run every 3 days as a test for all departments".
+    Operator: "access reviews are never per permission group"; one review per DEPARTMENT -- the reviewers confirm every admin
+    account of the department and the access each holds (wizard); an undecided person KEEPS access; "1 or 2 approvers per
+    dept, parallel or serial"; "if an access review is not responded it goes back and get a weekly reminder 3 times. then it
+    goes to the escalation mail/alert mail"; "a super admin [can] override pending access review and choose what to do";
+    "run every 3 days as a test"; decision 2026-09-26: PIM's OWN review, not Microsoft Entra access reviews.
 
-    What Graph allows (measured on ig798 2026-09-26, tests/live probe): one review covers ONE group (a
-    principalResourceMembershipsScope and a multi-group instanceEnumerationScope are both refused); recurrence is weekly /
-    monthly-based only (daily/3 refused); 2 stages (serial) and 2 reviewers in one stage (parallel) both work. So:
+    WHY NOT ENTRA (measured on ig798 2026-09-26): a review over "these users x these groups" (principalResourceMemberships)
+    and over several groups are REFUSED; a group review filtered to one department's users needs the Entra ID Governance
+    licence ("Tenant is not authorized for Custom Scoping Conditions Feature"); recurrence is weekly at the fastest.
 
-      * A DEPARTMENT CAMPAIGN = one ONE-TIME review per permission group of the department (every group definition row
-        whose Department is that department), all started together and named
-        "PIM4EntraPS review - <department> - <group> - <yyyy-MM-dd>".
-      * PIM runs the CADENCE itself (any number of days, e.g. 3): this job starts a department's campaign when
-        cadenceDays have passed since its last one (pim.Settings 'AccessReviewCycleState').
-      * RULES -- pim.Settings 'AccessReviewRules':
-          { default = { enabled; cadenceDays; durationDays; reviewers = @(UPN...); approvers = 1|2; mode = parallel|serial;
-                        undecided = keep }
-            departments = { '<department>' = { off = $true } | { <any default field, overriding it> } } }
-        A department with off=$true is OPTED OUT. Reviewers empty = the department's owners (PIM-Definitions-Departments).
-      * Undecided = KEEP (defaultDecisionEnabled false; decisions are never auto-applied -- a removal goes through the
-        engine's removal and its offboarding/approval gates).
-    Pro: 'reviews.campaigns'. Only DEFINED groups are ever reviewed (engine touches only defined).
+    MODEL -- pim.Settings:
+      'AccessReviewRules'     { default = { enabled; cadenceDays; durationDays; reviewers[]; approvers 1|2; mode parallel|serial;
+                                            undecided keep; remindEveryDays; reminders }
+                                departments = { '<dept>' = { off } | { <fields overriding the default> } } }
+      'AccessReviewCampaigns' { campaigns = @( { id; department; status open|closed; startedUtc; dueUtc; closedUtc; closeReason;
+                                            approvers; mode; reviewers[]; remindersSent; lastReminderUtc; escalatedUtc;
+                                            items = @( { user; displayName; access[]; decisions = { '<reviewer>' = { decision; utc } };
+                                                         override = { decision; by; utc }; outcome } ) } ) }
+    DECISIONS per person (Keep | Remove):
+      * 1 approver         -- any reviewer's decision stands.
+      * 2 approvers PARALLEL -- both decide (either order); both Keep = keep, any Remove = remove.
+      * 2 approvers SERIAL   -- reviewer 1 decides first, then reviewer 2 (who sees reviewer 1's decision); reviewer 2 decides.
+      * a SuperAdmin OVERRIDE decides the item outright.
+    LIFECYCLE: a department's campaign starts when its rule is due (cadenceDays since the last START) and no campaign of it
+    is open. It closes when every item is decided; when it is past dueUtc with items open, the reviewers get a reminder every
+    remindEveryDays (up to 'reminders' times), then the alert recipients get the ESCALATION and the campaign closes --
+    undecided = KEEP. A Remove outcome raises the offboard approval request (a PIM administrator approves; the engine
+    executes) -- never a direct removal.
 #>
 Set-StrictMode -Off
 
-$script:PimAccessReviewRuleDefaults = [ordered]@{ enabled = $false; cadenceDays = 90; durationDays = 14; reviewers = @(); approvers = 1; mode = 'parallel'; undecided = 'keep' }
+$script:PimAccessReviewRuleDefaults = [ordered]@{ enabled = $false; cadenceDays = 90; durationDays = 14; reviewers = @(); approvers = 1; mode = 'parallel'; undecided = 'keep'; remindEveryDays = 7; reminders = 3 }
 
 function Get-PimArField { param($O, [string]$N) if ($null -eq $O) { return $null }; if ($O -is [System.Collections.IDictionary]) { if ($O.Contains($N)) { return $O[$N] } else { return $null } }; $p = $O.PSObject.Properties[$N]; if ($p) { return $p.Value }; return $null }
 
@@ -48,6 +55,8 @@ function ConvertTo-PimAccessReviewRule {
     $r.approvers = [int]"$($r.approvers)"; if ($r.approvers -notin 1, 2) { throw "access review rule: approvers must be 1 or 2 (got $($r.approvers))" }
     $r.mode = "$($r.mode)".Trim().ToLowerInvariant(); if ($r.mode -notin 'parallel', 'serial') { throw "access review rule: mode must be parallel or serial (got '$($r.mode)')" }
     $r.undecided = "$($r.undecided)".Trim().ToLowerInvariant(); if ($r.undecided -ne 'keep') { throw "access review rule: undecided must be 'keep' (removal after a missed review is not built yet; got '$($r.undecided)')" }
+    $r.remindEveryDays = [int]"$($r.remindEveryDays)"; if ($r.remindEveryDays -lt 1 -or $r.remindEveryDays -gt 90) { throw "access review rule: remindEveryDays must be 1..90 (got $($r.remindEveryDays))" }
+    $r.reminders = [int]"$($r.reminders)"; if ($r.reminders -lt 0 -or $r.reminders -gt 10) { throw "access review rule: reminders must be 0..10 (got $($r.reminders))" }
     return [pscustomobject]$r
 }
 
@@ -67,71 +76,11 @@ function Resolve-PimDepartmentReviewRule {
     return $rule
 }
 
-function Get-PimAccessReviewCyclePlan {
-    <#
-      PURE. Which department campaigns are DUE now. -Groups: @{ GroupName; Department } (the defined permission groups);
-      -Departments: @{ Department; Owners } rows; -State: @{ '<dept lower>' = @{ lastStartedUtc } }.
-      Returns @{ due = @({ department; rule; groups; reviewers }); skipped = @({ department; reason }) }.
-    #>
-    param($Rules, [object[]]$Groups = @(), [object[]]$Departments = @(), $State, [datetime]$NowUtc = [datetime]::UtcNow)
-    $byDept = [ordered]@{}
-    foreach ($g in @($Groups)) { $d = "$(Get-PimArField $g 'Department')".Trim(); $n = "$(Get-PimArField $g 'GroupName')".Trim(); if ($d -and $n) { if (-not $byDept.Contains($d)) { $byDept[$d] = New-Object System.Collections.Generic.List[string] }; if (-not $byDept[$d].Contains($n)) { $byDept[$d].Add($n) } } }
-    $owners = @{}; foreach ($r in @($Departments)) { $d = "$(Get-PimArField $r 'Department')".Trim(); if ($d) { $owners[$d.ToLowerInvariant()] = @("$(Get-PimArField $r 'Owners')" -split '[,;\s]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } }
-    $due = New-Object System.Collections.Generic.List[object]; $skipped = New-Object System.Collections.Generic.List[object]
-    foreach ($d in @($byDept.Keys)) {
-        $rule = $null
-        try { $rule = Resolve-PimDepartmentReviewRule -Rules $Rules -Department $d } catch { $skipped.Add([pscustomobject]@{ department = $d; reason = "rule invalid: $($_.Exception.Message)" }); continue }
-        if (-not $rule) { $skipped.Add([pscustomobject]@{ department = $d; reason = 'off (opted out, or reviews not enabled)' }); continue }
-        $st = Get-PimArField $State $d.ToLowerInvariant()
-        $last = $null; $lr = Get-PimArField $st 'lastStartedUtc'
-        if ($lr) { try { $last = if ($lr -is [datetime]) { ([datetime]$lr).ToUniversalTime() } else { [datetime]::Parse("$lr", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') } } catch { $last = $null } }
-        if ($last -and ($NowUtc.ToUniversalTime() - $last).TotalDays -lt $rule.cadenceDays) { $skipped.Add([pscustomobject]@{ department = $d; reason = ("not due (last started {0:u}, every {1} day(s))" -f $last, $rule.cadenceDays) }); continue }
-        $rev = @(@(if (@($rule.reviewers).Count) { $rule.reviewers } else { $owners[$d.ToLowerInvariant()] }) | Where-Object { "$_".Trim() })   # a missing owner row is $null -- never a reviewer
-        if (-not $rev.Count) { $skipped.Add([pscustomobject]@{ department = $d; reason = 'no reviewer: the rule names none and the department has no owner' }); continue }
-        if ($rule.approvers -eq 2 -and $rev.Count -lt 2) { $skipped.Add([pscustomobject]@{ department = $d; reason = 'the rule needs 2 approvers and names 1' }); continue }
-        $due.Add([pscustomobject]@{ department = $d; rule = $rule; groups = @($byDept[$d].ToArray()); reviewers = @($rev) })
-    }
-    return [pscustomobject]@{ due = @($due.ToArray()); skipped = @($skipped.ToArray()) }
-}
-
-function New-PimAccessReviewCycleBody {
-    <#
-      PURE. The ONE-TIME review of one group in a department campaign. -ReviewerIds: user object ids in rule order.
-      approvers 1 -> one stage, the first reviewer(s); 2 + parallel -> one stage, both reviewers (Graph: the first decision
-      counts); 2 + serial -> two stages, approver 1 then approver 2 (stage 2 sees stage 1's decisions).
-    #>
-    param([Parameter(Mandatory)][string]$Department, [Parameter(Mandatory)][string]$GroupName, [Parameter(Mandatory)][string]$GroupId,
-          [Parameter(Mandatory)]$Rule, [Parameter(Mandatory)][string[]]$ReviewerIds, [datetime]$NowUtc = [datetime]::UtcNow)
-    $q = { param($id) @{ query = "/users/$id"; queryType = 'MicrosoftGraph' } }
-    $day = $NowUtc.ToUniversalTime().ToString('yyyy-MM-dd')
-    $body = [ordered]@{
-        displayName          = "PIM4EntraPS review - $Department - $GroupName - $day"
-        descriptionForAdmins = "Department access review ($Department), started by PIM4EntraPS every $($Rule.cadenceDays) day(s). Undecided members keep their access; decisions are not applied automatically."
-        descriptionForReviewers = "Review who still needs membership of $GroupName ($Department)."
-        scope                = @{ '@odata.type' = '#microsoft.graph.accessReviewQueryScope'; query = "/groups/$GroupId/transitiveMembers"; queryType = 'MicrosoftGraph' }
-    }
-    $settings = [ordered]@{ mailNotificationsEnabled = $true; reminderNotificationsEnabled = $true; justificationRequiredOnApproval = $true; recommendationsEnabled = $true
-        defaultDecisionEnabled = $false; defaultDecision = 'None'; autoApplyDecisionsEnabled = $false; instanceDurationInDays = [int]$Rule.durationDays
-        recurrence = @{ pattern = @{ type = 'weekly'; interval = 1 }; range = @{ type = 'numbered'; numberOfOccurrences = 1; startDate = $day } } }
-    $ids = @($ReviewerIds)
-    if ($Rule.approvers -eq 2 -and $Rule.mode -eq 'serial') {
-        $half = [math]::Max(1, [math]::Floor([int]$Rule.durationDays / 2))
-        $body['stageSettings'] = @(
-            @{ stageId = '1'; durationInDays = $half; recommendationsEnabled = $true; decisionsThatWillMoveToNextStage = @('NotReviewed', 'Approve'); reviewers = @(& $q $ids[0]) },
-            @{ stageId = '2'; dependsOn = @('1'); durationInDays = [math]::Max(1, [int]$Rule.durationDays - $half); recommendationsEnabled = $true; reviewers = @(& $q $ids[1]) })
-    } else {
-        $who = if ($Rule.approvers -eq 2) { @($ids | Select-Object -First 2) } else { $ids }
-        $body['reviewers'] = @($who | ForEach-Object { & $q $_ })
-    }
-    $body['settings'] = $settings
-    return $body
-}
-
 function Get-PimDepartmentsWithoutOwner {
     <#
       PURE (operator 2026-09-26: "a dept with no owners must escalate to alert mail" / "there must be a daily mail if a dept
-      has min not 1 owner"). Every department -- a PIM-Definitions-Departments row, or a department a group names -- with NO
-      owner. Returns the names, sorted.
+      has min not 1 owner"). Every department -- a PIM-Definitions-Departments row, or a department an admin or a group names --
+      with NO owner. Returns the names, sorted.
     #>
     param([object[]]$Departments = @(), [object[]]$Groups = @())
     $own = @{}
@@ -140,20 +89,130 @@ function Get-PimDepartmentsWithoutOwner {
     return @($own.Values | Where-Object { $_.n -lt 1 } | ForEach-Object { $_.name } | Sort-Object)
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# campaigns (PURE)
+# ---------------------------------------------------------------------------------------------------------------------
+function ConvertTo-PimUtcDate { param($V) if ($null -eq $V -or "$V" -eq '') { return $null }; if ($V -is [datetime]) { return ([datetime]$V).ToUniversalTime() }; try { return [datetime]::Parse("$V", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') } catch { return $null } }
+
+function Get-PimDepartmentReviewPeople {
+    <#
+      PURE. The people of one department: every admin definition row (Account-Definitions-Admins) whose Department is it,
+      each with the access it holds (PIM-Assignments-Admins GroupTag + type). @{ user; displayName; access[] }.
+    #>
+    param([Parameter(Mandatory)][string]$Department, [object[]]$Admins = @(), [object[]]$Assignments = @())
+    $acc = @{}
+    foreach ($a in @($Assignments)) {
+        $u = "$(Get-PimArField $a 'Username')".Trim().ToLowerInvariant(); $gt = "$(Get-PimArField $a 'GroupTag')".Trim()
+        if ($u -and $gt -and "$(Get-PimArField $a 'Action')" -notmatch '(?i)^remove') { if (-not $acc.ContainsKey($u)) { $acc[$u] = New-Object System.Collections.Generic.List[string] }; $t = "$(Get-PimArField $a 'AssignmentType')".Trim(); $acc[$u].Add($(if ($t) { "$gt ($t)" } else { $gt })) }
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Admins)) {
+        if ("$(Get-PimArField $r 'Department')".Trim().ToLowerInvariant() -ne $Department.Trim().ToLowerInvariant()) { continue }
+        $u = "$(Get-PimArField $r 'UserName')".Trim(); if (-not $u) { $u = "$(Get-PimArField $r 'Username')".Trim() }; if (-not $u) { continue }
+        $dn = "$(Get-PimArField $r 'DisplayName')".Trim(); if (-not $dn) { $dn = ("$(Get-PimArField $r 'FirstName') $(Get-PimArField $r 'LastName')").Trim() }
+        $k = $u.ToLowerInvariant()
+        $out.Add([pscustomobject]@{ user = $u; displayName = $dn; access = @(if ($acc.ContainsKey($k)) { $acc[$k].ToArray() }) })
+    }
+    return @($out.ToArray() | Sort-Object user)
+}
+
+function New-PimReviewCampaign {
+    <# PURE. A new OPEN campaign for one department. #>
+    param([Parameter(Mandatory)][string]$Department, [Parameter(Mandatory)]$Rule, [Parameter(Mandatory)][string[]]$Reviewers, [object[]]$People = @(), [datetime]$NowUtc = [datetime]::UtcNow)
+    $now = $NowUtc.ToUniversalTime()
+    return [pscustomobject]@{
+        id = "{0}-{1}" -f ($Department -replace '[^A-Za-z0-9]', '').ToLowerInvariant(), $now.ToString('yyyyMMddHHmm'); department = $Department; status = 'open'
+        startedUtc = $now.ToString('o'); dueUtc = $now.AddDays([int]$Rule.durationDays).ToString('o'); closedUtc = ''; closeReason = ''
+        approvers = [int]$Rule.approvers; mode = "$($Rule.mode)"; reviewers = @($Reviewers | Select-Object -First $(if ([int]$Rule.approvers -eq 2) { 2 } else { 20 }))
+        remindEveryDays = [int]$Rule.remindEveryDays; reminders = [int]$Rule.reminders; remindersSent = 0; lastReminderUtc = ''; escalatedUtc = ''
+        items = @($People | ForEach-Object { [pscustomobject]@{ user = "$($_.user)"; displayName = "$($_.displayName)"; access = @($_.access); decisions = [pscustomobject]@{}; override = $null; outcome = '' } })
+    }
+}
+
+function Get-PimReviewItemState {
+    <#
+      PURE. One person's state in a campaign: @{ state = pending | keep | remove; awaiting = @(reviewers still to decide) }.
+    #>
+    param([Parameter(Mandatory)]$Campaign, [Parameter(Mandatory)]$Item)
+    $ov = Get-PimArField $Item 'override'
+    if ($ov -and "$(Get-PimArField $ov 'decision')") { return [pscustomobject]@{ state = "$(Get-PimArField $ov 'decision')"; awaiting = @(); by = "override: $(Get-PimArField $ov 'by')" } }
+    $revs = @($Campaign.reviewers); $dec = Get-PimArField $Item 'decisions'
+    $d = @{}; foreach ($r in $revs) { $x = Get-PimArField $dec $r.ToLowerInvariant(); if ($x -and "$(Get-PimArField $x 'decision')") { $d[$r.ToLowerInvariant()] = "$(Get-PimArField $x 'decision')" } }
+    if ([int]$Campaign.approvers -ne 2) {
+        $any = @($revs | Where-Object { $d.ContainsKey($_.ToLowerInvariant()) } | Select-Object -First 1)
+        if ($any.Count) { return [pscustomobject]@{ state = $d[$any[0].ToLowerInvariant()]; awaiting = @(); by = $any[0] } }
+        return [pscustomobject]@{ state = 'pending'; awaiting = @($revs); by = '' }
+    }
+    $r1 = "$($revs[0])".ToLowerInvariant(); $r2 = "$($revs[1])".ToLowerInvariant()
+    if ("$($Campaign.mode)" -eq 'serial') {
+        if (-not $d.ContainsKey($r1)) { return [pscustomobject]@{ state = 'pending'; awaiting = @($revs[0]); by = '' } }
+        if (-not $d.ContainsKey($r2)) { return [pscustomobject]@{ state = 'pending'; awaiting = @($revs[1]); by = '' } }
+        return [pscustomobject]@{ state = $d[$r2]; awaiting = @(); by = $revs[1] }
+    }
+    $miss = @($revs | Where-Object { -not $d.ContainsKey($_.ToLowerInvariant()) })
+    if ($miss.Count) { return [pscustomobject]@{ state = 'pending'; awaiting = $miss; by = '' } }
+    return [pscustomobject]@{ state = $(if (@($d.Values) -contains 'remove') { 'remove' } else { 'keep' }); awaiting = @(); by = ($revs -join ' + ') }
+}
+
+function Set-PimReviewDecision {
+    <#
+      PURE. Record one reviewer's decision (keep | remove) on one person, or a SuperAdmin -Override. Returns
+      @{ ok; reason; campaign }. Refused: a closed campaign, a person not in it, a caller who is not a reviewer, reviewer 2 of a
+      SERIAL campaign before reviewer 1 decided, an item already decided.
+    #>
+    param([Parameter(Mandatory)]$Campaign, [Parameter(Mandatory)][string]$User, [Parameter(Mandatory)][ValidateSet('keep', 'remove')][string]$Decision,
+          [Parameter(Mandatory)][string]$By, [switch]$Override, [datetime]$NowUtc = [datetime]::UtcNow)
+    $no = { param($w) [pscustomobject]@{ ok = $false; reason = $w; campaign = $Campaign } }
+    if ("$($Campaign.status)" -ne 'open') { return (& $no 'this review is closed') }
+    $it = @($Campaign.items | Where-Object { "$($_.user)".ToLowerInvariant() -eq $User.Trim().ToLowerInvariant() })[0]
+    if (-not $it) { return (& $no "$User is not in this review") }
+    $st = Get-PimReviewItemState -Campaign $Campaign -Item $it
+    if ($st.state -ne 'pending') { return (& $no "$User is already decided ($($st.state))") }
+    $stamp = $NowUtc.ToUniversalTime().ToString('o')
+    if ($Override) { $it.override = [pscustomobject]@{ decision = $Decision; by = $By; utc = $stamp }; return [pscustomobject]@{ ok = $true; reason = ''; campaign = $Campaign } }
+    $me = $By.Trim().ToLowerInvariant()
+    if (@($Campaign.reviewers | ForEach-Object { "$_".ToLowerInvariant() }) -notcontains $me) { return (& $no "$By is not a reviewer of this review") }
+    if (@($st.awaiting | ForEach-Object { "$_".ToLowerInvariant() }) -notcontains $me) { return (& $no $(if ("$($Campaign.mode)" -eq 'serial') { "the first approver ($($Campaign.reviewers[0])) decides first" } else { "$By has already decided on $User" })) }
+    $it.decisions | Add-Member -NotePropertyName $me -NotePropertyValue ([pscustomobject]@{ decision = $Decision; utc = $stamp }) -Force
+    return [pscustomobject]@{ ok = $true; reason = ''; campaign = $Campaign }
+}
+
+function Get-PimReviewCampaignStep {
+    <#
+      PURE. What the job does with one OPEN campaign now:
+        'close'    -- every person is decided (outcomes applied)
+        'remind'   -- past due, items open, a reminder is due (every remindEveryDays, up to 'reminders')
+        'escalate' -- past due, the reminders are spent and the last interval has passed: alert mail + close (undecided keep)
+        'wait'     -- nothing to do yet
+    #>
+    param([Parameter(Mandatory)]$Campaign, [datetime]$NowUtc = [datetime]::UtcNow)
+    $pending = @($Campaign.items | Where-Object { (Get-PimReviewItemState -Campaign $Campaign -Item $_).state -eq 'pending' })
+    if (-not $pending.Count) { return 'close' }
+    $now = $NowUtc.ToUniversalTime(); $due = ConvertTo-PimUtcDate $Campaign.dueUtc
+    if (-not $due -or $now -lt $due) { return 'wait' }
+    $every = [math]::Max(1, [int]$Campaign.remindEveryDays); $sent = [int]$Campaign.remindersSent
+    $last = ConvertTo-PimUtcDate $Campaign.lastReminderUtc
+    $next = if ($last) { $last.AddDays($every) } else { $due }
+    if ($now -lt $next) { return 'wait' }
+    if ($sent -lt [int]$Campaign.reminders) { return 'remind' }
+    return 'escalate'
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the job
+# ---------------------------------------------------------------------------------------------------------------------
+function Read-PimArSetting { param([string]$Cs, [string]$Name) $v = Get-PimSqlSetting -ConnectionString $Cs -Name $Name; if ($v -is [string] -and "$v".Trim()) { return ($v | ConvertFrom-Json) }; return $v }
+
 function Invoke-PimAccessReviewCycleJob {
-    <# The job. Reads rules + state + the defined groups from SQL, starts every DUE department campaign. #>
+    <# The job: no-owner escalation, then start what is due, remind / escalate / close what is open. #>
     param([object]$Job, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
     $cs = $null
     if (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) { try { $cs = Get-PimSqlSettingsConnectionString } catch { $cs = $null } }
-    if (-not $cs) { throw '[access-review-cycle] no SQL store -- the review rules and the groups cannot be read' }
-    # Departments WITHOUT an owner escalate to the alert mail, DAILY while it lasts -- before the Pro / rules checks: an
-    # ownerless department has nobody to review it, approve for it or answer for it, reviews on or off.
-    $deptRows0 = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Definitions-Departments' | ForEach-Object { [pscustomobject]@{ Department = "$(if ($_.Department) { $_.Department } else { $_.Name })"; Owners = "$($_.Owners)" } })
-    $groups0 = New-Object System.Collections.Generic.List[object]
-    foreach ($e in @('PIM-Definitions-Roles', 'PIM-Definitions-Tasks', 'PIM-Definitions-Services', 'PIM-Definitions-Processes', 'PIM-Definitions-Organization')) {
-        foreach ($r in @(Get-PimSqlRows -ConnectionString $cs -Entity $e)) { if ("$($r.Department)".Trim()) { $groups0.Add([pscustomobject]@{ Department = "$($r.Department)".Trim() }) } }
-    }
-    $noOwner = @(Get-PimDepartmentsWithoutOwner -Departments $deptRows0 -Groups $groups0.ToArray())
+    if (-not $cs) { throw '[access-review-cycle] no SQL store -- the review rules and the departments cannot be read' }
+    $deptRows = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Definitions-Departments' | ForEach-Object { [pscustomobject]@{ Department = "$(if ($_.Department) { $_.Department } else { $_.Name })".Trim(); Owners = "$($_.Owners)" } } | Where-Object { $_.Department })
+    $admins = @(Get-PimSqlRows -ConnectionString $cs -Entity 'Account-Definitions-Admins')
+    # Departments WITHOUT an owner escalate to the alert mail, DAILY while it lasts -- before the Pro / rules checks.
+    $noOwner = @(Get-PimDepartmentsWithoutOwner -Departments $deptRows -Groups @($admins | ForEach-Object { [pscustomobject]@{ Department = "$($_.Department)" } }))
     $ownerNote = ''
     if ($noOwner.Count) {
         $ownerNote = " | $($noOwner.Count) department(s) WITHOUT an owner: $($noOwner -join ', ')"
@@ -166,45 +225,80 @@ function Invoke-PimAccessReviewCycleJob {
         }
     }
     if ((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and -not (Test-PimFeatureAvailable -Key 'reviews.campaigns' -Quiet)) {
-        return [pscustomobject]@{ ran = $false; skipped = $true; whatIf = [bool]$WhatIf; detail = ('access-review-cycle: access review campaigns are not enabled or not licensed (Pro) -- nothing started' + $ownerNote) }
+        return [pscustomobject]@{ ran = $false; skipped = $true; whatIf = [bool]$WhatIf; detail = ('access-review-cycle: access reviews are not enabled or not licensed (Pro) -- nothing started' + $ownerNote) }
     }
-    $read = { param($n) $v = Get-PimSqlSetting -ConnectionString $cs -Name $n; if ($v -is [string] -and "$v".Trim()) { $v | ConvertFrom-Json } else { $v } }
-    $rules = & $read 'AccessReviewRules'
-    if (-not $rules) { return [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; detail = ('access-review-cycle: no review rules (Access reviews > Review rules) -- nothing started' + $ownerNote) } }
-    $state = & $read 'AccessReviewCycleState'
-    $groups = New-Object System.Collections.Generic.List[object]
-    foreach ($e in @('PIM-Definitions-Roles', 'PIM-Definitions-Tasks', 'PIM-Definitions-Services', 'PIM-Definitions-Processes', 'PIM-Definitions-Organization')) {
-        foreach ($r in @(Get-PimSqlRows -ConnectionString $cs -Entity $e)) { if ("$($r.GroupName)".Trim() -and "$($r.Department)".Trim()) { $groups.Add([pscustomobject]@{ GroupName = "$($r.GroupName)".Trim(); Department = "$($r.Department)".Trim() }) } }
-    }
-    $depts = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Definitions-Departments' | ForEach-Object { [pscustomobject]@{ Department = "$(if ($_.Department) { $_.Department } else { $_.Name })"; Owners = "$($_.Owners)" } })
-    $plan = Get-PimAccessReviewCyclePlan -Rules $rules -Groups $groups.ToArray() -Departments $depts -State $state -NowUtc $NowUtc
-    if ($WhatIf) {
-        return [pscustomobject]@{ ran = $true; whatIf = $true; detail = ("whatif:access-review-cycle -- would start {0} department campaign(s): {1}" -f @($plan.due).Count, (@($plan.due | ForEach-Object { "$($_.department) ($(@($_.groups).Count) group(s))" }) -join ', ')) }
-    }
-    $newState = @{}; if ($state) { foreach ($p in $state.PSObject.Properties) { $newState[$p.Name] = $p.Value } }
-    $started = 0; $errors = New-Object System.Collections.Generic.List[string]; $done = New-Object System.Collections.Generic.List[string]
-    $userCache = @{}
-    foreach ($c in @($plan.due)) {
-        $ids = New-Object System.Collections.Generic.List[string]
-        foreach ($u in @($c.reviewers)) {
-            $k = $u.ToLowerInvariant()
-            if (-not $userCache.ContainsKey($k)) { try { $userCache[$k] = "$((Invoke-PimGraph -Path "/users/$([uri]::EscapeDataString($u))?`$select=id").id)" } catch { $userCache[$k] = '' } }
-            if ($userCache[$k]) { $ids.Add($userCache[$k]) } else { $errors.Add("$($c.department): reviewer '$u' is not a user in this tenant") }
+    $rules = Read-PimArSetting $cs 'AccessReviewRules'
+    # CAS: the Manager records decisions into the same document -- read the RAW text, write only if it is unchanged.
+    $rawCamp = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'AccessReviewCampaigns'
+    $store = if ("$rawCamp".Trim()) { $rawCamp | ConvertFrom-Json } else { $null }
+    $campaigns = New-Object System.Collections.Generic.List[object]; foreach ($c in @(Get-PimArField $store 'campaigns')) { if ($c) { $campaigns.Add($c) } }
+    $assign = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Assignments-Admins')
+    $owners = @{}; foreach ($r in $deptRows) { $owners[$r.Department.ToLowerInvariant()] = @("$($r.Owners)" -split '[,;\s]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    $log = New-Object System.Collections.Generic.List[string]; $errors = New-Object System.Collections.Generic.List[string]; $changed = $false
+    $portal = "$(if (Get-Command Resolve-PimManagerMailUrl -ErrorAction SilentlyContinue) { try { Resolve-PimManagerMailUrl } catch { '' } })"
+    $mail = { param($to, $title, $body)
+        if ($WhatIf -or -not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { return }
+        $tok = @{ AlertTitle = $title; AlertEvent = 'owner-review'; AlertDetail = $body; PortalTab = 'owner'; TenantName = "$($global:PIM_TenantName)"; Instance = 'scheduler'; WhenUtc = $NowUtc.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
+        try { [void](Send-PimNotifyMail -Type 'alert-notice' -Tokens $tok -Recipient $to) } catch { $errors.Add("mail to $to failed: $($_.Exception.Message)") } }
+    $enc = { param($x) [System.Net.WebUtility]::HtmlEncode("$x") }
+    # 1. OPEN campaigns: close / remind / escalate
+    foreach ($c in @($campaigns | Where-Object { "$($_.status)" -eq 'open' })) {
+        $step = Get-PimReviewCampaignStep -Campaign $c -NowUtc $NowUtc
+        if ($step -eq 'wait') { continue }
+        $pendingItems = @($c.items | Where-Object { (Get-PimReviewItemState -Campaign $c -Item $_).state -eq 'pending' })
+        if ($step -eq 'remind') {
+            $to = @($pendingItems | ForEach-Object { (Get-PimReviewItemState -Campaign $c -Item $_).awaiting } | Select-Object -Unique)
+            foreach ($r in $to) { & $mail $r ("Reminder {0} of {1}: please review access in {2}" -f ([int]$c.remindersSent + 1), $c.reminders, $c.department) ("The access review of <b>$(& $enc $c.department)</b> is overdue: $($pendingItems.Count) person(s) still wait for your decision. Open My people and decide Keep or Remove for each.") }
+            if (-not $WhatIf) { $c.remindersSent = [int]$c.remindersSent + 1; $c.lastReminderUtc = $NowUtc.ToUniversalTime().ToString('o'); $changed = $true }
+            $log.Add("$($c.department): reminder $($c.remindersSent) sent to $($to -join ', ')"); continue
         }
-        if (-not $ids.Count -or ($c.rule.approvers -eq 2 -and $ids.Count -lt 2)) { $errors.Add("$($c.department): not started -- its reviewer(s) could not be resolved"); continue }
-        $n = 0
-        foreach ($gn in @($c.groups)) {
-            $esc = $gn.Replace("'", "''")
-            $gid = "$(@((Invoke-PimGraph -Path "/groups?`$filter=displayName eq '$esc'&`$select=id").value)[0].id)"
-            if (-not $gid) { $errors.Add("$($c.department): group '$gn' not found in the tenant"); continue }
-            $body = New-PimAccessReviewCycleBody -Department $c.department -GroupName $gn -GroupId $gid -Rule $c.rule -ReviewerIds $ids.ToArray() -NowUtc $NowUtc
-            try { [void](Invoke-PimGraph -Beta -Method POST -Path '/identityGovernance/accessReviews/definitions' -Body $body); $n++ }
-            catch { $errors.Add("$($c.department): the review of '$gn' could not be created: $($_.ErrorDetails.Message) $($_.Exception.Message)") }
+        if ($step -eq 'escalate') {
+            if (-not $WhatIf -and (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue)) {
+                $lines = @($pendingItems | ForEach-Object { '&bull; <b>' + (& $enc $_.user) + '</b> -- waiting for ' + (& $enc (@((Get-PimReviewItemState -Campaign $c -Item $_).awaiting) -join ', ')) })
+                try { [void](Send-PimJobAlertViaNotify -Event 'coverage' -Title ("Access review of {0} not answered ({1} person(s))" -f $c.department, $pendingItems.Count) -Detail ("The reviewers did not answer after $($c.reminders) reminder(s). Undecided people KEEP their access; a SuperAdmin can still decide on the Access reviews page.<br><br>" + ($lines -join '<br>')) -LinkTab 'accessreview' -DebounceMinutes 0 `
+                                -Headline 'An access review was not answered.' -Action 'Open Access reviews: decide the open people yourself, or follow up with the reviewers.') } catch { $errors.Add("$($c.department): the escalation could not be sent: $($_.Exception.Message)") }
+            }
+            if (-not $WhatIf) { $c.escalatedUtc = $NowUtc.ToUniversalTime().ToString('o'); $step = 'close'; $c.closeReason = 'escalated: undecided people keep their access' }
+            $log.Add("$($c.department): escalated to the alert mail ($($pendingItems.Count) undecided -> keep)")
         }
-        if ($n) { $started += $n; $done.Add("$($c.department) ($n)"); $newState[$c.department.ToLowerInvariant()] = [ordered]@{ lastStartedUtc = $NowUtc.ToUniversalTime().ToString('o'); reviews = $n } }
+        if ($step -eq 'close' -and -not $WhatIf) {
+            foreach ($it in @($c.items)) {
+                $s = Get-PimReviewItemState -Campaign $c -Item $it
+                $it.outcome = $(if ($s.state -eq 'pending') { 'keep (undecided)' } else { $s.state })
+                # a Remove outcome already raised its offboard approval request when it was decided (the Manager, like My people)
+
+            }
+            $c.status = 'closed'; $c.closedUtc = $NowUtc.ToUniversalTime().ToString('o'); if (-not $c.closeReason) { $c.closeReason = 'every person decided' }; $changed = $true
+            $log.Add("$($c.department): closed -- $(@($c.items | Where-Object { $_.outcome -eq 'remove' }).Count) removal request(s)")
+        }
     }
-    if ($done.Count) { Set-PimSqlSetting -ConnectionString $cs -Name 'AccessReviewCycleState' -Value ([pscustomobject]$newState | ConvertTo-Json -Depth 5) }
-    $detail = "access-review-cycle: started $started review(s) in $($done.Count) department campaign(s)$(if ($done.Count) { ': ' + ($done -join ', ') })$ownerNote"
-    if ($errors.Count) { throw ("[access-review-cycle] " + $detail + ' -- ' + ($errors -join '; ')) }
-    return [pscustomobject]@{ ran = $true; whatIf = $false; detail = $detail }
+    # 2. START what is due (one open campaign per department at a time)
+    $depts = @($deptRows | ForEach-Object { $_.Department }) + @($admins | ForEach-Object { "$($_.Department)".Trim() } | Where-Object { $_ })
+    foreach ($d in @($depts | Sort-Object -Unique)) {
+        $rule = $null
+        try { $rule = Resolve-PimDepartmentReviewRule -Rules $rules -Department $d } catch { $errors.Add("$($d): rule invalid: $($_.Exception.Message)"); continue }
+        if (-not $rule) { continue }
+        $mine = @($campaigns | Where-Object { "$($_.department)".ToLowerInvariant() -eq $d.ToLowerInvariant() })
+        if (@($mine | Where-Object { "$($_.status)" -eq 'open' }).Count) { continue }
+        $last = @($mine | ForEach-Object { ConvertTo-PimUtcDate $_.startedUtc } | Sort-Object -Descending | Select-Object -First 1)
+        if ($last.Count -and ($NowUtc.ToUniversalTime() - $last[0]).TotalDays -lt $rule.cadenceDays) { continue }
+        $rev = @(@(if (@($rule.reviewers).Count) { $rule.reviewers } else { $owners[$d.ToLowerInvariant()] }) | Where-Object { "$_".Trim() })
+        if (-not $rev.Count) { $log.Add("$($d): not started -- no reviewer (the rule names none and the department has no owner)"); continue }
+        if ($rule.approvers -eq 2 -and $rev.Count -lt 2) { $log.Add("$($d): not started -- the rule needs 2 approvers and names 1"); continue }
+        $people = @(Get-PimDepartmentReviewPeople -Department $d -Admins $admins -Assignments $assign)
+        if (-not $people.Count) { continue }
+        $c = New-PimReviewCampaign -Department $d -Rule $rule -Reviewers $rev -People $people -NowUtc $NowUtc
+        if (-not $WhatIf) { $campaigns.Add($c); $changed = $true }
+        foreach ($r in @($c.reviewers)) { & $mail $r ("Please review access in {0} ({1} person(s))" -f $d, $people.Count) ("You review the privileged access of <b>$(& $enc $d)</b>. For each person open My people and choose <b>Keep</b> if they still need it or <b>Remove</b> if not, by $(([datetime](ConvertTo-PimUtcDate $c.dueUtc)).ToString('yyyy-MM-dd')). $(if ($c.approvers -eq 2) { "Two approvers review ($($c.mode))." })$(if ($portal) { "<br><br>$(& $enc $portal)" })") }
+        $log.Add("$($d): started ($($people.Count) person(s), reviewers $($c.reviewers -join ', '))")
+    }
+    if ($changed) {
+        # keep the last 200 campaigns (closed ones age out first)
+        $keep = @($campaigns | Sort-Object @{ Expression = { "$($_.status)" -eq 'open' }; Descending = $true }, @{ Expression = { "$($_.startedUtc)" }; Descending = $true } | Select-Object -First 200)
+        $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cs -Name 'AccessReviewCampaigns' -NewValueJson ([pscustomobject]@{ campaigns = @($keep) } | ConvertTo-Json -Depth 12 -Compress) -ExpectedValueJson $rawCamp
+        if ([int]$n -lt 1) { $log.Clear(); $log.Add('a reviewer decided while this run worked -- nothing written; the next run repeats it') }
+    }
+    $detail = "access-review-cycle: " + $(if ($log.Count) { $log -join '; ' } else { 'nothing due' }) + $ownerNote
+    if ($errors.Count) { throw ("[access-review-cycle] $detail -- " + ($errors -join '; ')) }
+    return [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; detail = $(if ($WhatIf) { "whatif:$detail" } else { $detail }) }
 }

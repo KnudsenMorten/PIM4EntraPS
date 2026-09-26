@@ -14,6 +14,22 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.448 — Department access reviews run in PIM
+
+- **A department's review now covers its people, not a list of groups.** Each round lists every admin account of the
+  department with the access it holds. The reviewers decide **Keep** or **Remove** for each person on **My people**,
+  which also works for reviewers who have no other role in the Manager.
+- **With two approvers,** parallel means both decide and any Remove wins; serial means approver 1 decides first and
+  approver 2 has the final word, seeing approver 1's decision.
+- **A review nobody answers is chased.** After the due date the reviewers get a reminder every week, three times, then the
+  alert recipients are told and the round closes. Undecided people keep their access.
+- **A senior administrator can decide any open person** on the Access reviews page (Override: keep / remove), and every
+  decision is recorded in the audit trail.
+- **Remove never removes anything directly.** It raises the same removal request as My people, which a PIM administrator
+  approves.
+- Why the change: Microsoft Entra access reviews cannot review a department's people across several groups without the
+  Entra ID Governance licence, and cannot repeat more often than weekly.
+
 ## v2.4.447 — Access reviews per department
 
 - **Access reviews now run per department, from review rules.** On the Access reviews page, **Review rules** sets a

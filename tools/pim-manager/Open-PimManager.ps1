@@ -11969,6 +11969,75 @@ function Handle-Request {
         # cache/<instance>/discovery-baseline.json. Acknowledge = snapshot
         # the current state as the new baseline.
         # -------------------------------------------------------------------
+        if ($path -eq '/api/access-review-campaigns' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            # REQ-AR-2: a REVIEWER sees the open campaigns they review; an Admin sees every campaign (open + the last closed);
+            # a SuperAdmin may also OVERRIDE. Every person carries its state and whom it waits for.
+            $role = Get-PimManagerRole
+            if ("$($role.role)" -eq 'None') { Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'sign in first' }; return 401 }
+            $me = "$($role.identity)".Trim().ToLowerInvariant()
+            $isAdmin = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin'); $isSuper = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+            $cs = Get-PimManagerStoreCs
+            if (-not $cs) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is wired in this host' }; return 503 }
+            $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'AccessReviewCampaigns'
+            $doc = if ("$raw".Trim()) { $raw | ConvertFrom-Json } else { $null }
+            $out = New-Object System.Collections.Generic.List[object]
+            foreach ($c in @($doc.campaigns)) {
+                if (-not $c) { continue }
+                $amReviewer = @($c.reviewers | ForEach-Object { "$_".ToLowerInvariant() }) -contains $me
+                if (-not $isAdmin -and -not ($amReviewer -and "$($c.status)" -eq 'open')) { continue }
+                $items = @($c.items | ForEach-Object { $s = Get-PimReviewItemState -Campaign $c -Item $_
+                    [ordered]@{ user = $_.user; displayName = $_.displayName; access = @($_.access); state = $s.state; awaiting = @($s.awaiting); by = $s.by; outcome = $_.outcome
+                                myTurn = [bool](@($s.awaiting | ForEach-Object { "$_".ToLowerInvariant() }) -contains $me) } })
+                $out.Add([ordered]@{ id = $c.id; department = $c.department; status = $c.status; startedUtc = $c.startedUtc; dueUtc = $c.dueUtc; closedUtc = $c.closedUtc; closeReason = $c.closeReason
+                    approvers = $c.approvers; mode = $c.mode; reviewers = @($c.reviewers); remindersSent = $c.remindersSent; reminders = $c.reminders; escalatedUtc = $c.escalatedUtc
+                    amReviewer = $amReviewer; items = @($items) })
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ campaigns = @($out.ToArray() | Select-Object -First 60); canOverride = $isSuper; me = $me }
+            return 200
+        }
+
+        if ($path -eq '/api/access-review-campaigns/decide' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            # REQ-AR-2: a reviewer decides Keep / Remove for one person; with override=true a SuperAdmin decides a PENDING person
+            # outright. A person whose outcome becomes REMOVE raises the offboard approval request (the My people path): a PIM
+            # administrator approves it and the engine executes it -- never a direct removal. Audited; CAS on the document.
+            $role = Get-PimManagerRole
+            $me = "$($role.identity)".Trim()
+            $body = Read-RequestJson -Request $req
+            $id = "$($body.id)".Trim(); $user = "$($body.user)".Trim(); $dec = "$($body.decision)".Trim().ToLowerInvariant(); $ovr = [bool]$body.override
+            if (-not $id -or -not $user -or $dec -notin @('keep', 'remove')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'body must be { id, user, decision: keep | remove, override? }' }; return 400 }
+            if ($ovr -and -not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'only a SuperAdmin can override an access review decision' }; return 403 }
+            if ("$($role.role)" -eq 'None' -or -not $me) { Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'sign in first' }; return 401 }
+            $cs = Get-PimManagerStoreCs
+            if (-not $cs) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is wired in this host -- nothing was recorded' }; return 503 }
+            $res = $null; $saved = $false; $state = $null; $camp = $null
+            for ($try = 0; $try -lt 5 -and -not $saved; $try++) {
+                $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'AccessReviewCampaigns'
+                $doc = if ("$raw".Trim()) { $raw | ConvertFrom-Json } else { $null }
+                $camp = @($doc.campaigns | Where-Object { "$($_.id)" -eq $id })[0]
+                if (-not $camp) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "no review '$id'" }; return 404 }
+                $res = Set-PimReviewDecision -Campaign $camp -User $user -Decision $dec -By $me -Override:$ovr
+                if (-not $res.ok) {
+                    Write-PimManagerAuditEvent -Action $(if ($ovr) { 'accessreview.override' } else { 'accessreview.decide' }) -Target "$id/$user" -Result 'denied' -After @{ by = $me; decision = $dec; reason = $res.reason }
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{ error = $res.reason }; return 409
+                }
+                $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cs -Name 'AccessReviewCampaigns' -NewValueJson ($doc | ConvertTo-Json -Depth 12 -Compress) -ExpectedValueJson $raw
+                $saved = ([int]$n -ge 1)
+                if (-not $saved) { Start-Sleep -Milliseconds (40 * ($try + 1)) }
+            }
+            if (-not $saved) { Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'someone else was deciding at the same moment -- please try again.' }; return 409 }
+            $item = @($camp.items | Where-Object { "$($_.user)".ToLowerInvariant() -eq $user.ToLowerInvariant() })[0]
+            $state = Get-PimReviewItemState -Campaign $camp -Item $item
+            $hold = $null
+            if ($state.state -eq 'remove') {
+                $hold = Request-PimManagerOffboardHold -Upn $user -What "Removal decided in the access review of $($camp.department)" -Justification "access review $id ($($state.by))" -Requestor $me -Via 'accessreview.remove'
+            }
+            Write-PimManagerAuditEvent -Action $(if ($ovr) { 'accessreview.override' } else { 'accessreview.decide' }) -Target "$id/$user" -Result 'ok' -After ([ordered]@{ by = $me; decision = $dec; state = $state.state; approvalId = "$(if ($hold) { $hold.approvalId })" })
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; state = $state.state; awaiting = @($state.awaiting)
+                note = $(if ($state.state -eq 'remove') { $(if ($hold -and $hold.approvalRaised) { 'Removal requested: a PIM administrator approves it; until then nothing changes.' } else { "Decided Remove, but the removal request was not raised: $(if ($hold) { $hold.note })" }) } elseif ($state.state -eq 'keep') { 'Kept: they keep their access.' } else { "Recorded -- waiting for $(@($state.awaiting) -join ', ')." }) })
+            return 200
+        }
         if ($path -eq '/api/access-review-rules' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             # REQ-AR-2: the review rules, the departments they apply to, and when each department's last campaign started.
