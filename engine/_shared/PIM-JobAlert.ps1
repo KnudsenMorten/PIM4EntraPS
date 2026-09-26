@@ -166,7 +166,9 @@ function Invoke-PimJobRunAlert {
       NEVER throws.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][object]$Run, [int]$DebounceMinutes = 60)
+    # 2026-09-26: an IDENTICAL failure (same job, same detail) is re-mailed at most once a day while it lasts -- a job on a
+    # 5-minute tick that keeps failing the same way sent one mail an hour. A NEW or DIFFERENT failure still mails at once.
+    param([Parameter(Mandatory)][object]$Run, [int]$DebounceMinutes = 1440)
 
     try {
         $d = Get-PimJobFailureAlert -Run $Run

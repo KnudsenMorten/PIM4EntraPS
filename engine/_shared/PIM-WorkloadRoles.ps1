@@ -276,7 +276,7 @@ function Get-PimDefenderRoleCatalog {
             $acts = New-Object System.Collections.Generic.List[string]
             foreach ($rp in @($r.rolePermissions)) { foreach ($a in @($rp.allowedResourceActions)) { if ("$a".Trim()) { $acts.Add("$a".Trim()) } } }
             $bi = $false; if ($r.PSObject.Properties['isBuiltIn'] -and $null -ne $r.isBuiltIn) { $bi = [bool]$r.isBuiltIn }
-            $roles.Add([pscustomobject]@{ id = $id; name = $n; isBuiltIn = $bi; actions = @($acts.ToArray()) })
+            $roles.Add([pscustomobject]@{ id = $id; name = $n; isBuiltIn = $bi; actions = @($acts.ToArray()); description = "$($r.description)" })
         }
     } catch {
         $msg = "$($_.Exception.Message)"
@@ -418,6 +418,48 @@ function Find-PimDefenderRoleIdByName {
     return ''
 }
 
+if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }   # IMP-02 reader (the create-pending marker)
+$script:PimDefenderManagedRoleDescription = 'Managed by PIM4EntraPS: the custom Defender XDR role of the permission group of the same name.'
+
+function Get-PimDefenderDuplicateRolePlan {
+    <#
+      PURE. Two or more live roles share a name. They are healed ONLY when every one is PIM's OWN custom role (not built-in,
+      PIM's description) and at most ONE carries an assignment: keep that one (or the first when none is assigned), delete
+      the rest. Anything else returns $null and stays DEFENDER-ROLE-AMBIGUOUS -- PIM never deletes a role it did not make or
+      one somebody assigned.
+      Measured 2026-09-26 on RIDE: 2x 'PIM-Defender-XDR-DataOperations-Operator-L3-T1-MP-ID' and 2x '...-Reader-L4-T1-MP-ID',
+      mailed as a drift warning every 4 hours -- the create was redirected, not read back in time, and POSTed again.
+    #>
+    param([Parameter(Mandatory)][object[]]$Hits, [AllowEmptyCollection()][string[]]$AssignedRoleIds = @())
+    $hs = @($Hits | Where-Object { $_ })
+    if ($hs.Count -lt 2) { return $null }
+    foreach ($h in $hs) {
+        if ($h.isBuiltIn) { return $null }
+        if ("$($h.description)".Trim() -ne $script:PimDefenderManagedRoleDescription) { return $null }
+    }
+    $asg = @{}; foreach ($a in @($AssignedRoleIds)) { if ("$a".Trim()) { $asg["$a".Trim().ToLowerInvariant()] = $true } }
+    $assigned = @($hs | Where-Object { $asg.ContainsKey("$($_.id)".ToLowerInvariant()) })
+    if ($assigned.Count -gt 1) { return $null }
+    $keep = if ($assigned.Count -eq 1) { $assigned[0] } else { $hs[0] }
+    return [pscustomobject]@{ keep = "$($keep.id)"; delete = @($hs | Where-Object { "$($_.id)" -ne "$($keep.id)" } | ForEach-Object { "$($_.id)" }) }
+}
+
+function Get-PimDefenderCreatePending {
+    # The names whose create was ANSWERED (redirect) but not yet listed, with when: pim.Settings['DefenderRoleCreatePending'].
+    $h = @{}
+    try { $raw = Get-PimSetting -Name 'DefenderRoleCreatePending'; if ($raw) { $o = if ($raw -is [string]) { $raw | ConvertFrom-Json } else { $raw }; foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = $p.Value } } } catch { }   # the RAW value: pwsh 7 made a [datetime] of the ISO text, and "$dt" loses its UTC kind
+    return $h
+}
+function Set-PimDefenderCreatePending {
+    param([Parameter(Mandatory)][string]$Name, [switch]$Clear)
+    try {
+        $h = Get-PimDefenderCreatePending; $k = $Name.ToLowerInvariant()
+        if ($Clear) { if (-not $h.ContainsKey($k)) { return }; $h.Remove($k) } else { $h[$k] = [datetime]::UtcNow.ToString('o') }
+        foreach ($kk in @($h.Keys)) { if ($h[$kk] -is [datetime]) { $h[$kk] = ([datetime]$h[$kk]).ToUniversalTime().ToString('o') } }
+        Set-PimSetting -Name 'DefenderRoleCreatePending' -Value ([pscustomobject]$h | ConvertTo-Json -Compress)
+    } catch { Write-Warning "DefenderXdrRoles: the create-pending marker for '$Name' could not be saved ($($_.Exception.Message)) -- a slow create may be posted again" }
+}
+
 function Resolve-PimDefenderSpecRole {
     <#
       WRITES. The custom role a spec binding needs, made to match the spec: POST it when no live role has the name,
@@ -429,10 +471,25 @@ function Resolve-PimDefenderSpecRole {
     if (-not $cat.ok) { throw "DefenderXdrRoles: the Defender XDR role catalog could not be read -- the role '$Name' was not created or checked: $($cat.error)" }
     $hits = @(); if ($cat.byName.ContainsKey($Name.ToLowerInvariant())) { $hits = @($cat.byName[$Name.ToLowerInvariant()]) }
     if ($hits.Count -gt 1) {
+        # SELF-HEAL (2026-09-26): duplicates PIM itself made (see Get-PimDefenderDuplicateRolePlan) are reduced to one.
+        $assignedIds = @()
+        try { $assignedIds = @(@(Invoke-PimGraph -Beta -All -Path '/roleManagement/defender/roleAssignments') | ForEach-Object { "$($_.roleDefinitionId)" }) } catch { $assignedIds = $null }
+        $plan = if ($null -ne $assignedIds) { Get-PimDefenderDuplicateRolePlan -Hits $hits -AssignedRoleIds $assignedIds } else { $null }
+        if ($plan) {
+            foreach ($did in @($plan.delete)) {
+                Invoke-PimGraph -Beta -Method DELETE -Path "/roleManagement/defender/roleDefinitions/$did" | Out-Null
+                Write-Host ("    [-] Defender XDR role '{0}': deleted the duplicate {1} PIM created (kept {2})" -f $Name, $did, $plan.keep) -ForegroundColor Yellow
+            }
+            $hits = @($hits | Where-Object { "$($_.id)" -eq $plan.keep })
+            $cat.byName[$Name.ToLowerInvariant()] = @($hits)
+        }
+    }
+    if ($hits.Count -gt 1) {
         throw ("DEFENDER-ROLE-AMBIGUOUS: {0} live Defender XDR roles are named '{1}' (ids {2}) -- PIM will not pick one. Rename or delete the extra role in the Defender portal (Settings > Permissions > Roles), then the next run binds the one that is left." -f $hits.Count, $Name, (@($hits | ForEach-Object { $_.id }) -join ', '))
     }
     if ($hits.Count -eq 1) {
         $role = $hits[0]
+        Set-PimDefenderCreatePending -Name $Name -Clear
         if (-not (Test-PimWorkloadStringSetEqual -A @($role.actions) -B @($Actions))) {
             try { Invoke-PimGraph -Beta -Method PATCH -Path "/roleManagement/defender/roleDefinitions/$($role.id)" -Body @{ rolePermissions = @(@{ allowedResourceActions = @($Actions) }) } | Out-Null }
             catch { throw (Get-PimDefenderRoleWriteErrorText -Name $Name -Actions $Actions -Message "$($_.Exception.Message)$(if ($_.ErrorDetails) { ' ' + $_.ErrorDetails.Message })" -Verb 'update') }
@@ -441,9 +498,19 @@ function Resolve-PimDefenderSpecRole {
         }
         return "$($role.id)"
     }
+    # PREVENT (2026-09-26): a create that was redirected and not yet listed is NOT posted again for 30 minutes -- the second
+    # POST is exactly how RIDE got two roles of one name.
+    $pend = Get-PimDefenderCreatePending
+    $pk = $Name.ToLowerInvariant()
+    if ($pend.ContainsKey($pk)) {
+        $at = $null; try { $at = Get-PimUtcStamp $pend[$pk] } catch { }   # IMP-02: locale- and kind-safe (a culture round trip read a 5-minute-old marker as 2 h old on a UTC+2 host)
+        if ($at -and $at -gt [datetime]::UtcNow.AddMinutes(-30)) {
+            throw "DEFENDER-ROLE-CREATE-PENDING: the custom role '$Name' was created at $($at.ToString('u')) and Defender does not list it yet -- not created again; the next run binds it once it is listed"
+        }
+    }
     $body = @{
         displayName     = $Name
-        description     = 'Managed by PIM4EntraPS: the custom Defender XDR role of the permission group of the same name.'
+        description     = $script:PimDefenderManagedRoleDescription
         rolePermissions = @(@{ allowedResourceActions = @($Actions) })
     }
     $new = $null; $redirected = $false
@@ -462,7 +529,10 @@ function Resolve-PimDefenderSpecRole {
             if ($i) { Start-Sleep -Seconds 3 }
             try { $nid = Find-PimDefenderRoleIdByName -Name $Name } catch { $nid = '' }
         }
-        if (-not $nid) { throw "DefenderXdrRoles: creating the custom role '$Name' was answered with a redirect Graph does not allow to follow, and the role could not be read back by name -- the next run retries" }
+        if (-not $nid) {
+            Set-PimDefenderCreatePending -Name $Name
+            throw "DEFENDER-ROLE-CREATE-PENDING: the custom role '$Name' was created (answered with a redirect) and Defender does not list it yet -- it is not created again; the next run binds it once it is listed"
+        }
     }
     if (-not $nid) { throw "DefenderXdrRoles: creating the custom role '$Name' returned no id" }
     Write-Host ("    [+] Defender XDR role '{0}' created ({1})" -f $Name, (@($Actions) -join '; ')) -ForegroundColor Green

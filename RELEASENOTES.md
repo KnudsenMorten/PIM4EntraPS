@@ -14,6 +14,17 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.445 — Fewer, clearer alert emails
+
+- **The same drift is no longer emailed every few hours.** An unchanged drift report is sent once, then at most once a day
+  as a reminder while it lasts. A change in the drift is sent at once. The same applies to a job that keeps failing in the
+  same way.
+- **Drift reports name what they found.** An Azure assignment that PIM does not manage used to read "group  -> Azure role
+  ''". It now names the account or group and the role.
+- **Duplicate Defender XDR roles are cleaned up.** When Defender answers the creation of a custom role slowly, PIM could
+  create it a second time, and then refused to use either. PIM now waits for a role it has just created, and removes an
+  extra copy it made itself when only one copy is in use. Roles you created, and copies in use, are never removed.
+
 ## v2.4.444 — Setup and engine fixes found by the live tests
 
 - **The notification mailbox step waits out a Microsoft delay.** Right after its permission is granted, Microsoft can

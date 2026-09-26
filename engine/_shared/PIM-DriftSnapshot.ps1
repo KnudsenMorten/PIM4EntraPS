@@ -469,11 +469,15 @@ function Invoke-PimDriftSnapshotJob {
                 '&bull; <b>' + (& $enc $_.scope) + '</b> [' + (& $enc $_.type) + '] ' + (& $enc $_.label) + $(if ($_.detail) { ' &mdash; <i>' + (& $enc $_.detail) + '</i>' } else { '' }) })
             $detail += '<br><br>' + ($lines -join '<br>') + $(if ($all.Count -gt 15) { "<br>... and $($all.Count - 15) more on the Drift page." } else { '' })
         }
+        # 🔴 2026-09-26 (operator: "i also see alerts / errors from emails"): the SAME drift was mailed every 4 hours -- 7
+        # identical mails in 30 h on EFIF, to three people, two of them the customer's staff. The drift job runs every 4 h
+        # and the debounce was the default 60 min, so it never held. Identical drift is now mailed once and then at most
+        # once a day as a reminder; a CHANGE in the drift (the detail differs) is mailed at once.
         try {
             if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
-                [void](Send-PimManagerAlert -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift')
+                [void](Send-PimManagerAlert -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 1440)
             } elseif (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue) {
-                [void](Send-PimJobAlertViaNotify -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift')
+                [void](Send-PimJobAlertViaNotify -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 1440)
             }
         } catch { Write-Warning "[$type] the drift alert could not be raised: $($_.Exception.Message)" }
     }
