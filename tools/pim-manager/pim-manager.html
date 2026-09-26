@@ -1390,6 +1390,7 @@
   <div id="accessreviewTab" class="tab-panel">
     <!-- REQ-Y: the Pro-feature notice (renderMspLicenceBanners) -- hidden unless this Pro feature is unlicensed / in grace. -->
     <div class="pro-lic-banner" data-feature="reviews.campaigns" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
+    <div id="arRulesBody" style="flex:0 0 auto; padding:10px 18px 0; max-height:45vh; overflow:auto;"></div>   <!-- REQ-AR-2: review rules per department -->
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="arBody">
       <div style="color:#57606a; font-size:12px;">Loading access reviews&hellip;</div>
     </div>
@@ -7927,6 +7928,77 @@
     }
 
     drawAccessReviews();
+    try { await renderAccessReviewRules(); } catch (_) { }
+  }
+
+  // ----- REQ-AR-2 (operator 2026-09-26): access reviews PER DEPARTMENT, driven by review rules ----------------------------
+  // A default rule + per department: Default | Off (opt out) | Own rule. A rule: every N days, open N days, reviewers,
+  // 1 or 2 approvers (parallel = both at once, the first decision counts; serial = approver 1, then approver 2), undecided =
+  // keep. The job 'access-review-cycle' starts one review per group of each department whose rule is due.
+  function arRuleFields(pfx, r, disabled) {
+    const esc = escapeHtml, d = disabled ? ' disabled' : '';
+    const v = (k, dflt) => (r && r[k] != null && r[k] !== '') ? r[k] : dflt;
+    return '<label style="margin-right:10px;">every <input id="' + pfx + 'Cad" type="number" min="1" max="3650" style="width:60px;" value="' + esc(String(v('cadenceDays', 90))) + '"' + d + '> day(s)</label>' +
+      '<label style="margin-right:10px;">open <input id="' + pfx + 'Dur" type="number" min="1" max="180" style="width:55px;" value="' + esc(String(v('durationDays', 14))) + '"' + d + '> day(s)</label>' +
+      '<label style="margin-right:10px;">approvers <select id="' + pfx + 'App"' + d + '><option value="1"' + (String(v('approvers', 1)) === '1' ? ' selected' : '') + '>1</option><option value="2"' + (String(v('approvers', 1)) === '2' ? ' selected' : '') + '>2</option></select></label>' +
+      '<label style="margin-right:10px;"><select id="' + pfx + 'Mode"' + d + '><option value="parallel"' + (v('mode', 'parallel') === 'parallel' ? ' selected' : '') + '>parallel</option><option value="serial"' + (v('mode', 'parallel') === 'serial' ? ' selected' : '') + '>serial</option></select></label>' +
+      '<label>reviewers <input id="' + pfx + 'Rev" style="width:320px;" placeholder="UPN, UPN (empty = the department owner)" value="' + esc(asList(v('reviewers', [])).join(', ')) + '"' + d + '></label>';
+  }
+  function arReadRule(pfx) {
+    const g = (id) => document.getElementById(pfx + id);
+    return { cadenceDays: Number(g('Cad').value), durationDays: Number(g('Dur').value), approvers: Number(g('App').value), mode: g('Mode').value,
+             reviewers: String(g('Rev').value || '').split(/[,;\s]+/).map(s => s.trim()).filter(Boolean), undecided: 'keep' };
+  }
+  async function renderAccessReviewRules() {
+    const host = document.getElementById('arRulesBody');
+    if (!host || !isServer) return;
+    const esc = escapeHtml;
+    let d = null;
+    try { d = await api('GET', '/api/access-review-rules'); } catch (e) { host.innerHTML = '<div style="color:#cf222e;font-size:12px;">Review rules could not be read: ' + esc(String((e && e.body && e.body.error) || e.message || e)) + '</div>'; return; }
+    const rules = d.rules || {}, def = rules.default || {}, depts = rules.departments || {}, can = !!d.canEdit, state = d.state || {};
+    const dis = !can;
+    const h = [];
+    h.push('<details id="arRules" open style="border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;margin-bottom:10px;"><summary style="font-weight:600;font-size:13px;cursor:pointer;">Review rules -- one review per department</summary>');
+    h.push('<div style="color:#57606a;font-size:11.5px;margin:4px 0 8px;">Each department is reviewed on its own cadence: every group of the department gets a review for the rule\'s reviewers. ' +
+      'A member nobody decides on <b>keeps</b> their access. <b>Parallel</b> = both approvers at once (the first decision counts); <b>serial</b> = approver 1, then approver 2.</div>');
+    h.push('<div style="font-size:12px;margin-bottom:6px;"><label style="margin-right:12px;"><input type="checkbox" id="arDefOn"' + (def.enabled ? ' checked' : '') + (dis ? ' disabled' : '') + '> <b>Access reviews on</b></label> Default rule: ' + arRuleFields('arDef', def, dis) + '</div>');
+    h.push('<table class="grid" style="font-size:12px;width:100%;"><thead><tr><th>Department</th><th>Rule</th><th>Own rule</th><th>Last started</th></tr></thead><tbody>');
+    for (const name of asList(d.departments)) {
+      const key = Object.keys(depts).find(k => k.toLowerCase() === name.toLowerCase());
+      const ov = key ? depts[key] : null;
+      const mode = ov ? (ov.off ? 'off' : 'own') : 'default';
+      const id = 'arD_' + name.replace(/[^A-Za-z0-9]/g, '_');
+      const st = state[name.toLowerCase()] || null;
+      h.push('<tr data-dept="' + esc(name) + '" data-id="' + id + '"><td><b>' + esc(name) + '</b></td>' +
+        '<td><select class="arDeptMode" data-id="' + id + '"' + (dis ? ' disabled' : '') + '><option value="default"' + (mode === 'default' ? ' selected' : '') + '>Default rule</option><option value="off"' + (mode === 'off' ? ' selected' : '') + '>Off (opt out)</option><option value="own"' + (mode === 'own' ? ' selected' : '') + '>Own rule</option></select></td>' +
+        '<td class="arOwn" data-id="' + id + '" style="' + (mode === 'own' ? '' : 'opacity:.35;') + '">' + arRuleFields(id, mode === 'own' ? Object.assign({}, def, ov) : def, dis || mode !== 'own') + '</td>' +
+        '<td>' + (st && st.lastStartedUtc ? esc(String(st.lastStartedUtc).substring(0, 16).replace('T', ' ')) + ' UTC (' + esc(String(st.reviews || '')) + ')' : '<span style="color:#57606a;">never</span>') + '</td></tr>');
+    }
+    if (!asList(d.departments).length) h.push('<tr><td colspan="4" style="color:#57606a;">No departments defined yet (Departments page).</td></tr>');
+    h.push('</tbody></table>');
+    if (can) h.push('<div style="margin-top:8px;"><button id="arRulesSave" class="primary">Save review rules</button> <span id="arRulesMsg" style="font-size:11.5px;color:#57606a;"></span></div>');
+    else h.push('<div style="color:#57606a;font-size:11.5px;margin-top:6px;">Changing the rules needs the SuperAdmin role.</div>');
+    h.push('</details>');
+    host.innerHTML = h.join('');
+    host.querySelectorAll('.arDeptMode').forEach(s => s.onchange = () => {
+      const cell = host.querySelector('.arOwn[data-id="' + s.getAttribute('data-id') + '"]');
+      const own = s.value === 'own';
+      if (cell) { cell.style.opacity = own ? '' : '.35'; cell.querySelectorAll('input,select').forEach(x => { x.disabled = !own; }); }
+    });
+    const save = document.getElementById('arRulesSave');
+    if (save) save.onclick = async () => {
+      const msg = document.getElementById('arRulesMsg');
+      const out = { default: Object.assign(arReadRule('arDef'), { enabled: !!document.getElementById('arDefOn').checked }), departments: {} };
+      host.querySelectorAll('tr[data-dept]').forEach(tr => {
+        const name = tr.getAttribute('data-dept'), id = tr.getAttribute('data-id');
+        const m = (host.querySelector('.arDeptMode[data-id="' + id + '"]') || {}).value;
+        if (m === 'off') out.departments[name] = { off: true };
+        else if (m === 'own') out.departments[name] = Object.assign(arReadRule(id), { enabled: true });
+      });
+      msg.textContent = 'Saving…'; msg.style.color = '#57606a';
+      try { await api('PUT', '/api/access-review-rules', { rules: out }); msg.textContent = 'Saved ✓ -- the next access-review-cycle run starts what is due'; msg.style.color = '#116329'; }
+      catch (e) { msg.textContent = 'Not saved: ' + String((e && e.body && e.body.error) || e.message || e); msg.style.color = '#cf222e'; }
+    };
   }
 
   // Attest a single decision item (Approve / Deny / DontKnow). Degrades gracefully
@@ -9038,6 +9110,7 @@
     'coverage':                    'Lists every role, workspace and Azure scope PIM does not delegate yet, orphan groups and groups PIM does not manage (the Coverage & gaps page).',
     'owner-review':                'Asks each department\'s owners, by mail, to confirm who still needs privileged access: on My people they Keep, Extend or Remove each person (a removal is approved by a PIM administrator). Off until you turn it on; its interval is the review cycle.',
     'pending-check':               'Reports staged changes and queued actions that were started more than a day ago and never committed (Pending changes). Changes committed but not yet applied are checked every 30 minutes by verify-convergence.',
+    'access-review-cycle':         'Starts the access review of each department whose review rule makes it due (Access reviews > Review rules): one review per group of the department, for the reviewers of the rule. Does nothing until a rule is switched on.',
     'target-check':                'Checks that the Azure resources, Azure roles and Entra roles your delegations point at still exist, and reports the ones that are gone (Coverage & gaps). It never removes anything -- you decide.',
     // REQ-U wave 2: per-NAME entries (looked up before the type) -- two discovery jobs read the workload role catalogs.
     'discovery-defender':          'Reads the Defender XDR roles and their permissions, and reports roles and permission groups no template knows yet.',
