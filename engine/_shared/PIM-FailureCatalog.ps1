@@ -176,6 +176,16 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'transient'
        fixes = @() }
 
+    # 2026-09-26: a Defender custom role whose create was answered (redirect) but is not listed yet -- the engine does NOT post
+    # it again (that is how RIDE got two roles of one name); the next run binds it once Defender lists it.
+    @{ code = 'DEFENDER-ROLE-CREATE-PENDING'
+       match = { param($m, $row) $m -match '(?i)DEFENDER-ROLE-CREATE-PENDING' }
+       title = 'The Defender XDR role was created and is not listed yet'
+       cause = 'Defender XDR answers the create of a custom role with a redirect and lists the new role only after a delay. The engine waits instead of creating it a second time.'
+       remedy = 'Nothing to do: the next run binds the role once Defender lists it. If it is still waiting after 30 minutes, the engine tries the create again.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
     # BUG-257 (§78 live run 7, 2026-09-24): the TAP job (delta-admin-tap, every 10 min) and the account job (delta-admins,
     # every 5 min) run apart, so an admin that became due between them reaches AdminTap before the account exists -- the
     # run was recorded FAILED "Unrecognised failure" and the next run issued the pass as normal. Ordering, not a fault.
@@ -422,7 +432,15 @@ function Get-PimFailureItemLabel {
     }
     $pRole = & $g 'PolicyRole'
     if ($gname -and $pRole) { return "PIM for Groups $pRole policy of group $gname$(if ($tplId) { " (template $tplId)" })" }
-    if ($azPerm -or $azScope) { return "group $gdisp -> Azure role '$azPerm' at $(Format-PimAzureScopeLabel $azScope)$t" }
+    if ($azPerm -or $azScope) {
+        # 2026-09-26 (EFIF drift mail, 7x): a LIVE Azure assignment the store does not define (a drift 'extra') carries no
+        # GroupTag and no AzScopePermission -- it read "group  -> Azure role '' at management group ...". Name what the live
+        # row does carry (principal name / id, role definition id) instead of printing blanks.
+        $whoAz = if ($gdisp) { "group $gdisp" } elseif ($pName) { $pName } elseif ($prin) { "principal $prin" } else { 'an unnamed principal' }
+        $rdId = & $g 'roleDefinitionId'
+        $roleAz = if ($azPerm) { $azPerm } elseif ($rdId) { "role id $(("$rdId" -split '/')[-1])" } else { 'an unnamed role' }
+        return "$whoAz -> Azure role '$roleAz' at $(Format-PimAzureScopeLabel $azScope)$t"
+    }
     $role = & $g 'RoleDefinitionName'
     if ($role) {
         # REQ-U wave 2: a WORKLOAD binding (Defender XDR / Intune rows carry RoleDefinitionName + Workload) is not an

@@ -7894,12 +7894,14 @@ function New-PimDefenderXdrRolesProvider {
                 -What ("Defender XDR role '{0}' for group '{1}'" -f $rn, $(if ("$($d.GroupName)".Trim()) { "$($d.GroupName)" } else { $gt }))
             if ($__held) { return $__held }
             if (-not $gid) { throw "DefenderXdrRoles: group for tag '$gt' not found" }
+            $spec = Get-PimDefenderRoleSpec -Row $d
             # REQ-U wave 2: an AMBIGUOUS role name (two live roles share it) is refused -- never resolved to one of them.
+            # 2026-09-26: a SPEC row's role is PIM's own, and Resolve-PimDefenderSpecRole heals duplicates PIM made itself
+            # (or refuses them the same way) -- so the early refusal applies to a by-name binding of an EXISTING role only.
             $amb = $ctx['defRoleAmbiguous']
-            if ($amb -is [hashtable] -and $rn -and $amb.ContainsKey($rn.ToLowerInvariant())) {
+            if (-not $spec -and $amb -is [hashtable] -and $rn -and $amb.ContainsKey($rn.ToLowerInvariant())) {
                 throw ("DEFENDER-ROLE-AMBIGUOUS: {0} live Defender XDR roles are named '{1}' (ids {2}) -- PIM will not pick one. Rename or delete the extra role in the Defender portal, then the next run binds the one that is left." -f @($amb[$rn.ToLowerInvariant()]).Count, $rn, (@($amb[$rn.ToLowerInvariant()]) -join ', '))
             }
-            $spec = Get-PimDefenderRoleSpec -Row $d
             if ($spec) {
                 # The custom role named like the group: created when missing, its actions PATCHed to the spec.
                 $rid = Resolve-PimDefenderSpecRole -Name $rn -Actions @($spec.actions) -Catalog $ctx['defRoleCatalog']
@@ -7930,10 +7932,7 @@ function New-PimDefenderXdrRolesProvider {
             $spec = Get-PimDefenderRoleSpec -Row $d
             if (-not $spec) { return [pscustomobject]@{ pimApplied = $false; reason = 'nothing to update (the row carries no role spec)' } }
             $rn = Get-PimRowProp -Row $d -Names @('RoleDefinitionName','RoleName')
-            $amb = $ctx['defRoleAmbiguous']
-            if ($amb -is [hashtable] -and $rn -and $amb.ContainsKey($rn.ToLowerInvariant())) {
-                throw ("DEFENDER-ROLE-AMBIGUOUS: {0} live Defender XDR roles are named '{1}' -- PIM will not pick one; rename or delete the extra role in the Defender portal." -f @($amb[$rn.ToLowerInvariant()]).Count, $rn)
-            }
+            # (a spec row -- Resolve-PimDefenderSpecRole heals PIM-made duplicates or refuses them as DEFENDER-ROLE-AMBIGUOUS)
             $rid = Resolve-PimDefenderSpecRole -Name $rn -Actions @($spec.actions) -Catalog $ctx['defRoleCatalog']
             $out = [pscustomobject]@{ roleId = $rid; reassigned = $false }
             if (-not (Test-PimWorkloadStringSetEqual -A @($l.appScopeIds) -B @($spec.dataSources))) {
