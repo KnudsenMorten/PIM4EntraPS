@@ -14,6 +14,13 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.451 — A managed tenant's first pull no longer reports a failure for something that is only waiting
+
+- **A managed tenant no longer records a failed pull when an item is only waiting.** On the first pull, a new group and
+  its membership arrive together; the membership waits a moment for the group and applies on the next run. The pull used
+  to be recorded as failed for that. It is now recorded as successful and says what is waiting, exactly as the scheduled
+  jobs already did. An item that keeps waiting past its limit is still reported as a failure.
+
 ## v2.4.450 — Access reviews list each account's access, and nobody reviews their own account
 
 - **Each person in a department review now shows the access it holds.** When an admin was defined by its short account

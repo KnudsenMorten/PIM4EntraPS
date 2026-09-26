@@ -174,6 +174,9 @@ if (-not $mspLic.ok) { Stop-DownlinkJob -Code 2 -State failed -Detail "$($mspLic
 # Load the scenario + downlink + downlink-job cores (placement / verdict helpers).
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
 . (Join-Path $shared 'PIM-DownlinkJob.ps1')
+# The engine runs as a CHILD script, so its failure catalog is gone when the downlink judges the run: loaded here so a
+# run whose only failures are transient waits is WAITING, not FAILED (Invoke-PimScenarioRun, measured on RIDE 2026-09-26).
+. (Join-Path $shared 'PIM-FailureCatalog.ps1')
 # §79.6: a central session revoke (signed intent) is QUEUED here as this tenant's own committed action -- New-PimChange.
 . (Join-Path $shared 'PIM-ChangeQueue.ps1')
 

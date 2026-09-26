@@ -4179,7 +4179,22 @@ function Invoke-PimScenarioDeploy {
             # 'held', needs an approval, and says which. A real item failure alongside a hold still fails it.
             $engineHeld = [bool]($summary -and $summary.PSObject.Properties['outcome'] -and "$($summary.outcome)" -eq 'held')
             $okEngine = if ($summary) { ($eu -eq 0) -or $engineHeld } else { $true }
-            $det = if ($summary) { "engine ran ($EngineScope/$EngineMode$(if($WhatIfMode){' whatif'})): create=$cu update=$uu remove=$ru errors=$eu$(if ($engineHeld) { " -- NEEDS APPROVAL: $($summary.heldDetail)" })" }
+            # WAITING IS NOT FAILING -- the scheduler's rule (Start-PimScheduler, operator 2026-09-22), now also here.
+            # Measured on RIDE 2026-09-26 (MSP live E2E): the FIRST pull created the replicated group and its eligible
+            # membership in one run; the membership waited for the group (transient + retryable), errors=1, and the
+            # whole pull was recorded FAILED although the next run applied it unattended. A run whose only failures
+            # are transient + retryable (and have not outlived their cause) is OK and says how many items wait.
+            $engineWaiting = 0; $waitTxt = ''
+            if ($summary -and -not $okEngine -and (Get-Command Test-PimEngineFailuresAreAllTransient -ErrorAction SilentlyContinue)) {
+                $__scopes = @(@($summary.perScope) | Where-Object { $null -ne $_ })
+                $__items = @($__scopes | Where-Object { [int]$_.errors -gt 0 } | ForEach-Object { if ($_.PSObject.Properties['failures']) { @($_.failures) } })
+                $__unbound = @($__scopes | Where-Object { "$($_.detail)" -match 'no provider for scope' }).Count
+                if (-not $__unbound -and $__items.Count -and (Test-PimEngineFailuresAreAllTransient -Failures $__items -NowUtc $NowUtc)) {
+                    $okEngine = $true; $engineWaiting = $__items.Count
+                    $waitTxt = if (Get-Command Format-PimFailureSummary -ErrorAction SilentlyContinue) { Format-PimFailureSummary -Failures $__items } else { "$($__items.Count) item(s) waiting" }
+                }
+            }
+            $det = if ($summary) { "engine ran ($EngineScope/$EngineMode$(if($WhatIfMode){' whatif'})): create=$cu update=$uu remove=$ru errors=$eu$(if ($engineHeld) { " -- NEEDS APPROVAL: $($summary.heldDetail)" })$(if ($engineWaiting) { " -- WAITING (applies on the next run): $waitTxt" })" }
                    else { "engine ran ($EngineScope/$EngineMode$(if($WhatIfMode){' whatif'})) -- no structured summary returned" }
             $results.Add([pscustomobject]@{ step = 'engine-apply'; ok = $okEngine; held = $engineHeld; detail = $det; result = $engine; changeSummary = $summary }) | Out-Null
             if (-not $okEngine) {
