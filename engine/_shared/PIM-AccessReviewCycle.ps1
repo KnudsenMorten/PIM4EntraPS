@@ -105,13 +105,22 @@ function Get-PimDepartmentReviewPeople {
         $u = "$(Get-PimArField $a 'Username')".Trim().ToLowerInvariant(); $gt = "$(Get-PimArField $a 'GroupTag')".Trim()
         if ($u -and $gt -and "$(Get-PimArField $a 'Action')" -notmatch '(?i)^remove') { if (-not $acc.ContainsKey($u)) { $acc[$u] = New-Object System.Collections.Generic.List[string] }; $t = "$(Get-PimArField $a 'AssignmentType')".Trim(); $acc[$u].Add($(if ($t) { "$gt ($t)" } else { $gt })) }
     }
+    # The assignments name the account by its UPN; an admin row may carry only the short UserName (measured on EFIF
+    # 2026-09-26: 'adm-e-emaa-t1-c' vs 'adm-e-emaa-t1-c@<tenant>') -- so the access is also found by the UPN's local part.
+    $byLocal = @{}
+    foreach ($k in @($acc.Keys)) { $lp = ($k -split '@')[0]; if (-not $byLocal.ContainsKey($lp)) { $byLocal[$lp] = $acc[$k] } }
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($r in @($Admins)) {
         if ("$(Get-PimArField $r 'Department')".Trim().ToLowerInvariant() -ne $Department.Trim().ToLowerInvariant()) { continue }
-        $u = "$(Get-PimArField $r 'UserName')".Trim(); if (-not $u) { $u = "$(Get-PimArField $r 'Username')".Trim() }; if (-not $u) { continue }
+        $short = "$(Get-PimArField $r 'UserName')".Trim(); if (-not $short) { $short = "$(Get-PimArField $r 'Username')".Trim() }
+        # The review item is the UPN when the row has one: a Remove decision offboards the account by it.
+        $u = "$(Get-PimArField $r 'UserPrincipalName')".Trim(); if (-not $u) { $u = $short }; if (-not $u) { continue }
         $dn = "$(Get-PimArField $r 'DisplayName')".Trim(); if (-not $dn) { $dn = ("$(Get-PimArField $r 'FirstName') $(Get-PimArField $r 'LastName')").Trim() }
         $k = $u.ToLowerInvariant()
-        $out.Add([pscustomobject]@{ user = $u; displayName = $dn; access = @(if ($acc.ContainsKey($k)) { $acc[$k].ToArray() }) })
+        # (a plain assignment each -- an if-EXPRESSION would unroll a one-entry list into a string)
+        $lk = $k; if (-not $acc.ContainsKey($lk) -and $short) { $lk = $short.ToLowerInvariant() }
+        $list = $null; if ($acc.ContainsKey($lk)) { $list = $acc[$lk] } else { $list = $byLocal[($k -split '@')[0]] }
+        $out.Add([pscustomobject]@{ user = $u; displayName = $dn; access = @(if ($null -ne $list) { $list.ToArray() }) })
     }
     return @($out.ToArray() | Sort-Object user)
 }
@@ -172,6 +181,8 @@ function Set-PimReviewDecision {
     if ($Override) { $it.override = [pscustomobject]@{ decision = $Decision; by = $By; utc = $stamp }; return [pscustomobject]@{ ok = $true; reason = ''; campaign = $Campaign } }
     $me = $By.Trim().ToLowerInvariant()
     if (@($Campaign.reviewers | ForEach-Object { "$_".ToLowerInvariant() }) -notcontains $me) { return (& $no "$By is not a reviewer of this review") }
+    # No self-review: a reviewer never keeps their OWN account (it stays open for the other approver or a SuperAdmin).
+    if ($me -eq $User.Trim().ToLowerInvariant() -or ($me -split '@')[0] -eq ($User.Trim().ToLowerInvariant() -split '@')[0]) { return (& $no "$By cannot review their own account -- another reviewer or a SuperAdmin decides") }
     if (@($st.awaiting | ForEach-Object { "$_".ToLowerInvariant() }) -notcontains $me) { return (& $no $(if ("$($Campaign.mode)" -eq 'serial') { "the first approver ($($Campaign.reviewers[0])) decides first" } else { "$By has already decided on $User" })) }
     $it.decisions | Add-Member -NotePropertyName $me -NotePropertyValue ([pscustomobject]@{ decision = $Decision; utc = $stamp }) -Force
     return [pscustomobject]@{ ok = $true; reason = ''; campaign = $Campaign }
