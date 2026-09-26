@@ -473,13 +473,20 @@ function Invoke-PimDriftSnapshotJob {
         # identical mails in 30 h on EFIF, to three people, two of them the customer's staff. The drift job runs every 4 h
         # and the debounce was the default 60 min, so it never held. Identical drift is now mailed once and then at most
         # once a day as a reminder; a CHANGE in the drift (the detail differs) is mailed at once.
-        try {
+        # SETTLING (operator 2026-09-26: "dont send ... alerts during a commit where things are not fully rolled out"): drift
+        # found while a commit is still being applied is the rollout itself -- held; the next drift run mails it if it stays.
+        $__settling = $false
+        if ((Get-Command Test-PimAlertSettling -ErrorAction SilentlyContinue) -and (Get-Command Get-PimLastDesiredChangeUtc -ErrorAction SilentlyContinue)) {
+            $__lc = Get-PimLastDesiredChangeUtc
+            if (Test-PimAlertSettling -LastChangeUtc $__lc) { $__settling = $true; Write-Host ("[$type] drift found while the commit of {0:u} is still rolling out -- not mailed now" -f $__lc) -ForegroundColor DarkYellow }
+        }
+        if (-not $__settling) { try {
             if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
                 [void](Send-PimManagerAlert -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 1440)
             } elseif (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue) {
                 [void](Send-PimJobAlertViaNotify -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 1440)
             }
-        } catch { Write-Warning "[$type] the drift alert could not be raised: $($_.Exception.Message)" }
+        } catch { Write-Warning "[$type] the drift alert could not be raised: $($_.Exception.Message)" } }
     }
 
     if ($scopeDocs.Count -gt 0 -and $failedNames.Count -eq $scopeDocs.Count) {

@@ -6021,18 +6021,24 @@ top — §9.2.)
 
 ### 17.13 Resource auto-discovery
 
-`_tenantSync.ps1` snapshots Entra roles, AUs, Azure scopes, and PIM groups.
-Discovery = diff current vs previous snapshot
-(`cache/<instance>/discovery-baseline.json`): new Azure subscriptions / management
-groups, new built-in Entra roles, and (via connector live role listing) new
-workload resources such as Power BI workspaces surface as **discovered items**. Per
-resource type, `config/resource-discovery.custom.json` selects handling:
-`"Off" | "Portal" | "Engine"`. **Portal**: the Newly discovered resources page lists items; one
-click stages naming-convention-generated definition + assignment rows into pending.
-**Engine**: the engine auto-generates and applies the same rows on its run (zero
-touch), emitting `resource.discovered` + `resource.onboarded` audit events and a
-`new-permission` mail. Row generation reuses the naming-conventions module.
+**The Discovery page is one list** (2.4.446). It shows what is in the tenant and not yet in PIM, grouped by kind: Azure
+management groups and subscriptions, Power BI workspaces, and new Entra ID, Defender XDR and Intune roles. Each row has
+**Create** and **Ignore**; tick-boxes with "select all" per kind handle many similar items in one click; the **Ignored** view
+has **Re-add**.
 
+- **Sources.** The tenant cache the Manager already keeps: Azure scopes (with their management-group parents), Entra roles,
+  the Defender XDR and Intune role catalogs, and the Power BI workspace list the daily Power BI discovery job stores.
+- **What is "new".** An Azure scope or Power BI workspace is known once a stored definition references it, or once the
+  permission group it would become is already defined. A role kind records what exists the first time it is read, so only
+  roles Microsoft adds afterwards are new.
+- **Create.** An Azure management group, subscription or Power BI workspace becomes a **permission group definition**
+  (`PIM-Definitions-Services`), named by the naming convention at the Cloud Adoption Framework level of its place in the
+  management-group tree (the same rule as the Create wizard). It is staged in the normal pending store: review it under
+  Review & commit, and the engine creates the group after the commit. Discovery never grants access -- roles are linked in
+  Create access. A new role is **accepted** into the role catalog.
+- **Ignore / Re-add.** One click, no reason; who and when are kept. Decisions live in the store, not in a file.
+- **API.** `GET /api/discovery-inbox`; `POST /api/discovery-decisions` with `create`, `ignore` or `readd` and the item keys
+  (Admin role and a Pro licence; audited).
 **REST engine discovery layer (`engine/_shared/PIM-Discovery.ps1`).** The new
 module-free engine carries its own discovery, alongside the Azure scope reconcile
 planner (`PIM-AzureDiscovery.ps1`). It splits cleanly into pure planners (offline,

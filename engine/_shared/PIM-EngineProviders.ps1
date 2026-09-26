@@ -7818,11 +7818,18 @@ function New-PimDefenderXdrRolesProvider {
             param($ctx)
             Ensure-PimContextLoaded
             $tagToName = if ($ctx['defTagToName']) { $ctx['defTagToName'] } else { Get-PimTagToGroupName }
+            $desired = if ($null -ne $ctx['defDesired']) { @($ctx['defDesired']) } else { @(Get-PimDefenderDesiredBindings -TagToName $tagToName) }
             $roleNameToId = Get-PimDefenderRoleNameToId
             $cat = Get-PimDefenderRoleCatalog
+            # R25-42 (2026-09-26): duplicates PIM made itself are healed HERE, at read time, on a real run (never WhatIf) --
+            # an ambiguous binding never reaches a create/update item, so a heal later in the pipeline never runs.
+            if (-not $ctx['__pimWhatIf'] -and $cat -and $cat.ok) {
+                $specNames = @($desired | Where-Object { Get-PimDefenderRoleSpec -Row $_ } | ForEach-Object { Get-PimRowProp -Row $_ -Names @('RoleDefinitionName', 'RoleName') })
+                $healed = @(Repair-PimDefenderDuplicateRoles -Catalog $cat -Names $specNames)
+                if ($healed.Count) { Clear-PimWorkloadRoleCaches; $script:__pimDefenderRoles = $null; $cat = Get-PimDefenderRoleCatalog -Force; $roleNameToId = Get-PimDefenderRoleNameToId }
+            }
             $ctx['defRoleNameToId'] = $roleNameToId; $ctx['defGid'] = @{}; $ctx['defRoleCatalog'] = $cat
             $ctx['defRoleAmbiguous'] = Get-PimDefenderAmbiguousRoleNames -Catalog $cat
-            $desired = if ($null -ne $ctx['defDesired']) { @($ctx['defDesired']) } else { @(Get-PimDefenderDesiredBindings -TagToName $tagToName) }
             # REQ-U wave 2: the Defender workload groups PIM defines. The orphan check reads live even before any
             # binding row exists -- a group with no binding at all is exactly the orphan to report.
             $wlDefs = @(Get-PimWorkloadDefinitionsOfKind -Kind 'defender')

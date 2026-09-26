@@ -14,6 +14,26 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.446 — Discovery: one list, Create or Ignore
+
+- **Discovery is now one simple list** of what is in your tenant and not yet in PIM: Azure management groups and
+  subscriptions, Power BI workspaces, and new Entra ID, Defender XDR and Intune roles. Each row has **Create** and
+  **Ignore**. Tick several similar items, or a whole kind, and create or ignore them in one click.
+- **Create** turns an Azure scope or Power BI workspace into a permission group, named by your naming convention at the
+  right level, and puts it in Review & commit for you to check. A new role is accepted into the role catalog. Nothing is
+  granted to anyone.
+- **Ignore** hides an item with one click. The **Ignored** view lists them, with who ignored them and when, and **Re-add**
+  brings one back.
+- Before this, the page compared the tenant with one baseline that could only be reset for everything at once, and items
+  the daily discovery did not create were never shown again.
+
+### No alerts while a commit is rolling out
+
+- **A commit is given time to finish before anything is reported.** A commit is applied over several engine runs: groups
+  first, then memberships, owners and policies. For 45 minutes after a change, a failed run or drift is not emailed. If it
+  is still there afterwards, the alert is sent then. A change waiting for your approval is still reported at once.
+- **Duplicate Defender XDR roles are now removed on the next run,** also when a group is already bound to one of the copies.
+
 ## v2.4.445 — Fewer, clearer alert emails
 
 - **The same drift is no longer emailed every few hours.** An unchanged drift report is sent once, then at most once a day
