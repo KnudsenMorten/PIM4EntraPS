@@ -643,6 +643,21 @@ function Get-PimManagerLocalIdentity {
     try { return [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { return "$env:USERNAME" }
 }
 
+function Get-PimManagerRecordedActor {
+    <#
+      🔴 BUG-262 -- the name a RECORD carries (audit, approvals, queue, commit history). Equal to the identity, except on a
+      LOCAL (loopback) Manager started with $env:PIM_LOCAL_ACTOR_TAG: then "<tag> (as <identity>)". Measured on ig798
+      2026-09-26: the live E2E's own Approve click was audited as the operator's Windows account, and the operator saw an
+      approval they never made. ONLY the record changes -- roles, ownership and reviewer checks keep the plain identity.
+      A HOSTED Manager ignores the tag: it cannot relabel a real signed-in person.
+    #>
+    param([string]$Who)
+    $tag = "$env:PIM_LOCAL_ACTOR_TAG".Trim()
+    if ($script:PimHosted -or -not $tag -or -not "$Who".Trim()) { return "$Who" }
+    if ("$Who".StartsWith("$tag (as ")) { return "$Who" }
+    return ("{0} (as {1})" -f $tag, "$Who".Trim())
+}
+
 function Get-PimManagerDelegatedCap {
     <#
       PURE. REQ-Y (operator 2026-09-20: "fix req-y 3 items"). What a RESOLVED Manager role becomes when the Pro
@@ -1005,6 +1020,7 @@ function Write-PimManagerAuditEvent {
         $who = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME }
         $whoSource = 'process-identity (NO signed-in principal resolved)'
     }
+    $who = Get-PimManagerRecordedActor -Who $who   # BUG-262: a test Manager says so in the trail
 
     $evt = [ordered]@{
         ts = [datetime]::UtcNow.ToString('o'); runId = "$($script:PimManagerSessionId)"; correlationId = ''
@@ -2648,6 +2664,7 @@ function Invoke-PimManagerSafeCommit {
     # signed-in principal, not the container's process user. Same defect as the audit writer.
     $who = try { $r = Get-PimManagerRole; if ("$($r.identity)".Trim()) { "$($r.identity)" } else { throw } }
            catch { try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME } }
+    $who = Get-PimManagerRecordedActor -Who $who   # BUG-262
     $snapshot = New-PimCommitSnapshot -Entity $Base -Base $Base -Rows @($Current.rows) -Header @($Current.header) -By "$who" -Reason 'review-and-save commit'
     # BUG-255: a changed group / AU name is a RENAME -- remember the old name so the engine renames, not duplicates.
     $NewRows = Add-PimRenameMemory -Base $Base -NewRows @($NewRows) -OldRows @($Current.rows)
@@ -2727,6 +2744,7 @@ function Invoke-PimManagerBackupRestore {
         # SEC-16(b) -- "who restored" is evidence too.
         $who = try { $r = Get-PimManagerRole; if ("$($r.identity)".Trim()) { "$($r.identity)" } else { throw } }
                catch { try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME } }
+        $who = Get-PimManagerRecordedActor -Who $who   # BUG-262
         $curHeader = @()
         $spec = Get-PimCsvSpec -BaseName $plan.entity; if ($spec) { $curHeader = @($spec.defaultHeader) }
         $preSnap = New-PimCommitSnapshot -Entity $plan.entity -Base $plan.base -Rows @($curRows) -Header @($curHeader) -By "$who" -Reason ("pre-restore of snapshot $Id")
@@ -4284,7 +4302,7 @@ function Get-PimManagerCadenceStatus {
     }
 }
 function Get-PimManagerActorName {
-    try { $r = Get-PimManagerRole; if ("$($r.identity)".Trim()) { return "$($r.identity)" } } catch { }
+    try { $r = Get-PimManagerRole; if ("$($r.identity)".Trim()) { return (Get-PimManagerRecordedActor -Who "$($r.identity)") } } catch { }
     return 'unknown'
 }
 function Request-PimManagerCadenceRun {
@@ -4449,9 +4467,9 @@ function Get-PimManagerActor {
     # $global:PIM_CurrentUser and $env:USERNAME are BOTH EMPTY in the container, so every queued
     # entry was written with By='' -- measured live 2026-09-12 on two real revokes. The Manager
     # already knows the caller: Get-PimManagerRole resolves the Easy Auth principal.
-    try { $r = Get-PimManagerRole; if ("$($r.identity)".Trim()) { return "$($r.identity)".Trim() } } catch { }
-    if ("$($global:PIM_CurrentUser)".Trim()) { return "$($global:PIM_CurrentUser)".Trim() }
-    if ("$env:USERNAME".Trim()) { return "$env:USERNAME" }
+    try { $r = Get-PimManagerRole; if ("$($r.identity)".Trim()) { return (Get-PimManagerRecordedActor -Who "$($r.identity)".Trim()) } } catch { }
+    if ("$($global:PIM_CurrentUser)".Trim()) { return (Get-PimManagerRecordedActor -Who "$($global:PIM_CurrentUser)".Trim()) }
+    if ("$env:USERNAME".Trim()) { return (Get-PimManagerRecordedActor -Who "$env:USERNAME") }
     return 'unknown'
 }
 function Get-PimManagerStoreCs {
@@ -12532,7 +12550,7 @@ function Handle-Request {
             }
             $tenantsIn = @(); if ($body.PSObject.Properties['tenants'] -and $body.tenants) { $tenantsIn = @($body.tenants | ForEach-Object { "$_" }) }
             $who = ''
-            try { $r = Get-PimManagerRole; $who = "$($r.identity)" } catch { $who = '' }
+            try { $r = Get-PimManagerRole; $who = Get-PimManagerRecordedActor -Who "$($r.identity)" } catch { $who = '' }
             # R25-12: every supplied tenant must be a tenant id -- one that is not refuses the intent (it used to widen it).
             $badTenants = @($tenantsIn | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' })
             if ($badTenants.Count) {
@@ -14085,7 +14103,7 @@ function Handle-Request {
                 # approver is evidence, and a body field let anyone record anyone.
                 $cand = [pscustomobject]@{
                     tenantId = $confTenant; templateId = "$($b.templateId)"; itemKey = "$($b.itemKey)"
-                    reason = "$($b.reason)"; approvedBy = "$((Get-PimManagerRole).identity)"
+                    reason = "$($b.reason)"; approvedBy = "$(Get-PimManagerRecordedActor -Who "$((Get-PimManagerRole).identity)")"
                     approvedUtc = ([datetime]::UtcNow).ToString('o'); expiresUtc = "$($b.expiresUtc)"
                 }
                 $v = Test-PimExemptionValid -Exemption $cand -NowUtc ([datetime]::UtcNow)
@@ -14827,6 +14845,7 @@ function Handle-Request {
                 # SEC-16(b) -- the `by` reported back to the caller must name the operator.
                 $who = try { $ro = Get-PimManagerRole; if ("$($ro.identity)".Trim()) { "$($ro.identity)" } else { throw } }
                        catch { try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME } }
+                $who = Get-PimManagerRecordedActor -Who $who   # BUG-262
                 Write-PimMutationLog -BaseName $base -Adds 0 -Removes 0 -Modifies 0 -NewRowCount ([int]$r.rowCount) -Summary "Restored from backup $snapId ($([int]$r.rowCount) rows now; a backup of the state before the restore was kept as $($r.preRestoreSnapshotId))"
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; base = $base; restoredFrom = $snapId; entity = "$($r.entity)"; rowCount = [int]$r.rowCount; preRestoreSnapshotId = "$($r.preRestoreSnapshotId)"; by = "$who" })
                 return 200
