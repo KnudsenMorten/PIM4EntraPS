@@ -83,6 +83,53 @@ function Get-PimJobFailureAlert {
     return $out
 }
 
+function Get-PimJobAlertMailParts {
+    <#
+      The mail parts for a job alert: @{ title; headline; detailHtml; actionHtml; skip }. Never throws.
+      * FAILED -> the run's detail, HTML-encoded; the next step in words.
+      * HELD   -> each held plan named in the run's detail ("-Provider <p> -PlanHash <h>"), read back from its hold
+                  record (Get-PimPolicyMassHold) and rendered by Format-PimPolicyHoldMail. When every one of those
+                  plans was ALREADY mailed by the engine's own hold alert in this process ($global:PimPolicyHoldAlerted,
+                  set by Write-PimPolicyMassHoldAlert), skip = $true: one mail per hold, not two for the same event.
+    #>
+    param([Parameter(Mandatory)][object]$Alert, [object]$Run)
+    $enc = { param($t) [System.Net.WebUtility]::HtmlEncode("$t") }
+    $status = "$(Get-PimJobAlertField -Item $Run -Name 'status')".Trim().ToLowerInvariant()
+    $name   = "$(Get-PimJobAlertField -Item $Run -Name 'name')".Trim()
+    $out = [ordered]@{ title = "$($Alert.title)"; headline = ''; detailHtml = (& $enc "$($Alert.detail)"); actionHtml = ''; skip = $false }
+    if ($status -ne 'held') {
+        $out.headline = "The job '$name' failed."
+        $out.actionHtml = 'Open the PIM Manager, <b>Jobs &rsaquo; Engine logs &amp; errors</b>: every failing item is listed there with its cause and, where there is one, a fix.'
+        return [pscustomobject]$out
+    }
+    try {
+        $held = @([regex]::Matches("$($Alert.detail)", '-Provider\s+(\w+)\s+-PlanHash\s+([0-9a-fA-F]{64})') | ForEach-Object { [pscustomobject]@{ provider = $_.Groups[1].Value; hash = $_.Groups[2].Value.ToLowerInvariant() } })
+        if ($held.Count) {
+            $sentAlready = $global:PimPolicyHoldAlerted
+            if ($sentAlready -is [hashtable] -and -not @($held | Where-Object { -not $sentAlready.ContainsKey($_.hash) }).Count) {
+                $out.skip = $true; return [pscustomobject]$out
+            }
+            if ((Get-Command Get-PimPolicyMassHold -ErrorAction SilentlyContinue) -and (Get-Command Format-PimPolicyHoldMail -ErrorAction SilentlyContinue)) {
+                $parts = @()
+                foreach ($h in $held) {
+                    $rec = $null; try { $rec = Get-PimPolicyMassHold -Provider $h.provider } catch { $rec = $null }
+                    if ($rec -and "$($rec.planHash)".ToLowerInvariant() -eq $h.hash) { $parts += Format-PimPolicyHoldMail -Hold $rec -Provider $h.provider }
+                }
+                if ($parts.Count) {
+                    $out.headline   = (@($parts | ForEach-Object { $_.headline }) -join ' ')
+                    $out.detailHtml = (@($parts | ForEach-Object { $_.detailHtml }) -join '<br><hr>')
+                    $out.actionHtml = (@($parts | ForEach-Object { $_.actionHtml }) -join '<br>')
+                    $out.title      = "Job '$name': " + (@($parts | ForEach-Object { $_.subject }) -join '; ')
+                    return [pscustomobject]$out
+                }
+            }
+        }
+    } catch { }
+    $out.headline = "The job '$name' is held: a change set needs your approval before it is applied."
+    $out.actionHtml = 'Open the PIM Manager, <b>Jobs &rsaquo; Engine logs &amp; errors</b>: the held change is shown there setting by setting, with the button to approve it.'
+    return [pscustomobject]$out
+}
+
 function Get-PimJobAlertField {
     # Tolerant field read -- run records are PSCustomObjects in-process and
     # dictionaries after a store round-trip. PSObject.Properties does NOT see
@@ -125,12 +172,19 @@ function Invoke-PimJobRunAlert {
         $d = Get-PimJobFailureAlert -Run $Run
         if (-not $d.fire) { return 'none' }
 
+        # 2026-09-21 (operator: "this email is impossible to read" / "this email needs more details, which policies and
+        # what is the change"): the mail body is HTML and tokens go in RAW -- so the plain detail is ENCODED (its
+        # '<you>' vanished as a tag), and a HELD run carries the held plan itself: which policies, each setting
+        # current -> new, and how to approve (Format-PimPolicyHoldMail, the same text as the engine's hold alert).
+        $mail = Get-PimJobAlertMailParts -Alert $d -Run $Run
+        if ($mail.skip) { return 'none' }
+
         if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
-            [void](Send-PimManagerAlert -Event $d.event -Title $d.title -Detail $d.detail -LinkTab 'jobs' -DebounceMinutes $DebounceMinutes)
+            [void](Send-PimManagerAlert -Event $d.event -Title $mail.title -Detail $mail.detailHtml -Headline $mail.headline -Action $mail.actionHtml -LinkTab 'jobs' -DebounceMinutes $DebounceMinutes)
             return 'manager'
         }
         if (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue) {
-            $r = Send-PimJobAlertViaNotify -Event $d.event -Title $d.title -Detail $d.detail -DebounceMinutes $DebounceMinutes
+            $r = Send-PimJobAlertViaNotify -Event $d.event -Title $mail.title -Detail $mail.detailHtml -Headline $mail.headline -Action $mail.actionHtml -DebounceMinutes $DebounceMinutes
             if ($r) { return 'notify' }
             return 'none'
         }
@@ -154,7 +208,8 @@ function Get-PimJobAlertingConfig {
     param([string]$ConnectionString)
 
     # 'coverage' (REQ-I + REQ-U): NEW gaps / orphans / unmanaged privileged groups found by the 'coverage' job.
-    $catalog = @('engine-failure','drift','expiring-access','break-glass','coverage')
+    # §79.1: 'target-missing' -- delegation targets (Azure scopes / roles, Entra roles) that no longer exist ('target-check' job).
+    $catalog = @('engine-failure','drift','expiring-access','break-glass','coverage','target-missing','pending-uncommitted')   # 'pending-uncommitted': §79.2
     $events = @{}
     foreach ($e in $catalog) { $events[$e] = $true }
     $out = [ordered]@{ recipients = @(); events = $events }
@@ -200,7 +255,11 @@ function Send-PimJobAlertViaNotify {
         [Parameter(Mandatory)][string]$Event,
         [string]$Title,
         [string]$Detail,
-        [int]$DebounceMinutes = 60
+        [int]$DebounceMinutes = 60,
+        [string]$Headline = '',
+        [string]$Action = '',
+        # §79.3: the Manager page the mail links to (drift, coverage, admins ...). 'jobs' keeps every earlier caller as it was.
+        [ValidatePattern('^[a-z0-9-]+$')][string]$LinkTab = 'jobs'
     )
     if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) { return $false }
 
@@ -229,9 +288,11 @@ function Send-PimJobAlertViaNotify {
         AlertTitle  = $(if ("$Title".Trim()) { $Title } else { $Event })
         AlertEvent  = $Event
         AlertDetail = "$Detail"
-        AlertTab    = 'jobs'
+        AlertTab    = $LinkTab
         TenantName  = "$($global:PIM_TenantName)"
         Instance    = 'scheduler'
+        AlertHeadline = $(if ("$Headline".Trim()) { "$Headline" } else { 'A PIM4EntraPS alert was raised for your privileged-access estate.' })
+        AlertAction   = $(if ("$Action".Trim()) { "$Action" } else { "Open the PIM Manager and review the $LinkTab view." })
         WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
     }
     $sent = 0; $lastReason = ''
@@ -248,7 +309,7 @@ function Send-PimJobAlertViaNotify {
                  (Get-Command Write-PimAlertFeedSql -ErrorAction SilentlyContinue)) {
         try {
             $result = [ordered]@{ event = $Event; fired = $true; sent = $sent; recipients = @($cfg.recipients); reason = "$lastReason" }
-            $rec = New-PimAlertRecord -Event $Event -Title $Title -Detail $Detail -LinkTab 'jobs' -SendResult $result -Instance 'scheduler'
+            $rec = New-PimAlertRecord -Event $Event -Title $Title -Detail $Detail -LinkTab $LinkTab -SendResult $result -Instance 'scheduler'
             [void](Write-PimAlertFeedSql -ConnectionString $cs -Record $rec)
         } catch {
             # Same as the Manager's feed write: the alert went out, the record did not. Warn rather

@@ -120,6 +120,9 @@ if (-not $mspLic.ok) { Stop-PublishJob -Code 2 -State failed -Detail "$($mspLic.
 . (Join-Path $shared 'PIM-ChangeQueue.ps1')
 . (Join-Path $shared 'PIM-Baseline.ps1')             # the verifier the managed tenants run
 . (Join-Path $shared 'PIM-BaselinePublish.ps1')      # the shared producer + the Key Vault signer
+# REQ-REV-DOWN-1 / REQ-REN-1: the authorised withdrawals + renames this bundle carries (pure).
+$__dlIntents = Join-Path $shared 'PIM-DownlinkIntents.ps1'
+if (Test-Path -LiteralPath $__dlIntents) { . $__dlIntents }
 
 JobLog ("store {0}/{1} -> https://{2}.blob.core.windows.net/{3}/ ; signing key {4} ; valid {5} days ; scope {6}" -f $SqlServer, $SqlDatabase, $StorageAccount, $Container, $SigningKeyId, $vd, $Scope)
 # A PLAIN scriptblock (no GetNewClosure): it resolves $cs and Invoke-PimSqlQuery through this script's scope.
@@ -143,8 +146,33 @@ $fetcher  = {
     return "$($r.Content)"
 }
 
+# REQ-REV-DOWN-1 / REQ-REN-1 -- the withdrawals and renames the operator authorised centrally, read
+# from the master's own store (pim.Settings 'DownlinkIntents') and carried in the SIGNED bundle.
+# 🔒 Failing to read them must NOT fail the publish and must NOT invent any: a bundle with no
+# intents is the old behaviour, which withdraws nothing. Silence here can only ever under-act.
+$intents = @()
 try {
-    $res = Invoke-PimBaselinePublishRun -RunQuery $runQuery -Signer $signer -Upload $uploader -Fetch $fetcher -Scope $Scope -ValidDays $vd
+    # 🔴 §79.6 live E2E (2026-09-25): this read Get-PimSqlSetting -ConnectionString $global:PIM_SqlConnectionString --
+    # a variable nothing in this job sets, and a table (pim.Settings) its identity has no right on. Every publish since
+    # 2.4.406 logged "could not be read (... ConnectionString ... empty string)" and shipped NO intents: no central
+    # withdrawal, rename or session revoke ever reached a managed tenant. It reads what every other setting here reads:
+    # the job's own connection ($cs), through pim.vw_PublishJobControl, which carries the 'DownlinkIntents' row.
+    if (Get-Command Read-PimJobCadenceValues -ErrorAction SilentlyContinue) {
+        $rawIntents = (Read-PimJobCadenceValues -ConnectionString $cs -Object 'pim.vw_PublishJobControl' -Names @('DownlinkIntents'))['DownlinkIntents']
+        if ("$rawIntents".Trim()) {
+            $parsed = if ($rawIntents -is [string]) { $rawIntents | ConvertFrom-Json } else { $rawIntents }
+            $sel = if (Get-Command Select-PimDownlinkIntents -ErrorAction SilentlyContinue) { Select-PimDownlinkIntents -Intents @($parsed) } else { @{ intents = @($parsed); dropped = @() } }
+            $intents = @($sel.intents)
+            if (@($sel.dropped).Count) { JobLog ("dropped {0} stale intent(s) older than the intent lifetime" -f @($sel.dropped).Count) 'WARN' }
+            if ($intents.Count) { JobLog ("carrying {0} authorised withdrawal/rename intent(s) in this bundle" -f $intents.Count) }
+        }
+    }
+} catch {
+    JobLog ("the authorised-withdrawal list could not be read ({0}) -- publishing WITHOUT it, so nothing is withdrawn downstream" -f $_.Exception.Message) 'WARN'
+    $intents = @()
+}
+try {
+    $res = Invoke-PimBaselinePublishRun -RunQuery $runQuery -Signer $signer -Upload $uploader -Fetch $fetcher -Scope $Scope -ValidDays $vd -Intents $intents
 } catch {
     JobLog ("PUBLISH FAILED: " + $_.Exception.Message) 'ERROR'
     Stop-PublishJob -Code 1 -State failed -Detail ("PUBLISH FAILED: " + $_.Exception.Message)

@@ -383,8 +383,8 @@ function Get-PimRestToken {
   # BECOME SOMEBODY ELSE.
   #
   # MEASURED 2026-08-28: a caller asked for tenant f0fa27a0 (myfamilynetwork) + the PIM engine
-  # client id + its certificate thumbprint, and got back a token for tenant 7825c48b
-  # (ExpertsLiveDK -- A DIFFERENT COMPANY) with a different appid. Nothing in the return value
+  # client id + its certificate thumbprint, and got back a token for ANOTHER company's tenant
+  # (A DIFFERENT COMPANY's tenant) with a different appid. Nothing in the return value
   # said so. The certificate had failed to resolve, the failure went to Write-Verbose, and the
   # "dev convenience" az fallback below then minted a token for whatever subscription happened
   # to be the az DEFAULT context -- which on the dev machine is frequently another tenant
@@ -640,6 +640,10 @@ function Invoke-PimRest {
         # ("ReadOnlyDisabledSubscription -- the subscription is disabled and therefore
         # marked as read only").
         $detail = Get-PimRestErrorDetail -Body $body
+        # 2026-09-21 (operator: "can you provide graph or arm errors in here as i have nothing to work with"): the
+        # thrown message stays code+message (above), but the full body of the LAST failure is kept for a caller that
+        # needs more -- e.g. a policy-rule PATCH that adds the request-id and what it sent (Invoke-PimPolicyRulePatch).
+        $global:PimLastRestError = [pscustomobject]@{ method = $Method; url = $next; status = $code; body = "$body"; atUtc = [datetime]::UtcNow }
         if ($detail) { throw "$Method $next -> HTTP $code : $detail$hintText" }
         throw "$Method $next -> HTTP $code : (no error body returned by the service)$hintText"
       }
@@ -1065,6 +1069,23 @@ function Get-PimAdminMailRecipientPlan {
   if (& $isAddr $mgr) {
     $out['recipients'] = @($mgr); $out['recipient'] = $mgr; $out['source'] = 'manager-legacy'; $out['legacy'] = $true
     $out['reason'] = "LEGACY: using ManagerEmail ($mgr) on $who. The rule is the sponsor department's owners -- $($out['reason'])"
+    return $out
+  }
+  # 5. 2026-09-21 (operator: "i cannot set tap on master either" / "we must also get email from slaves when account is
+  #    created/replicated down"): with no override, no department owner and no legacy manager, the mail about this admin
+  #    (new-admin notice, TAP) goes to THIS tenant's ALERT RECIPIENTS (PIM_AlertRecipient + Manager > Alerting) -- the
+  #    people who run the environment. Before, there was nobody to send to, so no TAP could be issued at all and a
+  #    replicated admin arrived in a slave without anyone being told. Reported as 'alert-recipients' so the screens
+  #    still say "set a sponsor department" for the proper route.
+  $alert = @()
+  try {
+    if (Get-Command Get-PimSafetyAlertRecipients -ErrorAction SilentlyContinue) { $alert = @(Get-PimSafetyAlertRecipients) }
+    elseif (Get-Command Get-PimAlertingConfig -ErrorAction SilentlyContinue) { $alert = @((Get-PimAlertingConfig).recipients) }
+  } catch { $alert = @() }
+  $alert = @($alert | ForEach-Object { "$_".Trim() } | Where-Object { & $isAddr $_ } | Select-Object -Unique)
+  if ($alert.Count) {
+    $out['recipients'] = @($alert); $out['recipient'] = $alert[0]; $out['source'] = 'alert-recipients'
+    $out['reason'] = "no sponsor department owner for $who -- sent to this tenant's alert recipients ($($alert -join ', ')). $($out['reason'])"
     return $out
   }
   return $out

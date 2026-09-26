@@ -78,7 +78,16 @@ function New-PimTapRequestBody {
     param([int]$LifetimeMinutes = 240, [object]$Policy = $null, [string]$StartDateTime = '')
     $notes = New-Object System.Collections.Generic.List[string]
     $mins = $LifetimeMinutes
-    if ($mins -le 0) { $mins = 240 }
+    # 2026-09-21 (operator: "we need to have a long tap length, 4 hr is not enough if you have 25 tenants where you must
+    # login and setup"): -1 = "as long as this tenant allows" -- the tenant TAP policy's maximum (Entra allows up to 30
+    # days); an unreadable policy -> 8 hours (Entra's own default maximum), never a value Entra would refuse.
+    # Same day, operator: "set tap length for 48 hr", then "ignore the 48 hr tap request. we go with 8 hr" -- so -1 = 8 hours, capped at the tenant maximum.
+    if ($mins -lt 0) {
+        $pmax = if ($Policy -and $Policy.readable) { [int]$Policy.maximumLifetimeInMinutes } else { 0 }
+        if ($pmax -gt 0) { $mins = [math]::Min(480, $pmax); [void]$notes.Add("no lifetime set on the admin -> 8 hours (480 min), capped at the tenant maximum $pmax min -> $mins min") }
+        else { $mins = 480; [void]$notes.Add('no lifetime set on the admin and the tenant TAP policy could not be read -> 480 min (8 hours)') }
+    }
+    if ($mins -eq 0) { $mins = 240 }
     $once = $false
     if ($Policy -and $Policy.readable) {
         if ($Policy.isUsableOnce) { $once = $true; [void]$notes.Add('the tenant TAP policy forces one-time use -> isUsableOnce=true') }

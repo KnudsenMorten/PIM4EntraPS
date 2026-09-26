@@ -140,6 +140,41 @@ function Get-PimQueueEntryLookupIds {
     return @{ objects = @($objects.ToArray()); roles = @($roles.ToArray()) }
 }
 
+function Get-PimQueueFriendlyName {
+    <#
+      PURE. The human name an entry's payload already carries, if any. Producers name the field
+      differently (roleName / displayName / GroupName / Username ...), and a display that only
+      understood one of them is how a whole queue page ended up reading as GUIDs.
+    #>
+    param($Payload)
+    foreach ($n in @('roleName', 'displayName', 'DisplayName', 'name', 'Name',
+                     'GroupName', 'groupName', 'GroupTag', 'groupTag',
+                     'UserPrincipalName', 'Username', 'userPrincipalName')) {
+        $v = Get-PimQueuePayloadValue -Payload $Payload -Name $n
+        if ("$v".Trim()) { return "$v".Trim() }
+    }
+    return ''
+}
+
+function Get-PimQueueServiceLabel {
+    # PURE. The product name a human uses for a connector id. Unknown ids are returned as given --
+    # a wrong friendly name is worse than the id itself.
+    param([AllowEmptyString()][string]$Service)
+    switch ("$Service".Trim().ToLowerInvariant()) {
+        'entra'         { return 'Entra ID' }
+        'entraid'       { return 'Entra ID' }
+        'defender'      { return 'Defender XDR' }
+        'defender-xdr'  { return 'Defender XDR' }
+        'intune'        { return 'Intune' }
+        'powerbi'       { return 'Power BI' }
+        'powerplatform' { return 'Power Platform' }
+        'azuredevops'   { return 'Azure DevOps' }
+        'dataverse'     { return 'Dataverse' }
+        'businesscentral' { return 'Business Central' }
+        default         { return $(if ("$Service".Trim()) { "$Service".Trim() } else { 'service' }) }
+    }
+}
+
 function Resolve-PimQueueName {
     param([hashtable]$Names, [AllowEmptyString()][string]$Id)
     if (-not "$Id".Trim()) { return '' }
@@ -198,10 +233,33 @@ function Format-PimQueueEntryDisplay {
         $u = Get-PimQueuePayloadValue -Payload $p -Name 'userPrincipalName'; if (-not $u) { $u = $key }
         return "Revoke sign-in sessions for $u"
     }
-    # Desired-state rows and any other action: the entity plus its natural key is already readable
-    # (GroupTag / UserName / ...), so say what happens to which row.
+    # 🔴 A KEY THAT IS AN ID SAYS NOTHING (operator, 2026-09-22, on a queue full of
+    # "Add PIM-Catalog-ServiceRoles row entra|124577f8-48ed-456a-839f-13b419002e33": *"what is this,
+    # it is hard to understand, i need displayname - context, i dont assume it is new entra roles"*).
+    # The producer HAD the name all along -- Invoke-PimServiceRoleSweep puts roleName in the payload --
+    # and the display threw it away because the fallback assumed every key is a natural key
+    # (GroupTag / UserName), which is true of every OTHER producer and false of this one.
+    # So: the name leads, the id stays underneath (the GUI renders the raw key in grey), and the
+    # sentence says WHAT the row is and what it does NOT do -- cataloguing a role grants nobody
+    # anything, which is the reassurance the question was really asking for.
+    if ($entity -like 'PIM-Catalog-*') {
+        $svc = Get-PimQueuePayloadValue -Payload $p -Name 'service'
+        if (-not $svc -and $key -match '^([^|]+)\|') { $svc = $Matches[1] }
+        $nm = Get-PimQueueFriendlyName -Payload $p
+        if (-not $nm) { $nm = if ($key -match '\|(.+)$') { $Matches[1] } else { $key } }
+        $svcLabel = Get-PimQueueServiceLabel -Service $svc
+        $verbTxt = switch ($op) { 'Create' { 'Catalogue' } 'Remove' { 'Remove from the catalogue' } default { 'Update in the catalogue' } }
+        return ("{0} the {1} role '{2}' -- found in the tenant and not yet in PIM's catalogue (cataloguing it grants nobody access)" -f $verbTxt, $svcLabel, $nm)
+    }
+    # Desired-state rows and any other action: the entity plus its natural key is usually readable
+    # (GroupTag / UserName / ...), so say what happens to which row -- but if the key is an ID and
+    # the payload carries a name, LEAD WITH THE NAME. Same defect class as above, one level up.
     $verb = switch ($op) { 'Create' { 'Add' } 'Update' { 'Change' } 'Remove' { 'Remove' } default { $op } }
-    $what = if ($key) { "$entity row $key" } else { $entity }
+    $friendly = Get-PimQueueFriendlyName -Payload $p
+    $keyIsId = (Test-PimQueueLooksLikeId $key) -or ($key -match '^[^|]+\|[0-9a-fA-F-]{36}$')
+    $what = if ($key -and $keyIsId -and $friendly) { "$friendly in $entity" }
+            elseif ($key) { "$entity row $key" }
+            else { $entity }
     if ($type) { return ("{0}: {1} ({2})" -f $verb, $what, $type) }
     return ("{0} {1}" -f $verb, $what)
 }

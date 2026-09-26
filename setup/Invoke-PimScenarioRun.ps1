@@ -59,13 +59,13 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('S1','S2','S3','S4','S5','S6')][string]$Scenario,
+    [ValidateSet('S1','S2','S3','S5','S6')][string]$Scenario,
 
     [string]$EngineScope = 'All',
     [ValidateSet('Full','Delta')][string]$EngineMode = 'Delta',
 
     [string]$TenantId,
-    [ValidateRange(0,2)][int]$SlaveRing = 2,
+    [ValidateRange(0,2)][int]$SlaveRing = 0,
     [string]$BaselineDocPath,
     [string]$BaselineUrl,
     [string]$BaselineAccessToken,

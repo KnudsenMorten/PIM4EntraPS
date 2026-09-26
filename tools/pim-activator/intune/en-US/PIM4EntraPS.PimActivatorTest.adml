@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<policyDefinitionResources revision="1.0" schemaVersion="1.0"
+<policyDefinitionResources revision="1.1" schemaVersion="1.0"
                             xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"
                             xmlns:xsd="http://www.w3.org/2001/XMLSchema"
                             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -15,6 +15,15 @@
       <string id="TenantCatalog_Explain">JSON array of tenants for the PIM Activator browser extension -- TEST channel build (extension id glldnbmjpdkjemcnficagdhgienfdpoo). The TEST extension reads this via chrome.storage.managed.tenantCatalog on every popup load.
 
 This is the SAME catalog shape as the released channel; it is written to the TEST extension's own 3rdparty policy path so the released and TEST builds can be centrally configured side-by-side on one device with no conflict.</string>
+      <string id="AutoActivateMax_EdgeTest">Auto-activate: maximum groups (TEST) -- Microsoft Edge</string>
+      <string id="AutoActivateMax_ChromeTest">Auto-activate: maximum groups (TEST) -- Google Chrome</string>
+      <string id="AutoActivateMax_Explain">TEST channel build (extension id glldnbmjpdkjemcnficagdhgienfdpoo). Limits how many groups a user on this device can mark "auto" in the PIM Activator (least privilege).
+
+0 = auto-activation is turned off on this device.
+1-100 = at most that many groups. Ticking one more is refused with a message; if more were already ticked, only that many are activated and the rest are marked "Not auto-activated".
+Not Configured = no limit.
+
+Manual activation is not affected. Device policy only; users cannot change it and the tenant catalog cannot override it.</string>
     </stringTable>
     <presentationTable>
       <presentation id="TenantCatalog_EdgeTest_Presentation">
@@ -26,6 +35,12 @@ This is the SAME catalog shape as the released channel; it is written to the TES
         <textBox refId="TenantCatalog_ChromeTest_Value">
           <label>Tenant catalog JSON (Chrome, TEST):</label>
         </textBox>
+      </presentation>
+      <presentation id="AutoActivateMax_EdgeTest_Presentation">
+        <decimalTextBox refId="AutoActivateMax_EdgeTest_Value" defaultValue="3" spinStep="1">Maximum auto-activated groups (Edge, TEST), 0 = off:</decimalTextBox>
+      </presentation>
+      <presentation id="AutoActivateMax_ChromeTest_Presentation">
+        <decimalTextBox refId="AutoActivateMax_ChromeTest_Value" defaultValue="3" spinStep="1">Maximum auto-activated groups (Chrome, TEST), 0 = off:</decimalTextBox>
       </presentation>
     </presentationTable>
   </resources>

@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when it is dot-sourced without the full PIM-Functions module.
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) {
@@ -357,7 +357,9 @@ function Invoke-PimPreflightValidation {
             # must be matched optionally-escaped -- the old pattern ('\\\}') never matched, the
             # token survived as a literal, and EVERY legitimate UPN got a false warning then too.
             $reSrc = $reSrc -replace '\\\{[A-Za-z][A-Za-z0-9]*\\?\}', '.*'
-            [regex]::new('^' + $reSrc + '($|@)')
+            # 2026-09-21 (operator, EFIF: "i dont see the problem here" -- 'adm-e-chau-t0-c' vs '...-T0-...'): a UPN is
+            # case-INsensitive in Entra, so the convention is too. Case-sensitive, every lower-case 't0'/'t1' warned.
+            [regex]::new('^' + $reSrc + '($|@)', 'IgnoreCase')
         } catch { $null }
     }
     $adminPatternRegex = $null
@@ -489,6 +491,45 @@ function Invoke-PimPreflightValidation {
         }
     }
 
+    # 🔴 THE REPLICATED ADMINS ARE ADMINS TOO (RIDE, 2026-09-22: "tons of errors here" -- 11x PIM-FK-002
+    # on a managed tenant whose admins had just arrived from the master).
+    # On an MSP slave the downlink writes the master's admins into their OWN entity,
+    # 'Account-Definitions-Admins-Central' (PIM-Downlink.ps1 Invoke-PimDownlinkAdminApply), because they
+    # are governed by the master and must never be edited locally. The slave's own
+    # 'Account-Definitions-Admins' holds only its LOCAL admins. The memberships arrive in the same pull
+    # and name those central accounts -- so an index built from the local entity alone declares every
+    # replicated membership an orphan, with a "Remove this assignment" button that would undo the
+    # replication and a "Add ... to admins" button that would fork a local copy of a master-owned
+    # account. Measured on RIDE: 18 central admins, 3 local, 11 errors, all of them false.
+    # Kept as a SEPARATE set rather than merged into $adminIndex on purpose: every other admin rule
+    # below reports by ROW INDEX into Account-Definitions-Admins, so a central row in that index would
+    # point findings at the wrong row -- and these rows are read-only anyway, so none of those rules
+    # (naming, TAP, orphan, status, ring/target) has anything actionable to say about them.
+    $centralAdminNames = New-Object System.Collections.Generic.HashSet[string]   # UserName AND UPN, lower
+    $centralAdminList  = New-Object System.Collections.Generic.List[string]      # for the did-you-mean haystack
+    if (Get-Command Read-PimRows -ErrorAction SilentlyContinue) {
+        try {
+            foreach ($cr in @((Read-PimRows -BaseName 'Account-Definitions-Admins-Central').rows)) {
+                foreach ($col in @('UserName', 'UserPrincipalName')) {
+                    $cv = "$(Get-PimRowValue -Row $cr -Column $col)".Trim()
+                    if (-not $cv) { continue }
+                    if ($centralAdminNames.Add($cv.ToLowerInvariant())) { $centralAdminList.Add($cv) }
+                }
+            }
+        } catch {
+            # No such entity (single tenant, or a master) -- not a finding. Only a slave has one.
+        }
+    }
+    $isKnownAdminName = {
+        param([string]$Name)
+        $k = "$Name".Trim().ToLowerInvariant()
+        if (-not $k) { return $false }
+        if ($centralAdminNames.Contains($k)) { return $true }
+        # a full UPN whose local part is a central admin's UserName is a reference to that admin
+        if ($k.Contains('@') -and $centralAdminNames.Contains($k.Substring(0, $k.IndexOf('@')))) { return $true }
+        return $false
+    }
+
     # Tenant cache (entra-roles, aus, azure-scopes) for stale / orphan checks.
     $cachedEntraRoleNames = @{}  # lower -> displayName
     $cachedAuNames        = @{}  # lower -> displayName / id
@@ -587,7 +628,7 @@ function Invoke-PimPreflightValidation {
                 if (-not $groupTagIndex.ContainsKey($val.ToLowerInvariant())) {
                     $suggestion = $null
                     $matches = Get-PimClosestMatches -Needle $val -Haystack $knownTagList -MaxDistance 5 -Top 3
-                    if ($matches -and $matches.Count -gt 0) {
+                    if (@($matches).Count -gt 0) {
                         $list = ($matches | ForEach-Object { "$($_.Value) (distance $($_.Distance))" }) -join ', '
                         $suggestion = "Define '$val' in one of $(($defGroupBases | Where-Object { $_ -ne 'PIM-Definitions-Roles' }) -join ', '), or change this row to one of: $list."
                     } else {
@@ -647,7 +688,7 @@ function Invoke-PimPreflightValidation {
     # ------------------------------------------------------------------
     if ($loaded.ContainsKey('PIM-Assignments-Admins')) {
         $rows = $loaded['PIM-Assignments-Admins'].rows
-        $knownUpns = @($adminIndex.Values | ForEach-Object { $_.Upn })
+        $knownUpns = @(@($adminIndex.Values | ForEach-Object { $_.Upn }) + @($centralAdminList)) | Where-Object { $_ }
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
@@ -658,6 +699,8 @@ function Invoke-PimPreflightValidation {
             # A membership naming the admin by UserName, or by a full UPN whose local part is an admin's UserName, is a
             # reference to that admin: the UPN is composed from the UserName at create (UserName vs UPN, 2.4.377).
             if ($adminUserNames.Contains($key) -or ($key.Contains('@') -and $adminUserNames.Contains($key.Substring(0, $key.IndexOf('@'))))) { continue }
+            # ...and an admin REPLICATED from the master is defined, just not here (see $centralAdminNames above).
+            if (& $isKnownAdminName $u) { continue }
             # Try UPN-derivation match too (raw UserName -> UserName@defaultDomain).
             $derivedHit = $false
             if ($defaultDomain) {
@@ -667,7 +710,12 @@ function Invoke-PimPreflightValidation {
             if ($derivedHit) { continue }
             $suggestion = $null
             $matches = Get-PimClosestMatches -Needle $u -Haystack $knownUpns -MaxDistance 5 -Top 3
-            if ($matches -and $matches.Count -gt 0) {
+            # 🪤 `@($matches).Count`, not `$matches.Count` -- and it is not cosmetic. On WINDOWS
+            # POWERSHELL 5.1 a ONE-element result unwraps to a bare PSCustomObject, which has no
+            # .Count there (pwsh 7 gives it one), so `$matches.Count -gt 0` was FALSE and the
+            # did-you-mean list was dropped for exactly the case it is most useful in: a single
+            # near-miss, e.g. one character wrong in an admin's UserName. Four rules had it.
+            if (@($matches).Count -gt 0) {
                 $list = ($matches | ForEach-Object { "$($_.Value) (distance $($_.Distance))" }) -join ', '
                 $suggestion = "Add '$u' to Account-Definitions-Admins, or change this row to one of: $list."
             } else {
@@ -704,7 +752,7 @@ function Invoke-PimPreflightValidation {
             if ($auTagIndex.ContainsKey($t.ToLowerInvariant())) { continue }
             $suggestion = $null
             $matches = Get-PimClosestMatches -Needle $t -Haystack $knownAuTags -MaxDistance 5 -Top 3
-            if ($matches -and $matches.Count -gt 0) {
+            if (@($matches).Count -gt 0) {
                 $list = ($matches | ForEach-Object { "$($_.Value) (distance $($_.Distance))" }) -join ', '
                 $suggestion = "Add '$t' to PIM-Definitions-AU, or change this row to one of: $list."
             } else {
@@ -920,11 +968,28 @@ function Invoke-PimPreflightValidation {
             $matched = $false
             foreach ($rx in $applicable) { if ($rx.IsMatch($upn)) { $matched = $true; break } }
             if (-not $matched) {
-                $patLabel = if ($purpose -ieq 'HighPriv') { "AdminAccountPatternHighPriv '$($naming.AdminAccountPatternHighPriv)'" }
-                            elseif ($purpose -ieq 'Day2Day') { "AdminAccountPattern '$($naming.AdminAccountPattern)'" }
-                            else { "AdminAccountPattern '$($naming.AdminAccountPattern)' or AdminAccountPatternHighPriv '$($naming.AdminAccountPatternHighPriv)'" }
+                # Say what the name SHOULD look like for THIS row -- the pattern with its values filled in -- not only
+                # the raw template, which the operator cannot check by eye ("i dont see the problem here").
+                $fill = {
+                    param([string]$tpl)
+                    $prefixes = $naming.AdminTypePrefixes; $suffixes = $naming.EnvironmentSuffixes
+                    $at = "$(Get-PimRowValue -Row $r -Column 'AdminType')".Trim(); if (-not $at) { $at = "$($naming.AdminTypeDefault)".Trim() }
+                    $en = "$(Get-PimRowValue -Row $r -Column 'Environment')".Trim(); if (-not $en) { $en = "$($naming.EnvironmentDefault)".Trim() }
+                    $pick = { param($map, $k) if ($null -eq $map -or -not $k) { return $null }; if ($map -is [System.Collections.IDictionary]) { if ($map.Contains($k)) { return "$($map[$k])" } } elseif ($map.PSObject.Properties[$k]) { return "$($map.$k)" }; $null }
+                    $co = "$(Get-PimRowValue -Row $r -Column 'Company')".Trim(); if (-not $co) { $co = "$($naming.Company)".Trim() }
+                    $ini = "$(Get-PimRowValue -Row $r -Column 'Initials')".Trim()
+                    $vals = @{ AdminTypePrefix = (& $pick $prefixes $at); Platform = (& $pick $suffixes $en); Company = $co; Initial = $ini; Initials = $ini; AdminWord = "$($naming.AdminWord)".Trim() }
+                    $out = "$tpl"
+                    for ($pass = 0; $pass -lt 3; $pass++) {
+                        $out = [regex]::Replace($out, '\{([A-Za-z][A-Za-z0-9]*)\}',{ param($m) $v = $vals[$m.Groups[1].Value]; if ("$v".Trim()) { "$v" } else { '<' + $m.Groups[1].Value.ToLowerInvariant() + '>' } })
+                    }
+                    $out
+                }
+                $patLabel = if ($purpose -ieq 'HighPriv') { "the high-privilege pattern, i.e. '$(& $fill $naming.AdminAccountPatternHighPriv)' ($($naming.AdminAccountPatternHighPriv))" }
+                            elseif ($purpose -ieq 'Day2Day') { "the day-to-day pattern, i.e. '$(& $fill $naming.AdminAccountPattern)' ($($naming.AdminAccountPattern))" }
+                            else { "either pattern: '$(& $fill $naming.AdminAccountPattern)' or '$(& $fill $naming.AdminAccountPatternHighPriv)'" }
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-NAME-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'UserPrincipalName' `
-                    -Message "UPN '$upn' (Purpose='$purpose') doesn't match $patLabel." `
+                    -Message "UPN '$upn' (Purpose='$purpose') doesn't match $patLabel -- upper and lower case are the same." `
                     -Suggestion "Either rename to fit the convention, fix the row's Purpose, or change the pattern in Settings > Naming (stored in SQL)."))
             }
         }
@@ -1204,7 +1269,7 @@ function Invoke-PimPreflightValidation {
                     # @() -- on Windows PowerShell 5.1 a SINGLE match unwraps to a bare object with no
                     # .Count, so the did-you-mean (which the Fix-all uses) silently disappeared there.
                     $matches = @(Get-PimClosestMatches -Needle $rn -Haystack @($cachedEntraRoleNames.Values) -MaxDistance 6 -Top 3)
-                    $suggestion = if ($matches -and $matches.Count -gt 0) {
+                    $suggestion = if (@($matches).Count -gt 0) {
                         "Did you mean: $((($matches | ForEach-Object { $_.Value }) -join ', '))?"
                     } else {
                         "Correct the role name to an existing Entra role, or delete this row."
@@ -1327,6 +1392,24 @@ function Invoke-PimPreflightValidation {
     }
 
     # ------------------------------------------------------------------
+    # PIM-UPN-001 -- AN ADMIN ROW MUST CARRY ITS UserPrincipalName (operator 2026-09-21: "we can not have a admin
+    # without a upn. that makes no sense, then it is not compatible"). Measured on EFIF: six rows imported with a
+    # UserName only never showed on Admin accounts, and every UPN-keyed path (TAP, forwarding, sign-in) passed them
+    # by. The UPN is this tenant's; a replicated admin gets its slave's UPN built at staging (UserName@slave domain).
+    if ($loaded.ContainsKey('Account-Definitions-Admins')) {
+        $rows = $loaded['Account-Definitions-Admins'].rows
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            if (Test-PimRowIsBlank -Row $r) { continue }
+            if ("$(Get-PimRowValue -Row $r -Column 'UserPrincipalName')".Trim()) { continue }
+            $un = "$(Get-PimRowValue -Row $r -Column 'UserName')".Trim()
+            [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-UPN-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'UserPrincipalName' `
+                -Message "admin '$un' has no UserPrincipalName -- an admin without a UPN is not a valid admin: it cannot sign in, get a TAP or be managed." `
+                -Suggestion "Set UserPrincipalName to '$un@<the tenant's domain>'."))
+        }
+    }
+
+    # ------------------------------------------------------------------
     # PIM-MAIL-001 (71.19) -- WHO RECEIVES AN ADMIN'S MAIL IS THE SPONSOR DEPARTMENT, NOT A PERSON.
     # Operator 2026-09-16: "the logic is that an admin is linked to a dept (sponsor) and the dept has owners";
     # REQUIREMENTS §62: "we dont add a manager on the person ... whoever is the actual manager of the dept gets the
@@ -1373,17 +1456,12 @@ function Invoke-PimPreflightValidation {
 
     # ------------------------------------------------------------------
     # PIM-RING-001: Ring column (deployment-ring rollout staging) must be
-    # blank or a WHOLE NUMBER. DOC-16 a (§33.28): an invalid value UNDER-grants,
-    # it does not over-grant. The master publishes an admin only when Ring is a
-    # whole number (PIM-Downlink.ps1, '^\d+$'), and each slave's ring is set
-    # locally in the slave -- so a value that is not a whole number is not
-    # published at all: the admin reaches NO managed tenant and is silently not
-    # deployed. 2.4.371 (DOC-16 a vs c): ANY whole number is valid -- the grid,
-    # the account editor and the wizard accept 3, 7, 12 ... and the master
-    # publishes them -- so only a non-whole-number value is flagged here (the old
-    # 0/1/2 check contradicted the picker and the Fix-all "repaired" ring 3 to 2).
-    # Severity is WARNING by design (never blocks Save); the Validate tab's
-    # Fix-all offers Ring=2 or blank.
+    # blank, 0 (dev), 1 (test) or 2 (broad) -- §77.20 (operator 2026-09-21), the
+    # same order as the update rings. DOC-16 a (§33.28): an invalid value
+    # UNDER-grants, it does not over-grant: the admin reaches NO managed tenant.
+    # Each slave's ring is set locally in the slave. Severity is WARNING by
+    # design (never blocks Save); the Validate tab's Fix-all offers Ring=0
+    # (dev tenants only, the narrowest) or blank.
     # ------------------------------------------------------------------
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {
         $rows = $loaded['Account-Definitions-Admins'].rows
@@ -1393,11 +1471,11 @@ function Invoke-PimPreflightValidation {
             if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') { continue }   # AD-only: no Entra tenant rollout
             $ringVal = (Get-PimRowValue -Row $r -Column 'Ring').Trim()
             if (-not $ringVal) { continue }
-            if ($ringVal -notmatch '^\d+$') {
+            if ($ringVal -notmatch '^[0-2]$') {
                 $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-RING-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Ring' `
-                    -Message "Ring '$ringVal' for '$upn' is not a whole number, so it is not a deployment ring. The master publishes only whole-number rings, so this admin reaches NO managed tenant -- it UNDER-grants: the admin is silently NOT deployed (it is never widened to all tenants)." `
-                    -Suggestion "Set Ring to the whole number you intend (an admin on ring N reaches the managed tenants whose own ring is N or higher), or use Fix-all (Ring=2 or blank)."))
+                    -Message "Ring '$ringVal' for '$upn' is not a deployment ring (0 = dev, 1 = test, 2 = broad), so this admin reaches NO managed tenant -- it UNDER-grants: the admin is silently NOT deployed (it is never widened to all tenants)." `
+                    -Suggestion "Set Ring to 0 (dev tenants only), 1 (dev + test) or 2 (every tenant) -- an admin on ring N reaches the managed tenants whose own ring is N or lower -- or use Fix-all (Ring=0 or blank)."))
             }
         }
     }
@@ -1419,11 +1497,11 @@ function Invoke-PimPreflightValidation {
             if (Test-PimRowIsBlank -Row $r) { continue }
             $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
             $mode = (Get-PimRowValue -Row $r -Column 'ManagementMode').Trim()
-            # DOC-16 a vs c (2.4.371): any WHOLE NUMBER is a valid ring (the downlink publishes ^\d+$); ring 3+ is not "no ring".
-            if ($mode -ieq 'msp' -and (Get-PimRowValue -Row $r -Column 'Ring').Trim() -notmatch '^\d+$') {
+            # 77.20 (2.4.388): the rings are 0 (dev), 1 (test), 2 (broad) only.
+            if ($mode -ieq 'msp' -and (Get-PimRowValue -Row $r -Column 'Ring').Trim() -notmatch '^[0-2]$') {
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Ring' `
-                    -Message "'$upn' is ManagementMode=msp (synced to slaves) but has no valid Ring (blank or not a whole number) -- the downlink sends it to NO slave." `
-                    -Suggestion "Set Ring to a whole number (0, 1, 2, ...: which slaves receive it), or set ManagementMode=local if it should not be synced."))
+                    -Message "'$upn' is ManagementMode=msp (synced to slaves) but has no valid Ring (blank, or not 0, 1 or 2) -- the downlink sends it to NO slave." `
+                    -Suggestion "Set Ring to 0 (dev tenants), 1 (dev + test) or 2 (every tenant), or set ManagementMode=local if it should not be synced."))
             }
             $tgt = (Get-PimRowValue -Row $r -Column 'Target').Trim()
             if ($tgt -and (Get-Command Test-PimAdminTargetSelector -ErrorAction SilentlyContinue)) {
@@ -1492,7 +1570,7 @@ function Invoke-PimPreflightValidation {
                         continue
                     }
                     [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-MSP-003' -Csv $repEnt -Row $i -Column 'Replicate' -Message "'$label' -- $err" `
-                        -Suggestion "Set Replicate to No, Yes or Follow. On an admin it must match ManagementMode: msp = Yes, local = No."))
+                        -Suggestion "Pick the replication from the dropdown -- no replication (blank) or Replicate to managed tenants; an admin also offers 'only where a delegation needs this admin'. On an admin it must match Management mode: msp = replicate, local/blank = no replication."))
                 }
                 if ($repKind -ne 'admin') {
                     foreach ($w in @($chk.warnings)) {

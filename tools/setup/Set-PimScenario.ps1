@@ -16,7 +16,7 @@
 param(
     [Parameter(Mandatory)][string]$SqlServerFqdn,
     [string]$SqlDatabase = 'PimPlatform',
-    [Parameter(Mandatory)][ValidateSet('S1','S2','S3','S4','S5','S6')][string]$Scenario,
+    [Parameter(Mandatory)][ValidateSet('S1','S2','S3','S5','S6')][string]$Scenario,
     [Parameter(Mandatory)][string]$TenantId,
     # Certificate identity -- OR -UseSignedInAccount (71.33: the signed-in az user, a member of the SQL admin group).
     [string]$ClientId,

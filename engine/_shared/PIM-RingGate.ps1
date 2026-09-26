@@ -61,7 +61,7 @@
 #   Same mechanism, two independently-owned maps.
 #
 #   🪤 A THIRD thing is also called "ring" in PIM and is NOT version selection at
-#   all: `admin.Ring <= tenant.Ring` (pim.vw_AdminTenantTargets,
+#   all: `tenant.Ring <= admin.Ring` (§77.20; pim.vw_AdminTenantTargets,
 #   Select-PimDownlinkAdmins in PIM-Downlink.ps1) decides WHICH ADMINS REACH
 #   WHICH TENANTS. That is ASSIGNMENT SCOPING. It is genuinely PIM's own, it is
 #   unchanged by RING-1, and it is the "master-store assignment provider" RING-1

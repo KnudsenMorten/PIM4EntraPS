@@ -535,15 +535,60 @@ function New-PimAdminsProvider {
                     if ($k -and -not $seen.ContainsKey($k)) { $seen[$k] = $true; [void]$rows.Add($u) }
                 }
             }
+            # 🔴 AN ADMIN THIS TENANT ALREADY HAS A ROW FOR IS PART OF THE POPULATION, WHATEVER IT IS
+            # CALLED (operator, 2026-09-22: "you can not block admins due to different name pattern").
+            # The prefix filter above answers "which accounts in this tenant are admin accounts?" and
+            # it must stay (BUG-12: without it the whole user population is a removal candidate). But
+            # an account NAMED BY A DESIRED ROW is not a discovery question at all -- PIM is already
+            # managing it, by its own store. On a managed tenant those rows arrive from the master
+            # (Owner=MSP) and carry the MASTER's naming, so a slave whose prefixes differ could never
+            # see them: the diff said "not present", every tick re-created the account, and the guard
+            # that noticed this WITHHELD the admin instead -- naming deciding replication, which is
+            # exactly what must not happen.
+            # 🔑 This is a TARGETED read of named users (one lookup each), never a widening of the
+            # filter: it cannot admit an account no row asks for, so the BUG-12 property holds.
+            $desiredUpns = New-Object System.Collections.Generic.List[string]
+            foreach ($d in @($ctx['adminsDesiredAll'])) {
+                if ($null -eq $d) { continue }
+                $u = "$(Get-PimRowProp -Row $d -Names @('UserPrincipalName','userPrincipalName','UPN','upn'))".Trim()
+                if (-not $u) { continue }
+                if ($u.IndexOf('@') -lt 0) { continue }          # a bare name cannot be read by UPN
+                if (-not $desiredUpns.Contains($u)) { [void]$desiredUpns.Add($u) }
+            }
+            $addedByRow = New-Object System.Collections.Generic.List[string]
+            # 🪤 BUG-138: NOT `@($rows)` -- the array subexpression over a List[object] throws
+            # "Argument types do not match" at runtime (tests/Test-PimListWrapTrap.ps1). That is
+            # exactly how 2.4.412 broke RIDE's delta-admins job: the scope threw before it read a
+            # single account, so nine replicated admins were never created, and delta-admin-tap then
+            # failed nine times with "user not found". Index the UPNs once instead -- correct AND O(1).
+            $liveUpnSeen = @{}
+            foreach ($lr in $rows) { $lu = "$($lr.userPrincipalName)".Trim().ToLowerInvariant(); if ($lu) { $liveUpnSeen[$lu] = $true } }
+            foreach ($u in $desiredUpns) {
+                if ($liveUpnSeen.ContainsKey($u.ToLowerInvariant())) { continue }
+                $one = $null
+                try { $one = Invoke-PimGraph -Path ("/users/{0}?`$select=id,userPrincipalName,displayName,accountEnabled,givenName,surname,jobTitle,usageLocation,companyName,passwordPolicies,onPremisesSyncEnabled" -f [uri]::EscapeDataString($u)) } catch { $one = $null }
+                if ($null -eq $one -or -not "$($one.id)".Trim()) { continue }   # not created yet -- the create path owns that
+                $k = "$($one.id)"
+                if ($k -and -not $seen.ContainsKey($k)) {
+                    $seen[$k] = $true; [void]$rows.Add($one); [void]$addedByRow.Add($u)
+                    $nu = "$($one.userPrincipalName)".Trim().ToLowerInvariant(); if ($nu) { $liveUpnSeen[$nu] = $true }
+                }
+            }
             $live = $rows.ToArray()
             # Structural assertion: both sides of the diff must be the same population.
             # If anything non-admin slipped through (a server-side filter that silently
             # did nothing, say), stop -- do not diff a mixed population.
+            # 🔑 The accounts a DESIRED ROW names are part of that population by definition, so they
+            # are passed as allowed: without this the assertion would reject the very rows the store
+            # asks for (a centrally-managed admin on a tenant with different naming).
             if (Get-Command Assert-PimAdminPopulationComparable -ErrorAction SilentlyContinue) {
-                $chk = Assert-PimAdminPopulationComparable -Live $live -Prefixes $prefixes
+                $chk = Assert-PimAdminPopulationComparable -Live $live -Prefixes $prefixes -AlsoAllowed @($desiredUpns)
                 if (-not $chk.ok) { throw ("Admins scope: " + $chk.reason) }
             }
             Write-Host ("    [admins] live set limited to {0} admin account(s) by prefix: {1}" -f $live.Count, ($prefixes -join ', ')) -ForegroundColor DarkGray
+            if ($addedByRow.Count) {
+                Write-Host ("    [admins] + {0} account(s) named by a desired row whose name matches no prefix (managed by their row, not by naming): {1}" -f $addedByRow.Count, (($addedByRow | Select-Object -First 8) -join ', ')) -ForegroundColor DarkGray
+            }
             # #8: a SCHEDULED admin's existing account (a re-hire, say) is not this run's business
             # either. Taken out of LIVE as well as desired, it can never become an unmanaged-admin
             # removal while its row waits for its ProvisionDate.
@@ -1212,6 +1257,11 @@ function New-PimEntraRolesProvider {
             $gid = $ctx['tagToGroupId'][$tag]
             $rn  = Get-PimRowProp -Row $d -Names @('RoleDefinitionName','RoleName')
             $rid = $ctx['roleNameToId'][$rn.ToLowerInvariant()]
+            if ($gid -and -not $rid) {
+                # BUG-234 (77.3): say WHICH half is missing, and for a role, the closest real one.
+                $cat = @($Global:Roles_All_ID | ForEach-Object { "$($_.DisplayName)" })
+                throw (Get-PimEntraRoleNotFoundMessage -Scope 'EntraRoles' -RoleName $rn -Where "the Entra role assignment of group tag '$tag'" -Catalog $cat)
+            }
             if (-not $gid -or -not $rid) { throw "EntraRoles: unresolved group/role ($tag / $rn)" }
             $type = Get-PimRowProp -Row $d -Names @('AssignmentType')
             $perm = (Get-PimRowProp -Row $d -Names @('Permanent')) -match '(?i)true'
@@ -1276,6 +1326,48 @@ function Get-PimEntraRoleNameMap {
     return $map
 }
 
+function Get-PimEntraRoleSuggestion {
+    <#
+      PURE. BUG-234 (77.3): the closest Entra role display name for a name the tenant does not have, or ''.
+      Display names are not stable across tenants: measured 2026-09-21, EFIF calls template
+      2af84b1e-32c8-42b7-82a3-daa748c1ce1b "Office Apps Administrator" while a row named it "Microsoft 365 Apps
+      Administrator", and every run failed for two days as "Unrecognised failure". Known renames first, then the
+      catalog name sharing the most words (ignoring 'administrator'/'admin', which every other role shares).
+    #>
+    param([string]$Name, [string[]]$Catalog)
+    $n = "$Name".Trim(); if (-not $n) { return '' }
+    $cat = @($Catalog | Where-Object { "$_".Trim() })
+    $aliases = @{
+        'microsoft 365 apps administrator' = 'Office Apps Administrator'; 'office apps administrator' = 'Microsoft 365 Apps Administrator'
+        'microsoft entra joined device local administrator' = 'Azure AD Joined Device Local Administrator'; 'azure ad joined device local administrator' = 'Microsoft Entra Joined Device Local Administrator'
+        'company administrator' = 'Global Administrator'
+    }
+    $a = $aliases[$n.ToLowerInvariant()]
+    if ($a) { $hit = @($cat | Where-Object { "$_" -ieq $a }); if ($hit.Count) { return "$($hit[0])" } }
+    $words = { param($s) @(("$s".ToLowerInvariant() -split '[^a-z0-9]+') | Where-Object { $_ -and $_ -notin @('administrator','admin','microsoft','365','the','of') } | Sort-Object -Unique) }
+    $want = & $words $n
+    if (-not $want.Count) { return '' }
+    $best = ''; $bestScore = 0.0
+    foreach ($c in $cat) {
+        $have = & $words $c
+        if (-not $have.Count) { continue }
+        $common = @($want | Where-Object { $have -contains $_ }).Count
+        if (-not $common) { continue }
+        $score = $common / [double](@(@($want) + @($have) | Sort-Object -Unique).Count)
+        if ($score -gt $bestScore) { $bestScore = $score; $best = "$c" }
+    }
+    if ($bestScore -ge 0.34) { return $best }
+    ''
+}
+
+function Get-PimEntraRoleNotFoundMessage {
+    # PURE. BUG-234: the sentence an operator can act on -- which role, which row, the closest real role.
+    param([Parameter(Mandatory)][string]$Scope, [string]$RoleName, [string]$Where, [string[]]$Catalog)
+    $s = Get-PimEntraRoleSuggestion -Name $RoleName -Catalog $Catalog
+    "${Scope}: Entra has no role named '$RoleName' in this tenant" + $(if ($s) { " -- did you mean '$s'? (role display names differ between tenants)" } else { '' }) +
+        $(if ("$Where".Trim()) { ". Used by: $Where" } else { '' }) + ". Fix: correct the role name on that row, or remove the row."
+}
+
 function Get-PimGroupDefinitionRows {
     # Every entity that DEFINES a group becomes one create candidate. All share the
     # GroupName/GroupTag/GroupDescription/IsRoleAssignable/AdministrativeUnitTag columns.
@@ -1319,6 +1411,9 @@ function Get-PimGroupDefinitionRows {
                 PolicyTemplate        = (Get-PimRowProp -Row $r -Names @('PolicyTemplate'))
                 ReviewCycle           = (Get-PimRowProp -Row $r -Names @('ReviewCycle'))
                 Workload              = (Get-PimRowProp -Row $r -Names @('Workload'))   # REQ-U: pairs the group with its workload binding
+                # BUG-255: the former name(s) the Groups provider renames FROM. Dropped by this projection in 2.4.421, so the
+                # released fix never saw it (live run 8 still made a second group) -- carried now, and pinned by the test.
+                PreviousGroupName     = (Get-PimRowProp -Row $r -Names @('PreviousGroupName'))
                 Lifecycle             = $life
                 SourceEntity          = $e
             })
@@ -1420,6 +1515,65 @@ function Test-PimNameAlreadyLive {
         }
         foreach ($o in $r) { if ($o -and "$($o.displayName)" -eq $n) { return "$($o.id)" } }
     } catch { Write-Verbose "existence probe ($Kind '$n'): $($_.Exception.Message)" }
+    return $null
+}
+
+function Get-PimPreviousNames {
+    <#
+      PURE. The former display names a definition row carries (REQ-REN-1 / BUG-255): the Manager's rename action appends
+      the old name to PreviousGroupName (groups) or PreviousAUDisplayName (AUs), '|'-separated, newest LAST. Returns them
+      newest FIRST, trimmed, de-duplicated (case-insensitive), without the row's current name.
+    #>
+    param([object]$Row, [ValidateSet('group', 'administrativeUnit')][string]$Kind = 'group', [string]$CurrentName = '')
+    $col = if ($Kind -eq 'group') { 'PreviousGroupName' } else { 'PreviousAUDisplayName' }
+    $raw = "$(Get-PimRowProp -Row $Row -Names @($col))"
+    $out = New-Object System.Collections.Generic.List[string]
+    $parts = @($raw -split '\|' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    [array]::Reverse($parts)
+    foreach ($p in $parts) {
+        if ($CurrentName -and $p -ieq "$CurrentName".Trim()) { continue }
+        if (@($out | Where-Object { $_ -ieq $p }).Count) { continue }
+        $out.Add($p)
+    }
+    return $out.ToArray()   # unrolled on purpose: callers wrap in @() (a comma-return would nest the array)
+}
+
+function Invoke-PimRenameInPlace {
+    <#
+      🔴 BUG-255 (§78 live test, 2026-09-24) -- REQ-REN-1 says a rename is a RENAME, "not a delete+create". The engine keys
+      groups and AUs on display name, so a renamed definition used to reach Entra as a NEW object while the old one kept
+      every membership and role it held (scheduled runs never prune) -- privileged access left on an object nobody manages.
+      Called by ApplyCreate AFTER the by-name check found nothing under the new name: if the row names a former name and
+      an object with that name is live, PATCH its displayName (and a group's mailNickname) instead of creating. Newest
+      former name first; the first one found wins. Returns the renamed object, or $null (then the caller creates).
+    #>
+    param([Parameter(Mandatory)][ValidateSet('group', 'administrativeUnit')][string]$Kind, [Parameter(Mandatory)][string]$NewName, [object]$Row)
+    foreach ($old in @(Get-PimPreviousNames -Row $Row -Kind $Kind -CurrentName $NewName)) {
+        $oid = Test-PimNameAlreadyLive -Kind $Kind -DisplayName $old
+        if (-not $oid) { continue }
+        if ($Kind -eq 'group') {
+            [void](Invoke-PimGraph -Method PATCH -Path "/groups/$oid" -Body @{ displayName = $NewName; mailNickname = (Get-PimMailNickname $NewName) })
+        } else {
+            [void](Invoke-PimGraph -Method PATCH -Path "/directory/administrativeUnits/$oid" -Body @{ displayName = $NewName })
+        }
+        Write-Host ("    [~] {0} (RENAMED in place from '{1}' -- same object, memberships and roles kept)" -f $NewName, $old) -ForegroundColor Cyan
+        $o = [pscustomobject]@{ id = $oid; displayName = $NewName; renamedFrom = $old }
+        # The context cache de-duplicates by id (Merge-PimCacheItem), so the cached copy would keep the OLD name and every
+        # later scope in this run would look the group up by a name it no longer has -- rename the cached copy itself.
+        $var = if ($Kind -eq 'group') { 'Groups_All_ID' } else { 'AU_All_ID' }
+        $hit = $false
+        foreach ($c in @(Get-Variable -Scope Global -Name $var -ValueOnly -ErrorAction SilentlyContinue)) {
+            foreach ($x in @($c)) {
+                if ($x -and ("$($x.id)" -eq $oid -or "$($x.Id)" -eq $oid)) {
+                    foreach ($pn in 'displayName', 'DisplayName') { if ($x.PSObject.Properties[$pn]) { $x.$pn = $NewName } }
+                    $hit = $true
+                }
+            }
+        }
+        if (-not $hit -and (Get-Command Add-PimContextObject -ErrorAction SilentlyContinue)) { Add-PimContextObject -Kind $(if ($Kind -eq 'group') { 'Group' } else { 'AU' }) -Object $o }
+        if ($Kind -eq 'group') { $global:PIM_OwnedGroupsDirty = $true }
+        return $o
+    }
     return $null
 }
 
@@ -2071,6 +2225,9 @@ function New-PimAdministrativeUnitsProvider {
                 if (Get-Command Add-PimContextObject -ErrorAction SilentlyContinue) { Add-PimContextObject -Kind AU -Object $au }
                 return $au
             }
+            # BUG-255 / REQ-REN-1: a renamed AU renames the AU it already has (its members and scoped roles stay).
+            $ren = Invoke-PimRenameInPlace -Kind administrativeUnit -NewName "$($item.key)" -Row $d
+            if ($ren) { return $ren }
             $vis = Get-PimRowProp -Row $d -Names @('Visibility'); if (-not $vis) { $vis = 'Public' }
             $au = Invoke-PimGraph -Method POST -Path '/directory/administrativeUnits' -Body @{
                 displayName = "$($item.key)"; description = (Get-PimRowProp -Row $d -Names @('AUDescription')); visibility = $vis
@@ -2262,6 +2419,9 @@ function New-PimGroupsProvider {
                 if (Get-Command Add-PimContextObject -ErrorAction SilentlyContinue) { Add-PimContextObject -Kind Group -Object $g0 }
                 return $g0
             }
+            # BUG-255 / REQ-REN-1: a renamed definition renames the group it already has -- never a second group.
+            $ren = Invoke-PimRenameInPlace -Kind group -NewName $gn -Row $d
+            if ($ren) { return $ren }
             # 🔴 REQ-W (operator 2026-09-19: "it should be possible to deploy groups"): the REQ-U wave-2 create hold that
             # stood here is GONE. A workload group is ALWAYS created -- binding gated off, no binding row, prerequisites
             # not green or a binding read refused. Measured on internal (tick 17:01Z, 2.4.378/379): with 0 binding rows
@@ -2511,6 +2671,17 @@ function New-PimAdminMembersProvider {
                 if ($acctRow -and (Test-PimAdminIsAdOnly -Row $acctRow)) {
                     if (-not $outSeen.ContainsKey($ak)) { $outSeen[$ak] = $true; Write-Host ("    [AdminMembers] {0}: AD-only admin -- no Entra group membership (it does not exist in Entra)." -f $ak) -ForegroundColor DarkGray }
                     continue
+                }
+                # Operator 2026-09-25 (verify-convergence FAIL, internal): an admin whose ProvisionDate is in the FUTURE has no
+                # account yet, so its memberships were planned as creates for a principal that does not exist ("||role-...")
+                # and, after the grace window, reported as a CONVERGENCE FAILURE for two days. They are not due until the
+                # account is -- they leave the desired set until delta-admins creates it, then apply on the next run.
+                if ($acctRow -and (Get-Command Test-PimAdminProvisionDue -ErrorAction SilentlyContinue)) {
+                    $pd = Test-PimAdminProvisionDue -Row $acctRow
+                    if (-not $pd.due) {
+                        if (-not $outSeen.ContainsKey($ak)) { $outSeen[$ak] = $true; Write-Host ("    [AdminMembers] {0}: account is {1} -- memberships wait for it." -f $ak, $pd.reason) -ForegroundColor DarkGray }
+                        continue
+                    }
                 }
                 if ($acctRow) {
                     $o = Test-PimAdminIsOut -Row $acctRow -NowUtc $now -OffboardState $obMap[$ak]
@@ -3561,6 +3732,35 @@ function Repair-PimWriteLockedPolicy {
     Set-PimPolicyRuleSet -PolicyId $PolicyId -Rules $send.ToArray()
     return $true
 }
+function Get-PimPolicyRulePatchDiagnostic {
+    <#
+      2026-09-21 (operator, on "HTTP 400 : InvalidPolicyRule -- The policy rule is invalid.": "can you provide graph or
+      arm errors in here as i have nothing to work with"). Graph says only THAT the rule is invalid, never WHICH value.
+      So the message carries what is needed to find it: the rule body the engine SENT, the rule as it is LIVE now
+      (the difference is the offending value), and Graph's request-id + date for a Microsoft support case.
+      Best-effort -- a failure here never hides the original error, which always comes first.
+    #>
+    param([string]$PolicyId, [object]$Body, [string]$Message)
+    $parts = New-Object System.Collections.Generic.List[string]
+    [void]$parts.Add($Message)
+    try {
+        $le = $global:PimLastRestError
+        if ($le -and "$($le.body)" -and "$($le.url)" -like "*$PolicyId/rules/$($Body.id)*") {   # only THIS call's error, never a stale one
+            $e = ("$($le.body)" | ConvertFrom-Json -ErrorAction Stop).error
+            $ie = if ($e) { $e.innerError } else { $null }
+            if ($ie) { [void]$parts.Add("graph request-id=$($ie.'request-id') client-request-id=$($ie.'client-request-id') date=$(if ($ie.date -is [datetime]) { $ie.date.ToString('yyyy-MM-ddTHH:mm:ss') } else { $ie.date }) UTC") }
+            if ($e -and $e.details) { [void]$parts.Add('graph details: ' + (($e.details | ConvertTo-Json -Depth 6 -Compress))) }
+        }
+    } catch { }
+    $cut = { param($s) $s = "$s"; if ($s.Length -gt 1500) { $s.Substring(0, 1500) + '...' } else { $s } }
+    try { [void]$parts.Add('sent: ' + (& $cut ($Body | ConvertTo-Json -Depth 12 -Compress))) } catch { }
+    try {
+        $live = Invoke-PimGraph -Method GET -Path "/policies/roleManagementPolicies/$PolicyId/rules/$($Body.id)"
+        if ($live) { $live.PSObject.Properties.Remove('@odata.context'); [void]$parts.Add('live: ' + (& $cut ($live | ConvertTo-Json -Depth 12 -Compress))) }
+    } catch { [void]$parts.Add("live: (could not read the rule: $($_.Exception.Message))") }
+    return ($parts -join ' || ')
+}
+
 function Invoke-PimPolicyRulePatch {
     <#
       PATCH one rule, and if the policy turns out to be WRITE-LOCKED, unlock it and apply the
@@ -3579,7 +3779,7 @@ function Invoke-PimPolicyRulePatch {
         Invoke-PimGraph -Method PATCH -Path "/policies/roleManagementPolicies/$PolicyId/rules/$($Body.id)" -Body $Body | Out-Null
         return
     } catch {
-        if (-not (Test-PimPolicyWriteLocked $_.Exception.Message)) { throw }
+        if (-not (Test-PimPolicyWriteLocked $_.Exception.Message)) { throw (Get-PimPolicyRulePatchDiagnostic -PolicyId $PolicyId -Body $Body -Message $_.Exception.Message) }
     }
     # Write-locked. Clear the poison first (its own call -- see Repair-PimWriteLockedPolicy),
     # then re-apply the caller's rule normally, now that the policy accepts writes again.
@@ -3737,6 +3937,15 @@ $script:PimEngineRoot = if ($PSScriptRoot) { (Resolve-Path "$PSScriptRoot\..\.."
 if ($PSScriptRoot -and -not (Get-Command Resolve-PimPolicyTemplateKey -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-PolicyTemplateStore.ps1'))) {
     . (Join-Path $PSScriptRoot 'PIM-PolicyTemplateStore.ps1')
 }
+# REQ-WHATIF (77.1): the current -> new impact report every policy hold carries. Loaded UNCONDITIONALLY with the
+# providers -- a Get-Command guard on a library nobody dot-sources is false forever (33.0 trap).
+if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-PolicyImpact.ps1'))) {
+    . (Join-Path $PSScriptRoot 'PIM-PolicyImpact.ps1')
+}
+# §79.14: the CAB workbook (.xlsx, no module) the policy-hold mail carries. Loaded unconditionally, like the impact report.
+if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-Xlsx.ps1'))) {
+    . (Join-Path $PSScriptRoot 'PIM-Xlsx.ps1')
+}
 function Get-PimEnginePolicyTemplates {
     $raw = $null
     if ($null -ne $global:PIM_PolicyTemplates) { $raw = $global:PIM_PolicyTemplates }
@@ -3828,8 +4037,13 @@ function Test-PimPolicyBaselineEnabled {
       env 'PolicyBaselineAllTargets' = false turns it off. A baseline target gets its type's default
       template and the engine never manages APPROVAL on it (nothing named it, so nothing decided it).
     #>
-    $v = Get-PimAdminLifecycleSetting -Name 'PolicyBaselineAllTargets' -Default 'true'
-    return -not ("$v".Trim() -match '(?i)^(false|0|no|off|disabled?)$')
+    # 🔒 §79.15 CRITICAL GATE (operator 2026-09-25) -- RETIRED, PERMANENTLY OFF: "we can NOT apply changes except if they
+    # are managed (defined) inside database. engine must NOT touch anything which is NOT defined" / "unmanaged groups,
+    # admins, delegations can NOT be touch by pim - only managed things". The v1-parity baseline put the default template
+    # on EVERY directory role and EVERY PIM-* group no row names -- on a ring-2 customer that was 797 groups its v1 engine made, a
+    # 1092-policy change the breaker held since the 2.4.416 roll. This rule OVERRIDES v1 parity. The setting
+    # 'PolicyBaselineAllTargets' is no longer read: no value, env or global can turn the baseline back on.
+    return $false
 }
 
 function Get-PimBaselineGroupTargets {
@@ -4709,7 +4923,10 @@ function Invoke-PimEntraRolePolicyApply {
     param([object]$item, [hashtable]$ctx)
             $d = $item.desired; $rn = "$($d.RoleDefinitionName)"
             $rid = $ctx['rolePolRoleIds'][$rn.ToLowerInvariant()]
-            if (-not $rid) { throw "EntraRolePolicies: directory role '$rn' not found in this tenant" }
+            if (-not $rid) {
+                $cat = @($Global:Roles_All_ID | ForEach-Object { "$($_.DisplayName)" })
+                throw (Get-PimEntraRoleNotFoundMessage -Scope 'EntraRolePolicies' -RoleName $rn -Where 'an Entra role assignment row (its activation policy cannot be set)' -Catalog $cat)
+            }
             $polId = Get-PimDirectoryRolePolicyId -RoleDefinitionId $rid
             if (-not $polId) { throw "EntraRolePolicies: no roleManagementPolicy for directory role '$rn'" }
 
@@ -5297,6 +5514,7 @@ function Get-PimAzResPolicyChangePlan {
     $weak = New-Object System.Collections.Generic.List[object]
     $adminAligned = New-Object System.Collections.Generic.List[object]
     $notifyAligned = New-Object System.Collections.Generic.List[object]
+    $defaultAligned = New-Object System.Collections.Generic.List[object]
     $checked = 0
     foreach ($v in @($Verdicts)) {
         if ($null -eq $v) { continue }
@@ -5323,12 +5541,16 @@ function Get-PimAzResPolicyChangePlan {
                 # NOTIFICATION DEFAULTS aligned to the template (decision 2026-09-13) are not weakening either -- a
                 # default-recipient switch; removing a NAMED recipient still is.
                 elseif ($df.ruleId -like 'Notification_*' -and $s -eq 'turns default recipients off') { $notifyAligned.Add($entry) }
+                # 2026-09-21 (operator: "it still shows pending approvals of policies, but i have approved long ago"): a SYSTEM
+                # DEFAULT policy nobody ever changed has nothing to protect -- its first template application is not weakening.
+                elseif ($v.PSObject.Properties['isDefaultPolicy'] -and $v.isDefaultPolicy) { $defaultAligned.Add($entry) }
                 else { $weak.Add($entry) }
             }
             $rules.Add([pscustomobject]@{ ruleId = $df.ruleId; live = $df.live; target = $df.target; weakening = @($w) })
             $lines.Add(("{0}|{1}|{2}" -f "$($v.policyId)".ToLowerInvariant(), $df.ruleId, $df.target))
         }
-        if ($rules.Count) { $policies.Add([pscustomobject]@{ key = $v.key; scope = $v.scope; role = $v.role; policyId = $v.policyId; template = $v.template; rules = $rules.ToArray() }) }
+        if ($rules.Count) { $policies.Add([pscustomobject]@{ key = $v.key; scope = $v.scope; role = $v.role; policyId = $v.policyId; template = $v.template; rules = $rules.ToArray()
+                                                             neverModified = [bool]($v.PSObject.Properties['isDefaultPolicy'] -and $v.isDefaultPolicy) }) }
     }
     $sorted = $lines.ToArray(); [Array]::Sort($sorted, [StringComparer]::Ordinal)
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -5337,7 +5559,7 @@ function Get-PimAzResPolicyChangePlan {
     $byKey = @{}; foreach ($p in $policies) { $byKey[$p.key] = $p }
     [pscustomobject]@{ planHash = $hash; checked = $checked; changes = $policies.Count; weakening = $weak.Count; ruleChanges = $sorted.Count
                        policies = $policies.ToArray(); weakenings = $weak.ToArray(); byKey = $byKey
-                       adminPathAligned = $adminAligned.ToArray(); notificationDefaultsAligned = $notifyAligned.ToArray() }
+                       adminPathAligned = $adminAligned.ToArray(); notificationDefaultsAligned = $notifyAligned.ToArray(); defaultPolicyAligned = $defaultAligned.ToArray() }
 }
 
 function ConvertFrom-PimAzResSettingValue {
@@ -5445,6 +5667,35 @@ function Get-PimPolicyMassHold {
     $h
 }
 
+function Get-PimPolicyWeakeningKey {
+    # PURE. What identifies ONE weakening change for an approval: the policy, the rule and the change, lower-case.
+    param([Parameter(Mandatory)][object]$Entry)
+    ("{0}|{1}|{2}" -f "$($Entry.policyId)", "$($Entry.ruleId)", "$($Entry.change)").ToLowerInvariant()
+}
+
+function Approve-PimAllPolicyMassChanges {
+    <#
+      Approve EVERY standing policy hold (PIM for Groups, Entra role and Azure role policies) in one go -- operator 2026-09-21:
+      "show me all changes and i can approve all in one go". Each is approved exactly as Approve-PimPolicyMassChange would
+      (its own current plan hash, its own audit record). Returns one row per provider: @{ provider; approved; planHash; error }.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$By, [ValidateRange(1, 168)][int]$ValidHours = 24, [datetime]$NowUtc = [datetime]::UtcNow)
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($prov in 'GroupsPolicies', 'EntraRolePolicies', 'AzResPolicies') {
+        $hold = $null
+        try { $hold = Get-PimPolicyMassHold -Provider $prov } catch { $hold = $null }
+        if (-not $hold) { continue }
+        try {
+            $r = Approve-PimPolicyMassChange -Provider $prov -PlanHash "$($hold.planHash)" -By $By -ValidHours $ValidHours -NowUtc $NowUtc
+            $out.Add([pscustomobject]@{ provider = $prov; approved = $true; planHash = "$($r.planHash)"; changes = [int]$hold.changes; weakening = [int]$hold.weakening; error = '' }) | Out-Null
+        } catch {
+            $out.Add([pscustomobject]@{ provider = $prov; approved = $false; planHash = "$($hold.planHash)"; changes = [int]$hold.changes; weakening = [int]$hold.weakening; error = "$($_.Exception.Message)" }) | Out-Null
+        }
+    }
+    return @($out.ToArray())
+}
+
 function Approve-PimPolicyMassChange {
     <#
       Approve ONE held plan of ONE provider. Refused unless -PlanHash equals the CURRENT recorded hold's hash
@@ -5466,7 +5717,9 @@ function Approve-PimPolicyMassChange {
         throw "${fn}: REFUSED -- plan hash $h does not match the recorded hold ($($hold.planHash)). An approval never covers a different change set."
     }
     $now = $NowUtc.ToUniversalTime()
-    $rec = [ordered]@{ planHash = $h; approvedBy = "$By".Trim(); approvedUtc = $now.ToString('o'); expiresUtc = $now.AddHours($ValidHours).ToString('o'); changes = [int]$hold.changes; weakening = [int]$hold.weakening }
+    # weakeningKeys: exactly which weakening changes the approver saw -- a later plan is covered while it adds none (Test-PimPolicyBreaker).
+    $rec = [ordered]@{ planHash = $h; approvedBy = "$By".Trim(); approvedUtc = $now.ToString('o'); expiresUtc = $now.AddHours($ValidHours).ToString('o'); changes = [int]$hold.changes; weakening = [int]$hold.weakening
+                       weakeningKeys = @(@($hold.weakenings) | Where-Object { $null -ne $_ } | ForEach-Object { Get-PimPolicyWeakeningKey -Entry $_ } | Select-Object -Unique) }
     Set-PimSetting -Name "$($spec.Prefix)MassChangeApproval" -Value (ConvertTo-Json -InputObject $rec -Compress)
     try {
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) { Write-PimAuditEvent -Action "$($spec.Audit).approved" -Target $spec.Provider -After $rec | Out-Null }
@@ -5477,7 +5730,10 @@ function Approve-PimPolicyMassChange {
 function Write-PimPolicyMassHoldAlert {
     # Loud, best-effort -- same pattern as Write-PimDisableAbortAlert. NEVER throws: an alert failure must
     # not turn the hold (the safe outcome) into something else.
-    param([Parameter(Mandatory)][string]$Provider, [Parameter(Mandatory)][object]$Hold, [Parameter(Mandatory)][string]$Message)
+    param([Parameter(Mandatory)][string]$Provider, [Parameter(Mandatory)][object]$Hold, [Parameter(Mandatory)][string]$Message,
+          # One mail per hold, not per run (Set-PimPolicyHoldMailState): $false = this hold was already mailed and has not
+          # grown weaker since -- log and audit, but no new mail (and the job's own "held" alert skips it too).
+          [bool]$MailDue = $true)
     $spec = Get-PimPolicyBreakerSpec -Provider $Provider
     Write-Host ("[engine] {0}: mass-change circuit breaker HELD [{1}] -- N={2} T={3} W={4} planHash={5}. Wrote NOTHING this run." -f $spec.Provider, (@($Hold.tripped) -join ', '), $Hold.changes, $Hold.checked, $Hold.weakening, $Hold.planHash) -ForegroundColor Red
     try {
@@ -5489,9 +5745,41 @@ function Write-PimPolicyMassHoldAlert {
     # template does not use, and discarded the result, so the HOLD was never mailed and nothing said so.
     # Send-PimSafetyAlert (PIM-DisableGuard.ps1) uses 'alert-notice', READS the result, and reports a
     # failed or impossible send loudly. A runtime without it says so rather than pretending.
+    if (-not $MailDue) {
+        if (-not ($global:PimPolicyHoldAlerted -is [hashtable])) { $global:PimPolicyHoldAlerted = @{} }
+        $global:PimPolicyHoldAlerted["$($Hold.planHash)".ToLowerInvariant()] = [datetime]::UtcNow
+        Write-Host ("  [engine] {0}: this hold was already mailed at {1} and is not weaker than then -- no new mail (one mail per hold; the Approvals page shows the current change set)" -f $spec.Provider, "$($Hold.alertedUtc)") -ForegroundColor DarkGray
+        return
+    }
     try {
         if (Get-Command Send-PimSafetyAlert -ErrorAction SilentlyContinue) {
-            [void](Send-PimSafetyAlert -Title "$($spec.MailSubject)" -Detail $Message -SwallowScope 'policy-mass-hold-alert-mail' -Tab 'jobs')
+            # 2026-09-21 (operator: "this email is impossible to read" / "needs more details, which policies and what is
+            # the change"): the mail carries the WhatIf -- which policies, each setting current -> new -- and what to
+            # do, HTML-safe. The technical message stays in the job log. Falls back to the encoded message.
+            $mail = $null
+            if (Get-Command Format-PimPolicyHoldMail -ErrorAction SilentlyContinue) { try { $mail = Format-PimPolicyHoldMail -Hold $Hold -Provider $spec.Provider } catch { $mail = $null } }
+            if ($mail) {
+                # §79.14 (operator 2026-09-25): "i need this email to include a detailed excel file with all changes, policy
+                # change (before, new) - i need to be able to get approval from their CAB / change board". Every policy x
+                # setting, current -> new, in a workbook the change board can sort and sign. Best effort: a workbook that
+                # cannot be built, or is over the ~3 MB a Graph sendMail can carry, never stops the alert itself.
+                $att = @(); $attNote = ''
+                if (Get-Command New-PimPolicyHoldWorkbook -ErrorAction SilentlyContinue) {
+                    try {
+                        $xb = New-PimPolicyHoldWorkbook -Hold $Hold -Provider $spec.Provider
+                        $fn = "PIM-policy-change-{0}-{1}-{2}.xlsx" -f $spec.Provider, "$($Hold.planHash)".Substring(0, [Math]::Min(8, "$($Hold.planHash)".Length)), [datetime]::UtcNow.ToString('yyyyMMdd')
+                        if ($xb.Length -le 3MB) { $att = @(@{ name = $fn; contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'; bytes = $xb }) }
+                        else { $attNote = " The full change list ($([math]::Round($xb.Length / 1MB, 1)) MB) is too large to attach -- download it from Approvals." }
+                    } catch { $attNote = ''; Write-Warning "  [engine] $($spec.Provider): the CAB workbook could not be built: $($_.Exception.Message)" }
+                }
+                $actionHtml = "$($mail.actionHtml)" + $(if ($att.Count) { ' <b>Attached:</b> the complete change list for your change board (every policy and setting, current &rarr; new).' } else { $attNote })
+                [void](Send-PimSafetyAlert -Title "$($mail.subject)" -Headline "$($mail.headline)" -Detail "$($mail.detailHtml)" -Action $actionHtml -SwallowScope 'policy-mass-hold-alert-mail' -Tab 'jobs' -Attachments $att)
+                # The job that ran this will raise its own "held" alert; it skips a plan mailed here (one mail per hold).
+                if (-not ($global:PimPolicyHoldAlerted -is [hashtable])) { $global:PimPolicyHoldAlerted = @{} }
+                $global:PimPolicyHoldAlerted["$($Hold.planHash)".ToLowerInvariant()] = [datetime]::UtcNow
+            } else {
+                [void](Send-PimSafetyAlert -Title "$($spec.MailSubject)" -Detail ([System.Net.WebUtility]::HtmlEncode($Message)) -SwallowScope 'policy-mass-hold-alert-mail' -Tab 'jobs')
+            }
         } else {
             Write-Warning "  [engine] $($spec.Provider): the mass-change hold alert was NOT emailed -- the safety-alert sender (PIM-DisableGuard.ps1) is not loaded in this runtime."
         }
@@ -5532,7 +5820,11 @@ function Test-PimPolicyBreaker {
     [CmdletBinding()]
     param([Parameter(Mandatory)][object]$Plan, [object]$Thresholds = $null, [object]$Approval = $null, [datetime]$NowUtc = [datetime]::UtcNow, [string]$Provider = 'AzResPolicies')
     if (-not $Thresholds) { $Thresholds = Get-PimPolicyBreakerThresholds -Provider $Provider }
-    $n = [int]$Plan.changes; $t = [int]$Plan.checked; $w = [int]$Plan.weakening
+    # 2026-09-21 (operator: "it still shows pending approvals of policies, but i have approved long ago"): 21 imported groups
+    # = 42 new policies still at Entra's defaults held the whole set at the 25 cap. A policy NOBODY ever changed has no
+    # setting to protect; its first template application is shown in the WhatIf but never counts toward the caps.
+    $first = @(@($Plan.policies) | Where-Object { $null -ne $_ -and $_.PSObject.Properties['neverModified'] -and $_.neverModified }).Count
+    $n = [Math]::Max(0, [int]$Plan.changes - $first); $t = [Math]::Max(0, [int]$Plan.checked - $first); $w = [int]$Plan.weakening
     $tripped = New-Object System.Collections.Generic.List[string]
     $reasons = New-Object System.Collections.Generic.List[string]
     if ($n -gt [int]$Thresholds.MaxChanges) { $tripped.Add('max-changes'); $reasons.Add("would change $n policies (> cap $($Thresholds.MaxChanges))") }
@@ -5549,10 +5841,25 @@ function Test-PimPolicyBreaker {
     $note = 'no approval recorded'
     if ($Approval) {
         $exp = ConvertTo-PimAzResUtc $Approval.expiresUtc
-        if ("$($Approval.planHash)".Trim().ToLowerInvariant() -ne "$($Plan.planHash)".ToLowerInvariant()) { $note = "the recorded approval is for a DIFFERENT plan ($($Approval.planHash)) -- an approval never covers another change set" }
-        elseif (-not $exp -or $exp -le $NowUtc.ToUniversalTime()) { $note = "the approval for this plan EXPIRED ($($Approval.expiresUtc))" }
+        $sameHash = ("$($Approval.planHash)".Trim().ToLowerInvariant() -eq "$($Plan.planHash)".ToLowerInvariant())
+        # 2026-09-21 (operator: "why is it that you cannot show me all changes and i can approve all in one go"): an approval
+        # STICKS. It used to cover only the exact plan hash, so one new group between the click and the next run made it
+        # void and the change was held again -- all day. Now it also covers a DIFFERENT plan as long as that plan adds no
+        # WEAKENING the approver did not see: every weakening in it must be one the approval recorded (policy + rule +
+        # change). Template alignment of further policies (a new group getting its template) is what the approver already
+        # accepted. A weakening nobody approved -- a policy someone set by hand being loosened -- still holds.
+        $newWeak = @()
+        if (-not $sameHash) {
+            $okKeys = @{}
+            foreach ($k in @($(if ($Approval.PSObject.Properties['weakeningKeys']) { $Approval.weakeningKeys } else { @() }))) { $okKeys["$k".ToLowerInvariant()] = $true }
+            $newWeak = @(@($Plan.weakenings) | Where-Object { $null -ne $_ } | Where-Object { -not $okKeys.ContainsKey((Get-PimPolicyWeakeningKey -Entry $_)) })
+        }
+        if (-not $exp -or $exp -le $NowUtc.ToUniversalTime()) { $note = "the approval EXPIRED ($($Approval.expiresUtc))" }
+        elseif (-not $sameHash -and -not ($Approval.PSObject.Properties['weakeningKeys'])) { $note = "the recorded approval is for a DIFFERENT plan ($($Approval.planHash)) and predates approvals that carry over -- approve again" }
+        elseif ($newWeak.Count) { $note = "the approval does not cover $($newWeak.Count) NEW weakening change(s) that appeared since it was given -- approve again after reviewing them" }
         else {
-            return [pscustomobject](@{ allowed = $true; abort = $false; hold = $false; approved = $true; approvedBy = "$($Approval.approvedBy)"; reason = "$why -- APPROVED by $($Approval.approvedBy) until $($Approval.expiresUtc)"; approvalNote = 'approved' } + $base)
+            $how = if ($sameHash) { 'this exact change set' } else { 'an earlier change set; this run adds no weakening it did not approve' }
+            return [pscustomobject](@{ allowed = $true; abort = $false; hold = $false; approved = $true; approvedBy = "$($Approval.approvedBy)"; reason = "$why -- APPROVED by $($Approval.approvedBy) ($how) until $($Approval.expiresUtc)"; approvalNote = 'approved' } + $base)
         }
     }
     [pscustomobject](@{ allowed = $false; abort = $true; hold = $true; approved = $false; approvedBy = ''; reason = $why; approvalNote = $note } + $base)
@@ -5572,6 +5879,7 @@ function New-PimAzResPolicyMassHold {
         weakenings = @($Plan.weakenings)
         adminPathAligned = @($Plan.adminPathAligned)
         notificationDefaultsAligned = @($Plan.notificationDefaultsAligned)
+        impact = $(Get-PimPolicyImpactReportSafe -Plan $Plan)   # REQ-WHATIF 77.1: current -> new, grouped
         approveWith = "Approve-PimAzResPolicyMassChange -PlanHash $($Plan.planHash) -By <upn>"
         approvalValidHours = $script:PimAzResPolicyApprovalValidHours
     }
@@ -5581,7 +5889,9 @@ function Format-PimAzResPolicyMassHoldMessage {
     param([Parameter(Mandatory)][object]$Hold)
     $pol = @($Hold.policies | ForEach-Object { "$($_.role) @ $($_.scope) (" + (@($_.rules | ForEach-Object { $_.ruleId }) -join ', ') + ')' })
     $wk = @($Hold.weakenings | ForEach-Object { "$($_.role) @ $($_.scope) $($_.ruleId): $($_.change)" })
-    ("AzResPolicies [AZ-POLICY-MASS-HOLD]: HELD by the mass-change circuit breaker [" + (@($Hold.tripped) -join ', ') + "] -- $($Hold.reason). " +
+    $imp = if ($Hold.PSObject.Properties['impact']) { $Hold.impact } else { $null }
+    ((Get-PimPolicyHoldLead -Noun 'Azure role policy' -Impact $imp -Changes ([int]$Hold.changes)) + ' ' +
+     "AzResPolicies [AZ-POLICY-MASS-HOLD]: HELD by the mass-change circuit breaker [" + (@($Hold.tripped) -join ', ') + "] -- $($Hold.reason). " +
      "Wrote NOTHING this run. N=$($Hold.changes) policies to change, T=$($Hold.checked) checked, W=$($Hold.weakening) weakening. planHash=$($Hold.planHash). " +
      "Policies: " + ($pol -join '; ') + $(if ($Hold.morePolicies) { "; and $($Hold.morePolicies) more" } else { '' }) + ". " +
      "Weakening changes: " + $(if ($wk.Count) { $wk -join '; ' } else { 'none' }) + ". " +
@@ -5593,8 +5903,8 @@ function Format-PimAzResPolicyMassHoldMessage {
 function Write-PimAzResPolicyMassHoldAlert {
     # Loud, best-effort -- same pattern as Write-PimDisableAbortAlert. NEVER throws: an alert failure must
     # not turn the hold (the safe outcome) into something else.
-    param([Parameter(Mandatory)][object]$Hold, [Parameter(Mandatory)][string]$Message)
-    Write-PimPolicyMassHoldAlert -Provider 'AzResPolicies' -Hold $Hold -Message $Message
+    param([Parameter(Mandatory)][object]$Hold, [Parameter(Mandatory)][string]$Message, [bool]$MailDue = $true)
+    Write-PimPolicyMassHoldAlert -Provider 'AzResPolicies' -Hold $Hold -Message $Message -MailDue:$MailDue
 }
 
 function Get-PimAzResPolicyMassHold {
@@ -5728,7 +6038,8 @@ function Get-PimGraphPolicyChangePlan {
             $rules.Add([pscustomobject]@{ ruleId = $rid; live = $(if ($have.ContainsKey($rid)) { "$($have[$rid])" } else { '(absent)' }); target = "$($want[$rid])"; weakening = @($w) })
             $lines.Add(("{0}|{1}|{2}" -f "$($l.PolicyId)".ToLowerInvariant(), $rid, "$($want[$rid])"))
         }
-        if ($rules.Count) { $policies.Add([pscustomobject]@{ key = $key; name = $name; role = $role; policyId = "$($l.PolicyId)"; template = "$($d.TemplateId)"; rules = $rules.ToArray() }) }
+        if ($rules.Count) { $policies.Add([pscustomobject]@{ key = $key; name = $name; role = $role; policyId = "$($l.PolicyId)"; template = "$($d.TemplateId)"; rules = $rules.ToArray()
+                                                             neverModified = [bool]($l.PSObject.Properties['NeverModified'] -and $l.NeverModified) }) }
     }
     $byKey = @{}; foreach ($p in $policies) { $byKey[$p.key] = $p }
     [pscustomobject]@{ planHash = (Get-PimPolicyPlanHash -Lines $lines.ToArray()); checked = $checked; changes = $policies.Count; weakening = $weak.Count; ruleChanges = $lines.Count
@@ -5753,6 +6064,7 @@ function New-PimGraphPolicyMassHold {
         adminPathAligned = @($Plan.adminPathAligned)
         notificationDefaultsAligned = @($Plan.notificationDefaultsAligned)
         defaultPolicyAligned = @($(if ($Plan.PSObject.Properties['defaultPolicyAligned']) { $Plan.defaultPolicyAligned } else { @() }))
+        impact = $(Get-PimPolicyImpactReportSafe -Plan $Plan)   # REQ-WHATIF 77.1: current -> new, grouped
         approveWith = "Approve-PimPolicyMassChange -Provider $($spec.Provider) -PlanHash $($Plan.planHash) -By <upn>"
         approvalValidHours = $script:PimAzResPolicyApprovalValidHours
     }
@@ -5763,7 +6075,9 @@ function Format-PimGraphPolicyMassHoldMessage {
     $spec = Get-PimPolicyBreakerSpec -Provider "$($Hold.provider)"
     $pol = @($Hold.policies | ForEach-Object { "$($_.name) (" + (@($_.rules | ForEach-Object { $_.ruleId }) -join ', ') + ')' })
     $wk = @($Hold.weakenings | ForEach-Object { "$($_.name) $($_.ruleId): $($_.change)" })
-    ("$($spec.Provider) [$($spec.Code)]: HELD by the mass-change circuit breaker [" + (@($Hold.tripped) -join ', ') + "] -- $($Hold.reason). " +
+    $imp = if ($Hold.PSObject.Properties['impact']) { $Hold.impact } else { $null }
+    ((Get-PimPolicyHoldLead -Noun $(if ($spec.Provider -eq 'GroupsPolicies') { 'PIM for Groups policy' } else { 'Entra role policy' }) -Impact $imp -Changes ([int]$Hold.changes)) + ' ' +
+     "$($spec.Provider) [$($spec.Code)]: HELD by the mass-change circuit breaker [" + (@($Hold.tripped) -join ', ') + "] -- $($Hold.reason). " +
      "Wrote NOTHING this run. N=$($Hold.changes) policies to change, T=$($Hold.checked) checked, W=$($Hold.weakening) weakening. planHash=$($Hold.planHash). " +
      "Policies: " + ($pol -join '; ') + $(if ($Hold.morePolicies) { "; and $($Hold.morePolicies) more" } else { '' }) + ". " +
      "Weakening changes: " + $(if ($wk.Count) { $wk -join '; ' } else { 'none' }) + ". " +
@@ -5797,6 +6111,7 @@ function Set-PimGraphPolicyBreakerPlan {
     if ($plan.PSObject.Properties['defaultPolicyAligned'] -and @($plan.defaultPolicyAligned).Count) {
         Write-Host ("    [breaker] {0}: {1} rule change(s) are the FIRST template application to never-modified default policies (new groups/roles) -- counted in N, not in W: {2}" -f $spec.Provider, @($plan.defaultPolicyAligned).Count, ((@($plan.defaultPolicyAligned) | ForEach-Object { $_.name } | Select-Object -Unique) -join ', ')) -ForegroundColor DarkCyan
     }
+    if ($dec.hold -or ($Context["__pimWhatIf"] -and [int]$plan.changes -gt 0)) { Write-PimPolicyImpactLog -Provider $spec.Provider -Plan $plan }
 }
 
 function Invoke-PimGraphPolicyGuardedApply {
@@ -5828,11 +6143,14 @@ function Invoke-PimGraphPolicyGuardedApply {
             $st.holdRecorded = $true
             $hold = New-PimGraphPolicyMassHold -Provider $spec.Provider -Plan $plan -Decision $dec
             $msg = Format-PimGraphPolicyMassHoldMessage -Hold $hold
+            # One mail per hold, not per run: stamp the mail state carried from the hold still standing (Set-PimPolicyHoldMailState).
+            $__prevHold = $null; try { $__prevHold = Get-PimPolicyMassHold -Provider $spec.Provider } catch { $__prevHold = $null }
+            $__mailDue = $true; if (Get-Command Set-PimPolicyHoldMailState -ErrorAction SilentlyContinue) { $__mailDue = Set-PimPolicyHoldMailState -Previous $__prevHold -Hold $hold }
             if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
                 try { Set-PimSetting -Name "$($spec.Prefix)MassHold" -Value (ConvertTo-Json -InputObject $hold -Depth 8 -Compress) }
                 catch { Write-Warning "  [engine] $($spec.Provider): the hold record could NOT be saved (it cannot be approved until a run saves it): $($_.Exception.Message)" }
             }
-            Write-PimPolicyMassHoldAlert -Provider $spec.Provider -Hold $hold -Message $msg
+            Write-PimPolicyMassHoldAlert -Provider $spec.Provider -Hold $hold -Message $msg -MailDue:$__mailDue
             throw $msg
         }
         return [pscustomobject]@{ pimApplied = $false; note = "held by the mass-change circuit breaker (planHash $($plan.planHash))" }
@@ -5954,11 +6272,13 @@ function Invoke-PimAzResPolicyUpdate {
             $st.holdRecorded = $true
             $hold = New-PimAzResPolicyMassHold -Plan $plan -Decision $dec
             $msg = Format-PimAzResPolicyMassHoldMessage -Hold $hold
+            $__prevHold = $null; try { $__prevHold = Get-PimPolicyMassHold -Provider 'AzResPolicies' } catch { $__prevHold = $null }
+            $__mailDue = $true; if (Get-Command Set-PimPolicyHoldMailState -ErrorAction SilentlyContinue) { $__mailDue = Set-PimPolicyHoldMailState -Previous $__prevHold -Hold $hold }
             if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
                 try { Set-PimSetting -Name 'AzResPolicyMassHold' -Value (ConvertTo-Json -InputObject $hold -Depth 8 -Compress) }
                 catch { Write-Warning "  [engine] AzResPolicies: the hold record could NOT be saved (it cannot be approved until a run saves it): $($_.Exception.Message)" }
             }
-            Write-PimAzResPolicyMassHoldAlert -Hold $hold -Message $msg
+            Write-PimAzResPolicyMassHoldAlert -Hold $hold -Message $msg -MailDue:$__mailDue
             throw $msg
         }
         return [pscustomobject]@{ pimApplied = $false; note = "held by the mass-change circuit breaker (planHash $($plan.planHash))" }
@@ -6104,6 +6424,7 @@ function New-PimAzResPoliciesProvider {
                 Write-Host ("    [breaker] AzResPolicies: {0} admin-path enablement change(s) aligned to template (engine requirement: its identity cannot present MFA) -- counted in N, not in W: {1}" -f `
                     @($plan.adminPathAligned).Count, ((@($plan.adminPathAligned | Select-Object -First 5 | ForEach-Object { "$($_.role) @ $($_.scope) $($_.ruleId) $($_.change)" })) -join '; ')) -ForegroundColor DarkCyan
             }
+            if ($dec.hold -or ($ctx["__pimWhatIf"] -and [int]$plan.changes -gt 0)) { Write-PimPolicyImpactLog -Provider 'AzResPolicies' -Plan $plan }
             $live.ToArray()
         }
         KeyOf = { param($r) Get-PimAzResPolicyKey -Row $r }
@@ -6305,11 +6626,42 @@ function New-PimAdminTapProvider {
                 Write-Warning "  [AdminTap] REFUSING to issue any TAP this run: issuance cannot be recorded ($($store.reason)), so issue-once could not be guaranteed."
             }
             $backfill = $false
+            # 2026-09-23 (operator: "disable the automatic tap sending every day"): the 2026-09-21 re-issue below minted and
+            # mailed a new pass every time the last one expired. It is OFF unless pim.Settings 'TapReissueUntilOnboarded'
+            # is TRUE -- issue once again; a new pass is the Manager's Reset TAP.
+            $__reissue = "$(Get-PimAdminLifecycleSetting -Name 'TapReissueUntilOnboarded' -Default '')" -match '^(?i)(true|1|yes)$'
             foreach ($d in $desired) {
                 $upn = Get-PimRowProp -Row $d -Names @('UserPrincipalName')
                 $upnL = "$upn".Trim().ToLowerInvariant()
                 if (-not $store.ok) { $live.Add([pscustomobject]@{ UserPrincipalName=$upn }); continue }        # fail closed
-                if ($store.map.ContainsKey($upnL)) { $live.Add([pscustomobject]@{ UserPrincipalName=$upn }); continue }   # issued once already
+                if ($store.map.ContainsKey($upnL) -and -not $__reissue) { $live.Add([pscustomobject]@{ UserPrincipalName=$upn }); continue }   # issued once = satisfied
+                if ($store.map.ContainsKey($upnL)) {
+                    # 2026-09-21 (operator: "keep sending a tap until logged in"): ISSUE-ONCE becomes ISSUE-UNTIL-ONBOARDED. An
+                    # account that was issued a TAP stays satisfied while that pass is still usable, or once the admin has
+                    # registered a sign-in method of their own (then recorded as onboarded and never probed again). An
+                    # expired or used-up pass on an account with NO own method gets a NEW one. Any read that fails keeps it
+                    # satisfied (fail closed: a delayed pass, never a loop of credentials).
+                    $__rec = $store.map[$upnL]
+                    $__onb = ($__rec -is [System.Collections.IDictionary] -and $__rec.Contains('onboarded') -and $__rec['onboarded']) -or ("$($__rec.source)" -like 'already onboarded*')
+                    if ($__onb) { $live.Add([pscustomobject]@{ UserPrincipalName=$upn }); continue }
+                    $__uid = Resolve-PimPrincipalId $upn
+                    if (-not $__uid) { $live.Add([pscustomobject]@{ UserPrincipalName=$upn }); continue }
+                    try {
+                        $__usable = @(@(Invoke-PimGraph -All -Path "/users/$__uid/authentication/temporaryAccessPassMethods") | Where-Object { "$($_.isUsable)" -match '(?i)true' })
+                        if ($__usable.Count) { $live.Add([pscustomobject]@{ UserPrincipalName=$upn }); continue }
+                        $__own = @(Invoke-PimGraph -All -Path "/users/$__uid/authentication/methods" | Where-Object {
+                            "$($_.'@odata.type')" -match '(?i)fido2|microsoftAuthenticator|windowsHelloForBusiness|softwareOath|platformCredential|x509Certificate|passkey|phoneAuthentication' })
+                        if ($__own.Count) {
+                            $store.map[$upnL] = @{ issuedAtUtc = "$($__rec.issuedAtUtc)"; recordedAtUtc = [datetime]::UtcNow.ToString('o'); source = 'already onboarded: registered a sign-in method of their own'; onboarded = $true }
+                            $backfill = $true
+                            $live.Add([pscustomobject]@{ UserPrincipalName=$upn }); continue
+                        }
+                        Write-Host "  [AdminTap] $upn -- the last TAP is no longer usable and the admin has not registered a method of their own yet -- issuing a NEW TAP (keep sending until signed in)." -ForegroundColor Yellow
+                        continue   # NOT in the live set -> ApplyCreate issues a fresh pass (and replaces the dead one)
+                    } catch {
+                        $live.Add([pscustomobject]@{ UserPrincipalName=$upn }); continue   # unreadable -> satisfied (fail closed)
+                    }
+                }
                 $uid = Resolve-PimPrincipalId $upn; if (-not $uid) { continue }
                 # 🔴 -All IS LOAD-BEARING, and its absence made this scope a no-op.
                 # Invoke-PimRest returns the RAW RESPONSE unless -All is passed (`if (-not $All)
@@ -6346,11 +6698,18 @@ function New-PimAdminTapProvider {
                         # A pass PIM has no record of: issued before issue-once tracking existed (or by
                         # hand). It COUNTS as the one issuance -- recorded, never replaced automatically.
                         $why = if ($usable.Count) { 'pre-existing usable TAP' } else { "pre-existing TAP, not usable ($($taps[0].methodUsabilityReason))" }
+                        if (-not $usable.Count -and $__reissue) {
+                            # 2026-09-21 ("keep sending a tap until logged in"): a dead pass on an account with no method of its
+                            # own is replaced -- not left for a person to notice.
+                            $__own0 = @()
+                            try { $__own0 = @(Invoke-PimGraph -All -Path "/users/$uid/authentication/methods" | Where-Object { "$($_.'@odata.type')" -match '(?i)fido2|microsoftAuthenticator|windowsHelloForBusiness|softwareOath|platformCredential|x509Certificate|passkey|phoneAuthentication' }) } catch { $__own0 = @('unreadable') }
+                            if (-not $__own0.Count) {
+                                Write-Host "  [AdminTap] $upn holds a TAP that is NOT usable ($($taps[0].methodUsabilityReason)) and has no sign-in method of its own -- issuing a NEW TAP." -ForegroundColor Yellow
+                                continue
+                            }
+                        }
                         $store.map[$upnL] = @{ issuedAtUtc = ''; recordedAtUtc = [datetime]::UtcNow.ToString('o'); source = $why }
                         $backfill = $true
-                        if (-not $usable.Count) {
-                            Write-Host "  [AdminTap] $upn holds a TAP that is NOT usable ($($taps[0].methodUsabilityReason)) -- NOT re-issued automatically (issue once); re-issue it from the Manager's Accounts & TAP tab." -ForegroundColor Yellow
-                        }
                         $live.Add([pscustomobject]@{ UserPrincipalName=$upn })
                         continue
                     }
@@ -6385,7 +6744,8 @@ function New-PimAdminTapProvider {
             param($item,$ctx)
             $d=$item.desired; $upn=Get-PimRowProp -Row $d -Names @('UserPrincipalName'); $uid=Resolve-PimPrincipalId $upn
             if (-not $uid) { throw "AdminTap: user '$upn' not found" }
-            $hrs=[int]("0"+(Get-PimRowProp -Row $d -Names @('TAPLifetimeHours'))); if ($hrs -le 0) { $hrs = 4 }
+            # 2026-09-21: no TAPLifetimeHours on the row = as long as the tenant's TAP policy allows (New-PimTapRequestBody -1).
+            $hrs=[int]("0"+(Get-PimRowProp -Row $d -Names @('TAPLifetimeHours'))); $__tapMins = if ($hrs -gt 0) { $hrs*60 } else { -1 }
 
             # 🔴 BUG-66 -- REFUSE BEFORE MINTING when the mail cannot be delivered.
             # Now that GetLive replaces an EXPIRED pass, this scope re-mints on expiry -- which is
@@ -6407,7 +6767,7 @@ function New-PimAdminTapProvider {
                     # Not a throw: one unreachable admin must not fail the whole scope. Reported
                     # loudly, and NOTHING is created -- the existing (dead) pass is left untouched,
                     # which is strictly better than a live credential nobody received.
-                    Write-Warning "  [AdminTap] $upn -- REFUSING to issue a TAP that cannot be delivered: $($mailChk.reason). Nothing was changed."
+                    Write-Warning "  [AdminTap] $upn -- no TAP issued (nothing changed): $($mailChk.reason)"
                     # 🔴 `return $null` HERE WAS COUNTED AS APPLIED. Measured live on EFIF 2026-08-25:
                     # the guard refused all six admins, printed "Nothing was changed" six times, and
                     # the run still summarised `applied=6 errors=0 ok=True`. Six dead accounts, a
@@ -6450,7 +6810,7 @@ function New-PimAdminTapProvider {
             # a MULTI-use request unconditionally, and a tenant that only allows one-time passes
             # answered 400 "Tenant Policy does not allow multiple use temporary access pass method"
             # for every admin (measured live on internal 2026-09-12). The POST itself stays here.
-            $tap = Invoke-PimTapCreate -LifetimeMinutes ($hrs*60) -StartDateTime $__start.value -UserLabel $upn -Poster {
+            $tap = Invoke-PimTapCreate -LifetimeMinutes $__tapMins -StartDateTime $__start.value -UserLabel $upn -Poster {
                 param($b) Invoke-PimGraph -Method POST -Path "/users/$uid/authentication/temporaryAccessPassMethods" -Body $b
             }
             # Record the issuance BEFORE delivery, as v1 did (11418): a delivery failure must never

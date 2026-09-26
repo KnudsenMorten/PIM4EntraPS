@@ -105,7 +105,13 @@ function Get-PimBaselineBundlePayload {
     param(
         [Parameter(Mandatory)][scriptblock]$RunQuery,
         [string]$Scope = 'fleet',
-        [int]$ValidDays = 30
+        [int]$ValidDays = 30,
+        # REQ-REV-DOWN-1 / REQ-REN-1 (2026-09-22): the withdrawals and renames the master AUTHORISED.
+        # They travel in the SIGNED payload because they instruct a managed tenant to REMOVE or RENAME
+        # something -- an instruction that must not be forgeable between here and there.
+        # LOCKED RULE -- Added to the payload ONLY when there are any: a master with nothing to withdraw produces
+        # the same bytes it produced before this existed (the no-regression byte rule above).
+        [object[]]$Intents = @()
     )
     $sql = "SELECT UserName, DisplayName, FirstName, LastName, Initials, UsageLocation, Purpose, Ring, Template FROM pim.CentralAdmins WHERE Owner='MSP' AND Enabled=1 ORDER BY Ring"
     $sqlWithTarget = "SELECT UserName, DisplayName, FirstName, LastName, Initials, UsageLocation, Purpose, Ring, Template, Target FROM pim.CentralAdmins WHERE Owner='MSP' AND Enabled=1 ORDER BY Ring"
@@ -225,6 +231,15 @@ function Get-PimBaselineBundlePayload {
     if ($orphan.Count) { Write-Host "  [warn] $($orphan.Count) projected tag(s) have NO group definition in the master: $($orphan -join ', ')" -ForegroundColor Yellow }
     foreach ($b in $bindArr) { Write-Host ("    binds {0,-42} -> {1}" -f $b.GroupTag, $b.RoleDefinitionName) -ForegroundColor DarkGray }
 
+    # 1f. REQUIREMENTS 77.20: the Deployment rings (name + tag rule per ring), carried so each slave judges its own membership.
+    # A missing setting means the three rings with no tag rule (every slave on a ring is a member) -- the same reach as
+    # before rings had rules. A failed READ refuses the bundle: a rule that silently vanished would widen reach.
+    # Through pim.vw_PublishJobControl, NOT pim.Settings: the publish job's reader user has no right on pim.Settings (it also
+    # holds ManagerAccess); the control view exposes exactly its own rows, this one included (Get-PimPublishJobControlViewSql).
+    $ringsRaw = @(& $RunQuery "SELECT ValueJson FROM pim.vw_PublishJobControl WHERE Name = 'DeploymentRings'")
+    $ringsOut = @(ConvertTo-PimDeploymentRings -Value $(if ($ringsRaw.Count -and $null -ne $ringsRaw[0]) { "$($ringsRaw[0].ValueJson)" } else { $null }))
+    Write-Host ("baseline deployment rings: " + (@($ringsOut | ForEach-Object { "$($_.ring)=$($_.name)$(if ($_.tags) { " [$($_.tags)]" })" }) -join ', '))
+
     # 2. Build the payload (key order identical to the pre-71.35 producer; the no-regression byte rule).
     $version = [int64](Get-Date -Format 'yyMMddHHmm')
     $payload = [ordered]@{
@@ -239,6 +254,18 @@ function Get-PimBaselineBundlePayload {
         definitions    = $content.definitions
         projectionPolicy = $policyOut
         tenantTags       = $tagsOut
+        ringOrder        = 'dev-first'
+        deploymentRings  = @($ringsOut)
+    }
+    # Appended, not inserted: the key order above is the byte-compatible producer, and a bundle with
+    # no intents must remain byte-identical to one published before this feature.
+    $liveIntents = @($Intents | Where-Object { $_ -and "$($_.entity)".Trim() -and "$($_.key)".Trim() })
+    if ($liveIntents.Count) {
+        $payload['intents'] = @($liveIntents)
+        Write-Host ("baseline authorised withdrawals/renames: {0}" -f $liveIntents.Count)
+        if (Get-Command Get-PimDownlinkIntentSummary -ErrorAction SilentlyContinue) {
+            foreach ($s in (Get-PimDownlinkIntentSummary -Intents $liveIntents)) { Write-Host "  $s" }
+        }
     }
     $payloadJson  = ($payload | ConvertTo-Json -Depth 8 -Compress)
     $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadJson)
@@ -359,11 +386,15 @@ function Invoke-PimBaselinePublishRun {
         [Parameter(Mandatory)][scriptblock]$Upload,
         [scriptblock]$Fetch,
         [string]$Scope = 'fleet',
-        [int]$ValidDays = 30
+        [int]$ValidDays = 30,
+        # REQ-REV-DOWN-1 / REQ-REN-1: the authorised withdrawals + renames to carry in this bundle.
+        # The job reads them from the master's store and passes them; omitted = a bundle identical to
+        # what this produced before the feature existed.
+        [object[]]$Intents = @()
     )
     if ($ValidDays -lt 2) { return @{ ok = $false; reason = 'ValidDays must be at least 2 (a daily publish needs overlap)' } }
     $built = $null
-    try { $built = Get-PimBaselineBundlePayload -RunQuery $RunQuery -Scope $Scope -ValidDays $ValidDays }
+    try { $built = Get-PimBaselineBundlePayload -RunQuery $RunQuery -Scope $Scope -ValidDays $ValidDays -Intents $Intents }
     catch { return @{ ok = $false; reason = "BUILD REFUSED (nothing signed, nothing uploaded): $($_.Exception.Message)" } }
     $s = & $Signer $built.payloadBytes
     if ($null -eq $s -or $null -eq $s.signatureBytes -or -not (Test-PimBaselineKeyIdFormat -KeyId "$($s.keyId)")) { return @{ ok = $false; reason = 'the signer returned no signature / key id' } }

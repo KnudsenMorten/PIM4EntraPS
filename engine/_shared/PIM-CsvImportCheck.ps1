@@ -400,6 +400,66 @@ function Get-PimCsvImportForceLocalPlan {
     return @{ rows = @($outRows.ToArray()); changes = @($changes.ToArray()) }
 }
 
+function Get-PimCsvImportAdminUpnPlan {
+    <#
+      Every admin row must carry a UserPrincipalName. A row without one gets UserName@DefaultDomain (a copy; the
+      input rows are not touched). With no -DefaultDomain it is reported with composed=$false: the caller refuses.
+      Returns @{ rows; missing = @( @{ index; userName; upn; composed } ) }.
+    #>
+    param([AllowEmptyCollection()][object[]]$Rows = @(), [string]$DefaultDomain)
+    $dom = "$DefaultDomain".Trim().TrimStart('@')
+    $outRows = New-Object System.Collections.Generic.List[object]
+    $missing = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -lt @($Rows).Count; $i++) {
+        $r = $Rows[$i]
+        $upn = "$(Get-PimDownlinkValue -Object $r -Key 'UserPrincipalName')".Trim()
+        if ($upn) { $outRows.Add($r) | Out-Null; continue }
+        $un = "$(Get-PimDownlinkValue -Object $r -Key 'UserName')".Trim()
+        if (-not $un) { $un = "$(Get-PimDownlinkValue -Object $r -Key 'Username')".Trim() }
+        if ($un -and $dom) {
+            $c = Copy-PimCsvImportRow -Row $r
+            $c | Add-Member -NotePropertyName 'UserPrincipalName' -NotePropertyValue "$un@$dom" -Force
+            $outRows.Add($c) | Out-Null
+            $missing.Add([ordered]@{ index = $i; userName = $un; upn = "$un@$dom"; composed = $true }) | Out-Null
+        } else {
+            $outRows.Add($r) | Out-Null
+            $missing.Add([ordered]@{ index = $i; userName = $un; upn = ''; composed = $false }) | Out-Null
+        }
+    }
+    return @{ rows = @($outRows.ToArray()); missing = @($missing.ToArray()) }
+}
+
+function Get-PimImportProtectedAdmins {
+    <#
+      THE ADMINS AN IMPORT MAY NEVER REMOVE OR OVERWRITE (operator 2026-09-21: "the importer can never flush super
+      admins ... otherwise noone can login"). The Manager SuperAdmins (ManagerAccess) and the break-glass accounts,
+      keyed by UPN LOCAL PART, lower case -- the admin row's key is its UserName, which is that local part.
+      Returns @{ '<localpart>' = 'Manager SuperAdmin' | 'break-glass' }.
+    #>
+    param([object]$ManagerAccess, [object]$BreakGlass)
+    $out = @{}
+    $lp = { param($s) $v = "$s".Trim(); $i = $v.IndexOf('@'); if ($i -ge 0) { $v = $v.Substring(0, $i) }; $v.ToLowerInvariant() }
+    $ma = $ManagerAccess
+    if ($ma -is [string] -and "$ma".Trim()) { $ma = $ma | ConvertFrom-Json }
+    $entries = @()
+    if ($null -ne $ma) {
+        if ($ma -is [System.Collections.IDictionary] -and $ma.Contains('managerAccess')) { $entries = @($ma['managerAccess']) }
+        elseif ($ma.PSObject -and $ma.PSObject.Properties['managerAccess']) { $entries = @($ma.managerAccess) }
+        else { $entries = @($ma) }
+    }
+    foreach ($e in $entries) {
+        if ($null -eq $e) { continue }
+        $get = { param($o, $k) if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($k)) { $o[$k] } } elseif ($o.PSObject.Properties[$k]) { $o.$k } }
+        $role = "$(& $get $e 'role')".Trim()
+        $id = "$(& $get $e 'identity')".Trim()
+        if ($id -and $role -ieq 'SuperAdmin') { $out[(& $lp $id)] = 'Manager SuperAdmin' }
+    }
+    $bg = $BreakGlass
+    if ($bg -is [string] -and "$bg".Trim().StartsWith('[')) { $bg = $bg | ConvertFrom-Json }
+    foreach ($b in @($bg)) { if ("$b".Trim()) { $k = & $lp $b; if (-not $out.ContainsKey($k)) { $out[$k] = 'break-glass' } } }
+    return $out
+}
+
 function Get-PimCsvImportReplication {
     <#
       Per replicable row: the EFFECTIVE Replicate (Get-PimReplicateMode) and whether an MSP master would
@@ -592,6 +652,27 @@ function Invoke-PimCsvImportCheck {
         }
     }
 
+    # --- admins: every row carries a UserPrincipalName (operator 2026-09-21: "we can not have a admin without a upn.
+    # that makes no sense, then it is not compatible"). EFIF measured: six rows imported with UserName only never
+    # appeared on Admin accounts, and every UPN-keyed path (TAP, forwarding, sign-in) skipped them. A row without one
+    # gets UserName@<-DefaultDomain> written INTO the row; with no -DefaultDomain the import is REFUSED.
+    if ($import.Contains('Account-Definitions-Admins')) {
+        $im = $import['Account-Definitions-Admins']
+        $up = Get-PimCsvImportAdminUpnPlan -Rows @($im.rows) -DefaultDomain $DefaultDomain
+        $im.rows = @($up.rows)
+        foreach ($m in @($up.missing)) {
+            $rowNo = $im.rowNumbers[$m.index]; $line = $im.lines[$m.index]
+            if ($m.composed) {
+                $findings.Add((New-PimCsvImportFinding -Severity info -Code 'CSVIMP-UPN-002' -File $im.file -Entity 'Account-Definitions-Admins' -Row $rowNo -Line $line -Column 'UserPrincipalName' `
+                    -Message ("admin '{0}' has no UserPrincipalName -- the import writes '{1}'." -f $m.userName, $m.upn))) | Out-Null
+            } else {
+                $findings.Add((New-PimCsvImportFinding -Severity error -Code 'CSVIMP-UPN-001' -File $im.file -Entity 'Account-Definitions-Admins' -Row $rowNo -Line $line -Column 'UserPrincipalName' `
+                    -Message ("admin '{0}' has no UserPrincipalName. An admin without a UPN is not a valid admin: it cannot sign in, get a TAP or be shown on Admin accounts." -f $m.userName) `
+                    -Suggestion 'Fill in UserPrincipalName in the file, or run the import with -DefaultDomain <the tenant''s default domain> so it is written as UserName@domain.')) | Out-Null
+            }
+        }
+    }
+
     # --- row level: the Manager's validator, over the rows that would be imported ------------------------
     $prevNc = $global:PIM_NamingConventions; $prevMaster = $global:PIM_ValidatorIsMspMaster
     $prevTags = $global:PIM_ValidatorKnownTenantTags; $prevDom = $global:DefaultDomainUPN
@@ -646,7 +727,7 @@ function Invoke-PimCsvImportCheck {
             -Message "$($v.Message)" -Suggestion "$($v.Suggestion)" -Source 'validator')) | Out-Null
     }
     $findings.Add((New-PimCsvImportFinding -Severity info -Code 'CSVIMP-VAL-000' -Source 'validator' `
-        -Message ("The Manager's validator ran offline over the parsed files: naming rules use the SHIPPED defaults, policy templates are the SHIPPED templates, the target is treated as {0}, admins without a UserPrincipalName are matched {1}, managed-tenant tags are not known, and no tenant cache is available (cache-driven rules report that they did not run). Rows already in the target store are NOT seen: a reference to a row that exists only there is reported as missing." -f $(if ($NotMspMaster) { 'NOT an MSP master' } else { 'an MSP master' }), $(if ("$DefaultDomain".Trim()) { "as UserName@$("$DefaultDomain".Trim())" } else { 'by UserName (no -DefaultDomain given)' })))) | Out-Null
+        -Message ("The Manager's validator ran offline over the parsed files: naming rules use the SHIPPED defaults, policy templates are the SHIPPED templates, the target is treated as {0}, memberships naming an admin by UserName are matched {1}, managed-tenant tags are not known, and no tenant cache is available (cache-driven rules report that they did not run). Rows already in the target store are NOT seen: a reference to a row that exists only there is reported as missing." -f $(if ($NotMspMaster) { 'NOT an MSP master' } else { 'an MSP master' }), $(if ("$DefaultDomain".Trim()) { "as UserName@$("$DefaultDomain".Trim())" } else { 'by UserName (no -DefaultDomain given)' })))) | Out-Null
 
     # --- replication: the effective Replicate of every row, and what the master would publish -------------
     $asFiles = @{}; $asImported = @{}

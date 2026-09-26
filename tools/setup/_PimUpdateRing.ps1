@@ -394,6 +394,14 @@ function Test-PimRollRingGate {
         # an existing ring always wins, because a redeploy never promotes or demotes. -1 = none.
         [int]$PendingRing = -1,
         [AllowEmptyString()][string]$PendingSourceUrl,
+        # §79.11 + R25-24 (operator 2026-09-26: "community edition is free (non-PRO)"). The environment's EDITION, as a FACT
+        # read from its own store (Get-PimEnvironmentEdition: no valid Pro licence = 'community'), never the caller's word.
+        # The free community edition has no in-cloud updater BY DESIGN (BUG-156) and no operator channel governs it -- the
+        # customer IS its release channel -- so a ring-less 'community' environment is not gated (and the caller audits it).
+        # 'pro' and '' (unknown: the store could not be read) are gated exactly as before. It was a -CommunityGitPull switch
+        # set from "-Source git-pull", so a PAID environment updating from git (the retired MSP-community S4) was ungated too.
+        # A community environment that DOES carry a ring is gated by that ring.
+        [ValidateSet('', 'community', 'pro')][string]$EnvironmentEdition = '',
         [scriptblock]$Fetch
     )
     $r = { param($allowed, $gated, $ring, $appr, $reason) [pscustomobject]@{ allowed = [bool]$allowed; gated = [bool]$gated; ring = $ring; approved = $appr; reason = $reason } }
@@ -408,6 +416,11 @@ function Test-PimRollRingGate {
     if (-not $ringRaw) {
         if ($Greenfield) {
             return (& $r $true $false $null '' 'nothing PIM is deployed in this resource group yet -- a first install is not a roll (the updater the deploy installs carries the ring from then on).')
+        }
+        if ($EnvironmentEdition -eq 'community' -and $PendingRing -lt 0) {
+            $cv = & $r $true $false $null '' 'the free Community edition (no Pro licence in this environment''s store) -- no operator ring governs it (it has no in-cloud updater by design); not gated, and audited.'
+            $cv | Add-Member -NotePropertyName community -NotePropertyValue $true
+            return $cv
         }
         if ($PendingRing -ge 0) {
             # The ring this deploy is installing decides -- and it is gated exactly as if it were already there.
@@ -457,6 +470,9 @@ function Assert-PimRollRingGate {
         [int]$PendingUpdateRing = -1,
         [AllowEmptyString()][string]$PendingUpdateSourceUrl,
         [scriptblock]$GetJobs,
+        # R25-24: returns the environment's stored licence document (text) or throws -- tests only; production reads
+        # pim.Settings['License'] through -SqlConnectionString (Get-PimEnvironmentEdition).
+        [scriptblock]$ReadLicense,
         [scriptblock]$Fetch,
         [scriptblock]$Audit
     )
@@ -469,17 +485,37 @@ function Assert-PimRollRingGate {
     if ($PendingUpdateRing -gt $script:PimUpdateRingMax) { throw "$Caller`: -PendingUpdateRing $PendingUpdateRing is outside 0-$($script:PimUpdateRingMax)." }
     $upd = Get-PimEnvironmentUpdaterEnv -ResourceGroup $ResourceGroup -SubscriptionArgs $SubscriptionArgs -UpdateJobName $UpdateJobName -GetJobs $GetJobs
     $verdict = $null
-    $pend = @{ PendingRing = $PendingUpdateRing; PendingSourceUrl = "$PendingUpdateSourceUrl" }
+    # R25-24: the edition is read from the ENVIRONMENT (its store's licence), never taken from the caller.
+    $edition = Get-PimEnvironmentEdition -SqlConnectionString $SqlConnectionString -ReadLicense $ReadLicense
+    $pend = @{ PendingRing = $PendingUpdateRing; PendingSourceUrl = "$PendingUpdateSourceUrl"; EnvironmentEdition = "$($edition.edition)" }
     if (-not $upd.ok)        { $verdict = Test-PimRollRingGate -TargetVersion $TargetVersion -UpdaterUnreadable -UnreadableReason "$($upd.reason)" -Fetch $Fetch }
     elseif (-not $upd.found) { $verdict = Test-PimRollRingGate -TargetVersion $TargetVersion -UpdaterMissing -Greenfield:(-not $upd.deployed) @pend -Fetch $Fetch }
     else                     { $verdict = Test-PimRollRingGate -TargetVersion $TargetVersion -UpdaterEnv $upd.env @pend -Fetch $Fetch }
     if ($verdict.allowed) {
         if ($verdict.gated) { Write-Host "    ring gate: $($verdict.reason)" -ForegroundColor Green }
         else { Write-Host "    ring gate: $($verdict.reason)" -ForegroundColor DarkGray }
-        return [pscustomobject]@{ allowed = $true; overridden = $false; verdict = $verdict }
+        $cAud = $false
+        $isCommunity = [bool]($verdict.PSObject.Properties['community'] -and $verdict.community)
+        if ($isCommunity) {
+            # R25-24: an ungated roll is ALWAYS on the record -- the same audit path an override uses.
+            $who = "$($env:USERDOMAIN)\$($env:USERNAME)".Trim('\')
+            $rec = [ordered]@{ event = 'ring-gate-community'; caller = $Caller; resourceGroup = $ResourceGroup; ring = $null; target = "$TargetVersion"
+                               reason = "$($edition.reason)"; by = $who; utc = [datetime]::UtcNow.ToString('o') }
+            try {
+                if ($Audit) { & $Audit $rec; $cAud = $true }
+                elseif ("$SqlConnectionString".Trim() -and (Get-Command Write-PimSqlAuditEvent -ErrorAction SilentlyContinue)) {
+                    [void](Write-PimSqlAuditEvent -ConnectionString $SqlConnectionString -Actor $who -ActorSource 'deploy-host' `
+                            -Action 'update.ring-gate.community' -Target $ResourceGroup -After $rec -Result 'ok')
+                    $cAud = $true
+                }
+            } catch { Write-Warning "ring gate (community): the ungated roll was NOT written to the audit trail: $($_.Exception.Message)" }
+            if (-not $cAud) { Write-Warning 'ring gate (community): no audit trail in this host -- the ungated roll is recorded in this deploy''s output only.' }
+        }
+        return [pscustomobject]@{ allowed = $true; overridden = $false; verdict = $verdict; community = $isCommunity; audited = $cAud }
     }
     if (-not $OverrideRingGate) {
-        throw "RING GATE ($Caller, $ResourceGroup): $($verdict.reason)"
+        $hint = if (-not "$($edition.edition)") { " (the environment's edition could not be read: $($edition.reason) -- a free Community install is exempt only when its store says so)" } else { '' }
+        throw "RING GATE ($Caller, $ResourceGroup): $($verdict.reason)$hint"
     }
     $who = "$($env:USERDOMAIN)\$($env:USERNAME)".Trim('\')
     $rec = [ordered]@{ event = 'ring-gate-override'; caller = $Caller; resourceGroup = $ResourceGroup; ring = $verdict.ring
@@ -506,6 +542,41 @@ function Assert-PimRollRingGate {
     return [pscustomobject]@{ allowed = $true; overridden = $true; verdict = $verdict; record = $rec; audited = $audited }
 }
 
+function Get-PimEnvironmentEdition {
+    <#
+      R25-24 -- the environment's EDITION as a fact from its own store: pim.Settings['License'] verified with the same code
+      the Manager uses (PIM-License.ps1 Get-PimLicense -LicenseText). Returns @{ edition = 'community' | 'pro' | ''; reason }.
+        'pro'       -- a Valid (or Grace) Pro licence is stored;
+        'community' -- none is stored, or the stored one does not verify / has expired (the free edition);
+        ''          -- the store could not be read, so the edition is UNKNOWN (the gate then treats it as not exempt).
+      -ReadLicense (tests): returns the document text, or throws.
+    #>
+    param([string]$SqlConnectionString, [scriptblock]$ReadLicense)
+    $shared = Join-Path $PSScriptRoot '..\..\engine\_shared'
+    $doc = $null
+    try {
+        if ($ReadLicense) { $doc = & $ReadLicense }
+        elseif ("$SqlConnectionString".Trim()) {
+            if (-not (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) { . (Join-Path $shared 'PIM-SqlStore.ps1') }
+            $v = Get-PimSqlSetting -ConnectionString $SqlConnectionString -Name 'License'
+            $doc = if ($null -eq $v) { '' } elseif ($v -is [string]) { $v } else { ConvertTo-Json -InputObject $v -Depth 6 -Compress }
+        } else { return [pscustomobject]@{ edition = ''; reason = 'no connection to the environment''s store was given' } }
+    } catch {
+        # A store whose schema is not there yet (a first install: the 'code' step runs before 'schema') has no
+        # pim.Settings table, so no licence can be stored in it -- that IS the free edition, not an unknown one.
+        # (Found on the first community install after R25-24, 2026-09-26: the read threw "Invalid object name".)
+        if ("$($_.Exception.Message)" -match "(?i)Invalid object name '?pim\.Settings'?") {
+            return [pscustomobject]@{ edition = 'community'; reason = 'the store has no settings table yet (first install) -- no Pro licence can be stored there' }
+        }
+        return [pscustomobject]@{ edition = ''; reason = "the environment's store could not be read ($($_.Exception.Message))" }
+    }
+    if (-not "$doc".Trim()) { return [pscustomobject]@{ edition = 'community'; reason = 'no Pro licence is stored in this environment' } }
+    if (-not (Get-Command Get-PimLicense -ErrorAction SilentlyContinue)) { . (Join-Path $shared 'PIM-License.ps1') }
+    $lic = $null
+    try { $lic = Get-PimLicense -LicenseText "$doc" } catch { return [pscustomobject]@{ edition = ''; reason = "the stored licence could not be evaluated ($($_.Exception.Message))" } }
+    if ("$($lic.Status)" -in @('Valid', 'Grace')) { return [pscustomobject]@{ edition = 'pro'; reason = "a $($lic.Status) Pro licence ($($lic.Customer)) is stored" } }
+    return [pscustomobject]@{ edition = 'community'; reason = "the stored licence is $($lic.Status): $($lic.Reason)" }
+}
 function Get-PimEnvironmentUpdaterEnv {
     <#
       Read an environment's update job env (az, subscription-scoped). Returns

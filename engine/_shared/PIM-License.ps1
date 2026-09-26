@@ -620,6 +620,9 @@ Function Get-PimLicenseApiBody {
         mspReason    = $(if ($MspRole) { "$($m.reason)" } else { '' })
         mspMessage   = $(if ($MspRole) { "$($m.message)" } else { '' })
         contact      = "$script:PimLicenseContact"
+        # Free edition (operator 2026-09-26): where "Buy Pro" goes. An https URL from PIM_PRO_BUY_URL (env or global) --
+        # anything else is ignored and the page mails the contact instead.
+        buyUrl       = $(foreach ($u in @("$($global:PIM_ProBuyUrl)", "$env:PIM_PRO_BUY_URL")) { if ("$u".Trim() -match '^https://[^\s"''<>]+$') { "$u".Trim(); break } })
         command      = "$($m.command)"
         editionLine  = "Free: the community edition for a single tenant. Pro: the licensed features for a single tenant, and the multi-tenant half (MSP master / managed tenants). Contact $script:PimLicenseContact."
         # key -> { label; scope; ok; grace; state ok|grace|locked; reason; message } for every Pro feature of the catalog

@@ -23,6 +23,38 @@ Set-StrictMode -Off
 $script:PimEngineProviders = @{}   # scope(lower) -> provider hashtable
 
 # ---- pure diff core (testable, no I/O) ------------------------------------
+function Get-PimChangeFieldDiff {
+    <#
+      §79.3 (operator 2026-09-25: mails must carry "detailed information like configuration drift"). A drift
+      'changed' item used to say only WHICH object differs. This names HOW: every scalar field present on both
+      sides whose value differs, as "Field: live -> desired". Pure; a provider's shapes may be hashtables or
+      objects. Collections and nested objects are skipped (their text form is not a readable difference), and the
+      list is capped so one exotic row cannot bloat the stored drift document.
+    #>
+    param([AllowNull()][object]$Live, [AllowNull()][object]$Desired, [int]$Max = 6)
+    if ($null -eq $Live -or $null -eq $Desired) { return '' }
+    $props = {
+        param($o)
+        $h = [ordered]@{}
+        if ($o -is [System.Collections.IDictionary]) { foreach ($k in $o.Keys) { $h["$k"] = $o[$k] } }
+        else { foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = $p.Value } }
+        $h
+    }
+    $l = & $props $Live; $d = & $props $Desired
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($k in $d.Keys) {
+        if (-not $l.Contains($k)) { continue }
+        $dv = $d[$k]; $lv = $l[$k]
+        $scalar = { param($v) $null -eq $v -or $v -is [string] -or $v -is [ValueType] }
+        if (-not ((& $scalar $dv) -and (& $scalar $lv))) { continue }
+        if ("$lv" -ceq "$dv") { continue }
+        $show = { param($v) $s = "$v"; if (-not $s.Trim()) { '(empty)' } elseif ($s.Length -gt 60) { $s.Substring(0, 57) + '...' } else { $s } }
+        $out.Add(("{0}: {1} -> {2}" -f $k, (& $show $lv), (& $show $dv)))
+        if ($out.Count -ge $Max) { break }
+    }
+    return ($out -join '; ')
+}
+
 function Compare-PimDesiredVsLive {
     param(
         [object[]]$Desired = @(),
@@ -498,6 +530,9 @@ function Invoke-PimEngineScope {
     # group / unmanaged binding / wrong permissions warnings). They travel back as the scope result's `findings`; the
     # drift snapshot lists and counts them (PIM-DriftSnapshot.ps1).
     $Context['__pimLiveFindings'] = New-Object System.Collections.Generic.List[object]
+    # REQ-WHATIF (77.1): a policy provider prints its current -> new impact report on EVERY WhatIf run that would
+    # change something, not only when the breaker holds -- so a WhatIf (drift snapshot, -WhatIf run) previews it.
+    $Context['__pimWhatIf'] = [bool]$WhatIf
 
     # Assignment scopes depend on groups/AUs/admins an earlier scope may have just created.
     # INCREMENTAL refresh: those creates are appended to the directory cache by
@@ -706,7 +741,10 @@ function Invoke-PimEngineScope {
         $entity = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
         if (Get-Command New-PimChange -ErrorAction SilentlyContinue) {
             $payload = if ($op -eq 'Remove') { $item.live } else { $item.desired }
-            $plan.Add((New-PimChange -Entity $entity -Key "$($item.key)" -Op $op -By 'engine' -Payload $payload))
+            $__chg = New-PimChange -Entity $entity -Key "$($item.key)" -Op $op -By 'engine' -Payload $payload
+            # §79.3: an Update says WHAT differs (live -> desired), so drift and its mail can name it.
+            if ($op -eq 'Update' -and $__chg) { $__chg | Add-Member -NotePropertyName diff -NotePropertyValue (Get-PimChangeFieldDiff -Live $item.live -Desired $item.desired) -Force }
+            $plan.Add($__chg)
         } else { $plan.Add([pscustomobject]@{ entity=$entity; key="$($item.key)"; op=$op }) }
         $sym = switch ($op) { 'Create' { '+' } 'Update' { '~' } 'Remove' { '-' } default { '?' } }
         $__isRetype = ($op -eq 'Update' -and $item.PSObject.Properties['typeChange'] -and $item.typeChange)
@@ -762,7 +800,10 @@ function Invoke-PimEngineScope {
                 }
                 if ($__reported) {
                     $script:__skipped++
-                    Write-Host ("    [r] {0} (reported only -- NOT applied)" -f $item.key) -ForegroundColor DarkYellow
+                    # 2026-09-21 (operator, on a held run: "terrible error messages"): a hold reported 117 identical
+                    # "[r] ... (reported only)" lines. The first 3 are listed; the rest are counted before the done line.
+                    $script:__reportedShown = 1 + [int]$script:__reportedShown
+                    if ($script:__reportedShown -le 3) { Write-Host ("    [r] {0} (reported only -- NOT applied)" -f $item.key) -ForegroundColor DarkYellow }
                 } else {
                     $script:__applied++; Write-Host ("    [{0}] {1}" -f $sym, $item.key) -ForegroundColor Green
                     Write-PimEngineChangeAudit -Scope $Scope -Entity $entity -Op $op -Item $item -Result 'ok'
@@ -802,7 +843,7 @@ function Invoke-PimEngineScope {
             Write-Host ("    [{0}] {1} (plan)" -f $sym, $item.key) -ForegroundColor DarkGray
         }
     }
-    $script:__applied = 0; $script:__errors = 0; $script:__skipped = 0
+    $script:__applied = 0; $script:__errors = 0; $script:__skipped = 0; $script:__reportedShown = 0
     $script:__failures = New-Object System.Collections.Generic.List[object]
     $script:__rowDone = @{}; $script:__rowObj = @{}   # Remove rows: revoked item count + the row, by row key
     # Held by the removal budget (68.6 row 24): explicit Remove rows / type changes that did NOT apply.
@@ -852,6 +893,7 @@ function Invoke-PimEngineScope {
             $__rowsDone = Complete-PimRemoveRows -Entity $__rdEnt -Rows $__doneRows -Scope $Scope
         }
     }
+    if ([int]$script:__reportedShown -gt 3) { Write-Host ("    [r] ... and {0} more reported only -- NOT applied (same reason as above)" -f ([int]$script:__reportedShown - 3)) -ForegroundColor DarkYellow }
     Write-Host ("[engine] {0,-20} done  applied={1} skipped={2} errors={3}" -f $Scope, $script:__applied, $script:__skipped, $script:__errors) -ForegroundColor $(if ($script:__errors) { 'Yellow' } else { 'Green' })
     # The CURRENTLY-FAILING set for this scope (SQL). A WhatIf run applied nothing, so it proves nothing
     # about what is failing and must not clear or replace the record.
@@ -1064,6 +1106,31 @@ function Update-PimEngineRunContext {
     }
 }
 
+function Get-PimStoreManagedRowCount {
+    <#
+      §79.15 -- how many rows the store MANAGES (definitions and assignments). 0 = nothing is defined; -1 = could not be
+      counted (the gate treats both as "touch nothing"). Reads through Get-PimDesiredRows, the same source every provider
+      uses, and stops at the first entity that has rows.
+      R25-32 (decided): PIM-Definitions-Resources is deliberately NOT in the list. The discovery sweep writes rows there by
+      itself (auto-create policy, PIM-EngineCore discovery), so counting them would let a store the operator never filled
+      unlock the engine on the next run -- exactly what this gate exists to stop. A store that ALSO has any operator-defined
+      row counts through the other entities, and then Resources rows are managed like every other row.
+    #>
+    $entities = @('Account-Definitions-Admins', 'Account-Definitions-Admins-Central',
+                  'PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks',
+                  'PIM-Definitions-Departments', 'PIM-Definitions-Processes', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg',
+                  'PIM-Definitions-AU', 'PIM-Assignments-Admins', 'PIM-Assignments-Groups', 'PIM-Assignments-Roles-Groups',
+                  'PIM-Assignments-Roles-AUs', 'PIM-Assignments-Azure-Resources', 'PIM-Assignments-Workloads', 'PIM-Assignments-Roles-Direct',
+                  'PIM-Assignments-AppRole', 'PIM-Assignments-Defender', 'PIM-Assignments-Intune')
+    if (-not (Get-Command Get-PimDesiredRows -ErrorAction SilentlyContinue)) { return -1 }
+    $n = 0; $readOk = 0
+    foreach ($e in $entities) {
+        try { $c = @(Get-PimDesiredRows -Entity $e | Where-Object { $null -ne $_ }).Count; $readOk++; $n += $c; if ($n -gt 0) { return $n } } catch { }
+    }
+    if ($readOk -eq 0) { return -1 }
+    return $n
+}
+
 function Invoke-PimEngine {
     # Run one scope, or all registered scopes (Scope='All').
     #   -Mode Full           : whole-scope reconcile (create/update; prune ONLY with -Prune)
@@ -1095,6 +1162,24 @@ function Invoke-PimEngine {
     if ($res.alias) { Write-Host "[engine] $($res.detail)" -ForegroundColor Yellow }
 
     $out = New-Object System.Collections.Generic.List[object]
+    # 🔒 §79.15 CRITICAL GATE (operator 2026-09-25): "as the definitions are empty (no rows), then engine must not touch
+    # anythin - no admins, no groups, no pim etc". A store that manages nothing is a store nobody has filled -- a fresh
+    # install, a failed import, a wiped database -- never an instruction. So when not ONE managed row exists, EVERY scope
+    # is skipped before it reads or writes anything (a Full -Prune on an empty desired set would otherwise target
+    # everything live). Fail closed: a store that cannot be COUNTED is treated the same way.
+    $__managed = Get-PimStoreManagedRowCount
+    if ($__managed -le 0) {
+        $why = if ($__managed -lt 0) { 'the managed rows could not be counted' } else { 'the store defines nothing (0 managed rows)' }
+        Write-Host ("[engine] CRITICAL GATE: {0} -- the engine touches NOTHING (no admins, no groups, no policies, no assignments). Define what PIM manages first." -f $why) -ForegroundColor Red
+        foreach ($s in @($res.scopes)) {
+            # R25-32: skipped is a COUNT everywhere (Invoke-PimEngineCore sums it as [int] under Stop -- the text crashed the run,
+            # an alert every tick); the reason has its own field.
+            $out.Add([pscustomobject]@{ scope = $s; ok = $true; skipped = 0; skipReason = 'no-managed-rows'; detail = "skipped: $why"
+                desired = 0; live = 0; create = 0; update = 0; remove = 0; nochange = 0; errors = 0; plan = @() })
+        }
+        if (@($res.scopes).Count -eq 1 -and -not $res.alias) { return $out[0] }
+        return $out.ToArray()
+    }
     $__nScopes = @($res.scopes).Count; $__iScope = 0
     foreach ($s in @($res.scopes)) {
         $out.Add((Invoke-PimEngineScope -Scope $s @common))

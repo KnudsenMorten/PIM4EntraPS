@@ -15,7 +15,7 @@
       2. VERIFY it offline (RSA-SHA256 against the embedded PUBLIC baseline cert;
          refuse on bad signature / expiry / anti-rollback) -- pull-not-push trust
          model identical to the offline .pimlicense.
-      3. RING-GATE the admin set to admin.Ring <= slave.Ring.
+      3. RING-GATE the admin set to slave.Ring <= admin.Ring (§77.20: 0 dev, 1 test, 2 broad).
       4. STAGE the per-tenant sync files in the resolved folder (central-msp via
          -CentralRoot / $env:PIM_SyncRootCentral, local-slave via -LocalRoot /
          $env:PIM_SyncRootLocal). Idempotent: only rewrites on content change.
@@ -36,7 +36,7 @@
     'S5' (central-hosted managed) or 'S6' (local-hosted managed).
 
 .PARAMETER TenantId / SlaveRing
-    The managed tenant id + its OWN ring (0..2, default 2 = test). The ring is LOCAL to the
+    The managed tenant id + its OWN ring (0 = dev, 1 = test, 2 = broad; default 0). The ring is LOCAL to the
     slave and authoritative; the master's platform.Tenants.Ring is only the master's copy
     and is never read here.
 
@@ -77,7 +77,7 @@
 param(
     [Parameter(Mandatory)][ValidateSet('S5','S6')][string]$Scenario,
     [Parameter(Mandatory)][string]$TenantId,
-    [ValidateRange(0,2)][int]$SlaveRing = 2,
+    [ValidateRange(0,2)][int]$SlaveRing = 0,
 
     [string]$BaselineUrl,
     [string]$BaselineAccessToken,

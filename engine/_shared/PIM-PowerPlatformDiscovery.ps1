@@ -50,7 +50,7 @@ function Get-PimPowerPlatformDerivation {
         default                 { 4 }
     }
     $seg = if ("$DisplayName".Trim()) { ConvertTo-PimNameSegment $DisplayName } else { ConvertTo-PimNameSegment $EnvironmentType }
-    $name = New-PimPermissionGroupName -Service 'PowerPlatform' -Name $seg -Level $level -Tier $tier -Code $code -Domain $domain
+    $name = New-PimPermissionGroupName -Service $(if (Get-Command Get-PimServiceName -ErrorAction SilentlyContinue) { Get-PimServiceName 'powerplatform' } else { 'PowerPlatform' }) -Name $seg -Level $level -Tier $tier -Code $code -Domain $domain
     return [pscustomobject]@{ level = $level; tier = $tier; plane = $code; domain = $domain; environmentType = "$EnvironmentType"; groupName = $name }
 }
 

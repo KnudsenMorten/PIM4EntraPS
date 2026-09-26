@@ -343,9 +343,13 @@ if ($plan.action -eq 'build') {
             Send-PimUpdateOutcome -Action 'failed' -Outcome 'failed' -ToVersion "$($plan.version)" -ErrorText 'cannot resolve which registry to build in'
             exit 1
         }
-        Say "building $imageRepo`:$($plan.version) in $($reg.registryName) (the registry builds; this job only asks)"
+        # 🔴 PIM_ACR_AGENT_POOL (set on this job by Deploy-PimUpdateJob -AcrAgentPoolName) was read ONLY by the
+        # host-side Invoke-PimUpdate. The in-cloud build ignored it, so a registry with public access Disabled
+        # refused every nightly build ("client with IP ... is not allowed access") -- measured 2026-09-23.
+        $pool = "$($env:PIM_ACR_AGENT_POOL)".Trim()
+        Say ("building $imageRepo`:$($plan.version) in $($reg.registryName) (the registry builds; this job only asks)" + $(if ($pool) { " on agent pool '$pool'" } else { '' }))
         $b = Invoke-PimAcrRestBuild -SubscriptionId $sub -ResourceGroup $rg -RegistryName $reg.registryName `
-                -ContextPath $ctx -ImageNames @("$imageRepo`:$($plan.version)") `
+                -ContextPath $ctx -ImageNames @("$imageRepo`:$($plan.version)") -AgentPoolName $pool `
                 -OnPoll { param($s) Say "  build $s" 'DarkGray' }
         if (-not $b.ok) {
             Say "  BUILD $($b.status) after $($b.seconds)s (run $($b.runId))" 'Red'

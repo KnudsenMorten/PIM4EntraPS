@@ -33,7 +33,7 @@
 
 .PARAMETER Scenario      S5 | S6 (placement + identity model).
 .PARAMETER TenantId      The managed/slave tenant id.
-.PARAMETER SlaveRing     THE ring of this managed tenant (0..2, default 2 = test). LOCAL and authoritative: it is
+.PARAMETER SlaveRing     THE ring of this managed tenant (0 = dev, 1 = test, 2 = broad; default 0 -- §77.20). LOCAL and authoritative: it is
                          the pull job's own argument. The master's platform.Tenants.Ring is only its copy.
 .PARAMETER Cron          5-field cron expression (UTC) of the job's TRIGGER. Default '*/5 * * * *': the job gates itself
                          against the cadence set in this tenant's Manager (Job schedule > Managed-tenant pull, 5-1440 min;
@@ -76,7 +76,7 @@
 param(
     [Parameter(Mandatory)][ValidateSet('S5','S6')][string]$Scenario,
     [string]$TenantId,
-    [ValidateRange(0,2)][int]$SlaveRing = 2,
+    [ValidateRange(0,2)][int]$SlaveRing = 0,
     # Every 5 minutes -- the finest interval the Manager's Job schedule allows. The job GATES ITSELF against this tenant's
     # own DownlinkSchedule (PIM-JobCadence.ps1): nothing set there = daily, the cadence the old '0 3 * * *' gave.
     [string]$Cron = '*/5 * * * *',
@@ -223,7 +223,7 @@ function Invoke-Az {
 
 # 🔴 BUG-215 -- NEVER CHANGE THE MACHINE'S az DEFAULT. This line used to run `az account set --subscription` and never
 # restore it, so a standalone deploy silently moved every later az call on the box (other sessions included) to this
-# subscription -- the ELDK default-context hazard in reverse. Every az call below is scoped with --subscription instead.
+# subscription -- the other-company default-context hazard in reverse. Every az call below is scoped with --subscription instead.
 # 🪤 What --subscription CANNOT scope is a DIRECTORY call (az ad sp show, via Resolve-PimMiAppId): that follows the
 # default context's tenant. The old `account set` hid that by moving the default; now the deploy REFUSES when the
 # default context is a different tenant than the subscription's, instead of reading the wrong directory.

@@ -67,7 +67,9 @@ $script:PimFeatureFlagCatalog = @(
     # operator could switch on a surface that has nothing behind it and no write of which is legal here.
     # A surface that needs a topology this tenant is NOT is not a choice: it is locked OFF with the
     # reason, exactly the way an always-on surface is locked ON.
-    [ordered]@{ id = 'downlink';    label = 'MSP Downlink';             default = $false; alwaysOn = $false; requires = 'msp-master' })
+    # 2026-09-21 (operator, on an MSP master: "bug: why is downlink off on the master - critical bug"): ON by default --
+    # 'requires' already locks it OFF everywhere that is not a master, so the default only ever applies on a master.
+    [ordered]@{ id = 'downlink';    label = 'MSP Downlink';             default = $true;  alwaysOn = $false; requires = 'msp-master' })
 
 # What each `requires` value means, in one phrase -- shown on the locked toggle and in the refusal.
 $script:PimFeatureFlagRequirementText = @{
@@ -227,6 +229,9 @@ function ConvertTo-PimFeatureFlagOverrides {
     $overrides = [ordered]@{}
     foreach ($id in $resolved.flags.Keys) {
         if ($always[$id]) { continue }
+        # A surface this deployment cannot host is never stored either way: its forced OFF is a fact of the topology, not a
+        # choice -- storing it would pin it off if the deployment later becomes a master (downlink is ON by default).
+        $eff = $resolved.effective[$id]; if ($eff -and $eff.Contains('available') -and -not [bool]$eff['available']) { continue }
         if ([bool]$resolved.flags[$id] -ne [bool]$defaults[$id]) { $overrides[$id] = [bool]$resolved.flags[$id] }
     }
     return $overrides

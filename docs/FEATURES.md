@@ -20,11 +20,9 @@ deployment is a supported choice) and no credentials lying around.
   - **a single tenant, on our release** — portal, engine and database in that tenant's own
     subscription, updating itself overnight from our release channel;
   - **a single tenant, community edition** — the same shape, free, installed and kept current by
-    you from the public repository;
+    you from the public repository (a provider — managing — tenant is always part of Pro);
   - **a provider (managing tenant), on our release** — a service provider's own tenant, with the
     provider half on top: define once, sign it, roll it out in waves;
-  - **a provider (managing tenant), community edition** — the same, kept current from the public
-    repository;
   - **a managed tenant hosted by the provider** — the portal and database run in the provider's
     tenant and govern the customer's directory;
   - **a managed tenant hosted in its own tenant** — the portal and database run in the customer's
@@ -135,8 +133,8 @@ deployment is a supported choice) and no credentials lying around.
   everywhere. If it cannot read what its ring approves, it stays where it is. Tools run by
   hand obey the same ring and refuse an unapproved version unless an override is given with a
   logged reason. *(The self-updating job needs a published source feed to pull from. A
-  community installation from the public repository updates by pulling the new version and
-  re-running the same one-command deploy, which is idempotent.)*
+  community installation from the public repository updates with one command, which pulls the
+  new version and re-runs the same idempotent deploy with the parameters it was installed with.)*
 - **Updates never go backward by themselves.** ✅ 2026-09-18 Before it builds or rolls anything, the
   nightly update compares the version its ring approves with the highest version the environment is
   known to have reached, and **refuses** to move backward — naming both versions, the ring that
@@ -160,25 +158,31 @@ deployment is a supported choice) and no credentials lying around.
   rather than a guess, and a record older than two days is flagged as stale instead of being shown as
   current. The panel is **read-only by design** — moving a ring stays a deliberate act on the update job,
   and the Manager offers no control that writes one.
+- **The community edition installs exactly as the README says.** ✅ 2026-09-25 A fresh tenant, the README commands
+  and nothing else: the installation finishes, checks itself (the Manager runs its latest version, the page answers
+  behind sign-in, the engine job exists), runs the engine every five minutes, and applies a first delegation. Proven
+  on a clean test tenant, then removed without a trace.
 
 ## 4. MSP
 - **Replication rings — roll a change to one wave of customers before the rest.** ✅ 2026-09-18
-  Every definition row carries a ring and every managed tenant carries a ring; a row is admitted
-  when its own ring is at or below the tenant's. The ring is never the whole answer: a row reaches
-  a tenant only when it is marked for replication **and** the ring admits it **and** the tenant
-  matches what the row is aimed at — *ring AND target*, never either-or. Rows are aimed by name or
-  by tag: blank means every tenant the ring admits, a named tenant means just that one, several
-  tags listed together mean *any of these*, tags joined into one term mean *all of these at once*,
-  and a row can be marked as never leaving the provider. Tenant tags live in the provider's own
-  tenant record and travel inside the signed set, so a tenant cannot tag itself into scope.
+  Three rings in the same order as the software rings — **0 = dev, 1 = test, 2 = broad** (since
+  2.4.388; the order used to be the reverse, and existing rows and tenants were converted so each
+  keeps its reach). Every managed tenant sets its own ring and every definition row carries one; a
+  row reaches the tenants whose ring is at or below its own, so a new administrator starts on ring 0
+  (dev tenants only) and is promoted 0 → 1 → 2. **Tags belong to the ring:** the provider names each
+  ring and may narrow it with a tag rule once (e.g. *test = tenants tagged `wave:pilot`*), instead of
+  setting tags on every row; a tenant outside its ring's rule receives nothing ring-gated. A row
+  reaches a tenant only when it is marked for replication **and** the ring admits the tenant, and a
+  row can be marked as never leaving the provider. Tenant tags live in the provider's own tenant
+  record and travel inside the signed set, so a tenant cannot tag itself into scope.
   **A row the ring does not admit is withheld, not retracted** — the tenant does not receive it and
   whatever it already holds is untouched; widening the ring later releases it. Withdrawing access a
   tenant already has is a separate, deliberate act: off by default, reported before it is done, and
   stopped rather than exceeding a safety limit. If a reaching row depends on a row the ring or
   target would have excluded, the dependency is included anyway and the run says so, naming the
   row, what needed it and the tenant. **This is a different control from the release ring that
-  decides which software version an environment runs** (chapter 3) — same word, same small
-  numbers, not the same scale, and neither one implies the other.
+  decides which software version an environment runs** (chapter 3) — both run in the same order
+  (ring 0 first, ring 2 widest), but neither one implies the other.
 - **See what reaches each tenant, and what is held back, before you send it.** ✅ 2026-09-18 The
   provider's Manager shows per row how many managed tenants it will reach and which ones, and per
   role which tenants it is **withheld** from with the reason — the ring, the target, the
@@ -189,8 +193,8 @@ deployment is a supported choice) and no credentials lying around.
   of writing a rule that would change nothing and report success.
 - **Replication settings in plain words.** ✅ 2026-09-19 Each row says *Follow (default) — sent only
   when a replicated row needs it*, *Replicate to managed tenants*, or *No replication to managed
-  tenants — master tenant only*. Each ring option says which tenants it reaches (Ring 0 = every
-  managed tenant, Ring 2 = only the pilot ring), and every tenant is shown with its ring. A group set
+  tenants — master tenant only*. Each ring option says which tenants it reaches (Ring 0 = dev tenants
+  only, Ring 2 = every managed tenant), and every tenant is shown with its ring. A group set
   to replicate on its own now reaches its tenants even before any administrator is replicated.
 - **Pull, never push.** In a managed-service setup, the provider never reaches into or
   writes to your tenant. Each tenant pulls a signed baseline into its own local database;
@@ -234,6 +238,11 @@ deployment is a supported choice) and no credentials lying around.
   365 days, or switching a delegation to a policy that needs approval, is a couple of clicks. Edits queue
   in Pending changes and commit like any other change. *All records* remains as the raw view of
   everything, and the narrowed table says it is narrowed with one click back.
+- **Rename a group or an Administrative Unit — it stays the same object.** ✅ 2026-09-24 In *All records*, the ✎
+  on a definition renames it: name, description and, if you want, its tag. Every row that points at the tag is
+  updated in the same change. After the commit, the engine renames the **existing** group or AU in Entra ID, so its
+  members, roles and history stay with it. Earlier versions created a second group and left the old one with its
+  access. Changing the name directly in the grid works the same way. *(2.4.422)*
 - **Mail about an administrator goes to their sponsor department's owners.** ✅ 2026-09-16 When PIM sends
   anything about an administrator account — the new-account notice, the Temporary Access Pass — it goes to
   the **owners of the department that sponsors that administrator**, all of them, not to a manager recorded
@@ -296,6 +305,50 @@ deployment is a supported choice) and no credentials lying around.
   shared and **keyed by product**, so companion tooling (such as tenant management) reuses the
   exact same registry, authentication and storage model rather than a separate parallel
   system — fewer moving parts, one consistent security posture.
+
+- **Your administrators are never held back because of how they are named.** ✅ 2026-09-22 A managed tenant's admin
+  naming convention says which accounts *in that tenant* are administrator accounts. It was also deciding which
+  administrators the provider was allowed to send — so an account named differently from the customer's convention
+  was quietly dropped, and the sync still reported success. Now every administrator you publish is sent, the
+  tenant's engine recognises it because **its own record names it**, and a naming difference is reported as
+  something to look at rather than acted on.
+- **The pull says what it did, afterwards.** ✅ 2026-09-22 How many administrators were sent, what was excluded by
+  policy or ring, how many groups will be created — that explanation used to exist only while the job was running.
+  It is now kept with the run and shown on **Job schedule**.
+- **Copy a setting from one tenant to another.** ✅ 2026-09-22 A supported script exports a named setting (naming
+  conventions, a schedule) from one tenant and imports it into another, backing up the target's current value first
+  and reading back what it wrote. It refuses the settings that name the tenant they came from — who may use the
+  Manager, trust pins, store pointers — because copying those points one tenant at another's identities.
+- **An admin account can follow the delegations that need it.** ✅ 2026-09-22 An administrator's account is
+  either kept on your own tenant, replicated to every managed tenant its ring admits, or — new — sent **only
+  where a replicated delegation names that person**. Before this, a delegation you had marked *Replicate to
+  managed tenants* was **dropped without a word** when the admin it named was master-only: the row looked
+  correct, reached nobody, and nothing said so. Now the account travels with the delegation, exactly where it is
+  needed, and a delegation whose admin is still master-only is **listed as not published with the fix in the
+  sentence**. An account you have explicitly marked as staying on the master is never dragged out by a
+  delegation. *Why it matters:* "I gave them the role in the customer tenant and nothing happened" was, in every
+  case, this.
+- **On a managed tenant, every record says where it came from.** ✅ 2026-09-22 The replication settings belong to
+  your provider and are hidden on a managed tenant — which left no way to tell a row the provider sent from one
+  you created yourself. Each replicable record type now carries a **Source** column (*from the MSP master* /
+  *local*) and counts both in its header line. It is a statement of provenance, not a new control: your own rows
+  are still yours, and the provider's sync still touches only what it put there.
+- **A replicating row must name its ring.** ✅ 2026-09-22 Setting replication on and leaving the ring empty
+  produced a row that looked finished and reached nobody. It is now refused when saved, and the bulk control
+  tells you how many of the rows you selected would have hit it.
+- **Set replication and ring on many rows at once.** ✅ 2026-09-22 Tick rows in **All records** and use **Set
+  replication to…** and **Move to ring…** in the selection bar — the same words and the same values as the
+  per-row dropdowns, with a count of how many rows now reach your managed tenants (or no longer do). The ring
+  action previously existed only for admin accounts.
+- **Revoke someone's sessions everywhere at once.** ✅ 2026-09-25 When you revoke an administrator's sign-in
+  sessions on the MSP master, you can have every managed tenant revoke the sessions of that person's account there
+  too — no approval needed in each tenant. Each tenant carries it out once, on its next sync, and checks that it took
+  effect. Break-glass accounts are never revoked. *Why it matters:* when someone leaves, their access ends in every
+  customer, not only in yours.
+- **Remove an administrator in all, some or none of your managed tenants.** ✅ 2026-09-25 Removing a replicated
+  administrator (or any replicated record) on the MSP master asks whether the managed tenants should remove it too —
+  in all of them, or only the ones you pick. The chosen tenants remove the administrator and their memberships on
+  the next sync; the others keep it and report it. A removal never overrides something the master still publishes.
 
 ## 5. SQL / Data
 - **Single source of truth in SQL.** ✅ 2026-09-13 Configuration, settings, access rules,
@@ -413,9 +466,12 @@ deployment is a supported choice) and no credentials lying around.
   exactly as for Entra roles and PIM for Groups. A policy that was only partly configured is
   repaired rule by rule, and approval that is already switched on is never removed.
 - **Group owner policies and the full notification set.** ✅ 2026-09-13 The owner-role policy on
-  each PIM group is managed as well as the member policy, the complete set of notification
-  settings is applied, and every directory role and managed group is checked — not only the ones
-  named in your data.
+  each PIM group is managed as well as the member policy, and the complete set of notification
+  settings is applied.
+- **PIM only touches what you define.** ✅ 2026-09-25 A policy, group, admin or assignment is
+  changed only when your data defines it. Groups, roles and admins that PIM does not manage, and
+  break-glass accounts, are never touched, whatever their name. If your data defines nothing at all,
+  the engine changes nothing.
 - **Moving from v1 changes no PIM policy.** ✅ 2026-09-13 The standard policy templates for Entra
   roles, Azure resource roles and PIM for Groups (member and owner) carry exactly the values v1
   used, and a standing check compares every rule with v1's definitions so they cannot drift
@@ -423,8 +479,10 @@ deployment is a supported choice) and no credentials lying around.
   overwriting anything you changed.
 - **A safety brake on large or weakening policy changes.** ✅ 2026-09-13 If a run would change
   many PIM policies at once, or weaken protection (for example remove MFA on activation),
-  **nothing is changed**: the plan is held and shown for an administrator to approve on the Jobs
-  page, and the approval covers exactly that plan and nothing else. The brake covers Entra role,
+  **nothing is changed**: the plan is held and shown for an administrator to approve under
+  **Approvals**, which shows each held change set with its settings as current → new and its own **Approve**
+  button. The approval covers exactly that plan and nothing else. *(2.4.423: held changes stay listed at all times;
+  before that they could disappear from the page after Access reviews had been opened.)* The brake covers Entra role,
   Azure resource and PIM for Groups policies in every case. Ordinary drift is still corrected
   straight away, and applying a template to a brand-new group's untouched default policy is not
   treated as weakening, so creating new delegations does not trip it.
@@ -481,13 +539,24 @@ deployment is a supported choice) and no credentials lying around.
   and confirm the pattern right in Settings before importing.
 
 ## 9. Auth / Identity
+- **Signing in works whatever an administrator is called.** ✅ 2026-09-22 — the Manager verifies that the two
+  identity headers its authentication front door supplies describe the same person, and only then accepts the
+  sign-in. An HTTP header can carry plain English letters only, so a display name with a space or an accent
+  arrives encoded (`S%C3%B8rensen`) while the companion record carries it as written — and the two were compared
+  letter by letter, so every such administrator was refused with *"no authenticated principal — this app must be
+  reached through its authentication edge"*, blaming the deployment for a front door that was working. The
+  comparison now understands the encoding. *Why it matters:* it is the difference between "nobody outside a
+  narrow set of names can use the tool" and "everyone can", and the check it protects — a name header without
+  its matching record, or naming somebody else, is still refused — is unchanged.
 - **An admin whose first-time sign-in pass has expired is rescued automatically.** New admin
   accounts are handed a time-boxed Temporary Access Pass so they can sign in and register their
   own MFA. If nobody uses it before it expires, that admin previously had **no way back in at
   all** — and the system reported everything as healthy, because it only checked whether a pass
   existed, not whether it still worked. It now checks that the pass is genuinely **usable**, and
-  issues a fresh one to any admin whose pass has lapsed. *(✅ 2026-08-21, verified against a live
-  tenant.)*
+  shows an admin whose pass has lapsed. *(✅ 2026-08-21, verified against a live tenant.)*
+  **Each admin gets one pass automatically.** When that pass expires, the system does **not**
+  mint and mail a new one on its own. A new pass is issued only when an administrator clicks
+  **Reset TAP** in the Manager. *(2.4.416)*
   - **It refuses to issue a pass it cannot deliver.** If the notification mailbox is not set up,
     the recipient address is missing, or email is switched off, the system **changes nothing** and
     says why. A sign-in credential that was created but never reached anyone is worse than the
@@ -496,6 +565,9 @@ deployment is a supported choice) and no credentials lying around.
   - **It never issues in a loop.** Once an admin holds a working pass the system leaves it alone;
     and if it cannot read an admin's current state, it deliberately does nothing rather than risk
     issuing a new credential on every cycle.
+  - **The button tells you when it cannot work.** ✅ 2026-09-24 Without a notification mailbox, **Reset TAP** in
+    Accounts & TAP is disabled and says why. A click always answers, even before the list under the grid has
+    finished loading. *(2.4.422, 2.4.423)*
   - **The code only ever appears in the email** — never in a web response, on screen, or in an
     audit record. Passes can also be re-issued on demand from the Manager by an administrator; the
     re-issue is queued, applied by the engine, and mailed to the account owner's address (below).
@@ -588,7 +660,8 @@ deployment is a supported choice) and no credentials lying around.
   and their membership in the chosen delegation group — all staged for the normal Review & Save
   flow, so nothing is granted until you confirm and the engine applies it. Guest invitation is
   cloud-only (you cannot invite a guest into on-prem Active Directory), and only an operator with
-  the guest-invite delegation right (or a super-admin) may do it.
+  the guest-invite delegation right (or a super-admin) may do it. If your tenant does not allow guest invitations,
+  the engine stops at once, changes nothing, and names the External collaboration setting to change. *(2.4.421)*
 - **Self-service consultant enable / disable.** ✅ 2026-06-15 A department or service owner can
   switch one of *their own* managed consultants on or off from the console — without a central
   request. The action is allowed only for the consultants that owner manages (a super-admin may
@@ -624,6 +697,42 @@ deployment is a supported choice) and no credentials lying around.
 
 ![PIM Manager — Home / Overview dashboard](img/manager-home.png)
 *The Manager opens on Home: red/amber/green attention tiles for engine health, validation findings, break-glass, delegation by tier, gaps, expiring access and pending reviews. (Synthetic demo data.)*
+
+- **Four words that mean four different things — defined once, on the screen where you choose.** ✅ 2026-09-22 —
+  **Stop managing**, **Remove**, **Revoke** and **Delete** act on three different things, and the difference
+  decides whether somebody still has access tomorrow. Every list that offers them now carries the same short
+  table, and the same wording appears in each confirmation:
+
+  | word | acts on | what happens | undo |
+  |---|---|---|---|
+  | **Stop managing** | the delegation **row** | the row leaves the product; the access stays exactly as it is and nobody loses anything | yes — add the row back |
+  | **Remove** | the **access** that row grants | that exact assignment is taken away on the next run, then the row is deleted (it is a one-time instruction) | no |
+  | **Revoke** | the **live** assignment, now | taken away immediately — but the delegation is untouched, so if it still says *Assign* the access is **created again** on the next run | no, but it comes back unless you also Remove |
+  | **Delete** | the **group** itself | roles removed, members taken out, group deleted | no |
+
+  The last line of that table is the one that used to surprise people: revoking alone does not make access
+  stay away. The revoke screen now says so, and every removal dialog shows the table so the right act is
+  one click away.
+
+- **Take a delegation away, from the list or from the map.** ✅ 2026-09-22 — a delegation row now has a
+  **⊖** that removes the access it grants: the engine takes that exact assignment away on its next run and
+  then clears the row. The same act is what the Access map stages when you remove a link. Both are staged,
+  both are reversible until you commit, and a row waiting to be removed shows it — with a one-click undo.
+
+- **Two clearly different ways to get rid of a group — and the screen says which is which.** ✅ 2026-09-22 —
+  on any list of group definitions, each row now offers both:
+  - **✕ — take the row out of PIM.** The group stays in your directory, everyone keeps the access they
+    already have, and the product simply stops managing it. Use it when the group should live on but
+    somebody else owns it from now on. The bulk button above the list does the same thing for every
+    selected row, and now says so in those words.
+  - **🗑 — delete the group.** The product removes the directory roles the group holds, takes every member
+    out, and deletes the group itself. This cannot be undone, so it is **refused** while any delegation or
+    any live assignment still gives somebody access through that group — and the refusal names them and
+    offers to take you there. The dialog also tells you whether automatic group deletion is switched on in
+    your environment, so you are never told something was deleted when it was not.
+
+  Both are staged: nothing happens until you commit, and you can back out until then. A short line above
+  the list answers the question directly — which button do I want, and what survives each one.
 
 - **Turn any Manager feature on or off in Settings — roll out gradually.** ✅ 2026-06-16 — every
   screen in the Manager (each tab and major panel) can be switched on or off from a **Features** panel in
@@ -1007,6 +1116,60 @@ deployment is a supported choice) and no credentials lying around.
   still shows their access, and a name that genuinely matches nothing is reported rather than silently
   dropped. Workload reconciliation only appears when workload bindings exist.
 
+- **The Access map is tested at every option, in a real browser.** ✅ 2026-09-25 Every kind of box is clicked
+  and must draw its whole chain — up to the people, down to the roles and scopes — with every line joining the
+  right boxes and sitting exactly on them. The focus toggle, Back to overview, search, the risk overlay, removing
+  access, three screen widths, export and print are covered too, so a change that breaks the lines is caught
+  before it ships. *(2.4.442)*
+
+- **The Access map also maps — put people into groups and permissions into groups, from either end.**
+  ✅ 2026-09-21 Selecting a person offers **+ Assign to a direct group**, so you can put them into a job
+  role, department, organisation or project group. Selecting one of those groups offers **+ Add people**
+  and **+ Add permissions**, and selecting a permission group offers **+ Give this to a direct group** —
+  so you can start from whichever end you happen to be looking at. **Three ways, whichever suits you:**
+  select the source and **Ctrl+click** each target (⌘ on a Mac); **drag** one box onto another, where only
+  boxes that can accept it light up; or use the **➕ buttons in the toolbar** — *Give access*, *Add people*,
+  *Add permissions*, *Give to a group* — named for whatever you have selected. Both ends of a link you have
+  not committed yet are **marked in amber with the word "staged"**, so you can see what you changed in this
+  session at a glance; the mark clears itself when you commit. The buttons open a **list you
+  can filter by name or tag** — click an entry to add it, keep clicking to add more, then press Done;
+  anything already linked is listed as *already linked* rather than hidden. The matching column on the
+  board lights up and can be clicked instead, whichever you prefer. Each pick adds one change and draws
+  it on the board at once as a dashed line, and nothing reaches your tenant until you commit on
+  Review & Save — which takes a backup first, applies in one transaction, and lets the engine make the
+  change in your tenant on the run it starts immediately. Permissions that carry a directory role are added as
+  eligible, because Entra allows them no other way; everything else is added as active. The buttons need the
+  Admin role.
+- **…and it removes a delegation — as its own, clearly separate action.** ✅ 2026-09-22 Until now the map could
+  only add: asked to remove a link it pointed at *Review current delegations*, which lists the access that is
+  **live in your tenant** and never contained these rows — so searching there for the group came back empty.
+  Selecting anything now offers **two kinds of button**: **➕ Give access / Add people / Add permissions** in
+  blue, and **➖ Remove access / Remove people / Remove permissions** in red. Each opens a list of only that
+  direction's candidates — giving lists what it does **not** have yet, removing lists only what it **is linked to
+  today** — so a click can never do the opposite of the button you pressed. Removals are **staged**, not done:
+  the entry, both boxes and the line between them turn **red and struck through** and read *"staged remove"*
+  (additions stay amber and read *"staged add"*) until you commit on **Review & Save**; clicking again takes it
+  back. Ctrl+click or a drop onto an existing link does the same and asks you to confirm by name. If the row is
+  replicated to managed tenants you are asked, once, whether they should remove it too. *Why it matters:* the
+  board is where you can see that somebody has access they should not — and it is now where you can take it
+  away, without ever confusing that with granting it.
+- **The selection bar stays in view.** ✅ 2026-09-22 The bar that names what you have selected and carries these
+  actions used to sit at the very bottom of a full-height board, off-screen and in plain white. It now sticks to
+  the bottom of the window, tinted and outlined — blue while you are giving, red while you are removing.
+- **"This group cannot be deleted" now names what is in the way — and takes you to it.** ✅ 2026-09-22 A group
+  that still gives somebody access is refused, as before. The refusal used to name the *record type* and a
+  count; it now lists each delegation in words — *"anna@… is in ROLE-Operations"*, *"ROLE-Operations gets the
+  permissions of TASK-Reader"*, *"…holds the Entra role Global Reader"* — says plainly that these are delegation
+  rows rather than live assignments, and offers to **open exactly those rows, already filtered**, so you can
+  remove them first. If it is live assignments that block the delete, it offers to open *Review current
+  delegations* filtered on the group instead.
+- **Review current delegations understands group tags, and an empty result explains itself.** ✅ 2026-09-22 A
+  live assignment carries the group's **display name**, while the rest of the Manager speaks **group tags**, so
+  searching this page by tag returned nothing — which reads as "there is no such access". The search now matches
+  either. And when nothing matches, the page says what it actually lists — access that is **live in the tenant
+  right now** — explains that a delegation is a row that lives on the Access map, and offers to look for the
+  same text there.
+
 ![Access map — admin to direct group to permission group to target, with the risk overlay on](img/manager-access-map.png)
 *The Access map traces admin → direct group → permission group → target, with the risk overlay marking orphaned and over-privileged nodes. (Synthetic demo data.)*
 
@@ -1266,6 +1429,11 @@ deployment is a supported choice) and no credentials lying around.
   (UTF-8, ISO timestamps that read the same on any machine) and hardened against spreadsheet
   formula-injection, so it is safe to open and to hand to an auditor as ticket evidence or a recertification
   record. As before, the whole view is strictly read-only.
+  - **An event with nothing before it reads as a fact, not as a change.** ✅ 2026-09-22 A sign-in has no
+    "before", so the change column filled every row with *role: (none) → SuperAdmin; mode: (none) → hosted*
+    — arrows pointing out of nothing, page after page, saying only what the row already was. A sign-in is
+    now one sentence — *signed in as SuperAdmin (hosted Manager, role from sql ManagerAccess)* — and any
+    other event that merely records a state states it. A real before → after is unchanged.
 - **Support tab — a one-click self-check and a safe bundle to hand off for help.** ✅ 2026-06-16 —
   when something is not working, the **Support** tab now gives you a first-line diagnostics you can run
   yourself. **Run checks** tests the three things the Manager depends on — the **database**, **Microsoft
@@ -1289,6 +1457,11 @@ deployment is a supported choice) and no credentials lying around.
   for example "admin-x@contoso.com → member of group PIM-ROLE-… (Eligible)" or "group A → member of group
   B"; a principal the directory no longer knows is shown as "unresolved principal" with its group. **Check
   now** queues a fresh check. When there is no drift it simply says so.
+  - **The solution's own objects are not counted as drift.** ✅ 2026-09-22 The security group the deployment
+    creates to administer PIM's database — and whose members are the identities PIM itself runs as — is not
+    something PIM delegates, so it showed up as an extra object that could never be cleared, on the one group
+    you must not delete. It is left out of the counts, and the page says **how many items were left out and
+    which object they were**, because a number that is quietly smaller is how a real finding hides.
 - **Correct drift from the same page.** ✅ 2026-06-16 An administrator can tick items and press **Apply
   now**: the same engine that runs your scheduled reconciles corrects only the selected items. Missing and
   changed items are created or updated; removing an **extra** item needs a deliberate, separate opt-in and
@@ -1374,6 +1547,19 @@ deployment is a supported choice) and no credentials lying around.
   before it is extended, with one exception: rows explicitly opted into auto-extension
   skip the owner step. A removal/deny decision is remembered, so the engine does not
   silently re-add a person the owner just removed; the most recent decision always wins.
+- **Access reviews created from the group's review cycle.** ✅ 2026-09-24 — Give a group a review cycle
+  (weekly, monthly, quarterly, half-yearly or yearly) and the engine creates a recurring access review of its
+  members, reviewed by the group's owners. It needs one additional permission for the engine's identity, which
+  Microsoft requires for creating reviews. Once granted, every group with a review cycle gets its review, and
+  reviewers are notified by mail. *(2.4.422)*
+- **Review decisions and reviewer changes are carried out by the engine.** ✅ 2026-09-25 — When a reviewer
+  records Approve / Deny / Don't know, or an admin changes who reviews, the Manager records it and starts the
+  engine, which applies it within moments and checks that it took effect. The Manager itself only reads, so it
+  no longer needs permission to change access reviews, and a correctly set-up environment no longer refuses
+  these buttons. *(2.4.442)*
+- **A new admin's pass waits for the account.** ✅ 2026-09-24 — The temporary access pass and the account are
+  handled by two jobs on their own schedules. If the pass job reaches a new admin first, it waits for the account
+  and issues the pass on its next run, instead of reporting a failure. *(2.4.421)*
 - **Emergency break-glass override.** ✅ 2026-06-14 — In a genuine emergency an authorized
   super-admin can temporarily lift the approval requirement on the affected privileged
   access, gated by a passphrase. The passphrase is verified against a secret held in your
@@ -1382,6 +1568,13 @@ deployment is a supported choice) and no credentials lying around.
   Every step is audited and the owners are notified, and normal approval policy is
   restored automatically when the window expires. It works from a client PC, so it still
   functions even if the central console is unavailable.
+- **A daily check that your delegations still point at something real.** ✅ 2026-09-25 Every day PIM checks that the
+  Azure resources, Azure roles and Entra roles your delegations name still exist, and mails you the ones that are gone,
+  with the delegations that name them. It reports and never removes anything — you decide. A lookup that could not
+  answer is shown as unknown, never as missing.
+- **A daily reminder of changes nobody committed.** ✅ 2026-09-25 Changes staged under Pending changes, and queued
+  actions such as a pass re-issue or a session revoke, that have waited more than a day are mailed to you with who
+  staged them and how long ago. On by default; a SuperAdmin sets how often, or turns it off, under Jobs.
 
 ## 14. Scale / Performance
 - **Built for large tenants.** The solution never bulk-lists hundreds of thousands of users
@@ -1502,6 +1695,12 @@ deployment is a supported choice) and no credentials lying around.
 - **Verified end to end.** Delegations are confirmed to be genuinely applied in PIM, Azure
   resource access is validated against real sample resource groups, and a rerunnable offline
   test suite covers the engine and Manager flows.
+- **Every feature is tested live, end to end, and the list grows with the product.** ✅ 2026-09-24 A live
+  test drives every feature against a dedicated test environment, through both the engine and the Manager in a
+  real browser. It covers creating and delegating, revoking, deleting, renaming, policy templates and their safety
+  brake and approval, the emergency override, scheduled creation, access reviews and application roles. The
+  browser part also checks usability at three screen widths. Every object it creates is marked and removed
+  afterwards. A coverage check fails the build when a new feature ships without its live test.
 - **Deploy-validation that proves what got built.** ✅ 2026-06-14 After a first-time deploy, an
   automated suite reads the desired configuration straight from the database and confirms —
   against the live tenant — that **every** group, administrative unit, role assignment, admin
@@ -1587,13 +1786,14 @@ licence state.
 **Free — the community edition, for a single tenant.** The full portal; eligible, time-boxed access with approval
 and a complete audit trail; Entra ID roles, PIM for Groups, administrative units and Azure RBAC; Intune and
 Defender XDR role delegation, including Defender custom roles; delegation by group; policy templates (a Standard and
-a RequireApproval template per kind, renameable, with a default per kind); drift detection; access reviews and
-reports; administrator accounts and first-time access passes; permission templates imported by script and tenant
+a RequireApproval template per kind, renameable, with a default per kind); drift detection; reports (standing and expiring access)
+and the current delegations list; administrator accounts and first-time access passes; permission templates imported by script and tenant
 preparation from one configuration file; self-updating from the public release; and community support.
 
 **Pro — licensed capabilities for a single tenant.** Coverage & gaps and discovery across every workload; the
 Power BI, Exchange Online, enterprise-app role, Azure DevOps, Dataverse, Business Central and Power Platform
-connectors; revoking current delegations; access review campaigns; a second approver for sensitive changes;
+connectors; revoking current delegations (the list itself is free); access reviews (campaigns with decisions recorded and
+enforced); a second approver for sensitive changes;
 delegated administration (portal users limited to a tier, level, service or scope); the tier-impact report; and the
 evidence export. Without a licence the second approver is off too, so install the licence before relying on it.
 

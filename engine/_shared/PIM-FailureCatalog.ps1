@@ -120,6 +120,17 @@ $script:PimFailureRules = @(
        retryable = $false; severity = 'data'
        fixes = @(@{ id = 'delete-row'; label = 'Remove this row'; kind = 'delete-row' }) }
 
+    # BUG-234 (77.3, EFIF 2026-09-21): a row names an Entra role this tenant does not have. It was UNCLASSIFIED in
+    # EntraRolePolicies and "unresolved group/role" in EntraRoles, and failed every run for two days. Ahead of the
+    # generic rule below, which still covers a missing GROUP.
+    @{ code = 'ENTRA-ROLE-NOT-IN-TENANT'
+       match = { param($m, $row) $m -match "(?i)Entra has no role named '|directory role '[^']+' not found in this tenant" }
+       title = 'The row names an Entra role this tenant does not have'
+       cause = 'No Entra directory role with this display name exists in this tenant. Role display names are not the same everywhere -- Microsoft renames roles and tenants can show the old or the new name (e.g. "Office Apps Administrator" vs "Microsoft 365 Apps Administrator"). The error names the closest real role when there is one.'
+       remedy = 'Change RoleDefinitionName on the row to the role name this tenant uses (the suggestion in the error), or remove the row. Nothing is assigned until then.'
+       retryable = $false; severity = 'data'
+       fixes = @(@{ id = 'delete-row'; label = 'Remove this row'; kind = 'delete-row' }) }
+
     @{ code = 'ENTRA-ROLE-UNRESOLVED'
        match = { param($m, $row) $m -match '(?i)unresolved group/role' }
        title = 'Entra group or role could not be resolved'
@@ -138,6 +149,28 @@ $script:PimFailureRules = @(
        remedy = 'Make the nesting Eligible (the delegation wizards now always write Eligible here), or remove the row.'
        retryable = $false; severity = 'data'
        fixes = @(@{ id = 'make-eligible'; label = 'Make it Eligible'; kind = 'set'; set = @{ AssignmentType = 'Eligible' } }) }
+
+    # BUG-253 (§78 live E2E, 2026-09-24): an account (or group) the SAME run just created is not yet visible to the PIM
+    # role service, which answers 404 SubjectNotFound. Measured: a DIRECT role on a user created seconds earlier in the
+    # run -- UNCLASSIFIED, and the whole run recorded FAILED; the next run applied it. Replication lag, not data.
+    @{ code = 'PRINCIPAL-NOT-REPLICATED-YET'
+       match = { param($m, $row) $m -match '(?i)SubjectNotFound|The subject is not found' }
+       title = 'The account or group was created moments ago and PIM cannot see it yet'
+       cause = 'Entra replicates a new user or group to the PIM service within minutes. An assignment made in the same run that created the principal is refused with "SubjectNotFound" until then.'
+       remedy = 'Nothing to do: the next run applies it. If it persists for hours, check that the account or group in the row still exists.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
+
+    # BUG-257 (§78 live run 7, 2026-09-24): the TAP job (delta-admin-tap, every 10 min) and the account job (delta-admins,
+    # every 5 min) run apart, so an admin that became due between them reaches AdminTap before the account exists -- the
+    # run was recorded FAILED "Unrecognised failure" and the next run issued the pass as normal. Ordering, not a fault.
+    @{ code = 'ADMIN-NOT-CREATED-YET'
+       match = { param($m, $row) $m -match "(?i)AdminTap: user '[^']+' not found" }
+       title = 'The admin account is not created yet, so its Temporary Access Pass waits'
+       cause = 'The pass is issued by the TAP job and the account is created by the Admin accounts job; they run on their own schedules. An admin that has just become due (a new row, or a scheduled ProvisionDate that has passed) reaches the TAP job before its account exists.'
+       remedy = 'Nothing to do: once the Admin accounts job has created the account, the next TAP run issues the pass. If it persists for hours, look for a failed Admin accounts item for the same person.'
+       retryable = $true; severity = 'transient'
+       fixes = @() }
 
     # A group the row needs does not exist (yet). Almost always ORDER, not data: the Groups job creates the
     # group, and every item that names it fails until then -- or for good, when the create itself failed
@@ -382,6 +415,10 @@ function Get-PimFailureItemLabel {
         $wlr = & $g 'Workload'
         if ($wlr) { return "group $gdisp -> $wlr role '$role'$t" }
         $au = & $g 'AdministrativeUnitTag'
+        # A DIRECT role row (PIM-Assignments-Roles-Direct) names a USER, not a group -- it read "group  -> Entra role
+        # 'Reports Reader'" with an empty group (§78 live E2E, 2026-09-24).
+        $dUpn = & $g 'UserPrincipalName'; if (-not $dUpn) { $dUpn = & $g 'Username' }
+        if ($dUpn -and -not $gt -and -not $gname) { return "user $dUpn -> Entra role '$role' (direct)$t" }
         return "group $gdisp -> Entra role '$role'$(if ($au) { " in administrative unit $au" })$t"
     }
     $wl = & $g 'Workload'; $wrole = & $g 'RoleName'
@@ -412,18 +449,84 @@ function New-PimEngineItemFailure {
     }
 }
 
+function Test-PimEngineFailuresAreAllTransient {
+    <#
+      PURE. TRUE when every failed item in a run is a transient, retryable one -- today that is
+      GROUP-NOT-CREATED-YET and its kind: the item names something another job creates in the same
+      cycle, so it applies on the next run without anybody doing anything.
+      🔴 Operator, 2026-09-22, on an alert for 'delta-admins' (1x "The group this item needs does not
+      exist yet"): "bug". A run whose ONLY problem is ordering was recorded FAILED and raised a
+      failure alert every cycle, which is how a real failure stops being noticed.
+      🔒 It is NOT "ignore transient items": with no failures at all the caller reports ok and SAYS
+      how many are waiting, and an item still waiting after `-MaxAgeMinutes` (its first-seen stamp)
+      is treated as a real failure again -- something it needs is never coming.
+    #>
+    param([object[]]$Failures, [int]$MaxAgeMinutes = 120, [datetime]$NowUtc = [datetime]::UtcNow)
+    $all = @($Failures | Where-Object { $_ })
+    if (-not $all.Count) { return $false }
+    foreach ($x in $all) {
+        if (Test-PimEngineFailureIsApprovalHold $x) { continue }          # holds have their own path
+        if (-not ("$($x.severity)" -eq 'transient' -and $x.retryable)) { return $false }
+        # Outlived its cause? The item carries firstSeenUtc once the failure store has seen it before.
+        $seen = $null
+        try { if ($x.PSObject.Properties['firstSeenUtc'] -and "$($x.firstSeenUtc)".Trim()) { $seen = [datetime]::Parse("$($x.firstSeenUtc)", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') } } catch { $seen = $null }
+        if ($seen -and ($NowUtc.ToUniversalTime() - $seen).TotalMinutes -gt $MaxAgeMinutes) { return $false }
+    }
+    return $true
+}
+
 function Format-PimFailureSummary {
     <# "17 item(s) failed: 10x Azure PIM policy rejects the assignment duration [AZ-POLICY-MAX-DURATION]; 4x ..." #>
     param([object[]]$Failures)
-    $f = @($Failures | Where-Object { $_ })
-    if (-not $f.Count) { return '' }
-    $groups = @($f | Group-Object code | Sort-Object Count -Descending)
-    $parts = foreach ($g in $groups) {
-        $t = "$($g.Group[0].title)"
-        $fixable = @($g.Group | Where-Object { @($_.fixes).Count }).Count
-        "{0}x {1} [{2}]{3}" -f $g.Count, $t, $g.Name, $(if ($fixable) { ' -- auto-fix available' } else { '' })
+    $all = @($Failures | Where-Object { $_ })
+    if (-not $all.Count) { return '' }
+    # BUG-233 (77.2, EFIF 2026-09-21): a breaker HOLD is not a failure. It used to be counted as "1x ... HELD"
+    # among the failures, so one unrelated error turned the whole job into "2 item(s) failed" and the approval the
+    # run was waiting for was never stated. Holds are reported on their own, after the real failures.
+    $holds = @($all | Where-Object { Test-PimEngineFailureIsApprovalHold $_ })
+    $rest  = @($all | Where-Object { -not (Test-PimEngineFailureIsApprovalHold $_) })
+    # 🔴 WAITING IS NOT FAILING (operator, 2026-09-22, on an alert for 'delta-admins': "[AdminMembers]
+    # 1 item(s) failed: 1x The group this item needs does not exist yet [GROUP-NOT-CREATED-YET]" --
+    # "bug"). That item is ORDER, not error: the Groups job creates the group and the membership
+    # applies on the next run. The catalogue already calls it transient + retryable, but the run was
+    # still recorded FAILED and it raised a failure alert -- every cycle, for a condition that fixes
+    # itself. Same treatment as a breaker HOLD (BUG-233): reported on its own line, never counted
+    # among the failures. A transient item that OUTLIVES its cause is a real failure and is escalated
+    # by the caller (Test-PimEngineFailuresAreAllTransient + the first-seen age), not by hiding it.
+    $waiting = @($rest | Where-Object { "$($_.severity)" -eq 'transient' -and $_.retryable })
+    $f = @($rest | Where-Object { -not ("$($_.severity)" -eq 'transient' -and $_.retryable) })
+    $out = @()
+    if ($f.Count) {
+        $groups = @($f | Group-Object code | Sort-Object Count -Descending)
+        $parts = foreach ($g in $groups) {
+            $t = "$($g.Group[0].title)"
+            $fixable = @($g.Group | Where-Object { @($_.fixes).Count }).Count
+            # BUG-234 (77.3): "Unrecognised failure" says nothing. With no catalogued explanation, the raw error IS
+            # the explanation -- show it (first item, trimmed), not only the word "unrecognised".
+            $raw = if ("$($g.Name)" -eq 'UNCLASSIFIED') {
+                $m = ("$($g.Group[0].message)" -replace '\s+', ' ').Trim()
+                if ($m.Length -gt 220) { $m = $m.Substring(0, 217) + '...' }
+                if ($m) { ": $m" } else { '' }
+            } else { '' }
+            "{0}x {1} [{2}]{3}{4}" -f $g.Count, $t, $g.Name, $raw, $(if ($fixable) { ' -- auto-fix available' } else { '' })
+        }
+        $out += ("{0} item(s) failed: {1}. Open Jobs > Engine logs & errors for each item, its cause and the fix." -f $f.Count, ($parts -join '; '))
     }
-    return ("{0} item(s) failed: {1}. Open Jobs > Engine logs & errors for each item, its cause and the fix." -f $f.Count, ($parts -join '; '))
+    if ($waiting.Count) {
+        $wg = @($waiting | Group-Object code | Sort-Object Count -Descending)
+        $wp = foreach ($g in $wg) { "{0}x {1} [{2}]" -f $g.Count, "$($g.Group[0].title)", $g.Name }
+        $out += ("{0} item(s) WAITING (not failed -- they apply on a later run once what they need exists): {1}" -f $waiting.Count, ($wp -join '; '))
+    }
+    if ($holds.Count) {
+        $h = @($holds | ForEach-Object {
+            $msg = "$($_.message)"; $prov = Get-PimApprovalHoldProvider -Code "$($_.code)"
+            $hash = ''; $m = [regex]::Match($msg, 'planHash=([0-9a-fA-F]{64})'); if ($m.Success) { $hash = $m.Groups[1].Value.ToLowerInvariant() }
+            $n = ''; $m2 = [regex]::Match($msg, 'N=(\d+) polic'); if ($m2.Success) { $n = $m2.Groups[1].Value }
+            "{0}: {1} polic(ies) would change -- review the WhatIf and approve in Jobs > Engine logs & errors (Approve-PimPolicyMassChange -Provider {0} -PlanHash {2} -By <you>)" -f $prov, $(if ($n) { $n } else { '?' }), $(if ($hash) { $hash } else { '<hash>' })
+        } | Select-Object -Unique)
+        $out += ($(if ($f.Count) { 'ALSO NEEDS APPROVAL (nothing written for these): ' } else { 'NEEDS APPROVAL (nothing written for these): ' }) + ($h -join ' | '))
+    }
+    return ($out -join ' ')
 }
 
 function ConvertTo-PimFailureStamp {

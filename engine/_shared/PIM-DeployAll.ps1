@@ -413,7 +413,7 @@ function Get-PimUpdaterStepDecision {
                          public GitHub install does not have, so installing it could only fail -- and
                          a failed step used to HALT the deploy and roll back a working environment.
                          Community installs update by `git pull` + re-running the deploy (the re-run
-                         is the updater).
+                         is the updater) -- one command: tools/setup/Update-PimCommunity.ps1 -Apply.
         'install'        everything else, including a community install that DOES supply a feed.
       A non-community scenario with no feed still returns 'install' on purpose: Deploy-PimUpdateJob
       refuses a ring without a source, loudly, and that refusal must stay visible there.
@@ -425,6 +425,7 @@ function Get-PimUpdaterStepDecision {
         [switch]$SkipUpdater
     )
     if ($SkipUpdater) { return 'skip-flag' }
-    if (("$Scenario".Trim().ToUpperInvariant() -in @('S2', 'S4')) -and -not "$SourceUrlTemplate".Trim()) { return 'skip-community' }
+    if (("$Scenario".Trim().ToUpperInvariant() -in @('S2')) -and   # S4 (MSP on the free edition) is retired
+        -not "$SourceUrlTemplate".Trim()) { return 'skip-community' }
     return 'install'
 }

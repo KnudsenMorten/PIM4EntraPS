@@ -1,5 +1,5 @@
 {
-  "_doc": "PIM4EntraPS workload template (engine/_shared/PIM-Conformance.ps1). A versioned set of PIM-group -> workload-role bindings. templateVersion + per-entry sinceVersion are a CHANGELOG label; rollout is by ring (entryRing <= tenantRing). Only status:'approved' templates deploy. 'workload' = a connector id under workloads/connectors/. This sample models Defender XDR Unified RBAC: 3 roles at ring 0, a 4th piloting at ring 2.",
+  "_doc": "PIM4EntraPS workload template (engine/_shared/PIM-Conformance.ps1). A versioned set of PIM-group -> workload-role bindings. templateVersion + per-entry sinceVersion are a CHANGELOG label; rollout is by ring (tenantRing <= entryRing; 0 dev, 1 test, 2 broad). Only status:'approved' templates deploy. 'workload' = a connector id under workloads/connectors/. This sample models Defender XDR Unified RBAC: 3 roles at ring 2, a 4th piloting at ring 0.",
   "templateId": "defender-xdr-roles",
   "workload": "defender-xdr",
   "templateVersion": 8,
@@ -8,13 +8,13 @@
   "approvedUtc": "2026-06-13T00:00:00Z",
   "knownCatalog": ["Security Reader", "Security Operator", "Security Administrator", "Security Operator (preview)"],
   "versionHistory": [
-    { "v": 7, "date": "2026-03-01", "summary": "3 built-in roles at ring 0" },
-    { "v": 8, "date": "2026-06-13", "summary": "+4th role at ring 2 (pilot)" }
+    { "v": 7, "date": "2026-03-01", "summary": "3 built-in roles at ring 2 (broad; ring 0 in the pre-2.4.388 order)" },
+    { "v": 8, "date": "2026-06-13", "summary": "+4th role at ring 0 (dev; ring 2 in the pre-2.4.388 order)" }
   ],
   "entries": [
-    { "key": "role:Security Reader",        "sinceVersion": 7, "ring": 0, "roleName": "Security Reader",        "groupTag": "PIM-Defender-SecReader",        "action": "Assign" },
-    { "key": "role:Security Operator",      "sinceVersion": 7, "ring": 0, "roleName": "Security Operator",      "groupTag": "PIM-Defender-SecOperator",      "action": "Assign" },
-    { "key": "role:Security Administrator", "sinceVersion": 7, "ring": 0, "roleName": "Security Administrator", "groupTag": "PIM-Defender-SecAdmin",         "action": "Assign" },
-    { "key": "role:Security Operator (preview)", "sinceVersion": 8, "ring": 2, "roleName": "Security Operator (preview)", "groupTag": "PIM-Defender-SecOperatorPreview", "action": "Assign" }
+    { "key": "role:Security Reader",        "sinceVersion": 7, "ring": 2, "roleName": "Security Reader",        "groupTag": "PIM-Defender-SecReader",        "action": "Assign" },
+    { "key": "role:Security Operator",      "sinceVersion": 7, "ring": 2, "roleName": "Security Operator",      "groupTag": "PIM-Defender-SecOperator",      "action": "Assign" },
+    { "key": "role:Security Administrator", "sinceVersion": 7, "ring": 2, "roleName": "Security Administrator", "groupTag": "PIM-Defender-SecAdmin",         "action": "Assign" },
+    { "key": "role:Security Operator (preview)", "sinceVersion": 8, "ring": 0, "roleName": "Security Operator (preview)", "groupTag": "PIM-Defender-SecOperatorPreview", "action": "Assign" }
   ]
 }

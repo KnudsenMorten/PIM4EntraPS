@@ -124,7 +124,9 @@ function Get-PimReplicationPreview {
         # @{ tenantId; name; ring; tags } -- the master's registered managed tenants
         [AllowEmptyCollection()][object[]]$Tenants = @(),
         # tenant id (lowercase) -> @( @{ Mode; GroupTag } ), as the bundle carries it
-        [object]$ProjectionPolicy = ([ordered]@{})
+        [object]$ProjectionPolicy = ([ordered]@{}),
+        # §77.20: the master's Deployment rings (Get-PimReplicationMasterModel); omitted = no ring narrows by tag
+        [object[]]$DeploymentRings = @()
     )
     $content = Select-PimBaselineBundleContent -RegistryRows @($RegistryRows) -RegistryReplicate $RegistryReplicate -Entities $Entities
     $tagMap = [ordered]@{}
@@ -144,7 +146,7 @@ function Get-PimReplicationPreview {
         $tlist.Add([ordered]@{ tenantId = $tid; name = $name; ring = $ring; ringKnown = [bool]$rc.known; ringSource = 'master-copy'; tags = $tags }) | Out-Null
     }
     $now = [datetime]::UtcNow
-    $payload = New-PimBaselinePayload -Content $content -ProjectionPolicy $ProjectionPolicy -TenantTags $tagMap -Version 1 `
+    $payload = New-PimBaselinePayload -Content $content -ProjectionPolicy $ProjectionPolicy -TenantTags $tagMap -Version 1 -DeploymentRings @($DeploymentRings) `
                  -GeneratedAtUtc $now.ToString('yyyy-MM-ddTHH:mm:ssZ') -ValidToUtc $now.AddDays(1).ToString('yyyy-MM-ddTHH:mm:ssZ')
     $bytes = [System.Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Depth 8 -Compress))
     $rsa = [System.Security.Cryptography.RSA]::Create(2048)
@@ -247,7 +249,10 @@ function Get-PimReplicationMasterModel {
         # labelled "no readable ring" instead of silently becoming ring 0 here and ring 2 there.
         [ordered]@{ tenantId = "$($_.TenantId)"; name = "$($_.DisplayName)"; ring = "$($_.Ring)".Trim(); tags = @("$($_.Tags)" -split '[;,]' | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
     })
-    return @{ RegistryRows = $registry; RegistryReplicate = $repMap; Entities = $entities; Tenants = $tenants; ProjectionPolicy = $policy }
+    # §77.20: the Deployment rings (name + tag rule per ring), exactly as the publisher reads them.
+    $rings = $null
+    try { $rr = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT ValueJson FROM pim.Settings WHERE Name = 'DeploymentRings'"); if ($rr.Count) { $rings = "$($rr[0].ValueJson)" } } catch { $rings = $null }
+    return @{ RegistryRows = $registry; RegistryReplicate = $repMap; Entities = $entities; Tenants = $tenants; ProjectionPolicy = $policy; DeploymentRings = @(ConvertTo-PimDeploymentRings -Value $rings) }
 }
 
 function Get-PimManagerDownlinkPolicy {

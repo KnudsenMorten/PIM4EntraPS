@@ -492,6 +492,35 @@ function Read-ExchAdminGrant {
     $inst = @(GrAll -Path "roleManagement/directory/roleAssignmentScheduleInstances?`$filter=principalId eq '$($adminSp.id)'")
     Select-PimActiveRoleGrant -Instances $inst -PrincipalId "$($adminSp.id)" -RoleDefinitionId $exchAdminRoleId
 }
+# 🔴 SELF-HEAL -- RoleManagement.ReadWrite.Directory (2026-09-26, the 13th "MAIL SENDER NOT PROVISIONED").
+# Both the read above and the activation below need it. A deploy identity created by
+# New-PimDeployIdentity -GrantGraph before 2026-09-26 does not hold it, and every one of those installs
+# ended here with 403 and a mail-mute environment. That identity DOES hold AppRoleAssignment.ReadWrite.All,
+# which is exactly the right to grant an app role -- including to itself -- so the step grants the missing
+# role, mints a FRESH token (roles are baked into the token at issue) and waits for the claim to carry it.
+$roleMgmtRole = $graphSp.appRoles | Where-Object { $_.value -eq 'RoleManagement.ReadWrite.Directory' -and $_.allowedMemberTypes -contains 'Application' } | Select-Object -First 1
+if (-not $roleMgmtRole) { Fail 'RoleManagement.ReadWrite.Directory app-role not found on the Graph service principal' }
+try {
+    $hasRoleMgmt = @(GrAll -Path "servicePrincipals/$($adminSp.id)/appRoleAssignments" |
+        Where-Object { $_.resourceId -eq $graphSp.id -and $_.appRoleId -eq $roleMgmtRole.id })
+} catch { Fail "could not read the onboarding SPN's app-role assignments, so cannot tell whether RoleManagement.ReadWrite.Directory is held -- refusing to guess: $($_.Exception.Message)" }
+if ($hasRoleMgmt.Count) { Note 'RoleManagement.ReadWrite.Directory already held' 'DarkGray' }
+elseif ($PSCmdlet.ShouldProcess($AdminAppId, 'grant RoleManagement.ReadWrite.Directory (self-heal)')) {
+    try {
+        $by = Invoke-PimGrant -Path "servicePrincipals/$($adminSp.id)/appRoleAssignments" `
+                -Body @{ principalId = $adminSp.id; resourceId = $graphSp.id; appRoleId = $roleMgmtRole.id } `
+                -What 'RoleManagement.ReadWrite.Directory'
+        Note "RoleManagement.ReadWrite.Directory: $by (self-heal -- the deploy identity predates it)" 'Green'
+    } catch { Fail "could not grant RoleManagement.ReadWrite.Directory to the onboarding SPN: $($_.Exception.Message)" }
+    # A token minted before the grant carries the OLD roles claim; re-mint until the claim shows the new role.
+    $claimSeen = Confirm-Eventually -What 'RoleManagement.ReadWrite.Directory in the token' -Seconds 600 -Test {
+        $t = Get-PimRestToken -Resource 'graph' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force
+        $p = "$t".Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($p.Length % 4) { $p += '=' }
+        $roles = @(([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json).roles)
+        if ($roles -contains 'RoleManagement.ReadWrite.Directory') { $script:GH = @{ Authorization = "Bearer $t"; 'Content-Type' = 'application/json' }; $true } else { $false }
+    }
+    if (-not $claimSeen) { Fail 'RoleManagement.ReadWrite.Directory was granted but no fresh token carried it within 10 minutes -- re-run this step; the grant itself is in place' }
+}
 try { $exchAdminState = Read-ExchAdminGrant }
 catch { Fail "could not read the onboarding SPN's active directory roles, so cannot tell whether Exchange Administrator is already active -- refusing to guess: $($_.Exception.Message)" }
 if ($exchAdminState.active) {

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<policyDefinitionResources revision="1.0" schemaVersion="1.0"
+<policyDefinitionResources revision="1.1" schemaVersion="1.0"
                             xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"
                             xmlns:xsd="http://www.w3.org/2001/XMLSchema"
                             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -28,6 +28,15 @@ When this policy is Enabled and a value is set, the extension's header tenant sw
 Lower the value for extra caution; raise it for high-trust tenants that routinely activate many roles at once. Valid range 1-100. When Disabled or Not Configured, the extension uses its built-in default (5).
 
 A per-entry "bulkActivateConfirmThreshold" inside the tenant catalog JSON overrides this tenant-wide value for that specific tenant. This setting is an administrator policy control only and is never exposed for end-user entry inside the popup.</string>
+      <string id="AutoActivateMax_Edge">Auto-activate: maximum groups -- Microsoft Edge</string>
+      <string id="AutoActivateMax_Chrome">Auto-activate: maximum groups -- Google Chrome</string>
+      <string id="AutoActivateMax_Explain">Limits how many groups a user on this device can mark "auto" in the PIM Activator, so that access is not activated every day for groups nobody needs that day (least privilege).
+
+0 = auto-activation is turned off on this device.
+1-100 = at most that many groups. Ticking one more is refused with a message; if more were already ticked before the limit was set, only that many are activated and the rest are marked "Not auto-activated" in the list.
+Not Configured = no limit.
+
+Manual activation is not affected. This is a device policy only; users cannot change it and the tenant catalog cannot override it.</string>
     </stringTable>
     <presentationTable>
       <presentation id="TenantCatalog_Edge_Presentation">
@@ -45,6 +54,12 @@ A per-entry "bulkActivateConfirmThreshold" inside the tenant catalog JSON overri
       </presentation>
       <presentation id="BulkThreshold_Chrome_Presentation">
         <decimalTextBox refId="BulkThreshold_Chrome_Value" defaultValue="5" spinStep="1">Confirm threshold (Chrome), 1-100:</decimalTextBox>
+      </presentation>
+      <presentation id="AutoActivateMax_Edge_Presentation">
+        <decimalTextBox refId="AutoActivateMax_Edge_Value" defaultValue="3" spinStep="1">Maximum auto-activated groups (Edge), 0 = off:</decimalTextBox>
+      </presentation>
+      <presentation id="AutoActivateMax_Chrome_Presentation">
+        <decimalTextBox refId="AutoActivateMax_Chrome_Value" defaultValue="3" spinStep="1">Maximum auto-activated groups (Chrome), 0 = off:</decimalTextBox>
       </presentation>
     </presentationTable>
   </resources>

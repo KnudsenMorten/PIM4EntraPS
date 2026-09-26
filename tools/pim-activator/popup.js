@@ -44,7 +44,7 @@ const KNOWN_BAD_LEGACY_CLIENTIDS = []
 // Pure config helpers (bulk-activate confirm threshold resolution + bounds).
 // Kept in a separate, DOM/chrome-free module so they are unit-testable under
 // Node; the render path is unchanged.
-import { resolveBulkActivateConfirmThreshold, BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT } from './popup-config.js'
+import { resolveBulkActivateConfirmThreshold, BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT, resolveAutoActivateMaxGroups, selectAutoActivateTargets, canTickAnotherAutoActivate } from './popup-config.js'
 
 // Network resilience primitives (timeout + watchdog). Kept in a separate
 // DOM/chrome-free module so they are unit-testable under Node. A bare fetch()
@@ -2356,6 +2356,28 @@ let autoActivateRunDone = false
 ;(async () => {
   try { const s = await getStored(['autoActivate']); if (s && s.autoActivate && typeof s.autoActivate === 'object') autoActivate = s.autoActivate } catch (_) {}
 })()
+// Per-DEVICE cap (managed policy 'autoActivateMaxGroups', see popup-config.js). null = no limit,
+// 0 = auto-activation off on this device, N = at most N groups. Read once per popup; the sweep and
+// the tick handler both wait for it, so a slow managed-storage provider can never let the cap be skipped.
+let autoActivateMax = null
+const autoActivateMaxReady = (async () => {
+  try {
+    const m = await storageGet('managed', ['autoActivateMaxGroups'])
+    autoActivateMax = resolveAutoActivateMaxGroups(m ? m.autoActivateMaxGroups : null)
+  } catch (_) { autoActivateMax = null }
+})()
+function autoActivateMaxText() {
+  return autoActivateMax === 0
+    ? 'Auto-activation is turned off on this device by your organisation.'
+    : 'Your organisation allows at most ' + autoActivateMax + ' auto-activated group(s) on this device.'
+}
+// How many CURRENTLY LISTED direct groups are ticked 'auto'. Counted over the rows the user can see
+// (and untick), not over every key ever stored -- a stale key for a group that has gone must not
+// block a new tick the user has no way to free.
+function countAutoActivateTicked() {
+  return (eligibleRows || []).filter(r => r && r.kind === 'group' && !r.depth &&
+    isAutoActivate(r.rowKey || ('group:' + r.groupId))).length
+}
 function isAutoActivate(rowKey) { return !!(rowKey && autoActivate[rowKey]) }
 function toggleAutoActivate(rowKey) {
   if (!rowKey) return
@@ -3947,6 +3969,17 @@ function render() {
     const autoCb = row.querySelector('.auto-cb')
     if (autoCb) autoCb.onchange = async (e) => {
       e.stopPropagation()
+      // Per-device cap (autoActivateMaxGroups): a NEW tick past the cap is refused and reverted, and
+      // nothing is activated. Unticking is always allowed -- that is how a user gets back under it.
+      if (autoCb.checked && !isAutoActivate(idAttr)) {
+        await autoActivateMaxReady
+        if (!canTickAnotherAutoActivate(countAutoActivateTicked(), autoActivateMax)) {
+          autoCb.checked = false
+          const st0 = row.querySelector('.status')
+          if (st0) st0.textContent = autoActivateMaxText() + (autoActivateMax ? ' Untick another group first.' : '')
+          return
+        }
+      }
       toggleAutoActivate(idAttr)   // persist the auto-on-open preference (OFF by default)
       // Ticking 'auto' STARTS the activation now (operator expectation) -- this group
       // ONLY, no chain. Unticking just stops auto-on-open; it never deactivates.
@@ -4284,10 +4317,21 @@ async function boot() {
 async function runAutoActivations(token) {
   if (autoActivateRunDone) return
   autoActivateRunDone = true
-  const targets = (eligibleRows || []).filter(r =>
+  const marked = (eligibleRows || []).filter(r =>
     r && r.kind === 'group' && !r.depth && !r.isNested && !r.isActive &&
     r.groupId && isAutoActivate(r.rowKey || ('group:' + r.groupId)))
-  if (!targets.length) return
+  if (!marked.length) return
+  // Per-device cap (autoActivateMaxGroups). Ticks made before the cap was lowered are kept, but only
+  // the first N run; the rest are named on their rows after the reload, never activated.
+  await autoActivateMaxReady
+  const alreadyOn = (eligibleRows || []).filter(r => r && r.kind === 'group' && !r.depth && r.isActive &&
+    isAutoActivate(r.rowKey || ('group:' + r.groupId))).length
+  const room = (autoActivateMax == null) ? null : Math.max(0, autoActivateMax - alreadyOn)
+  const sel = selectAutoActivateTargets(marked, room)
+  const targets = sel.run
+  if (sel.skipped.length) console.warn('[PIM Activator] auto-activate: ' + sel.skipped.length + ' marked group(s) skipped -- device limit autoActivateMaxGroups=' + autoActivateMax)
+  const showSkipped = () => { for (const r of sel.skipped) { try { setStatus(r.rowKey || ('group:' + r.groupId), 'Not auto-activated: ' + autoActivateMaxText(), 'err') } catch (_) {} } }
+  if (!targets.length) { showSkipped(); return }
   const just = (els.just && els.just.value && String(els.just.value).trim()) || 'Change in infrastructure'
   const durRaw = els.dur ? parseInt(els.dur.value, 10) : NaN
   const dur = (durRaw > 0 && durRaw <= 24) ? durRaw : 8
@@ -4310,6 +4354,7 @@ async function runAutoActivations(token) {
   try { setActivatingBanner('') } catch (_) {}
   console.log('[PIM Activator] auto-activated ' + done + '/' + targets.length + ' marked group(s) (no chain)')
   try { await loaded(token) } catch (_) {}   // refresh so activated rows show active (guard blocks re-sweep)
+  showSkipped()   // after the reload, which would otherwise wipe the per-row notes
   // 🪤 AFTER loaded(), NOT BEFORE. loaded() re-renders the whole list, which wipes any per-row
   // status written before it -- so a watch started first would paint its progress onto rows that
   // are about to be replaced, and the user would see nothing. The bulk path gets this right by

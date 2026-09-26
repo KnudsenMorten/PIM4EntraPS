@@ -334,6 +334,128 @@ function Set-PimPolicyTemplateExpiration {
     $fpAfter = (Get-PimPolicyTemplateStoreFingerprint -Value $back).hash
     return [ordered]@{ id = $key; changed = @($changed); before = $before; after = $after; fingerprintBefore = $fpBefore; fingerprintAfter = $fpAfter }
 }
+function ConvertTo-PimTplTree {
+    # PURE. A JSON-shaped value (PSCustomObject / dictionary / array / scalar) as ordered hashtables + arrays, so an
+    # edit can change it in place whatever shape the store handed back.
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string] -or $Value -is [ValueType]) { return $Value }
+    if ($Value -is [System.Collections.IDictionary]) { $o = [ordered]@{}; foreach ($k in @($Value.Keys)) { $o["$k"] = ConvertTo-PimTplTree $Value[$k] }; return $o }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) { $o = [ordered]@{}; foreach ($p in $Value.PSObject.Properties) { $o[$p.Name] = ConvertTo-PimTplTree $p.Value }; return $o }
+    if ($Value -is [System.Collections.IEnumerable]) { return ,@(foreach ($x in $Value) { ConvertTo-PimTplTree $x }) }
+    return $Value
+}
+
+function Set-PimPolicyTemplateRules {
+    <#
+      Operator 2026-09-21: "i need a edit button ... so i can finetune the templates" / "use dropdown in the fields".
+      Changes ONE template's rules, for one policy PART ('member' = the template's own rules; 'owner' = a group
+      template's Owner block). What may change -- and nothing else:
+        -Expiration        @{ <EndUser_Assignment|Admin_Eligibility|Admin_Assignment> = @{ maximumDuration; isExpirationRequired } }
+                           Activation (EndUser_Assignment) must stay required to expire.
+        -ActivationChecks  what ACTIVATION asks for: any of MultiFactorAuthentication, Justification, Ticketing
+                           ($null = leave as is). The ADMIN-path enablement is NOT reachable: BUG-21 -- MFA on
+                           Admin_Eligibility makes Entra reject every eligibility the engine creates.
+        -Notifications     @( @{ recipientType; caller; level; defaultRecipientsEnabled } ) -- each must name an existing
+                           rule of this part that is not a named-people redirect; only its default-recipient switch moves.
+      An INHERITED block (a RequireApproval template extends its Standard one per top-level key) is copied from the base
+      into this template the first time it is edited, so the edit applies to this template only.
+      Desired state moves (the engine converges onto it; the policy breakers still hold a mass change for approval).
+      Read back after the write. Returns @{ id; part; changed[]; fingerprintBefore; fingerprintAfter }.
+    #>
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string]$Id,
+        [ValidateSet('member', 'owner')][string]$Part = 'member',
+        [hashtable]$Expiration = @{},
+        [AllowNull()][string[]]$ActivationChecks = $null,
+        [object[]]$Notifications = @(),
+        [string]$Actor = 'system:policy-template-store',
+        [datetime]$NowUtc = [datetime]::UtcNow
+    )
+    $fn = 'Set-PimPolicyTemplateRules'
+    $expKeys = @('EndUser_Assignment', 'Admin_Eligibility', 'Admin_Assignment')
+    $checkOk = @('MultiFactorAuthentication', 'Justification', 'Ticketing')
+    foreach ($k in @($Expiration.Keys)) {
+        if ($expKeys -notcontains "$k") { throw "${fn}: '$k' is not an expiration rule that may be changed (allowed: $($expKeys -join ', '))." }
+        $n = $Expiration[$k]; $dv = "$($n.maximumDuration)".Trim()
+        if (-not $dv -or -not (Test-PimIso8601Duration -Value $dv)) { throw "${fn}: '$dv' is not a supported duration for '$k' (days and/or hours, e.g. PT8H, P90D, P365D)." }
+        if ("$k" -eq 'EndUser_Assignment' -and $null -ne $n.isExpirationRequired -and -not [bool]$n.isExpirationRequired) { throw "${fn}: an activation must always end -- EndUser_Assignment stays required to expire." }
+    }
+    if ($null -ne $ActivationChecks) { foreach ($c in @($ActivationChecks)) { if ($checkOk -notcontains "$c") { throw "${fn}: '$c' is not something activation may ask for here (allowed: $($checkOk -join ', '))." } } }
+
+    $existing = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'PolicyTemplates'
+    $raw = $existing; if ($raw -is [string]) { $raw = $raw | ConvertFrom-Json }
+    $map = ConvertTo-PimPolicyTemplateMap -Value $raw
+    if (-not $map.Count) { throw "${fn}: the template store is empty or unreadable -- nothing to change." }
+    $key = ''; foreach ($k in @($map.Keys)) { if ("$k" -ieq "$Id".Trim()) { $key = "$k" } }
+    if (-not $key) { throw "${fn}: no template with id '$Id' in the store." }
+    $fpBefore = (Get-PimPolicyTemplateStoreFingerprint -Value $raw).hash
+    $v = ConvertTo-PimTplTree $raw
+    $tpls = $v['templates']; $t = $tpls[$key]
+    if (-not $t.Contains('rules') -or $null -eq $t['rules']) { $t['rules'] = [ordered]@{} }
+    $rules = $t['rules']
+    $baseKey = ''; $ext = "$($t['extends'])".Trim()
+    if ($ext) { foreach ($k in @($tpls.Keys)) { if ("$k" -ieq $ext) { $baseKey = "$k" } } }
+    $baseRules = if ($baseKey -and $tpls[$baseKey].Contains('rules')) { $tpls[$baseKey]['rules'] } else { $null }
+    # the block to edit, copied down from the base when this template only inherits it
+    $own = {
+        param([string]$Name)
+        if ($rules.Contains($Name) -and $null -ne $rules[$Name]) { return $rules[$Name] }
+        if ($null -ne $baseRules -and $baseRules.Contains($Name) -and $null -ne $baseRules[$Name]) { $rules[$Name] = ConvertTo-PimTplTree $baseRules[$Name]; return $rules[$Name] }
+        return $null
+    }
+    $scope = $rules
+    if ($Part -eq 'owner') {
+        $ob = & $own 'Owner'
+        if ($null -eq $ob) { throw "${fn}: template '$key' has no OWNER policy (only PIM for Groups templates do)." }
+        $scope = $ob
+    }
+    $blk = {
+        param([string]$Name)
+        if ($Part -eq 'owner') { if (-not $scope.Contains($Name) -or $null -eq $scope[$Name]) { $scope[$Name] = [ordered]@{} }; return $scope[$Name] }
+        $b = & $own $Name; if ($null -eq $b) { $rules[$Name] = [ordered]@{}; $b = $rules[$Name] }; return $b
+    }
+    $changed = New-Object System.Collections.Generic.List[string]
+    if ($Expiration.Count) {
+        $ex = & $blk 'Expiration'
+        foreach ($k in @($Expiration.Keys)) {
+            $n = $Expiration[$k]
+            if (-not $ex.Contains("$k") -or $null -eq $ex["$k"]) { $ex["$k"] = [ordered]@{ maximumDuration = ''; isExpirationRequired = $true } }
+            $node = $ex["$k"]
+            $dv = "$($n.maximumDuration)".Trim()
+            if ("$($node['maximumDuration'])" -cne $dv) { $node['maximumDuration'] = $dv; $changed.Add("$k.maximumDuration") }
+            if ($null -ne $n.isExpirationRequired -and [bool]$node['isExpirationRequired'] -ne [bool]$n.isExpirationRequired) { $node['isExpirationRequired'] = [bool]$n.isExpirationRequired; $changed.Add("$k.isExpirationRequired") }
+        }
+    }
+    if ($null -ne $ActivationChecks) {
+        $en = & $blk 'Enablement'
+        $cur = @(@($en['EndUser_Assignment']) | Where-Object { "$_".Trim() } | ForEach-Object { "$_" })
+        $new = @($checkOk | Where-Object { @($ActivationChecks) -contains $_ })
+        if ((($cur | Sort-Object) -join ',') -ne (($new | Sort-Object) -join ',')) { $en['EndUser_Assignment'] = @($new); $changed.Add('Enablement.EndUser_Assignment') }
+    }
+    if (@($Notifications).Count) {
+        $list = if ($Part -eq 'owner') { $scope['Notification'] } else { & $own 'Notification' }
+        if ($null -eq $list) { throw "${fn}: template '$key' ($Part) has no notification rules to change." }
+        foreach ($want in @($Notifications)) {
+            $hit = @(@($list) | Where-Object { $_ -and "$($_['recipientType'])" -ieq "$($want.recipientType)" -and "$($_['caller'])" -ieq "$($want.caller)" -and "$($_['level'])" -ieq "$($want.level)" -and -not "$($_['recipientsSource'])".Trim() })
+            if (-not $hit.Count) { throw "${fn}: template '$key' ($Part) has no notification rule $($want.recipientType)/$($want.caller)/$($want.level) that may be switched." }
+            foreach ($h in $hit) { if ([bool]$h['defaultRecipientsEnabled'] -ne [bool]$want.defaultRecipientsEnabled) { $h['defaultRecipientsEnabled'] = [bool]$want.defaultRecipientsEnabled; $changed.Add("Notification.$($want.recipientType)_$($want.caller)_$($want.level)") } }
+        }
+    }
+    if (-not $changed.Count) { return [ordered]@{ id = $key; part = $Part; changed = @(); fingerprintBefore = $fpBefore; fingerprintAfter = $fpBefore } }
+    $t['_editedRules'] = [ordered]@{ by = $Actor; utc = $NowUtc.ToUniversalTime().ToString('o'); part = $Part; changed = @($changed.ToArray()) }
+    $v['updatedUtc'] = $NowUtc.ToUniversalTime().ToString('o')
+    Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'PolicyTemplates' -Value $v
+    $back = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'PolicyTemplates'
+    if ($back -is [string]) { $back = $back | ConvertFrom-Json }
+    $bm = ConvertTo-PimPolicyTemplateMap -Value $back
+    if ($bm.Count -ne $map.Count) { throw "${fn}: read-back mismatch -- the store holds $($bm.Count) template(s), expected $($map.Count)." }
+    $fpAfter = (Get-PimPolicyTemplateStoreFingerprint -Value $back).hash
+    if ($fpAfter -eq $fpBefore) { throw "${fn}: read-back mismatch -- the store did not change although $($changed.Count) setting(s) did." }
+    return [ordered]@{ id = $key; part = $Part; changed = @($changed.ToArray()); fingerprintBefore = $fpBefore; fingerprintAfter = $fpAfter }
+}
+
 function Get-PimPolicyTemplateStoreMeta {
     <# PURE: the metadata half of a stored PolicyTemplates value as plain hashtables:
        @{ source; seededUtc; fingerprint; fileNames = @{id=file}; shipped = @{id=@{fingerprint;file;recordedUtc}}; hasShippedRecord } #>

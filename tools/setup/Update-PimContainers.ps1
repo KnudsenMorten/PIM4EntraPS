@@ -128,7 +128,11 @@ param(
     [switch]$OverrideRingGate,
     [string]$Reason,
     [ValidateRange(-1,3)][int]$PendingUpdateRing = -1,
-    [string]$PendingUpdateSourceUrl = ''
+    [string]$PendingUpdateSourceUrl = '',
+    # R25-24: the environment's store. The ring gate reads the environment's EDITION from it (its licence): a ring-less FREE
+    # Community install is not gated (audited); anything else is. It used to be a -CommunityGitPull switch -- the caller's word.
+    # Without it the edition is unknown and the gate treats the environment as not exempt.
+    [string]$SqlConnectionString
 )
 
 # Built once, spliced into every az invocation. Empty => ambient (a single-directory machine),
@@ -394,9 +398,9 @@ function Invoke-ManagerSmokeGate {
     # one defect". This call site was the fifth and was missed, so the release GATE ran against
     # the ambient default context while the DEPLOY it was gating ran against the explicit one.
     # Measured on the 2.4.254 roll: the apps rolled correctly against
-    # 54468121-… (myfamilynetwork) and the gate then reported
-    #     az context: … / sub 772440e1-… (ambient default)
-    # -- ExpertsLiveDK, A DIFFERENT COMPANY (CLAUDE.md: "often the DEFAULT context" on mgmt1).
+    # the deployment's own subscription and the gate then reported
+    #     az context: … / sub <another company's subscription> (ambient default)
+    # -- A DIFFERENT COMPANY's tenant (often the DEFAULT az context on the build host).
     # From there it could not read the Log Analytics workspace and could not mint an Easy Auth
     # token, so BOTH layers self-skipped and the gate failed a HEALTHY deployment.
     # The smoke script has accepted -SubscriptionId all along; nobody handed it over. Same
@@ -706,7 +710,7 @@ if ($Rollback -or "$RollbackImage".Trim()) {   # §53.6: EITHER anchor puts us i
 Step "Ring gate: may $ResourceGroup take $ImageTag?"
 [void](Assert-PimRollRingGate -ResourceGroup $ResourceGroup -SubscriptionArgs $subArgs -TargetVersion $ImageTag `
           -UpdateJobName $UpdateJobName -OverrideRingGate:$OverrideRingGate -Reason $Reason -Caller 'Update-PimContainers' `
-          -PendingUpdateRing $PendingUpdateRing -PendingUpdateSourceUrl $PendingUpdateSourceUrl)
+          -PendingUpdateRing $PendingUpdateRing -PendingUpdateSourceUrl $PendingUpdateSourceUrl -SqlConnectionString $SqlConnectionString)
 
 if (-not $SkipBuild) {
     Step "Build $image via Build-PimManagerImage (clean git-archive context)"
@@ -720,7 +724,7 @@ if (-not $SkipBuild) {
         # 🔴 -SubscriptionId FORWARDED. The builder has DECLARED it all along and this caller never
         # passed it, so `az acr build` ran against the ambient default context -- which on mgmt1 is
         # another company's subscription, and the build died with "the resource 'acrpimmfnpr' could
-        # not be found in subscription 'ELDK Event Hub'". Declared-but-not-forwarded: the exact
+        # not be found in subscription '<another company's subscription>'". Declared-but-not-forwarded: the exact
         # shape of BUG-29 / SEC-10b / BUG-78 / BUG-79, and the reason scoping this script's OWN az
         # calls was not enough -- the one call it delegates was still unscoped.
         $buildArgs = @{ ImageTag = $ImageTag; AcrName = $AcrName; ImageRepo = $ImageRepo }

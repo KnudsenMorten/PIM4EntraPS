@@ -145,7 +145,7 @@ function Set-PimManagedTenantRegistration {
         [Parameter(Mandatory)][string]$ConnectionString,
         [Parameter(Mandatory)][AllowEmptyString()][string]$TenantId,
         [AllowEmptyString()][string]$DisplayName,
-        [int]$Ring = 2,
+        [int]$Ring = 0,
         [object]$Tags,
         [bool]$Enabled = $true,
         [AllowNull()][object]$Notes = $null,

@@ -761,7 +761,10 @@ function Get-PaHybridRegistryPlan {
         [Parameter(Mandatory)][string]$SourcePattern,
         [hashtable]$ExistingState,
         [string]$MinimumVersion,
-        [ValidateRange(0, 100)][int]$BulkThreshold = 0
+        [ValidateRange(0, 100)][int]$BulkThreshold = 0,
+        # Per-DEVICE auto-activate cap (2026-09-23): autoActivateMaxGroups DWORD next to tenantCatalog.
+        # -1 = not written (no limit); 0 = auto-activation off; N = at most N groups.
+        [ValidateRange(-1, 100)][int]$AutoActivateMaxGroups = -1
     )
 
     $WhatIfPreference = $false   # pure builder -- never a confirmable op
@@ -825,6 +828,15 @@ function Get-PaHybridRegistryPlan {
             })
         }
 
+        # 4c. Per-device auto-activate cap -- device policy only, never inside tenantCatalog.
+        if ($AutoActivateMaxGroups -ge 0) {
+            $entries.Add([pscustomobject]@{
+                Browser = $b; Policy = 'AutoActivateMax'; Hive = 'HKLM'
+                Key = $thirdKey; ValueName = 'autoActivateMaxGroups'
+                ValueKind = 'Dword'; Value = $AutoActivateMaxGroups; Action = 'Set'
+            })
+        }
+
         $slots[$b] = [pscustomobject]@{ Forcelist = $fl.Slot; ForcelistReused = $fl.Reused; Sources = $sr.Slot; SettingsLayout = $es.Layout }
     }
 
@@ -858,6 +870,8 @@ function ConvertTo-PaHybridManagedConfigObject {
         $managed = [ordered]@{ tenantCatalog = $Plan.CatalogJson }
         $bulk = @($Plan.Entries | Where-Object { $_.Browser -eq $b -and $_.Policy -eq 'BulkThreshold' } | Select-Object -First 1)
         if ($bulk.Count -gt 0) { $managed['bulkActivateConfirmThreshold'] = [int]$bulk[0].Value }
+        $amx = @($Plan.Entries | Where-Object { $_.Browser -eq $b -and $_.Policy -eq 'AutoActivateMax' } | Select-Object -First 1)
+        if ($amx.Count -gt 0) { $managed['autoActivateMaxGroups'] = [int]$amx[0].Value }
         $out[$b] = [ordered]@{
             ExtensionInstallForcelist = @($Plan.ForcelistValue)
             ExtensionInstallSources   = @(($Plan.Entries | Where-Object { $_.Browser -eq $b -and $_.Policy -eq 'Sources' } | Select-Object -First 1).Value)

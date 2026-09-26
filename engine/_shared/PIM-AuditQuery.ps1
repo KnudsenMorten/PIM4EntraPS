@@ -194,7 +194,7 @@ function Get-PimAuditChangeSummary {
         With neither before nor after, returns ''.
     #>
     [CmdletBinding()]
-    param([object]$Before, [object]$After)
+    param([object]$Before, [object]$After, [string]$Action = '')
 
     # §70.14 -- a configuration commit carries readable per-row sentences (`changes`). Show THOSE, one per
     # line, under the one-line summary -- never "adds: (none) -> 1; rowCount: (none) -> 28; instance: ...".
@@ -235,6 +235,33 @@ function Get-PimAuditChangeSummary {
     $keys = New-Object System.Collections.Generic.List[string]
     foreach ($k in $b.Keys) { if (-not $keys.Contains($k)) { $keys.Add($k) } }
     foreach ($k in $a.Keys) { if (-not $keys.Contains($k)) { $keys.Add($k) } }
+
+    # 🔴 AN EVENT THAT RECORDS A STATE IS NOT A CHANGE (operator, 2026-09-22: "these messages are
+    # useless - it says none evrywhere"). A login has nothing before it, so every field rendered as
+    # "role: (none) -> SuperAdmin; mode: (none) -> hosted; source: (none) -> sql ManagerAccess" -- a
+    # column of arrows pointing out of nothing, on 65 rows, saying only what the row already is.
+    # With NO before at all, the after fields are stated as FACTS. A login gets the sentence it
+    # deserves; anything else state-only reads "role SuperAdmin; mode hosted".
+    if ($b.Count -eq 0 -and $a.Count -gt 0) {
+        $val = { param($n) if ($a.Contains($n)) { "$($a[$n])".Trim() } else { '' } }
+        if ("$Action".Trim().ToLowerInvariant() -eq 'manager.login') {
+            $role = & $val 'role'; $mode = & $val 'mode'; $src = & $val 'source'
+            $txt = 'signed in'
+            if ($role) { $txt += " as $role" }
+            $where = New-Object System.Collections.Generic.List[string]
+            if ($mode) { $where.Add("$mode Manager") }
+            if ($src)  { $where.Add("role from $src") }
+            if ($where.Count) { $txt += ' (' + ($where -join ', ') + ')' }
+            return $txt
+        }
+        $facts = New-Object System.Collections.Generic.List[string]
+        foreach ($k in $keys) {
+            $nv = "$($a[$k])"
+            if ($nv -eq '') { continue }        # an empty field states nothing
+            $facts.Add($(if ($k) { "$k`: $nv" } else { $nv }))
+        }
+        if ($facts.Count) { return ($facts -join '; ') }
+    }
 
     $parts = New-Object System.Collections.Generic.List[string]
     foreach ($k in $keys) {

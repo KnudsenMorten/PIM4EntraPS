@@ -141,6 +141,13 @@ $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
 # REQ-I + REQ-U (Coverage & gaps page): job 'coverage' compares the tenant caches with pim.Rows here and stores
 # pim.TenantCache kind 'coverage-report'; the Manager only reads that row.
 . "$shared\PIM-Coverage.ps1"
+# §79.1: job 'target-check' -- do the Azure scopes and roles the delegation rows point at still exist? Reports only.
+. "$shared\PIM-TargetCheck.ps1"
+# §79.2: job 'pending-check' -- staged changes (the shared store, §79.13) and queued actions nobody committed.
+. "$shared\PIM-SharedPending.ps1"
+. "$shared\PIM-PendingCheck.ps1"
+# §79.7: job 'owner-review' -- department owners confirm (Keep / Extend / Remove) their people on My people.
+. "$shared\PIM-OwnerPortal.ps1"
 
 # Scheduler state + run history + acknowledgements live in SQL pim.Settings (SchedulerState /
 # JobRunHistory / JobAcknowledgements) -- the SAME store the Manager's Jobs tab reads. The old
@@ -272,6 +279,25 @@ Register-PimJobHandler -Type 'coverage' -Handler {
     Invoke-PimCoverageJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
 Write-Host "[scheduler] coverage report wired (pim.TenantCache/coverage-report; the Manager's Coverage & gaps page reads it)" -ForegroundColor Cyan
+# §79.1: the REAL 'target-check' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
+Register-PimJobHandler -Type 'target-check' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimTargetCheckJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
+Write-Host "[scheduler] target check wired (pim.TenantCache/target-check; missing Azure scopes / roles are reported, never removed)" -ForegroundColor Cyan
+# §79.2: the REAL 'pending-check' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
+Register-PimJobHandler -Type 'pending-check' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimPendingCheckJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
+# §79.7: the REAL 'owner-review' handler. A mail that could not be sent (not a deliberate hold) FAILS the run.
+Register-PimJobHandler -Type 'owner-review' -Handler {
+    param($job, $now, $whatIf)
+    $r = Invoke-PimOwnerReviewJob -Job $job -NowUtc $now -WhatIf:$whatIf
+    if ($r.failed) { throw "[owner-review] $($r.detail)" }
+    $r
+}
+Write-Host "[scheduler] pending check wired (uncommitted staged changes + queued actions older than a day are mailed)" -ForegroundColor Cyan
 
 # Wire the per-scope engine-delta / engine-full jobs to the NEW REST engine.
 # WhatIf (intent/recalc) -> plan only; otherwise the provider applies via REST.
@@ -313,6 +339,24 @@ $engineHandler = {
         $sumH = @($res) | ForEach-Object { "$($_.scope):c$($_.create)/u$($_.update)/r$($_.remove)" }
         return [pscustomobject]@{ ran=$true; held=$true; heldCount=[int]$outcome.heldCount; holds=@($outcome.holds)
             detail=("engine $mode [$scope] " + ($sumH -join ' ') + " -- NEEDS APPROVAL: " + $outcome.detail); whatIf=[bool]$whatIf }
+    }
+    # 🔴 WAITING IS NOT FAILING (operator, 2026-09-22: an alert for 'delta-admins' whose only problem
+    # was "1x The group this item needs does not exist yet [GROUP-NOT-CREATED-YET]" -- "bug"). That
+    # item is ORDER: the Groups job creates the group in the same cycle and the membership applies on
+    # the next run. Failing the job for it raises an alert every cycle for something that fixes
+    # itself -- and an alert that cries wolf is how the next REAL failure goes unread. A run whose
+    # only failures are transient + retryable (and have not outlived their cause) is reported OK,
+    # saying how many items are waiting and why.
+    if ($bad.Count -and (Get-Command Test-PimEngineFailuresAreAllTransient -ErrorAction SilentlyContinue)) {
+        $__failedScopes = @($bad | Where-Object { [int]$_.errors -gt 0 })
+        $__allItems = @($__failedScopes | ForEach-Object { if ($_.PSObject.Properties['failures']) { @($_.failures) } })
+        $__unboundAny = @($bad | Where-Object { "$($_.detail)" -match 'no provider for scope' }).Count
+        if (-not $__unboundAny -and $__allItems.Count -and (Test-PimEngineFailuresAreAllTransient -Failures $__allItems -NowUtc $now)) {
+            $sumW = @($res) | ForEach-Object { "$($_.scope):c$($_.create)/u$($_.update)/r$($_.remove)" }
+            $waitTxt = if (Get-Command Format-PimFailureSummary -ErrorAction SilentlyContinue) { Format-PimFailureSummary -Failures $__allItems } else { "$($__allItems.Count) item(s) waiting" }
+            return [pscustomobject]@{ ran=$true; waiting=[int]$__allItems.Count; whatIf=[bool]$whatIf
+                detail=("engine $mode [$scope] " + ($sumW -join ' ') + ' -- ' + $waitTxt) }
+        }
     }
     if ($bad.Count) {
         $unbound = @($bad | Where-Object { "$($_.detail)" -match 'no provider for scope' })

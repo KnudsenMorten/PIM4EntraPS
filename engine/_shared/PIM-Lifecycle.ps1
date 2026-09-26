@@ -68,6 +68,9 @@ function Get-PimDefaultEscalationPolicy {
             [pscustomobject]@{ atDays = 30; recipients = @('owner') }
             [pscustomobject]@{ atDays = 14; recipients = @('owner') }
             [pscustomobject]@{ atDays = 7;  recipients = @('owner','manager') }
+            # §79.8 (operator 2026-09-25): "the dept owner gets a reminder 2 days before a person is auto-disabled" --
+            # the mail links the owner page, where the owner extends the date.
+            [pscustomobject]@{ atDays = 2;  recipients = @('owner') }
             [pscustomobject]@{ atDays = 1;  recipients = @('owner','manager','admin') }
         )
         reminderIntervalDays = 3

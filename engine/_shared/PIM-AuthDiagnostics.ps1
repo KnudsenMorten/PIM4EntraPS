@@ -76,7 +76,7 @@ $script:PimRoleHintByPath = @(
     @{ match = 'deviceManagement/roleDefinitions';                           appRoles = @('DeviceManagementRBAC.ReadWrite.All','DeviceManagementRBAC.Read.All'); pimRoles = @('Intune Administrator') }
     @{ match = 'policies/roleManagementPolic';                                appRoles = @('RoleManagementPolicy.ReadWrite.AzureADGroup','RoleManagementPolicy.ReadWrite.Directory'); pimRoles = @('Privileged Role Administrator') }
     @{ match = 'identityGovernance/privilegedAccess/group';                   appRoles = @('PrivilegedAccess.ReadWrite.AzureADGroup'); pimRoles = @('Privileged Role Administrator') }
-    @{ match = 'identityGovernance/accessReviews';                            appRoles = @('AccessReview.Read.All'); pimRoles = @('Identity Governance Administrator') }
+    @{ match = 'identityGovernance/accessReviews';                            appRoles = @('AccessReview.Read.All', 'AccessReview.ReadWrite.All'); pimRoles = @('Identity Governance Administrator') }
     @{ match = 'directory/administrativeUnits';                               appRoles = @('AdministrativeUnit.ReadWrite.All'); pimRoles = @('Privileged Role Administrator') }
     @{ match = 'appRoleAssignedTo';                                           appRoles = @('AppRoleAssignment.ReadWrite.All'); pimRoles = @('Cloud Application Administrator','Application Administrator') }
     @{ match = 'servicePrincipals/';                                          appRoles = @('Application.ReadWrite.All'); pimRoles = @('Cloud Application Administrator','Application Administrator') }

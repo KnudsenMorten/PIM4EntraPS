@@ -199,6 +199,31 @@ function Get-PimWorkloadRoleBindingKey {
     return ("$gid|$role").ToLowerInvariant()
 }
 
+function Test-PimDefenderActionCovers {
+    # PURE. Does Defender action $By already grant $Action? '<ns>/<path...>/<verb>'. A '*' path segment matches ONE OR
+    # MORE segments; the verb must match, or $By's verb is 'manage' (manage includes read) or '*'.
+    param([string]$By, [string]$Action)
+    $b = "$By".Trim().ToLowerInvariant(); $a = "$Action".Trim().ToLowerInvariant()
+    if (-not $b -or -not $a -or $b -eq $a) { return $false }
+    $bs = $b -split '/'; $as = $a -split '/'
+    if ($bs.Count -lt 2 -or $as.Count -lt 2) { return $false }
+    $bv = $bs[-1]; $av = $as[-1]
+    if (-not ($bv -eq $av -or $bv -eq '*' -or ($bv -eq 'manage' -and $av -eq 'read'))) { return $false }
+    $bp = @($bs[0..($bs.Count - 2)]) | ForEach-Object { if ($_ -eq '*') { '[^/]+(?:/[^/]+)*' } else { [regex]::Escape($_) } }
+    $ap = ($as[0..($as.Count - 2)]) -join '/'
+    return ($ap -match ('^' + ($bp -join '/') + '$'))
+}
+
+function Get-PimDefenderEffectiveActions {
+    # PURE. The spec's actions as Defender STORES them: an action another spec action already grants is dropped.
+    # 2026-09-21 (operator: "bug: looks wrong" -- four "wrong permissions" warnings + "changed" every run): the pack lists
+    # 'microsoft.xdr/secops/*/manage;microsoft.xdr/secops/rawdata/quarantineemailcontent/read'; Defender keeps only the
+    # wildcard (it covers the read), so live never equalled the spec and the engine re-planned an UPDATE forever.
+    param([AllowNull()][object[]]$Actions)
+    $all = @($Actions | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
+    return @($all | Where-Object { $x = $_; -not @($all | Where-Object { Test-PimDefenderActionCovers -By $_ -Action $x }).Count })
+}
+
 function Get-PimDefenderSpecDifference {
     # PURE. How a live Defender binding differs from its spec: '' when it matches (or the row has no spec).
     #   -Desired: a desired binding (Permissions / DataSources); -LiveActions: the role's live allowedResourceActions;
@@ -207,7 +232,7 @@ function Get-PimDefenderSpecDifference {
     $spec = Get-PimDefenderRoleSpec -Row $Desired
     if (-not $spec) { return '' }
     $parts = New-Object System.Collections.Generic.List[string]
-    if (-not (Test-PimWorkloadStringSetEqual -A @($LiveActions) -B @($spec.actions))) {
+    if (-not (Test-PimWorkloadStringSetEqual -A @(Get-PimDefenderEffectiveActions -Actions @($LiveActions)) -B @(Get-PimDefenderEffectiveActions -Actions @($spec.actions)))) {
         $parts.Add(("actions: live [{0}], spec [{1}]" -f (@($LiveActions) -join '; '), (@($spec.actions) -join '; ')))
     }
     if ($null -ne $LiveDataSources -and -not (Test-PimWorkloadStringSetEqual -A @($LiveDataSources) -B @($spec.dataSources))) {

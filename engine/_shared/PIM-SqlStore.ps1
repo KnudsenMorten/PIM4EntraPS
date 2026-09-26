@@ -500,6 +500,89 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $ddl)
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimChangeQueueDdl))
     [void](Initialize-PimNamingConventionSeed -ConnectionString $ConnectionString)
+    [void](Invoke-PimRingOrderMigration -ConnectionString $ConnectionString)
+}
+
+function Get-PimRingOrderMigrationSql {
+    # §77.20 -- the ONE-TIME conversion of every stored ring to the dev-first order (new = 2 - old), in ONE transaction,
+    # guarded by the pim.Settings['RingOrder'] marker read under UPDLOCK so two starts cannot both convert. Rings outside
+    # 0..2 are left as they are (they reached no tenant before and reach none now). UpdatedUtc is NOT touched: the
+    # conversion changes no reach, so it must not look like an edit to the change detector.
+    return @"
+SET XACT_ABORT ON;
+BEGIN TRAN;
+IF NOT EXISTS (SELECT 1 FROM pim.Settings WITH (UPDLOCK, HOLDLOCK) WHERE Name = 'RingOrder')
+BEGIN
+    DECLARE @rows INT = 0, @central INT = 0, @tenants INT = 0;
+    UPDATE pim.Rows
+       SET DataJson = JSON_MODIFY(DataJson, '$.Ring', CAST(2 - CAST(JSON_VALUE(DataJson, '$.Ring') AS INT) AS NVARCHAR(10)))
+     WHERE ISJSON(DataJson) = 1 AND JSON_VALUE(DataJson, '$.Ring') IN ('0', '1', '2');
+    SET @rows = @@ROWCOUNT;
+    IF OBJECT_ID('pim.CentralAdmins') IS NOT NULL
+    BEGIN
+        EXEC sp_executesql N'UPDATE pim.CentralAdmins SET Ring = 2 - Ring WHERE Ring BETWEEN 0 AND 2; SET @n = @@ROWCOUNT;', N'@n INT OUTPUT', @n = @central OUTPUT;
+    END
+    IF OBJECT_ID('platform.Tenants') IS NOT NULL AND COL_LENGTH('platform.Tenants', 'Ring') IS NOT NULL
+    BEGIN
+        EXEC sp_executesql N'UPDATE platform.Tenants SET Ring = 2 - Ring WHERE Ring BETWEEN 0 AND 2; SET @n = @@ROWCOUNT;', N'@n INT OUTPUT', @n = @tenants OUTPUT;
+    END
+    INSERT pim.Settings (Name, ValueJson)
+    VALUES ('RingOrder', CONCAT('{"order":"dev-first","convertedUtc":"', CONVERT(NVARCHAR(30), SYSUTCDATETIME(), 127),
+                                '","rows":', @rows, ',"centralAdmins":', @central, ',"tenants":', @tenants, '}'));
+    SELECT 'converted' AS Outcome, @rows AS RowsConverted, @central AS CentralAdmins, @tenants AS Tenants;
+END
+ELSE
+    SELECT 'already' AS Outcome, 0 AS RowsConverted, 0 AS CentralAdmins, 0 AS Tenants;
+COMMIT;
+"@
+}
+
+function Invoke-PimRingOrderMigration {
+    <#
+      §77.20 (operator 2026-09-21: "ring 0 = dev, ring 1 = test, ring 2 = broad (all)" / "make it consistent"). Until
+      2.4.388 ring 0 was the BROADEST reach; every stored ring is converted ONCE per store so each row keeps exactly the
+      tenants it reached: pim.Rows (every entity's Ring), pim.CentralAdmins.Ring, platform.Tenants.Ring, and the
+      conformance overlay's per-entry rings. Idempotent (marker pim.Settings['RingOrder']); a fresh store just gets
+      the marker. Returns @{ outcome = converted|already|failed; rows; centralAdmins; tenants; overlay; error }.
+      A failure is REPORTED, never thrown: the store keeps working, and the next start tries again.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $res = [ordered]@{ outcome = 'failed'; rows = 0; centralAdmins = 0; tenants = 0; overlay = 0; error = '' }
+    try {
+        # The conformance overlay first: it carries its own done-flag, so a retry after a failed SQL step never
+        # converts it twice.
+        $ov = $null
+        try { $ov = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'ConformanceTemplateOverlay' } catch { $ov = $null }
+        $marker = $null
+        try { $marker = Get-PimSqlSetting -ConnectionString $ConnectionString -Name 'RingOrder' } catch { $marker = $null }
+        if ($null -eq $marker -and $null -ne $ov) {
+            if ($ov -is [string]) { try { $ov = $ov | ConvertFrom-Json } catch { $ov = $null } }
+            if ($null -ne $ov -and -not $ov.PSObject.Properties['__ringOrder']) {
+                $n = 0
+                foreach ($tp in @($ov.PSObject.Properties)) {
+                    $entry = $tp.Value
+                    if ($null -eq $entry -or -not $entry.PSObject -or -not $entry.PSObject.Properties['rings'] -or $null -eq $entry.rings) { continue }
+                    foreach ($rp in @($entry.rings.PSObject.Properties)) {
+                        if ("$($rp.Value)".Trim() -match '^[0-2]$') { $rp.Value = 2 - [int]"$($rp.Value)".Trim(); $n++ }
+                    }
+                }
+                $ov | Add-Member -NotePropertyName '__ringOrder' -NotePropertyValue 'dev-first' -Force
+                Set-PimSqlSetting -ConnectionString $ConnectionString -Name 'ConformanceTemplateOverlay' -ValueJson ($ov | ConvertTo-Json -Depth 10 -Compress) | Out-Null
+                $res.overlay = $n
+            }
+        }
+        $out = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql (Get-PimRingOrderMigrationSql))
+        $row = $out | Select-Object -Last 1
+        $res.outcome = "$($row.Outcome)"
+        $res.rows = [int]$row.RowsConverted; $res.centralAdmins = [int]$row.CentralAdmins; $res.tenants = [int]$row.Tenants
+        if ($res.outcome -eq 'converted') {
+            Write-Host ("  [store] ring order converted to dev-first (0 dev, 1 test, 2 broad): {0} row(s), {1} central admin(s), {2} tenant(s), {3} conformance ring(s) -- every row keeps the tenants it reached" -f $res.rows, $res.centralAdmins, $res.tenants, $res.overlay) -ForegroundColor Yellow
+        }
+    } catch {
+        $res.error = "$($_.Exception.Message)"
+        Write-Warning ("  [store] the ring-order conversion (0 dev, 1 test, 2 broad) did NOT run: {0} -- rings are still in the OLD order in this store; it is retried on the next start." -f $res.error)
+    }
+    return $res
 }
 
 function Initialize-PimNamingConventionSeed {
@@ -612,6 +695,26 @@ function Remove-PimSqlRow {
 }
 
 # --- SQL-backed change queue (mirrors the JSON adapter) -------------------------
+function ConvertTo-PimSqlUtcDateTime {
+    <#
+      BUG-251 (§78 live GUI sweep, 2026-09-24): `[datetime]'2026-09-24T04:06:10Z'` converts to the MACHINE'S LOCAL time,
+      and that local value was written into pim.ChangeQueue.EnqueuedUtc. In the hosted container local IS UTC, so it hid;
+      a Manager or tool on a UTC+2 host stored every enqueue two hours ahead, and Pending changes then showed an entry
+      "applied" two hours before it was requested. Always hand SQL a real UTC value:
+        * a [datetime]: Local -> converted; Utc -> as is; Unspecified -> taken AS UTC (it came from a ...Utc column)
+        * a string: parsed invariant, assumed UTC when it carries no offset, adjusted to UTC when it does
+      Empty -> now (UTC), matching the old behaviour of an enqueue without a timestamp.
+    #>
+    param($Value)
+    if ($null -eq $Value -or "$Value".Trim() -eq '') { return [datetime]::UtcNow }
+    if ($Value -is [datetime]) {
+        if ($Value.Kind -eq [DateTimeKind]::Local) { return $Value.ToUniversalTime() }
+        return [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc)
+    }
+    $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+    return [datetime]::Parse("$Value", [Globalization.CultureInfo]::InvariantCulture, $styles)
+}
+
 function Add-PimSqlQueueChange {
     # §65 -- carries Kind/Origin/Justification. Both dimensions default at the DDL level to
     # DesiredState/Proposal, so a caller built before §65 (or one that passes a bare change record)
@@ -624,10 +727,11 @@ function Add-PimSqlQueueChange {
     $kind    = if ("$($Change.kind)".Trim())   { "$($Change.kind)" }   else { 'DesiredState' }
     $origin  = if ("$($Change.origin)".Trim()) { "$($Change.origin)" } else { 'Proposal' }
     $just    = if ("$($Change.justification)".Trim()) { "$($Change.justification)" } else { $null }
+    $enq     = ConvertTo-PimSqlUtcDateTime $Change.enqueuedUtc
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
 INSERT INTO pim.ChangeQueue (Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], Status, Kind, Origin, Justification)
 VALUES (@id, @e, @k, @op, @p, @enq, @by, 'pending', @kind, @origin, @just);
-"@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = [datetime]$Change.enqueuedUtc; by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just })
+"@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = $enq; by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just })
 }
 
 function Add-PimSqlQueueChangeIfAbsent {
@@ -649,7 +753,7 @@ INSERT INTO pim.ChangeQueue (Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], 
 SELECT @id, @e, @k, @op, @p, @enq, @by, 'pending', @kind, @origin, @just
 WHERE NOT EXISTS (SELECT 1 FROM pim.ChangeQueue WITH (UPDLOCK, HOLDLOCK)
                   WHERE Entity=@e AND [Key]=@k AND Op=@op AND Status IN ('pending','committed','applying','failed'));
-"@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = [datetime]$Change.enqueuedUtc; by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just }
+"@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = (ConvertTo-PimSqlUtcDateTime $Change.enqueuedUtc); by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just }
     return ([int]$n -gt 0)
 }
 
@@ -734,12 +838,27 @@ function Get-PimSqlQueue {
     param(
         [Parameter(Mandatory)][string]$ConnectionString,
         [string]$Status = 'pending',
-        [ValidateSet('','DesiredState','Action')][string]$Kind = ''
+        [ValidateSet('','DesiredState','Action')][string]$Kind = '',
+        # 🔴 READ WHAT WILL BE LOOKED AT (operator, 2026-09-22: "loading queue is taking too long").
+        # Every row carries its PAYLOAD -- for a configuration commit that is the whole row set it
+        # wrote (one live queue held 151 discarded entries and a Services commit of 67 rows) -- and
+        # the page was reading, parsing, describing and shipping all of it to render 36 rows.
+        # -ExcludeStatus drops states nobody is looking at; -Limit keeps the NEWEST n.
+        # Neither may be used to hide a failure: the caller still counts every state separately
+        # (Get-PimSqlQueueCounts), so what is not read is still REPORTED.
+        [string[]]$ExcludeStatus = @(),
+        [int]$Limit = 0
     )
     $where = New-Object System.Collections.Generic.List[string]
     $p = @{}
     if ("$Status".Trim()) { $where.Add('Status=@s'); $p['s'] = $Status }
     if ("$Kind".Trim())   { $where.Add('Kind=@kd');  $p['kd'] = $Kind }
+    $ex = @($ExcludeStatus | Where-Object { "$_".Trim() })
+    if ($ex.Count) {
+        $names = @()
+        for ($i = 0; $i -lt $ex.Count; $i++) { $names += "@x$i"; $p["x$i"] = "$($ex[$i])" }
+        $where.Add('Status NOT IN (' + ($names -join ',') + ')')
+    }
     # The discard columns are ADDITIVE (2026-09-12). Select them only when the store has them, so an
     # engine/drain running against a store the Manager has not migrated yet keeps working unchanged.
     $hasDiscard = $false
@@ -748,10 +867,14 @@ function Get-PimSqlQueue {
         $hasDiscard = ($null -ne $colLen -and -not ($colLen -is [System.DBNull]) -and "$colLen".Trim() -ne '')
     } catch { $hasDiscard = $false }
     $discardCols = if ($hasDiscard) { ', DiscardedBy, DiscardedUtc, DiscardReason' } else { '' }
-    $sql = "SELECT Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], Status, Kind, Origin, Justification, CommittedBy, CommittedUtc, Attempts, LastAttemptUtc, LastError, AppliedUtc, AppliedBy$discardCols FROM pim.ChangeQueue"
+    $top = if ($Limit -gt 0) { "TOP ($([int]$Limit)) " } else { '' }
+    $sql = "SELECT ${top}Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], Status, Kind, Origin, Justification, CommittedBy, CommittedUtc, Attempts, LastAttemptUtc, LastError, AppliedUtc, AppliedBy$discardCols FROM pim.ChangeQueue"
     if ($where.Count) { $sql += ' WHERE ' + ($where -join ' AND ') }
-    $sql += ' ORDER BY EnqueuedUtc'
+    # With a limit the NEWEST rows are the ones worth reading, so the cut is taken from the top and
+    # the result is turned back into the ascending order every caller expects.
+    $sql += $(if ($Limit -gt 0) { ' ORDER BY EnqueuedUtc DESC' } else { ' ORDER BY EnqueuedUtc' })
     $raw = Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql $sql -Parameters $p
+    if ($Limit -gt 0) { $raw = @($raw) ; [array]::Reverse($raw) }
     $iso = { param($v) if ($null -ne $v -and "$v".Trim()) { ([datetime]$v).ToString('o') } else { '' } }
     return @($raw | ForEach-Object {
         [pscustomobject]@{ id = "$($_.Id)"; entity = "$($_.Entity)"; key = "$($_.Key)"; op = "$($_.Op)"
@@ -766,6 +889,24 @@ function Get-PimSqlQueue {
             discardedUtc = $(if ($hasDiscard) { (& $iso $_.DiscardedUtc) } else { '' })
             discardReason = $(if ($hasDiscard) { "$($_.DiscardReason)" } else { '' }) }
     })
+}
+
+function Get-PimSqlQueueCounts {
+    <#
+      How many entries are in each state, as ONE aggregate -- no payloads, no rows.
+      The queue list may legitimately read a subset (see -ExcludeStatus / -Limit on Get-PimSqlQueue),
+      and this is what keeps the page HONEST about what it is not showing: "151 discarded hidden" is
+      a fact read from the store, not a count of rows that happened to be fetched.
+      Returns @{ pending = n; applied = n; ... } -- states with no rows are simply absent.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString)
+    $out = @{}
+    $raw = Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql 'SELECT Status, COUNT(*) AS N FROM pim.ChangeQueue GROUP BY Status'
+    foreach ($r in @($raw)) {
+        $s = "$($r.Status)".Trim()
+        if ($s) { $out[$s] = [int]"$($r.N)" }
+    }
+    return $out
 }
 
 function Set-PimSqlQueueDiscarded {
@@ -1005,6 +1146,15 @@ function Get-PimStoreRowKey {
         }
         'PIM-Assignments-Admins'         { ((& $g 'Username') + '|' + (& $g 'GroupTag')) }
         'PIM-Assignments-Groups'         { ((& $g 'TargetGroupTag') + '|' + (& $g 'SourceGroupTag')) }
+        # 2026-09-21 (operator: "assign permanent ga to ..."): a DIRECT Entra role row names a user, not a group, so it
+        # fell through to 'default' (GroupTag / GroupName), got a BLANK key and was dropped on every save. Keyed like the
+        # engine's Get-PimDirectRoleKey: the user, the role and the assignment type.
+        'PIM-Assignments-Roles-Direct'   {
+            $u = (& $g 'UserPrincipalName'); if (-not "$u".Trim()) { $u = (& $g 'Username') }; if (-not "$u".Trim()) { $u = (& $g 'UserName') }
+            $r = (& $g 'RoleDefinitionName'); if (-not "$r".Trim()) { $r = (& $g 'RoleName') }
+            if (-not "$u".Trim() -or -not "$r".Trim()) { ''; break }
+            ("$u".Trim() + '|' + "$r".Trim() + '|' + (& $g 'AssignmentType')); break
+        }
         'PIM-Assignments-Roles-Groups'   { ((& $g 'GroupTag') + '|' + (& $g 'RoleDefinitionName')) }
         'PIM-Assignments-Roles-AUs'      { ((& $g 'GroupTag') + '|' + (& $g 'AdministrativeUnitTag') + '|' + (& $g 'RoleDefinitionName')) }
         'PIM-Assignments-Azure-Resources'{ ((& $g 'GroupTag') + '|' + (& $g 'AzScope') + '|' + (& $g 'AzScopePermission')) }

@@ -106,7 +106,8 @@ function Resolve-PimHybridAdIdentity {
         $owner = (Get-PimRowProp -Row $Row -Names @('Initials','Owner','Initial')).Trim()
         if ($owner) {
             $hp = ((Get-PimRowProp -Row $Row -Names @('Purpose')).Trim() -ieq 'HighPriv')
-            $gen = Resolve-PimAdminName -Owner $owner -AdminType (Get-PimRowProp -Row $Row -Names @('AdminType')) -Environment 'ad' -HighPriv:$hp
+            $gen = Resolve-PimAdminName -Owner $owner -AdminType (Get-PimRowProp -Row $Row -Names @('AdminType')) -Environment 'ad' -HighPriv:$hp `
+                                        -Company (Get-PimRowProp -Row $Row -Names @('Company'))   # {Company} (2026-09-21)
             $local = "$gen"; $suffixed = ''
             if ($local -match '^([^@]+)@(.+)$') { $local = $Matches[1]; $suffixed = "$gen" }
             if (-not $userName) { $userName = $local; $derived += 'UserName' }

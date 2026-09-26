@@ -480,9 +480,14 @@ function Get-PimPublishJobControlViewSql {
       REQ-Y (2026-09-19): the control view also carries the 'License' row -- the signed licence document, which is not a
       secret (anyone may verify it) -- because an MSP master's publish job refuses without a Pro licence and this view is
       the only part of pim.Settings its identity may read. ManagerAccess and every other row stay out of reach.
+      REQUIREMENTS 77.20 (2026-09-21): and the 'DeploymentRings' row (the name + tag rule of each ring), which the producer
+      signs into the bundle -- configuration, not a secret, read the same way.
+      §79.6 (2026-09-25): and the 'DownlinkIntents' row -- the withdrawals / renames / session revokes the operator
+      authorised centrally, which the producer signs into the bundle. Keys, who and why; no secret. Without it the job
+      could not read them and every bundle shipped none.
     #>
     $d = (Get-PimJobCadenceDefinition -Job 'publish')
-    $v1 = "CREATE OR ALTER VIEW pim.vw_PublishJobControl AS SELECT Name, ValueJson, UpdatedUtc FROM pim.Settings WHERE Name IN (N''$($d.scheduleKey)'', N''$($d.runNowKey)'', N''$($d.lastRunKey)'', N''License'')"
+    $v1 = "CREATE OR ALTER VIEW pim.vw_PublishJobControl AS SELECT Name, ValueJson, UpdatedUtc FROM pim.Settings WHERE Name IN (N''$($d.scheduleKey)'', N''$($d.runNowKey)'', N''$($d.lastRunKey)'', N''License'', N''DeploymentRings'', N''DownlinkIntents'')"
     $v2 = "CREATE OR ALTER VIEW pim.vw_PublishJobLastRun AS SELECT Name, ValueJson, UpdatedUtc FROM pim.Settings WHERE Name = N''$($d.lastRunKey)'' WITH CHECK OPTION"
     return ("IF OBJECT_ID(N'pim.Settings') IS NULL THROW 50001, 'pim.Settings does not exist in this store -- the Manager has not initialised it', 1;`n" +
             "EXEC (N'$v1');`nEXEC (N'$v2');")
