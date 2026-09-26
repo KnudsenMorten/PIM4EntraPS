@@ -1391,6 +1391,7 @@
     <!-- REQ-Y: the Pro-feature notice (renderMspLicenceBanners) -- hidden unless this Pro feature is unlicensed / in grace. -->
     <div class="pro-lic-banner" data-feature="reviews.campaigns" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
     <div id="arRulesBody" style="flex:0 0 auto; padding:10px 18px 0; max-height:45vh; overflow:auto;"></div>   <!-- REQ-AR-2: review rules per department -->
+    <div id="arCampaignsBody" style="flex:0 0 auto; padding:6px 18px 0; max-height:45vh; overflow:auto;"></div>   <!-- REQ-AR-2: department campaigns + SuperAdmin override -->
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="arBody">
       <div style="color:#57606a; font-size:12px;">Loading access reviews&hellip;</div>
     </div>
@@ -1398,6 +1399,7 @@
 
   <!-- =========== §79.8 My people (the PIM owner page): a department owner's people and when their access ends =========== -->
   <div id="ownerTab" class="tab-panel">
+    <div id="ownerReviewsBody" style="flex:0 0 auto; padding:10px 18px 0; max-height:50vh; overflow:auto;"></div>   <!-- REQ-AR-2: the department reviews this person reviews -->
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="ownerBody">
       <div style="color:#57606a; font-size:12px;">Loading your people&hellip;</div>
     </div>
@@ -7803,6 +7805,7 @@
     const host = document.getElementById('ownerBody');
     if (!host) return;
     if (!isServer) { host.innerHTML = '<div style="color:#57606a;">My people needs the live Manager (it is not available in the static viewer).</div>'; return; }
+    try { await renderReviewCampaigns('ownerReviewsBody', 'reviewer'); } catch (_) { }
     try {
       ownerState.data = await api('GET', '/api/owner/people' + (ownerState.all ? '?all=1' : ''));
     } catch (e) {
@@ -7929,6 +7932,7 @@
 
     drawAccessReviews();
     try { await renderAccessReviewRules(); } catch (_) { }
+    try { await renderReviewCampaigns('arCampaignsBody', 'admin'); } catch (_) { }
   }
 
   // ----- REQ-AR-2 (operator 2026-09-26): access reviews PER DEPARTMENT, driven by review rules ----------------------------
@@ -7999,6 +8003,52 @@
       try { await api('PUT', '/api/access-review-rules', { rules: out }); msg.textContent = 'Saved ✓ -- the next access-review-cycle run starts what is due'; msg.style.color = '#116329'; }
       catch (e) { msg.textContent = 'Not saved: ' + String((e && e.body && e.body.error) || e.message || e); msg.style.color = '#cf222e'; }
     };
+  }
+
+  // REQ-AR-2: the department review campaigns. mode 'reviewer' (My people): the open campaigns the signed-in person reviews,
+  // with Keep / Remove where it is their turn. mode 'admin' (Access reviews): every campaign; a SuperAdmin can OVERRIDE a
+  // pending person. A Remove raises the offboard approval request (a PIM administrator approves; nothing changes before).
+  async function renderReviewCampaigns(hostId, mode) {
+    const host = document.getElementById(hostId);
+    if (!host || !isServer) return;
+    const esc = escapeHtml;
+    let d = null;
+    try { d = await api('GET', '/api/access-review-campaigns'); } catch (e) { host.innerHTML = mode === 'admin' ? '<div style="color:#cf222e;font-size:12px;">Department reviews could not be read: ' + esc(String((e && e.body && e.body.error) || e.message || e)) + '</div>' : ''; return; }
+    const camps = asList(d.campaigns).filter(c => mode === 'admin' || (c.amReviewer && c.status === 'open'));
+    if (!camps.length) { host.innerHTML = mode === 'admin' ? '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">No department review has run yet.</div>' : ''; return; }
+    const can = !!d.canOverride;
+    const h = ['<div class="arCamps" style="border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;margin-bottom:10px;"><div style="font-weight:600;font-size:13px;margin-bottom:4px;">' +
+      (mode === 'admin' ? 'Department reviews' : 'Access reviews waiting for you') + '</div>'];
+    for (const c of camps) {
+      const open = c.status === 'open';
+      h.push('<div style="margin:6px 0 2px;font-size:12px;"><b>' + esc(c.department) + '</b> -- ' + (open ? 'open, due ' + esc(String(c.dueUtc || '').substring(0, 10)) : 'closed ' + esc(String(c.closedUtc || '').substring(0, 10)) + ' (' + esc(c.closeReason || '') + ')') +
+        ' -- ' + esc(String(c.approvers)) + ' approver(s)' + (Number(c.approvers) === 2 ? ' ' + esc(c.mode) : '') + ' -- ' + esc(asList(c.reviewers).join(', ')) +
+        (Number(c.remindersSent) ? ' -- reminders ' + esc(String(c.remindersSent)) + '/' + esc(String(c.reminders)) : '') + '</div>');
+      h.push('<table class="grid" style="font-size:12px;width:100%;"><thead><tr><th>Person</th><th>Access</th><th>State</th><th></th></tr></thead><tbody>');
+      for (const it of asList(c.items)) {
+        const st = open ? (it.state === 'pending' ? 'waiting for ' + esc(asList(it.awaiting).join(', ')) : '<b>' + esc(it.state) + '</b> (' + esc(it.by || '') + ')') : esc(it.outcome || it.state);
+        let btn = '';
+        if (open && it.state === 'pending') {
+          if (it.myTurn) btn = '<button class="arDecide primary" data-id="' + esc(c.id) + '" data-user="' + esc(it.user) + '" data-dec="keep">Keep</button> <button class="arDecide" data-id="' + esc(c.id) + '" data-user="' + esc(it.user) + '" data-dec="remove">Remove</button>';
+          else if (mode === 'admin' && can) btn = '<button class="arOverride" data-id="' + esc(c.id) + '" data-user="' + esc(it.user) + '" data-dec="keep">Override: keep</button> <button class="arOverride" data-id="' + esc(c.id) + '" data-user="' + esc(it.user) + '" data-dec="remove">Override: remove</button>';
+        }
+        h.push('<tr><td><b>' + esc(it.displayName || it.user) + '</b><div style="color:#57606a;font-size:11px;">' + esc(it.user) + '</div></td><td style="font-size:11px;">' + (asList(it.access).map(esc).join('<br>') || '<span style="color:#57606a;">none</span>') + '</td><td>' + st + '</td><td style="white-space:nowrap;">' + btn + '</td></tr>');
+      }
+      h.push('</tbody></table>');
+    }
+    h.push('</div>');
+    host.innerHTML = h.join('');
+    const act = async (bt, override) => {
+      const dec = bt.getAttribute('data-dec');
+      switch (dec) { case 'keep': case 'remove': break; default: return; }
+      if (dec === 'remove' && !confirm('Remove ' + bt.getAttribute('data-user') + '? A PIM administrator approves the removal before anything changes.')) return;
+      try { const r = await api('POST', '/api/access-review-campaigns/decide', { id: bt.getAttribute('data-id'), user: bt.getAttribute('data-user'), decision: dec, override });
+            sharedToast((r && r.note) || 'Recorded'); }
+      catch (e) { alert('Not recorded: ' + ((e && e.body && e.body.error) || (e && e.message) || e)); }
+      renderReviewCampaigns(hostId, mode);
+    };
+    host.querySelectorAll('.arDecide').forEach(bt => bt.onclick = () => act(bt, false));
+    host.querySelectorAll('.arOverride').forEach(bt => bt.onclick = () => act(bt, true));
   }
 
   // Attest a single decision item (Approve / Deny / DontKnow). Degrades gracefully

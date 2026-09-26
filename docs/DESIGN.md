@@ -1505,14 +1505,18 @@ who attested what, when. Pure cores live in `engine/_shared/PIM-AccessReviews.ps
 covered by `tests/Test-PimAccessReviews.ps1` (114 offline assertions) and the GUI↔engine
 alignment check. The hosted/SQL Manager GUI smoke is the live gate.
 
-**Access reviews per department (2.4.447).** Reviews follow **review rules** (Access reviews › Review rules): a default
-rule and, per department, the default, **Off** (opt out) or its own rule. A rule holds the cadence in days, how long a round
-stays open, the reviewers (empty = the department owner), and 1 or 2 approvers, **parallel** (one stage, both reviewers;
-the first decision counts) or **serial** (two stages: approver 1, then approver 2). The job `access-review-cycle` checks
-every six hours which departments are due and starts, for each, one **one-time** review per group of the department,
-named "PIM4EntraPS review - <department> - <group> - <date>". PIM runs the cadence itself because Microsoft Graph repeats
-reviews weekly at the fastest and reviews one group per review. An undecided member keeps access, and decisions are never
-applied automatically. The same job mails the alert recipients every day while any department has no owner.
+**Access reviews per department (2.4.448).** PIM runs the department reviews itself. **Review rules** (Access reviews ›
+Review rules) set a default rule and, per department, the default, **Off** (opt out) or its own rule: the cadence in days,
+how long a round stays open, the reviewers (empty = the department owner), 1 or 2 approvers, **parallel** (both decide;
+any Remove wins) or **serial** (approver 1 first, approver 2 has the final word), and the reminders (default a reminder every
+7 days, three times). The job `access-review-cycle` checks every six hours: it starts a round for each department that is
+due and has none open, listing every admin account of the department with the access it holds; it reminds reviewers after
+the due date; after the last reminder it tells the alert recipients and closes the round, and undecided people keep their
+access. Reviewers decide **Keep** or **Remove** per person on **My people**; a senior administrator can decide any open person
+on the Access reviews page. A Remove raises the offboard approval request that My people uses, so an administrator
+approves it and the engine carries it out. Microsoft Entra access reviews are not used for this, because they cannot
+review one department's people across several groups without the Entra ID Governance licence, and repeat weekly at the
+fastest. The same job mails the alert recipients every day while any department has no owner.
 **Creating the reviews (2.4.421/2.4.422).** The `AccessReviews` engine provider creates one review definition per group
 whose definition row carries a `ReviewCycle`. It uses `POST /identityGovernance/accessReviews/definitions`, with the
 group's transitive members as the scope and the row's owners as reviewers. Microsoft documents exactly one application
