@@ -14,6 +14,17 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.447 — Access reviews per department
+
+- **Access reviews now run per department, from review rules.** On the Access reviews page, **Review rules** sets a
+  default rule and, per department, the default, **Off** (the department opts out) or its own rule. A rule sets how often
+  the department is reviewed (any number of days), how long each round stays open, the reviewers (empty = the department
+  owner), and 1 or 2 approvers, either **parallel** (both at once; the first decision counts) or **serial** (approver 1,
+  then approver 2). Each round reviews every group of the department. A member nobody decides on keeps their access, and
+  decisions are never applied automatically.
+- **A department without an owner is reported every day** to the alert recipients, until someone names an owner.
+- The review rules are Pro and are changed by a senior administrator; every change is recorded in the audit trail.
+
 ## v2.4.446 — Discovery: one list, Create or Ignore
 
 - **Discovery is now one simple list** of what is in your tenant and not yet in PIM: Azure management groups and

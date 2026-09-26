@@ -146,6 +146,8 @@ $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
 # §79.2: job 'pending-check' -- staged changes (the shared store, §79.13) and queued actions nobody committed.
 . "$shared\PIM-SharedPending.ps1"
 . "$shared\PIM-PendingCheck.ps1"
+# REQ-AR-2: job 'access-review-cycle' -- the per-department access review campaigns.
+. "$shared\PIM-AccessReviewCycle.ps1"
 # §79.7: job 'owner-review' -- department owners confirm (Keep / Extend / Remove) their people on My people.
 . "$shared\PIM-OwnerPortal.ps1"
 
@@ -298,6 +300,12 @@ Register-PimJobHandler -Type 'owner-review' -Handler {
     $r
 }
 Write-Host "[scheduler] pending check wired (uncommitted staged changes + queued actions older than a day are mailed)" -ForegroundColor Cyan
+# REQ-AR-2: the REAL 'access-review-cycle' handler. A review that could not be started FAILS the run (it is retried next time).
+Register-PimJobHandler -Type 'access-review-cycle' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimAccessReviewCycleJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
+Write-Host "[scheduler] access review cycle wired (per-department campaigns from Settings > Access reviews)" -ForegroundColor Cyan
 
 # Wire the per-scope engine-delta / engine-full jobs to the NEW REST engine.
 # WhatIf (intent/recalc) -> plan only; otherwise the provider applies via REST.

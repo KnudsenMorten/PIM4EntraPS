@@ -290,6 +290,8 @@ if (Test-Path -LiteralPath $_permLib) { . $_permLib }
 # REQ-DISC-2 (operator 2026-09-26): the Discovery inbox -- one list of what is new, each item Create / Ignore / Re-add.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-AzureDiscovery.ps1')
 . (Join-Path $solutionRoot 'engine\_shared\PIM-DiscoveryInbox.ps1')
+# REQ-AR-2 (operator 2026-09-26): access reviews PER DEPARTMENT, driven by review rules (Settings > Access reviews).
+. (Join-Path $solutionRoot 'engine\_shared\PIM-AccessReviewCycle.ps1')
 # REQ-U (prereqs) -- the workload-prerequisite catalog + view (engine/_shared/PIM-WorkloadPrereqs.ps1): behind
 # GET /api/workload-prereqs, the green / amber / red chips that show whether tools\setup\Initialize-PimWorkloadPrereqs.ps1
 # has run for a workload. The same definitions the setup script and tests\Test-PimWorkloadPrereqs.ps1 use.
@@ -11967,6 +11969,41 @@ function Handle-Request {
         # cache/<instance>/discovery-baseline.json. Acknowledge = snapshot
         # the current state as the new baseline.
         # -------------------------------------------------------------------
+        if ($path -eq '/api/access-review-rules' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            # REQ-AR-2: the review rules, the departments they apply to, and when each department's last campaign started.
+            $rules = $null; $state = $null
+            try { $rules = Get-PimManagerSettingObject -Name 'AccessReviewRules'; $state = Get-PimManagerSettingObject -Name 'AccessReviewCycleState' } catch {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "the review rules could not be read: $($_.Exception.Message)" }; return 503
+            }
+            $depts = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Definitions-Departments' | ForEach-Object { "$(if ($_.Department) { $_.Department } else { $_.Name })".Trim() } | Where-Object { $_ } | Sort-Object -Unique)
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ rules = $rules; defaults = $script:PimAccessReviewRuleDefaults; departments = @($depts); state = $state
+                canEdit = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') }
+            return 200
+        }
+
+        if ($path -eq '/api/access-review-rules' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change the access review rules.' }; return 403
+            }
+            if (-not (Test-PimManagerProFeature -Key 'reviews.campaigns' -Response $resp)) { return 403 }
+            $body = Read-RequestJson -Request $req
+            $rules = $body.rules
+            if (-not $rules) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'body must be { rules: { default: {...}, departments: { <department>: { off } | {...} } } }' }; return 400 }
+            # Validate every rule BEFORE anything is saved: a bad value is named, nothing is written.
+            try {
+                [void](ConvertTo-PimAccessReviewRule -Base $rules.default -Override $null)
+                if ($rules.departments) { foreach ($pp in $rules.departments.PSObject.Properties) { if (-not [bool]$pp.Value.off) { [void](ConvertTo-PimAccessReviewRule -Base $rules.default -Override $pp.Value) } } }
+            } catch { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($_.Exception.Message)" }; return 400 }
+            $before = $null; try { $before = Get-PimManagerSettingObject -Name 'AccessReviewRules' } catch { }
+            try { Set-PimManagerSettingObject -Name 'AccessReviewRules' -Value $rules } catch {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; error = "the review rules were NOT saved: $($_.Exception.Message)" }; return 503
+            }
+            Write-PimManagerAuditEvent -Action 'accessreview.rules.save' -Target $script:PimInstanceName -Before $before -After $rules
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true }
+            return 200
+        }
         if ($path -eq '/api/discovery-inbox' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             # REQ-DISC-2: the ONE list -- new items with Create / Ignore, the ignored ones with Re-add.

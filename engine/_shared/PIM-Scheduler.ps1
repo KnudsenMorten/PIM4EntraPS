@@ -52,6 +52,10 @@ $script:PimTickOnlyJobTypes += 'target-check'
 # §79.2 (operator 2026-09-25): 'pending-check' reports staged changes and queued actions nobody committed (PIM-PendingCheck.ps1).
 $script:PimJobTypes += 'pending-check'
 $script:PimTickOnlyJobTypes += 'pending-check'
+# REQ-AR-2 (operator 2026-09-26): 'access-review-cycle' starts the per-DEPARTMENT access review campaigns the review rules
+# make due (PIM-AccessReviewCycle.ps1). Checks every 6 h; the cadence per department is the rule's cadenceDays.
+$script:PimJobTypes += 'access-review-cycle'
+$script:PimTickOnlyJobTypes += 'access-review-cycle'
 # §79.7 (operator 2026-09-25): 'owner-review' mails each department's owners their people to Keep / Extend / Remove (PIM-OwnerPortal.ps1).
 $script:PimJobTypes += 'owner-review'
 $script:PimTickOnlyJobTypes += 'owner-review'
@@ -191,6 +195,8 @@ function Get-PimDefaultJobSchedule {
         # §79.2: daily -- staged changes / queued actions older than a day that nobody committed. On/off + cadence on the Jobs
         # page (SuperAdmin schedule); mail under Alerting > 'pending-uncommitted'.
         [pscustomobject]@{ name='pending-check'; type='pending-check'; intervalMinutes=1440; enabled=$true }
+        # REQ-AR-2: no-op until review rules are saved and enabled (Settings > Access reviews); Pro 'reviews.campaigns'.
+        [pscustomobject]@{ name='access-review-cycle'; type='access-review-cycle'; intervalMinutes=360; enabled=$true }
         # §79.7: every 90 days -- each department's owners get their people to Keep / Extend / Remove on My people. OFF by
         # default: it mails people outside IT, so a SuperAdmin turns it on (and sets the cadence) on the Jobs page.
         [pscustomobject]@{ name='owner-review'; type='owner-review'; intervalMinutes=129600; enabled=$false }
@@ -1007,6 +1013,13 @@ function Initialize-PimDefaultJobHandlers {
         # §79.7: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimOwnerReviewJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:owner-review (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'access-review-cycle' -Handler {
+        param($job,$now,$whatIf)
+        # REQ-AR-2: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimAccessReviewCycleJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:access-review-cycle (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'pending-check' -Handler {
