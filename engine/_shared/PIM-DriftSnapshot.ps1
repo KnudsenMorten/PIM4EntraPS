@@ -376,6 +376,23 @@ function Resolve-PimDriftPrincipalName {
     return $res
 }
 
+function Get-PimDriftAuTagMap {
+    # AU id (lower-case) -> the PIM tag of the AU PIM defines under that display name. Reads the definitions and the directory
+    # cache already loaded in the engine; @{} when either is missing (an AU role is then not Kept -- never a guessed tag).
+    $map = @{}
+    try {
+        $byName = @{}
+        if (Get-Command Get-PimDesiredRows -ErrorAction SilentlyContinue) {
+            foreach ($d in @(Get-PimDesiredRows -Entity 'PIM-Definitions-AU')) { $n = "$($d.AUDisplayName)".Trim(); $tg = "$($d.AdministrativeUnitTag)".Trim(); if ($n -and $tg) { $byName[$n.ToLowerInvariant()] = $tg } }
+        }
+        foreach ($a in @($Global:AU_All_ID | Where-Object { $_ })) {
+            $n = "$($a.DisplayName)".Trim().ToLowerInvariant(); $id = "$($a.Id)".Trim().ToLowerInvariant()   # property names are case-insensitive (SDK or REST shape alike)
+            if ($n -and $id -and $byName.ContainsKey($n)) { $map[$id] = $byName[$n] }
+        }
+    } catch { }
+    return $map
+}
+
 function Add-PimDriftPayloadNames {
     <#
       Operator, 2026-09-14, on the Drift page: "i cannot see what that guid is". An 'extra' item carries the LIVE row,
@@ -386,13 +403,26 @@ function Add-PimDriftPayloadNames {
       Only rows with principalId + groupId and no desired-side names are touched; everything else is left as it is.
     #>
     param([object[]]$ScopeResults = @())
-    $cache = @{}; $owned = $null; $ownedTried = $false
+    $cache = @{}; $owned = $null; $ownedTried = $false; $auTags = $null
     foreach ($r in @($ScopeResults)) {
         foreach ($pc in @(@(Get-PimDriftSnapshotField $r 'plan') | Where-Object { $null -ne $_ })) {
             $pl = Get-PimDriftSnapshotField $pc 'payload'
             if ($null -eq $pl) { continue }
             $prin = "$(Get-PimDriftSnapshotField $pl 'principalId')".Trim()
             $gid  = "$(Get-PimDriftSnapshotField $pl 'groupId')".Trim()
+            # REQ-AU-DRIFT-1 (2.4.455): an AU-scoped role row names its group by id and its AU by the scope path -- stamp the
+            # group's tag and the AU's PIM tag, so Keep can stage the Roles-AUs row.
+            $dsid = "$(Get-PimDriftSnapshotField $pl 'directoryScopeId')".Trim()
+            if ($prin -and -not $gid -and $dsid -match '(?i)^/administrativeUnits/([^/]+)$') {
+                $auId = $Matches[1]
+                if (-not $ownedTried) { $ownedTried = $true; if (Get-Command Get-PimSolutionOwnedGroups -ErrorAction SilentlyContinue) { try { $owned = Get-PimSolutionOwnedGroups } catch { $owned = $null } } }
+                if ($null -eq $auTags) { $auTags = Get-PimDriftAuTagMap }
+                $copy = if ($pl -is [System.Collections.IDictionary]) { [pscustomobject]$pl } else { $pl | Select-Object * }
+                if ($owned -and $owned.byId -and $owned.byId.ContainsKey($prin) -and "$($owned.byId[$prin].tag)") { Add-Member -InputObject $copy -NotePropertyName PrincipalTag -NotePropertyValue "$($owned.byId[$prin].tag)" -Force }
+                if ($auTags.ContainsKey($auId.ToLowerInvariant())) { Add-Member -InputObject $copy -NotePropertyName AuTag -NotePropertyValue "$($auTags[$auId.ToLowerInvariant()])" -Force }
+                if ($pc -is [System.Collections.IDictionary]) { $pc['payload'] = $copy } else { $pc.payload = $copy }
+                continue
+            }
             if (-not $prin -or -not $gid) { continue }
             if ("$(Get-PimDriftSnapshotField $pl 'Username')" -or "$(Get-PimDriftSnapshotField $pl 'TargetGroupTag')" -or "$(Get-PimDriftSnapshotField $pl 'PrincipalName')") { continue }
             if (-not $ownedTried) {
@@ -651,6 +681,12 @@ function ConvertTo-PimDriftSnapshotView {
 # dropdown"). An EXTRA (in the tenant, not in PIM) can be DELETED -- queued as the matching revoke, with every gate the
 # revoke path has (break-glass, count confirmation, approval, commit on the Queue) -- or KEPT: the desired row that defines it
 # is staged, so PIM manages it and the drift is gone after Review & commit. Missing / changed items keep "Apply now".
+function ConvertTo-PimDriftAuTag {
+    # PURE. A tag for an adopted AU: its display name with anything but letters, digits, '.', '_', '-' made a '-'.
+    param([string]$DisplayName)
+    return (("$DisplayName".Trim() -replace '[^A-Za-z0-9._-]+', '-') -replace '-{2,}', '-').Trim('-')
+}
+
 function Get-PimDriftExtraActions {
     <#
       PURE. What Delete and Keep can do for ONE extra item, from the LIVE row the engine plan carried (-Payload) and its area
@@ -689,7 +725,22 @@ function Get-PimDriftExtraActions {
         $out.revoke = [ordered]@{ type = 'entra-role'; principalId = $prin; roleDefinitionId = (& $f 'roleDefinitionId'); directoryScopeId = $ds; assignmentType = $type; principal = $(if ($pname) { $pname } else { & $f 'GroupTag' }) }
         if ($Scope -eq 'EntraRoles' -and $ds -eq '/' -and (& $f 'GroupTag') -and (& $f 'RoleDefinitionName')) {
             $out.keep = [ordered]@{ base = 'PIM-Assignments-Roles-Groups'; row = [ordered]@{ GroupTag = (& $f 'GroupTag'); RoleDefinitionName = (& $f 'RoleDefinitionName'); AssignmentType = $type } }
+        } elseif ($Scope -eq 'RolesAUs' -and (& $f 'PrincipalTag') -and (& $f 'AuTag') -and (& $f 'RoleDefinitionName')) {
+            # REQ-AU-DRIFT-1 (2.4.455): an AU-scoped role on a PIM group, in an AU PIM defines -> its Roles-AUs row
+            $out.keep = [ordered]@{ base = 'PIM-Assignments-Roles-AUs'; row = [ordered]@{ GroupTag = (& $f 'PrincipalTag'); AdministrativeUnitTag = (& $f 'AuTag'); RoleDefinitionName = (& $f 'RoleDefinitionName'); AssignmentType = $type } }
+        } elseif ($Scope -eq 'RolesAUs') {
+            $out.keepWhy = $(if (-not (& $f 'AuTag')) { 'the Administrative Unit is not defined in PIM -- Keep the AU first (its own drift item), then this assignment' } else { 'the group or role could not be named as a PIM row -- add it on the AU delegation page' })
         } else { $out.keepWhy = 'this role assignment is kept by adding its row on its page' }
+        return $out
+    }
+    if ($Scope -eq 'AdministrativeUnits' -and ((& $f 'displayName') -or (& $f 'DisplayName'))) {
+        # REQ-AU-DRIFT-1 (2.4.455): an AU in the tenant that PIM does not define. PIM matches AUs by display name, so Keep =
+        # its PIM-Definitions-AU row under that name (description / visibility as they are). PIM never deletes an AU.
+        $dn = if (& $f 'displayName') { & $f 'displayName' } else { & $f 'DisplayName' }
+        $out.revokeWhy = 'PIM never deletes an Administrative Unit -- remove it in Entra if it should go, or Ignore it'
+        $row = [ordered]@{ AUDisplayName = $dn; AUDescription = (& $f 'description'); AdministrativeUnitTag = (ConvertTo-PimDriftAuTag -DisplayName $dn) }
+        if (& $f 'visibility') { $row['Visibility'] = (& $f 'visibility') }
+        $out.keep = [ordered]@{ base = 'PIM-Definitions-AU'; row = $row }
         return $out
     }
     $out.revokeWhy = 'nothing the revoke queue can address -- remove it at its source'

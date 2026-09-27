@@ -14,6 +14,27 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.455 — Stop managing and re-import admins; Administrative Units in drift and Discovery
+
+- **Stop managing an admin.** On Admin accounts (and on an admin in the Access map) **Stop managing** takes the admin out of
+  PIM: the admin's definition and every access row naming the admin (by sign-in name or short user name, in any letter case)
+  are staged for removal, and the name is taken out of owner, sponsor, approver and notify fields (other names stay).
+  **Nothing changes in Entra**: the account is not disabled or deleted, and the access it holds stays. To take the access
+  away as well, use **Mark for manual removal** (offboarding).
+- **Import an unmanaged admin.** Admin accounts now lists the admin accounts that exist in the directory but not in PIM,
+  each with **Import**: the admin's definition is read from the account itself, and the rows that keep the access it holds
+  today come from the latest drift check. Both are staged for Review & commit.
+- **Administrative Units in drift.** An Administrative Unit that exists in the tenant but not in PIM can now be **kept** from
+  the Drift page (its definition is staged under its name). An AU-scoped role on a PIM group can be kept too, once PIM
+  defines that AU. PIM never deletes an Administrative Unit; remove it in Entra if it should go.
+- **Administrative Units in Discovery.** New Administrative Units appear in the Discovery inbox; **Create** stages their
+  definition.
+- **Authoring.** A new **Create an Administrative Unit** card defines an AU and can give a group Entra roles inside it, and
+  **Give a group one or more Entra roles** can now limit the roles to chosen Administrative Units.
+- **Fixed:** **Import administrators** now accepts the format its own example shows (`upn;Display Name;Department`, no
+  header line).
+- **Upgrade note:** none.
+
 ## v2.4.454 — Removing one access in a review now removes it; a faster Manager and fewer throttled reads
 
 - **Fixed: removing one access in an access review.** In 2.4.453 the staged change deleted the access row instead of

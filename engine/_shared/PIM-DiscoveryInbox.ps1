@@ -35,6 +35,7 @@ $script:PimDiscoveryKinds = [ordered]@{
     'entra-role'    = 'Entra ID role'
     'defender-role' = 'Defender XDR role'
     'intune-role'   = 'Intune role'
+    'entra-au'      = 'Administrative Unit'   # REQ-AU-DRIFT-1 (2.4.455): Create = its PIM-Definitions-AU row (matched by display name)
 }
 $script:PimDiscoveryRoleKinds = @('entra-role', 'defender-role', 'intune-role')
 
@@ -74,7 +75,7 @@ function Get-PimAzureCafLevel {
 
 function ConvertTo-PimDiscoveryItems {
     <# PURE. The cached sources -> one flat list of { key; kind; kindLabel; id; name; path }. #>
-    param([object[]]$AzureScopes = @(), [object[]]$EntraRoles = @(), [object[]]$DefenderRoles = @(), [object[]]$IntuneRoles = @(), [object[]]$PowerBiWorkspaces = @())
+    param([object[]]$AzureScopes = @(), [object[]]$EntraRoles = @(), [object[]]$DefenderRoles = @(), [object[]]$IntuneRoles = @(), [object[]]$PowerBiWorkspaces = @(), [object[]]$AdministrativeUnits = @())
     $out = New-Object System.Collections.Generic.List[object]
     $add = { param($kind, $id, $name, $path) if ("$id".Trim()) { $out.Add([pscustomobject]@{ key = "${kind}:$("$id".Trim().ToLowerInvariant())"; kind = $kind; kindLabel = $script:PimDiscoveryKinds[$kind]; id = "$id".Trim(); name = "$name".Trim(); path = "$path".Trim() }) } }
     foreach ($s in @($AzureScopes)) {
@@ -87,6 +88,7 @@ function ConvertTo-PimDiscoveryItems {
     foreach ($r in @($DefenderRoles)) { & $add 'defender-role' (Get-PimDiscoveryField $r 'id') (Get-PimDiscoveryField $r 'name') '' }
     foreach ($r in @($IntuneRoles)) { & $add 'intune-role' (Get-PimDiscoveryField $r 'id') (Get-PimDiscoveryField $r 'name') '' }
     foreach ($w in @($PowerBiWorkspaces)) { & $add 'powerbi-ws' (Get-PimDiscoveryField $w 'workspaceId') (Get-PimDiscoveryField $w 'workspaceName') '' }
+    foreach ($a in @($AdministrativeUnits)) { & $add 'entra-au' (Get-PimDiscoveryField $a 'id') (Get-PimDiscoveryField $a 'displayName') (Get-PimDiscoveryField $a 'description') }
     return $out.ToArray()
 }
 
@@ -97,6 +99,12 @@ function Get-PimDiscoveryProposal {
     #>
     param([Parameter(Mandatory)]$Item, [object[]]$Scopes = @())
     if ($Item.kind -in $script:PimDiscoveryRoleKinds) { return $null }
+    if ($Item.kind -eq 'entra-au') {
+        # PIM matches an AU by its DISPLAY NAME, so the definition keeps the name as it is; the tag is derived from it.
+        $tag = (("$($Item.name)".Trim() -replace '[^A-Za-z0-9._-]+', '-') -replace '-{2,}', '-').Trim('-')
+        return [pscustomobject]@{ base = 'PIM-Definitions-AU'; groupName = "$($Item.name)"; groupTag = $tag; level = $null
+            row = [ordered]@{ AUDisplayName = "$($Item.name)"; AUDescription = "$($Item.path)"; AdministrativeUnitTag = $tag } }
+    }
     if ($Item.kind -eq 'powerbi-ws') {
         $seg = ConvertTo-PimNameSegment $Item.name
         $svc = 'PowerBI'
