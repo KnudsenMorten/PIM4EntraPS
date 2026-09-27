@@ -14,6 +14,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.456 — Import brings back an admin's memberships
+
+- **Fixed: Import of an unmanaged admin now offers the admin's group memberships.** In 2.4.455 the memberships came only
+  from the drift check, which does not list the access of accounts PIM does not manage, so Import offered the account
+  alone. Import now reads the account's current PIM group memberships and offers a row to keep each one (in groups PIM
+  manages).
+- **Upgrade note:** none.
+
 ## v2.4.455 — Stop managing and re-import admins; Administrative Units in drift and Discovery
 
 - **Stop managing an admin.** On Admin accounts (and on an admin in the Access map) **Stop managing** takes the admin out of

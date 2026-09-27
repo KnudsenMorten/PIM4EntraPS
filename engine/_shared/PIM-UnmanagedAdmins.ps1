@@ -168,3 +168,26 @@ function Get-PimAdminImportMemberships {
     }
     return @($out.ToArray())
 }
+
+function ConvertTo-PimAdminImportMembershipRows {
+    <#
+      PURE (REQ-ADM-REIMPORT-1, 2.4.455 -- the drift check never lists an UNDEFINED account's memberships: the engine only
+      looks at what the store defines). The account's own PIM-for-Groups schedules -> the PIM-Assignments-Admins rows that
+      keep them: -Eligible / -Active = the Graph schedule objects (groupId, accessId, assignmentType); -TagByGroupId = the
+      group id -> PIM GroupTag of every group PIM defines. Only MEMBER schedules of PIM's own groups; an ACTIVATION is not an
+      assignment. Returns @(rows) with Action=Assign.
+    #>
+    param([object[]]$Eligible = @(), [object[]]$Active = @(), [hashtable]$TagByGroupId = @{}, [Parameter(Mandatory)][string]$Upn)
+    $out = New-Object System.Collections.Generic.List[object]; $seen = @{}
+    $take = {
+        param($s, $type)
+        $gid = "$($s.groupId)".Trim().ToLowerInvariant(); if (-not $gid -or -not $TagByGroupId.ContainsKey($gid)) { return }
+        if ("$($s.accessId)".Trim() -and "$($s.accessId)".Trim() -ine 'member') { return }
+        if ("$($s.assignmentType)" -ieq 'Activated') { return }
+        $k = "$gid|$type"; if ($seen.ContainsKey($k)) { return }; $seen[$k] = $true
+        $out.Add([pscustomobject][ordered]@{ Username = $Upn; GroupTag = "$($TagByGroupId[$gid])"; AssignmentType = $type; Action = 'Assign' })
+    }
+    foreach ($s in @($Eligible)) { if ($s) { & $take $s 'Eligible' } }
+    foreach ($s in @($Active)) { if ($s) { & $take $s 'Active' } }
+    return @($out.ToArray())
+}
