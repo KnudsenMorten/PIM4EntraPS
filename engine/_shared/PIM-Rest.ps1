@@ -739,7 +739,20 @@ function Invoke-PimGraphBatchGet {
   # send them again AS A BATCH (up to 3 rounds), and only then fall back to the single-request path. Every call that
   # was throttled or slow says so in one [graph-batch] line.
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
-  $script:PimBatchStats = @{ roundTrips = 0; throttled = 0; serverErrors = 0; retryRounds = 0; waitedSeconds = 0; singles = 0 }
+  $script:PimBatchStats = @{ roundTrips = 0; throttled = 0; serverErrors = 0; retryRounds = 0; waitedSeconds = 0; singles = 0; pacedSeconds = 0 }
+  # 🔴 PACING (2026-09-27, internal, measured in Log Analytics): the first pass fired every round-trip back to back, so once
+  # Graph started throttling, almost every later round-trip came back 429 too -- two 712-path reads per drift snapshot
+  # (group memberships, group policies) each drew ~1,240 throttled answers, ~190 single fallbacks and ~225 s. Now a
+  # round-trip that came back throttled is followed by a pause (its Retry-After, at most 10 s) before the NEXT round-trip.
+  # The pauses share a 120 s budget per call; once it is spent the reader behaves as before (never slower than unpaced).
+  $pace = {
+    param([int]$RetryAfter)
+    if ($script:PimBatchStats.pacedSeconds -ge 120) { return }
+    $p = [Math]::Min(10, [Math]::Max(1, $RetryAfter))
+    $p = [Math]::Min($p, 120 - $script:PimBatchStats.pacedSeconds)
+    $script:PimBatchStats.pacedSeconds += $p; $script:PimBatchStats.waitedSeconds += $p
+    if ($script:PimBatchSleep -is [scriptblock]) { & $script:PimBatchSleep $p } else { Start-Sleep -Seconds $p }
+  }
   $sendBatch = {
     param([int[]]$Indexes)
     $pending = New-Object System.Collections.Generic.List[int]   # throttled / missing -> retry
@@ -798,6 +811,7 @@ function Invoke-PimGraphBatchGet {
     $r = & $sendBatch -Indexes @($ofs..$last)
     foreach ($p in @($r.pending)) { $retryQueue.Add([int]$p) }
     if ($r.maxRetryAfter -gt $maxRa) { $maxRa = $r.maxRetryAfter }
+    if (@($r.pending).Count -and ($ofs + $BatchSize) -lt $n) { & $pace $r.maxRetryAfter }   # throttled: let it clear before the next
   }
   # Up to 3 rounds: wait out the throttle ONCE for the whole queue, then send the queue again in batches.
   $round = 0
@@ -814,6 +828,7 @@ function Invoke-PimGraphBatchGet {
       $r = & $sendBatch -Indexes $slice
       foreach ($p in @($r.pending)) { $retryQueue.Add([int]$p) }
       if ($r.maxRetryAfter -gt $maxRa) { $maxRa = $r.maxRetryAfter }
+      if (@($r.pending).Count -and ($o + $BatchSize) -lt $queue.Count) { & $pace $r.maxRetryAfter }
     }
   }
   # Anything still unanswered (still throttled after the rounds, or a host that does not batch): the single-request
@@ -822,8 +837,8 @@ function Invoke-PimGraphBatchGet {
   $sw.Stop()
   $st = $script:PimBatchStats
   if ($st.throttled -or $st.serverErrors -or $st.singles -or $sw.Elapsed.TotalSeconds -ge 20) {
-    Write-Host ("  [graph-batch] {0} path(s), {1} round-trip(s), {2} throttled (429), {3} server error(s), {4} retry round(s) waiting {5}s, {6} single fallback(s), {7:N1}s" -f `
-      $n, $st.roundTrips, $st.throttled, $st.serverErrors, $st.retryRounds, $st.waitedSeconds, $st.singles, $sw.Elapsed.TotalSeconds) -ForegroundColor DarkGray
+    Write-Host ("  [graph-batch] {0} path(s), {1} round-trip(s), {2} throttled (429), {3} server error(s), {4} retry round(s) waiting {5}s (paced {8}s), {6} single fallback(s), {7:N1}s" -f `
+      $n, $st.roundTrips, $st.throttled, $st.serverErrors, $st.retryRounds, $st.waitedSeconds, $st.singles, $sw.Elapsed.TotalSeconds, $st.pacedSeconds) -ForegroundColor DarkGray
   }
   return ,$results
 }

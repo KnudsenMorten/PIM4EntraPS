@@ -266,6 +266,10 @@ function Test-PimSharedPendingSatisfied {
         return $true
     }
     foreach ($r in $cands) { if (Test-PimSharedPendingRowMatch -Wanted $c.row -Stored $r -Exact $exact) { return $true } }
+    # 2.4.454: a modify that sets Action=Remove is a ONE-TIME instruction -- once carried out, the engine deletes the row
+    # (Complete-PimRemoveRows). A committed-and-applied removal then has no row left to match, and the change would hold
+    # its row locked forever when no reconcile ran between the commit and the engine (found by the §78 live case).
+    if ($c.op -eq 'modify' -and $byKey -and -not @($cands).Count -and "$(Get-PimSharedPendingField $c.row 'Action')".Trim() -ieq 'Remove') { return $true }
     return $false
 }
 

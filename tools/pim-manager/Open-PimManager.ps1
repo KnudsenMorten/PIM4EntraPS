@@ -1070,6 +1070,13 @@ function Write-PimManagerAuditEvent {
 # preflight then downgrades the matched finding to 'acknowledged' so the active
 # warning/info count drops.
 # ---------------------------------------------------------------------------
+function Add-PimManagerAuditChange {
+    # The human before/after summary on ONE event (idempotent: an event that has it keeps it).
+    param([Parameter(Mandatory)]$Event)
+    if ($Event.PSObject.Properties['change']) { return }
+    try { $Event | Add-Member -NotePropertyName change -NotePropertyValue (Get-PimAuditChangeSummary -Before $Event.before -After $Event.after -Action "$($Event.action)") -Force } catch {}
+}
+
 function Get-PimManagerAuditEvents {
     <#
       SEC-16 (§36.2) -- the READ side of the audit trail, mirroring the writer: SQL only.
@@ -1078,7 +1085,10 @@ function Get-PimManagerAuditEvents {
       `change` the same way, so Select-PimAuditEvents / ConvertTo-PimAuditCsv and the Audit tab
       work unchanged. Moving the store is not a licence to rewrite the query layer.
     #>
-    param([int]$Months = 0)
+    # -NoChange (BUG-264, 2.4.454): skip the before/after change summary -- the Audit tab needs it only for the page it shows
+    # (or for every event when it SEARCHES, since the search reads it). Measured on ig798: 1,669 events in the 3-month
+    # window, the summaries alone 2.5 s on pwsh 7 and several times that on the 5.1 Manager -- all on the ONE request loop.
+    param([int]$Months = 0, [switch]$NoChange)
     $cs = $null
     if (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) {
         try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
@@ -1089,9 +1099,11 @@ function Get-PimManagerAuditEvents {
             # Months is a WINDOW, not a page size: N months back from now, 0 = full history.
             if ($Months -gt 0) { $args['FromUtc'] = [datetime]::UtcNow.AddMonths(-$Months) }
             $evts = @(Get-PimSqlAuditEvents @args)
+            # the categoriser is resolved ONCE per call, not probed with Get-Command per event
+            $catFn = if (Get-Command Get-PimAuditCategory -ErrorAction SilentlyContinue) { ${function:Get-PimAuditCategory} } else { ${function:Resolve-PimAuditCategory} }
             foreach ($e in $evts) {
-                try { $e | Add-Member -NotePropertyName category -NotePropertyValue (Resolve-PimAuditCategory -Action "$($e.action)" -Target "$($e.target)") -Force } catch {}
-                try { $e | Add-Member -NotePropertyName change   -NotePropertyValue (Get-PimAuditChangeSummary -Before $e.before -After $e.after -Action "$($e.action)") -Force } catch {}
+                try { $e | Add-Member -NotePropertyName category -NotePropertyValue (& $catFn -Action "$($e.action)" -Target "$($e.target)") -Force } catch {}
+                if (-not $NoChange) { Add-PimManagerAuditChange -Event $e }
             }
             return @($evts)
         } catch {
@@ -7243,6 +7255,9 @@ function Invoke-Server {
 
             $started = Get-Date
             $status = 500
+            # BUG-264: opt-in (PIM_MANAGER_TRACE_REQUESTS=1, the live E2E sets it) -- the START of each request, so a request that
+            # hangs names itself; the completion line below is written only when it ends.
+            if ("$($env:PIM_MANAGER_TRACE_REQUESTS)" -eq '1') { Write-Host ("  [{0}] {1,-6} {2} ... started" -f $started.ToString('HH:mm:ss'), $ctx.Request.HttpMethod, $ctx.Request.Url.AbsolutePath) -ForegroundColor DarkGray }
             # Hosted: capture THIS request's Easy Auth principal for role resolution.
             if ($script:PimHosted) { try { $script:CurrentRequestPrincipal = Get-PimEasyAuthPrincipal -Request $ctx.Request } catch { $script:CurrentRequestPrincipal = $null } }
             try {
@@ -7255,7 +7270,9 @@ function Invoke-Server {
                 $status = 500
             }
             $ts = $started.ToString('HH:mm:ss')
-            Write-Host ("  [{0}] {1,-6} {2,-40} -> {3}" -f $ts, $ctx.Request.HttpMethod, $ctx.Request.Url.PathAndQuery, $status) -ForegroundColor DarkGray
+            # BUG-264: the loop is single-threaded, so a slow request holds every request behind it -- name its duration.
+            $took = ((Get-Date) - $started).TotalSeconds
+            Write-Host ("  [{0}] {1,-6} {2,-40} -> {3}{4}" -f $ts, $ctx.Request.HttpMethod, $ctx.Request.Url.PathAndQuery, $status, $(if ($took -ge 1) { " ({0:N1}s{1})" -f $took, $(if ($took -ge 5) { ' SLOW -- every request behind it waited' } else { '' }) } else { '' })) -ForegroundColor $(if ($took -ge 5) { 'Yellow' } else { 'DarkGray' })
             # A served request IS client activity. Long-running endpoints
             # (active-assignments took 90s on a real tenant) block the
             # single-threaded loop, so the browser's 10s heartbeats queue
@@ -8532,7 +8549,8 @@ function Handle-Request {
                 if ($mv -eq 'all' -or $mv -eq '0') { $months = 0 } else { $months = [Math]::Max(0, [int]$mv) }
             }
 
-            $events = @(Get-PimManagerAuditEvents -Months $months)
+            # BUG-264: the change summary only where it is read -- every event when searching (the search reads it), else the page.
+            $events = @(Get-PimManagerAuditEvents -Months $months -NoChange:(-not $search))
             # Category counts BEFORE search/category filtering (chips show totals).
             $counts = @{}
             foreach ($e in $events) { $c = "$($e.category)"; if ($c) { $counts[$c] = ([int]$counts[$c]) + 1 } }
@@ -8541,6 +8559,7 @@ function Handle-Request {
             $matchCount = $sorted.Count
             $skip = ($page - 1) * $pageSize
             $pageItems = @($sorted | Select-Object -Skip $skip -First $pageSize)
+            foreach ($pi in $pageItems) { Add-PimManagerAuditChange -Event $pi }
             $monthsTotalCount = [int](Get-PimManagerAuditMonthCount)
             Write-JsonResponse -Response $resp -Status 200 -Body @{
                 events       = $pageItems
@@ -10802,6 +10821,16 @@ function Handle-Request {
         # who cannot see that is the person this whole feature exists to help.
         if ($path -eq '/api/permissions-health' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
+            # 🔴 BUG-264 (live GUI E2E 2026-09-27): this check makes several Graph reads, an ARM read per subscription (up to
+            # 10) and SQL reads -- 1.8-3.7 s measured on ig798, longer cold -- on the Manager's ONE request loop, on EVERY
+            # Home load. Every request behind it waited (a wizard's data loads timed out the E2E). The answer is kept for
+            # 5 minutes; ?refresh=1 (the "Verify permissions" button) checks again at once.
+            $permRefresh = $false; try { $permRefresh = ("$($req.Url.Query)" -match '(?:^|[?&])refresh=1') } catch { }
+            if (-not $permRefresh -and $script:PimPermHealthCache -and ((Get-Date) - $script:PimPermHealthCache.at).TotalSeconds -lt 300) {
+                $cached = $script:PimPermHealthCache.body; $cached['cached'] = $true
+                Write-JsonResponse -Response $resp -Status 200 -Body $cached
+                return 200
+            }
             if (-not (Get-Command Get-PimPermissionHealth -ErrorAction SilentlyContinue)) {
                 Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'permission-health module not loaded'; hint = 'engine/_shared/PIM-PermissionHealth.ps1 is missing from this build' }
                 return 501
@@ -10930,7 +10959,7 @@ function Handle-Request {
                            ". Grant the missing permission to the engine identity; a new grant can take up to ~30 minutes to reach its token. " +
                            "Jobs > Engine logs & errors lists every item. (Manager identity check: $($health.headline))"
             }
-            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+            $permBody = ([ordered]@{
                 ok         = $hOk
                 severity   = $hSev
                 headline   = $hHead
@@ -10951,7 +10980,11 @@ function Handle-Request {
                 identities = @($identities)
                 connectors = @(Get-PimWorkloadConnectorRequirements | ForEach-Object { [ordered]@{ connector="$($_.connector)"; surface="$($_.surface)"; model="$($_.model)"; tier="$($_.tier)"; grant="$($_.grant)" } })
                 checkedUtc = (Get-Date).ToUniversalTime().ToString('o')
+                cached     = $false
             })
+            # an UNREADABLE check is not cached: the next load tries again
+            if ([bool]$readable) { $script:PimPermHealthCache = @{ at = (Get-Date); body = $permBody } } else { $script:PimPermHealthCache = $null }
+            Write-JsonResponse -Response $resp -Status 200 -Body $permBody
             return 200
         }
 
