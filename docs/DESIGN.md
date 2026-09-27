@@ -633,6 +633,18 @@ top of the engine delta — it does NOT reimplement reconciliation.**
   missing/changed drift. Removing an `extra` is **refused** (`409`, nothing queued): a scheduled
   reconcile never prunes, so such an item is revoked through the queued revoke path, or given a
   desired row if it should stay. The request is audited as `governance.drift.remediate.queued`.
+- **Delete / Keep / Ignore an item (2.4.453, REQ-DRIFT-2).** Each `extra` item in the stored check carries what can be done
+  with it, derived from the live row the plan carried (`Get-PimDriftExtraActions`): `revoke` (the row `POST /api/revoke`
+  takes — a PIM-for-Groups membership, an Entra role at its scope, or an eligible Azure role) and `keep` (the desired row
+  that would define it: `PIM-Assignments-Admins`, `-Groups` or `-Roles-Groups`). When a row cannot be built, the item says
+  why instead (an active Azure role has no assignment id in the live read). **Delete** runs the revoke preview and then
+  the revoke with a justification, so every revoke safeguard applies and the removal is queued for commit; **Keep** stages
+  the row into the pending changes for Review & commit; **Ignore** is one click and **Re-add** undoes it. One item or the
+  ticked items.
+- **The drift mail cadence (2.4.453).** The drift alert mail goes out once per cadence (`pim.Settings` `DriftAlertCadence`:
+  daily, weekly, monthly — the default — or quarterly; `PUT /api/drift/settings`, SuperAdmin, audited). The job records
+  each send in `DriftAlertState` and sends again only when the cadence has passed (`Test-PimDriftAlertDue`, an hour of
+  slack); a change in between waits for the next mail. Mid-rollout drift is still held (settling).
   (Before v2.4.370 the handler ran the engine inside the web process.) Detected drift also raises
   the `drift` Manager alert.
 
@@ -876,7 +888,7 @@ apply. They run in a fixed dependency **order**:
 | 67 | WorkloadConnectors | `PIM-Assignments-Workloads` | the remaining workload roles through the connector framework (§15) |
 | 70 | GroupsPolicies | definition `PolicyTemplate` | per-group PIM for Groups **member and owner** policy (approval, MFA/justification, durations, notifications) |
 | 75 | EntraRolePolicies | `PIM-Assignments-Roles-{Groups,AUs}` | directory-role PIM policy from the policy template |
-| 80 | AccessReviews | definition `ReviewCycle` | per-group access-review schedule (reviewers = owners) |
+| 80 | AccessReviews | — | **retired 2.4.453**: no longer creates per-group Entra reviews (access is reviewed per department) |
 | 90 | AdminOffboarding | `Account-Definitions-Admins` | auto-disable on its own schedule: disable, revoke sessions, remove delegations, notify — and stop. The account is never deleted (see §6.2, §17.10) |
 | 92 | GroupRetirement | `PIM-Definitions-*` | retires a group whose definition is marked for retirement (`Lifecycle=Retire`) — see the note below |
 | 95 | HybridAdProvisioning | `Account-Definitions-Admins` (AD platform) | **PLANS** on-prem AD accounts + gMSA/sMSA; on-prem write is hybrid-worker-only (see §6.5) |
@@ -1511,13 +1523,23 @@ how long a round stays open, the reviewers (empty = the department owner), 1 or 
 any Remove wins) or **serial** (approver 1 first, approver 2 has the final word), and the reminders (default a reminder every
 7 days, three times). The job `access-review-cycle` checks every six hours: it starts a round for each department that is
 due and has none open, listing every admin account of the department with the access it holds; it reminds reviewers after
-the due date; after the last reminder it tells the alert recipients and closes the round, and undecided people keep their
-access. Reviewers decide **Keep** or **Remove** per person on **My people**; a senior administrator can decide any open person
-on the Access reviews page. A Remove raises the offboard approval request that My people uses, so an administrator
-approves it and the engine carries it out. Microsoft Entra access reviews are not used for this, because they cannot
+the due date; after the last reminder it tells the alert recipients and closes the round. What happens to undecided people
+is the rule's **Not answered** setting: **keep access** (the default) or **request removal**, which raises an offboard approval
+request for each undecided person (one per person; a request already pending is reused, and a request that cannot be raised
+keeps the round open so the next run tries again). Reviewers decide **Keep** or **Remove** per person on **My people**; a
+senior administrator can decide any open person on the Access reviews page. A Remove with nothing ticked raises the offboard
+approval request that My people uses, so an administrator approves it and the engine carries it out. A Remove with access
+**ticked** (2.4.453) removes only those memberships: their assignment rows are staged as removals in the shared pending
+changes, an administrator commits them under Review & commit, and the account keeps the rest. With two parallel approvers
+the removals are combined and a whole-account Remove wins; with serial approvers the second approver's choice counts. Microsoft Entra access reviews are not used for this, because they cannot
 review one department's people across several groups without the Entra ID Governance licence, and repeat weekly at the
 fastest. The same job mails the alert recipients every day while any department has no owner.
-**Creating the reviews (2.4.421/2.4.422).** The `AccessReviews` engine provider creates one review definition per group
+**Per-group Entra reviews — retired in 2.4.453.** Access is reviewed per department (above); a group row's `ReviewCycle` no
+longer creates anything. The `AccessReviews` provider stays registered but desires, reads, creates and removes nothing.
+Reviews it created earlier stay in Entra with their decision history until an administrator removes them. The history
+below describes what it did from 2.4.421 to 2.4.452, and why `AccessReview.ReadWrite.All` is still granted (the Access
+reviews page reads and decides the reviews that exist in Entra).
+**Creating the reviews (2.4.421/2.4.422, retired 2.4.453).** The `AccessReviews` engine provider created one review definition per group
 whose definition row carries a `ReviewCycle`. It uses `POST /identityGovernance/accessReviews/definitions`, with the
 group's transitive members as the scope and the row's owners as reviewers. Microsoft documents exactly one application
 permission for that call, **`AccessReview.ReadWrite.All`**, so it is in the runtime grant map (`_PimSetupShared.ps1`),

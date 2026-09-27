@@ -7937,8 +7937,8 @@
 
   // ----- REQ-AR-2 (operator 2026-09-26): access reviews PER DEPARTMENT, driven by review rules ----------------------------
   // A default rule + per department: Default | Off (opt out) | Own rule. A rule: every N days, open N days, reviewers,
-  // 1 or 2 approvers (parallel = both at once, the first decision counts; serial = approver 1, then approver 2), undecided =
-  // keep. The job 'access-review-cycle' starts one review per group of each department whose rule is due.
+  // 1 or 2 approvers (parallel = both decide, any Remove wins; serial = approver 1, then approver 2), undecided = keep or
+  // request removal (2.4.453). The job 'access-review-cycle' starts one review per department whose rule is due.
   function arRuleFields(pfx, r, disabled) {
     const esc = escapeHtml, d = disabled ? ' disabled' : '';
     const v = (k, dflt) => (r && r[k] != null && r[k] !== '') ? r[k] : dflt;
@@ -7946,12 +7946,13 @@
       '<label style="margin-right:10px;">open <input id="' + pfx + 'Dur" type="number" min="1" max="180" style="width:55px;" value="' + esc(String(v('durationDays', 14))) + '"' + d + '> day(s)</label>' +
       '<label style="margin-right:10px;">approvers <select id="' + pfx + 'App"' + d + '><option value="1"' + (String(v('approvers', 1)) === '1' ? ' selected' : '') + '>1</option><option value="2"' + (String(v('approvers', 1)) === '2' ? ' selected' : '') + '>2</option></select></label>' +
       '<label style="margin-right:10px;"><select id="' + pfx + 'Mode"' + d + '><option value="parallel"' + (v('mode', 'parallel') === 'parallel' ? ' selected' : '') + '>parallel</option><option value="serial"' + (v('mode', 'parallel') === 'serial' ? ' selected' : '') + '>serial</option></select></label>' +
+      '<label style="margin-right:10px;">not answered: <select id="' + pfx + 'Und"' + d + '><option value="keep"' + (v('undecided', 'keep') !== 'remove' ? ' selected' : '') + '>keep access</option><option value="remove"' + (v('undecided', 'keep') === 'remove' ? ' selected' : '') + '>request removal</option></select></label>' +
       '<label>reviewers <input id="' + pfx + 'Rev" style="width:320px;" placeholder="UPN, UPN (empty = the department owner)" value="' + esc(asList(v('reviewers', [])).join(', ')) + '"' + d + '></label>';
   }
   function arReadRule(pfx) {
     const g = (id) => document.getElementById(pfx + id);
     return { cadenceDays: Number(g('Cad').value), durationDays: Number(g('Dur').value), approvers: Number(g('App').value), mode: g('Mode').value,
-             reviewers: String(g('Rev').value || '').split(/[,;\s]+/).map(s => s.trim()).filter(Boolean), undecided: 'keep' };
+             reviewers: String(g('Rev').value || '').split(/[,;\s]+/).map(s => s.trim()).filter(Boolean), undecided: (g('Und') && g('Und').value === 'remove') ? 'remove' : 'keep' };
   }
   async function renderAccessReviewRules() {
     const host = document.getElementById('arRulesBody');
@@ -7964,7 +7965,8 @@
     const h = [];
     h.push('<details id="arRules" open style="border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;margin-bottom:10px;"><summary style="font-weight:600;font-size:13px;cursor:pointer;">Review rules -- one review per department</summary>');
     h.push('<div style="color:#57606a;font-size:11.5px;margin:4px 0 8px;">Each department is reviewed on its own cadence: every group of the department gets a review for the rule\'s reviewers. ' +
-      'A member nobody decides on <b>keeps</b> their access. <b>Parallel</b> = both approvers at once (the first decision counts); <b>serial</b> = approver 1, then approver 2.</div>');
+      'A person nobody decides on <b>keeps</b> their access, unless the rule says <b>request removal</b> -- then an unanswered review raises a removal request a PIM administrator approves. ' +
+      '<b>Parallel</b> = both approvers decide (any Remove wins); <b>serial</b> = approver 1, then approver 2. A reviewer can remove the whole account or only the access they tick.</div>');
     h.push('<div style="font-size:12px;margin-bottom:6px;"><label style="margin-right:12px;"><input type="checkbox" id="arDefOn"' + (def.enabled ? ' checked' : '') + (dis ? ' disabled' : '') + '> <b>Access reviews on</b></label> Default rule: ' + arRuleFields('arDef', def, dis) + '</div>');
     h.push('<table class="grid" style="font-size:12px;width:100%;"><thead><tr><th>Department</th><th>Rule</th><th>Own rule</th><th>Last started</th></tr></thead><tbody>');
     for (const name of asList(d.departments)) {
@@ -8007,7 +8009,8 @@
 
   // REQ-AR-2: the department review campaigns. mode 'reviewer' (My people): the open campaigns the signed-in person reviews,
   // with Keep / Remove where it is their turn. mode 'admin' (Access reviews): every campaign; a SuperAdmin can OVERRIDE a
-  // pending person. A Remove raises the offboard approval request (a PIM administrator approves; nothing changes before).
+  // pending person. A Remove raises the offboard approval request (a PIM administrator approves; nothing changes before);
+  // a Remove with access TICKED stages the removal of only those memberships (Review & commit) and keeps the account.
   async function renderReviewCampaigns(hostId, mode) {
     const host = document.getElementById(hostId);
     if (!host || !isServer) return;
@@ -8026,13 +8029,22 @@
         (Number(c.remindersSent) ? ' -- reminders ' + esc(String(c.remindersSent)) + '/' + esc(String(c.reminders)) : '') + '</div>');
       h.push('<table class="grid" style="font-size:12px;width:100%;"><thead><tr><th>Person</th><th>Access</th><th>State</th><th></th></tr></thead><tbody>');
       for (const it of asList(c.items)) {
-        const st = open ? (it.state === 'pending' ? 'waiting for ' + esc(asList(it.awaiting).join(', ')) : '<b>' + esc(it.state) + '</b> (' + esc(it.by || '') + ')') : esc(it.outcome || it.state);
+        const partial = asList(it.removeAccess);
+        const stWord = (s) => esc(s) + (String(s).indexOf('remove') === 0 && partial.length ? ' only ' + esc(partial.join(', ')) : '');
+        const st = open ? (it.state === 'pending' ? 'waiting for ' + esc(asList(it.awaiting).join(', ')) : '<b>' + stWord(it.state) + '</b> (' + esc(it.by || '') + ')') : stWord(it.outcome || it.state);
         let btn = '';
-        if (open && it.state === 'pending') {
+        const canAct = open && it.state === 'pending' && (it.myTurn || (mode === 'admin' && can));
+        if (canAct) {
           if (it.myTurn) btn = '<button class="arDecide primary" data-id="' + esc(c.id) + '" data-user="' + esc(it.user) + '" data-dec="keep">Keep</button> <button class="arDecide" data-id="' + esc(c.id) + '" data-user="' + esc(it.user) + '" data-dec="remove">Remove</button>';
-          else if (mode === 'admin' && can) btn = '<button class="arOverride" data-id="' + esc(c.id) + '" data-user="' + esc(it.user) + '" data-dec="keep">Override: keep</button> <button class="arOverride" data-id="' + esc(c.id) + '" data-user="' + esc(it.user) + '" data-dec="remove">Override: remove</button>';
+          else btn = '<button class="arOverride" data-id="' + esc(c.id) + '" data-user="' + esc(it.user) + '" data-dec="keep">Override: keep</button> <button class="arOverride" data-id="' + esc(c.id) + '" data-user="' + esc(it.user) + '" data-dec="remove">Override: remove</button>';
         }
-        h.push('<tr><td><b>' + esc(it.displayName || it.user) + '</b><div style="color:#57606a;font-size:11px;">' + esc(it.user) + '</div></td><td style="font-size:11px;">' + (asList(it.access).map(esc).join('<br>') || '<span style="color:#57606a;">none</span>') + '</td><td>' + st + '</td><td style="white-space:nowrap;">' + btn + '</td></tr>');
+        // REQ-AR-2 (2.4.453): tick access to remove ONLY that membership; Remove with nothing ticked removes the whole account.
+        const rows = asList(it.accessRows).length ? asList(it.accessRows) : asList(it.access).map(l => ({ groupTag: String(l).replace(/\s*\([^)]*\)\s*$/, '').trim(), label: l }));
+        const accHtml = rows.map(a => canAct
+          ? '<label style="display:block;"><input type="checkbox" class="arAcc" data-id="' + esc(c.id) + '" data-user="' + esc(it.user) + '" value="' + esc(a.groupTag || '') + '"> ' + esc(a.label || a.groupTag || '') + '</label>'
+          : esc(a.label || a.groupTag || '')).join(canAct ? '' : '<br>');
+        h.push('<tr><td><b>' + esc(it.displayName || it.user) + '</b><div style="color:#57606a;font-size:11px;">' + esc(it.user) + '</div></td><td style="font-size:11px;">' + (accHtml || '<span style="color:#57606a;">none</span>') +
+          (canAct && rows.length ? '<div style="color:#57606a;font-size:10.5px;">tick to remove only that access</div>' : '') + '</td><td>' + st + '</td><td style="white-space:nowrap;">' + btn + '</td></tr>');
       }
       h.push('</tbody></table>');
     }
@@ -8041,8 +8053,13 @@
     const act = async (bt, override) => {
       const dec = bt.getAttribute('data-dec');
       switch (dec) { case 'keep': case 'remove': break; default: return; }
-      if (dec === 'remove' && !confirm('Remove ' + bt.getAttribute('data-user') + '? A PIM administrator approves the removal before anything changes.')) return;
-      try { const r = await api('POST', '/api/access-review-campaigns/decide', { id: bt.getAttribute('data-id'), user: bt.getAttribute('data-user'), decision: dec, override });
+      const who = bt.getAttribute('data-user'), cid = bt.getAttribute('data-id');
+      const ticked = Array.from(host.querySelectorAll('.arAcc')).filter(x => x.checked && x.getAttribute('data-id') === cid && x.getAttribute('data-user') === who).map(x => x.value).filter(Boolean);
+      if (dec === 'keep' && ticked.length) { alert('Untick the access first -- ticked access is for Remove.'); return; }
+      if (dec === 'remove' && !confirm(ticked.length
+          ? 'Remove only ' + ticked.join(', ') + ' from ' + who + '? The removal is staged; an administrator carries it out on Review & commit. The account stays.'
+          : 'Remove ' + who + ' (the whole account)? A PIM administrator approves the removal before anything changes.')) return;
+      try { const r = await api('POST', '/api/access-review-campaigns/decide', { id: cid, user: who, decision: dec, override, access: ticked });
             sharedToast((r && r.note) || 'Recorded'); }
       catch (e) { alert('Not recorded: ' + ((e && e.body && e.body.error) || (e && e.message) || e)); }
       renderReviewCampaigns(hostId, mode);
@@ -8401,6 +8418,10 @@
       (d.stale ? '<span style="color:#9a6700;font-size:11.5px;">stale &mdash; check the drift-snapshot job on the Jobs page</span>' : '') +
       '<span style="flex:1 1 auto;"></span>' +
       (items.length ? (exportBarHtml('govDrift') + ' ') : '') +
+      // REQ-DRIFT-2: how often the drift MAIL goes out (the check itself keeps running every few hours).
+      '<label style="font-size:12px;color:#57606a;" title="How often the drift alert mail is sent. A change in the drift between two mails waits for the next one; this page always shows the latest check.">Drift mail: <select id="driftCadence"' + (d.canSetCadence ? '' : ' disabled') + '>' +
+        asList(d.alertCadences && d.alertCadences.length ? d.alertCadences : ['daily', 'weekly', 'monthly', 'quarterly']).map(c => '<option value="' + esc(c) + '"' + (c === (d.alertCadence || 'monthly') ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select>' +
+        (d.alertLastMailUtc ? ' <span style="font-size:11px;">last sent ' + esc(driftFmtUtc(d.alertLastMailUtc)) + '</span>' : '') + '</label> ' +
       (canApply ? '<button id="driftCheckNow" title="Queues a new drift check for the scheduler. This page stays usable; the result appears here in a few minutes.">Check now</button>' : '') +
       '<span id="driftCheckMsg" style="color:#57606a;font-size:11.5px;">' + esc(note || '') + '</span></div>');
     h.push('<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">For every area the engine manages, this compares what PIM says should exist (<b>desired</b>) with what the tenant holds (<b>live</b>): ' +
@@ -8497,7 +8518,15 @@
             ((it.type === 'changed' && it.detail) ? '<div style="color:#9a6700;font-size:11px;">' + esc(it.detail) + '</div>' : '') +
             ((it.label && it.label !== it.key) ? '<div style="color:#8c959f;font-size:10.5px;font-family:Consolas,monospace;">' + esc(it.key) + '</div>' : '') +
             // §79.4 (operator 2026-09-25: "it should be possible to have a ignore button so findings can be ignored and not shown").
-            (canApply ? '<div><button class="driftIgnoreBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;" data-scope="' + esc(s.scope) + '" data-key="' + esc(it.key) + '" data-label="' + esc(it.label || it.key) + '" data-type="' + esc(it.type) + '" title="Hide this finding from the counts, this page and the drift mail (listed below as ignored, with your reason -- it can be undone)">Ignore</button></div>' : '') +
+            // REQ-DRIFT-2: an EXTRA can be deleted (queued revoke, with every revoke gate) or kept (its desired row is staged).
+            (canApply ? '<div>' +
+              (it.type === 'extra' ? (it.revoke
+                  ? '<button class="driftDeleteBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;" data-sel="' + esc(sel) + '" title="Queue its removal (a revoke, committed on the Queue -- the engine carries it out)">Delete</button> '
+                  : '<button class="btn-sec" disabled style="font-size:10.5px;padding:1px 6px;margin-top:2px;" title="' + esc(it.revokeWhy || 'cannot be deleted from here') + '">Delete</button> ') : '') +
+              (it.type === 'extra' ? (it.keep
+                  ? '<button class="driftKeepBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;" data-sel="' + esc(sel) + '" title="Keep it: stage the PIM row that defines it (' + esc(it.keep.base) + '), so PIM manages it -- Review &amp; commit">Keep</button> '
+                  : '<button class="btn-sec" disabled style="font-size:10.5px;padding:1px 6px;margin-top:2px;" title="' + esc(it.keepWhy || 'cannot be kept from here') + '">Keep</button> ') : '') +
+              '<button class="driftIgnoreBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;" data-scope="' + esc(s.scope) + '" data-key="' + esc(it.key) + '" data-label="' + esc(it.label || it.key) + '" data-type="' + esc(it.type) + '" title="Hide this finding from the counts, this page and the drift mail (listed below as ignored -- Re-add brings it back)">Ignore</button></div>' : '') +
             '</td></tr>');
         });
         det.push('</tbody></table>');
@@ -8517,11 +8546,15 @@
     if (canApply && applicable.length) {
       h.push('<div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">' +
         '<button id="govDriftApply">Apply now (correct selected drift)</button>' +
+        '<button id="govDriftDelete" class="btn-sec">Delete ticked extras</button>' +
+        '<button id="govDriftKeep" class="btn-sec">Keep ticked extras</button>' +
+        '<button id="govDriftIgnore" class="btn-sec">Ignore ticked</button>' +
         '<span id="govDriftMsg" style="color:#57606a;font-size:11.5px;"></span></div>' +
-        // BUG-205: Apply now QUEUES an engine reconcile (the Manager never runs the engine). The reconcile
-        // never prunes, so an EXTRA is not removed from here -- it is revoked from Maintenance & Revoke.
+        // BUG-205: Apply now QUEUES an engine reconcile (the Manager never runs the engine). The reconcile never prunes, so an
+        // EXTRA is not removed by it. REQ-DRIFT-2: Delete queues the extra's REVOKE (the revoke path, every gate), Keep stages
+        // the desired row that defines it.
         '<div style="color:#57606a;font-size:11px;margin-top:4px;">Apply now <b>queues</b> an engine reconcile: missing/changed items are created/updated on the engine&rsquo;s next run (it is started now). ' +
-        'An <b>extra</b> is never removed from here &mdash; revoke it from <b>Reviews &amp; controls &rsaquo; Review current delegations</b> (a queued, audited action), or add its desired row if it should stay. The engine honours the approval gate &mdash; this never bypasses it.</div>');
+        'For an <b>extra</b>: <b>Delete</b> queues its revoke (commit it on the Queue; the engine removes it), <b>Keep</b> stages the PIM row that defines it (Review &amp; commit), <b>Ignore</b> hides it. The engine honours the approval gate &mdash; this never bypasses it.</div>');
     } else if (!canApply && items.length) {
       h.push('<div style="color:#8c959f;font-size:11.5px;margin-top:6px;">Admin role required to apply remediation.</div>');
     }
@@ -8531,17 +8564,37 @@
       h.push('<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:12px;"><b>' + ignored.length + ' ignored finding(s)</b> &mdash; hidden from the counts, this page and the drift mail</summary>' +
         '<table class="grid" style="font-size:11.5px;margin:4px 0;"><thead><tr><th>Area</th><th>Drift</th><th>What</th><th>Why ignored</th><th>By / when</th>' + (canApply ? '<th></th>' : '') + '</tr></thead><tbody>' +
         ignored.map(g => '<tr><td>' + esc(g.scope) + '</td><td>' + esc(g.type) + '</td><td>' + esc(g.label || g.key) + '</td><td>' + esc(g.reason) + '</td><td>' + esc(g.by) + '<br><span style="color:#8c959f;">' + esc(String(g.atUtc || '').replace('T', ' ').slice(0, 16)) + '</span></td>' +
-          (canApply ? '<td><button class="driftUnignoreBtn btn-sec" style="font-size:10.5px;padding:1px 6px;" data-scope="' + esc(g.scope) + '" data-key="' + esc(g.key) + '">Un-ignore</button></td>' : '') + '</tr>').join('') +
+          (canApply ? '<td><button class="driftUnignoreBtn btn-sec" style="font-size:10.5px;padding:1px 6px;" data-scope="' + esc(g.scope) + '" data-key="' + esc(g.key) + '" title="Show it again: back in the counts, this page and the drift mail">Re-add</button></td>' : '') + '</tr>').join('') +
         '</tbody></table></details>');
     }
     body.innerHTML = h.join('');
+    // REQ-DRIFT-2: Ignore is ONE click (no reason); who and when are recorded, and Re-add brings it back.
     body.querySelectorAll('.driftIgnoreBtn').forEach(b => b.onclick = async (ev) => {
       ev.stopPropagation();
-      const why = (window.prompt('Ignore this drift finding?\n\n' + b.dataset.label + '\n\nIt is hidden from the counts, this page and the drift mail for everyone until someone un-ignores it. Reason (required):', '') || '').trim();
-      if (why.length < 3) return;
-      try { await api('PUT', '/api/drift/ignore', { scope: b.dataset.scope, key: b.dataset.key, label: b.dataset.label, type: b.dataset.type, reason: why }); renderDrift(); }
+      try { await api('PUT', '/api/drift/ignore', { scope: b.dataset.scope, key: b.dataset.key, label: b.dataset.label, type: b.dataset.type }); renderDrift(); }
       catch (e) { alert('The finding was NOT ignored: ' + e.message); }
     });
+    const bySel = {};
+    scopes.forEach(s => asList(s.items).forEach(it => { bySel[s.scope + '|' + it.key] = Object.assign({ scope: s.scope }, it); }));
+    const tickedSel = () => Array.from(body.querySelectorAll('.govDriftSel')).filter(c => c.checked).map(c => c.getAttribute('data-sel'));
+    const say = (t, bad) => { const m = document.getElementById('govDriftMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#9a6700'; } else if (bad) alert(t); else sharedToast(t); };
+    body.querySelectorAll('.driftDeleteBtn').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); driftDeleteExtras([bySel[b.dataset.sel]], say); });
+    body.querySelectorAll('.driftKeepBtn').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); driftKeepExtras([bySel[b.dataset.sel]], say); });
+    const bulkDel = document.getElementById('govDriftDelete'), bulkKeep = document.getElementById('govDriftKeep'), bulkIgn = document.getElementById('govDriftIgnore');
+    if (bulkDel) bulkDel.onclick = () => { const its = tickedSel().map(k => bySel[k]).filter(x => x && x.type === 'extra' && x.revoke); if (!its.length) { say('Tick at least one extra that can be deleted.', true); return; } driftDeleteExtras(its, say); };
+    if (bulkKeep) bulkKeep.onclick = () => { const its = tickedSel().map(k => bySel[k]).filter(x => x && x.type === 'extra' && x.keep); if (!its.length) { say('Tick at least one extra that can be kept.', true); return; } driftKeepExtras(its, say); };
+    if (bulkIgn) bulkIgn.onclick = async () => {
+      const its = tickedSel().map(k => bySel[k]).filter(Boolean);
+      if (!its.length) { say('Tick at least one item.', true); return; }
+      let n = 0;
+      for (const it of its) { try { await api('PUT', '/api/drift/ignore', { scope: it.scope, key: it.key, label: it.label || it.key, type: it.type }); n++; } catch (e) { say('Stopped after ' + n + ': ' + e.message, true); break; } }
+      renderDrift({ note: 'Ignored ' + n + ' item(s)' });
+    };
+    const cadSel = document.getElementById('driftCadence');
+    if (cadSel) cadSel.onchange = async () => {
+      try { await api('PUT', '/api/drift/settings', { alertCadence: cadSel.value }); sharedToast('The drift mail now goes out ' + cadSel.value); }
+      catch (e) { alert('Not saved: ' + ((e && e.body && e.body.error) || e.message)); renderDrift(); }
+    };
     body.querySelectorAll('.driftUnignoreBtn').forEach(b => b.onclick = async (ev) => {
       ev.stopPropagation();
       try { await api('DELETE', '/api/drift/ignore?scope=' + encodeURIComponent(b.dataset.scope) + '&key=' + encodeURIComponent(b.dataset.key)); renderDrift(); }
@@ -8606,6 +8659,53 @@
       }
       finally { apply.disabled = false; }
     };
+  }
+
+  // REQ-DRIFT-2: DELETE an extra = queue its REVOKE through POST /api/revoke -- the same gates as Review current delegations
+  // (Pro, break-glass skipped, count confirmation, the approval threshold). Queued, committed on the Queue, run by the engine.
+  async function driftDeleteExtras(its, say) {
+    const rows = its.filter(it => it && it.revoke).map(it => Object.assign({ id: it.scope + '|' + it.key }, it.revoke));
+    if (!rows.length) return;
+    const why = (window.prompt('Delete ' + rows.length + ' extra item(s)?\n\n' + its.slice(0, 8).map(it => '- ' + (it.label || it.key)).join('\n') + (its.length > 8 ? '\n...' : '') +
+      '\n\nEach is queued as a revoke: commit it on the Queue and the engine removes it. Justification (required, recorded with the revoke):', '') || '').trim();
+    if (!why) return;
+    let pv;
+    try { pv = await api('POST', '/api/revoke', { rows, preview: true }); }
+    catch (e) { say('Not queued: ' + ((e && e.body && e.body.error) || e.message), true); return; }
+    if (pv && pv.approvalRequired) { say('Not queued: ' + rows.length + ' removal(s) is over the approval threshold -- use Reviews & controls > Review current delegations, which raises the approval request.', true); return; }
+    try {
+      const r = await api('POST', '/api/revoke', { rows, justification: why, confirmCount: (pv && pv.confirmRequired) ? pv.toRevokeCount : undefined });
+      const q = asList(r && r.results).filter(x => x && x.ok).length;
+      const sk = Number(r && r.skippedCount) || 0;
+      say('Queued ' + q + ' removal(s)' + (sk ? ', ' + sk + ' skipped (break-glass)' : '') + ' -- commit them on the Queue; the drift clears after the engine ran and the next check.');
+    } catch (e) { say('Not queued: ' + ((e && e.body && e.body.error) || e.message), true); }
+  }
+  // REQ-DRIFT-2: KEEP an extra = stage the PIM row that defines it (the Discovery "Create" path): it shows under Review &
+  // commit, and once committed PIM manages it and the drift is gone.
+  async function driftKeepExtras(its, say) {
+    const stage = its.filter(it => it && it.keep && it.keep.base && it.keep.row);
+    if (!stage.length) return;
+    let added = 0, had = 0;
+    for (const base of Array.from(new Set(stage.map(s => s.keep.base)))) {
+      const data = await loadCsv(base);
+      ensurePending(base, data.header, data.rows);
+      const pc = pendingChanges[base];
+      const keyOf = (r) => base === 'PIM-Assignments-Groups'
+        ? [r.TargetGroupTag, r.SourceGroupTag, r.AssignmentType].map(v => String(v || '').toLowerCase()).join('|')
+        : base === 'PIM-Assignments-Roles-Groups'
+          ? [r.GroupTag, r.RoleDefinitionName, r.AssignmentType].map(v => String(v || '').toLowerCase()).join('|')
+          : [r.Username, r.GroupTag, r.AssignmentType].map(v => String(v || '').toLowerCase()).join('|');
+      const have = new Set(pc.rows.map(keyOf));
+      for (const s of stage.filter(x => x.keep.base === base)) {
+        const row = {}; pc.header.forEach(h => { row[h] = ''; });
+        Object.keys(s.keep.row).forEach(k => { row[k] = s.keep.row[k]; if (pc.header.indexOf(k) < 0) pc.header.push(k); });
+        if (have.has(keyOf(row))) { had++; continue; }
+        pc.rows.push(row); have.add(keyOf(row)); added++;
+      }
+    }
+    markBadges();   // persists the draft and shares it (Review & commit)
+    try { valRevalidateAfterFix(); } catch (_) { }
+    say('Staged ' + added + ' row(s)' + (had ? ' (' + had + ' already there)' : '') + ' -- review and commit them under Review & commit; the drift clears after the next check.');
   }
 
   function driftWireCheckNow(d) {

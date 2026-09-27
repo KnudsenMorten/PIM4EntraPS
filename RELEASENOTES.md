@@ -14,6 +14,27 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.453 — Remove one access in a review, act on configuration drift, and a drift mail on your schedule
+
+- **A reviewer can remove one access instead of the whole account.** In a department access review, tick the access a
+  person no longer needs and choose Remove: only those memberships are staged for removal (an administrator carries them
+  out under Review & commit) and the account keeps the rest. Remove with nothing ticked still removes the whole account
+  through the offboarding approval, as before. With two approvers in parallel, both removals are combined; a whole-account
+  Remove wins.
+- **Unanswered reviews can request removal.** A review rule now has "Not answered: keep access / request removal". With
+  request removal, every person still undecided when the reminders are spent gets an offboarding approval request that a
+  PIM administrator approves or denies. The default is unchanged: undecided people keep their access.
+- **Access reviews are only per department.** A group row's review cycle no longer creates a Microsoft Entra access review
+  per group. Reviews that were created earlier are left in place, with their history, until you remove them in Entra.
+- **Configuration drift: Delete, Keep or Ignore.** On the Drift page, an extra item (in the tenant, not in PIM) can be
+  **deleted** (its removal is queued with the same safeguards as Review current delegations and runs once committed) or
+  **kept** (the PIM row that defines it is staged, so PIM manages it from then on). **Ignore** is one click now, and ignored
+  items can be re-added. All three work on one item or on the ticked items.
+- **The drift mail follows a cadence.** The drift alert mail goes out monthly by default; a SuperAdmin can change it to
+  daily, weekly or quarterly on the Drift page. The drift check itself still runs every few hours and the page always shows
+  the latest result.
+- **Upgrade note:** none. Drift mail now arrives monthly unless you choose another cadence.
+
 ## v2.4.452 — Approvals are used once, and test runs are named as tests in the audit trail
 
 - **An approved policy change set is used once.** When the approved changes were applied by a run that no longer needed

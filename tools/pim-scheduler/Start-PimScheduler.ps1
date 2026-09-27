@@ -148,6 +148,9 @@ $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
 . "$shared\PIM-PendingCheck.ps1"
 # REQ-AR-2: job 'access-review-cycle' -- the per-department access review campaigns.
 . "$shared\PIM-AccessReviewCycle.ps1"
+# REQ-AR-2 remove-on-undecided: an unanswered review whose rule removes undecided people raises the offboard approval
+# request (Add-PimApprovalRequest / Get-PimApprovalRequests, pim.Settings through Get-/Set-PimSetting wired below).
+. "$shared\PIM-ApprovalGate.ps1"
 # §79.7: job 'owner-review' -- department owners confirm (Keep / Extend / Remove) their people on My people.
 . "$shared\PIM-OwnerPortal.ps1"
 

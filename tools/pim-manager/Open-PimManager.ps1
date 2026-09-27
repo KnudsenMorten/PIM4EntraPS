@@ -12005,10 +12005,10 @@ function Handle-Request {
                 $amReviewer = @($c.reviewers | ForEach-Object { "$_".ToLowerInvariant() }) -contains $me
                 if (-not $isAdmin -and -not ($amReviewer -and "$($c.status)" -eq 'open')) { continue }
                 $items = @($c.items | ForEach-Object { $s = Get-PimReviewItemState -Campaign $c -Item $_
-                    [ordered]@{ user = $_.user; displayName = $_.displayName; access = @($_.access); state = $s.state; awaiting = @($s.awaiting); by = $s.by; outcome = $_.outcome
+                    [ordered]@{ user = $_.user; displayName = $_.displayName; access = @($_.access); accessRows = @($_.accessRows); state = $s.state; awaiting = @($s.awaiting); by = $s.by; outcome = $_.outcome; removeAccess = @($s.removeAccess)
                                 myTurn = [bool](@($s.awaiting | ForEach-Object { "$_".ToLowerInvariant() }) -contains $me) } })
                 $out.Add([ordered]@{ id = $c.id; department = $c.department; status = $c.status; startedUtc = $c.startedUtc; dueUtc = $c.dueUtc; closedUtc = $c.closedUtc; closeReason = $c.closeReason
-                    approvers = $c.approvers; mode = $c.mode; reviewers = @($c.reviewers); remindersSent = $c.remindersSent; reminders = $c.reminders; escalatedUtc = $c.escalatedUtc
+                    approvers = $c.approvers; mode = $c.mode; undecided = $(if ("$($c.undecided)" -eq 'remove') { 'remove' } else { 'keep' }); reviewers = @($c.reviewers); remindersSent = $c.remindersSent; reminders = $c.reminders; escalatedUtc = $c.escalatedUtc
                     amReviewer = $amReviewer; items = @($items) })
             }
             Write-JsonResponse -Response $resp -Status 200 -Body @{ campaigns = @($out.ToArray() | Select-Object -First 60); canOverride = $isSuper; me = $me }
@@ -12020,11 +12020,15 @@ function Handle-Request {
             # REQ-AR-2: a reviewer decides Keep / Remove for one person; with override=true a SuperAdmin decides a PENDING person
             # outright. A person whose outcome becomes REMOVE raises the offboard approval request (the My people path): a PIM
             # administrator approves it and the engine executes it -- never a direct removal. Audited; CAS on the document.
+            # access = [group tags] on a Remove (operator 2026-09-26: "remove ONE membership instead of offboarding the whole
+            # account"): only those memberships go -- their PIM-Assignments-Admins rows are STAGED as removals in the shared
+            # pending changes (§79.13), and an administrator carries them out on Review & commit. The account stays.
             $role = Get-PimManagerRole
             $me = "$($role.identity)".Trim()
             $body = Read-RequestJson -Request $req
             $id = "$($body.id)".Trim(); $user = "$($body.user)".Trim(); $dec = "$($body.decision)".Trim().ToLowerInvariant(); $ovr = [bool]$body.override
-            if (-not $id -or -not $user -or $dec -notin @('keep', 'remove')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'body must be { id, user, decision: keep | remove, override? }' }; return 400 }
+            $acc = @(@($body.access) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+            if (-not $id -or -not $user -or $dec -notin @('keep', 'remove')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'body must be { id, user, decision: keep | remove, access?: [group tags, Remove only], override? }' }; return 400 }
             if ($ovr -and -not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'only a SuperAdmin can override an access review decision' }; return 403 }
             if ("$($role.role)" -eq 'None' -or -not $me) { Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'sign in first' }; return 401 }
             $cs = Get-PimManagerStoreCs
@@ -12035,7 +12039,7 @@ function Handle-Request {
                 $doc = if ("$raw".Trim()) { $raw | ConvertFrom-Json } else { $null }
                 $camp = @($doc.campaigns | Where-Object { "$($_.id)" -eq $id })[0]
                 if (-not $camp) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "no review '$id'" }; return 404 }
-                $res = Set-PimReviewDecision -Campaign $camp -User $user -Decision $dec -By $me -Override:$ovr
+                $res = Set-PimReviewDecision -Campaign $camp -User $user -Decision $dec -By $me -Override:$ovr -Access $acc
                 if (-not $res.ok) {
                     Write-PimManagerAuditEvent -Action $(if ($ovr) { 'accessreview.override' } else { 'accessreview.decide' }) -Target "$id/$user" -Result 'denied' -After @{ by = $me; decision = $dec; reason = $res.reason }
                     Write-JsonResponse -Response $resp -Status 409 -Body @{ error = $res.reason }; return 409
@@ -12047,13 +12051,32 @@ function Handle-Request {
             if (-not $saved) { Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'someone else was deciding at the same moment -- please try again.' }; return 409 }
             $item = @($camp.items | Where-Object { "$($_.user)".ToLowerInvariant() -eq $user.ToLowerInvariant() })[0]
             $state = Get-PimReviewItemState -Campaign $camp -Item $item
-            $hold = $null
-            if ($state.state -eq 'remove') {
+            $hold = $null; $staged = $null; $removeNote = ''
+            if ($state.state -eq 'remove' -and @($state.removeAccess).Count) {
+                # ONE membership (or several), not the account: stage the removals for Review & commit.
+                try {
+                    $mr = Get-PimReviewMembershipRows -Item $item -Tags @($state.removeAccess) -StoredRows @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Assignments-Admins')
+                    $u = Update-PimSharedPendingStore -ConnectionString $cs -Mutate {
+                        param($pdoc)
+                        $r = Add-PimReviewRemovalsToPending -Doc $pdoc -Rows @($mr.rows) -By $me
+                        $pdoc['__result'] = $r
+                        return [bool](@($r.added).Count)
+                    }
+                    if (-not $u.ok) { throw "$($u.reason)" }
+                    $staged = $u.result
+                    $parts = @()
+                    if (@($staged.added).Count -or @($staged.already).Count) { $parts += "Removal of $(@(@($staged.added) + @($staged.already)).Count) membership(s) staged -- an administrator carries it out on Review & commit; the account stays." }
+                    if (@($staged.locked).Count) { $parts += "Not staged, another administrator has a change on the same row: $(@($staged.locked | ForEach-Object { "$($_.key) ($($_.by))" }) -join ', ')." }
+                    if (@($mr.missing).Count) { $parts += "No stored assignment for: $(@($mr.missing) -join ', ') (already gone?)." }
+                    $removeNote = $parts -join ' '
+                } catch { $removeNote = "Decided Remove of $(@($state.removeAccess) -join ', '), but the removal could NOT be staged: $($_.Exception.Message)" }
+            } elseif ($state.state -eq 'remove') {
                 $hold = Request-PimManagerOffboardHold -Upn $user -What "Removal decided in the access review of $($camp.department)" -Justification "access review $id ($($state.by))" -Requestor $me -Via 'accessreview.remove'
+                $removeNote = $(if ($hold -and $hold.approvalRaised) { 'Removal requested: a PIM administrator approves it; until then nothing changes.' } else { "Decided Remove, but the removal request was not raised: $(if ($hold) { $hold.note })" })
             }
-            Write-PimManagerAuditEvent -Action $(if ($ovr) { 'accessreview.override' } else { 'accessreview.decide' }) -Target "$id/$user" -Result 'ok' -After ([ordered]@{ by = $me; decision = $dec; state = $state.state; approvalId = "$(if ($hold) { $hold.approvalId })" })
-            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; state = $state.state; awaiting = @($state.awaiting)
-                note = $(if ($state.state -eq 'remove') { $(if ($hold -and $hold.approvalRaised) { 'Removal requested: a PIM administrator approves it; until then nothing changes.' } else { "Decided Remove, but the removal request was not raised: $(if ($hold) { $hold.note })" }) } elseif ($state.state -eq 'keep') { 'Kept: they keep their access.' } else { "Recorded -- waiting for $(@($state.awaiting) -join ', ')." }) })
+            Write-PimManagerAuditEvent -Action $(if ($ovr) { 'accessreview.override' } else { 'accessreview.decide' }) -Target "$id/$user" -Result 'ok' -After ([ordered]@{ by = $me; decision = $dec; state = $state.state; removeAccess = @($state.removeAccess); approvalId = "$(if ($hold) { $hold.approvalId })"; staged = @(if ($staged) { $staged.added }) })
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; state = $state.state; awaiting = @($state.awaiting); removeAccess = @($state.removeAccess)
+                note = $(if ($state.state -eq 'remove') { $removeNote } elseif ($state.state -eq 'keep') { 'Kept: they keep their access.' } else { "Recorded -- waiting for $(@($state.awaiting) -join ', ')." }) })
             return 200
         }
         if ($path -eq '/api/access-review-rules' -and $method -eq 'GET') {
@@ -14904,8 +14927,10 @@ function Handle-Request {
             $k = Get-PimDriftIgnoreKey $iScope $iKey
             $rest = @($cur | Where-Object { (Get-PimDriftIgnoreKey "$($_.scope)" "$($_.key)") -ne $k })
             if ($method -eq 'PUT') {
+                # REQ-DRIFT-2 (operator 2026-09-26): Ignore is ONE click -- no reason asked. Who and when are still recorded and
+                # listed with the ignored findings, and Re-add brings it back.
                 $reason = "$($ib.reason)".Trim()
-                if ($reason.Length -lt 3) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'a reason is required -- an ignored finding is hidden from everyone, so say why' }; return 400 }
+                if (-not $reason) { $reason = 'ignored on the Drift page' }
                 $entry = [ordered]@{ scope = $iScope; key = $iKey; label = "$($ib.label)"; type = "$($ib.type)"; reason = $reason; by = "$((Get-PimManagerRole).identity)"; atUtc = [datetime]::UtcNow.ToString('o') }
                 $new = @($rest) + @([pscustomobject]$entry)
             } else { $new = @($rest) }
@@ -14913,6 +14938,20 @@ function Handle-Request {
             catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the ignore list was NOT saved: $($_.Exception.Message)" }; return 500 }
             Write-PimManagerAuditEvent -Action $(if ($method -eq 'PUT') { 'drift.ignore' } else { 'drift.unignore' }) -Target "$iScope|$iKey" -Result 'ok' -After @{ scope = $iScope; key = $iKey; reason = "$($ib.reason)"; count = @($new).Count }
             Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; ignored = @($new).Count }
+            return 200
+        }
+        # REQ-DRIFT-2: the drift ALERT MAIL cadence (daily | weekly | monthly | quarterly; default monthly). SuperAdmin, audited.
+        if ($path -eq '/api/drift/settings' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change how often the drift mail is sent.' }; return 403 }
+            $sb = Read-RequestJson -Request $req
+            $cad = "$($sb.alertCadence)".Trim().ToLowerInvariant()
+            if (@(Get-PimDriftAlertCadenceNames) -notcontains $cad) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "alertCadence must be one of: $(@(Get-PimDriftAlertCadenceNames) -join ', ')" }; return 400 }
+            $before = $null; try { $before = ConvertTo-PimDriftAlertCadence (Get-PimSetting -Name 'DriftAlertCadence') } catch { }
+            try { Set-PimManagerSettingObject -Name 'DriftAlertCadence' -Value $cad }
+            catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; error = "the drift mail cadence was NOT saved: $($_.Exception.Message)" }; return 503 }
+            Write-PimManagerAuditEvent -Action 'drift.alertCadence.save' -Target $script:PimInstanceName -Before $before -After $cad
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; alertCadence = $cad }
             return 200
         }
         if ($path -eq '/api/drift' -and $method -eq 'GET') {
@@ -14929,6 +14968,12 @@ function Handle-Request {
             }
             try {
                 $body = Get-PimDriftCached -QueueRefresh:$driftRefresh -Reason 'manager-refresh'
+                # REQ-DRIFT-2: how often the drift mail goes out, and when it last did.
+                $dCad = 'monthly'; $dLast = $null
+                try { $dCad = ConvertTo-PimDriftAlertCadence (Get-PimSetting -Name 'DriftAlertCadence') } catch { }
+                try { $dSt = Get-PimSetting -Name 'DriftAlertState'; if ($dSt -is [string] -and "$dSt".Trim()) { $dSt = $dSt | ConvertFrom-Json }; if ($dSt) { $dLast = $dSt.lastMailUtc } } catch { }
+                $body['alertCadence'] = $dCad; $body['alertCadences'] = @(Get-PimDriftAlertCadenceNames); $body['alertLastMailUtc'] = $dLast
+                $body['canSetCadence'] = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
                 if ($driftRefresh -and $body.refreshQueued -and (Get-Command Start-PimManagerTickNow -ErrorAction SilentlyContinue)) {
                     $kick = $null
                     try { $kick = Start-PimManagerTickNow -Reason 'drift-refresh' } catch { $kick = $null }

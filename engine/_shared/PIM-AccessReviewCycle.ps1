@@ -17,22 +17,27 @@
 
     MODEL -- pim.Settings:
       'AccessReviewRules'     { default = { enabled; cadenceDays; durationDays; reviewers[]; approvers 1|2; mode parallel|serial;
-                                            undecided keep; remindEveryDays; reminders }
+                                            undecided keep|remove; remindEveryDays; reminders }
                                 departments = { '<dept>' = { off } | { <fields overriding the default> } } }
       'AccessReviewCampaigns' { campaigns = @( { id; department; status open|closed; startedUtc; dueUtc; closedUtc; closeReason;
-                                            approvers; mode; reviewers[]; remindersSent; lastReminderUtc; escalatedUtc;
-                                            items = @( { user; displayName; access[]; decisions = { '<reviewer>' = { decision; utc } };
-                                                         override = { decision; by; utc }; outcome } ) } ) }
-    DECISIONS per person (Keep | Remove):
+                                            approvers; mode; undecided; reviewers[]; remindersSent; lastReminderUtc; escalatedUtc;
+                                            items = @( { user; displayName; access[]; accessRows[] = { groupTag; type; label; username };
+                                                         decisions = { '<reviewer>' = { decision; access[]; utc } };
+                                                         override = { decision; access[]; by; utc }; outcome; removeAccess[] } ) } ) }
+    DECISIONS per person (Keep | Remove). A Remove may name ACCESS (group tags): then ONLY those memberships go -- a staged
+    removal of the PIM-Assignments-Admins rows, carried out on Review & commit. A Remove WITHOUT access removes the whole
+    account (the offboard approval request). Operator 2026-09-26: "remove ONE membership instead of offboarding the account".
       * 1 approver         -- any reviewer's decision stands.
-      * 2 approvers PARALLEL -- both decide (either order); both Keep = keep, any Remove = remove.
+      * 2 approvers PARALLEL -- both decide (either order); both Keep = keep, any Remove = remove; what is removed = the
+                              union of both Removes, and a whole-account Remove wins.
       * 2 approvers SERIAL   -- reviewer 1 decides first, then reviewer 2 (who sees reviewer 1's decision); reviewer 2 decides.
       * a SuperAdmin OVERRIDE decides the item outright.
     LIFECYCLE: a department's campaign starts when its rule is due (cadenceDays since the last START) and no campaign of it
     is open. It closes when every item is decided; when it is past dueUtc with items open, the reviewers get a reminder every
     remindEveryDays (up to 'reminders' times), then the alert recipients get the ESCALATION and the campaign closes --
-    undecided = KEEP. A Remove outcome raises the offboard approval request (a PIM administrator approves; the engine
-    executes) -- never a direct removal.
+    undecided = KEEP by default; a rule with undecided = 'remove' raises the offboard approval request for every undecided
+    person instead (operator 2026-09-26: remove-on-undecided as an option). A Remove outcome raises the offboard approval
+    request (a PIM administrator approves; the engine executes) -- never a direct removal.
 #>
 Set-StrictMode -Off
 
@@ -54,7 +59,7 @@ function ConvertTo-PimAccessReviewRule {
     $r.reviewers = @(@($r.reviewers) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
     $r.approvers = [int]"$($r.approvers)"; if ($r.approvers -notin 1, 2) { throw "access review rule: approvers must be 1 or 2 (got $($r.approvers))" }
     $r.mode = "$($r.mode)".Trim().ToLowerInvariant(); if ($r.mode -notin 'parallel', 'serial') { throw "access review rule: mode must be parallel or serial (got '$($r.mode)')" }
-    $r.undecided = "$($r.undecided)".Trim().ToLowerInvariant(); if ($r.undecided -ne 'keep') { throw "access review rule: undecided must be 'keep' (removal after a missed review is not built yet; got '$($r.undecided)')" }
+    $r.undecided = "$($r.undecided)".Trim().ToLowerInvariant(); if ($r.undecided -notin 'keep', 'remove') { throw "access review rule: undecided must be keep or remove (got '$($r.undecided)')" }
     $r.remindEveryDays = [int]"$($r.remindEveryDays)"; if ($r.remindEveryDays -lt 1 -or $r.remindEveryDays -gt 90) { throw "access review rule: remindEveryDays must be 1..90 (got $($r.remindEveryDays))" }
     $r.reminders = [int]"$($r.reminders)"; if ($r.reminders -lt 0 -or $r.reminders -gt 10) { throw "access review rule: reminders must be 0..10 (got $($r.reminders))" }
     return [pscustomobject]$r
@@ -97,13 +102,19 @@ function ConvertTo-PimUtcDate { param($V) if ($null -eq $V -or "$V" -eq '') { re
 function Get-PimDepartmentReviewPeople {
     <#
       PURE. The people of one department: every admin definition row (Account-Definitions-Admins) whose Department is it,
-      each with the access it holds (PIM-Assignments-Admins GroupTag + type). @{ user; displayName; access[] }.
+      each with the access it holds (PIM-Assignments-Admins GroupTag + type). @{ user; displayName; access[]; accessRows[] }
+      -- accessRows = @{ groupTag; type; label; username } per access (username = the row's own Username, its key), so a
+      reviewer can remove ONE membership.
     #>
     param([Parameter(Mandatory)][string]$Department, [object[]]$Admins = @(), [object[]]$Assignments = @())
     $acc = @{}
     foreach ($a in @($Assignments)) {
         $u = "$(Get-PimArField $a 'Username')".Trim().ToLowerInvariant(); $gt = "$(Get-PimArField $a 'GroupTag')".Trim()
-        if ($u -and $gt -and "$(Get-PimArField $a 'Action')" -notmatch '(?i)^remove') { if (-not $acc.ContainsKey($u)) { $acc[$u] = New-Object System.Collections.Generic.List[string] }; $t = "$(Get-PimArField $a 'AssignmentType')".Trim(); $acc[$u].Add($(if ($t) { "$gt ($t)" } else { $gt })) }
+        if ($u -and $gt -and "$(Get-PimArField $a 'Action')" -notmatch '(?i)^remove') {
+            if (-not $acc.ContainsKey($u)) { $acc[$u] = New-Object System.Collections.Generic.List[object] }
+            $t = "$(Get-PimArField $a 'AssignmentType')".Trim()
+            $acc[$u].Add([pscustomobject]@{ groupTag = $gt; type = $t; label = $(if ($t) { "$gt ($t)" } else { $gt }); username = "$(Get-PimArField $a 'Username')".Trim() })
+        }
     }
     # The assignments name the account by its UPN; an admin row may carry only the short UserName (measured on EFIF
     # 2026-09-26: 'adm-e-emaa-t1-c' vs 'adm-e-emaa-t1-c@<tenant>') -- so the access is also found by the UPN's local part.
@@ -120,7 +131,8 @@ function Get-PimDepartmentReviewPeople {
         # (a plain assignment each -- an if-EXPRESSION would unroll a one-entry list into a string)
         $lk = $k; if (-not $acc.ContainsKey($lk) -and $short) { $lk = $short.ToLowerInvariant() }
         $list = $null; if ($acc.ContainsKey($lk)) { $list = $acc[$lk] } else { $list = $byLocal[($k -split '@')[0]] }
-        $out.Add([pscustomobject]@{ user = $u; displayName = $dn; access = @(if ($null -ne $list) { $list.ToArray() }) })
+        $rows = @(if ($null -ne $list) { $list.ToArray() })
+        $out.Add([pscustomobject]@{ user = $u; displayName = $dn; access = @($rows | ForEach-Object { "$($_.label)" }); accessRows = $rows })
     }
     return @($out.ToArray() | Sort-Object user)
 }
@@ -132,60 +144,129 @@ function New-PimReviewCampaign {
     return [pscustomobject]@{
         id = "{0}-{1}" -f ($Department -replace '[^A-Za-z0-9]', '').ToLowerInvariant(), $now.ToString('yyyyMMddHHmm'); department = $Department; status = 'open'
         startedUtc = $now.ToString('o'); dueUtc = $now.AddDays([int]$Rule.durationDays).ToString('o'); closedUtc = ''; closeReason = ''
-        approvers = [int]$Rule.approvers; mode = "$($Rule.mode)"; reviewers = @($Reviewers | Select-Object -First $(if ([int]$Rule.approvers -eq 2) { 2 } else { 20 }))
+        approvers = [int]$Rule.approvers; mode = "$($Rule.mode)"; undecided = $(if ("$($Rule.undecided)" -eq 'remove') { 'remove' } else { 'keep' }); reviewers = @($Reviewers | Select-Object -First $(if ([int]$Rule.approvers -eq 2) { 2 } else { 20 }))
         remindEveryDays = [int]$Rule.remindEveryDays; reminders = [int]$Rule.reminders; remindersSent = 0; lastReminderUtc = ''; escalatedUtc = ''
-        items = @($People | ForEach-Object { [pscustomobject]@{ user = "$($_.user)"; displayName = "$($_.displayName)"; access = @($_.access); decisions = [pscustomobject]@{}; override = $null; outcome = '' } })
+        items = @($People | ForEach-Object { [pscustomobject]@{ user = "$($_.user)"; displayName = "$($_.displayName)"; access = @($_.access); accessRows = @($_.accessRows); decisions = [pscustomobject]@{}; override = $null; outcome = ''; removeAccess = @() } })
     }
 }
 
 function Get-PimReviewItemState {
     <#
-      PURE. One person's state in a campaign: @{ state = pending | keep | remove; awaiting = @(reviewers still to decide) }.
+      PURE. One person's state in a campaign: @{ state = pending | keep | remove; awaiting = @(reviewers still to decide); by;
+      removeAccess = @(group tags) }. removeAccess is set on a REMOVE only: empty = the whole account, else only those
+      memberships (PARALLEL: the union of both Removes, a whole-account Remove wins; SERIAL: reviewer 2's).
     #>
     param([Parameter(Mandatory)]$Campaign, [Parameter(Mandatory)]$Item)
+    $st = { param($s, $aw, $by, $acc) [pscustomobject]@{ state = $s; awaiting = @($aw); by = $by; removeAccess = @(if ($s -eq 'remove') { @($acc) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() } | Select-Object -Unique }) } }
     $ov = Get-PimArField $Item 'override'
-    if ($ov -and "$(Get-PimArField $ov 'decision')") { return [pscustomobject]@{ state = "$(Get-PimArField $ov 'decision')"; awaiting = @(); by = "override: $(Get-PimArField $ov 'by')" } }
+    if ($ov -and "$(Get-PimArField $ov 'decision')") { return (& $st "$(Get-PimArField $ov 'decision')" @() "override: $(Get-PimArField $ov 'by')" @(Get-PimArField $ov 'access')) }
     $revs = @($Campaign.reviewers); $dec = Get-PimArField $Item 'decisions'
-    $d = @{}; foreach ($r in $revs) { $x = Get-PimArField $dec $r.ToLowerInvariant(); if ($x -and "$(Get-PimArField $x 'decision')") { $d[$r.ToLowerInvariant()] = "$(Get-PimArField $x 'decision')" } }
+    $d = @{}; $da = @{}
+    foreach ($r in $revs) { $x = Get-PimArField $dec $r.ToLowerInvariant(); if ($x -and "$(Get-PimArField $x 'decision')") { $d[$r.ToLowerInvariant()] = "$(Get-PimArField $x 'decision')"; $da[$r.ToLowerInvariant()] = @(@(Get-PimArField $x 'access') | Where-Object { "$_".Trim() }) } }
     if ([int]$Campaign.approvers -ne 2) {
         $any = @($revs | Where-Object { $d.ContainsKey($_.ToLowerInvariant()) } | Select-Object -First 1)
-        if ($any.Count) { return [pscustomobject]@{ state = $d[$any[0].ToLowerInvariant()]; awaiting = @(); by = $any[0] } }
-        return [pscustomobject]@{ state = 'pending'; awaiting = @($revs); by = '' }
+        if ($any.Count) { $k = $any[0].ToLowerInvariant(); return (& $st $d[$k] @() $any[0] $da[$k]) }
+        return (& $st 'pending' $revs '' @())
     }
     $r1 = "$($revs[0])".ToLowerInvariant(); $r2 = "$($revs[1])".ToLowerInvariant()
     if ("$($Campaign.mode)" -eq 'serial') {
-        if (-not $d.ContainsKey($r1)) { return [pscustomobject]@{ state = 'pending'; awaiting = @($revs[0]); by = '' } }
-        if (-not $d.ContainsKey($r2)) { return [pscustomobject]@{ state = 'pending'; awaiting = @($revs[1]); by = '' } }
-        return [pscustomobject]@{ state = $d[$r2]; awaiting = @(); by = $revs[1] }
+        if (-not $d.ContainsKey($r1)) { return (& $st 'pending' @($revs[0]) '' @()) }
+        if (-not $d.ContainsKey($r2)) { return (& $st 'pending' @($revs[1]) '' @()) }
+        return (& $st $d[$r2] @() $revs[1] $da[$r2])
     }
     $miss = @($revs | Where-Object { -not $d.ContainsKey($_.ToLowerInvariant()) })
-    if ($miss.Count) { return [pscustomobject]@{ state = 'pending'; awaiting = $miss; by = '' } }
-    return [pscustomobject]@{ state = $(if (@($d.Values) -contains 'remove') { 'remove' } else { 'keep' }); awaiting = @(); by = ($revs -join ' + ') }
+    if ($miss.Count) { return (& $st 'pending' $miss '' @()) }
+    $removers = @($d.Keys | Where-Object { $d[$_] -eq 'remove' })
+    if (-not $removers.Count) { return (& $st 'keep' @() ($revs -join ' + ') @()) }
+    # a whole-account Remove (no access named) wins over a Remove of some memberships
+    $whole = @($removers | Where-Object { -not @($da[$_]).Count }).Count -gt 0
+    return (& $st 'remove' @() ($revs -join ' + ') $(if ($whole) { @() } else { @($removers | ForEach-Object { $da[$_] }) }))
 }
 
 function Set-PimReviewDecision {
     <#
       PURE. Record one reviewer's decision (keep | remove) on one person, or a SuperAdmin -Override. Returns
       @{ ok; reason; campaign }. Refused: a closed campaign, a person not in it, a caller who is not a reviewer, reviewer 2 of a
-      SERIAL campaign before reviewer 1 decided, an item already decided.
+      SERIAL campaign before reviewer 1 decided, an item already decided, -Access on a Keep, -Access naming a group the person
+      does not hold in this review.
+      -Access (group tags, Remove only): remove ONLY these memberships instead of the whole account.
     #>
     param([Parameter(Mandatory)]$Campaign, [Parameter(Mandatory)][string]$User, [Parameter(Mandatory)][ValidateSet('keep', 'remove')][string]$Decision,
-          [Parameter(Mandatory)][string]$By, [switch]$Override, [datetime]$NowUtc = [datetime]::UtcNow)
+          [Parameter(Mandatory)][string]$By, [switch]$Override, [string[]]$Access = @(), [datetime]$NowUtc = [datetime]::UtcNow)
     $no = { param($w) [pscustomobject]@{ ok = $false; reason = $w; campaign = $Campaign } }
     if ("$($Campaign.status)" -ne 'open') { return (& $no 'this review is closed') }
     $it = @($Campaign.items | Where-Object { "$($_.user)".ToLowerInvariant() -eq $User.Trim().ToLowerInvariant() })[0]
     if (-not $it) { return (& $no "$User is not in this review") }
     $st = Get-PimReviewItemState -Campaign $Campaign -Item $it
     if ($st.state -ne 'pending') { return (& $no "$User is already decided ($($st.state))") }
+    $acc = @(@($Access) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    if ($acc.Count -and $Decision -ne 'remove') { return (& $no 'access can only be named on a Remove') }
+    if ($acc.Count) {
+        # the group tags the person holds in THIS review (a campaign from before 2.4.453 has no accessRows: parse the labels)
+        $held = @(@($it.accessRows) | Where-Object { $_ } | ForEach-Object { "$(Get-PimArField $_ 'groupTag')".Trim().ToLowerInvariant() })
+        if (-not $held.Count) { $held = @(@($it.access) | ForEach-Object { ("$_" -replace '\s*\([^)]*\)\s*$', '').Trim().ToLowerInvariant() }) }
+        $bad = @($acc | Where-Object { $held -notcontains $_.ToLowerInvariant() })
+        if ($bad.Count) { return (& $no "$User does not hold $($bad -join ', ') in this review") }
+    }
     $stamp = $NowUtc.ToUniversalTime().ToString('o')
-    if ($Override) { $it.override = [pscustomobject]@{ decision = $Decision; by = $By; utc = $stamp }; return [pscustomobject]@{ ok = $true; reason = ''; campaign = $Campaign } }
+    if ($Override) { $it.override = [pscustomobject]@{ decision = $Decision; access = $acc; by = $By; utc = $stamp }; return [pscustomobject]@{ ok = $true; reason = ''; campaign = $Campaign } }
     $me = $By.Trim().ToLowerInvariant()
     if (@($Campaign.reviewers | ForEach-Object { "$_".ToLowerInvariant() }) -notcontains $me) { return (& $no "$By is not a reviewer of this review") }
     # No self-review: a reviewer never keeps their OWN account (it stays open for the other approver or a SuperAdmin).
     if ($me -eq $User.Trim().ToLowerInvariant() -or ($me -split '@')[0] -eq ($User.Trim().ToLowerInvariant() -split '@')[0]) { return (& $no "$By cannot review their own account -- another reviewer or a SuperAdmin decides") }
     if (@($st.awaiting | ForEach-Object { "$_".ToLowerInvariant() }) -notcontains $me) { return (& $no $(if ("$($Campaign.mode)" -eq 'serial') { "the first approver ($($Campaign.reviewers[0])) decides first" } else { "$By has already decided on $User" })) }
-    $it.decisions | Add-Member -NotePropertyName $me -NotePropertyValue ([pscustomobject]@{ decision = $Decision; utc = $stamp }) -Force
+    $it.decisions | Add-Member -NotePropertyName $me -NotePropertyValue ([pscustomobject]@{ decision = $Decision; access = $acc; utc = $stamp }) -Force
     return [pscustomobject]@{ ok = $true; reason = ''; campaign = $Campaign }
+}
+
+function Get-PimReviewMembershipRows {
+    <#
+      PURE. A Remove that names ACCESS: the stored PIM-Assignments-Admins rows it removes -- the rows of THIS person (the
+      item's user, or the Username an accessRow carries) whose GroupTag is one of -Tags. A row already marked Remove is not
+      access and is left alone. Returns @{ rows = @(...); missing = @(tags with no stored row) }.
+    #>
+    param([Parameter(Mandatory)]$Item, [string[]]$Tags = @(), [object[]]$StoredRows = @())
+    $want = @{}; foreach ($t in @($Tags)) { if ("$t".Trim()) { $want["$t".Trim().ToLowerInvariant()] = $true } }
+    $names = @{}
+    $u = "$(Get-PimArField $Item 'user')".Trim().ToLowerInvariant(); if ($u) { $names[$u] = $true; $names[($u -split '@')[0]] = $true }
+    foreach ($ar in @(Get-PimArField $Item 'accessRows')) { $n = "$(Get-PimArField $ar 'username')".Trim().ToLowerInvariant(); if ($n) { $names[$n] = $true } }
+    $out = New-Object System.Collections.Generic.List[object]; $found = @{}
+    foreach ($r in @($StoredRows)) {
+        if ($null -eq $r) { continue }
+        $ru = "$(Get-PimArField $r 'Username')".Trim().ToLowerInvariant(); $gt = "$(Get-PimArField $r 'GroupTag')".Trim().ToLowerInvariant()
+        if (-not $ru -or -not $want.ContainsKey($gt)) { continue }
+        if (-not $names.ContainsKey($ru) -and -not $names.ContainsKey(($ru -split '@')[0])) { continue }
+        if ("$(Get-PimArField $r 'Action')" -match '(?i)^remove') { continue }
+        $out.Add($r); $found[$gt] = $true
+    }
+    [pscustomobject]@{ rows = @($out.ToArray()); missing = @($want.Keys | Where-Object { -not $found.ContainsKey($_) } | Sort-Object) }
+}
+
+function Add-PimReviewRemovalsToPending {
+    <#
+      PURE (needs PIM-SharedPending.ps1). Stage a 'remove' of each row in the shared pending-changes document (-Doc, the
+      hashtable Update-PimSharedPendingStore hands its -Mutate) for entity PIM-Assignments-Admins, held by -By. A row whose key
+      is already staged as a remove is left as it is; a row another administrator has staged a DIFFERENT change on is LOCKED
+      and not touched (§79.13). Returns @{ added = @(keys); already = @(keys); locked = @(@{ key; by }) } -- the caller writes
+      the document when 'added' is non-empty.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Doc, [object[]]$Rows = @(), [Parameter(Mandatory)][string]$By, [datetime]$NowUtc = [datetime]::UtcNow)
+    $base = 'PIM-Assignments-Admins'
+    $cur = if ($Doc.bases.ContainsKey($base)) { $Doc.bases[$base] } else { @{ version = 0; changes = @() } }
+    $changes = New-Object System.Collections.Generic.List[object]; foreach ($c in @($cur.changes)) { if ($c) { $changes.Add($c) } }
+    $added = New-Object System.Collections.Generic.List[string]; $already = New-Object System.Collections.Generic.List[string]; $locked = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Rows)) {
+        $k = Get-PimSharedPendingRowKey -Base $base -Row $r; if (-not $k) { continue }
+        $held = @($changes | Where-Object { "$($_.key)".ToLowerInvariant() -eq $k })[0]
+        if ($held) {
+            if ("$($held.op)" -eq 'remove') { $already.Add($k) } else { $locked.Add([pscustomobject]@{ key = $k; by = "$($held.by)" }) }
+            continue
+        }
+        $ch = ConvertTo-PimSharedPendingChange ([ordered]@{ key = $k; op = 'remove'; before = $r; by = $By; atUtc = $NowUtc.ToUniversalTime().ToString('o') })
+        if ($ch) { $changes.Add($ch); $added.Add($k) }
+    }
+    if ($added.Count) { $Doc.bases[$base] = @{ version = [int]$cur.version + 1; changes = @($changes.ToArray()) } }
+    [pscustomobject]@{ added = @($added.ToArray()); already = @($already.ToArray()); locked = @($locked.ToArray()) }
 }
 
 function Get-PimReviewCampaignStep {
@@ -274,23 +355,42 @@ function Invoke-PimAccessReviewCycleJob {
             $log.Add("$($c.department): reminder $($c.remindersSent) sent to $($to -join ', ')"); continue
         }
         if ($step -eq 'escalate') {
+            $undecidedRemove = ("$($c.undecided)" -eq 'remove')
+            $raiseFailed = $false
+            if ($undecidedRemove -and -not $WhatIf) {
+                # remove-on-undecided: the SAME gate as a reviewer's Remove -- an offboard approval request, never a direct
+                # removal. One per person: a request already pending for them (an earlier run whose write lost the race) is reused.
+                foreach ($it in $pendingItems) {
+                    try {
+                        $open = @(); try { $open = @(Get-PimApprovalRequests -Status Pending -Action offboard -Target "$($it.user)") } catch { $open = @() }
+                        if ($open.Count) { $it | Add-Member -NotePropertyName approvalId -NotePropertyValue "$($open[0].id)" -Force; continue }
+                        if (-not (Get-Command Add-PimApprovalRequest -ErrorAction SilentlyContinue)) { throw 'the approval library is not loaded in this host' }
+                        $apr = Add-PimApprovalRequest -Requestor 'access-review-cycle' -Action 'offboard' -Target "$($it.user)" -Justification ("access review {0} ({1}) was not answered -- the rule removes undecided people" -f $c.id, $c.department)
+                        $it | Add-Member -NotePropertyName approvalId -NotePropertyValue "$($apr.id)" -Force
+                    } catch { $raiseFailed = $true; $errors.Add("$($c.department): the removal request for $($it.user) could not be raised: $($_.Exception.Message)") }
+                }
+            }
+            # a removal request that could not be raised keeps the campaign OPEN: the next run escalates again (and says so loudly)
+            if ($raiseFailed) { $log.Add("$($c.department): stays open -- a removal request could not be raised"); continue }
             if (-not $WhatIf -and (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue)) {
                 $lines = @($pendingItems | ForEach-Object { '&bull; <b>' + (& $enc $_.user) + '</b> -- waiting for ' + (& $enc (@((Get-PimReviewItemState -Campaign $c -Item $_).awaiting) -join ', ')) })
-                try { [void](Send-PimJobAlertViaNotify -Event 'coverage' -Title ("Access review of {0} not answered ({1} person(s))" -f $c.department, $pendingItems.Count) -Detail ("The reviewers did not answer after $($c.reminders) reminder(s). Undecided people KEEP their access; a SuperAdmin can still decide on the Access reviews page.<br><br>" + ($lines -join '<br>')) -LinkTab 'accessreview' -DebounceMinutes 0 `
-                                -Headline 'An access review was not answered.' -Action 'Open Access reviews: decide the open people yourself, or follow up with the reviewers.') } catch { $errors.Add("$($c.department): the escalation could not be sent: $($_.Exception.Message)") }
+                $what = if ($undecidedRemove) { 'This review''s rule REMOVES undecided people: an offboard approval request was raised for each of them -- a PIM administrator approves or denies it on the Approvals tab.' } else { 'Undecided people KEEP their access; a SuperAdmin can still decide on the Access reviews page.' }
+                try { [void](Send-PimJobAlertViaNotify -Event 'coverage' -Title ("Access review of {0} not answered ({1} person(s))" -f $c.department, $pendingItems.Count) -Detail ("The reviewers did not answer after $($c.reminders) reminder(s). $what<br><br>" + ($lines -join '<br>')) -LinkTab $(if ($undecidedRemove) { 'approvals' } else { 'accessreview' }) -DebounceMinutes 0 `
+                                -Headline 'An access review was not answered.' -Action $(if ($undecidedRemove) { 'Open Approvals: approve or deny the removal of each undecided person.' } else { 'Open Access reviews: decide the open people yourself, or follow up with the reviewers.' })) } catch { $errors.Add("$($c.department): the escalation could not be sent: $($_.Exception.Message)") }
             }
-            if (-not $WhatIf) { $c.escalatedUtc = $NowUtc.ToUniversalTime().ToString('o'); $step = 'close'; $c.closeReason = 'escalated: undecided people keep their access' }
-            $log.Add("$($c.department): escalated to the alert mail ($($pendingItems.Count) undecided -> keep)")
+            if (-not $WhatIf) { $c.escalatedUtc = $NowUtc.ToUniversalTime().ToString('o'); $step = 'close'; $c.closeReason = $(if ($undecidedRemove) { 'escalated: removal requested for the undecided people' } else { 'escalated: undecided people keep their access' }) }
+            $log.Add("$($c.department): escalated to the alert mail ($($pendingItems.Count) undecided -> $(if ($undecidedRemove) { 'removal requested' } else { 'keep' }))")
         }
         if ($step -eq 'close' -and -not $WhatIf) {
             foreach ($it in @($c.items)) {
                 $s = Get-PimReviewItemState -Campaign $c -Item $it
-                $it.outcome = $(if ($s.state -eq 'pending') { 'keep (undecided)' } else { $s.state })
-                # a Remove outcome already raised its offboard approval request when it was decided (the Manager, like My people)
-
+                $it.outcome = $(if ($s.state -eq 'pending') { $(if ("$($c.undecided)" -eq 'remove') { 'remove (undecided)' } else { 'keep (undecided)' }) } else { $s.state })
+                if ($s.state -eq 'remove') { $it | Add-Member -NotePropertyName removeAccess -NotePropertyValue @($s.removeAccess) -Force }
+                # a Remove outcome already raised its offboard approval request (or staged its membership removals) when it
+                # was decided (the Manager, like My people)
             }
             $c.status = 'closed'; $c.closedUtc = $NowUtc.ToUniversalTime().ToString('o'); if (-not $c.closeReason) { $c.closeReason = 'every person decided' }; $changed = $true
-            $log.Add("$($c.department): closed -- $(@($c.items | Where-Object { $_.outcome -eq 'remove' }).Count) removal request(s)")
+            $log.Add("$($c.department): closed -- $(@($c.items | Where-Object { "$($_.outcome)" -like 'remove*' }).Count) removal request(s)")
         }
     }
     # 2. START what is due (one open campaign per department at a time)

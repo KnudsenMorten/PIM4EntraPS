@@ -228,7 +228,13 @@ function ConvertTo-PimDriftSnapshotDocument {
             if (-not $label.Trim()) { $label = "$($it.key)" }
             # §79.3: a changed item says WHAT differs (live -> desired); missing / extra say where the item is.
             $det = switch ("$($it.type)") { 'changed' { "$($diffOf["$($sd.scope)|$($it.key)"])" } 'missing' { 'in PIM, not in the tenant' } 'extra' { 'in the tenant, not in PIM' } default { '' } }
-            $items.Add([ordered]@{ type = "$($it.type)"; key = "$($it.key)"; label = $label; detail = $det })
+            $row = [ordered]@{ type = "$($it.type)"; key = "$($it.key)"; label = $label; detail = $det }
+            # REQ-DRIFT-2: an EXTRA carries what Delete (the revoke row) and Keep (the desired row) would do, from its live row.
+            if ("$($it.type)" -eq 'extra') {
+                $xa = Get-PimDriftExtraActions -Scope "$($sd.scope)" -Payload $payloads["$($sd.scope)|$($it.key)"]
+                $row['revoke'] = $xa.revoke; $row['revokeWhy'] = $xa.revokeWhy; $row['keep'] = $xa.keep; $row['keepWhy'] = $xa.keepWhy
+            }
+            $items.Add($row)
         }
         # REQ-U wave 2 (design point 8): the area's live WARNINGS (orphan group, unmanaged binding, wrong permissions).
         # They count toward drift -- EXCEPT a warning that names an item the plan already lists (its key, or one of its
@@ -406,6 +412,8 @@ function Add-PimDriftPayloadNames {
                 Add-Member -InputObject $copy -NotePropertyName PrincipalKind -NotePropertyValue "$($who.kind)" -Force
             }
             if ($grpName) { Add-Member -InputObject $copy -NotePropertyName GroupName -NotePropertyValue $grpName -Force }
+            # REQ-DRIFT-2: a member that is itself a PIM group carries its tag, so Keep can stage the nesting row.
+            if ($owned -and $owned.byId -and $owned.byId.ContainsKey($prin) -and "$($owned.byId[$prin].tag)") { Add-Member -InputObject $copy -NotePropertyName PrincipalTag -NotePropertyValue "$($owned.byId[$prin].tag)" -Force }
             if ($pc -is [System.Collections.IDictionary]) { $pc['payload'] = $copy } else { $pc.payload = $copy }
         }
     }
@@ -480,12 +488,23 @@ function Invoke-PimDriftSnapshotJob {
             $__lc = Get-PimLastDesiredChangeUtc
             if (Test-PimAlertSettling -LastChangeUtc $__lc) { $__settling = $true; Write-Host ("[$type] drift found while the commit of {0:u} is still rolling out -- not mailed now" -f $__lc) -ForegroundColor DarkYellow }
         }
-        if (-not $__settling) { try {
+        # REQ-DRIFT-2 CADENCE (operator 2026-09-26: "monthly by default, but possible to define cadence as dropdown"): the
+        # drift mail goes out once per cadence (pim.Settings 'DriftAlertCadence', default monthly); a change in between
+        # waits for the next mail. The last send is kept in pim.Settings 'DriftAlertState'.
+        $__cad = 'monthly'; $__last = $null
+        if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
+            try { $__cad = ConvertTo-PimDriftAlertCadence (Get-PimSetting -Name 'DriftAlertCadence') } catch { $__cad = 'monthly' }
+            try { $__st = Get-PimSetting -Name 'DriftAlertState'; if ($__st -is [string] -and "$__st".Trim()) { $__st = $__st | ConvertFrom-Json }; if ($__st) { $__last = $__st.lastMailUtc } } catch { $__last = $null }
+        }
+        $__due = Test-PimDriftAlertDue -Cadence $__cad -LastMailUtc $__last -NowUtc $NowUtc
+        if (-not $__settling -and -not $__due) { Write-Host ("[$type] drift found; the $__cad drift mail was last sent {0} -- the next one waits for the cadence" -f $__last) -ForegroundColor DarkGray }
+        if (-not $__settling -and $__due) { try {
             if (Get-Command Send-PimManagerAlert -ErrorAction SilentlyContinue) {
-                [void](Send-PimManagerAlert -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 1440)
+                [void](Send-PimManagerAlert -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 0)
             } elseif (Get-Command Send-PimJobAlertViaNotify -ErrorAction SilentlyContinue) {
-                [void](Send-PimJobAlertViaNotify -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 1440)
+                [void](Send-PimJobAlertViaNotify -Event 'drift' -Title $title -Detail $detail -LinkTab 'drift' -DebounceMinutes 0)
             }
+            if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { Set-PimSetting -Name 'DriftAlertState' -Value ([pscustomobject]@{ lastMailUtc = $NowUtc.ToUniversalTime().ToString('o'); cadence = $__cad; total = [int]$doc.total }) }
         } catch { Write-Warning "[$type] the drift alert could not be raised: $($_.Exception.Message)" } }
     }
 
@@ -625,6 +644,80 @@ function ConvertTo-PimDriftSnapshotView {
         items           = @($flat.ToArray())
         source          = 'scheduler-snapshot'
     }
+}
+
+# ---- REQ-DRIFT-2 (operator 2026-09-26: "similar logic for configuration drift but it must go to alert mail instead - and be
+# possible to delete/keep/ignore"; "cadence for config drift must be monthly by default, but possible to define cadence as
+# dropdown"). An EXTRA (in the tenant, not in PIM) can be DELETED -- queued as the matching revoke, with every gate the
+# revoke path has (break-glass, count confirmation, approval, commit on the Queue) -- or KEPT: the desired row that defines it
+# is staged, so PIM manages it and the drift is gone after Review & commit. Missing / changed items keep "Apply now".
+function Get-PimDriftExtraActions {
+    <#
+      PURE. What Delete and Keep can do for ONE extra item, from the LIVE row the engine plan carried (-Payload) and its area
+      (-Scope). Returns @{ revoke; revokeWhy; keep; keepWhy }:
+        revoke -- the row POST /api/revoke takes ({ type = entra-role | pim-for-groups | azure-rbac; principalId; ... }), or
+                  $null with revokeWhy saying why this item cannot be deleted from the Drift page;
+        keep   -- @{ base; row } the desired row to stage, or $null with keepWhy.
+      Nothing is guessed: a field the row lacks means "not from here", never a partial row.
+    #>
+    param([string]$Scope, [AllowNull()][object]$Payload)
+    $f = { param($n) "$(Get-PimDriftSnapshotField $Payload $n)".Trim() }
+    $out = [ordered]@{ revoke = $null; revokeWhy = ''; keep = $null; keepWhy = '' }
+    if ($null -eq $Payload) { $out.revokeWhy = 'the stored check has no live details for this item'; $out.keepWhy = $out.revokeWhy; return $out }
+    $prin = & $f 'principalId'; $type = & $f 'AssignmentType'; if (-not $type) { $type = 'Eligible' }
+    $pname = & $f 'PrincipalName'
+    if ((& $f 'groupId') -and $prin) {
+        # a PIM-for-Groups membership / ownership (AdminMembers, GroupMembers)
+        $out.revoke = [ordered]@{ type = 'pim-for-groups'; principalId = $prin; groupId = (& $f 'groupId'); accessId = $(if (& $f 'accessId') { & $f 'accessId' } else { 'member' }); assignmentType = $type; principal = $pname }
+        $tag = & $f 'GroupTag'
+        if ($Scope -eq 'AdminMembers' -and $tag -and $pname -and (& $f 'PrincipalKind') -eq 'user') {
+            $out.keep = [ordered]@{ base = 'PIM-Assignments-Admins'; row = [ordered]@{ Username = $pname; GroupTag = $tag; AssignmentType = $type } }
+        } elseif ($Scope -eq 'GroupMembers' -and $tag -and (& $f 'PrincipalTag')) {
+            $out.keep = [ordered]@{ base = 'PIM-Assignments-Groups'; row = [ordered]@{ TargetGroupTag = (& $f 'PrincipalTag'); SourceGroupTag = $tag; AssignmentType = $type } }
+        } else { $out.keepWhy = 'the member could not be named as a PIM row (not a known admin account or PIM group) -- add its row on its page if it should stay' }
+        return $out
+    }
+    if ((& $f 'AzScope') -and $prin) {
+        if ($type -ieq 'Eligible' -and (& $f 'roleDefinitionId')) {
+            $out.revoke = [ordered]@{ type = 'azure-rbac'; principalId = $prin; roleDefinitionId = (& $f 'roleDefinitionId'); scope = (& $f 'AzScope'); assignmentType = 'Eligible'; principal = $pname }
+        } else { $out.revokeWhy = 'an ACTIVE Azure assignment is removed by its assignment id -- revoke it from Reviews & controls > Review current delegations' }
+        $out.keepWhy = 'an Azure role is kept by adding its row on the Azure resources page (the role name is needed)'
+        return $out
+    }
+    if ((& $f 'roleDefinitionId') -and $prin) {
+        $ds = & $f 'directoryScopeId'; if (-not $ds) { $ds = '/' }
+        $out.revoke = [ordered]@{ type = 'entra-role'; principalId = $prin; roleDefinitionId = (& $f 'roleDefinitionId'); directoryScopeId = $ds; assignmentType = $type; principal = $(if ($pname) { $pname } else { & $f 'GroupTag' }) }
+        if ($Scope -eq 'EntraRoles' -and $ds -eq '/' -and (& $f 'GroupTag') -and (& $f 'RoleDefinitionName')) {
+            $out.keep = [ordered]@{ base = 'PIM-Assignments-Roles-Groups'; row = [ordered]@{ GroupTag = (& $f 'GroupTag'); RoleDefinitionName = (& $f 'RoleDefinitionName'); AssignmentType = $type } }
+        } else { $out.keepWhy = 'this role assignment is kept by adding its row on its page' }
+        return $out
+    }
+    $out.revokeWhy = 'nothing the revoke queue can address -- remove it at its source'
+    $out.keepWhy = 'add its desired row on its page if it should stay'
+    return $out
+}
+
+# The drift ALERT MAIL cadence (pim.Settings 'DriftAlertCadence'). The drift job keeps refreshing the page every run; this is
+# only how often the mail goes out. A change in the drift between two mails waits for the next one.
+$script:PimDriftAlertCadences = [ordered]@{ daily = 1; weekly = 7; monthly = 30; quarterly = 91 }
+function Get-PimDriftAlertCadenceNames { @($script:PimDriftAlertCadences.Keys) }
+function ConvertTo-PimDriftAlertCadence {
+    # PURE. A stored value -> daily | weekly | monthly | quarterly; anything else (unset, unreadable) = monthly (the default).
+    param([AllowNull()][object]$Value)
+    $v = "$Value".Trim().Trim('"').ToLowerInvariant()
+    if ($script:PimDriftAlertCadences.Contains($v)) { return $v }
+    return 'monthly'
+}
+function Test-PimDriftAlertDue {
+    <# PURE. Is a drift mail due now? Never mailed = yes; else when the cadence has passed since the last drift mail. #>
+    param([AllowNull()][object]$Cadence, [AllowNull()][object]$LastMailUtc, [datetime]$NowUtc = [datetime]::UtcNow)
+    $c = ConvertTo-PimDriftAlertCadence $Cadence
+    $last = $null
+    if ($LastMailUtc -is [datetime]) { $last = ([datetime]$LastMailUtc).ToUniversalTime() }   # pwsh 7 ConvertFrom-Json hands a date back as [datetime]
+    elseif ("$LastMailUtc".Trim()) { try { $last = [datetime]::Parse("$LastMailUtc", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') } catch { $last = $null } }
+    if (-not $last) { return $true }
+    # an hour of slack, so a job that runs on the same clock every time is not pushed a whole run later by seconds
+    return (($NowUtc.ToUniversalTime() - $last).TotalHours -ge ([double]$script:PimDriftAlertCadences[$c] * 24 - 1))
 }
 
 # ---- §79.4 IGNORE A DRIFT FINDING (operator 2026-09-25: "configuration drift, it should be possible to have a ignore

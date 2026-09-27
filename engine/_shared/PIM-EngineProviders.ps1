@@ -6892,23 +6892,10 @@ function New-PimAdminTapProvider {
 }
 
 # ---------------------------------------------------------------------------
-# AccessReviews scope -- create an access-review schedule for groups that opt in via a
-# ReviewCycle column. Reviewers = the group's Owners; auto-apply is OFF (the engine never
-# auto-applies decisions on an engine-managed group -- matches LIFECYCLE-GOVERNANCE).
-# Needs AccessReview.ReadWrite.All on the engine SPN; built REST-only.
+# AccessReviews scope -- RETIRED 2.4.453 (REQ-AR-2). It created a Microsoft Entra access review per group whose row carried
+# a ReviewCycle; access is now reviewed PER DEPARTMENT by PIM's own campaigns (PIM-AccessReviewCycle.ps1). The scope stays
+# registered (the Pro gate and the scope list still name it) and does nothing.
 # ---------------------------------------------------------------------------
-function Get-PimReviewRecurrence {
-    # ReviewCycle text -> Graph accessReview recurrence pattern + a sensible instance duration.
-    param([string]$Cycle)
-    switch -Regex ("$Cycle") {
-        '(?i)week'                 { return @{ pattern = @{ type = 'weekly';        interval = 1 }; days = 3  } }
-        '(?i)month'                { return @{ pattern = @{ type = 'absoluteMonthly'; interval = 1 }; days = 7  } }
-        '(?i)quarter'              { return @{ pattern = @{ type = 'absoluteMonthly'; interval = 3 }; days = 14 } }
-        '(?i)semi|half'            { return @{ pattern = @{ type = 'absoluteMonthly'; interval = 6 }; days = 21 } }
-        '(?i)ann|year'             { return @{ pattern = @{ type = 'absoluteYearly';  interval = 1 }; days = 30 } }
-        default                    { return @{ pattern = @{ type = 'absoluteMonthly'; interval = 3 }; days = 14 } }
-    }
-}
 function New-PimAccessReviewsProvider {
     @{
         scope = 'AccessReviews'; entity = 'PIM-Definitions'; order = 80; refreshBefore = $true
@@ -6917,46 +6904,17 @@ function New-PimAccessReviewsProvider {
         feature = 'reviews.campaigns'
         GetDesired = {
             param($ctx)
-            Ensure-PimContextLoaded
-            @(Get-PimGroupDefinitionRows | Where-Object { "$(Get-PimRowProp -Row $_ -Names @('ReviewCycle'))".Trim() } |
-                ForEach-Object { [pscustomobject]@{ GroupName = $_.GroupName; Owners = $_.Owners; SponsorUpn = $_.SponsorUpn; Department = $_.Department; ReviewCycle = (Get-PimRowProp -Row $_ -Names @('ReviewCycle')) } })
+            # 🔒 RETIRED 2.4.453 (REQ-AR-2, operator 2026-09-26: "access reviews are never per permission group"). Access is
+            # reviewed PER DEPARTMENT by PIM's own campaigns (PIM-AccessReviewCycle.ps1, job 'access-review-cycle'); a row's
+            # ReviewCycle no longer creates a Microsoft Entra review. Nothing is desired, and there is no ApplyRemove: a
+            # review PIM created earlier ("PIM4EntraPS review - <group>") is LEFT as it is -- deleting it would delete its
+            # decision history -- and an administrator removes it in Entra when it is no longer wanted. The live side is not
+            # read either: with nothing desired and nothing removable there is nothing to compare, and no Graph call is spent.
+            @()
         }
-        GetLive = {
-            param($ctx)
-            $live = New-Object System.Collections.Generic.List[object]
-            try { foreach ($d in @(Invoke-PimGraph -All -Path "/identityGovernance/accessReviews/definitions?`$select=id,displayName")) { if ("$($d.displayName)" -like 'PIM4EntraPS review - *') { $live.Add([pscustomobject]@{ GroupName = ("$($d.displayName)" -replace '^PIM4EntraPS review - ', '') }) } } }
-            catch {
-                $ctx['__pimLiveIncomplete'] = 'AccessReviews: the review definitions could not be listed'   # 2026-09-20, see AdministrativeUnitMembers
-                Write-Warning "  [AccessReviews] list failed: $($_.Exception.Message)"
-            }
-            $live.ToArray()
-        }
+        GetLive = { param($ctx) @() }
         KeyOf = { param($r) (Get-PimRowProp -Row $r -Names @('GroupName')).ToLowerInvariant() }
-        Equal = { param($d, $l) $true }   # one review schedule per group (existence-based)
-        ApplyCreate = {
-            param($item, $ctx)
-            $d = $item.desired; $gn = $d.GroupName
-            $gid = Resolve-PimLiveGroupIdByName $gn; if (-not $gid) { throw "AccessReviews: group '$gn' not found" }
-            $reviewerIds = Resolve-PimGroupOwnerIds -Row $d -Ctx $ctx
-            if (-not $reviewerIds.Count) { throw "AccessReviews: no reviewer (owner) resolves for '$gn'" }
-            $rev = @($reviewerIds | ForEach-Object { @{ query = "/users/$_"; queryType = 'MicrosoftGraph' } })
-            $rc = Get-PimReviewRecurrence -Cycle $d.ReviewCycle
-            $body = @{
-                displayName = "PIM4EntraPS review - $gn"
-                descriptionForAdmins = "Engine-managed access review for PIM group $gn (reviewers = owners; auto-apply OFF)."
-                scope = @{ '@odata.type' = '#microsoft.graph.accessReviewQueryScope'; query = "/groups/$gid/transitiveMembers"; queryType = 'MicrosoftGraph' }
-                reviewers = $rev
-                settings = @{
-                    mailNotificationsEnabled = $true; reminderNotificationsEnabled = $true
-                    justificationRequiredOnApproval = $true; recommendationsEnabled = $true
-                    defaultDecisionEnabled = $false; defaultDecision = 'None'
-                    autoApplyDecisionsEnabled = $false            # engine never auto-applies
-                    instanceDurationInDays = $rc.days
-                    recurrence = @{ pattern = $rc.pattern; range = @{ type = 'noEnd'; startDate = ([datetime]::UtcNow.ToString('yyyy-MM-dd')) } }
-                }
-            }
-            Invoke-PimGraph -Method POST -Path '/identityGovernance/accessReviews/definitions' -Body $body
-        }
+        Equal = { param($d, $l) $true }
     }
 }
 
