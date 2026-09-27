@@ -14,6 +14,23 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.454 — Removing one access in a review now removes it; a faster Manager and fewer throttled reads
+
+- **Fixed: removing one access in an access review.** In 2.4.453 the staged change deleted the access row instead of
+  marking it for removal, so after commit the membership stayed in the tenant and showed up as drift. The review now
+  stages the same targeted removal as "Remove access" on the delegation grid: once committed, PIM removes exactly that
+  membership and clears the row.
+- **The Manager stays responsive while it checks permissions.** The permission check on the Overview page is kept for five
+  minutes instead of running on every visit; **Verify permissions** still checks at once. Every other page waited while it
+  ran, which could leave a wizard waiting for its data. The audit trail also answers much faster: it prepares the
+  before/after summary only for the entries on screen (all of them only while you search), and Pending changes, which
+  shows the latest saves from it, no longer holds up a commit.
+- **Fewer throttled Graph reads.** When Microsoft Graph asks PIM to slow down, PIM now pauses between batches instead of
+  sending the next one straight away, so large reads (group memberships and group policies in the drift check) finish
+  with far fewer retries.
+- **Upgrade note:** a one-access removal staged with 2.4.453 and already committed left the membership in place; remove
+  it again with 2.4.454 (or use Delete on the Drift page).
+
 ## v2.4.453 — Remove one access in a review, act on configuration drift, and a drift mail on your schedule
 
 - **A reviewer can remove one access instead of the whole account.** In a department access review, tick the access a

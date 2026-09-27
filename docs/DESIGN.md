@@ -1529,8 +1529,10 @@ request for each undecided person (one per person; a request already pending is 
 keeps the round open so the next run tries again). Reviewers decide **Keep** or **Remove** per person on **My people**; a
 senior administrator can decide any open person on the Access reviews page. A Remove with nothing ticked raises the offboard
 approval request that My people uses, so an administrator approves it and the engine carries it out. A Remove with access
-**ticked** (2.4.453) removes only those memberships: their assignment rows are staged as removals in the shared pending
-changes, an administrator commits them under Review & commit, and the account keeps the rest. With two parallel approvers
+**ticked** (2.4.453; corrected in 2.4.454) removes only those memberships: each assignment row is staged with
+`Action=Remove` in the shared pending changes (the engine's targeted removal, the same instruction as "Remove access" on the
+grid — a deleted row would remove nothing, because the scheduled engine never prunes), an administrator commits it under
+Review & commit, the engine removes exactly that membership and clears the row, and the account keeps the rest. With two parallel approvers
 the removals are combined and a whole-account Remove wins; with serial approvers the second approver's choice counts. Microsoft Entra access reviews are not used for this, because they cannot
 review one department's people across several groups without the Entra ID Governance licence, and repeat weekly at the
 fastest. The same job mails the alert recipients every day while any department has no owner.
@@ -1961,6 +1963,15 @@ never bulk-enumerate the directory to manage a few hundred PIM groups + admins.
   **once** (capped) and resends the collected items together as a batch (bounded attempts), instead
   of re-running each one immediately as its own request. Every slow or throttled read logs how many
   requests it sent, in how many round-trips, and how many were throttled.
+- **Pacing (2.4.454).** A round-trip that comes back throttled is followed by a pause (its `Retry-After`, at most 10 s)
+  before the next round-trip is sent, instead of sending the rest straight into the throttle. The pauses share a 120 s
+  budget per read, so a throttle that never lifts cannot make a read slower than before.
+- **The Manager keeps its permission check (2.4.454).** The Manager answers one request at a time, and the Overview page's
+  permission check (Graph, Azure and store reads) took 2-4 s on every visit while every other request waited. Its answer
+  is kept for five minutes; **Verify permissions** checks again at once. Each request the Manager serves is logged with its
+  duration, and a request of 5 s or more is flagged as slow. The Audit tab builds the before/after change summary only for
+  the page it shows (for every event only while searching, because the search reads it); the CSV export still carries the
+  full summary for every event.
 - **Cached lookups.** A group's member/owner PIM policy id never changes for the life of the group,
   so a found id is kept in the process for 12 hours **and** persisted in `pim.Settings`
   `GroupPolicyIdMap`, so a fresh tick process starts with every known id (a miss is never cached,

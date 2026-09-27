@@ -244,11 +244,15 @@ function Get-PimReviewMembershipRows {
 
 function Add-PimReviewRemovalsToPending {
     <#
-      PURE (needs PIM-SharedPending.ps1). Stage a 'remove' of each row in the shared pending-changes document (-Doc, the
-      hashtable Update-PimSharedPendingStore hands its -Mutate) for entity PIM-Assignments-Admins, held by -By. A row whose key
-      is already staged as a remove is left as it is; a row another administrator has staged a DIFFERENT change on is LOCKED
-      and not touched (§79.13). Returns @{ added = @(keys); already = @(keys); locked = @(@{ key; by }) } -- the caller writes
-      the document when 'added' is non-empty.
+      PURE (needs PIM-SharedPending.ps1). Stage the TARGETED REMOVAL of each row in the shared pending-changes document (-Doc,
+      the hashtable Update-PimSharedPendingStore hands its -Mutate) for entity PIM-Assignments-Admins, held by -By: a MODIFY
+      that sets Action=Remove -- the engine then removes exactly that assignment (in every mode) and deletes the row
+      (Complete-PimRemoveRows), the same instruction the grid's "Remove access" stages.
+      🔴 2.4.454: 2.4.453 staged the row's DELETION instead. A deleted desired row does not remove anything -- the scheduled
+      engine never prunes -- so the membership stayed and only turned into drift (found writing the §78 live case).
+      A row already staged as that removal is left as it is; a row another administrator has staged a DIFFERENT change on
+      is LOCKED and not touched (§79.13). Returns @{ added = @(keys); already = @(keys); locked = @(@{ key; by }) } -- the
+      caller writes the document when 'added' is non-empty.
     #>
     param([Parameter(Mandatory)][hashtable]$Doc, [object[]]$Rows = @(), [Parameter(Mandatory)][string]$By, [datetime]$NowUtc = [datetime]::UtcNow)
     $base = 'PIM-Assignments-Admins'
@@ -259,10 +263,14 @@ function Add-PimReviewRemovalsToPending {
         $k = Get-PimSharedPendingRowKey -Base $base -Row $r; if (-not $k) { continue }
         $held = @($changes | Where-Object { "$($_.key)".ToLowerInvariant() -eq $k })[0]
         if ($held) {
-            if ("$($held.op)" -eq 'remove') { $already.Add($k) } else { $locked.Add([pscustomobject]@{ key = $k; by = "$($held.by)" }) }
+            if ("$($held.op)" -eq 'modify' -and "$(Get-PimArField $held.row 'Action')" -match '(?i)^remove$') { $already.Add($k) } else { $locked.Add([pscustomobject]@{ key = $k; by = "$($held.by)" }) }
             continue
         }
-        $ch = ConvertTo-PimSharedPendingChange ([ordered]@{ key = $k; op = 'remove'; before = $r; by = $By; atUtc = $NowUtc.ToUniversalTime().ToString('o') })
+        $after = [ordered]@{}
+        $props = if ($r -is [System.Collections.IDictionary]) { @($r.Keys) } else { @($r.PSObject.Properties | ForEach-Object Name) }
+        foreach ($pn in $props) { $after["$pn"] = Get-PimArField $r "$pn" }
+        $after['Action'] = 'Remove'
+        $ch = ConvertTo-PimSharedPendingChange ([ordered]@{ key = $k; op = 'modify'; row = $after; before = $r; by = $By; atUtc = $NowUtc.ToUniversalTime().ToString('o') })
         if ($ch) { $changes.Add($ch); $added.Add($k) }
     }
     if ($added.Count) { $Doc.bases[$base] = @{ version = [int]$cur.version + 1; changes = @($changes.ToArray()) } }
