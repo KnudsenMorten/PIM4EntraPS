@@ -11712,10 +11712,34 @@ function Handle-Request {
             $row = ConvertTo-PimAdminImportRow -User $user
             $drift = $null; try { if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) { $drift = Get-PimTenantCacheEntry -Kind 'drift' } } catch { $drift = $null }
             $mem = @(Get-PimAdminImportMemberships -DriftDoc $drift -Upn "$($row.UserPrincipalName)")
+            # 2.4.455 (live E2E): the drift check never lists an UNDEFINED account's memberships (the engine only looks at what
+            # the store defines), so the account's own PIM-for-Groups schedules are read too -- two principal-filtered reads for
+            # ONE account -- and mapped to PIM's groups (group id -> display name -> the defining row's GroupTag). Graph's
+            # principal filter can omit a schedule; this is an OFFER to keep access, so a miss never removes anything.
+            $liveNote = ''
+            try {
+                $uid = "$($user.id)"
+                $el = @(Invoke-PimGraph -All -Path ("/identityGovernance/privilegedAccess/group/eligibilitySchedules?`$filter=principalId eq '{0}'" -f $uid))
+                $as = @(Invoke-PimGraph -All -Path ("/identityGovernance/privilegedAccess/group/assignmentSchedules?`$filter=principalId eq '{0}'" -f $uid))
+                $tagByName = @{}
+                foreach ($e in @('PIM-Definitions-Roles', 'PIM-Definitions-Organization', 'PIM-Definitions-Departments', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg', 'PIM-Definitions-Processes', 'PIM-Definitions-Tasks', 'PIM-Definitions-Services', 'PIM-Definitions-Resources')) {
+                    foreach ($dr in @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $e)) { $gn = "$($dr.GroupName)".Trim(); $gt = "$($dr.GroupTag)".Trim(); if ($gn -and $gt) { $tagByName[$gn.ToLowerInvariant()] = $gt } }
+                }
+                $tagById = @{}
+                foreach ($gid in @(@($el) + @($as) | ForEach-Object { "$($_.groupId)".Trim().ToLowerInvariant() } | Where-Object { $_ } | Select-Object -Unique)) {
+                    $gname = ''
+                    $hit = @($script:PimManager_Groups | Where-Object { $_ -and "$($_.Id)".ToLowerInvariant() -eq $gid }) | Select-Object -First 1
+                    if ($hit) { $gname = "$($hit.DisplayName)" } else { try { $gname = "$((Invoke-PimGraph -Path "/groups/$gid`?`$select=displayName").displayName)" } catch { $gname = '' } }
+                    if ($gname -and $tagByName.ContainsKey($gname.ToLowerInvariant())) { $tagById[$gid] = $tagByName[$gname.ToLowerInvariant()] }
+                }
+                $liveRows = @(ConvertTo-PimAdminImportMembershipRows -Eligible $el -Active $as -TagByGroupId $tagById -Upn "$($row.UserPrincipalName)")
+                $have = @{}; foreach ($m in $mem) { $have[("$($m.GroupTag)|$($m.AssignmentType)").ToLowerInvariant()] = $true }
+                foreach ($lr in $liveRows) { if (-not $have.ContainsKey(("$($lr.GroupTag)|$($lr.AssignmentType)").ToLowerInvariant())) { $mem += $lr } }
+            } catch { $liveNote = "The account's current PIM group memberships could not be read ($($_.Exception.Message -replace '\s+', ' ')) -- only the drift check's rows are offered." }
             $defined = @(@(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'Account-Definitions-Admins') | Where-Object { "$($_.UserPrincipalName)".Trim() -ieq "$($row.UserPrincipalName)" -or "$($_.UserName)".Trim() -ieq "$($row.UserName)" }).Count -gt 0
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; adminRow = $row; memberships = @($mem); alreadyDefined = $defined
                 driftCheckedUtc = "$(if ($drift) { $drift.refreshedUtc })"
-                note = $(if ($defined) { 'This account is already defined in PIM -- only its memberships are offered.' } elseif (-not $drift) { 'No drift check is stored yet, so no memberships are offered -- run Check now on the Drift page, then import again.' } else { '' }) })
+                note = ((@($(if ($defined) { 'This account is already defined in PIM -- only its memberships are offered.' }), $liveNote) | Where-Object { $_ }) -join ' ') })
             return 200
         }
         if ($path -eq '/api/directory/people' -and $method -eq 'GET') {
