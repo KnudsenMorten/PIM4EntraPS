@@ -120,3 +120,51 @@ function Get-PimUnmanagedAdminTile {
     }
 }
 
+# ---- REQ-ADM-REIMPORT-1 (operator 2026-09-27: "we need a way to re-import him using the configuration drift solution or import
+# him"). An unmanaged admin account -- one PIM stopped managing, or one made outside PIM -- is IMPORTED: its definition row is
+# built from the account itself, and its memberships come from the latest drift check's Keep rows. The Manager hands both
+# to the page, which STAGES them (Review & commit); nothing is written here.
+function ConvertTo-PimAdminImportRow {
+    <#
+      PURE. A directory user (Graph: userPrincipalName, givenName, surname, displayName, department, companyName,
+      usageLocation, userType, accountEnabled) -> an Account-Definitions-Admins row. Nothing is invented: a value the
+      account lacks stays empty for the operator to fill in; UserName is the UPN's local part (the account exists already).
+    #>
+    param([Parameter(Mandatory)][object]$User)
+    $g = { param($n) $p = $User.PSObject.Properties[$n]; if ($p -and $null -ne $p.Value) { "$($p.Value)".Trim() } else { '' } }
+    $upn = & $g 'userPrincipalName'
+    if (-not $upn) { throw 'the account has no userPrincipalName' }
+    $first = & $g 'givenName'; $last = & $g 'surname'; $disp = & $g 'displayName'
+    if (-not $first -and -not $last -and $disp) { $pp = @($disp -split '\s+'); $first = $pp[0]; $last = $(if ($pp.Count -gt 1) { ($pp[1..($pp.Count - 1)] -join ' ') } else { '' }) }
+    $ini = (("$(if ($first) { $first.Substring(0, 1) })" + "$(if ($last) { $last.Substring(0, 1) })")).ToUpperInvariant()
+    $enabled = $User.PSObject.Properties['accountEnabled'] -and $User.accountEnabled -ne $false
+    [ordered]@{
+        FirstName = $first; LastName = $last; Initials = $ini
+        DisplayName = $(if ($disp) { $disp } else { ("$first $last").Trim() })
+        UserPrincipalName = $upn; UserName = ($upn -split '@')[0]
+        UserType = $(if ((& $g 'userType') -ieq 'Guest') { 'External' } else { 'Internal' })
+        AccountStatus = $(if ($enabled) { 'Enabled' } else { 'Disabled' })
+        Department = (& $g 'department'); Company = (& $g 'companyName'); UsageLocation = (& $g 'usageLocation')
+        Purpose = 'Imported from the tenant (was not managed by PIM)'
+    }
+}
+
+function Get-PimAdminImportMemberships {
+    <#
+      PURE. From a stored drift document (pim.TenantCache 'drift'), the PIM-Assignments-Admins rows that would KEEP the
+      admin's live memberships -- the EXTRA items whose keep row names this admin (Username = the UPN, case-insensitive).
+      Returns @(rows), each with Action=Assign added.
+    #>
+    param([AllowNull()][object]$DriftDoc, [Parameter(Mandatory)][string]$Upn)
+    $u = $Upn.Trim().ToLowerInvariant(); $out = New-Object System.Collections.Generic.List[object]; $seen = @{}
+    foreach ($s in @($DriftDoc.scopes)) {
+        foreach ($it in @($s.items)) {
+            if ("$($it.type)" -ne 'extra' -or -not $it.keep -or "$($it.keep.base)" -ne 'PIM-Assignments-Admins') { continue }
+            $row = $it.keep.row; if ("$($row.Username)".Trim().ToLowerInvariant() -ne $u) { continue }
+            $k = ("$($row.Username)|$($row.GroupTag)|$($row.AssignmentType)").ToLowerInvariant(); if ($seen.ContainsKey($k)) { continue }; $seen[$k] = $true
+            $o = [ordered]@{}; foreach ($p in $row.PSObject.Properties) { $o[$p.Name] = "$($p.Value)" }; if (-not $o.Contains('Action')) { $o['Action'] = 'Assign' }
+            $out.Add([pscustomobject]$o)
+        }
+    }
+    return @($out.ToArray())
+}

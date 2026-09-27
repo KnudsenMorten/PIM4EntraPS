@@ -1201,11 +1201,11 @@ function Get-PimManagerDiscoveryInbox {
     $missing = New-Object System.Collections.Generic.List[string]
     $az = & $read 'azure-scopes'; if ($null -eq $az) { $missing.Add('azure-scopes') }
     $en = & $read 'entra-roles'; if ($null -eq $en) { $missing.Add('entra-roles') }
-    $df = & $read 'workload-roles:defender'; $it = & $read 'workload-roles:intune'; $pb = & $read 'powerbi-workspaces'
+    $df = & $read 'workload-roles:defender'; $it = & $read 'workload-roles:intune'; $pb = & $read 'powerbi-workspaces'; $au = & $read 'aus'
     $scopes = @(if ($az) { @($az.items) | Where-Object { $_ } })
     $items = ConvertTo-PimDiscoveryItems -AzureScopes $scopes -EntraRoles @(if ($en) { @($en.items) | Where-Object { $_ } }) `
         -DefenderRoles @(if ($df -and $df.read) { @($df.roles) | Where-Object { $_ } }) -IntuneRoles @(if ($it -and $it.read) { @($it.roles) | Where-Object { $_ } }) `
-        -PowerBiWorkspaces @(if ($pb) { @($pb.items) | Where-Object { $_ } })
+        -PowerBiWorkspaces @(if ($pb) { @($pb.items) | Where-Object { $_ } }) -AdministrativeUnits @(if ($au) { @($au.items) | Where-Object { $_ } })
     # what the store already defines
     $names = New-Object System.Collections.Generic.List[string]; $tags = New-Object System.Collections.Generic.List[string]; $refs = New-Object System.Collections.Generic.List[string]
     foreach ($e in @('PIM-Definitions-Services', 'PIM-Definitions-Resources', 'PIM-Definitions-Tasks', 'PIM-Definitions-Roles')) {
@@ -1217,6 +1217,8 @@ function Get-PimManagerDiscoveryInbox {
         }
     }
     foreach ($r in @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Assignments-Azure-Resources')) { $v = "$($r.AzScope)".Trim(); if ($v) { $refs.Add($v) } }
+    # REQ-AU-DRIFT-1: an AU PIM defines is known by its display name (and its tag)
+    foreach ($r in @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Definitions-AU')) { $v = "$($r.AUDisplayName)".Trim(); if ($v) { $names.Add($v) }; $v = "$($r.AdministrativeUnitTag)".Trim(); if ($v) { $tags.Add($v) } }
     $decRaw = Get-PimManagerSettingObject -Name 'DiscoveryDecisions'
     $decisions = @{}; if ($decRaw) { if ($decRaw -is [System.Collections.IDictionary]) { foreach ($k in $decRaw.Keys) { $decisions["$k"] = $decRaw[$k] } } else { foreach ($p in $decRaw.PSObject.Properties) { $decisions[$p.Name] = $p.Value } } }
     $blRaw = Get-PimManagerSettingObject -Name 'DiscoveryRoleBaseline'
@@ -11684,6 +11686,38 @@ function Handle-Request {
             return 200
         }
 
+        # REQ-ADM-REIMPORT-1 (operator 2026-09-27): the unmanaged admin accounts (the engine's report) and, per account, what
+        # IMPORT would stage -- its definition row read from the account itself + the rows that keep its live memberships
+        # (the latest drift check's Keep rows). Read-only: the page stages them; Review & commit writes them.
+        if ($path -eq '/api/unmanaged-admins' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required.' }; return 403 }
+            $rec = $null; try { $rec = Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name (Get-PimUnmanagedAdminSettingName) } catch { $rec = $null }
+            $tile = Get-PimUnmanagedAdminTile -Record $rec
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; reported = $tile.reported; accounts = @($tile.accounts); count = $tile.count; stale = $tile.stale; observedUtc = $tile.observedUtc; message = $tile.message })
+            return 200
+        }
+        if ($path -eq '/api/unmanaged-admins/import' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to import an admin account.' }; return 403 }
+            $iu = ''; try { foreach ($pair in ("$($req.Url.Query)".TrimStart('?') -split '&')) { if ($pair -match '^upn=(.*)$') { $iu = [uri]::UnescapeDataString($Matches[1]).Trim() } } } catch { }
+            if ($iu -notmatch '^[^@\s]+@[^@\s]+$') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'upn=<user principal name> is required' }; return 400 }
+            if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no Graph client in this runtime -- the account could not be read' }; return 503 }
+            $user = $null
+            try { $user = Invoke-PimGraph -Path ("/users/{0}?`$select=id,userPrincipalName,givenName,surname,displayName,department,companyName,usageLocation,userType,accountEnabled" -f [uri]::EscapeDataString($iu)) }
+            catch {
+                $st = if ("$($_.Exception.Message)" -match 'Request_ResourceNotFound|404') { 404 } else { 502 }
+                Write-JsonResponse -Response $resp -Status $st -Body @{ error = $(if ($st -eq 404) { "no account '$iu' in the directory" } else { "the account could not be read: $($_.Exception.Message)" }) }; return $st
+            }
+            $row = ConvertTo-PimAdminImportRow -User $user
+            $drift = $null; try { if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) { $drift = Get-PimTenantCacheEntry -Kind 'drift' } } catch { $drift = $null }
+            $mem = @(Get-PimAdminImportMemberships -DriftDoc $drift -Upn "$($row.UserPrincipalName)")
+            $defined = @(@(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'Account-Definitions-Admins') | Where-Object { "$($_.UserPrincipalName)".Trim() -ieq "$($row.UserPrincipalName)" -or "$($_.UserName)".Trim() -ieq "$($row.UserName)" }).Count -gt 0
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; adminRow = $row; memberships = @($mem); alreadyDefined = $defined
+                driftCheckedUtc = "$(if ($drift) { $drift.refreshedUtc })"
+                note = $(if ($defined) { 'This account is already defined in PIM -- only its memberships are offered.' } elseif (-not $drift) { 'No drift check is stored yet, so no memberships are offered -- run Check now on the Drift page, then import again.' } else { '' }) })
+            return 200
+        }
         if ($path -eq '/api/directory/people' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             # REQUIREMENTS §35.8. The directory-people lookup every people-picker needs.

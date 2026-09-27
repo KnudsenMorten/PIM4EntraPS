@@ -240,14 +240,28 @@ function ConvertFrom-PimAdminImportCsv {
     # Detect delimiter from the header.
     $header = $lines[0]
     $delim = if ($header -match "`t") { "`t" } elseif ($header.Contains(';')) { ';' } else { ',' }
-    $cols = @($header -split [regex]::Escape($delim) | ForEach-Object { $_.Trim() })
+    $cols = @($header -split [regex]::Escape($delim) | ForEach-Object { $_.Trim() } | ForEach-Object { if ($_ -ieq 'UPN') { 'UserPrincipalName' } else { $_ } })
+    # BUG-265 (2026-09-27): the card's own placeholder is HEADER-LESS ("upn@contoso.com;Jane Doe;IT") and staged 0 rows, because
+    # the first line was always taken as the header. A first line that names NO known column is data, in the placeholder's
+    # order UPN;DisplayName;Department -- FirstName/LastName come from the display name, UserName from the UPN.
+    $known = @('FirstName', 'LastName', 'Initials', 'UserPrincipalName', 'DisplayName', 'Department', 'UserName', 'UsageLocation', 'TargetPlatform', 'Purpose', 'UserType')
+    $first = 1
+    if (-not @($cols | Where-Object { $c = $_; @($known | Where-Object { $_ -ieq $c }).Count }).Count) {
+        $cols = @('UserPrincipalName', 'DisplayName', 'Department'); $first = 0
+    }
     $records = New-Object System.Collections.ArrayList
-    for ($i = 1; $i -lt $lines.Count; $i++) {
+    for ($i = $first; $i -lt $lines.Count; $i++) {
         $cells = @($lines[$i] -split [regex]::Escape($delim))
         $rec = [ordered]@{}
         for ($c = 0; $c -lt $cols.Count; $c++) {
             $rec[$cols[$c]] = if ($c -lt $cells.Count) { "$($cells[$c])".Trim() } else { '' }
         }
+        # A row with a display name but no first / last name (the header-less shape): split the display name.
+        if (-not "$($rec['FirstName'])".Trim() -and -not "$($rec['LastName'])".Trim() -and "$($rec['DisplayName'])".Trim()) {
+            $parts = @("$($rec['DisplayName'])".Trim() -split '\s+')
+            $rec['FirstName'] = $parts[0]; $rec['LastName'] = $(if ($parts.Count -gt 1) { ($parts[1..($parts.Count - 1)] -join ' ') } else { '' })
+        }
+        if (-not "$($rec['UserName'])".Trim() -and "$($rec['UserPrincipalName'])".Trim()) { $rec['UserName'] = ("$($rec['UserPrincipalName'])".Trim() -split '@')[0] }
         # Skip fully-blank lines.
         $hasAny = $false; foreach ($k in $rec.Keys) { if ("$($rec[$k])".Trim()) { $hasAny = $true; break } }
         if ($hasAny) { [void]$records.Add($rec) }

@@ -641,6 +641,18 @@ top of the engine delta — it does NOT reimplement reconciliation.**
   the revoke with a justification, so every revoke safeguard applies and the removal is queued for commit; **Keep** stages
   the row into the pending changes for Review & commit; **Ignore** is one click and **Re-add** undoes it. One item or the
   ticked items.
+- **Administrative Units in drift (2.4.455).** An AU in the tenant that PIM does not define is an `extra` whose Keep is its
+  `PIM-Definitions-AU` row under its display name (PIM matches AUs by name; the tag is derived from it); it has no Delete,
+  because PIM never deletes an AU. An AU-scoped role on a PIM group can be deleted (an Entra-role revoke at the AU scope) and
+  kept (its `PIM-Assignments-Roles-AUs` row) once the AU is defined: the drift job stamps the group's tag and the AU's PIM
+  tag on the live row for that.
+- **Stop managing and Import an admin (2.4.455).** **Stop managing** (Admin accounts, and an admin node on the Access map)
+  stages the removal of every row that names the admin -- the definition row and the assignment rows, by sign-in name or
+  short user name in any case -- and takes the name out of owner / sponsor / approver / notify cells. Nothing changes in
+  Entra: the Admins scope never disables an account because its row is gone (it is reported as an unmanaged admin), and no
+  scheduled run prunes its memberships (they show as drift). **Import** reverses it: `GET /api/unmanaged-admins/import`
+  reads the account from the directory into a definition row and takes the memberships from the latest drift check's
+  Keep rows; the page stages both for Review & commit.
 - **The drift mail cadence (2.4.453).** The drift alert mail goes out once per cadence (`pim.Settings` `DriftAlertCadence`:
   daily, weekly, monthly — the default — or quarterly; `PUT /api/drift/settings`, SuperAdmin, audited). The job records
   each send in `DriftAlertState` and sends again only when the cadence has passed (`Test-PimDriftAlertDue`, an hour of
@@ -6082,6 +6094,8 @@ has **Re-add**.
   Review & commit, and the engine creates the group after the commit. Discovery never grants access -- roles are linked in
   Create access. A new role is **accepted** into the role catalog.
 - **Ignore / Re-add.** One click, no reason; who and when are kept. Decisions live in the store, not in a file.
+- **Administrative Units (2.4.455).** The tenant's AUs (the `aus` tenant cache) are a creatable kind: Create stages the AU's
+  `PIM-Definitions-AU` row under its display name; an AU PIM already defines (by name or tag) is known.
 - **API.** `GET /api/discovery-inbox`; `POST /api/discovery-decisions` with `create`, `ignore` or `readd` and the item keys
   (Admin role and a Pro licence; audited).
 **REST engine discovery layer (`engine/_shared/PIM-Discovery.ps1`).** The new

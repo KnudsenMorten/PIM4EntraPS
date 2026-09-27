@@ -2929,6 +2929,9 @@
           // wrong place, it must be per user in the top"). It was on the TAP table below, which is
           // a different, TAP-only list -- so the one place an operator manages an admin did not
           // include the verb that changes the admin.
+          // REQ-ADM-UNMANAGE-1: out of PIM, Entra untouched (the account and its access stay; Import brings it back).
+          '<button class="btn-sec acctUnmanage" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
+            ' title="Take this admin out of PIM: every row that names it leaves the desired state. Nothing changes in Entra -- the account and the access it holds stay (listed as unmanaged / drift; Import brings it back)." style="font-size:11px;">Stop managing</button> ' +
           '<button class="btn-sec acctEditTop" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + (a.readOnly ? ' disabled' : '') +
             ' title="' + (a.readOnly ? escapeHtml(a.readOnlyWhy || 'read-only') + ' -- change it on the master' : 'Change display name, office user email (where mail for this admin is forwarded), company, department, manager, or whether it is synced to slaves.') + '" style="font-size:11px;">Edit</button> ' +
           '<button class="btn-sec acctAccess" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + ((a.accessLocked || (a.readOnly && a.source !== 'central')) ? ' disabled title="' + escapeHtml(a.readOnlyWhy || 'read-only') + '"' : '') +
@@ -3459,6 +3462,7 @@
     document.querySelectorAll('.acctRevoke').forEach(b => { b.onclick = () => acctRevokeSessions(b.dataset.upn); });
     document.querySelectorAll('.acctTap').forEach(b => { b.onclick = () => resetAdminTap(b.dataset.upn); });
     document.querySelectorAll('.acctRetire').forEach(b => { b.onclick = () => acctMarkForManualRemoval(b.dataset.upn); });
+    document.querySelectorAll('.acctUnmanage').forEach(b => { b.onclick = () => acctStopManaging(b.dataset.upn, b.dataset.user); });
     // §35.6: two surfaces, ONE workflow. This jump is what stops the grid and the wizard from
     // being two disconnected tools -- without it the operator leaves here, finds the wizard, and
     // re-identifies the same person by hand.
@@ -3526,6 +3530,49 @@
     renderAccounts();
   }
 
+  // REQ-ADM-REIMPORT-1 (operator 2026-09-27): the admin accounts PIM does not manage (the engine's report), each with IMPORT:
+  // its definition row read from the account + the rows that keep its live memberships (the latest drift check), staged for
+  // Review & commit. Nothing is written until the commit.
+  async function renderUnmanagedAdmins(host) {
+    if (!host || !isServer || !roleAtLeast('Admin')) { if (host) host.innerHTML = ''; return; }
+    let d = null;
+    try { d = await api('GET', '/api/unmanaged-admins'); } catch (e) { host.innerHTML = ''; return; }
+    const acc = asList(d && d.accounts);
+    if (!d || d.reported !== true || !acc.length) { host.innerHTML = ''; return; }
+    const esc = escapeHtml;
+    host.innerHTML = '<details id="acctUnmanaged" open style="border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;padding:8px 10px;margin-bottom:10px;">' +
+      '<summary style="font-weight:600;font-size:13px;cursor:pointer;">' + acc.length + ' unmanaged admin account(s) -- in the directory, not in PIM</summary>' +
+      '<div style="color:#57606a;font-size:11.5px;margin:4px 0 6px;">No TAP healing, no reminders, no review. <b>Import</b> stages the account&rsquo;s definition (read from the account) and the rows that keep the access it holds today (from the latest drift check) -- review and commit under Pending changes.' +
+      (d.stale ? ' <span style="color:#9a6700;">(report is stale -- observed ' + esc(d.observedUtc || '') + ')</span>' : '') + '</div>' +
+      '<table class="grid" style="font-size:12px;"><tbody>' + acc.map(u => '<tr><td>' + esc(u) + '</td><td><button class="btn-sec acctImportBtn" data-upn="' + esc(u) + '" style="font-size:11px;">Import</button> <span class="acctImportMsg" style="font-size:11px;color:#57606a;"></span></td></tr>').join('') +
+      '</tbody></table></details>';
+    host.querySelectorAll('.acctImportBtn').forEach(b => b.onclick = () => acctImportUnmanaged(b.dataset.upn, b));
+  }
+  async function acctImportUnmanaged(upn, btn) {
+    const msg = btn && btn.parentElement ? btn.parentElement.querySelector('.acctImportMsg') : null;
+    const say = (t, bad) => { if (msg) { msg.textContent = t; msg.style.color = bad ? '#cf222e' : '#116329'; } else sharedToast(t); };
+    let r = null;
+    try { r = await api('GET', '/api/unmanaged-admins/import?upn=' + encodeURIComponent(upn)); }
+    catch (e) { say('Not imported: ' + ((e && e.body && e.body.error) || e.message), true); return; }
+    let staged = 0;
+    if (!r.alreadyDefined && r.adminRow) {
+      const base = 'Account-Definitions-Admins';
+      const data = await loadCsv(base); ensurePending(base, data.header, data.rows);
+      const p = pendingChanges[base];
+      const dupe = p.rows.some((x, i) => !p.deletes.has(i) && String(x.UserPrincipalName || '').toLowerCase() === String(r.adminRow.UserPrincipalName || '').toLowerCase());
+      if (!dupe) {
+        const row = {}; p.header.forEach(h => { row[h] = ''; });
+        Object.keys(r.adminRow).forEach(k => { row[k] = r.adminRow[k]; if (p.header.indexOf(k) < 0) p.header.push(k); });
+        p.rows.push(row); staged++;
+      }
+    }
+    const mem = asList(r.memberships);
+    if (mem.length) await driftKeepExtras(mem.map(m => ({ type: 'extra', keep: { base: 'PIM-Assignments-Admins', row: m } })), () => { });
+    markBadges();
+    try { valRevalidateAfterFix(); } catch (_) { }
+    say('Staged ' + (staged ? 'the account + ' : '') + mem.length + ' membership row(s)' + (r.note ? ' -- ' + r.note : '') + ' -- commit under Pending changes.');
+  }
+
   async function renderAccounts() {
     const outer = document.getElementById('accountsBody');
     if (!outer) return;
@@ -3533,9 +3580,10 @@
     // the credential-recovery detail view. Two containers so each re-renders independently --
     // a TAP refresh must not blow away the grid's filter box mid-typing.
     if (!document.getElementById('acctGridWrap')) {
-      outer.innerHTML = '<div id="acctGridWrap"></div><hr style="border:none;border-top:1px solid #eaeef2;margin:18px 0;"><div id="accountsTapBody"></div>';
+      outer.innerHTML = '<div id="acctUnmanagedWrap"></div><div id="acctGridWrap"></div><hr style="border:none;border-top:1px solid #eaeef2;margin:18px 0;"><div id="accountsTapBody"></div>';
     }
     try { await renderAccountGrid(document.getElementById('acctGridWrap')); } catch (_) {}
+    try { await renderUnmanagedAdmins(document.getElementById('acctUnmanagedWrap')); } catch (_) {}
     const body = document.getElementById('accountsTapBody');
     if (!body) return;
     // 🔴 TAP STATE IS CHECKED PER ADMIN, ON DEMAND (operator, 2026-09-12: "no need to enum all
@@ -8695,6 +8743,10 @@
         ? [r.TargetGroupTag, r.SourceGroupTag, r.AssignmentType].map(v => String(v || '').toLowerCase()).join('|')
         : base === 'PIM-Assignments-Roles-Groups'
           ? [r.GroupTag, r.RoleDefinitionName, r.AssignmentType].map(v => String(v || '').toLowerCase()).join('|')
+        : base === 'PIM-Assignments-Roles-AUs'   // REQ-AU-DRIFT-1 (2.4.455)
+          ? [r.GroupTag, r.AdministrativeUnitTag, r.RoleDefinitionName, r.AssignmentType].map(v => String(v || '').toLowerCase()).join('|')
+        : base === 'PIM-Definitions-AU'          // an AU is matched by its display name
+          ? String(r.AUDisplayName || '').toLowerCase()
           : [r.Username, r.GroupTag, r.AssignmentType].map(v => String(v || '').toLowerCase()).join('|');
       const have = new Set(pc.rows.map(keyOf));
       for (const s of stage.filter(x => x.keep.base === base)) {
@@ -9205,7 +9257,7 @@
     const out = [];
     for (const s of (stage || [])) {
       const hdr = (headers && headers[s.base]) || Object.keys(s.row || {});
-      const tag = String((s.row && s.row.GroupTag) || '').toLowerCase();
+      const tag = String((s.row && (s.row.GroupTag || s.row.AdministrativeUnitTag)) || '').toLowerCase();   // an AU row has no GroupTag
       const seen = (pendingTags && pendingTags[s.base]) || new Set();
       if (tag && seen.has(tag)) continue;
       if (tag) seen.add(tag);
@@ -9227,7 +9279,7 @@
         const data = await loadCsv(base);
         ensurePending(base, data.header, data.rows);
         headers[base] = pendingChanges[base].header;
-        pendingTags[base] = new Set(pendingChanges[base].rows.map(x => String((x && x.GroupTag) || '').toLowerCase()).filter(Boolean));
+        pendingTags[base] = new Set(pendingChanges[base].rows.map(x => String((x && (x.GroupTag || x.AdministrativeUnitTag)) || '').toLowerCase()).filter(Boolean));
       }
       const plan = discStagePlan(stage, headers, pendingTags);
       for (const s of plan) pendingChanges[s.base].rows.push(s.row);
@@ -10476,8 +10528,24 @@
             fieldRow('Target group', '<input id="aBaGroup" data-combo="1" type="text" list="aBaGroupList" placeholder="start typing a group…" autocomplete="off"><datalist id="aBaGroupList"></datalist>') +
             fieldRow('Entra roles (choose one or more)', '<select id="aBaRoles" multiple size="5" style="min-height:96px;"></select>') +
             fieldRow('Assignment type', '<select id="aBaType"><option>Eligible</option><option>Active</option></select>') +
+            // DOC-AU-1 (2.4.455): the roles only INSIDE these Administrative Units (AU-scoped) instead of tenant-wide.
+            fieldRow('Only in these Administrative Units (optional)', '<select id="aBaAus" multiple size="4" style="min-height:76px;min-width:200px;" title="Leave empty for tenant-wide roles. Pick AUs to give the roles only inside them."><option value="" disabled>(no Administrative Units defined yet)</option></select>') +
           '</div>' +
           '<div style="margin-top:8px;"><button id="aBaGo" class="primary">Compute &amp; stage</button> <span id="aBaMsg" style="font-size:11.5px;color:#57606a;"></span></div>' +
+        '</div>' +
+        // DOC-AU-1 (2.4.455): create an Administrative Unit (+ AU-scoped roles for a group) -- POST /api/authoring/au
+        '<div class="auth-card" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#fff;">' +
+          '<b style="font-size:13px;">Create an Administrative Unit</b>' +
+          '<div style="color:#57606a;font-size:11.5px;margin:3px 0 8px;">Defines an AU (PIM creates it in Entra on the next run) and, optionally, gives a group Entra roles scoped to it.</div>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;">' +
+            fieldRow('AU name', '<input id="aAuName" type="text" placeholder="e.g. Helpdesk Europe">') +
+            fieldRow('AU tag (optional)', '<input id="aAuTag" type="text" placeholder="derived from the name">') +
+            fieldRow('Description', '<input id="aAuDesc" type="text">') +
+            fieldRow('Visibility', '<select id="aAuVis"><option>Public</option><option>HiddenMembership</option></select>') +
+            fieldRow('Group to delegate (optional)', '<input id="aAuGroup" data-combo="1" type="text" list="aBaGroupList" placeholder="start typing a group…" autocomplete="off">') +
+            fieldRow('Roles in this AU (optional)', '<select id="aAuRoles" multiple size="4" style="min-height:76px;"></select>') +
+          '</div>' +
+          '<div style="margin-top:8px;"><button id="aAuGo" class="primary">Compute &amp; stage</button> <span id="aAuMsg" style="font-size:11.5px;color:#57606a;"></span></div>' +
         '</div>' +
         // Clone definition
         '<div class="auth-card" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#fff;">' +
@@ -10679,9 +10747,13 @@
         const groupTag = document.getElementById('aBaGroup').value.trim();
         if (!groupTag) throw new Error('pick a target GroupTag');
         if (!roles.length) throw new Error('select at least one Entra role');
+        const aus = Array.from((document.getElementById('aBaAus') || {}).selectedOptions || []).map(o => o.value.trim()).filter(Boolean);
+        // DOC-AU-1: with AUs picked, the roles are AU-scoped (PIM-Assignments-Roles-AUs) instead of tenant-wide.
         const r = await api('POST', '/api/authoring/bulk-attach', {
           groupTag: groupTag,
-          entraRoles: roles, assignmentType: document.getElementById('aBaType').value
+          entraRoles: aus.length ? [] : roles,
+          auScopes: aus.length ? [].concat(...aus.map(a => roles.map(role => ({ auTag: a, role })))) : [],
+          assignmentType: document.getElementById('aBaType').value
         });
         msg.textContent = 'previewing...';
         const staged = await stageBulkAttachResult(r, true);
@@ -10690,6 +10762,36 @@
         msg.style.color = '#57606a';
         msg.innerHTML = staged + ' row(s) staged &mdash; <a style="cursor:pointer;color:#0969da;" id="aBaSave">Pending changes</a>';
         const a = document.getElementById('aBaSave'); if (a) a.onclick = () => switchTab('save');
+      } catch (e) { msg.style.color = '#cf222e'; msg.textContent = e.message; }
+    };
+    // DOC-AU-1 (2.4.455): the AU pickers (defined AUs) + the role list for the AU card (the same Entra roles as above).
+    (async () => {
+      try {
+        const d = await loadCsv('PIM-Definitions-AU');
+        const opts = (d.rows || []).filter(x => x && x.AdministrativeUnitTag).map(x => '<option value="' + escapeHtml(x.AdministrativeUnitTag) + '">' + escapeHtml(x.AUDisplayName || x.AdministrativeUnitTag) + '</option>').join('');
+        const sel = document.getElementById('aBaAus'); if (sel && opts) sel.innerHTML = opts;   // none defined: the disabled hint stays
+      } catch (_) { }
+      const src = document.getElementById('aBaRoles'), dst = document.getElementById('aAuRoles');
+      const copy = () => { if (src && dst && !dst.options.length) dst.innerHTML = src.innerHTML; };
+      copy(); setTimeout(copy, 1500); setTimeout(copy, 5000);
+    })();
+    (document.getElementById('aAuGo') || {}).onclick = async () => {
+      const msg = document.getElementById('aAuMsg'); msg.style.color = '#57606a'; msg.textContent = 'computing...';
+      try {
+        const name = document.getElementById('aAuName').value.trim();
+        if (!name) throw new Error('give the AU a name');
+        const tag = document.getElementById('aAuTag').value.trim() || name.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-{2,}/g, '-').replace(/^-|-$/g, '');
+        const grp = document.getElementById('aAuGroup').value.trim();
+        const roles = Array.from(document.getElementById('aAuRoles').selectedOptions || []).map(o => o.value.trim()).filter(Boolean);
+        if (roles.length && !grp) throw new Error('pick the group that gets the roles, or clear the roles');
+        const r = await api('POST', '/api/authoring/au', { auDisplayName: name, auTag: tag, auDescription: document.getElementById('aAuDesc').value.trim(),
+          visibility: document.getElementById('aAuVis').value, roleBindings: grp ? roles.map(role => ({ groupTag: grp, role })) : [] });
+        const res = (r && (r.result || r)) || {};
+        let n = 0;
+        if (res.auRow) n += await stageComputedRows('PIM-Definitions-AU', [res.auRow]);
+        if (asList(res.rolesAusRows).length) n += await stageComputedRows('PIM-Assignments-Roles-AUs', asList(res.rolesAusRows));
+        msg.innerHTML = n + ' row(s) staged &mdash; <a style="cursor:pointer;color:#0969da;" id="aAuSave">Pending changes</a>';
+        const a = document.getElementById('aAuSave'); if (a) a.onclick = () => switchTab('save');
       } catch (e) { msg.style.color = '#cf222e'; msg.textContent = e.message; }
     };
     // IMP-19. Turn a human name into the tag the store keys on. Deliberately CONSERVATIVE:
@@ -13850,7 +13952,7 @@
           ${rolePermsSummaryRow}
         </div>
         ${rolePermsBlock}
-        ${canDelete ? `<div class="toolbar" style="margin-top:10px;"><button class="danger" id="btnDeleteNode">Delete this node</button></div>` : ''}
+        ${canDelete ? `<div class="toolbar" style="margin-top:10px;"><button class="danger" id="btnDeleteNode"${data.kind === 'admin' ? ' title="Take this admin out of PIM -- Entra untouched"' : ''}>${data.kind === 'admin' ? 'Stop managing' : 'Delete this node'}</button></div>` : ''}
         <h2>Incoming (${incoming.length})</h2>
         ${incoming.length ? incoming.map(e => neighborChip(e, 'source')).join('') : '<div class="empty">(none)</div>'}
         <h2>Outgoing (${outgoing.length})</h2>
@@ -14930,21 +15032,9 @@
   async function deleteNode(data) {
     // Gather impact across all referencing CSVs by loading them.
     const impact = []; // [{ base, count, criteria(plural) }]
-    if (data.kind === 'admin') {
-      const adminBase = 'Account-Definitions-Admins';
-      const aData = await loadCsv(adminBase);
-      ensurePending(adminBase, aData.header, aData.rows);
-      // Match the admin by UserPrincipalName (the node id).
-      const upn = data.id;
-      const adminMatches = pendingChanges[adminBase].rows.filter((r,i) => !pendingChanges[adminBase].deletes.has(i) && (r.UserPrincipalName === upn));
-      impact.push({ base: adminBase, count: adminMatches.length, criteria: [{ UserPrincipalName: upn }] });
-
-      const asgBase = 'PIM-Assignments-Admins';
-      const sData = await loadCsv(asgBase);
-      ensurePending(asgBase, sData.header, sData.rows);
-      const sMatches = pendingChanges[asgBase].rows.filter((r,i) => !pendingChanges[asgBase].deletes.has(i) && (r.Username === upn));
-      impact.push({ base: asgBase, count: sMatches.length, criteria: [{ Username: upn }] });
-    } else if (data.kind === 'role-group' || data.kind === 'permission-group') {
+    // REQ-ADM-UNMANAGE-1: an ADMIN node is never "deleted" -- it is taken out of PIM (every row naming it), Entra untouched.
+    if (data.kind === 'admin') { return acctStopManaging(String(data.id || ''), String(data.userName || '')); }
+    if (data.kind === 'role-group' || data.kind === 'permission-group') {
       const groupTag = data.groupTag || (data.id || '').replace(/^group:/, '');
       const defBase = data.source;
       const dData = await loadCsv(defBase);
@@ -15003,6 +15093,72 @@
       }
     }
     markBadges();
+    switchTab('save');
+  }
+
+  // ----- REQ-ADM-UNMANAGE-1 (operator 2026-09-27): "remove admin account from pim management ... remove any delegations and rows
+  // above him ... but we dont delete in entra, just from pim manager". STOP MANAGING: every row that names the admin leaves the
+  // desired state; Entra is untouched -- the account stays as it is, and the access it holds stays too (no scheduled run prunes;
+  // it is listed as drift and under "Unmanaged admin accounts", where Import brings it back).
+  const PIM_ADMIN_NAME_COLUMNS = ['Owners', 'SponsorUpn', 'ApproverUpns', 'NotifyUpns'];
+  // PURE (exported for the harness). ident = { upn, userName }; tables = { <base>: { header, rows, deletes? } }.
+  // Returns [{ base, deletes: [row index], edits: [{ idx, col, from, to }] }] -- only entities with something to do.
+  //   Account-Definitions-Admins: the admin's row (UserPrincipalName or UserName, case-insensitive).
+  //   PIM-Assignments-Admins:     every row whose Username is the UPN or the short UserName (case-insensitive).
+  //   every other entity:         the admin's name is taken OUT of Owners / SponsorUpn / ApproverUpns / NotifyUpns cells
+  //                               (the other names in the cell stay; the row stays).
+  function pimUnmanageAdminPlan(ident, tables) {
+    const upn = String((ident && ident.upn) || '').trim().toLowerCase();
+    const short = String((ident && ident.userName) || (upn.split('@')[0] || '')).trim().toLowerCase();
+    const isMe = v => { const s = String(v || '').trim().toLowerCase(); return !!s && (s === upn || s === short); };
+    const out = [];
+    for (const base of Object.keys(tables || {})) {
+      const tb = tables[base] || {}; const rows = tb.rows || []; const dels = tb.deletes || new Set();
+      const item = { base, deletes: [], edits: [] };
+      rows.forEach((r, i) => {
+        if (!r || (dels.has && dels.has(i))) return;
+        if (base === 'Account-Definitions-Admins') { if (isMe(r.UserPrincipalName) || isMe(r.UserName)) item.deletes.push(i); return; }
+        if (base === 'PIM-Assignments-Admins') { if (isMe(r.Username) || isMe(r.UserName)) item.deletes.push(i); return; }
+        for (const col of PIM_ADMIN_NAME_COLUMNS) {
+          const cell = r[col]; if (cell == null || !String(cell).trim()) continue;
+          const parts = String(cell).split(/[,;\s]+/).map(s => s.trim()).filter(Boolean);
+          const keep = parts.filter(p => !isMe(p));
+          if (keep.length !== parts.length) {
+            const sep = /;/.test(String(cell)) ? '; ' : (/,/.test(String(cell)) ? ', ' : '; ');
+            item.edits.push({ idx: i, col, from: String(cell), to: keep.join(sep) });
+          }
+        }
+      });
+      if (item.deletes.length || item.edits.length) out.push(item);
+    }
+    return out;
+  }
+  async function acctStopManaging(upn, userName) {
+    if (!isServer) { alert('Static mode -- cannot edit. Restart with -Server.'); return; }
+    if (!roleAtLeast('Admin')) { alert('Admin role required.'); return; }
+    const bases = ['Account-Definitions-Admins', 'PIM-Assignments-Admins'].concat(PIM_TAG_OWNER_ENTITIES).concat(['PIM-Assignments-Roles-Groups']);
+    const tables = {};
+    for (const b of bases) {
+      try { const d = await loadCsv(b); ensurePending(b, d.header, d.rows); tables[b] = pendingChanges[b]; } catch (_) { }
+    }
+    const plan = pimUnmanageAdminPlan({ upn, userName }, tables);
+    const nDel = plan.reduce((s, x) => s + x.deletes.length, 0), nEdit = plan.reduce((s, x) => s + x.edits.length, 0);
+    if (!nDel && !nEdit) { await showConfirm('Nothing to stop managing', '<p>No row names <b>' + escapeHtml(upn) + '</b>.</p>', false); return; }
+    const lines = plan.map(x => '<li><b>' + escapeHtml(x.base) + '</b>: ' + (x.deletes.length ? x.deletes.length + ' row(s) removed' : '') +
+      (x.deletes.length && x.edits.length ? ', ' : '') + (x.edits.length ? x.edits.length + ' cell(s) without this name' : '') + '</li>').join('');
+    const ok = await showConfirm('Stop managing ' + upn,
+      '<p><b>Stop managing</b> takes <b>' + escapeHtml(upn) + '</b> out of PIM: every row that names this admin leaves the desired state.</p><ul>' + lines + '</ul>' +
+      '<p><b>Nothing changes in Entra</b>: the account is not disabled or deleted, and the access it holds today stays. It is then listed under ' +
+      '<b>Unmanaged admin accounts</b> and its memberships as drift -- <b>Import</b> there brings it back. To take the access away as well, use ' +
+      '<b>Mark for manual removal</b> (offboarding) instead.</p><p style="color:#57606a">Nothing is saved yet -- review and commit under <b>Pending changes</b>.</p>', true);
+    if (!ok) return;
+    for (const x of plan) {
+      const p = pendingChanges[x.base];
+      for (const e of x.edits) { if (p.rows[e.idx]) p.rows[e.idx][e.col] = e.to; }
+      for (const i of x.deletes) p.deletes.add(i);
+    }
+    markBadges();
+    try { valRevalidateAfterFix(); } catch (_) { }
     switchTab('save');
   }
 
@@ -22363,129 +22519,6 @@
       { lbl:"You'll get -- GroupTag",  val: buildPermGroupTag(s.workload, s.capability, lvl) }
     ]);
   }
-  // SHIM: retain legacy single-page wizard body for diff readability; unreachable.
-  async function _wizardPermGroupEntraLegacy() {
-    const tlEntra = getCachedList('entraRoles');
-    const tlAus   = getCachedList('aus');
-
-    // Existing role-group choices for nesting.
-    let roleGroups = [];
-    try { const r = await loadCsv('PIM-Definitions-Roles'); roleGroups = (r.rows || []).filter(g => g.GroupTag); } catch (_) {}
-
-    const defTargets = [
-      { base: 'PIM-Definitions-Tasks',        label: 'Tasks (single capability)' },
-      { base: 'PIM-Definitions-Services',     label: 'Services (full service admin)' },
-      { base: 'PIM-Definitions-Processes',    label: 'Processes' },
-      { base: 'PIM-Definitions-Resources',    label: 'Resources' },
-      { base: 'PIM-Definitions-Departments',  label: 'Departments' },
-      { base: 'PIM-Definitions-Organization', label: 'Organization' }
-    ];
-
-    const body = document.createElement('div');
-    body.innerHTML = `
-      <div class="wiz-sub" style="padding:10px 14px 0 14px;">A capability bundle that grants an Entra ID role (or AU-scoped role). Generates 1 def row + 1 assignment row + optional nest rows.</div>
-      <div style="padding:10px 14px;">
-        <div class="field"><label>Service</label><input id="wzSvc" placeholder="e.g. Entra-ID"></div>
-        <div class="field"><label>Capability name <span style="color:#cf222e">*</span></label><input id="wzCap" placeholder="e.g. AppAdmin"></div>
-        <div class="field"><label>Level</label><select id="wzLevel">${[0,1,2,3,4,5,6,7,8,9].map(i => `<option>L${i}</option>`).join('')}</select></div>
-        <div class="field"><label>Tier</label><select id="wzTier"><option>T0</option><option>T1</option><option>T2</option></select></div>
-        <div class="field"><label>Code</label><select id="wzCode"><option>CP</option><option>WDP</option><option>MP</option><option>APP</option><option>USER</option></select></div>
-        <div class="field"><label>Domain</label><select id="wzDom"><option>ID</option><option>RES</option><option>DAT</option></select></div>
-        <div class="field"><label>Definition CSV</label><select id="wzDefBase">${defTargets.map(d => `<option value="${escapeHtml(d.base)}">${escapeHtml(d.label)}</option>`).join('')}</select></div>
-        <div class="field"><label>Target Entra role <span style="color:#cf222e">*</span> <span class="cache-badge-slot" data-list-key="entraRoles"></span></label>
-          <select id="wzRole"><option value="">(pick one)</option>${tlEntra.items.map(r => `<option value="${escapeHtml(r.displayName)}">${escapeHtml(r.displayName)}</option>`).join('')}</select>
-        </div>
-        <div class="field"><label>AU scope (optional) <span class="cache-badge-slot" data-list-key="aus"></span></label>
-          <select id="wzAu"><option value="">(none -- tenant-wide)</option>${tlAus.items.map(a => `<option value="${escapeHtml(a.displayName)}">${escapeHtml(a.displayName)}</option>`).join('')}</select>
-        </div>
-        <div class="field"><label>Assignment type</label><select id="wzAsgType"><option>Eligible</option><option>Active</option></select></div>
-        <div class="field field-full"><label>Nest into ${dimNounPlural()}</label>
-          <div class="multi">${roleGroups.length === 0 ? '<div style="color:#57606a">(none)</div>' : roleGroups.map(rg => `<label><input type="checkbox" value="${escapeHtml(rg.GroupTag)}"> ${escapeHtml(rg.GroupName||rg.GroupTag)} <span style="color:#57606a;font-size:10.5px">(${escapeHtml(rg.GroupTag)})</span></label>`).join('')}</div>
-        </div>
-        <div class="preview" id="wzPreview"></div>
-        <div class="err" id="wzErr" style="display:none"></div>
-      </div>`;
-
-    function compose() {
-      const svc  = body.querySelector('#wzSvc').value.trim();
-      const cap  = body.querySelector('#wzCap').value.trim();
-      const lvl  = body.querySelector('#wzLevel').value;
-      const tier = body.querySelector('#wzTier').value;
-      const code = body.querySelector('#wzCode').value;
-      const dom  = body.querySelector('#wzDom').value;
-      const namePartSvc = svc ? (svc + '-') : '';
-      const groupName = cap ? `PIM-${namePartSvc}${cap}-${lvl}-${tier}-${code}-${dom}` : '';
-      const groupTag  = cap ? `${namePartSvc}${cap}-${lvl}-${tier}-${code}-${dom}` : '';
-      return { svc, cap, lvl, tier, code, dom, groupName, groupTag };
-    }
-
-    function updatePreview() {
-      const c = compose();
-      const auTag  = body.querySelector('#wzAu').value;
-      const role   = body.querySelector('#wzRole').value;
-      const def    = body.querySelector('#wzDefBase').value;
-      const asgB   = auTag ? 'PIM-Assignments-Roles-AUs' : 'PIM-Assignments-Roles-Groups';
-      const nested = Array.from(body.querySelectorAll('.multi input[type=checkbox]:checked')).map(x => x.value);
-      const lines = [];
-      lines.push(`<div class="pv-row"><span class="pv-csv">${escapeHtml(def)} +</span>GroupName=<b>${escapeHtml(c.groupName||'(set capability)')}</b>, GroupTag=${escapeHtml(c.groupTag||'')}</div>`);
-      if (role) lines.push(`<div class="pv-row"><span class="pv-csv">${escapeHtml(asgB)} +</span>GroupTag=${escapeHtml(c.groupTag)}, RoleDefinitionName=${escapeHtml(role)}${auTag ? ', AdministrativeUnitTag='+escapeHtml(auTag) : ''}</div>`);
-      for (const rg of nested) lines.push(`<div class="pv-row"><span class="pv-csv">PIM-Assignments-Groups +</span>TargetGroupTag=${escapeHtml(rg)}, SourceGroupTag=${escapeHtml(c.groupTag)}, AssignmentType=Eligible</div>`);
-      body.querySelector('#wzPreview').innerHTML = lines.join('');
-    }
-    body.addEventListener('input', updatePreview);
-    body.addEventListener('change', updatePreview);
-
-    WIZ.open('New permission group (Entra ID)', body);
-    renderCacheBadges(body);
-
-    (document.getElementById('wizFinish') || {}).onclick = async () => {
-      const err = body.querySelector('#wzErr');
-      const c = compose();
-      const role = body.querySelector('#wzRole').value;
-      const auTag = body.querySelector('#wzAu').value;
-      const asgType = body.querySelector('#wzAsgType').value;
-      if (!c.cap || !role) { err.textContent = 'Capability name and target Entra role are required.'; err.style.display = ''; return; }
-      if (!PIM_GROUP_TAG_REGEX.test(c.groupTag)) { err.textContent = 'Generated GroupTag ' + c.groupTag + ' does not match the convention. ' + PIM_GROUP_TAG_HINT; err.style.display = ''; return; }
-      err.style.display = 'none';
-
-      const defBase = body.querySelector('#wzDefBase').value;
-      const additions = [];
-      additions.push({ base: defBase, row: {
-        GroupName: c.groupName, GroupDescription: c.cap + ' (' + (c.svc||'') + ')',
-        GroupTag: c.groupTag, AdministrativeUnitTag: auTag ? auTag : '',
-        IsRoleAssignable: 'TRUE', Workload: c.svc, Level: c.lvl, TierLevel: c.tier, Plane: c.code, CPPlatform: c.dom, Owners: ''
-      }});
-      if (auTag) {
-        additions.push({ base: 'PIM-Assignments-Roles-AUs', row: {
-          GroupTag: c.groupTag, AdministrativeUnitTag: auTag, RoleDefinitionName: role,
-          AssignmentType: asgType, Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
-          NumOfDaysWhenExpire: '365', Permanent: 'FALSE',
-          CPPlatform: c.dom, Plane: c.code, TierLevel: c.tier, PermissionScope: 'Scoped', SyncPlatform: ''
-        }});
-      } else {
-        additions.push({ base: 'PIM-Assignments-Roles-Groups', row: {
-          GroupTag: c.groupTag, RoleDefinitionName: role,
-          AssignmentType: asgType, Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
-          NumOfDaysWhenExpire: '365', Permanent: 'FALSE',
-          CPPlatform: c.dom, Plane: c.code, TierLevel: c.tier, PermissionScope: 'Global', SyncPlatform: ''
-        }});
-      }
-      const nested = Array.from(body.querySelectorAll('.multi input[type=checkbox]:checked')).map(x => x.value);
-      for (const rg of nested) {
-        additions.push({ base: 'PIM-Assignments-Groups', row: {
-          TargetGroupTag: rg, SourceGroupTag: c.groupTag,
-          AssignmentType: 'Eligible', Action: 'Assign', UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
-          NumOfDaysWhenExpire: '365', Permanent: 'FALSE',
-          CPPlatform: c.dom, Plane: c.code, TierLevel: c.tier, PermissionScope: '', SyncPlatform: ''
-        }});
-      }
-      await applyAdditions(additions);
-      WIZ.close();
-      switchTab('save');
-    };
-    updatePreview();
-  }
-
   // ===================================================================
   // Wizard C: New permission group (Azure resource)
   // ===================================================================
@@ -23615,7 +23648,7 @@
           fn: () => wizardClone(tag, data.kind, data.source || (data.kind === 'role-group' ? 'PIM-Definitions-Roles' : 'PIM-Definitions-Tasks'))
         });
       }
-      items.push({ label: 'Delete this node', sub: data.label || data.id, fn: () => deleteNode(data) });
+      items.push({ label: data.kind === 'admin' ? 'Stop managing (Entra untouched)' : 'Delete this node', sub: data.label || data.id, fn: () => deleteNode(data) });
       if (items.length === 0) return;
       const ev = evt.originalEvent || evt;
       showCtxMenu(ev.clientX || 200, ev.clientY || 200, items);
