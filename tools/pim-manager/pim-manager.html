@@ -11923,7 +11923,8 @@
     }
     if (kind !== 'recent-actions') {
       try {
-        const d = await api('GET', '/api/audit?q=' + encodeURIComponent('config.save') + '&months=1&pageSize=25');
+        // BUG-264: an exact action filter the server runs in SQL -- a free-text search built every event's change summary (7 s).
+        const d = await api('GET', '/api/audit?action=' + encodeURIComponent('config.save,config.csv.save') + '&months=1&pageSize=25');
         ((d && d.events) || []).filter(ev => /^config(\.csv)?\.save$/i.test(String(ev.action || '')))
           .forEach(ev => rows.push({ when: ev.ts || '', type: 'Configuration', what: (ev.target || '') + (ev.change ? ' — ' + String(ev.change).split('\n').slice(0, 4).join(' | ') : ''),
             who: ev.actor || '', state: String(ev.result || 'ok'), detail: '' }));

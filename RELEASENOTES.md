@@ -14,6 +14,24 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.457 — A faster Manager: Home, Jobs and the audit trail
+
+- **Faster: the Home page.** The jobs tile read the job scope once for every job and scanned the whole run history per
+  job, and the validation tile re-ran the full validation on every visit. The scope is now read once, the history is
+  grouped once, and the validation tile reuses the result of the last run until the definitions change. Measured on a
+  test environment: Home went from 4–6 seconds to 1–3 seconds, and the Jobs page from 1.6 to about 0.7 seconds.
+- **Faster: the recent configuration changes on the Commit page.** They were found with a free-text search that built a
+  change summary for every audit event in the month (7 seconds). They are now asked for by action, filtered in the
+  database, in a quarter of a second.
+- **Faster: the Audit tab.** The before/after details are read only for the page on screen, not for every event in the
+  window (about a third faster).
+- Because the Manager answers one request at a time, each of these also shortens the wait of everything queued behind it.
+- **Fewer throttled Graph reads.** When Microsoft Graph starts throttling a large batched read, PIM now sends smaller
+  batches (20, then 10, then 5 per round-trip) instead of full ones. On a test tenant, 712 PIM for Groups reads drew 37
+  throttled answers instead of 444, needed no one-by-one fallbacks (49 before), and finished sooner (251 s instead of
+  284 s). The total time is still set by the tenant's own Graph limits.
+- **Upgrade note:** none.
+
 ## v2.4.456 — Import brings back an admin's memberships
 
 - **Fixed: Import of an unmanaged admin now offers the admin's group memberships.** In 2.4.455 the memberships came only

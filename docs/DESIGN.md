@@ -1978,6 +1978,17 @@ never bulk-enumerate the directory to manage a few hundred PIM groups + admins.
 - **Pacing (2.4.454).** A round-trip that comes back throttled is followed by a pause (its `Retry-After`, at most 10 s)
   before the next round-trip is sent, instead of sending the rest straight into the throttle. The pauses share a 120 s
   budget per read, so a throttle that never lifts cannot make a read slower than before.
+- **Smaller batches under throttling (2.4.457).** A read starts at 20 requests per round-trip and halves the batch (down to
+  5) after each round-trip that came back throttled. Measured on a test tenant with 712 PIM for Groups schedule reads: the
+  time is set by the tenant's own read ceiling (about 2.7 reads per second) whatever the batch size, but full batches drew
+  444 throttled answers and 49 one-by-one fallbacks, while the shrinking reader drew 37 and none, and finished first
+  (251 s against 284 s). A read that is not throttled keeps full batches. The read's log line names the batch size it
+  ended on.
+- **The Manager's Overview, Jobs and audit reads (2.4.457).** The jobs view reads the job scope once (it was read once per
+  job) and groups the run history by job once; the Overview's validation tile reuses the validator's cached report while
+  the definitions are unchanged (the same key as the Validate page); the Commit page asks the audit trail for configuration
+  saves by action, filtered in the database; and the Audit tab reads the before/after details only for the page on
+  screen. Each Overview load that takes a second or more logs how long each tile took.
 - **The Manager keeps its permission check (2.4.454).** The Manager answers one request at a time, and the Overview page's
   permission check (Graph, Azure and store reads) took 2-4 s on every visit while every other request waited. Its answer
   is kept for five minutes; **Verify permissions** checks again at once. Each request the Manager serves is logged with its
