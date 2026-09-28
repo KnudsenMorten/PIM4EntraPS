@@ -1088,7 +1088,9 @@ function Get-PimManagerAuditEvents {
     # -NoChange (BUG-264, 2.4.454): skip the before/after change summary -- the Audit tab needs it only for the page it shows
     # (or for every event when it SEARCHES, since the search reads it). Measured on ig798: 1,669 events in the 3-month
     # window, the summaries alone 2.5 s on pwsh 7 and several times that on the 5.1 Manager -- all on the ONE request loop.
-    param([int]$Months = 0, [switch]$NoChange)
+    # -Actions (BUG-264, 2.4.457): exact action names, filtered IN SQL. -NoPayload: before/after are not read at all (implies
+    # -NoChange); the caller fills them for the events it returns with Read-PimManagerAuditPayloads.
+    param([int]$Months = 0, [switch]$NoChange, [string[]]$Actions, [switch]$NoPayload)
     $cs = $null
     if (Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) {
         try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
@@ -1098,6 +1100,9 @@ function Get-PimManagerAuditEvents {
             $args = @{ ConnectionString = $cs }
             # Months is a WINDOW, not a page size: N months back from now, 0 = full history.
             if ($Months -gt 0) { $args['FromUtc'] = [datetime]::UtcNow.AddMonths(-$Months) }
+            $sqlParams = (Get-Command Get-PimSqlAuditEvents).Parameters
+            if (@($Actions | Where-Object { "$_".Trim() }).Count -and $sqlParams.ContainsKey('Actions')) { $args['Actions'] = @($Actions) }
+            if ($NoPayload -and $sqlParams.ContainsKey('NoPayload')) { $args['NoPayload'] = $true; $NoChange = [switch]$true }
             $evts = @(Get-PimSqlAuditEvents @args)
             # the categoriser is resolved ONCE per call, not probed with Get-Command per event
             $catFn = if (Get-Command Get-PimAuditCategory -ErrorAction SilentlyContinue) { ${function:Get-PimAuditCategory} } else { ${function:Resolve-PimAuditCategory} }
@@ -1120,6 +1125,16 @@ function Get-PimManagerAuditEvents {
     throw ("No SQL audit store is configured, so there is no readable audit trail. PIM v2 keeps the " +
            "audit trail in SQL only (pim.AuditEvents); configure the store. A pre-v2 local file trail is " +
            "imported once with tools/pim-manager/Import-PimAuditFileTrail.ps1.")
+}
+
+function Read-PimManagerAuditPayloads {
+    # BUG-264 -- before/after for the events a -NoPayload read returned (the page on screen), in one SQL query. An event
+    # that already carries them (a full read, or a store without the -NoPayload reader) is left as it is.
+    param([object[]]$Events = @())
+    $need = @(@($Events) | Where-Object { $null -ne $_ -and -not $_.PSObject.Properties['before'] -and "$($_.id)".Trim() })
+    if (-not $need.Count -or -not (Get-Command Read-PimSqlAuditEventPayloads -ErrorAction SilentlyContinue)) { return }
+    $cs = $null; try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+    if ($cs) { Read-PimSqlAuditEventPayloads -ConnectionString $cs -Events $need }
 }
 
 function Get-PimEmergencyOverrideStoreName { 'EmergencyOverride' }
@@ -5341,12 +5356,26 @@ function Get-PimDelegationTierLevel {
     return $null
 }
 
+function Get-PimManagerPreflightStamp {
+    # The preflight cache key: instance + the store's change signal (row count + newest UpdatedUtc over pim.Rows). A read
+    # that fails yields a unique stamp, so nothing is served from the cache (fail-open). Shared by GET /api/preflight and
+    # the Home overview's validation tile (BUG-264: the tile used to re-run the validator on every Home load).
+    $stamp = "$($script:PimInstanceName)"
+    try {
+        $sig = Invoke-PimSqlQuery -ConnectionString $script:PimSqlCs -Sql "SELECT COUNT(*) AS c, CONVERT(VARCHAR(33), MAX(UpdatedUtc), 126) AS m FROM pim.Rows" | Select-Object -First 1
+        $stamp += "|sql:rows=$($sig.c):max=$($sig.m)"
+    } catch { $stamp += "|sql:" + [datetime]::UtcNow.ToString('o') }
+    return $stamp
+}
+
 function Get-PimHomeOverview {
     [CmdletBinding()]
     param([switch]$IncludeHeavy)
 
     $now = [datetime]::UtcNow
     $tiles = [ordered]@{}
+    # BUG-264: time each tile -- /api/home holds the ONE request loop, and a slow load must name its slow tile.
+    $hsw = [System.Diagnostics.Stopwatch]::StartNew(); $hT = [ordered]@{}
 
     # ---- 1. Delegation estate: per-level (L0-L5) + gaps/orphans/unmanaged -----
     # Sourced from the live graph model the Delegation Map renders (Build-PimGraphData):
@@ -5395,6 +5424,7 @@ function Get-PimHomeOverview {
         $tiles.tiers = [ordered]@{ ok = $false; error = "$($_.Exception.Message)" }
         $tiles.gaps  = [ordered]@{ ok = $false; error = "$($_.Exception.Message)" }
     }
+    $hT['tiers'] = $hsw.ElapsedMilliseconds; $hsw.Reset(); $hsw.Start()
 
     # ---- 1b. 🔴 IMP-33 -- privileged accounts in the directory with NO desired-state row --------
     # Measured on EFIF 2026-09-18: six real admin accounts were unmanaged (no TAP healing, reminders or review)
@@ -5408,6 +5438,7 @@ function Get-PimHomeOverview {
         $tiles.unmanagedAdmins = if (Get-Command Get-PimUnmanagedAdminTile -ErrorAction SilentlyContinue) { Get-PimUnmanagedAdminTile -Record $uaRec }
                                  else { [ordered]@{ ok = $false; error = 'the unmanaged-admin report library (PIM-UnmanagedAdmins.ps1) is not loaded in this Manager' } }
     } catch { $tiles.unmanagedAdmins = [ordered]@{ ok = $false; error = "$($_.Exception.Message)" } }
+    $hT['unmanagedAdmins'] = $hsw.ElapsedMilliseconds; $hsw.Reset(); $hsw.Start()
 
     # ---- 2. Engine & jobs health (scheduler) ---------------------------------
     # last run / result / FAILED jobs / next run / running, red-green.
@@ -5417,7 +5448,8 @@ function Get-PimHomeOverview {
             $vm  = if ($eff.Count -gt 0) { Get-PimJobsStatus -Jobs $eff } else { Get-PimJobsStatus }
             $jobs = @($vm.jobs)
             $histCount = 0
-            try { if (Get-Command Get-PimJobRunHistory -ErrorAction SilentlyContinue) { $histCount = @(Get-PimJobRunHistory).Count } } catch {}
+            if ($vm.PSObject.Properties['historyCount']) { $histCount = [int]$vm.historyCount }   # BUG-264: no second history read
+            else { try { if (Get-Command Get-PimJobRunHistory -ErrorAction SilentlyContinue) { $histCount = @(Get-PimJobRunHistory).Count } } catch {} }
             # BUG-113: the SAME split the Jobs view makes, made here too. A last run of
             # 'no-handler-registered' says this worker has no implementation for the job type --
             # a deployment/scope question. Counting it in the Overview's FAILED JOBS tile turns
@@ -5488,11 +5520,16 @@ function Get-PimHomeOverview {
     } catch {
         $tiles.jobs = [ordered]@{ ok = $false; status = 'unknown'; error = "$($_.Exception.Message)"; total = 0; failedCount = 0 }
     }
+    $hT['jobs'] = $hsw.ElapsedMilliseconds; $hsw.Reset(); $hsw.Start()
 
     # ---- 3. Validation errors/warnings (preflight) ---------------------------
     try {
         if (Get-Command Invoke-PimPreflightValidation -ErrorAction SilentlyContinue) {
-            $report = if ($script:PimPreflightCacheReport) { $script:PimPreflightCacheReport } else { Invoke-PimPreflightValidation }
+            # BUG-264: the SAME cache as GET /api/preflight -- the validator ran on every Home load (~1.4 s on ig798) whenever
+            # the Validate page had not been opened since start; a cached report of unchanged rows is served, and a fresh run fills it.
+            $pfStamp = Get-PimManagerPreflightStamp
+            if ($script:PimPreflightCacheReport -and $script:PimPreflightCacheStamp -eq $pfStamp) { $report = $script:PimPreflightCacheReport }
+            else { $report = Invoke-PimPreflightValidation; $script:PimPreflightCacheStamp = $pfStamp; $script:PimPreflightCacheReport = $report }
             $sum = $report.summary
             $errs = [int]$sum.errors; $warns = [int]$sum.warnings
             $tiles.validation = [ordered]@{
@@ -5509,6 +5546,7 @@ function Get-PimHomeOverview {
     } catch {
         $tiles.validation = [ordered]@{ ok = $false; error = "$($_.Exception.Message)"; errors = 0; warnings = 0 }
     }
+    $hT['validation'] = $hsw.ElapsedMilliseconds; $hsw.Reset(); $hsw.Start()
 
     # ---- 4. Break-glass (emergency override) ---------------------------------
     try {
@@ -5585,6 +5623,7 @@ function Get-PimHomeOverview {
     } catch {
         $tiles.alerts = [ordered]@{ ok = $false; total = 0; error = "$($_.Exception.Message)" }
     }
+    $hT['breakGlass+approvals+alerts'] = $hsw.ElapsedMilliseconds; $hsw.Reset(); $hsw.Start()
 
     # ---- 5. Access reviews (pending) -- heavy/live, opt-in -------------------
     if ($IncludeHeavy) {
@@ -5659,6 +5698,9 @@ function Get-PimHomeOverview {
         $tiles.accessReviews = [ordered]@{ ok = $true; deferred = $true; pending = $null }
         $tiles.expiring      = [ordered]@{ ok = $true; deferred = $true; expiring = $null }
     }
+    $hT['heavy'] = $hsw.ElapsedMilliseconds
+    $hTotal = 0; foreach ($k in @($hT.Keys)) { $hTotal += [long]$hT[$k] }
+    if ($hTotal -ge 1000) { Write-Host ('  [home] {0:N1}s: {1}' -f ($hTotal / 1000.0), ((@($hT.Keys) | ForEach-Object { '{0} {1}ms' -f $_, $hT[$_] }) -join ', ')) -ForegroundColor DarkYellow }
 
     return [ordered]@{
         generatedUtc = $now.ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -8551,8 +8593,12 @@ function Handle-Request {
                 if ($mv -eq 'all' -or $mv -eq '0') { $months = 0 } else { $months = [Math]::Max(0, [int]$mv) }
             }
 
-            # BUG-264: the change summary only where it is read -- every event when searching (the search reads it), else the page.
-            $events = @(Get-PimManagerAuditEvents -Months $months -NoChange:(-not $search))
+            # BUG-264 (2.4.457): ?action=a,b = exact action names, filtered in SQL (the commit page's "latest config saves" was a
+            # free-text SEARCH over every event's change summary, 7 s on ig798); without it the whole window is read.
+            $actions = @(if ($q.ContainsKey('action')) { "$($q['action'])" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
+            # BUG-264: the change summary only where it is read -- every event when searching (the search reads it), else the page;
+            # and when not searching, before/after themselves are read only for the page (-NoPayload + Read-PimManagerAuditPayloads).
+            $events = @(Get-PimManagerAuditEvents -Months $months -NoChange:(-not $search) -Actions $actions -NoPayload:(-not $search))
             # Category counts BEFORE search/category filtering (chips show totals).
             $counts = @{}
             foreach ($e in $events) { $c = "$($e.category)"; if ($c) { $counts[$c] = ([int]$counts[$c]) + 1 } }
@@ -8561,6 +8607,7 @@ function Handle-Request {
             $matchCount = $sorted.Count
             $skip = ($page - 1) * $pageSize
             $pageItems = @($sorted | Select-Object -Skip $skip -First $pageSize)
+            Read-PimManagerAuditPayloads -Events $pageItems
             foreach ($pi in $pageItems) { Add-PimManagerAuditChange -Event $pi }
             $monthsTotalCount = [int](Get-PimManagerAuditMonthCount)
             Write-JsonResponse -Response $resp -Status 200 -Body @{
@@ -14610,11 +14657,7 @@ function Handle-Request {
                 #   SQL mode -> MAX(UpdatedUtc) + row count over pim.Rows (the
                 #     CSV files don't exist; a write-time stamp would never change
                 #     and the cache would serve a stale report forever).
-                $stamp = $script:PimInstanceName
-                try {
-                    $sig = Invoke-PimSqlQuery -ConnectionString $script:PimSqlCs -Sql "SELECT COUNT(*) AS c, CONVERT(VARCHAR(33), MAX(UpdatedUtc), 126) AS m FROM pim.Rows" | Select-Object -First 1
-                    $stamp += "|sql:rows=$($sig.c):max=$($sig.m)"
-                } catch { $stamp += "|sql:" + [datetime]::UtcNow.ToString('o') }  # fail-open: don't cache
+                $stamp = Get-PimManagerPreflightStamp
                 if ($script:PimPreflightCacheStamp -eq $stamp -and $script:PimPreflightCacheReport) {
                     Write-JsonResponse -Response $resp -Status 200 -Body $script:PimPreflightCacheReport
                     return 200

@@ -2035,12 +2035,17 @@ function Get-PimJobsStatus {
     $stateByName = @{}
     if ($state -and $state.jobs) { foreach ($sj in @($state.jobs)) { if ("$($sj.name)".Trim()) { $stateByName["$($sj.name)"] = $sj } } }
     $history = @(Get-PimJobRunHistory)
+    # BUG-264: the runs grouped by job ONCE (history order kept, newest first) -- a Where-Object over the whole history per
+    # job made the Home overview's jobs tile ~2 s on the Manager's single request loop.
+    $runsByName = @{}
+    foreach ($hr in $history) { $hn = "$($hr.name)"; if (-not $runsByName.ContainsKey($hn)) { $runsByName[$hn] = New-Object System.Collections.ArrayList }; [void]$runsByName[$hn].Add($hr) }
     $acks = @(Get-PimRunAcknowledgements)        # [M6] muted runIds (failure/overdue signals cleared)
+    $jobScopeRead = $false; $jobScopeOnce = $null
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($j in @($Jobs)) {
         $name = "$($j.name)"
         $sj = $stateByName["$name"]              # persisted-state fallback for this job (may be $null)
-        $runs = @($history | Where-Object { "$($_.name)" -eq $name })
+        $runs = if ($runsByName.ContainsKey($name)) { @($runsByName[$name].ToArray()) } else { @() }
         $last = $runs | Select-Object -First 1
         $inProg = @($runs | Where-Object { "$($_.status)" -eq 'running' -or -not "$($_.finishedUtc)".Trim() }) | Select-Object -First 1
         $en = $true; if ($j.PSObject.Properties['enabled']) { $en = [bool]$j.enabled }
@@ -2139,7 +2144,9 @@ function Get-PimJobsStatus {
         # worker's scope is persisted by the runner (Save-PimJobScopeToStore), so the view can
         # answer "does this deployment run this job at all?" directly and stop inferring it
         # from history. Out of scope => never failing, never overdue, never needs attention.
-        $jobScope   = Get-PimPersistedJobScope
+        # BUG-264: read ONCE per view (above the loop) -- it was one SQL read per job, ~0.9 s for 36 jobs on ig798.
+        if (-not $jobScopeRead) { $jobScopeOnce = Get-PimPersistedJobScope; $jobScopeRead = $true }
+        $jobScope   = $jobScopeOnce
         $outOfScope = $false
         if ($jobScope -and @($jobScope).Count -gt 0) {
             $outOfScope = ("$($j.type)".Trim().ToLowerInvariant() -notin @($jobScope))
@@ -2298,6 +2305,7 @@ function Get-PimJobsStatus {
         # 71.13: jobs with a standing HOLD (needs approval) -- counted under "needs attention", never under failing.
         heldCount    = @($rows | Where-Object { $_.needsApproval }).Count
         total        = $rows.Count
+        historyCount = $history.Count      # BUG-264: the Home tile's "any run recorded" without a second history read
     }
 }
 function Format-PimCadence {

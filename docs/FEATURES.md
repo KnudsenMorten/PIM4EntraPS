@@ -162,6 +162,11 @@ deployment is a supported choice) and no credentials lying around.
   and nothing else: the installation finishes, checks itself (the Manager runs its latest version, the page answers
   behind sign-in, the engine job exists), runs the engine every five minutes, and applies a first delegation. Proven
   on a clean test tenant, then removed without a trace.
+- **The community edition updates with one command.** ✅ 2026-09-26 One update command pulls the latest release from
+  GitHub and re-runs your installation with the parameters it was installed with, which the installation keeps on the
+  machine that ran it (never a secret). Run it without the apply switch first: it shows the version it would move to
+  and the plan, and changes nothing. A copy with local changes is left alone. Proven by updating a running community
+  installation from GitHub and re-running the full end-to-end test against it.
 
 ## 4. MSP
 - **Replication rings — roll a change to one wave of customers before the rest.** ✅ 2026-09-18
@@ -530,6 +535,15 @@ deployment is a supported choice) and no credentials lying around.
   change pipeline (the same one your reviewed commits use), so nothing is granted without going through
   your usual review and approval. A preview ("what would this find") mode reports without changing
   anything.
+- **The Discovery inbox — one list, Create or Ignore.** ✅ 2026-09-27 The Discovery page is one simple list of what
+  is in your tenant and not yet in PIM, grouped by kind: Azure management groups and subscriptions, Power BI
+  workspaces, Administrative Units, and new Entra ID, Defender XDR and Intune roles. Each row has **Create** and
+  **Ignore**; tick several similar items, or a whole kind, and act on them in one click. **Create** turns an Azure scope
+  or Power BI workspace into a permission group named by your naming convention at the right level, turns an
+  Administrative Unit into its definition, or accepts a new role into the role catalog — always through Review &
+  commit, and nothing is granted to anyone. **Ignore** hides an item with one click (no reason needed); the **Ignored**
+  view shows who ignored what and when, and **Re-add** brings it back. An item PIM already defines is never listed as
+  new.
 
 - **Import your departments straight from Entra.** ✅ 2026-06-15 — point the solution at a group
   naming convention (for example `ORG-*`) and one click pulls every matching Entra group in as a
@@ -1467,12 +1481,22 @@ deployment is a supported choice) and no credentials lying around.
   changed items are created or updated; removing an **extra** item needs a deliberate, separate opt-in and
   never happens from a single click. Every apply keeps the engine's safety guards and lands in the audit
   trail.
+- **Delete, Keep or Ignore what is extra.** ✅ 2026-09-27 An **extra** item on the Drift page — in the tenant but not
+  in PIM — now has three answers, on one item or on the ticked items. **Delete** queues its removal with the same
+  safeguards as Review current delegations, and it runs once committed. **Keep** stages the PIM row that defines it,
+  so PIM manages it from then on and it stops being drift. **Ignore** is one click (no reason needed), and ignored
+  items can be re-added. An Administrative Unit made outside PIM can be kept the same way (its definition is staged
+  under its name); PIM never deletes an Administrative Unit, so remove it in Entra if it should go.
+- **The drift mail follows your cadence.** ✅ 2026-09-27 The drift alert mail goes out **monthly** by default; a
+  SuperAdmin can change it to daily, weekly or quarterly on the Drift page, and the change is audited. The drift check
+  itself still runs every few hours and the page always shows the latest result.
 
   ![Drift: live vs desired — one row per area, expanded to named differences](img/manager-drift.png)
   *Drift: live vs desired, one row per area with desired, live and in-sync counts, expanded to the named items that differ. (Synthetic demo data.)*
 - **Newly discovered resources have their own page.** ✅ 2026-09-14 **Audit & Settings › Newly discovered
   resources** lists the new subscriptions, management groups, resource groups, Power BI workspaces and
   Entra roles found by discovery, together with the settings that decide what the engine does with them.
+  Since 2026-09-27 this page is the **Discovery inbox** (see §8): one list with Create, Ignore and Re-add.
 - **Access Reviews you can actually complete — attest, assign, and chase from the portal.** ✅ 2026-06-17 —
   the **Access Review** tab is no longer read-only. For each review you can open **Review items** and record a
   per-person decision — **Approve** (keep access), **Deny** (remove access), or **Recertify / Don't-know** —
@@ -1551,7 +1575,28 @@ deployment is a supported choice) and no credentials lying around.
   (weekly, monthly, quarterly, half-yearly or yearly) and the engine creates a recurring access review of its
   members, reviewed by the group's owners. It needs one additional permission for the engine's identity, which
   Microsoft requires for creating reviews. Once granted, every group with a review cycle gets its review, and
-  reviewers are notified by mail. *(2.4.422)*
+  reviewers are notified by mail. *(2.4.422)* **Retired in 2.4.453:** access reviews now run per department (below);
+  a group's review cycle no longer creates a review, and reviews created earlier stay in Entra with their history
+  until you remove them there.
+- **Access reviews per department, run by PIM.** ✅ 2026-09-27 — Review rules on the Access reviews page set a
+  default rule and, per department, the default, **Off** (the department opts out) or its own rule: how often (any
+  number of days), how long a round stays open, the reviewers (the department owner by default), and 1 or 2
+  approvers — **parallel** (both decide, any Remove wins) or **serial** (approver 1 first, approver 2 has the final
+  word). Each round lists every admin account of the department with the access it holds; reviewers decide **Keep**
+  or **Remove** per person on **My people**, and nobody reviews their own account. A reviewer can **remove one access**
+  instead of the whole account: only the ticked memberships are staged for removal and carried out under Review &
+  commit, the account keeps the rest. Remove with nothing ticked raises the offboarding approval for the whole
+  account. A round nobody answers is chased with a weekly reminder, three times, then the alert recipients are told;
+  the rule decides whether an unanswered person **keeps** access (the default) or gets an offboarding approval
+  request. A SuperAdmin can decide any open person, every decision is in the audit trail, and a department without an
+  owner is reported to the alert recipients every day. *(2.4.447–2.4.454)*
+- **Stop managing an admin, or import one back.** ✅ 2026-09-27 — **Stop managing** (on Admin accounts and on an admin
+  in the Access map) takes an admin out of PIM: the definition and every access row naming the admin are staged for
+  removal, and the name is taken out of owner, sponsor, approver and notify fields. **Nothing changes in Entra** — the
+  account stays enabled and keeps its access; to take the access away, use offboarding. Admin accounts also lists the
+  admin accounts that exist in the directory but not in PIM, each with **Import**: the definition is read from the
+  account and a row is offered to keep each group membership it holds in groups PIM manages, all staged for Review &
+  commit. *(2.4.455–2.4.456)*
 - **Review decisions and reviewer changes are carried out by the engine.** ✅ 2026-09-25 — When a reviewer
   records Approve / Deny / Don't know, or an admin changes who reviews, the Manager records it and starts the
   engine, which applies it within moments and checks that it took effect. The Manager itself only reads, so it

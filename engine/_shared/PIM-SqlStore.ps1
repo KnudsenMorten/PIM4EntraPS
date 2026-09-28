@@ -1593,23 +1593,36 @@ function Get-PimSqlAuditEvents {
     param(
         [Parameter(Mandatory)][string]$ConnectionString,
         [datetime]$FromUtc, [datetime]$ToUtc,
-        [int]$Top = 5000
+        [int]$Top = 5000,
+        # BUG-264: -Actions narrows to exact action names IN SQL (the commit page asks for config saves only); -NoPayload
+        # leaves BeforeJson/AfterJson unread and unparsed (the Audit tab fills them for the page it shows, by `id`).
+        [string[]]$Actions,
+        [switch]$NoPayload
     )
     $where = @(); $p = @{}
     if ($PSBoundParameters.ContainsKey('FromUtc')) { $where += 'Ts >= @f'; $p['f'] = $FromUtc }
     if ($PSBoundParameters.ContainsKey('ToUtc'))   { $where += 'Ts <= @t'; $p['t'] = $ToUtc }
+    $acts = @(@($Actions) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() } | Select-Object -Unique)
+    if ($acts.Count) {
+        $names = for ($i = 0; $i -lt $acts.Count; $i++) { $p["a$i"] = $acts[$i]; "@a$i" }
+        $where += ('Action IN (' + (@($names) -join ',') + ')')
+    }
     $w = if ($where.Count) { 'WHERE ' + ($where -join ' AND ') } else { '' }
     if ($Top -lt 1) { $Top = 1 }
+    $payloadCols = if ($NoPayload) { '' } else { ', BeforeJson, AfterJson' }
     $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql @"
-SELECT TOP ($Top) Ts, RunId, CorrelationId, Actor, ActorSource, Action, Target, BeforeJson, AfterJson, Result, WhatIf
+SELECT TOP ($Top) Id, Ts, RunId, CorrelationId, Actor, ActorSource, Action, Target$payloadCols, Result, WhatIf
 FROM pim.AuditEvents $w ORDER BY Ts DESC, Id DESC;
 "@ -Parameters $p)
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($r in $rows) {
         $before = $null; $after = $null
-        if ("$($r.BeforeJson)".Trim()) { try { $before = $r.BeforeJson | ConvertFrom-Json } catch { $before = "$($r.BeforeJson)" } }
-        if ("$($r.AfterJson)".Trim())  { try { $after  = $r.AfterJson  | ConvertFrom-Json } catch { $after  = "$($r.AfterJson)" } }
+        if (-not $NoPayload) {
+            if ("$($r.BeforeJson)".Trim()) { try { $before = $r.BeforeJson | ConvertFrom-Json } catch { $before = "$($r.BeforeJson)" } }
+            if ("$($r.AfterJson)".Trim())  { try { $after  = $r.AfterJson  | ConvertFrom-Json } catch { $after  = "$($r.AfterJson)" } }
+        }
         $out.Add([pscustomobject]@{
+            id = "$($r.Id)"
             # Ts is stored UTC (SYSUTCDATETIME) but comes back Kind=Unspecified, which
             # ToUniversalTime() treats as LOCAL -- shifting every event by the host's offset.
             ts = [datetime]::SpecifyKind([datetime]$r.Ts, [System.DateTimeKind]::Utc).ToString('o')
@@ -1619,6 +1632,8 @@ FROM pim.AuditEvents $w ORDER BY Ts DESC, Id DESC;
             before = $before; after = $after
             result = "$($r.Result)"; whatIf = [bool]$r.WhatIf
         })
+        # -NoPayload: no before/after AT ALL (not $null) -- "not read" must not look like "recorded as empty"
+        if ($NoPayload) { $o = $out[$out.Count - 1]; [void]$o.PSObject.Properties.Remove('before'); [void]$o.PSObject.Properties.Remove('after') }
     }
     # 🪤 `.ToArray()`, NOT `@($out)`. Wrapping a System.Collections.Generic.List[object] in @()
     # throws "Argument types do not match" on BOTH Windows PowerShell 5.1 and pwsh 7, empty or
@@ -1633,6 +1648,28 @@ FROM pim.AuditEvents $w ORDER BY Ts DESC, Id DESC;
     # whole Admin accounts screen), which is why the guard is now mechanical:
     # tests/Test-PimListWrapTrap.ps1 scans every shipped script.
     return $out.ToArray()
+}
+
+function Read-PimSqlAuditEventPayloads {
+    <#
+      BUG-264 -- the other half of Get-PimSqlAuditEvents -NoPayload: read BeforeJson/AfterJson for just these events (by
+      their `id`) and set .before / .after on them, parsed exactly as the full read parses them. One query per call.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [object[]]$Events = @())
+    $byId = @{}
+    foreach ($e in @($Events)) { if ($null -ne $e -and "$($e.id)" -match '^\d+$') { $byId["$($e.id)"] = $e } }
+    if ($byId.Count -eq 0) { return }
+    $p = @{}; $i = 0
+    $names = foreach ($k in @($byId.Keys)) { $p["i$i"] = [long]$k; "@i$i"; $i++ }
+    $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql ("SELECT Id, BeforeJson, AfterJson FROM pim.AuditEvents WHERE Id IN (" + (@($names) -join ',') + ");") -Parameters $p)
+    foreach ($r in $rows) {
+        $e = $byId["$($r.Id)"]; if ($null -eq $e) { continue }
+        $before = $null; $after = $null
+        if ("$($r.BeforeJson)".Trim()) { try { $before = $r.BeforeJson | ConvertFrom-Json } catch { $before = "$($r.BeforeJson)" } }
+        if ("$($r.AfterJson)".Trim())  { try { $after  = $r.AfterJson  | ConvertFrom-Json } catch { $after  = "$($r.AfterJson)" } }
+        $e | Add-Member -NotePropertyName before -NotePropertyValue $before -Force
+        $e | Add-Member -NotePropertyName after -NotePropertyValue $after -Force
+    }
 }
 
 function Get-PimSqlAuditMonthCount {

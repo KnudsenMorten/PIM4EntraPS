@@ -342,6 +342,11 @@ New resources become ready-to-delegate access groups **on their own**:
   you never end up with an orphan plus a duplicate.
 - **It proposes, it never auto-grants.** Discovery creates the empty container;
   who actually gets in stays a human decision.
+- **One inbox, Create or Ignore.** The Discovery page lists what is in your
+  tenant and not yet in PIM — Azure scopes, Power BI workspaces, Administrative
+  Units and new roles. **Create** stages a permission group (or the AU's
+  definition, or accepts the role) for Review & commit; **Ignore** hides an item
+  with one click, and **Re-add** brings it back.
 - **New built-in roles** (Entra, Defender, Intune) are catalogued automatically
   so you can pick them, and a role you've already handled never shows up as "new"
   again — each run surfaces only what you haven't dealt with yet.
@@ -454,8 +459,15 @@ creation:
   it's extended. A removal decision is **remembered**, so the engine never
   silently re-adds someone an owner just removed — the most recent decision
   always wins.
-- **Access reviews from a review cycle.** Give a group a review cycle and the
-  engine creates a recurring review of its members, reviewed by its owners.
+- **Access reviews per department.** Review rules set, per department, how
+  often its people are reviewed, by whom, with one or two approvers (parallel or
+  serial) — or opt the department out. Reviewers keep or remove each person on
+  **My people**, or remove just one access; unanswered rounds are chased weekly,
+  three times, then escalated to the alert recipients.
+- **Stop managing an admin, or import one.** Stop managing takes an admin out of
+  PIM without touching the account in Entra; admin accounts that exist in the
+  directory but not in PIM are listed with **Import**, which brings back the
+  definition and the memberships it holds.
 - **Rename a group or Administrative Unit, and keep the object.** Renaming in
   *All records* renames the existing group or AU in Entra ID, with its members
   and roles; every row that points at it is updated in the same change.
@@ -696,6 +708,12 @@ in-sync counts; expand a row to see each difference **by name** — for example 
 admin who should be an eligible member of a group — rather than by object id. An
 area that could not be checked says so instead of pretending to be clean. **Check
 now** queues a fresh check.
+
+An **extra** item (in the tenant, not in PIM) can be **deleted** (its removal is
+queued with the usual safeguards), **kept** (PIM stages the row that defines it and
+manages it from then on) or **ignored** with one click — on one item or on the
+ticked items. The drift alert mail goes out monthly by default; a SuperAdmin can
+make it daily, weekly or quarterly.
 
 ### Review current delegations
 
