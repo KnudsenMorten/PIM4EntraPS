@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/img/brand/pim-manager-reversed.svg">
+    <img src="docs/img/brand/pim-manager.svg" alt="Invardia PIM Manager" width="420">
+  </picture>
+</p>
+
 # PIM4EntraPS
 
 > **Privileged-access governance for Microsoft Entra, as code.**
@@ -484,11 +491,19 @@ creation:
   on-premises Active Directory admins are created in AD with an initial password
   that is mailed, never stored.
 - **Hybrid worker for on-premises Active Directory (preview, Pro).** A small
-  domain-joined server running as a gMSA applies the AD side: admin accounts, PIM
-  groups mirrored to AD groups, and just-in-time AD membership — a person who
-  activates a PIM group is in its AD group within seconds (time-limited where the
-  forest supports it). Its network can be disconnected in one step, and a
-  plan-only mode shows every change before it is made.
+  domain-joined server applies the AD side and replaces the older PIM-for-AD scripts:
+  admin accounts, PIM groups mirrored to AD groups, and just-in-time AD membership — a
+  person who activates a PIM group is in its AD group within seconds, for exactly the
+  time left on the activation. It onboards servers (each server's own administrator
+  group is added to its local Administrators, never removed) and handles groups AD
+  protects without failing. It runs as **one managed service account per privilege
+  tier**, each right granted to that account's permission group, with no password or
+  secret on the server. **Settings → Hybrid Active Directory** holds your own naming
+  (group marker or pattern, admin-account mapping, OU for new groups, server-group
+  names), and a **live view** shows the continuous sync. Its network can be
+  disconnected in one step, and a plan-only mode shows every change before it is made.
+
+  ![Settings — Hybrid Active Directory: your own naming for PIM for AD, with a preview of the mirrored groups and the account mapping](docs/img/manager-settings-hybrid-ad.png)
 - **Optional audit to Log Analytics.** On top of the audit trail kept in the
   database, every change can optionally be forwarded to Azure Log Analytics (off
   by default, one setting to enable).
@@ -818,6 +833,8 @@ Settings keeps the operational defaults in one place, saved to the same database
 the engine and jobs read — so what you see is what the system actually uses.
 
 ![Settings — Manager access and roles, emergency override and naming conventions](docs/img/manager-settings.png)
+
+![Admin accounts & TAP — the managed admin accounts, their sponsor department, status, access pass and actions (Stop managing, Revoke sessions)](docs/img/manager-admin-accounts.png)
 *Settings holds Manager access & roles, the emergency override, naming
 conventions, feature customization, template packs and mail templates — all
 stored in the database. (Synthetic demo data.)*
@@ -1046,6 +1063,20 @@ set of advanced single-tenant capabilities and the whole multi-tenant half. From
 jobs and the portal, and the portal says why. Everything in the free edition keeps working whatever the
 licence state.
 
+![Free vs Pro — the page a Pro menu item opens on a Community install](docs/img/manager-free-vs-pro.png)
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/img/brand/pim-manager-community-reversed.svg">
+    <img src="docs/img/brand/pim-manager-community.svg" alt="Invardia PIM Manager Community edition" width="380">
+  </picture>
+  &nbsp;&nbsp;&nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/img/brand/pim-manager-pro-reversed.svg">
+    <img src="docs/img/brand/pim-manager-pro.svg" alt="Invardia PIM Manager Pro edition" width="330">
+  </picture>
+</p>
+
 ### Free — the community edition, for a single tenant
 
 Everything an organisation needs to govern its own tenant:
@@ -1148,6 +1179,9 @@ What an environment does before anyone changes a setting (the full table is in
   tier-impact report and the evidence export. **Pro, off until switched on:** the second approver, discovery,
   Power BI, Exchange Online, and MSP.
 - **Policy templates:** `Groups_Standard`, `EntraIDRoles_Standard` and `AzureRoles_Standard` are the defaults per kind.
+- **Alert mail (since 2.4.453):** the drift mail goes out **monthly** (a dropdown on the Drift page changes it); the
+  same drift or job failure is mailed once and then at most daily; failure and drift alerts wait 45 minutes after a
+  change to your definitions so a rollout in progress is not reported as broken.
 - **Workload assignments:** groups are always created; a new Intune / Defender / Power BI / connector assignment waits
   until that workload's prerequisites are green; Azure waits only when a check found a problem.
 - **Prerequisite results** are re-checked after 30 days (they keep working meanwhile); **licences** have a 30-day grace
@@ -1363,6 +1397,12 @@ push** (the multi-tenant half is the paid edition — see
   instruction can disable a specific privileged account across every managed
   tenant — applied locally by the customer's own engine through the same audited
   path as any other change.
+- **Revoke someone's sessions everywhere at once.** Revoking an administrator's sign-in sessions on the MSP
+  master can have every managed tenant revoke that person's sessions there too; each tenant does it once on its
+  next sync and checks it took effect. Break-glass accounts are never revoked.
+- **Remove an administrator in all, some or none of the managed tenants.** Removing a replicated administrator
+  (or any replicated record) asks whether the managed tenants should remove it too — in all of them or only the
+  ones you pick; the others keep it and report it.
 - **Deploy with a signed-in administrator.** The provider and each customer are built with one command
   each, either as a certificate-based deployment identity or as an administrator's own sign-in.
 

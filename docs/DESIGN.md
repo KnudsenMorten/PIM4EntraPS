@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="img/brand/pim-manager-reversed.svg">
+    <img src="img/brand/pim-manager.svg" alt="Invardia PIM Manager" width="360">
+  </picture>
+</p>
+
 # PIM4EntraPS — design
 
 This is the **single design document** for PIM4EntraPS: the architecture and how
@@ -780,6 +787,8 @@ blip** via `Get-PimHealthState`: a sub-threshold consecutive failure stays **HTT
 outage (≥ 3 consecutive failures) returns **503** ("unhealthy").
 
 ### 5.4 Safe, reversible Review & Save commits (`PIM-CommitBackup.ps1`)
+
+![Admin accounts & TAP — the managed admin accounts with their sponsor department, status, access pass and actions](img/manager-admin-accounts.png)
 
 ![Pending changes — the one queue of configuration edits and queued directory actions](img/manager-pending-changes.png)
 *Pending changes: the keyed diff and the commit gate this section describes, beside the queued directory actions (§18.1f). (Synthetic demo data.)*
@@ -6773,6 +6782,15 @@ summary + catalog; it is wired into the alerting card's "Recent alerts" view
 (`renderAlertFeed`) and a Home "Recent alerts" tile (`tiles.alerts`). The feed
 lives in SQL `pim.Settings['AlertFeed']` only (reader and writer share one store). The Manager dot-sources `PIM-AlertFeed.ps1` at boot. No real mail is ever sent
 at test time (no `$global:PIM_MailSender` offline → rendered-only).
+
+**Job alerts: once, then daily; held while a rollout settles (2.4.445 / 2.4.446).** The scheduler's job alerts
+(`Invoke-PimJobRunAlert`) debounce an identical drift or failure for 1,440 minutes — mailed once, then at most a daily
+reminder; a changed finding is mailed at once. `Test-PimAlertSettling` holds failure and drift alerts for 45 minutes
+after the newest change to the desired state (`Get-PimLastDesiredChangeUtc`: the newest `pim.Rows.UpdatedUtc`, a
+committed queue entry, or a delete / commit audit event), because a commit is still fanning out then; a finding still
+present after the window is mailed (a held alert was never sent, so no debounce blocks it). A policy HOLD is never
+delayed, and an unknown last-change time never holds (fail open). The drift mail itself follows its own cadence
+(monthly by default, set on the Drift page).
 
 **Outbound alert CHANNELS — Teams / generic webhook (`engine/_shared/PIM-AlertChannels.ps1`).**
 A SECOND delivery channel beside email, channel-agnostic behind the same

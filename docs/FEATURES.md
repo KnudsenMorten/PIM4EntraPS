@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="img/brand/pim-manager-reversed.svg">
+    <img src="img/brand/pim-manager.svg" alt="Invardia PIM Manager" width="360">
+  </picture>
+</p>
+
 # PIM4EntraPS — delivered feature catalog
 
 This is the delivered feature set of **PIM4EntraPS**, written in plain language for IT
@@ -1529,6 +1536,10 @@ deployment is a supported choice) and no credentials lying around.
 - **Mail is sent as the environment's identity, to real addresses only.** ✅ 2026-09-13 Hosted
   environments send as their managed identity with the send right limited to the sender mailbox, and
   mail about an admin account goes to the account owner's office address — see Auth / Identity.
+- **Alerts without noise.** ✅ 2026-09-26 The same drift or the same job failure is mailed once, then at most a daily
+  reminder while it lasts; a change is mailed at once. For 45 minutes after a change to your definitions (while groups
+  are still being created and access is fanning out), failure and drift alerts are held; anything still wrong after
+  that window is mailed. Test runs send their mail only to the environment's own sender mailbox.
 
 ## 13. Lifecycle / Governance / Approvals
 - **Scheduled account creation and time-limited access pass.** ✅ 2026-06-14 — Admin
@@ -1566,6 +1577,7 @@ deployment is a supported choice) and no credentials lying around.
     server's own administrator group is added to that server's local Administrators (added only,
     never removed). The worker uses one managed service account per privilege tier, with every right
     granted to that account's permission group, and no password or secret is stored on the server.
+    ![Settings — Hybrid Active Directory: your own naming for PIM for AD](img/manager-settings-hybrid-ad.png)
   - **Workload roles** listed in your data (Defender, Intune, enterprise applications, Power BI, Power
     Platform, Dataverse, Business Central, Azure DevOps, Azure RBAC) are applied, with exemptions, and
     reminders, the daily summary and the tier report carry real content.
@@ -1720,6 +1732,19 @@ deployment is a supported choice) and no credentials lying around.
   deploying to many tenants at once, the override applies to **every** tenant in the deployment. It's
   opt-in — leave it out and the existing defaults are kept — and it applies whether tenant settings
   come from a published catalog file or are auto-discovered.
+- **Auto-activate reaches sub-groups.** ✅ 2026-09-30 (Activator 1.6.135) A permission group nested in a role group
+  only appears once the role group is active. Ticked sub-groups are now activated as soon as they appear: the
+  extension re-checks every 30 seconds for up to 10 minutes while they wait for their parent, and tries each group
+  once per opening.
+- **Busy periods do not fail an activation.** ✅ 2026-09-30 (Activator 1.6.135) When Microsoft temporarily slows an
+  account that sends many requests ("429"), the extension waits as long as Microsoft asks and tries again (up to four
+  times), for activation, deactivation and Azure roles alike, and shows the wait on the row instead of failing.
+- **"Waiting for approval", not "failed".** ✅ 2026-09-30 (Activator 1.6.135) A group that needs an approver shows
+  that it is waiting for approval and is not watched for permissions that cannot arrive yet; a group that was just
+  granted shows as already active at once.
+- **Settings for Edge and Chrome from one Intune Remediation.** ✅ 2026-09-30 The remediation that writes the
+  extension's settings (tenant catalog, limits) now writes them for Google Chrome as well as Edge, and repairs a
+  stuck copy in either browser on request.
 
 ## 17. Naming
 - **Naming lives in config, never hardcoded.** All admin, group and resource naming
@@ -1765,6 +1790,8 @@ deployment is a supported choice) and no credentials lying around.
   describe both how the system works and what it does for you.
 
 ## 29. Feature customization & editions
+
+![Free vs Pro — the page a Pro menu item opens on a Community install](img/manager-free-vs-pro.png)
 - **Every advanced capability is yours to switch on — nothing happens until you say so.** ✅ 2026-06-17 —
   a single **Feature customization** panel in **Settings** lists every optional capability (discovery,
   email & Teams alerting, workload connectors, Power BI, Exchange Online, MSP fan-out, scheduled jobs)
