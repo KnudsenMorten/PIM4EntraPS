@@ -11,8 +11,8 @@
       2. Bad-input rejection: empty, >25, missing field, malformed GUID,
          duplicate tenantId.
       3. PARITY: the pure builder's ExtensionSettings JSON + forcelist row +
-         tenantCatalog match the values Deploy-PimActivatorIntune.ps1 builds for
-         the same inputs (extracted from that script's source, never modified).
+         tenantCatalog match the documented managed config (and the catalog form the
+         Intune Remediation writes) for the same inputs.
       4. The registry plan covers both browsers x four policies with the correct
          HKLM key paths / value names / kinds.
       5. Each -Target (Json|LocalGpo|DomainGpo) under -WhatIf makes NO changes.
@@ -31,7 +31,7 @@ $here       = Split-Path -Parent $MyInvocation.MyCommand.Path
 $activator  = Split-Path -Parent $here
 $builder    = Join-Path $activator '_PimActivatorHybridPolicy.ps1'
 $deploy     = Join-Path $activator 'Deploy-PimActivatorHybrid.ps1'
-$intune     = Join-Path $activator 'Deploy-PimActivatorIntune.ps1'
+$remediate  = Join-Path $activator 'intune-remediation\Remediate-PimActivator.ps1'
 $sampleJson = Join-Path $activator 'pim-activator-hybrid-tenants.sample.json'
 
 . $builder
@@ -48,7 +48,7 @@ function Assert-Throws([scriptblock]$sb, [string]$msg) {
     Assert $threw $msg
 }
 
-# Default install policy constants (mirror Deploy-PimActivatorIntune.ps1 param defaults).
+# Default install policy constants (the documented Edge management service values).
 $extId   = 'eheocihmlppcophaeakmdenhgcookkab'
 $updUrl  = 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml'
 $srcPat  = 'https://knudsenmorten.github.io/*'
@@ -86,36 +86,35 @@ Assert-Throws { New-PaHybridConfig -InputObject @(
 ) } "duplicate tenantId rejected"
 Assert-Throws { New-PaHybridConfig -InputObject ([pscustomobject]@{ notTenants = @() }) } "object without 'tenants' rejected"
 
-# ---- 3. PARITY with Deploy-PimActivatorIntune.ps1 -------------------------
+# ---- 3. PARITY with the documented managed config + the Intune Remediation -----
 Write-Host ''
-Write-Host "-- 3. Parity with Deploy-PimActivatorIntune.ps1 (unchanged) --" -ForegroundColor Cyan
+Write-Host "-- 3. Parity with the documented managed config + the Intune Remediation --" -ForegroundColor Cyan
 
-# 3a. ExtensionSettings JSON: rebuild the EXACT expression the Intune script
-#     uses ($extSettingsJson) and compare to the builder's output, byte for byte.
+# 3a. ExtensionSettings JSON: rebuild the documented force-install entry
+#     and compare to the builder's output, byte for byte.
 $intuneExtSettings = (@{ $extId = @{
     installation_mode     = 'force_installed'
     update_url            = $updUrl
     runtime_allowed_hosts = @('<all_urls>')
 }} | ConvertTo-Json -Depth 5 -Compress)
 $builderExtSettings = New-PaHybridExtensionSettingsJson -ExtensionId $extId -UpdateUrl $updUrl
-Assert ($builderExtSettings -eq $intuneExtSettings) "ExtensionSettings JSON byte-identical to Intune deploy"
+Assert ($builderExtSettings -eq $intuneExtSettings) "ExtensionSettings JSON is the documented force-install entry"
 
 # 3b. Forcelist row "<extId>;<updateUrl>"
 $intuneForcelist = "$extId;$updUrl"
 $builderForcelist = New-PaHybridForcelistValue -ExtensionId $extId -UpdateUrl $updUrl
-Assert ($builderForcelist -eq $intuneForcelist) "Forcelist row byte-identical to Intune deploy"
+Assert ($builderForcelist -eq $intuneForcelist) "Forcelist row is <id>;<update URL>"
 
 # 3c. tenantCatalog minified JSON: same -InputObject @(...) array-forced shape.
 $intuneCatalog  = ConvertTo-Json -InputObject @($catalog) -Depth 10 -Compress
 $builderCatalog = ConvertTo-PaHybridCatalogJson -Catalog $catalog
-Assert ($builderCatalog -eq $intuneCatalog) "tenantCatalog JSON byte-identical to Intune deploy"
+Assert ($builderCatalog -eq $intuneCatalog) "tenantCatalog JSON is the compact array form"
 
-# 3d. Confirm the Intune script source still defines those exact expressions
-#     (guards against silent drift if the Intune deploy is ever edited).
-$intuneSrc = Get-Content -LiteralPath $intune -Raw
-Assert ($intuneSrc -match "runtime_allowed_hosts\s*=\s*@\('<all_urls>'\)") "Intune source still pre-grants runtime_allowed_hosts=<all_urls>"
-Assert ($intuneSrc -match '\$forcelistValue\s*=\s*"\$ExtensionId;\$UpdateUrl"') "Intune source still builds forcelist as `$ExtensionId;`$UpdateUrl"
-Assert ($intuneSrc -match 'ConvertTo-Json\s+-InputObject\s+@\(\$catalog\)\s+-Depth\s+10\s+-Compress') "Intune source still minifies catalog via -InputObject @(`$catalog)"
+# 3d. The Intune Remediation (the fleet path since 2026-09-28) writes the catalog in the same compact array form
+#     under the same 3rdparty extension key.
+$remSrc = Get-Content -LiteralPath $remediate -Raw
+Assert ($remSrc -match 'ConvertTo-Json -InputObject @\(\$TenantCatalog \| ConvertFrom-Json \| ForEach-Object \{ \$_ \}\) -Depth 10 -Compress') "Remediation writes the catalog as the same compact array"
+Assert ($remSrc -match 'SOFTWARE\\Policies\\Microsoft\\Edge\\3rdparty\\extensions\\\$ExtensionId\\policy') "Remediation writes under the same 3rdparty extension key"
 
 # ---- 4. Registry plan shape ------------------------------------------------
 Write-Host ''
@@ -221,8 +220,8 @@ if (Test-Path -LiteralPath $noOut) {
     Remove-Item -LiteralPath $noOut -Force -ErrorAction SilentlyContinue
 }
 
-# 7c. Both deploy paths expose the two opt-in params (Hybrid + Intune parity).
-foreach ($sp in @($deploy, $intune)) {
+# 7c. Both script deploy paths expose the two opt-in params (Hybrid + Client parity).
+foreach ($sp in @($deploy, (Join-Path $activator 'Deploy-PimActivatorClient.ps1'))) {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($sp, [ref]$null, [ref]$null)
     $pn = $ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
     Assert (($pn -contains 'DefaultJustification') -and ($pn -contains 'DefaultDurationHours')) "$([IO.Path]::GetFileName($sp)) exposes -DefaultJustification + -DefaultDurationHours"

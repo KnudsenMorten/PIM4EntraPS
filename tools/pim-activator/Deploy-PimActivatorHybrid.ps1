@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     Hybrid (on-prem / standalone) setup for the PIM Activator browser extension
-    -- the on-prem sibling of Deploy-PimActivatorIntune.ps1. An MSP deploys the
+    -- the on-prem sibling of the Edge management service + Intune Remediation path. An MSP deploys the
     SAME client-side managed configuration (forcelist + sources + extension
     settings + multi-tenant catalog) to its admins' HYBRID machines (on-prem
     AD domain-joined OR standalone) WITHOUT Intune, via one of three targets:
@@ -42,7 +42,7 @@
         // ... up to 25 entries
       ]
 
-    This is the SAME per-entry shape Deploy-PimActivatorIntune.ps1 reads via
+    This is the SAME per-entry shape the Intune Remediation's $TenantCatalog uses via
     -CatalogJsonPath and that managed-schema.json documents for tenantCatalog.
 
     Validation: empty set, >25 tenants, missing name/tenantId/clientId,
@@ -76,7 +76,7 @@
 
 .PARAMETER ExtensionId
     Chrome/Edge extension id. Default 'eheocihmlppcophaeakmdenhgcookkab'
-    (mirrors Deploy-PimActivatorIntune.ps1).
+    (mirrors Deploy-PimActivatorClient.ps1).
 
 .PARAMETER UpdateUrl
     Self-hosted updates.xml URL. Default
@@ -94,7 +94,7 @@
     written to the managed catalog (all <=25 tenants) -- whether the value came
     from the -TenantConfigJsonPath file or was absent. The extension popup
     pre-fills the Activate form with it. Omit to keep each entry's own value.
-    Mirrors Deploy-PimActivatorClient.ps1 / Deploy-PimActivatorIntune.ps1.
+    Mirrors Deploy-PimActivatorClient.ps1.
 
 .PARAMETER DefaultDurationHours
     Opt-in. Like -DefaultJustification but for the default activation length
@@ -103,7 +103,7 @@
 .PARAMETER Channel
     Released (default) or Test. Test points at the TEST extension id + updates-test.xml
     unless -ExtensionId / -UpdateUrl are passed explicitly (mirrors
-    Deploy-PimActivatorClient.ps1 / Deploy-PimActivatorIntune.ps1).
+    Deploy-PimActivatorClient.ps1).
 
 .PARAMETER MinimumVersion
     Optional ExtensionSettings minimum_version_required: an install BELOW it is disabled
@@ -179,7 +179,7 @@ param(
     # whether the value came from the -TenantConfigJsonPath file or not.
     # -DefaultJustification sets the justification text; -DefaultDurationHours
     # sets the activation length (whole hours, 1..24). Mirrors the same two
-    # params on Deploy-PimActivatorClient.ps1 / Deploy-PimActivatorIntune.ps1.
+    # params on Deploy-PimActivatorClient.ps1.
     # Additive + opt-in: absent => the catalog's own values are kept unchanged.
     [Parameter()]
     [string]$DefaultJustification,

@@ -40,7 +40,7 @@
 
     On Intune-managed devices the HKLM ExtensionInstallForcelist value will
     be overwritten by Intune's policy on next sync -- use Intune's own
-    Settings Catalog entry instead (see Deploy-PimActivatorIntune.ps1).
+    Edge management service policy instead (see README.md: Prerequisites) and the Intune Remediation in intune-remediation\.
 
 .PARAMETER Browser
     'Edge', 'Chrome', or 'Both' (default).
@@ -135,7 +135,7 @@ param(
     # Update channel. 'Test' targets the test extension id + updates-test.xml so this
     # writes the SEPARATE test forcelist + managed catalog (same tenant catalog as
     # released; only the id/URL differ). 'Released' (default) is unchanged. Mirrors
-    # Update-PimActivator-Extension.ps1 / Deploy-PimActivatorIntune.ps1.
+    # Update-PimActivator-Extension.ps1.
     [Parameter()]
     [ValidateSet('Released','Test')]
     [string]$Channel = 'Released',
@@ -156,7 +156,7 @@ param(
     # Now: when omitted (the common case), the script auto-discovers the
     # tenant + PIM Activator app registration from the LIVE Microsoft Graph
     # context on the box (Connect-MgGraph runs interactively if not already
-    # connected, exactly like Deploy-PimActivatorIntune.ps1's auto-discover).
+    # connected).
     # That guarantees the catalog matches the tenant the operator is signed
     # into right now -- never a stale file from elsewhere. Pass an explicit
     # path to override, or -SkipTenantCatalog to skip the catalog write
@@ -360,7 +360,7 @@ if ($Scope -eq 'Machine') {
     Write-Host ""
     Write-Host "  -Scope Machine (default) -- writing to HKLM, applies to every user on this box." -ForegroundColor Cyan
     Write-Host "  Note: on Intune-managed devices, the Intune-pushed ExtensionInstallForcelist will" -ForegroundColor DarkGray
-    Write-Host "        overwrite this on next sync -- use Deploy-PimActivatorIntune.ps1 there." -ForegroundColor DarkGray
+    Write-Host "        overwrite this on next sync -- use the Edge management service + the Intune Remediation there (README.md)." -ForegroundColor DarkGray
     Write-Host ""
 } else {
     Write-Host ""
@@ -458,7 +458,7 @@ foreach ($root in $policyRoots) {
 
     # 5. Tenant catalog (chrome.storage.managed.tenantCatalog).
     #
-    # On Intune-managed boxes the catalog arrives through the custom ADMX
+    # On Intune-managed boxes the catalog arrives through the Intune Remediation
     # template (Group Policy CSP), surfacing under chrome.storage.managed
     # so the popup's 'Use centrally deployed' tile turns active. On
     # non-Intune boxes the same data path -- the chrome.storage.managed
@@ -468,7 +468,7 @@ foreach ($root in $policyRoots) {
     #     tenantCatalog (REG_SZ) = minified JSON array of tenant entries
     #
     # The extension reads chrome.storage.managed.tenantCatalog at popup
-    # open time. Same effect as Intune ADMX delivery, just locally pushed.
+    # open time. Same effect as the Intune Remediation, just locally pushed.
     # Skipped when -SkipTenantCatalog OR when the JSON file isn't present.
     if ($SkipTenantCatalog) {
         Write-Host "    -> tenantCatalog skipped (-SkipTenantCatalog)" -ForegroundColor DarkGray
@@ -492,7 +492,7 @@ foreach ($root in $policyRoots) {
 
         if (-not $catalog) {
             # Live auto-discover from the connected Microsoft Graph context.
-            # Mirrors Deploy-PimActivatorIntune.ps1's discover logic so the same
+            # The same discover logic as before, so the same
             # catalog ends up in registry for non-Intune-managed boxes.
             if (-not (Get-Module -ListAvailable Microsoft.Graph.Authentication)) {
                 Write-Warning "    Microsoft.Graph.Authentication module not installed; tenantCatalog skipped. Install with: Install-Module Microsoft.Graph.Authentication -Scope CurrentUser"

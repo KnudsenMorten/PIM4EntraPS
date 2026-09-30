@@ -122,7 +122,7 @@ function Get-PimSharedPendingRowKey {
     $first = { param([string[]]$ns) foreach ($n in $ns) { $v = & $g $n; if ($v) { return $v } }; return '' }
     $k = switch -Regex ("$Base") {
         '^PIM-Definitions-AU$'                 { & $g 'AdministrativeUnitTag'; break }
-        '^PIM-Definitions-Departments$'        { & $first @('Department', 'DepartmentName', 'GroupTag', 'GroupName'); break }
+        '^PIM-Definitions-Departments$'        { & $first @('GroupTag', 'Department', 'DepartmentName', 'GroupName'); break }   # 2.4.462: group rows by tag
         '^PIM-Definitions-'                    { & $g 'GroupTag'; break }
         '^Account-Definitions-Admins(-Central)?$' { & $g 'UserName'; break }
         '^PIM-Offboarding$'                    { & $first @('Username', 'UserName', 'UserPrincipalName', 'Upn'); break }

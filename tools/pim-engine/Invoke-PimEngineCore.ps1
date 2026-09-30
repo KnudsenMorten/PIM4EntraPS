@@ -158,6 +158,7 @@ if ($global:PIM_ActiveScenario) {
 . "$shared\PIM-DisableGuard.ps1"                # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-Notify.ps1"                      # mail notifications (REST sendMail)
 . "$shared\PIM-HybridAd.ps1"                    # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
+. "$shared\PIM-HybridAdGroups.ps1"              # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)
 . "$shared\PIM-EngineProviders.ps1"
 # 🔒 No filters FILE (operator, 2026-09-12: "we dont support files in pim v2" -- "we support filters,
 # but from sql"). The v1 Filters.locked.ps1 only fed filtered lists no v2 code reads; v2 filters live in

@@ -14,6 +14,168 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## PIM Activator 1.6.135 — auto-activate reaches sub-groups (released 2026-09-30)
+
+- **Fixed: a sub-group ticked for auto-activate was never activated.** A permission group nested in a role group only
+  appears in the list once the role group is active, and the automatic activation ran just once, when the Activator
+  opened — before the sub-group was there. It now runs whenever the list loads, and while ticked sub-groups are still
+  waiting for their parent it re-checks every 30 seconds (for up to 10 minutes) and activates each as soon as it appears.
+  Each group is tried at most once per opening. Published to the test channel first.
+- **Fixed: activating or deactivating several groups at once could fail with "429 Too Many Requests".** Microsoft
+  temporarily slows down an account that sends many requests. The Activator now waits as long as Microsoft asks and
+  tries again (up to four times, about a minute), for activation, deactivation and Azure roles alike, and shows the wait
+  on the row or button instead of failing at once.
+- **Fixed: a group that needs approval showed "Activation failed", or "Still not propagated after 20 min".** When a request
+  waits for an approver (or one is already open), nothing is granted until it is approved. The Activator now says "waiting
+  for approval" and no longer watches for permissions that cannot arrive yet -- on the auto tick, Activate selected and the
+  automatic activation. It watches only activations Microsoft actually granted.
+- **Fixed: an activated group did not show as "already active" until you switched tabs.** Microsoft's list of active
+  memberships lags the grant by a few seconds; the Activator now shows the group as active as soon as Microsoft confirms
+  the activation.
+
+## v2.4.468 — A stopped run no longer blocks the next one; safer wizards; the full reference template
+
+- **Fixed: after the platform stopped a running job execution, the next runs waited up to 15 minutes.** Only one
+  scheduler run may work at a time, and a run the hosting platform ended mid-way kept that right until it expired. A new
+  run now asks the platform whether the run holding it is still alive and, only when the platform says it has ended,
+  takes over at once and finishes the interrupted work. **Upgrade note:** this needs read access for the scheduler job's
+  identity on its own job; re-run the hosting access setup script. Without it, runs behave as before.
+- **Fixed: a wizard could stage its changes against an empty table when the table failed to load.** If the server was busy
+  or the connection dropped, the wizard treated the table as new and empty; committing that could have replaced the
+  table's existing rows. The wizard now says it could not read the table and stages nothing. While it works, the button
+  shows it is busy, a line says when it is still waiting for the server, and an error stays on screen.
+- **Drift shows what is live in an area you have not defined yet.** An area with no definitions (for example no
+  administrative-unit-scoped roles) used to show no extras at all, so roles made by hand there were invisible. They are
+  now listed as extras, marked "This area has no definitions yet". PIM still never removes anything from such an area on
+  its own; use Keep to take an item under management.
+- **The Entra ID reference template now has every role-linked group of the original model:** 37 task groups (for example
+  "manage Conditional Access policies" or "revoke sessions") and three more role groups (AI Administrator, Dynamics 365
+  Business Central Administrator, Insights Analyst) — 76 groups and 168 role links in all.
+- **Faster Home page and job history.** The access map behind the Home tiles is reused while nothing changed, and the
+  history of one-off (triggered) runs is kept to the latest 30 instead of growing without end.
+
+## v2.4.467 — Hybrid worker: one service account per tier; Import answers at once
+
+- **Changed: the hybrid worker uses one managed service account per privilege tier.** Group and membership work runs as
+  one account, server onboarding as a second one, and every right is granted to each account's permission group rather
+  than to the account itself. The setup script creates both accounts, their groups and a group policy that makes the
+  server account's permission group a local administrator on the servers you name. **Upgrade note:** re-run the AD setup
+  with the server account and servers OU, then re-run the worker's configuration with both account names.
+- **Fixed: Import on the unmanaged-admin list looked like it did nothing.** The import itself was quick, but every staged
+  row started a full validation and further clicks waited behind it. The button now says "Importing…" at once, errors
+  are shown, a burst of imports runs one validation, and an imported account shows "Staged" until it is committed.
+- **Discovery places a server's permission group in your L2 administrative unit.**
+
+## v2.4.466 — The live view of the PIM for AD sync shows data; Remove rows are cleared again
+
+- **Fixed: the live view of the hybrid sync stayed empty.** The worker could not reach its settings store from inside the
+  continuous loop, so it never sent the live data. It now does.
+- **Fixed: a Remove row that found nothing live was never cleared (2.4.464).** The second check that confirms "nothing
+  live" could not read its own record, so such rows stayed (safely, but for good). They are now cleared once the second
+  check confirms it.
+
+## v2.4.465 — PIM for Active Directory: your own naming in Settings, and a live view of the sync
+
+- **New: Settings → Hybrid Active Directory (PIM for AD).** Define how the hybrid worker recognises the PIM groups that
+  also live in your on-premises Active Directory (group marker or a full pattern), how a cloud admin account maps to its
+  AD admin account, where new AD groups are created, how the per-server administrator groups are named, the group every
+  onboarded server also gets, and accounts that are never removed. Blank fields follow your naming conventions. A preview
+  shows the names the worker will use and the groups that match today.
+- **New: live view of the continuous sync.** Jobs → hybrid-ad-sync → **Live view** (or the link on the Settings card)
+  opens a console that follows every pass: for each group, the members, their time left in AD against the time left on
+  the PIM activation, whether the difference is acceptable, and every add, correction and removal — plus a list of the
+  latest group changes. The worker only sends this while the view is open.
+
+## v2.4.464 — A Remove row survives a slow read; the hybrid worker handles protected groups and existing servers
+
+- **Fixed: a committed Remove row could vanish before it did its job.** When a delegation had been made only seconds
+  earlier, Microsoft's list sometimes did not show it yet; PIM read "nothing to remove", treated the row as done and
+  deleted it, and the delegation stayed. A Remove row that finds nothing live is now kept until a second check at least
+  ten minutes later confirms it; a row that actually revoked something is still cleared at once.
+- **Hybrid worker: protected Active Directory groups no longer fail every hour.** Groups that Active Directory protects
+  (members of Domain Admins, Schema Admins and similar) reset their own permissions, so the worker may not change their
+  display name or description. That cosmetic difference is now left as it is and reported, instead of failing the job
+  each hour. Membership — what actually grants access — is unaffected.
+- **Hybrid worker: servers already set up by the previous PIM for Active Directory scripts are recognised.** Discovery
+  now says that creating such a server's group adopts the existing group rather than making a new one.
+- **Hybrid worker: a clearer answer when it lacks rights on a server.** "No access" (the worker is not a local
+  administrator there) is now told apart from "unreachable" (the server is off), with one message naming the exact
+  group to add the worker's account to.
+
+## v2.4.463 — A new admin gets the Temporary Access Pass straight away
+
+- **Fixed: the first Temporary Access Pass of a new admin was delayed 10–30 minutes.** Microsoft Entra takes a few
+  seconds before a just-created account can be given a pass, so the first attempt was refused and the pass only arrived
+  with the next run (with an error in the log). PIM now waits briefly and retries within the same run — only for that
+  "account not visible yet" answer; any other refusal is reported at once as before.
+- **Fixed: server onboarding showed as "not implemented" on environments without a hybrid worker.** When no group is
+  marked for Active Directory and no hybrid worker runs, the job now simply reports that there is nothing to onboard.
+
+## v2.4.462 — Commit results you cannot miss; department groups commit reliably
+
+- **Fixed: a new department group could be refused while its assignments were saved.** A department group row was stored
+  under its business department's name, so a new group of a department that already had an owner entry was refused as a
+  duplicate — after the assignments that use it had already been written. Every later commit was then blocked by
+  "not defined" errors and the engine could not apply the assignments. Department group rows are now identified by their
+  group tag; existing data is moved to the new identification automatically when the update runs.
+- **Safer: "Commit all" writes definitions before assignments**, so a definition that cannot be saved stops the commit
+  before any assignment that uses it is written.
+- **New: the commit result in the middle of the screen.** Validating and writing show a progress box; a refused or
+  failed commit is a **red, pulsing box** that lists the errors and says exactly what was and was not saved; a successful
+  commit is a green box with the summary. The result line next to the buttons is still there.
+
+## v2.4.461 — Hybrid worker: server onboarding, and the worker on the Jobs page
+
+- **New: server onboarding on the hybrid worker.** The worker lists the Windows servers in Active Directory, and
+  **Discovery** now offers each server that has no PIM group yet — **Create** stages its per-server group in your naming
+  convention. Once the group exists, the worker puts it (and, if you set one, your shared "all servers" admin group) into
+  that server's **local Administrators**. It only ever adds: nobody is removed from a server's local Administrators. A
+  server that is switched off is reported, not treated as a failure. The worker's gMSA needs local administrator rights
+  on the servers (the setup script can add it to the group your policy makes local admin).
+- **New: the hybrid worker on the Jobs page.** Every on-premises AD job shows where it runs — **on the worker** (green),
+  **plan-only** (amber) or **worker not seen** (red) — so a stopped worker is visible at once. The cloud scheduler no
+  longer adds its own "not run here" rows to those jobs' history.
+- **Changed: custom Manager names.** A custom name is optional. On an environment reachable from the internet it must be
+  a public subdomain you own (or keep the default name); a private name (such as `.local`) is refused with the options.
+  Private names belong to a Manager in a private network.
+- The hybrid worker's setup now defaults to a 4 GB VM.
+
+## v2.4.460 — Hybrid worker: a reviewable plan
+
+- **Better: the hybrid worker's log lists every item.** In plan-only mode (and when live) the group mirror and the
+  just-in-time membership sync now write one line per group or member they would change — or changed — with the reason
+  (missing in AD, which attribute drifted, active PIM assignment, no active assignment). The continuous sync writes a
+  plan again only when it changes, so the log stays readable.
+- **Quieter: nested groups.** A group that is a member of a PIM group is skipped as before, now without an error line in
+  the worker log on every pass.
+
+## v2.4.459 — Hybrid worker fix
+
+- **Fixed: the hybrid worker's Active Directory group calls.** In 2.4.458 every AD group call of the hybrid worker
+  failed, so the group mirror and the just-in-time membership sync could not run (they reported the error; nothing was
+  changed in AD). Found by the first plan-only run on a real worker; covered by a new test that drives the real AD
+  calls.
+
+## v2.4.458 — The hybrid worker for on-premises Active Directory, Import all templates
+
+- **New: the hybrid worker (preview).** A small domain-joined Windows server that applies PIM's on-premises Active
+  Directory work, running as a group managed service account (gMSA) — no stored password:
+  - admin accounts in AD, created and updated from the admins you manage in the Manager;
+  - **PIM for AD**: every PIM group marked for Active Directory is mirrored to an AD group of the same name, and the
+    people who have **activated** that PIM group are put into the AD group **within seconds** — the sync runs
+    continuously, not on a schedule. When the forest supports time-limited membership, the AD membership expires with
+    the activation. Only accounts PIM manages are ever removed from those groups.
+  - It runs in its own network that you can disconnect in one step, reads its data with its own managed identity, and
+    updates itself to the version your update ring approves. A plan-only mode shows what it would change before it
+    changes anything. Setup scripts are in `tools/pim-hybrid-worker`.
+  - On-premises Active Directory is a **Pro** feature.
+- **New: Import all** on the permission templates, and a new quick-start template with the Entra ID role groups of the
+  reference set, imported with **your** naming convention.
+- **New: Access → Create Discovered Resources** — straight to the new resources Discovery found, ready to create.
+- **New: a custom host name for the Manager** (setup script); mail links use it once configured.
+- **Upgrade note:** nothing to do. Without a hybrid worker, the new AD jobs report that one is required only when you
+  have defined AD work; otherwise they have nothing to do.
+
 ## v2.4.457 — A faster Manager: Home, Jobs and the audit trail
 
 - **Faster: the Home page.** The jobs tile read the job scope once for every job and scanned the whole run history per

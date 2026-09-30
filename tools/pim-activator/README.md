@@ -54,17 +54,20 @@ sit at the top and the last-used justification + duration are remembered.
 |---|---|---|
 | `Deploy-PimActivatorBackend.ps1` | Tenant admin | One-time per tenant — create the Entra app reg + grant delegated permissions |
 | `Deploy-PimActivatorClient.ps1`  | Endpoint admin | Per machine — write the force-install policies + the tenant catalog into HKLM / HKCU |
-| `Deploy-PimActivatorIntune.ps1`  | Endpoint admin | Intune — the same client policies + tenant catalog as a configuration profile (ADMX-backed) |
 | `Deploy-PimActivatorHybrid.ps1`  | Endpoint admin | Without Intune — the same client policies as a domain GPO, local machine policy, or a JSON artifact |
+| `intune-remediation\*.ps1` + `Publish-PimActivatorRemediation.ps1` | Endpoint admin | **Recommended for Edge.** One plain Intune Remediation pair: the extension's settings (no ADMX) + repair when a user or admin sets the RepairStuck flag; the helper uploads it to Intune. Pair them with an Edge management service policy that installs the extension. See [Deploy with the Edge management service + a Remediation](#deploy-with-the-edge-management-service--a-remediation-recommended-for-edge) |
 | `Update-PimActivator-Extension.ps1` | Extension maintainer | Dev loop — pack new CRX, push to `gh-pages`, flush local browser |
 | `Test-PimActivatorFlow.ps1`      | QA / smoke test | Headless verification of the end-to-end activation path |
 
 The tenant catalog reaches the extension through `chrome.storage.managed`
-(`managed-schema.json` documents the keys; `intune/` holds the ADMX/ADML the
-Intune profile uses), or is imported / typed per browser profile in the setup
+(`managed-schema.json` documents the keys; on Intune-managed Edge the
+Remediation in `intune-remediation\` writes them), or is imported / typed per browser profile in the setup
 wizard. Removed long ago and not coming back: `config.js`,
 `config.template.js`, `Setup-PimActivator.ps1`,
-`Set-PimActivatorPolicy-Intune.ps1`, `Deploy-PimActivatorPolicy-Admx.ps1`.
+`Set-PimActivatorPolicy-Intune.ps1`, `Deploy-PimActivatorPolicy-Admx.ps1`,
+and (2026-09-28) the ADMX/Intune-profile delivery: `Deploy-PimActivatorIntune.ps1`,
+`intune/` (ADMX/ADML), `Inspect-PimActivatorAdmxProfile.ps1`,
+`Get-PimActivatorTenantSettings.ps1`, `Test-PushTenantCatalog.ps1`.
 
 ---
 
@@ -139,8 +142,8 @@ exact display name, or take `-ClientId`).
 Writes the Chromium enterprise policies (`ExtensionInstallForcelist`,
 `ExtensionInstallSources`, `ExtensionSettings`) plus the tenant catalog so the
 browser auto-installs the extension on next launch. Designed for unattended
-rollout via GPO / Configuration Manager (use `Deploy-PimActivatorIntune.ps1` on
-Intune-managed devices).
+rollout via GPO / Configuration Manager (on Intune-managed Edge use the Edge
+management service + the Intune Remediation instead).
 
 **Your organisation's own extension policies are never overwritten.** Our
 forcelist / sources rows go into the slot that already holds our extension id,
@@ -190,9 +193,9 @@ Defaults wired into the script:
 The popup pre-fills the Activate form's **justification** and **activation
 length** from the managed tenant catalog. An MSP can set the org's defaults at
 deploy time — opt-in, on **every** tenant entry written — with two parameters
-that work the same way on **all three** deploy scripts
-(`Deploy-PimActivatorClient.ps1`, `Deploy-PimActivatorHybrid.ps1`,
-`Deploy-PimActivatorIntune.ps1`):
+that work the same way on **both** deploy scripts
+(`Deploy-PimActivatorClient.ps1`, `Deploy-PimActivatorHybrid.ps1`; on the Intune
+Remediation, set the values in `$TenantCatalog` directly):
 
 | Parameter | Effect |
 |---|---|
@@ -209,9 +212,6 @@ it applied.
 # Set the org default justification + 4h activation length across every tenant:
 .\Deploy-PimActivatorHybrid.ps1 -ConfigUncPath \\fs01\pim\tenants.json -Target LocalGpo `
     -DefaultJustification 'Approved change / incident work' -DefaultDurationHours 4
-
-.\Deploy-PimActivatorIntune.ps1 -CatalogJsonPath .\catalog.json `
-    -DefaultJustification 'Approved change / incident work' -DefaultDurationHours 4
 ```
 
 ### Intune managed-policy equivalent (no script)
@@ -226,6 +226,180 @@ eheocihmlppcophaeakmdenhgcookkab;https://knudsenmorten.github.io/PIM4EntraPS/upd
 
 Same effect as running `Deploy-PimActivatorClient.ps1 -Scope Machine`
 fleet-wide.
+
+---
+
+## Deploy with the Edge management service + a Remediation (recommended for Edge)
+
+Intune configuration profiles do not merge: when global IT force-installs some extensions and a department
+force-installs others, the same setting sits in two profiles, Intune reports a conflict and only one list applies.
+The Microsoft Edge management service (Microsoft 365 admin center → Settings → Microsoft Edge) holds the install
+instead, as a cloud policy per group, and a small script delivers the extension's own settings. No ADMX is imported,
+so a new setting in a later extension version needs no re-import.
+
+### Prerequisites — two settings in the Edge management service policy
+
+The extension is installed by the Microsoft Edge management service with a **Cloud** configuration policy assigned to
+the user group. It needs these two settings — without them the extension is not installed, or an old copy never updates.
+
+> **One policy per AUDIENCE, not per channel.** The Edge management service does **not merge** the extension list
+> across policies: when a user gets two policies that both force-install extensions, only the highest-priority policy's
+> list applies (observed 2026-09-30: with separate "PROD" and "TEST" policies only the production Activator installed).
+> So, when test users should get both channels and everyone else only production:
+> - a policy with **both** entries (released + test), assigned to the **test users only**, at the **higher** priority;
+> - a policy with the **released** entry only, assigned to everyone, at a lower priority.
+>
+> Test users then get "PIM Activator" and "PIM Activator (TEST)" side by side (they have different ids and names);
+> everyone else gets production only. A tenant-wide policy that also force-installs extensions (e.g. "Global
+> Extensions") must either carry the Activator entries too or not set that list, or it replaces them for everyone.
+
+| # | Where in the policy | Setting | Value |
+|---|---|---|---|
+| 1 | **Settings** → Add setting | **ExtensionInstallSources** ("Configure extension and user script install sources") | `https://knudsenmorten.github.io/*` |
+| 2 | **Managed extensions** → Add extension → *External extension* → the extension id → select it (the "Manage extension" dialog) | **Installation setting** | **Force** |
+|   |   | **Update URL** | the channel's update URL (table below) |
+|   |   | **Use this update URL for all extension updates** | ticked (this is `override_update_url`) |
+|   |   | **Minimum version** | `1.6.126` |
+
+| Channel | Extension id | Update URL |
+|---|---|---|
+| Released (PROD) | `eheocihmlppcophaeakmdenhgcookkab` | `https://knudsenmorten.github.io/PIM4EntraPS/updates.xml` |
+| Test | `glldnbmjpdkjemcnficagdhgienfdpoo` | `https://knudsenmorten.github.io/PIM4EntraPS/updates-test.xml` |
+
+Why each one:
+- **ExtensionInstallSources** — the extension is self-hosted (not in a store), so its download location must be an
+  allowed install source.
+- **Force + update URL** — installs the extension and keeps it installed.
+- **Use this update URL for all extension updates** — Edge also *updates* the extension from that URL. Versions before
+  1.6.126 carry no update address of their own and stay stuck on their version without it.
+- **Minimum version 1.6.126** — an older copy is disabled until it has updated.
+
+The same as ExtensionSettings JSON (e.g. for **Import JSON** on the Managed extensions tab):
+`{ "<extension id>": { "installation_mode": "force_installed", "update_url": "<update URL>", "override_update_url": true, "minimum_version_required": "1.6.126" } }`.
+A device policy set by Intune or Group Policy for the same Edge setting wins over the cloud policy — do not also set
+these through an Intune profile for these users.
+
+### The Intune Remediation — settings + repair on request
+
+`intune-remediation\Detect-PimActivator.ps1` + `Remediate-PimActivator.ps1`. **Every run** it writes the extension's
+settings for **Microsoft Edge and Google Chrome** (only the extension's own registry key per browser — see
+[Managed settings reference](#managed-settings-reference); it never touches the browsers themselves). **Only when
+someone asks** (the registry value below) it also repairs the extension. Both scripts start with the same **SETTINGS**
+block — every option is explained line by line in `Remediate-PimActivator.ps1`:
+
+| Setting | Values | Meaning |
+|---|---|---|
+| `$Channel` | `'Released'` / `'Test'` | which extension (production or test id — the same id in Edge and Chrome) |
+| `$Browsers` | `@('Edge', 'Chrome')` (default) / `@('Edge')` / `@('Chrome')` | which browsers get the settings (and the repair); a browser left out is not touched |
+| `$TenantCatalog` | JSON list of tenants | `name`, `tenantId`, `clientId` required; optional fields in [Managed settings reference](#managed-settings-reference) |
+| `$AutoActivateMaxGroups` | `$null` / `0` / `1`–`100` | no limit / auto-activation OFF / at most N groups ticked "auto" (needs 1.6.128+) |
+| `$BulkActivateConfirmThreshold` | `$null` / `1`–`100` | default 5 / Activate asks for a 2nd click at N roles |
+| `$CloseEdge` | `$false` / `$true` | a requested repair while the browser is open: wait until it is closed / close it — covers Edge **and** Chrome (name kept for existing copies) |
+
+**The registry value that requests a repair ("flush")**
+
+| | |
+|---|---|
+| Key (user) | `HKCU\Software\PIM4EntraPS\PimActivator` — the user can set it, **no admin rights needed** |
+| Key (device) | `HKLM\SOFTWARE\PIM4EntraPS\PimActivator` — an admin, for every user on the device |
+| Value name | `RepairStuck` |
+| Type / data | `REG_DWORD` = `1` |
+| Set it | `reg add HKCU\Software\PIM4EntraPS\PimActivator /v RepairStuck /t REG_DWORD /d 1 /f` (user) — or the HKLM line as admin |
+| What happens | On the next Remediation run with **the browser closed**: PIM Activator's registration is cut out of every Edge / Chrome profile's `Preferences` / `Secure Preferences` (the browsers in `$Browsers`; text only — every other byte of the file is kept; each file backed up as `<file>.bak-<date-time>`) and its program files are deleted. The browser's install policy installs the current version fresh on the next start. |
+| Afterwards | The value is **deleted** automatically (in HKCU and HKLM). |
+| Browser open | Nothing in the browser is changed, the value is kept, and the next run tries again (schedule the Remediation e.g. every hour) — unless `$CloseEdge = $true`. |
+| The user notices | PIM Activator is reinstalled: the user signs in to it again, and its own saved data (favorites, "auto" ticks) may be gone. Bookmarks, passwords, history, other extensions and sync are not touched. |
+
+Why text-only: on 2026-06-09 a PowerShell JSON read/re-write of `Preferences` corrupted the file under Windows
+PowerShell 5.1 and Edge reset the whole profile. The repair therefore never re-serialises the file — it cuts the
+extension's blocks out of the text, checks the result is still one balanced JSON object, and leaves any file it does
+not recognise untouched.
+
+**Create the Remediation.** Copy both scripts, edit the SETTINGS block **identically in both**, then in Intune →
+**Devices → Scripts and remediations → Create**: detection script = `Detect-PimActivator.ps1`, remediation script =
+`Remediate-PimActivator.ps1`, **Run this script using the logged-on credentials = No** (runs as SYSTEM),
+**Enforce script signature check = No**, **Run script in 64-bit PowerShell = Yes**; assign it to the same group as the
+Edge policy (a user group runs it on that user's devices) and schedule it — **every hour** is a good choice. One
+Remediation per channel and set of values, e.g. `PIM Activator settings (PROD)` and `PIM Activator settings (TEST)`.
+Edge picks up new settings on its next policy refresh; `edge://policy` → **Reload policies** shows them at once (Chrome:
+`chrome://policy` → **Reload policies**). The Remediation does not install the extension in Chrome — Chrome needs its own
+`ExtensionInstallForcelist` policy with the same id and update URL.
+
+**Or upload it with `Publish-PimActivatorRemediation.ps1`** — creates the Remediation, or updates it in place when one
+with the same name exists (its assignments are kept), and reads it back:
+
+```powershell
+Connect-MgGraph -Scopes DeviceManagementScripts.ReadWrite.All
+.\Publish-PimActivatorRemediation.ps1 -Name 'PIM Activator settings (PROD)' `
+    -DetectScript .\Detect-PimActivator-PROD.ps1 -RemediateScript .\Remediate-PimActivator-PROD.ps1 `
+    -AssignToGroupId <group-id> -EveryHours 1
+```
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `-Name` | yes | the Remediation's name in Intune; an existing one with this exact name is updated in place |
+| `-DetectScript` | yes | path to your edited `Detect-PimActivator.ps1` |
+| `-RemediateScript` | yes | path to your edited `Remediate-PimActivator.ps1` |
+| `-Description` | no | text shown in Intune |
+| `-AssignToGroupId` | no | Entra group id (user or device group) to assign it to — **replaces** its current assignments; left out = assignments unchanged |
+| `-EveryHours` | no | with `-AssignToGroupId`: run every N hours (1–23), e.g. `1` = hourly |
+| `-DailyTime` | no | with `-AssignToGroupId` and no `-EveryHours`: run daily at `HH:mm` (default `09:00`) |
+
+It always uploads with *run as SYSTEM*, *64-bit*, *no signature check*.
+
+**Good to know.** To change a value later, edit the SETTINGS block in both scripts and upload again; a value set back
+to `$null` is removed from the devices. If an older Intune profile still pushes the **Tenant catalog** settings from the
+imported PIM Activator ADMX, set those to *Not configured* for these users (two writers of the same value undo each
+other). Remediations need a Windows Enterprise E3/E5 (or equivalent) licence. Keep department groups that get
+*different* values from overlapping — a device in two groups runs both and the last one wins.
+
+## Managed settings reference
+
+Everything the extension reads from policy (`chrome.storage.managed`, declared in `managed-schema.json`). On Windows
+the values live under:
+
+```
+HKLM\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\<extension id>\policy     (Edge)
+HKLM\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\<extension id>\policy      (Chrome)
+```
+
+`<extension id>` is `eheocihmlppcophaeakmdenhgcookkab` (released) or `glldnbmjpdkjemcnficagdhgienfdpoo` (test). These
+keys belong to the extension alone, so they never conflict with any other extension policy.
+
+| Value | Type | What it does | Default when not set |
+|---|---|---|---|
+| `tenantCatalog` | REG_SZ (JSON array) | The tenants users can sign in to — see the entry fields below. Required for a zero-setup experience; without it users run the setup wizard. | Empty: the setup wizard is shown |
+| `bulkActivateConfirmThreshold` | REG_DWORD 1–100 | When a user selects at least this many roles, **Activate** asks for a second click to confirm. A per-tenant value in the catalog overrides it. | 5 |
+| `autoActivateMaxGroups` | REG_DWORD 0–100 | Per-device cap on groups a user may mark **auto** (activated when the popup opens). `0` turns auto-activation off on the device; `N` allows at most N. Device policy only — never read from the catalog. | No limit |
+
+**Tenant catalog entry fields** (one JSON object per tenant):
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | No | Display name in the tenant switcher (defaults to the tenant id). |
+| `tenantId` | **Yes** | Entra tenant id (GUID). |
+| `clientId` | **Yes** | Application id of the PIM Activator app registration in that tenant (GUID). |
+| `defaultJustification` | No | Pre-filled justification on the Activate form (default `Change in infrastructure`). |
+| `defaultDurationHours` | No | Pre-filled activation duration in hours (default 8; capped by each role's PIM policy). |
+| `prefix` | No | Only list groups whose name **starts with** this text (or any of a list of texts), e.g. `"PIM-"`. |
+| `entraPrefix` | No | Text (or list) that puts a group in the **Entra** section, e.g. `["PIM-Entra","PIM-AAD"]`. |
+| `azurePrefix` | No | Text (or list) that puts a group in the **Azure** section, e.g. `["PIM-Azure","PIM-AzRes"]`. |
+| `groupNameFilter` | No | Advanced: a regular expression instead of `prefix` (wins over it). An invalid pattern shows all groups and says so. |
+| `entraGroupRegex` | No | Advanced: a regular expression instead of `entraPrefix` (default `Entra`). |
+| `azureGroupRegex` | No | Advanced: a regular expression instead of `azurePrefix` (default `AzRes\|Azure`). |
+| `bulkActivateConfirmThreshold` | No | Per-tenant override of the tenant-wide confirm threshold above. |
+
+Groups that match neither the Entra nor the Azure pattern are listed under *PIM for Groups*. Example catalog with two
+tenants (paste it into `$TenantCatalog` in the SETTINGS block):
+
+```json
+[
+  { "name": "Contoso", "tenantId": "<tenant-guid>", "clientId": "<app-id>",
+    "defaultJustification": "Approved change", "defaultDurationHours": 4, "prefix": "PIM-" },
+  { "name": "Fabrikam", "tenantId": "<tenant-guid>", "clientId": "<app-id>",
+    "entraPrefix": ["PIM-Entra"], "azurePrefix": ["PIM-Azure"], "bulkActivateConfirmThreshold": 10 }
+]
+```
 
 ---
 
@@ -397,7 +571,7 @@ one browser profile and switch between them from the header.
 | `popup-report.js` | extension | Scrubs ids / e-mails / tokens out of the public "Report bug" text |
 | `popup-config.js`, `popup-net.js`, `version-badge.js` | extension | Pure config helpers, fetch timeouts/watchdogs, version badge |
 | `background.js`   | extension | MV3 service worker — intentionally empty (sign-in runs in the popup) |
-| `managed-schema.json`, `intune/` | extension / policy | Managed-storage schema + the ADMX/ADML for the tenant catalog |
+| `managed-schema.json` | extension / policy | Managed-storage schema (the keys the Remediation / Client / Hybrid write) |
 | `_PimActivatorHybridPolicy.ps1` | endpoint setup | Shared slot / ExtensionSettings-merge logic of the Client + Hybrid deploys |
 | `icons/`          | extension | 16/32/128 px toolbar icons |
 | `extension-identity.txt` | extension | Public key + deterministic extension id |

@@ -67,7 +67,7 @@ $script:PimProEditionName       = 'Pro'
 # the second approver, delegated administration ceilings, the tier-impact report and the evidence export. Dropped then
 # (free, and never gated by production code): Intake, SelfService, ContactsRouting, Conformance, Rings, ApproverMatrix,
 # PawPolicy, Lifecycle, AzureDiscovery (now 'Discovery'), DefinitionImport, PermissionWizard.
-$script:PimProFeatureCatalog = @('AccessReviews', 'Coverage', 'Discovery', 'EvidenceExport', 'MakerChecker', 'MspFanout',
+$script:PimProFeatureCatalog = @('AccessReviews', 'Coverage', 'Discovery', 'EvidenceExport', 'HybridAd', 'MakerChecker', 'MspFanout',
     'PortalAdmins', 'Revoke', 'TierReport', 'WorkloadConnectors')
 
 $script:PimLicenseCache = $null

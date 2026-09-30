@@ -36,6 +36,7 @@ $script:PimDiscoveryKinds = [ordered]@{
     'defender-role' = 'Defender XDR role'
     'intune-role'   = 'Intune role'
     'entra-au'      = 'Administrative Unit'   # REQ-AU-DRIFT-1 (2.4.455): Create = its PIM-Definitions-AU row (matched by display name)
+    'ad-server'     = 'Windows server (Active Directory)'   # §80.2: listed by the hybrid worker; Create = its per-server PIM group
 }
 $script:PimDiscoveryRoleKinds = @('entra-role', 'defender-role', 'intune-role')
 
@@ -75,7 +76,7 @@ function Get-PimAzureCafLevel {
 
 function ConvertTo-PimDiscoveryItems {
     <# PURE. The cached sources -> one flat list of { key; kind; kindLabel; id; name; path }. #>
-    param([object[]]$AzureScopes = @(), [object[]]$EntraRoles = @(), [object[]]$DefenderRoles = @(), [object[]]$IntuneRoles = @(), [object[]]$PowerBiWorkspaces = @(), [object[]]$AdministrativeUnits = @())
+    param([object[]]$AzureScopes = @(), [object[]]$EntraRoles = @(), [object[]]$DefenderRoles = @(), [object[]]$IntuneRoles = @(), [object[]]$PowerBiWorkspaces = @(), [object[]]$AdministrativeUnits = @(), [object[]]$AdServers = @())
     $out = New-Object System.Collections.Generic.List[object]
     $add = { param($kind, $id, $name, $path) if ("$id".Trim()) { $out.Add([pscustomobject]@{ key = "${kind}:$("$id".Trim().ToLowerInvariant())"; kind = $kind; kindLabel = $script:PimDiscoveryKinds[$kind]; id = "$id".Trim(); name = "$name".Trim(); path = "$path".Trim() }) } }
     foreach ($s in @($AzureScopes)) {
@@ -89,6 +90,13 @@ function ConvertTo-PimDiscoveryItems {
     foreach ($r in @($IntuneRoles)) { & $add 'intune-role' (Get-PimDiscoveryField $r 'id') (Get-PimDiscoveryField $r 'name') '' }
     foreach ($w in @($PowerBiWorkspaces)) { & $add 'powerbi-ws' (Get-PimDiscoveryField $w 'workspaceId') (Get-PimDiscoveryField $w 'workspaceName') '' }
     foreach ($a in @($AdministrativeUnits)) { & $add 'entra-au' (Get-PimDiscoveryField $a 'id') (Get-PimDiscoveryField $a 'displayName') (Get-PimDiscoveryField $a 'description') }
+    foreach ($s in @($AdServers)) {
+        # 2.4.464: the worker flags a server whose per-server group ALREADY exists in AD (v1 made one for every server) --
+        # Create then ADOPTS that group (the engine matches groups by name), it does not make a second one.
+        $p = Get-PimDiscoveryField $s 'dnsHostName'
+        if ((Get-PimDiscoveryField $s 'groupInAd') -eq 'True') { $p = "$p -- existing group $(Get-PimDiscoveryField $s 'groupName') (from PIM for AD v1): Create adopts it" }
+        & $add 'ad-server' (Get-PimDiscoveryField $s 'name') (Get-PimDiscoveryField $s 'name') $p
+    }
     return $out.ToArray()
 }
 
@@ -104,6 +112,19 @@ function Get-PimDiscoveryProposal {
         $tag = (("$($Item.name)".Trim() -replace '[^A-Za-z0-9._-]+', '-') -replace '-{2,}', '-').Trim('-')
         return [pscustomobject]@{ base = 'PIM-Definitions-AU'; groupName = "$($Item.name)"; groupTag = $tag; level = $null
             row = [ordered]@{ AUDisplayName = "$($Item.name)"; AUDescription = "$($Item.path)"; AdministrativeUnitTag = $tag } }
+    }
+    if ($Item.kind -eq 'ad-server') {
+        # §80.2 server onboarding: the per-server PIM-for-AD group in the customer's naming (Get-PimHybridAdServerGroupName);
+        # v1 made these L2 / T0 / control plane. The hybrid worker puts it into the server's local Administrators.
+        if (-not (Get-Command Get-PimHybridAdServerGroupName -ErrorAction SilentlyContinue)) { return $null }
+        $name = Get-PimHybridAdServerGroupName -Server $Item.name
+        $tag = (($name -replace '[^A-Za-z0-9._-]+', '-') -replace '-{2,}', '-').Trim('-')
+        # 2.4.467: placed in the tenant's L2 permission-group AU (Settings > Group naming values; default PIM-L2) -- v1 put
+        # every per-server group in its L2 AU (Custom-LocalGroups: AdministrativeUnitTargetObjectID = PIM-Groups-L2).
+        $au = if (Get-Command Get-PimPermissionGroupAdminUnit -ErrorAction SilentlyContinue) { try { "$(Get-PimPermissionGroupAdminUnit -Level 'L2')" } catch { 'PIM-L2' } } else { 'PIM-L2' }
+        return [pscustomobject]@{ base = 'PIM-Definitions-Services'; groupName = $name; groupTag = $tag; level = 2
+            row = [ordered]@{ GroupName = $name; GroupDescription = "PIM - Local Administrators on server $($Item.name) -- created from Discovery"; GroupTag = $tag
+                              AdministrativeUnitTag = $au; IsRoleAssignable = 'FALSE'; Workload = 'Active-Directory'; Level = 'L2'; TierLevel = 'T0'; Plane = 'CP'; CPPlatform = 'AD'; Owners = ''; PolicyTemplate = '' } }
     }
     if ($Item.kind -eq 'powerbi-ws') {
         $seg = ConvertTo-PimNameSegment $Item.name

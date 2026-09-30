@@ -2335,6 +2335,11 @@
           // of an existing delegation are all changed here.
           desc: 'Every existing delegation in one table: change an eligibility from 90 to 365 days, make it Active or Eligible, or switch its policy to one that needs approval -- the group, Entra role or Azure role policy. Edits are staged in Pending changes like any other.' },
         { tab: 'grid', gridScope: '',            label: 'All records',           desc: 'The raw records behind every screen, in a table' },
+        // §80.3 (operator 2026-09-29: "I need in the menu under Access to have a Create Discovered Resources"). A marked
+        // cross-link (anchor) into the ONE Discovery page, opened on its New view: create what discovery found without going
+        // through Audit & Settings. Discovery itself stays listed there.
+        { tab: 'discovery', anchor: 'discInbox', discView: 'new', label: 'Create Discovered Resources',
+          desc: 'New Azure scopes, Power BI workspaces, administrative units and roles found in the tenant: tick them and Create -- staged in Pending changes, committed under Review & commit' },
       ] },
     { id: 'change', label: 'Pending changes',
       title: 'Check, review and commit what is waiting',
@@ -2427,7 +2432,7 @@
       ? { tab: it, label: null, desc: '', anchor: null }
       // 71.26: gridScope opens the records table narrowed to one family of entities (the
       // delegation grid entry). It is carried like nchor -- a deliberate, marked deep-link.
-      : { tab: it.tab, label: it.label || null, desc: it.desc || '', anchor: it.anchor || null, gridScope: it.gridScope || null };
+      : { tab: it.tab, label: it.label || null, desc: it.desc || '', anchor: it.anchor || null, gridScope: it.gridScope || null, discView: it.discView || null };
   }
 
   // Scroll a tab's section into view after the tab has rendered. Tabs render asynchronously, so
@@ -2521,7 +2526,7 @@
             '<span class="nav-item-badge" aria-hidden="true"></span>' +
           '</span>' +
           (spec.desc ? '<span class="nav-item-desc">' + escapeHtml(spec.desc) + '</span>' : '');
-        item.addEventListener('click', () => { if (spec.gridScope !== undefined) setGridScope(spec.gridScope); switchTab(tabKey); closeAllNavGroups(); navScrollToAnchor(spec.anchor); });
+        item.addEventListener('click', () => { if (spec.gridScope !== undefined) setGridScope(spec.gridScope); if (spec.discView) PIM_DISC_VIEW = spec.discView; switchTab(tabKey); closeAllNavGroups(); navScrollToAnchor(spec.anchor); });
         menu.appendChild(item);
         wired++;
         groupItems++;
@@ -3544,16 +3549,34 @@
       '<summary style="font-weight:600;font-size:13px;cursor:pointer;">' + acc.length + ' unmanaged admin account(s) -- in the directory, not in PIM</summary>' +
       '<div style="color:#57606a;font-size:11.5px;margin:4px 0 6px;">No TAP healing, no reminders, no review. <b>Import</b> stages the account&rsquo;s definition (read from the account) and the rows that keep the access it holds today (from the latest drift check) -- review and commit under Pending changes.' +
       (d.stale ? ' <span style="color:#9a6700;">(report is stale -- observed ' + esc(d.observedUtc || '') + ')</span>' : '') + '</div>' +
-      '<table class="grid" style="font-size:12px;"><tbody>' + acc.map(u => '<tr><td>' + esc(u) + '</td><td><button class="btn-sec acctImportBtn" data-upn="' + esc(u) + '" style="font-size:11px;">Import</button> <span class="acctImportMsg" style="font-size:11px;color:#57606a;"></span></td></tr>').join('') +
+      '<table class="grid" style="font-size:12px;"><tbody>' + acc.map(u => {
+        // 2.4.467 (operator 2026-09-30: "when i click import for 2nd nothing happens, no msg like for simon"): the row
+        // itself says STAGED whenever the account is in the pending changes -- a message only in a span was lost on the
+        // next re-render of this list (the import had worked: both accounts were in the shared pending changes).
+        const st = acctUnmanagedStaged(u);
+        return '<tr><td>' + esc(u) + '</td><td>' + (st
+          ? '<span class="acctImportMsg" style="font-size:11px;color:#116329;font-weight:600;">&#10003; Staged -- commit under Pending changes</span>'
+          : '<button class="btn-sec acctImportBtn" data-upn="' + esc(u) + '" style="font-size:11px;">Import</button> <span class="acctImportMsg" style="font-size:11px;color:#57606a;"></span>') + '</td></tr>';
+      }).join('') +
       '</tbody></table></details>';
     host.querySelectorAll('.acctImportBtn').forEach(b => b.onclick = () => acctImportUnmanaged(b.dataset.upn, b));
   }
+  function acctUnmanagedStaged(upn) {
+    const p = (typeof pendingChanges !== 'undefined' && pendingChanges) ? pendingChanges['Account-Definitions-Admins'] : null;
+    if (!p || !Array.isArray(p.rows)) return false;
+    const u = String(upn || '').toLowerCase();
+    return p.rows.some((x, i) => !(p.deletes && p.deletes.has && p.deletes.has(i)) && String((x && x.UserPrincipalName) || '').toLowerCase() === u);
+  }
   async function acctImportUnmanaged(upn, btn) {
-    const msg = btn && btn.parentElement ? btn.parentElement.querySelector('.acctImportMsg') : null;
-    const say = (t, bad) => { if (msg) { msg.textContent = t; msg.style.color = bad ? '#cf222e' : '#116329'; } else sharedToast(t); };
+    const msgOf = () => { const b = Array.from(document.querySelectorAll('.acctImportBtn')).find(x => x.dataset.upn === String(upn)) || btn; return b && b.parentElement ? b.parentElement.querySelector('.acctImportMsg') : null; };
+    // say(): into the row's message if it is still on the page, AND a toast -- the list may have re-rendered meanwhile
+    const say = (t, bad) => { const m = msgOf(); if (m && m.isConnected) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#116329'; } try { sharedToast(t); } catch (_) { } };
+    if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+    { const m = msgOf(); if (m) { m.textContent = 'reading the account and its PIM memberships…'; m.style.color = '#57606a'; } }
+    try {
     let r = null;
     try { r = await api('GET', '/api/unmanaged-admins/import?upn=' + encodeURIComponent(upn)); }
-    catch (e) { say('Not imported: ' + ((e && e.body && e.body.error) || e.message), true); return; }
+    catch (e) { say('Not imported: ' + ((e && e.body && e.body.error) || e.message), true); if (btn) { btn.disabled = false; btn.textContent = 'Import'; } return; }
     let staged = 0;
     if (!r.alreadyDefined && r.adminRow) {
       const base = 'Account-Definitions-Admins';
@@ -3569,8 +3592,15 @@
     const mem = asList(r.memberships);
     if (mem.length) await driftKeepExtras(mem.map(m => ({ type: 'extra', keep: { base: 'PIM-Assignments-Admins', row: m } })), () => { });
     markBadges();
-    try { valRevalidateAfterFix(); } catch (_) { }
-    say('Staged ' + (staged ? 'the account + ' : '') + mem.length + ' membership row(s)' + (r.note ? ' -- ' + r.note : '') + ' -- commit under Pending changes.');
+    try { valRevalidateAfterFix(8000); } catch (_) { }   // one preflight after a burst of imports, not one per click
+    say((staged ? 'Staged ' + upn + ' + ' : (r.alreadyDefined ? upn + ' is already defined; staged ' : 'Staged ')) + mem.length + ' membership row(s)' + (r.note ? ' -- ' + r.note : '') + ' -- commit under Pending changes.');
+    if (btn) { btn.disabled = false; btn.textContent = 'Import'; }
+    try { await renderUnmanagedAdmins(document.getElementById('acctUnmanagedWrap')); } catch (_) { }   // the row now shows "Staged"
+    } catch (e) {
+      // anything after the read (staging, the pending draft) -- never a silent click
+      say('Not imported: ' + String((e && e.message) || e), true);
+      if (btn) { btn.disabled = false; btn.textContent = 'Import'; }
+    }
   }
 
   async function renderAccounts() {
@@ -6887,6 +6917,9 @@
       h += `</div>`;
     }
 
+    // 2.4.465 (operator 2026-09-30: "a customer must be able to define his groups naming convention for the hybrid solution")
+    h += `<div id="setHybridAdHost"><div style="color:#57606a;font-size:12px;">Loading hybrid Active Directory settings…</div></div>`;
+
     // --- Naming conventions (key/value editor) -------------------------
     h += `<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">Naming conventions${seedNote(s.namingSeeded,'naming')}</h3>`;
     h += `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Patterns + tokens for admin / group / resource names. ` +
@@ -7124,6 +7157,7 @@
     renderTemplatePacksSection(document.getElementById('setTemplatePacksHost'));
     renderSettingsCopySection(document.getElementById('setCopyHost'));
     renderAdminDomainSection(document.getElementById('setAdminDomainHost'));
+    renderHybridAdSection(document.getElementById('setHybridAdHost'));
 
     // Operational-policy + Alerting cards load asynchronously (host containers
     // are always present so the rest of Settings paints first).
@@ -8551,6 +8585,10 @@
           '<div style="color:#57606a;font-size:11px;">The engine did not compare this area, so it is not counted as in sync. Turn the feature on (Settings &rarr; Features) or grant the missing permission, and the next check includes it.</div>');
       } else {
         const its = asList(s.items);
+        // REQ-AU-DRIFT-1 (operator 2026-09-30): an area with NO definitions still lists what is live there, read-only
+        if (s.noDefinitions) det.push('<div class="driftNoDefs" style="color:#9a6700;font-size:11.5px;padding:4px 0;">This area has no definitions yet &mdash; ' +
+          'everything live here is listed as extra so you can see it. PIM removes nothing from an area it has no definitions for; ' +
+          'use <b>Keep</b> to take an item under management, or Delete to remove it on purpose.</div>');
         det.push('<table class="grid" style="font-size:11.5px;margin:4px 0;"><thead><tr>' +
           (canApply ? '<th style="width:24px;"><input type="checkbox" class="driftScopeAll" data-scope="' + esc(s.scope) + '" title="select every item in this area"></th>' : '') +
           '<th style="width:70px;">Drift</th><th>What</th></tr></thead><tbody>');
@@ -9308,6 +9346,9 @@
     'tenant-cache':                'Refreshes the lists of roles, administrative units, groups and Azure scopes the pickers and validation use.',
     'verify-convergence':          'Re-reads the tenant and proves that what was committed is actually deployed.',
     'hybrid-ad-apply':             'Applies on-premises Active Directory changes for hybrid admin accounts.',
+    'hybrid-ad-servers':           'Lists the Windows servers in Active Directory for Discovery, and puts each server\'s PIM group into that server\'s local Administrators (adds only; runs on the hybrid worker).',
+    'hybrid-ad-groups':            'Mirrors the PIM groups marked for Active Directory to on-premises AD groups (runs on the hybrid worker).',
+    'hybrid-ad-sync':              'Puts the people who have ACTIVATED a PIM group into its on-premises AD group, time-limited when the forest supports it (runs CONTINUOUSLY on the hybrid worker: an activation reaches AD within seconds).',
     'active-assignments-snapshot': 'Reads who holds active privileged access right now, for Review current delegations and Home.',
     'drift-snapshot':              'Checks whether the tenant still matches what PIM says it should (the Drift page).',
     'coverage':                    'Lists every role, workspace and Azure scope PIM does not delegate yet, orphan groups and groups PIM does not manage (the Coverage & gaps page).',
@@ -10019,6 +10060,130 @@
         if (msg) { msg.style.color = '#cf222e'; msg.textContent = String((e && e.message) || e); }
       }
     };
+  }
+
+  // ----- Settings: Hybrid Active Directory (PIM for AD) -- 2.4.465 -------------------------------------------------------
+  // Operator 2026-09-30: "a customer must be able to define his groups naming convention for the hybrid solution. where in
+  // the settings and portal can we configure the hybrid work". Every knob of the hybrid worker, each its own pim.Settings
+  // row (GET/PUT /api/settings/hybrid-ad); blank = the default, derived from this tenant's naming. A live PREVIEW shows the
+  // names the worker will use and the defined groups the pattern matches today.
+  async function renderHybridAdSection(host) {
+    if (!host) return;
+    const esc = escapeHtml;
+    let d = null, err = '';
+    try { d = await api('GET', '/api/settings/hybrid-ad'); } catch (e) { err = String((e && e.message) || e); }
+    let h = '<div class="set-card" id="setHybridAd"><h3 style="margin:0 0 4px;font-size:14px;">Hybrid Active Directory (PIM for AD)</h3>';
+    h += '<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">How the hybrid worker recognises the PIM groups that also exist in your on-premises Active Directory, ' +
+         'how a cloud admin maps to its AD admin account, and how servers are onboarded. Uses <b>your</b> naming &mdash; blank fields follow the naming conventions below. ' +
+         '<a href="#" id="setHybridAdLive">Open the live view</a> to watch the continuous sync.</div>';
+    if (err || !d) { host.innerHTML = h + '<div style="color:#cf222e;font-size:12px;">Could not read the hybrid settings: ' + esc(err || 'no answer') + '</div></div>'; bindLive(); return; }
+    const ro = d.canWrite ? '' : ' disabled';
+    h += '<table class="set-table" id="setHybridAdTbl"><tr><th>Setting</th><th>Value</th><th>Default</th></tr>';
+    (d.settings || []).forEach(x => {
+      h += '<tr><td style="white-space:nowrap;" title="' + esc(x.help || '') + '">' + esc(x.label || x.name) + '<div style="color:#57606a;font-size:10.5px;max-width:320px;white-space:normal;">' + esc(x.help || '') + '</div></td>' +
+           '<td><input class="setHybridAdIn" data-key="' + esc(x.name) + '" value="' + esc(x.value || '') + '"' + ro + ' style="width:320px" placeholder="' + esc(x.default || '(derived)') + '"></td>' +
+           '<td><code style="font-size:11px;">' + esc(x.default || '(derived)') + '</code></td></tr>';
+    });
+    h += '</table>';
+    const p = d.preview || {};
+    h += '<div id="setHybridAdPreview" style="margin-top:10px;padding:8px 10px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;font-size:12px;">' +
+         '<div><b>Mirrored to AD:</b> PIM groups named <code>' + esc(p.pattern || '') + '</code> &mdash; <b>' + (p.matchedCount || 0) + '</b> defined today</div>' +
+         '<div><b>Account mapping:</b> <code>' + esc(p.exampleCloudAccount || '') + '</code> in Entra ID &rarr; <code>' + esc(p.exampleAdAccount || '') + '</code> in AD</div>' +
+         '<div><b>Server group:</b> server FS01 &rarr; <code>' + esc(p.exampleServerGroup || '') + '</code></div>';
+    if ((p.matched || []).length) h += '<details style="margin-top:4px;"><summary>Show the matching groups</summary><div style="font-family:monospace;font-size:11px;max-height:180px;overflow:auto;">' + (p.matched || []).map(esc).join('<br>') + '</div></details>';
+    h += '</div>';
+    if (d.canWrite) h += '<div style="margin-top:8px;"><button id="setHybridAdSave">Save hybrid settings</button> <span id="setHybridAdMsg" style="font-size:12px;"></span></div>';
+    else h += '<div style="font-size:11px;color:#57606a;margin-top:6px;">(SuperAdmin required to change)</div>';
+    host.innerHTML = h + '</div>';
+    bindLive();
+    const btn = document.getElementById('setHybridAdSave');
+    if (btn) btn.onclick = async () => {
+      const values = {};
+      host.querySelectorAll('.setHybridAdIn').forEach(i => { values[i.getAttribute('data-key')] = i.value; });
+      btn.disabled = true;
+      const msg = document.getElementById('setHybridAdMsg');
+      try {
+        const r = await api('PUT', '/api/settings/hybrid-ad', { values });
+        await renderHybridAdSection(host);
+        const m2 = document.getElementById('setHybridAdMsg');
+        if (m2) { m2.style.color = '#1a7f37'; m2.textContent = (r && r.detail) || 'Saved.'; }
+      } catch (e) {
+        btn.disabled = false;
+        if (msg) { msg.style.color = '#cf222e'; msg.textContent = String((e && e.message) || e); }
+      }
+    };
+    function bindLive() { const a = document.getElementById('setHybridAdLive'); if (a) a.onclick = (ev) => { ev.preventDefault(); openHybridAdLive(); }; }
+  }
+
+  // ----- The LIVE view of the continuous PIM-for-AD sync -- 2.4.465 -----------------------------------------------------
+  // Operator 2026-09-30: "where can i see live the continuously pulling and group changes in hybrid worker, as i use this
+  // for demo of PIM for AD". A full-screen console in v1's look (per group: current vs expected TTL, the deviation, and
+  // every add / remove), polling GET /api/hybrid-ad/live every 3 s. Opening it is what makes the worker publish (it writes
+  // nothing while nobody watches); the first pass arrives within ~15 s.
+  function openHybridAdLive() {
+    const esc = escapeHtml;
+    let ov = document.getElementById('hybridAdLiveOverlay');
+    if (ov) ov.remove();
+    ov = document.createElement('div');
+    ov.id = 'hybridAdLiveOverlay';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:10050;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;';
+    ov.innerHTML = '<div style="width:min(1200px,96vw);height:min(860px,92vh);background:#012456;color:#eee;border-radius:8px;box-shadow:0 10px 40px rgba(0,0,0,.5);display:flex;flex-direction:column;font-family:Consolas,\'Cascadia Mono\',monospace;">' +
+      '<div style="display:flex;align-items:center;gap:12px;padding:8px 14px;background:#00183a;border-radius:8px 8px 0 0;font-family:system-ui,sans-serif;">' +
+        '<b style="font-size:14px;">PIM for AD &mdash; live sync</b><span id="hadLiveState" style="font-size:12px;color:#9ecbff;">connecting…</span>' +
+        '<span style="flex:1"></span><label style="font-size:12px;"><input type="checkbox" id="hadLiveAll" checked> every group</label>' +
+        '<label style="font-size:12px;"><input type="checkbox" id="hadLivePause"> pause</label>' +
+        '<button id="hadLiveClose" style="background:#30363d;color:#fff;border:0;border-radius:4px;padding:4px 10px;cursor:pointer;">Close</button></div>' +
+      '<div style="display:flex;flex:1;min-height:0;">' +
+        '<div id="hadLiveMain" style="flex:3;overflow:auto;padding:10px 14px;font-size:13.5px;line-height:1.45;white-space:pre-wrap;"></div>' +
+        '<div style="flex:1.3;border-left:1px solid #1f4a82;display:flex;flex-direction:column;min-width:260px;">' +
+          '<div style="padding:8px 10px;font-family:system-ui,sans-serif;font-size:12px;color:#9ecbff;border-bottom:1px solid #1f4a82;">Group changes (newest first)</div>' +
+          '<div id="hadLiveChanges" style="flex:1;overflow:auto;padding:8px 10px;font-size:12px;line-height:1.4;white-space:pre-wrap;"></div></div></div></div>';
+    document.body.appendChild(ov);
+    const col = { info: '#eeeeee', ok: '#3fdc5a', bad: '#ff5c5c', change: '#ffd33d', dim: '#8aa4c8' };
+    let timer = null, closed = false;
+    const close = () => { closed = true; if (timer) clearTimeout(timer); ov.remove(); };
+    document.getElementById('hadLiveClose').onclick = close;
+    ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+    const fmtTime = (u) => { try { return new Date(u).toLocaleTimeString(); } catch (_) { return String(u || ''); } };
+    async function tick() {
+      if (closed) return;
+      if (!document.getElementById('hadLivePause').checked) {
+        try {
+          const r = await api('GET', '/api/hybrid-ad/live');
+          const st = document.getElementById('hadLiveState');
+          const live = r && r.live;
+          const age = (r && r.ageSeconds != null) ? r.ageSeconds : null;
+          if (!live || !live.passes || !live.passes.length) {
+            st.textContent = 'waiting for the hybrid worker (it starts publishing within ~15 s of opening this view)…';
+            st.style.color = '#ffd33d';
+          } else {
+            const last = live.passes[live.passes.length - 1];
+            st.textContent = 'worker ' + (live.host || '?') + ' · pass ' + fmtTime(last.utc) + ' · every ' + (live.pauseSeconds || '?') + ' s · TTL membership ' + (live.pamEnabled ? 'ON' : 'off') + (age != null && age > 30 ? ' · ⚠ no pass for ' + age + ' s' : '');
+            st.style.color = (age != null && age > 30) ? '#ff5c5c' : '#3fdc5a';
+            const showAll = document.getElementById('hadLiveAll').checked;
+            const lines = (last.lines || []);
+            // "every group" off = only the groups that have members / changes (a big tenant has many empty groups)
+            let out = [], block = [], blockHasMember = false;
+            const flush = () => { if (block.length && (showAll || blockHasMember)) out = out.concat(block); block = []; blockHasMember = false; };
+            lines.forEach(l => {
+              if (/^Validating PIM members for group /.test(l.t)) flush();
+              if (l.k !== 'info' && l.k !== 'dim' || /TTL/.test(l.t)) blockHasMember = true;
+              block.push(l);
+            });
+            flush();
+            const main = document.getElementById('hadLiveMain');
+            main.innerHTML = '<div style="color:#8aa4c8;">' + esc(fmtTime(last.utc) + '  ' + (last.summary || '')) + '</div><br>' +
+              out.map(l => '<div style="color:' + (col[l.k] || '#eee') + ';' + (/^Validating/.test(l.t) ? 'margin-top:8px;' : '') + '">' + esc(l.t) + '</div>').join('');
+            const ch = (live.changes || []).slice().reverse();
+            document.getElementById('hadLiveChanges').innerHTML = ch.length ? ch.map(c => '<div style="color:' + (col[c.k] || '#eee') + ';margin-bottom:4px;">' + esc(c.t) + '</div>').join('') : '<div style="color:#8aa4c8;">No add / remove since the worker started. Activate a PIM group in the portal and watch it appear here.</div>';
+          }
+        } catch (e) {
+          const st = document.getElementById('hadLiveState'); if (st) { st.textContent = 'error: ' + String((e && e.message) || e); st.style.color = '#ff5c5c'; }
+        }
+      }
+      if (!closed) timer = setTimeout(tick, 3000);
+    }
+    tick();
   }
 
   async function renderMailTemplatesSection(host) {
@@ -11767,6 +11932,17 @@
     return fut ? ('in ' + v) : (v + ' ago');
   }
   function esc0(s) { return escapeHtml(s == null ? '' : String(s)); }
+  // §80.2: where a hybrid AD job actually runs -- the hybrid worker, live / plan-only / not seen. A stopped worker must be
+  // visible here, not discovered when someone notices AD admins or memberships are missing.
+  function hybridWorkerBadge(j) {
+    const w = j && j.hybridWorker;
+    if (!w) return '';
+    let bg = '#ffebe9', fg = '#cf222e', label = 'hybrid worker not seen', tip = 'No hybrid worker has run this job recently. On-premises AD work waits until one does (tools/pim-hybrid-worker).';
+    if (w.state === 'live') { bg = '#dafbe1'; fg = '#1a7f37'; label = 'on ' + (w.host || 'hybrid worker'); tip = 'Runs on the hybrid worker ' + (w.host || '') + ', last seen ' + w.minutesAgo + ' min ago.'; }
+    else if (w.state === 'plan-only') { bg = '#fff1d6'; fg = '#9a6700'; label = 'plan-only on ' + (w.host || 'hybrid worker'); tip = 'The hybrid worker ' + (w.host || '') + ' runs this job with -WhatIf: it logs what it would change and changes nothing in AD. Last seen ' + w.minutesAgo + ' min ago.'; }
+    else if (w.lastSeenUtc) { tip = 'The hybrid worker ' + (w.host || '') + ' was last seen ' + w.minutesAgo + ' min ago -- it has stopped or lost its network.'; }
+    return ' <span class="hybrid-worker-badge" data-state="' + esc0(w.state) + '" title="' + esc0(tip) + '" style="display:inline-block;margin-top:3px;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:' + bg + ';color:' + fg + ';">' + esc0(label) + '</span>';
+  }
   function jobStatusPill(j) {
     // 🔴 BUG-112. A job this deployment does not run is reported as such -- FIRST, before any
     // last-run status is considered. Nine jobs sat showing `failed / no-handler-registered`
@@ -12418,11 +12594,11 @@
           '<td style="padding:6px 8px;"><b>' + esc0(j.name) + '</b>' + scope + '<div style="color:#8c959f;font-size:11px;">' + esc0(j.type) + '</div>' + pullNote + '</td>' +
           '<td style="padding:6px 8px;">' + cadenceCell + '</td>' +
           '<td style="padding:6px 8px;">' + enabledCell + '</td>' +
-          '<td style="padding:6px 8px;">' + jobStatusPill(j) + '</td>' +
+          '<td style="padding:6px 8px;">' + jobStatusPill(j) + hybridWorkerBadge(j) + '</td>' +
           '<td style="padding:6px 8px;" title="' + esc0(j.lastRunUtc || '') + '">' + lastCell + '</td>' +
           '<td style="padding:6px 8px;max-width:280px;">' + result + '</td>' +
           '<td style="padding:6px 8px;" title="' + esc0(j.nextRunUtc || '') + (j.nextRunSynthesized ? ' (computed from cadence)' : '') + '">' + (j.overdue ? '<span style="color:#9a6700;font-weight:600;">' : '') + nextCell + (j.overdue ? '</span>' : '') + '</td>' +
-          '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' + runBtn + ' ' + histBtn + ' ' + ackBtn + ' ' + logBtn + '</td>' +
+          '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' + (j.type === 'hybrid-ad-sync' ? '<button class="btn-sec jobsHybridLive" title="Watch the continuous PIM-for-AD sync live (TTL checks, adds, removes)">Live view</button> ' : '') + runBtn + ' ' + histBtn + ' ' + ackBtn + ' ' + logBtn + '</td>' +
           '</tr>');
       });
       h.push('</tbody></table>');
@@ -12496,6 +12672,7 @@
     document.querySelectorAll('.jobsGoSchedule').forEach(a => {
       a.onclick = (ev) => { ev.preventDefault(); switchTab('jobschedule'); };
     });
+    document.querySelectorAll('.jobsHybridLive').forEach(b => { b.onclick = (ev) => { ev.preventDefault(); openHybridAdLive(); }; });
     const auto = document.getElementById('jobsAuto');
     if (auto) {
       auto.checked = !!window._jobsAutoOn;
@@ -14542,7 +14719,9 @@
     const g = (n) => String((row && row[n] != null) ? row[n] : '').trim();
     let k;
     if (base === 'PIM-Definitions-AU') k = g('AdministrativeUnitTag');
-    else if (base === 'PIM-Definitions-Departments') k = g('Department') || g('DepartmentName') || g('GroupTag') || g('GroupName');
+    // 2.4.462: a department GROUP row is keyed on its GroupTag -- one business department (the Department column) can own
+    // several DEPT- groups, and keying them on Department made a new group collide with the department's owner row.
+    else if (base === 'PIM-Definitions-Departments') k = g('GroupTag') || g('Department') || g('DepartmentName') || g('GroupName');
     else if (/^PIM-Definitions-/.test(base)) k = g('GroupTag');
     else if (base === 'Account-Definitions-Admins' || base === 'Account-Definitions-Admins-Central') k = g('UserName');
     else if (base === 'PIM-Offboarding') k = g('Username') || g('UserName') || g('UserPrincipalName') || g('Upn');
@@ -16280,10 +16459,60 @@
   // (46 -> 67) and deleted its pending entry, then the second PUT Services with pendingFinalRows() = null -> the server
   // read "no rows" as "empty the entity". One commit at a time now, and a base whose pending entry is gone is skipped.
   let _commitInFlight = false;
+  // 🔴 2.4.462 (operator 2026-09-29, demo on internal): "we need to make this easier to spot like box in the middle blinking or
+  // something. nobody sees it". The commit's progress and outcome used to be one line of text at the far right of the button
+  // row -- a refusal (validation errors) and a half-applied commit both went unnoticed. Now every commit outcome is ALSO a
+  // box in the middle of the screen: busy (blue), refused / failed (red, pulsing until closed), committed (green).
+  function commitOverlay(kind, title, bodyHtml) {
+    let ov = document.getElementById('commitOverlay');
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = 'commitOverlay';
+      ov.style.cssText = 'position:fixed;inset:0;z-index:10050;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:16px;';
+      document.body.appendChild(ov);
+      if (!document.getElementById('commitOverlayCss')) {
+        const st = document.createElement('style'); st.id = 'commitOverlayCss';
+        st.textContent = '@keyframes pimCommitPulse{0%,100%{box-shadow:0 0 0 0 rgba(207,34,46,.75)}50%{box-shadow:0 0 0 14px rgba(207,34,46,0)}}' +
+          '@keyframes pimCommitSpin{to{transform:rotate(360deg)}}' +
+          '#commitOverlay .co-box{background:#fff;border-radius:12px;max-width:760px;width:100%;max-height:80vh;overflow:auto;padding:22px 24px;border:3px solid #0969da;font-size:14px;line-height:1.5}' +
+          '#commitOverlay .co-box.err{border-color:#cf222e;animation:pimCommitPulse 1.2s ease-in-out infinite}' +
+          '#commitOverlay .co-box.ok{border-color:#1a7f37}' +
+          '#commitOverlay .co-title{font-size:18px;font-weight:700;margin-bottom:10px}' +
+          '#commitOverlay .co-box.err .co-title{color:#cf222e}#commitOverlay .co-box.ok .co-title{color:#1a7f37}' +
+          '#commitOverlay .co-spin{display:inline-block;width:16px;height:16px;border:3px solid #cfe2ff;border-top-color:#0969da;border-radius:50%;animation:pimCommitSpin .8s linear infinite;vertical-align:-3px;margin-right:8px}';
+        document.head.appendChild(st);
+      }
+    }
+    const busy = kind === 'busy';
+    ov.innerHTML = '<div class="co-box ' + (kind === 'error' ? 'err' : (kind === 'ok' ? 'ok' : '')) + '" role="alertdialog" aria-live="assertive">' +
+      '<div class="co-title">' + (busy ? '<span class="co-spin"></span>' : (kind === 'error' ? '&#9888; ' : '&#10004; ')) + escapeHtml(title) + '</div>' +
+      '<div class="co-body">' + (bodyHtml || '') + '</div>' +
+      (busy ? '' : '<div style="text-align:right;margin-top:14px;"><button type="button" class="' + (kind === 'error' ? '' : 'primary') + '" id="commitOverlayClose">' + (kind === 'error' ? 'Close -- nothing more is saved' : 'OK') + '</button></div>') +
+      '</div>';
+    ov.style.display = 'flex';
+    const close = () => { ov.style.display = 'none'; ov.innerHTML = ''; document.removeEventListener('keydown', onKey); };
+    const onKey = (ev) => { if (ev.key === 'Escape' && !busy) close(); };
+    document.addEventListener('keydown', onKey);
+    const cb = document.getElementById('commitOverlayClose'); if (cb) { cb.onclick = close; try { cb.focus(); } catch (_) { } }
+    // green = good news: it closes by itself (5 s) or on any click; red stays until the operator closes it
+    if (kind === 'ok') { ov.onclick = close; const t = setTimeout(() => { if (ov.style.display !== 'none') close(); }, 5000); ov.dataset.t = String(t); }
+    else { ov.onclick = null; }
+    // links inside the body (e.g. "Open the Validate tab") close the box before they act
+    ov.querySelectorAll('.co-body a').forEach(a => a.addEventListener('click', () => setTimeout(close, 0)));
+    return close;
+  }
+  function commitOverlayHide() { const ov = document.getElementById('commitOverlay'); if (ov) { ov.style.display = 'none'; ov.innerHTML = ''; } }
+  // 2.4.462: the order entities are written in. DEFINITIONS first: an assignment names a group a definition declares, and the
+  // entities are separate writes -- written the other way round, a definition the server then refused left assignments stored
+  // that point at nothing (internal 2026-09-29: two assignment entities saved, the department definition refused).
+  function commitOrder(bases) {
+    const rank = (b) => /^(PIM|Account)-Definitions-/.test(b) ? 0 : (/^PIM-Assignments-/.test(b) ? 2 : 1);
+    return bases.map((b, i) => ({ b, i })).sort((x, y) => (rank(x.b) - rank(y.b)) || (x.i - y.i)).map(x => x.b);
+  }
   (document.getElementById('btnCommit') || {}).onclick = async () => {
     if (_commitInFlight) return;
     _commitInFlight = true;
-    try { return await commitAllRun(); } finally { _commitInFlight = false; }
+    try { return await commitAllRun(); } catch (e) { commitOverlay('error', 'Commit failed', escapeHtml((e && e.message) || String(e))); } finally { _commitInFlight = false; }
   };
   const commitAllRun = async () => {
     if (!isServer) return;
@@ -16294,7 +16523,7 @@
     // §79.13: everything staged here is shared BEFORE it is committed, so the store knows who staged what (the second-
     // approver gate reads it), and a commit that carries a colleague's staged changes says so first.
     try { await sharedFlush(); } catch (_) { }
-    const bases = Object.keys(pendingChanges).filter(b => isDirty(b));
+    const bases = commitOrder(Object.keys(pendingChanges).filter(b => isDirty(b)));
     if (SHARED.on && bases.length) {
       const me = String(SHARED.me || '').toLowerCase();
       const others = {};
@@ -16334,8 +16563,10 @@
     // Re-validate the state THIS commit would produce first; refuse only if errors remain.
     if (VAL_STATE.blockOnErrors) {
       status.textContent = 'Validating the staged changes before commit...';
+      commitOverlay('busy', 'Validating the staged changes before commit ...', '<span style="color:#57606a">Nothing is saved until this check passes.</span>');
       try { await runPreflight({ silent: true }); } catch (_) { }
       status.textContent = '';
+      commitOverlayHide();
     }
     if (VAL_STATE.blockOnErrors && VAL_STATE.report && VAL_STATE.report.summary && VAL_STATE.report.summary.errors > 0) {
       // §70.18 (operator: a refused Commit "takes me to" another page): stay on Pending changes and show WHICH
@@ -16349,6 +16580,12 @@
       status.className = 'err';
       const ov = document.getElementById('saveOpenValidate');
       if (ov) ov.onclick = (ev) => { ev.preventDefault(); switchTab('validate'); };
+      commitOverlay('error', 'NOT committed -- ' + VAL_STATE.report.summary.errors + ' validation error(s)',
+        '<p style="margin:0 0 6px;">Nothing was saved. Fix these, then press <b>Commit all</b> again:</p>' +
+        (lines ? '<ul style="margin:6px 0 4px 18px;">' + lines + (errs.length > 8 ? '<li>&hellip; and ' + (errs.length - 8) + ' more</li>' : '') + '</ul>' : '') +
+        '<p style="margin:8px 0 0;"><a href="#" id="coOpenValidate">Open the Validate tab</a> for the fix buttons.</p>');
+      const cov = document.getElementById('coOpenValidate');
+      if (cov) cov.onclick = (ev) => { ev.preventDefault(); switchTab('validate'); };
       return;
     }
     const valErrs = validatePendingChanges();
@@ -16378,8 +16615,11 @@
     const wrote = [];
     // BUG-190: admin changes the server HELD for the offboard approval (202 { offboardHeld, held[] }).
     const heldAll = [];
+    let _wi = 0;
     for (const base of bases) {
       status.textContent = 'Writing ' + base + ' ...';
+      commitOverlay('busy', 'Committing ... (' + (++_wi) + ' of ' + bases.length + ')', 'Writing <b>' + escapeHtml(base) + '</b>' +
+        (wrote.length ? '<br><span style="color:#57606a">Done: ' + wrote.map(w => escapeHtml(w.base)).join(', ') + '</span>' : ''));
       try {
         let finalRows = pendingFinalRows(base);
         if (!Array.isArray(finalRows)) continue;   // §77.24: already written (or discarded) -- never PUT "no rows"
@@ -16424,9 +16664,15 @@
         document.getElementById('btnCancel').disabled = false;
         if (status.dataset) status.dataset.sticky = '1';   // §70.23: a refusal must not be wiped either
         status.className = 'err';
-        if (showOffboardHeldRefusal(status, base, e, wrote)) return;   // BUG-190: only disabling admin changes were pending
-        if (showCommitRefusal(status, base, e, wrote)) return;   // BUG-200 conflict / maker-checker gate
+        // 2.4.462: the failure is also the red box in the middle -- and it says which entities WERE written before it
+        const partial = wrote.length ? '<p style="margin:8px 0 0;"><b>Already saved before this failure:</b> ' + wrote.map(w => escapeHtml(w.base)).join(', ') + '. <b>Not saved:</b> ' + escapeHtml(base) + (bases.indexOf(base) < bases.length - 1 ? ' and ' + bases.slice(bases.indexOf(base) + 1).map(escapeHtml).join(', ') : '') + '.</p>' : '<p style="margin:8px 0 0;">Nothing was saved.</p>';
+        // the refusal panels keep their Show / Fix / Approve buttons next to Commit all (their handlers live there) -- the box
+        // carries the message and points at them
+        const toButtons = '<p style="margin:8px 0 0;"><b>The buttons to fix it are next to Commit all</b>, below this box.</p>';
+        if (showOffboardHeldRefusal(status, base, e, wrote)) { commitOverlay('error', 'Commit stopped at ' + base, '<p style="margin:0;">' + escapeHtml(status.textContent || '') + '</p>' + partial + toButtons); return; }   // BUG-190
+        if (showCommitRefusal(status, base, e, wrote)) { commitOverlay('error', 'Commit stopped at ' + base, '<p style="margin:0;">' + escapeHtml(status.textContent || '') + '</p>' + partial + toButtons); return; }   // BUG-200 conflict / maker-checker gate
         status.textContent = 'FAILED on ' + base + ': ' + e.message;
+        commitOverlay('error', 'Commit FAILED on ' + base, '<p style="margin:0;">' + escapeHtml(e.message || String(e)) + '</p>' + partial);
         return;
       }
     }
@@ -16465,6 +16711,8 @@
     for (const h of heldAll) summaryHtml += offboardHeldHtml(h.base, h.body, false);
     status.innerHTML = summaryHtml;
     if (heldAll.length) { status.className = 'err'; wireOffboardHeld(); }
+    // 2.4.462: the outcome in the middle of the screen as well (green when everything was written)
+    commitOverlay(heldAll.length ? 'error' : 'ok', heldAll.length ? 'Committed -- but some admin changes are HELD for approval' : 'Committed', summaryHtml);
     if (status.dataset) status.dataset.sticky = '1';
     // Pull fresh graph data.
     try {
@@ -16916,16 +17164,19 @@
   // because a run of fixes ("Fix all auto-fixable") would otherwise fire one validation per click;
   // silent, because this is a refresh the operator did not ask for and must not be interrupted by.
   let _valRevalTimer = null;
-  function valRevalidateAfterFix() {
+  function valRevalidateAfterFix(delayMs) {
     if (!isServer) return;
     clearTimeout(_valRevalTimer);
+    // 2.4.467: a caller that stages in bursts (Import on the unmanaged-admin list) passes a longer delay -- the preflight
+    // takes 13-21 s on internal and the Manager answers one request at a time, so one preflight per click queued every
+    // following click behind it ("it came after 1-2 min"; ca-pim-manager log 2026-09-30 07:44-07:45).
     _valRevalTimer = setTimeout(() => {
       runPreflight({ silent: true }).then(() => {
         try { if (document.getElementById('validateTab').classList.contains('active')) renderValidateTab(); } catch (_) { }
         try { renderSaveValBanner(); } catch (_) { }
         try { if (document.getElementById('homeTab').classList.contains('active')) renderHome(); } catch (_) { }
       }).catch(() => { });
-    }, 400);
+    }, (typeof delayMs === 'number' && delayMs > 0) ? delayMs : 400);
   }
 
   async function runPreflight(opts) {
@@ -19078,8 +19329,11 @@
       let data;
       try { data = await loadCsv(base); }
       catch (e) {
-        // CSV doesn't exist yet -- bootstrap an empty pending block with the
-        // default header from PIM_DATA.csvBases (server already knows it).
+        // BUG-264: ONLY "this table does not exist" (404) bootstraps an empty pending block. A load that timed out,
+        // lost its connection or failed on the server used to land here too, and the rows were staged against an EMPTY
+        // baseline for a table that has rows. The SQL store answers an empty table with its header, so anything else is
+        // a failure the wizard must show, with nothing staged.
+        if (!e || e.status !== 404) throw new Error('could not read ' + base + ' -- nothing was staged. ' + ((e && e.message) || ''));
         data = { header: Object.keys(byBase[base][0]), rows: [] };
       }
       ensurePending(base, data.header, data.rows);
@@ -19189,7 +19443,7 @@
       }
     }
   }
-  function _wizErr(msg) {
+  function _wizErr(msg, opts) {
     let bar = document.getElementById('wizErrBar');
     if (!bar) {
       bar = document.createElement('div');
@@ -19197,8 +19451,12 @@
       bar.style.cssText = 'color:#cf222e; font-size:11.5px; margin-right:auto; padding-left:6px;';
       document.querySelector('.wiz-actions').insertBefore(bar, document.querySelector('.wiz-actions .spacer'));
     }
+    // BUG-264: { note: true } is a neutral progress line; { sticky: true } stays until the next message (a Finish that
+    // failed after a long wait must not vanish 5 s later, unread).
+    bar.style.color = (opts && opts.note) ? '#57606a' : '#cf222e';
     bar.textContent = msg;
-    setTimeout(() => { if (bar) bar.textContent = ''; }, 5000);
+    clearTimeout(bar._clr);
+    if (!(opts && (opts.sticky || opts.note))) bar._clr = setTimeout(() => { if (bar) bar.textContent = ''; }, 5000);
   }
   async function _wizClose(discardStaged) {
     if (!_wizCtx) { document.getElementById('wizBg').style.display = 'none'; return; }
@@ -19246,8 +19504,20 @@
       if (r === false) return;
       if (typeof r === 'string' && r.length) { _wizErr(r); return; }
     }
+    // BUG-264 (live GUI E2E ig798): Finish awaited a load that never answered, and the dialog just sat there -- no sign it
+    // was waiting, the button still live. Now: the button is busy while it works, a line says so after a few seconds, and a
+    // failure (api() gives up after 2 minutes) stays on screen.
+    const fb = document.getElementById('wizFinish');
+    if (fb && fb.disabled) return;
+    const fbLabel = fb ? fb.textContent : '';
+    if (fb) { fb.disabled = true; fb.textContent = 'Adding…'; }
+    const slow = setTimeout(() => _wizErr('Still waiting for the server -- it answers one request at a time and may be busy. Nothing is staged yet; this gives up after 2 minutes and says why.', { note: true }), 6000);
+    let failed = null;
     try { await _wizCtx.onFinish(_wizCtx.state, _wizCtx); }
-    catch (e) { _wizErr('Failed: ' + e.message); return; }
+    catch (e) { failed = e; }
+    finally { clearTimeout(slow); if (fb) { fb.disabled = false; fb.textContent = fbLabel; } }
+    if (failed) { _wizErr('Failed: ' + failed.message, { sticky: true }); return; }
+    _wizErr('', { note: true });
     _wizCtx.stagedRows = []; // success -- don't discard on close
     await _wizClose(false);
     switchTab('save');
@@ -19437,7 +19707,14 @@
     // NORMAL path on a new tenant -- the one where the operator has least idea what went wrong.
     // The row itself carries every column it needs, so fall back to its own keys.
     let data = null;
-    try { data = await loadCsv(base); } catch (e) { data = null; }
+    // BUG-264: only "this table does not exist" (404) falls back. A load that timed out / lost its connection / failed
+    // on the server staged the row against an EMPTY baseline with no baseRowsHash -- and Commit is a full-set replace the
+    // server then accepts unchecked, i.e. the wizard's row REPLACING every stored row of that table. Refuse instead.
+    try { data = await loadCsv(base); }
+    catch (e) {
+      if (!e || e.status !== 404) throw new Error('could not read ' + base + ' -- nothing was staged. ' + ((e && e.message) || ''));
+      data = null;
+    }
     const header = (data && Array.isArray(data.header) && data.header.length) ? data.header : Object.keys(rowObj);
     const rows   = (data && Array.isArray(data.rows)) ? data.rows : [];
     ensurePending(base, header, rows);
@@ -23241,7 +23518,9 @@
         const auTag = String(s.auTag || '').trim();
         if (auTag) {
           let auData = null;
-          try { auData = await loadCsv('PIM-Definitions-AU'); } catch (e) { auData = null; }
+          // BUG-264: a FAILED read is not "no AU defined" -- that staged a duplicate AU definition. Only a 404 is.
+          try { auData = await loadCsv('PIM-Definitions-AU'); }
+          catch (e) { if (!e || e.status !== 404) throw new Error('could not read PIM-Definitions-AU -- nothing was staged. ' + ((e && e.message) || '')); auData = null; }
           const staged = (pendingChanges['PIM-Definitions-AU'] && pendingChanges['PIM-Definitions-AU'].rows) || [];
           const known = [].concat((auData && auData.rows) || [], staged)
             .some(r => String((r && r.AdministrativeUnitTag) || '').toLowerCase() === auTag.toLowerCase());
@@ -24807,6 +25086,29 @@
       const tpls = ((r && r.templates) || []).filter(t => !t.disabled);
       if (!tpls.length) { wrap.innerHTML = '<div class="empty">No active templates (manage packs under Governance &rsaquo; Permission templates).</div>'; return; }
       wrap.innerHTML = '';
+      // §80.4 (operator 2026-09-29: "quick get started with mine ... preselect from my select or import all button"). ONE
+      // button stages every active pack's new permissions (each pack's own Import, all rows ticked, same unit rules);
+      // Show on a card is the pick-list to take part of a pack. Names follow THIS tenant's naming on import.
+      const pendingPacks = tpls.filter(t => !t.error && t.missingCount > 0);
+      if (pendingPacks.length) {
+        const bar = document.createElement('div');
+        bar.className = 'tpl-importall-bar';
+        bar.style.cssText = 'display:flex; align-items:center; gap:10px; margin:4px 0 8px; flex-wrap:wrap;';
+        const total = pendingPacks.reduce((a, t) => a + Number(t.missingCount || 0), 0);
+        bar.innerHTML = '<button class="primary tpl-import-all">Import all (' + total + ' from ' + pendingPacks.length + ' pack' + (pendingPacks.length === 1 ? '' : 's') + ')</button>' +
+          '<span style="font-size:11.5px; color:#57606a;">Stages every new permission of every active pack into Pending changes, named by your naming convention. Use <b>Show</b> on a pack to pick only some.</span>';
+        wrap.appendChild(bar);
+        const all = bar.querySelector('.tpl-import-all');
+        all.onclick = async () => {
+          const btns = Array.from(wrap.querySelectorAll('.tpl-import')).filter(b => !b.disabled);
+          if (!btns.length) return;
+          all.disabled = true; all.textContent = 'Importing ' + btns.length + ' pack(s)...';
+          let done = 0;
+          for (const b of btns) { try { if (typeof b.onclick === 'function') { await b.onclick(); done++; } } catch (_) { } }
+          all.textContent = 'Imported ' + done + ' pack(s) into pending';
+          try { sharedToast('Imported ' + done + ' template pack(s) into Pending changes -- review and commit under Review & commit.'); } catch (_) { }
+        };
+      }
       for (const t of tpls) {
         const card = document.createElement('div');
         card.dataset.tplId = String(t.id || '');

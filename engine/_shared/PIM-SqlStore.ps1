@@ -501,6 +501,51 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimChangeQueueDdl))
     [void](Initialize-PimNamingConventionSeed -ConnectionString $ConnectionString)
     [void](Invoke-PimRingOrderMigration -ConnectionString $ConnectionString)
+    [void](Invoke-PimDepartmentRowKeyMigration -ConnectionString $ConnectionString)
+}
+
+function Invoke-PimDepartmentRowKeyMigration {
+    <#
+      2.4.462 -- re-key PIM-Definitions-Departments to the new store key (Get-PimStoreRowKey: a department GROUP row by its
+      GroupTag, an owner row by its department name). Before 2.4.462 group rows were keyed on the Department column, so a
+      new group of an existing department collided with that department's owner row and its save was refused.
+      A full-set save re-keys by itself, but ROW-BY-ROW writers (the MSP downlink) would add a second copy next to the old
+      key -- so existing rows are moved here, once, idempotently:
+        * key already right                         -> untouched
+        * new key free                              -> UPDATE [Key] (the row keeps its data and timestamp)
+        * new key taken by a row with the SAME data -> the old-key copy is a duplicate -> deleted
+        * new key taken by DIFFERENT data           -> left alone and reported (never merged or overwritten)
+      Returns @{ moved; deduplicated; conflicts[] }. Never throws: a failed migration must not stop the store from opening.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [object[]]$Rows = $null, [scriptblock]$Exec = $null)
+    $out = @{ moved = 0; deduplicated = 0; conflicts = @() }
+    try {
+        $e = 'PIM-Definitions-Departments'
+        if ($null -eq $Rows) { $Rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT [Key], DataJson FROM pim.Rows WHERE Entity=@e" -Parameters @{ e = $e }) }
+        if (-not $Exec) { $Exec = { param($sql, $p) [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $sql -Parameters $p) } }
+        $byKey = @{}; foreach ($r in @($Rows)) { if ($r) { $byKey["$($r.Key)".ToLowerInvariant()] = $r } }
+        foreach ($r in @($Rows)) {
+            if (-not $r) { continue }
+            $data = $null; try { $data = "$($r.DataJson)" | ConvertFrom-Json } catch { continue }
+            $nk = "$(Get-PimStoreRowKey -Base $e -Row $data)".Trim()
+            if (-not $nk -or $nk -ieq "$($r.Key)") { continue }
+            $other = $byKey[$nk.ToLowerInvariant()]
+            if (-not $other) {
+                & $Exec 'UPDATE pim.Rows SET [Key]=@nk WHERE Entity=@e AND [Key]=@ok' @{ e = $e; nk = $nk; ok = "$($r.Key)" }
+                $byKey.Remove("$($r.Key)".ToLowerInvariant()); $byKey[$nk.ToLowerInvariant()] = $r
+                $out.moved++
+            } elseif ("$($other.DataJson)" -eq "$($r.DataJson)") {
+                & $Exec 'DELETE FROM pim.Rows WHERE Entity=@e AND [Key]=@ok' @{ e = $e; ok = "$($r.Key)" }
+                $byKey.Remove("$($r.Key)".ToLowerInvariant())
+                $out.deduplicated++
+            } else {
+                $out.conflicts += "$($r.Key) -> $nk"
+            }
+        }
+        if ($out.moved -or $out.deduplicated) { Write-Host ("[store] Departments re-keyed to the 2.4.462 store key: moved {0}, duplicates removed {1}" -f $out.moved, $out.deduplicated) -ForegroundColor DarkCyan }
+        if ($out.conflicts.Count) { Write-Warning ("[store] Departments: {0} row(s) could not be re-keyed (a different row already holds the new key): {1}" -f $out.conflicts.Count, ($out.conflicts -join '; ')) }
+    } catch { Write-Warning "[store] Departments re-key migration skipped: $($_.Exception.Message)" }
+    return $out
 }
 
 function Get-PimRingOrderMigrationSql {
@@ -1117,9 +1162,15 @@ function Get-PimStoreRowKey {
         # 'PIM-Definitions-*' branch below keys on GroupTag -> blank key -> the row
         # is silently dropped on save. Key on Department/DepartmentName first, then
         # fall back to GroupTag/GroupName for the shipped-sample shape that carries one.
+        # 🔴 2.4.462 (demo on internal 2026-09-29): a department GROUP row carries BOTH its business department (Department =
+        # FINANCE) and its own GroupTag (DEPT-deptsimon). Keyed on Department, a NEW group of an existing department took the
+        # key of that department's owner row -> "duplicate store key" -> the definition save was refused (400) AFTER the
+        # assignments naming it had been written. One department can own several DEPT- groups: a row with a GroupTag is
+        # keyed on the tag; an owner row (no tag) on the department name.
         'PIM-Definitions-Departments'    {
-            $d = (& $g 'Department'); if (-not "$d".Trim()) { $d = (& $g 'DepartmentName') }
-            if (-not "$d".Trim()) { $d = (& $g 'GroupTag') }
+            $d = (& $g 'GroupTag')
+            if (-not "$d".Trim()) { $d = (& $g 'Department') }
+            if (-not "$d".Trim()) { $d = (& $g 'DepartmentName') }
             if (-not "$d".Trim()) { $d = (& $g 'GroupName') }
             $d; break
         }

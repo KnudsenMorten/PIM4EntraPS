@@ -59,6 +59,112 @@ $script:PimTickOnlyJobTypes += 'access-review-cycle'
 # §79.7 (operator 2026-09-25): 'owner-review' mails each department's owners their people to Keep / Extend / Remove (PIM-OwnerPortal.ps1).
 $script:PimJobTypes += 'owner-review'
 $script:PimTickOnlyJobTypes += 'owner-review'
+# §80.2 PIMHYBRIDWRK (operator 2026-09-29): the PIM-for-AD replacement -- 'hybrid-ad-groups' mirrors the AD-marked PIM
+# groups to AD, 'hybrid-ad-sync' puts their ACTIVE PIM members into the AD groups (PIM-HybridAdGroups.ps1). Like
+# 'hybrid-ad-apply' they only act on a hybrid worker; everywhere else they report that one is required.
+$script:PimJobTypes += 'hybrid-ad-groups'
+$script:PimJobTypes += 'hybrid-ad-sync'
+$script:PimJobTypes += 'hybrid-ad-servers'   # §80.2 server onboarding (local Administrators, add only)
+$script:PimHybridWorkerJobTypes = @('hybrid-ad-apply', 'hybrid-ad-groups', 'hybrid-ad-sync', 'hybrid-ad-servers')
+function Get-PimHybridWorkerJobTypes { @($script:PimHybridWorkerJobTypes) }
+# §80.2: a SCHEDULER INSTANCE. The hybrid worker runs its own scheduler next to the container tick against the SAME store.
+# Sharing the one lease, the one SchedulerState and the one JobScope record, it would (a) fight the tick for the lease,
+# (b) advance every job it does not run (out-of-scope still stamps next-run) and (c) overwrite the scope the Manager
+# shows. $env:PIM_SCHED_INSTANCE (Start-PimScheduler -Instance) gives it '<name>.<instance>' copies of those three.
+# Unset = the one shared scheduler, exactly as before.
+function Get-PimSchedulerInstance {
+    $i = "$env:PIM_SCHED_INSTANCE".Trim().ToLowerInvariant()
+    if (-not $i) { return '' }
+    if ($i -notmatch '^[a-z0-9][a-z0-9-]{0,31}$') { throw "PIM_SCHED_INSTANCE '$i' is not a valid instance name (a-z, 0-9, '-', max 32) -- refusing to fall back to the shared scheduler state" }
+    return $i
+}
+function Get-PimSchedulerSettingName {
+    param([Parameter(Mandatory)][string]$Base)
+    $i = Get-PimSchedulerInstance
+    if ($i) { return "$Base.$i" } else { return $Base }
+}
+function Save-PimHybridWorkerHeartbeat {
+    # Written by the 'hybrid' instance every tick: tells the main tick that the hybrid jobs have an owner.
+    # PER JOB ('seen': type -> last seen UTC): the worker runs TWO processes -- the 5-minute scheduler (hybrid-ad-apply,
+    # hybrid-ad-groups) and the continuous hybrid-ad-sync loop -- and a single 'jobs' list would let each one erase the
+    # other's claim. Each writer refreshes only its own types (read-merge-write; a lost race heals on the next write).
+    # -PlanOnly: the writer runs with -WhatIf (the worker's plan-only mode) -- shown in the Manager next to the job.
+    param([string[]]$Scope, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$PlanOnly)
+    # 2.4.467: 'hybrid*' -- server onboarding runs as its OWN gMSA (tier split, operator 2026-09-30) in its own scheduler
+    # instance 'hybridsrv', and it claims its job exactly like the 'hybrid' instance does.
+    if ((Get-PimSchedulerInstance) -notlike 'hybrid*' -or -not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { return }
+    try {
+        $seen = [ordered]@{}; $plan = [ordered]@{}
+        if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
+            try {
+                $raw = Get-PimSetting -Name 'HybridWorkerHeartbeat'; $old = if ($raw -is [string]) { $raw | ConvertFrom-Json } else { $raw }
+                if ($old -and $old.PSObject.Properties['seen'] -and $old.seen) { foreach ($p in $old.seen.PSObject.Properties) { $seen[$p.Name] = "$($p.Value)" } }
+                if ($old -and $old.PSObject.Properties['planOnly'] -and $old.planOnly) { foreach ($p in $old.planOnly.PSObject.Properties) { $plan[$p.Name] = [bool]$p.Value } }
+            } catch { }
+        }
+        foreach ($t in @($Scope)) { if ("$t".Trim()) { $k = "$t".Trim().ToLowerInvariant(); $seen[$k] = $NowUtc.ToUniversalTime().ToString('o'); $plan[$k] = [bool]$PlanOnly } }
+        $payload = [ordered]@{ owner = (Resolve-PimSchedulerOwner); host = "$env:COMPUTERNAME"; seen = $seen; planOnly = $plan; updatedUtc = $NowUtc.ToUniversalTime().ToString('o') }
+        Set-PimSetting -Name 'HybridWorkerHeartbeat' -Value ($payload | ConvertTo-Json -Depth 4 -Compress)
+    } catch { Write-Warning "[scheduler] hybrid worker heartbeat did not persist: $($_.Exception.Message)" }
+}
+function Get-PimHybridWorkerDelegation {
+    <#
+      On the MAIN scheduler (no instance): a hybrid job type is handed to the hybrid worker when its heartbeat is fresh
+      (-FreshMinutes, default 180) and names the type. Returns the detail text, or $null (run it here -- which reports
+      "hybrid worker required"). The hybrid instance itself never delegates.
+    #>
+    param([Parameter(Mandatory)][string]$Type, [datetime]$NowUtc = [datetime]::UtcNow, [int]$FreshMinutes = 180, [object]$Heartbeat = $null)
+    $t = "$Type".Trim().ToLowerInvariant()
+    if ($t -notin $script:PimHybridWorkerJobTypes -or (Get-PimSchedulerInstance)) { return $null }
+    $hb = $Heartbeat
+    if ($null -eq $hb) {
+        if (-not (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) { return $null }
+        try { $raw = Get-PimSetting -Name 'HybridWorkerHeartbeat'; if ($raw -is [string]) { $hb = $raw | ConvertFrom-Json } else { $hb = $raw } } catch { return $null }
+    }
+    if (-not $hb) { return $null }
+    if ($hb.PSObject.Properties['seen'] -and $hb.seen) {
+        # per-job heartbeat: THIS type's own last-seen decides
+        $p = $hb.seen.PSObject.Properties | Where-Object { $_.Name -ieq $t } | Select-Object -First 1
+        if (-not $p) { return $null }
+        $at = Get-PimUtcStamp "$($p.Value)"
+        if ($null -eq $at -or ($NowUtc.ToUniversalTime() - $at).TotalMinutes -gt $FreshMinutes) { return $null }
+        return ("runs on the hybrid worker {0} (last seen {1:yyyy-MM-dd HH:mm} UTC)" -f $(if ("$($hb.host)".Trim()) { $hb.host } else { $hb.owner }), $at)
+    }
+    if (-not "$($hb.updatedUtc)".Trim()) { return $null }
+    $at = Get-PimUtcStamp $hb.updatedUtc
+    if ($null -eq $at -or ($NowUtc.ToUniversalTime() - $at).TotalMinutes -gt $FreshMinutes) { return $null }
+    $jobs = @(@($hb.jobs) | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    if ($jobs.Count -and $t -notin $jobs) { return $null }
+    return ("runs on the hybrid worker {0} (last seen {1:yyyy-MM-dd HH:mm} UTC)" -f $(if ("$($hb.host)".Trim()) { $hb.host } else { $hb.owner }), $at)
+}
+function Get-PimHybridWorkerJobStatus {
+    <#
+      §80.2 -- for the Manager's Jobs view: the hybrid worker as seen by ONE hybrid job type. Returns $null for a non-hybrid
+      type, else @{ host; lastSeenUtc; minutesAgo; fresh; planOnly; state } -- state = 'live' | 'plan-only' | 'not seen'
+      (fresh = seen within -FreshMinutes: 10 for the continuous hybrid-ad-sync, 90 for the hourly jobs).
+    #>
+    param([Parameter(Mandatory)][string]$Type, [datetime]$NowUtc = [datetime]::UtcNow, [object]$Heartbeat = $null)
+    $t = "$Type".Trim().ToLowerInvariant()
+    if ($t -notin $script:PimHybridWorkerJobTypes) { return $null }
+    $hb = $Heartbeat
+    if ($null -eq $hb -and (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) {
+        try { $raw = Get-PimSetting -Name 'HybridWorkerHeartbeat'; $hb = if ($raw -is [string]) { $raw | ConvertFrom-Json } else { $raw } } catch { $hb = $null }
+    }
+    $fresh = if ($t -eq 'hybrid-ad-sync') { 10 } else { 90 }
+    $out = [ordered]@{ host = ''; lastSeenUtc = ''; minutesAgo = $null; fresh = $false; planOnly = $false; state = 'not seen' }
+    if (-not $hb -or -not $hb.PSObject.Properties['seen'] -or -not $hb.seen) { return [pscustomobject]$out }
+    $p = $hb.seen.PSObject.Properties | Where-Object { $_.Name -ieq $t } | Select-Object -First 1
+    if (-not $p) { return [pscustomobject]$out }
+    $at = Get-PimUtcStamp "$($p.Value)"
+    if ($null -eq $at) { return [pscustomobject]$out }
+    $out.host = "$(if ("$($hb.host)".Trim()) { $hb.host } else { $hb.owner })"
+    $out.lastSeenUtc = $at.ToString('o')
+    $out.minutesAgo = [int][math]::Floor(($NowUtc.ToUniversalTime() - $at).TotalMinutes)
+    $out.fresh = ($out.minutesAgo -le $fresh)
+    if ($hb.PSObject.Properties['planOnly'] -and $hb.planOnly) { $q = $hb.planOnly.PSObject.Properties | Where-Object { $_.Name -ieq $t } | Select-Object -First 1; if ($q) { $out.planOnly = [bool]$q.Value } }
+    $out.state = if (-not $out.fresh) { 'not seen' } elseif ($out.planOnly) { 'plan-only' } else { 'live' }
+    return [pscustomobject]$out
+}
 function Get-PimTickOnlyJobTypes { @($script:PimTickOnlyJobTypes) }
 $script:PimJobHandlers = @{}      # type -> scriptblock(job, nowUtc, whatIf)
 $script:PimSchedState  = $null    # in-memory fallback for state
@@ -154,6 +260,16 @@ function Get-PimDefaultJobSchedule {
         # with the ActiveDirectory module and an AD credential (v1's condition); everywhere else it
         # reports that a hybrid worker is required, instead of planning in silence.
         [pscustomobject]@{ name='hybrid-ad-apply';    type='hybrid-ad-apply';  intervalMinutes=60; enabled=$true  }
+        # §80.2 PIM-for-AD replacement: the group mirror hourly (v1 ran it with the baseline). The membership sync does NOT
+        # run on this cadence on a hybrid worker: it runs CONTINUOUSLY there (Start-PimScheduler -ContinuousJob, v1's endless
+        # PIM-Sync-ID-AD loop -- operator 2026-09-29 "otherwise people loose 5 min"). This entry is only what the MAIN tick
+        # reports every 5 minutes: delegated while the loop's heartbeat is fresh, "hybrid worker required" when it is not.
+        [pscustomobject]@{ name='hybrid-ad-groups';   type='hybrid-ad-groups'; intervalMinutes=60; enabled=$true  }
+        [pscustomobject]@{ name='hybrid-ad-sync';     type='hybrid-ad-sync';   intervalMinutes=5;  enabled=$true  }
+        # §80.2 server onboarding (v1 AD-ManageLocalAdministratorsGroupMembership.ps1): lists AD servers for Discovery and puts
+        # each DEFINED per-server group into that server's local Administrators (add only). Hourly: a new server is offered in
+        # Discovery within the hour, and a committed group lands on its server at the next run after the mirror created it.
+        [pscustomobject]@{ name='hybrid-ad-servers';  type='hybrid-ad-servers'; intervalMinutes=60; enabled=$true  }
         # 🔴 OFF BY DEFAULT (operator, 2026-09-10: "it must be disabled by default").
         # This job can ONLY ever no-op until ServiceNow intake is ENABLED (setting IntakeEnabled; the drop store is SQL, BUG-211), which
         # is a deliberate integration nobody gets by accident. Shipped enabled, it put a permanent
@@ -726,7 +842,7 @@ function Save-PimJobScopeToStore {
             owner      = (Resolve-PimSchedulerOwner)
             updatedUtc = ([datetime]::UtcNow.ToString('o'))
         }
-        Set-PimSetting -Name 'JobScope' -Value ($payload | ConvertTo-Json -Depth 4 -Compress)
+        Set-PimSetting -Name (Get-PimSchedulerSettingName -Base 'JobScope') -Value ($payload | ConvertTo-Json -Depth 4 -Compress)
     } catch {
         # Never let publishing telemetry break a tick -- the worst case is the GUI keeps
         # showing what it showed before.
@@ -970,6 +1086,28 @@ function Initialize-PimDefaultJobHandlers {
             return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:hybrid-ad-apply (PIM-HybridAd.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf }
         }
         Invoke-PimHybridAdWorkerJob -NowUtc $now -WhatIf:$whatIf
+    }
+    # §80.2: the PIM-for-AD replacement (PIM-HybridAdGroups.ps1) -- group mirror + JIT membership, hybrid worker only.
+    Register-PimJobHandler -Type 'hybrid-ad-groups' -Handler {
+        param($job,$now,$whatIf)
+        if (-not (Get-Command Invoke-PimHybridAdGroupsJob -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:hybrid-ad-groups (PIM-HybridAdGroups.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf }
+        }
+        Invoke-PimHybridAdGroupsJob -NowUtc $now -WhatIf:$whatIf
+    }
+    Register-PimJobHandler -Type 'hybrid-ad-sync' -Handler {
+        param($job,$now,$whatIf)
+        if (-not (Get-Command Invoke-PimHybridAdSyncJob -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:hybrid-ad-sync (PIM-HybridAdGroups.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf }
+        }
+        Invoke-PimHybridAdSyncJob -NowUtc $now -WhatIf:$whatIf
+    }
+    Register-PimJobHandler -Type 'hybrid-ad-servers' -Handler {
+        param($job,$now,$whatIf)
+        if (-not (Get-Command Invoke-PimHybridAdServersJob -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:hybrid-ad-servers (PIM-HybridAdGroups.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf }
+        }
+        Invoke-PimHybridAdServersJob -NowUtc $now -WhatIf:$whatIf
     }
     Register-PimJobHandler -Type 'verify-convergence' -Handler {
         param($job,$now,$whatIf)
@@ -1423,6 +1561,11 @@ function Get-PimJobProFeatureKeys {
         'discovery'     { return @('discovery.sweep') }
         'coverage'      { return @('coverage.gaps') }
         'tier-report'   { return @('reports.tier') }
+        # §75.4 / §80.2: every job that writes on-premises AD.
+        'hybrid-ad-apply'  { return @('hybrid.ad') }
+        'hybrid-ad-groups' { return @('hybrid.ad') }
+        'hybrid-ad-sync'   { return @('hybrid.ad') }
+        'hybrid-ad-servers' { return @('hybrid.ad') }
         # msp-pull is not here: the tick never pulls (its handler records a skip naming the pull job), and the pull
         # job (tools/pim-engine/downlink-job-entry.ps1) gates itself on the MSP licence.
         default         { return @() }
@@ -1445,6 +1588,12 @@ function Invoke-PimScheduledJob {
                                    outOfScope=$true
                                    detail="not scheduled on this worker (PIM_SCHED_JOBS = $((Get-PimJobScope) -join ', '))"
                                    ranUtc=$NowUtc.ToString('o') }
+    }
+    # §80.2: a hybrid job whose hybrid worker is alive runs THERE -- the main tick reports it as delegated, not as
+    # "hybrid worker required" (which would read as a fault while the worker is doing the job).
+    $hwd = Get-PimHybridWorkerDelegation -Type "$($Job.type)" -NowUtc $NowUtc
+    if ($hwd) {
+        return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; ran=$false; outOfScope=$true; detail=$hwd; ranUtc=$NowUtc.ToString('o') }
     }
     # 🔴 BUG-113 -- ASK "IS IT SWITCHED OFF?" BEFORE "IS IT IMPLEMENTED HERE?"
     # This gate used to sit BELOW the handler lookup, so a job whose feature is DISABLED but
@@ -1711,7 +1860,7 @@ function Get-PimSchedulerState {
         # into a bare catch, silently reverting the whole scheduler to file/memory state and
         # making every job look due. Accept both shapes, and never fail in silence.
         try {
-            $v = Get-PimSetting -Name 'SchedulerState'
+            $v = Get-PimSetting -Name (Get-PimSchedulerSettingName -Base 'SchedulerState')
             if ($v) { if ($v -is [string]) { return ("$v" | ConvertFrom-Json) } else { return $v } }
         } catch { Write-Warning "  [scheduler] SchedulerState read failed -- using this process's in-memory state: $($_.Exception.Message)" }
     }
@@ -1729,7 +1878,7 @@ function Save-PimSchedulerState {
     # 🔑 SQL is the only persistence; the memory copy above serves this process only.
     $saved = $false; $why = 'no SQL settings store (Set-PimSetting) is wired -- PIM v2 is SQL-only'
     if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) {
-        try { Set-PimSetting -Name 'SchedulerState' -Value $json | Out-Null; $saved = $true } catch { $why = "$($_.Exception.Message)" }
+        try { Set-PimSetting -Name (Get-PimSchedulerSettingName -Base 'SchedulerState') -Value $json | Out-Null; $saved = $true } catch { $why = "$($_.Exception.Message)" }
     }
     if (-not $saved) { Write-Warning "[scheduler] SchedulerState did NOT persist ($why). Every job will look due on the next tick." }
 }
@@ -1793,14 +1942,32 @@ function Add-PimJobRunRecord {
     # drop any prior 'running' placeholder for the same runId (it's now finished)
     if ("$($Run.runId)".Trim()) { $all = @($all | Where-Object { "$($_.runId)" -ne "$($Run.runId)" }) }
     $all = @(@($Run) + $all)
-    # per-job trim
+    Save-PimJobRunHistory -Runs @(Select-PimJobRunHistoryKept -Runs $all)
+}
+
+# BUG-264 (remainder): the ring was PER NAME, and triggered runs carry one-off names ('trigger:engine-delta:<scope list>',
+# a live test's 'pime2e-<label>-<HHmmss>'), so every new name started a new ring that nothing ever evicted -- 887 KB on
+# internal, read whole on every Jobs/Home load; ig798 held 43 one-off names a day after its rebuild. Names that only ever
+# ran as TRIGGERS now share ONE pooled ring; a name that has a scheduled run keeps its own ring of $script:PimRunHistoryMax.
+$script:PimRunHistoryAdHocMax = 30
+function Select-PimJobRunHistoryKept {
+    # PURE. The records to keep, newest first: $script:PimRunHistoryMax per scheduled job name, $script:PimRunHistoryAdHocMax
+    # in total over the trigger-only names. A 'running' record is always kept (it is replaced by runId when it finishes).
+    param([object[]]$Runs = @())
+    $sorted = @(@($Runs) | Where-Object { $_ } | Sort-Object { "$($_.startedUtc)" } -Descending)
+    $scheduled = @{}
+    foreach ($r in $sorted) { if (-not ($r.PSObject.Properties['trigger'] -and [bool]$r.trigger)) { $scheduled["$($r.name)"] = $true } }
     $kept = New-Object System.Collections.Generic.List[object]
-    $counts = @{}
-    foreach ($r in @($all | Sort-Object { "$($_.startedUtc)" } -Descending)) {
-        $n = "$($r.name)"; if (-not $counts.ContainsKey($n)) { $counts[$n] = 0 }
-        if ($counts[$n] -lt $script:PimRunHistoryMax) { $kept.Add($r); $counts[$n]++ }
+    $counts = @{}; $adHoc = 0
+    foreach ($r in $sorted) {
+        $n = "$($r.name)"
+        if ("$($r.status)" -eq 'running') { $kept.Add($r); continue }
+        if ($scheduled.ContainsKey($n)) {
+            if (-not $counts.ContainsKey($n)) { $counts[$n] = 0 }
+            if ($counts[$n] -lt $script:PimRunHistoryMax) { $kept.Add($r); $counts[$n]++ }
+        } elseif ($adHoc -lt $script:PimRunHistoryAdHocMax) { $kept.Add($r); $adHoc++ }
     }
-    Save-PimJobRunHistory -Runs $kept.ToArray()
+    return $kept.ToArray()
 }
 function Get-PimJobRunLog {
     # Read one run's log text by runId (for the GUI "Logs" button).
@@ -2034,6 +2201,12 @@ function Get-PimJobsStatus {
     # overdue/next-run -- otherwise an effective-schedule row would never look overdue.
     $stateByName = @{}
     if ($state -and $state.jobs) { foreach ($sj in @($state.jobs)) { if ("$($sj.name)".Trim()) { $stateByName["$($sj.name)"] = $sj } } }
+    # §80.2: the hybrid worker heartbeat, read ONCE for the whole view (BUG-264: never a store read per job row)
+    $hwHeartbeat = $null
+    if (@($Jobs | Where-Object { "$($_.type)".Trim().ToLowerInvariant() -in $script:PimHybridWorkerJobTypes }).Count -and (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) {
+        try { $raw = Get-PimSetting -Name 'HybridWorkerHeartbeat'; $hwHeartbeat = if ($raw -is [string]) { $raw | ConvertFrom-Json } else { $raw } } catch { $hwHeartbeat = $null }
+    }
+    if ($null -eq $hwHeartbeat) { $hwHeartbeat = [pscustomobject]@{} }   # "read, nothing there" -- not a reason to read again per row
     $history = @(Get-PimJobRunHistory)
     # BUG-264: the runs grouped by job ONCE (history order kept, newest first) -- a Where-Object over the whole history per
     # job made the Home overview's jobs tile ~2 s on the Manager's single request loop.
@@ -2251,6 +2424,8 @@ function Get-PimJobsStatus {
             lastStatus      = $(if ($last -and $last.PSObject.Properties['status']) { "$($last.status)" } elseif ($last) { $(if ($last.ok) { 'completed' } else { 'failed' }) } else { '' })
             # BUG-112: the GUI renders these muted and excludes them from "needs attention".
             outOfScope      = [bool]$outOfScope
+            # §80.2: the hybrid worker as this job sees it ($null for every other job) -- live / plan-only / not seen
+            hybridWorker    = $(if ("$($j.type)".Trim().ToLowerInvariant() -in $script:PimHybridWorkerJobTypes) { Get-PimHybridWorkerJobStatus -Type "$($j.type)" -NowUtc $now -Heartbeat $hwHeartbeat } else { $null })
             lastRan         = $(if ($last) { [bool]$last.ran } else { $null })
             lastDurationMs  = $(if ($last) { [int64]$last.durationMs } else { $null })   # [int64] -- see BUG-04
             lastRunId       = $lastRunId
@@ -2417,6 +2592,7 @@ function Write-PimJobRunningRecord {
             ok = $true; ran = $true; status = 'running'
             detail = "running since $($StartedUtc.ToUniversalTime().ToString('HH:mm:ss')) UTC$(if ($scope) { " (scope $scope)" })"
             trigger = [bool]$Trigger; reason = "$Reason"
+            owner = "$($script:PimTickOwner)"   # BUG-268: the lease holder, so a takeover can close exactly its records
             startedUtc = $StartedUtc.ToUniversalTime().ToString('o'); finishedUtc = ''; durationMs = 0
             log = ("[{0}] job '{1}' started by the scheduler{2}" -f $StartedUtc.ToUniversalTime().ToString('o'), "$($Job.name)", $(if ($scope) { " scope=$scope" } else { '' }))
         })
@@ -2424,17 +2600,24 @@ function Write-PimJobRunningRecord {
 }
 
 function Close-PimStaleRunningRecords {
-    param([datetime]$NowUtc = [datetime]::UtcNow, [int]$OlderThanMinutes = 30)
+    # -Owner (BUG-268): close every 'running' record written by THAT lease holder, whatever its age -- used once the
+    # platform has confirmed the holder's execution ended. Records from builds before the owner field are left to the age rule.
+    param([datetime]$NowUtc = [datetime]::UtcNow, [int]$OlderThanMinutes = 30, [string]$Owner = '', [string]$Reason = '')
     try {
         $all = @(Get-PimJobRunHistory)
         $cut = $NowUtc.ToUniversalTime().AddMinutes(-$OlderThanMinutes)
-        $stale = @($all | Where-Object { "$($_.status)" -eq 'running' -and -not "$($_.finishedUtc)".Trim() -and (Get-PimUtcStamp $_.startedUtc) -and (Get-PimUtcStamp $_.startedUtc) -lt $cut })
+        # @( if ... ) -- an `if` expression unrolls a one-element array, and a bare [pscustomobject] has no .Count on 5.1
+        $stale = @(if ("$Owner".Trim()) {
+            $all | Where-Object { "$($_.status)" -eq 'running' -and -not "$($_.finishedUtc)".Trim() -and $_.PSObject.Properties['owner'] -and "$($_.owner)" -eq "$Owner" }
+        } else {
+            $all | Where-Object { "$($_.status)" -eq 'running' -and -not "$($_.finishedUtc)".Trim() -and (Get-PimUtcStamp $_.startedUtc) -and (Get-PimUtcStamp $_.startedUtc) -lt $cut }
+        })
         if (-not $stale.Count) { return 0 }
         $ids = @{}; foreach ($s in $stale) { $ids["$($s.runId)"] = $true }
         $fixed = @($all | ForEach-Object {
             if ($ids.ContainsKey("$($_.runId)") -and "$($_.status)" -eq 'running') {
                 $_.status = 'failed'; $_.ok = $false
-                $_.detail = "interrupted: the run started $($_.startedUtc) and never reported back (the scheduler process ended while it ran)"
+                $_.detail = if ("$Reason".Trim()) { "$Reason" } else { "interrupted: the run started $($_.startedUtc) and never reported back (the scheduler process ended while it ran)" }
                 $_.finishedUtc = $NowUtc.ToUniversalTime().ToString('o')
             }
             $_ })
@@ -2735,13 +2918,70 @@ function Resolve-PimSchedulerOwner {
 
 function New-PimSchedulerLease {
     # PURE. The lease document, given an owner, a clock and a TTL. No I/O.
+    # BUG-268: -Execution records the Container Apps job execution that holds the lease, so a later tick can ask the
+    # platform whether that execution is still alive (Resolve-PimSchedulerDeadLease). Omitted outside ACA.
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Owner, [Parameter(Mandatory)][datetime]$NowUtc, [int]$TtlMinutes = 15)
+    param([Parameter(Mandatory)][string]$Owner, [Parameter(Mandatory)][datetime]$NowUtc, [int]$TtlMinutes = 15, [string]$Execution = '')
     if ($TtlMinutes -lt 1) { $TtlMinutes = 1 }
-    [pscustomobject]@{
+    $l = [pscustomobject]@{
         owner      = $Owner
         acquiredUtc= $NowUtc.ToUniversalTime().ToString('o')
         expiresUtc = $NowUtc.ToUniversalTime().AddMinutes($TtlMinutes).ToString('o')
+    }
+    if ("$Execution".Trim()) { $l | Add-Member -NotePropertyName execution -NotePropertyValue "$Execution".Trim() }
+    $l
+}
+
+# ---- BUG-268: a lease held by an execution the PLATFORM already ended ------------------------------
+# Measured on ig798 2026-09-29: the first pod of a tick execution failed before it started, the platform created a retry,
+# then counted the backoff limit and deleted the RUNNING retry ("ManuallyStopped" -- no ARM stop call, no person). That
+# retry had just taken the lease and a trigger, so the lease stayed held until its 15-minute TTL: three ticks skipped
+# behind a holder that no longer existed, and the trigger waited ~18 minutes. The TTL cannot simply be shortened (one
+# Graph read has run 4 minutes with no item to heartbeat on). Instead a tick that finds the lease held asks the platform
+# for the holder's execution status and takes the lease over ONLY when the platform says that execution has ENDED.
+# Everything else -- no execution recorded, no tick job id, no right to read it, 404, Running, Unknown -- keeps today's
+# behaviour: the lease is held (fail closed).
+$script:PimLeaseDeadStatuses = @('Succeeded', 'Failed', 'Stopped')
+
+function Get-PimSchedulerExecutionName {
+    # The Container Apps job execution this process runs in ('' outside ACA).
+    "$([System.Environment]::GetEnvironmentVariable('CONTAINER_APP_JOB_EXECUTION_NAME'))".Trim()
+}
+
+function Test-PimSchedulerLeaseHolderGone {
+    # PURE. True only when the lease names an execution AND the platform's status for it is a terminal one.
+    [CmdletBinding()]
+    param([object]$Lease, [string]$Status)
+    if (-not $Lease -or -not $Lease.PSObject.Properties['execution'] -or -not "$($Lease.execution)".Trim()) { return $false }
+    return (@($script:PimLeaseDeadStatuses | Where-Object { $_ -eq "$Status".Trim() }).Count -gt 0)
+}
+
+function Get-PimSchedulerExecutionStatus {
+    <#
+      The platform's status for one execution of the tick job ('' when it cannot be known). Reads the tick job's resource
+      id from $env:PIM_TickJobId or pim.Settings 'SchedulerTickJobId', and only asks about an execution of THAT job.
+      Needs read on the tick job for the tick's own identity (Initialize-PimHostingAccess grants 'Reader' there).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ExecutionName)
+    $jobId = "$($env:PIM_TickJobId)".Trim()
+    if (-not $jobId -and (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) {
+        try { $jobId = "$(Get-PimSetting -Name 'SchedulerTickJobId')".Trim().Trim('"') } catch { $jobId = '' }
+    }
+    if ($jobId -notmatch '(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.App/jobs/([^/]+)$') { return '' }
+    $jobName = $Matches[1]
+    $exec = "$ExecutionName".Trim()
+    if ($exec -notmatch ('^(?i)' + [regex]::Escape($jobName) + '-[a-z0-9]+$')) { return '' }
+    if (-not (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) { return '' }
+    try {
+        $r = Invoke-PimArm -Path "$jobId/executions/$exec" -ApiVersion '2024-03-01'
+        return "$($r.properties.status)".Trim()
+    } catch {
+        if (-not $script:PimLeaseStatusWarned) {
+            $script:PimLeaseStatusWarned = $true
+            Write-Warning ("[scheduler] cannot read execution '{0}' of the tick job, so a lease it holds is kept until its TTL: {1}" -f $exec, "$($_.Exception.Message)")
+        }
+        return ''
     }
 }
 
@@ -2780,7 +3020,7 @@ function Get-PimSchedulerLeaseRaw {
     $cs = Get-PimSchedulerLeaseStoreCs
     if ($cs -and (Get-Command Get-PimSqlSettingRaw -ErrorAction SilentlyContinue)) {
         try {
-            $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name $script:PimLeaseSettingName
+            $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name (Get-PimSchedulerSettingName -Base $script:PimLeaseSettingName)
             $obj = $null; if ("$raw".Trim()) { try { $obj = $raw | ConvertFrom-Json } catch { $obj = $null } }
             return @{ Raw = $raw; Lease = $obj; Backend = 'sql'; Cs = $cs }
         } catch { }
@@ -2812,11 +3052,11 @@ function Request-PimSchedulerLease {
     }
     $cur = Get-PimSchedulerLeaseRaw
     if (-not (Test-PimSchedulerLeaseFree -Lease $cur.Lease -Owner $Owner -NowUtc $NowUtc)) { return $false }
-    $new  = New-PimSchedulerLease -Owner $Owner -NowUtc $NowUtc -TtlMinutes $TtlMinutes
+    $new  = New-PimSchedulerLease -Owner $Owner -NowUtc $NowUtc -TtlMinutes $TtlMinutes -Execution (Get-PimSchedulerExecutionName)
     $json = $new | ConvertTo-Json -Depth 4 -Compress
     if ($cur.Backend -eq 'sql') {
         try {
-            $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cur.Cs -Name $script:PimLeaseSettingName `
+            $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cur.Cs -Name (Get-PimSchedulerSettingName -Base $script:PimLeaseSettingName) `
                     -NewValueJson $json -ExpectedValueJson $cur.Raw
             if ($n -ge 1) { $script:PimLeaseHeld = $json; return $true }
             # BUG-41: losing the CAS when we had just read the lease as FREE is not a normal
@@ -2850,11 +3090,11 @@ function Update-PimSchedulerLease {
     param([Parameter(Mandatory)][string]$Owner, [datetime]$NowUtc = [datetime]::UtcNow, [int]$TtlMinutes = 15)
     $cur = Get-PimSchedulerLeaseRaw
     if (-not $cur.Lease -or "$($cur.Lease.owner)" -ne $Owner) { return $false }
-    $new  = New-PimSchedulerLease -Owner $Owner -NowUtc $NowUtc -TtlMinutes $TtlMinutes
+    $new  = New-PimSchedulerLease -Owner $Owner -NowUtc $NowUtc -TtlMinutes $TtlMinutes -Execution (Get-PimSchedulerExecutionName)
     $json = $new | ConvertTo-Json -Depth 4 -Compress
     if ($cur.Backend -eq 'sql') {
         try {
-            $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cur.Cs -Name $script:PimLeaseSettingName `
+            $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cur.Cs -Name (Get-PimSchedulerSettingName -Base $script:PimLeaseSettingName) `
                     -NewValueJson $json -ExpectedValueJson $cur.Raw
             if ($n -ge 1) { $script:PimLeaseHeld = $json; return $true }
             return $false
@@ -2873,7 +3113,7 @@ function Remove-PimSchedulerLease {
     if (-not $cur.Lease -or "$($cur.Lease.owner)" -ne $Owner) { return $false }
     if ($cur.Backend -eq 'sql') {
         try {
-            $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cur.Cs -Name $script:PimLeaseSettingName `
+            $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cur.Cs -Name (Get-PimSchedulerSettingName -Base $script:PimLeaseSettingName) `
                     -NewValueJson $null -ExpectedValueJson $cur.Raw
             $script:PimLeaseHeld = $null
             return ($n -ge 1)
@@ -2881,6 +3121,30 @@ function Remove-PimSchedulerLease {
     }
     $script:PimLeaseMemory = $null; $script:PimLeaseHeld = $null
     return $true
+}
+
+function Resolve-PimSchedulerDeadLease {
+    <#
+      BUG-268. Called when the lease is HELD by someone else. Take it over only when the platform says the holder's
+      execution has ended; a compare-and-set against the exact stored value, so a lease renewed or taken meanwhile is left
+      alone. Returns @{ TookOver; DeadOwner; Execution; Status }. SQL store only -- the in-memory lease has no other runner.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Owner, [datetime]$NowUtc = [datetime]::UtcNow, [int]$TtlMinutes = 15)
+    $out = @{ TookOver = $false; DeadOwner = ''; Execution = ''; Status = '' }
+    $cur = Get-PimSchedulerLeaseRaw
+    if ($cur.Backend -ne 'sql' -or -not $cur.Lease -or "$($cur.Lease.owner)" -eq $Owner) { return $out }
+    if (-not $cur.Lease.PSObject.Properties['execution'] -or -not "$($cur.Lease.execution)".Trim()) { return $out }
+    $out.DeadOwner = "$($cur.Lease.owner)"; $out.Execution = "$($cur.Lease.execution)".Trim()
+    $out.Status = Get-PimSchedulerExecutionStatus -ExecutionName $out.Execution
+    if (-not (Test-PimSchedulerLeaseHolderGone -Lease $cur.Lease -Status $out.Status)) { return $out }
+    $json = New-PimSchedulerLease -Owner $Owner -NowUtc $NowUtc -TtlMinutes $TtlMinutes -Execution (Get-PimSchedulerExecutionName) | ConvertTo-Json -Depth 4 -Compress
+    try {
+        $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cur.Cs -Name (Get-PimSchedulerSettingName -Base $script:PimLeaseSettingName) `
+                -NewValueJson $json -ExpectedValueJson $cur.Raw
+        if ($n -ge 1) { $script:PimLeaseHeld = $json; $out.TookOver = $true }
+    } catch { Write-Warning "[scheduler] lease takeover FAILED against the SQL store: $($_.Exception.Message)" }
+    return $out
 }
 
 # ---- one tick + the loop --------------------------------------------------
@@ -2947,6 +3211,19 @@ function Invoke-PimSchedulerTick {
                                         detail = "skipped: owner '$Owner' is not identifying -- an empty host half is shared by every instance" })
         }
         $haveLease = Request-PimSchedulerLease -Owner $Owner -NowUtc $now -TtlMinutes $LeaseTtlMinutes
+        $deadTake = $null
+        if (-not $haveLease) {
+            # BUG-268: the holder may be an execution the platform already ended -- take over instead of waiting out the TTL.
+            try { $deadTake = Resolve-PimSchedulerDeadLease -Owner $Owner -NowUtc $now -TtlMinutes $LeaseTtlMinutes } catch { $deadTake = $null }
+            if ($deadTake -and $deadTake.TookOver) {
+                $haveLease = $true
+                Write-Host ("[scheduler] took over the lease from '{0}': the platform reports its execution '{1}' as {2}" -f $deadTake.DeadOwner, $deadTake.Execution, $deadTake.Status) -ForegroundColor DarkYellow
+                if (-not $WhatIf) {
+                    [void](Close-PimStaleRunningRecords -NowUtc $now -Owner $deadTake.DeadOwner `
+                            -Reason ("interrupted: the platform ended execution '{0}' ({1}) while this run was in progress; its pending trigger runs again" -f $deadTake.Execution, $deadTake.Status))
+                }
+            }
+        }
         if (-not $haveLease) {
             # BUG-41: do not ASSERT contention -- report what was actually observed. The lease
             # is only "held by another runner" if the store shows a live lease; otherwise the
@@ -2979,6 +3256,7 @@ function Invoke-PimSchedulerTick {
     # while it applies items; it is a no-op outside a leased tick.
     if ($haveLease) {
         $global:PIM_LeaseHeartbeat = [pscustomobject]@{ owner = $Owner; ttl = $LeaseTtlMinutes; lastUtc = $now; lost = $false }
+        $script:PimTickOwner = $Owner
     }
     try {
     # Hydrate JobSchedule + EmailControls from pim.Settings ONCE so even a one-shot
@@ -2989,6 +3267,7 @@ function Invoke-PimSchedulerTick {
     # different machine) can show which jobs this deployment actually runs, instead of judging
     # every job by a last-run record that may be 24h old.
     Save-PimJobScopeToStore -Scope @(Get-PimJobScope)
+    Save-PimHybridWorkerHeartbeat -Scope @(Get-PimJobScope) -PlanOnly:([bool]$WhatIf)
     # The tick's own clock, offset by real elapsed time, gives each job's ACTUAL start: the real
     # start in production, and deterministic when a test injects -NowUtc.
     $wallStart = [datetime]::UtcNow
@@ -3006,9 +3285,16 @@ function Invoke-PimSchedulerTick {
     $st = Get-PimSchedulerState
     $lastWm = if ($st -and $st.PSObject.Properties['lastWatermark']) { "$($st.lastWatermark)" } else { '' }
 
+    # §80.2 🔴 A SECONDARY INSTANCE (the hybrid worker) RUNS ITS OWN JOBS AND NOTHING ELSE. The watermark, the SQL change
+    # detector, the queue pickup and the trigger drains below all CONSUME shared signals: run here they would eat the main
+    # tick's triggers (the drain clears a trigger after dispatching it, and on a scoped instance "dispatching" an engine
+    # trigger is an out-of-scope no-op) and apply committed queue actions with an identity that was never granted them.
+    $secondary = [bool](Get-PimSchedulerInstance)
+    if ($secondary) { Write-Host "[scheduler] instance '$(Get-PimSchedulerInstance)': own jobs only -- triggers, queue and change detection stay with the main tick" -ForegroundColor DarkGray }
+
     # (a) WATERMARK: desired config changed out-of-band -> enqueue an immediate recompute.
     $wm = Get-PimChangeWatermark
-    if (Test-PimWatermarkChanged -LastSeen $lastWm -Current $wm) {
+    if (-not $secondary -and (Test-PimWatermarkChanged -LastSeen $lastWm -Current $wm)) {
         Add-PimJobTrigger -Type 'engine-delta' -Scope 'All' -Reason 'watermark' -NowUtc $now | Out-Null
         $lastWm = $wm
     }
@@ -3018,7 +3304,7 @@ function Invoke-PimSchedulerTick {
     # SQL writes (another MSP node, a direct SQL edit, the cutover import) that never
     # bumped the in-process watermark above. No-op unless a SQL store is configured.
     $sqlCs = $null
-    if (Get-Command Invoke-PimSqlChangeDetector -ErrorAction SilentlyContinue) {
+    if (-not $secondary -and (Get-Command Invoke-PimSqlChangeDetector -ErrorAction SilentlyContinue)) {
         if ("$($global:PIM_SqlConnectionString)".Trim()) { $sqlCs = "$($global:PIM_SqlConnectionString)" }
         elseif ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and ("$($global:PIM_SqlServer)".Trim() -or "$($global:PIM_SqlConnStringVault)".Trim())) {
             try { $sqlCs = Get-PimSqlConnectionString } catch { $sqlCs = $null }
@@ -3032,7 +3318,7 @@ function Invoke-PimSchedulerTick {
     # job we now repeat the cheap part: the SQL change detector (two small aggregate queries), a committed
     # queue-action check, and the trigger drain. Every step is guarded -- a failure here never breaks the tick.
     $qaJob = @(@($Jobs) | Where-Object { $_ -and "$($_.type)" -eq 'queue-apply' -and $_.enabled -ne $false })
-    $qaJob = if ($qaJob.Count) { $qaJob[0] } else { $null }
+    $qaJob = if ($qaJob.Count -and -not $secondary) { $qaJob[0] } else { $null }
     $qaSeen = @{}   # queue entry ids already run between jobs this tick -- never re-run the same entry in a loop
     # 🔴 §70.22 (measured 2026-09-14 07:20Z): a queued TAP re-issue + session revoke committed at 07:20 waited for a
     # `trigger:engine-delta:All` that had started at 07:17 -- ONE job, many scopes, so "between jobs" never came.
@@ -3061,7 +3347,7 @@ function Invoke-PimSchedulerTick {
         }
         $n
     }
-    if (-not $WhatIf) {
+    if (-not $WhatIf -and -not $secondary) {
         # NO GetNewClosure: a closure is bound to a new module and cannot see functions dot-sourced into a SCRIPT scope (the scheduler
         # entry point and every test do exactly that). The hook runs INSIDE this tick's call stack, so dynamic scoping resolves
         # $queuePickup / $qaJob / $sqlCs / $results; outside a tick it is cleared (finally below) and would fail harmlessly anyway.
@@ -3073,10 +3359,13 @@ function Invoke-PimSchedulerTick {
 
     # (b) TRIGGERS: run on-demand requests NOW (event-driven), then clear them.
     # Invoke-PimSchedulerTriggerDrain is this block, moved verbatim so (c) can call it between jobs.
-    foreach ($tr in @(Invoke-PimSchedulerTriggerDrain -NowUtc ($now.Add([datetime]::UtcNow - $wallStart)) -WhatIf:$WhatIf)) { if ($null -ne $tr) { $results.Add($tr) } }
+    if (-not $secondary) {
+        foreach ($tr in @(Invoke-PimSchedulerTriggerDrain -NowUtc ($now.Add([datetime]::UtcNow - $wallStart)) -WhatIf:$WhatIf)) { if ($null -ne $tr) { $results.Add($tr) } }
+    }
 
     $interJobPickup = {
         $picked = 0
+        if ($secondary) { return 0 }
         if ($sqlCs -and (Get-Command Invoke-PimSqlChangeDetector -ErrorAction SilentlyContinue)) {
             try { [void](Invoke-PimSqlChangeDetector -ConnectionString $sqlCs -Scope 'All' -Reason 'sql-change') } catch { }
         }
@@ -3091,6 +3380,12 @@ function Invoke-PimSchedulerTick {
 
     # (c) SCHEDULED: run due jobs on their cadence; advance next-run.
     foreach ($j in @($Jobs)) {
+        # §80.2: a secondary instance does not even RECORD the jobs outside its scope -- they belong to the main tick (or to
+        # the continuous hybrid-ad-sync loop), and a "skipped" row from here would sit in THEIR run history.
+        if ($secondary -and -not (Test-PimJobInScope -Type "$($j.type)")) { continue }
+        # ...and the MAIN tick does not record a hybrid job the live hybrid worker owns: its "delegated" row would land in
+        # the same run history as the worker's real result and the Jobs view would flip between the two.
+        if (-not $secondary -and (Get-PimHybridWorkerDelegation -Type "$($j.type)" -NowUtc $now)) { continue }
         if (Test-PimJobDue -Job $j -NowUtc $now) {
             # The slot this run fills: the stored next-run, or this tick when it was never scheduled.
             $slot = $null
@@ -3139,6 +3434,7 @@ function Invoke-PimSchedulerTick {
         # later run until the TTL expires -- for a cron deployment that is silent downtime.
         $global:PIM_LeaseHeartbeat = $null
         $global:PIM_BetweenScopesHook = $null
+        $script:PimTickOwner = $null
         if ($haveLease) { [void](Remove-PimSchedulerLease -Owner $Owner) }
     }
 }

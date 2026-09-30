@@ -483,6 +483,12 @@ creation:
   admin receives a Temporary Access Pass that honours its start date; and
   on-premises Active Directory admins are created in AD with an initial password
   that is mailed, never stored.
+- **Hybrid worker for on-premises Active Directory (preview, Pro).** A small
+  domain-joined server running as a gMSA applies the AD side: admin accounts, PIM
+  groups mirrored to AD groups, and just-in-time AD membership — a person who
+  activates a PIM group is in its AD group within seconds (time-limited where the
+  forest supports it). Its network can be disconnected in one step, and a
+  plan-only mode shows every change before it is made.
 - **Optional audit to Log Analytics.** On top of the audit trail kept in the
   database, every change can optionally be forwarded to Azure Log Analytics (off
   by default, one setting to enable).

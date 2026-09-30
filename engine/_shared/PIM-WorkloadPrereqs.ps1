@@ -216,6 +216,7 @@ function Get-PimWorkloadPrereqTemplateMap {
         'intune'          = @('Intune')
         'azure-rbac'      = @('AzureRbac')
         'entra-roles'     = @('EntraRoles')
+        'entra-roles-reference' = @('EntraRoles')   # §80.4: the quick-start set of role-assignable groups -> Entra roles
         'sentinel'        = @('AzureRbac')
         'exchange-online' = @()
     }
