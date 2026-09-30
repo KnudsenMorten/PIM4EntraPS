@@ -858,8 +858,9 @@ function Get-PimAuthoringRowKey {
     switch -Wildcard ("$Base") {
         'PIM-Definitions-AU'               { $k = (& $g 'AdministrativeUnitTag'); break }
         'PIM-Definitions-Departments'      {
-            $d = (& $g 'Department'); if (-not "$d".Trim()) { $d = (& $g 'DepartmentName') }
-            if (-not "$d".Trim()) { $d = (& $g 'GroupTag') }; if (-not "$d".Trim()) { $d = (& $g 'GroupName') }
+            # 2.4.462: GroupTag first (a department GROUP row), then the department name (an owner row) -- see Get-PimStoreRowKey
+            $d = (& $g 'GroupTag'); if (-not "$d".Trim()) { $d = (& $g 'Department') }
+            if (-not "$d".Trim()) { $d = (& $g 'DepartmentName') }; if (-not "$d".Trim()) { $d = (& $g 'GroupName') }
             $k = $d; break
         }
         'PIM-Definitions-*'                { $k = (& $g 'GroupTag'); break }

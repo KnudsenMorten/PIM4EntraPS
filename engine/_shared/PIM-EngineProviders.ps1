@@ -6613,6 +6613,28 @@ function Send-PimAdminTapChatDelivery {
     return $res
 }
 
+function Invoke-PimReplicationRetry {
+    <#
+      2.4.463 -- run -Action; when it fails because Entra does not yet see an object that was JUST created (HTTP 404
+      "resourceNotFound" / "Request_ResourceNotFound" / "does not exist"), wait and try again: -DelaysSeconds (10, 20, 30 --
+      about a minute in all). Any OTHER error is thrown at once, unchanged. The last 404 is thrown when the waits run out, so
+      the caller's failure handling (the next run retries) still applies. -Sleep is the test seam.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Action, [string]$Label = '', [int[]]$DelaysSeconds = @(10, 20, 30), [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s })
+    $attempt = 0
+    while ($true) {
+        try { return (& $Action) }
+        catch {
+            $m = "$($_.Exception.Message)"
+            $notYet = $m -match '(?i)\b404\b' -and $m -match '(?i)resourceNotFound|Request_ResourceNotFound|does not exist'
+            if (-not $notYet -or $attempt -ge $DelaysSeconds.Count) { throw }
+            $wait = $DelaysSeconds[$attempt]; $attempt++
+            Write-Host ("  [replication] {0}: the object is not visible in Entra yet (404) -- retry {1}/{2} in {3}s" -f $Label, $attempt, $DelaysSeconds.Count, $wait) -ForegroundColor DarkGray
+            & $Sleep $wait
+        }
+    }
+}
+
 function New-PimAdminTapProvider {
     @{
         scope = 'AdminTap'; entity = 'Account-Definitions-Admins'; order = 35; refreshBefore = $true
@@ -6828,8 +6850,11 @@ function New-PimAdminTapProvider {
             # a MULTI-use request unconditionally, and a tenant that only allows one-time passes
             # answered 400 "Tenant Policy does not allow multiple use temporary access pass method"
             # for every admin (measured live on internal 2026-09-12). The POST itself stays here.
+            # 2.4.463 (operator 2026-09-29: "add the TAP retry"): a NEW account is not visible to the authentication-methods
+            # API for a few seconds after it is created, so the first TAP of every new admin failed with 404 resourceNotFound
+            # and waited for the next AdminTap run (10-30 min). Invoke-PimReplicationRetry waits and retries THAT case only.
             $tap = Invoke-PimTapCreate -LifetimeMinutes $__tapMins -StartDateTime $__start.value -UserLabel $upn -Poster {
-                param($b) Invoke-PimGraph -Method POST -Path "/users/$uid/authentication/temporaryAccessPassMethods" -Body $b
+                param($b) Invoke-PimReplicationRetry -Label "TAP for $upn" -Action { Invoke-PimGraph -Method POST -Path "/users/$uid/authentication/temporaryAccessPassMethods" -Body $b }
             }
             # Record the issuance BEFORE delivery, as v1 did (11418): a delivery failure must never
             # cause a second TAP on the next run. The CODE is never stored.

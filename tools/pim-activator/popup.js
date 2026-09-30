@@ -44,7 +44,7 @@ const KNOWN_BAD_LEGACY_CLIENTIDS = []
 // Pure config helpers (bulk-activate confirm threshold resolution + bounds).
 // Kept in a separate, DOM/chrome-free module so they are unit-testable under
 // Node; the render path is unchanged.
-import { resolveBulkActivateConfirmThreshold, BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT, resolveAutoActivateMaxGroups, selectAutoActivateTargets, canTickAnotherAutoActivate } from './popup-config.js'
+import { resolveBulkActivateConfirmThreshold, BULK_ACTIVATE_CONFIRM_THRESHOLD_DEFAULT, resolveAutoActivateMaxGroups, selectAutoActivateTargets, canTickAnotherAutoActivate, pickAutoActivateCandidates, tickedGroupIdsNotListed, countAutoActivateInUse, graphRetryDelayMs, GRAPH_RETRY_MAX, classifyActivationAnswer, activationAnswerText, isApprovalPendingStatus, APPROVAL_PENDING_TEXT } from './popup-config.js'
 
 // Network resilience primitives (timeout + watchdog). Kept in a separate
 // DOM/chrome-free module so they are unit-testable under Node. A bare fetch()
@@ -1798,21 +1798,33 @@ async function signOut() {
 }
 
 // ---------- Graph ----------
+// Throttling (2026-09-30): the latest "Graph is throttling" wait, so a long-running action can show it (onGraphThrottle).
+let onGraphThrottle = null
 async function graph(token, method, url, body) {
-  const r = await fetchWithTimeout(`https://graph.microsoft.com/beta${url}`, {
-    method,
-    cache: 'no-store',   // never serve a stale cached GET -- the propagation poll must see live counts (else the bar sticks at 95% / count never updates)
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
-    body: body ? JSON.stringify(body) : undefined
-  })
+  let r = null
+  for (let attempt = 1; ; attempt++) {
+    r = await fetchWithTimeout(`https://graph.microsoft.com/beta${url}`, {
+      method,
+      cache: 'no-store',   // never serve a stale cached GET -- the propagation poll must see live counts (else the bar sticks at 95% / count never updates)
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: body ? JSON.stringify(body) : undefined
+    })
+    // 429 (any method) / 503-504 (GET): wait what Graph asks (Retry-After) or back off, then repeat -- see graphRetryDelayMs
+    const wait = r.ok ? null : graphRetryDelayMs(r.status, method, r.headers && r.headers.get ? r.headers.get('Retry-After') : null, attempt)
+    if (wait == null) break
+    console.warn(`[PIM Activator] Graph ${r.status} on ${method} ${url} -- retry ${attempt}/${GRAPH_RETRY_MAX} in ${Math.round(wait / 1000)} s`)
+    try { if (typeof onGraphThrottle === 'function') onGraphThrottle(Math.round(wait / 1000), attempt) } catch (_) {}
+    await new Promise(res => setTimeout(res, wait))
+  }
   const text = await r.text()
   let json = null
   try { json = text ? JSON.parse(text) : null } catch {}
   if (!r.ok) {
-    const msg = json?.error?.message || text || r.statusText
+    let msg = json?.error?.message || text || r.statusText
+    if (r.status === 429) msg += ` -- Microsoft Graph is still throttling your account after ${GRAPH_RETRY_MAX} retries (about 1 minute); wait a minute and try again`
     const err = new Error(`${method} ${url} -> ${r.status}: ${msg}`)
     err.status = r.status
     err.body = json
@@ -1983,7 +1995,9 @@ async function deactivateGroup(token, groupId, justification) {
     action: 'selfDeactivate',
     justification: justification || 'User-initiated deactivation from PIM Activator'
   }
-  return graph(token, 'POST', '/identityGovernance/privilegedAccess/group/assignmentScheduleRequests', body)
+  const out = await graph(token, 'POST', '/identityGovernance/privilegedAccess/group/assignmentScheduleRequests', body)
+  try { provisionedAt.delete(String(groupId).toLowerCase()) } catch (_) {}   // no longer shown active by the grace window
+  return out
 }
 
 // ---------- Direct (PIM v1) Entra role eligibilities ----------
@@ -2196,6 +2210,23 @@ async function listActiveDirectAzureRbacForMe(armToken) {
   return perSub.flat()
 }
 
+// ARM write with the same throttling policy as graph() (2026-09-30): a 429 is repeated after Retry-After / backoff. The
+// request id (GUID in the URL) stays the SAME on every attempt, so ARM de-duplicates -- a retry never creates a second request.
+async function armPutWithRetry(url, armToken, body) {
+  for (let attempt = 1; ; attempt++) {
+    const resp = await fetchWithTimeout(url, {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer ' + armToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    const wait = resp.ok ? null : graphRetryDelayMs(resp.status, 'PUT', resp.headers && resp.headers.get ? resp.headers.get('Retry-After') : null, attempt)
+    if (wait == null) return resp
+    console.warn(`[PIM Activator] ARM ${resp.status} on PUT ${url.split('?')[0]} -- retry ${attempt}/${GRAPH_RETRY_MAX} in ${Math.round(wait / 1000)} s`)
+    try { if (typeof onGraphThrottle === 'function') onGraphThrottle(Math.round(wait / 1000), attempt) } catch (_) {}
+    await new Promise(res => setTimeout(res, wait))
+  }
+}
+
 async function activateDirectAzureRbac(armToken, scope, roleDefinitionId, principalId, justification, durationHours) {
   // ARM uses PUT with a client-generated GUID for the request id (the
   // server side dedups via that id; resending the same GUID is a retry).
@@ -2218,11 +2249,7 @@ async function activateDirectAzureRbac(armToken, scope, roleDefinitionId, princi
       }
     }
   }
-  const resp = await fetchWithTimeout(url, {
-    method: 'PUT',
-    headers: { Authorization: 'Bearer ' + armToken, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  })
+  const resp = await armPutWithRetry(url, armToken, body)
   if (!resp.ok) {
     const err = await resp.text().catch(() => '')
     throw new Error(`ARM activate failed (${resp.status}): ${err.slice(0, 300)}`)
@@ -2242,11 +2269,7 @@ async function deactivateDirectAzureRbac(armToken, scope, roleDefinitionId, prin
       justification: justification || 'User-initiated deactivation from PIM Activator'
     }
   }
-  const resp = await fetchWithTimeout(url, {
-    method: 'PUT',
-    headers: { Authorization: 'Bearer ' + armToken, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  })
+  const resp = await armPutWithRetry(url, armToken, body)
   if (!resp.ok) {
     const err = await resp.text().catch(() => '')
     throw new Error(`ARM deactivate failed (${resp.status}): ${err.slice(0, 300)}`)
@@ -2352,7 +2375,34 @@ function toggleFavorite(rowKey) {
 // feature). Off by default. Stored in chrome.storage.local, keyed by rowKey like
 // favorites. The on-open sweep (runAutoActivations) runs at most once per session.
 let autoActivate = {}            // { rowKey: true }
-let autoActivateRunDone = false
+// Per popup session: the group ids the sweep already tried (never retried in the same session), whether a sweep is
+// running, whether a list load asked for another pass meanwhile, and the wait-for-sub-groups re-read loop.
+const autoActivateAttempted = new Set()
+// Group ids activated (or found already pending) in THIS session, by the sweep or by ticking -- counted against the
+// per-device cap until they show as active (else a later pass, while they still propagate, could exceed autoActivateMaxGroups),
+// and the only reason to wait for ticked sub-groups (something was just activated whose children may now surface).
+const autoActivateStarted = new Set()
+// Group ids whose request WAITS FOR APPROVAL (response PendingApproval, or "already pending"): they hold a cap slot, but are
+// never watched and never start the sub-group wait -- nothing is provisioned until an approver acts.
+const autoActivateAwaitingApproval = new Set()
+// Groups this popup activated and Microsoft answered 'Provisioned' (groupId -> ms). Shown as ACTIVE at once and through every
+// reload for up to 10 min, until Graph's active list catches up; a deactivation removes the entry. (2026-09-30: after a tick
+// activation the row stayed "not active" until a tab switch.)
+const provisionedAt = new Map()
+const PROVISIONED_GRACE_MS = 10 * 60 * 1000
+function markProvisioned(groupId) { if (groupId) provisionedAt.set(String(groupId).toLowerCase(), Date.now()) }
+function isRecentlyProvisioned(groupId) {
+  const t = groupId ? provisionedAt.get(String(groupId).toLowerCase()) : null
+  return !!(t && (Date.now() - t) < PROVISIONED_GRACE_MS)
+}
+function showRowActive(groupId) {
+  // flip the row now (no Graph round-trip): active, unchecked, re-rendered
+  for (const r of (eligibleRows || [])) { if (r && r.kind === 'group' && String(r.groupId).toLowerCase() === String(groupId).toLowerCase()) { r.isActive = true; r.checked = false } }
+  try { render() } catch (_) {}
+}
+let autoActivateRunning = false
+let autoActivateRerun = false
+let autoActivateWait = { timer: null, tries: 0 }
 ;(async () => {
   try { const s = await getStored(['autoActivate']); if (s && s.autoActivate && typeof s.autoActivate === 'object') autoActivate = s.autoActivate } catch (_) {}
 })()
@@ -2608,12 +2658,24 @@ async function roleCacheWrite(obj) {
 async function graphBatch(token, requests) {
   const all = []
   for (let i = 0; i < requests.length; i += 20) {
-    const chunk = requests.slice(i, i + 20)
-    try {
-      const res = await graph(token, 'POST', '/$batch', { requests: chunk })
-      if (res && Array.isArray(res.responses)) all.push(...res.responses)
-    } catch (e) {
-      for (const req of chunk) all.push({ id: req.id, status: 0, body: { error: { message: e?.message || String(e) } } })
+    let chunk = requests.slice(i, i + 20)
+    // 2026-09-30: a sub-request can be throttled (429) INSIDE a successful batch -- re-send only those, honouring the
+    // largest Retry-After among them (graphRetryDelayMs), up to GRAPH_RETRY_MAX rounds; the rest are kept as answered.
+    for (let round = 1; chunk.length; round++) {
+      let res = null
+      try { res = await graph(token, 'POST', '/$batch', { requests: chunk }) }
+      catch (e) {
+        for (const req of chunk) all.push({ id: req.id, status: 0, body: { error: { message: e?.message || String(e) } } })
+        break
+      }
+      const resp = (res && Array.isArray(res.responses)) ? res.responses : []
+      const throttled = resp.filter(x => x && x.status === 429)
+      const waits = throttled.map(x => graphRetryDelayMs(429, (chunk.find(q => q.id === x.id) || {}).method || 'GET', x.headers && (x.headers['Retry-After'] || x.headers['retry-after']), round)).filter(w => w != null)
+      if (!throttled.length || waits.length < throttled.length) { all.push(...resp); break }
+      all.push(...resp.filter(x => !(x && x.status === 429)))
+      const ids = new Set(throttled.map(x => x.id))
+      chunk = chunk.filter(q => ids.has(q.id))
+      await new Promise(r2 => setTimeout(r2, Math.max(...waits)))
     }
   }
   return all
@@ -3989,16 +4051,38 @@ function render() {
         const dur = (durRaw > 0 && durRaw <= 24) ? durRaw : 8
         const st = row.querySelector('.status')
         autoCb.disabled = true
+        let tok = null   // outside the try: the catch schedules the sub-group wait with it
         try {
           if (st) st.textContent = 'Activating...'
           const fr  = await acquireGraphToken({ interactive: false }).catch(() => null)
-          const tok = (fr && fr.accessToken) ? fr.accessToken : null
+          tok = (fr && fr.accessToken) ? fr.accessToken : null
           if (!tok) { if (st) st.textContent = 'Sign in first, then tick auto.'; return }
-          await activateGroup(tok, r.groupId, just, dur)
-          if (st) st.textContent = ''
-          try { watchPropagation('activate', [r.groupId]) } catch (_) {}   // inline activating state
+          const resp = await activateGroup(tok, r.groupId, just, dur)
+          autoActivateAttempted.add(r.groupId)   // the sweep knows it (no second try)
+          if (isApprovalPendingStatus(resp && resp.status)) {
+            // requires approval: nothing is provisioned yet -- say so; NO propagation watch (it would run 20 min for nothing)
+            autoActivateAwaitingApproval.add(r.groupId)
+            if (st) st.textContent = APPROVAL_PENDING_TEXT
+          } else {
+            autoActivateStarted.add(r.groupId)
+            if (st) st.textContent = ''
+            // granted: show the row as ACTIVE now (Graph's list lags); render first, THEN the watch paints on the new row
+            if (/^(Provisioned|Granted)$/i.test(String((resp && resp.status) || ''))) { markProvisioned(r.groupId); showRowActive(r.groupId) }
+            try { watchPropagation('activate', [r.groupId]) } catch (_) {}   // inline activating state
+            scheduleAutoActivateWait(tok)   // a ticked PARENT: its ticked sub-groups follow as soon as they surface
+          }
         } catch (err) {
-          if (st) st.textContent = 'Activation failed: ' + ((err && err.message) ? err.message : String(err))
+          // "already pending" (= waiting for approval) / "already exists" is not a failure -- say so. Pending is NEVER watched.
+          const kind = classifyActivationAnswer(err)
+          if (kind === 'pending') {
+            autoActivateAttempted.add(r.groupId); autoActivateAwaitingApproval.add(r.groupId)
+            if (st) st.textContent = activationAnswerText(kind)
+          } else if (kind === 'active') {
+            autoActivateAttempted.add(r.groupId); autoActivateStarted.add(r.groupId)
+            if (st) st.textContent = activationAnswerText(kind)
+            if (tok) scheduleAutoActivateWait(tok)   // active parent: its ticked sub-groups may surface
+          }
+          else if (st) st.textContent = 'Activation failed: ' + ((err && err.message) ? err.message : String(err))
         } finally { autoCb.disabled = false }
       }
     }
@@ -4315,17 +4399,57 @@ async function boot() {
 // normal single-group activation via the same activateGroup path; failures are
 // per-group and never block the rest or the UI.
 async function runAutoActivations(token) {
-  if (autoActivateRunDone) return
-  autoActivateRunDone = true
-  const marked = (eligibleRows || []).filter(r =>
-    r && r.kind === 'group' && !r.depth && !r.isNested && !r.isActive &&
-    r.groupId && isAutoActivate(r.rowKey || ('group:' + r.groupId)))
+  // Runs on EVERY list load (was: once per session -- a ticked SUB-group, listed only after its parent role group is
+  // active, was never reached; operator 2026-09-30). Re-entrant loads while a sweep runs ask for one more pass.
+  if (autoActivateRunning) { autoActivateRerun = true; return }
+  autoActivateRunning = true
+  try {
+    do {
+      autoActivateRerun = false
+      await runAutoActivationsOnce(token)
+    } while (autoActivateRerun)
+  } finally { autoActivateRunning = false }
+  scheduleAutoActivateWait(token)
+}
+
+// Ticked groups that are not listed yet are sub-groups waiting for their parent to become active: while any wait (and
+// something was activated this session, or a parent is still activating), re-read the list every 30 s for up to 10 min,
+// so each one is activated as soon as it surfaces. Nothing is re-read when nothing waits.
+function scheduleAutoActivateWait(token) {
+  if (autoActivateWait.timer) { clearTimeout(autoActivateWait.timer); autoActivateWait.timer = null }
+  const waiting = tickedGroupIdsNotListed(autoActivate, eligibleRows || [])
+  const st = els.status
+  if (!waiting.length || autoActivateWait.tries >= 20) {
+    if (waiting.length && st) st.textContent = waiting.length + ' ticked sub-group(s) did not become available within 10 minutes -- is their parent group active? Reopen PIM Activator to try again.'
+    return
+  }
+  // Wait ONLY when something was activated in this session (a parent whose sub-groups surface once it is active). A ticked
+  // group that is simply no longer eligible, with nothing activating, must not start 30-second reloads (Graph load, 429s).
+  if (!autoActivateStarted.size) return
+  // Once every group started this session shows as active, their sub-groups should be listed within a few minutes:
+  // allow 6 more reads (3 min) after that point, not the full 10.
+  const rowsById = new Map((eligibleRows || []).filter(r => r && r.groupId).map(r => [String(r.groupId).toLowerCase(), r]))
+  const allStartedActive = [...autoActivateStarted].every(id => { const x = rowsById.get(String(id).toLowerCase()); return !!(x && x.isActive) })
+  if (allStartedActive) { autoActivateWait.afterActive = (autoActivateWait.afterActive || 0) + 1; if (autoActivateWait.afterActive > 6) { if (st) st.textContent = waiting.length + ' ticked sub-group(s) did not appear 3 minutes after their parent became active -- you may no longer be eligible for them.'; return } }
+  if (st) st.textContent = 'Waiting for ' + waiting.length + ' ticked sub-group(s) -- they appear once their parent group is active; auto-activating as soon as they do...'
+  autoActivateWait.timer = setTimeout(async () => {
+    autoActivateWait.timer = null
+    autoActivateWait.tries++
+    try {
+      const fr = await acquireGraphToken({ interactive: false }).catch(() => null)   // a fresh token: the wait can run 10 min
+      await loaded((fr && fr.accessToken) || token)
+    } catch (e) { console.warn('[PIM Activator] auto-activate wait: reload failed', e && e.message ? e.message : e) }
+  }, 30000)
+}
+
+async function runAutoActivationsOnce(token) {
+  const marked = pickAutoActivateCandidates(eligibleRows || [], isAutoActivate, autoActivateAttempted)
   if (!marked.length) return
   // Per-device cap (autoActivateMaxGroups). Ticks made before the cap was lowered are kept, but only
   // the first N run; the rest are named on their rows after the reload, never activated.
   await autoActivateMaxReady
-  const alreadyOn = (eligibleRows || []).filter(r => r && r.kind === 'group' && !r.depth && r.isActive &&
-    isAutoActivate(r.rowKey || ('group:' + r.groupId))).length
+  // in use = ticked + active, PLUS what this session already started and is still propagating (countAutoActivateInUse)
+  const alreadyOn = countAutoActivateInUse(eligibleRows || [], isAutoActivate, new Set([...autoActivateStarted, ...autoActivateAwaitingApproval]))   // a request waiting for approval holds its slot too
   const room = (autoActivateMax == null) ? null : Math.max(0, autoActivateMax - alreadyOn)
   const sel = selectAutoActivateTargets(marked, room)
   const targets = sel.run
@@ -4345,16 +4469,32 @@ async function runAutoActivations(token) {
   let done = 0
   const watched = []
   for (const r of targets) {
+    autoActivateAttempted.add(r.groupId)   // tried once per session, success or not -- never a retry loop
+    // a 429 is retried inside graph(); show the wait in the banner (2026-09-30)
+    onGraphThrottle = (s, n) => { try { setActivatingBanner(`Microsoft is throttling -- retrying ${r.displayName || 'the group'} in ${s} s (${n}/${GRAPH_RETRY_MAX})...`) } catch (_) {} }
     try {
-      await activateGroup(token, r.groupId, just, dur)
+      const resp = await activateGroup(token, r.groupId, just, dur)
       done++
-      watched.push(r.groupId)
-    } catch (e) { console.warn('[PIM Activator] auto-activate failed for', r.displayName || r.groupId, e && e.message ? e.message : e) }
+      // WATCH ONLY WHAT WAS PROVISIONED: a request waiting for approval never lands, so watching it ran 20 min and ended
+      // "Still not propagated" (operator screenshot 2026-09-30)
+      if (isApprovalPendingStatus(resp && resp.status)) autoActivateAwaitingApproval.add(r.groupId)
+      else {
+        watched.push(r.groupId); autoActivateStarted.add(r.groupId)
+        if (/^(Provisioned|Granted)$/i.test(String((resp && resp.status) || ''))) markProvisioned(r.groupId)   // the reload below shows it active
+      }
+    } catch (e) {
+      const kind = classifyActivationAnswer(e)   // already pending (= approval) / already active = not a failure
+      if (kind === 'pending') { done++; autoActivateAwaitingApproval.add(r.groupId); console.log('[PIM Activator] auto-activate: ' + (r.displayName || r.groupId) + ' is waiting for approval') }
+      else if (kind === 'active') { done++; autoActivateStarted.add(r.groupId) }
+      else console.warn('[PIM Activator] auto-activate failed for', r.displayName || r.groupId, e && e.message ? e.message : e)
+    }
   }
+  onGraphThrottle = null
   try { setActivatingBanner('') } catch (_) {}
   console.log('[PIM Activator] auto-activated ' + done + '/' + targets.length + ' marked group(s) (no chain)')
-  try { await loaded(token) } catch (_) {}   // refresh so activated rows show active (guard blocks re-sweep)
+  try { await loaded(token) } catch (_) {}   // refresh so activated rows show active (the reload's own sweep call only sets autoActivateRerun; attempted ids are skipped)
   showSkipped()   // after the reload, which would otherwise wipe the per-row notes
+  for (const r of targets) { if (autoActivateAwaitingApproval.has(r.groupId)) { try { setStatus(r.rowKey || ('group:' + r.groupId), APPROVAL_PENDING_TEXT, 'pending') } catch (_) {} } }
   // 🪤 AFTER loaded(), NOT BEFORE. loaded() re-renders the whole list, which wipes any per-row
   // status written before it -- so a watch started first would paint its progress onto rows that
   // are about to be replaced, and the user would see nothing. The bulk path gets this right by
@@ -4566,8 +4706,10 @@ async function loaded(token) {
     // isActive = the user is already in this group; row gets greyed out at
     // the bottom of the list + the checkbox is disabled (no re-activation
     // path; user goes to My Access tab to see/extend it).
-    isActive: activeKeys.has(`${x.groupId}|${x.accessId}`),
-    checked: preSelected.has(x.groupId) && !activeKeys.has(`${x.groupId}|${x.accessId}`)
+    // OR provisioned by THIS popup moments ago: Graph's active list lags the grant, so the row read "not active" until a
+    // tab switch reloaded it (operator 2026-09-30). Microsoft's 'Provisioned' answer is the grant itself.
+    isActive: activeKeys.has(`${x.groupId}|${x.accessId}`) || isRecentlyProvisioned(x.groupId),
+    checked: preSelected.has(x.groupId) && !activeKeys.has(`${x.groupId}|${x.accessId}`) && !isRecentlyProvisioned(x.groupId)
   }))
 
   // Direct (PIM v1) Entra role eligibilities. Each row carries the role
@@ -4808,6 +4950,9 @@ async function loaded(token) {
       els.myAccessDeactivateSelected.textContent = `Deactivating ${rows.length}...`
       let ok2 = 0, failed = 0
       const deactErrs = []
+      // show a Graph throttle wait on the button instead of looking hung (graph() retries 429 itself)
+      onGraphThrottle = (s, n) => { els.myAccessDeactivateSelected.textContent = `Graph is throttling -- retrying in ${s} s (${n}/${GRAPH_RETRY_MAX})...` }
+      try {
       for (const r of rows) {
         // Reflect per-row status on the button by writing the row name in the toolbar.
         try {
@@ -4844,6 +4989,7 @@ async function loaded(token) {
           console.warn(`bulk deactivate failed for ${r.groupId}:`, msg)
         }
       }
+      } finally { onGraphThrottle = null }
       els.myAccessDeactivateSelected.textContent = `${ok2} deactivated${failed ? `, ${failed} failed` : ''}`
       // Surface the ACTUAL failure reason(s) -- a bare "N failed" count is not
       // diagnosable (managed Edge hides DevTools). Show the first few errors.
@@ -4974,6 +5120,7 @@ async function loaded(token) {
     selected.forEach(r => setStatus(r.rowKey || r.groupId, 'queued...', 'pending'))
 
     let anySucceeded = false
+    const bulkWatch = new Set()   // groups actually PROVISIONED -- the only ones the propagation watch follows
 
     // Activate sequentially to be gentle on PIM / ARM throttling. The
     // dispatcher switches on r.kind:
@@ -4983,6 +5130,8 @@ async function loaded(token) {
     for (const r of selected) {
       const rk = r.rowKey || r.groupId
       setStatus(rk, 'activating...', 'pending')
+      // a Graph / ARM 429 is retried inside graph() / armPutWithRetry -- show the wait on THIS row (2026-09-30)
+      onGraphThrottle = (s, n) => setStatus(rk, `Microsoft is throttling -- retrying in ${s} s (${n}/${GRAPH_RETRY_MAX})...`, 'pending')
       try {
         // Re-acquire token per round in case the previous one expired mid-loop.
         const fresh = await acquireGraphToken({ interactive: false })
@@ -5034,11 +5183,15 @@ async function loaded(token) {
               ? `active for ${dur}h - see My Access tab`
               : `active for ${usedHours}h (policy maximum; you asked for ${dur}h) - see My Access tab`,
             'ok')
+        } else if (isApprovalPendingStatus(res && (res.status || (res.properties && res.properties.status)))) {
+          setStatus(rk, APPROVAL_PENDING_TEXT, 'pending')
         } else {
           setStatus(rk, `submitted - check My Access tab in a few seconds`, 'pending')
         }
         r.checked = false
         anySucceeded = true
+        // only a PROVISIONED group is watched and can bring its sub-groups (an approval request provisions nothing yet)
+        if (r.kind === 'group' && r.groupId) { if (statusOk) { autoActivateStarted.add(r.groupId); bulkWatch.add(r.groupId); markProvisioned(r.groupId) } else autoActivateAwaitingApproval.add(r.groupId) }
         // Group activations recorded against groupId; direct activations
         // recorded against rowKey so the activation-history sort still works
         // (groups vs direct rows live in different buckets, no key collision).
@@ -5051,10 +5204,17 @@ async function loaded(token) {
           setStatus(rk, 'session expired -- signing in again...', 'pending')
           return triggerInteractiveReauth(`Your session expired while activating (${e.message}). Re-select the rows after signing in.`)
         }
+        // "already pending" / "already exists" is not a failure (2026-09-30)
+        const kind = classifyActivationAnswer(e)
+        if (kind) { setStatus(rk, activationAnswerText(kind), kind === 'active' ? 'ok' : 'pending'); r.checked = false; anySucceeded = true; if (r.kind === 'group' && r.groupId) { if (kind === 'active') autoActivateStarted.add(r.groupId); else autoActivateAwaitingApproval.add(r.groupId) }; continue }
         setStatus(rk, e.message, 'err')
         // leave r.checked = true so user can retry
       }
     }
+    onGraphThrottle = null
+    // the morning flow (REQUIREMENTS "auto-activate the indirect chain"): a parent activated by hand -> its ticked
+    // sub-groups are auto-activated as soon as they surface
+    if (anySucceeded) { try { scheduleAutoActivateWait(token) } catch (_) {} }
     els.activate.disabled = false
 
     // Invalidate My Access cache so the badge + tab content reflect the new
@@ -5089,9 +5249,13 @@ async function loaded(token) {
       // KNOWS when it's ready instead of guessing / manually refreshing. v1.6.47.
       // Show the propagation status INLINE on the activated group row(s) (the
       // "group in scope") + poll until it settles. v1.6.55.
-      const scopeIds = selected.filter(r => r.kind === 'group' && r.groupId).map(r => r.groupId)
-      setPropRowStatus(scopeIds, 'Activating — waiting for Entra PIM to propagate the permissions…', null, false)
-      watchPropagation('activate', scopeIds)
+      // only the groups Microsoft PROVISIONED (2026-09-30): a request waiting for approval -- or one that failed -- never
+      // lands, and watching it ran 20 min and ended "Still not propagated"
+      const scopeIds = [...bulkWatch]
+      if (scopeIds.length) {
+        setPropRowStatus(scopeIds, 'Activating — waiting for Entra PIM to propagate the permissions…', null, false)
+        watchPropagation('activate', scopeIds)
+      }
     }
   }
 }

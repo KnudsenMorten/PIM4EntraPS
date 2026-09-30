@@ -508,6 +508,7 @@ function Get-PimDefaultActiveDirectoryAdapter {
             $p = if ("$Upn".Trim()) { @{ Filter = "UserPrincipalName -eq '$("$Upn".Trim().Replace("'", "''"))'"; Properties = $props } }
                  else { @{ Filter = "SamAccountName -eq '$("$Sam".Replace("'", "''"))'"; Properties = $props } }
             if ($Credential) { $p['Credential'] = $Credential }
+            if ("$($global:PIM_HybridAdServer)".Trim()) { $p['Server'] = "$($global:PIM_HybridAdServer)".Trim() }   # §75.3b / §80.2: a named DC
             Get-ADUser @p -ErrorAction Stop
         }
         # Create a standard AD user in the routed OU (v1 New-ADUser, 5911-5922): -Name = the account name,
@@ -522,6 +523,7 @@ function Get-PimDefaultActiveDirectoryAdapter {
                 $v = "$(Get-PimHybridAdDesiredValue -Desired $d -Name $pair[1])".Trim(); if ($v) { $p[$pair[0]] = $v }
             }
             if ($Credential) { $p['Credential'] = $Credential }
+            if ("$($global:PIM_HybridAdServer)".Trim()) { $p['Server'] = "$($global:PIM_HybridAdServer)".Trim() }   # §75.3b / §80.2: a named DC
             New-ADUser @p
         }
         # Update the attributes v1 updated (Set-ADUser, 5878-5884). A blank desired value is not written.
@@ -533,6 +535,7 @@ function Get-PimDefaultActiveDirectoryAdapter {
                 $v = "$(Get-PimHybridAdDesiredValue -Desired $d -Name $pair[1])".Trim(); if ($v) { $p[$pair[0]] = $v }
             }
             if ($Credential) { $p['Credential'] = $Credential }
+            if ("$($global:PIM_HybridAdServer)".Trim()) { $p['Server'] = "$($global:PIM_HybridAdServer)".Trim() }   # §75.3b / §80.2: a named DC
             Set-ADUser @p
         }
         # Resolve a gMSA/sMSA managed password from the DC (msDS-ManagedPassword). On the
@@ -588,7 +591,10 @@ function Invoke-PimHybridAdApply {
         # reported as a success.
         [scriptblock]$DeliverPassword,
         [scriptblock]$PasswordDeliveryReady,
-        [scriptblock]$NewPlainPassword
+        [scriptblock]$NewPlainPassword,
+        # §80.2: the caller VERIFIED (Test-PimHybridAdRunAsGmsa) that this process runs as the configured gMSA -- the AD
+        # cmdlets then carry no -Credential. Never set it without that check.
+        [switch]$RunAsGmsa
     )
     $items = @($Plan.workItems)
     $results = New-Object System.Collections.Generic.List[object]
@@ -605,7 +611,7 @@ function Invoke-PimHybridAdApply {
 
     if ($Apply) {
         if (-not $ActiveDirectoryAdapter) { $ActiveDirectoryAdapter = Get-PimDefaultActiveDirectoryAdapter }
-        if (-not $Credential) {
+        if (-not $Credential -and -not $RunAsGmsa) {
             # Mirror the legacy contract: without an explicit AD credential, skip the AD
             # branch and SAY SO (never fall back to ambient SYSTEM silently).
             foreach ($it in $items) {
@@ -707,6 +713,35 @@ function Invoke-PimHybridAdApply {
 # A hybrid worker is a domain-joined Windows host running the scheduler scoped to this job
 # (Start-PimScheduler.ps1 -Jobs hybrid-ad-apply), with its SQL coordinates.
 # ---------------------------------------------------------------------------
+function Get-PimHybridAdProcessIdentity {
+    # The Windows identity this process runs as ('DOMAIN\name'). Seam for tests: $global:PIM_HybridAdProcessIdentity.
+    if ("$($global:PIM_HybridAdProcessIdentity)".Trim()) { return "$($global:PIM_HybridAdProcessIdentity)".Trim() }
+    try { return [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { return '' }
+}
+
+function Test-PimHybridAdRunAsGmsa {
+    <#
+      §80.2 PIMHYBRIDWRK, gMSA mode (operator 2026-09-29: "it must be supporting gmsa mode only for now"). The worker's
+      scheduled task runs AS the gMSA, so the AD cmdlets carry no -Credential and no managed password is ever read into
+      the process. That is NOT "ambient SYSTEM": the apply only proceeds when the process identity IS the configured
+      gMSA -- 'DOMAIN\gmsa$' (the trailing $ of a managed service account) -- and refuses SYSTEM, a machine account or a
+      normal user. PURE apart from the identity seam. Returns @{ ok; identity; reason }.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$GmsaName, [string]$Identity = $null)
+    $id = if ($PSBoundParameters.ContainsKey('Identity')) { "$Identity".Trim() } else { Get-PimHybridAdProcessIdentity }
+    $want = "$GmsaName".Trim()
+    if (-not $want) { return [pscustomobject]@{ ok = $false; identity = $id; reason = 'no gMSA is configured (setting HybridAdGmsaName)' } }
+    $wantSam = ($want -split '\\')[-1]; if (-not $wantSam.EndsWith('$')) { $wantSam += '$' }
+    $haveSam = ("$id" -split '\\')[-1]
+    if ($id -match '(?i)^NT AUTHORITY\\') { return [pscustomobject]@{ ok = $false; identity = $id; reason = "the worker runs as $id, not as the gMSA $wantSam -- never ambient SYSTEM" } }
+    if (-not $haveSam.EndsWith('$')) { return [pscustomobject]@{ ok = $false; identity = $id; reason = "the worker runs as '$id', a normal account -- gMSA mode needs the task to run as $wantSam" } }
+    if ($haveSam -ne $wantSam) { return [pscustomobject]@{ ok = $false; identity = $id; reason = "the worker runs as '$id', not the configured gMSA $wantSam" } }
+    $wantDom = if ($want -match '\\') { ($want -split '\\')[0] } else { '' }
+    $haveDom = if ($id -match '\\') { ($id -split '\\')[0] } else { '' }
+    if ($wantDom -and $haveDom -and $wantDom -ne $haveDom) { return [pscustomobject]@{ ok = $false; identity = $id; reason = "the gMSA is of domain $haveDom, configured $wantDom" } }
+    return [pscustomobject]@{ ok = $true; identity = $id; reason = "running as the gMSA $id" }
+}
+
 function Resolve-PimHybridAdCredential {
     # The explicit AD credential, never ambient SYSTEM. Sources, in order:
     #   1. $global:PIM_HybridAdCredential                     (a PSCredential the worker launcher set)
@@ -716,6 +751,13 @@ function Resolve-PimHybridAdCredential {
     #      through -SecretReader, $global:PIM_HybridAdSecretReader, or Get-PimSqlSecretFromKeyVault.
     # Returns @{ credential; source } -- credential $null when none. Never logs a secret.
     param([scriptblock]$SecretReader)
+    # §80.2: gMSA mode (setting HybridAdCredentialMode = 'gMSA') -- the ONLY mode PIMHYBRIDWRK supports for now. No
+    # credential object at all: the task runs as the gMSA (Test-PimHybridAdRunAsGmsa); nothing falls back to an account.
+    $modeGet = { param($n) $v = $null; if (Get-Command Get-PimAdminLifecycleSetting -ErrorAction SilentlyContinue) { $v = Get-PimAdminLifecycleSetting -Name $n }; if (-not "$v".Trim()) { $v = Get-Variable -Name "PIM_$n" -Scope Global -ValueOnly -ErrorAction SilentlyContinue }; "$v".Trim() }
+    if ((& $modeGet 'HybridAdCredentialMode') -ieq 'gMSA') {
+        $g = Test-PimHybridAdRunAsGmsa -GmsaName (& $modeGet 'HybridAdGmsaName')
+        return [pscustomobject]@{ credential = $null; source = $(if ($g.ok) { "gMSA run-as $($g.identity)" } else { '' }); runAsGmsa = [bool]$g.ok; reason = $g.reason }
+    }
     if ($global:PIM_HybridAdCredential -is [System.Management.Automation.PSCredential]) {
         return [pscustomobject]@{ credential = $global:PIM_HybridAdCredential; source = 'PIM_HybridAdCredential' }
     }
@@ -751,12 +793,17 @@ function Test-PimHybridAdWorkerCapability {
     # AD credential. -AdModulePresent is the test seam.
     param([object]$AdModulePresent = $null, [object]$Credential = $null, [scriptblock]$SecretReader)
     $ad = if ($null -ne $AdModulePresent) { [bool]$AdModulePresent } else { [bool](Get-Command Get-ADUser -ErrorAction SilentlyContinue) }
-    $cred = $Credential; $src = 'supplied'
-    if (-not $cred) { $r = Resolve-PimHybridAdCredential -SecretReader $SecretReader; $cred = $r.credential; $src = $r.source }
+    $cred = $Credential; $src = 'supplied'; $runAs = $false; $credWhy = ''
+    if (-not $cred) {
+        $r = Resolve-PimHybridAdCredential -SecretReader $SecretReader; $cred = $r.credential; $src = $r.source
+        if ($r.PSObject.Properties['runAsGmsa']) { $runAs = [bool]$r.runAsGmsa; $credWhy = "$($r.reason)" }
+    }
     $reason = ''
     if (-not $ad) { $reason = 'this host has no ActiveDirectory module (RSAT-AD) -- a container cannot write on-premises AD' }
-    elseif (-not $cred) { $reason = 'no AD credential is available (set PIM_HybridAdCredential on the worker, or the HybridAdCredentialVault / -UserSecret / -PasswordSecret settings)' }
-    return [pscustomobject]@{ ok = ($ad -and [bool]$cred); adModule = $ad; hasCredential = [bool]$cred; credential = $cred; credentialSource = $src; reason = $reason }
+    elseif (-not $cred -and -not $runAs) {
+        $reason = if ($credWhy) { "gMSA mode: $credWhy" } else { 'no AD credential is available (set PIM_HybridAdCredential on the worker, or the HybridAdCredentialVault / -UserSecret / -PasswordSecret settings)' }
+    }
+    return [pscustomobject]@{ ok = ($ad -and ([bool]$cred -or $runAs)); adModule = $ad; hasCredential = [bool]$cred; runAsGmsa = $runAs; credential = $cred; credentialSource = $src; reason = $reason }
 }
 
 function New-PimHybridAdSecurePassword {
@@ -875,7 +922,9 @@ function Invoke-PimHybridAdWorkerJob {
         return [pscustomobject]@{ ran = $true; whatIf = $true; adRows = $ad.Count; results = $pr.results
             detail = ("hybrid-ad-apply (whatif): {0} AD row(s) planned, {1} skipped{2}" -f @($pr.results | Where-Object { $_.status -eq 'plan' }).Count, @($pr.results | Where-Object { $_.status -eq 'skipped' }).Count, $heldText) }
     }
-    $applyArgs = @{ Plan = $plan; Apply = $true; Credential = $cap.credential }
+    $applyArgs = @{ Plan = $plan; Apply = $true }
+    if ($cap.credential) { $applyArgs['Credential'] = $cap.credential }
+    if ($cap.runAsGmsa) { $applyArgs['RunAsGmsa'] = $true }
     if ($DeliverPassword) { $applyArgs['DeliverPassword'] = $DeliverPassword; if ($PasswordDeliveryReady) { $applyArgs['PasswordDeliveryReady'] = $PasswordDeliveryReady } }
     else { $applyArgs['NewPassword'] = { New-PimHybridAdSecurePassword } }
     if ($ActiveDirectoryAdapter) { $applyArgs['ActiveDirectoryAdapter'] = $ActiveDirectoryAdapter }

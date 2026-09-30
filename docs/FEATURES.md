@@ -1558,6 +1558,14 @@ deployment is a supported choice) and no credentials lying around.
     kept up to date in AD, in the organisational unit and with the names your naming settings produce.
     Their initial password is mailed to the owner's office address and is never stored or logged; they
     are never touched in Entra ID and raise no cloud-only warnings.
+  - **PIM for Active Directory, run by a hybrid worker.** ✅ 2026-09-30 — a small domain-joined server
+    replaces the older PIM-for-AD scripts. PIM groups marked for Active Directory are mirrored to AD
+    groups; people who activate such a group in PIM are put into its AD group within seconds (the sync
+    runs continuously), for exactly the time left on their activation, and are taken out when it ends.
+    Groups Active Directory protects are handled without failing, and servers are onboarded: each
+    server's own administrator group is added to that server's local Administrators (added only,
+    never removed). The worker uses one managed service account per privilege tier, with every right
+    granted to that account's permission group, and no password or secret is stored on the server.
   - **Workload roles** listed in your data (Defender, Intune, enterprise applications, Power BI, Power
     Platform, Dataverse, Business Central, Azure DevOps, Azure RBAC) are applied, with exemptions, and
     reminders, the daily summary and the tier report carry real content.

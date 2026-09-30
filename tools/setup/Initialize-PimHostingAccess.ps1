@@ -3,7 +3,8 @@
 .SYNOPSIS
     71.18 -- converge the hosting identities' access on an EXISTING environment: the tick's Graph app roles (Engine set),
     the Manager's Graph app roles (read-only Manager set), the Manager's right to start the tick now
-    ('Container Apps Jobs Operator' on ca-pim-tick only) and pim.Settings 'SchedulerTickJobId'.
+    ('Container Apps Jobs Operator' on ca-pim-tick only), the tick's right to read its own executions ('Reader' on
+    ca-pim-tick only, BUG-268) and pim.Settings 'SchedulerTickJobId'.
 
 .DESCRIPTION
     Before this script those four were done ONLY inside Setup-PimContainers.ps1 (the infra step) -- or not at all (the
@@ -66,6 +67,19 @@ if (-not $SkipTickStart) {
         if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = 'Stop'; throw "could not assign 'Container Apps Jobs Operator' to $ManagerApp on $TickJobName (the deploying identity needs User Access Administrator or Owner on the resource group)." }
         $have = az role assignment list @sub --assignee $mgrOid --scope $tickId --role 'Container Apps Jobs Operator' --query "[].id" -o tsv --only-show-errors 2>$null
         if (-not "$have".Trim()) { $ErrorActionPreference = 'Stop'; throw "read-back FAILED: the role assignment is not listed on $tickId." }
+        Note 'assigned and read back'
+    }
+
+    # BUG-268: the tick reads the status of the execution that holds its lease, so a lease left by an execution the
+    # platform ended is taken over at the next tick instead of after its 15-minute TTL. Read-only, this job only.
+    Step "'Reader' for $TickJobName on itself (lease holder's execution status)"
+    $have = az role assignment list @sub --assignee $tickOid --scope $tickId --role 'Reader' --query "[].id" -o tsv --only-show-errors 2>$null
+    if ("$have".Trim()) { Note 'already assigned' }
+    elseif ($PSCmdlet.ShouldProcess($tickId, 'role assignment Reader (tick identity)')) {
+        az role assignment create @sub --assignee-object-id $tickOid --assignee-principal-type ServicePrincipal --role 'Reader' --scope $tickId -o none --only-show-errors 2>$null
+        if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = 'Stop'; throw "could not assign 'Reader' to $TickJobName on itself (the deploying identity needs User Access Administrator or Owner on the resource group)." }
+        $have = az role assignment list @sub --assignee $tickOid --scope $tickId --role 'Reader' --query "[].id" -o tsv --only-show-errors 2>$null
+        if (-not "$have".Trim()) { $ErrorActionPreference = 'Stop'; throw "read-back FAILED: the Reader assignment is not listed on $tickId." }
         Note 'assigned and read back'
     }
     $ErrorActionPreference = 'Stop'

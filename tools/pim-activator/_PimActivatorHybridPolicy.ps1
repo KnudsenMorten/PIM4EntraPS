@@ -8,7 +8,7 @@
     This is the shared core behind Deploy-PimActivatorHybrid.ps1's three
     -Target modes (Json / DomainGpo / LocalGpo). It turns an MSP's
     multi-tenant Activator config into the EXACT same client-side managed
-    configuration that Deploy-PimActivatorIntune.ps1 produces, expressed as
+    configuration the fleet path uses (Edge management service + the Intune Remediation in intune-remediation\), expressed as
     plain HKLM registry policy values so the same plan drives:
 
       * LocalGpo  -- write the values straight into the local machine's
@@ -16,7 +16,7 @@
       * DomainGpo -- feed the values to New-GPO / Set-GPRegistryValue.
       * Json      -- emit the managed-config JSON artifact for inspection.
 
-    PARITY CONTRACT (must match Deploy-PimActivatorIntune.ps1):
+    PARITY CONTRACT (must match the documented managed config and intune-remediation\Remediate-PimActivator.ps1):
     Per included browser (Edge and/or Chrome) the Intune deploy pushes FOUR
     client policies. Their on-device HKLM registry shapes are:
 
@@ -32,7 +32,7 @@
            value: { "<extId>": { installation_mode, update_url,
                                   runtime_allowed_hosts:["<all_urls>"] } }
       4. tenantCatalog              (REG_SZ, single JSON string) via the
-         3rd-party extension policy path (the ADMX-backed Intune setting
+         3rd-party extension policy path (the Intune Remediation
          writes here)
            key:   SOFTWARE\Policies\<vendor>\3rdparty\extensions\<extId>\policy
            value name: tenantCatalog
@@ -43,7 +43,7 @@
        Chrome -> Google\Chrome
 
     The ExtensionSettings JSON and the forcelist/source row formats are byte
-    identical to those built in Deploy-PimActivatorIntune.ps1 so all targets
+    identical to the documented managed config (and the Remediation's catalog) so all targets
     (and Intune) converge on the same effective client configuration.
 
     PS 5.1-safe: no ?./??, no RSA.ImportFromPem, no .Contains(string,cmp);
@@ -81,7 +81,7 @@
 #>
 
 # Vendor registry sub-paths under HKLM\SOFTWARE\Policies, keyed by our browser
-# label. Mirrors the verify hints printed at the end of Deploy-PimActivatorIntune.ps1.
+# label.
 $script:PaHybridVendorPath = @{
     Edge   = 'Microsoft\Edge'
     Chrome = 'Google\Chrome'
@@ -221,7 +221,7 @@ function ConvertTo-PaHybridCatalogJson {
         Serialise the normalised catalog to the minified JSON string the
         extension reads as tenantCatalog (always emits a JSON array).
     .DESCRIPTION
-        Matches Deploy-PimActivatorIntune.ps1's $minifiedCatalog:
+        The same compact array the Intune Remediation writes:
         ConvertTo-Json -InputObject @($catalog) -Depth 10 -Compress, so PS 5.1
         never collapses a single-element catalog to a bare object.
     #>
@@ -234,7 +234,7 @@ function New-PaHybridForcelistValue {
     <#
     .SYNOPSIS
         The single ExtensionInstallForcelist row: "<extId>;<updateUrl>".
-        Identical to Deploy-PimActivatorIntune.ps1's $forcelistValue.
+        The documented "<extension id>;<update URL>" row.
     #>
     [CmdletBinding()]
     param(
@@ -249,7 +249,7 @@ function New-PaHybridExtensionSettingsJson {
     .SYNOPSIS
         The ExtensionSettings policy value (single JSON string keyed by ext id).
     .DESCRIPTION
-        Byte-identical to Deploy-PimActivatorIntune.ps1's $extSettingsJson:
+        The documented force-install entry:
         runtime_allowed_hosts=['<all_urls>'] pre-grants the broad scope so
         Chrome's permission-expansion gate skips the auto-update silent-disable.
     #>
@@ -457,7 +457,7 @@ function Get-PaExtensionSettingsPlan {
     .DESCRIPTION
         Chromium reads ExtensionSettings on Windows from EITHER layout:
           Value  -- a REG_SZ named 'ExtensionSettings' under the policy root holding the
-                    whole dictionary as JSON (the documented form; what the ADMX / Intune write)
+                    whole dictionary as JSON (the documented form)
           Subkey -- a key named 'ExtensionSettings' with one REG_SZ per extension id
                     (value name = id or '*', data = that id's JSON)
         and when BOTH exist the subkey wins for the whole policy. So:
@@ -810,7 +810,7 @@ function Get-PaHybridRegistryPlan {
         foreach ($e in (ConvertTo-PaPolicyEntries -Browser $b -Policy 'Settings' -PolicyKey $polKey -SettingsOps $es.Ops)) { $entries.Add($e) }
 
         # 4. tenantCatalog -- single REG_SZ JSON string under the 3rd-party
-        #    extension policy path (the ADMX-backed Intune setting writes here).
+        #    extension policy path (the Intune Remediation writes here too).
         #    This key is OURS alone (it carries our extension id), so it is simply set.
         $entries.Add([pscustomobject]@{
             Browser = $b; Policy = 'Catalog'; Hive = 'HKLM'

@@ -137,6 +137,9 @@ $script:PimFeatureCatalog = @(
     [ordered]@{ key='reviews.campaigns'; label='Access review campaigns';             group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='AccessReviews';  description='Scheduled access reviews with the decisions recorded and enforced.' }
     [ordered]@{ key='access.delegated';  label='Delegated administration ceilings';   group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='PortalAdmins';   description='Manager users limited by tier / level / service / scope with named capabilities.' }
     [ordered]@{ key='reports.tier';      label='Tier-impact report';                  group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='TierReport';     description='Everyone who can reach tier 0, including through nested groups.' }
+    # §75.4 / §80.2 (operator 2026-09-20, the AD-broker wizard): on-premises AD -- admin accounts, the PIM-for-AD group
+    # mirror and JIT membership -- is Pro, enforced where the write happens (the hybrid worker's jobs).
+    [ordered]@{ key='hybrid.ad';         label='On-premises Active Directory (hybrid worker)'; group='Governance'; tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='HybridAd'; description='Admin accounts in on-premises AD, PIM groups mirrored to AD groups and just-in-time AD membership for activated PIM groups -- applied by the hybrid worker.' }
     [ordered]@{ key='reports.evidence';  label='Evidence / audit export';             group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='EvidenceExport'; description='Who may hold what, who held it and who approved it -- the evidence report and its export.' }
 
     # ---- MSP (advanced, Pro) --------------------------------------------------

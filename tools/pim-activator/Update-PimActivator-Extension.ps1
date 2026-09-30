@@ -1194,7 +1194,7 @@ foreach ($b in $browsers) {
 }
 
 # Pure brace-counting JSON property removal. Same shape as
-# Fix-PimActivatorStuck.ps1 / Reset-CorruptedExtensions.ps1 -- no PS 5.1
+# intune-remediation\Remediate-PimActivator.ps1 (the RepairStuck repair) -- no PS 5.1
 # ConvertTo-Json round-trip, so the 2026-06-09 profile-corruption footgun
 # cannot fire. Removes every JSON occurrence of "<EXT_ID>": ... (object,
 # array, string, or scalar value) plus swallows one comma so the result

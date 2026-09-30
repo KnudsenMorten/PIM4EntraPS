@@ -49,7 +49,17 @@ param(
     # PIM_SCHED_JOBS. 🔴 Leaving this unset means RUN ALL JOBS, which includes the ones that send
     # mail (reminders / escalations / daily-summary / tier-report) and create accounts
     # (scheduled-creation). An external trigger that only wants the delta must say so.
-    [string]$Jobs
+    [string]$Jobs,
+    # §80.2 PIM_SCHED_INSTANCE: a SECOND scheduler against the same store (the hybrid worker: -Instance hybrid) keeps its
+    # own lease, state and scope record so it neither fights the main tick nor advances the jobs it does not run.
+    [string]$Instance,
+    # §80.2: authenticate to SQL AND Graph as this host's managed identity (a VM: IMDS). The hybrid worker has no engine
+    # certificate on it by design; without this switch a VM would try the SPN path and fail.
+    [switch]$UseManagedIdentity,
+    # §80.2: run ONE job continuously instead of ticking (operator 2026-09-29: an activation must reach AD in seconds, as
+    # v1's endless PIM-Sync-ID-AD loop did, not at the next 5-minute slot). Only 'hybrid-ad-sync' is allowed.
+    [ValidateSet('', 'hybrid-ad-sync')][string]$ContinuousJob = '',
+    [int]$ContinuousPauseSeconds = 5
 )
 $ErrorActionPreference = 'Stop'
 
@@ -62,11 +72,13 @@ if ("$SqlServer".Trim())      { $env:PIM_SqlServer      = $SqlServer.Trim() }
 if ("$SqlDatabase".Trim())    { $env:PIM_SqlDatabase    = $SqlDatabase.Trim() }
 if ("$StorageBackend".Trim()) { $env:PIM_StorageBackend = $StorageBackend.Trim() }
 if ("$Jobs".Trim())           { $env:PIM_SCHED_JOBS     = $Jobs.Trim() }
+if ("$Instance".Trim())       { $env:PIM_SCHED_INSTANCE = $Instance.Trim() }
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $here) { $here = 'C:\SCRIPTS\AutomateIT\SOLUTIONS\PIM4EntraPS\tools\pim-scheduler' }
 $shared = Resolve-Path "$here\..\..\engine\_shared"
 
 $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
+if ($UseManagedIdentity -or "$env:PIM_UseManagedIdentity".Trim() -eq '1') { $global:PIM_UseManagedIdentity = $true }
 . "$shared\PIM-Rest.ps1"
 . "$shared\PIM-PortalAccess.ps1"      # Get-PimPolicySetting (config-driven schedule)
 . "$shared\PIM-ChangeQueue.ps1"       # Get-PimQueueApplyPlan (queue-apply handler)
@@ -88,6 +100,7 @@ $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
 . "$shared\PIM-EngineCore.ps1"        # NEW REST+SQL engine (diff + providers)
 . "$shared\PIM-DisableGuard.ps1"      # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-HybridAd.ps1"          # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
+. "$shared\PIM-HybridAdGroups.ps1"    # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)
 . "$shared\PIM-EngineProviders.ps1"
 # REQ-U wave 2: the workload role catalogs (discovery-defender / discovery-intune -> Invoke-PimWorkloadRoleDiscoveryJob). The
 # providers file dot-sources it too; named here so the tick's gated capability is visibly loaded (Test-PimScheduler).
@@ -645,6 +658,18 @@ function Invoke-PimUpdaterWatchdogIfConfigured {
     } catch { Write-Host "  [watchdog] skipped: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 
+if ($ContinuousJob) {
+    # No lease / no scheduler state: the loop owns exactly one job type, the scheduler instance does not schedule it.
+    # It stops when the installed VERSION changes (the hybrid worker's updater swapped the code), so the task that keeps it
+    # alive restarts it on the new code.
+    $verFile = Join-Path $here '..\..\VERSION'
+    $verAtStart = if (Test-Path $verFile) { (Get-Content -LiteralPath $verFile -Raw).Trim() } else { '' }
+    Write-Host "[scheduler] CONTINUOUS $ContinuousJob (pause ${ContinuousPauseSeconds}s, version $verAtStart)" -ForegroundColor Cyan
+    [void](Invoke-PimHybridAdSyncLoop -PauseSeconds $ContinuousPauseSeconds -WhatIf:$WhatIf -StopWhen {
+        $v = if (Test-Path $verFile) { (Get-Content -LiteralPath $verFile -Raw).Trim() } else { '' }
+        if ($v -ne $verAtStart) { "the installed version changed ($verAtStart -> $v)" } })
+    return
+}
 if ($Once) {
     @(Invoke-PimSchedulerTick -WhatIf:$WhatIf -LeaseTtlMinutes $ttl) | ForEach-Object { Write-Host ("  {0,-20} {1}" -f $_.name, $_.detail) }
     if (-not $WhatIf) { Invoke-PimUpdaterWatchdogIfConfigured }

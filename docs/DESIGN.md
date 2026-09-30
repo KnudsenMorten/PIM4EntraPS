@@ -522,7 +522,11 @@ container, or from the scheduler with no `Connect-*` step.
   rows seeded) must never silently disable real admins. A second guard applies even with
   `-Prune`: a scope whose **desired set is empty is never pruned** (an empty desired almost
   always means "this scope wasn't loaded", not "delete everything live") — the engine logs
-  the refusal and skips the prune.
+  the refusal and skips the prune. **One read-only exception (2.4.468):** the drift snapshot's own
+  plan (`-WhatIf`, with a flag it sets for its read and clears afterwards) still *lists* what is
+  live in such a scope as extras, marked "no definitions yet", so hand-made access there is visible.
+  That plan cannot write, so the removal budget does not cut its list; every run that writes keeps
+  both guards.
 - **Account-disable circuit breaker** (`PIM-DisableGuard.ps1`). A provider whose remove path
   *disables Entra accounts* (`accountEnabled=$false`) is the highest-blast-radius operation in
   the engine: the `Admins` provider's LIVE set is the **whole tenant user population**, so a
@@ -1401,6 +1405,51 @@ on-prem action and best-effort write the work package to
 `New-ADUser`/`Set-ADUser`/managed-password read is **deferred to the hybrid worker**
 (still on the backlog) and is the hybrid-worker contract above.
 
+### 6.5a The hybrid worker — PIM for Active Directory, as built (2.4.458 – 2.4.467)
+
+A domain-joined Windows server in its own network, peered to the PIM environment (cutting the peering isolates it). It
+replaces the older "PIM for Active Directory" scripts and runs the same scheduler as the cloud engine, with its own
+scheduler instances, so its state and lease never collide with the main tick. SQL, Graph (read) and the source store are
+reached with the server's managed identity; Active Directory is written by **group managed service accounts** only — no
+password, secret or certificate on the server.
+
+**Identities — one per privilege tier.** Each identity is three objects: the gMSA (`gMSA-<code>-L<level>-T<tier>`), its
+`-PermissionGroup` (the gMSA is its only member; **every right is granted to this group**, never to the account) and its
+`-PrincipalsAllowedAccess` group (the computers allowed to fetch the password).
+
+| Identity (default name) | Runs | Rights (on its PermissionGroup) |
+|---|---|---|
+| `gMSA-PIM-L1-T0` | admin accounts in AD, the AD group mirror, the continuous membership sync | create groups + write member / displayName / description in the PIM groups OU; create users + full control below the admin-accounts OU; write `member` on AdminSDHolder (protected groups) — Tier 0 |
+| `gMSA-PIM-L2-T1` | server onboarding | local administrator on the servers OU, through a GPO (Restricted Groups "member of" Administrators, adds only) |
+
+`Initialize-PimHybridWorkerAd.ps1` creates both identities, the rights and the servers GPO; `Install-PimHybridWorker.ps1`
+installs and **tests** each gMSA before it registers a task. A worker identity is never put into a PIM just-in-time
+group — those groups' members are the people with an active elevation, and the membership sync removes anyone else.
+
+**Jobs and tasks.**
+
+| Job | Cadence | Task / identity | What it does |
+|---|---|---|---|
+| `hybrid-ad-apply` | every 5 min | PIM Hybrid Worker / L1-T0 | creates and updates the admin accounts in AD |
+| `hybrid-ad-groups` | hourly | PIM Hybrid Worker / L1-T0 | mirrors each defined AD-marked PIM group to an AD group; a protected group (`adminCount=1`) keeps its cosmetic drift (reported, never retried) |
+| `hybrid-ad-sync` | **continuous** (5 s pause) | PIM Hybrid AD Sync / L1-T0 | the ACTIVE PIM-for-Groups members of each mirrored group → AD group membership, with a time-to-live equal to the time left on the activation when the forest has the PAM feature; re-added when the TTL is more than 2 min off; removes only accounts carrying the AD-admin suffix |
+| `hybrid-ad-servers` | hourly | PIM Hybrid Servers / L2-T1 | lists the servers for Discovery; puts each defined per-server group (+ the optional shared group) into that server's local Administrators, add only; "adopt" when the group already exists, "no access" (a grant fixes it) vs "unreachable" (off) |
+
+The worker writes a per-job heartbeat; the main tick leaves a job to the worker while its heartbeat is fresh, and the
+Manager's Jobs view shows it per job (live / plan-only / not seen). A version change stops the continuous loop and the
+task restarts it on the new code; a daily task (or an on-demand run) moves the worker to the version its ring approves.
+
+**The customer's naming.** Every knob is one `pim.Settings` row from one catalog (`Get-PimHybridAdSettingCatalog`),
+shown and validated on **Settings → Hybrid Active Directory**: the AD marker or a full pattern, the cloud and AD account
+suffixes, the OU for new groups, the per-server group format, the shared server-admins group, the never-remove list.
+Blank = derived from the tenant's naming conventions. A test fails when the worker reads a setting the catalog does not
+list.
+
+**Live view.** Jobs → `hybrid-ad-sync` → **Live view** follows every pass (per group: current vs expected TTL, the
+deviation, and each add / correction / removal, plus the last 40 group changes). The worker publishes it to
+`pim.Settings['HybridAdSyncLive']` **only while the view is open** (the page renews `HybridAdSyncLiveWatch`; the worker
+reads it at most every 10 s) — nothing is written when nobody watches.
+
 ### 6.6 Access Review overview (read-only data layer)
 
 Separate from the `AccessReviews` *provider* (order 80, which **creates** one
@@ -1988,7 +2037,13 @@ never bulk-enumerate the directory to manage a few hundred PIM groups + admins.
   job) and groups the run history by job once; the Overview's validation tile reuses the validator's cached report while
   the definitions are unchanged (the same key as the Validate page); the Commit page asks the audit trail for configuration
   saves by action, filtered in the database; and the Audit tab reads the before/after details only for the page on
-  screen. Each Overview load that takes a second or more logs how long each tile took.
+  screen. Each Overview load that takes a second or more logs how long each tile took. Since 2.4.468 the Overview also
+  reuses the access-map model while the definitions are unchanged, per signed-in view (a scoped reader never sees
+  another view's model), for at most five minutes.
+- **Wizards refuse to stage on a failed read (2.4.468).** A wizard reads the table it adds to first, so the staged change
+  carries the table's current rows and version. Only "this table does not exist" (404) starts from an empty table; a
+  timeout, a lost connection or a server error stops the wizard with "could not read <table> — nothing was staged",
+  because a commit is a full-set replace and an empty baseline would have replaced the stored rows.
 - **The Manager keeps its permission check (2.4.454).** The Manager answers one request at a time, and the Overview page's
   permission check (Graph, Azure and store reads) took 2-4 s on every visit while every other request waited. Its answer
   is kept for five minutes; **Verify permissions** checks again at once. Each request the Manager serves is logged with its
@@ -2501,7 +2556,13 @@ topology the scheduler runs as a **Container Apps Job** (`ca-pim-tick` by defaul
 It uses the same image as the Manager, its own system-assigned managed identity, and persists
 schedules, last/next run, triggers and run history in SQL `pim.Settings`. A **SQL lease** guarantees
 one tick at a time; a tick renews its lease while it works (so a long job keeps its turn) and stops
-making changes if another run has taken the lease over. On a server/VM the same code runs as a timer
+making changes if another run has taken the lease over. The lease records the job execution that
+holds it. A tick that finds the lease held asks the platform for that execution's status and, only
+when the platform reports it **ended** (succeeded, failed or stopped — e.g. a running pod the
+platform deleted after a failed first attempt), takes the lease over at once, closes that run's
+"running" records and runs its pending trigger. Anything it cannot confirm (no execution recorded,
+no read right, unknown status) waits for the lease to expire, as before. The tick's identity needs
+read access on its own job for this (the hosting access script grants it). On a server/VM the same code runs as a timer
 loop (`-IntervalSeconds`) or once per external cron start (`-Once`). The Manager never runs the
 engine: on-demand actions come through the **Manager API** as queue entries and triggers that the
 tick drains.
@@ -2623,7 +2684,9 @@ dispatch result (`detail` + the handler's inner `ran`/`whatIf`/`detail` and any
 processes share it**; an in-memory copy serves only a process with no store (offline tests). The
 ring is trimmed to the **10 most recent runs per job** (`$script:PimRunHistoryMax`), because the
 whole ring is one setting rewritten on every run and a larger ring measurably slowed every save on a
-small database tier; full engine output lives in the per-run output below and in Log Analytics.
+small database tier. Runs under a name that only ever ran as a **trigger** (one-off names such as a
+scope list) share **one** ring of the 30 most recent (2.4.468) — a ring per one-off name never
+shrank; full engine output lives in the per-run output below and in Log Analytics.
 
 **The run's own output** (`Save-PimJobRunOutput` / `Get-PimJobRunOutput`). `Invoke-PimScheduledJob`
 captures everything the handler prints (host lines, warnings, errors) and stores it per job name in
@@ -8104,6 +8167,23 @@ across flavors.
 
 ### Activator (`tools/pim-activator/`)
 
+**Auto-activate, including sub-groups (2026-09-30).** A group ticked **auto** is activated by the Activator itself — the group
+only, opt-in, off by default. A sub-group (a permission group nested in a role group) appears in the user's eligibility list
+only once its parent is active, so the sweep is not a one-shot: it runs on every list load and starts each ticked, listed,
+inactive group once per popup session (`pickAutoActivateCandidates`). Whatever was activated in the session — by the sweep, by
+ticking, or by **Activate selected** — is recorded; while ticked groups are still missing from the list (`tickedGroupIdsNotListed`)
+and something was activated, the list is re-read every 30 s (fresh token), for at most 10 minutes and at most 3 minutes after every
+started group is active. Nothing is re-read when nothing was activated (a stale tick never polls). The per-device cap counts ticked
+active groups **plus** groups started this session that are still propagating (`countAutoActivateInUse`), so repeated passes can
+never exceed it. **Approval:** the propagation watch follows only groups Microsoft PROVISIONED. A response `PendingApproval`
+(`isApprovalPendingStatus`) or the answer "a request is already pending" (`classifyActivationAnswer` -- in practice an open request
+waiting for an approver) is shown as "waiting for approval", holds its cap slot, and is never watched and never starts the sub-group
+wait -- watching it ran 20 min and ended "Still not propagated" (2026-09-30). "The assignment already exists" is shown as active.
+
+**Microsoft throttling.** Every Graph call (`graph()`), Graph `$batch` sub-request and ARM write (`armPutWithRetry`, the same
+request GUID on every attempt) retries a 429 after `Retry-After` (capped 60 s) or 5 / 10 / 20 / 30 s, at most 4 times; 503 / 504 are
+retried for reads only. The wait is shown on the row, button or banner (`graphRetryDelayMs`).
+
 **Per-device auto-activate cap (`autoActivateMaxGroups`).** Managed configuration only (`chrome.storage.managed`,
 `...\3rdparty\extensions\<id>\policy\autoActivateMaxGroups`, REG_DWORD), so it is set per device and a user cannot change it;
 it is deliberately not read from the tenant catalog, which could otherwise loosen it. Not set = no limit, 0 = auto-activation
@@ -8111,9 +8191,8 @@ off, N = at most N groups (clamped to 100; `resolveAutoActivateMaxGroups` in `po
 capped: ticking "auto" (which activates at once) is refused and reverted past the cap, counting the ticked groups the user
 can see (a stale key for a group that is gone cannot block a new tick); the on-open sweep counts groups already active and
 auto, then activates only the first N remaining (`selectAutoActivateTargets`) and marks the rest "Not auto-activated" after
-the reload. Delivered by the ADMX (revision 1.1, released and TEST ids) through `Deploy-PimActivatorIntune.ps1
--AutoActivateMaxGroups`, which upgrades an older ingested ADMX in place (`uploadNewVersion`) instead of removing it, so the
-existing profiles survive; and by `Deploy-PimActivatorClient.ps1` / `Deploy-PimActivatorHybrid.ps1` for servers.
+the reload. Delivered on Intune-managed Edge by the Intune Remediation (`intune-remediation\Remediate-PimActivator.ps1`,
+`AutoActivateMaxGroups` in its settings block; the ADMX delivery was removed 2026-09-28); and by `Deploy-PimActivatorClient.ps1` / `Deploy-PimActivatorHybrid.ps1` for servers.
 
 Edge browser extension. Admin clicks the toolbar icon → list of eligible
 PIM-for-Groups assignments → multi-select → enter justification + duration →
@@ -8154,8 +8233,8 @@ else the built-in default. The resolution is a pure, side-effect-free function i
 so it is Node-unit-testable; `loadConfig` stamps the resolved number onto `cfg`,
 and the guard reads `cfg.bulkActivateConfirmThreshold`. It is **never** user-
 enterable (confirm strength is an admin policy decision); the key is declared in
-`managed-schema.json` and pushable per browser via the custom ADMX/ADML
-(`BulkThreshold_Edge` / `BulkThreshold_Chrome`, valueName `bulkActivateConfirmThreshold`).
+`managed-schema.json` and pushable per device as the `bulkActivateConfirmThreshold` policy value
+(the Intune Remediation's `BulkActivateConfirmThreshold` setting, or the Client / Hybrid deploy).
 
 **First-run getting-started tip.** The first time a freshly-onboarded user lands
 on a populated Activate list, a one-time dismissible note (`maybeShowGettingStartedTip`)

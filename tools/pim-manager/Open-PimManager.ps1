@@ -290,6 +290,9 @@ if (Test-Path -LiteralPath $_permLib) { . $_permLib }
 # REQ-DISC-2 (operator 2026-09-26): the Discovery inbox -- one list of what is new, each item Create / Ignore / Re-add.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-AzureDiscovery.ps1')
 . (Join-Path $solutionRoot 'engine\_shared\PIM-DiscoveryInbox.ps1')
+# §80.2 server onboarding: a Discovery 'ad-server' item is named by the customer's PIM-for-AD naming (pure functions only
+# are used here -- the AD writes are the hybrid worker's).
+. (Join-Path $solutionRoot 'engine\_shared\PIM-HybridAdGroups.ps1')
 # REQ-AR-2 (operator 2026-09-26): access reviews PER DEPARTMENT, driven by review rules (Settings > Access reviews).
 . (Join-Path $solutionRoot 'engine\_shared\PIM-AccessReviewCycle.ps1')
 # REQ-U (prereqs) -- the workload-prerequisite catalog + view (engine/_shared/PIM-WorkloadPrereqs.ps1): behind
@@ -892,7 +895,9 @@ function Resolve-PimManagerMailUrl {
       (CONTAINER_APP_NAME + CONTAINER_APP_ENV_DNS_SUFFIX), App Service (WEBSITE_HOSTNAME) -- plus the operator's custom
       hostnames (PIM_MANAGER_HOSTNAMES, comma-separated). A request header only CHOOSES among those (a custom domain the
       person came in through); a header naming anything else is ignored. No known name -> no url (nothing is recorded).
-      Returns @{ url; why }.
+      §80.1 (operator 2026-09-29: "option to add custom dns name to the url, like pim-manager.<internal dns domain>"):
+      when the request names no known host, a CUSTOM hostname wins over the platform name. Returns @{ url; why; custom;
+      platformUrls } -- platformUrls lets the caller upgrade an auto-recorded platform address to the custom one.
     #>
     param([string]$ForwardedHost = '', [string]$RequestHost = '', [hashtable]$EnvMap = $null)
     $get = { param($n) if ($EnvMap) { "$($EnvMap[$n])" } else { "$([Environment]::GetEnvironmentVariable($n))" } }
@@ -902,12 +907,16 @@ function Resolve-PimManagerMailUrl {
     $ws = "$(& $get 'WEBSITE_HOSTNAME')".Trim(); if ($ws) { $known.Add($ws.ToLowerInvariant()) }
     foreach ($h in ("$(& $get 'PIM_MANAGER_HOSTNAMES')" -split '[,;\s]+')) { if ("$h".Trim()) { $known.Add("$h".Trim().ToLowerInvariant()) } }
     $ok = @($known | Where-Object { $_ -match '^[a-z0-9.-]+\.[a-z]{2,}$' } | Select-Object -Unique)
-    if (-not $ok.Count) { return @{ url = ''; why = 'the platform names no host for this app (and PIM_MANAGER_HOSTNAMES is empty)' } }
+    $custom = @(("$(& $get 'PIM_MANAGER_HOSTNAMES')" -split '[,;\s]+') | ForEach-Object { "$_".Trim().ToLowerInvariant() } |
+        Where-Object { $_ -match '^[a-z0-9.-]+\.[a-z]{2,}$' } | Select-Object -Unique)
+    $platformUrls = @($ok | Where-Object { $custom -notcontains $_ } | ForEach-Object { "https://$_" })
+    if (-not $ok.Count) { return @{ url = ''; why = 'the platform names no host for this app (and PIM_MANAGER_HOSTNAMES is empty)'; custom = $false; platformUrls = @() } }
     foreach ($c in @("$ForwardedHost".Split(',')[0].Trim(), "$RequestHost".Trim())) {
         $c = "$c".Trim().ToLowerInvariant() -replace ':\d+$', ''
-        if ($c -and $ok -contains $c) { return @{ url = "https://$c"; why = 'the host this request came in on, a known name of this app' } }
+        if ($c -and $ok -contains $c) { return @{ url = "https://$c"; why = 'the host this request came in on, a known name of this app'; custom = ($custom -contains $c); platformUrls = $platformUrls } }
     }
-    return @{ url = "https://$($ok[0])"; why = 'the platform host of this app (the request named no known host)' }
+    if ($custom.Count) { return @{ url = "https://$($custom[0])"; why = 'the custom hostname of this app (PIM_MANAGER_HOSTNAMES)'; custom = $true; platformUrls = $platformUrls } }
+    return @{ url = "https://$($ok[0])"; why = 'the platform host of this app (the request named no known host)'; custom = $false; platformUrls = $platformUrls }
 }
 function Get-PimManagerDelegatedContext {
     <#
@@ -1217,10 +1226,12 @@ function Get-PimManagerDiscoveryInbox {
     $az = & $read 'azure-scopes'; if ($null -eq $az) { $missing.Add('azure-scopes') }
     $en = & $read 'entra-roles'; if ($null -eq $en) { $missing.Add('entra-roles') }
     $df = & $read 'workload-roles:defender'; $it = & $read 'workload-roles:intune'; $pb = & $read 'powerbi-workspaces'; $au = & $read 'aus'
+    $ads = & $read 'ad-servers'   # §80.2: written by the hybrid worker (hybrid-ad-servers); absent = no worker -> no server items
     $scopes = @(if ($az) { @($az.items) | Where-Object { $_ } })
     $items = ConvertTo-PimDiscoveryItems -AzureScopes $scopes -EntraRoles @(if ($en) { @($en.items) | Where-Object { $_ } }) `
         -DefenderRoles @(if ($df -and $df.read) { @($df.roles) | Where-Object { $_ } }) -IntuneRoles @(if ($it -and $it.read) { @($it.roles) | Where-Object { $_ } }) `
-        -PowerBiWorkspaces @(if ($pb) { @($pb.items) | Where-Object { $_ } }) -AdministrativeUnits @(if ($au) { @($au.items) | Where-Object { $_ } })
+        -PowerBiWorkspaces @(if ($pb) { @($pb.items) | Where-Object { $_ } }) -AdministrativeUnits @(if ($au) { @($au.items) | Where-Object { $_ } }) `
+        -AdServers @(if ($ads) { @($ads.items) | Where-Object { $_ } })
     # what the store already defines
     $names = New-Object System.Collections.Generic.List[string]; $tags = New-Object System.Collections.Generic.List[string]; $refs = New-Object System.Collections.Generic.List[string]
     foreach ($e in @('PIM-Definitions-Services', 'PIM-Definitions-Resources', 'PIM-Definitions-Tasks', 'PIM-Definitions-Roles')) {
@@ -5368,6 +5379,26 @@ function Get-PimManagerPreflightStamp {
     return $stamp
 }
 
+function Get-PimHomeGraphData {
+    <#
+      BUG-264 (remainder): the Home overview's delegation tiles rebuilt the whole map model (Build-PimGraphData, ~0.7 s on
+      ig798) on EVERY Home load, on the Manager's single request loop. Served from a cache when the store has not changed
+      (the preflight stamp: row count + newest UpdatedUtc) for the SAME caller view (role + identity -- a Delegated reader
+      sees a scoped model), and never older than -MaxAgeSeconds, because the model also reads non-row inputs. A stamp read
+      that fails is unique, so nothing is served from the cache then (fail open). Only the Home tiles use this; the Map and
+      the reports still build fresh.
+    #>
+    param([string]$Stamp = '', [int]$MaxAgeSeconds = 300, [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not "$Stamp".Trim()) { $Stamp = Get-PimManagerPreflightStamp }
+    $view = ''; try { $r = Get-PimManagerRole; $view = "$($r.role)|$($r.identity)" } catch { $view = '?' }
+    $key = "$Stamp#$view"
+    $c = $script:PimHomeGraphCache
+    if ($c -and $c.key -eq $key -and ($NowUtc - [datetime]$c.atUtc).TotalSeconds -lt $MaxAgeSeconds) { return $c.graph }
+    $g = Build-PimGraphData
+    $script:PimHomeGraphCache = @{ key = $key; atUtc = $NowUtc; graph = $g }
+    return $g
+}
+
 function Get-PimHomeOverview {
     [CmdletBinding()]
     param([switch]$IncludeHeavy)
@@ -5383,8 +5414,10 @@ function Get-PimHomeOverview {
     #   - orphans = groups with NO inbound/outbound edge (defined but unwired)
     #   - gaps    = admins with NO group membership edge (a person who reaches nothing)
     #   - unmanaged = synthetic targets (Entra role / AU / Azure scope) reached by NO group
+    # BUG-264: one store stamp for this load -- the map model below and the validation tile share it.
+    $homeStamp = Get-PimManagerPreflightStamp
     try {
-        $g = Build-PimGraphData
+        $g = Get-PimHomeGraphData -Stamp $homeStamp
         $nodes = @($g.nodes); $edges = @($g.edges)
         $byLevel = [ordered]@{ 'L0'=0;'L1'=0;'L2'=0;'L3'=0;'L4'=0;'L5'=0;'untiered'=0 }
         $delegationGroups = @($nodes | Where-Object { $_.kind -eq 'role-group' -or $_.kind -eq 'permission-group' })
@@ -5527,7 +5560,7 @@ function Get-PimHomeOverview {
         if (Get-Command Invoke-PimPreflightValidation -ErrorAction SilentlyContinue) {
             # BUG-264: the SAME cache as GET /api/preflight -- the validator ran on every Home load (~1.4 s on ig798) whenever
             # the Validate page had not been opened since start; a cached report of unchanged rows is served, and a fresh run fills it.
-            $pfStamp = Get-PimManagerPreflightStamp
+            $pfStamp = $homeStamp
             if ($script:PimPreflightCacheReport -and $script:PimPreflightCacheStamp -eq $pfStamp) { $report = $script:PimPreflightCacheReport }
             else { $report = Invoke-PimPreflightValidation; $script:PimPreflightCacheStamp = $pfStamp; $script:PimPreflightCacheReport = $report }
             $sum = $report.summary
@@ -7379,6 +7412,9 @@ function Handle-Request {
                 # hostnames), never from a client header: a spoofed X-Forwarded-Host on the first GET / used to be persisted
                 # as every mail's "Open in PIM Manager" link. The headers only pick AMONG the known names.
                 $mu = Resolve-PimManagerMailUrl -ForwardedHost "$($req.Headers['X-Forwarded-Host'])" -RequestHost "$($req.Url.Host)"
+                # §80.1: an address that was only AUTO-recorded as the platform host is upgraded once to the custom hostname
+                # (a value the operator set to anything else is still never overwritten).
+                if ($cur -and $mu.url -and $mu.custom -and (@($mu.platformUrls) -contains $cur.TrimEnd('/').ToLowerInvariant())) { $cur = '' }
                 if (-not $cur -and $mu.url) {
                     Set-PimManagerSettingObject -Name 'ManagerUrl' -Value $mu.url
                     if ($global:PIM_NamingConventions -is [System.Collections.IDictionary]) { $global:PIM_NamingConventions['ManagerUrl'] = $mu.url }
@@ -8215,6 +8251,73 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status $st -Body ([ordered]@{ ok = (-not $errors.Count); written = $written.ToArray(); errors = $errors.ToArray()
                 skipped = @($apply | Where-Object { $_ -notin $written.ToArray() }) })
             return $st
+        }
+        # 2.4.465 (operator 2026-09-30): Settings > Hybrid Active Directory -- the customer's own naming for PIM for AD.
+        # Each knob is its own pim.Settings row (PIM-HybridAdGroups.ps1 catalog); blank = the default derived from the naming.
+        if ($path -eq '/api/settings/hybrid-ad' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                $rows = New-Object System.Collections.Generic.List[object]
+                foreach ($e in $script:PimHybridAdGroupEntities) { foreach ($r in @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $e)) { if ($null -ne $r) { $rows.Add($r) } } }
+                $v = Get-PimHybridAdSettingsView -Rows $rows.ToArray()
+                $v['canWrite'] = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+                Write-JsonResponse -Response $resp -Status 200 -Body $v
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "hybrid AD settings could not be read: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+        if ($path -eq '/api/settings/hybrid-ad' -and $method -eq 'PUT') {
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change the hybrid Active Directory settings.' }
+                return 403
+            }
+            $script:lastHeartbeat = Get-Date
+            $body = Read-RequestJson -Request $req
+            $in = @{}; if ($body -and $body.PSObject.Properties['values'] -and $body.values) { foreach ($p in $body.values.PSObject.Properties) { $in[$p.Name] = "$($p.Value)" } }
+            $chk = Test-PimHybridAdSettingsInput -Values $in
+            if (-not $chk.ok) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = ($chk.errors -join '; ') }; return 400 }
+            $changed = New-Object System.Collections.Generic.List[string]
+            try {
+                foreach ($k in @($chk.values.Keys)) {
+                    $before = "$(Get-PimHybridAdSetting -Name $k -Default '')".Trim()
+                    $after = "$($chk.values[$k])"
+                    if ($before -ceq $after) { continue }
+                    Set-PimManagerSetting -Name $k -Value $(if ($after) { $after } else { $null })
+                    if ($global:PIM_NamingConventions -is [System.Collections.IDictionary]) { $global:PIM_NamingConventions[$k] = $(if ($after) { $after } else { $null }) }
+                    Write-PimManagerAuditEvent -Action 'settings.hybrid-ad.save' -Target "settings:$k" -Before @{ value = $before } -After @{ value = $after } -Result 'ok'
+                    $changed.Add($k)
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; changed = $changed.ToArray()
+                    detail = $(if ($changed.Count) { "Saved $($changed.Count) setting(s). The hybrid worker picks them up within 5 minutes (its definitions refresh)." } else { 'Nothing changed.' }) }
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; changed = $changed.ToArray(); error = "hybrid AD settings save failed after $($changed.Count) change(s): $($_.Exception.Message)" }
+                return 500
+            }
+        }
+        # 2.4.465: the LIVE view of the continuous PIM-for-AD sync (operator: "where can i see live the continuously pulling
+        # and group changes ... as i use this for demo"). Asking renews pim.Settings 'HybridAdSyncLiveWatch' (the worker only
+        # publishes while it is in the future -- no SQL writes when nobody watches) and returns the newest passes.
+        if ($path -eq '/api/hybrid-ad/live' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                $now = [datetime]::UtcNow
+                $w = $null; try { $w = Get-PimManagerSetting -Name 'HybridAdSyncLiveWatch' } catch { $w = $null }
+                $until = $null
+                if ($w -and $w.PSObject.Properties['untilUtc']) { $u0 = $w.untilUtc; if ($u0 -is [datetime]) { $until = $u0.ToUniversalTime() } else { try { $until = [datetime]::Parse("$u0", [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal) } catch { $until = $null } } }
+                if (-not $until -or ($until - $now).TotalSeconds -lt 60) { $until = $now.AddSeconds(120); Set-PimManagerSetting -Name 'HybridAdSyncLiveWatch' -Value ([ordered]@{ untilUtc = $until.ToString('o') }) }
+                $live = $null; try { $live = Get-PimManagerSetting -Name 'HybridAdSyncLive' } catch { $live = $null }
+                $hb = $null; try { $hb = Get-PimManagerSetting -Name 'HybridWorkerHeartbeat' } catch { $hb = $null }
+                $age = $null
+                if ($live -and $live.PSObject.Properties['updatedUtc']) { $lu = $live.updatedUtc; try { $lt = if ($lu -is [datetime]) { $lu.ToUniversalTime() } else { [datetime]::Parse("$lu", [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal) }; $age = [int]($now - $lt).TotalSeconds } catch { $age = $null } }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ watchingUntilUtc = $until.ToString('o'); ageSeconds = $age; live = $live; heartbeat = $hb })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the live view could not be read: $($_.Exception.Message)" }
+                return 500
+            }
         }
         if ($path -eq '/api/settings/admin-domain' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date

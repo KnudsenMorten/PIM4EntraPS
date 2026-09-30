@@ -578,9 +578,19 @@ function Invoke-PimEngineScope {
     #      a remove-only diff by construction, so the "0 desired = wrong store" heuristic
     #      doesn't apply.
     $doPrune = ($Mode -eq 'Full') -and $Prune
+    $__emptyDesiredRead = $false
     if ($doPrune -and @($desired).Count -eq 0 -and -not $p.allowEmptyDesiredPrune) {
-        Write-Host ("[engine] {0,-20} prune SKIPPED -- desired set is empty (refusing to remove {1} live items; not authoritative)" -f $Scope, @($live).Count) -ForegroundColor Yellow
-        $doPrune = $false
+        # REQ-AU-DRIFT-1 (operator 2026-09-30: "List extras, read-only"): the DRIFT SNAPSHOT may still LIST what is live in a
+        # scope that has no rows -- hand-made AU-scoped roles were invisible until the first Roles-AUs row existed. Only a
+        # plan (-WhatIf) that the drift snapshot asked for ($global:PIM_DriftListEmptyScopes); every other run -- above all
+        # every run that WRITES -- still never prunes an empty scope.
+        if ($WhatIf -and $global:PIM_DriftListEmptyScopes) {
+            $__emptyDesiredRead = $true
+            Write-Host ("[engine] {0,-20} no definitions -- drift read lists {1} live item(s) as extras (plan only, nothing is removed)" -f $Scope, @($live).Count) -ForegroundColor DarkYellow
+        } else {
+            Write-Host ("[engine] {0,-20} prune SKIPPED -- desired set is empty (refusing to remove {1} live items; not authoritative)" -f $Scope, @($live).Count) -ForegroundColor Yellow
+            $doPrune = $false
+        }
     }
     # v1 parity (68.6 rows 24-25): a provider may name explicit Remove rows (GetRemoveRows) and a
     # type-neutral key (TypeKeyOf). Both are optional; a provider with neither diffs exactly as before.
@@ -713,7 +723,9 @@ function Invoke-PimEngineScope {
     $__rmTotal = @($diff.remove).Count + $__retype.Count
     $__heldCand = @(@(@($diff.remove) + $__retype) | Where-Object { $_ -and (($_.PSObject.Properties['targeted'] -and $_.targeted) -or ($_.PSObject.Properties['typeChange'] -and $_.typeChange)) })
     $__keepUpdate = @(@($diff.update) | Where-Object { -not ($_.PSObject.Properties['typeChange'] -and $_.typeChange) })
-    if ($__rmTotal -gt 0 -and (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue)) {
+    # REQ-AU-DRIFT-1: the empty-scope drift READ is a plan that can never write, and its whole point is to LIST what is
+    # there -- a budget trip would drop the list and show nothing. The budget still guards every other plan and every apply.
+    if ($__rmTotal -gt 0 -and -not $__emptyDesiredRead -and (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue)) {
         # The BREAKDOWN goes with the count: the alert must be able to say whether these are assignment
         # type changes (which delete the old type first) or rows the operator marked Action=Remove.
         # Without it the mail read as "the engine decided to delete 9 things" (operator, 2026-09-20).
@@ -887,6 +899,13 @@ function Invoke-PimEngineScope {
             Write-Warning ("  [engine] {0}: {1} Remove row(s) look already-done, but the live read was NOT proven complete ({2}) -- they are KEPT and re-checked next run, never deleted on an unproven 'absent'." -f $Scope, @($__absentRows).Count, $__liveIncomplete)
             $__absentRows = @()
         }
+        # 🔴 BUG-267 (2.4.464) -- a COMPLETE read can still LAG: PIM's schedule list does not show a request made seconds
+        # earlier, so "absent" on one read deleted a Remove row whose delegation was about to appear (ig798 E2E run 1).
+        # An absent row is now deleted only when a second read at least 10 min after the first still finds it absent.
+        if (@($__absentRows).Count) {
+            $__rdEntA = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
+            $__absentRows = @(Select-PimConfirmedAbsentRemoveRows -Entity $__rdEntA -Rows $__absentRows -Scope $Scope)
+        }
         $__doneRows = @(@($__fullyDone) + @($__absentRows) | Where-Object { $null -ne $_ })
         if ($__doneRows.Count) {
             $__rdEnt = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
@@ -909,6 +928,7 @@ function Invoke-PimEngineScope {
         failures=$script:__failures.ToArray()
         held=$__held.Count; absent=$__absent.Count; conflicts=$__conflicts.Count
         removeRowsDone=$__rowsDone
+        noDefinitions=[bool]$__emptyDesiredRead   # REQ-AU-DRIFT-1: extras listed from a scope with no rows (drift read only)
         warnings=@($Context['__pimScopeWarnings'])
         # .ToArray(), never @(): pwsh 7 throws "Argument types do not match" on @() over a List[object] from a hashtable.
         findings=$(if ($Context['__pimLiveFindings'] -is [System.Collections.Generic.List[object]]) { $Context['__pimLiveFindings'].ToArray() } else { @() })
@@ -933,6 +953,69 @@ function Get-PimFeatureSkipReason {
     }
     if (-not $enabled) { return "$what is turned off" }
     return "$what is not licensed for this edition"
+}
+
+function Select-PimConfirmedAbsentRemoveRows {
+    <#
+      BUG-267. -Rows: Remove rows this run found ABSENT (nothing of the delegation live). Returns only the rows that
+      were ALSO absent on an earlier read at least -MinMinutes (10) before; the others are stamped (first-absent, in
+      pim.Settings 'RemoveRowAbsentSeen', "<entity>|<row key>" -> utc) and kept, so the next run re-reads them -- and
+      revokes them if the lagging delegation has appeared by then. A stamp of this entity whose row is no longer absent
+      is dropped (the two reads must be consecutive); stamps older than 7 days are pruned.
+      No SQL store (offline runs, fixed providers -- nothing lags there) = the rows are returned as they are.
+      -Load / -Save inject the stamp map (tests).
+    #>
+    param([Parameter(Mandatory)][string]$Entity, [object[]]$Rows = @(), [string]$Scope = '', [datetime]$NowUtc = [datetime]::UtcNow,
+          [int]$MinMinutes = 10, [scriptblock]$Load, [scriptblock]$Save)
+    $rows = @($Rows | Where-Object { $null -ne $_ })
+    if (-not $rows.Count) { return @() }
+    if (-not $Load -or -not $Save) {
+        $cs = $null
+        if ((Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue) -and (Get-Command Set-PimSqlSetting -ErrorAction SilentlyContinue)) {
+            $cs = if ($global:PIM_EngineSqlCs) { $global:PIM_EngineSqlCs } elseif ($global:PIM_SqlConnectionString) { $global:PIM_SqlConnectionString }
+                  elseif ((Get-Command Get-PimSqlConnectionString -ErrorAction SilentlyContinue) -and ($global:PIM_SqlServer -or $global:PIM_SqlConnStringVault)) { Get-PimSqlConnectionString } else { $null }
+        }
+        if (-not $cs) { return $rows }
+        # 🔴 PLAIN scriptblocks, NO .GetNewClosure() (2.4.466): a closure is bound to a new module and cannot see
+        # Get-PimSqlSetting dot-sourced into the engine's SCRIPT scope -- 2.4.464 failed every stamp read that way (safe:
+        # rows kept, but never cleared). Invoked below, inside this function, they see $cs by dynamic scope.
+        $Load = { Get-PimSqlSetting -ConnectionString $cs -Name 'RemoveRowAbsentSeen' }
+        $Save = { param($m) Set-PimSqlSetting -ConnectionString $cs -Name 'RemoveRowAbsentSeen' -ValueJson ($m | ConvertTo-Json -Depth 3 -Compress) }
+    }
+    $now = $NowUtc.ToUniversalTime()
+    $map = [ordered]@{}
+    # pwsh 7's ConvertFrom-Json turns an ISO string into a [datetime] (local kind) -- normalise every value to 'o' UTC text.
+    $norm = { param($v) if ($v -is [datetime]) { $v.ToUniversalTime().ToString('o') } else { "$v" } }
+    try {
+        $cur = & $Load
+        if ($cur -is [System.Collections.IDictionary]) { foreach ($k in $cur.Keys) { $map["$k"] = & $norm $cur[$k] } }
+        elseif ($cur) { foreach ($pp in $cur.PSObject.Properties) { $map[$pp.Name] = & $norm $pp.Value } }
+    } catch {
+        # Cannot prove an earlier absent read -> keep every row (never delete on one read); next run tries again.
+        Write-Warning ("  [engine] {0}: {1} absent Remove row(s) KEPT -- the first-absent stamps could not be read: {2}" -f $Scope, $rows.Count, $_.Exception.Message)
+        return @()
+    }
+    $orig = ($map | ConvertTo-Json -Depth 3 -Compress)
+    $prefix = "$Entity|"
+    $absentKeys = @{}; $confirmed = @(); $waiting = 0
+    foreach ($r in $rows) {
+        $rk = if (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue) { "$(Get-PimStoreRowKey -Base $Entity -Row $r)".Trim() } else { '' }
+        if (-not $rk) { $waiting++; continue }   # no key -> cannot stamp -> never deleted on one read
+        $k = "$prefix$rk"; $absentKeys[$k] = $true
+        $first = $null; if ($map.Contains($k)) { try { $first = ([datetime]::Parse("$($map[$k])", [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal)) } catch { $first = $null } }
+        if ($first -and ($now - $first).TotalMinutes -ge $MinMinutes) { $confirmed += $r; $map.Remove($k) }
+        else { if (-not $first) { $map[$k] = $now.ToString('o') }; $waiting++ }
+    }
+    foreach ($k in @($map.Keys)) {
+        $drop = ("$k".StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) -and -not $absentKeys.ContainsKey($k))
+        if (-not $drop) { try { $drop = ($now - [datetime]::Parse("$($map[$k])", [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal)).TotalDays -gt 7 } catch { $drop = $true } }
+        if ($drop) { $map.Remove($k) }
+    }
+    if (($map | ConvertTo-Json -Depth 3 -Compress) -ne $orig) {
+        try { & $Save $map } catch { Write-Warning ("  [engine] {0}: first-absent stamps not saved ({1}) -- the rows stay and are re-checked" -f $Scope, $_.Exception.Message); return @() }
+    }
+    if ($waiting) { Write-Host ("[engine] {0}: {1} Remove row(s) found nothing live -- KEPT until a read at least {2} min later confirms it (a just-made assignment can lag the live read)" -f $Scope, $waiting, $MinMinutes) -ForegroundColor DarkGray }
+    return $confirmed
 }
 
 function Complete-PimRemoveRows {
