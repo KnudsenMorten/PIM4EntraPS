@@ -31,6 +31,9 @@
       manager-reports.png          Reviews & controls > Reports
       manager-role-lookup.png      Access > Look up a role
       manager-settings.png         Audit & Settings > Settings
+      manager-free-vs-pro.png      the Free vs Pro page (the capture runs as the Community edition)
+      manager-admin-accounts.png   Access > Admin accounts & TAP
+      manager-settings-hybrid-ad.png  Audit & Settings > Settings > Hybrid Active Directory
 
 .PARAMETER OutDir
     Where the PNGs are written. Default: docs/img of this solution.

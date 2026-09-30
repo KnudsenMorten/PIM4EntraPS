@@ -33,6 +33,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   memberships lags the grant by a few seconds; the Activator now shows the group as active as soon as Microsoft confirms
   the activation.
 
+## v2.4.469 — Invardia PIM Manager branding; refreshed documentation and screenshots
+
+- **New look: the Invardia PIM Manager logo.** The Manager's header shows the logo of the edition it runs as —
+  **Community** without a licence, **Pro** with a valid licence — and the browser tab shows the Invardia shield. The
+  README, feature catalog and design document carry the logo, and the editions section shows both edition logos.
+- **Documentation brought up to date:** every screenshot recaptured (with the new header), plus three new ones — the
+  Free vs Pro page, Admin accounts and Settings → Hybrid Active Directory; the README describes the hybrid worker as it
+  is now (one service account per tier, server onboarding, your own naming, the live view), the MSP section lists
+  revoking sessions everywhere and removing an administrator from all, some or none of the managed tenants, and the
+  defaults list the alert-mail behaviour; the feature catalog adds the PIM Activator 1.6.135 improvements and how alerts
+  avoid noise.
+
 ## v2.4.468 — A stopped run no longer blocks the next one; safer wizards; the full reference template
 
 - **Fixed: after the platform stopped a running job execution, the next runs waited up to 15 minutes.** Only one
