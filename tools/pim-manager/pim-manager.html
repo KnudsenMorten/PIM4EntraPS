@@ -1406,6 +1406,7 @@
   <!-- =========== §79.8 My people (the PIM owner page): a department owner's people and when their access ends =========== -->
   <div id="ownerTab" class="tab-panel">
     <div id="ownerReviewsBody" style="flex:0 0 auto; padding:10px 18px 0; max-height:50vh; overflow:auto;"></div>   <!-- REQ-AR-2: the department reviews this person reviews -->
+    <div id="ownerAutoExtendBody" style="flex:0 0 auto; padding:10px 18px 0; max-height:50vh; overflow:auto;"></div>   <!-- §83: the permissions auto-extended in the coming month (Approve / Deny) -->
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="ownerBody">
       <div style="color:#57606a; font-size:12px;">Loading your people&hellip;</div>
     </div>
@@ -7951,11 +7952,97 @@
     const r = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate() + n));
     return r.toISOString().slice(0, 10);
   }
+  // ===================================================================
+  // §83 Upcoming auto-extensions (operator 2026-10-01: "i need to have a monthly report, where i can see the auto-extend
+  // upcoming, so i can quickly change it (approve,deny)"; "owners approve, silence means extend"). The permissions PIM will
+  // extend in the coming month, for the departments this person owns (an administrator: everyone). Deny = that permission
+  // ends on its date; no answer = extended. A person the access review kept or removed is decided there, not here.
+  // ===================================================================
+  let aeState = { data: null, all: false, msg: '', err: '', policy: null };
+  async function renderOwnerAutoExtend() {
+    const host = document.getElementById('ownerAutoExtendBody');
+    if (!host || !isServer) return;
+    try { aeState.data = await api('GET', '/api/autoextend/upcoming' + (aeState.all ? '?all=1' : '')); }
+    catch (e) { host.innerHTML = '<div style="color:#cf222e; font-size:12px;">Upcoming extensions could not be loaded: ' + escapeHtml(e.message || String(e)) + '</div>'; return; }
+    const d = aeState.data || {}, items = d.items || [];
+    const h = [];
+    h.push('<h2 style="margin:0 0 4px; font-size:18px;" id="aeTitle">Upcoming automatic extensions</h2>');
+    h.push('<div style="color:#57606a; font-size:13px; margin-bottom:8px;">These permissions end in the coming weeks. PIM extends each one automatically <b>' +
+      escapeHtml(String(d.leadDays || 14)) + ' days before it ends</b>. <b>If it should be extended, do nothing.</b> Choose <b>Deny</b> only when one should end on its date.' +
+      (d.defaultOn === false ? ' <span style="color:#9a6700;">Rows without an AutoExtend value are NOT extended (Settings).</span>' : '') + '</div>');
+    if (d.isAdmin) h.push('<label style="font-size:12px; display:block; margin-bottom:8px;"><input type="checkbox" id="aeAllChk"' + (aeState.all ? ' checked' : '') + '> Show every department (you are a PIM administrator)</label>');
+    if (aeState.msg) h.push('<div id="aeMsg" style="background:#dafbe1; color:#116329; padding:8px 10px; border-radius:6px; margin-bottom:8px;">' + escapeHtml(aeState.msg) + '</div>');
+    if (aeState.err) h.push('<div id="aeErr" style="background:#ffebe9; color:#cf222e; padding:8px 10px; border-radius:6px; margin-bottom:8px;">' + escapeHtml(aeState.err) + '</div>');
+    if (!items.length) {
+      h.push('<div style="color:#57606a; font-size:12px; margin-bottom:10px;" id="aeEmpty">' + (((d.departments || []).length || aeState.all) ?
+        'Nothing is due to be extended in the coming month.' : 'You are not an owner of any department.') +
+        (d.updatedUtc ? ' (checked ' + escapeHtml(String(d.updatedUtc).slice(0, 16).replace('T', ' ')) + ' UTC)' : '') + '</div>');
+    } else {
+      h.push('<table class="grid" id="aeTable" style="border-collapse:collapse; font-size:13px; margin-bottom:10px;"><thead><tr>' +
+        '<th style="text-align:left; padding:4px 8px;">Who</th><th style="text-align:left; padding:4px 8px;">Permission</th><th style="text-align:left; padding:4px 8px;">Department</th>' +
+        '<th style="text-align:left; padding:4px 8px;">Ends</th><th style="text-align:left; padding:4px 8px;">Extended on</th><th style="text-align:left; padding:4px 8px;">Decision</th></tr></thead><tbody>');
+      items.forEach((it, i) => {
+        const review = String(it.source || '').indexOf('review-') === 0;
+        let st, act;
+        if (review) { st = it.willExtend ? '<span style="color:#116329;">kept in the access review</span>' : '<span style="color:#cf222e;">removed in the access review</span>'; act = ''; }
+        else if (it.decision === 'deny') { st = '<span style="color:#cf222e;">denied by ' + escapeHtml(it.decidedBy || '') + '</span>' + (it.decisionReason ? '<div style="font-size:11px; color:#57606a;">' + escapeHtml(it.decisionReason) + '</div>' : ''); act = '<button class="btn" data-ae-clear="' + i + '">Undo</button>'; }
+        else if (!it.willExtend) { st = '<span style="color:#9a6700;">not extended (' + escapeHtml(it.reason || it.source || '') + ')</span>'; act = ''; }
+        else {
+          st = it.decision === 'approve' ? '<span style="color:#116329;">approved by ' + escapeHtml(it.decidedBy || '') + '</span>' : '<span style="color:#57606a;">will be extended</span>';
+          act = (it.decision === 'approve' ? '' : '<button class="btn" data-ae-approve="' + i + '" title="Confirm it -- it is extended either way">Approve</button> ') +
+                '<button class="btn" data-ae-deny="' + i + '" title="Let this permission end on its date">Deny</button>';
+        }
+        h.push('<tr data-ae-key="' + escapeHtml(it.key) + '"><td style="padding:4px 8px;"><b>' + escapeHtml(it.principal || '') + '</b></td>' +
+          '<td style="padding:4px 8px;">' + escapeHtml(it.target || '') + (it.type ? ' <span style="color:#57606a;">(' + escapeHtml(it.type) + ')</span>' : '') + '</td>' +
+          '<td style="padding:4px 8px;">' + escapeHtml(it.department || '') + '</td>' +
+          '<td style="padding:4px 8px;">' + escapeHtml(it.endDate || '') + '</td><td style="padding:4px 8px;">' + escapeHtml(it.extendOnUtc || '') + '</td>' +
+          '<td style="padding:4px 8px;">' + st + ' ' + act + '</td></tr>');
+      });
+      h.push('</tbody></table>');
+    }
+    if (typeof roleAtLeast === 'function' && roleAtLeast('SuperAdmin')) {
+      if (!aeState.policy) { try { aeState.policy = await api('GET', '/api/settings/autoextend'); } catch (_) { aeState.policy = null; } }
+      const pol = aeState.policy || { leadDays: d.leadDays || 14, defaultOn: d.defaultOn !== false };
+      h.push('<details id="aePolicy" style="font-size:12px; margin-bottom:10px;"><summary>Auto-extend policy (SuperAdmin)</summary><div style="padding:6px 0;">' +
+        'Extend <input type="number" id="aeLead" min="1" max="90" value="' + escapeHtml(String(pol.leadDays)) + '" style="width:60px;"> days before a permission ends. ' +
+        '<label><input type="checkbox" id="aeDefaultOn"' + (pol.defaultOn ? ' checked' : '') + '> Rows without an AutoExtend value are extended (default ON)</label> ' +
+        '<button class="btn" id="aePolicySave">Save</button></div></details>');
+    }
+    host.innerHTML = h.join('');
+    const chk = document.getElementById('aeAllChk'); if (chk) chk.onchange = () => { aeState.all = chk.checked; renderOwnerAutoExtend(); };
+    const decide = async (i, decision) => {
+      const it = items[i]; if (!it) return;
+      let reason = '';
+      if (decision === 'deny') {
+        reason = window.prompt('Why should ' + (it.principal || '') + ' -- ' + (it.target || '') + ' NOT be extended?\n\nIt then ends on ' + (it.endDate || 'its date') + '.', '');
+        if (reason === null) return;
+        if (!String(reason).trim()) { aeState.err = 'Not denied: please say why.'; aeState.msg = ''; renderOwnerAutoExtend(); return; }
+      }
+      aeState.msg = ''; aeState.err = '';
+      try { const r = await api('POST', '/api/autoextend/decide', { key: it.key, decision, reason }); aeState.msg = (it.principal || '') + ': ' + ((r && r.note) || decision); }
+      catch (e) { aeState.err = (it.principal || '') + ': ' + (e.message || String(e)); }
+      renderOwnerAutoExtend();
+    };
+    host.querySelectorAll('[data-ae-approve]').forEach(b => b.onclick = () => decide(+b.dataset.aeApprove, 'approve'));
+    host.querySelectorAll('[data-ae-deny]').forEach(b => b.onclick = () => decide(+b.dataset.aeDeny, 'deny'));
+    host.querySelectorAll('[data-ae-clear]').forEach(b => b.onclick = () => decide(+b.dataset.aeClear, 'clear'));
+    const ps = document.getElementById('aePolicySave');
+    if (ps) ps.onclick = async () => {
+      aeState.msg = ''; aeState.err = '';
+      try {
+        const r = await api('PUT', '/api/settings/autoextend', { leadDays: +(document.getElementById('aeLead').value || 0), defaultOn: !!document.getElementById('aeDefaultOn').checked });
+        aeState.policy = { leadDays: r.leadDays, defaultOn: r.defaultOn };
+        aeState.msg = 'Auto-extend policy saved: ' + r.leadDays + ' days before the end; rows without a value are ' + (r.defaultOn ? 'extended.' : 'NOT extended.');
+      } catch (e) { aeState.err = 'Policy not saved: ' + (e.message || String(e)); }
+      renderOwnerAutoExtend();
+    };
+  }
   async function renderOwnerPage() {
     const host = document.getElementById('ownerBody');
     if (!host) return;
     if (!isServer) { host.innerHTML = '<div style="color:#57606a;">My people needs the live Manager (it is not available in the static viewer).</div>'; return; }
     try { await renderReviewCampaigns('ownerReviewsBody', 'reviewer'); } catch (_) { }
+    try { await renderOwnerAutoExtend(); } catch (_) { }
     try {
       ownerState.data = await api('GET', '/api/owner/people' + (ownerState.all ? '?all=1' : ''));
     } catch (e) {
@@ -13679,6 +13766,19 @@
           { value: 'Remove', label: 'Remove -- TAKE THIS ACCESS AWAY, then clear the row' },
           { value: 'Update', label: 'Update -- keep it, and re-apply the duration/type' } ],
         validate: (v) => v === '' || /^(assign|remove|update)$/i.test(v)
+      };
+    }
+    // §83 (operator 2026-10-01): AutoExtend was a FREE-TEXT cell, and a blank one meant "never extend" -- a row created
+    // outside the wizards silently lost its access at expiry. A picker, and the blank option SAYS what blank does now
+    // (the Settings default, ON unless switched off). An access review Keep extends regardless; an owner Deny stops it.
+    if (PIM_DELEGATION_ENTITIES.indexOf(base) >= 0 && col === 'AutoExtend') {
+      return {
+        listKey: null, allowCustom: false, allowBlank: true,
+        blankLabel: 'Default (Settings -- ON) -- extended before it ends',
+        options: [
+          { value: 'TRUE', label: 'TRUE -- extend it before it ends' },
+          { value: 'FALSE', label: 'FALSE -- let it end (never extended)' } ],
+        validate: (v) => v === '' || /^(true|false|1|0|yes|no|y|n)$/i.test(v)
       };
     }
     // §71.5 -- the replication fields, as pickers with the same rule the wizard and the server use.

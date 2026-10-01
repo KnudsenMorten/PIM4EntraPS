@@ -6024,9 +6024,8 @@ primitives.
 - **Lifecycle calendar** — `Build-PimLifecycleCalendar` folds the primitives into
   one pass: `upcoming` (horizon, soonest-first), `escalations` (the stage due now
   per item, honouring a per-item notify log so reminders respect the cadence) and
-  `renewals` (AutoExtend items in the window). `Get-PimLifecycleRenewalChanges`
-  turns renewals into change-queue `Update` records (so renewal flows through the
-  normal commit/apply path); `Send-PimLifecycleEscalations` renders + sends the
+  `renewals` (AutoExtend items in the window -- counted only; the extension itself is the engine's,
+  see "Automatic extension" below); `Send-PimLifecycleEscalations` renders + sends the
   reminders via the existing templated mail, resolving symbolic
   `owner`/`manager`/`admin` recipients through a caller resolver (WhatIf-safe).
   The `reminders` and `escalations` scheduler jobs now drive these instead of the
@@ -6056,15 +6055,26 @@ primitives.
     only a legacy fallback, and an item that resolves to nobody goes to the Alerting recipients.
     `admin` is the Alerting recipients.
   - **One summary line per run** in the tick log: due / sent / skipped / seeded / failed.
-- **Access-review feedback loop** — `Get-PimAccessReviewDecision` routes each
-  assignment to `auto-extend` (the opt-in `AutoExtend` column — owners gate
-  skipped) or `owner-approval` (owners parsed pipe-joined from `Owners`, falling
-  back to `Department`). `New-PimReviewFeedbackRecord` records the outcome
-  (`Deny` → `suppressReAdd=$true`, no new expiry; `Approve` → new expiry) and
-  `Test-PimReviewSuppressesReAdd` is the engine guard that stops a denied user
-  being silently re-added on reconcile (latest decision wins) — the same intent
-  as the §13 tombstone layer, expressed as a pure decision the assignment step
-  can call.
+- **Automatic extension (2.4.472)** — `engine/_shared/PIM-AutoExtend.ps1`. When the engine
+  compares an existing time-limited assignment with its row (all six assignment kinds), it extends it
+  (Graph `adminExtend` / ARM `AdminExtend`, falling back to an update) once the live end is within the
+  lead time -- pim.Settings `AutoExtendPolicy.leadDays`, default **14** (it was a fixed 30) -- and the
+  decision says so. **Who decides**, first match wins: (1) the **access review** of the person's
+  department, when that department's review is enabled and the person has an outcome (admin
+  memberships only -- the review is per person): **Keep extends even when the row says FALSE**,
+  Remove (the account, or that membership) does not; (2) an **owner Deny** recorded for that row AND
+  that end date (pim.Settings `AutoExtendDecisions`; the next expiry is asked again); (3) the row's
+  `AutoExtend` TRUE/FALSE; (4) the **default** for a blank cell, `AutoExtendPolicy.defaultOn`,
+  **on** (until 2.4.472 a blank cell meant never). Without a readable store the safe defaults apply
+  (14 days, blank = extend). Each engine run records the time-limited assignments that end within the
+  lead time + 31 days, with that decision and their department (the person's, else the group's), in
+  pim.Settings `AutoExtendOutlook` (an extended row leaves it at once). The monthly
+  `autoextend-report` job (every 30 days, on by default) mails each department's owners their part --
+  "if it should be extended, do nothing" -- and the administrators the whole list (Alerting event
+  `expiring-access`). On **My people** an owner sees their departments (an administrator everyone) with
+  Approve / Deny / Undo (`/api/autoextend/upcoming`, `/api/autoextend/decide`: owner of the department or
+  Admin; Deny needs a reason; a person the review decided is changed in the review; compare-and-set,
+  audited), and a SuperAdmin sets the lead time and the default (`/api/settings/autoextend`).
 
 ### 17.10 Offboarding
 
@@ -6094,7 +6104,8 @@ off**: everything v1 enforced is on by default (same settings source), never opt
    active) and the row is then deleted from the store so nothing re-applies it; a removal that is
    held (bulk removals are held for review) or fails keeps its row. Switching a row between
    eligible and active replaces the old type, and a changed duration updates the schedule;
-   `AutoExtend` rows are extended before they expire.
+   time-limited rows are extended 14 days before they expire unless their row, an owner or an access
+   review says otherwise (see "Automatic extension").
 6. **Both assignment types are kept unless asked.** When a principal holds a schedule as both
    eligible and active and the row names only one type, the other type is **not** removed unless
    the `RemoveTypeLeftovers` setting is turned on (v1 kept both).
@@ -7435,7 +7446,7 @@ row goes into via a single "What kind of capability?" dropdown.
 
 All assignment files share: `AssignmentType` (Eligible/Active),
 `Action` (Assign/Remove), `UpdateExisting` (TRUE/FALSE),
-`AutoExtend` (TRUE/FALSE, default TRUE), `NumOfDaysWhenExpire`
+`AutoExtend` (TRUE/FALSE; blank = the Settings default, ON), `NumOfDaysWhenExpire`
 (90/180/365/Custom…, default 365), `Permanent` (TRUE/FALSE), and the inherited
 columns `CPPlatform / Plane / TierLevel / PermissionScope / SyncPlatform` (each
 with an override toggle).
