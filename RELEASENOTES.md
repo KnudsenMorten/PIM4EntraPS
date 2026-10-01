@@ -33,6 +33,24 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   memberships lags the grant by a few seconds; the Activator now shows the group as active as soon as Microsoft confirms
   the activation.
 
+## v2.4.475 — Lower running cost for managed tenants; Pro features in their own folders
+
+- **Fixed: a managed tenant re-applied an unchanged bundle on every pull.** Each scheduled pull re-wrote the same
+  rows and ran a full engine pass that changed nothing. With a short pull interval that cost a container running
+  most of the time. A due pull now compares the managing tenant's signed bundle, its central kill switch and this
+  tenant's own pull settings with the last clean apply, and when nothing changed it records "unchanged" and stops.
+  A central change still applies on the next due pull. Run now, a redeploy, a retry after a failure and a daily
+  safety pass always run in full.
+- **Fixed: the scheduler reconciled the same scopes twice in one run.** When a change trigger had just reconciled a
+  set of scopes cleanly, the scheduled delta jobs for the same scopes ran again minutes later. They are now recorded
+  as covered and run on their next slot. Drift correction keeps its cadence, and the daily full reconcile is
+  unchanged.
+- **Internal restructuring, no change in behaviour.** The code behind the Pro features (multi-tenant, discovery,
+  coverage, access reviews, PIM for Active Directory, the tier-impact report and delegated portal administrators) now
+  lives in its own folders next to the shared engine code. The Community code loads each of them only when present,
+  and an automated check proves on every build that a copy without them still runs. This prepares the separate
+  Community and Pro payloads.
+
 ## v2.4.474 — Access map shows the path; change many rows at once
 
 - **Fixed: selecting a group on the Access map now shows its path, with the lines.** Selecting a direct group or a

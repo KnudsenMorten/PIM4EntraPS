@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     §31.3 Phase-2 -- the SCENARIO-BOUND engine runner live wrapper. Thin
-    orchestrator over the PURE core in engine/_shared/PIM-Downlink.ps1
+    orchestrator over the PURE core in engine/msp/PIM-Downlink.ps1
     (Invoke-PimScenarioDeploy / Get-PimScenarioRunPlan).
 
 .DESCRIPTION
@@ -113,7 +113,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
-. (Join-Path $shared 'PIM-Baseline.ps1')
+if (Test-Path -LiteralPath (Join-Path $shared '..\msp\PIM-Baseline.ps1')) { . (Join-Path $shared '..\msp\PIM-Baseline.ps1') }   # §84 Pro (MSP): loaded only when present
 # BUG-79: the vendored platform ring core, for the same reason Invoke-PimDownlinkSync.ps1 loads it.
 # ⚠️ Without this line Get-PimTemplateRingPlan is not merely uncalled, it is UNDEFINED in this
 # process -- which is BUG-29's original shape verbatim ("the gate was not merely called by nobody,

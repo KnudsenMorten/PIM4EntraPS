@@ -584,7 +584,7 @@ function Invoke-PimCsvImportCheck {
     if (-not (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)) { . (Join-Path $shared 'PIM-SqlStore.ps1') }
     if (-not (Get-Command Get-PimAdminMailRecipientPlan -ErrorAction SilentlyContinue)) { . (Join-Path $shared 'PIM-Rest.ps1') }
     . (Join-Path $shared 'PIM-Naming.ps1')
-    . (Join-Path $shared 'PIM-Downlink.ps1')
+    if (Test-Path -LiteralPath (Join-Path $shared '..\msp\PIM-Downlink.ps1')) { . (Join-Path $shared '..\msp\PIM-Downlink.ps1') }   # §84 Pro: loaded only when present
     . (Join-Path $shared 'PIM-PolicyTemplateStore.ps1')
     . (Join-Path $solRoot 'tools\pim-manager\_validator.ps1')
     foreach ($need in 'Invoke-PimPreflightValidation','Get-PimReplicateMode','Get-PimReplicationKindForEntity','Get-PimReplicationEntities',

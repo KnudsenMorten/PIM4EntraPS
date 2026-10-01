@@ -6,7 +6,7 @@
 # always has DateSafe loaded; an offline test that dot-sources only this file did not, so load it
 # here when it is missing rather than degrade.
 if (-not (Get-Command Get-PimAdminAutoDisableDate -ErrorAction SilentlyContinue)) {
-    $__dsPath = Join-Path $PSScriptRoot 'PIM-DateSafe.ps1'
+    $__dsPath = Join-Path $PSScriptRoot '..\_shared\PIM-DateSafe.ps1'
     if (Test-Path -LiteralPath $__dsPath) { . $__dsPath }
 }
 
@@ -58,7 +58,7 @@ Set-StrictMode -Off
 # resolves Invoke-PimManagedDownlink / Invoke-PimScenarioDeploy via Get-Command.)
 if ($PSScriptRoot) {
     if (-not (Get-Command Resolve-PimScenarioContext -ErrorAction SilentlyContinue)) {
-        $__sp = Join-Path $PSScriptRoot 'PIM-ScenarioProfile.ps1'
+        $__sp = Join-Path $PSScriptRoot '..\_shared\PIM-ScenarioProfile.ps1'
         if (Test-Path -LiteralPath $__sp) { . $__sp }
     }
     if (-not (Get-Command Test-PimBaselineDoc -ErrorAction SilentlyContinue)) {
@@ -69,7 +69,7 @@ if ($PSScriptRoot) {
     # slave's desired store. The PURE functions above need none of this, so the load
     # stays lazy-by-availability like the two above it.
     if (-not (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
-        $__ss = Join-Path $PSScriptRoot 'PIM-SqlStore.ps1'
+        $__ss = Join-Path $PSScriptRoot '..\_shared\PIM-SqlStore.ps1'
         if (Test-Path -LiteralPath $__ss) { . $__ss }
     }
 }

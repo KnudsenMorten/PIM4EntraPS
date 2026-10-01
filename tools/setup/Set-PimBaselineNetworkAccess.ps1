@@ -11,7 +11,7 @@
     replaces all of it with what DESIGN 13.7 always described:
 
       TRUST  = the RSA signature. Every pull verifies it against the public certificate embedded in the product and
-               REFUSES a bundle that does not verify (engine/_shared/PIM-Baseline.ps1 Test-PimBaselineDoc).
+               REFUSES a bundle that does not verify (engine/msp/PIM-Baseline.ps1 Test-PimBaselineDoc).
       ACCESS = the network. The container allows anonymous read of BLOBS only (no listing), the account's firewall
                default action is Deny, and one allow rule names each reader:
                  * a VIRTUAL NETWORK RULE for the managed tenant's Container Apps subnet -- the default. It may be in
@@ -62,7 +62,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-. (Join-Path $solRoot 'engine\_shared\PIM-MspBuild.ps1')
+. (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 

@@ -92,7 +92,7 @@ If ($global:PIM_UseGraphSdk) {
 # embedded legacy certificate; product/kind; expiry) and the anti-rollback floor Get-/Set-PimBaselineApplied, which
 # lives in this tenant's pim.Settings (SEC-24 -- never a state file). The PULL itself is the downlink job
 # (PIM-Downlink.ps1), which calls these; Get-PimBaselineBundle (a direct HTTPS pull) has no caller in v2.
-. (Join-Path $PSScriptRoot 'PIM-Baseline.ps1')
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\msp\PIM-Baseline.ps1')) { . (Join-Path $PSScriptRoot '..\msp\PIM-Baseline.ps1') }   # §84 Pro: loaded only when present
 
 # MSP shared substrate + multiple sync models + signed-baseline kill-switch (§ 4) --
 # Product-keyed registry (TenantManager reuse), Resolve-PimSyncModel (don't force one),
@@ -142,22 +142,22 @@ If ($global:PIM_UseGraphSdk) {
 
 # Azure scope auto-discovery + reconcile -- discovered MGs/subs/RGs vs existing
 # definitions -> create/rename-on-move/orphan plan, feeding the change queue.
-. (Join-Path $PSScriptRoot 'PIM-AzureDiscovery.ps1')
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\discovery\PIM-AzureDiscovery.ps1')) { . (Join-Path $PSScriptRoot '..\discovery\PIM-AzureDiscovery.ps1') }   # §84 Pro: loaded only when present
 
 # Power Platform environment auto-discovery + reconcile -- discovered Power Apps /
 # Power Automate / Dataverse environments vs existing definitions -> create (propose,
 # never auto-map by default) / rename / orphan plan, feeding the change queue.
-. (Join-Path $PSScriptRoot 'PIM-PowerPlatformDiscovery.ps1')
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\discovery\PIM-PowerPlatformDiscovery.ps1')) { . (Join-Path $PSScriptRoot '..\discovery\PIM-PowerPlatformDiscovery.ps1') }   # §84 Pro: loaded only when present
 
 # Power BI workspace + service/role discovery, auto-map gate (never auto-map a
 # principal), and delta refinement (surface only not-yet-handled items). REST-only.
-. (Join-Path $PSScriptRoot 'PIM-Discovery.ps1')
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\discovery\PIM-Discovery.ps1')) { . (Join-Path $PSScriptRoot '..\discovery\PIM-Discovery.ps1') }   # §84 Pro: loaded only when present
 
 # Access Review OVERVIEW (read-only data layer) -- enumerate Entra access reviews
 # relevant to the PIM estate -> normalized, table-ready rows for the Manager GUI tab
 # (GUI queued separately). List/get only, REST-only, no decisions. PURE normalizer
 # + thin live wrapper. Needs AccessReview.Read.All (graceful no-op without it).
-. (Join-Path $PSScriptRoot 'PIM-AccessReviews.ps1')
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\access-reviews\PIM-AccessReviews.ps1')) { . (Join-Path $PSScriptRoot '..\access-reviews\PIM-AccessReviews.ps1') }   # §84 Pro: loaded only when present
 
 # Connector role-definition import -- connector live roles -> permission
 # definitions (manual super-admin import, or auto by service-type+tier+level).

@@ -42,8 +42,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)
-. (Join-Path $solRoot 'engine\_shared\PIM-Baseline.ps1')
-. (Join-Path $solRoot 'engine\_shared\PIM-BaselinePublish.ps1')
+. (Join-Path $solRoot 'engine\msp\PIM-Baseline.ps1')
+. (Join-Path $solRoot 'engine\msp\PIM-BaselinePublish.ps1')
 . (Join-Path $here '_PimAz.ps1')                 # the guarded az shadow (an az WARNING on stderr must not abort)
 . (Join-Path $here '_PimUpdateRing.ps1')          # New-PimSubscriptionArmInvoker (tenant-checked ARM caller)
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
@@ -133,7 +133,7 @@ Write-Host '  A managed tenant REFUSES a bundle signed by a key it does not pin.
 
 # ---- 4. §71.40 -- pin it on this managing tenant's OWN Manager (merge, never replace; read back) ---------------------------------
 if ("$PinOnManagerApp".Trim()) {
-    . (Join-Path $solRoot 'engine\_shared\PIM-DownlinkManager.ps1')
+    . (Join-Path $solRoot 'engine\msp\PIM-DownlinkManager.ps1')
     Step "pin the key id on the Manager $PinOnManagerApp (PIM_BaselineTrustedKeys, merged)"
     $cur = "$(@(az containerapp show --subscription $SubscriptionId -g $ResourceGroup -n $PinOnManagerApp --query "properties.template.containers[0].env[?name=='PIM_BaselineTrustedKeys'].value" -o tsv 2>$null) -join ',')".Trim()
     $merge = Get-PimManagerBaselineEnvPlan -TrustedKeys @($cur, $keyId)

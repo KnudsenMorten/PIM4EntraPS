@@ -99,8 +99,8 @@ if ($UseManagedIdentity -or "$env:PIM_UseManagedIdentity".Trim() -eq '1') { $glo
 . "$shared\PIM-FailureCatalog.ps1"    # classified item failures (cause/remedy/auto-fix), persisted in SQL
 . "$shared\PIM-EngineCore.ps1"        # NEW REST+SQL engine (diff + providers)
 . "$shared\PIM-DisableGuard.ps1"      # account-disable circuit breaker (incident 2026-06-15)
-. "$shared\PIM-HybridAd.ps1"          # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
-. "$shared\PIM-HybridAdGroups.ps1"    # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)
+if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAd.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAd.ps1" }   # §84 Pro: loaded only when present          # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
+if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1" }   # §84 Pro: loaded only when present    # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)
 . "$shared\PIM-EngineProviders.ps1"
 # REQ-U wave 2: the workload role catalogs (discovery-defender / discovery-intune -> Invoke-PimWorkloadRoleDiscoveryJob). The
 # providers file dot-sources it too; named here so the tick's gated capability is visibly loaded (Test-PimScheduler).
@@ -120,8 +120,9 @@ if ($UseManagedIdentity -or "$env:PIM_UseManagedIdentity".Trim() -eq '1') { $glo
 # that no v2 engine code reads, and Build-PimContext no longer requires it.
 . "$shared\PIM-ContextBuilder.ps1"
 . "$shared\PIM-PermissionWizard.ps1"  # Azure scope derivation/depth + group naming (used by the Azure reconcile planner)
-. "$shared\PIM-AzureDiscovery.ps1"    # Get-PimAzureReconcilePlan / ConvertTo-PimReconcileQueueChanges
-. "$shared\PIM-Discovery.ps1"         # discovery enumerators + sweep (Invoke-PimDiscoveryJobSweep)
+# Pro (discovery): loaded only when present -- Get-PimAzureReconcilePlan / ConvertTo-PimReconcileQueueChanges
+if (Test-Path -LiteralPath "$shared\..\discovery\PIM-AzureDiscovery.ps1") { . "$shared\..\discovery\PIM-AzureDiscovery.ps1" }
+if (Test-Path -LiteralPath "$shared\..\discovery\PIM-Discovery.ps1") { . "$shared\..\discovery\PIM-Discovery.ps1" }   # §84 Pro: loaded only when present         # discovery enumerators + sweep (Invoke-PimDiscoveryJobSweep)
 . "$shared\PIM-License.ps1"           # offline Core/Pro edition model (Get-PimEdition)
 . "$shared\PIM-FeatureCatalog.ps1"    # feature catalog + gates (Test-PimFeatureAvailable) -- s29/s30
 . "$shared\PIM-AlertFeed.ps1"         # ALERT-01: recorded-send proof + the shared SQL feed adapter
@@ -153,14 +154,14 @@ if ($UseManagedIdentity -or "$env:PIM_UseManagedIdentity".Trim() -eq '1') { $glo
 . "$shared\PIM-DriftSnapshot.ps1"
 # REQ-I + REQ-U (Coverage & gaps page): job 'coverage' compares the tenant caches with pim.Rows here and stores
 # pim.TenantCache kind 'coverage-report'; the Manager only reads that row.
-. "$shared\PIM-Coverage.ps1"
+if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\..\coverage\PIM-Coverage.ps1" }   # §84 Pro: loaded only when present
 # §79.1: job 'target-check' -- do the Azure scopes and roles the delegation rows point at still exist? Reports only.
 . "$shared\PIM-TargetCheck.ps1"
 # §79.2: job 'pending-check' -- staged changes (the shared store, §79.13) and queued actions nobody committed.
 . "$shared\PIM-SharedPending.ps1"
 . "$shared\PIM-PendingCheck.ps1"
 # REQ-AR-2: job 'access-review-cycle' -- the per-department access review campaigns.
-. "$shared\PIM-AccessReviewCycle.ps1"
+if (Test-Path -LiteralPath "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1") { . "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1" }   # §84 Pro: loaded only when present
 # REQ-AR-2 remove-on-undecided: an unanswered review whose rule removes undecided people raises the offboard approval
 # request (Add-PimApprovalRequest / Get-PimApprovalRequests, pim.Settings through Get-/Set-PimSetting wired below).
 . "$shared\PIM-ApprovalGate.ps1"

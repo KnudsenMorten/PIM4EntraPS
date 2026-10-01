@@ -1376,7 +1376,7 @@ controller line-of-sight and no `ActiveDirectory` module**. So on-prem AD writes
 **cannot** run from the cloud engine; they must run on a **hybrid worker** (a
 domain-joined Windows host with RSAT-AD and an explicit high-priv credential or a
 gMSA). The model splits this cleanly into a pure planner and an execution seam
-(`engine/_shared/PIM-HybridAd.ps1`):
+(`engine/hybrid-ad/PIM-HybridAd.ps1`):
 
 **Planner (pure, offline-unit-testable, runs anywhere — cloud engine included).**
 `Get-PimHybridAdPlan` reads the `Account-Definitions-Admins` rows whose
@@ -1473,7 +1473,7 @@ review schedule per opted-in group), the **overview** is a **read-only data/prov
 layer** that enumerates the access reviews relevant to the PIM estate and returns a
 **normalized, table-ready list** for the Manager's Access Reviews GUI tab (the tab
 itself is queued separately — this layer renders nothing). It lives in
-`engine/_shared/PIM-AccessReviews.ps1` and is **list/get only** — it never records or
+`engine/access-reviews/PIM-AccessReviews.ps1` and is **list/get only** — it never records or
 applies a review decision, never POSTs/PATCHes/DELETEs. It is REST-only via
 `Invoke-PimGraph` (cert app-only; honours the `$global:PIM_UseGraphSdk` opt-in inside
 PIM-Rest), and needs **`AccessReview.Read.All`** on the engine SPN — without it the
@@ -1590,7 +1590,7 @@ wiring (no parallel review system):
 Both endpoints **degrade gracefully** (a 403 for the missing `AccessReview.ReadWrite.All` →
 `{ok:false,permissionMissing:true}`, HTTP 200) and **fall back to the seeded preview offline** so
 the controls are never dead. Evidence export (already shipped) supplies the auditor artefact —
-who attested what, when. Pure cores live in `engine/_shared/PIM-AccessReviews.ps1`, PS 5.1-safe,
+who attested what, when. Pure cores live in `engine/access-reviews/PIM-AccessReviews.ps1`, PS 5.1-safe,
 covered by `tests/Test-PimAccessReviews.ps1` (114 offline assertions) and the GUI↔engine
 alignment check. The hosted/SQL Manager GUI smoke is the live gate.
 
@@ -2666,6 +2666,14 @@ Key semantics:
 | **Connectors** (workload role discover/apply) | invoked *by* the engine runs | in-process via PIM-Rest (not a separate scheduler) |
 | Azure / Entra / Power BI discovery | scheduled (daily) | scheduler tick |
 | **Update** (fetch approved version → build → schema → roll → verify → rollback) | **nightly, per environment, by release ring** | **NOT the engine/scheduler.** A separate Container Apps Job (`ca-pim-update` by default) rolls the environment over ARM; a host-side `Invoke-PimUpdate.ps1` run obeys the same ring. See §11.6.0. |
+
+**One clean pass per scope per tick (2026-10-01).** A tick can reconcile the same scopes twice: a commit
+trigger runs first, and the scheduled Delta jobs that are due a few minutes later cover the same scopes. A
+scheduled Delta whose scopes **all** had a clean pass earlier in the same tick (succeeded, nothing held or
+waiting, not a dry run) is therefore recorded as completed ("covered", naming the run that covered it) and moved
+to its next slot without running again. A scope that the covering run did not reach, or reached with items held,
+waiting or failed, still runs on its own job. The daily Full reconcile is never skipped this way. Drift correction
+keeps every job's cadence, because the covering pass read the live tenant moments earlier.
 
 **Why not the alternatives (each breaks a constraint):**
 - **Azure Functions** — reaching the *private* SQL needs VNet integration = the
@@ -4217,7 +4225,7 @@ state). Both Basic (~$5/mo each).
   job signs with (§13.7), or the legacy machine-store certificate `CN=PIM4EntraPS-Baseline`;
   `CN=PIM4EntraPS-Licensing` signs licences (Pro entitlement).
 - **Producer: the cloud publish job** (`publish-job-entry.ps1`, deployed by
-  `Deploy-PimBaselinePublishJob.ps1`; logic in `engine/_shared/PIM-BaselinePublish.ps1`,
+  `Deploy-PimBaselinePublishJob.ps1`; logic in `engine/msp/PIM-BaselinePublish.ps1`,
   `Invoke-PimBaselinePublishRun`). It builds the payload with the one producer function
   `Get-PimBaselineBundlePayload`, signs it through Key Vault, uploads it and reads it back. A
   projection table that cannot be read (anything other than genuinely absent) **refuses the
@@ -4235,8 +4243,8 @@ state). Both Basic (~$5/mo each).
   CA, attribution and revocation.
 - **Consumer: the scheduled pull job** (`downlink-job-entry.ps1`, deployed by
   `Deploy-PimDownlinkJob.ps1`) → `setup/Invoke-PimScenarioRun.ps1` → `Invoke-PimManagedDownlink`
-  (`engine/_shared/PIM-Downlink.ps1`). It pulls and verifies the signed bundle
-  (`engine/_shared/PIM-Baseline.ps1`), plans with the tenant's own local ring, target and class
+  (`engine/msp/PIM-Downlink.ps1`). It pulls and verifies the signed bundle
+  (`engine/msp/PIM-Baseline.ps1`), plans with the tenant's own local ring, target and class
   vetoes, and applies the synced rows into the local store; the engine tick then creates the
   accounts, groups and assignments in the tenant.
 - `engine/_shared/PIM-License.ps1` — offline signed-document verification helper
@@ -4382,7 +4390,7 @@ receives, and the readiness check requires a delivery address for every Entra ad
 
 **One-shot MSP build.** `tools/setup/Invoke-PimMspBuild.ps1` builds a managing tenant or a managed tenant from a
 machine-local file of ids and names (a file carrying anything resembling a credential is refused). The pure planner
-(`engine/_shared/PIM-MspBuild.ps1`) orders the steps:
+(`engine/msp/PIM-MspBuild.ps1`) orders the steps:
 - **Both roles:** the tenant vault grant; hosting (`Invoke-PimDeployAll`, managed identity only); the SQL admin group,
   with the scheduler and Manager identities; hosting access (the Engine and read-only Manager Graph sets, and the Manager's
   right to start the scheduler); the scenario.
@@ -4439,12 +4447,12 @@ the fields. The validator refuses a `Replicate` value that is not `No`/`Yes`/`Fo
   the row last changed. The ring column reads "Ring (managing tenant's copy -- each managed tenant's own ring decides)".
 - Writes are SuperAdmin-only and audited (`msp.tenant.register` / `msp.tenant.update`, refusals too), and they request a
   publish, because the tags travel in the signed bundle. They go through the one writer the setup script
-  `Register-PimManagedTenant.ps1` also uses (`Set-PimManagedTenantRegistration`, `engine/_shared/PIM-MspRegistry.ps1`).
+  `Register-PimManagedTenant.ps1` also uses (`Set-PimManagedTenantRegistration`, `engine/msp/PIM-MspRegistry.ps1`).
   It validates the values, runs the parameterised MERGE and reads the row back.
 - The writer refuses the managing tenant's own tenant (and any registration when the managing tenant's tenant id is unknown), a tenant
   that is already registered, a name another tenant carries, and a tag a Target reserves (`all`, `none`, `tag:…`,
   `tenant:…`). It never deletes: disabling keeps the row.
-- *Replication overview* (`GET /api/msp/replication/overview`, `engine/_shared/PIM-ReplicationOverview.ps1`) lists every
+- *Replication overview* (`GET /api/msp/replication/overview`, `engine/msp/PIM-ReplicationOverview.ps1`) lists every
   replicable row, grouped by kind: admins (registry and definitions), memberships, direct groups, permission groups,
   nestings, Entra role bindings and resource bindings.
 - Each row shows its Replicate / Ring / Target in the plain picker words, the tenants it reaches and, for a row that
@@ -4509,6 +4517,16 @@ A skip logs exactly one `[cadence] SKIPPED: <code>` line and exits 0 without loa
 steps read that marker, so a skip is never mistaken for a run. A run first **claims** the start with a
 compare-and-set on the last-run row, so two overlapping executions cannot both run. It then records the end
 (`Complete-PimJobCadenceRun`); a failure to record is logged, and never changes the job's own exit code.
+
+**A due pull compares before it applies (2026-10-01).** A pull that is due, after the licence check, fingerprints
+what decides its outcome: the bundle's exact bytes, the central-kill document, the tenant's ring, admin naming,
+retraction opt-in, trusted signing keys, engine scope and mode, and the product version. When the fingerprint equals
+the one stored after the last **clean** apply (`pim.Settings['DownlinkApplied']`), the pull logs `UNCHANGED`, records
+a successful run with that reason and exits, without projecting rows or running the engine. Only a `due` trigger can
+skip this way. Run now, a redeploy, the first run, retries, an unreadable store, and the first pull 24 hours after the
+last full apply (the daily safety pass) always run in full, and so does any pull whose bundle or kill document could
+not be read. The fingerprint is stored only after a clean apply; a held apply clears it. A central change therefore
+applies on the next due trigger, while an unchanged trigger costs a container start and two small reads.
 
 **Defaults — no silent change of behaviour.** Nothing stored means **daily (1440 minutes), enabled**: the cadence
 the jobs always had. The one change is the time of day. The deploy stamp makes a freshly deployed job run once on
@@ -4872,7 +4890,7 @@ it supports, `pull-baseline`, as the managed tenant's scheduled pull job.
 Both layers are verified with the same keys as the bundle (a pinned signing key, or the
 **embedded public baseline cert**; no secret at the receiver), reusing the baseline crypto
 (`Test-PimBaselineDoc`, `-AllowedKind`). **The trust state is SQL, in the managed tenant's own
-store, never a file** (v2.4.370; `engine/_shared/PIM-Baseline.ps1`):
+store, never a file** (v2.4.370; `engine/msp/PIM-Baseline.ps1`):
 
 | `pim.Settings` key | Holds | Written by |
 |---|---|---|
@@ -5042,7 +5060,7 @@ README and `FEATURES.md` describe **two** of the three axes, deliberately:
   2.4.368, no approved version ⇒ no move, a held environment does not move.
 - **the replication ring** (axis 3) — which managed tenants a definition row reaches. Stated as the
   full predicate, never as ring alone: `Replicate != No` **AND** `tenant.Ring <= row.Ring` (v2.4.388) **AND**
-  `Target` matches (`Test-PimReplicationReach`, `engine/_shared/PIM-Downlink.ps1`) — *ring AND
+  `Target` matches (`Test-PimReplicationReach`, `engine/msp/PIM-Downlink.ps1`) — *ring AND
   target, never OR* — plus target semantics (blank ⇒ every admitted tenant; a named tenant; tags
   OR-ed across a list and AND-ed within one `+` term; `none` ⇒ never leaves the managing tenant), tenant tags
   travelling **inside the signed bundle** so a tenant cannot re-tag itself into scope, the
@@ -5064,7 +5082,7 @@ stating that the two are set separately and neither implies the other.
 
 ### 13.20 Per-admin sync to managed tenants + the tenant mode badge — built
 
-**The managing tenant's admin row decides whether an admin is synced** (`engine/_shared/PIM-Downlink.ps1`).
+**The managing tenant's admin row decides whether an admin is synced** (`engine/msp/PIM-Downlink.ps1`).
 On the managing tenant, `Get-PimCentralAdminsFromDefinitions` reads the managing tenant's own
 `Account-Definitions-Admins` rows and publishes as central admins only those with
 `ManagementMode = msp`; `Ring` selects which managed tenants may receive the admin and `Target`
@@ -5428,7 +5446,7 @@ naming convention (e.g. `ORG-*`).
 - **Code:** `ConvertTo-PimDepartmentImportPrefix` / `Test-PimDepartmentImportMatch` /
   `ConvertTo-PimDepartmentName` / `Get-PimEntraDepartmentImportPlan` (pure) +
   `Get-PimLiveEntraDepartmentGroups` / `Resolve-PimGroupOwnerUpn` / `Import-PimEntraDepartments`
-  (live) in `engine/_shared/PIM-Discovery.ps1`. (REST/cert, PS 5.1-safe.)
+  (live) in `engine/discovery/PIM-Discovery.ps1`. (REST/cert, PS 5.1-safe.)
 
 ### 15.5b Approver/owner import from CSV + department rename (SHIPPED 2026-06-15)
 
@@ -5452,7 +5470,7 @@ a department.
   created/updated/renamed summary. Surfaced in Settings → Departments as an **Import approvers
   from CSV** file picker + button.
 - **Code:** `ConvertFrom-PimApproverCsv` / `Get-PimApproverImportPlan` (pure) +
-  `Import-PimApproversFromCsv` (orchestration) in `engine/_shared/PIM-Discovery.ps1`.
+  `Import-PimApproversFromCsv` (orchestration) in `engine/discovery/PIM-Discovery.ps1`.
 
 ### 15.5c AD OU placement surfaced in Settings (SHIPPED 2026-06-15)
 
@@ -6218,7 +6236,7 @@ has **Re-add**.
   `PIM-Definitions-AU` row under its display name; an AU PIM already defines (by name or tag) is known.
 - **API.** `GET /api/discovery-inbox`; `POST /api/discovery-decisions` with `create`, `ignore` or `readd` and the item keys
   (Admin role and a Pro licence; audited).
-**REST engine discovery layer (`engine/_shared/PIM-Discovery.ps1`).** The new
+**REST engine discovery layer (`engine/discovery/PIM-Discovery.ps1`).** The new
 module-free engine carries its own discovery, alongside the Azure scope reconcile
 planner (`PIM-AzureDiscovery.ps1`). It splits cleanly into pure planners (offline,
 unit-tested) and thin REST enumerators (the only side-effecting parts):
@@ -6956,7 +6974,7 @@ conformance, Support, grid snapshot) are tracked in the backlog.
 **Tier-impact report — who can reach Tier-0 / Tier-1 (§23 / ROADMAP #24).** A
 fourth Reports mode answers the question a security review opens with: *which users
 can reach a Tier-0 / Tier-1 target — including reach inherited through nested
-groups?* It is a **pure, offline-testable** library, `engine/_shared/PIM-TierImpact.ps1`,
+groups?* It is a **pure, offline-testable** library, `engine/tier-report/PIM-TierImpact.ps1`,
 over the *same* node/edge model and the *same* column-oriented reach semantics as
 `Get-PimAccessGraphModel` / `PIM-MapRisk.ps1` (it reuses the MapRisk
 `ConvertTo-PimMapReach` / `Get-PimMapNodeField` / `Get-PimMapColumn` helpers when
@@ -8193,6 +8211,26 @@ the same paragraph as the split, deliberately. The call to action for the licens
 single mail address (`mok@mortenknudsen.net`) and nothing else: no phone number, no company
 internal domain, no tenant name. The sanitization gate accepts that address; it is the one
 deliberate contact detail in the public set.
+
+#### 19a.2 Where the Pro code lives (2026-10-01)
+
+One codebase, two payloads: the Community edition is the code base, and the Pro features are
+separate files that the Community code loads **only when present**. The engine's shared libraries
+stay in `engine/_shared`; each Pro feature has its own folder next to it:
+
+| Folder | Pro feature |
+|---|---|
+| `engine/msp` | multi-tenant: downlink, signed baseline publish, managed-tenant registry, enrolment, replication overview |
+| `engine/discovery` | discovery of Azure, Power Platform and directory resources, and the discovery inbox |
+| `engine/coverage` | coverage report |
+| `engine/access-reviews` | access-review cycles and decisions |
+| `engine/hybrid-ad` | PIM for Active Directory groups |
+| `engine/tier-report` | tier-impact report |
+| `engine/portal-admins` | delegated portal administrators |
+
+A Community copy without those folders still loads the engine, the scheduler and the module; a
+queued Pro action there ends as "part of the Pro edition, not installed" instead of failing. The
+offline payload gate builds exactly that copy on every test run.
 
 ---
 

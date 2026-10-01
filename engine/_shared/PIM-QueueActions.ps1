@@ -590,7 +590,8 @@ function Invoke-PimQueueAction {
                 $d = "$($p.definitionId)".Trim(); $i = "$($p.instanceId)".Trim(); $x = "$($p.decisionId)".Trim()
                 $outcome = "$($p.outcome)".Trim(); $just = "$($p.justification)".Trim()
                 if (-not $d -or -not $i -or -not $x -or -not $outcome -or -not $just) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='access-review-decision needs definitionId, instanceId, decisionId, outcome and justification' } }
-                if (-not (Get-Command New-PimReviewDecisionPatch -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-AccessReviews.ps1') }
+                # Pro (access reviews): loaded only when present; without it the action is terminal
+                if (-not (Get-Command New-PimReviewDecisionPatch -ErrorAction SilentlyContinue)) { $arLib = Join-Path $PSScriptRoot '..\access-reviews\PIM-AccessReviews.ps1'; if (Test-Path -LiteralPath $arLib) { . $arLib } else { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='access reviews are part of the Pro edition, and its code is not installed in this environment' } } }
                 $patch = New-PimReviewDecisionPatch -Outcome $outcome -Justification $just -NowUtc ([datetime]::UtcNow) -DecidedBy "$($p.decidedBy)"
                 $want = "$($patch.body.decision)"
                 $path = "/identityGovernance/accessReviews/definitions/$d/instances/$i/decisions/$x"
@@ -606,7 +607,8 @@ function Invoke-PimQueueAction {
             'access-review-reviewers' {
                 $d = "$($p.definitionId)".Trim(); $rv = @(@($p.reviewers) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
                 if (-not $d -or -not $rv.Count) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='access-review-reviewers needs a definitionId and at least one reviewer' } }
-                if (-not (Get-Command New-PimReviewerAssignmentPatch -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-AccessReviews.ps1') }
+                # Pro (access reviews): loaded only when present; without it the action is terminal
+                if (-not (Get-Command New-PimReviewerAssignmentPatch -ErrorAction SilentlyContinue)) { $arLib = Join-Path $PSScriptRoot '..\access-reviews\PIM-AccessReviews.ps1'; if (Test-Path -LiteralPath $arLib) { . $arLib } else { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='access reviews are part of the Pro edition, and its code is not installed in this environment' } } }
                 $patch = New-PimReviewerAssignmentPatch -Reviewers $rv -NowUtc ([datetime]::UtcNow) -AssignedBy "$($p.assignedBy)"
                 $path = "/identityGovernance/accessReviews/definitions/$d"
                 # PUT with the WHOLE definition: PATCH is 404 on a definition (verified live 2026-09-25; live E2E 9b stayed

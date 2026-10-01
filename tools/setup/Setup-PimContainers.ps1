@@ -330,16 +330,15 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
 . "$here\_PimSetupShared.ps1"
 . "$solRoot\engine\_shared\PIM-Rest.ps1"
 . "$solRoot\engine\_shared\PIM-SqlStore.ps1"
-# Build-PimDownlinkJobArgs / Test-PimDownlinkJobCron -- the PURE, already-offline-tested
-# `az containerapp job` argument builder. Reused rather than duplicated: one way to construct a
-# scheduled Job, and it already refuses inline secrets and validates the cron expression.
-. "$solRoot\engine\_shared\PIM-DownlinkJob.ps1"
+# §84 P1: the cron check is Test-PimJobCron (_PimSetupShared.ps1) -- this used to dot-source PIM-DownlinkJob.ps1, an MSP
+# (Pro) file, for one 5-field check, so a Community copy without the MSP code could not run setup.
 
 # 71.40 -- the Manager's baseline trust + document URL, decided and REFUSED here, before any Azure call: a malformed pin
 # would otherwise land as an env var that pins nothing and looks configured. Loaded only when asked for.
 $managerBaselineEnv = @()
 if (@($BaselineTrustedKeys | Where-Object { "$_".Trim() }).Count -or "$BaselineDocUrl".Trim()) {
-    . "$solRoot\engine\_shared\PIM-DownlinkManager.ps1"
+    # §84 Pro (MSP): the baseline trust belongs to the MSP edition -- say so plainly when its code is not installed.
+    if (Test-Path -LiteralPath "$solRoot\engine\msp\PIM-DownlinkManager.ps1") { . "$solRoot\engine\msp\PIM-DownlinkManager.ps1" } else { throw '-BaselineTrustedKeys / -BaselineDocUrl configure the MSP (Pro) baseline, and the MSP code is not installed in this copy.' }
     $mbe = Get-PimManagerBaselineEnvPlan -TrustedKeys $BaselineTrustedKeys -DocUrl $BaselineDocUrl
     if (-not $mbe.ok) { throw $mbe.reason }
     $managerBaselineEnv = @($mbe.env)
@@ -364,7 +363,7 @@ $subArgs = @('--subscription', $SubscriptionId)
 # so the mode is a single switch and the two shapes cannot drift apart.
 $workersAll = @($Workers)   # the full matrix, kept for an existing always-on environment (see "Existing shape" below)
 if ($WorkerMode -eq 'cron') {
-    $cronCheck = Test-PimDownlinkJobCron -Cron $TickCron
+    $cronCheck = Test-PimJobCron -Cron $TickCron
     if (-not $cronCheck.ok) { throw "-TickCron is not a valid 5-field cron expression: $($cronCheck.reason)" }
     $mgrOnly = @($Workers | Where-Object { $_.entry -eq 'manager' })
     if (-not $mgrOnly.Count) { throw "-WorkerMode cron still needs a manager entry in -Workers (the GUI front end)." }

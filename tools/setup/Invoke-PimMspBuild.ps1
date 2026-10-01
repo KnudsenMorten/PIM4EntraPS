@@ -7,7 +7,7 @@
 
 .DESCRIPTION
     Operator 2026-09-15: "on friday we must use it to build efif and ride in prod". Runs, in order and idempotently, every
-    step that made the EFIF -> RIDE test pair work (engine/_shared/PIM-MspBuild.ps1 decides the plan):
+    step that made the EFIF -> RIDE test pair work (engine/msp/PIM-MspBuild.ps1 decides the plan):
 
       both   keyvault (when keyVaultName + bootstrapAppId are set) -> hosting (Invoke-PimDeployAll -Scenario S3|S6: identity,
              prerequisites incl. SQL admin group, image, containers, schema, mail sender, Easy Auth, code, updater, access,
@@ -86,7 +86,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)
-. (Join-Path $solRoot 'engine\_shared\PIM-MspBuild.ps1')
+. (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
 . (Join-Path $here '_PimSasCertLogin.ps1')
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "config not found: $ConfigPath" }

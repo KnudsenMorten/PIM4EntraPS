@@ -66,7 +66,7 @@
 # 'drift' (Drift page, 2026-09-14): { refreshedUtc; durationSeconds; total; counts; scopesFailed; ok; scopes[...] } -- written
 # by the scheduler job 'drift-snapshot', read by GET /api/drift. See engine/_shared/PIM-DriftSnapshot.ps1.
 # 'coverage-report' (REQ-I + REQ-U, Coverage & gaps page): { computedUtc; ok; counts; sources[]; rows[]; ... } -- written by the
-# scheduler job 'coverage', read by GET /api/coverage. See engine/_shared/PIM-Coverage.ps1.
+# scheduler job 'coverage', read by GET /api/coverage. See engine/coverage/PIM-Coverage.ps1.
 # 'workload-roles:defender' / 'workload-roles:intune' (REQ-U wave 2): { read; reason; readUtc; roles:[{ name; id; isBuiltIn; actions? }] }
 # -- written by the scheduler jobs 'discovery-defender' / 'discovery-intune' (engine/_shared/PIM-WorkloadRoles.ps1), read by
 # the Coverage page. read=false = NOT CHECKED (with its reason), never an empty catalog.
