@@ -3549,10 +3549,30 @@
     let d = null;
     try { d = await api('GET', '/api/unmanaged-admins'); } catch (e) { host.innerHTML = ''; return; }
     const acc = asList(d && d.accounts);
-    if (!d || d.reported !== true || !acc.length) { host.innerHTML = ''; return; }
+    const ign = asList(d && d.ignored);   // REQ-ADM-IGNORE-1: accounts an administrator chose to leave out of PIM
+    if (!d || d.reported !== true || (!acc.length && !ign.length)) { host.innerHTML = ''; return; }
     const esc = escapeHtml;
-    host.innerHTML = '<details id="acctUnmanaged" open style="border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;padding:8px 10px;margin-bottom:10px;">' +
-      '<summary style="font-weight:600;font-size:13px;cursor:pointer;">' + acc.length + ' unmanaged admin account(s) -- in the directory, not in PIM</summary>' +
+    // REQ-ADM-IGNORE-1 (operator 2026-10-01: "close the picture"): the box remembers it was closed (per viewer) for THIS
+    // set of accounts, and opens again by itself when the set changes -- a new unmanaged account is never hidden.
+    const sig = acc.map(x => String(x).toLowerCase()).sort().join('|');
+    let closedSig = null; try { closedSig = localStorage.getItem('pim.unmanagedAdmins.closed'); } catch (_) { }
+    const isOpen = acc.length > 0 && closedSig !== sig;
+    const ignHtml = ign.length
+      ? '<details id="acctUnmanagedIgnored" style="margin-top:6px;font-size:11.5px;"><summary style="cursor:pointer;color:#57606a;">' + ign.length + ' ignored account(s) -- not shown above</summary>' +
+        '<table class="grid" style="font-size:11.5px;margin-top:4px;"><tbody>' + ign.map(g =>
+          '<tr><td>' + esc(g.upn || '') + '</td><td style="color:#57606a;">ignored by ' + esc(g.by || '?') + (g.atUtc ? ' on ' + esc(String(g.atUtc).slice(0, 10)) : '') +
+          (g.reason ? ' &mdash; ' + esc(g.reason) : '') + '</td><td><button class="btn-sec acctUnignoreBtn" data-upn="' + esc(g.upn || '') + '" style="font-size:11px;">Stop ignoring</button></td></tr>').join('') +
+        '</tbody></table></details>'
+      : '';
+    if (!acc.length) {
+      host.innerHTML = '<div id="acctUnmanaged" style="font-size:11.5px;color:#57606a;margin-bottom:10px;">No unmanaged admin account to review.' + ignHtml + '</div>';
+      host.querySelectorAll('.acctUnignoreBtn').forEach(b => b.onclick = () => acctUnmanagedIgnore(b.dataset.upn, false, b));
+      return;
+    }
+    host.innerHTML = '<details id="acctUnmanaged"' + (isOpen ? ' open' : '') + ' style="border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;padding:8px 10px;margin-bottom:10px;">' +
+      '<summary style="font-weight:600;font-size:13px;cursor:pointer;">' + acc.length + ' unmanaged admin account(s) -- in the directory, not in PIM' +
+        (ign.length ? ' <span style="font-weight:400;color:#57606a;">(' + ign.length + ' ignored)</span>' : '') +
+        ' <span style="font-weight:400;color:#57606a;font-size:11px;">-- click to ' + (isOpen ? 'close' : 'open') + '</span></summary>' +
       '<div style="color:#57606a;font-size:11.5px;margin:4px 0 6px;">No TAP healing, no reminders, no review. <b>Import</b> stages the account&rsquo;s definition (read from the account) and the rows that keep the access it holds today (from the latest drift check) -- review and commit under Pending changes.' +
       (d.stale ? ' <span style="color:#9a6700;">(report is stale -- observed ' + esc(d.observedUtc || '') + ')</span>' : '') + '</div>' +
       '<table class="grid" style="font-size:12px;"><tbody>' + acc.map(u => {
@@ -3562,10 +3582,38 @@
         const st = acctUnmanagedStaged(u);
         return '<tr><td>' + esc(u) + '</td><td>' + (st
           ? '<span class="acctImportMsg" style="font-size:11px;color:#116329;font-weight:600;">&#10003; Staged -- commit under Pending changes</span>'
-          : '<button class="btn-sec acctImportBtn" data-upn="' + esc(u) + '" style="font-size:11px;">Import</button> <span class="acctImportMsg" style="font-size:11px;color:#57606a;"></span>') + '</td></tr>';
+          : '<button class="btn-sec acctImportBtn" data-upn="' + esc(u) + '" style="font-size:11px;">Import</button> ' +
+            '<button class="btn-sec acctIgnoreBtn" data-upn="' + esc(u) + '" style="font-size:11px;" title="Leave this account out of PIM: it is no longer listed here or counted on Home. Nothing changes in the directory. Undo under &quot;ignored accounts&quot;.">Ignore</button> ' +
+            '<span class="acctImportMsg" style="font-size:11px;color:#57606a;"></span>') + '</td></tr>';
       }).join('') +
-      '</tbody></table></details>';
+      '</tbody></table>' + ignHtml + '</details>';
     host.querySelectorAll('.acctImportBtn').forEach(b => b.onclick = () => acctImportUnmanaged(b.dataset.upn, b));
+    host.querySelectorAll('.acctIgnoreBtn').forEach(b => b.onclick = () => acctUnmanagedIgnore(b.dataset.upn, true, b));
+    host.querySelectorAll('.acctUnignoreBtn').forEach(b => b.onclick = () => acctUnmanagedIgnore(b.dataset.upn, false, b));
+    const box = host.querySelector('#acctUnmanaged');
+    if (box) box.addEventListener('toggle', () => {
+      try { if (box.open) localStorage.removeItem('pim.unmanagedAdmins.closed'); else localStorage.setItem('pim.unmanagedAdmins.closed', sig); } catch (_) { }
+      const hint = box.querySelector('summary > span:last-child'); if (hint) hint.textContent = '-- click to ' + (box.open ? 'close' : 'open');
+    });
+  }
+  // REQ-ADM-IGNORE-1: ignore / stop ignoring one unmanaged admin account (stored for every viewer, audited).
+  async function acctUnmanagedIgnore(upn, ignore, btn) {
+    let reason = '';
+    if (ignore) {
+      const r = window.prompt('Ignore ' + upn + '?\n\nIt is no longer listed here or counted on Home; nothing changes in the directory. You can undo this under "ignored accounts".\n\nReason (optional):', '');
+      if (r === null) return;
+      reason = String(r).trim();
+    }
+    if (btn) { btn.disabled = true; }
+    try {
+      await api('POST', '/api/unmanaged-admins/' + (ignore ? 'ignore' : 'unignore'), { upn: upn, reason: reason });
+      try { sharedToast((ignore ? 'Ignored ' : 'No longer ignoring ') + upn); } catch (_) { }
+    } catch (e) {
+      try { sharedToast('Not saved: ' + ((e && e.body && e.body.error) || (e && e.message) || e)); } catch (_) { }
+      if (btn) btn.disabled = false;
+      return;
+    }
+    try { await renderUnmanagedAdmins(document.getElementById('acctUnmanagedWrap')); } catch (_) { }
   }
   function acctUnmanagedStaged(upn) {
     const p = (typeof pendingChanges !== 'undefined' && pendingChanges) ? pendingChanges['Account-Definitions-Admins'] : null;

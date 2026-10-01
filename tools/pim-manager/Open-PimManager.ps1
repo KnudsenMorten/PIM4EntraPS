@@ -5470,7 +5470,8 @@ function Get-PimHomeOverview {
         if ($script:PimSqlCs -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
             $uaRec = Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name 'UnmanagedAdmins'
         }
-        $tiles.unmanagedAdmins = if (Get-Command Get-PimUnmanagedAdminTile -ErrorAction SilentlyContinue) { Get-PimUnmanagedAdminTile -Record $uaRec }
+        $uaIgn = $null; try { if ($script:PimSqlCs) { $uaIgn = Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name 'UnmanagedAdminsIgnored' } } catch { $uaIgn = $null }   # REQ-ADM-IGNORE-1
+        $tiles.unmanagedAdmins = if (Get-Command Get-PimUnmanagedAdminTile -ErrorAction SilentlyContinue) { Get-PimUnmanagedAdminTile -Record $uaRec -Ignored $uaIgn }
                                  else { [ordered]@{ ok = $false; error = 'the unmanaged-admin report library (PIM-UnmanagedAdmins.ps1) is not loaded in this Manager' } }
     } catch { $tiles.unmanagedAdmins = [ordered]@{ ok = $false; error = "$($_.Exception.Message)" } }
     $hT['unmanagedAdmins'] = $hsw.ElapsedMilliseconds; $hsw.Reset(); $hsw.Start()
@@ -11850,8 +11851,33 @@ function Handle-Request {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required.' }; return 403 }
             $rec = $null; try { $rec = Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name (Get-PimUnmanagedAdminSettingName) } catch { $rec = $null }
-            $tile = Get-PimUnmanagedAdminTile -Record $rec
-            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; reported = $tile.reported; accounts = @($tile.accounts); count = $tile.count; stale = $tile.stale; observedUtc = $tile.observedUtc; message = $tile.message })
+            $ignV = $null; try { $ignV = Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name (Get-PimUnmanagedIgnoreSettingName) } catch { $ignV = $null }
+            $tile = Get-PimUnmanagedAdminTile -Record $rec -Ignored $ignV
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; reported = $tile.reported; accounts = @($tile.accounts); count = $tile.count; ignored = @($tile.ignored); stale = $tile.stale; observedUtc = $tile.observedUtc; message = $tile.message })
+            return 200
+        }
+        # REQ-ADM-IGNORE-1 (operator 2026-10-01: "i need a way to ignore this on a person level"): ignore / stop ignoring
+        # ONE unmanaged admin account. Stored in pim.Settings (every viewer sees the same list), audited, Admin role.
+        if ($path -match '^/api/unmanaged-admins/(ignore|unignore)$' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            $verb = $Matches[1]
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required.' }; return 403 }
+            $body = Read-RequestJson -Request $req
+            $iu = "$(if ($body) { $body.upn })".Trim()
+            if ($iu -notmatch '^[^@\s]+@[^@\s]+$') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'upn (a user principal name) is required' }; return 400 }
+            $reason = "$(if ($body -and $body.PSObject.Properties['reason']) { $body.reason })".Trim()
+            $who = "$((Get-PimManagerRole).identity)"
+            try {
+                $name = Get-PimUnmanagedIgnoreSettingName
+                $before = @(ConvertTo-PimUnmanagedIgnoreList -Value (Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name $name))
+                $after = @(Set-PimUnmanagedIgnoreEntry -List $before -Upn $iu -Remove:($verb -eq 'unignore') -By $who -Reason $reason)
+                # -ValueJson (IMP-39): the exact array text; -InputObject keeps a one-entry list an ARRAY on 5.1 too
+                Set-PimSqlSetting -ConnectionString $script:PimSqlCs -Name $name -ValueJson (ConvertTo-Json -InputObject @($after) -Depth 4 -Compress)
+                Write-PimManagerAuditEvent -Action "admin.unmanaged.$verb" -Target $iu -Result 'ok' -After ([ordered]@{ by = $who; reason = $reason; ignoredCount = $after.Count })
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the ignore list could not be saved -- nothing changed: $($_.Exception.Message)" }; return 500
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; upn = $iu; ignored = ($verb -eq 'ignore'); ignoredCount = $after.Count })
             return 200
         }
         if ($path -eq '/api/unmanaged-admins/import' -and $method -eq 'GET') {

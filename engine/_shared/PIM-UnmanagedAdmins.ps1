@@ -13,6 +13,38 @@
 
 function Get-PimUnmanagedAdminSettingName { 'UnmanagedAdmins' }
 
+# REQ-ADM-IGNORE-1 (operator 2026-10-01: "i need a way to ignore this on a person level"): an unmanaged admin account an
+# administrator has decided to leave out of PIM. Kept in pim.Settings (shared by every viewer, audited), never in a
+# browser. Ignored accounts drop out of the list, the count and the Home tile; they stay readable ("N ignored") and an
+# ignore can be undone. The engine's report itself is unchanged -- ignoring hides, it never imports or disables.
+function Get-PimUnmanagedIgnoreSettingName { 'UnmanagedAdminsIgnored' }
+
+function ConvertTo-PimUnmanagedIgnoreList {
+    # PURE. The stored value (array, JSON text of an array, or $null) -> @( @{ upn; by; atUtc; reason } ), one per UPN
+    # (case-insensitive, the newest entry wins), sorted by UPN. Anything unreadable is dropped, never thrown.
+    param([AllowNull()][object]$Value)
+    $v = $Value
+    if ($v -is [string]) { if (-not "$v".Trim()) { return @() }; try { $v = $v | ConvertFrom-Json } catch { return @() } }
+    $seen = @{}
+    foreach ($e in @($v)) {
+        if ($null -eq $e) { continue }
+        $u = "$(if ($e -is [System.Collections.IDictionary]) { $e['upn'] } else { $e.upn })".Trim()
+        if (-not $u) { continue }
+        $get = { param($n) "$(if ($e -is [System.Collections.IDictionary]) { $e[$n] } else { $e.$n })".Trim() }
+        $seen[$u.ToLowerInvariant()] = [ordered]@{ upn = $u; by = (& $get 'by'); atUtc = (& $get 'atUtc'); reason = (& $get 'reason') }
+    }
+    return @($seen.Keys | Sort-Object | ForEach-Object { $seen[$_] })
+}
+
+function Set-PimUnmanagedIgnoreEntry {
+    # PURE. Add (or replace) / remove one UPN in the list. Returns the new list.
+    param([object[]]$List = @(), [Parameter(Mandatory)][string]$Upn, [switch]$Remove, [string]$By = '', [string]$Reason = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    $u = "$Upn".Trim()
+    $out = @(@(ConvertTo-PimUnmanagedIgnoreList -Value @($List)) | Where-Object { "$($_.upn)" -ine $u })
+    if (-not $Remove) { $out += [ordered]@{ upn = $u; by = "$By"; atUtc = $NowUtc.ToUniversalTime().ToString('o'); reason = "$Reason".Trim() } }
+    return @(ConvertTo-PimUnmanagedIgnoreList -Value $out)
+}
+
 function New-PimUnmanagedAdminRecord {
     <#
       🔴 IMP-33 (2026-09-18) -- PURE. The stored form of "privileged accounts that exist in the directory
@@ -94,11 +126,14 @@ function Get-PimUnmanagedAdminTile {
       no record = "not reported yet" (the engine writes it on its next Admins pass), never "0".
       A record older than -StaleHours is flagged stale rather than trusted.
     #>
-    param([AllowNull()][object]$Record, [datetime]$NowUtc = [datetime]::UtcNow, [int]$StaleHours = 2)
+    # -Ignored (REQ-ADM-IGNORE-1): the ignore list; ignored accounts leave accounts + count and are returned in `ignored`
+    # (only those the report still lists, so an account that has since been imported or removed drops out by itself).
+    param([AllowNull()][object]$Record, [datetime]$NowUtc = [datetime]::UtcNow, [int]$StaleHours = 2, [AllowNull()][object]$Ignored = $null)
     if ($null -eq $Record -or -not $Record.PSObject.Properties['scopes'] -or -not $Record.scopes) {
-        return [ordered]@{ ok = $true; reported = $false; count = $null; accounts = @(); stale = $false; observedUtc = ''
+        return [ordered]@{ ok = $true; reported = $false; count = $null; accounts = @(); stale = $false; observedUtc = ''; ignored = @()
                            message = 'not reported yet -- the engine records this on its next Admins pass' }
     }
+    $ign = @{}; foreach ($e in @(ConvertTo-PimUnmanagedIgnoreList -Value $Ignored)) { $ign["$($e.upn)".ToLowerInvariant()] = $e }
     $acc = New-Object System.Collections.Generic.List[string]; $latest = $null
     foreach ($sp in $Record.scopes.PSObject.Properties) {
         foreach ($a in @($sp.Value.accounts)) { if ("$a".Trim() -and -not $acc.Contains("$a")) { [void]$acc.Add("$a") } }
@@ -113,10 +148,15 @@ function Get-PimUnmanagedAdminTile {
     # DateTime subtraction ignores Kind, so both sides must be UTC (see New-PimUnmanagedAdminRecord).
     $nowU = if ($NowUtc.Kind -eq [DateTimeKind]::Utc) { $NowUtc } else { $NowUtc.ToUniversalTime() }
     $stale = ($null -eq $latest) -or (($nowU - $latest).TotalHours -gt $StaleHours)
+    $shown = @($acc | Where-Object { -not $ign.ContainsKey("$_".ToLowerInvariant()) } | Sort-Object)
+    $ignoredNow = @($acc | Where-Object { $ign.ContainsKey("$_".ToLowerInvariant()) } | Sort-Object | ForEach-Object { $ign["$_".ToLowerInvariant()] })
+    $ignTxt = if ($ignoredNow.Count) { " ($($ignoredNow.Count) ignored)" } else { '' }
     return [ordered]@{
-        ok = $true; reported = $true; count = $acc.Count; accounts = @($acc | Sort-Object)
+        ok = $true; reported = $true; count = $shown.Count; accounts = $shown; ignored = $ignoredNow
         stale = $stale; observedUtc = $(if ($latest) { $latest.ToString('u') } else { '' })
-        message = $(if ($acc.Count) { "$($acc.Count) privileged account(s) exist in the directory with NO desired-state row: no TAP healing, no reminders, no review. $($Record.fix)" } else { 'every admin account in the directory has a desired-state row' })
+        message = $(if ($shown.Count) { "$($shown.Count) privileged account(s) exist in the directory with NO desired-state row: no TAP healing, no reminders, no review.$ignTxt $($Record.fix)" }
+                    elseif ($ignoredNow.Count) { "no unmanaged admin account left to review -- $($ignoredNow.Count) ignored" }
+                    else { 'every admin account in the directory has a desired-state row' })
     }
 }
 

@@ -2739,25 +2739,59 @@ function Save-PimJobTriggers {
         catch { Write-Warning "[scheduler] SchedulerTriggers did NOT persist ($($_.Exception.Message)). A requested run will not fire." }
     }
 }
+# 🔴 BUG-275 (live GUI E2E on ig798, 2026-10-01): the trigger list was a plain read-modify-write. The tick's SQL change
+# detector read it at ~09:40:50, the live runner wrote its drift trigger at 09:40:52, and the detector's save at 09:40:54
+# ERASED it -- the requested run never happened and the runner waited 25 minutes. The Manager's "Run now", a commit and
+# every other writer race the same way. Every change now goes through ONE compare-and-set on the SQL row (retried), like
+# the lease; without a SQL store (single process) the old in-process path stays.
+function Update-PimJobTriggerList {
+    # -Mutate gets the current list and EMITS the new one, item by item (never ,$list -- that arrives as ONE nested item).
+    param([Parameter(Mandatory)][scriptblock]$Mutate, [int]$Attempts = 8)
+    $cs = Get-PimSchedulerLeaseStoreCs
+    if ($cs -and (Get-Command Get-PimSqlSettingRaw -ErrorAction SilentlyContinue) -and (Get-Command Set-PimSqlSettingIfUnchanged -ErrorAction SilentlyContinue)) {
+        for ($i = 0; $i -lt $Attempts; $i++) {
+            $raw = $null
+            try { $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'SchedulerTriggers' } catch { Write-Warning "[scheduler] SchedulerTriggers could not be READ for an update ($($_.Exception.Message))"; return $null }
+            $parsed = $null; if ("$raw".Trim()) { try { $parsed = $raw | ConvertFrom-Json } catch { $parsed = $null } }
+            $cur = @(ConvertFrom-PimSchedulerStoredList -Value $parsed)   # both stored shapes: an array, or JSON text of one
+            $new = @(& $Mutate $cur | Where-Object { $null -ne $_ })
+            $json = ConvertTo-Json -InputObject @($new) -Depth 6 -Compress
+            if ("$raw" -eq $json) { $script:PimTriggers = $new; return ,$new }
+            $n = 0
+            try { $n = Set-PimSqlSettingIfUnchanged -ConnectionString $cs -Name 'SchedulerTriggers' -NewValueJson $json -ExpectedValueJson $raw } catch { $n = 0 }
+            if ($n -ge 1) { $script:PimTriggers = $new; return ,$new }
+            Start-Sleep -Milliseconds (40 * ($i + 1))   # someone else wrote in between: re-read and apply OUR change to theirs
+        }
+        Write-Warning "[scheduler] SchedulerTriggers changed under every one of $Attempts attempts -- this change was NOT saved."
+        return $null
+    }
+    $new = @(& $Mutate @(Get-PimPendingTriggers) | Where-Object { $null -ne $_ })
+    Save-PimJobTriggers -Triggers $new
+    return ,$new
+}
 function Add-PimJobTrigger {
     # Enqueue an on-demand run. Call from the manager right after it writes a change,
     # or from a monitor that detects a SQL change. Deduped by type+scope.
     # -JobName (BUG-235, 77.4): the scheduled job a "Run now" was pressed on. The drain records the run under THAT
     # name, so the job's own row shows the run; without it the run is recorded as 'trigger:<type>:<scope>'.
     param([Parameter(Mandatory)][string]$Type, [string]$Scope = 'All', [string]$Reason = '', [string]$JobName = '', [datetime]$NowUtc = [datetime]::UtcNow)
-    $t = @(Get-PimPendingTriggers)
-    $same = @($t | Where-Object { "$($_.type)" -eq $Type -and "$($_.scope)" -eq $Scope })
-    if (-not $same.Count) {
-        $o = [ordered]@{ type = $Type; scope = $Scope; reason = $Reason; requestedUtc = $NowUtc.ToUniversalTime().ToString('o') }
-        if ("$JobName".Trim()) { $o['job'] = "$JobName".Trim() }
-        $t += [pscustomobject]$o
-        Save-PimJobTriggers -Triggers $t
-    } elseif ("$JobName".Trim() -and -not @($same | Where-Object { $_.PSObject.Properties['job'] -and "$($_.job)".Trim() }).Count) {
-        # already queued anonymously (e.g. by a commit): name it, so the run still lands on the job the operator pressed
-        $same[0] | Add-Member -NotePropertyName job -NotePropertyValue "$JobName".Trim() -Force
-        Save-PimJobTriggers -Triggers $t
+    $jn = "$JobName".Trim()
+    $req = $NowUtc.ToUniversalTime().ToString('o')
+    $res = Update-PimJobTriggerList -Mutate {
+        param($t)
+        $t = @($t)
+        $same = @($t | Where-Object { "$($_.type)" -eq $Type -and "$($_.scope)" -eq $Scope })
+        if (-not $same.Count) {
+            $o = [ordered]@{ type = $Type; scope = $Scope; reason = $Reason; requestedUtc = $req }
+            if ($jn) { $o['job'] = $jn }
+            $t += [pscustomobject]$o
+        } elseif ($jn -and -not @($same | Where-Object { $_.PSObject.Properties['job'] -and "$($_.job)".Trim() }).Count) {
+            # already queued anonymously (e.g. by a commit): name it, so the run still lands on the job the operator pressed
+            $same[0] | Add-Member -NotePropertyName job -NotePropertyValue $jn -Force
+        }
+        $t
     }
-    return $t.Count
+    return @($res).Count
 }
 function Request-PimCommit {
     # Call this ONLY when the user COMMITS (not when they queue). Enqueues a recompute +
@@ -3180,8 +3214,8 @@ function Invoke-PimSchedulerTriggerDrain {
         # a request made mid-run vanished. Remove only what was actually run (type + scope + requestedUtc).
         $ranKeys = @{}
         foreach ($tg in $triggers) { $ranKeys["$($tg.type)|$($tg.scope)|$($tg.requestedUtc)"] = $true }
-        $still = @(@(Get-PimPendingTriggers) | Where-Object { -not $ranKeys.ContainsKey("$($_.type)|$($_.scope)|$($_.requestedUtc)") })
-        [void](Save-PimJobTriggers -Triggers $still)
+        # BUG-275: the removal is one compare-and-set too, so a trigger queued while it is written survives.
+        [void](Update-PimJobTriggerList -Mutate { param($cur) @($cur) | Where-Object { -not $ranKeys.ContainsKey("$($_.type)|$($_.scope)|$($_.requestedUtc)") } })
     }
     return $out.ToArray()
 }

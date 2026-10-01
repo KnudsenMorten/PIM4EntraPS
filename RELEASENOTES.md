@@ -33,6 +33,20 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   memberships lags the grant by a few seconds; the Activator now shows the group as active as soon as Microsoft confirms
   the activation.
 
+## v2.4.471 — Ignore an unmanaged admin account; the list can stay closed
+
+- **New: Ignore an unmanaged admin account.** On Admin accounts, each account in the directory that PIM does not manage
+  now has **Ignore** next to **Import** (with an optional reason). An ignored account is no longer listed or counted,
+  here or on Home, for everyone; nothing changes in the directory. The ignored accounts are listed underneath with who
+  ignored them and why, and **Stop ignoring** brings one back.
+- **The unmanaged-accounts box stays closed** once you close it, until a new account appears.
+- **Fixed: a requested run could be lost.** When two things queued a run at almost the same moment (for example
+  **Run now** while the engine was noticing a change), the second could overwrite the first, and that run never happened.
+  Queued runs are now added and removed safely, so none is lost.
+- **Fixed: a new group's membership no longer fails the run.** For a minute or two after PIM creates a group, adding an
+  eligible member can be refused because the group is not visible to PIM yet. That is now shown as waiting (it applies
+  on the next run) instead of an unrecognised failure.
+
 ## v2.4.470 — Drift shows every extra; Admin accounts shows department owners correctly
 
 - **Fixed: Drift showed nothing for an area with more than five extras.** The safety limit on how much the engine removes
