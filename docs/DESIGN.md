@@ -6055,6 +6055,13 @@ primitives.
     only a legacy fallback, and an item that resolves to nobody goes to the Alerting recipients.
     `admin` is the Alerting recipients.
   - **One summary line per run** in the tick log: due / sent / skipped / seeded / failed.
+- **Access map focus and filters; grid quick changes (2.4.474).** A selection in focus mode shows only its path; the
+  boxes it could be linked to are classed `link-cand` but shown only while dragging (`drag-mode`) or with **Show link
+  targets** (`show-cands`) -- otherwise hundreds of them buried the path and `mapDrawWires` (which skips a box scrolled
+  out of its column) drew no line. Each column has All / Assigned / Not assigned (`cf-hide`, never on `.sel` / `.path`;
+  per viewer in localStorage). The grid's selection bar sets one field on every selected row (`gridQuickApply`): the
+  values come from the column's own spec, identity columns are never offered, and a duration must be 1..3650 days
+  (blank / 0 mean permanent); the change is staged like a cell edit.
 - **Community -> Pro (2.4.473).** `Set-PimLicense` refuses a licence that cannot make THIS environment Pro (sku not Pro,
   or bound to another tenant) -- `Test-PimLicenseIsProForTenant` is the one verdict for the badge (`Get-PimEdition`),
   `GET /api/license`, the import and the updater's edition read (`Get-PimEnvironmentEdition`); the hard gate per
