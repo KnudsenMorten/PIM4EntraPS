@@ -41,7 +41,7 @@ $script:PimJobTypes    = @('emergency-override','queue-apply','engine-delta','en
 # tests/Test-PimJobsRunLogs.ps1 derives that set from the script and fails when this list falls behind.
 $script:PimTickOnlyJobTypes = @('emergency-override','engine-delta','engine-full','msp-pull','active-assignments-snapshot','drift-snapshot','verify-convergence','discovery')
 # REQ-I + REQ-U (Coverage & gaps page): 'coverage' compares the tenant caches with pim.Rows and stores the report in
-# pim.TenantCache 'coverage-report' (engine/_shared/PIM-Coverage.ps1). Its real handler is registered only by
+# pim.TenantCache 'coverage-report' (engine/coverage/PIM-Coverage.ps1). Its real handler is registered only by
 # Start-PimScheduler (it may read Power BI / Graph), so it is tick-only: Run now QUEUES it.
 $script:PimJobTypes += 'coverage'
 $script:PimTickOnlyJobTypes += 'coverage'
@@ -1192,7 +1192,7 @@ function Initialize-PimDefaultJobHandlers {
     Register-PimJobHandler -Type 'coverage' -Handler {
         param($job,$now,$whatIf)
         # REQ-I + REQ-U (Coverage & gaps page). The REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1
-        # (Invoke-PimCoverageJob, engine/_shared/PIM-Coverage.ps1). Deliberately NOT wired here: the Manager initialises these
+        # (Invoke-PimCoverageJob, engine/coverage/PIM-Coverage.ps1). Deliberately NOT wired here: the Manager initialises these
         # handlers too, and the job reads Power BI / Graph, which never runs on the Manager's request loop.
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:coverage (wired by Start-PimScheduler; the Manager never computes the coverage report)'
@@ -1445,7 +1445,7 @@ function Register-PimDiscoveryHandler {
         [switch]$AutoImportPowerBI
     )
     if (-not (Get-Command Invoke-PimDiscoveryJobSweep -ErrorAction SilentlyContinue)) {
-        throw "Invoke-PimDiscoveryJobSweep not loaded (dot-source engine/_shared/PIM-Discovery.ps1 before wiring the discovery handler)."
+        throw "Invoke-PimDiscoveryJobSweep not loaded (dot-source engine/discovery/PIM-Discovery.ps1 before wiring the discovery handler)."
     }
     $script:PimDiscoveryGetDiscovered  = $GetDiscovered
     $script:PimDiscoveryGetExisting    = $GetExisting
@@ -3196,6 +3196,54 @@ function Resolve-PimSchedulerDeadLease {
 }
 
 # ---- one tick + the loop --------------------------------------------------
+# ---- §87 BUG-281: ONE CLEAN PASS PER SCOPE PER TICK --------------------------
+# Measured on RIDE 2026-10-01 19:20Z: a trigger reconciled Admins, Groups, the policies and the Entra roles, and two
+# minutes later -- in the SAME tick -- the scheduled delta-admins, delta-groups-deploy, delta-policies and delta-pim-entra
+# ran exactly those scopes again (the policy pass alone ~60 s of throttled reads), every scope `nochange`. A scheduled
+# DELTA whose scopes ALL had a clean pass earlier in this tick is therefore recorded as covered and advanced to its next
+# slot, not run. Drift correction keeps its cadence: the covering pass read the live tenant moments ago. Only a CLEAN
+# pass counts (ok, not held, not waiting, not WhatIf) -- a scope with failed or waiting items runs again on its own job.
+$script:PimTickReconciled = @{}
+function Get-PimEngineJobScopeKeys {
+    # PURE-ish. The canonical (lower-case) REST scopes an engine job runs; @() when it is not an engine job or does not resolve.
+    param([Parameter(Mandatory)][object]$Job)
+    if ("$($Job.type)" -notin @('engine-delta', 'engine-full')) { return @() }
+    if (-not (Get-Command Resolve-PimEngineScope -ErrorAction SilentlyContinue)) { return @() }
+    $sc = if ($Job.PSObject.Properties['scope'] -and "$($Job.scope)".Trim()) { "$($Job.scope)".Trim() } else { 'All' }
+    $r = $null; try { $r = Resolve-PimEngineScope -Scope $sc } catch { $r = $null }
+    if (-not $r -or -not $r.ok) { return @() }
+    return @(@($r.scopes) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ } | Sort-Object -Unique)
+}
+function Test-PimEngineRunClean {
+    # PURE. Did this engine job result reconcile its scopes cleanly (nothing held, waiting or failed; not a WhatIf)?
+    param([AllowNull()][object]$Result)
+    if (-not $Result -or -not $Result.ok) { return $false }
+    if ($Result.PSObject.Properties['ran'] -and $Result.ran -eq $false) { return $false }
+    $in = if ($Result.PSObject.Properties['result']) { $Result.result } else { $null }
+    if (-not $in) { return $false }
+    foreach ($k in 'held', 'waiting', 'whatIf') { if ($in.PSObject.Properties[$k] -and $in.$k) { return $false } }
+    if ($in.PSObject.Properties['ran'] -and $in.ran -eq $false) { return $false }
+    return $true
+}
+function Add-PimTickReconciled {
+    param([Parameter(Mandatory)][object]$Job, [AllowNull()][object]$Result)
+    if (-not (Test-PimEngineRunClean -Result $Result)) { return }
+    foreach ($k in @(Get-PimEngineJobScopeKeys -Job $Job)) { $script:PimTickReconciled[$k] = "$($Job.name)" }
+}
+function Get-PimTickCoverage {
+    # A scheduled DELTA whose scopes all had a clean pass earlier in this tick -> the covering job names; $null otherwise.
+    param([Parameter(Mandatory)][object]$Job)
+    if ("$($Job.type)" -ne 'engine-delta') { return $null }
+    $keys = @(Get-PimEngineJobScopeKeys -Job $Job)
+    if (-not $keys.Count) { return $null }
+    $by = New-Object System.Collections.Generic.List[string]
+    foreach ($k in $keys) {
+        if (-not $script:PimTickReconciled.ContainsKey($k)) { return $null }
+        if (-not $by.Contains($script:PimTickReconciled[$k])) { $by.Add($script:PimTickReconciled[$k]) }
+    }
+    return @($by.ToArray())
+}
+
 function Invoke-PimSchedulerTriggerDrain {
     # The tick's "(b) TRIGGERS" block, unchanged in behaviour, made callable so the tick can also drain
     # BETWEEN scheduled jobs. Runs every pending trigger (running record -> dispatch -> run record, with the
@@ -3220,6 +3268,7 @@ function Invoke-PimSchedulerTriggerDrain {
             $r = Invoke-PimScheduledJob -Job $tjob -NowUtc ($now.Add($started - $drainWall)) -WhatIf:$WhatIf -CorrelationId $tRunId
             $r | Add-Member -NotePropertyName trigger -NotePropertyValue $true -Force
             $r | Add-Member -NotePropertyName reason  -NotePropertyValue "$($tg.reason)" -Force
+            if (-not $WhatIf) { Add-PimTickReconciled -Job $tjob -Result $r }   # §87
             $out.Add($r)
             Write-PimJobRunRecord -Job $tjob -Result $r -StartedUtc $started -Trigger -Reason "$($tg.reason)" -RunId $tRunId | Out-Null
         }
@@ -3330,8 +3379,9 @@ function Invoke-PimSchedulerTick {
     # BUG-134: the RESOLVED list is what runs -- check THAT, not the shipped default (once/process).
     Write-PimJobScopeBindingReport -Schedule @($Jobs)
     $results = New-Object System.Collections.Generic.List[object]
+    $script:PimTickReconciled = @{}   # §87: a new tick starts with no scope reconciled
     $st = Get-PimSchedulerState
-    $lastWm = if ($st -and $st.PSObject.Properties['lastWatermark']) { "$($st.lastWatermark)" } else { '' }
+    $lastWm =if ($st -and $st.PSObject.Properties['lastWatermark']) { "$($st.lastWatermark)" } else { '' }
 
     # §80.2 🔴 A SECONDARY INSTANCE (the hybrid worker) RUNS ITS OWN JOBS AND NOTHING ELSE. The watermark, the SQL change
     # detector, the queue pickup and the trigger drains below all CONSUME shared signals: run here they would eat the main
@@ -3442,8 +3492,17 @@ function Invoke-PimSchedulerTick {
             $started  = [datetime]::UtcNow
             $jobStart = $now.Add($started - $wallStart)
             $jRunId = [guid]::NewGuid().ToString('N')
-            if (-not $WhatIf) { [void](Write-PimJobRunningRecord -Job $j -RunId $jRunId -StartedUtc $started) }
-            $res = Invoke-PimScheduledJob -Job $j -NowUtc $now -WhatIf:$WhatIf -CorrelationId $jRunId
+            $coveredBy = if ($WhatIf) { $null } else { Get-PimTickCoverage -Job $j }   # §87 BUG-281
+            if ($coveredBy) {
+                $res = [pscustomobject]@{ name = "$($j.name)"; type = "$($j.type)"; ok = $true; ran = $false; covered = $true
+                    detail = ("covered -- its scopes were reconciled cleanly earlier in this tick by {0}; next run on its own cadence" -f (@($coveredBy) -join ', '))
+                    ranUtc = $now.ToString('o'); correlationId = $jRunId }
+                Write-Host ("[scheduler] {0}: {1}" -f $j.name, $res.detail) -ForegroundColor DarkGray
+            } else {
+                if (-not $WhatIf) { [void](Write-PimJobRunningRecord -Job $j -RunId $jRunId -StartedUtc $started) }
+                $res = Invoke-PimScheduledJob -Job $j -NowUtc $now -WhatIf:$WhatIf -CorrelationId $jRunId
+                if (-not $WhatIf) { Add-PimTickReconciled -Job $j -Result $res }
+            }
             $results.Add($res)
             Write-PimJobRunRecord -Job $j -Result $res -StartedUtc $started -RunId $jRunId | Out-Null
             # 🔴 Both stamps used to be the TICK start. A tick runs its jobs in sequence, so a job

@@ -760,3 +760,66 @@ function Get-PimDownlinkJobExecutionVerdict {
         verified = [bool]$verified; held = [bool]$held; reason = $reason
     }
 }
+
+# ---------------------------------------------------------------------------
+# §87 BUG-281 -- COMPARE FIRST: AN UNCHANGED BUNDLE IS NOT RE-APPLIED (operator 2026-10-01: "can the pull not do a
+# compare and run delta only"). Measured on RIDE: every 5-minute pull re-projected an unchanged bundle (admins ~15,
+# groups ~39 rewritten) and ran a full engine pass in which every scope was `nochange` -- ~200 s at 0.5 vCPU, every
+# trigger, and the rewritten rows then queued a second engine pass in the tick. The pull now fingerprints what decides
+# the outcome and skips the projection + engine pass when nothing in it changed since the last CLEAN apply.
+#   * The fingerprint covers the bundle's exact bytes, the central-kill document, this tenant's ring, scenario, admin
+#     naming, retraction opt-in, trusted signing keys, engine scope / mode, and the image version (new code may project
+#     differently). Anything unknown (a fetch that failed) = no fingerprint = the full pull runs, as before.
+#   * Only a 'due' trigger may skip. Run now, a redeploy, the first run, a retry, a store that could not be read --
+#     each runs the full pull. So does the first pull after $FullEveryHours (default 24): a daily safety pass that
+#     re-projects and re-applies even when nothing central changed (a row edited locally, the retraction report).
+#   * The fingerprint is stored ONLY after a clean apply (succeeded, not held, not WhatIf) -- a failed or held run is
+#     never what a later run compares against.
+# ---------------------------------------------------------------------------
+$script:PimDownlinkAppliedKey = 'DownlinkApplied'
+function Get-PimDownlinkAppliedKey { return $script:PimDownlinkAppliedKey }
+
+function Get-PimDownlinkPullFingerprint {
+    # PURE. SHA-256 (hex) over the bundle text, the kill text and the ordered inputs. '' when the bundle text is unknown.
+    param([AllowNull()][string]$BundleText, [AllowNull()][string]$KillText, [System.Collections.IDictionary]$Inputs = @{})
+    if ($null -eq $BundleText -or -not "$BundleText".Length) { return '' }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("v1`n")
+    foreach ($k in @(@($Inputs.Keys) | ForEach-Object { "$_" } | Sort-Object)) {
+        $v = $Inputs[$k]
+        $s = if ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) { (@($v) | ForEach-Object { "$_" }) -join ',' } else { "$v" }
+        [void]$sb.Append("$k=$s`n")
+    }
+    $h = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hx = { param($s) ([BitConverter]::ToString($h.ComputeHash([Text.Encoding]::UTF8.GetBytes("$s")))).Replace('-', '').ToLowerInvariant() }
+        [void]$sb.Append("bundle=$(& $hx $BundleText)`n")
+        [void]$sb.Append("kill=$(if ($null -eq $KillText) { 'none' } else { & $hx $KillText })`n")
+        return (& $hx $sb.ToString())
+    } finally { $h.Dispose() }
+}
+
+function Get-PimDownlinkUnchangedDecision {
+    # PURE. Skip this pull? @{ skip; reason }. -Applied = the stored DownlinkApplied record (fingerprint, appliedUtc, version).
+    param([string]$GateCode, [string]$Fingerprint, [AllowNull()][object]$Applied, [datetime]$NowUtc = [datetime]::UtcNow, [int]$FullEveryHours = 24)
+    $no = { param($r) [pscustomobject]@{ skip = $false; reason = $r } }
+    if ("$GateCode" -ne 'due') { return (& $no "the trigger is '$GateCode' -- a full pull") }
+    if (-not "$Fingerprint".Trim()) { return (& $no 'the bundle could not be fingerprinted -- a full pull') }
+    if (-not $Applied) { return (& $no 'no clean apply recorded yet -- a full pull') }
+    $fp = "$(Get-PimDownlinkJobValue -Object $Applied -Key 'fingerprint')".Trim()
+    if ($fp -ne "$Fingerprint".Trim()) { return (& $no 'the bundle or this tenant''s pull inputs changed since the last clean apply -- a full pull') }
+    $at = [datetime]::MinValue
+    $atRaw = Get-PimDownlinkJobValue -Object $Applied -Key 'appliedUtc'
+    if ($atRaw -is [datetime]) { $at = $atRaw.ToUniversalTime() }
+    elseif (-not [datetime]::TryParse("$atRaw", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$at)) { return (& $no 'the last clean apply has no readable time -- a full pull') }
+    $age = ($NowUtc.ToUniversalTime() - $at).TotalHours
+    if ($age -ge $FullEveryHours) { return (& $no ("the daily safety pass: the last full apply was {0:N1} h ago" -f $age)) }
+    $ver = "$(Get-PimDownlinkJobValue -Object $Applied -Key 'version')".Trim()
+    return [pscustomobject]@{ skip = $true; reason = ("unchanged -- the managing tenant's bundle{0} and this tenant's pull inputs are the same as at the last clean apply ({1}Z); nothing to apply. The next full pass is at the daily safety pass or on Run now." -f $(if ($ver) { " v$ver" } else { '' }), $at.ToString('yyyy-MM-ddTHH:mm:ss')) }
+}
+
+function New-PimDownlinkAppliedRecord {
+    # PURE. What a clean apply stores.
+    param([Parameter(Mandatory)][string]$Fingerprint, [string]$Version = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    return [ordered]@{ fingerprint = $Fingerprint; appliedUtc = $NowUtc.ToUniversalTime().ToString('o'); version = "$Version" }
+}

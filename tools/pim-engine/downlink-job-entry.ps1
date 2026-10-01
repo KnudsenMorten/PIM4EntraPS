@@ -29,7 +29,7 @@
          execution is observable via `az containerapp job execution` + `... logs`.
 
     This entrypoint INVOKES the downlink; it never edits it. The pure plan brain is
-    engine/_shared/PIM-DownlinkJob.ps1 (offline-tested in tests/Test-PimDownlinkJob.ps1).
+    engine/msp/PIM-DownlinkJob.ps1 (offline-tested in tests/Test-PimDownlinkJob.ps1).
 
 .PARAMETER Scenario
     'S5' (central-hosted managed, multi-tenant SPN) or 'S6' (local-hosted managed,
@@ -173,7 +173,7 @@ if (-not $mspLic.ok) { Stop-DownlinkJob -Code 2 -State failed -Detail "$($mspLic
 
 # Load the scenario + downlink + downlink-job cores (placement / verdict helpers).
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
-. (Join-Path $shared 'PIM-DownlinkJob.ps1')
+. (Join-Path $shared '..\msp\PIM-DownlinkJob.ps1')
 # The engine runs as a CHILD script, so its failure catalog is gone when the downlink judges the run: loaded here so a
 # run whose only failures are transient waits is WAITING, not FAILED (Invoke-PimScenarioRun, measured on RIDE 2026-09-26).
 . (Join-Path $shared 'PIM-FailureCatalog.ps1')
@@ -286,6 +286,56 @@ elseif ("$BaselineUrl".Trim()) {
 # master's central kill; the kill URL defaults to the bundle's sibling, so only an explicit override is passed.
 if ("$CentralKillUrl".Trim()) { $runArgs['CentralKillUrl'] = "$CentralKillUrl".Trim() }
 
+# --- §87 BUG-281: COMPARE FIRST -- an unchanged bundle is not re-projected or re-applied (PIM-DownlinkJob.ps1) ---------
+# Fingerprint what decides the outcome; a 'due' trigger whose fingerprint matches the last CLEAN apply (within the daily
+# safety pass) records "unchanged" and exits. Anything that cannot be read leaves $pullFp empty -> the full pull runs.
+$pullFp = ''; $pullVer = ''
+if (-not $cadenceErr) {
+    try {
+        $bundleText = $null
+        if ("$BaselineDocPath".Trim()) { $bundleText = [IO.File]::ReadAllText("$BaselineDocPath".Trim()) }
+        else {
+            $bh = @{ 'x-ms-version' = '2021-08-06' }
+            if ("$BaselineAccessToken".Trim()) { $bh['Authorization'] = "Bearer $BaselineAccessToken" }
+            $bresp = Invoke-WebRequest -Method GET -Uri "$BaselineUrl".Trim() -Headers $bh -UseBasicParsing -ErrorAction Stop
+            $bundleText = if ($bresp.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($bresp.Content) } else { "$($bresp.Content)" }
+        }
+        if ("$bundleText" -match '"version"\s*:\s*"?v?(\d+)') { $pullVer = $Matches[1] }
+        $ks = Get-PimCentralKillSource -CentralKillUrl $CentralKillUrl -BaselineUrl $BaselineUrl -AccessToken $BaselineAccessToken
+        if ("$($ks.error)".Trim()) { throw "the central kill could not be read ($($ks.error))" }
+        $killText = if (-not $ks.checked) { 'not-checked' } elseif ($null -eq $ks.doc) { 'none-published' } else { $ks.doc | ConvertTo-Json -Depth 30 -Compress }
+        $verFile = Join-Path $solRoot 'VERSION'
+        $pullInputs = [ordered]@{
+            scenario = $Scenario; tenant = "$TenantId".ToLowerInvariant(); ring = $SlaveRing; engineScope = $EngineScope; engineMode = $EngineMode
+            whatIf = [bool]$WhatIfMode; prefixes = @($SlaveAdminPrefixes); retraction = [bool]$retraction.allow
+            trustedKeys = "$env:PIM_BaselineTrustedKeys".Trim(); image = $(if (Test-Path -LiteralPath $verFile) { ([IO.File]::ReadAllText($verFile)).Trim() } else { '' })
+        }
+        $pullFp = Get-PimDownlinkPullFingerprint -BundleText $bundleText -KillText $killText -Inputs $pullInputs
+        $appliedRaw = (Read-PimJobCadenceValues -ConnectionString $cadenceCs -Object 'pim.Settings' -Names @((Get-PimDownlinkAppliedKey)))[(Get-PimDownlinkAppliedKey)]
+        $applied = $null
+        if ($appliedRaw -and $appliedRaw -isnot [System.DBNull] -and "$appliedRaw".Trim()) { try { $applied = "$appliedRaw" | ConvertFrom-Json } catch { $applied = $null } }
+        $same = Get-PimDownlinkUnchangedDecision -GateCode "$($cadenceGate.decision.code)" -Fingerprint $pullFp -Applied $applied
+        if ($same.skip) {
+            JobLog ("UNCHANGED: {0}" -f $same.reason)
+            JobLog '==== downlink JOB UNCHANGED (nothing to apply) ===='
+            Stop-DownlinkJob -Code 0 -State succeeded -Detail $same.reason
+        }
+        JobLog ("COMPARE: {0}" -f $same.reason)
+    } catch {
+        $pullFp = ''
+        JobLog ("COMPARE: could not fingerprint this pull ({0}) -- the full pull runs" -f $_.Exception.Message) 'WARN'
+    }
+}
+# Store the fingerprint after a CLEAN apply only; a held run clears it so the next trigger pulls in full again.
+function Save-DownlinkApplied {
+    param([string]$Fingerprint)
+    if ($cadenceErr -or $WhatIfMode) { return }
+    try {
+        $rec = if ($Fingerprint) { New-PimDownlinkAppliedRecord -Fingerprint $Fingerprint -Version $pullVer } else { [ordered]@{ fingerprint = ''; appliedUtc = ''; version = '' } }
+        Write-PimJobCadenceValue -ConnectionString $cadenceCs -Object 'pim.Settings' -Name (Get-PimDownlinkAppliedKey) -Json ($rec | ConvertTo-Json -Compress)
+    } catch { JobLog ("COMPARE: the applied fingerprint could not be stored ({0}) -- the next trigger pulls in full" -f $_.Exception.Message) 'WARN' }
+}
+
 JobLog "invoking scenario runner (downlink-sync -> engine-apply) ..."
 $result = $null
 try {
@@ -329,6 +379,7 @@ if ($ok -and $held) {
     # 71.13 -- HELD is not FAILED. The pull applied; the engine's policy mass-change breaker held a change set that
     # needs an operator's approval (the plan hash + approve command are in the engine-apply step above, and the
     # breaker raised its own alert). The execution succeeds, and this line says why it still needs attention.
+    Save-DownlinkApplied -Fingerprint ''   # §87: a held apply is never what a later pull compares against
     JobLog ("==== downlink JOB HELD ({0}; NEEDS APPROVAL -- see the engine-apply step) ====" -f $(if ($WhatIfMode) { 'planned' } else { 'applied' })) 'WARN'
     Stop-DownlinkJob -Code 0 -State held -Detail ("{0}; a policy change set NEEDS APPROVAL (see the engine-apply step)" -f $(if ($WhatIfMode) { 'planned' } else { 'applied' }))
 }
@@ -353,6 +404,7 @@ if ($ok) {
     $__base = $(if ($WhatIfMode) { 'planned (WhatIf)' } else { 'pulled, verified and applied' })
     # Capped: this lands in a stored result the page renders, not in a log file.
     if ($__planDetail.Length -gt 900) { $__planDetail = $__planDetail.Substring(0, 897) + '...' }
+    if ($pullFp) { Save-DownlinkApplied -Fingerprint $pullFp }   # §87: a clean apply -- the next unchanged trigger skips
     Stop-DownlinkJob -Code 0 -State succeeded -Detail $(if ($__planDetail) { "$__base -- $__planDetail" } else { $__base })
 } else {
     JobLog "==== downlink JOB FAILED ====" 'ERROR'

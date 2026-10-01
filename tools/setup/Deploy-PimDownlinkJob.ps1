@@ -27,7 +27,7 @@
     identity is a Managed Identity (AcrPull + SQL contained user) or an SPN cert
     whose thumbprint/clientId are read from the store and passed as env (not a value).
 
-    PURE plan brain: engine/_shared/PIM-DownlinkJob.ps1 (offline-tested in
+    PURE plan brain: engine/msp/PIM-DownlinkJob.ps1 (offline-tested in
     tests/Test-PimDownlinkJob.ps1). This wrapper only probes existence + invokes az.
     PS 5.1-safe; REST/cert + MI only (no PowerShell modules).
 
@@ -155,7 +155,7 @@ function Warn($m){ Write-Host "    $m" -ForegroundColor Yellow }
 
 $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # SOLUTIONS\PIM4EntraPS
-. (Join-Path $solRoot 'engine\_shared\PIM-DownlinkJob.ps1')
+. (Join-Path $solRoot 'engine\msp\PIM-DownlinkJob.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-JobCadence.ps1')   # the cadence gate's skip marker (-Verify)
 
 # Shared setup helpers. NOT best-effort any more: this script now needs

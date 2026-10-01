@@ -22,7 +22,7 @@
     hand is precisely how it gets violated.
 
     📌 IT ALSO ADDS THE OPTIONAL COLUMNS THE BUNDLE ALREADY EXPECTS. The bundle producer
-    (Get-PimBaselineBundlePayload, engine/_shared/PIM-BaselinePublish.ps1, run by the managing tenant's ca-pim-publish job) selects `Target, TapLifetimeHours, ManagerEmail` (71.17: no longer CreateTap -- a
+    (Get-PimBaselineBundlePayload, engine/msp/PIM-BaselinePublish.ps1, run by the managing tenant's ca-pim-publish job) selects `Target, TapLifetimeHours, ManagerEmail` (71.17: no longer CreateTap -- a
     TAP is enforced for every Entra admin) and falls back with "(no TapLifetimeHours/ManagerEmail in
     pim.CentralAdmins -- the downlink will apply its own default)" when they are absent. 📌 71.19: ManagerEmail is LEGACY -- an admin's mail and TAP go to its
     SPONSOR DEPARTMENT's owners (Account-Definitions-Admins.Department -> PIM-Definitions-Departments.Owners), which is

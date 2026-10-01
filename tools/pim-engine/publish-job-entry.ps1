@@ -17,7 +17,7 @@
      0b. REQ-Y: refuses (exit 2, nothing published) unless the managing tenant holds a Pro licence that covers MSP for its tenant
          (Invoke-PimMspLicenseGate, engine/_shared/PIM-License.ps1); a licence in its grace window publishes with a WARN.
       1. reads the managing tenant store (Azure SQL, as the identity -- its own reader database user (SELECT on the 4 registry tables))
-      2. builds the payload with the producer (engine/_shared/PIM-BaselinePublish.ps1; the pre-71.35 host publisher
+      2. builds the payload with the producer (engine/msp/PIM-BaselinePublish.ps1; the pre-71.35 host publisher
          setup/New-PimBaselineBundle.ps1 is retired, SEC-27). An optional table/column that cannot be READ (anything
          but a genuinely missing object) refuses the publish -- it is never read as "absent", which would widen reach
       3. signs it through Key Vault: RS256 over the SHA-256 digest with a NON-EXPORTABLE key
@@ -118,10 +118,10 @@ if (-not $mspLic.ok) { Stop-PublishJob -Code 2 -State failed -Detail "$($mspLic.
 
 . (Join-Path $shared 'PIM-AccountRest.ps1')          # Send-PimRestBlob (Put Blob, bearer token)
 . (Join-Path $shared 'PIM-ChangeQueue.ps1')
-. (Join-Path $shared 'PIM-Baseline.ps1')             # the verifier the managed tenants run
-. (Join-Path $shared 'PIM-BaselinePublish.ps1')      # the shared producer + the Key Vault signer
+. (Join-Path $shared '..\msp\PIM-Baseline.ps1')             # the verifier the managed tenants run
+. (Join-Path $shared '..\msp\PIM-BaselinePublish.ps1')      # the shared producer + the Key Vault signer
 # REQ-REV-DOWN-1 / REQ-REN-1: the authorised withdrawals + renames this bundle carries (pure).
-$__dlIntents = Join-Path $shared 'PIM-DownlinkIntents.ps1'
+$__dlIntents = Join-Path $shared '..\msp\PIM-DownlinkIntents.ps1'
 if (Test-Path -LiteralPath $__dlIntents) { . $__dlIntents }
 
 JobLog ("store {0}/{1} -> https://{2}.blob.core.windows.net/{3}/ ; signing key {4} ; valid {5} days ; scope {6}" -f $SqlServer, $SqlDatabase, $StorageAccount, $Container, $SigningKeyId, $vd, $Scope)

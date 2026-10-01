@@ -3,7 +3,7 @@
 .SYNOPSIS
     §31.3 Phase-2 -- the ring-gated master->managed (managed tenant) admin/permission SYNC
     (downlink) live wrapper. Thin orchestrator over the PURE core in
-    engine/_shared/PIM-Downlink.ps1 (Invoke-PimManagedDownlink).
+    engine/msp/PIM-Downlink.ps1 (Invoke-PimManagedDownlink).
 
 .DESCRIPTION
     For ONE managed tenant (S5 central-hosted | S6 local-hosted):
@@ -27,7 +27,7 @@
              next tick -- pull, not push. Needs -SlaveSqlServer and a managed tenant default domain.
          Either way the MASTER never writes into the managed tenant.
 
-    PURE decisions live in engine/_shared/PIM-Downlink.ps1 (offline-tested in
+    PURE decisions live in engine/msp/PIM-Downlink.ps1 (offline-tested in
     tests/Test-PimDownlink.ps1). This wrapper only gathers facts (pull + read
     registry) and acts. PS 5.1-safe; SPN + certificate only (never interactive,
     never a secret, never device-code).
@@ -182,7 +182,7 @@ $shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
 . (Join-Path $shared 'PIM-Rest.ps1')
 . (Join-Path $shared 'PIM-SqlStore.ps1')
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
-. (Join-Path $shared 'PIM-Baseline.ps1')
+. (Join-Path $shared '..\msp\PIM-Baseline.ps1')
 # BUG-29: the vendored platform ring core. ⚠️ Until this line, PIM-RingGate.ps1 was
 # dot-sourced by NOTHING except its own test -- so the version gate was not merely
 # "called by nobody", its functions were not even DEFINED in any runtime process.

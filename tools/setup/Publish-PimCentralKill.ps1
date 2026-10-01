@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     The managed-tenant pull already CONSUMES a signed kind='central-kill' manifest at <bundle container>/central-kill.json
-    (engine/_shared/PIM-Downlink.ps1: Get-PimCentralKillSource -> Get-PimCentralKillState). A verified manifest with
+    (engine/msp/PIM-Downlink.ps1: Get-PimCentralKillSource -> Get-PimCentralKillState). A verified manifest with
     entries is ACTIVE: the pull refuses, loudly, naming who is killed, until the manifest is withdrawn or expires. 404 at
     that location = no kill. Nothing on a managing tenant published one until this script.
 
@@ -69,7 +69,7 @@ function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 
 . (Join-Path $shared 'PIM-Rest.ps1')
 . (Join-Path $shared 'PIM-AccountRest.ps1')          # Send-PimRestBlob (Put Blob, bearer token)
-. (Join-Path $shared 'PIM-BaselinePublish.ps1')      # the producer + the Key Vault signer (loads PIM-Downlink + PIM-Baseline)
+. (Join-Path $shared '..\msp\PIM-BaselinePublish.ps1')      # the producer + the Key Vault signer (loads PIM-Downlink + PIM-Baseline)
 
 $Container = "$Container".Trim()
 if ($Container -notmatch '^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]$') { Write-Host "REFUSED: '$Container' is not a blob container name" -ForegroundColor Red; exit 2 }

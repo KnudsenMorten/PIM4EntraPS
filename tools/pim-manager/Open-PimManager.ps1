@@ -196,12 +196,12 @@ if (Test-Path -LiteralPath $_dirSearchLib) { . $_dirSearchLib }
 $_mapRiskLib = Join-Path $solutionRoot 'engine\_shared\PIM-MapRisk.ps1'
 if (Test-Path -LiteralPath $_mapRiskLib) { . $_mapRiskLib }
 
-# Tier-impact report (engine/_shared/PIM-TierImpact.ps1, REQUIREMENTS §23 /
+# Tier-impact report (engine/tier-report/PIM-TierImpact.ps1, REQUIREMENTS §23 /
 # ROADMAP #24) -- pure function over the SAME graph model the Map renders:
 # every user with ANY path (incl. indirect via nested groups) to a Tier-0/Tier-1
 # target. Powers /api/tier-impact. Dot-sourced standalone (no SQL); reuses the
 # PIM-MapRisk reach helpers loaded above.
-$_tierImpactLib = Join-Path $solutionRoot 'engine\_shared\PIM-TierImpact.ps1'
+$_tierImpactLib = Join-Path $solutionRoot 'engine\tier-report\PIM-TierImpact.ps1'
 if (Test-Path -LiteralPath $_tierImpactLib) { . $_tierImpactLib }
 
 # Workload live-crawl map + reconciliation (engine/_shared/PIM-WorkloadMap.ps1) --
@@ -231,7 +231,7 @@ $_queueDisplayLib = Join-Path $solutionRoot 'engine\_shared\PIM-QueueDisplay.ps1
 if (Test-Path -LiteralPath $_queueDisplayLib) { . $_queueDisplayLib }
 # REQ-REV-DOWN-1 / REQ-REN-1 (2026-09-22): the authorised withdrawals + renames the managing tenant records
 # here and the publish job carries in the signed bundle (/api/downlink-intents).
-$_dlIntentLib = Join-Path $solutionRoot 'engine\_shared\PIM-DownlinkIntents.ps1'
+$_dlIntentLib = Join-Path $solutionRoot 'engine\msp\PIM-DownlinkIntents.ps1'
 if (Test-Path -LiteralPath $_dlIntentLib) { . $_dlIntentLib }
 # PIM policy templates live in SQL (pim.Settings 'PolicyTemplates'), seeded once from the shipped
 # templates on a fresh store (never overwritten -- BUG-55). The validator reads that store.
@@ -285,18 +285,18 @@ if (Test-Path -LiteralPath $_permLib) { . $_permLib }
 . (Join-Path $solutionRoot 'engine\_shared\PIM-OwnerPortal.ps1')
 # §83 auto-extend governance: the upcoming extensions (owner page, Approve / Deny) and the policy (lead time, default ON).
 . (Join-Path $solutionRoot 'engine\_shared\PIM-AutoExtend.ps1')
-# §79.9 THE DELEGATED MODEL, write side (engine/_shared/PIM-DelegatedModel.ps1): a delegated caller (role Delegated, or a
+# §79.9 THE DELEGATED MODEL, write side (engine/portal-admins/PIM-DelegatedModel.ps1): a delegated caller (role Delegated, or a
 # Reader who owns a department) stages and commits ONLY rows they own, inside their profile (derived: level 3+, tier 1+,
 # Azure only under their departments' AzureScopes).
-. (Join-Path $solutionRoot 'engine\_shared\PIM-DelegatedModel.ps1')
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\portal-admins\PIM-DelegatedModel.ps1')) { . (Join-Path $solutionRoot 'engine\portal-admins\PIM-DelegatedModel.ps1') }   # §84 Pro: loaded only when present
 # REQ-DISC-2 (operator 2026-09-26): the Discovery inbox -- one list of what is new, each item Create / Ignore / Re-add.
-. (Join-Path $solutionRoot 'engine\_shared\PIM-AzureDiscovery.ps1')
-. (Join-Path $solutionRoot 'engine\_shared\PIM-DiscoveryInbox.ps1')
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\discovery\PIM-AzureDiscovery.ps1')) { . (Join-Path $solutionRoot 'engine\discovery\PIM-AzureDiscovery.ps1') }   # §84 Pro: loaded only when present
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\discovery\PIM-DiscoveryInbox.ps1')) { . (Join-Path $solutionRoot 'engine\discovery\PIM-DiscoveryInbox.ps1') }   # §84 Pro: loaded only when present
 # §80.2 server onboarding: a Discovery 'ad-server' item is named by the customer's PIM-for-AD naming (pure functions only
 # are used here -- the AD writes are the hybrid worker's).
-. (Join-Path $solutionRoot 'engine\_shared\PIM-HybridAdGroups.ps1')
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\hybrid-ad\PIM-HybridAdGroups.ps1')) { . (Join-Path $solutionRoot 'engine\hybrid-ad\PIM-HybridAdGroups.ps1') }   # §84 Pro: loaded only when present
 # REQ-AR-2 (operator 2026-09-26): access reviews PER DEPARTMENT, driven by review rules (Settings > Access reviews).
-. (Join-Path $solutionRoot 'engine\_shared\PIM-AccessReviewCycle.ps1')
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\access-reviews\PIM-AccessReviewCycle.ps1')) { . (Join-Path $solutionRoot 'engine\access-reviews\PIM-AccessReviewCycle.ps1') }   # §84 Pro: loaded only when present
 # REQ-U (prereqs) -- the workload-prerequisite catalog + view (engine/_shared/PIM-WorkloadPrereqs.ps1): behind
 # GET /api/workload-prereqs, the green / amber / red chips that show whether tools\setup\Initialize-PimWorkloadPrereqs.ps1
 # has run for a workload. The same definitions the setup script and tests\Test-PimWorkloadPrereqs.ps1 use.
@@ -428,22 +428,22 @@ if (Test-Path -LiteralPath $_notifyLib) { . $_notifyLib }
 $_failLib = Join-Path $solutionRoot 'engine\_shared\PIM-FailureCatalog.ps1'
 if (Test-Path -LiteralPath $_failLib) { . $_failLib }
 
-# MSP downlink surface (engine/_shared/PIM-DownlinkManager.ps1) -- powers the
+# MSP downlink surface (engine/msp/PIM-DownlinkManager.ps1) -- powers the
 # MSP Downlink tab: /api/downlink (per-relationship plan), /api/downlink/policy
 # (the per-relationship projection rules) and /api/downlink/run (dry-run + apply).
 # It COMPOSES the pure core (Get-PimDownlinkPlan over the SIGNED baseline) and never
 # decides anything itself, so the preview and the apply cannot disagree about who
 # ends up holding privilege in a managed tenant.
-$_downlinkLib = Join-Path $solutionRoot 'engine\_shared\PIM-DownlinkManager.ps1'
+$_downlinkLib = Join-Path $solutionRoot 'engine\msp\PIM-DownlinkManager.ps1'
 if (Test-Path -LiteralPath $_downlinkLib) { . $_downlinkLib }
 
-# REQ-N -- the managed-tenant REGISTRY (engine/_shared/PIM-MspRegistry.ps1): the ONE writer of a platform.Tenants row,
+# REQ-N -- the managed-tenant REGISTRY (engine/msp/PIM-MspRegistry.ps1): the ONE writer of a platform.Tenants row,
 # shared with tools/setup/Register-PimManagedTenant.ps1 (/api/msp/tenants). REQ-O -- the REPLICATION OVERVIEW
-# (engine/_shared/PIM-ReplicationOverview.ps1): every replicable row and the tenants it reaches, laid out from the SAME
+# (engine/msp/PIM-ReplicationOverview.ps1): every replicable row and the tenants it reaches, laid out from the SAME
 # reach preview the plan computes (/api/msp/replication/overview). Both are MSP-master surfaces.
-$_mspRegistryLib = Join-Path $solutionRoot 'engine\_shared\PIM-MspRegistry.ps1'
+$_mspRegistryLib = Join-Path $solutionRoot 'engine\msp\PIM-MspRegistry.ps1'
 if (Test-Path -LiteralPath $_mspRegistryLib) { . $_mspRegistryLib }
-$_replOverviewLib = Join-Path $solutionRoot 'engine\_shared\PIM-ReplicationOverview.ps1'
+$_replOverviewLib = Join-Path $solutionRoot 'engine\msp\PIM-ReplicationOverview.ps1'
 if (Test-Path -LiteralPath $_replOverviewLib) { . $_replOverviewLib }
 
 # Operational-policy settings (engine/_shared/PIM-OperationalPolicy.ps1) -- the
@@ -495,11 +495,11 @@ if (Test-Path -LiteralPath $_scenarioProfileLib) { . $_scenarioProfileLib }
 $_jobCadenceLib = Join-Path $solutionRoot 'engine\_shared\PIM-JobCadence.ps1'
 if (Test-Path -LiteralPath $_jobCadenceLib) { . $_jobCadenceLib }
 
-# Discovery layer (engine/_shared/PIM-Discovery.ps1) -- REST enumerators + pure
+# Discovery layer (engine/discovery/PIM-Discovery.ps1) -- REST enumerators + pure
 # planners. Powers the Settings "Import departments from Entra" action
 # (Import-PimEntraDepartments / Get-PimEntraDepartmentImportPlan); REST-only via
 # PIM-Rest (loaded above), engine stays the writer for the persisted dept list.
-$_discoveryLib = Join-Path $solutionRoot 'engine\_shared\PIM-Discovery.ps1'
+$_discoveryLib = Join-Path $solutionRoot 'engine\discovery\PIM-Discovery.ps1'
 if (Test-Path -LiteralPath $_discoveryLib) { . $_discoveryLib }
 
 # Audit-trail query core (engine/_shared/PIM-AuditQuery.ps1, REQUIREMENTS s28 [H6]
@@ -922,7 +922,7 @@ function Resolve-PimManagerMailUrl {
 }
 function Get-PimManagerDelegatedContext {
     <#
-      §79.9 THE DELEGATED MODEL, write side (engine/_shared/PIM-DelegatedModel.ps1). For a caller BELOW Admin: are they a
+      §79.9 THE DELEGATED MODEL, write side (engine/portal-admins/PIM-DelegatedModel.ps1). For a caller BELOW Admin: are they a
       delegated administrator, and under which profile? Delegated = ManagerAccess role 'Delegated', or a Reader who OWNS a
       department (derived; operator decision 2026-09-25 "derived, capped at level 3"). Pro ('access.delegated'): without the
       licence nobody is delegated (Limit-PimManagerRoleByLicence caps it). Fresh per call (no cache): a definition committed a
@@ -1816,10 +1816,10 @@ if (Test-Path -LiteralPath $_activeAssignLib) { . $_activeAssignLib }
 # registers the handler (Register-PimDriftSnapshotHandler) and never calls Invoke-PimDriftSnapshot.
 $_driftSnapLib = Join-Path $solutionRoot 'engine\_shared\PIM-DriftSnapshot.ps1'
 if (Test-Path -LiteralPath $_driftSnapLib) { . $_driftSnapLib }
-# REQ-I + REQ-U (Coverage & gaps page): the coverage REPORT reader (engine/_shared/PIM-Coverage.ps1). The report is computed
+# REQ-I + REQ-U (Coverage & gaps page): the coverage REPORT reader (engine/coverage/PIM-Coverage.ps1). The report is computed
 # ONLY by the scheduler (job 'coverage'); this process reads pim.TenantCache 'coverage-report' and queues a refresh -- it never
 # registers the handler and never calls Invoke-PimCoverageJob / Get-PimCoverageInputs.
-$_coverageLib = Join-Path $solutionRoot 'engine\_shared\PIM-Coverage.ps1'
+$_coverageLib = Join-Path $solutionRoot 'engine\coverage\PIM-Coverage.ps1'
 if (Test-Path -LiteralPath $_coverageLib) { . $_coverageLib }
 if (Test-Path -LiteralPath $validator)  { . $validator }
 
@@ -6692,7 +6692,7 @@ function Get-PimCoverageCached {
     # trigger (Request-PimCoverageRefresh, read back) and returns at once -- the Manager never computes the report.
     param([switch]$QueueRefresh, [string]$Reason = 'manager', [datetime]$NowUtc = [datetime]::UtcNow)
     if (-not (Get-Command ConvertTo-PimCoverageView -ErrorAction SilentlyContinue)) {
-        throw 'engine/_shared/PIM-Coverage.ps1 is not loaded -- the coverage report cannot be read.'
+        throw 'engine/coverage/PIM-Coverage.ps1 is not loaded -- the coverage report cannot be read.'
     }
     $entry = $null
     if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) { $entry = Get-PimTenantCacheEntry -Kind 'coverage-report' }
@@ -9269,7 +9269,7 @@ function Handle-Request {
         }
 
         # Access Review overview (read-only). Surfaces the engine's access-review
-        # data layer (engine/_shared/PIM-AccessReviews.ps1 -> Get-PimAccessReviewOverview)
+        # data layer (engine/access-reviews/PIM-AccessReviews.ps1 -> Get-PimAccessReviewOverview)
         # for the "Access Review" GUI tab: review name, scope/target, reviewers,
         # recurrence, current-instance status + due date, pending/approved/denied
         # counts. Strictly read-only (no decisions recorded). BUG-195: an empty tenant is an
@@ -15364,7 +15364,7 @@ function Handle-Request {
         if ($path -eq '/api/coverage' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command ConvertTo-PimCoverageView -ErrorAction SilentlyContinue)) {
-                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; supported = $false; error = 'the coverage report reader (engine/_shared/PIM-Coverage.ps1) is not loaded in this Manager.' }
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; supported = $false; error = 'the coverage report reader (engine/coverage/PIM-Coverage.ps1) is not loaded in this Manager.' }
                 return 503
             }
             try {
@@ -15390,7 +15390,7 @@ function Handle-Request {
             # REQ-Y: Coverage & gaps is Pro (hard) -- the coverage job is inert without a licence, so a check is refused here.
             if (-not (Test-PimManagerProFeature -Key 'coverage.gaps' -Response $resp)) { return 403 }
             if (-not (Get-Command Request-PimCoverageRefresh -ErrorAction SilentlyContinue)) {
-                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; queued = $false; error = 'the coverage report reader (engine/_shared/PIM-Coverage.ps1) is not loaded in this Manager.' }
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; queued = $false; error = 'the coverage report reader (engine/coverage/PIM-Coverage.ps1) is not loaded in this Manager.' }
                 return 503
             }
             try {

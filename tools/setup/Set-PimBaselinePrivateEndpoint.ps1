@@ -45,7 +45,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-. (Join-Path $solRoot 'engine\_shared\PIM-MspBuild.ps1')
+. (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 function AzJson { $A = @($args | ForEach-Object { $_ }); $o = & az @A -o json --only-show-errors 2>$null; if ($LASTEXITCODE -ne 0 -or -not "$o".Trim()) { return $null }; return ($o | Out-String | ConvertFrom-Json) }

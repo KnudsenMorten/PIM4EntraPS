@@ -534,7 +534,7 @@ function Test-PimSqlContainedUserReadBack {
 
 function Get-PimBaselinePublishSqlReads {
     <#
-      SEC-39 -- the ONLY objects the signed-baseline publish job reads (engine/_shared/PIM-BaselinePublish.ps1,
+      SEC-39 -- the ONLY objects the signed-baseline publish job reads (engine/msp/PIM-BaselinePublish.ps1,
       Get-PimBaselineBundlePayload). Its database user is granted SELECT on these and nothing else.
       tests/Test-PimBaselinePublishJob.ps1 parses every FROM in the producer and fails when it reads a table
       that is not listed here, so a new read cannot land as a runtime "permission denied".
@@ -1161,4 +1161,15 @@ and on-prem/peered clients resolve the private names. The Manager stays private
 function Show-PimGsaPrivateLinkGuidance {
     [CmdletBinding()] param([string]$ManagerFqdn)
     Write-Host (Get-PimGsaPrivateLinkGuidance -ManagerFqdn $ManagerFqdn) -ForegroundColor Yellow
+}
+
+function Test-PimJobCron {
+    # §84 P1: the 5-field cron check the setup scripts need, kept FREE -- it used to come from PIM-DownlinkJob.ps1 (MSP,
+    # a Pro file) and a Community install could not have loaded it. Same rule as Test-PimDownlinkJobCron.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Cron)
+    $c = "$Cron".Trim()
+    if (-not $c) { return @{ ok = $false; reason = 'cron expression is blank' } }
+    $fields = @($c -split '\s+' | Where-Object { "$_".Trim() })
+    if ($fields.Count -ne 5) { return @{ ok = $false; reason = "cron must have 5 fields (min hour day-of-month month day-of-week); got $($fields.Count): '$c'" } }
+    return @{ ok = $true; reason = "valid 5-field cron '$c' (UTC)" }
 }

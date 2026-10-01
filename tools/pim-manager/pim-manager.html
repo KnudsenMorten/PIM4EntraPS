@@ -9036,7 +9036,7 @@
   // ----- Coverage & gaps (tab 'coverage') -- REQ-I + REQ-U --------------------------------------------------------------
   // Operator, 2026-09-19: "see the difference between existing permission groups fx. against entra roles and then any new
   // roles that exist which has NOT been created ... show gaps/missing roles ... create fast ... prestage all so i can
-  // multiselect". The scheduler job 'coverage' (engine/_shared/PIM-Coverage.ps1) compares every workload's live catalog
+  // multiselect". The scheduler job 'coverage' (engine/coverage/PIM-Coverage.ps1) compares every workload's live catalog
   // with pim.Rows and stores the report; this page reads it (GET /api/coverage) and never computes anything.
   // 🔒 A Gap's proposal is made of UNITS (one group + its binding). Every unit is pre-selected; staging puts a unit into
   //    Pending changes WHOLE or not at all (wuxStage, the wizards' own path) -- the normal review / commit follows.

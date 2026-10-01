@@ -34,7 +34,7 @@ if ($PSScriptRoot) {
         if (Test-Path -LiteralPath $__dl) { . $__dl }
     }
     if (-not (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
-        $__ss = Join-Path $PSScriptRoot 'PIM-SqlStore.ps1'
+        $__ss = Join-Path $PSScriptRoot '..\_shared\PIM-SqlStore.ps1'
         if (Test-Path -LiteralPath $__ss) { . $__ss }
     }
 }

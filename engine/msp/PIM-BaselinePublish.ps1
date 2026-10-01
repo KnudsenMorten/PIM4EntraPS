@@ -42,7 +42,7 @@ if ($PSScriptRoot) {
     }
     # The published-entity list (shared with the Manager's publish-on-commit hook) and the job's cadence defaults.
     if (-not (Test-Path Function:\Get-PimBaselinePublishedEntities)) {
-        $__jc = Join-Path $PSScriptRoot 'PIM-JobCadence.ps1'
+        $__jc = Join-Path $PSScriptRoot '..\_shared\PIM-JobCadence.ps1'
         if (Test-Path -LiteralPath $__jc) { . $__jc }
     }
 }

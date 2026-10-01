@@ -65,7 +65,7 @@ if (-not (Get-Command Get-PimRowProp -ErrorAction SilentlyContinue)) {
 # (hydrated into $global:PIM_NamingConventions) through the SAME helpers the Entra path and the
 # Manager use -- nothing here hard-codes a '-AD' suffix, an 'Admin-' prefix or a level/tier marker.
 if (-not (Get-Command Get-PimNamingConvention -ErrorAction SilentlyContinue)) {
-    $__pimNamingLib = Join-Path $PSScriptRoot 'PIM-Naming.ps1'
+    $__pimNamingLib = Join-Path $PSScriptRoot '..\_shared\PIM-Naming.ps1'
     if (Test-Path -LiteralPath $__pimNamingLib) { . $__pimNamingLib }
 }
 

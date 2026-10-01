@@ -609,13 +609,13 @@ function Test-PimScenarioDescriptor {
 # and Invoke-PimScenarioDeploy (the scenario-bound engine runner). Idempotent.
 # ---------------------------------------------------------------------------
 if ($PSScriptRoot -and -not (Get-Command Invoke-PimManagedDownlink -ErrorAction SilentlyContinue)) {
-    $__pimDownlink = Join-Path $PSScriptRoot 'PIM-Downlink.ps1'
+    $__pimDownlink = Join-Path $PSScriptRoot '..\msp\PIM-Downlink.ps1'
     if (Test-Path -LiteralPath $__pimDownlink) { . $__pimDownlink }
 }
 # REQ-REV-DOWN-1 / REQ-REN-1: the pull reads the bundle's authorised withdrawals through these.
 # Loaded beside the downlink itself -- without them Invoke-PimManagedDownlink still runs and simply
 # withdraws nothing (Get-Command guards), which is the safe direction.
 if ($PSScriptRoot -and -not (Get-Command Select-PimDownlinkIntents -ErrorAction SilentlyContinue)) {
-    $__pimDlIntents = Join-Path $PSScriptRoot 'PIM-DownlinkIntents.ps1'
+    $__pimDlIntents = Join-Path $PSScriptRoot '..\msp\PIM-DownlinkIntents.ps1'
     if (Test-Path -LiteralPath $__pimDlIntents) { . $__pimDlIntents }
 }

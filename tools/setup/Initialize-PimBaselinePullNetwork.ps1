@@ -39,7 +39,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-. (Join-Path $solRoot 'engine\_shared\PIM-MspBuild.ps1')
+. (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 $sub = @('--subscription', "$SubscriptionId".Trim())

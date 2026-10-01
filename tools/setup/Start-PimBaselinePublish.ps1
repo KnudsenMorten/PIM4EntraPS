@@ -27,7 +27,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot '_PimAz.ps1')         # the guarded az shadow (an az WARNING on stderr must not abort)
-. (Join-Path $solRoot 'engine\_shared\PIM-BaselinePublish.ps1')
+. (Join-Path $solRoot 'engine\msp\PIM-BaselinePublish.ps1')
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 $sub = @('--subscription', $SubscriptionId)

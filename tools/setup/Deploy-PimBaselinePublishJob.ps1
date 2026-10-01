@@ -63,8 +63,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)
-. (Join-Path $solRoot 'engine\_shared\PIM-Baseline.ps1')
-. (Join-Path $solRoot 'engine\_shared\PIM-BaselinePublish.ps1')
+. (Join-Path $solRoot 'engine\msp\PIM-Baseline.ps1')
+. (Join-Path $solRoot 'engine\msp\PIM-BaselinePublish.ps1')
 . (Join-Path $here '_PimAz.ps1')                 # the guarded az shadow (an az WARNING on stderr must not abort)
 . (Join-Path $here '_PimUpdateRing.ps1')          # New-PimSubscriptionArmInvoker, ConvertTo-PimJobEnvMap
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }

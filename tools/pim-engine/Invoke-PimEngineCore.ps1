@@ -143,8 +143,8 @@ if ($global:PIM_ActiveScenario) {
 . "$shared\PIM-ChangeQueue.ps1"
 . "$shared\PIM-QueueActions.ps1"   # §65 -- the ACTION drain (see PIM-Functions.psm1)
 . "$shared\PIM-PermissionWizard.ps1"      # naming helpers (ConvertTo-PimNameSegment / New-PimPermissionGroupName / scope-depth+plane) for discovery
-. "$shared\PIM-AzureDiscovery.ps1"        # Azure scope reconcile planner (Power BI discovery mirrors its shape)
-. "$shared\PIM-Discovery.ps1"             # Power BI / service-role / auto-map / delta discovery layer (REST-only)
+if (Test-Path -LiteralPath "$shared\..\discovery\PIM-AzureDiscovery.ps1") { . "$shared\..\discovery\PIM-AzureDiscovery.ps1" }   # §84 Pro: loaded only when present        # Azure scope reconcile planner (Power BI discovery mirrors its shape)
+if (Test-Path -LiteralPath "$shared\..\discovery\PIM-Discovery.ps1") { . "$shared\..\discovery\PIM-Discovery.ps1" }   # §84 Pro: loaded only when present             # Power BI / service-role / auto-map / delta discovery layer (REST-only)
 . "$shared\PIM-ContextBuilder.ps1"
 # 🔴 2026-09-20 -- LOADED EXPLICITLY, because the PREFLIGHT below refuses to run without a stored naming
 # convention and that guard is written as `if (Get-Command Test-PimNamingConventionsUsable ...)`. This
@@ -157,8 +157,8 @@ if ($global:PIM_ActiveScenario) {
 . "$shared\PIM-EngineCore.ps1"
 . "$shared\PIM-DisableGuard.ps1"                # account-disable circuit breaker (incident 2026-06-15)
 . "$shared\PIM-Notify.ps1"                      # mail notifications (REST sendMail)
-. "$shared\PIM-HybridAd.ps1"                    # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
-. "$shared\PIM-HybridAdGroups.ps1"              # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)
+if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAd.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAd.ps1" }   # §84 Pro: loaded only when present                    # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
+if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1" }   # §84 Pro: loaded only when present              # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)
 . "$shared\PIM-EngineProviders.ps1"
 # 🔒 No filters FILE (operator, 2026-09-12: "we dont support files in pim v2" -- "we support filters,
 # but from sql"). The v1 Filters.locked.ps1 only fed filtered lists no v2 code reads; v2 filters live in

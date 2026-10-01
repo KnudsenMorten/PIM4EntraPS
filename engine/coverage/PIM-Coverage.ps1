@@ -105,10 +105,10 @@ function Initialize-PimCoverageNaming {
     # The naming + derivation helpers (tenant pattern). Loaded on demand so the Manager, which only reads the stored
     # report, does not have to carry them.
     if (-not (Get-Command Resolve-PimGroupNameFromTag -ErrorAction SilentlyContinue)) {
-        $n = Join-Path $PSScriptRoot 'PIM-Naming.ps1'; if (Test-Path -LiteralPath $n) { . $n }
+        $n = Join-Path $PSScriptRoot '..\_shared\PIM-Naming.ps1'; if (Test-Path -LiteralPath $n) { . $n }
     }
     if (-not (Get-Command Get-PimEntraDerivation -ErrorAction SilentlyContinue)) {
-        $w = Join-Path $PSScriptRoot 'PIM-PermissionWizard.ps1'; if (Test-Path -LiteralPath $w) { . $w }
+        $w = Join-Path $PSScriptRoot '..\_shared\PIM-PermissionWizard.ps1'; if (Test-Path -LiteralPath $w) { . $w }
     }
 }
 
