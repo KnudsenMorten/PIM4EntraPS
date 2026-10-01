@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    71.18 -- THE ONE-SHOT MSP BUILD: an MSP MASTER (S3) or a MANAGED tenant (S6, locally hosted pull), end to end, from a
+    71.18 -- THE ONE-SHOT MSP BUILD: a managing tenant (S3) or a MANAGED tenant (S6, locally hosted pull), end to end, from a
     machine-local config of ids and names. Signed-in administrator OR certificate identity; the environments it builds
     run as managed identities. Plan by default; -Apply to build.
 
@@ -13,19 +13,19 @@
              prerequisites incl. SQL admin group, image, containers, schema, mail sender, Easy Auth, code, updater, access,
              smoke gate) -> sqlgroup (tick + Manager + troubleshooting identity) -> access (tick Engine Graph set, Manager
              read-only set, Container Apps Jobs Operator on the tick, SchedulerTickJobId) -> scenario
-      master registry -> publishnetwork (storage service endpoint on the master's own subnet) -> storage (public-but-signed:
-             anonymous blob read; the master's subnet allowed, THEN firewall Deny) -> register-<n> + network-<n> (each managed
+      master registry -> publishnetwork (storage service endpoint on the managing tenant's own subnet) -> storage (public-but-signed:
+             anonymous blob read; the managing tenant's subnet allowed, THEN firewall Deny) -> register-<n> + network-<n> (each managed
              tenant: ring + tags, and a storage network rule for its subnet) -> signingkey (non-exportable Key Vault key; PRINTS
              the key id managed tenants pin) -> publishjob (ca-pim-publish: daily Container Apps job, system identity) ->
              publish (start it, wait for Succeeded)   [71.35: no signing host, no certificate, no scheduled task]
-      slave  pullnetwork (storage service endpoint on this environment's subnet; PRINTS the subnet id for the master) ->
+      slave  pullnetwork (storage service endpoint on this environment's subnet; PRINTS the subnet id for the managing tenant) ->
              downlink (pull job: plain blob URL, signature-verified, system identity)
 
-    THE PULL IS PUBLIC-BUT-SIGNED (71.34, DESIGN 13.7). No SAS, no read link, no rotation task, no master credential on the
+    THE PULL IS PUBLIC-BUT-SIGNED (71.34, DESIGN 13.7). No SAS, no read link, no rotation task, no managing tenant credential on the
     managed tenant's side, and nothing in the access path that expires. Trust is the bundle's RSA signature (a pull
-    REFUSES a bundle that does not verify); access is the master storage firewall, which names each managed tenant's
-    subnet. Order: build the MASTER, build the managed tenant (it prints its subnet id), then on the master set
-    slaves[<n>].subnetResourceId and re-run -From network-<n>.
+    REFUSES a bundle that does not verify); access is the managing tenant storage firewall, which names each managed tenant's
+    subnet. Order: build the MASTER, build the managed tenant (it prints its subnet id), then on the managing tenant set
+    managed tenants[<n>].subnetResourceId and re-run -From network-<n>.
 
     Then it PRINTS the operator steps (Get-PimMspOperatorSteps) -- the first-run policy mass-change approval is deliberately
     not automated.
@@ -36,7 +36,7 @@
         another tenant or another subscription is refused; with no sign-in it runs `az login --tenant <tenantId>`), and
         unless no AZURE_CLIENT_SECRET / PIM_CERT_THUMBPRINT / managed-identity variable would make a step authenticate as
         somebody else. The signed-in user is made a member of grp-pim-sql-admins (the store steps connect as that user).
-        (71.35: the daily publish is a Container Apps job on the master's managed identity, so a signed-in master build has
+        (71.35: the daily publish is a Container Apps job on the managing tenant's managed identity, so a signed-in master build has
         no step it cannot run.)
         Roles the signed-in user needs: Owner (or Contributor + User Access Administrator) on the subscription; in Entra,
         Privileged Role Administrator (to grant the managed identities their Microsoft Graph app roles), Application

@@ -365,9 +365,9 @@ function Update-PimAdminsDisableDecision {
         $on = Test-PimAdminValueTrue $l.accountEnabled
         if ($dec.disable -and $on) {
             if ($bg.Count -gt 0 -and (Get-Command Test-PimRowIsBreakGlass -ErrorAction SilentlyContinue) -and (Test-PimRowIsBreakGlass -Row $l -Identifiers $bg)) { [void]$bgHit.Add($k); continue }
-            # 68.6 row 35: a CENTRAL admin's status is decided by the MSP master and arrived in its signed
+            # 68.6 row 35: a CENTRAL admin's status is decided by the managing tenant and arrived in its signed
             # baseline -- that signature is the authorisation. The slave-side StatusChangeCode check
-            # guards the slave's OWN rows only.
+            # guards the managed tenant's OWN rows only.
             if ($dec.statusDriven -and -not ((Get-Command Test-PimAdminRowIsCentral -ErrorAction SilentlyContinue) -and (Test-PimAdminRowIsCentral -Row $d))) {
                 $auth = Test-PimAdminStatusChangeAuthorized -UserPrincipalName "$($l.userPrincipalName)" -ProvidedCode (Get-PimRowProp -Row $d -Names @('StatusChangeCode'))
                 if (-not $auth.authorized) { $unauth[$k] = $auth.reason; continue }
@@ -540,8 +540,8 @@ function New-PimAdminsProvider {
             # The prefix filter above answers "which accounts in this tenant are admin accounts?" and
             # it must stay (BUG-12: without it the whole user population is a removal candidate). But
             # an account NAMED BY A DESIRED ROW is not a discovery question at all -- PIM is already
-            # managing it, by its own store. On a managed tenant those rows arrive from the master
-            # (Owner=MSP) and carry the MASTER's naming, so a slave whose prefixes differ could never
+            # managing it, by its own store. On a managed tenant those rows arrive from the managing tenant
+            # (Owner=MSP) and carry the MASTER's naming, so a managed tenant whose prefixes differ could never
             # see them: the diff said "not present", every tick re-created the account, and the guard
             # that noticed this WITHHELD the admin instead -- naming deciding replication, which is
             # exactly what must not happen.
@@ -739,17 +739,17 @@ function New-PimAdminsProvider {
             } elseif ($dec.desiredEnabled -eq $true -and -not $on -and $dec.mayEnable) {
                 $body['accountEnabled'] = $true; $enabling = $true
             }
-            # 🔴 71.20 -- A DISABLE THAT CAME FROM THE MSP MASTER MUST NEVER BE DROPPED QUIETLY (operator 2026-09-16:
+            # 🔴 71.20 -- A DISABLE THAT CAME FROM THE managing tenant MUST NEVER BE DROPPED QUIETLY (operator 2026-09-16:
             # "if an master admin is synced and he is disabled in master, then that state must also be synced out to
             # slaves"). A guard refusal on a CENTRAL row leaves the customer's directory with an account the MSP has
             # already decided to disable, so it is a FAILED ITEM (job red, alert raised by the guard above), naming the
-            # admin and the guard. A LOCAL row keeps the previous report-only behaviour -- that is the slave's own data
+            # admin and the guard. A LOCAL row keeps the previous report-only behaviour -- that is the managed tenant's own data
             # and its own decision.
             $__central = (Get-Command Test-PimAdminRowIsCentral -ErrorAction SilentlyContinue) -and (Test-PimAdminRowIsCentral -Row $d)
             if ($blocked -and $__central) {
-                throw ("MSP-DISABLE-BLOCKED: the MSP master has this admin as $($dec.reason), but this tenant did NOT disable " +
+                throw ("MSP-DISABLE-BLOCKED: the managing tenant has this admin as $($dec.reason), but this tenant did NOT disable " +
                        "$($item.key): $blocked. The account is still ENABLED here. Fix the guard condition (or approve the pass) " +
-                       "and re-run; the master's decision is not applied until this succeeds.")
+                       "and re-run; the managing tenant's decision is not applied until this succeeds.")
             }
             if ($body.Count -eq 0) {
                 $why = if ($blocked) { "NOT disabled -- $blocked" } else { 'nothing to change' }
@@ -1667,7 +1667,7 @@ function Resolve-PimPrincipalId {
     # + cache. GUIDs pass through. /users/{upn} returns a single object (not .value).
     # FALLBACK (MSP master->slave): when the value is a BARE username (no '@') and the
     # direct lookup yields nothing, retry once as "{UserName}@{targetTenantDefaultDomain}".
-    # The fanout rewrites UserName->UPN when CREATING the slave account, but the desired
+    # The fanout rewrites UserName->UPN when CREATING the managed tenant account, but the desired
     # PIM-Assignments-Admins rows are not rewritten before engine-apply, so the assignment
     # carries the bare central UserName. The fallback ONLY triggers on a no-'@' value whose
     # primary resolution failed -- a real UPN or a value that resolves directly is unchanged.
@@ -6844,7 +6844,7 @@ function New-PimAdminTapProvider {
             }
 
             # Entra allows exactly ONE TAP per user, so a dead pass must be REMOVED before a new
-            # one can be created. This is the step that was done by hand to recover the master.
+            # one can be created. This is the step that was done by hand to recover the managing tenant.
             try {
                 foreach ($old in @(Invoke-PimGraph -All -Path "/users/$uid/authentication/temporaryAccessPassMethods")) {
                     if (-not "$($old.id)".Trim()) { continue }

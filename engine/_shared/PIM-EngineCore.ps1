@@ -348,8 +348,8 @@ function Resolve-PimEngineScope {
 
 # ---- default desired/live helpers -----------------------------------------
 function Get-PimCentralAdminEntityName {
-    # REQUIREMENTS 68.6 row 35: central admins imported from an MSP master live in their OWN entity,
-    # separate from the slave's Account-Definitions-Admins. Identical literal in PIM-Downlink.ps1
+    # REQUIREMENTS 68.6 row 35: central admins imported from a managing tenant live in their OWN entity,
+    # separate from the managed tenant's Account-Definitions-Admins. Identical literal in PIM-Downlink.ps1
     # Invoke-PimDownlinkAdminApply (tests/Test-PimDownlink.ps1 asserts they match).
     'Account-Definitions-Admins-Central'
 }
@@ -365,7 +365,7 @@ function Test-PimAdminRowIsCentral {
 }
 
 function Get-PimDesiredRows {
-    # 68.6 row 35 -- the admin definitions a slave governs are ITS OWN rows plus the central admins
+    # 68.6 row 35 -- the admin definitions a managed tenant governs are ITS OWN rows plus the central admins
     # the downlink imported into a separate entity. They are returned together so no provider can
     # treat a central admin as unmanaged (and prune it); each central row is stamped
     # AdminSource=central so governance follows its source. A local row always wins a name clash
@@ -407,7 +407,7 @@ function Get-PimDesiredRowsFromStore {
     # errored silently -> 0 desired (the engine appeared to do nothing). Resolve the CS
     # from the engine CS / in-memory CS / build from $global:PIM_SqlServer+Database.
     param([Parameter(Mandatory)][string]$Entity,
-          # The central-admin entity is legitimately absent everywhere except on an MSP slave, so
+          # The central-admin entity is legitimately absent everywhere except on a managed tenant, so
           # "no in-memory rows for it" is a resolved empty set there, not an unknown one.
           [switch]$AbsentIsResolved)
     # Resolution tracking: a disable pass must distinguish "desired set is genuinely

@@ -333,7 +333,7 @@ function Get-PimRestToken {
   #
   # Proven live: an S6 (local-slave) run targeting a tenant with ZERO PIM groups reported
   # "Groups live=85" -- the MASTER's group count -- and the verifier then found all six
-  # groups missing from the slave it was supposed to be managing. A write-shaped run would
+  # groups missing from the managed tenant it was supposed to be managing. A write-shaped run would
   # have applied the customer's desired state to the MSP's own tenant.
   #
   # The key is now the full identity: audience + tenant + client + credential KIND (and the
@@ -1107,11 +1107,11 @@ function Get-PimAdminMailRecipientPlan {
     $out['reason'] = "LEGACY: using ManagerEmail ($mgr) on $who. The rule is the sponsor department's owners -- $($out['reason'])"
     return $out
   }
-  # 5. 2026-09-21 (operator: "i cannot set tap on master either" / "we must also get email from slaves when account is
+  # 5. 2026-09-21 (operator: "i cannot set tap on managing tenant either" / "we must also get email from managed tenants when account is
   #    created/replicated down"): with no override, no department owner and no legacy manager, the mail about this admin
   #    (new-admin notice, TAP) goes to THIS tenant's ALERT RECIPIENTS (PIM_AlertRecipient + Manager > Alerting) -- the
   #    people who run the environment. Before, there was nobody to send to, so no TAP could be issued at all and a
-  #    replicated admin arrived in a slave without anyone being told. Reported as 'alert-recipients' so the screens
+  #    replicated admin arrived in a managed tenant without anyone being told. Reported as 'alert-recipients' so the screens
   #    still say "set a sponsor department" for the proper route.
   $alert = @()
   try {

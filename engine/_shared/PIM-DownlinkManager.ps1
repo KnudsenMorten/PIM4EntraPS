@@ -16,12 +16,12 @@
 #   * A Manager in the MASTER holds the MASTER's ambient identity, and
 #     Get-PimSqlConnectionString mints its Azure SQL token from it -- so any connection
 #     aimed at a managed store authenticates as the WRONG tenant. It does not work, and
-#     if it did it would be the master acting inside a customer.
+#     if it did it would be the managing tenant acting inside a customer.
 #
 # 📌 Under the agreed model (framework MSP-3) the managed tenant PULLS the signed
 # baseline, decides locally with its own identity, and its own admin ACCEPTS before
 # anything applies. So everything here is computed from the SIGNED BUNDLE plus the
-# MASTER's own registry -- both of which the master legitimately holds.
+# MASTER's own registry -- both of which the managing tenant legitimately holds.
 #
 # PS 5.1 COMPATIBLE: no ?./??, no ternary, Set-StrictMode -Off, null-guarded.
 # =============================================================================
@@ -43,7 +43,7 @@ if ($PSScriptRoot) {
 
 function Get-PimManagerDownlinkTenants {
     <#
-      The managed relationships from the master registry. Returns @() when the
+      The managed relationships from the managing tenant registry. Returns @() when the
       platform schema is not applied -- a single-tenant deployment has no
       relationships, which is a legitimate empty answer, not an error.
     #>
@@ -65,11 +65,11 @@ ELSE
 
 # --- BUG-175: THE RING THE MASTER PREVIEWS WITH IS ONLY ITS COPY ---------------
 #
-# 🔒 Every ring is LOCAL in the slave (DESIGN; operator 2026-09-18). The real pull is gated by the managed tenant's
-# OWN -SlaveRing -- its downlink job argument, set in the slave -- and nothing reports it back to the master. What the
+# 🔒 Every ring is LOCAL in the managed tenant (DESIGN; operator 2026-09-18). The real pull is gated by the managed tenant's
+# OWN -SlaveRing -- its downlink job argument, set in the managed tenant -- and nothing reports it back to the managing tenant. What the
 # master holds is platform.Tenants.Ring, written by Register-PimManagedTenant: a COPY that can drift. So every preview
-# here ("reaches N tenants", the overview, the dry run) is labelled as computed from the master's copy, and the
-# value is never made authoritative. The slave reports the ring that actually decided in its own pull result and
+# here ("reaches N tenants", the overview, the dry run) is labelled as computed from the managing tenant's copy, and the
+# value is never made authoritative. The managed tenant reports the ring that actually decided in its own pull result and
 # acceptance record (slaveRing, slaveRingSource = 'local').
 # One parser for all three previews: they used to disagree on a missing value (the reach preview read it as ring 2,
 # the overview and the dry run as ring 0 -- `[int]("0" + '')`), so one view said "reaches" and another "held back".
@@ -79,10 +79,10 @@ function Get-PimMasterRingCopy {
     $r = 0
     if ($s -match '^\d+$' -and [int]::TryParse($s, [ref]$r)) {
         return [ordered]@{ ring = $r; known = $true; source = 'master-copy'
-                           note = "ring $r is the MASTER'S COPY (platform.Tenants.Ring). The tenant's own local -SlaveRing gates its real pull; this preview is right only while the two agree." }
+                           note = "ring $r is the MANAGING TENANT'S COPY (platform.Tenants.Ring). The tenant's own local -SlaveRing gates its real pull; this preview is right only while the two agree." }
     }
     return [ordered]@{ ring = 2; known = $false; source = 'master-copy'
-                       note = "the master holds no readable ring for this tenant ('$s') -- previewed as ring 2 (the pull job's default). The tenant's own local -SlaveRing decides." }
+                       note = "the managing tenant holds no readable ring for this tenant ('$s') -- previewed as ring 2 (the pull job's default). The tenant's own local -SlaveRing decides." }
 }
 
 # --- §71: THE REPLICATION REACH PREVIEW ---------------------------------------
@@ -121,11 +121,11 @@ function Get-PimReplicationPreview {
         [AllowEmptyCollection()][object[]]$RegistryRows = @(),
         [hashtable]$RegistryReplicate = @{},
         [hashtable]$Entities = @{},
-        # @{ tenantId; name; ring; tags } -- the master's registered managed tenants
+        # @{ tenantId; name; ring; tags } -- the managing tenant's registered managed tenants
         [AllowEmptyCollection()][object[]]$Tenants = @(),
         # tenant id (lowercase) -> @( @{ Mode; GroupTag } ), as the bundle carries it
         [object]$ProjectionPolicy = ([ordered]@{}),
-        # §77.20: the master's Deployment rings (Get-PimReplicationMasterModel); omitted = no ring narrows by tag
+        # §77.20: the managing tenant's Deployment rings (Get-PimReplicationMasterModel); omitted = no ring narrows by tag
         [object[]]$DeploymentRings = @()
     )
     $content = Select-PimBaselineBundleContent -RegistryRows @($RegistryRows) -RegistryReplicate $RegistryReplicate -Entities $Entities
@@ -137,7 +137,7 @@ function Get-PimReplicationPreview {
         if (-not $tid) { continue }
         $name = "$(Get-PimDownlinkValue -Object $t -Key 'name')"; if (-not $name) { $name = "$(Get-PimDownlinkValue -Object $t -Key 'DisplayName')" }; if (-not $name) { $name = $tid }
         $ringRaw = "$(Get-PimDownlinkValue -Object $t -Key 'ring')"; if (-not $ringRaw) { $ringRaw = "$(Get-PimDownlinkValue -Object $t -Key 'Ring')" }
-        # BUG-175: the master's COPY of the ring, labelled as such (see Get-PimMasterRingCopy).
+        # BUG-175: the managing tenant's COPY of the ring, labelled as such (see Get-PimMasterRingCopy).
         $rc = Get-PimMasterRingCopy -Value $ringRaw
         $ring = [int]$rc.ring
         $tagsRaw = Get-PimDownlinkValue -Object $t -Key 'tags'; if ($null -eq $tagsRaw) { $tagsRaw = Get-PimDownlinkValue -Object $t -Key 'Tags' }
@@ -181,9 +181,9 @@ function Get-PimReplicationPreview {
     return [ordered]@{
         tenantCount        = $tlist.Count
         tenants            = @($tlist.ToArray())
-        # BUG-175: "reaches N tenants" is computed from the MASTER'S COPY of each tenant's ring.
+        # BUG-175: "reaches N tenants" is computed from the MANAGING TENANT'S COPY of each tenant's ring.
         ringSource         = 'master-copy'
-        ringNote           = "Computed with the master's copy of each tenant's ring (platform.Tenants.Ring). Each tenant's own local ring gates its real pull, so a tenant whose ring differs from the master's copy receives what ITS ring admits."
+        ringNote           = "Computed with the managing tenant's copy of each tenant's ring (platform.Tenants.Ring). Each tenant's own local ring gates its real pull, so a tenant whose ring differs from the managing tenant's copy receives what ITS ring admits."
         reach              = $out
         warnings           = @($warnings.ToArray())
         notPublished       = @($content.report.notPublished)
@@ -209,7 +209,7 @@ function Get-PimReplicationRowReach {
 
 function Get-PimReplicationMasterModel {
     <#
-      The master's store, read the way Get-PimBaselineBundlePayload reads it, for the reach preview: registry
+      The managing tenant's store, read the way Get-PimBaselineBundlePayload reads it, for the reach preview: registry
       rows (+ Replicate), every replicable entity, the projection policy and the tenant registry.
       -Overlay: entity -> rows that REPLACE the stored rows of that entity (the grid's pending set).
       -Draft:   @( @{ entity; row } ) upserted by natural key (a wizard's not-yet-staged row).
@@ -271,7 +271,7 @@ function Set-PimManagerDownlinkPolicyMany {
       🔒 THE TRANSACTION IS THE WHOLE POINT, NOT TIDINESS. This is DELETE-then-INSERT, and
       "no rows for a tenant" is not a neutral state -- it means ALLOW ALL. So a failure
       between the delete and the last insert would leave the relationship projecting
-      EVERYTHING the master publishes: an error that silently WIDENS privilege. That is
+      EVERYTHING the managing tenant publishes: an error that silently WIDENS privilege. That is
       ESTATE-14's failure class (an unchecked failure presented as a state of the world),
       and it is the reason this cannot be two separate statements.
 
@@ -384,7 +384,7 @@ function Test-PimBaselineDocUrl {
 
 function Get-PimManagerBaselineEnvPlan {
     <#
-      PURE. 71.40 -- the two Manager environment variables that let the hosted Downlink view verify what the master
+      PURE. 71.40 -- the two Manager environment variables that let the hosted Downlink view verify what the managing tenant
       publishes: PIM_BaselineTrustedKeys (the signing key id(s) this Manager pins) and PIM_BaselineDocUrl (the plain URL the
       bundle is published to). Used by Setup-PimContainers (create + update of ca-pim-manager).
       🔒 THE PIN CHECK IS THE PULL JOB'S, NOT A LOOSER COPY: Deploy-PimDownlinkJob.ps1 splits on , ; whitespace and REFUSES
@@ -397,7 +397,7 @@ function Get-PimManagerBaselineEnvPlan {
     $bad  = @($flat | Where-Object { $_ -cnotmatch '^[A-Za-z0-9_-]{43}$' })
     if ($bad.Count) {
         return @{ ok = $false; env = @(); keys = @(); url = ''
-                  reason = "REFUSED: -BaselineTrustedKeys '$($bad -join ', ')' is not a signing key id (43 characters of base64url, as the master's signingkey step prints)." }
+                  reason = "REFUSED: -BaselineTrustedKeys '$($bad -join ', ')' is not a signing key id (43 characters of base64url, as the managing tenant's signingkey step prints)." }
     }
     $keys = New-Object System.Collections.Generic.List[string]
     foreach ($k in $flat) { if (-not $keys.Contains($k)) { $keys.Add($k) } }
@@ -417,7 +417,7 @@ function Get-PimManagerBaselineDoc {
       The signed bundle the Manager plans against. Preference order:
         1. an explicit -Path / $global:PIM_BaselineDocPath (a staged local document)
         2. $env:PIM_BaselineDocPath
-        3. 71.40: an explicit -Url / $global:PIM_BaselineDocUrl / $env:PIM_BaselineDocUrl -- the PLAIN blob URL the master
+        3. 71.40: an explicit -Url / $global:PIM_BaselineDocUrl / $env:PIM_BaselineDocUrl -- the PLAIN blob URL the managing tenant
            publishes to (anonymous read, public-but-signed or over the private endpoint). This is what a HOSTED Manager
            has: no local file ever exists in the container, so without it the Downlink view said "no baseline document
            configured" on every hosted environment, whatever was pinned.
@@ -457,7 +457,7 @@ function Get-PimManagerBaselineDoc {
             try { return @{ doc = ($txt | ConvertFrom-Json); source = $Url; error = '' } }
             catch { return @{ doc = $null; source = $Url; error = "the published baseline at $Url is not valid JSON: $($_.Exception.Message)" } }
         }
-        return @{ doc = $null; source = ''; error = 'no baseline document configured (set PIM_BaselineDocUrl to the plain URL the master publishes to, or PIM_BaselineDocPath to a staged copy)' }
+        return @{ doc = $null; source = ''; error = 'no baseline document configured (set PIM_BaselineDocUrl to the plain URL the managing tenant publishes to, or PIM_BaselineDocPath to a staged copy)' }
     }
     if (-not (Test-Path -LiteralPath $Path)) { return @{ doc = $null; source = "$Path"; error = "baseline document not found at $Path" } }
     try {
@@ -468,7 +468,7 @@ function Get-PimManagerBaselineDoc {
 
 function Get-PimManagerBaselineTrustedKeyIds {
     <#
-      71.35 -- the master signing key ids THIS Manager pins. Read EXACTLY as the managed tenant's pull job
+      71.35 -- the managing tenant signing key ids THIS Manager pins. Read EXACTLY as the managed tenant's pull job
       reads them (tools/pim-engine/downlink-job-entry.ps1 -> Test-PimBaselineDoc -> Get-PimBaselineTrustedKeyIds):
       $global:PIM_BaselineTrustedKeys when set, else $env:PIM_BaselineTrustedKeys; comma / semicolon / space
       separated; anything that is not a 43-character base64url key id is ignored (never widened to "any key").
@@ -487,7 +487,7 @@ function Get-PimManagerBaselineTrustedKeyIds {
 function Get-PimManagerBaselineVerification {
     <#
       The banner's verdict on the signed bundle, with the reason when it is NOT verified.
-      * A bundle carrying signingKey (the master's cloud publish job, Key Vault key) verifies only when its key id
+      * A bundle carrying signingKey (the managing tenant's cloud publish job, Key Vault key) verifies only when its key id
         is PINNED here (Get-PimManagerBaselineTrustedKeyIds) and RS256 checks out.
       * A bundle without signingKey verifies against the embedded CN=PIM4EntraPS-Baseline certificate, exactly as
         before -- no pin needed, and a pin does not change it.
@@ -565,7 +565,7 @@ function Get-PimManagerDownlinkOverview {
         $entry = [ordered]@{
             tenantId       = $tid
             name           = "$($t.DisplayName)"
-            # BUG-175: the MASTER'S COPY of the ring -- labelled, never authoritative (the tenant's local ring gates its pull).
+            # BUG-175: the MANAGING TENANT'S COPY of the ring -- labelled, never authoritative (the tenant's local ring gates its pull).
             ring           = [int]$rc.ring
             ringKnown      = [bool]$rc.known
             ringSource     = 'master-copy'
@@ -590,7 +590,7 @@ function Get-PimManagerDownlinkOverview {
                 # 🔴 NO -SlaveGroupTags, ON PURPOSE. Knowing which tags the customer already
                 # owns would mean READING THEIR STORE, and §22 is explicit that customer data
                 # never leaves their tenant -- a "harmless" read is still a reach-in. It also
-                # could not work: the master's ambient identity has no rights there.
+                # could not work: the managing tenant's ambient identity has no rights there.
                 # Omitting it makes the plan treat every tag the bundle defines as creatable,
                 # which is the honest MASTER-SIDE view: "this is what we would OFFER". Which
                 # of those the customer already owns is resolved by the customer, when they
@@ -651,7 +651,7 @@ function Get-PimManagerDownlinkOverview {
         baselineSource = "$($bl.source)"
         # BUG-175: what every relationship above was planned with.
         ringSource    = 'master-copy'
-        ringNote      = "Each relationship is previewed with the master's copy of its ring (platform.Tenants.Ring). The managed tenant's own local ring gates its real pull and is reported in its acceptance record (slaveRing)."
+        ringNote      = "Each relationship is previewed with the managing tenant's copy of its ring (platform.Tenants.Ring). The managed tenant's own local ring gates its real pull and is reported in its acceptance record (slaveRing)."
         canWrite      = $canWrite
         reason        = $(if (-not $tenants.Count) { 'No managed tenants are registered in platform.Tenants.' } elseif (-not $bl.doc) { "$($bl.error)" } else { '' })
     }
@@ -1089,13 +1089,13 @@ function Invoke-PimManagerDownlinkRun {
       🔴 THIS USED TO WRITE INTO THE MANAGED TENANT'S STORE, AND THAT WAS WRONG TWICE OVER.
       It broke the standing Do-Not in docs/REQUIREMENTS.md §22 -- "MSP never writes to a
       customer tenant" -- and the pull-not-push tenet PIM-Downlink.ps1 asserts throughout.
-      It was also simply broken: a Manager in the master holds the MASTER's ambient
+      It was also simply broken: a Manager in the managing tenant holds the MASTER's ambient
       identity, and Get-PimSqlConnectionString mints its Azure SQL token from that, so the
       connection authenticated as the wrong tenant entirely.
 
       📌 THE AGREED MODEL (framework MSP-3, operator 2026-08-13) removes the need rather
       than licensing it: the managed tenant PULLS, decides locally with its own identity,
-      and its own administrator ACCEPTS before anything applies. So the master side of this
+      and its own administrator ACCEPTS before anything applies. So the managing tenant side of this
       feature PUBLISHES a version; it never reaches in.
 
       What remains is the PREVIEW an MSP operator legitimately needs -- "what would this
@@ -1118,7 +1118,7 @@ function Invoke-PimManagerDownlinkRun {
         # Refuse LOUDLY rather than silently downgrading to a preview: an operator who asked
         # to apply must never be shown a green "done" for something that did nothing.
         return @{ ok = $false; whatIf = $true; detail = @(
-            'REFUSED: the master does not write into a managed tenant.',
+            'REFUSED: the managing tenant does not write into a managed tenant.',
             '',
             'Under the agreed model (framework MSP-3) the managed tenant PULLS the signed baseline,',
             'decides locally with its own identity, and its own administrator ACCEPTS it before',
@@ -1136,7 +1136,7 @@ function Invoke-PimManagerDownlinkRun {
     # Omitting it makes the plan treat every tag the bundle defines as creatable, which is
     # the honest preview -- the tenant resolves the rest itself when it pulls.
     # 🔴 NOT $env:TEMP -- unset in the Linux container (see the sibling call above).
-    # BUG-175: planned with the MASTER'S COPY of the ring, and the preview says so on its first lines.
+    # BUG-175: planned with the MANAGING TENANT'S COPY of the ring, and the preview says so on its first lines.
     $rc = Get-PimMasterRingCopy -Value $t.Ring
     $planArgs = @{ Scenario = 'S6'; Doc = $bl.doc; TenantId = $TenantId; SlaveRing = [int]$rc.ring; LocalRoot = [System.IO.Path]::GetTempPath() }
     $plan = Get-PimDownlinkPlan @planArgs

@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    §31.3 CLOUD-NATIVE -- deploy the master->managed (slave) downlink as an Azure
+    §31.3 CLOUD-NATIVE -- deploy the master->managed (managed tenant) downlink as an Azure
     Container Apps scheduled JOB (cron), NOT a Windows scheduled task. Operator
     directive 2026-06-17: "all run in cloud only compute, in one test"; "run it
     through the containers in the slave".
@@ -15,7 +15,7 @@
 
     Two placements (REQUIREMENTS §31.2 matrix):
       * S5 -> the Job runs in the CENTRAL ACA env (cae-pim, MSP tenant) and the
-              MULTI-TENANT SPN / MI acts INTO the slave. The central env already
+              MULTI-TENANT SPN / MI acts INTO the managed tenant. The central env already
               exists (Setup-PimContainers).
       * S6 -> the Job runs in the SLAVE tenant's OWN ACA env using a LOCAL SPN / MI.
               That env must be stood up first (see -EnvName + the prereq note below).
@@ -32,13 +32,13 @@
     PS 5.1-safe; REST/cert + MI only (no PowerShell modules).
 
 .PARAMETER Scenario      S5 | S6 (placement + identity model).
-.PARAMETER TenantId      The managed/slave tenant id.
+.PARAMETER TenantId      The managed tenant id.
 .PARAMETER SlaveRing     THE ring of this managed tenant (0 = dev, 1 = test, 2 = broad; default 0 -- §77.20). LOCAL and authoritative: it is
-                         the pull job's own argument. The master's platform.Tenants.Ring is only its copy.
+                         the pull job's own argument. The managing tenant's platform.Tenants.Ring is only its copy.
 .PARAMETER Cron          5-field cron expression (UTC) of the job's TRIGGER. Default '*/5 * * * *': the job gates itself
                          against the cadence set in this tenant's Manager (Job schedule > Managed-tenant pull, 5-1440 min;
                          nothing set = daily, the old '0 3 * * *' cadence) -- engine/_shared/PIM-JobCadence.ps1.
-.PARAMETER EnvName       ACA environment the Job runs in (S5: the central cae-pim; S6: the slave env).
+.PARAMETER EnvName       ACA environment the Job runs in (S5: the central cae-pim; S6: the managed tenant env).
 .PARAMETER ResourceGroup RG of the ACA environment + the Job.
 .PARAMETER AcrName       ACR holding the pim-manager image (pulled via MI AcrPull).
 .PARAMETER ImageTag      Image tag to run (default: the VERSION file).
@@ -119,8 +119,8 @@ param(
     # These are the managed tenant's admin naming prefixes, e.g. 'admin-','x-admin'. Required
     # unless -AllowUncheckedAdminNaming is given.
     [string[]]$SlaveAdminPrefixes = @(),
-    # 71.35 TRUST ANCHOR: the master's signing key id(s) this tenant pins (PIM_BaselineTrustedKeys). Identifiers, not
-    # secrets -- given by the master's build output, never read from the bundle store. A bundle signed by a key that is
+    # 71.35 TRUST ANCHOR: the managing tenant's signing key id(s) this tenant pins (PIM_BaselineTrustedKeys). Identifiers, not
+    # secrets -- given by the managing tenant's build output, never read from the bundle store. A bundle signed by a key that is
     # not pinned is REFUSED. Several may be pinned (a key roll). A redeploy without it pins nothing again.
     [string[]]$BaselineTrustedKeys = @(),
     # 🔒 The deliberate, greppable opt-out. Onboarding a tenant without declaring its convention
@@ -182,7 +182,7 @@ Note $placement.reason
 # --- §71.10: WHICH IDENTITY THE ENGINE RUNS AS -------------------------------------------------------
 # 🔴 FOUND LIVE ON RIDE 2026-09-15. Without an engine SPN secret this job used to run as the user-assigned
 # MI it names in PIM_ManagedIdentityClientId -- an identity that holds NO Graph app-roles (it exists to
-# pull the first image). The pull therefore could not read the slave's own default domain, so no admin was
+# pull the first image). The pull therefore could not read the managed tenant's own default domain, so no admin was
 # staged, and the engine apply had no directory rights: the only way to a working job was a client SECRET,
 # which the machine-wide rule forbids. ca-pim-tick has always run the engine as its SYSTEM identity with
 # the UAMI attached for the pull only; this job now does the same.
@@ -264,8 +264,8 @@ if ($Verify -and -not $Start) {
 }
 
 # ---- DEPLOY (create or update) -------------------------------------------------
-if (-not "$EnvName".Trim()) { throw "-EnvName is required to deploy (S5: the central cae-pim; S6: the slave tenant's ACA env)." }
-if (-not "$TenantId".Trim()) { throw "-TenantId (the managed/slave tenant) is required to deploy." }
+if (-not "$EnvName".Trim()) { throw "-EnvName is required to deploy (S5: the central cae-pim; S6: the managed tenant's ACA env)." }
+if (-not "$TenantId".Trim()) { throw "-TenantId (the managed tenant) is required to deploy." }
 if (-not "$AcrName".Trim())  { throw "-AcrName is required (the image is pulled via the Job's MI)." }
 if (-not "$ImageTag".Trim()) { throw "-ImageTag is required (no VERSION file found to default from)." }
 
@@ -306,11 +306,11 @@ if ($exists -and -not $WhatIfPreference) {
 }
 
 
-# S6 prereq guard: warn loudly that the slave ACA env must already exist.
+# S6 prereq guard: warn loudly that the managed tenant ACA env must already exist.
 if ($Scenario -eq 'S6' -and -not $WhatIfPreference) {
     $envOk = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query name -o tsv 2>$null
     if (-not "$envOk".Trim()) {
-        Warn "S6 PREREQ: the slave ACA env '$EnvName' (RG $ResourceGroup) does not exist."
+        Warn "S6 PREREQ: the managed tenant ACA env '$EnvName' (RG $ResourceGroup) does not exist."
         Warn "          Stand it up first: Setup-PimContainers.ps1 -SubscriptionId <slave-sub> -TenantId $TenantId -ResourceGroup $ResourceGroup -EnvName $EnvName ... (internal-only, private)."
         throw "S6 slave ACA env '$EnvName' missing -- create it before deploying the local downlink Job."
     }
@@ -452,7 +452,7 @@ $yamlPath = Join-Path $env:TEMP "pim-$JobName-$ResourceGroup-$PID.yaml"
 # exactly this "silent .\SQLEXPRESS default outranking the configured Azure SQL server".
 # 🔒 IMP-13 -- OPERATOR RULING 2026-09-03: the MSP admin prefix is MANDATORY in a managed tenant.
 # THE FAILURE THIS PREVENTS IS SILENT AND SELF-PERPETUATING. A synced MSP admin lands in the
-# customer's tenant as <UserName>@<slave domain>. If the slave's Admins provider scopes on a prefix
+# customer's tenant as <UserName>@<managed tenant domain>. If the managed tenant's Admins provider scopes on a prefix
 # that does not match, its live set never contains that account -- so the diff says "not present"
 # on EVERY tick, the sync recreates it EVERY tick, and each pass leaves another unmanaged
 # privileged account in a customer's directory. Nothing errors. It just accumulates.
@@ -481,7 +481,7 @@ if (-not "$SqlServerFqdn".Trim()) {
            "(PIM_StorageBackend=sql is always set), but -SqlServerFqdn was not supplied. The Job " +
            "would name database '$SqlDatabase' with no server, the engine would fall back to " +
            ".\SQLEXPRESS, and the identity's contained-user grant would be skipped as well. " +
-           "Pass -SqlServerFqdn <the slave's own server>.database.windows.net.")
+           "Pass -SqlServerFqdn <the managed tenant's own server>.database.windows.net.")
 }
 
 # SEC-27 (operator 2026-09-18): NO SAS. The pull URL is the PLAIN blob URL (public-but-signed or private endpoint,
@@ -494,9 +494,9 @@ if ("$BaselineUrl".Trim() -and "$BaselineUrl".Trim() -notmatch '^https://') { th
 
 # 71.35: a pin that is not a key id is REFUSED here, not silently dropped by the env builder (a typo would pin nothing).
 $badPins = @(@($BaselineTrustedKeys) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -cnotmatch '^[A-Za-z0-9_-]{43}$' })
-if ($badPins.Count) { throw "REFUSED: -BaselineTrustedKeys '$($badPins -join ', ')' is not a signing key id (43 characters of base64url, as the master's signingkey step prints)." }
+if ($badPins.Count) { throw "REFUSED: -BaselineTrustedKeys '$($badPins -join ', ')' is not a signing key id (43 characters of base64url, as the managing tenant's signingkey step prints)." }
 if (@($BaselineTrustedKeys | Where-Object { "$_".Trim() }).Count) { Note ("pinned master signing key(s): {0}" -f (@($BaselineTrustedKeys) -join ', ')) }
-else { Warn 'no -BaselineTrustedKeys: only bundles signed by the product''s embedded certificate will verify; a master publishing from its cloud job will be REFUSED.' }
+else { Warn 'no -BaselineTrustedKeys: only bundles signed by the product''s embedded certificate will verify; a managing tenant publishing from its cloud job will be REFUSED.' }
 $plan = Get-PimDownlinkJobDeployPlan -Scenario $Scenario -TenantId $TenantId -SlaveRing $SlaveRing `
     -JobName $JobName -ResourceGroup $ResourceGroup -EnvName $EnvName -Image $image -AcrServer $acrServer `
     -Cron $Cron -EntryPath $EntryPath -BaselineUrl $BaselineUrl -BaselineDocPath $BaselineDocPath `
@@ -570,7 +570,7 @@ if (-not $WhatIfPreference) {
 
 # --- NO LEFTOVER SECRETS (lead 2026-09-18, measured on RIDE: "legacy leftovers are not allowed") -----------------------
 # `job update --yaml` leaves every secret the YAML does not list IN PLACE. So after a redeploy with the PLAIN -BaselineUrl,
-# the retired SAS transport's 'pim-baseline-url' (a SAS link -- a standing credential to the master's bundle store)
+# the retired SAS transport's 'pim-baseline-url' (a SAS link -- a standing credential to the managing tenant's bundle store)
 # stayed on the job, referenced by nothing. Every secret the deployed definition does not reference is removed here
 # (`--yes`: the command prompts otherwise), and the removal is READ BACK: a secret still listed fails the deploy.
 if ($WhatIfPreference) {

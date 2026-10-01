@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     The only writer used to be the Manager's PUT /api/settings/scenario (a signed-in SuperAdmin), so every build ended
-    with a hand step -- and an unset scenario resolves as S1 (single tenant): an MSP master then publishes nothing and a
+    with a hand step -- and an unset scenario resolves as S1 (single tenant): a managing tenant then publishes nothing and a
     managed tenant never pulls. Same stored shape as the Manager ({"scenario":"S3"}), validated against the scenario
     catalog, READ BACK, audited ('settings.scenario.save', like the Manager). Certificate identity only.
 

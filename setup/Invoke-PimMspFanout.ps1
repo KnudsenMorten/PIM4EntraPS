@@ -259,7 +259,7 @@ foreach ($grp in $byTenant) {
             # MSP-2: this used to be hardcoded ''. The baseline bundle goes to the trouble of
             # carrying + SIGNING Template (Get-PimBaselineBundlePayload selects it, the downlink stages
             # it), and the fan-out then threw it away on arrival -- so the value could never
-            # reach the slave no matter what the master published.
+            # reach the managed tenant no matter what the managing tenant published.
             Template              = "$($a.Template)"
             AutoDisableDate       = ''
         }

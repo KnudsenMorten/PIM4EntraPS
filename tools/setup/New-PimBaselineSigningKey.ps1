@@ -1,11 +1,11 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    71.35 -- the MSP master's baseline SIGNING KEY: a non-exportable RSA key in the master's Key Vault, created once, and
+    71.35 -- the managing tenant's baseline SIGNING KEY: a non-exportable RSA key in the managing tenant's Key Vault, created once, and
     its KEY ID (RFC 7638 thumbprint) printed for every managed tenant to pin.
 
 .DESCRIPTION
-    Replaces the CN=PIM4EntraPS-Baseline machine certificate for a master that publishes from its cloud job
+    Replaces the CN=PIM4EntraPS-Baseline machine certificate for a managing tenant that publishes from its cloud job
     (ca-pim-publish). Idempotent, and never re-versions a key:
       1. the vault: must exist (the build's keyvault step, or an existing tenant vault); with -CreateVaultIfMissing it is
          created RBAC-mode with purge protection. Its SKU decides the key type: premium -> RSA-HSM, standard -> RSA.
@@ -131,7 +131,7 @@ Write-Host "    master.signingKeyIds += $keyId" -ForegroundColor Yellow
 Write-Host "    key: $keyUriWithVersion ($($back.properties.kty) $($back.properties.keySize), sign+verify, not exportable)" -ForegroundColor DarkGray
 Write-Host '  A managed tenant REFUSES a bundle signed by a key it does not pin. Pin a new id everywhere BEFORE a key roll.' -ForegroundColor DarkGray
 
-# ---- 4. §71.40 -- pin it on this master's OWN Manager (merge, never replace; read back) ---------------------------------
+# ---- 4. §71.40 -- pin it on this managing tenant's OWN Manager (merge, never replace; read back) ---------------------------------
 if ("$PinOnManagerApp".Trim()) {
     . (Join-Path $solRoot 'engine\_shared\PIM-DownlinkManager.ps1')
     Step "pin the key id on the Manager $PinOnManagerApp (PIM_BaselineTrustedKeys, merged)"

@@ -16,7 +16,7 @@
 
     The four steps, in the order the runbook establishes (each is a trap if skipped):
 
-      1. REGISTER Microsoft.Storage on the master's subscription. Skipping this is the
+      1. REGISTER Microsoft.Storage on the managing tenant's subscription. Skipping this is the
          trap, not the work: Azure answers an unregistered provider with
          (SubscriptionNotFound) "Subscription <id> was not found", which reads as a
          permissions or wrong-tenant problem and sends you hunting in the wrong place.
@@ -26,7 +26,7 @@
          public access on, no listing) from a network the storage firewall allows
          (default-action Deny); without it, public blob access stays OFF.
       3. GRANT the PUBLISHING identity 'Storage Blob Data Contributor' -- unless
-         -NoHostPublisher: since 71.35 the publisher is the master's cloud publish job
+         -NoHostPublisher: since 71.35 the publisher is the managing tenant's cloud publish job
          (ca-pim-publish), whose own identity Deploy-PimBaselinePublishJob.ps1 grants on the
          container. With a host publisher it is the identity that publishes, NOT the bootstrap
          SPN -- the bootstrap SPN is Key Vault data-plane only and will 401 here, which looks
@@ -76,7 +76,7 @@ param(
     [switch]$PublicSignedRead,
     [string[]]$PublisherSubnetResourceIds = @(),
     [string[]]$PublisherIpAddresses = @(),
-    # 71.35 CLOUD PUBLISH: the publisher is the master's own Container Apps job (ca-pim-publish), so the allowed publisher
+    # 71.35 CLOUD PUBLISH: the publisher is the managing tenant's own Container Apps job (ca-pim-publish), so the allowed publisher
     # network is the subnet of THIS Container Apps environment (read from it; its storage service endpoint is set first by
     # Initialize-PimBaselinePullNetwork.ps1). Its VNet rule is added BEFORE default-action Deny, in the same call.
     [string]$PublisherEnvName,
@@ -110,10 +110,10 @@ if ($StorageAccount -notmatch '^[a-z0-9]{3,24}$') {
 # not which subscription happens to be the machine-wide default. (The old check refused on the default and told the
 # operator to `az account set`, i.e. to change the default context every other session on the host uses.)
 $acct = az account show --subscription $SubscriptionId --query id -o tsv 2>$null
-if ($LASTEXITCODE -ne 0 -or -not "$acct".Trim()) { throw "no az context for subscription '$SubscriptionId'. Log in to the master tenant first." }
+if ($LASTEXITCODE -ne 0 -or -not "$acct".Trim()) { throw "no az context for subscription '$SubscriptionId'. Log in to the managing tenant first." }
 if ("$acct".Trim() -ne "$SubscriptionId".Trim()) {
     # Same family as ESTATE-14: "a context exists" is not "the right context".
-    throw "az resolved subscription '$acct', not the master '$SubscriptionId' -- refusing to create storage in the wrong subscription."
+    throw "az resolved subscription '$acct', not the managing tenant '$SubscriptionId' -- refusing to create storage in the wrong subscription."
 }
 Note "az context verified: $acct"
 # 🔴 Every call below splats this. It was referenced by the create calls but never DEFINED, so it
@@ -160,7 +160,7 @@ elseif ($PSCmdlet.ShouldProcess($Container, 'create container')) {
     Note 'created'
 }
 
-# 71.35: the master's own Container Apps subnet is the publisher network (the cloud publish job runs there).
+# 71.35: the managing tenant's own Container Apps subnet is the publisher network (the cloud publish job runs there).
 if ("$PublisherEnvName".Trim()) {
     $pubSubnet = "$(az containerapp env show @subArgs -g $ResourceGroup -n $PublisherEnvName --query properties.vnetConfiguration.infrastructureSubnetId -o tsv 2>$null)".Trim()
     if (-not $pubSubnet) { throw "the Container Apps environment '$PublisherEnvName' names no infrastructure subnet -- the publish job's network cannot be allowed on the store." }
@@ -173,7 +173,7 @@ if ($NoHostPublisher) {
     Note 'publisher role: not granted here -- the publish job''s own identity gets Storage Blob Data Contributor on the container (Deploy-PimBaselinePublishJob.ps1)'
 } else {
 if (-not "$PublisherObjectId".Trim()) {
-    if (-not "$PublisherAppId".Trim()) { throw 'pass -PublisherObjectId or -PublisherAppId (the master ENGINE SPN, not the bootstrap SPN).' }
+    if (-not "$PublisherAppId".Trim()) { throw 'pass -PublisherObjectId or -PublisherAppId (the managing tenant ENGINE SPN, not the bootstrap SPN).' }
     $PublisherObjectId = az ad sp show --id $PublisherAppId --query id -o tsv 2>$null
     if (-not "$PublisherObjectId".Trim()) { throw "could not resolve an object id for app id '$PublisherAppId'." }
     Note "publisher appId $PublisherAppId -> objectId $PublisherObjectId"

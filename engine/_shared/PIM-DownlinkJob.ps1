@@ -1,6 +1,6 @@
 ﻿# =============================================================================
 # PIM-DownlinkJob.ps1 -- the PURE, offline-testable plan brain for the §31.3
-# CLOUD-NATIVE master->managed (slave) downlink as an Azure Container Apps JOB
+# CLOUD-NATIVE master->managed (managed tenant) downlink as an Azure Container Apps JOB
 # with a CRON schedule (operator directive 2026-06-17: "all run in cloud only
 # compute, in one test"; "run it through the containers in the slave").
 #
@@ -12,7 +12,7 @@
 #   command/entrypoint that pulls -> verifies -> stages -> applies the ring-gated
 #   downlink for ONE scenario+tenant+ring. Two placements:
 #     * S5 -> the Job runs in the CENTRAL ACA env (cae-pim, MSP tenant) using the
-#             MULTI-TENANT SPN (acts into the slave).
+#             MULTI-TENANT SPN (acts into the managed tenant).
 #     * S6 -> the Job runs in the SLAVE tenant's OWN ACA env using a LOCAL SPN.
 #
 # DESIGN TENETS (mirror the rest of PIM4EntraPS)
@@ -179,7 +179,7 @@ function Get-PimDownlinkJobEnv {
         # 71.14: the explicit, default-OFF retraction opt-in. Emitted ONLY when ON, as the exact value the entry
         # accepts ('true'); absent means report-only.
         [switch]$AllowRetraction,
-        # 71.35 TRUST ANCHOR: the master signing key ids this tenant pins (RFC 7638 thumbprints, comma-separated in one env
+        # 71.35 TRUST ANCHOR: the managing tenant signing key ids this tenant pins (RFC 7638 thumbprints, comma-separated in one env
         # value). Identifiers, not secrets. Absent => only bundles signed by the product's embedded certificate verify.
         [AllowEmptyCollection()][string[]]$BaselineTrustedKeys = @(),
         # The cadence (PIM-JobCadence.ps1): when this definition was deployed (ISO UTC). The pull runs once on the next
@@ -236,7 +236,7 @@ function Get-PimDownlinkJobEnv {
 # ---------------------------------------------------------------------------
 # PURE. Which ACA secrets a redeploy must REMOVE from the job (lead 2026-09-18, measured on RIDE: after a redeploy with the
 # PLAIN -BaselineUrl, the retired SAS transport's secret 'pim-baseline-url' -- a SAS link, i.e. a standing credential to
-# the master's bundle store -- stayed attached to the job, referenced by nothing). A `job update --yaml` leaves secrets it
+# the managing tenant's bundle store -- stayed attached to the job, referenced by nothing). A `job update --yaml` leaves secrets it
 # does not list in place, so they have to be removed explicitly. Rule: every existing secret that the deployed definition
 # does not reference goes; the retired 'pim-baseline-url' always goes. Returns @{ remove; keep; reason }.
 # ---------------------------------------------------------------------------
@@ -585,7 +585,7 @@ function Build-PimDownlinkJobArgs {
     # is `?sv=...&sig=<base64>`, so a SAS-bearing baseline URL could have been pasted straight onto
     # the command line and this function would have reported hasInlineSecret=$false -- a read
     # credential for the MASTER's bundle store, readable in the job definition by anyone with
-    # Reader on the slave's resource group, forever, and rotated by nobody.
+    # Reader on the managed tenant's resource group, forever, and rotated by nobody.
     $secretish = '(?i)(password=|pwd=|client[_-]?secret=|accountkey=|sharedaccesskey=|[?&]sig=)'
     $inline = $false
     foreach ($e in @($EnvVars)) {
@@ -658,7 +658,7 @@ function Get-PimDownlinkJobDeployPlan {
         # ca-pim-tick. The user-assigned MI stays attached ONLY to pull the first image (BUG-71); the
         # SYSTEM identity is what gets the Graph app-roles and the SQL admin group membership. That is
         # the tick's proven shape, and the only no-secret shape: a user-assigned MI named by
-        # PIM_ManagedIdentityClientId holds no Graph roles, so the pull could never resolve the slave's
+        # PIM_ManagedIdentityClientId holds no Graph roles, so the pull could never resolve the managed tenant's
         # domain or apply anything, and the only alternative was an engine client SECRET.
         # 🔒 With -SystemAssigned the MI client id is NEVER emitted: naming the user-assigned identity
         # would make every token call pick it again, which is exactly the broken shape.
@@ -673,7 +673,7 @@ function Get-PimDownlinkJobDeployPlan {
     if ($SystemAssigned) { $ManagedIdentityClientId = '' }
     $placement = Get-PimDownlinkJobPlacement -Scenario $Scenario
     # 🔒 SEC-27 (2026-09-18): NO SAS. The job definition is readable by anyone with Reader on the RG, so a URL with a
-    # query string (a SAS is `?sv=...&sig=...`) would be a standing credential to the master's bundle store in plain
+    # query string (a SAS is `?sv=...&sig=...`) would be a standing credential to the managing tenant's bundle store in plain
     # sight. BUG-73 used to move it into an ACA secret; the transport is now public-but-signed / private-endpoint
     # (DESIGN 13.7) and such a URL is refused outright.
     if ("$BaselineUrl".Trim() -match '[?#]') {

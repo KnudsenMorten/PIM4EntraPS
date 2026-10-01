@@ -419,9 +419,9 @@ function Invoke-PimSqlScalar {
 }
 
 function Initialize-PimSqlDatabase {
-    # Create the database if missing (connects to master). Idempotent.
+    # Create the database if missing (connects to managing tenant). Idempotent.
     # BUG-32 (2026-08-08): the guard was `IF DB_ID('<db>') IS NULL`, which is NOT idempotent on
-    # Azure SQL -- the store we actually support. Measured from master as the managed identity:
+    # Azure SQL -- the store we actually support. Measured from managing tenant as the managed identity:
     #     DB_ID('PimScenarioTest')            -> NULL
     #     EXISTS (sys.databases WHERE name=..) -> YES
     # On Azure SQL, DB_ID() resolves only databases the principal owns/created (metadata
@@ -1176,7 +1176,7 @@ function Get-PimStoreRowKey {
         }
         'PIM-Definitions-*'              { (& $g 'GroupTag') }
         'Account-Definitions-Admins'     { (& $g 'UserName') }
-        # 68.6 row 35: central admins imported from an MSP master (PIM-Downlink.ps1 Invoke-PimDownlinkAdminApply).
+        # 68.6 row 35: central admins imported from a managing tenant (PIM-Downlink.ps1 Invoke-PimDownlinkAdminApply).
         'Account-Definitions-Admins-Central' { (& $g 'UserName') }
         # TEST-13: neither of these carries a GroupTag/GroupName, so both fell through to
         # the generic 'default' branch, derived a BLANK key, and every row was dropped on

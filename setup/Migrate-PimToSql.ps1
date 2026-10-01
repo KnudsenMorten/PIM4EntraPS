@@ -10,7 +10,7 @@
       * Before ANYTHING is written (before SQL is even contacted) every file is checked by
         engine/_shared/PIM-CsvImportCheck.ps1 -- the same check setup/Invoke-PimCsvImportCheck.ps1 runs:
         encoding, delimiter, header vs the entity schema, keys, duplicate keys, the Manager's own
-        validator rules over the rows, and the replication each row would get on an MSP master.
+        validator rules over the rows, and the replication each row would get on a managing tenant.
         Any ERROR refuses the import unless -AllowValidationErrors is passed. -ValidateOnly runs the
         check and stops: no SQL, nothing written.
       * The engine's STATE files (*_Delta.csv, *_LastApplied.csv) are never imported.
@@ -18,7 +18,7 @@
         alone; a key with DIFFERENT content is a collision and is reported -- by default the import
         REFUSES, before writing any row (-OnKeyConflict KeepExisting keeps the store's row and imports
         the rest; -OnKeyConflict Overwrite updates it from the file). Nothing is ever deleted.
-      * -ForceLocal: imported rows stay on the master (Replicate=No; admins ManagementMode=local)
+      * -ForceLocal: imported rows stay on the managing tenant (Replicate=No; admins ManagementMode=local)
         unless the file sets the value explicitly.
     (BUG-201 kept a whole entity out when the store already held rows for it -- so a store holding
     the SAMPLE rows imported NOTHING for that entity, and said only "KEPT". Adding by key keeps what
@@ -67,7 +67,7 @@
 
 .PARAMETER ForceLocal
     Imported rows get Replicate=No (admins: ManagementMode=local) unless the file sets it explicitly,
-    so nothing imported onto an MSP master is published to managed tenants by default.
+    so nothing imported onto a managing tenant is published to managed tenants by default.
 
 .EXAMPLE
     # dev (Express)
@@ -101,9 +101,9 @@ param(
     [switch]$AllowValidationErrors,
     # REQ-G: a key already in the store with different content. Refuse = write nothing (default).
     [ValidateSet('Refuse','KeepExisting','Overwrite')][string]$OnKeyConflict = 'Refuse',
-    # REQ-G: imported rows stay on the master unless the file sets Replicate / ManagementMode.
+    # REQ-G: imported rows stay on the managing tenant unless the file sets Replicate / ManagementMode.
     [switch]$ForceLocal,
-    # REQ-G: the target is a single or managed tenant, not an MSP master (passed to the check).
+    # REQ-G: the target is a single or managed tenant, not a managing tenant (passed to the check).
     [switch]$NotMspMaster,
     # REQ-G: the target's default UPN domain, for admin rows without a UserPrincipalName (passed to the check).
     [string]$DefaultDomain

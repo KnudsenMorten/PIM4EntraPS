@@ -63,7 +63,7 @@ function Get-PimLockedSchema {
                 @{ from = 'OffboardDate'; to = 'AutoDisableDate'; whenTargetBlank = $true }
             )
         }
-        # 68.6 row 35: the central admins an MSP slave imports, kept apart from its own admins. Written only by
+        # 68.6 row 35: the central admins a managed tenant imports, kept apart from its own admins. Written only by
         # the downlink (UserName-keyed, same row shape); nothing to migrate or drop.
         'Account-Definitions-Admins-Central' = @{ key = 'UserName'; deprecated = @(); required = @(); migrations = @() }
         'PIM-Definitions-Roles'        = $genericDef

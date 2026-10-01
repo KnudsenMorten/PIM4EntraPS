@@ -1,21 +1,21 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    REQ-N -- the MSP master's MANAGED-TENANT REGISTRY (platform.Tenants): read it, and write it through ONE writer that
+    REQ-N -- the managing tenant's MANAGED-TENANT REGISTRY (platform.Tenants): read it, and write it through ONE writer that
     tools/setup/Register-PimManagedTenant.ps1 and the Manager's "Managed tenant registry" page both call.
 
 .DESCRIPTION
     Operator 2026-09-19: "where do i define the tags and names for the tenants ? in settings ?". Until REQ-N the name, the
-    master's copy of the ring, the tags and Enabled of a managed tenant could only be written by the setup script or the
+    managing tenant's copy of the ring, the tags and Enabled of a managed tenant could only be written by the setup script or the
     MSP build config. The Manager page now edits the same row, and it goes through the SAME code:
       * Get-PimManagedTenantRegistration (PIM-MspBuild.ps1, PURE) validates the values and builds the parameterised MERGE;
-      * Set-PimManagedTenantRegistration (here) refuses what the registry must never hold (the master's own tenant, a
+      * Set-PimManagedTenantRegistration (here) refuses what the registry must never hold (the managing tenant's own tenant, a
         second row for a tenant already registered, a second tenant with the same name), runs the MERGE and READS IT
         BACK. The callers audit (the script with Write-PimSetupAudit, the Manager with Write-PimManagerAuditEvent).
     One writer means the script and the page can never disagree about what a valid registration is.
 
-    🔒 BUG-175 -- THE RING HERE IS THE MASTER'S COPY. Every ring is LOCAL in the managed tenant (its own -SlaveRing gates
-    its pull); platform.Tenants.Ring is only what the master previews with. Everything this file returns labels it so.
+    🔒 BUG-175 -- THE RING HERE IS THE MANAGING TENANT'S COPY. Every ring is LOCAL in the managed tenant (its own -SlaveRing gates
+    its pull); platform.Tenants.Ring is only what the managing tenant previews with. Everything this file returns labels it so.
 
     🔑 THE TAGS ARE WHAT TARGETING READS. The bundle producer signs platform.Tenants.Tags into the bundle
     (payload.tenantTags), and a row's Target (tag:<key:value>, tag:a+b, tenant:<id>) is evaluated against them. A tag is
@@ -61,12 +61,12 @@ function ConvertTo-PimMspRegistryUtcText {
 }
 
 function Get-PimMspRingCopyLabel {
-    # PURE. The one wording for the registry's ring field (REQ-N): it is the MASTER'S COPY, and the tenant's own ring decides.
-    return "Ring (master's copy -- each managed tenant's own ring decides)"
+    # PURE. The one wording for the registry's ring field (REQ-N): it is the MANAGING TENANT'S COPY, and the tenant's own ring decides.
+    return "Ring (managing tenant's copy -- each managed tenant's own ring decides)"
 }
 
 function ConvertTo-PimManagedTenantView {
-    # PURE. One platform.Tenants row -> what the page and the API show. The ring is labelled as the master's copy.
+    # PURE. One platform.Tenants row -> what the page and the API show. The ring is labelled as the managing tenant's copy.
     param([Parameter(Mandatory)][object]$Row)
     $tid = "$(Get-PimMspRegistryValue $Row 'TenantId')".Trim().ToLowerInvariant()
     $ringRaw = "$(Get-PimMspRegistryValue $Row 'Ring')".Trim()
@@ -101,17 +101,17 @@ function Get-PimManagedTenantRegistry {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ConnectionString)
     $probe = $null
     try { $probe = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT CASE WHEN OBJECT_ID('platform.Tenants') IS NULL THEN 0 ELSE 1 END AS HasRegistry, CASE WHEN COL_LENGTH('platform.Tenants','Tags') IS NULL THEN 0 ELSE 1 END AS HasTags") }
-    catch { return [ordered]@{ available = $false; reason = "the master registry could not be read: $($_.Exception.Message)"; tenants = @() } }
+    catch { return [ordered]@{ available = $false; reason = "the managing tenant registry could not be read: $($_.Exception.Message)"; tenants = @() } }
     $hasReg = $false; $hasTags = $false
     if ($probe.Count) { $hasReg = ("$($probe[0].HasRegistry)" -eq '1'); $hasTags = ("$($probe[0].HasTags)" -eq '1') }
     if (-not $hasReg) {
         return [ordered]@{ available = $false; tenants = @()
-                           reason = 'platform.Tenants does not exist in this store -- it is not an MSP master registry yet (tools/setup/Initialize-PimMasterRegistry.ps1 creates it).' }
+                           reason = 'platform.Tenants does not exist in this store -- it is not a managing tenant registry yet (tools/setup/Initialize-PimMasterRegistry.ps1 creates it).' }
     }
     $tagCol = if ($hasTags) { 'Tags' } else { 'CAST(NULL AS nvarchar(400)) AS Tags' }
     try {
         $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT CONVERT(nvarchar(50), TenantId) AS TenantId, DisplayName, Ring, Enabled, $tagCol, Notes, CreatedAtUtc, UpdatedAtUtc FROM platform.Tenants ORDER BY DisplayName")
-    } catch { return [ordered]@{ available = $false; reason = "the master registry could not be read: $($_.Exception.Message)"; tenants = @() } }
+    } catch { return [ordered]@{ available = $false; reason = "the managing tenant registry could not be read: $($_.Exception.Message)"; tenants = @() } }
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($r in $rows) { if ($null -ne $r) { $out.Add((ConvertTo-PimManagedTenantView -Row $r)) | Out-Null } }
     return [ordered]@{ available = $true; reason = ''; tagsColumn = $hasTags; tenants = @($out.ToArray()) }
@@ -131,13 +131,13 @@ function Set-PimManagedTenantRegistration {
       READS BACK. Returns @{ ok; status; reason; action = register|update; before; after; parameters }.
         status 400 -- a value is invalid (not a GUID, blank name, ring outside 0..2, a malformed or reserved tag)
         status 404 -- -Mode Update and the tenant is not registered
-        status 409 -- the master's OWN tenant, a tenant already registered (-Mode Create), a name another tenant carries,
-                      no registry in this store, or the master's tenant id is unknown (it cannot be ruled out)
+        status 409 -- the managing tenant's OWN tenant, a tenant already registered (-Mode Create), a name another tenant carries,
+                      no registry in this store, or the managing tenant's tenant id is unknown (it cannot be ruled out)
         status 500 -- the write failed, or the read-back does not hold what was written
       -Mode Upsert (the setup script, idempotent) | Create (POST: refuse an existing row) | Update (PUT: refuse a missing row).
       -Notes: pass it to set it; leave it out to KEEP the stored notes (an edit of the tags must not wipe them).
-      -MasterTenantId: the tenant this master runs in. REQUIRED and checked, fail closed: an unknown master id is refused,
-      because "is this the master's own tenant?" could not be answered.
+      -MasterTenantId: the tenant this managing tenant runs in. REQUIRED and checked, fail closed: an unknown master id is refused,
+      because "is this the managing tenant's own tenant?" could not be answered.
       🔒 It never DELETES: disabling keeps the row (Enabled = 0), exactly as the script's -Disable always did.
     #>
     [CmdletBinding()]
@@ -168,8 +168,8 @@ function Set-PimManagedTenantRegistration {
     if (-not $reg0.ok) { return (& $fail 400 $reg0.reason) }
     $tid = "$($reg0.parameters.tid)"
 
-    if ($master -notmatch $guid) { return (& $fail 409 "the master's own tenant id is not known here, so a registration cannot be checked against it -- refused (fail closed)") }
-    if ($tid -eq $master) { return (& $fail 409 "tenant $tid is the MSP master's OWN tenant -- the master is not a managed tenant of itself") }
+    if ($master -notmatch $guid) { return (& $fail 409 "the managing tenant's own tenant id is not known here, so a registration cannot be checked against it -- refused (fail closed)") }
+    if ($tid -eq $master) { return (& $fail 409 "tenant $tid is the managing tenant's OWN tenant -- the managing tenant is not a managed tenant of itself") }
 
     $cur = Get-PimManagedTenantRegistry -ConnectionString $ConnectionString
     if (-not $cur.available) { return (& $fail 409 $cur.reason) }
@@ -205,7 +205,7 @@ function Set-PimManagedTenantRegistration {
 
 function Get-PimManagedTenantPublishState {
     <#
-      PURE. "When did the master last publish for this tenant?" -- answered from what IS recorded. The publish job records
+      PURE. "When did the managing tenant last publish for this tenant?" -- answered from what IS recorded. The publish job records
       ONE last run for the whole bundle (pim.Settings['PublishLastRun']: startedUtc, finishedUtc, state), so per tenant the
       honest answer is whether that run came AFTER the tenant's registry row last changed (its tags are then in the
       signed bundle) or not. Returns @{ state; text; lastPublishUtc }.
@@ -221,7 +221,7 @@ function Get-PimManagedTenantPublishState {
     $started = ConvertTo-PimMspRegistryUtcText (Get-PimMspRegistryValue $LastRun 'startedUtc')
     $finished = ConvertTo-PimMspRegistryUtcText (Get-PimMspRegistryValue $LastRun 'finishedUtc')
     $state = "$(Get-PimMspRegistryValue $LastRun 'state')".Trim().ToLowerInvariant()
-    if (-not $started -and -not $finished) { return [ordered]@{ state = 'unknown'; lastPublishUtc = ''; text = 'No publish is recorded on this master yet.' } }
+    if (-not $started -and -not $finished) { return [ordered]@{ state = 'unknown'; lastPublishUtc = ''; text = 'No publish is recorded on this managing tenant yet.' } }
     if ($state -eq 'running') { return [ordered]@{ state = 'running'; lastPublishUtc = ''; text = "A publish is running (started $started)." } }
     if ($state -eq 'failed')  { return [ordered]@{ state = 'failed'; lastPublishUtc = ''; text = "The last publish FAILED ($(if ($finished) { $finished } else { $started })) -- see Jobs." } }
     if ($state -eq 'held')    { return [ordered]@{ state = 'held'; lastPublishUtc = ''; text = "The last publish was held ($(if ($finished) { $finished } else { $started }))." } }
@@ -235,8 +235,8 @@ function Get-PimManagedTenantPublishState {
 
 function Get-PimMspTenantRegistryView {
     <#
-      What GET /api/msp/tenants returns: the registry, each tenant with its publish state, labelled as the master's copy of
-      the ring. -LastRun is the master's pim.Settings['PublishLastRun'] value (the caller reads it; $null = none recorded).
+      What GET /api/msp/tenants returns: the registry, each tenant with its publish state, labelled as the managing tenant's copy of
+      the ring. -LastRun is the managing tenant's pim.Settings['PublishLastRun'] value (the caller reads it; $null = none recorded).
     #>
     [CmdletBinding()] param([Parameter(Mandatory)][string]$ConnectionString, [AllowNull()][object]$LastRun, [bool]$CanWrite, [string]$MasterTenantId)
     $reg = Get-PimManagedTenantRegistry -ConnectionString $ConnectionString
@@ -261,7 +261,7 @@ function Get-PimMspTenantRegistryView {
         lastPublish    = $lr
         ringLabel      = Get-PimMspRingCopyLabel
         ringSource     = 'master-copy'
-        ringNote       = "The ring here is the MASTER'S COPY. Each managed tenant sets its own ring locally, and that ring gates its real pull; the master uses its copy only for its previews (reach, Replication overview, Managed tenants). Keep the two equal."
+        ringNote       = "The ring here is the MANAGING TENANT'S COPY. Each managed tenant sets its own ring locally, and that ring gates its real pull; the managing tenant uses its copy only for its previews (reach, Replication overview, Managed tenants). Keep the two equal."
         tagGrammar     = 'word or key:value (letters, digits, - _ .), separated by ; -- a replication Target names them as tag:<tag>, tag:a+b (all of), or tenant:<id>'
     }
 }

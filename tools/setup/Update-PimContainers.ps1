@@ -290,7 +290,7 @@ function Invoke-PimRollSameRepoJobs {
       onto -TargetImage, verify each by reading it back, and return @{ rolled; failed; checked }.
 
       🔴 This roller used to roll the apps and the tick Job and nothing else, so `ca-pim-downlink-s6`
-      (a managed tenant's pull) and `ca-pim-publish` (the master's publisher) kept the tag they were
+      (a managed tenant's pull) and `ca-pim-publish` (the managing tenant's publisher) kept the tag they were
       deployed with. A pull job left on a pre-§71.35 image refuses every Key Vault signed bundle
       (SIGNATURE INVALID -- it only knows the certificate) while the Manager and tick report the new
       version; a publish job never picks up producer fixes. The in-cloud updater already rolls them

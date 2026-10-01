@@ -80,3 +80,21 @@ function Read-PimDeployProfile {
     }
     [pscustomobject]@{ parameters = $h; omitted = @($doc.omitted | Where-Object { $_ }); version = "$($doc.version)"; savedUtc = "$($doc.savedUtc)" }
 }
+
+function Get-PimProUpgradeDeployArgs {
+    <#
+      PURE. BUG-277: the deploy arguments that upgrade a Community install to Pro -- the saved profile's parameters plus the
+      Pro update feed and the CUSTOMER ring (2), so the 'updater' step installs the in-cloud updater. A copy: the profile
+      itself is not changed. Refuses a feed that is not https or has no {version}.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Parameters, [Parameter(Mandatory)][string]$SourceUrlTemplate, [switch]$Apply)
+    $src = "$SourceUrlTemplate".Trim()
+    if ($src -notmatch '^https://[^\s]+$' -or $src -notmatch '\{version\}') { throw 'the Pro update feed must be an https URL containing {version}' }
+    $a = @{}
+    foreach ($k in @($Parameters.Keys)) { $a[$k] = $Parameters[$k] }
+    $a['UpdateSourceUrlTemplate'] = $src
+    $a['UpdateRing'] = 2
+    if ($a.ContainsKey('SkipUpdater')) { $a.Remove('SkipUpdater') }
+    if ($Apply) { $a['Apply'] = $true } elseif ($a.ContainsKey('Apply')) { $a.Remove('Apply') }
+    return $a
+}

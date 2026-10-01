@@ -9,18 +9,18 @@
      rename in downlinks first and lock the central"
 
   WHY A NEW CONCEPT WAS NEEDED, instead of just publishing the new desired set.
-  The slave applies what it pulls BY KEY, and it is deliberately report-first about anything that
-  disappears: a row the master no longer sends is recorded as "would remove" and is removed only
+  The managed tenant applies what it pulls BY KEY, and it is deliberately report-first about anything that
+  disappears: a row the managing tenant no longer sends is recorded as "would remove" and is removed only
   with -AllowRetraction, inside a removal budget (Invoke-PimDownlinkAssignmentApply). That rule
-  exists because "the master revoked it" and "the master failed to publish it" look identical from
-  the slave, and the safe reading is the second. It is right, and it must stay.
+  exists because "the managing tenant revoked it" and "the managing tenant failed to publish it" look identical from
+  the managed tenant, and the safe reading is the second. It is right, and it must stay.
   So the two things the operator asked for cannot be expressed by absence:
-    * a REVOKE that must reach the managed tenants is an ABSENCE the slave is told to trust;
+    * a REVOKE that must reach the managed tenants is an ABSENCE the managed tenant is told to trust;
     * a RENAME published as a new key is an ABSENCE (the old key) plus a CREATE (the new one), which
       a report-first slave turns into a DUPLICATE -- exactly the hazard behind "rename in the
       downlinks first and lock the central".
   An INTENT says which absence is authorised, by whom and why. It travels inside the signed bundle,
-  so a slave acts on a withdrawal only when the master really published it -- the whole point of
+  so a managed tenant acts on a withdrawal only when the managing tenant really published it -- the whole point of
   report-first is preserved for everything that is NOT named.
 
   AUTO-COMMITTED BY DESIGN (the operator's "so we dont have to approve 25 tenants"): the human
@@ -42,11 +42,11 @@ function New-PimDownlinkIntent {
         -Op withdraw : remove this row in the managed tenants (the central revoke reached them)
         -Op rename   : the row whose key was -Key is now -To (rename in place, never re-create)
       Returns $null for an unusable request rather than a half-formed record -- a malformed intent
-      that reaches a slave is worse than none.
+      that reaches a managed tenant is worse than none.
     #>
     param(
         # §79.6 (operator 2026-09-25: "verify that a reset sessions centrally in msp mode for an admin also resets the sessions
-        # in all slaves. important if person leaves msp"): -Op revoke-sessions -- every managed tenant revokes the sign-in
+        # in all managed tenants. important if person leaves msp"): -Op revoke-sessions -- every managed tenant revokes the sign-in
         # sessions of ITS account for this central admin (Entity Account-Definitions-Admins, Key = the admin's UserName).
         [Parameter(Mandatory)][ValidateSet('withdraw', 'rename', 'revoke-sessions')][string]$Op,
         [Parameter(Mandatory)][string]$Entity,
@@ -137,8 +137,8 @@ function Select-PimDownlinkIntents {
 }
 
 function Get-PimDownlinkWithdrawalKeys {
-    # The keys a slave is AUTHORISED to remove for one entity, lower-cased for matching.
-    # §79.5: an intent with a 'tenants' list (the master's "pick") applies ONLY in those tenants; -TenantId is this one.
+    # The keys a managed tenant is AUTHORISED to remove for one entity, lower-cased for matching.
+    # §79.5: an intent with a 'tenants' list (the managing tenant's "pick") applies ONLY in those tenants; -TenantId is this one.
     # An intent without the list applies everywhere (unchanged). A scoped intent never matches an unknown own id.
     param([object[]]$Intents = @(), [Parameter(Mandatory)][string]$Entity, [string]$TenantId = '')
     $e = "$Entity".Trim().ToLowerInvariant()
@@ -184,9 +184,9 @@ function Get-PimDownlinkSessionRevokes {
 
 function Select-PimDownlinkSessionRevokeTargets {
     <#
-      PURE. 🔴 R25-31 -- which of -Revokes (Get-PimDownlinkSessionRevokes) this slave may carry out. A revoke names a
-      CENTRAL admin by UserName; the slave revokes '<key>@<its domain>'. That is right only when the key IS a central admin
-      this slave holds for the master (Account-Definitions-Admins-Central, Owner = -Owner) and no LOCAL admin of the
+      PURE. 🔴 R25-31 -- which of -Revokes (Get-PimDownlinkSessionRevokes) this managed tenant may carry out. A revoke names a
+      CENTRAL admin by UserName; the managed tenant revokes '<key>@<its domain>'. That is right only when the key IS a central admin
+      this managed tenant holds for the managing tenant (Account-Definitions-Admins-Central, Owner = -Owner) and no LOCAL admin of the
       customer has the same UserName (the local row wins that name, PIM-EngineCore Get-PimDesiredRows) -- otherwise the
       customer's own admin had their sessions ended, auto-committed. Returns @{ revoke = @(...); skipped = @({ key; id; why }) }.
     #>
@@ -228,12 +228,12 @@ function Get-PimDownlinkRenameMap {
 
 function Resolve-PimDownlinkRenamePlan {
     <#
-      PURE. What a rename means for the rows a slave already holds.
-      -Rows      the slave's current rows for -Entity
+      PURE. What a rename means for the rows a managed tenant already holds.
+      -Rows      the managed tenant's current rows for -Entity
       -RenameMap from-key(lower) -> to-key   (Get-PimDownlinkRenameMap)
       -KeyColumn the column holding the key in THIS entity (GroupTag / TargetGroupTag / ...)
       Returns @{ updates = @(@{ index; column; from; to }); collisions = @(...) }.
-      A rename onto a key the slave ALREADY has is a COLLISION, reported and NOT applied: merging
+      A rename onto a key the managed tenant ALREADY has is a COLLISION, reported and NOT applied: merging
       two rows silently is indistinguishable from losing one.
     #>
     param(

@@ -33,6 +33,21 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   memberships lags the grant by a few seconds; the Activator now shows the group as active as soon as Microsoft confirms
   the activation.
 
+## v2.4.473 — Community to Pro without reinstalling; "managing tenant" and "managed tenant"
+
+- **New: upgrade a Community installation to Pro.** Register the Pro licence on the Licence page and the Pro features
+  switch on at once. The page then shows one command, `Upgrade-PimToPro.ps1`, that gives the installation the in-cloud
+  updater so it receives Pro releases by itself. Until you run it, the Community update keeps working (it used to be
+  refused once a licence was registered).
+- **Fixed: "Pro" was shown for a licence that unlocks nothing.** A licence for another tenant, or one that is not a Pro
+  licence, showed Pro on the page while every Pro feature stayed locked. Such a licence is now refused when you
+  register it, and the page, the features and the updater all use the same check.
+- **New wording: "managing tenant" and "managed tenant"** replace "MSP master" and "slave" everywhere you read them --
+  the Manager, its messages, the mode badge and the documentation. Nothing you have stored or configured changes.
+- **Access menu:** *Create Discovered Resources* now sits right under *Create access*.
+- **Fixed: a new role-assignable group's first eligibility no longer fails the run** -- for a minute or two Microsoft
+  answers it with an error; it is now shown as waiting and applied on the next run.
+
 ## v2.4.472 — Nobody loses access by accident: automatic extension you can see and steer
 
 - **Fixed (critical): a permission whose AutoExtend was left empty was never extended**, so it ended when its time ran

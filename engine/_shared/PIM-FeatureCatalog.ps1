@@ -64,7 +64,7 @@ $script:PimEditionNames = @('Core', 'Pro', 'Pro-DesignPartner')
 #   license        'free'      = available in every edition (incl. Core)
 #                  'pro'       = requires a Pro / Pro-DesignPartner edition
 #   scope          'single'    = acts on ONE tenant (this environment)
-#                  'multi'     = the multi-tenant half (MSP master / managed tenants)
+#                  'multi'     = the multi-tenant half (managing tenant / managed tenants)
 #                  REQ-Y (operator 2026-09-19: "single tenant must be sep in free and pro"): the edition is decided per
 #                  entry by license x scope, and THIS catalog is the one authoritative list -- PIM-License.ps1's
 #                  Get-PimProFeatureCatalog must equal Get-PimCatalogProFeatureNames (tests/Test-PimMspLicense.ps1).

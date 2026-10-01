@@ -101,7 +101,7 @@ Invoke-Check -Name 'store reachable + schema present' -Body {
     # tables because it is a SLAVE" from "the schema upgrade never applied", and an earlier
     # version of this check used `< 5` -- which measured 3 on a healthy managed tenant and would
     # have declared EVERY SLAVE IN THE ESTATE broken. A gate that cries wolf is a gate that gets
-    # ignored, which is worse than no gate. Measured 2026-08-13: a master carries 9 tables
+    # ignored, which is worse than no gate. Measured 2026-08-13: a managing tenant carries 9 tables
     # (incl. the CentralAdmins / TenantRoleProjection / platform.* registry, which are master-side
     # by design) and a healthy slave carries exactly these three.
     $required = @('Rows', 'Settings', 'ChangeQueue')

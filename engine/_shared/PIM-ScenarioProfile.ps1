@@ -77,7 +77,7 @@ function Get-PimGenericScenarioDimensions {
         hostingLocation  = @{ values = @('in-tenant', 'central-msp', 'local-slave'); description = 'Where the GUI (web) + SQL store live.' }
         syncFileLocation = @{ values = @('none', 'central-msp', 'local-slave');     description = 'Where master->managed sync files are staged on the automation server.' }
         spnModel         = @{ values = @('local-spn', 'multi-tenant-spn');          description = 'Service-principal model for tenant auth.' }
-        syncModel        = @{ values = @('none', 'master-to-slave-admins-permissions'); description = 'Whether admins+permissions are synced from the MSP master.' }
+        syncModel        = @{ values = @('none', 'master-to-slave-admins-permissions'); description = 'Whether admins+permissions are synced from the managing tenant.' }
         licenseTier      = @{ values = @('Pro-DesignPartner', 'Community', 'Pro');  description = 'Commercial license tier required.' }
     }
 }
@@ -122,7 +122,7 @@ function Get-PimScenarioCatalog {
         },
         [pscustomobject]@{
             id               = 'S3'
-            label            = 'MSP master tenant -- Internal/AutomateIT edition'
+            label            = 'Managing tenant -- Internal/AutomateIT edition'
             role             = 'msp-master'
             edition          = 'internal-automateit'
             updateSource     = 'internal-automateit'
@@ -131,14 +131,14 @@ function Get-PimScenarioCatalog {
             spnModel         = 'local-spn'
             syncModel        = 'none'
             licenseTier      = 'Pro-DesignPartner'
-            summary          = "MSP master. GUI + SQL hosted in the master tenant. Updates from the internal AutomateIT source. Operator's customers. Pro (Design Partner) license."
+            summary          = "Managing tenant. GUI + SQL hosted in the managing tenant. Updates from the internal AutomateIT source. Operator's customers. Pro (Design Partner) license."
             bindings         = [pscustomobject]@{ configVariant = 'msp'; updateSourceProfile = 'sync-automateit'; ringGated = $false; activeEdition = 'Pro-DesignPartner'; grantBasis = 'design-partner' }
         },
-        # S4 (MSP master -- Community edition) is RETIRED, not supported (operator 2026-09-26: "msp editions will not be made in a
+        # S4 (managing tenant -- Community edition) is RETIRED, not supported (operator 2026-09-26: "msp editions will not be made in a
         # free edition, only pro/paid ... msp is always a paid solution"). Its id stays reserved -- scenario ids are never renumbered.
         [pscustomobject]@{
             id               = 'S5'
-            label            = 'MSP managed/slave tenant -- CENTRAL hosted (multi-tenant SPN)'
+            label            = 'MSP managed tenant -- CENTRAL hosted (multi-tenant SPN)'
             role             = 'msp-managed'
             edition          = 'internal-automateit'
             updateSource     = 'from-master-by-rings'
@@ -147,12 +147,12 @@ function Get-PimScenarioCatalog {
             spnModel         = 'multi-tenant-spn'
             syncModel        = 'master-to-slave-admins-permissions'
             licenseTier      = 'Pro-DesignPartner'
-            summary          = 'Managed/slave tenant, CENTRAL hosted. Updates pulled from the master, ring-gated. Syncs admins+permissions from the master so MSP admins are created in the managed tenant. SQL + web stored separately in the MSP (central) tenant. Sync files central, in separate per-tenant folders on the MSP automation server. Multi-tenant SPN in the managed tenant.'
+            summary          = 'Managed tenant, CENTRAL hosted. Updates pulled from the managing tenant, ring-gated. Syncs admins+permissions from the managing tenant so MSP admins are created in the managed tenant. SQL + web stored separately in the MSP (central) tenant. Sync files central, in separate per-tenant folders on the MSP automation server. Multi-tenant SPN in the managed tenant.'
             bindings         = [pscustomobject]@{ configVariant = 'msp'; updateSourceProfile = 'from-master'; ringGated = $true; activeEdition = 'Pro-DesignPartner'; grantBasis = 'design-partner' }
         },
         [pscustomobject]@{
             id               = 'S6'
-            label            = 'MSP managed/slave tenant -- LOCAL hosted (local SPN)'
+            label            = 'MSP managed tenant -- LOCAL hosted (local SPN)'
             role             = 'msp-managed'
             edition          = 'internal-automateit'
             updateSource     = 'from-master-by-rings'
@@ -161,7 +161,7 @@ function Get-PimScenarioCatalog {
             spnModel         = 'local-spn'
             syncModel        = 'master-to-slave-admins-permissions'
             licenseTier      = 'Pro-DesignPartner'
-            summary          = 'Managed/slave tenant, LOCAL hosted. Local SPN in the managed/slave tenant. Updates from the master, ring-gated. Syncs admins+permissions from the master so MSP admins are created in the managed tenant. SQL + web stored LOCALLY in the managed/slave tenant. Sync files stored LOCALLY in folders on the managed tenant automation server.'
+            summary          = 'Managed tenant, LOCAL hosted. Local SPN in the managed tenant. Updates from the managing tenant, ring-gated. Syncs admins+permissions from the managing tenant so MSP admins are created in the managed tenant. SQL + web stored LOCALLY in the managed tenant. Sync files stored LOCALLY in folders on the managed tenant automation server.'
             bindings         = [pscustomobject]@{ configVariant = 'msp'; updateSourceProfile = 'from-master'; ringGated = $true; activeEdition = 'Pro-DesignPartner'; grantBasis = 'design-partner' }
         }
     )
@@ -184,13 +184,13 @@ function Get-PimScenarioValue {
     return $null
 }
 
-$script:PimRetiredScenarios = @{ 'S4' = 'MSP master on the free Community edition is not supported -- MSP is always a paid (Pro) solution; use S3 with a Pro licence' }
+$script:PimRetiredScenarios = @{ 'S4' = 'managing tenant on the free Community edition is not supported -- MSP is always a paid (Pro) solution; use S3 with a Pro licence' }
 function Get-PimRetiredScenarioReason {
     # '' for a supported or unknown id; the reason for a retired one.
     param([string]$Id)
     $k = "$Id".Trim().ToUpperInvariant()
     if ($script:PimRetiredScenarios -is [hashtable] -and $script:PimRetiredScenarios.ContainsKey($k)) { return "$($script:PimRetiredScenarios[$k])" }
-    if ($k -eq 'S4') { return 'MSP master on the free Community edition is not supported -- MSP is always a paid (Pro) solution; use S3 with a Pro licence' }   # literal floor: $script: can be $null in a child scope
+    if ($k -eq 'S4') { return 'managing tenant on the free Community edition is not supported -- MSP is always a paid (Pro) solution; use S3 with a Pro licence' }   # literal floor: $script: can be $null in a child scope
     return ''
 }
 
@@ -250,7 +250,7 @@ function Get-PimActiveScenario {
 
 # ---------------------------------------------------------------------------
 # REQUIREMENTS 68.6 row 36 (operator 2026-09-13: "gui must show which mode tenant is running, like
-# single, msp master etc"). PURE. The mode named by ROLE and HOSTING -- never the internal S1-S6
+# single, managing tenant etc"). PURE. The mode named by ROLE and HOSTING -- never the internal S1-S6
 # codes. Derived from the same descriptor the engine resolves (role + hostingLocation).
 # Returns @{ key; label; role; hosting; masterName; slaveCount; detail }.
 #   key: single | msp-master | slave-local | slave-central
@@ -263,16 +263,16 @@ function Get-PimTenantModeLabel {
     $role = "$($s.role)"; $host_ = "$($s.hostingLocation)"
     $key = 'single'; $label = 'Single'; $hosting = ''
     switch ($role) {
-        'msp-master'  { $key = 'msp-master'; $label = 'MSP Master' }
+        'msp-master'  { $key = 'msp-master'; $label = 'Managing tenant' }   # §85: the word; the key stays
         'msp-managed' {
-            if ($host_ -eq 'central-msp') { $key = 'slave-central'; $label = 'Slave (centrally hosted)'; $hosting = 'central' }
-            else { $key = 'slave-local'; $label = 'Slave (locally hosted)'; $hosting = 'local' }
+            if ($host_ -eq 'central-msp') { $key = 'slave-central'; $label = 'Managed tenant (centrally hosted)'; $hosting = 'central' }
+            else { $key = 'slave-local'; $label = 'Managed tenant (locally hosted)'; $hosting = 'local' }
         }
         default       { $key = 'single'; $label = 'Single' }
     }
     $detail = ''
     if ($key -like 'slave-*') {
-        $detail = if ("$MasterName".Trim()) { "managed by the MSP master '$("$MasterName".Trim())'" } else { 'managed by an MSP master (master name not recorded on this tenant)' }
+        $detail = if ("$MasterName".Trim()) { "managed by the managing tenant '$("$MasterName".Trim())'" } else { 'managed by a managing tenant (managing tenant name not recorded on this tenant)' }
     } elseif ($key -eq 'msp-master') {
         $detail = if ($SlaveCount -ge 0) { "$SlaveCount managed slave tenant(s)" } else { 'managed slave count unknown (registry not readable)' }
     } else { $detail = 'one tenant, no MSP relationship' }
@@ -298,7 +298,7 @@ function Resolve-PimScenarioContext {
         # 'local' uses config-local/ (local-tenant-owned). $global:PIM_ConfigVariant.
         configVariant       = "$(Get-PimScenarioValue -Object $b -Key 'configVariant')"
         # Update source profile fed to Invoke-PimUpdate / Get-PimUpdateSourceProfile.
-        # 'from-master' is the ring-gated MSP downlink (managed pulls from master).
+        # 'from-master' is the ring-gated MSP downlink (managed pulls from managing tenant).
         updateSourceProfile = "$(Get-PimScenarioValue -Object $b -Key 'updateSourceProfile')"
         # Ring gating: TRUE for managed/slave (S5/S6) -- they pull only their ring.
         ringGated           = [bool](Get-PimScenarioValue -Object $b -Key 'ringGated')
@@ -357,7 +357,7 @@ function Get-PimScenarioEntryPlan {
     # Edition payload (the exact shape Resolve-PimEdition reads under the 'Edition' key).
     $note = "set by deployment scenario $($ctx.id) ($($ctx.role), $($ctx.distributionEdition))"
     $editionPayload = @{ edition = "$($ctx.activeEdition)"; grantBasis = "$($ctx.grantBasis)"; note = $note }
-    # (was S4 only: a Community-distribution MSP master. S4 is retired -- no scenario is community AND MSP.)
+    # (was S4 only: a Community-distribution managing tenant. S4 is retired -- no scenario is community AND MSP.)
     $mspFeaturesRequirePro = ("$($ctx.distributionEdition)" -eq 'community' -and "$($ctx.role)" -eq 'msp-master')
     return [pscustomobject]@{
         id                    = "$($ctx.id)"
@@ -542,7 +542,7 @@ function Set-PimScenarioContext {
     $global:PIM_ConfigVariant = $ctx.configVariant
     # Ring gating flag for the managed downlink pull (existing MSP pull reads PIM_Ring).
     # AutomateIT RING-1: this DECLARES that the scenario consumes a ring plan (plane 2 --
-    # an MSP master gating which template version its managed tenants may pull). It is not
+    # a managing tenant gating which template version its managed tenants may pull). It is not
     # the gate: the decision comes from the vendored platform core in PIM-RingGate.ps1,
     # which PIM consumes rather than redefines. Do NOT confuse this with the ADMIN ring
     # (tenant.Ring <= admin.Ring in PIM-Downlink.ps1, §77.20) -- that is assignment scoping, a

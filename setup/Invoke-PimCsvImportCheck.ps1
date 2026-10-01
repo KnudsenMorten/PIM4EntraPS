@@ -8,7 +8,7 @@
     Runs engine/_shared/PIM-CsvImportCheck.ps1 (Invoke-PimCsvImportCheck) over -Path and reports:
       * every finding -- file, row, line, column, code, severity (error / warning / info), message;
       * a summary per file (rows, errors, warnings) and an overall verdict;
-      * the replication report: the effective Replicate of every replicable row and what an MSP master
+      * the replication report: the effective Replicate of every replicable row and what a managing tenant
         would publish to its managed tenants, with and without -ForceLocal, and the exact values
         -ForceLocal would set.
     The row-level rules are the Manager's own validator (tools/pim-manager/_validator.ps1), called --
@@ -26,7 +26,7 @@
     report still lists what -ForceLocal would change.
 
 .PARAMETER NotMspMaster
-    The target is a single or managed tenant, not an MSP master (replication fields mean nothing there).
+    The target is a single or managed tenant, not a managing tenant (replication fields mean nothing there).
 
 .PARAMETER DefaultDomain
     The target's default UPN domain, so admin rows without a UserPrincipalName resolve as the engine does.

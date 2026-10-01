@@ -13,7 +13,7 @@
          fires every 5 minutes; the gate reads this tenant's OWN pim.Settings (DownlinkSchedule / DownlinkRunNow /
          DownlinkLastRun) and a not-due execution logs one "[cadence] SKIPPED:" line and exits 0 before the engine is
          loaded. Nothing stored = daily, as before. See engine/_shared/PIM-JobCadence.ps1.
-     0b. REQ-Y: REFUSES (exit 2, nothing pulled or applied) unless this slave holds a Pro licence that covers MSP for
+     0b. REQ-Y: REFUSES (exit 2, nothing pulled or applied) unless this managed tenant holds a Pro licence that covers MSP for
          -TenantId (Invoke-PimMspLicenseGate, engine/_shared/PIM-License.ps1); in its grace window it pulls with a WARN.
       1. AUTHENTICATES the runtime identity (Managed Identity by default; an SPN
          certificate when $env:PIM_ENGINE_CERT_THUMBPRINT is set). REST-only, no
@@ -22,7 +22,7 @@
          INVOKING the existing live wrapper setup/Invoke-PimScenarioRun.ps1, which:
             * managed (S5/S6) -> downlink-sync (pull the SIGNED master baseline ->
               verify RSA-SHA256 -> ring-gate slave.Ring <= admin.Ring (§77.20) -> stage the
-              per-tenant sync files -> APPLY into the slave via its own SPN) THEN
+              per-tenant sync files -> APPLY into the managed tenant via its own SPN) THEN
             * engine apply (admins + delegation groups/roles/AUs) -- which honours
               the mass-disable guard (empty desired never prunes; -Prune opt-in).
       3. Writes a structured run log to STDOUT (the container log stream) so the
@@ -36,18 +36,18 @@
     local SPN). The cron Job's command always supplies this.
 
 .PARAMETER TenantId / SlaveRing
-    The managed/slave tenant id + the slave's OWN ring (0 = dev, 1 = test, 2 = broad; default 0). The ring
-    is LOCAL: it is this job's argument, set in the slave, and it is authoritative. The
-    master's platform.Tenants.Ring is only the master's copy and is never read here.
+    The managed tenant id + the managed tenant's OWN ring (0 = dev, 1 = test, 2 = broad; default 0). The ring
+    is LOCAL: it is this job's argument, set in the managed tenant, and it is authoritative. The
+    master's platform.Tenants.Ring is only the managing tenant's copy and is never read here.
 
 .PARAMETER BaselineUrl
-    PLAIN blob URL of the master's signed baseline bundle (DESIGN 13.7: public-but-signed,
+    PLAIN blob URL of the managing tenant's signed baseline bundle (DESIGN 13.7: public-but-signed,
     or a private endpoint over VNet peering). No query string: the SAS transport is
     retired (SEC-27). Mutually exclusive with -BaselineDocPath. Falls back to
     $env:PIM_BaselineUrl.
 
 .PARAMETER CentralKillUrl
-    SEC-25: the master's signed central-kill manifest. Falls back to $env:PIM_CentralKillUrl,
+    SEC-25: the managing tenant's signed central-kill manifest. Falls back to $env:PIM_CentralKillUrl,
     else the sibling of the bundle URL (<container>/central-kill.json). A 404 = no kill.
 
 .PARAMETER BaselineDocPath
@@ -81,7 +81,7 @@ param(
     [string]$EngineScope = 'All',
     [ValidateSet('Full','Delta')][string]$EngineMode = 'Delta',
     # IMP-13 / operator ruling 2026-09-03. Comma-separated in the env because an ACA env value is
-    # one string. 🔴 Without this the scheduled Job never told the plan what the slave's admin
+    # one string. 🔴 Without this the scheduled Job never told the plan what the managed tenant's admin
     # naming convention is, so Select-PimUnrecognisableAdmins returned `checked = $false` on every
     # production run -- "we did not look", which its own contract says must not be read as "they
     # are fine". The guard was correct and simply never armed on this path.
@@ -156,7 +156,7 @@ function Stop-DownlinkJob {
     exit $Code
 }
 
-# --- 0b) REQ-Y: AN MSP SLAVE NEEDS A PRO LICENCE (operator 2026-09-19: "msp master slave require license pro") ---------
+# --- 0b) REQ-Y: AN MSP SLAVE NEEDS A PRO LICENCE (operator 2026-09-19: "managing tenant slave require license pro") ---------
 # After the cadence says the pull is due; BEFORE the scenario profile, the downlink and the engine are loaded -- nothing
 # is pulled or applied without it. The licence is THIS tenant's pim.Settings['License'], bound to -TenantId (the tenant
 # this job already pulls for). A store that cannot be read cannot prove a licence: refused, and the log says why.
@@ -219,7 +219,7 @@ else { JobLog 'trusted master signing keys: none pinned -- only bundles signed b
 
 # --- 2) COMPOSE downlink-sync THEN engine apply via the scenario runner --------
 # Invoke-PimScenarioRun.ps1 is the single scenario-bound runner: for S5/S6 it runs
-# the downlink (pull -> verify -> ring-gate -> stage -> apply into the slave) and
+# the downlink (pull -> verify -> ring-gate -> stage -> apply into the managed tenant) and
 # THEN the engine apply (admins + delegation groups/roles/AUs), in that order. We
 # INVOKE it (never edit it). It honours the mass-disable guard through the engine.
 $runner = Join-Path $solRoot 'setup\Invoke-PimScenarioRun.ps1'

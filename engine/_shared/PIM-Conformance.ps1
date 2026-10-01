@@ -213,7 +213,7 @@ function Read-PimApprovedTemplates {
 # --- WHERE THE TEMPLATE-CATALOG RING COMES FROM (BUG-179, operator decision 2026-09-18) --------------
 # §77.20 (operator 2026-09-21: "ring 0 = dev, ring 1 = test, ring 2 = broad" / "make it consistent"): ONE ring
 # order everywhere. An entry on ring E reaches a tenant on ring T when T <= E -- the same rule as an admin reaching
-# a slave (Test-PimRingReaches). The catalog ring IS the environment's update ring, no inversion any more:
+# a managed tenant (Test-PimRingReaches). The catalog ring IS the environment's update ring, no inversion any more:
 #     update ring 0 (dev)       -> 0   everything, pilots included
 #     update ring 1 (internal)  -> 1
 #     update ring 2 (customers) -> 2   only fully promoted entries
@@ -221,7 +221,7 @@ function Read-PimApprovedTemplates {
 # 🪤 Get-PimTenantRing (PIM-Functions.psm1) is deliberately NOT used or changed: it also drives the
 # admin<->tenant ring filter (Select-PimAdminRowsByRing), which is a different axis.
 # The update ring is read from the record the UPDATE JOB writes (pim.Settings['UpdateState'].ring,
-# PIM-UpdateState.ps1) -- the ring is local to the environment, never set by a master.
+# PIM-UpdateState.ps1) -- the ring is local to the environment, never set by a managing tenant.
 function ConvertTo-PimTemplateCatalogRing {
     # PURE. Update ring ('2', 'ring2', 'Ring 1', ...) -> @{ ring; valid; updateRing; reason }.
     [CmdletBinding()]

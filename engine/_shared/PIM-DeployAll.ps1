@@ -153,7 +153,7 @@ function Get-PimDeployStepDecision {
         -Step    : a catalog entry (from Get-PimDeployStepCatalog).
         -Needed  : the gathered fact -- $true when the step must run (target missing / drifted /
                    not current), $false when the target is already in the desired state.
-        -Apply   : the master gate. $false (-WhatIf / plan-only) => never 'do', always 'plan'.
+        -Apply   : the managing tenant gate. $false (-WhatIf / plan-only) => never 'do', always 'plan'.
         -Hosted  : is this the hosted (ACA) flavour? A hostedOnly step on a non-hosted target
                    is skipped as not-applicable.
         -ValidateOnly : when set, ONLY the 'verify' step may run; every other step is skipped.

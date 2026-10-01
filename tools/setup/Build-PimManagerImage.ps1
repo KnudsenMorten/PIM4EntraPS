@@ -191,7 +191,7 @@ Write-Host "=== PIM4EntraPS BUILD Manager image ($Source) -> $ImageRepo`:$ImageT
 
       🔑 MEASURED, AND IT WAS THE WORST POSSIBLE FIX TO MISS. On 2026-09-12 a SEC-01 defect in
       engine/_shared/PIM-HostedAuth.ps1 locked every human out of the hosted Manager. It was fixed,
-      committed, and the customer's master tenant was re-deployed -- which reported success, end to
+      committed, and the customer's managing tenant was re-deployed -- which reported success, end to
       end, having rebuilt NOTHING. The same blindness applies to the nightly in-cloud updater, so
       the entire fleet would have kept the lockout indefinitely: a self-updating system that cannot
       see its own engine change is not self-updating.
@@ -207,23 +207,23 @@ $contentHash = Get-PimSolutionContentHash -SolutionRoot $solRoot
 Info "pulled Manager content hash: $contentHash"
 
 # 🔴 WHERE THE CODE COMES FROM IS NOT HOW THE IMAGE IS BUILT, AND CONFLATING THEM BROKE S6.
-# The scenario map sends "from-master, locally hosted" (S6 -- a managed/slave tenant) to the
-# git-pull path, because its UPDATE SOURCE is the master rather than the AutomateIT sync. But an S6
+# The scenario map sends "from-master, locally hosted" (S6 -- a managed tenant) to the
+# git-pull path, because its UPDATE SOURCE is the managing tenant rather than the AutomateIT sync. But an S6
 # slave still hosts its OWN containers, out of its OWN registry -- and on a greenfield slave that
 # registry is empty. The git-pull path packages the Manager into a local output folder, pushes
 # NOTHING, and then the step reported
 #     -> ok=True ran=True built acrpimrj466/pim-manager:2.4.324
 # naming an ACR image that does not exist. Infra refused two lines later, correctly:
 #     ERROR: the specified tag does not exist
-# Measured rebuilding a managed/slave tenant 2026-09-12.
+# Measured rebuilding a managed tenant 2026-09-12.
 # 🔑 THE SIGNAL IS -AcrName. A registry was supplied, so this environment HAS one and its containers
 # pull from it; a community local install (S1/S2) passes none and is unaffected. Ring-gated updates
-# from the master are unchanged -- this only decides how the FIRST image gets into the slave's own
+# from the managing tenant are unchanged -- this only decides how the FIRST image gets into the managed tenant's own
 # registry, which nothing else does.
 $buildSource = $Source
 if ($buildSource -ne 'sync-automateit' -and "$AcrName".Trim() -and (Have 'az')) {
     Step "hosted registry '$AcrName' supplied -- building INTO it (the update source stays '$Source')"
-    Info '  a local package cannot be pulled by Container Apps; the slave needs a real image in its own ACR.'
+    Info '  a local package cannot be pulled by Container Apps; the managed tenant needs a real image in its own ACR.'
     $buildSource = 'sync-automateit'
 }
 

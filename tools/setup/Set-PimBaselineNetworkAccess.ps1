@@ -1,13 +1,13 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    71.34 -- PUBLIC-BUT-SIGNED access to the MSP master's signed-baseline store (DESIGN 13.7): let exactly the named
+    71.34 -- PUBLIC-BUT-SIGNED access to the managing tenant's signed-baseline store (DESIGN 13.7): let exactly the named
     networks read the bundle blob anonymously, and nobody else. No SAS, no stored access policy, no account key, and
     nothing in the access path that expires.
 
 .DESCRIPTION
     Operator 2026-09-17: "go back to original design. we can not release the current." The SAS read link had an
-    expiry, needed the master's certificate on the managed tenant's side and a weekly SYSTEM rotation task. This
+    expiry, needed the managing tenant's certificate on the managed tenant's side and a weekly SYSTEM rotation task. This
     replaces all of it with what DESIGN 13.7 always described:
 
       TRUST  = the RSA signature. Every pull verifies it against the public certificate embedded in the product and
@@ -22,7 +22,7 @@
                    effect on requests from the same Azure region as the storage account (Microsoft documents this).
 
     Adds are idempotent; -Remove takes away exactly the named sources and nothing else (and refuses to leave the store
-    with no allowed network at all). Every change is READ BACK from ARM, and audited in the master store
+    with no allowed network at all). Every change is READ BACK from ARM, and audited in the managing tenant store
     ('msp.tenant.network') when -SqlServerFqdn is given. Firewall and public-access settings are control-plane
     operations, so this works even though the data plane is firewalled.
 
@@ -51,7 +51,7 @@ param(
     [string[]]$IpAddress = @(),
     [switch]$Remove,
     [switch]$EnsurePosture,
-    # Audit (optional): the master store and the identity that writes the audit row.
+    # Audit (optional): the managing tenant store and the identity that writes the audit row.
     [string]$ManagedTenantId,
     [string]$SqlServerFqdn,
     [string]$SqlDatabase = 'PimPlatform',

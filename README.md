@@ -78,6 +78,7 @@ owns the detail. (Screenshot uses synthetic demo data.)*
   - [How licensing works](#how-licensing-works)
   - [Defaults in this release](#defaults-in-this-release)
   - [Getting a licence](#getting-a-licence)
+  - [Support](#support)
 - [Getting started — install the community edition](#getting-started--install-the-community-edition)
   - [What you need](#what-you-need)
   - [1. Get the code](#1-get-the-code)
@@ -631,7 +632,7 @@ description. (Synthetic demo data.)*
 | **Access** | The Access map, Look up a role, Create access (guided wizards), Change existing access, Admin accounts & TAP, Invite a guest or consultant, Departments & owners, and All records. |
 | **Pending changes** | Check for problems (validation) and the Review & commit queue. |
 | **Jobs** | Jobs & status, Engine logs & errors, and the Job schedule. |
-| **Reviews & controls** | Review current delegations, Approvals, Drift: live vs desired, **Coverage & gaps** (what every workload has delegated and what it has not), Access reviews, Tenant conformance, Reports, Managed tenants, and on an MSP master the **Managed tenant registry** and **Replication overview**. |
+| **Reviews & controls** | Review current delegations, Approvals, Drift: live vs desired, **Coverage & gaps** (what every workload has delegated and what it has not), Access reviews, Tenant conformance, Reports, Managed tenants, and on a managing tenant the **Managed tenant registry** and **Replication overview**. |
 | **Audit & Settings** | Audit trail, Settings, Newly discovered resources, Manager access & roles, Emergency access (break-glass), Mail templates, **Policy templates**, and Support. |
 
 A **global search box** in the header jumps to any person, group, role, scope or
@@ -1064,6 +1065,9 @@ set of advanced single-tenant capabilities and the whole multi-tenant half. From
 jobs and the portal, and the portal says why. Everything in the free edition keeps working whatever the
 licence state.
 
+**Buy Pro at [invardia.com](https://invardia.com).** Licensed customers get support at
+**[portal.invardia.com](https://portal.invardia.com)**.
+
 ![Free vs Pro — the page a Pro menu item opens on a Community install](docs/img/manager-free-vs-pro.png)
 
 <p align="center">
@@ -1095,7 +1099,7 @@ Everything an organisation needs to govern its own tenant:
 - **permission templates imported by script** (`Import-PimPermissionTemplate.ps1`) and tenant preparation from one
   configuration file (`Invoke-PimTenantPrep.ps1`);
 - **self-updating from the public release**;
-- **community support**.
+- **community support** (GitHub issues on the public repository).
 
 ### Pro — licensed capabilities for a single tenant
 
@@ -1133,9 +1137,9 @@ For a service provider, or any organisation running more than one tenant:
 - **controlled release rings** for the software itself;
 - **the provider-hosted option** — the provider runs the portal and database for the
   customer;
-- **support with an agreed response time**.
+- **support with an agreed response time**, at portal.invardia.com.
 
-A managing (master) or managed (slave) tenant **requires** a Pro licence: without one, its publishing and
+A managing tenant or a managed tenant **requires** a Pro licence: without one, its publishing and
 downlink jobs refuse to run and the portal shows a red banner on its MSP pages.
 
 ### How licensing works
@@ -1190,8 +1194,17 @@ What an environment does before anyone changes a setting (the full table is in
 
 ### Getting a licence
 
-**Mail [mok@mortenknudsen.net](mailto:mok@mortenknudsen.net) for a Pro licence** — for the advanced single-tenant
-capabilities, or for the multi-tenant edition. The terms that apply to this code are in **[LICENSE](LICENSE)**.
+**Buy a Pro licence at [invardia.com](https://invardia.com)** — for the advanced single-tenant capabilities, or for
+the multi-tenant edition. You receive one signed licence file (and, for a Community installation, the Pro update feed
+used by [Upgrading to Pro](#upgrading-to-pro)). Questions before you buy:
+[mok@mortenknudsen.net](mailto:mok@mortenknudsen.net). The terms that apply to this code are in **[LICENSE](LICENSE)**.
+
+### Support
+
+| Edition | Where |
+|---|---|
+| **Community (free)** | Community support: GitHub issues on the public repository. |
+| **Pro (paid licence)** | **[portal.invardia.com](https://portal.invardia.com)** — the support portal for licensed customers, with an agreed response time. |
 
 ---
 
@@ -1322,6 +1335,23 @@ The database schema is upgraded additively before the new version rolls, and a
 failed health check rolls the Manager back to the previous version. (The unattended
 in-cloud updater used by subscription environments needs a published release feed,
 so the community edition updates on your schedule, from GitHub.)
+
+### Upgrading to Pro
+
+Register the licence file you received under **Settings ▸ Licence** (pick the file or paste it). The Pro
+features switch on at once -- nothing is redeployed -- and a licence for another tenant, or one that is not a Pro
+licence, is refused without changing anything. The page then shows one last step: give the installation the
+in-cloud updater, so it receives Pro releases by itself through the customer ring, from the update feed you
+received with your licence:
+
+```powershell
+.\tools\setup\Upgrade-PimToPro.ps1 -SourceUrlTemplate '<the Pro update feed>'          # the plan
+.\tools\setup\Upgrade-PimToPro.ps1 -SourceUrlTemplate '<the Pro update feed>' -Apply   # upgrade
+```
+
+It re-runs the deploy with your saved parameters and installs the updater; nothing else changes. Until then
+`Update-PimCommunity.ps1` keeps working as before; after it, the installation updates itself -- stop using
+`Update-PimCommunity.ps1`.
 
 An environment that updates itself does so **only forward**: before it builds
 anything it compares the version its release ring approves with the highest version

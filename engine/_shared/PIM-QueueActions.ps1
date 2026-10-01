@@ -557,7 +557,7 @@ function Invoke-PimQueueAction {
 
             'session-revoke' {
                 $uid = "$($p.userId)".Trim()
-                # §79.6: a revoke a MANAGED tenant queues from the master's signed intent knows the account by its UPN only
+                # §79.6: a revoke a MANAGED tenant queues from the managing tenant's signed intent knows the account by its UPN only
                 # (<UserName>@<this tenant's admin domain>). Graph takes a UPN wherever it takes an id, read-back included.
                 if (-not $uid) { $uid = "$($p.userPrincipalName)".Trim() }
                 if (-not $uid) { return [pscustomobject]@{ ok=$false; terminal=$true; verification='none'; detail='session-revoke has no userId or userPrincipalName' } }

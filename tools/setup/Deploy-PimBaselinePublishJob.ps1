@@ -1,8 +1,8 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    71.35 -- deploy the MSP master's signed-baseline PUBLISH job (ca-pim-publish): a Container Apps job on the master's own
-    environment, on the cadence set in the master's Manager (Job schedule; daily when nothing is set -- the job's trigger
+    71.35 -- deploy the managing tenant's signed-baseline PUBLISH job (ca-pim-publish): a Container Apps job on the managing tenant's own
+    environment, on the cadence set in the managing tenant's Manager (Job schedule; daily when nothing is set -- the job's trigger
     fires every 5 minutes and it gates itself) + on demand, running as its SYSTEM-ASSIGNED managed identity. No certificate, no secret, no
     SAS, no account key -- in the job, in its environment variables, or on this host.
 
@@ -25,7 +25,7 @@
     The SQL step connects from THIS host as the az context the build established (a member of the SQL admin group),
     so this host must reach the SQL server -- the same requirement every other store step of the build has.
 
-    NETWORK. The job runs in the master's Container Apps subnet. The bundle store's firewall allows that subnet (the
+    NETWORK. The job runs in the managing tenant's Container Apps subnet. The bundle store's firewall allows that subnet (the
     build's publishnetwork + storage steps put the Microsoft.Storage service endpoint on it and the VNet rule on the
     store BEFORE default-action Deny), so the job can write and can read the blob back anonymously.
 #>
@@ -40,7 +40,7 @@ param(
     [string]$JobName = 'ca-pim-publish',
     [string]$ManagerApp = 'ca-pim-manager',
     # Every 5 minutes (operator 2026-09-18: the cadence is set in the Manager's Job schedule). The job GATES ITSELF against
-    # the master's own PublishSchedule (engine/_shared/PIM-JobCadence.ps1); nothing set = daily, as the old '0 4 * * *'.
+    # the managing tenant's own PublishSchedule (engine/_shared/PIM-JobCadence.ps1); nothing set = daily, as the old '0 4 * * *'.
     [string]$Cron = '*/5 * * * *',
     [Parameter(Mandatory)][string]$SqlServerFqdn,
     [string]$SqlDatabase = 'PimPlatform',
@@ -162,7 +162,7 @@ foreach ($gr in $grants) {
 
 # ---- 5. SQL: its OWN least-privilege READER user -- never the SQL admin group (SEC-39) ------------------------------
 # SEC-39 -- THIS USED TO ADD THE JOB'S IDENTITY TO grp-pim-sql-admins, the SQL server's Entra ADMIN: full administration
-# of the master registry for a job that only SELECTs from four tables. A compromise of the publish job (or of anything
+# of the managing tenant registry for a job that only SELECTs from four tables. A compromise of the publish job (or of anything
 # able to run as it) would then have been able to rewrite who is an MSP admin in every managed tenant. It now gets a
 # contained user created from its app id as a SID (FROM EXTERNAL PROVIDER fails on these servers), with SELECT on exactly
 # what the producer reads and NO fixed role (a broader role an older run granted is taken back). Read back, then -- and
@@ -219,10 +219,10 @@ if (-not $SkipSqlGrant) {
                'This host must reach the SQL server and its az identity must be a member of the SQL admin group (as for every store step of the build).')
     } finally { $conn.Close(); $conn.Dispose(); $tokObj = $null }
     # FAIL CLOSED on a missing table: the producer reads a SELECT that is refused exactly like a table that is absent, and
-    # for pim.TenantRoleProjection "absent" means "project everything". A master registry without these is not ready.
+    # for pim.TenantRoleProjection "absent" means "project everything". A managing tenant registry without these is not ready.
     $absent = @()
     if ($rowBack) { $absent = @($sqlSel | Where-Object { $p = $rowBack.PSObject.Properties["sel_$("$_".Replace('.', '_'))"]; $p -and ($null -eq $p.Value -or $p.Value -is [DBNull]) }) }
-    if ($absent.Count) { throw "the master store $SqlDatabase has no $($absent -join ', ') -- apply the registry schema (Initialize-PimMasterRegistry.ps1) first (the cadence views need pim.Settings, which the Manager creates); the job's reader user was NOT proven." }
+    if ($absent.Count) { throw "the managing tenant store $SqlDatabase has no $($absent -join ', ') -- apply the registry schema (Initialize-PimMasterRegistry.ps1) first (the cadence views need pim.Settings, which the Manager creates); the job's reader user was NOT proven." }
     $verdict = Test-PimSqlContainedUserReadBack -Row $rowBack -RevokeRoles $revoke -SelectObjects $sqlSel -WriteObjects $sqlWrite -DbUserName $JobName
     if (-not $verdict.ok) { throw "read-back FAILED for $JobName's database user: $($verdict.problems -join '; ')" }
     Note "read back: contained user '$JobName' (SID from app id $miAppId), SELECT on $($sqlSel -join ', '), INSERT/UPDATE on $($sqlWrite -join ', '), no fixed database role"

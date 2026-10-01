@@ -84,7 +84,7 @@ function New-PimUnmanagedAdminRecord {
         schema  = 1
         scopes  = [pscustomobject]$scopes
         total   = (@($scopes.Values | ForEach-Object { [int]$_.count }) | Measure-Object -Sum).Sum
-        fix     = 'Add each account to the definitions (on an MSP master: tools/setup/Add-PimCentralAdmin.ps1, then publish + downlink), or remove the account in Entra. PIM never creates, disables or removes an account because of this report.'
+        fix     = 'Add each account to the definitions (on a managing tenant: tools/setup/Add-PimCentralAdmin.ps1, then publish + downlink), or remove the account in Entra. PIM never creates, disables or removes an account because of this report.'
     }
     return @{ record = $rec; changed = $changed; accounts = $acc }
 }

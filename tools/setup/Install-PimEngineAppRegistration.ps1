@@ -147,7 +147,7 @@ $graphRoleMap = Get-PimGraphAppRoleMap
 # 🔴 BUG-181 -- THE LIST IS THE ENGINE MAP, NOT A COPY OF IT. This used to be a hand-kept literal that had drifted behind
 # the map the managed identity is granted from: it lacked RoleManagement.ReadWrite.Directory (70.16: creating a
 # role-assignable ROLE-* group needs it), plus AppRoleAssignment / Application.Read / Defender / DeviceManagementRBAC /
-# the .Remove.* schedule roles -- so an engine running AS THIS SPN (the VM path, a master acting cross-tenant) was
+# the .Remove.* schedule roles -- so an engine running AS THIS SPN (the VM path, a managing tenant acting cross-tenant) was
 # 403-blind where the managed identity was not, and nothing reported it. tests/Test-PimGraphRoleMap.ps1 pins this.
 $graphRolesWanted = @(Get-PimEngineSpnGraphRoles)
 $exoRoleValue = 'Exchange.ManageAsApp'

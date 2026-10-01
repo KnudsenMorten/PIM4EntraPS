@@ -276,7 +276,7 @@ $profile = Get-PimUpdateSourceProfile -Source $Source -ManagedHosting $ManagedHo
 # Get-PimUpdateSourceProfile keys isHosted off the UPDATE SOURCE, and for S5/S6 that resolves to
 # 'git-pull' (from-master + managedHosting=local) -> isHosted=$false. But "local" carries two
 # unrelated meanings -- MSP topology (the customer's own tenant) and hosting flavour (a VM with a
-# local build) -- and a managed/slave tenant is routinely topology-local AND hosting-hosted.
+# local build) -- and a managed tenant is routinely topology-local AND hosting-hosted.
 # 🪤 THE ORCHESTRATOR LEARNED THIS; THIS SCRIPT DID NOT. It re-derives its own $profile from the
 # source, so the correction made one layer up never reached here. Measured rebuilding a managed
 # slave 2026-09-12: hosted=False on an environment running a container app, an ACA job, a managed

@@ -258,7 +258,7 @@ $subArgs = @('--subscription', $SubscriptionId)
 # resource against a Registering provider fails with a message that blames the resource.
 Write-Host "[1] resource providers ..." -ForegroundColor Yellow
 # 🔴 Microsoft.Storage added 2026-08-25 (operator: "register microsoft.storage must be in the
-# script" -- no manual prereqs). The MSP baseline bundle is published to blob, so an MSP master
+# script" -- no manual prereqs). The MSP baseline bundle is published to blob, so a managing tenant
 # needs this provider; a single-tenant install never notices, which is exactly why it was missing.
 # 🪤 THE FAILURE DOES NOT SAY "PROVIDER": creating a storage account against an unregistered
 # Microsoft.Storage answers `(SubscriptionNotFound) Subscription <id> was not found`. That reads as
@@ -486,7 +486,7 @@ Write-Host "    $uamiId"
 
 # ---- 6. SQL server + database, Entra-only ----------------------------------
 # Skipped for hostingLocation=central-msp: an S5 managed tenant has NO store of its own, it
-# uses the master's. Creating one here would quietly turn S5 into S6.
+# uses the managing tenant's. Creating one here would quietly turn S5 into S6.
 if ($SkipSql) {
     Write-Host "[6] sql ... SKIPPED (this environment uses a central store, by design)" -ForegroundColor DarkGray
 } else {

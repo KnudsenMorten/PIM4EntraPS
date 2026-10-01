@@ -1,8 +1,8 @@
 <#
-  PIM4EntraPS -- copy settings from one PIM environment to another (export on the master, import on a slave).
+  PIM4EntraPS -- copy settings from one PIM environment to another (export on the managing tenant, import on a managed tenant).
 
-  Operator 2026-09-21: "how can i export settings and import them into slave from master fx naming".
-  Each environment keeps its OWN settings (a slave's ring and settings are local -- DESIGN), so this is a deliberate,
+  Operator 2026-09-21: "how can i export settings and import them into managed tenant from managing tenant fx naming".
+  Each environment keeps its OWN settings (a managed tenant's ring and settings are local -- DESIGN), so this is a deliberate,
   operator-driven copy: Settings > Copy settings > Export writes ONE JSON file with the sections picked; on the other
   environment Settings > Copy settings > Import shows every setting as current -> new and writes only the ticked ones.
 

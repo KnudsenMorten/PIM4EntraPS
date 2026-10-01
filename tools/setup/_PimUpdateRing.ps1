@@ -401,7 +401,7 @@ function Test-PimRollRingGate {
         # 'pro' and '' (unknown: the store could not be read) are gated exactly as before. It was a -CommunityGitPull switch
         # set from "-Source git-pull", so a PAID environment updating from git (the retired MSP-community S4) was ungated too.
         # A community environment that DOES carry a ring is gated by that ring.
-        [ValidateSet('', 'community', 'pro')][string]$EnvironmentEdition = '',
+        [ValidateSet('', 'community', 'pro', 'upgrade-pending')][string]$EnvironmentEdition = '',
         [scriptblock]$Fetch
     )
     $r = { param($allowed, $gated, $ring, $appr, $reason) [pscustomobject]@{ allowed = [bool]$allowed; gated = [bool]$gated; ring = $ring; approved = $appr; reason = $reason } }
@@ -416,6 +416,15 @@ function Test-PimRollRingGate {
     if (-not $ringRaw) {
         if ($Greenfield) {
             return (& $r $true $false $null '' 'nothing PIM is deployed in this resource group yet -- a first install is not a roll (the updater the deploy installs carries the ring from then on).')
+        }
+        # BUG-277: a Community install that registered a Pro licence keeps updating as before (audited) until the upgrade
+        # step installs the Pro updater -- from then on its ring governs (this branch is only reached with NO ring).
+        if ($EnvironmentEdition -eq 'upgrade-pending' -and $PendingRing -lt 0) {
+            $cv = & $r $true $false $null '' ('a Community install that registered a Pro licence and has no in-cloud updater yet -- not gated, and audited. ' +
+                'To receive Pro updates through the customer ring, run: .\tools\setup\Upgrade-PimToPro.ps1 -SourceUrlTemplate <the Pro update feed you received with your licence> -Apply')
+            $cv | Add-Member -NotePropertyName community -NotePropertyValue $true
+            $cv | Add-Member -NotePropertyName upgradePending -NotePropertyValue $true
+            return $cv
         }
         if ($EnvironmentEdition -eq 'community' -and $PendingRing -lt 0) {
             $cv = & $r $true $false $null '' 'the free Community edition (no Pro licence in this environment''s store) -- no operator ring governs it (it has no in-cloud updater by design); not gated, and audited.'
@@ -473,6 +482,7 @@ function Assert-PimRollRingGate {
         # R25-24: returns the environment's stored licence document (text) or throws -- tests only; production reads
         # pim.Settings['License'] through -SqlConnectionString (Get-PimEnvironmentEdition).
         [scriptblock]$ReadLicense,
+        [scriptblock]$ReadUpgradeMarker,   # BUG-277 (tests): pim.Settings['EditionUpgrade']
         [scriptblock]$Fetch,
         [scriptblock]$Audit
     )
@@ -486,7 +496,7 @@ function Assert-PimRollRingGate {
     $upd = Get-PimEnvironmentUpdaterEnv -ResourceGroup $ResourceGroup -SubscriptionArgs $SubscriptionArgs -UpdateJobName $UpdateJobName -GetJobs $GetJobs
     $verdict = $null
     # R25-24: the edition is read from the ENVIRONMENT (its store's licence), never taken from the caller.
-    $edition = Get-PimEnvironmentEdition -SqlConnectionString $SqlConnectionString -ReadLicense $ReadLicense
+    $edition = Get-PimEnvironmentEdition -SqlConnectionString $SqlConnectionString -ReadLicense $ReadLicense -ReadUpgradeMarker $ReadUpgradeMarker
     $pend = @{ PendingRing = $PendingUpdateRing; PendingSourceUrl = "$PendingUpdateSourceUrl"; EnvironmentEdition = "$($edition.edition)" }
     if (-not $upd.ok)        { $verdict = Test-PimRollRingGate -TargetVersion $TargetVersion -UpdaterUnreadable -UnreadableReason "$($upd.reason)" -Fetch $Fetch }
     elseif (-not $upd.found) { $verdict = Test-PimRollRingGate -TargetVersion $TargetVersion -UpdaterMissing -Greenfield:(-not $upd.deployed) @pend -Fetch $Fetch }
@@ -551,7 +561,9 @@ function Get-PimEnvironmentEdition {
         ''          -- the store could not be read, so the edition is UNKNOWN (the gate then treats it as not exempt).
       -ReadLicense (tests): returns the document text, or throws.
     #>
-    param([string]$SqlConnectionString, [scriptblock]$ReadLicense)
+    param([string]$SqlConnectionString, [scriptblock]$ReadLicense, [string]$TenantId = $(if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)" } else { "$env:PIM_TenantId" }),
+          # BUG-277 (tests): returns pim.Settings['EditionUpgrade'] (the Community -> Pro conversion marker), or $null
+          [scriptblock]$ReadUpgradeMarker)
     $shared = Join-Path $PSScriptRoot '..\..\engine\_shared'
     $doc = $null
     try {
@@ -574,7 +586,24 @@ function Get-PimEnvironmentEdition {
     if (-not (Get-Command Get-PimLicense -ErrorAction SilentlyContinue)) { . (Join-Path $shared 'PIM-License.ps1') }
     $lic = $null
     try { $lic = Get-PimLicense -LicenseText "$doc" } catch { return [pscustomobject]@{ edition = ''; reason = "the stored licence could not be evaluated ($($_.Exception.Message))" } }
-    if ("$($lic.Status)" -in @('Valid', 'Grace')) { return [pscustomobject]@{ edition = 'pro'; reason = "a $($lic.Status) Pro licence ($($lic.Customer)) is stored" } }
+    # BUG-278: the same verdict as the badge and the gate (sku Pro + this tenant), not "any Valid licence".
+    $v = if (Get-Command Test-PimLicenseIsProForTenant -ErrorAction SilentlyContinue) { Test-PimLicenseIsProForTenant -License $lic -TenantId $TenantId } else {
+        $b = @(@($lic.TenantIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ }); $ti = "$TenantId".Trim().ToLowerInvariant()
+        $ok = ("$($lic.Status)" -in @('Valid', 'Grace')) -and ("$($lic.Sku)".Trim() -match '^(?i)pro(-.+)?$') -and (-not $b.Count -or ($ti -and $b -contains $ti))
+        [pscustomobject]@{ pro = $ok; reason = $(if ($ok) { 'Pro' } else { "sku '$($lic.Sku)' / tenant binding $($b -join ',') does not make this tenant ($ti) Pro" }) } }
+    if ($v.pro) {
+        # BUG-277: a Community install that has just registered its Pro licence has no in-cloud updater yet (by design) --
+        # it is an upgrade in progress, not a Pro environment that lost its updater.
+        $mk = $null
+        try {
+            if ($ReadUpgradeMarker) { $mk = & $ReadUpgradeMarker }
+            elseif ("$SqlConnectionString".Trim() -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) { $mk = Get-PimSqlSetting -ConnectionString $SqlConnectionString -Name 'EditionUpgrade' }
+        } catch { $mk = $null }
+        if ($mk -is [string]) { try { $mk = $mk | ConvertFrom-Json } catch { $mk = $null } }
+        if ($mk -and "$($mk.toEdition)" -eq 'pro') { return [pscustomobject]@{ edition = 'upgrade-pending'; reason = "a $($lic.Status) Pro licence ($($lic.Customer)) was registered on this Community install $("$($mk.licensedUtc)".Substring(0, [Math]::Min(10, "$($mk.licensedUtc)".Length))) -- it has not got the Pro updater yet" } }
+        return [pscustomobject]@{ edition = 'pro'; reason = "a $($lic.Status) Pro licence ($($lic.Customer)) is stored" }
+    }
+    if ("$($lic.Status)" -in @('Valid', 'Grace')) { return [pscustomobject]@{ edition = 'community'; reason = "the stored licence does not make this environment Pro: $($v.reason)" } }
     return [pscustomobject]@{ edition = 'community'; reason = "the stored licence is $($lic.Status): $($lic.Reason)" }
 }
 function Get-PimEnvironmentUpdaterEnv {

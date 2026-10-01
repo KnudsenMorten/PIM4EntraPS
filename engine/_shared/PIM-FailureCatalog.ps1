@@ -160,7 +160,11 @@ $script:PimFailureRules = @(
        # BUG-276 (§78 GUI live, ig798 2026-10-01): the PIM-for-Groups schedule-request POST answers the same 404 for a group
        # created seconds earlier ("POST .../privilegedAccess/group/eligibilityScheduleRequests -> HTTP 404 : ResourceNotFound");
        # the run was recorded FAILED and the next one, two minutes later, applied both items. Same lag, so the same code.
-       match = { param($m, $row) $m -match '(?i)SubjectNotFound|The subject is not found|(role(Eligibility|Assignment)|privilegedAccess/group/(eligibility|assignment))ScheduleRequests\S*\s*->\s*HTTP 404\b.{0,20}ResourceNotFound' }
+       # BUG-279 (§78 live, ig798 2026-10-01 13:47; also internal 2026-09-29 13:06, §33.31): the FIRST eligibility of a
+       # role-assignable group created moments earlier answers "HTTP 400 : ArgumentNullException -- Value cannot be null.
+       # Parameter name: action" -- the run was recorded FAILED and the next run applied it. Only on the schedule-request POSTs;
+       # a body that is really malformed keeps failing and is escalated by the waiting-window rule hours later.
+       match = { param($m, $row) $m -match '(?i)SubjectNotFound|The subject is not found|(role(Eligibility|Assignment)|privilegedAccess/group/(eligibility|assignment))ScheduleRequests\S*\s*->\s*HTTP (404\b.{0,20}ResourceNotFound|400\b.{0,10}ArgumentNullException.{0,60}Parameter name: action)' }
        title = 'The account or group was created moments ago and PIM cannot see it yet'
        cause = 'Entra replicates a new user or group to the PIM service within minutes. An assignment made in the same run that created the principal is refused with "SubjectNotFound" until then.'
        remedy = 'Nothing to do: the next run applies it. If it persists for hours, check that the account or group in the row still exists.'

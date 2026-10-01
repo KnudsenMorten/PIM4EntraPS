@@ -1068,10 +1068,10 @@
     <div class="tab" data-tab="reports" title="&quot;Who can do what&quot; (and the reverse) — pick a person to see everything they can reach, or pick a role to see who can activate it. Printable + exportable.">Reports</div>
     <div class="tab" data-tab="conformance" title="Keep tenants current with the approved delegation templates — see how far behind each tenant is and roll the updates forward.">Template Rollout</div>
     <div class="tab" data-tab="downlink" title="MSP downlink — which of your central admins and roles reach each managed customer, what was held back and why, and the per-relationship projection policy.">MSP Downlink <span id="downlinkUnresBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
-    <!-- REQ-N / REQ-O (operator 2026-09-19): the MSP master's managed-tenant registry and replication overview. MSP MASTER
+    <!-- REQ-N / REQ-O (operator 2026-09-19): the managing tenant's managed-tenant registry and replication overview. MANAGING TENANT
          ONLY -- hidden until the tenant mode says msp-master (applyMspMasterOnlyTabs), and the server refuses elsewhere. -->
-    <div class="tab" data-tab="msptenants" title="The managed tenants this MSP master replicates to — name, tenant id, the master's copy of each tenant's ring, the tags replication targets, and whether it is enabled.">Managed tenant registry</div>
-    <div class="tab" data-tab="replication" title="Every replicable admin, membership, group, nesting and binding on this MSP master, and which managed tenants it reaches — computed by the same plan every tenant runs.">Replication overview</div>
+    <div class="tab" data-tab="msptenants" title="The managed tenants this managing tenant replicates to — name, tenant id, the managing tenant's copy of each tenant's ring, the tags replication targets, and whether it is enabled.">Managed tenant registry</div>
+    <div class="tab" data-tab="replication" title="Every replicable admin, membership, group, nesting and binding on this managing tenant, and which managed tenants it reaches — computed by the same plan every tenant runs.">Replication overview</div>
     <div class="tab" data-tab="jobs" title="The scheduler — see each job's cadence, last result and next run, spot overdue or failing runs, re-run on demand, and export the run history.">Jobs <span id="jobsRunBadge" class="badge" style="display:none;background:#1f883d">0</span></div>
     <div class="tab" data-tab="enginelogs" title="Every recent engine run across all jobs, newest first — what failed and why, with each run's full log.">Engine logs &amp; errors <span id="engLogErrBadge" class="badge" style="display:none;background:#cf222e;color:#fff" title="failed runs nobody has acknowledged yet">0</span></div>
     <div class="tab" data-tab="jobschedule" title="When each scheduled job runs, in plain words — which area it covers, whether it is on, and how often. Mail jobs included.">Job schedule</div>
@@ -1456,9 +1456,9 @@
     </div>
   </div>
 
-  <!-- =========== REQ-N: Managed tenant registry (MSP master only) =========== -->
+  <!-- =========== REQ-N: Managed tenant registry (managing tenant only) =========== -->
   <!-- platform.Tenants, edited through the SAME writer as tools/setup/Register-PimManagedTenant.ps1
-       (Set-PimManagedTenantRegistration): SuperAdmin, audited, read back. The ring is the MASTER'S COPY (BUG-175). -->
+       (Set-PimManagedTenantRegistration): SuperAdmin, audited, read back. The ring is the MANAGING TENANT'S COPY (BUG-175). -->
   <div id="msptenantsTab" class="tab-panel">
     <div class="msp-lic-banner" data-page="msptenants" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="msptenantsBody">
@@ -1466,7 +1466,7 @@
     </div>
   </div>
 
-  <!-- =========== REQ-O: Replication overview (MSP master only) =========== -->
+  <!-- =========== REQ-O: Replication overview (managing tenant only) =========== -->
   <!-- Every replicable row and the tenants it reaches, from GET /api/msp/replication/overview -- the server's reach
        preview (the plan every tenant runs). The page only FILTERS what the server computed. -->
   <div id="replicationTab" class="tab-panel">
@@ -2222,8 +2222,8 @@
     // The Drift page inherits the catalog's 'governance' flag ("Governance & Drift") -- the tab it came out of -- so an
     // operator who switched that off keeps it off.
     if (tabKey === 'drift' && !Object.prototype.hasOwnProperty.call(PIM_FEATURE_FLAGS, 'drift')) tabKey = 'governance';
-    // REQ-N / REQ-O (2.4.378, operator "you decide"): the tenant registry and the replication overview are the master's CORE
-    // configuration, so they are NOT hidden by the optional 'downlink' view flag -- a master must always be able to see and fix
+    // REQ-N / REQ-O (2.4.378, operator "you decide"): the tenant registry and the replication overview are the managing tenant's CORE
+    // configuration, so they are NOT hidden by the optional 'downlink' view flag -- a managing tenant must always be able to see and fix
     // what it replicates. They stay master-only (applyMspMasterOnlyTabs); a flag of their OWN still gates them if one is set.
     if (Object.prototype.hasOwnProperty.call(PIM_FEATURE_FLAGS, tabKey)) return !!PIM_FEATURE_FLAGS[tabKey];
     return true;   // not in the catalog -> not gateable -> always shown
@@ -2310,7 +2310,12 @@
         // grants, creates or hands over access now lives under Access, and every label names the
         // screen it actually opens.
         { tab: 'new',        label: 'Create access',         desc: 'Guided wizards: create an administrator (with a future creation date and TAP start), build a direct group, or delegate a permission' },
-        // 🔴 REQ-GRID (operator 2026-09-20: "this name and page is also misleading"). This entry read
+        // §80.3 (operator 2026-09-29: "I need in the menu under Access to have a Create Discovered Resources"). A marked
+        // cross-link (anchor) into the ONE Discovery page, opened on its New view: create what discovery found without going
+        // through Audit & Settings. Discovery itself stays listed there.
+        // Operator 2026-10-01 (screenshot): moved up, right under Create access -- it is creation, not a table.
+        { tab: 'discovery', anchor: 'discInbox', discView: 'new', label: 'Create Discovered Resources',
+          desc: 'New Azure scopes, Power BI workspaces, administrative units and roles found in the tenant: tick them and Create -- staged in Pending changes, committed under Review & commit' },        // 🔴 REQ-GRID (operator 2026-09-20: "this name and page is also misleading"). This entry read
         // "Change existing access ... Nothing new is created here" while the page it opens is headed
         // "Create & change access" and two of its four cards CREATE: Duplicate an existing group makes
         // groups, Import administrators makes admin rows. The menu and the page contradicted each
@@ -2342,11 +2347,7 @@
           // of an existing delegation are all changed here.
           desc: 'Every existing delegation in one table: change an eligibility from 90 to 365 days, make it Active or Eligible, or switch its policy to one that needs approval -- the group, Entra role or Azure role policy. Edits are staged in Pending changes like any other.' },
         { tab: 'grid', gridScope: '',            label: 'All records',           desc: 'The raw records behind every screen, in a table' },
-        // §80.3 (operator 2026-09-29: "I need in the menu under Access to have a Create Discovered Resources"). A marked
-        // cross-link (anchor) into the ONE Discovery page, opened on its New view: create what discovery found without going
-        // through Audit & Settings. Discovery itself stays listed there.
-        { tab: 'discovery', anchor: 'discInbox', discView: 'new', label: 'Create Discovered Resources',
-          desc: 'New Azure scopes, Power BI workspaces, administrative units and roles found in the tenant: tick them and Create -- staged in Pending changes, committed under Review & commit' },
+
       ] },
     { id: 'change', label: 'Pending changes',
       title: 'Check, review and commit what is waiting',
@@ -2403,8 +2404,8 @@
         { tab: 'conformance',  label: 'Tenant conformance', desc: 'Whether a tenant matches the standard it should' },
         { tab: 'reports',      label: 'Reports',          desc: 'Evidence you can hand to an auditor' },
         { tab: 'downlink',     label: 'Managed tenants',  desc: 'Push and check configuration in tenants you manage' },
-        // REQ-N / REQ-O (operator 2026-09-19): MSP master only (applyMspMasterOnlyTabs hides them elsewhere).
-        { tab: 'msptenants',   label: 'Managed tenant registry', desc: 'Name, tenant id, ring (master\'s copy) and tags of every managed tenant — add and edit them' },
+        // REQ-N / REQ-O (operator 2026-09-19): managing tenant only (applyMspMasterOnlyTabs hides them elsewhere).
+        { tab: 'msptenants',   label: 'Managed tenant registry', desc: 'Name, tenant id, ring (managing tenant\'s copy) and tags of every managed tenant — add and edit them' },
         { tab: 'replication',  label: 'Replication overview', desc: 'Every admin, group, nesting and binding that replicates, and which managed tenants it reaches' },
       ] },
     { id: 'audit', label: 'Audit & Settings',
@@ -2681,9 +2682,9 @@
     audit:       { title: 'What this is & how to use it', what: 'The append-only audit trail &mdash; every login, delegation, account, approval, engine and break-glass event.', how: ['Filter by category or free-text search; the window defaults to the last 3 months &mdash; widen it to 12 months or the full history. Newest first.'] },
     reports:     { title: 'What this is & how to use it', what: '"Who can do what" (and the reverse) &mdash; pick a person to see everything they reach, or a role to see who can activate it.', how: ['Choose forward or reverse, run the report, then print or export.'], legend: true },
     conformance: { title: 'What this is & how to use it', what: 'Template Rollout &mdash; how far each tenant is behind the approved delegation templates, and roll updates forward.', how: ['Review the gap per tenant; rollout is ring-driven and approval-gated.'] },
-    // REQ-N / REQ-O (MSP master only)
-    msptenants:  { title: 'What this is & how to use it', what: 'The managed tenants this MSP master replicates to &mdash; name, tenant id, the master&rsquo;s copy of each tenant&rsquo;s ring, and the tags a replication Target names.', how: ['Edit a row or register a new tenant (SuperAdmin); every save is audited, read back and requests a publish.', 'The ring is only the master&rsquo;s copy: each managed tenant&rsquo;s own ring decides what its pull accepts.'] },
-    replication: { title: 'What this is & how to use it', what: 'Every replicable admin, membership, group, nesting and binding on this MSP master, and which managed tenants it reaches &mdash; computed on the server by the same plan every tenant runs.', how: ['Pick a tenant to see what it gets, a kind to narrow the list, or show only rows that reach no tenant.', 'Change a row&rsquo;s Replicate / Ring / Target in its wizard or the records grid; Recompute runs the plan again.'] },
+    // REQ-N / REQ-O (managing tenant only)
+    msptenants:  { title: 'What this is & how to use it', what: 'The managed tenants this managing tenant replicates to &mdash; name, tenant id, the managing tenant&rsquo;s copy of each tenant&rsquo;s ring, and the tags a replication Target names.', how: ['Edit a row or register a new tenant (SuperAdmin); every save is audited, read back and requests a publish.', 'The ring is only the managing tenant&rsquo;s copy: each managed tenant&rsquo;s own ring decides what its pull accepts.'] },
+    replication: { title: 'What this is & how to use it', what: 'Every replicable admin, membership, group, nesting and binding on this managing tenant, and which managed tenants it reaches &mdash; computed on the server by the same plan every tenant runs.', how: ['Pick a tenant to see what it gets, a kind to narrow the list, or show only rows that reach no tenant.', 'Change a row&rsquo;s Replicate / Ring / Target in its wizard or the records grid; Recompute runs the plan again.'] },
     jobs:        { title: 'What this is & how to use it', what: 'The scheduler job registry and recent runs.', how: ['In-progress jobs sort to the top; open Logs on any row.', '<b>Run now</b> (Admin) starts a job on demand: an engine job is queued for the scheduler and its tick job is started, so it runs in about a minute &mdash; the Manager never runs the engine itself.'] },
     settings:    { title: 'What this is & how to use it', what: 'Admin settings &mdash; naming conventions, imports, AD OU placement and platform options.', how: ['Edit a card and Save; imports pull from Entra or a CSV. Changes persist to the store the engine reads.'] },
     support:     { title: 'What this is & how to use it', what: 'Support &mdash; version and tenant context, plus a pre-filled issue template.', how: ['No tenant connection needed; use it to file an issue with the context already filled in.'] }
@@ -2793,7 +2794,7 @@
   // An admin whose Temporary Access Pass has EXPIRED can never get another one
   // from the engine: the AdminTap scope counts any TAP method as "has a TAP",
   // so a dead one classifies the account as satisfied and the scope reports
-  // success while minting nothing. Measured live on the master tenant: six
+  // success while minting nothing. Measured live on the managing tenant: six
   // consecutive clean runs, and the admin with no way to obtain a credential.
   //
   // This tab is the read-out the engine cannot give (usable vs expired vs none)
@@ -2895,7 +2896,7 @@
          // DOC-17 g / 71.19: ManagerEmail is a LEGACY fallback -- mail (TAP included) goes to the sponsor
          // department's owners. The column says so, and an empty one is not an error.
          '<th>TAP</th><th>Mail forward</th><th title="Legacy per-admin ManagerEmail. Since 71.19 mail (including the TAP) goes to the sponsor department&#39;s owners; this is only a fallback.">Manager (legacy)</th>' +
-         (syncCol === 'master' ? '<th>Sync to slaves</th>' : (syncCol === 'managed' ? '<th>From MSP master</th>' : '')) +
+         (syncCol === 'master' ? '<th>Sync to managed tenants</th>' : (syncCol === 'managed' ? '<th>From managing tenant</th>' : '')) +
          '<th style="min-width:300px;">Actions</th></tr>';
     rows.forEach(a => {
       const busy = acctGridState.busy === a.userPrincipalName;
@@ -2923,7 +2924,7 @@
         '<td style="font-size:11.5px;">' + (a.managerEmail ? escapeHtml(a.managerEmail) : '<span style="color:#8c959f;" title="Not needed: mail goes to the sponsor department&#39;s owners">&mdash;</span>') + '</td>' +
         (syncCol === 'master' ? '<td style="font-size:11.5px;" class="acctSyncCell">' + acctSyncCell(a) + '</td>' :
          syncCol === 'managed' ? '<td style="font-size:11.5px;" class="acctFromMaster">' + (a.source === 'central'
-            ? '<span style="color:#8250df;" title="Received from the MSP master -- read-only here">received from the MSP master (read-only)</span>'
+            ? '<span style="color:#8250df;" title="Received from the managing tenant -- read-only here">received from the managing tenant (read-only)</span>'
             : '<span style="color:#8c959f;">this tenant&rsquo;s own admin</span>') + '</td>' : '') +
         '<td>' +
           '<button class="btn-sec acctTap"    data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(a.canResetTap) +
@@ -2945,7 +2946,7 @@
           '<button class="btn-sec acctUnmanage" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
             ' title="Take this admin out of PIM: every row that names it leaves the desired state. Nothing changes in Entra -- the account and the access it holds stay (listed as unmanaged / drift; Import brings it back)." style="font-size:11px;">Stop managing</button> ' +
           '<button class="btn-sec acctEditTop" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + (a.readOnly ? ' disabled' : '') +
-            ' title="' + (a.readOnly ? escapeHtml(a.readOnlyWhy || 'read-only') + ' -- change it on the master' : 'Change display name, office user email (where mail for this admin is forwarded), company, department, manager, or whether it is synced to slaves.') + '" style="font-size:11px;">Edit</button> ' +
+            ' title="' + (a.readOnly ? escapeHtml(a.readOnlyWhy || 'read-only') + ' -- change it on the managing tenant' : 'Change display name, office user email (where mail for this admin is forwarded), company, department, manager, or whether it is synced to managed tenants.') + '" style="font-size:11px;">Edit</button> ' +
           '<button class="btn-sec acctAccess" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + ((a.accessLocked || (a.readOnly && a.source !== 'central')) ? ' disabled title="' + escapeHtml(a.readOnlyWhy || 'read-only') + '"' : '') +
             ' title="Give this admin access — opens the delegation wizard for this person." style="font-size:11px;">Give access →</button>' +
         '</td></tr>' +
@@ -3014,20 +3015,20 @@
       '<div style="color:#57606a;font-size:10.5px;max-width:240px;">On this date the account is <b>disabled</b>, its sessions revoked and its PIM access removed. <b>PIM never deletes accounts.</b> Leave blank for none.</div>' +
       (a.autoDisableConflict ? '<div style="color:#cf222e;font-size:10.5px;max-width:240px;">This row also carries the old <code>OffboardDate</code> with a different date, so the engine refuses it. Saving here clears the old column.</div>' : ''));
     // REQUIREMENTS 68.6 row 35 -- MSP downlink, defined on the admin: sync on/off (ManagementMode),
-    // which slaves (Ring: 0 dev, 1 test, 2 broad -- §77.20; tags are set on the ring, not here).
-    // Only on the MSP master (operator 2026-09-15): in Single mode there are no slaves, and a managed tenant never
-    // edits what the master sends. The server refuses these fields off the master as well.
+    // which managed tenants (Ring: 0 dev, 1 test, 2 broad -- §77.20; tags are set on the ring, not here).
+    // Only on the managing tenant (operator 2026-09-15): in Single mode there are no managed tenants, and a managed tenant never
+    // edits what the managing tenant sends. The server refuses these fields off the managing tenant as well.
     if (!pimIsMspMaster()) return h;
     const mode = String(a.managementMode || '').trim().toLowerCase();
     const ring = String(a.ring || '').trim();
-    h += lbl('Sync to slaves (MSP)',
+    h += lbl('Sync to managed tenants (MSP)',
       '<select class="acctEditFldTop acctModeSel" data-k="managementMode" style="width:170px;">' +
         '<option value="local"' + (mode === 'msp' ? '' : ' selected') + '>local &mdash; not synced</option>' +
-        '<option value="msp"' + (mode === 'msp' ? ' selected' : '') + '>msp &mdash; synced to slaves</option>' +
+        '<option value="msp"' + (mode === 'msp' ? ' selected' : '') + '>msp &mdash; synced to managed tenants</option>' +
       '</select>');
-    h += lbl('Ring (which slaves)',
+    h += lbl('Ring (which managed tenants)',
       '<select class="acctEditFldTop acctRingSel" data-k="ring" style="width:210px;">' +
-        // §77.20: 0 = dev, 1 = test, 2 = broad -- a ring reaches the slaves on that ring or a lower one.
+        // §77.20: 0 = dev, 1 = test, 2 = broad -- a ring reaches the managed tenants on that ring or a lower one.
         ['', '0', '1', '2'].map(v => '<option value="' + esc(v) + '"' + (v === ring ? ' selected' : '') + '>' + esc(replRingLabel(v, 'admin')) + '</option>').join('') +
       '</select>');
     // §77.20 (operator 2026-09-21): tags belong to the Deployment rings, not the admin. A Target already stored on the
@@ -3039,7 +3040,7 @@
     }
     return h;
   }
-  // The slave tags the MSP master's managed tenants carry (GET /api/msp/tenant-tags). Cached per page.
+  // The managed-tenant tags the managing tenant's managed tenants carry (GET /api/msp/tenant-tags). Cached per page.
   let _mspTagsPromise = null;
   function mspTenantTags() {
     if (!_mspTagsPromise) _mspTagsPromise = api('GET', '/api/msp/tenant-tags').catch(() => ({ known: false, tags: [] }));
@@ -3047,16 +3048,16 @@
   }
   // ===================================================================
   // §71 -- MSP REPLICATION TARGETING (framework MSP-4 SURFACE). Per row: Replicate (No / Yes / Follow),
-  // Ring, Target (tag:<key:value> any-of, tag:a+b all-of, tenant:<id>). MSP MASTER ONLY: the context
-  // endpoint says whether this tenant is the master, and nothing below renders when it is not. The reach
+  // Ring, Target (tag:<key:value> any-of, tag:a+b all-of, tenant:<id>). MANAGING TENANT ONLY: the context
+  // endpoint says whether this tenant is the managing tenant, and nothing below renders when it is not. The reach
   // ("this will reach: N tenants") is ALWAYS the server's plan (POST /api/msp/replication/reach) -- the
   // browser never estimates reach, because an estimate could disagree with what the tenants receive.
   // ===================================================================
   // 🔒 THE ONE TENANT-MODE SOURCE for every MSP sync / replication surface (operator 2026-09-15: "it should show in
-  // msp master/slave mode ... not relevant for single mode"). It is the SAME answer the header mode badge shows --
+  // managing/managed tenant mode ... not relevant for single mode"). It is the SAME answer the header mode badge shows --
   // GET /api/settings/scenario -> mode.key (single | msp-master | slave-local | slave-central) -- not a second guess.
   //   master  -> the surfaces are shown and editable
-  //   managed -> authoring is hidden; at most a read-only "received from the MSP master" indicator
+  //   managed -> authoring is hidden; at most a read-only "received from the managing tenant" indicator
   //   single  -> hidden entirely
   // Fail CLOSED: an unreadable mode is 'single', which hides every sync surface. The server refuses the writes too.
   let _pimModePromise = null;
@@ -3094,7 +3095,7 @@
     return _mspReplCtxPromise;
   }
   function replIsMaster() { return !!(_mspReplCtx && _mspReplCtx.master); }
-  // A column the grid must not show on a tenant that is not the master (the server strips it too).
+  // A column the grid must not show on a tenant that is not the managing tenant (the server strips it too).
   function replHiddenCol(base, col) {
     const kind = REPL_KIND[base];
     if (!kind || replIsMaster()) return false;
@@ -3130,8 +3131,8 @@
       return !!tag && tag.split('+').every(p => /^[A-Za-z0-9._:-]+$/.test(p.trim()));
     });
   }
-  // REQ-M (operator 2026-09-19: "use words like No Replication to managed tenants, Only Master tenant, msp local is also
-  // confusing, is it the master or slave"; "i dont understand this"). Plain words, no "(blank)", no "MSP-local", and no
+  // REQ-M (operator 2026-09-19: "use words like No Replication to managed tenants, Only Managing tenant, msp local is also
+  // confusing, is it the managing tenant or slave"; "i dont understand this"). Plain words, no "(blank)", no "MSP-local", and no
   // second Follow entry that meant the same as the first. A STORED explicit 'Follow' still selects the default entry.
   // 🔴 REQ-REPL-DD-1 (operator, 2026-09-22): *"We cannot have both blank and no replication. why have
   // that? either we dont replicate or we replicate. If something is dependent, then it must
@@ -3147,7 +3148,7 @@
   // So the CHOICE is two values, and blank reads as the No default. Nothing about what is sent
   // changes -- only what a human is asked to decide. A row that still holds a stored 'Follow' is
   // shown on the No entry (identical behaviour) and is rewritten to No the moment it is touched.
-  const REPL_NO_LABEL = 'No replication to managed tenants -- master tenant only (still sent automatically if a replicated row needs it)';
+  const REPL_NO_LABEL = 'No replication to managed tenants -- managing tenant only (still sent automatically if a replicated row needs it)';
   function replModeOptions(kind) {
     // 2026-09-22 (operator: "this delegation should include the admin account to be replicated" ->
     // "=follow"): an admin can now FOLLOW -- the account is created in a managed tenant only where a
@@ -3157,12 +3158,12 @@
     // "we cannot have this Follow dropdown, as people dont understand the consequence"). What is
     // offered here is the OUTCOME in plain words; for the other kinds Follow is still not offered at
     // all, because there it behaves exactly like No.
-    if (kind === 'admin') return [ { value:'No', label:'Master tenant only -- no replication to managed tenants' },
+    if (kind === 'admin') return [ { value:'No', label:'Managing tenant only -- no replication to managed tenants' },
              { value:'Follow', label:'Only where a delegation needs this admin' },
              { value:'Yes', label:'Replicate to managed tenants' } ];
-    if (kind === 'resource') return [ { value:'', label:'Master tenant only (default) -- a tenant-specific resource is not replicated' },
+    if (kind === 'resource') return [ { value:'', label:'Managing tenant only (default) -- a tenant-specific resource is not replicated' },
              { value:'Yes', label:'Replicate to managed tenants' } ];
-    return [ { value:'', label:'No replication (default) -- master tenant only; sent automatically if a replicated row needs it' },
+    return [ { value:'', label:'No replication (default) -- managing tenant only; sent automatically if a replicated row needs it' },
              { value:'Yes', label:'Replicate to managed tenants' }, { value:'No', label:REPL_NO_LABEL } ];
   }
   // §77.20: ring 0 = dev, 1 = test, 2 = broad. Ring N reaches managed tenants whose own ring is N or LOWER
@@ -3183,21 +3184,21 @@
     }, 250);
   }
   // The wizard "Replication" section. opts: { entity, kind, row: () => draft row (without the §71 fields) }.
-  // Renders NOTHING unless this tenant is the MSP master. State lives on s.repl so a re-render keeps it.
+  // Renders NOTHING unless this tenant is the managing tenant. State lives on s.repl so a re-render keeps it.
   function wuxReplicationSection(s, opts) {
     const host = document.createElement('div');
     host.className = 'wiz-repl';
     host.style.cssText = 'display:none; border-top:1px solid #d0d7de; margin-top:12px; padding-top:10px; font-size:12px;';
     mspReplicationContext().then(ctx => {
       // REQ-T (operator 2026-09-19: "all wizards in msp/slave setup must have the field to show if it is replicated
-      // downlink"): the master gets the full section below; a MANAGED tenant gets one read-only line -- what it creates
-      // here stays here, and rows its master sends are marked as received. A single tenant shows nothing.
+      // downlink"): the managing tenant gets the full section below; a MANAGED tenant gets one read-only line -- what it creates
+      // here stays here, and rows its managing tenant sends are marked as received. A single tenant shows nothing.
       if (ctx && /^slave/.test(String(ctx.mode || ''))) {
         host.style.display = '';
         host.className = 'wiz-repl wiz-repl-slave';
         host.innerHTML = '<div style="font-weight:600;color:#24292f;margin-bottom:2px;">Replication <span style="font-weight:400;color:#57606a;">(this is a managed tenant)</span></div>' +
           '<div style="color:#57606a;">Local to this tenant &mdash; not replicated. What you create here stays in this tenant. ' +
-          'Rows your MSP master sends are marked <i>received from the MSP master</i>, and a replicated admin gets this tenant&rsquo;s own Admin account domain.</div>';
+          'Rows your managing tenant sends are marked <i>received from the managing tenant</i>, and a replicated admin gets this tenant&rsquo;s own Admin account domain.</div>';
         return;
       }
       if (!ctx || !ctx.master) { host.remove(); return; }
@@ -3214,8 +3215,8 @@
       const tenants = ctx.tenants || [];
       host.style.display = '';
       host.innerHTML =
-        '<div style="font-weight:600;color:#24292f;margin-bottom:4px;">Replication to managed tenants <span style="font-weight:400;color:#57606a;">(you are on the master tenant)</span></div>' +
-        '<div style="color:#57606a;margin-bottom:6px;">Decides whether this row is copied from this master tenant to the customer tenants it manages. A managed tenant gets it when ' +
+        '<div style="font-weight:600;color:#24292f;margin-bottom:4px;">Replication to managed tenants <span style="font-weight:400;color:#57606a;">(you are on the managing tenant)</span></div>' +
+        '<div style="color:#57606a;margin-bottom:6px;">Decides whether this row is copied from this managing tenant to the customer tenants it manages. A managed tenant gets it when ' +
           '<b>Replicate</b> sends it and the <b>Ring</b> includes that tenant (0 = dev, 1 = test, 2 = broad; a row on ring N reaches tenants on ring N or lower). ' +
           'Which tenants each ring holds, and any tag narrowing, is set once on the ring (Managed tenant registry &rsaquo; Deployment rings) -- not per row. A group that another replicated row depends on is sent anyway, with a warning.</div>' +
         '<label style="margin-right:12px;">Replicate <select class="repl-mode">' + replModeOptions(kind).map(o => '<option value="' + escapeHtml(o.value) + '"' + (o.value === r.replicate ? ' selected' : '') + '>' + escapeHtml(o.label) + '</option>').join('') + '</select></label>' +
@@ -3242,12 +3243,12 @@
           if (!one) { reachEl.textContent = 'This will reach: 0 tenant(s)'; return; }
           reachEl.textContent = 'This will reach: ' + one.count + ' of ' + one.tenantCount + ' tenant(s)';
           reachEl.title = ((one.tenants || []).join(', ') || 'no tenant') + (d.ringNote ? '\n' + d.ringNote : '');
-          // BUG-175 (GUI half): the count uses the MASTER'S COPY of each tenant's ring; the tenant's own local ring decides.
+          // BUG-175 (GUI half): the count uses the MANAGING TENANT'S COPY of each tenant's ring; the tenant's own local ring decides.
           if (d.ringSource === 'master-copy') {
             const rn = document.createElement('div');
             rn.className = 'repl-ring-source';
             rn.style.cssText = 'font-weight:400;color:#57606a;font-size:11px;';
-            rn.textContent = "Computed with the master's copy of each tenant's ring -- each managed tenant's own local ring is authoritative and decides what it really pulls." +
+            rn.textContent = "Computed with the managing tenant's copy of each tenant's ring -- each managed tenant's own local ring is authoritative and decides what it really pulls." +
               ((d.ringUnknown || []).length ? ' No ring recorded for ' + d.ringUnknown.join(', ') + ' (previewed as ring 2).' : '');
             reachEl.appendChild(rn);
           }
@@ -3265,7 +3266,7 @@
     });
     return host;
   }
-  // The §71 fields to stage. {} on a tenant that is not the master, or when the section was never shown.
+  // The §71 fields to stage. {} on a tenant that is not the managing tenant, or when the section was never shown.
   function wuxReplicationFields(s, kind, forPreview) {
     if (!replIsMaster() || !s || !s.repl || (!s.repl.used && !forPreview)) return {};
     const r = s.repl;
@@ -3287,12 +3288,12 @@
     return acctTargetTokens(t).filter(x => !/^(tenant:.*|all|\*|none)$/i.test(x)).map(x => x.replace(/^tag:/i, '').trim()).filter(Boolean);
   }
   function acctSyncCell(a) {
-    if (a.source === 'central') return '<span style="color:#8250df;" title="' + escapeHtml(a.readOnlyWhy || '') + '">central &mdash; governed by the MSP master</span>';
+    if (a.source === 'central') return '<span style="color:#8250df;" title="' + escapeHtml(a.readOnlyWhy || '') + '">central &mdash; governed by the managing tenant</span>';
     const mode = String(a.managementMode || '').trim().toLowerCase();
     if (mode !== 'msp') return '<span style="color:#8c959f;">local (not synced)</span>';
     const ring = String(a.ring || '').trim();
-    // §77.20: the rings are 0 (dev), 1 (test), 2 (broad); anything else reaches no slave.
-    if (!/^[0-2]$/.test(ring)) return '<span style="color:#cf222e;" title="ManagementMode=msp but no valid Ring (0, 1 or 2): it reaches no slave">msp &mdash; no ring</span>';
+    // §77.20: the rings are 0 (dev), 1 (test), 2 (broad); anything else reaches no managed tenant.
+    if (!/^[0-2]$/.test(ring)) return '<span style="color:#cf222e;" title="ManagementMode=msp but no valid Ring (0, 1 or 2): it reaches no managed tenant">msp &mdash; no ring</span>';
     const tags = acctTargetTags(a.target);
     return 'msp &middot; ' + escapeHtml(replRingLabel(ring, 'admin')) + (tags.length ? ' &middot; <span style="color:#9a6700;" title="legacy per-admin target -- move it to the ring">tags: ' + escapeHtml(tags.join(', ')) + '</span>' : '');
   }
@@ -3453,7 +3454,7 @@
           (payload.forwardMailsToContact === 'TRUE' && !String(payload.mailForwardAddress || '').trim()) ? 'Forward mail to the owner’s office user is TRUE, so enter the office user email address (or set it to FALSE).' :
           (payload.forwardMailsToContact === 'FALSE' && String(payload.mailForwardAddress || '').trim()) ? 'An office user email address is entered but sending is FALSE -- set it to TRUE, or clear the address.' :
           (payload.managerEmail && !ACCT_MAIL_RX.test(payload.managerEmail.trim())) ? 'Manager email is not a valid email address.' :
-          (payload.managementMode === 'msp' && !/^[0-2]$/.test(String(payload.ring || '').trim())) ? 'Sync to slaves is msp, so choose a Ring (0 dev, 1 test, 2 broad) -- without one the admin reaches no slave.' : '';
+          (payload.managementMode === 'msp' && !/^[0-2]$/.test(String(payload.ring || '').trim())) ? 'Sync to managed tenants is msp, so choose a Ring (0 dev, 1 test, 2 broad) -- without one the admin reaches no managed tenant.' : '';
         if (bad) { if (msg) { msg.textContent = bad; msg.style.color = '#cf222e'; } return; }
         if (msg) { msg.textContent = 'Saving ' + upn + '…'; msg.style.color = '#57606a'; }
         const res = await acctModifyWithApproval(upn, payload);
@@ -3499,7 +3500,7 @@
         msg.style.color = '#9a6700';
       }
       // §79.6 (operator 2026-09-25: "a reset sessions centrally in msp mode for an admin also resets the sessions in all
-      // slaves. important if person leaves msp"). A central (MSP-replicated) admin has an account in every managed tenant
+      // managed tenants. important if person leaves msp"). A central (MSP-replicated) admin has an account in every managed tenant
       // it reaches: offer to revoke those too -- a signed intent each tenant applies on its next pull, no per-tenant approval.
       const a = (acctGridState.rows || []).find(x => String(x.userPrincipalName || '').toLowerCase() === String(upn || '').toLowerCase());
       if (a && String(a.managementMode || '').toLowerCase() === 'msp' && roleAtLeast('SuperAdmin') && a.userName &&
@@ -4667,8 +4668,8 @@
       '<div style="color:#57606a;font-size:12px;margin-bottom:8px;">' +
       'The table below is per <b>tenant</b>; this one is per <b>role</b>. A role that reaches every tenant is not narrowed; ' +
       'the narrowed ones are listed first. Withheld tenants carry the reason the plan gave.' +
-      // BUG-175 (GUI half): the reach is planned with the master's copy of each tenant's ring.
-      (d && d.ringSource === 'master-copy' ? ' <span class="dlReachRingNote">Rings are the <b>master&rsquo;s copy</b>; each tenant&rsquo;s own local ring is authoritative for what it really pulls.</span>' : '') +
+      // BUG-175 (GUI half): the reach is planned with the managing tenant's copy of each tenant's ring.
+      (d && d.ringSource === 'master-copy' ? ' <span class="dlReachRingNote">Rings are the <b>managing tenant&rsquo;s copy</b>; each tenant&rsquo;s own local ring is authoritative for what it really pulls.</span>' : '') +
       (canWrite ? ' <b>Narrow&hellip;</b> edits the reach here; only tenants held back by the <i>relationship policy</i> can be let in from this view &mdash; a ring, a Target selector or a blocked capability is refused by name rather than written and reported as done.' : '') +
       '</div>';
     h += '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
@@ -4767,7 +4768,7 @@
       // BUG-175 (GUI half): what every relationship below was planned with.
       (data && data.ringSource === 'master-copy'
         ? '<div class="dlRingSourceNote" style="color:#9a6700;font-size:12px;margin:-8px 0 14px;">' +
-            "Rings shown here are the <b>master's copy</b>. Each managed tenant's <b>own local ring is authoritative</b>: " +
+            "Rings shown here are the <b>managing tenant's copy</b>. Each managed tenant's <b>own local ring is authoritative</b>: " +
             'it gates what that tenant really pulls, so a tenant whose local ring differs receives what <i>its</i> ring admits.' +
             (data.ringNote ? ' <span style="color:#57606a;">(' + escapeHtml(String(data.ringNote)) + ')</span>' : '') + '</div>'
         : '');
@@ -4813,13 +4814,13 @@
       h += '<div style="padding:10px 14px;background:#f6f8fa;border-bottom:1px solid #d0d7de;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
         '<b style="font-size:14px;">' + escapeHtml(r.name || r.tenantId) + '</b>' +
         '<span style="color:#57606a;font-size:11px;font-family:monospace;">' + escapeHtml(r.tenantId || '') + '</span>' +
-        // BUG-175 (GUI half, 2.4.371): this ring is the MASTER'S COPY (platform.Tenants.Ring). The tenant's own local
+        // BUG-175 (GUI half, 2.4.371): this ring is the MANAGING TENANT'S COPY (platform.Tenants.Ring). The tenant's own local
         // ring is authoritative for its real pull -- say so on the pill, and never show a guessed ring as a fact.
         (r.ring !== undefined && r.ring !== null
-          ? '<span class="dlRingPill" title="' + escapeHtml(r.ringNote || "The master's copy of this tenant's ring. The tenant's own local ring gates its real pull.") + '">' +
+          ? '<span class="dlRingPill" title="' + escapeHtml(r.ringNote || "The managing tenant's copy of this tenant's ring. The tenant's own local ring gates its real pull.") + '">' +
               (r.ringKnown === false
-                ? downlinkPill("ring ? -- the master has none (previewed as " + r.ring + ')', 'warn')
-                : downlinkPill('ring ' + r.ring + (r.ringSource === 'master-copy' ? " (master's copy)" : ''), 'mute')) + '</span>'
+                ? downlinkPill("ring ? -- the managing tenant has none (previewed as " + r.ring + ')', 'warn')
+                : downlinkPill('ring ' + r.ring + (r.ringSource === 'master-copy' ? " (managing tenant's copy)" : ''), 'mute')) + '</span>'
           : '') +
         downlinkPill(proj.length + ' projected', proj.length ? 'ok' : 'mute') +
         (excl.length ? downlinkPill(excl.length + ' excluded', 'warn') : '') +
@@ -4869,7 +4870,7 @@
         '<span style="color:#57606a;">&mdash; no rules = every role projects. A <code>deny</code> always wins; adding any <code>allow</code> turns it into an allow-list.</span></div>';
       const rules = r.policy || [];
       h += '<div id="dlPolicy-' + escapeHtml(r.tenantId) + '" style="font-size:12px;">';
-      if (!rules.length) { h += '<div style="color:#57606a;margin-bottom:6px;">No rules &mdash; everything the master publishes projects here.</div>'; }
+      if (!rules.length) { h += '<div style="color:#57606a;margin-bottom:6px;">No rules &mdash; everything the managing tenant publishes projects here.</div>'; }
       else {
         h += '<ul style="margin:0 0 6px 18px;">';
         rules.forEach(x => { h += '<li>' + downlinkPill(x.Mode, x.Mode === 'deny' ? 'bad' : 'ok') + ' <code>' + escapeHtml(x.GroupTag) + '</code></li>'; });
@@ -4887,7 +4888,7 @@
       h += '</div>';
 
       // ---- run -------------------------------------------------------------
-      // 🔴 NO APPLY BUTTON, DELIBERATELY. The master does not write into a managed tenant
+      // 🔴 NO APPLY BUTTON, DELIBERATELY. The managing tenant does not write into a managed tenant
       // (§22, and the pull-not-push tenet). Under the agreed model (framework MSP-3) the
       // customer PULLS this and their own administrator ACCEPTS it. What an MSP operator
       // legitimately needs here is the PREVIEW -- "what would they receive" -- so that is
@@ -4929,7 +4930,7 @@
     });
     body.querySelectorAll('.dl-clear').forEach(b => b.onclick = async () => {
       const tid = b.dataset.tid;
-      if (!confirm('Remove every projection rule for this relationship?\n\nWith no rules, EVERY role the master publishes will project here.')) return;
+      if (!confirm('Remove every projection rule for this relationship?\n\nWith no rules, EVERY role the managing tenant publishes will project here.')) return;
       try { await api('PUT', '/api/downlink/policy', { tenantId: tid, policy: [] }); renderDownlink(); }
       catch (e) { showOut(tid, false, (e && e.message) || String(e)); }
     });
@@ -4942,14 +4943,14 @@
   }
 
   // ===================================================================
-  // REQ-N / REQ-O (operator 2026-09-19) -- the MSP MASTER's two pages.
+  // REQ-N / REQ-O (operator 2026-09-19) -- the managing tenant's two pages.
   //   msptenants  -- "where do i define the tags and names for the tenants ?": the managed-tenant registry
   //                  (platform.Tenants), edited through the SAME writer as Register-PimManagedTenant.ps1.
   //   replication -- "list all direct and indirect delegations and roles that should be replicated downlinks to
   //                  which": every replicable row and the tenants it reaches, COMPUTED BY THE SERVER (the plan every
   //                  tenant runs). This page only filters what the server returned; it never estimates reach.
-  // 🔒 MSP MASTER ONLY: hidden until the tenant mode says msp-master (applyMspMasterOnlyTabs), and every endpoint
-  // refuses elsewhere. 🔒 BUG-175: every ring shown is the MASTER'S COPY -- each managed tenant's own ring decides.
+  // 🔒 MANAGING TENANT ONLY: hidden until the tenant mode says msp-master (applyMspMasterOnlyTabs), and every endpoint
+  // refuses elsewhere. 🔒 BUG-175: every ring shown is the MANAGING TENANT'S COPY -- each managed tenant's own ring decides.
   // ===================================================================
   const MSP_MASTER_ONLY_TABS = ['msptenants', 'replication'];
   function applyMspMasterOnlyTabs() {
@@ -4979,8 +4980,8 @@
     host.querySelectorAll('.msp-xlink').forEach(b => { b.onclick = () => switchTab(b.dataset.go); });
   }
   function mspNotMasterHtml(what) {
-    return stateEmpty(what + ' exists only on the MSP master',
-      'This tenant is not an MSP master (see the tenant mode in the header). A managed tenant keeps its own ring and pulls what the master publishes; a single tenant has nothing to replicate.');
+    return stateEmpty(what + ' exists only on the managing tenant',
+      'This tenant is not a managing tenant (see the tenant mode in the header). A managed tenant keeps its own ring and pulls what the managing tenant publishes; a single tenant has nothing to replicate.');
   }
   // The tenant-tag grammar (ConvertTo-PimTenantTags): word or key:value of letters, digits, - _ . -- minus the words a
   // replication Target reserves. A hint only; the server validates and refuses.
@@ -4990,11 +4991,11 @@
     return { tags, bad };
   }
   function mspRingOptions(sel) {
-    // The TENANT's ring (its master's copy; the tenant sets its own). §77.20: a row on ring N reaches tenants on ring N or lower.
+    // The TENANT's ring (its managing tenant's copy; the tenant sets its own). §77.20: a row on ring N reaches tenants on ring N or lower.
     const opts = [['0', '0 (dev) -- receives rows of every ring (0, 1, 2) first'], ['1', '1 (test) -- receives rows of ring 1 and 2'], ['2', '2 (broad) -- receives only ring-2 rows']];
     return opts.map(o => '<option value="' + o[0] + '"' + (String(sel) === o[0] ? ' selected' : '') + '>' + escapeHtml(o[1]) + '</option>').join('');
   }
-  // §77.20 -- DEPLOYMENT RINGS (MSP master). 0 = dev, 1 = test, 2 = broad, in the same order as the update rings. Each
+  // §77.20 -- DEPLOYMENT RINGS (managing tenant). 0 = dev, 1 = test, 2 = broad, in the same order as the update rings. Each
   // managed tenant sets its OWN ring; a row on ring N reaches the tenants on ring N or lower. A ring's TAG RULE narrows
   // which tenants on it count (blank = every tenant on it) -- set once here, never per admin or per row.
   async function renderDeploymentRingsCard(el) {
@@ -5046,26 +5047,26 @@
     if (!body) return;
     const esc = escapeHtml;
     if (!isServer) { body.innerHTML = stateEmpty('Static mode', 'The managed-tenant registry needs the server.') + mspCrossLinksHtml('msptenants'); wireMspCrossLinks(body); return; }
-    body.innerHTML = stateLoading('Loading the managed-tenant registry…', 'Reading the tenants this MSP master replicates to.');
+    body.innerHTML = stateLoading('Loading the managed-tenant registry…', 'Reading the tenants this managing tenant replicates to.');
     try { await pimTenantMode(); } catch (_) { }
     if (!pimIsMspMaster()) { body.innerHTML = mspNotMasterHtml('The managed-tenant registry') + mspCrossLinksHtml('msptenants'); wireMspCrossLinks(body); return; }
     let d;
     try { d = await api('GET', '/api/msp/tenants'); }
     catch (e) { body.innerHTML = stateError('Could not load the managed-tenant registry', (e && e.message) || String(e)) + mspCrossLinksHtml('msptenants'); wireMspCrossLinks(body); return; }
     if (!d || d.master === false) { body.innerHTML = mspNotMasterHtml('The managed-tenant registry') + mspCrossLinksHtml('msptenants'); wireMspCrossLinks(body); return; }
-    const ringLabel = d.ringLabel || "Ring (master's copy -- each managed tenant's own ring decides)";
+    const ringLabel = d.ringLabel || "Ring (managing tenant's copy -- each managed tenant's own ring decides)";
     let h = '<h3 style="margin:0 0 6px;">Managed tenant registry</h3>' + mspCrossLinksHtml('msptenants') +
       '<div id="mspRegIntro" style="margin-bottom:10px;padding:10px 12px;background:#ddf4ff;border:1px solid #54aeff;border-radius:8px;font-size:12.5px;color:#0a3069;">' +
-      'The managed tenants this MSP master replicates to. Their <b>tags</b> are what a deployment ring&rsquo;s tag rule names ' +
+      'The managed tenants this managing tenant replicates to. Their <b>tags</b> are what a deployment ring&rsquo;s tag rule names ' +
       '(<code>tag:region:eu</code>, <code>tag:a+b</code> for all-of, <code>tenant:&lt;id&gt;</code>); they are signed into the published bundle. ' +
-      '<b>The ring here is the master&rsquo;s copy</b>: each managed tenant sets its own ring locally, and that ring decides what its pull accepts. ' +
-      'The master uses its copy only for its previews, so keep the two equal.</div>';
+      '<b>The ring here is the managing tenant&rsquo;s copy</b>: each managed tenant sets its own ring locally, and that ring decides what its pull accepts. ' +
+      'The managing tenant uses its copy only for its previews, so keep the two equal.</div>';
     if (d.lastPublish) {
       const lp = d.lastPublish;
       h += '<div id="mspRegLastPublish" style="font-size:12px;color:#57606a;margin-bottom:8px;">Last publish on this master: <b>' + esc(lp.state || 'unknown') + '</b>' +
            (lp.finishedUtc ? ' at ' + esc(lp.finishedUtc) : (lp.startedUtc ? ' (started ' + esc(lp.startedUtc) + ')' : '')) + '</div>';
     } else {
-      h += '<div id="mspRegLastPublish" style="font-size:12px;color:#57606a;margin-bottom:8px;">No publish is recorded on this master yet.</div>';
+      h += '<div id="mspRegLastPublish" style="font-size:12px;color:#57606a;margin-bottom:8px;">No publish is recorded on this managing tenant yet.</div>';
     }
     if (mspTenantsState.msg) {
       h += '<div id="mspRegMsg" style="margin-bottom:8px;padding:6px 10px;border-radius:6px;font-size:12px;' +
@@ -5099,7 +5100,7 @@
         h += '<tr class="mspRegRow" data-tid="' + esc(t.tenantId) + '">' +
           '<td><b>' + esc(t.name) + '</b>' + (t.notes ? '<div style="font-size:11px;color:#57606a;">' + esc(t.notes) + '</div>' : '') + '</td>' +
           '<td><code>' + esc(t.tenantId) + '</code></td>' +
-          '<td>' + (t.ringKnown ? 'ring ' + esc(String(t.ring)) + ' <span style="color:#57606a;font-size:11px;">(master&rsquo;s copy)</span>' : '<span style="color:#9a6700;">no readable ring</span>') + '</td>' +
+          '<td>' + (t.ringKnown ? 'ring ' + esc(String(t.ring)) + ' <span style="color:#57606a;font-size:11px;">(managing tenant&rsquo;s copy)</span>' : '<span style="color:#9a6700;">no readable ring</span>') + '</td>' +
           '<td>' + ((t.tags || []).length ? (t.tags || []).map(x => '<code style="margin-right:4px;">' + esc(x) + '</code>').join('') : '<span style="color:#57606a;">untagged</span>') + '</td>' +
           '<td>' + (t.enabled ? 'yes' : '<span style="color:#9a6700;">disabled</span>') + '</td>' +
           '<td style="color:' + pubColor + ';" class="mspRegPub" data-state="' + esc(pub.state || '') + '">' + esc(pub.text || '') + '</td>' +
@@ -5117,7 +5118,7 @@
         '<label>Tags<br><input id="mspAddTags" placeholder="region:eu; wave:pilot" style="width:200px;"></label>' +
         '<label><input type="checkbox" id="mspAddEnabled" checked> enabled</label>' +
         '<button type="button" class="btn-pri" id="mspAddBtn">Register</button></div>' +
-        '<div id="mspAddHint" style="font-size:11px;color:#57606a;margin-top:4px;">Tags: a word or key:value (letters, digits, - _ .), separated by ; &mdash; not <code>all</code>, <code>none</code>, <code>tag:&hellip;</code> or <code>tenant:&hellip;</code>. The master&rsquo;s own tenant cannot be registered. Saved changes are audited and request a publish.</div></div>';
+        '<div id="mspAddHint" style="font-size:11px;color:#57606a;margin-top:4px;">Tags: a word or key:value (letters, digits, - _ .), separated by ; &mdash; not <code>all</code>, <code>none</code>, <code>tag:&hellip;</code> or <code>tenant:&hellip;</code>. The managing tenant&rsquo;s own tenant cannot be registered. Saved changes are audited and request a publish.</div></div>';
     } else {
       h += '<div style="margin-top:10px;font-size:12px;color:#57606a;">Read-only: a SuperAdmin registers and edits managed tenants.</div>';
     }
@@ -5192,7 +5193,7 @@
     const groups = d.groups || [];
     let h = '<h3 style="margin:0 0 6px;">Replication overview</h3>' + mspCrossLinksHtml('replication');
     h += '<div id="replOvRingNote" style="margin-bottom:10px;padding:10px 12px;background:#fff8c5;border:1px solid #d4a72c;border-radius:8px;font-size:12.5px;color:#4d2d00;">' +
-      '<b>Uses the master&rsquo;s copy of each tenant&rsquo;s ring.</b> ' + esc(d.ringNote || '') +
+      '<b>Uses the managing tenant&rsquo;s copy of each tenant&rsquo;s ring.</b> ' + esc(d.ringNote || '') +
       ' Reach is computed on the server by the same plan every managed tenant runs; this page only filters it.</div>';
     if ((d.notChecked || []).length) {
       h += '<div id="replOvNotChecked" style="margin-bottom:10px;padding:8px 12px;background:#ffebe9;border:1px solid #ff8182;border-radius:8px;font-size:12.5px;color:#82071e;">' +
@@ -5205,7 +5206,7 @@
     h += '<div id="replOvFilters" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;font-size:12.5px;">' +
       '<label>Tenant <select id="replOvTenant"><option value="">All managed tenants</option>' +
       tenants.map(t => '<option value="' + esc(t.name) + '"' + (replOvState.tenant === t.name ? ' selected' : '') + '>' + esc(t.name) +
-        ' (ring ' + esc(t.ringKnown ? String(t.ring) : '?') + ", master's copy)</option>").join('') + '</select></label>' +
+        ' (ring ' + esc(t.ringKnown ? String(t.ring) : '?') + ", managing tenant's copy)</option>").join('') + '</select></label>' +
       '<label>Kind <select id="replOvKind"><option value="">All kinds</option>' +
       groups.map(g => '<option value="' + esc(g.key) + '"' + (replOvState.kind === g.key ? ' selected' : '') + '>' + esc(g.label) + '</option>').join('') + '</select></label>' +
       '<label><input type="checkbox" id="replOvNone"' + (replOvState.none ? ' checked' : '') + '> only rows that reach no tenant</label>' +
@@ -5249,7 +5250,7 @@
     const np = d.notPublished || [];
     const dep = d.dependencyIncluded || [];
     h += '<details id="replOvNotPublished" style="margin-top:10px;"' + (np.length ? '' : '') + '><summary style="font-weight:600;cursor:pointer;">Not published (' + np.length + ')</summary>' +
-      (np.length ? '<ul style="font-size:12px;">' + np.map(x => '<li><b>' + esc(x.kind || '') + '</b> ' + esc(x.name || '') + ' -- ' + esc(x.reason || '') + '</li>').join('') + '</ul>' : '<div style="font-size:12px;color:#57606a;">Every replicable row the master holds is in the bundle, or follows a row that is.</div>') + '</details>';
+      (np.length ? '<ul style="font-size:12px;">' + np.map(x => '<li><b>' + esc(x.kind || '') + '</b> ' + esc(x.name || '') + ' -- ' + esc(x.reason || '') + '</li>').join('') + '</ul>' : '<div style="font-size:12px;color:#57606a;">Every replicable row the managing tenant holds is in the bundle, or follows a row that is.</div>') + '</details>';
     h += '<details id="replOvDependencies" style="margin-top:6px;"><summary style="font-weight:600;cursor:pointer;">Carried only as a dependency (' + dep.length + ')</summary>' +
       (dep.length ? '<ul style="font-size:12px;">' + dep.map(x => '<li><b>' + esc(x.kind || '') + '</b> ' + esc(x.name || '') + ' -- ' + esc(x.reason || '') + '</li>').join('') + '</ul>' : '<div style="font-size:12px;color:#57606a;">None.</div>') + '</details>';
     body.innerHTML = h;
@@ -5822,7 +5823,7 @@
 
   // ===================================================================
   // ===================================================================
-  // REQ-Y (operator 2026-09-19): "msp master slave require license pro" / "write text to contact mok@mortenknudsen.net
+  // REQ-Y (operator 2026-09-19): "managing tenant slave require license pro" / "write text to contact mok@mortenknudsen.net
   // for license" / "in gui" / "add info in settings to register license file" / "or cmdlet to run".
   // ONE source: GET /api/license (Get-PimLicenseApiBody) -- the licence in plain words and the MSP verdict for THIS
   // environment (mspRequired; mspState none | ok | grace | refused). The page never decides the verdict itself.
@@ -5850,17 +5851,17 @@
   function mspLicenceBannerHtml(d, page) {
     if (!d || !d.mspRequired) return '';
     const st = String(d.mspState || '');
-    const role = (d.mspRole === 'slave') ? 'slave' : 'master';
+    const role = (d.mspRole === 'slave') ? 'managed tenant' : 'managing tenant';   // §85: the word; the API value stays slave | master
     const go = ' <a href="#" class="lic-go-settings" style="color:inherit;font-weight:600;">Settings &rsaquo; Licence</a>';
     const base = 'border-radius:8px;padding:8px 12px;font-size:12.5px;';
     if (st === 'refused') {
       return '<div class="msp-lic-note" data-state="refused" data-page="' + escapeHtml(page || '') + '" style="' + base + 'background:#ffebe9;border:1px solid #cf222e;color:#82071e;">' +
-        '&#x26D4; <b>MSP ' + role + ' requires a PIM4EntraPS Pro licence</b> -- ' + escapeHtml(d.mspReason || 'no Pro licence is installed') +
+        '&#x26D4; <b>A ' + role + ' (MSP) requires a PIM4EntraPS Pro licence</b> -- ' + escapeHtml(d.mspReason || 'no Pro licence is installed') +
         '. Contact ' + licenceMailtoHtml(d) + ' for a licence.' + go + '</div>';
     }
     if (st === 'grace') {
       return '<div class="msp-lic-note" data-state="grace" data-page="' + escapeHtml(page || '') + '" style="' + base + 'background:#fff8c5;border:1px solid #d4a72c;color:#6b4c00;">' +
-        '&#x26A0; <b>MSP ' + role + ': licence expired ' + escapeHtml(d.validTo || '?') + ', grace until ' + escapeHtml(d.graceUntil || '?') + '</b>' +
+        '&#x26A0; <b>' + role.charAt(0).toUpperCase() + role.slice(1) + ' (MSP): licence expired ' + escapeHtml(d.validTo || '?') + ', grace until ' + escapeHtml(d.graceUntil || '?') + '</b>' +
         ' -- contact ' + licenceMailtoHtml(d) + ' to renew.' + go + '</div>';
     }
     return '';
@@ -5913,7 +5914,7 @@
     "administrator accounts and first-time access passes, issued and tracked",
     "permission templates imported by script (Import-PimPermissionTemplate.ps1) and tenant preparation from one configuration file (Invoke-PimTenantPrep.ps1)",
     "self-updating from the public release",
-    "community support"];
+    "community support (GitHub issues on the public repository)"];
   var PIM_EDITION_PRO_SINGLE = ["Coverage & gaps and discovery — what is and is not delegated through PIM across every workload, and the scheduled jobs that find new roles, groups and resources",
     "the other workload connectors — Power BI, Exchange Online, enterprise-app roles, Azure DevOps, Dataverse, Business Central and Power Platform",
     "revoking current delegations from the portal (the list itself is free)",
@@ -5933,7 +5934,7 @@
     "removals remain the tenant's call — the provider proposes, the tenant disposes",
     "controlled release rings for the software itself",
     "the provider-hosted option — the provider runs the portal and database for the customer",
-    "support with an agreed response time"];
+    "support with an agreed response time, at portal.invardia.com"];
   var PIM_PRO_WANTED = '';
   function pimProPageLocked(tab) {
     const k = PIM_PRO_PAGES[tab];
@@ -6039,15 +6040,18 @@
   function licenceSectionHtml(d) {
     const esc = escapeHtml;
     if (!d || d.loadError) return stateError('Could not read the licence', (d && d.loadError) || 'no answer from /api/license');
-    const pro = (d.status === 'Valid' || d.status === 'Grace');
+    // BUG-278: the SERVER's verdict (sku Pro + this tenant), not the licence status alone -- a Community-sku licence or one for
+    // another tenant showed Pro here while every Pro feature stayed locked.
+    const pro = (d.edition ? d.edition === 'Pro' : (d.status === 'Valid' || d.status === 'Grace'));
     const row = (k, v) => '<tr><td style="white-space:nowrap;font-weight:600;padding:2px 10px 2px 0;">' + esc(k) + '</td><td class="lic-val">' + v + '</td></tr>';
     let st;
-    if (d.status === 'Valid') st = 'Pro -- valid until ' + esc(d.validTo || '?');
+    if (!pro && (d.status === 'Valid' || d.status === 'Grace')) st = 'Community (free) -- the licence does not make this environment Pro: ' + esc(d.reason || '');
+    else if (d.status === 'Valid') st = 'Pro -- valid until ' + esc(d.validTo || '?');
     else if (d.status === 'Grace') st = 'Pro (grace) -- expired ' + esc(d.validTo || '?') + ', grace until ' + esc(d.graceUntil || '?');
     else if (d.status === 'Missing') st = 'Community (free) -- no Pro licence is installed';
     else st = 'Community (free) -- the licence is ' + esc(String(d.status || 'unknown')) + ': ' + esc(d.reason || '');
     let h = '<div id="licEditionLine" style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Free: the community edition for a single tenant. ' +
-      'Pro: the licensed features for a single tenant, and the multi-tenant half (MSP master / managed tenants). Contact ' + licenceMailtoHtml(d) + '.</div>';
+      'Pro: the licensed features for a single tenant, and the multi-tenant half (managing tenant / managed tenants). Contact ' + licenceMailtoHtml(d) + '.</div>';
     h += '<table class="set-table" id="licStatusTbl">';
     h += row('Edition', '<b id="licEdition">' + (pro ? 'Pro' : 'Community') + '</b>');
     h += row('Status', '<span id="licStatus">' + st + '</span>');
@@ -6056,10 +6060,17 @@
     if (d.customer || d.validTo) h += row('Bound tenant', '<span id="licTenant">' + (d.boundTenant ? esc(d.boundTenant) : 'any tenant (not bound)') + '</span>');
     if (d.tenantId) h += row('This tenant', '<code>' + esc(d.tenantId) + '</code>');
     h += '</table>';
+    // BUG-277: a Community install that registered its Pro licence -- the Pro features are on, and one step gives it the Pro updater.
+    if (d.upgrade && d.upgrade.pending) {
+      h += '<div id="licUpgrade" style="margin-top:8px;font-size:12px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:6px 10px;">' +
+        '<b>Upgrade to Pro updates.</b> The Pro features are on. This installation still updates like the Community edition (from GitHub). ' +
+        'To receive Pro releases automatically, run this once on the machine you deploy from, with the Pro update feed you received with your licence:' +
+        '<div><code class="lic-cmd" style="font-size:11px;overflow-wrap:anywhere;">' + esc(d.upgrade.command || '') + '</code></div></div>';
+    }
     if (d.mspRequired) {
-      const role = (d.mspRole === 'slave') ? 'slave' : 'master';
+      const role = (d.mspRole === 'slave') ? 'managed tenant' : 'managing tenant';   // §85: the word; the API value stays slave | master
       const okTxt = d.mspState === 'ok' ? 'licensed' : d.mspState === 'grace' ? 'licensed, in the grace period -- renew now' : 'REFUSED: ' + esc(d.mspReason || '');
-      h += '<div id="licMspLine" data-state="' + esc(d.mspState || '') + '" style="margin-top:8px;font-size:12px;">This environment runs as <b>MSP ' + role + '</b>, which needs a Pro licence: <b>' + okTxt + '</b>.</div>';
+      h += '<div id="licMspLine" data-state="' + esc(d.mspState || '') + '" style="margin-top:8px;font-size:12px;">This environment runs as a <b>' + role + ' (MSP)</b>, which needs a Pro licence: <b>' + okTxt + '</b>.</div>';
     } else {
       h += '<div id="licMspLine" data-state="none" style="margin-top:8px;font-size:12px;color:#57606a;">This environment runs as a single tenant: no MSP licence requirement.</div>';
     }
@@ -6093,7 +6104,11 @@
       '<code class="lic-cmd" style="flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-size:11px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:4px 8px;">' + esc(d.command || '') + '</code>' +
       '<button type="button" class="btn-sec lic-copy" style="font-size:11px;padding:2px 8px;">Copy</button></div>' +
       '<div style="font-size:11px;color:#57606a;margin-top:3px;"><code>-AdminAppId</code> / <code>-AdminCertThumbprint</code> are <b>this deployment&rsquo;s own</b> admin application and certificate &mdash; the identity that reaches its SQL store. They are not ours, and you do not need them if you register above.</div>';
-    h += '<div id="licContact" style="margin-top:10px;font-size:12px;">Need a licence? Contact ' + licenceMailtoHtml(d) + '</div>';
+    // Operator 2026-10-01: Pro is bought at invardia.com; paid licences get support at portal.invardia.com.
+    const buyUrl = (d && /^https:\/\//i.test(String(d.buyUrl || ''))) ? String(d.buyUrl) : 'https://invardia.com';
+    const supUrl = (d && /^https:\/\//i.test(String(d.supportUrl || ''))) ? String(d.supportUrl) : 'https://portal.invardia.com';
+    if (pro) h += '<div id="licSupport" style="margin-top:10px;font-size:12px;">Support for your licence: <a href="' + esc(supUrl) + '" target="_blank" rel="noopener">' + esc(supUrl.replace(/^https:\/\//, '')) + '</a></div>';
+    h += '<div id="licContact" style="margin-top:10px;font-size:12px;">Need a licence? Buy Pro at <a href="' + esc(buyUrl) + '" target="_blank" rel="noopener">' + esc(buyUrl.replace(/^https:\/\//, '')) + '</a>, or contact ' + licenceMailtoHtml(d) + '</div>';
     return h;
   }
   // Wire the Register control. Split out so licenceSectionHtml stays PURE (the harness renders it).
@@ -6198,8 +6213,8 @@
   // ===================================================================
   let PIM_SCENARIO_CACHE = null;
   // REQUIREMENTS 68.6 row 36 (operator 2026-09-13: "gui must show which mode tenant is running, like
-  // single, msp master etc"). An always-visible header badge: Single / MSP Master / Slave (locally
-  // hosted) / Slave (centrally hosted) -- named by role and hosting, never by the internal S1-S6 code.
+  // single, managing tenant etc"). An always-visible header badge: Single / Managing tenant / Managed tenant (locally
+  // hosted) / Managed tenant (centrally hosted) -- named by role and hosting, never by the internal S1-S6 code.
   async function renderTenantModeBadge() {
     const right = document.getElementById('brandRight');
     if (!right) return;
@@ -6407,7 +6422,7 @@
     if (!sc) {
       h += `<div style="color:#57606a;font-size:12px;">No deployment scenario is set. The install uses the safe single-tenant default (S1) until one is chosen.</div>`;
     } else {
-      // 68.6 row 36: the MODE by role and hosting (Single / MSP Master / Slave (...)), never the S1-S6 code.
+      // 68.6 row 36: the MODE by role and hosting (Single / Managing tenant / Managed tenant (...)), never the S1-S6 code.
       const md = s.mode || null;
       h += `<div id="setScenarioMode" style="margin-bottom:8px;">This tenant runs as: <b>${esc(md ? md.label : sc.role)}</b>${md && md.detail ? ' &mdash; ' + esc(md.detail) : ''}</div>`;
       if (sc.summary) { h += `<div style="font-size:11.5px;color:#57606a;margin-bottom:10px;">${esc(sc.summary)}</div>`; }
@@ -6994,7 +7009,7 @@
          `<b><code>{Initial}</code> (preferred) = the owning person's <u>initials</u></b> (e.g. <code>ABC</code>) — it is the admin account's owner identifier, <b>not</b> a list of approver UPNs. ` +
          `<code>{Owner}</code> is the backward-compat synonym for <code>{Initial}</code>. See the full token list below; click a token to insert it into the focused Value field.</div>`;
     // 🔴 SAY HOW TO COPY THIS TO ANOTHER TENANT (operator, 2026-09-22: "can you copy over the naming
-    // convention from master to slave - export/import on slave" -> "so from efif to ride using the
+    // convention from managing tenant to managed tenant - export/import on slave" -> "so from efif to ride using the
     // script" -> "make info on the settings on how to export/import between tenants (script)").
     // tools/setup/Copy-PimSettings.ps1 shipped in 2.4.412 and NOTHING in the product pointed at it,
     // so the answer to "how do I copy this" lived only in a release note. The command is spelled out
@@ -7158,7 +7173,7 @@
     // --- Edition / License (REQUIREMENTS s30): which edition is active + what it
     // unlocks. Set the edition + record the grant basis. SuperAdmin to change.
     // --- REQ-Y: Licence -- the installed licence in plain words, how to register a licence file (the command + Copy) and
-    // whom to contact. Read-only, every role. MSP master / managed tenant mode REQUIRES a Pro licence (the jobs refuse).
+    // whom to contact. Read-only, every role. managing tenant / managed tenant mode REQUIRES a Pro licence (the jobs refuse).
     h += `<div class="set-card" id="setLicenceCard"><h3 style="margin:0 0 4px;font-size:14px;">Licence</h3>` +
          `<div id="setLicenceBody"><div style="color:#57606a;font-size:12px;">Loading licence&hellip;</div></div></div>`;
     h += `<div class="set-card" id="setEditionCard"><h3 style="margin:0 0 4px;font-size:14px;">Edition &amp; license</h3>` +
@@ -7168,7 +7183,7 @@
          // NEVER consults the old Test-PimProLicenseEnforced switch, and every Pro feature of the catalog
          // runs through it (Test-PimFeatureProLicence). A settings page that tells the operator a gate is
          // off while the gate is refusing calls is worse than no text at all.
-         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Choose the active edition for this tenant. <b>Core</b> includes every essential PIM feature for free &mdash; Core is never gated. <b>Pro</b> and <b>Pro (Design Partner)</b> cover the advanced integrations. <b>The Pro features listed under Licence above are enforced:</b> each one is allowed only while an installed Pro licence covers that feature and this tenant, and a feature that is not covered is refused with the reason (this includes MSP master / managed tenant mode). The edition you pick here records the commercial basis; what is actually unlocked is decided by the installed <b>licence</b>, not by this dropdown.</div>` +
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Choose the active edition for this tenant. <b>Core</b> includes every essential PIM feature for free &mdash; Core is never gated. <b>Pro</b> and <b>Pro (Design Partner)</b> cover the advanced integrations. <b>The Pro features listed under Licence above are enforced:</b> each one is allowed only while an installed Pro licence covers that feature and this tenant, and a feature that is not covered is refused with the reason (this includes managing tenant / managed tenant mode). The edition you pick here records the commercial basis; what is actually unlocked is decided by the installed <b>licence</b>, not by this dropdown.</div>` +
          `<div id="setEditionBody"><div style="color:#57606a;font-size:12px;">Loading edition&hellip;</div></div></div>`;
 
     // --- Deployment scenario (REQUIREMENTS §31): which of the six supported
@@ -7177,7 +7192,7 @@
     // edition) resolves to. SuperAdmin can switch the active scenario; switching only
     // changes what subsequent resolutions read -- it never silently re-runs anything.
     h += `<div class="set-card" id="setScenarioCard"><h3 style="margin:0 0 4px;font-size:14px;">Deployment scenario</h3>` +
-         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">The deployment <b>topology</b> this install runs as &mdash; single-tenant or MSP master/managed, internal or community, central or local hosting. The summary below shows the active scenario and what each runtime setting (hosting store, service-principal model, sync-file location, update source, edition) resolves to. Changing it persists the active scenario; the engine, jobs and deploy apply it on their next run (this card never changes behaviour on its own).</div>` +
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">The deployment <b>topology</b> this install runs as &mdash; single-tenant or managing tenant/managed, internal or community, central or local hosting. The summary below shows the active scenario and what each runtime setting (hosting store, service-principal model, sync-file location, update source, edition) resolves to. Changing it persists the active scenario; the engine, jobs and deploy apply it on their next run (this card never changes behaviour on its own).</div>` +
          `<div id="setScenarioBody"><div style="color:#57606a;font-size:12px;">Loading deployment scenario&hellip;</div></div></div>`;
 
     // --- Feature customization (REQUIREMENTS s29): per-feature kill switch over the
@@ -9494,7 +9509,7 @@
     'queue-apply':                 'Applies queued actions (revokes, TAP re-issues, session revokes) that were committed.',
     'engine-delta':                'Applies committed changes for one area to the tenant. A commit also starts the engine straight away; this is the safety net.',
     'engine-full':                 'A whole-tenant reconcile of every area — the daily backstop that catches anything a delta missed.',
-    'msp-pull':                    'MSP deployments only: pulls configuration from the central (master) tenant.',
+    'msp-pull':                    'MSP deployments only: pulls configuration from the central (managing tenant) tenant.',
     'reminders':                   'Mails reminders about access that is about to expire or needs attention.',
     'escalations':                 'Mails escalations when a reminder was not acted on in time.',
     'discovery':                   'Looks for new subscriptions, management groups, resource groups, Power BI workspaces and Entra roles.',
@@ -9550,7 +9565,7 @@
       h.push('<div id="govCadNote" style="color:#57606a;font-size:11.5px;margin:0 0 8px;max-width:980px;padding:6px 10px;border:1px solid #54aeff;border-radius:6px;background:#ddf4ff;">' +
         // 2026-09-22 (operator: "a lot of text, not user friendly") -- two short sentences, not five,
         // keeping the two facts that change what an operator does: it is not a scheduler job (so the
-        // button is not instant), and on a master a commit already asks for a publish.
+        // button is not instant), and on a managing tenant a commit already asks for a publish.
         '<b>' + escapeHtml(sched.cadence.label || '') + '</b> (first row) is not a scheduler job &mdash; it is its own job, so <b>' +
         (pub ? 'Publish now' : 'Run pull now') + '</b> takes up to ' +
         escapeHtml(String(sched.cadence.triggerMinutes || 5)) + ' minutes. Its last result and next run are in the row. ' +
@@ -10017,7 +10032,7 @@
   }
 
   // ----- Settings: Copy settings to another environment (export here, import there) ------------------------------------
-  // Operator 2026-09-21: "how can i export settings and import them into slave from master fx naming". Export = one JSON
+  // Operator 2026-09-21: "how can i export settings and import them into managed tenant from managing tenant fx naming". Export = one JSON
   // file with the sections ticked; Import on the other environment = a preview of every setting (current -> new) and only
   // the ticked ones are written (SuperAdmin, audited). Who may use the Manager, approvers, break-glass, licence, rings and
   // the admin account domain are never copied. Backed by GET /api/settings/export + POST /api/settings/import.
@@ -10028,7 +10043,7 @@
     try { cat = await api('GET', '/api/settings/export?catalog=1'); } catch (e) { host.innerHTML = ''; return; }
     const secs = (cat && cat.sections) || [];
     let h = '<div class="set-card" id="setCopyCard"><h3 style="margin:0 0 4px;font-size:14px;">Copy settings to another environment</h3>' +
-      '<div style="color:#57606a;font-size:11.5px;margin:2px 0 8px;">Export the sections you pick to a file here (for example on the MSP master), then import it on another environment. ' +
+      '<div style="color:#57606a;font-size:11.5px;margin:2px 0 8px;">Export the sections you pick to a file here (for example on the managing tenant), then import it on another environment. ' +
       'The import shows every setting as <b>current &rarr; new</b> and writes only what you tick. Never copied: who may use the Manager, approvers, break-glass accounts, the licence, deployment rings, and the admin account domain.</div>' +
       '<div style="display:flex;flex-wrap:wrap;gap:6px 18px;margin-bottom:8px;">' +
       secs.map(s => '<label style="font-size:12px;"><input type="checkbox" class="copySec" value="' + esc(s.id) + '"' + (s.id === 'naming' ? ' checked' : '') + '> ' + esc(s.label) + '</label>').join('') +
@@ -10177,8 +10192,8 @@
     let h = '<div class="set-card" id="setAdminDomain"><h3 style="margin:0 0 4px;font-size:14px;">Admin account domain</h3>';
     h += '<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">The domain after the @ in every admin account PIM creates in <b>this</b> tenant. ' +
          '<b>Tenant default domain</b> follows whatever Entra ID marks as default (what v1 did).';
-    if (mode === 'msp-master') h += ' On this MSP master it applies to admins created here; each managed tenant creates its replicated admins at <b>its own</b> admin account domain.';
-    else if (/^slave/.test(mode)) h += ' On this managed tenant it is also the domain the admins your MSP master replicates are created at &mdash; the master&rsquo;s domain is never carried over.';
+    if (mode === 'msp-master') h += ' On this managing tenant it applies to admins created here; each managed tenant creates its replicated admins at <b>its own</b> admin account domain.';
+    else if (/^slave/.test(mode)) h += ' On this managed tenant it is also the domain the admins your managing tenant replicates are created at &mdash; the managing tenant&rsquo;s domain is never carried over.';
     h += '</div>';
     if (err || !d) { host.innerHTML = h + '<div style="color:#cf222e;font-size:12px;">Could not read the admin account domain: ' + esc(err || 'no answer') + '</div></div>'; return; }
     const cur = String(d.value || '').replace(/^@/, '');
@@ -12728,15 +12743,15 @@
           ? ('<button class="ghost jobAckBtn" data-runid="' + esc0(ackIds.join(',')) + '" data-name="' + esc0(j.name) + '" title="acknowledge the ' + ackIds.length + ' standing failure(s) (keeps the run records)" style="font-size:11px;color:#9a6700;">Ack</button>')
           : '';
         // 🔴 msp-pull IS A PLACEHOLDER, AND IT HAS TO SAY SO (operator, 2026-09-22: "i dont
-        // understand what the purpose of this is on master and slave" / "where can i trigger the
+        // understand what the purpose of this is on managing tenant and slave" / "where can i trigger the
         // definitions sync under jobs ?"). The scheduler tick NEVER runs it: the managed tenant's
         // definitions pull is its own Container Apps job (ca-pim-downlink-s6, the Data Definition
         // Updater), and its cadence, last result and Run pull now live on the Job schedule page. On
-        // an MSP master it does nothing at all -- a master publishes, it never pulls. Shown off and
+        // a managing tenant it does nothing at all -- a managing tenant publishes, it never pulls. Shown off and
         // idle with no explanation, it read as a broken job on every environment.
         // 🔴 ...AND A ROW NOBODY CAN USE DOES NOT BELONG IN THE LIST AT ALL (operator, 2026-09-22:
         // "why show this unedr jobs & engine, if it is not used"). The scheduler tick never runs
-        // msp-pull anywhere -- on a managed tenant the pull is its own container job, and a master
+        // msp-pull anywhere -- on a managed tenant the pull is its own container job, and a managing tenant
         // never pulls -- so the row was pure noise on every environment. It is dropped from the
         // table; one line under it says where the pull really lives.
         const isPullPlaceholder = String(j.type || '') === 'msp-pull';
@@ -12764,7 +12779,7 @@
       if (sawPullPlaceholder) {
         h.push('<div style="margin-top:8px;color:#57606a;font-size:11.5px;">' +
           'The <b>definitions pull</b> is not in this list: on a managed tenant it is its own job (the Data Definition Updater), ' +
-          'with its cadence and <b>Run pull now</b> on <a href="#" class="jobsGoSchedule">Job schedule</a>. A master publishes and never pulls.</div>');
+          'with its cadence and <b>Run pull now</b> on <a href="#" class="jobsGoSchedule">Job schedule</a>. A managing tenant publishes and never pulls.</div>');
       }
       h.push('<div id="jobsActionMsg" style="margin-top:8px;font-size:12px;min-height:16px;"></div>');
     }
@@ -13782,7 +13797,7 @@
       };
     }
     // §71.5 -- the replication fields, as pickers with the same rule the wizard and the server use.
-    // Only reachable on the MSP master: replHiddenCol() removes the columns everywhere else.
+    // Only reachable on the managing tenant: replHiddenCol() removes the columns everywhere else.
     if (REPL_KIND[base] && col === 'Replicate') {
       const kind = REPL_KIND[base];
       return {
@@ -13811,7 +13826,7 @@
           const mm = String((row && row.ManagementMode) || '').trim().toLowerCase();
           return (/^yes$/i.test(v) && mm === 'msp') || (/^no$/i.test(v) && mm !== 'msp');
         },
-        invalidHint: kind === 'admin' ? 'Replication must match Management mode: msp = replicate to managed tenants, local = master tenant only' : 'Pick the replication from the dropdown (blank = no replication, or Replicate to managed tenants)'
+        invalidHint: kind === 'admin' ? 'Replication must match Management mode: msp = replicate to managed tenants, local = managing tenant only' : 'Pick the replication from the dropdown (blank = no replication, or Replicate to managed tenants)'
       };
     }
     // §77.20 (operator 2026-09-21: "ring 0 = dev, ring 1 = test, ring 2 = broad (all)" / "make it consistent"): the
@@ -15825,13 +15840,13 @@
     }
     const selCount  = p.selection ? p.selection.size : 0;
     const isAdmins  = (base === 'Account-Definitions-Admins');
-    // §71.5 -- the replication columns are the MSP master's alone. The server already strips them from a
+    // §71.5 -- the replication columns are the managing tenant's alone. The server already strips them from a
     // non-master's header; this is the same rule client-side, so a stale pending header cannot show them.
     if (REPL_KIND[base] && !_mspReplCtx) { mspReplicationContext().then(() => { if (currentGridBase === base) renderGrid(base); }); }
     const visHeader = header.filter(c => !replHiddenCol(base, c));
     const replReach = !!(REPL_KIND[base] && replIsMaster());
-    // 🔴 The managed tenant's half of the same question (operator, 2026-09-22): the master sees
-    // "Reach", the slave has to see WHERE EACH ROW CAME FROM. Declared here so the count can be said
+    // 🔴 The managed tenant's half of the same question (operator, 2026-09-22): the managing tenant sees
+    // "Reach", the managed tenant has to see WHERE EACH ROW CAME FROM. Declared here so the count can be said
     // in the header line as well as marked per row.
     const showProvenance = !!(REPL_KIND[base] && isServer && !replIsMaster());
     const mspRowCount = showProvenance
@@ -15860,7 +15875,7 @@
       <div>
         <div class="grid-title">${escapeHtml(entityLabel(base))}</div>
         <div class="grid-sub"><code style="font-size:10.5px;color:#8c959f;" title="The storage key -- what this is called in the database and in the API">${escapeHtml(base)}</code>
-          &nbsp;|&nbsp; ${p.rows.length - p.deletes.size} row(s) ${isDirty(base) ? '<span style="color:#9a6700">(pending changes)</span>' : ''}${showProvenance ? ('&nbsp;|&nbsp; <span style="color:#0550ae;" title="Rows the downlink put here (Owner = MSP). The rest are this tenant\'s own.">' + mspRowCount + ' from the MSP master, ' + ((p.rows.length - p.deletes.size) - mspRowCount) + ' local</span>') : ''}
+          &nbsp;|&nbsp; ${p.rows.length - p.deletes.size} row(s) ${isDirty(base) ? '<span style="color:#9a6700">(pending changes)</span>' : ''}${showProvenance ? ('&nbsp;|&nbsp; <span style="color:#0550ae;" title="Rows the downlink put here (Owner = MSP). The rest are this tenant\'s own.">' + mspRowCount + ' from the managing tenant, ' + ((p.rows.length - p.deletes.size) - mspRowCount) + ' local</span>') : ''}
           &nbsp;|&nbsp; <span style="color:#57606a;">click any cell to edit &middot; click a column header to sort</span></div>
       </div>
       <div class="toolbar">
@@ -15893,7 +15908,7 @@
     // row by row -- on the very rows whose ring decides whether they reach a tenant at all.
     if ((isAdmins || (REPL_KIND[base] && replIsMaster())) && !replHiddenCol(base, 'Ring') && header.indexOf('Ring') >= 0) {
       // Ring moves as a first-class action (LIFECYCLE-GOVERNANCE phase 1):
-      // promote 2 -> 1 -> 0 (or pull back) without hand-editing the column. MSP master only (§71).
+      // promote 2 -> 1 -> 0 (or pull back) without hand-editing the column. managing tenant only (§71).
       html.push('<span class="gab-label">Move to ring:</span>');
       html.push('<select id="gabRing">' +
         '<option value="0">0 (dev tenants only)</option>' +
@@ -15960,7 +15975,7 @@
     // Header checkbox: tri-state (none / some / all visible-selectable rows).
     html.push('<th class="grid-sel-col"><input type="checkbox" id="gridSelectAll" title="Select / clear all visible rows"></th>');
     html.push('<th class="row-actions-head" title="Per-row actions: rename, clone, mark deleted">&nbsp;</th>');
-    // 🔴 ON A MANAGED TENANT, SAY WHICH ROWS CAME FROM THE MASTER (operator, 2026-09-22: "on a slave
+    // 🔴 ON A MANAGED TENANT, SAY WHICH ROWS CAME FROM THE MASTER (operator, 2026-09-22: "on a managed tenant
     // i must be ale to see which are replicated down and which are local"). The replication columns
     // (Replicate / Ring / Target) are the MASTER'S and are hidden here -- correctly, a managed tenant
     // does not author them -- which left no way at all to tell a row the downlink put here from one
@@ -15968,7 +15983,7 @@
     // prunes only those (PIM-Downlink: "Owner tag = provenance not a gate"), so this reads it and
     // shows it. Read-only, and only where it means something.
     if (showProvenance) {
-      html.push('<th class="grid-src-head" title="Where this row came from. From the MSP master = sent by your provider on a pull and kept in step with theirs; Local = this tenant\'s own row, which the downlink never touches.">Source</th>');
+      html.push('<th class="grid-src-head" title="Where this row came from. From the managing tenant = sent by your provider on a pull and kept in step with theirs; Local = this tenant\'s own row, which the downlink never touches.">Source</th>');
     }
     for (const col of visHeader) {
       const gv = gridView(base);
@@ -16048,7 +16063,7 @@
         const fromMsp = (owner === 'msp');
         html.push('<td class="grid-src-cell" style="white-space:nowrap;">' +
           (fromMsp
-            ? '<span title="Sent by your provider on a pull. The next pull keeps it in step with theirs -- edit it here and the change is reported as drift and put back." style="background:#ddf4ff;color:#0550ae;border-radius:10px;padding:1px 7px;font-size:10.5px;font-weight:600;">from the MSP master</span>'
+            ? '<span title="Sent by your provider on a pull. The next pull keeps it in step with theirs -- edit it here and the change is reported as drift and put back." style="background:#ddf4ff;color:#0550ae;border-radius:10px;padding:1px 7px;font-size:10.5px;font-weight:600;">from the managing tenant</span>'
             : '<span title="This tenant&rsquo;s own row. The downlink never touches it." style="background:#eaeef2;color:#57606a;border-radius:10px;padding:1px 7px;font-size:10.5px;">local</span>') +
           '</td>');
       }
@@ -16058,7 +16073,7 @@
         let invalid = false;
         if (spec && spec.validateRow) { if (!spec.validateRow(v, row)) invalid = true; }
         else if (spec && spec.validate && !spec.validate(v)) invalid = true;
-        // §71.5 -- Target on a replicable entity (master): the grammar check + a tag/tenant picker.
+        // §71.5 -- Target on a replicable entity (managing tenant): the grammar check + a tag/tenant picker.
         if (replReach && col === 'Target' && !deleted) {
           const bad = !replTargetValid(v);
           html.push(`<td class="${bad ? 'cell-bad cell-bad-tip' : ''}" data-col="Target"${bad ? ' title="Target must be tag:&lt;key:value&gt;, tag:a+b, tenant:&lt;id&gt; (comma separated), or blank"' : ''}><span class="repl-target-val">${escapeHtml(v)}</span> <button class="repl-target-pick" data-idx="${idx}" title="Pick tags / tenants">tags…</button></td>`);
@@ -16119,7 +16134,7 @@
     // Cache-age badges.
     renderCacheBadges(main);
 
-    // §71.5 -- the Target picker and the per-row reach (MSP master only).
+    // §71.5 -- the Target picker and the per-row reach (managing tenant only).
     if (replReach) {
       main.querySelectorAll('button.repl-target-pick').forEach(btn => {
         btn.onclick = async () => {
@@ -17529,10 +17544,10 @@
       // is switched off on a date nobody chose.
       'PIM-OFF-002':    'This row carries an <b>Auto-disable date</b> AND the old <code>OffboardDate</code>, with different dates, so the engine refuses to disable this admin at all. Which date is the right one is a decision only you can make: put it in Auto-disable date (Edit on the admin, Access &rarr; Admin accounts) and clear the old column. Saving the date there clears the old column for you.',
       'PIM-OFF-003':    'Nothing is broken &mdash; the old column name <code>OffboardDate</code> is still read. The column is now <b>Auto-disable date</b>, because the sweep only DISABLES the account (PIM never deletes an account). Re-enter the date in Auto-disable date with Edit on the admin (Access &rarr; Admin accounts) and the old column is cleared for you; the schema preflight also migrates it on its next pass.',
-      'PIM-MSP-001':    'Which slaves receive this admin is a decision only you can make. Set its Ring (Edit on the admin), or set Management mode to local if it should not be synced.',
-      'PIM-MSP-002':    'Pick the slave tags on the admin (Edit on the admin). A tag no managed tenant carries sends the admin to no slave.',
-      'PIM-MSP-003':    'Pick the replication from the dropdown: blank (no replication) or Replicate to managed tenants -- an admin also offers "only where a delegation needs this admin". On an admin it must match Management mode (msp = replicate, local/blank = master tenant only). Which one is right is your decision -- fix the row in the grid or the wizard.',
-      'PIM-MSP-004':    'Replication is authored only on the MSP master. Clear Replicate / Ring / Target on this tenant; the master decides what reaches it.',
+      'PIM-MSP-001':    'Which managed tenants receive this admin is a decision only you can make. Set its Ring (Edit on the admin), or set Management mode to local if it should not be synced.',
+      'PIM-MSP-002':    'Pick the managed-tenant tags on the admin (Edit on the admin). A tag no managed tenant carries sends the admin to no managed tenant.',
+      'PIM-MSP-003':    'Pick the replication from the dropdown: blank (no replication) or Replicate to managed tenants -- an admin also offers "only where a delegation needs this admin". On an admin it must match Management mode (msp = replicate, local/blank = managing tenant only). Which one is right is your decision -- fix the row in the grid or the wizard.',
+      'PIM-MSP-004':    'Replication is authored only on the managing tenant. Clear Replicate / Ring / Target on this tenant; the managing tenant decides what reaches it.',
       'PIM-MSP-005':    'Which tenants a group-model row should reach is your decision. Set its Ring to a whole number (0, 1, 2, ...), or leave it blank.',
       'PIM-DUP-001':    'Multiple paths to the same target may be deliberate. Remove whichever role-group path you do not want — the tool cannot know which one that is.',
       'PIM-STORE-001':  'The entity could not be read from the SQL store. Check the store connection on the Support tab, then run validation again.',
@@ -18380,8 +18395,8 @@
 
   // 🔴 REQ-REV-DOWN-1 -- "ALSO REMOVE IT IN THE MANAGED TENANTS?" (operator, 2026-09-22).
   // A managed tenant never removes something just because it stopped arriving: it reports it and
-  // holds, because "the master revoked it" and "the master failed to publish" look identical from
-  // there. So a central revoke reaches the tenants only if the master SAYS it authorised that
+  // holds, because "the managing tenant revoked it" and "the managing tenant failed to publish" look identical from
+  // there. So a central revoke reaches the tenants only if the managing tenant SAYS it authorised that
   // removal. This asks once, records the authorisation, and that is the end of the human part --
   // no per-tenant approval ("so we dont have to approve 25 tenants"); the pull applies it.
   // Asked ONLY for a row that is actually replicated: for anything master-only there is nothing
@@ -18445,7 +18460,7 @@
           tenants = Array.from(new Set(idx.map(n => list[n - 1].tenantId)));
         }
       }
-    } catch (_) { /* no registry (not a master, or unreadable): the choice is all or nothing, as before */ }
+    } catch (_) { /* no registry (not a managing tenant, or unreadable): the choice is all or nothing, as before */ }
     const reason = window.prompt('Why is it being removed? (recorded with the authorisation)', '') || '';
     try {
       const body = { op: 'withdraw', entity: base, key: key, reason: reason };
@@ -18908,7 +18923,7 @@
 
     // --- RING-001: repair invalid deployment-ring values (not 0, 1 or 2). Default = Ring 0 (dev tenants only,
     // the narrowest ring, §77.20). An invalid ring reaches NO managed tenant, so leaving it silently drops the
-    // admin from every slave. A value that IS a ring (0, 1, 2) is never touched, even if a stale finding names it.
+    // admin from every managed tenant. A value that IS a ring (0, 1, 2) is never touched, even if a stale finding names it.
     if (opts.ringAction === 'ring0' || opts.ringAction === 'clear') {
       const newVal = opts.ringAction === 'ring0' ? '0' : '';
       for (const v of (opts.ringBad || [])) {
@@ -21937,7 +21952,7 @@
             const refresh = () => { cnt.textContent = s.nestedIn.size + ' ' + dimNounPlural() + ' selected'; };
             f.appendChild(wuxPicklist({ items, multi:true, selected:s.nestedIn, onChange: refresh }));
             refresh(); f.appendChild(cnt);
-            // §71.5 -- Replication of the derived indirect permission group (MSP master only).
+            // §71.5 -- Replication of the derived indirect permission group (managing tenant only).
             const rdEntity = s.target === 'azure' ? 'PIM-Assignments-Azure-Resources' : (s.target === 'entra' ? 'PIM-Definitions-Tasks' : 'PIM-Assignments-Workloads');
             f.appendChild(wuxReplicationSection(s, { entity: rdEntity, kind: REPL_KIND[rdEntity], row: () => ({ GroupTag: s._replDerivedTag || '' }) }));
             return f;
@@ -22035,7 +22050,7 @@
       adminTemplates = (r && r.templates) || [];
     } catch (_) {}
 
-    await pimTenantMode();   // the MSP fields below exist only on the MSP master
+    await pimTenantMode();   // the MSP fields below exist only on the managing tenant
     const state = {
       first:'', last:'', initials:'',
       // Purpose drives the naming convention (v2.4.171): Day2Day (default) =
@@ -22123,15 +22138,15 @@
               onInput:(v)=>{ s.upnSuffix=v; rerender(); }
             });
             f.appendChild(wfsfxFld);
-            // REQ-T: on an MSP master the suffix above is the MASTER's. A replicated admin is created in each managed
+            // REQ-T: on a managing tenant the suffix above is the MASTER's. A replicated admin is created in each managed
             // tenant at THAT tenant's own Admin account domain (its default domain unless it chose another) -- the
-            // downlink never carries the master's suffix. Said here, where the question was asked.
+            // downlink never carries the managing tenant's suffix. Said here, where the question was asked.
             mspReplicationContext().then(ctx => {
               if (!ctx || !ctx.master || !wfsfxFld.isConnected) return;
               const n = document.createElement('div');
               n.className = 'wf-sfx-msp';
               n.style.cssText = 'margin:2px 0 8px 214px;font-size:11px;color:#57606a;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:6px 8px;';
-              n.innerHTML = '<b>Replicated to managed tenants?</b> Then this suffix is used on this master tenant only. In each managed tenant the admin is created as ' +
+              n.innerHTML = '<b>Replicated to managed tenants?</b> Then this suffix is used on this managing tenant only. In each managed tenant the admin is created as ' +
                 '<code>&lt;user name&gt;@&lt;that tenant&rsquo;s Admin account domain&gt;</code> &mdash; its default domain unless that tenant chose another in its own Settings.';
               wfsfxFld.after(n);
             });
@@ -22223,7 +22238,7 @@
                 rerender();
               }
             }));
-            // §71 / operator 2026-09-15: ring, management mode and slave tags are MSP MASTER fields only.
+            // §71 / operator 2026-09-15: ring, management mode and managed-tenant tags are MANAGING TENANT fields only.
             if (pimIsMspMaster()) {
             f.appendChild(wuxField({ id:'wf-ring', label:'Deployment ring', required:true, type:'select', value:s.ring,
               sub:'Account-Definitions-Admins.Ring',
@@ -22245,9 +22260,9 @@
               onInput:(v)=>{ s.managementMode=v; rerender(); }
             }));
             // §77.20 (operator 2026-09-21: "you should not define settings here like tags, that shoud be defined on the
-            // depoyment rings"): an msp admin picks only its RING; which slaves a ring holds, and any tag narrowing, is
+            // depoyment rings"): an msp admin picks only its RING; which managed tenants a ring holds, and any tag narrowing, is
             // set once on the ring (Managed tenant registry > Deployment rings). The per-admin tag boxes are gone.
-            }   // end: MSP master only
+            }   // end: managing tenant only
             f.appendChild(wuxAdminLivePreview(s));
             return f;
           },
@@ -22434,7 +22449,7 @@
                 environment: s.environment, highPriv: !!s.useLongForm, company: s.company || '', tier: s.tier, level: s.level
               }, (d) => { if (d && d.userName && d.userName !== userName) { s._engineUserName = d.userName; rerender(); } });
             }
-            // §71.5 -- Replication (MSP master only; renders nothing elsewhere). Replicate is the admin's
+            // §71.5 -- Replication (managing tenant only; renders nothing elsewhere). Replicate is the admin's
             // ManagementMode (Yes = msp), so the two can never be staged disagreeing.
             wrap.appendChild(wuxReplicationSection(s, { entity: 'Account-Definitions-Admins', kind: 'admin',
               initialTarget: (s.slaveTags && s.slaveTags.size) ? [...s.slaveTags].map(t => 'tag:' + t).join(',') : '',
@@ -22475,8 +22490,8 @@
           TAPStartDate: s.createTap === 'TRUE' ? s.tapStartDate.trim() : '',
           TAPLifetimeHours: s.createTap === 'TRUE' ? String(s.tapLifetimeHours || '').trim() : '',
           AccountStatus: s.status, StatusChangeCode: '',
-          Ring: pimIsMspMaster() ? s.ring : '',   // off the master a ring means nothing and the server refuses it
-          // 68.6 row 35: slave tags only mean something for an msp admin.
+          Ring: pimIsMspMaster() ? s.ring : '',   // off the managing tenant a ring means nothing and the server refuses it
+          // 68.6 row 35: managed-tenant tags only mean something for an msp admin.
           Target: (s.managementMode === 'msp' && s.slaveTags && s.slaveTags.size) ? [...s.slaveTags].map(t => 'tag:' + t).join(';') : '',
           Template: s.templateId || ''
         }, wuxReplicationFields(s, 'admin')));   // §71: Replicate/Ring/Target from the Replication section (master only)
@@ -22915,7 +22930,7 @@
               const weGranted = s.grantedRoles.filter(g => g.roleDefinitionName && g.roleDefinitionName.trim());
               wrapE.appendChild(wuxPolicyTemplateField(s, rerender, { kind: 'directoryRole', activeOnly: weGranted.every(g => String(g.assignmentType) === 'Active') }));
             }
-            // §71.5 -- Replication of this INDIRECT permission group (MSP master only).
+            // §71.5 -- Replication of this INDIRECT permission group (managing tenant only).
             if (REPL_KIND[base]) wrapE.appendChild(wuxReplicationSection(s, { entity: base, kind: 'group', row: () => ({ GroupTag: tag, GroupName: name }) }));
             return wrapE;
           }
@@ -23430,7 +23445,7 @@
               'No tenant changes happen until you click <b>Commit all</b> under Pending changes.',
               impact
             ));
-            // §71.5 -- Replication of the project's direct group (MSP master only).
+            // §71.5 -- Replication of the project's direct group (managing tenant only).
             wrapP.appendChild(wuxReplicationSection(s, { entity: 'PIM-Definitions-Roles', kind: 'group', row: () => ({ GroupTag: tag, GroupName: buildRoleGroupName('Project-' + s.shortName) }) }));
             return wrapP;
           }
@@ -23827,7 +23842,7 @@
               'No tenant changes happen until you click <b>Commit all</b> under Pending changes.',
               null
             ));
-            // §71.5 -- the clone keeps the source's replication fields unless changed here (MSP master only).
+            // §71.5 -- the clone keeps the source's replication fields unless changed here (managing tenant only).
             if (REPL_KIND[s.sourceBase]) wrapC.appendChild(wuxReplicationSection(s, { entity: s.sourceBase, kind: REPL_KIND[s.sourceBase], row: () => ({ GroupTag: newTag }) }));
             return wrapC;
           }
@@ -27276,7 +27291,7 @@
   if (isServer) { try { renderTenantModeBadge(); } catch (e) { } }   // 68.6 row 36: tenant mode in the header
   if (isServer) { try { renderMspLicenceBanners(); } catch (e) { } }  // REQ-Y: MSP without a Pro licence -> Home notice
   if (isServer) { try { renderUpdateRingBadge(); } catch (e) { } }   // §71.43: the UPDATE RING this environment is on
-  if (isServer) { try { mspReplicationContext(); } catch (e) { } }   // §71.5: is this the MSP master (Replication surface on/off)
+  if (isServer) { try { mspReplicationContext(); } catch (e) { } }   // §71.5: is this the managing tenant (Replication surface on/off)
   // REQ-N / REQ-O: the registry + overview pages are MSP-master only -- hidden now (fail closed), shown once the tenant
   // mode (the header badge's source) says msp-master.
   try { applyMspMasterOnlyTabs(); pimTenantMode().then(applyMspMasterOnlyTabs).catch(() => { }); } catch (e) { }

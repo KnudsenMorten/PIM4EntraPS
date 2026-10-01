@@ -1,13 +1,13 @@
 ﻿# =============================================================================================
-# PIM-Enrolment.ps1 -- MSP-5, THE SLAVE-ENROLMENT HANDSHAKE ("the slave knocks on the door").
+# PIM-Enrolment.ps1 -- MSP-5, THE SLAVE-ENROLMENT HANDSHAKE ("the managed tenant knocks on the door").
 #
-# The operator's shape: *"basic deployment of a slave with minimum config ... then the slave knock
-# on the door to master. then master sends downstream allowed config like central admin accounts,
+# The operator's shape: *"basic deployment of a managed tenant with minimum config ... then the managed tenant knock
+# on the door to managing tenant. then master sends downstream allowed config like central admin accounts,
 # central roles and assignments."*
 #
 # 🔴 WHAT IS GENUINELY NEW HERE IS THE **RETURN PATH**, and it is the reason this file is mostly
 # refusals. Framework §8's uplink is APPEND-ONLY BY DESIGN: a customer POSTs its outcome and can
-# read nothing back. "The slave knocks and receives its allowed config" adds a READ surface, which
+# read nothing back. "The managed tenant knocks and receives its allowed config" adds a READ surface, which
 # is a different capability with a different risk profile. The four decisions that had to be made
 # before any of it could be built are recorded below, each next to the code that implements it.
 #
@@ -26,7 +26,7 @@
 #   is deliberately no field that could carry an admin, a role, or an assignment.
 #
 # FORK 3 -- MSP-3 STAYS INTACT: THE MASTER ANSWERS A REQUEST, IT NEVER REACHES IN.
-#   Everything here is master-side evaluation of a document the slave sent. Nothing in this file
+#   Everything here is master-side evaluation of a document the managed tenant sent. Nothing in this file
 #   opens a connection to a managed tenant, and the grant it produces is something the SLAVE then
 #   acts on with its own identity -- which is what the live proof established.
 #
@@ -53,10 +53,10 @@ function New-PimEnrolmentRequest {
       🔒 It carries NO CREDENTIAL and NO SECRET. A knock is a claim of identity, not proof of one;
       the proof is the authenticated channel it arrives on (framework §8.2), and putting a secret in
       the body would make the document itself worth stealing.
-      🔒 DOC-16b (2026-09-18) -- `localRing` is the slave's OWN ring, and it is AUTHORITATIVE. Every ring
-      is defined LOCALLY in the slave (DESIGN; operator 2026-09-18): the slave's downlink job gates its
-      pull with its own -SlaveRing, so the knock DECLARES that ring to the master; it does not ask for
-      one. (This used to say the opposite -- that the ring was the operator's and the slave's value was
+      🔒 DOC-16b (2026-09-18) -- `localRing` is the managed tenant's OWN ring, and it is AUTHORITATIVE. Every ring
+      is defined LOCALLY in the managed tenant (DESIGN; operator 2026-09-18): the managed tenant's downlink job gates its
+      pull with its own -SlaveRing, so the knock DECLARES that ring to the managing tenant; it does not ask for
+      one. (This used to say the opposite -- that the ring was the operator's and the managed tenant's value was
       ignored -- which inverted the rule. -RequestedRing is kept as an alias so old callers bind.)
     #>
     [CmdletBinding()]
@@ -78,12 +78,12 @@ function New-PimEnrolmentRequest {
         version       = 1
         tenantId      = "$TenantId".Trim()
         displayName   = "$DisplayName".Trim()
-        # DECLARED, not requested: the slave's own local ring (0..2). See the note above.
+        # DECLARED, not requested: the managed tenant's own local ring (0..2). See the note above.
         localRing     = [int]$LocalRing
         scenario      = "$Scenario".Trim()
         subscriptionId = "$SubscriptionId".Trim()
         uplinkUri     = "$UplinkUri".Trim()
-        # IMP-13: the slave declares its own admin naming conventions AT ENROLMENT, which is the
+        # IMP-13: the managed tenant declares its own admin naming conventions AT ENROLMENT, which is the
         # moment the mismatch is cheapest to fix -- before any account has been created in it.
         adminAccountPrefixes = @(@($AdminAccountPrefixes) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
         nonce         = $n
@@ -109,11 +109,11 @@ function Test-PimEnrolmentRequest {
     if (-not [guid]::TryParse($tid, [ref]$guid)) { return [ordered]@{ ok = $false; reason = "tenantId '$tid' is not a GUID" } }
     if (-not "$(Get-PimDownlinkValue -Object $Request -Key 'displayName')".Trim()) { return [ordered]@{ ok = $false; reason = 'the request names no displayName -- an operator approving it would be approving an id' } }
     if (-not "$(Get-PimDownlinkValue -Object $Request -Key 'nonce')".Trim()) { return [ordered]@{ ok = $false; reason = 'the request carries no nonce, so a replay could not be told from a retry' } }
-    # DOC-16b: the slave's own ring is part of what it declares. Missing or out of range fails CLOSED -- never defaulted,
+    # DOC-16b: the managed tenant's own ring is part of what it declares. Missing or out of range fails CLOSED -- never defaulted,
     # because a defaulted ring decides which admins a customer receives. (Legacy 'requestedRing' is read as the same value.)
     $lr = "$(Get-PimDownlinkValue -Object $Request -Key 'localRing')".Trim()
     if (-not $lr) { $lr = "$(Get-PimDownlinkValue -Object $Request -Key 'requestedRing')".Trim() }
-    if ($lr -notmatch '^[0-2]$') { return [ordered]@{ ok = $false; reason = "the request declares no valid local ring ('$lr'; expected 0, 1 or 2) -- the slave's own ring is not guessed" } }
+    if ($lr -notmatch '^[0-2]$') { return [ordered]@{ ok = $false; reason = "the request declares no valid local ring ('$lr'; expected 0, 1 or 2) -- the managed tenant's own ring is not guessed" } }
     return [ordered]@{ ok = $true; reason = '' }
 }
 
@@ -128,8 +128,8 @@ function Get-PimEnrolmentDecision {
       reading a log needs to tell them apart.
 
       -Registry: the operator's decisions, @( @{ tenantId; state = approved|denied; ring } ). A registry `ring`
-      is only the MASTER'S COPY (reported as masterCopyRing; a mismatch is named) -- it never decides.
-      Returns @{ enrolled; state; ring; masterCopyRing; reason }, ring = the slave's declared LOCAL ring.
+      is only the MANAGING TENANT'S COPY (reported as masterCopyRing; a mismatch is named) -- it never decides.
+      Returns @{ enrolled; state; ring; masterCopyRing; reason }, ring = the managed tenant's declared LOCAL ring.
       PURE.
     #>
     [CmdletBinding()]
@@ -143,17 +143,17 @@ function Get-PimEnrolmentDecision {
     $hit = @(@($Registry) | Where-Object { "$(Get-PimDownlinkValue -Object $_ -Key 'tenantId')".Trim().ToLowerInvariant() -eq $tid })
     if (-not $hit.Count) {
         return [ordered]@{ enrolled = $false; state = 'unknown'; ring = $null
-            reason = "tenant $tid has not been approved for enrolment -- knocking is not joining. An operator must approve it before the master will answer with anything." }
+            reason = "tenant $tid has not been approved for enrolment -- knocking is not joining. An operator must approve it before the managing tenant will answer with anything." }
     }
     $state = "$(Get-PimDownlinkValue -Object $hit[0] -Key 'state')".Trim().ToLowerInvariant()
     if ($state -ne 'approved') {
         return [ordered]@{ enrolled = $false; state = $(if ($state) { $state } else { 'unknown' }); ring = $null
             reason = "tenant $tid is registered but not approved (state '$state')" }
     }
-    # 🔒 DOC-16b -- THE RING IS THE SLAVE'S OWN (every ring is LOCAL in the slave; DESIGN, operator 2026-09-18).
-    # This used to take the ring from the registry and deliberately ignore the slave's -- the opposite of the rule.
+    # 🔒 DOC-16b -- THE RING IS THE MANAGED TENANT'S OWN (every ring is LOCAL in the managed tenant; DESIGN, operator 2026-09-18).
+    # This used to take the ring from the registry and deliberately ignore the managed tenant's -- the opposite of the rule.
     # The approval gates ENROLMENT (whether this tenant receives anything at all); it does not assign a ring. The
-    # registry's ring is the master's COPY, kept for the master's previews: reported, and a mismatch named, never obeyed.
+    # registry's ring is the managing tenant's COPY, kept for the managing tenant's previews: reported, and a mismatch named, never obeyed.
     $lr = "$(Get-PimDownlinkValue -Object $Request -Key 'localRing')".Trim()
     if (-not $lr) { $lr = "$(Get-PimDownlinkValue -Object $Request -Key 'requestedRing')".Trim() }
     $ring = [int]$lr   # shape-checked (0..2) by Test-PimEnrolmentRequest above
@@ -162,7 +162,7 @@ function Get-PimEnrolmentDecision {
     if ($null -ne $rawRing -and "$rawRing".Trim() -match '^\d+$') { $copy = [int]"$rawRing".Trim() }
     $note = ''
     if ($null -ne $copy -and $copy -ne $ring) {
-        $note = "the master's copy of this tenant's ring is $copy but the tenant declares ring $ring -- the tenant's own ring decides; update the master's copy (Register-PimManagedTenant -Ring $ring) so its previews match"
+        $note = "the managing tenant's copy of this tenant's ring is $copy but the tenant declares ring $ring -- the tenant's own ring decides; update the managing tenant's copy (Register-PimManagedTenant -Ring $ring) so its previews match"
     }
     return [ordered]@{ enrolled = $true; state = 'approved'; ring = $ring; masterCopyRing = $copy; reason = $note }
 }
@@ -176,11 +176,11 @@ function New-PimEnrolmentGrant {
       the transport; answering a knock with inline config would bypass exactly that guarantee and
       quietly create a second distribution channel with weaker properties than the first.
       So the grant says: *you are enrolled -- now go and PULL the signed bundle from the channel you
-      already verify.* Its `ring` only ECHOES the ring the slave declared (DOC-16b: the ring is the
-      slave's own); the slave's pull keeps using its local -SlaveRing either way.
+      already verify.* Its `ring` only ECHOES the ring the managed tenant declared (DOC-16b: the ring is the
+      slave's own); the managed tenant's pull keeps using its local -SlaveRing either way.
 
-      🔒 It also does NOT carry a credential. The slave authenticates with its own identity, which
-      is what MSP-3 established and what makes "the slave applies locally" true.
+      🔒 It also does NOT carry a credential. The managed tenant authenticates with its own identity, which
+      is what MSP-3 established and what makes "the managed tenant applies locally" true.
     #>
     [CmdletBinding()]
     param(

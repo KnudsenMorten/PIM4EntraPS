@@ -3,7 +3,7 @@
 .SYNOPSIS
     The CADENCE of the two MSP jobs, set in the Manager's Job schedule and decided by each job itself:
       pull     the managed tenant's Data Definition Updater (ca-pim-downlink-s6, tools/pim-engine/downlink-job-entry.ps1)
-      publish  the master's signed-baseline publish            (ca-pim-publish,      tools/pim-engine/publish-job-entry.ps1)
+      publish  the managing tenant's signed-baseline publish            (ca-pim-publish,      tools/pim-engine/publish-job-entry.ps1)
 
 .DESCRIPTION
     Operator, 2026-09-18: "can the pull run every 30 min" ... "i need to be able to control cadence" ... "gui must be
@@ -55,7 +55,7 @@ function Get-PimJobCadenceDefinition {
         return [pscustomobject]@{
             job = 'pull'; row = 'msp-pull'; type = 'msp-pull'; verb = 'pull'
             label = 'Managed-tenant pull (Data Definition Updater)'
-            plain = 'Pulls the signed configuration from the master tenant and applies it here (the Data Definition Updater job). Runs as its own job on this managed tenant, not in the scheduler tick.'
+            plain = 'Pulls the signed configuration from the managing tenant and applies it here (the Data Definition Updater job). Runs as its own job on this managed tenant, not in the scheduler tick.'
             scheduleKey = 'DownlinkSchedule'; runNowKey = 'DownlinkRunNow'; lastRunKey = 'DownlinkLastRun'
             jobName = 'ca-pim-downlink-s6'
             # replicaTimeout 1800 s (Get-PimDownlinkJobYaml) + one trigger: a 'running' record older than this was killed.
@@ -478,7 +478,7 @@ function Get-PimPublishJobControlViewSql {
     <#
       PURE. Idempotent DDL for the two views (each CREATE VIEW is its own batch, hence EXEC).
       REQ-Y (2026-09-19): the control view also carries the 'License' row -- the signed licence document, which is not a
-      secret (anyone may verify it) -- because an MSP master's publish job refuses without a Pro licence and this view is
+      secret (anyone may verify it) -- because a managing tenant's publish job refuses without a Pro licence and this view is
       the only part of pim.Settings its identity may read. ManagerAccess and every other row stay out of reach.
       REQUIREMENTS 77.20 (2026-09-21): and the 'DeploymentRings' row (the name + tag rule of each ring), which the producer
       signs into the bundle -- configuration, not a secret, read the same way.
@@ -495,7 +495,7 @@ function Get-PimPublishJobControlViewSql {
 
 function Get-PimPublishJobControlViewRefreshSql {
     <#
-      PURE. REQ-Y: re-apply the two views ONLY where they already exist (a master whose publish job was deployed). The
+      PURE. REQ-Y: re-apply the two views ONLY where they already exist (a managing tenant whose publish job was deployed). The
       Manager runs this at startup, so an upgraded master's view gains the 'License' row without redeploying the publish
       job -- otherwise that job would read "no licence" through the old view and refuse. CREATE OR ALTER keeps the grants.
       A store without the views (every non-master) is left untouched.

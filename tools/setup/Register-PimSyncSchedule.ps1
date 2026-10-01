@@ -25,7 +25,7 @@
     -Source selects the pull edition the update uses:
       * sync-automateit (default) -- INTERNAL edition: hosted ACA + Azure SQL (az acr build / ACA roll).
       * git-pull                  -- COMMUNITY edition: local/VM (local build/relaunch + local SQL upgrade).
-    -ManagedHosting central|local applies to the from-master (MSP slave) downlink.
+    -ManagedHosting central|local applies to the from-master (managed tenant) downlink.
 
     -LocalPull (community pure-VM hosts) instead drives a customer-supplied -PullScript (e.g. a
     git/sync pull of the released code that THEN calls Invoke-PimUpdate.ps1), so the same scheduled
@@ -50,7 +50,7 @@
     by -UpdateMode Full (passed through to Invoke-PimUpdate.ps1 -Source).
 
 .PARAMETER ManagedHosting
-    'central'|'local' for the from-master (MSP slave) downlink; passed through to Invoke-PimUpdate.ps1.
+    'central'|'local' for the from-master (managed tenant) downlink; passed through to Invoke-PimUpdate.ps1.
 
 .PARAMETER RunAsUser
     Service account the task runs as (must be able to `az login`/MI + reach the deployment).

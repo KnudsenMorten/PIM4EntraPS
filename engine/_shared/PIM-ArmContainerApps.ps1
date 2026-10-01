@@ -343,7 +343,7 @@ function Get-PimAcaJobRollPlan {
       §53.5 -- WHICH jobs in this environment the nightly updater should roll.
 
       The updater used to roll a hardcoded three: the Manager, the tick job, and itself. Every other
-      job in the resource group then drifted FOREVER. Measured at an MSP slave, where a green update
+      job in the resource group then drifted FOREVER. Measured at a managed tenant, where a green update
       execution left `ca-pim-downlink-s6` on a digest carrying NO TAG AT ALL -- a dangling manifest
       from a build whose tag had since moved, i.e. the job was running code nobody could name. MSP
       topologies are exactly where the extra jobs live, so "the three we thought of" was never the

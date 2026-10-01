@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    REQ-O -- the REPLICATION OVERVIEW: every replicable row on the MSP master, grouped by kind, with its effective
+    REQ-O -- the REPLICATION OVERVIEW: every replicable row on the managing tenant, grouped by kind, with its effective
     Replicate / Ring / Target in plain words and the managed tenants it reaches.
 
 .DESCRIPTION
@@ -16,7 +16,7 @@
     whether a row reaches a tenant; it only lays the preview's answer out per row. The browser only filters what the
     server computed.
 
-    🔒 BUG-175 -- EVERY RING IS LOCAL IN THE MANAGED TENANT. The preview plans each tenant with the MASTER'S COPY of its
+    🔒 BUG-175 -- EVERY RING IS LOCAL IN THE MANAGED TENANT. The preview plans each tenant with the MANAGING TENANT'S COPY of its
     ring (platform.Tenants.Ring); the tenant's own ring gates its real pull. The result says so (ringSource/ringNote).
 
     🔒 NOT CHECKED IS NOT "REACHES NONE". A tenant whose plan failed is listed in notChecked, and a row is only called
@@ -66,10 +66,10 @@ function Get-PimReplicationWording {
         'Yes'    { 'Replicate to managed tenants' }
         'Follow' { 'Follow (default) -- sent only when a replicated row needs it' }
         default  {
-            if (-not $m.valid) { 'No replication -- the value is refused (treated as master tenant only)' }
-            elseif ($Kind -eq 'admin') { 'Master tenant only -- no replication to managed tenants' }
-            elseif ($Kind -eq 'resource' -and -not $m.explicit) { 'Master tenant only (default) -- a tenant-specific resource is not replicated' }
-            else { 'No replication to managed tenants -- master tenant only' }
+            if (-not $m.valid) { 'No replication -- the value is refused (treated as managing tenant only)' }
+            elseif ($Kind -eq 'admin') { 'Managing tenant only -- no replication to managed tenants' }
+            elseif ($Kind -eq 'resource' -and -not $m.explicit) { 'Managing tenant only (default) -- a tenant-specific resource is not replicated' }
+            else { 'No replication to managed tenants -- managing tenant only' }
         }
     }
     $ringRaw = "$(Get-PimDownlinkValue -Object $Row -Key 'Ring')".Trim()
@@ -100,7 +100,7 @@ function Get-PimReplicationWording {
             $ps = @($tag -split '\+' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
             if ($ps.Count -gt 1) { $parts.Add("tenants tagged $($ps -join ' AND ')") | Out-Null } else { $parts.Add("tenants tagged $tag") | Out-Null }
         }
-        if ($none) { $tgtText = 'none -- master tenant only (never replicated)' }
+        if ($none) { $tgtText = 'none -- managing tenant only (never replicated)' }
         elseif ($parts.Count) { $tgtText = ($parts.ToArray() -join ' OR ') }
     }
     return [ordered]@{
@@ -261,7 +261,7 @@ function Get-PimReplicationOverview {
         errors             = @($prev.errors)
         notChecked         = @($notChecked)
         ringSource         = 'master-copy'
-        ringNote           = "Computed with the master's copy of each tenant's ring (platform.Tenants.Ring). Each managed tenant's own ring is set locally and gates its real pull, so a tenant whose ring differs from the master's copy receives what ITS ring admits."
+        ringNote           = "Computed with the managing tenant's copy of each tenant's ring (platform.Tenants.Ring). Each managed tenant's own ring is set locally and gates its real pull, so a tenant whose ring differs from the managing tenant's copy receives what ITS ring admits."
     }
 }
 

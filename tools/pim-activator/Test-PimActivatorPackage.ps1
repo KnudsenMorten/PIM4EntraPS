@@ -4,7 +4,7 @@
     Lints / validates the PIM Activator browser-extension package without signing it.
 
 .DESCRIPTION
-    A repack of the extension is only valid from the master signing key on mgmt1
+    A repack of the extension is only valid from the managing tenant signing key on mgmt1
     (the one key that reproduces extension id "eheocihmlppcophaeakmdenhgcookkab").
     This script does NOT sign or repack -- it validates the *source* so problems
     are caught before the master-key repack/deploy step runs.

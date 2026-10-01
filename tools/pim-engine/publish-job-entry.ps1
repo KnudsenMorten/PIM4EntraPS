@@ -1,22 +1,22 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    71.35 -- the in-container entry point of the MSP master's signed-baseline PUBLISH job (ca-pim-publish).
+    71.35 -- the in-container entry point of the managing tenant's signed-baseline PUBLISH job (ca-pim-publish).
 
 .DESCRIPTION
     Operator decision 2026-09-17: "go with cloud job publish". The bundle used to be produced on the MSP management host,
     signed with a machine certificate and scheduled as a SYSTEM task. That tied every master to one host and one
     certificate, and it could not exist for a customer that deploys as a signed-in administrator with no automation VM.
 
-    This job runs on the master's own Container Apps environment, on a cron and on demand, as its
+    This job runs on the managing tenant's own Container Apps environment, on a cron and on demand, as its
     SYSTEM-ASSIGNED MANAGED IDENTITY. It holds no certificate, no secret, no SAS and no account key:
       0. decides whether a publish is DUE (operator 2026-09-18: the cadence is set in the Manager's Job schedule). The cron
-         fires every 5 minutes; the gate reads the master's own PublishSchedule / PublishRunNow / PublishLastRun through
+         fires every 5 minutes; the gate reads the managing tenant's own PublishSchedule / PublishRunNow / PublishLastRun through
          two narrow views (engine/_shared/PIM-JobCadence.ps1). Not due = one "[cadence] SKIPPED:" line and exit 0.
          Nothing stored = daily, as before.
-     0b. REQ-Y: refuses (exit 2, nothing published) unless the master holds a Pro licence that covers MSP for its tenant
+     0b. REQ-Y: refuses (exit 2, nothing published) unless the managing tenant holds a Pro licence that covers MSP for its tenant
          (Invoke-PimMspLicenseGate, engine/_shared/PIM-License.ps1); a licence in its grace window publishes with a WARN.
-      1. reads the master store (Azure SQL, as the identity -- its own reader database user (SELECT on the 4 registry tables))
+      1. reads the managing tenant store (Azure SQL, as the identity -- its own reader database user (SELECT on the 4 registry tables))
       2. builds the payload with the producer (engine/_shared/PIM-BaselinePublish.ps1; the pre-71.35 host publisher
          setup/New-PimBaselineBundle.ps1 is retired, SEC-27). An optional table/column that cannot be READ (anything
          but a genuinely missing object) refuses the publish -- it is never read as "absent", which would widen reach
@@ -79,7 +79,7 @@ $global:PIM_SqlServer = "$SqlServer".Trim(); $global:PIM_SqlDatabase = "$SqlData
 $cs = Get-PimSqlConnectionString -Server "$SqlServer".Trim() -Database "$SqlDatabase".Trim()
 
 # ---- 0. THE CADENCE GATE (operator 2026-09-18: the publish cadence is set in the Manager's Job schedule) -------------
-# The cron fires every 5 minutes; whether THIS execution publishes is decided from the master's OWN store: PublishSchedule
+# The cron fires every 5 minutes; whether THIS execution publishes is decided from the managing tenant's OWN store: PublishSchedule
 # / PublishRunNow / PublishLastRun, read through pim.vw_PublishJobControl and recorded through pim.vw_PublishJobLastRun --
 # this identity's reader user (SEC-39) holds no right on pim.Settings itself, which also holds who is SuperAdmin.
 # Nothing stored = the daily cadence this job always had. A store that cannot be read = PUBLISH ANYWAY, loudly (a publish
@@ -97,7 +97,7 @@ function Stop-PublishJob {
     exit $Code
 }
 
-# ---- 0b. REQ-Y: AN MSP MASTER NEEDS A PRO LICENCE (operator 2026-09-19: "msp master slave require license pro") --------
+# ---- 0b. REQ-Y: a managing tenant NEEDS A PRO LICENCE (operator 2026-09-19: "managing tenant slave require license pro") --------
 # After the store is reachable and the cadence says a publish is due; BEFORE anything is built, signed or uploaded. The
 # licence is pim.Settings['License'], read through the same least-privilege view as the cadence (it carries that row).
 # The tenant is PIM_TenantId when the job has one, else the tenant of this job's own managed identity (the token's tid).
@@ -147,7 +147,7 @@ $fetcher  = {
 }
 
 # REQ-REV-DOWN-1 / REQ-REN-1 -- the withdrawals and renames the operator authorised centrally, read
-# from the master's own store (pim.Settings 'DownlinkIntents') and carried in the SIGNED bundle.
+# from the managing tenant's own store (pim.Settings 'DownlinkIntents') and carried in the SIGNED bundle.
 # 🔒 Failing to read them must NOT fail the publish and must NOT invent any: a bundle with no
 # intents is the old behaviour, which withdraws nothing. Silence here can only ever under-act.
 $intents = @()

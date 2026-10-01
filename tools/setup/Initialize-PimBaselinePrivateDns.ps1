@@ -1,11 +1,11 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    71.36 -- the MANAGED tenant's half of PRIVATE-ENDPOINT baseline access (master.privateEndpointIp set): make the master's
-    bundle store resolve to the master's private endpoint IP from THIS environment's VNet.
+    71.36 -- the MANAGED tenant's half of PRIVATE-ENDPOINT baseline access (master.privateEndpointIp set): make the managing tenant's
+    bundle store resolve to the managing tenant's private endpoint IP from THIS environment's VNet.
 
 .DESCRIPTION
-    The master's store has public network access disabled and ONE private endpoint in the master's VNet. This tenant
+    The managing tenant's store has public network access disabled and ONE private endpoint in the managing tenant's VNet. This tenant
     reaches that IP over VNet peering (created by the operator -- a per-tenant deploy identity cannot authorise a peering
     on another tenant's VNet). A private DNS zone cannot be linked across tenants, so the name is published HERE:
       zone   privatelink.blob.core.windows.net       in this resource group
@@ -13,7 +13,7 @@
                                                       storage account with its own private endpoint still resolves publicly)
       record A <master store> -> <master.privateEndpointIp>   exactly that one address (a stale address is replaced)
     Public DNS already answers <store>.blob.core.windows.net with a CNAME to <store>.privatelink.blob.core.windows.net once
-    the master has a private endpoint, and Azure DNS (168.63.129.16) answers that name from this linked zone.
+    the managing tenant has a private endpoint, and Azure DNS (168.63.129.16) answers that name from this linked zone.
 
     Idempotent; READ BACK. Nothing here is a credential. The VNet is READ FROM THE CONTAINER APPS ENVIRONMENT (its
     infrastructure subnet), -VnetName is the fallback.
@@ -43,7 +43,7 @@ $dnsRg = if ("$PrivateDnsResourceGroup".Trim()) { "$PrivateDnsResourceGroup".Tri
 $acct = "$(az account show --query id -o tsv 2>$null)".Trim()
 if ($acct -ne "$SubscriptionId".Trim()) { throw "az context is '$acct', not '$SubscriptionId' -- refusing." }
 
-Step "private DNS for the master's bundle store: $store.$zone -> $PrivateEndpointIp"
+Step "private DNS for the managing tenant's bundle store: $store.$zone -> $PrivateEndpointIp"
 $ErrorActionPreference = 'Continue'
 $vnetId = ''
 if ("$EnvName".Trim()) {
@@ -83,5 +83,5 @@ $okRec = ($ips.Count -eq 1 -and $ips[0] -eq "$PrivateEndpointIp".Trim())
 $okLink = ($lk -and "$($lk.virtualNetwork.id)" -ieq $vnetId -and "$($lk.resolutionPolicy)" -eq 'NxDomainRedirect')
 Note "A $store = $($ips -join ', ') (want $PrivateEndpointIp): $okRec"
 Note "link $linkName -> $($lk.virtualNetwork.id) policy $($lk.resolutionPolicy) state $($lk.virtualNetworkLinkState): $okLink"
-if (-not ($okRec -and $okLink)) { throw 'private DNS for the master store is NOT as intended (see above)' }
-Write-Host "    PASS: from $vnetShort, $store.blob.core.windows.net resolves to $PrivateEndpointIp. The pull reaches it only over the peering to the master's VNet." -ForegroundColor Green
+if (-not ($okRec -and $okLink)) { throw 'private DNS for the managing tenant store is NOT as intended (see above)' }
+Write-Host "    PASS: from $vnetShort, $store.blob.core.windows.net resolves to $PrivateEndpointIp. The pull reaches it only over the peering to the managing tenant's VNet." -ForegroundColor Green
