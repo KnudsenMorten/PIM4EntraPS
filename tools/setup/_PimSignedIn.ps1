@@ -100,6 +100,19 @@ function Get-PimSignedInEnvironmentConflicts {
     return @($out)
 }
 
+function Get-PimSignedInConflictHint {
+    # PURE. How to clear the named variables for THIS session only (§73.9: on an Azure Arc / Azure VM host
+    # IDENTITY_ENDPOINT is set machine-wide, and an operator had to be told how to clear it).
+    param([string[]]$Names)
+    $n = @($Names | Where-Object { "$_".Trim() })
+    if (-not $n.Count) { return '' }
+    $cmd = ($n | ForEach-Object { "`$env:$_ = `$null" }) -join '; '
+    $arc = if ($n -contains 'IDENTITY_ENDPOINT' -or $n -contains 'MSI_ENDPOINT') {
+        ' IDENTITY_ENDPOINT / MSI_ENDPOINT are set machine-wide by Azure Arc or an Azure VM agent: clearing them in this window affects this window only, never the machine or the agent.'
+    } else { '' }
+    return "Clear them for this session only, then re-run in the same window: $cmd.$arc Or use the certificate mode."
+}
+
 function Get-PimSignedInIdentity {
     <#
       Read and ASSERT the signed-in identity for one tenant + subscription. Returns @{ ok; reason; userName; objectId;
@@ -111,7 +124,7 @@ function Get-PimSignedInIdentity {
     $conf = @(Get-PimSignedInEnvironmentConflicts)
     if ($conf.Count) {
         return @{ ok = $false; reason = ("REFUSED: $($conf -join ', ') $(if ($conf.Count -eq 1) { 'is' } else { 'are' }) set in this session -- a token call would authenticate as " +
-                 'that identity instead of the signed-in user. Clear them (Remove-Item Env:\<name>) or use the certificate mode.') }
+                 'that identity instead of the signed-in user. ' + (Get-PimSignedInConflictHint -Names $conf)) }
     }
     $acct = $null
     try { $acct = ((& $Az @('account', 'show', '--subscription', "$SubscriptionId", '-o', 'json')) | Out-String | ConvertFrom-Json) } catch { $acct = $null }
@@ -151,7 +164,7 @@ function Connect-PimSignedInSql {
     #>
     param([Parameter(Mandatory)][string]$TenantId)
     $conf = @(Get-PimSignedInEnvironmentConflicts)
-    if ($conf.Count) { throw "REFUSED: $($conf -join ', ') set in this session -- the SQL token would be minted for that identity, not the signed-in user." }
+    if ($conf.Count) { throw "REFUSED: $($conf -join ', ') set in this session -- the SQL token would be minted for that identity, not the signed-in user. $(Get-PimSignedInConflictHint -Names $conf)" }
     if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { throw 'Connect-PimSignedInSql: engine\_shared\PIM-Rest.ps1 is not loaded.' }
     Set-PimSignedInGlobals -TenantId $TenantId
     $tok = Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId

@@ -544,14 +544,24 @@ catch { Fail "could not read the onboarding SPN's active directory roles, so can
 if ($exchAdminState.active) {
     if ($exchAdminState.kind -eq 'permanent') {
         Note 'Exchange Administrator already active -- as a PERMANENT assignment (standing privilege; see the summary)' 'Yellow'
-    } else { Note "Exchange Administrator already active until $($exchAdminState.endDateTime.ToString('u')) (time-bound, reused)" 'DarkGray' }
+    } else {
+        $ol = Test-PimGrantOverlong -Grant $exchAdminState -Duration $ExchangeAdminDuration
+        if ($ol.overlong) { Note "Exchange Administrator already active, but it $($ol.reason) -- that is STANDING privilege until then (a portal assignment defaults to one year); shorten it to $ExchangeAdminDuration or remove it after this run" 'Yellow' }
+        else { Note "Exchange Administrator already active until $($exchAdminState.endDateTime.ToString('u')) (time-bound, reused)" 'DarkGray' }
+    }
 }
 elseif ($PSCmdlet.ShouldProcess($AdminAppId, "activate Exchange Administrator through PIM for $ExchangeAdminDuration")) {
     try {
         $body = New-PimRoleScheduleRequestBody -PrincipalId "$($adminSp.id)" -RoleDefinitionId $exchAdminRoleId -Duration $ExchangeAdminDuration
         $by = Invoke-PimGrant -Path 'roleManagement/directory/roleAssignmentScheduleRequests' -Body $body -What 'Exchange Administrator (time-bound)'
         Note "Exchange Administrator requested for $ExchangeAdminDuration through PIM (via the $by)" 'Green'
-    } catch { Fail "could not activate Exchange Administrator for the onboarding SPN through PIM: $($_.Exception.Message)" }
+    } catch {
+        # BUG-248: both identities can be refused (seen at a customer: 403 as the SPN and as the signed-in Global Administrator --
+        # the Azure CLI's token carries no delegated role-management scope). Say what the manual way must look like.
+        Fail ("could not activate Exchange Administrator for the onboarding SPN through PIM: $($_.Exception.Message)" +
+              " -- MANUAL WAY: in Entra > Roles > Exchange Administrator > Add assignments, assign app $AdminAppId as ACTIVE and TIME-BOUND," +
+              " ending within $ExchangeAdminDuration (the portal defaults to ONE YEAR -- change it), then re-run this script; it reuses the assignment.")
+    }
     # READ BACK -- a request that was accepted is not yet an active role.
     $seen = Confirm-Eventually -What 'time-bound Exchange Administrator' -Seconds 120 -Test { (Read-ExchAdminGrant).active }
     if (-not $seen) { Fail 'the time-bound Exchange Administrator request was accepted but the role is not active on read-back' }
@@ -913,6 +923,7 @@ Write-Host ""
 try { $exchAdminNow = Read-ExchAdminGrant } catch { $exchAdminNow = $exchAdminState }
 $exAdminLine = if (-not $exchAdminNow.active) { 'not active (expired or never granted)' }
                elseif ($exchAdminNow.kind -eq 'permanent') { 'ACTIVE, PERMANENT (standing privilege outside PIM -- remove it with a DIFFERENT administrator: an identity cannot remove its own directory role)' }
+               elseif ((Test-PimGrantOverlong -Grant $exchAdminNow -Duration $ExchangeAdminDuration).overlong) { "ACTIVE until $($exchAdminNow.endDateTime.ToString('u')) -- LONGER than the requested ${ExchangeAdminDuration}: standing privilege until then (shorten or remove it with a different administrator)" }
                else { "active until $($exchAdminNow.endDateTime.ToString('u')), then expires on its own (granted through PIM)" }
 $result.privilegedGrants = [ordered]@{
     identity = $AdminAppId

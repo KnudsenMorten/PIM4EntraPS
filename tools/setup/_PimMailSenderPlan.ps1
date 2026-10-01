@@ -329,6 +329,26 @@ function Select-PimActiveRoleGrant {
     return [pscustomobject]@{ active = $false; kind = ''; endDateTime = $null; id = '' }
 }
 
+function Test-PimGrantOverlong {
+    <#
+      BUG-248 (§73.9, a customer build 2026-09-23) -- a reused time-bound grant that ends LATER than -Duration from now is
+      standing privilege in all but name. A manual portal assignment defaulted to ONE YEAR and the script
+      reused it as "time-bound". Returns { overlong; limitUtc; reason }. A permanent or inactive grant is not
+      judged here (permanent is already reported on its own). 5 minutes of slack for clock skew.
+    #>
+    [CmdletBinding()]
+    param([object]$Grant, [Parameter(Mandatory)][string]$Duration, [datetime]$Now = [datetime]::UtcNow)
+    $out = [pscustomobject]@{ overlong = $false; limitUtc = $null; reason = '' }
+    if (-not $Grant -or -not $Grant.active -or "$($Grant.kind)" -ne 'time-bound' -or $null -eq $Grant.endDateTime) { return $out }
+    try { $span = [System.Xml.XmlConvert]::ToTimeSpan($Duration) } catch { $out.reason = "duration '$Duration' unreadable"; return $out }
+    $out.limitUtc = $Now.ToUniversalTime().Add($span).AddMinutes(5)
+    if (([datetime]$Grant.endDateTime).ToUniversalTime() -gt $out.limitUtc) {
+        $out.overlong = $true
+        $out.reason = "ends $(([datetime]$Grant.endDateTime).ToUniversalTime().ToString('u')), later than the requested $Duration allows ($($out.limitUtc.ToString('u')))"
+    }
+    return $out
+}
+
 function Select-PimTenantWideMailSend {
     # appRoleAssignments on one service principal that are the TENANT-WIDE Graph Mail.Send.
     [CmdletBinding()] param([object[]]$Assignments = @(), [string]$GraphSpId, [string]$MailSendRoleId)

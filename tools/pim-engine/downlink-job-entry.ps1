@@ -300,7 +300,7 @@ if (-not $cadenceErr) {
             $bresp = Invoke-WebRequest -Method GET -Uri "$BaselineUrl".Trim() -Headers $bh -UseBasicParsing -ErrorAction Stop
             $bundleText = if ($bresp.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($bresp.Content) } else { "$($bresp.Content)" }
         }
-        if ("$bundleText" -match '"version"\s*:\s*"?v?(\d+)') { $pullVer = $Matches[1] }
+        $pullVer = Get-PimDownlinkBundleVersion -BundleText $bundleText
         $ks = Get-PimCentralKillSource -CentralKillUrl $CentralKillUrl -BaselineUrl $BaselineUrl -AccessToken $BaselineAccessToken
         if ("$($ks.error)".Trim()) { throw "the central kill could not be read ($($ks.error))" }
         $killText = if (-not $ks.checked) { 'not-checked' } elseif ($null -eq $ks.doc) { 'none-published' } else { $ks.doc | ConvertTo-Json -Depth 30 -Compress }
