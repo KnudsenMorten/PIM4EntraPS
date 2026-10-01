@@ -1,13 +1,13 @@
 ﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-    Apply the MSP MASTER registry schema (platform.Tenants / platform.TenantApps /
-    pim.CentralAdmins / the fan-out view) to a master's store. Idempotent, and VERIFIED after it
+    Apply the managing tenant registry schema (platform.Tenants / platform.TenantApps /
+    pim.CentralAdmins / the fan-out view) to a managing tenant's store. Idempotent, and VERIFIED after it
     runs.
 
 .DESCRIPTION
     🔴 WHY THIS SCRIPT EXISTS. The estate's step 4 creates the *pim* desired-store schema. It does
-    NOT create the *platform* one -- the tables that make a tenant an MSP MASTER. Until now the
+    NOT create the *platform* one -- the tables that make a tenant a managing tenant. Until now the
     only thing that applied `sql/platform-schema.sql` outside the engine was
     `tests/live/Seed-PimScenarioDataset.ps1`, a TEST script, which meant a freshly provisioned
     master had no `pim.CentralAdmins` and the first real command against it failed with
@@ -56,7 +56,7 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)
 if (-not "$SchemaPath".Trim()) { $SchemaPath = Join-Path $solRoot 'sql\platform-schema.sql' }
 if (-not (Test-Path -LiteralPath $SchemaPath)) { throw "platform schema not found: $SchemaPath" }
 
-Step "MSP master registry -> $SqlServer/$Database"
+Step "managing tenant registry -> $SqlServer/$Database"
 Note "schema: $SchemaPath"
 
 $tok = Get-PimRestToken -Resource 'https://database.windows.net'

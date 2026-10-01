@@ -10,14 +10,14 @@
 
         S1 / S3  private   https://<store>/pim-src/pim-src-{version}.tar.gz?<read-sas>
         S2 / S4  community https://<public-host>/pim-src-{version}.tar.gz
-        S6       managed   whatever its MSP master publishes for its ring
+        S6       managed   whatever its managing tenant publishes for its ring
         S5       central   -- no registry of its own; nothing to fetch
 
     🔑 WHY A URL AND NOT A CREDENTIAL. The alternative was distributing IMAGES between registries,
     which needs a cross-tenant registry credential provisioned and rotated in every customer
     tenant. A read-scoped URL to ONE object needs none: nothing that can read the whole repository
     ever lands in a tenant we do not own, and the same mechanism serves a public host, a SAS'd
-    blob and an MSP master without the updater knowing which it is.
+    blob and a managing tenant without the updater knowing which it is.
 
     🪤 THE ARCHIVE MUST BE REPO-ROOT SHAPED. The Dockerfile does `COPY SOLUTIONS/PIM4EntraPS`, so
     the context root must be the repository root -- exactly what
@@ -202,11 +202,11 @@ function Get-PimRingVersion {
 }
 
 # ---- 2026-09-17 (BUG-162) -- AN UPDATE NEVER GOES BACKWARD BY ITSELF -----------------------------
-# MEASURED on the rehearsal MSP master dp998: built at 2.4.366, its own ca-pim-update ran once and
+# MEASURED on the rehearsal managing tenant dp998: built at 2.4.366, its own ca-pim-update ran once and
 # rolled all five containers -- Manager, tick, update, dbinit and ca-pim-publish -- to 2.4.324, the
 # version its (wrong, see BUG-162 part 1) ring held. 42 versions backward, while the job itself still
 # recorded PIM_UPDATE_LAST_GOOD=...:2.4.366. The next ca-pim-publish then failed outright, because
-# publish-job-entry.ps1 does not exist in 2.4.324 -- so the master silently STOPPED PUBLISHING and its
+# publish-job-entry.ps1 does not exist in 2.4.324 -- so the managing tenant silently STOPPED PUBLISHING and its
 # managed tenants kept serving the last bundle until it expired.
 #
 # A ROLL FORWARD IS AN UPDATE; A ROLL BACKWARD IS A ROLLBACK, AND A ROLLBACK IS AN ATTENDED ACT.
@@ -328,7 +328,7 @@ function Get-PimUpdateDowngradeDecision {
         "$ringTxt approves $toRaw, but this environment is on $from ($fromSrc) -- that is BACKWARD." `
         ("A roll backward is a ROLLBACK, and a rollback is an attended operation: an older image simply does not " +
          "contain what a newer one added, so the damage surfaces somewhere else entirely (BUG-162: 2.4.324 has no " +
-         "publish-job-entry.ps1, so the master stopped publishing and nothing alerted). Known here: $whereTxt.")
+         "publish-job-entry.ps1, so the managing tenant stopped publishing and nothing alerted). Known here: $whereTxt.")
 }
 
 # ---- 2026-09-13 -- DOES THE UPDATER REACH THIS ENVIRONMENT'S STORE? ------------------------------

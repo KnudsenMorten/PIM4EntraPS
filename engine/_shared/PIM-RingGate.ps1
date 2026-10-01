@@ -50,11 +50,11 @@
 #     only DECLARES its capabilities in solution.deploy.json. Nothing in this
 #     file runs on plane 1.
 #
-#   PLANE 2 -- a PIM MSP MASTER -> its own managed tenants. Payload: the signed
+#   PLANE 2 -- a PIM managing tenant -> its own managed tenants. Payload: the signed
 #     BASELINE TEMPLATE VERSION (S5/S6 managed downlink pull). Map: the MSP
 #     master's own store. This is the plane THIS FILE serves.
 #
-#   WHY THEY STAY SEPARATE. A PIM customer who is an MSP master runs its own
+#   WHY THEY STAY SEPARATE. A PIM customer who is a managing tenant runs its own
 #   downstream fleet. Its rollout waves are ITS business, not the AutomateIT
 #   operator's -- so the AutomateIT operator's ring assignment must not silently
 #   dictate which template version a third party's managed tenants receive.
@@ -335,7 +335,7 @@ function Resolve-PimRingRelease {
 }
 
 # ---------------------------------------------------------------------------
-# PLANE 2 -- the MSP master's own template ring gate.
+# PLANE 2 -- the managing tenant's own template ring gate.
 # Composed from the VENDORED parts above, so plane 2 behaves identically to
 # plane 1 by construction rather than by a second implementation.
 # ---------------------------------------------------------------------------
@@ -346,7 +346,7 @@ function Get-PimTemplateRingPlan {
         one object -- the S5/S6 managed downlink's version gate.
 
     .DESCRIPTION
-        This is PLANE 2 (see the file header): a PIM MSP MASTER deciding which
+        This is PLANE 2 (see the file header): a PIM managing tenant deciding which
         signed baseline TEMPLATE VERSION each of ITS managed tenants may pull.
         It is NOT the AutomateIT operator's code-version gate (plane 1), and the
         two maps are owned by different parties.
@@ -361,10 +361,10 @@ function Get-PimTemplateRingPlan {
         🔓 NOTE ON HASHING. Plane 1 hashes tenant ids because its map travels
         inside the snapshot EVERY customer downloads, so a plaintext id would
         disclose the customer list to every other customer. Plane 2's map lives in
-        the MSP master's OWN store and is never shipped to a third party, so a
-        plain tenant id is correct here -- the master already knows its own
+        the managing tenant's OWN store and is never shipped to a third party, so a
+        plain tenant id is correct here -- the managing tenant already knows its own
         managed tenants. Do not copy the hashing across "for consistency": it
-        would only make the master's own map unreadable to its owner.
+        would only make the managing tenant's own map unreadable to its owner.
 
     .PARAMETER Template
         The template/baseline name being gated (plane 1's "solution" slot).

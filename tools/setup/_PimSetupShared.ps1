@@ -397,7 +397,7 @@ function Get-PimEngineSpnGraphRoles {
       own literal list, and both had drifted BEHIND the map: no RoleManagement.ReadWrite.Directory (creates
       role-assignable groups, 70.16), no UserAuthenticationMethod.ReadWrite.All (mints TAPs), no Domain.Read.All
       (the downlink's default domain), no AppRoleAssignment / Application.Read / Defender / DeviceManagementRBAC.
-      An engine running AS THE SPN (the VM path, a master acting cross-tenant) therefore could not do what the
+      An engine running AS THE SPN (the VM path, a managing tenant acting cross-tenant) therefore could not do what the
       managed identity could, and nothing said so. One source now: the SPN is granted exactly the engine map.
       Returns the sorted role NAMES. Mail.Send is REFUSED here, not merely absent (IMP-06e: a tenant-wide
       Mail.Send defeats the per-mailbox Exchange RBAC scope).

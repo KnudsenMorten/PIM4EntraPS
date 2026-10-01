@@ -590,7 +590,7 @@ top of the engine delta — it does NOT reimplement reconciliation.**
   `pim.TenantCache` kind `drift`, with per-scope desired / live / in-sync counts.
 - **🔴 A NAME NEVER GATES REPLICATION** (2026-09-22, operator: *"you can not block admins due to different name
   pattern"* / *"but name pattern is not used to control replication"*). IMP-13 used to WITHHOLD an admin whose
-  UserName matched none of the slave's `PIM_SlaveAdminPrefixes`. Measured on the live pair: the managed tenant's
+  UserName matched none of the managed tenant's `PIM_SlaveAdminPrefixes`. Measured on the live pair: the managed tenant's
   job carried `Admin-,admin-`, so nine published `adm-e-*` accounts were dropped and the run still reported
   success — a deployment string deciding who holds privileged access in a customer tenant. The projection now
   only REPORTS the mismatch (`unrecognisedAdmins`, and the plan reason says *SENT ANYWAY*).
@@ -618,11 +618,11 @@ top of the engine delta — it does NOT reimplement reconciliation.**
   names them** (step 3b2, after the membership filter so the answer is the memberships that actually reach here,
   and before the projection, whose `AdminUserNames` come from `$admins`); the rest are reported as withheld.
   `Test-PimDownlinkAdminSynced` therefore treats a Follow bundle row as a **candidate**, not a refusal.
-  🔒 `Target=none` still wins: a declaration that an account stays on the master beats a dependency.
+  🔒 `Target=none` still wins: a declaration that an account stays on the managing tenant beats a dependency.
 - **A row that replicates must carry a ring.** `Test-PimReplicationRowFields` errors on `Replicate=Yes|Follow`
   with a blank Ring (operator: *"people must define ring, otherwise nothing happens - result of using blank as
   default"*). The same blank meant opposite things on two rows of one page: on an admin "no Ring → reaches no
-  slave", on every other kind "not narrowed by ring" (= all). Authoring refuses it; stored rows are untouched
+  managed tenant", on every other kind "not narrowed by ring" (= all). Authoring refuses it; stored rows are untouched
   until next written (the write gate checks CHANGED rows), and the validator reports them.
 - **Platform-owned objects are excluded, counted and named** (2026-09-22). `Get-PimDriftExcludedNames`
   returns PIM's own objects — today the SQL admin group (`$global:PIM_SqlAdminGroupName`, default
@@ -1042,7 +1042,7 @@ dropped from desired.
 > 🔴 **PIM never deletes a user account, and never disables one for being absent.** Two things this
 > sweep used to do, it no longer does anywhere in the product:
 > * **It does not delete.** There is no code path that deletes a user — not in a single tenant, not
->   on an MSP master, not on a managed tenant, and not behind a setting. An offboarded admin ends as
+>   on a managing tenant, not on a managed tenant, and not behind a setting. An offboarded admin ends as
 >   a **disabled account that stays in the directory**, with no sessions, no memberships and no
 >   eligibilities, until a person deletes it by hand. The retention field (`DeleteAfterDays`) is
 >   **removed and not supported** — no column, no parameter, no setting, no validator finding and no
@@ -1249,7 +1249,7 @@ way (`entryRing <= tenantRing`). One order everywhere replaced that bridge; the 
 (the SQL overlay) were converted once per store (`Invoke-PimRingOrderMigration`, new = 2 − old), and
 the shipped template's rings were flipped with it. The update ring is read from the record the
 environment's own update job writes, `pim.Settings['UpdateState'].ring` (§11.6.0), so the ring
-stays local to the environment and no master sets it. `ConvertTo-PimTemplateCatalogRing` (pure)
+stays local to the environment and no managing tenant sets it. `ConvertTo-PimTemplateCatalogRing` (pure)
 and `Get-PimTemplateCatalogRing` (`PIM-Conformance.ps1`) implement it. Every `/api/conformance*`
 answer carries `tenantRing` together with `tenantRingSource` (`update-ring N` or `not recorded`)
 and `tenantRingReason`, and the Template Rollout tab shows both. `Get-PimTenantRing` is not used
@@ -1646,7 +1646,7 @@ it held: access nobody managed any more. A rename is now carried as data.
   - It never renames on top of an object that already has the new name; that one is adopted.
 - `Get-PimGroupDefinitionRows` carries `PreviousGroupName` into the provider. 2.4.421 dropped it in that projection,
   which left the fix inert until 2.4.422.
-- A replicated row carries the column to managed tenants too, so a slave renames its own group in place rather than
+- A replicated row carries the column to managed tenants too, so a managed tenant renames its own group in place rather than
   creating a duplicate.
 - Covered by `tests/Test-PimRenameInPlace.ps1` (it drives the real projection) and live by the §78 end-to-end test,
   which checks that the object id is unchanged, that the old name is gone and that the group's role is kept.
@@ -1954,7 +1954,7 @@ See §17.7 for the full template/approval mechanics.
     (service principal) with a **certificate** (`$global:PIM_CertThumbprint` /
     `PIM_CERT_THUMBPRINT`) resolved from the machine certificate store. Reuse the one engine
     application; never create a new one per run, and remove stale duplicate certificates.
-  - **Across tenants.** A managed identity lives in one directory, so an MSP master acting *into*
+  - **Across tenants.** A managed identity lives in one directory, so a managing tenant acting *into*
     a managed tenant (S5) uses a multi-tenant application with a credential (§27.4).
   - Certificates or managed identity are the default everywhere. A **client secret** is accepted
     only where a platform requires one — the Manager's Easy Auth sign-in registration (it grants
@@ -2660,7 +2660,7 @@ Key semantics:
 | Engine **Full** run (whole-tenant reconcile) | scheduled (daily) | scheduler tick |
 | **Snapshots** (active assignments 120 min, drift 240 min) | scheduled **+** queued refresh | scheduler tick → `pim.TenantCache` |
 | **Verify convergence** (live vs desired, writes nothing) | scheduled (30 min) | scheduler tick |
-| **MSP pull** (managed tenant) / **MSP publish** (master) | self-gated cadence set in the Job schedule (default daily) **+** Run now **+** publish on commit | their own Container Apps jobs, not the tick (§13.5b); the tick's `msp-pull` entry never pulls |
+| **MSP pull** (managed tenant) / **MSP publish** (managing tenant) | self-gated cadence set in the Job schedule (default daily) **+** Run now **+** publish on commit | their own Container Apps jobs, not the tick (§13.5b); the tick's `msp-pull` entry never pulls |
 | **Reminders** (upcoming expirations / renewals) | scheduled (12 h) | scheduler → templated mail |
 | **Escalations** (approvals aging past SLA) | scheduled (hourly) | scheduler → next approver layer + mail |
 | **Connectors** (workload role discover/apply) | invoked *by* the engine runs | in-process via PIM-Rest (not a separate scheduler) |
@@ -2842,7 +2842,7 @@ place:
   model as the container path. A VM has no authentication edge, so the web Manager is deployed
   **closed** unless a front end that forwards a signed Entra ID token is declared
   (§11.5.2 C); only then is the firewall port opened.
-- **MSP** — the one-shot MSP build, `Invoke-PimMspBuild.ps1` (§13.5a), builds an MSP master or a
+- **MSP** — the one-shot MSP build, `Invoke-PimMspBuild.ps1` (§13.5a), builds a managing tenant or a
   managed tenant from a machine-local file of ids and names, on the same container topology.
   *(Retired in v2.4.370: the earlier per-customer MSP setup script, which deployed v1 worker apps
   with a cross-tenant SQL connection string and named rings. The one-shot build replaces it.)*
@@ -3102,7 +3102,7 @@ headers. The script therefore sets the auth layer explicitly (`PIM_HOSTED_AUTH_L
     -TenantId <tenant-id> -Port 8080 -AuthLayer SignedToken -TokenAudience <client-id>
 ```
 
-**D. MSP — `Invoke-PimMspBuild.ps1`.** The one-shot MSP build (§13.5a) builds an MSP master or
+**D. MSP — `Invoke-PimMspBuild.ps1`.** The one-shot MSP build (§13.5a) builds a managing tenant or
 a managed tenant from a machine-local file of ids and names: hosting through
 `Invoke-PimDeployAll` (managed identity only), the SQL admin group, hosting access, and on the
 master the registry, the signing key and the daily publish job; on a managed tenant the pull job.
@@ -3669,7 +3669,7 @@ is necessary but not sufficient.
 ### 11.8 Deployment scenarios — the six supported topologies (S1–S6)
 
 PIM4EntraPS supports a fixed, named set of **deployment topologies**: the
-combination of *who runs it* (a single tenant, an MSP master, or an MSP-managed
+combination of *who runs it* (a single tenant, a managing tenant, or an MSP-managed
 customer tenant), *which distribution edition* it is (Internal/AutomateIT vs the
 public Community edition), *where the update comes from*, *where the GUI + SQL
 live*, *which SPN model* authenticates, and *what license tier* the feature
@@ -3683,7 +3683,7 @@ active license edition, hosting location, SPN model) are **built and
 offline-verified**, and the update-source selector + license-tier gating are wired
 end-to-end through the entry points (`-Scenario S1..S6` on `Invoke-PimUpdate` /
 `Invoke-PimDeployAll` / `Build-PimManagerImage`). The **locally hosted managed tenant
-(S6)** is **wired and verified live**: the master's publish job and the managed tenant's
+(S6)** is **wired and verified live**: the managing tenant's publish job and the managed tenant's
 scheduled pull job ran on a live master / managed pair on 2026-09-15 (§13.5a: the reaching
 admins, groups, memberships and role binding arrived and were created, the rest did not), and
 again on 2026-09-18 on the public-but-signed transport with a pinned signing key, the central
@@ -3702,13 +3702,13 @@ solution can reuse the same descriptor and supply only its own bindings); only t
 |----|------|------------------------|---------------|-------------------|-----------|-----------------------|--------------|
 | **S1** | single tenant | Internal/AutomateIT | internal AutomateIT | in tenant | managed identity (hosted) | — | single tenant |
 | **S2** | single tenant | Community | GitHub | in tenant | managed identity (hosted) / certificate | — | single tenant — community edition is **free** |
-| **S3** | MSP **master** | Internal/AutomateIT | internal AutomateIT | in master tenant | managed identity (hosted) | — | MSP — paid (Pro) edition, details to follow |
-| ~~S4~~ | ~~MSP master, Community~~ | — | — | — | — | — | **Retired — not supported.** MSP is always a paid (Pro) solution; there is no free MSP edition |
-| **S5** | MSP **managed** | Internal/AutomateIT | **from master, ring-gated** | **central** (MSP tenant) | **multi-tenant application** (crosses tenants) | admins + permissions | MSP — paid (Pro) edition, details to follow |
-| **S6** | MSP **managed** | Internal/AutomateIT | **from master, ring-gated** | **local** (managed tenant) | managed identity (hosted) | admins + permissions | MSP — paid (Pro) edition, details to follow |
+| **S3** | MSP **master** | Internal/AutomateIT | internal AutomateIT | in managing tenant | managed identity (hosted) | — | MSP — paid (Pro) edition, details to follow |
+| ~~S4~~ | ~~managing tenant, Community~~ | — | — | — | — | — | **Retired — not supported.** MSP is always a paid (Pro) solution; there is no free MSP edition |
+| **S5** | MSP **managed** | Internal/AutomateIT | **from managing tenant, ring-gated** | **central** (MSP tenant) | **multi-tenant application** (crosses tenants) | admins + permissions | MSP — paid (Pro) edition, details to follow |
+| **S6** | MSP **managed** | Internal/AutomateIT | **from managing tenant, ring-gated** | **local** (managed tenant) | managed identity (hosted) | admins + permissions | MSP — paid (Pro) edition, details to follow |
 
-*"Update source: from master, ring-gated"* is the catalog value (`from-master-by-rings`). As built,
-what a managed tenant takes from the master is **data** — the signed bundle, filtered by the
+*"Update source: from managing tenant, ring-gated"* is the catalog value (`from-master-by-rings`). As built,
+what a managed tenant takes from the managing tenant is **data** — the signed bundle, filtered by the
 managed tenant's own local ring (§13.5a). Its **code** updates, like every hosted environment's,
 come through its own in-cloud updater and its local Platform Updates Ring (§11.6.0); the one-shot
 MSP build installs that updater on both roles.
@@ -3721,8 +3721,8 @@ tenants (the provider is `S3`) — a distinction the ids hide:
 |---|---|---|
 | **Single (tenant, local-hosted)** | S1, S2 | distribution edition only |
 | **Provider / master (MSP, local-hosted)** | S3 | — (MSP is paid only; S4, the community master, is retired) |
-| **Managed / slave (MSP, central-hosted)** | **S5** | portal + SQL live in the **provider's** tenant; multi-tenant application. **Being decommissioned** (operator decision 2026-09-18) |
-| **Managed / slave (MSP, local-hosted)** | **S6** | portal + SQL live in the **managed** tenant; local identity |
+| **Managed tenant (MSP, central-hosted)** | **S5** | portal + SQL live in the **provider's** tenant; multi-tenant application. **Being decommissioned** (operator decision 2026-09-18) |
+| **Managed tenant (MSP, local-hosted)** | **S6** | portal + SQL live in the **managed** tenant; local identity |
 
 *local-hosted* = portal + SQL live in that tenant itself; *central-hosted* = they live in the
 provider's tenant. Single and provider are always local-hosted, so their hosting is stated rather
@@ -3734,7 +3734,7 @@ Two distinct axes are easy to conflate and are kept separate on purpose:
   *where updates originate* (the internal AutomateIT source vs public GitHub).
 - **License** — the commercial basis. Single-tenant use (S1/S2) is the single-tenant
   edition, and single-tenant use of the community edition (S2) is free. The MSP scenarios
-  (S3–S6: a managing master tenant and the managed tenants it looks after) will be part of
+  (S3–S6: a managing managing tenant and the managed tenants it looks after) will be part of
   the paid (Pro) edition; licensing details will be published. Licence **enforcement is
   currently switched off** (§19a), so no scenario is restricted today.
 
@@ -3783,17 +3783,17 @@ the *topology is identical*. No master, no cross-tenant anything.
         LICENSE: single tenant                      |   S2 community edition = free
 ```
 
-#### Topology — MSP master (S3)
+#### Topology — managing tenant (S3)
 
 The **master** tenant holds the central authoritative baseline (the templates,
 rings, fleet/version metadata) and the MSP operator's own Manager + SQL. It is, in
 effect, an S1/S2 deployment *plus* the master-side authoring + signing + rollout
-control. (A community-edition master, S4, is not supported: MSP is always paid.) The master
+control. (A community-edition managing tenant, S4, is not supported: MSP is always paid.) The managing tenant
 **hosts and signs** — it never reaches into a managed tenant (that boundary is the
 managed-tenant pull, below).
 
 ```
- ┌──────────────────────── MSP MASTER tenant (S3, paid) ──────────────────────────────┐
+ ┌──────────────────────── MANAGING tenant (S3, paid) ──────────────────────────────┐
  │   ┌───────────────────────────┐                                                      │
  │   │  PIM Manager (master GUI)  │   authoring: templates · rings · fleet/version       │
  │   │   Easy Auth; ext. or priv. │                                                      │
@@ -3808,26 +3808,26 @@ managed-tenant pull, below).
  └──────────────────────────────────────────────────────────────────────────────────┘
         UPDATE: S3 ◄── internal AutomateIT source
         LICENSE: S3 = MSP scenario — paid (Pro) edition
-        managed identity (hosted) in the master tenant; master HOSTS + SIGNS, never writes downstream.
+        managed identity (hosted) in the managing tenant; master HOSTS + SIGNS, never writes downstream.
 ```
 
 #### Topology — MSP managed, CENTRAL hosted, multi-tenant SPN (S5)
 
 > ⚠️ **S5 is being decommissioned** (operator decision 2026-09-18). No new central-hosted managed
-> tenant is set up, and S5-only divergences (its fan-out follows the master's copy of the ring,
+> tenant is set up, and S5-only divergences (its fan-out follows the managing tenant's copy of the ring,
 > not a local one) are not being fixed. The locally hosted managed tenant (S6) is the managed-tenant
 > shape. The description below is kept for reference until S5 is removed.
 
-A managed/slave customer tenant whose **GUI + SQL live centrally in the MSP
+A managed customer tenant whose **GUI + SQL live centrally in the MSP
 tenant** and whose acting identity is a **multi-tenant SPN** that authenticates
 *into* the managed tenant. Updates and the admin/permission set are **pulled from
-the master, ring-gated**. Sync files are staged in **central** per-tenant folders
+the managing tenant, ring-gated**. Sync files are staged in **central** per-tenant folders
 on the MSP automation server. The pull and the engine apply are the *only* things
 that touch the managed tenant — and that traffic is **private over a cross-tenant
 VNet** (see the hard constraint below).
 
 ```
-   MSP (central) tenant                            MANAGED / slave tenant
+   MSP (central) tenant                            MANAGED / managed tenant
  ┌──────────────────────────────────┐            ┌──────────────────────────────────┐
  │  Central GUI + SQL for THIS       │            │  (no local GUI / SQL — central)    │
  │  managed tenant  (separate store) │            │                                    │
@@ -3835,26 +3835,26 @@ VNet** (see the hard constraint below).
  │        │ MI                       │  apply via │   (the governed PIM here)          │
  │  Engine (central)  ──────────────────────────────►  ▲                              │
  │        ▲   multi-tenant SPN + cert │  PRIVATE  │     │ accounts · groups · scopes   │
- │        │   (authenticates INTO     │  x-tenant │     │  created from master baseline│
+ │        │   (authenticates INTO     │  x-tenant │     │  created from managing tenant baseline│
  │        │    the managed tenant) ⧗  │   VNet    │     │  + ring-approved version     │
  │  Sync files (CENTRAL folders) ⧗   │            │   └──────────────────────────────┘
  │  Ring-gated pull FROM master ⧗    │◄═══ private cross-tenant VNet only (never internet)
  └──────────────────────────────────┘
-   UPDATE: from master, ring-gated  ·  LICENSE: MSP scenario — paid (Pro) edition
+   UPDATE: from managing tenant, ring-gated  ·  LICENSE: MSP scenario — paid (Pro) edition
    ⧗ pending = not wired live; S5 is being decommissioned (§11.8)                                  
 ```
 
 #### Topology — MSP managed, LOCAL hosted, local SPN (S6)
 
-Same managed-tenant *intent* as S5 — admins and permissions pulled from the master,
+Same managed-tenant *intent* as S5 — admins and permissions pulled from the managing tenant,
 ring-gated — but the **GUI + SQL live locally in the managed tenant**, and the acting identities
 are the managed tenant's own **managed identities**: the scheduled pull job (§13.5a) and the engine
 tick. This is the §13 "local plane" model, and the managed-tenant shape that is built and verified
 live (§11.8 status). Its **code** updates come, like every hosted environment's, through its own
-in-cloud updater and its local Platform Updates Ring (§11.6.0), not from the master.
+in-cloud updater and its local Platform Updates Ring (§11.6.0), not from the managing tenant.
 
 ```
-   MSP MASTER tenant                               MANAGED / slave tenant (LOCAL hosted)
+   MANAGING tenant                               MANAGED / managed tenant (LOCAL hosted)
  ┌──────────────────────────────┐                ┌──────────────────────────────────────┐
  │  Central registry SQL         │                │   ┌──────────────────────────────┐    │
  │  (Owner=MSP baseline + rings) │                │   │ PIM Manager (local GUI)       │    │
@@ -3870,13 +3870,13 @@ in-cloud updater and its local Platform Updates Ring (§11.6.0), not from the ma
        (trust = signature + pinned key)            │       Entra ID / Azure RBAC (this tenant)│
    Pull job: scheduled, runs as the managed        │       ← MSP admins created HERE         │
    tenant's own managed identity                   └──────────────────────────────────────┘
-   UPDATE: from master, ring-gated  ·  LICENSE: MSP scenario — paid (Pro) edition
+   UPDATE: from managing tenant, ring-gated  ·  LICENSE: MSP scenario — paid (Pro) edition
    Verified live 2026-09-15 and 2026-09-18 (§11.8 status)                                       
 ```
 
 > 🚩 **Transport of the cross-tenant sync — as built (§13.7).** The only thing that crosses
-> between the master and a managed tenant is the **signed bundle**, and the managed tenant always
-> **pulls** it; the master never writes into or connects to a managed tenant. The trust is the
+> between the managing tenant and a managed tenant is the **signed bundle**, and the managed tenant always
+> **pulls** it; the managing tenant never writes into or connects to a managed tenant. The trust is the
 > **signature**, checked against a signing key the managed tenant pins, never the network. Two
 > transports are built, and the one-shot MSP build selects between them:
 > - **public-but-signed (the default):** the bundle container allows anonymous read of blobs only,
@@ -3927,16 +3927,16 @@ self-skip (no `az` / not logged in / app unreachable) is UNVERIFIED, not green.
 
 #### Process — master → managed DOWNLINK SYNC (S5 / S6, pull-not-push)
 
-The managed tenant **pulls** the signed baseline from the master, verifies it, plans
+The managed tenant **pulls** the signed baseline from the managing tenant, verifies it, plans
 with its own local ring, target and class vetoes, writes the rows that reach it into its
 own store, and its **engine creates the MSP admins + permission rows in the managed
-tenant**. The master **never** writes into, or opens a connection into, the managed
+tenant**. The managing tenant **never** writes into, or opens a connection into, the managed
 tenant — it only hosts + signs; the managed side reaches out. The transport is
 public-but-signed by default or a private endpoint (the 🚩 note above). For S6 this
 runtime is **built and verified live** (§11.8 status); S5 is being decommissioned.
 
 ```
-   MSP MASTER (admin plane)                              MANAGED tenant (initiates the pull)
+   MANAGING TENANT (admin plane)                              MANAGED tenant (initiates the pull)
  ┌──────────────────────────────┐                      ┌────────────────────────────────────┐
  │ 1  Author Owner=MSP baseline  │                      │                                      │
  │    + assign rollout RING      │                      │                                      │
@@ -4012,7 +4012,7 @@ deploy + validate against a real test tenant is the release gate**.
 
 The product runs as **one parameterised image** on Azure Container Apps (§11.4): the Manager is a
 Container App, and the engine runs as scheduled Container Apps **jobs** — the scheduler tick
-(`ca-pim-tick`), the nightly updater (`ca-pim-update`, §11.6.0), and on an MSP master the daily
+(`ca-pim-tick`), the nightly updater (`ca-pim-update`, §11.6.0), and on a managing tenant the daily
 bundle publisher and on a managed tenant the scheduled pull (§13.5a). The job entry points live in
 `tools/pim-engine/` (`Invoke-PimEngineCore.ps1`, `update-job-entry.ps1`, `publish-job-entry.ps1`,
 `downlink-job-entry.ps1`, `dbinit-job-entry.ps1`). The jobs authenticate as managed identities
@@ -4277,7 +4277,7 @@ constraint was removed in v2.4.177 as over-reach.)
         MSP TENANT (admin plane)                       CUSTOMER TENANT (local plane)
    ┌───────────────────────────────────┐         ┌────────────────────────────────────┐
    │  Central registry SQL (Owner=MSP) │         │ Local store SQL (own base schema)  │
-   │   Entra-only; the master's store  │         │  in the customer's sub, Entra-only │
+   │   Entra-only; the managing tenant's store  │         │  in the customer's sub, Entra-only │
    │            │ read published rows  │         │           ▲ MSP-owned rows only    │
    │            ▼                      │         │           │                        │
    │  Publish job (cloud, daily, MI)   │         │ Pull job (scheduled, own MI)       │
@@ -4301,9 +4301,9 @@ constraint was removed in v2.4.177 as over-reach.)
 
 ### 13.5 Flow A — MSP baseline distribution (build + sign + publish + pull + verify)
 
-1. MSP edits the master's desired state (admins with `ManagementMode=msp`, the groups, nestings
+1. MSP edits the managing tenant's desired state (admins with `ManagementMode=msp`, the groups, nestings
    and bindings they need, rings and targets, §13.5a).
-2. The master's **publish job** (on the cadence set in the master's Job schedule, default daily; on Run
+2. The managing tenant's **publish job** (on the cadence set in the managing tenant's Job schedule, default daily; on Run
    now; and after a commit that changes what it publishes, §13.5b) builds a versioned payload
    (`version`, `generatedAtUtc`, `validToUtc`, the rows) with `Get-PimBaselineBundlePayload`.
 3. It **signs** the payload bytes RSA-SHA256 through the Key Vault `sign` operation with a
@@ -4315,13 +4315,13 @@ constraint was removed in v2.4.177 as over-reach.)
 7. It **verifies** (`Test-PimDownlinkBaseline`): the signer is not on this tenant's revoked
    list; the signature against a key the tenant pins (or the embedded PUBLIC certificate);
    `product/kind`; not expired; version above this tenant's **anti-rollback floor**. It also
-   checks the master's central kill (§13.17). Any failure → rejected, nothing applied.
+   checks the managing tenant's central kill (§13.17). Any failure → rejected, nothing applied.
 8. On success it applies the rows that reach this tenant into its own store and records the
    applied version as the new floor in its own `pim.Settings` (§13.17).
 
 ### 13.5a Replication targeting — which master rows reach which managed tenants (2.4.360, verified offline)
 
-The MSP master decides, **per row**, whether and where a row replicates. Managed tenants never edit this; they pull
+The managing tenant decides, **per row**, whether and where a row replicates. Managed tenants never edit this; they pull
 the one signed bundle and evaluate it for themselves.
 
 **Fields.** Every replicable row carries `Replicate` (`No` / `Yes` / `Follow`), `Ring` and `Target`:
@@ -4329,12 +4329,12 @@ admins (`Account-Definitions-Admins`, `pim.CentralAdmins`), admin → direct gro
 (`PIM-Assignments-Admins`), direct groups (role, organisation, department, project, cross-org), indirect permission
 groups (tasks, services, processes), nestings (`PIM-Assignments-Groups`), Entra role bindings, and the tenant-scoped
 resource bindings (AU-scoped roles, Azure resources, workloads).
-`Ring` is blank or **any whole number** (0, 1, 2, 3, 12 …); the master publishes a ring only when it is a whole number.
+`Ring` is blank or **any whole number** (0, 1, 2, 3, 12 …); the managing tenant publishes a ring only when it is a whole number.
 A value that is not a whole number reaches **no** managed tenant: it under-grants, never widens to every tenant. The
 validator warns (`PIM-RING-001`, and `PIM-MSP-001` for an MSP-managed admin without a valid ring), and the shared
 authoring check `Test-PimReplicationRowFields` returns the same warning to the grid and the wizards (v2.4.372).
 `Target` is blank (every tenant the ring admits) or a comma list of `tag:<key:value>` (any-of), `tag:a+b` (the tenant
-must carry all) and `tenant:<id>`. Tenant tags are free `key:value` labels on the master's tenant registry, so a
+must carry all) and `tenant:<id>`. Tenant tags are free `key:value` labels on the managing tenant's tenant registry, so a
 hierarchy is expressed as tags (`region:eu`, `region:eu-north`).
 
 **Blank = the behaviour before this feature.** An admin replicates when `ManagementMode=msp` (and must agree with
@@ -4344,7 +4344,7 @@ workspace they name exists in one tenant; an explicit `Follow` or `Yes` carries 
 
 **Reach rule.** Tenant T receives row R when `Replicate` is not `No` **and** R's ring admits T's ring (`R.Ring ≤ T.Ring`;
 a group-model row with no ring is not narrowed) **and** R's `Target` is blank or matches T. Ring and target combine with
-AND, never OR. The master's registry view `pim.vw_AdminTenantTargets` applies the same rule.
+AND, never OR. The managing tenant's registry view `pim.vw_AdminTenantTargets` applies the same rule.
 
 **Dependencies are auto-included, with a warning.** When a row that reaches T needs another row there — a membership
 needs its group, a nesting needs both groups, a binding needs its group — the needed row is included for T even if its
@@ -4358,7 +4358,7 @@ dependency are reported. With blank fields the payload is byte-identical to the 
 **Per tenant.** `Get-PimDownlinkPlan` evaluates the rule for its own tenant, computes its own closure, reports
 `autoIncluded` and `notReplicated`, and still never retracts. The definitions step runs whenever the bundle carries
 definitions, **including when it carries no memberships at all**: an empty membership set is an empty projection, not
-"no projection" (until v2.4.376 a master with no replicated admins sent `Yes` seeds that no tenant ever received, and
+"no projection" (until v2.4.376 a managing tenant with no replicated admins sent `Yes` seeds that no tenant ever received, and
 the reach preview, which runs this same plan, said "0 of N"). The apply writes only rows the MSP owns, never takes over a
 customer row with the same key, and strips the replication fields (they mean nothing inside a managed tenant).
 **Retraction is report-first:** a synced row that no longer reaches the tenant is reported as "would remove" (and in the
@@ -4367,20 +4367,20 @@ the opt-in only when its environment sets `PIM_DOWNLINK_ALLOW_RETRACTION=true` (
 -AllowRetraction`); the entry reads it fail-closed (only an explicit true value allows, a mistyped value is reported and
 treated as off) and passes it through the scenario runner to the orchestrator.
 
-**Admin lifecycle follows the source.** A published admin carries, besides its status and offboarding date, the master
-definition's provisioning date, TAP start date and delete-after-offboarding days — each only when the master set it, so
+**Admin lifecycle follows the source.** A published admin carries, besides its status and offboarding date, the managing tenant
+definition's provisioning date, TAP start date and delete-after-offboarding days — each only when the managing tenant set it, so
 an older row ships unchanged. The managed tenant stores them on the central admin row (falling back to its previous
-defaults when absent) and keeps dates as ISO-8601 text whatever the JSON parser made of them. A slave's own
+defaults when absent) and keeps dates as ISO-8601 text whatever the JSON parser made of them. A managed tenant's own
 status-change code is never published.
 
-**A TAP is enforced for every Entra admin.** Single tenant, MSP master and managed tenant alike: the TAP scope issues one
+**A TAP is enforced for every Entra admin.** Single tenant, managing tenant and managed tenant alike: the TAP scope issues one
 to every Entra admin (never to an AD-only one), and nothing keyed on the "create TAP" column can switch it off — the
 column is not published in the bundle, a managed tenant stores it as on, the fan-out ignores a registry "no", the
 scheduled-creation report treats the TAP as due, and the validator reports a "no" as having no effect (with a one-click
 fix). An admin still gets no TAP when there is nowhere to deliver it: the engine refuses to mint a credential nobody
 receives, and the readiness check requires a delivery address for every Entra admin.
 
-**One-shot MSP build.** `tools/setup/Invoke-PimMspBuild.ps1` builds an MSP master or a managed tenant from a
+**One-shot MSP build.** `tools/setup/Invoke-PimMspBuild.ps1` builds a managing tenant or a managed tenant from a
 machine-local file of ids and names (a file carrying anything resembling a credential is refused). The pure planner
 (`engine/_shared/PIM-MspBuild.ps1`) orders the steps:
 - **Both roles:** the tenant vault grant; hosting (`Invoke-PimDeployAll`, managed identity only); the SQL admin group,
@@ -4391,8 +4391,8 @@ machine-local file of ids and names (a file carrying anything resembling a crede
   for its subnet, the Key Vault signing key (the build prints its key id for the managed tenants to pin), the daily publish
   job, and a first publish that waits for that job to succeed.
 - **Managed tenant:** the storage service endpoint on its own Container Apps subnet (the build prints the subnet id for
-  the master) and the pull job, which reads a plain blob address and verifies the signature against the master signing key(s) it pins. No link, no credential
-  from the master, nothing to renew.
+  the managing tenant) and the pull job, which reads a plain blob address and verifies the signature against the managing tenant signing key(s) it pins. No link, no credential
+  from the managing tenant, nothing to renew.
 
 Values only known at run time — managed identity object ids, the signed-in user's object id — are placeholders that
 the runner resolves; an unresolved placeholder stops the build. Each step runs in its own process on the host it needs,
@@ -4409,39 +4409,39 @@ re-publish on a person's sign-in — is shown as not run and the build ends "inc
 stops at the first failure with the resume command, and ends by printing the steps that need a person. The first policy
 mass-change approval is one of them, and is deliberately not automated.
 
-**Manager (MSP master only).** Every MSP sync surface follows the tenant mode the header shows (Single, MSP Master,
-Slave): on the master it is shown and editable; on a managed tenant only a read-only "received from the MSP master"
-indicator appears on the Accounts list; in Single mode it is absent — including the admin's "Sync to slaves" column,
-its management mode, ring and slave-tag fields, and the grid's admin Ring / Target columns. The pickers use plain words
+**Manager (managing tenant only).** Every MSP sync surface follows the tenant mode the header shows (Single, Managing tenant,
+Managed tenant): on the managing tenant it is shown and editable; on a managed tenant only a read-only "received from the managing tenant"
+indicator appears on the Accounts list; in Single mode it is absent — including the admin's "Sync to managed tenants" column,
+its management mode, ring and managed-tenant tag fields, and the grid's admin Ring / Target columns. The pickers use plain words
 (v2.4.376): *Follow (default) — sent only when a replicated row needs it*, *Replicate to managed tenants* and *No
-replication to managed tenants — master tenant only* (admins: *Master tenant only* / *Replicate to managed tenants*;
-tenant-scoped resources default to *Master tenant only*). The ring labels say which way they narrow (v2.4.388, §13.19):
+replication to managed tenants — managing tenant only* (admins: *Managing tenant only* / *Replicate to managed tenants*;
+tenant-scoped resources default to *Managing tenant only*). The ring labels say which way they narrow (v2.4.388, §13.19):
 Ring 0 (dev) reaches dev tenants only, Ring 1 (test) dev + test tenants, Ring 2 (broad) every managed tenant; each tenant
-shows the master's copy of its ring. Since v2.4.388 the tag chips and the tenant picker are gone from the wizards and the
+shows the managing tenant's copy of its ring. Since v2.4.388 the tag chips and the tenant picker are gone from the wizards and the
 admin editor — tags are set once on the **Deployment rings** (§13.19) — and a per-row Target stored before then is kept
 and shown as legacy. Every Create wizard has a Replication section on its Review step (Replicate, Ring,
 "This will reach: N of M tenant(s)" with names, and the dependency
 warnings); the grid shows `Replicate`/`Ring` pickers, a `Target` picker with a grammar check and a Reach count per row.
 Reach is computed by the server: it builds the bundle with the producer's selection, signs it with a throwaway key and
-runs the same plan every managed tenant runs, once per registered tenant. **The ring the master previews with is only
+runs the same plan every managed tenant runs, once per registered tenant. **The ring the managing tenant previews with is only
 its copy** (`platform.Tenants.Ring`): every managed tenant's ring is set locally in that tenant and gates its real pull
-(§13.19). The reach preview, the MSP overview and the dry run therefore label the ring they used as **the master's
+(§13.19). The reach preview, the MSP overview and the dry run therefore label the ring they used as **the managing tenant's
 copy** (`Get-PimMasterRingCopy`); a preview is right only while the two agree. The managed tenant reports the local ring
 that gated its run in its result (`slaveRing`, source `local`). On a single tenant or a managed tenant the
 columns are removed from the grid, the section never renders, and the Manager refuses a save that introduces or changes
 the fields. The validator refuses a `Replicate` value that is not `No`/`Yes`/`Follow` or that disagrees with the admin's
 `ManagementMode`.
 
-**Managed tenant registry and Replication overview (MSP master only).** Two pages sit next to *Managed tenants* under
-*Reviews & controls*. They are hidden until the tenant mode says MSP master, and every endpoint refuses on any other tenant.
+**Managed tenant registry and Replication overview (managing tenant only).** Two pages sit next to *Managed tenants* under
+*Reviews & controls*. They are hidden until the tenant mode says managing tenant, and every endpoint refuses on any other tenant.
 - *Managed tenant registry* (`GET/POST /api/msp/tenants`, `PUT /api/msp/tenants/{tenantId}`) lists every registered
-  tenant, enabled or not: name, tenant id, ring, tags, enabled, and whether the master's last recorded publish came after
-  the row last changed. The ring column reads "Ring (master's copy -- each managed tenant's own ring decides)".
+  tenant, enabled or not: name, tenant id, ring, tags, enabled, and whether the managing tenant's last recorded publish came after
+  the row last changed. The ring column reads "Ring (managing tenant's copy -- each managed tenant's own ring decides)".
 - Writes are SuperAdmin-only and audited (`msp.tenant.register` / `msp.tenant.update`, refusals too), and they request a
   publish, because the tags travel in the signed bundle. They go through the one writer the setup script
   `Register-PimManagedTenant.ps1` also uses (`Set-PimManagedTenantRegistration`, `engine/_shared/PIM-MspRegistry.ps1`).
   It validates the values, runs the parameterised MERGE and reads the row back.
-- The writer refuses the master's own tenant (and any registration when the master's tenant id is unknown), a tenant
+- The writer refuses the managing tenant's own tenant (and any registration when the managing tenant's tenant id is unknown), a tenant
   that is already registered, a name another tenant carries, and a tag a Target reserves (`all`, `none`, `tag:…`,
   `tenant:…`). It never deletes: disabling keeps the row.
 - *Replication overview* (`GET /api/msp/replication/overview`, `engine/_shared/PIM-ReplicationOverview.ps1`) lists every
@@ -4451,13 +4451,13 @@ the fields. The validator refuses a `Replicate` value that is not `No`/`Yes`/`Fo
   reaches none, why. It also shows the auto-included dependencies, the not-published list and the rows carried only as
   a dependency.
 - Reach is the reach preview's own answer: the server runs the same plan every tenant runs, once per registered tenant,
-  with the master's copy of each ring, and the page says so. A tenant whose plan failed is shown as not checked, never as
+  with the managing tenant's copy of each ring, and the page says so. A tenant whose plan failed is shown as not checked, never as
   "reaches none".
 - The result is cached for 30 seconds per store (*Recompute* runs the plan again, and a registry write clears the cache).
   An answer with a failed tenant plan is not cached. The browser only filters the result: by tenant ("what does this
   tenant get"), by kind, and to the rows that reach no tenant.
 
-**Verified on a live master / managed pair (2026-09-15).** A sample model on the master — admins targeted by one tag,
+**Verified on a live master / managed pair (2026-09-15).** A sample model on the managing tenant — admins targeted by one tag,
 by two tags together, by tenant id, one not replicated and one targeted at a tag the managed tenant does not carry, a
 role group (`Yes`), an organisation group (`No`) that a replicated membership needs, and two permission groups with
 nestings and an Entra role binding — was published, pulled by the managed tenant's scheduled job and applied: exactly
@@ -4477,7 +4477,7 @@ Both MSP jobs used to run on a fixed Container Apps cron (the pull daily at 03:0
 UTC), and nothing in the Manager could change it. Now each job's **trigger** fires every 5 minutes (`*/5 * * * *`,
 the default `-Cron` of `Deploy-PimDownlinkJob.ps1` and `Deploy-PimBaselinePublishJob.ps1`), and the job **gates
 itself** from its **own** store (`engine/_shared/PIM-JobCadence.ps1`). The cadence is local to the tenant that runs
-the job, the same principle as rings: a managed tenant sets its own pull, a master its own publish.
+the job, the same principle as rings: a managed tenant sets its own pull, a managing tenant its own publish.
 
 | | Managed tenant (S6) — the pull | Master — the publish |
 |---|---|---|
@@ -4521,7 +4521,7 @@ pull cadence from it would have switched the pull off on every environment whose
 cadence therefore has its own settings, and the Manager never writes the cadence row into `JobSchedule`. The tick's
 `msp-pull` handler never pulls: it records a skip that names the separate job where the pull really runs.
 
-**Publish on commit.** On a master, a successful safe commit (§5.4) that actually changed an entity the producer
+**Publish on commit.** On a managing tenant, a successful safe commit (§5.4) that actually changed an entity the producer
 ships (`Get-PimBaselinePublishedEntities`, the same list `Get-PimBaselineBundlePayload` reads), or a save of the
 per-relationship projection policy, sets the publish's Run-now flag
 (`Request-PimManagerPublishAfterCommit`). The publish then runs on its next trigger, within 5 minutes, instead of
@@ -4547,7 +4547,7 @@ that fails is reported; the deploy is never called clean by assumption.
 1. The managed tenant's pull job (Flow A) writes the rows that reach this tenant into its own
    store as desired state: the MSP admins (`Invoke-PimDownlinkAdminApply`, with UPNs built at the
    tenant's own **admin account domain** — its Settings value, the naming key `AdminAccountUpnSuffix`, read from
-   its own store by `Get-PimSlaveAdminUpnDomain`; blank = its default domain; the master's suffix is never carried),
+   its own store by `Get-PimSlaveAdminUpnDomain`; blank = its default domain; the managing tenant's suffix is never carried),
    then the groups, then the memberships and role bindings. Only
    rows the MSP owns are written; a local row with the same key is never taken over.
 2. A step that fails makes the whole run **fail** and names the failed steps (partial when other
@@ -4617,7 +4617,7 @@ the PE, or MSP rejects / pulls RBAC. Content is signed regardless.
 #### Implementation note (2026-09-17) — public-but-signed is what the one-shot MSP build sets up
 
 An interim implementation handed each managed tenant a read-only SAS link to the bundle blob, renewed by a weekly
-scheduled task that needed a certificate identity in BOTH tenants. It expired, it put a master credential on the
+scheduled task that needed a certificate identity in BOTH tenants. It expired, it put a managing tenant credential on the
 managed tenant's side, and it could not be deployed by a managed tenant's own administrator. It is removed from the
 build, and in v2.4.370 its scripts were deleted as well (the SAS renewal tool, the certificate sign-in configuration and
 the pre-authorisation helper, the pull job's SAS-link parameter, and the older MSP onboarding runbook). The build now
@@ -4625,7 +4625,7 @@ implements transport 2 above, with the network half made precise:
 
 - **Trust = the signature.** Every pull verifies the RSA signature against the public certificate embedded in the
   product and refuses a bundle that does not verify, before anything is applied. The network never establishes trust.
-- **Access = the master storage firewall.** The bundle container allows anonymous read of **blobs only** (no
+- **Access = the managing tenant storage firewall.** The bundle container allows anonymous read of **blobs only** (no
   listing); the storage account's firewall default action is **Deny**; one allow rule names each reader:
   - a **virtual network rule** for the managed tenant's Container Apps subnet — the default. Azure accepts a subnet
     from any subscription in any Microsoft Entra tenant (by fully qualified subnet id; not selectable in the portal).
@@ -4638,17 +4638,17 @@ implements transport 2 above, with the network half made precise:
   - the **publishing host** is named the same way, or Deny locks out the publish itself.
 - **Nothing expires in the access path.** No SAS, no stored access policy, no account key. A rule is set once per
   managed tenant and removed when that tenant stops receiving. The bundle's own validity window (content freshness) is
-  unchanged and is renewed by the master's scheduled publish.
+  unchanged and is renewed by the managing tenant's scheduled publish.
 - **Transport 1 (private endpoint by approval)** remains the alternative when a service endpoint cannot be used on the
   managed tenant's subnet, or when the storage account must have no public endpoint at all.
 
-#### Implementation note (2026-09-17) — the master publishes from a cloud job, signed by a Key Vault key
+#### Implementation note (2026-09-17) — the managing tenant publishes from a cloud job, signed by a Key Vault key
 
-The bundle is no longer produced on a management host. The master runs a **Container Apps job** on its own environment
-(on the cadence set in the master's Job schedule, default daily, and on demand; §13.5b) as its **system-assigned
+The bundle is no longer produced on a management host. The managing tenant runs a **Container Apps job** on its own environment
+(on the cadence set in the managing tenant's Job schedule, default daily, and on demand; §13.5b) as its **system-assigned
 managed identity**. It holds no certificate, secret, SAS or account key:
 
-- **Read and build.** It reads the master store through its **own least-privilege database user** (v2.4.370): a
+- **Read and build.** It reads the managing tenant store through its **own least-privilege database user** (v2.4.370): a
   contained user created from its app id as a SID, with `SELECT` on exactly the tables the producer reads and no fixed
   database role (a broader role an earlier run granted is taken back). The grant is read back, and only then is an
   earlier version's SQL-admin-group membership removed, so the job is never without access. *(Built and tested offline;
@@ -4663,21 +4663,21 @@ managed identity**. It holds no certificate, secret, SAS or account key:
   uploading, it reads the bundle back **anonymously from its own subnet** — the managed tenants' read path — and verifies
   it again. The execution succeeds only if all of that happened.
 - **Trust anchor.** A Key Vault signed bundle carries its public key, and that key is **not** what makes it trusted: each
-  managed tenant pins the key's RFC 7638 thumbprint in its own configuration, taken from the master's build output and never
+  managed tenant pins the key's RFC 7638 thumbprint in its own configuration, taken from the managing tenant's build output and never
   from the bundle store. Several keys may be pinned at once, so a key roll is: give the new key id to every managed tenant,
   then switch the job to the new key. A bundle signed by a key the tenant does not pin is refused; a bundle without a
   carried key is verified against the embedded product certificate exactly as before, so certificate-signed bundles keep
   working during a migration.
-- **Network.** The master's Container Apps subnet carries the storage service endpoint, and the store's firewall rule for
+- **Network.** The managing tenant's Container Apps subnet carries the storage service endpoint, and the store's firewall rule for
   that subnet is created before the firewall's default action becomes Deny. The machine that runs the build is not an
   allowed network and does not need to be.
 
 #### Implementation note (2026-09-17) — private-only pairs use transport 1, and the build sets it up
 
-When the master's and the managed tenant's private networks are **connected** (global VNet peering, created by the
+When the managing tenant's and the managed tenant's private networks are **connected** (global VNet peering, created by the
 operators — a per-tenant deploy identity cannot authorise one), the build selects transport 1 instead of transport 2:
 
-- **One private endpoint, in the master's own network**, targeting the bundle store's blob subresource; the store's
+- **One private endpoint, in the managing tenant's own network**, targeting the bundle store's blob subresource; the store's
   public network access is **Disabled**, so the file has no public surface at all. The store name is published in the
   master's `privatelink.blob` private DNS zone.
 - **Each managed tenant publishes the same name in ITS OWN zone**, as an address record for the private endpoint's
@@ -4694,11 +4694,11 @@ operators — a per-tenant deploy identity cannot authorise one), the build sele
   final step.
 
 Transport 2 (public-but-signed) is unchanged and remains the default for managed tenants whose network is not connected
-to the master's. The trust anchor is the same in both: the bundle's signature and the pinned signing key.
+to the managing tenant's. The trust anchor is the same in both: the bundle's signature and the pinned signing key.
 
 #### Implementation note (2026-09-17) — the one-shot MSP build, deployed by certificate or by a signed-in administrator
 
-The master and each managed tenant are built by one command per side, from a configuration file that carries
+The managing tenant and each managed tenant are built by one command per side, from a configuration file that carries
 identifiers only (a credential in the file is refused). The identity mode is decided by the file, not a switch:
 
 - **Certificate mode** — the file names a deployment application; the build signs in with its certificate into an
@@ -4709,16 +4709,16 @@ identifiers only (a credential in the file is refused). The identity mode is dec
   Every token minted from that sign-in is decoded and checked the same way. Steps receive no application identity; the
   database steps make the signed-in user a member of the SQL administrators group before they connect.
 
-**Order of a new pair.** Each side needs one value the other side creates: the master's store rule names the managed
-tenant's subnet, and the managed tenant's pull job pins the master's signing key identifier. A new pair is therefore
+**Order of a new pair.** Each side needs one value the other side creates: the managing tenant's store rule names the managed
+tenant's subnet, and the managed tenant's pull job pins the managing tenant's signing key identifier. A new pair is therefore
 prepared with two single steps before the two builds — the managed tenant puts the storage service endpoint on its
-subnet and prints the subnet identifier; the master creates its signing key and prints the key identifier — and every
+subnet and prints the subnet identifier; the managing tenant creates its signing key and prints the key identifier — and every
 step converges, so the full builds repeat them as no-ops. The two values travel between administrators, never through
 the bundle store.
 
 #### Implementation note (2026-09-17) — the provider's Manager verifies the bundle the way a managed tenant does
 
-The MSP view in the master's Manager plans against a signed bundle. Its banner verdict uses the managed tenant's
+The MSP view in the managing tenant's Manager plans against a signed bundle. Its banner verdict uses the managed tenant's
 verifier with the trusted key identifiers read from the same configuration value the pull job reads: a bundle carrying a
 Key Vault key verifies only when that key is trusted there, a certificate-signed bundle verifies against the embedded
 certificate as before, and an expired bundle is not verified. The verdict carries the signer, the key identifier and the
@@ -4798,7 +4798,7 @@ a certificate to renew; the per-tenant certificate application is for hosts wher
 identity cannot be used.
 
 **Storage: SQL only in v2.** Every environment keeps its desired state, settings and audit in its
-**own Azure SQL store** (§14.2): the MSP master's store holds the central registry, and each managed
+**own Azure SQL store** (§14.2): the managing tenant's store holds the central registry, and each managed
 tenant's store is its local plane. There is no CSV or file storage profile and no store switch: the
 engine reads desired rows through `Get-PimDesiredRows`, and the Manager reads and writes through
 `Get-PimSqlRows` / `Set-PimSqlRow` / `Set-PimSqlEntityRows` (`PIM-SqlStore.ps1`). A file-based
@@ -4892,7 +4892,7 @@ a file nothing on the pull path read.)
    Key Vault key ids exactly). Revoking the key is the off-switch for everything it signed.
    `Test-PimBaselineSignerAllowed` answers the same question for other callers and refuses to say
    "allowed" without a list. There is no Manager screen for the list yet.
-2. **Signed central kill (MSP-wide).** A master can publish a signed `kind='central-kill'` manifest
+2. **Signed central kill (MSP-wide).** A managing tenant can publish a signed `kind='central-kill'` manifest
    beside the bundle. The pull checks it **before** anything else (`Get-PimCentralKillSource`, then
    the pure `Get-PimCentralKillState`):
 
@@ -4901,10 +4901,10 @@ a file nothing on the pull path read.)
    | `PIM_CentralKillUrl` set explicitly | read strictly: `404` = none; any other failure = **unknown** | unknown **refuses** |
    | unset: the sibling of the bundle URL (`<container>/central-kill.json`) | `404` = none; `401`/`403` = **not checked** (the store is not publicly readable and nobody configured a kill location), reported loudly with how to enforce it (v2.4.371); any other failure = unknown | not checked proceeds; unknown refuses |
    | `none`, or no bundle URL to derive from | not checked | proceeds, reported |
-   | a manifest that verifies, with entries | **active** | **refused**: nothing is taken from the master while it stands |
+   | a manifest that verifies, with entries | **active** | **refused**: nothing is taken from the managing tenant while it stands |
    | a manifest that does not verify / is expired / verifies empty | invalid (refuses) / expired / none | — |
 
-   **Publishing a kill (v2.4.373).** The master publishes and withdraws the manifest with
+   **Publishing a kill (v2.4.373).** The managing tenant publishes and withdraws the manifest with
    `tools/setup/Publish-PimCentralKill.ps1`:
    - It signs with the **same Key Vault key, signer and document shape as the bundle**, so the
      managed tenants verify it with the key they already pin.
@@ -4957,8 +4957,8 @@ conflating them produces wrong fixes, so they are named here once. (Not to be co
 | # | Axis | Who decides | Selects | Where it lives |
 |---|---|---|---|---|
 | 1 | **Code-version ring** | the **framework operator** | which **version of the solution's code** a customer receives | the framework's central release map; resolved by the sync engine |
-| 2 | **Template-version ring** | a **PIM MSP master** | which **signed baseline/template version** its managed tenants may pull | the MSP master's own store |
-| 3 | **Admin↔tenant ring** | the **MSP master's data** | which **admins reach which tenants** — *no version at all* | `pim.CentralAdmins.Ring` ≤ `platform.Tenants.Ring` (`pim.vw_AdminTenantTargets`) |
+| 2 | **Template-version ring** | a **PIM managing tenant** | which **signed baseline/template version** its managed tenants may pull | the managing tenant's own store |
+| 3 | **Admin↔tenant ring** | the **managing tenant's data** | which **admins reach which tenants** — *no version at all* | `pim.CentralAdmins.Ring` ≤ `platform.Tenants.Ring` (`pim.vw_AdminTenantTargets`) |
 
 **Axis 1 is not PIM's.** It belongs to the **AutomateIT framework layer**, which implements ring +
 capability gating **generically** so every solution shares one mechanism rather than each growing its
@@ -4985,13 +4985,13 @@ unattended. They are read from the customer's **own** `bootstrap\Sync-AutomateIT
 and the same `blockCapabilities` key the platform sync already honours: their file, their choice, and
 deliberately **not** a PIM-private consent store, which would be a second place to say the same thing
 and would drift. A blocked class is reported `Held` on the plan with the capability named, never
-silently absent — *"the customer declined roles"* and *"the master published none"* must not produce
+silently absent — *"the customer declined roles"* and *"the managing tenant published none"* must not produce
 the same report. `msp-policies` is intentionally **not declared**: the downlink does not carry policy
 artifacts, and declaring a capability that gates nothing would advertise a control that does not
 exist.
 
 **Axis 2 uses the same mechanism as axis 1, deliberately as a separate instance.** A PIM customer
-acting as an MSP master runs its **own** downstream fleet; its rollout waves are its business, not
+acting as a managing tenant runs its **own** downstream fleet; its rollout waves are its business, not
 the AutomateIT operator's, so the two maps are owned by different parties and neither dictates the
 other. What PIM does *not* do is re-implement the decision: `engine/_shared/PIM-RingGate.ps1` is a
 **vendored copy of the platform's pure core**, so plane 2 behaves identically to plane 1 by
@@ -5009,13 +5009,13 @@ filter, the reach preview, conformance and `pim.vw_AdminTenantTargets` share). A
 
 - **Deployment rings** (`pim.Settings['DeploymentRings']`, edited on the Managed tenant registry page,
   `GET/PUT /api/msp/deployment-rings`) name each ring and may narrow it with a **tag rule** in the Target
-  grammar. The rule travels in the signed bundle (`deploymentRings`); a slave that set itself to ring R
+  grammar. The rule travels in the signed bundle (`deploymentRings`); a managed tenant that set itself to ring R
   but does not match R's rule receives nothing ring-gated (`Test-PimDeploymentRingMember`) — withheld and
-  reported, never retracted. The slave still sets its own ring (operator decision 2026-09-21).
+  reported, never retracted. The managed tenant still sets its own ring (operator decision 2026-09-21).
 - **Conversion, once per store** (`Invoke-PimRingOrderMigration`, run by `Initialize-PimSqlStore`, guarded
   by `pim.Settings['RingOrder']`): every stored ring becomes `2 − old` — `pim.Rows` rings, `pim.CentralAdmins`,
   `platform.Tenants` and the conformance overlay — so each row keeps exactly the tenants it reached. A bundle
-  carries `ringOrder = dev-first`; a slave reading a bundle without it converts its rings itself
+  carries `ringOrder = dev-first`; a managed tenant reading a bundle without it converts its rings itself
   (`ConvertFrom-PimLegacyRingPayload`). A pull job built before v2.4.388 has no `PIM_RingOrder` variable, so
   its `-SlaveRing` is read in the old order and converted.
 
@@ -5044,7 +5044,7 @@ README and `FEATURES.md` describe **two** of the three axes, deliberately:
   full predicate, never as ring alone: `Replicate != No` **AND** `tenant.Ring <= row.Ring` (v2.4.388) **AND**
   `Target` matches (`Test-PimReplicationReach`, `engine/_shared/PIM-Downlink.ps1`) — *ring AND
   target, never OR* — plus target semantics (blank ⇒ every admitted tenant; a named tenant; tags
-  OR-ed across a list and AND-ed within one `+` term; `none` ⇒ never leaves the master), tenant tags
+  OR-ed across a list and AND-ed within one `+` term; `none` ⇒ never leaves the managing tenant), tenant tags
   travelling **inside the signed bundle** so a tenant cannot re-tag itself into scope, the
   dependency auto-include with its warning, and **withheld ≠ retracted** (`retracts = $false` on
   every plan; retraction is a separate, opt-in, report-first, budgeted act).
@@ -5064,8 +5064,8 @@ stating that the two are set separately and neither implies the other.
 
 ### 13.20 Per-admin sync to managed tenants + the tenant mode badge — built
 
-**The master's admin row decides whether an admin is synced** (`engine/_shared/PIM-Downlink.ps1`).
-On the master, `Get-PimCentralAdminsFromDefinitions` reads the master's own
+**The managing tenant's admin row decides whether an admin is synced** (`engine/_shared/PIM-Downlink.ps1`).
+On the managing tenant, `Get-PimCentralAdminsFromDefinitions` reads the managing tenant's own
 `Account-Definitions-Admins` rows and publishes as central admins only those with
 `ManagementMode = msp`; `Ring` selects which managed tenants may receive the admin and `Target`
 (tags) optionally narrows that ring (blank = every managed tenant in the ring). Names are taken
@@ -5079,14 +5079,14 @@ On the managed side `Test-PimDownlinkAdminSynced` applies the same decision to t
 is a legacy central-registry row, which only ever held MSP admins, and is treated as synced so an
 update never retracts existing MSP admins. Managed tenants keep their **own** local admins
 separately (rows owned locally are never touched by the downlink), and a central admin is governed
-by the master. Before staging, the downlink also refuses admins whose names do not match the managed
+by the managing tenant. Before staging, the downlink also refuses admins whose names do not match the managed
 tenant's admin naming prefixes — its engine would not see them and would recreate them each tick —
 and names the fix (add the MSP's prefix to that tenant's naming configuration, or rename).
 
 **Tenant mode badge.** The Manager header renders a **Mode** badge (`renderTenantModeBadge()`)
 from `GET /api/settings/scenario`: the resolved deployment scenario's label (single tenant, MSP
 master, MSP managed …) with its detail as a tooltip, so an operator can see whether this tenant's
-changes are local or arrive from a master. It is hidden when no scenario is resolved.
+changes are local or arrive from a managing tenant. It is hidden when no scenario is resolved.
 
 ---
 
@@ -6055,6 +6055,15 @@ primitives.
     only a legacy fallback, and an item that resolves to nobody goes to the Alerting recipients.
     `admin` is the Alerting recipients.
   - **One summary line per run** in the tick log: due / sent / skipped / seeded / failed.
+- **Community -> Pro (2.4.473).** `Set-PimLicense` refuses a licence that cannot make THIS environment Pro (sku not Pro,
+  or bound to another tenant) -- `Test-PimLicenseIsProForTenant` is the one verdict for the badge (`Get-PimEdition`),
+  `GET /api/license`, the import and the updater's edition read (`Get-PimEnvironmentEdition`); the hard gate per
+  feature applies the same rule plus the feature list. Registering the first Pro licence on a store with none records
+  pim.Settings `EditionUpgrade` (community -> pro). While that marker exists and no in-cloud updater run is recorded
+  after it (pim.Settings `UpdateState`), the environment reads **upgrade-pending**: the ring gate lets its Community
+  update through (audited, naming the upgrade step) and the Licence page shows the command.
+  `tools/setup/Upgrade-PimToPro.ps1 -SourceUrlTemplate <feed> -Apply` re-runs the deploy from the saved profile with the
+  feed and ring 2, which installs `ca-pim-update`; from then on the ring governs.
 - **Automatic extension (2.4.472)** — `engine/_shared/PIM-AutoExtend.ps1`. When the engine
   compares an existing time-limited assignment with its row (all six assignment kinds), it extends it
   (Graph `adminExtend` / ARM `AdminExtend`, falling back to an update) once the live end is within the
@@ -7040,7 +7049,7 @@ what the screen does, and an entry may deep-link to a *section* of a tab via `an
 | **Access** | Access map · Look up a role · Create access · Change existing access · Admin accounts & TAP · Invite a guest or consultant · **Departments & owners** (its own page since 2026-09-19, §18.9) · **Delegations — edit in a table** (§71.26: the records table scoped to the assignment entities) · All records (the raw view) |
 | **Pending changes** | Check for problems · Review & commit queue (§18.1f) |
 | **Jobs** | Jobs & status · Engine logs & errors · Job schedule (§11.3a) |
-| **Reviews & controls** | Review current delegations · Approvals · Drift: live vs desired (§5.2) · **Coverage & gaps** · Access reviews · Tenant conformance · Reports · Managed tenants · **Managed tenant registry** and **Replication overview** (MSP master only) |
+| **Reviews & controls** | Review current delegations · Approvals · Drift: live vs desired (§5.2) · **Coverage & gaps** · Access reviews · Tenant conformance · Reports · Managed tenants · **Managed tenant registry** and **Replication overview** (managing tenant only) |
 | **Audit & Settings** | Audit trail · Settings · Newly discovered resources · **Manager access & roles** · **Emergency access (break-glass)** (the break-glass accounts and the emergency override, one page) · **Mail templates** · **Policy templates** (read-only) · Support. Each is its own page since 2026-09-19 — a menu item never deep-links into Settings, so each page can be permissioned on its own. |
 
 The former *Daily operations* menu is folded into Reviews & controls, and the former *Governance*
@@ -7836,7 +7845,7 @@ answers the question purely and **fails closed on an unknown requirement**.
 so the refusal is server-side rather than a disabled tick box. The Manager supplies
 the topology from `Test-PimManagerIsMspMaster` on **both** the read and the save path.
 🔒 **`-IsMspMaster` is optional on purpose:** a caller that does not supply it gets the
-pre-2.4.382 behaviour unchanged. Guessing would hide a real MSP master's own Downlink
+pre-2.4.382 behaviour unchanged. Guessing would hide a real managing tenant's own Downlink
 tab the moment a scenario read failed — the opposite fault, and a worse one.
 
 **Wrappers + endpoints (`Open-PimManager.ps1`).** `Get-/Set-PimFeatureFlags` persist
@@ -8012,7 +8021,7 @@ routing) ships ready to use. The product never phones home. On the free edition 
 enforcement off never blocks or degrades a feature based on entitlement.
 
 **Licensing.** Licensing details for the Pro edition will be published soon. Single-tenant use of the
-community edition (scenario S2) is free. The MSP scenarios — a managing (master) tenant and the
+community edition (scenario S2) is free. The MSP scenarios — a managing (managing tenant) tenant and the
 managed customer tenants it looks after (S3–S6, §11.8) — will be part of the paid (Pro) edition;
 details will follow.
 
@@ -8046,7 +8055,7 @@ any stored setting or deploy baseline; *switches itself on* means it is on while
 | App-role / Azure DevOps / Dataverse / Business Central / Power Platform (`connectors.apps`) | **Pro** | single | off | yes — `PIM-Assignments-AppRole` / `-Workloads` rows (still needs the licence) |
 | Power BI (`connectors.powerbi`) | **Pro** | single | off | — |
 | Exchange Online (`connectors.exo`) | **Pro** | single | off | — |
-| MSP downlink / fan-out, MSP master / managed (`msp.downlink`) | **Pro** | multi | off | — |
+| MSP downlink / fan-out, managing tenant / managed (`msp.downlink`) | **Pro** | multi | off | — |
 
 A Pro capability runs only with a valid (or in-grace) Pro licence bound to the tenant; without one it is inert and
 the portal says so. Settings › Licence and `GET /api/license` are never locked.
@@ -8080,7 +8089,7 @@ snapshots per entity are kept.
 > drift). **Pro, single tenant:** `coverage.gaps`, `discovery.sweep`, `connectors.apps` (app-role, Azure DevOps,
 > Dataverse, Business Central, Power Platform), `connectors.powerbi`, `connectors.exo`, `revoke.current`,
 > `reviews.campaigns`, `makerchecker`, `access.delegated`, `reports.tier`, `reports.evidence`. **Pro, multi tenant:**
-> `msp.downlink` and the MSP master / managed roles. `connectors.workload` (Intune + Defender XDR) and everything else
+> `msp.downlink` and the managing tenant / managed roles. `connectors.workload` (Intune + Defender XDR) and everything else
 > is free. Enforcement is **targeted**: the feature gate also checks for a valid (or in-grace) Pro licence bound to the
 > tenant, so a Pro capability is inert in the engine and jobs (skipped with the licence reason) and the Manager answers
 > 403 with the same text; `Test-PimMspLicense` gates the publish and downlink job entries (exit 2 with the contact and
@@ -8134,7 +8143,7 @@ the provider and **no-ops the whole scope** (no `GetDesired`/`GetLive`, no diff,
 apply) when off — covering Full/Delta/queue triggers identically. The discovery sweep
 (`Invoke-PimEngineDiscoverySweep`) is gated by `discovery.sweep`, with Power BI gated
 separately by `connectors.powerbi`. The scheduler gates at the central
-`Invoke-PimScheduledJob` dispatch: a master `scheduler.jobs` switch plus a per-type
+`Invoke-PimScheduledJob` dispatch: a managing tenant `scheduler.jobs` switch plus a per-type
 map (`Get-PimJobFeatureKey`) so a disabled feature's job never invokes its handler.
 The notify path (`Send-PimNotifyMail`) honours a global email kill switch
 (`$global:PIM_MailKillSwitch`), the `alerting.email` feature gate, a redirect target
@@ -8338,7 +8347,7 @@ result is explainable from one snapshot.
 `manifest.json` (Chromium: first 16 bytes of `SHA-256(DER pubkey)`, each nibble
 mapped `0–15 → a–p`). The id appears in the app-registration redirect URI, the
 managed force-install policy and the published CRX, so it must never drift. Only
-the **machine holding the master signing key** reproduces that id; a repack is
+the **machine holding the managing tenant signing key** reproduces that id; a repack is
 valid from that machine alone, never from another.
 
 **Package validator (`Test-PimActivatorPackage.ps1`).** A pure, offline,
@@ -8683,7 +8692,7 @@ member's access, so the step does **not** migrate it: it reports it on every run
 **security finding** (`securityFindings`, printed as `[SECURITY FINDING]`) with how to migrate once,
 and otherwise proceeds as before. A finding is not a failure.
 
-**Not every job identity is a member.** The MSP master's publish job only reads, so it gets its own
+**Not every job identity is a member.** The managing tenant's publish job only reads, so it gets its own
 reader user instead of membership (§13.7), and a re-deploy removes a membership an earlier version
 added.
 
@@ -8773,10 +8782,10 @@ the field is empty. Direct edits count as the committer's own for the second-app
 "sensitive". An administrator can discard a colleague's staged change with a recorded reason.
 
 ### 28.6 MSP: decisions that travel to managed tenants
-Besides the rows it publishes, the MSP master signs **decisions** into the bundle: a withdrawal (remove this row), a
+Besides the rows it publishes, the managing tenant signs **decisions** into the bundle: a withdrawal (remove this row), a
 rename, and a **session revoke** (revoke this person's sign-in sessions). Each can be limited to chosen tenants. A
-managed tenant carries out only what names it, and a withdrawal only acts on a row the master no longer publishes — a
-decision never overrides the master's current state. A session revoke is queued and committed in the managed tenant
+managed tenant carries out only what names it, and a withdrawal only acts on a row the managing tenant no longer publishes — a
+decision never overrides the managing tenant's current state. A session revoke is queued and committed in the managed tenant
 itself, carried out by its own engine (break-glass accounts excluded), checked by reading the account back, and
 recorded so the same decision never runs twice. A central offboard (an end date) reaches every tenant the person reaches
 with no prompt; removing a replicated row asks: all tenants, the ones you pick, or none.

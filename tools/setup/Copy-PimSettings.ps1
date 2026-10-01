@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     Settings live in `pim.Settings` as one JSON document per name (naming conventions, schedules,
-    manager access, ...). Copying one between tenants -- a master's naming conventions to a managed
+    manager access, ...). Copying one between tenants -- a managing tenant's naming conventions to a managed
     tenant, a known-good schedule to a new environment -- was a hand-written SQL job every time, and
     a hand-written job is where the wrong tenant gets written.
 

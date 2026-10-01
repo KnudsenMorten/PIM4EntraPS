@@ -1,30 +1,30 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    §31.3 Phase-2 -- the ring-gated master->managed (slave) admin/permission SYNC
+    §31.3 Phase-2 -- the ring-gated master->managed (managed tenant) admin/permission SYNC
     (downlink) live wrapper. Thin orchestrator over the PURE core in
     engine/_shared/PIM-Downlink.ps1 (Invoke-PimManagedDownlink).
 
 .DESCRIPTION
-    For ONE managed/slave tenant (S5 central-hosted | S6 local-hosted):
+    For ONE managed tenant (S5 central-hosted | S6 local-hosted):
 
-      1. PULL the master's SIGNED baseline bundle (HTTPS GET of the PLAIN blob URL:
-         public-but-signed or private endpoint, DESIGN 13.7) -- the bundle the master's
+      1. PULL the managing tenant's SIGNED baseline bundle (HTTPS GET of the PLAIN blob URL:
+         public-but-signed or private endpoint, DESIGN 13.7) -- the bundle the managing tenant's
          ca-pim-publish job publishes. -BaselineDocPath lets the main session feed a locally-pulled
          bundle instead (e.g. when the seeder produced it).
       2. VERIFY it offline (RSA-SHA256 against the embedded PUBLIC baseline cert;
          refuse on bad signature / expiry / anti-rollback) -- pull-not-push trust
          model identical to the offline .pimlicense.
-      3. RING-GATE the admin set to slave.Ring <= admin.Ring (§77.20: 0 dev, 1 test, 2 broad).
+      3. RING-GATE the admin set to managed tenant.Ring <= admin.Ring (§77.20: 0 dev, 1 test, 2 broad).
       4. STAGE the per-tenant sync files in the resolved folder (central-msp via
          -CentralRoot / $env:PIM_SyncRootCentral, local-slave via -LocalRoot /
          $env:PIM_SyncRootLocal). Idempotent: only rewrites on content change.
       5. PROVIDE THE ACCOUNTS, by the route the topology dictates (IMP-12):
            * S5 (central-hosted): compose Invoke-PimMspFanout, which authenticates
              per-tenant with the SLAVE's OWN SPN + certificate and creates the accounts.
-           * S6 (local-hosted): stage them as desired rows in the slave's own store
-             (Invoke-PimDownlinkAdminApply) and let the slave's engine create them on its
-             next tick -- pull, not push. Needs -SlaveSqlServer and a slave default domain.
+           * S6 (local-hosted): stage them as desired rows in the managed tenant's own store
+             (Invoke-PimDownlinkAdminApply) and let the managed tenant's engine create them on its
+             next tick -- pull, not push. Needs -SlaveSqlServer and a managed tenant default domain.
          Either way the MASTER never writes into the managed tenant.
 
     PURE decisions live in engine/_shared/PIM-Downlink.ps1 (offline-tested in
@@ -37,16 +37,16 @@
 
 .PARAMETER TenantId / SlaveRing
     The managed tenant id + its OWN ring (0 = dev, 1 = test, 2 = broad; default 0). The ring is LOCAL to the
-    slave and authoritative; the master's platform.Tenants.Ring is only the master's copy
+    slave and authoritative; the managing tenant's platform.Tenants.Ring is only the managing tenant's copy
     and is never read here.
 
 .PARAMETER CentralKillUrl
-    SEC-25: the master's signed central-kill manifest. Default: the sibling of -BaselineUrl
+    SEC-25: the managing tenant's signed central-kill manifest. Default: the sibling of -BaselineUrl
     (<container>/central-kill.json); 'none' disables the check (reported NOT CHECKED).
     A 404 means no kill is published; any other read failure REFUSES the pull.
 
 .PARAMETER BaselineUrl
-    HTTPS URL of the master's signed baseline bundle (baseline-latest.json).
+    HTTPS URL of the managing tenant's signed baseline bundle (baseline-latest.json).
     Mutually exclusive with -BaselineDocPath.
 
 .PARAMETER BaselineAccessToken
@@ -82,7 +82,7 @@ param(
     [string]$BaselineUrl,
     [string]$BaselineAccessToken,
     [string]$BaselineDocPath,
-    # SEC-25: the master's signed central-kill manifest (default: the bundle's sibling central-kill.json).
+    # SEC-25: the managing tenant's signed central-kill manifest (default: the bundle's sibling central-kill.json).
     [string]$CentralKillUrl = $env:PIM_CentralKillUrl,
 
     [string]$CentralRoot = $env:PIM_SyncRootCentral,
@@ -95,11 +95,11 @@ param(
     # slave's own pim.Settings (the last APPLIED version, needs -SlaveSqlServer); the higher of the two wins.
     [int64]$LastVersion = 0,
 
-    # --- BUG-29: the master's TEMPLATE ring map (RING-1 plane 2) ---------------
-    # The master's answer to "which baseline VERSION is approved for a ring?".
+    # --- BUG-29: the managing tenant's TEMPLATE ring map (RING-1 plane 2) ---------------
+    # The managing tenant's answer to "which baseline VERSION is approved for a ring?".
     # See config/template-ring-map.sample.json. IMP-38: only its PROMOTIONS are used, keyed
-    # on this tenant's LOCAL -SlaveRing; its assignments/default (the master deciding a
-    # tenant's ring) are reported and ignored -- every ring is local in the slave.
+    # on this tenant's LOCAL -SlaveRing; its assignments/default (the managing tenant deciding a
+    # tenant's ring) are reported and ignored -- every ring is local in the managed tenant.
     # 🔒 OPT-IN AND INERT WITHOUT IT. Omit both and this script behaves exactly as it
     # did when S5/S6 were VERIFIED -- no version restriction, ring used only to filter
     # the admin set. That mirrors the framework's own `default: null` non-breaking rule.
@@ -131,21 +131,21 @@ param(
     # Supplying it SKIPS the manifest read entirely -- one source of truth per run.
     [string[]]$BlockedCapabilities,
     # IMP-13. The SLAVE's admin naming prefixes. Normally LEFT UNSET: on this S6 path the downlink
-    # runs inside the slave, so the authority on the customer's naming is the customer's own live
+    # runs inside the managed tenant, so the authority on the customer's naming is the customer's own live
     # config, and it is read from there below. The parameter exists for the case where it cannot be
     # (a dry run from elsewhere), and so the gate has an explicit spelling an operator can supply.
     [string[]]$SlaveAdminPrefixes,
 
-    # --- MSP-2 / control #2: reflect the master admins' ROLES into the slave -----
+    # --- MSP-2 / control #2: reflect the managing tenant admins' ROLES into the managed tenant -----
     # The projection itself always runs (it is carried by the signed bundle); these
-    # decide whether it is APPLIED. The slave's DESIRED store is a different database
-    # from the master's platform registry above, and this script cannot infer it --
+    # decide whether it is APPLIED. The managed tenant's DESIRED store is a different database
+    # from the managing tenant's platform registry above, and this script cannot infer it --
     # so it is explicit. Without it the run still stages the assignments file and
     # says, in yellow, that it projected N roles and applied none.
     [string]$SlaveSqlServer,
     [string]$SlaveSqlDatabase,
     # IMP-12: the managed tenant's default verified domain. On S6 the synced admins are
-    # staged into the slave's OWN store as <UserName>@<this domain> and its engine creates
+    # staged into the managed tenant's OWN store as <UserName>@<this domain> and its engine creates
     # them. Omit it when this runs inside the managed tenant and the domain can be read from
     # the ambient token; it is never guessed, so without either the admins are not staged.
     [string]$SlaveDefaultDomain,
@@ -157,7 +157,7 @@ param(
     # department link (REQUIREMENTS §62: the sponsor is a department, never a person).
     [ValidateSet('TRUE','FALSE')][string]$CreateTapDefault = 'TRUE',
     [int]$TapLifetimeHoursDefault = 8,
-    # The decouple switch: withdraw previously-synced roles even when the master
+    # The decouple switch: withdraw previously-synced roles even when the managing tenant
     # currently projects none. Off by default -- see the mass-revoke guard.
     [switch]$AllowFullPrune,
     # §71 (framework MSP-4 SURFACE item 8): withdraw synced rows that no longer reach this tenant.
@@ -221,7 +221,7 @@ if ("$BaselineDocPath".Trim()) {
     throw 'supply -BaselineDocPath (local) or -BaselineUrl (HTTPS pull) for the signed baseline.'
 }
 
-# 1b) BUG-29: build the TEMPLATE ring plan, if the master published a map.
+# 1b) BUG-29: build the TEMPLATE ring plan, if the managing tenant published a map.
 # The decision comes from the VENDORED PLATFORM CORE (Get-PimTemplateRingPlan, itself
 # composed from the vendored plane-1 parts), never from PIM-private hold/allow logic --
 # PIM consumes the AutomateIT design here rather than reimplementing it.
@@ -254,7 +254,7 @@ if ($ringMap) {
 } else {
     # Say so explicitly. A silent absence is how BUG-29 survived for months: the gate
     # was DOCUMENTED as active while no code path implemented it.
-    Write-Host "  ring map: none supplied -- version gate INERT (pulls whatever version the master published)" -ForegroundColor DarkYellow
+    Write-Host "  ring map: none supplied -- version gate INERT (pulls whatever version the managing tenant published)" -ForegroundColor DarkYellow
 }
 
 # 1c) SEC-10: the CUSTOMER's half of MSP-3's ACCEPT gate -- which downlink CLASSES
@@ -288,16 +288,16 @@ if ($null -ne $blockedCaps) { $dlArgs['BlockedCapabilities'] = $blockedCaps }
 # IMP-13 -- the SLAVE's own admin naming prefixes, read from the SLAVE's own config.
 #
 # 🔑 THIS IS THE WHOLE DECISION, and it is why the prefixes are READ rather than SUPPLIED. A synced
-# MSP admin lands as `<UserName>@<slave domain>`; if the slave's AdminAccountPatterns do not cover
-# it, the slave's Admins provider never sees the account, the diff says "not present", and every
+# MSP admin lands as `<UserName>@<managed tenant domain>`; if the managed tenant's AdminAccountPatterns do not cover
+# it, the managed tenant's Admins provider never sees the account, the diff says "not present", and every
 # tick creates it again -- leaving another unmanaged privileged account behind each time.
 # 🔒 The tempting fix is to MERGE the MSP's prefix into the customer's conventions. That is the
-# master editing a customer's own fail-closed scoping control so that the master's write succeeds,
+# master editing a customer's own fail-closed scoping control so that the managing tenant's write succeeds,
 # which §22 ("MSP never writes to a customer tenant") and the MSP-3 consent model both forbid, and
 # which would be indistinguishable from the sync quietly granting itself more reach. So the plan
 # DETECTS and WITHHOLDS; repairing the convention stays the customer's act, on the customer's side.
-# ⚠️ Only meaningful on this S6 path, where the downlink runs INSIDE the slave and
-# $global:PIM_NamingConventions IS the slave's. Left unset otherwise, and the plan then reports
+# ⚠️ Only meaningful on this S6 path, where the downlink runs INSIDE the managed tenant and
+# $global:PIM_NamingConventions IS the managed tenant's. Left unset otherwise, and the plan then reports
 # recognisability as NOT EVALUATED rather than as fine.
 $slaveAdminPrefixes = @()
 if ($PSBoundParameters.ContainsKey('SlaveAdminPrefixes') -and @($SlaveAdminPrefixes).Count) {
@@ -315,14 +315,14 @@ if (@($slaveAdminPrefixes).Count) {
 }
 
 # --- MSP-2 / control #2 inputs ------------------------------------------------
-# The relationship's role-projection policy is AUTHORED in the master's platform registry
+# The relationship's role-projection policy is AUTHORED in the managing tenant's platform registry
 # (pim.TenantRoleProjection) and DELIVERED inside the signed bundle, keyed by tenant id.
 #
 # 🪤 It cannot be read from the registry here, and that is structural, not laziness: a process
 # holds ONE ambient identity and Get-PimSqlConnectionString mints its Azure SQL token from it,
 # so the same run cannot read the MASTER's registry and write the SLAVE's store -- different
-# tenants, different credentials. In S6 the downlink runs inside the slave, which has no
-# credential for the master's SQL at all. An earlier revision read it here and would have been
+# tenants, different credentials. In S6 the downlink runs inside the managed tenant, which has no
+# credential for the managing tenant's SQL at all. An earlier revision read it here and would have been
 # unreachable on exactly the topology IMP-11 says we must use.
 #
 # So the bundle is the source, and the ESTATE-14 lesson still holds -- a policy that cannot be
@@ -342,7 +342,7 @@ try {
 if ($bundlePolicy -and @($bundlePolicy).Count) {
     Write-Host "  role policy: $(@($bundlePolicy).Count) rule(s) carried in the SIGNED bundle ($((@($bundlePolicy) | ForEach-Object { "$($_.Mode):$($_.GroupTag)" }) -join ', '))" -ForegroundColor DarkGray
 } else {
-    Write-Host "  role policy: none for this relationship -- ALL of the master's roles project (add pim.TenantRoleProjection rows on the MASTER to narrow)" -ForegroundColor DarkGray
+    Write-Host "  role policy: none for this relationship -- ALL of the managing tenant's roles project (add pim.TenantRoleProjection rows on the MASTER to narrow)" -ForegroundColor DarkGray
 }
 
 if ("$SlaveSqlServer".Trim()) {
@@ -351,7 +351,7 @@ if ("$SlaveSqlServer".Trim()) {
     $dlArgs['SlaveStoreConnectionString'] = $slaveCs
     if ($AllowFullPrune) { $dlArgs['AllowFullPrune'] = $true }
     if ($AllowRetraction) { $dlArgs['AllowRetraction'] = $true }
-    # Which group tags actually EXIST in the slave. A projected tag with no group
+    # Which group tags actually EXIST in the managed tenant. A projected tag with no group
     # there cannot be granted, and is reported instead of staged to fail at apply.
     try {
         # BUG-60: read every entity a group definition can live in. Reading only
@@ -363,7 +363,7 @@ if ("$SlaveSqlServer".Trim()) {
         # customer's. Counting it made the second sync disown its own output: every group flipped
         # to "a group with this tag already exists -- the customer owns it", create dropped to 0,
         # the nestings and role bindings were withheld as writes-into-a-customer-group, and the
-        # apply then offered to PRUNE the 7 rows it had just been told the master no longer
+        # apply then offered to PRUNE the 7 rows it had just been told the managing tenant no longer
         # publishes. Measured live against HOGYM on the second run, minutes after the first.
         # An UNSTAMPED row still counts as the customer's -- absent provenance fails safe to Local,
         # exactly as the apply's prune scoping does.
@@ -380,14 +380,14 @@ if ("$SlaveSqlServer".Trim()) {
         } else {
             # Loud: this is the state EFIF/RIDE are in today, and it means control #2
             # can create desired rows that the engine can never resolve.
-            Write-Host "  [warn] the slave store has NO PIM-Definitions groups -- every projected role will be UNRESOLVED until its delegation model exists." -ForegroundColor Yellow
+            Write-Host "  [warn] the managed tenant store has NO PIM-Definitions groups -- every projected role will be UNRESOLVED until its delegation model exists." -ForegroundColor Yellow
         }
-    } catch { Write-Host "  [warn] could not read the slave's group tags: $($_.Exception.Message)" -ForegroundColor Yellow }
+    } catch { Write-Host "  [warn] could not read the managed tenant's group tags: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 if ("$SlaveDefaultDomain".Trim()) { $dlArgs['SlaveDefaultDomain'] = "$SlaveDefaultDomain".Trim() }
 $dlArgs['CreateTapDefault']       = $CreateTapDefault
 $dlArgs['TapLifetimeHoursDefault'] = $TapLifetimeHoursDefault
-# SEC-25: the master's signed central-kill manifest (fetched here; verified by the orchestrator against this
+# SEC-25: the managing tenant's signed central-kill manifest (fetched here; verified by the orchestrator against this
 # tenant's own revoked-signer list). A -BaselineDocPath run has no URL to derive it from and says NOT CHECKED.
 $dlArgs['CentralKillSource'] = Get-PimCentralKillSource -CentralKillUrl $CentralKillUrl -BaselineUrl $BaselineUrl -AccessToken $BaselineAccessToken
 $result = Invoke-PimManagedDownlink -Scenario $Scenario -Doc $doc `

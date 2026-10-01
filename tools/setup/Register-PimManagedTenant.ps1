@@ -4,19 +4,19 @@
     71.18 -- register (or update, or disable) a MANAGED tenant on the MSP MASTER: platform.Tenants ring + tags.
 
 .DESCRIPTION
-    Replaces the documented hand SQL step (§71 gap 2: "no product command registers a managed tenant"). The master's
+    Replaces the documented hand SQL step (§71 gap 2: "no product command registers a managed tenant"). The managing tenant's
     bundle producer reads this row's TAGS and signs them into the bundle (targeting). Idempotent (MERGE on TenantId),
     READ BACK after the write, audited ('msp.tenant.register') in pim.AuditEvents. Certificate identity only; the
-    identity must be in the master store's SQL admin group.
+    identity must be in the managing tenant store's SQL admin group.
 
-    BUG-175 -- THE RING HERE IS THE MASTER'S COPY, NOT THE TENANT'S RING. Every ring is LOCAL in the slave: the pull
-    is gated by the managed tenant's OWN -SlaveRing (its downlink job argument, set in the slave). The bundle producer
-    does NOT read this Ring (it reads only Tags), and nothing reconciles the two values. The master uses its copy only
-    for its own previews (the Manager's reach preview, overview and dry run, each labelled "master's copy") -- keep it
-    equal to the slave's -SlaveRing, or those previews describe a ring the tenant is not on.
+    BUG-175 -- THE RING HERE IS THE MANAGING TENANT'S COPY, NOT THE TENANT'S RING. Every ring is LOCAL in the slave: the pull
+    is gated by the managed tenant's OWN -SlaveRing (its downlink job argument, set in the managed tenant). The bundle producer
+    does NOT read this Ring (it reads only Tags), and nothing reconciles the two values. The managing tenant uses its copy only
+    for its own previews (the Manager's reach preview, overview and dry run, each labelled "managing tenant's copy") -- keep it
+    equal to the managed tenant's -SlaveRing, or those previews describe a ring the tenant is not on.
 
 .PARAMETER ManagedTenantId / DisplayName / Ring / Tags
-    The managed tenant. Ring 0..2 (0 = dev, 1 = test, 2 = broad -- §77.20) -- the MASTER'S COPY of the ring the tenant set
+    The managed tenant. Ring 0..2 (0 = dev, 1 = test, 2 = broad -- §77.20) -- the MANAGING TENANT'S COPY of the ring the tenant set
     locally (see above). Tags: 'region:eu;wave:pilot' or an array.
 
 .PARAMETER Disable
@@ -26,8 +26,8 @@
     Print the registered tenants and exit.
 
 .EXAMPLE
-    .\Register-PimManagedTenant.ps1 -SqlServerFqdn sql-ait-wa678.database.windows.net -ManagedTenantId <slave tenant> `
-        -DisplayName RIDE -Ring 2 -Tags 'region:eu','wave:pilot' -TenantId <master tenant> -ClientId <app> -CertThumbprint <thumb>
+    .\Register-PimManagedTenant.ps1 -SqlServerFqdn sql-ait-wa678.database.windows.net -ManagedTenantId <managed tenant> `
+        -DisplayName RIDE -Ring 2 -Tags 'region:eu','wave:pilot' -TenantId <managing tenant> -ClientId <app> -CertThumbprint <thumb>
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -57,7 +57,7 @@ function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 
 $cs = Connect-PimSetupStore -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint -UseSignedInAccount:$UseSignedInAccount
 if (-not "$(Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT OBJECT_ID('platform.Tenants')")".Trim()) {   # DBNull renders empty
-    throw "platform.Tenants does not exist on $SqlServerFqdn/$SqlDatabase -- this is not an MSP master yet. Run tools\setup\Initialize-PimMasterRegistry.ps1 first."
+    throw "platform.Tenants does not exist on $SqlServerFqdn/$SqlDatabase -- this is not a managing tenant yet. Run tools\setup\Initialize-PimMasterRegistry.ps1 first."
 }
 $readRows = { @(Invoke-PimSqlQuery -ConnectionString $cs -Sql "SELECT CONVERT(nvarchar(50), TenantId) AS TenantId, DisplayName, Ring, Enabled, Tags FROM platform.Tenants ORDER BY Ring, DisplayName") }
 if ($List) {
@@ -80,6 +80,6 @@ if ($PSCmdlet.ShouldProcess($reg.parameters.tid, 'MERGE platform.Tenants')) {
     if (-not $w.ok) { throw "REFUSED ($($w.status)): $($w.reason)" }
     $after = @(& $readRows | Where-Object { "$($_.TenantId)".ToLowerInvariant() -eq $reg.parameters.tid })[0]
     Write-PimSetupAudit -ConnectionString $cs -Action 'msp.tenant.register' -Target $reg.parameters.tid -Before $before -After $w.parameters
-    Note "read back OK: ring $($after.Ring) (the master's copy -- the tenant's own -SlaveRing gates its pull), enabled $($after.Enabled), tags '$($after.Tags)'"
+    Note "read back OK: ring $($after.Ring) (the managing tenant's copy -- the tenant's own -SlaveRing gates its pull), enabled $($after.Enabled), tags '$($after.Tags)'"
     Note 'next: publish the bundle (start the master''s ca-pim-publish job, Start-PimBaselinePublish.ps1) so the tenant''s tags are signed into it.'
 }

@@ -302,8 +302,8 @@ param(
     # reached to TEST it, and cannot be opened afterwards: the setting is immutable. Built
     # external, the Manager can still be locked down with one reversible `ingress update`.
     [ValidateSet('internal','external')][string]$Exposure = 'external',
-    # 71.40 -- forwarded to Setup-PimContainers for the MANAGER: the master signing key id(s) it pins and the plain URL
-    # the master publishes the signed bundle to (its Downlink view verifies against them). Validated there.
+    # 71.40 -- forwarded to Setup-PimContainers for the MANAGER: the managing tenant signing key id(s) it pins and the plain URL
+    # the managing tenant publishes the signed bundle to (its Downlink view verifies against them). Validated there.
     [string[]]$BaselineTrustedKeys = @(),
     [string]$BaselineDocUrl,
     [string]$HubVnetName,
@@ -455,7 +455,7 @@ $ErrorActionPreference = 'Stop'
 # MEASURED: dp998-master.json carries "updater": { "ring": 1 }, PIM-MspBuild forwarded UpdateRing = 1,
 # and the deployed ca-pim-update carried PIM_UPDATE_RING=2. That ring then approved 2.4.324 against an
 # environment built at 2.4.366, and the nightly updater rolled all five containers 42 versions
-# BACKWARD -- which removed publish-job-entry.ps1 and stopped the master publishing.
+# BACKWARD -- which removed publish-job-entry.ps1 and stopped the managing tenant publishing.
 #
 # So the question is answered ONCE, HERE, at script scope, where $PSBoundParameters means what the
 # caller passed. Every later use reads this variable. A ring that was not passed keeps whatever ring

@@ -67,13 +67,13 @@ $script:PimFeatureFlagCatalog = @(
     # operator could switch on a surface that has nothing behind it and no write of which is legal here.
     # A surface that needs a topology this tenant is NOT is not a choice: it is locked OFF with the
     # reason, exactly the way an always-on surface is locked ON.
-    # 2026-09-21 (operator, on an MSP master: "bug: why is downlink off on the master - critical bug"): ON by default --
-    # 'requires' already locks it OFF everywhere that is not a master, so the default only ever applies on a master.
+    # 2026-09-21 (operator, on a managing tenant: "bug: why is downlink off on the managing tenant - critical bug"): ON by default --
+    # 'requires' already locks it OFF everywhere that is not a managing tenant, so the default only ever applies on a managing tenant.
     [ordered]@{ id = 'downlink';    label = 'MSP Downlink';             default = $true;  alwaysOn = $false; requires = 'msp-master' })
 
 # What each `requires` value means, in one phrase -- shown on the locked toggle and in the refusal.
 $script:PimFeatureFlagRequirementText = @{
-    'msp-master' = 'an MSP master (this deployment manages no other tenants)'
+    'msp-master' = 'a managing tenant (this deployment manages no other tenants)'
 }
 
 function Get-PimFeatureFlagCatalog {
@@ -137,7 +137,7 @@ function Resolve-PimFeatureFlags {
     #   - a flag whose `requires` this deployment does not satisfy is forced OFF and marked
     #     unavailable -- but ONLY when the caller tells us the topology (-IsMspMaster). A caller
     #     that does not know it passes nothing and gets exactly the old behaviour; the alternative,
-    #     guessing, would hide an MSP master's own Downlink tab the moment a read failed.
+    #     guessing, would hide a managing tenant's own Downlink tab the moment a read failed.
     # Returns @{ flags=<ordered id->bool>; effective=<id->object>; warnings=<string[]> }.
     # `effective` carries per-flag id/label/enabled/default/alwaysOn/available/unavailableReason.
     param([object]$Raw, [AllowNull()][object]$IsMspMaster = $null)
@@ -230,7 +230,7 @@ function ConvertTo-PimFeatureFlagOverrides {
     foreach ($id in $resolved.flags.Keys) {
         if ($always[$id]) { continue }
         # A surface this deployment cannot host is never stored either way: its forced OFF is a fact of the topology, not a
-        # choice -- storing it would pin it off if the deployment later becomes a master (downlink is ON by default).
+        # choice -- storing it would pin it off if the deployment later becomes a managing tenant (downlink is ON by default).
         $eff = $resolved.effective[$id]; if ($eff -and $eff.Contains('available') -and -not [bool]$eff['available']) { continue }
         if ([bool]$resolved.flags[$id] -ne [bool]$defaults[$id]) { $overrides[$id] = [bool]$resolved.flags[$id] }
     }

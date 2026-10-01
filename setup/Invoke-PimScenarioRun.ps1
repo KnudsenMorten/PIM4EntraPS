@@ -9,7 +9,7 @@
     Resolves the active deployment scenario (S1-S6) and runs the right path for the
     topology:
       * single  (S1/S2) -> engine apply only.
-      * master  (S3/S4) -> engine apply only (the master hosts its own estate).
+      * master  (S3/S4) -> engine apply only (the managing tenant hosts its own estate).
       * managed (S5/S6) -> downlink-sync (ring pull -> verify -> master->slave admin
                            sync) THEN engine apply.
 
@@ -30,12 +30,12 @@
     Forwarded to Invoke-PimEngineCore (default All / Delta).
 
 .PARAMETER TenantId / SlaveRing / BaselineDocPath / BaselineUrl / BaselineAccessToken
-    Managed (S5/S6) downlink inputs -- the signed baseline + the slave tenant and its OWN
-    ring. -SlaveRing is LOCAL to the slave and authoritative (0..2, default 2); the master's
-    platform.Tenants.Ring is only the master's copy and is never read here.
+    Managed (S5/S6) downlink inputs -- the signed baseline + the managed tenant and its OWN
+    ring. -SlaveRing is LOCAL to the managed tenant and authoritative (0..2, default 2); the managing tenant's
+    platform.Tenants.Ring is only the managing tenant's copy and is never read here.
 
 .PARAMETER CentralKillUrl
-    SEC-25: where the master's signed central-kill manifest is read from. Default: the
+    SEC-25: where the managing tenant's signed central-kill manifest is read from. Default: the
     sibling of -BaselineUrl (<container>/central-kill.json). 'none' disables the check
     (reported NOT CHECKED on every run). A 404 means no kill is published.
 
@@ -69,7 +69,7 @@ param(
     [string]$BaselineDocPath,
     [string]$BaselineUrl,
     [string]$BaselineAccessToken,
-    # SEC-25: the master's signed central-kill manifest. Default = the bundle's sibling central-kill.json.
+    # SEC-25: the managing tenant's signed central-kill manifest. Default = the bundle's sibling central-kill.json.
     [string]$CentralKillUrl = $env:PIM_CentralKillUrl,
 
     [string]$CentralRoot = $env:PIM_SyncRootCentral,
@@ -97,8 +97,8 @@ param(
     [string]$LocalManifestPath,
     [string[]]$BlockedCapabilities,
     # IMP-13. The SLAVE's admin naming prefixes, so this entry can supply the same gate the other
-    # one resolves from the slave's own config. Absent => the plan reports admin recognisability as
-    # NOT EVALUATED, which is the honest answer from a runner that may not be inside the slave.
+    # one resolves from the managed tenant's own config. Absent => the plan reports admin recognisability as
+    # NOT EVALUATED, which is the honest answer from a runner that may not be inside the managed tenant.
     [string[]]$SlaveAdminPrefixes,
     # 71.14: the downlink's removal opt-in (same name as Invoke-PimDownlinkSync.ps1). Default OFF = retraction is
     # report-only ("WOULD REMOVE ..."); ON removes what no longer reaches this tenant, still within the removal budget.
@@ -126,9 +126,9 @@ $shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
 # presents no credential, and Azure SQL answers `Login failed for user ''`. BUG-33 wrote that
 # signature down -- "the common cause is not 'auth failed' but 'the token provider was never
 # loaded'" -- and this runner was doing exactly that.
-# MEASURED on the greenfield slave 2026-08-27: with the slave store finally wired (BUG-79), the
+# MEASURED on the greenfield slave 2026-08-27: with the managed tenant store finally wired (BUG-79), the
 # downlink's own reads failed as
-#     [downlink] roles: could not read PIM-Assignments-Admins from the slave store:
+#     [downlink] roles: could not read PIM-Assignments-Admins from the managed tenant store:
 #                "Login failed for user ''."
 # while the ENGINE -- a separate process that does load PIM-Rest -- reached the same database
 # perfectly well in the same run. That split is the tell: same store, same identity, two processes,
@@ -265,10 +265,10 @@ if ($srRingMap -and "$TenantId".Trim()) {
     # assuming its shape.
     # Only worth saying on a run that actually pulls -- S1..S4 never do, so "no ring map" there is
     # not a gap, and a warning on every single-tenant run would train people to ignore it.
-    Write-Host "  ring map: none supplied -- version gate INERT (pulls whatever version the master published)" -ForegroundColor DarkYellow
+    Write-Host "  ring map: none supplied -- version gate INERT (pulls whatever version the managing tenant published)" -ForegroundColor DarkYellow
 }
 
-# (c) SEC-25: the master's signed central-kill manifest, fetched here (I/O) and VERIFIED by the orchestrator against
+# (c) SEC-25: the managing tenant's signed central-kill manifest, fetched here (I/O) and VERIFIED by the orchestrator against
 #     this tenant's own revoked-signer list. Only a run that pulls a downlink needs it.
 if ($run.runDownlink) {
     $srArgs['CentralKillSource'] = Get-PimCentralKillSource -CentralKillUrl $CentralKillUrl -BaselineUrl $BaselineUrl -AccessToken $BaselineAccessToken

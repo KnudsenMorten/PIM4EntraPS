@@ -321,7 +321,7 @@ function Get-PimUpdateSourceProfile {
                               runs on Container Apps. Build = az acr build; deploy = roll the ACA
                               revision to the freshly-built image.
         * 'from-master'     : MSP MANAGED/SLAVE downlink (s31 S5/S6) -- the managed tenant pulls the
-                              ring's signed template/baseline FROM THE MSP MASTER (pull-not-push;
+                              ring's signed template/baseline FROM THE managing tenant (pull-not-push;
                               ring-gated). The CODE update path mirrors the managed tenant's hosting:
                               CENTRAL-hosted (S5) rolls the central ACA revision (acr-build/aca-roll);
                               LOCAL-hosted (S6) does a local build/relaunch -- so the caller passes
@@ -332,7 +332,7 @@ function Get-PimUpdateSourceProfile {
                               platform core, never by PIM-private hold/allow logic.
                               ⚠️ This line previously claimed "the pull only takes the ring's
                               approved version (never a version above the tenant's ring)". That was
-                              NOT true as built -- the master publishes ONE baseline-latest.json and
+                              NOT true as built -- the managing tenant publishes ONE baseline-latest.json and
                               the managed tenant always pulled latest, ring-filtering only the ADMIN
                               SET, never the version. The version gate now exists in
                               Get-PimDownlinkPlan but is OPT-IN via -RingPlan (inert without it, per

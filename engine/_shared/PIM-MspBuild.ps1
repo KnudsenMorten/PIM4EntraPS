@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    71.18 -- THE ONE-SHOT MSP BUILD (pure core). Decides, for an MSP MASTER (S3) or a MANAGED tenant (S6, locally hosted
+    71.18 -- THE ONE-SHOT MSP BUILD (pure core). Decides, for a managing tenant (S3) or a MANAGED tenant (S6, locally hosted
     pull), every step that made the EFIF -> RIDE test pair work, in order, with the exact script and arguments. The runner
     is tools/setup/Invoke-PimMspBuild.ps1; offline-tested by tests/Test-PimMspBuild.ps1.
 
@@ -10,7 +10,7 @@
     build efif and ride in prod". The audit that day found the build spread over four entry points, none end to end:
     Invoke-PimDeployAll.ps1 (hosting only), the phased onboarding script (three phases broken; deleted 2026-09-18, SEC-27),
     the framework estate build (test tenants only), and hand steps -- the scenario setting, registering the managed tenant
-    on the master (SQL), publishing and scheduling the signed bundle, the pull job, the weekly read-link rotation, the tick
+    on the managing tenant (SQL), publishing and scheduling the signed bundle, the pull job, the weekly read-link rotation, the tick
     and Manager Graph roles on an existing environment, the Manager's right to start the tick, and the SQL admin group
     membership of the tick and Manager identities.
 
@@ -22,9 +22,9 @@
     NO SECRET, EVER. The build runs as a CERTIFICATE identity (deployIdentity) or as the SIGNED-IN az user (no
     deployIdentity, 71.33); the environments it builds run as managed identities. No step is given a client secret, an
     account key or a SAS. The managed tenant pulls the bundle PUBLIC-BUT-SIGNED (71.34, DESIGN 13.7): a plain blob URL,
-    reachable only from the networks the master's storage firewall names, trusted only because the signature verifies.
-    71.35: the master PUBLISHES from a Container Apps job (ca-pim-publish) as its managed identity, signing with a
-    non-exportable Key Vault key; the managed tenant PINS that key's id (master.signingKeyIds), taken from the master's
+    reachable only from the networks the managing tenant's storage firewall names, trusted only because the signature verifies.
+    71.35: the managing tenant PUBLISHES from a Container Apps job (ca-pim-publish) as its managed identity, signing with a
+    non-exportable Key Vault key; the managed tenant PINS that key's id (master.signingKeyIds), taken from the managing tenant's
     build output.
 
     Operator steps (a decision or a human) are returned separately, each with the exact command: the first-run policy
@@ -167,7 +167,7 @@ function Get-PimBaselineNetworkPlan {
 function Get-PimPullSubnetEndpointPlan {
     <#
       PURE. 71.34 -- the managed tenant's side: its Container Apps subnet must carry the Azure Storage service endpoint so
-      the master's storage sees the traffic as coming FROM THAT SUBNET (which is what its VNet rule allows).
+      the managing tenant's storage sees the traffic as coming FROM THAT SUBNET (which is what its VNet rule allows).
       -Current: the subnet's service endpoint names. -Want: Microsoft.Storage (master storage in the same region) or
       Microsoft.Storage.Global (any region). A subnet can carry only ONE of the two, so the other one already present is
       REFUSED rather than replaced (replacing it could cut something else on that subnet off its storage).
@@ -179,7 +179,7 @@ function Get-PimPullSubnetEndpointPlan {
     $other = if ($Want -eq 'Microsoft.Storage') { 'Microsoft.Storage.Global' } else { 'Microsoft.Storage' }
     if ($cur -contains $other) {
         return @{ action = 'refuse'; endpoints = $cur; reason = ("the subnet already carries $other, and a subnet can hold only one of Microsoft.Storage / Microsoft.Storage.Global. " +
-                  $(if ($other -eq 'Microsoft.Storage') { "It works as-is IF the master's storage is in the SAME region -- set baselineServiceEndpoint to Microsoft.Storage. " } else { "Microsoft.Storage.Global already covers every region -- set baselineServiceEndpoint to Microsoft.Storage.Global. " }) +
+                  $(if ($other -eq 'Microsoft.Storage') { "It works as-is IF the managing tenant's storage is in the SAME region -- set baselineServiceEndpoint to Microsoft.Storage. " } else { "Microsoft.Storage.Global already covers every region -- set baselineServiceEndpoint to Microsoft.Storage.Global. " }) +
                   'Not replaced automatically: another workload on this subnet may depend on it.') }
     }
     return @{ action = 'add'; endpoints = @($cur + $Want); reason = "adding $Want to the subnet's service endpoints" }
@@ -197,12 +197,12 @@ function Test-PimPrivateIPv4 {
 
 function Get-PimBaselineAccessMode {
     <#
-      PURE. 71.36 -- HOW a managed tenant reaches the master's bundle store, decided by the config alone:
+      PURE. 71.36 -- HOW a managed tenant reaches the managing tenant's bundle store, decided by the config alone:
         publicSigned    (default, 71.34) anonymous blob read on the public endpoint, storage firewall Deny + a VNet rule per
                         managed tenant subnet (service endpoints). For networks that are NOT connected to each other.
-        privateEndpoint (operator 2026-09-17) public network access DISABLED, one private endpoint in the master's VNet,
+        privateEndpoint (operator 2026-09-17) public network access DISABLED, one private endpoint in the managing tenant's VNet,
                         managed tenants reach it over VNet peering and resolve it through their OWN private DNS zone.
-      Master: baseline.access. Managed tenant: master.access, or implied by master.privateEndpointIp.
+      Master: baseline.access. Managed tenant: master.access, or implied by managing tenant.privateEndpointIp.
     #>
     param([Parameter(Mandatory)][ValidateSet('Master','Slave')][string]$Role, [Parameter(Mandatory)][object]$Config)
     $raw = if ($Role -eq 'Master') { "$(Get-PimMspBuildValue -Object $Config -Path 'baseline.access')".Trim() } else { "$(Get-PimMspBuildValue -Object $Config -Path 'master.access')".Trim() }
@@ -246,8 +246,8 @@ function Test-PimSqlBuildWindowState {
 
 function Get-PimBaselinePrivateDnsPlan {
     <#
-      PURE. 71.36 -- the managed tenant's A record for the master store in its own privatelink.blob.core.windows.net zone must
-      hold EXACTLY the master's private endpoint IP. Returns @{ actions = @(@{ op = 'add'|'remove'; ip }); summary }.
+      PURE. 71.36 -- the managed tenant's A record for the managing tenant store in its own privatelink.blob.core.windows.net zone must
+      hold EXACTLY the managing tenant's private endpoint IP. Returns @{ actions = @(@{ op = 'add'|'remove'; ip }); summary }.
       Add first, then remove stale ones (never leaves the name without an address mid-change).
     #>
     param([string[]]$CurrentIps = @(), [Parameter(Mandatory)][string]$WantIp)
@@ -262,7 +262,7 @@ function Get-PimBaselinePrivateDnsPlan {
 
 function Test-PimBaselinePrivateEndpointState {
     <#
-      PURE. 71.36 -- verdict on the master store's private-endpoint posture as READ BACK from ARM:
+      PURE. 71.36 -- verdict on the managing tenant store's private-endpoint posture as READ BACK from ARM:
       @{ publicNetworkAccess; allowBlobPublicAccess; containerPublicAccess; endpointIp; dnsRecordIps[]; linkResolutionPolicy;
          linkVnetId; expectedVnetId } -> @{ ok; reasons[]; lines[] }.
     #>
@@ -287,7 +287,7 @@ function Test-PimBaselinePrivateEndpointState {
 
 function Get-PimManagedTenantRegistration {
     <#
-      PURE. The registration of ONE managed tenant on the master (platform.Tenants): validated values + the parameterised
+      PURE. The registration of ONE managed tenant on the managing tenant (platform.Tenants): validated values + the parameterised
       MERGE. Replaces the documented hand SQL ("no product command registers a managed tenant", §71 gap 2).
       Ring 0..2 (0 = dev, 1 = test, 2 = broad -- §77.20). Tags as ConvertTo-PimTenantTags. Returns @{ ok; reason; sql; parameters }.
     #>
@@ -370,9 +370,9 @@ function Test-PimMspBuildConfig {
       at run time, never from the file.)
       deployIdentity.clientId + deployIdentity.certThumbprint: OPTIONAL since 71.33. Present = certificate mode (then both
       are required and validated exactly as before); absent = signed-in mode (Get-PimMspBuildAuthMode).
-      Master: baseline.storageAccount; slaves[] each tenantId + displayName (+ ring, tags).
+      Master: baseline.storageAccount; managed tenants[] each tenantId + displayName (+ ring, tags).
       Slave : adminPrefixes; master.tenantId, master.subscriptionId, master.storageAccount; master.deployIdentity.* in
-              certificate mode (a signed-in slave build never holds the master's certificate -- the steps that need it
+              certificate mode (a signed-in managed-tenant build never holds the managing tenant's certificate -- the steps that need it
               are planned as NOT RUNNABLE, see Get-PimMspBuildPlan).
     #>
     param([Parameter(Mandatory)][ValidateSet('Master','Slave')][string]$Role, [Parameter(Mandatory)][object]$Config)
@@ -428,9 +428,9 @@ function Test-PimMspBuildConfig {
     $cfgRole = "$(& $V 'role')".Trim()
     if ($cfgRole -and $cfgRole -ine $Role) { $errors.Add("the config says role '$cfgRole' but the build was asked for '$Role'") }
     if ($Role -eq 'Master') {
-        if (-not "$(& $V 'baseline.storageAccount')".Trim()) { $errors.Add("'baseline.storageAccount' is required on the master (the signed bundle's store)") }
+        if (-not "$(& $V 'baseline.storageAccount')".Trim()) { $errors.Add("'baseline.storageAccount' is required on the managing tenant (the signed bundle's store)") }
         $slaves = @(& $V 'slaves')
-        if (-not @($slaves | Where-Object { $null -ne $_ }).Count) { $warnings.Add('no slaves[] listed -- the bundle will be published for no managed tenant; register them later with Register-PimManagedTenant.ps1') }
+        if (-not @($slaves | Where-Object { $null -ne $_ }).Count) { $warnings.Add('no managed tenants[] listed -- the bundle will be published for no managed tenant; register them later with Register-PimManagedTenant.ps1') }
         $i = 0
         foreach ($s in @($slaves | Where-Object { $null -ne $_ })) {
             $r = Get-PimManagedTenantRegistration -TenantId (Get-PimMspBuildValue $s 'tenantId') -DisplayName (Get-PimMspBuildValue $s 'displayName') `
@@ -446,7 +446,7 @@ function Test-PimMspBuildConfig {
             }
             $i++
         }
-        # 71.35 CLOUD PUBLISH: the publisher is the master's own Container Apps job, so its network is the master's own
+        # 71.35 CLOUD PUBLISH: the publisher is the managing tenant's own Container Apps job, so its network is the managing tenant's own
         # subnet (the plan allows it on the store before Deny). baseline.publisherSubnetIds / publisherIps are no longer
         # needed; when given they are still validated and still allowed (e.g. a host that publishes during a migration).
         $pubSources = @(@(& $V 'baseline.publisherSubnetIds') + @(& $V 'baseline.publisherIps') | Where-Object { $null -ne $_ -and "$_".Trim() })
@@ -471,42 +471,42 @@ function Test-PimMspBuildConfig {
         $cron = "$(& $V 'baseline.publishCron')".Trim()
         if ($cron -and @($cron -split '\s+').Count -ne 5) { $errors.Add("'baseline.publishCron' '$cron' is not a 5-field cron expression") }
     } else {
-        # 71.34 PUBLIC-BUT-SIGNED (DESIGN 13.7): the slave needs NOTHING from the master but the blob's address. No master
-        # identity, no SAS, no rotation -- trust is the bundle signature, access is the master's storage network rule.
-        if ("$(& $V 'master.tenantId')".Trim() -notmatch $script:PimMspGuid) { $errors.Add("'master.tenantId' must be a GUID (the master this tenant pulls from)") }
+        # 71.34 PUBLIC-BUT-SIGNED (DESIGN 13.7): the managed tenant needs NOTHING from the managing tenant but the blob's address. No master
+        # identity, no SAS, no rotation -- trust is the bundle signature, access is the managing tenant's storage network rule.
+        if ("$(& $V 'master.tenantId')".Trim() -notmatch $script:PimMspGuid) { $errors.Add("'master.tenantId' must be a GUID (the managing tenant this tenant pulls from)") }
         $mStoreName = "$(& $V 'master.storageAccount')".Trim()
-        if (-not $mStoreName) { $errors.Add("'master.storageAccount' is required (where the master publishes the signed bundle)") }
+        if (-not $mStoreName) { $errors.Add("'master.storageAccount' is required (where the managing tenant publishes the signed bundle)") }
         elseif ($mStoreName -notmatch '^[a-z0-9]{3,24}$') { $errors.Add("'master.storageAccount' '$mStoreName' is not a storage account name (3-24 lowercase letters/digits)") }
-        if ($null -ne (& $V 'master.deployIdentity')) { $warnings.Add("'master.deployIdentity' is no longer used: a managed tenant pulls the public-but-signed bundle with no master credential (71.34) -- remove it.") }
+        if ($null -ne (& $V 'master.deployIdentity')) { $warnings.Add("'master.deployIdentity' is no longer used: a managed tenant pulls the public-but-signed bundle with no managing tenant credential (71.34) -- remove it.") }
         $dlCron = "$(& $V 'downlinkCron')".Trim()
         if ($dlCron -and @($dlCron -split '\s+').Count -ne 5) { $errors.Add("'downlinkCron' '$dlCron' is not a 5-field cron expression (UTC), e.g. '*/30 * * * *'") }
-        # 71.35 TRUST ANCHOR: the master's signing key id(s), from the master's build output (its 'signingkey' step) --
+        # 71.35 TRUST ANCHOR: the managing tenant's signing key id(s), from the managing tenant's build output (its 'signingkey' step) --
         # never from the bundle store. More than one may be pinned, so a key roll never breaks this tenant.
         $pins = @(@(& $V 'master.signingKeyIds') | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { "$_".Trim() })
-        if (-not $pins.Count) { $errors.Add("'master.signingKeyIds' is required: the key id(s) the master's build printed at its 'signingkey' step. The pull REFUSES a bundle signed by a key this tenant does not pin (71.35).") }
-        foreach ($pin in $pins) { if ($pin -cnotmatch '^[A-Za-z0-9_-]{43}$') { $errors.Add("'master.signingKeyIds' entry '$pin' is not a signing key id (43 characters of base64url, as printed by the master's signingkey step)") } }
+        if (-not $pins.Count) { $errors.Add("'master.signingKeyIds' is required: the key id(s) the managing tenant's build printed at its 'signingkey' step. The pull REFUSES a bundle signed by a key this tenant does not pin (71.35).") }
+        foreach ($pin in $pins) { if ($pin -cnotmatch '^[A-Za-z0-9_-]{43}$') { $errors.Add("'master.signingKeyIds' entry '$pin' is not a signing key id (43 characters of base64url, as printed by the managing tenant's signingkey step)") } }
         $sacc = Get-PimBaselineAccessMode -Role Slave -Config $Config
         if ($sacc -notin @('publicSigned', 'privateEndpoint')) { $errors.Add("'master.access' must be publicSigned (default) or privateEndpoint") }
         if ($sacc -eq 'privateEndpoint') {
             $pip = "$(& $V 'master.privateEndpointIp')".Trim()
-            if (-not (Test-PimPrivateIPv4 -Value $pip)) { $errors.Add("'master.privateEndpointIp' must be the private IPv4 address of the master store's private endpoint (printed by the master's 'privateendpoint' step as master.privateEndpointIp = <ip>); got '$pip'") }
+            if (-not (Test-PimPrivateIPv4 -Value $pip)) { $errors.Add("'master.privateEndpointIp' must be the private IPv4 address of the managing tenant store's private endpoint (printed by the managing tenant's 'privateendpoint' step as master.privateEndpointIp = <ip>); got '$pip'") }
             if ("$(& $V 'baselineServiceEndpoint')".Trim()) { $warnings.Add("'baselineServiceEndpoint' is ignored in privateEndpoint mode -- no storage service endpoint is added (the store is reached over the peering)") }
         }
         $sep = "$(& $V 'baselineServiceEndpoint')".Trim()
         if ($sep -and $sep -notin @('Microsoft.Storage', 'Microsoft.Storage.Global')) { $errors.Add("'baselineServiceEndpoint' must be Microsoft.Storage (master storage in the SAME region) or Microsoft.Storage.Global (any region)") }
         if (-not @(& $V 'adminPrefixes' | Where-Object { "$_".Trim() }).Count) { $errors.Add("'adminPrefixes' is required on a managed tenant (IMP-13: the MSP admin prefix is mandatory)") }
-        # BUG-175: slaveRing is THE ring of this tenant (every ring is local in the slave) -- the master's slaves[i].ring is
+        # BUG-175: slaveRing is THE ring of this tenant (every ring is local in the managed tenant) -- the managing tenant's managed tenants[i].ring is
         # only its copy. A value that is set but not 0..2 used to fall silently to 2; a typo in the one authoritative ring
         # is refused instead.
         $sr = "$(& $V 'slaveRing')".Trim()
-        if (-not $sr) { $warnings.Add("'slaveRing' not set -- the pull job uses ring 0 (dev). This value is THE ring of this tenant (local); the master's slaves[].ring is only its copy.") }
+        if (-not $sr) { $warnings.Add("'slaveRing' not set -- the pull job uses ring 0 (dev). This value is THE ring of this tenant (local); the managing tenant's managed tenants[].ring is only its copy.") }
         elseif ($sr -notmatch '^[0-2]$') { $errors.Add("'slaveRing' '$sr' is not a ring (0, 1 or 2) -- refusing rather than defaulting the tenant's own ring") }
         # 71.19: no fallback address here. A synced admin's mail/TAP recipient is its SPONSOR DEPARTMENT's owners,
         # replicated with the admin -- a build-level address would be the "manager on the person" §62 forbids.
-        if ("$(& $V 'defaultManagerEmail')".Trim()) { $errors.Add("REFUSED: 'defaultManagerEmail' is no longer used (71.19). An admin's mail and TAP go to its SPONSOR DEPARTMENT's owners -- set Department on the admin at the master and Owners on that department; remove this key.") }
+        if ("$(& $V 'defaultManagerEmail')".Trim()) { $errors.Add("REFUSED: 'defaultManagerEmail' is no longer used (71.19). An admin's mail and TAP go to its SPONSOR DEPARTMENT's owners -- set Department on the admin at the managing tenant and Owners on that department; remove this key.") }
     }
     if ("$(& $V 'master.tenantId')".Trim() -and "$(& $V 'master.tenantId')".Trim() -eq "$(& $V 'tenantId')".Trim()) { $errors.Add('master.tenantId equals tenantId -- a managed tenant cannot pull from itself') }
-    # (71.35: the signed-in warning about the unattended daily publish is gone -- the publish is a cloud job on the master's
+    # (71.35: the signed-in warning about the unattended daily publish is gone -- the publish is a cloud job on the managing tenant's
     # managed identity, so a signed-in master build has nothing it cannot run.)
     return @{ ok = ($errors.Count -eq 0); errors = @($errors.ToArray()); warnings = @($warnings.ToArray()); authMode = $authMode }
 }
@@ -611,7 +611,7 @@ function Get-PimMspBuildPlan {
     if ($hosting['Exposure'] -eq 'internal' -and -not [bool](& $V 'sql.privateEndpoint')) { $hosting['SqlPrivateEndpoint'] = $false }
     # 🔴 71.40 -- WHAT THE MANAGER'S DOWNLINK VIEW VERIFIES AGAINST. Nothing deployed either value, so every hosted Manager
     # said "no baseline document configured" and could not verify a Key Vault signed bundle even with one in hand.
-    #   slave  : the master's pinned key id(s) (the SAME master.signingKeyIds its pull job pins) + the master's bundle URL
+    #   slave  : the managing tenant's pinned key id(s) (the SAME master.signingKeyIds its pull job pins) + the managing tenant's bundle URL
     #   master : its own bundle URL. Its own key id does not exist yet at this step (signingkey runs later), so the pin
     #            is an operator step printed after the build (Get-PimMspOperatorSteps), never a guess.
     # Both are identifiers, never credentials: the URL is the plain blob URL (no query string -- refused downstream).
@@ -691,19 +691,19 @@ function Get-PimMspBuildPlan {
 
     $steps.Add((New-PimMspBuildStep -Id 'scenario' -Title "deployment scenario $scenario in pim.Settings" -Script 'tools\setup\Set-PimScenario.ps1' -HostExe 'powershell' `
         -Arguments (@{ SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; Scenario = $scenario } + $storeArgs) -Switches $storeSwitches `
-        -Why 'unset, every tenant resolves as S1 (single) -- no master publishes, no slave pulls'))
+        -Why 'unset, every tenant resolves as S1 (single) -- no managing tenant publishes, no managed tenant pulls'))
 
     if ($Role -eq 'Master') {
         $store = "$(& $V 'baseline.storageAccount')".Trim()
         $container = if ("$(& $V 'baseline.container')".Trim()) { "$(& $V 'baseline.container')".Trim() } else { 'baselines' }
         $valid = if ("$(& $V 'baseline.validDays')" -match '^\d+$') { [int](& $V 'baseline.validDays') } else { 30 }
-        $steps.Add((New-PimMspBuildStep -Id 'registry' -Title 'MSP master registry schema (platform.Tenants, pim.CentralAdmins, targeting columns)' `
+        $steps.Add((New-PimMspBuildStep -Id 'registry' -Title 'managing tenant registry schema (platform.Tenants, pim.CentralAdmins, targeting columns)' `
             -Script 'tools\setup\Initialize-PimMasterRegistry.ps1' -HostExe 'powershell' -Arguments @{ SqlServer = $sqlFqdn; Database = $db } `
             -Why 'the estate schema step creates the pim store, not the platform registry'))
         # 71.35 CLOUD PUBLISH (operator 2026-09-17: "go with cloud job publish"). The bundle is published by a Container Apps
         # job on THIS environment (ca-pim-publish), as its system-assigned identity, signed by a non-exportable Key Vault
         # key. No host, no certificate, no scheduled task. So the store's PUBLISHER network is this environment's subnet:
-        #   publishnetwork  the Microsoft.Storage service endpoint on the master's own Container Apps subnet
+        #   publishnetwork  the Microsoft.Storage service endpoint on the managing tenant's own Container Apps subnet
         #   storage         the VNet rule for that subnet is added BEFORE default-action Deny (one call, rules first)
         # ...and only then the job that writes through it (signingkey -> publishjob -> publish).
         $signVault = "$(& $V 'baseline.signingKeyVaultName')".Trim(); if (-not $signVault) { $signVault = $kv }
@@ -749,9 +749,9 @@ function Get-PimMspBuildPlan {
         foreach ($s in @(& $V 'slaves' | Where-Object { $null -ne $_ })) {
             $reg = @{ SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; ManagedTenantId = "$(Get-PimMspBuildValue $s 'tenantId')".Trim(); DisplayName = "$(Get-PimMspBuildValue $s 'displayName')".Trim()
                       Ring = $(if ($null -ne (Get-PimMspBuildValue $s 'ring')) { [int](Get-PimMspBuildValue $s 'ring') } else { 2 }); Tags = (ConvertTo-PimTenantTags -Tags (Get-PimMspBuildValue $s 'tags')).value } + $storeArgs
-            # BUG-175: slaves[i].ring is the MASTER'S COPY of the tenant's ring (previews + fleet view only). The pull is gated by
-            # the slave's OWN slaveRing (its job argument, set in the slave's build) -- nothing reconciles the two, so say so.
-            $steps.Add((New-PimMspBuildStep -Id "register-$i" -Title "register managed tenant $($reg.DisplayName) (master's copy of its ring: $($reg.Ring) -- the slave's own slaveRing decides; tags '$($reg.Tags)')" `
+            # BUG-175: managed tenants[i].ring is the MANAGING TENANT'S COPY of the tenant's ring (previews + fleet view only). The pull is gated by
+            # the managed tenant's OWN slaveRing (its job argument, set in the managed tenant's build) -- nothing reconciles the two, so say so.
+            $steps.Add((New-PimMspBuildStep -Id "register-$i" -Title "register managed tenant $($reg.DisplayName) (managing tenant's copy of its ring: $($reg.Ring) -- the managed tenant's own slaveRing decides; tags '$($reg.Tags)')" `
                 -Script 'tools\setup\Register-PimManagedTenant.ps1' -HostExe 'powershell' -Arguments $reg -Switches $storeSwitches -Why 'replaces the documented hand SQL on platform.Tenants'))
             if ($masterAccess -ne 'publicSigned') { $i++; continue }   # 71.36: over a private endpoint the peering is the access -- no per-tenant storage rule
             $slSubnet = "$(Get-PimMspBuildValue $s 'subnetResourceId')".Trim(); $slIp = "$(Get-PimMspBuildValue $s 'egressIp')".Trim()
@@ -759,7 +759,7 @@ function Get-PimMspBuildPlan {
                       SqlServerFqdn = $sqlFqdn; SqlDatabase = $db } + $storeArgs
             if ($slSubnet) { $net['SubnetResourceId'] = @($slSubnet) }
             if ($slIp)     { $net['IpAddress'] = @($slIp) }
-            $netBlocked = if (-not $slSubnet -and -not $slIp) { "slaves[$i] has no subnetResourceId / egressIp yet. Build the managed tenant first: its 'pullnetwork' step prints the subnet id. Add it as slaves[$i].subnetResourceId and re-run -From network-$i." } else { '' }
+            $netBlocked = if (-not $slSubnet -and -not $slIp) { "slaves[$i] has no subnetResourceId / egressIp yet. Build the managed tenant first: its 'pullnetwork' step prints the subnet id. Add it as managed tenants[$i].subnetResourceId and re-run -From network-$i." } else { '' }
             $steps.Add((New-PimMspBuildStep -Id "network-$i" -Title "let $($reg.DisplayName) read the bundle: storage network rule for its subnet/IP (read back, audited)" `
                 -Script 'tools\setup\Set-PimBaselineNetworkAccess.ps1' -HostExe 'powershell' -Arguments $net -Switches $storeSwitches -Blocked $netBlocked `
                 -Why 'the firewall denies every network not named; one rule per managed tenant, set once, nothing to renew'))
@@ -769,7 +769,7 @@ function Get-PimMspBuildPlan {
         # 2026-09-18; EFIF publishes from ca-pim-publish). Same steps in certificate and signed-in mode: every one runs on the az
         # context the build established, and nothing unattended depends on a person's sign-in afterwards.
         $keyArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; Location = $loc; KeyVaultName = $signVault; KeyName = $keyName }
-        # §71.40 -- the master's OWN Manager pins the key the moment it exists (merged into PIM_BaselineTrustedKeys, read
+        # §71.40 -- the managing tenant's OWN Manager pins the key the moment it exists (merged into PIM_BaselineTrustedKeys, read
         # back), so its Downlink view verifies what it publishes without an operator step.
         $keyArgs['PinOnManagerApp'] = if ("$(& $V 'managerApp')".Trim()) { "$(& $V 'managerApp')".Trim() } else { 'ca-pim-manager' }
         if ($signVaultRg) { $keyArgs['KeyVaultResourceGroup'] = $signVaultRg }
@@ -795,7 +795,7 @@ function Get-PimMspBuildPlan {
         # 71.34 -- NO READ LINK, NO ROTATION, NO MASTER CREDENTIAL (operator 2026-09-17: "go back to original design").
         # The SAS + weekly certificate rotation is gone from the plan entirely (not behind a flag). The managed tenant:
         #   pullnetwork -- puts the Azure Storage service endpoint on its OWN Container Apps subnet and PRINTS that subnet's id
-        #                  for the master (the master's storage VNet rule names it; nothing is exchanged but an address)
+        #                  for the managing tenant (the managing tenant's storage VNet rule names it; nothing is exchanged but an address)
         #   downlink    -- the pull job gets the PLAIN blob URL (no query string, no ACA secret); the pull still REFUSES a
         #                  bundle whose signature does not verify (Test-PimBaselineDoc), so the network grants reach, not trust.
         $mStore = "$(& $V 'master.storageAccount')".Trim()
@@ -803,9 +803,9 @@ function Get-PimMspBuildPlan {
         $job = if ("$(& $V 'downlinkJobName')".Trim()) { "$(& $V 'downlinkJobName')".Trim() } else { 'ca-pim-downlink-s6' }
         $endpoint = if ("$(& $V 'baselineServiceEndpoint')".Trim()) { "$(& $V 'baselineServiceEndpoint')".Trim() } else { 'Microsoft.Storage.Global' }
         if ((Get-PimBaselineAccessMode -Role Slave -Config $Config) -eq 'privateEndpoint') {
-            # 71.36: no service endpoint and nothing for the master -- the master store's name resolves to its private
+            # 71.36: no service endpoint and nothing for the managing tenant -- the managing tenant store's name resolves to its private
             # endpoint through THIS tenant's own zone, and the traffic crosses the operator's VNet peering.
-            $steps.Add((New-PimMspBuildStep -Id 'privatedns' -Title "privatelink.blob.core.windows.net on this VNet: $mStore -> $("$(& $V 'master.privateEndpointIp')".Trim()) (the master's private endpoint, over the peering)" `
+            $steps.Add((New-PimMspBuildStep -Id 'privatedns' -Title "privatelink.blob.core.windows.net on this VNet: $mStore -> $("$(& $V 'master.privateEndpointIp')".Trim()) (the managing tenant's private endpoint, over the peering)" `
                 -Script 'tools\setup\Initialize-PimBaselinePrivateDns.ps1' `
                 -Arguments @{ SubscriptionId = $sub; ResourceGroup = $rg; EnvName = $env; MasterStorageAccount = $mStore; PrivateEndpointIp = "$(& $V 'master.privateEndpointIp')".Trim() } `
                 -Why 'a private DNS zone cannot be linked across tenants, so the name is published in this tenant'))
@@ -813,7 +813,7 @@ function Get-PimMspBuildPlan {
         $steps.Add((New-PimMspBuildStep -Id 'pullnetwork' -Title "service endpoint $endpoint on this environment's subnet; print the subnet id for the master" `
             -Script 'tools\setup\Initialize-PimBaselinePullNetwork.ps1' `
             -Arguments @{ SubscriptionId = $sub; ResourceGroup = $rg; EnvName = $env; ServiceEndpoint = $endpoint; MasterStorageAccount = $mStore; MasterContainer = $mContainer } `
-            -Why "the master's bundle store denies every network it has not named; it names this subnet"))
+            -Why "the managing tenant's bundle store denies every network it has not named; it names this subnet"))
         }
         $dl = @{ Scenario = 'S6'; TenantId = $tid; SlaveRing = $(if ("$(& $V 'slaveRing')" -match '^[0-2]$') { [int](& $V 'slaveRing') } else { 0 })
                  ResourceGroup = $rg; EnvName = $env; AcrName = $acr; SubscriptionId = $sub; JobName = $job; BaselineUrl = (Get-PimBaselinePullUrl -StorageAccount $mStore -Container $mContainer)
@@ -874,36 +874,36 @@ function Get-PimMspOperatorSteps {
     $out.Add([pscustomobject]@{ id = 'smoke'; title = 'sign in to the Manager once in a browser (Easy Auth)'; when = 'after the build'
         command = "Open the ca-pim-manager URL; confirm render mode SQL, read-write for a SuperAdmin, Jobs page green or amber (never red)." })
     if ($Role -eq 'Slave') {
-        $out.Add([pscustomobject]@{ id = 'master-registration'; title = 'this tenant is registered on the master (ring + tags)'; when = 'before the first pull'
-            command = "On the master build config add it to slaves[] and re-run Invoke-PimMspBuild.ps1 -Role Master -From register-0, or: Register-PimManagedTenant.ps1 -SqlServerFqdn <master sql> -ManagedTenantId $("$(& $V 'tenantId')".Trim()) -DisplayName <name> -Ring <0-2> -Tags <tags> -TenantId <master tenant> -ClientId <master deploy app> -CertThumbprint <thumb>" })
+        $out.Add([pscustomobject]@{ id = 'master-registration'; title = 'this tenant is registered on the managing tenant (ring + tags)'; when = 'before the first pull'
+            command = "On the managing tenant build config add it to managed tenants[] and re-run Invoke-PimMspBuild.ps1 -Role Master -From register-0, or: Register-PimManagedTenant.ps1 -SqlServerFqdn <master sql> -ManagedTenantId $("$(& $V 'tenantId')".Trim()) -DisplayName <name> -Ring <0-2> -Tags <tags> -TenantId <managing tenant> -ClientId <master deploy app> -CertThumbprint <thumb>" })
         if ((Get-PimBaselineAccessMode -Role Slave -Config $Config) -eq 'privateEndpoint') {
-            $out.Add([pscustomobject]@{ id = 'peering'; title = "global VNet peering between this tenant's VNet and the master's VNet (OPERATOR -- the per-tenant deploy identities cannot authorise it)"; when = 'before the first pull succeeds'
+            $out.Add([pscustomobject]@{ id = 'peering'; title = "global VNet peering between this tenant's VNet and the managing tenant's VNet (OPERATOR -- the per-tenant deploy identities cannot authorise it)"; when = 'before the first pull succeeds'
                 command = "Both directions, allowVirtualNetworkAccess on, no gateway transit: see the runbook's peering section (an identity with Network Contributor on BOTH VNets, e.g. an admin guest in the other tenant, az login to both tenants, then az network vnet peering create --remote-vnet <full id> in each). Until it is Connected on both sides the pull job's executions fail with a connect timeout to $("$(& $V 'master.privateEndpointIp')".Trim()):443." })
         } else {
-        # 71.34: the ONLY thing the master needs from a managed tenant for the pull to work is an address.
-        $out.Add([pscustomobject]@{ id = 'master-network'; title = "the master lets this tenant's subnet read the bundle (one-time; nothing expires)"; when = 'after the pullnetwork step; before the first pull succeeds'
-            command = ("Give the master the subnet id the 'pullnetwork' step printed. On the master: set slaves[<n>].subnetResourceId in its build config and re-run Invoke-PimMspBuild.ps1 -Role Master -From network-<n> " +
+        # 71.34: the ONLY thing the managing tenant needs from a managed tenant for the pull to work is an address.
+        $out.Add([pscustomobject]@{ id = 'master-network'; title = "the managing tenant lets this tenant's subnet read the bundle (one-time; nothing expires)"; when = 'after the pullnetwork step; before the first pull succeeds'
+            command = ("Give the managing tenant the subnet id the 'pullnetwork' step printed. On the master: set managed tenants[<n>].subnetResourceId in its build config and re-run Invoke-PimMspBuild.ps1 -Role Master -From network-<n> " +
                        "(or Set-PimBaselineNetworkAccess.ps1 -SubscriptionId <master sub> -ResourceGroup <master rg> -StorageAccount $("$(& $V 'master.storageAccount')".Trim()) -SubnetResourceId <id>). " +
                        "Until then the pull job's executions fail with 403 (AuthorizationFailure) -- the bundle is refused by the network, never accepted unsigned.") })
         }
-        # 71.35: the trust anchor comes from the master's BUILD OUTPUT, not from its bundle store.
-        $out.Add([pscustomobject]@{ id = 'master-signing-key'; title = "pin the master's signing key id(s) in this build config"; when = 'before this build (the config check refuses without it)'
-            command = "master.signingKeyIds = [ '<the id the master's signingkey step printed>' ]. Ask the MSP for it over a channel you already trust -- never copy it from the bundle store. On a key roll the MSP gives you the NEW id first: add it (keep the old one), re-run -From downlink, and only then does the master switch." })
+        # 71.35: the trust anchor comes from the managing tenant's BUILD OUTPUT, not from its bundle store.
+        $out.Add([pscustomobject]@{ id = 'master-signing-key'; title = "pin the managing tenant's signing key id(s) in this build config"; when = 'before this build (the config check refuses without it)'
+            command = "master.signingKeyIds = [ '<the id the managing tenant's signingkey step printed>' ]. Ask the MSP for it over a channel you already trust -- never copy it from the bundle store. On a key roll the MSP gives you the NEW id first: add it (keep the old one), re-run -From downlink, and only then does the managing tenant switch." })
     } else {
         if ((Get-PimBaselineAccessMode -Role Master -Config $Config) -eq 'privateEndpoint') {
             $out.Add([pscustomobject]@{ id = 'slave-network'; title = 'each managed tenant: the privateEndpointIp + a global VNet peering (OPERATOR)'; when = 'after the privateendpoint step; before each managed tenant''s first pull'
                 command = 'Give each managed tenant the value the privateendpoint step printed (master.privateEndpointIp = <ip>) for its build config, and create the VNet peering between this VNet and that tenant''s VNet (both directions; the runbook''s peering section). Removing a tenant''s access: delete the peering (and Register-PimManagedTenant.ps1 -Disable). Nothing expires.' })
         } else {
         $out.Add([pscustomobject]@{ id = 'slave-network'; title = 'each managed tenant''s subnet is allowed on the bundle store'; when = 'after each managed tenant''s build'
-            command = 'Add slaves[<n>].subnetResourceId (printed by that tenant''s pullnetwork step) and re-run -From network-<n>. Removing a tenant''s access: Set-PimBaselineNetworkAccess.ps1 ... -SubnetResourceId <id> -Remove (and Register-PimManagedTenant.ps1 -Disable). No renewal exists or is needed.' })
+            command = 'Add managed tenants[<n>].subnetResourceId (printed by that tenant''s pullnetwork step) and re-run -From network-<n>. Removing a tenant''s access: Set-PimBaselineNetworkAccess.ps1 ... -SubnetResourceId <id> -Remove (and Register-PimManagedTenant.ps1 -Disable). No renewal exists or is needed.' })
         }
         $out.Add([pscustomobject]@{ id = 'signing-key-id'; title = 'give the SIGNING KEY ID to every managed tenant (an identifier, not a credential)'; when = 'after the signingkey step; before each managed tenant''s build'
             command = "The signingkey step printed 'master.signingKeyIds += <id>'. Each managed tenant puts it in its build config. KEY ROLL (never needed routinely): create a NEW key name (New-PimBaselineSigningKey.ps1 -KeyName <new>), give its id to every managed tenant and let them re-run -From downlink, THEN set baseline.signingKeyName to the new name and re-run -From signingkey. A tenant that has not pinned the new id refuses the new bundles and keeps its last applied state." })
-        # 71.40: the master's OWN Manager pin is now DONE BY the signingkey step (-PinOnManagerApp: merged, read back).
-        # This entry only says how to check it, and what to do on a master built before that step existed.
+        # 71.40: the managing tenant's OWN Manager pin is now DONE BY the signingkey step (-PinOnManagerApp: merged, read back).
+        # This entry only says how to check it, and what to do on a managing tenant built before that step existed.
         $mgrApp = if ("$(& $V 'managerApp')".Trim()) { "$(& $V 'managerApp')".Trim() } else { 'ca-pim-manager' }
-        $out.Add([pscustomobject]@{ id = 'manager-signing-key'; title = "CHECK the signing key id is pinned on this master's own Manager (the signingkey step pins it)"; when = 'after the signingkey step'
-            command = "az containerapp show -g $rg -n $mgrApp --subscription $sub --query ""properties.template.containers[0].env[?name=='PIM_BaselineTrustedKeys'].value"" -o tsv   -- must list the id the signingkey step printed. A master built BEFORE this was automated: re-run -From signingkey (idempotent; it merges the pin). Until pinned the Downlink banner says 'signed by Key Vault key <id>, which this Manager does not pin' -- the managed tenants are unaffected: they decide with their OWN pins." })
+        $out.Add([pscustomobject]@{ id = 'manager-signing-key'; title = "CHECK the signing key id is pinned on this managing tenant's own Manager (the signingkey step pins it)"; when = 'after the signingkey step'
+            command = "az containerapp show -g $rg -n $mgrApp --subscription $sub --query ""properties.template.containers[0].env[?name=='PIM_BaselineTrustedKeys'].value"" -o tsv   -- must list the id the signingkey step printed. A managing tenant built BEFORE this was automated: re-run -From signingkey (idempotent; it merges the pin). Until pinned the Downlink banner says 'signed by Key Vault key <id>, which this Manager does not pin' -- the managed tenants are unaffected: they decide with their OWN pins." })
     }
     if (Test-PimMspPrivateStore -Config $Config) {
         $out.Add([pscustomobject]@{ id = 'sql-window'; title = 'PRIVATE store: any later host-side store command needs the build window (mgmt1 is not an allowed network after the build)'; when = 'policy approval, pair test, troubleshooting from the build host'
@@ -913,7 +913,7 @@ function Get-PimMspOperatorSteps {
         $out.Add([pscustomobject]@{ id = 'signed-in-sql'; title = 'the signed-in administrator is a member of grp-pim-sql-admins'; when = 'during the build (added automatically); review afterwards'
             command = 'The build adds the signed-in user to the SQL admin group so the store steps can connect. If your organisation does not want a person there permanently, remove the membership after the build -- a re-run adds it again.' })
     }
-    $out.Add([pscustomobject]@{ id = 'verify'; title = 'live verification'; when = 'after the first pull (slave) / publish (master)'
+    $out.Add([pscustomobject]@{ id = 'verify'; title = 'live verification'; when = 'after the first pull (managed tenant) / publish (managing tenant)'
         command = "pwsh -File tests\live\Test-PimMspLivePair.ps1  (for a pair with a SAMPLE model); otherwise tests\live\Test-PimManagerHostedSmoke.ps1 against $rg / sub $sub / SQL $sql" })
     return @($out.ToArray())
 }
@@ -933,7 +933,7 @@ function Get-PimMspBuildAzExtensionDir {
 }
 
 # (SEC-27, 2026-09-18: Get-PimBaselinePublishTaskArgLine is GONE with the host publisher it scheduled --
-# setup\New-PimBaselineBundle.ps1 + tools\setup\Register-PimBaselinePublish.ps1 are deleted. The master publishes
+# setup\New-PimBaselineBundle.ps1 + tools\setup\Register-PimBaselinePublish.ps1 are deleted. The managing tenant publishes
 # only through its cloud job, ca-pim-publish, signed by its Key Vault key.)
 
 function Resolve-PimMspBuildArgument {

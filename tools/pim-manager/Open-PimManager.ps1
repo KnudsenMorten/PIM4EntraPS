@@ -229,7 +229,7 @@ if (Test-Path -LiteralPath $_sqlLib) { . $_sqlLib }
 # and the names stored on a queued action at enqueue time.
 $_queueDisplayLib = Join-Path $solutionRoot 'engine\_shared\PIM-QueueDisplay.ps1'
 if (Test-Path -LiteralPath $_queueDisplayLib) { . $_queueDisplayLib }
-# REQ-REV-DOWN-1 / REQ-REN-1 (2026-09-22): the authorised withdrawals + renames the master records
+# REQ-REV-DOWN-1 / REQ-REN-1 (2026-09-22): the authorised withdrawals + renames the managing tenant records
 # here and the publish job carries in the signed bundle (/api/downlink-intents).
 $_dlIntentLib = Join-Path $solutionRoot 'engine\_shared\PIM-DownlinkIntents.ps1'
 if (Test-Path -LiteralPath $_dlIntentLib) { . $_dlIntentLib }
@@ -490,7 +490,7 @@ if (Test-Path -LiteralPath $_featureCatalogLib) { . $_featureCatalogLib }
 $_scenarioProfileLib = Join-Path $solutionRoot 'engine\_shared\PIM-ScenarioProfile.ps1'
 if (Test-Path -LiteralPath $_scenarioProfileLib) { . $_scenarioProfileLib }
 
-# The cadence of the two self-gated MSP jobs (the managed tenant's pull, the master's publish) -- the Job schedule page
+# The cadence of the two self-gated MSP jobs (the managed tenant's pull, the managing tenant's publish) -- the Job schedule page
 # edits it, the jobs read it (engine/_shared/PIM-JobCadence.ps1). Pure; no I/O at load.
 $_jobCadenceLib = Join-Path $solutionRoot 'engine\_shared\PIM-JobCadence.ps1'
 if (Test-Path -LiteralPath $_jobCadenceLib) { . $_jobCadenceLib }
@@ -1739,7 +1739,7 @@ function Initialize-PimManagerPolicyTemplates {
 }
 
 function Initialize-PimManagerPublishJobViews {
-    # REQ-Y: on a master whose publish job is deployed, re-apply pim.vw_PublishJobControl so it carries the 'License' row
+    # REQ-Y: on a managing tenant whose publish job is deployed, re-apply pim.vw_PublishJobControl so it carries the 'License' row
     # the publish job's licence gate reads (Get-PimPublishJobControlViewRefreshSql -- a store without the view is left
     # alone). Runs at every Manager start, i.e. on every upgrade. Reported, not fatal: the publish job then reads no
     # licence through the old view and refuses, loudly.
@@ -2905,8 +2905,8 @@ function ConvertTo-PimAdminAssignmentUpnRows {
     foreach ($r in @($Rows)) {
         if ($null -eq $r) { continue }
         $col = @('Username', 'UserName') | Where-Object { ($r -is [System.Collections.IDictionary] -and $r.Contains($_)) -or ($r.PSObject.Properties[$_]) } | Select-Object -First 1
-        # 🔒 A row the MSP downlink OWNS (Owner stamped, not Local) keeps its BARE name: the slave's engine builds the UPN at
-        # the slave's own domain, and the downlink finds the rows it owns by '<bare name>|<GroupTag>' -- converting them
+        # 🔒 A row the MSP downlink OWNS (Owner stamped, not Local) keeps its BARE name: the managed tenant's engine builds the UPN at
+        # the managed tenant's own domain, and the downlink finds the rows it owns by '<bare name>|<GroupTag>' -- converting them
         # would orphan them from the sync (re-created bare next pull, the UPN copy left behind).
         $own = if ($r -is [System.Collections.IDictionary]) { if ($r.Contains('Owner')) { "$($r['Owner'])".Trim() } else { '' } } else { "$($r.Owner)".Trim() }
         if ($own -and $own -ine 'Local') { $col = $null }
@@ -3201,7 +3201,7 @@ function Write-PimManagerAlertFeedRecord {
 # ===========================================================================
 # ACCOUNTS & TAP -- read the live TAP state, and re-issue one on request.
 #
-# 🔴 WHY THIS EXISTS (BUG-66, measured live on the master tenant 2026-08-13).
+# 🔴 WHY THIS EXISTS (BUG-66, measured live on the managing tenant 2026-08-13).
 # An account whose TAP has EXPIRED can never get another one from the engine.
 # The AdminTap scope counts ANY temporaryAccessPassMethods entry as "this
 # account has a TAP" and its Equal is hardcoded $true, so an expired, unusable
@@ -3211,7 +3211,7 @@ function Write-PimManagerAlertFeedRecord {
 # next tick minted a usable TAP within seconds.
 #
 # 🔑 Entra allows exactly ONE TAP per user, so "reset" is necessarily
-# DELETE-then-CREATE. That is what was done by hand to recover the master; this
+# DELETE-then-CREATE. That is what was done by hand to recover the managing tenant; this
 # is that recovery, made a first-class, audited, one-click operation.
 #
 # 📌 A BUTTON, NOT AN AUTO-REMINT -- and that distinction is the whole design.
@@ -3337,15 +3337,15 @@ function Test-PimManagerAdminTapWanted {
     return -not ("$($Row.TargetPlatform)".Trim() -ieq 'AD')
 }
 function Get-PimManagerCentralAdminRows {
-    # 68.6 row 35: on an MSP slave, the central admins the downlink imported live in their own entity
+    # 68.6 row 35: on a managed tenant, the central admins the downlink imported live in their own entity
     # (PIM-Downlink.ps1 Invoke-PimDownlinkAdminApply). The Manager shows them, labelled 'central', and
-    # never edits them -- they are governed by the master. Empty everywhere else.
+    # never edits them -- they are governed by the managing tenant. Empty everywhere else.
     try { return @((Read-PimRows 'Account-Definitions-Admins-Central').rows) } catch { return @() }
 }
 function Get-PimManagerKnownTenantTags {
-    # 68.6 row 35: the tenant tags an admin's Target can name -- the MSP master registry's
+    # 68.6 row 35: the tenant tags an admin's Target can name -- the managing tenant registry's
     # platform.Tenants.Tags. Returns @{ known; tags }: known=$false when there is no registry to read
-    # (single tenant, a slave, or a read failure), so a caller can say "not checked" instead of guessing.
+    # (single tenant, a managed tenant, or a read failure), so a caller can say "not checked" instead of guessing.
     $cs = $null; try { $cs = Get-PimManagerStoreCs } catch { $cs = $null }
     if (-not $cs -or -not (Get-Command Invoke-PimSqlQuery -ErrorAction SilentlyContinue)) { return @{ known = $false; tags = @() } }
     try {
@@ -3362,7 +3362,7 @@ function Get-PimManagerKnownTenantTags {
     } catch { return @{ known = $false; tags = @() } }
 }
 function Test-PimManagerIsMspMaster {
-    # §71.5 -- the Replication surface exists ONLY on the MSP master (managing tenant). A single tenant has
+    # §71.5 -- the Replication surface exists ONLY on the managing tenant. A single tenant has
     # nothing to target and a managed tenant never edits targets (framework MSP-4 SURFACE item 1).
     # Fail CLOSED: an unresolvable scenario is "not the master", which hides and refuses the fields.
     if (Get-Variable -Name PIM_ManagerReplicationMasterOverride -Scope Global -ErrorAction SilentlyContinue) {
@@ -3372,24 +3372,24 @@ function Test-PimManagerIsMspMaster {
     try { $s = Get-PimActiveScenario; return ("$($s.role)" -eq 'msp-master') } catch { return $false }
 }
 # ---------------------------------------------------------------------------
-# REQ-N / REQ-O (operator 2026-09-19) -- the MSP MASTER's two pages: the managed-tenant REGISTRY and the REPLICATION
+# REQ-N / REQ-O (operator 2026-09-19) -- the managing tenant's two pages: the managed-tenant REGISTRY and the REPLICATION
 # OVERVIEW. The routes (/api/msp/tenants, /api/msp/tenants/{id}, /api/msp/replication/overview) are thin; these
 # functions hold the gates, so every path through them is master-only (fail closed, Test-PimManagerIsMspMaster) and
 # every write is SuperAdmin-only, audited and read back (Set-PimManagedTenantRegistration, the ONE writer the setup
 # script shares). Each returns @{ status; body }.
 # ---------------------------------------------------------------------------
 function Get-PimManagerMasterTenantId {
-    # REQ-N: the tenant this Manager -- the MSP master -- runs in. The registry must never list it as a managed tenant.
-    # '' when unknown; the writer then REFUSES (it cannot rule the master's own tenant out).
+    # REQ-N: the tenant this Manager -- the managing tenant -- runs in. The registry must never list it as a managed tenant.
+    # '' when unknown; the writer then REFUSES (it cannot rule the managing tenant's own tenant out).
     $t = "$($global:PIM_TenantId)".Trim()
     if (-not $t) { $t = "$($global:AzureTenantID)".Trim() }
     return $t.ToLowerInvariant()
 }
 function Get-PimManagerMspTenantsResponse {
-    # REQ-N: GET /api/msp/tenants -- every registered managed tenant (enabled and disabled), the master's COPY of its ring
-    # (labelled so), its tags, and whether the master's last publish carries it (pim.Settings['PublishLastRun']).
+    # REQ-N: GET /api/msp/tenants -- every registered managed tenant (enabled and disabled), the managing tenant's COPY of its ring
+    # (labelled so), its tags, and whether the managing tenant's last publish carries it (pim.Settings['PublishLastRun']).
     if (-not (Test-PimManagerIsMspMaster)) {
-        return @{ status = 200; body = [ordered]@{ master = $false; available = $false; tenants = @(); reason = 'The managed-tenant registry exists only on the MSP master. This tenant is not the master.' } }
+        return @{ status = 200; body = [ordered]@{ master = $false; available = $false; tenants = @(); reason = 'The managed-tenant registry exists only on the managing tenant. This tenant is not the managing tenant.' } }
     }
     $lr = $null
     try {
@@ -3414,7 +3414,7 @@ function Invoke-PimManagerMspTenantWrite {
     # leaves out keeps its stored value; a POST defaults to ring 0 (dev -- the pull job's default, §77.20) and enabled.
     param([Parameter(Mandatory)][ValidateSet('Create', 'Update')][string]$Mode, [string]$TenantId, [object]$Body)
     if (-not (Test-PimManagerIsMspMaster)) {
-        return @{ status = 403; body = [ordered]@{ ok = $false; error = 'The managed-tenant registry exists only on the MSP master. This tenant is not the master.' } }
+        return @{ status = 403; body = [ordered]@{ ok = $false; error = 'The managed-tenant registry exists only on the managing tenant. This tenant is not the managing tenant.' } }
     }
     if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
         return @{ status = 403; body = [ordered]@{ ok = $false; error = 'SuperAdmin role required to change the managed-tenant registry.' } }
@@ -3429,7 +3429,7 @@ function Invoke-PimManagerMspTenantWrite {
     }
     $name = if (& $has 'displayName') { "$($Body.displayName)" } elseif ($current) { "$($current.name)" } else { '' }
     $ringIn = if (& $has 'ring') { "$($Body.ring)".Trim() } elseif ($current -and $current.ringKnown) { "$($current.ring)" } else { '0' }
-    if ($ringIn -notmatch '^[0-2]$') { return @{ status = 400; body = [ordered]@{ ok = $false; error = "Ring '$ringIn' is not a ring -- 0 (dev), 1 (test) or 2 (broad), the master's copy of the tenant's own ring." } } }
+    if ($ringIn -notmatch '^[0-2]$') { return @{ status = 400; body = [ordered]@{ ok = $false; error = "Ring '$ringIn' is not a ring -- 0 (dev), 1 (test) or 2 (broad), the managing tenant's copy of the tenant's own ring." } } }
     $tags = if (& $has 'tags') { $Body.tags } elseif ($current) { @($current.tags) } else { @() }
     $enabled = if (& $has 'enabled') { ConvertTo-PimManagerMspBool $Body.enabled } elseif ($current) { [bool]$current.enabled } else { $true }
     $wArgs = @{ ConnectionString = $cs; TenantId = $tid; DisplayName = $name; Ring = [int]$ringIn; Tags = $tags; Enabled = [bool]$enabled
@@ -3450,11 +3450,11 @@ function Invoke-PimManagerMspTenantWrite {
     try { $pub = [bool](Request-PimManagerPublishAfterCommit -Base 'platform.Tenants' -NotAnEntity) } catch { Write-Warning "  [publish] the registry was saved, but a publish could NOT be requested: $($_.Exception.Message)" }
     return @{ status = 200; body = [ordered]@{
         ok = $true; action = "$($w.action)"; tenant = $w.after; before = $w.before; publishRequested = $pub
-        note = "Saved and read back. The tags reach the managed tenants in the next signed bundle$(if ($pub) { ' (a publish was requested; it runs within 5 minutes)' } else { '' }). The ring is only the master's copy: the tenant's own ring gates its pull." } }
+        note = "Saved and read back. The tags reach the managed tenants in the next signed bundle$(if ($pub) { ' (a publish was requested; it runs within 5 minutes)' } else { '' }). The ring is only the managing tenant's copy: the tenant's own ring gates its pull." } }
 }
 function Get-PimManagerDeploymentRingsResponse {
     # §77.20 -- GET /api/msp/deployment-rings: the three rings (0 dev, 1 test, 2 broad) with their name and tag rule, the
-    # tags the registered tenants carry, and per ring the tenants on it (master's copy) and whether each matches the rule.
+    # tags the registered tenants carry, and per ring the tenants on it (managing tenant's copy) and whether each matches the rule.
     if (-not (Test-PimManagerIsMspMaster)) {
         return @{ status = 200; body = [ordered]@{ master = $false; rings = @(); tags = @(); canWrite = $false } }
     }
@@ -3476,12 +3476,12 @@ function Get-PimManagerDeploymentRingsResponse {
         order = 'A row on ring N reaches the managed tenants whose own ring is N or lower: 0 = dev (gets new rows first), 1 = test, 2 = broad. A tag rule narrows which tenants on that ring count.' } }
 }
 function Set-PimManagerDeploymentRings {
-    # §77.20 -- PUT /api/msp/deployment-rings { rings: [ { ring; name; tags } ] }. SuperAdmin, MSP master only; the tag rule
+    # §77.20 -- PUT /api/msp/deployment-rings { rings: [ { ring; name; tags } ] }. SuperAdmin, managing tenant only; the tag rule
     # uses the replication Target grammar and is validated with the same check (malformed = refused). Audited, read
     # back, and a publish is requested: the rings travel IN the signed bundle.
     param([object]$Body)
     if (-not (Test-PimManagerIsMspMaster)) {
-        return @{ status = 403; body = [ordered]@{ ok = $false; error = 'Deployment rings exist only on the MSP master. This tenant is not the master.' } }
+        return @{ status = 403; body = [ordered]@{ ok = $false; error = 'Deployment rings exist only on the managing tenant. This tenant is not the managing tenant.' } }
     }
     if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
         return @{ status = 403; body = [ordered]@{ ok = $false; error = 'SuperAdmin role required to change the deployment rings.' } }
@@ -3522,7 +3522,7 @@ function Get-PimManagerReplicationOverviewResponse {
     # seconds per store (?refresh=1 recomputes). The browser only filters it.
     param([switch]$Refresh)
     if (-not (Test-PimManagerIsMspMaster)) {
-        return @{ status = 200; body = [ordered]@{ master = $false; groups = @(); tenants = @(); reason = 'The replication overview exists only on the MSP master. This tenant is not the master.' } }
+        return @{ status = 200; body = [ordered]@{ master = $false; groups = @(); tenants = @(); reason = 'The replication overview exists only on the managing tenant. This tenant is not the managing tenant.' } }
     }
     $cs = Get-PimManagerStoreCs
     $ov = Get-PimReplicationOverviewCached -CacheKey "$cs" -TtlSeconds 30 -Refresh:$Refresh -Loader {
@@ -3541,7 +3541,7 @@ function Get-PimManagerReplicationHeader {
     if (-not (Get-Command Get-PimReplicationKindForEntity -ErrorAction SilentlyContinue)) { return @($Header) }
     $kind = Get-PimReplicationKindForEntity -Entity $Base
     if (-not $kind) { return @($Header) }
-    # Operator 2026-09-15: "not relevant for single mode" -- off the master the admin's sync switch and ring go too.
+    # Operator 2026-09-15: "not relevant for single mode" -- off the managing tenant the admin's sync switch and ring go too.
     $drop = if ($kind -eq 'admin') { @('Replicate', 'Ring', 'Target', 'ManagementMode') } else { @('Replicate', 'Ring', 'Target') }
     return @(@($Header) | Where-Object { $drop -notcontains $_ })
 }
@@ -3571,7 +3571,7 @@ function Get-PimAdminTapState {
     $rows = @()
     try { $rows = @((Read-PimRows 'Account-Definitions-Admins').rows) } catch { $rows = @() }
     # 2026-09-21 (operator: "why is tap disabled in slave env ... that is a completely separately account"): a central admin
-    # received from the MSP master is an account IN THIS TENANT -- its TAP is issued and reset here like any other.
+    # received from the managing tenant is an account IN THIS TENANT -- its TAP is issued and reset here like any other.
     try { $rows = @($rows) + @(Get-PimManagerCentralAdminRows) } catch { }
     $wanted = @($rows | Where-Object { Test-PimManagerAdminTapWanted -Row $_ })
     $liveCheck = [bool]"$Upn".Trim()
@@ -3966,7 +3966,7 @@ function Get-PimFeatureFlags {
     # Always fully populated (defaults applied) even on an empty store.
     $raw = $null
     try { $raw = Get-PimManagerSetting -Name 'FeatureFlags' } catch {}
-    # The Manager KNOWS the topology, so pass it: a surface that needs an MSP master resolves OFF and
+    # The Manager KNOWS the topology, so pass it: a surface that needs a managing tenant resolves OFF and
     # unavailable on a single tenant, and the catalog says so instead of offering a live checkbox
     # (operator 2026-09-20: "should not be possible to select in single domain setup").
     $isMaster = $false
@@ -4151,8 +4151,8 @@ function Get-PimScenarioConfig {
     try { $catalog = @(Get-PimScenarioCatalog | ForEach-Object {
         $ml = ''; try { $ml = "$((Get-PimTenantModeLabel -Scenario $_).label)" } catch { }
         [ordered]@{ id = "$($_.id)"; label = "$($_.label)"; modeLabel = $ml; role = "$($_.role)"; summary = "$($_.summary)" } }) } catch {}
-    # 68.6 row 36 -- the tenant's MODE, by role and hosting. The master's name on a slave (pim.Settings
-    # 'MspMasterName', or $env:PIM_MspMasterName), the slave count on a master (platform.Tenants).
+    # 68.6 row 36 -- the tenant's MODE, by role and hosting. The managing tenant's name on a managed tenant (pim.Settings
+    # 'MspMasterName', or $env:PIM_MspMasterName), the managed tenant count on a managing tenant (platform.Tenants).
     $mode = $null
     try {
         $masterName = ''; $slaveCount = -1
@@ -4239,7 +4239,7 @@ function Get-PimManagerEffectiveSchedule {
 # THE MSP JOB CADENCE (operator 2026-09-18: "can the pull run every 30 min" ... "i need to be able to control cadence"
 # ... "gui must be made to control"). Two jobs are NOT scheduler-tick jobs -- they are their own Container Apps jobs that
 # fire every 5 minutes and gate themselves on a cadence stored HERE, in this tenant's own store (engine/_shared/
-# PIM-JobCadence.ps1). The cadence is LOCAL, like rings: a managed tenant sets its own pull, a master its own publish.
+# PIM-JobCadence.ps1). The cadence is LOCAL, like rings: a managed tenant sets its own pull, a managing tenant its own publish.
 #   * managed tenant (S6): 'msp-pull'          -> the Data Definition Updater (ca-pim-downlink-s6)
 #   * master (msp-master): 'baseline-publish'  -> the signed-baseline publish (ca-pim-publish)
 # Stored as DownlinkSchedule / PublishSchedule (NOT in 'JobSchedule': every Jobs-page save persists the tick catalog's
@@ -4303,9 +4303,9 @@ function Test-PimManagerProFeature {
 function Get-PimManagerCadenceJob {
     # '' | 'pull' | 'publish' -- which self-gated job this environment's Job schedule controls.
     # 🔴 A SLAVE IS A SLAVE, WHATEVER ITS HOSTING (operator, 2026-09-22: "i need to be able to
-    # trigger this as a run now in slave tenants as well"). This keyed off the scenario ID 'S6'
+    # trigger this as a run now in managed tenants as well"). This keyed off the scenario ID 'S6'
     # alone -- but S5 and S6 are BOTH managed tenants (role 'msp-managed'); S5 is the
-    # centrally-hosted one. On any slave that was not labelled exactly S6 the Job schedule showed no
+    # centrally-hosted one. On any managed tenant that was not labelled exactly S6 the Job schedule showed no
     # pull row at all, which took the cadence AND the "Run pull now" button with it, and the
     # run-now endpoint refused with 409 for the same reason.
     # It now also accepts a tenant that plainly DOES pull -- one that has a pull cadence or a
@@ -7574,7 +7574,7 @@ function Handle-Request {
 
             if ($method -eq 'GET') {
                 $storedRows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base)
-                # §71.5 -- the replication columns are the MSP master's alone; everywhere else they are
+                # §71.5 -- the replication columns are the managing tenant's alone; everywhere else they are
                 # neither shown nor (see the PUT gate) accepted.
                 $payload = [ordered]@{ path = 'sql'; source = 'sql'; header = @(Get-PimManagerReplicationHeader -Base $base -Header @($spec.defaultHeader) -IsMaster (Test-PimManagerIsMspMaster)) }
                 # 🔴 SEC-43 -- ONLY THE CALLER'S VISIBLE SLICE. This read Get-PimSqlRows directly, so a Delegated
@@ -7864,8 +7864,8 @@ function Handle-Request {
                 }
 
                 # §71.5 -- THE REPLICATION GATE, server-side, because the GUI is never the only gate. A
-                # tenant that is not the MSP master may not introduce or change Replicate (or Ring/Target on
-                # a non-admin entity); on the master every changed row must pass the same check the wizard
+                # tenant that is not the managing tenant may not introduce or change Replicate (or Ring/Target on
+                # a non-admin entity); on the managing tenant every changed row must pass the same check the wizard
                 # and the validator use -- a ManagementMode/Replicate disagreement, a bad Replicate value or
                 # a malformed Target is refused before anything is written.
                 # §79.13 SECOND APPROVER (operator 2026-09-25: "it must be possible that another person can approve a
@@ -8206,7 +8206,7 @@ function Handle-Request {
         #   PUT -- SuperAdmin, audited. Only '' or one of THIS tenant's verified domains; unknown domains are refused.
         # -------------------------------------------------------------------
         # -------------------------------------------------------------------
-        # Settings > Copy settings (operator 2026-09-21: "how can i export settings and import them into slave from master
+        # Settings > Copy settings (operator 2026-09-21: "how can i export settings and import them into managed tenant from managing tenant
         # fx naming"). GET export = Admin (a download of this environment's settings, audited). POST import = SuperAdmin:
         # dryRun=true returns the plan (current -> new per setting); dryRun=false writes ONLY the settings named in
         # 'apply' that the plan shows as new/changed, each audited. Tenant-specific settings are never in the catalog.
@@ -10631,7 +10631,7 @@ function Handle-Request {
         # scenario never silently re-runs anything; it only changes what subsequent
         # resolutions read (the deploy/engine paths apply it on their next run).
         # -------------------------------------------------------------------
-        # 68.6 row 35 -- the tenant tags an admin's "sync to slaves" picker offers (MSP master registry).
+        # 68.6 row 35 -- the tenant tags an admin's "sync to slaves" picker offers (managing tenant registry).
         if ($path -eq '/api/msp/tenant-tags' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             $kt = Get-PimManagerKnownTenantTags
@@ -10641,7 +10641,7 @@ function Handle-Request {
 
         # -------------------------------------------------------------------
         # §71 -- MSP REPLICATION TARGETING (framework MSP-4 SURFACE).
-        #   GET  /api/msp/replication/context -- is this the master, which tenants/tags a target can name
+        #   GET  /api/msp/replication/context -- is this the managing tenant, which tenants/tags a target can name
         #   POST /api/msp/replication/reach   -- "this will reach: N tenants", per row, plus the
         #                                        dependency warnings. Body: { draft: [{entity,row}] } for a
         #                                        wizard's unsaved row, and/or { pending: {entity: [rows]} }
@@ -10670,7 +10670,7 @@ function Handle-Request {
         if ($path -eq '/api/msp/replication/reach' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerIsMspMaster)) {
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ master = $false; reason = 'replication targeting exists only on the MSP master'; rows = @(); warnings = @() })
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ master = $false; reason = 'replication targeting exists only on the managing tenant'; rows = @(); warnings = @() })
                 return 200
             }
             try {
@@ -10699,7 +10699,7 @@ function Handle-Request {
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                     master = $true; tenantCount = $prev.tenantCount; rows = @($rowsOut.ToArray()); warnings = @($prev.warnings)
                     notPublished = @($prev.notPublished); dependencyIncluded = @($prev.dependencyIncluded); errors = @($prev.errors)
-                    # BUG-175 (GUI half, 2.4.371): the count above is computed with the MASTER'S COPY of each tenant's ring;
+                    # BUG-175 (GUI half, 2.4.371): the count above is computed with the MANAGING TENANT'S COPY of each tenant's ring;
                     # the tenant's own local ring is authoritative. Carried so the page can say so, plus the tenants the
                     # master holds no readable ring for (previewed as ring 2).
                     ringSource = "$($prev.ringSource)"; ringNote = "$($prev.ringNote)"
@@ -10713,8 +10713,8 @@ function Handle-Request {
         }
 
         # -------------------------------------------------------------------
-        # REQ-N / REQ-O (operator 2026-09-19) -- the MSP MASTER's registry page and replication overview.
-        #   GET  /api/msp/tenants               -- the registry: name, id, the master's COPY of the ring, tags, enabled,
+        # REQ-N / REQ-O (operator 2026-09-19) -- the managing tenant's registry page and replication overview.
+        #   GET  /api/msp/tenants               -- the registry: name, id, the managing tenant's COPY of the ring, tags, enabled,
         #                                          and whether the last publish carries it
         #   POST /api/msp/tenants               -- register a managed tenant (SuperAdmin, audited, read back)
         #   PUT  /api/msp/tenants/{tenantId}    -- edit DisplayName / Ring copy / Tags / Enabled (SuperAdmin, audited, read back)
@@ -11189,7 +11189,7 @@ function Handle-Request {
             # Never take the recipient from the request body: that would turn this into
             # "mail a credential for any admin to any address I name".
             # 2026-09-21 (operator): a CENTRAL admin's account in this tenant is this tenant's -- its TAP is reset here too
-            # (it used to be refused as "governed by the MSP master"; only its DEFINITION is the master's).
+            # (it used to be refused as "governed by the managing tenant"; only its DEFINITION is the managing tenant's).
             $row = @(Get-PimAdminTapState | Where-Object { $_.userPrincipalName -eq $upn })
             if (-not $row.Count) {
                 Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "'$upn' is not a managed Entra admin row (unknown account, or TargetPlatform=AD, which cannot hold a TAP) -- refusing to issue a TAP" }
@@ -11318,9 +11318,9 @@ function Handle-Request {
             try { $rows = @((Read-PimRows 'Account-Definitions-Admins').rows) } catch { $rows = @() }
             $row = @($rows | Where-Object { "$($_.UserPrincipalName)".Trim() -ieq $upn })[0]
             if (-not $row) {
-                # 68.6 row 35: a CENTRAL admin (imported from the MSP master) is governed at its source.
+                # 68.6 row 35: a CENTRAL admin (imported from the managing tenant) is governed at its source.
                 if (@(Get-PimManagerCentralAdminRows | Where-Object { "$($_.UserPrincipalName)".Trim() -ieq $upn }).Count) {
-                    Write-JsonResponse -Response $resp -Status 409 -Body @{ error = "'$upn' is a CENTRAL admin managed by the MSP master -- it is read-only here. Change it on the master's admin row; the next sync brings the change down." }
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{ error = "'$upn' is a CENTRAL admin managed by the managing tenant -- it is read-only here. Change it on the managing tenant's admin row; the next sync brings the change down." }
                     return 409
                 }
                 Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "'$upn' is not a managed admin account in this store." }
@@ -11486,10 +11486,10 @@ function Handle-Request {
                     return $st
                 }
             }
-            # Operator 2026-09-15: the MSP sync fields exist only on the MSP master. Refused, not ignored, so a caller that
+            # Operator 2026-09-15: the MSP sync fields exist only on the managing tenant. Refused, not ignored, so a caller that
             # bypasses the GUI (which hides them in Single and managed mode) is told why nothing changed.
             if (-not (Test-PimManagerIsMspMaster) -and @(@('ManagementMode', 'Ring', 'Target', 'Replicate') | Where-Object { $changes.Contains($_) }).Count) {
-                Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'Sync to slaves (ManagementMode / Ring / Target) can only be set on the MSP master -- this tenant is not the master.'; code = 'not-msp-master' }
+                Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'Sync to managed tenants (ManagementMode / Ring / Target) can only be set on the managing tenant -- this tenant is not the managing tenant.'; code = 'not-msp-master' }
                 return 409
             }
             # §71: a row that carries Replicate must keep AGREEING with ManagementMode (msp <-> Yes, local <-> No), or
@@ -11773,7 +11773,7 @@ function Handle-Request {
 
             $rows = @()
             try { $rows = @((Read-PimRows 'Account-Definitions-Admins').rows) } catch { $rows = @() }
-            # 68.6 row 35: a slave's own admins, then the central admins the MSP master governs (read-only here).
+            # 68.6 row 35: a managed tenant's own admins, then the central admins the managing tenant governs (read-only here).
             $localNames = @{}
             foreach ($lr in $rows) { $n = "$($lr.UserPrincipalName)".Trim().ToLowerInvariant(); if ($n) { $localNames[$n] = $true } }
             $centralRows = @(Get-PimManagerCentralAdminRows | Where-Object { -not $localNames.ContainsKey("$($_.UserPrincipalName)".Trim().ToLowerInvariant()) })
@@ -11892,11 +11892,11 @@ function Handle-Request {
                     managementMode    = "$($r.ManagementMode)".Trim()
                     ring              = "$($r.Ring)".Trim()
                     target            = "$($r.Target)".Trim()
-                    # 68.6 row 35: where this admin is governed. 'central' = imported from the MSP master,
-                    # read-only on this tenant; every change happens on the master's row.
+                    # 68.6 row 35: where this admin is governed. 'central' = imported from the managing tenant,
+                    # read-only on this tenant; every change happens on the managing tenant's row.
                     source            = $(if ($isCentral) { 'central' } else { 'local' })
                     readOnly          = [bool]($isCentral -or $upnMissing)
-                    readOnlyWhy       = $(if ($upnMissing) { 'no UserPrincipalName -- not a valid admin row' } elseif ($isCentral) { 'central admin -- governed by the MSP master' } else { '' })
+                    readOnlyWhy       = $(if ($upnMissing) { 'no UserPrincipalName -- not a valid admin row' } elseif ($isCentral) { 'central admin -- governed by the managing tenant' } else { '' })
                     # Per-row, per-verb. A verb the row itself cannot support is reported with a
                     # REASON, so the GUI can disable it and say why instead of failing on click.
                     upnMissing        = [bool]$upnMissing
@@ -12151,7 +12151,7 @@ function Handle-Request {
             }
 
             # 2026-09-21 (operator: "that is a completely separately account"): a CENTRAL admin's sessions in THIS tenant are
-            # revoked here -- the account is this tenant's; only its definition is the master's.
+            # revoked here -- the account is this tenant's; only its definition is the managing tenant's.
             try { $adminRows = @($adminRows) + @(Get-PimManagerCentralAdminRows) } catch { }
             $decision = Get-PimSessionRevokeDecision -UserPrincipalName $upn -AdminRows $adminRows
             if (-not $decision.allowed) {
@@ -12760,7 +12760,7 @@ function Handle-Request {
                     # decides whether to render a button a reader would just bounce off.
                     canWrite    = [bool]$dlo.canWrite
                     reason      = "$($dlo.reason)"
-                    # BUG-175 (GUI half, 2.4.371): the reach was planned with the master's copy of each ring.
+                    # BUG-175 (GUI half, 2.4.371): the reach was planned with the managing tenant's copy of each ring.
                     ringSource  = "$($dlo.ringSource)"
                     ringNote    = "$($dlo.ringNote)"
                 }
@@ -12901,7 +12901,7 @@ function Handle-Request {
         # ===================================================================
         # REQ-REV-DOWN-1 / REQ-REN-1 -- THE AUTHORISED WITHDRAWALS AND RENAMES (2026-09-22).
         # A managed tenant never removes something just because it stopped arriving (report-first),
-        # so a central revoke of a REPLICATED row reaches the tenants only if the master says it
+        # so a central revoke of a REPLICATED row reaches the tenants only if the managing tenant says it
         # authorised that removal. This is where that authorisation is recorded; the publish job
         # carries the list in the SIGNED bundle and the pull acts on exactly those keys.
         # 🔒 SuperAdmin: it removes access in other people's tenants. Audited, and auto-committed by
@@ -13058,7 +13058,7 @@ function Handle-Request {
                 })
             }
             # THE SELF-GATED MSP JOB (Get-PimManagerCadenceJob): on a managed tenant (S6) the 'msp-pull' row IS the pull's
-            # cadence (DownlinkSchedule), not the tick catalog's placeholder; on a master a 'baseline-publish' row is added
+            # cadence (DownlinkSchedule), not the tick catalog's placeholder; on a managing tenant a 'baseline-publish' row is added
             # (PublishSchedule). Each carries what the job recorded: last run + result, next due, a pending Run now.
             # Everywhere else the rows are exactly as before.
             $cadJob = Get-PimManagerCadenceJob
@@ -13109,11 +13109,11 @@ function Handle-Request {
             return 200
         }
 
-        # ----- Run the self-gated MSP job now (the managed tenant's pull / the master's publish) -------------------
+        # ----- Run the self-gated MSP job now (the managed tenant's pull / the managing tenant's publish) -------------------
         # POST { name: 'msp-pull' | 'baseline-publish' }. Sets the job's Run-now flag in THIS tenant's store; the job runs
         # on its next trigger (every 5 minutes) -- even when it is disabled in the Job schedule, because this is an
         # explicit act. SuperAdmin only (the same role that sets the cadence), audited. Refused (409) where the job does
-        # not run from this environment: a pull is a managed tenant's job, a publish is a master's.
+        # not run from this environment: a pull is a managed tenant's job, a publish is a managing tenant's.
         if ($path -eq '/api/job-schedule/run-now' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
@@ -13124,7 +13124,7 @@ function Handle-Request {
             $name = "$($body.name)".Trim()
             $cadJob = Get-PimManagerCadenceJob
             if (-not $cadJob -or "$((Get-PimJobCadenceDefinition -Job $cadJob).row)" -ne $name) {
-                $where = if ($name -eq 'msp-pull') { 'on a managed tenant (scenario S6) -- the pull runs in the managed tenant, not here' } elseif ($name -eq 'baseline-publish') { 'on the MSP master -- the publish runs there, not here' } else { 'for msp-pull (managed tenant) or baseline-publish (master)' }
+                $where = if ($name -eq 'msp-pull') { 'on a managed tenant (scenario S6) -- the pull runs in the managed tenant, not here' } elseif ($name -eq 'baseline-publish') { 'on the managing tenant -- the publish runs there, not here' } else { 'for msp-pull (managed tenant) or baseline-publish (managing tenant)' }
                 Write-JsonResponse -Response $resp -Status 409 -Body @{ error = "Run now for '$name' is only available $where." }
                 return 409
             }

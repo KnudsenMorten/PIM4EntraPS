@@ -109,7 +109,7 @@ if (-not $global:PIM_SqlDatabase) { throw "Engine config missing: set PIM_SqlDat
 # When a deployment scenario is active ($global:PIM_ActiveScenario / $env:PIM_Scenario),
 # resolve the SPN MODEL so the engine cert-SPN auth targets the RIGHT tenant:
 #   * multi-tenant-spn (S5): the same multi-tenant engine app authenticates AGAINST
-#     the MANAGED tenant id (the central host reaches into the slave) -- set
+#     the MANAGED tenant id (the central host reaches into the managed tenant) -- set
 #     $global:PIM_TenantId to the managed tenant ($env:PIM_ManagedTenantId).
 #   * local-spn (S1-S4/S6): a local single-tenant SPN against the ambient local tenant
 #     -- no change.

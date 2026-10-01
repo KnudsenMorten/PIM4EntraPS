@@ -25,7 +25,7 @@
                      Get-PimCsvBases seams the Manager uses (the rules are CALLED, never copied). Cross-file
                      references (a GroupTag used in an assignment must be defined) come from there.
     * replication -- the EFFECTIVE Replicate of every replicable row (Get-PimReplicateMode), and what an
-                     MSP master would actually put in the signed bundle, computed by the producer's own
+                     managing tenant would actually put in the signed bundle, computed by the producer's own
                      pure function (Select-PimBaselineBundleContent). Every row that would reach managed
                      tenants is a WARNING. -ForceLocal is the import-side rule (Replicate=No on rows /
                      ManagementMode=local on admins, unless the file sets them explicitly); the report
@@ -367,7 +367,7 @@ function Copy-PimCsvImportRow {
 
 function Get-PimCsvImportForceLocalPlan {
     <#
-      THE IMPORT-SIDE RULE (-ForceLocal). An imported row stays on the master unless the FILE says
+      THE IMPORT-SIDE RULE (-ForceLocal). An imported row stays on the managing tenant unless the FILE says
       otherwise:
         * an admin (Account-Definitions-Admins) with no ManagementMode AND no Replicate gets ManagementMode=local;
         * every other replicable row (Get-PimReplicationEntities) with no Replicate gets Replicate=No.
@@ -462,7 +462,7 @@ function Get-PimImportProtectedAdmins {
 
 function Get-PimCsvImportReplication {
     <#
-      Per replicable row: the EFFECTIVE Replicate (Get-PimReplicateMode) and whether an MSP master would
+      Per replicable row: the EFFECTIVE Replicate (Get-PimReplicateMode) and whether a managing tenant would
       PUBLISH it, decided by the producer's own pure function (Select-PimBaselineBundleContent) over the
       rows. -EntityRows: base -> @(rows). Returns @{ rows = @(...); bundle = counts; notPublished; dependencyIncluded }.
       Computed over the given rows ALONE: rows already in the target store can make a Follow row travel too.
@@ -502,7 +502,7 @@ function Get-PimCsvImportReplication {
                     if ($pub) { $why = "published: $($m.reason), Ring $("$(Get-PimDownlinkValue -Object $r -Key 'Ring')".Trim())" }
                     else {
                         $ns = @(@($b.report.defAdmins.notSynced) + @($b.report.defAdmins.mspWithoutRing) + @($b.report.defAdmins.adOnly) | Where-Object { (& $lc $_.UserName) -eq (& $lc $un) }) | Select-Object -First 1
-                        $why = if ($ns -and $ns.Contains('masterOnly') -and $ns['masterOnly']) { 'not published: ManagementMode blank -- master tenant only' }
+                        $why = if ($ns -and $ns.Contains('masterOnly') -and $ns['masterOnly']) { 'not published: ManagementMode blank -- managing tenant only' }
                                elseif ($ns) { "not published: $($ns.reason)" } else { 'not published' }
                     }
                 }
@@ -569,7 +569,7 @@ function Invoke-PimCsvImportCheck {
         [string[]]$Entities,
         # The import-side replication rule (see Get-PimCsvImportForceLocalPlan). Reported either way.
         [switch]$ForceLocal,
-        # The target is NOT an MSP master (a single or managed tenant): the replication fields mean nothing there.
+        # The target is NOT a managing tenant (a single or managed tenant): the replication fields mean nothing there.
         [switch]$NotMspMaster,
         # The target's default UPN domain, so admin rows without a UserPrincipalName resolve as the engine resolves them.
         [string]$DefaultDomain
@@ -727,9 +727,9 @@ function Invoke-PimCsvImportCheck {
             -Message "$($v.Message)" -Suggestion "$($v.Suggestion)" -Source 'validator')) | Out-Null
     }
     $findings.Add((New-PimCsvImportFinding -Severity info -Code 'CSVIMP-VAL-000' -Source 'validator' `
-        -Message ("The Manager's validator ran offline over the parsed files: naming rules use the SHIPPED defaults, policy templates are the SHIPPED templates, the target is treated as {0}, memberships naming an admin by UserName are matched {1}, managed-tenant tags are not known, and no tenant cache is available (cache-driven rules report that they did not run). Rows already in the target store are NOT seen: a reference to a row that exists only there is reported as missing." -f $(if ($NotMspMaster) { 'NOT an MSP master' } else { 'an MSP master' }), $(if ("$DefaultDomain".Trim()) { "as UserName@$("$DefaultDomain".Trim())" } else { 'by UserName (no -DefaultDomain given)' })))) | Out-Null
+        -Message ("The Manager's validator ran offline over the parsed files: naming rules use the SHIPPED defaults, policy templates are the SHIPPED templates, the target is treated as {0}, memberships naming an admin by UserName are matched {1}, managed-tenant tags are not known, and no tenant cache is available (cache-driven rules report that they did not run). Rows already in the target store are NOT seen: a reference to a row that exists only there is reported as missing." -f $(if ($NotMspMaster) { 'NOT a managing tenant' } else { 'a managing tenant' }), $(if ("$DefaultDomain".Trim()) { "as UserName@$("$DefaultDomain".Trim())" } else { 'by UserName (no -DefaultDomain given)' })))) | Out-Null
 
-    # --- replication: the effective Replicate of every row, and what the master would publish -------------
+    # --- replication: the effective Replicate of every row, and what the managing tenant would publish -------------
     $asFiles = @{}; $asImported = @{}
     foreach ($b in @($import.Keys)) { $asFiles[$b] = @($import[$b].rawRows); $asImported[$b] = @($import[$b].rows) }
     $repFiles = Get-PimCsvImportReplication -EntityRows $asFiles
@@ -743,18 +743,18 @@ function Invoke-PimCsvImportCheck {
         $fn = $im.file; $rowNo = $im.rowNumbers[$rr.index]; $line = $im.lines[$rr.index]
         if (-not $NotMspMaster -and $rr.published) {
             $findings.Add((New-PimCsvImportFinding -Severity warning -Code 'CSVIMP-REP-001' -File $fn -Entity $rr.entity -Row $rowNo -Line $line -Column 'Replicate' -Source 'replication' `
-                -Message ("{0} '{1}' WOULD BE REPLICATED to managed tenants by this MSP master -- {2}." -f $rr.kind, $rr.key, $rr.publishReason) `
-                -Suggestion 'If it must stay on the master, set Replicate=No (admins: ManagementMode=local) in the file, or import with -ForceLocal.')) | Out-Null
+                -Message ("{0} '{1}' WOULD BE REPLICATED to managed tenants by this managing tenant -- {2}." -f $rr.kind, $rr.key, $rr.publishReason) `
+                -Suggestion 'If it must stay on the managing tenant, set Replicate=No (admins: ManagementMode=local) in the file, or import with -ForceLocal.')) | Out-Null
         }
         # REP-002: an admin with a BLANK ManagementMode (no column, as in a v1 file, or an empty value) and no Replicate
-        # stays on the master tenant only. Through 2.4.377 Get-PimReplicateMode read the no-column case as Yes while the
+        # stays on the managing tenant only. Through 2.4.377 Get-PimReplicateMode read the no-column case as Yes while the
         # bundle did not publish it, and this warning named that disagreement; both now say No (-AdminSource Definition),
-        # so what remains worth a warning on an MSP master is the plain fact: a v1 admin will NOT reach managed tenants.
+        # so what remains worth a warning on a managing tenant is the plain fact: a v1 admin will NOT reach managed tenants.
         $mmBlank = ("$($rr.managementMode)" -eq '<no column>') -or -not "$($rr.managementMode)".Trim()
         if (-not $NotMspMaster -and $rr.kind -eq 'admin' -and $mmBlank -and -not "$($rr.replicate)".Trim() -and -not $rr.published) {
             $findings.Add((New-PimCsvImportFinding -Severity warning -Code 'CSVIMP-REP-002' -File $fn -Entity $rr.entity -Row $rowNo -Line $line -Column 'ManagementMode' -Source 'replication' `
-                -Message ("admin '{0}' has {1}: a blank ManagementMode means MASTER TENANT ONLY, so this MSP master will NOT replicate it to any managed tenant ({2})." -f $rr.key, $(if ("$($rr.managementMode)" -eq '<no column>') { 'NO ManagementMode column' } else { 'an empty ManagementMode' }), $rr.reason) `
-                -Suggestion 'If it must reach managed tenants, set ManagementMode=msp and a Ring in the file. To state that it stays on the master, set ManagementMode=local or import with -ForceLocal.')) | Out-Null
+                -Message ("admin '{0}' has {1}: a blank ManagementMode means MANAGING TENANT ONLY, so this managing tenant will NOT replicate it to any managed tenant ({2})." -f $rr.key, $(if ("$($rr.managementMode)" -eq '<no column>') { 'NO ManagementMode column' } else { 'an empty ManagementMode' }), $rr.reason) `
+                -Suggestion 'If it must reach managed tenants, set ManagementMode=msp and a Ring in the file. To state that it stays on the managing tenant, set ManagementMode=local or import with -ForceLocal.')) | Out-Null
         }
     }
     $findings.Add((New-PimCsvImportFinding -Severity info -Code 'CSVIMP-REP-000' -Source 'replication' `
@@ -817,7 +817,7 @@ function Write-PimCsvImportReport {
     $loc = { param($f) $p = @(); if ($f.file) { $p += $f.file }; if ($null -ne $f.row) { $p += "row $($f.row)" }; if ($null -ne $f.line) { $p += "line $($f.line)" }; if ($f.column) { $p += "col $($f.column)" }; if ($p.Count) { $p -join ' / ' } else { '<global>' } }
     Write-Host ''
     Write-Host ("CSV PRE-IMPORT CHECK -- {0}" -f $Result.path) -ForegroundColor Cyan
-    Write-Host ("  target: {0}; -ForceLocal: {1}" -f $(if ($Result.targetIsMspMaster) { 'MSP master' } else { 'not an MSP master' }), $(if ($Result.forceLocal) { 'APPLIED' } else { 'not applied (changes it would make are listed)' })) -ForegroundColor DarkGray
+    Write-Host ("  target: {0}; -ForceLocal: {1}" -f $(if ($Result.targetIsMspMaster) { 'managing tenant' } else { 'not a managing tenant' }), $(if ($Result.forceLocal) { 'APPLIED' } else { 'not applied (changes it would make are listed)' })) -ForegroundColor DarkGray
     Write-Host ''
     Write-Host ("  {0,-48} {1,-11} {2,-28} {3,5} {4,6} {5,6} {6,6}" -f 'FILE', 'STATUS', 'ENCODING / DELIM', 'ROWS', 'ERR', 'WARN', 'INFO') -ForegroundColor White
     foreach ($f in @($Result.files)) {
@@ -850,7 +850,7 @@ function Write-PimCsvImportReport {
     }
     $rep = $Result.replication
     Write-Host ''
-    Write-Host '  REPLICATION to managed tenants (what this MSP master would publish; producer rules, files only):' -ForegroundColor Cyan
+    Write-Host '  REPLICATION to managed tenants (what this managing tenant would publish; producer rules, files only):' -ForegroundColor Cyan
     foreach ($label in 'withoutForceLocal', 'withForceLocal') {
         $r = $rep[$label]
         $bb = $r.bundle

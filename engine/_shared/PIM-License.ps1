@@ -5,8 +5,8 @@
 
 .DESCRIPTION
     PIM4EntraPS Community is free for a single tenant. Pro (the licensed single-tenant features, and the
-    multi-tenant half: MSP master / managed tenants) requires a customer licence: the issued signed document,
-    stored in SQL pim.Settings[License] (IMP-42 -- no file). REQ-Y: an MSP master / slave is refused without one.
+    multi-tenant half: managing tenant / managed tenants) requires a customer licence: the issued signed document,
+    stored in SQL pim.Settings[License] (IMP-42 -- no file). REQ-Y: a managing tenant / slave is refused without one.
 
     The license is FULLY OFFLINE -- no online activation, no call-home, no
     public endpoint. It is a JSON payload signed with the maintainer's private
@@ -151,13 +151,55 @@ Function Set-PimLicense {
       verified licence object. THROWS on a failed verify or a failed write.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$LicenseText, [string]$PublicCertB64)
+    param([Parameter(Mandatory)][string]$LicenseText, [string]$PublicCertB64, [string]$TenantId = $(if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)" } else { "$env:PIM_TenantId" }))
     $chk = if ($PublicCertB64) { Get-PimLicense -LicenseText $LicenseText -PublicCertB64 $PublicCertB64 } else { Get-PimLicense -LicenseText $LicenseText }
     if ($chk.Status -in @('Invalid','Missing')) { throw "licence NOT stored: $($chk.Reason)" }
+    # BUG-278: a licence that can never make THIS environment Pro is refused at the door, not discovered later per feature.
+    if ("$($chk.Sku)".Trim() -notmatch '^(?i)pro(-.+)?$') { throw "licence NOT stored: it is a '$("$($chk.Sku)".Trim())' licence, not Pro" }
+    $bound = @(@($chk.TenantIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $tid = "$TenantId".Trim().ToLowerInvariant()
+    if ($bound.Count -and $tid -and ($bound -notcontains $tid)) { throw "licence NOT stored: it is for another tenant (bound to $($bound -join ', '); this tenant is $tid)" }
     if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { throw 'licence NOT stored: no SQL settings store (Set-PimSetting) is wired -- PIM v2 keeps the licence in SQL only' }
+    # BUG-277: was this environment Community until now? Then record the conversion. A Community install has no in-cloud
+    # updater by design; the ring gate reads this marker so the install keeps updating as before until the upgrade step
+    # (tools\setup\Upgrade-PimToPro.ps1) gives it the Pro updater and its ring.
+    $wasPro = $false
+    try { $prev = Get-PimLicense -Refresh; $wasPro = [bool](Test-PimLicenseIsProForTenant -License $prev -TenantId $TenantId).pro } catch { $wasPro = $false }
     Set-PimSetting -Name 'License' -Value $LicenseText
     $script:PimLicenseCache = $null
+    if (-not $wasPro) {
+        try {
+            Set-PimSetting -Name 'EditionUpgrade' -Value ([pscustomobject][ordered]@{ fromEdition = 'community'; toEdition = 'pro'; licensedUtc = [datetime]::UtcNow.ToString('o'); customer = "$($chk.Customer)"; licenseId = "$($chk.LicenseId)" }) | Out-Null
+        } catch { Write-Warning "[licence] the Community -> Pro conversion could not be recorded ($($_.Exception.Message)) -- run tools\setup\Upgrade-PimToPro.ps1 before the next update." }
+    }
     return $chk
+}
+
+Function Get-PimEditionUpgradeState {
+    <#
+      PURE. BUG-277: is this environment a Community install that registered a Pro licence and has NOT been given the Pro
+      updater yet? -Marker = pim.Settings['EditionUpgrade'], -UpdateState = pim.Settings['UpdateState'] (written by the
+      in-cloud updater on every run). Pending while the marker exists and no updater run is recorded after it.
+      Returns @{ pending; since; reason; command }.
+    #>
+    param($Marker, $UpdateState)
+    $m = $Marker; if ($m -is [string]) { try { $m = $m | ConvertFrom-Json } catch { $m = $null } }
+    $cmd = '.\tools\setup\Upgrade-PimToPro.ps1 -SourceUrlTemplate ''<the Pro update feed you received with your licence>'' -Apply'
+    if (-not $m -or "$($m.toEdition)" -ne 'pro') { return [pscustomobject]@{ pending = $false; since = ''; reason = ''; command = $cmd } }
+    $since = "$($m.licensedUtc)"
+    $u = $UpdateState; if ($u -is [string]) { try { $u = $u | ConvertFrom-Json } catch { $u = $null } }
+    $last = ''; foreach ($n in 'lastRunUtc', 'finishedUtc', 'startedUtc', 'updatedUtc', 'utc') { if ($u -and $u.PSObject.Properties[$n] -and "$($u.$n)") { $last = "$($u.$n)"; break } }
+    $pending = $true
+    if ($last -and $since) {
+        try {
+            $ls = [datetime]::Parse($last, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal')
+            $ss = [datetime]::Parse($since, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal')
+            if ($ls -gt $ss) { $pending = $false }
+        } catch { }
+    }
+    return [pscustomobject]@{ pending = $pending; since = $since
+        reason = $(if ($pending) { 'the Pro licence is registered; this install still updates like the Community edition until the Pro updater is installed' } else { 'the Pro updater runs (it has reported since the licence was registered)' })
+        command = $cmd }
 }
 
 Function Get-PimLicense {
@@ -344,11 +386,34 @@ Function Test-PimProFeature {
     return $true
 }
 
+Function Test-PimLicenseIsProForTenant {
+    <#
+      PURE. BUG-278 (2026-10-01): THE edition verdict -- the same rule the hard gate (Test-PimProLicence) applies, minus the
+      per-feature check: Status Valid or Grace, sku Pro / Pro-<variant> (never Community, never 'Core'), and a tenant
+      binding that includes -TenantId (or no binding). The badge, GET /api/license, the updater's edition read and the
+      import all use it, so the header can no longer say Pro while every Pro feature is locked.
+      Returns @{ pro; reason }. A bound licence with an UNKNOWN tenant is not Pro (fail closed, as the gate).
+    #>
+    param($License, [string]$TenantId)
+    if (-not $License) { return [pscustomobject]@{ pro = $false; reason = 'no Pro licence is installed' } }
+    $st = "$($License.Status)"
+    if ($st -notin @('Valid', 'Grace')) { return [pscustomobject]@{ pro = $false; reason = $(if ($st -eq 'Missing') { 'no Pro licence is installed' } else { "the licence is $st ($($License.Reason))" }) } }
+    $sku = "$($License.Sku)".Trim()
+    if ($sku -notmatch '^(?i)pro(-.+)?$') { return [pscustomobject]@{ pro = $false; reason = "the licence is a '$sku' licence, not Pro" } }
+    $bound = @(@($License.TenantIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $tid = "$TenantId".Trim().ToLowerInvariant()
+    if ($bound.Count -and -not $tid) { return [pscustomobject]@{ pro = $false; reason = "the licence is bound to tenant $($bound -join ', '), and this environment's tenant id is not known" } }
+    if ($bound.Count -and ($bound -notcontains $tid)) { return [pscustomobject]@{ pro = $false; reason = "the licence is for another tenant (bound to $($bound -join ', '); this tenant is $tid)" } }
+    return [pscustomobject]@{ pro = $true; reason = $(if ($st -eq 'Grace') { "Pro licence in its grace period ($($License.Reason))" } else { "Pro licence for '$($License.Customer)'" }) }
+}
+
 Function Get-PimEdition {
-    # The active EDITION: 'Pro' when a valid (or in-grace) license is present,
-    # else 'Community' (free). Drives feature gating + the manager edition badge.
+    # The active EDITION: 'Pro' when a valid (or in-grace) PRO licence for THIS tenant is present, else 'Community' (free).
+    # Drives the manager edition badge. BUG-278: was "any Valid licence" -- a Community-sku or another tenant's licence
+    # showed Pro while the hard gate (which checks both) kept every Pro feature locked.
+    param([string]$TenantId = $(if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)" } else { "$env:PIM_TenantId" }))
     $lic = Get-PimLicense
-    if ($lic.Status -in @('Valid', 'Grace')) { return $script:PimProEditionName }
+    if ((Test-PimLicenseIsProForTenant -License $lic -TenantId $TenantId).pro) { return $script:PimProEditionName }
     return $script:PimCommunityEditionName
 }
 
@@ -364,9 +429,9 @@ Function Get-PimLicenseStatusText {
 }
 
 # =====================================================================================================================
-# REQ-Y (operator 2026-09-19: "msp master slave require license pro" / "enforce in code" / "write text to contact
+# REQ-Y (operator 2026-09-19: "managing tenant slave require license pro" / "enforce in code" / "write text to contact
 # mok@mortenknudsen.net for license" / "msp license is req now"). A TARGETED enforcement: an environment that runs as an
-# MSP MASTER (publishes the signed baseline) or an MSP SLAVE (pulls it) needs a Pro licence bound to its tenant.
+# MANAGING TENANT (publishes the signed baseline) or an MSP SLAVE (pulls it) needs a Pro licence bound to its tenant.
 #   * It does NOT read Test-PimProLicenseEnforced. The global switch stays OFF, so every OTHER Pro feature stays free.
 #   * Valid = run. Grace (the licence's own graceDays after validTo) = run, with a warning. Anything else = refuse.
 #   * No introduction grace: the requirement is immediate (operator 2026-09-19, "msp license is req now").
@@ -375,6 +440,10 @@ Function Get-PimLicenseStatusText {
 # the MSP-page banners.
 # =====================================================================================================================
 $script:PimLicenseContact = 'mok@mortenknudsen.net'
+# Operator 2026-10-01: "https://invardia.com ... is the website for buying pro version. it is also the support page
+# (portal.invardia.com) for support to paid licenses".
+$script:PimProBuyUrlDefault  = 'https://invardia.com'
+$script:PimProSupportUrl     = 'https://portal.invardia.com'
 # The licence feature names that cover MSP: the Pro catalog's MspFanout, the feature catalog key msp.downlink, and 'Msp'.
 # '*' (all Pro features) covers it too.
 $script:PimMspLicenseFeatures = @('MspFanout', 'msp.downlink', 'Msp')
@@ -527,8 +596,8 @@ Function Test-PimProLicence {
 Function Test-PimMspLicense {
     <#
     .SYNOPSIS
-        REQ-Y. Does this MSP master / slave hold a Pro licence that covers MSP for its tenant? (Test-PimProLicence with
-        the MSP feature names, labelled "MSP master" / "MSP slave".) The result also carries role = master | slave.
+        REQ-Y. Does this managing tenant / slave hold a Pro licence that covers MSP for its tenant? (Test-PimProLicence with
+        the MSP feature names, labelled "managing tenant" / "MSP slave".) The result also carries role = master | slave.
     #>
     [CmdletBinding()]
     param(
@@ -540,7 +609,10 @@ Function Test-PimMspLicense {
         [string]$PublicCertB64
     )
     $roleWord = if ($Role -eq 'Slave') { 'slave' } else { 'master' }
-    $a = @{ FeatureNames = $script:PimMspLicenseFeatures; Label = "MSP $roleWord"; FeatureWord = 'MSP'; TenantId = $TenantId; StoreError = $StoreError; SqlServer = $SqlServer }
+    # §85 (operator 2026-10-01: "slave is not nice"): the WORDS are "managing tenant" / "managed tenant"; the role field the
+    # API and the jobs read stays master | slave.
+    $roleLabel = if ($Role -eq 'Slave') { 'Managed tenant (MSP)' } else { 'Managing tenant (MSP)' }
+    $a = @{ FeatureNames = $script:PimMspLicenseFeatures; Label = $roleLabel; FeatureWord = 'MSP'; TenantId = $TenantId; StoreError = $StoreError; SqlServer = $SqlServer }
     if ($PublicCertB64) { $a['PublicCertB64'] = $PublicCertB64 }
     if ($PSBoundParameters.ContainsKey('LicenseText')) { $a['LicenseText'] = "$LicenseText" }
     $r = Test-PimProLicence @a
@@ -572,7 +644,7 @@ Function Invoke-PimMspLicenseGate {
         $cmd = Get-PimLicenseRegisterCommand -SqlServer $SqlServer -TenantId $TenantId
         $r = [pscustomobject]@{ ok = $false; status = 'Invalid'; grace = $false; customer = ''; sku = ''; validTo = ''; graceUntil = ''; tenantIds = @(); tenantId = "$TenantId"; role = $roleWord
             reason = "the licence check failed ($($_.Exception.Message))"; contact = "$script:PimLicenseContact"; command = $cmd
-            message = ("MSP {0} requires a PIM4EntraPS Pro licence -- the licence check failed ({1}). Contact {2} for a licence; register it with: {3}" -f $roleWord, $_.Exception.Message, $script:PimLicenseContact, $cmd) }
+            message = ("{0} requires a PIM4EntraPS Pro licence -- the licence check failed ({1}). Contact {2} for a licence; register it with: {3}" -f $(if ($Role -eq 'Slave') { 'Managed tenant (MSP)' } else { 'Managing tenant (MSP)' }), $_.Exception.Message, $script:PimLicenseContact, $cmd) }
     }
     $lvl = if (-not $r.ok) { 'ERROR' } elseif ($r.grace) { 'WARN' } else { 'INFO' }
     if ($Log) { & $Log $r.message $lvl }
@@ -591,7 +663,7 @@ Function Get-PimLicenseApiBody {
     $ma = @{ Role = $(if ($MspRole) { $MspRole } else { 'Master' }); TenantId = $TenantId; SqlServer = $SqlServer }
     if ($PublicCertB64) { $ma['PublicCertB64'] = $PublicCertB64 }
     $m = Test-PimMspLicense @ma
-    $pro = ("$($lic.Status)" -in @('Valid', 'Grace'))
+    $pro = [bool](Test-PimLicenseIsProForTenant -License $lic -TenantId $TenantId).pro   # BUG-278: sku + tenant, as the gate
     $statusText = switch ("$($lic.Status)") {
         'Missing' { 'Community (free) -- no Pro licence installed' }
         'Valid'   { "Pro -- $($lic.Customer) -- valid until $($m.validTo)" }
@@ -622,9 +694,12 @@ Function Get-PimLicenseApiBody {
         contact      = "$script:PimLicenseContact"
         # Free edition (operator 2026-09-26): where "Buy Pro" goes. An https URL from PIM_PRO_BUY_URL (env or global) --
         # anything else is ignored and the page mails the contact instead.
-        buyUrl       = $(foreach ($u in @("$($global:PIM_ProBuyUrl)", "$env:PIM_PRO_BUY_URL")) { if ("$u".Trim() -match '^https://[^\s"''<>]+$') { "$u".Trim(); break } })
+        buyUrl       = $(foreach ($u in @("$($global:PIM_ProBuyUrl)", "$env:PIM_PRO_BUY_URL", "$script:PimProBuyUrlDefault")) { if ("$u".Trim() -match '^https://[^\s"''<>]+$') { "$u".Trim(); break } })
+        supportUrl   = "$script:PimProSupportUrl"   # support for paid licences (shown once the environment is Pro)
         command      = "$($m.command)"
-        editionLine  = "Free: the community edition for a single tenant. Pro: the licensed features for a single tenant, and the multi-tenant half (MSP master / managed tenants). Contact $script:PimLicenseContact."
+        # BUG-277: a Community install that registered a Pro licence and has not got the Pro updater yet -> the page says how.
+        upgrade      = $(try { $mk = $null; $us = $null; if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { $mk = Get-PimSetting -Name 'EditionUpgrade'; $us = Get-PimSetting -Name 'UpdateState' }; $ug = Get-PimEditionUpgradeState -Marker $mk -UpdateState $us; [ordered]@{ pending = [bool]($pro -and $ug.pending); since = $ug.since; reason = $ug.reason; command = $ug.command } } catch { [ordered]@{ pending = $false; since = ''; reason = ''; command = '' } })
+        editionLine  = "Free: the community edition for a single tenant. Pro: the licensed features for a single tenant, and the multi-tenant half (managing tenant / managed tenants). Contact $script:PimLicenseContact."
         # key -> { label; scope; ok; grace; state ok|grace|locked; reason; message } for every Pro feature of the catalog
         # (the GUI's "Pro -- contact" notices). Empty when the catalog is not loaded in this process.
         pro          = $(if (Get-Command Get-PimProFeatureStates -ErrorAction SilentlyContinue) { $pa = @{ TenantId = $TenantId; SqlServer = $SqlServer }; if ($PublicCertB64) { $pa['PublicCertB64'] = $PublicCertB64 }; Get-PimProFeatureStates @pa } else { [ordered]@{} })

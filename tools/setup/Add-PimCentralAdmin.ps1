@@ -22,7 +22,7 @@
     hand is precisely how it gets violated.
 
     📌 IT ALSO ADDS THE OPTIONAL COLUMNS THE BUNDLE ALREADY EXPECTS. The bundle producer
-    (Get-PimBaselineBundlePayload, engine/_shared/PIM-BaselinePublish.ps1, run by the master's ca-pim-publish job) selects `Target, TapLifetimeHours, ManagerEmail` (71.17: no longer CreateTap -- a
+    (Get-PimBaselineBundlePayload, engine/_shared/PIM-BaselinePublish.ps1, run by the managing tenant's ca-pim-publish job) selects `Target, TapLifetimeHours, ManagerEmail` (71.17: no longer CreateTap -- a
     TAP is enforced for every Entra admin) and falls back with "(no TapLifetimeHours/ManagerEmail in
     pim.CentralAdmins -- the downlink will apply its own default)" when they are absent. 📌 71.19: ManagerEmail is LEGACY -- an admin's mail and TAP go to its
     SPONSOR DEPARTMENT's owners (Account-Definitions-Admins.Department -> PIM-Definitions-Departments.Owners), which is
@@ -38,7 +38,7 @@
     ManagerEmail is used only when no department resolves. 🔑 The account itself needs no mailbox: the mail is SENT
     FROM the shared sender mailbox TO the recipient. 🪤 pim.CentralAdmins has no Department column, so for an admin
     that exists ONLY in this registry ManagerEmail is still the only recipient that travels -- omit it only when the
-    admin's sponsor department is set where the master publishes it. With no recipient at all the engine REFUSES to
+    admin's sponsor department is set where the managing tenant publishes it. With no recipient at all the engine REFUSES to
     mint a TAP rather than mint one nobody receives.
 
 .PARAMETER Ring

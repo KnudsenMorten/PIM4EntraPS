@@ -2,18 +2,18 @@
 <#
 .SYNOPSIS
     71.34 -- the MANAGED tenant's half of the public-but-signed pull (DESIGN 13.7): put the Azure Storage service endpoint
-    on this environment's Container Apps subnet, and print that subnet's resource id for the MSP master.
+    on this environment's Container Apps subnet, and print that subnet's resource id for the managing tenant.
 
 .DESCRIPTION
-    The master's bundle store denies every network it has not named (Set-PimBaselineNetworkAccess.ps1). It names a
+    The managing tenant's bundle store denies every network it has not named (Set-PimBaselineNetworkAccess.ps1). It names a
     managed tenant by a VIRTUAL NETWORK RULE for this subnet -- Azure accepts a subnet from another Microsoft Entra tenant
     by its fully qualified id -- and a VNet rule only matches traffic that arrives over a service endpoint:
       Microsoft.Storage         reaches storage accounts in the SAME region as this VNet
       Microsoft.Storage.Global  reaches storage accounts in ANY region (the default: a managed tenant does not need to
-                                know which region the master chose)
+                                know which region the managing tenant chose)
     A subnet can carry only one of the two; the other one already present is REFUSED, not replaced.
 
-    Nothing is exchanged with the master except the subnet id this script prints. No credential, no link, nothing that
+    Nothing is exchanged with the managing tenant except the subnet id this script prints. No credential, no link, nothing that
     expires. The subnet is READ FROM THE CONTAINER APPS ENVIRONMENT (authoritative; -SubnetId is only the fallback), and
     the endpoint list is MERGED (az --service-endpoints replaces the whole list) and read back.
 
@@ -22,7 +22,7 @@
     it -- such an account needs a VNet rule for this subnet instead.
 
 .OUTPUTS
-    The subnet resource id (a string, on the pipeline) -- give it to the master as slaves[<n>].subnetResourceId.
+    The subnet resource id (a string, on the pipeline) -- give it to the managing tenant as managed tenants[<n>].subnetResourceId.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -70,7 +70,7 @@ if ($plan.action -eq 'add' -and $PSCmdlet.ShouldProcess($SubnetId, "service endp
     $ErrorActionPreference = 'Stop'
     if ($code -ne 0 -or $back -notcontains $ServiceEndpoint) {
         throw ("read-back FAILED: the subnet carries '$($back -join ', ')' after the update (az exit $code). If the subnet is delegated to " +
-               'Microsoft.App/environments and the platform refused the endpoint, the fallback is a private endpoint to the master store (DESIGN 13.7 option 1).')
+               'Microsoft.App/environments and the platform refused the endpoint, the fallback is a private endpoint to the managing tenant store (DESIGN 13.7 option 1).')
     }
     Note "read back: $($back -join ', ')"
 }
@@ -82,8 +82,8 @@ if ($ForPublisher) {
     Write-Output $SubnetId
     exit 0
 }
-Write-Host '  GIVE THIS TO THE MSP MASTER (it is an address, not a credential):' -ForegroundColor Yellow
-Write-Host "    slaves[<n>].subnetResourceId = $SubnetId" -ForegroundColor Yellow
+Write-Host '  GIVE THIS TO THE managing tenant (it is an address, not a credential):' -ForegroundColor Yellow
+Write-Host "    managed tenants[<n>].subnetResourceId = $SubnetId" -ForegroundColor Yellow
 if ($url) { Write-Host "    this tenant pulls: $url  (public-but-signed; the pull refuses an unsigned bundle)" -ForegroundColor DarkGray }
 Write-Output $SubnetId
 exit 0

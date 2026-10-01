@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    71.35 -- the FIRST PUBLISH: start the master's publish job (ca-pim-publish) now and WAIT for the execution to end.
+    71.35 -- the FIRST PUBLISH: start the managing tenant's publish job (ca-pim-publish) now and WAIT for the execution to end.
 
 .DESCRIPTION
     A managed tenant has nothing to pull until baseline-latest.json exists. The build host CANNOT read the blob to check

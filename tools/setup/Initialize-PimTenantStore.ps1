@@ -7,7 +7,7 @@
   were each done BY HAND while bringing the test estate up. They belong in a script, because a
   proof environment must be reachable only by automation:
 
-    1. (IMP-49 d) NOTHING in `master`. This used to give the modern SPN a master user with
+    1. (IMP-49 d) NOTHING in `master`. This used to give the modern SPN a managing tenant user with
        **dbmanager** (create/drop ANY database on the server) "because Initialize-PimSqlDatabase
        connects to master" -- but this script never calls Initialize-PimSqlDatabase, and nothing
        in the engine does: the database already exists. A dbmanager membership an earlier run

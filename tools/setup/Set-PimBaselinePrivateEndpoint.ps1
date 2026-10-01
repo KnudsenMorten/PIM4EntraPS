@@ -1,21 +1,21 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    71.36 -- PRIVATE-ENDPOINT access to the MSP master's signed-baseline store (baseline.access = "privateEndpoint").
+    71.36 -- PRIVATE-ENDPOINT access to the managing tenant's signed-baseline store (baseline.access = "privateEndpoint").
     For master and managed tenants on PRIVATE networks joined by VNet peering (operator 2026-09-17: "<master> and <managed tenant> are on
     2 completely separate networks. They will run PRIVATE ONLY. They will run global VNet peering").
 
 .DESCRIPTION
     Converges, on the MASTER, in this order (nothing is closed before the private path exists):
-      1. the private-endpoint subnet in the master's VNet (never the Container Apps subnet: it is delegated to
+      1. the private-endpoint subnet in the managing tenant's VNet (never the Container Apps subnet: it is delegated to
          Microsoft.App/environments and cannot hold a private endpoint) -- found, or created from -PrivateEndpointSubnetAddressPrefix
       2. ONE private endpoint pe-<store>-blob (group 'blob') in that subnet
-      3. private DNS zone privatelink.blob.core.windows.net in the master's resource group, linked to the master's VNet
+      3. private DNS zone privatelink.blob.core.windows.net in the managing tenant's resource group, linked to the managing tenant's VNet
          with resolution policy NxDomainRedirect (a storage account elsewhere that has its own private endpoint -- one
          this zone holds no record for -- still resolves publicly instead of failing), and the endpoint's DNS zone group
          (Azure writes the A record)
       4. anonymous read of the BLOB (container access 'blob', no listing) -- KEPT on purpose: the managed tenant's pull job
-         has NO identity the master's tenant can authorise (a managed identity cannot be granted data rights on a storage
+         has NO identity the managing tenant's tenant can authorise (a managed identity cannot be granted data rights on a storage
          account in another tenant) and a SAS is refused by design (no credential, nothing that expires). Over a private
          endpoint the reachability is the peered network; the trust is still the bundle's signature.
       5. publicNetworkAccess DISABLED -- last. After this the store is reachable ONLY through the private endpoint: from the
@@ -56,7 +56,7 @@ $dnsRg = if ("$PrivateDnsResourceGroup".Trim()) { "$PrivateDnsResourceGroup".Tri
 $peName = "pe-$StorageAccount-blob"
 
 $acct = "$(az account show --query id -o tsv 2>$null)".Trim()
-if ($acct -ne "$SubscriptionId".Trim()) { throw "az context is '$acct', not the master subscription '$SubscriptionId' -- refusing." }
+if ($acct -ne "$SubscriptionId".Trim()) { throw "az context is '$acct', not the managing tenant subscription '$SubscriptionId' -- refusing." }
 $ErrorActionPreference = 'Continue'
 $sa = AzJson storage account show @sub -g $ResourceGroup -n $StorageAccount
 if (-not $sa) { throw "storage account '$StorageAccount' not found in $ResourceGroup -- run the storage step (New-PimBaselineStorage.ps1) first." }

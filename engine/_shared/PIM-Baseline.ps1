@@ -39,12 +39,12 @@ $script:PimBaselinePublicCertB64 = 'MIID+TCCAmGgAwIBAgIQNSAUfKUEGLRHFcG6VRAUzjAN
 # -----------------------------------------------------------------------------
 # 71.35 -- KEY VAULT SIGNED BUNDLES (the cloud publish job, ca-pim-publish).
 #
-# A bundle published by the master's Container Apps job is signed by an RSA key in the
+# A bundle published by the managing tenant's Container Apps job is signed by an RSA key in the
 # master's Key Vault (non-exportable; RS256 = RSASSA-PKCS1-v1_5 over SHA-256, the SAME
 # primitive the certificate path uses). Such a bundle CARRIES its public key
 # (signingKey = { kty, n, e, kid }), and that is NOT what makes it trusted: the key's
 # RFC 7638 JWK thumbprint must be one this tenant PINS (PIM_BaselineTrustedKeys, a
-# config value given by the slave build -- never fetched from the bundle store). Several
+# config value given by the managed tenant build -- never fetched from the bundle store). Several
 # keys may be pinned at once, so a key roll is: pin the new id everywhere, then switch.
 # A bundle WITHOUT signingKey is verified exactly as before, against the embedded
 # CN=PIM4EntraPS-Baseline certificate (legacy, still live on EFIF -> RIDE).
@@ -138,7 +138,7 @@ function Test-PimBaselineKeySignature {
     if (@($TrustedKeyIds) -cnotcontains $id) {
         throw ("UNTRUSTED SIGNING KEY -- the bundle is signed by key $id, which this tenant does not pin " +
                "($(@($TrustedKeyIds).Count) key(s) pinned in PIM_BaselineTrustedKeys). A bundle store is not a trust anchor: add the " +
-               "master's key id to this tenant's build config (master.signingKeyIds) if, and only if, the master gave it to you.")
+               "master's key id to this tenant's build config (master.signingKeyIds) if, and only if, the managing tenant gave it to you.")
     }
     $rsa = New-PimBaselineRsaPublicKey -N $n -E $e
     try {
@@ -248,7 +248,7 @@ function Get-PimBaselineBundle {
 }
 
 # -----------------------------------------------------------------------------
-# SEC-24 / SEC-25 -- THE SLAVE'S TRUST STATE, IN ITS OWN pim.Settings.
+# SEC-24 / SEC-25 -- THE MANAGED TENANT'S TRUST STATE, IN ITS OWN pim.Settings.
 # -----------------------------------------------------------------------------
 function Get-PimBaselineTrustSettingName {
     # One place for the two pim.Settings names (literal on purpose: no $script: state to lose across dot-sources).

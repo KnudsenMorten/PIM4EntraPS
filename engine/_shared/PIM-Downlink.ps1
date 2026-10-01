@@ -11,18 +11,18 @@ if (-not (Get-Command Get-PimAdminAutoDisableDate -ErrorAction SilentlyContinue)
 }
 
 # PIM-Downlink.ps1 -- the PURE, offline-testable decision brain for the §31.3
-# master->managed (slave) admin/permission SYNC (downlink) + the scenario-bound
+# master->managed (managed tenant) admin/permission SYNC (downlink) + the scenario-bound
 # engine runner. Phase 2 of the §31 hosting/edition scenario matrix (S1-S6).
 #
 # WHAT this delivers (the §31.3 wiring gap the live matrix asserts):
-#   * a ring-gated master->managed admin/permission downlink: PULL the master's
+#   * a ring-gated master->managed admin/permission downlink: PULL the managing tenant's
 #     SIGNED baseline (RSA-SHA256, same trust model as .pimlicense -- verify with
 #     the embedded PUBLIC cert, refuse on bad sig / expiry / rollback), FILTER the
 #     admin set to admin.Ring <= slave.Ring, STAGE per-tenant sync files in the
-#     resolved folder (central-msp vs local-slave), and APPLY into the slave by
+#     resolved folder (central-msp vs local-slave), and APPLY into the managed tenant by
 #     composing the EXISTING Invoke-PimMspFanout (pull-not-push: the MASTER never
 #     writes into a managed tenant; the central/managed engine applies the synced
-#     rows into the slave via ITS OWN per-tenant SPN).
+#     rows into the managed tenant via ITS OWN per-tenant SPN).
 #   * a scenario-bound runner: resolve the scenario, and for single/master run the
 #     engine apply; for managed run the downlink-sync THEN the engine apply.
 #
@@ -36,7 +36,7 @@ if (-not (Get-Command Get-PimAdminAutoDisableDate -ErrorAction SilentlyContinue)
 #     the sync files go?", "is the second pass a no-op?", "which topology branch?" --
 #     unit-testable in real PS 5.1 with NO live tenant.
 #   * pull-not-push + ring-gated + guardrails: the downlink only ever PULLS the
-#     ring's approved baseline; an admin above the slave's ring is never synced; the
+#     ring's approved baseline; an admin above the managed tenant's ring is never synced; the
 #     apply composes the engine's mass-disable guard (empty desired never prunes).
 #   * idempotent: a second pass produces zero changes (find-or-create fan-out +
 #     anti-rollback baseline marker + stable sync-file content hash).
@@ -92,8 +92,8 @@ function Get-PimDownlinkValue {
 
 # 71.15 (pure) -- a lifecycle DATE field as text, whatever the JSON parser made of it. pwsh 7's ConvertFrom-Json and
 # Invoke-RestMethod turn an ISO-8601 string ('2026-10-01T08:00:00Z') into a [datetime], and "$value" then renders it in
-# the host culture ('10/01/2026 08:00:00'), dropping the zone. The slave's copy of a master's ProvisionDate /
-# TAPStartDate / AutoDisableDate must stay the ISO text the master wrote, so a [datetime] is rendered back as ISO-8601
+# the host culture ('10/01/2026 08:00:00'), dropping the zone. The managed tenant's copy of a managing tenant's ProvisionDate /
+# TAPStartDate / AutoDisableDate must stay the ISO text the managing tenant wrote, so a [datetime] is rendered back as ISO-8601
 # (UTC with Z when the parser knew it was UTC; without a zone when it did not). Anything else is the trimmed text.
 function ConvertTo-PimDownlinkLifecycleText {
     param([object]$Value)
@@ -115,7 +115,7 @@ function ConvertTo-PimDownlinkLifecycleText {
 #   wrong fixes (see engine/_shared/PIM-RingGate.ps1 for the full map):
 #     * RING-1 plane 1 -- the AutomateIT operator picks which CODE VERSION a
 #       customer receives. Decided in the sync engine, before PIM is on disk.
-#     * RING-1 plane 2 -- an MSP master picks which TEMPLATE VERSION a managed
+#     * RING-1 plane 2 -- a managing tenant picks which TEMPLATE VERSION a managed
 #       tenant may pull (Get-PimTemplateRingPlan).
 #     * THIS ONE -- ASSIGNMENT SCOPING: which ADMINS reach which TENANTS. No
 #       version is selected here, ever.
@@ -124,9 +124,9 @@ function ConvertTo-PimDownlinkLifecycleText {
 #   it must NOT be merged into either version-selection plane.
 #
 #   Ring order (§77.20, operator 2026-09-21: "ring 0 = dev, ring 1 = test, ring 2 = broad (all)") -- the SAME
-#   direction as the update rings, where ring 0 also goes first. A slave sets its own ring; an admin on ring N
-#   reaches every slave whose ring is <= N: a new hire on ring 0 reaches only dev slaves, a ring-2 admin reaches
-#   every slave. ONE rule, Test-PimRingReaches, used by this filter, the replication overview, conformance and
+#   direction as the update rings, where ring 0 also goes first. A managed tenant sets its own ring; an admin on ring N
+#   reaches every managed tenant whose ring is <= N: a new hire on ring 0 reaches only dev managed tenants, a ring-2 admin reaches
+#   every managed tenant. ONE rule, Test-PimRingReaches, used by this filter, the replication overview, conformance and
 #   (as the same comparison) pim.vw_AdminTenantTargets. Until 2.4.388 the order was the reverse (0 = broad);
 #   Convert-PimLegacyRing is the one conversion (new = 2 - old).
 # Input rows may be hashtables OR PSCustomObjects (UserName + Ring). Returns the
@@ -134,11 +134,11 @@ function ConvertTo-PimDownlinkLifecycleText {
 # ---------------------------------------------------------------------------
 function Select-PimUnrecognisableAdmins {
     <#
-      IMP-13 -- WOULD THE SLAVE'S OWN ENGINE EVEN SEE THE ACCOUNTS THIS SYNC IS ABOUT TO CREATE?
+      IMP-13 -- WOULD THE MANAGED TENANT'S OWN ENGINE EVEN SEE THE ACCOUNTS THIS SYNC IS ABOUT TO CREATE?
 
       The Admins provider limits its live set to accounts whose UPN starts with a configured
       `AdminAccountPatterns` prefix -- fail-closed, and correctly so. A synced MSP admin lands as
-      `<MSP UserName>@<slave domain>`, so if the slave's conventions do not include the MSP's
+      `<MSP UserName>@<managed tenant domain>`, so if the managed tenant's conventions do not include the MSP's
       prefix the live set EXCLUDES them, the diff reads "not present", and **every tick tries to
       create them again**.
 
@@ -149,14 +149,14 @@ function Select-PimUnrecognisableAdmins {
 
       🔒 AND THE FIX IS *NOT* TO WIDEN THE CUSTOMER'S PATTERNS FROM OUR SIDE. `AdminAccountPatterns`
       is the customer's own fail-closed scoping control; merging the MSP's prefix into it would be
-      the master editing a customer's security configuration to make its own write succeed. That is
+      the managing tenant editing a customer's security configuration to make its own write succeed. That is
       exactly what §22 ("MSP never writes to a customer tenant") and the MSP-3 consent model forbid,
       and it would be indistinguishable from the sync quietly granting itself more reach. So this
       DETECTS and REPORTS; the operator (or onboarding) fixes the convention, on the customer side.
 
       Returns @{ checked; unrecognised; recognised; prefixes; reason }.
       🪤 `checked = $false` when no prefixes are known -- the S5 master-side case, where we simply
-      cannot see the slave's config. That is "we did not look", NOT "it is fine", and the caller must
+      cannot see the managed tenant's config. That is "we did not look", NOT "it is fine", and the caller must
       not read an empty `unrecognised` list as a clean bill of health.
       PURE: no store, no network.
     #>
@@ -169,7 +169,7 @@ function Select-PimUnrecognisableAdmins {
     if (-not $pref.Count) {
         return [ordered]@{
             checked = $false; unrecognised = @(); recognised = @($AdminUserNames); prefixes = @()
-            reason  = "the slave's admin naming prefixes are not known here, so recognisability was NOT evaluated (this is 'did not look', not 'they are fine')"
+            reason  = "the managed tenant's admin naming prefixes are not known here, so recognisability was NOT evaluated (this is 'did not look', not 'they are fine')"
         }
     }
     $bad = New-Object System.Collections.Generic.List[string]
@@ -189,15 +189,15 @@ function Select-PimUnrecognisableAdmins {
         recognised   = @($ok.ToArray())
         prefixes     = $pref
         reason       = $(if ($badArr.Count) {
-                            "$($badArr.Count) admin(s) do not match the slave's admin naming prefixes ($($pref -join ', ')) -- the slave's engine would NOT see them, so each tick would create them again and leave an unmanaged privileged account behind. Add the MSP's prefix to the CUSTOMER's AdminAccountPatterns (their config, their decision), or rename the admins."
+                            "$($badArr.Count) admin(s) do not match the managed tenant's admin naming prefixes ($($pref -join ', ')) -- the managed tenant's engine would NOT see them, so each tick would create them again and leave an unmanaged privileged account behind. Add the MSP's prefix to the CUSTOMER's AdminAccountPatterns (their config, their decision), or rename the admins."
                         } else { '' })
     }
 }
 
 # ---------------------------------------------------------------------------
-# Is this admin synced to slaves at all? (pure) -- REQUIREMENTS 68.6 row 35.
+# Is this admin synced to managed tenants at all? (pure) -- REQUIREMENTS 68.6 row 35.
 # Operator 2026-09-13: "slaves import admins from central if defined per admins at master".
-# The master's admin row decides: ManagementMode=msp syncs; blank or 'local' does not.
+# The managing tenant's admin row decides: ManagementMode=msp syncs; blank or 'local' does not.
 # A row that carries NO ManagementMode field at all is a pim.CentralAdmins registry row (the
 # bundle shape before 2026-09-13). That registry holds MSP admins only, so it is msp by
 # construction -- treating it as 'local' would retract every existing MSP admin on update.
@@ -227,17 +227,17 @@ function Test-PimDownlinkAdminSynced {
     $mode = "$(Get-PimDownlinkValue -Object $Admin -Key 'ManagementMode')".Trim()
     if ($mode -ieq 'msp') { return @{ synced = $true; reason = 'ManagementMode=msp at the master' } }
     $shown = if ($mode) { $mode } else { '(blank)' }
-    return @{ synced = $false; reason = "ManagementMode=$shown at the master -- only msp admins are synced to slaves" }
+    return @{ synced = $false; reason = "ManagementMode=$shown at the managing tenant -- only msp admins are synced to slaves" }
 }
 
 # ---------------------------------------------------------------------------
-# MASTER SIDE (pure): which of the master's own Account-Definitions-Admins rows are CENTRAL
+# MASTER SIDE (pure): which of the managing tenant's own Account-Definitions-Admins rows are CENTRAL
 # admins to publish -- REQUIREMENTS 68.6 row 35. The row is the definition: ManagementMode=msp
-# (sync on/off), Ring (which slaves), Target (tags that narrow the ring; blank = every slave in
+# (sync on/off), Ring (which managed tenants), Target (tags that narrow the ring; blank = every managed tenant in
 # the ring). Names are taken from the row as the customer's naming produced them -- nothing is
 # derived or reshaped here. Every row that is NOT published is reported with its reason.
 # Returns @{ synced; notSynced; mspWithoutRing; adOnly } -- synced rows carry ManagementMode='msp'
-# so the slave-side gate (Test-PimDownlinkAdminSynced) reads the master's decision, plus the
+# so the slave-side gate (Test-PimDownlinkAdminSynced) reads the managing tenant's decision, plus the
 # governance fields (AccountStatus / AutoDisableDate) that must flow down from the source.
 # ---------------------------------------------------------------------------
 function Get-PimCentralAdminsFromDefinitions {
@@ -246,7 +246,7 @@ function Get-PimCentralAdminsFromDefinitions {
     $notSynced = New-Object System.Collections.Generic.List[object]
     $noRing = New-Object System.Collections.Generic.List[object]
     $adOnly = New-Object System.Collections.Generic.List[object]
-    # 2026-09-22: admins the master marked Replicate=Follow -- shaped exactly like a synced one, but
+    # 2026-09-22: admins the managing tenant marked Replicate=Follow -- shaped exactly like a synced one, but
     # handed back separately so the producer ships them ONLY when a replicated delegation names them.
     $follow = New-Object System.Collections.Generic.List[object]
     foreach ($r in @($Rows)) {
@@ -272,12 +272,12 @@ function Get-PimCentralAdminsFromDefinitions {
             continue
         }
         if ("$(Get-PimDownlinkValue -Object $r -Key 'TargetPlatform')".Trim() -ieq 'AD') {
-            $adOnly.Add([ordered]@{ UserName = $un; reason = 'TargetPlatform=AD -- an on-premises-only admin does not exist in a slave (Entra) tenant' }) | Out-Null
+            $adOnly.Add([ordered]@{ UserName = $un; reason = 'TargetPlatform=AD -- an on-premises-only admin does not exist in a managed tenant (Entra) tenant' }) | Out-Null
             continue
         }
         $ring = "$(Get-PimDownlinkValue -Object $r -Key 'Ring')".Trim()
         if ($ring -notmatch '^[0-2]$') {
-            $noRing.Add([ordered]@{ UserName = $un; reason = "ManagementMode=msp but Ring='$ring' -- not a ring, so it reaches no slave (set Ring to 0 dev, 1 test or 2 broad)" }) | Out-Null
+            $noRing.Add([ordered]@{ UserName = $un; reason = "ManagementMode=msp but Ring='$ring' -- not a ring, so it reaches no managed tenant (set Ring to 0 dev, 1 test or 2 broad)" }) | Out-Null
             continue
         }
         $tapLife = "$(Get-PimDownlinkValue -Object $r -Key 'TAPLifetimeHours')".Trim()
@@ -294,36 +294,36 @@ function Get-PimCentralAdminsFromDefinitions {
             Target           = "$(Get-PimDownlinkValue -Object $r -Key 'Target')".Trim()
             # 71.19: the SPONSOR DEPARTMENT travels with the admin -- it is what decides who receives its mail and TAP in
             # the managed tenant (that department's row is auto-included as a dependency). ManagerEmail still travels as
-            # legacy data for a master that has not moved to departments yet.
+            # legacy data for a managing tenant that has not moved to departments yet.
             Department       = "$(Get-PimDownlinkValue -Object $r -Key 'Department')".Trim()
             ManagerEmail     = "$(Get-PimDownlinkValue -Object $r -Key 'ManagerEmail')"
             TapLifetimeHours = $tapLife
             AccountStatus    = "$(Get-PimDownlinkValue -Object $r -Key 'AccountStatus')".Trim()
-            # 🔴 71.23 -- the bundle carries AutoDisableDate, NOT the legacy OffboardDate. The master
+            # 🔴 71.23 -- the bundle carries AutoDisableDate, NOT the legacy OffboardDate. The managing tenant
             # resolves either column name on its own row (Get-PimAdminAutoDisableDate) and publishes
-            # ONE name, so a slave can never receive both and have to guess between them.
-            # UPGRADE ORDER: a slave older than 2.4.364 does not know this key, so master and slave
+            # ONE name, so a managed tenant can never receive both and have to guess between them.
+            # UPGRADE ORDER: a managed tenant older than 2.4.364 does not know this key, so managing and managed tenant
             # must both be at 2.4.364+ (they are built together; ring 1 is the only live MSP pair).
             AutoDisableDate  = ConvertTo-PimDownlinkLifecycleText (Get-PimAdminAutoDisableDate -Row $r).raw
             ManagementMode   = 'msp'
         }
-        # carried only when the master set it, so a row authored before §71 ships the same bytes.
+        # carried only when the managing tenant set it, so a row authored before §71 ships the same bytes.
         # A FOLLOW admin ships as Follow, because WHICH tenants need it is decided per tenant
         # (Get-PimDownlinkPlan step 3b2) -- shipping it as Yes would create the account in every
         # tenant its ring admits, including the ones where no delegation names it.
         if ($isFollow) { $one['Replicate'] = 'Follow' }
         elseif ($repRaw) { $one['Replicate'] = 'Yes' }
-        # 71.15 -- THE ADMIN LIFECYCLE FIELDS the slave's engine reads, taken from the master's definition (governance
-        # follows the SOURCE, row 35). Only AccountStatus/AutoDisableDate/TAPLifetimeHours were published, so the slave apply
+        # 71.15 -- THE ADMIN LIFECYCLE FIELDS the managed tenant's engine reads, taken from the managing tenant's definition (governance
+        # follows the SOURCE, row 35). Only AccountStatus/AutoDisableDate/TAPLifetimeHours were published, so the managed tenant apply
         # filled the rest with its own defaults (ProvisionDate Now, no TAPStartDate).
         #   ProvisionDate   -> when the account may be created (Test-PimAdminProvisionDue)
         #   TAPStartDate    -> when its TAP starts / is deferred (Select-PimAdminTapCandidates)
         # 🔴 NO retention/delete field (71.21, operator "we will newer delete an accounnt" + "i dont want it to be shown
         # as it confuses"): PIM never deletes a user account anywhere, the field is not supported, and the bundle must
-        # not carry anything that implies a slave may delete.
+        # not carry anything that implies a managed tenant may delete.
         # NOT CreateTAP (71.17, operator "tap is on for all"): nothing on either side may read it, so it is not published.
-        # NOT StatusChangeCode: that is the slave's own authorisation for a local status change, and a central row's
-        # status is authorised by the signed bundle instead. Each key is emitted ONLY when the master set it, so a row
+        # NOT StatusChangeCode: that is the managed tenant's own authorisation for a local status change, and a central row's
+        # status is authorised by the signed bundle instead. Each key is emitted ONLY when the managing tenant set it, so a row
         # without them ships the same bytes as before.
         foreach ($lf in 'ProvisionDate','TAPStartDate') {
             $lv = ConvertTo-PimDownlinkLifecycleText (Get-PimDownlinkValue -Object $r -Key $lf)
@@ -335,7 +335,7 @@ function Get-PimCentralAdminsFromDefinitions {
 }
 
 function Test-PimRingReaches {
-    # THE ring rule (§77.20): a row on ring $AdminRing reaches a slave on ring $SlaveRing when SlaveRing <= AdminRing.
+    # THE ring rule (§77.20): a row on ring $AdminRing reaches a managed tenant on ring $SlaveRing when SlaveRing <= AdminRing.
     # ring 0 = dev (receives every ring's rows first), 1 = test, 2 = broad (receives only ring-2 rows).
     param([Parameter(Mandatory)][int]$AdminRing, [Parameter(Mandatory)][int]$SlaveRing)
     # Only 0..2 are rings. A value outside them reaches NOTHING (fail closed): with `SlaveRing <= AdminRing`, a stray
@@ -355,7 +355,7 @@ function Convert-PimLegacyRing {
 
 function ConvertFrom-PimLegacyRingPayload {
     <#
-      §77.20: a bundle from a master older than 2.4.388 carries every Ring in the OLD order (0 = broad). Returns the payload
+      §77.20: a bundle from a managing tenant older than 2.4.388 carries every Ring in the OLD order (0 = broad). Returns the payload
       with each Ring converted (new = 2 - old; a value outside 0..2 becomes blank = reaches nothing) on rows, assignments
       and every definitions list, stamped ringOrder='dev-first'. A stamped payload is returned unchanged. The signature was
       verified on the original bytes before this runs; nothing here is re-signed.
@@ -387,8 +387,8 @@ function ConvertFrom-PimLegacyRingPayload {
 function ConvertTo-PimDeploymentRings {
     <#
       §77.20 -- THE DEPLOYMENT RINGS (master's pim.Settings['DeploymentRings'], carried in the signed bundle): a name per
-      ring and an optional TAG RULE that narrows which slaves on that ring count as its members (blank = every slave
-      that set itself to that ring). The tag rule uses the Target grammar (tag:a, a+b, tenant:<id>). The slave still
+      ring and an optional TAG RULE that narrows which managed tenants on that ring count as its members (blank = every managed tenant
+      that set itself to that ring). The tag rule uses the Target grammar (tag:a, a+b, tenant:<id>). The managed tenant still
       sets its OWN ring (operator decision 2026-09-21); the rule only narrows. Always returns the three rings 0..2.
     #>
     param([object]$Value)
@@ -412,13 +412,13 @@ function ConvertTo-PimDeploymentRings {
 }
 
 function Test-PimDeploymentRingMember {
-    # Is this slave a member of the ring it set itself to? Blank tag rule = yes. A slave outside its ring's rule
+    # Is this managed tenant a member of the ring it set itself to? Blank tag rule = yes. A managed tenant outside its ring's rule
     # receives NOTHING ring-gated (withheld and reported, never retracted) -- narrowing, never widening.
     param([object[]]$Rings = @(), [Parameter(Mandatory)][int]$SlaveRing, [Parameter(Mandatory)][string]$TenantId, [string[]]$TenantTags = @())
     $def = @(@($Rings) | Where-Object { $null -ne $_ -and "$(Get-PimDownlinkValue -Object $_ -Key 'ring')" -eq "$SlaveRing" })[0]
     $name = if ($def) { "$(Get-PimDownlinkValue -Object $def -Key 'name')" } else { "ring $SlaveRing" }
     $rule = if ($def) { "$(Get-PimDownlinkValue -Object $def -Key 'tags')".Trim() } else { '' }
-    if (-not $rule) { return @{ member = $true; reason = "ring $SlaveRing ($name) has no tag rule -- every slave on it is a member" } }
+    if (-not $rule) { return @{ member = $true; reason = "ring $SlaveRing ($name) has no tag rule -- every managed tenant on it is a member" } }
     $t = Test-PimArtifactTarget -Target $rule -TenantId $TenantId -TenantTags @($TenantTags)
     if ($t.match) { return @{ member = $true; reason = "matches ring $SlaveRing ($name) tag rule '$rule'" } }
     return @{ member = $false; reason = "this tenant set itself to ring $SlaveRing ($name) but does not match the ring's tag rule '$rule' -- nothing ring-gated is sent until it does (fix the tenant's tags or the ring's rule)" }
@@ -432,7 +432,7 @@ function Select-PimDownlinkAdmins {
     $keep = New-Object System.Collections.Generic.List[object]
     foreach ($a in @($Admins)) {
         if ($null -eq $a) { continue }
-        if (-not (Test-PimDownlinkAdminSynced -Admin $a).synced) { continue }   # row 35: the master's row must say msp
+        if (-not (Test-PimDownlinkAdminSynced -Admin $a).synced) { continue }   # row 35: the managing tenant's row must say msp
         $ringRaw = Get-PimDownlinkValue -Object $a -Key 'Ring'
         if ($null -eq $ringRaw -or "$ringRaw".Trim() -eq '') { continue }   # no ring => not eligible (fail-safe)
         if ("$ringRaw".Trim() -notmatch '^[0-2]$') { continue }                # not a ring (0..2) => reaches nothing
@@ -455,8 +455,8 @@ function Select-PimDownlinkAdmins {
 # promise as ONE customer whose ring MOVES, so it can be measured on a two-tenant
 # fleet instead of blocking on a third, slave-only tenant.
 #
-# WHY THIS SHAPE. Asking "does admin X exist in the slave tenant?" is unanswerable
-# when the slave IS the master (the master holds every admin from its own estate).
+# WHY THIS SHAPE. Asking "does admin X exist in the managed tenant?" is unanswerable
+# when the managed tenant IS the managing tenant (the managing tenant holds every admin from its own estate).
 # Asking "for THIS customer, what does the gate SELECT at ring N?" is a property of
 # the DECISION, not of the tenant's population -- so a shared tenant cannot confound
 # it, and one customer is enough.
@@ -494,7 +494,7 @@ function Test-PimDownlinkRingGate {
         if ($lost.Count) { $failures.Add("ring $hi selected admin(s) that the wider ring $lo did not -- not a monotonic gate: $($lost -join ', ')") | Out-Null }
     }
 
-    # 2. EXCLUSION: an admin whose ring is BELOW the slave's ring must not be selected at it.
+    # 2. EXCLUSION: an admin whose ring is BELOW the managed tenant's ring must not be selected at it.
     foreach ($r in $rings) {
         $over = @(@($RingRows[$r]) | Where-Object {
                     $rv = Get-PimDownlinkValue -Object $_ -Key 'Ring'
@@ -674,12 +674,12 @@ function Test-PimDownlinkBaselineFinish {
 # ---------------------------------------------------------------------------
 # SEC-25 -- THE CENTRAL KILL SWITCH ON THE PULL PATH (pure).
 #
-# The master publishes a SIGNED kind='central-kill' manifest (DESIGN 13.17) next to the bundle. It is
+# The managing tenant publishes a SIGNED kind='central-kill' manifest (DESIGN 13.17) next to the bundle. It is
 # verified exactly like the bundle -- same keys, same revoked-signer list -- and an ACTIVE one stops the
-# downlink: nothing more is taken from the master while the kill stands, and the run says so, loudly,
+# downlink: nothing more is taken from the managing tenant while the kill stands, and the run says so, loudly,
 # naming what the manifest kills. (Applying the kills themselves is the engine kill-switch pipeline's
 # job -- Resolve-PimCentralKill -> AccountStatus flips -- and is not done here.)
-#   -Doc      : the pulled manifest, or $null when the master publishes none.
+#   -Doc      : the pulled manifest, or $null when the managing tenant publishes none.
 #   -Checked  : $false when no source was consulted (e.g. a -BaselineDocPath run with no kill source) --
 #               reported as NOT CHECKED, never as "no kill".
 #   -FetchError : the transport failure text when the source could not be read (404 is "none", decided by
@@ -724,17 +724,17 @@ function Get-PimCentralKillState {
         $u = "$(Get-PimDownlinkValue -Object $_ -Key 'upn')".Trim(); if (-not $u) { $u = "$(Get-PimDownlinkValue -Object $_ -Key 'userName')".Trim() }
         "$u ($("$(Get-PimDownlinkValue -Object $_ -Key 'status')".Trim()))" })
     return @{ state = 'active'; blocks = $true; kills = $kills; signer = "$($v.signer)"
-              reason = "CENTRAL KILL ACTIVE -- the master's signed kill manifest is in force ($($kills.Count) entr$(if ($kills.Count -eq 1) { 'y' } else { 'ies' }): $($names -join ', ')); this tenant takes NOTHING from the master until it is withdrawn" }
+              reason = "CENTRAL KILL ACTIVE -- the managing tenant's signed kill manifest is in force ($($kills.Count) entr$(if ($kills.Count -eq 1) { 'y' } else { 'ies' }): $($names -join ', ')); this tenant takes NOTHING from the managing tenant until it is withdrawn" }
 }
 
 # ---------------------------------------------------------------------------
-# IMP-38 -- THE TEMPLATE VERSION GATE USES THE SLAVE'S **LOCAL** RING (pure).
+# IMP-38 -- THE TEMPLATE VERSION GATE USES THE MANAGED TENANT'S **LOCAL** RING (pure).
 #
 # The template ring map (config/template-ring-map.sample.json) is written by the MASTER, and its
-# `assignments[<tenant>].<Template>.ring` / `default` would put the master in charge of which ring a
-# managed tenant is on. Every ring is LOCAL in the slave (DESIGN; operator 2026-09-18), so that half of
-# the map is IGNORED here: only `promotions` (which version the master approves FOR a ring) is read, and
-# the ring it is read for is this tenant's own -SlaveRing. A master assignment that disagrees is reported,
+# `assignments[<tenant>].<Template>.ring` / `default` would put the managing tenant in charge of which ring a
+# managed tenant is on. Every ring is LOCAL in the managed tenant (DESIGN; operator 2026-09-18), so that half of
+# the map is IGNORED here: only `promotions` (which version the managing tenant approves FOR a ring) is read, and
+# the ring it is read for is this tenant's own -SlaveRing. A managing tenant assignment that disagrees is reported,
 # never obeyed. 📌 The gate stays INERT on the scheduled pull: downlink-job-entry passes no map, and a map
 # is armed only by an operator passing -TemplateRingMapPath/-Url to the slave-side entry scripts.
 # Returns @{ plan; ignoredMasterRing; note }.
@@ -758,11 +758,11 @@ function Get-PimLocalTemplateRingPlan {
     $localAssign = [pscustomobject]@{ $TenantId = [pscustomobject]@{ $Template = [pscustomobject]@{ ring = [int]$SlaveRing } } }
     $plan = Get-PimTemplateRingPlan -Template $Template -TenantId $TenantId -Assignments $localAssign `
                 -Promotions (Get-PimDownlinkValue -Object $RingMap -Key 'promotions') -Channel $Channel -DefaultRing $null
-    $note = "version gate keyed on this tenant's LOCAL ring $SlaveRing (the map's assignments/default are the master's and are not used)"
+    $note = "version gate keyed on this tenant's LOCAL ring $SlaveRing (the map's assignments/default are the managing tenant's and are not used)"
     $ignored = $null
     if ($null -ne $masterRing -and $masterRing -ne [int]$SlaveRing) {
         $ignored = $masterRing
-        $note = "the master's map assigns ring $masterRing to this tenant -- IGNORED: the ring is local, and this tenant is on ring $SlaveRing"
+        $note = "the managing tenant's map assigns ring $masterRing to this tenant -- IGNORED: the ring is local, and this tenant is on ring $SlaveRing"
     }
     return @{ plan = $plan; ignoredMasterRing = $ignored; note = $note }
 }
@@ -834,7 +834,7 @@ function Resolve-PimDownlinkSyncPath {
 # TARGET GRAMMAR -- a semicolon/comma list of selectors, matched case-insensitively:
 #     ''  or  '*'  or  'all'   -> every tenant (THE DEFAULT: absent target = today's
 #                                 behaviour, so nothing changes for existing rows)
-#     'none'                   -> MSP-LOCAL. Never leaves the master. See below.
+#     'none'                   -> MSP-LOCAL. Never leaves the managing tenant. See below.
 #     'tag:<name>'             -> tenants carrying that tag
 #     'tenant:<guid>'          -> one explicit tenant
 #     a bare word              -> treated as 'tag:<word>' (the common case reads well)
@@ -913,7 +913,7 @@ function Test-PimArtifactTarget {
     $lower = { param($s) "$s".Trim().ToLowerInvariant() }
     # 'none' is checked FIRST and unconditionally: MSP-local must not be overridable by
     # another selector sitting beside it in the same expression.
-    foreach ($s in $sel) { if ((& $lower $s) -eq 'none') { return @{ match = $false; reason = 'master tenant only by declaration (target=none) -- never replicated to managed tenants' } } }
+    foreach ($s in $sel) { if ((& $lower $s) -eq 'none') { return @{ match = $false; reason = 'managing tenant only by declaration (target=none) -- never replicated to managed tenants' } } }
 
     $tags = New-Object System.Collections.Generic.HashSet[string]
     foreach ($g in @($TenantTags)) { [void]$tags.Add((& $lower $g)) }
@@ -959,7 +959,7 @@ function Test-PimArtifactTarget {
 # kind, and each default reproduces the behaviour before §71 byte for byte:
 #     admin       -> ManagementMode=msp => Yes (at its Ring), anything else => No -- including an
 #                    Account-Definitions-Admins row with NO ManagementMode field (a v1 CSV import):
-#                    blank ManagementMode = master tenant only. Only a pim.CentralAdmins registry row
+#                    blank ManagementMode = managing tenant only. Only a pim.CentralAdmins registry row
 #                    (Owner='MSP', which has no ManagementMode column) is MSP by construction => Yes,
 #                    and the CALLER says which one it holds (-AdminSource), never the row's shape.
 #     membership  -> Follow (follows its admin)
@@ -1004,7 +1004,7 @@ function Get-PimReplicateMode {
       -AdminSource (admins only) -- WHERE the admin row came from, declared by the caller:
         Definition (default) = an Account-Definitions-Admins row (pim.Rows / a CSV / the grid). Blank
                      ManagementMode -- the value empty OR the field absent, as in a v1 CSV -- is
-                     "master tenant only" => No, which is exactly what the bundle producer does
+                     "managing tenant only" => No, which is exactly what the bundle producer does
                      (Get-PimCentralAdminsFromDefinitions never publishes it).
         Registry   = a pim.CentralAdmins row (Owner='MSP'), or a bundle row the producer took from it.
                      That table has no ManagementMode column and holds MSP admins only, so a row
@@ -1031,14 +1031,14 @@ function Get-PimReplicateMode {
         elseif ($null -ne $Row) { $hasMm = [bool]$Row.PSObject.Properties['ManagementMode'] }
         $mm = "$(Get-PimDownlinkValue -Object $Row -Key 'ManagementMode')".Trim()
         # no ManagementMode field on a REGISTRY row (pim.CentralAdmins, declared by the caller) = MSP by
-        # construction. On a definition row a missing field is blank = master tenant only.
+        # construction. On a definition row a missing field is blank = managing tenant only.
         $regByConstruction = (-not $hasMm) -and $AdminSource -eq 'Registry'
         $mmMode = if ($regByConstruction) { 'Yes' } elseif ($mm -ieq 'msp') { 'Yes' } else { 'No' }
         if ($norm -eq 'Follow' -and $isNone) {
-            # Target=none is the operator's own declaration that this account stays on the master. A
+            # Target=none is the operator's own declaration that this account stays on the managing tenant. A
             # declaration beats a dependency: a delegation cannot drag an admin into a tenant the
             # master said it must never leave.
-            return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'master tenant only by declaration (Target=none) -- never published, even as a dependency' }
+            return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'managing tenant only by declaration (Target=none) -- never published, even as a dependency' }
         }
         if ($norm -eq 'Follow') {
             # 🔴 2026-09-22 (operator, pointing at a delegation marked "Replicate to managed tenants"
@@ -1061,11 +1061,11 @@ function Get-PimReplicateMode {
             return @{ mode = 'No'; explicit = $true; valid = $false; reason = "ManagementMode=$shown and Replicate=$norm disagree -- refused (msp goes with Yes, local/blank with No)" }
         }
         $mode = if ($norm) { $norm } else { $mmMode }
-        if ($mode -eq 'Yes' -and $isNone) { return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'master tenant only by declaration (Target=none) -- never published' } }
-        $why = if ($norm) { "Replicate=$norm" } elseif ($regByConstruction) { 'central registry row (MSP by construction)' } elseif ($mode -eq 'Yes') { 'ManagementMode=msp' } elseif (-not $mm) { 'ManagementMode blank -- master tenant only' } else { "ManagementMode=$mm -- not replicated" }
+        if ($mode -eq 'Yes' -and $isNone) { return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'managing tenant only by declaration (Target=none) -- never published' } }
+        $why = if ($norm) { "Replicate=$norm" } elseif ($regByConstruction) { 'central registry row (MSP by construction)' } elseif ($mode -eq 'Yes') { 'ManagementMode=msp' } elseif (-not $mm) { 'ManagementMode blank -- managing tenant only' } else { "ManagementMode=$mm -- not replicated" }
         return @{ mode = $mode; explicit = [bool]$norm; valid = $true; reason = $why }
     }
-    if ($isNone -and $norm -ne 'No') { return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'master tenant only by declaration (Target=none) -- never replicated' } }
+    if ($isNone -and $norm -ne 'No') { return @{ mode = 'No'; explicit = $true; valid = $true; reason = 'managing tenant only by declaration (Target=none) -- never replicated' } }
     if ($norm) {
         $why = if ($norm -eq 'No') { 'Replicate=No -- not replicated' } else { "Replicate=$norm" }
         return @{ mode = $norm; explicit = $true; valid = $true; reason = $why }
@@ -1171,11 +1171,11 @@ function Test-PimReplicationRowFields {
 function Test-PimReplicationWriteAllowed {
     <#
       THE MASTER-ONLY GATE for a grid/wizard write (§71.5). Pure: the Manager passes the rows it is
-      about to commit, the rows currently stored, and whether this tenant is the MSP master.
-        * NOT the master -> a row may not INTRODUCE or CHANGE Replicate, nor Ring/Target on a non-admin
+      about to commit, the rows currently stored, and whether this tenant is the managing tenant.
+        * NOT the managing tenant -> a row may not INTRODUCE or CHANGE Replicate, nor Ring/Target on a non-admin
           entity (an admin's Ring/Target predate §71 and keep working on every tenant). Managed tenants
           never edit targets; single tenants have nothing to target.
-        * the master     -> every changed row must pass Test-PimReplicationRowFields (errors refuse).
+        * the managing tenant     -> every changed row must pass Test-PimReplicationRowFields (errors refuse).
       Returns @{ allowed; reason; refused = @( @{ key; reason } ) }.
     #>
     param(
@@ -1188,8 +1188,8 @@ function Test-PimReplicationWriteAllowed {
     )
     $kind = Get-PimReplicationKindForEntity -Entity $Entity
     if (-not $kind) { return @{ allowed = $true; reason = ''; refused = @() } }
-    # Operator 2026-09-15: every MSP sync surface belongs to the MSP MASTER only -- "not relevant for single mode", and a
-    # managed tenant never edits what the master sends. So off the master an admin's Ring / Target are refused too
+    # Operator 2026-09-15: every MSP sync surface belongs to the managing tenant only -- "not relevant for single mode", and a
+    # managed tenant never edits what the managing tenant sends. So off the managing tenant an admin's Ring / Target are refused too
     # (the v2 engine reads an admin's Ring only in the MSP downlink), and so is switching ManagementMode to msp.
     $fields = @('Replicate','Ring','Target')
     $keyOf = {
@@ -1220,7 +1220,7 @@ function Test-PimReplicationWriteAllowed {
         }
         if (-not $changed) { continue }
         if (-not $IsMaster) {
-            $refused.Add([ordered]@{ key = $k; reason = "MSP sync / replication fields (Replicate, Ring, Target, ManagementMode=msp) can only be set on the MSP master -- this tenant is not the master" }) | Out-Null
+            $refused.Add([ordered]@{ key = $k; reason = "MSP sync / replication fields (Replicate, Ring, Target, ManagementMode=msp) can only be set on the managing tenant -- this tenant is not the master" }) | Out-Null
             continue
         }
         $chk = Test-PimReplicationRowFields -Row $r -Entity $Entity -KnownTags @($KnownTags) -TagsKnown:([bool]$TagsKnown)
@@ -1241,7 +1241,7 @@ function Select-PimBaselineBundleContent {
       does the SQL reads and the signing; this decides the rows.
 
       🔒 BYTE-FOR-BYTE FOR BLANK DATA. Field lists, key order and sort order are the pre-§71 producer's
-      exactly; Replicate/Ring are added to a shipped row ONLY when the master set them. The MSP pair
+      exactly; Replicate/Ring are added to a shipped row ONLY when the managing tenant set them. The MSP pair
       sim compares the signed payload against a golden captured from the code before this change.
 
       WHAT CHANGED, AND WHY:
@@ -1252,7 +1252,7 @@ function Select-PimBaselineBundleContent {
           shipped row depends on it (framework MSP-4 SURFACE item 6). An MSP-local admin must not sit in
           a payload 28 customers can read.
         * Replicate=Yes groups / nestings / bindings SEED the model on their own (a group can now go to
-          slaves without an admin needing it), and the nesting closure iterates to a FIXPOINT, so every
+          managed tenants without an admin needing it), and the nesting closure iterates to a FIXPOINT, so every
           row any tenant could need is present; each tenant then decides for itself.
         * tenant-scoped resource bindings (Roles-AUs / Azure-Resources / Workloads) ship only when
           explicitly Follow/Yes, under `definitions.resourceBindings`, with the AU definitions the
@@ -1300,9 +1300,9 @@ function Select-PimBaselineBundleContent {
     }
     foreach ($x in @($defAdmins.notSynced)) {
         if ("$($x.reason)" -match 'Replicate|Target=none|disagree') { $notPublished.Add([ordered]@{ kind = 'admin'; name = "$($x.UserName)"; reason = "$($x.reason)" }) | Out-Null }
-        # A definition admin with a BLANK ManagementMode (no Replicate) stays on the master, and Get-PimReplicateMode
+        # A definition admin with a BLANK ManagementMode (no Replicate) stays on the managing tenant, and Get-PimReplicateMode
         # says No for it too -- listed, so "not replicated" is never silent (a v1 CSV admin has no ManagementMode).
-        elseif ($x.Contains('masterOnly') -and $x['masterOnly']) { $notPublished.Add([ordered]@{ kind = 'admin'; name = "$($x.UserName)"; reason = 'ManagementMode blank -- master tenant only' }) | Out-Null }
+        elseif ($x.Contains('masterOnly') -and $x['masterOnly']) { $notPublished.Add([ordered]@{ kind = 'admin'; name = "$($x.UserName)"; reason = 'ManagementMode blank -- managing tenant only' }) | Out-Null }
     }
 
     # 2. memberships of the published admins
@@ -1398,7 +1398,7 @@ function Select-PimBaselineBundleContent {
         }
     }
     # 71.19 -- THE SPONSOR DEPARTMENT OF EVERY PUBLISHED ADMIN IS A DEPENDENCY. An admin's mail and TAP go to its
-    # department's OWNERS, and the slave resolves that from its own replicated PIM-Definitions-Departments rows -- so a
+    # department's OWNERS, and the managed tenant resolves that from its own replicated PIM-Definitions-Departments rows -- so a
     # department left behind by targeting means an admin nobody can deliver a credential to. Auto-included exactly like a
     # group a replicated membership depends on (reported, never silent); an admin naming a department that has no row at
     # all is reported too, because that is the same failure one step earlier.
@@ -1527,7 +1527,7 @@ function New-PimBaselinePayload {
         [string]$Scope = 'fleet',
         [string]$GeneratedAtUtc = '',
         [string]$ValidToUtc = '',
-        # §77.20: the master's Deployment rings (pim.Settings DeploymentRings); omitted = the three rings, no tag rule
+        # §77.20: the managing tenant's Deployment rings (pim.Settings DeploymentRings); omitted = the three rings, no tag rule
         [object]$DeploymentRings = $null
     )
     return [ordered]@{
@@ -1557,7 +1557,7 @@ function New-PimBaselinePayload {
 #
 # 🪤 A BLOCKED CLASS IS 'Held', NOT 'nothing to do'. The distinction is the whole
 # reason RING-1's vocabulary is Allowed/Held/Refused: a customer who declined role
-# changes and a master who published none must not produce the same report.
+# changes and a managing tenant who published none must not produce the same report.
 # ---------------------------------------------------------------------------
 function Get-PimDownlinkCapabilityName {
     param([Parameter(Mandatory)][ValidateSet('admins','roles','groups','policies')][string]$Class)
@@ -1712,8 +1712,8 @@ function New-PimAcceptanceRecord {
         # WHAT ARRIVED
         baselineVersion  = $Plan.baselineVersion
         assignmentRing   = $Plan.ring
-        # BUG-175: THE SLAVE REPORTS ITS OWN RING. The ring that gated this run is the slave's LOCAL -SlaveRing (its job
-        # argument) -- authoritative. The master's platform.Tenants.Ring is only the master's copy and can drift; this
+        # BUG-175: THE SLAVE REPORTS ITS OWN RING. The ring that gated this run is the managed tenant's LOCAL -SlaveRing (its job
+        # argument) -- authoritative. The managing tenant's platform.Tenants.Ring is only the managing tenant's copy and can drift; this
         # field is what lets a reader of the record (and a future uplink) see the value that actually decided.
         slaveRing        = $Plan.ring
         slaveRingSource  = 'local'
@@ -1866,12 +1866,12 @@ function Resolve-PimCustomerBlockedCapabilities {
 # ---------------------------------------------------------------------------
 # MSP-2 / control #2 -- ROLE PROJECTION (pure).
 #
-# WHAT THIS IS. Control #1 creates the master's admins in the slave. Control #2
-# gives them their ROLES there. The currency is the GROUP TAG: on the master an
+# WHAT THIS IS. Control #1 creates the managing tenant's admins in the managed tenant. Control #2
+# gives them their ROLES there. The currency is the GROUP TAG: on the managing tenant an
 # admin holds roles by being an eligible/active member of a PIM group, and the
 # slave's engine already knows how to make an admin a member of the group with a
 # given tag (the AdminMembers provider, entity PIM-Assignments-Admins). So the
-# projection re-stages the master's memberships as slave desired rows and the
+# projection re-stages the managing tenant's memberships as slave desired rows and the
 # EXISTING delegation path does the rest -- deliberately NOT a second mechanism.
 #
 # WHY A FILTER AT ALL. An MSP does not grant every customer the same delegation,
@@ -1879,7 +1879,7 @@ function Resolve-PimCustomerBlockedCapabilities {
 # from pim.TenantRoleProjection (see sql/platform-schema.sql for the semantics);
 # this function is their single interpreter.
 #
-# 🪤 UNRESOLVABLE TAGS ARE REPORTED, NOT DROPPED. A tag the slave has no group for
+# 🪤 UNRESOLVABLE TAGS ARE REPORTED, NOT DROPPED. A tag the managed tenant has no group for
 # would fail at apply with "unresolved principal/group". When -SlaveGroupTags is
 # supplied, those rows are separated into `unresolved` with a reason rather than
 # staged -- an admin silently missing a role is exactly the failure class that
@@ -1906,12 +1906,12 @@ function Select-PimProjectedAssignments {
         # AssignmentType, Permanent, NumOfDaysWhenExpire, AutoExtend.
         [object[]]$Assignments = @(),
         # The admin set that survived the ring gate. An assignment whose admin did
-        # NOT reach this slave must not project either, or a ring-2 consultant's
+        # NOT reach this managed tenant must not project either, or a ring-2 consultant's
         # roles would land in a tenant the consultant themselves never reaches.
         [string[]]$AdminUserNames = @(),
         # pim.TenantRoleProjection rows for THIS tenant: @{ Mode; GroupTag }.
         [object[]]$Policy = @(),
-        # Optional: the group tags that actually exist in the slave.
+        # Optional: the group tags that actually exist in the managed tenant.
         [string[]]$SlaveGroupTags,
         # The admins dropped by the artifact TARGET selector rather than by the ring.
         # 🔑 WITHOUT THIS, ONE AXIS WEARS ANOTHER'S NAME. Both narrowings remove an admin from
@@ -1942,7 +1942,7 @@ function Select-PimProjectedAssignments {
         $mark = { param($list, $why) $r = [ordered]@{ UserName = $user; GroupTag = $tag; reason = $why }; $list.Add($r) | Out-Null }
 
         if (-not $user -or -not $tag) { & $mark $excluded 'malformed row (missing UserName or GroupTag)'; continue }
-        # the admin must have survived the ring gate for this slave. An EMPTY set means NO admin reached it -- then no
+        # the admin must have survived the ring gate for this managed tenant. An EMPTY set means NO admin reached it -- then no
         # membership may project either (2.4.388: `$allowed.Count -and` used to skip the gate exactly then, so a tenant
         # outside its ring's tag rule, or one every admin was withheld from, still received every role assignment).
         if (-not $allowed.Contains($user.ToLowerInvariant())) {
@@ -1999,9 +1999,9 @@ function Select-PimProjectedAssignments {
 # projection that delivers nothing. So the baseline can STAND UP its own model.
 #
 # THE RULE, and it is a yielding one:
-#   * the slave ALREADY has a group with the tag  -> DEFER. It is the customer's group;
+#   * the managed tenant ALREADY has a group with the tag  -> DEFER. It is the customer's group;
 #     we add our admin to it and touch neither its definition nor its role bindings.
-#   * the slave does NOT                          -> CREATE it, stamped Owner='MSP'.
+#   * the managed tenant does NOT                          -> CREATE it, stamped Owner='MSP'.
 # So an MSP model works in an empty tenant, and a customer who has built their own
 # delegation keeps ownership of it. The tag is the contract; who owns the group is not.
 #
@@ -2026,9 +2026,9 @@ function Select-PimProjectedDefinitions {
         # payload.definitions -> @{ groups; nestings; roleBindings [; resourceBindings; aus] }
         [object]$Definitions,
         # the tags actually projected AFTER ring + policy filtering (from
-        # Select-PimProjectedAssignments .projected) -- never the master's whole model.
+        # Select-PimProjectedAssignments .projected) -- never the managing tenant's whole model.
         [string[]]$ProjectedTags = @(),
-        # tags that already exist in the slave (its own PIM-Definitions).
+        # tags that already exist in the managed tenant (its own PIM-Definitions).
         [string[]]$SlaveGroupTags = @(),
         # §71 -- THIS tenant, for the replication reach rule. ABSENT => no replication evaluation at all
         # and the result is exactly the pre-§71 one (the parameter is the opt-in, like -RingPlan).
@@ -2085,8 +2085,8 @@ function Select-PimProjectedDefinitions {
     # 🪤 THIS MUST ITERATE TO A FIXPOINT, not walk the list once. A single pass only
     # reaches ONE level: given A -> B -> C it pulls in B and stops, so C is never
     # created and the admin silently gets part of their delegation. Nesting depth is a
-    # modelling choice the master makes, not something this code may cap. Bounded by
-    # the tag count so a cycle in the master's model terminates instead of hanging.
+    # modelling choice the managing tenant makes, not something this code may cap. Bounded by
+    # the tag count so a cycle in the managing tenant's model terminates instead of hanging.
     $need = New-Object System.Collections.Generic.HashSet[string]
     foreach ($t in @($ProjectedTags)) {
         $lt = & $lower $t
@@ -2197,7 +2197,7 @@ function Select-PimProjectedDefinitions {
         }
         $outBind.Add($bnd) | Out-Null
     }
-    # §71: tenant-scoped resource bindings (only ever present when the master explicitly replicated
+    # §71: tenant-scoped resource bindings (only ever present when the managing tenant explicitly replicated
     # them). Same two guards; a tag with NO group definition at all (an Azure permission group is
     # defined by its Azure-Resources rows) counts as ours unless the customer already has that tag.
     $outRes = New-Object System.Collections.Generic.List[object]
@@ -2257,9 +2257,9 @@ function New-PimDownlinkSyncContent {
         # exactly the pre-control-#2 behaviour (so an old master that publishes no
         # assignments keeps working unchanged).
         [hashtable]$Projection,
-        # REQ-REV-DOWN-1 / REQ-REN-1 (2026-09-22): the AUTHORISED absences. A slave is report-first
+        # REQ-REV-DOWN-1 / REQ-REN-1 (2026-09-22): the AUTHORISED absences. A managed tenant is report-first
         # about anything that disappears from the bundle (see Invoke-PimDownlinkAssignmentApply), and
-        # that rule stays -- these name the removals and renames the master really decided, so the
+        # that rule stays -- these name the removals and renames the managing tenant really decided, so the
         # slave can act on exactly those and keep holding everything else. Omitted => the bundle is
         # byte-identical to before, which is what keeps an older master working unchanged.
         [object[]]$Intents = @()
@@ -2283,7 +2283,7 @@ function New-PimDownlinkSyncContent {
         admins    = $adminRows
     }
     # MSP-2: the projected role memberships, staged as their own file so the admin
-    # file's bytes (and therefore its idempotency hash) are unchanged for a master
+    # file's bytes (and therefore its idempotency hash) are unchanged for a managing tenant
     # that publishes no assignments.
     $projRows = @(); $exclRows = @(); $unresRows = @()
     if ($Projection) {
@@ -2329,7 +2329,7 @@ function New-PimDownlinkSyncContent {
         }
         $out['assignments'] = ($assignDoc | ConvertTo-Json -Depth 8)
     }
-    # The intents file is produced ONLY when there are intents: a master with nothing to withdraw
+    # The intents file is produced ONLY when there are intents: a managing tenant with nothing to withdraw
     # publishes exactly the bytes it published before this feature existed.
     if (@($Intents).Count) {
         $intentDoc = [ordered]@{
@@ -2384,13 +2384,13 @@ function Get-PimDownlinkPlan {
         # tenant. See the version-gate block below for why this is opt-in.
         [object]$RingPlan,
         # MSP-2 / control #2 (optional, and INERT when absent -- same non-breaking
-        # rule as -RingPlan above). The master's PIM-Assignments-Admins rows for the
+        # rule as -RingPlan above). The managing tenant's PIM-Assignments-Admins rows for the
         # baseline admins; when omitted, taken from payload.assignments if the bundle
         # carries them, so an OLD bundle simply projects nothing.
         [object[]]$BaselineAssignments,
         # pim.TenantRoleProjection rows for THIS tenant. Absent/empty => allow all.
         [object[]]$ProjectionPolicy = @(),
-        # The group tags that exist in the slave, for the unresolved-tag check.
+        # The group tags that exist in the managed tenant, for the unresolved-tag check.
         [string[]]$SlaveGroupTags,
         # MSP-4 (optional, inert when absent -- same non-breaking rule as -RingPlan).
         # This tenant's tags, for artifact targeting. Taken from the signed bundle's
@@ -2400,7 +2400,7 @@ function Get-PimDownlinkPlan {
         [string[]]$BlockedCapabilities = @(),
         # IMP-13. The SLAVE's own admin naming prefixes (its AdminAccountPatterns). Absent =>
         # recognisability is NOT evaluated and the plan says so -- it is never assumed fine.
-        # Available in S6 (the downlink runs inside the slave); typically unknown master-side.
+        # Available in S6 (the downlink runs inside the managed tenant); typically unknown master-side.
         [string[]]$SlaveAdminPrefixes = @(),
         # SEC-25: the signer ids THIS tenant has revoked (its pim.Settings). A revoked signer is refused.
         [AllowEmptyCollection()][string[]]$RevokedSigners = @(),
@@ -2412,7 +2412,7 @@ function Get-PimDownlinkPlan {
         return @{ ok = $false; reason = "scenario $($ctx.id) is not a managed/sync scenario (syncAdminsPermissions=false)"; scenarioId = "$($ctx.id)"; admins = @(); sync = $null; content = $null; baselineVersion = 0; verify = $null }
     }
 
-    # 0) SEC-25: the central kill switch. Checked FIRST -- while a kill stands nothing is taken from the master.
+    # 0) SEC-25: the central kill switch. Checked FIRST -- while a kill stands nothing is taken from the managing tenant.
     if ($null -ne $CentralKill -and [bool](Get-PimDownlinkValue -Object $CentralKill -Key 'blocks')) {
         return @{ ok = $false; reason = "$(Get-PimDownlinkValue -Object $CentralKill -Key 'reason')"; scenarioId = "$($ctx.id)"; ring = $SlaveRing; admins = @(); sync = $null; content = $null; baselineVersion = 0; verify = $null; centralKill = $CentralKill }
     }
@@ -2437,7 +2437,7 @@ function Get-PimDownlinkPlan {
     #
     # ⚠️ WHAT THIS FIXES. Get-PimUpdateSourceProfile documents the from-master pull
     # as "ringGated ... the pull only takes the ring's approved version (never a
-    # version above the tenant's ring)". That was NOT implemented: the master
+    # version above the tenant's ring)". That was NOT implemented: the managing tenant
     # publishes ONE baseline-latest.json containing every admin row, the managed
     # tenant always pulls latest, and the only ring use was the admin filter in
     # step 3 below. The version was never checked against a ring at all -- it was
@@ -2467,7 +2467,7 @@ function Get-PimDownlinkPlan {
     $deploymentRings = @(ConvertTo-PimDeploymentRings -Value (Get-PimDownlinkValue -Object $payload -Key 'deploymentRings'))
 
     # 3) ring-gate to SlaveRing <= admin.Ring (§77.20) -- after the row-35 mode gate, whose skips are
-    #    REPORTED (never silent): an admin the master no longer marks msp is not sent, and the
+    #    REPORTED (never silent): an admin the managing tenant no longer marks msp is not sent, and the
     #    slave-side apply withdraws it only inside the retraction budget.
     $notSynced = New-Object System.Collections.Generic.List[object]
     foreach ($a in @($src)) {
@@ -2482,7 +2482,7 @@ function Get-PimDownlinkPlan {
     # 3a) MSP-4 TARGETING + CLASS GATING.
     # Tags come from the caller, else from the signed bundle's per-tenant map -- the
     # same delivery the projection policy uses, and for the same reason: a downlink
-    # running inside the slave has no credential for the master's registry.
+    # running inside the managed tenant has no credential for the managing tenant's registry.
     $effTags = @()
     if ($PSBoundParameters.ContainsKey('TenantTags') -and $null -ne $TenantTags) { $effTags = @($TenantTags) }
     else {
@@ -2519,18 +2519,18 @@ function Get-PimDownlinkPlan {
         }
         $admins = @($keepAdmins.ToArray())
     }
-    # §77.20: the slave set its own ring; the ring's tag rule (master's Deployment rings) decides whether it counts.
+    # §77.20: the managed tenant set its own ring; the ring's tag rule (master's Deployment rings) decides whether it counts.
     $ringMember = Test-PimDeploymentRingMember -Rings $deploymentRings -SlaveRing $SlaveRing -TenantId $TenantId -TenantTags $effTags
     if (-not $ringMember.member) {
         foreach ($a in @($admins)) { $targetSkips.Add([ordered]@{ kind = 'admin'; name = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; UserName = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; GroupTag = ''; reason = $ringMember.reason }) | Out-Null }
         $admins = @()
     }
 
-    # IMP-13 -- WITHHOLD admins the slave's own engine could never see. Applied AFTER the ring and
+    # IMP-13 -- WITHHOLD admins the managed tenant's own engine could never see. Applied AFTER the ring and
     # targeting gates so it reports on what would actually have been created, and kept separate
     # from them because it has a different fix: this one is repaired in the CUSTOMER's naming
     # conventions, not in a ring or a Target.
-    # 🔴 Withheld rather than created: an account the slave's Admins provider does not match is
+    # 🔴 Withheld rather than created: an account the managed tenant's Admins provider does not match is
     # never in its live set, so the diff says "not present" forever -- every tick recreates it and
     # leaves another unmanaged privileged account in the customer's tenant. Not creating it is
     # strictly safer than creating one nobody owns.
@@ -2542,24 +2542,24 @@ function Get-PimDownlinkPlan {
         # 🔴 A NAME NEVER DECIDES WHAT REPLICATES (operator, 2026-09-22: "you can not block admins due
         # to different name pattern" / "but name pattern is not used to control replication").
         # This used to WITHHOLD such an admin. Measured on RIDE the same day: the job carried
-        # PIM_SlaveAdminPrefixes='Admin-,admin-', so nine `adm-e-*` accounts the master had published
+        # PIM_SlaveAdminPrefixes='Admin-,admin-', so nine `adm-e-*` accounts the managing tenant had published
         # were dropped -- a deployment string deciding who gets access in a customer tenant, which is
         # not what that setting is for.
-        # 🔑 The harm IMP-13 was written for is real and is fixed at its source instead: the slave's
+        # 🔑 The harm IMP-13 was written for is real and is fixed at its source instead: the managed tenant's
         # Admins provider now reads the accounts its DESIRED ROWS name (PIM-EngineProviders, Admins
         # GetLive), so a centrally-sent admin is in the live set whatever it is called -- no
         # "not present" every tick, no recreate loop, no orphan. The mismatch is still REPORTED here,
-        # because a slave whose conventions disagree with its master is worth saying out loud.
+        # because a managed tenant whose conventions disagree with its managing tenant is worth saying out loud.
         foreach ($a in @($admins)) {
             $un = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')".Trim()
             if ($unrec.Contains($un.ToLowerInvariant())) {
                 $unrecognisedAdmins.Add([ordered]@{ kind = 'admin'; name = $un; UserName = $un; GroupTag = ''
-                                                    reason = "the slave's admin naming prefixes ($($adminRecog.prefixes -join ', ')) do not match '$un' -- it is still sent (its own row makes it managed); align the tenant's admin naming if this is unexpected" }) | Out-Null
+                                                    reason = "the managed tenant's admin naming prefixes ($($adminRecog.prefixes -join ', ')) do not match '$un' -- it is still sent (its own row makes it managed); align the tenant's admin naming if this is unexpected" }) | Out-Null
             }
         }
     }
 
-    # 3b) MSP-2 / control #2: project the master's role memberships for exactly the
+    # 3b) MSP-2 / control #2: project the managing tenant's role memberships for exactly the
     # admins that survived the ring gate, through the relationship's policy.
     $srcAssign = $null
     if ($PSBoundParameters.ContainsKey('BaselineAssignments') -and $null -ne $BaselineAssignments) { $srcAssign = @($BaselineAssignments) }
@@ -2569,7 +2569,7 @@ function Get-PimDownlinkPlan {
     }
     # 🔴 REQ-M (2.4.376): a bundle with group DEFINITIONS but no memberships ("assignments": [] -- which
     # Get-PimDownlinkValue unrolls to $null) skipped the whole definitions plan below, so a Replicate=Yes
-    # group, nesting or binding -- a §71 SEED that stands on its own -- reached NO tenant while the master's
+    # group, nesting or binding -- a §71 SEED that stands on its own -- reached NO tenant while the managing tenant's
     # preview said "0 of N". No memberships is an empty set, not "no projection".
     if ($null -eq $srcAssign -and $null -ne (Get-PimDownlinkValue -Object $payload -Key 'definitions')) { $srcAssign = @() }
     # roles: same two narrowings, applied BEFORE the relationship policy so the plan can
@@ -2622,9 +2622,9 @@ function Get-PimDownlinkPlan {
     $projection = $null
     $definitionPlan = $null
     if ($null -ne $srcAssign) {
-        # The policy is AUTHORED in the master registry but DELIVERED in the signed bundle,
-        # keyed by tenant id. A downlink running inside the slave (S6) has no credential for
-        # the master's SQL, so a registry read there is impossible -- and reading it from the
+        # The policy is AUTHORED in the managing tenant registry but DELIVERED in the signed bundle,
+        # keyed by tenant id. A downlink running inside the managed tenant (S6) has no credential for
+        # the managing tenant's SQL, so a registry read there is impossible -- and reading it from the
         # signed payload is stronger anyway: the managed tenant cannot widen its own
         # projection without breaking the signature. An explicit -ProjectionPolicy still wins,
         # for tests and for an operator overriding a single run.
@@ -2650,7 +2650,7 @@ function Get-PimDownlinkPlan {
         }
         # BUG-59: with definitions in the bundle, an unknown tag is no longer automatically
         # unresolvable -- we may be about to CREATE that group. So the unresolved check is
-        # made against the slave's tags PLUS the tags the bundle can stand up.
+        # made against the managed tenant's tags PLUS the tags the bundle can stand up.
         $creatableTags = @()
         $defsIn = Get-PimDownlinkValue -Object $payload -Key 'definitions'
         if ($defsIn) {
@@ -2662,7 +2662,7 @@ function Get-PimDownlinkPlan {
         }
         $projection = Select-PimProjectedAssignments @selArgs
 
-        # decide, per tag, whether the slave needs OUR group or already has its own.
+        # decide, per tag, whether the managed tenant needs OUR group or already has its own.
         # A customer who blocked 'msp-groups' gets none of ours -- they define their own.
         $grpClass = Test-PimDownlinkClassAllowed -Class 'groups' -BlockedCapabilities $BlockedCapabilities
         if ($defsIn -and -not $grpClass.allowed) {
@@ -2695,7 +2695,7 @@ function Get-PimDownlinkPlan {
     $content = New-PimDownlinkSyncContent @contentArgs
 
     # 🔴 "PROJECTED", never "reach" -- and the difference is security-relevant, not stylistic.
-    # This sentence used to read "N admin(s) reach slave ring M". A narrowing run therefore
+    # This sentence used to read "N admin(s) reach managed tenant ring M". A narrowing run therefore
     # printed "1 admin(s) reach" while THREE admins still held live access in that tenant:
     # desired fell 3 -> 2 -> 1, live stayed 3, remove=0 throughout. Target controls FUTURE
     # PROJECTION, not PRESENT STATE -- un-targeting an admin withholds the next projection, it
@@ -2703,7 +2703,7 @@ function Get-PimDownlinkPlan {
     # access there" is exactly the misreading to prevent, and the ring-0 Global Administrator is
     # the account it would most likely be made about. A plan is a statement about what WILL be
     # sent, so it is worded in the tense it actually has.
-    $reason = "downlink plan for $($ctx.id): $($admins.Count) admin(s) PROJECTED to slave ring $SlaveRing from baseline v$blVersion"
+    $reason = "downlink plan for $($ctx.id): $($admins.Count) admin(s) PROJECTED to managed tenant ring $SlaveRing from baseline v$blVersion"
     if ($null -ne $projection) {
         $reason += "; $(@($projection.projected).Count) role assignment(s) projected"
         $nEx = @($projection.excluded).Count; $nUn = @($projection.unresolved).Count
@@ -2745,7 +2745,7 @@ function Get-PimDownlinkPlan {
             $reason += " ($($adminSkips.Count) of them ADMIN(S) -- WITHHELD, NOT RETRACTED: whatever access they already hold in this tenant is UNCHANGED by this plan)"
         }
     }
-    if ($notSynced.Count)   { $reason += "; $($notSynced.Count) admin(s) NOT SYNCED -- their row at the master is not ManagementMode=msp (a slave that still holds them withdraws them only inside its retraction budget)" }
+    if ($notSynced.Count)   { $reason += "; $($notSynced.Count) admin(s) NOT SYNCED -- their row at the managing tenant is not ManagementMode=msp (a managed tenant that still holds them withdraws them only inside its retraction budget)" }
     if ($classHeld.Count)   { $reason += "; $($classHeld.Count) HELD -- the customer blocked that capability" }
     # IMP-13: named in the reason, because the operator cannot fix this one from our side and the
     # symptom without it (an account recreated on every tick, forever) points nowhere near the cause.
@@ -2768,7 +2768,7 @@ function Get-PimDownlinkPlan {
         # whose own replication fields keep them out of this tenant.
         autoIncluded    = $(if ($null -ne $definitionPlan) { @($definitionPlan.autoIncluded) } else { @() })
         notReplicated   = $(if ($null -ne $definitionPlan) { @($definitionPlan.notReplicated) } else { @() })
-        # Row 35: admins the master does not mark ManagementMode=msp. A FIELD, like notTargeted.
+        # Row 35: admins the managing tenant does not mark ManagementMode=msp. A FIELD, like notTargeted.
         notSynced       = @($notSynced.ToArray())
         # A downlink plan NEVER removes access -- it only decides what is SENT. Stated as a
         # field so a caller can assert it directly instead of inferring it from remove=0, which
@@ -2875,19 +2875,19 @@ function Get-PimScenarioRunPlan {
 # explicitly invoked by the live wrappers / main session. The matrix's
 # Test-SyncWiringBuilt only needs these to be DEFINED (Get-Command), which is the
 # §31.3 "wiring exists + is invokable" contract; the live outcome (admins created
-# in the slave) is proven by running them against the real tenants.
+# in the managed tenant) is proven by running them against the real tenants.
 #
 # IMPORTANT (pull-not-push): the MASTER never writes into a managed tenant. The
 # central/managed engine host runs Invoke-PimManagedDownlink, which applies the
-# synced rows into the slave via the SLAVE's OWN per-tenant SPN (Invoke-PimMspFanout
+# synced rows into the managed tenant via the SLAVE's OWN per-tenant SPN (Invoke-PimMspFanout
 # authenticates per-tenant from pim.CentralAdmins + platform.TenantApps and creates
-# the admins IN the slave). The downlink only stages the ring's signed baseline.
+# the admins IN the managed tenant). The downlink only stages the ring's signed baseline.
 # =============================================================================
 
-# SEC-25 -- FETCH the master's signed central-kill manifest for the pull (thin I/O; the verdict is the pure
+# SEC-25 -- FETCH the managing tenant's signed central-kill manifest for the pull (thin I/O; the verdict is the pure
 # Get-PimCentralKillState). Where it lives: -CentralKillUrl, else the SIBLING of the bundle URL
 # (<container>/central-kill.json -- the same public-but-signed / private-endpoint transport, DESIGN 13.7).
-#   * 404          -> @{ checked = $true;  doc = $null }  (the master publishes no kill: none in force)
+#   * 404          -> @{ checked = $true;  doc = $null }  (the managing tenant publishes no kill: none in force)
 #   * other failure-> @{ checked = $true;  error = '...' } (UNKNOWN -> the pull refuses: fail closed)
 #   * 'none', or no URL to derive one from -> @{ checked = $false } (reported NOT CHECKED, loudly)
 # -Fetcher is a test seam: { param($url, $headers) <parsed doc>; throw with .Exception.Response.StatusCode on HTTP errors }.
@@ -2937,7 +2937,7 @@ function Get-PimCentralKillSource {
 
 # Invoke-PimManagedDownlink -- the ring-gated master->managed admin/permission
 # downlink for ONE managed tenant. Verifies + stages the sync files (pure plan),
-# then (unless -WhatIfMode) applies into the slave by composing Invoke-PimMspFanout.
+# then (unless -WhatIfMode) applies into the managed tenant by composing Invoke-PimMspFanout.
 #   -Scenario        : S5 | S6 (or descriptor).
 #   -Doc             : the pulled signed baseline document.
 #   -PublicKey       : verifying key (omit in prod -> embedded cert).
@@ -2994,7 +2994,7 @@ function Invoke-PimManagedDownlink {
         [string]$SlaveDefaultDomain,
         # TAP intent for the synced admins -- enforced ON (71.17). -CreateTapDefault is kept only so existing callers bind.
         # 🔴 71.19: -DefaultManagerEmail is GONE. Who receives an admin's TAP is its SPONSOR DEPARTMENT's owners, resolved
-        # in the slave from the department rows the bundle carries (Get-PimAdminMailRecipientPlan) -- a fleet-wide fallback
+        # in the managed tenant from the department rows the bundle carries (Get-PimAdminMailRecipientPlan) -- a fleet-wide fallback
         # address was papering over a missing department link, and it is exactly the "manager on the person" the design
         # forbids (REQUIREMENTS §62).
         [string]$CreateTapDefault = 'TRUE',
@@ -3004,7 +3004,7 @@ function Invoke-PimManagedDownlink {
         # ('would remove') and withdrawn only with this opt-in, inside the removal budget. Declared
         # here AND on Sync-PimMasterToSlave -- PowerShell binds only declared names.
         [switch]$AllowRetraction,
-        # SEC-25: where the master's signed central-kill manifest came from, as the entry script found it:
+        # SEC-25: where the managing tenant's signed central-kill manifest came from, as the entry script found it:
         # @{ checked = $bool; doc = <manifest or $null>; error = '<transport failure>' }. Unbound => the kill
         # is reported NOT CHECKED (never "no kill"). Verified here, against THIS tenant's revoked signers.
         [object]$CentralKillSource,
@@ -3112,7 +3112,7 @@ function Invoke-PimManagedDownlink {
             $bundleIntents = @()
         }
     }
-    # §79.5: central admins the master removed and named (withdraw on Account-Definitions-Admins, key = UserName). Used by the
+    # §79.5: central admins the managing tenant removed and named (withdraw on Account-Definitions-Admins, key = UserName). Used by the
     # admin apply (the central row) and the membership apply (that admin's memberships).
     $adminWithdrawKeys = @()
     if (@($bundleIntents).Count -and (Get-Command Get-PimDownlinkWithdrawalKeys -ErrorAction SilentlyContinue)) {
@@ -3155,7 +3155,7 @@ function Invoke-PimManagedDownlink {
     #    S6 (local-hosted managed): the downlink already runs INSIDE the managed tenant,
     #    whose own engine has the identity and the tick schedule. Handing it desired rows
     #    (Invoke-PimDownlinkAdminApply) is both simpler and the only thing consistent with
-    #    MSP-3's pull-not-push -- the master never writes into the customer.
+    #    MSP-3's pull-not-push -- the managing tenant never writes into the customer.
     #
     # 🪤 IMP-12 -- THIS BRANCH DID NOT EXIST, AND ITS ABSENCE WAS SILENT. Invoke-PimDownlinkAdminApply
     # was built for exactly this and then called by NOTHING but its own unit test, while this
@@ -3198,12 +3198,12 @@ function Invoke-PimManagedDownlink {
             Write-Host "[downlink] Invoke-PimMspFanout.ps1 not found -- staged sync files only (no apply)." -ForegroundColor Yellow
         }
     } elseif ("$SlaveStoreConnectionString".Trim()) {
-        # The slave's UPNs are <UserName>@<its default domain>, so the domain is required.
+        # The managed tenant's UPNs are <UserName>@<its default domain>, so the domain is required.
         # Resolve it from the ambient tenant when we are running inside it (S6), and REFUSE
         # rather than guess: a wrong domain creates accounts nobody can sign in to and
         # memberships that resolve to nothing.
         # 🔑 REQ-T (2.4.377): THIS TENANT'S OWN "Admin account domain" SETTING DECIDES, like every slave-side setting
-        # (ring included, DESIGN). The master's suffix is never carried: a replicated admin is <UserName>@<the domain
+        # (ring included, DESIGN). The managing tenant's suffix is never carried: a replicated admin is <UserName>@<the domain
         # THIS tenant chose>, and only when it chose none (blank = default domain, the v1 behaviour) do -SlaveDefaultDomain
         # and then the ambient default domain apply.
         $dom = "$(Get-PimSlaveAdminUpnDomain -ConnectionString $SlaveStoreConnectionString)".Trim()
@@ -3217,10 +3217,10 @@ function Invoke-PimManagedDownlink {
                 -CreateTapDefault $CreateTapDefault -TapLifetimeHoursDefault $TapLifetimeHoursDefault `
                 -AllowFullPrune:$AllowFullPrune -AllowRetraction:$AllowRetraction -Withdrawals $adminWithdrawKeys -WhatIfMode:$WhatIfMode
             Write-Host "[downlink] admins (S6 pull, domain $dom): $($adminApply.detail)" -ForegroundColor $(if ($adminApply.ok) { 'Green' } else { 'Red' })
-            foreach ($x in @($adminApply.withdrawn)) { if ("$x".Trim()) { Write-Host "[downlink]   WITHDRAWN $x (removed on the master, authorised in the signed bundle)" -ForegroundColor Cyan } }
+            foreach ($x in @($adminApply.withdrawn)) { if ("$x".Trim()) { Write-Host "[downlink]   WITHDRAWN $x (removed on the managing tenant, authorised in the signed bundle)" -ForegroundColor Cyan } }
             foreach ($x in @($adminApply.wouldRetract)) { if ("$x".Trim()) { Write-Host "[downlink]   WOULD REMOVE $x (no longer reaches this tenant; reported only -- pass -AllowRetraction)" -ForegroundColor Yellow } }
             # §79.6 (operator 2026-09-25: "verify that a reset sessions centrally in msp mode for an admin also resets the
-            # sessions in all slaves. important if person leaves msp"). The master's revoke travels as a SIGNED intent; this
+            # sessions in all managed tenants. important if person leaves msp"). The managing tenant's revoke travels as a SIGNED intent; this
             # tenant queues a session revoke for ITS account of that admin (<UserName>@<this tenant's domain>), COMMITTED at
             # once (the human decision was the central one -- "so we dont have to approve 25 tenants"), and records it as
             # done so the same intent never revokes twice. The engine's queue-apply carries it out and verifies it.
@@ -3251,7 +3251,7 @@ function Invoke-PimManagedDownlink {
                     try {
                         $ch = New-PimChange -Entity 'PIM-Action-Sessions' -Key $upn -Op 'Update' `
                                 -Payload ([pscustomobject]@{ type = 'session-revoke'; userPrincipalName = $upn; principalName = $upn; targetKind = 'Sign-in sessions'; downlinkIntent = $rv.id }) `
-                                -By "msp-downlink ($($rv.by))" -Kind 'Action' -Origin 'Authorised' -Justification "revoked centrally on the MSP master: $($rv.reason)"
+                                -By "msp-downlink ($($rv.by))" -Kind 'Action' -Origin 'Authorised' -Justification "revoked centrally on the managing tenant: $($rv.reason)"
                         Add-PimSqlQueueChange -ConnectionString $SlaveStoreConnectionString -Change $ch
                         [void](Set-PimSqlQueueCommitted -ConnectionString $SlaveStoreConnectionString -Ids @("$($ch.id)") -By 'msp-downlink')
                         $doneNow.Add($rv.id)
@@ -3265,16 +3265,16 @@ function Invoke-PimManagedDownlink {
                 }
             }
         } else {
-            Write-Host "[downlink] admins NOT staged: no slave default domain (-SlaveDefaultDomain, or an ambient tenant to read it from). Refusing to build UPNs at a guessed domain." -ForegroundColor Yellow
+            Write-Host "[downlink] admins NOT staged: no managed tenant default domain (-SlaveDefaultDomain, or an ambient tenant to read it from). Refusing to build UPNs at a guessed domain." -ForegroundColor Yellow
         }
     } else {
         Write-Host "[downlink] admins NOT staged: this is a pull topology and no -SlaveStoreConnectionString was supplied (sync files only)." -ForegroundColor Yellow
     }
 
-    # 4) MSP-2 / control #2: put the projected roles into the slave's DESIRED store,
+    # 4) MSP-2 / control #2: put the projected roles into the managed tenant's DESIRED store,
     #    AFTER step 3 has provided the accounts (order matters -- a membership row
     #    whose principal does not exist yet resolves to nothing at engine-apply).
-    #    The slave's engine grants them on its next run through its normal path.
+    #    The managed tenant's engine grants them on its next run through its normal path.
     $assignApply = $null
     $defApply = $null
     if ("$SlaveStoreConnectionString".Trim()) {
@@ -3292,9 +3292,9 @@ function Invoke-PimManagedDownlink {
                     Write-Host "[downlink]   DEFERRED $($d.GroupTag): $($d.reason)" -ForegroundColor DarkGray
                 }
             }
-            # REQ-REV-DOWN-1 -- the master's AUTHORISED withdrawals, taken from the VERIFIED bundle
+            # REQ-REV-DOWN-1 -- the managing tenant's AUTHORISED withdrawals, taken from the VERIFIED bundle
             # (never from an argument a caller could invent). Named rows only; everything else still
-            # reports and holds. The keys are named in the master's terms: '<username>|<grouptag>'.
+            # reports and holds. The keys are named in the managing tenant's terms: '<username>|<grouptag>'.
             $withdrawKeys = @()
             if (@($bundleIntents).Count -and (Get-Command Get-PimDownlinkWithdrawalKeys -ErrorAction SilentlyContinue)) {
                 $withdrawKeys = @((Get-PimDownlinkWithdrawalKeys -Intents $bundleIntents -Entity 'PIM-Assignments-Admins' -TenantId $TenantId).Keys)
@@ -3303,7 +3303,7 @@ function Invoke-PimManagedDownlink {
                 -Assignments @($plan.assignments) -Withdrawals $withdrawKeys -WithdrawnAdmins $adminWithdrawKeys `
                 -AllowFullPrune:$AllowFullPrune -AllowRetraction:$AllowRetraction -WhatIfMode:$WhatIfMode
             foreach ($x in @($assignApply.withdrawn)) {
-                if ("$x".Trim()) { Write-Host "[downlink]   WITHDRAWN $x (revoked on the master, authorised in the signed bundle)" -ForegroundColor Cyan }
+                if ("$x".Trim()) { Write-Host "[downlink]   WITHDRAWN $x (revoked on the managing tenant, authorised in the signed bundle)" -ForegroundColor Cyan }
             }
             $col = if ($assignApply.ok) { 'Green' } else { 'Red' }
             Write-Host "[downlink] roles: $($assignApply.detail)" -ForegroundColor $col
@@ -3381,13 +3381,13 @@ function Invoke-PimManagedDownlink {
 # MSP-2 / control #2 -- APPLY the projected roles into the SLAVE's desired store.
 #
 # The projected rows are written as ordinary PIM-Assignments-Admins desired rows,
-# so the slave's engine grants them through its NORMAL delegation path (the
+# so the managed tenant's engine grants them through its NORMAL delegation path (the
 # AdminMembers provider makes the admin an eligible/active member of the tagged
 # PIM group). There is deliberately no second grant mechanism here -- this function
 # only puts desired state in the store.
 #
 # 🪤 WHY NOT Set-PimSqlEntityRows. That helper is a FULL-SET replace: it deletes
-# every current key not in the submitted set. The slave's own local admins have
+# every current key not in the submitted set. The managed tenant's own local admins have
 # their own rows in this same entity, so a full-set replace would delete the
 # customer's entire delegation on the first sync. Rows are therefore upserted
 # individually and stamped with their OWNER, and only rows carrying Owner='MSP'
@@ -3403,7 +3403,7 @@ function Invoke-PimManagedDownlink {
 # the customer not at all.
 #
 # 🔒 EMPTY-DESIRED GUARD. An empty projection does NOT prune, mirroring the engine's
-# mass-disable guard: "the master published nothing this run" and "the master
+# mass-disable guard: "the managing tenant published nothing this run" and "the managing tenant
 # revoked everything" look identical from here, and the safe reading is the first.
 # Pass -AllowFullPrune to actually withdraw everything (the decouple path).
 # Returns @{ ok; created; updated; removed; skippedForeign; wouldPrune; detail }.
@@ -3423,7 +3423,7 @@ function Invoke-PimDownlinkAssignmentApply {
         # REQ-REV-DOWN-1: the keys the MASTER authorised removing here (from the signed bundle's
         # intents). Named rows only -- never a wildcard, never inferred from absence.
         [string[]]$Withdrawals = @(),
-        # §79.5: central ADMINS the master removed (withdraw intent on Account-Definitions-Admins). Their memberships
+        # §79.5: central ADMINS the managing tenant removed (withdraw intent on Account-Definitions-Admins). Their memberships
         # ('<username>|<grouptag>') are authorised with them -- a membership of a withdrawn admin has nothing to hang on.
         [string[]]$WithdrawnAdmins = @(),
         [switch]$WhatIfMode = $true
@@ -3431,7 +3431,7 @@ function Invoke-PimDownlinkAssignmentApply {
     $entity = 'PIM-Assignments-Admins'
     $existing = @()
     try { $existing = @(Get-PimSqlRows -ConnectionString $ConnectionString -Entity $entity) }
-    catch { return @{ ok = $false; created = 0; updated = 0; removed = 0; skippedForeign = 0; wouldPrune = @(); wouldRetract = @(); retractHeld = @(); detail = "could not read $entity from the slave store: $($_.Exception.Message)" } }
+    catch { return @{ ok = $false; created = 0; updated = 0; removed = 0; skippedForeign = 0; wouldPrune = @(); wouldRetract = @(); retractHeld = @(); detail = "could not read $entity from the managed tenant store: $($_.Exception.Message)" } }
 
     $keyOf = { param($u, $t) "$u|$t" }
     # what the sync currently owns in this store. An UNSTAMPED row is Local by
@@ -3477,8 +3477,8 @@ function Invoke-PimDownlinkAssignmentApply {
     $budget = Get-PimDownlinkRetractionBudget
     # 🔴 REQ-REV-DOWN-1 -- AN AUTHORISED WITHDRAWAL IS NOT A GUESS (operator 2026-09-22: a central
     # revoke of a replicated row must be able to reach the managed tenants, "auto-committed so we
-    # dont have to approve 25 tenants"). Report-first exists because the slave cannot tell "the
-    # master revoked it" from "the master failed to publish it" -- so the master now SAYS which, in
+    # dont have to approve 25 tenants"). Report-first exists because the managed tenant cannot tell "the
+    # master revoked it" from "the managing tenant failed to publish it" -- so the managing tenant now SAYS which, in
     # the signed bundle. A key named by a withdraw intent is removed here even without the blanket
     # -AllowRetraction, and it does NOT consume the removal budget: it is one named row, decided by
     # a human, not a mass disappearance. Everything NOT named keeps today's behaviour exactly.
@@ -3514,7 +3514,7 @@ function Invoke-PimDownlinkAssignmentApply {
     }
     # ${entity} braces are required: "$entity:" parses '$entity:' as a SCOPE qualifier.
     $detail = "${entity}: +$created ~$updated -$removed (left $foreign local row(s) untouched)"
-    if ($withdrawn.Count) { $detail += "; $($withdrawn.Count) row(s) withdrawn on the master's authorisation (revoked centrally)" }
+    if ($withdrawn.Count) { $detail += "; $($withdrawn.Count) row(s) withdrawn on the managing tenant's authorisation (revoked centrally)" }
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced row(s) because the projection was EMPTY -- pass -AllowFullPrune to withdraw them" }
     if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) synced row(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in)" }
     if ($retractHeld.Count) { $detail += "; HELD: $($retractHeld.Count) retraction(s) exceed the removal budget of $budget -- NOTHING withdrawn" }
@@ -3523,7 +3523,7 @@ function Invoke-PimDownlinkAssignmentApply {
 }
 
 # ---------------------------------------------------------------------------
-# BUG-59 -- APPLY the group DEFINITIONS the projection needs into the slave's store.
+# BUG-59 -- APPLY the group DEFINITIONS the projection needs into the managed tenant's store.
 #
 # Same discipline as the membership apply: upsert by the entity's natural key, stamp
 # Owner='MSP', and prune ONLY Owner='MSP' rows. A customer group that already carries
@@ -3557,9 +3557,9 @@ function Invoke-PimDownlinkDefinitionApply {
     # its desired set from PIM-Definitions-Roles / -Services / -Organization / -Tasks
     # (Get-PimGroupDefinitionRows) and Get-PimDesiredRows matches the name EXACTLY.
     # ('PIM-Definitions' is only the change-QUEUE label the provider stamps on its diffs.) So the
-    # synced groups sat in the slave's store, correct and complete, and its engine never saw them
+    # synced groups sat in the managed tenant's store, correct and complete, and its engine never saw them
     # -- the projected memberships then failed as unresolvable. Each group now goes back into the
-    # entity it came from on the master (carried as SourceEntity in the signed bundle).
+    # entity it came from on the managing tenant (carried as SourceEntity in the signed bundle).
     $groupsByEntity = @{}
     foreach ($g in @($DefinitionPlan.create)) {
         $e = "$(Get-PimDownlinkValue -Object $g -Key 'SourceEntity')".Trim()
@@ -3607,7 +3607,7 @@ function Invoke-PimDownlinkDefinitionApply {
         $entity = "$($w.Entity)"
         $existing = @()
         try { $existing = @(Get-PimSqlRows -ConnectionString $ConnectionString -Entity $entity) }
-        catch { return @{ ok = $false; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = @(); wouldRetract = @(); retractHeld = @(); detail = "could not read $entity from the slave store: $($_.Exception.Message)" } }
+        catch { return @{ ok = $false; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = @(); wouldRetract = @(); retractHeld = @(); detail = "could not read $entity from the managed tenant store: $($_.Exception.Message)" } }
 
         $keyFor = {
             param($row)
@@ -3659,7 +3659,7 @@ function Invoke-PimDownlinkDefinitionApply {
         }
         $stale = @($ownedKeys.Keys | Where-Object { -not $desired.ContainsKey($_) } | Sort-Object)
         if ($stale.Count) {
-            # The mass-revoke guard asks "did the master publish NOTHING of this KIND",
+            # The mass-revoke guard asks "did the managing tenant publish NOTHING of this KIND",
             # never "nothing in this one entity". Groups are spread over several definition
             # entities, so a per-entity test would refuse forever to clean up an entity the
             # groups have legitimately MOVED OUT OF (e.g. off the legacy 'PIM-Definitions'
@@ -3667,7 +3667,7 @@ function Invoke-PimDownlinkDefinitionApply {
             $classEmpty = if ($w.IsGroupClass) { @($DefinitionPlan.create).Count -eq 0 } else { @($w.Rows).Count -eq 0 }
             if ($classEmpty -and -not $AllowFullPrune) {
                 # Same mass-revoke guard as the other two applies -- and it must SAY SO.
-                # It used to skip silently, so "the master published no groups this run"
+                # It used to skip silently, so "the managing tenant published no groups this run"
                 # and "nothing needed removing" produced identical output. Reporting a
                 # refusal is the whole point of having one.
                 foreach ($k in $stale) { $wouldPrune.Add("$entity|$k") | Out-Null }
@@ -3696,7 +3696,7 @@ function Invoke-PimDownlinkDefinitionApply {
     }
     $detail = "definitions +$created ~$updated -$removed ($($parts -join ' ')); left $foreign customer-owned row(s) untouched"
     if ($takeOverRefused) { $detail += "; $takeOverRefused row(s) NOT written -- the customer already has a row with that key" }
-    if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced row(s) because the master published none -- pass -AllowFullPrune to withdraw them" }
+    if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced row(s) because the managing tenant published none -- pass -AllowFullPrune to withdraw them" }
     if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) synced row(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in)" }
     if ($retractHeld.Count) { $detail += "; HELD: $($retractHeld.Count) retraction(s) exceed the removal budget of $budget -- NOTHING withdrawn" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
@@ -3716,7 +3716,7 @@ function Get-PimDownlinkRetractionBudget {
 
 # ---------------------------------------------------------------------------
 # CONTROL #1 on the S6 (pull) path -- stage the baseline ADMINS as desired rows in
-# the slave's own store, so the SLAVE's engine creates them.
+# the managed tenant's own store, so the SLAVE's engine creates them.
 #
 # WHY THIS EXISTS ALONGSIDE Invoke-PimMspFanout. The fan-out PUSHES: it authenticates
 # per-tenant with a certificate from Cert:\LocalMachine\My and writes the accounts to
@@ -3724,7 +3724,7 @@ function Get-PimDownlinkRetractionBudget {
 # it is S5-shaped, and IMP-11 records that S5's cross-tenant reach is not currently
 # available. On the S6 path the downlink already runs INSIDE the managed tenant, whose
 # own engine has the identity and the tick schedule to create accounts. Handing it
-# desired rows is therefore both simpler and more faithful to pull-not-push: the master
+# desired rows is therefore both simpler and more faithful to pull-not-push: the managing tenant
 # never writes into the customer, and the customer's engine does exactly what it does
 # for its own local admins.
 #
@@ -3740,11 +3740,11 @@ function Get-PimDownlinkRetractionBudget {
 # THEM, because the only credential path an engine-created admin has is the TAP it mints on
 # creation. The MSP was left administering a customer it had no key to. Withholding the
 # credential did not make the privilege smaller; it only made it unusable while remaining fully
-# granted. The intent now travels from the master's registry (pim.CentralAdmins.CreateTap,
+# granted. The intent now travels from the managing tenant's registry (pim.CentralAdmins.CreateTap,
 # default 1) and this apply defaults ON when the bundle predates those columns.
 # 🪤 A TAP still needs somewhere to go, and 71.19 fixed WHERE: the admin's SPONSOR DEPARTMENT's owners. The synced row
 # therefore carries its Department, and the bundle carries that department's row (auto-included as a dependency), so the
-# slave resolves the recipient exactly as the master does. Nothing here can compensate for a slave that cannot send mail
+# slave resolves the recipient exactly as the managing tenant does. Nothing here can compensate for a managed tenant that cannot send mail
 # at all -- that is the sender-mailbox half of the same gap.
 # ---------------------------------------------------------------------------
 function Get-PimSlaveAdminUpnDomain {
@@ -3783,15 +3783,15 @@ function Invoke-PimDownlinkAdminApply {
         # on RIDE 2026-09-15): an admin that stops reaching this tenant is reported as 'would remove' and its
         # central row withdrawn only with this opt-in, inside the removal budget. -AllowFullPrune still wins.
         [switch]$AllowRetraction,
-        # §79.5 (operator 2026-09-25, "Prompt on remove only"): the central admins the master REMOVED and named in a signed
+        # §79.5 (operator 2026-09-25, "Prompt on remove only"): the central admins the managing tenant REMOVED and named in a signed
         # withdraw intent (Account-Definitions-Admins, key = UserName). Removed here without -AllowRetraction and outside the
         # budget -- one named row decided by a human -- exactly as REQ-REV-DOWN-1 does for memberships. Unnamed rows: unchanged.
         [string[]]$Withdrawals = @(),
         [switch]$WhatIfMode = $true
     )
     # 🔑 REQUIREMENTS 68.6 row 35 (operator 2026-09-13): "slaves ... have their own admins.
-    # separate table." Central admins imported from the master live in their OWN entity; the
-    # slave's Account-Definitions-Admins holds only the slave's own admins. The engine reads both
+    # separate table." Central admins imported from the managing tenant live in their OWN entity; the
+    # slave's Account-Definitions-Admins holds only the managed tenant's own admins. The engine reads both
     # (Get-PimDesiredRows unions them, central rows stamped AdminSource=central) and governs each
     # by its SOURCE. Keep this name identical to PIM-EngineCore.ps1 Get-PimCentralAdminEntityName.
     $localEntity = 'Account-Definitions-Admins'
@@ -3799,11 +3799,11 @@ function Invoke-PimDownlinkAdminApply {
     $existing = @()
     $localRows = @()
     try { $existing = @(Get-PimSqlRows -ConnectionString $ConnectionString -Entity $entity) }
-    catch { return @{ ok = $false; created = 0; updated = 0; removed = 0; skippedForeign = 0; detail = "could not read $entity from the slave store: $($_.Exception.Message)" } }
+    catch { return @{ ok = $false; created = 0; updated = 0; removed = 0; skippedForeign = 0; detail = "could not read $entity from the managed tenant store: $($_.Exception.Message)" } }
     try { $localRows = @(Get-PimSqlRows -ConnectionString $ConnectionString -Entity $localEntity) }
-    catch { return @{ ok = $false; created = 0; updated = 0; removed = 0; skippedForeign = 0; detail = "could not read $localEntity from the slave store: $($_.Exception.Message)" } }
+    catch { return @{ ok = $false; created = 0; updated = 0; removed = 0; skippedForeign = 0; detail = "could not read $localEntity from the managed tenant store: $($_.Exception.Message)" } }
 
-    # ONE-TIME MIGRATION: before this change the sync wrote central admins INTO the slave's own
+    # ONE-TIME MIGRATION: before this change the sync wrote central admins INTO the managed tenant's own
     # entity, stamped Owner=$Owner. Move exactly those (copy first, then remove -- a failure in
     # between leaves a duplicate, never a lost admin). Unstamped / Local rows stay where they are.
     $migrated = 0
@@ -3828,7 +3828,7 @@ function Invoke-PimDownlinkAdminApply {
         if ("$(Get-PimDownlinkValue -Object $e -Key 'Owner')" -ne $Owner) { continue }
         $ownedKeys["$(Get-PimDownlinkValue -Object $e -Key 'UserName')"] = $true
     }
-    # the slave's OWN admins: everything in its own entity that this sync did not plant
+    # the managed tenant's OWN admins: everything in its own entity that this sync did not plant
     $foreign = @($localRows | Where-Object { "$(Get-PimDownlinkValue -Object $_ -Key 'Owner')" -ne $Owner }).Count
 
     $created = 0; $updated = 0; $desired = @{}; $tapOn = 0; $tapNoRecipient = 0; $tapIgnored = 0
@@ -3839,7 +3839,7 @@ function Invoke-PimDownlinkAdminApply {
 
         # --- 71.17 TAP IS ON FOR ALL. A synced admin is always an Entra admin (TargetPlatform=ID below), and every Entra
         # admin gets a TAP -- the bundle's CreateTap (an older bundle, or a registry row) and -CreateTapDefault are NOT
-        # honoured. 2.4.362 briefly carried a master's CreateTAP=FALSE to the slave (71.15); stored there it silenced the
+        # honoured. 2.4.362 briefly carried a managing tenant's CreateTAP=FALSE to the managed tenant (71.15); stored there it silenced the
         # "TAP on but nowhere to deliver it" warning while the engine still (correctly) planned the TAP.
         $tapRaw = "$(Get-PimDownlinkValue -Object $a -Key 'CreateTap')".Trim()
         if (-not $tapRaw) { $tapRaw = "$(Get-PimDownlinkValue -Object $a -Key 'CreateTAP')".Trim() }
@@ -3877,17 +3877,17 @@ function Invoke-PimDownlinkAdminApply {
             Notes                 = "MSP downlink (central admin ring $(Get-PimDownlinkValue -Object $a -Key 'Ring'))"
             ManagerEmail          = $mgr
             StartDate             = ''
-            # 71.15: the master's lifecycle values win; absent = the previous defaults (Now / no TAP start / no delete).
+            # 71.15: the managing tenant's lifecycle values win; absent = the previous defaults (Now / no TAP start / no delete).
             ProvisionDate         = $(if (ConvertTo-PimDownlinkLifecycleText (Get-PimDownlinkValue -Object $a -Key 'ProvisionDate')) { ConvertTo-PimDownlinkLifecycleText (Get-PimDownlinkValue -Object $a -Key 'ProvisionDate') } else { 'Now' })
             CreateTAP             = $createTap
             TAPStartDate          = ConvertTo-PimDownlinkLifecycleText (Get-PimDownlinkValue -Object $a -Key 'TAPStartDate')
             TAPLifetimeHours      = "$life"
-            # Governance follows the SOURCE (row 35): the master's status and offboarding decision
+            # Governance follows the SOURCE (row 35): the managing tenant's status and offboarding decision
             # flow down with the row. A bundle that predates these fields means Enabled / none.
             # 🔴 71.20 -- THE MASTER'S STATUS, VERBATIM, INCLUDING BLANK. This defaulted to 'Enabled', and an explicit
-            # 'Enabled' is the ONE value that RE-ENABLES a disabled account (Get-PimAdminStatusDecision) -- so a master
+            # 'Enabled' is the ONE value that RE-ENABLES a disabled account (Get-PimAdminStatusDecision) -- so a managing tenant
             # that simply left the column blank re-enabled an account the customer had disabled, on the next pull.
-            # Blank now stays blank: the slave then leaves the live account exactly as it is.
+            # Blank now stays blank: the managed tenant then leaves the live account exactly as it is.
             AccountStatus         = "$(Get-PimDownlinkValue -Object $a -Key 'AccountStatus')".Trim()
             StatusChangeCode      = ''
             Ring                  = "$(Get-PimDownlinkValue -Object $a -Key 'Ring')"
@@ -3895,10 +3895,10 @@ function Invoke-PimDownlinkAdminApply {
             ManagementMode        = 'msp'
             AdminSource           = 'central'
             Template              = "$(Get-PimDownlinkValue -Object $a -Key 'Template')"
-            # 71.23: written under the NEW name only -- never both, so the slave row cannot conflict.
+            # 71.23: written under the NEW name only -- never both, so the managed tenant row cannot conflict.
             AutoDisableDate       = ConvertTo-PimDownlinkLifecycleText (Get-PimAdminAutoDisableDate -Row $a).raw
             # 71.21: no DeleteAfterDays column at all -- PIM never deletes an account and the field is
-            # not supported, so a central row cannot carry anything that reads like "this slave deletes it".
+            # not supported, so a central row cannot carry anything that reads like "this managed tenant deletes it".
             Owner                 = $Owner
         }
         if ($ownedKeys.ContainsKey($un)) { $updated++ } else { $created++ }
@@ -3909,7 +3909,7 @@ function Invoke-PimDownlinkAdminApply {
     # "withdrew everyone" are indistinguishable here, and the safe reading is the first.
     $stale = @($ownedKeys.Keys | Where-Object { -not $desired.ContainsKey($_) } | Sort-Object)
     $removed = 0; $wouldPrune = @(); $retractHeld = @(); $wouldRetract = @()
-    # Row 35: an admin the master stops marking msp (or narrows away) is a cross-tenant retraction.
+    # Row 35: an admin the managing tenant stops marking msp (or narrows away) is a cross-tenant retraction.
     # 🔴 §71.11 -- IT USED TO BE WITHDRAWN AT ONCE (inside the budget), while the group and membership applies
     # beside it were already report-first. Measured on RIDE 2026-09-15: re-targeting one SAMPLE admin away
     # from the tenant removed its central row on the next pull while its membership stayed "WOULD REMOVE".
@@ -3940,17 +3940,17 @@ function Invoke-PimDownlinkAdminApply {
             }
         }
     }
-    $detail = "${entity}: +$created ~$updated -$removed (left $foreign of the slave's own admin row(s) untouched); TAP on for $tapOn"
+    $detail = "${entity}: +$created ~$updated -$removed (left $foreign of the managed tenant's own admin row(s) untouched); TAP on for $tapOn"
     if ($migrated) { $detail += "; MIGRATED $migrated central admin row(s) out of $localEntity into $entity (one-time)" }
     if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) central admin(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in, -AllowRetraction)" }
-    if ($retractHeld.Count) { $detail += "; HELD: would withdraw $($retractHeld.Count) central admin(s), over the retraction budget of $budget -- NOTHING withdrawn (check the master's ManagementMode / Ring / Target, then re-run with -AllowFullPrune or raise PIM_RemoveMaxCount)" }
+    if ($retractHeld.Count) { $detail += "; HELD: would withdraw $($retractHeld.Count) central admin(s), over the retraction budget of $budget -- NOTHING withdrawn (check the managing tenant's ManagementMode / Ring / Target, then re-run with -AllowFullPrune or raise PIM_RemoveMaxCount)" }
     # Surfaced, never swallowed: a TAP with no recipient is minted, mailed nowhere, and the code
     # is unrecoverable afterwards. That must read as a WARNING in the sync output, not as success.
-    if ($tapNoRecipient) { $detail += "; WARNING $tapNoRecipient admin(s) get a TAP (enforced for every admin) but name NO sponsor department (and carry no legacy ManagerEmail) -- the engine REFUSES to issue a TAP it cannot deliver, so they cannot sign in: set the admin's Department at the master and give that department Owners" }
+    if ($tapNoRecipient) { $detail += "; WARNING $tapNoRecipient admin(s) get a TAP (enforced for every admin) but name NO sponsor department (and carry no legacy ManagerEmail) -- the engine REFUSES to issue a TAP it cannot deliver, so they cannot sign in: set the admin's Department at the managing tenant and give that department Owners" }
     if ($tapIgnored) { $detail += "; NOTE CreateTAP=FALSE on $tapIgnored admin(s) was IGNORED -- a TAP is enforced for every Entra admin" }
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced admin(s) on an EMPTY baseline -- pass -AllowFullPrune" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
-    if ($withdrawnAdmins.Count) { $detail += "; WITHDRAWN $($withdrawnAdmins.Count) central admin(s) the master removed (authorised in the signed bundle)" }
+    if ($withdrawnAdmins.Count) { $detail += "; WITHDRAWN $($withdrawnAdmins.Count) central admin(s) the managing tenant removed (authorised in the signed bundle)" }
     return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; withdrawn = @($withdrawnAdmins | ForEach-Object { "$entity|$_" }); wouldRetract = @($wouldRetract | ForEach-Object { "$entity|$_" }); retractHeld = $retractHeld; retractionBudget = $budget; migrated = $migrated; entity = $entity; tapEnabled = $tapOn; tapWithoutRecipient = $tapNoRecipient; tapFalseIgnored = $tapIgnored; detail = $detail }
 }
 
@@ -4047,13 +4047,13 @@ function Invoke-PimScenarioDeploy {
         # of auditing the chain instead of listing the instances.
         [string[]]$SlaveAdminPrefixes,
         [string]$SlaveDefaultDomain,
-        # (71.19 removed -DefaultManagerEmail here too: the slave resolves the recipient from the admin's sponsor
+        # (71.19 removed -DefaultManagerEmail here too: the managed tenant resolves the recipient from the admin's sponsor
         # department, which the bundle carries.)
         # 71.14: the downlink's removal opt-in, declared on the scenario runner so the scheduled pull job can carry it
         # (PIM_DOWNLINK_ALLOW_RETRACTION=true). Default OFF: retraction stays report-first, and ON is still capped by the
         # removal budget inside the apply functions.
         [switch]$AllowRetraction,
-        # SEC-25: the master's central-kill source (@{ checked; doc; error }), forwarded to the orchestrator.
+        # SEC-25: the managing tenant's central-kill source (@{ checked; doc; error }), forwarded to the orchestrator.
         [object]$CentralKillSource,
         [datetime]$NowUtc = ([datetime]::UtcNow),
         [int64]$LastVersion = 0,
@@ -4079,12 +4079,12 @@ function Invoke-PimScenarioDeploy {
             # -- its empty-desired guard doing exactly the right thing over a store nobody filled.
             # 🔒 WHY DEFAULTING THIS IS **NOT** THE FORBIDDEN PUSH PATH. MSP-3's rule is "no
             # component ever writes ACROSS A TENANT BOUNDARY", and the handoff rightly warns against
-            # threading a slave connection string through the MASTER's tooling. This is the mirror
+            # threading a managed tenant connection string through the MASTER's tooling. This is the mirror
             # image: on `local-slave` the job is running INSIDE the managed tenant, as that tenant's
             # own identity, and the ambient store IS its own store. A tenant writing to its own
             # database is the pull model working, not a boundary being crossed.
             # ⛔ SCOPED TO local-slave ON PURPOSE. On `central-msp` (S5) the ambient store is the
-            # MASTER's, and defaulting there would write a slave's projection into the master's
+            # MASTER's, and defaulting there would write a managed tenant's projection into the managing tenant's
             # database -- the precise mistake MSP-3 exists to prevent. So the default is keyed on
             # the resolved hostingLocation, never on "a store happens to be configured".
             if (-not $__slaveCs) {
@@ -4102,14 +4102,14 @@ function Invoke-PimScenarioDeploy {
             }
             if ($__slaveCs) { $dlPass['SlaveStoreConnectionString'] = $__slaveCs }
             # 🔴 BUG-81 -- THE UPN DOMAIN. The downlink refuses, correctly, to invent one:
-            #     [downlink] admins NOT staged: no slave default domain (-SlaveDefaultDomain, or an
+            #     [downlink] admins NOT staged: no managed tenant default domain (-SlaveDefaultDomain, or an
             #                ambient tenant to read it from). Refusing to build UPNs at a guessed domain.
             # That refusal is right -- a guessed domain creates admins nobody can sign in as -- but
             # IMP-12 already says the value is "resolved from the ambient tenant when we are running
             # inside it; never guessed", and on local-slave we ARE inside it. Nothing was doing that
             # resolution, so the refusal fired on every run and no admin ever reached the store.
             # Same boundary rule as the store above: ambient ONLY for local-slave. On central-msp the
-            # ambient tenant is the MASTER, and stamping the master's domain onto a slave's admins
+            # ambient tenant is the MASTER, and stamping the managing tenant's domain onto a managed tenant's admins
             # would be silently wrong in a way that looks fine in the log.
             if (-not "$SlaveDefaultDomain".Trim()) {
                 $__ctx2 = $null

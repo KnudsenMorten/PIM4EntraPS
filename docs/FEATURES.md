@@ -205,7 +205,7 @@ deployment is a supported choice) and no credentials lying around.
   of writing a rule that would change nothing and report success.
 - **Replication settings in plain words.** ✅ 2026-09-19 Each row says *Follow (default) — sent only
   when a replicated row needs it*, *Replicate to managed tenants*, or *No replication to managed
-  tenants — master tenant only*. Each ring option says which tenants it reaches (Ring 0 = dev tenants
+  tenants — managing tenant only*. Each ring option says which tenants it reaches (Ring 0 = dev tenants
   only, Ring 2 = every managed tenant), and every tenant is shown with its ring. A group set
   to replicate on its own now reaches its tenants even before any administrator is replicated.
 - **Pull, never push.** In a managed-service setup, the provider never reaches into or
@@ -234,10 +234,10 @@ deployment is a supported choice) and no credentials lying around.
   by your own engine through the same audited, authorized path as any other change (never a
   back-door write from outside).
 - **Each admin says whether it is synced to managed tenants, and to which.** ✅ 2026-09-13 On
-  the managing (master) tenant, an admin is synced to managed tenants only when its own record
+  the managing (managing tenant) tenant, an admin is synced to managed tenants only when its own record
   is marked as MSP-managed, optionally narrowed to tenants carrying particular tags; every other
   admin stays local. Managed tenants keep their own local admins separately, and a synced admin
-  is governed by the master — including its status and its auto-disable date, which flow down with
+  is governed by the managing tenant — including its status and its auto-disable date, which flow down with
   it. Admins that are not synced are reported with the reason.
 - **A permission delegation can be given its own activation policy.** ✅ 2026-09-16 When you create a
   permission group — for Entra ID or for an Azure resource — you choose the activation policy it uses,
@@ -337,12 +337,12 @@ deployment is a supported choice) and no credentials lying around.
   managed tenants* was **dropped without a word** when the admin it named was master-only: the row looked
   correct, reached nobody, and nothing said so. Now the account travels with the delegation, exactly where it is
   needed, and a delegation whose admin is still master-only is **listed as not published with the fix in the
-  sentence**. An account you have explicitly marked as staying on the master is never dragged out by a
+  sentence**. An account you have explicitly marked as staying on the managing tenant is never dragged out by a
   delegation. *Why it matters:* "I gave them the role in the customer tenant and nothing happened" was, in every
   case, this.
 - **On a managed tenant, every record says where it came from.** ✅ 2026-09-22 The replication settings belong to
   your provider and are hidden on a managed tenant — which left no way to tell a row the provider sent from one
-  you created yourself. Each replicable record type now carries a **Source** column (*from the MSP master* /
+  you created yourself. Each replicable record type now carries a **Source** column (*from the managing tenant* /
   *local*) and counts both in its header line. It is a statement of provenance, not a new control: your own rows
   are still yours, and the provider's sync still touches only what it put there.
 - **A replicating row must name its ring.** ✅ 2026-09-22 Setting replication on and leaving the ring empty
@@ -353,14 +353,14 @@ deployment is a supported choice) and no credentials lying around.
   per-row dropdowns, with a count of how many rows now reach your managed tenants (or no longer do). The ring
   action previously existed only for admin accounts.
 - **Revoke someone's sessions everywhere at once.** ✅ 2026-09-25 When you revoke an administrator's sign-in
-  sessions on the MSP master, you can have every managed tenant revoke the sessions of that person's account there
+  sessions on the managing tenant, you can have every managed tenant revoke the sessions of that person's account there
   too — no approval needed in each tenant. Each tenant carries it out once, on its next sync, and checks that it took
   effect. Break-glass accounts are never revoked. *Why it matters:* when someone leaves, their access ends in every
   customer, not only in yours.
 - **Remove an administrator in all, some or none of your managed tenants.** ✅ 2026-09-25 Removing a replicated
-  administrator (or any replicated record) on the MSP master asks whether the managed tenants should remove it too —
+  administrator (or any replicated record) on the managing tenant asks whether the managed tenants should remove it too —
   in all of them, or only the ones you pick. The chosen tenants remove the administrator and their memberships on
-  the next sync; the others keep it and report it. A removal never overrides something the master still publishes.
+  the next sync; the others keep it and report it. A removal never overrides something the managing tenant still publishes.
 
 ## 5. SQL / Data
 - **Single source of truth in SQL.** ✅ 2026-09-13 Configuration, settings, access rules,
@@ -1832,6 +1832,16 @@ deployment is a supported choice) and no credentials lying around.
   prefers it, and the page now makes clear that the application id and certificate it asks for are **your**
   deployment's. Registering is restricted to a senior administrator and both the acceptance and any refusal
   are written to the audit trail.
+- **Buying Pro and getting support.** ✅ 2026-10-01 — Pro is bought at [invardia.com](https://invardia.com); the
+  **Buy Pro** button on the Free vs Pro page opens it. Licensed customers get support at
+  [portal.invardia.com](https://portal.invardia.com), linked from the Licence page; the community edition is supported
+  by the community.
+- **From Community to Pro without reinstalling.** ✅ 2026-10-01 — register the Pro licence on a Community
+  installation and the Pro features switch on at once; the edition shown, the features unlocked and the update
+  path all follow the same check (a Pro licence for **this** tenant), so a licence for another tenant -- or one
+  that is not a Pro licence -- is refused at the door instead of showing "Pro" with everything locked. The
+  Licence page then shows the one step that gives the installation the Pro updater
+  (`Upgrade-PimToPro.ps1`); until it runs, the Community update keeps working.
 - **A capability that cannot work here cannot be switched on.** ✅ 2026-09-20 — the feature switches now know
   the shape of your deployment. On a single-tenant install the **managed-tenant downlink** surface is locked
   off with the reason shown, instead of offering a switch that would reveal a page with nothing behind it.

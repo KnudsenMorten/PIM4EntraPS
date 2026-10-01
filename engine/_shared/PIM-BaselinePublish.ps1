@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    71.35 -- the signed-baseline PRODUCER. Its publisher is tools/pim-engine/publish-job-entry.ps1 -- the master's
+    71.35 -- the signed-baseline PRODUCER. Its publisher is tools/pim-engine/publish-job-entry.ps1 -- the managing tenant's
     Container Apps job (ca-pim-publish), running as its SYSTEM-ASSIGNED managed identity and signing with a
     NON-EXPORTABLE Key Vault key.
     SEC-27 (operator 2026-09-18): the pre-71.35 HOST publisher (setup/New-PimBaselineBundle.ps1, signed with the
@@ -15,7 +15,7 @@
     ConvertTo-PimBaselineDocJson          { product, payloadB64, signature, keyThumbprint [, signingKey] }
     Invoke-PimBaselineKeyVaultSign        RS256 through the Key Vault REST 'sign' operation over the SHA-256 digest;
                                           the returned signature is checked locally against the key's public half
-    Invoke-PimBaselinePublishRun          build -> sign -> self-verify (the slave's verifier, pinned to the signing key)
+    Invoke-PimBaselinePublishRun          build -> sign -> self-verify (the managed tenant's verifier, pinned to the signing key)
                                           -> upload versioned + latest -> anonymous read-back -> verify again
     Get-PimBaselinePublishJobSpec         PURE. the job's env + YAML; refuses anything credential-shaped
     Get-PimBaselinePublishJobGrants       PURE. the job identity's ONLY data-plane grants (container + key scope)
@@ -88,13 +88,13 @@ function Invoke-PimBaselineOptionalRead {
     catch {
         if (Test-PimBaselineAbsentObjectError -ErrorRecord $_ -Name $Name) { Write-Host "  ($AbsentNote)" -ForegroundColor DarkGray; return $null }
         throw ("BUNDLE REFUSED: reading $What failed ($($_.Exception.Message)). This is NOT treated as 'absent' -- that would " +
-               "publish a WIDER bundle than the master defines. Fix the read (permissions / connectivity) and publish again.")
+               "publish a WIDER bundle than the managing tenant defines. Fix the read (permissions / connectivity) and publish again.")
     }
 }
 
 function Get-PimBaselineBundlePayload {
     <#
-      Read the master registry + delegation model through -RunQuery (param($sql) -> rows) and build the payload.
+      Read the managing tenant registry + delegation model through -RunQuery (param($sql) -> rows) and build the payload.
       Returns @{ payload; payloadJson; payloadBytes; version; rowCount; assignmentCount }.
       -RunQuery is a PLAIN scriptblock from the caller's scope. TRAP: NO .GetNewClosure() on it (found while building 71):
       a closure runs in a NEW module scope that chains to GLOBAL, not to the caller -- so a dot-sourced
@@ -106,10 +106,10 @@ function Get-PimBaselineBundlePayload {
         [Parameter(Mandatory)][scriptblock]$RunQuery,
         [string]$Scope = 'fleet',
         [int]$ValidDays = 30,
-        # REQ-REV-DOWN-1 / REQ-REN-1 (2026-09-22): the withdrawals and renames the master AUTHORISED.
+        # REQ-REV-DOWN-1 / REQ-REN-1 (2026-09-22): the withdrawals and renames the managing tenant AUTHORISED.
         # They travel in the SIGNED payload because they instruct a managed tenant to REMOVE or RENAME
         # something -- an instruction that must not be forgeable between here and there.
-        # LOCKED RULE -- Added to the payload ONLY when there are any: a master with nothing to withdraw produces
+        # LOCKED RULE -- Added to the payload ONLY when there are any: a managing tenant with nothing to withdraw produces
         # the same bytes it produced before this existed (the no-regression byte rule above).
         [object[]]$Intents = @()
     )
@@ -190,7 +190,7 @@ function Get-PimBaselineBundlePayload {
     $bindArr = @($content.definitions.roleBindings)
 
     # 1d. The PER-RELATIONSHIP projection policy, carried IN the bundle (signed), keyed by tenant id: a downlink running
-    # inside the slave has no credential for the master's registry.
+    # inside the managed tenant has no credential for the managing tenant's registry.
     $policyMap = [ordered]@{}
     # THE ONE THAT WIDENS THE MOST: "absent" here means "every relationship projects everything". Only SQL 208 naming
     # the table counts; a permission-denied / transient read REFUSES the bundle.
@@ -231,8 +231,8 @@ function Get-PimBaselineBundlePayload {
     if ($orphan.Count) { Write-Host "  [warn] $($orphan.Count) projected tag(s) have NO group definition in the master: $($orphan -join ', ')" -ForegroundColor Yellow }
     foreach ($b in $bindArr) { Write-Host ("    binds {0,-42} -> {1}" -f $b.GroupTag, $b.RoleDefinitionName) -ForegroundColor DarkGray }
 
-    # 1f. REQUIREMENTS 77.20: the Deployment rings (name + tag rule per ring), carried so each slave judges its own membership.
-    # A missing setting means the three rings with no tag rule (every slave on a ring is a member) -- the same reach as
+    # 1f. REQUIREMENTS 77.20: the Deployment rings (name + tag rule per ring), carried so each managed tenant judges its own membership.
+    # A missing setting means the three rings with no tag rule (every managed tenant on a ring is a member) -- the same reach as
     # before rings had rules. A failed READ refuses the bundle: a rule that silently vanished would widen reach.
     # Through pim.vw_PublishJobControl, NOT pim.Settings: the publish job's reader user has no right on pim.Settings (it also
     # holds ManagerAccess); the control view exposes exactly its own rows, this one included (Get-PimPublishJobControlViewSql).
@@ -372,11 +372,11 @@ function Invoke-PimBaselineKeyVaultSign {
 function Invoke-PimBaselinePublishRun {
     <#
       One publish, end to end, with every side effect behind a seam (the job wires the real ones):
-        -RunQuery  param($sql) -> rows                        (the master store, as the managed identity)
+        -RunQuery  param($sql) -> rows                        (the managing tenant store, as the managed identity)
         -Signer    param([byte[]]$payload) -> @{ signatureBytes; keyId; signingKey }
         -Upload    param($blobName, [string]$json)            (Put Blob as the managed identity)
         -Fetch     param($blobName) -> [string]               (ANONYMOUS GET -- the managed tenant's own read path)
-      Order: build -> sign -> SELF-VERIFY with the slave's verifier pinned to exactly the signing key -> upload
+      Order: build -> sign -> SELF-VERIFY with the managed tenant's verifier pinned to exactly the signing key -> upload
       baseline-v<version>.json, then baseline-latest.json -> anonymous read-back of latest -> byte-compare + verify again.
       Nothing is uploaded unless the self-verify passed. Returns @{ ok; reason; version; keyId; sha256; blobs; readBack }.
     #>
@@ -388,7 +388,7 @@ function Invoke-PimBaselinePublishRun {
         [string]$Scope = 'fleet',
         [int]$ValidDays = 30,
         # REQ-REV-DOWN-1 / REQ-REN-1: the authorised withdrawals + renames to carry in this bundle.
-        # The job reads them from the master's store and passes them; omitted = a bundle identical to
+        # The job reads them from the managing tenant's store and passes them; omitted = a bundle identical to
         # what this produced before the feature existed.
         [object[]]$Intents = @()
     )
@@ -576,7 +576,7 @@ function Get-PimBaselinePublishExecutionVerdict {
                     if ($Attempt -lt $MaxAttempts) { return @{ action = 'retry'; reason = "another execution is publishing right now ($($sk.line)); retrying" } }
                     return @{ action = 'fail'; reason = "another execution was still publishing on the last attempt: $($sk.line)" }
                 }
-                'disabled' { return @{ action = 'fail'; reason = "publishing is DISABLED in the master's Manager (Job schedule > Publish to managed tenants) -- enable it there, or use Publish now: $($sk.line)" } }
+                'disabled' { return @{ action = 'fail'; reason = "publishing is DISABLED in the managing tenant's Manager (Job schedule > Publish to managed tenants) -- enable it there, or use Publish now: $($sk.line)" } }
                 default { return @{ action = 'fail'; reason = "the execution did not publish: $($sk.line)" } }
             }
         }
@@ -589,7 +589,7 @@ function Get-PimBaselinePublishExecutionVerdict {
 # =====================================================================================================================
 # SEC-25 remainder (2.4.373) -- THE CENTRAL-KILL PRODUCER. The managed-tenant pull already CONSUMES a signed
 # kind='central-kill' manifest at <bundle container>/central-kill.json (PIM-Downlink.ps1: Get-PimCentralKillSource ->
-# Get-PimCentralKillState; 404 = none in force), but nothing on a master published one. These build, sign and verify it
+# Get-PimCentralKillState; 404 = none in force), but nothing on a managing tenant published one. These build, sign and verify it
 # with the SAME path and document shape as the bundle (ConvertTo-PimBaselineDocJson + the Key Vault signer), and the
 # publisher (tools/setup/Publish-PimCentralKill.ps1) proves each publish and each withdraw with the CONSUMER's own code.
 # Payload (what Get-PimCentralKillState / Resolve-PimCentralKill read):

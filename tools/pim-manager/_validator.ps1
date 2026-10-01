@@ -492,10 +492,10 @@ function Invoke-PimPreflightValidation {
     }
 
     # 🔴 THE REPLICATED ADMINS ARE ADMINS TOO (RIDE, 2026-09-22: "tons of errors here" -- 11x PIM-FK-002
-    # on a managed tenant whose admins had just arrived from the master).
-    # On an MSP slave the downlink writes the master's admins into their OWN entity,
+    # on a managed tenant whose admins had just arrived from the managing tenant).
+    # On a managed tenant the downlink writes the managing tenant's admins into their OWN entity,
     # 'Account-Definitions-Admins-Central' (PIM-Downlink.ps1 Invoke-PimDownlinkAdminApply), because they
-    # are governed by the master and must never be edited locally. The slave's own
+    # are governed by the managing tenant and must never be edited locally. The managed tenant's own
     # 'Account-Definitions-Admins' holds only its LOCAL admins. The memberships arrive in the same pull
     # and name those central accounts -- so an index built from the local entity alone declares every
     # replicated membership an orphan, with a "Remove this assignment" button that would undo the
@@ -517,7 +517,7 @@ function Invoke-PimPreflightValidation {
                 }
             }
         } catch {
-            # No such entity (single tenant, or a master) -- not a finding. Only a slave has one.
+            # No such entity (single tenant, or a managing tenant) -- not a finding. Only a managed tenant has one.
         }
     }
     $isKnownAdminName = {
@@ -699,7 +699,7 @@ function Invoke-PimPreflightValidation {
             # A membership naming the admin by UserName, or by a full UPN whose local part is an admin's UserName, is a
             # reference to that admin: the UPN is composed from the UserName at create (UserName vs UPN, 2.4.377).
             if ($adminUserNames.Contains($key) -or ($key.Contains('@') -and $adminUserNames.Contains($key.Substring(0, $key.IndexOf('@'))))) { continue }
-            # ...and an admin REPLICATED from the master is defined, just not here (see $centralAdminNames above).
+            # ...and an admin REPLICATED from the managing tenant is defined, just not here (see $centralAdminNames above).
             if (& $isKnownAdminName $u) { continue }
             # Try UPN-derivation match too (raw UserName -> UserName@defaultDomain).
             $derivedHit = $false
@@ -1395,7 +1395,7 @@ function Invoke-PimPreflightValidation {
     # PIM-UPN-001 -- AN ADMIN ROW MUST CARRY ITS UserPrincipalName (operator 2026-09-21: "we can not have a admin
     # without a upn. that makes no sense, then it is not compatible"). Measured on EFIF: six rows imported with a
     # UserName only never showed on Admin accounts, and every UPN-keyed path (TAP, forwarding, sign-in) passed them
-    # by. The UPN is this tenant's; a replicated admin gets its slave's UPN built at staging (UserName@slave domain).
+    # by. The UPN is this tenant's; a replicated admin gets its managed tenant's UPN built at staging (UserName@slave domain).
     if ($loaded.ContainsKey('Account-Definitions-Admins')) {
         $rows = $loaded['Account-Definitions-Admins'].rows
         for ($i = 0; $i -lt $rows.Count; $i++) {
@@ -1459,7 +1459,7 @@ function Invoke-PimPreflightValidation {
     # blank, 0 (dev), 1 (test) or 2 (broad) -- §77.20 (operator 2026-09-21), the
     # same order as the update rings. DOC-16 a (§33.28): an invalid value
     # UNDER-grants, it does not over-grant: the admin reaches NO managed tenant.
-    # Each slave's ring is set locally in the slave. Severity is WARNING by
+    # Each slave's ring is set locally in the managed tenant. Severity is WARNING by
     # design (never blocks Save); the Validate tab's Fix-all offers Ring=0
     # (dev tenants only, the narrowest) or blank.
     # ------------------------------------------------------------------
@@ -1500,7 +1500,7 @@ function Invoke-PimPreflightValidation {
             # 77.20 (2.4.388): the rings are 0 (dev), 1 (test), 2 (broad) only.
             if ($mode -ieq 'msp' -and (Get-PimRowValue -Row $r -Column 'Ring').Trim() -notmatch '^[0-2]$') {
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Ring' `
-                    -Message "'$upn' is ManagementMode=msp (synced to slaves) but has no valid Ring (blank, or not 0, 1 or 2) -- the downlink sends it to NO slave." `
+                    -Message "'$upn' is ManagementMode=msp (synced to managed tenants) but has no valid Ring (blank, or not 0, 1 or 2) -- the downlink sends it to NO slave." `
                     -Suggestion "Set Ring to 0 (dev tenants), 1 (dev + test) or 2 (every tenant), or set ManagementMode=local if it should not be synced."))
             }
             $tgt = (Get-PimRowValue -Row $r -Column 'Target').Trim()
@@ -1511,7 +1511,7 @@ function Invoke-PimPreflightValidation {
                     if (@($sel.malformed).Count)   { $what += "malformed: $(@($sel.malformed) -join ', ')" }
                     if (@($sel.unknownTags).Count) { $what += "no managed tenant carries tag(s): $(@($sel.unknownTags) -join ', ')" }
                     [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-002' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Target' `
-                        -Message "Target '$tgt' for '$upn' -- $($what -join '; '). A tag nobody carries sends the admin to no slave." `
+                        -Message "Target '$tgt' for '$upn' -- $($what -join '; '). A tag nobody carries sends the admin to no managed tenant." `
                         -Suggestion "Pick tags from the managed tenants' tags (use tag:<name>, tenant:<id>, all or none)."))
                 }
             }
@@ -1525,7 +1525,7 @@ function Invoke-PimPreflightValidation {
     #   003 ERROR   = Replicate is not No/Yes/Follow, is Follow on an admin, or DISAGREES with the admin's
     #                 ManagementMode (msp <-> Yes, local/blank <-> No). The bundle fails such a row closed,
     #                 so saving it would silently stop (or never start) replicating the admin.
-    #   004 warning = replication fields on a tenant that is NOT the MSP master -- they mean nothing here
+    #   004 warning = replication fields on a tenant that is NOT the managing tenant -- they mean nothing here
     #                 and the Manager refuses to change them. Only raised when the mode is KNOWN.
     #   005 warning = a group-model row's Ring is not 0/1/2 -- it reaches no tenant.
     #   002 warning = a group-model row's Target is malformed or names an unknown tag (admins: above).
@@ -1556,8 +1556,8 @@ function Invoke-PimPreflightValidation {
                 if (-not $hasFields) { continue }
                 if ($repMaster -eq $false) {
                     [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-004' -Csv $repEnt -Row $i -Column 'Replicate' `
-                        -Message "'$label' carries replication fields (Replicate/Ring/Target) but this tenant is not the MSP master -- they have no effect here." `
-                        -Suggestion "Clear them. Replication is authored only on the MSP master and pulled by managed tenants."))
+                        -Message "'$label' carries replication fields (Replicate/Ring/Target) but this tenant is not the managing tenant -- they have no effect here." `
+                        -Suggestion "Clear them. Replication is authored only on the managing tenant and pulled by managed tenants."))
                     continue
                 }
                 $chk = Test-PimReplicationRowFields -Row $r -Entity $repEnt -KnownTags @($repTags.tags) -TagsKnown:([bool]$repTags.known)
@@ -1601,7 +1601,7 @@ function Invoke-PimPreflightValidation {
             if ($ct -and $ct -notmatch '(?i)^(true|1|yes)$') {
                 $who = (Get-PimRowValue -Row $r -Column 'UserPrincipalName').Trim(); if (-not $who) { $who = (Get-PimRowValue -Row $r -Column 'UserName').Trim() }
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-TAP-003' -Csv 'Account-Definitions-Admins' -Row $i -Column 'CreateTAP' `
-                    -Message "'$who' -- CreateTAP='$ct' has NO effect: a Temporary Access Pass is enforced for every Entra admin (single tenant, MSP master and managed tenants alike)." `
+                    -Message "'$who' -- CreateTAP='$ct' has NO effect: a Temporary Access Pass is enforced for every Entra admin (single tenant, managing tenant and managed tenants alike)." `
                     -Suggestion 'Set CreateTAP to TRUE (or leave it blank). To stop a TAP, the admin must not be an Entra admin (TargetPlatform=AD).'))
             }
         }

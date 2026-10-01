@@ -1,19 +1,19 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    SEC-25 -- publish (or withdraw) the MSP master's SIGNED central-kill manifest, which every managed tenant's pull checks
-    before it takes anything from the master.
+    SEC-25 -- publish (or withdraw) the managing tenant's SIGNED central-kill manifest, which every managed tenant's pull checks
+    before it takes anything from the managing tenant.
 
 .DESCRIPTION
     The managed-tenant pull already CONSUMES a signed kind='central-kill' manifest at <bundle container>/central-kill.json
     (engine/_shared/PIM-Downlink.ps1: Get-PimCentralKillSource -> Get-PimCentralKillState). A verified manifest with
     entries is ACTIVE: the pull refuses, loudly, naming who is killed, until the manifest is withdrawn or expires. 404 at
-    that location = no kill. Nothing on a master published one until this script.
+    that location = no kill. Nothing on a managing tenant published one until this script.
 
     PUBLISH (-Kill ... -Reason ...):
       1. builds the payload { product, kind='central-kill', version, generatedAtUtc, validToUtc, reason, kills[] }
          (New-PimCentralKillPayload; each kill = upn or userName + status Disabled|Revoked, the only two the consumer takes);
-      2. signs it through Key Vault with the master's NON-EXPORTABLE bundle signing key -- the SAME signer and document
+      2. signs it through Key Vault with the managing tenant's NON-EXPORTABLE bundle signing key -- the SAME signer and document
          shape as the bundle (Invoke-PimBaselineKeyVaultSign + ConvertTo-PimBaselineDocJson), so the managed tenants
          verify it with the key they already pin (PIM_BaselineTrustedKeys);
       3. SELF-VERIFIES with the managed tenant's own verdict (Get-PimCentralKillState, pinned to that key) = 'active'
@@ -29,7 +29,7 @@
 
 .NOTES
     WHERE IT RUNS -- the bundle store's firewall denies every network except the ones it names (DESIGN 13.7), for
-    authenticated writes as much as for anonymous reads. Run this from a network the store allows (the master's VNet /
+    authenticated writes as much as for anonymous reads. Run this from a network the store allows (the managing tenant's VNet /
     the publish job's subnet). From anywhere else the upload fails with 403 AuthorizationFailure, and the script says so.
     IDENTITY -- a service principal with a CERTIFICATE (-TenantId -ClientId -CertThumbprint; the cert in the local store),
     or the managed identity of the host it runs on (-UseManagedIdentity). Never a client secret. It needs:
@@ -118,7 +118,7 @@ $blobUrl = { param($name) "https://$StorageAccount.blob.core.windows.net/$Contai
 $explainNetwork = {
     param($err)
     if ("$err" -match '(?i)AuthorizationFailure|403') {
-        return " -- 403 from the store: either this identity lacks 'Storage Blob Data Contributor' on the container, or (more often) this host's network is not one the store's firewall allows. Run it from the master's VNet / the publish job's subnet."
+        return " -- 403 from the store: either this identity lacks 'Storage Blob Data Contributor' on the container, or (more often) this host's network is not one the store's firewall allows. Run it from the managing tenant's VNet / the publish job's subnet."
     }
     return ''
 }

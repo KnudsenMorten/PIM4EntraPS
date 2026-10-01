@@ -274,7 +274,7 @@ param(
     [string]$PendingUpdateSourceUrl = '',
 
     # --- 71.40: what the Manager's Downlink view verifies against -------------------------------
-    # The master signing key id(s) the MANAGER pins (PIM_BaselineTrustedKeys) and the PLAIN URL the master publishes
+    # The managing tenant signing key id(s) the MANAGER pins (PIM_BaselineTrustedKeys) and the PLAIN URL the managing tenant publishes
     # the signed bundle to (PIM_BaselineDocUrl). Without them a hosted Manager said "no baseline document configured"
     # on every environment, and could not verify a Key Vault signed bundle even when it had one. Manager only (the
     # pull job carries its own pins, Deploy-PimDownlinkJob). Blank = not set, exactly as before.

@@ -633,7 +633,7 @@ function Assert-PimAdminPopulationComparable {
           # 🔴 2026-09-22 (operator: "you can not block admins due to different name pattern"). Accounts
           # a DESIRED ROW names are part of this population by definition -- PIM is already managing
           # them, by the store, not by what they are called. On a managed tenant those rows come from
-          # the master and carry ITS naming, so without this the assertion would reject the very rows
+          # the managing tenant and carry ITS naming, so without this the assertion would reject the very rows
           # the tenant was told to hold. It does NOT widen discovery: the caller passes only the UPNs
           # its desired set actually names, so an account no row asks for still cannot get in here.
           [string[]]$AlsoAllowed = @())
