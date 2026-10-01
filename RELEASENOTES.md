@@ -33,6 +33,19 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   memberships lags the grant by a few seconds; the Activator now shows the group as active as soon as Microsoft confirms
   the activation.
 
+## v2.4.474 — Access map shows the path; change many rows at once
+
+- **Fixed: selecting a group on the Access map now shows its path, with the lines.** Selecting a direct group or a
+  permission group used to keep every group it *could* be linked to on screen (hundreds, alphabetically), which pushed
+  its real path out of view and left the lines undrawn. Those link targets now appear only while you drag, or when you
+  switch on **Show link targets**.
+- **New: filter each Access map column** -- **All**, **Assigned** or **Not assigned** -- to find your way through
+  hundreds of groups. The selected path is never filtered away.
+- **New: change many rows at once.** Select rows in a delegation table and one strip offers **Policy**,
+  **Duration (days)**, **Type** and **Auto-extend** (and more under the field picker), with the same values as the
+  column itself; Apply changes every selected row and says how many. No scrolling to the column. The explanation of
+  Remove / Revoke / Delete is now one click away instead of filling the bar.
+
 ## v2.4.473 — Community to Pro without reinstalling; "managing tenant" and "managed tenant"
 
 - **New: upgrade a Community installation to Pro.** Register the Pro licence on the Licence page and the Pro features

@@ -395,7 +395,16 @@
   /* A box you can link the current selection to. Focus mode hides everything off the path
      (`.map-item.dim{display:none}`), which removed every possible target the moment you selected a
      source -- so Ctrl+click and drag had nothing to aim at. These stay, quietly. */
-  #mapBoard.focused .map-item.link-cand { display:flex !important; opacity:.5; border-style:dashed; }
+  /* BUG-280 (operator 2026-10-01: "i clicked on direct group, it should filter ... and show lines through"): a selected
+     group kept EVERY box it could be linked to visible (~500 permission groups), alphabetically, so its real path was
+     scrolled out of view and no wire was drawn to it. Candidates now show only while linking: a drag, or the
+     "Show link targets" switch (a Give / Remove session turns focus off and shows everything anyway). */
+  #mapBoard.focused.drag-mode .map-item.link-cand, #mapBoard.focused.show-cands .map-item.link-cand { display:flex !important; opacity:.5; border-style:dashed; }
+  #mapBoard .map-item.link-cand { border-style:dashed; }
+  /* §86.2: the per-column filter. A box on the selected path is never hidden by it. */
+  #mapBoard .map-item.cf-hide:not(.sel):not(.path) { display:none !important; }
+  .map-col-tools { padding:0 10px 4px; text-align:right; }
+  .map-col-filter { font-size:11px; font-weight:400; text-transform:none; letter-spacing:0; margin-left:6px; padding:1px 4px; border:1px solid #d0d7de; border-radius:4px; background:#fff; color:#24292f; }
   #mapBoard .map-item.link-cand:hover { opacity:1; background:#ddf4ff; border-color:#0969da; }
   /* A box with an UNCOMMITTED link, in the same amber as the dashed pending wire. */
   #mapBoard .map-item.staged { border-color:#9a6700; border-style:dashed; background:#fff8c5; }
@@ -636,6 +645,11 @@
   .grid-action-bar button.gab-primary { color:#fff; background:#0969da; border-color:#0969da; font-weight:600; }
   .grid-action-bar button.gab-primary:hover { background:#0757ba; border-color:#0757ba; }
   .grid-action-bar button.gab-primary:disabled { background:#8c959f; border-color:#8c959f; cursor:not-allowed; }
+  /* §86.3 the quick-change strip */
+  .grid-action-bar .gab-quick { padding:6px 8px; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; }
+  .grid-action-bar button.gab-quick-btn { border-radius:12px; padding:2px 10px; }
+  .grid-action-bar button.gab-quick-btn.on { background:#ddf4ff; border-color:#0969da; color:#0550ae; font-weight:600; }
+  .grid-action-bar #gabQuickValue { min-width:220px; max-width:520px; font-size:12px; }
   .grid-action-bar button.gab-secondary-danger { color:#cf222e; background:#fff; border-color:#cf222e; }
   .grid-action-bar button.gab-secondary-danger:hover { background:#ffebe9; }
   .grid-action-bar .gab-spacer { flex:1; }
@@ -1119,6 +1133,8 @@
            in -- the label named the mode you were NOT in. Text + title are set
            by mapSetFocusToggle(). -->
       <button id="mapFocusToggle" style="display:none" aria-pressed="true"></button>
+      <!-- BUG-280: what the selection could be linked to is hidden until asked for (it buried the real path). -->
+      <button id="mapCandToggle" style="display:none" aria-pressed="false" title="Show the boxes the selected item could be linked to (for Ctrl+click), faded and dashed">&#x2610; Show link targets</button>
       <!-- REQ-MAP-LINK, 2026-09-21 (operator, on 2.4.395: "i dont see button. why not with others" /
            "not clear"). The link controls shipped ONLY as ghost buttons in the detail bar at the
            BOTTOM of the page, after the node summary and above the fold-out breakdown -- so on a
@@ -13765,6 +13781,54 @@
   // ===================================================================
   // Returns null if the column isn't a known dropdown target, otherwise
   // an object: { options: [{value,label,sub}], allowCustom: true, listKey, badge }.
+  // §86.3 the grid's quick-change strip -- what can be changed on many rows at once, the value control, and the apply.
+  // Identity columns (who / which group / which role / scope) are deliberately NOT here: changing them on ten rows at
+  // once makes ten different delegations, which is a create, not a change.
+  function gridQuickFieldList() { return [
+    ['PolicyTemplate', 'Policy', true], ['NumOfDaysWhenExpire', 'Duration (days)', true], ['AssignmentType', 'Type (Eligible / Active)', true],
+    ['AutoExtend', 'Auto-extend', true], ['Permanent', 'Permanent', false], ['Action', 'Action (Assign / Remove)', false],
+    ['UpdateExisting', 'Update existing', false], ['ApproverUpns', 'Approvers', false], ['TierLevel', 'Tier', false],
+    ['Plane', 'Plane', false], ['CPPlatform', 'Platform', false], ['PermissionScope', 'Permission scope', false], ['SyncPlatform', 'Sync platform', false]]; }
+  function gridQuickFields(base, header, colSpecs) {
+    const h = header || [];
+    return gridQuickFieldList()
+      .filter(f => h.indexOf(f[0]) >= 0 && !(typeof replHiddenCol === 'function' && replHiddenCol(base, f[0])))
+      .map(f => ({ col: f[0], label: f[1], quick: f[2] }));
+  }
+  function gridQuickValueHtml(base, col, spec) {
+    if (spec && Array.isArray(spec.options) && spec.options.length) {
+      let o = '';
+      if (spec.allowBlank) o += '<option value="">' + escapeHtml(spec.blankLabel || '(blank)') + '</option>';
+      for (const x of spec.options) {
+        const v = (x && typeof x === 'object') ? String(x.value) : String(x);
+        const l = (x && typeof x === 'object') ? String(x.label || x.value) : String(x);
+        o += '<option value="' + escapeHtml(v) + '">' + escapeHtml(l) + '</option>';
+      }
+      return '<select id="gabQuickValue" data-field="' + escapeHtml(col) + '">' + o + '</select>';
+    }
+    if (col === 'NumOfDaysWhenExpire') return '<input id="gabQuickValue" data-field="' + escapeHtml(col) + '" type="number" min="1" max="3650" placeholder="e.g. 365" style="width:110px;">';
+    return '<input id="gabQuickValue" data-field="' + escapeHtml(col) + '" type="text" placeholder="new value" style="width:220px;">';
+  }
+  // PURE over the grid state: set -Field to -Value on every selected, not-deleted row. Returns { changed; same; note; error }.
+  function gridQuickApply(p, field, value, spec) {
+    if (!p || !field) return { changed: 0, same: 0, note: '', error: 'pick what to change' };
+    // A blank or 0 duration means PERMANENT to the engine -- never an accident of an empty box on ten rows.
+    if (field === 'NumOfDaysWhenExpire' && (!/^\d+$/.test(value) || +value < 1 || +value > 3650)) return { changed: 0, same: 0, note: '', error: 'Duration must be a whole number of days from 1 to 3650 (use Permanent for no end date).' };
+    if (spec && typeof spec.validate === 'function' && !spec.validate(value)) return { changed: 0, same: 0, note: '', error: '"' + value + '" is not a valid value for ' + field + '.' };
+    let changed = 0, same = 0;
+    for (const i of (p.selection || [])) {
+      if (p.deletes && p.deletes.has(i)) continue;
+      const row = p.rows[i]; if (!row) continue;
+      if (String(row[field] == null ? '' : row[field]).trim() === value) { same++; continue; }
+      row[field] = value; changed++;
+    }
+    const shown = value === '' ? '(blank)' : value;
+    const note = changed
+      ? (changed + ' row(s): ' + field + ' set to ' + shown + (same ? ' (' + same + ' already had it)' : '') + '. Review under Pending changes.')
+      : ('Nothing changed: the selected row(s) already have ' + field + ' = ' + shown + '.');
+    return { changed, same, note, error: '' };
+  }
+
   function getDropdownSpec(base, col) {
     // 🔴 `Action` IS THE FIELD THAT TAKES ACCESS AWAY, AND IT WAS A FREE-TEXT CELL (operator,
     // 2026-09-22: "how can i remove the delegation - is that only done in the revoke or how ?" ...
@@ -15894,6 +15958,28 @@
     const barCls = selCount > 0 ? 'grid-action-bar active' : 'grid-action-bar';
     html.push(`<div id="gridActionBar" class="${barCls}">`);
     html.push(`<span class="gab-count">${selCount} row(s) selected</span>`);
+    // 🔴 §86.3 (operator 2026-10-01: "I am missing buttoms so i fx can change the policy for this row or replicating ...
+    // lets say i want to change policy i have to scroll many times to the right to change ... it must also work for
+    // editing 10 rows and change same thing"). ONE strip: pick what to change (quick buttons for the usual four), pick
+    // the value from the SAME list the cell offers (colSpecs), apply to every selected row. Staged like a cell edit.
+    if (selCount > 0) {
+      const quickFields = gridQuickFields(base, header, colSpecs);
+      if (quickFields.length) {
+        const qf = (p.quickField && quickFields.some(f => f.col === p.quickField)) ? p.quickField : quickFields[0].col;
+        html.push('<div id="gabQuick" class="gab-quick" style="flex-basis:100%;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">');
+        html.push('<b style="font-size:12px;">Change ' + (selCount === 1 ? 'this row' : 'all ' + selCount + ' rows') + ':</b>');
+        for (const f of quickFields.filter(x => x.quick)) {
+          html.push('<button class="gab-quick-btn' + (f.col === qf ? ' on' : '') + '" data-quick-field="' + escapeHtml(f.col) + '" title="Change ' + escapeHtml(f.label) + ' on the selected row(s)">' + escapeHtml(f.label) + '</button>');
+        }
+        html.push('<select id="gabQuickField" title="Or pick any other field">' + quickFields.map(f =>
+          '<option value="' + escapeHtml(f.col) + '"' + (f.col === qf ? ' selected' : '') + '>' + escapeHtml(f.label) + '</option>').join('') + '</select>');
+        html.push('<span style="font-size:12px;">to</span>');
+        html.push(gridQuickValueHtml(base, qf, colSpecs[qf]));
+        html.push('<button id="gabQuickApply" class="gab-primary">Apply to ' + selCount + ' row' + (selCount === 1 ? '' : 's') + '</button>');
+        if (p.quickNote) html.push('<span id="gabQuickNote" class="gab-label" style="color:#1a7f37;">' + escapeHtml(p.quickNote) + '</span>');
+        html.push('</div>');
+      }
+    }
     if (isAdmins) {
       html.push('<span class="gab-label">Set AccountStatus to:</span>');
       html.push('<select id="gabAccountStatus">' +
@@ -15966,9 +16052,10 @@
     // different things -- and the product had been using them loosely enough that nobody could
     // predict which button did what. It is open by default here, because this is the bar where the
     // choice is actually made.
-    html.push('<div class="gab-label" style="flex-basis:100%;color:#57606a;">' +
-      '<b>Which one do I want?</b> Four words, four different things:' +
-      pimVerbsTableHtml() + '</div>');
+    // §86.3 (operator 2026-10-01: "why all this text"): the glossary is one click away, not the bar's main content.
+    html.push('<details class="gab-label" id="gabVerbs" style="flex-basis:100%;color:#57606a;"><summary style="cursor:pointer;">' +
+      'What&rsquo;s the difference: take out of PIM, remove, revoke, delete?</summary>' +
+      pimVerbsTableHtml() + '</details>');
     html.push('</div>');
 
     html.push('<table class="grid"><thead><tr>');
@@ -16351,6 +16438,25 @@
     // Bulk REPLICATE (2026-09-22). Writes the same column the per-row dropdown writes, with the same
     // values, and counts how many rows it WIDENED -- turning 24 rows on in one click is exactly the
     // action that deserves a number next to it.
+    // §86.3 the quick-change strip: a quick button / the field picker re-renders with that field's value list; Apply sets
+    // the value on every selected row (deleted rows skipped), validated with the column's own rule, and says what changed.
+    document.querySelectorAll('#gabQuick [data-quick-field]').forEach(b => b.onclick = () => { p.quickField = b.dataset.quickField; p.quickNote = ''; renderGrid(base); });
+    const gabQuickField = document.getElementById('gabQuickField');
+    if (gabQuickField) gabQuickField.onchange = () => { p.quickField = gabQuickField.value; p.quickNote = ''; renderGrid(base); };
+    const gabQuickApply = document.getElementById('gabQuickApply');
+    if (gabQuickApply) {
+      gabQuickApply.onclick = () => {
+        const field = (gabQuickField && gabQuickField.value) || p.quickField;
+        const vEl = document.getElementById('gabQuickValue');
+        if (!field || !vEl) return;
+        const r = gridQuickApply(p, field, String(vEl.value == null ? '' : vEl.value).trim(), colSpecs[field]);
+        p.quickField = field;
+        p.quickNote = r.error ? '' : r.note;
+        if (r.error) { alert(r.error); return; }
+        if (r.changed > 0) markBadges();
+        renderGrid(base);
+      };
+    }
     const gabApplyRepl = document.getElementById('gabApplyRepl');
     if (gabApplyRepl) {
       gabApplyRepl.onclick = () => {
@@ -25955,6 +26061,8 @@
       colEl.appendChild(e);
     });
 
+    mapEnsureColFilters();   // §86.2
+    mapApplyColFilter();
     mapApplyRisk();
     mapApplySearch();
     if (MAP.sel && m.byId[MAP.sel]) mapSelect(MAP.sel, true); else mapClearSel(true);
@@ -25999,6 +26107,8 @@
     wires.classList.remove('mw-isolating');
     document.getElementById('mapClear').style.display = 'none';
     document.getElementById('mapFocusToggle').style.display = 'none';
+    const candBtn0 = document.getElementById('mapCandToggle'); if (candBtn0) candBtn0.style.display = 'none';
+    board.classList.remove('show-cands');
     const dEmpty = document.getElementById('mapDetail');
     dEmpty.classList.remove('has-sel', 'picking', 'picking-remove');
     dEmpty.innerHTML = '<span class="empty">Nothing selected &mdash; click a person, group or permission above to see what it reaches and to give or remove access.</span>';
@@ -26072,6 +26182,15 @@
     board.classList.toggle('focused', MAP.focusMode !== false);
     document.getElementById('mapFocusToggle').style.display = '';
     mapSetFocusToggle();
+    // BUG-280: link targets only on request -- otherwise the path is the only thing in its columns.
+    board.classList.toggle('show-cands', !!MAP.showLinkTargets);
+    const candBtn = document.getElementById('mapCandToggle');
+    if (candBtn) {
+      candBtn.style.display = canLink ? '' : 'none';
+      candBtn.textContent = (MAP.showLinkTargets ? '☑' : '☐') + ' Show link targets';
+      candBtn.setAttribute('aria-pressed', MAP.showLinkTargets ? 'true' : 'false');
+      candBtn.classList.toggle('on', !!MAP.showLinkTargets);
+    }
     // scroll selected into view on first selection
     if (!rerendered) {
       const selEl = document.querySelector('#mapBoard .map-item.sel');
@@ -27177,6 +27296,67 @@
     MAP.focusMode = (MAP.focusMode === false);   // toggle; default true
     if (MAP.sel) mapSelect(MAP.sel, true);
   };
+  // BUG-280: show / hide what the selection could be linked to (for Ctrl+click). Off by default.
+  (document.getElementById('mapCandToggle') || {}).onclick = () => {
+    MAP.showLinkTargets = !MAP.showLinkTargets;
+    if (MAP.sel) mapSelect(MAP.sel, true);
+  };
+
+  // §86.2 (operator 2026-10-01: "i need a filter option so i can filter on show assigned only vs show not assigned. with
+  // 500 groups it becomes too complex"): a filter in each column header -- All / Assigned / Not assigned. People:
+  // assigned = holds at least one assignment; a group / permission: assigned = something reaches it. A box on the
+  // selected path is never hidden by it (the CSS keeps .sel / .path visible). Remembered per viewer.
+  function mapColFilterState() {
+    if (!MAP.colFilter) {
+      let s = null; try { s = JSON.parse(localStorage.getItem('pim.map.colFilter') || 'null'); } catch (_) { s = null; }
+      MAP.colFilter = (Array.isArray(s) && s.length === 4) ? s.map(v => (v === 'assigned' || v === 'unassigned') ? v : 'all') : ['all', 'all', 'all', 'all'];
+    }
+    return MAP.colFilter;
+  }
+  function mapEnsureColFilters() {
+    const st = mapColFilterState();
+    document.querySelectorAll('#mapBoard .map-col').forEach((col, i) => {
+      const h = col.querySelector('h3'); if (!h || col.querySelector('.map-col-filter')) return;
+      const s = document.createElement('select');
+      s.className = 'map-col-filter'; s.dataset.col = String(i);
+      s.title = 'Show every row, only the assigned ones, or only the ones nothing is assigned to';
+      s.innerHTML = '<option value="all">All</option><option value="assigned">Assigned</option><option value="unassigned">Not assigned</option>';
+      s.value = st[i] || 'all';
+      s.onclick = (ev) => ev.stopPropagation();
+      s.onchange = () => {
+        const cur = mapColFilterState(); cur[i] = s.value;
+        try { localStorage.setItem('pim.map.colFilter', JSON.stringify(cur)); } catch (_) { }
+        mapApplyColFilter();
+        if (MAP.sel && MAP.lastEdges) mapDrawWires(MAP.lastEdges);
+      };
+      const bar = document.createElement('div');
+      bar.className = 'map-col-tools';
+      bar.appendChild(s);
+      h.insertAdjacentElement('afterend', bar);
+    });
+  }
+  function mapIsAssigned(m, n) {
+    if (!m || !n) return false;
+    const c = m.colOf(n);
+    if (c === 0) return (m.fwd[n.id] || []).length > 0;
+    return (m.back[n.id] || []).length > 0;
+  }
+  function mapApplyColFilter() {
+    const m = MAP.model; if (!m) return;
+    const st = mapColFilterState();
+    const colEls = ['mapCol0', 'mapCol1', 'mapCol2', 'mapCol3'].map(id => document.getElementById(id));
+    colEls.forEach((colEl, i) => {
+      if (!colEl) return;
+      const f = st[i] || 'all';
+      colEl.querySelectorAll('.map-item').forEach(el => {
+        const n = m.byId[el.dataset.id];
+        const a = mapIsAssigned(m, n);
+        el.classList.toggle('cf-hide', (f === 'assigned' && !a) || (f === 'unassigned' && a));
+      });
+      const sel = document.querySelector('#mapBoard .map-col-filter[data-col="' + i + '"]');
+      if (sel && sel.value !== f) sel.value = f;
+    });
+  }
   // Export the WHOLE delegation map (every admin -> every reachable target, with
   // the path) -- REQUIREMENTS §26a "export everywhere" for the delegation map.
   // Traverses the SAME engine-backed map model the board renders.
