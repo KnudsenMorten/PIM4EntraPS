@@ -150,7 +150,9 @@ $subnet  = Get-PimEffective $SubnetName        'snet-pim-aca'
 $law     = Get-PimEffective $LogAnalyticsName  "law-pim-$Token"
 # ACR: alphanumeric only. An OVERRIDE is sanitised the same way a derived name is -- silently
 # accepting 'acr-customer' here would fail minutes later inside az with a name-rules error.
-$acr     = (Get-PimEffective $AcrName ("acrpim$Token") -replace '[^A-Za-z0-9]','').ToLowerInvariant()
+# BUG-274: the call needs its own parentheses -- without them `-replace` was handed to Get-PimEffective as an argument
+# (silently, into $args) and an override like 'acr-Customer' kept its hyphen.
+$acr     = ((Get-PimEffective $AcrName ("acrpim$Token")) -replace '[^A-Za-z0-9]','').ToLowerInvariant()
 $sqlSrv  = Get-PimEffective $SqlServerName     "sql-ait-$Token"
 $sqlDb   = 'PimPlatform'
 # 🔒 ADDRESSING COMES FROM EXACTLY ONE PLACE, and the caller chooses which:
