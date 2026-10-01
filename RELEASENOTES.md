@@ -14,6 +14,21 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.476 — Clearer setup and update messages
+
+- **Fixed: the updater reported an image digest as the running version.** After a normal roll the running image is
+  pinned by digest, and the update log showed that long hash as the "running VERSION". The version is now looked up in
+  the registry, or reported as unknown with the reason -- never as a digest.
+- **Fixed: opening the SQL build window hid the real reason when Azure refused it.** If a policy forbids public network
+  access, the script now stops with Azure's own message and points to the private endpoint, instead of failing later on
+  the firewall rule.
+- **Mail sender setup: a manual Exchange Administrator assignment must be time-bound.** When the automatic activation is
+  refused, the script now explains the manual way (active, time-bound, no longer than requested -- the portal defaults to
+  one year). A reused assignment that ends later than requested is reported as standing privilege.
+- **Signed-in setup on an Azure Arc or Azure VM host** now tells you exactly how to clear the managed-identity
+  variable for the current window only.
+- **Managed tenants:** the "unchanged" pull line now names the bundle version.
+
 ## PIM Activator 1.6.135 — auto-activate reaches sub-groups (released 2026-09-30)
 
 - **Fixed: a sub-group ticked for auto-activate was never activated.** A permission group nested in a role group only

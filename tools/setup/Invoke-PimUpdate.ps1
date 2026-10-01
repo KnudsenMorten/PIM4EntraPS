@@ -337,11 +337,20 @@ function Get-PulledManagerContentHash {
 function Get-RunningManagerInfo {
     # hosted: read the running image tag + its baked-in content hash label via az (best-effort).
     # community: read the local package marker if present. Blank hash => detection treats as needs-update.
-    $info = @{ version = ''; contentHash = '' }
+    $info = @{ version = ''; versionNote = ''; contentHash = '' }
     if ($profile.isHosted -and (Have 'az')) {
         try {
             $img = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "properties.template.containers[0].image" -o tsv 2>$null
-            if ("$img".Trim()) { $info.version = ("$img" -split ':')[-1] }
+            # BUG-230: a digest-pinned image is resolved to its version tag in the registry, else UNKNOWN.
+            $rv = Resolve-PimRunningVersionFromImage -Image "$img" -TagResolver {
+                param($repo, $digest)
+                $reg = ($repo -split '/')[0]; $name = ($repo -split '/', 2)[1]
+                if (-not $reg -or -not $name -or $reg -notmatch '\.azurecr\.io$') { return @() }
+                $j = az acr repository show @azSubArgs -n ($reg -replace '\.azurecr\.io$', '') --image "$name@$digest" -o json 2>$null
+                if ($LASTEXITCODE -ne 0 -or -not "$j".Trim()) { return @() }
+                @(("$j" | ConvertFrom-Json).tags)
+            }
+            $info.version = $rv.version; $info.versionNote = $rv.note
             # content hash is published as an image env/label; read the app env var if present.
             $h = @(az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "properties.template.containers[0].env[?name=='PIM_MANAGER_CONTENT_HASH'].value" -o tsv 2>$null) | Select-Object -First 1
             if ("$h".Trim()) { $info.contentHash = "$h".Trim() }
@@ -551,7 +560,8 @@ Step '1. DETECT'
 $pulledVersion = if ("$ImageTag".Trim()) { $ImageTag } else { Get-PulledVersion }
 $pulledHash    = Get-PulledManagerContentHash
 $running       = Get-RunningManagerInfo
-Info "pulled VERSION: $pulledVersion; running VERSION: $($running.version)"
+$runVerText = $(if ("$($running.version)".Trim()) { "$($running.version)" } else { 'UNKNOWN' }) + $(if ("$($running.versionNote)".Trim()) { " ($($running.versionNote))" } else { '' })
+Info "pulled VERSION: $pulledVersion; running VERSION: $runVerText"
 Info "pulled GUI content hash: $pulledHash"
 Info "running GUI content hash: $($running.contentHash)"
 

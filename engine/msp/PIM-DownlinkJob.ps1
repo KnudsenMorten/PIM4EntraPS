@@ -818,6 +818,23 @@ function Get-PimDownlinkUnchangedDecision {
     return [pscustomobject]@{ skip = $true; reason = ("unchanged -- the managing tenant's bundle{0} and this tenant's pull inputs are the same as at the last clean apply ({1}Z); nothing to apply. The next full pass is at the daily safety pass or on Run now." -f $(if ($ver) { " v$ver" } else { '' }), $at.ToString('yyyy-MM-ddTHH:mm:ss')) }
 }
 
+function Get-PimDownlinkBundleVersion {
+    # PURE. The bundle version for the log line only (never a trust decision -- Test-PimDownlinkBaseline decides).
+    # The signed bundle is { payloadB64; signature; keyThumbprint }: the version is INSIDE the base64 payload, so a
+    # regex over the outer text never found it (the 2.4.475 UNCHANGED line named no version). '' when unreadable.
+    param([AllowNull()][string]$BundleText)
+    if (-not "$BundleText".Trim()) { return '' }
+    try {
+        $doc = $BundleText | ConvertFrom-Json
+        $p = $doc
+        if ($doc.PSObject.Properties['payloadB64'] -and "$($doc.payloadB64)".Trim()) {
+            $p = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("$($doc.payloadB64)".Trim())) | ConvertFrom-Json
+        }
+        if ($p.PSObject.Properties['version'] -and "$($p.version)" -match '^\s*v?(\d+)\s*$') { return $Matches[1] }
+    } catch { }
+    return ''
+}
+
 function New-PimDownlinkAppliedRecord {
     # PURE. What a clean apply stores.
     param([Parameter(Mandatory)][string]$Fingerprint, [string]$Version = '', [datetime]$NowUtc = [datetime]::UtcNow)

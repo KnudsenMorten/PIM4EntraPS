@@ -167,6 +167,55 @@ function Get-PimGuiUpdatePlan {
         pulledContentHash = $ph; runningContentHash = $rh; pulledVersion = "$PulledVersion"; runningVersion = "$RunningVersion" }
 }
 
+# ---- Running version from the app's image reference (pure) ---------------
+# BUG-230 (§76.9): Update-PimContainers pins the rolled image BY DIGEST (BUG-40), so the app's
+# image reads 'acr.azurecr.io/pim-manager@sha256:<64 hex>'. The detector took "the text after the
+# last ':'" as the version -- the digest -- and printed "running VERSION: e84e5c36..." and a schema
+# "advance" from a digest to a version. A digest is never a version: resolve it to the registry's
+# version tag through -TagResolver (the caller's az lookup), and if that cannot be done the version
+# is UNKNOWN (blank, with a note), never the digest.
+function Resolve-PimRunningVersionFromImage {
+    <#
+      PURE. Returns { version; source; digest; note }.
+        source: 'tag' (the reference carries a tag), 'registry' (digest resolved to a tag),
+                'unknown' (digest-only and unresolvable, or empty).
+      -TagResolver: scriptblock { param($repositoryWithRegistry, $digest) -> string[] tags }.
+      Only a tag that looks like a version (digits and dots, optional leading v) is accepted.
+    #>
+    param(
+        [AllowEmptyString()][string]$Image,
+        [scriptblock]$TagResolver
+    )
+    $out = [ordered]@{ version = ''; source = 'unknown'; digest = ''; note = '' }
+    $r = "$Image".Trim()
+    if (-not $r) { $out.note = 'no image reference'; return [pscustomobject]$out }
+    $isVersion = { param($t) "$t" -match '^v?\d+(\.\d+){1,3}$' }
+    $rest = $r
+    $at = $rest.IndexOf('@')
+    if ($at -ge 0) { $out.digest = $rest.Substring($at + 1).Trim(); $rest = $rest.Substring(0, $at) }
+    $slash = $rest.LastIndexOf('/')
+    $last  = if ($slash -ge 0) { $rest.Substring($slash + 1) } else { $rest }
+    $colon = $last.IndexOf(':')
+    if ($colon -ge 0) {
+        $tag = $last.Substring($colon + 1).Trim()
+        if (& $isVersion $tag) { $out.version = $tag -replace '^v', ''; $out.source = 'tag'; return [pscustomobject]$out }
+        if (-not $out.digest) { $out.note = "image tag '$tag' is not a version"; return [pscustomobject]$out }
+        $rest = $(if ($slash -ge 0) { $rest.Substring(0, $slash + 1) } else { '' }) + $last.Substring(0, $colon)
+    }
+    if (-not $out.digest) { $out.note = 'image reference carries neither a tag nor a digest'; return [pscustomobject]$out }
+    $short = if ($out.digest.Length -gt 19) { $out.digest.Substring(0, 19) + '...' } else { $out.digest }
+    if ($TagResolver) {
+        $tags = @()
+        try { $tags = @(& $TagResolver $rest $out.digest) } catch { $out.note = "digest-pinned ($short); tag lookup failed: $($_.Exception.Message)"; return [pscustomobject]$out }
+        $v = @($tags | Where-Object { & $isVersion $_ } | ForEach-Object { "$_" -replace '^v', '' } | Sort-Object { [version]("$_" + $(if ("$_".Split('.').Count -lt 3) { '.0' } else { '' })) } -Descending) | Select-Object -First 1
+        if ($v) { $out.version = "$v"; $out.source = 'registry'; $out.note = "resolved from $short"; return [pscustomobject]$out }
+        $out.note = "digest-pinned ($short); the registry lists no version tag for it"
+        return [pscustomobject]$out
+    }
+    $out.note = "digest-pinned ($short); no tag lookup available"
+    return [pscustomobject]$out
+}
+
 # ---- SQL / schema update detection (pure) ---------------------------------
 function Get-PimSqlUpdatePlan {
     <#

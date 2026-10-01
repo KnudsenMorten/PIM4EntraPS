@@ -74,8 +74,19 @@ if ($Mode -eq 'Open') {
     if ("$HostIp" -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "could not determine this host's egress IP ('$HostIp')" }
     if ($shape -eq 'privateEndpoint') { Write-Warning "'$srv' has a private endpoint: this host can use the window only if its DNS resolves $srv.privatelink.database.windows.net (mgmt1's DNS does NOT -- measured 2026-09-17)." }
     if ($PSCmdlet.ShouldProcess($srv, "open build window for $HostIp")) {
-        if ($cur.publicNetworkAccess -ne 'Enabled') { az sql server update @sub -g $ResourceGroup -n $srv --enable-public-network true -o none --only-show-errors }
-        az sql server firewall-rule create @sub -g $ResourceGroup -s $srv -n AllowSetupHost --start-ip-address $HostIp --end-ip-address $HostIp -o none --only-show-errors
+        # BUG-246 (§73.9, a customer build 2026-09-23): the enable was not checked, so a policy refusal (Deny on public network
+        # access) surfaced only as the firewall rule's 'DenyPublicEndpointEnabled' -- the real cause never shown.
+        if ($cur.publicNetworkAccess -ne 'Enabled') {
+            $enOut = @(az sql server update @sub -g $ResourceGroup -n $srv --enable-public-network true -o none --only-show-errors 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                throw ("build window did NOT open: Azure refused to enable public network access on '$srv': " + (($enOut | ForEach-Object { "$_" }) -join ' ').Trim() +
+                       " -- a policy may forbid public access here; reach SQL through the private endpoint instead (run the build from a host on that network).")
+            }
+            $mid = & $readState
+            if ($mid.publicNetworkAccess -ne 'Enabled') { throw "build window did NOT open: public network access on '$srv' reads '$($mid.publicNetworkAccess)' after the enable (a policy may reset it)." }
+        }
+        $fwOut = @(az sql server firewall-rule create @sub -g $ResourceGroup -s $srv -n AllowSetupHost --start-ip-address $HostIp --end-ip-address $HostIp -o none --only-show-errors 2>&1)
+        if ($LASTEXITCODE -ne 0) { throw ("build window did NOT open: the firewall rule AllowSetupHost was refused: " + (($fwOut | ForEach-Object { "$_" }) -join ' ').Trim()) }
     }
     $after = & $readState
     $fwIp = "$(az sql server firewall-rule show @sub -g $ResourceGroup -s $srv -n AllowSetupHost --query startIpAddress -o tsv --only-show-errors 2>$null)".Trim()
