@@ -33,6 +33,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   memberships lags the grant by a few seconds; the Activator now shows the group as active as soon as Microsoft confirms
   the activation.
 
+## v2.4.472 — Nobody loses access by accident: automatic extension you can see and steer
+
+- **Fixed (critical): a permission whose AutoExtend was left empty was never extended**, so it ended when its time ran
+  out. An empty AutoExtend now follows a default that is **on** (Settings). A row that says FALSE is still never extended.
+- **Extended 14 days before it ends** (was 30). The number of days is a setting (1–90).
+- **The access review decides for the people it reviews.** A person kept in their department's review is extended even
+  if their row says FALSE; a person, or one of their memberships, removed in the review is not.
+- **New: a monthly list of what will be extended.** Each department's owners get the permissions that will be extended in
+  the coming month, and the administrators get the whole list. **No answer means extended.** On **My people** the list
+  has Approve, Deny (that permission then ends on its date) and Undo.
+- **AutoExtend is a picker in the grid**: TRUE, FALSE, or empty = the default.
+
 ## v2.4.471 — Ignore an unmanaged admin account; the list can stay closed
 
 - **New: Ignore an unmanaged admin account.** On Admin accounts, each account in the directory that PIM does not manage

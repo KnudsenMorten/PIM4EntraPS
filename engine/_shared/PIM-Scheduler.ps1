@@ -58,7 +58,11 @@ $script:PimJobTypes += 'access-review-cycle'
 $script:PimTickOnlyJobTypes += 'access-review-cycle'
 # §79.7 (operator 2026-09-25): 'owner-review' mails each department's owners their people to Keep / Extend / Remove (PIM-OwnerPortal.ps1).
 $script:PimJobTypes += 'owner-review'
-$script:PimTickOnlyJobTypes += 'owner-review'
+$script:PimTickOnlyJobTypes += 'owner-review'# §83 (operator 2026-10-01: "i need to have a monthly report, where i can see the auto-extend upcoming"; "owners approve,
+# silence means extend"): 'autoextend-report' mails each department's owners the permissions that will be auto-extended in
+# the coming month (Deny on the owner page lets one end), and the administrators the whole list (Alerting 'expiring-access').
+$script:PimJobTypes += 'autoextend-report'
+$script:PimTickOnlyJobTypes += 'autoextend-report'
 # §80.2 PIMHYBRIDWRK (operator 2026-09-29): the PIM-for-AD replacement -- 'hybrid-ad-groups' mirrors the AD-marked PIM
 # groups to AD, 'hybrid-ad-sync' puts their ACTIVE PIM members into the AD groups (PIM-HybridAdGroups.ps1). Like
 # 'hybrid-ad-apply' they only act on a hybrid worker; everywhere else they report that one is required.
@@ -316,6 +320,9 @@ function Get-PimDefaultJobSchedule {
         # §79.7: every 90 days -- each department's owners get their people to Keep / Extend / Remove on My people. OFF by
         # default: it mails people outside IT, so a SuperAdmin turns it on (and sets the cadence) on the Jobs page.
         [pscustomobject]@{ name='owner-review'; type='owner-review'; intervalMinutes=129600; enabled=$false }
+        # §83: every 30 days -- the auto-extensions of the coming month to each department's owners (+ the administrators).
+        # ON by default (operator: "i need to have a monthly report"); no answer = extended, so it never takes access away.
+        [pscustomobject]@{ name='autoextend-report'; type='autoextend-report'; intervalMinutes=43200; enabled=$true }
         # 🔑 THE TRUST JOB (operator, 2026-09-12: "it is critical that we can trust that the
         # delegation is actual deployed into the platform"). Every other job makes a FAILURE
         # visible; this one makes SUCCESS provable. It re-reads LIVE from the tenant and diffs it
@@ -1151,6 +1158,13 @@ function Initialize-PimDefaultJobHandlers {
         # §79.7: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimOwnerReviewJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:owner-review (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'autoextend-report' -Handler {
+        param($job,$now,$whatIf)
+        # §83: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimAutoExtendReportJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:autoextend-report (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'access-review-cycle' -Handler {

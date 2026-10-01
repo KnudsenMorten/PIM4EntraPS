@@ -1,6 +1,6 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/img/brand/pim-manager-reversed.svg">
+    <source media="(prefers color scheme: dark)" srcset="docs/img/brand/pim-manager-reversed.svg">
     <img src="docs/img/brand/pim-manager.svg" alt="Invardia PIM Manager" width="420">
   </picture>
 </p>

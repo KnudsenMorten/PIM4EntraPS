@@ -1285,6 +1285,11 @@ function Invoke-PimEngine {
             try { $null = @(& $global:PIM_BetweenScopesHook) } catch { Write-Verbose "between-scopes hook: $($_.Exception.Message)" }
         }
     }
+    # §83: the upcoming extensions the assignment scopes saw this run -> pim.Settings 'AutoExtendOutlook' (the monthly report
+    # and the owner page read it). Best effort: a failed save never fails the run; the next run saves it.
+    if (Get-Command Save-PimAutoExtendOutlook -ErrorAction SilentlyContinue) {
+        try { [void](Save-PimAutoExtendOutlook) } catch { Write-Warning "[auto-extend] the upcoming-extension list was not saved: $($_.Exception.Message)" }
+    }
     # Preserve the single-scope return shape callers depend on (one object, not a 1-element array).
     if (@($res.scopes).Count -eq 1 -and -not $res.alias) { return $out[0] }
     return $out.ToArray()

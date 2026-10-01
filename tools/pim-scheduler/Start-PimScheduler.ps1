@@ -166,6 +166,8 @@ if ($UseManagedIdentity -or "$env:PIM_UseManagedIdentity".Trim() -eq '1') { $glo
 . "$shared\PIM-ApprovalGate.ps1"
 # §79.7: job 'owner-review' -- department owners confirm (Keep / Extend / Remove) their people on My people.
 . "$shared\PIM-OwnerPortal.ps1"
+# §83: auto-extend governance (lead time, review Keep, owner Deny, default ON) + the monthly 'autoextend-report'.
+. "$shared\PIM-AutoExtend.ps1"
 
 # Scheduler state + run history + acknowledgements live in SQL pim.Settings (SchedulerState /
 # JobRunHistory / JobAcknowledgements) -- the SAME store the Manager's Jobs tab reads. The old
@@ -307,6 +309,13 @@ Write-Host "[scheduler] target check wired (pim.TenantCache/target-check; missin
 Register-PimJobHandler -Type 'pending-check' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimPendingCheckJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
+# §83: the REAL 'autoextend-report' handler. A mail that could not be sent (not a deliberate hold) FAILS the run.
+Register-PimJobHandler -Type 'autoextend-report' -Handler {
+    param($job, $now, $whatIf)
+    $r = Invoke-PimAutoExtendReportJob -Job $job -NowUtc $now -WhatIf:$whatIf
+    if ($r.failed) { throw "[autoextend-report] $($r.detail)" }
+    $r
 }
 # §79.7: the REAL 'owner-review' handler. A mail that could not be sent (not a deliberate hold) FAILS the run.
 Register-PimJobHandler -Type 'owner-review' -Handler {

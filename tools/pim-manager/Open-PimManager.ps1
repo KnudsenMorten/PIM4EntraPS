@@ -283,6 +283,8 @@ if (Test-Path -LiteralPath $_permLib) { . $_permLib }
 # §79.8 THE OWNER PAGE (engine/_shared/PIM-OwnerPortal.ps1): a department owner sees the people in the departments they
 # own and may EXTEND an auto-disable date -- scoped by ownership, not by Manager role.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-OwnerPortal.ps1')
+# §83 auto-extend governance: the upcoming extensions (owner page, Approve / Deny) and the policy (lead time, default ON).
+. (Join-Path $solutionRoot 'engine\_shared\PIM-AutoExtend.ps1')
 # §79.9 THE DELEGATED MODEL, write side (engine/_shared/PIM-DelegatedModel.ps1): a delegated caller (role Delegated, or a
 # Reader who owns a department) stages and commits ONLY rows they own, inside their profile (derived: level 3+, tier 1+,
 # Azure only under their departments' AzureScopes).
@@ -11589,6 +11591,100 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status $st -Body ([ordered]@{ ok = [bool]$hold.approvalRaised; userName = $un; approvalId = "$($hold.approvalId)"
                 note = $(if ($hold.approvalRaised) { 'Removal requested. A PIM administrator approves it; until then nothing changes.' } else { "$($hold.note)" }) })
             return $st
+        }
+        # §83 (operator 2026-10-01: "i need to have a monthly report, where i can see the auto-extend upcoming, so i can quickly
+        # change it (approve,deny)"; "owners approve, silence means extend"). The permissions the engine will auto-extend in the
+        # coming month, SCOPED BY OWNERSHIP like My people: an owner sees their departments, an Admin everyone (?all=1).
+        if ($path -eq '/api/autoextend/upcoming' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $role = Get-PimManagerRole
+            if ("$($role.role)" -eq 'None') { Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'sign in first' }; return 401 }
+            $isAdmin = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+            $idx = $null; try { $idx = Get-PimManagerDepartmentOwnerIndex } catch { $idx = $null }
+            if ($null -eq $idx) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the departments and their owners could not be read -- try again shortly.' }; return 503 }
+            $owned = @(Get-PimOwnedDepartments -DepartmentOwners $idx -Identity "$($role.identity)")
+            $all = $isAdmin -and ("$($req.QueryString['all'])" -eq '1')
+            $ctx = Get-PimAutoExtendContext -Refresh
+            $outl = $null; try { $outl = ConvertTo-PimAutoExtendObject (Get-PimManagerSettingObject -Name 'AutoExtendOutlook') } catch { $outl = $null }
+            $depts = if ($all) { @() } else { @($owned | ForEach-Object { "$_".ToLowerInvariant() }) }
+            $items = @()
+            if ($all -or $depts.Count) {
+                $items = @(Get-PimAutoExtendUpcoming -Items @(Get-PimAutoExtendField $outl 'items') -Decisions $ctx.decisions -LeadDays $ctx.leadDays -WithinDays 31 -Departments $depts -IncludeNotExtending)
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                identity = "$($role.identity)"; departments = @($owned); isAdmin = $isAdmin; all = [bool]$all
+                leadDays = $ctx.leadDays; defaultOn = $ctx.defaultOn; updatedUtc = "$(Get-PimAutoExtendField $outl 'updatedUtc')"
+                items = @($items); count = @($items).Count
+            })
+            return 200
+        }
+        if ($path -eq '/api/autoextend/decide' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            $role = Get-PimManagerRole
+            if ("$($role.role)" -eq 'None') { Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'sign in first' }; return 401 }
+            $body = Read-RequestJson -Request $req
+            $key = "$($body.key)".Trim().ToLowerInvariant(); $dec = "$($body.decision)".Trim().ToLowerInvariant(); $why = "$($body.reason)".Trim()
+            if (-not $key -or $dec -notin 'approve', 'deny', 'clear') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'say which permission (key) and approve, deny or clear.' }; return 400 }
+            if ($dec -eq 'deny' -and -not $why) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'say why it should NOT be extended -- the administrators see it.' }; return 400 }
+            $outl = $null; try { $outl = ConvertTo-PimAutoExtendObject (Get-PimManagerSettingObject -Name 'AutoExtendOutlook') } catch { $outl = $null }
+            $item = @(@(Get-PimAutoExtendField $outl 'items') | Where-Object { $_ -and "$($_.key)".ToLowerInvariant() -eq $key }) | Select-Object -First 1
+            if (-not $item) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = 'that permission is not in the upcoming extensions (it may have been extended or removed already) -- reload the page.' }; return 404 }
+            $isAdmin = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+            $dept = "$($item.department)".Trim()
+            if (-not $isAdmin) {
+                $idx = $null; try { $idx = Get-PimManagerDepartmentOwnerIndex } catch { $idx = $null }
+                $owned = @(Get-PimOwnedDepartments -DepartmentOwners $(if ($idx) { $idx } else { @{} }) -Identity "$($role.identity)")
+                if (-not $dept -or -not @($owned | Where-Object { $_ -ieq $dept }).Count) {
+                    Write-PimManagerAuditEvent -Action "autoextend.$dec" -Target $key -Result 'denied' -After ([ordered]@{ by = "$($role.identity)"; department = $dept })
+                    Write-JsonResponse -Response $resp -Status 403 -Body @{ error = $(if ($dept) { "you are not an owner of department '$dept'." } else { 'this permission has no department, so only a PIM administrator can decide it.' }) }
+                    return 403
+                }
+            }
+            if ("$($item.source)" -like 'review-*' -and $dec -eq 'deny') {
+                Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'the access review decides this person (they were kept or removed there). Change it in the access review, not here.' }; return 409
+            }
+            $cs = (Get-PimManagerStoreCs)
+            if (-not $cs) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is wired in this host -- nothing was recorded.' }; return 503 }
+            $saved = $false; $after = $null
+            for ($try = 0; $try -lt 6 -and -not $saved; $try++) {
+                $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'AutoExtendDecisions'
+                $after = Set-PimAutoExtendDecision -Decisions (ConvertTo-PimAutoExtendDecisions $raw) -Key $key -Decision $dec -EndDate "$($item.endDate)" -By "$($role.identity)" -Reason $why
+                $json = ConvertTo-Json -InputObject ([ordered]@{ items = $after }) -Depth 5 -Compress
+                $saved = ([int](Set-PimSqlSettingIfUnchanged -ConnectionString $cs -Name 'AutoExtendDecisions' -NewValueJson $json -ExpectedValueJson $raw) -ge 1)
+                if (-not $saved) { Start-Sleep -Milliseconds (40 * ($try + 1)) }
+            }
+            if (-not $saved) { Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'someone else was deciding at the same moment -- please try again.' }; return 409 }
+            [void](Get-PimAutoExtendContext -Refresh)
+            Write-PimManagerAuditEvent -Action "autoextend.$dec" -Target $key -Result 'ok' -After ([ordered]@{ by = "$($role.identity)"; department = $dept; principal = "$($item.principal)"; target = "$($item.target)"; endDate = "$($item.endDate)"; reason = $why })
+            $note = switch ($dec) {
+                'deny'    { "Not extended: this permission ends on $($item.endDate). Clear the decision to extend it after all." }
+                'approve' { "Approved: it is extended about $($item.extendOnUtc)." }
+                default   { 'Decision cleared: it is extended as normal.' }
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; key = $key; decision = $dec; note = $note })
+            return 200
+        }
+        if ($path -eq '/api/settings/autoextend' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $pol = ConvertTo-PimAutoExtendPolicy $(try { Get-PimManagerSettingObject -Name 'AutoExtendPolicy' } catch { $null })
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ leadDays = $pol.leadDays; defaultOn = $pol.defaultOn; leadDaysDefault = $script:PimAutoExtendLeadDaysDefault })
+            return 200
+        }
+        if ($path -eq '/api/settings/autoextend' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change the auto-extend policy.' }; return 403 }
+            $body = Read-RequestJson -Request $req
+            $ld = "$($body.leadDays)".Trim()
+            if ($ld -notmatch '^\d+$' -or [int]$ld -lt 1 -or [int]$ld -gt 90) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'leadDays must be a whole number of days from 1 to 90.' }; return 400 }
+            $on = [bool]("$($body.defaultOn)" -match '^(?i)(true|1|yes|on)$')
+            $before = ConvertTo-PimAutoExtendPolicy $(try { Get-PimManagerSettingObject -Name 'AutoExtendPolicy' } catch { $null })
+            $val = [ordered]@{ leadDays = [int]$ld; defaultOn = $on }
+            try { Set-PimManagerSettingObject -Name 'AutoExtendPolicy' -Value ([pscustomobject]$val) | Out-Null }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the policy was not saved: $($_.Exception.Message)" }; return 500 }
+            [void](Get-PimAutoExtendContext -Refresh)
+            Write-PimManagerAuditEvent -Action 'settings.autoextend.save' -Target 'settings:autoextend' -Before ([ordered]@{ leadDays = $before.leadDays; defaultOn = $before.defaultOn }) -After $val -Result 'ok'
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; leadDays = [int]$ld; defaultOn = $on })
+            return 200
         }
         if ($path -eq '/api/owner/people' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date

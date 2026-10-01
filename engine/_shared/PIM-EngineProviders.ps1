@@ -851,7 +851,11 @@ function Get-PimEntraRoleKey {
 #   * removals go through the engine's G4 removal budget (PIM-EngineCore / PIM-DisableGuard).
 # All helpers below are PURE except the Invoke-* appliers.
 # ===========================================================================
-$script:PimAssignmentRenewWithinDays = 30   # v1's threshold, verbatim
+# §83 (operator 2026-10-01: "critical bug as people would loose their permissions" / "14 days, keep wins, owners approve,
+# silence means extend"): the lead time is pim.Settings 'AutoExtendPolicy'.leadDays (default 14 -- was v1's hard-coded 30),
+# and WHO decides an extension is Resolve-PimAutoExtendDecision (access review Keep > owner Deny > row > default ON).
+$script:PimAssignmentRenewWithinDays = 14   # the fallback only; the policy decides (Get-PimAutoExtendContext)
+if (-not (Get-Command Resolve-PimAutoExtendDecision -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-AutoExtend.ps1') }
 
 function Test-PimRowIsRemove {
     param([object]$Row)
@@ -944,8 +948,10 @@ function Get-PimAssignmentMaintenance {
       A renewal is only "due" when it moves the end date by more than a day, so a short
       NumOfDaysWhenExpire (<= 30) cannot turn into a write on every engine tick.
     #>
-    param([object]$Desired, [object]$Live, [datetime]$NowUtc = [datetime]::UtcNow, [int]$WithinDays = $script:PimAssignmentRenewWithinDays)
+    param([object]$Desired, [object]$Live, [datetime]$NowUtc = [datetime]::UtcNow, [int]$WithinDays = -1, $AutoExtendContext = $null)
     $now = $NowUtc.ToUniversalTime()
+    $aeCtx = if ($AutoExtendContext) { $AutoExtendContext } else { Get-PimAutoExtendContext }
+    if ($WithinDays -lt 0) { $WithinDays = $(if ($aeCtx -and [int]$aeCtx.leadDays -gt 0) { [int]$aeCtx.leadDays } else { $script:PimAssignmentRenewWithinDays }) }
     $intent = Get-PimAssignmentIntent -Row $Desired
     $w = Get-PimLiveScheduleWindow -Live $Live
     if (-not $w.known)     { return [pscustomobject]@{ action = 'none'; reason = 'live schedule not read'; daysLeft = $null } }
@@ -958,8 +964,13 @@ function Get-PimAssignmentMaintenance {
     }
     $daysLeft = [math]::Round(($w.endUtc - $now).TotalDays, 0)
     $gain = if ($intent.permanent) { [double]::MaxValue } else { ($now.AddDays($intent.days) - $w.endUtc).TotalDays }
-    if ($daysLeft -le $WithinDays -and $intent.autoExtend -and $gain -gt 1) {
-        return [pscustomobject]@{ action = 'extend'; reason = "AutoExtend: $daysLeft day(s) left"; daysLeft = $daysLeft }
+    # §83: who decides (review Keep > owner Deny > row > default ON), and the engine records what is coming for the report.
+    $ae = Resolve-PimAutoExtendDecision -Row $Desired -EndUtc $w.endUtc -Context $aeCtx
+    if ("$(Get-PimRowProp -Row $Desired -Names @('Action'))".Trim() -notmatch '^(?i)remove$') {
+        try { Add-PimAutoExtendOutlookItem -Row $Desired -EndUtc $w.endUtc -NowUtc $now -Decision $ae -Context $aeCtx } catch { }
+    }
+    if ($daysLeft -le $WithinDays -and $ae.extend -and $gain -gt 1) {
+        return [pscustomobject]@{ action = 'extend'; reason = "AutoExtend ($($ae.source): $($ae.reason)): $daysLeft day(s) left"; daysLeft = $daysLeft }
     }
     if ($intent.updateExisting) {
         if ($intent.permanent) { return [pscustomobject]@{ action = 'update'; reason = 'permanence: the row asks for a permanent assignment'; daysLeft = $daysLeft } }
