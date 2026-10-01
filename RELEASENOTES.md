@@ -33,6 +33,17 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
   memberships lags the grant by a few seconds; the Activator now shows the group as active as soon as Microsoft confirms
   the activation.
 
+## v2.4.470 — Drift shows every extra; Admin accounts shows department owners correctly
+
+- **Fixed: Drift showed nothing for an area with more than five extras.** The safety limit on how much the engine removes
+  in one run also applied to the read-only drift check, and it hid the whole list. Every extra is now listed; an area over
+  the limit says so, because an automatic run would hold those removals for review instead of making them.
+- **Fixed: Admin accounts said a department had "no owners"** after you had opened Reports or Look up a role, although the
+  same page mailed those owners. It now always shows them.
+- **Fixed: the connectivity check always reported Azure Resource Manager as unreachable.**
+- **Fixed: a custom container registry name was not cleaned up** (letters and digits only) when it was set by hand.
+- **Fixed: a missing-recipient message on Admin accounts repeated its own advice.**
+
 ## v2.4.469 — Invardia PIM Manager branding; refreshed documentation and screenshots
 
 - **New look: the Invardia PIM Manager logo.** The Manager's header shows the logo of the edition it runs as —

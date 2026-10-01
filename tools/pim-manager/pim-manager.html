@@ -8608,6 +8608,11 @@
         if (s.noDefinitions) det.push('<div class="driftNoDefs" style="color:#9a6700;font-size:11.5px;padding:4px 0;">This area has no definitions yet &mdash; ' +
           'everything live here is listed as extra so you can see it. PIM removes nothing from an area it has no definitions for; ' +
           'use <b>Keep</b> to take an item under management, or Delete to remove it on purpose.</div>');
+        // BUG-269: more extras than the removal budget -- all are listed; the engine would hold them, not remove them
+        if (s.overRemoveBudget) det.push('<div class="driftOverBudget" style="color:#9a6700;font-size:11.5px;padding:4px 0;">' +
+          escapeHtml(String(s.overRemoveBudget.toRemove)) + ' item(s) here are more than the engine removes in one run (removal budget ' +
+          escapeHtml(String(s.overRemoveBudget.budget)) + '). All are listed; an automatic run would hold them rather than remove them &mdash; ' +
+          'use <b>Keep</b> or <b>Delete</b> per item, or fix the definitions if they are missing.</div>');
         det.push('<table class="grid" style="font-size:11.5px;margin:4px 0;"><thead><tr>' +
           (canApply ? '<th style="width:24px;"><input type="checkbox" class="driftScopeAll" data-scope="' + esc(s.scope) + '" title="select every item in this area"></th>' : '') +
           '<th style="width:70px;">Drift</th><th>What</th></tr></thead><tbody>');

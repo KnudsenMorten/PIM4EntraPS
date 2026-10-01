@@ -183,6 +183,8 @@ function ConvertTo-PimDriftSnapshotDocument {
             checked = $true; notCheckedReason = ''
             # REQ-AU-DRIFT-1: the scope has no definitions -- every extra here is something PIM has never been told about
             noDefinitions = [bool](Get-PimDriftSnapshotField $r 'noDefinitions')
+            # BUG-269: more extras than the removal budget -- all listed; an apply would hold them (the budget guards writes)
+            overRemoveBudget = $(if ($ob = Get-PimDriftSnapshotField $r 'overRemoveBudget') { [ordered]@{ toRemove = [int](Get-PimDriftSnapshotField $ob 'toRemove'); budget = [int](Get-PimDriftSnapshotField $ob 'budget') } } else { $null })
             truncated = 0; items = @()
         })
     }
@@ -318,7 +320,7 @@ function Invoke-PimDriftSnapshot {
     $results = New-Object System.Collections.Generic.List[object]
     # REQ-AU-DRIFT-1: a scope with no rows still has its live items LISTED as extras (plan only -- see Invoke-PimEngineScope).
     # Set for this read and cleared in finally, so no other engine run in the process ever sees it.
-    $global:PIM_DriftListEmptyScopes = $true
+    $global:PIM_DriftReadPlan = $true
     try {
     if ($scopes.Count -eq 0) {
         # No resolver in this process: one call, and a throw is recorded against 'All' (still never "clean").
@@ -335,7 +337,7 @@ function Invoke-PimDriftSnapshot {
             }
         }
     }
-    } finally { $global:PIM_DriftListEmptyScopes = $null }
+    } finally { $global:PIM_DriftReadPlan = $null }
     try { Add-PimDriftPayloadNames -ScopeResults @($results.ToArray()) } catch { Write-Warning "[drift-snapshot] names for drift items could not be resolved: $($_.Exception.Message)" }
     $sw.Stop()
     return (ConvertTo-PimDriftSnapshotDocument -ScopeResults @($results.ToArray()) -NowUtc $NowUtc -DurationSeconds $sw.Elapsed.TotalSeconds)

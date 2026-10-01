@@ -3593,7 +3593,9 @@ function Get-PimAdminTapState {
         # the per-admin Check ($liveCheck) runs the full readiness probe.
         $__rp = Get-PimAdminTapRecipientPlan -Row $r      # 71.19: says WHERE it goes and WHY it does not
         $mailChk = if ($liveCheck) { Test-PimTapMailReady -Recipient $mgr -Reason "$($__rp.reason)" }
-                   elseif (-not "$mgr".Trim()) { @{ ok = $false; reason = "$($__rp.reason) -- an admin's mail goes to its SPONSOR DEPARTMENT's owners: set the admin's Department and set Owners on that department (Definitions > Departments)" } }
+                   # BUG-272: every Get-PimAdminTapRecipientPlan reason already ends with its own fix; appending a second
+                   # phrasing of the same hint printed it twice. One reason, once.
+                   elseif (-not "$mgr".Trim()) { @{ ok = $false; reason = $(if ("$($__rp.reason)".Trim()) { "$($__rp.reason)" } else { "no recipient -- set the admin's Department and give that department Owners (Access > Departments & owners)" }) } }
                    else { @{ ok = $true; reason = '' } }
         $status = 'unknown'; $detail = ''; $created = ''
         if (-not $liveCheck) {
@@ -5800,7 +5802,9 @@ function Get-PimSupportDiagnostics {
         $armReach = $false; $armStatus = 0; $armErr = ''
         try {
             if (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue) {
-                $null = Invoke-PimArm -Method GET -Uri 'https://management.azure.com/subscriptions?api-version=2020-01-01'
+                # BUG-273 (found by the BUG-271 parameter check): was `-Uri`, which Invoke-PimArm does not have -- the
+                # probe never ran and ARM always read "unreachable: parameter cannot be found". -Path takes a full URL.
+                $null = Invoke-PimArm -Method GET -Path 'https://management.azure.com/subscriptions?api-version=2020-01-01'
                 $armReach = $true; $armStatus = 200
             } else { $armErr = 'ARM client (Invoke-PimArm) not available in this runtime.' }
         } catch {
@@ -11733,7 +11737,10 @@ function Handle-Request {
                         # file already carries two notes about. Same separators as the engine: | ; ,
                         $__ownRaw = "$($__deptIdx[$__dept.ToLowerInvariant()])"
                         $__deptOwners = if (Get-Command Split-PimOwners -ErrorAction SilentlyContinue) {
-                            @(Split-PimOwners -Value $__ownRaw)
+                            # BUG-271: was `-Value` -- Split-PimOwners takes -Raw. The call failed to bind as soon as a page
+                            # (Reports, Role lookup) had loaded the engine providers, the owner list came back EMPTY and
+                            # every department read "no owners" while the TAP column, on the shared splitter, mailed them.
+                            @(Split-PimOwners -Raw $__ownRaw)
                         } else {
                             @($__ownRaw -split '[|;,]' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
                         }

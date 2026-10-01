@@ -582,9 +582,9 @@ function Invoke-PimEngineScope {
     if ($doPrune -and @($desired).Count -eq 0 -and -not $p.allowEmptyDesiredPrune) {
         # REQ-AU-DRIFT-1 (operator 2026-09-30: "List extras, read-only"): the DRIFT SNAPSHOT may still LIST what is live in a
         # scope that has no rows -- hand-made AU-scoped roles were invisible until the first Roles-AUs row existed. Only a
-        # plan (-WhatIf) that the drift snapshot asked for ($global:PIM_DriftListEmptyScopes); every other run -- above all
+        # plan (-WhatIf) that the drift snapshot asked for ($global:PIM_DriftReadPlan); every other run -- above all
         # every run that WRITES -- still never prunes an empty scope.
-        if ($WhatIf -and $global:PIM_DriftListEmptyScopes) {
+        if ($WhatIf -and $global:PIM_DriftReadPlan) {
             $__emptyDesiredRead = $true
             Write-Host ("[engine] {0,-20} no definitions -- drift read lists {1} live item(s) as extras (plan only, nothing is removed)" -f $Scope, @($live).Count) -ForegroundColor DarkYellow
         } else {
@@ -723,9 +723,20 @@ function Invoke-PimEngineScope {
     $__rmTotal = @($diff.remove).Count + $__retype.Count
     $__heldCand = @(@(@($diff.remove) + $__retype) | Where-Object { $_ -and (($_.PSObject.Properties['targeted'] -and $_.targeted) -or ($_.PSObject.Properties['typeChange'] -and $_.typeChange)) })
     $__keepUpdate = @(@($diff.update) | Where-Object { -not ($_.PSObject.Properties['typeChange'] -and $_.typeChange) })
-    # REQ-AU-DRIFT-1: the empty-scope drift READ is a plan that can never write, and its whole point is to LIST what is
-    # there -- a budget trip would drop the list and show nothing. The budget still guards every other plan and every apply.
-    if ($__rmTotal -gt 0 -and -not $__emptyDesiredRead -and (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue)) {
+    # BUG-269 (operator 2026-10-01: "fix"): the DRIFT READ is a plan that can never write, and its job is to LIST what is
+    # there -- a budget trip dropped the whole list, so a scope with 6+ extras showed 0 extras and "in sync". On the drift
+    # read the list is KEPT and the scope is marked over the budget (an apply would hold it). The budget still guards
+    # every other plan and every run that writes.
+    $__overBudget = $null
+    $__driftRead = [bool]($WhatIf -and $global:PIM_DriftReadPlan)
+    if ($__rmTotal -gt 0 -and $__driftRead -and (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue)) {
+        $rbd = Test-PimRemoveBudgetAllowed -ToRemove $__rmTotal -Scope $Scope -Scanned (@($live).Count) -Operation 'remove'
+        if (-not $rbd.allowed) {
+            $__overBudget = [pscustomobject]@{ toRemove = $__rmTotal; budget = $rbd.budget }
+            Write-Host ("[engine] {0,-20} drift read: {1} removal(s) are over the removal budget ({2}) -- LISTED; an apply would hold them" -f $Scope, $__rmTotal, $rbd.budget) -ForegroundColor DarkYellow
+        }
+    }
+    if ($__rmTotal -gt 0 -and -not $__driftRead -and (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue)) {
         # The BREAKDOWN goes with the count: the alert must be able to say whether these are assignment
         # type changes (which delete the old type first) or rows the operator marked Action=Remove.
         # Without it the mail read as "the engine decided to delete 9 things" (operator, 2026-09-20).
@@ -929,6 +940,7 @@ function Invoke-PimEngineScope {
         held=$__held.Count; absent=$__absent.Count; conflicts=$__conflicts.Count
         removeRowsDone=$__rowsDone
         noDefinitions=[bool]$__emptyDesiredRead   # REQ-AU-DRIFT-1: extras listed from a scope with no rows (drift read only)
+        overRemoveBudget=$__overBudget            # BUG-269: drift read only -- { toRemove; budget } when an apply would hold
         warnings=@($Context['__pimScopeWarnings'])
         # .ToArray(), never @(): pwsh 7 throws "Argument types do not match" on @() over a List[object] from a hashtable.
         findings=$(if ($Context['__pimLiveFindings'] -is [System.Collections.Generic.List[object]]) { $Context['__pimLiveFindings'].ToArray() } else { @() })

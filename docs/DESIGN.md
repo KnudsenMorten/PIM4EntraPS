@@ -533,7 +533,9 @@ container, or from the scheduler with no `Connect-*` step.
   plan (`-WhatIf`, with a flag it sets for its read and clears afterwards) still *lists* what is
   live in such a scope as extras, marked "no definitions yet", so hand-made access there is visible.
   That plan cannot write, so the removal budget does not cut its list; every run that writes keeps
-  both guards.
+  both guards. The same holds for any scope on the drift read (2.4.470): more extras than the removal
+  budget are all listed, and the scope is marked "over the removal budget" (an automatic run would
+  hold them); before, the budget dropped the whole list and the page read "in sync".
 - **Account-disable circuit breaker** (`PIM-DisableGuard.ps1`). A provider whose remove path
   *disables Entra accounts* (`accountEnabled=$false`) is the highest-blast-radius operation in
   the engine: the `Admins` provider's LIVE set is the **whole tenant user population**, so a
