@@ -666,6 +666,11 @@ top of the engine delta — it does NOT reimplement reconciliation.**
   scheduled run prunes its memberships (they show as drift). **Import** reverses it: `GET /api/unmanaged-admins/import`
   reads the account from the directory into a definition row and takes the memberships from the latest drift check's
   Keep rows; the page stages both for Review & commit.
+- **Ignore an unmanaged admin (2.4.471).** An administrator can leave a listed unmanaged account out of PIM: the choice
+  (who, when, optional reason) is stored once for everyone in the settings store and audited, the account drops out of
+  the list, its count and the Home tile, and stays visible under "ignored" with **Stop ignoring**. Ignoring changes
+  nothing in the directory. The box itself remembers, per viewer, that it was closed for the current set of accounts and
+  opens again when a new account appears.
 - **The drift mail cadence (2.4.453).** The drift alert mail goes out once per cadence (`pim.Settings` `DriftAlertCadence`:
   daily, weekly, monthly — the default — or quarterly; `PUT /api/drift/settings`, SuperAdmin, audited). The job records
   each send in `DriftAlertState` and sends again only when the cadence has passed (`Test-PimDriftAlertDue`, an hour of
@@ -2565,7 +2570,10 @@ the private zones resolve VNet-wide. Until then, the management host uses
 topology the scheduler runs as a **Container Apps Job** (`ca-pim-tick` by default) started on a cron
 (default every 5 minutes); each execution is one **tick** that decides what is due, runs it and exits.
 It uses the same image as the Manager, its own system-assigned managed identity, and persists
-schedules, last/next run, triggers and run history in SQL `pim.Settings`. A **SQL lease** guarantees
+schedules, last/next run, triggers and run history in SQL `pim.Settings`. The queue of pending
+triggers is changed only by a compare-and-set on its row (2.4.471): a writer that finds the list
+changed since it read it re-reads and applies its change again, so a "Run now", a commit and the
+change detector queuing at the same moment never overwrite one another. A **SQL lease** guarantees
 one tick at a time; a tick renews its lease while it works (so a long job keeps its turn) and stops
 making changes if another run has taken the lease over. The lease records the job execution that
 holds it. A tick that finds the lease held asks the platform for that execution's status and, only

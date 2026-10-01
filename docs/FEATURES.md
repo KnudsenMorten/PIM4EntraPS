@@ -1610,6 +1610,11 @@ deployment is a supported choice) and no credentials lying around.
   the rule decides whether an unanswered person **keeps** access (the default) or gets an offboarding approval
   request. A SuperAdmin can decide any open person, every decision is in the audit trail, and a department without an
   owner is reported to the alert recipients every day. *(2.4.447–2.4.454)*
+- **Ignore an admin account PIM should not manage.** ✅ 2026-10-01 — Admin accounts lists the privileged accounts that
+  exist in the directory but not in PIM. Next to **Import**, **Ignore** (with an optional reason) leaves one out: it is
+  no longer listed or counted, on Admin accounts or on Home, for every administrator. Nothing changes in the directory.
+  The ignored accounts stay visible underneath with who ignored them, when and why, and **Stop ignoring** brings one
+  back. The box of unmanaged accounts stays closed once you close it, until a new account appears.
 - **Stop managing an admin, or import one back.** ✅ 2026-09-27 — **Stop managing** (on Admin accounts and on an admin
   in the Access map) takes an admin out of PIM: the definition and every access row naming the admin are staged for
   removal, and the name is taken out of owner, sponsor, approver and notify fields. **Nothing changes in Entra** — the

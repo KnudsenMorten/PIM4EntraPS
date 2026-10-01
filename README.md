@@ -474,7 +474,8 @@ creation:
 - **Stop managing an admin, or import one.** Stop managing takes an admin out of
   PIM without touching the account in Entra; admin accounts that exist in the
   directory but not in PIM are listed with **Import**, which brings back the
-  definition and the memberships it holds.
+  definition and the memberships it holds, and **Ignore**, which leaves one out of
+  the list and the counts for everyone (with a reason; **Stop ignoring** undoes it).
 - **Rename a group or Administrative Unit, and keep the object.** Renaming in
   *All records* renames the existing group or AU in Entra ID, with its members
   and roles; every row that points at it is updated in the same change.
