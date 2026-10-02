@@ -275,6 +275,8 @@ if (Test-Path -LiteralPath $_permLib) { . $_permLib }
 # §79.13 SHARED PENDING CHANGES (engine/_shared/PIM-SharedPending.ps1): staged changes live in SQL
 # (pim.Settings['PendingChanges']), one per row key (the lock), visible to every Manager user.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-SharedPending.ps1')
+# §88 COMMIT WATCHER: every commit records the keys it changed; GET /api/commits says per key saved / applied / live.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-CommitWatch.ps1')
 # 🔴 Found 2026-09-25 by the code audit once it could follow the Manager's loads: these two were NEVER loaded, so the
 # Get-Command guards around them were always false -- a warning override was checked only by the partial fallback
 # (never Test-PimWarningOverrideValid), and the CSV import check never read the tenant list cache.
@@ -1920,7 +1922,10 @@ $script:PimCsvBases = @(
     # "no ManagerEmail on the row" and cannot be fixed from the grid.
     # 🪤 Unlike the JobSchedule case (BUG-136), this one DOES reach every environment on an image
     # roll: the header is shipped in code and never persisted per-deployment. No migration needed.
-    [ordered]@{ base = 'Account-Definitions-Admins';      group = 'Definitions';  defaultHeader = @('FirstName','LastName','Initials','Purpose','TargetUsage','TargetPlatform','UserType','AdminType','UserName','DisplayName','UserPrincipalName','UsageLocation','Company','Department','ManagerEmail','Environment','ForwardMailsToContact','MailForwardAddress','CreateTAP','TAPStartDate','TAPLifetimeHours','AccountStatus','AutoDisableDate','ManagementMode','Ring','Target','Replicate') },
+    [ordered]@{ base = 'Account-Definitions-Admins';      group = 'Definitions';  defaultHeader = @('FirstName','LastName','Initials','Purpose','TargetUsage','TargetPlatform','UserType','AdminType','UserName','DisplayName','UserPrincipalName','UsageLocation','Company','Department','ManagerEmail','Environment','ForwardMailsToContact','MailForwardAddress','CreateTAP','TAPStartDate','TAPLifetimeHours','AccountStatus','AutoDisableDate','ContactEmail','RfaMode','RfaWindowEndUtc','ManagementMode','Ring','Target','Replicate') },
+    # §82 (operator 2026-10-02) consultant lifecycle: an external company whose contacts confirm its consultants (admin rows
+    # whose Company names it). Keyed on Company. NOT a PIM-Definitions-* base -- those are all Entra GROUP definitions.
+    [ordered]@{ base = 'Account-Definitions-Companies';   group = 'Definitions';  defaultHeader = @('Company','Contacts','SponsorDepartment','ReviewCadenceDays','Notes') },
     # 🔴 BUG-139 (same class) -- THE ACCOUNTABLE-OWNER FIELDS HAD NO COLUMN ON *ROLES*.
     # DESIGN.md §1268/§1502 defines the owner chain as: `Owners` (pipe-joined UPNs) -> `SponsorUpn`
     # (Roles) -> the group's **Department** contact. The ENGINE implements all three
@@ -1959,7 +1964,7 @@ $script:PimCsvBases = @(
     # 2026-09-19 ("did you add selection in wizards and existing"): Departments / Organization / Projects / CrossOrg gain
     # PolicyTemplate -- the engine already reads it on these definitions (Get-PimGroupPolicyDefinitionRows), but the grid
     # could not show or change it. A header column never rewrites stored rows (Read-PimRows returns them as stored).
-    [ordered]@{ base = 'PIM-Definitions-Departments';     group = 'Definitions';  defaultHeader = @('Department','GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','AzureScopes','PolicyTemplate','Lifecycle','Replicate','Ring','Target') },
+    [ordered]@{ base = 'PIM-Definitions-Departments';     group = 'Definitions';  defaultHeader = @('Department','GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','AzureScopes','PolicyTemplate','RfaMode','RfaDurations','Lifecycle','Replicate','Ring','Target') },
     [ordered]@{ base = 'PIM-Definitions-Organization';    group = 'Definitions';  defaultHeader = @('GroupName','GroupDescription','GroupTag','AdministrativeUnitTag','IsRoleAssignable','Workload','Level','TierLevel','Plane','CPPlatform','Owners','PolicyTemplate','Lifecycle','Replicate','Ring','Target') },
     # Direct-group types Project (PROJ-, AU PIM-PROJECTS) and Cross-org (CORG-, AU PIM-CROSSORG) --
     # operator, 2026-09-12: "where is the project and cross-org direct group".
@@ -2714,7 +2719,10 @@ function Invoke-PimManagerSafeCommit {
     # SQL-only: the snapshot store, the apply and the restore are all SQL (no file branch).
     $null = $SqlMode
     if ($true) {
-        try { Initialize-PimBackupStore -ConnectionString $script:PimSqlCs } catch { Write-Warning "  [backup] init store failed (non-fatal): $($_.Exception.Message)" }
+        # §88: the IF-guarded DDL ran on EVERY commit -- once per process is enough (a failure is retried next commit).
+        if ($script:PimBackupStoreReadyFor -ne $script:PimSqlCs) {
+            try { Initialize-PimBackupStore -ConnectionString $script:PimSqlCs; $script:PimBackupStoreReadyFor = $script:PimSqlCs } catch { Write-Warning "  [backup] init store failed (non-fatal): $($_.Exception.Message)" }
+        }
         $save    = { param($s) Save-PimSqlBackupSnapshot -ConnectionString $script:PimSqlCs -Snapshot $s }
         # 🔒 -AllowEmpty IS DELIBERATE ON EXACTLY THESE TWO PATHS, AND NOWHERE ELSE.
         # The store now refuses a full-set replace that submits nothing against a non-empty entity,
@@ -2730,7 +2738,22 @@ function Invoke-PimManagerSafeCommit {
         $prune   = { [void](Invoke-PimSqlBackupRetention -ConnectionString $script:PimSqlCs -Entity $Base -Keep $script:PimBackupKeep) }
     }
 
+    # §88: say how long the SQL part of a commit took and how much it really wrote, so a slow commit can be measured.
+    $__sw = [System.Diagnostics.Stopwatch]::StartNew()
     $txResult = Invoke-PimCommitTransaction -Snapshot $snapshot -ApplyScript $apply -RestoreScript $restore -SaveSnapshotScript $save -PruneScript $prune
+    $__sw.Stop()
+    # §88: record WHICH keys this commit changed, for the watcher. Never fails the commit (it has landed).
+    try {
+        if ($txResult -and $txResult.ok -and (Get-Command Add-PimCommitWatchRecord -ErrorAction SilentlyContinue) -and "$($script:PimSqlCs)".Trim()) {
+            $__ch = @(Get-PimCommitChangedKeys -Base $Base -OldRows @($Current.rows) -NewRows @($NewRows))
+            $__rec = New-PimCommitWatchRecord -Entity $Base -Changes $__ch -By "$who"
+            if ($__rec -and (Add-PimCommitWatchRecord -ConnectionString $script:PimSqlCs -Record $__rec)) { $txResult | Add-Member -NotePropertyName commitId -NotePropertyValue "$($__rec.id)" -Force }
+        }
+    } catch { Write-Warning "  [commit-watch] $Base committed, but the watcher could not record it: $($_.Exception.Message)" }
+    try {
+        $__w = if ($txResult -and $txResult.PSObject.Properties['written']) { "$($txResult.written) row(s) written, $($txResult.removed) removed, of $($txResult.rowsAffected)" } else { "$(if ($txResult) { $txResult.rowsAffected }) row(s)" }
+        Write-Host ("  [commit] {0}: backup + transactional apply + retention {1} ms ({2})" -f $Base, $__sw.ElapsedMilliseconds, $__w) -ForegroundColor DarkGray
+    } catch { }
     # On a MASTER, a committed change to what the publisher ships requests a publish (Request-PimManagerPublishAfterCommit).
     # Here, not at each caller, so every commit path (grid, departments, conformance deploy) is covered. A commit that
     # changed nothing requests nothing (the order-independent row hash). Never fails the commit, which has already landed.
@@ -7972,6 +7995,7 @@ function Handle-Request {
                     removes    = $diff.removes.Count
                     modifies   = $diff.modifies.Count
                     snapshotId = "$($commitRes.snapshotId)"
+                    commitId   = "$(if ($commitRes -and $commitRes.PSObject.Properties['commitId']) { $commitRes.commitId })"   # §88 watcher
                     rowsHash   = $newRowsHash
                     concurrency = $concurrencyNote
                 }
@@ -13583,6 +13607,31 @@ function Handle-Request {
         # (and the Manager's own token is minted per PROCESS), so a per-session queue would show
         # each person a different list -- which is the opposite of a review surface.
         # ------------------------------------------------------------------
+        # §88 COMMIT WATCHER: the recent commits with a live state per changed key (saved / applied / live / waiting /
+        # failed / stored). ?since=<ISO> limits to commits at or after it; ?id=<commit id> returns one. Read-only, every role
+        # that can see the Manager (it names only entities + row keys the reader already sees in the grids).
+        if ($path -eq '/api/commits' -and $method -eq 'GET') {
+            $cs = (Get-PimManagerStoreCs)
+            if (-not $cs -or -not (Get-Command Get-PimCommitWatchStatus -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is wired in this host, so the commits cannot be read'; readable = $false }
+                return 503
+            }
+            try {
+                $w = Read-PimCommitWatchDoc -ConnectionString $cs -Name 'CommitWatch'
+                $o = Read-PimCommitWatchDoc -ConnectionString $cs -Name 'CommitOutcomes'
+                $recs = @(if ($w.doc -and $w.doc.PSObject.Properties['commits']) { $w.doc.commits })
+                $since = $null; $sq = "$($req.QueryString['since'])".Trim(); if ($sq) { $since = ConvertFrom-PimCommitWatchUtc $sq }
+                $idq = "$($req.QueryString['id'])".Trim()
+                if ($idq) { $recs = @($recs | Where-Object { "$($_.id)" -eq $idq }) }
+                if ($since) { $recs = @($recs | Where-Object { (ConvertFrom-PimCommitWatchUtc $_.committedUtc) -ge $since }) }
+                $out = @($recs | Select-Object -First 30 | ForEach-Object { Get-PimCommitWatchStatus -Record $_ -Outcomes $o.doc })
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ commits = $out; readable = $true; nowUtc = [datetime]::UtcNow.ToString('o') }
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the commit watcher could not be read: $($_.Exception.Message)"; readable = $false }
+                return 500
+            }
+        }
         if ($path -eq '/api/queue' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             $cs = (Get-PimManagerStoreCs)

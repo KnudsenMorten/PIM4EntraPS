@@ -162,6 +162,8 @@ if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\
 . "$shared\PIM-PendingCheck.ps1"
 # REQ-AR-2: job 'access-review-cycle' -- the per-department access review campaigns.
 if (Test-Path -LiteralPath "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1") { . "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1" }   # §84 Pro: loaded only when present
+if (Test-Path -LiteralPath "$shared\..\rfa\PIM-RfaSync.ps1") { . "$shared\..\rfa\PIM-RfaSync.ps1" }   # §82 Pro: loaded only when present
+if (Test-Path -LiteralPath "$shared\..\consultant-lifecycle\PIM-CompanyReviewJob.ps1") { . "$shared\..\consultant-lifecycle\PIM-CompanyReviewJob.ps1" }   # §82 Pro
 # REQ-AR-2 remove-on-undecided: an unanswered review whose rule removes undecided people raises the offboard approval
 # request (Add-PimApprovalRequest / Get-PimApprovalRequests, pim.Settings through Get-/Set-PimSetting wired below).
 . "$shared\PIM-ApprovalGate.ps1"
@@ -332,6 +334,26 @@ Register-PimJobHandler -Type 'access-review-cycle' -Handler {
     Invoke-PimAccessReviewCycleJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
 Write-Host "[scheduler] access review cycle wired (per-department campaigns from Settings > Access reviews)" -ForegroundColor Cyan
+# §82: the REAL 'rfa-sync' / 'company-review' handlers -- only when the Pro libraries are present (Community has neither).
+# A run with errors (a row or a mail that failed) FAILS, so status = latest run shows it and the next run retries.
+if (Get-Command Invoke-PimRfaSyncJob -ErrorAction SilentlyContinue) {
+    Register-PimJobHandler -Type 'rfa-sync' -Handler {
+        param($job, $now, $whatIf)
+        $r = Invoke-PimRfaSyncJob -Job $job -NowUtc $now -WhatIf:$whatIf
+        if ($r.failed) { throw "[rfa-sync] $($r.detail)" }
+        $r
+    }
+    Write-Host "[scheduler] rfa-sync wired (RFA store -> requests -> admin rows; inert until the RFA portal is deployed)" -ForegroundColor Cyan
+}
+if (Get-Command Invoke-PimCompanyReviewJob -ErrorAction SilentlyContinue) {
+    Register-PimJobHandler -Type 'company-review' -Handler {
+        param($job, $now, $whatIf)
+        $r = Invoke-PimCompanyReviewJob -Job $job -NowUtc $now -WhatIf:$whatIf
+        if ($r.failed) { throw "[company-review] $($r.detail)" }
+        $r
+    }
+    Write-Host "[scheduler] company-review wired (consultant lifecycle; inert until a company is defined)" -ForegroundColor Cyan
+}
 
 # Wire the per-scope engine-delta / engine-full jobs to the NEW REST engine.
 # WhatIf (intent/recalc) -> plan only; otherwise the provider applies via REST.

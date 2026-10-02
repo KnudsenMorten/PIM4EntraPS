@@ -21,6 +21,8 @@
 Set-StrictMode -Off
 
 $script:PimEngineProviders = @{}   # scope(lower) -> provider hashtable
+# §88 commit watcher: the engine records what it did with every WATCHED key (free; loaded with the core).
+if (-not (Get-Command Update-PimCommitOutcomes -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-CommitWatch.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-CommitWatch.ps1') }
 
 # ---- pure diff core (testable, no I/O) ------------------------------------
 function Get-PimChangeFieldDiff {
@@ -759,6 +761,18 @@ function Invoke-PimEngineScope {
         $Scope, $Mode, $tag, @($desired).Count, @($live).Count, $diff.create.Count, $diff.update.Count, $diff.remove.Count, $diff.nochange.Count) -ForegroundColor Cyan
 
     $plan = New-Object System.Collections.Generic.List[object]
+    # §88 commit watcher: what this run did with each item, by its pim.Rows entity + key (Get-PimCommitWatchItemRef).
+    # Collected always, written once at the end of a real (not WhatIf) run, and only for keys a commit waits for.
+    $script:__watch = New-Object System.Collections.Generic.List[object]
+    $watchAdd = {
+        param($wOp, $wItem, $wResult, $wReason)
+        if ($WhatIf -or -not (Get-Command Get-PimCommitWatchItemRef -ErrorAction SilentlyContinue)) { return }
+        try {
+            $wEnt = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
+            $ref = Get-PimCommitWatchItemRef -Entity $wEnt -Item $wItem -Op $wOp
+            if ($ref) { $script:__watch.Add([pscustomobject]@{ entity = $ref.entity; key = $ref.key; action = "$wOp"; result = "$wResult"; reason = "$wReason" }) }
+        } catch { }
+    }
     $do = {
         param($op,$item,$handlerName)
         $entity = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
@@ -822,6 +836,7 @@ function Invoke-PimEngineScope {
                     if ($null -ne $__o -and $__o.PSObject -and ($__o.PSObject.Properties.Name -contains 'pimApplied') -and (-not $__o.pimApplied)) { $__reported = $true }
                 }
                 if ($__reported) {
+                    & $watchAdd $op $item 'waiting' 'reported only -- not applied by this run (a hold or report mode)'
                     $script:__skipped++
                     # 2026-09-21 (operator, on a held run: "terrible error messages"): a hold reported 117 identical
                     # "[r] ... (reported only)" lines. The first 3 are listed; the rest are counted before the done line.
@@ -829,6 +844,7 @@ function Invoke-PimEngineScope {
                     if ($script:__reportedShown -le 3) { Write-Host ("    [r] {0} (reported only -- NOT applied)" -f $item.key) -ForegroundColor DarkYellow }
                 } else {
                     $script:__applied++; Write-Host ("    [{0}] {1}" -f $sym, $item.key) -ForegroundColor Green
+                    & $watchAdd $op $item 'ok' ''
                     Write-PimEngineChangeAudit -Scope $Scope -Entity $entity -Op $op -Item $item -Result 'ok'
                     if ($op -eq 'Remove' -and $item.PSObject.Properties['targeted'] -and $item.targeted -and $null -ne $item.row -and $item.rowKey) {
                         $script:__rowDone[$item.rowKey] = 1 + [int]$script:__rowDone[$item.rowKey]; $script:__rowObj[$item.rowKey] = $item.row
@@ -841,6 +857,7 @@ function Invoke-PimEngineScope {
                 # not a failure (idempotent re-run). Mirrors the legacy "RoleAssignmentExists ... skipping".
                 if ($em -match '(?i)RoleAssignmentExists|already exist|references already exist|ConflictingObjects|existing assignment|A conflicting object|RoleAssignmentRequestPolicyValidationFailed.*active|The Role assignment already exists') {
                     $script:__skipped++; Write-Host ("    [=] {0} (exists -- validated, skipped)" -f $item.key) -ForegroundColor DarkGray
+                    & $watchAdd 'NoChange' $item 'ok' ''
                 } else {
                     # 🔴 §70.19 (2026-09-13): "Nesting is currently not supported" (an ACTIVE group nesting into a
                     # role-assignable group) used to be a separate branch that counted a SKIP and printed a yellow
@@ -848,6 +865,7 @@ function Invoke-PimEngineScope {
                     # nothing, and only verify-convergence complained 18 hours later with no cause. It is a
                     # failure of the row, so it is recorded like one: ENTRA-NESTING-ROLE-ASSIGNABLE, fix = Eligible.
                     $script:__errors++; Write-Host ("    [x] {0} {1} FAILED: {2}" -f $op, $item.key, $em) -ForegroundColor Red
+                    & $watchAdd $op $item 'failed' $em
                     Write-PimEngineChangeAudit -Scope $Scope -Entity $entity -Op $op -Item $item -Result 'error' -ErrorMessage $em
                     # Keep WHAT failed and WHY as data, not only as a log line nobody can reach from the
                     # Manager (operator, 2026-09-12: "the eror msg was useless"). PIM-FailureCatalog.ps1.
@@ -879,6 +897,7 @@ function Invoke-PimEngineScope {
         $__hMsg = ("REMOVE-BUDGET-HELD: {0} NOT applied -- this run would remove {1} item(s) in scope '{2}', over the per-run removal budget of {3}, so NOTHING was removed in this scope. Check that the Remove rows and assignment-type changes for this scope are intended, then apply them in batches of at most {3}." -f $__what, $__h.toRemove, $Scope, $__h.budget)
         Write-Host ("    [h] {0} HELD: {1}" -f $__it.key, $__hMsg) -ForegroundColor Red
         if ($WhatIf) { continue }
+        & $watchAdd $__hOp $__it 'held' $__hMsg
         $script:__errors++
         if (Get-Command New-PimEngineItemFailure -ErrorAction SilentlyContinue) {
             $__hRow = if ($__it.PSObject.Properties['row'] -and $null -ne $__it.row) { $__it.row } elseif ($__hOp -eq 'Update') { $__it.desired } else { $__it.live }
@@ -890,6 +909,8 @@ function Invoke-PimEngineScope {
     foreach ($i in $diff.create) { & $do 'Create' $i 'ApplyCreate' }
     foreach ($i in $diff.update) { & $do 'Update' $i 'ApplyUpdate' }
     foreach ($i in $diff.remove) { & $do 'Remove' $i 'ApplyRemove' }   # only present in Full
+    # §88: an item the platform already matches is LIVE for the watcher.
+    foreach ($i in $diff.nochange) { & $watchAdd 'NoChange' $i 'ok' '' }
     # A Remove row REVOKES a delegation and is then DELETED, so nothing re-applies it (operator 2026-09-13:
     # "remove was to revoke a delegation which must be removed deleted so it doesnt reapply"; in the old
     # files the rows were forgotten after the first run). Deleted only when EVERY live item it names
@@ -929,6 +950,17 @@ function Invoke-PimEngineScope {
     # about what is failing and must not clear or replace the record.
     if (-not $WhatIf -and (Get-Command Update-PimEngineItemFailures -ErrorAction SilentlyContinue)) {
         [void](Update-PimEngineItemFailures -Scope $Scope -Failures $script:__failures.ToArray())
+    }
+    # §88 commit watcher: the per-key outcomes + "a CLEAN pass covered these entities" (no error, nothing held). Never
+    # fails the run; only when a SQL store is reachable (an offline / fixed-provider run records nothing).
+    if (-not $WhatIf -and (Get-Command Update-PimCommitOutcomes -ErrorAction SilentlyContinue) -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) {
+        $__wcs = $null; try { $__wcs = Get-PimSqlSettingsConnectionString } catch { $__wcs = $null }
+        if ($__wcs) {
+            # a clean pass (no error, nothing held) covers every entity THIS scope applies -- Update-PimCommitOutcomes
+            # keeps only those (Test-PimCommitWatchScopeApplies)
+            $__clean = if ($script:__errors -eq 0) { @(Get-PimCommitWatchPlatformEntities) } else { @() }
+            Update-PimCommitOutcomes -ConnectionString $__wcs -Items $script:__watch.ToArray() -CleanEntities $__clean -Scope "$Scope" -Mode "$Mode"
+        }
     }
 
     return [pscustomobject]@{

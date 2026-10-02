@@ -167,8 +167,13 @@ function Invoke-PimCommitTransaction {
         $applyRes = & $ApplyScript
         $result.applied = $true
         if ($null -ne $applyRes) {
-            if ($applyRes.PSObject.Properties['rowsAffected']) { $result.rowsAffected = [int]$applyRes.rowsAffected }
-            elseif ($applyRes.PSObject.Properties['rowCount']) { $result.rowsAffected = [int]$applyRes.rowCount }
+            # 🪤 the SQL writer returns a HASHTABLE, whose keys PSObject.Properties never lists -- rowsAffected was always 0.
+            $get = { param($n) if ($applyRes -is [System.Collections.IDictionary]) { if ($applyRes.Contains($n)) { $applyRes[$n] } } elseif ($applyRes.PSObject.Properties[$n]) { $applyRes.$n } }
+            if ($null -ne (& $get 'rowsAffected')) { $result.rowsAffected = [int](& $get 'rowsAffected') }
+            elseif ($null -ne (& $get 'rowCount')) { $result.rowsAffected = [int](& $get 'rowCount') }
+            # §88: what the commit really wrote (only changed rows are written now) and removed.
+            if ($null -ne (& $get 'written')) { $result['written'] = [int](& $get 'written') }
+            if ($null -ne (& $get 'removed')) { $result['removed'] = [int](& $get 'removed') }
         }
     } catch {
         $applyErr = "$($_.Exception.Message)"

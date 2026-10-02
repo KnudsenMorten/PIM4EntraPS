@@ -43,7 +43,7 @@ function Get-PimTemplatePackKnownBases {
     # route checks with Get-PimCsvSpec). A pack entity outside it is skipped, exactly as the route skips it.
     # DUPLICATED on purpose (the Manager is not a library); tests\Test-PimTemplateImport.ps1 fails when the two drift.
     @(
-        'Account-Definitions-Admins',
+        'Account-Definitions-Admins', 'Account-Definitions-Companies',
         'PIM-Definitions-Roles', 'PIM-Definitions-Tasks', 'PIM-Definitions-Services', 'PIM-Definitions-Processes',
         'PIM-Definitions-Resources', 'PIM-Definitions-Departments', 'PIM-Definitions-Organization', 'PIM-Definitions-Projects',
         'PIM-Definitions-CrossOrg', 'PIM-Definitions-AU',

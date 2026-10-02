@@ -16908,6 +16908,7 @@
     const wrote = [];
     // BUG-190: admin changes the server HELD for the offboard approval (202 { offboardHeld, held[] }).
     const heldAll = [];
+    const commitWatchIds = [];   // §88: the watcher follows these commits until they are live
     let _wi = 0;
     for (const base of bases) {
       status.textContent = 'Writing ' + base + ' ...';
@@ -16943,6 +16944,7 @@
           r = await api('PUT', '/api/csv/' + encodeURIComponent(base), commitPutBody(base, finalRows));
         }
         if (r && r.offboardHeld) heldAll.push({ base: base, body: r });
+        if (r && r.commitId) commitWatchIds.push(r.commitId);
         wrote.push(commitWriteSummary(base, r));
         // Refresh local cache + reset pending.
         await loadCsv(base, true);
@@ -16990,7 +16992,8 @@
       '</b> to the desired state across ' + wrote.length + ' entit' + (wrote.length === 1 ? 'y' : 'ies') + '.' +
       (per ? '<ul style="margin:6px 0 4px 18px;">' + per + '</ul>' : ' ') +
       'The engine applies ' + (totalChanges === 1 ? 'it' : 'them') + ' on its next run.' + engineNote +
-      ' <span style="color:#57606a">Listed below under <b>Change queue &amp; recent commits</b> (state <i>saved</i>).</span>';
+      (commitWatchIds.length ? ' <b>The commit watcher</b> (bottom right) follows every change until it is live in Entra / Azure.' :
+       ' <span style="color:#57606a">Listed below under <b>Change queue &amp; recent commits</b> (state <i>saved</i>).</span>');
     // §70.20: the queued actions shown below are part of "all" too.
     if (queueIds.length && confirm('Also commit ' + queueIds.length + ' queued action' + (queueIds.length === 1 ? '' : 's') + ' from the Change queue?\n\nThe engine applies them on its next run.')) {
       try {
@@ -17006,6 +17009,7 @@
     if (heldAll.length) { status.className = 'err'; wireOffboardHeld(); }
     // 2.4.462: the outcome in the middle of the screen as well (green when everything was written)
     commitOverlay(heldAll.length ? 'error' : 'ok', heldAll.length ? 'Committed -- but some admin changes are HELD for approval' : 'Committed', summaryHtml);
+    if (commitWatchIds.length) startCommitWatcher(commitWatchIds);
     if (status.dataset) status.dataset.sticky = '1';
     // Pull fresh graph data.
     try {
@@ -17020,6 +17024,82 @@
     // Re-run the pre-flight validator now that the on-disk CSVs have moved.
     runPreflight({ silent: true }).catch(() => {});
   };
+
+  // §88 COMMIT WATCHER (operator 2026-10-02: "a watcher feature which detect when commit actually is active in platform").
+  // A commit only writes SQL; the engine applies it later. This panel follows the commits just made -- per changed row:
+  // saved -> applied -> LIVE (read back from Entra / Azure), or waiting / failed with the engine's reason -- polling
+  // GET /api/commits every 10 s until nothing is left in flight (or 45 min). It survives a page reload (sessionStorage).
+  const CW_KEY = 'pim.commitWatch';
+  let cwTimer = null, cwIds = [], cwStarted = 0, cwOpen = false;
+  const CW_LABEL = { saved: 'saved', applied: 'applied', live: 'live', waiting: 'waiting', failed: 'failed', stored: 'saved (no platform object)' };
+  const CW_COLOR = { saved: '#9a6700', applied: '#0969da', live: '#1a7f37', waiting: '#9a6700', failed: '#cf222e', stored: '#1a7f37' };
+  function startCommitWatcher(ids) {
+    cwIds = Array.from(new Set((cwIds || []).concat(ids || []))).slice(-20);
+    cwStarted = Date.now();
+    try { sessionStorage.setItem(CW_KEY, JSON.stringify({ ids: cwIds, started: cwStarted })); } catch (_) { }
+    commitWatchPoll();
+  }
+  function stopCommitWatcher(clear) {
+    if (cwTimer) { clearTimeout(cwTimer); cwTimer = null; }
+    if (clear) { cwIds = []; try { sessionStorage.removeItem(CW_KEY); } catch (_) { } const el = document.getElementById('commitWatch'); if (el) el.remove(); }
+  }
+  function commitWatchBox() {
+    let el = document.getElementById('commitWatch');
+    if (!el) {
+      el = document.createElement('div'); el.id = 'commitWatch';
+      el.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9000;max-width:440px;min-width:300px;background:#fff;border:1px solid #d0d7de;border-radius:8px;box-shadow:0 8px 24px rgba(140,149,159,.3);font-size:12.5px;';
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+  async function commitWatchPoll() {
+    if (cwTimer) { clearTimeout(cwTimer); cwTimer = null; }
+    if (!cwIds.length) return;
+    let commits = [];
+    try { const r = await api('GET', '/api/commits'); commits = ((r && r.commits) || []).filter(c => cwIds.indexOf(c.id) >= 0); }
+    catch (e) { commitWatchRender(null, 'The watcher cannot read the commits right now: ' + (e && e.message ? e.message : e)); cwTimer = setTimeout(commitWatchPoll, 30000); return; }
+    const allDone = commits.length > 0 && commits.every(c => c.done);
+    commitWatchRender(commits, '');
+    if (allDone) { try { sessionStorage.removeItem(CW_KEY); } catch (_) { } return; }
+    if (Date.now() - cwStarted > 45 * 60 * 1000) { commitWatchRender(commits, 'Stopped watching after 45 minutes -- open it again from Pending changes to re-check.'); return; }
+    cwTimer = setTimeout(commitWatchPoll, 10000);
+  }
+  function commitWatchRender(commits, note) {
+    const el = commitWatchBox();
+    const tot = { total: 0 };
+    (commits || []).forEach(c => (c.keys || []).forEach(k => { tot[k.state] = (tot[k.state] || 0) + 1; tot.total++; }));
+    const done = (tot.live || 0) + (tot.stored || 0);
+    const busy = (tot.saved || 0) + (tot.applied || 0) + (tot.waiting || 0);
+    const head = !commits ? 'Commit watcher' :
+      (busy ? ('Going live: ' + done + ' of ' + tot.total + ' change' + (tot.total === 1 ? '' : 's') + ' live') :
+              (tot.failed ? (tot.failed + ' change' + (tot.failed === 1 ? '' : 's') + ' FAILED, ' + done + ' live') : ('All ' + tot.total + ' change' + (tot.total === 1 ? '' : 's') + ' live')));
+    const headColor = tot.failed ? '#cf222e' : (busy ? '#0969da' : '#1a7f37');
+    const chips = Object.keys(CW_LABEL).filter(s => tot[s]).map(s => '<span style="color:' + CW_COLOR[s] + ';margin-right:10px;">' + tot[s] + ' ' + CW_LABEL[s] + '</span>').join('');
+    let body = '';
+    if (cwOpen && commits) {
+      body = commits.map(c => {
+        const rows = (c.keys || []).filter(k => k.state !== 'live' && k.state !== 'stored').slice(0, 25).map(k =>
+          '<div style="padding:2px 0;border-top:1px solid #f0f2f4;"><span style="color:' + (CW_COLOR[k.state] || '#57606a') + ';font-weight:600;">' + escapeHtml(CW_LABEL[k.state] || k.state) + '</span> ' +
+          '<code style="font-size:11px;">' + escapeHtml(k.key) + '</code> <span style="color:#57606a;">' + escapeHtml(k.op) + '</span>' +
+          (k.reason ? '<div style="color:#57606a;font-size:11px;">' + escapeHtml(k.reason) + '</div>' : '') + '</div>').join('');
+        const liveN = (c.keys || []).filter(k => k.state === 'live' || k.state === 'stored').length;
+        return '<div style="margin-top:8px;"><b>' + escapeHtml(c.entity) + '</b> <span style="color:#57606a;">' + liveN + ' of ' + (c.keys || []).length + ' live' +
+          (c.moreKeys ? ' (+' + c.moreKeys + ' more not tracked)' : '') + '</span>' + rows + '</div>';
+      }).join('');
+    }
+    el.innerHTML = '<div style="padding:10px 12px;">' +
+      '<div style="display:flex;align-items:center;gap:8px;"><b style="color:' + headColor + ';flex:1;">' + escapeHtml(head) + '</b>' +
+      '<a href="#" id="cwToggle" style="font-size:12px;">' + (cwOpen ? 'Hide details' : 'Details') + '</a>' +
+      '<a href="#" id="cwClose" title="Close the watcher" style="font-size:15px;text-decoration:none;color:#57606a;">&times;</a></div>' +
+      (chips ? '<div style="margin-top:4px;">' + chips + '</div>' : '') +
+      (busy ? '<div style="color:#57606a;font-size:11px;margin-top:2px;">saved = waiting for the engine &middot; applied = written, read-back next &middot; live = confirmed in Entra / Azure. Checks every 10 s.</div>' : '') +
+      (note ? '<div style="color:#9a6700;margin-top:4px;">' + escapeHtml(note) + '</div>' : '') +
+      '<div style="max-height:320px;overflow:auto;">' + body + '</div></div>';
+    const t = document.getElementById('cwToggle'); if (t) t.onclick = function (ev) { ev.preventDefault(); cwOpen = !cwOpen; commitWatchRender(commits, note); };
+    const x = document.getElementById('cwClose'); if (x) x.onclick = function (ev) { ev.preventDefault(); stopCommitWatcher(true); };
+  }
+  // a reload keeps following the commits that were still in flight
+  try { const s = JSON.parse(sessionStorage.getItem(CW_KEY) || 'null'); if (s && Array.isArray(s.ids) && s.ids.length && Date.now() - (s.started || 0) < 45 * 60 * 1000) { cwIds = s.ids; cwStarted = s.started; setTimeout(commitWatchPoll, 1500); } } catch (_) { }
 
   // BUG-200: after a 409, re-read the entity and re-apply THIS page's edits on top of what the other
   // administrator committed (the same rebase the §70.12 draft restore uses). A removal/edit whose

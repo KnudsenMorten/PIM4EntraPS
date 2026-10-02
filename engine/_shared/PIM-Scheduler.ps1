@@ -56,6 +56,13 @@ $script:PimTickOnlyJobTypes += 'pending-check'
 # make due (PIM-AccessReviewCycle.ps1). Checks every 6 h; the cadence per department is the rule's cadenceDays.
 $script:PimJobTypes += 'access-review-cycle'
 $script:PimTickOnlyJobTypes += 'access-review-cycle'
+# §82 (operator 2026-10-02, Pro): 'rfa-sync' takes in RFA requests from the RFA store, enables / ends the windows and
+# publishes the eligibility list (engine/rfa/PIM-RfaSync.ps1); 'company-review' runs the consultant lifecycle's company
+# reviews (engine/consultant-lifecycle/PIM-CompanyReviewJob.ps1). Both are inert until configured (store / companies).
+$script:PimJobTypes += 'rfa-sync'
+$script:PimTickOnlyJobTypes += 'rfa-sync'
+$script:PimJobTypes += 'company-review'
+$script:PimTickOnlyJobTypes += 'company-review'
 # §79.7 (operator 2026-09-25): 'owner-review' mails each department's owners their people to Keep / Extend / Remove (PIM-OwnerPortal.ps1).
 $script:PimJobTypes += 'owner-review'
 $script:PimTickOnlyJobTypes += 'owner-review'# §83 (operator 2026-10-01: "i need to have a monthly report, where i can see the auto-extend upcoming"; "owners approve,
@@ -317,6 +324,10 @@ function Get-PimDefaultJobSchedule {
         [pscustomobject]@{ name='pending-check'; type='pending-check'; intervalMinutes=1440; enabled=$true }
         # REQ-AR-2: no-op until review rules are saved and enabled (Settings > Access reviews); Pro 'reviews.campaigns'.
         [pscustomobject]@{ name='access-review-cycle'; type='access-review-cycle'; intervalMinutes=360; enabled=$true }
+        # §82: every tick (the tick runs every 5 min); inert until the RFA portal is deployed + enabled (Pro 'rfa.portal').
+        [pscustomobject]@{ name='rfa-sync'; type='rfa-sync'; intervalMinutes=1; enabled=$true }
+        # §82: every 6 h; inert until a company is defined (Pro 'consultants.review'). The cadence per company is its own.
+        [pscustomobject]@{ name='company-review'; type='company-review'; intervalMinutes=360; enabled=$true }
         # §79.7: every 90 days -- each department's owners get their people to Keep / Extend / Remove on My people. OFF by
         # default: it mails people outside IT, so a SuperAdmin turns it on (and sets the cadence) on the Jobs page.
         [pscustomobject]@{ name='owner-review'; type='owner-review'; intervalMinutes=129600; enabled=$false }
@@ -1165,6 +1176,20 @@ function Initialize-PimDefaultJobHandlers {
         # §83: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimAutoExtendReportJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:autoextend-report (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'rfa-sync' -Handler {
+        param($job,$now,$whatIf)
+        # §82: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimRfaSyncJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:rfa-sync (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'company-review' -Handler {
+        param($job,$now,$whatIf)
+        # §82: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimCompanyReviewJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:company-review (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'access-review-cycle' -Handler {

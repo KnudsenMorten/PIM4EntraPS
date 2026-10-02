@@ -13,6 +13,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## v2.4.477 — See your changes go live; faster commits
+
+- **New: the commit watcher.** After you commit, a small panel follows every change you made until it is live in
+  Entra ID or Azure: *saved* (waiting for the engine), *applied* (written, read back next), *live* (confirmed), or
+  *waiting* / *failed* with the engine's reason. It checks every 10 seconds, keeps going if you reload the page, and
+  stops once nothing is left in flight. Lists that have no object of their own in Entra or Azure show as saved at once.
+- **Faster commits.** A commit used to rewrite every row of the list you changed, so one changed administrator in a
+  large list meant hundreds of database writes. Only the rows that really changed are written now, and each commit
+  logs how long its database part took and how many rows it wrote.
+- **Groundwork for consultant management (Pro, not active yet).** Companies can be defined, and administrators carry a
+  contact e-mail and a request mode. The jobs that will run company reviews and requests for authorization are in place
+  but stay idle until those features are set up.
 
 ## v2.4.476 — Clearer setup and update messages
 
