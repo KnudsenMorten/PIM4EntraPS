@@ -22,6 +22,13 @@ Content-Type: application/json
 }
 ```
 
+A **proposal** (a standing change for an administrator to review) has no `hours`:
+
+```json
+{ "userPrincipalName": "adm-jane@contoso.com", "type": "proposal", "requestType": "group-membership",
+  "groupTag": "ERP-Admins", "requestor": "jane.manager@contoso.com", "ticket": "RITM0012399", "reason": "new ERP team member" }
+```
+
 Answers: `202 { id, state: "submitted", status }` for a new request; `200 { ...status }` when the same ticket was already
 sent; `400` (invalid, with the reason), `401` (no / bad sign-in), `403` (application not allowed / key without the scope),
 `429` (too many calls -- honour `Retry-After`).
@@ -33,7 +40,7 @@ GET  https://<broker-host>/api/v1/requests/<id>          -> { id, state, status,
 POST https://<broker-host>/api/v1/requests/<id>/cancel   -> 202 { id, state: "cancel-requested" }
 ```
 
-Final states: `active`, `ended`, `denied`, `rejected`, `expired`, `cancelled`. Poll every 20-60 seconds.
+Final states: `active`, `ended`, `denied`, `rejected`, `expired`, `cancelled`, `forwarded` (a proposal). Poll every 20-60 seconds.
 
 ## Power Automate / Logic Apps
 

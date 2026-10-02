@@ -171,6 +171,7 @@ function Invoke-PimRfaSyncJob {
     $find = { param($id) @($reqs | Where-Object { "$($_.id)" -eq "$id" -or @($_.storeIds) -contains "$id" })[0] }
     $note = { param($r, $text) $r | Add-Member -NotePropertyName note -NotePropertyValue $text -Force }
     $reject = @{}
+    $forward = @{}   # REQ 90: store row id -> the status text of a proposal handed to the intake
     foreach ($sr in @($storeRows.Values | Where-Object { "$($_.state)" -eq 'submitted' })) {
         $sid = "$($sr.RowKey)"
         if (& $find $sid) { continue }   # already taken in (the status push below brings the store row up to date)
@@ -191,6 +192,23 @@ function Invoke-PimRfaSyncJob {
             $admin = $byUpn["$($sr.upn)".Trim().ToLowerInvariant()]
         } else { $reject[$sid] = "unknown source '$src'"; continue }
         if (-not $admin) { $reject[$sid] = 'no such account here'; continue }
+        # REQ 90: a PROPOSAL (a standing change) goes to the existing intake -- its gates (no activation, no self-targeting,
+        # Tier 0/1 always to a human) and the servicenow-intake job turn it into a PENDING change for an administrator to
+        # review and commit. It never becomes an RFA window and is never applied by the machine.
+        if ($src -eq 'api' -and "$($sr.kind)" -eq 'proposal') {
+            $intakeOn = $false; if (Get-Command Test-PimIntakeConfigured -ErrorAction SilentlyContinue) { try { $intakeOn = [bool](Test-PimIntakeConfigured) } catch { $intakeOn = $false } }
+            if (-not $intakeOn) { $reject[$sid] = 'proposals are not accepted here -- the intake (IntakeEnabled) is switched off'; continue }
+            $rec = [ordered]@{ externalId = "$($sr.externalRef)"; requestType = "$($sr.requestType)"; requestor = "$($sr.requestor)"; targetAdmin = (Get-PimRfaRowValue -Row $admin -Name 'UserName')
+                               groupTag = "$($sr.groupName)"; justification = "$($sr.reason)"; source = "api:$(if ("$($sr.callerKeyId)".Trim()) { "key:$($sr.callerKeyId)" } else { "app:$($sr.callerAppId)" })" }
+            $gate = Test-PimIntakeAccepted -Record ([pscustomobject]$rec)
+            if (-not $gate.accepted) { $reject[$sid] = "proposal refused: $($gate.reason)"; continue }
+            if (-not $WhatIf) {
+                try { [void](Add-PimIntakeRecord -Record ([pscustomobject]$rec)) } catch { $errors.Add("$sid : the proposal could not be handed to the intake: $($_.Exception.Message)"); continue }
+            }
+            $forward[$sid] = "Proposal forwarded -- it becomes a pending change that an administrator reviews and commits in PIM (ticket $($sr.externalRef))."
+            $log.Add("$sid proposal forwarded to the intake: $($rec.requestType) $($rec.targetAdmin) -> $($rec.groupTag)")
+            continue
+        }
         $hours = 0; [void][int]::TryParse("$($sr.hours)", [ref]$hours)
         $isC = Test-PimRfaIsConsultant -Admin $admin -Companies $companies
         $kind = if ("$($sr.kind)" -eq 'group') { 'group' } else { 'enable' }
@@ -324,6 +342,7 @@ function Invoke-PimRfaSyncJob {
         }
         foreach ($k in @($have.Keys | Where-Object { -not $want.ContainsKey($_) })) { Remove-PimRfaStoreEntity -Store $Store -Table 'RfaEligibility' -PartitionKey 'acct' -RowKey $k }
         foreach ($sid in @($reject.Keys)) { Set-PimRfaStoreEntity -Store $Store -Table 'RfaRequests' -PartitionKey 'req' -RowKey $sid -Entity (@{} + (ConvertTo-PimRfaStoreStatus -Row $storeRows[$sid] -State 'rejected' -Text $reject[$sid])) }
+        foreach ($sid in @($forward.Keys)) { Set-PimRfaStoreEntity -Store $Store -Table 'RfaRequests' -PartitionKey 'req' -RowKey $sid -Entity (@{} + (ConvertTo-PimRfaStoreStatus -Row $storeRows[$sid] -State 'forwarded' -Text $forward[$sid])) }
         foreach ($r in @($keep)) {
             $txt = Get-PimRfaStatusText -Request $r; $we = Format-PimRfaValue $r.windowEndUtc
             foreach ($sid in @($r.storeIds | Where-Object { "$_".Trim() })) {

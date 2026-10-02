@@ -33,7 +33,7 @@
   "paths": {
     "/api/v1/requests": {
       "post": {
-        "summary": "Request an admin account enabled, or a group membership, for a number of hours (already approved by the caller's own workflow)",
+        "summary": "Request an admin account enabled, or an ad-hoc group membership, for a number of hours (already approved by the caller's own workflow) -- or propose a standing change (type proposal: requestType + groupTag + requestor, no hours), which PIM queues for an administrator to review",
         "requestBody": {
           "required": true,
           "content": {
@@ -42,7 +42,6 @@
                 "type": "object",
                 "required": [
                   "userPrincipalName",
-                  "hours",
                   "ticket"
                 ],
                 "properties": {
@@ -55,22 +54,39 @@
                     "minimum": 1
                   },
                   "type": {
+                    "type": "string",
                     "enum": [
                       "enable",
-                      "group"
-                    ],
-                    "type": "string"
+                      "group",
+                      "proposal"
+                    ]
                   },
                   "groupName": {
                     "type": "string"
                   },
-                  "ticket": {
-                    "maxLength": 100,
+                  "requestType": {
+                    "type": "string",
+                    "enum": [
+                      "group-add",
+                      "delegation-request",
+                      "group-membership",
+                      "admin-group-assignment"
+                    ]
+                  },
+                  "groupTag": {
                     "type": "string"
                   },
+                  "requestor": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "ticket": {
+                    "type": "string",
+                    "maxLength": 100
+                  },
                   "reason": {
-                    "maxLength": 500,
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 500
                   }
                 }
               }

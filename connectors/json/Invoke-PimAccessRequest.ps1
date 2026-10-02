@@ -46,9 +46,13 @@ param(
     [string]$ApiKey,
     # ---- a new request ----
     [Parameter(ParameterSetName = 'Request', Mandatory)][string]$UserPrincipalName,
-    [Parameter(ParameterSetName = 'Request', Mandatory)][ValidateRange(1, 744)][int]$Hours,
+    [Parameter(ParameterSetName = 'Request')][ValidateRange(0, 744)][int]$Hours = 0,
     [Parameter(ParameterSetName = 'Request', Mandatory)][ValidateLength(1, 100)][string]$Ticket,
-    [Parameter(ParameterSetName = 'Request')][ValidateSet('enable', 'group')][string]$Type = 'enable',
+    [Parameter(ParameterSetName = 'Request')][ValidateSet('enable', 'group', 'proposal')][string]$Type = 'enable',
+    # a PROPOSAL (a standing change PIM queues for an administrator to review): what, which PIM group, and who asked
+    [Parameter(ParameterSetName = 'Request')][ValidateSet('group-add', 'delegation-request', 'group-membership', 'admin-group-assignment')][string]$RequestType,
+    [Parameter(ParameterSetName = 'Request')][string]$GroupTag,
+    [Parameter(ParameterSetName = 'Request')][string]$Requestor,
     [Parameter(ParameterSetName = 'Request')][string]$GroupName,
     [Parameter(ParameterSetName = 'Request')][string]$Reason = '',
     [Parameter(ParameterSetName = 'Request')][switch]$Wait,
@@ -61,6 +65,8 @@ $ErrorActionPreference = 'Stop'
 $base = $BrokerUrl.TrimEnd('/')
 if ($base -notmatch '^https://') { throw 'BrokerUrl must start with https://' }
 if ($Type -eq 'group' -and -not "$GroupName".Trim()) { throw '-Type group needs -GroupName' }
+if ($PSCmdlet.ParameterSetName -eq 'Request' -and $Type -ne 'proposal' -and $Hours -lt 1) { throw '-Hours (1..744) is required for enable and group' }
+if ($Type -eq 'proposal' -and (-not $RequestType -or -not "$GroupTag".Trim() -or -not "$Requestor".Trim())) { throw '-Type proposal needs -RequestType, -GroupTag and -Requestor' }
 
 function ConvertTo-B64Url([byte[]]$Bytes) { [Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
 
@@ -96,13 +102,15 @@ function Invoke-PimApi([string]$Method, [string]$Path, $Body = $null) {
     }
 }
 
-$final = @('active', 'ended', 'denied', 'rejected', 'expired', 'cancelled')
+$final = @('active', 'ended', 'denied', 'rejected', 'expired', 'cancelled', 'forwarded')
 switch ($PSCmdlet.ParameterSetName) {
     'Status' { return (Invoke-PimApi GET "/api/v1/requests/$([uri]::EscapeDataString($StatusId))") }
     'Cancel' { return (Invoke-PimApi POST "/api/v1/requests/$([uri]::EscapeDataString($CancelId))/cancel") }
 }
-$body = [ordered]@{ userPrincipalName = $UserPrincipalName; hours = $Hours; type = $Type; ticket = $Ticket; reason = $Reason }
+$body = [ordered]@{ userPrincipalName = $UserPrincipalName; type = $Type; ticket = $Ticket; reason = $Reason }
+if ($Type -ne 'proposal') { $body.hours = $Hours }
 if ($Type -eq 'group') { $body.groupName = $GroupName }
+if ($Type -eq 'proposal') { $body.requestType = $RequestType; $body.groupTag = $GroupTag; $body.requestor = $Requestor }
 $r = Invoke-PimApi POST '/api/v1/requests' $body
 Write-Host "request $($r.id): $($r.state) -- $($r.status)"
 if (-not $Wait) { return $r }

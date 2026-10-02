@@ -153,17 +153,30 @@ function New-PimRfaApiRequestRow {
     $no = { param($s, $r) [pscustomobject]@{ ok = $false; status = $s; reason = $r } }
     $upn = "$($Body.userPrincipalName)".Trim().ToLowerInvariant()
     if ($upn -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { return (& $no 400 'userPrincipalName is required (the admin account)') }
-    $hours = 0; if (-not [int]::TryParse("$($Body.hours)", [ref]$hours) -or $hours -lt 1 -or $hours -gt 744) { return (& $no 400 'hours must be a whole number from 1 to 744') }
     $type = "$(if ("$($Body.type)".Trim()) { $Body.type } else { 'enable' })".Trim().ToLowerInvariant()
-    if ($type -notin @('enable', 'group')) { return (& $no 400 "type must be 'enable' or 'group'") }
-    $grp = "$($Body.groupName)".Trim()
+    if ($type -notin @('enable', 'group', 'proposal')) { return (& $no 400 "type must be 'enable', 'group' or 'proposal'") }
+    # REQ 90 (the intake on the one API): a PROPOSAL asks for a STANDING change (an admin into a PIM group) -- PIM queues it
+    # for an administrator to review and commit; it is never applied by the machine and carries no hours.
+    $ptype = ''; $requestor = ''
+    if ($type -eq 'proposal') {
+        $ptype = "$($Body.requestType)".Trim().ToLowerInvariant()
+        if ($ptype -notin @('group-add', 'delegation-request', 'group-membership', 'admin-group-assignment')) { return (& $no 400 "a proposal needs requestType: group-add, delegation-request, group-membership or admin-group-assignment") }
+        $requestor = "$($Body.requestor)".Trim()
+        if (-not $requestor -or $requestor.Length -gt 200) { return (& $no 400 'a proposal needs requestor (who asked for it, at most 200 characters)') }
+        $hours = 0
+    } else {
+        $hours = 0; if (-not [int]::TryParse("$($Body.hours)", [ref]$hours) -or $hours -lt 1 -or $hours -gt 744) { return (& $no 400 'hours must be a whole number from 1 to 744') }
+    }
+    $grp = "$(if ($type -eq 'proposal') { $Body.groupTag } else { $Body.groupName })".Trim()
     if ($type -eq 'group' -and -not $grp) { return (& $no 400 'a group request needs groupName') }
+    if ($type -eq 'proposal' -and -not $grp) { return (& $no 400 'a proposal needs groupTag (the PIM group)') }
     $ticket = "$($Body.ticket)".Trim()
     if (-not $ticket -or $ticket.Length -gt 100) { return (& $no 400 'ticket is required (your request / ticket number, at most 100 characters) -- it makes a retried call safe') }
     $why = "$($Body.reason)".Trim(); if ($why.Length -gt 500) { $why = $why.Substring(0, 500) }
     $ck = "$($Caller.kind):$($Caller.id)".ToLowerInvariant()
     $rk = 'api-' + (Get-PimRfaHash -Salt '' -Text "$ck|$ticket|$type|$upn|$grp".ToLowerInvariant()).Substring(0, 32)
     $e = [ordered]@{ state = 'submitted'; source = 'api'; upn = $upn; hours = $hours; kind = $type; groupName = $grp; externalRef = $ticket; reason = $why; submittedUtc = $NowUtc.ToUniversalTime().ToString('o') }
+    if ($type -eq 'proposal') { $e['requestType'] = $ptype; $e['requestor'] = $requestor }
     if ($Caller.kind -eq 'app') { $e['callerAppId'] = "$($Caller.id)" } else { $e['callerKeyId'] = "$($Caller.id)" }
     return [pscustomobject]@{ ok = $true; status = 202; reason = ''; rowKey = $rk; entity = $e }
 }
@@ -172,7 +185,7 @@ function ConvertTo-PimRfaApiStatus {
     # PURE. A store row -> what the API returns (never the internal fields).
     param([Parameter(Mandatory)][object]$Row)
     return [ordered]@{ id = "$($Row.RowKey)"; state = "$($Row.state)"; status = "$($Row.statusText)"; userPrincipalName = "$($Row.upn)"; type = "$(if ($Row.kind) { $Row.kind } else { 'enable' })"
-                       groupName = "$($Row.groupName)"; hours = "$($Row.hours)"; ticket = "$($Row.externalRef)"; windowEndUtc = "$($Row.windowEndUtc)"; submittedUtc = "$($Row.submittedUtc)" }
+                       groupName = "$($Row.groupName)"; requestType = "$($Row.requestType)"; hours = "$($Row.hours)"; ticket = "$($Row.externalRef)"; windowEndUtc = "$($Row.windowEndUtc)"; submittedUtc = "$($Row.submittedUtc)" }
 }
 
 function New-PimRfaAnswerRow {

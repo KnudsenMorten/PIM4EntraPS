@@ -15,6 +15,7 @@ folder are **recipes and samples over that one API** -- there is no second API a
 |---|---|---|
 | `enable` | the admin account is enabled for `hours` (1 to 744) | the account is disabled again when the window ends (its roles are kept) |
 | `group` | **ad-hoc** membership of the permission group `groupName` for `hours` | the membership is **removed automatically** when the window ends |
+| `proposal` | a **standing** change (`requestType`: `group-add`, `delegation-request`, `group-membership`, `admin-group-assignment`; the PIM group in `groupTag`; who asked in `requestor`; no `hours`) | never applied by the machine: it becomes a **pending change** an administrator reviews and commits in PIM. State `forwarded` once handed over. Activation requests, requests where the requester is the target, and anything while the intake is switched off are rejected; Tier 0/1 always waits for a person |
 
 Ad-hoc access is never confused with delegated (standing) access: it is marked *ad-hoc* in the PIM Manager, and a group
 the account already holds through delegation is refused.
@@ -31,7 +32,7 @@ the account already holds through delegation is refused.
 2. **`POST /api/v1/requests`** with **your own ticket number** in `ticket`. The call is idempotent on the ticket: the
    same ticket again returns that request's status, so a retry after a timeout never creates a second request.
 3. **`GET /api/v1/requests/{id}`** until the state is final: `active` (it is in effect), `ended`, `denied`, `rejected`
-   (the reason is in `status`), `expired`, `cancelled`.
+   (the reason is in `status`), `expired`, `cancelled`, `forwarded` (a proposal handed to PIM's review queue).
 4. **`POST /api/v1/requests/{id}/cancel`** ends a window early.
 
 The caller's own workflow **is** the approval: a request made through the API is approved on arrival and applied within
