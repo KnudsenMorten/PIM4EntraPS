@@ -1178,6 +1178,9 @@ function Get-PimStoreRowKey {
         'Account-Definitions-Admins'     { (& $g 'UserName') }
         # 68.6 row 35: central admins imported from a managing tenant (PIM-Downlink.ps1 Invoke-PimDownlinkAdminApply).
         'Account-Definitions-Admins-Central' { (& $g 'UserName') }
+        # §82 consultant lifecycle: an external company, keyed on its name. Deliberately NOT a PIM-Definitions-* entity --
+        # every PIM-Definitions-* base is treated as an Entra GROUP definition (template packs, cutover, policy catalog).
+        'Account-Definitions-Companies'  { (& $g 'Company'); break }
         # TEST-13: neither of these carries a GroupTag/GroupName, so both fell through to
         # the generic 'default' branch, derived a BLANK key, and every row was dropped on
         # save with a warning that scrolls past. An offboarding row is identified by the
@@ -1311,23 +1314,29 @@ WHEN MATCHED THEN UPDATE SET DataJson = @d, UpdatedUtc = SYSUTCDATETIME()
 WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @k, @d, SYSUTCDATETIME());
 "@
 
-        # 1) read current keys (inside the tx for a consistent snapshot).
+        # 1) read current keys AND their stored JSON (inside the tx for a consistent snapshot).
         $curCmd = $c.CreateCommand(); $curCmd.Transaction = $tx
-        $curCmd.CommandText = "SELECT [Key] FROM pim.Rows WHERE Entity=@e"
+        $curCmd.CommandText = "SELECT [Key], DataJson FROM pim.Rows WHERE Entity=@e"
         [void]$curCmd.Parameters.AddWithValue('@e', $Entity)
         $rd = $curCmd.ExecuteReader(); $currentKeys = New-Object System.Collections.Generic.List[string]
-        while ($rd.Read()) { $currentKeys.Add("$($rd.GetValue(0))") }
+        $currentJson = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+        while ($rd.Read()) { $ck0 = "$($rd.GetValue(0))"; $currentKeys.Add($ck0); $dj = $rd.GetValue(1); $currentJson[$ck0] = $(if ($null -eq $dj -or $dj -is [DBNull]) { '' } else { "$dj" }) }
         $rd.Close()
 
-        # 2) upsert every submitted row.
-        $submitted = @{}
+        # 2) upsert the submitted rows that CHANGED.
+        # §88 (operator 2026-10-02: "why is the commit so slow into the sql"): this used to MERGE EVERY submitted row --
+        # the Manager submits the whole entity, so one changed admin on internal (659 rows) was 659 round trips to Azure
+        # SQL inside the commit. A row whose JSON is byte-identical to what is stored is skipped: same data, and its
+        # UpdatedUtc stays honest (the change detector still sees the rows that did change).
+        $submitted = @{}; $written = 0
         foreach ($r in @($Rows)) {
             $k = Get-PimStoreRowKey -Base $base -Row $r
             if (-not $k) { continue }
             $submitted[$k] = $true
             $json = if ($null -ne $r) { $r | ConvertTo-Json -Depth 12 -Compress } else { '{}' }
+            if ($currentJson.ContainsKey($k) -and [string]::Equals($currentJson[$k], $json, [StringComparison]::Ordinal)) { continue }
             & $exec $mergeSql @{ e = $Entity; k = $k; d = $json }
-            $stmts++
+            $stmts++; $written++
             if ($FailAfter -ge 0 -and $stmts -ge $FailAfter) { throw "injected mid-commit failure after $stmts statement(s) (test seam)" }
         }
 
@@ -1360,7 +1369,7 @@ WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @
         }
 
         $tx.Commit()
-        return @{ rowCount = $submitted.Count; removed = $removed }
+        return @{ rowCount = $submitted.Count; removed = $removed; written = $written }
     } catch {
         if ($tx) { try { $tx.Rollback() } catch { Write-Warning "  [sql] transaction rollback failed: $($_.Exception.Message)" } }
         throw

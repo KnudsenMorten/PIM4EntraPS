@@ -865,6 +865,7 @@ function Get-PimAuthoringRowKey {
         }
         'PIM-Definitions-*'                { $k = (& $g 'GroupTag'); break }
         'Account-Definitions-Admins'       { $k = (& $g 'UserName'); break }
+        'Account-Definitions-Companies'    { $k = (& $g 'Company'); break }   # §82 -- same key as Get-PimStoreRowKey
         'PIM-Assignments-Admins'           { $k = ((& $g 'Username') + '|' + (& $g 'GroupTag')); break }
         'PIM-Assignments-Groups'           { $k = ((& $g 'TargetGroupTag') + '|' + (& $g 'SourceGroupTag')); break }
         'PIM-Assignments-Roles-Groups'     { $k = ((& $g 'GroupTag') + '|' + (& $g 'RoleDefinitionName')); break }

@@ -1,0 +1,18 @@
+<!-- subject: {{Title}} -->
+<!-- tokens: Title, Headline, Detail, Action, PortalUrl, TenantName, WhenUtc -->
+<!-- §82 RFA + consultant lifecycle: every mail to a person OUTSIDE IT -- a consultant (PIN, request received, approved,
+     denied, expired, enabled, window ending, disabled), a company contact (review request, reminder) and a department
+     Owner (an access request to decide). PortalUrl is the public RFA portal (or the Manager's Access requests page for
+     an Owner). To customize: edit it in the Manager (Settings > Mail templates); the edited copy is kept in SQL. -->
+<html>
+<body style="margin:0; padding:0; background:#f6f8fa;">
+  <div style="font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,Roboto,Helvetica,Arial,sans-serif; color:#24292f; font-size:15px; line-height:1.5; max-width:680px; margin:0 auto; padding:24px;">
+    <p style="margin:0 0 4px 0; font-family:'Segoe UI',Helvetica,Arial,sans-serif;">Hello,</p>
+    <p style="margin:0 0 16px 0; font-size:17px; font-weight:600; font-family:'Segoe UI',Helvetica,Arial,sans-serif;">{{Headline}}</p>
+    <p style="margin:0 0 18px 0; font-family:'Segoe UI',Helvetica,Arial,sans-serif;">{{Detail}}</p>
+    <p style="margin:0 0 18px 0; font-family:'Segoe UI',Helvetica,Arial,sans-serif;"><b>What to do:</b> {{Action}}</p>
+    <p style="margin:0 0 18px 0; font-family:'Segoe UI',Helvetica,Arial,sans-serif;"><a href="{{PortalUrl}}" style="color:#0969da;">{{PortalUrl}}</a></p>
+    <p style="margin:0; color:#57606a; font-size:12px; font-family:'Segoe UI',Helvetica,Arial,sans-serif;">Sent by privileged access management for {{TenantName}} at {{WhenUtc}}. If you did not expect this mail, tell your contact at {{TenantName}}; never forward a PIN.</p>
+  </div>
+</body>
+</html>

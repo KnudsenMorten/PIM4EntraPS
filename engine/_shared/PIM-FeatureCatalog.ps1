@@ -142,6 +142,11 @@ $script:PimFeatureCatalog = @(
     [ordered]@{ key='hybrid.ad';         label='On-premises Active Directory (hybrid worker)'; group='Governance'; tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='HybridAd'; description='Admin accounts in on-premises AD, PIM groups mirrored to AD groups and just-in-time AD membership for activated PIM groups -- applied by the hybrid worker.' }
     [ordered]@{ key='reports.evidence';  label='Evidence / audit export';             group='Governance';   tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='EvidenceExport'; description='Who may hold what, who held it and who approved it -- the evidence report and its export.' }
 
+    # §82 (operator 2026-10-02, wizard: "Both Pro"). The company review is inert until a Company is defined; RFA needs the
+    # public portal deployed (§82.6), so it is an ADVANCED switch, off until the operator turns it on.
+    [ordered]@{ key='consultants.review'; label='Consultant lifecycle (company review)'; group='Governance'; tier='core'; license='pro'; scope='single'; defaultEnabled=$true; dependsOn=@(); proFeature='ConsultantLifecycle'; description='External companies confirm their consultants on a cadence; a consultant who left is disabled, and removing the access waits for an internal approver.' }
+    [ordered]@{ key='rfa.portal';         label='Request for authorization (RFA) portal';  group='Governance'; tier='advanced'; license='pro'; scope='single'; defaultEnabled=$false; dependsOn=@(); proFeature='Rfa'; description='A disabled admin signs in with a one-time PIN and requests the account enabled for a set time, auto-approved or approved by the department; ServiceNow can request through the API. Needs the public RFA portal deployed.' }
+
     # ---- MSP (advanced, Pro) --------------------------------------------------
     [ordered]@{ key='msp.downlink';     label='MSP downlink / fan-out';  group='MSP';          tier='advanced'; license='pro';  scope='multi'; defaultEnabled=$false; dependsOn=@('engine.reconcile');     proFeature='MspFanout';         description='Fan a central admin baseline out to managed customer tenants (pull-not-push). Off = no fan-out runs.' }
 
