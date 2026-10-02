@@ -14,6 +14,16 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.481 — Propose standing changes through the access request API (Pro)
+
+- **New: `type: proposal` on the access request API.** ServiceNow or any other system can propose a standing change --
+  put an administrator into a PIM group (`group-add`, `delegation-request`, `group-membership`,
+  `admin-group-assignment`) -- with who asked and the ticket number. PIM never applies it by itself: it becomes a pending
+  change that an administrator reviews and commits, exactly like a change made in the Manager. Activation requests,
+  requests where the requester is also the target, and Tier 0/1 changes without a person's review are refused, and while
+  the intake is switched off a proposal is rejected with that reason. The request reads `forwarded` once it is handed
+  over. The connectors, the OpenAPI document and the reference client cover the new type.
+
 ## v2.4.480 — Switch an environment to internal-only; connectors for the access request API
 
 - **New: turn an existing environment internal-only.** The rebuild that already turned internal-only environments into
