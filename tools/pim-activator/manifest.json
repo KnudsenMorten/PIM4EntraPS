@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PIM Activator",
-  "version": "1.6.135",
+  "version": "1.6.136",
   "update_url": "https://knudsenmorten.github.io/PIM4EntraPS/updates.xml",
   "description": "Bulk-activate your eligible Entra ID, Azure and PIM for Groups (incl. workload RBAC) PIM assignments in one click. Companion to PIM4EntraPS module (https://github.com/KnudsenMorten/PIM4EntraPS)",
   "author": "Morten Knudsen (Microsoft MVP)",

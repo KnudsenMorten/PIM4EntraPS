@@ -1,4 +1,5 @@
 ﻿#Requires -Version 5.1
+if (-not (Get-Command Test-PimRingValue -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '..\_shared\PIM-Rings.ps1') }   # §91.2: the DEFINED deployment rings
 <#
 .SYNOPSIS
     REQ-O -- the REPLICATION OVERVIEW: every replicable row on the managing tenant, grouped by kind, with its effective
@@ -75,7 +76,10 @@ function Get-PimReplicationWording {
     $ringRaw = "$(Get-PimDownlinkValue -Object $Row -Key 'Ring')".Trim()
     $ringText = ''
     if (-not $ringRaw) { $ringText = if ($Kind -eq 'admin') { 'No ring -- an admin without a ring reaches no managed tenant' } else { 'Any ring -- not narrowed by ring' } }
-    elseif ($ringRaw -notmatch '^[0-2]$') { $ringText = "Ring '$ringRaw' is not a ring (0 dev, 1 test, 2 broad) -- reaches no managed tenant" }
+    elseif (-not (Test-PimRingValue -Value $ringRaw)) { $ringText = "Ring '$ringRaw' is not a ring ($(Get-PimRingRangeText)) -- reaches no managed tenant" }
+    # §91.2: the dev / test / broad words hold for the default three rings only; with more (or fewer) DEFINED rings the text
+    # says the rule itself -- "ring 2 = every managed tenant" would be false once a ring 3 exists.
+    elseif ((Get-PimRingMax) -ne 2) { $ringText = $(if ([int]$ringRaw -eq (Get-PimRingMax)) { "Ring $ringRaw -- every managed tenant (the highest defined ring)" } else { "Ring $ringRaw -- managed tenants on ring $ringRaw or lower" }) }
     elseif ($ringRaw -eq '0') { $ringText = 'Ring 0 (dev) -- dev tenants only' }
     elseif ($ringRaw -eq '1') { $ringText = 'Ring 1 (test) -- dev + test tenants' }
     elseif ($ringRaw -eq '2') { $ringText = 'Ring 2 (broad) -- every managed tenant' }

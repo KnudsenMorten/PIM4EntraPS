@@ -96,6 +96,8 @@ function Invoke-PimRfaBrokerRequest {
     try {
         $now = $NowUtc.ToUniversalTime()
         $b = $null; if ("$BodyText".Trim()) { try { $b = $BodyText | ConvertFrom-Json } catch { return (& $json 400 @{ error = 'the body is not JSON' }) } }
+        # HEAD = GET without a body (load balancers and probes send it; it used to fall through to the store read)
+        if ($Method -eq 'HEAD' -and $Path -in @('/', '/index.html', '/health')) { return [pscustomobject]@{ status = 200; body = ''; contentType = 'text/plain'; headers = @{} } }
         if ($Method -eq 'GET' -and $Path -eq '/health') { return [pscustomobject]@{ status = 200; body = 'ok'; contentType = 'text/plain'; headers = @{} } }
         if ($Method -eq 'GET' -and ($Path -eq '/' -or $Path -eq '/index.html')) {
             return [pscustomobject]@{ status = 200; body = [IO.File]::ReadAllText($script:RfaPageFile); contentType = 'text/html; charset=utf-8'; headers = @{} }
@@ -148,16 +150,25 @@ function Invoke-PimRfaBrokerRequest {
                 if ($Method -eq 'GET' -and $Path -eq '/portal/me') {
                     return (& $json 200 ([ordered]@{ kind = 'consultant'; name = "$($sess.name)"; eligible = [bool]$el; mode = "$(if ($el) { $el.mode })"
                         durations = @(if ($el) { "$($el.durations)" -split '\|' | Where-Object { $_ } | ForEach-Object { [int]$_ } })
-                        requests = @($mine | Sort-Object { "$($_.submittedUtc)" } -Descending | Select-Object -First 20 | ForEach-Object { [ordered]@{ id = "$($_.RowKey)"; state = "$($_.state)"; status = "$($_.statusText)"; hours = "$($_.hours)"; submittedUtc = "$($_.submittedUtc)"; windowEndUtc = "$($_.windowEndUtc)" } }) }))
+                        # §91.7: ad-hoc permission groups this account may ask for, and the lengths offered for them
+                        groups = @(Get-PimRfaOfferedGroups -Eligibility $el | ForEach-Object { [ordered]@{ tag = $_.tag; name = $_.name } })
+                        groupHours = @(if ($el -and $el.PSObject.Properties['groupHours']) { "$($el.groupHours)" -split '\|' | Where-Object { $_ } | ForEach-Object { [int]$_ } })
+                        requests = @($mine | Sort-Object { "$($_.submittedUtc)" } -Descending | Select-Object -First 20 | ForEach-Object { [ordered]@{ id = "$($_.RowKey)"; kind = "$(if ($_.kind) { $_.kind } else { 'enable' })"; groupName = "$($_.groupName)"; state = "$($_.state)"; status = "$($_.statusText)"; hours = "$($_.hours)"; submittedUtc = "$($_.submittedUtc)"; windowEndUtc = "$($_.windowEndUtc)" } }) }))
                 }
                 if ($Method -eq 'POST' -and $Path -eq '/portal/request') {
                     if (-not $el) { return (& $json 403 @{ error = 'this account can no longer use the portal' }) }
-                    if (@($mine | Where-Object { "$($_.state)" -in @('submitted', 'pending-approval', 'approved') }).Count) { return (& $json 409 @{ error = 'a request is already waiting -- see its status below' }) }
+                    $kind = if ("$($b.kind)" -eq 'group') { 'group' } else { 'enable' }
+                    $gname = "$($b.groupName)".Trim()
+                    # one waiting request per THING: the account itself, or each group
+                    $same = @($mine | Where-Object { "$($_.state)" -in @('submitted', 'pending-approval', 'approved') -and "$(if ($_.kind) { $_.kind } else { 'enable' })" -eq $kind -and ($kind -ne 'group' -or "$($_.groupName)" -ieq $gname) })
+                    if ($same.Count) { return (& $json 409 @{ error = $(if ($kind -eq 'group') { "a request for $gname is already waiting -- see its status below" } else { 'a request is already waiting -- see its status below' }) }) }
                     $hours = 0; [void][int]::TryParse("$($b.hours)", [ref]$hours)
-                    $nr = New-PimRfaPortalRequestRow -Eligibility $el -AccountKey $sess.subject -Hours $hours -Reason "$($b.reason)" -NowUtc $now
+                    $nr = New-PimRfaPortalRequestRow -Eligibility $el -AccountKey $sess.subject -Hours $hours -Reason "$($b.reason)" -NowUtc $now -Kind $kind -GroupName $gname
                     if (-not $nr.ok) { return (& $json 400 @{ error = $nr.reason }) }
                     Set-PimRfaStoreEntity -Store $Store -Table 'RfaRequests' -PartitionKey 'req' -RowKey $nr.rowKey -Entity $nr.entity
-                    return (& $json 202 @{ ok = $true; id = $nr.rowKey; message = $(if ($el.mode -eq 'Auto') { 'Sent. Your account is enabled within a few minutes; you get a mail.' } else { 'Sent. Your sponsor department decides within 24 hours; you get a mail.' }) })
+                    $msg = if ($kind -eq 'group') { "Sent. Your sponsor department decides within 24 hours; you get a mail. The membership of $gname is removed automatically when the time is up." }
+                           elseif ($el.mode -eq 'Auto') { 'Sent. Your account is enabled within a few minutes; you get a mail.' } else { 'Sent. Your sponsor department decides within 24 hours; you get a mail.' }
+                    return (& $json 202 @{ ok = $true; id = $nr.rowKey; message = $msg })
                 }
                 if ($Method -eq 'POST' -and $Path -eq '/portal/cancel') {
                     $row = @($mine | Where-Object { "$($_.RowKey)" -eq "$($b.id)" })[0]

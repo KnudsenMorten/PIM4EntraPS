@@ -67,7 +67,8 @@ function Get-PimCommitChangedKeys {
     #>
     param([Parameter(Mandatory)][string]$Base, [object[]]$OldRows = @(), [object[]]$NewRows = @(), [scriptblock]$KeyOf)
     if (-not $KeyOf) { $KeyOf = { param($b, $r) Get-PimStoreRowKey -Base $b -Row $r } }
-    $old = @{}; foreach ($r in @($OldRows)) { if ($null -eq $r) { continue }; $k = & $KeyOf $Base $r; if ("$k".Trim()) { $old["$k"] = ($r | ConvertTo-Json -Depth 12 -Compress) } }
+    $old = @{}; $oldRow = @{}
+    foreach ($r in @($OldRows)) { if ($null -eq $r) { continue }; $k = & $KeyOf $Base $r; if ("$k".Trim()) { $old["$k"] = ($r | ConvertTo-Json -Depth 12 -Compress); $oldRow["$k"] = $r } }
     $out = New-Object System.Collections.Generic.List[object]; $seen = @{}
     foreach ($r in @($NewRows)) {
         if ($null -eq $r) { continue }
@@ -75,10 +76,30 @@ function Get-PimCommitChangedKeys {
         $seen[$k] = $true
         $j = $r | ConvertTo-Json -Depth 12 -Compress
         if (-not $old.ContainsKey($k)) { $out.Add([pscustomobject]@{ key = $k; op = 'add' }) }
-        elseif ($old[$k] -ne $j) { $out.Add([pscustomobject]@{ key = $k; op = 'modify' }) }
+        elseif ($old[$k] -ne $j) { $out.Add([pscustomobject]@{ key = $k; op = 'modify'; fields = @(Get-PimCommitFieldChanges -Old $oldRow[$k] -New $r) }) }
     }
     foreach ($k in @($old.Keys | Sort-Object)) { if (-not $seen.ContainsKey($k)) { $out.Add([pscustomobject]@{ key = $k; op = 'remove' }) } }
     return $out.ToArray()   # .ToArray(): pwsh 7 throws "Argument types do not match" on @() over a List[object]
+}
+
+function Get-PimCommitFieldChanges {
+    <#
+      PURE. What a MODIFY changed, in words: @( 'Column: old -> new' ) for every column that differs (values shortened
+      to 60 characters, at most 8 columns). Operator 2026-10-02: "it would be nice to show the actual changes".
+    #>
+    param([AllowNull()][object]$Old, [AllowNull()][object]$New)
+    $props = { param($o) if ($null -eq $o) { @{} } elseif ($o -is [System.Collections.IDictionary]) { $h = @{}; foreach ($k in $o.Keys) { $h["$k"] = $o[$k] }; $h } else { $h = @{}; foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = $p.Value }; $h } }
+    $a = & $props $Old; $b = & $props $New
+    $short = { param($v) $s = "$v".Trim(); if (-not $s) { '(blank)' } elseif ($s.Length -gt 60) { $s.Substring(0, 57) + '...' } else { $s } }
+    $out = @()
+    foreach ($k in @(@($a.Keys) + @($b.Keys) | Select-Object -Unique | Sort-Object)) {
+        if ($k -in @('__pimRowNo', 'RfaRequestId', 'UpdatedUtc')) { continue }
+        $x = "$($a[$k])".Trim(); $y = "$($b[$k])".Trim()
+        if ($x -ceq $y) { continue }
+        $out += ('{0}: {1} -> {2}' -f $k, (& $short $x), (& $short $y))
+    }
+    if ($out.Count -gt 8) { $out = @($out[0..7]) + @("... and $($out.Count - 8) more") }
+    return @($out)
 }
 
 function New-PimCommitWatchRecord {
@@ -90,7 +111,7 @@ function New-PimCommitWatchRecord {
     return [pscustomobject]@{
         id = [guid]::NewGuid().ToString('n'); entity = $Entity; committedUtc = $NowUtc.ToUniversalTime().ToString('o'); by = "$By"
         platform = [bool](@(Get-PimCommitWatchEntityScopes -Entity $Entity).Count)
-        keys = @($ch | Select-Object -First $script:PimCommitWatchMaxKeys | ForEach-Object { [pscustomobject]@{ key = "$($_.key)"; op = "$($_.op)" } })
+        keys = @($ch | Select-Object -First $script:PimCommitWatchMaxKeys | ForEach-Object { [pscustomobject]@{ key = "$($_.key)"; op = "$($_.op)"; fields = @(if ($_.PSObject.Properties["fields"]) { $_.fields }) } })
         moreKeys = $more
     }
 }
@@ -171,7 +192,7 @@ function Get-PimCommitWatchStatus {
         # a REMOVED row has no item in a Delta pass: only a Full clean pass proves it is gone
         $c = if ("$($k.op)" -eq 'remove') { $covFull } else { $cov }
         $s = Get-PimCommitWatchKeyState -Record $Record -Key $k -Outcome $o -CoveredUtc $c -NowUtc $NowUtc
-        [pscustomobject]@{ key = "$($k.key)"; op = "$($k.op)"; state = $s.state; reason = $s.reason; atUtc = $s.atUtc }
+        [pscustomobject]@{ key = "$($k.key)"; op = "$($k.op)"; fields = @(if ($k.PSObject.Properties["fields"]) { $k.fields }); state = $s.state; reason = $s.reason; atUtc = $s.atUtc }
     })
     $counts = [ordered]@{}; foreach ($k in $keys) { $counts[$k.state] = 1 + [int]$counts[$k.state] }
     $done = -not @($keys | Where-Object { $_.state -in @('saved', 'applied', 'waiting') }).Count

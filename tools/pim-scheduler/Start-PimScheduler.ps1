@@ -703,6 +703,13 @@ if ($ContinuousJob) {
     return
 }
 if ($Once) {
+    # Self-healing layer 2 (operator 2026-10-02: "it must be running 24x7x365"): the 5-minute hybrid tick runs as the SAME gMSA as
+    # the continuous sync loop, so it may end a loop that stopped making progress; the sync task restarts it within a minute.
+    # (Instance 'hybridsrv' runs as another gMSA and could not -- it does not try.)
+    if ("$Instance".Trim() -eq 'hybrid' -and (Get-Command Invoke-PimHybridSyncWatchdogCheck -ErrorAction SilentlyContinue)) {
+        try { $wd = Invoke-PimHybridSyncWatchdogCheck; Write-Host "  [hybrid-ad-sync watchdog] $($wd.action): $($wd.detail)" -ForegroundColor $(if ($wd.action -eq 'killed') { 'Yellow' } else { 'DarkGray' }) }
+        catch { Write-Host "  [hybrid-ad-sync watchdog] check failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+    }
     @(Invoke-PimSchedulerTick -WhatIf:$WhatIf -LeaseTtlMinutes $ttl) | ForEach-Object { Write-Host ("  {0,-20} {1}" -f $_.name, $_.detail) }
     if (-not $WhatIf) { Invoke-PimUpdaterWatchdogIfConfigured }
     return

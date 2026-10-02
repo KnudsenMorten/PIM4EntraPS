@@ -59,6 +59,18 @@
       <div class="msg" id="msgReq"></div>
     </div>
     <p class="muted" style="margin-top:14px;">When it is enabled, sign in with your admin account and activate your roles with MFA (PIM Activator or the Azure portal). The account is disabled again when the time is up.</p>
+    <div id="cGroups" class="hidden">
+      <h2 style="margin-top:18px;">Ask for access to another permission group</h2>
+      <p class="muted">Short-term (ad-hoc) access to a group you do not have yet. Your sponsor department approves it, and the membership is <b>removed automatically</b> when the time is up. Your admin account must be enabled too &mdash; ask for that above.</p>
+      <label for="grp">Permission group</label>
+      <select id="grp"></select>
+      <label for="grpHours">For how long</label>
+      <select id="grpHours"></select>
+      <label for="grpReason">What for</label>
+      <textarea id="grpReason" rows="2" maxlength="500"></textarea>
+      <button id="btnGroup">Ask for this group</button>
+      <div class="msg" id="msgGrp"></div>
+    </div>
     <h2 style="margin-top:18px;">My requests</h2>
     <table><tbody id="cRequests"></tbody></table>
   </div>
@@ -107,9 +119,15 @@
       $('consultant').classList.remove('hidden');
       if (!me.eligible) { $('cNotEligible').classList.remove('hidden'); $('cForm').classList.add('hidden'); }
       $('cMode').textContent = me.mode === 'Auto' ? 'Your account is enabled as soon as you send the request.' : 'Your sponsor department approves the request (within 24 hours).';
-      $('hours').innerHTML = (me.durations || []).map(h => '<option value="' + h + '">' + (h % 24 === 0 ? (h / 24) + ' day' + (h === 24 ? '' : 's') : h + ' hours') + '</option>').join('');
+      const hoursTxt = h => (h % 24 === 0 ? (h / 24) + ' day' + (h === 24 ? '' : 's') : h + ' hours');
+      $('hours').innerHTML = (me.durations || []).map(h => '<option value="' + h + '">' + hoursTxt(h) + '</option>').join('');
+      // §91.7: ad-hoc permission groups offered to this account
+      const gs = me.groups || [];
+      $('cGroups').classList.toggle('hidden', !(me.eligible && gs.length));
+      $('grp').innerHTML = gs.map(g => '<option value="' + esc(g.tag) + '">' + esc(g.name) + '</option>').join('');
+      $('grpHours').innerHTML = (me.groupHours || []).map(h => '<option value="' + h + '"' + (h === 24 ? ' selected' : '') + '>' + hoursTxt(h) + '</option>').join('');
       $('cRequests').innerHTML = (me.requests || []).length ? me.requests.map(r =>
-        '<tr><td>' + when(r.submittedUtc) + '<div class="muted">' + esc(r.hours) + ' h</div></td><td><b>' + esc(r.state) + '</b><div class="muted">' + esc(r.status || 'waiting to be taken in') + '</div></td><td>' +
+        '<tr><td>' + when(r.submittedUtc) + '<div class="muted">' + (r.kind === 'group' ? 'ad-hoc: ' + esc(r.groupName) + ', ' : 'account, ') + esc(r.hours) + ' h</div></td><td><b>' + esc(r.state) + '</b><div class="muted">' + esc(r.status || 'waiting to be taken in') + '</div></td><td>' +
         (['submitted', 'pending-approval', 'approved', 'active'].indexOf(r.state) >= 0 ? '<button class="secondary" data-cancel="' + esc(r.id) + '">End</button>' : '') + '</td></tr>').join('') : '<tr><td class="muted">No requests yet.</td></tr>';
       document.querySelectorAll('[data-cancel]').forEach(b => b.onclick = async function () { try { await call('POST', '/portal/cancel', { id: b.getAttribute('data-cancel') }); await load(); } catch (e) { alert(e.message); } });
     } else {
@@ -132,6 +150,10 @@
   $('btnRequest').onclick = async function () {
     try { const r = await call('POST', '/portal/request', { hours: +$('hours').value, reason: $('reason').value }); say('msgReq', r.message, 'ok'); await load(); }
     catch (e) { say('msgReq', e.message, 'bad'); }
+  };
+  $('btnGroup').onclick = async function () {
+    try { const r = await call('POST', '/portal/request', { kind: 'group', groupName: $('grp').value, hours: +$('grpHours').value, reason: $('grpReason').value }); say('msgGrp', r.message, 'ok'); await load(); }
+    catch (e) { say('msgGrp', e.message, 'bad'); }
   };
   load();
 })();

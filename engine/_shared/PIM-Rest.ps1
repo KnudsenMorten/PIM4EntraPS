@@ -104,14 +104,14 @@ function Get-PimManagedIdentityToken {
     $miCid = if ($global:PIM_ManagedIdentityClientId) { "$($global:PIM_ManagedIdentityClientId)".Trim() }
              elseif ($env:PIM_ManagedIdentityClientId) { "$($env:PIM_ManagedIdentityClientId)".Trim() } else { '' }
     if ($miCid) { $u += "&client_id=$([uri]::EscapeDataString($miCid))" }
-    $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER }
+    $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER } -TimeoutSec 60
     if ("$($r.access_token)") { try { [System.Console]::Out.WriteLine("  [mi] token via IDENTITY_ENDPOINT (len $($r.access_token.Length))") } catch {} }  # Console.Out (not Write-Host): headless-safe from any scope (App Service has no console buffer; Write-Host throws there even from module scope)
     return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
   }
   # App Service (older / some Linux SKUs): MSI_ENDPOINT + MSI_SECRET (api 2017-09-01, header 'Secret')
   if ($env:MSI_ENDPOINT -and $env:MSI_SECRET) {
     $u = "$($env:MSI_ENDPOINT)?resource=$res&api-version=2017-09-01"
-    $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'Secret' = $env:MSI_SECRET }
+    $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'Secret' = $env:MSI_SECRET } -TimeoutSec 60
     if ("$($r.access_token)") { try { [System.Console]::Out.WriteLine("  [mi] token via MSI_ENDPOINT (len $($r.access_token.Length))") } catch {} }  # Console.Out: headless-safe from any scope
     return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
   }
@@ -126,7 +126,7 @@ function Get-PimManagedIdentityToken {
 function Get-PimClientSecretToken {
   param([Parameter(Mandatory)][string]$TenantId,[Parameter(Mandatory)][string]$ClientId,[Parameter(Mandatory)][string]$ClientSecret,[Parameter(Mandatory)][string]$Audience)
   $body = @{ grant_type='client_credentials'; client_id=$ClientId; client_secret=$ClientSecret; scope="$Audience/.default" }
-  $r = Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body $body
+  $r = Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body $body -TimeoutSec 60
   return [pscustomobject]@{ token = $r.access_token; expiresUtc = (Get-Date).ToUniversalTime().AddSeconds([int]$r.expires_in - 60) }
 }
 
@@ -148,7 +148,7 @@ function Get-PimClientCertToken {
   $jwt = "$unsigned." + (ConvertTo-PimBase64Url -Bytes $sigBytes)
   $body = @{ grant_type='client_credentials'; client_id=$ClientId; scope="$Audience/.default"
             client_assertion_type='urn:ietf:params:oauth:client-assertion-type:jwt-bearer'; client_assertion=$jwt }
-  $r = Invoke-RestMethod -Method POST -Uri $tokenUrl -ContentType 'application/x-www-form-urlencoded' -Body $body
+  $r = Invoke-RestMethod -Method POST -Uri $tokenUrl -ContentType 'application/x-www-form-urlencoded' -Body $body -TimeoutSec 60
   return [pscustomobject]@{ token = $r.access_token; expiresUtc = (Get-Date).ToUniversalTime().AddSeconds([int]$r.expires_in - 60) }
 }
 
@@ -573,6 +573,24 @@ function Get-PimRestErrorDetail {
 }
 
 # ---- data plane -----------------------------------------------------------
+# Every REST call is bounded (see Invoke-PimRest). $global:PIM_RestTimeoutSec overrides; floor 10 s, default 180 s.
+function Get-PimRestTimeoutSec {
+  $v = 0; if ($global:PIM_RestTimeoutSec) { [void][int]::TryParse("$($global:PIM_RestTimeoutSec)", [ref]$v) }
+  if ($v -ge 10) { return $v }
+  return 180
+}
+function Test-PimRestTimeoutError {
+  # pwsh 7: HttpClient's timeout surfaces as TaskCanceledException / TimeoutException ("The request was canceled due to the
+  # configured HttpClient.Timeout"); PS 5.1: WebException status Timeout ("The operation has timed out").
+  param($ErrorRecord)
+  $e = $null; try { $e = $ErrorRecord.Exception } catch { }
+  while ($e) {
+    if ($e -is [System.TimeoutException] -or $e -is [System.Threading.Tasks.TaskCanceledException]) { return $true }
+    if ($e -is [System.Net.WebException] -and $e.Status -eq [System.Net.WebExceptionStatus]::Timeout) { return $true }
+    $e = $e.InnerException
+  }
+  return ("$($ErrorRecord)" -match 'HttpClient\.Timeout|operation has timed out|request was canceled')
+}
 function Invoke-PimRest {
   [CmdletBinding()]
   param(
@@ -598,7 +616,9 @@ function Invoke-PimRest {
     $attempt = 0
     while ($true) {
       try {
-        $args = @{ Method = $Method; Uri = $next; Headers = $h }
+        # 🔴 2026-10-02: NO -TimeoutSec = wait FOREVER on pwsh 7. One Graph call that never answered froze the hybrid worker's
+        # continuous AD sync for 22 hours (process alive, task "Running", IgnoreNew -> never restarted). Every call is bounded now.
+        $args = @{ Method = $Method; Uri = $next; Headers = $h; TimeoutSec = (Get-PimRestTimeoutSec) }
         # (see Get-PimRestErrorBody / Get-PimRestErrorDetail above for the failure path)
         if ($null -ne $Body -and $Method -ne 'GET') {
           $args.Body = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 20 }
@@ -615,6 +635,10 @@ function Invoke-PimRest {
         $body = Get-PimRestErrorBody -ErrorRecord $_
         # retry transient + freshly-created-principal replication (ARM 400 PrincipalNotFound)
         $isReplDelay = ($code -eq 400 -and "$body" -match 'PrincipalNotFound|does not exist in the directory')
+        # a call that hit -TimeoutSec is retried ONCE (a second full wait is the most a stuck endpoint may cost), then fails
+        $isTimeout = (-not $code) -and (Test-PimRestTimeoutError -ErrorRecord $_)
+        if ($isTimeout -and $attempt -lt 1) { $attempt++; continue }
+        if ($isTimeout) { throw "$Method $next -> timed out after $(Get-PimRestTimeoutSec) s (twice) -- the service did not answer" }
         if (($code -eq 429 -or $code -ge 500 -or $isReplDelay) -and $attempt -lt $MaxRetry) {
           $wait = [Math]::Min(60, [Math]::Pow(2, $attempt + 1))
           try { $ra = [int]("$($_.Exception.Response.Headers['Retry-After'])"); if ($ra -gt 0) { $wait = $ra } } catch {}

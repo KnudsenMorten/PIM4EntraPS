@@ -109,7 +109,7 @@ function Save-PimHybridWorkerHeartbeat {
         if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
             try {
                 $raw = Get-PimSetting -Name 'HybridWorkerHeartbeat'; $old = if ($raw -is [string]) { $raw | ConvertFrom-Json } else { $raw }
-                if ($old -and $old.PSObject.Properties['seen'] -and $old.seen) { foreach ($p in $old.seen.PSObject.Properties) { $seen[$p.Name] = "$($p.Value)" } }
+                if ($old -and $old.PSObject.Properties['seen'] -and $old.seen) { foreach ($p in $old.seen.PSObject.Properties) { $seen[$p.Name] = $(if ($p.Value -is [datetime]) { $p.Value.ToUniversalTime().ToString('o') } else { "$($p.Value)" }) } }   # pwsh 7 reads an ISO stamp back as [datetime]; "$()" would re-save it as '10/01/2026 14:38:52' (seen live 2026-10-02)
                 if ($old -and $old.PSObject.Properties['planOnly'] -and $old.planOnly) { foreach ($p in $old.planOnly.PSObject.Properties) { $plan[$p.Name] = [bool]$p.Value } }
             } catch { }
         }

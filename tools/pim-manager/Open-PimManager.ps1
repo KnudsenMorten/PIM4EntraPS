@@ -114,6 +114,9 @@ $validator    = Join-Path $PSScriptRoot '_validator.ps1'
 # same file so GUI, validator and engine agree.
 $_dateExprLib = Join-Path $solutionRoot 'engine\_shared\PIM-DateExpression.ps1'
 if (Test-Path -LiteralPath $_dateExprLib) { . $_dateExprLib }
+# §91.2: the DEFINED deployment rings (Test-PimRingValue / Get-PimRingMax) -- the admin edit path checks a Ring with it on
+# every edition, so it is loaded here and not only through the MSP (Pro) libraries.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-Rings.ps1')
 
 # IMP-03: the ONE visible way to swallow a non-fatal error. Loaded early so every
 # decision path below (auth, gating, store reads) can report instead of vanishing.
@@ -3456,7 +3459,7 @@ function Invoke-PimManagerMspTenantWrite {
     }
     $name = if (& $has 'displayName') { "$($Body.displayName)" } elseif ($current) { "$($current.name)" } else { '' }
     $ringIn = if (& $has 'ring') { "$($Body.ring)".Trim() } elseif ($current -and $current.ringKnown) { "$($current.ring)" } else { '0' }
-    if ($ringIn -notmatch '^[0-2]$') { return @{ status = 400; body = [ordered]@{ ok = $false; error = "Ring '$ringIn' is not a ring -- 0 (dev), 1 (test) or 2 (broad), the managing tenant's copy of the tenant's own ring." } } }
+    if (-not (Test-PimRingValue -Value $ringIn)) { return @{ status = 400; body = [ordered]@{ ok = $false; error = "Ring '$ringIn' is not a ring -- $(Get-PimRingRangeText), the managing tenant's copy of the tenant's own ring." } } }
     $tags = if (& $has 'tags') { $Body.tags } elseif ($current) { @($current.tags) } else { @() }
     $enabled = if (& $has 'enabled') { ConvertTo-PimManagerMspBool $Body.enabled } elseif ($current) { [bool]$current.enabled } else { $true }
     $wArgs = @{ ConnectionString = $cs; TenantId = $tid; DisplayName = $name; Ring = [int]$ringIn; Tags = $tags; Enabled = [bool]$enabled
@@ -3498,9 +3501,31 @@ function Get-PimManagerDeploymentRingsResponse {
         })
         [ordered]@{ ring = [int]$r.ring; name = "$($r.name)"; tags = "$($r.tags)"; tenants = @($on) }
     }
+    # §91.1 (operator 2026-10-02: "Reach must be shown ... when I move the cursor over the ring"): what a ROW on ring N reaches =
+    # the member tenants whose own ring is N or lower. Computed here once, shown on hover in the grids.
+    $out = @($out)
+    foreach ($o in $out) {
+        $o['reach'] = @($out | Where-Object { [int]$_.ring -le [int]$o.ring } | ForEach-Object { @($_.tenants) } | Where-Object { $_.member } | ForEach-Object { "$($_.name)" })
+    }
+    Set-PimRingMaxFromRings -Rings $rings
     return @{ status = 200; body = [ordered]@{
-        master = $true; rings = @($out); tags = @($tagSet); canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
-        order = 'A row on ring N reaches the managed tenants whose own ring is N or lower: 0 = dev (gets new rows first), 1 = test, 2 = broad. A tag rule narrows which tenants on that ring count.' } }
+        master = $true; rings = @($out); tags = @($tagSet); canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'); maxRings = 10
+        order = 'A row on ring N reaches the managed tenants whose own ring is N or lower: ring 0 gets new rows first, the highest ring is the broadest. A tag rule narrows which tenants on that ring count. Add or remove the highest ring; a ring still in use cannot be removed.' } }
+}
+function Get-PimManagerRingUsers {
+    # §91.2: who still uses ring N -- registered managed tenants on it, and stored rows whose Ring is N (admins, replicated
+    # delegations). A ring with users may not be removed.
+    param([Parameter(Mandatory)][int]$Ring)
+    $out = New-Object System.Collections.Generic.List[string]
+    try {
+        $reg = Get-PimManagedTenantRegistry -ConnectionString (Get-PimManagerStoreCs)
+        if ($reg -and $reg.available) { foreach ($t in @($reg.tenants)) { if ($t.ringKnown -and [int]$t.ring -eq $Ring) { $out.Add("tenant $($t.name)") | Out-Null } } }
+    } catch { }
+    try {
+        $rows = @(Invoke-PimSqlQuery -ConnectionString (Get-PimManagerStoreCs) -Sql ("SELECT Entity, [Key] FROM pim.Rows WHERE DataJson LIKE '%`"Ring`":`"{0}`"%' OR DataJson LIKE '%`"Ring`":{0},%' OR DataJson LIKE '%`"Ring`":{0}}}%'" -f $Ring))
+        foreach ($r in $rows) { $out.Add("$($r.Entity) $($r.Key)") | Out-Null }
+    } catch { }
+    return ,$out
 }
 function Set-PimManagerDeploymentRings {
     # §77.20 -- PUT /api/msp/deployment-rings { rings: [ { ring; name; tags } ] }. SuperAdmin, managing tenant only; the tag rule
@@ -3515,9 +3540,28 @@ function Set-PimManagerDeploymentRings {
     }
     $in = if ($Body -and $Body.PSObject.Properties['rings']) { @($Body.rings) } else { @() }
     $errors = New-Object System.Collections.Generic.List[string]
+    # §91.2 (operator 2026-10-02: "define (add/remove) the names of the rings and add/remove rows"): rings 0..9, CONTIGUOUS from
+    # 0 (a gap would make "ring N or lower" mean something different from what the table shows), at least one.
+    $nums = @($in | ForEach-Object { "$($_.ring)".Trim() })
+    if (-not $nums.Count) { $errors.Add('at least one ring (ring 0) must stay defined') | Out-Null }
+    elseif (@($nums | Where-Object { $_ -notmatch '^[0-9]$' }).Count) { $errors.Add("a ring is a whole number 0..9 (got: $((@($nums | Where-Object { $_ -notmatch '^[0-9]$' })) -join ', '))") | Out-Null }
+    else {
+        $sorted = @($nums | ForEach-Object { [int]$_ } | Sort-Object)
+        if (@($sorted | Select-Object -Unique).Count -ne $sorted.Count) { $errors.Add('a ring number appears twice') | Out-Null }
+        elseif ($sorted[0] -ne 0 -or $sorted[-1] -ne ($sorted.Count - 1)) { $errors.Add("the rings must run 0, 1, 2 ... without a gap (got $($sorted -join ', ')) -- add or remove the HIGHEST ring") | Out-Null }
+    }
+    if (-not $errors.Count) {
+        # Removing a ring that is still IN USE would silently drop every row and tenant on it out of reach -- refused, with who uses it.
+        $oldTop = 2; try { $m = Get-PimRingMaxFromDefinitions -Value (Get-PimManagerSetting -Name 'DeploymentRings'); if ($null -ne $m) { $oldTop = [int]$m } } catch { }
+        $newTop = [int](@($nums | ForEach-Object { [int]$_ } | Measure-Object -Maximum).Maximum)
+        foreach ($gone in $(if ($newTop -lt $oldTop) { @(($newTop + 1)..$oldTop) } else { @() })) {
+            $users = Get-PimManagerRingUsers -Ring $gone
+            if ($users.Count) { $errors.Add("ring $gone is still used by $($users.Count): $((@($users) | Select-Object -First 6) -join ', ')$(if ($users.Count -gt 6) { ', ...' }) -- move them to another ring first") | Out-Null }
+        }
+    }
     foreach ($e in $in) {
         $n = "$($e.ring)".Trim()
-        if ($n -notmatch '^[0-2]$') { $errors.Add("ring '$n' is not 0, 1 or 2") | Out-Null; continue }
+        if ($n -notmatch '^[0-9]$') { continue }
         $tg = "$($e.tags)".Trim()
         if ($tg) {
             $sel = Test-PimAdminTargetSelector -Target $tg
@@ -3528,7 +3572,8 @@ function Set-PimManagerDeploymentRings {
     }
     if ($errors.Count) { return @{ status = 400; body = [ordered]@{ ok = $false; error = ($errors.ToArray() -join '; ') } } }
     $before = $null; try { $before = Get-PimManagerSetting -Name 'DeploymentRings' } catch { $before = $null }
-    $value = [ordered]@{ rings = @(ConvertTo-PimDeploymentRings -Value ([pscustomobject]@{ rings = @($in) })) }
+    # defined=true: the editor's value means EXACTLY these rings (§91.2) -- without it a list of two would read as 0..2
+    $value = [ordered]@{ rings = @(ConvertTo-PimDeploymentRings -Value ([pscustomobject]@{ rings = @($in); defined = $true })); defined = $true }
     Set-PimManagerSetting -Name 'DeploymentRings' -Value $value   # the OBJECT: a pre-serialised string would be stored double-encoded
     $back = @(ConvertTo-PimDeploymentRings -Value (Get-PimManagerSetting -Name 'DeploymentRings'))
     $same = (($back | ConvertTo-Json -Depth 5 -Compress) -eq (@($value.rings) | ConvertTo-Json -Depth 5 -Compress))
@@ -3537,6 +3582,7 @@ function Set-PimManagerDeploymentRings {
         return @{ status = 500; body = [ordered]@{ ok = $false; error = 'The deployment rings were NOT saved: the read-back differs from what was written.' } }
     }
     Write-PimManagerAuditEvent -Action 'msp.deployment-rings.save' -Target 'DeploymentRings' -Before $before -After $value -Result 'ok'
+    Set-PimRingMaxFromRings -Rings $back   # §91.2: every ring check follows at once
     if (Get-Command Clear-PimReplicationOverviewCache -ErrorAction SilentlyContinue) { Clear-PimReplicationOverviewCache }
     $pub = $false
     try { $pub = [bool](Request-PimManagerPublishAfterCommit -Base 'DeploymentRings' -NotAnEntity) } catch { Write-Warning "  [publish] the deployment rings were saved, but a publish could NOT be requested: $($_.Exception.Message)" }
@@ -5028,6 +5074,30 @@ function Build-PimGraphData {
             source   = 'Account-Definitions-Admins'
         })
     }
+    # §91.4 (operator 2026-10-02, RIDE: "the central admins dont show up ... in access map. Remember that it must combine
+    # central synced admins with slave/local accounts"). On a managed tenant the downlink keeps the managing tenant's admins
+    # in their OWN entity (Account-Definitions-Admins-Central); the engine merges them (Get-PimDesiredRows), the map did not.
+    # A local row with the same UPN wins, as in the engine.
+    $adminAlias = @{}   # login name / UPN local part (lower) -> UPN: the synced memberships name a central admin by login name
+    $haveUpn = @{}; foreach ($n in $nodes) { if ($n.kind -eq 'admin') { $haveUpn["$($n.id)".ToLowerInvariant()] = $true } }
+    $centralAdmins = @()
+    if (Get-Command Get-PimManagerCentralAdminRows -ErrorAction SilentlyContinue) { try { $centralAdmins = @(Get-PimManagerCentralAdminRows) } catch { $centralAdmins = @() } }
+    foreach ($a in $centralAdmins) {
+        $u = "$($a.UserPrincipalName)".Trim(); if (-not $u -or $haveUpn.ContainsKey($u.ToLowerInvariant())) { continue }
+        $haveUpn[$u.ToLowerInvariant()] = $true
+        $purposeVal = if ("$($a.Purpose)".Trim()) { "$($a.Purpose)".Trim() } elseif ("$($a.UserName)" -match '(?i)(^|[-_.])(L0|T0)([-_.]|$)') { 'HighPriv' } else { 'Day2Day' }
+        [void]$nodes.Add([ordered]@{
+            id = $u; label = "$(if ("$($a.DisplayName)".Trim()) { $a.DisplayName } else { $u })"; kind = 'admin'; purpose = $purposeVal; tier = ''
+            platform = $a.TargetPlatform; source = 'Account-Definitions-Admins-Central'; central = $true
+        })
+    }
+    foreach ($a in @(@($admins) + @($centralAdmins))) {
+        $u = "$($a.UserPrincipalName)".Trim(); if (-not $u) { continue }
+        foreach ($al in @("$($a.UserName)".Trim(), ($u -split '@')[0])) {
+            $k = "$al".ToLowerInvariant(); if (-not $k -or $k -eq $u.ToLowerInvariant()) { continue }
+            if ($adminAlias.ContainsKey($k) -and $adminAlias[$k] -ne $u) { $adminAlias[$k] = $null } else { $adminAlias[$k] = $u }   # ambiguous -> never guessed
+        }
+    }
 
     $groupSources = @(
         # 🔴 §70.22 (operator 2026-09-14: "dept and organization are direct groups and not permission delegations"):
@@ -5290,6 +5360,9 @@ function Build-PimGraphData {
         $k = "$($n.id)".ToLowerInvariant()
         if (-not $idByLower.ContainsKey($k)) { $idByLower[$k] = $n.id }
     }
+    # §91.4: an admin is also found by its login name / UPN local part (central memberships carry the login name). Only an
+    # UNAMBIGUOUS alias, and never one that is itself a node id.
+    if ($adminAlias) { foreach ($k in @($adminAlias.Keys)) { if ($adminAlias[$k] -and -not $idByLower.ContainsKey($k)) { $idByLower[$k] = $adminAlias[$k] } } }
     $edgeCaseFixed = 0
     $danglingEdges = New-Object System.Collections.Generic.List[string]
     foreach ($e in $edges) {
@@ -7622,6 +7695,14 @@ function Handle-Request {
                     # changed since is refused with 409 instead of silently replacing the other admin's rows.
                     rowsHash = (Get-PimRowsHash -Rows $storedRows)
                 }
+                # §91.4 (operator 2026-10-02, RIDE): on a managed tenant the managing tenant's admins live in their own entity.
+                # The grid lists them READ-ONLY beside the local rows -- never part of the editable set (a commit is a
+                # full-set replace of the LOCAL entity; central rows are governed by the managing tenant).
+                if ($base -eq 'Account-Definitions-Admins') {
+                    $central = @(Get-PimManagerCentralAdminRows)
+                    $localUpns = @{}; foreach ($r in @($slice.rows)) { $localUpns["$($r.UserPrincipalName)".Trim().ToLowerInvariant()] = $true }
+                    $body['centralRows'] = @($central | Where-Object { -not $localUpns.ContainsKey("$($_.UserPrincipalName)".Trim().ToLowerInvariant()) })
+                }
                 Write-JsonResponse -Response $resp -Status 200 -Body $body
                 return 200
             }
@@ -8296,6 +8377,15 @@ function Handle-Request {
                 foreach ($e in $script:PimHybridAdGroupEntities) { foreach ($r in @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $e)) { if ($null -ne $r) { $rows.Add($r) } } }
                 $v = Get-PimHybridAdSettingsView -Rows $rows.ToArray()
                 $v['canWrite'] = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+                # Operator 2026-10-02: "i need to have a way to see it is working and green" -- the worker's per-job status
+                # (the same heartbeat check the Jobs page badges use), shown at the top of the card.
+                $v['worker'] = @()
+                if (Get-Command Get-PimHybridWorkerJobStatus -ErrorAction SilentlyContinue) {
+                    $v['worker'] = @(foreach ($t in @('hybrid-ad-sync', 'hybrid-ad-apply', 'hybrid-ad-groups', 'hybrid-ad-servers')) {
+                        $s = Get-PimHybridWorkerJobStatus -Type $t
+                        if ($s) { [ordered]@{ type = $t; state = "$($s.state)"; host = "$($s.host)"; lastSeenUtc = "$($s.lastSeenUtc)"; minutesAgo = $s.minutesAgo; fresh = [bool]$s.fresh } }
+                    })
+                }
                 Write-JsonResponse -Response $resp -Status 200 -Body $v
                 return 200
             } catch {
@@ -8835,6 +8925,7 @@ function Handle-Request {
         # approval would authorise BEFORE deciding. Read-only.
         if ($path -eq '/api/approvals' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
+            $selfApproveOn = $false; try { $saS = Get-PimManagerSettingObject -Name 'ApprovalSelfApprove'; if ($saS -and $saS.PSObject.Properties['enabled']) { $selfApproveOn = [bool]$saS.enabled } } catch { $selfApproveOn = $false }   # Settings > Approvals: self-approval (single-admin tenants)
             if (-not (Get-Command Get-PimApprovalRequests -ErrorAction SilentlyContinue)) {
                 Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $false; requests = @(); total = 0; note = 'approval-gate library not loaded'; canDecide = $false }
                 return 200
@@ -8864,7 +8955,7 @@ function Handle-Request {
                     # they are NOT the requestor (unless self-approve is explicitly allowed).
                     $isRequestor = ("$($r.requestor)".Trim().ToLowerInvariant() -eq "$me".Trim().ToLowerInvariant())
                     $sepOk = $true
-                    try { $sepOk = [bool](Test-PimApprovalSeparationOk -Requestor "$($r.requestor)" -Approver "$me") } catch {}
+                    try { $sepOk = [bool](Test-PimApprovalSeparationOk -Requestor "$($r.requestor)" -Approver "$me" -AllowSelfApprove $selfApproveOn) } catch {}
                     $out.Add([ordered]@{
                         id            = "$($r.id)"
                         requestor     = "$($r.requestor)"
@@ -8974,6 +9065,32 @@ function Handle-Request {
         # Idempotent (re-deciding a decided request returns the prior outcome). Approving
         # does NOT execute anything -- it only marks the request Approved so a controlled,
         # scoped, audited execution becomes possible later (still gated, never automatic).
+        # 2026-10-02 (operator: "how can i force this (disable 2nd approval)"): self-approval of approval requests for a
+        # SINGLE-ADMINISTRATOR tenant. GET (any role) / PUT { enabled } (SuperAdmin), audited. Default OFF: maker != checker.
+        if ($path -eq '/api/settings/approval-self-approve' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if ($true) {
+                $sa = $null; try { $sa = Get-PimManagerSettingObject -Name 'ApprovalSelfApprove' } catch { $sa = $null }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ enabled = [bool]($sa -and $sa.enabled); by = "$(if ($sa) { $sa.by })"; atUtc = "$(if ($sa) { $sa.atUtc })"; canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') })
+                return 200
+            }
+        }
+        if ($path -eq '/api/settings/approval-self-approve' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if ($true) {
+                if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change who may approve.' }; return 403 }
+                $body = Read-RequestJson -Request $req
+                if ($null -eq $body -or -not $body.PSObject.Properties['enabled']) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'enabled (true / false) is required' }; return 400 }
+                $on = [bool]$body.enabled
+                $me = "$((Get-PimManagerRole).identity)"
+                $before = $null; try { $before = Get-PimManagerSettingObject -Name 'ApprovalSelfApprove' } catch { $before = $null }
+                $val = [ordered]@{ enabled = $on; by = $me; atUtc = [datetime]::UtcNow.ToString('o') }
+                Set-PimManagerSettingObject -Name 'ApprovalSelfApprove' -Value $val
+                Write-PimManagerAuditEvent -Action 'settings.approval-self-approve' -Target 'ApprovalSelfApprove' -Before $before -After $val -Result 'ok'
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; enabled = $on; note = $(if ($on) { 'Self-approval is ON: the administrator who raised a request may approve it. Every such approval is recorded as a self-approval in the audit. Turn it off again as soon as a second administrator exists.' } else { 'Self-approval is OFF: a different administrator must approve (separation of duties).' }) })
+                return 200
+            }
+        }
         if ($path -eq '/api/approvals/decide' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
             if (Test-PimGovernancePreviewBlocked -Response $resp -FlagId 'approvalsPreview' -Surface 'Approvals') { return 409 }
@@ -8996,7 +9113,11 @@ function Handle-Request {
             }
             try {
                 $me  = (Get-PimManagerRole).identity
-                $res = Set-PimApprovalDecision -Id $apprId -Approver "$me" -Decision $decision -Note $note
+                # 2026-10-02 (operator: "how can i force this (disable 2nd approval)"): a SINGLE-ADMINISTRATOR tenant can never
+                # find a different approver. Settings > Approvals: "Allow self-approval" (SuperAdmin, audited, default OFF).
+                $selfOk = $false
+                try { $sa = Get-PimManagerSettingObject -Name 'ApprovalSelfApprove'; if ($sa -and $sa.PSObject.Properties['enabled']) { $selfOk = [bool]$sa.enabled } } catch { $selfOk = $false }
+                $res = Set-PimApprovalDecision -Id $apprId -Approver "$me" -Decision $decision -Note $note -AllowSelfApprove $selfOk
                 if (-not $res.request) {
                     Write-JsonResponse -Response $resp -Status 404 -Body @{ ok = $false; error = "$($res.reason)" }
                     return 404
@@ -9007,7 +9128,7 @@ function Handle-Request {
                     Write-JsonResponse -Response $resp -Status $code -Body @{ ok = $false; status = "$($res.status)"; reason = "$($res.reason)" }
                     return $code
                 }
-                Write-PimManagerAuditEvent -Action ("approval.request." + $res.status.ToLowerInvariant()) -Target "$($res.request.target)" -After @{ id = "$($res.request.id)"; approver = "$me"; action = "$($res.request.action)"; decision = $decision }
+                Write-PimManagerAuditEvent -Action ("approval.request." + $res.status.ToLowerInvariant()) -Target "$($res.request.target)" -After @{ id = "$($res.request.id)"; approver = "$me"; action = "$($res.request.action)"; decision = $decision; selfApproved = [bool]($decision -eq 'approve' -and "$($res.request.requestor)".Trim() -ieq "$me".Trim()) }
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; id = "$($res.request.id)"; status = "$($res.status)"; reason = "$($res.reason)" })
                 return 200
             } catch {
@@ -11475,7 +11596,7 @@ function Handle-Request {
                 else { $changes['ManagementMode'] = $mv }
             }
             # 77.20 (2.4.388): the rings are 0 (dev), 1 (test), 2 (broad) only -- anything else reaches no tenant.
-            if (-not $badField -and $changes.Contains('Ring') -and "$($changes['Ring'])".Trim() -and "$($changes['Ring'])".Trim() -notmatch '^[0-2]$') {
+            if (-not $badField -and $changes.Contains('Ring') -and "$($changes['Ring'])".Trim() -and -not (Test-PimRingValue -Value "$($changes['Ring'])".Trim())) {
                 $badField = "Ring must be blank, 0 (dev), 1 (test) or 2 (broad) (got '$($changes['Ring'])')."
             }
             if (-not $badField -and $changes.Contains('Target') -and "$($changes['Target'])" -and (Get-Command Test-PimAdminTargetSelector -ErrorAction SilentlyContinue)) {
@@ -11779,7 +11900,10 @@ function Handle-Request {
                     $o['canEnd'] = ("$($_.state)" -in @('approved', 'active') -and ($isAdmin -or (& $ownersOf "$($_.department)") -contains $me))
                     [pscustomobject]$o })
                 $st = Get-PimSqlSetting -ConnectionString $cs -Name 'RfaSettings'
-                $settingsOut = [ordered]@{ storeAccount = "$(if ($st) { $st.storeAccount })"; portalUrl = "$(if ($st) { $st.portalUrl })"; apiAppIds = @(if ($st -and $st.PSObject.Properties['apiAppIds']) { $st.apiAppIds }) }
+                $settingsOut = [ordered]@{ storeAccount = "$(if ($st) { $st.storeAccount })"; portalUrl = "$(if ($st) { $st.portalUrl })"; apiAppIds = @(if ($st -and $st.PSObject.Properties['apiAppIds']) { $st.apiAppIds })
+                    # §91.7: ad-hoc group access -- the groups offered and the default length (24 h unless set)
+                    adHocGroups = @(if ($st -and $st.PSObject.Properties['adHocGroups']) { @($st.adHocGroups) | Where-Object { "$_".Trim() } })
+                    adHocHours = $(if ($st -and $st.PSObject.Properties['adHocHours'] -and "$($st.adHocHours)".Trim()) { [int]$st.adHocHours } else { 24 }) }
                 $feature = $true; if (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) { $feature = [bool](Test-PimFeatureAvailable -Key 'rfa.portal' -Quiet) }
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ requests = $out; settings = $settingsOut; enabled = $feature; deployed = [bool]"$($settingsOut.storeAccount)"; isAdmin = $isAdmin; isSuperAdmin = $isSuper })
                 return 200
@@ -11847,8 +11971,21 @@ function Handle-Request {
                 $cur = Get-PimSqlSetting -ConnectionString $cs -Name 'RfaSettings'
                 $new = if ($cur) { $cur.PSObject.Copy() } else { [pscustomobject]@{} }   # the salt is kept
                 foreach ($kv in @(@('storeAccount', $acct), @('portalUrl', $url), @('apiAppIds', @($apps)))) { $new | Add-Member -NotePropertyName $kv[0] -NotePropertyValue $kv[1] -Force }
+                # §91.7: AD-HOC group access -- which groups a consultant may ask for (none = nothing offered) and the default
+                # length (24 h). Only written when the form sends them, so an older page never wipes them.
+                if ($body.PSObject.Properties['adHocGroups']) {
+                    $grps = @(@($body.adHocGroups) | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+                    $badG = @($grps | Where-Object { $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$' })
+                    if ($badG.Count) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "not a group tag: $($badG -join ', ')" }; return 400 }
+                    $new | Add-Member -NotePropertyName adHocGroups -NotePropertyValue @($grps) -Force
+                }
+                if ($body.PSObject.Properties['adHocHours']) {
+                    $ah = 0
+                    if (-not [int]::TryParse("$($body.adHocHours)", [ref]$ah) -or $ah -lt 1 -or $ah -gt 744) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'the default ad-hoc length is 1 to 744 hours (31 days)' }; return 400 }
+                    $new | Add-Member -NotePropertyName adHocHours -NotePropertyValue $ah -Force
+                }
                 Set-PimSqlSetting -ConnectionString $cs -Name 'RfaSettings' -Value $new
-                Write-PimManagerAuditEvent -Action 'rfa.settings' -Target 'RfaSettings' -Result 'ok' -After ([ordered]@{ storeAccount = $acct; portalUrl = $url; apiAppIds = @($apps); by = $me })
+                Write-PimManagerAuditEvent -Action 'rfa.settings' -Target 'RfaSettings' -Result 'ok' -After ([ordered]@{ storeAccount = $acct; portalUrl = $url; apiAppIds = @($apps); adHocGroups = @($new.adHocGroups); adHocHours = $new.adHocHours; by = $me })
                 Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true }
                 return 200
             }
@@ -11869,7 +12006,7 @@ function Handle-Request {
                     $name = "$($body.name)".Trim(); $days = 0; [void][int]::TryParse("$($body.days)", [ref]$days)
                     $scopes = @(@($body.scopes) | ForEach-Object { "$_".Trim() } | Where-Object { $_ -in @('requests.write', 'requests.read') } | Select-Object -Unique)
                     if (-not $name -or $name.Length -gt 60) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'a name (who uses the key, at most 60 characters) is required' }; return 400 }
-                    if ($days -lt 1 -or $days -gt 365) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'a key lives 1 to 365 days' }; return 400 }
+                    if ($days -lt 1 -or $days -gt 3650) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'a key lives 1 to 3650 days (10 years)' }; return 400 }   # operator 2026-10-02: "dont limit me if i want to set 10 year"
                     if (-not $scopes.Count) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'pick at least one scope: requests.write, requests.read' }; return 400 }
                     $nk = New-PimApiKey
                     $rec = [pscustomobject][ordered]@{ id = $nk.id; name = $name; hash = $nk.hash; prefix = $nk.prefix; scopes = ($scopes -join '|'); expiresUtc = [datetime]::UtcNow.AddDays($days).ToString('o'); revoked = 'false'; createdBy = $me; createdUtc = [datetime]::UtcNow.ToString('o') }
@@ -14821,7 +14958,7 @@ function Handle-Request {
                 $tpl = & $findShippedTpl "$($b.templateId)"
                 if (-not $tpl) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'unknown template' }; return 400 }
                 $ringIn = 0
-                if (-not [int]::TryParse("$($b.ring)", [ref]$ringIn) -or $ringIn -lt 0 -or $ringIn -gt 2) {
+                if (-not [int]::TryParse("$($b.ring)", [ref]$ringIn) -or -not (Test-PimRingValue -Value $ringIn)) {
                     Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "ring must be 0 (dev), 1 (test) or 2 (broad) (got '$($b.ring)')" }; return 400
                 }
                 try {

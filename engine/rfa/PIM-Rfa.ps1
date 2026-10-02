@@ -23,6 +23,50 @@ $script:PimRfaApprovalHours     = 24
 $script:PimRfaWarnBeforeMinutes = 60
 $script:PimRfaOverrideMaxHours  = 744      # 31 days -- IT override (Manager Admin)
 $script:PimRfaEmailPattern      = '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+$script:PimRfaAdHocDefaultHours = 24       # §91.7: default length of an AD-HOC group membership (RfaSettings.adHocHours)
+
+function Get-PimRfaAdHocHours {
+    # PURE. §91.7 -- the lengths offered for an ad-hoc GROUP request: the setting's default (RfaSettings.adHocHours, 1..744,
+    # default 24) plus the department's RfaDurations. Sorted, unique.
+    param([AllowNull()][object]$Settings, [AllowNull()][object]$Department)
+    $d = $script:PimRfaAdHocDefaultHours
+    $raw = if ($Settings -and $Settings.PSObject.Properties['adHocHours']) { "$($Settings.adHocHours)" } else { '' }
+    $n = 0; if ([int]::TryParse($raw.Trim(), [ref]$n) -and $n -ge 1 -and $n -le $script:PimRfaOverrideMaxHours) { $d = $n }
+    $dep = if ($Department) { @(Get-PimRfaDurations -Department $Department) } else { @() }
+    return @(@($d) + $dep | Sort-Object -Unique)
+}
+
+function Get-PimRfaRequestableGroups {
+    <#
+      PURE. §91.7 (operator 2026-10-02: "request access to other permissions groups that he doesn't have access to already.
+      Show list and be able to request access"). The groups THIS account may ask for ad hoc:
+        * listed in RfaSettings.adHocGroups (the operator chooses -- empty = nothing is requestable),
+        * DEFINED (a GroupTag in -Definitions),
+        * not already held: no PIM-Assignments-Admins row for the account on that group, except a Remove row.
+      Returns @( @{ tag; name } ).
+    #>
+    param([AllowNull()][object]$Settings, [Parameter(Mandatory)][object]$Admin, [object[]]$Assignments = @(), [object[]]$Definitions = @())
+    $src = if ($Settings -and $Settings.PSObject.Properties['adHocGroups']) { @($Settings.adHocGroups) } else { @() }
+    $allowed = @($src | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if (-not $allowed.Count) { return @() }
+    $un = (Get-PimRfaRowValue -Row $Admin -Name 'UserName').ToLowerInvariant()
+    $upn = (Get-PimRfaRowValue -Row $Admin -Name 'UserPrincipalName').ToLowerInvariant()
+    $held = @{}
+    foreach ($r in @($Assignments)) {
+        $u = "$($r.Username)".Trim().ToLowerInvariant()
+        if (($u -eq $un -or $u -eq $upn) -and "$($r.Action)" -ne 'Remove') { $held["$($r.GroupTag)".Trim().ToLowerInvariant()] = $true }
+    }
+    $defs = @{}
+    foreach ($d in @($Definitions)) { $t = "$($d.GroupTag)".Trim(); if ($t -and -not $defs.ContainsKey($t.ToLowerInvariant())) { $defs[$t.ToLowerInvariant()] = $d } }
+    $out = @()
+    foreach ($t in ($allowed | Select-Object -Unique)) {
+        $k = $t.ToLowerInvariant()
+        if (-not $defs.ContainsKey($k) -or $held.ContainsKey($k)) { continue }
+        $nm = "$($defs[$k].GroupName)".Trim()
+        $out += [pscustomobject]@{ tag = "$($defs[$k].GroupTag)".Trim(); name = $(if ($nm) { $nm } else { $t }) }
+    }
+    return @($out)
+}
 
 function Get-PimRfaRowValue {
     # Read one column off a row that may be a hashtable or an object; '' when absent.
@@ -242,21 +286,31 @@ function New-PimRfaRequest {
         [ValidateSet('portal', 'api', 'override')][string]$Source = 'portal',
         [ValidateSet('enable', 'group')][string]$Kind = 'enable',
         [string]$GroupName = '', [string]$ExternalRef = '', [string]$RequestedBy = '', [string]$Reason = '',
-        [datetime]$NowUtc = [datetime]::UtcNow, [string]$Id = '', [switch]$IsConsultant
+        [datetime]$NowUtc = [datetime]::UtcNow, [string]$Id = '', [switch]$IsConsultant,
+        # §91.7: a PORTAL group request may name only a group of this list (Get-PimRfaRequestableGroups), for one of -GroupHours
+        [object[]]$RequestableGroups = @(), [int[]]$GroupHours = @()
     )
     $upn = Get-PimRfaRowValue -Row $Admin -Name 'UserPrincipalName'
     $no = { param($r) [pscustomobject]@{ ok = $false; reason = $r; request = $null } }
     if (-not $upn) { return (& $no 'the admin row has no UserPrincipalName') }
-    if ($Kind -eq 'group' -and $Source -ne 'api') { return (& $no 'a group membership can only be requested through the API') }
+    if ($Kind -eq 'group' -and $Source -eq 'override') { return (& $no 'an IT override enables the account; a group is given in the delegation grid') }
     if ($Kind -eq 'group' -and -not "$GroupName".Trim()) { return (& $no 'a group request needs the group name') }
     $state = 'pending-approval'; $mode = ''
     switch ($Source) {
         'portal' {
             $el = Get-PimRfaEligibility -Admin $Admin -Department $Department -IsConsultant:$IsConsultant
             if (-not $el.eligible) { return (& $no $el.reason) }
-            if (@($el.durations) -notcontains $Hours) { return (& $no ("{0} h is not offered -- choose {1} h" -f $Hours, (@($el.durations) -join ' / '))) }
-            $mode = $el.mode
-            if ($mode -eq 'Auto') { $state = 'approved' }
+            if ($Kind -eq 'group') {
+                # §91.7: AD-HOC access to a permission group -- only a requestable group, never Auto (a person decides)
+                $g = @(@($RequestableGroups) | Where-Object { "$($_.tag)" -ieq "$GroupName".Trim() })[0]
+                if (-not $g) { return (& $no "'$GroupName' cannot be requested here (not offered for ad-hoc access, or already held)") }
+                if (@($GroupHours) -notcontains $Hours) { return (& $no ("{0} h is not offered for ad-hoc access -- choose {1} h" -f $Hours, (@($GroupHours) -join ' / '))) }
+                $GroupName = "$($g.tag)"; $mode = 'Approval'
+            } else {
+                if (@($el.durations) -notcontains $Hours) { return (& $no ("{0} h is not offered -- choose {1} h" -f $Hours, (@($el.durations) -join ' / '))) }
+                $mode = $el.mode
+                if ($mode -eq 'Auto') { $state = 'approved' }
+            }
         }
         'api' {
             if (-not "$ExternalRef".Trim()) { return (& $no 'an API request needs its ticket number (ExternalRef) -- it makes a repeated call idempotent') }
@@ -383,7 +437,9 @@ function Get-PimRfaEligibilityList {
       PURE. What the engine publishes to the RFA store: ONLY eligible accounts, keyed by a salted hash of the UPN,
       with the PIN address, the mode and the offered durations. No UPN, no name, no roles, no groups.
     #>
-    param([object[]]$Admins = @(), [object[]]$Departments = @(), [object[]]$Companies = @(), [Parameter(Mandatory)][string]$Salt)
+    param([object[]]$Admins = @(), [object[]]$Departments = @(), [object[]]$Companies = @(), [Parameter(Mandatory)][string]$Salt,
+          # §91.7: what the account may request AD HOC (group tags + display names, and the lengths) -- only when groups are offered
+          [AllowNull()][object]$Settings = $null, [object[]]$Assignments = @(), [object[]]$Definitions = @())
     $byDept = @{}
     foreach ($d in @($Departments)) { $k = (Get-PimRfaRowValue -Row $d -Name 'Department').ToLowerInvariant(); if ($k -and -not $byDept.ContainsKey($k)) { $byDept[$k] = $d } }
     $out = @()
@@ -393,7 +449,14 @@ function Get-PimRfaEligibilityList {
         $dep = $byDept[(Get-PimRfaRowValue -Row $a -Name 'Department').ToLowerInvariant()]
         $el = Get-PimRfaEligibility -Admin $a -Department $dep -IsConsultant:(Test-PimRfaIsConsultant -Admin $a -Companies $Companies)
         if (-not $el.eligible) { continue }
-        $out += [pscustomobject]@{ accountKey = (Get-PimRfaAccountKey -Salt $Salt -UserPrincipalName $upn); contactEmail = $el.contactEmail; mode = $el.mode; durations = (@($el.durations) -join '|') }
+        $o = [pscustomobject]@{ accountKey = (Get-PimRfaAccountKey -Salt $Salt -UserPrincipalName $upn); contactEmail = $el.contactEmail; mode = $el.mode; durations = (@($el.durations) -join '|') }
+        $gs = @(Get-PimRfaRequestableGroups -Settings $Settings -Admin $a -Assignments $Assignments -Definitions $Definitions)
+        if ($gs.Count) {
+            # tag=name pairs, '|' between (a tag never holds '=' or '|'; a name's '|' is replaced)
+            $o | Add-Member -NotePropertyName groups -NotePropertyValue ((@($gs | ForEach-Object { "$($_.tag)=$("$($_.name)" -replace '[|=]', '-')" })) -join '|')
+            $o | Add-Member -NotePropertyName groupHours -NotePropertyValue ((@(Get-PimRfaAdHocHours -Settings $Settings -Department $dep)) -join '|')
+        }
+        $out += $o
     }
     return @($out)
 }

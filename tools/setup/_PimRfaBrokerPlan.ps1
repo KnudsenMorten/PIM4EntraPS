@@ -75,7 +75,7 @@ function Get-PimRfaBrokerDeployPlan {
         & $add 'env' "Container Apps environment $EnvironmentName (PUBLIC, consumption)" @{ name = $EnvironmentName; location = $Location; vnet = $VnetName; subnet = $SubnetName; internal = $false }
     }
     & $add 'app' "container app $AppName (the PIM image, command Start-PimRfaBroker.ps1, scale $MinReplicas..2)" @{ name = $AppName; environment = $EnvironmentName; image = $Image; acr = $AcrName; minReplicas = $MinReplicas; maxReplicas = 2; targetPort = 8080
-        command = @('pwsh', '-NoProfile', '-File', '/app/PIM4EntraPS/tools/pim-rfa/Start-PimRfaBroker.ps1'); envVars = [ordered]@{ PIM_RFA_STORE = $StorageAccountName; PIM_RFA_SENDER = $SenderMailbox; PIM_RFA_TENANT_NAME = $TenantName } }
+        command = @('pwsh', '/app/PIM4EntraPS/tools/pim-rfa/Start-PimRfaBroker.ps1'); envVars = [ordered]@{ PIM_RFA_STORE = $StorageAccountName; PIM_RFA_SENDER = $SenderMailbox; PIM_RFA_TENANT_NAME = $TenantName } }
     & $add 'role-app' "Storage Table Data Contributor for $AppName's identity on $StorageAccountName (its ONLY Azure right)" @{ role = 'Storage Table Data Contributor'; scope = 'storage'; principal = 'app' }
     foreach ($e in @($EngineIdentityPrincipalIds | Where-Object { "$_" -match $guid })) { & $add "role-engine-$e" "Storage Table Data Contributor for the engine identity $e on $StorageAccountName (the pull)" @{ role = 'Storage Table Data Contributor'; scope = 'storage'; principal = $e } }
     & $add 'auth' "Easy Auth on ${AppName}: Entra provider, unauthenticated = ALLOW (the portal is PIN-based; /api/v1 needs a validated token or an API key)" @{ app = $AppName; unauthenticated = 'AllowAnonymous' }

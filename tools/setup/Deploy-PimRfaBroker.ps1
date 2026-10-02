@@ -53,7 +53,9 @@ function Invoke-Az {
         if ($AllowNotFound -and $txt -match '(?i)not ?found|ResourceNotFound|could not be found') { return $null }
         throw "az $($AzArgs[0..2] -join ' ') failed: $txt"
     }
-    $j = (@($out) | ForEach-Object { "$_" }) -join "`n"
+    # stdout only: az writes warnings (e.g. the 32-bit cryptography notice) to stderr, which 2>&1 mixes in as ErrorRecords
+    # -- parsed as part of the JSON they made every result $null (found deploying internal, 2026-10-02)
+    $j = (@($out) | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }) -join "`n"
     if ("$j".Trim()) { try { return ($j | ConvertFrom-Json) } catch { return $null } }
     return $null
 }
