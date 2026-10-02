@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Access request</title>
+<!-- §82 P3: the PUBLIC access request portal. Self-contained (no external script, font or style: the broker's CSP is
+     default-src 'self'). PIN sign-in -> a consultant asks to have the admin account enabled for a while, or a company
+     contact confirms the company's consultants. Every POST carries X-Rfa: 1 (CSRF); the session is an HttpOnly cookie. -->
+<style>
+  :root { --fg:#1f2328; --muted:#59636e; --line:#d1d9e0; --bg:#f6f8fa; --card:#ffffff; --accent:#0969da; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e6edf3; --muted:#9198a1; --line:#3d444d; --bg:#0d1117; --card:#151b23; --accent:#4493f8; --ok:#3fb950; --warn:#d29922; --bad:#f85149; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 "Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,Helvetica,Arial,sans-serif; }
+  main { max-width:640px; margin:0 auto; padding:32px 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px; margin-bottom:16px; }
+  h1 { font-size:22px; margin:0 0 6px; } h2 { font-size:17px; margin:0 0 10px; }
+  p.muted, .muted { color:var(--muted); }
+  label { display:block; font-weight:600; margin:12px 0 4px; }
+  input, select, textarea { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--fg); font:inherit; }
+  button { margin-top:14px; padding:9px 16px; border:0; border-radius:6px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--accent); border:1px solid var(--line); margin-top:0; padding:5px 10px; font-weight:500; }
+  .msg { margin-top:10px; } .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:14px; } td, th { text-align:left; padding:7px 4px; border-top:1px solid var(--line); vertical-align:top; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Access request</h1>
+    <p class="muted" id="intro">Sign in with a one-time PIN sent to your e-mail. Consultants: use your <b>admin account</b> name. Company contacts: use your own e-mail address.</p>
+  </div>
+
+  <div class="card" id="stepName">
+    <label for="name">Admin account or e-mail address</label>
+    <input id="name" autocomplete="username" placeholder="adm-firstname@company.com">
+    <button id="btnPin">Send me a PIN</button>
+    <div class="msg" id="msgName"></div>
+  </div>
+
+  <div class="card hidden" id="stepPin">
+    <label for="pin">PIN (6 digits, valid 15 minutes)</label>
+    <input id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+    <button id="btnVerify">Sign in</button>
+    <div class="msg" id="msgPin"></div>
+  </div>
+
+  <div class="card hidden" id="consultant">
+    <h2>Enable my admin account</h2>
+    <div id="cNotEligible" class="warn hidden">This account can no longer use the portal. Contact your sponsor department.</div>
+    <div id="cForm">
+      <p class="muted" id="cMode"></p>
+      <label for="hours">For how long</label>
+      <select id="hours"></select>
+      <label for="reason">What for (optional)</label>
+      <textarea id="reason" rows="2" maxlength="500"></textarea>
+      <button id="btnRequest">Send request</button>
+      <div class="msg" id="msgReq"></div>
+    </div>
+    <p class="muted" style="margin-top:14px;">When it is enabled, sign in with your admin account and activate your roles with MFA (PIM Activator or the Azure portal). The account is disabled again when the time is up.</p>
+    <h2 style="margin-top:18px;">My requests</h2>
+    <table><tbody id="cRequests"></tbody></table>
+  </div>
+
+  <div class="card hidden" id="contact">
+    <h2>Confirm your consultants</h2>
+    <p class="muted">For each person: still working for you, left the company, or on leave until a date. Someone who left is disabled at once.</p>
+    <div id="reviews"></div>
+    <div class="msg" id="msgAns"></div>
+  </div>
+
+  <div class="card hidden" id="signedIn"><button class="secondary" id="btnOut">Sign out</button> <span class="muted" id="who"></span></div>
+</main>
+<script>
+(function () {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  async function call(method, path, body) {
+    const r = await fetch(path, { method: method, credentials: 'same-origin', headers: Object.assign({ 'Content-Type': 'application/json' }, method === 'POST' ? { 'X-Rfa': '1' } : {}), body: body ? JSON.stringify(body) : undefined });
+    let j = null; try { j = await r.json(); } catch (_) { j = null; }
+    if (!r.ok) { const e = new Error((j && j.error) || ('HTTP ' + r.status)); e.status = r.status; throw e; }
+    return j || {};
+  }
+  function say(id, text, cls) { const m = $(id); m.className = 'msg ' + (cls || ''); m.textContent = text; }
+  const when = v => { if (!v) return ''; const d = new Date(v); return isNaN(d) ? esc(v) : d.toLocaleString(); };
+
+  $('btnPin').onclick = async function () {
+    const name = $('name').value.trim();
+    if (!name) { say('msgName', 'Enter your admin account or e-mail address.', 'bad'); return; }
+    try { const r = await call('POST', '/portal/pin', { name: name }); say('msgName', r.message, 'ok'); $('stepPin').classList.remove('hidden'); $('pin').focus(); }
+    catch (e) { say('msgName', e.message, 'bad'); }
+  };
+  $('btnVerify').onclick = async function () {
+    try { await call('POST', '/portal/verify', { name: $('name').value.trim(), pin: $('pin').value.trim() }); await load(); }
+    catch (e) { say('msgPin', e.message, 'bad'); }
+  };
+  $('btnOut').onclick = async function () { try { await call('POST', '/portal/signout'); } catch (_) { } location.reload(); };
+
+  async function load() {
+    let me;
+    try { me = await call('GET', '/portal/me'); } catch (e) { return; }
+    $('stepName').classList.add('hidden'); $('stepPin').classList.add('hidden'); $('signedIn').classList.remove('hidden');
+    $('who').textContent = 'Signed in as ' + me.name;
+    if (me.kind === 'consultant') {
+      $('consultant').classList.remove('hidden');
+      if (!me.eligible) { $('cNotEligible').classList.remove('hidden'); $('cForm').classList.add('hidden'); }
+      $('cMode').textContent = me.mode === 'Auto' ? 'Your account is enabled as soon as you send the request.' : 'Your sponsor department approves the request (within 24 hours).';
+      $('hours').innerHTML = (me.durations || []).map(h => '<option value="' + h + '">' + (h % 24 === 0 ? (h / 24) + ' day' + (h === 24 ? '' : 's') : h + ' hours') + '</option>').join('');
+      $('cRequests').innerHTML = (me.requests || []).length ? me.requests.map(r =>
+        '<tr><td>' + when(r.submittedUtc) + '<div class="muted">' + esc(r.hours) + ' h</div></td><td><b>' + esc(r.state) + '</b><div class="muted">' + esc(r.status || 'waiting to be taken in') + '</div></td><td>' +
+        (['submitted', 'pending-approval', 'approved', 'active'].indexOf(r.state) >= 0 ? '<button class="secondary" data-cancel="' + esc(r.id) + '">End</button>' : '') + '</td></tr>').join('') : '<tr><td class="muted">No requests yet.</td></tr>';
+      document.querySelectorAll('[data-cancel]').forEach(b => b.onclick = async function () { try { await call('POST', '/portal/cancel', { id: b.getAttribute('data-cancel') }); await load(); } catch (e) { alert(e.message); } });
+    } else {
+      $('contact').classList.remove('hidden');
+      $('reviews').innerHTML = (me.reviews || []).map(rv => '<h2>' + esc(rv.company) + '</h2><table><tbody>' + (rv.items || []).map(it =>
+        '<tr><td>' + esc(it.upn) + (it.displayName ? '<div class="muted">' + esc(it.displayName) + '</div>' : '') + '</td><td>' +
+        (it.answer ? '<b>' + esc(it.answer) + '</b>' + (it.leaveUntil ? ' until ' + esc(it.leaveUntil) : '') :
+          '<button class="secondary" data-a="working" data-c="' + esc(rv.id) + '" data-u="' + esc(it.upn) + '">Still working</button> ' +
+          '<button class="secondary" data-a="left" data-c="' + esc(rv.id) + '" data-u="' + esc(it.upn) + '">Left</button> ' +
+          '<button class="secondary" data-a="leave" data-c="' + esc(rv.id) + '" data-u="' + esc(it.upn) + '">On leave</button>') + '</td></tr>').join('') + '</tbody></table>').join('') || '<p class="muted">Nothing to confirm right now.</p>';
+      document.querySelectorAll('[data-a]').forEach(b => b.onclick = async function () {
+        const a = b.getAttribute('data-a'); let until = '';
+        if (a === 'leave') { until = prompt('On leave until (yyyy-mm-dd)?') || ''; if (!until) return; }
+        if (a === 'left' && !confirm(b.getAttribute('data-u') + ' left the company?')) return;
+        try { await call('POST', '/portal/answer', { campaignId: b.getAttribute('data-c'), upn: b.getAttribute('data-u'), answer: a, leaveUntil: until }); say('msgAns', 'Recorded -- thank you.', 'ok'); b.parentNode.textContent = a + (until ? ' until ' + until : '') + ' (recorded)'; }
+        catch (e) { say('msgAns', e.message, 'bad'); }
+      });
+    }
+  }
+  $('btnRequest').onclick = async function () {
+    try { const r = await call('POST', '/portal/request', { hours: +$('hours').value, reason: $('reason').value }); say('msgReq', r.message, 'ok'); await load(); }
+    catch (e) { say('msgReq', e.message, 'bad'); }
+  };
+  load();
+})();
+</script>
+</body>
+</html>

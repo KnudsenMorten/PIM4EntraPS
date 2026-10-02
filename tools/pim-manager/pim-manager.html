@@ -1062,6 +1062,7 @@
     <div class="tab" data-tab="approvals" title="The maker/checker approval queue — raise an offboard/revoke/sensitive change, approve or deny one (a different admin must approve), and execute an approved request.">Approvals <span id="apprPendBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
     <div class="tab" data-tab="accessreview" title="Run access reviews end-to-end — attest (approve / deny / recertify) with justification, assign reviewers, send reminders, and export the evidence.">Access Review <span id="arOpenBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="owner" title="People in the departments you own -- see when each person's access ends, and extend it if they still need it.">My people</div>
+    <div class="tab" data-tab="accessrequests" title="Requests to have a disabled admin account enabled for a while (request for authorization), the company reviews of external consultants, and an IT override for a longer window.">Access requests</div>
     <div class="tab" data-tab="grid" title="The full editable grid of every desired-state row — for power users who want direct, spreadsheet-style editing across all entities.">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="authoring" title="Bulk authoring — move an admin, clone a definition or Azure-RBAC delegation to many targets, bulk-attach, and import admins, each with a preview before commit.">Authoring</div>
     <div class="tab" data-tab="onboarding" title="Onboard a new admin — derive the name and metadata, place them in the right groups, and (for sensitive grants) route through second-person approval.">Onboarding</div>
@@ -1416,6 +1417,13 @@
     <div id="arCampaignsBody" style="flex:0 0 auto; padding:6px 18px 0; max-height:45vh; overflow:auto;"></div>   <!-- REQ-AR-2: department campaigns + SuperAdmin override -->
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="arBody">
       <div style="color:#57606a; font-size:12px;">Loading access reviews&hellip;</div>
+    </div>
+  </div>
+
+  <!-- =========== §82 Access requests (RFA) + company reviews (Pro) =========== -->
+  <div id="accessrequestsTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="accessRequestsBody">
+      <div style="color:#57606a; font-size:12px;">Loading access requests&hellip;</div>
     </div>
   </div>
 
@@ -2417,6 +2425,8 @@
         { tab: 'accessreview', label: 'Access reviews',   desc: 'Recertification campaigns and their results' },
         // §79.8 / §79.7 decision: the PIM owner page -- a department owner's own people, and their access end dates.
         { tab: 'owner',        label: 'My people',        desc: 'People in the departments you own — see when their access ends and extend it' },
+        // §82: requests to have a disabled admin account enabled for a while + the company reviews of external consultants.
+        { tab: 'accessrequests', label: 'Access requests', desc: 'Requests to enable a disabled admin account for a while, IT overrides, and the company reviews of consultants' },
         { tab: 'conformance',  label: 'Tenant conformance', desc: 'Whether a tenant matches the standard it should' },
         { tab: 'reports',      label: 'Reports',          desc: 'Evidence you can hand to an auditor' },
         { tab: 'downlink',     label: 'Managed tenants',  desc: 'Push and check configuration in tenants you manage' },
@@ -2774,6 +2784,7 @@
     if (name === 'approvals') renderApprovals();
     if (name === 'accessreview') renderAccessReviews();
     if (name === 'owner') renderOwnerPage();   // §79.8
+    if (name === 'accessrequests') renderAccessRequests();   // §82
     if (name === 'authoring') renderAuthoring();
     if (name === 'onboarding') renderOnboarding();
     if (name === 'departments') renderDepartmentsPage();
@@ -2903,7 +2914,7 @@
          // admin is linked to. this is considered the dept that sponsor him and define approval for
          // example if he must be enabled/disabled"). The department is not a label — it decides who
          // approves for this admin and where its mail (including its TAP) is delivered.
-         '<th title="The department that sponsors this admin. Its OWNERS approve for this admin and receive its mail, including its Temporary Access Pass. Hover a department to see them.">Sponsor dept</th>' +
+         '<th title="The INTERNAL department that sponsors this admin (a company may be internal or external -- see Company). Its OWNERS approve for this admin and receive its mail, including its Temporary Access Pass. Hover a department to see them.">Department (internal)</th>' +
          '<th>Status</th>' +
          // 🔴 71.23 (operator 2026-09-16: "i need to have this field on the admin overview so i cna
          // devine an AutoDisableDate"). The date the engine disables this account -- and nothing more
@@ -3016,7 +3027,7 @@
     // Filled with the departments ENTITY list when the editor opens (deptOptions is cached and warms
     // asynchronously). The current value is kept even if it is not in the list, so opening the
     // editor never silently changes it.
-    h += lbl('Department',
+    h += lbl('Department (internal)',
       '<select class="acctEditFldTop acctDeptSel" data-k="department" data-cur="' + esc(dept) + '" style="width:190px;">' +
         '<option value="">-- none --</option>' + (dept ? '<option value="' + esc(dept) + '" selected>' + esc(dept) + '</option>' : '') +
       '</select>');
@@ -7018,6 +7029,7 @@
 
     // 2.4.465 (operator 2026-09-30: "a customer must be able to define his groups naming convention for the hybrid solution")
     h += `<div id="setHybridAdHost"><div style="color:#57606a;font-size:12px;">Loading hybrid Active Directory settings…</div></div>`;
+    h += `<div id="setRfaBrokerHost"></div>`;   // §82/§90: RFA broker & API (Pro; SuperAdmin)
 
     // --- Naming conventions (key/value editor) -------------------------
     h += `<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">Naming conventions${seedNote(s.namingSeeded,'naming')}</h3>`;
@@ -7257,6 +7269,7 @@
     renderSettingsCopySection(document.getElementById('setCopyHost'));
     renderAdminDomainSection(document.getElementById('setAdminDomainHost'));
     renderHybridAdSection(document.getElementById('setHybridAdHost'));
+    renderRfaBrokerSection(document.getElementById('setRfaBrokerHost'));
 
     // Operational-policy + Alerting cards load asynchronously (host containers
     // are always present so the rest of Settings paints first).
@@ -8068,6 +8081,157 @@
       renderOwnerAutoExtend();
     };
   }
+  // §82 ACCESS REQUESTS (operator 2026-09-30 / 2026-10-02): the Manager's half of RFA + the company reviews. The engine
+  // (rfa-sync, company-review) does the work; this page shows the state and records decisions.
+  async function renderAccessRequests() {
+    const host = document.getElementById('accessRequestsBody');
+    if (!host) return;
+    if (!isServer) { host.innerHTML = '<div style="color:#57606a;">Access requests need the live Manager.</div>'; return; }
+    let d = null, cr = null;
+    try { d = await api('GET', '/api/rfa/requests'); } catch (e) { host.innerHTML = '<div style="color:#cf222e;">Could not load the access requests: ' + escapeHtml(e.message || String(e)) + '</div>'; return; }
+    try { cr = await api('GET', '/api/company-reviews'); } catch (_) { cr = null; }
+    const fmt = function (v) { if (!v) return ''; const t = new Date(v); return isNaN(t) ? escapeHtml(String(v)) : t.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'; };
+    const stColor = { 'pending-approval': '#9a6700', approved: '#0969da', active: '#1a7f37', 'cancel-requested': '#9a6700', ended: '#57606a', cancelled: '#57606a', expired: '#57606a', denied: '#cf222e', rejected: '#cf222e', failed: '#cf222e' };
+    let h = '<h2 style="margin:0 0 6px;">Access requests</h2>' +
+      '<div class="pro-lic-banner" data-feature="rfa.portal"></div>' +
+      '<p style="color:#57606a;margin:0 0 10px;max-width:900px;">A disabled admin -- typically an external consultant -- asks to have the account <b>enabled for a set time</b>. ' +
+      'Auto-approved departments enable it at once; otherwise any one <b>Owner of the department (internal)</b> decides within 24 hours. ' +
+      'When the time is up the account is disabled again (its roles are kept). ServiceNow can request through the API.</p>';
+    if (!d.enabled) h += '<div style="background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:8px 10px;margin-bottom:10px;">The request portal is <b>switched off</b> (Settings &gt; Features: <i>Request for authorization (RFA) portal</i>, Pro). Nothing is taken in until it is on.</div>';
+    else if (!d.deployed) h += '<div style="background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:8px 10px;margin-bottom:10px;">The public request portal is <b>not deployed</b> yet (no RFA store in the settings below). IT overrides still work.</div>';
+    const rows = (d.requests || []);
+    h += '<table class="grid" style="width:100%;margin-bottom:14px;"><thead><tr><th>Requested</th><th>Person</th><th>Department (internal)</th><th>Company</th><th>What</th><th>Source</th><th>Status</th><th></th></tr></thead><tbody>';
+    if (!rows.length) h += '<tr><td colspan="8" style="color:#57606a;">No requests yet.</td></tr>';
+    for (const r of rows) {
+      const what = (r.kind === 'group' ? 'member of ' + escapeHtml(r.groupName || '') : 'account enabled') + ' for ' + escapeHtml(String(r.hours)) + ' h';
+      const act = (r.canDecide ? '<button class="rfaDec" data-id="' + escapeHtml(r.id) + '" data-d="approve">Approve</button> <button class="rfaDec" data-id="' + escapeHtml(r.id) + '" data-d="deny">Deny</button>' : '') +
+                  (r.canEnd ? ' <button class="rfaEnd" data-id="' + escapeHtml(r.id) + '">End now</button>' : '');
+      h += '<tr><td>' + fmt(r.requestedUtc) + '</td><td>' + escapeHtml(r.upn || '') + (r.reason ? '<div style="color:#57606a;font-size:11px;">' + escapeHtml(r.reason) + '</div>' : '') + '</td>' +
+           '<td>' + escapeHtml(r.department || '') + '</td><td>' + escapeHtml(r.company || '') + '</td><td>' + what + '</td>' +
+           '<td>' + escapeHtml(r.source === 'api' ? 'API (' + (r.externalRef || '') + ')' : (r.source === 'override' ? 'IT override (' + (r.requestedBy || '') + ')' : 'portal')) + '</td>' +
+           '<td><span style="color:' + (stColor[r.state] || '#57606a') + ';font-weight:600;">' + escapeHtml(r.state || '') + '</span><div style="color:#57606a;font-size:11px;">' + escapeHtml(r.statusText || '') + (r.decidedBy && r.decidedBy !== 'auto' ? ' -- ' + escapeHtml(r.decidedBy) : '') + '</div></td>' +
+           '<td style="white-space:nowrap;">' + act + '</td></tr>';
+    }
+    h += '</tbody></table><div id="rfaMsg" style="margin:-6px 0 12px;"></div>';
+    if (d.isAdmin) {
+      h += '<h3 style="margin:10px 0 4px;">IT override -- a longer window</h3><div style="color:#57606a;font-size:12px;margin-bottom:6px;">Enable an admin account for up to 31 days without a request. The department Owners review it every 30 days.</div>' +
+           '<input id="rfaOvUpn" placeholder="admin UPN" style="width:260px;"> <input id="rfaOvHours" type="number" min="1" max="744" value="168" style="width:90px;"> hours ' +
+           '<input id="rfaOvWhy" placeholder="reason (recorded)" style="width:260px;"> <button id="rfaOvGo">Grant</button>';
+    }
+    // company reviews
+    const camps = (cr && cr.campaigns) || [];
+    h += '<h3 style="margin:18px 0 4px;">Company reviews (external consultants)</h3>' +
+         '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">Each external company confirms its consultants on its cadence. Unanswered after 21 days = disabled (re-enabled through a request). ' +
+         'You can answer on the company\'s behalf. <a href="#" id="rfaEditCompanies">Edit companies</a> (' + ((cr && cr.companies) || 0) + ' defined).</div>';
+    if (!camps.length) h += '<div style="color:#57606a;">No company review yet.</div>';
+    for (const c of camps) {
+      const open = !c.closedUtc;
+      h += '<div style="border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;margin-bottom:8px;"><b>' + escapeHtml(c.company) + '</b> <span style="color:#57606a;">started ' + fmt(c.startedUtc) + (open ? '' : ' -- closed ' + fmt(c.closedUtc)) + '</span>';
+      for (const it of (c.items || [])) {
+        const ans = it.answer ? '<b>' + escapeHtml(it.answer) + '</b>' + (it.leaveUntil ? ' until ' + escapeHtml(it.leaveUntil) : '') + ' <span style="color:#57606a;">by ' + escapeHtml(it.answeredBy || '') + '</span>' : '<span style="color:#9a6700;">not answered</span>';
+        const btns = (open && !it.answer) ? ' <button class="crAns" data-c="' + escapeHtml(c.id) + '" data-u="' + escapeHtml(it.upn) + '" data-a="working">Still working here</button> <button class="crAns" data-c="' + escapeHtml(c.id) + '" data-u="' + escapeHtml(it.upn) + '" data-a="left">Left</button> <button class="crAns" data-c="' + escapeHtml(c.id) + '" data-u="' + escapeHtml(it.upn) + '" data-a="leave">On leave&hellip;</button>' : '';
+        h += '<div style="padding:3px 0;border-top:1px solid #f0f2f4;">' + escapeHtml(it.upn) + (it.displayName ? ' <span style="color:#57606a;">(' + escapeHtml(it.displayName) + ')</span>' : '') + ' -- ' + ans + btns + '</div>';
+      }
+      h += '</div>';
+    }
+    // §82/§90 (operator 2026-10-02: "settings should contain rfa broker config like api keys"): the broker settings and the
+    // API keys live in Settings > RFA broker & API (renderRfaBrokerSection); this page is for the requests and reviews.
+    if (d.isSuperAdmin) h += '<div style="margin-top:18px;color:#57606a;">The broker settings and API keys are under <a href="#" id="rfaToSettings">Settings &gt; RFA broker &amp; API</a>.</div>';
+    host.innerHTML = h;
+    try { renderMspLicenceBanners(); } catch (_) { }
+    const msg = function (t, bad) { const m = document.getElementById('rfaMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#1a7f37'; } };
+    host.querySelectorAll('.rfaDec').forEach(b => b.onclick = async function () {
+      const dec = b.dataset.d; let note = '';
+      if (dec === 'deny') { note = window.prompt('Why is it denied? (the person is told)', '') ; if (note === null) return; }
+      try { const r = await api('POST', '/api/rfa/decide', { id: b.dataset.id, decision: dec, note: note }); msg(r.note || 'Recorded.'); renderAccessRequests(); } catch (e) { msg(e.message || String(e), true); }
+    });
+    host.querySelectorAll('.rfaEnd').forEach(b => b.onclick = async function () {
+      if (!confirm('End this window now? The account is disabled on the engine\'s next run.')) return;
+      try { const r = await api('POST', '/api/rfa/end', { id: b.dataset.id }); msg(r.note || 'Ending.'); renderAccessRequests(); } catch (e) { msg(e.message || String(e), true); }
+    });
+    const ov = document.getElementById('rfaOvGo');
+    if (ov) ov.onclick = async function () {
+      const upn = (document.getElementById('rfaOvUpn').value || '').trim(), hrs = (document.getElementById('rfaOvHours').value || '').trim(), why = (document.getElementById('rfaOvWhy').value || '').trim();
+      if (!upn || !why) { msg('An IT override needs the admin UPN and a reason.', true); return; }
+      try { const r = await api('POST', '/api/rfa/override', { userPrincipalName: upn, hours: hrs, reason: why }); msg(r.note || 'Granted.'); renderAccessRequests(); } catch (e) { msg(e.message || String(e), true); }
+    };
+    host.querySelectorAll('.crAns').forEach(b => b.onclick = async function () {
+      let until = '';
+      if (b.dataset.a === 'leave') { until = window.prompt('On leave until (yyyy-mm-dd)?', ''); if (!until) return; }
+      if (b.dataset.a === 'left' && !confirm(b.dataset.u + ' left the company?\n\nThe account is disabled now; removing the access waits for an approver.')) return;
+      try { const r = await api('POST', '/api/company-review/answer', { campaignId: b.dataset.c, upn: b.dataset.u, answer: b.dataset.a, leaveUntil: until }); msg(r.note || 'Recorded.'); renderAccessRequests(); } catch (e) { msg(e.message || String(e), true); }
+    });
+    const ec = document.getElementById('rfaEditCompanies');
+    if (ec) ec.onclick = function (ev) { ev.preventDefault(); switchTab('grid'); setTimeout(function () { try { currentGridBase = 'Account-Definitions-Companies'; renderGrid(currentGridBase); } catch (_) { } }, 300); };
+    const toSet = document.getElementById('rfaToSettings');
+    if (toSet) toSet.onclick = function (ev) { ev.preventDefault(); switchTab('settings'); setTimeout(function () { const el = document.getElementById('setRfaBrokerHost'); if (el) el.scrollIntoView(); }, 400); };
+  }
+
+  // ----- Settings: RFA broker & API (§82 / §90, Pro; SuperAdmin) ---------------------------------------------------------
+  // The public broker's settings (its store, the portal URL, the Entra applications allowed on the API) and the API keys.
+  async function renderRfaBrokerSection(host) {
+    if (!host) return;
+    if (!isServer) { host.innerHTML = ''; return; }
+    let d = null;
+    try { d = await api('GET', '/api/rfa/requests'); } catch (e) { host.innerHTML = '<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">RFA broker &amp; API</h3><div style="color:#57606a;">Not available here: ' + escapeHtml(e.message || String(e)) + '</div></div>'; return; }
+    if (!d.isSuperAdmin) { host.innerHTML = '<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">RFA broker &amp; API</h3><div style="color:#57606a;">Only a SuperAdmin changes the broker settings and API keys.</div></div>'; return; }
+    let h = '<div class="set-card" id="setRfaBroker"><h3 style="margin:0 0 4px;font-size:14px;">RFA broker &amp; API</h3><div class="pro-lic-banner" data-feature="rfa.portal"></div>' +
+      '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">The public access request portal + REST API (the broker). The engine pulls requests from the store of the broker; nothing on the public side can reach PIM.</div>';
+    const s = d.settings || {};
+    h += '<h3 style="margin:18px 0 4px;">Broker settings</h3>' +
+         '<div style="display:grid;grid-template-columns:200px 1fr;gap:6px;max-width:760px;align-items:center;">' +
+         '<label>RFA store account</label><input id="rfaSetAcct" value="' + escapeHtml(s.storeAccount || '') + '" placeholder="set by the RFA deploy">' +
+         '<label>Public portal URL</label><input id="rfaSetUrl" value="' + escapeHtml(s.portalUrl || '') + '" placeholder="https://...">' +
+         '<label>API applications (client ids)</label><input id="rfaSetApps" value="' + escapeHtml((s.apiAppIds || []).join(', ')) + '" placeholder="ServiceNow\'s Entra app id, comma separated">' +
+         '</div><button id="rfaSetSave" style="margin-top:6px;">Save settings</button>' +
+         // §90: API keys for systems without Entra OAuth (shown ONCE; only the hash is stored)
+         '<h3 style="margin:18px 0 4px;">API keys</h3><div style="color:#57606a;font-size:12px;">The API is described at <code>' + escapeHtml((s.portalUrl || 'https://<portal>') + '/api/v1/openapi.json') + '</code>.</div><div class="pro-lic-banner" data-feature="api.broker"></div>' +
+         '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">For a system that cannot use an Entra application token. Prefer the Entra app (add its client id above). A key is shown once, expires, and can be revoked.</div>' +
+         '<div id="rfaKeys" style="margin-bottom:6px;color:#57606a;">Loading keys&hellip;</div>' +
+         '<input id="rfaKeyName" placeholder="who uses it (e.g. ServiceNow test)" style="width:240px;"> ' +
+         '<label style="display:inline;font-weight:normal;"><input type="checkbox" id="rfaKeyW" checked> requests.write</label> ' +
+         '<label style="display:inline;font-weight:normal;"><input type="checkbox" id="rfaKeyR" checked> requests.read</label> ' +
+         '<input id="rfaKeyDays" type="number" min="1" max="365" value="90" style="width:70px;"> days <button id="rfaKeyNew">Create key</button>' +
+         '<div id="rfaKeyOnce" style="display:none;margin-top:8px;padding:8px 10px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;"></div>';
+    h += '<div id="rfaSetMsg" style="margin-top:8px;"></div></div>';
+    host.innerHTML = h;
+    try { renderMspLicenceBanners(); } catch (_) { }
+    const msg = function (t, bad) { const m = document.getElementById('rfaSetMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#1a7f37'; } };
+    // §90 API keys
+    const keysHost = document.getElementById('rfaKeys');
+    const loadKeys = async function () {
+      if (!keysHost) return;
+      try {
+        const k = await api('GET', '/api/rfa/api-keys');
+        const ks = (k && k.keys) || [];
+        keysHost.innerHTML = ks.length ? '<table class="grid"><thead><tr><th>Name</th><th>Key</th><th>Scopes</th><th>Expires</th><th>By</th><th></th></tr></thead><tbody>' + ks.map(x =>
+          '<tr><td>' + escapeHtml(x.name) + '</td><td><code>' + escapeHtml(x.prefix) + '&hellip;</code></td><td>' + escapeHtml(String(x.scopes || '').replace(/\|/g, ', ')) + '</td><td>' + escapeHtml(String(x.expiresUtc || '').slice(0, 10)) + '</td><td>' + escapeHtml(x.createdBy || '') + '</td>' +
+          '<td>' + (x.revoked ? '<span style="color:#cf222e;">revoked</span>' : '<button class="rfaKeyRev" data-id="' + escapeHtml(x.id) + '">Revoke</button>') + '</td></tr>').join('') + '</tbody></table>' : 'No API keys.';
+        keysHost.querySelectorAll('.rfaKeyRev').forEach(b => b.onclick = async function () {
+          if (!confirm('Revoke this API key? Calls with it are refused from now on.')) return;
+          try { const r = await api('POST', '/api/rfa/api-keys/revoke', { id: b.dataset.id }); msg(r.note || 'Revoked.'); loadKeys(); } catch (e) { msg(e.message || String(e), true); }
+        });
+      } catch (e) { keysHost.textContent = 'The keys could not be read: ' + (e.message || e); }
+    };
+    loadKeys();
+    const kn = document.getElementById('rfaKeyNew');
+    if (kn) kn.onclick = async function () {
+      const scopes = []; if (document.getElementById('rfaKeyW').checked) scopes.push('requests.write'); if (document.getElementById('rfaKeyR').checked) scopes.push('requests.read');
+      try {
+        const r = await api('POST', '/api/rfa/api-keys', { name: document.getElementById('rfaKeyName').value, scopes: scopes, days: document.getElementById('rfaKeyDays').value });
+        const once = document.getElementById('rfaKeyOnce');
+        once.style.display = 'block';
+        once.innerHTML = '<b>Copy this key now -- it is shown only once:</b><br><code style="user-select:all;word-break:break-all;">' + escapeHtml(r.key) + '</code><div style="color:#57606a;font-size:11px;margin-top:4px;">' + escapeHtml(r.note || '') + ' Send it as the header <code>X-Api-Key</code>.</div>';
+        loadKeys();
+      } catch (e) { msg(e.message || String(e), true); }
+    };
+    const ss = document.getElementById('rfaSetSave');
+    if (ss) ss.onclick = async function () {
+      const apps = (document.getElementById('rfaSetApps').value || '').split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
+      try { await api('PUT', '/api/rfa/settings', { storeAccount: document.getElementById('rfaSetAcct').value, portalUrl: document.getElementById('rfaSetUrl').value, apiAppIds: apps }); msg('Settings saved.'); } catch (e) { msg(e.message || String(e), true); }
+    };
+  }
+
   async function renderOwnerPage() {
     const host = document.getElementById('ownerBody');
     if (!host) return;
@@ -13788,14 +13952,46 @@
     ['PolicyTemplate', 'Policy', true], ['NumOfDaysWhenExpire', 'Duration (days)', true], ['AssignmentType', 'Type (Eligible / Active)', true],
     ['AutoExtend', 'Auto-extend', true], ['Permanent', 'Permanent', false], ['Action', 'Action (Assign / Remove)', false],
     ['UpdateExisting', 'Update existing', false], ['ApproverUpns', 'Approvers', false], ['TierLevel', 'Tier', false],
-    ['Plane', 'Plane', false], ['CPPlatform', 'Platform', false], ['PermissionScope', 'Permission scope', false], ['SyncPlatform', 'Sync platform', false]]; }
+    ['Plane', 'Plane', false], ['CPPlatform', 'Platform', false], ['PermissionScope', 'Permission scope', false], ['SyncPlatform', 'Sync platform', false],
+    // §89 (operator 2026-10-02: "multiselect edit options so i can fx link to company ... link to dept"): admins only.
+    ['Company', 'Link to company', true, 'Account-Definitions-Admins'], ['Department', 'Link to department (internal)', true, 'Account-Definitions-Admins']]; }
   function gridQuickFields(base, header, colSpecs) {
     const h = header || [];
     return gridQuickFieldList()
-      .filter(f => h.indexOf(f[0]) >= 0 && !(typeof replHiddenCol === 'function' && replHiddenCol(base, f[0])))
+      .filter(f => h.indexOf(f[0]) >= 0 && (!f[3] || f[3] === base) && !(typeof replHiddenCol === 'function' && replHiddenCol(base, f[0])))
       .map(f => ({ col: f[0], label: f[1], quick: f[2] }));
   }
+  // §89: a column's DISPLAY name. The department on an admin is its INTERNAL sponsor (operator: "add (internal) after
+  // Dept to tell this is the internal sponsor"); a company may be internal or external.
+  function gridColLabel(base, col) {
+    if (base === 'Account-Definitions-Admins' && col === 'Department') return 'Department (internal)';
+    if (base === 'Account-Definitions-Companies' && col === 'Type') return 'Type (Internal / External)';
+    return col;
+  }
+  // §89: the defined companies (Account-Definitions-Companies) for the "Link to company" picker. Same cache rules as
+  // deptOptions(): an empty, unfinished load is not an answer.
+  let _coCache = null, _coLoading = null, _coLoaded = false;
+  function companyOptions(onLoaded) {
+    if (_coCache && (_coCache.length || _coLoaded)) return _coCache;
+    if (!_coCache) _coCache = [];
+    if (isServer && !_coLoading) {
+      _coLoading = api('GET', '/api/csv/' + encodeURIComponent('Account-Definitions-Companies')).then(r => {
+        const rows = (r && r.rows) || [];
+        _coCache = rows.map(x => ({ name: String(x && x.Company || '').trim(), type: /^internal$/i.test(String(x && x.Type || '').trim()) ? 'internal' : 'external' }))
+                       .filter(x => x.name).map(x => ({ value: x.name, label: x.name + ' (' + x.type + ')' }));
+        _coLoaded = true;
+        if (typeof onLoaded === 'function') onLoaded();
+        return _coCache;
+      }).catch(() => []).finally(() => { _coLoading = null; });
+    }
+    return _coCache;
+  }
   function gridQuickValueHtml(base, col, spec) {
+    if (base === 'Account-Definitions-Admins' && (col === 'Company' || col === 'Department')) {
+      const opts = col === 'Company' ? companyOptions(function () { try { renderGrid(base); } catch (_) { } }) : deptOptions();
+      if (opts && opts.length) spec = { options: opts, allowBlank: true, blankLabel: '(none -- unlink)' };
+      else return '<input id="gabQuickValue" data-field="' + escapeHtml(col) + '" type="text" placeholder="' + (col === 'Company' ? 'no company defined yet -- type a name, or define it under Companies' : 'no department defined yet -- type a name') + '" style="width:300px;">';
+    }
     if (spec && Array.isArray(spec.options) && spec.options.length) {
       let o = '';
       if (spec.allowBlank) o += '<option value="">' + escapeHtml(spec.blankLabel || '(blank)') + '</option>';
@@ -15988,6 +16184,10 @@
         '<option value="Revoked">Revoked</option>' +
         '</select>');
       html.push('<button id="gabApplyStatus">Apply</button>');
+      // §89 (operator: "reset tap, revoke sessions"): queued ACTIONS on every selected admin (not row edits). Each is
+      // queued by the same per-account route the Accounts page uses; the engine performs them after the queue commit.
+      html.push('<button id="gabResetTap" title="Queue a new Temporary Access Pass for each selected admin">Reset TAP</button>');
+      html.push('<button id="gabRevokeSessions" title="Queue a sign-out everywhere for each selected admin (the accounts stay enabled)">Revoke sessions</button>');
     }
     // 2026-09-22 (operator: "i need option in gui to multi select all and select ring"): the ring
     // bulk action was admins-only, so on every OTHER replicable record type the ring had to be set
@@ -16076,7 +16276,7 @@
       const gv = gridView(base);
       const arrow = (gv.sortCol === col && gv.sortDir) ? (gv.sortDir > 0 ? ' &#x25B2;' : ' &#x25BC;') : '';
       const w = gridColWidth(base, col);
-      html.push(`<th class="grid-sort-th" data-col="${escapeHtml(col)}" style="cursor:pointer;user-select:none;" title="${(colSpecs[col] && colSpecs[col].headerHint) ? escapeHtml(colSpecs[col].headerHint) + ' -- ' : ''}click to sort, drag the right edge to resize"><div class="grid-th-in" style="resize:horizontal;overflow:hidden;min-width:40px;${w ? 'width:' + w + 'px;' : ''}">${escapeHtml(col)}${arrow}</div></th>`);
+      html.push(`<th class="grid-sort-th" data-col="${escapeHtml(col)}" style="cursor:pointer;user-select:none;" title="${(colSpecs[col] && colSpecs[col].headerHint) ? escapeHtml(colSpecs[col].headerHint) + ' -- ' : ''}click to sort, drag the right edge to resize"><div class="grid-th-in" style="resize:horizontal;overflow:hidden;min-width:40px;${w ? 'width:' + w + 'px;' : ''}">${escapeHtml(gridColLabel(base, col))}${arrow}</div></th>`);
     }
     if (replReach) html.push('<th title="How many managed tenants this row will reach -- computed by the same plan every managed tenant runs">Reach</th>');
     html.push('</tr></thead><tbody>');
@@ -16404,6 +16604,25 @@
         renderGrid(base);
       };
     }
+
+    // §89: bulk Reset TAP / Revoke sessions on the selected admins -- one queued action per account, through the existing
+    // per-account routes (same checks, same audit). Says plainly how many were queued and which were refused.
+    const gabBulk = async function (kind) {
+      const upns = Array.from(p.selection || []).filter(i => !(p.deletes && p.deletes.has(i))).map(i => String((p.rows[i] || {}).UserPrincipalName || '').trim()).filter(Boolean);
+      if (!upns.length) { alert('Select one or more admins with a UserPrincipalName first.'); return; }
+      const what = kind === 'tap' ? 'a new Temporary Access Pass' : 'a revoke of ALL sign-in sessions (the accounts stay enabled)';
+      if (!confirm('Queue ' + what + ' for ' + upns.length + ' admin(s)?\n\n' + upns.slice(0, 15).join('\n') + (upns.length > 15 ? '\n... and ' + (upns.length - 15) + ' more' : '') + '\n\nNothing happens until the queue is committed on Pending changes; the engine then performs it.')) return;
+      const route = kind === 'tap' ? '/api/admin-tap/reset' : '/api/admin-sessions/revoke';
+      let ok = 0; const bad = [];
+      for (const u of upns) {
+        try { await api('POST', route, { userPrincipalName: u }); ok++; }
+        catch (e) { bad.push(u + ': ' + String((e && e.message) || e)); }
+      }
+      try { refreshQueueBadge(); } catch (_) { }
+      alert((kind === 'tap' ? 'TAP reset' : 'Session revoke') + ' QUEUED for ' + ok + ' of ' + upns.length + ' admin(s) -- NOT yet in effect. Commit the queue on Pending changes.' + (bad.length ? '\n\nRefused:\n' + bad.slice(0, 20).join('\n') : ''));
+    };
+    const gabTap = document.getElementById('gabResetTap'); if (gabTap) gabTap.onclick = function () { gabBulk('tap'); };
+    const gabRev = document.getElementById('gabRevokeSessions'); if (gabRev) gabRev.onclick = function () { gabBulk('sessions'); };
 
     const gabApplyRing = document.getElementById('gabApplyRing');
     if (gabApplyRing) {

@@ -60,10 +60,18 @@ function ConvertTo-PimRfaMode {
 function Test-PimRfaIsConsultant {
     # PURE. A consultant = an admin whose Company names a DEFINED company (PIM-Definitions-Companies). The Company
     # column alone is not enough: it is also the account's Entra companyName, which internal admins carry too.
+    # §89 (operator 2026-10-02: "company can be both internal and external"): an INTERNAL company (our own, a sister
+    # company) is only a label -- its people are not consultants. Type blank = External.
     param([Parameter(Mandatory)][object]$Admin, [object[]]$Companies = @())
     $c = (Get-PimRfaRowValue -Row $Admin -Name 'Company').ToLowerInvariant()
     if (-not $c) { return $false }
-    return [bool](@($Companies | Where-Object { (Get-PimRfaRowValue -Row $_ -Name 'Company').ToLowerInvariant() -eq $c }).Count)
+    return [bool](@($Companies | Where-Object { (Get-PimRfaRowValue -Row $_ -Name 'Company').ToLowerInvariant() -eq $c -and -not (Test-PimCompanyIsInternal -Company $_) }).Count)
+}
+
+function Test-PimCompanyIsInternal {
+    # PURE. Type = Internal (case-insensitive); anything else, blank included, is External.
+    param([AllowNull()][object]$Company)
+    return ((Get-PimRfaRowValue -Row $Company -Name 'Type') -match '^(?i)internal$')
 }
 
 function Get-PimRfaEffectiveMode {

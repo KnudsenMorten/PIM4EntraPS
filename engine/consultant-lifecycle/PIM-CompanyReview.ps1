@@ -92,6 +92,8 @@ function Get-PimCompanyReviewStep {
           [int]$ConsultantCount = 0, [datetime]$NowUtc = [datetime]::UtcNow)
     $now = $NowUtc.ToUniversalTime()
     if ($null -eq $Campaign -or "$($Campaign.closedUtc)".Trim()) {
+        # §89: an INTERNAL company is a label, not an external party -- it is never reviewed
+        if ((Get-PimCompanyRowValue -Row $Company -Name 'Type') -match '^(?i)internal$') { return [pscustomobject]@{ action = 'none'; reason = 'an internal company is not reviewed' } }
         if ($ConsultantCount -lt 1) { return [pscustomobject]@{ action = 'none'; reason = 'no consultants linked to this company' } }
         if (-not @(Get-PimCompanyContacts -Company $Company).Count) { return [pscustomobject]@{ action = 'none'; reason = 'the company has no valid contact e-mail -- nobody can confirm its consultants (reported)' } }
         $last = ConvertFrom-PimCompanyUtc $LastClosedUtc
@@ -120,11 +122,15 @@ function Set-PimCompanyReviewAnswer {
     #>
     param([Parameter(Mandatory)][object]$Campaign, [Parameter(Mandatory)][object]$Company, [Parameter(Mandatory)][string]$Upn,
           [ValidateSet('working', 'left', 'leave')][string]$Answer, [string]$LeaveUntil = '', [Parameter(Mandatory)][string]$By,
-          [datetime]$NowUtc = [datetime]::UtcNow)
+          [datetime]$NowUtc = [datetime]::UtcNow,
+          # an INTERNAL answer on the company's behalf (a Manager Admin or a sponsor-department Owner, checked by the
+          # caller -- the escalation mail invites it); recorded as 'internal:<who>'
+          [switch]$Internal)
     $no = { param($r) [pscustomobject]@{ ok = $false; reason = $r; campaign = $Campaign } }
     if ("$($Campaign.closedUtc)".Trim()) { return (& $no 'this review is closed') }
     $by = "$By".Trim().ToLowerInvariant()
-    if (@(Get-PimCompanyContacts -Company $Company) -notcontains $by) { return (& $no "$By is not a contact of $($Campaign.company)") }
+    if ($Internal) { $by = 'internal:' + $by }
+    elseif (@(Get-PimCompanyContacts -Company $Company) -notcontains $by) { return (& $no "$By is not a contact of $($Campaign.company)") }
     $u = "$Upn".Trim().ToLowerInvariant()
     $item = @($Campaign.items | Where-Object { "$($_.upn)" -eq $u }) | Select-Object -First 1
     if (-not $item) { return (& $no "$Upn is not on this company's list") }

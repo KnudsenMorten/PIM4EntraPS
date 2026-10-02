@@ -17,6 +17,7 @@
 
 if (-not (Get-Command Get-PimRfaEffectiveMode -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-Rfa.ps1') }
 if (-not (Get-Command Get-PimRfaStoreEntities -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-RfaStore.ps1') }
+if (-not (Get-Command Test-PimApiKeyRecord -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-RfaBroker.ps1') }   # §90 API keys
 
 $script:PimRfaTerminalStates = @('denied', 'expired', 'ended', 'cancelled', 'rejected', 'failed')
 $script:PimRfaKeepDays = 90
@@ -149,6 +150,9 @@ function Invoke-PimRfaSyncJob {
     foreach ($a in $admins) { $u = (Get-PimRfaRowValue -Row $a -Name 'UserPrincipalName').ToLowerInvariant(); if ($u) { $byUpn[$u] = $a; $byKey[(Get-PimRfaAccountKey -Salt $salt -UserPrincipalName $u)] = $a } }
     $deptOf = { param($a) $deptIdx[(Get-PimRfaRowValue -Row $a -Name 'Department').ToLowerInvariant()] }
     $apiApps = @(@(if ($settings -and $settings.PSObject.Properties['apiAppIds']) { $settings.apiAppIds }) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    # §90: the API keys the Manager issued (hash only), pim.Settings 'ApiKeys' = { keys: [...] }
+    $apiKeys = @()
+    try { $ak = Get-PimSqlSetting -ConnectionString $cs -Name 'ApiKeys'; if ($ak -and $ak.PSObject.Properties['keys']) { $apiKeys = @($ak.keys) } } catch { $apiKeys = @() }
     $portalUrl = "$(if ($settings) { $settings.portalUrl })".Trim()
     $managerUrl = "$(if (Get-Command Resolve-PimManagerMailUrl -ErrorAction SilentlyContinue) { try { Resolve-PimManagerMailUrl } catch { '' } })"
     $storeRows = @{}; foreach ($r in @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaRequests' -PartitionKey 'req')) { $storeRows["$($r.RowKey)"] = $r }
@@ -167,7 +171,16 @@ function Invoke-PimRfaSyncJob {
         $admin = $null
         if ($src -eq 'portal') { $admin = $byKey["$($sr.accountKey)"] }
         elseif ($src -eq 'api') {
-            if ($apiApps -notcontains "$($sr.callerAppId)".Trim().ToLowerInvariant()) { $reject[$sid] = 'the calling application is not allowed to use the RFA API'; continue }
+            # §90: the API is its own Pro feature (api.broker)
+            if ((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and -not (Test-PimFeatureAvailable -Key 'api.broker' -Quiet)) { $reject[$sid] = 'the access request API is not enabled here (Pro feature api.broker)'; continue }
+            # §90: an allow-listed Entra application OR a valid PIM API key with requests.write (re-checked HERE -- the
+            # broker's own check is only the fast answer)
+            $kid = "$($sr.callerKeyId)".Trim()
+            if ($kid) {
+                $kr = @($apiKeys | Where-Object { "$($_.id)" -eq $kid })[0]
+                $kv = Test-PimApiKeyRecord -Record $kr -Scope 'requests.write' -NowUtc $now
+                if (-not $kv.ok) { $reject[$sid] = "API key: $($kv.reason)"; continue }
+            } elseif ($apiApps -notcontains "$($sr.callerAppId)".Trim().ToLowerInvariant()) { $reject[$sid] = 'the calling application is not allowed to use the RFA API'; continue }
             $admin = $byUpn["$($sr.upn)".Trim().ToLowerInvariant()]
         } else { $reject[$sid] = "unknown source '$src'"; continue }
         if (-not $admin) { $reject[$sid] = 'no such account here'; continue }
@@ -278,6 +291,17 @@ function Invoke-PimRfaSyncJob {
     try {
         $cfg = @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaConfig' -PartitionKey 'config' | Where-Object { "$($_.RowKey)" -eq 'salt' })[0]
         if (-not $cfg -or "$($cfg.value)" -ne $salt) { Set-PimRfaStoreEntity -Store $Store -Table 'RfaConfig' -PartitionKey 'config' -RowKey 'salt' -Entity @{ value = $salt } }
+        # §90: what the broker needs for a fast API answer (the engine re-checks every request): the allowed apps + the
+        # valid API keys (hash only)
+        $appsCsv = (@($apiApps) -join ',')
+        $cfgS = @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaConfig' -PartitionKey 'config' | Where-Object { "$($_.RowKey)" -eq 'settings' })[0]
+        if (-not $cfgS -or "$($cfgS.apiAppIds)" -ne $appsCsv) { Set-PimRfaStoreEntity -Store $Store -Table 'RfaConfig' -PartitionKey 'config' -RowKey 'settings' -Entity @{ apiAppIds = $appsCsv } }
+        if (Get-Command Get-PimApiKeyPublishRows -ErrorAction SilentlyContinue) {
+            $wantK = @{}; foreach ($k in @(Get-PimApiKeyPublishRows -Keys $apiKeys -NowUtc $now)) { $wantK["$($k.hash)"] = $k }
+            $haveK = @{}; foreach ($k in @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaApiKeys' -PartitionKey 'key')) { $haveK["$($k.RowKey)"] = $k }
+            foreach ($h in @($wantK.Keys)) { $w = $wantK[$h]; $x = $haveK[$h]; if (-not $x -or "$($x.scopes)" -ne $w.scopes -or (Format-PimRfaValue $x.expiresUtc) -ne $w.expiresUtc) { Set-PimRfaStoreEntity -Store $Store -Table 'RfaApiKeys' -PartitionKey 'key' -RowKey $h -Entity @{ id = $w.id; name = $w.name; scopes = $w.scopes; expiresUtc = $w.expiresUtc } } }
+            foreach ($h in @($haveK.Keys | Where-Object { -not $wantK.ContainsKey($_) })) { Remove-PimRfaStoreEntity -Store $Store -Table 'RfaApiKeys' -PartitionKey 'key' -RowKey $h }
+        }
         $want = @{}; foreach ($e in @(Get-PimRfaEligibilityList -Admins $admins -Departments @($deptIdx.Values) -Companies $companies -Salt $salt)) { $want["$($e.accountKey)"] = $e }
         $have = @{}; foreach ($e in @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaEligibility' -PartitionKey 'acct')) { $have["$($e.RowKey)"] = $e }
         foreach ($k in @($want.Keys)) {
