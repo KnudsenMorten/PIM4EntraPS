@@ -14,6 +14,24 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.480 — Switch an environment to internal-only; connectors for the access request API
+
+- **New: turn an existing environment internal-only.** The rebuild that already turned internal-only environments into
+  external ones now also works the other way (`Rebuild-PimEnvInternal.ps1`). Like before, it plans unless told to apply,
+  keeps every resource that holds data (and proves it afterwards), restores the Manager and every job from a capture
+  and compares them, and repairs the identities that a recreate replaces. Going internal also publishes the private DNS
+  name the Manager needs inside your network. Locking the container registry is done only when you ask, and only when
+  the registry has a private endpoint, because image pulls and updates depend on it.
+- **Both rebuild directions now restore the Graph permissions** of the recreated identities, and name the leftovers
+  (old sign-in reply addresses, old DNS records) you remove by hand.
+- **New (Pro): connectors for the access request API** -- a ServiceNow guide (sign-in with a certificate, Flow Designer
+  actions, a catalog item, a status mapping), a JSON / Power Automate / Logic Apps guide, the OpenAPI document, and a
+  reference client script. A retried call with the same ticket number never creates a second request.
+- **New (Pro): `Set-PimRfaBrokerApiAuth.ps1`** lets the access request broker accept Microsoft Entra application tokens
+  (until now this needed a manual step after the broker was deployed). Plans unless told to apply.
+- **Lower running cost confirmed:** a managed tenant whose signed set did not change now stops in seconds; measured,
+  its daily container cost fell from about 13-15 to under 2 (DKK).
+
 ## v2.4.479 — Define your own deployment rings; ad-hoc group access; a self-healing hybrid AD sync
 
 - **New: deployment rings you define.** Name the rings and add or remove them (up to ten, 0..9) under Settings >

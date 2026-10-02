@@ -1,0 +1,123 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "PIM access request API",
+    "version": "1.0"
+  },
+  "components": {
+    "securitySchemes": {
+      "entra": {
+        "type": "oauth2",
+        "flows": {
+          "clientCredentials": {
+            "tokenUrl": "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+            "scopes": {}
+          }
+        }
+      },
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Api-Key"
+      }
+    }
+  },
+  "security": [
+    {
+      "entra": []
+    },
+    {
+      "apiKey": []
+    }
+  ],
+  "paths": {
+    "/api/v1/requests": {
+      "post": {
+        "summary": "Request an admin account enabled, or a group membership, for a number of hours (already approved by the caller's own workflow)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userPrincipalName",
+                  "hours",
+                  "ticket"
+                ],
+                "properties": {
+                  "userPrincipalName": {
+                    "type": "string"
+                  },
+                  "hours": {
+                    "type": "integer",
+                    "maximum": 744,
+                    "minimum": 1
+                  },
+                  "type": {
+                    "enum": [
+                      "enable",
+                      "group"
+                    ],
+                    "type": "string"
+                  },
+                  "groupName": {
+                    "type": "string"
+                  },
+                  "ticket": {
+                    "maxLength": 100,
+                    "type": "string"
+                  },
+                  "reason": {
+                    "maxLength": 500,
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "accepted"
+          },
+          "200": {
+            "description": "the same ticket again: its status"
+          },
+          "400": {
+            "description": "invalid"
+          },
+          "401": {
+            "description": "no valid token / key"
+          },
+          "403": {
+            "description": "not allowed"
+          }
+        }
+      }
+    },
+    "/api/v1/requests/{id}": {
+      "get": {
+        "summary": "The status of a request this caller made",
+        "responses": {
+          "200": {
+            "description": "status"
+          },
+          "404": {
+            "description": "not found for this caller"
+          }
+        }
+      }
+    },
+    "/api/v1/requests/{id}/cancel": {
+      "post": {
+        "summary": "End the window early",
+        "responses": {
+          "202": {
+            "description": "ending"
+          }
+        }
+      }
+    }
+  }
+}

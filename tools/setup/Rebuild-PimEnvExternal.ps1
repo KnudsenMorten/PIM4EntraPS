@@ -113,8 +113,28 @@ param(
     [string[]]$EasyAuthAllowedPrincipals = @(),
     [switch]$EasyAuthAllowAllTenantUsers,
 
+    # ---- §92 NET-2: THE OTHER DIRECTION (external -> internal) ----------------------------------------
+    # Same capture / delete / recreate / restore / diff / identity repair, with the environment recreated
+    # --internal-only TRUE. Rebuild-PimEnvInternal.ps1 calls this with -ToExposure Internal. The Manager is
+    # then reachable only from the VNet and its peers, so the private DNS zone for the NEW default domain is
+    # created (apex + wildcard A -> the environment's static IP) and linked to the spoke VNet and -HubVnetId.
+    [ValidateSet('External', 'Internal')][string]$ToExposure = 'External',
+    [string[]]$HubVnetId = @(),
+    [string]$PrivateDnsResourceGroup,
+    # §92 NET-3: turn the registry's public network access OFF (Premium only). REFUSED when the registry has
+    # no private endpoint: the environment pulls images and the in-cloud updater builds over it, so locking
+    # it without one stops every update. Never done implicitly.
+    [switch]$LockRegistry,
+    # §92 NET-1: re-grant the new identities' Graph app roles + the tick-start rights (Initialize-PimHostingAccess)
+    # after the identity repair. Needs the tenant and a certificate identity that may write app-role assignments.
+    [string]$HostingAccessTenantId,
+    [string]$HostingAccessClientId,
+    [string]$HostingAccessCertThumbprint,
+
     [switch]$Apply
 )
+$wantInternal = ($ToExposure -eq 'Internal')
+$fromWord = $(if ($wantInternal) { 'EXTERNAL' } else { 'INTERNAL-ONLY' }); $toWord = $(if ($wantInternal) { 'INTERNAL-ONLY' } else { 'EXTERNAL' })
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $PSCommandPath
@@ -346,7 +366,36 @@ function Invoke-AzChecked {
     if ($LASTEXITCODE -ne 0) { throw "$What FAILED (az exit $LASTEXITCODE) -- refusing to continue." }
 }
 
-Write-Host "=== Rebuild PIM environment as EXTERNAL -- $Tag / $EnvName ===" -ForegroundColor Cyan
+function Get-PimRegistryLockDecision {
+    <#
+      PURE (§92 NET-3). May the registry's public network access be turned OFF? Only Premium has the switch, and only a
+      registry WITH a private endpoint keeps working once it is off: the environment pulls images and the in-cloud
+      updater builds over it. Returns @{ lock; reason }.
+    #>
+    param([string]$Sku, [string]$PublicNetworkAccess, [int]$PrivateEndpointCount = 0, [switch]$Requested)
+    if ("$PublicNetworkAccess" -eq 'Disabled') { return @{ lock = $false; reason = 'public network access is already OFF' } }
+    if ("$Sku" -ne 'Premium') { return @{ lock = $false; reason = "the registry is $Sku -- only Premium can turn public access off (Basic/Standard have no network controls at all)" } }
+    if ($PrivateEndpointCount -lt 1) { return @{ lock = $false; reason = 'the registry has NO private endpoint -- turning public access off would stop every image pull and every update; add a private endpoint first' } }
+    if (-not $Requested) { return @{ lock = $false; reason = 'it could be turned off (Premium, private endpoint present) -- pass -LockRegistry to do it' } }
+    return @{ lock = $true; reason = 'Premium with a private endpoint -- public network access is turned OFF' }
+}
+function Get-PimInternalSwitchNotes {
+    # §92 NET-3: what an internal environment still needs that the environment rebuild itself does not change.
+    param([string[]]$SubG, [switch]$LockRegistry)
+    $notes = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @(AzJson (@('acr','list') + $SubG))) {
+        $pe = @($r.privateEndpointConnections).Count
+        $d = Get-PimRegistryLockDecision -Sku "$($r.sku.name)" -PublicNetworkAccess "$($r.publicNetworkAccess)" -PrivateEndpointCount $pe -Requested:$LockRegistry
+        $notes.Add("registry $($r.name): $($d.reason)") | Out-Null
+    }
+    foreach ($s in @(AzJson (@('sql','server','list') + $SubG))) {
+        $pe = @($s.privateEndpointConnections).Count
+        $notes.Add("sql $($s.name): " + $(if ($pe) { "private endpoint present ($pe)" } else { 'NO private endpoint -- the store is still reached over its public endpoint (VNet rule); add one with New-PimHostingPrerequisites -SqlPrivateEndpoint for a fully private store' })) | Out-Null
+    }
+    return @($notes)
+}
+
+Write-Host "=== Rebuild PIM environment as $toWord -- $Tag / $EnvName ===" -ForegroundColor Cyan
 Say "subscription : $SubscriptionId"
 Say "resource grp : $ResourceGroup"
 Say "az profile   : $AzureConfigDir"
@@ -380,6 +429,7 @@ if ($ResumeFromCapture) {
 } else {
 
 Step '0. capture the live environment (fresh -- an older capture is never reused)'
+Say "direction    : $fromWord -> $toWord" 'Cyan'
 $envCap = @(AzJson (@('containerapp','env','list') + $subG)) | Where-Object { $_.name -eq $EnvName }
 if (-not $envCap) { throw "environment '$EnvName' not found in $ResourceGroup. If a previous run already deleted it, re-run with -CaptureDir <that run's dir> -ResumeFromCapture." }
 $envCap = @($envCap)[0]
@@ -403,9 +453,9 @@ Say "subnet       : $subnetId"
 # 🔒 Routine deploys go through Setup-PimContainers / Update-PimContainers, which never delete an
 #    environment -- Setup-PimContainers detects this same mismatch and deliberately refuses to act
 #    on it, which is why this script exists as a separate, explicit, one-time tool.
-if ($isInternal -ne 'True') {
-    Warn "environment '$EnvName' is ALREADY external (internal=$isInternal). NOTHING TO REBUILD -- stopping."
-    Warn 'This script is a ONE-TIME migration for an environment built internal-only. It is not a deploy step.'
+if (($wantInternal -and $isInternal -eq 'True') -or (-not $wantInternal -and $isInternal -ne 'True')) {
+    Warn "environment '$EnvName' is ALREADY $toWord (internal=$isInternal). NOTHING TO REBUILD -- stopping."
+    Warn "This script is a ONE-TIME migration for an environment built $fromWord. It is not a deploy step."
     Warn 'To change only who can reach the Manager, use the APP (reversible, no downtime):'
     Warn "  az containerapp ingress update -g $ResourceGroup -n $ManagerApp --type external|internal"
     Warn 'To deploy code, use Update-PimContainers.ps1 -- it never deletes an environment.'
@@ -490,7 +540,7 @@ foreach ($k in $script:KeepBefore.Keys) {
     $v = @($script:KeepBefore[$k])
     Say ("  {0,-14} {1}" -f $k, $(if ($v.Count) { $v -join ', ' } else { '(none)' })) 'DarkGray'
 }
-if ($staleZone) {
+if ($staleZone -and -not $wantInternal) {
     Warn "private DNS zone '$oldDomain' exists -- it will SHADOW the new public name for VNet clients."
 }
 
@@ -565,7 +615,12 @@ elseif (-not "$SqlServer".Trim() -or -not "$SqlAdminClientId".Trim()) {
 }
 
 # ---- refuse early, not half-way -----------------------------------------------------------------
-if (-not $SkipEasyAuth -and -not $hadEasyAuth -and -not "$EasyAuthTenantId".Trim()) {
+if ($wantInternal -and -not $SkipEasyAuth -and -not $hadEasyAuth -and -not "$EasyAuthTenantId".Trim()) {
+    # going INTERNAL narrows who can reach it; auth stays the right default, but nothing is newly exposed -- so warn, not refuse
+    Warn 'No Easy Auth on the Manager and no -EasyAuthTenantId: it will be reachable from the VNet and its peers WITHOUT sign-in. Pass -EasyAuthTenantId to attach it.'
+    $SkipEasyAuth = $true
+}
+if (-not $wantInternal -and -not $SkipEasyAuth -and -not $hadEasyAuth -and -not "$EasyAuthTenantId".Trim()) {
     throw ("This environment has NO Easy Auth, so making it external would publish the Manager " +
            "unauthenticated. Pass -EasyAuthTenantId <tenant> so auth can be attached before it is " +
            "exposed, or -SkipEasyAuth to leave the Manager on INTERNAL ingress and attach auth yourself.")
@@ -574,10 +629,13 @@ if (-not $SkipEasyAuth -and -not $hadEasyAuth -and -not "$EasyAuthTenantId".Trim
 if (-not $Apply) {
     Step 'PLAN ONLY -- nothing was changed'
     Say "would DELETE : $(@($jobsCap).Count) job(s), app '$ManagerApp', environment '$EnvName'"
-    Say "would CREATE : '$EnvName' with --internal-only false (same subnet, same workspace)"
+    Say "would CREATE : '$EnvName' with --internal-only $(if ($wantInternal) { 'true' } else { 'false' }) (same subnet, same workspace)"
     Say "would RESTORE: '$ManagerApp' with ingress INTERNAL, then $(@($jobsCap).Count) job(s)"
-    Say ("would THEN   : " + $(if ($SkipEasyAuth) { 'stop (Manager stays INTERNAL)' } else { 'attach Easy Auth, verify it, then flip ingress to external' }))
-    if ($staleZone -and -not $KeepOldPrivateDnsZone) { Say "would DELETE : stale private DNS zone '$oldDomain'" }
+    Say ("would THEN   : " + $(if ($SkipEasyAuth) { 'stop (Manager stays INTERNAL)' } else { 'attach Easy Auth, verify it, then flip ingress to external' + $(if ($wantInternal) { ' (inside an internal-only environment = the VNet and its peers only)' } else { '' }) }))
+    if ($wantInternal) { Say ("would CREATE : private DNS zone for the NEW default domain -> the static IP, linked to the spoke VNet" + $(if (@($HubVnetId).Count) { " + $(@($HubVnetId).Count) hub VNet(s)" } else { ' (no -HubVnetId: peered clients will not resolve it)' })) }
+    if ($wantInternal) { foreach ($n in @(Get-PimInternalSwitchNotes -SubG $subG -LockRegistry:$LockRegistry)) { Say "NOTE         : $n" 'Yellow' } }
+    if (-not $wantInternal -and $staleZone -and -not $KeepOldPrivateDnsZone) { Say "would DELETE : stale private DNS zone '$oldDomain'" }
+    if (-not "$HostingAccessTenantId".Trim()) { Say 'NOTE         : no -HostingAccessTenantId -- the Graph app roles of the NEW identities are NOT re-granted; run Initialize-PimHostingAccess.ps1 afterwards' 'Yellow' }
     Say "capture written to $CaptureDir" 'Green'
     Say 'Re-run with -Apply to execute.' 'Yellow'
     return
@@ -595,9 +653,10 @@ if (-not $Apply) {
 # 🔑 Decide from the LIVE state, not from the switch: if the environment is already external, the
 # deletes are done and the run belongs at the restore step.
 $envNow = AzJson (@('containerapp','env','show') + $subG + @('-n',$EnvName))
-$skipDeletes = ($envNow -and "$($envNow.properties.vnetConfiguration.internal)" -ne 'True')
+$envNowInternal = ($envNow -and "$($envNow.properties.vnetConfiguration.internal)" -eq 'True')
+$skipDeletes = ($envNow -and ($envNowInternal -eq $wantInternal))
 if ($skipDeletes) {
-    Step "1-3. SKIPPED -- '$EnvName' is already EXTERNAL, so the deletes are already done"
+    Step "1-3. SKIPPED -- '$EnvName' is already $toWord, so the deletes are already done"
     Say 'resuming at the restore step.' 'Green'
 } else {
 
@@ -633,27 +692,29 @@ while ($true) {
 # =================================================================================================
 # 4. RECREATE the environment, EXTERNAL-capable.
 # =================================================================================================
-Step '4. create the environment with --internal-only false'
+$internalFlag = $(if ($wantInternal) { 'true' } else { 'false' })
+Step "4. create the environment with --internal-only $internalFlag"
 $lawKey = az monitor log-analytics workspace get-shared-keys @subG -n $lawName --query primarySharedKey -o tsv 2>$null
 if (-not "$lawKey".Trim()) { throw "could not read the shared key for workspace '$lawName' -- refusing to recreate the environment without its log destination." }
 # 🔑 IDEMPOTENT ON RESUME. A resumed run may find the environment already recreated by the run
 # that failed later on -- recreating it would delete the work and start the 15-30 minute wait
 # again. Re-use it when it is already EXTERNAL; refuse if it somehow came back internal.
 $existing = AzJson (@('containerapp','env','show') + $subG + @('-n',$EnvName))
-if ($existing -and "$($existing.properties.vnetConfiguration.internal)" -ne 'True') {
-    Say "environment '$EnvName' already exists and is EXTERNAL -- reusing it" 'Green'
+$existingInternal = ($existing -and "$($existing.properties.vnetConfiguration.internal)" -eq 'True')
+if ($existing -and ($existingInternal -eq $wantInternal)) {
+    Say "environment '$EnvName' already exists and is $toWord -- reusing it" 'Green'
 } else {
-    if ($existing) { throw "environment '$EnvName' exists and is still internal-only -- delete it before resuming." }
+    if ($existing) { throw "environment '$EnvName' exists and is still $fromWord -- delete it before resuming." }
     Invoke-AzChecked "create environment '$EnvName'" { az containerapp env create @subG -n $EnvName --location $location `
-        --infrastructure-subnet-resource-id $subnetId --internal-only false `
+        --infrastructure-subnet-resource-id $subnetId --internal-only $internalFlag `
         --enable-workload-profiles --logs-destination log-analytics `
         --logs-workspace-id $lawCid --logs-workspace-key $lawKey -o none }
 }
 $newEnv = AzJson (@('containerapp','env','show') + $subG + @('-n',$EnvName))
 if (-not $newEnv) { throw 'the environment was not created.' }
 # VERIFY, never assume -- this is the one property the whole exercise exists to change.
-if ("$($newEnv.properties.vnetConfiguration.internal)" -eq 'True') {
-    throw "the recreated environment is STILL internal-only -- refusing to continue."
+if ((("$($newEnv.properties.vnetConfiguration.internal)" -eq 'True')) -ne $wantInternal) {
+    throw "the recreated environment is STILL $fromWord -- refusing to continue."
 }
 $newDomain = $newEnv.properties.defaultDomain
 Say "new domain   : $newDomain" 'Green'
@@ -864,6 +925,26 @@ Say 'identity-keyed state repaired and verified' 'Green'
 # =================================================================================================
 # 7. PROVE THE RESTORE IS FAITHFUL. "Recreated" is a claim; a diff is evidence.
 # =================================================================================================
+# =================================================================================================
+# 6d. §92 NET-1 -- the GRAPH app roles of the NEW identities. 6c repairs SQL users and Azure role
+#     assignments; the tick's Engine roles and the Manager's read-only roles are Graph app-role
+#     assignments on the OLD principals and vanished with them. Without this the engine runs and is
+#     refused by Graph on every call.
+# =================================================================================================
+if ("$HostingAccessTenantId".Trim() -and "$SqlServer".Trim()) {
+    Step '6d. re-grant the Graph app roles + tick-start rights of the NEW identities (Initialize-PimHostingAccess)'
+    $hostAccess = Join-Path $here 'Initialize-PimHostingAccess.ps1'
+    $ha = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; SqlServerFqdn = $(if ($SqlServer -match '\.') { $SqlServer } else { "$SqlServer.database.windows.net" }); SqlDatabase = $SqlDatabase; TenantId = $HostingAccessTenantId }
+    if ("$HostingAccessClientId".Trim()) { $ha['ClientId'] = $HostingAccessClientId }
+    if ("$HostingAccessCertThumbprint".Trim()) { $ha['CertThumbprint'] = $HostingAccessCertThumbprint }
+    & $hostAccess @ha
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { Bad "Initialize-PimHostingAccess failed (exit $LASTEXITCODE) -- the new identities may lack their Graph roles; re-run it before relying on the engine." }
+} else {
+    Step '6d. Graph app roles of the NEW identities -- NOT re-granted here'
+    Warn ("re-run: tools\setup\Initialize-PimHostingAccess.ps1 -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup " +
+          "-SqlServerFqdn <server>.database.windows.net -TenantId <tenant> -ClientId <cert SPN> -CertThumbprint <thumb>")
+}
+
 Step '7. verify the restore against the capture'
 $now = AzJson (@('containerapp','show') + $subG + @('-n',$ManagerApp))
 function Cmp($what, $a, $b) {
@@ -975,7 +1056,36 @@ if ($SkipEasyAuth) {
 # =================================================================================================
 # 10. the private DNS zone for the OLD domain -- it shadows the new public name inside the VNet.
 # =================================================================================================
-if ($staleZone -and -not $KeepOldPrivateDnsZone) {
+if ($wantInternal) {
+    # §92 NET-2: an internal-only environment publishes its apps at ONE private static IP that nothing off the
+    # subnet resolves -- the zone is what makes the Manager reachable at all from the VNet and its peers.
+    Step "10. private DNS zone for the NEW domain '$newDomain' -> $($newEnv.properties.staticIp)"
+    $reach = Join-Path $sol 'engine\_shared\PIM-Reachability.ps1'
+    if (-not (Get-Command Get-PimPrivateDnsPlan -ErrorAction SilentlyContinue)) { . $reach }
+    if (-not (Get-Command Set-PimPrivateDnsZone -ErrorAction SilentlyContinue)) {
+        # ONLY this function from the setup library -- dot-sourcing the whole file would also install its guarded az wrapper
+        $tk = $null; $pe = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $here '_PimSetupShared.ps1'), [ref]$tk, [ref]$pe)
+        $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Set-PimPrivateDnsZone' }, $true)
+        if (-not $fn) { throw 'Set-PimPrivateDnsZone not found in _PimSetupShared.ps1' }
+        . ([scriptblock]::Create($fn.Extent.Text))
+    }
+    $vnetOfSubnet = ($subnetId -replace '/subnets/[^/]+$', '')
+    $links = @(@($vnetOfSubnet) + @($HubVnetId | Where-Object { "$_".Trim() }) | Select-Object -Unique)
+    $dnsRg = $(if ("$PrivateDnsResourceGroup".Trim()) { $PrivateDnsResourceGroup } else { $ResourceGroup })
+    Set-PimPrivateDnsZone -EnvDomain $newDomain -StaticIp "$($newEnv.properties.staticIp)" -ResourceGroup $dnsRg -SubscriptionId $SubscriptionId -LinkVnetIds $links
+    if (-not @($HubVnetId).Count) { Warn 'no -HubVnetId: only the spoke VNet resolves the Manager. Link the hub (or add the record to your AD DNS) for clients outside it.' }
+    # §92 NET-3: the registry (only on request, only when safe) and what the store still needs
+    foreach ($r in @(AzJson (@('acr','list') + $subG))) {
+        $d = Get-PimRegistryLockDecision -Sku "$($r.sku.name)" -PublicNetworkAccess "$($r.publicNetworkAccess)" -PrivateEndpointCount @($r.privateEndpointConnections).Count -Requested:$LockRegistry
+        if ($d.lock) {
+            Invoke-AzChecked "turn public network access OFF on registry '$($r.name)'" { az acr update --subscription $SubscriptionId -n $r.name --public-network-enabled false -o none }
+            $pna = "$(az acr show --subscription $SubscriptionId -n $r.name --query publicNetworkAccess -o tsv 2>$null)".Trim()
+            if ($pna -ne 'Disabled') { Bad "registry '$($r.name)' still reports publicNetworkAccess=$pna after the switch" } else { Say "registry $($r.name): public network access OFF (read back)" 'Green' }
+        } else { Say "registry $($r.name): $($d.reason)" 'Yellow' }
+    }
+    foreach ($n in @(Get-PimInternalSwitchNotes -SubG $subG | Where-Object { $_ -like 'sql *' })) { Warn $n }
+} elseif ($staleZone -and -not $KeepOldPrivateDnsZone) {
     Step "10. remove the stale private DNS zone '$oldDomain'"
     # Links must go first; a zone with virtual-network links refuses to delete.
     foreach ($lnk in @(AzJson (@('network','private-dns','link','vnet','list') + $subG + @('-z',$oldDomain)))) {
@@ -1027,5 +1137,7 @@ Step 'REBUILD COMPLETE'
 Say "old domain : $oldDomain"
 Say "new domain : $newDomain" 'Green'
 Say "capture    : $CaptureDir (configuration only -- every file that held a secret value was shredded)"
-if (-not $SkipEasyAuth) { Say 'verify: the public FQDN should answer 302 to Entra, never 200.' 'Yellow' }
+if (-not $SkipEasyAuth) { Say $(if ($wantInternal) { 'verify FROM A VNET / HUB CLIENT: the FQDN should answer 302 to Entra, never 200 (from the internet it must not resolve or answer).' } else { 'verify: the public FQDN should answer 302 to Entra, never 200.' }) 'Yellow' }
+# §92 NET-4: what the rebuild cannot see and does not remove
+Warn "leftovers to remove by hand: reply URLs for *.$oldDomain on the Manager's Entra app registration; any AD / public DNS record for $oldDomain or a custom domain pointing at it."
 
