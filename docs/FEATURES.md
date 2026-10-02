@@ -176,6 +176,12 @@ deployment is a supported choice) and no credentials lying around.
   installation from GitHub and re-running the full end-to-end test against it.
 
 ## 4. MSP
+- **A managed tenant only works when something changed -- much lower running cost.** ✅ 2026-10-02
+  The managed tenant's pull compares the signed set it fetched (and everything that decides what it projects) with the last
+  one it applied, and stops in seconds when nothing changed; the engine pass that follows only runs for the areas not
+  already handled in the same cycle. A full pull still happens on the first run, on Run now, after an update and once a
+  day as a safety pass. Measured on a managed test tenant: a pull went from about 200 s to under 40 s, and the daily
+  container cost fell from about 13-15 to under 2 (DKK), leaving mostly the fixed cost of the hosting.
 - **Replication rings — roll a change to one wave of customers before the rest.** ✅ 2026-09-18
   Three rings in the same order as the software rings — **0 = dev, 1 = test, 2 = broad** (since
   2.4.388; the order used to be the reverse, and existing rows and tenants were converted so each

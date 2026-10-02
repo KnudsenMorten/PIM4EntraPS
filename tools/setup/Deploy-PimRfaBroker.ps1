@@ -124,7 +124,7 @@ foreach ($s in $plan.steps) {
             # so a failure here is a warning with the next step, never a stopped deploy.
             try { [void](Invoke-Az -Sub $s.sub -AzArgs @('containerapp', 'auth', 'update', '-g', $s.rg, '-n', $a.app, '--unauthenticated-client-action', 'AllowAnonymous', '--enabled', 'true')) }
             catch { Write-Warning "   Easy Auth could not be switched on yet ($($_.Exception.Message)) -- Entra application tokens are refused until it is; API keys and the portal work." }
-            Write-Host '   Easy Auth: register the Entra provider for the API audience (containerapp auth microsoft update) to accept Entra application tokens.' -ForegroundColor Yellow
+            Write-Host "   NEXT: Set-PimRfaBrokerApiAuth.ps1 -SubscriptionId $($s.sub) -ResourceGroup $($s.rg) -BrokerApp $($a.app) -TenantId <tenant>  (registers the API audience so Entra application tokens are accepted; plans unless -Apply)" -ForegroundColor Yellow
         }
         'ip' { foreach ($ip in @($a.allow)) { [void](Invoke-Az -Sub $s.sub -AzArgs @('containerapp', 'ingress', 'access-restriction', 'set', '-g', $s.rg, '-n', $a.app, '--rule-name', ("allow-" + ($ip -replace '[./]', '-')), '--ip-address', $ip, '--action', 'Allow')) } }
         'mail' { Write-Host "   NEXT: Initialize-PimMailSender.ps1 ... -ManagedIdentityObjectId $appPrincipal  (Exchange-scoped send as $SenderMailbox only)" -ForegroundColor Yellow }
