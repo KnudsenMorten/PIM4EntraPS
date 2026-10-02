@@ -787,6 +787,26 @@ try {
     Say "  could not enumerate the jobs in $rg -- only the NAMED jobs were rolled: $($_.Exception.Message)" 'Yellow'
 }
 
+# ---- 2c. 2026-10-02 -- every other CONTAINER APP that runs the same image ------------------------
+# The access request broker (ca-pim-rfa) is an app on the Manager's image; only the Manager was rolled by name, so the
+# broker stayed behind (internal: 2.4.478 while ring 1 ran 2.4.481). Same rule as the jobs (Get-PimAcaJobRollPlan:
+# same REPOSITORY, single container), the Manager excluded -- it was rolled above, with its health gate.
+try {
+    $apps = Get-PimAcaApps -SubscriptionId $sub -ResourceGroup $rg
+    $aplan = Get-PimAcaJobRollPlan -Jobs $apps -TargetImage $targetImg -Exclude @($managerApp)
+    foreach ($s in @($aplan.skip | Where-Object { $_.reason -ne 'rolled separately' })) { Say "  skipping app $($s.name): $($s.reason)" 'DarkGray' }
+    foreach ($r in @($aplan.roll)) {
+        try {
+            Say "rolling app $($r.name) (same image as the Manager)"
+            [void](Set-PimAcaAppImage -SubscriptionId $sub -ResourceGroup $rg -Name $r.name -Image $targetImg)
+            $discovered++
+        } catch { $jobFailed += $r.name; Say "  app $($r.name) NOT rolled: $($_.Exception.Message)" 'Yellow' }
+    }
+} catch {
+    $jobFailed += '<app enumeration>'
+    Say "  could not enumerate the container apps in $rg -- only the Manager was rolled: $($_.Exception.Message)" 'Yellow'
+}
+
 # ---- 3. itself, LAST --------------------------------------------------------------------------
 if ($selfJob) {
     try {

@@ -8043,6 +8043,15 @@ session — `Write-PimManagerLoginAudit`, called from the `GET /` handler, dedup
 trail. It records the resolved role, the role source, and `local`/`hosted` mode. Like
 all audit writes it is best-effort and never blocks serving the page.
 
+**MCP server (Pro).** The Manager answers the Model Context Protocol on `POST /mcp` (streamable HTTP, JSON
+responses, JSON-RPC 2.0). Hosted, the platform sign-in validates an Entra access token for the Manager's own
+application (scope `mcp.access`); locally, the page token is required. The caller's Manager role (Reader / Admin /
+SuperAdmin) is resolved exactly as for the page and decides which tools are listed and callable. Read tools answer
+from the same store reads as the page; `stage_change` writes into the shared pending set; `commit_staged` commits
+only the caller's own staged changes through the very function the page's Review & commit uses, so validation,
+second-approver and Tier 0/1 approval, the offboarding hold and optimistic concurrency apply unchanged. Nothing is
+ever activated. Every call is audited as `mcp.<read|propose|commit>`; the endpoint refuses without the Pro feature.
+
 ---
 
 ## 19. Editions

@@ -407,6 +407,20 @@ function Get-PimAcaJobs {
     @(Invoke-PimArm -Method GET -Path $path -ApiVersion $script:PimAcaApi -All)
 }
 
+function Get-PimAcaApps {
+    <#
+      Every Container App in a resource group (LIST). 2026-10-02: the access request broker (ca-pim-rfa) is an APP running
+      the same image as the Manager, and the updater only knew the Manager by name -- measured on internal, the broker
+      stayed on 2.4.478 while ring 1 moved to 2.4.481. The apps go through the same "same repository" plan as the jobs.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$ResourceGroup
+    )
+    $path = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps"
+    @(Invoke-PimArm -Method GET -Path $path -ApiVersion $script:PimAcaApi -All)
+}
+
 function Set-PimAcaJobEnvValue {
     <#
       Add or update ONE environment variable on a Container Apps Job, leaving the rest alone.
