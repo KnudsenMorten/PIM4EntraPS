@@ -595,6 +595,8 @@
   /* Rows referenced by a PIM-FK-001 (orphan: GroupTag not in any PIM-Definitions-* CSV). */
   table.grid tr.row-orphan-error { outline:2px solid #cf222e; outline-offset:-2px; background:#ffebe9; }
   table.grid tr.row-orphan-error td:first-child::before { content:'\26A0  '; color:#cf222e; font-weight:700; }
+  /* §91.6: the rows in scope of the problem opened from "Check for problems" */
+  table.grid tr.row-problem { outline:2px solid #bc4c00; outline-offset:-2px; background:#fff1e5; }
   /* FK-001 quick-fix buttons embedded in the Validate tab. */
   .v-fk-actions { display:flex; gap:6px; margin-top:6px; }
   /* BUG-91: the note that says a per-finding fix is STAGED, not written, and that the bulk
@@ -1268,6 +1270,13 @@
         <div class="wiz-sub">Build the Azure RBAC capability bundle directly, at a chosen management group, subscription or resource group scope.</div>
       </div>
     </div>
+
+    <!-- 2026-10-02 (operator: "these 2 should be moved into create access"): moved here from the bulk page. -->
+    <div class="wiz-group-hdr" data-step="2b">
+      <span class="wiz-step-num">2</span> Entra roles &amp; Administrative Units
+      <span class="wiz-group-sub">Give an existing group Entra roles (tenant-wide or only inside chosen Administrative Units), or define a new Administrative Unit.</span>
+    </div>
+    <div id="newRoleAuHost" style="padding:0 18px 12px 18px;"></div>
 
     <div class="wiz-group-hdr" data-step="3">
       <span class="wiz-step-num">&#x2398;</span> Utilities
@@ -2347,7 +2356,6 @@
         // Named for what it does. Creation genuinely lives in two places -- the guided wizards under
         // "Create access" and the bulk/derived actions here -- so the description says which is which
         // instead of denying that this one creates at all.
-        { tab: 'authoring',  label: 'Create & change access (bulk)',desc: 'Duplicate a group, import administrators, attach Entra roles, move an admin between groups. Guided one-at-a-time creation is under Create access' },
         { tab: 'accounts',   label: 'Admin accounts & TAP',  desc: 'The privileged accounts themselves: update one, issue or reset its Temporary Access Pass, flag it for offboarding' },
         { tab: 'onboarding', label: 'Invite a guest or consultant', desc: 'B2B guest invitation into the delegation model, and enable/disable a managed consultant account' },
         // Departments decide WHO APPROVES and WHO IS MAILED for everything above (the owner chain
@@ -2371,6 +2379,8 @@
           // of an existing delegation are all changed here.
           desc: 'Every existing delegation in one table: change an eligibility from 90 to 365 days, make it Active or Eligible, or switch its policy to one that needs approval -- the group, Entra role or Azure role policy. Edits are staged in Pending changes like any other.' },
         { tab: 'grid', gridScope: '',            label: 'All records',           desc: 'The raw records behind every screen, in a table' },
+        // 2026-10-02 (operator: "move the build create and change to the bottom on the menu as it is used rarely").
+        { tab: 'authoring',  label: 'Create & change access (bulk)',desc: 'Duplicate a group, import administrators, move an admin between groups. Used rarely. Guided one-at-a-time creation is under Create access' },
 
       ] },
     { id: 'change', label: 'Pending changes',
@@ -2852,7 +2862,7 @@
   // reset tap, create new admin, flag for deletion, revoke sessions."
   // ONE row per admin, every verb reachable without leaving it. Rows the caller may not manage
   // are never returned by the endpoint, so they cannot be drawn and cannot be bulk-selected.
-  const acctGridState = { rows: [], meta: null, busy: '', filter: '' };
+  const acctGridState = { rows: [], meta: null, busy: '', filter: '', sel: new Set() };   // sel: §89 multi-select (UPNs)
 
   async function renderAccountGrid(container) {
     if (!isServer) { container.innerHTML = '<div style="color:#57606a">Static mode &mdash; the account grid needs the server.</div>'; return; }
@@ -2908,7 +2918,9 @@
     // become very cramped in layout on wide screens"). 1180px was a sensible cap when it was written and
     // is simply too small now. width:100% makes the table USE the width it is given; the cap stays, far
     // wider, so an ultrawide does not stretch rows to an unreadable line length.
+    h += acctBulkBarHtml(rows);
     h += '<table class="set-table" style="width:100%;max-width:1900px;"><tr>' +
+         '<th style="width:26px;"><input type="checkbox" id="acctSelAll" title="Select every account shown (central admins are read-only and left out)"></th>' +
          '<th>Admin</th><th>Type</th>' +
          // 🔴 71.24 (operator 2026-09-16: "in the admin overview i need to see which sponsor dept an
          // admin is linked to. this is considered the dept that sponsor him and define approval for
@@ -2932,6 +2944,8 @@
       const flagged = a.alreadyFlagged;
       const dis = (ok) => (ok && !busy) ? '' : ' disabled';
       h += '<tr' + (flagged ? ' style="background:#fff8f6;"' : '') + '>' +
+        '<td><input type="checkbox" class="acctSel" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + (acctGridState.sel.has(a.userPrincipalName) ? ' checked' : '') +
+          ((a.readOnly || a.upnMissing) ? ' disabled title="' + escapeHtml(a.readOnlyWhy || 'read-only') + '"' : '') + '></td>' +
         '<td><div style="font-weight:600;">' + escapeHtml(a.displayName || a.userName || a.userPrincipalName) +
           (a.source === 'central' ? ' <span class="acctCentralBadge" title="' + escapeHtml(a.readOnlyWhy || 'central admin') + '" style="font-size:10px;font-weight:600;color:#8250df;border:1px solid #d8b9ff;border-radius:10px;padding:0 6px;">central</span>' : '') + '</div>' +
           (a.upnMissing
@@ -2978,7 +2992,7 @@
             ' title="Give this admin access — opens the delegation wizard for this person." style="font-size:11px;">Give access →</button>' +
         '</td></tr>' +
         // The inline editor for THIS admin, collapsed until Edit is pressed.
-        '<tr class="acctEditRowTop" id="acctEditTop-' + escapeHtml(a.userPrincipalName) + '" hidden><td colspan="' + (syncCol ? 10 : 9) + '" style="background:#f6f8fa;padding:10px 12px;">' +
+        '<tr class="acctEditRowTop" id="acctEditTop-' + escapeHtml(a.userPrincipalName) + '" hidden><td colspan="' + (syncCol ? 11 : 10) + '" style="background:#f6f8fa;padding:10px 12px;">' +
           '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">' +
           acctEditFieldsHtml(a) +
           '<button class="btn acctEditSaveTop" data-upn="' + escapeHtml(a.userPrincipalName) + '">Save</button>' +
@@ -2991,6 +3005,95 @@
     h += '</table><div id="acctMsg" style="margin-top:10px;font-size:12px;"></div>';
     container.innerHTML = h;
     wireAccountGrid(container);
+    wireAcctBulk(container);
+  }
+
+  // §89 / §91.9 (operator 2026-10-02: "i am missing the multiselect option in admin accounts so i can select multiple
+  // accounts and fx map to internal dept or company" / "extend the auto-disable with x months/x days"). Select accounts,
+  // then: link to a department (internal) or a company, extend or set the auto-disable date, Reset TAP, Revoke sessions.
+  // Every change goes through the SAME per-account routes as one-by-one (validation, approvals, audit); a date that
+  // disables at once is HELD for an approval exactly like a single edit (acctModifyWithApproval).
+  function acctBulkBarHtml(rows) {
+    const visible = new Set((rows || []).map(a => a.userPrincipalName));
+    for (const u of Array.from(acctGridState.sel)) { if (!visible.has(u)) acctGridState.sel.delete(u); }   // a filtered-out row is never acted on
+    const n = acctGridState.sel.size;
+    if (!n) return '<div id="acctBulk" style="display:none;"></div>';
+    const dOpts = (deptOptions() || []).map(o => '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>').join('');
+    const cOpts = (companyOptions(function () { const c = document.getElementById('acctGridWrap'); if (c) renderAccountGrid(c); }) || []).map(o => '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</option>').join('');
+    return '<div id="acctBulk" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:#ddf4ff;border:1px solid #54aeff;border-radius:6px;padding:8px 10px;margin-bottom:8px;font-size:12px;">' +
+      '<b>' + n + ' selected</b>' +
+      '<span>Department (internal) <select id="acctBulkDept"><option value="">(none -- unlink)</option>' + dOpts + '</select> <button class="btn-sec" id="acctBulkDeptGo">Link</button></span>' +
+      '<span>Company <select id="acctBulkCo"><option value="">(none -- unlink)</option>' + cOpts + '</select> <button class="btn-sec" id="acctBulkCoGo">Link</button></span>' +
+      '<span>Extend auto-disable by <input id="acctBulkExtN" type="number" min="1" max="999" value="3" style="width:56px;"> <select id="acctBulkExtU"><option value="m">months</option><option value="d">days</option></select> <button class="btn-sec" id="acctBulkExtGo">Extend</button></span>' +
+      '<span>or set <input id="acctBulkDate" type="date"> <button class="btn-sec" id="acctBulkDateGo">Set date</button></span>' +
+      '<button class="btn-sec" id="acctBulkTap">Reset TAP</button>' +
+      '<button class="btn-sec" id="acctBulkRevoke">Revoke sessions</button>' +
+      '<button class="btn-sec" id="acctBulkClear">Clear selection</button></div>';
+  }
+  // PURE: the date N days / months after the LATER of today and the current auto-disable date (yyyy-mm-dd).
+  function acctExtendDate(current, n, unit) {
+    const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+    let base = today;
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(current || ''));
+    if (m) { const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])); if (d > base) base = d; }
+    const r = new Date(base.getTime());
+    if (unit === 'm') { const day = r.getUTCDate(); r.setUTCDate(1); r.setUTCMonth(r.getUTCMonth() + n); const last = new Date(Date.UTC(r.getUTCFullYear(), r.getUTCMonth() + 1, 0)).getUTCDate(); r.setUTCDate(Math.min(day, last)); }
+    else r.setUTCDate(r.getUTCDate() + n);
+    return r.toISOString().slice(0, 10);
+  }
+  function wireAcctBulk(container) {
+    const rowsByUpn = {}; (acctGridState.rows || []).forEach(a => { rowsByUpn[a.userPrincipalName] = a; });
+    const rerender = function () { renderAccountGrid(container); };
+    container.querySelectorAll('.acctSel').forEach(cb => cb.onchange = function () { if (cb.checked) acctGridState.sel.add(cb.dataset.upn); else acctGridState.sel.delete(cb.dataset.upn); rerender(); });
+    const all = document.getElementById('acctSelAll');
+    if (all) {
+      const boxes = Array.from(container.querySelectorAll('.acctSel:not([disabled])'));
+      all.checked = boxes.length > 0 && boxes.every(b => b.checked);
+      all.onchange = function () { boxes.forEach(b => { if (all.checked) acctGridState.sel.add(b.dataset.upn); else acctGridState.sel.delete(b.dataset.upn); }); rerender(); };
+    }
+    if (!acctGridState.sel.size) return;
+    // the department list loads asynchronously (deptOptions): draw the bar again once it is there
+    if (typeof _deptLoading !== 'undefined' && _deptLoading && !(deptOptions() || []).length) { _deptLoading.then(function () { if (acctGridState.sel.size) rerender(); }); }
+    const msg = function (t, bad) { const m = document.getElementById('acctMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#1a7f37'; } };
+    // one change per selected account through acctModifyWithApproval (the per-account route + its approval path)
+    const each = async function (label, payloadOf) {
+      const upns = Array.from(acctGridState.sel); let ok = 0; const held = [], bad = [];
+      for (const u of upns) {
+        const pl = payloadOf(rowsByUpn[u] || {}); if (!pl) continue;
+        msg(label + ': ' + u + ' (' + (ok + held.length + bad.length + 1) + ' of ' + upns.length + ')…');
+        try { const r = await acctModifyWithApproval(u, Object.assign({ userPrincipalName: u }, pl)); if (r.ok) ok++; else if (/approv/i.test(r.text || '')) held.push(u); else bad.push(u + ': ' + (r.text || 'refused')); }
+        catch (e) { bad.push(u + ': ' + (e.message || e)); }
+      }
+      msg(label + ' -- ' + ok + ' saved' + (held.length ? ', ' + held.length + ' held for approval' : '') + (bad.length ? ', ' + bad.length + ' refused: ' + bad.slice(0, 5).join('; ') : '') + '. The engine applies it on its next run.', bad.length > 0);
+      try { await renderAccounts(); } catch (_) { }
+    };
+    const on = function (id, fn) { const el = document.getElementById(id); if (el) el.onclick = fn; };
+    on('acctBulkDeptGo', function () { const v = document.getElementById('acctBulkDept').value; if (!confirm((v ? 'Link ' + acctGridState.sel.size + ' account(s) to the department (internal) "' + v + '"?' : 'Unlink ' + acctGridState.sel.size + ' account(s) from their department?') + '\n\nThe department owners approve and receive the mail for these admins.')) return; each('Department', () => ({ department: v })); });
+    on('acctBulkCoGo', function () { const v = document.getElementById('acctBulkCo').value; if (!confirm(v ? 'Link ' + acctGridState.sel.size + ' account(s) to the company "' + v + '"?' : 'Unlink ' + acctGridState.sel.size + ' account(s) from their company?')) return; each('Company', () => ({ company: v })); });
+    on('acctBulkExtGo', function () {
+      const n = parseInt(document.getElementById('acctBulkExtN').value, 10), u = document.getElementById('acctBulkExtU').value;
+      if (!(n >= 1 && n <= 999)) { msg('Enter a whole number from 1 to 999.', true); return; }
+      const without = Array.from(acctGridState.sel).filter(x => !/^\d{4}-\d{2}-\d{2}/.test(String((rowsByUpn[x] || {}).autoDisableDate || ''))).length;
+      if (!confirm('Extend the auto-disable date of ' + acctGridState.sel.size + ' account(s) by ' + n + (u === 'm' ? ' month(s)' : ' day(s)') + '?\n\nEach counts from its current date (or today when that is earlier).' + (without ? '\n\n' + without + ' of them have NO date yet (or a date expression): they GET one, ' + n + (u === 'm' ? ' month(s)' : ' day(s)') + ' from today.' : ''))) return;
+      each('Extend auto-disable', a => ({ autoDisableDate: acctExtendDate(a.autoDisableDate, n, u) }));
+    });
+    on('acctBulkDateGo', function () {
+      const v = document.getElementById('acctBulkDate').value;
+      if (!v) { msg('Pick a date first.', true); return; }
+      if (!confirm('Set the auto-disable date of ' + acctGridState.sel.size + ' account(s) to ' + v + '?\n\nOn that date each account is disabled, its sessions revoked and its PIM access removed. A date today or earlier is held for an approval.')) return;
+      each('Auto-disable date', () => ({ autoDisableDate: v }));
+    });
+    const actions = async function (kind) {
+      const upns = Array.from(acctGridState.sel);
+      if (!confirm('Queue ' + (kind === 'tap' ? 'a new Temporary Access Pass' : 'a revoke of ALL sign-in sessions (the accounts stay enabled)') + ' for ' + upns.length + ' account(s)?\n\nNothing happens until the queue is committed on Pending changes.')) return;
+      let ok = 0; const bad = [];
+      for (const u of upns) { try { await api('POST', kind === 'tap' ? '/api/admin-tap/reset' : '/api/admin-sessions/revoke', { userPrincipalName: u }); ok++; } catch (e) { bad.push(u + ': ' + (e.message || e)); } }
+      try { refreshQueueBadge(); } catch (_) { }
+      msg((kind === 'tap' ? 'TAP reset' : 'Session revoke') + ' QUEUED for ' + ok + ' of ' + upns.length + ' -- NOT yet in effect: commit the queue on Pending changes.' + (bad.length ? ' Refused: ' + bad.slice(0, 5).join('; ') : ''), bad.length > 0);
+    };
+    on('acctBulkTap', function () { actions('tap'); });
+    on('acctBulkRevoke', function () { actions('sessions'); });
+    on('acctBulkClear', function () { acctGridState.sel.clear(); rerender(); });
   }
 
   // 🔴 THE ADMIN EDITOR WAS SIX IDENTICAL TEXT BOXES (operator, 2026-09-12: "where is the field to
@@ -3038,7 +3141,10 @@
     // because "auto-disable" has to be unambiguous: it disables, and PIM never deletes an account.
     const add = String(a.autoDisableDate || a.offboardDate || '').trim();
     h += lbl('Auto-disable date',
-      '<input class="acctEditFldTop" data-k="autoDisableDate" type="text" placeholder="yyyy-mm-dd" value="' + esc(add.length > 10 ? add.slice(0, 10) : add) + '" style="width:130px;">' +
+      // §91.8 (operator 2026-10-02: "must be a date-picker solution, not a string field which no-one understands"). A stored
+      // date EXPRESSION (e.g. FirstDayNextMonth) cannot be shown in a date picker: it is named and KEPT unless a date is picked.
+      '<input class="acctEditFldTop" data-k="autoDisableDate" type="date" data-orig="' + esc(add) + '" value="' + (/^\d{4}-\d{2}-\d{2}/.test(add) ? esc(add.slice(0, 10)) : '') + '" style="width:150px;">' +
+      (add && !/^\d{4}-\d{2}-\d{2}/.test(add) ? '<div style="color:#57606a;font-size:10.5px;">now: <code>' + esc(add) + '</code> (kept unless you pick a date)</div>' : '') +
       '<div style="color:#57606a;font-size:10.5px;max-width:240px;">On this date the account is <b>disabled</b>, its sessions revoked and its PIM access removed. <b>PIM never deletes accounts.</b> Leave blank for none.</div>' +
       (a.autoDisableConflict ? '<div style="color:#cf222e;font-size:10.5px;max-width:240px;">This row also carries the old <code>OffboardDate</code> with a different date, so the engine refuses it. Saving here clears the old column.</div>' : ''));
     // REQUIREMENTS 68.6 row 35 -- MSP downlink, defined on the admin: sync on/off (ManagementMode),
@@ -3055,8 +3161,8 @@
       '</select>');
     h += lbl('Ring (which managed tenants)',
       '<select class="acctEditFldTop acctRingSel" data-k="ring" style="width:210px;">' +
-        // §77.20: 0 = dev, 1 = test, 2 = broad -- a ring reaches the managed tenants on that ring or a lower one.
-        ['', '0', '1', '2'].map(v => '<option value="' + esc(v) + '"' + (v === ring ? ' selected' : '') + '>' + esc(replRingLabel(v, 'admin')) + '</option>').join('') +
+        // §77.20: a ring reaches the managed tenants on that ring or a lower one. §91.3: the DEFINED rings, with what each reaches on hover.
+        [''].concat(pimRingList()).map(v => '<option value="' + esc(v) + '"' + (v === ring ? ' selected' : '') + (v ? ' title="' + esc(pimRingReachText(v)) + '"' : '') + '>' + esc(replRingLabel(v, 'admin')) + '</option>').join('') +
       '</select>');
     // §77.20 (operator 2026-09-21): tags belong to the Deployment rings, not the admin. A Target already stored on the
     // row is kept (hidden field, saved back unchanged) and shown as legacy so it can be moved to the ring.
@@ -3092,10 +3198,47 @@
   function pimTenantMode() {
     if (!_pimModePromise) {
       _pimModePromise = (isServer ? api('GET', '/api/settings/scenario') : Promise.resolve(null))
-        .then(s => { _pimModeKey = (s && s.mode && s.mode.key) ? String(s.mode.key) : 'single'; return _pimModeKey; })
+        .then(s => { _pimModeKey = (s && s.mode && s.mode.key) ? String(s.mode.key) : 'single'; if (_pimModeKey === 'msp-master') loadPimRings().catch(() => { }); return _pimModeKey; })
         .catch(() => { _pimModeKey = 'single'; return _pimModeKey; });
     }
     return _pimModePromise;
+  }
+  // §91.1-91.3 (operator 2026-10-02): the deployment rings are DEFINED in settings (add / remove / name), every ring dropdown
+  // offers exactly those, and hovering a ring says which managed tenants it reaches. Defaults until the server answers.
+  let PIM_RINGS = [{ ring: 0, name: 'Dev', reach: null }, { ring: 1, name: 'Test', reach: null }, { ring: 2, name: 'Broad', reach: null }];
+  let _pimRingsPromise = null;
+  function loadPimRings(force) {
+    if (!isServer) return Promise.resolve(PIM_RINGS);
+    if (!_pimRingsPromise || force) {
+      _pimRingsPromise = api('GET', '/api/msp/deployment-rings').then(d => {
+        const rs = asList(d && d.rings).filter(r => r && /^[0-9]$/.test(String(r.ring)));
+        if (rs.length) PIM_RINGS = rs.map(r => ({ ring: Number(r.ring), name: String(r.name || ('Ring ' + r.ring)), reach: Array.isArray(r.reach) ? r.reach : asList(r.reach) }))
+          .sort((a, b) => a.ring - b.ring);
+        return PIM_RINGS;
+      }).catch(() => PIM_RINGS);
+    }
+    return _pimRingsPromise;
+  }
+  function pimRingList() { return PIM_RINGS.map(r => String(r.ring)); }
+  function pimRingsAreDefault() { return PIM_RINGS.length === 3 && PIM_RINGS.map(r => String(r.name).toLowerCase()).join('|') === 'dev|test|broad'; }
+  function pimRingMax() { return PIM_RINGS.length ? PIM_RINGS[PIM_RINGS.length - 1].ring : 2; }
+  function pimRingValid(v) { const s = String(v == null ? '' : v).trim(); return /^[0-9]$/.test(s) && Number(s) <= pimRingMax(); }
+  function pimRingDef(v) { return PIM_RINGS.find(r => String(r.ring) === String(v).trim()) || null; }
+  function pimRingRangeText() { return pimRingsAreDefault() ? '0 (dev), 1 (test) or 2 (broad)' : PIM_RINGS.map(r => r.ring + ' (' + r.name + ')').join(', '); }
+  // What a ROW on ring v reaches, in words: the rings at or below it, and -- once the server said -- the tenants by name.
+  function pimRingReachText(v) {
+    const r = pimRingDef(v);
+    if (!r || !pimRingValid(v)) return 'Ring ' + String(v) + ' is not a defined ring -- it reaches no managed tenant';
+    const lower = PIM_RINGS.filter(x => x.ring <= r.ring).map(x => x.name);
+    const t = Array.isArray(r.reach) ? r.reach : null;
+    return 'Ring ' + r.ring + ' (' + r.name + ') reaches the managed tenants on ' + lower.join(' + ') +
+      (t ? (t.length ? ': ' + t.join(', ') : ' -- no managed tenant is on those rings yet') : '');
+  }
+  function pimRingShort(v) {
+    const r = pimRingDef(v);
+    if (!r) return '';
+    if (r.ring === pimRingMax() && r.ring > 0) return 'every managed tenant';
+    return PIM_RINGS.filter(x => x.ring <= r.ring).map(x => x.name).join(' + ') + ' tenants' + (r.ring === 0 ? ' only' : '');
   }
   function pimIsMspMaster()  { return _pimModeKey === 'msp-master'; }
   function pimIsMspManaged() { return /^slave/.test(String(_pimModeKey || '')); }
@@ -3197,10 +3340,15 @@
   // (Test-PimRingReaches: tenant ring <= row ring) -- promote 0 -> 1 -> 2 to widen.
   function replRingLabel(v, kind) {
     if (v === '') return kind === 'admin' ? '-- none --' : 'Any ring -- every managed tenant';
-    if (v === '0') return 'Ring 0 (dev) -- dev tenants only';
-    if (v === '1') return 'Ring 1 (test) -- dev + test tenants';
-    if (v === '2') return 'Ring 2 (broad) -- every managed tenant';
-    return 'Ring ' + v + ' -- not a ring (use 0, 1 or 2)';
+    // §91.3: the DEFINED rings (PIM_RINGS), named as the operator named them. The three default rings keep their familiar words.
+    if (pimRingsAreDefault()) {
+      if (v === '0') return 'Ring 0 (dev) -- dev tenants only';
+      if (v === '1') return 'Ring 1 (test) -- dev + test tenants';
+      if (v === '2') return 'Ring 2 (broad) -- every managed tenant';
+    }
+    const d = pimRingDef(v);
+    if (d && pimRingValid(v)) return 'Ring ' + d.ring + ' (' + d.name + ') -- ' + pimRingShort(v);
+    return 'Ring ' + v + ' -- not a ring (use ' + pimRingRangeText() + ')';
   }
   // Server reach for draft rows: [{ entity, row }] -> response. Debounced per caller key.
   const _replReachTimers = {};
@@ -3250,7 +3398,7 @@
         // §77.20: rings are 0 (dev), 1 (test), 2 (broad) only; tags and specific tenants live on the Deployment rings
         // (operator 2026-09-21), so the per-row Tags / Specific-tenant boxes are gone. A Target already stored on the
         // row is KEPT as it is (r.tags / r.tenants / r.keep from the initial value) -- never silently widened.
-        '<label>Ring <select class="repl-ring">' + ['', '0', '1', '2'].map(v => '<option value="' + v + '"' + (v === r.ring ? ' selected' : '') + '>' + replRingLabel(v, kind) + '</option>').join('') + '</select></label>' +
+        '<label>Ring <select class="repl-ring">' + [''].concat(pimRingList()).map(v => '<option value="' + v + '"' + (v === r.ring ? ' selected' : '') + '>' + replRingLabel(v, kind) + '</option>').join('') + '</select></label>' +
         '<div class="repl-target" style="margin-top:6px;color:#57606a;"></div>' +
         '<div class="repl-reach" style="margin-top:6px;font-weight:600;">This will reach: …</div>' +
         '<ul class="repl-warn" style="margin:4px 0 0 16px;padding:0;color:#9a6700;"></ul>';
@@ -3320,7 +3468,7 @@
     if (mode !== 'msp') return '<span style="color:#8c959f;">local (not synced)</span>';
     const ring = String(a.ring || '').trim();
     // §77.20: the rings are 0 (dev), 1 (test), 2 (broad); anything else reaches no managed tenant.
-    if (!/^[0-2]$/.test(ring)) return '<span style="color:#cf222e;" title="ManagementMode=msp but no valid Ring (0, 1 or 2): it reaches no managed tenant">msp &mdash; no ring</span>';
+    if (!pimRingValid(ring)) return '<span style="color:#cf222e;" title="ManagementMode=msp but no valid Ring (' + escapeHtml(pimRingRangeText()) + '): it reaches no managed tenant">msp &mdash; no ring</span>';
     const tags = acctTargetTags(a.target);
     return 'msp &middot; ' + escapeHtml(replRingLabel(ring, 'admin')) + (tags.length ? ' &middot; <span style="color:#9a6700;" title="legacy per-admin target -- move it to the ring">tags: ' + escapeHtml(tags.join(', ')) + '</span>' : '');
   }
@@ -3473,7 +3621,11 @@
         const row = topRow(upn);
         if (!row) return;
         const payload = { userPrincipalName: upn };
-        row.querySelectorAll('.acctEditFldTop').forEach(f => { payload[f.dataset.k] = f.value; });
+        row.querySelectorAll('.acctEditFldTop').forEach(f => {
+          // §91.8: an empty date picker over a stored date EXPRESSION keeps the expression (the picker cannot show it)
+          if (f.dataset.k === 'autoDisableDate' && !f.value && f.dataset.orig && !/^\d{4}-\d{2}-\d{2}/.test(f.dataset.orig)) { payload[f.dataset.k] = f.dataset.orig; return; }
+          payload[f.dataset.k] = f.value;
+        });
         const msg = document.getElementById('acctMsg');
         // Say it here, next to the field, before the round-trip. The server enforces the same rules.
         const bad =
@@ -3481,7 +3633,7 @@
           (payload.forwardMailsToContact === 'TRUE' && !String(payload.mailForwardAddress || '').trim()) ? 'Forward mail to the owner’s office user is TRUE, so enter the office user email address (or set it to FALSE).' :
           (payload.forwardMailsToContact === 'FALSE' && String(payload.mailForwardAddress || '').trim()) ? 'An office user email address is entered but sending is FALSE -- set it to TRUE, or clear the address.' :
           (payload.managerEmail && !ACCT_MAIL_RX.test(payload.managerEmail.trim())) ? 'Manager email is not a valid email address.' :
-          (payload.managementMode === 'msp' && !/^[0-2]$/.test(String(payload.ring || '').trim())) ? 'Sync to managed tenants is msp, so choose a Ring (0 dev, 1 test, 2 broad) -- without one the admin reaches no managed tenant.' : '';
+          (payload.managementMode === 'msp' && !pimRingValid(payload.ring)) ? 'Sync to managed tenants is msp, so choose a Ring (' + pimRingRangeText() + ')' + ' -- without one the admin reaches no managed tenant.' : '';
         if (bad) { if (msg) { msg.textContent = bad; msg.style.color = '#cf222e'; } return; }
         if (msg) { msg.textContent = 'Saving ' + upn + '…'; msg.style.color = '#57606a'; }
         const res = await acctModifyWithApproval(upn, payload);
@@ -5019,7 +5171,10 @@
   }
   function mspRingOptions(sel) {
     // The TENANT's ring (its managing tenant's copy; the tenant sets its own). §77.20: a row on ring N reaches tenants on ring N or lower.
-    const opts = [['0', '0 (dev) -- receives rows of every ring (0, 1, 2) first'], ['1', '1 (test) -- receives rows of ring 1 and 2'], ['2', '2 (broad) -- receives only ring-2 rows']];
+    // §91.3: the DEFINED rings. A tenant on ring N receives the rows of ring N and every higher ring.
+    const opts = pimRingsAreDefault()
+      ? [['0', '0 (dev) -- receives rows of every ring (0, 1, 2) first'], ['1', '1 (test) -- receives rows of ring 1 and 2'], ['2', '2 (broad) -- receives only ring-2 rows']]
+      : PIM_RINGS.map(r => [String(r.ring), r.ring + ' (' + r.name + ') -- receives rows of ' + (r.ring === pimRingMax() ? 'ring ' + r.ring + ' only' : 'ring ' + r.ring + ' and up')]);
     return opts.map(o => '<option value="' + o[0] + '"' + (String(sel) === o[0] ? ' selected' : '') + '>' + escapeHtml(o[1]) + '</option>').join('');
   }
   // §77.20 -- DEPLOYMENT RINGS (managing tenant). 0 = dev, 1 = test, 2 = broad, in the same order as the update rings. Each
@@ -5041,29 +5196,58 @@
       '<table id="mspRingsTbl" style="border-collapse:collapse;width:100%;"><thead><tr>' +
       '<th style="text-align:left;padding:3px 8px;">Ring</th><th style="text-align:left;padding:3px 8px;">Name</th>' +
       '<th style="text-align:left;padding:3px 8px;">Tag rule <span style="font-weight:400;color:#57606a;">(blank = every tenant on the ring)</span></th>' +
+      '<th style="text-align:left;padding:3px 8px;">A row on this ring reaches</th>' +
       '<th style="text-align:left;padding:3px 8px;">Tenants on this ring</th></tr></thead><tbody>';
-    (d.rings || []).forEach(r => {
-      const ts = (r.tenants || []).map(t => '<span style="margin-right:8px;white-space:nowrap;' + (t.member ? '' : 'color:#cf222e;') + '" title="' + esc(t.reason || '') + '">' +
+    const rlist = asList(d.rings);
+    const rowHtml = (r, isLast, isNew) => {
+      const ts = asList(r.tenants).map(t => '<span style="margin-right:8px;white-space:nowrap;' + (t.member ? '' : 'color:#cf222e;') + '" title="' + esc(t.reason || '') + '">' +
         esc(t.name) + (t.member ? '' : ' &mdash; not a member (gets nothing)') + '</span>').join('');
-      h += '<tr class="mspRingRow" data-ring="' + esc(String(r.ring)) + '">' +
-        '<td style="padding:3px 8px;"><b>' + esc(String(r.ring)) + '</b></td>' +
+      const reach = asList(r.reach);
+      return '<tr class="mspRingRow" data-ring="' + esc(String(r.ring)) + '"' + (isNew ? ' data-new="1"' : '') + '>' +
+        '<td style="padding:3px 8px;white-space:nowrap;"><b>' + esc(String(r.ring)) + '</b> <span class="mspRingRmHost">' + (can && isLast && Number(r.ring) > 0 ? '<button type="button" class="mspRingRemove" title="Remove the highest ring. Refused while a tenant or a row still uses it.">Remove</button>' : '') + '</span></td>' +
         '<td style="padding:3px 8px;">' + (can ? '<input class="mspRingName" value="' + esc(r.name) + '" maxlength="40" style="width:120px;">' : esc(r.name)) + '</td>' +
         '<td style="padding:3px 8px;">' + (can ? '<input class="mspRingTags" value="' + esc(r.tags || '') + '" placeholder="(every tenant on the ring)" style="width:95%;">' : (esc(r.tags || '') || '<span style="color:#57606a;">every tenant on the ring</span>')) + '</td>' +
+        '<td style="padding:3px 8px;">' + (isNew ? '<span style="color:#57606a;">(after Save)</span>' : (reach.length ? esc(reach.join(', ')) : '<span style="color:#57606a;">no tenant yet</span>')) + '</td>' +
         '<td style="padding:3px 8px;">' + (ts || '<span style="color:#57606a;">none</span>') + '</td></tr>';
-    });
+    };
+    rlist.forEach((r, i) => { h += rowHtml(r, i === rlist.length - 1, false); });
     h += '</tbody></table>';
-    if (can) h += '<div style="margin-top:8px;"><button type="button" class="btn-pri" id="mspRingsSave">Save rings</button> <span id="mspRingsMsg" style="font-size:12px;"></span></div>';
+    if (can) h += '<div style="margin-top:8px;"><button type="button" id="mspRingAdd" title="Add the next ring (up to 10 rings, 0..9)">+ Add ring</button> ' +
+      '<button type="button" class="btn-pri" id="mspRingsSave">Save rings</button> <span id="mspRingsMsg" style="font-size:12px;"></span></div>';
     el.innerHTML = h;
-    const save = document.getElementById('mspRingsSave');
+    // §91.2: add the next ring / remove the highest one (staged in the table; Save writes it and the server refuses a removal in use)
+    const tbody = el.querySelector('#mspRingsTbl tbody');
+    const wireRemove = () => el.querySelectorAll('.mspRingRemove').forEach(b => b.onclick = () => {
+      const tr = b.closest('tr'); tr.remove();
+      const rows = el.querySelectorAll('.mspRingRow'); const last = rows[rows.length - 1];
+      if (last && Number(last.dataset.ring) > 0 && !last.querySelector('.mspRingRemove')) {
+        const hostEl = last.querySelector('.mspRingRmHost'); if (hostEl) hostEl.innerHTML = '<button type="button" class="mspRingRemove" title="Remove the highest ring. Refused while a tenant or a row still uses it.">Remove</button>';
+        wireRemove();
+      }
+      const m = el.querySelector('#mspRingsMsg'); if (m) { m.textContent = 'Removed from the table -- press Save rings.'; m.style.color = '#9a6700'; }
+    });
+    wireRemove();
+    const add = el.querySelector('#mspRingAdd');
+    if (add) add.onclick = () => {
+      const rows = el.querySelectorAll('.mspRingRow');
+      const next = rows.length ? Number(rows[rows.length - 1].dataset.ring) + 1 : 0;
+      if (next > 9) { const m = el.querySelector('#mspRingsMsg'); if (m) { m.textContent = 'Ten rings (0..9) is the most.'; m.style.color = '#cf222e'; } return; }
+      rows.forEach(tr => { const b = tr.querySelector('.mspRingRemove'); if (b) b.remove(); });
+      tbody.insertAdjacentHTML('beforeend', rowHtml({ ring: next, name: 'Ring ' + next, tags: '', tenants: [], reach: [] }, true, true));
+      wireRemove();
+      const m = el.querySelector('#mspRingsMsg'); if (m) { m.textContent = 'Ring ' + next + ' added to the table -- name it, then press Save rings.'; m.style.color = '#9a6700'; }
+    };
+    const save = el.querySelector('#mspRingsSave');
     if (save) save.onclick = async () => {
-      const msg = document.getElementById('mspRingsMsg');
+      const msg = el.querySelector('#mspRingsMsg');
       const rings = Array.from(el.querySelectorAll('.mspRingRow')).map(tr => ({ ring: Number(tr.dataset.ring), name: tr.querySelector('.mspRingName').value.trim(), tags: tr.querySelector('.mspRingTags').value.trim() }));
       save.disabled = true; msg.textContent = 'Saving…'; msg.style.color = '#57606a';
       try {
         const r = await api('PUT', '/api/msp/deployment-rings', { rings });
         const note = (r && r.note) || 'Saved.';
+        try { await loadPimRings(true); } catch (_) { }   // §91.3: every ring dropdown follows the saved definitions
         await renderDeploymentRingsCard(el);   // reload first, THEN say so -- the reload replaces the message element
-        const m2 = document.getElementById('mspRingsMsg'); if (m2) { m2.textContent = note; m2.style.color = '#116329'; }
+        const m2 = el.querySelector('#mspRingsMsg'); if (m2) { m2.textContent = note; m2.style.color = '#116329'; }
       }
       catch (e) { msg.textContent = 'Not saved: ' + ((e && e.body && e.body.error) || (e && e.message) || String(e)); msg.style.color = '#cf222e'; save.disabled = false; }
     };
@@ -6903,6 +7087,71 @@
   // Naming + filters are default-seeded server-side so they're never empty.
   // ===================================================================
   let SETTINGS_DATA = null;
+  // 2026-10-02 (operator: "the whole settings page has become a wild west mesh. can you restructure into categories to
+  // make it easier to find the options"). The sections keep their own renderers and handlers (each finds its elements by
+  // id); this only MOVES each rendered section into its category and shows one category at a time, chosen from a bar.
+  // A section no rule claims lands in "Other", so nothing can disappear. The last category is remembered per browser.
+  const SETTINGS_CATEGORIES = [
+    { key: 'naming',    label: 'Naming & accounts',      match: ['setAdminDomainHost', 'setGroupNamingCard', /admin name prefixes/i, /naming conventions/i, /naming words/i, /AD OU placement/i, /^filters/i] },
+    { key: 'features',  label: 'Features & edition',     match: ['setFeaturesCard', 'setGovPreviewCard', 'setLicenceCard', 'setEditionCard', 'setScenarioCard', 'setFeatureGatesCard'] },
+    { key: 'approvals', label: 'Approvals & policy',     match: ['setSelfApproveHost', 'setOpPolicyCard'] },
+    { key: 'rings',     label: 'Deployment rings',       match: ['setRingsHost'] },
+    { key: 'mail',      label: 'Mail & alerting',        match: ['setEmailControlsCard', 'setAlertingCard'] },
+    { key: 'access',    label: 'Access requests (RFA)',  match: ['setRfaBrokerHost'] },
+    { key: 'hybrid',    label: 'Hybrid AD & workloads',  match: ['setHybridAdHost', 'setWorkloadExemptCard', 'setTemplatePacksHost'] },
+    { key: 'tools',     label: 'Copy & tools',           match: ['setCopyHost'] },
+  ];
+  function settingsCategoryOf(el) {
+    const id = el.id || '';
+    const head = ((el.querySelector && el.querySelector('h3')) || {}).textContent || '';
+    for (const c of SETTINGS_CATEGORIES) {
+      for (const m of c.match) {
+        if (typeof m === 'string' ? id === m : m.test(head.trim())) return c.key;
+      }
+    }
+    return 'other';
+  }
+  function groupSettingsIntoCategories(body) {
+    const kids = Array.from(body.children);
+    if (kids.length < 3) return;
+    const intro = kids[0];   // the "Settings · ..." line stays on top
+    const groups = {}; const order = SETTINGS_CATEGORIES.map(c => c.key).concat(['other']);
+    order.forEach(k => { const d = document.createElement('div'); d.className = 'set-cat'; d.dataset.cat = k; groups[k] = d; });
+    kids.slice(1).forEach(el => groups[settingsCategoryOf(el)].appendChild(el));
+    const labels = {}; SETTINGS_CATEGORIES.forEach(c => { labels[c.key] = c.label; }); labels.other = 'Other';
+    let cur = ''; try { cur = localStorage.getItem('pimSettingsCat') || ''; } catch (_) { }
+    const present = order.filter(k => groups[k].children.length);
+    if (present.indexOf(cur) < 0) cur = present[0];
+    const bar = document.createElement('div');
+    bar.id = 'settingsCatBar';
+    bar.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin:0 0 14px;position:sticky;top:0;z-index:5;background:var(--bg, #fff);padding:6px 0;border-bottom:1px solid #d0d7de;';
+    present.forEach(k => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'btn-sec settingsCatBtn'; b.dataset.cat = k;
+      b.textContent = labels[k] + ' (' + groups[k].children.length + ')';
+      bar.appendChild(b);
+    });
+    const all = document.createElement('button'); all.type = 'button'; all.className = 'btn-sec settingsCatBtn'; all.dataset.cat = '*'; all.textContent = 'Show all'; bar.appendChild(all);
+    intro.after(bar);
+    let anchor = bar;
+    present.forEach(k => { anchor.after(groups[k]); anchor = groups[k]; });
+    const show = function (k) {
+      present.forEach(x => { groups[x].style.display = (k === '*' || x === k) ? '' : 'none'; });
+      bar.querySelectorAll('.settingsCatBtn').forEach(b => { const on = b.dataset.cat === k; b.style.fontWeight = on ? '700' : ''; b.style.borderColor = on ? '#0969da' : ''; });
+      try { localStorage.setItem('pimSettingsCat', k); } catch (_) { }
+    };
+    bar.querySelectorAll('.settingsCatBtn').forEach(b => { b.onclick = function () { show(b.dataset.cat); }; });
+    show(cur || '*');
+  }
+  // open Settings on the category that holds a section (deep links from other pages, e.g. "Settings > RFA broker & API")
+  function showSettingsSection(hostId) {
+    const el = document.getElementById(hostId); if (!el) return;
+    const g = el.closest ? el.closest('.set-cat') : null;
+    const b = g && document.querySelector('#settingsCatBar .settingsCatBtn[data-cat="' + g.dataset.cat + '"]');
+    if (b) b.click();
+    el.scrollIntoView();
+  }
+
   async function renderSettings() {
     const body = document.getElementById('settingsBody');
     const esc = escapeHtml;
@@ -7030,6 +7279,9 @@
     // 2.4.465 (operator 2026-09-30: "a customer must be able to define his groups naming convention for the hybrid solution")
     h += `<div id="setHybridAdHost"><div style="color:#57606a;font-size:12px;">Loading hybrid Active Directory settings…</div></div>`;
     h += `<div id="setRfaBrokerHost"></div>`;   // §82/§90: RFA broker & API (Pro; SuperAdmin)
+    h += `<div id="setSelfApproveHost"></div>`;   // single-administrator tenants: allow self-approval (SuperAdmin)
+    // §91.2 (operator 2026-10-02): the deployment rings are also defined HERE (managing tenant only; the card removes itself elsewhere)
+    h += `<div id="setRingsHost" class="set-card" style="font-size:12.5px;"></div>`;
 
     // --- Naming conventions (key/value editor) -------------------------
     h += `<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">Naming conventions${seedNote(s.namingSeeded,'naming')}</h3>`;
@@ -7260,6 +7512,7 @@
     h += `<div id="setCopyHost" style="margin-top:18px;"></div>`;
 
     body.innerHTML = h;
+    try { groupSettingsIntoCategories(body); } catch (e) { console.warn('settings categories', e); }   // operator: "restructure into categories"
 
     // The sections that moved here from the old Governance page (2026-09-14). Each renders into its own host and binds
     // its own handlers (the IMP-20 "adopt the Governance DOM node" workaround is gone with that page). Role gates are
@@ -7270,6 +7523,8 @@
     renderAdminDomainSection(document.getElementById('setAdminDomainHost'));
     renderHybridAdSection(document.getElementById('setHybridAdHost'));
     renderRfaBrokerSection(document.getElementById('setRfaBrokerHost'));
+    renderSelfApproveSection(document.getElementById('setSelfApproveHost'));
+    pimTenantMode().then(() => { const rh = document.getElementById('setRingsHost'); if (!rh) return; if (pimIsMspMaster()) renderDeploymentRingsCard(rh); else rh.remove(); }).catch(() => { });
 
     // Operational-policy + Alerting cards load asynchronously (host containers
     // are always present so the rest of Settings paints first).
@@ -7842,7 +8097,7 @@
             h.push(`<span class="apprMsg" data-id="${esc(r.id)}" style="font-size:12px;"></span>`);
             h.push(`</div>`);
           } else if (r.isRequestor) {
-            h.push(`<div style="margin-top:8px;font-size:12px;color:#bc4c00;">You raised this request &mdash; a <b>different</b> administrator must approve it (separation of duties).</div>`);
+            h.push(`<div style="margin-top:8px;font-size:12px;color:#bc4c00;">You raised this request &mdash; a <b>different</b> administrator must approve it (separation of duties). The only administrator? A SuperAdmin can allow self-approval under <b>Settings &gt; Approvals: self-approval</b>.</div>`);
           } else if (!_apprData.canDecide) {
             h.push(`<div style="margin-top:8px;font-size:12px;color:#8c959f;">Admin role required to approve or deny.</div>`);
           }
@@ -8103,7 +8358,7 @@
     h += '<table class="grid" style="width:100%;margin-bottom:14px;"><thead><tr><th>Requested</th><th>Person</th><th>Department (internal)</th><th>Company</th><th>What</th><th>Source</th><th>Status</th><th></th></tr></thead><tbody>';
     if (!rows.length) h += '<tr><td colspan="8" style="color:#57606a;">No requests yet.</td></tr>';
     for (const r of rows) {
-      const what = (r.kind === 'group' ? 'member of ' + escapeHtml(r.groupName || '') : 'account enabled') + ' for ' + escapeHtml(String(r.hours)) + ' h';
+      const what = (r.kind === 'group' ? '<span title="Ad-hoc: given for the window only and REMOVED automatically when it ends -- not delegated (standing) access" style="display:inline-block;padding:0 6px;border-radius:8px;background:#fff1d6;color:#9a6700;font-size:11px;font-weight:600;">ad-hoc</span> member of ' + escapeHtml(r.groupName || '') : 'account enabled') + ' for ' + escapeHtml(String(r.hours)) + ' h';
       const act = (r.canDecide ? '<button class="rfaDec" data-id="' + escapeHtml(r.id) + '" data-d="approve">Approve</button> <button class="rfaDec" data-id="' + escapeHtml(r.id) + '" data-d="deny">Deny</button>' : '') +
                   (r.canEnd ? ' <button class="rfaEnd" data-id="' + escapeHtml(r.id) + '">End now</button>' : '');
       h += '<tr><td>' + fmt(r.requestedUtc) + '</td><td>' + escapeHtml(r.upn || '') + (r.reason ? '<div style="color:#57606a;font-size:11px;">' + escapeHtml(r.reason) + '</div>' : '') + '</td>' +
@@ -8164,7 +8419,30 @@
     const ec = document.getElementById('rfaEditCompanies');
     if (ec) ec.onclick = function (ev) { ev.preventDefault(); switchTab('grid'); setTimeout(function () { try { currentGridBase = 'Account-Definitions-Companies'; renderGrid(currentGridBase); } catch (_) { } }, 300); };
     const toSet = document.getElementById('rfaToSettings');
-    if (toSet) toSet.onclick = function (ev) { ev.preventDefault(); switchTab('settings'); setTimeout(function () { const el = document.getElementById('setRfaBrokerHost'); if (el) el.scrollIntoView(); }, 400); };
+    if (toSet) toSet.onclick = function (ev) { ev.preventDefault(); switchTab('settings'); setTimeout(function () { showSettingsSection('setRfaBrokerHost'); }, 600); };
+  }
+
+  // ----- Settings: self-approval (single-administrator tenants) ---------------------------------------------------------
+  // 2026-10-02 (operator: "how can i force this (disable 2nd approval)"): with ONE administrator, an approval request
+  // (offboard, revoke, ...) can never be approved -- maker != checker. A SuperAdmin may allow self-approval; every such
+  // approval is recorded as a self-approval in the audit. Default OFF.
+  async function renderSelfApproveSection(host) {
+    if (!host || !isServer) return;
+    let d = null; try { d = await api('GET', '/api/settings/approval-self-approve'); } catch (e) { host.innerHTML = ''; return; }
+    host.innerHTML = '<div class="set-card" id="setSelfApprove"><h3 style="margin:0 0 4px;font-size:14px;">Approvals: self-approval</h3>' +
+      '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">By default the administrator who raises a request (offboard, revoke, ...) may NOT approve it -- a different administrator must (separation of duties). ' +
+      'On a tenant with only one administrator nothing can then be approved. Allow self-approval only there, and switch it off when a second administrator exists.</div>' +
+      '<label style="font-weight:normal;"><input type="checkbox" id="selfApproveOn"' + (d.enabled ? ' checked' : '') + (d.canWrite ? '' : ' disabled') + '> Allow an administrator to approve their own requests</label>' +
+      (d.enabled && d.by ? '<div style="color:#bc4c00;font-size:11px;margin-top:4px;">ON since ' + escapeHtml(String(d.atUtc || '').slice(0, 16).replace('T', ' ')) + ' UTC (by ' + escapeHtml(d.by) + ') -- each self-approval is recorded as such in the audit.</div>' : '') +
+      (d.canWrite ? '' : '<div style="color:#8c959f;font-size:11px;">Only a SuperAdmin can change this.</div>') +
+      '<div id="selfApproveMsg" style="font-size:12px;margin-top:4px;"></div></div>';
+    const cb = document.getElementById('selfApproveOn');
+    if (cb && d.canWrite) cb.onchange = async function () {
+      if (cb.checked && !confirm('Allow self-approval?\n\nThe administrator who raises a request may then approve it alone. Use this only on a tenant with a single administrator.')) { cb.checked = false; return; }
+      const m = document.getElementById('selfApproveMsg');
+      try { const r = await api('PUT', '/api/settings/approval-self-approve', { enabled: cb.checked }); if (m) { m.textContent = r.note || 'Saved.'; m.style.color = '#1a7f37'; } renderSelfApproveSection(host); }
+      catch (e) { if (m) { m.textContent = e.message || String(e); m.style.color = '#cf222e'; } cb.checked = !cb.checked; }
+    };
   }
 
   // ----- Settings: RFA broker & API (§82 / §90, Pro; SuperAdmin) ---------------------------------------------------------
@@ -8183,6 +8461,10 @@
          '<label>RFA store account</label><input id="rfaSetAcct" value="' + escapeHtml(s.storeAccount || '') + '" placeholder="set by the RFA deploy">' +
          '<label>Public portal URL</label><input id="rfaSetUrl" value="' + escapeHtml(s.portalUrl || '') + '" placeholder="https://...">' +
          '<label>API applications (client ids)</label><input id="rfaSetApps" value="' + escapeHtml((s.apiAppIds || []).join(', ')) + '" placeholder="ServiceNow\'s Entra app id, comma separated">' +
+         // §91.7 (operator 2026-10-02): AD-HOC access to other permission groups -- which groups may be asked for, and for how long by default
+         '<label title="A consultant may ask for short-term membership of these groups in the portal. The department approves; the membership is removed automatically when the time is up. None selected = nothing is offered.">Ad-hoc groups consultants may request</label>' +
+         '<select id="rfaSetAdHoc" multiple size="6" style="min-height:110px;">' + Array.from(new Set(collectKnownGroupTags().concat(asList(s.adHocGroups)))).sort().map(t => '<option value="' + escapeHtml(t) + '"' + (asList(s.adHocGroups).indexOf(t) >= 0 ? ' selected' : '') + '>' + escapeHtml(t) + '</option>').join('') + '</select>' +
+         '<label>Default ad-hoc length (hours)</label><span><input id="rfaSetAdHocHours" type="number" min="1" max="744" value="' + escapeHtml(String(s.adHocHours || 24)) + '" style="width:90px;"> <span style="color:#57606a;font-size:11.5px;">ad-hoc access (default 24 h) is removed automatically; delegated access (typically 6&ndash;12 months) is set in the delegation grid</span></span>' +
          '</div><button id="rfaSetSave" style="margin-top:6px;">Save settings</button>' +
          // §90: API keys for systems without Entra OAuth (shown ONCE; only the hash is stored)
          '<h3 style="margin:18px 0 4px;">API keys</h3><div style="color:#57606a;font-size:12px;">The API is described at <code>' + escapeHtml((s.portalUrl || 'https://<portal>') + '/api/v1/openapi.json') + '</code>.</div><div class="pro-lic-banner" data-feature="api.broker"></div>' +
@@ -8191,7 +8473,7 @@
          '<input id="rfaKeyName" placeholder="who uses it (e.g. ServiceNow test)" style="width:240px;"> ' +
          '<label style="display:inline;font-weight:normal;"><input type="checkbox" id="rfaKeyW" checked> requests.write</label> ' +
          '<label style="display:inline;font-weight:normal;"><input type="checkbox" id="rfaKeyR" checked> requests.read</label> ' +
-         '<input id="rfaKeyDays" type="number" min="1" max="365" value="90" style="width:70px;"> days <button id="rfaKeyNew">Create key</button>' +
+         '<input id="rfaKeyDays" type="number" min="1" max="3650" value="365" style="width:80px;" title="1 to 3650 days (10 years)"> days <button id="rfaKeyNew">Create key</button>' +
          '<div id="rfaKeyOnce" style="display:none;margin-top:8px;padding:8px 10px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;"></div>';
     h += '<div id="rfaSetMsg" style="margin-top:8px;"></div></div>';
     host.innerHTML = h;
@@ -8228,7 +8510,9 @@
     const ss = document.getElementById('rfaSetSave');
     if (ss) ss.onclick = async function () {
       const apps = (document.getElementById('rfaSetApps').value || '').split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
-      try { await api('PUT', '/api/rfa/settings', { storeAccount: document.getElementById('rfaSetAcct').value, portalUrl: document.getElementById('rfaSetUrl').value, apiAppIds: apps }); msg('Settings saved.'); } catch (e) { msg(e.message || String(e), true); }
+      const adHoc = Array.from((document.getElementById('rfaSetAdHoc') || {}).selectedOptions || []).map(o => o.value);
+      const adHocHours = Number((document.getElementById('rfaSetAdHocHours') || {}).value || 24);
+      try { await api('PUT', '/api/rfa/settings', { storeAccount: document.getElementById('rfaSetAcct').value, portalUrl: document.getElementById('rfaSetUrl').value, apiAppIds: apps, adHocGroups: adHoc, adHocHours: adHocHours }); msg('Settings saved.'); } catch (e) { msg(e.message || String(e), true); }
     };
   }
 
@@ -10432,6 +10716,26 @@
          '<a href="#" id="setHybridAdLive">Open the live view</a> to watch the continuous sync.</div>';
     if (err || !d) { host.innerHTML = h + '<div style="color:#cf222e;font-size:12px;">Could not read the hybrid settings: ' + esc(err || 'no answer') + '</div></div>'; bindLive(); return; }
     const ro = d.canWrite ? '' : ' disabled';
+    // Operator 2026-10-02: "i need to have a way to see it is working and green". One pill per worker job, from the
+    // heartbeat the worker writes (fresh = seen within 10 min for the continuous sync, 90 min for the others).
+    const hwJobs = { 'hybrid-ad-sync': 'Continuous group sync', 'hybrid-ad-apply': 'Apply changes', 'hybrid-ad-groups': 'Group definitions', 'hybrid-ad-servers': 'Server onboarding' };
+    const ws = Array.isArray(d.worker) ? d.worker : [];
+    if (ws.length) {
+      const allOk = ws.every(w => w.state === 'live');
+      h += '<div id="setHybridAdWorker" data-ok="' + (allOk ? '1' : '0') + '" style="margin:0 0 10px;padding:8px 10px;border-radius:6px;border:1px solid ' + (allOk ? '#1a7f37' : '#cf222e') + ';background:' + (allOk ? '#dafbe1' : '#ffebe9') + ';font-size:12px;">' +
+           '<b>' + (allOk ? '&#x2714; Hybrid worker is working' : '&#x26A0; Hybrid worker needs attention') + '</b>' +
+           (ws[0] && ws[0].host ? ' <span style="color:#57606a;">on ' + esc(ws[0].host) + '</span>' : '') +
+           '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">' +
+           ws.map(w => {
+             const ok = w.state === 'live', plan = w.state === 'plan-only';
+             const bg = ok ? '#1a7f37' : (plan ? '#9a6700' : '#cf222e');
+             const ago = (w.minutesAgo === null || w.minutesAgo === undefined) ? 'never seen' : (w.minutesAgo < 1 ? 'just now' : w.minutesAgo < 120 ? w.minutesAgo + ' min ago' : Math.round(w.minutesAgo / 60) + ' h ago');
+             return '<span class="hw-pill" data-type="' + esc(w.type) + '" data-state="' + esc(w.state) + '" title="' + esc(w.type + ': ' + w.state + (w.lastSeenUtc ? ', last seen ' + w.lastSeenUtc : '')) + '" style="padding:2px 9px;border-radius:10px;color:#fff;background:' + bg + ';font-weight:600;">' +
+                    (ok ? '&#x25CF; ' : '&#x25CB; ') + esc(hwJobs[w.type] || w.type) + ' &middot; ' + esc(plan ? 'plan-only' : ago) + '</span>';
+           }).join('') + '</div>' +
+           (allOk ? '' : '<div style="color:#57606a;margin-top:5px;">A red job has not checked in recently: its scheduled task on the worker has stopped, or the worker lost its network. The continuous sync must check in every few minutes.</div>') +
+           '</div>';
+    }
     h += '<table class="set-table" id="setHybridAdTbl"><tr><th>Setting</th><th>Value</th><th>Default</th></tr>';
     (d.settings || []).forEach(x => {
       h += '<tr><td style="white-space:nowrap;" title="' + esc(x.help || '') + '">' + esc(x.label || x.name) + '<div style="color:#57606a;font-size:10.5px;max-width:320px;white-space:normal;">' + esc(x.help || '') + '</div></td>' +
@@ -11036,36 +11340,7 @@
       // IMP-17: filled when the read-only Access map hands a node over.
       '<div id="aFromMap" style="display:none;margin-bottom:12px;padding:8px 11px;border:1px solid #0969da;border-left:4px solid #0969da;border-radius:6px;background:#ddf4ff;font-size:12px;"></div>' +
       '<div style="display:flex;flex-direction:column;gap:14px;max-width:760px;">' +
-        // Bulk-attach
-        '<div class="auth-card" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#fff;">' +
-          '<b style="font-size:13px;">Give a group one or more Entra roles</b>' +
-          '<div style="color:#57606a;font-size:11.5px;margin:3px 0 8px;">Attach Entra directory roles to an existing group. ' +
-            'Groups come from the definition catalog; roles from the live Entra-role cache <span class="cache-badge-slot" data-list-key="entraRoles"></span>.</div>' +
-          '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;">' +
-            // IMP-19: "Target GroupTag" asked the user for a foreign key. The field is the same;
-            // the label now names the THING, and the tag is the technical id underneath it.
-            fieldRow('Target group', '<input id="aBaGroup" data-combo="1" type="text" list="aBaGroupList" placeholder="start typing a group…" autocomplete="off"><datalist id="aBaGroupList"></datalist>') +
-            fieldRow('Entra roles (choose one or more)', '<select id="aBaRoles" multiple size="5" style="min-height:96px;"></select>') +
-            fieldRow('Assignment type', '<select id="aBaType"><option>Eligible</option><option>Active</option></select>') +
-            // DOC-AU-1 (2.4.455): the roles only INSIDE these Administrative Units (AU-scoped) instead of tenant-wide.
-            fieldRow('Only in these Administrative Units (optional)', '<select id="aBaAus" multiple size="4" style="min-height:76px;min-width:200px;" title="Leave empty for tenant-wide roles. Pick AUs to give the roles only inside them."><option value="" disabled>(no Administrative Units defined yet)</option></select>') +
-          '</div>' +
-          '<div style="margin-top:8px;"><button id="aBaGo" class="primary">Compute &amp; stage</button> <span id="aBaMsg" style="font-size:11.5px;color:#57606a;"></span></div>' +
-        '</div>' +
-        // DOC-AU-1 (2.4.455): create an Administrative Unit (+ AU-scoped roles for a group) -- POST /api/authoring/au
-        '<div class="auth-card" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#fff;">' +
-          '<b style="font-size:13px;">Create an Administrative Unit</b>' +
-          '<div style="color:#57606a;font-size:11.5px;margin:3px 0 8px;">Defines an AU (PIM creates it in Entra on the next run) and, optionally, gives a group Entra roles scoped to it.</div>' +
-          '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;">' +
-            fieldRow('AU name', '<input id="aAuName" type="text" placeholder="e.g. Helpdesk Europe">') +
-            fieldRow('AU tag (optional)', '<input id="aAuTag" type="text" placeholder="derived from the name">') +
-            fieldRow('Description', '<input id="aAuDesc" type="text">') +
-            fieldRow('Visibility', '<select id="aAuVis"><option>Public</option><option>HiddenMembership</option></select>') +
-            fieldRow('Group to delegate (optional)', '<input id="aAuGroup" data-combo="1" type="text" list="aBaGroupList" placeholder="start typing a group…" autocomplete="off">') +
-            fieldRow('Roles in this AU (optional)', '<select id="aAuRoles" multiple size="4" style="min-height:76px;"></select>') +
-          '</div>' +
-          '<div style="margin-top:8px;"><button id="aAuGo" class="primary">Compute &amp; stage</button> <span id="aAuMsg" style="font-size:11.5px;color:#57606a;"></span></div>' +
-        '</div>' +
+        // 2026-10-02: "Give a group one or more Entra roles" + "Create an Administrative Unit" moved to Create access.
         // Clone definition
         '<div class="auth-card" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#fff;">' +
           '<b style="font-size:13px;">Duplicate an existing group</b>' +
@@ -11146,18 +11421,8 @@
           if (t2 && !t2.value) t2.value = tag;
         }
       }
-      // Bulk-attach: GroupTag datalist (pick-or-type) + Entra-role multiselect.
-      const baTags = collectKnownGroupTags();
-      const baGroupList = document.getElementById('aBaGroupList');
-      if (baGroupList) baGroupList.innerHTML = baTags.map(t => `<option value="${esc(t)}">`).join('');
-      const baRoles = document.getElementById('aBaRoles');
-      if (baRoles) {
-        const roleOpts = collectAuthoringEntraRoles();
-        const keep = new Set(Array.from(baRoles.selectedOptions || []).map(o => o.value));
-        baRoles.innerHTML = roleOpts.length
-          ? roleOpts.map(o => `<option value="${esc(o.value)}"${keep.has(o.value) ? ' selected' : ''}>${esc(o.label)}</option>`).join('')
-          : '<option value="" disabled>(role cache empty — click the badge above to refresh)</option>';
-      }
+      // 2026-10-02 (operator: "these 2 should be moved into create access"): the Entra-roles and Administrative Unit
+      // cards (and their pickers) now live on Create access -- renderEntraRoleAuCards().
       // Move-admin: Admin select, From-tag (from that admin's assignments),
       // To-tag datalist (all known tags).
       const mvUser = document.getElementById('aMvUser');
@@ -11211,10 +11476,7 @@
           note.innerHTML = 'This admin is not in any group yet, so there is nothing to move. ' +
             '<a id="aMvAssignInstead" style="cursor:pointer;color:#0969da;font-weight:600;">Give them their first group instead &rarr;</a>';
           const go = document.getElementById('aMvAssignInstead');
-          if (go) go.onclick = () => {
-            const g = document.getElementById('aBaGroup');
-            if (g) { g.scrollIntoView({ block: 'center' }); g.focus(); }
-          };
+          if (go) go.onclick = () => switchTab('new');   // "Give an existing admin access" lives on Create access
         }
       }
     }
@@ -11258,61 +11520,6 @@
     clBase.onchange = loadCloneRows;
     if (clBase.value) loadCloneRows();
 
-    (document.getElementById('aBaGo') || {}).onclick = async () => {
-      const msg = document.getElementById('aBaMsg'); msg.textContent = 'computing...';
-      try {
-        const roles = Array.from(document.getElementById('aBaRoles').selectedOptions || [])
-          .map(o => o.value.trim()).filter(Boolean);
-        const groupTag = document.getElementById('aBaGroup').value.trim();
-        if (!groupTag) throw new Error('pick a target GroupTag');
-        if (!roles.length) throw new Error('select at least one Entra role');
-        const aus = Array.from((document.getElementById('aBaAus') || {}).selectedOptions || []).map(o => o.value.trim()).filter(Boolean);
-        // DOC-AU-1: with AUs picked, the roles are AU-scoped (PIM-Assignments-Roles-AUs) instead of tenant-wide.
-        const r = await api('POST', '/api/authoring/bulk-attach', {
-          groupTag: groupTag,
-          entraRoles: aus.length ? [] : roles,
-          auScopes: aus.length ? [].concat(...aus.map(a => roles.map(role => ({ auTag: a, role })))) : [],
-          assignmentType: document.getElementById('aBaType').value
-        });
-        msg.textContent = 'previewing...';
-        const staged = await stageBulkAttachResult(r, true);
-        if (staged === false) { msg.style.color = '#57606a'; msg.textContent = 'cancelled.'; return; }
-        if (!staged) throw new Error('nothing computed -- check the GroupTag + roles');
-        msg.style.color = '#57606a';
-        msg.innerHTML = staged + ' row(s) staged &mdash; <a style="cursor:pointer;color:#0969da;" id="aBaSave">Pending changes</a>';
-        const a = document.getElementById('aBaSave'); if (a) a.onclick = () => switchTab('save');
-      } catch (e) { msg.style.color = '#cf222e'; msg.textContent = e.message; }
-    };
-    // DOC-AU-1 (2.4.455): the AU pickers (defined AUs) + the role list for the AU card (the same Entra roles as above).
-    (async () => {
-      try {
-        const d = await loadCsv('PIM-Definitions-AU');
-        const opts = (d.rows || []).filter(x => x && x.AdministrativeUnitTag).map(x => '<option value="' + escapeHtml(x.AdministrativeUnitTag) + '">' + escapeHtml(x.AUDisplayName || x.AdministrativeUnitTag) + '</option>').join('');
-        const sel = document.getElementById('aBaAus'); if (sel && opts) sel.innerHTML = opts;   // none defined: the disabled hint stays
-      } catch (_) { }
-      const src = document.getElementById('aBaRoles'), dst = document.getElementById('aAuRoles');
-      const copy = () => { if (src && dst && !dst.options.length) dst.innerHTML = src.innerHTML; };
-      copy(); setTimeout(copy, 1500); setTimeout(copy, 5000);
-    })();
-    (document.getElementById('aAuGo') || {}).onclick = async () => {
-      const msg = document.getElementById('aAuMsg'); msg.style.color = '#57606a'; msg.textContent = 'computing...';
-      try {
-        const name = document.getElementById('aAuName').value.trim();
-        if (!name) throw new Error('give the AU a name');
-        const tag = document.getElementById('aAuTag').value.trim() || name.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-{2,}/g, '-').replace(/^-|-$/g, '');
-        const grp = document.getElementById('aAuGroup').value.trim();
-        const roles = Array.from(document.getElementById('aAuRoles').selectedOptions || []).map(o => o.value.trim()).filter(Boolean);
-        if (roles.length && !grp) throw new Error('pick the group that gets the roles, or clear the roles');
-        const r = await api('POST', '/api/authoring/au', { auDisplayName: name, auTag: tag, auDescription: document.getElementById('aAuDesc').value.trim(),
-          visibility: document.getElementById('aAuVis').value, roleBindings: grp ? roles.map(role => ({ groupTag: grp, role })) : [] });
-        const res = (r && (r.result || r)) || {};
-        let n = 0;
-        if (res.auRow) n += await stageComputedRows('PIM-Definitions-AU', [res.auRow]);
-        if (asList(res.rolesAusRows).length) n += await stageComputedRows('PIM-Assignments-Roles-AUs', asList(res.rolesAusRows));
-        msg.innerHTML = n + ' row(s) staged &mdash; <a style="cursor:pointer;color:#0969da;" id="aAuSave">Pending changes</a>';
-        const a = document.getElementById('aAuSave'); if (a) a.onclick = () => switchTab('save');
-      } catch (e) { msg.style.color = '#cf222e'; msg.textContent = e.message; }
-    };
     // IMP-19. Turn a human name into the tag the store keys on. Deliberately CONSERVATIVE:
     // strip accents, keep letters/digits, collapse everything else to a single hyphen, upper
     // the first letter of each word. It is shown to the operator BEFORE staging (below), so a
@@ -14096,8 +14303,9 @@
     if (REPL_KIND[base] && REPL_KIND[base] !== 'admin' && col === 'Ring') {
       return {
         listKey: null, allowCustom: false, allowBlank: true,
-        options: [ { value: '0', label: '0 — dev tenants only' }, { value: '1', label: '1 — dev + test tenants' }, { value: '2', label: '2 — every tenant (broad)' } ],
-        validate: (v) => v === '' || /^[0-2]$/.test(String(v).trim()), invalidHint: 'Ring must be blank, 0 (dev), 1 (test) or 2 (broad)'
+        options: PIM_RINGS.map(r => ({ value: String(r.ring), label: r.ring + ' — ' + r.name + ' (' + pimRingShort(r.ring) + ')', title: pimRingReachText(r.ring) })),
+        cellTitle: (v) => v === '' ? 'No ring -- this row is not limited to a ring' : pimRingReachText(v),
+        validate: (v) => v === '' || pimRingValid(v), invalidHint: 'Ring must be blank or one of the defined rings: ' + pimRingRangeText()
       };
     }
     // Deployment ring of an admin (MSP rollout staging): a new hire starts on 0 (dev tenants only) and is promoted
@@ -14107,13 +14315,10 @@
         listKey: null,
         allowCustom: false,
         allowBlank: true,
-        options: [
-          { value: '0', label: '0 — dev tenants only (new hire)' },
-          { value: '1', label: '1 — dev + test tenants' },
-          { value: '2', label: '2 — every tenant (broad, veteran)' }
-        ],
-        validate: (v) => v === '' || /^[0-2]$/.test(String(v).trim()),
-        invalidHint: 'Ring must be 0 (dev), 1 (test) or 2 (broad). Anything else reaches NO managed tenant.'
+        options: PIM_RINGS.map(r => ({ value: String(r.ring), label: r.ring + ' — ' + r.name + ' (' + pimRingShort(r.ring) + (r.ring === 0 ? ', new hire' : '') + ')', title: pimRingReachText(r.ring) })),
+        cellTitle: (v) => v === '' ? 'No ring -- an msp admin without a ring reaches NO managed tenant' : pimRingReachText(v),
+        validate: (v) => v === '' || pimRingValid(v),
+        invalidHint: 'Ring must be one of the defined rings: ' + pimRingRangeText() + '. Anything else reaches NO managed tenant.'
       };
     }
     // Admin-type (drives the name PREFIX) -- Account-Definitions-Admins grid.
@@ -15162,7 +15367,7 @@
   // 🔴 BUG-207 -- THE ROW KEY. The natural key per entity, the SAME derivation the store keys pim.Rows
   // on (Get-PimStoreRowKey, engine/_shared/PIM-SqlStore.ps1) and the server's Review diff pairs rows
   // by (Compare-PimRowSets). '' = no key derivable (the row then pairs by content only).
-  function pendingRowKey(base, row) {
+  function pendingRowKey(base, row, keepCase) {   // keepCase: for DISPLAY (the commit box); every comparison uses the lower-cased key
     const g = (n) => String((row && row[n] != null) ? row[n] : '').trim();
     let k;
     if (base === 'PIM-Definitions-AU') k = g('AdministrativeUnitTag');
@@ -15180,7 +15385,7 @@
     else if (base === 'PIM-Assignments-Azure-Resources') k = g('GroupTag') + '|' + g('AzScope') + '|' + g('AzScopePermission');
     else k = g('GroupTag') || g('GroupName');
     k = String(k || '').trim();
-    return (!k || /^\|+$/.test(k)) ? '' : k.toLowerCase();
+    return (!k || /^\|+$/.test(k)) ? '' : (keepCase ? k : k.toLowerCase());
   }
   // Per-row state of a pending entity, compared BY ROW KEY, never by position:
   //   1. a row identical to a stored row is unchanged, wherever it sits;
@@ -16073,6 +16278,8 @@
     const v = gridView(base);
     const f = String(v.filter || '').trim().toLowerCase();
     let order = p.rows.map((_, i) => i);
+    // §91.6: a problem's "Open in Grid" shows ONLY the rows that problem covers (until "Show all rows")
+    if (v.problem && v.problem.rows && v.problem.rows.size) order = order.filter(i => v.problem.rows.has(i));
     if (f) order = order.filter(i => cols.some(c => String((p.rows[i] || {})[c] || '').toLowerCase().indexOf(f) >= 0));
     if (v.sortCol && v.sortDir) {
       const c = v.sortCol, d = v.sortDir;
@@ -16140,6 +16347,7 @@
       </div>
       <div class="toolbar">
         <input id="gridFilter" type="search" placeholder="filter rows…" autocomplete="off" value="${escapeHtml(gridView(base).filter)}" style="padding:3px 8px;font-size:12px;border:1px solid #d0d7de;border-radius:6px;width:200px;" title="Show only rows whose cells contain this text">
+        ${gridView(base).problem ? '<span id="gridProblemBar" style="font-size:11.5px;background:#ffebe9;border:1px solid #ff8182;border-radius:6px;padding:2px 8px;">Showing the <b>' + gridView(base).problem.rows.size + '</b> row(s) with problem <b>' + escapeHtml(gridView(base).problem.code) + '</b>' + (gridView(base).problem.message ? ' &mdash; ' + escapeHtml(gridView(base).problem.message) : '') + ' <a href="#" id="gridProblemClear">Show all rows</a></span>' : ''}
         ${__gridOrder.length !== p.rows.length ? '<span id="gridShown" style="font-size:11.5px;color:#9a6700;">' + __gridOrder.length + ' of ' + p.rows.length + ' shown</span>' : ''}
         <button id="btnAddRow">+ Add row</button>
         <button id="btnReloadGrid">&#x21bb; Reload</button>
@@ -16196,11 +16404,7 @@
       // Ring moves as a first-class action (LIFECYCLE-GOVERNANCE phase 1):
       // promote 2 -> 1 -> 0 (or pull back) without hand-editing the column. managing tenant only (§71).
       html.push('<span class="gab-label">Move to ring:</span>');
-      html.push('<select id="gabRing">' +
-        '<option value="0">0 (dev tenants only)</option>' +
-        '<option value="1">1 (dev + test tenants)</option>' +
-        '<option value="2">2 (every tenant -- broad)</option>' +
-        '</select>');
+      html.push('<select id="gabRing">' + PIM_RINGS.map(r => '<option value="' + r.ring + '" title="' + escapeHtml(pimRingReachText(r.ring)) + '">' + escapeHtml(r.ring + ' (' + r.name + ' -- ' + pimRingShort(r.ring) + ')') + '</option>').join('') + '</select>');
       html.push('<button id="gabApplyRing">Apply</button>');
       if (p.ringNote) {
         html.push(`<span class="gab-label" style="color:#9a6700">${escapeHtml(p.ringNote)}</span>`);
@@ -16302,6 +16506,7 @@
       const modified = !deleted && state === 'modified';
       let cls = deleted ? 'row-deleted' : (added ? 'row-added' : (modified ? 'row-modified' : ''));
       if (!deleted && fkOrphanRows.has(idx)) cls = (cls ? cls + ' ' : '') + 'row-orphan-error';
+      if (!deleted && gridView(base).problem && gridView(base).problem.rows && gridView(base).problem.rows.has(idx)) cls = (cls ? cls + ' ' : '') + 'row-problem';
       html.push(`<tr data-idx="${idx}" class="${cls}">`);
       // Per-row select checkbox (Roadmap #6 + #7). Disabled on
       // already-deleted rows so they can't be re-selected.
@@ -16366,8 +16571,15 @@
           html.push(`<td class="${bad ? 'cell-bad cell-bad-tip' : ''}" data-col="Target"${bad ? ' title="Target must be tag:&lt;key:value&gt;, tag:a+b, tenant:&lt;id&gt; (comma separated), or blank"' : ''}><span class="repl-target-val">${escapeHtml(v)}</span> <button class="repl-target-pick" data-idx="${idx}" title="Pick tags / tenants">tags…</button></td>`);
           continue;
         }
+        // §91.7: an AD-HOC membership (given by an approved access request, RfaRequestId) is marked on its Username cell --
+        // it is removed automatically when the request's window ends; delegated (standing) access carries no mark.
+        if (base === 'PIM-Assignments-Admins' && col === 'Username' && String(row.RfaRequestId || '').trim()) {
+          html.push(`<td data-col="Username" contenteditable="false" title="Ad-hoc access from access request ${escapeHtml(String(row.RfaRequestId))}: removed automatically when the request's time is up. Not delegated (standing) access -- change it under Access requests, not here.">${escapeHtml(v)} <span class="adhoc-badge" style="display:inline-block;padding:0 6px;border-radius:8px;background:#fff1d6;color:#9a6700;font-size:10.5px;font-weight:600;">ad-hoc</span></td>`);
+          continue;
+        }
         const tdCls = invalid ? 'cell-bad cell-bad-tip' : '';
-        const tdTitle = invalid ? `title="${escapeHtml(spec.invalidHint || 'Invalid value')}"` : '';
+        // §91.1: a spec may explain a VALID value on hover too (the Ring cell says which managed tenants it reaches)
+        const tdTitle = invalid ? `title="${escapeHtml(spec.invalidHint || 'Invalid value')}"` : ((spec && typeof spec.cellTitle === 'function') ? `title="${escapeHtml(String(spec.cellTitle(v) || ''))}"` : '');
         if (spec && !deleted) {
           // Render a native <select> with the cached options + "Custom value..." escape hatch.
           // REQ-L: a spec may name what blank MEANS (PolicyTemplate: "[standard settings (<id>)]") and how an unknown
@@ -16379,7 +16591,7 @@
           for (const o of spec.options) {
             const sel = (o.value === v);
             if (sel) matched = true;
-            optHtml.push(`<option value="${escapeHtml(o.value)}"${sel ? ' selected' : ''}>${escapeHtml(o.label || o.value)}</option>`);
+            optHtml.push(`<option value="${escapeHtml(o.value)}"${sel ? ' selected' : ''}${o.title ? ' title="' + escapeHtml(o.title) + '"' : ''}>${escapeHtml(o.label || o.value)}</option>`);
           }
           if (v && !matched) {
             const ul = (typeof spec.unknownLabel === 'function') ? String(spec.unknownLabel(v) || '') : '';
@@ -16397,6 +16609,18 @@
       html.push('</tr>');
     });
     html.push('</tbody></table>');
+    // §91.4 (operator 2026-10-02, RIDE: "the central admins dont show up under All Records - Administrator Accounts ...
+    // it must combine central synced admins with slave/local accounts"): the managing tenant's admins, READ-ONLY here
+    // (governed by the managing tenant; never part of this grid's editable set).
+    const centralRows = (base === 'Account-Definitions-Admins' && cache && Array.isArray(cache.centralRows)) ? cache.centralRows : [];
+    if (centralRows.length) {
+      const cc = ['UserName', 'UserPrincipalName', 'DisplayName', 'Department', 'Company', 'AccountStatus', 'AutoDisableDate', 'Ring'];
+      html.push('<div style="margin-top:14px;"><b>Central admins from the managing tenant</b> <span style="color:#57606a;font-size:12px;">(' + centralRows.length +
+        ', read-only here -- change them on the managing tenant; the next sync brings the change down)</span></div>');
+      html.push('<table class="grid" style="opacity:.92;"><thead><tr>' + cc.map(c => '<th>' + escapeHtml(gridColLabel(base, c)) + '</th>').join('') + '</tr></thead><tbody>');
+      centralRows.forEach(r => { html.push('<tr class="row-central" title="central admin -- read-only">' + cc.map(c => '<td style="color:#57606a;">' + escapeHtml(String(r[c] == null ? '' : r[c])) + '</td>').join('') + '</tr>'); });
+      html.push('</tbody></table>');
+    }
     main.innerHTML = html.join('');
     main.querySelectorAll('th.grid-sort-th').forEach(th => {
       const box = th.querySelector('.grid-th-in');
@@ -16410,6 +16634,8 @@
         renderGrid(base);
       };
     });
+    const gpc = document.getElementById('gridProblemClear');
+    if (gpc) gpc.onclick = (ev) => { ev.preventDefault(); gridView(base).problem = null; renderGrid(base); };   // §91.6
     const gf = document.getElementById('gridFilter');
     if (gf) gf.oninput = () => {
       gridView(base).filter = gf.value;
@@ -16888,7 +17114,32 @@
     try { await refreshQueueBadge(); } catch (e) { }
   }
 
+  // 2026-10-02 (operator, on the overlay "Committing ... Writing PIM-Assignments-Groups": "show the actual change"; §91.5 "the
+  // commit must detail everything"): the diff each card computed is kept, and the commit box lists it row by row in words.
+  const SAVE_DIFFS = {};
+  function commitChangeLines(base) {
+    const d = SAVE_DIFFS[base];
+    if (!d) return [];
+    const out = [];
+    const keyOf = (r) => { try { return pendingRowKey(base, r, true) || ''; } catch (_) { return ''; } };
+    for (const r of asList(d.adds)) out.push(cwChangeText(base, { op: 'add', key: keyOf(r) }));
+    for (const r of asList(d.removes)) out.push(cwChangeText(base, { op: 'remove', key: keyOf(r) }));
+    for (const m of asList(d.modifies)) {
+      const cols = asList(m.diffCols);
+      const det = cols.slice(0, 4).map(c => c + ': ' + String(((m.before || {})[c]) || '(empty)') + ' → ' + String(((m.after || {})[c]) || '(empty)')).join('; ') + (cols.length > 4 ? '; +' + (cols.length - 4) + ' more' : '');
+      out.push(cwChangeText(base, { op: 'modify', key: keyOf(m.after || m.before || {}) || String(m.key || '') }) + (det ? ' (' + det + ')' : ''));
+    }
+    return out;
+  }
+  function commitChangeListHtml(lines, max) {
+    const ls = asList(lines);
+    if (!ls.length) return '';
+    const n = max || 12;
+    return '<ul class="commit-change-list" style="margin:6px 0 2px 18px;font-size:12.5px;">' + ls.slice(0, n).map(t => '<li>' + escapeHtml(t) + '</li>').join('') +
+      (ls.length > n ? '<li style="color:#57606a;">… and ' + (ls.length - n) + ' more</li>' : '') + '</ul>';
+  }
   function renderSaveCard(card, base, diff) {
+    SAVE_DIFFS[base] = diff;
     const addsN = (diff.adds || []).length;
     const remsN = (diff.removes || []).length;
     const modsN = (diff.modifies || []).length;
@@ -17013,6 +17264,19 @@
     ov.querySelectorAll('.co-body a').forEach(a => a.addEventListener('click', () => setTimeout(close, 0)));
     return close;
   }
+  // The refusal panel (rendered next to Commit all, where its handlers live) shown INSIDE the red box: same text, and each
+  // button with an id becomes a proxy that closes the box and presses the real button. Buttons without an id are dropped.
+  function commitRefusalOverlay(base, status, partialHtml) {
+    const box = document.createElement('div');
+    box.innerHTML = status.innerHTML;
+    box.querySelectorAll('button').forEach(b => { if (b.id) { b.setAttribute('data-proxy', b.id); b.removeAttribute('id'); } else b.remove(); });
+    box.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
+    const already = /Nothing was saved|nothing was saved/.test(box.textContent || '');
+    const close = commitOverlay('error', 'Commit stopped at ' + entityLabel(base), box.innerHTML + (already && /Nothing was saved\.<\/p>$/.test(partialHtml || '') ? '' : (partialHtml || '')));
+    document.querySelectorAll('#commitOverlay .co-body [data-proxy]').forEach(b => {
+      b.onclick = () => { const id = b.getAttribute('data-proxy'); close(); const o = document.getElementById(id); if (o) o.click(); };
+    });
+  }
   function commitOverlayHide() { const ov = document.getElementById('commitOverlay'); if (ov) { ov.style.display = 'none'; ov.innerHTML = ''; } }
   // 2.4.462: the order entities are written in. DEFINITIONS first: an assignment names a group a definition declares, and the
   // entities are separate writes -- written the other way round, a definition the server then refused left assignments stored
@@ -17131,8 +17395,10 @@
     let _wi = 0;
     for (const base of bases) {
       status.textContent = 'Writing ' + base + ' ...';
-      commitOverlay('busy', 'Committing ... (' + (++_wi) + ' of ' + bases.length + ')', 'Writing <b>' + escapeHtml(base) + '</b>' +
-        (wrote.length ? '<br><span style="color:#57606a">Done: ' + wrote.map(w => escapeHtml(w.base)).join(', ') + '</span>' : ''));
+      const _lines = commitChangeLines(base);
+      commitOverlay('busy', 'Committing ... (' + (++_wi) + ' of ' + bases.length + ')', 'Writing <b>' + escapeHtml(entityLabel(base)) + '</b>' +
+        (_lines.length ? ' &mdash; ' + _lines.length + ' change' + (_lines.length === 1 ? '' : 's') + ':' + commitChangeListHtml(_lines, 12) : '') +
+        (wrote.length ? '<div style="color:#57606a;margin-top:4px;">Done: ' + wrote.map(w => escapeHtml(entityLabel(w.base))).join(', ') + '</div>' : ''));
       try {
         let finalRows = pendingFinalRows(base);
         if (!Array.isArray(finalRows)) continue;   // §77.24: already written (or discarded) -- never PUT "no rows"
@@ -17164,7 +17430,8 @@
         }
         if (r && r.offboardHeld) heldAll.push({ base: base, body: r });
         if (r && r.commitId) commitWatchIds.push(r.commitId);
-        wrote.push(commitWriteSummary(base, r));
+        wrote.push(Object.assign(commitWriteSummary(base, r), { lines: _lines }));
+        delete SAVE_DIFFS[base];
         // Refresh local cache + reset pending.
         await loadCsv(base, true);
         delete pendingChanges[base];
@@ -17180,11 +17447,11 @@
         status.className = 'err';
         // 2.4.462: the failure is also the red box in the middle -- and it says which entities WERE written before it
         const partial = wrote.length ? '<p style="margin:8px 0 0;"><b>Already saved before this failure:</b> ' + wrote.map(w => escapeHtml(w.base)).join(', ') + '. <b>Not saved:</b> ' + escapeHtml(base) + (bases.indexOf(base) < bases.length - 1 ? ' and ' + bases.slice(bases.indexOf(base) + 1).map(escapeHtml).join(', ') : '') + '.</p>' : '<p style="margin:8px 0 0;">Nothing was saved.</p>';
-        // the refusal panels keep their Show / Fix / Approve buttons next to Commit all (their handlers live there) -- the box
-        // carries the message and points at them
-        const toButtons = '<p style="margin:8px 0 0;"><b>The buttons to fix it are next to Commit all</b>, below this box.</p>';
-        if (showOffboardHeldRefusal(status, base, e, wrote)) { commitOverlay('error', 'Commit stopped at ' + base, '<p style="margin:0;">' + escapeHtml(status.textContent || '') + '</p>' + partial + toButtons); return; }   // BUG-190
-        if (showCommitRefusal(status, base, e, wrote)) { commitOverlay('error', 'Commit stopped at ' + base, '<p style="margin:0;">' + escapeHtml(status.textContent || '') + '</p>' + partial + toButtons); return; }   // BUG-200 conflict / maker-checker gate
+        // 2026-10-02 (operator: "what buttom"): the box said "the buttons are next to Commit all, below this box" -- behind
+        // it, where nobody could see them -- and flattened the panel to text ("#16)Show me these rows"). It now SHOWS the
+        // panel, and its buttons work from inside the box (each closes the box and presses the real one).
+        if (showOffboardHeldRefusal(status, base, e, wrote)) { commitRefusalOverlay(base, status, partial); return; }   // BUG-190
+        if (showCommitRefusal(status, base, e, wrote)) { commitRefusalOverlay(base, status, partial); return; }   // BUG-200 conflict / maker-checker gate
         status.textContent = 'FAILED on ' + base + ': ' + e.message;
         commitOverlay('error', 'Commit FAILED on ' + base, '<p style="margin:0;">' + escapeHtml(e.message || String(e)) + '</p>' + partial);
         return;
@@ -17205,7 +17472,7 @@
     const totalChanges = wrote.reduce(function (n, w) { return n + w.adds + w.removes + w.modifies; }, 0);
     const per = wrote.map(function (w) {
       return '<li><b>' + escapeHtml(w.base) + '</b> &mdash; ' + w.adds + ' added, ' + w.removes + ' removed, ' +
-             w.modifies + ' changed (' + w.rowCount + ' rows now)</li>';
+             w.modifies + ' changed (' + w.rowCount + ' rows now)' + commitChangeListHtml(w.lines, 10) + '</li>';
     }).join('');
     let summaryHtml = '<b>Committed ' + totalChanges + ' configuration change' + (totalChanges === 1 ? '' : 's') +
       '</b> to the desired state across ' + wrote.length + ' entit' + (wrote.length === 1 ? 'y' : 'ies') + '.' +
@@ -17249,9 +17516,30 @@
   // saved -> applied -> LIVE (read back from Entra / Azure), or waiting / failed with the engine's reason -- polling
   // GET /api/commits every 10 s until nothing is left in flight (or 45 min). It survives a page reload (sessionStorage).
   const CW_KEY = 'pim.commitWatch';
-  let cwTimer = null, cwIds = [], cwStarted = 0, cwOpen = false;
+  let cwTimer = null, cwIds = [], cwStarted = 0, cwOpen = false, cwNextAt = 0, cwTick = null;
+  // operator 2026-10-02: "make a timer that refreshes every 10 sec" -- a visible countdown to the next check
+  function cwCountdown() { const el = document.getElementById("cwNext"); if (!el) return; const s = Math.max(0, Math.ceil((cwNextAt - Date.now()) / 1000)); el.textContent = cwNextAt ? (s ? "next check in " + s + " s" : "checking ...") : ""; }
   const CW_LABEL = { saved: 'saved', applied: 'applied', live: 'live', waiting: 'waiting', failed: 'failed', stored: 'saved (no platform object)' };
   const CW_COLOR = { saved: '#9a6700', applied: '#0969da', live: '#1a7f37', waiting: '#9a6700', failed: '#cf222e', stored: '#1a7f37' };
+  // A committed row key in plain words: who / what was added, removed or changed (the store key's parts per entity).
+  function cwChangeText(entity, k) {
+    const p = String(k.key || '').split('|');
+    const verb = k.op === 'add' ? 'Added' : (k.op === 'remove' ? 'Removed' : 'Changed');
+    let what;
+    switch (entity) {
+      case 'Account-Definitions-Admins':      what = 'admin account ' + p[0]; break;
+      case 'Account-Definitions-Companies':   what = 'company ' + p[0]; break;
+      case 'PIM-Assignments-Admins':          what = p[0] + ' → member of ' + (p[1] || ''); break;
+      case 'PIM-Assignments-Groups':          what = (p[1] || '') + ' nested in ' + p[0]; break;
+      case 'PIM-Assignments-Roles-Groups':    what = p[0] + ' → Entra role ' + (p[1] || ''); break;
+      case 'PIM-Assignments-Roles-AUs':       what = p[0] + ' → Entra role ' + (p[2] || '') + ' in AU ' + (p[1] || ''); break;
+      case 'PIM-Assignments-Azure-Resources': what = p[0] + ' → Azure ' + (p[2] || '') + ' on ' + (p[1] || ''); break;
+      case 'PIM-Assignments-Workloads':       what = 'workload binding ' + p.join(' / '); break;
+      case 'PIM-Definitions-AU':              what = 'administrative unit ' + p[0]; break;
+      default: what = (/^PIM-Definitions-/.test(entity) ? 'group ' : entity + ' ') + p.join(' / ');
+    }
+    return verb + ': ' + what;
+  }
   function startCommitWatcher(ids) {
     cwIds = Array.from(new Set((cwIds || []).concat(ids || []))).slice(-20);
     cwStarted = Date.now();
@@ -17279,9 +17567,11 @@
     catch (e) { commitWatchRender(null, 'The watcher cannot read the commits right now: ' + (e && e.message ? e.message : e)); cwTimer = setTimeout(commitWatchPoll, 30000); return; }
     const allDone = commits.length > 0 && commits.every(c => c.done);
     commitWatchRender(commits, '');
-    if (allDone) { try { sessionStorage.removeItem(CW_KEY); } catch (_) { } return; }
+    if (allDone) { try { sessionStorage.removeItem(CW_KEY); } catch (_) { } cwNextAt = 0; if (cwTick) { clearInterval(cwTick); cwTick = null; } return; }
     if (Date.now() - cwStarted > 45 * 60 * 1000) { commitWatchRender(commits, 'Stopped watching after 45 minutes -- open it again from Pending changes to re-check.'); return; }
-    cwTimer = setTimeout(commitWatchPoll, 10000);
+    cwNextAt = Date.now() + 10000; cwTimer = setTimeout(commitWatchPoll, 10000);
+    if (!cwTick) cwTick = setInterval(cwCountdown, 1000);
+    cwCountdown();
   }
   function commitWatchRender(commits, note) {
     const el = commitWatchBox();
@@ -17296,11 +17586,15 @@
     const chips = Object.keys(CW_LABEL).filter(s => tot[s]).map(s => '<span style="color:' + CW_COLOR[s] + ';margin-right:10px;">' + tot[s] + ' ' + CW_LABEL[s] + '</span>').join('');
     let body = '';
     if (cwOpen && commits) {
+      // operator 2026-10-02: "it would be nice to show the actual changes" -- EVERY change in plain words (live ones too),
+      // what changed on a modify, and the state; problems (failed / waiting) first.
+      const order = { failed: 0, waiting: 1, applied: 2, saved: 3, live: 4, stored: 5 };
       body = commits.map(c => {
-        const rows = (c.keys || []).filter(k => k.state !== 'live' && k.state !== 'stored').slice(0, 25).map(k =>
-          '<div style="padding:2px 0;border-top:1px solid #f0f2f4;"><span style="color:' + (CW_COLOR[k.state] || '#57606a') + ';font-weight:600;">' + escapeHtml(CW_LABEL[k.state] || k.state) + '</span> ' +
-          '<code style="font-size:11px;">' + escapeHtml(k.key) + '</code> <span style="color:#57606a;">' + escapeHtml(k.op) + '</span>' +
-          (k.reason ? '<div style="color:#57606a;font-size:11px;">' + escapeHtml(k.reason) + '</div>' : '') + '</div>').join('');
+        const rows = (c.keys || []).slice().sort((x, y) => (order[x.state] ?? 9) - (order[y.state] ?? 9)).slice(0, 40).map(k =>
+          '<div style="padding:3px 0;border-top:1px solid #f0f2f4;"><span style="color:' + (CW_COLOR[k.state] || '#57606a') + ';font-weight:600;">' + escapeHtml(CW_LABEL[k.state] || k.state) + '</span> &middot; ' +
+          escapeHtml(cwChangeText(c.entity, k)) +
+          ((k.fields || []).length ? '<div style="color:#57606a;font-size:11px;">' + (k.fields || []).map(f => escapeHtml(String(f).replace(' -> ', ' → '))).join('<br>') + '</div>' : '') +
+          (k.reason && k.state !== 'live' && k.state !== 'stored' ? '<div style="color:#57606a;font-size:11px;">' + escapeHtml(k.reason) + '</div>' : '') + '</div>').join('');
         const liveN = (c.keys || []).filter(k => k.state === 'live' || k.state === 'stored').length;
         return '<div style="margin-top:8px;"><b>' + escapeHtml(c.entity) + '</b> <span style="color:#57606a;">' + liveN + ' of ' + (c.keys || []).length + ' live' +
           (c.moreKeys ? ' (+' + c.moreKeys + ' more not tracked)' : '') + '</span>' + rows + '</div>';
@@ -17311,11 +17605,13 @@
       '<a href="#" id="cwToggle" style="font-size:12px;">' + (cwOpen ? 'Hide details' : 'Details') + '</a>' +
       '<a href="#" id="cwClose" title="Close the watcher" style="font-size:15px;text-decoration:none;color:#57606a;">&times;</a></div>' +
       (chips ? '<div style="margin-top:4px;">' + chips + '</div>' : '') +
-      (busy ? '<div style="color:#57606a;font-size:11px;margin-top:2px;">saved = waiting for the engine &middot; applied = written, read-back next &middot; live = confirmed in Entra / Azure. Checks every 10 s.</div>' : '') +
+      (busy ? '<div style="color:#57606a;font-size:11px;margin-top:2px;">saved = waiting for the engine &middot; applied = written, read-back next &middot; live = confirmed in Entra / Azure. Checks every 10 s -- <b id="cwNext"></b> <a href="#" id="cwNow">check now</a></div>' : '') +
       (note ? '<div style="color:#9a6700;margin-top:4px;">' + escapeHtml(note) + '</div>' : '') +
       '<div style="max-height:320px;overflow:auto;">' + body + '</div></div>';
     const t = document.getElementById('cwToggle'); if (t) t.onclick = function (ev) { ev.preventDefault(); cwOpen = !cwOpen; commitWatchRender(commits, note); };
     const x = document.getElementById('cwClose'); if (x) x.onclick = function (ev) { ev.preventDefault(); stopCommitWatcher(true); };
+    const now = document.getElementById('cwNow'); if (now) now.onclick = function (ev) { ev.preventDefault(); commitWatchPoll(); };
+    cwCountdown();
   }
   // a reload keeps following the commits that were still in flight
   try { const s = JSON.parse(sessionStorage.getItem(CW_KEY) || 'null'); if (s && Array.isArray(s.ids) && s.ids.length && Date.now() - (s.started || 0) < 45 * 60 * 1000) { cwIds = s.ids; cwStarted = s.started; setTimeout(commitWatchPoll, 1500); } } catch (_) { }
@@ -17431,18 +17727,23 @@
     const p = pendingChanges[base];
     const keyCol = (base === 'PIM-Definitions-AU') ? 'AdministrativeUnitTag'
                  : (PIM_TAG_OWNER_ENTITIES.indexOf(base) >= 0 ? 'GroupTag' : '');
-    status.innerHTML = '<b>Not committed: ' + escapeHtml(entityLabel(base)) + ' has rows that share one key.</b> ' +
-      'The store keeps ONE row per key, so all but the last would be lost. <b>Nothing was saved</b>, and every other ' +
-      'staged change is waiting behind this one.' +
+    // 2026-10-02 (operator, on this text: "rephrase as it adds no values and also mention internal code version"): say WHAT
+    // collides in the words of the page (the account name / group tag, and the rows by their display name), what to do, and
+    // nothing about versions or store internals.
+    const isAdmins = base === 'Account-Definitions-Admins';
+    const keyWord = isAdmins ? 'account name' : (keyCol === 'GroupTag' ? 'group tag' : (keyCol === 'AdministrativeUnitTag' ? 'AU tag' : 'key'));
+    const rowName = (n) => { const r = p && Array.isArray(p.rows) ? p.rows[Number(n) - 1] : null; const nm = r ? String(r.DisplayName || r.GroupName || r.AUDisplayName || '').trim() : ''; return '#' + n + (nm ? ' ' + nm : ''); };
+    status.innerHTML = '<b>Not committed: two ' + escapeHtml(entityLabel(base)) + ' rows use the same ' + keyWord + '.</b> ' +
+      'Each ' + keyWord + ' can be used only once, so nothing was saved &mdash; and the other staged changes wait until this is fixed.' +
       '<ul style="margin:4px 0 4px 18px;">' +
-        dups.map(d => '<li><code>' + escapeHtml(String(d.key)) + '</code> &mdash; ' + escapeHtml(String(d.count)) +
-          ' rows (#' + asList(d.rows).join(', #') + ')</li>').join('') +
+        dups.map(d => '<li><code>' + escapeHtml(String(d.key)) + '</code> is used by ' + asList(d.rows).map(n => '<b>' + escapeHtml(rowName(n)) + '</b>').join(' and ') + '</li>').join('') +
       '</ul>' +
+      '<div style="margin:0 0 6px;">' + (isAdmins
+        ? 'Usually a new admin was given the same initials as an existing one. Remove the new row (or give it different initials) and commit again.'
+        : 'Remove the extra row, or give it its own ' + keyWord + ', and commit again.') + '</div>' +
       '<button id="saveDupOpen" type="button">Show me these rows</button> ' +
       (keyCol ? '<button id="saveDupFix" type="button">Give each row its own key</button> ' : '') +
-      '<span id="saveDupMsg" style="margin-left:6px;color:#57606a"></span>' +
-      '<div style="margin-top:4px;color:#57606a">Keep the one you want and delete or rename the others &mdash; a clone ' +
-      'made before v2.4.410 copied the key, which is how this usually happens.</div>';
+      '<span id="saveDupMsg" style="margin-left:6px;color:#57606a"></span>';
     const open = document.getElementById('saveDupOpen');
     if (open) open.onclick = async () => {
       const k = String((dups[0] || {}).key || '');
@@ -18107,7 +18408,7 @@
           const rowLabel = vFindingIdentity(v);
           const colLabel = v.Column ? (' &middot; field <b>' + escapeHtml(v.Column) + '</b>') : '';
           const jump = (v.Row != null && v.Csv && v.Csv !== '<global>')
-            ? '<div class="v-jump" data-csv="' + escapeHtml(v.Csv) + '" data-row="' + v.Row + '">Open in Grid</div>' : '';
+            ? '<div class="v-jump" data-csv="' + escapeHtml(v.Csv) + '" data-row="' + v.Row + '" data-code="' + escapeHtml(v.Code || '') + '" title="Open the grid on every row with this problem">Open in Grid</div>' : '';
           // BUG-91. Per-finding actions come from a REGISTRY keyed by finding code, not from a
           // hard-coded `if (v.Code === 'PIM-FK-001')`. That single branch was why PIM-RA-002,
           // PIM-STALE-001 and PIM-RING-001 rendered as dead ends -- each one IS auto-fixable and
@@ -18163,7 +18464,7 @@
 
     // Wire "Open in Grid" jumps.
     results.querySelectorAll('.v-jump').forEach(el => {
-      el.onclick = () => jumpToGridRow(el.dataset.csv, parseInt(el.dataset.row, 10));
+      el.onclick = () => jumpToGridRow(el.dataset.csv, parseInt(el.dataset.row, 10), el.dataset.code || '');
     });
     // Wire Overrule / Acknowledge buttons.
     results.querySelectorAll('[data-act="overrule"]').forEach(el => {
@@ -19334,7 +19635,7 @@
       for (const v of (opts.ringBad || [])) {
         const { p, idx } = await valPendingRow(v.Csv, v.Row);
         if (idx < 0 || !p.rows[idx]) { stats.rowGone++; continue; }
-        if (/^[0-2]$/.test(String(p.rows[idx].Ring == null ? '' : p.rows[idx].Ring).trim())) { stats.ringValidKept = (stats.ringValidKept || 0) + 1; continue; }
+        if (pimRingValid(p.rows[idx].Ring == null ? '' : p.rows[idx].Ring)) { stats.ringValidKept = (stats.ringValidKept || 0) + 1; continue; }
         p.rows[idx].Ring = newVal;
         stats.ringFixed++;
       }
@@ -19594,7 +19895,17 @@
   }
 
   // Jump from a violation row to the corresponding row in the Grid tab.
-  async function jumpToGridRow(base, rowIdx) {
+  async function jumpToGridRow(base, rowIdx, code) {
+    // §91.6 (operator 2026-10-02: "the grid button must link and mark the entities in scope of the problem so it can be
+    // fixed"): EVERY row of this list with the same problem code is shown and outlined -- not one row flashed for 3 s.
+    const scope = new Set();
+    let message = '';
+    try {
+      const vs = ((VAL_STATE && VAL_STATE.report && VAL_STATE.report.violations) || []).filter(v => v.Csv === base && (!code || v.Code === code));
+      vs.forEach(v => { const li = valRowIndex(base, v.Row); if (li >= 0) scope.add(li); });
+      if (vs.length === 1) message = vs[0].Message || '';
+    } catch (_) { }
+    gridView(base).problem = code && scope.size ? { code: code, rows: scope, message: message } : null;
     switchTab('grid');
     await openGrid(base);
     // BUG-199: the finding's Row is its position in what the validator read -- find the live row.
@@ -22648,11 +22959,9 @@
             f.appendChild(wuxField({ id:'wf-ring', label:'Deployment ring', required:true, type:'select', value:s.ring,
               sub:'Account-Definitions-Admins.Ring',
               hint:'MSP rollout staging: 0 = dev, 1 = test, 2 = broad (the same order as the update rings). New hires start on ring 0 (dev tenants only) and are promoted 0 → 1 → 2 by editing this one value centrally. Each managed tenant sets its OWN ring locally; the admin reaches every tenant whose ring is at or below this value. Which tenants a ring holds, and any tag narrowing, is set on the ring (Managed tenant registry › Deployment rings).',
-              options:[
-                { value:'0', label:'0 -- Dev tenants only (new hire, default)' },
-                { value:'1', label:'1 -- Dev + test tenants' },
-                { value:'2', label:'2 -- Every tenant (broad, veteran)' }
-              ],
+              options: pimRingsAreDefault()
+                ? [ { value:'0', label:'0 -- Dev tenants only (new hire, default)' }, { value:'1', label:'1 -- Dev + test tenants' }, { value:'2', label:'2 -- Every tenant (broad, veteran)' } ]
+                : PIM_RINGS.map(r => ({ value: String(r.ring), label: r.ring + ' -- ' + r.name + ' (' + pimRingShort(r.ring) + (r.ring === 0 ? ', new hire, default' : '') + ')' })),
               onInput:(v)=>{ s.ring=v; }
             }));
             f.appendChild(wuxField({ id:'wf-mode', label:'Management mode', required:true, type:'select', value:s.managementMode,
@@ -22847,6 +23156,15 @@
                 '. No tenant changes happen until you click <b>Commit all</b> under Pending changes.',
                 impact));
             }
+            // 2026-10-02: say it HERE when the name is already taken (Finish refuses it too).
+            if (!guest && userName) adminNameTakenBy(userName, upn).then(t => {
+              if (!t || !wrap.isConnected) return;
+              const w = document.createElement('div');
+              w.className = 'adm-name-taken';
+              w.style.cssText = 'margin:0 0 8px;padding:8px 10px;border:1px solid #cf222e;border-left:4px solid #cf222e;border-radius:6px;background:#ffebe9;font-size:12.5px;';
+              w.innerHTML = '<b>' + escapeHtml(userName) + ' is already used by ' + escapeHtml(t) + '.</b> Go back to the <b>Person</b> step and use different initials &mdash; two accounts cannot share a name.';
+              wrap.insertBefore(w, wrap.firstChild);
+            }).catch(() => { });
             // Refresh the name from the engine (once) if it hasn't resolved yet.
             if (isServer && !s._engineUserName && s.initials && s.initials.trim()) {
               deriveLivePreview('adminReview', {
@@ -22874,6 +23192,12 @@
         }
         if (!userName) userName = buildAdminUserName(s.initials, s.level.replace(/^L/,''), s.tier.replace(/^T/,''), s.useLongForm, s.adminType, s.environment);
         const upn = userName + s.upnSuffix;
+        // 2026-10-02 (seen on internal): a second admin with the SAME initials got the same generated name and was staged as
+        // an add; the commit then refused the duplicate key and blocked every other staged change. Refuse it here instead.
+        if (s.adminType !== 'external-guest') {
+          const taken = await adminNameTakenBy(userName, upn);
+          if (taken) throw new Error('the account name ' + userName + ' is already used by ' + taken + '. Go back to the Person step and use different initials (for example ' + s.initials.toUpperCase() + '2 or a third letter).');
+        }
         const display = buildAdminDisplay(s.first, s.last, s.usage, s.level.replace(/^L/,''), s.tier.replace(/^T/,''), s.useLongForm, s.adminType, s.environment, { initial: s.initials, company: s.company });
 
         // external-guest -> invitation path: the server computes the B2B invitation + Consultant
@@ -22911,6 +23235,17 @@
         }
       }
     });
+  }
+  // Who already holds this admin name? Stored rows plus anything staged (an admin staged earlier in this session counts too).
+  // Returns a short description of the holder, or '' when the name is free.
+  async function adminNameTakenBy(userName, upn) {
+    const un = String(userName || '').trim().toLowerCase(), up = String(upn || '').trim().toLowerCase();
+    if (!un && !up) return '';
+    let rows = pendingFinalRows('Account-Definitions-Admins');
+    if (!Array.isArray(rows)) { try { const d = await loadCsv('Account-Definitions-Admins'); rows = (d && d.rows) || []; } catch (_) { rows = []; } }
+    const hit = rows.find(r => r && ((un && String(r.UserName || '').trim().toLowerCase() === un) || (up && String(r.UserPrincipalName || '').trim().toLowerCase() === up)));
+    if (!hit) return '';
+    return String(hit.DisplayName || '').trim() || String(hit.UserPrincipalName || hit.UserName || '').trim();
   }
   function wuxAdminLivePreview(s) {
     // Instant client-side preview (fallback / static mode)...
@@ -25667,7 +26002,130 @@
     }
     return false;
   }
+  // 2026-10-02 (operator: "these 2 should be moved into create access"): the two creation cards that sat on the bulk
+  // page -- give a group Entra roles (tenant-wide or AU-scoped) and create an Administrative Unit -- render on Create access.
+  // Same markup, same POSTs (/api/authoring/bulk-attach, /api/authoring/au), same staging into Pending changes.
+  function renderEntraRoleAuCards() {
+    const host = document.getElementById('newRoleAuHost');
+    if (!host) return;
+    if (!isServer || !roleAtLeast('Admin')) { host.innerHTML = '<div style="color:#57606a;font-size:12px;">Needs the server and the <b>Admin</b> role.</div>'; return; }
+    const esc = escapeHtml;
+    if (!host.dataset.built) {
+      host.dataset.built = '1';
+      host.innerHTML = '<div style="display:flex;flex-direction:column;gap:14px;max-width:760px;">' +
+        // Bulk-attach
+        '<div class="auth-card" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#fff;">' +
+          '<b style="font-size:13px;">Give a group one or more Entra roles</b>' +
+          '<div style="color:#57606a;font-size:11.5px;margin:3px 0 8px;">Attach Entra directory roles to an existing group. ' +
+            'Groups come from the definition catalog; roles from the live Entra-role cache <span class="cache-badge-slot" data-list-key="entraRoles"></span>.</div>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;">' +
+            // IMP-19: "Target GroupTag" asked the user for a foreign key. The field is the same;
+            // the label now names the THING, and the tag is the technical id underneath it.
+            fieldRow('Target group', '<input id="aBaGroup" data-combo="1" type="text" list="aBaGroupList" placeholder="start typing a group…" autocomplete="off"><datalist id="aBaGroupList"></datalist>') +
+            fieldRow('Entra roles (choose one or more)', '<select id="aBaRoles" multiple size="5" style="min-height:96px;"></select>') +
+            fieldRow('Assignment type', '<select id="aBaType"><option>Eligible</option><option>Active</option></select>') +
+            // DOC-AU-1 (2.4.455): the roles only INSIDE these Administrative Units (AU-scoped) instead of tenant-wide.
+            fieldRow('Only in these Administrative Units (optional)', '<select id="aBaAus" multiple size="4" style="min-height:76px;min-width:200px;" title="Leave empty for tenant-wide roles. Pick AUs to give the roles only inside them."><option value="" disabled>(no Administrative Units defined yet)</option></select>') +
+          '</div>' +
+          '<div style="margin-top:8px;"><button id="aBaGo" class="primary">Compute &amp; stage</button> <span id="aBaMsg" style="font-size:11.5px;color:#57606a;"></span></div>' +
+        '</div>' +
+        // DOC-AU-1 (2.4.455): create an Administrative Unit (+ AU-scoped roles for a group) -- POST /api/authoring/au
+        '<div class="auth-card" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#fff;">' +
+          '<b style="font-size:13px;">Create an Administrative Unit</b>' +
+          '<div style="color:#57606a;font-size:11.5px;margin:3px 0 8px;">Defines an AU (PIM creates it in Entra on the next run) and, optionally, gives a group Entra roles scoped to it.</div>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;">' +
+            fieldRow('AU name', '<input id="aAuName" type="text" placeholder="e.g. Helpdesk Europe">') +
+            fieldRow('AU tag (optional)', '<input id="aAuTag" type="text" placeholder="derived from the name">') +
+            fieldRow('Description', '<input id="aAuDesc" type="text">') +
+            fieldRow('Visibility', '<select id="aAuVis"><option>Public</option><option>HiddenMembership</option></select>') +
+            fieldRow('Group to delegate (optional)', '<input id="aAuGroup" data-combo="1" type="text" list="aBaGroupList" placeholder="start typing a group…" autocomplete="off">') +
+            fieldRow('Roles in this AU (optional)', '<select id="aAuRoles" multiple size="4" style="min-height:76px;"></select>') +
+          '</div>' +
+          '<div style="margin-top:8px;"><button id="aAuGo" class="primary">Compute &amp; stage</button> <span id="aAuMsg" style="font-size:11.5px;color:#57606a;"></span></div>' +
+        '</div>' +
+      '</div>';
+      ensureTenantLists(['entraRoles']);
+      (document.getElementById('aBaGo') || {}).onclick = async () => {
+        const msg = document.getElementById('aBaMsg'); msg.textContent = 'computing...';
+        try {
+          const roles = Array.from(document.getElementById('aBaRoles').selectedOptions || [])
+            .map(o => o.value.trim()).filter(Boolean);
+          const groupTag = document.getElementById('aBaGroup').value.trim();
+          if (!groupTag) throw new Error('pick a target GroupTag');
+          if (!roles.length) throw new Error('select at least one Entra role');
+          const aus = Array.from((document.getElementById('aBaAus') || {}).selectedOptions || []).map(o => o.value.trim()).filter(Boolean);
+          // DOC-AU-1: with AUs picked, the roles are AU-scoped (PIM-Assignments-Roles-AUs) instead of tenant-wide.
+          const r = await api('POST', '/api/authoring/bulk-attach', {
+            groupTag: groupTag,
+            entraRoles: aus.length ? [] : roles,
+            auScopes: aus.length ? [].concat(...aus.map(a => roles.map(role => ({ auTag: a, role })))) : [],
+            assignmentType: document.getElementById('aBaType').value
+          });
+          msg.textContent = 'previewing...';
+          const staged = await stageBulkAttachResult(r, true);
+          if (staged === false) { msg.style.color = '#57606a'; msg.textContent = 'cancelled.'; return; }
+          if (!staged) throw new Error('nothing computed -- check the GroupTag + roles');
+          msg.style.color = '#57606a';
+          msg.innerHTML = staged + ' row(s) staged &mdash; <a style="cursor:pointer;color:#0969da;" id="aBaSave">Pending changes</a>';
+          const a = document.getElementById('aBaSave'); if (a) a.onclick = () => switchTab('save');
+        } catch (e) { msg.style.color = '#cf222e'; msg.textContent = e.message; }
+      };
+      // DOC-AU-1 (2.4.455): the AU pickers (defined AUs) + the role list for the AU card (the same Entra roles as above).
+      (async () => {
+        try {
+          const d = await loadCsv('PIM-Definitions-AU');
+          const opts = (d.rows || []).filter(x => x && x.AdministrativeUnitTag).map(x => '<option value="' + escapeHtml(x.AdministrativeUnitTag) + '">' + escapeHtml(x.AUDisplayName || x.AdministrativeUnitTag) + '</option>').join('');
+          const sel = document.getElementById('aBaAus'); if (sel && opts) sel.innerHTML = opts;   // none defined: the disabled hint stays
+        } catch (_) { }
+        const src = document.getElementById('aBaRoles'), dst = document.getElementById('aAuRoles');
+        const copy = () => { if (src && dst && !dst.options.length) dst.innerHTML = src.innerHTML; };
+        copy(); setTimeout(copy, 1500); setTimeout(copy, 5000);
+      })();
+      (document.getElementById('aAuGo') || {}).onclick = async () => {
+        const msg = document.getElementById('aAuMsg'); msg.style.color = '#57606a'; msg.textContent = 'computing...';
+        try {
+          const name = document.getElementById('aAuName').value.trim();
+          if (!name) throw new Error('give the AU a name');
+          const tag = document.getElementById('aAuTag').value.trim() || name.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-{2,}/g, '-').replace(/^-|-$/g, '');
+          const grp = document.getElementById('aAuGroup').value.trim();
+          const roles = Array.from(document.getElementById('aAuRoles').selectedOptions || []).map(o => o.value.trim()).filter(Boolean);
+          if (roles.length && !grp) throw new Error('pick the group that gets the roles, or clear the roles');
+          const r = await api('POST', '/api/authoring/au', { auDisplayName: name, auTag: tag, auDescription: document.getElementById('aAuDesc').value.trim(),
+            visibility: document.getElementById('aAuVis').value, roleBindings: grp ? roles.map(role => ({ groupTag: grp, role })) : [] });
+          const res = (r && (r.result || r)) || {};
+          let n = 0;
+          if (res.auRow) n += await stageComputedRows('PIM-Definitions-AU', [res.auRow]);
+          if (asList(res.rolesAusRows).length) n += await stageComputedRows('PIM-Assignments-Roles-AUs', asList(res.rolesAusRows));
+          msg.innerHTML = n + ' row(s) staged &mdash; <a style="cursor:pointer;color:#0969da;" id="aAuSave">Pending changes</a>';
+          const a = document.getElementById('aAuSave'); if (a) a.onclick = () => switchTab('save');
+        } catch (e) { msg.style.color = '#cf222e'; msg.textContent = e.message; }
+      };
+    }
+    function fillEntraRoleAuPickers() {
+      // Bulk-attach: GroupTag datalist (pick-or-type) + Entra-role multiselect.
+      const baTags = collectKnownGroupTags();
+      const baGroupList = document.getElementById('aBaGroupList');
+      if (baGroupList) baGroupList.innerHTML = baTags.map(t => `<option value="${esc(t)}">`).join('');
+      const baRoles = document.getElementById('aBaRoles');
+      if (baRoles) {
+        const roleOpts = collectAuthoringEntraRoles();
+        const keep = new Set(Array.from(baRoles.selectedOptions || []).map(o => o.value));
+        baRoles.innerHTML = roleOpts.length
+          ? roleOpts.map(o => `<option value="${esc(o.value)}"${keep.has(o.value) ? ' selected' : ''}>${esc(o.label)}</option>`).join('')
+          : '<option value="" disabled>(role cache empty — click the badge above to refresh)</option>';
+      }
+    }
+    fillEntraRoleAuPickers();
+    (async () => {
+      try {
+        const bases = (PIM_DATA.csvBases || []).filter(b => b.group === 'Definitions').map(b => b.base);
+        await Promise.all(bases.map(b => loadCsv(b).catch(() => null)));
+      } finally { fillEntraRoleAuPickers(); }
+    })();
+  }
+
   async function renderTemplates() {
+    try { renderEntraRoleAuCards(); } catch (_) { }
     const wrap = document.getElementById('tplCards');
     if (!wrap) return;
     if (!isServer) { wrap.innerHTML = '<div class="empty">Templates need server mode.</div>'; return; }

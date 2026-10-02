@@ -689,13 +689,23 @@ function Invoke-PimHybridAdSyncLoop {
         [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s },
         [scriptblock]$Clock = { [datetime]::UtcNow },
         # 2.4.465: the Manager's LIVE view (written only while somebody watches -- Publish-PimHybridAdSyncLive)
-        [scriptblock]$Live = { param($res, $now) [void](Publish-PimHybridAdSyncLive -Result $res -NowUtc $now -PauseSeconds $PauseSeconds) }
+        [scriptblock]$Live = { param($res, $now) [void](Publish-PimHybridAdSyncLive -Result $res -NowUtc $now -PauseSeconds $PauseSeconds) },
+        # 🔴 SELF-HEALING (operator 2026-10-02: "it must be running 24x7x365"). A pass that never returns (a REST/LDAP/SQL call
+        # waiting forever) froze the loop for 22 h while the task said "Running". -StallMinutes: when no iteration completes for
+        # that long, the in-process watchdog KILLS this process and the task's 1-minute trigger starts a fresh loop. 0 = off.
+        # -Alive is called once per iteration: it feeds the watchdog and stamps the liveness file the 5-minute tick checks
+        # (Invoke-PimHybridSyncWatchdogCheck -- the second, external layer).
+        [int]$StallMinutes = 10,
+        [scriptblock]$Alive = { param($now) Set-PimHybridSyncAlive -NowUtc $now }
     )
     $script:PimHybridAdCacheSeconds = [math]::Max(0, $RefreshSeconds)
     $start = & $Clock; $lastRecord = [datetime]::MinValue; $lastBeat = [datetime]::MinValue
     $passes = 0; $recorded = 0; $failures = 0; $stop = ''
+    if ($StallMinutes -gt 0) { try { Start-PimHybridSyncWatchdog -StallMinutes $StallMinutes } catch { Write-Warning "[hybrid-ad-sync] watchdog not started: $($_.Exception.Message)" } }
+    try {
     while ($true) {
         $now = & $Clock
+        try { & $Alive $now } catch { }
         if (($now - $lastBeat).TotalSeconds -ge $RecordEverySeconds) { try { & $Heartbeat } catch { }; $lastBeat = $now }
         $res = $null; $threw = $false
         try { $res = & $Pass $now ([bool]$WhatIf) }
@@ -718,8 +728,99 @@ function Invoke-PimHybridAdSyncLoop {
         # a failing pass backs off (DC or Graph down must not become a tight error loop); a healthy one pauses -PauseSeconds
         & $Sleep $(if ($bad) { [math]::Min(60, $PauseSeconds * 6) } else { $PauseSeconds })
     }
+    } finally { if ($StallMinutes -gt 0) { Stop-PimHybridSyncWatchdog } }
     Write-Host "[hybrid-ad-sync] loop stopped after $passes pass(es): $stop"
     return [pscustomobject]@{ passes = $passes; recorded = $recorded; failures = $failures; stopReason = $stop }
+}
+
+# ---- self-healing of the continuous sync (operator 2026-10-02: "it must be running 24x7x365") -----------------------------
+# Layer 1 (in-process): a .NET timer THREAD -- not a PowerShell event, which never fires while the pipeline is blocked in a
+#   call -- that kills this process when no loop iteration completed for -StallMinutes. The task restarts the loop in <= 1 min.
+# Layer 2 (external, Invoke-PimHybridSyncWatchdogCheck): the 5-minute hybrid tick reads the liveness file and kills a sync
+#   process whose stamp is stale -- for the case where layer 1 itself is wedged.
+function Get-PimHybridSyncAlivePath {
+    if ("$env:PIM_HybridSyncAliveFile".Trim()) { return "$env:PIM_HybridSyncAliveFile".Trim() }
+    $base = if ($env:ProgramData) { $env:ProgramData } else { [IO.Path]::GetTempPath() }
+    return (Join-Path $base 'PIM4EntraPS\hybrid-ad-sync.alive')
+}
+function Set-PimHybridSyncAlive {
+    param([datetime]$NowUtc = [datetime]::UtcNow)
+    if ('PimHybridSyncWatchdog' -as [type]) { [PimHybridSyncWatchdog]::Beat() }
+    $p = Get-PimHybridSyncAlivePath
+    $d = Split-Path $p -Parent
+    if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+    [IO.File]::WriteAllText($p, ("{0}|{1}" -f $NowUtc.ToUniversalTime().ToString('o'), $PID))
+}
+function Get-PimHybridSyncAlive {
+    # -> @{ utc; pid } or $null (no file / unreadable)
+    $p = Get-PimHybridSyncAlivePath
+    if (-not (Test-Path -LiteralPath $p)) { return $null }
+    try {
+        $parts = ([IO.File]::ReadAllText($p)).Trim() -split '\|'
+        $at = Get-PimUtcStamp $parts[0]
+        if ($null -eq $at) { return $null }
+        $procId = 0; if ($parts.Count -gt 1) { [void][int]::TryParse($parts[1], [ref]$procId) }
+        return [pscustomobject]@{ utc = $at; pid = $procId }
+    } catch { return $null }
+}
+function Start-PimHybridSyncWatchdog {
+    param([int]$StallMinutes = 10, [int]$StallSeconds = 0)   # -StallSeconds: tests only (floor 3 s); production floor is 60 s
+    if (-not ('PimHybridSyncWatchdog' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+public static class PimHybridSyncWatchdog {
+    static long _last = DateTime.UtcNow.Ticks;
+    static long _limit;
+    static Timer _timer;
+    static string _log;
+    public static void Start(int stallSeconds, string logPath) {
+        _log = logPath;
+        Interlocked.Exchange(ref _limit, TimeSpan.FromSeconds(stallSeconds).Ticks);
+        Beat();
+        if (_timer == null) { _timer = new Timer(Check, null, 15000, 15000); }
+    }
+    public static void Beat() { Interlocked.Exchange(ref _last, DateTime.UtcNow.Ticks); }
+    public static double IdleSeconds() { return TimeSpan.FromTicks(DateTime.UtcNow.Ticks - Interlocked.Read(ref _last)).TotalSeconds; }
+    public static void Stop() { Interlocked.Exchange(ref _limit, 0); if (_timer != null) { _timer.Dispose(); _timer = null; } }
+    static void Check(object state) {
+        long limit = Interlocked.Read(ref _limit);
+        if (limit <= 0 || DateTime.UtcNow.Ticks - Interlocked.Read(ref _last) <= limit) { return; }
+        string line = DateTime.UtcNow.ToString("o") + " WATCHDOG: no hybrid-ad-sync iteration for " + ((int)IdleSeconds()) + " s -- killing process " + Process.GetCurrentProcess().Id + "; the task starts a fresh loop within a minute";
+        try { if (!String.IsNullOrEmpty(_log)) { File.AppendAllText(_log, line + Environment.NewLine); } } catch { }
+        try { Console.Error.WriteLine("[hybrid-ad-sync] " + line); } catch { }
+        Process.GetCurrentProcess().Kill();
+    }
+}
+'@
+    }
+    $log = Join-Path (Split-Path (Get-PimHybridSyncAlivePath) -Parent) 'hybrid-ad-sync-watchdog.log'
+    $secs = if ($StallSeconds -gt 0) { [math]::Max(3, $StallSeconds) } else { [math]::Max(60, $StallMinutes * 60) }
+    [PimHybridSyncWatchdog]::Start($secs, $log)
+}
+function Stop-PimHybridSyncWatchdog { if ('PimHybridSyncWatchdog' -as [type]) { [PimHybridSyncWatchdog]::Stop() } }
+function Invoke-PimHybridSyncWatchdogCheck {
+    <#
+      Layer 2, run by the 5-minute hybrid tick: when the continuous loop's liveness stamp is older than -StaleMinutes, the
+      process that wrote it (the pid in the stamp, and only if its command line is the sync loop) is killed; the sync task's
+      1-minute trigger then starts a fresh one. No stamp at all = nothing to judge (older version, never started) -> no action.
+      Returns @{ action = 'ok'|'none'|'killed'|'gone'; detail }.
+    #>
+    param([int]$StaleMinutes = 15, [datetime]$NowUtc = [datetime]::UtcNow,
+        [scriptblock]$GetProcess = { param($procId) Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue },
+        [scriptblock]$Kill = { param($procId) Stop-Process -Id $procId -Force -ErrorAction Stop })
+    $a = Get-PimHybridSyncAlive
+    if (-not $a) { return [pscustomobject]@{ action = 'none'; detail = 'no liveness stamp yet' } }
+    $age = ($NowUtc.ToUniversalTime() - $a.utc).TotalMinutes
+    if ($age -le $StaleMinutes) { return [pscustomobject]@{ action = 'ok'; detail = ("sync loop alive ({0:N1} min ago, pid {1})" -f $age, $a.pid) } }
+    if ($a.pid -le 0) { return [pscustomobject]@{ action = 'none'; detail = 'stale stamp without a pid' } }
+    $p = & $GetProcess $a.pid
+    if (-not $p) { return [pscustomobject]@{ action = 'gone'; detail = ("stale stamp ({0:N0} min) and pid {1} is gone -- the task starts a new loop" -f $age, $a.pid) } }
+    if ("$($p.CommandLine)" -notmatch 'Mode Sync|ContinuousJob') { return [pscustomobject]@{ action = 'none'; detail = "pid $($a.pid) is not the sync loop (reused pid) -- left alone" } }
+    & $Kill $a.pid
+    return [pscustomobject]@{ action = 'killed'; detail = ("sync loop pid {0} made no progress for {1:N0} min -- killed; the task restarts it within a minute" -f $a.pid, $age) }
 }
 
 # =====================================================================================================================

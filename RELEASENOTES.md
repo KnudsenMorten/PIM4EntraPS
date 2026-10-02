@@ -14,6 +14,36 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.479 — Define your own deployment rings; ad-hoc group access; a self-healing hybrid AD sync
+
+- **New: deployment rings you define.** Name the rings and add or remove them (up to ten, 0..9) under Settings >
+  Deployment rings or on the managed tenant registry. A ring that a tenant or a row still uses cannot be removed. Every
+  ring dropdown offers exactly the defined rings, and hovering a ring shows which managed tenants it reaches.
+- **New (Pro): ad-hoc access to another permission group.** In the access request portal a consultant can ask for
+  short-term membership of a group they do not have yet (for example when another consultant has to step in). The
+  department approves it, and the membership is removed automatically when the time is up (24 hours by default).
+  Settings > Access requests chooses which groups may be asked for. Ad-hoc memberships are marked *ad-hoc* in the
+  delegation grid and on the Access requests page, so they are never mistaken for delegated access.
+- **Fixed: the hybrid AD sync could stop for hours without anyone noticing.** A call to the directory that never
+  answered kept the continuous sync waiting forever. Every call now has a time limit, and two watchdogs restart a sync
+  that stops making progress. The Hybrid Active Directory settings now show, per worker job, whether it is working.
+- **Fixed: a second administrator with the same initials blocked every commit.** The new-admin wizard now refuses an
+  account name that is already in use, before anything is staged.
+- **The commit says what it changes.** While committing, and when it is done, the dialog lists every change in plain
+  words. A refused commit explains the problem in plain words and offers the buttons to fix it in the same dialog.
+- **Admin accounts:** select several accounts to link them to a company or a department, extend or set the auto-disable
+  date (by months or days), or reset their access. The auto-disable date is a date picker.
+- **Easier to find:** Settings are grouped in categories; the commit watcher shows the actual changes and refreshes
+  every 10 seconds; "Give a group Entra roles" and "Create an Administrative Unit" moved to Create access; the bulk
+  page moved to the bottom of the Access menu; problems open the grid with the affected rows marked; central admins
+  show on managed tenants. A single-administrator tenant can allow self-approval (recorded in the audit), and an API
+  key can live up to 10 years.
+
+## PIM Activator 1.6.136 (released 2026-10-02)
+
+- A new version number on both channels (test and production); the extension behaves exactly as 1.6.135. Managed
+  browsers update on their next extension update check.
+
 ## v2.4.478 — Admin bulk actions; access requests and the request API (Pro, not yet deployed)
 
 - **New: act on many administrators at once.** Select administrators in the grid to link them to a company or to their

@@ -76,12 +76,31 @@ function New-PimRfaPortalRequestRow {
       PURE. A consultant's request as the broker writes it (the ENGINE re-validates everything). -Eligibility is the
       signed-in account's eligibility row. Returns { ok; reason; rowKey; entity }.
     #>
-    param([Parameter(Mandatory)][object]$Eligibility, [Parameter(Mandatory)][string]$AccountKey, [int]$Hours, [string]$Reason = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    param([Parameter(Mandatory)][object]$Eligibility, [Parameter(Mandatory)][string]$AccountKey, [int]$Hours, [string]$Reason = '', [datetime]$NowUtc = [datetime]::UtcNow,
+          # §91.7: 'group' = AD-HOC membership of one of the groups the eligibility row offers, for one of its groupHours
+          [ValidateSet('enable', 'group')][string]$Kind = 'enable', [string]$GroupName = '')
+    $r = "$Reason".Trim(); if ($r.Length -gt 500) { $r = $r.Substring(0, 500) }
+    if ($Kind -eq 'group') {
+        $offered = @(Get-PimRfaOfferedGroups -Eligibility $Eligibility)
+        $g = @($offered | Where-Object { $_.tag -ieq "$GroupName".Trim() })[0]
+        if (-not $g) { return [pscustomobject]@{ ok = $false; reason = 'that group is not offered to this account' } }
+        $gh = @("$($Eligibility.groupHours)" -split '\|' | ForEach-Object { $n = 0; if ([int]::TryParse("$_", [ref]$n)) { $n } })
+        if ($gh -notcontains $Hours) { return [pscustomobject]@{ ok = $false; reason = ("choose {0} hours" -f ($gh -join ' / ')) } }
+        return [pscustomobject]@{ ok = $true; reason = ''; rowKey = [guid]::NewGuid().ToString('n')
+                                  entity = [ordered]@{ state = 'submitted'; source = 'portal'; kind = 'group'; groupName = $g.tag; accountKey = $AccountKey; hours = $Hours; reason = $r; submittedUtc = $NowUtc.ToUniversalTime().ToString('o') } }
+    }
     $allowed = @("$($Eligibility.durations)" -split '\|' | ForEach-Object { $n = 0; if ([int]::TryParse("$_", [ref]$n)) { $n } })
     if ($allowed -notcontains $Hours) { return [pscustomobject]@{ ok = $false; reason = ("choose {0} hours" -f ($allowed -join ' / ')) } }
-    $r = "$Reason".Trim(); if ($r.Length -gt 500) { $r = $r.Substring(0, 500) }
     return [pscustomobject]@{ ok = $true; reason = ''; rowKey = [guid]::NewGuid().ToString('n')
                               entity = [ordered]@{ state = 'submitted'; source = 'portal'; accountKey = $AccountKey; hours = $Hours; reason = $r; submittedUtc = $NowUtc.ToUniversalTime().ToString('o') } }
+}
+function Get-PimRfaOfferedGroups {
+    # PURE. §91.7: the eligibility row's 'groups' ("tag=name|tag=name") -> @( @{ tag; name } ).
+    param([AllowNull()][object]$Eligibility)
+    if (-not $Eligibility) { return @() }
+    $raw = "$(if ($Eligibility.PSObject.Properties['groups']) { $Eligibility.groups })".Trim()
+    if (-not $raw) { return @() }
+    return @($raw -split '\|' | Where-Object { "$_".Trim() } | ForEach-Object { $p = "$_" -split '=', 2; [pscustomobject]@{ tag = $p[0].Trim(); name = $(if ($p.Count -gt 1 -and $p[1].Trim()) { $p[1].Trim() } else { $p[0].Trim() }) } })
 }
 
 function ConvertFrom-PimRfaPrincipalHeader {

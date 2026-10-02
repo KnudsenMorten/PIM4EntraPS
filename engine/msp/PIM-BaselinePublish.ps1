@@ -174,6 +174,12 @@ function Get-PimBaselineBundlePayload {
     }
     $entities = @{}
     foreach ($k in $byEntity.Keys) { $entities[$k] = @($byEntity[$k].ToArray()) }
+    # REQ 91.2: read the DEFINED deployment rings BEFORE the admin rows are selected -- which Ring values are rings depends on them.
+    $ringsRaw = @(& $RunQuery "SELECT ValueJson FROM pim.vw_PublishJobControl WHERE Name = 'DeploymentRings'")
+    $ringsOut = @(ConvertTo-PimDeploymentRings -Value $(if ($ringsRaw.Count -and $null -ne $ringsRaw[0]) { "$($ringsRaw[0].ValueJson)" } else { $null }))
+    Write-Host ("baseline deployment rings: " + (@($ringsOut | ForEach-Object { "$($_.ring)=$($_.name)$(if ($_.tags) { " [$($_.tags)]" })" }) -join ', '))
+    # REQ 91.2: the highest DEFINED ring decides which Ring values are rings for this bundle (this job cannot read pim.Settings).
+    Set-PimRingMaxFromRings -Rings $ringsOut
     $content = Select-PimBaselineBundleContent -RegistryRows $rowObjs -RegistryReplicate $registryReplicate -Entities $entities
     $rowObjs = @($content.rows)
     $defAdmins = $content.report.defAdmins
@@ -236,9 +242,7 @@ function Get-PimBaselineBundlePayload {
     # before rings had rules. A failed READ refuses the bundle: a rule that silently vanished would widen reach.
     # Through pim.vw_PublishJobControl, NOT pim.Settings: the publish job's reader user has no right on pim.Settings (it also
     # holds ManagerAccess); the control view exposes exactly its own rows, this one included (Get-PimPublishJobControlViewSql).
-    $ringsRaw = @(& $RunQuery "SELECT ValueJson FROM pim.vw_PublishJobControl WHERE Name = 'DeploymentRings'")
-    $ringsOut = @(ConvertTo-PimDeploymentRings -Value $(if ($ringsRaw.Count -and $null -ne $ringsRaw[0]) { "$($ringsRaw[0].ValueJson)" } else { $null }))
-    Write-Host ("baseline deployment rings: " + (@($ringsOut | ForEach-Object { "$($_.ring)=$($_.name)$(if ($_.tags) { " [$($_.tags)]" })" }) -join ', '))
+    # (the deployment rings are read further up, before the admin rows are selected -- REQ 91.2)
 
     # 2. Build the payload (key order identical to the pre-71.35 producer; the no-regression byte rule).
     $version = [int64](Get-Date -Format 'yyMMddHHmm')

@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+if (-not (Get-Command Test-PimRingValue -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rings.ps1') }   # §91.2: the DEFINED deployment rings
 # IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when it is dot-sourced without the full PIM-Functions module.
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) {
@@ -1471,7 +1472,7 @@ function Invoke-PimPreflightValidation {
             if ((Get-PimRowValue -Row $r -Column 'TargetPlatform').Trim() -ieq 'AD') { continue }   # AD-only: no Entra tenant rollout
             $ringVal = (Get-PimRowValue -Row $r -Column 'Ring').Trim()
             if (-not $ringVal) { continue }
-            if ($ringVal -notmatch '^[0-2]$') {
+            if (-not (Test-PimRingValue -Value $ringVal)) {
                 $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-RING-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Ring' `
                     -Message "Ring '$ringVal' for '$upn' is not a deployment ring (0 = dev, 1 = test, 2 = broad), so this admin reaches NO managed tenant -- it UNDER-grants: the admin is silently NOT deployed (it is never widened to all tenants)." `
@@ -1498,7 +1499,7 @@ function Invoke-PimPreflightValidation {
             $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'
             $mode = (Get-PimRowValue -Row $r -Column 'ManagementMode').Trim()
             # 77.20 (2.4.388): the rings are 0 (dev), 1 (test), 2 (broad) only.
-            if ($mode -ieq 'msp' -and (Get-PimRowValue -Row $r -Column 'Ring').Trim() -notmatch '^[0-2]$') {
+            if ($mode -ieq 'msp' -and -not (Test-PimRingValue -Value (Get-PimRowValue -Row $r -Column 'Ring').Trim())) {
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-MSP-001' -Csv 'Account-Definitions-Admins' -Row $i -Column 'Ring' `
                     -Message "'$upn' is ManagementMode=msp (synced to managed tenants) but has no valid Ring (blank, or not 0, 1 or 2) -- the downlink sends it to NO slave." `
                     -Suggestion "Set Ring to 0 (dev tenants), 1 (dev + test) or 2 (every tenant), or set ManagementMode=local if it should not be synced."))

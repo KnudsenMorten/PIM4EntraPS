@@ -137,6 +137,13 @@ function Invoke-PimRfaSyncJob {
     $deptIdx = Get-PimRfaDepartmentIndex -Departments @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Definitions-Departments')
     $companies = @(Get-PimSqlRows -ConnectionString $cs -Entity 'Account-Definitions-Companies')
     $assign = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Assignments-Admins')
+    # §91.7: the defined groups, read only when ad-hoc groups are offered (RfaSettings.adHocGroups)
+    $defs = @()
+    if ($settings -and $settings.PSObject.Properties['adHocGroups'] -and @(@($settings.adHocGroups) | Where-Object { "$_".Trim() }).Count) {
+        foreach ($de in 'PIM-Definitions-Roles', 'PIM-Definitions-Organization', 'PIM-Definitions-Departments', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg', 'PIM-Definitions-Processes', 'PIM-Definitions-Tasks', 'PIM-Definitions-Services') {
+            try { $defs += @(Get-PimSqlRows -ConnectionString $cs -Entity $de) } catch { }
+        }
+    }
     $salt = "$(if ($settings) { $settings.salt })".Trim()
     if (-not $salt) {
         $b = New-Object byte[] 16; $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create(); try { $rng.GetBytes($b) } finally { $rng.Dispose() }
@@ -192,7 +199,11 @@ function Invoke-PimRfaSyncJob {
             $clash = @($assign | Where-Object { "$($_.Username)" -ieq $un -and "$($_.GroupTag)" -ieq "$($sr.groupName)" -and -not "$($_.RfaRequestId)".Trim() })
             if ($clash.Count) { $reject[$sid] = "the account already has a managed assignment to $($sr.groupName) -- RFA does not change it"; continue }
         }
-        $nr = if ($src -eq 'portal') { New-PimRfaRequest -Admin $admin -Department (& $deptOf $admin) -Hours $hours -Source portal -Reason "$($sr.reason)" -NowUtc $now -IsConsultant:$isC -Id $sid }
+        $nr = if ($src -eq 'portal' -and $kind -eq 'group') {
+                  # §91.7: ad-hoc access to a permission group -- re-checked HERE against the CURRENT list (the broker's check is only the fast answer)
+                  New-PimRfaRequest -Admin $admin -Department (& $deptOf $admin) -Hours $hours -Source portal -Kind group -GroupName "$($sr.groupName)" -Reason "$($sr.reason)" -NowUtc $now -IsConsultant:$isC -Id $sid `
+                      -RequestableGroups @(Get-PimRfaRequestableGroups -Settings $settings -Admin $admin -Assignments $assign -Definitions $defs) -GroupHours @(Get-PimRfaAdHocHours -Settings $settings -Department (& $deptOf $admin)) }
+              elseif ($src -eq 'portal') { New-PimRfaRequest -Admin $admin -Department (& $deptOf $admin) -Hours $hours -Source portal -Reason "$($sr.reason)" -NowUtc $now -IsConsultant:$isC -Id $sid }
               else { New-PimRfaRequest -Admin $admin -Department (& $deptOf $admin) -Hours $hours -Source api -Kind $kind -GroupName "$($sr.groupName)" -ExternalRef "$($sr.externalRef)" -RequestedBy "api:$($sr.callerAppId)" -Reason "$($sr.reason)" -NowUtc $now -IsConsultant:$isC }
         if (-not $nr.ok) { $reject[$sid] = $nr.reason; continue }
         $existing = & $find $nr.request.id
@@ -203,7 +214,7 @@ function Invoke-PimRfaSyncJob {
         if ($nr.request.state -eq 'pending-approval') {
             $d = & $deptOf $admin
             foreach ($o in @(if ($d) { $d.Owners })) {
-                $mails.Add(@{ to = $o; title = "Access request from $($nr.request.upn)"; headline = 'Someone asks to have their admin account enabled.'
+                $mails.Add(@{ to = $o; title = "Access request from $($nr.request.upn)"; headline = $(if ($nr.request.kind -eq 'group') { "Someone asks for AD-HOC membership of $($nr.request.groupName) (removed automatically when the time is up)." } else { 'Someone asks to have their admin account enabled.' })
                               detail = "<b>$([System.Net.WebUtility]::HtmlEncode($nr.request.upn))</b> asks for $($nr.request.hours) hours$(if ($nr.request.company) { " (consultant from $([System.Net.WebUtility]::HtmlEncode($nr.request.company)))" }). Reason: $([System.Net.WebUtility]::HtmlEncode($(if ($nr.request.reason) { $nr.request.reason } else { '(none given)' })))."
                               action = 'Open Access requests in the PIM Manager and approve or deny it within 24 hours.'; url = $managerUrl })
             }
@@ -279,7 +290,7 @@ function Invoke-PimRfaSyncJob {
         } catch { $errors.Add("$($g.key): the membership row could not be written: $($_.Exception.Message)") }
     }
     if ($touchedAdmins -and (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue)) { try { [void](Add-PimJobTrigger -Type 'engine-delta' -Scope 'AdminAccounts' -Reason 'rfa-sync') } catch { $errors.Add("engine trigger (AdminAccounts): $($_.Exception.Message)") } }
-    if ($touchedGroups -and (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue)) { try { [void](Add-PimJobTrigger -Type 'engine-delta' -Scope 'GroupMembers' -Reason 'rfa-sync') } catch { $errors.Add("engine trigger (GroupMembers): $($_.Exception.Message)") } }
+    if ($touchedGroups -and (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue)) { try { [void](Add-PimJobTrigger -Type 'engine-delta' -Scope 'AdminMembers' -Reason 'rfa-sync') } catch { $errors.Add("engine trigger (AdminMembers): $($_.Exception.Message)") } }
 
     # ---- 6: mail, then publish ----------------------------------------------------------------------------------
     foreach ($ml in $mails) {
@@ -302,12 +313,13 @@ function Invoke-PimRfaSyncJob {
             foreach ($h in @($wantK.Keys)) { $w = $wantK[$h]; $x = $haveK[$h]; if (-not $x -or "$($x.scopes)" -ne $w.scopes -or (Format-PimRfaValue $x.expiresUtc) -ne $w.expiresUtc) { Set-PimRfaStoreEntity -Store $Store -Table 'RfaApiKeys' -PartitionKey 'key' -RowKey $h -Entity @{ id = $w.id; name = $w.name; scopes = $w.scopes; expiresUtc = $w.expiresUtc } } }
             foreach ($h in @($haveK.Keys | Where-Object { -not $wantK.ContainsKey($_) })) { Remove-PimRfaStoreEntity -Store $Store -Table 'RfaApiKeys' -PartitionKey 'key' -RowKey $h }
         }
-        $want = @{}; foreach ($e in @(Get-PimRfaEligibilityList -Admins $admins -Departments @($deptIdx.Values) -Companies $companies -Salt $salt)) { $want["$($e.accountKey)"] = $e }
+        $want = @{}; foreach ($e in @(Get-PimRfaEligibilityList -Admins $admins -Departments @($deptIdx.Values) -Companies $companies -Salt $salt -Settings $settings -Assignments $assign -Definitions $defs)) { $want["$($e.accountKey)"] = $e }
         $have = @{}; foreach ($e in @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaEligibility' -PartitionKey 'acct')) { $have["$($e.RowKey)"] = $e }
         foreach ($k in @($want.Keys)) {
             $w = $want[$k]; $h = $have[$k]
-            if (-not $h -or "$($h.contactEmail)" -ne "$($w.contactEmail)" -or "$($h.mode)" -ne "$($w.mode)" -or "$($h.durations)" -ne "$($w.durations)") {
-                Set-PimRfaStoreEntity -Store $Store -Table 'RfaEligibility' -PartitionKey 'acct' -RowKey $k -Entity @{ contactEmail = $w.contactEmail; mode = $w.mode; durations = $w.durations }
+            $wg = "$($w.groups)"; $wgh = "$($w.groupHours)"
+            if (-not $h -or "$($h.contactEmail)" -ne "$($w.contactEmail)" -or "$($h.mode)" -ne "$($w.mode)" -or "$($h.durations)" -ne "$($w.durations)" -or "$($h.groups)" -ne $wg -or "$($h.groupHours)" -ne $wgh) {
+                Set-PimRfaStoreEntity -Store $Store -Table 'RfaEligibility' -PartitionKey 'acct' -RowKey $k -Entity @{ contactEmail = $w.contactEmail; mode = $w.mode; durations = $w.durations; groups = $wg; groupHours = $wgh }
             }
         }
         foreach ($k in @($have.Keys | Where-Object { -not $want.ContainsKey($_) })) { Remove-PimRfaStoreEntity -Store $Store -Table 'RfaEligibility' -PartitionKey 'acct' -RowKey $k }

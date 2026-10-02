@@ -1,3 +1,4 @@
+if (-not (Get-Command Test-PimRingValue -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '..\_shared\PIM-Rings.ps1') }   # §91.2: the DEFINED deployment rings
 # =============================================================================
 # 🔴 71.23 -- Get-PimAdminAutoDisableDate (PIM-DateSafe.ps1) decides which column carries an admin's
 # auto-disable date, and REFUSES a row that carries both names with different dates. The downlink
@@ -276,8 +277,8 @@ function Get-PimCentralAdminsFromDefinitions {
             continue
         }
         $ring = "$(Get-PimDownlinkValue -Object $r -Key 'Ring')".Trim()
-        if ($ring -notmatch '^[0-2]$') {
-            $noRing.Add([ordered]@{ UserName = $un; reason = "ManagementMode=msp but Ring='$ring' -- not a ring, so it reaches no managed tenant (set Ring to 0 dev, 1 test or 2 broad)" }) | Out-Null
+        if (-not (Test-PimRingValue -Value $ring)) {
+            $noRing.Add([ordered]@{ UserName = $un; reason = "ManagementMode=msp but Ring='$ring' -- not a ring, so it reaches no managed tenant (set Ring to $(Get-PimRingRangeText))" }) | Out-Null
             continue
         }
         $tapLife = "$(Get-PimDownlinkValue -Object $r -Key 'TAPLifetimeHours')".Trim()
@@ -340,7 +341,8 @@ function Test-PimRingReaches {
     param([Parameter(Mandatory)][int]$AdminRing, [Parameter(Mandatory)][int]$SlaveRing)
     # Only 0..2 are rings. A value outside them reaches NOTHING (fail closed): with `SlaveRing <= AdminRing`, a stray
     # ring 5 would otherwise reach every tenant.
-    if ($AdminRing -lt 0 -or $AdminRing -gt 2 -or $SlaveRing -lt 0 -or $SlaveRing -gt 2) { return $false }
+    $rmax = Get-PimRingMax
+    if ($AdminRing -lt 0 -or $AdminRing -gt $rmax -or $SlaveRing -lt 0 -or $SlaveRing -gt $rmax) { return $false }
     return ($SlaveRing -le $AdminRing)
 }
 
@@ -401,10 +403,16 @@ function ConvertTo-PimDeploymentRings {
         $list = if ($null -ne $inner) { @($inner) } else { @($v) }
     }
     $defaults = @{ 0 = 'Dev'; 1 = 'Test'; 2 = 'Broad' }
+    # §91.2 (2026-10-02): the rings are DEFINED -- 0..N, contiguous, N <= 9 (Get-PimRingMaxFromDefinitions). A stored value with
+    # no usable ring keeps the three defaults, so every value written before (always 0, 1 and 2) reads back exactly as before.
+    # A value saved by the ring editor carries defined=true and means EXACTLY its rings (fewer than three allowed); anything
+    # older (or a bare list) keeps the old reading -- at least 0..2, names it lacks filled with the defaults.
+    $maxDef = Get-PimRingMaxFromDefinitions -Value $v
+    $top = if ($null -ne $maxDef) { [int]$maxDef } else { 2 }
     $out = New-Object System.Collections.Generic.List[object]
-    foreach ($n in 0, 1, 2) {
+    foreach ($n in 0..$top) {
         $e = @($list | Where-Object { $null -ne $_ -and "$(Get-PimDownlinkValue -Object $_ -Key 'ring')".Trim() -eq "$n" })[0]
-        $name = if ($e -and "$(Get-PimDownlinkValue -Object $e -Key 'name')".Trim()) { "$(Get-PimDownlinkValue -Object $e -Key 'name')".Trim() } else { $defaults[$n] }
+        $name = if ($e -and "$(Get-PimDownlinkValue -Object $e -Key 'name')".Trim()) { "$(Get-PimDownlinkValue -Object $e -Key 'name')".Trim() } elseif ($defaults.ContainsKey($n)) { $defaults[$n] } else { "Ring $n" }
         $tags = if ($e) { "$(Get-PimDownlinkValue -Object $e -Key 'tags')".Trim() } else { '' }
         $out.Add([ordered]@{ ring = $n; name = $name; tags = $tags }) | Out-Null
     }
@@ -435,7 +443,7 @@ function Select-PimDownlinkAdmins {
         if (-not (Test-PimDownlinkAdminSynced -Admin $a).synced) { continue }   # row 35: the managing tenant's row must say msp
         $ringRaw = Get-PimDownlinkValue -Object $a -Key 'Ring'
         if ($null -eq $ringRaw -or "$ringRaw".Trim() -eq '') { continue }   # no ring => not eligible (fail-safe)
-        if ("$ringRaw".Trim() -notmatch '^[0-2]$') { continue }                # not a ring (0..2) => reaches nothing
+        if (-not (Test-PimRingValue -Value "$ringRaw")) { continue }          # not a DEFINED ring => reaches nothing
         if (Test-PimRingReaches -AdminRing ([int]"$ringRaw".Trim()) -SlaveRing $SlaveRing) { $keep.Add($a) | Out-Null }
     }
     $sorted = @($keep.ToArray() | Sort-Object `
@@ -1083,7 +1091,7 @@ function Test-PimReplicationRingAdmits {
         if ($Kind -eq 'admin') { return @{ admits = $false; reason = 'no Ring -- an admin without a ring reaches no slave' } }
         return @{ admits = $true; reason = 'no Ring set -- not narrowed by ring' }
     }
-    if ($r -notmatch '^[0-2]$') { return @{ admits = $false; reason = "Ring='$r' is not a ring (0 dev, 1 test, 2 broad) -- reaches no tenant (fail closed)" } }
+    if (-not (Test-PimRingValue -Value $r)) { return @{ admits = $false; reason = "Ring='$r' is not a ring ($(Get-PimRingRangeText)) -- reaches no tenant (fail closed)" } }
     if (Test-PimRingReaches -AdminRing ([int]$r) -SlaveRing $TenantRing) { return @{ admits = $true; reason = "ring $r admits tenant ring $TenantRing" } }
     return @{ admits = $false; reason = "its Ring $r is below this tenant's ring $TenantRing (ring 0 = dev, 1 = test, 2 = broad: promote the row to reach it)" }
 }
@@ -1141,7 +1149,7 @@ function Test-PimReplicationRowFields {
     if (-not $m.valid) { $errors.Add("$($m.reason)") | Out-Null }
     $ring = "$(Get-PimDownlinkValue -Object $Row -Key 'Ring')".Trim()
     # §77.20: the rings are 0 (dev), 1 (test), 2 (broad) -- nothing else reaches a tenant
-    if ($ring -and $ring -notmatch '^[0-2]$') { $errors.Add("Ring '$ring' is not a ring -- use 0 (dev), 1 (test) or 2 (broad)") | Out-Null }
+    if ($ring -and -not (Test-PimRingValue -Value $ring)) { $errors.Add("Ring '$ring' is not a ring -- use $(Get-PimRingRangeText)") | Out-Null }
     # 🔴 A ROW THAT REPLICATES MUST NAME ITS RING (operator, 2026-09-22: "this should not be possible -
     # people must define ring, otherwise nothing happens - result of using blank as default").
     # Replicate=Yes with a blank Ring is the combination that READS as done and does nothing: on an
@@ -2465,6 +2473,8 @@ function Get-PimDownlinkPlan {
     else { $src = @(Get-PimDownlinkValue -Object $payload -Key 'rows') }
 
     $deploymentRings = @(ConvertTo-PimDeploymentRings -Value (Get-PimDownlinkValue -Object $payload -Key 'deploymentRings'))
+    # §91.2: the signed bundle carries the managing tenant's DEFINED rings; the highest one decides what is a ring here.
+    Set-PimRingMaxFromRings -Rings $deploymentRings
 
     # 3) ring-gate to SlaveRing <= admin.Ring (§77.20) -- after the row-35 mode gate, whose skips are
     #    REPORTED (never silent): an admin the managing tenant no longer marks msp is not sent, and the

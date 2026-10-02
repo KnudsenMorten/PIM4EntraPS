@@ -73,7 +73,7 @@ param(
     # 🪤 An env-provided ring is ALWAYS in the dev-first order (0 dev, 1 test, 2 broad): the variable
     # did not exist before that order did. It is therefore not $PSBoundParameters-bound, so the
     # legacy conversion below correctly leaves it alone. An explicit -SlaveRing still wins.
-    [ValidateRange(0,2)][int]$SlaveRing = $(if ("$env:PIM_SlaveRing".Trim() -match '^[0-2]$') { [int]("$env:PIM_SlaveRing".Trim()) } else { 0 }),
+    [ValidateRange(0,9)][int]$SlaveRing = $(if ("$env:PIM_SlaveRing".Trim() -match '^[0-9]$') { [int]("$env:PIM_SlaveRing".Trim()) } else { 0 }),
     [string]$BaselineUrl     = $env:PIM_BaselineUrl,
     [string]$BaselineAccessToken = $env:PIM_BaselineAccessToken,
     [string]$BaselineDocPath = $env:PIM_BaselineDocPath,

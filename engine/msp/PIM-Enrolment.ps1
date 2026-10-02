@@ -1,4 +1,5 @@
-﻿# =============================================================================================
+﻿if (-not (Get-Command Test-PimRingValue -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '..\_shared\PIM-Rings.ps1') }   # §91.2: the DEFINED deployment rings
+# =============================================================================================
 # PIM-Enrolment.ps1 -- MSP-5, THE SLAVE-ENROLMENT HANDSHAKE ("the managed tenant knocks on the door").
 #
 # The operator's shape: *"basic deployment of a managed tenant with minimum config ... then the managed tenant knock
@@ -113,7 +114,7 @@ function Test-PimEnrolmentRequest {
     # because a defaulted ring decides which admins a customer receives. (Legacy 'requestedRing' is read as the same value.)
     $lr = "$(Get-PimDownlinkValue -Object $Request -Key 'localRing')".Trim()
     if (-not $lr) { $lr = "$(Get-PimDownlinkValue -Object $Request -Key 'requestedRing')".Trim() }
-    if ($lr -notmatch '^[0-2]$') { return [ordered]@{ ok = $false; reason = "the request declares no valid local ring ('$lr'; expected 0, 1 or 2) -- the managed tenant's own ring is not guessed" } }
+    if (-not (Test-PimRingValue -Value $lr)) { return [ordered]@{ ok = $false; reason = "the request declares no valid local ring ('$lr'; expected $(Get-PimRingRangeText)) -- the managed tenant's own ring is not guessed" } }
     return [ordered]@{ ok = $true; reason = '' }
 }
 

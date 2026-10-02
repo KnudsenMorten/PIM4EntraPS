@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+if (-not (Get-Command Test-PimRingValue -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '..\_shared\PIM-Rings.ps1') }   # §91.2: the DEFINED deployment rings
 <#
 .SYNOPSIS
     71.18 -- THE ONE-SHOT MSP BUILD (pure core). Decides, for a managing tenant (S3) or a MANAGED tenant (S6, locally hosted
@@ -302,7 +303,7 @@ function Get-PimManagedTenantRegistration {
     $tid = "$TenantId".Trim()
     if ($tid -notmatch $script:PimMspGuid) { return @{ ok = $false; reason = "TenantId '$TenantId' is not a GUID" } }
     if (-not "$DisplayName".Trim()) { return @{ ok = $false; reason = 'DisplayName is required (it is what the Manager lists)' } }
-    if ($Ring -lt 0 -or $Ring -gt 2) { return @{ ok = $false; reason = "Ring $Ring is outside 0..2 (0 = dev, 1 = test, 2 = broad)" } }
+    if (-not (Test-PimRingValue -Value $Ring)) { return @{ ok = $false; reason = "Ring $Ring is outside $(Get-PimRingRangeText)" } }
     $tg = ConvertTo-PimTenantTags -Tags $Tags
     if (-not $tg.ok) { return @{ ok = $false; reason = "malformed tag(s): $($tg.bad -join ', ') -- use word or key:value (letters, digits, - _ .); 'all', 'none', 'tag:...' and 'tenant:...' are reserved by the replication Target" } }
     $sql = @"
@@ -500,7 +501,7 @@ function Test-PimMspBuildConfig {
         # is refused instead.
         $sr = "$(& $V 'slaveRing')".Trim()
         if (-not $sr) { $warnings.Add("'slaveRing' not set -- the pull job uses ring 0 (dev). This value is THE ring of this tenant (local); the managing tenant's managed tenants[].ring is only its copy.") }
-        elseif ($sr -notmatch '^[0-2]$') { $errors.Add("'slaveRing' '$sr' is not a ring (0, 1 or 2) -- refusing rather than defaulting the tenant's own ring") }
+        elseif (-not (Test-PimRingValue -Value $sr)) { $errors.Add("'slaveRing' '$sr' is not a ring ($(Get-PimRingRangeText)) -- refusing rather than defaulting the tenant's own ring") }
         # 71.19: no fallback address here. A synced admin's mail/TAP recipient is its SPONSOR DEPARTMENT's owners,
         # replicated with the admin -- a build-level address would be the "manager on the person" §62 forbids.
         if ("$(& $V 'defaultManagerEmail')".Trim()) { $errors.Add("REFUSED: 'defaultManagerEmail' is no longer used (71.19). An admin's mail and TAP go to its SPONSOR DEPARTMENT's owners -- set Department on the admin at the managing tenant and Owners on that department; remove this key.") }
@@ -815,7 +816,7 @@ function Get-PimMspBuildPlan {
             -Arguments @{ SubscriptionId = $sub; ResourceGroup = $rg; EnvName = $env; ServiceEndpoint = $endpoint; MasterStorageAccount = $mStore; MasterContainer = $mContainer } `
             -Why "the managing tenant's bundle store denies every network it has not named; it names this subnet"))
         }
-        $dl = @{ Scenario = 'S6'; TenantId = $tid; SlaveRing = $(if ("$(& $V 'slaveRing')" -match '^[0-2]$') { [int](& $V 'slaveRing') } else { 0 })
+        $dl = @{ Scenario = 'S6'; TenantId = $tid; SlaveRing = $(if (Test-PimRingValue -Value "$(& $V 'slaveRing')") { [int](& $V 'slaveRing') } else { 0 })
                  ResourceGroup = $rg; EnvName = $env; AcrName = $acr; SubscriptionId = $sub; JobName = $job; BaselineUrl = (Get-PimBaselinePullUrl -StorageAccount $mStore -Container $mContainer)
                  SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; SlaveAdminPrefixes = @(& $V 'adminPrefixes' | Where-Object { "$_".Trim() })
                  # 71.35 TRUST ANCHOR: the pinned signing key id(s) -- config, not a secret, never read from the bundle store.

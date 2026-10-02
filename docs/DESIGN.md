@@ -1455,6 +1455,12 @@ The worker writes a per-job heartbeat; the main tick leaves a job to the worker 
 Manager's Jobs view shows it per job (live / plan-only / not seen). A version change stops the continuous loop and the
 task restarts it on the new code; a daily task (or an on-demand run) moves the worker to the version its ring approves.
 
+**Self-healing (24x7).** Every REST call has a time limit (180 s, one retry), so a call that never answers fails the pass
+instead of freezing it. Inside the continuous loop a watchdog thread ends the process when no pass has completed for 10
+minutes; the sync task (started every minute, one instance at a time) then starts a fresh loop. The 5-minute worker tick
+checks the loop's liveness stamp as a second layer and ends a loop that is more than 15 minutes stale. **Settings → Hybrid
+Active Directory** shows one status per worker job (working / needs attention, with the last check-in).
+
 **The customer's naming.** Every knob is one `pim.Settings` row from one catalog (`Get-PimHybridAdSettingCatalog`),
 shown and validated on **Settings → Hybrid Active Directory**: the AD marker or a full pattern, the cloud and AD account
 suffixes, the OU for new groups, the per-server group format, the shared server-admins group, the never-remove list.
@@ -5023,7 +5029,10 @@ directly when it is not.
 *"ring 0 = dev, ring 1 = test, ring 2 = broad (all)"*) it runs in the **same order as the update rings**:
 a row on ring N reaches a tenant on ring T when `T <= N` (`Test-PimRingReaches`, the one rule the downlink
 filter, the reach preview, conformance and `pim.vw_AdminTenantTargets` share). A new hire starts on ring 0
-(dev tenants only) and is promoted 0 → 1 → 2. The rings are 0–2 only.
+(dev tenants only) and is promoted 0 → 1 → 2. Since 2.4.479 the rings are **defined**: 0..N (N ≤ 9, no gap), named
+and added / removed on **Settings → Deployment rings** or the registry page; a ring that a tenant or a row still uses cannot
+be removed. A value above the highest defined ring is not a ring and reaches nothing (fail closed). Every ring dropdown
+offers the defined rings, and hovering a ring shows the managed tenants it reaches.
 
 - **Deployment rings** (`pim.Settings['DeploymentRings']`, edited on the Managed tenant registry page,
   `GET/PUT /api/msp/deployment-rings`) name each ring and may narrow it with a **tag rule** in the Target
