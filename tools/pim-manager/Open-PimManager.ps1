@@ -277,6 +277,10 @@ if (Test-Path -LiteralPath $_permLib) { . $_permLib }
 . (Join-Path $solutionRoot 'engine\_shared\PIM-SharedPending.ps1')
 # §88 COMMIT WATCHER: every commit records the keys it changed; GET /api/commits says per key saved / applied / live.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-CommitWatch.ps1')
+# §82 RFA + consultant lifecycle (Pro): loaded only when present -- the Community payload has neither folder.
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\rfa\PIM-Rfa.ps1')) { . (Join-Path $solutionRoot 'engine\rfa\PIM-Rfa.ps1') }
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\rfa\PIM-RfaBroker.ps1')) { . (Join-Path $solutionRoot 'engine\rfa\PIM-RfaBroker.ps1') }   # §90 API keys
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\consultant-lifecycle\PIM-CompanyReview.ps1')) { . (Join-Path $solutionRoot 'engine\consultant-lifecycle\PIM-CompanyReview.ps1') }
 # 🔴 Found 2026-09-25 by the code audit once it could follow the Manager's loads: these two were NEVER loaded, so the
 # Get-Command guards around them were always false -- a warning override was checked only by the partial fallback
 # (never Test-PimWarningOverrideValid), and the CSV import check never read the tenant list cache.
@@ -1925,7 +1929,7 @@ $script:PimCsvBases = @(
     [ordered]@{ base = 'Account-Definitions-Admins';      group = 'Definitions';  defaultHeader = @('FirstName','LastName','Initials','Purpose','TargetUsage','TargetPlatform','UserType','AdminType','UserName','DisplayName','UserPrincipalName','UsageLocation','Company','Department','ManagerEmail','Environment','ForwardMailsToContact','MailForwardAddress','CreateTAP','TAPStartDate','TAPLifetimeHours','AccountStatus','AutoDisableDate','ContactEmail','RfaMode','RfaWindowEndUtc','ManagementMode','Ring','Target','Replicate') },
     # §82 (operator 2026-10-02) consultant lifecycle: an external company whose contacts confirm its consultants (admin rows
     # whose Company names it). Keyed on Company. NOT a PIM-Definitions-* base -- those are all Entra GROUP definitions.
-    [ordered]@{ base = 'Account-Definitions-Companies';   group = 'Definitions';  defaultHeader = @('Company','Contacts','SponsorDepartment','ReviewCadenceDays','Notes') },
+    [ordered]@{ base = 'Account-Definitions-Companies';   group = 'Definitions';  defaultHeader = @('Company','Type','Contacts','SponsorDepartment','ReviewCadenceDays','Notes') },   # §89: Type = Internal | External (blank = External)
     # 🔴 BUG-139 (same class) -- THE ACCOUNTABLE-OWNER FIELDS HAD NO COLUMN ON *ROLES*.
     # DESIGN.md §1268/§1502 defines the owner chain as: `Owners` (pipe-joined UPNs) -> `SponsorUpn`
     # (Roles) -> the group's **Department** contact. The ENGINE implements all three
@@ -11737,6 +11741,202 @@ function Handle-Request {
             })
             return 200
         }
+        # ============ §82 ACCESS REQUESTS (RFA) + COMPANY REVIEWS -- the Manager's half (Pro) ============
+        # The engine (rfa-sync / company-review) does the work; these routes only READ the state and RECORD decisions
+        # into the same pim.Settings documents (compare-and-swap), exactly like the access reviews.
+        if ($path -like '/api/rfa/*' -or $path -like '/api/company-review*') {
+            $script:lastHeartbeat = Get-Date
+            $cs = (Get-PimManagerStoreCs)
+            if (-not $cs -or -not (Get-Command New-PimRfaRequest -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'access requests need the SQL store and the Pro RFA library -- neither is available in this host'; readable = $false }
+                return 503
+            }
+            $role = Get-PimManagerRole
+            $me = "$($role.identity)".Trim().ToLowerInvariant()
+            $isAdmin = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+            $isSuper = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+            $ownIdx = Get-PimManagerDepartmentOwnerIndex
+            $ownersOf = { param($dept) @("$($ownIdx["$dept".Trim().ToLowerInvariant()])" -split '[|,;\s]+' | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ }) }
+            $readMirror = { $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'RfaRequests'; [pscustomobject]@{ raw = $raw; list = @(if ("$raw".Trim()) { @(($raw | ConvertFrom-Json).requests) }) } }
+            # CAS: the rfa-sync job writes the same document every few minutes
+            $mutate = { param([scriptblock]$Fn)
+                for ($try = 0; $try -lt 5; $try++) {
+                    $m = & $readMirror
+                    $res = & $Fn @($m.list)
+                    if (-not $res.ok) { return $res }
+                    $json = [pscustomobject]@{ requests = @($res.list) } | ConvertTo-Json -Depth 8 -Compress
+                    if ([int](Set-PimSqlSettingIfUnchanged -ConnectionString $cs -Name 'RfaRequests' -NewValueJson $json -ExpectedValueJson $m.raw) -eq 1) { return $res }
+                }
+                return [pscustomobject]@{ ok = $false; status = 409; error = 'the request list kept changing (the engine was writing it) -- try again' } }
+
+            if ($path -eq '/api/rfa/requests' -and $method -eq 'GET') {
+                $m = & $readMirror
+                $mine = @($m.list | Where-Object { $isAdmin -or (& $ownersOf "$($_.department)") -contains $me })
+                $out = @($mine | Sort-Object { "$($_.requestedUtc)" } -Descending | Select-Object -First 200 | ForEach-Object {
+                    $o = [ordered]@{}; foreach ($p in $_.PSObject.Properties) { $o[$p.Name] = $p.Value }
+                    $o['statusText'] = $(if (Get-Command Get-PimRfaStatusText -ErrorAction SilentlyContinue) { Get-PimRfaStatusText -Request $_ } else { "$($_.state)" })
+                    $o['canDecide'] = ("$($_.state)" -eq 'pending-approval' -and "$($_.upn)".ToLowerInvariant() -ne $me -and ($isAdmin -or (& $ownersOf "$($_.department)") -contains $me))
+                    $o['canEnd'] = ("$($_.state)" -in @('approved', 'active') -and ($isAdmin -or (& $ownersOf "$($_.department)") -contains $me))
+                    [pscustomobject]$o })
+                $st = Get-PimSqlSetting -ConnectionString $cs -Name 'RfaSettings'
+                $settingsOut = [ordered]@{ storeAccount = "$(if ($st) { $st.storeAccount })"; portalUrl = "$(if ($st) { $st.portalUrl })"; apiAppIds = @(if ($st -and $st.PSObject.Properties['apiAppIds']) { $st.apiAppIds }) }
+                $feature = $true; if (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) { $feature = [bool](Test-PimFeatureAvailable -Key 'rfa.portal' -Quiet) }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ requests = $out; settings = $settingsOut; enabled = $feature; deployed = [bool]"$($settingsOut.storeAccount)"; isAdmin = $isAdmin; isSuperAdmin = $isSuper })
+                return 200
+            }
+            if ($path -eq '/api/rfa/decide' -and $method -eq 'POST') {
+                if (-not (Test-PimManagerProFeature -Key 'rfa.portal' -Response $resp)) { return 403 }
+                $body = Read-RequestJson -Request $req
+                $id = "$($body.id)".Trim(); $dec = "$($body.decision)".Trim().ToLowerInvariant(); $note = "$($body.note)".Trim()
+                if (-not $id -or $dec -notin @('approve', 'deny')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'id and decision (approve | deny) are required' }; return 400 }
+                $res = & $mutate {
+                    param($list)
+                    $r = @($list | Where-Object { "$($_.id)" -eq $id })[0]
+                    if (-not $r) { return [pscustomobject]@{ ok = $false; status = 404; error = 'no such request' } }
+                    $d = Set-PimRfaDecision -Request $r -Decision $dec -By $me -DepartmentOwners (& $ownersOf "$($r.department)") -IsAdmin:$isAdmin -Note $note
+                    if (-not $d.ok) { return [pscustomobject]@{ ok = $false; status = 403; error = $d.reason } }
+                    [pscustomobject]@{ ok = $true; list = @($list | ForEach-Object { if ("$($_.id)" -eq $id) { $d.request } else { $_ } }); request = $d.request }
+                }
+                if (-not $res.ok) { Write-JsonResponse -Response $resp -Status $res.status -Body @{ error = $res.error }; return $res.status }
+                Write-PimManagerAuditEvent -Action "rfa.$dec" -Target "$($res.request.upn)" -Result 'ok' -After ([ordered]@{ id = $id; by = $me; note = $note })
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; state = "$($res.request.state)"; note = $(if ($dec -eq 'approve') { 'Approved. The engine enables the account on its next run (within a few minutes) and mails the person.' } else { 'Denied. The person is told by mail.' }) })
+                return 200
+            }
+            if ($path -eq '/api/rfa/end' -and $method -eq 'POST') {
+                if (-not (Test-PimManagerProFeature -Key 'rfa.portal' -Response $resp)) { return 403 }
+                $body = Read-RequestJson -Request $req; $id = "$($body.id)".Trim()
+                $res = & $mutate {
+                    param($list)
+                    $r = @($list | Where-Object { "$($_.id)" -eq $id })[0]
+                    if (-not $r) { return [pscustomobject]@{ ok = $false; status = 404; error = 'no such request' } }
+                    if (-not ($isAdmin -or (& $ownersOf "$($r.department)") -contains $me)) { return [pscustomobject]@{ ok = $false; status = 403; error = 'only a Manager Admin or an Owner of the department can end it' } }
+                    if ("$($r.state)" -notin @('approved', 'active', 'pending-approval')) { return [pscustomobject]@{ ok = $false; status = 409; error = "the request is '$($r.state)'" } }
+                    $n = $r.PSObject.Copy(); $n.state = 'cancel-requested'
+                    [pscustomobject]@{ ok = $true; list = @($list | ForEach-Object { if ("$($_.id)" -eq $id) { $n } else { $_ } }); request = $n }
+                }
+                if (-not $res.ok) { Write-JsonResponse -Response $resp -Status $res.status -Body @{ error = $res.error }; return $res.status }
+                Write-PimManagerAuditEvent -Action 'rfa.end' -Target "$($res.request.upn)" -Result 'ok' -After ([ordered]@{ id = $id; by = $me })
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; note = 'Ending. The engine disables the account on its next run.' }
+                return 200
+            }
+            if ($path -eq '/api/rfa/override' -and $method -eq 'POST') {
+                # §82.5 Q16: a Manager Admin may grant a long window (up to 31 days)
+                if (-not $isAdmin) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'an IT override needs the Admin role' }; return 403 }
+                if (-not (Test-PimManagerProFeature -Key 'rfa.portal' -Response $resp)) { return 403 }
+                $body = Read-RequestJson -Request $req
+                $upn = "$($body.userPrincipalName)".Trim().ToLowerInvariant(); $hours = 0; [void][int]::TryParse("$($body.hours)", [ref]$hours)
+                $admin = @(@((Read-PimRows -BaseName 'Account-Definitions-Admins' -NoScope).rows) | Where-Object { "$(Get-PimCell $_ 'UserPrincipalName')".Trim().ToLowerInvariant() -eq $upn })[0]
+                if (-not $admin) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "no admin row for '$upn'" }; return 404 }
+                $nr = New-PimRfaRequest -Admin $admin -Department $null -Hours $hours -Source override -RequestedBy $me -Reason "$($body.reason)"
+                if (-not $nr.ok) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = $nr.reason }; return 400 }
+                $res = & $mutate { param($list) [pscustomobject]@{ ok = $true; list = @(@($list) + $nr.request); request = $nr.request } }
+                if (-not $res.ok) { Write-JsonResponse -Response $resp -Status $res.status -Body @{ error = $res.error }; return $res.status }
+                Write-PimManagerAuditEvent -Action 'rfa.override' -Target $upn -Result 'ok' -After ([ordered]@{ hours = $hours; by = $me; reason = "$($body.reason)" })
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; id = "$($nr.request.id)"; note = "Granted for $hours hours. The engine enables the account on its next run." }
+                return 200
+            }
+            if ($path -eq '/api/rfa/settings' -and $method -eq 'PUT') {
+                if (-not $isSuper) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'the RFA settings need the SuperAdmin role' }; return 403 }
+                $body = Read-RequestJson -Request $req
+                $acct = "$($body.storeAccount)".Trim().ToLowerInvariant(); $url = "$($body.portalUrl)".Trim()
+                $apps = @(@($body.apiAppIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ } | Select-Object -Unique)
+                if ($acct -and $acct -notmatch '^[a-z0-9]{3,24}$') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'storeAccount must be a storage account name (3-24 lower-case letters / digits)' }; return 400 }
+                if ($url -and $url -notmatch '^https://') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'portalUrl must start with https://' }; return 400 }
+                $bad = @($apps | Where-Object { $_ -notmatch '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$' })
+                if ($bad.Count) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "not an application (client) id: $($bad -join ', ')" }; return 400 }
+                $cur = Get-PimSqlSetting -ConnectionString $cs -Name 'RfaSettings'
+                $new = if ($cur) { $cur.PSObject.Copy() } else { [pscustomobject]@{} }   # the salt is kept
+                foreach ($kv in @(@('storeAccount', $acct), @('portalUrl', $url), @('apiAppIds', @($apps)))) { $new | Add-Member -NotePropertyName $kv[0] -NotePropertyValue $kv[1] -Force }
+                Set-PimSqlSetting -ConnectionString $cs -Name 'RfaSettings' -Value $new
+                Write-PimManagerAuditEvent -Action 'rfa.settings' -Target 'RfaSettings' -Result 'ok' -After ([ordered]@{ storeAccount = $acct; portalUrl = $url; apiAppIds = @($apps); by = $me })
+                Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true }
+                return 200
+            }
+            # §90 API KEYS (SuperAdmin): created here (the key is shown ONCE, only its hash is stored), revoked here; the
+            # rfa-sync job publishes the valid ones (hash only) to the broker, and re-checks each on every request.
+            if ($path -like '/api/rfa/api-keys*') {
+                if (-not $isSuper) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'API keys need the SuperAdmin role' }; return 403 }
+                $readKeys = { $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'ApiKeys'; [pscustomobject]@{ raw = $raw; keys = @(if ("$raw".Trim()) { @(($raw | ConvertFrom-Json).keys) }) } }
+                $saveKeys = { param($cur, $keys) [int](Set-PimSqlSettingIfUnchanged -ConnectionString $cs -Name 'ApiKeys' -NewValueJson ([pscustomobject]@{ keys = @($keys) } | ConvertTo-Json -Depth 5 -Compress) -ExpectedValueJson $cur.raw) -eq 1 }
+                if ($path -eq '/api/rfa/api-keys' -and $method -eq 'GET') {
+                    $k = & $readKeys
+                    Write-JsonResponse -Response $resp -Status 200 -Body @{ keys = @($k.keys | ForEach-Object { [ordered]@{ id = "$($_.id)"; name = "$($_.name)"; prefix = "$($_.prefix)"; scopes = "$($_.scopes)"; expiresUtc = "$($_.expiresUtc)"; revoked = [bool]("$($_.revoked)" -match '^(?i)true|1$'); createdBy = "$($_.createdBy)"; createdUtc = "$($_.createdUtc)" } }) }
+                    return 200
+                }
+                if ($path -eq '/api/rfa/api-keys' -and $method -eq 'POST') {
+                    if (-not (Test-PimManagerProFeature -Key 'api.broker' -Response $resp)) { return 403 }
+                    $body = Read-RequestJson -Request $req
+                    $name = "$($body.name)".Trim(); $days = 0; [void][int]::TryParse("$($body.days)", [ref]$days)
+                    $scopes = @(@($body.scopes) | ForEach-Object { "$_".Trim() } | Where-Object { $_ -in @('requests.write', 'requests.read') } | Select-Object -Unique)
+                    if (-not $name -or $name.Length -gt 60) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'a name (who uses the key, at most 60 characters) is required' }; return 400 }
+                    if ($days -lt 1 -or $days -gt 365) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'a key lives 1 to 365 days' }; return 400 }
+                    if (-not $scopes.Count) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'pick at least one scope: requests.write, requests.read' }; return 400 }
+                    $nk = New-PimApiKey
+                    $rec = [pscustomobject][ordered]@{ id = $nk.id; name = $name; hash = $nk.hash; prefix = $nk.prefix; scopes = ($scopes -join '|'); expiresUtc = [datetime]::UtcNow.AddDays($days).ToString('o'); revoked = 'false'; createdBy = $me; createdUtc = [datetime]::UtcNow.ToString('o') }
+                    $saved = $false
+                    for ($try = 0; $try -lt 5 -and -not $saved; $try++) { $cur = & $readKeys; $saved = & $saveKeys $cur (@($cur.keys) + $rec) }
+                    if (-not $saved) { Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'the key list kept changing -- try again' }; return 409 }
+                    Write-PimManagerAuditEvent -Action 'api-key.create' -Target $name -Result 'ok' -After ([ordered]@{ id = $nk.id; prefix = $nk.prefix; scopes = ($scopes -join '|'); days = $days; by = $me })
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; id = $nk.id; key = $nk.key; note = 'Copy the key NOW -- it is shown only once. It works on the broker within a few minutes (the next rfa-sync run publishes it).' })
+                    return 200
+                }
+                if ($path -eq '/api/rfa/api-keys/revoke' -and $method -eq 'POST') {
+                    $body = Read-RequestJson -Request $req; $kid = "$($body.id)".Trim()
+                    $done = $false; $found = $false
+                    for ($try = 0; $try -lt 5 -and -not $done; $try++) {
+                        $cur = & $readKeys
+                        $found = [bool](@($cur.keys | Where-Object { "$($_.id)" -eq $kid }).Count)
+                        if (-not $found) { break }
+                        $new = @($cur.keys | ForEach-Object { if ("$($_.id)" -eq $kid) { $n = $_.PSObject.Copy(); $n | Add-Member -NotePropertyName revoked -NotePropertyValue 'true' -Force; $n } else { $_ } })
+                        $done = & $saveKeys $cur $new
+                    }
+                    if (-not $found) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = 'no such key' }; return 404 }
+                    if (-not $done) { Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'the key list kept changing -- try again' }; return 409 }
+                    Write-PimManagerAuditEvent -Action 'api-key.revoke' -Target $kid -Result 'ok' -After ([ordered]@{ by = $me })
+                    Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; note = 'Revoked. The engine refuses it at once; the broker stops accepting it within a few minutes.' }
+                    return 200
+                }
+            }
+            if ($path -eq '/api/company-reviews' -and $method -eq 'GET') {
+                $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'CompanyReviewCampaigns'
+                $camps = @(if ("$raw".Trim()) { @(($raw | ConvertFrom-Json).campaigns) })
+                $cos = @((Read-PimRows -BaseName 'Account-Definitions-Companies' -NoScope).rows)
+                $out = @($camps | Where-Object { $c = $_; $co = @($cos | Where-Object { "$(Get-PimCell $_ 'Company')".Trim() -ieq "$($c.company)" })[0]
+                                                 $isAdmin -or (& $ownersOf "$(if ($co) { Get-PimCell $co 'SponsorDepartment' })") -contains $me } |
+                         Sort-Object { "$($_.startedUtc)" } -Descending | Select-Object -First 50)
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ campaigns = $out; companies = @($cos).Count })
+                return 200
+            }
+            if ($path -eq '/api/company-review/answer' -and $method -eq 'POST') {
+                if (-not (Test-PimManagerProFeature -Key 'consultants.review' -Response $resp)) { return 403 }
+                $body = Read-RequestJson -Request $req
+                $cid = "$($body.campaignId)".Trim(); $upn = "$($body.upn)".Trim(); $ans = "$($body.answer)".Trim().ToLowerInvariant()
+                if ($ans -notin @('working', 'left', 'leave')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'answer must be working | left | leave' }; return 400 }
+                $cos = @((Read-PimRows -BaseName 'Account-Definitions-Companies' -NoScope).rows)
+                for ($try = 0; $try -lt 5; $try++) {
+                    $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'CompanyReviewCampaigns'
+                    $doc = if ("$raw".Trim()) { $raw | ConvertFrom-Json } else { $null }
+                    $camps = @(if ($doc) { @($doc.campaigns) })
+                    $c = @($camps | Where-Object { "$($_.id)" -eq $cid })[0]
+                    if (-not $c) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = 'no such review' }; return 404 }
+                    $co = @($cos | Where-Object { "$(Get-PimCell $_ 'Company')".Trim() -ieq "$($c.company)" })[0]
+                    if (-not ($isAdmin -or (& $ownersOf "$(if ($co) { Get-PimCell $co 'SponsorDepartment' })") -contains $me)) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'only a Manager Admin or an Owner of the sponsor department can answer on the company''s behalf' }; return 403 }
+                    $r = Set-PimCompanyReviewAnswer -Campaign $c -Company ([pscustomobject]@{ Company = "$($c.company)"; Contacts = "$(if ($co) { Get-PimCell $co 'Contacts' })" }) -Upn $upn -Answer $ans -LeaveUntil "$($body.leaveUntil)" -By $me -Internal
+                    if (-not $r.ok) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = $r.reason }; return 400 }
+                    $json = [pscustomobject]@{ campaigns = @($camps | ForEach-Object { if ("$($_.id)" -eq $cid) { $r.campaign } else { $_ } }) } | ConvertTo-Json -Depth 10 -Compress
+                    if ([int](Set-PimSqlSettingIfUnchanged -ConnectionString $cs -Name 'CompanyReviewCampaigns' -NewValueJson $json -ExpectedValueJson $raw) -eq 1) {
+                        Write-PimManagerAuditEvent -Action 'company-review.answer' -Target $upn -Result 'ok' -After ([ordered]@{ campaign = $cid; answer = $ans; by = "internal:$me" })
+                        Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; note = 'Recorded. The engine applies it on its next company-review run.' }
+                        return 200
+                    }
+                }
+                Write-JsonResponse -Response $resp -Status 409 -Body @{ error = 'the review kept changing -- try again' }
+                return 409
+            }
+            Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "unknown route $method $path" }
+            return 404
+        }
+
         if ($path -eq '/api/owner/extend' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
             $body = Read-RequestJson -Request $req

@@ -13,6 +13,21 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+
+## v2.4.478 — Admin bulk actions; access requests and the request API (Pro, not yet deployed)
+
+- **New: act on many administrators at once.** Select administrators in the grid to link them to a company or to their
+  internal sponsor department, or to queue a new Temporary Access Pass or a sign-out everywhere for each of them. The
+  department column now reads *Department (internal)*: it is the internal sponsor. A company can be internal or
+  external; only the people of an external company are treated as consultants.
+- **New (Pro): Access requests.** A page for the requests to have a disabled administrator account enabled for a set
+  time: approve or deny (any Owner of the department), end a window early, grant an IT override of up to 31 days, and
+  answer a company's consultant review on the company's behalf.
+- **New (Pro): the access request portal and API.** A separate public portal where a consultant signs in with a one-time
+  PIN and asks to have the account enabled, and where a company contact confirms the company's consultants; and a REST
+  API for ServiceNow and other systems (an Entra application token or an API key). The portal runs apart from PIM and
+  holds no rights in it: PIM collects the requests and decides. Broker settings and API keys are under *Settings > RFA
+  broker & API*. Deploying the portal is a separate step and is not done by this update.
 ## v2.4.477 — See your changes go live; faster commits
 
 - **New: the commit watcher.** After you commit, a small panel follows every change you made until it is live in
