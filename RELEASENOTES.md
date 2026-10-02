@@ -14,6 +14,17 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.482 — MCP server (preview); updates reach the access request broker
+
+- **Fixed: the access request broker was never updated.** The nightly updater rolled the Manager and every job on the
+  PIM image, but no other container app -- so the broker stayed on the version it was deployed with while the rest of
+  the environment moved on. Every container app running the PIM image is now updated with the release (a customer's own
+  apps in the same resource group are never touched), and a broker that could not be updated fails the update visibly.
+- **New (Pro, preview): an MCP server in the Manager.** An AI assistant that speaks the Model Context Protocol can read
+  PIM, stage a change and commit its own staged changes -- signed in as the person, within that person's Manager role,
+  through the same checks and approvals as the Review & commit page. Nothing is ever activated. Sign-in for MCP clients
+  is switched on per environment with `Set-PimManagerMcpAuth.ps1 -Apply`.
+
 ## v2.4.481 — Propose standing changes through the access request API (Pro)
 
 - **New: `type: proposal` on the access request API.** ServiceNow or any other system can propose a standing change --

@@ -283,6 +283,7 @@ if (Test-Path -LiteralPath $_permLib) { . $_permLib }
 # §82 RFA + consultant lifecycle (Pro): loaded only when present -- the Community payload has neither folder.
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\rfa\PIM-Rfa.ps1')) { . (Join-Path $solutionRoot 'engine\rfa\PIM-Rfa.ps1') }
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\rfa\PIM-RfaBroker.ps1')) { . (Join-Path $solutionRoot 'engine\rfa\PIM-RfaBroker.ps1') }   # §90 API keys
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\mcp\PIM-Mcp.ps1')) { . (Join-Path $solutionRoot 'engine\mcp\PIM-Mcp.ps1') }   # REQ 93 MCP server (Pro)
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\consultant-lifecycle\PIM-CompanyReview.ps1')) { . (Join-Path $solutionRoot 'engine\consultant-lifecycle\PIM-CompanyReview.ps1') }
 # 🔴 Found 2026-09-25 by the code audit once it could follow the Manager's loads: these two were NEVER loaded, so the
 # Get-Command guards around them were always false -- a warning override was checked only by the partial fallback
@@ -4353,6 +4354,534 @@ function Get-PimManagerLicenseBody {
     }
 }
 
+function Get-PimManagerMcpTools {
+    <#
+      REQ 93 -- the MCP tools, each over the SAME functions the Manager's own routes use (no second implementation).
+      Reader: read tools. Admin: + stage a change (the shared pending store, the same merge and row locks as the page).
+      The commit tool comes with the commit path as a function (REQ 93.3 P3); until then the answer to "commit" is the
+      Manager's Review & commit page.
+    #>
+    $tools = New-Object System.Collections.Generic.List[object]
+    $tools.Add((New-PimMcpTool -Name 'whoami' -Kind read -MinRole Reader -Description 'Your identity and PIM Manager role, and this environment''s version.' -Handler {
+        param($a, $ctx) [ordered]@{ identity = $ctx.identity; role = $ctx.role; version = $ctx.version } }))
+    $tools.Add((New-PimMcpTool -Name 'who_can' -Kind read -MinRole Reader -Description 'What a person (admin account UPN or name) can reach: every role, group and resource, directly and through nesting.' `
+        -InputSchema @{ type = 'object'; required = @('person'); properties = @{ person = @{ type = 'string'; description = 'admin account UPN or user name' } } } -Handler {
+        param($a, $ctx) Get-PimReachableTargets -Person "$($a.person)" }))
+    $tools.Add((New-PimMcpTool -Name 'who_has' -Kind read -MinRole Reader -Description 'Who can activate a role or reach a target (Entra role, AU-scoped role, Azure resource role).' `
+        -InputSchema @{ type = 'object'; required = @('role'); properties = @{ role = @{ type = 'string'; description = 'role name or node id' }; kind = @{ type = 'string'; enum = @('entra-role', 'au-role', 'az-resource') } } } -Handler {
+        param($a, $ctx) Get-PimRoleReachers -Role "$($a.role)" -Kind "$(if ($a.PSObject.Properties['kind']) { $a.kind })" }))
+    $tools.Add((New-PimMcpTool -Name 'list_rows' -Kind read -MinRole Reader -Description 'Rows of one configuration entity (e.g. Account-Definitions-Admins, PIM-Assignments-Admins, PIM-Definitions-Roles), optionally only those containing a text. Scoped to what you may see.' `
+        -InputSchema @{ type = 'object'; required = @('entity'); properties = @{ entity = @{ type = 'string' }; contains = @{ type = 'string' }; top = @{ type = 'integer'; description = 'at most this many rows (default 50, max 500)' } } } -Handler {
+        param($a, $ctx)
+        $base = "$($a.entity)".Trim()
+        if (-not (Get-PimCsvSpec -BaseName $base)) { throw "'$base' is not a PIM entity" }
+        $slice = Get-PimManagerVisibleSlice -Base $base -Rows @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base)
+        $rows = @($slice.rows)
+        $needle = "$(if ($a.PSObject.Properties['contains']) { $a.contains })".Trim()
+        if ($needle) { $rows = @($rows | Where-Object { ($_ | ConvertTo-Json -Compress -Depth 4) -match [regex]::Escape($needle) }) }
+        $top = 50; if ($a.PSObject.Properties['top'] -and "$($a.top)" -match '^\d+$') { $top = [math]::Min(500, [math]::Max(1, [int]$a.top)) }
+        [ordered]@{ entity = $base; total = $rows.Count; shown = [math]::Min($top, $rows.Count); filteredForYou = [bool]$slice.filtered; rows = @($rows | Select-Object -First $top) } }))
+    $tools.Add((New-PimMcpTool -Name 'pending_changes' -Kind read -MinRole Reader -Description 'Everything staged and waiting to be committed (per entity: add / modify / remove, the row key, who staged it, when).' -Handler {
+        param($a, $ctx)
+        $st = Read-PimSharedPendingStore -ConnectionString $script:PimSqlCs
+        @(foreach ($b in @($st.doc.bases.Keys)) { foreach ($c in @($st.doc.bases[$b].changes)) { [ordered]@{ entity = $b; op = "$($c.op)"; key = "$($c.key)"; by = "$($c.by)"; atUtc = "$($c.atUtc)" } } }) }))
+    $tools.Add((New-PimMcpTool -Name 'jobs_status' -Kind read -MinRole Reader -Description 'Every engine job: enabled, cadence, last run (status, when, detail) and next run.' -Handler {
+        param($a, $ctx)
+        $eff = @(Get-PimManagerEffectiveSchedule)
+        $vm = if ($eff.Count) { Get-PimJobsStatus -Jobs $eff } else { Get-PimJobsStatus }
+        @($vm.jobs | ForEach-Object { [ordered]@{ name = "$($_.name)"; enabled = $_.enabled; status = "$($_.status)"; lastRunUtc = "$($_.lastRunUtc)"; nextRunUtc = "$($_.nextRunUtc)"; detail = "$($_.detail)" } }) }))
+    $tools.Add((New-PimMcpTool -Name 'problems' -Kind read -MinRole Reader -Description 'The validation report (Check for problems): errors and warnings in the configuration, with the entity, row and a fix hint.' `
+        -InputSchema @{ type = 'object'; properties = @{ severity = @{ type = 'string'; enum = @('error', 'warning', 'info') }; top = @{ type = 'integer' } } } -Handler {
+        param($a, $ctx)
+        $stamp = Get-PimManagerPreflightStamp
+        $rep = if ($script:PimPreflightCacheStamp -eq $stamp -and $script:PimPreflightCacheReport) { $script:PimPreflightCacheReport } else { $r = Invoke-PimPreflightValidation; $script:PimPreflightCacheStamp = $stamp; $script:PimPreflightCacheReport = $r; $r }
+        $sev = "$(if ($a -and $a.PSObject.Properties['severity']) { $a.severity })"
+        $f = @($rep.violations); if ($sev) { $f = @($f | Where-Object { "$($_.Severity)" -eq $sev }) }
+        $top = 100; if ($a -and $a.PSObject.Properties['top'] -and "$($a.top)" -match '^\d+$') { $top = [math]::Min(500, [math]::Max(1, [int]$a.top)) }
+        [ordered]@{ summary = $rep.summary; shown = [math]::Min($top, $f.Count); findings = @($f | Select-Object -First $top) } }))
+    $tools.Add((New-PimMcpTool -Name 'access_requests' -Kind read -MinRole Admin -Description 'Access requests (RFA): account windows and ad-hoc group memberships -- state, who, how long, who decided.' -Handler {
+        param($a, $ctx)
+        $raw = Get-PimSqlSettingRaw -ConnectionString $script:PimSqlCs -Name 'RfaRequests'
+        @(if ("$raw".Trim()) { @(($raw | ConvertFrom-Json).requests) | Sort-Object { "$($_.requestedUtc)" } -Descending | Select-Object -First 100 }) }))
+    $tools.Add((New-PimMcpTool -Name 'audit_search' -Kind read -MinRole Admin -Description 'Search the audit trail (last month): who did what, when, with what result.' `
+        -InputSchema @{ type = 'object'; properties = @{ contains = @{ type = 'string' }; top = @{ type = 'integer' } } } -Handler {
+        param($a, $ctx)
+        $ev = @(Get-PimManagerAuditEvents -Months 1 -NoChange)
+        $needle = "$(if ($a -and $a.PSObject.Properties['contains']) { $a.contains })".Trim()
+        if ($needle) { $ev = @($ev | Where-Object { "$($_.action) $($_.target) $($_.actor) $($_.result)" -match [regex]::Escape($needle) }) }
+        $top = 50; if ($a -and $a.PSObject.Properties['top'] -and "$($a.top)" -match '^\d+$') { $top = [math]::Min(500, [math]::Max(1, [int]$a.top)) }
+        @($ev | Select-Object -First $top | ForEach-Object { [ordered]@{ ts = "$($_.ts)"; actor = "$($_.actor)"; action = "$($_.action)"; target = "$($_.target)"; result = "$($_.result)" } }) }))
+    $tools.Add((New-PimMcpTool -Name 'stage_change' -Kind propose -MinRole Admin -Description 'STAGE one change to a configuration entity (add a row, modify fields of a row, or remove a row). It is NOT applied: it waits under Pending changes, locked to you, until it is committed in the PIM Manager (Review & commit), with every check the Manager runs.' `
+        -InputSchema @{ type = 'object'; required = @('entity', 'op', 'row'); properties = @{
+            entity = @{ type = 'string'; description = 'e.g. PIM-Assignments-Admins' }; op = @{ type = 'string'; enum = @('add', 'modify', 'remove') }
+            row = @{ type = 'object'; description = 'add: the whole row. modify: the key fields + the fields to change. remove: the key fields.' } } } -Handler {
+        param($a, $ctx)
+        $base = "$($a.entity)".Trim(); $op = "$($a.op)".ToLowerInvariant()
+        if (-not (Get-PimCsvSpec -BaseName $base)) { throw "'$base' is not a PIM entity" }
+        $key = Get-PimSharedPendingRowKey -Base $base -Row $a.row
+        if (-not $key) { throw "the row does not carry the key fields of $base" }
+        $stored = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base | Where-Object { (Get-PimSharedPendingRowKey -Base $base -Row $_) -eq $key })[0]
+        if ($op -eq 'add' -and $stored) { throw "$base already has a row '$key' -- use op modify" }
+        if ($op -ne 'add' -and -not $stored) { throw "$base has no row '$key'" }
+        $row = $a.row
+        if ($op -eq 'modify') { $m = $stored.PSObject.Copy(); foreach ($p in $a.row.PSObject.Properties) { $m | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force }; $row = $m }
+        $who = "$($ctx.identity)"
+        $new = [ordered]@{ key = $key; op = $op; row = $(if ($op -eq 'remove') { $null } else { $row }); before = $stored }
+        $u = Update-PimSharedPendingStore -ConnectionString $script:PimSqlCs -Mutate {
+            param($doc)
+            $cur = if ($doc.bases.ContainsKey($base)) { $doc.bases[$base] } else { @{ version = 0; changes = @() } }
+            # the WHOLE set, as the page submits it: every staged change (anyone's) except this key, plus this one -- the merge
+            # keeps the others' unchanged changes and refuses if this key is staged by someone else (the row lock)
+            $rest = @(@($cur.changes) | Where-Object { "$($_.key)" -ne $key })
+            $m2 = Merge-PimSharedPendingChanges -Current @($cur.changes) -Submitted (@($rest) + @([pscustomobject]$new)) -By $who
+            if (-not $m2.ok) { $doc['__result'] = @{ gate = 'locked'; locked = @($m2.locked) }; return $false }
+            $doc.bases[$base] = @{ version = [int]$cur.version + 1; changes = @($m2.changes) }
+            $doc['__result'] = @{ gate = 'ok' }; return $true
+        }
+        if (-not $u.ok) { throw "$($u.reason)" }
+        if ($u.result.gate -eq 'locked') { throw ("locked: another administrator has staged the same row -- " + ((@($u.result.locked) | ForEach-Object { "$($_.key) by $($_.by)" }) -join '; ')) }
+        Write-PimManagerAuditEvent -Action 'pending.stage' -Target $base -Result 'ok' -After ([ordered]@{ by = $who; via = 'mcp'; op = $op; key = $key })
+        [ordered]@{ staged = $true; entity = $base; op = $op; key = $key; next = 'Commit it with commit_staged, or in the PIM Manager: Pending changes > Review & commit.' } }))
+    $tools.Add((New-PimMcpTool -Name 'commit_staged' -Kind commit -MinRole Admin -Description 'COMMIT the changes YOU staged on one entity, through exactly the same commit as the Manager''s Review & commit: validation, the second-approver rule, Tier 0/1 approval, the offboarding hold and concurrency checks all apply, and a refusal says why. The engine then applies the committed rows; follow it with the commit id in the Manager''s commit watcher.' `
+        -InputSchema @{ type = 'object'; required = @('entity'); properties = @{ entity = @{ type = 'string' }; justification = @{ type = 'string'; description = 'why -- recorded with the commit' }; ticket = @{ type = 'string' } } } -Handler {
+        param($a, $ctx)
+        $base = "$($a.entity)".Trim(); $spec = Get-PimCsvSpec -BaseName $base
+        if (-not $spec) { throw "'$base' is not a PIM entity" }
+        $who = "$($ctx.identity)"
+        $st = Read-PimSharedPendingStore -ConnectionString $script:PimSqlCs
+        $mine = @(if ($st.doc.bases.ContainsKey($base)) { @($st.doc.bases[$base].changes) | Where-Object { "$($_.by)".Trim() -ieq $who } })
+        if (-not $mine.Count) { throw "nothing staged by you on $base" }
+        $stored = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base)
+        $rows = New-Object System.Collections.Generic.List[object]
+        foreach ($r in @((Get-PimManagerVisibleSlice -Base $base -Rows $stored).rows)) { $rows.Add($r) }
+        foreach ($c in $mine) {
+            $k = "$($c.key)"; $op = "$($c.op)"
+            $ix = -1; for ($i = 0; $i -lt $rows.Count; $i++) { if ((Get-PimSharedPendingRowKey -Base $base -Row $rows[$i]) -eq $k) { $ix = $i; break } }
+            $row = if ($null -ne $c.row) { [pscustomobject]$c.row } else { $null }
+            switch ($op) {
+                'add'    { if ($ix -ge 0) { throw "$base already has '$k' -- re-stage it as a modify" }; $rows.Add($row) }
+                'modify' { if ($ix -lt 0) { throw "$base no longer has '$k'" }; $rows[$ix] = $row }
+                'remove' { if ($ix -ge 0) { $rows.RemoveAt($ix) } }
+            }
+        }
+        $putBody = [pscustomobject]@{ rows = @($rows.ToArray()); baseRowsHash = (Get-PimRowsHash -Rows $stored) }
+        if ($a.PSObject.Properties['justification']) { $putBody | Add-Member -NotePropertyName justification -NotePropertyValue "$($a.justification)" }
+        if ($a.PSObject.Properties['ticket']) { $putBody | Add-Member -NotePropertyName ticket -NotePropertyValue "$($a.ticket)" }
+        # the commit writes its answer to a response object -- this capture stands in for the HTTP one
+        $cap = [pscustomobject]@{ StatusCode = 0; ContentType = ''; ContentLength64 = 0; OutputStream = (New-Object System.IO.MemoryStream); Headers = (New-Object System.Net.WebHeaderCollection) }
+        $cap | Add-Member -MemberType ScriptMethod -Name AddHeader -Value { param($n, $v) $this.Headers[$n] = $v }
+        $code = Invoke-PimManagerCsvPut -base $base -spec $spec -resp $cap -PutBody $putBody
+        $txt = [System.Text.Encoding]::UTF8.GetString($cap.OutputStream.ToArray())
+        $res = $null; try { $res = $txt | ConvertFrom-Json } catch { $res = $txt }
+        if ([int]$code -ge 400 -or [int]$code -eq 0) {
+            $why = if ($res -and $res.PSObject -and $res.PSObject.Properties['error']) { "$($res.error)" } else { "$txt" }
+            throw "not committed ($code): $why"
+        }
+        [ordered]@{ committed = $true; status = [int]$code; entity = $base; changes = $mine.Count; result = $res } }))
+    return @($tools.ToArray())
+}
+
+function Invoke-PimManagerCsvPut {
+    <#
+      PUT /api/csv/<base> -- the COMMIT of one entity (moved here from the route unchanged, REQ 93): the role and delegation
+      checks, the replication gate, validation, the second-approver and Tier 0/1 approval gates, the offboarding hold,
+      optimistic concurrency (baseRowsHash), the safe commit, audit and the commit watcher. Writes its answer to -resp
+      (an HttpListenerResponse, or the capture the MCP commit tool hands in) and returns the status.
+    #>
+    param([Parameter(Mandatory)][string]$base, [Parameter(Mandatory)]$spec, [Parameter(Mandatory)]$resp, [AllowNull()]$PutBody)
+    $sqlMode = $true
+    # §79.9: a DELEGATED caller (role Delegated, or a Reader who owns a department) may commit too -- only rows they
+    # own, inside their profile (checked below on the real diff, Test-PimDelegatedWrite).
+    $delegCtx = $null
+    if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { $delegCtx = Get-PimManagerDelegatedContext }
+    if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin') -and -not ($delegCtx -and $delegCtx.isDelegated)) {
+        Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "Your Manager role is Reader -- saving changes requires Admin$(if ($delegCtx -and $delegCtx.reason) { " (not a delegated administrator: $($delegCtx.reason))" }). $(Get-PimAccessFixHint)" }
+        return 403
+    }
+    $body = $PutBody
+    # 🔴 §77.24 (EFIF 2026-09-21: "409: This commit would EMPTY the entity (was 67 row(s), would be 0)"): a body
+    # WITHOUT a rows array (absent / null -- a second, overlapping commit sent pendingFinalRows() = null) was read
+    # as "replace the entity with nothing" and answered with the mass-disable warning. It is a malformed request:
+    # refuse it as one. An explicit `rows: []` is still an empty set, and still meets the empty-set guard below.
+    $rowsProp = if ($body) { $body.PSObject.Properties['rows'] } else { $null }
+    if (-not $rowsProp -or $null -eq $rowsProp.Value) {
+        Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{
+            ok = $false; base = $base; gate = 'no-rows'
+            error = "The commit for $base carried no rows (the request had no 'rows' list), so nothing was saved. Reload Pending changes and commit again."
+        })
+        return 400
+    }
+    $rowsRaw = @()
+    if ($body -and $body.rows) { $rowsRaw = @($body.rows) }
+    $rowsOrdered = @($rowsRaw | ForEach-Object { ConvertTo-OrderedRow $_ } | Where-Object { $_ -ne $null })
+    # §79.13: the rows AS SUBMITTED, before any server-side normalisation (the admin-assignment UPN rewrite below
+    # turns "adm-bo" into "adm-bo@domain"). A staged change says what the page submitted, so attribution (second
+    # approver) and clean-up after the commit match against these as well as against the stored rows.
+    $pendingSubmitted = @($rowsOrdered)
+    # Explicit operator acknowledgement for the empty-set / large-delta guard.
+    $confirmDestructive = $false
+    if ($body -and ($null -ne $body.confirm) -and ("$($body.confirm)" -ieq 'true' -or "$($body.confirm)" -eq '1' -or $body.confirm -eq $true)) { $confirmDestructive = $true }
+
+    # Diff against current state (SQL or CSV) for the audit log AND the
+    # pre-commit snapshot ([M1]). Capture header too, so an undo restores
+    # the exact column layout (file mode preserves separator/blank rows).
+    $spec = Get-PimCsvSpec -BaseName $base
+    $current = @{ rows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base); header = $(if ($spec) { @($spec.defaultHeader) } else { @() }) }
+
+    # 🔴 BUG-200 -- OPTIMISTIC CONCURRENCY. The GET handed out the hash of the full stored set; a commit
+    # built on an older read would full-set-replace away whatever another admin committed in between.
+    # baseRowsHash present + different -> 409, nothing written. Absent -> accepted (scripts, tests), and
+    # the audit event says the commit was NOT concurrency-checked.
+    $currentRowsHash = Get-PimRowsHash -Rows @($current.rows)
+    $baseRowsHash = ''
+    if ($body -and $body.PSObject.Properties['baseRowsHash']) { $baseRowsHash = "$($body.baseRowsHash)".Trim().ToLowerInvariant() }
+    if ($baseRowsHash -and $baseRowsHash -ne $currentRowsHash) {
+        Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
+            ok = $false; base = $base; conflict = $true; gate = 'concurrency'
+            error = "$base has changed since you loaded it (another commit, or the engine completing a queued change or a Remove row, landed in between). Nothing was saved -- reload it, re-apply your change and commit again."
+            currentRowsHash = $currentRowsHash
+        })
+        return 409
+    }
+    $concurrencyNote = if ($baseRowsHash) { 'checked' } else { 'NOT checked (no baseRowsHash sent)' }
+
+    # 🔴 BUG-198 -- MERGE THE CALLER'S VISIBLE SLICE INTO THE FULL STORED SET. A scoped caller only ever
+    # sees (SEC-43) and sends their own slice; the old code diffed that slice against the WHOLE entity and
+    # full-set-replaced it, deleting every row outside their scope, while the delta guard and the audit
+    # described the pre-filter diff. Rows outside the slice are now preserved untouched, a submitted row
+    # that would overwrite one of them is refused, and everything below -- the gates, the delta guard,
+    # the commit and the audit -- works on the merged set and its REAL diff.
+    $callerScope = Get-PimManagerCallerScope
+    $slice = Get-PimManagerVisibleSlice -Base $base -Rows @($current.rows)
+    if ($slice.filtered) {
+        $merge = Merge-PimManagerVisibleSlice -Base $base -Hidden @($slice.hidden) -Submitted @($rowsOrdered)
+        if (@($merge.collisions).Count -gt 0) {
+            Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{
+                ok = $false; base = $base; gate = 'scope'
+                error = "$(@($merge.collisions).Count) submitted row(s) would overwrite a row outside your delegated scope -- refused, nothing was saved."
+                denied = @($merge.collisions)
+            })
+            return 403
+        }
+        $rowsOrdered = @($merge.rows)
+    }
+    # 2026-09-21 (operator: "i prefer to have upn here but you mix usernames and upn syntax"): who-gets-which-
+    # group stores the admin's UPN. Rows from v1 / older wizards carried the bare account name; the engine
+    # accepts both (Get-PimAdminUpnDomain), so this changes no live access -- it makes the column one syntax.
+    if ($base -eq 'PIM-Assignments-Admins') { $rowsOrdered = @(ConvertTo-PimManagerAdminAssignmentUpns -Rows @($rowsOrdered)) }
+    # 🔴 BUG-204 (2.4.371) -- TWO ROWS, ONE STORE KEY, IN ONE COMMIT. The full-set replace upserts row by
+    # row by Get-PimStoreRowKey, so rows sharing a key collapse and only the LAST survives -- a 2-role
+    # workload delegation (key = GroupTag alone) kept one role and reported success. The diff cannot show
+    # it either (Compare-PimRowSets falls back to content matching on a colliding key). Refuse, name the
+    # key, write nothing.
+    $dupKeys = @()
+    if (Get-Command Get-PimDuplicateStoreKeys -ErrorAction SilentlyContinue) { $dupKeys = @(Get-PimDuplicateStoreKeys -Base $base -Rows @($rowsOrdered)) }
+    if ($dupKeys.Count -gt 0) {
+        # 2026-09-22: name the ROWS, not only the key. "'X' (3 rows)" left the operator
+        # scrolling a 60-row grid looking for which three -- the positions are already in
+        # the finding, so say them (and the grid's filter box takes the key straight to them).
+        $dupTxt = (@($dupKeys | Select-Object -First 5 | ForEach-Object {
+            $pos = @($_.rows | Select-Object -First 8)
+            "'$($_.key)' ($($_.count) rows: #$($pos -join ', #')$(if ($_.count -gt $pos.Count) { ', ...' }))"
+        }) -join ', ')
+        Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{
+            ok = $false; base = $base; gate = 'duplicate-key'
+            error = "$($dupKeys.Count) store key(s) of $base are used by more than one row in this commit: $dupTxt. The store keeps ONE row per key, so all but the last would be silently lost. Nothing was saved -- give each row its own key (type the key into the filter box on All records to see exactly these rows; for PIM-Assignments-Workloads: one role per delegation group)."
+            duplicateKeys = @($dupKeys)
+        })
+        return 400
+    }
+    $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered -Base $base
+
+    # §79.9 / R25-05: the DELEGATED check runs HERE, on the diff as submitted -- BEFORE the offboard holds below are
+    # computed and raised. It used to run after them, so an offboard-only commit (a disable plus a justification)
+    # returned 202 with an approval raised against ANY admin, including one outside the caller's departments.
+    if ($delegCtx -and $delegCtx.isDelegated) {
+        # §79.9: EVERY row this commit touches must be the delegated caller's (owned) AND inside their profile.
+        # R25-03: the ceiling comes from the stored groups + the role / scope granted (in the library); the
+        # columns a delegated caller may write are the entity's own -- anything else is refused.
+        $dwMaxDays = 0; try { $mv = Get-PimManagerSettingObject -Name 'OwnerExtendMaxDays'; if ("$mv" -match '^\d+$') { $dwMaxDays = [int]"$mv" } } catch { }
+        $dwCols = New-Object System.Collections.Generic.List[string]
+        foreach ($x in @($diff.adds)) { foreach ($c in @(Get-PimDelegatedRowColumns $x)) { $dwCols.Add("$c") } }
+        foreach ($m in @($diff.modifies)) {
+            # a changed column that now carries a value (a legacy column the page dropped is not a write)
+            $ma = if ($m -is [System.Collections.IDictionary]) { $m['after'] } else { $m.after }
+            $maCols = @(Get-PimDelegatedRowColumns $ma)
+            foreach ($c in @($(if ($m -is [System.Collections.IDictionary]) { $m['diffCols'] } else { $m.diffCols }))) { if ("$c".Trim() -and $maCols -contains "$c") { $dwCols.Add("$c") } }
+        }
+        $dw = Test-PimDelegatedWrite -Profile $delegCtx.profile -Rows @(Get-PimManagerDiffTouchedRows -Diff $diff) -Base $base -Identity $delegCtx.identity -Ownership $delegCtx.ownership -AllowedColumns @($(if ($spec) { $spec.defaultHeader } else { '__no-spec__' })) -WrittenColumns @($dwCols.ToArray()) -Diff $diff -OwnerExtendMaxDays $dwMaxDays
+        if (-not $dw.allowed) {
+            Write-PimManagerAuditEvent -Action 'delegated.commit' -Target $base -Result 'denied' -After ([ordered]@{ by = $delegCtx.identity; as = $delegCtx.source; reason = "$($dw.reason)" })
+            Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; base = $base; gate = 'delegated'; error = "$($dw.reason)"; denied = @($dw.denied) })
+            return 403
+        }
+    }
+    # 🔴 BUG-190 (adjacent path, operator decision 2026-09-18 for /modify, applied here as the SAME rule): an
+    # admin row that would DISABLE the account on the next engine run -- AccountStatus Disabled/Revoked,
+    # Lifecycle Retire, an AutoDisableDate/OffboardDate at or before now -- is an OFFBOARD. Review & Save wrote
+    # it straight to pim.Rows, so one Admin could disable any in-scope admin with no second person. The
+    # disabling value is now HELD (Get-PimAdminDisableHolds: a modified row keeps every other column; an added
+    # row carrying one is held whole) and an offboard approval is raised per admin (Request-PimManagerOffboardHold,
+    # the /modify outcome) when the body carries a justification. Every other change in the commit is kept.
+    $offboardHolds = @()
+    if ($base -eq 'Account-Definitions-Admins' -and (Get-Command Get-PimAdminDisableHolds -ErrorAction SilentlyContinue)) {
+        $adh = Get-PimAdminDisableHolds -Before @($current.rows) -After @($rowsOrdered) -Base $base
+        $offboardHolds = @($adh.holds)
+        if ($offboardHolds.Count -gt 0) {
+            # Scope first: a held row outside the caller's portal scope is refused exactly as a write would be,
+            # so no approval is ever raised against an admin the caller may not manage.
+            if (-not $callerScope.isSuperAdmin -and $callerScope.profile -and (Get-Command Test-PimPortalRowsInScope -ErrorAction SilentlyContinue)) {
+                $holdScope = Test-PimPortalRowsInScope -Profile $callerScope.profile -Rows @(Get-PimManagerDiffTouchedRows -Diff $diff) -Base $base -RequireManage
+                if (-not $holdScope.allowed) {
+                    Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; base = $base; error = "$($holdScope.reason)"; denied = @($holdScope.denied) })
+                    return 403
+                }
+            }
+            $rowsOrdered = @($adh.rows)
+            $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered -Base $base
+        }
+    }
+    # Raises the approvals (once the rest of the commit is safe to land) and builds the per-admin result.
+    $raiseOffboardHolds = {
+        $out = New-Object System.Collections.Generic.List[object]
+        $just = ''; $tick = ''
+        if ($body) {
+            if ($body.PSObject.Properties['justification']) { $just = "$($body.justification)".Trim() }
+            if ($body.PSObject.Properties['ticket'])        { $tick = "$($body.ticket)".Trim() }
+        }
+        foreach ($h in $offboardHolds) {
+            $what = (@($h.fields.Keys | ForEach-Object { "$_ '$($h.fields[$_])'" }) -join ', ')
+            if ($h.kind -eq 'add') {
+                $r = [ordered]@{ approvalRequired = $true; gate = 'offboard-approval'; upn = "$($h.upn)"; approvalRaised = $false; approvalId = ''
+                    note = "'$($h.upn)' is a NEW admin row carrying $what, which would disable an existing account on the next engine run. The row was NOT saved: add the admin without it, then offboard it through the approval." }
+            } else {
+                $hUpn = $(if ("$($h.upn)".Trim()) { "$($h.upn)".Trim() } else { "$($h.key)" })   # the row key (UserName) when no UPN
+            $r = Request-PimManagerOffboardHold -Upn $hUpn -What $what -Justification $just -Ticket $tick -Requestor "$((Get-PimManagerRole).identity)" -Via "review-save $base"
+            }
+            $r['kind'] = "$($h.kind)"; $r['held'] = $h.fields
+            Write-PimManagerAuditEvent -Action 'admin.commit.offboard-held' -Target "$($h.upn)" -Result $(if ($r.approvalRaised) { 'ok' } else { 'denied' }) -After ([ordered]@{ held = $h.fields; kind = "$($h.kind)"; approvalRaised = [bool]$r.approvalRaised; approvalId = "$($r.approvalId)"; via = "review-save $base" })
+            $out.Add($r)
+        }
+        return ,($out.ToArray())
+    }
+    if ($offboardHolds.Count -gt 0 -and ($diff.adds.Count + $diff.removes.Count + $diff.modifies.Count) -eq 0) {
+        # Nothing else in this commit: nothing is written. 202 = every held admin has an offboard approval
+        # raised; 409 = at least one has not (no justification, surface off, a new row) -- say why, per admin.
+        $holdRes = & $raiseOffboardHolds
+        $allRaised = (@($holdRes | Where-Object { -not $_.approvalRaised }).Count -eq 0)
+        $st = if ($allRaised) { 202 } else { 409 }
+        $holdMsg = "Nothing else was saved: $(@($holdRes).Count) admin change(s) would disable the account on the next engine run, which is an OFFBOARD and needs a second administrator's approval. " + (@($holdRes | ForEach-Object { $_.note }) -join ' ')
+        $holdBody = [ordered]@{
+            ok = $allRaised; base = $base; changed = 0; adds = 0; removes = 0; modifies = 0; rowCount = @($rowsOrdered).Count
+            gate = 'offboard-approval'; approvalRequired = $true; offboardHeld = $true
+            approvalsRaised = @($holdRes | Where-Object { $_.approvalRaised } | ForEach-Object { "$($_.approvalId)" })
+            held = @($holdRes); note = $holdMsg; rowsHash = $currentRowsHash
+        }
+        if (-not $allRaised) { $holdBody['error'] = $holdMsg }
+        Write-JsonResponse -Response $resp -Status $st -Body $holdBody
+        return $st
+    }
+
+    # -------------------------------------------------------------------
+    # SERVER-SIDE ENFORCEMENT (Batch 1) -- the GUI is NOT the only gate.
+    # The plain Review & Save / Create-wizard / Onboarding PUT is the SAME
+    # write path the authoring endpoints only PREVIEW; gate it here too.
+    # -------------------------------------------------------------------
+    # [Fix 1] MAKER/CHECKER on the general commit path: re-run the SAME gate
+    # the /api/authoring/* endpoints use, so a sensitive change committed via
+    # the plain PUT (bypassing the GUI's sensitivity check) is still blocked
+    # unless a second admin approved it. Non-sensitive -> allowed (idempotent;
+    # safe if the GUI already checked). The keyed diff's removes/adds drive the
+    # classification (a privileged-row removal/attach is sensitive).
+    $mc = $null
+    if (Get-Command Test-PimAuthoringCommitAllowed -ErrorAction SilentlyContinue) {
+        # 🟠 §33.28 (lead follow-up, 2026-09-18): the INPUT to this gate is deliberately kept at what it
+        # has effectively been since it shipped -- the diff's ADDS + REMOVES, falling back to the whole
+        # after-set when there are none. Get-PimWriteAffectedRows now also returns both sides of every
+        # MODIFY (it used to drop them: [ordered] dictionaries), but feeding that here changes which
+        # commits need a second approver, and that switch is held until the approve path is usable
+        # end to end in the GUI: the Approvals raise form offers no 'authoring' action, POST
+        # /api/approvals sits behind the approvalsPreview flag (default OFF), and a blocked review-save
+        # names a target the operator has to type by hand. With the 'makerchecker' feature OFF (the
+        # default, BUG-107) this gate always allows, so nothing is blocked either way today.
+        $gateRows = New-Object System.Collections.Generic.List[object]
+        foreach ($ga in @($diff.adds))    { if ($null -ne $ga) { $gateRows.Add($ga) } }
+        foreach ($gr in @($diff.removes)) { if ($null -ne $gr) { $gateRows.Add($gr) } }
+        $gateRows = @($gateRows.ToArray())
+        if (@($gateRows).Count -eq 0) { $gateRows = @($rowsOrdered) }
+        $reqs = @()
+        if (Get-Command Get-PimApprovalRequests -ErrorAction SilentlyContinue) { try { $reqs = @(Get-PimApprovalRequests) } catch {} }
+        $mc = Test-PimAuthoringCommitAllowed -Action 'review-save' -Base $base -Rows $gateRows -Requests $reqs
+        if (-not $mc.allowed) {
+            Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
+                ok = $false; base = $base; gate = "$($mc.gate)"; error = "$($mc.reason)"
+                approvalRequired = $true; target = "$($mc.target)"; reasons = @($mc.reasons)
+            })
+            return 409
+        }
+    }
+
+    # [Fix 2] PORTAL SCOPE on writes: a non-SuperAdmin delegated caller may
+    # only create/change/REMOVE rows inside their tier/level/service/scope.
+    # We validate EVERY row the merged diff touches -- adds, BOTH sides of every
+    # modify, and removes. (BUG-198: Get-PimWriteAffectedRows reads a modify's
+    # before/after through PSObject.Properties, which a dictionary does not expose,
+    # so modifies were never checked; Get-PimManagerDiffTouchedRows reads both shapes.)
+    # A new row outside the caller's scope is REFUSED, no longer silently dropped.
+    if (-not ($delegCtx -and $delegCtx.isDelegated) -and -not $callerScope.isSuperAdmin -and $callerScope.profile -and (Get-Command Test-PimPortalRowsInScope -ErrorAction SilentlyContinue)) {
+        $affected = @(Get-PimManagerDiffTouchedRows -Diff $diff)
+        $scopeCheck = Test-PimPortalRowsInScope -Profile $callerScope.profile -Rows $affected -Base $base -RequireManage
+        if (-not $scopeCheck.allowed) {
+            Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{
+                ok = $false; base = $base; error = "$($scopeCheck.reason)"; denied = @($scopeCheck.denied)
+            })
+            return 403
+        }
+    }
+
+    # [Fix 5] EMPTY-SET / LARGE-DELTA guard (mirrors the engine disable-guard;
+    # the 53-user mass-disable precondition was an empty/over-broad desired set).
+    # Refuse a commit that empties the entity or removes more than the safety
+    # threshold of current rows, UNLESS the operator passed confirm=true.
+    if (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue) {
+        $deltaGuard = Test-PimCommitDeltaGuard -BeforeCount (@($current.rows).Count) -AfterCount (@($rowsOrdered).Count) -RemoveCount (@($diff.removes).Count) -Confirm:$confirmDestructive
+        if (-not $deltaGuard.allowed) {
+            Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
+                ok = $false; base = $base; gate = "$($deltaGuard.rule)"; error = "$($deltaGuard.reason)"
+                confirmRequired = $true; removeCount = [int]$deltaGuard.removeCount; beforeCount = (@($current.rows).Count); afterCount = (@($rowsOrdered).Count)
+            })
+            return 409
+        }
+    }
+
+    # §71.5 -- THE REPLICATION GATE, server-side, because the GUI is never the only gate. A
+    # tenant that is not the managing tenant may not introduce or change Replicate (or Ring/Target on
+    # a non-admin entity); on the managing tenant every changed row must pass the same check the wizard
+    # and the validator use -- a ManagementMode/Replicate disagreement, a bad Replicate value or
+    # a malformed Target is refused before anything is written.
+    # §79.13 SECOND APPROVER (operator 2026-09-25: "it must be possible that another person can approve a
+    # commitment (2nd approver). so for some changes it should require that"). Setting 'PendingSecondApprover'
+    # = off (default) | sensitive | all. The shared pending store says who STAGED each change this commit carries
+    # out; a change the committer staged themselves (or, under 'all', any direct edit with no stager) needs a
+    # DIFFERENT administrator to commit it. Sensitivity is the same classifier the maker/checker gate uses.
+    $secondMode = 'off'
+    try { $sv = "$(Get-PimSetting -Name 'PendingSecondApprover')".Trim().ToLowerInvariant(); if ($sv -in @('sensitive', 'all')) { $secondMode = $sv } } catch { }
+    # R25-26: a submitted row whose disabling value was HELD for an offboard approval did not land -- it must not
+    # count as "carried out" (it would clear, or satisfy, a staged change that is still outstanding).
+    $heldKeys = @($offboardHolds | ForEach-Object { "$($_.key)".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $pendingSubmittedEff = @($pendingSubmitted | Where-Object { $heldKeys -notcontains "$(Get-PimStoreRowKey -Base $base -Row $_)".Trim().ToLowerInvariant() })
+    # 🔴 R25-06: THE ROW LOCKS HOLD AT COMMIT TOO. Every entry of this commit's diff is classified against the
+    # shared pending changes (Get-PimSharedPendingCommitClassification): an entry on a row ANOTHER administrator
+    # holds is refused unless it carries out their staged change exactly. Before, the locks were checked only when
+    # staging, and the store was read here only with a second approver configured -- so with the default 'off'
+    # one administrator could commit over a row a colleague held.
+    $spClass = $null
+    if ($script:PimSqlCs -and (Get-Command Get-PimSharedPendingCommitClassification -ErrorAction SilentlyContinue)) {
+        $spDoc = (Read-PimSharedPendingStore -ConnectionString $script:PimSqlCs).doc
+        $spChanges = if ($spDoc.bases.ContainsKey($base)) { @($spDoc.bases[$base].changes) } else { @() }
+        $spClass = Get-PimSharedPendingCommitClassification -Base $base -Changes $spChanges -Diff $diff -AfterRows @(@($rowsOrdered) + @($pendingSubmittedEff)) -Committer "$((Get-PimManagerRole).identity)"
+        if (-not $spClass.ok) {
+            $lockTxt = (@($spClass.locked | ForEach-Object { "$($_.key) (staged by $($_.by))" }) -join '; ')
+            Write-PimManagerAuditEvent -Action 'commit.locked' -Target $base -Result 'denied' -After ([ordered]@{ locked = @($spClass.locked) })
+            Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
+                ok = $false; base = $base; gate = 'locked'; locked = @($spClass.locked)
+                error = "Locked: this commit changes row(s) another administrator has staged -- $lockTxt. Nothing was saved. Commit their change as staged, ask them to discard it, or wait until it is committed."
+            })
+            return 409
+        }
+    }
+    if ($secondMode -ne 'off' -and $spClass) {
+        $spUncarried = @($spClass.direct).Count
+        $spSens = {
+            param($c)
+            if (-not (Get-Command Get-PimAuthoringSensitivity -ErrorAction SilentlyContinue)) { return $true }   # unknown -> treat as sensitive (fail closed)
+            $r = if ($c.op -eq 'remove') { $c.before } else { $c.row }
+            try { return [bool](Get-PimAuthoringSensitivity -Action 'review-save' -Base $base -Rows @([pscustomobject]$r)).sensitive } catch { return $true }
+        }
+        $spGate = Test-PimSharedPendingSecondApprover -Mode $secondMode -Committer "$((Get-PimManagerRole).identity)" -Carried @($spClass.carried) -Uncarried $spUncarried -Direct @($spClass.direct) -IsSensitive $spSens
+        if (-not $spGate.allowed) {
+            Write-PimManagerAuditEvent -Action 'commit.second-approver-required' -Target $base -Result 'denied' -After ([ordered]@{ mode = $secondMode; own = @($spGate.own); uncarried = $spUncarried })
+            Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
+                ok = $false; base = $base; gate = 'second-approver'; error = "$($spGate.reason)"; secondApprover = $secondMode; own = @($spGate.own)
+            })
+            return 409
+        }
+    }
+
+    if (Get-Command Test-PimReplicationWriteAllowed -ErrorAction SilentlyContinue) {
+        $repTags = @{ known = $false; tags = @() }
+        try { $repTags = Get-PimManagerKnownTenantTags } catch { }
+        $repGate = Test-PimReplicationWriteAllowed -Entity $base -Rows @($rowsOrdered) -CurrentRows @($current.rows) `
+                     -IsMaster (Test-PimManagerIsMspMaster) -KnownTags @($repTags.tags) -TagsKnown:([bool]$repTags.known)
+        if (-not $repGate.allowed) {
+            Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
+                ok = $false; base = $base; gate = 'replication'; error = "$($repGate.reason)"; refused = @($repGate.refused)
+            })
+            return 409
+        }
+    }
+
+    # [M1] SAFE COMMIT: timestamped backup BEFORE the apply, all-or-nothing
+    # transactional apply, automatic rollback-to-snapshot on any failure.
+    try {
+        $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode
+    } catch {
+        # The store was left exactly as before (snapshot restored). Surface
+        # the clear error so the operator sees the commit was reversed.
+        Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; base = $base; error = "$($_.Exception.Message)" }
+        return 500
+    }
+    $writtenPath = 'sql'
+    # 🔴 §33.28: an 'authoring' approval that authorised THIS commit is consumed ONCE, as the design says
+    # (Set-PimApprovalRequestExecuted). The PUT never latched it, so one approval stayed usable for every
+    # later sensitive commit on the same entity until it expired.
+    if ($mc -and "$($mc.gate)" -eq 'approved' -and $mc.approval -and (Get-Command Set-PimApprovalRequestExecuted -ErrorAction SilentlyContinue)) {
+        try { [void](Set-PimApprovalRequestExecuted -Id "$($mc.approval.id)") }
+        catch { Write-Warning "  [maker/checker] the approval $($mc.approval.id) that authorised this commit was NOT marked executed -- it could authorise another commit: $($_.Exception.Message)" }
+    }
+    Write-PimMutationLog -BaseName $base -Adds $diff.adds.Count -Removes $diff.removes.Count -Modifies $diff.modifies.Count -NewRowCount $rowsOrdered.Count -Diff $diff `
+        -Concurrency $concurrencyNote -ScopeMerged:([bool]$slice.filtered)
+    # §70.21: start the engine now (debounced, so a multi-entity commit starts one run; the container takes
+    # longer to start than the remaining entity writes, and a running tick re-checks between its jobs).
+    if (($diff.adds.Count + $diff.removes.Count + $diff.modifies.Count) -gt 0) { try { [void](Start-PimManagerTickNow -Reason "commit:$base") } catch { } }
+
+    # BUG-200: hand back the hash of what is stored NOW, so a follow-up commit from the same page is
+    # checked against its own result rather than against the pre-commit read.
+    $newRowsHash = ''
+    try { $newRowsHash = Get-PimRowsHash -Rows @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base) } catch { $newRowsHash = '' }
+    # §79.13: the shared pending changes this commit carried out leave the store -- whoever staged them.
+    if ($script:PimSqlCs -and (Get-Command Invoke-PimSharedPendingReconcile -ErrorAction SilentlyContinue)) {
+        try { [void](Invoke-PimSharedPendingReconcile -ConnectionString $script:PimSqlCs -Bases @($base) -ReadRows { param($b) @(@(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $b) + @($pendingSubmittedEff)) }) }
+        catch { Write-Warning "  [pending] the committed changes for $base were NOT cleared from the shared pending store: $($_.Exception.Message)" }
+    }
+    $putOut = [ordered]@{
+        ok         = $true
+        base       = $base
+        path       = $writtenPath
+        rowCount   = $rowsOrdered.Count
+        adds       = $diff.adds.Count
+        removes    = $diff.removes.Count
+        modifies   = $diff.modifies.Count
+        snapshotId = "$($commitRes.snapshotId)"
+        commitId   = "$(if ($commitRes -and $commitRes.PSObject.Properties['commitId']) { $commitRes.commitId })"   # §88 watcher
+        rowsHash   = $newRowsHash
+        concurrency = $concurrencyNote
+    }
+    # BUG-190: the rest of the commit landed; the disabling value(s) were held for the offboard approval.
+    # 202 (Accepted, not all applied) so no caller mistakes it for "everything I sent is now stored".
+    $putStatus = 200
+    if ($offboardHolds.Count -gt 0) {
+        $holdRes = & $raiseOffboardHolds
+        $putOut['gate'] = 'offboard-approval'; $putOut['approvalRequired'] = $true; $putOut['offboardHeld'] = $true
+        $putOut['approvalsRaised'] = @($holdRes | Where-Object { $_.approvalRaised } | ForEach-Object { "$($_.approvalId)" })
+        $putOut['held'] = @($holdRes)
+        $putOut['note'] = "Saved every other change. " + (@($holdRes | ForEach-Object { $_.note }) -join ' ')
+        $putStatus = 202
+    }
+    Write-JsonResponse -Response $resp -Status $putStatus -Body $putOut
+    return $putStatus
+}
+
 function Test-PimManagerProFeature {
     <#
       REQ-Y ("Hard, like MSP"). The Manager's refusal for a Pro-only ACTION: $true = licensed (or a free feature), go on.
@@ -6544,7 +7073,7 @@ function Expand-PimBootTemplate {
 
 function Write-JsonResponse {
     param(
-        [Parameter(Mandatory)][System.Net.HttpListenerResponse]$Response,
+        [Parameter(Mandatory)][object]$Response,   # an HttpListenerResponse, or the MCP capture (REQ 93)
         [Parameter(Mandatory)][int]$Status,
         [Parameter(Mandatory)][object]$Body
     )
@@ -6575,7 +7104,7 @@ function Write-JsonResponse {
 # when the call is blocked; $false when the surface is enabled and may proceed.
 function Test-PimGovernancePreviewBlocked {
     param(
-        [Parameter(Mandatory)][System.Net.HttpListenerResponse]$Response,
+        [Parameter(Mandatory)][object]$Response,   # an HttpListenerResponse, or the MCP capture (REQ 93)
         [Parameter(Mandatory)][ValidateSet('approvalsPreview','conformancePreview')][string]$FlagId,
         [string]$Surface = ''
     )
@@ -6593,7 +7122,7 @@ function Test-PimGovernancePreviewBlocked {
 
 function Write-HtmlResponse {
     param(
-        [Parameter(Mandatory)][System.Net.HttpListenerResponse]$Response,
+        [Parameter(Mandatory)][object]$Response,   # an HttpListenerResponse, or the MCP capture (REQ 93)
         [Parameter(Mandatory)][string]$Html
     )
     try {
@@ -7631,6 +8160,41 @@ function Handle-Request {
         return [int]$hs.httpStatus
     }
 
+    # ---- REQ 93 -- the MCP server (Pro 'mcp.server'): POST /mcp, one JSON-RPC message per request ----------------------
+    # Hosted: the caller sends `Authorization: Bearer <Entra access token>` for this Manager; Easy Auth validates it and
+    # hands the principal in, and the caller's OWN Manager role decides the tools (Get-PimManagerRole, as for the page).
+    # The Authorization header is REQUIRED even with a principal: a browser's Easy Auth session cookie alone must not be
+    # able to drive /mcp from another site (with application/json also required, a cross-site form post cannot reach it).
+    # Local mode: the page token, exactly as /api/*.
+    if ($path -eq '/mcp') {
+        if ($method -ne 'POST') { $resp.Headers['Allow'] = 'POST'; Write-JsonResponse -Response $resp -Status 405 -Body @{ error = 'POST one JSON-RPC message (streamable HTTP, JSON responses; no SSE stream)' }; return 405 }
+        $ah = "$($req.Headers['Authorization'])"
+        $authOk = if ($script:PimHosted) { ($ah -match '^Bearer\s+\S') -and "$script:CurrentRequestPrincipal".Trim() } else { $ah -eq "Bearer $ExpectedToken" }
+        if (-not $authOk) {
+            try { $resp.AddHeader('WWW-Authenticate', 'Bearer realm="pim-manager"') } catch { }   # HttpListener restricts this header on some hosts
+            Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; detail = 'send Authorization: Bearer <an Entra access token for this PIM Manager>' }
+            return 401
+        }
+        if ("$($req.ContentType)" -notmatch '^(?i)application/json') { Write-JsonResponse -Response $resp -Status 415 -Body @{ error = 'Content-Type must be application/json' }; return 415 }
+        if (-not (Get-Command Invoke-PimMcpMessage -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = 'the MCP server is not part of this edition' }; return 404 }
+        if (-not (Test-PimManagerProFeature -Key 'mcp.server' -Response $resp)) { return 403 }
+        if ((Get-Command Test-PimFeatureEnabled -ErrorAction SilentlyContinue) -and -not (Test-PimFeatureEnabled -Key 'mcp.server')) {
+            Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'the MCP server is switched off -- a SuperAdmin turns it on under Settings > Features' }; return 403
+        }
+        $msg = $null
+        try { $msg = Read-RequestJson -Request $req } catch { Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{ jsonrpc = '2.0'; id = $null; error = [ordered]@{ code = -32700; message = 'parse error' } }); return 400 }
+        $mr = Get-PimManagerRole
+        $ctxM = @{ identity = "$($mr.identity)"; role = "$($mr.role)"; version = (Get-PimSolutionVersion) }
+        $r = Invoke-PimMcpMessage -Message $msg -Role "$($mr.role)" -Tools (Get-PimManagerMcpTools) -Context $ctxM -ServerVersion ((Get-PimSolutionVersion) -replace '^v', '')
+        if ($r.audit) {
+            # every tool call is in the audit trail -- reads too: an assistant reading who-has-what is worth knowing about
+            try { Write-PimManagerAuditEvent -Action "mcp.$($r.audit.kind)" -Target "$($r.audit.tool)" -Result $(if ($r.audit.ok) { 'ok' } else { 'failed' }) -After ([ordered]@{ tool = "$($r.audit.tool)"; via = 'mcp'; detail = "$($r.audit.detail)" }) } catch { Write-Warning "[mcp] audit not written: $($_.Exception.Message)" }
+        }
+        if ($r.status -eq 202) { $resp.StatusCode = 202; $resp.OutputStream.Close(); return 202 }
+        Write-JsonResponse -Response $resp -Status ([int]$r.status) -Body $r.body
+        return [int]$r.status
+    }
+
     # All /api/* paths require Authorization: Bearer <token>.
     if ($path -like '/api/*') {
         $authHeader = $req.Headers['Authorization']
@@ -7707,396 +8271,8 @@ function Handle-Request {
                 return 200
             }
             if ($method -eq 'PUT') {
-                # §79.9: a DELEGATED caller (role Delegated, or a Reader who owns a department) may commit too -- only rows they
-                # own, inside their profile (checked below on the real diff, Test-PimDelegatedWrite).
-                $delegCtx = $null
-                if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { $delegCtx = Get-PimManagerDelegatedContext }
-                if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin') -and -not ($delegCtx -and $delegCtx.isDelegated)) {
-                    Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "Your Manager role is Reader -- saving changes requires Admin$(if ($delegCtx -and $delegCtx.reason) { " (not a delegated administrator: $($delegCtx.reason))" }). $(Get-PimAccessFixHint)" }
-                    return 403
-                }
-                $body = Read-RequestJson -Request $req
-                # 🔴 §77.24 (EFIF 2026-09-21: "409: This commit would EMPTY the entity (was 67 row(s), would be 0)"): a body
-                # WITHOUT a rows array (absent / null -- a second, overlapping commit sent pendingFinalRows() = null) was read
-                # as "replace the entity with nothing" and answered with the mass-disable warning. It is a malformed request:
-                # refuse it as one. An explicit `rows: []` is still an empty set, and still meets the empty-set guard below.
-                $rowsProp = if ($body) { $body.PSObject.Properties['rows'] } else { $null }
-                if (-not $rowsProp -or $null -eq $rowsProp.Value) {
-                    Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{
-                        ok = $false; base = $base; gate = 'no-rows'
-                        error = "The commit for $base carried no rows (the request had no 'rows' list), so nothing was saved. Reload Pending changes and commit again."
-                    })
-                    return 400
-                }
-                $rowsRaw = @()
-                if ($body -and $body.rows) { $rowsRaw = @($body.rows) }
-                $rowsOrdered = @($rowsRaw | ForEach-Object { ConvertTo-OrderedRow $_ } | Where-Object { $_ -ne $null })
-                # §79.13: the rows AS SUBMITTED, before any server-side normalisation (the admin-assignment UPN rewrite below
-                # turns "adm-bo" into "adm-bo@domain"). A staged change says what the page submitted, so attribution (second
-                # approver) and clean-up after the commit match against these as well as against the stored rows.
-                $pendingSubmitted = @($rowsOrdered)
-                # Explicit operator acknowledgement for the empty-set / large-delta guard.
-                $confirmDestructive = $false
-                if ($body -and ($null -ne $body.confirm) -and ("$($body.confirm)" -ieq 'true' -or "$($body.confirm)" -eq '1' -or $body.confirm -eq $true)) { $confirmDestructive = $true }
-
-                # Diff against current state (SQL or CSV) for the audit log AND the
-                # pre-commit snapshot ([M1]). Capture header too, so an undo restores
-                # the exact column layout (file mode preserves separator/blank rows).
-                $spec = Get-PimCsvSpec -BaseName $base
-                $current = @{ rows = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base); header = $(if ($spec) { @($spec.defaultHeader) } else { @() }) }
-
-                # 🔴 BUG-200 -- OPTIMISTIC CONCURRENCY. The GET handed out the hash of the full stored set; a commit
-                # built on an older read would full-set-replace away whatever another admin committed in between.
-                # baseRowsHash present + different -> 409, nothing written. Absent -> accepted (scripts, tests), and
-                # the audit event says the commit was NOT concurrency-checked.
-                $currentRowsHash = Get-PimRowsHash -Rows @($current.rows)
-                $baseRowsHash = ''
-                if ($body -and $body.PSObject.Properties['baseRowsHash']) { $baseRowsHash = "$($body.baseRowsHash)".Trim().ToLowerInvariant() }
-                if ($baseRowsHash -and $baseRowsHash -ne $currentRowsHash) {
-                    Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
-                        ok = $false; base = $base; conflict = $true; gate = 'concurrency'
-                        error = "$base has changed since you loaded it (another commit, or the engine completing a queued change or a Remove row, landed in between). Nothing was saved -- reload it, re-apply your change and commit again."
-                        currentRowsHash = $currentRowsHash
-                    })
-                    return 409
-                }
-                $concurrencyNote = if ($baseRowsHash) { 'checked' } else { 'NOT checked (no baseRowsHash sent)' }
-
-                # 🔴 BUG-198 -- MERGE THE CALLER'S VISIBLE SLICE INTO THE FULL STORED SET. A scoped caller only ever
-                # sees (SEC-43) and sends their own slice; the old code diffed that slice against the WHOLE entity and
-                # full-set-replaced it, deleting every row outside their scope, while the delta guard and the audit
-                # described the pre-filter diff. Rows outside the slice are now preserved untouched, a submitted row
-                # that would overwrite one of them is refused, and everything below -- the gates, the delta guard,
-                # the commit and the audit -- works on the merged set and its REAL diff.
-                $callerScope = Get-PimManagerCallerScope
-                $slice = Get-PimManagerVisibleSlice -Base $base -Rows @($current.rows)
-                if ($slice.filtered) {
-                    $merge = Merge-PimManagerVisibleSlice -Base $base -Hidden @($slice.hidden) -Submitted @($rowsOrdered)
-                    if (@($merge.collisions).Count -gt 0) {
-                        Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{
-                            ok = $false; base = $base; gate = 'scope'
-                            error = "$(@($merge.collisions).Count) submitted row(s) would overwrite a row outside your delegated scope -- refused, nothing was saved."
-                            denied = @($merge.collisions)
-                        })
-                        return 403
-                    }
-                    $rowsOrdered = @($merge.rows)
-                }
-                # 2026-09-21 (operator: "i prefer to have upn here but you mix usernames and upn syntax"): who-gets-which-
-                # group stores the admin's UPN. Rows from v1 / older wizards carried the bare account name; the engine
-                # accepts both (Get-PimAdminUpnDomain), so this changes no live access -- it makes the column one syntax.
-                if ($base -eq 'PIM-Assignments-Admins') { $rowsOrdered = @(ConvertTo-PimManagerAdminAssignmentUpns -Rows @($rowsOrdered)) }
-                # 🔴 BUG-204 (2.4.371) -- TWO ROWS, ONE STORE KEY, IN ONE COMMIT. The full-set replace upserts row by
-                # row by Get-PimStoreRowKey, so rows sharing a key collapse and only the LAST survives -- a 2-role
-                # workload delegation (key = GroupTag alone) kept one role and reported success. The diff cannot show
-                # it either (Compare-PimRowSets falls back to content matching on a colliding key). Refuse, name the
-                # key, write nothing.
-                $dupKeys = @()
-                if (Get-Command Get-PimDuplicateStoreKeys -ErrorAction SilentlyContinue) { $dupKeys = @(Get-PimDuplicateStoreKeys -Base $base -Rows @($rowsOrdered)) }
-                if ($dupKeys.Count -gt 0) {
-                    # 2026-09-22: name the ROWS, not only the key. "'X' (3 rows)" left the operator
-                    # scrolling a 60-row grid looking for which three -- the positions are already in
-                    # the finding, so say them (and the grid's filter box takes the key straight to them).
-                    $dupTxt = (@($dupKeys | Select-Object -First 5 | ForEach-Object {
-                        $pos = @($_.rows | Select-Object -First 8)
-                        "'$($_.key)' ($($_.count) rows: #$($pos -join ', #')$(if ($_.count -gt $pos.Count) { ', ...' }))"
-                    }) -join ', ')
-                    Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{
-                        ok = $false; base = $base; gate = 'duplicate-key'
-                        error = "$($dupKeys.Count) store key(s) of $base are used by more than one row in this commit: $dupTxt. The store keeps ONE row per key, so all but the last would be silently lost. Nothing was saved -- give each row its own key (type the key into the filter box on All records to see exactly these rows; for PIM-Assignments-Workloads: one role per delegation group)."
-                        duplicateKeys = @($dupKeys)
-                    })
-                    return 400
-                }
-                $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered -Base $base
-
-                # §79.9 / R25-05: the DELEGATED check runs HERE, on the diff as submitted -- BEFORE the offboard holds below are
-                # computed and raised. It used to run after them, so an offboard-only commit (a disable plus a justification)
-                # returned 202 with an approval raised against ANY admin, including one outside the caller's departments.
-                if ($delegCtx -and $delegCtx.isDelegated) {
-                    # §79.9: EVERY row this commit touches must be the delegated caller's (owned) AND inside their profile.
-                    # R25-03: the ceiling comes from the stored groups + the role / scope granted (in the library); the
-                    # columns a delegated caller may write are the entity's own -- anything else is refused.
-                    $dwMaxDays = 0; try { $mv = Get-PimManagerSettingObject -Name 'OwnerExtendMaxDays'; if ("$mv" -match '^\d+$') { $dwMaxDays = [int]"$mv" } } catch { }
-                    $dwCols = New-Object System.Collections.Generic.List[string]
-                    foreach ($x in @($diff.adds)) { foreach ($c in @(Get-PimDelegatedRowColumns $x)) { $dwCols.Add("$c") } }
-                    foreach ($m in @($diff.modifies)) {
-                        # a changed column that now carries a value (a legacy column the page dropped is not a write)
-                        $ma = if ($m -is [System.Collections.IDictionary]) { $m['after'] } else { $m.after }
-                        $maCols = @(Get-PimDelegatedRowColumns $ma)
-                        foreach ($c in @($(if ($m -is [System.Collections.IDictionary]) { $m['diffCols'] } else { $m.diffCols }))) { if ("$c".Trim() -and $maCols -contains "$c") { $dwCols.Add("$c") } }
-                    }
-                    $dw = Test-PimDelegatedWrite -Profile $delegCtx.profile -Rows @(Get-PimManagerDiffTouchedRows -Diff $diff) -Base $base -Identity $delegCtx.identity -Ownership $delegCtx.ownership -AllowedColumns @($(if ($spec) { $spec.defaultHeader } else { '__no-spec__' })) -WrittenColumns @($dwCols.ToArray()) -Diff $diff -OwnerExtendMaxDays $dwMaxDays
-                    if (-not $dw.allowed) {
-                        Write-PimManagerAuditEvent -Action 'delegated.commit' -Target $base -Result 'denied' -After ([ordered]@{ by = $delegCtx.identity; as = $delegCtx.source; reason = "$($dw.reason)" })
-                        Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; base = $base; gate = 'delegated'; error = "$($dw.reason)"; denied = @($dw.denied) })
-                        return 403
-                    }
-                }
-                # 🔴 BUG-190 (adjacent path, operator decision 2026-09-18 for /modify, applied here as the SAME rule): an
-                # admin row that would DISABLE the account on the next engine run -- AccountStatus Disabled/Revoked,
-                # Lifecycle Retire, an AutoDisableDate/OffboardDate at or before now -- is an OFFBOARD. Review & Save wrote
-                # it straight to pim.Rows, so one Admin could disable any in-scope admin with no second person. The
-                # disabling value is now HELD (Get-PimAdminDisableHolds: a modified row keeps every other column; an added
-                # row carrying one is held whole) and an offboard approval is raised per admin (Request-PimManagerOffboardHold,
-                # the /modify outcome) when the body carries a justification. Every other change in the commit is kept.
-                $offboardHolds = @()
-                if ($base -eq 'Account-Definitions-Admins' -and (Get-Command Get-PimAdminDisableHolds -ErrorAction SilentlyContinue)) {
-                    $adh = Get-PimAdminDisableHolds -Before @($current.rows) -After @($rowsOrdered) -Base $base
-                    $offboardHolds = @($adh.holds)
-                    if ($offboardHolds.Count -gt 0) {
-                        # Scope first: a held row outside the caller's portal scope is refused exactly as a write would be,
-                        # so no approval is ever raised against an admin the caller may not manage.
-                        if (-not $callerScope.isSuperAdmin -and $callerScope.profile -and (Get-Command Test-PimPortalRowsInScope -ErrorAction SilentlyContinue)) {
-                            $holdScope = Test-PimPortalRowsInScope -Profile $callerScope.profile -Rows @(Get-PimManagerDiffTouchedRows -Diff $diff) -Base $base -RequireManage
-                            if (-not $holdScope.allowed) {
-                                Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; base = $base; error = "$($holdScope.reason)"; denied = @($holdScope.denied) })
-                                return 403
-                            }
-                        }
-                        $rowsOrdered = @($adh.rows)
-                        $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered -Base $base
-                    }
-                }
-                # Raises the approvals (once the rest of the commit is safe to land) and builds the per-admin result.
-                $raiseOffboardHolds = {
-                    $out = New-Object System.Collections.Generic.List[object]
-                    $just = ''; $tick = ''
-                    if ($body) {
-                        if ($body.PSObject.Properties['justification']) { $just = "$($body.justification)".Trim() }
-                        if ($body.PSObject.Properties['ticket'])        { $tick = "$($body.ticket)".Trim() }
-                    }
-                    foreach ($h in $offboardHolds) {
-                        $what = (@($h.fields.Keys | ForEach-Object { "$_ '$($h.fields[$_])'" }) -join ', ')
-                        if ($h.kind -eq 'add') {
-                            $r = [ordered]@{ approvalRequired = $true; gate = 'offboard-approval'; upn = "$($h.upn)"; approvalRaised = $false; approvalId = ''
-                                note = "'$($h.upn)' is a NEW admin row carrying $what, which would disable an existing account on the next engine run. The row was NOT saved: add the admin without it, then offboard it through the approval." }
-                        } else {
-                            $hUpn = $(if ("$($h.upn)".Trim()) { "$($h.upn)".Trim() } else { "$($h.key)" })   # the row key (UserName) when no UPN
-                        $r = Request-PimManagerOffboardHold -Upn $hUpn -What $what -Justification $just -Ticket $tick -Requestor "$((Get-PimManagerRole).identity)" -Via "review-save $base"
-                        }
-                        $r['kind'] = "$($h.kind)"; $r['held'] = $h.fields
-                        Write-PimManagerAuditEvent -Action 'admin.commit.offboard-held' -Target "$($h.upn)" -Result $(if ($r.approvalRaised) { 'ok' } else { 'denied' }) -After ([ordered]@{ held = $h.fields; kind = "$($h.kind)"; approvalRaised = [bool]$r.approvalRaised; approvalId = "$($r.approvalId)"; via = "review-save $base" })
-                        $out.Add($r)
-                    }
-                    return ,($out.ToArray())
-                }
-                if ($offboardHolds.Count -gt 0 -and ($diff.adds.Count + $diff.removes.Count + $diff.modifies.Count) -eq 0) {
-                    # Nothing else in this commit: nothing is written. 202 = every held admin has an offboard approval
-                    # raised; 409 = at least one has not (no justification, surface off, a new row) -- say why, per admin.
-                    $holdRes = & $raiseOffboardHolds
-                    $allRaised = (@($holdRes | Where-Object { -not $_.approvalRaised }).Count -eq 0)
-                    $st = if ($allRaised) { 202 } else { 409 }
-                    $holdMsg = "Nothing else was saved: $(@($holdRes).Count) admin change(s) would disable the account on the next engine run, which is an OFFBOARD and needs a second administrator's approval. " + (@($holdRes | ForEach-Object { $_.note }) -join ' ')
-                    $holdBody = [ordered]@{
-                        ok = $allRaised; base = $base; changed = 0; adds = 0; removes = 0; modifies = 0; rowCount = @($rowsOrdered).Count
-                        gate = 'offboard-approval'; approvalRequired = $true; offboardHeld = $true
-                        approvalsRaised = @($holdRes | Where-Object { $_.approvalRaised } | ForEach-Object { "$($_.approvalId)" })
-                        held = @($holdRes); note = $holdMsg; rowsHash = $currentRowsHash
-                    }
-                    if (-not $allRaised) { $holdBody['error'] = $holdMsg }
-                    Write-JsonResponse -Response $resp -Status $st -Body $holdBody
-                    return $st
-                }
-
-                # -------------------------------------------------------------------
-                # SERVER-SIDE ENFORCEMENT (Batch 1) -- the GUI is NOT the only gate.
-                # The plain Review & Save / Create-wizard / Onboarding PUT is the SAME
-                # write path the authoring endpoints only PREVIEW; gate it here too.
-                # -------------------------------------------------------------------
-                # [Fix 1] MAKER/CHECKER on the general commit path: re-run the SAME gate
-                # the /api/authoring/* endpoints use, so a sensitive change committed via
-                # the plain PUT (bypassing the GUI's sensitivity check) is still blocked
-                # unless a second admin approved it. Non-sensitive -> allowed (idempotent;
-                # safe if the GUI already checked). The keyed diff's removes/adds drive the
-                # classification (a privileged-row removal/attach is sensitive).
-                $mc = $null
-                if (Get-Command Test-PimAuthoringCommitAllowed -ErrorAction SilentlyContinue) {
-                    # 🟠 §33.28 (lead follow-up, 2026-09-18): the INPUT to this gate is deliberately kept at what it
-                    # has effectively been since it shipped -- the diff's ADDS + REMOVES, falling back to the whole
-                    # after-set when there are none. Get-PimWriteAffectedRows now also returns both sides of every
-                    # MODIFY (it used to drop them: [ordered] dictionaries), but feeding that here changes which
-                    # commits need a second approver, and that switch is held until the approve path is usable
-                    # end to end in the GUI: the Approvals raise form offers no 'authoring' action, POST
-                    # /api/approvals sits behind the approvalsPreview flag (default OFF), and a blocked review-save
-                    # names a target the operator has to type by hand. With the 'makerchecker' feature OFF (the
-                    # default, BUG-107) this gate always allows, so nothing is blocked either way today.
-                    $gateRows = New-Object System.Collections.Generic.List[object]
-                    foreach ($ga in @($diff.adds))    { if ($null -ne $ga) { $gateRows.Add($ga) } }
-                    foreach ($gr in @($diff.removes)) { if ($null -ne $gr) { $gateRows.Add($gr) } }
-                    $gateRows = @($gateRows.ToArray())
-                    if (@($gateRows).Count -eq 0) { $gateRows = @($rowsOrdered) }
-                    $reqs = @()
-                    if (Get-Command Get-PimApprovalRequests -ErrorAction SilentlyContinue) { try { $reqs = @(Get-PimApprovalRequests) } catch {} }
-                    $mc = Test-PimAuthoringCommitAllowed -Action 'review-save' -Base $base -Rows $gateRows -Requests $reqs
-                    if (-not $mc.allowed) {
-                        Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
-                            ok = $false; base = $base; gate = "$($mc.gate)"; error = "$($mc.reason)"
-                            approvalRequired = $true; target = "$($mc.target)"; reasons = @($mc.reasons)
-                        })
-                        return 409
-                    }
-                }
-
-                # [Fix 2] PORTAL SCOPE on writes: a non-SuperAdmin delegated caller may
-                # only create/change/REMOVE rows inside their tier/level/service/scope.
-                # We validate EVERY row the merged diff touches -- adds, BOTH sides of every
-                # modify, and removes. (BUG-198: Get-PimWriteAffectedRows reads a modify's
-                # before/after through PSObject.Properties, which a dictionary does not expose,
-                # so modifies were never checked; Get-PimManagerDiffTouchedRows reads both shapes.)
-                # A new row outside the caller's scope is REFUSED, no longer silently dropped.
-                if (-not ($delegCtx -and $delegCtx.isDelegated) -and -not $callerScope.isSuperAdmin -and $callerScope.profile -and (Get-Command Test-PimPortalRowsInScope -ErrorAction SilentlyContinue)) {
-                    $affected = @(Get-PimManagerDiffTouchedRows -Diff $diff)
-                    $scopeCheck = Test-PimPortalRowsInScope -Profile $callerScope.profile -Rows $affected -Base $base -RequireManage
-                    if (-not $scopeCheck.allowed) {
-                        Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{
-                            ok = $false; base = $base; error = "$($scopeCheck.reason)"; denied = @($scopeCheck.denied)
-                        })
-                        return 403
-                    }
-                }
-
-                # [Fix 5] EMPTY-SET / LARGE-DELTA guard (mirrors the engine disable-guard;
-                # the 53-user mass-disable precondition was an empty/over-broad desired set).
-                # Refuse a commit that empties the entity or removes more than the safety
-                # threshold of current rows, UNLESS the operator passed confirm=true.
-                if (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue) {
-                    $deltaGuard = Test-PimCommitDeltaGuard -BeforeCount (@($current.rows).Count) -AfterCount (@($rowsOrdered).Count) -RemoveCount (@($diff.removes).Count) -Confirm:$confirmDestructive
-                    if (-not $deltaGuard.allowed) {
-                        Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
-                            ok = $false; base = $base; gate = "$($deltaGuard.rule)"; error = "$($deltaGuard.reason)"
-                            confirmRequired = $true; removeCount = [int]$deltaGuard.removeCount; beforeCount = (@($current.rows).Count); afterCount = (@($rowsOrdered).Count)
-                        })
-                        return 409
-                    }
-                }
-
-                # §71.5 -- THE REPLICATION GATE, server-side, because the GUI is never the only gate. A
-                # tenant that is not the managing tenant may not introduce or change Replicate (or Ring/Target on
-                # a non-admin entity); on the managing tenant every changed row must pass the same check the wizard
-                # and the validator use -- a ManagementMode/Replicate disagreement, a bad Replicate value or
-                # a malformed Target is refused before anything is written.
-                # §79.13 SECOND APPROVER (operator 2026-09-25: "it must be possible that another person can approve a
-                # commitment (2nd approver). so for some changes it should require that"). Setting 'PendingSecondApprover'
-                # = off (default) | sensitive | all. The shared pending store says who STAGED each change this commit carries
-                # out; a change the committer staged themselves (or, under 'all', any direct edit with no stager) needs a
-                # DIFFERENT administrator to commit it. Sensitivity is the same classifier the maker/checker gate uses.
-                $secondMode = 'off'
-                try { $sv = "$(Get-PimSetting -Name 'PendingSecondApprover')".Trim().ToLowerInvariant(); if ($sv -in @('sensitive', 'all')) { $secondMode = $sv } } catch { }
-                # R25-26: a submitted row whose disabling value was HELD for an offboard approval did not land -- it must not
-                # count as "carried out" (it would clear, or satisfy, a staged change that is still outstanding).
-                $heldKeys = @($offboardHolds | ForEach-Object { "$($_.key)".Trim().ToLowerInvariant() } | Where-Object { $_ })
-                $pendingSubmittedEff = @($pendingSubmitted | Where-Object { $heldKeys -notcontains "$(Get-PimStoreRowKey -Base $base -Row $_)".Trim().ToLowerInvariant() })
-                # 🔴 R25-06: THE ROW LOCKS HOLD AT COMMIT TOO. Every entry of this commit's diff is classified against the
-                # shared pending changes (Get-PimSharedPendingCommitClassification): an entry on a row ANOTHER administrator
-                # holds is refused unless it carries out their staged change exactly. Before, the locks were checked only when
-                # staging, and the store was read here only with a second approver configured -- so with the default 'off'
-                # one administrator could commit over a row a colleague held.
-                $spClass = $null
-                if ($script:PimSqlCs -and (Get-Command Get-PimSharedPendingCommitClassification -ErrorAction SilentlyContinue)) {
-                    $spDoc = (Read-PimSharedPendingStore -ConnectionString $script:PimSqlCs).doc
-                    $spChanges = if ($spDoc.bases.ContainsKey($base)) { @($spDoc.bases[$base].changes) } else { @() }
-                    $spClass = Get-PimSharedPendingCommitClassification -Base $base -Changes $spChanges -Diff $diff -AfterRows @(@($rowsOrdered) + @($pendingSubmittedEff)) -Committer "$((Get-PimManagerRole).identity)"
-                    if (-not $spClass.ok) {
-                        $lockTxt = (@($spClass.locked | ForEach-Object { "$($_.key) (staged by $($_.by))" }) -join '; ')
-                        Write-PimManagerAuditEvent -Action 'commit.locked' -Target $base -Result 'denied' -After ([ordered]@{ locked = @($spClass.locked) })
-                        Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
-                            ok = $false; base = $base; gate = 'locked'; locked = @($spClass.locked)
-                            error = "Locked: this commit changes row(s) another administrator has staged -- $lockTxt. Nothing was saved. Commit their change as staged, ask them to discard it, or wait until it is committed."
-                        })
-                        return 409
-                    }
-                }
-                if ($secondMode -ne 'off' -and $spClass) {
-                    $spUncarried = @($spClass.direct).Count
-                    $spSens = {
-                        param($c)
-                        if (-not (Get-Command Get-PimAuthoringSensitivity -ErrorAction SilentlyContinue)) { return $true }   # unknown -> treat as sensitive (fail closed)
-                        $r = if ($c.op -eq 'remove') { $c.before } else { $c.row }
-                        try { return [bool](Get-PimAuthoringSensitivity -Action 'review-save' -Base $base -Rows @([pscustomobject]$r)).sensitive } catch { return $true }
-                    }
-                    $spGate = Test-PimSharedPendingSecondApprover -Mode $secondMode -Committer "$((Get-PimManagerRole).identity)" -Carried @($spClass.carried) -Uncarried $spUncarried -Direct @($spClass.direct) -IsSensitive $spSens
-                    if (-not $spGate.allowed) {
-                        Write-PimManagerAuditEvent -Action 'commit.second-approver-required' -Target $base -Result 'denied' -After ([ordered]@{ mode = $secondMode; own = @($spGate.own); uncarried = $spUncarried })
-                        Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
-                            ok = $false; base = $base; gate = 'second-approver'; error = "$($spGate.reason)"; secondApprover = $secondMode; own = @($spGate.own)
-                        })
-                        return 409
-                    }
-                }
-
-                if (Get-Command Test-PimReplicationWriteAllowed -ErrorAction SilentlyContinue) {
-                    $repTags = @{ known = $false; tags = @() }
-                    try { $repTags = Get-PimManagerKnownTenantTags } catch { }
-                    $repGate = Test-PimReplicationWriteAllowed -Entity $base -Rows @($rowsOrdered) -CurrentRows @($current.rows) `
-                                 -IsMaster (Test-PimManagerIsMspMaster) -KnownTags @($repTags.tags) -TagsKnown:([bool]$repTags.known)
-                    if (-not $repGate.allowed) {
-                        Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
-                            ok = $false; base = $base; gate = 'replication'; error = "$($repGate.reason)"; refused = @($repGate.refused)
-                        })
-                        return 409
-                    }
-                }
-
-                # [M1] SAFE COMMIT: timestamped backup BEFORE the apply, all-or-nothing
-                # transactional apply, automatic rollback-to-snapshot on any failure.
-                try {
-                    $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode
-                } catch {
-                    # The store was left exactly as before (snapshot restored). Surface
-                    # the clear error so the operator sees the commit was reversed.
-                    Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; base = $base; error = "$($_.Exception.Message)" }
-                    return 500
-                }
-                $writtenPath = 'sql'
-                # 🔴 §33.28: an 'authoring' approval that authorised THIS commit is consumed ONCE, as the design says
-                # (Set-PimApprovalRequestExecuted). The PUT never latched it, so one approval stayed usable for every
-                # later sensitive commit on the same entity until it expired.
-                if ($mc -and "$($mc.gate)" -eq 'approved' -and $mc.approval -and (Get-Command Set-PimApprovalRequestExecuted -ErrorAction SilentlyContinue)) {
-                    try { [void](Set-PimApprovalRequestExecuted -Id "$($mc.approval.id)") }
-                    catch { Write-Warning "  [maker/checker] the approval $($mc.approval.id) that authorised this commit was NOT marked executed -- it could authorise another commit: $($_.Exception.Message)" }
-                }
-                Write-PimMutationLog -BaseName $base -Adds $diff.adds.Count -Removes $diff.removes.Count -Modifies $diff.modifies.Count -NewRowCount $rowsOrdered.Count -Diff $diff `
-                    -Concurrency $concurrencyNote -ScopeMerged:([bool]$slice.filtered)
-                # §70.21: start the engine now (debounced, so a multi-entity commit starts one run; the container takes
-                # longer to start than the remaining entity writes, and a running tick re-checks between its jobs).
-                if (($diff.adds.Count + $diff.removes.Count + $diff.modifies.Count) -gt 0) { try { [void](Start-PimManagerTickNow -Reason "commit:$base") } catch { } }
-
-                # BUG-200: hand back the hash of what is stored NOW, so a follow-up commit from the same page is
-                # checked against its own result rather than against the pre-commit read.
-                $newRowsHash = ''
-                try { $newRowsHash = Get-PimRowsHash -Rows @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base) } catch { $newRowsHash = '' }
-                # §79.13: the shared pending changes this commit carried out leave the store -- whoever staged them.
-                if ($script:PimSqlCs -and (Get-Command Invoke-PimSharedPendingReconcile -ErrorAction SilentlyContinue)) {
-                    try { [void](Invoke-PimSharedPendingReconcile -ConnectionString $script:PimSqlCs -Bases @($base) -ReadRows { param($b) @(@(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $b) + @($pendingSubmittedEff)) }) }
-                    catch { Write-Warning "  [pending] the committed changes for $base were NOT cleared from the shared pending store: $($_.Exception.Message)" }
-                }
-                $putOut = [ordered]@{
-                    ok         = $true
-                    base       = $base
-                    path       = $writtenPath
-                    rowCount   = $rowsOrdered.Count
-                    adds       = $diff.adds.Count
-                    removes    = $diff.removes.Count
-                    modifies   = $diff.modifies.Count
-                    snapshotId = "$($commitRes.snapshotId)"
-                    commitId   = "$(if ($commitRes -and $commitRes.PSObject.Properties['commitId']) { $commitRes.commitId })"   # §88 watcher
-                    rowsHash   = $newRowsHash
-                    concurrency = $concurrencyNote
-                }
-                # BUG-190: the rest of the commit landed; the disabling value(s) were held for the offboard approval.
-                # 202 (Accepted, not all applied) so no caller mistakes it for "everything I sent is now stored".
-                $putStatus = 200
-                if ($offboardHolds.Count -gt 0) {
-                    $holdRes = & $raiseOffboardHolds
-                    $putOut['gate'] = 'offboard-approval'; $putOut['approvalRequired'] = $true; $putOut['offboardHeld'] = $true
-                    $putOut['approvalsRaised'] = @($holdRes | Where-Object { $_.approvalRaised } | ForEach-Object { "$($_.approvalId)" })
-                    $putOut['held'] = @($holdRes)
-                    $putOut['note'] = "Saved every other change. " + (@($holdRes | ForEach-Object { $_.note }) -join ' ')
-                    $putStatus = 202
-                }
-                Write-JsonResponse -Response $resp -Status $putStatus -Body $putOut
-                return $putStatus
+                # REQ 93: the commit is ONE function now -- the page and the MCP commit tool run the SAME code and gates.
+                return (Invoke-PimManagerCsvPut -base $base -spec $spec -resp $resp -PutBody (Read-RequestJson -Request $req))
             }
             if ($method -eq 'POST' -and $path -match '^/api/(?:csv|data)/[\w\.-]+$') {
                 Write-JsonResponse -Response $resp -Status 405 -Body @{ error = 'method not allowed (did you mean /api/diff/<base>?)' }
