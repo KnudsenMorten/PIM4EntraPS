@@ -14,6 +14,19 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.483 — MCP sign-in hardened; the access request API describes itself in full
+
+- **Fixed (security, MCP preview): only a signed-in person can use the MCP server.** The Manager now verifies every MCP
+  caller's token itself and refuses an application token with no person behind it; before, such a token would have
+  been treated as a Reader once the MCP server was switched on. The MCP server is off by default.
+- **Improved: MCP clients can discover the sign-in.** Without a token, `/mcp` now answers `401` with the standard
+  pointer to its sign-in metadata instead of redirecting to the login page.
+- **Fixed: the access request API's live `openapi.json` lost the request fields.** The description served by the
+  broker cut the request schema short, so a connector imported from the live URL showed no fields. It is now served in
+  full, identical to the shipped `connectors/json/openapi.json`.
+- **Upgrade note:** after the update, re-run `Set-PimManagerMcpAuth.ps1 -Apply` on an environment that uses MCP -- it
+  sets the audience the Manager pins tokens to and moves `/mcp` outside the login redirect.
+
 ## v2.4.482 — MCP server (preview); updates reach the access request broker
 
 - **Fixed: the access request broker was never updated.** The nightly updater rolled the Manager and every job on the

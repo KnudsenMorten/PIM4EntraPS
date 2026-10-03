@@ -567,6 +567,26 @@ function Get-PimEntraJwks {
     return $null
 }
 
+function Get-PimManagerMcpAuthConfig {
+    # REQ 93 -- what /mcp pins a token to: audiences from PIM_MCP_AUDIENCE (written by Set-PimManagerMcpAuth.ps1 -Apply),
+    # issuers = THIS tenant (v1 + v2). Not configured = /mcp refuses every hosted call (fail closed, 503 with the remedy).
+    param([System.Net.HttpListenerRequest]$Request)
+    $aud = @("$env:PIM_MCP_AUDIENCE" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $tid = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $tid) { $tid = "$($global:PIM_TenantId)".Trim() }; if (-not $tid) { $tid = "$env:PIM_TenantId".Trim() }
+    $iss = @(if ($tid -and (Get-Command Get-PimHostedDefaultIssuers -ErrorAction SilentlyContinue)) { Get-PimHostedDefaultIssuers -TenantId $tid })
+    $apiUri = @($aud | Where-Object { $_ -like 'api://*' })[0]; if (-not $apiUri) { $apiUri = @($aud)[0] }
+    $hostName = ''
+    if ($Request) { $hostName = "$(("$($Request.Headers['X-Forwarded-Host'])" -split ',')[0])".Trim(); if (-not $hostName) { $hostName = "$($Request.Headers['Host'])".Trim() }; if (-not $hostName) { $hostName = "$($Request.Url.Authority)" } }
+    return @{
+        configured = ($aud.Count -gt 0 -and $iss.Count -gt 0)
+        audiences = $aud; issuers = $iss
+        scope = $(if ($apiUri) { "$apiUri/mcp.access" } else { '' })
+        authorizationServer = $(if ($tid) { "https://login.microsoftonline.com/$tid/v2.0" } else { '' })
+        resource = "https://$hostName/mcp"
+        metadataUrl = "https://$hostName/.well-known/oauth-protected-resource/mcp"
+    }
+}
+
 function Get-PimEasyAuthPrincipal {
     # The Entra-authenticated caller, VERIFIED -- not merely asserted by a header (SEC-01).
     #
@@ -8161,18 +8181,46 @@ function Handle-Request {
     }
 
     # ---- REQ 93 -- the MCP server (Pro 'mcp.server'): POST /mcp, one JSON-RPC message per request ----------------------
-    # Hosted: the caller sends `Authorization: Bearer <Entra access token>` for this Manager; Easy Auth validates it and
-    # hands the principal in, and the caller's OWN Manager role decides the tools (Get-PimManagerRole, as for the page).
-    # The Authorization header is REQUIRED even with a principal: a browser's Easy Auth session cookie alone must not be
-    # able to drive /mcp from another site (with application/json also required, a cross-site form post cannot reach it).
+    # Hosted: the caller sends `Authorization: Bearer <Entra access token for api://<app>/mcp.access>` and the Manager
+    # VERIFIES IT ITSELF (Resolve-PimMcpBearer: tenant JWKS signature, pinned issuer + audience, a delegated scope, the
+    # user from the token) -- 🔴 BUG-283: Easy Auth alone let an app-only token in as Reader. Because the token is the
+    # proof, /mcp can be an Easy Auth excludedPath (Set-PimManagerMcpAuth.ps1) and answer 401 + WWW-Authenticate with the
+    # protected-resource metadata, which is how an MCP client discovers the sign-in; the X-MS-* headers are never read here.
+    # The bearer is REQUIRED: a browser's Easy Auth session cookie alone can never drive /mcp from another site.
     # Local mode: the page token, exactly as /api/*.
+    if ($path -like '/.well-known/oauth-protected-resource*' -and $method -eq 'GET') {
+        $mc = Get-PimManagerMcpAuthConfig -Request $req
+        if (-not $script:PimHosted -or -not $mc.configured) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = 'not found' }; return 404 }
+        Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ resource = $mc.resource; authorization_servers = @($mc.authorizationServer); scopes_supported = @($mc.scope); bearer_methods_supported = @('header'); resource_name = 'PIM Manager (MCP)' })
+        return 200
+    }
     if ($path -eq '/mcp') {
         if ($method -ne 'POST') { $resp.Headers['Allow'] = 'POST'; Write-JsonResponse -Response $resp -Status 405 -Body @{ error = 'POST one JSON-RPC message (streamable HTTP, JSON responses; no SSE stream)' }; return 405 }
         $ah = "$($req.Headers['Authorization'])"
-        $authOk = if ($script:PimHosted) { ($ah -match '^Bearer\s+\S') -and "$script:CurrentRequestPrincipal".Trim() } else { $ah -eq "Bearer $ExpectedToken" }
-        if (-not $authOk) {
-            try { $resp.AddHeader('WWW-Authenticate', 'Bearer realm="pim-manager"') } catch { }   # HttpListener restricts this header on some hosts
-            Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; detail = 'send Authorization: Bearer <an Entra access token for this PIM Manager>' }
+        if ($script:PimHosted) {
+            $mc = Get-PimManagerMcpAuthConfig -Request $req
+            $bv = if (Get-Command Resolve-PimMcpBearer -ErrorAction SilentlyContinue) {
+                $jw = if ($ah -match '^\s*Bearer\s+\S' -and $mc.configured) { Get-PimEntraJwks } else { $null }
+                Resolve-PimMcpBearer -Authorization $ah -Jwks $jw -ExpectedIssuers $mc.issuers -ExpectedAudiences $mc.audiences
+            } else { @{ ok = $false; status = 503; identity = ''; reason = 'PIM-HostedAuth.ps1 not loaded (refused)' } }
+            # never the edge headers on this path: from here on the request's principal is the VERIFIED token's user, or nobody
+            $script:CurrentRequestPrincipal = if ($bv.ok) { "$($bv.identity)" } else { $null }
+            if (-not $bv.ok) {
+                if ($ah) { Write-Host ("  [mcp] REFUSED ({0}) -- {1}" -f $bv.status, $bv.reason) -ForegroundColor Red }
+                if ([int]$bv.status -eq 401) {
+                    $wa = 'Bearer realm="pim-manager"'
+                    if ($mc.configured) { $wa += ", resource_metadata=`"$($mc.metadataUrl)`", scope=`"$($mc.scope)`"" }
+                    if ($ah) { $wa += ', error="invalid_token"' }
+                    try { $resp.AddHeader('WWW-Authenticate', $wa) } catch { }   # HttpListener restricts this header on some hosts
+                    Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; detail = "$($bv.reason) -- send Authorization: Bearer <a token for $($mc.scope)>" }
+                    return 401
+                }
+                Write-JsonResponse -Response $resp -Status ([int]$bv.status) -Body @{ error = $(if ([int]$bv.status -eq 403) { 'forbidden' } else { 'unavailable' }); detail = "$($bv.reason)" }
+                return [int]$bv.status
+            }
+        } elseif ($ah -ne "Bearer $ExpectedToken") {
+            try { $resp.AddHeader('WWW-Authenticate', 'Bearer realm="pim-manager"') } catch { }
+            Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; detail = 'send Authorization: Bearer <the page token>' }
             return 401
         }
         if ("$($req.ContentType)" -notmatch '^(?i)application/json') { Write-JsonResponse -Response $resp -Status 415 -Body @{ error = 'Content-Type must be application/json' }; return 415 }

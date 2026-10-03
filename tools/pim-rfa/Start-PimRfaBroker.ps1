@@ -261,6 +261,14 @@ function Get-PimRfaOpenApi {
     }
 }
 
+function ConvertTo-PimRfaResponseText {
+    # The body EXACTLY as the listener writes it. 🔴 BUG-282 (live, internal 2.4.482): this was -Depth 8 inline in the
+    # listener, and the OpenAPI request-schema properties sit at depth 9 -- served as "System.Collections.Hashtable".
+    param($Body)
+    if ($Body -is [string]) { return $Body }
+    return ($Body | ConvertTo-Json -Depth 32 -Compress)
+}
+
 if ($NoListen) { return }
 
 # ------------------------------ the listener ------------------------------
@@ -289,7 +297,7 @@ while ($listener.IsListening) {
         $resp.Headers['Referrer-Policy'] = 'no-referrer'
         $resp.Headers['Content-Security-Policy'] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         $resp.Headers['Cache-Control'] = 'no-store'
-        $out = if ($r.body -is [string]) { $r.body } else { $r.body | ConvertTo-Json -Depth 8 -Compress }
+        $out = ConvertTo-PimRfaResponseText -Body $r.body
         $bytes = [Text.Encoding]::UTF8.GetBytes($out)
         $resp.OutputStream.Write($bytes, 0, $bytes.Length)
     } catch { try { $resp.StatusCode = 500 } catch { } }
