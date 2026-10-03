@@ -14,6 +14,19 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.486 — The access request API, proven end to end
+
+- **Delivered: let a ticketing system switch an admin account on for a set time (Pro).** The access request API is now
+  proven against a live environment: a request enables a disabled admin account for the chosen period, the same
+  ticket sent twice opens one window, the status can be read, a cancel switches the account off again, and a proposed
+  change waits for an administrator instead of being applied.
+- **Changed: one database-admin group per tenant again.** Several environments in one tenant now share the PIM
+  database-admin group, because the same administrators look after all of them. Each environment still gets its own
+  sign-in app, administrators group and notification mailbox. To give one environment different database admins, name
+  its group explicitly at setup.
+- **Testing:** the live test for this API runs only against a dedicated test store, and proves that every test object
+  it created is removed afterwards, including from the directory's deleted-items bin. No change to the product itself.
+
 ## v2.4.485 — Several environments in one tenant; corrected edition lists
 
 - **Fixed: a second environment in the same tenant took over the first one's sign-in app.** Setup now gives every

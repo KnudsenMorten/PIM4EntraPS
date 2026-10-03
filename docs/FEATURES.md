@@ -1651,6 +1651,12 @@ deployment is a supported choice) and no credentials lying around.
 - **A daily reminder of changes nobody committed.** ✅ 2026-09-25 Changes staged under Pending changes, and queued
   actions such as a pass re-issue or a session revoke, that have waited more than a day are mailed to you with who
   staged them and how long ago. On by default; a SuperAdmin sets how often, or turns it off, under Jobs.
+- **Let your ticketing system switch an admin account on for a set time (Pro).** ✅ 2026-10-03 — A system such as
+  ServiceNow, which owns the request and its approval, calls one REST API to have a disabled admin account enabled for
+  a chosen period, read the request's status, or cancel it. PIM enables the account, switches it off again when the
+  period ends or the request is cancelled, and sending the same ticket twice never opens a second window. The caller
+  signs in with its own Entra application, and only the applications you list are accepted. A system can also
+  *propose* a change, which waits for an administrator instead of being applied. *(2.4.486)*
 
 ## 14. Scale / Performance
 - **Built for large tenants.** The solution never bulk-lists hundreds of thousands of users
@@ -1896,8 +1902,8 @@ preparation from one configuration file; self-updating from the public release; 
 Power BI, enterprise-app role, Azure DevOps, Dataverse, Business Central and Power Platform
 connectors; revoking current delegations (the list itself is free); access reviews (campaigns with decisions recorded and
 enforced); a second approver for sensitive changes;
-delegated administration (portal users limited to a tier, level, service or scope); the tier-impact report; and the
-evidence export. Without a licence the second approver is off too, so install the licence before relying on it.
+delegated administration (portal users limited to a tier, level, service or scope); the tier-impact report; the
+access request API for ticketing systems; and the evidence export. Without a licence the second approver is off too, so install the licence before relying on it.
 
 **Pro — the multi-tenant half.** Define once and target tenants by tag and by rollout wave; signed definition sets
 verified on arrival; a clear view of what reaches each tenant and what is held back; per-customer rules; a read-only
