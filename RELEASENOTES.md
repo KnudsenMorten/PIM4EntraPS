@@ -14,6 +14,15 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.490 — Setup in tenants with several subscriptions
+
+- **Fixed: updates and rollbacks during setup always use the installation's own subscription.** In a tenant with several
+  Azure subscriptions, the database update, the application roll-out and the automatic rollback could act on whichever
+  subscription the Azure CLI had selected. They now always use the subscription the installation was set up with.
+- **Fixed: the private DNS zone of a private installation goes to the right subscription.** With the hub network in
+  another subscription, the zone for the Container Apps environment is now created in the hub's subscription, next to
+  the hub.
+
 ## v2.4.489 — Your licence can arrive by itself
 
 - **New (off until you switch it on): request the licence from Invardia automatically.** When no Pro licence is
