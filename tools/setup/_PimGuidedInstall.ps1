@@ -1,0 +1,220 @@
+﻿#Requires -Version 5.1
+<#
+.SYNOPSIS
+  §95.2 -- the PURE parts of the guided install (Install-PimManager.ps1), offline-tested in tests/Test-PimGuidedInstall.ps1.
+
+.DESCRIPTION
+  The contract is Invardia's GUIDED-INSTALL §4.2-4.4 (the bootstrap calls ONE command, Install-PimManager):
+    config.json  = the wizard's answers, keyed as in tools/setup/install-parameters.json, plus installId
+    events       = @{ installId; step = @{ id; title }; state; message; action = @{ text; command }; detail; outputs }
+                   state: started | ok | warning | failed | skipped | completed
+    exit codes   = 0 succeeded (warnings allowed) | 1 a step failed | 2 preflight failed | 3 bad config
+  A step that needs a higher role than the installer holds ends as 'warning' with action.command for the right person;
+  the install continues. Only what nothing can work around is 'failed'.
+#>
+
+$script:PimInstallGuid = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+
+# The stable step ids (the status page and support tickets refer to them) and their titles in customer language.
+# Order = run order. DeployAll's 'appreg' step is never shown: a guided install runs on managed identities only.
+$script:PimInstallSteps = [ordered]@{
+    'config'               = 'Check your answers'
+    'preflight-signin'     = 'Your sign-in'
+    'preflight-target'     = 'Tenant and subscription'
+    'preflight-rights'     = 'Your Azure and Entra rights'
+    'preflight-providers'  = 'Azure resource providers'
+    'preflight-names'      = 'Resource names'
+    'preflight-sql-region' = 'Azure SQL in the chosen region'
+    'prereq'               = 'Network, registry, identity and database'
+    'image'                = 'Container image'
+    'infra'                = 'Container Apps environment and apps'
+    'sqlaccess'            = 'Database access'
+    'schema'               = 'Database schema'
+    'mailsender'           = 'Notification mailbox'
+    'features'             = 'Feature settings'
+    'easyauth'             = 'Sign-in for the PIM Manager'
+    'code'                 = 'Roll out the application'
+    'updater'              = 'Updates'
+    'access'               = 'PIM Manager access'
+    'verify'               = 'Deployment health check'
+    'licence'              = 'Your licence'
+    'support-app-access'   = 'Invardia support access'
+    'health-check'         = 'Final health check'
+    'completed'            = 'Installation complete'
+}
+
+function Get-PimInstallStepTitle([string]$Id) {
+    if ($script:PimInstallSteps.Contains($Id)) { return $script:PimInstallSteps[$Id] }
+    return $Id
+}
+
+function New-PimInstallEvent {
+    <# PURE. One reporter event in the contract shape. Never carries a secret (callers pass customer-language text). #>
+    param([Parameter(Mandatory)][string]$StepId, [Parameter(Mandatory)][ValidateSet('started', 'ok', 'warning', 'failed', 'skipped', 'waiting', 'completed')][string]$State,
+          [string]$Message = '', [string]$ActionText = '', [string]$ActionCommand = '', [System.Collections.IDictionary]$Detail, [System.Collections.IDictionary]$Outputs, [string]$InstallId = '')
+    $e = [ordered]@{ installId = $InstallId; step = [ordered]@{ id = $StepId; title = (Get-PimInstallStepTitle $StepId) }; state = $State; message = $Message }
+    if ("$ActionText".Trim() -or "$ActionCommand".Trim()) { $e['action'] = [ordered]@{ text = $ActionText; command = $ActionCommand } }
+    if ($Detail) { $e['detail'] = $Detail }
+    if ($Outputs) { $e['outputs'] = $Outputs }
+    return $e
+}
+
+function Get-PimInstallToken {
+    <# PURE. A short, stable, lower-case name token from the install id (6 hex chars of its SHA-256). #>
+    param([Parameter(Mandatory)][string]$InstallId)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes("$InstallId".Trim().ToLowerInvariant())) } finally { $sha.Dispose() }
+    return (-join ($h[0..2] | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Test-PimInstallConfig {
+    <#
+      PURE. Validate the wizard's answers (an object from config.json). Returns @{ ok; errors[]; config (normalised) }.
+      Refuses: a missing / malformed required value, an unknown enum value, internal exposure (the guided install is
+      external only -- Invardia refuses it too), an MSP role (managing / managed tenants are not a guided install yet),
+      a bad CIDR / UPN / e-mail.
+    #>
+    param([AllowNull()][object]$Config)
+    $err = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $Config) { return @{ ok = $false; errors = @('config.json could not be read as JSON'); config = $null } }
+    $get = { param($k) $p = $Config.PSObject.Properties[$k]; if ($p) { $p.Value } else { $null } }
+    $c = [ordered]@{}
+    foreach ($k in 'installId', 'tenantId', 'subscriptionId') {
+        $v = "$(& $get $k)".Trim(); $c[$k] = $v
+        if (-not $v) { $err.Add("$k is required") }
+    }
+    foreach ($k in 'tenantId', 'subscriptionId') { if ($c[$k] -and $c[$k] -notmatch $script:PimInstallGuid) { $err.Add("$k must be a GUID") } }
+    if ($c.installId -and $c.installId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$') { $err.Add('installId must be 3-64 letters, digits, dot, dash or underscore') }
+    $loc = "$(& $get 'location')".Trim(); if (-not $loc) { $loc = 'swedencentral' }
+    if ($loc -notmatch '^[a-z0-9]{3,30}$') { $err.Add("location '$loc' is not an Azure region name") }
+    $c.location = $loc
+    $rg = "$(& $get 'resourceGroup')".Trim(); if (-not $rg) { $rg = 'rg-pim' }
+    if ($rg -notmatch '^[A-Za-z0-9._()-]{1,89}[A-Za-z0-9_()-]$') { $err.Add("resourceGroup '$rg' is not a valid resource group name") }
+    $c.resourceGroup = $rg
+    $ed = "$(& $get 'edition')".Trim().ToLowerInvariant(); if (-not $ed) { $ed = 'trial' }
+    if ($ed -notin 'trial', 'pro') { $err.Add("edition must be trial or pro (got '$ed')") }
+    $c.edition = $ed
+    $ex = "$(& $get 'exposure')".Trim().ToLowerInvariant(); if (-not $ex) { $ex = 'external' }
+    if ($ex -ne 'external') { $err.Add("exposure '$ex' is not supported by the guided install -- it installs the external (public, signed-in) shape; an internal install is a consultant-led setup") }
+    $c.exposure = $ex
+    $cidr = '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$'
+    $vn = "$(& $get 'vnetAddressPrefix')".Trim(); if (-not $vn) { $vn = '10.220.0.0/22' }
+    $sn = "$(& $get 'subnetAddressPrefix')".Trim(); if (-not $sn) { $sn = '10.220.0.0/23' }
+    foreach ($pair in @(@('vnetAddressPrefix', $vn), @('subnetAddressPrefix', $sn))) {
+        $m = [regex]::Match($pair[1], $cidr)
+        if (-not $m.Success -or @(1..4 | Where-Object { [int]$m.Groups[$_].Value -gt 255 }).Count -or [int]$m.Groups[5].Value -gt 32) { $err.Add("$($pair[0]) '$($pair[1])' is not an IPv4 CIDR") }
+    }
+    $snm = [regex]::Match($sn, $cidr)
+    if ($snm.Success -and [int]$snm.Groups[5].Value -gt 23) { $err.Add("subnetAddressPrefix '$sn' is smaller than /23 -- Container Apps needs a /23 or larger") }
+    $vnm = [regex]::Match($vn, $cidr)
+    if ($snm.Success -and $vnm.Success -and [int]$snm.Groups[5].Value -lt [int]$vnm.Groups[5].Value) { $err.Add("subnetAddressPrefix '$sn' is larger than the VNet '$vn'") }
+    $c.vnetAddressPrefix = $vn; $c.subnetAddressPrefix = $sn
+    $role = "$(& $get 'mspRole')".Trim().ToLowerInvariant(); if (-not $role) { $role = 'single' }
+    if ($role -notin 'single', 'managing', 'managed') { $err.Add("mspRole must be single, managing or managed (got '$role')") }
+    elseif ($role -ne 'single') { $err.Add("mspRole '$role': managing / managed tenants are not a guided install yet -- install as single and contact support for the multi-tenant setup") }
+    $c.mspRole = $role
+    $upn = '^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$'
+    foreach ($k in 'portalUsers', 'superAdmins') {
+        $list = @(@(& $get $k) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        foreach ($u in $list) { if ($u -notmatch $upn) { $err.Add("$k entry '$u' is not a user principal name") } }
+        $c[$k] = @($list)
+    }
+    $c.allowAllMembers = [bool](& $get 'allowAllMembers')
+    $ms = "$(& $get 'mailSender')".Trim()
+    if ($ms -and $ms -notmatch $upn) { $err.Add("mailSender '$ms' is not an e-mail address") }
+    $c.mailSender = $ms
+    $sa = "$(& $get 'supportAppId')".Trim()
+    if ($sa -and $sa -notmatch $script:PimInstallGuid) { $err.Add('supportAppId must be a GUID (the Invardia Support app''s client id)') }
+    $c.supportAppId = $sa
+    $lvl = "$(& $get 'supportAccess')".Trim().ToLowerInvariant(); if (-not $lvl) { $lvl = 'troubleshoot' }
+    if ($lvl -notin 'troubleshoot', 'setup') { $err.Add("supportAccess must be troubleshoot or setup (got '$lvl')") }
+    $c.supportAccess = $lvl
+    return @{ ok = ($err.Count -eq 0); errors = @($err); config = [pscustomobject]$c }
+}
+
+function Get-PimInstallNames {
+    <# PURE. The resource names of a guided install (framework §5.5: purpose words; globally unique names carry the token). #>
+    param([Parameter(Mandatory)][object]$Config)
+    $t = Get-PimInstallToken -InstallId $Config.installId
+    return [pscustomobject]@{
+        token = $t; resourceGroup = $Config.resourceGroup; vnet = 'vnet-pim'; environment = 'cae-pim'; logAnalytics = 'log-pim'
+        acr = "acrpim$t"; sqlServer = "sql-pim-$t"; sqlFqdn = "sql-pim-$t.database.windows.net"; sqlDatabase = 'PimPlatform'; managerApp = 'ca-pim-manager'
+    }
+}
+
+function ConvertTo-PimInstallDeployArgs {
+    <#
+      PURE. The Invoke-PimDeployAll parameters for one guided install. Fixed by design: the signed-in account (Cloud Shell
+      -- never a secret), no deploy application (-SkipAppReg: the runtime is managed identity only), scenario S2 (the
+      public release, updated with Update-PimCommunity.ps1; the licence switches the Pro features on), -Apply.
+    #>
+    param([Parameter(Mandatory)][object]$Config, [string]$SignedInUpn = '')
+    $n = Get-PimInstallNames -Config $Config
+    $admins = @($Config.superAdmins); if (-not $admins.Count -and "$SignedInUpn".Trim()) { $admins = @("$SignedInUpn".Trim()) }
+    $portal = @($Config.portalUsers); if (-not $portal.Count -and -not $Config.allowAllMembers) { $portal = @($admins) }
+    $a = [ordered]@{
+        Scenario = 'S2'; TenantId = $Config.tenantId; SubscriptionId = $Config.subscriptionId; Location = $Config.location
+        Exposure = 'external'; ResourceGroup = $n.resourceGroup; VnetName = $n.vnet; VnetResourceGroup = $n.resourceGroup
+        EnvName = $n.environment; AcrName = $n.acr; LogAnalyticsWorkspaceName = $n.logAnalytics; LogAnalyticsResourceGroup = $n.resourceGroup
+        SqlServerFqdn = $n.sqlFqdn; SqlDatabase = $n.sqlDatabase
+        SqlConnectionString = "Server=tcp:$($n.sqlFqdn),1433;Database=$($n.sqlDatabase);Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
+        PrereqToken = $n.token; PrereqVnetAddressPrefix = $Config.vnetAddressPrefix; PrereqSubnetAddressPrefix = $Config.subnetAddressPrefix
+        ManagerSuperAdmins = (@($admins) -join ','); UseSignedInAccount = $true; SkipAppReg = $true; Apply = $true
+    }
+    if (@($portal).Count) { $a['EasyAuthAllowedPrincipals'] = @($portal) }
+    if ($Config.allowAllMembers) { $a['EasyAuthAllowAllTenantUsers'] = $true }
+    if ("$($Config.mailSender)".Trim()) { $a['MailSender'] = "$($Config.mailSender)".Trim() }
+    return $a
+}
+
+function ConvertTo-PimInstallStepEvent {
+    <#
+      PURE. One Invoke-PimDeployAll -OnStep event -> the guided-install event, or $null when it is not shown (appreg).
+      A failed step carries the deploy's own detail as the message; the customer action is to fix that and -Resume.
+    #>
+    param([Parameter(Mandatory)][object]$DeployEvent, [string]$InstallId = '', [string]$ResumeCommand = '')
+    $key = "$($DeployEvent.key)"
+    if ($key -eq 'appreg' -or -not $script:PimInstallSteps.Contains($key)) { return $null }
+    $state = "$($DeployEvent.state)"; $detail = "$($DeployEvent.detail)".Trim()
+    if ($detail.Length -gt 400) { $detail = $detail.Substring(0, 400) + ' ...' }
+    switch ($state) {
+        'failed'  { return (New-PimInstallEvent -StepId $key -State failed -Message $(if ($detail) { $detail } else { 'the step failed' }) -ActionText 'Fix the cause above, then resume the installation:' -ActionCommand $ResumeCommand -InstallId $InstallId) }
+        'warning' { return (New-PimInstallEvent -StepId $key -State warning -Message $detail -InstallId $InstallId) }
+        default   { return (New-PimInstallEvent -StepId $key -State $state -Message $detail -InstallId $InstallId) }
+    }
+}
+
+function Get-PimInstallRightsVerdict {
+    <#
+      PURE. Azure role names the signed-in user holds on the subscription (or above) + Entra directory role template ids.
+      Returns @{ azureOk; entraOk; message; action }. Azure: Owner, or Contributor + (User Access Administrator | Role
+      Based Access Control Administrator) -- without it nothing can be built (failed). Entra: Privileged Role
+      Administrator or Global Administrator -- without it the install still completes; the directory steps end as
+      warnings with the command for that person.
+    #>
+    param([string[]]$AzureRoles = @(), [string[]]$DirectoryRoleTemplateIds = @())
+    $r = @($AzureRoles | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    $azureOk = ($r -contains 'owner') -or (($r -contains 'contributor') -and (($r -contains 'user access administrator') -or ($r -contains 'role based access control administrator')))
+    $pra = 'e8611ab8-c189-46e8-94e1-60213ab1f814'; $ga = '62e90394-69f5-4237-9190-012177145e10'
+    $ids = @($DirectoryRoleTemplateIds | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    $entraOk = ($ids -contains $pra) -or ($ids -contains $ga)
+    $msg = @()
+    if (-not $azureOk) { $msg += 'you need Owner (or Contributor + User Access Administrator) on the subscription' }
+    if (-not $entraOk) { $msg += 'you are not an ACTIVE Privileged Role Administrator or Global Administrator -- the SQL admin group, the Graph permissions and the sign-in consent will end as hand-off actions (activate the role in PIM first if you have it)' }
+    return @{ azureOk = $azureOk; entraOk = $entraOk; message = ($msg -join '; ') }
+}
+
+function Read-PimInstallState {
+    <# The state file (state.json in -StatePath): @{ installId; completed[]; updatedUtc }. Missing or unreadable = empty. #>
+    param([Parameter(Mandatory)][string]$StatePath)
+    $f = Join-Path $StatePath 'state.json'
+    if (Test-Path -LiteralPath $f) { try { $s = Get-Content -Raw -LiteralPath $f | ConvertFrom-Json; return [pscustomobject]@{ installId = "$($s.installId)"; completed = @($s.completed | Where-Object { $_ }); updatedUtc = "$($s.updatedUtc)" } } catch { } }
+    return [pscustomobject]@{ installId = ''; completed = @(); updatedUtc = '' }
+}
+
+function Save-PimInstallState {
+    param([Parameter(Mandatory)][string]$StatePath, [Parameter(Mandatory)][string]$InstallId, [string[]]$Completed = @())
+    if (-not (Test-Path -LiteralPath $StatePath)) { New-Item -ItemType Directory -Force -Path $StatePath | Out-Null }
+    $doc = [ordered]@{ schema = 1; installId = $InstallId; completed = @($Completed | Select-Object -Unique); updatedUtc = [datetime]::UtcNow.ToString('o') }
+    Set-Content -LiteralPath (Join-Path $StatePath 'state.json') -Value ($doc | ConvertTo-Json -Depth 4) -Encoding utf8
+}

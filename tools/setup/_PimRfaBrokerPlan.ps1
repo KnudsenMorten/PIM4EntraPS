@@ -84,3 +84,22 @@ function Get-PimRfaBrokerDeployPlan {
     $steps.Add([pscustomobject]@{ id = 'settings'; what = "tell PIM where the broker is: Settings > RFA broker & API -> store $StorageAccountName + the portal URL"; sub = $SubscriptionId; rg = $ResourceGroup; args = @{ storeAccount = $StorageAccountName } })
     return [pscustomobject]@{ ok = $true; reason = ''; placement = $Placement; steps = $steps.ToArray() }
 }
+
+function New-PimRfaBrokerSettingsValue {
+    <# PURE. RfaSettings after a broker deploy: the store + the portal URL set, everything else KEPT (the API app ids, the salt). #>
+    param([AllowNull()][object]$Current, [Parameter(Mandatory)][string]$StoreAccount, [Parameter(Mandatory)][string]$PortalUrl)
+    $o = [ordered]@{}
+    if ($Current) { foreach ($p in $Current.PSObject.Properties) { $o[$p.Name] = $p.Value } }
+    $o['storeAccount'] = $StoreAccount; $o['portalUrl'] = "$PortalUrl".TrimEnd('/')
+    if (-not $o.Contains('apiAppIds')) { $o['apiAppIds'] = @() }
+    return [pscustomobject]$o
+}
+
+function New-PimRfaBrokerFeatureGatesValue {
+    <# PURE. FeatureGates after a broker deploy: rfa.portal + api.broker ON, every other gate KEPT as it was. #>
+    param([AllowNull()][object]$Current)
+    $g = [ordered]@{}
+    if ($Current -and $Current.gates) { foreach ($p in $Current.gates.PSObject.Properties) { $g[$p.Name] = [bool]$p.Value } }
+    foreach ($k in 'rfa.portal', 'api.broker') { $g[$k] = $true }
+    return [pscustomobject]@{ gates = [pscustomobject]$g }
+}

@@ -84,6 +84,17 @@ function ConvertTo-PimTokenExpiry {
   try { return ([datetimeoffset]"$ExpiresOn").UtcDateTime } catch {}
   return (Get-Date).ToUniversalTime().AddMinutes(50)
 }
+function Set-PimManagedIdentityHomeTenant {
+  # LIC anti-copy (2026-10-03): the tid claim of a MANAGED IDENTITY token = the tenant this environment really runs in.
+  # Recorded once per process in $global:PIM_ManagedIdentityTenantId; PIM-License.ps1 checks the licence against it, so a
+  # licence cannot be made valid elsewhere by editing PIM_TenantId. Never throws.
+  param([string]$Token)
+  try {
+    $seg = "$Token".Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($seg.Length % 4) { $seg += '=' }
+    $tid = "$(([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($seg)) | ConvertFrom-Json).tid)".Trim().ToLowerInvariant()
+    if ($tid -match '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$') { $global:PIM_ManagedIdentityTenantId = $tid }
+  } catch { }
+}
 function Get-PimManagedIdentityToken {
   param([Parameter(Mandatory)][string]$Audience)
   $res = [uri]::EscapeDataString($Audience)
@@ -106,20 +117,20 @@ function Get-PimManagedIdentityToken {
     if ($miCid) { $u += "&client_id=$([uri]::EscapeDataString($miCid))" }
     $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER } -TimeoutSec 60
     if ("$($r.access_token)") { try { [System.Console]::Out.WriteLine("  [mi] token via IDENTITY_ENDPOINT (len $($r.access_token.Length))") } catch {} }  # Console.Out (not Write-Host): headless-safe from any scope (App Service has no console buffer; Write-Host throws there even from module scope)
-    return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
+    Set-PimManagedIdentityHomeTenant -Token "$($r.access_token)"; return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
   }
   # App Service (older / some Linux SKUs): MSI_ENDPOINT + MSI_SECRET (api 2017-09-01, header 'Secret')
   if ($env:MSI_ENDPOINT -and $env:MSI_SECRET) {
     $u = "$($env:MSI_ENDPOINT)?resource=$res&api-version=2017-09-01"
     $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'Secret' = $env:MSI_SECRET } -TimeoutSec 60
     if ("$($r.access_token)") { try { [System.Console]::Out.WriteLine("  [mi] token via MSI_ENDPOINT (len $($r.access_token.Length))") } catch {} }  # Console.Out: headless-safe from any scope
-    return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
+    Set-PimManagedIdentityHomeTenant -Token "$($r.access_token)"; return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
   }
   # IMDS (Azure VM)
   $u = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=$res"
   if ($global:PIM_ManagedIdentityClientId) { $u += "&client_id=$($global:PIM_ManagedIdentityClientId)" }
   $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ Metadata = 'true' } -TimeoutSec 5
-  return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
+  Set-PimManagedIdentityHomeTenant -Token "$($r.access_token)"; return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
 }
 
 # ---- SPN client secret ----------------------------------------------------

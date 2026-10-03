@@ -224,7 +224,7 @@ if ($UseSignedInAccount) {
 } else {
 if (-not "$AdminAppId".Trim()) { throw 'give -AdminAppId with -AdminCertPem (or -AdminSecret), or -UseSignedInAccount.' }
 # isolated az profile so the shared context on this host is never disturbed
-$cfg = Join-Path $env:TEMP "azcfg-$Token"
+$cfg = Join-Path ([IO.Path]::GetTempPath()) "azcfg-$Token"
 New-Item -ItemType Directory -Force $cfg | Out-Null
 $env:AZURE_CONFIG_DIR = $cfg
 # Drop the cached token before signing in -- this directory persists between runs, so a permission

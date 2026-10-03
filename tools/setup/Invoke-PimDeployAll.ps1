@@ -72,6 +72,12 @@
     & $StepRunner $stepKey $context -> returns @{ ok=$bool; ran=$bool; detail='' }. Lets the
     orchestration be exercised end-to-end OFFLINE. Omit it for real deploys.
 
+.PARAMETER OnStep
+    (guided install, §95.2) a scriptblock called with ONE object per step event:
+    @{ key; name; state = started | ok | warning | failed | skipped; detail }. 'warning' = the step succeeded but
+    reported DEGRADED / WARNING (e.g. mail sender skipped). Called for every planned step, including the skipped
+    ones. A failing reporter never fails the deploy. Install-PimManager.ps1 maps these to its customer events.
+
 .EXAMPLE
     .\Invoke-PimDeployAll.ps1 -Source sync-automateit -TenantId <tid> -SubscriptionId <sub> `
         -ResourceGroup rg-pim -VnetName vnet -VnetResourceGroup rg-net -AcrName myacr `
@@ -445,7 +451,10 @@ param(
     [ValidatePattern('^$|^[a-z0-9][a-z0-9-]{0,19}$')][string]$EnvLabel = '',
 
     # --- TEST seam: inject the per-step runner so the whole flow is offline-testable ---
-    [scriptblock]$StepRunner
+    [scriptblock]$StepRunner,
+
+    # --- guided install (§95.2): a per-step event callback, see .PARAMETER OnStep ---
+    [scriptblock]$OnStep
 )
 $ErrorActionPreference = 'Stop'
 
@@ -2673,13 +2682,23 @@ $ranKeys  = New-Object System.Collections.Generic.List[string]
 $verifyResult = $null
 $halted = $false
 
+# §95.2 guided install: one event per step state. A reporter that throws is logged and ignored -- reporting must
+# never be the reason a deploy fails.
+function Send-PimDeployStepEvent([object]$Step, [string]$State, [string]$Detail) {
+    if (-not $OnStep) { return }
+    try { & $OnStep ([pscustomobject]@{ key = "$($Step.key)"; name = "$($Step.name)"; state = $State; detail = "$Detail" }) | Out-Null }
+    catch { Write-Verbose "OnStep reporter failed: $($_.Exception.Message)" }
+}
+
 foreach ($s in $plan.steps) {
     if (-not $s.do) {
         Step "$($s.key): $($s.action) -- $($s.reason)"
         $outcomes.Add([pscustomobject]@{ key=$s.key; ran=$false; ok=$true }) | Out-Null
+        Send-PimDeployStepEvent $s 'skipped' "$($s.action) -- $($s.reason)"
         continue
     }
     Step "$($s.key): RUN -- $($s.name)"
+    Send-PimDeployStepEvent $s 'started' ''
     $res = & $runner $s.key $ctx
     if (-not $res) { $res = @{ ok=$false; ran=$true; detail='runner returned nothing' } }
     # A runner may return a hashtable, a PSCustomObject, or (defensively) a scalar.
@@ -2726,6 +2745,7 @@ foreach ($s in $plan.steps) {
     $ok  = [bool]$okRaw
     $ran = if ($null -ne $ranRaw) { [bool]$ranRaw } else { $true }
     Info "  -> ok=$ok ran=$ran $detail"
+    Send-PimDeployStepEvent $s $(if (-not $ok) { 'failed' } elseif ("$detail" -match '^(?i)\s*(DEGRADED|WARNING)\b') { 'warning' } elseif (-not $ran) { 'skipped' } else { 'ok' }) "$detail"
     $outcomes.Add([pscustomobject]@{ key=$s.key; ran=$ran; ok=$ok }) | Out-Null
     if ($ran) { $ranKeys.Add($s.key) | Out-Null }
     if ($s.key -eq 'verify') { $verifyResult = $res }

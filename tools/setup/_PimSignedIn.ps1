@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     71.33 -- the SIGNED-IN (interactive) identity for the one-shot MSP build and the setup steps it runs.
@@ -89,11 +89,23 @@ function Test-PimSignedInToken {
     return @{ ok = $true; reason = ''; objectId = "$($c.oid)".Trim().ToLowerInvariant(); userName = $upn; tenantId = $tid }
 }
 
+function Test-PimCloudShell {
+    # PURE given -Environment. Azure Cloud Shell sets AZUREPS_HOST_ENVIRONMENT=cloud-shell/<ver> and ACC_CLOUD; there the
+    # MSI_ENDPOINT / IDENTITY_ENDPOINT serve the SIGNED-IN USER's token (Cloud Shell's own token broker), not a machine
+    # identity -- so they are no conflict there (§95.2 Cloud Shell blocker 2, guided install 2026-10-03).
+    param([hashtable]$Environment)
+    $get = { param($n) if ($Environment) { "$($Environment[$n])" } else { "$([Environment]::GetEnvironmentVariable($n))" } }
+    return ((& $get 'AZUREPS_HOST_ENVIRONMENT') -match '^(?i)cloud-shell') -or [bool]"$(& $get 'ACC_CLOUD')".Trim()
+}
+
 function Get-PimSignedInEnvironmentConflicts {
     # PURE given -Environment (a hashtable name -> value); by default reads this process. The names that are set.
+    # In Azure Cloud Shell MSI_ENDPOINT / IDENTITY_ENDPOINT are the user's own token broker and are not counted.
     param([hashtable]$Environment)
+    $cloudShell = Test-PimCloudShell -Environment $Environment
     $out = @()
     foreach ($n in $script:PimSignedInConflictVars) {
+        if ($cloudShell -and $n -in 'MSI_ENDPOINT', 'IDENTITY_ENDPOINT') { continue }
         $v = if ($Environment) { $Environment[$n] } else { [Environment]::GetEnvironmentVariable($n) }
         if ("$v".Trim()) { $out += $n }
     }
@@ -182,14 +194,29 @@ function Invoke-PimSignedInSqlAdminMembership {
       group, so membership would grant nothing -- the caller must refuse with that reason.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$ResourceGroup,
-          [Parameter(Mandatory)][string]$SqlServerName, [Parameter(Mandatory)][string]$UserObjectId, [string]$GroupName = 'grp-pim-sql-admins')
+          [Parameter(Mandatory)][string]$SqlServerName, [Parameter(Mandatory)][string]$UserObjectId, [string]$GroupName = 'grp-pim-sql-admins',
+          # test seam: @{ Graph; Arm; TenantId } instead of the signed-in az context
+          [object]$Invokers)
     if (-not (Get-Command Invoke-PimSqlAdminGroupStep -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '_PimSqlAdminGroup.ps1') }
-    $inv = New-PimSqlAdminGroupInvokers -SubscriptionId $SubscriptionId -TenantId $TenantId
+    $inv = if ($Invokers) { $Invokers } else { New-PimSqlAdminGroupInvokers -SubscriptionId $SubscriptionId -TenantId $TenantId }
     $srv = ("$SqlServerName".Trim() -split '\.')[0]
     $sqlRg = $ResourceGroup
     if (Get-Command Resolve-PimSqlServerFromFqdn -ErrorAction SilentlyContinue) {
         try { $res = Resolve-PimSqlServerFromFqdn -Arm $inv.Arm -SubscriptionId $SubscriptionId -Server $srv; if ($res) { $sqlRg = $res.resourceGroup; $srv = $res.name } } catch { }
     }
+    # §95.2 Cloud Shell blocker 5 (guided install): an installer WITHOUT Privileged Role Administrator cannot create the
+    # role-assignable SQL admin group, so the prerequisites leave the server's Entra admin = the signed-in user. That user
+    # already holds every SQL right; the members-only step would only fail on "group does not exist". Say so, hand the
+    # group to a Privileged Role Administrator, and let the deploy continue.
+    try {
+        $list = & $inv.Arm -Method GET -Path "/subscriptions/$SubscriptionId/resourceGroups/$sqlRg/providers/Microsoft.Sql/servers/$srv/administrators?api-version=$($script:PimSqlApi)"
+        $cur = @(@($list.value) | Where-Object { $_ }) | Select-Object -First 1
+        if ($cur -and "$($cur.properties.sid)".Trim() -ieq "$UserObjectId".Trim()) {
+            $action = ".\Initialize-PimSqlAdminGroup.ps1 -SubscriptionId $SubscriptionId -TenantId $TenantId -ResourceGroup $sqlRg -SqlServerName $srv -GroupName $GroupName"
+            Write-Host "    the signed-in user IS the Entra admin of $srv -- SQL is reachable. The SQL admin group '$GroupName' is not the admin yet; a Privileged Role Administrator converges it with: $action" -ForegroundColor Yellow
+            return @{ ok = $true; blocked = $false; added = $false; direct = $true; reason = ''; action = $action }
+        }
+    } catch { Write-Verbose "reading the Entra admin of $srv failed: $($_.Exception.Message) -- falling back to the group membership" }
     $r = Invoke-PimSqlAdminGroupStep -Graph $inv.Graph -Arm $inv.Arm -TenantId $inv.TenantId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
             -SqlResourceGroup $sqlRg -SqlServerName $srv -GroupName $GroupName -UpdateJobName '' -NoDiscovery -Mode membersOnly `
             -ExtraMembers @([pscustomobject]@{ objectId = "$UserObjectId".Trim(); label = 'the signed-in administrator' })

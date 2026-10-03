@@ -128,7 +128,7 @@ if ($buildLayout -eq 'flat') {
 # registry so concurrent per-environment builds cannot trample each other's profile.
 if ($AdminSecret -and $AdminCertPem) { throw 'pass EITHER -AdminSecret OR -AdminCertPem, not both.' }
 if ($TenantId -and $AdminAppId -and ($AdminSecret -or $AdminCertPem)) {
-    $cfgDir = Join-Path $env:TEMP ("azcfg-build-" + $(if ($AcrName) { $AcrName } else { 'pim' }))
+    $cfgDir = Join-Path ([IO.Path]::GetTempPath()) ("azcfg-build-" + $(if ($AcrName) { $AcrName } else { 'pim' }))
     New-Item -ItemType Directory -Force $cfgDir | Out-Null
     $env:AZURE_CONFIG_DIR = $cfgDir
     # Drop the cached token before signing in -- this directory persists between runs, so a
@@ -249,7 +249,7 @@ if ($buildSource -eq 'sync-automateit') {
       if ($buildLayout -eq 'flat') {
         # BUG-154: stage SOLUTIONS/PIM4EntraPS from the public clone, then build exactly as the
         # monorepo does. Short root for the same MAX_PATH reason as the git-archive branch below.
-        $ctxRoot = Join-Path $env:SystemDrive 'pimbld'
+        $ctxRoot = Join-Path $(if ($env:SystemDrive) { $env:SystemDrive } else { [IO.Path]::GetTempPath() }) 'pimbld'
         New-Item -ItemType Directory -Force $ctxRoot | Out-Null
         $flatCtx = Join-Path $ctxRoot ("f" + (Get-Random -Maximum 99999))
         try {
@@ -314,7 +314,7 @@ if ($buildSource -eq 'sync-automateit') {
             # (.dockerignore whitelists SOLUTIONS/PIM4EntraPS) -- this also keeps the
             # long-named sample files of OTHER solutions (e.g. SecurityInsight) entirely
             # out of the context, so neither the tar walk nor extraction can choke.
-            $ctxRoot = Join-Path $env:SystemDrive 'pimbld'
+            $ctxRoot = Join-Path $(if ($env:SystemDrive) { $env:SystemDrive } else { [IO.Path]::GetTempPath() }) 'pimbld'
             New-Item -ItemType Directory -Force $ctxRoot | Out-Null
             $tmpCtx = Join-Path $ctxRoot ("c" + (Get-Random -Maximum 99999))
             $tarPath = "$tmpCtx.tar"
@@ -442,7 +442,7 @@ if ($engine) {
         # BUG-154: a flat (public) clone builds from a staged SOLUTIONS/PIM4EntraPS context.
         $localCtx = $repoRoot; $localTmp = $null
         if ($buildLayout -eq 'flat') {
-            $localTmp = Join-Path (Join-Path $env:SystemDrive 'pimbld') ("l" + (Get-Random -Maximum 99999))
+            $localTmp = Join-Path (Join-Path $(if ($env:SystemDrive) { $env:SystemDrive } else { [IO.Path]::GetTempPath() }) 'pimbld') ("l" + (Get-Random -Maximum 99999))
             $localCtx = (New-PimFlatBuildContext -SolutionRoot $solRoot -OutDir $localTmp).Path
         }
         Push-Location $localCtx

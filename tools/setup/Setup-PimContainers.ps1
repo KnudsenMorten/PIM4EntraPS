@@ -387,7 +387,7 @@ if ($WhatIfPreference) { Note 'WhatIf — plan only, nothing created.'; }
 # New-PimHostingPrerequisites / Build-PimManagerImage, so the three sign-ins cannot disagree.
 if ($AdminSecret -and $AdminCertPem) { throw 'pass EITHER -AdminSecret OR -AdminCertPem, not both.' }
 if ($AdminAppId -and ($AdminSecret -or $AdminCertPem)) {
-    $cfgDir = Join-Path $env:TEMP "azcfg-containers-$AcrName"
+    $cfgDir = Join-Path ([IO.Path]::GetTempPath()) "azcfg-containers-$AcrName"
     New-Item -ItemType Directory -Force $cfgDir | Out-Null
     $env:AZURE_CONFIG_DIR = $cfgDir
     # 🔴 DROP THE CACHED TOKEN BEFORE SIGNING IN. This directory PERSISTS between runs, and az
@@ -1190,7 +1190,7 @@ $envYaml
             # The app names are identical in every environment ('ca-pim-manager'), so a bare
             # "pim-<name>.yaml" is the SAME PATH for every tenant, and the estate orchestrator
             # deploys 6 environments CONCURRENTLY by default.
-            $tmp = Join-Path $env:TEMP "pim-$($w.name)-$ResourceGroup-$PID.yaml"; Set-Content -LiteralPath $tmp -Value $y -Encoding utf8
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) "pim-$($w.name)-$ResourceGroup-$PID.yaml"; Set-Content -LiteralPath $tmp -Value $y -Encoding utf8
             az containerapp create @subArgs -g $ResourceGroup -n $w.name --yaml $tmp -o none
         }
     } else {
@@ -1352,7 +1352,7 @@ $envYamlJob
         # DIFFERENT subscriptions, so the foreign environmentId was unresolvable. Two environments
         # in ONE subscription would have SUCCEEDED and written one tenant's job definition -- image,
         # identity, SQL server, engine credential -- into the other tenant's resource group.
-        $jobTmp = Join-Path $env:TEMP "pim-$TickJobName-$ResourceGroup-$PID.yaml"
+        $jobTmp = Join-Path ([IO.Path]::GetTempPath()) "pim-$TickJobName-$ResourceGroup-$PID.yaml"
         Set-Content -LiteralPath $jobTmp -Value $jobYaml -Encoding utf8
         # 🪤 CAPTURE az's OWN ERROR. This used to throw "failed (exit 1)" and nothing else, with
         # `-o none` swallowing the rest -- so the yaml-collision above surfaced as a bare exit code
