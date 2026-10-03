@@ -50,6 +50,11 @@ $script:AitLicensePublicCertB64 = 'MIIFFzCCAv+gAwIBAgIQNY8l3/KZOoxF7K1nXIXwazANB
 
 $script:PimLicensePublicCertB64 = 'MIID+zCCAmOgAwIBAgIQZi8bo4EYqJ9PSvrXsI3orTANBgkqhkiG9w0BAQsFADAgMR4wHAYDVQQDDBVQSU00RW50cmFQUy1MaWNlbnNpbmcwHhcNMjYwNjEyMTY1MzM4WhcNNDEwNjEyMTcwMzM0WjAgMR4wHAYDVQQDDBVQSU00RW50cmFQUy1MaWNlbnNpbmcwggGiMA0GCSqGSIb3DQEBAQUAA4IBjwAwggGKAoIBgQD+YFgQSxRJNuwpv/lc9z6ClbFgEc+9/hpM/TXPg7f3Q40TQfyWf54EgaKzC8Y04JkdS2lNv69NWZ5MJgwyHkwTuyngDx/giBF0aVBbnbW9dLixSY0YaN435uylMgrL9irYB79c+rN+NAWyRZTzFdw3LFLR7zhl4Wor3OexsI7tYHgH/WXegzmbl4R8amVHR2QsAr3ZHBg5WEW3C3DeomDeAuVIny4xMZp/nq6i1VXTqrBx76Cxdms6RJS0cwtystrFQFdCB4e06jqdttuj5m8CCvQbUILEzAhNnzHnFtMXJC/wWWu2vfOqqY/Wy7ORjZCWaI/a/c7bfXWpdiI5H3E4pcZCezSH7lg1VdvSGrq/bbQxOUO4a5FQ5JI5fXZuzQksjm7t0u5AAmdLpvtac86vMQmM8LCTsUoNs9GAhVvNmV+pJtReWyubfqLgzaRmMP4qMp7a6DoR3RKeuYjmSzhjFn5S4lcDmAz35Qc/LO0sEPDr3LL30fQxhX8uSqlFAEkCAwEAAaMxMC8wDgYDVR0PAQH/BAQDAgeAMB0GA1UdDgQWBBS2n3cmD8taKDsdy2debDNeQkv7qzANBgkqhkiG9w0BAQsFAAOCAYEArrFYyp4BQzH803d4htpcqtWbkTgg10tFrdQndJ35tv+ZDGcq7AIHohI7egzH4pDPgbXOGf7GuisIzj8MEJkH63+xqB4wHHBPn+pl9YGYk02XiWY9H0blP+TIlYjderzr/XH/mLn67z2VAm9dGAw1X2xw1zMtc36aPVU7i7bRIZwfxIA5Y1sVJ9bpMRkXDawMhegA39a0inLVriBWcvfku3zz84MtHtB4WLfwUI97QLvDObHPdkQ68w+0+0tmIz33z5Fgu9dtIUf6RROkFhjoc2rC+GcI023SLeDPjHrUHg1RjUeoPJkPQiX8N8lSnX335dJddiHIDAn43OhQn13lITovtz5EHiaJJSXr/DwsaZzyv6UC067KpFeKLc4heYiM0A0Orj7UH/B5f/qEu8MPsl+XdBGl7v0lecn2DbG2bXlOxEucP8JNzIeOnLg609XaneGRdu93dFLUGSsNtUMnrhrSWGjqAwXteWhhGy+aJ/WfUdfUGJ+rf/D9hVOBIpsk'
 
+# LIC-4 (operator 2026-10-03): the Invardia licence signer, CN=Invardia-Licensing (BA65E6AA62128EBE89A743722E404980F6D2878D).
+# Trusted ALONGSIDE the two signers above, never instead: Invardia switches to it only after this release is rolled out.
+# Byte-identical to sync/_AitLicense.ps1 $script:AitLicenseInvardiaCertB64 (tests/Test-PimLicensing.ps1 pins it).
+$script:InvardiaLicensePublicCertB64 = 'MIIFQDCCAyigAwIBAgIQXXs1IY0ZQE2MwtugYutXwDANBgkqhkiG9w0BAQsFADAdMRswGQYDVQQDExJJbnZhcmRpYS1MaWNlbnNpbmcwHhcNMjYxMDAzMTY1NDMxWhcNMzYxMDAzMTcwNDMxWjAdMRswGQYDVQQDExJJbnZhcmRpYS1MaWNlbnNpbmcwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQCn9X21WYLer9r3ojq9lCP3eGV5YK8UMHoyyGT/q8carwQK+ztBRweKAgHyg8rr67utZ1zZBDRei64T/63nXGZpC666efzNZjIU+Og7vtO0bTNjQm/yVD/Q4KFZachYbE5orU+99HQcgRrcwnmmltyazyun2MV2CTk2nUDeMX5IIFD/1yIT8SLNFa6b6Gy4Ms/TIlc4u3lEH3zjbTSF+phSrbv7J6ytz5Eq1ahRkKHWcdBoF9GJo2ynWP0vTGHWvvjNdeVpXP1rkGnLt9MAQj2Us/2XiTgZzf26QLNiXX9YeJeUA9IVdPWczJav+YYkcICyG4ynwhPCudI6S2iDeu8jyL54gfVT871/+RFebzKHq9teY2vB0aGsbaW9VOmV5dDQ2mVfQLFTkNd1ByeZKv9tR0vPfaiZCza+DedApF2LfoAa7Y34pb9WHGRJFAPVmG2WMSsTY90Y0VBYrktF4g4q712W2ZdQc+QIxtvP5nsz6bk1QBvJ1Hcsr/euiysxmkFxcl3NH7WM1EKzdzUaYDJpysoE9e0jkjdJpb9bNNmSE7V9IMTk7r/XOiYJ+8qOALTgwUIEyOLi/hfOihJDRn31aJ6aPvzCEYikueJV5oALrDxquiXbPi8z10aMuXLL4hfi6B7U0qo2kOTPQ9Qh/cJFVkV9pEXjtY+NwwI9EtxgaQIDAQABo3wwejAOBgNVHQ8BAf8EBAMCB4AwCQYDVR0TBAIwADAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwHwYDVR0jBBgwFoAUuZzWkYh3hkE0oJH42LneYVKXIzowHQYDVR0OBBYEFLmc1pGId4ZBNKCR+Ni53mFSlyM6MA0GCSqGSIb3DQEBCwUAA4ICAQCluVZnotzEyS5ux+4hMuz9mOfpSJCNg5nkS8XxIHySiE2AEjVT4ZFEyykZUFoROv5clLBkO5icvDDRBitkeKHvioZruRPtVGy0fs0VxJ4VMcOU/i5cVdJXBQeyUFE8o//4+7FXZp10ToVNv/drjdO7adcNHRVjsddm2mXPNyHmE07ErV6eInPj+r0/1dogPBW1knF+T53RTwT2O0Ppe5qK0QEdBfo5sf4nvjg7ONNXYlW38SzXGLsXy6TZphRWqxLq7u31HAwujQGy9syO+TPIzusH1WHkCsvjDDRXNI8iYhKcS2wq/P/O6O4Ebt/PFN0hxyzyuYx4kreXKKhqrfsEMDxzMUQNnUEjFgU4/4atLVJpBvoDmb/MuQDIzlhxz8obAJi5BuxyjyemR9jg6XMIE2IAhe1v+MN0ZY58tbZR3t5rF30tp541NRaJfn4DBpqNmAIFyDQMdM2FogkFoOV+Mo0IBmGzV/jyv/2z+sre1P5MncLP2qZhfFmu595gWnNoOsMdUZmEWMkbISMGvGzfpPRF3IBan+fymCZSsKNB00E3W50Sh/t2sopEYc3eSwpu6bhvPUgB2ZKU6KN49Al4Pf41uldHVY0aVVp+kpLmRntDFzkTNXUG4OWOwF5gHuGY8jIrwDR7pCPSNzDWrUf857O6DyWEsHXERWg5OPLNUg=='
+
 # Editions: COMMUNITY (free) and PRO (licensed). One engine/manager/activator; Pro
 # unlocks the advanced capabilities below. (The free tier was historically called
 # 'Core'; it is surfaced as 'Community' now. A licence SKU of 'Core' is NOT Pro --
@@ -234,11 +239,11 @@ Function Get-PimLicense {
     }
     if (-not $useOverride) { $script:PimLicenseCacheUtc = [datetime]::UtcNow }
 
-    # LIC-1 -- accept EITHER signer. AutomateIT first (the going-forward framework key), then the
+    # LIC-1 / LIC-4 -- accept ANY trusted signer (AutomateIT, the legacy PIM key, Invardia). AutomateIT first (the going-forward framework key), then the
     # legacy PIM key so anything already issued keeps verifying. An explicit -PublicCertB64 still
     # wins, which is what the negative tests rely on.
     $trustedCerts = if ($PublicCertB64) { @($PublicCertB64) }
-                    else { @($script:AitLicensePublicCertB64, $script:PimLicensePublicCertB64) }
+                    else { @($script:AitLicensePublicCertB64, $script:PimLicensePublicCertB64, $script:InvardiaLicensePublicCertB64) }
 
     $result = [pscustomobject]@{
         Status     = 'Missing'      # Missing | Invalid | NotYetValid | Expired | Grace | Valid

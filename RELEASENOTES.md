@@ -14,6 +14,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.487 — Licences from the new Invardia signer are accepted
+
+- **Licensing: a second trusted signer.** PIM now accepts licences signed by the Invardia licensing key as well as by
+  the existing key. Every licence already issued keeps working unchanged. New licences will move to the Invardia key
+  after this release is rolled out; the licence file format does not change.
+- **Upgrade note:** install this version before you install a licence file issued by the Invardia signer. An older
+  version does not recognise that signer and reports the licence as invalid.
+
 ## v2.4.486 — The access request API, proven end to end
 
 - **Delivered: let a ticketing system switch an admin account on for a set time (Pro).** The access request API is now
