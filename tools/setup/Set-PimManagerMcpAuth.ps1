@@ -111,6 +111,28 @@ function Invoke-AzJsonRetry([string[]]$A, [int]$Tries = 8) {
     }
 }
 
+function Resolve-PimManagerImageVersion {
+    <#
+      PURE. The deploy pins the Manager by DIGEST (registry/pim-manager@sha256:...), which carries no version, so the
+      2.4.483+ gate on excludedPaths deferred forever (live, r1-pro 2026-10-03). Given the registry's tags for the repo
+      (@{ name; digest }), return 'registry/repo:<version>' for the highest version tag pointing at that digest; an image
+      already tagged is returned as is; no matching version tag = the input (the gate then defers, fail closed).
+    #>
+    param([string]$Image, [object[]]$Tags = @())
+    if ("$Image" -notmatch '^(?<repo>[^@]+)@(?<dig>sha256:[0-9a-f]+)$') { return "$Image" }
+    $repo = $Matches['repo']; $dig = $Matches['dig']
+    $vers = @(@($Tags) | Where-Object { "$($_.digest)" -eq $dig -and "$($_.name)" -match '^v?\d+\.\d+\.\d+$' } |
+              ForEach-Object { [version]("$($_.name)" -replace '^v', '') } | Sort-Object -Descending)
+    if (-not $vers.Count) { return "$Image" }
+    return "${repo}:$($vers[0])"
+}
+function Get-PimManagerImageForGate([string]$Image) {
+    # the registry's tags for a digest-pinned image (az acr: --subscription per call, never az account set)
+    if ("$Image" -notmatch '^(?<reg>[^/.]+)\.azurecr\.io/(?<repo>[^@:]+)@sha256:') { return "$Image" }
+    $tags = @(try { Invoke-AzJson @('acr', 'repository', 'show-tags', '--subscription', $SubscriptionId, '-n', $Matches['reg'], '--repository', $Matches['repo'], '--detail') } catch { @() })
+    return (Resolve-PimManagerImageVersion -Image $Image -Tags @($tags | ForEach-Object { [pscustomobject]@{ name = "$($_.name)"; digest = "$($_.digest)" } }))
+}
+
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 $acct = Invoke-AzJson @('account', 'show')
@@ -121,7 +143,7 @@ if (-not $appId) { throw "$ManagerApp has no Easy Auth application -- run Set-Pi
 $app = Invoke-AzJson @('ad', 'app', 'show', '--id', $appId)   # never a Graph URL with parentheses through 'az rest': az is az.cmd and cmd.exe breaks the argument at them
 $ca = Invoke-AzJson @('containerapp', 'show', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $ManagerApp)
 $c0 = @($ca.properties.template.containers)[0]
-$plan = Get-PimManagerMcpAuthPlan -App $app -Auth $auth -NewScopeId ([guid]::NewGuid().ToString()) -EnvVars @($c0.env) -ManagerImage "$($c0.image)"
+$plan = Get-PimManagerMcpAuthPlan -App $app -Auth $auth -NewScopeId ([guid]::NewGuid().ToString()) -EnvVars @($c0.env) -ManagerImage (Get-PimManagerImageForGate "$($c0.image)")
 Write-Host "==> $ManagerApp / application $appId : $($plan.reason)" -ForegroundColor Cyan
 if (-not $plan.ok) { throw $plan.reason }
 if (-not $plan.steps.Count) { return $plan }
@@ -151,7 +173,7 @@ $app2 = Invoke-AzJson @('ad', 'app', 'show', '--id', $appId)
 $auth2 = Invoke-AzJson @('containerapp', 'auth', 'show', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $ManagerApp)
 $ca2 = Invoke-AzJson @('containerapp', 'show', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $ManagerApp)
 $c2 = @($ca2.properties.template.containers)[0]
-$after = Get-PimManagerMcpAuthPlan -App $app2 -Auth $auth2 -NewScopeId ([guid]::NewGuid().ToString()) -EnvVars @($c2.env) -ManagerImage "$($c2.image)"
+$after = Get-PimManagerMcpAuthPlan -App $app2 -Auth $auth2 -NewScopeId ([guid]::NewGuid().ToString()) -EnvVars @($c2.env) -ManagerImage (Get-PimManagerImageForGate "$($c2.image)")
 if ($after.steps.Count) { throw "read-back: still $($after.reason)" }
 Write-Host "==> done. Scope api://$appId/mcp.access; the person's Manager role decides what the MCP tools may do." -ForegroundColor Green
 return $after

@@ -566,6 +566,10 @@ if ($SkipSql) {
             az sql server create @subArgs -g $rg -n $sqlSrv -l $Location `
                 --enable-ad-only-auth --external-admin-principal-type $(if ($signedIn) { 'User' } else { 'Application' }) `
                 --external-admin-name $spName --external-admin-sid $spOid --only-show-errors -o none
+            # §94 (live 2026-10-03): 'West Europe is not accepting creation of new SQL servers' for a sponsorship
+            # subscription -- the run went on and failed at the admin GROUP, which then took the blame. Stop HERE.
+            if ($LASTEXITCODE) { throw ("could NOT create the SQL server '$sqlSrv' in '$Location' (az exit $LASTEXITCODE -- the az error is printed above; " +
+                                        "'RegionDoesNotAllowProvisioning' means the region refuses new SQL servers for this subscription: deploy with another -Location).") }
         }
         # The deploy identity stays able to administer the database through the group -- it is what
         # creates the contained users and applies the schema from this host on public SQL.
@@ -595,6 +599,8 @@ if ($SkipSql) {
         az sql server create @subArgs -g $rg -n $sqlSrv -l $Location `
             --enable-ad-only-auth --external-admin-principal-type Application `
             --external-admin-name $sqlUami --external-admin-sid $sqlUamiOid --only-show-errors -o none
+        if ($LASTEXITCODE) { throw ("could NOT create the SQL server '$sqlSrv' in '$Location' (az exit $LASTEXITCODE -- the az error is printed above; " +
+                                    "'RegionDoesNotAllowProvisioning' means the region refuses new SQL servers for this subscription: deploy with another -Location).") }
     }
     # The SQL identity MUST be a member: the in-cloud bootstrap job administers the database as it.
     Invoke-PimPrereqSqlAdminGroup -ExtraMembers @(

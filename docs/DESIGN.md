@@ -8108,7 +8108,6 @@ any stored setting or deploy baseline; *switches itself on* means it is on while
 | Discovery sweep (`discovery.sweep`) | **Pro** | single | off | — |
 | App-role / Azure DevOps / Dataverse / Business Central / Power Platform (`connectors.apps`) | **Pro** | single | off | yes — `PIM-Assignments-AppRole` / `-Workloads` rows (still needs the licence) |
 | Power BI (`connectors.powerbi`) | **Pro** | single | off | — |
-| Exchange Online (`connectors.exo`) | **Pro** | single | off | — |
 | MSP downlink / fan-out, managing tenant / managed (`msp.downlink`) | **Pro** | multi | off | — |
 
 A Pro capability runs only with a valid (or in-grace) Pro licence bound to the tenant; without one it is inert and

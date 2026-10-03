@@ -155,8 +155,8 @@ actual **targets** (Entra roles, Azure scopes, workloads). The payoff is huge:
 The engine connects **directly to Microsoft over secure web calls, using a
 certificate to sign in** — never a shared secret, never a copy-pasted password,
 never a fragile interactive prompt. There are **no PowerShell Graph or Azure
-modules** to install, version-match or keep in lock-step, so it runs cleanly on
-a plain VM or a lightweight container with nothing pre-installed.
+modules** to install, version-match or keep in lock-step, so it runs cleanly in a
+lightweight container with nothing pre-installed (v2 is hosted on Azure Container Apps).
 
 ### And two more standouts
 
@@ -684,8 +684,9 @@ The Manager turns "author a group by hand" into guided flows:
   always **Eligible** (Entra refuses an Active membership there); an existing Active
   nesting of that kind is flagged with a one-click "Set to Eligible" fix.
 - **Ready-made template packs** for Microsoft Defender XDR, Microsoft Sentinel,
-  Intune, Exchange Online, Azure RBAC and common Entra ID roles — named and tiered
-  correctly out of the box.
+  Intune, Azure RBAC and common Entra ID roles — named and tiered correctly out of the box.
+  (An Exchange Online pack ships its permission **groups** only: the product does not yet bind them to
+  Exchange's own role groups.)
 - **Change existing access** links, moves and removes people in groups and groups
   in permission groups, and the grid editors cover every record for power users.
   All of these only **prepare** changes — the engine remains the only thing that
@@ -1107,14 +1108,16 @@ On top of the free edition, a Pro licence adds:
 
 - **Coverage & gaps and discovery** — what is and is not delegated through PIM across every workload, and the
   scheduled jobs that find new roles, groups and resources;
-- the **other workload connectors** — Power BI, Exchange Online, enterprise-app roles, Azure DevOps, Dataverse,
+- the **other workload connectors** — Power BI, enterprise-app roles, Azure DevOps, Dataverse,
   Business Central and Power Platform;
 - **revoking current delegations** from the portal (the list itself is free);
 - **access reviews** — campaigns with decisions recorded and enforced;
 - a **second approver** for sensitive changes (separation of duties);
 - **delegated administration** — portal users limited to a tier, level, service or scope;
 - the **tier-impact report** — everyone who can reach tier 0, including through nested groups;
-- the **evidence export** — who may hold what, who held it, and who approved.
+- the **evidence export** — who may hold what, who held it, and who approved;
+- **PIM for on-premises Active Directory** — admin accounts in on-premises AD, PIM groups mirrored to AD groups and
+  just-in-time AD membership for activated PIM groups, applied by a small hybrid worker.
 
 > ⚠️ Without a licence, the second approver is switched off too — sensitive changes then need one administrator,
 > not two. Install the licence before you rely on it.
@@ -1182,7 +1185,7 @@ What an environment does before anyone changes a setting (the full table is in
   app-role / Azure DevOps / Dataverse / Business Central / Power Platform connectors (Pro).
 - **Pro, on when licensed:** Coverage & gaps, revoke, access review campaigns, delegated administration, the
   tier-impact report and the evidence export. **Pro, off until switched on:** the second approver, discovery,
-  Power BI, Exchange Online, and MSP.
+  Power BI and MSP.
 - **Policy templates:** `Groups_Standard`, `EntraIDRoles_Standard` and `AzureRoles_Standard` are the defaults per kind.
 - **Alert mail (since 2.4.453):** the drift mail goes out **monthly** (a dropdown on the Drift page changes it); the
   same drift or job failure is mailed once and then at most daily; failure and drift alerts wait 45 minutes after a
