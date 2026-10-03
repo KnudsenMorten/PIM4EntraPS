@@ -8044,8 +8044,13 @@ trail. It records the resolved role, the role source, and `local`/`hosted` mode.
 all audit writes it is best-effort and never blocks serving the page.
 
 **MCP server (Pro).** The Manager answers the Model Context Protocol on `POST /mcp` (streamable HTTP, JSON
-responses, JSON-RPC 2.0). Hosted, the platform sign-in validates an Entra access token for the Manager's own
-application (scope `mcp.access`); locally, the page token is required. The caller's Manager role (Reader / Admin /
+responses, JSON-RPC 2.0). Hosted, the Manager verifies the caller's Entra access token itself -- signature against
+the tenant's signing keys, issuer pinned to the tenant, audience pinned to the Manager's own application, a delegated
+`mcp.access` scope -- and takes the person from the verified token, never from platform headers; an application
+token with no person behind it is refused. Because the token is the proof, `/mcp` sits outside the platform sign-in
+redirect: a client without a token gets `401` with a `WWW-Authenticate` header that points at the protected-resource
+metadata (`/.well-known/oauth-protected-resource`), which is how MCP clients discover where to sign in. Locally, the
+page token is required. The caller's Manager role (Reader / Admin /
 SuperAdmin) is resolved exactly as for the page and decides which tools are listed and callable. Read tools answer
 from the same store reads as the page; `stage_change` writes into the shared pending set; `commit_staged` commits
 only the caller's own staged changes through the very function the page's Review & commit uses, so validation,

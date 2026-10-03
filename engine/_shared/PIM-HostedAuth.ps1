@@ -422,6 +422,48 @@ function Test-PimEdgeHeadersConsistent {
     return @{ trusted = $true; identity = $identity; reason = 'auth-edge headers consistent' }
 }
 
+function Resolve-PimMcpBearer {
+    <#
+      PURE given its inputs. REQ 93 -- who is calling /mcp, proven by the BEARER TOKEN itself, never by edge headers.
+      🔴 BUG-283 (live, internal 2026-10-03): once Easy Auth accepted the api://<app> audience, an APP-ONLY token (client
+      credentials -- any service principal in the tenant, no person) passed it with a principal, and an unknown principal
+      is Reader. §93.2 decided "the person signs in": a delegated token carries the scope in `scp`; an app-only one does not.
+      🔑 Verified HERE (signature against the tenant JWKS, issuer + audience pinned, exp) so /mcp can sit outside Easy Auth
+      (excludedPaths) and answer an unauthenticated client 401 + WWW-Authenticate -- the MCP sign-in discovery -- instead of
+      a 302 to the login page. Outside Easy Auth the X-MS-* headers are the caller's own words, so they are never read.
+      Returns @{ ok; status (401 = no / bad token, 403 = valid token but not allowed, 503 = not configured); identity; reason }.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Authorization = '',
+        [object]$Jwks = $null,
+        [string[]]$ExpectedIssuers = @(),
+        [string[]]$ExpectedAudiences = @(),
+        [string]$Scope = 'mcp.access',
+        [datetime]$NowUtc = ([datetime]::UtcNow)
+    )
+    $iss = @($ExpectedIssuers | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $aud = @($ExpectedAudiences | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if ($iss.Count -eq 0 -or $aud.Count -eq 0) {
+        return @{ ok = $false; status = 503; identity = ''; reason = 'MCP sign-in is not configured on this Manager (no pinned issuer / audience) -- run Set-PimManagerMcpAuth.ps1 -Apply' }
+    }
+    if ("$Authorization" -notmatch '^\s*Bearer\s+(\S+)\s*$') { return @{ ok = $false; status = 401; identity = ''; reason = 'no bearer token' } }
+    $jwt = Get-PimJwtParts -Token $Matches[1]
+    if ($null -eq $jwt) { return @{ ok = $false; status = 401; identity = ''; reason = 'the bearer token is not a well-formed JWT' } }
+    if ($null -eq $Jwks) { return @{ ok = $false; status = 503; identity = ''; reason = 'the tenant signing keys could not be fetched -- cannot verify any token (refused)' } }
+    $sig = Test-PimJwtSignature -Jwt $jwt -Jwks $Jwks
+    if (-not $sig.valid) { return @{ ok = $false; status = 401; identity = ''; reason = "token signature: $($sig.reason)" } }
+    $cl = Test-PimJwtClaims -Payload $jwt.payload -ExpectedIssuers $iss -ExpectedAudiences $aud -NowUtc $NowUtc
+    if (-not $cl.valid) { return @{ ok = $false; status = 401; identity = ''; reason = "token claims: $($cl.reason)" } }
+    $scopes = @("$($jwt.payload.scp)" -split '\s+' | Where-Object { $_ })
+    if ($scopes.Count -eq 0) { return @{ ok = $false; status = 403; identity = ''; reason = "an application token (no delegated scope) -- MCP needs a person signed in for '$Scope'" } }
+    if ($scopes -notcontains $Scope) { return @{ ok = $false; status = 403; identity = ''; reason = ("the token's scope (" + ($scopes -join ' ') + ") is not '$Scope' -- request a token for api://<this Manager>/$Scope") } }
+    $who = ''
+    foreach ($c in @('upn', 'preferred_username', 'unique_name')) { $v = "$($jwt.payload.$c)".Trim(); if ($v) { $who = $v; break } }
+    if (-not $who) { return @{ ok = $false; status = 403; identity = ''; reason = 'the token names no user (no upn / preferred_username)' } }
+    return @{ ok = $true; status = 200; identity = $who; reason = "delegated token with '$Scope'" }
+}
+
 # ---- the composite decision ---------------------------------------------------
 
 function Get-PimHostedAuthLayer {
