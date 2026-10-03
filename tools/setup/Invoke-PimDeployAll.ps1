@@ -436,6 +436,14 @@ param(
     # credential (one identity per deploy). The user must be a USER in -TenantId for -SubscriptionId (asserted).
     [switch]$UseSignedInAccount,
 
+    # §94 SEVERAL ENVIRONMENTS IN ONE TENANT (operator 2026-10-03: r1-pro / r1-com-ca / r1-com-vm beside the
+    # existing internal one). Every Entra object the deploy finds-or-creates is otherwise a TENANT singleton:
+    # the Manager's Easy Auth app is keyed on api://<tenant>/pim4entraps-manager, so a second environment
+    # ADOPTED the first one's app and rewrote its redirect URIs and assignments. A label makes each of them
+    # per environment: app 'PIM4EntraPS Manager (<label>)' keyed on api://<tenant>/pim4entraps-manager-<label>
+    # (no legacy-name adoption), its members group, the SQL admin group, the engine app name. Empty = unchanged.
+    [ValidatePattern('^$|^[a-z0-9][a-z0-9-]{0,19}$')][string]$EnvLabel = '',
+
     # --- TEST seam: inject the per-step runner so the whole flow is offline-testable ---
     [scriptblock]$StepRunner
 )
@@ -462,6 +470,11 @@ $ErrorActionPreference = 'Stop'
 # the updater already carries, and a NEW updater gets the documented default (-UpdateRing's own
 # default, stated on screen by Deploy-PimUpdateJob -- never silently).
 $script:PimDeployRingExplicit = $PSBoundParameters.ContainsKey('UpdateRing')
+# §94: a label renames the tenant singletons -- only those the caller did not name explicitly (script scope, BUG-162).
+if ("$EnvLabel".Trim()) {
+    if (-not $PSBoundParameters.ContainsKey('SqlAdminGroupName'))    { $SqlAdminGroupName    = "grp-pim-sql-admins-$EnvLabel" }
+    if (-not $PSBoundParameters.ContainsKey('EngineAppDisplayName')) { $EngineAppDisplayName = "PIM4EntraPS Engine ($EnvLabel)" }
+}
 # The deploy profile (Update-PimCommunity.ps1) is taken from the same script-scope $PSBoundParameters, for the same reason.
 $script:PimDeployBound = @{} + $PSBoundParameters
 
@@ -1576,6 +1589,10 @@ function Invoke-DefaultStepRunner {
                 # the VNet -- otherwise the build works or fails depending on WHERE it is run, which
                 # is not reproducible.
                 if ("$AcrAgentPoolName".Trim()) { $bldId['AcrAgentPool'] = "$AcrAgentPoolName".Trim() }
+                # §94 (live 2026-10-03): the builder signs in as the SPN, and az then picks the tenant's FIRST subscription.
+                # With one subscription per tenant (every test tenant) that was right by luck; in the internal tenant (7) the
+                # build looked for the registry in a demo subscription. The builder scopes every call by -SubscriptionId.
+                if ("$SubscriptionId".Trim()) { $bldId['SubscriptionId'] = "$SubscriptionId".Trim() }
                 try {
                 & $bld @bldId -Source $Source -TenantId $TenantId -AcrName $AcrName -ImageRepo $ImageRepo `
                     -ImageTag (Get-EffectiveImageTag) | Out-Host
@@ -1801,6 +1818,10 @@ function Invoke-DefaultStepRunner {
                     $mailParts = "$MailSender".Trim() -split '@', 2
                     if ($mailParts[0]) { $mailArgs['MailboxName'] = $mailParts[0] }
                     if ($mailParts.Count -eq 2 -and $mailParts[1]) { $mailArgs['MailDomain'] = $mailParts[1] }
+                } elseif ("$EnvLabel".Trim()) {
+                    # §94: PIM-Engine@ is the tenant's first environment's sender -- each labelled one gets its own mailbox
+                    $mailArgs['MailboxName'] = "PIM-Engine-$EnvLabel"
+                    $mailArgs['DisplayName'] = "PIM4EntraPS Engine ($EnvLabel, notifications)"
                 }
                 # Without this the script THROWS on its own first line -- "one of -AdminSecret /
                 # -AdminCertThumbprint is required" -- and this step's deliberate
@@ -2093,6 +2114,13 @@ function Invoke-DefaultStepRunner {
                 if ("$EasyAuthClientId".Trim())    { $eaArgs['ClientId']       = $EasyAuthClientId }
                 if ($EasyAuthAllowedPrincipals.Count) { $eaArgs['AllowedPrincipals'] = @($EasyAuthAllowedPrincipals) }
                 if ($EasyAuthAllowAllTenantUsers)     { $eaArgs['AllowAllTenantUsers'] = $true }
+                if ("$EnvLabel".Trim()) {
+                    # §94: this environment's OWN registration -- never the tenant's first one found by uri or legacy name
+                    $eaArgs['AppDisplayName']      = "PIM4EntraPS Manager ($EnvLabel)"
+                    $eaArgs['StableIdentifierUri'] = "api://$TenantId/pim4entraps-manager-$EnvLabel"
+                    $eaArgs['LegacyDisplayNames']  = @()
+                    $eaArgs['MembersGroupName']    = "PIM4EntraPS Manager users ($EnvLabel) (members, no guests)"
+                }
                 # 🪤 A THROW IS A FAILURE TOO. Set-PimManagerEasyAuth reports most refusals by throwing, and
                 # an unhandled throw here escaped the runner before the Manager could be closed below.
                 $eaWhy = ''
@@ -2458,6 +2486,19 @@ function Invoke-DeployValidation {
             $env:PIM_TenantId      = $TenantId
             $env:PIM_ClientId      = $EngineClientId
             $env:PIM_CertThumbprint= $EngineCertThumbprint
+            # §94 (live, r1-pro 2026-10-03): a CONTAINER environment has no engine SPN -- its engine is a managed identity
+            # this host cannot use -- so the test signed in with nothing usable ("Login failed for user '<token-identified
+            # principal>'") and rolled back a deploy whose smoke had passed 12/0. The deploy identity (a member of the
+            # SQL admin group, holding the directory reads) is the read-only validation identity there.
+            if (-not "$EngineClientId".Trim() -and "$SqlAdminClientId".Trim() -and "$SqlAdminCertThumbprint".Trim()) {
+                $env:PIM_ClientId       = $SqlAdminClientId
+                $env:PIM_CertThumbprint = $SqlAdminCertThumbprint
+            }
+            if ("$SqlAdminClientId".Trim() -and "$SqlAdminCertThumbprint".Trim()) {
+                $env:PIM_SqlClientId       = $SqlAdminClientId
+                $env:PIM_SqlCertThumbprint = $SqlAdminCertThumbprint
+            }
+            if ("$SqlServerFqdn".Trim()) { $env:PIM_SqlServer = $SqlServerFqdn }
             $env:PIM_SqlDatabase   = $SqlDatabase
             $env:PIM_DEPLOY_MARKER = $DeployMarker
             # 🔴 §52.13 -- A WRONG PESTER VERSION ROLLED BACK A VERIFIED-GOOD DEPLOYMENT.

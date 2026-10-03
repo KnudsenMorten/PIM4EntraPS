@@ -101,8 +101,8 @@ deployment is a supported choice) and no credentials lying around.
   running app plus a tenant validation; if that fails, it automatically rolls the app back
   to the previous known-good version and reports exactly what happened. A validation-only
   mode re-checks an existing environment without changing anything.
-- **Repeatable, script-driven setup.** Deployment runs through setup scripts (container,
-  VM, and MSP variants) rather than manual clicking, so every environment comes out the
+- **Repeatable, script-driven setup.** Deployment runs through setup scripts (single-tenant
+  and MSP variants, hosted on Azure Container Apps) rather than manual clicking, so every environment comes out the
   same way.
 - **Database access without passwords.** When using a managed identity against the
   database, setup wires up the correct passwordless access automatically.
@@ -405,8 +405,8 @@ deployment is a supported choice) and no credentials lying around.
 
 ## 6. Engine — Core
 - **Modern, dependency-free engine.** The engine talks directly to Microsoft's APIs and
-  the database — no heavy PowerShell modules to install or keep updated — so it runs on a
-  plain VM or in a lightweight container.
+  the database — no heavy PowerShell modules to install or keep updated — so it runs in a
+  lightweight container (v2 is hosted on Azure Container Apps).
 - **Fast incremental runs.** Instead of a one-to-two-hour full sweep every time, the
   engine queues changes and applies only what actually changed, scoped to the area you
   ask for. Full reprocessing is still available when you want it.
@@ -613,7 +613,7 @@ deployment is a supported choice) and no credentials lying around.
   every cloud admin account (on-premises AD admins cannot hold one), respects the start date you
   set, is issued once, and follows your tenant's own pass policy (for example one-time use).
 - **100% direct API, no modules.** Authentication runs entirely over REST, so the solution
-  works on a clean VM or container with nothing pre-installed.
+  works in a clean container with nothing pre-installed.
 - **Managed identity or certificate, not shared secrets.** A hosted environment runs the engine
   and the Manager as the containers' own managed identities, so there is no credential to store or
   rotate. An engine that runs on a server signs in as an application with a certificate from the
@@ -1370,7 +1370,7 @@ deployment is a supported choice) and no credentials lying around.
   and tiered the right way out of the box, and the Manager shows you exactly which rows your
   instance does not have yet (so a pack that grows later surfaces only the new additions). The
   shipped packs now cover: **Microsoft Defender XDR**, **Microsoft Sentinel**, **Intune /
-  Endpoint Manager**, **Exchange Online**, a generic **Azure RBAC** pack (Reader / Contributor /
+  Endpoint Manager**, a generic **Azure RBAC** pack (Reader / Contributor /
   Owner / User Access Administrator at a scope you choose), and a common **Entra ID role** pack
   (Helpdesk, User, Authentication, Groups and License administrators, plus Global Reader). The
   workload packs bind the service's own roles directly to the group; the Azure and Entra packs
@@ -1805,7 +1805,7 @@ deployment is a supported choice) and no credentials lying around.
 ![Free vs Pro — the page a Pro menu item opens on a Community install](img/manager-free-vs-pro.png)
 - **Every advanced capability is yours to switch on — nothing happens until you say so.** ✅ 2026-06-17 —
   a single **Feature customization** panel in **Settings** lists every optional capability (discovery,
-  email & Teams alerting, workload connectors, Power BI, Exchange Online, MSP fan-out, scheduled jobs)
+  email & Teams alerting, workload connectors, Power BI, MSP fan-out, scheduled jobs)
   grouped into clear chapters. Each one has a simple on/off switch. A newly-shipped advanced feature always
   starts **off**, so upgrading never springs a new behaviour on your environment — you enable each capability
   deliberately, per customer, when you're ready. The essential PIM features (reconcile, the delegation map,
@@ -1822,7 +1822,8 @@ deployment is a supported choice) and no credentials lying around.
   updated ✅ 2026-09-20 — choose the active edition per tenant. **Core** includes every essential PIM
   capability at no cost and is **never** gated. **Pro** covers the advanced integrations (workload
   connectors, Power BI, coverage & gaps, revoking current delegations, access reviews, the second approver,
-  delegated administration, the tier-impact report and the evidence export) and the multi-tenant half
+  delegated administration, the tier-impact report, the evidence export and PIM for on-premises Active
+  Directory -- listed as Pro ✅ 2026-10-03) and the multi-tenant half
   (managing and managed tenants). **Each Pro capability is allowed only while an installed Pro licence
   covers that capability and this tenant** — otherwise it is refused, with the reason shown in plain words.
   The edition you choose records the commercial basis; what is actually unlocked is decided by the installed
@@ -1892,7 +1893,7 @@ and the current delegations list; administrator accounts and first-time access p
 preparation from one configuration file; self-updating from the public release; and community support.
 
 **Pro — licensed capabilities for a single tenant.** Coverage & gaps and discovery across every workload; the
-Power BI, Exchange Online, enterprise-app role, Azure DevOps, Dataverse, Business Central and Power Platform
+Power BI, enterprise-app role, Azure DevOps, Dataverse, Business Central and Power Platform
 connectors; revoking current delegations (the list itself is free); access reviews (campaigns with decisions recorded and
 enforced); a second approver for sensitive changes;
 delegated administration (portal users limited to a tier, level, service or scope); the tier-impact report; and the

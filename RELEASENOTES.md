@@ -14,6 +14,25 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.485 — Several environments in one tenant; corrected edition lists
+
+- **Fixed: a second environment in the same tenant took over the first one's sign-in app.** Setup now gives every
+  environment its own Manager sign-in app, administrators group, database-admin group and notification mailbox
+  (`Invoke-PimDeployAll -EnvLabel <name>`). Without a label nothing changes.
+- **Fixed: notification mail scoped to the wrong mailbox.** With two environments in one tenant, the second one's send
+  right was attached to the first one's mailbox scope. Each mailbox now has its own scope; a scope for another mailbox
+  is never reused, and a misplaced send right is moved.
+- **Fixed: setup in a tenant with several subscriptions.** The image build now always targets the deployment's
+  subscription, a refused SQL server creation stops setup with the real reason (for example a region not accepting new
+  servers), and the post-deploy validation signs in with the deployment identity when the engine runs as a managed
+  identity -- it rolled back a healthy deployment before.
+- **Fixed: MCP sign-in could not finish on a deployed environment.** The check that lets `/mcp` answer sign-in
+  discovery now reads the Manager's version from the registry when the image is pinned by digest.
+- **Docs: the edition lists are corrected.** PIM for on-premises Active Directory is listed as Pro. Exchange Online is
+  no longer listed as a connector -- there is none; the Exchange template pack provides permission groups only. The
+  product is hosted on Azure Container Apps.
+- **Upgrade note:** none for existing environments.
+
 ## v2.4.484 — MCP: the managing tenant's view of its managed tenants (MSP)
 
 - **New (Pro, MSP, preview): two read-only MCP tools on the managing tenant.** `managed_tenants` lists every managed

@@ -756,7 +756,7 @@ function Invoke-ExoWhenHydrated {
 #     identity's was reported "already present" and never created -- and the hosted engine, which
 #     sends as that managed identity, was refused with nothing in this log to say why. The plan
 #     matches assignments by ASSIGNEE.
-$scopeName = "PIM4EntraPS-Sender"
+$scopeName = Get-PimMailSenderScopeName -Sender $sender   # §94: per mailbox, except the default one (unchanged for existing tenants)
 # 🔴 BUG-166 (b) -- these three used to end in `catch { @() }`, so "I could not read the scopes" became
 # "there are no scopes": measured on EFIF/RIDE, Get-ManagementScope answered 401 during the Exchange
 # Administrator propagation, the plan said "create", and New-ManagementScope then failed with

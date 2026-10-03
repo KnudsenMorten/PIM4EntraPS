@@ -123,6 +123,19 @@ function Select-PimExoMailSendAssignment {
     })
 }
 
+function Get-PimMailSenderScopeName {
+    <#
+      PURE. The Exchange management scope a sender's send right lives in. The DEFAULT mailbox (PIM-Engine@) keeps the
+      historic 'PIM4EntraPS-Sender', so every existing tenant is unchanged. Any other mailbox -- a second environment in the
+      same tenant (§94: PIM-Engine-r1-pro@) -- gets its own 'PIM4EntraPS-Sender-<mailbox>', because a scope is a tenant
+      singleton and sharing one meant sending as the other environment's mailbox.
+    #>
+    param([Parameter(Mandatory)][string]$Sender)
+    $local = ("$Sender" -split '@')[0].Trim()
+    if (-not $local -or $local -ieq 'PIM-Engine') { return 'PIM4EntraPS-Sender' }
+    return ('PIM4EntraPS-Sender-' + ($local -replace '[^A-Za-z0-9-]', '-'))
+}
+
 function New-PimMailSenderExoPlan {
     <#
       WHAT to create in Exchange, given what already exists. Returns an ordered list of
@@ -142,12 +155,32 @@ function New-PimMailSenderExoPlan {
                                          parameters = @{ AppId = $p.appId; ObjectId = $p.objectId; DisplayName = $p.displayName } })
         }
     }
-    if (-not @(@($Scopes) | Where-Object { $null -ne $_ -and "$($_.Name)" -eq $ScopeName }).Count) {
+    $existingScope = @(@($Scopes) | Where-Object { $null -ne $_ -and "$($_.Name)" -eq $ScopeName })[0]
+    if (-not $existingScope) {
         $plan.Add([pscustomobject]@{ cmdlet = 'New-ManagementScope'; what = "scope $ScopeName -> $Sender only"
                                      parameters = @{ Name = $ScopeName; RecipientRestrictionFilter = "PrimarySmtpAddress -eq '$Sender'" } })
+    } else {
+        # §94 (live, internal 2026-10-03): a second environment in the tenant found the FIRST one's scope by name and
+        # attached its identities to it -- so it could send only as the OTHER environment's mailbox. A scope that does not
+        # name THIS sender is never reused (and never rewritten: that would cut the other environment off).
+        $flt = "$($existingScope.RecipientRestrictionFilter)"
+        if ($flt.Trim() -and $flt.IndexOf("'$Sender'", [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            throw ("the Exchange scope '$ScopeName' already exists for ANOTHER mailbox ($flt), not $Sender -- refusing to attach this " +
+                   "sender's identities to it. Give this environment its own scope (Initialize-PimMailSender derives '$ScopeName-<mailbox>' " +
+                   "for any mailbox other than the default).")
+        }
     }
     foreach ($p in @($Principals)) {
         $ids = Get-PimExoAssigneeIds -ExoServicePrincipals $ExoServicePrincipals -AppId $p.appId -ObjectId $p.objectId
+        # §94: the same identity's send right on ANOTHER of our sender scopes is the wrong-mailbox grant above -- remove it
+        # first (assignment names are tenant-unique, so the right one could not be created beside it).
+        foreach ($wrong in @(@($Assignments) | Where-Object { $null -ne $_ -and "$($_.Role)" -eq 'Application Mail.Send' -and
+                    "$($_.CustomResourceScope)" -like 'PIM4EntraPS-Sender*' -and "$($_.CustomResourceScope)" -ne $ScopeName } |
+                    Where-Object { @(Select-PimExoMailSendAssignment -Assignments @($_) -ScopeName "$($_.CustomResourceScope)" -AssigneeIds $ids -AssignmentName $p.assignmentName).Count })) {
+            $idn = if ("$($wrong.Identity)".Trim()) { "$($wrong.Identity)".Trim() } else { "$($wrong.Name)".Trim() }
+            $plan.Add([pscustomobject]@{ cmdlet = 'Remove-ManagementRoleAssignment'; what = "remove $($p.kind) $($p.appId)'s send right on the OTHER scope $($wrong.CustomResourceScope) ($idn)"
+                                         parameters = @{ Identity = $idn; Confirm = $false } })
+        }
         if (-not @(Select-PimExoMailSendAssignment -Assignments $Assignments -ScopeName $ScopeName -AssigneeIds $ids -AssignmentName $p.assignmentName).Count) {
             $plan.Add([pscustomobject]@{ cmdlet = 'New-ManagementRoleAssignment'; what = "scoped send right for $($p.kind) $($p.appId)"
                                          parameters = @{ App = $p.appId; Role = 'Application Mail.Send'; CustomResourceScope = $ScopeName; Name = $p.assignmentName } })
