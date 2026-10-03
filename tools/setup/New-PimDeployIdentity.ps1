@@ -322,7 +322,7 @@ if ($GrantGraph) {
     foreach ($p in @($plan)) {
         # 🪤 az is az.cmd: a JSON body on the command line is mangled by cmd.exe quoting, and a
         # multi-line one is truncated after line 1. Always hand it a FILE.
-        $bodyFile = Join-Path $env:TEMP ("pim-approle-" + [guid]::NewGuid().ToString('N') + '.json')
+        $bodyFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-approle-" + [guid]::NewGuid().ToString('N') + '.json')
         try {
             Set-Content -LiteralPath $bodyFile -Value (New-PimAppRoleAssignmentBody -PrincipalId $spId -ResourceId $graphSpId -AppRoleId $p.Id) -Encoding ascii -NoNewline
             $done = $false
@@ -371,7 +371,7 @@ if ("$PeerVnetResourceId".Trim()) {
 # ---- 5. prove it can actually sign in -----------------------------------------------------------
 # The whole point is that the NEXT step authenticates as this identity. Proving it here means a
 # failure is attributed to identity creation, where it belongs, instead of to the deploy.
-$probe = Join-Path $env:TEMP "pim-identity-probe-$([guid]::NewGuid().ToString('N'))"
+$probe = Join-Path ([IO.Path]::GetTempPath()) "pim-identity-probe-$([guid]::NewGuid().ToString('N'))"
 $null = New-Item -ItemType Directory -Force -Path $probe
 $prev = $env:AZURE_CONFIG_DIR
 try {

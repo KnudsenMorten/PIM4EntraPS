@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Export settings from one PIM tenant and import them into another (operator, 2026-09-22:
@@ -16,9 +16,9 @@
         environment's own identity, and carrying them across is how a tenant ends up trusting
         another tenant's administrators. The block list is in $script:PimSettingsNeverCopy and a
         -Name that hits it is REFUSED, not warned about.
-      * It never merges. A setting is one document; a half-merged document is a shape no reader
-        expects. The target's current value is written to a backup file FIRST, and restoring it is
-        the same command with -From/-To swapped.
+      * It never merges -- unless -MergeKeys asks for the one safe merge (below). A setting is one
+        document; a half-merged document is a shape no reader expects. The target's current value is
+        written to a backup file FIRST, and restoring it is the same command with -From/-To swapped.
       * It writes nothing without -Apply. The default is a diff.
 
 .PARAMETER Name
@@ -32,6 +32,12 @@
 
 .PARAMETER BackupDir
     Where the target's current value is written before anything changes. Default: the user's temp.
+
+.PARAMETER MergeKeys
+    (2026-10-03) For an OBJECT setting: the source's top-level keys win and the keys ONLY the target has are KEPT --
+    so copying from an environment set up on an older release does not drop the keys a newer release added (found
+    copying NamingConventions to the rebuilt ring-1 environment). Arrays and plain values are still replaced whole.
+    The kept keys are listed before anything is written.
 
 .PARAMETER Apply
     Write. Without it the script only reports what WOULD change (and still takes the backup).
@@ -60,6 +66,7 @@ param(
     [Parameter(Mandatory)][string]$ToClientId,
     [Parameter(Mandatory)][string]$ToCertThumbprint,
     [string]$BackupDir,
+    [switch]$MergeKeys,
     [switch]$Apply
 )
 
@@ -68,6 +75,7 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path      # ...\tools\setup
 $sol  = Split-Path -Parent (Split-Path -Parent $here)        # ...\SOLUTIONS\PIM4EntraPS
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-SqlStore.ps1')
+. (Join-Path $here '_PimSettingsCopy.ps1')
 
 # 🔒 Settings that describe WHO this environment is, or WHO may act in it. Copying one of these
 # between tenants does not configure the target -- it points the target at the source's identities.
@@ -120,13 +128,19 @@ foreach ($n in @($Name)) {
     $src = $null
     try { $src = Get-PimSqlSetting -ConnectionString $csFrom -Name $n } catch { throw ("could not read '$n' from the source: $($_.Exception.Message)") }
     if ($null -eq $src) { Write-Host "  the SOURCE has no such setting -- skipped (nothing is cleared in the target)" -ForegroundColor Yellow; continue }
-    $srcJson = ($src | ConvertTo-Json -Depth 12)
-    Set-Content -Path (Join-Path $BackupDir ("{0}-SOURCE-{1}.json" -f $n, $stamp)) -Value $srcJson -Encoding UTF8
+    Set-Content -Path (Join-Path $BackupDir ("{0}-SOURCE-{1}.json" -f $n, $stamp)) -Value ($src | ConvertTo-Json -Depth 12) -Encoding UTF8
 
     $csTo = Use-Tenant -TenantId $ToTenantId -ClientId $ToClientId -Thumbprint $ToCertThumbprint -Server $ToServer -Database $ToDatabase
     $dst = $null
     try { $dst = Get-PimSqlSetting -ConnectionString $csTo -Name $n } catch { throw ("could not read '$n' from the target: $($_.Exception.Message)") }
     $dstJson = $(if ($null -ne $dst) { ($dst | ConvertTo-Json -Depth 12) } else { '' })
+    # -MergeKeys: the value to write is the source with the target's EXTRA top-level keys kept (objects only).
+    if ($MergeKeys) {
+        $kept = @(Get-PimSettingKeyDiff -Target $dst -Source $src)
+        if ($kept.Count) { Write-Host ("  -MergeKeys: keeping the target's own key(s): {0}" -f ($kept -join ', ')) -ForegroundColor Cyan }
+        $src = Merge-PimSettingKeys -Target $dst -Source $src
+    }
+    $srcJson = ($src | ConvertTo-Json -Depth 12)
     # 🔑 The target's CURRENT value is saved before anything is written, every run -- including a dry
     # run. Restoring is this same script with -From/-To swapped, or an import of this file.
     $backupFile = Join-Path $BackupDir ("{0}-TARGET-BEFORE-{1}.json" -f $n, $stamp)

@@ -435,7 +435,7 @@ if (-not $WhatIfPreference) {
 # Setup-PimContainers had the identical defect and it corrupted a concurrent estate deploy on
 # 2026-09-03 (see the Job-yaml note there). Fixed here at the same time rather than waiting for it
 # to happen a second time on the downlink path, where the file's contents are secrets.
-$yamlPath = Join-Path $env:TEMP "pim-$JobName-$ResourceGroup-$PID.yaml"
+$yamlPath = Join-Path ([IO.Path]::GetTempPath()) "pim-$JobName-$ResourceGroup-$PID.yaml"
 
 # 🔴 REFUSE A SQL-BACKED JOB WITH NO SQL SERVER. Get-PimDownlinkJobEnv emits
 # PIM_StorageBackend=sql and PIM_SqlDatabase UNCONDITIONALLY, but PIM_SqlServer only when one was

@@ -14,6 +14,30 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.488 — Licences bound to their tenant, guided installation, setup scripts that finish the job
+
+- **Changed: a licence is valid only in the tenant it names.** A licence file that names no tenant is no longer
+  accepted. Where PIM runs as a managed identity, the tenant is taken from that identity's own sign-in rather than from
+  configuration, so a licence copied to another installation does not unlock Pro there. **Upgrade note:** every licence
+  issued so far names its tenant, so there is nothing to do.
+- **New: guided installation (preview).** `tools/setup/Install-PimManager.ps1` installs the PIM Manager with one
+  command from Azure Cloud Shell, signed in as yourself (never a secret), from a short answer file and your licence.
+  - Before it changes anything it checks your answers, the licence, your rights, the Azure resource providers, the names
+    and Azure SQL in the chosen region.
+  - It reports every step and can be resumed where it stopped.
+  - A step that needs a higher role than yours ends as a warning with the exact command for the person who has that
+    role, and the installation still completes.
+- **New: Invardia support access.** `Grant-PimSupportAccess.ps1` gives your Invardia Support app read-only access or
+  setup access to this installation. The same command with `-Remove` takes it back.
+- **Improved: the access request broker deploys completely.** Given the tenant and an administrator identity, the
+  deploy also registers the API, gives the broker its send right on your notification mailbox only, and tells PIM where
+  the broker is.
+- **Improved: copying settings between environments can keep newer settings.** `Copy-PimSettings.ps1 -MergeKeys`
+  keeps the target's own settings keys when you copy from an installation of an older release.
+- **Fixed: setup from Linux and Azure Cloud Shell.** The Azure CLI, temporary folders and the database client are now
+  found on Linux as on Windows. An installer who is the database's administrator is no longer refused for missing a
+  group.
+
 ## v2.4.487 — Licences from the new Invardia signer are accepted
 
 - **Licensing: a second trusted signer.** PIM now accepts licences signed by the Invardia licensing key as well as by

@@ -174,6 +174,14 @@ deployment is a supported choice) and no credentials lying around.
   machine that ran it (never a secret). Run it without the apply switch first: it shows the version it would move to
   and the plan, and changes nothing. A copy with local changes is left alone. Proven by updating a running community
   installation from GitHub and re-running the full end-to-end test against it.
+- **Give your Invardia support access, and take it back.** ✅ 2026-10-04 — One command gives your Invardia Support
+  app either read-only access to the PIM database (troubleshoot) or setup access (it may repair and upgrade: database
+  administration and ownership of PIM's own app registrations and groups). The same command with a remove switch
+  takes everything back. Nothing is granted twice, and every change is read back. *(2.4.488)*
+- **The access request broker deploys completely in one run.** ✅ 2026-10-04 — Deploying the access request broker
+  now also registers its API, gives the broker its send right on your notification mailbox only, and tells PIM where
+  the broker is. All three are read back and reported. If a step lacks what it needs, it prints the exact command
+  instead. *(2.4.488)*
 
 ## 4. MSP
 - **A managed tenant only works when something changed -- much lower running cost.** ✅ 2026-10-02

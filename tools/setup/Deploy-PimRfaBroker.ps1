@@ -13,6 +13,14 @@
   shared; the app scales to zero (cold start ~10-20 s; -MinReplicas 1 keeps one warm: ~50-80 kr./month); storage
   tables cost cents. Check the price before -Apply.
 
+  FOLLOW-UP STEPS (2026-10-03): with -Apply, the three steps after the app run THEMSELVES when their inputs are given:
+    api audience   -TenantId                                  -> Set-PimRfaBrokerApiAuth.ps1 -Apply (-ApiAppDisplayName)
+    mail           -TenantId + -AdminAppId + -AdminCertThumbprint -> Initialize-PimMailSender.ps1 for the broker's identity
+                   (Exchange RBAC needs an application identity; signed-in, it stays a printed NEXT step)
+    settings       -SqlServerFqdn (+ -AdminAppId/-AdminCertThumbprint, or -UseSignedInAccount) -> pim.Settings RfaSettings
+                   (store + portal URL, the API app ids kept) and the feature gates rfa.portal + api.broker switched ON
+  A missing input prints that step's NEXT command, exactly as before.
+
 .EXAMPLE
   .\Deploy-PimRfaBroker.ps1 -SubscriptionId <pim sub> -ResourceGroup rg-automateit-x -VnetName vnet-pim -SubnetPrefix 10.20.8.0/27 `
      -PimSubnetPrefixes 10.20.0.0/23 -StorageAccountName strfax01 -Image acrx.azurecr.io/pim-manager:2.4.478 -AcrName acrx `
@@ -31,6 +39,10 @@ param(
     [Parameter(Mandatory)][string]$SenderMailbox, [string]$TenantName = '',
     [Parameter(Mandatory)][string[]]$EngineIdentityPrincipalIds,
     [string[]]$ApiAllowedIps = @(), [int]$MinReplicas = 0, [string]$ExistingEnvironmentName = '',
+    # --- the follow-up steps (see FOLLOW-UP STEPS) ---
+    [string]$TenantId = '', [string]$ApiAppDisplayName = 'PIM access request API', [string]$AzureConfigDir = '',
+    [string]$AdminAppId = '', [string]$AdminCertThumbprint = '', [switch]$UseSignedInAccount,
+    [string]$SqlServerFqdn = '', [string]$SqlDatabase = 'PimPlatform',
     [switch]$Apply
 )
 $ErrorActionPreference = 'Stop'
@@ -60,7 +72,8 @@ function Invoke-Az {
     return $null
 }
 
-$appPrincipal = $null; $storageId = $null
+$appPrincipal = $null; $storageId = $null; $appFqdn = ''
+$followUps = New-Object System.Collections.Generic.List[string]
 foreach ($s in $plan.steps) {
     Write-Host "== [$($s.id)] $($s.what)" -ForegroundColor Cyan
     $a = $s.args
@@ -108,6 +121,7 @@ foreach ($s in $plan.steps) {
                 $app = Invoke-Az -Sub $s.sub -AzArgs $cargs
             }
             $appPrincipal = "$($app.identity.principalId)"
+            $appFqdn = "$($app.properties.configuration.ingress.fqdn)"
             Write-Host "   app identity: $appPrincipal   url: https://$($app.properties.configuration.ingress.fqdn)" -ForegroundColor DarkGray
         }
         'role-*' {
@@ -124,11 +138,49 @@ foreach ($s in $plan.steps) {
             # so a failure here is a warning with the next step, never a stopped deploy.
             try { [void](Invoke-Az -Sub $s.sub -AzArgs @('containerapp', 'auth', 'update', '-g', $s.rg, '-n', $a.app, '--unauthenticated-client-action', 'AllowAnonymous', '--enabled', 'true')) }
             catch { Write-Warning "   Easy Auth could not be switched on yet ($($_.Exception.Message)) -- Entra application tokens are refused until it is; API keys and the portal work." }
-            Write-Host "   NEXT: Set-PimRfaBrokerApiAuth.ps1 -SubscriptionId $($s.sub) -ResourceGroup $($s.rg) -BrokerApp $($a.app) -TenantId <tenant>  (registers the API audience so Entra application tokens are accepted; plans unless -Apply)" -ForegroundColor Yellow
+            if ("$TenantId".Trim()) {
+                $aa = @{ SubscriptionId = $s.sub; ResourceGroup = $s.rg; BrokerApp = $a.app; TenantId = $TenantId; ApiAppDisplayName = $ApiAppDisplayName; Apply = $true }
+                if ("$AzureConfigDir".Trim()) { $aa['AzureConfigDir'] = $AzureConfigDir }
+                try { & (Join-Path $PSScriptRoot 'Set-PimRfaBrokerApiAuth.ps1') @aa | Out-Host; $followUps.Add('api audience: registered') }
+                catch { Write-Warning "   the API audience could not be registered: $($_.Exception.Message)"; $followUps.Add('api audience: FAILED -- re-run Set-PimRfaBrokerApiAuth.ps1 -Apply') }
+            } else {
+                Write-Host "   NEXT: Set-PimRfaBrokerApiAuth.ps1 -SubscriptionId $($s.sub) -ResourceGroup $($s.rg) -BrokerApp $($a.app) -TenantId <tenant>  (registers the API audience so Entra application tokens are accepted; plans unless -Apply)" -ForegroundColor Yellow
+            }
         }
         'ip' { foreach ($ip in @($a.allow)) { [void](Invoke-Az -Sub $s.sub -AzArgs @('containerapp', 'ingress', 'access-restriction', 'set', '-g', $s.rg, '-n', $a.app, '--rule-name', ("allow-" + ($ip -replace '[./]', '-')), '--ip-address', $ip, '--action', 'Allow')) } }
-        'mail' { Write-Host "   NEXT: Initialize-PimMailSender.ps1 ... -ManagedIdentityObjectId $appPrincipal  (Exchange-scoped send as $SenderMailbox only)" -ForegroundColor Yellow }
-        'settings' { Write-Host "   NEXT: Manager > Settings > RFA broker & API: store '$StorageAccountName', portal URL https://<app fqdn>" -ForegroundColor Yellow }
+        'mail' {
+            if ("$TenantId".Trim() -and "$AdminAppId".Trim() -and "$AdminCertThumbprint".Trim() -and $appPrincipal) {
+                $mb, $dom = "$SenderMailbox".Split('@', 2)
+                $ma = @{ TenantId = $TenantId; AdminAppId = $AdminAppId; AdminCertThumbprint = $AdminCertThumbprint; MailboxName = $mb; MailDomain = $dom; ManagedIdentityObjectId = @($appPrincipal) }
+                try { & (Join-Path $PSScriptRoot 'Initialize-PimMailSender.ps1') @ma | Out-Host; $followUps.Add("mail: the broker sends as $SenderMailbox (Exchange-scoped)") }
+                catch { Write-Warning "   the broker's send right could not be set: $($_.Exception.Message)"; $followUps.Add('mail: FAILED -- run Initialize-PimMailSender.ps1 for the broker identity') }
+            } else {
+                Write-Host "   NEXT: Initialize-PimMailSender.ps1 ... -ManagedIdentityObjectId $appPrincipal  (Exchange-scoped send as $SenderMailbox only; needs an admin application identity -- pass -TenantId -AdminAppId -AdminCertThumbprint to do it here)" -ForegroundColor Yellow
+            }
+        }
+        'settings' {
+            if ("$SqlServerFqdn".Trim() -and $appFqdn -and (("$AdminAppId".Trim() -and "$AdminCertThumbprint".Trim()) -or $UseSignedInAccount)) {
+                try {
+                    $sol = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+                    if ($UseSignedInAccount) { . (Join-Path $PSScriptRoot '_PimSignedIn.ps1'); Set-PimSignedInGlobals -TenantId $TenantId }
+                    else { $global:PIM_TenantId = $TenantId; $global:PIM_SqlClientId = $AdminAppId; $global:PIM_SqlCertThumbprint = $AdminCertThumbprint }
+                    $global:PIM_SqlServer = $SqlServerFqdn; $global:PIM_SqlDatabase = $SqlDatabase; $global:PIM_UseGraphSdk = $false
+                    . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1'); . (Join-Path $sol 'engine\_shared\PIM-SqlStore.ps1')
+                    $cs = Get-PimSqlConnectionString
+                    $rs = New-PimRfaBrokerSettingsValue -Current (Get-PimSqlSetting -ConnectionString $cs -Name 'RfaSettings') -StoreAccount $StorageAccountName -PortalUrl "https://$appFqdn"
+                    Set-PimSqlSetting -ConnectionString $cs -Name 'RfaSettings' -Value $rs
+                    $fg = New-PimRfaBrokerFeatureGatesValue -Current (Get-PimSqlSetting -ConnectionString $cs -Name 'FeatureGates')
+                    Set-PimSqlSetting -ConnectionString $cs -Name 'FeatureGates' -Value $fg
+                    $back = Get-PimSqlSetting -ConnectionString $cs -Name 'RfaSettings'
+                    if ("$($back.storeAccount)" -ne $StorageAccountName) { throw 'RfaSettings did not read back' }
+                    $followUps.Add("settings: RfaSettings -> $StorageAccountName + https://$appFqdn; rfa.portal + api.broker ON (read back)")
+                } catch { Write-Warning "   PIM's settings could not be written: $($_.Exception.Message)"; $followUps.Add("settings: FAILED -- Manager > Settings > RFA broker & API: store '$StorageAccountName', portal URL https://$appFqdn") }
+            } else {
+                Write-Host "   NEXT: Manager > Settings > RFA broker & API: store '$StorageAccountName', portal URL https://$(if ($appFqdn) { $appFqdn } else { '<app fqdn>' })  (or pass -SqlServerFqdn with -AdminAppId/-AdminCertThumbprint or -UseSignedInAccount to do it here)" -ForegroundColor Yellow
+            }
+        }
     }
 }
+foreach ($f in $followUps) { Write-Host "   follow-up -- $f" -ForegroundColor $(if ($f -match 'FAILED') { 'Yellow' } else { 'Green' }) }
 Write-Host 'RFA broker deployed. The engine starts publishing on its next rfa-sync run once the settings name the store.' -ForegroundColor Green
+if (@($followUps | Where-Object { $_ -match 'FAILED' }).Count) { $global:LASTEXITCODE = 1; exit 1 }

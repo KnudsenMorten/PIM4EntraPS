@@ -55,7 +55,9 @@
 $script:PimAzExe = $null
 function Get-PimAzExecutable {
     if ($script:PimAzExe -and (Test-Path -LiteralPath $script:PimAzExe)) { return $script:PimAzExe }
-    $cmd = Get-Command -Name 'az.cmd', 'az.bat', 'az.exe' -CommandType Application -ErrorAction SilentlyContinue |
+    # 'az' last: on Linux / macOS (Azure Cloud Shell -- the guided install) the CLI is a plain `az` script; on Windows
+    # the .cmd wins, as before (§95.2 Cloud Shell blocker 1).
+    $cmd = Get-Command -Name 'az.cmd', 'az.bat', 'az.exe', 'az' -CommandType Application -ErrorAction SilentlyContinue |
            Select-Object -First 1
     if ($cmd) { $script:PimAzExe = $cmd.Source }
     return $script:PimAzExe

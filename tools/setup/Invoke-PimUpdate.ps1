@@ -421,14 +421,14 @@ function Invoke-PimSqlDdl {
                "identity the deploy set as the server's Entra admin), or sign in with 'az login' as an account " +
                "that is a SQL Entra admin before running the deploy.")
     }
-    $conn = New-Object System.Data.SqlClient.SqlConnection $ConnString
+    $conn = New-Object (Resolve-PimSqlClientType).FullName $ConnString
     if ($tok) { $conn.AccessToken = $tok }
     $conn.Open()
     try {
         # Split on GO so a shipped .sql batch separator does not reach the server as a keyword.
         foreach ($batch in ($Sql -split '(?im)^\s*GO\s*$')) {
             if (-not "$batch".Trim()) { continue }
-            $cmd = New-Object System.Data.SqlClient.SqlCommand $batch, $conn
+            $cmd = $conn.CreateCommand(); $cmd.CommandText = $batch
             $cmd.CommandTimeout = 300
             [void]$cmd.ExecuteNonQuery()
         }
@@ -440,11 +440,11 @@ function Invoke-PimSqlDdl {
 function Test-PimSqlColumnExists {
     param([Parameter(Mandatory)][string]$ConnString, [Parameter(Mandatory)][string]$Table, [Parameter(Mandatory)][string]$Column)
     $tok = Get-PimSqlAccessToken -ConnString $ConnString
-    $conn = New-Object System.Data.SqlClient.SqlConnection $ConnString
+    $conn = New-Object (Resolve-PimSqlClientType).FullName $ConnString
     if ($tok) { $conn.AccessToken = $tok }
     $conn.Open()
     try {
-        $cmd = New-Object System.Data.SqlClient.SqlCommand 'SELECT CASE WHEN COL_LENGTH(@t, @c) IS NULL THEN 0 ELSE 1 END', $conn
+        $cmd = $conn.CreateCommand(); $cmd.CommandText = 'SELECT CASE WHEN COL_LENGTH(@t, @c) IS NULL THEN 0 ELSE 1 END'
         [void]$cmd.Parameters.AddWithValue('@t', $Table)
         [void]$cmd.Parameters.AddWithValue('@c', $Column)
         $cmd.CommandTimeout = 60
@@ -517,11 +517,11 @@ function Get-DeployedColumns {
         $names = @()
         $readOk = $false
         try {
-            $conn = New-Object System.Data.SqlClient.SqlConnection $ConnString
+            $conn = New-Object (Resolve-PimSqlClientType).FullName $ConnString
             if ($sqlToken) { $conn.AccessToken = $sqlToken }
             $conn.Open()
             try {
-                $cmd = New-Object System.Data.SqlClient.SqlCommand $q, $conn
+                $cmd = $conn.CreateCommand(); $cmd.CommandText = $q
                 $cmd.CommandTimeout = 60
                 $rdr = $cmd.ExecuteReader()
                 while ($rdr.Read()) { $names += "$($rdr.GetValue(0))" }

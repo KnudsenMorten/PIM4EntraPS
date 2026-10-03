@@ -161,9 +161,8 @@ Function Set-PimLicense {
     if ($chk.Status -in @('Invalid','Missing')) { throw "licence NOT stored: $($chk.Reason)" }
     # BUG-278: a licence that can never make THIS environment Pro is refused at the door, not discovered later per feature.
     if ("$($chk.Sku)".Trim() -notmatch '^(?i)pro(-.+)?$') { throw "licence NOT stored: it is a '$("$($chk.Sku)".Trim())' licence, not Pro" }
-    $bound = @(@($chk.TenantIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
-    $tid = "$TenantId".Trim().ToLowerInvariant()
-    if ($bound.Count -and $tid -and ($bound -notcontains $tid)) { throw "licence NOT stored: it is for another tenant (bound to $($bound -join ', '); this tenant is $tid)" }
+    $bind = Test-PimLicenseTenantBinding -License $chk -TenantId $TenantId
+    if (-not $bind.ok) { throw "licence NOT stored: $($bind.reason)" }
     if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) { throw 'licence NOT stored: no SQL settings store (Set-PimSetting) is wired -- PIM v2 keeps the licence in SQL only' }
     # BUG-277: was this environment Community until now? Then record the conversion. A Community install has no in-cloud
     # updater by design; the ring gate reads this marker so the install keeps updating as before until the upgrade step
@@ -368,9 +367,8 @@ Function Test-PimProFeature {
         if (-not $TenantId) {
             try { $ctx = Get-MgContext -ErrorAction SilentlyContinue; if ($ctx -and $ctx.TenantId) { $TenantId = $ctx.TenantId } } catch { }
         }
-        if ($TenantId -and @($lic.TenantIds).Count -gt 0 -and ($lic.TenantIds -notcontains $TenantId)) {
-            $blockReason = "license for '$($lic.Customer)' is not valid for tenant $TenantId"
-        }
+        $bind = Test-PimLicenseTenantBinding -License $lic -TenantId $TenantId
+        if (-not $bind.ok) { $blockReason = "license for '$($lic.Customer)': $($bind.reason)" }
     }
 
     if ($blockReason) {
@@ -391,6 +389,43 @@ Function Test-PimProFeature {
     return $true
 }
 
+Function Resolve-PimLicenseTenantId {
+    <#
+      LIC anti-copy (2026-10-03). The tenant a licence is checked against: the MANAGED IDENTITY's home tenant when this
+      process has minted a managed-identity token (PIM-Rest.ps1 records its tid in $global:PIM_ManagedIdentityTenantId --
+      a managed identity's token always comes from its home tenant, so editing PIM_TenantId cannot change it); otherwise
+      the configured -TenantId (operator tools that run as a certificate SPN or the signed-in user).
+    #>
+    param([string]$TenantId)
+    $mi = "$($global:PIM_ManagedIdentityTenantId)".Trim().ToLowerInvariant()
+    if ($mi) { return $mi }
+    # SPN / signed-in: a token is requested FOR the configured tenant and issued BY it, so pointing the configuration at a
+    # licensed tenant makes the process really operate there -- the configured tenant is honest without a managed identity.
+    foreach ($c in @($TenantId, $global:PIM_TenantId, $env:PIM_TenantId)) { if ("$c".Trim()) { return "$c".Trim().ToLowerInvariant() } }
+    return ''
+}
+
+Function Test-PimLicenseTenantBinding {
+    <#
+      PURE (given $global:PIM_ManagedIdentityTenantId). LIC anti-copy (operator 2026-10-03: "validate license against the
+      tenant so license can not be copied to other tenants"). Returns @{ ok; reason; tenantId }.
+        * a licence that names NO tenant is refused -- every licence is issued for the tenant(s) it was bought for;
+        * the tenant is Resolve-PimLicenseTenantId (the managed identity's home tenant when known);
+        * an unknown tenant is refused (fail closed); a tenant not in the licence is refused.
+    #>
+    param($License, [string]$TenantId)
+    $bound = @(@($License.TenantIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $tid = Resolve-PimLicenseTenantId -TenantId $TenantId
+    if (-not $bound.Count) { return [pscustomobject]@{ ok = $false; tenantId = $tid; reason = 'the licence names no tenant -- a licence is only valid for the tenant it was issued for; ask for a licence bound to this tenant' } }
+    if (-not $tid) { return [pscustomobject]@{ ok = $false; tenantId = $tid; reason = "the licence is bound to tenant $($bound -join ', '), and this environment's tenant id is not known" } }
+    if ($bound -notcontains $tid) {
+        $cfg = "$TenantId".Trim().ToLowerInvariant()
+        $why = if ($cfg -and $cfg -ne $tid) { "; this environment runs in tenant $tid (its managed identity), although it is configured as $cfg" } else { "; this tenant is $tid" }
+        return [pscustomobject]@{ ok = $false; tenantId = $tid; reason = "the licence is for another tenant (bound to $($bound -join ', ')$why)" }
+    }
+    return [pscustomobject]@{ ok = $true; tenantId = $tid; reason = '' }
+}
+
 Function Test-PimLicenseIsProForTenant {
     <#
       PURE. BUG-278 (2026-10-01): THE edition verdict -- the same rule the hard gate (Test-PimProLicence) applies, minus the
@@ -405,10 +440,8 @@ Function Test-PimLicenseIsProForTenant {
     if ($st -notin @('Valid', 'Grace')) { return [pscustomobject]@{ pro = $false; reason = $(if ($st -eq 'Missing') { 'no Pro licence is installed' } else { "the licence is $st ($($License.Reason))" }) } }
     $sku = "$($License.Sku)".Trim()
     if ($sku -notmatch '^(?i)pro(-.+)?$') { return [pscustomobject]@{ pro = $false; reason = "the licence is a '$sku' licence, not Pro" } }
-    $bound = @(@($License.TenantIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
-    $tid = "$TenantId".Trim().ToLowerInvariant()
-    if ($bound.Count -and -not $tid) { return [pscustomobject]@{ pro = $false; reason = "the licence is bound to tenant $($bound -join ', '), and this environment's tenant id is not known" } }
-    if ($bound.Count -and ($bound -notcontains $tid)) { return [pscustomobject]@{ pro = $false; reason = "the licence is for another tenant (bound to $($bound -join ', '); this tenant is $tid)" } }
+    $bind = Test-PimLicenseTenantBinding -License $License -TenantId $TenantId
+    if (-not $bind.ok) { return [pscustomobject]@{ pro = $false; reason = $bind.reason } }
     return [pscustomobject]@{ pro = $true; reason = $(if ($st -eq 'Grace') { "Pro licence in its grace period ($($License.Reason))" } else { "Pro licence for '$($License.Customer)'" }) }
 }
 
@@ -570,10 +603,8 @@ Function Test-PimProLicence {
                     $out.reason = "the licence is a '$("$($lic.Sku)".Trim())' licence, not Pro"
                 } elseif (-not $covers) {
                     $out.reason = "the licence does not include $word (features: $(($features -join ', ')))"
-                } elseif (@($out.tenantIds).Count -gt 0 -and -not $tid) {
-                    $out.reason = "the licence is bound to tenant $(($out.tenantIds -join ', ')), and this environment's tenant id is not known"
-                } elseif (@($out.tenantIds).Count -gt 0 -and ($out.tenantIds -notcontains $tid)) {
-                    $out.reason = "the licence is for another tenant (bound to $(($out.tenantIds -join ', ')); this tenant is $tid)"
+                } elseif (-not ($bind = Test-PimLicenseTenantBinding -License $lic -TenantId $TenantId).ok) {
+                    $out.reason = $bind.reason
                 } else {
                     $out.ok = $true
                     if ("$($lic.Status)" -eq 'Grace') {
