@@ -1116,6 +1116,8 @@ On top of the free edition, a Pro licence adds:
 - **delegated administration** — portal users limited to a tier, level, service or scope;
 - the **tier-impact report** — everyone who can reach tier 0, including through nested groups;
 - the **evidence export** — who may hold what, who held it, and who approved;
+- the **access request API** — a ticketing system such as ServiceNow switches a disabled admin account on for a set
+  time, reads the request's status or cancels it, and PIM switches the account off again when the time is up;
 - **PIM for on-premises Active Directory** — admin accounts in on-premises AD, PIM groups mirrored to AD groups and
   just-in-time AD membership for activated PIM groups, applied by a small hybrid worker.
 

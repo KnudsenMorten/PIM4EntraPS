@@ -471,8 +471,10 @@ $ErrorActionPreference = 'Stop'
 # default, stated on screen by Deploy-PimUpdateJob -- never silently).
 $script:PimDeployRingExplicit = $PSBoundParameters.ContainsKey('UpdateRing')
 # §94: a label renames the tenant singletons -- only those the caller did not name explicitly (script scope, BUG-162).
+# The SQL admin group is deliberately NOT one of them (operator 2026-10-03, framework §5.5: "one group per app"): every
+# PIM store in a tenant is administered by the same identities, so all of them share grp-pim-sql-admins, as SI's do
+# grp-si-sql-admins. Pass -SqlAdminGroupName to give one environment different admins.
 if ("$EnvLabel".Trim()) {
-    if (-not $PSBoundParameters.ContainsKey('SqlAdminGroupName'))    { $SqlAdminGroupName    = "grp-pim-sql-admins-$EnvLabel" }
     if (-not $PSBoundParameters.ContainsKey('EngineAppDisplayName')) { $EngineAppDisplayName = "PIM4EntraPS Engine ($EnvLabel)" }
 }
 # The deploy profile (Update-PimCommunity.ps1) is taken from the same script-scope $PSBoundParameters, for the same reason.
