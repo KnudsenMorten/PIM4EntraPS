@@ -699,6 +699,10 @@ if (-not "$AdminAppId".Trim() -and -not $ValidateOnly -and -not $StepRunner -and
 # from-master downlink is honoured by passing -Scenario through to Invoke-PimUpdate (below).
 $planSource    = $Source
 $scenarioArgs  = @{}     # splat threaded into Invoke-PimUpdate sub-calls (empty unless -Scenario)
+# §94 (found building ring 1, 2026-10-03): Invoke-PimUpdate acted on az's CURRENT subscription because no caller passed
+# -SubscriptionId -- in a tenant with several subscriptions (the internal one has 7) that is often not the target, and the
+# r1 builds needed their own az profile to work around it. Every Invoke-PimUpdate call takes this splat, so pin it here.
+if ("$SubscriptionId".Trim()) { $scenarioArgs['SubscriptionId'] = "$SubscriptionId".Trim() }
 # 2026-09-13 -- the ring gate's override, threaded into every step that can ROLL an existing
 # environment (infra = Setup-PimContainers, code = Invoke-PimUpdate -> Update-PimContainers). Built
 # once so an audited override cannot be honoured by one step and refused by the next. Empty unless the
@@ -2792,6 +2796,8 @@ if ($needRollback -and $codeRan) {
                         $global:LASTEXITCODE = 0
                         $rbArgs = @{}
                         if ("$prevImage".Trim()) { $rbArgs['RollbackImage'] = "$prevImage".Trim() }
+                        # §94: the rollback rolls back in THIS deploy's subscription, never in az's current one.
+                        if ("$SubscriptionId".Trim()) { $rbArgs['SubscriptionId'] = "$SubscriptionId".Trim() }
                         # An empty -Rollback is legal here: with no surviving revision name, the
                         # roller goes straight to the image anchor.
                         & $roller -Rollback ("$prevRev".Trim()) -ResourceGroup $ResourceGroup -AcrName $AcrName -ImageRepo $ImageRepo -Apps $Apps -SkipSmoke @rbArgs | Out-Host

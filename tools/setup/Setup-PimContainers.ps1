@@ -691,6 +691,10 @@ if ($SkipPrivateDns) {
     $dnsRg = $(if ("$PrivateDnsResourceGroup".Trim()) { $PrivateDnsResourceGroup }
                elseif ("$HubVnetResourceGroup".Trim()) { $HubVnetResourceGroup }
                else { $ResourceGroup })
+    # §95.2 (verified 2026-10-04): the zone lives in the SUBSCRIPTION THAT OWNS ITS RESOURCE GROUP. Defaulting to the hub's
+    # resource group but creating the zone with the PIM subscription made a resource group named after the hub's inside the
+    # PIM subscription whenever the hub sits in another one. A named -PrivateDnsResourceGroup stays in the PIM subscription.
+    $dnsSub = $(if (-not "$PrivateDnsResourceGroup".Trim() -and "$HubVnetResourceGroup".Trim()) { $hubSubForPeering } else { $SubscriptionId })
     # Link BOTH sides: the hub so clients resolve it, and the spoke so anything running inside
     # the PIM VNet (the tick Job calling the Manager) resolves the same name to the same IP.
     $linkVnets = New-Object System.Collections.Generic.List[string]
@@ -700,7 +704,7 @@ if ($SkipPrivateDns) {
     }
     Step "Private DNS: zone '$envDomain' -> $envStatic (in $dnsRg)"
     Set-PimPrivateDnsZone -EnvDomain $envDomain -StaticIp $envStatic -ResourceGroup $dnsRg `
-        -SubscriptionId $SubscriptionId -LinkVnetIds @($linkVnets.ToArray())
+        -SubscriptionId $dnsSub -LinkVnetIds @($linkVnets.ToArray())
 } elseif (-not $WhatIfPreference) {
     Write-Warning "  could not read the environment's defaultDomain/staticIp -- skipping the private DNS zone. The Manager FQDN will not resolve."
 }
