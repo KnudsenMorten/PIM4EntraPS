@@ -4362,6 +4362,10 @@ function Get-PimManagerLicenseBody {
     try {
         $b = Get-PimLicenseApiBody -MspRole $role -TenantId "$($global:PIM_TenantId)".Trim() -SqlServer $srv
         $b['canWrite'] = $canWrite
+        # §95.2: the licence request client's state for the admin -- status + message only, NEVER the pull token.
+        $lrState = $null; try { $lrState = Get-PimSetting -Name 'LicenceRequestState' } catch { $lrState = $null }
+        $lrOn = $false; try { $lrOn = [bool](Test-PimFeatureEnabled -Key 'licence.autoRequest') } catch { $lrOn = $false }
+        $b['licenceRequest'] = [ordered]@{ enabled = $lrOn; status = "$($lrState.status)"; message = "$($lrState.message)"; updatedUtc = "$($lrState.updatedUtc)" }
         return $b
     }
     catch {

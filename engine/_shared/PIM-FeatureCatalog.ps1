@@ -154,6 +154,7 @@ $script:PimFeatureCatalog = @(
     [ordered]@{ key='msp.downlink';     label='MSP downlink / fan-out';  group='MSP';          tier='advanced'; license='pro';  scope='multi'; defaultEnabled=$false; dependsOn=@('engine.reconcile');     proFeature='MspFanout';         description='Fan a central admin baseline out to managed customer tenants (pull-not-push). Off = no fan-out runs.' }
 
     # ---- Scheduler / automated jobs (advanced) --------------------------------
+    [ordered]@{ key='licence.autoRequest'; label='Request the licence from Invardia automatically'; group='Automation'; tier='advanced'; license='free'; scope='single'; defaultEnabled=$false; dependsOn=@('scheduler.jobs'); proFeature=''; description='Every 30 minutes, when no Pro licence is valid for this tenant or it ends within 30 days, PIM asks Invardia for its licence and installs the signed file after checking it here (signature, Pro, this tenant). Sends the tenant id, the version and an installation id -- nothing else. Off until switched on.' }
     [ordered]@{ key='scheduler.jobs';   label='Scheduled jobs';          group='Automation';   tier='advanced'; license='free'; scope='single'; defaultEnabled=$false; dependsOn=@();                       proFeature='';                  description='The in-container/VM scheduler that drives reminders, digests, discovery, queue-apply, tenant-cache and engine runs on a cadence. Off = no scheduled job runs (manual/commit triggers still work via their own gates).' }
 )
 

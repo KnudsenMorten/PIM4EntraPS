@@ -14,6 +14,16 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.489 — Your licence can arrive by itself
+
+- **New (off until you switch it on): request the licence from Invardia automatically.** When no Pro licence is
+  installed for this tenant, or yours ends within 30 days, PIM asks Invardia for it every 30 minutes and installs the
+  signed file once it is ready. PIM checks the file itself before installing it: the signature, that it is Pro, and
+  that it is for this tenant. The Licence page shows where the request stands. PIM sends only the tenant id, its version
+  and an installation id. Switch it on under Settings > Features: *Request the licence from Invardia automatically*.
+- **Changed:** the Licence page no longer describes a licence without a tenant as valid for "any tenant". Such a
+  licence is not valid, as of 2.4.488.
+
 ## v2.4.488 — Licences bound to their tenant, guided installation, setup scripts that finish the job
 
 - **Changed: a licence is valid only in the tenant it names.** A licence file that names no tenant is no longer
