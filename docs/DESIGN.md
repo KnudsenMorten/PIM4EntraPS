@@ -8056,6 +8056,12 @@ from the same store reads as the page; `stage_change` writes into the shared pen
 only the caller's own staged changes through the very function the page's Review & commit uses, so validation,
 second-approver and Tier 0/1 approval, the offboarding hold and optimistic concurrency apply unchanged. Nothing is
 ever activated. Every call is audited as `mcp.<read|propose|commit>`; the endpoint refuses without the Pro feature.
+On an MSP managing tenant two more read tools are listed: `managed_tenants` (each managed tenant with its enabled
+state, the managing tenant's copy of its ring, its tags, whether the last publish carried it and how many replicated
+rows reach it) and `managed_tenant_reach` (what one managed tenant receives, grouped as on the Replication overview).
+Both are shaped from the same answers as the Managed tenants and Replication overview pages, never write, and never
+reach into a managed tenant. A managed tenant's own drift and conformance are not reported back to the managing tenant,
+and both tools say so rather than leave it unsaid.
 
 ---
 

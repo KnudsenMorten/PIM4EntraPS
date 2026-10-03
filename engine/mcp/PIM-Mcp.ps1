@@ -127,3 +127,62 @@ function Invoke-PimMcpMessage {
         default { return (& $err $id -32601 "method '$method' is not supported (tools only)") }
     }
 }
+
+# ---- REQ 93 P4 -- the managing tenant's read-only views of its managed tenants -------------------------------------
+# Shaped from the SAME bodies the Managed tenants and Replication overview pages get (Get-PimMspTenantRegistryView,
+# Get-PimReplicationOverview) -- no second computation. Read only: nothing here writes, and nothing reaches INTO a
+# managed tenant. 🔑 What a managed tenant itself sees (its drift, its conformance, the ring it really runs) is NOT
+# known here: nothing reports back to the managing tenant until the framework uplink (DOCS/REQUIREMENTS.md §8) is
+# deployed -- every answer says so instead of letting silence read as "fine".
+$script:PimMcpNoUplinkNote = "Not known on the managing tenant: a managed tenant's own drift, conformance and the ring it really runs are not reported back (the status uplink is not deployed). Check them in that tenant's own PIM Manager."
+
+function ConvertTo-PimMcpManagedTenants {
+    # PURE. The registry view (GET /api/msp/tenants body) -> the MCP answer. -Overview (optional) adds how many rows reach each tenant.
+    param([Parameter(Mandatory)][object]$View, [AllowNull()][object]$Overview)
+    if (-not [bool]$View.master) { throw "$(if ("$($View.reason)") { $View.reason } else { 'This is not the managing tenant.' })" }
+    $reachCount = @{}; $notChecked = @()
+    if ($null -ne $Overview) {
+        $notChecked = @($Overview.notChecked)
+        foreach ($g in @($Overview.groups)) { foreach ($r in @($g.rows)) { foreach ($id in @($r.reachIds)) { $k = "$id".ToLowerInvariant(); $reachCount[$k] = 1 + [int]$reachCount[$k] } } }
+    }
+    $rows = @(foreach ($t in @($View.tenants)) {
+        $tid = "$($t.tenantId)".ToLowerInvariant()
+        [ordered]@{
+            name = "$($t.name)"; tenantId = $tid; enabled = [bool]$t.enabled
+            ringCopy = $t.ring; tags = @($t.tags)
+            publish = "$($t.publish.state)"; publishText = "$($t.publish.text)"
+            rowsReaching = $(if ($null -eq $Overview) { $null } elseif ($notChecked -contains "$($t.name)") { 'not checked (its plan failed -- see the Replication overview)' } else { [int]$reachCount[$tid] })
+        }
+    })
+    return [ordered]@{
+        tenants = @($rows); count = @($rows).Count; lastPublish = $View.lastPublish
+        ringNote = "$($View.ringNote)"; notKnownHere = $script:PimMcpNoUplinkNote
+    }
+}
+
+function Get-PimMcpManagedTenantReach {
+    # PURE. The replication overview -> what ONE managed tenant receives (by name or tenant id), grouped as on the page.
+    param([Parameter(Mandatory)][object]$Overview, [Parameter(Mandatory)][string]$Tenant)
+    if (-not [bool]$Overview.master) { throw "$(if ("$($Overview.reason)") { $Overview.reason } else { 'This is not the managing tenant.' })" }
+    $want = "$Tenant".Trim()
+    $t = @(@($Overview.tenants) | Where-Object { "$($_.tenantId)" -ieq $want -or "$($_.name)" -ieq $want })
+    if ($t.Count -ne 1) {
+        $known = (@($Overview.tenants) | ForEach-Object { "$($_.name)" }) -join ', '
+        throw "no managed tenant '$want'$(if ($known) { " -- registered: $known" } else { ' -- none is registered' })"
+    }
+    $t = $t[0]; $tid = "$($t.tenantId)".ToLowerInvariant()
+    if (@($Overview.notChecked) -contains "$($t.name)") {
+        return [ordered]@{ tenant = "$($t.name)"; tenantId = $tid; checked = $false; reason = 'Its replication plan failed, so what it receives is NOT CHECKED -- see the Replication overview errors.'; errors = @(@($Overview.errors) | Where-Object { "$_" -like "$($t.name):*" }) }
+    }
+    $groups = @(foreach ($g in @($Overview.groups)) {
+        $hit = @(@($g.rows) | Where-Object { @($_.reachIds | ForEach-Object { "$_".ToLowerInvariant() }) -contains $tid } | ForEach-Object {
+            [ordered]@{ title = "$($_.title)"; entity = "$($_.entity)"; replicate = "$($_.replicate.text)"; ring = "$($_.ring.text)"; target = "$($_.target.text)" } })
+        if ($hit.Count) { [ordered]@{ group = "$($g.label)"; count = $hit.Count; rows = @($hit) } }
+    })
+    return [ordered]@{
+        tenant = "$($t.name)"; tenantId = $tid; ringCopy = $t.ring; tags = @($t.tags); checked = $true
+        rowsReaching = [int](@($groups | ForEach-Object { $_.count }) | Measure-Object -Sum).Sum
+        groups = @($groups); computedUtc = "$($Overview.computedUtc)"
+        ringNote = "$($Overview.ringNote)"; notKnownHere = $script:PimMcpNoUplinkNote
+    }
+}
