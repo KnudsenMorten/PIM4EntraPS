@@ -1857,6 +1857,12 @@ deployment is a supported choice) and no credentials lying around.
   **Buy Pro** button on the Free vs Pro page opens it. Licensed customers get support at
   [portal.invardia.com](https://portal.invardia.com), linked from the Licence page; the community edition is supported
   by the community.
+- **Your licence can arrive by itself.** ✅ 2026-10-04 — Switch on *Request the licence from Invardia automatically*
+  (Settings > Features). From then on, when no Pro licence is installed for this tenant or yours ends within 30 days, PIM
+  asks Invardia for it every 30 minutes and installs the signed file as soon as it is ready. Before installing, PIM checks
+  the file itself: its signature, that it is Pro, and that it is for this tenant. A renewal Invardia has already approved
+  arrives on the first try. The Licence page shows where the request stands. PIM sends only the tenant id, its version
+  and an installation id. The switch is off until you turn it on. *(2.4.489)*
 - **From Community to Pro without reinstalling.** ✅ 2026-10-01 — register the Pro licence on a Community
   installation and the Pro features switch on at once; the edition shown, the features unlocked and the update
   path all follow the same check (a Pro licence for **this** tenant), so a licence for another tenant -- or one

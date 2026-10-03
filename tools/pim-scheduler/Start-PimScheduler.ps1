@@ -160,6 +160,8 @@ if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\
 # §79.2: job 'pending-check' -- staged changes (the shared store, §79.13) and queued actions nobody committed.
 . "$shared\PIM-SharedPending.ps1"
 . "$shared\PIM-PendingCheck.ps1"
+# §95.2: job 'licence-request' -- ask Invardia for this install's licence (OFF unless 'licence.autoRequest').
+. "$shared\PIM-LicenceRequest.ps1"
 # REQ-AR-2: job 'access-review-cycle' -- the per-department access review campaigns.
 if (Test-Path -LiteralPath "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1") { . "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1" }   # §84 Pro: loaded only when present
 if (Test-Path -LiteralPath "$shared\..\rfa\PIM-RfaSync.ps1") { . "$shared\..\rfa\PIM-RfaSync.ps1" }   # §82 Pro: loaded only when present
@@ -308,6 +310,11 @@ Register-PimJobHandler -Type 'target-check' -Handler {
     Invoke-PimTargetCheckJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
 Write-Host "[scheduler] target check wired (pim.TenantCache/target-check; missing Azure scopes / roles are reported, never removed)" -ForegroundColor Cyan
+# §95.2: the REAL 'licence-request' handler. A network failure is reported in the result (asked again next run), never thrown.
+Register-PimJobHandler -Type 'licence-request' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimLicenceRequestJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
 # §79.2: the REAL 'pending-check' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
 Register-PimJobHandler -Type 'pending-check' -Handler {
     param($job, $now, $whatIf)

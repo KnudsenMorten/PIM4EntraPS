@@ -6270,7 +6270,8 @@
     h += row('Status', '<span id="licStatus">' + st + '</span>');
     if (d.customer) h += row('Customer', '<span id="licCustomer">' + esc(d.customer) + '</span>');
     if (d.validTo) h += row('Valid until', '<span id="licValidTo">' + esc(d.validTo) + (d.graceUntil ? ' (grace until ' + esc(d.graceUntil) + ')' : '') + '</span>');
-    if (d.customer || d.validTo) h += row('Bound tenant', '<span id="licTenant">' + (d.boundTenant ? esc(d.boundTenant) : 'any tenant (not bound)') + '</span>');
+    // LIC anti-copy (2.4.488): a licence that names no tenant is valid in NO tenant -- never "any tenant".
+    if (d.customer || d.validTo) h += row('Bound tenant', '<span id="licTenant">' + (d.boundTenant ? esc(d.boundTenant) : 'none -- not valid: a licence must name the tenant it is for') + '</span>');
     if (d.tenantId) h += row('This tenant', '<code>' + esc(d.tenantId) + '</code>');
     h += '</table>';
     // BUG-277: a Community install that registered its Pro licence -- the Pro features are on, and one step gives it the Pro updater.
@@ -6279,6 +6280,13 @@
         '<b>Upgrade to Pro updates.</b> The Pro features are on. This installation still updates like the Community edition (from GitHub). ' +
         'To receive Pro releases automatically, run this once on the machine you deploy from, with the Pro update feed you received with your licence:' +
         '<div><code class="lic-cmd" style="font-size:11px;overflow-wrap:anywhere;">' + esc(d.upgrade.command || '') + '</code></div></div>';
+    }
+    // §95.2: the licence request client (feature 'licence.autoRequest') -- what it last did, in its own words.
+    if (d.licenceRequest && (d.licenceRequest.enabled || d.licenceRequest.status)) {
+      const lr = d.licenceRequest;
+      h += '<div id="licRequest" data-status="' + esc(lr.status || '') + '" style="margin-top:8px;font-size:12px;">' +
+        '<b>Licence from Invardia:</b> ' + (lr.message ? esc(lr.message) : (lr.enabled ? 'on -- requested automatically when the licence is missing or ends within 30 days' : 'off')) +
+        (lr.updatedUtc ? ' <span style="color:#57606a;">(' + esc(String(lr.updatedUtc).slice(0, 16).replace('T', ' ')) + ' UTC)</span>' : '') + '</div>';
     }
     if (d.mspRequired) {
       const role = (d.mspRole === 'slave') ? 'managed tenant' : 'managing tenant';   // §85: the word; the API value stays slave | master

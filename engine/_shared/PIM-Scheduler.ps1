@@ -52,6 +52,10 @@ $script:PimTickOnlyJobTypes += 'target-check'
 # §79.2 (operator 2026-09-25): 'pending-check' reports staged changes and queued actions nobody committed (PIM-PendingCheck.ps1).
 $script:PimJobTypes += 'pending-check'
 $script:PimTickOnlyJobTypes += 'pending-check'
+# §95.2 (2026-10-04): 'licence-request' asks Invardia for this install's licence and installs the signed file (PIM-LicenceRequest.ps1).
+# Inert unless the feature 'licence.autoRequest' is ON (it ships OFF -- PIM's first call to invardia.com).
+$script:PimJobTypes += 'licence-request'
+$script:PimTickOnlyJobTypes += 'licence-request'
 # REQ-AR-2 (operator 2026-09-26): 'access-review-cycle' starts the per-DEPARTMENT access review campaigns the review rules
 # make due (PIM-AccessReviewCycle.ps1). Checks every 6 h; the cadence per department is the rule's cadenceDays.
 $script:PimJobTypes += 'access-review-cycle'
@@ -322,6 +326,9 @@ function Get-PimDefaultJobSchedule {
         # §79.2: daily -- staged changes / queued actions older than a day that nobody committed. On/off + cadence on the Jobs
         # page (SuperAdmin schedule); mail under Alerting > 'pending-uncommitted'.
         [pscustomobject]@{ name='pending-check'; type='pending-check'; intervalMinutes=1440; enabled=$true }
+        # §95.2: every 30 min (Invardia's poll interval); inert until 'licence.autoRequest' is ON. Does nothing while the licence is
+        # valid for more than 30 days.
+        [pscustomobject]@{ name='licence-request'; type='licence-request'; intervalMinutes=30; enabled=$true }
         # REQ-AR-2: no-op until review rules are saved and enabled (Settings > Access reviews); Pro 'reviews.campaigns'.
         [pscustomobject]@{ name='access-review-cycle'; type='access-review-cycle'; intervalMinutes=360; enabled=$true }
         # §82: every tick (the tick runs every 5 min); inert until the RFA portal is deployed + enabled (Pro 'rfa.portal').
@@ -1197,6 +1204,13 @@ function Initialize-PimDefaultJobHandlers {
         # REQ-AR-2: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimAccessReviewCycleJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:access-review-cycle (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'licence-request' -Handler {
+        param($job,$now,$whatIf)
+        # §95.2: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimLicenceRequestJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:licence-request (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'pending-check' -Handler {
