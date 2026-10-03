@@ -14,6 +14,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.484 — MCP: the managing tenant's view of its managed tenants (MSP)
+
+- **New (Pro, MSP, preview): two read-only MCP tools on the managing tenant.** `managed_tenants` lists every managed
+  tenant with its ring, tags, whether the last publish carried it and how many replicated rows reach it;
+  `managed_tenant_reach` shows what one managed tenant receives -- the Replication overview for that tenant. They are
+  listed only on the managing tenant and never change anything in a managed tenant. A managed tenant's own drift and
+  conformance are not reported back to the managing tenant yet; the tools say so.
+
 ## v2.4.483 — MCP sign-in hardened; the access request API describes itself in full
 
 - **Fixed (security, MCP preview): only a signed-in person can use the MCP server.** The Manager now verifies every MCP

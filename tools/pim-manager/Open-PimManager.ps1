@@ -4431,6 +4431,23 @@ function Get-PimManagerMcpTools {
         if ($needle) { $ev = @($ev | Where-Object { "$($_.action) $($_.target) $($_.actor) $($_.result)" -match [regex]::Escape($needle) }) }
         $top = 50; if ($a -and $a.PSObject.Properties['top'] -and "$($a.top)" -match '^\d+$') { $top = [math]::Min(500, [math]::Max(1, [int]$a.top)) }
         @($ev | Select-Object -First $top | ForEach-Object { [ordered]@{ ts = "$($_.ts)"; actor = "$($_.actor)"; action = "$($_.action)"; target = "$($_.target)"; result = "$($_.result)" } }) }))
+    # REQ 93 P4 -- the managing tenant's read-only views of its managed tenants, over the SAME bodies as its two pages.
+    # Listed only on the managing tenant (MSP); each handler checks again (fail closed). Never a write into a managed tenant.
+    if (Test-PimManagerIsMspMaster) {
+        $tools.Add((New-PimMcpTool -Name 'managed_tenants' -Kind read -MinRole Reader -Description 'MSP managing tenant only: every managed tenant -- name, tenant id, enabled, the managing tenant''s copy of its ring, tags, whether the last publish carried it, and how many replicated rows reach it. A managed tenant''s own drift / conformance is not known here.' -Handler {
+            param($a, $ctx)
+            $v = Get-PimManagerMspTenantsResponse
+            if ([int]$v.status -ne 200) { throw "$($v.body.error)" }
+            $ov = $null; try { $o = Get-PimManagerReplicationOverviewResponse; if ([int]$o.status -eq 200) { $ov = $o.body } } catch { $ov = $null }
+            ConvertTo-PimMcpManagedTenants -View $v.body -Overview $ov }))
+        $tools.Add((New-PimMcpTool -Name 'managed_tenant_reach' -Kind read -MinRole Reader -Description 'MSP managing tenant only: what ONE managed tenant receives from the managing tenant (admins, groups, roles, policies...) with each row''s Replicate / Ring / Target -- the Replication overview for that tenant.' `
+            -InputSchema @{ type = 'object'; required = @('tenant'); properties = @{ tenant = @{ type = 'string'; description = 'managed tenant name or tenant id' }; refresh = @{ type = 'boolean'; description = 'recompute instead of the 30-second cache' } } } -Handler {
+            param($a, $ctx)
+            $rf = ($a.PSObject.Properties['refresh'] -and "$($a.refresh)" -match '^(?i:true|1)$')
+            $o = Get-PimManagerReplicationOverviewResponse -Refresh:$rf
+            if ([int]$o.status -ne 200) { throw "$($o.body.error)" }
+            Get-PimMcpManagedTenantReach -Overview $o.body -Tenant "$($a.tenant)" }))
+    }
     $tools.Add((New-PimMcpTool -Name 'stage_change' -Kind propose -MinRole Admin -Description 'STAGE one change to a configuration entity (add a row, modify fields of a row, or remove a row). It is NOT applied: it waits under Pending changes, locked to you, until it is committed in the PIM Manager (Review & commit), with every check the Manager runs.' `
         -InputSchema @{ type = 'object'; required = @('entity', 'op', 'row'); properties = @{
             entity = @{ type = 'string'; description = 'e.g. PIM-Assignments-Admins' }; op = @{ type = 'string'; enum = @('add', 'modify', 'remove') }
