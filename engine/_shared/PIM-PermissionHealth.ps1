@@ -189,7 +189,13 @@ function Get-PimPermissionHealth {
         # decoy mailbox. So this dimension asks two different questions: is a sender configured, and
         # does a send actually succeed. $null = not probed (unknown), which is never reported as OK.
         [string]$MailSender          = '',
-        [object]$MailSendOk          = $null
+        [object]$MailSendOk          = $null,
+        # Operator 2026-10-04 (RIDE: "Core functionality is BLOCKED -- no Azure role-management scope" on an environment
+        # that defines NO Azure delegation): Azure rights are needed only when the store defines Azure resource
+        # delegations (PIM-Assignments-Azure-Resources rows). 0 = not needed, so their absence blocks nothing -- the engine
+        # touches only what is defined, and asking for User Access Administrator at the root for nothing is standing Tier-0
+        # privilege. -1 (the default) = unknown -> the old rule (needed), so a store that cannot be counted never hides a gap.
+        [int]$AzureDelegationCount   = -1
     )
 
     $required = @(Get-PimRequiredGraphCapabilities)
@@ -221,7 +227,9 @@ function Get-PimPermissionHealth {
     # Connectors switched off purely because a permission is absent -- named, so the reader can
     # decide whether they wanted that workload at all.
     $offConnectors = @($missingOpt | ForEach-Object { "$($_.connector)" } | Where-Object { $_ } | Sort-Object -Unique)
-    $azureOk = (@($AzureRoleScopes) | Where-Object { "$_".Trim() }).Count -gt 0
+    $azureHeld = (@($AzureRoleScopes) | Where-Object { "$_".Trim() }).Count -gt 0
+    $azureNotNeeded = ($AzureDelegationCount -eq 0)
+    $azureOk = ($azureHeld -or $azureNotNeeded)
 
     # Mail: configured AND proven. A configured sender that cannot send is not "ok" -- the whole
     # point is that TAP delivery and every notification silently stop.
@@ -261,10 +269,15 @@ function Get-PimPermissionHealth {
     $headline =
         if ($ok -and -not $missingOpt.Count) { 'Permissions OK' }
         elseif ($ok) { ("Core PIM OK -- {0} optional workload(s) unavailable" -f $offConnectors.Count) }
+        # Operator 2026-10-04 (internal: "critical Core functionality is BLOCKED -- mail not verified" while every permission
+        # was held): a sender that is configured but not yet PROVEN is a warning by design (above), so the headline must not
+        # say BLOCKED either. Everything else held + mail only unverified = core OK, verify mail.
+        elseif (-not $missingReq.Count -and $azureOk -and $mailConfigured -and $mailUnknown) { 'Core PIM OK -- mail sending not verified yet (press Verify)' }
         else { ("Core functionality is BLOCKED -- " + ($parts -join ', ')) }
 
     $detail = if ($ok) {
         $d = "$IdentityName holds every REQUIRED permission; core PIM works."
+        if ($azureNotNeeded -and -not $azureHeld) { $d += "  No Azure resource delegation is defined, so no Azure role-management right is needed (grant User Access Administrator at the scopes only when you define one)." }
         if ($offConnectors.Count) { $d += "  These optional workloads are unavailable until their permission is granted: " + ($offConnectors -join ', ') + "." }
         $d
     } else {
@@ -291,6 +304,7 @@ function Get-PimPermissionHealth {
         unavailableConnectors = $offConnectors
         brokenCapabilities = $caps
         azureOk = $azureOk
+        azureNeeded = (-not $azureNotNeeded)
         mail = [pscustomobject]@{ sender = "$MailSender"; configured = $mailConfigured; ok = $mailOk; verified = (-not $mailUnknown) }
         headline = $headline
         detail = $detail

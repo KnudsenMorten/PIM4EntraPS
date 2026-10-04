@@ -88,7 +88,8 @@ $script:PimSettingsNeverCopy = @(
     'BaselineTrustedKeys',
     'MspRegistry', 'MspTenants', 'CentralAdmins',
     'SqlStore', 'StorePointer', 'Instances',
-    'Licence', 'License'
+    'Licence', 'License',
+    'EnvironmentName'           # this environment's own display name (operator 2026-10-04) -- names THIS one
 )
 
 function Confirm-Copyable {
