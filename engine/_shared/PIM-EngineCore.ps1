@@ -1320,6 +1320,12 @@ function Invoke-PimEngine {
         $why = if ($__managed -lt 0) { 'the managed rows could not be counted' } else { 'the store defines nothing (0 managed rows)' }
         Write-Host ("[engine] CRITICAL GATE: {0} -- the engine touches NOTHING (no admins, no groups, no policies, no assignments). Define what PIM manages first." -f $why) -ForegroundColor Red
         foreach ($s in @($res.scopes)) {
+            # BUG-286 (ig798, 2026-10-04): a store that defines nothing has NOTHING failing. The scopes never run under this
+            # gate, so their failure slice was never replaced and the last failures (deleted E2E rows) kept the banner red
+            # for days. Clear each skipped scope's slice -- only on a real run, never a plan; never fatal.
+            if (-not $WhatIf -and (Get-Command Update-PimEngineItemFailures -ErrorAction SilentlyContinue)) {
+                try { [void](Update-PimEngineItemFailures -Scope $s -Failures @()) } catch { Write-Warning "[engine] could not clear the failures of '$s' under the empty-store gate: $($_.Exception.Message)" }
+            }
             # R25-32: skipped is a COUNT everywhere (Invoke-PimEngineCore sums it as [int] under Stop -- the text crashed the run,
             # an alert every tick); the reason has its own field.
             $out.Add([pscustomobject]@{ scope = $s; ok = $true; skipped = 0; skipReason = 'no-managed-rows'; detail = "skipped: $why"

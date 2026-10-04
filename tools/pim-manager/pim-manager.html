@@ -7132,7 +7132,7 @@
   // id); this only MOVES each rendered section into its category and shows one category at a time, chosen from a bar.
   // A section no rule claims lands in "Other", so nothing can disappear. The last category is remembered per browser.
   const SETTINGS_CATEGORIES = [
-    { key: 'naming',    label: 'Naming & accounts',      match: ['setAdminDomainHost', 'setGroupNamingCard', /admin name prefixes/i, /naming conventions/i, /naming words/i, /AD OU placement/i, /^filters/i] },
+    { key: 'naming',    label: 'Naming & accounts',      match: ['setEnvNameHost', 'setAdminDomainHost', 'setGroupNamingCard', /admin name prefixes/i, /naming conventions/i, /naming words/i, /AD OU placement/i, /^filters/i] },
     { key: 'features',  label: 'Features & edition',     match: ['setFeaturesCard', 'setGovPreviewCard', 'setLicenceCard', 'setEditionCard', 'setScenarioCard', 'setFeatureGatesCard'] },
     { key: 'approvals', label: 'Approvals & policy',     match: ['setSelfApproveHost', 'setOpPolicyCard'] },
     { key: 'rings',     label: 'Deployment rings',       match: ['setRingsHost'] },
