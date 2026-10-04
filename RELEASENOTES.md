@@ -14,6 +14,29 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.492 — The environment's name in the header, and a restore from backup
+
+- **New: give each PIM environment a name, shown at the top of every page.** Set it under Settings > *Environment name*,
+  for example `Production` or `Test (EU)`.
+  - It appears as **Environment**, left of Mode, and in the browser tab (`PIM Manager (<name>)`), so several open PIM
+    Managers are easy to tell apart.
+  - It works the same for a single tenant and for managing and managed tenants.
+  - The tenant name and Tenant ID are still shown on the right. The Tenant ID now has its own caption.
+  - Only a SuperAdmin can change the name, and the change is audited.
+  - The name is never copied to another environment.
+- **New: bring an environment's configuration back from its backup.** `tools/setup/Import-PimEnvironmentBackup.ps1` copies
+  a restored backup into another running environment, for example after a rebuild:
+  - **What it copies:** the definitions, the settings, the audit trail and the undo snapshots.
+  - **Plan first:** without `-Apply` it only shows the plan.
+  - **Before it writes:** with `-Apply` it saves the target's current settings to a file, then pauses the engine, then
+    writes everything in one transaction. The engine stays paused until you have reviewed the result.
+  - **Never overwritten:** a definition the target already has is left alone. The target's own identity settings
+    (licence, mail sender, URLs, scheduler state) are never copied. People lists are merged, so nobody loses access.
+  - **Audit trail:** the old trail is appended unchanged, and the import itself is recorded.
+- **Fixed: no "Core functionality is BLOCKED" warning about Azure when you use no Azure delegations.** Azure
+  role-management rights are needed only when you define Azure resource delegations. Without any, their absence no longer
+  shows as blocked. With some defined, a missing right is still reported as an error.
+
 ## v2.4.491 — A safer database administrator group, a hybrid worker without a public IP, Pro updates and status telemetry
 
 - **Changed: setup no longer makes an ordinary group the database administrator.** The group that administers the PIM

@@ -8473,6 +8473,34 @@ function Handle-Request {
             return 200
         }
 
+        # Operator 2026-10-04: the ENVIRONMENT's own name ("EFIF (test)"), shown in the header left of Mode and in the browser
+        # tab, so several open Managers are told apart. pim.Settings 'EnvironmentName' (a plain string). Read: every signed-in
+        # role (it is on every page). Change: SuperAdmin, audited. Never copied to another environment (it names THIS one).
+        if ($path -eq '/api/settings/environment-name' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $v = ''; try { $v = "$(Get-PimSetting -Name 'EnvironmentName')".Trim() } catch { $v = '' }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ value = $v; maxLength = 40; canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') }
+            return 200
+        }
+        if ($path -eq '/api/settings/environment-name' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change the environment name.' }; return 403 }
+            $sb = Read-RequestJson -Request $req
+            $want = if ($sb -and $sb.PSObject.Properties['value']) { ("$($sb.value)" -replace '[\x00-\x1F\x7F]', ' ').Trim() } else { '' }
+            if ($want.Length -gt 40) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'The environment name can be at most 40 characters.' }; return 400 }
+            $before = ''; try { $before = "$(Get-PimSetting -Name 'EnvironmentName')".Trim() } catch { }
+            # Clearing writes "" through ValueJson: Set-PimManagerSettingObject's -Value is Mandatory, and a Mandatory
+            # parameter refuses an empty string ("Cannot bind argument ... because it is an empty string").
+            if ($want) { Set-PimManagerSettingObject -Name 'EnvironmentName' -Value $want }
+            else {
+                Set-PimSqlSetting -ConnectionString (Get-PimManagerSettingCs) -Name 'EnvironmentName' -ValueJson '""'
+                if (Get-Command Update-PimManagerSettingMirror -ErrorAction SilentlyContinue) { try { Update-PimManagerSettingMirror -Name 'EnvironmentName' -Value ' ' } catch { } }
+            }
+            Write-PimManagerAuditEvent -Action 'settings.environment-name.save' -Target 'EnvironmentName' -Result 'ok' -Before @{ value = $before } -After @{ value = $want }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; value = $want }
+            return 200
+        }
+
         if ($path -eq '/api/tenant-lists' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             # Lazy hosted populate: if the cache is empty/stale (e.g. auth came
@@ -11483,8 +11511,15 @@ function Handle-Request {
                     if ($lastReal) { $mailProof = ([int]$lastReal.sent -gt 0) }
                 } catch { $mailProof = $null }
             }
+            # Operator 2026-10-04 (RIDE): Azure rights are needed only when Azure resource delegations are DEFINED. -1 = the
+            # store could not be counted -> the strict rule stays (a gap is never hidden by a failed read).
+            $azDefs = -1
+            if ($script:PimSqlCs -and (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
+                try { $azDefs = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Assignments-Azure-Resources').Count } catch { $azDefs = -1 }
+            }
             $health = Get-PimPermissionHealth -GrantedGraphRoles $granted -AzureRoleScopes $azScopes `
-                        -IdentityName $identityName -GraphReadable $readable -MailSender $mailSender -MailSendOk $mailProof
+                        -IdentityName $identityName -GraphReadable $readable -MailSender $mailSender -MailSendOk $mailProof `
+                        -AzureDelegationCount $azDefs
             # Say WHY the check failed -- "could not be checked" with no cause left the operator nothing to act on.
             if (-not $readable -and $permReadErr -and $health.PSObject.Properties['detail']) { $health.detail = "$($health.detail) Cause: $permReadErr" }
             $identities = @()
