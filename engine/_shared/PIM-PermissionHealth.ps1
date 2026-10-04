@@ -272,7 +272,7 @@ function Get-PimPermissionHealth {
         # Operator 2026-10-04 (internal: "critical Core functionality is BLOCKED -- mail not verified" while every permission
         # was held): a sender that is configured but not yet PROVEN is a warning by design (above), so the headline must not
         # say BLOCKED either. Everything else held + mail only unverified = core OK, verify mail.
-        elseif (-not $missingReq.Count -and $azureOk -and $mailConfigured -and $mailUnknown) { 'Core PIM OK -- mail sending not verified yet (press Verify)' }
+        elseif (-not $missingReq.Count -and $azureOk -and $mailConfigured -and $mailUnknown) { 'Core PIM OK -- mail sending not verified yet (send a test alert)' }
         else { ("Core functionality is BLOCKED -- " + ($parts -join ', ')) }
 
     $detail = if ($ok) {
@@ -287,7 +287,7 @@ function Get-PimPermissionHealth {
         if ($caps.Count)   { $d += "  Blocked: " + ($caps -join '; ') + "." }
         if (-not $azureOk) { $d += "  Azure resource roles cannot be assigned at any scope (needs User Access Administrator, typically at the tenant root management group)." }
         if (-not $mailConfigured) { $d += "  No sender mailbox is configured, so TAP delivery and every notification are dead." }
-        elseif ($mailUnknown)     { $d += "  Mail sending has not been verified -- press Verify to test it." }
+        elseif ($mailUnknown)     { $d += "  Mail sending has not been verified yet -- send a test alert: Settings > Mail & alerting > Send test alert (it needs at least one alert recipient). 'Verify permissions' re-reads the permissions only; it sends no mail." }
         elseif (-not $mailOk)     { $d += "  Mail sending FAILS: the scoped Exchange RBAC assignment for '$MailSender' is missing or wrong (Mail.Send is deliberately NOT granted as a Graph role)." }
         if ($offConnectors.Count) { $d += "  Separately, these optional workloads are off: " + ($offConnectors -join ', ') + "." }
         $d

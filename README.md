@@ -640,7 +640,7 @@ A **global search box** in the header jumps to any person, group, role, scope or
 tag across the whole estate: a person or role opens its "who can do what" report;
 a group, scope or tag focuses it on the Access map.
 
-Give each environment a **name** (Settings > Environment name, e.g. `Production` or `Test (EU)`). It is shown at the top
+Give each environment a **name** (Settings > Naming & accounts > Environment name, e.g. `Production` or `Test (EU)`). It is shown at the top
 of every page, as **Environment**, left of the Mode. It also names the browser tab, so several open PIM Managers are easy
 to tell apart. The tenant name and Tenant ID are still shown beside it.
 

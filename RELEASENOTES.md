@@ -14,6 +14,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.493 — Mail check wording, the environment name card, and a shared update verifier
+
+- **Fixed: the permission banner now says how to prove mail works.** When mail sending has not been proven yet, the
+  banner points at **Settings > Mail & alerting > Send test alert** (which needs at least one alert recipient).
+  *Verify permissions* only re-reads permissions and sends no mail, so pressing it could never clear the warning.
+- **Fixed: the Environment name card is easy to find.** It is now the first card under Settings > *Naming & accounts*;
+  in 2.4.492 it landed in the last tab, *Other*.
+- **Fixed: an engine run over an empty set of definitions clears old per-item failures**, so the Overview no longer
+  shows failures from an earlier run after everything was removed.
+- **Changed: the update-manifest verifier is its own product-neutral file**, so every product that takes signed updates
+  from Invardia runs the identical check. Behaviour is unchanged.
+
 ## v2.4.492 — The environment's name in the header, and a restore from backup
 
 - **New: give each PIM environment a name, shown at the top of every page.** Set it under Settings > *Environment name*,
