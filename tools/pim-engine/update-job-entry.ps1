@@ -237,11 +237,55 @@ if (-not $targetVer -and $targetImg) {
 # removing. To freeze ONE environment, set PIM_UPDATE_HOLD=1; that is an explicit, visible decision
 # rather than a stale pin nobody remembers setting.
 $ring = "$($env:PIM_UPDATE_RING)".Trim()
+# §95.4 -- a Pro install whose updates come from Invardia's update platform (Deploy-PimUpdateJob -UpdateSource Invardia).
+# Invardia decides WHAT and WHETHER (its ring for this environment, a signed manifest); everything after the version is
+# known -- build, schema, roll, verify, rollback -- is this job's own, unchanged. PIM-InvardiaUpdate.ps1 has the rules.
+$updSource = "$($env:PIM_UPDATE_SOURCE)".Trim().ToLowerInvariant()
+$script:PimInvardiaContext = ''; $script:PimInvardiaSequence = 0; $script:PimInvardiaApplied = 0
 if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     Say "PIM_UPDATE_HOLD=1 -- this environment is frozen; the ring channel is not consulted." 'Yellow'
     # §71.43 -- a held environment has NO approved version to show, and saying so is the point: the
     # Manager must not display the last version some earlier run happened to read as if it still applied.
     $script:PimRingApprovedReason = 'this environment is HELD (PIM_UPDATE_HOLD=1) -- the ring channel was not consulted'
+} elseif ($updSource -eq 'invardia') {
+    . (Join-Path $solRoot 'engine\_shared\PIM-LicenceRequest.ps1')   # Invoke-PimLicenceHttp (5.1 + 7, a non-2xx is a status)
+    . (Join-Path $solRoot 'engine\_shared\PIM-InvardiaUpdate.ps1')
+    $csInv = $null; try { $csInv = Get-PimSqlConnectionString } catch { $csInv = $null }
+    if (-not "$csInv".Trim()) {
+        try {
+            $heal = Resolve-PimUpdaterStoreSettings -JobServer "$($global:PIM_SqlServer)" -JobDatabase "$($global:PIM_SqlDatabase)" `
+                        -ManagerStore (Get-PimAcaStoreSettings -Resource $app) -ManagerApp $managerApp
+            if ($heal.source -eq 'manager' -and "$($heal.server)".Trim()) {
+                Set-Variable -Name 'PIM_SqlServer' -Scope Global -Value "$($heal.server)"
+                if ("$($heal.database)".Trim()) { Set-Variable -Name 'PIM_SqlDatabase' -Scope Global -Value "$($heal.database)" }
+                try { $csInv = Get-PimSqlConnectionString } catch { $csInv = $null }
+            }
+        } catch { }
+    }
+    if (-not "$csInv".Trim()) {
+        Say 'Invardia updates: no store -- the licence and the install key live in it. Nothing rolled.' 'Red'
+        $script:PimRingApprovedReason = 'Invardia updates: the store could not be reached (licence + install key)'
+        Send-PimUpdateOutcome -Action 'none' -Outcome 'failed' -ErrorText 'Invardia updates: no store for the licence and install key'
+        exit 1
+    }
+    $licText = ConvertTo-PimInvardiaLicenceText -Value $(try { Get-PimSqlSetting -ConnectionString $csInv -Name 'License' } catch { $null })
+    $invKey = Resolve-PimInvardiaInstallKey -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $csInv -Name $n }
+    $invBase = ''; try { $invBase = "$(Get-PimSqlSetting -ConnectionString $csInv -Name 'LicenceRequestBaseUrl')".Trim() } catch { }
+    $seqTmp = 0; if ([int]::TryParse("$($env:PIM_UPDATE_INVARDIA_SEQ)", [ref]$seqTmp)) { $script:PimInvardiaApplied = $seqTmp }
+    $t = Get-PimInvardiaUpdateTarget -Http { param($m, $u, $b, $h) Invoke-PimLicenceHttp -Method $m -Url $u -Body $b -Headers $h } `
+            -InstallKey $invKey -LicenceText $licText -BaseUrl $invBase -AppliedSequence $script:PimInvardiaApplied `
+            -RunningVersion "$($script:PimRunningVersion)" -LastBuiltVersion $lastBuilt
+    Say "Invardia: $($t.reason)" $(if ($t.ok) { 'DarkGray' } else { 'Red' })
+    $script:PimRingApproved = "$($t.version)"; $script:PimRingApprovedReason = "Invardia: $($t.reason)"
+    if (-not $t.ok) {
+        # 🔒 Refused or failed = NOTHING moves, and the run is FAILED so the fleet view shows it (never a quiet night).
+        Send-PimUpdateOutcome -Action 'none' -Outcome 'failed' -ErrorText "Invardia: $($t.reason)"
+        exit 1
+    }
+    $targetVer = "$($t.version)"
+    $script:PimInvardiaContext = "$($t.contextPath)"; $script:PimInvardiaSequence = [int]$t.sequence
+    # The plan builds only when it has a source; the Invardia archive IS the source (already verified + re-packed above).
+    if ($targetVer) { $srcUrlTpl = 'invardia://pim-manager-src-{version}' }
 } elseif ($ring -and -not $srcUrlTpl) {
     # 🔴 2026-09-13 -- A RING WITH NO SOURCE USED TO BE SKIPPED IN SILENCE, AND THE PIN WON. The ring
     # branch below needs the source template to find channel.json, so `$ring -and $srcUrlTpl` was false
@@ -307,7 +351,10 @@ if ($plan.action -eq 'none') {
 $runningVer = if ($ref) { "$($ref.tag)" } else { '' }
 $dg = Get-PimUpdateDowngradeDecision -TargetVersion "$($plan.version)" -RunningVersion $runningVer `
           -LastBuiltVersion $lastBuilt -LastGoodImage "$($env:PIM_UPDATE_LAST_GOOD)" -Ring $ring `
-          -AllowDowngrade:("$($env:PIM_UPDATE_ALLOW_DOWNGRADE)".Trim() -eq '1') -UpdateJobName $selfJob
+          -AllowDowngrade:(("$($env:PIM_UPDATE_ALLOW_DOWNGRADE)".Trim() -eq '1') -or ($script:PimInvardiaSequence -gt $script:PimInvardiaApplied -and $script:PimInvardiaApplied -gt 0)) -UpdateJobName $selfJob
+# §95.4: Invardia's rollback is a NEW, HIGHER, SIGNED sequence naming an older version -- the owner's deliberate decision,
+# so it may go down. Never on a first pull (nothing applied yet = no proof of what this environment had) and never on a
+# replay (a lower sequence is refused before this point).
 if ($dg.note) { Say "  $($dg.note)" 'DarkGray' }
 if (-not $dg.allowed) {
     Say $dg.message 'Red'
@@ -321,10 +368,17 @@ if ($dg.overridden) {
 }
 
 if ($plan.action -eq 'build') {
-    $srcUrl = Resolve-PimUpdateSourceUrl -Template $srcUrlTpl -Version $plan.version
     $ctx    = Join-Path ([IO.Path]::GetTempPath()) ("pim-src-{0}.tar.gz" -f $plan.version)
-    Say "fetching source for $($plan.version)"
-    $got = Get-PimUpdateSourceArchive -Url $srcUrl -OutFile $ctx
+    if ($script:PimInvardiaContext) {
+        # §95.4: already downloaded, SHA-256-checked against the signed manifest and re-packed as the build context.
+        $ctx = $script:PimInvardiaContext
+        $got = @{ ok = (Test-Path -LiteralPath $ctx); bytes = $(if (Test-Path -LiteralPath $ctx) { (Get-Item -LiteralPath $ctx).Length } else { 0 }); reason = 'the verified Invardia archive is gone' }
+        Say "source for $($plan.version): the verified Invardia release archive"
+    } else {
+        $srcUrl = Resolve-PimUpdateSourceUrl -Template $srcUrlTpl -Version $plan.version
+        Say "fetching source for $($plan.version)"
+        $got = Get-PimUpdateSourceArchive -Url $srcUrl -OutFile $ctx
+    }
     if (-not $got.ok) {
         Say "  source NOT fetched: $($got.reason)" 'Red'
         Say '  refusing to roll: an environment that cannot get its approved version must say so, not quietly stay behind.' 'Red'
@@ -832,6 +886,14 @@ if ($selfJob) {
                          -VariableName 'PIM_UPDATE_LAST_GOOD' -Value $selfNow)
                 Say "  recorded last-known-good updater image: $selfNow" 'DarkGray'
             } catch { Say "  could not record the last-known-good image: $($_.Exception.Message)" 'Yellow' }
+        }
+        # §95.4: the Invardia sequence this environment APPLIED -- a lower one is refused from now on (no replay).
+        if ($script:PimInvardiaSequence -gt $script:PimInvardiaApplied) {
+            try {
+                [void](Set-PimAcaJobEnvValue -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob `
+                         -VariableName 'PIM_UPDATE_INVARDIA_SEQ' -Value "$($script:PimInvardiaSequence)")
+                Say "  recorded the applied Invardia sequence: $($script:PimInvardiaSequence)" 'DarkGray'
+            } catch { Say "  could not record the applied Invardia sequence (the same release is simply seen again next run): $($_.Exception.Message)" 'Yellow' }
         }
         Say "stamping $selfJob (takes effect on the NEXT run, by design)"
         # 🔴 B8 (2026-09-10) -- AN ARM OPERATION ALREADY IN FLIGHT IS A WAIT, NOT A FAILURE.

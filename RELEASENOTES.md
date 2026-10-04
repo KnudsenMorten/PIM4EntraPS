@@ -14,6 +14,44 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.491 — A safer database administrator group, a hybrid worker without a public IP, Pro updates and status telemetry
+
+- **Changed: setup no longer makes an ordinary group the database administrator.** The group that administers the PIM
+  database must be role-assignable, so that only privileged role administrators can change who is in it. When an
+  existing group with that name is not role-assignable, setup now stops that step, keeps the current administrator, and
+  tells you how to recreate the group. A group that is already the administrator keeps working.
+- **Fixed: wording about deployment rings.** The documentation now says what the code does: a tenant with no recorded
+  ring counts as the most restrictive ring.
+- **New (off until you switch it on): status telemetry to Invardia.** Every hour PIM can report which jobs ran and whether
+  they succeeded, and once a day its version, edition and licence state. Without an install key it is anonymous: no tenant,
+  no server name, no error text -- only a failure class and rounded counts. With a Pro install key the reports carry the
+  error text with secrets removed, so support can see a failure before you call. Switch it on under Settings > Features
+  (*Send status telemetry to Invardia*).
+- **New: a ready-made script for the owner of the hub network.** When a private installation peers with a hub network
+  that another team owns, setup now writes the script that team runs: it creates the hub side of the peering with
+  exactly the name setup expects, can grant the deploy identity the rights it needs, and shows the state of both sides.
+  It is safe to run twice and never deletes anything. You can also write it in advance with
+  `tools/setup/New-PimHubPrepareScript.ps1`.
+- **Changed: the hybrid AD worker never has a public IP address.** The worker writes to Active Directory, so it is treated
+  as a Tier-0 machine. Its outbound traffic (Microsoft Graph, the PIM database, updates, Windows Update) now leaves
+  through a NAT gateway on its subnet, Azure's implicit outbound access is switched off, and nothing can open a
+  connection to it. New installations are built this way. A worker installed with an earlier version keeps its public IP
+  until you run `tools/pim-hybrid-worker/Set-PimHybridWorkerEgress.ps1` once. That script moves the same address to the
+  NAT gateway, so an allow-list naming it keeps working.
+- **New (off until you switch it on): Pro updates from Invardia.** A Pro installation can claim its Invardia install key
+  with its licence. Its nightly update can then take signed releases for the ring Invardia has set for it. Before
+  anything moves, PIM checks the release's signature against a key built into PIM, the release number (an older,
+  validly signed release is never applied again) and the archive checksum. A release that asks for a manual step is
+  held. Switch it on under Settings > Features (*Pro updates from Invardia*). The update source is chosen when the update
+  job is deployed (`Deploy-PimUpdateJob -UpdateSource Invardia`).
+- **New: telemetry opt-out is reported once.** When you switch status telemetry off after it was on, PIM sends one
+  "opted out" report and then nothing more. When you switch it back on, it sends one "opted in" report, and nothing from
+  the period in between.
+- **Fixed: an admin update no longer fails after a membership is removed.** The bookkeeping after a run (deleting
+  finished Remove rows, recording failures and commit progress) could fail a run whose changes had already been made. A
+  fault there is now a warning that says where it happened. A failed job run also records where it failed (function,
+  file and line), so the Jobs page can show it.
+
 ## v2.4.490 — Setup in tenants with several subscriptions
 
 - **Fixed: updates and rollbacks during setup always use the installation's own subscription.** In a tenant with several

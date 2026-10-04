@@ -79,6 +79,7 @@ owns the detail. (Screenshot uses synthetic demo data.)*
   - [Defaults in this release](#defaults-in-this-release)
   - [Getting a licence](#getting-a-licence)
   - [Support](#support)
+  - [What PIM sends to Invardia](#what-pim-sends-to-invardia)
 - [Getting started — install the community edition](#getting-started--install-the-community-edition)
   - [What you need](#what-you-need)
   - [1. Get the code](#1-get-the-code)
@@ -1211,6 +1212,17 @@ used by [Upgrading to Pro](#upgrading-to-pro)). Questions before you buy:
 | **Community (free)** | Community support: GitHub issues on the public repository. |
 | **Pro (paid licence)** | **[portal.invardia.com](https://portal.invardia.com)** — the support portal for licensed customers, with an agreed response time. |
 
+### What PIM sends to Invardia
+
+Nothing, until you switch it on. Two optional jobs talk to Invardia, each behind its own switch under **Settings > Features**:
+
+- **Request the licence automatically** -- asks Invardia for this installation's licence when none is valid or yours ends
+  within 30 days, then installs the signed file only after checking it here. It sends the tenant, the version and an
+  installation id.
+- **Send status telemetry** -- every hour, which jobs ran and whether they succeeded, and once a day the version, edition
+  and licence state. Without a Pro install key it is **anonymous**: no tenant, no server name, no error text -- only a
+  failure class and rounded counts, under a random id of its own. With a Pro install key the reports also carry the error
+  text, with secrets removed, so support can see a failure before you call. Switch it off at any time.
 ---
 
 ## Getting started — install the community edition

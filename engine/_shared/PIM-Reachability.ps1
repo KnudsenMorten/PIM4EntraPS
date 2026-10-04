@@ -167,6 +167,97 @@ function Get-PimPeeringPlan {
 }
 
 # ---------------------------------------------------------------------------
+# 1b. THE HUB OWNER'S "PREPARE" SCRIPT (pure) -- §95.2 item 9 (2026-10-04).
+#
+# A private install peers the PIM spoke with the customer's hub, and the hub is very often owned by
+# another team (or sits in a subscription the installer cannot write). Today that ends in "Cross-
+# subscription peering needs Network Contributor on BOTH sides" and a person who must work out the
+# names. This writes the script FOR them: the hub-side peering with EXACTLY the name the deploy looks
+# for (Get-PimPeeringPlan), optionally the right for the deploy identity (Network Contributor on the
+# hub VNet; Private DNS Zone Contributor on the DNS resource group when the zone goes next to the hub),
+# and a check. Idempotent, refuses a same-name peering that points elsewhere, never deletes anything.
+# Returns @{ ok; reason; fileName; text }.
+# ---------------------------------------------------------------------------
+function New-PimHubPrepareScript {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SpokeVnetName,
+        [Parameter(Mandatory)][string]$SpokeResourceGroup,
+        [Parameter(Mandatory)][string]$SpokeSubscriptionId,
+        [Parameter(Mandatory)][string]$HubVnetName,
+        [Parameter(Mandatory)][string]$HubResourceGroup,
+        [string]$HubSubscriptionId,
+        [string]$DeployPrincipalObjectId = '',                    # empty = the hub owner creates the hub side only
+        [ValidateSet('ServicePrincipal', 'User', 'Group')][string]$DeployPrincipalType = 'ServicePrincipal',
+        [string]$DnsResourceGroup = '',                           # the zone's RG when it is in the HUB subscription
+        [string]$EnvironmentLabel = '',
+        [datetime]$NowUtc = [datetime]::UtcNow
+    )
+    $plan = Get-PimPeeringPlan -SpokeVnetName $SpokeVnetName -SpokeResourceGroup $SpokeResourceGroup -SpokeSubscriptionId $SpokeSubscriptionId `
+                -HubVnetName $HubVnetName -HubResourceGroup $HubResourceGroup -HubSubscriptionId $HubSubscriptionId
+    if (-not $plan.ok) { return @{ ok = $false; reason = $plan.reason; fileName = ''; text = '' } }
+    $hub = @($plan.pairs | Where-Object { $_.direction -eq 'hub-to-spoke' })[0]
+    $spoke = @($plan.pairs | Where-Object { $_.direction -eq 'spoke-to-hub' })[0]
+    $oid = "$DeployPrincipalObjectId".Trim()
+    if ($oid -and $oid -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { return @{ ok = $false; reason = "the deploy identity must be an object id (GUID), not '$oid'"; fileName = ''; text = '' } }
+    # Every value goes in as a single-quoted PowerShell literal; Azure names cannot hold a quote, but refuse one anyway.
+    foreach ($v in @($SpokeVnetName, $SpokeResourceGroup, $HubVnetName, $HubResourceGroup, $DnsResourceGroup, $EnvironmentLabel)) {
+        if ("$v" -match "['`"``\r\n]") { return @{ ok = $false; reason = "a name contains a quote or a line break: '$v'"; fileName = ''; text = '' } }
+    }
+    $label = if ("$EnvironmentLabel".Trim()) { "$EnvironmentLabel".Trim() } else { $SpokeVnetName }
+    $L = New-Object System.Collections.Generic.List[string]
+    $add = { param($s) [void]$L.Add($s) }
+    & $add '#Requires -Version 5.1'
+    & $add "# PIM Manager -- PREPARE THE HUB NETWORK for '$label'. Generated $($NowUtc.ToUniversalTime().ToString('yyyy-MM-dd HH:mm')) UTC by PIM setup."
+    & $add '# Run it as someone who may change the hub VNet (Network Contributor on it), e.g. in Azure Cloud Shell (PowerShell).'
+    & $add '# What it does -- and nothing else (it never deletes anything; running it twice is safe):'
+    & $add "#   1. the hub side of the peering: '$($hub.name)' on '$HubVnetName' -> the PIM network '$SpokeVnetName'"
+    if ($oid) {
+        & $add "#   2. lets the PIM deploy identity ($oid) make its own side and link the name: Network Contributor on '$HubVnetName'"
+        if ("$DnsResourceGroup".Trim()) { & $add "#      and Private DNS Zone Contributor on the resource group '$DnsResourceGroup' (the zone for the Manager's name goes there)" }
+    }
+    & $add '#   3. shows the state of both sides. "Connected" on both = done; "Initiated" = PIM setup still has to make its side (run it again).'
+    & $add '$ErrorActionPreference = ''Stop'''
+    & $add "`$hubSub   = '$($hub.subscriptionId)'"
+    & $add "`$hubRg    = '$HubResourceGroup'"
+    & $add "`$hubVnet  = '$HubVnetName'"
+    & $add "`$hubName  = '$($hub.name)'"
+    & $add "`$spokeId  = '$($plan.spokeVnetId)'"
+    & $add "`$hubId    = '$($plan.hubVnetId)'"
+    & $add ''
+    & $add '# 1. the hub-side peering'
+    & $add '$have = az network vnet peering show -g $hubRg --vnet-name $hubVnet -n $hubName --subscription $hubSub --query remoteVirtualNetwork.id -o tsv --only-show-errors 2>$null'
+    & $add 'if (-not "$have".Trim()) {'
+    & $add '    az network vnet peering create -g $hubRg --vnet-name $hubVnet -n $hubName --remote-vnet $spokeId --allow-vnet-access --subscription $hubSub -o none --only-show-errors'
+    & $add '    if ($LASTEXITCODE) { throw "the peering $hubName could not be created (exit $LASTEXITCODE) -- do you have Network Contributor on $hubVnet?" }'
+    & $add '    Write-Host "peering $hubName created" -ForegroundColor Green'
+    & $add '} elseif ("$have".Trim().ToLowerInvariant() -ne $spokeId.ToLowerInvariant()) {'
+    & $add '    throw "a peering named $hubName already exists on $hubVnet and points at $have, not at the PIM network -- nothing was changed. Rename or remove it, then run this again."'
+    & $add '} else { Write-Host "peering $hubName exists" }'
+    if ($oid) {
+        & $add ''
+        & $add '# 2. the PIM deploy identity may make its own side (and link the name to the hub)'
+        & $add "`$who = '$oid'"
+        & $add "az role assignment create --assignee-object-id `$who --assignee-principal-type $DeployPrincipalType --role 'Network Contributor' --scope `$hubId --subscription `$hubSub -o none --only-show-errors"
+        & $add 'if ($LASTEXITCODE) { throw "Network Contributor on $hubVnet could not be granted (exit $LASTEXITCODE) -- this needs Owner or User Access Administrator on it" }'
+        if ("$DnsResourceGroup".Trim()) {
+            & $add "az role assignment create --assignee-object-id `$who --assignee-principal-type $DeployPrincipalType --role 'Private DNS Zone Contributor' --scope '/subscriptions/$($hub.subscriptionId)/resourceGroups/$("$DnsResourceGroup".Trim())' --subscription `$hubSub -o none --only-show-errors"
+            & $add 'if ($LASTEXITCODE) { throw "Private DNS Zone Contributor could not be granted (exit $LASTEXITCODE)" }'
+        }
+        & $add 'Write-Host "rights granted to the PIM deploy identity" -ForegroundColor Green'
+    }
+    & $add ''
+    & $add '# 3. the state of both sides'
+    & $add '$h = az network vnet peering show -g $hubRg --vnet-name $hubVnet -n $hubName --subscription $hubSub --query peeringState -o tsv --only-show-errors 2>$null'
+    & $add "`$s = az network vnet peering show -g '$($spoke.resourceGroup)' --vnet-name '$($spoke.vnetName)' -n '$($spoke.name)' --subscription '$($spoke.subscriptionId)' --query peeringState -o tsv --only-show-errors 2>`$null"
+    & $add 'Write-Host ("hub side   {0}: {1}" -f $hubName, $(if ("$h".Trim()) { $h } else { "not readable" }))'
+    & $add ("Write-Host (""PIM side   {0}: {1}"" -f '" + $spoke.name + "', `$(if (""`$s"".Trim()) { `$s } else { 'not readable from here (made by PIM setup)' }))")
+    & $add 'if ("$h".Trim() -eq "Connected") { Write-Host "Done: the PIM network is reachable from the hub." -ForegroundColor Green } else { Write-Host "Tell the PIM installer to continue: setup makes its side, then both read Connected." -ForegroundColor Yellow }'
+    $file = "prepare-hub-$((Get-PimVnetShortName -VnetName $SpokeVnetName) -replace '[^A-Za-z0-9-]', '-').ps1"
+    return @{ ok = $true; reason = $plan.reason; fileName = $file; text = ($L -join "`n") + "`n"; hubPeeringName = $hub.name; spokePeeringName = $spoke.name }
+}
+
+# ---------------------------------------------------------------------------
 # 2. PRIVATE DNS PLAN (pure).
 #
 # An `--internal-only` ACA environment publishes its apps on the environment's

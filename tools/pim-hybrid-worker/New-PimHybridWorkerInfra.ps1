@@ -15,12 +15,14 @@
         required; the PIM environment's VNet is optional. VNet DNS = -DnsServers (the DCs).
       * The VM: Windows Server 2022 Azure Edition CORE, small disk (-VmSize, default Standard_B2s: 4 GiB), Trusted Launch,
         system-assigned managed identity, hotpatch / platform patching, no public inbound. Egress (Graph, SQL, Windows
-        Update): a Standard static public IP with no inbound allowed (-Egress PublicIp, ~3.65 USD/month), or -Egress None
+        Update) goes OUT through a NAT gateway on the subnet (-Egress NatGateway, Set-PimHybridWorkerEgress.ps1); the VM NEVER
+        gets a public IP (operator 2026-10-04 -- it is Tier 0). -Egress None
         when your network already provides outbound (NAT gateway / firewall route).
       * The local administrator password is generated, used once and DISCARDED -- break-glass is `az vm user update`.
       * SQL VNet rule on -SqlServerId for the worker subnet.
 
-    Cost (West Europe, pay-as-you-go, 2026-09-29): B2s Windows ~40.9 + E4 disk 2.4 + public IP 3.65 = ~47 USD/month
+    Cost (West Europe, pay-as-you-go, 2026-10-04): B2s Windows ~40.9 + E4 disk 2.4 + NAT gateway ~32.9 + its public IP 3.65
+    = ~80 USD/month
     (B1ms, 2 GiB, ~26 USD/month works but leaves little memory once both worker tasks run).
 
 .EXAMPLE
@@ -41,7 +43,7 @@ param(
     [Parameter(Mandatory)][string[]]$PeerVnetId,
     [Parameter(Mandatory)][string[]]$DnsServers,
     [string]$SqlServerId = '',
-    [ValidateSet('PublicIp', 'None')][string]$Egress = 'PublicIp',
+    [ValidateSet('NatGateway', 'None')][string]$Egress = 'NatGateway',   # 🔒 never a public IP on the VM (Set-PimHybridWorkerEgress.ps1)
     [string]$Image = 'MicrosoftWindowsServer:WindowsServer:2022-datacenter-azure-edition-core-smalldisk:latest'
 )
 $ErrorActionPreference = 'Stop'
@@ -102,15 +104,14 @@ foreach ($rid in $PeerVnetId) {
     Info "peering $VnetName <-> $rName"
 }
 
-# egress
+# egress -- 🔒 NEVER a public IP on the VM (operator 2026-10-04: "it just cannot have a public ip directly. use the nat
+# gateway"). The worker is Tier 0: outbound goes through a NAT gateway on its subnet, nothing can connect in.
+# Set-PimHybridWorkerEgress.ps1 is the one implementation (it also migrates a worker installed with the old PublicIp default).
 $pipArgs = @('--public-ip-address', '""')
-if ($Egress -eq 'PublicIp') {
-    if (-not (AzTry network public-ip show -g $ResourceGroup -n $pipName @sub -o json) -and $PSCmdlet.ShouldProcess($pipName, 'create Standard static public IP (egress only)')) {
-        AzRun network public-ip create -g $ResourceGroup -n $pipName -l $Location --sku Standard --allocation-method Static @sub -o none | Out-Null
-    }
-    $pipArgs = @('--public-ip-address', $pipName)
-    Info "egress via $pipName (inbound denied by $nsgName)"
-}
+if ($Egress -eq 'NatGateway') {
+    & (Join-Path $PSScriptRoot 'Set-PimHybridWorkerEgress.ps1') -SubscriptionId $SubscriptionId -TenantId $TenantId -ResourceGroup $ResourceGroup `
+        -Location $Location -VmName $VmName -VnetName $VnetName -SubnetName $subnetName -WhatIf:$WhatIfPreference
+} else { Info "egress: -Egress None -- this subnet must already have an outbound path (NAT gateway / firewall route); the VM gets NO public IP" }
 
 # the VM
 $vm = AzTry vm show -g $ResourceGroup -n $VmName @sub -o json
