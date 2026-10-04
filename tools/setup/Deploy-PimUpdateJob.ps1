@@ -63,6 +63,11 @@ param(
     # environments that already update themselves nightly.
     [string]$SourceUrlTemplate,                         # e.g. https://<store>/pim-src/pim-src-{version}.tar.gz?<read-sas>
     [string]$TargetVersion,                             # the approved version, e.g. 2.4.307 (preferred over -TargetImage)
+    # §95.4 -- WHERE a Pro install's updates come from. 'Invardia' = Invardia's update platform (a signed manifest for the
+    # ring Invardia has set for this environment; needs the install key -- PIM_UPLINK_KEY or the 'install-key' job -- and an
+    # Invardia-issued Pro licence). 'pim-src' = the source archives + channel.json (the default). Omitted on a redeploy =
+    # the job keeps what it has.
+    [ValidateSet('pim-src', 'Invardia')][string]$UpdateSource,
     # 2026-09-13 -- THE UPDATE RING (operator: "nothing releases to ring 2 without my approve").
     # Every updater this installs ends with PIM_UPDATE_RING set. DEFAULT 2 = the safe customer ring;
     # internal and test environments pass 1 explicitly. NOT passing it on a redeploy KEEPS the ring the
@@ -263,6 +268,16 @@ foreach ($m in @($storePlan.messages)) {
 # then reads every value back byte-for-byte.
 foreach ($k in @($storePlan.writes.Keys)) { $envVars += "$k=$($storePlan.writes[$k])" }
 
+# §95.4: the update source. Written only when passed (a redeploy without it keeps PIM_UPDATE_SOURCE, preserved below).
+# The Invardia job reads no archive URL, but the ring plan refuses a ring without a source template -- so an install with
+# none gets Invardia's archive address as an INFORMATIONAL template (update-job-entry ignores it in Invardia mode).
+if ($UpdateSource) {
+    $envVars += "PIM_UPDATE_SOURCE=$($UpdateSource.ToLowerInvariant())"
+    if ($UpdateSource -eq 'Invardia' -and -not "$SourceUrlTemplate".Trim() -and -not "$($env:PIM_UPDATE_SOURCE_URL)".Trim() -and -not "$($existingEnv['PIM_UPDATE_SOURCE_URL'])".Trim()) {
+        $SourceUrlTemplate = 'https://invardia.com/api/updates/pim-manager/code/{version}/archive'
+    }
+    Note "update source: $UpdateSource"
+}
 $yamlNames = @($envVars | ForEach-Object { ("$_" -split '=', 2)[0] })
 # Throws -- before any create/update -- when no source can be resolved, or when the job carries a ring
 # value that is not a ring and -UpdateRing was not passed.

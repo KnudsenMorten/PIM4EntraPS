@@ -934,14 +934,21 @@ function Invoke-PimEngineScope {
         # 🔴 BUG-267 (2.4.464) -- a COMPLETE read can still LAG: PIM's schedule list does not show a request made seconds
         # earlier, so "absent" on one read deleted a Remove row whose delegation was about to appear (ig798 E2E run 1).
         # An absent row is now deleted only when a second read at least 10 min after the first still finds it absent.
-        if (@($__absentRows).Count) {
-            $__rdEntA = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
-            $__absentRows = @(Select-PimConfirmedAbsentRemoveRows -Entity $__rdEntA -Rows $__absentRows -Scope $Scope)
-        }
-        $__doneRows = @(@($__fullyDone) + @($__absentRows) | Where-Object { $null -ne $_ })
-        if ($__doneRows.Count) {
-            $__rdEnt = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
-            $__rowsDone = Complete-PimRemoveRows -Entity $__rdEnt -Rows $__doneRows -Scope $Scope
+        # BUG-284 (2026-10-04): the directory work of this run is DONE at this point. A bookkeeping fault here failed the
+        # whole run -- every admin delta read "failed" while the removal had landed. It is now a warning that says WHERE it
+        # threw; the rows stay and are re-checked next run (fail safe: a Remove row is never deleted on an error).
+        try {
+            if (@($__absentRows).Count) {
+                $__rdEntA = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
+                $__absentRows = @(Select-PimConfirmedAbsentRemoveRows -Entity $__rdEntA -Rows $__absentRows -Scope $Scope)
+            }
+            $__doneRows = @(@($__fullyDone) + @($__absentRows) | Where-Object { $null -ne $_ })
+            if ($__doneRows.Count) {
+                $__rdEnt = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
+                $__rowsDone = Complete-PimRemoveRows -Entity $__rdEnt -Rows $__doneRows -Scope $Scope
+            }
+        } catch {
+            Write-Warning ("  [engine] {0}: the finished Remove rows were NOT cleaned up (they stay and are re-checked next run): {1} | {2}" -f $Scope, $_.Exception.Message, (Get-PimEngineErrorWhere -ErrorRecord $_))
         }
     }
     if ([int]$script:__reportedShown -gt 3) { Write-Host ("    [r] ... and {0} more reported only -- NOT applied (same reason as above)" -f ([int]$script:__reportedShown - 3)) -ForegroundColor DarkYellow }
@@ -949,7 +956,8 @@ function Invoke-PimEngineScope {
     # The CURRENTLY-FAILING set for this scope (SQL). A WhatIf run applied nothing, so it proves nothing
     # about what is failing and must not clear or replace the record.
     if (-not $WhatIf -and (Get-Command Update-PimEngineItemFailures -ErrorAction SilentlyContinue)) {
-        [void](Update-PimEngineItemFailures -Scope $Scope -Failures $script:__failures.ToArray())
+        try { [void](Update-PimEngineItemFailures -Scope $Scope -Failures $script:__failures.ToArray()) }
+        catch { Write-Warning ("  [engine] {0}: the failing-items record was NOT updated: {1} | {2}" -f $Scope, $_.Exception.Message, (Get-PimEngineErrorWhere -ErrorRecord $_)) }
     }
     # §88 commit watcher: the per-key outcomes + "a CLEAN pass covered these entities" (no error, nothing held). Never
     # fails the run; only when a SQL store is reachable (an offline / fixed-provider run records nothing).
@@ -959,7 +967,8 @@ function Invoke-PimEngineScope {
             # a clean pass (no error, nothing held) covers every entity THIS scope applies -- Update-PimCommitOutcomes
             # keeps only those (Test-PimCommitWatchScopeApplies)
             $__clean = if ($script:__errors -eq 0) { @(Get-PimCommitWatchPlatformEntities) } else { @() }
-            Update-PimCommitOutcomes -ConnectionString $__wcs -Items $script:__watch.ToArray() -CleanEntities $__clean -Scope "$Scope" -Mode "$Mode"
+            try { Update-PimCommitOutcomes -ConnectionString $__wcs -Items $script:__watch.ToArray() -CleanEntities $__clean -Scope "$Scope" -Mode "$Mode" }
+            catch { Write-Warning ("  [engine] {0}: the commit watcher was NOT updated: {1} | {2}" -f $Scope, $_.Exception.Message, (Get-PimEngineErrorWhere -ErrorRecord $_)) }
         }
     }
 
@@ -997,6 +1006,18 @@ function Get-PimFeatureSkipReason {
     }
     if (-not $enabled) { return "$what is turned off" }
     return "$what is not licensed for this edition"
+}
+
+function Get-PimEngineErrorWhere {
+    # BUG-284 / IMP-269: "at <function>, <file>: line <n>" of an error record's first frame -- no folder, no data.
+    param([AllowNull()][object]$ErrorRecord)
+    if ($null -eq $ErrorRecord) { return '' }
+    foreach ($l in @("$($ErrorRecord.ScriptStackTrace)" -split "`r?`n")) {
+        if ("$l".Trim() -match '^at (?<fn>[^,]*), (?<file>.*): line (?<n>\d+)') {
+            return ("at {0}, {1}: line {2}" -f "$($Matches.fn)".Trim(), ("$($Matches.file)" -split '[\\/]')[-1], $Matches.n)
+        }
+    }
+    return ''
 }
 
 function Select-PimConfirmedAbsentRemoveRows {

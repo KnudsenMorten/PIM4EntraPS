@@ -937,7 +937,19 @@ function Set-PimVnetPeering {
             az network vnet peering create -g $p.resourceGroup --vnet-name $p.vnetName -n $p.name `
                 --remote-vnet $p.remoteVnetId --allow-vnet-access --subscription $p.subscriptionId -o none --only-show-errors
             if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-                throw "az network vnet peering create failed for '$($p.name)' on $($p.vnetName) (exit $LASTEXITCODE). Cross-subscription peering needs Network Contributor on BOTH sides."
+                $code = $LASTEXITCODE
+                # §95.2 item 9: the hub usually belongs to another team -- write THEIR script, with the exact names, instead
+                # of leaving a person to work them out from an az error.
+                $prep = ''
+                if ($p.direction -eq 'hub-to-spoke' -and (Get-Command New-PimHubPrepareScript -ErrorAction SilentlyContinue)) {
+                    try {
+                        $g = New-PimHubPrepareScript -SpokeVnetName $SpokeVnetName -SpokeResourceGroup $SpokeResourceGroup -SpokeSubscriptionId $SpokeSubscriptionId `
+                                -HubVnetName $HubVnetName -HubResourceGroup $HubResourceGroup -HubSubscriptionId $hubSub
+                        if ($g.ok) { $prep = Join-Path ([IO.Path]::GetTempPath()) $g.fileName; [IO.File]::WriteAllText($prep, $g.text, (New-Object Text.UTF8Encoding $false)) }
+                    } catch { $prep = '' }
+                }
+                throw ("az network vnet peering create failed for '$($p.name)' on $($p.vnetName) (exit $code). Cross-subscription peering needs Network Contributor on BOTH sides." +
+                       $(if ($prep) { " The owner of '$HubVnetName' can create the hub side with the script written to $prep -- then run setup again." } else { '' }))
             }
             Write-Host "    peering $($p.name): created" -ForegroundColor Green
         }

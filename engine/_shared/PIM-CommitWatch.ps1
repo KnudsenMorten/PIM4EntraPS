@@ -267,6 +267,10 @@ function Update-PimCommitOutcomes {
     param([Parameter(Mandatory)][string]$ConnectionString, [object[]]$Items = @(), [string[]]$CleanEntities = @(),
           [string]$Scope = '', [string]$Mode = 'Delta', [datetime]$NowUtc = [datetime]::UtcNow)
     # only the scope that APPLIES an entity speaks for it (AdminTap reads admin rows but does not apply them)
+    # BUG-284 hardening: an item or entity with NO name is dropped here -- a blank -Entity is a binding error, and this
+    # filter used to sit OUTSIDE the try below, so one blank item threw into (and failed) the whole engine run.
+    $Items = @($Items | Where-Object { $null -ne $_ -and "$($_.entity)".Trim() -and "$($_.key)".Trim() })
+    $CleanEntities = @($CleanEntities | Where-Object { "$_".Trim() })
     if ("$Scope".Trim()) {
         $Items = @($Items | Where-Object { Test-PimCommitWatchScopeApplies -Entity "$($_.entity)" -Scope $Scope })
         $CleanEntities = @($CleanEntities | Where-Object { Test-PimCommitWatchScopeApplies -Entity "$_" -Scope $Scope })

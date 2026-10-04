@@ -58,6 +58,7 @@ the alternative was found to fail in practice.
 26. [Where to read next](#26-where-to-read-next)
 27. [Identity, credentials and self-healing](#27-identity-credentials-and-self-healing)
 28. [Change control, ownership and daily checks (2026-09)](#28-change-control-ownership-and-daily-checks-2026-09)
+29. [Talking to Invardia: the licence request and status telemetry](#29-talking-to-invardia-the-licence-request-and-status-telemetry)
 
 ---
 
@@ -1164,8 +1165,8 @@ thinly:
 The Manager exposes two **read-only** routes (no tenant write): `GET
 /api/conformance/fleet` (the matrix for the active SQL instance; the active instance
 contributes its **template-catalog ring**, derived from its update ring as described in the
-per-entry ring section below, and other instances use their stamped ring, defaulting to
-0/production) and `GET /api/conformance/ring-plan?template=` (the ring bands). The
+per-entry ring section below, and other instances use their stamped ring; an instance with no stamped ring counts as
+ring 2, the most restrictive (§77.20)) and `GET /api/conformance/ring-plan?template=` (the ring bands). The
 single-tenant `deploy` handler also stamps the active tenant's ring into `fleetRingByTenant`
 so later fleet reads have it.
 
@@ -1428,6 +1429,17 @@ replaces the older "PIM for Active Directory" scripts and runs the same schedule
 scheduler instances, so its state and lease never collide with the main tick. SQL, Graph (read) and the source store are
 reached with the server's managed identity; Active Directory is written by **group managed service accounts** only — no
 password, secret or certificate on the server.
+
+**Network — never a public IP (2.4.491).** The worker can write Tier-0 groups, so it is a Tier-0 machine:
+- its NIC carries **no public IP**;
+- its subnet's NSG denies all inbound, and it is managed through Azure run-command only;
+- outbound traffic (Graph, SQL, the source store, Windows Update) leaves through a **NAT gateway** on its subnet, with
+  Azure's implicit default outbound access switched off.
+
+`New-PimHybridWorkerInfra.ps1` builds it that way (`-Egress NatGateway`, the default; `-Egress None` when the network
+already routes outbound). Builds before 2.4.491 put a public IP on the NIC (`-Egress PublicIp`, now removed).
+`Set-PimHybridWorkerEgress.ps1` migrates such a worker: it detaches the IP from the NIC, makes the same address the NAT
+gateway's outbound address, so an allow-list naming it keeps working, and verifies that no public IP is left.
 
 **Identities — one per privilege tier.** Each identity is three objects: the gMSA (`gMSA-<code>-L<level>-T<tier>`), its
 `-PermissionGroup` (the gMSA is its only member; **every right is granted to this group**, never to the account) and its
@@ -2429,8 +2441,11 @@ below is the **private-only** reference topology.
  │                                   pe-pim-baseline ─► Storage (run staging)             │
  │   Private DNS: database.windows.net · blob.core.windows.net · vaultcore.azure.net      │
  └────────────────────────────────────────────────────────────────────────────────────┘
-        ACR (container image, MI pull)        Key Vault (app-only cert/secret, MI-read)
+        ACR (container image, MI pull)        (no Key Vault: the identities are managed identities)
 ```
+> A container install has **no Key Vault** (verified in code 2026-10-04). The `vaultcore.azure.net` private
+> DNS zone in the diagram is a leftover of an earlier design. The one Key Vault in the product is the MSP
+> managing tenant's, for its non-exportable baseline-signing key.
 
 **Access levels (defense in depth, all private):**
 1. **Network** — only the mgmt / PAW-tier0 / SAW-tier1 subnets (or VPN/Bastion)
@@ -8695,7 +8710,6 @@ environment's exposure is immutable. That path regenerates the identities, and
 * **The nightly update**: detect → build → roll → idempotent schema upgrade → verify →
   **auto-rollback on a failed verify** → notify.
 * **A failed deploy** leaves its marker stale, so the next sync retries rather than needing a human.
-* **Sign-in secret rotation** (§27.8) — renewed before expiry by the update job itself.
 * **Identity-keyed state after a rebuild** (§27.7).
 
 ### 27.7 Identity repair after a rebuild
@@ -8710,23 +8724,29 @@ cannot see either one — the restore reports a faithful match and the Manager t
 unresolvable and its assignments are already gone), and repairs them after the restore and
 **before** exposure, verifying every SID by reading it back.
 
-### 27.8 Sign-in secret rotation, unattended
+### 27.8 Sign-in secret rotation — one command, not (yet) unattended
 
-The sign-in secret is the only thing in the design that fails on a timer, and a warning is a memory
-rather than a mechanism. The update job already runs nightly on a managed identity, so it renews the
-secret itself:
+The portal's built-in sign-in (Container Apps authentication) does not accept a managed identity, so it
+uses an app registration with a **client secret**: minted by `Set-PimManagerEasyAuth.ps1`, valid **two
+years**, stored only as the Container Apps secret `easyauth-client-secret`. It grants nothing in Azure,
+Graph or the database — it only completes the sign-in.
 
-1. read the days remaining on the credential the app's auth provider references
-2. inside the threshold → mint a **new** secret with `--append`, leaving the existing one valid
-3. write it to the ACA secret and restart the active revision
-4. verify the app still challenges unauthenticated callers
+It is the one thing in the design that fails on a timer. Today it is **reported, then renewed by a
+deliberate command** — nothing renews it unattended:
+
+1. `Test-PimCredentialExpiry.ps1` reports the days remaining and prints the rotate command
+2. `Set-PimManagerEasyAuth.ps1 -RotateSecret` mints a **new** secret with `--append`, leaving the
+   existing one valid
+3. writes it to the ACA secret and restarts the active revision (and checks the restart replaced it)
+4. verifies the app still challenges unauthenticated callers
 
 **The old credential is never revoked automatically** (by design). Both are valid at once,
-so there is no window in which sign-in is broken, and no reliance on the rotation's own verification
-being perfect. Revocation is a separate, deliberate act.
+so there is no window in which sign-in is broken. Revocation is a separate, deliberate act.
 
-The enabling permission is `Application.ReadWrite.OwnedBy`, granted to the update job's identity and
-scoped to that **one** app registration — not tenant-wide.
+> Earlier text here described the nightly update job renewing the secret itself under
+> `Application.ReadWrite.OwnedBy`. **That was never built** (verified in code 2026-10-04: no rotation in
+> the update job, and no code grants that permission). The unattended renewal is a backlog item in
+> REQUIREMENTS §33 (IMP-270).
 
 🪤 **An ACA secret change neither restarts the app nor creates a revision.** The auth sidecar keeps
 using the previous value, so a rotation that is never rolled looks applied and is not.
@@ -8867,3 +8887,67 @@ with no prompt; removing a replicated row asks: all tenants, the ones you pick, 
 When the safety brake holds a large or weakening batch of activation-policy changes, the mail carries a workbook with
 every rule that would change, current value and new value side by side, so the batch can go to a change advisory board
 before anyone approves it.
+
+## 29. Talking to Invardia: the licence request and status telemetry
+
+PIM makes exactly two kinds of call to Invardia, the vendor site. **Both are scheduled jobs, and both are off until an
+administrator switches them on** (Settings > Features). Neither ever receives an instruction from Invardia: one fetches a
+signed file that PIM checks itself, the other only sends.
+
+### 29.1 The licence request (job `licence-request`, feature `licence.autoRequest`)
+Every 30 minutes, when no Pro licence is valid for this tenant or the installed one ends within 30 days, PIM asks Invardia
+for its licence and then asks again for the result. It sends the product, the version, the tenant and an installation id, plus the installed licence's id and end date when one is installed.
+A delivered licence is installed only after PIM has checked it here: the file's hash, the signature against the trusted
+signers, that it is Pro, and that it names this tenant, the tenant the managed identity's own token is issued in. A
+rejection is shown in Settings > Licence and never asked again automatically.
+
+### 29.2 Status telemetry (job `uplink`, feature `telemetry.uplink`)
+Every hour PIM sends one report per job that ran since the last send, and once a day a heartbeat. A job that ran many times
+sends one report: *failed* if any of its runs failed (with that run's failure), *warning* if one was held for approval,
+otherwise *ok*. Skipped and unimplemented runs are not reported, because nothing ran. The heartbeat carries the version, the
+edition, the hosting type, the runtime identity and the licence state.
+
+| | Without an install key (anonymous) | With an install key (Pro / trial) |
+|---|---|---|
+| Credential | the public community code: it says "an installation", nothing more | the per-installation key Invardia issued, kept as a Container Apps secret |
+| Identity | a random telemetry installation id, separate from the licence request's id so the two cannot be joined | the key identifies the installation |
+| Errors | the failure class only (the failure catalog code) | the error text, shortened and with secrets removed before it leaves |
+| Counts | rounded into ranges | exact |
+| Tenant, server name | never sent | sent, and only compared with what the key says |
+
+The record format and the sending rules are the framework's uplink client (one shared client for every solution); PIM
+ships a byte-identical copy of it, checked by a test. A report that fails to send is sent again on the next cycle, and a
+failure to send never affects any other job. An endpoint other than Invardia's can be configured, but it must be https.
+
+**Opt-out and opt-in (2.4.491).**
+- **Switched off after it was on:** PIM sends ONE *optout* report with the same credential, then nothing more. If that
+  report is not delivered, it is tried again on the next cycle.
+- **Switched back on:** PIM first sends ONE *optin* report. Until that report is delivered, nothing else is sent. Nothing
+  from the opted-out period is ever sent, because the reporting floor restarts at the opt-in.
+- **Never switched on:** nothing is ever sent, and invardia.com is never called.
+
+The install key is the Container Apps secret, or else the key claimed by the job `install-key` (§29.3).
+
+### 29.3 Pro updates from Invardia (job `install-key`, feature `updates.invardia`, `PIM_UPDATE_SOURCE=invardia`)
+A Pro installation can take its updates from Invardia's update platform instead of the source archives. Invardia decides
+WHAT and WHETHER: one signed manifest per product, kind and ring, and the ring Invardia sets for the environment. PIM keeps
+HOW: build in its own registry, schema, roll, health gate, rollback.
+
+- **The install key.** The job `install-key` claims it with the installed licence and the real tenant, but only when the
+  installation has no key and a Pro licence. The key is kept in a setting that no API returns. A key delivered as the
+  Container Apps secret wins. A refusal (the environment already has a key, or the licence was refused) is not asked
+  again until the licence changes, so a copied licence cannot keep retrying.
+- **The pull.** The nightly update job sends the licence text and the install key and receives the manifest for its
+  ring. If nothing is released, nothing moves.
+- **What is checked before anything moves:**
+  - the signature (RS256 over the manifest bytes), by a key built into PIM — never a key fetched at run time;
+  - the product, the kind and the version;
+  - the release sequence, which must not be lower than the one this environment applied (no replay of an old, validly
+    signed release);
+  - the archive, against the signed SHA-256 and size;
+  - the archive's own VERSION file, against the manifest.
+  A release that asks for a manual step, or needs a newer starting version, is held with its reason. Any refusal fails
+  the run, and nothing moves.
+- **Rollback.** Invardia rolls back by releasing a higher sequence that names an older version. Such a signed rollback
+  may move an environment down. A first pull, with no applied sequence yet, may not.
+- **Applied sequence.** After a good roll the job records the applied sequence on itself.

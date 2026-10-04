@@ -162,6 +162,11 @@ if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\
 . "$shared\PIM-PendingCheck.ps1"
 # §95.2: job 'licence-request' -- ask Invardia for this install's licence (OFF unless 'licence.autoRequest').
 . "$shared\PIM-LicenceRequest.ps1"
+# §95.3: job 'uplink' -- status telemetry to Invardia (OFF unless 'telemetry.uplink'); the framework client is a pinned copy.
+. "$shared\AitUplink.framework.ps1"
+. "$shared\PIM-Uplink.ps1"
+# §95.4: job 'install-key' -- claim the Invardia install key (OFF unless 'updates.invardia'); the uplink + Pro updates use it.
+. "$shared\PIM-InvardiaUpdate.ps1"
 # REQ-AR-2: job 'access-review-cycle' -- the per-department access review campaigns.
 if (Test-Path -LiteralPath "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1") { . "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1" }   # §84 Pro: loaded only when present
 if (Test-Path -LiteralPath "$shared\..\rfa\PIM-RfaSync.ps1") { . "$shared\..\rfa\PIM-RfaSync.ps1" }   # §82 Pro: loaded only when present
@@ -311,6 +316,16 @@ Register-PimJobHandler -Type 'target-check' -Handler {
 }
 Write-Host "[scheduler] target check wired (pim.TenantCache/target-check; missing Azure scopes / roles are reported, never removed)" -ForegroundColor Cyan
 # §95.2: the REAL 'licence-request' handler. A network failure is reported in the result (asked again next run), never thrown.
+# §95.3: the REAL 'uplink' handler. A failed send is reported in the result and sent again next run, never thrown.
+Register-PimJobHandler -Type 'uplink' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimUplinkJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
+# §95.4: the REAL 'install-key' handler. A refused or failed claim is reported in the result, never thrown.
+Register-PimJobHandler -Type 'install-key' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimInstallKeyJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
 Register-PimJobHandler -Type 'licence-request' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimLicenceRequestJob -Job $job -NowUtc $now -WhatIf:$whatIf

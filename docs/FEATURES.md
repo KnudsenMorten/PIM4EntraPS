@@ -1863,6 +1863,11 @@ deployment is a supported choice) and no credentials lying around.
   the file itself: its signature, that it is Pro, and that it is for this tenant. A renewal Invardia has already approved
   arrives on the first try. The Licence page shows where the request stands. PIM sends only the tenant id, its version
   and an installation id. The switch is off until you turn it on. *(2.4.489)*
+- **A licence works only in its own tenant.** ✅ 2026-10-04 — Every licence names the tenant (or, for a managing tenant,
+  the tenants) it was issued for, and a licence that names no tenant is not accepted anywhere. Where PIM runs as a
+  managed identity, it takes the tenant from that identity's own sign-in, not from a setting. So a licence file copied
+  to another installation does not unlock Pro there, even if the setting is edited to match. Proven live: a licence
+  for another tenant, with the setting changed to that tenant, was refused on the next run. *(2.4.488)*
 - **From Community to Pro without reinstalling.** ✅ 2026-10-01 — register the Pro licence on a Community
   installation and the Pro features switch on at once; the edition shown, the features unlocked and the update
   path all follow the same check (a Pro licence for **this** tenant), so a licence for another tenant -- or one

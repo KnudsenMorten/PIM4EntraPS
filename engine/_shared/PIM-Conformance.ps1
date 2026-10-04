@@ -576,7 +576,7 @@ function Set-PimEntryRingInJson {
         if ($ringRx.IsMatch($span)) {
             $newSpan = $ringRx.Replace($span, { param($mm) $mm.Groups[1].Value + $Ring }, 1)
         } else {
-            # No ring property yet (Get-PimTemplateEntryRing defaults such an entry to 2).
+            # No ring property yet (Get-PimTemplateEntryRing treats such an entry as ring 0 -- dev -- §77.20).
             # Insert one directly after the key pair so the entry keeps its field order.
             $rel = $m.Index - $start + $m.Length
             $newSpan = $span.Substring(0, $rel) + ', "ring": ' + $Ring + $span.Substring($rel)

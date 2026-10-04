@@ -164,6 +164,14 @@ function Get-PimSqlAdminGroupPlan {
     }
     foreach ($r in $refused) { [void]$msgs.Add("refused member $($r.label): $($r.reason)") }
 
+    # SEC-32 (2026-10-04, as SI's Set-SISqlAdminGroup): an EXISTING group that is NOT role-assignable is never MADE the SQL
+    # admin -- adopting it would hand tier-0 control to anyone who can edit a plain group. A group that already IS the
+    # admin is still only reported (the access of every member hangs on it; migrating is the operator's one-time step).
+    if (-not $blocked -and $Mode -eq 'converge' -and $gid -and -not $adminIsGroup -and $Group -and
+        $Group.PSObject.Properties['isAssignableToRole'] -and $null -ne $Group.isAssignableToRole -and -not [bool]$Group.isAssignableToRole) {
+        $blocked = "SEC-32: '$GroupName' ($gid) exists but is NOT role-assignable -- it is NOT made the SQL admin (anyone who can edit a plain group could take the store). Create a role-assignable group (a new name, or delete this one first) as a Privileged Role Administrator; the current admin stays."
+        [void]$msgs.Add($blocked)
+    }
     $create = ($Mode -eq 'converge' -and -not $gid)
     $setAdmin = ($Mode -eq 'converge' -and -not $adminIsGroup -and -not $blocked)
     if ($create)   { [void]$msgs.Add("create ROLE-ASSIGNABLE security group '$GroupName'") }

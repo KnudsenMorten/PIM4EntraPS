@@ -56,6 +56,14 @@ $script:PimTickOnlyJobTypes += 'pending-check'
 # Inert unless the feature 'licence.autoRequest' is ON (it ships OFF -- PIM's first call to invardia.com).
 $script:PimJobTypes += 'licence-request'
 $script:PimTickOnlyJobTypes += 'licence-request'
+# §95.3 (2026-10-04): 'uplink' sends PIM's status telemetry (a daily heartbeat + one run report per job) to the Invardia-hosted
+# uplink through the framework client (PIM-Uplink.ps1). Inert unless the feature 'telemetry.uplink' is ON (it ships OFF).
+$script:PimJobTypes += 'uplink'
+$script:PimTickOnlyJobTypes += 'uplink'
+# §95.4 (2026-10-04): 'install-key' claims this Pro install's Invardia install key with its licence + real tenant
+# (PIM-InvardiaUpdate.ps1). Inert unless the feature 'updates.invardia' is ON (it ships OFF).
+$script:PimJobTypes += 'install-key'
+$script:PimTickOnlyJobTypes += 'install-key'
 # REQ-AR-2 (operator 2026-09-26): 'access-review-cycle' starts the per-DEPARTMENT access review campaigns the review rules
 # make due (PIM-AccessReviewCycle.ps1). Checks every 6 h; the cadence per department is the rule's cadenceDays.
 $script:PimJobTypes += 'access-review-cycle'
@@ -329,6 +337,10 @@ function Get-PimDefaultJobSchedule {
         # §95.2: every 30 min (Invardia's poll interval); inert until 'licence.autoRequest' is ON. Does nothing while the licence is
         # valid for more than 30 days.
         [pscustomobject]@{ name='licence-request'; type='licence-request'; intervalMinutes=30; enabled=$true }
+        # §95.3: hourly; inert until 'telemetry.uplink' is ON. One report per job that ran, a heartbeat once a day.
+        [pscustomobject]@{ name='uplink'; type='uplink'; intervalMinutes=60; enabled=$true }
+        # §95.4: every 6 h; inert until 'updates.invardia' is ON. Asks only while this install has no key and a Pro licence.
+        [pscustomobject]@{ name='install-key'; type='install-key'; intervalMinutes=360; enabled=$true }
         # REQ-AR-2: no-op until review rules are saved and enabled (Settings > Access reviews); Pro 'reviews.campaigns'.
         [pscustomobject]@{ name='access-review-cycle'; type='access-review-cycle'; intervalMinutes=360; enabled=$true }
         # §82: every tick (the tick runs every 5 min); inert until the RFA portal is deployed + enabled (Pro 'rfa.portal').
@@ -1206,6 +1218,20 @@ function Initialize-PimDefaultJobHandlers {
             detail='unimplemented:access-review-cycle (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
+    Register-PimJobHandler -Type 'install-key' -Handler {
+        param($job,$now,$whatIf)
+        # §95.4: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimInstallKeyJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:install-key (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'uplink' -Handler {
+        param($job,$now,$whatIf)
+        # §95.3: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimUplinkJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:uplink (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
     Register-PimJobHandler -Type 'licence-request' -Handler {
         param($job,$now,$whatIf)
         # §95.2: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimLicenceRequestJob).
@@ -1710,8 +1736,11 @@ function Invoke-PimScheduledJob {
         return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$true; detail="$($r.detail)"; result=$r; ranUtc=$NowUtc.ToString('o'); correlationId=$corr }
     } catch {
         $cap.lines.Add(([datetime]::UtcNow.ToString('HH:mm:ss')) + " ERROR: $($_.Exception.Message)")
+        # IMP-269: WHERE it threw (function, file, line -- no data), so a failed run can be located from its record.
+        $__stack = @(ConvertTo-PimErrorStackLines -StackTrace "$($_.ScriptStackTrace)")
+        foreach ($__sl in $__stack) { $cap.lines.Add("  $__sl") }
         Complete-PimJobOutputCapture -Capture $cap
-        return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$false; detail="error: $($_.Exception.Message)"; ranUtc=$NowUtc.ToString('o'); correlationId=$corr }
+        return [pscustomobject]@{ name="$($Job.name)"; type="$($Job.type)"; ok=$false; detail="error: $($_.Exception.Message)"; stack=$__stack; ranUtc=$NowUtc.ToString('o'); correlationId=$corr }
     } finally {
         $global:PIM_JobCorrelationId = ''; $global:PIM_JobName = ''
     }
@@ -2546,6 +2575,25 @@ function Format-PimCadence {
     if ($m -eq 1440)    { return 'daily' }
     $d = [Math]::Round($m / 1440.0, 1); return "every $d d"
 }
+function ConvertTo-PimErrorStackLines {
+    <#
+      PURE. IMP-269. $_.ScriptStackTrace -> at most -Max lines "at <function>, <file name>: line <n>". Only the file NAME
+      (no folder) and nothing after the line number, so no path, argument or data reaches the run record.
+    #>
+    param([AllowEmptyString()][string]$StackTrace = '', [int]$Max = 8)
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($l in @("$StackTrace" -split "`r?`n")) {
+        if ($out.Count -ge $Max) { break }
+        $t = "$l".Trim(); if (-not $t) { continue }
+        if ($t -match '^at (?<fn>[^,]*), (?<file>.*): line (?<n>\d+)') {
+            $file = "$($Matches.file)".Trim()
+            $leaf = if ($file -and $file -ne '<No file>') { ($file -split '[\\/]')[-1] } else { '<no file>' }
+            $out.Add(("at {0}, {1}: line {2}" -f "$($Matches.fn)".Trim(), $leaf, $Matches.n))
+        }
+    }
+    return @($out.ToArray())
+}
+
 function ConvertTo-PimRunLogText {
     # Build a readable per-run log from a dispatch result object. Handlers may add a
     # 'log' (string or string[]); otherwise we synthesize from detail + sub-results.
@@ -2555,6 +2603,8 @@ function ConvertTo-PimRunLogText {
     if ($Result) {
         $lines.Add("result.ok      = $([bool]$Result.ok)")
         if ($Result.PSObject.Properties['detail']) { $lines.Add("detail         = $($Result.detail)") }
+        # IMP-269: the failed handler's stack (function, file, line).
+        if ($Result.PSObject.Properties['stack'] -and @($Result.stack).Count) { foreach ($s in @($Result.stack)) { $lines.Add("stack          $s") } }
         $inner = if ($Result.PSObject.Properties['result']) { $Result.result } else { $null }
         if ($inner) {
             if ($inner.PSObject.Properties['ran'])    { $lines.Add("ran            = $([bool]$inner.ran)") }
