@@ -10038,7 +10038,9 @@
     'hybrid-ad-apply':             'Applies on-premises Active Directory changes for hybrid admin accounts.',
     'hybrid-ad-servers':           'Lists the Windows servers in Active Directory for Discovery, and puts each server\'s PIM group into that server\'s local Administrators (adds only; runs on the hybrid worker).',
     'hybrid-ad-groups':            'Mirrors the PIM groups marked for Active Directory to on-premises AD groups (runs on the hybrid worker).',
-    'hybrid-ad-sync':              'Puts the people who have ACTIVATED a PIM group into its on-premises AD group, time-limited when the forest supports it (runs CONTINUOUSLY on the hybrid worker: an activation reaches AD within seconds).',
+    'hybrid-ad-sync':              'CRITICAL groups (everything except the per-server groups): puts the people who have ACTIVATED a PIM group into its on-premises AD group, time-limited when the forest supports it. Runs CONTINUOUSLY on the hybrid worker, a pass every few seconds, so emergency access reaches AD within about 20-30 seconds however many servers there are.',
+    'hybrid-ad-sync-servers':      'The per-server groups (local administrators): the same activation sync in its own continuous process, reading the groups in parallel batches, so thousands of servers never slow the critical groups down.',
+    'hybrid-ad-changes':           'Change detection: the moment an AD admin or an AD-marked group definition changes, creates or updates the AD account or AD group at once (the timed Apply changes and Group definitions runs stay as a safety net).',
     'active-assignments-snapshot': 'Reads who holds active privileged access right now, for Review current delegations and Home.',
     'drift-snapshot':              'Checks whether the tenant still matches what PIM says it should (the Drift page).',
     'coverage':                    'Lists every role, workspace and Azure scope PIM does not delegate yet, orphan groups and groups PIM does not manage (the Coverage & gaps page).',
@@ -10073,7 +10075,7 @@
       '<a href="#" id="jobSchedMore">What do these columns mean?</a>' +
       '<div id="jobSchedMoreBox" style="display:none;margin-top:6px;">' +
         '<b>Job</b> &mdash; its name and what it does &middot; <b>Area</b> &mdash; the part of the tenant it covers &middot; ' +
-        '<b>Enabled</b> &mdash; on or off &middot; <b>Every (min)</b> &mdash; how often.<br>' +
+        '<b>Enabled</b> &mdash; on or off &middot; <b>Every (min) after it finishes</b> &mdash; the rest between two runs: the next run starts this long after the previous one FINISHED, so a slow run is never followed straight away.<br>' +
         'A commit starts the engine straight away, so a cadence is the safety net, not the delay. Changes apply from the next scheduler tick.' +
       '</div></div>');
     if (sched && sched.cadenceJob && sched.cadence) {
@@ -10113,7 +10115,7 @@
       // Mail-relevant jobs first (the ask), then the rest. The self-gated MSP job (the managed tenant's pull / the
       // master's publish) goes FIRST: it is the one row here that is its own job, with its own status.
       const ordered = schedJobs.slice().sort((a,b) => ((b.selfGated?2:0) + (b.isMail?1:0)) - ((a.selfGated?2:0) + (a.isMail?1:0)));
-      h.push('<table class="grid" style="font-size:12px;"><thead><tr><th>Job</th><th>Area</th><th>Enabled</th><th>Every (min)</th></tr></thead><tbody>');
+      h.push('<table class="grid" style="font-size:12px;"><thead><tr><th>Job</th><th>Area</th><th>Enabled</th><th title="The next run starts this long after the previous run FINISHED">Every (min) after it finishes</th></tr></thead><tbody>');
       for (const j of ordered) {
         // 🔴 AN INTEGRATION NOBODY HAS TURNED ON IS NOT A SCHEDULE ROW (operator, 2026-09-22:
         // "servicenow should not show here when not enabled"). ServiceNow intake ships OFF and can
@@ -10799,7 +10801,7 @@
     const ro = d.canWrite ? '' : ' disabled';
     // Operator 2026-10-02: "i need to have a way to see it is working and green". One pill per worker job, from the
     // heartbeat the worker writes (fresh = seen within 10 min for the continuous sync, 90 min for the others).
-    const hwJobs = { 'hybrid-ad-sync': 'Continuous group sync', 'hybrid-ad-apply': 'Apply changes', 'hybrid-ad-groups': 'Group definitions', 'hybrid-ad-servers': 'Server onboarding' };
+    const hwJobs = { 'hybrid-ad-sync': 'Critical group sync', 'hybrid-ad-sync-servers': 'Server group sync', 'hybrid-ad-changes': 'Change detection', 'hybrid-ad-apply': 'Apply changes', 'hybrid-ad-groups': 'Group definitions', 'hybrid-ad-servers': 'Server onboarding' };
     const ws = Array.isArray(d.worker) ? d.worker : [];
     if (ws.length) {
       const allOk = ws.every(w => w.state === 'live');
@@ -13158,7 +13160,8 @@
         // This page answers "did it run, what happened, run it now"; **Job schedule** owns when it
         // runs. So both are shown here as FACTS, with one link to the page that changes them.
         const cadenceCell = esc0(j.cadence) +
-          '<div style="color:#8c959f;font-size:11px;">' + (j.intervalMinutes ? ('every ' + esc0(String(j.intervalMinutes)) + ' min') : '&mdash;') + '</div>';
+          // SCHED-1 (operator 2026-10-04): the cadence counts from when the job FINISHED -- say so, so nobody reads it as a clock.
+          '<div style="color:#8c959f;font-size:11px;" title="The next run starts this long after the previous run FINISHED -- a run that takes longer than the cadence is never followed straight away by the next one.">' + (j.intervalMinutes ? (esc0(String(j.intervalMinutes)) + ' min after it finishes') : '&mdash;') + '</div>';
         const enabledCell = (j.enabled ? '<span style="color:#1a7f37;">on</span>' : '<span style="color:#9a6700;">off</span>');
         const dur = (j.lastDurationMs != null && j.lastDurationMs >= 0) ? (' <span style="color:#8c959f;">(' + (j.lastDurationMs >= 1000 ? (Math.round(j.lastDurationMs / 100) / 10) + 's' : j.lastDurationMs + 'ms') + ')</span>') : '';
         // Last run cell: explicit "no runs yet" for never-run jobs (not a bare dash).
@@ -13239,7 +13242,8 @@
           '<td style="padding:6px 8px;">' + jobStatusPill(j) + hybridWorkerBadge(j) + '</td>' +
           '<td style="padding:6px 8px;" title="' + esc0(j.lastRunUtc || '') + '">' + lastCell + '</td>' +
           '<td style="padding:6px 8px;max-width:280px;">' + result + '</td>' +
-          '<td style="padding:6px 8px;" title="' + esc0(j.nextRunUtc || '') + (j.nextRunSynthesized ? ' (computed from cadence)' : '') + '">' + (j.overdue ? '<span style="color:#9a6700;font-weight:600;">' : '') + nextCell + (j.overdue ? '</span>' : '') + '</td>' +
+          '<td style="padding:6px 8px;" title="' + esc0(j.nextRunUtc || '') + (j.nextRunSynthesized ? ' (computed from cadence)' : '') +
+            (j.lastFinishedUtc && j.intervalMinutes ? esc0(' = last run finished ' + j.lastFinishedUtc + ' + ' + j.intervalMinutes + ' min') : '') + '">' + (j.overdue ? '<span style="color:#9a6700;font-weight:600;">' : '') + nextCell + (j.overdue ? '</span>' : '') + '</td>' +
           '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' + (j.type === 'hybrid-ad-sync' ? '<button class="btn-sec jobsHybridLive" title="Watch the continuous PIM-for-AD sync live (TTL checks, adds, removes)">Live view</button> ' : '') + runBtn + ' ' + histBtn + ' ' + ackBtn + ' ' + logBtn + '</td>' +
           '</tr>');
       });

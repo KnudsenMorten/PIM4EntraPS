@@ -33,7 +33,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('Join', 'Configure', 'Update')][string]$Phase,
+    [Parameter(Mandatory)][ValidateSet('Join', 'Configure', 'Update', 'Layout')][string]$Phase,
     [string]$OdjBlob,
     [string]$GmsaName,
     # 2.4.467 tier split (operator 2026-09-30): server onboarding runs as its OWN gMSA (DOMAIN\gMSA-PIM-L2-T1), in its own
@@ -123,7 +123,7 @@ function Test-HybridCapable {
     return (($names -contains 'Instance') -and ($names -contains 'UseManagedIdentity') -and ($names -contains 'ContinuousJob'))
 }
 function Sync-WorkerTaskState {
-    foreach ($n in 'PIM Hybrid Worker', 'PIM Hybrid AD Sync', 'PIM Hybrid Servers') {
+    foreach ($n in 'PIM Hybrid Worker', 'PIM Hybrid AD Sync', 'PIM Hybrid AD Sync Servers', 'PIM Hybrid AD Changes', 'PIM Hybrid Servers') {
         $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
         if (-not $t) { continue }
         if (Test-HybridCapable) { if ($t.State -eq 'Disabled') { Enable-ScheduledTask -TaskName $n | Out-Null; Step "'$n' ENABLED -- $(Get-CurrentVersion) carries the hybrid worker" } }
@@ -160,14 +160,113 @@ function Install-Version([string]$V) {
     Step "PIM $V is current ($dest)"
 }
 
+
+# ------------------------------------------------------------------ the worker's LAYOUT: run wrapper + scheduled tasks
+# One function, used by -Phase Configure, -Phase Layout and (through the NEW version's -Phase Layout) -Phase Update, so a
+# worker always runs the task layout of the version it runs -- before 2.4.495 the nightly update swapped the code only and
+# a new task (a new lane) never reached an installed worker.
+# 2026-10-04 lanes (operator: "if a customer has 10000 servers + 65 critical ad groups, then it takes 1-2 hours to come to
+# the critical groups" / "in case of emergency then can gain access within 20-30 sec at max"): THREE continuous processes,
+# each its own task, log and liveness stamp, none waiting on another:
+#   -Mode Sync         'PIM Hybrid AD Sync'           critical (non-server) groups, a pass every 5 s
+#   -Mode SyncServers  'PIM Hybrid AD Sync Servers'   the per-server groups, parallel batches
+#   -Mode Changes      'PIM Hybrid AD Changes'        AD accounts + AD groups the moment their definitions change
+# -Mode Tick = the 5-minute scheduler (hybrid-ad-apply + hybrid-ad-groups as the SAFETY NET); -Mode Servers = onboarding.
+function Register-WorkerLayout {
+$run = @'
+param([ValidateSet('Tick', 'Sync', 'SyncServers', 'Changes', 'Servers')][string]$Mode = 'Tick')
+$ErrorActionPreference = 'Stop'
+$root = Split-Path (Split-Path $MyInvocation.MyCommand.Path -Parent) -Parent
+$cfg = Get-Content -LiteralPath (Join-Path $root 'bin\worker.json') -Raw | ConvertFrom-Json
+$split = [bool]"$($cfg.serverGmsa)".Trim()
+$log = Join-Path $root ("logs\{0}-{1:yyyyMMdd}.log" -f $(switch ($Mode) { 'Sync' { 'sync' } 'SyncServers' { 'sync-servers' } 'Changes' { 'changes' } 'Servers' { 'servers' } default { 'worker' } }), (Get-Date))
+Get-ChildItem (Join-Path $root 'logs') -Filter '*.log' | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-14) } | Remove-Item -Force -ErrorAction SilentlyContinue
+$env:PIM_HybridAdCredentialMode = 'gMSA'
+# the gMSA THIS task runs as -- PIM-HybridAd.ps1 refuses any other process identity
+$env:PIM_HybridAdGmsaName = $(if ($Mode -eq 'Servers') { $cfg.serverGmsa } else { $cfg.gmsa })
+if ("$($cfg.adServer)".Trim()) { $global:PIM_HybridAdServer = $cfg.adServer }
+$common = @{ Instance = $(if ($Mode -eq 'Servers') { 'hybridsrv' } else { 'hybrid' }); SqlServer = $cfg.sqlServer; SqlDatabase = $cfg.sqlDatabase; TenantId = $cfg.tenantId; StorageBackend = 'sql'; UseManagedIdentity = $true; WhatIf = [bool]$cfg.planOnly }
+$start = Join-Path $root 'app\current\SOLUTIONS\PIM4EntraPS\tools\pim-scheduler\Start-PimScheduler.ps1'
+$pause = [int]$(if ($cfg.syncPauseSeconds) { $cfg.syncPauseSeconds } else { 5 })
+Start-Transcript -LiteralPath $log -Append | Out-Null
+try {
+    switch ($Mode) {
+        'Sync'        { & $start @common -Jobs 'hybrid-ad-sync' -ContinuousJob 'hybrid-ad-sync' -ContinuousPauseSeconds $pause }
+        'SyncServers' { & $start @common -Jobs 'hybrid-ad-sync-servers' -ContinuousJob 'hybrid-ad-sync-servers' -ContinuousPauseSeconds $pause }
+        'Changes'     { & $start @common -Jobs 'hybrid-ad-changes,hybrid-ad-apply,hybrid-ad-groups' -ContinuousJob 'hybrid-ad-changes' -ContinuousPauseSeconds $pause }
+        'Servers'     { & $start @common -Once -Jobs 'hybrid-ad-servers' }
+        default       { if ($split) { & $start @common -Once -Jobs 'hybrid-ad-apply,hybrid-ad-groups' } else { & $start @common -Once -Jobs 'hybrid-ad-apply,hybrid-ad-groups,hybrid-ad-servers' } }
+    }
+} finally { Stop-Transcript | Out-Null }
+'@
+Set-Content -LiteralPath (Join-Path $Root 'bin\Run-PimHybridWorker.ps1') -Value $run -Encoding UTF8
+
+Step 'scheduled tasks'
+$pwshExe = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+$exe = if (Test-Path $pwshExe) { $pwshExe } else { "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" }
+$aRun = New-ScheduledTaskAction -Execute $exe -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Root\bin\Run-PimHybridWorker.ps1`""
+$tRun = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes $cfg.intervalMinutes)
+$pRun = New-ScheduledTaskPrincipal -UserId "$($cfg.gmsa)`$" -LogonType Password -RunLevel Limited
+$sRun = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 50) -StartWhenAvailable
+Register-ScheduledTask -TaskName 'PIM Hybrid Worker' -Action $aRun -Trigger $tRun -Principal $pRun -Settings $sRun -Force | Out-Null
+# the continuous lanes: each started at boot and re-checked EVERY MINUTE (IgnoreNew = a running loop is left alone), so a
+# loop that stopped (crash, hang killed by the watchdog, a new version installed) is back within a minute; no time limit.
+$sSync = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+foreach ($lane in @(@('PIM Hybrid AD Sync', 'Sync'), @('PIM Hybrid AD Sync Servers', 'SyncServers'), @('PIM Hybrid AD Changes', 'Changes'))) {
+    $a = New-ScheduledTaskAction -Execute $exe -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Root\bin\Run-PimHybridWorker.ps1`" -Mode $($lane[1])"
+    $tr = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1)))
+    Register-ScheduledTask -TaskName $lane[0] -Action $a -Trigger $tr -Principal $pRun -Settings $sSync -Force | Out-Null
+}
+# server onboarding AS ITS OWN gMSA (tier split): the scheduler instance 'hybridsrv' runs only hybrid-ad-servers
+if ("$($cfg.serverGmsa)".Trim()) {
+    $aSrv = New-ScheduledTaskAction -Execute $exe -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Root\bin\Run-PimHybridWorker.ps1`" -Mode Servers"
+    $tSrv = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(2)) -RepetitionInterval (New-TimeSpan -Minutes $cfg.intervalMinutes)
+    $pSrv = New-ScheduledTaskPrincipal -UserId "$($cfg.serverGmsa)`$" -LogonType Password -RunLevel Limited
+    Register-ScheduledTask -TaskName 'PIM Hybrid Servers' -Action $aSrv -Trigger $tSrv -Principal $pSrv -Settings $sRun -Force | Out-Null
+} elseif (Get-ScheduledTask -TaskName 'PIM Hybrid Servers' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'PIM Hybrid Servers' -Confirm:$false }
+$aUpd = New-ScheduledTaskAction -Execute $exe -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Root\bin\Install-PimHybridWorker.ps1`" -Phase Update"
+$tUpd = New-ScheduledTaskTrigger -Daily -At '04:30'
+$pUpd = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName 'PIM Hybrid Worker Update' -Action $aUpd -Trigger $tUpd -Principal $pUpd -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable) -Force | Out-Null
+Sync-WorkerTaskState
+# The changes lane and the server lane start at once (their 1-minute trigger would too); the running critical loop restarts
+# on its own when the installed version changes.
+foreach ($n in 'PIM Hybrid AD Sync Servers', 'PIM Hybrid AD Changes') { $tk = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue; if ($tk -and $tk.State -eq 'Ready') { Start-ScheduledTask -TaskName $n } }
+Step ("done: 'PIM Hybrid Worker' every {0} min (safety net) + 'PIM Hybrid AD Sync' / 'PIM Hybrid AD Sync Servers' / 'PIM Hybrid AD Changes' continuously, as {1}`$; logs in {2}\logs{3}" -f $cfg.intervalMinutes, $cfg.gmsa, $Root, $(if ($cfg.planOnly) { ' -- PLAN ONLY (-WhatIf): nothing is written to AD until Configure is re-run without -PlanOnly' } else { '' }))
+}
+
+# Run the CURRENT version's -Phase Layout (its run wrapper + tasks), and keep its installer in bin for the next update. A
+# version older than the layout phase is left alone (its own installer could not do it).
+function Invoke-CurrentLayout {
+    $inst = Join-Path $Root 'app\current\SOLUTIONS\PIM4EntraPS\tools\pim-hybrid-worker\Install-PimHybridWorker.ps1'
+    if (-not (Test-Path $inst)) { Step 'layout: the current version carries no installer -- tasks left as they are'; return }
+    if ((Get-Content -LiteralPath $inst -Raw) -notmatch "'Layout'") { Step 'layout: the current version predates -Phase Layout -- tasks left as they are'; return }
+    $px = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'; if (-not (Test-Path $px)) { $px = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" }
+    Step 'layout: applying the current version''s run wrapper + tasks'
+    & $px -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $inst -Phase Layout -Root $Root
+    if ($LASTEXITCODE -ne 0) { Step "layout: FAILED (exit $LASTEXITCODE) -- the previous tasks stay" }
+}
+function Test-WorkerLayoutCurrent {
+    foreach ($n in 'PIM Hybrid AD Sync Servers', 'PIM Hybrid AD Changes') { if (-not (Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue)) { return $false } }
+    return $true
+}
+
+# ------------------------------------------------------------------ Layout (run by Update with the NEW version's installer)
+if ($Phase -eq 'Layout') {
+    Register-WorkerLayout
+    Set-Content -LiteralPath (Join-Path $Root 'bin\Install-PimHybridWorker.ps1') -Value $selfText -Encoding UTF8   # the daily updater runs this copy
+    return
+}
+
 # ------------------------------------------------------------------ Update
 if ($Phase -eq 'Update') {
     $t = Resolve-TargetVersion; $c = Get-CurrentVersion
     Step "ring: $($t.reason); running: $(if ($c) { $c } else { 'none' })"
     if (-not $t.version) { Step 'no approved version -- nothing moves'; return }
     if ($c -and ([version]$t.version -lt [version]$c)) { Step "the ring approves $($t.version), older than the running $c -- NOT rolling back unattended"; return }
-    if ($t.version -eq $c) { Step 'up to date'; Sync-WorkerTaskState; return }
+    if ($t.version -eq $c) { Step 'up to date'; if (-not (Test-WorkerLayoutCurrent)) { Invoke-CurrentLayout }; Sync-WorkerTaskState; return }
     Install-Version -V $t.version
+    Invoke-CurrentLayout
     Sync-WorkerTaskState
     return
 }
@@ -237,56 +336,4 @@ $t = Resolve-TargetVersion
 if (-not $t.version) { throw "cannot install: $($t.reason)" }
 Install-Version -V $t.version
 
-# the run wrapper: a transcript per day, 14 days kept; the parameters come from worker.json (no secrets in it)
-# -Mode Tick = the 5-minute scheduler (hybrid-ad-apply + hybrid-ad-groups); -Mode Sync = the CONTINUOUS hybrid-ad-sync loop
-# (operator 2026-09-29: an activation must reach AD in seconds, as v1's endless PIM-Sync-ID-AD loop did).
-$run = @'
-param([ValidateSet('Tick', 'Sync', 'Servers')][string]$Mode = 'Tick')
-$ErrorActionPreference = 'Stop'
-$root = Split-Path (Split-Path $MyInvocation.MyCommand.Path -Parent) -Parent
-$cfg = Get-Content -LiteralPath (Join-Path $root 'bin\worker.json') -Raw | ConvertFrom-Json
-$split = [bool]"$($cfg.serverGmsa)".Trim()
-$log = Join-Path $root ("logs\{0}-{1:yyyyMMdd}.log" -f $(switch ($Mode) { 'Sync' { 'sync' } 'Servers' { 'servers' } default { 'worker' } }), (Get-Date))
-Get-ChildItem (Join-Path $root 'logs') -Filter '*.log' | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-14) } | Remove-Item -Force -ErrorAction SilentlyContinue
-$env:PIM_HybridAdCredentialMode = 'gMSA'
-# the gMSA THIS task runs as -- PIM-HybridAd.ps1 refuses any other process identity
-$env:PIM_HybridAdGmsaName = $(if ($Mode -eq 'Servers') { $cfg.serverGmsa } else { $cfg.gmsa })
-if ("$($cfg.adServer)".Trim()) { $global:PIM_HybridAdServer = $cfg.adServer }
-$common = @{ Instance = $(if ($Mode -eq 'Servers') { 'hybridsrv' } else { 'hybrid' }); SqlServer = $cfg.sqlServer; SqlDatabase = $cfg.sqlDatabase; TenantId = $cfg.tenantId; StorageBackend = 'sql'; UseManagedIdentity = $true; WhatIf = [bool]$cfg.planOnly }
-$start = Join-Path $root 'app\current\SOLUTIONS\PIM4EntraPS\tools\pim-scheduler\Start-PimScheduler.ps1'
-Start-Transcript -LiteralPath $log -Append | Out-Null
-try {
-    if ($Mode -eq 'Sync') { & $start @common -Jobs 'hybrid-ad-sync' -ContinuousJob 'hybrid-ad-sync' -ContinuousPauseSeconds ([int]$(if ($cfg.syncPauseSeconds) { $cfg.syncPauseSeconds } else { 5 })) }
-    elseif ($Mode -eq 'Servers') { & $start @common -Once -Jobs 'hybrid-ad-servers' }
-    elseif ($split) { & $start @common -Once -Jobs 'hybrid-ad-apply,hybrid-ad-groups' }
-    else { & $start @common -Once -Jobs 'hybrid-ad-apply,hybrid-ad-groups,hybrid-ad-servers' }
-} finally { Stop-Transcript | Out-Null }
-'@
-Set-Content -LiteralPath (Join-Path $Root 'bin\Run-PimHybridWorker.ps1') -Value $run -Encoding UTF8
-
-Step 'scheduled tasks'
-$exe = if (Test-Path $pwsh) { $pwsh } else { "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" }
-$aRun = New-ScheduledTaskAction -Execute $exe -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Root\bin\Run-PimHybridWorker.ps1`""
-$tRun = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes $cfg.intervalMinutes)
-$pRun = New-ScheduledTaskPrincipal -UserId "$($cfg.gmsa)`$" -LogonType Password -RunLevel Limited
-$sRun = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 50) -StartWhenAvailable
-Register-ScheduledTask -TaskName 'PIM Hybrid Worker' -Action $aRun -Trigger $tRun -Principal $pRun -Settings $sRun -Force | Out-Null
-# the continuous sync loop: started at boot and re-checked EVERY MINUTE (IgnoreNew = a running loop is left alone), so a loop
-# that stopped (crash, max runtime, a new version installed) is back within a minute; no execution time limit
-$aSync = New-ScheduledTaskAction -Execute $exe -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Root\bin\Run-PimHybridWorker.ps1`" -Mode Sync"
-$tSync = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1)))
-$sSync = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName 'PIM Hybrid AD Sync' -Action $aSync -Trigger $tSync -Principal $pRun -Settings $sSync -Force | Out-Null
-# server onboarding AS ITS OWN gMSA (tier split): the scheduler instance 'hybridsrv' runs only hybrid-ad-servers
-if ("$($cfg.serverGmsa)".Trim()) {
-    $aSrv = New-ScheduledTaskAction -Execute $exe -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Root\bin\Run-PimHybridWorker.ps1`" -Mode Servers"
-    $tSrv = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(2)) -RepetitionInterval (New-TimeSpan -Minutes $cfg.intervalMinutes)
-    $pSrv = New-ScheduledTaskPrincipal -UserId "$($cfg.serverGmsa)`$" -LogonType Password -RunLevel Limited
-    Register-ScheduledTask -TaskName 'PIM Hybrid Servers' -Action $aSrv -Trigger $tSrv -Principal $pSrv -Settings $sRun -Force | Out-Null
-} elseif (Get-ScheduledTask -TaskName 'PIM Hybrid Servers' -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName 'PIM Hybrid Servers' -Confirm:$false }
-$aUpd = New-ScheduledTaskAction -Execute $exe -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Root\bin\Install-PimHybridWorker.ps1`" -Phase Update"
-$tUpd = New-ScheduledTaskTrigger -Daily -At '04:30'
-$pUpd = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-Register-ScheduledTask -TaskName 'PIM Hybrid Worker Update' -Action $aUpd -Trigger $tUpd -Principal $pUpd -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable) -Force | Out-Null
-Sync-WorkerTaskState
-Step ("done: 'PIM Hybrid Worker' every {0} min + 'PIM Hybrid AD Sync' continuously, as {1}`${4}; logs in {2}\logs{3}" -f $cfg.intervalMinutes, $cfg.gmsa, $Root, $(if ($cfg.planOnly) { ' -- PLAN ONLY (-WhatIf): nothing is written to AD until Configure is re-run without -PlanOnly' } else { '' }), $(if ("$($cfg.serverGmsa)".Trim()) { " + 'PIM Hybrid Servers' every $($cfg.intervalMinutes) min as $($cfg.serverGmsa)`$" } else { '' }))
+Register-WorkerLayout

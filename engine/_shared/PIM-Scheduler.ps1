@@ -88,7 +88,11 @@ $script:PimTickOnlyJobTypes += 'autoextend-report'
 $script:PimJobTypes += 'hybrid-ad-groups'
 $script:PimJobTypes += 'hybrid-ad-sync'
 $script:PimJobTypes += 'hybrid-ad-servers'   # §80.2 server onboarding (local Administrators, add only)
-$script:PimHybridWorkerJobTypes = @('hybrid-ad-apply', 'hybrid-ad-groups', 'hybrid-ad-sync', 'hybrid-ad-servers')
+# 2026-10-04 lanes (operator: critical groups must reach AD within 20-30 s even with 10,000 servers): the per-server groups
+# sync in their own continuous loop, and AD accounts + AD groups run the moment their definitions change.
+$script:PimJobTypes += 'hybrid-ad-sync-servers'
+$script:PimJobTypes += 'hybrid-ad-changes'
+$script:PimHybridWorkerJobTypes = @('hybrid-ad-apply', 'hybrid-ad-groups', 'hybrid-ad-sync', 'hybrid-ad-sync-servers', 'hybrid-ad-changes', 'hybrid-ad-servers')
 function Get-PimHybridWorkerJobTypes { @($script:PimHybridWorkerJobTypes) }
 # §80.2: a SCHEDULER INSTANCE. The hybrid worker runs its own scheduler next to the container tick against the SAME store.
 # Sharing the one lease, the one SchedulerState and the one JobScope record, it would (a) fight the tick for the lease,
@@ -173,7 +177,7 @@ function Get-PimHybridWorkerJobStatus {
     if ($null -eq $hb -and (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) {
         try { $raw = Get-PimSetting -Name 'HybridWorkerHeartbeat'; $hb = if ($raw -is [string]) { $raw | ConvertFrom-Json } else { $raw } } catch { $hb = $null }
     }
-    $fresh = if ($t -eq 'hybrid-ad-sync') { 10 } else { 90 }
+    $fresh = if ($t -in 'hybrid-ad-sync', 'hybrid-ad-sync-servers', 'hybrid-ad-changes') { 10 } else { 90 }   # the continuous lanes beat every 5 min
     $out = [ordered]@{ host = ''; lastSeenUtc = ''; minutesAgo = $null; fresh = $false; planOnly = $false; state = 'not seen' }
     if (-not $hb -or -not $hb.PSObject.Properties['seen'] -or -not $hb.seen) { return [pscustomobject]$out }
     $p = $hb.seen.PSObject.Properties | Where-Object { $_.Name -ieq $t } | Select-Object -First 1
@@ -289,6 +293,10 @@ function Get-PimDefaultJobSchedule {
         # reports every 5 minutes: delegated while the loop's heartbeat is fresh, "hybrid worker required" when it is not.
         [pscustomobject]@{ name='hybrid-ad-groups';   type='hybrid-ad-groups'; intervalMinutes=60; enabled=$true  }
         [pscustomobject]@{ name='hybrid-ad-sync';     type='hybrid-ad-sync';   intervalMinutes=5;  enabled=$true  }
+        # 2026-10-04 lanes: like hybrid-ad-sync these run CONTINUOUSLY on the hybrid worker; the entries are what the main tick
+        # reports (delegated while the lane's heartbeat is fresh).
+        [pscustomobject]@{ name='hybrid-ad-sync-servers'; type='hybrid-ad-sync-servers'; intervalMinutes=5; enabled=$true }
+        [pscustomobject]@{ name='hybrid-ad-changes';  type='hybrid-ad-changes'; intervalMinutes=5; enabled=$true }
         # §80.2 server onboarding (v1 AD-ManageLocalAdministratorsGroupMembership.ps1): lists AD servers for Discovery and puts
         # each DEFINED per-server group into that server's local Administrators (add only). Hourly: a new server is offered in
         # Discovery within the hour, and a committed group lands on its server at the next run after the mirror created it.
@@ -748,7 +756,14 @@ function Get-PimNextRunAfterRun {
       catches it, instead of missing it by the seconds the previous tick took to reach the job.
     #>
     param([Parameter(Mandatory)][object]$Job, [Parameter(Mandatory)][datetime]$ScheduledUtc,
-          [Parameter(Mandatory)][datetime]$StartedUtc, [int]$ToleranceSeconds = 60)
+          [Parameter(Mandatory)][datetime]$StartedUtc, [int]$ToleranceSeconds = 60,
+          [AllowNull()][Nullable[datetime]]$FinishedUtc = $null)
+    # 🔴 SCHED-1 (operator 2026-10-04, CRITICAL: "fix the job scheduler ... so its cadence starts x min when job finishes.
+    # otherwise a job will start before it is finished ... sample: job take 8 min to complete and cadence is 5 min").
+    # The cadence is the REST between two runs: next = FINISHED + interval. A job that runs 8 minutes on a 5-minute cadence
+    # starts at T, ends at T+8, and is next due at T+13 -- never at T+5 while it is still running, and never back to back.
+    # (Framework contract DOCS/REQUIREMENTS.md SCHED-1 -- the same rule in every solution's scheduler.)
+    if ($null -ne $FinishedUtc) { return Get-PimNextRunUtc -Job $Job -FromUtc ([datetime]$FinishedUtc) }
     $fromSlot  = Get-PimNextRunUtc -Job $Job -FromUtc $ScheduledUtc
     $fromStart = (Get-PimNextRunUtc -Job $Job -FromUtc $StartedUtc).AddSeconds(-$ToleranceSeconds)
     if ($fromSlot -ge $fromStart) { return $fromSlot }
@@ -782,10 +797,10 @@ function Resolve-PimSchedulerJobs {
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($d in $sched) {
         $e = $d.PSObject.Copy()   # never mutate the schedule the GUI also renders
-        foreach ($p in @('lastRunUtc', 'nextRunUtc')) { if ($e.PSObject.Properties[$p]) { $e.PSObject.Properties.Remove($p) } }
+        foreach ($p in @('lastRunUtc', 'nextRunUtc', 'lastFinishedUtc')) { if ($e.PSObject.Properties[$p]) { $e.PSObject.Properties.Remove($p) } }
         $sj = $null; [void]$stateByName.TryGetValue("$($d.name)", [ref]$sj)
         if ($sj) {
-            foreach ($p in @('lastRunUtc', 'nextRunUtc')) {
+            foreach ($p in @('lastRunUtc', 'nextRunUtc', 'lastFinishedUtc')) {
                 if ($sj.PSObject.Properties[$p] -and "$($sj.$p)".Trim()) { $e | Add-Member -NotePropertyName $p -NotePropertyValue "$($sj.$p)" -Force }
             }
             $iv = 0; try { $iv = [int]$e.intervalMinutes } catch { }
@@ -797,7 +812,10 @@ function Resolve-PimSchedulerJobs {
             $changed = ($null -ne $oldIv -and $oldIv -ne $iv)
             $tooFar  = ($null -ne $next -and $next -gt $now.AddMinutes($iv).AddSeconds($ToleranceSeconds))
             if ($null -ne $next -and ($changed -or $tooFar)) {
-                if ($null -ne $last) { $nr = $last.AddMinutes($iv) }
+                # SCHED-1: from when the last run FINISHED (older state has only its start)
+                $fin = $null; if ($e.PSObject.Properties['lastFinishedUtc']) { $fin = Get-PimUtcStamp $e.lastFinishedUtc }
+                if ($null -ne $fin) { $nr = $fin.AddMinutes($iv) }
+                elseif ($null -ne $last) { $nr = $last.AddMinutes($iv) }
                 else { $nr = $now.AddMinutes($iv); if ($next -lt $nr) { $nr = $next } }
                 $e.nextRunUtc = $nr.ToString('o')
                 $why = if ($changed) { "cadence $oldIv -> $iv min" } else { "stored next slot was further out than one $iv-min interval" }
@@ -1122,7 +1140,9 @@ function Initialize-PimDefaultJobHandlers {
         if (-not (Get-Command Invoke-PimHybridAdWorkerJob -ErrorAction SilentlyContinue)) {
             return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:hybrid-ad-apply (PIM-HybridAd.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf }
         }
-        Invoke-PimHybridAdWorkerJob -NowUtc $now -WhatIf:$whatIf
+        # the same machine-wide AD-write lock the changes lane takes (Invoke-PimHybridAdWriteLocked) -- never both at once
+        if (Get-Command Invoke-PimHybridAdWriteLocked -ErrorAction SilentlyContinue) { Invoke-PimHybridAdWriteLocked -Action { Invoke-PimHybridAdWorkerJob -NowUtc $now -WhatIf:$whatIf } }
+        else { Invoke-PimHybridAdWorkerJob -NowUtc $now -WhatIf:$whatIf }
     }
     # §80.2: the PIM-for-AD replacement (PIM-HybridAdGroups.ps1) -- group mirror + JIT membership, hybrid worker only.
     Register-PimJobHandler -Type 'hybrid-ad-groups' -Handler {
@@ -1130,14 +1150,30 @@ function Initialize-PimDefaultJobHandlers {
         if (-not (Get-Command Invoke-PimHybridAdGroupsJob -ErrorAction SilentlyContinue)) {
             return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:hybrid-ad-groups (PIM-HybridAdGroups.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf }
         }
-        Invoke-PimHybridAdGroupsJob -NowUtc $now -WhatIf:$whatIf
+        if (Get-Command Invoke-PimHybridAdWriteLocked -ErrorAction SilentlyContinue) { Invoke-PimHybridAdWriteLocked -Action { Invoke-PimHybridAdGroupsJob -NowUtc $now -WhatIf:$whatIf } }
+        else { Invoke-PimHybridAdGroupsJob -NowUtc $now -WhatIf:$whatIf }
     }
     Register-PimJobHandler -Type 'hybrid-ad-sync' -Handler {
         param($job,$now,$whatIf)
         if (-not (Get-Command Invoke-PimHybridAdSyncJob -ErrorAction SilentlyContinue)) {
             return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:hybrid-ad-sync (PIM-HybridAdGroups.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf }
         }
-        Invoke-PimHybridAdSyncJob -NowUtc $now -WhatIf:$whatIf
+        # 'critical': every mirrored group except the per-server ones -- while the server lane runs (else all of them)
+        Invoke-PimHybridAdSyncJob -NowUtc $now -WhatIf:$whatIf -Lane critical
+    }
+    Register-PimJobHandler -Type 'hybrid-ad-sync-servers' -Handler {
+        param($job,$now,$whatIf)
+        if (-not (Get-Command Invoke-PimHybridAdSyncJob -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:hybrid-ad-sync-servers (PIM-HybridAdGroups.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf }
+        }
+        Invoke-PimHybridAdSyncJob -NowUtc $now -WhatIf:$whatIf -Lane servers
+    }
+    Register-PimJobHandler -Type 'hybrid-ad-changes' -Handler {
+        param($job,$now,$whatIf)
+        if (-not (Get-Command Invoke-PimHybridAdChangesJob -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ ran=$false; unimplemented=$true; detail='unimplemented:hybrid-ad-changes (PIM-HybridAdGroups.ps1 is not loaded on this worker)'; whatIf=[bool]$whatIf }
+        }
+        Invoke-PimHybridAdChangesJob -NowUtc $now -WhatIf:$whatIf
     }
     Register-PimJobHandler -Type 'hybrid-ad-servers' -Handler {
         param($job,$now,$whatIf)
@@ -1644,6 +1680,8 @@ function Get-PimJobProFeatureKeys {
         'hybrid-ad-apply'  { return @('hybrid.ad') }
         'hybrid-ad-groups' { return @('hybrid.ad') }
         'hybrid-ad-sync'   { return @('hybrid.ad') }
+        'hybrid-ad-sync-servers' { return @('hybrid.ad') }
+        'hybrid-ad-changes' { return @('hybrid.ad') }
         'hybrid-ad-servers' { return @('hybrid.ad') }
         # msp-pull is not here: the tick never pulls (its handler records a skip naming the pull job), and the pull
         # job (tools/pim-engine/downlink-job-entry.ps1) gates itself on the MSP licence.
@@ -2498,6 +2536,8 @@ function Get-PimJobsStatus {
             inProgress      = [bool]$inProg
             neverRun        = [bool]$neverRun
             lastRunUtc      = $lastRun
+            # SCHED-1: when the last run FINISHED -- the cadence counts from here (the Jobs view says so)
+            lastFinishedUtc = $(if ($j.PSObject.Properties['lastFinishedUtc'] -and "$($j.lastFinishedUtc)".Trim()) { "$($j.lastFinishedUtc)" } elseif ($sj -and $sj.PSObject.Properties['lastFinishedUtc'] -and "$($sj.lastFinishedUtc)".Trim()) { "$($sj.lastFinishedUtc)" } elseif ($last -and $last.PSObject.Properties['finishedUtc']) { "$($last.finishedUtc)" } else { '' })
             lastResult      = $(if ($last) { "$($last.detail)" } else { '' })
             lastOk          = $(if ($last) { [bool]$last.ok } else { $null })
             # BUG-92: the GUI needs the THREE-WAY outcome, not just ok/not-ok. Without this
@@ -3597,11 +3637,15 @@ function Invoke-PimSchedulerTick {
             # 🔴 Both stamps used to be the TICK start. A tick runs its jobs in sequence, so a job
             # that started 13 minutes into the tick recorded a last run 13 minutes early, and its next
             # slot drifted with every long tick. lastRun = when THIS job started (what run history
-            # records); next = anchored on the slot (Get-PimNextRunAfterRun).
-            $nr = (Get-PimNextRunAfterRun -Job $j -ScheduledUtc $slot -StartedUtc $jobStart).ToString('o')
+            # records). 🔴 SCHED-1 (2026-10-04): next = when THIS job FINISHED + its interval, so a run longer than its
+            # cadence is never followed straight away by the next one. lastFinishedUtc is kept for the Jobs view and for
+            # re-deriving the next slot when the cadence changes (Resolve-PimSchedulerJobs).
+            $jobEnd = $now.Add([datetime]::UtcNow - $wallStart)
+            $nr = (Get-PimNextRunAfterRun -Job $j -ScheduledUtc $slot -StartedUtc $jobStart -FinishedUtc $jobEnd).ToString('o')
             $lr = $jobStart.ToString('o')
             if ($j.PSObject.Properties['nextRunUtc']) { $j.nextRunUtc = $nr } else { $j | Add-Member -NotePropertyName nextRunUtc -NotePropertyValue $nr -Force }
             if ($j.PSObject.Properties['lastRunUtc']) { $j.lastRunUtc = $lr } else { $j | Add-Member -NotePropertyName lastRunUtc -NotePropertyValue $lr -Force }
+            $j | Add-Member -NotePropertyName lastFinishedUtc -NotePropertyValue ($jobEnd.ToString('o')) -Force
             # Renew mid-tick: a scheduled run can outlive the TTL (a full reconcile is not
             # quick), and a lapsed lease would let a second runner start while this one is
             # still writing. Renewal is half-TTL-gated, so this is not a per-job store write.

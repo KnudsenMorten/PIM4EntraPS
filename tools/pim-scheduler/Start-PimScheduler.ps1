@@ -58,7 +58,9 @@ param(
     [switch]$UseManagedIdentity,
     # §80.2: run ONE job continuously instead of ticking (operator 2026-09-29: an activation must reach AD in seconds, as
     # v1's endless PIM-Sync-ID-AD loop did, not at the next 5-minute slot). Only 'hybrid-ad-sync' is allowed.
-    [ValidateSet('', 'hybrid-ad-sync')][string]$ContinuousJob = '',
+    # 2026-10-04 lanes: hybrid-ad-sync (critical groups), hybrid-ad-sync-servers (per-server groups, parallel batches),
+    # hybrid-ad-changes (AD accounts + AD groups the moment their definitions change) -- one process each.
+    [ValidateSet('', 'hybrid-ad-sync', 'hybrid-ad-sync-servers', 'hybrid-ad-changes')][string]$ContinuousJob = '',
     [int]$ContinuousPauseSeconds = 5
 )
 $ErrorActionPreference = 'Stop'
@@ -719,7 +721,7 @@ if ($ContinuousJob) {
     $verFile = Join-Path $here '..\..\VERSION'
     $verAtStart = if (Test-Path $verFile) { (Get-Content -LiteralPath $verFile -Raw).Trim() } else { '' }
     Write-Host "[scheduler] CONTINUOUS $ContinuousJob (pause ${ContinuousPauseSeconds}s, version $verAtStart)" -ForegroundColor Cyan
-    [void](Invoke-PimHybridAdSyncLoop -PauseSeconds $ContinuousPauseSeconds -WhatIf:$WhatIf -StopWhen {
+    [void](Invoke-PimHybridAdSyncLoop -JobName $ContinuousJob -PauseSeconds $ContinuousPauseSeconds -WhatIf:$WhatIf -StopWhen {
         $v = if (Test-Path $verFile) { (Get-Content -LiteralPath $verFile -Raw).Trim() } else { '' }
         if ($v -ne $verAtStart) { "the installed version changed ($verAtStart -> $v)" } })
     return
@@ -729,8 +731,11 @@ if ($Once) {
     # the continuous sync loop, so it may end a loop that stopped making progress; the sync task restarts it within a minute.
     # (Instance 'hybridsrv' runs as another gMSA and could not -- it does not try.)
     if ("$Instance".Trim() -eq 'hybrid' -and (Get-Command Invoke-PimHybridSyncWatchdogCheck -ErrorAction SilentlyContinue)) {
-        try { $wd = Invoke-PimHybridSyncWatchdogCheck; Write-Host "  [hybrid-ad-sync watchdog] $($wd.action): $($wd.detail)" -ForegroundColor $(if ($wd.action -eq 'killed') { 'Yellow' } else { 'DarkGray' }) }
-        catch { Write-Host "  [hybrid-ad-sync watchdog] check failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+        # every continuous lane has its own liveness stamp; each is judged on its own (a lane that never ran has none: no action)
+        foreach ($lane in @('hybrid-ad-sync', 'hybrid-ad-sync-servers', 'hybrid-ad-changes')) {
+            try { $wd = Invoke-PimHybridSyncWatchdogCheck -Lane $lane; if ($wd.action -ne 'none' -or $lane -eq 'hybrid-ad-sync') { Write-Host "  [$lane watchdog] $($wd.action): $($wd.detail)" -ForegroundColor $(if ($wd.action -eq 'killed') { 'Yellow' } else { 'DarkGray' }) } }
+            catch { Write-Host "  [$lane watchdog] check failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+        }
     }
     @(Invoke-PimSchedulerTick -WhatIf:$WhatIf -LeaseTtlMinutes $ttl) | ForEach-Object { Write-Host ("  {0,-20} {1}" -f $_.name, $_.detail) }
     if (-not $WhatIf) { Invoke-PimUpdaterWatchdogIfConfigured }

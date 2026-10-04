@@ -8715,7 +8715,7 @@ function Handle-Request {
                 # (the same heartbeat check the Jobs page badges use), shown at the top of the card.
                 $v['worker'] = @()
                 if (Get-Command Get-PimHybridWorkerJobStatus -ErrorAction SilentlyContinue) {
-                    $v['worker'] = @(foreach ($t in @('hybrid-ad-sync', 'hybrid-ad-apply', 'hybrid-ad-groups', 'hybrid-ad-servers')) {
+                    $v['worker'] = @(foreach ($t in @('hybrid-ad-sync', 'hybrid-ad-sync-servers', 'hybrid-ad-changes', 'hybrid-ad-apply', 'hybrid-ad-groups', 'hybrid-ad-servers')) {
                         $s = Get-PimHybridWorkerJobStatus -Type $t
                         if ($s) { [ordered]@{ type = $t; state = "$($s.state)"; host = "$($s.host)"; lastSeenUtc = "$($s.lastSeenUtc)"; minutesAgo = $s.minutesAgo; fresh = [bool]$s.fresh } }
                     })

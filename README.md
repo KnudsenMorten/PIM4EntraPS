@@ -503,7 +503,11 @@ creation:
   tier**, each right granted to that account's permission group, with no password or
   secret on the server. **Settings → Hybrid Active Directory** holds your own naming
   (group marker or pattern, admin-account mapping, OU for new groups, server-group
-  names), and a **live view** shows the continuous sync. Its network can be
+  names), and a **live view** shows the continuous sync. Critical groups (such as Domain
+  Admins) sync in their own continuous process, so emergency access reaches AD within
+  about 20–30 seconds even with thousands of servers, whose groups sync separately in
+  parallel batches; a new or changed admin account or AD group is applied within
+  seconds of the commit. Its network can be
   disconnected in one step, and a plan-only mode shows every change before it is made.
 
   ![Settings — Hybrid Active Directory: your own naming for PIM for AD, with a preview of the mirrored groups and the account mapping](docs/img/manager-settings-hybrid-ad.png)
