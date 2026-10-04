@@ -52,6 +52,9 @@ $script:PimHybridAdSettingCatalog = @(
     [ordered]@{ name = 'HybridAdServerGroupFormat'; label = 'Per-server group format'; default = '{prefix}AD-SRV-{server}{cloud}{marker}'; help = 'The name of the group that becomes local administrator on one server. Tokens: {prefix} {server} {cloud} {marker}. {server} is required.' }
     [ordered]@{ name = 'HybridAdServerAdminsGroup'; label = 'Shared server-admins group'; default = ''; help = 'A group every onboarded server also gets in its local Administrators (and that the worker''s account is a member of). Blank = none.' }
     [ordered]@{ name = 'HybridAdProtectedMembers'; label = 'Never remove'; default = ''; help = 'Comma-separated account names the sync never removes from an AD group.' }
+    # 2026-10-04 scale (operator: "it could run fx 50 servers per batch"): the server lane's parallel Graph reads
+    [ordered]@{ name = 'HybridAdSyncBatchSize'; label = 'Groups per batch'; default = '50'; help = 'How many AD groups one parallel batch reads from Graph per pass (the server lane cuts its groups into batches of this size). 1-1000.' }
+    [ordered]@{ name = 'HybridAdSyncParallel'; label = 'Batches at once'; default = '8'; help = 'How many batches run at the same time (PowerShell 7 on the hybrid worker). Higher is faster until Graph starts throttling. 1-64.' }
 )
 
 function Get-PimHybridAdSettingCatalog { return $script:PimHybridAdSettingCatalog }
@@ -75,6 +78,8 @@ function Test-PimHybridAdSettingsInput {
             'HybridAdServerGroupFormat' { if ($v -and $v -notmatch '\{server\}') { $err.Add('Per-server group format: must contain {server}') } elseif ($v -match '[\s*?\\/@,;]') { $err.Add('Per-server group format: no spaces, wildcards, slashes, @, commas') } }
             'HybridAdServerAdminsGroup' { if ($v -match '[*?@,;]' -or $v -match '^\s|\\.*\\') { $err.Add('Shared server-admins group: one group name (optionally DOMAIN\name)') } }
             'HybridAdProtectedMembers' { if ($v -match '[*?]') { $err.Add('Never remove: account names only, no wildcards') } }
+            'HybridAdSyncBatchSize' { $i = 0; if ($v -and (-not [int]::TryParse($v, [ref]$i) -or $i -lt 1 -or $i -gt 1000)) { $err.Add('Groups per batch: a whole number 1-1000 (or blank = 50)') } }
+            'HybridAdSyncParallel' { $i = 0; if ($v -and (-not [int]::TryParse($v, [ref]$i) -or $i -lt 1 -or $i -gt 64)) { $err.Add('Batches at once: a whole number 1-64 (or blank = 8)') } }
         }
         $out["$k"] = $v
     }
@@ -254,6 +259,45 @@ function Get-PimHybridAdServerSplat {
     $p = @{}; if ("$($global:PIM_HybridAdServer)".Trim()) { $p['Server'] = "$($global:PIM_HybridAdServer)".Trim() }; return $p
 }
 
+function Select-PimHybridAdLaneGroups {
+    <#
+      PURE. The mirrored group rows one sync lane owns: 'servers' = the per-server groups (-ServerPattern, the server group
+      format with {server} = *), 'critical' = all the others, 'all' = everything. 🔒 The critical lane drops the server groups
+      ONLY while the server lane is alive: a worker whose task layout predates the lanes (or whose server loop died) keeps
+      every group in sync -- never a gap. Returns @{ rows; note }.
+    #>
+    param([object[]]$Rows = @(), [ValidateSet('all', 'critical', 'servers')][string]$Lane = 'all', [string]$ServerPattern = '', [bool]$ServersLaneAlive = $true)
+    $isSrv = { param($r) "$ServerPattern".Trim() -and "$($r.GroupName)".Trim() -like "$ServerPattern".Trim() }
+    switch ($Lane) {
+        'servers'  { return @{ rows = @($Rows | Where-Object { & $isSrv $_ }); note = '' } }
+        'critical' {
+            if (-not $ServersLaneAlive) { return @{ rows = @($Rows); note = 'server groups included -- the server lane is not running' } }
+            return @{ rows = @($Rows | Where-Object { -not (& $isSrv $_) }); note = '' }
+        }
+        default    { return @{ rows = @($Rows); note = '' } }
+    }
+}
+
+function Resolve-PimHybridAdMemberDn {
+    <#
+      One 'member' value (optionally '<TTL=n>,<dn>') -> @{ samAccountName; objectClass; ttlSeconds }. The DN -> account lookup
+      is cached for $script:PimHybridAdCacheSeconds (the loop's refresh window; a member's account name does not change between
+      passes), so a pass over thousands of groups costs one LDAP read for the groups, not one per member.
+    #>
+    param([Parameter(Mandatory)][string]$Entry, [scriptblock]$Lookup = { param($dn) $s = Get-PimHybridAdServerSplat; Get-ADObject -Identity $dn -Properties sAMAccountName, objectClass @s -ErrorAction Stop })
+    $ttl = $null; $dn = $Entry
+    if ($dn -match '^<TTL=(\d+)>,(.*)$') { $ttl = [int]$Matches[1]; $dn = $Matches[2] }
+    $life = [int]$script:PimHybridAdCacheSeconds
+    # Reset when there is none yet or the loop's refresh window passed. Outside the loop (no window) a process is one short tick.
+    if (-not $script:PimHybridAdDnCache -or ($life -gt 0 -and ([datetime]::UtcNow - $script:PimHybridAdDnCache.at).TotalSeconds -ge $life)) {
+        $script:PimHybridAdDnCache = @{ at = [datetime]::UtcNow; map = @{} }
+    }
+    $m = $script:PimHybridAdDnCache.map
+    if (-not $m.ContainsKey($dn)) { $o = & $Lookup $dn; $m[$dn] = @{ sam = "$($o.sAMAccountName)"; cls = "$($o.objectClass)" } }
+    $c = $m[$dn]
+    return [pscustomobject]@{ samAccountName = $c.sam; objectClass = $c.cls; ttlSeconds = $ttl }
+}
+
 function Get-PimDefaultActiveDirectoryGroupAdapter {
     <#
       [ ] HYBRID-WORKER-ONLY. The real AD calls for the group mirror + membership sync. Runs as the process identity (the
@@ -290,12 +334,20 @@ function Get-PimDefaultActiveDirectoryGroupAdapter {
             param([string]$Group)
             $s = Get-PimHybridAdServerSplat
             $g = Get-ADGroup -Identity $Group -Properties member -ShowMemberTimeToLive @s -ErrorAction Stop
-            foreach ($entry in @($g.member)) {
-                $ttl = $null; $dn = "$entry"
-                if ($dn -match '^<TTL=(\d+)>,(.*)$') { $ttl = [int]$Matches[1]; $dn = $Matches[2] }
-                $o = Get-ADObject -Identity $dn -Properties sAMAccountName, objectClass @s -ErrorAction Stop
-                [pscustomobject]@{ samAccountName = "$($o.sAMAccountName)"; objectClass = "$($o.objectClass)"; ttlSeconds = $ttl }
+            foreach ($entry in @($g.member)) { Resolve-PimHybridAdMemberDn -Entry "$entry" }
+        }
+        # SCALE (2026-10-04): every group's members in ONE paged LDAP read (Get-ADGroup -Filter <pattern> -Properties member),
+        # member DNs resolved once and cached (Resolve-PimHybridAdMemberDn) -- instead of one Get-ADGroup + one Get-ADObject per
+        # member per group per pass. Returns @{ <group name> = @( @{ samAccountName; objectClass; ttlSeconds } ) }.
+        GetMembersMany = {
+            param([string]$Pattern)
+            $s = Get-PimHybridAdServerSplat
+            $flt = "Name -like '$("$Pattern".Replace("'", "''"))'"
+            $map = @{}
+            foreach ($g in @(Get-ADGroup -Filter $flt -Properties member -ShowMemberTimeToLive -ResultPageSize 500 @s -ErrorAction Stop)) {
+                $map["$($g.Name)"] = @(foreach ($entry in @($g.member)) { Resolve-PimHybridAdMemberDn -Entry "$entry" })
             }
+            $map
         }
         AddMember = {
             param([string]$Group, [string]$Sam, $TtlSeconds)
@@ -349,14 +401,16 @@ function Invoke-PimHybridAdMembershipSync {
     #>
     param(
         [Parameter(Mandatory)][string[]]$Groups, [Parameter(Mandatory)][hashtable]$ActiveByGroup, [Parameter(Mandatory)][hashtable]$Adapter,
-        [switch]$Apply, [datetime]$NowUtc = [datetime]::UtcNow, [string[]]$Protected = @(), [object]$PamEnabled = $null
+        [switch]$Apply, [datetime]$NowUtc = [datetime]::UtcNow, [string[]]$Protected = @(), [object]$PamEnabled = $null,
+        # 2026-10-04 scale: the live members of every group, read in ONE pass (adapter GetMembersMany); a group not in it is read on its own
+        [hashtable]$LiveByGroup = $null
     )
     $pam = if ($null -ne $PamEnabled) { [bool]$PamEnabled } else { try { [bool](& $Adapter.PamEnabled) } catch { $false } }
     $sfx = Get-PimHybridAdSuffixes
     $cloudSfx = $sfx.cloud; $adSfx = $sfx.ad
     $res = New-Object System.Collections.Generic.List[object]
     foreach ($g in @($Groups)) {
-        try { $live = @(& $Adapter.GetMembers $g) }
+        try { $live = if ($LiveByGroup -and $LiveByGroup.ContainsKey($g)) { @($LiveByGroup[$g]) } else { @(& $Adapter.GetMembers $g) } }
         catch { $res.Add([pscustomobject]@{ group = $g; samAccountName = ''; op = 'read'; status = 'failed'; reason = "$($_.Exception.Message)" }); continue }
         $act = @(); if ($ActiveByGroup.ContainsKey($g)) { $act = @($ActiveByGroup[$g]) }
         $plan = Get-PimHybridAdMembershipPlan -Active $act -LiveMembers $live -PamEnabled $pam -NowUtc $NowUtc -CloudSuffix $cloudSfx -AdSuffix $adSfx -Protected $Protected
@@ -388,29 +442,103 @@ function Get-PimHybridAdActiveGroupMembers {
       PIM-for-Groups MEMBER assignments -> @{ mailNickname; endUtc } (users only; a group principal is skipped, as in v1).
       Returns a hashtable groupName -> list. -Graph is the seam ( { param($path) ... } returning the aggregated items ).
       Needs Graph application permissions: Group.Read.All + PrivilegedAssignmentSchedule.Read.AzureADGroup + User.Read.All.
+
+      SCALE (operator 2026-10-04: "if a customer has 10000 servers + 65 critical ad groups, then it takes 1-2 hours to come
+      to the critical groups" / "for servers ... use batch parallels in ps7" / "it could run fx 50 servers per batch"):
+        * group ids: with more than 20 unknown names and a -Prefix, ONE paged listing (displayName startswith <prefix>)
+          fills the id cache instead of one lookup per group;
+        * active instances: with -Parallel > 1 on PowerShell 7, the groups are cut into batches of -BatchSize (default 50);
+          each batch runs in its own runspace (ForEach-Object -Parallel, at most -Parallel at once) and reads its groups
+          through Graph `$batch (20 per round trip). Anything a batch could not answer (throttled, failed, paged) is read
+          again one by one through -Graph afterwards -- a batch never loses a read;
+        * principals: more than 20 unknown ids are resolved through /directoryObjects/getByIds (1,000 per call).
+      With a custom -Graph (tests) or on Windows PowerShell 5.1 the reads stay one by one, exactly as before.
     #>
-    param([Parameter(Mandatory)][string[]]$GroupNames, [scriptblock]$Graph)
+    param([Parameter(Mandatory)][string[]]$GroupNames, [scriptblock]$Graph, [string]$Prefix = '',
+          [ValidateRange(1, 1000)][int]$BatchSize = 50, [ValidateRange(1, 64)][int]$Parallel = 1)
+    $realGraph = -not $Graph
     if (-not $Graph) { $Graph = { param($p) @(Invoke-PimGraph -Path $p -All) } }
     $out = @{}
     # group ids + users change rarely; the ACTIVE instances are read fresh on every call. With $script:PimHybridAdCacheSeconds
-    # set (the continuous loop) the first two are kept that long, so a pass costs ~one Graph call per group.
+    # set (the continuous loop) the first two are kept that long, so a pass costs ~one Graph call per group (or per batch).
     $ttl = [int]$script:PimHybridAdCacheSeconds
     if ($ttl -le 0 -or -not $script:PimHybridAdGraphCache -or ([datetime]::UtcNow - $script:PimHybridAdGraphCache.at).TotalSeconds -ge $ttl) {
         $script:PimHybridAdGraphCache = @{ at = [datetime]::UtcNow; groups = @{}; users = @{} }
     }
     $groupCache = $script:PimHybridAdGraphCache.groups
     $userCache = $script:PimHybridAdGraphCache.users
-    foreach ($name in @($GroupNames)) {
-        if (-not $groupCache.ContainsKey($name)) {
-            $esc = $name.Replace("'", "''")
-            $grp = @(& $Graph "/groups?`$filter=displayName eq '$esc'&`$select=id,displayName")
-            $groupCache[$name] = if ($grp.Count) { "$($grp[0].id)" } else { '' }
+    $names = @($GroupNames | Where-Object { "$_".Trim() } | Select-Object -Unique)
+
+    # (1) group ids
+    $unknown = @($names | Where-Object { -not $groupCache.ContainsKey($_) })
+    if ($unknown.Count -gt 20 -and "$Prefix".Trim()) {
+        $pe = "$Prefix".Trim().Replace("'", "''")
+        try { foreach ($g in @(& $Graph "/groups?`$filter=startswith(displayName,'$pe')&`$select=id,displayName")) { if ("$($g.displayName)".Trim()) { $groupCache["$($g.displayName)"] = "$($g.id)" } } }
+        catch { Write-Warning "[hybrid-ad] group id listing failed, reading ids one by one: $($_.Exception.Message)" }
+        $unknown = @($names | Where-Object { -not $groupCache.ContainsKey($_) })
+        if ($unknown.Count -gt 20) { foreach ($n in $unknown) { $groupCache[$n] = '' } }   # listed and not there = no such group
+    }
+    foreach ($name in $unknown) {
+        $esc = $name.Replace("'", "''")
+        $grp = @(& $Graph "/groups?`$filter=displayName eq '$esc'&`$select=id,displayName")
+        $groupCache[$name] = if ($grp.Count) { "$($grp[0].id)" } else { '' }
+    }
+
+    # (2) active instances
+    $withId = @($names | Where-Object { $groupCache[$_] })
+    $instByGroup = @{}
+    if ($realGraph -and $Parallel -gt 1 -and $PSVersionTable.PSVersion.Major -ge 7 -and $withId.Count -gt 1) {
+        $token = Get-PimRestToken -Resource 'graph'
+        $timeout = 100; if (Get-Command Get-PimRestTimeoutSec -ErrorAction SilentlyContinue) { $timeout = [int](Get-PimRestTimeoutSec) }
+        $chunks = New-Object System.Collections.Generic.List[object]
+        for ($c = 0; $c -lt $withId.Count; $c += $BatchSize) {
+            $chunks.Add(@($withId[$c..([Math]::Min($c + $BatchSize, $withId.Count) - 1)] | ForEach-Object { [pscustomobject]@{ name = $_; id = $groupCache[$_] } }))
         }
-        $gid = $groupCache[$name]
-        if (-not $gid) { $out[$name] = @(); continue }
-        $inst = @(& $Graph "/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?`$filter=groupId eq '$gid' and accessId eq 'member'")
+        $answers = $chunks | ForEach-Object -ThrottleLimit $Parallel -Parallel {
+            $tok = $using:token; $to = $using:timeout
+            $items = @($_); $got = @{}
+            for ($k = 0; $k -lt $items.Count; $k += 20) {
+                $slice = @($items[$k..([Math]::Min($k + 20, $items.Count) - 1)])
+                $reqs = for ($r = 0; $r -lt $slice.Count; $r++) {
+                    @{ id = "$r"; method = 'GET'; url = "/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?`$filter=groupId eq '$($slice[$r].id)' and accessId eq 'member'" }
+                }
+                $body = @{ requests = @($reqs) } | ConvertTo-Json -Depth 6
+                $resp = $null
+                for ($try = 1; $try -le 3; $try++) {
+                    try { $resp = Invoke-RestMethod -Method POST -Uri 'https://graph.microsoft.com/v1.0/$batch' -Headers @{ Authorization = "Bearer $tok" } -Body $body -ContentType 'application/json' -TimeoutSec $to; break }
+                    catch { Start-Sleep -Seconds (2 * $try) }
+                }
+                if (-not $resp -or -not $resp.responses) { continue }
+                foreach ($rr in @($resp.responses)) {
+                    $nm = $slice[[int]$rr.id].name
+                    $paged = $rr.body -and $rr.body.PSObject.Properties['@odata.nextLink'] -and "$($rr.body.'@odata.nextLink')"
+                    if ([int]$rr.status -eq 200 -and -not $paged) { $got[$nm] = @($rr.body.value) }
+                }
+            }
+            $got
+        }
+        foreach ($a in @($answers)) { if ($a -is [hashtable]) { foreach ($k in $a.Keys) { $instByGroup[$k] = @($a[$k]) } } }
+    }
+    foreach ($name in $withId) {
+        if ($instByGroup.ContainsKey($name)) { continue }   # answered by a batch
+        $instByGroup[$name] = @(& $Graph "/identityGovernance/privilegedAccess/group/assignmentScheduleInstances?`$filter=groupId eq '$($groupCache[$name])' and accessId eq 'member'")
+    }
+
+    # (3) principals
+    $newIds = @($instByGroup.Values | ForEach-Object { @($_) } | ForEach-Object { "$($_.principalId)" } | Where-Object { $_ -and -not $userCache.ContainsKey($_) } | Select-Object -Unique)
+    if ($realGraph -and $newIds.Count -gt 20) {
+        for ($c = 0; $c -lt $newIds.Count; $c += 1000) {
+            $ids = @($newIds[$c..([Math]::Min($c + 1000, $newIds.Count) - 1)])
+            try {
+                $r = Invoke-PimGraph -Method POST -Path '/directoryObjects/getByIds' -Body @{ ids = $ids; types = @('user', 'group') }
+                foreach ($o in @($r.value)) { $userCache["$($o.id)"] = $(if ("$($o.'@odata.type')" -eq '#microsoft.graph.user') { $o } else { $null }) }
+            } catch { Write-Warning "[hybrid-ad] bulk principal read failed, reading them one by one: $($_.Exception.Message)" }
+        }
+    }
+    foreach ($name in $names) {
+        if (-not $groupCache[$name]) { $out[$name] = @(); continue }
         $list = New-Object System.Collections.Generic.List[object]
-        foreach ($i in $inst) {
+        foreach ($i in @($instByGroup[$name])) {
             $principal = "$($i.principalId)"; if (-not $principal) { continue }
             if (-not $userCache.ContainsKey($principal)) {
                 $u = $null
@@ -521,9 +649,23 @@ function Invoke-PimHybridAdSyncJob {
       membership (TTL when the forest has the PAM feature). Only groups that already exist in AD are synced (the mirror
       job creates them). THROWS when a membership change failed.
     #>
-    param([datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf, [object[]]$Rows = $null, [hashtable]$Adapter, [scriptblock]$Graph, [object]$AdModulePresent = $null, [scriptblock]$SecretReader)
+    param([datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf, [object[]]$Rows = $null, [hashtable]$Adapter, [scriptblock]$Graph, [object]$AdModulePresent = $null, [scriptblock]$SecretReader,
+          # 2026-10-04 lanes: 'critical' = every mirrored group EXCEPT the per-server ones (while the server lane runs),
+          # 'servers' = only the per-server groups, 'all' = everything (the original single loop).
+          [ValidateSet('all', 'critical', 'servers')][string]$Lane = 'all',
+          # $null = read the server lane's liveness stamp; tests pass it
+          [object]$ServersLaneAlive = $null)
     $defs = Get-PimHybridAdMirroredDefinitions -Rows $Rows
     if (-not $defs.ok) { return [pscustomobject]@{ ran = $false; unimplemented = $true; detail = "unimplemented:hybrid-ad-sync -- $($defs.reason)"; whatIf = [bool]$WhatIf } }
+    $jobName = if ($Lane -eq 'servers') { 'hybrid-ad-sync-servers' } else { 'hybrid-ad-sync' }
+    $laneNote = ''
+    if ($Lane -ne 'all') {
+        $alive = $ServersLaneAlive
+        if ($null -eq $alive) { $sa = Get-PimHybridSyncAlive -Lane 'hybrid-ad-sync-servers'; $alive = [bool]($sa -and ([datetime]::UtcNow - $sa.utc).TotalMinutes -le 15) }
+        $sel = Select-PimHybridAdLaneGroups -Rows @($defs.rows) -Lane $Lane -ServerPattern (Get-PimHybridAdServerGroupName -Server '*') -ServersLaneAlive ([bool]$alive)
+        $defs = @{ ok = $true; rows = @($sel.rows); pattern = $defs.pattern; reason = '' }
+        $laneNote = " [$Lane lane$(if ($sel.note) { ": $($sel.note)" })]"
+    }
     $n = @($defs.rows).Count
     if (-not $n) { return [pscustomobject]@{ ran = $true; groups = 0; whatIf = [bool]$WhatIf; detail = "hybrid-ad-sync: no defined group matches '$($defs.pattern)' -- nothing to sync" } }
     if (-not $Adapter) {
@@ -531,22 +673,43 @@ function Invoke-PimHybridAdSyncJob {
         if ($a.refuse) { return $a.refuse }
         $Adapter = $a.adapter
     }
-    $inAd = @{}; foreach ($g in @(& $Adapter.GetGroups $defs.pattern)) { if ($g) { $inAd["$($g.Name)".ToLowerInvariant()] = $true } }
+    # Which mirrored groups exist in AD. In the continuous loop this listing is kept for the refresh window (a group that
+    # appears is seen within it, or at once after the delta runner created it -- it clears this cache), instead of listing
+    # every mirrored group -- thousands of server groups -- on every 5-second pass of the critical lane.
+    $life = [int]$script:PimHybridAdCacheSeconds
+    $ck = "$($defs.pattern)"
+    $ic = $script:PimHybridAdInAdCache
+    if ($life -gt 0 -and $ic -and $ic.key -eq $ck -and ([datetime]::UtcNow - $ic.at).TotalSeconds -lt $life) { $inAd = $ic.map }
+    else {
+        $inAd = @{}; foreach ($g in @(& $Adapter.GetGroups $defs.pattern)) { if ($g) { $inAd["$($g.Name)".ToLowerInvariant()] = $true } }
+        if ($life -gt 0) { $script:PimHybridAdInAdCache = @{ key = $ck; at = [datetime]::UtcNow; map = $inAd } }
+    }
     $names = @($defs.rows | ForEach-Object { "$($_.GroupName)".Trim() } | Select-Object -Unique)
     $present = @($names | Where-Object { $inAd.ContainsKey($_.ToLowerInvariant()) })
     $missing = @($names | Where-Object { -not $inAd.ContainsKey($_.ToLowerInvariant()) })
     $missText = if ($missing.Count) { "; not yet in AD (hybrid-ad-groups creates them): $($missing.Count)" } else { '' }
-    if (-not $present.Count) { return [pscustomobject]@{ ran = $true; groups = 0; whatIf = [bool]$WhatIf; detail = "hybrid-ad-sync: none of the $($names.Count) mirrored group(s) exist in AD yet$missText" } }
-    $gArgs = @{ GroupNames = $present }; if ($Graph) { $gArgs['Graph'] = $Graph }
+    if (-not $present.Count) { return [pscustomobject]@{ ran = $true; groups = 0; whatIf = [bool]$WhatIf; detail = "$($jobName)$($laneNote): none of the $($names.Count) mirrored group(s) exist in AD yet$missText" } }
+    # Graph: ids from ONE prefix listing, active members in parallel batches (settings HybridAdSyncBatchSize, default 50
+    # groups per batch, and HybridAdSyncParallel, default 8 batches at once -- PowerShell 7).
+    $bs = 50; [void][int]::TryParse("$(Get-PimHybridAdSetting -Name 'HybridAdSyncBatchSize' -Default '50')", [ref]$bs); if ($bs -lt 1) { $bs = 50 }
+    $par = 8; [void][int]::TryParse("$(Get-PimHybridAdSetting -Name 'HybridAdSyncParallel' -Default '8')", [ref]$par); if ($par -lt 1) { $par = 1 }
+    $prefix = (("$($defs.pattern)" -split '\*')[0]).Trim()
+    $gArgs = @{ GroupNames = $present; Prefix = $prefix; BatchSize = [Math]::Min(1000, $bs); Parallel = [Math]::Min(64, $par) }; if ($Graph) { $gArgs['Graph'] = $Graph }
     $active = Get-PimHybridAdActiveGroupMembers @gArgs
+    # AD: the server lane reads every server group's members in ONE paged LDAP read (adapter GetMembersMany over the server
+    # pattern); the critical lane reads its few groups one by one (member DNs cached either way).
+    $liveMap = $null
+    if ($Lane -eq 'servers' -and $Adapter.ContainsKey('GetMembersMany')) {
+        try { $liveMap = & $Adapter.GetMembersMany (Get-PimHybridAdServerGroupName -Server '*') } catch { Write-Warning "[hybrid-ad] bulk member read failed, reading groups one by one: $($_.Exception.Message)"; $liveMap = $null }
+    }
     $prot = @("$(Get-PimHybridAdSetting -Name 'HybridAdProtectedMembers' -Default '')" -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    $r = Invoke-PimHybridAdMembershipSync -Groups $present -ActiveByGroup $active -Adapter $Adapter -Apply:(-not $WhatIf) -NowUtc $NowUtc -Protected $prot
-    Write-PimHybridAdItemLines -Job 'hybrid-ad-sync' -Lines @($r.results | Where-Object { $_.status -ne 'member' } | ForEach-Object { "{0,-8} {1,-7} {2} / {3}  {4}" -f $_.status, $_.op, $_.group, $_.samAccountName, $_.reason })
+    $r = Invoke-PimHybridAdMembershipSync -Groups $present -ActiveByGroup $active -Adapter $Adapter -Apply:(-not $WhatIf) -NowUtc $NowUtc -Protected $prot -LiveByGroup $liveMap
+    Write-PimHybridAdItemLines -Job $jobName -Lines @($r.results | Where-Object { $_.status -ne 'member' } | ForEach-Object { "{0,-8} {1,-7} {2} / {3}  {4}" -f $_.status, $_.op, $_.group, $_.samAccountName, $_.reason })
     $c = { param($op) @($r.results | Where-Object { $_.op -eq $op -and ($_.status -eq 'done' -or $_.status -eq 'plan') }).Count }
     $failed = @($r.results | Where-Object { $_.status -eq 'failed' })
     $wi = if ($WhatIf) { ' (whatif)' } else { '' }
     $ttl = if ($r.pamEnabled) { 'on' } else { 'off -- the AD PAM feature is not enabled' }
-    $detail = ("hybrid-ad-sync{0}: groups={1} add={2} readd={3} remove={4} kept={5} failed={6} (TTL membership: {7}){8}" -f $wi, $present.Count, (& $c 'add'), (& $c 'readd'), (& $c 'remove'), @($r.results | Where-Object { $_.status -eq 'kept' }).Count, $failed.Count, $ttl, $missText)
+    $detail = ("$($jobName)$($laneNote){0}: groups={1} add={2} readd={3} remove={4} kept={5} failed={6} (TTL membership: {7}){8}" -f $wi, $present.Count, (& $c 'add'), (& $c 'readd'), (& $c 'remove'), @($r.results | Where-Object { $_.status -eq 'kept' }).Count, $failed.Count, $ttl, $missText)
     if ($failed.Count) { throw ("$detail -- " + (@($failed | ForEach-Object { "$($_.group)/$($_.samAccountName) $($_.op): $($_.reason)" }) -join '; ')) }
     return [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; groups = $present.Count; groupNames = $present; missingGroups = $missing; pamEnabled = $r.pamEnabled; results = $r.results; detail = $detail }
 }
@@ -680,28 +843,35 @@ function Invoke-PimHybridAdSyncLoop {
       Returns @{ passes; recorded; failures; stopReason }.
     #>
     param(
-        [int]$PauseSeconds = 5, [int]$RefreshSeconds = 300, [int]$RecordEverySeconds = 300, [int]$MaxMinutes = 720,
+        # MaxMinutes 0 = NO runtime limit (operator 2026-10-04: "in the old world it ran for 1 hr, then it restarted the job.
+        # but it is not how we should do it today"). It was 720: the loop ended every 12 h and the task started a new one.
+        # The loop now ends only on a new version (-StopWhen), a hang (the watchdog) or -MaxIterations (tests).
+        [int]$PauseSeconds = 5, [int]$RefreshSeconds = 300, [int]$RecordEverySeconds = 300, [int]$MaxMinutes = 0,
         [int]$MaxIterations = 0, [switch]$WhatIf,
+        # 2026-10-04 lanes: which continuous loop this is -- hybrid-ad-sync (critical groups), hybrid-ad-sync-servers (the
+        # per-server groups) or hybrid-ad-changes (AD accounts + AD groups on change). Names the job, its run records, its
+        # heartbeat and its liveness stamp. The defaults below read it (dynamic scope: they run inside this function).
+        [ValidateSet('hybrid-ad-sync', 'hybrid-ad-sync-servers', 'hybrid-ad-changes')][string]$JobName = 'hybrid-ad-sync',
         [scriptblock]$StopWhen = { $false },
-        [scriptblock]$Pass = { param($now, $whatIf) Invoke-PimScheduledJob -Job ([pscustomobject]@{ name = 'hybrid-ad-sync'; type = 'hybrid-ad-sync' }) -NowUtc $now -WhatIf:$whatIf },
-        [scriptblock]$Record = { param($res, $started) if (Get-Command Write-PimJobRunRecord -ErrorAction SilentlyContinue) { Write-PimJobRunRecord -Job ([pscustomobject]@{ name = 'hybrid-ad-sync'; type = 'hybrid-ad-sync' }) -Result $res -StartedUtc $started -RunId ([guid]::NewGuid().ToString('N')) | Out-Null } },
-        [scriptblock]$Heartbeat = { if (Get-Command Save-PimHybridWorkerHeartbeat -ErrorAction SilentlyContinue) { Save-PimHybridWorkerHeartbeat -Scope @('hybrid-ad-sync') -PlanOnly:([bool]$WhatIf) } },   # $WhatIf: the loop's own parameter (dynamic scope)
+        [scriptblock]$Pass = { param($now, $whatIf) Invoke-PimScheduledJob -Job ([pscustomobject]@{ name = $JobName; type = $JobName }) -NowUtc $now -WhatIf:$whatIf },
+        [scriptblock]$Record = { param($res, $started) if (Get-Command Write-PimJobRunRecord -ErrorAction SilentlyContinue) { Write-PimJobRunRecord -Job ([pscustomobject]@{ name = $JobName; type = $JobName }) -Result $res -StartedUtc $started -RunId ([guid]::NewGuid().ToString('N')) | Out-Null } },
+        [scriptblock]$Heartbeat = { if (Get-Command Save-PimHybridWorkerHeartbeat -ErrorAction SilentlyContinue) { Save-PimHybridWorkerHeartbeat -Scope @($JobName) -PlanOnly:([bool]$WhatIf) } },   # $WhatIf: the loop's own parameter (dynamic scope)
         [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s },
         [scriptblock]$Clock = { [datetime]::UtcNow },
         # 2.4.465: the Manager's LIVE view (written only while somebody watches -- Publish-PimHybridAdSyncLive)
-        [scriptblock]$Live = { param($res, $now) [void](Publish-PimHybridAdSyncLive -Result $res -NowUtc $now -PauseSeconds $PauseSeconds) },
+        [scriptblock]$Live = { param($res, $now) if ($JobName -eq 'hybrid-ad-sync') { [void](Publish-PimHybridAdSyncLive -Result $res -NowUtc $now -PauseSeconds $PauseSeconds) } },
         # 🔴 SELF-HEALING (operator 2026-10-02: "it must be running 24x7x365"). A pass that never returns (a REST/LDAP/SQL call
         # waiting forever) froze the loop for 22 h while the task said "Running". -StallMinutes: when no iteration completes for
         # that long, the in-process watchdog KILLS this process and the task's 1-minute trigger starts a fresh loop. 0 = off.
         # -Alive is called once per iteration: it feeds the watchdog and stamps the liveness file the 5-minute tick checks
         # (Invoke-PimHybridSyncWatchdogCheck -- the second, external layer).
         [int]$StallMinutes = 10,
-        [scriptblock]$Alive = { param($now) Set-PimHybridSyncAlive -NowUtc $now }
+        [scriptblock]$Alive = { param($now) Set-PimHybridSyncAlive -NowUtc $now -Lane $JobName }
     )
     $script:PimHybridAdCacheSeconds = [math]::Max(0, $RefreshSeconds)
     $start = & $Clock; $lastRecord = [datetime]::MinValue; $lastBeat = [datetime]::MinValue
     $passes = 0; $recorded = 0; $failures = 0; $stop = ''
-    if ($StallMinutes -gt 0) { try { Start-PimHybridSyncWatchdog -StallMinutes $StallMinutes } catch { Write-Warning "[hybrid-ad-sync] watchdog not started: $($_.Exception.Message)" } }
+    if ($StallMinutes -gt 0) { try { Start-PimHybridSyncWatchdog -StallMinutes $StallMinutes } catch { Write-Warning "[$JobName] watchdog not started: $($_.Exception.Message)" } }
     try {
     while ($true) {
         $now = & $Clock
@@ -709,7 +879,7 @@ function Invoke-PimHybridAdSyncLoop {
         if (($now - $lastBeat).TotalSeconds -ge $RecordEverySeconds) { try { & $Heartbeat } catch { }; $lastBeat = $now }
         $res = $null; $threw = $false
         try { $res = & $Pass $now ([bool]$WhatIf) }
-        catch { $threw = $true; $res = [pscustomobject]@{ name = 'hybrid-ad-sync'; type = 'hybrid-ad-sync'; ok = $false; ran = $true; detail = "hybrid-ad-sync pass failed: $($_.Exception.Message)" } }
+        catch { $threw = $true; $res = [pscustomobject]@{ name = $JobName; type = $JobName; ok = $false; ran = $true; detail = "$JobName pass failed: $($_.Exception.Message)" } }
         $passes++
         try { & $Live $res $now } catch { }
         $inner = if ($res -and $res.PSObject.Properties['result']) { $res.result } else { $null }
@@ -717,20 +887,135 @@ function Invoke-PimHybridAdSyncLoop {
         $bad = $threw -or ($res -and $res.PSObject.Properties['ok'] -and -not $res.ok)
         if ($bad) { $failures++ }
         if ($acted -or $bad -or ($now - $lastRecord).TotalSeconds -ge $RecordEverySeconds) {
-            try { & $Record $res $now; $recorded++ } catch { Write-Warning "[hybrid-ad-sync] run record not written: $($_.Exception.Message)" }
+            try { & $Record $res $now; $recorded++ } catch { Write-Warning "[$JobName] run record not written: $($_.Exception.Message)" }
             $lastRecord = $now
-            if ($res) { Write-Host ("[hybrid-ad-sync] {0:HH:mm:ss} {1}" -f $now, "$($res.detail)") }
+            if ($res) { Write-Host ("[$JobName] {0:HH:mm:ss} {1}" -f $now, "$($res.detail)") }
         }
         if ($MaxIterations -gt 0 -and $passes -ge $MaxIterations) { $stop = "max iterations ($MaxIterations)"; break }
-        if (((& $Clock) - $start).TotalMinutes -ge $MaxMinutes) { $stop = "max runtime ($MaxMinutes min) -- the task restarts it"; break }
+        if ($MaxMinutes -gt 0 -and ((& $Clock) - $start).TotalMinutes -ge $MaxMinutes) { $stop = "max runtime ($MaxMinutes min) -- the task restarts it"; break }
         $why = $null; try { $why = & $StopWhen } catch { $why = $null }
         if ($why) { $stop = "$why"; break }
         # a failing pass backs off (DC or Graph down must not become a tight error loop); a healthy one pauses -PauseSeconds
         & $Sleep $(if ($bad) { [math]::Min(60, $PauseSeconds * 6) } else { $PauseSeconds })
     }
     } finally { if ($StallMinutes -gt 0) { Stop-PimHybridSyncWatchdog } }
-    Write-Host "[hybrid-ad-sync] loop stopped after $passes pass(es): $stop"
+    Write-Host "[$JobName] loop stopped after $passes pass(es): $stop"
     return [pscustomobject]@{ passes = $passes; recorded = $recorded; failures = $failures; stopReason = $stop }
+}
+
+# ---- DELTA: AD accounts + AD groups run the moment their definitions change (operator 2026-10-04) --------------------------
+# v1 ran "AD accounts (change detected)" and "AD groups for AD services (change detected)" in VisualCron -- a change reached
+# AD at once. v2 had them on a 60-minute cadence. Now the continuous sync process reads ONE cheap change stamp per pass
+# (count + checksum of the AD admin rows, of the group definitions, and of the hybrid / naming settings) and, when it moved,
+# runs hybrid-ad-apply and/or hybrid-ad-groups right there. The 60-minute cadence stays as the safety net only. Both paths
+# take the same machine-wide lock, so a delta run and the timed run never write AD at the same time.
+$script:PimHybridAdAdminEntities = @('Account-Definitions-Admins', 'Account-Definitions-Admins-Central')
+$script:PimHybridAdDeltaState = @{ stamp = $null }
+
+function Get-PimHybridAdChangeStamp {
+    <#
+      One read: @{ ok; admins; groups; settings; error }. Each part is "<rows>:<checksum>" -- an add, a delete or an edit of
+      any row moves it. -Query { param($sql, $params) -> first row } is the seam for tests; the default reads the desired
+      store (Get-PimSqlConnectionString). A failed read is ok=$false -- the caller then runs nothing on it (never a guess).
+    #>
+    param([scriptblock]$Query = $null)
+    $ae = @($script:PimHybridAdAdminEntities); $ge = @($script:PimHybridAdGroupEntities)
+    $p = @{}; $an = @(); $gn = @()
+    for ($i = 0; $i -lt $ae.Count; $i++) { $p["a$i"] = $ae[$i]; $an += "@a$i" }
+    for ($i = 0; $i -lt $ge.Count; $i++) { $p["g$i"] = $ge[$i]; $gn += "@g$i" }
+    $sql = "SELECT " +
+        "(SELECT CONCAT(COUNT(*), ':', ISNULL(CHECKSUM_AGG(CHECKSUM([Key], DataJson)), 0)) FROM pim.Rows WHERE Entity IN ($($an -join ', '))) AS admins, " +
+        "(SELECT CONCAT(COUNT(*), ':', ISNULL(CHECKSUM_AGG(CHECKSUM([Key], DataJson)), 0)) FROM pim.Rows WHERE Entity IN ($($gn -join ', '))) AS groups, " +
+        "(SELECT CONCAT(COUNT(*), ':', ISNULL(CHECKSUM_AGG(CHECKSUM(Name, ValueJson)), 0)) FROM pim.Settings WHERE Name LIKE 'HybridAd%' OR Name IN ('NamingConventions', 'FeatureGates')) AS settings"
+    if (-not $Query) {
+        $Query = {
+            param($q, $prm)
+            $cs = Get-PimSqlConnectionString
+            if (-not "$cs".Trim()) { throw 'no connection string for the desired store' }
+            @(Invoke-PimSqlQuery -ConnectionString $cs -Sql $q -Parameters $prm)[0]
+        }
+    }
+    try {
+        $r = & $Query $sql $p
+        if ($null -eq $r) { return @{ ok = $false; admins = ''; groups = ''; settings = ''; error = 'the change check returned nothing' } }
+        $g = { param($o, $n) if ($o -is [System.Collections.IDictionary]) { "$($o[$n])" } else { "$($o.$n)" } }
+        return @{ ok = $true; admins = (& $g $r 'admins'); groups = (& $g $r 'groups'); settings = (& $g $r 'settings'); error = '' }
+    } catch { return @{ ok = $false; admins = ''; groups = ''; settings = ''; error = "$($_.Exception.Message)" } }
+}
+
+function Get-PimHybridAdDeltaDue {
+    <#
+      PURE. Which jobs a stamp change asks for: @{ admins; groups; reason }. No previous stamp (the process just started) =
+      both, so whatever changed while it was down is caught up at once. A settings change (OUs, naming, marker, gates) = both.
+    #>
+    param([AllowNull()][hashtable]$Previous, [Parameter(Mandatory)][hashtable]$Current)
+    if (-not $Current.ok) { return @{ admins = $false; groups = $false; reason = "change check failed: $($Current.error)" } }
+    if (-not $Previous -or -not $Previous.ok) { return @{ admins = $true; groups = $true; reason = 'first check since start' } }
+    $s = ($Previous.settings -ne $Current.settings)
+    $a = $s -or ($Previous.admins -ne $Current.admins)
+    $g = $s -or ($Previous.groups -ne $Current.groups)
+    $why = @(); if ($Previous.admins -ne $Current.admins) { $why += 'admin definitions' }; if ($Previous.groups -ne $Current.groups) { $why += 'group definitions' }; if ($s) { $why += 'hybrid / naming settings' }
+    return @{ admins = $a; groups = $g; reason = $(if ($why.Count) { "changed: $($why -join ', ')" } else { '' }) }
+}
+
+function Invoke-PimHybridAdWriteLocked {
+    <#
+      Run -Action under the machine-wide AD-write lock ('Global\PimHybridAdWrite'). The timed hybrid tick and the delta runner
+      both write AD (create users / groups); without the lock the two could create the same object at the same moment and
+      one would report a false failure. Waits up to -WaitSeconds, then runs anyway with a warning (never blocks the work).
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Action, [int]$WaitSeconds = 600)
+    $m = $null; $owned = $false
+    try { $m = New-Object System.Threading.Mutex($false, 'Global\PimHybridAdWrite') } catch { $m = $null }
+    try {
+        if ($m) {
+            try { $owned = $m.WaitOne([TimeSpan]::FromSeconds($WaitSeconds)) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
+            if (-not $owned) { Write-Warning "[hybrid-ad] the AD-write lock was not free after $WaitSeconds s -- running anyway" }
+        }
+        & $Action
+    } finally { if ($m) { if ($owned) { try { $m.ReleaseMutex() } catch { } }; $m.Dispose() } }
+}
+
+function Invoke-PimHybridAdDeltaPass {
+    <#
+      One delta check (called every pass of the continuous loop). Reads the change stamp; when it moved, clears the cached
+      definitions and runs hybrid-ad-groups and/or hybrid-ad-apply AT ONCE through the normal job path (licence + feature
+      gates still decide), records each run, and logs it. The stamp is taken BEFORE the run, so a change made during the run
+      is seen on the next pass. A failed run is not retried here every 5 s -- the timed safety net retries it.
+      Returns @{ ran = @(types); reason }.
+    #>
+    param([hashtable]$State = $script:PimHybridAdDeltaState, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf,
+          [scriptblock]$Stamp = { Get-PimHybridAdChangeStamp },
+          [scriptblock]$RunJob = { param($type, $now, $whatIf) Invoke-PimScheduledJob -Job ([pscustomobject]@{ name = $type; type = $type }) -NowUtc $now -WhatIf:$whatIf },
+          [scriptblock]$Record = { param($type, $res, $started) if (Get-Command Write-PimJobRunRecord -ErrorAction SilentlyContinue) { Write-PimJobRunRecord -Job ([pscustomobject]@{ name = $type; type = $type }) -Result $res -StartedUtc $started -RunId ([guid]::NewGuid().ToString('N')) | Out-Null } })
+    $cur = & $Stamp
+    if (-not $cur.ok) { return @{ ran = @(); reason = "change check failed: $($cur.error)" } }   # keep the old stamp: retried next pass
+    $due = Get-PimHybridAdDeltaDue -Previous $State.stamp -Current $cur
+    $State.stamp = $cur
+    $types = @(); if ($due.groups) { $types += 'hybrid-ad-groups' }; if ($due.admins) { $types += 'hybrid-ad-apply' }
+    foreach ($t in $types) {
+        $script:PimHybridAdDefsCache = $null   # the new definitions, not the 5-minute cache
+        $res = $null
+        try { $res = Invoke-PimHybridAdWriteLocked -Action { & $RunJob $t $NowUtc ([bool]$WhatIf) } }
+        catch { $res = [pscustomobject]@{ name = $t; type = $t; ok = $false; ran = $true; detail = "$t (change detected) failed: $($_.Exception.Message)" } }
+        try { & $Record $t $res $NowUtc } catch { Write-Warning "[hybrid-ad-delta] run record for $t not written: $($_.Exception.Message)" }
+        Write-Host ("[hybrid-ad-delta] {0:HH:mm:ss} {1} (change detected -- {2}): {3}" -f $NowUtc, $t, $due.reason, "$(if ($res) { $res.detail })")
+    }
+    return @{ ran = $types; reason = $due.reason }
+}
+
+function Invoke-PimHybridAdChangesJob {
+    <#
+      The 'hybrid-ad-changes' job = one pass of the CHANGES lane (its own continuous loop, its own process): the change check,
+      and -- when the AD admin rows, the AD group definitions or the hybrid / naming settings moved -- hybrid-ad-groups and/or
+      hybrid-ad-apply at once. Returns the job-result shape the loop records: results[] carries one 'done' / 'failed' item
+      per job it ran, so the loop records the pass that acted (and otherwise every 5 minutes).
+    #>
+    param([datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
+    $d = Invoke-PimHybridAdDeltaPass -NowUtc $NowUtc -WhatIf:$WhatIf
+    $items = @(foreach ($t in @($d.ran)) { [pscustomobject]@{ status = 'done'; op = 'run'; name = $t } })
+    $detail = if (@($d.ran).Count) { "hybrid-ad-changes: ran $(@($d.ran) -join ' + ') ($($d.reason))" } elseif ("$($d.reason)" -match '^change check failed') { "hybrid-ad-changes: $($d.reason)" } else { 'hybrid-ad-changes: no change' }
+    return [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; results = $items; detail = $detail; ok = -not ("$($d.reason)" -match '^change check failed') }
 }
 
 # ---- self-healing of the continuous sync (operator 2026-10-02: "it must be running 24x7x365") -----------------------------
@@ -738,22 +1023,31 @@ function Invoke-PimHybridAdSyncLoop {
 #   call -- that kills this process when no loop iteration completed for -StallMinutes. The task restarts the loop in <= 1 min.
 # Layer 2 (external, Invoke-PimHybridSyncWatchdogCheck): the 5-minute hybrid tick reads the liveness file and kills a sync
 #   process whose stamp is stale -- for the case where layer 1 itself is wedged.
+# Lanes (operator 2026-10-04: critical groups such as Domain Admins must reach AD within 20-30 s even with 10,000 servers):
+# each continuous loop is its own process with its own liveness stamp, so the watchdog judges -- and kills -- only that one.
+#   hybrid-ad-sync           critical (non-server) AD groups; the file name of the original single loop is kept
+#   hybrid-ad-sync-servers   the per-server groups ({prefix}AD-SRV-{server}...), parallel batches
+#   hybrid-ad-changes        AD accounts + AD groups the moment their definitions change (delta)
+$script:PimHybridAdLanes = @('hybrid-ad-sync', 'hybrid-ad-sync-servers', 'hybrid-ad-changes')
 function Get-PimHybridSyncAlivePath {
-    if ("$env:PIM_HybridSyncAliveFile".Trim()) { return "$env:PIM_HybridSyncAliveFile".Trim() }
+    param([string]$Lane = 'hybrid-ad-sync')
+    $l = if ("$Lane".Trim()) { "$Lane".Trim().ToLowerInvariant() } else { 'hybrid-ad-sync' }
+    if ("$env:PIM_HybridSyncAliveFile".Trim()) { $f = "$env:PIM_HybridSyncAliveFile".Trim(); return $(if ($l -eq 'hybrid-ad-sync') { $f } else { "$f.$l" }) }
     $base = if ($env:ProgramData) { $env:ProgramData } else { [IO.Path]::GetTempPath() }
-    return (Join-Path $base 'PIM4EntraPS\hybrid-ad-sync.alive')
+    return (Join-Path $base "PIM4EntraPS\$l.alive")
 }
 function Set-PimHybridSyncAlive {
-    param([datetime]$NowUtc = [datetime]::UtcNow)
+    param([datetime]$NowUtc = [datetime]::UtcNow, [string]$Lane = 'hybrid-ad-sync')
     if ('PimHybridSyncWatchdog' -as [type]) { [PimHybridSyncWatchdog]::Beat() }
-    $p = Get-PimHybridSyncAlivePath
+    $p = Get-PimHybridSyncAlivePath -Lane $Lane
     $d = Split-Path $p -Parent
     if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
     [IO.File]::WriteAllText($p, ("{0}|{1}" -f $NowUtc.ToUniversalTime().ToString('o'), $PID))
 }
 function Get-PimHybridSyncAlive {
     # -> @{ utc; pid } or $null (no file / unreadable)
-    $p = Get-PimHybridSyncAlivePath
+    param([string]$Lane = 'hybrid-ad-sync')
+    $p = Get-PimHybridSyncAlivePath -Lane $Lane
     if (-not (Test-Path -LiteralPath $p)) { return $null }
     try {
         $parts = ([IO.File]::ReadAllText($p)).Trim() -split '\|'
@@ -808,19 +1102,19 @@ function Invoke-PimHybridSyncWatchdogCheck {
       1-minute trigger then starts a fresh one. No stamp at all = nothing to judge (older version, never started) -> no action.
       Returns @{ action = 'ok'|'none'|'killed'|'gone'; detail }.
     #>
-    param([int]$StaleMinutes = 15, [datetime]$NowUtc = [datetime]::UtcNow,
+    param([int]$StaleMinutes = 15, [datetime]$NowUtc = [datetime]::UtcNow, [string]$Lane = 'hybrid-ad-sync',
         [scriptblock]$GetProcess = { param($procId) Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue },
         [scriptblock]$Kill = { param($procId) Stop-Process -Id $procId -Force -ErrorAction Stop })
-    $a = Get-PimHybridSyncAlive
+    $a = Get-PimHybridSyncAlive -Lane $Lane
     if (-not $a) { return [pscustomobject]@{ action = 'none'; detail = 'no liveness stamp yet' } }
     $age = ($NowUtc.ToUniversalTime() - $a.utc).TotalMinutes
-    if ($age -le $StaleMinutes) { return [pscustomobject]@{ action = 'ok'; detail = ("sync loop alive ({0:N1} min ago, pid {1})" -f $age, $a.pid) } }
+    if ($age -le $StaleMinutes) { return [pscustomobject]@{ action = 'ok'; detail = ("$Lane loop alive ({0:N1} min ago, pid {1})" -f $age, $a.pid) } }
     if ($a.pid -le 0) { return [pscustomobject]@{ action = 'none'; detail = 'stale stamp without a pid' } }
     $p = & $GetProcess $a.pid
     if (-not $p) { return [pscustomobject]@{ action = 'gone'; detail = ("stale stamp ({0:N0} min) and pid {1} is gone -- the task starts a new loop" -f $age, $a.pid) } }
-    if ("$($p.CommandLine)" -notmatch 'Mode Sync|ContinuousJob') { return [pscustomobject]@{ action = 'none'; detail = "pid $($a.pid) is not the sync loop (reused pid) -- left alone" } }
+    if ("$($p.CommandLine)" -notmatch 'Mode (Sync[A-Za-z]*|Changes)|ContinuousJob') { return [pscustomobject]@{ action = 'none'; detail = "pid $($a.pid) is not the sync loop (reused pid) -- left alone" } }
     & $Kill $a.pid
-    return [pscustomobject]@{ action = 'killed'; detail = ("sync loop pid {0} made no progress for {1:N0} min -- killed; the task restarts it within a minute" -f $a.pid, $age) }
+    return [pscustomobject]@{ action = 'killed'; detail = ("$Lane loop pid {0} made no progress for {1:N0} min -- killed; the task restarts it within a minute" -f $a.pid, $age) }
 }
 
 # =====================================================================================================================

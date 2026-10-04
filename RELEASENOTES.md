@@ -14,6 +14,25 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.495 — Hybrid AD at scale: critical groups first, changes at once; job cadence counts from the finish
+
+- **Changed: the hybrid worker keeps critical AD groups fast, however many servers there are.** It now runs three
+  continuous processes that never wait on each other:
+  - **Critical group sync:** every AD-mirrored group except the per-server groups (for example Domain Admins). A pass
+    runs every few seconds, so emergency access reaches Active Directory within about 20–30 seconds.
+  - **Server group sync:** the per-server local-administrator groups, read in parallel batches (50 groups per batch,
+    8 batches at once by default; both adjustable under Settings > Hybrid AD & workloads).
+  - **Change detection:** a new or changed AD admin account or AD group definition is created or updated in AD within
+    seconds of the commit. The timed runs remain as a safety net.
+  - While the server sync is not running, the critical sync covers every group, so nothing is ever left out.
+  - The processes no longer restart on a timer; they restart only for a new version or when the watchdog finds one hung.
+  - **Upgrade note:** the worker's nightly update now also brings the task layout of the new version. A worker installed
+    before this version gets the new tasks once by running `Install-PimHybridWorker.ps1 -Phase Layout` (or `-Phase
+    Configure` again).
+- **Fixed: a job's cadence now counts from when the job finished.** A job that takes 8 minutes on a 5-minute cadence
+  is next due 5 minutes after it finished, never while it is still running. The Jobs page says so: "5 min after it
+  finishes", with the finish time in the next-run tooltip.
+
 ## v2.4.494 — Central (uplink) access is shown apart and is read-only on a managed tenant
 
 - **New: on a managed tenant, everything the managing tenant sent is marked and read-only.**
