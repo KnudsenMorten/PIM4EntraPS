@@ -2291,6 +2291,42 @@ function Get-PimManagerDiffTouchedRows {
     foreach ($r in @($Diff.removes)) { if ($null -ne $r) { $out.Add($r) } }
     return $out.ToArray()
 }
+function Test-PimManagerUplinkRowGate {
+    # PURE. §91.23 (operator 2026-10-04, RIDE: "any uplink replicated admins assignments should be shown special, as they are
+    # read-only and of course cannot be modified downlink ... but of course we cannot modify something from uplink").
+    # A row the MSP downlink put here carries Owner='MSP'; the managing tenant decides it, and the next pull puts it back.
+    # So a managed tenant's commit may not CHANGE or REMOVE such a row, and a new row may not CLAIM that owner (a clone
+    # of a synced row would otherwise be adopted -- and later pruned -- by the downlink). Local rows that point at central
+    # objects (a central admin in a local group) are ordinary local rows and are never refused here.
+    # -Diff: Compare-PimRowSets output. Returns @{ allowed; refused = @(@{ op; key; why }); reason }.
+    param([Parameter(Mandatory)][object]$Diff, [string]$Base = '')
+    $isUp = { param($r) if ($null -eq $r) { return $false }
+              $v = if ($r -is [System.Collections.IDictionary]) { $r['Owner'] } elseif ($r.PSObject.Properties['Owner']) { $r.Owner } else { $null }
+              return ("$v".Trim() -ieq 'msp') }
+    $side = { param($m, $s) if ($m -is [System.Collections.IDictionary]) { $m[$s] } elseif ($m.PSObject.Properties[$s]) { $m.PSObject.Properties[$s].Value } }
+    $keyOf = { param($r) $k = ''; if ($Base -and (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)) { try { $k = "$(Get-PimStoreRowKey -Base $Base -Row $r)" } catch { } }; $k }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Diff.removes)) { if (& $isUp $r) { $out.Add([ordered]@{ op = 'remove'; key = (& $keyOf $r); why = 'removing a row the managing tenant sent' }) } }
+    foreach ($m in @($Diff.modifies)) {
+        if ($null -eq $m) { continue }
+        $b = & $side $m 'before'; $a = & $side $m 'after'
+        if (& $isUp $b) {
+            # Whitespace-only differences are not a change (an Excel / grid round trip can add or drop them).
+            $cols = @(@(& $side $m 'diffCols') | Where-Object { $_ } | Where-Object {
+                $bv = if ($b -is [System.Collections.IDictionary]) { $b[$_] } else { $b.PSObject.Properties[$_].Value }
+                $av = if ($a -is [System.Collections.IDictionary]) { $a[$_] } elseif ($a.PSObject.Properties[$_]) { $a.PSObject.Properties[$_].Value } else { '' }
+                "$bv".Trim() -cne "$av".Trim() })
+            if ($cols.Count) { $out.Add([ordered]@{ op = 'modify'; key = (& $keyOf $b); why = "changing $($cols -join ', ') of a row the managing tenant sent" }) }
+        } elseif (& $isUp $a) {
+            $out.Add([ordered]@{ op = 'modify'; key = (& $keyOf $a); why = 'a local row cannot be marked as sent by the managing tenant (Owner=MSP)' })
+        }
+    }
+    foreach ($r in @($Diff.adds)) { if (& $isUp $r) { $out.Add([ordered]@{ op = 'add'; key = (& $keyOf $r); why = 'a new row cannot be marked as sent by the managing tenant (Owner=MSP) -- clear Owner to make it a local row' }) } }
+    if (-not $out.Count) { return @{ allowed = $true; refused = @(); reason = '' } }
+    $txt = (@($out | Select-Object -First 5 | ForEach-Object { "$($_.key): $($_.why)" }) -join '; ')
+    return @{ allowed = $false; refused = @($out.ToArray())
+              reason = "Read-only: $($out.Count) row(s) in this commit come from the managing tenant (uplink) -- $txt. They are changed on the managing tenant and arrive here on the next pull. Nothing was saved. You CAN add local rows, including local access for a central admin." }
+}
 function Compare-PimRowSets {
     # Per-row diff between two row arrays for the Review & Save preview.
     # Returns @{ adds = [...]; removes = [...]; modifies = [{ before, after, diffCols }]; unchanged = N }.
@@ -2735,6 +2771,10 @@ function Invoke-PimManagerSafeCommit {
         [Parameter(Mandatory)][hashtable]$Current,   # @{ rows; header } pre-commit state
         [bool]$SqlMode
     )
+    # §91.23 BACKSTOP: every commit path (grid, departments, workloads, conformance) lands here -- a row the managing tenant
+    # sent (Owner=MSP) is never changed or removed by a managed tenant's Manager, whichever page asked.
+    $__up = Test-PimManagerUplinkRowGate -Diff (Compare-PimRowSets -Before @($Current.rows) -After @($NewRows) -Base $Base) -Base $Base
+    if (-not $__up.allowed) { throw $__up.reason }
     # SEC-16(b) -- the snapshot's `By` is evidence ("who committed this change"), so it must be the
     # signed-in principal, not the container's process user. Same defect as the audit writer.
     $who = try { $r = Get-PimManagerRole; if ("$($r.identity)".Trim()) { "$($r.identity)" } else { throw } }
@@ -4849,6 +4889,16 @@ function Invoke-PimManagerCsvPut {
         }
     }
 
+    # §91.23: rows the managing tenant sent (Owner=MSP) are read-only here.
+    $upGate = Test-PimManagerUplinkRowGate -Diff $diff -Base $base
+    if (-not $upGate.allowed) {
+        Write-PimManagerAuditEvent -Action 'commit.uplink-readonly' -Target $base -Result 'denied' -After ([ordered]@{ refused = @($upGate.refused) })
+        Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
+            ok = $false; base = $base; gate = 'uplink-readonly'; error = "$($upGate.reason)"; refused = @($upGate.refused)
+        })
+        return 409
+    }
+
     if (Get-Command Test-PimReplicationWriteAllowed -ErrorAction SilentlyContinue) {
         $repTags = @{ known = $false; tags = @() }
         try { $repTags = Get-PimManagerKnownTenantTags } catch { }
@@ -5696,6 +5746,7 @@ function Build-PimGraphData {
                 level       = $g.Level
                 description = $g.GroupDescription
                 source      = $src.source
+                central     = [bool]("$($g.Owner)".Trim() -ieq 'msp')   # §91.23
                 groupTag    = $g.GroupTag
                 # §70.19: the wizards need it -- Entra refuses an ACTIVE group nesting into a role-assignable group.
                 roleAssignable = ("$($g.IsRoleAssignable)".Trim() -ieq 'TRUE')
@@ -5715,6 +5766,7 @@ function Build-PimGraphData {
             kind        = 'au'
             description = $au.AUDescription
             source      = 'PIM-Definitions-AU'
+            central     = [bool]("$($au.Owner)".Trim() -ieq 'msp')   # §91.23
             auTag       = $tag
         })
     }
@@ -5776,6 +5828,8 @@ function Build-PimGraphData {
         return @{ scopeType = $kind; scopeShort = (($s -split '/') | Where-Object { $_ } | Select-Object -Last 1) }
     }
 
+    # §91.23: a row the MSP downlink put here (Owner=MSP) is the managing tenant's -- the map shows it read-only.
+    $upOwned = { param($r) ("$($r.Owner)".Trim() -ieq 'msp') }
     foreach ($r in $asgnAdmins) {
         if (-not $r.Username -or -not $r.GroupTag) { continue }
         [void]$edges.Add([ordered]@{
@@ -5784,6 +5838,7 @@ function Build-PimGraphData {
             type   = $r.AssignmentType
             kind   = 'admin-to-group'
             source_csv = 'PIM-Assignments-Admins'
+            central = [bool](& $upOwned $r)   # §91.23: sent by the managing tenant -> read-only here
             match = [ordered]@{ Username = $r.Username; GroupTag = $r.GroupTag; AssignmentType = $r.AssignmentType }
         })
     }
@@ -5795,6 +5850,7 @@ function Build-PimGraphData {
             type   = $r.AssignmentType
             kind   = 'group-to-group'
             source_csv = 'PIM-Assignments-Groups'
+            central = [bool](& $upOwned $r)   # §91.23: sent by the managing tenant -> read-only here
             match = [ordered]@{ TargetGroupTag = $r.TargetGroupTag; SourceGroupTag = $r.SourceGroupTag; AssignmentType = $r.AssignmentType }
         })
     }
@@ -5808,6 +5864,7 @@ function Build-PimGraphData {
             type   = $r.AssignmentType
             kind   = 'group-to-entra-role'
             source_csv = 'PIM-Assignments-Roles-Groups'
+            central = [bool](& $upOwned $r)   # §91.23: sent by the managing tenant -> read-only here
             match = [ordered]@{ GroupTag = $r.GroupTag; RoleDefinitionName = $r.RoleDefinitionName; AssignmentType = $r.AssignmentType }
         })
     }
@@ -5822,6 +5879,7 @@ function Build-PimGraphData {
             type   = $r.AssignmentType
             kind   = 'group-to-au-role'
             source_csv = 'PIM-Assignments-Roles-AUs'
+            central = [bool](& $upOwned $r)   # §91.23: sent by the managing tenant -> read-only here
             match = [ordered]@{ GroupTag = $r.GroupTag; AdministrativeUnitTag = $r.AdministrativeUnitTag; RoleDefinitionName = $r.RoleDefinitionName; AssignmentType = $r.AssignmentType }
         })
         [void]$edges.Add([ordered]@{
@@ -5830,6 +5888,7 @@ function Build-PimGraphData {
             type   = ''
             kind   = 'au-to-au-role'
             source_csv = 'PIM-Assignments-Roles-AUs'
+            central = [bool](& $upOwned $r)   # §91.23: sent by the managing tenant -> read-only here
             match = [ordered]@{ GroupTag = $r.GroupTag; AdministrativeUnitTag = $r.AdministrativeUnitTag; RoleDefinitionName = $r.RoleDefinitionName }
             cosmetic = $true
         })
@@ -5847,6 +5906,7 @@ function Build-PimGraphData {
             type   = $r.AssignmentType
             kind   = 'group-to-az-resource'
             source_csv = 'PIM-Assignments-Azure-Resources'
+            central = [bool](& $upOwned $r)   # §91.23: sent by the managing tenant -> read-only here
             match = [ordered]@{ GroupTag = $r.GroupTag; AzScope = $r.AzScope; AzScopePermission = $r.AzScopePermission; AssignmentType = $r.AssignmentType }
         })
     }
@@ -5894,6 +5954,7 @@ function Build-PimGraphData {
             type   = $r.Action
             kind   = 'group-to-workload'
             source_csv = 'PIM-Assignments-Workloads'
+            central = [bool](& $upOwned $r)   # §91.23: sent by the managing tenant -> read-only here
             match = [ordered]@{ GroupTag = $r.GroupTag; Workload = $wid; RoleName = $r.RoleName; Scope = $wScope; Action = $r.Action }
         })
     }
