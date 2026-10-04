@@ -14,6 +14,23 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.494 — Central (uplink) access is shown apart and is read-only on a managed tenant
+
+- **New: on a managed tenant, everything the managing tenant sent is marked and read-only.**
+  - **Access map:** boxes from the managing tenant carry a **CENTRAL** badge and their links are drawn in teal. Selecting
+    one says it is read-only here; removing a central link from the map is refused with the reason.
+  - **Review current delegations:** a central admin's assignments carry a chip. A standing central assignment cannot be
+    selected for revoke. An activation of an eligible central assignment can still be ended, because that is this
+    tenant's own decision.
+  - A central admin can still be given **local** access (one of this tenant's own groups); those links are local and
+    fully editable.
+  - The Manager also refuses, when you commit, any change that would alter or remove a row the managing tenant sent, or
+    make a new row look as if it came from there. The refusal is recorded in the audit trail.
+- **Fixed: the Environment name examples are generic** (`Test (EU)`, `Production`); they named real environments.
+- **Changed: every Active Directory placement is in one place.** The admin-account OUs (Day2Day / High Priv) moved from
+  Settings > Naming & accounts to Settings > Hybrid AD & workloads, right below the Hybrid Active Directory card that
+  holds the OU for new AD groups.
+
 ## v2.4.493 — Mail check wording, the environment name card, and a shared update verifier
 
 - **Fixed: the permission banner now says how to prove mail works.** When mail sending has not been proven yet, the

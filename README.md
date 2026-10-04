@@ -964,6 +964,9 @@ environment's own database.
   pushes anything. The two hosting choices differ only in where the portal and the
   database live: in the provider's tenant (so the provider runs the infrastructure
   for the customer), or in the customer's own tenant (so the customer does).
+- **What the provider sent is read-only in the managed tenant, and shown as such.** On the Access map it carries a
+  **CENTRAL** badge and teal links; in Review current delegations a standing central assignment cannot be revoked. A
+  central administrator can still be given the customer's own, local access, which the customer manages as usual.
 - **You can start alone, be taken on later, and leave again.** A tenant that starts
   on its own can be brought under a provider afterwards, and a managed tenant can be
   detached at any time. Detaching removes the provider's synced administrators and
