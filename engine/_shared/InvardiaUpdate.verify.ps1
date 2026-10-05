@@ -99,7 +99,9 @@ function Test-InvardiaManifest {
     $sha = "$($m.sha256)".Trim().ToLowerInvariant(); if ($sha -notmatch '^[0-9a-f]{64}$') { return (& $no 'the manifest carries no SHA-256') }
     $seq = 0; if (-not [int]::TryParse("$($m.sequence)", [ref]$seq) -or $seq -lt 1) { return (& $no 'the manifest carries no sequence') }
     if ($seq -lt $AppliedSequence) { return (& $no "REPLAY refused: sequence $seq is lower than the $AppliedSequence already applied here") }
-    $size = [int64]0; [void][int64]::TryParse("$($m.size)", [ref]$size)
+    # F4 (framework UPDATE-1.5, 2026-10-05): the SIGNED size is required -- a manifest without it (or with 0) is refused,
+    # so the archive check below always compares the length, never only the hash.
+    $size = [int64]0; if (-not [int64]::TryParse("$($m.size)", [ref]$size) -or $size -lt 1) { return (& $no 'the manifest carries no archive size') }
     $url = "$(& $g $Response 'downloadUrl')".Trim()
     if ($url -notmatch '^https://') { return (& $no 'the download link is not https') }
     $r = @{ ok = $true; hold = $false; reason = "signed manifest: $ver (ring $($m.ring), sequence $seq)"; version = $ver; sequence = $seq; sha256 = $sha; size = $size; downloadUrl = $url; manifest = $m }
@@ -147,12 +149,14 @@ function Save-InvardiaArchive {
 function Test-InvardiaArchiveFile {
     <# PURE (file read). The downloaded file is a zip of the size and SHA-256 the SIGNED manifest names. #>
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$ExpectedSha256, [int64]$ExpectedSize = 0)
+    # F4: the signed size is REQUIRED -- no expected size = refused (a caller that has none must not skip the length check)
+    if ($ExpectedSize -lt 1) { return @{ ok = $false; bytes = 0; reason = 'no signed archive size to check the download against -- refused' } }
     if (-not (Test-Path -LiteralPath $Path)) { return @{ ok = $false; bytes = 0; reason = 'the download produced no file' } }
     $len = (Get-Item -LiteralPath $Path).Length
     $magic = New-Object byte[] 2
     $fs = [System.IO.File]::OpenRead($Path); try { [void]$fs.Read($magic, 0, 2) } finally { $fs.Dispose() }
     if ($magic[0] -ne 0x50 -or $magic[1] -ne 0x4B) { return @{ ok = $false; bytes = $len; reason = 'the downloaded file is not a zip' } }
-    if ($ExpectedSize -gt 0 -and $len -ne $ExpectedSize) { return @{ ok = $false; bytes = $len; reason = "the archive is $len bytes, the signed manifest says $ExpectedSize" } }
+    if ($len -ne $ExpectedSize) { return @{ ok = $false; bytes = $len; reason = "the archive is $len bytes, the signed manifest says $ExpectedSize" } }
     $sha = [System.Security.Cryptography.SHA256]::Create(); $fh = [System.IO.File]::OpenRead($Path)
     try { $h = ([BitConverter]::ToString($sha.ComputeHash($fh))).Replace('-', '').ToLowerInvariant() } finally { $fh.Dispose(); $sha.Dispose() }
     if ($h -ne "$ExpectedSha256".Trim().ToLowerInvariant()) { return @{ ok = $false; bytes = $len; reason = "the archive's SHA-256 ($h) is not the one the signed manifest names -- refused" } }

@@ -14,6 +14,15 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.497 — Stricter update checks, release publishing to Invardia, one accessibility fix
+
+- **Changed: a Pro update must state its archive size.** An update whose signed description has no archive size is now
+  refused, and every download is checked against both its signed size and its signature-protected hash.
+- **New (for the maintainer): publish a release to Invardia's Pro update platform.** `tools/setup/Publish-PimInvardiaRelease.ps1`
+  builds the release package from the release tag, checks it, and with `-Apply` uploads it with the publisher's
+  certificate. Without `-Apply` it only shows what it would send.
+- **Fixed: the auto-extend lead-days field has an accessible name**, so screen readers announce what it is.
+
 ## v2.4.496 — Every safety guard is seen; telemetry on by default
 
 - **New: when a safety guard steps in, you hear about it.** Whenever PIM holds or refuses something to protect your data
