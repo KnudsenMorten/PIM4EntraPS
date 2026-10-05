@@ -1308,15 +1308,7 @@
       </div>
     </div>
 
-    <!-- Permission templates: centrally maintained delegation packs
-         (templates/*.template.json, distributed by repo sync). When the
-         maintainer extends a template, subscribed tenants see the new
-         permissions here and import them into pending with one click. -->
-    <div id="tplSection" style="padding:0 18px 18px 18px;">
-      <h3 style="font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:#0969da; margin:8px 0 4px 0;">Permission Templates</h3>
-      <div style="color:#57606a; font-size:11.5px; margin-bottom:10px;">Centrally maintained delegation packs. When a template gains new roles (e.g. Defender XDR grew from 3 to 7), the new rows show here for one-click import into pending.</div>
-      <div id="tplCards"><div class="empty">Loading templates&hellip;</div></div>
-    </div>
+    <!-- (Permission templates moved to Audit & Settings > Workload templates, operator 2026-10-05) -->
   </div>
 
   <!-- =========== Save tab =========== -->
@@ -1645,6 +1637,16 @@
   <div id="workloadtemplatesTab" class="tab-panel">
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="workloadtemplatesBody">
       <div id="setTemplatePacksHost"><div style="color:#57606a;font-size:12px;">Loading workload templates&hellip;</div></div>
+      <!-- Permission templates: centrally maintained delegation packs
+           (templates/*.template.json, distributed by repo sync). When the
+           maintainer extends a template, subscribed tenants see the new
+           permissions here and import them into pending with one click. -->
+      <div id="tplSection" style="padding:18px 0 0 0;">
+        <h3 style="font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:#0969da; margin:8px 0 4px 0;">Permission Templates</h3>
+        <div style="color:#57606a; font-size:11.5px; margin-bottom:10px;">Centrally maintained delegation packs. When a template gains new roles (e.g. Defender XDR grew from 3 to 7), the new rows show here for one-click import into pending.</div>
+        <div id="tplCards"><div class="empty">Loading templates&hellip;</div></div>
+      </div>
+
     </div>
   </div>
   <div id="policytemplatesTab" class="tab-panel">
@@ -2856,7 +2858,7 @@
     syncNavGroups(name);
     if (name === 'home') renderHome();
     if (name === 'map') renderAccessMap();
-    if (name === 'new') renderTemplates();
+    // (the permission templates moved to Workload templates, operator 2026-10-05)
     if (name === 'grid') renderGridList();
     if (name === 'save') renderSaveTab();
     if (name === 'validate') openValidateTab();
@@ -2873,7 +2875,7 @@
     if (name === 'emergency') { renderSettingsBreakGlassSection(document.getElementById('setBreakGlassHost')); renderSettingsEmergencySection(document.getElementById('setEmergencyHost')); }
     if (name === 'mailtemplates') renderMailTemplatesSection(document.getElementById('setMailTemplatesHost'));
     if (name === 'policytemplates') renderPolicyTemplatesPage();   // REQ-L
-    if (name === 'workloadtemplates') renderTemplatePacksSection(document.getElementById('setTemplatePacksHost'));   // operator 2026-10-05: its own page
+    if (name === 'workloadtemplates') { renderTemplatePacksSection(document.getElementById('setTemplatePacksHost')); renderTemplates(); }   // operator 2026-10-05: its own page, with the permission templates (moved from Create access)
     if (name === 'roleperms') renderRolePerms();
     if (name === 'drift') renderDrift();
     if (name === 'coverage') renderCoverage();
@@ -26431,9 +26433,10 @@
     });
     return out;
   }
-  // Settings > Permission template packs > Import...: open Create access, find the pack's card, open its row list.
+  // Workload templates > Import...: the pack's card is on the same page (moved from Create access 2026-10-05); find it,
+  // open its row list.
   async function openTemplateImport(id) {
-    switchTab('new');
+    switchTab('workloadtemplates');
     for (let i = 0; i < 40; i++) {
       const card = document.querySelector('#tplCards [data-tpl-id="' + String(id).replace(/"/g, '') + '"]');
       if (card) {

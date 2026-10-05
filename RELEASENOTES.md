@@ -14,6 +14,15 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.501 — Removals go live on the next run, permission templates in one place
+
+- **Fixed: a removed delegation is taken away on the next engine run, not overnight.** Deleting an assignment (Stop
+  managing, a row delete) only took the row out of the desired state, and only the nightly full reconcile removed the
+  membership in Entra. The removal is now applied by the next delta run, minutes after the commit, and the row disappears
+  once the removal is confirmed.
+- **Changed: the permission templates moved from Create access to Audit & Settings > Workload templates**, next to the
+  template packs. **Import...** opens them there.
+
 ## v2.4.500 — Clearer menus, an easier admin wizard, stale approvals fixed
 
 - **Fixed: expired approval requests no longer count as waiting.** A request past its 72-hour expiry was still counted
