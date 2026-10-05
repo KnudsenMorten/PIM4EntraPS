@@ -478,15 +478,38 @@ function Write-PimEngineChangeAudit {
         $action = "engine.$("$Scope".ToLowerInvariant()).$verb"
         $target = if ($label) { $label } else { "$Entity $key" }
         $corr = "$($global:PIM_JobCorrelationId)"
+        # AUDIT-1 actor (operator 2026-10-05: "actor must be the person who a) triggered it and b) approved it if enabled"):
+        # the commit that asked for this change names the person; the engine is only the one that carried it out. The
+        # attribution index is read once per run. No commit names it (a reconcile, an expiry): the actor stays 'engine'.
+        $actor = 'engine'
+        $after['jobRun'] = $corr
+        if (Get-Command Resolve-PimChangeAttribution -ErrorAction SilentlyContinue) {
+            try {
+                if ("$($global:PIM_ChangeAttributionRun)" -ne $corr -or $null -eq $global:PIM_ChangeAttributionIndex) {
+                    $acs = if ("$($global:PIM_EngineSqlCs)".Trim()) { "$($global:PIM_EngineSqlCs)" } elseif ("$($global:PIM_SqlConnectionString)".Trim()) { "$($global:PIM_SqlConnectionString)" } else { '' }
+                    $global:PIM_ChangeAttributionIndex = if ($acs) { Get-PimChangeAttributionIndex -ConnectionString $acs } else { @{} }
+                    $global:PIM_ChangeAttributionRun = $corr
+                }
+                $att = Resolve-PimChangeAttribution -Index $global:PIM_ChangeAttributionIndex -Entity $Entity -Row $row
+                if ($att) {
+                    $actor = "$($att.InitiatedBy)"
+                    $after['initiatedBy'] = "$($att.InitiatedBy)"
+                    if ("$($att.ApprovedBy)".Trim()) { $after['approvedBy'] = "$($att.ApprovedBy)" }
+                    $after['commitId'] = "$($att.CommitId)"
+                    $after['appliedBy'] = 'engine'
+                    $corr = "$($att.CommitId)"
+                } else { $after['initiatedBy'] = 'engine (no commit names this change: a scheduled reconcile or an automatic step)' }
+            } catch { $actor = 'engine' }
+        }
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
-            Write-PimAuditEvent -Action $action -Target $target -After $after -Result $Result -Actor 'engine' -CorrelationId $corr | Out-Null
+            Write-PimAuditEvent -Action $action -Target $target -After $after -Result $Result -Actor $actor -CorrelationId $corr | Out-Null
             return
         }
         $cs = $null
         if ("$($global:PIM_EngineSqlCs)".Trim()) { $cs = "$($global:PIM_EngineSqlCs)" }
         elseif ("$($global:PIM_SqlConnectionString)".Trim()) { $cs = "$($global:PIM_SqlConnectionString)" }
         if ($cs -and (Get-Command Write-PimSqlAuditEvent -ErrorAction SilentlyContinue)) {
-            Write-PimSqlAuditEvent -ConnectionString $cs -Actor 'engine' -ActorSource 'engine' -Action $action -Target $target -After $after -Result $Result -CorrelationId $corr
+            Write-PimSqlAuditEvent -ConnectionString $cs -Actor $actor -ActorSource 'engine' -Action $action -Target $target -After $after -Result $Result -CorrelationId $corr
         }
     } catch { Write-Warning ("    [audit] engine change {0} {1} was NOT recorded: {2}" -f $Op, $(if ($Item) { $Item.key } else { '' }), $_.Exception.Message) }
 }
@@ -580,6 +603,12 @@ function Invoke-PimEngineScope {
     #      a remove-only diff by construction, so the "0 desired = wrong store" heuristic
     #      doesn't apply.
     $doPrune = ($Mode -eq 'Full') -and $Prune
+    # GUARD-1 'engine.empty-desired' (2026-10-05): a FULL prune run remembers each scope's desired count, and alerts ONCE
+    # when a scope that had definitions now has none while live items remain (gate 2 below then refuses the prune). Plans
+    # (-WhatIf) and the remove-only scopes (allowEmptyDesiredPrune) are not counted. Never throws.
+    if ($doPrune -and -not $WhatIf -and -not $p.allowEmptyDesiredPrune -and (Get-Command Invoke-PimEmptyDesiredGuard -ErrorAction SilentlyContinue)) {
+        [void](Invoke-PimEmptyDesiredGuard -Scope $Scope -DesiredCount @($desired).Count -LiveCount @($live).Count)
+    }
     $__emptyDesiredRead = $false
     if ($doPrune -and @($desired).Count -eq 0 -and -not $p.allowEmptyDesiredPrune) {
         # REQ-AU-DRIFT-1 (operator 2026-09-30: "List extras, read-only"): the DRIFT SNAPSHOT may still LIST what is live in a
@@ -735,6 +764,15 @@ function Invoke-PimEngineScope {
         $rbd = Test-PimRemoveBudgetAllowed -ToRemove $__rmTotal -Scope $Scope -Scanned (@($live).Count) -Operation 'remove'
         if (-not $rbd.allowed) {
             $__overBudget = [pscustomobject]@{ toRemove = $__rmTotal; budget = $rbd.budget }
+            # GUARD-1 'drift.over-remove-budget' (2026-10-05): the early warning -- nothing is held yet (this is a read), so
+            # the outcome is 'warning' (no ticket); the apply that would hold them trips 'engine.remove-budget' itself.
+            if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
+                [void](Invoke-PimGuardTrip -GuardId 'drift.over-remove-budget' -Outcome warning -Area $Scope -Job 'drift' `
+                    -Title ("{0}: {1} extra(s) found, over the removal budget of {2}" -f $Scope, $__rmTotal, $rbd.budget) `
+                    -Detail ("The drift check found {0} live item(s) in {1} that the definitions do not have. That is over the removal budget ({2}), so the next apply will hold them instead of removing them." -f $__rmTotal, $Scope, $rbd.budget) `
+                    -ActionText 'Review the extras on the Drift page: define what should stay, and let the rest be removed in smaller steps or raise the removal budget for one run.' `
+                    -Measured @{ toRemove = $__rmTotal; scanned = @($live).Count } -Thresholds @{ budget = [int]$rbd.budget })
+            }
             Write-Host ("[engine] {0,-20} drift read: {1} removal(s) are over the removal budget ({2}) -- LISTED; an apply would hold them" -f $Scope, $__rmTotal, $rbd.budget) -ForegroundColor DarkYellow
         }
     }

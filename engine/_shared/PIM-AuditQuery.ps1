@@ -382,3 +382,32 @@ function ConvertTo-PimAuditCsv {
     }
     return ($lines -join "`r`n")
 }
+
+function Select-PimAuditEventsInScope {
+    <#
+    .SYNOPSIS
+        AUDIT-1.3 (framework): what a DELEGATED administrator may read of the trail. Pure; fail closed.
+    .DESCRIPTION
+        Keeps an event when its actor is the caller (their own actions), or its target names something the caller owns:
+        a department, a group (by tag or by name) or an admin (username / UPN), as Get-PimDelegatedOwnership resolved them
+        (lower-cased keys). Everything else is dropped, including whole-table saves that name no single object: a scoped
+        reader is never shown an event that might concern someone else's scope. No ownership = no rows.
+    #>
+    param([object[]]$Events = @(), [object]$Ownership = $null, [string]$Identity = '')
+    if ($null -eq $Ownership) { return @() }
+    $id = "$Identity".Trim().ToLowerInvariant()
+    $keys = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($bag in 'departments', 'groupTags', 'groupNames', 'admins') {
+        $h = $null
+        if ($Ownership -is [System.Collections.IDictionary]) { $h = $Ownership[$bag] } elseif ($Ownership.PSObject.Properties[$bag]) { $h = $Ownership.$bag }
+        if ($h -is [System.Collections.IDictionary]) { foreach ($k in @($h.Keys)) { $s = "$k".Trim().ToLowerInvariant(); if ($s) { [void]$keys.Add($s) } } }
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($e in @($Events)) {
+        if ($null -eq $e) { continue }
+        $actor = "$($e.actor)".Trim().ToLowerInvariant()
+        $target = "$($e.target)".Trim().ToLowerInvariant()
+        if (($id -and $actor -eq $id) -or ($target -and $keys.Contains($target))) { $out.Add($e) }
+    }
+    return @($out.ToArray())
+}

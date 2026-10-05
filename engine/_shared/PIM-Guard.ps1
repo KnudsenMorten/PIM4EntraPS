@@ -185,3 +185,103 @@ function Invoke-PimGuardTrip {
     } catch { $res.detail = "guard trip not recorded: $($_.Exception.Message)" }
     return [pscustomobject]$res
 }
+
+# GUARD-1 'engine.empty-desired' (2026-10-05). The engine never prunes a scope whose desired set is EMPTY (PIM-EngineCore
+# gate 2) -- and for a scope nobody defines that is the normal, silent case (an empty definition touches nothing). It is a
+# GUARD TRIP only on the TRANSITION: the scope had definitions at its last full run, now it has none, and live items are
+# left unpruned -- the store lost rows, or someone emptied the scope. One trip per transition (the remembered count goes to
+# 0), so an intentionally emptied scope alerts once, not every run. State: pim.Settings 'EngineDesiredCounts'.
+$script:PimDesiredCountSetting = 'EngineDesiredCounts'
+$script:PimGuardDir = $PSScriptRoot
+
+function Test-PimEmptyDesiredTransition {
+    <# PURE. @{ trip; previous; state; changed } -- state = scope (lower) -> the last non-empty desired count. #>
+    param([AllowNull()][object]$State, [Parameter(Mandatory)][string]$Scope, [int]$DesiredCount, [int]$LiveCount)
+    $st = @{}
+    if ($State -is [System.Collections.IDictionary]) { foreach ($k in @($State.Keys)) { $st["$k"] = [int]$State[$k] } }
+    elseif ($null -ne $State -and "$State".Trim()) {
+        $o = $State; if ($State -is [string]) { try { $o = $State | ConvertFrom-Json } catch { $o = $null } }
+        if ($o) { foreach ($pp in $o.PSObject.Properties) { $n = 0; if ([int]::TryParse("$($pp.Value)", [ref]$n)) { $st[$pp.Name] = $n } } }
+    }
+    $k = $Scope.Trim().ToLowerInvariant()
+    $prev = if ($st.ContainsKey($k)) { [int]$st[$k] } else { 0 }
+    if ($DesiredCount -gt 0) {
+        $changed = ($prev -ne $DesiredCount); $st[$k] = $DesiredCount
+        return @{ trip = $false; previous = $prev; state = $st; changed = $changed }
+    }
+    if ($prev -gt 0 -and $LiveCount -gt 0) {
+        $st[$k] = 0
+        return @{ trip = $true; previous = $prev; state = $st; changed = $true }
+    }
+    return @{ trip = $false; previous = $prev; state = $st; changed = $false }
+}
+
+function Invoke-PimEmptyDesiredGuard {
+    <# Called by the engine on a FULL + prune run, before its empty-desired gate. NEVER throws. Returns the transition result. #>
+    param([Parameter(Mandatory)][string]$Scope, [int]$DesiredCount, [int]$LiveCount,
+          [scriptblock]$GetSetting = $null, [scriptblock]$SetSetting = $null, [scriptblock]$Trip = $null)
+    try {
+        if (-not $GetSetting) { $GetSetting = { param($n) if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { Get-PimSetting -Name $n } else { $null } } }
+        if (-not $SetSetting) { $SetSetting = { param($n, $v) if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { [void](Set-PimSetting -Name $n -Value $v) } } }
+        if (-not $Trip) {
+            $Trip = { param($a)
+                [void](Invoke-PimGuardTrip -GuardId 'engine.empty-desired' -Outcome refused -Area $a.scope -Job 'engine' -HeldCount $a.live `
+                    -Title ("{0}: the definitions are gone, {1} live item(s) left in place" -f $a.scope, $a.live) `
+                    -Detail ("The {0} scope had {1} definition(s) at its last full run and has none now. The engine refused to remove the {2} live item(s) it would otherwise prune." -f $a.scope, $a.previous, $a.live) `
+                    -ActionText 'If the definitions were removed on purpose, nothing is needed: remove the live items by hand or let a non-empty definition set take over. If not, restore the definitions (Backups) before the next full run.' `
+                    -Measured @{ desired = 0; desiredBefore = $a.previous; live = $a.live }) }
+        }
+        $r = Test-PimEmptyDesiredTransition -State (& $GetSetting $script:PimDesiredCountSetting) -Scope $Scope -DesiredCount $DesiredCount -LiveCount $LiveCount
+        if ($r.changed) { & $SetSetting $script:PimDesiredCountSetting ($r.state | ConvertTo-Json -Compress) }
+        if ($r.trip) { & $Trip @{ scope = $Scope; previous = $r.previous; live = $LiveCount } }
+        return $r
+    } catch {
+        Write-Warning "[guard] empty-desired check for ${Scope}: $($_.Exception.Message)"
+        return @{ trip = $false; previous = 0; state = @{}; changed = $false }
+    }
+}
+
+# GUARD-1 'msp.licence' (2026-10-05). The MSP publish / pull jobs REFUSE without a Pro licence (Invoke-PimMspLicenseGate) --
+# but they run as least-privilege identities that cannot keep guard state or send mail, so a refusal there was a log line
+# only. The tick's 'licence-check' job asks the same question for THIS environment's MSP role every hour and trips the
+# guard: not covered = refused (critical -- the managed tenants stop receiving changes); grace = warning (nothing held yet).
+# A single tenant (no MSP role) needs no MSP licence and is not checked.
+function Invoke-PimLicenceCheckJob {
+    param([object]$Job = $null, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf,
+          [scriptblock]$GetRole = $null, [scriptblock]$Check = $null, [scriptblock]$Trip = $null)
+    if (-not $GetRole) {
+        $GetRole = {
+            # The tick does not load the scenario profile (it carries the downlink); load it here, in this scope, when missing.
+            if (-not (Get-Command Get-PimActiveScenario -ErrorAction SilentlyContinue) -and $script:PimGuardDir) {
+                $__sp = Join-Path $script:PimGuardDir 'PIM-ScenarioProfile.ps1'
+                if (Test-Path -LiteralPath $__sp) { . $__sp }
+            }
+            $sc = $null; try { if (Get-Command Get-PimActiveScenario -ErrorAction SilentlyContinue) { $sc = Get-PimActiveScenario } } catch { $sc = $null }
+            if (-not $sc) { return '' }
+            if ("$($sc.role)" -eq 'msp-master') { return 'Master' }
+            if ("$($sc.role)" -eq 'msp-managed') { return 'Slave' }
+            return '' }
+    }
+    if (-not $Check) {
+        $Check = { param($role)
+            if (-not (Get-Command Test-PimMspLicense -ErrorAction SilentlyContinue)) { throw 'the licence library is not loaded' }
+            Test-PimMspLicense -Role $role -TenantId "$($global:PIM_TenantId)".Trim() -SqlServer "$($global:PIM_SqlServer)".Trim() }
+    }
+    if (-not $Trip) { $Trip = { param($a) [void](Invoke-PimGuardTrip @a) } }
+    $role = "$(& $GetRole)"
+    if (-not $role) { return [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; detail = 'licence-check: single tenant -- no MSP licence needed' } }
+    $word = if ($role -eq 'Slave') { 'managed tenant' } else { 'managing tenant' }
+    $r = $null
+    try { $r = & $Check $role } catch { $r = [pscustomobject]@{ ok = $false; grace = $false; reason = "the licence check failed ($($_.Exception.Message))"; message = '' } }
+    if ($r.ok -and -not $r.grace) { return [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; detail = "licence-check: $word -- the Pro licence covers MSP" } }
+    $isGrace = [bool]($r.ok -and $r.grace)
+    $why = if ("$($r.message)".Trim()) { "$($r.message)".Trim() } else { "$($r.reason)".Trim() }
+    if (-not $WhatIf) {
+        & $Trip @{ GuardId = 'msp.licence'; Outcome = $(if ($isGrace) { 'warning' } else { 'refused' }); Area = $word; Job = 'licence-check'
+            Title = $(if ($isGrace) { "MSP licence in its grace period ($word)" } else { "MSP refused: no valid Pro licence ($word)" })
+            Detail = $why
+            ActionText = $(if ($isGrace) { 'Renew the Pro licence before the grace period ends; after that the MSP publish / pull stops.' } else { 'Register a valid Pro licence that covers this tenant (Settings > Licence). Until then the MSP publish / pull refuses and the managed tenants receive no changes.' }) }
+    }
+    [pscustomobject]@{ ran = $true; whatIf = [bool]$WhatIf; tripped = $(if ($isGrace) { 'warning' } else { 'refused' })
+        detail = ("licence-check: {0} -- {1}: {2}" -f $word, $(if ($isGrace) { 'grace' } else { 'REFUSED' }), $why) }
+}

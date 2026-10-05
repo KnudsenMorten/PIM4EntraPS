@@ -1036,7 +1036,9 @@ function Write-PimManagerAuditEvent {
         # Write-PimSqlAuditEvent already stores a before-image; it just never got one.
         [object]$Before = $null,
         [object]$After = $null,
-        [string]$Result = 'ok'
+        [string]$Result = 'ok',
+        # AUDIT-1 actor (2026-10-05): the commit id a config.save shares with the engine changes that carry it out.
+        [string]$CorrelationId = ''
     )
     # 🔴 SEC-16 (§36.2) -- this function had TWO defects, fixed together 2026-08-31.
     #
@@ -1067,7 +1069,7 @@ function Write-PimManagerAuditEvent {
     $who = Get-PimManagerRecordedActor -Who $who   # BUG-262: a test Manager says so in the trail
 
     $evt = [ordered]@{
-        ts = [datetime]::UtcNow.ToString('o'); runId = "$($script:PimManagerSessionId)"; correlationId = ''
+        ts = [datetime]::UtcNow.ToString('o'); runId = "$($script:PimManagerSessionId)"; correlationId = "$CorrelationId"
         actor = $who; actorSource = $whoSource; action = $Action; target = $Target
         before = $Before; after = $After; result = $Result; whatIf = $false
     }
@@ -1083,7 +1085,7 @@ function Write-PimManagerAuditEvent {
         if ($cs -and (Get-Command Write-PimSqlAuditEvent -ErrorAction SilentlyContinue)) {
             Write-PimSqlAuditEvent -ConnectionString $cs -Actor $who -ActorSource $whoSource `
                 -Action $Action -Target $Target -Before $Before -After $After -Result $Result `
-                -RunId "$($script:PimManagerSessionId)"
+                -RunId "$($script:PimManagerSessionId)" -CorrelationId "$CorrelationId"
             $wroteSql = $true
         }
     } catch { $sqlErr = "$($_.Exception.Message)" }
@@ -2509,6 +2511,10 @@ function Compare-PimRowSets {
 
 function Write-PimMutationLog {
     param(
+        # AUDIT-1 actor (2026-10-05): -Classification = the shared-pending classification of this commit (who staged each
+        # change); -Approver = the approver of a maker/checker approval that authorised it. Both optional.
+        [object]$Classification = $null,
+        [string]$Approver = '',
         [Parameter(Mandatory)][string]$BaseName,
         [Parameter(Mandatory)][int]$Adds,
         [Parameter(Mandatory)][int]$Removes,
@@ -2562,7 +2568,26 @@ function Write-PimMutationLog {
                 if ($cl.omitted -gt 0) { $after['changesOmitted'] = [int]$cl.omitted }
             } catch { $after['changes'] = @("(the row details could not be described: $($_.Exception.Message))") }
         }
-        Write-PimManagerAuditEvent -Action 'config.save' -Target $BaseName -After $after
+        # AUDIT-1 actor: record who initiated / approved each changed row under a commit id (pim.ChangeAttribution), so the
+        # engine's applied changes name the person, not 'engine'; the commit id is this event's CorrelationId.
+        $commitId = [guid]::NewGuid().ToString('N')
+        $ini = @(); $apv = @()
+        if ((Get-Command ConvertTo-PimCommitAttributionEntries -ErrorAction SilentlyContinue) -and ($Adds + $Removes + $Modifies) -gt 0) {
+            try {
+                $committer = ''; try { $committer = "$((Get-PimManagerRole).identity)".Trim() } catch { }
+                if ($committer) {
+                    $ents = @(ConvertTo-PimCommitAttributionEntries -Base $BaseName -Committer $committer -Classification $Classification -Diff $Diff -Approver $Approver)
+                    $ini = @($ents | ForEach-Object { "$($_.initiatedBy)" } | Sort-Object -Unique)
+                    $apv = @($ents | ForEach-Object { "$($_.approvedBy)" } | Where-Object { $_ } | Sort-Object -Unique)
+                    $cs = $null; try { $cs = Get-PimSqlConnectionString } catch { $cs = $null }
+                    if ($cs -and $ents.Count) { [void](Save-PimChangeAttribution -ConnectionString $cs -Entity $BaseName -CommitId $commitId -Entries $ents) }
+                }
+            } catch { Write-Warning "change attribution NOT recorded (the engine will name 'engine' for this commit's changes): $($_.Exception.Message)" }
+        }
+        $after['commitId'] = $commitId
+        if ($ini.Count) { $after['initiatedBy'] = $ini }
+        if ($apv.Count) { $after['approvedBy'] = $apv }
+        Write-PimManagerAuditEvent -Action 'config.save' -Target $BaseName -After $after -CorrelationId $commitId
     } catch {
         Write-Warning "audit write failed (save NOT blocked): $($_.Exception.Message)"
     }
@@ -4949,8 +4974,9 @@ function Invoke-PimManagerCsvPut {
         try { [void](Set-PimApprovalRequestExecuted -Id "$($mc.approval.id)") }
         catch { Write-Warning "  [maker/checker] the approval $($mc.approval.id) that authorised this commit was NOT marked executed -- it could authorise another commit: $($_.Exception.Message)" }
     }
+    $mcApprover = if ($mc -and "$($mc.gate)" -eq 'approved' -and $mc.approval) { "$($mc.approval.approver)" } else { '' }
     Write-PimMutationLog -BaseName $base -Adds $diff.adds.Count -Removes $diff.removes.Count -Modifies $diff.modifies.Count -NewRowCount $rowsOrdered.Count -Diff $diff `
-        -Concurrency $concurrencyNote -ScopeMerged:([bool]$slice.filtered)
+        -Concurrency $concurrencyNote -ScopeMerged:([bool]$slice.filtered) -Classification $spClass -Approver $mcApprover
     # §70.21: start the engine now (debounced, so a multi-entity commit starts one run; the container takes
     # longer to start than the remaining entity writes, and a running tick re-checks between its jobs).
     if (($diff.adds.Count + $diff.removes.Count + $diff.modifies.Count) -gt 0) { try { [void](Start-PimManagerTickNow -Reason "commit:$base") } catch { } }
@@ -8580,6 +8606,30 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; value = $want }
             return 200
         }
+        # AUDIT-1.3 (framework): how long the audit trail keeps its rows. pim.Settings 'AuditRetentionMonths': 0 = keep every
+        # row (the default), else 13..1200 months -- the 'audit-retention' job deletes older rows and records it. Read: Admin
+        # (the Audit tab shows it). Change: SuperAdmin, audited with before / after.
+        if ($path -eq '/api/settings/audit-retention' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to read the audit retention.' }; return 403 }
+            $m = 0; try { $m = Get-PimAuditRetentionMonths -ConnectionString (Get-PimManagerSettingCs) } catch { $m = 0 }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ months = $m; minimum = 13; canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') }
+            return 200
+        }
+        if ($path -eq '/api/settings/audit-retention' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change the audit retention.' }; return 403 }
+            $sb = Read-RequestJson -Request $req
+            $want = 0
+            try { $want = ConvertTo-PimAuditRetentionMonths $(if ($sb -and $sb.PSObject.Properties['months']) { $sb.months } else { $null }) }
+            catch { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($_.Exception.Message)" }; return 400 }
+            $cs = Get-PimManagerSettingCs
+            $before = 0; try { $before = Get-PimAuditRetentionMonths -ConnectionString $cs } catch { }
+            Set-PimSqlSetting -ConnectionString $cs -Name 'AuditRetentionMonths' -ValueJson ("$want")
+            Write-PimManagerAuditEvent -Action 'settings.audit-retention.save' -Target 'AuditRetentionMonths' -Result 'ok' -Before @{ months = $before } -After @{ months = $want }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; months = $want }
+            return 200
+        }
 
         if ($path -eq '/api/tenant-lists' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
@@ -9148,9 +9198,16 @@ function Handle-Request {
             # the view + the CSV export (GET /api/audit/export) agree exactly.
             # [Fix 4] GATE: the audit trail is sensitive (who did what across the whole
             # tenant) -- require at least Admin (it previously had NO gate, only Bearer).
+            # AUDIT-1.3 (framework): a DELEGATED administrator reads only the events in their scope (their own actions and
+            # events about what they own -- Select-PimAuditEventsInScope, fail closed); below that, 403.
+            $auditScope = $null
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
-                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to view the audit trail. Roles are stored in SQL -- ask a SuperAdmin to grant you access.' }
-                return 403
+                $dctx = $null; try { $dctx = Get-PimManagerDelegatedContext } catch { $dctx = $null }
+                if (-not $dctx -or -not $dctx.isDelegated -or $null -eq $dctx.ownership) {
+                    Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to view the audit trail (a delegated administrator sees the events in their own scope). Roles are stored in SQL -- ask a SuperAdmin to grant you access.' }
+                    return 403
+                }
+                $auditScope = $dctx
             }
             $script:lastHeartbeat = Get-Date
             $q = @{}
@@ -9180,6 +9237,7 @@ function Handle-Request {
             # BUG-264: the change summary only where it is read -- every event when searching (the search reads it), else the page;
             # and when not searching, before/after themselves are read only for the page (-NoPayload + Read-PimManagerAuditPayloads).
             $events = @(Get-PimManagerAuditEvents -Months $months -NoChange:(-not $search) -Actions $actions -NoPayload:(-not $search))
+            if ($auditScope) { $events = @(Select-PimAuditEventsInScope -Events $events -Ownership $auditScope.ownership -Identity $auditScope.identity) }
             # Category counts BEFORE search/category filtering (chips show totals).
             $counts = @{}
             foreach ($e in $events) { $c = "$($e.category)"; if ($c) { $counts[$c] = ([int]$counts[$c]) + 1 } }
@@ -9203,6 +9261,7 @@ function Handle-Request {
                 months       = $months              # 0 = full history
                 monthsLoaded = if ($months -eq 0) { $monthsTotalCount } else { [Math]::Min($months, $monthsTotalCount) }
                 monthsTotal  = $monthsTotalCount   # months of history in whichever store answered (SEC-16)
+                scoped       = [bool]$auditScope       # AUDIT-1.3: only the caller's delegated scope
             }
             return 200
         }
