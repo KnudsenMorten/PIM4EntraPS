@@ -144,6 +144,9 @@ function Invoke-PimRfaSyncJob {
             try { $defs += @(Get-PimSqlRows -ConnectionString $cs -Entity $de) } catch { }
         }
     }
+    # the portal page's company name + support address (plain-string settings; a read that fails = not shown)
+    $companyName = ''; try { $companyName = "$(Get-PimSqlSetting -ConnectionString $cs -Name 'CompanyName')" } catch { $companyName = '' }
+    $supportEmail = ''; try { $supportEmail = "$(Get-PimSqlSetting -ConnectionString $cs -Name 'SupportEmail')" } catch { $supportEmail = '' }
     $salt = "$(if ($settings) { $settings.salt })".Trim()
     if (-not $salt) {
         $b = New-Object byte[] 16; $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create(); try { $rng.GetBytes($b) } finally { $rng.Dispose() }
@@ -245,7 +248,7 @@ function Invoke-PimRfaSyncJob {
     }
     $ctx = { param($r) $byUpn["$($r.upn)".ToLowerInvariant()] }
     $mailUser = { param($r, $title, $headline, $detail, $action)
-        $a = & $ctx $r; $to = Get-PimRfaRowValue -Row $a -Name 'ContactEmail'
+        $a = & $ctx $r; $to = "$(@(Get-PimRfaReadableAddresses -Admin $a)[0])"
         if ($to) { $mails.Add(@{ to = $to; title = $title; headline = $headline; detail = $detail; action = $action; url = $portalUrl }) } }
     foreach ($r in $reqs.ToArray()) {
         if ("$($r.state)" -in $script:PimRfaTerminalStates) { continue }
@@ -324,7 +327,12 @@ function Invoke-PimRfaSyncJob {
         # valid API keys (hash only)
         $appsCsv = (@($apiApps) -join ',')
         $cfgS = @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaConfig' -PartitionKey 'config' | Where-Object { "$($_.RowKey)" -eq 'settings' })[0]
-        if (-not $cfgS -or "$($cfgS.apiAppIds)" -ne $appsCsv) { Set-PimRfaStoreEntity -Store $Store -Table 'RfaConfig' -PartitionKey 'config' -RowKey 'settings' -Entity @{ apiAppIds = $appsCsv } }
+        # + what the portal page shows (operator 2026-10-05): pim.Settings 'CompanyName' (a plain string, like
+        # EnvironmentName -- "so they know where they are signing in") and 'SupportEmail' (one address -> a "Need help?" line)
+        $pub = Get-PimRfaPortalInfo -CompanyName $companyName -SupportEmail $supportEmail
+        if (-not $cfgS -or "$($cfgS.apiAppIds)" -ne $appsCsv -or "$($cfgS.companyName)" -ne $pub.companyName -or "$($cfgS.supportEmail)" -ne $pub.supportEmail) {
+            Set-PimRfaStoreEntity -Store $Store -Table 'RfaConfig' -PartitionKey 'config' -RowKey 'settings' -Entity @{ apiAppIds = $appsCsv; companyName = $pub.companyName; supportEmail = $pub.supportEmail }
+        }
         if (Get-Command Get-PimApiKeyPublishRows -ErrorAction SilentlyContinue) {
             $wantK = @{}; foreach ($k in @(Get-PimApiKeyPublishRows -Keys $apiKeys -NowUtc $now)) { $wantK["$($k.hash)"] = $k }
             $haveK = @{}; foreach ($k in @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaApiKeys' -PartitionKey 'key')) { $haveK["$($k.RowKey)"] = $k }
@@ -336,8 +344,8 @@ function Invoke-PimRfaSyncJob {
         foreach ($k in @($want.Keys)) {
             $w = $want[$k]; $h = $have[$k]
             $wg = "$($w.groups)"; $wgh = "$($w.groupHours)"
-            if (-not $h -or "$($h.contactEmail)" -ne "$($w.contactEmail)" -or "$($h.mode)" -ne "$($w.mode)" -or "$($h.durations)" -ne "$($w.durations)" -or "$($h.groups)" -ne $wg -or "$($h.groupHours)" -ne $wgh) {
-                Set-PimRfaStoreEntity -Store $Store -Table 'RfaEligibility' -PartitionKey 'acct' -RowKey $k -Entity @{ contactEmail = $w.contactEmail; mode = $w.mode; durations = $w.durations; groups = $wg; groupHours = $wgh }
+            if (-not $h -or "$($h.contactEmail)" -ne "$($w.contactEmail)" -or "$($h.mode)" -ne "$($w.mode)" -or "$($h.durations)" -ne "$($w.durations)" -or "$($h.groups)" -ne $wg -or "$($h.groupHours)" -ne $wgh -or "$($h.addressKeys)" -ne "$($w.addressKeys)") {
+                Set-PimRfaStoreEntity -Store $Store -Table 'RfaEligibility' -PartitionKey 'acct' -RowKey $k -Entity @{ contactEmail = $w.contactEmail; mode = $w.mode; durations = $w.durations; groups = $wg; groupHours = $wgh; addressKeys = "$($w.addressKeys)" }
             }
         }
         foreach ($k in @($have.Keys | Where-Object { -not $want.ContainsKey($_) })) { Remove-PimRfaStoreEntity -Store $Store -Table 'RfaEligibility' -PartitionKey 'acct' -RowKey $k }

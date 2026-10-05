@@ -13,7 +13,10 @@
   Routes (all JSON unless noted):
     GET  /                       the portal page (HTML)
     GET  /health                 200 "ok"
-    POST /portal/pin             { name }                 a PIN by mail (the same answer whether or not the name exists)
+    GET  /portal/info                                     { companyName, supportEmail } for the page header / help line
+    POST /portal/pin             { name }                 a PIN by mail (the same answer whether or not the name exists);
+                                                          name = the admin UPN, or an address the person reads
+                                                          (ContactEmail / MailForwardAddress), or a company contact's e-mail
     POST /portal/verify          { name, pin }            a 30-min session cookie (HttpOnly, Secure, SameSite=Strict)
     GET  /portal/me                                       consultant: eligibility + own requests | contact: reviews
     POST /portal/request         { hours, reason }        consultant: ask to have the account enabled
@@ -47,8 +50,9 @@ function Read-PimRfaBrokerConfig {
     param([Parameter(Mandatory)][hashtable]$Store)
     $cfg = @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaConfig' -PartitionKey 'config')
     $salt = "$(@($cfg | Where-Object { $_.RowKey -eq 'salt' })[0].value)".Trim()
-    $apps = @("$(@($cfg | Where-Object { $_.RowKey -eq 'settings' })[0].apiAppIds)" -split ',' | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
-    return [pscustomobject]@{ salt = $salt; apiAppIds = $apps }
+    $set = @($cfg | Where-Object { $_.RowKey -eq 'settings' })[0]
+    $apps = @("$($set.apiAppIds)" -split ',' | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    return [pscustomobject]@{ salt = $salt; apiAppIds = $apps; companyName = "$($set.companyName)"; supportEmail = "$($set.supportEmail)" }
 }
 
 function Send-PimRfaBrokerMail {
@@ -108,6 +112,12 @@ function Invoke-PimRfaBrokerRequest {
         # ------------------------------ portal ------------------------------
         if ($Path -like '/portal/*') {
             if ($Method -eq 'POST' -and "$($Headers['X-Rfa'])" -ne '1') { return (& $json 403 @{ error = 'missing X-Rfa header' }) }
+            if ($Method -eq 'GET' -and $Path -eq '/portal/info') {
+                # what the page shows before sign-in: the company name + the support address (published by the engine from
+                # pim.Settings CompanyName / SupportEmail; re-checked here, so a bad value is never rendered as a link)
+                $pi = Get-PimRfaPortalInfo -CompanyName $cfg.companyName -SupportEmail $cfg.supportEmail
+                return (& $json 200 ([ordered]@{ companyName = $pi.companyName; supportEmail = $pi.supportEmail }))
+            }
             if ($Method -eq 'POST' -and $Path -eq '/portal/pin') {
                 $ipv = Test-PimRfaBrokerRate -Store $Store -Bucket "pin-ip|$ClientIp" -Max 10 -WindowMinutes 15 -NowUtc $now
                 if (-not $ipv.allowed) { return (& $json 429 @{ error = "too many attempts -- try again in $([Math]::Ceiling($ipv.retryAfterSeconds / 60)) min" }) }
@@ -117,6 +127,11 @@ function Invoke-PimRfaBrokerRequest {
                 if (-not $t) { return (& $json 200 @{ ok = $true; message = $same }) }
                 $acv = Test-PimRfaBrokerRate -Store $Store -Bucket "pin-acct|$($t.subject)" -Max 5 -WindowMinutes 15 -NowUtc $now
                 if (-not $acv.allowed) { return (& $json 200 @{ ok = $true; message = $same }) }
+                if ($t.kind -eq 'ambiguous') {
+                    # the address belongs to several admin accounts: no PIN (which account?) -- tell the address's owner how to sign in
+                    if ($Mailer) { & $Mailer $t.email @{ Title = 'Sign in with your admin account'; Headline = 'This e-mail address belongs to more than one admin account'; Detail = 'To get a PIN, enter the admin account you want to use (for example adm-firstname@company.com) in the access request portal instead of this e-mail address.'; Action = 'If you did not ask for a PIN, ignore this mail.'; PortalUrl = ''; TenantName = "$env:PIM_RFA_TENANT_NAME"; WhenUtc = $now.ToString('yyyy-MM-dd HH:mm') + ' UTC' } }
+                    return (& $json 200 @{ ok = $true; message = $same })
+                }
                 $ch = New-PimRfaPinChallenge -AccountKey $t.subject -NowUtc $now
                 Set-PimRfaStoreEntity -Store $Store -Table 'RfaPins' -PartitionKey 'pin' -RowKey $t.subject -Entity $ch.record
                 if ($Mailer) { & $Mailer $t.email @{ Title = 'Your PIN'; Headline = "Your PIN is $($ch.code)"; Detail = 'Enter it in the access request portal. It is valid for 15 minutes and works once.'; Action = 'If you did not ask for it, ignore this mail -- nobody can use the PIN without your mailbox.'; PortalUrl = ''; TenantName = "$env:PIM_RFA_TENANT_NAME"; WhenUtc = $now.ToString('yyyy-MM-dd HH:mm') + ' UTC' } }
@@ -127,7 +142,7 @@ function Invoke-PimRfaBrokerRequest {
                 if (-not $ipv.allowed) { return (& $json 429 @{ error = 'too many attempts -- try again later' }) }
                 $t = Get-PimRfaPinTarget -Name "$($b.name)" -Salt $cfg.salt -Eligibility @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaEligibility' -PartitionKey 'acct') -Reviews @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaReviews' -PartitionKey 'review')
                 $bad = 'the PIN is wrong, expired or already used'
-                if (-not $t) { return (& $json 401 @{ error = $bad }) }
+                if (-not $t -or $t.kind -eq 'ambiguous') { return (& $json 401 @{ error = $bad }) }
                 $rec = @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaPins' -PartitionKey 'pin' | Where-Object { $_.RowKey -eq $t.subject })[0]
                 $v = Test-PimRfaPin -Record $rec -Code "$($b.pin)" -NowUtc $now
                 if ($v.record) { Set-PimRfaStoreEntity -Store $Store -Table 'RfaPins' -PartitionKey 'pin' -RowKey $t.subject -Entity $v.record }

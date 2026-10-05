@@ -14,6 +14,20 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.502 — Enable / disable admins, a clearer request portal
+
+- **New: Enable and Disable on the Admin accounts page**, on each row and for a selection. **Disable & remove
+  delegations** keeps the account (disabled) and takes all its access away on the next engine run. Everything is
+  staged in Pending changes; a disable needs the offboard approval unless self-approval is on.
+- **Changed: the Stop managing dialog** says "Stop managing" instead of "Delete".
+- **Changed: the Request for Authorization (RFA) portal.**
+  - It finds an admin or consultant by their admin account (UPN), their contact e-mail or their mail-forward (home)
+    address. The PIN goes to the address they read, and an admin with only a forward address can now use the portal.
+  - The sign-in page asks one plain question.
+  - The header reads "Request for Authorization (RFA)" with the PIM Manager logo and, when set, your organisation's
+    name. A support e-mail, when set, shows a "Need help?" line.
+- **New: Settings > Access requests (RFA): company name and support e-mail** for the portal.
+
 ## v2.4.501 — Removals go live on the next run, permission templates in one place
 
 - **Fixed: a removed delegation is taken away on the next engine run, not overnight.** Deleting an assignment (Stop

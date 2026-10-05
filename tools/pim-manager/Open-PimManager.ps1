@@ -8640,6 +8640,39 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; value = $want }
             return 200
         }
+        # Operator 2026-10-05: the RFA portal shows WHERE people sign in (CompanyName, "like environment name") and HOW to get
+        # help (SupportEmail, "add an option to send email for support, add it into the settings"). pim.Settings, plain
+        # strings; the broker reads them. Read: Admin. Change: SuperAdmin, validated, audited with before / after.
+        if ($path -eq '/api/settings/portal-branding' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required.' }; return 403 }
+            $cn = ''; $se = ''
+            try { $cn = "$(Get-PimSetting -Name 'CompanyName')".Trim().Trim('"') } catch { }
+            try { $se = "$(Get-PimSetting -Name 'SupportEmail')".Trim().Trim('"') } catch { }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ companyName = $cn; supportEmail = $se; maxLength = 40; canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') }
+            return 200
+        }
+        if ($path -eq '/api/settings/portal-branding' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change the portal settings.' }; return 403 }
+            $sb = Read-RequestJson -Request $req
+            $cn = if ($sb -and $sb.PSObject.Properties['companyName']) { ("$($sb.companyName)" -replace '[\x00-\x1F\x7F]', ' ').Trim() } else { '' }
+            $se = if ($sb -and $sb.PSObject.Properties['supportEmail']) { "$($sb.supportEmail)".Trim() } else { '' }
+            if ($cn.Length -gt 40) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'The company name can be at most 40 characters.' }; return 400 }
+            if ($se -and $se -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "The support e-mail must be an e-mail address (got '$se')." }; return 400 }
+            $cs = Get-PimManagerSettingCs
+            $before = @{ companyName = ''; supportEmail = '' }
+            try { $before.companyName = "$(Get-PimSetting -Name 'CompanyName')".Trim().Trim('"'); $before.supportEmail = "$(Get-PimSetting -Name 'SupportEmail')".Trim().Trim('"') } catch { }
+            Set-PimSqlSetting -ConnectionString $cs -Name 'CompanyName' -ValueJson ($cn | ConvertTo-Json -Compress)
+            Set-PimSqlSetting -ConnectionString $cs -Name 'SupportEmail' -ValueJson ($se | ConvertTo-Json -Compress)
+            if (Get-Command Update-PimManagerSettingMirror -ErrorAction SilentlyContinue) {
+                try { Update-PimManagerSettingMirror -Name 'CompanyName' -Value $(if ($cn) { $cn } else { ' ' }) } catch { }
+                try { Update-PimManagerSettingMirror -Name 'SupportEmail' -Value $(if ($se) { $se } else { ' ' }) } catch { }
+            }
+            Write-PimManagerAuditEvent -Action 'settings.portal-branding.save' -Target 'CompanyName,SupportEmail' -Result 'ok' -Before $before -After @{ companyName = $cn; supportEmail = $se }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; companyName = $cn; supportEmail = $se }
+            return 200
+        }
         # AUDIT-1.3 (framework): how long the audit trail keeps its rows. pim.Settings 'AuditRetentionMonths': 0 = keep every
         # row (the default), else 13..1200 months -- the 'audit-retention' job deletes older rows and records it. Read: Admin
         # (the Audit tab shows it). Change: SuperAdmin, audited with before / after.

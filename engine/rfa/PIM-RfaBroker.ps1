@@ -55,12 +55,19 @@ function Get-PimRfaContactKey {
 
 function Get-PimRfaPinTarget {
     <#
-      PURE. Who gets a PIN for this sign-in name? A consultant signs in with the ADMIN UPN (the PIN goes to the
-      ContactEmail on the eligibility row); a company contact signs in with their own e-mail (the PIN goes there, if
-      some open review lists that contact). Returns { kind; subject; email } or $null -- and the caller answers the
+      PURE. Who gets a PIN for this sign-in name? (operator 2026-10-05: an admin -- internal or consultant alike -- is
+      found by the admin UPN OR by the address they read: ContactEmail / MailForwardAddress.) In order:
+        1. the ADMIN UPN of an eligible account                     -> 'consultant' (the admin-account session)
+        2. a company contact's own e-mail on an OPEN company review  -> 'contact'    (unchanged)
+        3. an address the person reads (the eligibility row's addressKeys; a row published before addressKeys existed
+           is matched on its contactEmail) of exactly ONE account   -> 'consultant'
+        4. that address on SEVERAL accounts                         -> 'ambiguous' (no PIN: the caller mails that
+           address "sign in with the admin account name" -- the address is the person's own, so nothing leaks)
+      The PIN always goes to the eligibility row's contactEmail (the first readable address), never the admin mailbox.
+      Matching is trimmed + case-insensitive. Returns { kind; subject; email } or $null -- and the caller answers the
       SAME sentence either way, so the portal never tells who exists.
     #>
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Salt, [object[]]$Eligibility = @(), [object[]]$Reviews = @())
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Name, [Parameter(Mandatory)][string]$Salt, [object[]]$Eligibility = @(), [object[]]$Reviews = @())
     $n = "$Name".Trim().ToLowerInvariant()
     if ($n -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { return $null }
     $ak = Get-PimRfaAccountKey -Salt $Salt -UserPrincipalName $n
@@ -68,6 +75,12 @@ function Get-PimRfaPinTarget {
     if ($e -and "$($e.contactEmail)".Trim()) { return [pscustomobject]@{ kind = 'consultant'; subject = $ak; email = "$($e.contactEmail)".Trim() } }
     $ck = Get-PimRfaContactKey -Salt $Salt -Email $n
     if (@($Reviews | Where-Object { @("$($_.contactKeys)" -split '\|') -contains $ck }).Count) { return [pscustomobject]@{ kind = 'contact'; subject = $ck; email = $n } }
+    $byAddr = @($Eligibility | Where-Object {
+        "$($_.contactEmail)".Trim() -and $(
+            if ("$($_.addressKeys)".Trim()) { @("$($_.addressKeys)" -split '\|') -contains $ak }
+            else { "$($_.contactEmail)".Trim().ToLowerInvariant() -eq $n }) })
+    if ($byAddr.Count -eq 1) { return [pscustomobject]@{ kind = 'consultant'; subject = "$($byAddr[0].RowKey)"; email = "$($byAddr[0].contactEmail)".Trim() } }
+    if ($byAddr.Count -gt 1) { return [pscustomobject]@{ kind = 'ambiguous'; subject = $ak; email = $n } }
     return $null
 }
 
