@@ -16,7 +16,7 @@
      else. Publishing registers the version; RELEASING it to a ring is the owner's act in Invardia's back office.
   Without -Apply it is a plan: the zip is built and checked, nothing is sent.
 
-  Identity: client id + certificate thumbprint from kv-automatit-dev (invardia-publisher-clientid-pim-manager /
+  Identity: client id + certificate thumbprint from -KeyVault (invardia-publisher-clientid-pim-manager /
   invardia-publisher-thumbprint-pim-manager) unless passed; the certificate (key not exportable) is in
   Cert:\LocalMachine\My on the publishing machine.
 
@@ -30,8 +30,8 @@ param(
     [Parameter(Mandatory)][string]$TenantId,
     [string]$ClientId = '',
     [string]$CertThumbprint = '',
-    [string]$KeyVault = 'kv-automatit-dev',
-    [string]$KeyVaultSubscription = '54468121-98ba-48ba-ba59-ba10a9711ed3',
+    [string]$KeyVault = '',
+    [string]$KeyVaultSubscription = '',
     [string]$Endpoint = 'https://invardia.com',
     [string]$Audience = 'api://a5a57537-c847-482b-8878-9a229cbca61b',
     [ValidateSet('code')][string]$Kind = 'code',
@@ -83,6 +83,8 @@ if (-not $Apply) {
 
 Step 'publisher identity (certificate, from Key Vault unless passed)'
 if (-not $ClientId -or -not $CertThumbprint) {
+    # No vault or subscription is baked in (the source ships publicly): name them, or pass -ClientId and -CertThumbprint.
+    if (-not $KeyVault -or -not $KeyVaultSubscription) { throw "pass -ClientId and -CertThumbprint, or -KeyVault and -KeyVaultSubscription to read them" }
     $kvArgs = @('keyvault', 'secret', 'show', '--vault-name', $KeyVault, '--subscription', $KeyVaultSubscription, '--query', 'value', '-o', 'tsv')
     if (-not $ClientId) { $ClientId = (& az @kvArgs --name 'invardia-publisher-clientid-pim-manager' 2>$null | Select-Object -Last 1).Trim() }
     if (-not $CertThumbprint) { $CertThumbprint = (& az @kvArgs --name 'invardia-publisher-thumbprint-pim-manager' 2>$null | Select-Object -Last 1).Trim() }

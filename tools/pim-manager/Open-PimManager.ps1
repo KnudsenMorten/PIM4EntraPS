@@ -9240,6 +9240,13 @@ function Handle-Request {
             $events = @(Get-PimManagerAuditEvents -Months $months)
             $filtered = @(Select-PimAuditEvents -Events $events -Category $category -Search $search -FromUtc $fromUtc -ToUtc $toUtc)
             $csv = ConvertTo-PimAuditCsv -Events $filtered
+            # AUDIT-1.4 (framework): "The export is itself audited" -- and so is a print as evidence, which reads the same
+            # full filtered trail (purpose=print). Who, which filter and how many rows; the rows themselves are not copied.
+            $purpose = if ($q.ContainsKey('purpose') -and "$($q['purpose'])".Trim().ToLowerInvariant() -eq 'print') { 'print' } else { 'export' }
+            try {
+                Write-PimManagerAuditEvent -Action "audit.$purpose" -Target 'audit-trail' -After ([ordered]@{
+                    category = $category; search = $search; from = $fromUtc; to = $toUtc; months = $months; rows = $filtered.Count })
+            } catch { Write-Host ("  [audit] could not record the audit {0}: {1}" -f $purpose, $_.Exception.Message) -ForegroundColor Yellow }
             $stamp = [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss')
             $fname = "pim-audit-$stamp.csv"
             try {
