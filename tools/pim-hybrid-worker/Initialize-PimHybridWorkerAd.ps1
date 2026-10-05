@@ -161,7 +161,9 @@ function Grant-Ace([string]$Dn, [string[]]$Specs, [string]$Why) {
     }
     Info "$Why -> $Dn"
 }
-Grant-Ace -Dn $GroupsOu -Why 'PIM-for-AD groups: create + member/displayName/description' -Specs @('/I:T CC;group', '/I:S RPWP;member;group', '/I:S RPWP;displayName;group', '/I:S RPWP;description;group')
+# READ on the OU itself first (2026-10-04, internal: the Delegation Groups OU had inheritance OFF, so the worker could
+# not even see it and every create failed with "Cannot find an object with identity").
+Grant-Ace -Dn $GroupsOu -Why 'PIM-for-AD groups: read the OU + create + member/displayName/description' -Specs @('/I:T GR', '/I:T CC;group', '/I:S RPWP;member;group', '/I:S RPWP;displayName;group', '/I:S RPWP;description;group')
 foreach ($ou in @($AdminAccountsOu | Where-Object { "$_".Trim() })) {
     Grant-Ace -Dn $ou -Why 'admin accounts: create users + full control of the users below' -Specs @('/I:T CC;user', '/I:S GA;;user')
 }

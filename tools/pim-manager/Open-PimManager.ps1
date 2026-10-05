@@ -432,6 +432,9 @@ if (Test-Path -LiteralPath $_updStateLib) { . $_updStateLib }
 # only (honest "configure to enable" state), never a fake send.
 $_notifyLib = Join-Path $solutionRoot 'engine\_shared\PIM-Notify.ps1'
 if (Test-Path -LiteralPath $_notifyLib) { . $_notifyLib }
+# GUARD-1: the Manager's own guards (commit delta guard, uplink-readonly, replication gate) record their trips the same way
+$_guardLib = Join-Path $solutionRoot 'engine\_shared\PIM-Guard.ps1'
+if (Test-Path -LiteralPath $_guardLib) { . $_guardLib }
 
 # Classified engine item failures (engine/_shared/PIM-FailureCatalog.ps1) -- the SAME catalog the engine
 # writes with, so the Manager shows exactly the cause/remedy/fixes the engine recorded.
@@ -4827,6 +4830,12 @@ function Invoke-PimManagerCsvPut {
     if (Get-Command Test-PimCommitDeltaGuard -ErrorAction SilentlyContinue) {
         $deltaGuard = Test-PimCommitDeltaGuard -BeforeCount (@($current.rows).Count) -AfterCount (@($rowsOrdered).Count) -RemoveCount (@($diff.removes).Count) -Confirm:$confirmDestructive
         if (-not $deltaGuard.allowed) {
+            if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
+                [void](Invoke-PimGuardTrip -GuardId 'manager.commit.delta-guard' -Outcome warning -Area $base -Job 'manager-commit' `
+                    -Title "a commit that would remove $([int]$deltaGuard.removeCount) row(s) of $base was held for confirmation" -Detail "$($deltaGuard.reason)" `
+                    -ActionText 'Check the change on Pending changes; confirm it only if the removals are intended.' `
+                    -Measured @{ removeCount = [int]$deltaGuard.removeCount; beforeCount = @($current.rows).Count; afterCount = @($rowsOrdered).Count } -HeldCount ([int]$deltaGuard.removeCount))
+            }
             Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
                 ok = $false; base = $base; gate = "$($deltaGuard.rule)"; error = "$($deltaGuard.reason)"
                 confirmRequired = $true; removeCount = [int]$deltaGuard.removeCount; beforeCount = (@($current.rows).Count); afterCount = (@($rowsOrdered).Count)
@@ -4893,6 +4902,11 @@ function Invoke-PimManagerCsvPut {
     $upGate = Test-PimManagerUplinkRowGate -Diff $diff -Base $base
     if (-not $upGate.allowed) {
         Write-PimManagerAuditEvent -Action 'commit.uplink-readonly' -Target $base -Result 'denied' -After ([ordered]@{ refused = @($upGate.refused) })
+        if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
+            [void](Invoke-PimGuardTrip -GuardId 'manager.commit.uplink-readonly' -Outcome warning -Area $base -Job 'manager-commit' `
+                -Title "a commit tried to change $(@($upGate.refused).Count) row(s) the managing tenant sent" -Detail "$($upGate.reason)" `
+                -ActionText 'Change these on the managing tenant; local rows (also for a central admin) can be changed here.' -HeldCount @($upGate.refused).Count)
+        }
         Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
             ok = $false; base = $base; gate = 'uplink-readonly'; error = "$($upGate.reason)"; refused = @($upGate.refused)
         })
@@ -4905,6 +4919,11 @@ function Invoke-PimManagerCsvPut {
         $repGate = Test-PimReplicationWriteAllowed -Entity $base -Rows @($rowsOrdered) -CurrentRows @($current.rows) `
                      -IsMaster (Test-PimManagerIsMspMaster) -KnownTags @($repTags.tags) -TagsKnown:([bool]$repTags.known)
         if (-not $repGate.allowed) {
+            if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
+                [void](Invoke-PimGuardTrip -GuardId 'manager.commit.replication-gate' -Outcome warning -Area $base -Job 'manager-commit' `
+                    -Title "a commit to $base was refused by the replication gate" -Detail "$($repGate.reason)" `
+                    -ActionText 'Fix the Replicate / Ring / Target values the message names, then commit again.' -HeldCount @($repGate.refused).Count)
+            }
             Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{
                 ok = $false; base = $base; gate = 'replication'; error = "$($repGate.reason)"; refused = @($repGate.refused)
             })
@@ -9807,6 +9826,18 @@ function Handle-Request {
         # The Manager NEVER runs a job here -- this is a pure read. The scheduler shares
         # its state/history with this process via SQL pim.Settings when SQL is wired
         # (hosted), otherwise via a JSON file under the instance output dir.
+        # GUARD-1: the guards that tripped (pim.Settings 'GuardTrips', written by Invoke-PimGuardTrip), newest first. Read-only.
+        if ($path -eq '/api/guards' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $gl = @()
+            try {
+                $gs = Get-PimManagerSetting -Name 'GuardTrips'
+                if ($gs -is [string]) { $gs = $gs | ConvertFrom-Json }
+                if ($gs) { $gl = @($gs.PSObject.Properties | ForEach-Object { $_.Value } | Sort-Object { "$($_.lastSeenUtc)" } -Descending) }
+            } catch { $gl = @() }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ guards = @($gl); total = @($gl).Count })
+            return 200
+        }
         if ($path -eq '/api/jobs' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command Get-PimJobsStatus -ErrorAction SilentlyContinue)) {

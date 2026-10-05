@@ -14,6 +14,24 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.496 — Every safety guard is seen; telemetry on by default
+
+- **New: when a safety guard steps in, you hear about it.** Whenever PIM holds or refuses something to protect your data
+  (for example the per-run deletion ceiling, the account-disable breaker, a policy mass-change hold, or a commit that would
+  remove many rows), it:
+  - mails the alert recipients on the first trip, and then at most once a day per guard with how often it tripped since;
+  - lists it under **Jobs** in a new *Guards that protected your data* section, with the measured values, the limit and
+    what to do;
+  - records it in the audit trail; and
+  - reports it to Invardia with the status telemetry, so a Pro customer's support team can follow up.
+  Nothing is lost when a guard trips: it is the safe outcome. The guard mails can be switched off with the setting
+  `GuardAlertMail`.
+- **Changed: status telemetry to Invardia is on by default.** It stays switchable under Settings > Features; switching it
+  off is reported once and then nothing more is sent. Without an install key it is anonymous.
+- **Fixed: a failed AD group creation now says what to fix.** When the hybrid worker cannot see or write the OU for new
+  AD groups, the message names the missing right and the group to grant it to, instead of "The server is unwilling to
+  process the request". The worker setup now also grants read access on that OU.
+
 ## v2.4.495 — Hybrid AD at scale: critical groups first, changes at once; job cadence counts from the finish
 
 - **Changed: the hybrid worker keeps critical AD groups fast, however many servers there are.** It now runs three

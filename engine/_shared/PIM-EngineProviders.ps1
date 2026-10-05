@@ -5752,6 +5752,13 @@ function Write-PimPolicyMassHoldAlert {
             Write-PimAuditEvent -Action "$($spec.Audit).held" -Target $spec.Provider -After @{ planHash = $Hold.planHash; changes = $Hold.changes; checked = $Hold.checked; weakening = $Hold.weakening; tripped = @($Hold.tripped) } | Out-Null
         }
     } catch { Write-Warning "  [engine] $($spec.Provider): the mass-change hold was NOT written to the audit trail: $($_.Exception.Message)" }
+    # GUARD-1: state + audit 'guard.trip' + telemetry. The hold mails below (once per hold), so it counts as the guard's mail.
+    if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
+        $gm = @{}; foreach ($k in 'changes', 'checked', 'weakening') { if ($Hold.PSObject.Properties[$k]) { $gm[$k] = $Hold.$k } }
+        [void](Invoke-PimGuardTrip -GuardId ("engine.policy-mass-change." + "$($spec.Provider)".ToLowerInvariant()) -Outcome held -Area "$($spec.Provider)" -Job 'engine' -CallerMailed `
+            -Title ("policy mass-change held in {0} [{1}]" -f $spec.Provider, (@($Hold.tripped) -join ', ')) -Detail $Message `
+            -ActionText 'Open Approvals: approve the change set, or fix the definitions. Nothing was written.' -Measured $gm -HeldCount ([int]$(if ($Hold.PSObject.Properties['changes']) { $Hold.changes } else { 0 })))
+    }
     # 🔴 BUG-184 (§33.28): this sent Type 'alert' -- a template that does not exist -- with tokens the real
     # template does not use, and discarded the result, so the HOLD was never mailed and nothing said so.
     # Send-PimSafetyAlert (PIM-DisableGuard.ps1) uses 'alert-notice', READS the result, and reports a

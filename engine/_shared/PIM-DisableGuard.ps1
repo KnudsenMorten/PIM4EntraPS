@@ -928,6 +928,12 @@ function Write-PimRemoveBudgetAlert {
     $r = Send-PimSafetyAlert -SwallowScope 'remove-budget-alert-mail' `
             -Title ("{0} deletion(s) in '{1}' were blocked -- nothing was changed" -f $Decision.toRemove, $Decision.scope) `
             -Headline $headline -Detail $detail -Action $action
+    # GUARD-1: state + audit 'guard.trip' + telemetry (the mail above IS this guard's mail)
+    if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
+        [void](Invoke-PimGuardTrip -GuardId 'engine.remove-budget' -Outcome halted -Area "$($Decision.scope)" -Job 'engine' -CallerMailed `
+            -Title ("{0} deletion(s) in '{1}' were blocked" -f $Decision.toRemove, $Decision.scope) -Detail $headline -ActionText 'Open Jobs > Engine logs & errors and read the held items.' `
+            -Measured @{ toRemove = $Decision.toRemove } -Thresholds @{ budget = $Decision.budget } -HeldCount ([int]$Decision.toRemove))
+    }
     if ($PassThru) { return $r }
 }
 
@@ -960,5 +966,12 @@ function Write-PimDisableAbortAlert {
     # a failed send is reported under 'disable-abort-alert-mail' ("nobody is being paged").
     $r = Send-PimSafetyAlert -SwallowScope 'disable-abort-alert-mail' `
             -Title ("account-disable circuit breaker tripped -- {0} [{1}]" -f $Scope, $Decision.tripped) -Detail $msg
+    # GUARD-1: state + audit 'guard.trip' + telemetry (the mail above IS this guard's mail)
+    if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
+        $dm = @{}; foreach ($k in 'toDisable', 'scanned') { if ($Decision.PSObject.Properties[$k]) { $dm[$k] = $Decision.$k } }
+        [void](Invoke-PimGuardTrip -GuardId 'engine.disable-guard' -Outcome halted -Area $Scope -Job 'engine' -CallerMailed `
+            -Title ("account-disable stopped in {0} [{1}]" -f $Scope, $Decision.tripped) -Detail $msg -ActionText 'Open Jobs > Engine logs & errors; the run disabled nothing.' `
+            -Measured $dm -HeldCount ([int]$(if ($Decision.PSObject.Properties['toDisable']) { $Decision.toDisable } else { 0 })))
+    }
     if ($PassThru) { return $r }
 }

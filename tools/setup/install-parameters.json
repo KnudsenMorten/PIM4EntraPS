@@ -1,7 +1,7 @@
 {
   "_comment": "The guided-install contract of the PIM Manager (GUIDED-INSTALL 4.1-4.6). Invardia's wizard asks exactly these questions and writes the answers to config.json for tools/setup/Install-PimManager.ps1, which validates them again (Test-PimInstallConfig). 'maps' = what the answer drives. Kept in step with Install-PimManager by tests/Test-PimGuidedInstall.ps1.",
   "product": "pim-manager",
-  "version": "2.4.495",
+  "version": "2.4.496",
   "entryPoint": "Install-PimManager -ConfigPath <config.json> -LicencePath <file> -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]",
   "exitCodes": { "0": "succeeded (warnings allowed)", "1": "a step failed -- fix it and -Resume", "2": "preflight failed -- nothing was changed", "3": "bad answers or a bad licence -- nothing was changed" },
   "pages": [
