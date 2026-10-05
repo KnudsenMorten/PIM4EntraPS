@@ -8355,7 +8355,7 @@
       if (!aeState.policy) { try { aeState.policy = await api('GET', '/api/settings/autoextend'); } catch (_) { aeState.policy = null; } }
       const pol = aeState.policy || { leadDays: d.leadDays || 14, defaultOn: d.defaultOn !== false };
       h.push('<details id="aePolicy" style="font-size:12px; margin-bottom:10px;"><summary>Auto-extend policy (SuperAdmin)</summary><div style="padding:6px 0;">' +
-        'Extend <input type="number" id="aeLead" min="1" max="90" value="' + escapeHtml(String(pol.leadDays)) + '" style="width:60px;"> days before a permission ends. ' +
+        'Extend <input type="number" id="aeLead" aria-label="Days before a permission ends to extend it" title="Days before a permission ends to extend it" min="1" max="90" value="' + escapeHtml(String(pol.leadDays)) + '" style="width:60px;"> days before a permission ends. ' +
         '<label><input type="checkbox" id="aeDefaultOn"' + (pol.defaultOn ? ' checked' : '') + '> Rows without an AutoExtend value are extended (default ON)</label> ' +
         '<button class="btn" id="aePolicySave">Save</button></div></details>');
     }
