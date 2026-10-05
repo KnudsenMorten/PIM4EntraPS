@@ -14,6 +14,16 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.504 — An External Companies page, clearer portal wording
+
+- **New: the External Companies (Consultants) page**, laid out like Departments & owners.
+  - One row per external company: its 1-2 contacts (a consultancy manager, a support / helpdesk address), the sponsor
+    department, how often it is reviewed, notes, and the consultants linked to it.
+  - The contacts get the access-review mail, sign in with a magic link and confirm or deny each consultant. A consultant
+    they no longer work with is offboarded.
+  - The menu entry opens this page; it used to jump into Access requests.
+- **Changed: the request portal's sign-in field** reads "Admin Account (UPN) or e-mail address (external/consultant)".
+
 ## v2.4.503 — Records grouped as direct and indirect groups, quick clean-up
 
 - **Changed: the records list is grouped as Direct groups, Indirect groups, Who gets what and Other records**, and the
