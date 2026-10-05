@@ -14,6 +14,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.507 — Group tables show the group first
+
+- **Changed: on the group tables (e.g. Departments) the group comes first** -- its name, description and tag -- and the
+  sponsoring Department after the tag.
+
 ## v2.4.506 — "A new version is available"
 
 - **Changed: after an update the Manager tells you a new version is available**, naming the new and the old version, in
