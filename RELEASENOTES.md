@@ -14,6 +14,24 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.500 — Clearer menus, an easier admin wizard, stale approvals fixed
+
+- **Fixed: expired approval requests no longer count as waiting.** A request past its 72-hour expiry was still counted
+  on the Approvals badge and the Overview.
+- **Changed: the admin wizard asks the important things first.**
+  - Step 1 starts with the **admin type**: Internal admin, Consultant (a local account in this tenant), or Consultant (a
+    B2B guest who keeps their own identity).
+  - **Company** is shown only for a consultant, as a dropdown of your external companies.
+  - Two consultant templates (local account and B2B guest) set the type for you.
+  - **Create on** and **TAP valid from** are dropdowns of common choices (now, next week, next month, a date), with a
+    custom expression still possible.
+- **Changed: the menus.**
+  - **Departments & owners** moved to Reviews & controls, next to **External Companies (Consultants)** (renamed).
+  - **Workload templates** has its own page under Audit & Settings, next to Policy templates and **Tenant Baseline**
+    (formerly Tenant conformance).
+  - **Discovery** is one menu entry.
+- **Changed: the Access requests page** is laid out in cards and picks the admin for an IT override from a list.
+
 ## v2.4.499 — Tamper-proof audit trail, retention, request portal + consultants in the menu, more safety alerts
 
 - **Changed: the audit trail can no longer be edited, even directly in the database.** The database itself refuses any

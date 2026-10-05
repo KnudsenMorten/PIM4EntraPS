@@ -1,0 +1,23 @@
+{
+  "id": "consultant-guest",
+  "name": "Consultant -- B2B guest (invited from their own tenant)",
+  "description": "External consultant who keeps their OWN identity: a B2B invitation to their mailbox (no local account, Entra only), TAP mail sent to the owners of the admin's sponsor department (ManagerEmail only as a legacy fallback), assignments expire after 90 days. Pick the consultant's company in step 1.",
+  "prefill": {
+    "AdminType": "external-guest",
+    "Purpose": "Day2Day",
+    "TargetUsage": "Cloud",
+    "TargetPlatform": "ID",
+    "UserType": "Consultant",
+    "UsageLocation": "DK",
+    "Ring": "2",
+    "ProvisionDate": "Now",
+    "CreateTAP": "TRUE",
+    "TAPStartDate": "",
+    "TAPLifetimeHours": "8"
+  },
+  "assignmentDefaults": {
+    "AssignmentType": "Eligible",
+    "NumOfDaysWhenExpire": 90
+  },
+  "assignments": []
+}

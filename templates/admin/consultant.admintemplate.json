@@ -1,8 +1,9 @@
 {
   "id": "consultant",
-  "name": "Consultant (time-boxed)",
-  "description": "External consultant admin: provisions on the next engine run, TAP immediately, TAP mail sent to the owners of the admin's sponsor department (ManagerEmail only as a legacy fallback), assignments expire after 90 days.",
+  "name": "Consultant -- local account in this tenant",
+  "description": "External consultant who gets an admin account IN THIS TENANT (name prefix x-): provisions on the next engine run, TAP immediately, TAP mail sent to the owners of the admin's sponsor department (ManagerEmail only as a legacy fallback), assignments expire after 90 days. Pick the consultant's company in step 1.",
   "prefill": {
+    "AdminType": "external-adminuser",
     "Purpose": "Day2Day",
     "TargetUsage": "Cloud",
     "TargetPlatform": "ID",
