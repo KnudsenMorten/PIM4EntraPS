@@ -16273,7 +16273,8 @@
         { base: 'PIM-Assignments-Groups',          cols: [{ TargetGroupTag: groupTag }, { SourceGroupTag: groupTag }] },
         { base: 'PIM-Assignments-Roles-Groups',    cols: [{ GroupTag: groupTag }] },
         { base: 'PIM-Assignments-Roles-AUs',       cols: [{ GroupTag: groupTag }] },
-        { base: 'PIM-Assignments-Azure-Resources', cols: [{ GroupTag: groupTag }] }
+        { base: 'PIM-Assignments-Azure-Resources', cols: [{ GroupTag: groupTag }] },
+        { base: 'PIM-Assignments-Workloads',       cols: [{ GroupTag: groupTag }] }
       ];
       for (const x of xrefs) {
         const xData = await loadCsv(x.base);
@@ -16485,7 +16486,12 @@
   // permission-group definition entities that carry a PolicyTemplate column (the group policy), and nothing else: the
   // AU / admin / department entities and discovery's Resources stay under "All records".
   // 🪤 `var`, not `const`: renderGridList may run during init before this line (no TDZ).
-  var PIM_DELEGATION_GROUP_ENTITIES = ['PIM-Definitions-Roles', 'PIM-Definitions-Tasks', 'PIM-Definitions-Services', 'PIM-Definitions-Processes'];
+  // Operator 2026-10-05 ("where is the departments, project groups, cross org groups"): every group type is listed --
+  // the DIRECT groups people are members of (role, organisation, department, project, cross-org) and the INDIRECT
+  // permission groups (task, service, process).
+  var PIM_DIRECT_GROUP_ENTITIES = ['PIM-Definitions-Roles', 'PIM-Definitions-Organization', 'PIM-Definitions-Departments', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg'];
+  var PIM_INDIRECT_GROUP_ENTITIES = ['PIM-Definitions-Tasks', 'PIM-Definitions-Services', 'PIM-Definitions-Processes'];
+  var PIM_DELEGATION_GROUP_ENTITIES = PIM_DIRECT_GROUP_ENTITIES.concat(PIM_INDIRECT_GROUP_ENTITIES);
 
   // ===================================================================
   // REQ-GRID (operator 2026-09-20: "i hate this, as it looks like v1 csv files").
@@ -16538,12 +16544,15 @@
   function renderGridList() {
     const list = document.getElementById('gridList');
     const bases = (PIM_DATA.csvBases || []).filter(b => gridScopeMatches(b));
-    // Group bases by their group ('Definitions' / 'Assignments').
+    // Operator 2026-10-05: the list is grouped the way people think about it -- Direct groups, Indirect groups, Who gets
+    // what, Other records -- not by storage ('Definitions' / 'Assignments').
+    const sectionOf = (b) => PIM_DIRECT_GROUP_ENTITIES.indexOf(b.base) >= 0 ? 'Direct groups'
+      : PIM_INDIRECT_GROUP_ENTITIES.indexOf(b.base) >= 0 ? 'Indirect groups'
+      : String(b.group || '') === 'Assignments' ? 'Who gets what' : 'Other records';
     const groups = {};
-    for (const b of bases) {
-      if (!groups[b.group]) groups[b.group] = [];
-      groups[b.group].push(b.base);
-    }
+    ['Direct groups', 'Indirect groups', 'Who gets what', 'Other records'].forEach(s => { groups[s] = []; });
+    for (const b of bases) groups[sectionOf(b)].push(b.base);
+    Object.keys(groups).forEach(s => { if (!groups[s].length) delete groups[s]; });
     list.innerHTML = '';
     // Collapse toggle -- gives the table the full width; state persists.
     const tab = document.getElementById('gridTab');
@@ -16575,9 +16584,7 @@
       sc.className = 'group-hdr';
       sc.id = 'gridScopeNote';
       sc.style.cssText = 'color:#0969da;font-weight:600;';
-      sc.innerHTML = 'Delegations only <a href="#" id="gridScopeAll" style="font-weight:400;">show all records</a>' +
-        '<div id="gridScopePolicies" style="font-weight:400;color:#57606a;font-size:11px;margin-top:2px;">PolicyTemplate: the <b>group</b> policy on the group definitions, ' +
-        'the <b>Entra role</b> policy on Roles-Groups / Roles-AUs, the <b>Azure role</b> policy on Azure-Resources.</div>';
+      sc.innerHTML = 'Delegations only <a href="#" id="gridScopeAll" style="font-weight:400;">show all records</a>';
       list.appendChild(sc);
       const a = sc.querySelector('#gridScopeAll');
       if (a) a.onclick = (e) => { e.preventDefault(); setGridScope(''); };
@@ -16981,6 +16988,7 @@
           // one word that means "the group is gone" was attached to the act that leaves it standing.
           : (canRenameL ? '<button data-act="rename" title="rename this group (name, description or tag) and carry every row that points at it">&#x270E;</button> ' : '') +
             '<button data-act="clone" class="row-clone" title="clone this row">+1</button> ' +
+            (canRetireL && String(row.GroupTag || '').trim() ? '<button data-act="cleanup" class="row-cleanup" title="QUICK CLEAN-UP: take this group out of PIM together with EVERY delegation that names it -- its members, nestings, Entra / Azure / workload role bindings. Staged in Pending changes; the next engine run removes the access.">&#x1F9F9;</button> ' : '') +
             (canRetireL ? '<button data-act="retire" class="row-retire" title="DELETE the group in Entra ID: its role assignments are removed, its members are taken out and the group object is deleted. Staged here, done by the engine after you commit.">&#x1F5D1;</button> ' : '') +
             (canUnassignL ? (isRemoveRow
               ? '<button data-act="unassign-undo" class="row-unassign-on" title="This row is staged as Action=Remove: the engine will TAKE THIS ACCESS AWAY on its next run. Click to change it back to Assign.">&#x2296;</button> '
@@ -17149,6 +17157,7 @@
         const idx = parseInt(b.parentElement.parentElement.dataset.idx, 10);
         if (b.dataset.act === 'rename') { await actionRenameGroupTag(base, idx); return; }
         if (b.dataset.act === 'retire') { await actionRetireGroup(base, idx); return; }
+        if (b.dataset.act === 'cleanup') { const r = p.rows[idx] || {}; await deleteNode({ kind: 'role-group', groupTag: String(r.GroupTag || '').trim(), source: base, label: String(r.GroupName || r.GroupTag || '') }); renderGrid(base); return; }
         if (b.dataset.act === 'unassign') { await actionRemoveAccess(base, idx); return; }
         if (b.dataset.act === 'unassign-undo') {
           p.rows[idx].Action = 'Assign';

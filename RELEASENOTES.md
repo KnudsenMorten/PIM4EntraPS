@@ -14,6 +14,15 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.503 — Records grouped as direct and indirect groups, quick clean-up
+
+- **Changed: the records list is grouped as Direct groups, Indirect groups, Who gets what and Other records**, and the
+  delegations view now lists departments, organisation units, projects and cross-organisation groups too. The note at
+  the top is gone.
+- **New: quick clean-up on a group row.** One button takes a group out of PIM together with every delegation that names
+  it -- members, nestings and Entra, Azure and workload role bindings -- staged in Pending changes. The next engine run
+  removes the access.
+
 ## v2.4.502 — Enable / disable admins, a clearer request portal
 
 - **New: Enable and Disable on the Admin accounts page**, on each row and for a selection. **Disable & remove
