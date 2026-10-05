@@ -14,6 +14,15 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.508 — Remove a group's delegations, with or without deleting the group
+
+- **New: two clean-up actions on a group, per row and for a selection.**
+  - **Remove all delegations, keep the group** (the broom): every assignment, nesting and Entra / Azure / workload role
+    binding naming the group is removed by the next engine run.
+  - **Remove all delegations, delete the group** (the bin, now red and easy to see): the same, and the group is deleted in
+    Entra ID. It no longer refuses because delegations or live assignments still exist -- it removes them.
+  - Both are staged in Pending changes.
+
 ## v2.4.507 — Group tables show the group first
 
 - **Changed: on the group tables (e.g. Departments) the group comes first** -- its name, description and tag -- and the

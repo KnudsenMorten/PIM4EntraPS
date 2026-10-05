@@ -976,6 +976,7 @@
   /* Grid row clone button */
   table.grid td.row-actions .row-clone { color:#57606a; padding:1px 6px; font-size:11px; background:transparent; border:1px solid transparent; }
   table.grid td.row-actions .row-clone:hover { color:#1a7f37; border-color:#1a7f37; }
+  table.grid td.row-actions .row-retire { color:#cf222e; font-size:13px; }   /* operator 2026-10-05: the delete-group bin must be visible */
 
   /* Wizard body controls (v2.2 wizards use these simpler class names) */
   #wizBody .field { display:grid; grid-template-columns:200px 1fr; gap:8px 12px; align-items:center; padding:6px 0; border-bottom:1px solid #f6f8fa; }
@@ -17049,6 +17050,12 @@
     // row goes, the group stays. The word DELETE now belongs to one control only -- the bin on the
     // row -- so the two choices can no longer be read as the same thing.
     html.push(`<button id="gabDelete" class="gab-secondary-danger" title="Takes these rows out of PIM when you commit -- the same act as the x on each row, in bulk. The groups are NOT deleted and nobody loses access: PIM simply stops managing them. To delete a group, use the bin on its row.">Take ${selCount} row(s) out of PIM (keep the groups)</button>`);
+    // Operator 2026-10-05 ("i need different buttons like remove all delegations, keep group; remove all delegations, delete
+    // group"): for a selection of GROUP definition rows, the two clean-ups in bulk.
+    if (PIM_GROUP_DEF_ENTITIES.indexOf(base) >= 0) {
+      html.push('<button id="gabStripKeep" class="gab-secondary-danger" title="Remove every delegation of the selected groups (assignments, nestings, Entra / Azure / workload role bindings); the groups stay.">Remove all delegations, keep the group(s)</button>');
+      html.push('<button id="gabStripDelete" class="gab-secondary-danger" title="Remove every delegation of the selected groups AND delete the groups in Entra ID (Lifecycle = Retire).">Remove all delegations, delete the group(s)</button>');
+    }
     html.push('<button id="gabClear">Clear selection</button>');
     // 🔴 "what does stop managin row vs. delete means ? i see no impact" (operator, 2026-09-22).
     // They are the SAME act -- the x on a row and this button in bulk -- and neither revokes anything:
@@ -17149,7 +17156,7 @@
           // one word that means "the group is gone" was attached to the act that leaves it standing.
           : (canRenameL ? '<button data-act="rename" title="rename this group (name, description or tag) and carry every row that points at it">&#x270E;</button> ' : '') +
             '<button data-act="clone" class="row-clone" title="clone this row">+1</button> ' +
-            (canRetireL && String(row.GroupTag || '').trim() ? '<button data-act="cleanup" class="row-cleanup" title="QUICK CLEAN-UP: take this group out of PIM together with EVERY delegation that names it -- its members, nestings, Entra / Azure / workload role bindings. Staged in Pending changes; the next engine run removes the access.">&#x1F9F9;</button> ' : '') +
+            (canRetireL && String(row.GroupTag || '').trim() ? '<button data-act="cleanup" class="row-cleanup" title="REMOVE ALL DELEGATIONS, KEEP THE GROUP: every assignment, nesting and Entra / Azure / workload role binding that names this group is removed by the next engine run. The group itself stays. Staged in Pending changes.">&#x1F9F9;</button> ' : '') +
             (canRetireL ? '<button data-act="retire" class="row-retire" title="DELETE the group in Entra ID: its role assignments are removed, its members are taken out and the group object is deleted. Staged here, done by the engine after you commit.">&#x1F5D1;</button> ' : '') +
             (canUnassignL ? (isRemoveRow
               ? '<button data-act="unassign-undo" class="row-unassign-on" title="This row is staged as Action=Remove: the engine will TAKE THIS ACCESS AWAY on its next run. Click to change it back to Assign.">&#x2296;</button> '
@@ -17317,8 +17324,8 @@
       b.onclick = async () => {
         const idx = parseInt(b.parentElement.parentElement.dataset.idx, 10);
         if (b.dataset.act === 'rename') { await actionRenameGroupTag(base, idx); return; }
-        if (b.dataset.act === 'retire') { await actionRetireGroup(base, idx); return; }
-        if (b.dataset.act === 'cleanup') { const r = p.rows[idx] || {}; await deleteNode({ kind: 'role-group', groupTag: String(r.GroupTag || '').trim(), source: base, label: String(r.GroupName || r.GroupTag || '') }); renderGrid(base); return; }
+        if (b.dataset.act === 'retire') { await pimGroupStripDelegations(base, [idx], true); renderGrid(base); return; }
+        if (b.dataset.act === 'cleanup') { await pimGroupStripDelegations(base, [idx], false); renderGrid(base); return; }
         if (b.dataset.act === 'unassign') { await actionRemoveAccess(base, idx); return; }
         if (b.dataset.act === 'unassign-undo') {
           p.rows[idx].Action = 'Assign';
@@ -17576,6 +17583,10 @@
       };
     }
 
+    const gabStripKeep = document.getElementById('gabStripKeep');
+    if (gabStripKeep) gabStripKeep.onclick = async () => { await pimGroupStripDelegations(base, Array.from(p.selection || []), false); renderGrid(base); };
+    const gabStripDelete = document.getElementById('gabStripDelete');
+    if (gabStripDelete) gabStripDelete.onclick = async () => { await pimGroupStripDelegations(base, Array.from(p.selection || []), true); renderGrid(base); };
     const gabDelete = document.getElementById('gabDelete');
     if (gabDelete) {
       gabDelete.onclick = async () => {
@@ -19871,6 +19882,67 @@
     row.Action = 'Remove';
     markBadges();
     renderGrid(base);
+  }
+
+  // Operator 2026-10-05: "it must automatically delete all assignments and delete the group". ONE staged step for one or
+  // many group definition rows: every row that names the group's tag in the delegation entities is removed (the commit turns
+  // assignment deletes into targeted removals, so the next DELTA takes the access away), and -- deleteGroup -- the group is
+  // marked Lifecycle = Retire, which the engine's group retirement turns into the delete in Entra ID (it also strips what
+  // is still live). Without deleteGroup the group definition stays. Nothing is written until commit.
+  async function pimGroupStripDelegations(base, idxs, deleteGroup) {
+    if (PIM_GROUP_DEF_ENTITIES.indexOf(base) < 0) return;
+    if (!isServer) { alert('Static mode -- cannot edit. Restart with -Server.'); return; }
+    if (!roleAtLeast('Admin')) { alert('Admin role required.'); return; }
+    const p = pendingChanges[base];
+    const picks = (idxs || []).filter(i => p && p.rows[i] && !p.deletes.has(i) && String(p.rows[i].GroupTag || '').trim());
+    if (!picks.length) { alert('Select group rows that have a GroupTag.'); return; }
+    const tags = picks.map(i => String(p.rows[i].GroupTag).trim());
+    const names = picks.map(i => String(p.rows[i].GroupName || p.rows[i].GroupTag).trim());
+    const xrefs = [
+      { base: 'PIM-Assignments-Admins',          cols: ['GroupTag'] },
+      { base: 'PIM-Assignments-Groups',          cols: ['TargetGroupTag', 'SourceGroupTag'] },
+      { base: 'PIM-Assignments-Roles-Groups',    cols: ['GroupTag'] },
+      { base: 'PIM-Assignments-Roles-AUs',       cols: ['GroupTag'] },
+      { base: 'PIM-Assignments-Azure-Resources', cols: ['GroupTag'] },
+      { base: 'PIM-Assignments-Workloads',       cols: ['GroupTag'] }
+    ];
+    const lc = s => String(s || '').trim().toLowerCase();
+    const tagSet = new Set(tags.map(lc));
+    const plan = []; let total = 0;
+    for (const x of xrefs) {
+      let d; try { d = await loadCsv(x.base); } catch (_) { continue; }
+      if (!d || !Array.isArray(d.header) || !Array.isArray(d.rows)) continue;   // an entity this store does not have
+      ensurePending(x.base, d.header, d.rows);
+      const px = pendingChanges[x.base];
+      const hit = [];
+      px.rows.forEach((r, i) => { if (!px.deletes.has(i) && x.cols.some(c => tagSet.has(lc(r[c])))) hit.push(i); });
+      if (hit.length) { plan.push({ base: x.base, idx: hit }); total += hit.length; }
+    }
+    let retireOn = null;
+    if (deleteGroup) {
+      try { const fg = await api('GET', '/api/settings/feature-gates'); const g = (fg && (fg.value || fg)) || {}; const gates = g.gates || g; const v = gates.EnableGroupRetirement;
+            if (v !== undefined && v !== null && v !== '') retireOn = !!(v === true || /^(true|1|yes|on|enabled?)$/i.test(String(v))); } catch (_) { retireOn = null; }
+    }
+    const who = picks.length === 1 ? '<b>' + escapeHtml(names[0]) + '</b>' : '<b>' + picks.length + ' groups</b> (' + names.slice(0, 5).map(escapeHtml).join(', ') + (picks.length > 5 ? ', &hellip;' : '') + ')';
+    const lines = plan.map(x => '<li>' + escapeHtml(entityLabel(x.base)) + ': ' + x.idx.length + ' removed</li>').join('') || '<li>no delegation names ' + (picks.length === 1 ? 'it' : 'them') + '</li>';
+    const title = deleteGroup ? 'Remove all delegations and delete the group' + (picks.length > 1 ? 's' : '') : 'Remove all delegations, keep the group' + (picks.length > 1 ? 's' : '');
+    const body = '<p>' + who + ':</p><ul>' + lines + '</ul>' +
+      '<p>The next engine run takes this access away in Entra ID / Azure.</p>' +
+      (deleteGroup
+        ? '<p><b>The group' + (picks.length > 1 ? 's are' : ' is') + ' then DELETED in Entra ID</b> (Lifecycle = Retire): its remaining role assignments and members are removed and the group object is deleted. This cannot be undone.' +
+          (retireOn === false ? ' <span style="color:#cf222e;">Automatic group retirement is OFF in this environment (Settings &rsaquo; Feature gates &rsaquo; EnableGroupRetirement), so the delete waits until it is switched on.</span>' : '') + '</p>'
+        : '<p>The group definition stays.</p>') +
+      '<p style="color:#57606a;">Nothing is saved yet -- review and commit under <b>Pending changes</b>.</p>';
+    const ok = await showConfirm(title, body, true, deleteGroup ? 'Remove delegations and delete' : 'Remove delegations');
+    if (!ok) return;
+    for (const x of plan) { const px = pendingChanges[x.base]; for (const i of x.idx) px.deletes.add(i); }
+    if (deleteGroup) {
+      if (p.header && p.header.indexOf('Lifecycle') < 0) p.header.push('Lifecycle');
+      for (const i of picks) p.rows[i].Lifecycle = 'Retire';
+    }
+    if (p.selection) p.selection.clear();
+    markBadges();
+    try { valRevalidateAfterFix(); } catch (_) { }
   }
 
   async function actionRetireGroup(base, rowIdx) {
