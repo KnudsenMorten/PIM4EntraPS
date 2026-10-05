@@ -8408,7 +8408,8 @@ function Handle-Request {
     if ($path -like '/api/*') {
         $authHeader = $req.Headers['Authorization']
         if (-not $authHeader -or $authHeader -ne "Bearer $ExpectedToken") {
-            Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized' }
+            # BRAND-2.11 (2026-10-05): the running version rides with the 401, so a page older than a deploy says "updated to vX" instead of "expired".
+            Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; version = (Get-PimSolutionVersion) }
             return 401
         }
         # 🔴 SEC-31 (server half): the page token is ONE per process, so holding it proves only that
