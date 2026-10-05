@@ -3840,7 +3840,7 @@
     const ignHtml = ign.length
       ? '<details id="acctUnmanagedIgnored" style="margin-top:6px;font-size:11.5px;"><summary style="cursor:pointer;color:#57606a;">' + ign.length + ' ignored account(s) -- not shown above</summary>' +
         '<table class="grid" style="font-size:11.5px;margin-top:4px;"><tbody>' + ign.map(g =>
-          '<tr><td>' + esc(g.upn || '') + '</td><td style="color:#57606a;">ignored by ' + esc(g.by || '?') + (g.atUtc ? ' on ' + esc(String(g.atUtc).slice(0, 10)) : '') +
+          '<tr><td>' + esc(g.upn || '') + '</td><td style="color:#57606a;">ignored by ' + esc(g.by || '?') + (g.atUtc ? ' on ' + esc(fmtTime(g.atUtc, { dateOnly: true })) : '') +
           (g.reason ? ' &mdash; ' + esc(g.reason) : '') + '</td><td><button class="btn-sec acctUnignoreBtn" data-upn="' + esc(g.upn || '') + '" style="font-size:11px;">Stop ignoring</button></td></tr>').join('') +
         '</tbody></table></details>'
       : '';
@@ -3854,7 +3854,7 @@
         (ign.length ? ' <span style="font-weight:400;color:#57606a;">(' + ign.length + ' ignored)</span>' : '') +
         ' <span style="font-weight:400;color:#57606a;font-size:11px;">-- click to ' + (isOpen ? 'close' : 'open') + '</span></summary>' +
       '<div style="color:#57606a;font-size:11.5px;margin:4px 0 6px;">No TAP healing, no reminders, no review. <b>Import</b> stages the account&rsquo;s definition (read from the account) and the rows that keep the access it holds today (from the latest drift check) -- review and commit under Pending changes.' +
-      (d.stale ? ' <span style="color:#9a6700;">(report is stale -- observed ' + esc(d.observedUtc || '') + ')</span>' : '') + '</div>' +
+      (d.stale ? ' <span style="color:#9a6700;">(report is stale -- observed ' + esc(fmtTime(d.observedUtc)) + ')</span>' : '') + '</div>' +
       '<table class="grid" style="font-size:12px;"><tbody>' + acc.map(u => {
         // 2.4.467 (operator 2026-09-30: "when i click import for 2nd nothing happens, no msg like for simon"): the row
         // itself says STAGED whenever the account is in the pending changes -- a message only in a span was lost on the
@@ -4041,7 +4041,7 @@
         '<td><div style="font-weight:600;">' + escapeHtml(a.displayName || upn) + '</div>' +
           '<div style="color:#57606a;font-size:11px;">' + escapeHtml(upn) + '</div></td>' +
         '<td>' + (checking ? '<span style="color:#57606a;font-size:11.5px;">Checking… please wait</span>' : tapStatusChip(a.status, a.detail)) + '</td>' +
-        '<td style="font-size:11.5px;color:#57606a;">' + escapeHtml(a.createdDateTime || '') + '</td>' +
+        '<td style="font-size:11.5px;color:#57606a;">' + escapeHtml(fmtTime(a.createdDateTime)) + '</td>' +
         // 71.19: an admin's mail goes to its SPONSOR DEPARTMENT's owners. Show where it goes AND why that is the
         // address -- a legacy ManagerEmail is flagged amber so it gets moved to the department, and "none" says
         // exactly what to set instead of "no office user email".
@@ -4178,7 +4178,7 @@
     else if (h < 48) rel = h + 'h';
     else rel = dy + 'd';
     if (abs >= 60000) rel = diff >= 0 ? (rel + ' ago') : ('in ' + rel);
-    return rel + ' (' + d.toISOString().replace('T', ' ').replace(/\..*$/, '') + 'Z)';
+    return rel + ' (' + fmtTime(d) + ')';
   }
   // BRAND-2.6 (framework, operator 2026-10-04): every number a PERSON reads follows the VIEWER's regional format -- ONE
   // formatter, Intl.NumberFormat with the chosen locale. The choice is per browser (the status line's "numbers" picker);
@@ -4193,6 +4193,57 @@
     const x = Number(n);
     if (!isFinite(x)) return String(n);
     try { return new Intl.NumberFormat(pimNumberLocale(), opts || { maximumFractionDigits: 1 }).format(x); } catch (_) { return String(x); }
+  }
+  // BRAND-2.10 (framework, operator 2026-10-05): every date/time a PERSON reads is shown in the BROWSER's local time zone
+  // (daylight saving included), ISO-like 'yyyy-MM-dd HH:mm', never UTC and never with a "UTC" suffix ("it is fine to store
+  // in utc, but not the gui visual layer"). Storage, APIs, CSV / JSON exports, audit records and run records STAY UTC --
+  // only the display goes through fmtTime. An unzoned stamp from the server is UTC by convention (BUG-93, pimAsUtc).
+  // Accepts ISO strings (Z, +hh:mm offset, or unzoned = UTC; 'T' or space; any fraction length), Date objects and epoch
+  // ms. A bare date ('2026-10-05') is a calendar day, not an instant, and is shown as is. Unparseable -> unchanged.
+  // opts: { dateOnly, seconds, zone } -- zone appends the local zone's short name (e.g. CEST) for evidence views.
+  function pimParseTime(value) {
+    if (value === null || value === undefined || value === '') return null;
+    if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+    if (typeof value === 'number') { const dn = new Date(value); return isNaN(dn.getTime()) ? null : dn; }
+    const s = String(value).trim();
+    const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(:\d{2})?(?:[.,](\d+))?\s*(Z|[+\-]\d{2}:?\d{2})?$/i);
+    if (!m) return null;
+    let zone = m[5] || 'Z';
+    if (/^z$/i.test(zone)) zone = 'Z'; else if (zone.indexOf(':') < 0) zone = zone.slice(0, 3) + ':' + zone.slice(3);
+    const frac = m[4] ? '.' + (m[4] + '00').slice(0, 3) : '';
+    const d = new Date(m[1] + 'T' + m[2] + (m[3] || ':00') + frac + zone);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  function pimTimeZoneName() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (_) { return ''; } }
+  function pimTimeZoneLabel(d) {
+    try {
+      const part = new Intl.DateTimeFormat('en-GB', { timeZoneName: 'short' }).formatToParts(d || new Date()).find(x => x.type === 'timeZoneName');
+      if (part && part.value) return part.value;
+    } catch (_) { }
+    return pimTimeZoneName();
+  }
+  function fmtTime(value, opts) {
+    if (value === null || value === undefined || value === '') return '';
+    const o = opts || {};
+    if (typeof value === 'string' && /^\s*\d{4}-\d{2}-\d{2}\s*$/.test(value)) return value.trim();
+    const d = pimParseTime(value);
+    if (!d) return String(value);
+    const p = n => (n < 10 ? '0' : '') + n;
+    const day = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+    if (o.dateOnly) return day;
+    let t = day + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+    if (o.seconds) t += ':' + p(d.getSeconds());
+    if (o.zone) t += ' ' + pimTimeZoneLabel(d);
+    return t;
+  }
+  // BRAND-2.10 inputs: a day a person PICKS ('yyyy-MM-dd', a local calendar day) -> the UTC instant the server compares
+  // against: local 00:00:00 (start) or local 23:59:59.999 (end of that day). Empty / unparseable -> passed through.
+  function pimLocalDayToUtc(day, endOfDay) {
+    const s = String(day == null ? '' : day).trim();
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (!m) return s;
+    const d = endOfDay ? new Date(+m[1], +m[2] - 1, +m[3], 23, 59, 59, 999) : new Date(+m[1], +m[2] - 1, +m[3], 0, 0, 0, 0);
+    return isNaN(d.getTime()) ? s : d.toISOString();
   }
   function initNumberFormatPicker() {
     const sel = document.getElementById('numFmtSel');
@@ -4560,9 +4611,9 @@
         title: 'Unmanaged admin accounts',
         value: n,
         tone: n > 0 ? 'amber' : 'green',
-        sub: (n > 0 ? 'in the directory, not in the definitions' : 'every admin account is managed') + (ua.stale ? ' &middot; <span title="observed ' + esc(ua.observedUtc || '') + '">stale</span>' : ''),
+        sub: (n > 0 ? 'in the directory, not in the definitions' : 'every admin account is managed') + (ua.stale ? ' &middot; <span title="observed ' + esc(fmtTime(ua.observedUtc)) + '">stale</span>' : ''),
         tab: 'accounts',
-        lines: n > 0 ? shown.concat(['<span style="color:#57606a;">report only &mdash; PIM never disables an account for this</span>']) : ['observed ' + esc(ua.observedUtc || '')]
+        lines: n > 0 ? shown.concat(['<span style="color:#57606a;">report only &mdash; PIM never disables an account for this</span>']) : ['observed ' + esc(fmtTime(ua.observedUtc))]
       });
     }
 
@@ -4626,7 +4677,7 @@
         // §70.1b option 2: the tile reads the scheduler's snapshot -- say "as of" when, and never show "nothing
         // expiring" for a snapshot that does not exist yet.
         const exAsOfM = String(ex.asOfUtc || '').match(/T(\d{2}:\d{2})/);
-        const exAsOf = exAsOfM ? ('<span style="color:#57606a">as of ' + exAsOfM[1] + ' UTC' + (ex.stale ? ' (stale)' : '') + '</span>') : '';
+        const exAsOf = exAsOfM ? ('<span style="color:#57606a">as of ' + esc(fmtTime(ex.asOfUtc).slice(11)) +(ex.stale ? ' (stale)' : '') + '</span>') : '';
         if (ex.snapshotMissing) {
           exEl.innerHTML = homeTile({ title: 'Expiring access (14d)', value: '&mdash;', tone: 'neutral', tab: 'revoke',
             sub: 'no snapshot yet', lines: [ex.refreshQueued ? 'queued &mdash; the scheduler builds it within ~5 min' : 'built by the scheduler job active-assignments-snapshot'] });
@@ -4714,7 +4765,7 @@
     const ctxPublic = [
       ['Manager version', version],
       ['Mode', modeKind],
-      ['Data generated (UTC)', generated || '(n/a)'],
+      ['Data generated', generated ? fmtTime(generated, { zone: true }) : '(n/a)'],
       ['Browser', browser]
     ];
     const ctxPrivate = [
@@ -4830,7 +4881,7 @@
             '<td style="padding:3px 0; color:#57606a; vertical-align:top;">' + esc(c.hint || '') + '</td>' +
           '</tr>').join('');
         const h = d.health || {};
-        const lr = h.lastRun ? (esc(h.lastRun.name || '') + ' · ' + esc(h.lastRun.whenUtc || '') + ' · ' + (h.lastRun.ok ? 'ok' : 'FAILED')) : '(no run recorded)';
+        const lr = h.lastRun ? (esc(h.lastRun.name || '') + ' · ' + esc(fmtTime(h.lastRun.whenUtc)) + ' · ' + (h.lastRun.ok ? 'ok' : 'FAILED')) : '(no run recorded)';
         out.innerHTML =
           '<table style="border-collapse:collapse; width:100%; margin-bottom:12px;">' + checkRows + '</table>' +
           '<div style="border-top:1px solid #eaeef2; padding-top:10px; font-size:12px; color:#1a1a1a;">' +
@@ -5400,7 +5451,7 @@
     if (d.lastPublish) {
       const lp = d.lastPublish;
       h += '<div id="mspRegLastPublish" style="font-size:12px;color:#57606a;margin-bottom:8px;">Last publish on this master: <b>' + esc(lp.state || 'unknown') + '</b>' +
-           (lp.finishedUtc ? ' at ' + esc(lp.finishedUtc) : (lp.startedUtc ? ' (started ' + esc(lp.startedUtc) + ')' : '')) + '</div>';
+           (lp.finishedUtc ? ' at ' + esc(fmtTime(lp.finishedUtc)) : (lp.startedUtc ? ' (started ' + esc(fmtTime(lp.startedUtc)) + ')' : '')) + '</div>';
     } else {
       h += '<div id="mspRegLastPublish" style="font-size:12px;color:#57606a;margin-bottom:8px;">No publish is recorded on this managing tenant yet.</div>';
     }
@@ -5547,7 +5598,7 @@
       groups.map(g => '<option value="' + esc(g.key) + '"' + (replOvState.kind === g.key ? ' selected' : '') + '>' + esc(g.label) + '</option>').join('') + '</select></label>' +
       '<label><input type="checkbox" id="replOvNone"' + (replOvState.none ? ' checked' : '') + '> only rows that reach no tenant</label>' +
       '<button type="button" class="btn-sec" id="replOvRefresh">&#8635; Recompute</button>' +
-      '<span id="replOvComputed" style="color:#57606a;font-size:11.5px;">computed ' + esc(d.computedUtc || '') + (d.cached ? ' (cached ' + esc(String(d.cacheAgeSeconds || 0)) + 's ago; Recompute runs the plan again)' : '') + '</span></div>';
+      '<span id="replOvComputed" style="color:#57606a;font-size:11.5px;">computed ' + esc(fmtTime(d.computedUtc)) + (d.cached ? ' (cached ' + esc(String(d.cacheAgeSeconds || 0)) + 's ago; Recompute runs the plan again)' : '') + '</span></div>';
     if (replOvState.tenant) {
       const n = groups.reduce((a, g) => a + replOvFilterRows(g.rows, replOvState).length, 0);
       h += '<div id="replOvTenantHead" style="font-weight:600;margin:4px 0 8px;">What ' + esc(replOvState.tenant) + ' gets: ' + n + ' row(s)</div>';
@@ -5762,7 +5813,7 @@
         '<th style="padding:4px 8px;border-bottom:2px solid #d0d7de;"></th></tr>';
       for (const r of ex) {
         const dl = (r.DaysLeft === null || r.DaysLeft === undefined) ? '—' : (r.DaysLeft < 0 ? (r.DaysLeft + '') : r.DaysLeft);
-        const exp = r.ExpiresUtc ? esc(('' + r.ExpiresUtc).substring(0, 10)) : '—';
+        const exp = r.ExpiresUtc ? esc(fmtTime(r.ExpiresUtc, { dateOnly: true })) : '—';
         h += `<tr><td style="padding:4px 8px;border-bottom:1px solid #eef0f3;"><code>${esc(r.ItemKey)}</code></td>` +
           `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;color:#57606a;" title="${esc(r.Reason)}">${esc((r.Reason||'').length>60?(r.Reason.substring(0,60)+'…'):(r.Reason||''))}</td>` +
           `<td style="padding:4px 8px;border-bottom:1px solid #eef0f3;text-align:center;background:${stCol[r.State]||''};font-weight:600;" title="${esc(r.Detail||'')}">${esc(r.State)}</td>` +
@@ -5807,7 +5858,7 @@
   // Default expiry +90d (exemptions ALWAYS expire -- mandatory, no indefinite). YYYY-MM-DD.
   function confDefaultExemptExpiry() {
     const d = new Date(Date.now() + 90 * 86400000);
-    return d.toISOString().substring(0, 10);
+    return fmtTime(d, { dateOnly: true });   // BRAND-2.10: the LOCAL calendar day
   }
   async function confExempt(key) {
     const vals = await pimFormModal({
@@ -5816,12 +5867,13 @@
       okLabel: 'Add exemption',
       fields: [
         { name: 'reason', label: 'Exemption reason', type: 'textarea', required: true, placeholder: 'Why this binding is waived…' },
-        { name: 'expiry', label: 'Expiry date (UTC)', type: 'date', required: true, value: confDefaultExemptExpiry(), hint: 'Mandatory — the exemption stops suppressing the Gap on this date.' }
+        { name: 'expiry', label: 'Expiry date', type: 'date', required: true, value: confDefaultExemptExpiry(), hint: 'Mandatory — the exemption stops suppressing the Gap on this date.' }
       ]
     });
     if (!vals) return;
     let isoExp;
-    try { isoExp = new Date(vals.expiry + 'T00:00:00Z').toISOString(); }
+    // BRAND-2.10: the date is a LOCAL day; its local midnight is sent as UTC.
+    try { isoExp = new Date(vals.expiry + 'T00:00:00').toISOString(); }
     catch (e) { await pimConfirm({ title: 'Invalid date', body: 'Could not parse the expiry date.', okLabel: 'Close' }); return; }
     try {
       await api('POST', '/api/conformance/exemptions', { templateId: confSel, itemKey: key, reason: vals.reason, expiresUtc: isoExp });
@@ -6411,7 +6463,7 @@
       const lr = d.licenceRequest;
       h += '<div id="licRequest" data-status="' + esc(lr.status || '') + '" style="margin-top:8px;font-size:12px;">' +
         '<b>Licence from Invardia:</b> ' + (lr.message ? esc(lr.message) : (lr.enabled ? 'on -- requested automatically when the licence is missing or ends within 30 days' : 'off')) +
-        (lr.updatedUtc ? ' <span style="color:#57606a;">(' + esc(String(lr.updatedUtc).slice(0, 16).replace('T', ' ')) + ' UTC)</span>' : '') + '</div>';
+        (lr.updatedUtc ? ' <span style="color:#57606a;">(' + esc(fmtTime(lr.updatedUtc)) + ')</span>' : '') + '</div>';
     }
     if (d.mspRequired) {
       const role = (d.mspRole === 'slave') ? 'managed tenant' : 'managing tenant';   // §85: the word; the API value stays slave | master
@@ -7215,11 +7267,11 @@
       body.innerHTML = h; return;
     }
     h += '<table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="text-align:left;color:#57606a;">' +
-         '<th style="padding:2px 6px;">When (UTC)</th><th style="padding:2px 6px;">Event</th><th style="padding:2px 6px;">Title</th><th style="padding:2px 6px;">Delivery</th><th style="padding:2px 6px;">Recipients</th></tr></thead><tbody>';
+         '<th style="padding:2px 6px;">When</th><th style="padding:2px 6px;">Event</th><th style="padding:2px 6px;">Title</th><th style="padding:2px 6px;">Delivery</th><th style="padding:2px 6px;">Recipients</th></tr></thead><tbody>';
     alerts.forEach(a => {
       const state = PIM_ALERT_SEND_LABELS[a.sendState] || a.sendState || '';
       const color = (a.sendState === 'sent') ? '#116329' : '#bc4c00';
-      const when = ('' + (a.ts || '')).replace('T', ' ').replace(/\.\d+Z?$/, '').replace('Z', '');
+      const when = fmtTime(a.ts, { seconds: true });
       const rc = (a.recipients || []).join(', ');
       const proof = (a.sendState === 'sent') ? (esc(String(a.sent || 0)) + ' &check;') : esc(state);
       h += '<tr style="border-top:1px solid #eaeef2;">' +
@@ -8244,7 +8296,7 @@
       const fg = a === 'offboard' ? '#cf222e' : (a === 'revoke' ? '#bc4c00' : '#57606a');
       return `<span style="background:${bg};color:${fg};border-radius:10px;padding:1px 8px;font-size:11px;font-weight:600;">${esc(a)}</span>`;
     };
-    const fmtDate = (d) => { if (!d) return '<span style="color:#8c959f">-</span>'; const t = String(d).replace('T', ' ').replace(/:\d\dZ?$/, '').replace('Z', ''); return esc(t); };
+    const fmtDate = (d) => { if (!d) return '<span style="color:#8c959f">-</span>'; return esc(fmtTime(d)); };   // BRAND-2.10: local time
 
     const h = [];
     h.push('<div style="margin-bottom:12px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Approvals &mdash; maker / checker queue</span>');
@@ -8522,7 +8574,7 @@
     if (!items.length) {
       h.push('<div style="color:#57606a; font-size:12px; margin-bottom:10px;" id="aeEmpty">' + (((d.departments || []).length || aeState.all) ?
         'Nothing is due to be extended in the coming month.' : 'You are not an owner of any department.') +
-        (d.updatedUtc ? ' (checked ' + escapeHtml(String(d.updatedUtc).slice(0, 16).replace('T', ' ')) + ' UTC)' : '') + '</div>');
+        (d.updatedUtc ? ' (checked ' + escapeHtml(fmtTime(d.updatedUtc)) + ')' : '') + '</div>');
     } else {
       h.push('<table class="grid" id="aeTable" style="border-collapse:collapse; font-size:13px; margin-bottom:10px;"><thead><tr>' +
         '<th style="text-align:left; padding:4px 8px;">Who</th><th style="text-align:left; padding:4px 8px;">Permission</th><th style="text-align:left; padding:4px 8px;">Department</th>' +
@@ -8609,7 +8661,7 @@
     let d = null, cr = null;
     try { d = await api('GET', '/api/rfa/requests'); } catch (e) { host.innerHTML = '<div style="color:#cf222e;">Could not load the access requests: ' + escapeHtml(e.message || String(e)) + '</div>'; return; }
     try { cr = await api('GET', '/api/company-reviews'); } catch (_) { cr = null; }
-    const fmt = function (v) { if (!v) return ''; const t = new Date(v); return isNaN(t) ? escapeHtml(String(v)) : t.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'; };
+    const fmt = function (v) { return v ? escapeHtml(fmtTime(v)) : ''; };   // BRAND-2.10: local time
     const stColor = { 'pending-approval': '#9a6700', approved: '#0969da', active: '#1a7f37', 'cancel-requested': '#9a6700', ended: '#57606a', cancelled: '#57606a', expired: '#57606a', denied: '#cf222e', rejected: '#cf222e', failed: '#cf222e' };
     // Operator 2026-10-05 ("this page is ugly, lack of spacing, font"): the page reads like Settings -- one card per
     // section, the reading table (not the monospace edit grid), body text at the normal size, room between sections.
@@ -8730,7 +8782,7 @@
       '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">By default the administrator who raises a request (offboard, revoke, ...) may NOT approve it -- a different administrator must (separation of duties). ' +
       'On a tenant with only one administrator nothing can then be approved. Allow self-approval only there, and switch it off when a second administrator exists.</div>' +
       '<label style="font-weight:normal;"><input type="checkbox" id="selfApproveOn"' + (d.enabled ? ' checked' : '') + (d.canWrite ? '' : ' disabled') + '> Allow an administrator to approve their own requests</label>' +
-      (d.enabled && d.by ? '<div style="color:#bc4c00;font-size:11px;margin-top:4px;">ON since ' + escapeHtml(String(d.atUtc || '').slice(0, 16).replace('T', ' ')) + ' UTC (by ' + escapeHtml(d.by) + ') -- each self-approval is recorded as such in the audit.</div>' : '') +
+      (d.enabled && d.by ? '<div style="color:#bc4c00;font-size:11px;margin-top:4px;">ON since ' + escapeHtml(fmtTime(d.atUtc)) + ' (by ' + escapeHtml(d.by) + ') -- each self-approval is recorded as such in the audit.</div>' : '') +
       (d.canWrite ? '' : '<div style="color:#8c959f;font-size:11px;">Only a SuperAdmin can change this.</div>') +
       '<div id="selfApproveMsg" style="font-size:12px;margin-top:4px;"></div></div>';
     const cb = document.getElementById('selfApproveOn');
@@ -8784,7 +8836,7 @@
         const k = await api('GET', '/api/rfa/api-keys');
         const ks = (k && k.keys) || [];
         keysHost.innerHTML = ks.length ? '<table class="grid"><thead><tr><th>Name</th><th>Key</th><th>Scopes</th><th>Expires</th><th>By</th><th></th></tr></thead><tbody>' + ks.map(x =>
-          '<tr><td>' + escapeHtml(x.name) + '</td><td><code>' + escapeHtml(x.prefix) + '&hellip;</code></td><td>' + escapeHtml(String(x.scopes || '').replace(/\|/g, ', ')) + '</td><td>' + escapeHtml(String(x.expiresUtc || '').slice(0, 10)) + '</td><td>' + escapeHtml(x.createdBy || '') + '</td>' +
+          '<tr><td>' + escapeHtml(x.name) + '</td><td><code>' + escapeHtml(x.prefix) + '&hellip;</code></td><td>' + escapeHtml(String(x.scopes || '').replace(/\|/g, ', ')) + '</td><td>' + escapeHtml(fmtTime(x.expiresUtc, { dateOnly: true })) + '</td><td>' + escapeHtml(x.createdBy || '') + '</td>' +
           '<td>' + (x.revoked ? '<span style="color:#cf222e;">revoked</span>' : '<button class="rfaKeyRev" data-id="' + escapeHtml(x.id) + '">Revoke</button>') + '</td></tr>').join('') + '</tbody></table>' : 'No API keys.';
         keysHost.querySelectorAll('.rfaKeyRev').forEach(b => b.onclick = async function () {
           if (!confirm('Revoke this API key? Calls with it are refused from now on.')) return;
@@ -8865,7 +8917,7 @@
           '<td style="padding:4px 8px;">' + act + '</td>' +
           // §79.7: Keep = confirmed for another period; Remove = a removal REQUEST a PIM administrator approves.
           '<td style="padding:4px 8px;">' +
-            (p.lastReviewedUtc ? '<div style="font-size:11px; color:' + (p.reviewDue ? '#9a6700' : '#116329') + ';">confirmed ' + escapeHtml(p.lastReviewedUtc) + (p.reviewDue ? ' (due again)' : '') + '</div>'
+            (p.lastReviewedUtc ? '<div style="font-size:11px; color:' + (p.reviewDue ? '#9a6700' : '#116329') + ';">confirmed ' + escapeHtml(fmtTime(p.lastReviewedUtc)) + (p.reviewDue ? ' (due again)' : '') + '</div>'
                                : (p.reviewDue ? '<div style="font-size:11px; color:#9a6700;">not confirmed yet</div>' : '')) +
             '<button class="btn" data-owner-keep="' + i + '" title="They still need this access">Keep</button> ' +
             '<button class="btn" data-owner-remove="' + i + '" title="They no longer need it -- a PIM administrator approves the removal">Remove</button>' +
@@ -8991,7 +9043,7 @@
       h.push('<tr data-dept="' + esc(name) + '" data-id="' + id + '"><td><b>' + esc(name) + '</b></td>' +
         '<td><select class="arDeptMode" data-id="' + id + '"' + (dis ? ' disabled' : '') + '><option value="default"' + (mode === 'default' ? ' selected' : '') + '>Default rule</option><option value="off"' + (mode === 'off' ? ' selected' : '') + '>Off (opt out)</option><option value="own"' + (mode === 'own' ? ' selected' : '') + '>Own rule</option></select></td>' +
         '<td class="arOwn" data-id="' + id + '" style="' + (mode === 'own' ? '' : 'opacity:.35;') + '">' + arRuleFields(id, mode === 'own' ? Object.assign({}, def, ov) : def, dis || mode !== 'own') + '</td>' +
-        '<td>' + (st && st.lastStartedUtc ? esc(String(st.lastStartedUtc).substring(0, 16).replace('T', ' ')) + ' UTC (' + esc(String(st.reviews || '')) + ')' : '<span style="color:#57606a;">never</span>') + '</td></tr>');
+        '<td>' + (st && st.lastStartedUtc ? esc(fmtTime(st.lastStartedUtc)) + ' (' + esc(String(st.reviews || '')) + ')' : '<span style="color:#57606a;">never</span>') + '</td></tr>');
     }
     if (!asList(d.departments).length) h.push('<tr><td colspan="4" style="color:#57606a;">No departments defined yet (Departments page).</td></tr>');
     h.push('</tbody></table>');
@@ -9037,7 +9089,7 @@
       (mode === 'admin' ? 'Department reviews' : 'Access reviews waiting for you') + '</div>'];
     for (const c of camps) {
       const open = c.status === 'open';
-      h.push('<div style="margin:6px 0 2px;font-size:12px;"><b>' + esc(c.department) + '</b> -- ' + (open ? 'open, due ' + esc(String(c.dueUtc || '').substring(0, 10)) : 'closed ' + esc(String(c.closedUtc || '').substring(0, 10)) + ' (' + esc(c.closeReason || '') + ')') +
+      h.push('<div style="margin:6px 0 2px;font-size:12px;"><b>' + esc(c.department) + '</b> -- ' + (open ? 'open, due ' + esc(fmtTime(c.dueUtc, { dateOnly: true })) : 'closed ' + esc(fmtTime(c.closedUtc, { dateOnly: true })) + ' (' + esc(c.closeReason || '') + ')') +
         ' -- ' + esc(String(c.approvers)) + ' approver(s)' + (Number(c.approvers) === 2 ? ' ' + esc(c.mode) : '') + ' -- ' + esc(asList(c.reviewers).join(', ')) +
         (Number(c.remindersSent) ? ' -- reminders ' + esc(String(c.remindersSent)) + '/' + esc(String(c.reminders)) : '') + '</div>');
       h.push('<table class="grid" style="font-size:12px;width:100%;"><thead><tr><th>Person</th><th>Access</th><th>State</th><th></th></tr></thead><tbody>');
@@ -9260,7 +9312,7 @@
       else if (/error|failed/i.test(s)) { bg = '#ffebe9'; fg = '#cf222e'; }
       return `<span style="background:${bg};color:${fg};border-radius:10px;padding:1px 8px;font-size:11px;font-weight:600;">${esc(s)}</span>`;
     };
-    const fmtDate = (d) => { if (!d) return '<span style="color:#8c959f">-</span>'; const t = String(d).replace('T', ' ').replace(/:\d\dZ?$/, '').replace('Z', ''); return esc(t); };
+    const fmtDate = (d) => { if (!d) return '<span style="color:#8c959f">-</span>'; return esc(fmtTime(d)); };   // BRAND-2.10: local time
     const reviewers = (arr) => {
       arr = asList(arr).filter(Boolean);
       if (!arr.length) return '<span style="color:#8c959f">-</span>';
@@ -9400,7 +9452,7 @@
   // 'drift-snapshot' now runs the plan every 240 min (4 h) and stores it; this page reads the stored result the moment it opens.
   let DRIFT_POLL = null;
   const DRIFT_OPEN = new Set();          // scopes the reader expanded -- survives a re-render
-  function driftFmtUtc(iso) { return iso ? (String(iso).substring(0, 16).replace('T', ' ') + ' UTC') : ''; }
+  function driftFmtUtc(iso) { return fmtTime(iso); }   // BRAND-2.10: local time (name kept: the value it reads is UTC)
 
   async function renderDrift(opts) {
     const body = document.getElementById('driftBody');
@@ -9585,7 +9637,7 @@
     if (ignored.length) {
       h.push('<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:12px;"><b>' + ignored.length + ' ignored finding(s)</b> &mdash; hidden from the counts, this page and the drift mail</summary>' +
         '<table class="grid" style="font-size:11.5px;margin:4px 0;"><thead><tr><th>Area</th><th>Drift</th><th>What</th><th>Why ignored</th><th>By / when</th>' + (canApply ? '<th></th>' : '') + '</tr></thead><tbody>' +
-        ignored.map(g => '<tr><td>' + esc(g.scope) + '</td><td>' + esc(g.type) + '</td><td>' + esc(g.label || g.key) + '</td><td>' + esc(g.reason) + '</td><td>' + esc(g.by) + '<br><span style="color:#8c959f;">' + esc(String(g.atUtc || '').replace('T', ' ').slice(0, 16)) + '</span></td>' +
+        ignored.map(g => '<tr><td>' + esc(g.scope) + '</td><td>' + esc(g.type) + '</td><td>' + esc(g.label || g.key) + '</td><td>' + esc(g.reason) + '</td><td>' + esc(g.by) + '<br><span style="color:#8c959f;">' + esc(fmtTime(g.atUtc)) + '</span></td>' +
           (canApply ? '<td><button class="driftUnignoreBtn btn-sec" style="font-size:10.5px;padding:1px 6px;" data-scope="' + esc(g.scope) + '" data-key="' + esc(g.key) + '" title="Show it again: back in the counts, this page and the drift mail">Re-add</button></td>' : '') + '</tr>').join('') +
         '</tbody></table></details>');
     }
@@ -9831,7 +9883,7 @@
         '</td><td>' + escapeHtml(x.detail || '') + '</td><td>' + asList(x.rows).map(escapeHtml).join(', ') + '</td></tr>';
       const table = list => '<table class="grid" style="font-size:11.5px;margin:6px 0;"><thead><tr><th>Kind</th><th>Target</th><th>Why</th><th>Delegations pointing at it</th></tr></thead><tbody>' + list.map(row).join('') + '</tbody></table>';
       box.style.borderColor = miss.length ? '#cf222e' : '#1a7f37';
-      box.innerHTML = '<b>Delegation targets</b> &mdash; checked ' + escapeHtml(String(tc.checkedUtc).replace('T', ' ').slice(0, 16)) + ' UTC (' + escapeHtml(String(tc.azureRows || 0)) + ' Azure, ' + escapeHtml(String(tc.entraRows || 0)) + ' Entra role row(s)). ' +
+      box.innerHTML = '<b>Delegation targets</b> &mdash; checked ' + escapeHtml(fmtTime(tc.checkedUtc)) + ' (' + escapeHtml(String(tc.azureRows || 0)) + ' Azure, ' + escapeHtml(String(tc.entraRows || 0)) + ' Entra role row(s)). ' +
         (miss.length ? '<span style="color:#cf222e;font-weight:600;">' + miss.length + ' target(s) no longer exist.</span> PIM changed nothing &mdash; remove the delegations you no longer need (All records), or restore the resource.' + table(miss)
                      : '<span style="color:#1a7f37;font-weight:600;">Every target exists.</span>') +
         (unv.length ? '<details style="margin-top:4px;"><summary style="cursor:pointer;">' + unv.length + ' could not be verified (no access, or the read failed) &mdash; not reported as gone</summary>' + table(unv) + '</details>' : '');
@@ -9911,7 +9963,7 @@
     const srcs = asList(d.sources);
     if (srcs.length) {
       h.push('<div id="covSources" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;font-size:11.5px;">' + srcs.map(s =>
-        '<span class="covSource" data-read="' + (s.read ? '1' : '0') + '" style="padding:3px 8px;border:1px solid ' + (s.read ? '#d0d7de' : '#d4a72c') + ';border-radius:12px;background:' + (s.read ? '#f6f8fa' : '#fff8c5') + ';" title="' + esc((s.source || '') + (s.readUtc ? ' -- read ' + s.readUtc : '') + (s.note ? ' -- ' + s.note : '')) + '">' +
+        '<span class="covSource" data-read="' + (s.read ? '1' : '0') + '" style="padding:3px 8px;border:1px solid ' + (s.read ? '#d0d7de' : '#d4a72c') + ';border-radius:12px;background:' + (s.read ? '#f6f8fa' : '#fff8c5') + ';" title="' + esc((s.source || '') + (s.readUtc ? ' -- read ' + fmtTime(s.readUtc) : '') + (s.note ? ' -- ' + s.note : '')) + '">' +
         '<b>' + esc(s.workload || '') + '</b> ' + (s.read ? ('&#10003; ' + esc(String(s.items || 0)) + ' read') : ('<span style="color:#9a6700;font-weight:600;">not checked</span> &mdash; ' + esc(s.reason || 'could not be read'))) + '</span>').join('') + '</div>');
     }
     // Filters.
@@ -10197,7 +10249,7 @@
           (can ? '<th style="width:22px;"><input type="checkbox" class="discKindAll" data-kind="' + esc(k) + '"></th>' : '') +
           '<th>' + esc(kinds[k] || k) + ' (' + g.length + ')</th><th>' + (ign ? 'Ignored' : (role ? 'Create means' : 'Create adds')) + '</th>' + (can ? '<th style="width:170px;"></th>' : '') + '</tr></thead><tbody>');
         for (const x of g) {
-          const what = ign ? esc(((x.decidedBy || '') + ' ' + String(x.decidedUtc || '').substring(0, 16).replace('T', ' ')).trim())
+          const what = ign ? esc(((x.decidedBy || '') + ' ' + fmtTime(x.decidedUtc)).trim())
             : (role ? 'accept into the role catalog' : ('permission group <b>' + esc(x.groupName || '') + '</b>' + (x.level != null ? ' (L' + esc(String(x.level)) + ')' : '')));
           const staged = x.state === 'staged' ? ' <span style="color:#9a6700;font-size:11px;">staged -- in Review &amp; commit</span>' : '';
           h.push('<tr data-key="' + esc(x.key) + '">' +
@@ -10453,7 +10505,7 @@
     if (c.error) parts.push(`<div style="color:#cf222e;">${esc(c.error)}</div>`);
     if (lr) {
       const when = lr.finishedUtc || lr.startedUtc;
-      parts.push(`<div>Last ${verb}: <b style="color:${stateColor[lr.state] || '#24292f'}">${esc(lr.state || 'unknown')}</b> at ${esc(when)}` +
+      parts.push(`<div>Last ${verb}: <b style="color:${stateColor[lr.state] || '#24292f'}">${esc(lr.state || 'unknown')}</b> at ${esc(fmtTime(when))}` +
         (lr.version ? ` &middot; version ${esc(lr.version)}` : '') + (lr.trigger ? ` <span style="color:#8c959f;">(${esc(lr.trigger)})</span>` : '') +
         (lr.failures > 1 ? ` &middot; <span style="color:#cf222e;">${esc(String(lr.failures))} failures in a row</span>` : '') + `</div>` +
         (lr.detail ? `<div style="color:#57606a;">${esc(lr.detail)}</div>` : ''));
@@ -10461,7 +10513,7 @@
       parts.push(`<div>Last ${verb}: <i>none recorded yet</i></div>`);
     }
     if (c.nextDueText) parts.push(`<div>Next ${verb}: <b>${esc(c.nextDueText)}</b></div>`);
-    if (c.runNowPending) parts.push(`<div style="color:#0969da;">Run now requested at ${esc(c.runNowRequestedUtc)}${c.runNowRequestedBy ? ' by ' + esc(c.runNowRequestedBy) : ''} &mdash; runs on the next trigger (within ${esc(String(c.triggerMinutes || 5))} minutes)</div>`);
+    if (c.runNowPending) parts.push(`<div style="color:#0969da;">Run now requested at ${esc(fmtTime(c.runNowRequestedUtc))}${c.runNowRequestedBy ? ' by ' + esc(c.runNowRequestedBy) : ''} &mdash; runs on the next trigger (within ${esc(String(c.triggerMinutes || 5))} minutes)</div>`);
     parts.push(`<div style="color:#8c959f;">${esc(c.source === 'default' ? 'No cadence set here yet: the default applies (every 1440 min = daily, enabled).' : (c.note || ''))} Allowed ${esc(String(j.minIntervalMinutes || 5))}&ndash;${esc(String(j.maxIntervalMinutes || 1440))} min; the ${esc(c.jobName || 'job')} job checks every ${esc(String(c.triggerMinutes || 5))} min.</div>`);
     const btnLabel = (verb === 'publish') ? 'Publish now' : 'Run pull now';
     const btn = canEdit ? `<div style="margin-top:4px;"><button class="govCadRunNow" data-name="${esc(j.name)}">${btnLabel}</button> <span id="govCadRunMsg" style="font-size:11.5px;"></span></div>`
@@ -10603,7 +10655,7 @@
       h.push('<div id="bgPending" style="margin:6px 0 10px;padding:8px 10px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;font-size:12px;">');
       h.push('<div style="font-weight:700;color:#9a6700;">Change requested by ' + who + ' &mdash; ' +
         (rq.isMaker ? '<span id="bgAwaiting">awaiting approval by another SuperAdmin</span>' : 'awaiting a second SuperAdmin') + '</div>');
-      h.push('<div style="margin-top:4px;">Raised ' + esc(homeFmtWhen(rq.createdUtc)) + ' &middot; <b>expires ' + esc(homeFmtWhen(rq.expiresUtc)) + '</b> (' + esc(String(rq.expiresUtc || '')) + ')</div>');
+      h.push('<div style="margin-top:4px;">Raised ' + esc(homeFmtWhen(rq.createdUtc)) + ' &middot; <b>expires ' + esc(homeFmtWhen(rq.expiresUtc)) + '</b> (' + esc(fmtTime(rq.expiresUtc)) + ')</div>');
       h.push('<div style="margin-top:4px;">Justification: <i>' + esc(String(rq.justification || '')) + '</i></div>');
       h.push('<div style="margin-top:4px;">What it changes:</div>' + bgDiffHtml(esc, rq.added, rq.removed));
       if (rq.onlySuperAdmin && rq.onlySuperAdminNote) h.push('<div class="bgOnlySuper" style="color:#cf222e;margin-top:4px;">' + esc(String(rq.onlySuperAdminNote)) + '</div>');
@@ -10744,7 +10796,7 @@
     if (emergency.active) {
       h.push(`<div style="margin-top:6px;padding:10px;border:1px solid #cf222e;border-radius:6px;background:#fff5f5;font-size:12.5px;">` +
         `<b>ACTIVE</b> &mdash; approval disabled on <b>${esc((emergency.scopeGroupTags || []).filter(Boolean).join(', ') || 'ALL approval-protected groups')}</b> ` +
-        `until <b>${esc(emergency.expiresAtUtc || '')}</b> UTC (by ${esc(emergency.activatedBy || '')}; reason: ${esc(emergency.reason || '-')}). ` +
+        `until <b>${esc(fmtTime(emergency.expiresAtUtc))}</b> (by ${esc(emergency.activatedBy || '')}; reason: ${esc(emergency.reason || '-')}). ` +
         `Engine-applied so far: ${esc(((emergency.appliedGroups || []).filter(Boolean).join(', ')) || '(pending next engine run)')}` +
         `${PIM_ROLE === 'SuperAdmin' ? ' <button id="govEmRestore" style="margin-left:8px;">Restore now</button>' : ''}</div>`);
     } else if (PIM_ROLE === 'SuperAdmin') {
@@ -10780,8 +10832,8 @@
         // BUG-185: the override is RECORDED and QUEUED -- the engine switches approval off on its next run.
         // Never "active"; the server's note says when it takes effect, and it survives the re-render.
         _emLastNote = (r && r.inEffect === false) || (r && r.queued)
-          ? ('QUEUED, not yet in effect: ' + (r.note || 'the engine applies it on its next run') + (r.expiresAtUtc ? ' (expires ' + r.expiresAtUtc + ' UTC)' : ''))
-          : ('Recorded' + (r && r.expiresAtUtc ? ' until ' + r.expiresAtUtc + ' UTC' : '') + (r && r.note ? ' -- ' + r.note : ''));
+          ? ('QUEUED, not yet in effect: ' + (r.note || 'the engine applies it on its next run') + (r.expiresAtUtc ? ' (expires ' + fmtTime(r.expiresAtUtc) + ')' : ''))
+          : ('Recorded' + (r && r.expiresAtUtc ? ' until ' + fmtTime(r.expiresAtUtc) : '') + (r && r.note ? ' -- ' + r.note : ''));
         await renderSettingsEmergencySection(host);
       } catch (e2) { status.textContent = 'Not activated: ' + ((e2 && e2.body && e2.body.error) || e2.message); status.style.color = '#cf222e'; }
     };
@@ -10854,7 +10906,7 @@
     const items = plan.items || [];
     const short = (v) => { const t = (v === null || v === undefined) ? '(not set)' : (typeof v === 'string' ? v : JSON.stringify(v)); return t.length > 160 ? t.slice(0, 160) + '…' : t; };
     const pick = (o, k) => (o && typeof o === 'object' && k in o) ? o[k] : undefined;
-    msg.textContent = 'From ' + (plan.source || 'another environment') + (plan.exportedUtc ? ', exported ' + String(plan.exportedUtc).slice(0, 16).replace('T', ' ') + ' UTC' : '') + '.'; msg.style.color = '#57606a';
+    msg.textContent = 'From ' + (plan.source || 'another environment') + (plan.exportedUtc ? ', exported ' + fmtTime(plan.exportedUtc) : '') + '.'; msg.style.color = '#57606a';
     let h = '<table class="set-table" id="copyPlanTbl" style="font-size:12px;"><tr><th></th><th>Section</th><th>Setting</th><th>What changes (current &rarr; new)</th></tr>';
     items.forEach(it => {
       const same = it.state === 'same';
@@ -11087,7 +11139,7 @@
              const ok = w.state === 'live', plan = w.state === 'plan-only';
              const bg = ok ? '#1a7f37' : (plan ? '#9a6700' : '#cf222e');
              const ago = (w.minutesAgo === null || w.minutesAgo === undefined) ? 'never seen' : (w.minutesAgo < 1 ? 'just now' : w.minutesAgo < 120 ? w.minutesAgo + ' min ago' : Math.round(w.minutesAgo / 60) + ' h ago');
-             return '<span class="hw-pill" data-type="' + esc(w.type) + '" data-state="' + esc(w.state) + '" title="' + esc(w.type + ': ' + w.state + (w.lastSeenUtc ? ', last seen ' + w.lastSeenUtc : '')) + '" style="padding:2px 9px;border-radius:10px;color:#fff;background:' + bg + ';font-weight:600;">' +
+             return '<span class="hw-pill" data-type="' + esc(w.type) + '" data-state="' + esc(w.state) + '" title="' + esc(w.type + ': ' + w.state + (w.lastSeenUtc ? ', last seen ' + fmtTime(w.lastSeenUtc) : '')) + '" style="padding:2px 9px;border-radius:10px;color:#fff;background:' + bg + ';font-weight:600;">' +
                     (ok ? '&#x25CF; ' : '&#x25CB; ') + esc(hwJobs[w.type] || w.type) + ' &middot; ' + esc(plan ? 'plan-only' : ago) + '</span>';
            }).join('') + '</div>' +
            (allOk ? '' : '<div style="color:#57606a;margin-top:5px;">A red job has not checked in recently: its scheduled task on the worker has stopped, or the worker lost its network. The continuous sync must check in every few minutes.</div>') +
@@ -11159,7 +11211,7 @@
     const close = () => { closed = true; if (timer) clearTimeout(timer); ov.remove(); };
     document.getElementById('hadLiveClose').onclick = close;
     ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
-    const fmtTime = (u) => { try { return new Date(u).toLocaleTimeString(); } catch (_) { return String(u || ''); } };
+    const fmtPass = (u) => fmtTime(u, { seconds: true }).slice(11) || String(u || '');   // BRAND-2.10: local clock time
     async function tick() {
       if (closed) return;
       if (!document.getElementById('hadLivePause').checked) {
@@ -11173,7 +11225,7 @@
             st.style.color = '#ffd33d';
           } else {
             const last = live.passes[live.passes.length - 1];
-            st.textContent = 'worker ' + (live.host || '?') + ' · pass ' + fmtTime(last.utc) + ' · every ' + (live.pauseSeconds || '?') + ' s · TTL membership ' + (live.pamEnabled ? 'ON' : 'off') + (age != null && age > 30 ? ' · ⚠ no pass for ' + age + ' s' : '');
+            st.textContent = 'worker ' + (live.host || '?') + ' · pass ' + fmtPass(last.utc) + ' · every ' + (live.pauseSeconds || '?') + ' s · TTL membership ' + (live.pamEnabled ? 'ON' : 'off') + (age != null && age > 30 ? ' · ⚠ no pass for ' + age + ' s' : '');
             st.style.color = (age != null && age > 30) ? '#ff5c5c' : '#3fdc5a';
             const showAll = document.getElementById('hadLiveAll').checked;
             const lines = (last.lines || []);
@@ -11187,7 +11239,7 @@
             });
             flush();
             const main = document.getElementById('hadLiveMain');
-            main.innerHTML = '<div style="color:#8aa4c8;">' + esc(fmtTime(last.utc) + '  ' + (last.summary || '')) + '</div><br>' +
+            main.innerHTML = '<div style="color:#8aa4c8;">' + esc(fmtPass(last.utc) + '  ' + (last.summary || '')) + '</div><br>' +
               out.map(l => '<div style="color:' + (col[l.k] || '#eee') + ';' + (/^Validating/.test(l.t) ? 'margin-top:8px;' : '') + '">' + esc(l.t) + '</div>').join('');
             const ch = (live.changes || []).slice().reverse();
             document.getElementById('hadLiveChanges').innerHTML = ch.length ? ch.map(c => '<div style="color:' + (col[c.k] || '#eee') + ';margin-bottom:4px;">' + esc(c.t) + '</div>').join('') : '<div style="color:#8aa4c8;">No add / remove since the worker started. Activate a PIM group in the portal and watch it appear here.</div>';
@@ -11307,7 +11359,7 @@
     let data;
     const filterQs = () =>
       `category=${encodeURIComponent(auditState.category)}&q=${encodeURIComponent(auditState.q)}` +
-      `&months=${encodeURIComponent(auditState.months)}&from=${encodeURIComponent(auditState.from)}&to=${encodeURIComponent(auditState.to)}`;
+      `&months=${encodeURIComponent(auditState.months)}&from=${encodeURIComponent(pimLocalDayToUtc(auditState.from, false))}&to=${encodeURIComponent(pimLocalDayToUtc(auditState.to, true))}`;
     try {
       const qs = filterQs() + `&page=${auditState.page}&pageSize=${auditState.pageSize}`;
       data = await api('GET', '/api/audit?' + qs);
@@ -11354,7 +11406,7 @@
 
     const events = data.events || [];
     h.push(`<div style="color:#57606a;font-size:11.5px;margin-bottom:4px;">${fmtNum(data.matchCount || 0)} match(es)${(auditState.category !== 'all' || auditState.q) ? ' for the current filter' : ''} &mdash; page ${data.page} of ${data.pageCount}.</div>`);
-    h.push('<table class="grid" style="font-size:11.5px;"><thead><tr><th>When (UTC)</th><th>Actor</th><th>Category</th><th>Action</th><th>Target</th><th>Result</th><th>Change (before &rarr; after)</th></tr></thead><tbody>');
+    h.push('<table class="grid" style="font-size:11.5px;"><thead><tr><th>When</th><th>Actor</th><th>Category</th><th>Action</th><th>Target</th><th>Result</th><th>Change (before &rarr; after)</th></tr></thead><tbody>');
     if (events.length === 0) {
       h.push('<tr><td colspan="7" style="color:#57606a;padding:10px;">No events match the current filter.</td></tr>');
     } else {
@@ -11362,7 +11414,7 @@
         const res = (e.result || 'ok');
         const resColor = (res === 'ok') ? '#1a7f37' : (res === 'denied' || res === 'failed' || res === 'error') ? '#cf222e' : '#57606a';
         h.push(`<tr>` +
-          `<td style="white-space:nowrap;">${esc((e.ts || '').replace('T', ' ').substring(0, 19))}</td>` +
+          `<td style="white-space:nowrap;" title="${esc(e.ts || '')}">${esc(fmtTime(e.ts, { seconds: true }))}</td>` +
           `<td>${esc(e.actor || '')}</td>` +
           `<td>${esc(e.category || 'other')}</td>` +
           // §70.14 -- older commits were recorded as 'config.csv.save'; PIM v2 has no CSV, so never show it.
@@ -11499,7 +11551,9 @@
     const cat = (AUDIT_CATEGORIES.find(c => c.key === st.category) || { label: st.category || 'All' }).label;
     const range = (st.from || st.to) ? ((st.from || 'start') + ' to ' + (st.to || 'now'))
       : (st.months === 'all' ? 'full history' : ('last ' + st.months + ' months'));
-    const iso = (d) => d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+    // BRAND-2.10: "Printed at" is the viewer's LOCAL time with the zone named (evidence). The event rows below are the
+    // export's own UTC column ("When (UTC)") and stay exactly as exported.
+    const iso = (d) => { const z = pimTimeZoneName(); return fmtTime(d, { zone: true }) + (z ? ' (' + z + ')' : ''); };
     return '<!doctype html><html><head><meta charset="utf-8"><title>Audit trail evidence ' + esc(iso(when)) + '</title><style>' +
       'body{font:11px Segoe UI,Arial,sans-serif;color:#000;background:#fff;margin:18px;}h1{font-size:16px;margin:0 0 6px;}' +
       'table.meta td{padding:1px 10px 1px 0;vertical-align:top;}table.ev{border-collapse:collapse;width:100%;margin-top:10px;}' +
@@ -12981,7 +13035,7 @@
     // [M6] overdue badge -- the job missed its scheduled fire window (didn't fire).
     if (j.overdue) {
       const by = (j.overdueByMinutes != null && j.overdueByMinutes > 0) ? (' ' + jobMinsAgo(j.overdueByMinutes)) : '';
-      html += ' <span title="' + esc0('expected by ' + (j.expectedRunUtc || '') + '') + '" style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#fff1d6;color:#9a6700;">overdue' + by + '</span>';
+      html += ' <span title="' + esc0('expected by ' + fmtTime(j.expectedRunUtc)) + '" style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#fff1d6;color:#9a6700;">overdue' + by + '</span>';
     }
     return html;
   }
@@ -13140,9 +13194,9 @@
     const tone = { committed: '#0969da', applying: '#8250df', applied: '#1a7f37', failed: '#cf222e', ok: '#1a7f37', error: '#cf222e' };
     if (!rows.length) { host.innerHTML = '<div style="color:#57606a;font-size:12.5px;padding:18px 0;">Nothing committed recently.</div>'; return; }
     host.innerHTML = '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;">' +
-      '<thead><tr style="text-align:left;border-bottom:1px solid #d0d7de;"><th style="padding:6px 8px;">When (UTC)</th><th style="padding:6px 8px;">Type</th><th style="padding:6px 8px;">What</th><th style="padding:6px 8px;">By</th><th style="padding:6px 8px;">State</th></tr></thead><tbody>' +
+      '<thead><tr style="text-align:left;border-bottom:1px solid #d0d7de;"><th style="padding:6px 8px;">When</th><th style="padding:6px 8px;">Type</th><th style="padding:6px 8px;">What</th><th style="padding:6px 8px;">By</th><th style="padding:6px 8px;">State</th></tr></thead><tbody>' +
       rows.slice(0, 60).map(r => '<tr style="border-bottom:1px solid #eaeef2;">' +
-        '<td style="padding:6px 8px;vertical-align:top;color:#57606a;white-space:nowrap;">' + esc(String(r.when).replace('T', ' ').substring(0, 19)) + '</td>' +
+        '<td style="padding:6px 8px;vertical-align:top;color:#57606a;white-space:nowrap;">' + esc(fmtTime(r.when, { seconds: true })) + '</td>' +
         '<td style="padding:6px 8px;vertical-align:top;">' + esc(r.type) + '</td>' +
         '<td style="padding:6px 8px;vertical-align:top;">' + esc(r.what) + (r.detail ? '<div style="color:#cf222e;font-size:11px;">' + esc(r.detail) + '</div>' : '') + '</td>' +
         '<td style="padding:6px 8px;vertical-align:top;">' + esc(r.who) + '</td>' +
@@ -13463,7 +13517,7 @@
         '<td style="padding:6px 8px;"><span style="display:inline-block;padding:0 7px;border-radius:9px;font-size:11px;font-weight:600;' +
           (crit ? 'background:#ffebe9;color:#cf222e;' : 'background:#fff8c5;color:#9a6700;') + '">' + (crit ? 'critical' : 'warning') + '</span></td>' +
         '<td style="padding:6px 8px;"><b>' + esc0(g.title || g.guardId) + '</b><div style="color:#8c959f;font-size:11px;">' + esc0(g.guardId) + (g.area ? ' &middot; ' + esc0(g.area) : '') + ' &middot; ' + esc0(g.outcome) + '</div></td>' +
-        '<td style="padding:6px 8px;white-space:nowrap;" title="first seen ' + esc0(g.firstSeenUtc) + '">' + jobTimeAgo(g.lastSeenUtc) + '<div style="color:#8c959f;font-size:11px;">' + esc0(g.tripCount) + ' time(s)</div></td>' +
+        '<td style="padding:6px 8px;white-space:nowrap;" title="first seen ' + esc0(fmtTime(g.firstSeenUtc)) + '">' + jobTimeAgo(g.lastSeenUtc) + '<div style="color:#8c959f;font-size:11px;">' + esc0(g.tripCount) + ' time(s)</div></td>' +
         '<td style="padding:6px 8px;font-size:11.5px;">' + (vals || '&mdash;') + (thr ? '<div style="color:#8c959f;">limit: ' + thr + '</div>' : '') + '</td>' +
         '<td style="padding:6px 8px;font-size:11.5px;max-width:360px;">' + esc0(g.actionText || '') + '</td></tr>';
     }).join('');
@@ -13640,10 +13694,10 @@
           '<td style="padding:6px 8px;">' + cadenceCell + '</td>' +
           '<td style="padding:6px 8px;">' + enabledCell + '</td>' +
           '<td style="padding:6px 8px;">' + jobStatusPill(j) + hybridWorkerBadge(j) + '</td>' +
-          '<td style="padding:6px 8px;" title="' + esc0(j.lastRunUtc || '') + '">' + lastCell + '</td>' +
+          '<td style="padding:6px 8px;" title="' + esc0(fmtTime(j.lastRunUtc, { seconds: true })) + '">' + lastCell + '</td>' +
           '<td style="padding:6px 8px;max-width:280px;">' + result + '</td>' +
-          '<td style="padding:6px 8px;" title="' + esc0(j.nextRunUtc || '') + (j.nextRunSynthesized ? ' (computed from cadence)' : '') +
-            (j.lastFinishedUtc && j.intervalMinutes ? esc0(' = last run finished ' + j.lastFinishedUtc + ' + ' + j.intervalMinutes + ' min') : '') + '">' + (j.overdue ? '<span style="color:#9a6700;font-weight:600;">' : '') + nextCell + (j.overdue ? '</span>' : '') + '</td>' +
+          '<td style="padding:6px 8px;" title="' + esc0(fmtTime(j.nextRunUtc)) + (j.nextRunSynthesized ? ' (computed from cadence)' : '') +
+            (j.lastFinishedUtc && j.intervalMinutes ? esc0(' = last run finished ' + fmtTime(j.lastFinishedUtc) + ' + ' + j.intervalMinutes + ' min') : '') + '">' + (j.overdue ? '<span style="color:#9a6700;font-weight:600;">' : '') + nextCell + (j.overdue ? '</span>' : '') + '</td>' +
           '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' + (j.type === 'hybrid-ad-sync' ? '<button class="btn-sec jobsHybridLive" title="Watch the continuous PIM-for-AD sync live (TTL checks, adds, removes)">Live view</button> ' : '') + runBtn + ' ' + histBtn + ' ' + ackBtn + ' ' + logBtn + '</td>' +
           '</tr>');
       });
@@ -13815,7 +13869,7 @@
       const when = jobTimeAgo(r.startedUtc || r.finishedUtc);
       const dur = (r.durationMs >= 1000) ? fmtNum(Math.round(r.durationMs / 100) / 10) + 's' : (fmtNum(r.durationMs || 0) + 'ms');
       return '<div style="padding:5px 0;border-bottom:1px solid #eaeef2;font-size:12px;">' +
-        badge + ' <span style="color:#57606a;" title="' + esc0(r.startedUtc || '') + '">' + esc0(when) + '</span>' +
+        badge + ' <span style="color:#57606a;" title="' + esc0(fmtTime(r.startedUtc, { seconds: true })) + '">' + esc0(when) + '</span>' +
         ' <span style="color:#8c959f;">(' + esc0(dur) + ')</span>' +
         (r.trigger ? ' <span style="color:#8c959f;">[' + esc0(r.reason || 'trigger') + ']</span>' : '') +
         '<div style="color:#57606a;margin-top:2px;">' + esc0(r.detail || '') + '</div>' +
@@ -13924,7 +13978,7 @@
         h += '<tr' + (r.ok ? '' : ' style="background:#fff8f6;"') + '>' +
              '<td>' + res + '</td>' +
              '<td style="font-weight:600;max-width:260px;overflow-wrap:anywhere;" title="' + esc(rawName) + '">' + esc(shownName) + '</td>' +
-             '<td style="white-space:nowrap;color:#57606a;" title="' + esc(r.startedUtc || '') + '">' + esc(jobTimeAgo(r.startedUtc || r.finishedUtc)) + '</td>' +
+             '<td style="white-space:nowrap;color:#57606a;" title="' + esc(fmtTime(r.startedUtc, { seconds: true })) + '">' + esc(jobTimeAgo(r.startedUtc || r.finishedUtc)) + '</td>' +
              '<td style="color:#57606a;">' + esc(dur) + '</td>' +
              '<td style="font-size:11.5px;max-width:560px;overflow-wrap:anywhere;" title="' + esc(r.detail || '') + '">' + esc(r.detail || '') + '</td>' +
              '<td>' + (r.runId ? '<button class="btn-sec engLogOpen" data-runid="' + esc(r.runId) + '" data-name="' + esc(r.name || '') + '" style="font-size:11px;">View log</button>' : '') + '</td>' +
@@ -14241,7 +14295,7 @@
              (azPortal ? '<div style="font-size:10.5px;"><a href="' + esc(azPortal) + '" target="_blank" rel="noopener">Open this scope\'s PIM policies in the Azure portal</a></div>' : '') +
              (lbl ? '<div style="color:#8c959f;font-size:10px;word-break:break-all;">' + esc(it.key || '') + '</div>' : '') +
              '<div style="color:#57606a;font-size:10.5px;">' + esc(it.scope || '') + ' &middot; ' + esc(it.op || '') + ' &middot; ' + esc(it.entity || '') + '</div></td>' +
-             '<td style="font-size:11px;white-space:nowrap;" title="' + esc(it.firstSeenUtc || '') + '">' + esc(jobTimeAgo(it.firstSeenUtc)) + '</td>' +
+             '<td style="font-size:11px;white-space:nowrap;" title="' + esc(fmtTime(it.firstSeenUtc)) + '">' + esc(jobTimeAgo(it.firstSeenUtc)) + '</td>' +
              '<td style="font-size:11px;">' + esc(String(it.count || 1)) + '</td>' +
              '<td style="font-size:11px;max-width:420px;word-break:break-word;color:#57606a;">' + esc(it.message || '') + '</td>' +
              '<td style="white-space:nowrap;">' + (it.fixes || []).map(fx => '<button class="btn-sec engFixOne" data-code="' + esc(code) + '" data-i="' + i + '" data-fix="' + esc(fx.id) + '" style="font-size:11px;">' + esc(fx.label) + '</button>').join(' ') + '</td></tr>';
@@ -14583,7 +14637,7 @@
                   : info.freshness === 'none'  ? 'no cache - auto-refreshes; click to refresh now'
                   : info.freshness === 'stale' ? ('stale \u2022 ' + formatAge(info.ageMs) + ' - auto-refreshes; click to refresh now')
                   : (info.freshness + ' \u2022 ' + formatAge(info.ageMs));
-      const tip = (info.refreshedUtc ? ('last refreshed ' + info.refreshedUtc) : 'never refreshed') + ' \u2014 the scheduler refreshes this every 12h; click to refresh now';
+      const tip = (info.refreshedUtc ? ('last refreshed ' + fmtTime(info.refreshedUtc)) : 'never refreshed') + ' \u2014 the scheduler refreshes this every 12h; click to refresh now';
       slot.innerHTML = `<span class="cache-badge ${cls}" title="${escapeHtml(tip)}">${escapeHtml(label)}</span>`;
       slot.querySelector('.cache-badge').onclick = () => refreshTenantLists();
     });
@@ -15325,7 +15379,7 @@
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
-  // A stored UTC timestamp as a person reads it: "2026-09-24 04:06 UTC", the exact value in the tooltip.
+  // A stored UTC timestamp as a person reads it: "2026-09-24 06:06" in the viewer's local zone (BRAND-2.10), the exact value in the tooltip.
   // §78 live GUI sweep (2026-09-24): Pending changes printed raw "2026-09-24T06:06:10.0500000" next to
   // "applied 2026-09-24T04:06:45.0395700" -- seven-digit fractions wrapping over two lines, no zone, and (BUG-251)
   // two different zones, so an entry read as applied two hours before it was requested. Same convention as the
@@ -15335,8 +15389,9 @@
     if (!s) return '';
     const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/);
     if (!m) return escapeHtml(s);
+    // BRAND-2.10: shown in the viewer's LOCAL zone; the tooltip keeps the stored value (UTC), which is allowed.
     return '<span title="' + escapeHtml(s + (/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? '' : ' (UTC)')) + '" style="white-space:nowrap;">' +
-           escapeHtml(m[1] + ' ' + m[2]) + ' UTC</span>';
+           escapeHtml(fmtTime(s)) + '</span>';
   }
 
   // Coerce a JSON value that SHOULD be a list into a real array. The server's
@@ -15394,7 +15449,7 @@
     const esc = escapeHtml;
     const thead = '<tr>' + headers.map(h => '<th>' + esc(h) + '</th>').join('') + '</tr>';
     const tbody = (rows || []).map(r => '<tr>' + r.map(c => '<td>' + esc(c) + '</td>').join('') + '</tr>').join('');
-    const when = new Date().toISOString().replace('T', ' ').replace(/\..*$/, '') + 'Z';
+    const when = fmtTime(new Date(), { seconds: true, zone: true });   // BRAND-2.10: local, zone named (a print leaves the screen)
     const tenant = (PIM_DATA && (PIM_DATA.tenantName || PIM_DATA.tenantId)) ? (PIM_DATA.tenantName || '') + ' ' + (PIM_DATA.tenantId ? '(' + PIM_DATA.tenantId + ')' : '') : '';
     const doc =
       '<!doctype html><html><head><meta charset="utf-8"><title>' + esc(title) + '</title><style>' +
@@ -18491,7 +18546,7 @@
       }
       const rows = backups.map(b =>
         '<div class="diff-row" style="display:flex;align-items:center;gap:10px;">' +
-          '<span style="color:#57606a;min-width:200px;">' + escapeHtml(b.takenUtc) + '</span>' +
+          '<span style="color:#57606a;min-width:200px;" title="' + escapeHtml(b.takenUtc || '') + '">' + escapeHtml(fmtTime(b.takenUtc, { seconds: true })) + '</span>' +
           '<span style="min-width:90px;">' + (b.rowCount || 0) + ' row(s)</span>' +
           '<span style="color:#57606a;flex:1;">' + escapeHtml(b.by || '') + ' &mdash; ' + escapeHtml(b.reason || '') + '</span>' +
           '<button data-restore="' + escapeHtml(b.id) + '" data-base="' + escapeHtml(base) + '">Restore</button>' +
@@ -21012,7 +21067,7 @@
       timer = setTimeout(async () => {
         try {
           const r = await api('GET', '/api/resolve-date?expr=' + encodeURIComponent(v.trim()));
-          if (r && r.ok) { prev.textContent = '↳ resolves to ' + r.display + ' = ' + r.utc + ' UTC'; prev.style.color = '#1a7f37'; }
+          if (r && r.ok) { prev.textContent = '↳ resolves to ' + fmtTime(r.utc) + ' (your local time)'; /* BRAND-2.10: r.utc is UTC; r.display is the SERVER's zone */ prev.style.color = '#1a7f37'; }
           else { prev.textContent = '⚠ ' + ((r && r.error) || 'cannot resolve'); prev.style.color = '#9a6700'; }
         } catch (e) { prev.textContent = ''; }
       }, 350);
@@ -22193,7 +22248,7 @@
       // 2026-09-19: the id (immutable -- what delegations point at), the former ids it still answers to, and who renamed it.
       h.push('<div class="pt-ident" style="font-size:12px;margin-top:6px;"><b>Id</b> <code>' + esc(t.id) + '</code> (never changes — delegations point at it)' +
         ((t.aliases || []).length ? '; also accepted: ' + t.aliases.map(a => '<code>' + esc(a) + '</code>').join(', ') + ' (former id)' : '') +
-        (t.renamed && t.renamed.from != null ? '; renamed from “' + esc(t.renamed.from) + '”' + (t.renamed.by ? ' by ' + esc(t.renamed.by) : '') + (t.renamed.utc ? ' at ' + esc(t.renamed.utc) : '') : '') + '</div>');
+        (t.renamed && t.renamed.from != null ? '; renamed from “' + esc(t.renamed.from) + '”' + (t.renamed.by ? ' by ' + esc(t.renamed.by) : '') + (t.renamed.utc ? ' at ' + esc(fmtTime(t.renamed.utc)) : '') : '') + '</div>');
       if (canEdit) {
         h.push('<div class="pt-rename" style="font-size:12px;margin-top:6px;"><label>Name <input class="pt-rename-input" data-id="' + esc(t.id) + '" value="' + esc(t.name || '') + '" maxlength="80" style="width:320px;font-size:12px;"></label> ' +
           '<button class="pt-rename-btn" data-id="' + esc(t.id) + '">Rename</button> <span id="pt-rename-msg-' + esc(t.id) + '" style="font-size:11px;"></span>' +
@@ -25938,7 +25993,7 @@
     if (!s) return '';
     // s arrives as ISO 8601 from the server; show as "YYYY-MM-DD HH:MM" for compactness.
     const m = String(s).match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
-    if (m) return m[1] + ' ' + m[2] + 'Z';
+    if (m) return fmtTime(s);   // BRAND-2.10: local time
     return String(s);
   }
 
@@ -26379,7 +26434,7 @@
     }
   }
 
-  // §70.1b option 2: "as of HH:MM UTC (refreshes every 2 h; Refresh queues a new read)" + the snapshot note.
+  // §70.1b option 2: "as of HH:MM (refreshes every 2 h; Refresh queues a new read)" + the snapshot note -- local time (BRAND-2.10).
   function revCadenceText(min) {
     const m = Number(min) || 120;
     return (m % 60 === 0) ? ((m / 60) + ' h') : (m + ' min');
@@ -26391,10 +26446,11 @@
     if (at) {
       if (REV.snapshotMissing) at.textContent = 'no snapshot yet (' + every + ')';
       else if (REV.loadedUtc) {
-        const m = String(REV.loadedUtc).match(/T(\d{2}:\d{2})/);
-        const day = String(REV.loadedUtc).slice(0, 10);
-        const today = new Date().toISOString().slice(0, 10);
-        at.textContent = 'as of ' + (m ? m[1] : REV.loadedUtc) + ' UTC' + (day && day !== today ? ' ' + day : '') + ' (' + every + ')';
+        // BRAND-2.10: the snapshot time in the viewer's LOCAL zone; the day only when it is not today (local).
+        const loc = fmtTime(REV.loadedUtc);
+        const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/.exec(loc);
+        const today = fmtTime(new Date(), { dateOnly: true });
+        at.textContent = 'as of ' + (m ? m[2] : loc) + (m && m[1] !== today ? ' ' + m[1] : '') + ' (' + every + ')';
       } else at.textContent = '';
       at.title = REV.snapshotHint || '';
     }
@@ -26480,7 +26536,7 @@
     const pal = { green: ['#dafbe1', '#1a7f37', '#1a7f37'], amber: ['#fff8c5', '#d4a72c', '#9a6700'], red: ['#ffebe9', '#cf222e', '#cf222e'] };
     let chip = String(w.chip || 'amber'); if (!pal[chip]) chip = 'amber';
     const state = String(w.state || 'notRun');
-    const when = w.ranUtc ? String(w.ranUtc).replace('T', ' ').replace(/:\d\dZ$/, 'Z') : '';
+    const when = w.ranUtc ? fmtTime(w.ranUtc) : '';
     const ago = (w.ageDays != null && w.ageDays !== '') ? ' (' + w.ageDays + ' day' + (Number(w.ageDays) === 1 ? '' : 's') + ' ago)' : '';
     const title = w.title || w.workload;
     let text;
@@ -27191,7 +27247,7 @@
     b.style.color = r.color;
     let tip = r.label;
     if (n.reconReason) tip += ' — ' + n.reconReason;
-    if (n.reconCrawledUtc) tip += ' (crawled ' + n.reconCrawledUtc + ')';
+    if (n.reconCrawledUtc) tip += ' (crawled ' + fmtTime(n.reconCrawledUtc) + ')';
     b.title = tip;
     const cnt = el.querySelector('.map-count');
     if (cnt) el.insertBefore(b, cnt); else el.appendChild(b);
@@ -28694,7 +28750,7 @@
       if (d) d.innerHTML = '<span style="color:#57606a">No desired workload role bindings (PIM-Assignments-Workloads is empty).</span>';
       return;
     }
-    const crawled = s.crawledUtc ? (' &middot; crawled ' + escapeHtml(s.crawledUtc)) : ' &middot; <i>not yet crawled</i>';
+    const crawled = s.crawledUtc ? (' &middot; crawled ' + escapeHtml(fmtTime(s.crawledUtc))) : ' &middot; <i>not yet crawled</i>';
     let html = '<b>Workload reconciliation</b> &mdash; ' + s.total + ' desired binding(s): ' +
       '<span style="color:#1a7f37">&#10003; ' + (s.mapped || 0) + ' mapped</span>, ' +
       '<span style="color:#cf222e">&#9888; ' + (s.missing || 0) + ' missing</span>, ' +
@@ -28710,7 +28766,7 @@
       cb.disabled = true; cb.textContent = 'Crawling...';
       try {
         const r = await api('POST', '/api/workload-crawl');
-        cb.textContent = 'Crawled ' + (r && r.crawledUtc ? r.crawledUtc : '');
+        cb.textContent = 'Crawled ' + (r && r.crawledUtc ? fmtTime(r.crawledUtc) : '');
         // Reload so the freshly-crawled recon status bakes into PIM_DATA chips.
         setTimeout(() => { location.reload(); }, 700);
       } catch (e) {

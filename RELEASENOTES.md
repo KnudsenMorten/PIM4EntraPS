@@ -14,6 +14,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.505 — Times in your own time zone
+
+- **Changed: every time the Manager shows is in your browser's local time zone** (daylight saving included), never UTC.
+  That covers the audit trail, jobs, approvals, access requests, drift, the Overview tiles and every other page.
+  - Prints made as evidence name the time zone.
+  - A date you pick (e.g. the audit trail's From / To) is your local day.
+  - Stored times, logs, exports and the API stay in UTC.
+
 ## v2.4.504 — An External Companies page, clearer portal wording
 
 - **New: the External Companies (Consultants) page**, laid out like Departments & owners.
