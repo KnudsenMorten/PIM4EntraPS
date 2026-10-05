@@ -1090,6 +1090,7 @@
     <div class="tab" data-tab="mailtemplates" title="The wording of every notification mail.">Mail templates</div>
     <!-- REQ-L: read-only list of the activation policy templates, what each sets, and which delegations use it. -->
     <div class="tab" data-tab="policytemplates" title="Every activation policy template in this tenant, what it sets in plain words, and which delegations use it (read-only).">Policy templates</div>
+    <div class="tab" data-tab="workloadtemplates" title="The workload permission templates (Defender XDR, Intune, ...): which roles each grants, its version and approval, switch a pack on or off, and import it.">Workload templates</div>
     <div class="tab" data-tab="roleperms" title="Role Lookup answers all role questions — what a role can do, which roles grant an action (least-privilege first), who can activate a role, and compare two roles.">Role Lookup</div>
     <!-- 2026-09-14: the old 'governance' tab is GONE. Its sections each got a real home: drift -> its own page
          (below), discovered resources -> its own page, job schedule -> its own page under Jobs, and access & roles,
@@ -1099,7 +1100,7 @@
     <div class="tab" data-tab="coverage" title="What PIM delegates and what it does not: every Entra role, Intune and Defender role, Power BI workspace and Azure scope with no delegation (a ready-made proposal for each, all pre-selected), orphan groups, and PIM for Groups groups PIM does not manage. Checked by the scheduler (every 12 hours by default).">Coverage &amp; gaps</div>
     <div class="tab" data-tab="audit" title="The audit trail you can defend — filter and search every change by entity, actor or date range, see before → after, and export the whole trail.">Audit</div>
     <div class="tab" data-tab="reports" title="&quot;Who can do what&quot; (and the reverse) — pick a person to see everything they can reach, or pick a role to see who can activate it. Printable + exportable.">Reports</div>
-    <div class="tab" data-tab="conformance" title="Keep tenants current with the approved delegation templates — see how far behind each tenant is and roll the updates forward.">Template Rollout</div>
+    <div class="tab" data-tab="conformance" title="Keep tenants current with the approved delegation templates — see how far behind each tenant is and roll the updates forward.">Tenant Baseline</div>
     <div class="tab" data-tab="downlink" title="MSP downlink — which of your central admins and roles reach each managed customer, what was held back and why, and the per-relationship projection policy.">MSP Downlink <span id="downlinkUnresBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
     <!-- REQ-N / REQ-O (operator 2026-09-19): the managing tenant's managed-tenant registry and replication overview. MANAGING TENANT
          ONLY -- hidden until the tenant mode says msp-master (applyMspMasterOnlyTabs), and the server refuses elsewhere. -->
@@ -1641,6 +1642,11 @@
     </div>
   </div>
   <!-- =========== REQ-L: Policy templates (read-only) =========== -->
+  <div id="workloadtemplatesTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="workloadtemplatesBody">
+      <div id="setTemplatePacksHost"><div style="color:#57606a;font-size:12px;">Loading workload templates&hellip;</div></div>
+    </div>
+  </div>
   <div id="policytemplatesTab" class="tab-panel">
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="policytemplatesBody">
       <div style="color:#57606a;font-size:12px;">Loading policy templates&hellip;</div>
@@ -2364,8 +2370,8 @@
         // cross-link (anchor) into the ONE Discovery page, opened on its New view: create what discovery found without going
         // through Audit & Settings. Discovery itself stays listed there.
         // Operator 2026-10-01 (screenshot): moved up, right under Create access -- it is creation, not a table.
-        { tab: 'discovery', anchor: 'discInbox', discView: 'new', label: 'Create Discovered Resources',
-          desc: 'New Azure scopes, Power BI workspaces, administrative units and roles found in the tenant: tick them and Create -- staged in Pending changes, committed under Review & commit' },        // 🔴 REQ-GRID (operator 2026-09-20: "this name and page is also misleading"). This entry read
+        { tab: 'discovery', anchor: 'discInbox', discView: 'new', label: 'Discovery: create what is new',
+          desc: 'What is new in the tenant -- Azure subscriptions and management groups, Power BI workspaces, administrative units, Entra, Defender XDR and Intune roles: tick and Create (staged in Pending changes), or ignore it' },        // 🔴 REQ-GRID (operator 2026-09-20: "this name and page is also misleading"). This entry read
         // "Change existing access ... Nothing new is created here" while the page it opens is headed
         // "Create & change access" and two of its four cards CREATE: Duplicate an existing group makes
         // groups, Import administrators makes admin rows. The menu and the page contradicted each
@@ -2375,10 +2381,7 @@
         // instead of denying that this one creates at all.
         { tab: 'accounts',   label: 'Admin accounts & TAP',  desc: 'The privileged accounts themselves: update one, issue or reset its Temporary Access Pass, flag it for offboarding' },
         { tab: 'onboarding', label: 'Invite a guest or consultant', desc: 'B2B guest invitation into the delegation model, and enable/disable a managed consultant account' },
-        // Departments decide WHO APPROVES and WHO IS MAILED for everything above (the owner chain
-        // is Owners -> SponsorUpn -> the Department contact), so they belong where access is
-        // granted. REQ-D (2026-09-19): their OWN page now, no longer a section of Settings.
-        { tab: 'departments', label: 'Departments & owners', desc: 'Who sponsors a delegation, and who therefore receives its approvals and mail. A department, not a named person, so it survives reorganisations' },
+
         // 🔴 71.26 -- THE DELEGATION GRID, WITH A NAME THAT SAYS WHAT IT IS FOR (operator 2026-09-16:
         // *"i am missing the grid overview (maybe it is in there, so i quickly can change an existing
         // delegation like eligibility from 90 to 365 or change the policy to approval. i dont see that
@@ -2453,11 +2456,14 @@
         // §79.8 / §79.7 decision: the PIM owner page -- a department owner's own people, and their access end dates.
         { tab: 'owner',        label: 'My people',        desc: 'People in the departments you own — see when their access ends and extend it' },
         // §82: requests to have a disabled admin account enabled for a while + the company reviews of external consultants.
+        // Operator 2026-10-05 ("why are department and owners under access ... move dept to review & controls with
+        // consultants"): the departments and their Owners are who REVIEW and APPROVE -- they sit with the reviews, beside
+        // the external companies. REQ-D (2026-09-19): their own page, not a section of Settings.
+        { tab: 'departments', label: 'Departments & owners', desc: 'Who sponsors a delegation, and who therefore receives its approvals and mail. A department, not a named person, so it survives reorganisations' },
         { tab: 'accessrequests', label: 'Access requests (RFA portal)', desc: 'The request portal link, requests to enable a disabled admin account for a while, and IT overrides' },
         // Operator 2026-10-05 ("consultants mgmt in gui, i dont see it"): the consultant companies + their reviews get their own
         // menu entry -- a deep link to the section on the same page (marked data-anchor, so the nav audit reads it as deliberate).
-        { tab: 'accessrequests', anchor: 'rfaConsultants', label: 'Consultants & companies', desc: 'The external companies, their consultants, and the company reviews that keep them confirmed' },
-        { tab: 'conformance',  label: 'Tenant conformance', desc: 'Whether a tenant matches the standard it should' },
+        { tab: 'accessrequests', anchor: 'rfaConsultants', label: 'External Companies (Consultants)', desc: 'The external companies, their consultants, and the company reviews that keep them confirmed' },
         { tab: 'reports',      label: 'Reports',          desc: 'Evidence you can hand to an auditor' },
         { tab: 'downlink',     label: 'Managed tenants',  desc: 'Push and check configuration in tenants you manage' },
         // REQ-N / REQ-O (operator 2026-09-19): managing tenant only (applyMspMasterOnlyTabs hides them elsewhere).
@@ -2471,8 +2477,6 @@
         { tab: 'settings', label: 'Settings',    desc: 'Naming, filters, operational policy, alerting and permission templates' },
         // 2026-09-14 (operator: "we need a new menu-item under audit and settings with Newly discovered resources and
         // relevant settings. they are the wrong place").
-        { tab: 'discovery', label: 'Discovery',
-          desc: 'What is new in the tenant -- Azure subscriptions and management groups, Power BI workspaces, new Entra, Defender XDR and Intune roles: create it in PIM or ignore it' },
         // REQ-S (operator 2026-09-19): every menu item opens its OWN page -- never an anchor into Settings, where a section
         // cannot be permissioned on its own. The two emergency items are ONE page ("why 2 emergency menu items"): the
         // override and the break-glass accounts (IMP-39, SQL) are one subject.
@@ -2481,6 +2485,10 @@
         { tab: 'mailtemplates', label: 'Mail templates', desc: 'The wording of every notification mail — edit in place, reset to the shipped default' },
         // REQ-L (operator 2026-09-19: "i dont see the different policies anymore"): its own read-only page.
         { tab: 'policytemplates', label: 'Policy templates', desc: 'Every activation policy template: what it sets in plain words (duration, MFA, approval, expiry, notifications) and which delegations use it' },
+        { tab: 'workloadtemplates', label: 'Workload templates', desc: 'The workload permission templates (Defender XDR, Intune, ...): the roles each grants, its version and approval, on or off' },
+        // Operator 2026-10-05: 'Tenant conformance' is the TENANT BASELINE -- how this tenant (and the fleet) compares with the
+        // approved templates; it sits with the templates it rolls out.
+        { tab: 'conformance',  label: 'Tenant Baseline', desc: 'How this tenant (and every managed tenant) compares with the approved templates, and roll a version out by ring' },
 
         { tab: 'support',  label: 'Support',     desc: 'Diagnostics and help' },
       ] },
@@ -2780,7 +2788,7 @@
     jobschedule: { title: 'What this is & how to use it', what: 'The job schedule &mdash; every scheduled job, the area it covers, whether it is on and how often it runs.', how: ['Change on/off or the interval and Save (SuperAdmin); it applies from the next scheduler tick.', 'Run history, failures and Run now are on the Jobs page.'] },
     audit:       { title: 'What this is & how to use it', what: 'The append-only audit trail &mdash; every login, delegation, account, approval, engine and break-glass event.', how: ['Filter by category or free-text search; the window defaults to the last 3 months &mdash; widen it to 12 months or the full history. Newest first.'] },
     reports:     { title: 'What this is & how to use it', what: '"Who can do what" (and the reverse) &mdash; pick a person to see everything they reach, or a role to see who can activate it.', how: ['Choose forward or reverse, run the report, then print or export.'], legend: true },
-    conformance: { title: 'What this is & how to use it', what: 'Template Rollout &mdash; how far each tenant is behind the approved delegation templates, and roll updates forward.', how: ['Review the gap per tenant; rollout is ring-driven and approval-gated.'] },
+    conformance: { title: 'What this is & how to use it', what: 'Tenant Baseline &mdash; how far each tenant is behind the approved delegation templates, and roll updates forward.', how: ['Review the gap per tenant; rollout is ring-driven and approval-gated.'] },
     // REQ-N / REQ-O (managing tenant only)
     msptenants:  { title: 'What this is & how to use it', what: 'The managed tenants this managing tenant replicates to &mdash; name, tenant id, the managing tenant&rsquo;s copy of each tenant&rsquo;s ring, and the tags a replication Target names.', how: ['Edit a row or register a new tenant (SuperAdmin); every save is audited, read back and requests a publish.', 'The ring is only the managing tenant&rsquo;s copy: each managed tenant&rsquo;s own ring decides what its pull accepts.'] },
     replication: { title: 'What this is & how to use it', what: 'Every replicable admin, membership, group, nesting and binding on this managing tenant, and which managed tenants it reaches &mdash; computed on the server by the same plan every tenant runs.', how: ['Pick a tenant to see what it gets, a kind to narrow the list, or show only rows that reach no tenant.', 'Change a row&rsquo;s Replicate / Ring / Target in its wizard or the records grid; Recompute runs the plan again.'] },
@@ -2865,6 +2873,7 @@
     if (name === 'emergency') { renderSettingsBreakGlassSection(document.getElementById('setBreakGlassHost')); renderSettingsEmergencySection(document.getElementById('setEmergencyHost')); }
     if (name === 'mailtemplates') renderMailTemplatesSection(document.getElementById('setMailTemplatesHost'));
     if (name === 'policytemplates') renderPolicyTemplatesPage();   // REQ-L
+    if (name === 'workloadtemplates') renderTemplatePacksSection(document.getElementById('setTemplatePacksHost'));   // operator 2026-10-05: its own page
     if (name === 'roleperms') renderRolePerms();
     if (name === 'drift') renderDrift();
     if (name === 'coverage') renderCoverage();
@@ -7632,7 +7641,7 @@
     // 2026-09-14: permission template packs and mail templates -- formerly in the Governance page's collapsed
     // "Configuration" zone -- are their own sections here, expanded (operator: "maybe it must be moved and expanded by
     // default"; "this should also go into settings"). The job schedule went to its own page under Jobs.
-    h += `<div id="setTemplatePacksHost" style="margin-top:18px;"><div style="color:#57606a;font-size:12px;">Loading permission template packs…</div></div>`;
+    // The permission template packs moved to their own page, Audit & Settings > Workload templates (operator 2026-10-05).
     h += `<div id="setCopyHost" style="margin-top:18px;"></div>`;
 
     body.innerHTML = h;
@@ -7642,7 +7651,6 @@
     // its own handlers (the IMP-20 "adopt the Governance DOM node" workaround is gone with that page). Role gates are
     // inside each renderer, unchanged: role mapping + break-glass SuperAdmin, template toggles + mail edit Admin+.
     // Verified by tests/gui-headless/config-zone-wiring.js (every control present AND wired in its new home).
-    renderTemplatePacksSection(document.getElementById('setTemplatePacksHost'));
     renderSettingsCopySection(document.getElementById('setCopyHost'));
     renderEnvironmentNameSection(document.getElementById('setEnvNameHost'));
     renderAdminDomainSection(document.getElementById('setAdminDomainHost'));
@@ -8463,6 +8471,23 @@
   }
   // §82 ACCESS REQUESTS (operator 2026-09-30 / 2026-10-02): the Manager's half of RFA + the company reviews. The engine
   // (rfa-sync, company-review) does the work; this page shows the state and records decisions.
+  // The IT override's admin picker: every DEFINED admin (Account-Definitions-Admins), disabled accounts first -- an
+  // override is for an account that is off. Value = the UPN the override API takes.
+  async function rfaFillAdminPicker() {
+    const sel = document.getElementById('rfaOvUpn');
+    if (!sel || sel.tagName !== 'SELECT') return;
+    let rows = [];
+    try { const r = await api('GET', '/api/csv/' + encodeURIComponent('Account-Definitions-Admins')); rows = (r && r.rows) || []; } catch (_) { rows = []; }
+    const pick = (o, k) => String((o && o[k]) || '').trim();
+    const items = rows.map(r => ({ upn: pick(r, 'UserPrincipalName'), name: pick(r, 'DisplayName'), off: /^disabled$/i.test(pick(r, 'AccountStatus')) }))
+      .filter(x => x.upn).sort((a, b) => a.upn.toLowerCase() < b.upn.toLowerCase() ? -1 : 1);
+    const opt = x => '<option value="' + escapeHtml(x.upn) + '">' + escapeHtml(x.upn) + (x.name ? ' &mdash; ' + escapeHtml(x.name) : '') + '</option>';
+    const off = items.filter(x => x.off), on = items.filter(x => !x.off);
+    sel.innerHTML = '<option value="">' + (items.length ? 'Choose an admin&hellip;' : 'No admins are defined') + '</option>' +
+      (off.length ? '<optgroup label="Disabled (an override enables them)">' + off.map(opt).join('') + '</optgroup>' : '') +
+      (on.length ? '<optgroup label="Enabled">' + on.map(opt).join('') + '</optgroup>' : '');
+  }
+
   async function renderAccessRequests() {
     const host = document.getElementById('accessRequestsBody');
     if (!host) return;
@@ -8472,25 +8497,32 @@
     try { cr = await api('GET', '/api/company-reviews'); } catch (_) { cr = null; }
     const fmt = function (v) { if (!v) return ''; const t = new Date(v); return isNaN(t) ? escapeHtml(String(v)) : t.toISOString().replace('T', ' ').slice(0, 16) + ' UTC'; };
     const stColor = { 'pending-approval': '#9a6700', approved: '#0969da', active: '#1a7f37', 'cancel-requested': '#9a6700', ended: '#57606a', cancelled: '#57606a', expired: '#57606a', denied: '#cf222e', rejected: '#cf222e', failed: '#cf222e' };
-    let h = '<h2 style="margin:0 0 6px;">Access requests</h2>' +
+    // Operator 2026-10-05 ("this page is ugly, lack of spacing, font"): the page reads like Settings -- one card per
+    // section, the reading table (not the monospace edit grid), body text at the normal size, room between sections.
+    const card = 'class="set-card" style="max-width:1200px;"';
+    const sub = 'style="color:#57606a;font-size:12.5px;margin:0 0 10px;line-height:1.5;max-width:900px;"';
+    let h = '<div style="max-width:1200px;margin-bottom:14px;"><h2 style="margin:0 0 6px;font-size:18px;">Access requests</h2>' +
       '<div class="pro-lic-banner" data-feature="rfa.portal"></div>' +
-      '<p style="color:#57606a;margin:0 0 10px;max-width:900px;">A disabled admin -- typically an external consultant -- asks to have the account <b>enabled for a set time</b>. ' +
+      '<p ' + sub + '>A disabled admin -- typically an external consultant -- asks to have the account <b>enabled for a set time</b>. ' +
       'Auto-approved departments enable it at once; otherwise any one <b>Owner of the department (internal)</b> decides within 24 hours. ' +
-      'When the time is up the account is disabled again (its roles are kept). ServiceNow can request through the API.</p>';
-    if (!d.enabled) h += '<div style="background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:8px 10px;margin-bottom:10px;">The request portal is <b>switched off</b> (Settings &gt; Features: <i>Request for authorization (RFA) portal</i>, Pro). Nothing is taken in until it is on.</div>';
-    else if (!d.deployed) h += '<div style="background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:8px 10px;margin-bottom:10px;">The public request portal is <b>not deployed</b> yet (no RFA store in the settings below). IT overrides still work.</div>';
+      'When the time is up the account is disabled again (its roles are kept). ServiceNow can request through the API.</p></div>';
+    if (!d.enabled) h += '<div style="max-width:1200px;background:#fff8c5;border:1px solid #d4a72c;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:12.5px;">The request portal is <b>switched off</b> (Settings &gt; Features: <i>Request for authorization (RFA) portal</i>, Pro). Nothing is taken in until it is on.</div>';
+    else if (!d.deployed) h += '<div style="max-width:1200px;background:#fff8c5;border:1px solid #d4a72c;border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:12.5px;">The public request portal is <b>not deployed</b> yet (no RFA store in the settings below). IT overrides still work.</div>';
     // Operator 2026-10-05 ("add link to portal also"): where the people who ask for access go.
     const portalUrl = String((d.settings && d.settings.portalUrl) || '').trim();
     // (no regex literal with '//' here: the source-scope scanner reads it as a comment -- Test-PimAssertionScope)
     if (d.enabled && d.deployed && portalUrl.toLowerCase().indexOf('https:' + '//') === 0) {
-      h += '<div id="rfaPortalLink" style="border:1px solid #d0d7de;border-left:4px solid #0969da;border-radius:6px;padding:8px 12px;margin-bottom:12px;background:#f6f8fa;">' +
-           '<b>Request portal</b> &mdash; give this link to the consultants and admins who ask for access: ' +
-           '<a href="' + escapeHtml(portalUrl) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(portalUrl) + '</a> ' +
-           '<button id="rfaCopyPortal" class="ghost" style="font-size:11px;padding:1px 8px;">Copy link</button></div>';
+      h += '<div id="rfaPortalLink" class="set-card" style="max-width:1200px;border-left:4px solid #0969da;">' +
+           '<h3 style="margin:0 0 4px;font-size:14px;">Request portal</h3>' +
+           '<div style="color:#57606a;font-size:12.5px;margin-bottom:8px;">Give this link to the consultants and admins who ask for access.</div>' +
+           '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px;"><a href="' + escapeHtml(portalUrl) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(portalUrl) + '</a> ' +
+           '<button id="rfaCopyPortal" class="ghost" style="font-size:12px;padding:3px 10px;">Copy link</button></div></div>';
     }
     const rows = (d.requests || []);
-    h += '<table class="grid" style="width:100%;margin-bottom:14px;"><thead><tr><th>Requested</th><th>Person</th><th>Department (internal)</th><th>Company</th><th>What</th><th>Source</th><th>Status</th><th></th></tr></thead><tbody>';
-    if (!rows.length) h += '<tr><td colspan="8" style="color:#57606a;">No requests yet.</td></tr>';
+    h += '<div ' + card + '><h3 style="margin:0 0 4px;font-size:14px;">Requests</h3>' +
+         '<div style="color:#57606a;font-size:12.5px;margin-bottom:10px;">From the portal, the API and IT overrides, newest first.</div>' +
+         '<table class="set-table" style="width:100%;"><thead><tr><th>Requested</th><th>Person</th><th>Department (internal)</th><th>Company</th><th>What</th><th>Source</th><th>Status</th><th></th></tr></thead><tbody>';
+    if (!rows.length) h += '<tr><td colspan="8" style="color:#57606a;padding:10px 8px;">No requests yet.</td></tr>';
     for (const r of rows) {
       const what = (r.kind === 'group' ? '<span title="Ad-hoc: given for the window only and REMOVED automatically when it ends -- not delegated (standing) access" style="display:inline-block;padding:0 6px;border-radius:8px;background:#fff1d6;color:#9a6700;font-size:11px;font-weight:600;">ad-hoc</span> member of ' + escapeHtml(r.groupName || '') : 'account enabled') + ' for ' + escapeHtml(String(r.hours)) + ' h';
       const act = (r.canDecide ? '<button class="rfaDec" data-id="' + escapeHtml(r.id) + '" data-d="approve">Approve</button> <button class="rfaDec" data-id="' + escapeHtml(r.id) + '" data-d="deny">Deny</button>' : '') +
@@ -8501,19 +8533,27 @@
            '<td><span style="color:' + (stColor[r.state] || '#57606a') + ';font-weight:600;">' + escapeHtml(r.state || '') + '</span><div style="color:#57606a;font-size:11px;">' + escapeHtml(r.statusText || '') + (r.decidedBy && r.decidedBy !== 'auto' ? ' -- ' + escapeHtml(r.decidedBy) : '') + '</div></td>' +
            '<td style="white-space:nowrap;">' + act + '</td></tr>';
     }
-    h += '</tbody></table><div id="rfaMsg" style="margin:-6px 0 12px;"></div>';
+    h += '</tbody></table><div id="rfaMsg" style="margin-top:8px;font-size:12.5px;"></div></div>';
     if (d.isAdmin) {
-      h += '<h3 style="margin:10px 0 4px;">IT override -- a longer window</h3><div style="color:#57606a;font-size:12px;margin-bottom:6px;">Enable an admin account for up to 31 days without a request. The department Owners review it every 30 days.</div>' +
-           '<input id="rfaOvUpn" placeholder="admin UPN" style="width:260px;"> <input id="rfaOvHours" type="number" min="1" max="744" value="168" style="width:90px;"> hours ' +
-           '<input id="rfaOvWhy" placeholder="reason (recorded)" style="width:260px;"> <button id="rfaOvGo">Grant</button>';
+      // Operator 2026-10-05 ("make the admin upn as dropdown"): pick a DEFINED admin (rfaFillAdminPicker below); the
+      // disabled accounts -- the ones an override is for -- are listed first.
+      const lbl = 'style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#57606a;"';
+      const inp = 'font-size:13px;padding:5px 8px;border:1px solid #d0d7de;border-radius:6px;';
+      h += '<div ' + card + '><h3 style="margin:0 0 4px;font-size:14px;">IT override &mdash; a longer window</h3>' +
+           '<div style="color:#57606a;font-size:12.5px;margin-bottom:12px;">Enable an admin account for up to 31 days without a request. The department Owners review it every 30 days.</div>' +
+           '<div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">' +
+           '<label ' + lbl + '>Admin<select id="rfaOvUpn" style="' + inp + 'min-width:320px;"><option value="">Loading admins&hellip;</option></select></label>' +
+           '<label ' + lbl + '>Hours (1&ndash;744)<input id="rfaOvHours" type="number" min="1" max="744" value="168" style="' + inp + 'width:110px;"></label>' +
+           '<label ' + lbl + '>Reason (recorded)<input id="rfaOvWhy" placeholder="why the account is needed" style="' + inp + 'width:320px;"></label>' +
+           '<button id="rfaOvGo" style="font-size:13px;padding:6px 16px;">Grant</button></div></div>';
     }
     // company reviews
     const camps = (cr && cr.campaigns) || [];
-    h += '<h3 id="rfaConsultants" style="margin:18px 0 4px;">Consultants &amp; companies</h3>' +
-         '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">Each external company confirms its consultants on its cadence. Unanswered after 21 days = disabled (re-enabled through a request). ' +
+    h += '<div ' + card + '><h3 id="rfaConsultants" style="margin:0 0 4px;font-size:14px;">External Companies (Consultants)</h3>' +
+         '<div style="color:#57606a;font-size:12.5px;margin-bottom:12px;">Each external company confirms its consultants on its cadence. Unanswered after 21 days = disabled (re-enabled through a request). ' +
          'You can answer on the company\'s behalf.</div>' +
-         '<div style="margin-bottom:8px;"><button id="rfaEditCompanies">Manage companies</button> <span style="color:#57606a;font-size:12px;">' + fmtNum((cr && cr.companies) || 0) + ' compan' + (((cr && cr.companies) || 0) === 1 ? 'y' : 'ies') + ' defined' + (((cr && cr.companies) || 0) ? '' : ' -- add one so its consultants are reviewed') + '. A consultant is an admin linked to a company (Admins, column Company).</span></div>';
-    if (!camps.length) h += '<div style="color:#57606a;">No company review yet.</div>';
+         '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;"><button id="rfaEditCompanies" style="font-size:13px;padding:5px 14px;">Manage companies</button> <span style="color:#57606a;font-size:12.5px;">' + fmtNum((cr && cr.companies) || 0) + ' compan' + (((cr && cr.companies) || 0) === 1 ? 'y' : 'ies') + ' defined' + (((cr && cr.companies) || 0) ? '' : ' -- add one so its consultants are reviewed') + '. A consultant is an admin linked to a company (Admins, column Company).</span></div>';
+    if (!camps.length) h += '<div style="color:#57606a;font-size:12.5px;">No company review yet.</div>';
     for (const c of camps) {
       const open = !c.closedUtc;
       h += '<div style="border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;margin-bottom:8px;"><b>' + escapeHtml(c.company) + '</b> <span style="color:#57606a;">started ' + fmt(c.startedUtc) + (open ? '' : ' -- closed ' + fmt(c.closedUtc)) + '</span>';
@@ -8524,11 +8564,13 @@
       }
       h += '</div>';
     }
+    h += '</div>';   // the Consultants & companies card
     // §82/§90 (operator 2026-10-02: "settings should contain rfa broker config like api keys"): the broker settings and the
     // API keys live in Settings > RFA broker & API (renderRfaBrokerSection); this page is for the requests and reviews.
-    if (d.isSuperAdmin) h += '<div style="margin-top:18px;color:#57606a;">The broker settings and API keys are under <a href="#" id="rfaToSettings">Settings &gt; RFA broker &amp; API</a>.</div>';
+    if (d.isSuperAdmin) h += '<div style="max-width:1200px;color:#57606a;font-size:12.5px;margin:4px 0 0;">The broker settings and API keys are under <a href="#" id="rfaToSettings">Settings &gt; RFA broker &amp; API</a>.</div>';
     host.innerHTML = h;
     try { renderMspLicenceBanners(); } catch (_) { }
+    rfaFillAdminPicker();
     const msg = function (t, bad) { const m = document.getElementById('rfaMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#1a7f37'; } };
     host.querySelectorAll('.rfaDec').forEach(b => b.onclick = async function () {
       const dec = b.dataset.d; let note = '';
@@ -20733,6 +20775,37 @@
   // Date-expression input with a debounced live resolve preview (server-side
   // resolver = the same code the engine runs, via /api/resolve-date).
   // Appends the field AND its preview line to container `f`.
+  // Operator 2026-10-05 ("this is too complex, make predefined values to choose from in a dropdown"): a date field is a
+  // DROPDOWN of the common choices (opts.presets: [{ value, label }], every value a date expression the engine resolves);
+  // "On a date..." shows a date picker (stored yyyy-MM-dd[@opts.dateTime]); "Custom expression..." keeps the free text.
+  // The state field keeps the expression itself, so templates and existing rows read the same as before.
+  function wuxPresetDateField(f, opts) {
+    const presets = opts.presets || [];
+    const v0 = String(opts.value || '');
+    const isPreset = presets.some(p => p.value === v0);
+    const dateRe = /^(\d{4}-\d{2}-\d{2})(@\d{2}:\d{2})?$/;
+    let mode = isPreset ? v0 : (dateRe.test(v0) ? '__date' : '__custom');
+    if (opts.modeOf && opts.modeOf() !== undefined) mode = opts.modeOf();
+    const wrap = document.createElement('div');
+    wrap.className = 'wux-preset-date';
+    wrap.appendChild(wuxField({ id: opts.id + '-pick', label: opts.label, type: 'select', value: mode, sub: opts.sub, hint: opts.hint,
+      options: presets.concat([{ value: '__date', label: 'On a date…' }, { value: '__custom', label: 'Custom expression…' }]),
+      onInput: (m) => {
+        if (opts.setMode) opts.setMode(m);
+        if (m !== '__date' && m !== '__custom') opts.onInput(m);
+        else if (m === '__date') opts.onInput('');
+        if (opts.rerender) opts.rerender();
+      } }));
+    if (mode === '__date') {
+      const dm = dateRe.exec(v0);
+      wrap.appendChild(wuxField({ id: opts.id + '-date', label: 'Date', type: 'date', value: dm ? dm[1] : '',
+        hint: opts.dateTime ? ('At ' + opts.dateTime + ' (tenant time).') : '',
+        onInput: (d) => { opts.onInput(d ? (d + (opts.dateTime ? '@' + opts.dateTime : '')) : ''); } }));
+    } else if (mode === '__custom') {
+      wuxDateField(wrap, { id: opts.id, label: 'Expression', value: isPreset ? '' : v0, example: opts.example, onInput: opts.onInput });
+    }
+    f.appendChild(wrap);
+  }
   function wuxDateField(f, opts) {
     const prev = document.createElement('div');
     prev.style.cssText = 'font-size:11px; margin:-4px 0 8px 2px; color:#57606a;';
@@ -20984,7 +21057,8 @@
     const n = (typeof PIM_NAMING !== 'undefined' && PIM_NAMING) || {};
     const keys = ['internal-adminuser', 'external-adminuser', 'external-guest'];
     Object.keys(n.AdminTypePrefixes || {}).forEach(k => { const kk = String(k).trim().toLowerCase(); if (kk && keys.indexOf(kk) < 0) keys.push(kk); });
-    const nice = { 'internal-adminuser': 'Internal admin user', 'external-adminuser': 'External admin user', 'external-guest': 'External guest (B2B invitation)' };
+    // Operator 2026-10-05: two kinds of consultant -- a local account in this tenant, or a B2B guest who keeps their own identity.
+    const nice = { 'internal-adminuser': 'Internal admin', 'external-adminuser': 'Consultant -- local account in this tenant', 'external-guest': 'Consultant -- B2B guest (their own identity)' };
     return keys.map(k => { const p = adminTypePrefix(k); return { value: k, label: (nice[k] || k) + ' -- ' + (p ? 'prefix ' + p : 'no prefix') }; });
   }
   function environmentOptions() {
@@ -22073,8 +22147,22 @@
   // ===================================================================
   // Apply an admin template's prestaged values onto the wizard state
   // (LIFECYCLE-GOVERNANCE phase 2). Everything stays editable afterwards.
+  // The admin type and what follows from it, in ONE place (the step-1 picker and a template's AdminType both call it).
+  function setWizardAdminType(s, v) {
+    s.adminType = v;
+    // keep the legacy UserType column coherent (Internal vs External).
+    s.userType = /^internal/i.test(String(v)) ? 'Internal' : 'External';
+    // external-guest = a cloud B2B identity: force Entra + no on-prem AD; the engine onboards it via the invitation path.
+    if (v === 'external-guest') { s.environment = 'entra'; s.usage = 'Cloud'; s.platform = 'ID'; s.userType = 'Consultant'; }
+    // an internal admin has no consultant company
+    if (/^internal/i.test(String(v))) s.company = '';
+    s._engineUserName = null;
+  }
   function applyAdminTemplate(s, tpl) {
     if (!tpl) return;
+    // Operator 2026-10-05 ("if i already defined consultant, it should preselect external"): a template that names the
+    // admin type (the two consultant templates) sets it -- and with it the type-driven defaults.
+    if (tpl.prefill && tpl.prefill.AdminType) setWizardAdminType(s, String(tpl.prefill.AdminType));
     const p = tpl.prefill || {};
     const map = {
       Purpose:'purpose',
@@ -23106,6 +23194,26 @@
               'It lands as one row in <b>Account-Definitions-Admins</b> (SQL). ' +
               'You give the person and platform; the wizard composes the UPN, display name, and short login name to match the existing naming convention.'
             ));
+            // Operator 2026-10-05: the admin TYPE is the first question -- it decides the name prefix, whether this is a
+            // consultant (and then which company), and whether it is a local account or a B2B guest.
+            f.appendChild(wuxField({ id:'wf-atype', label:'Admin type', required:true, type:'select', value:s.adminType,
+              sub:'Account-Definitions-Admins.AdminType -- drives the name prefix',
+              hint:'A consultant is either a <b>local account in this tenant</b> or a <b>B2B guest</b> who keeps their own identity. The prefixes come from Settings &rsaquo; Naming.',
+              options: adminTypeOptions(),
+              onInput:(v)=>{ setWizardAdminType(s, v); rerender(); }
+            }));
+            if (s.adminType === 'external-guest') {
+              const gi = document.createElement('div');
+              gi.style.cssText = 'background:#fff8c5; border:1px solid #d4a72c; border-radius:6px; padding:8px 10px; font-size:11.5px; color:#54470d; margin:2px 0 10px;';
+              gi.innerHTML = '<b>Guest (invite) path.</b> A B2B guest is <b>invited</b> (not created): on Finish this wizard composes the invitation, a Consultant account definition and the delegation placement. Environment is locked to <b>Entra</b> (guests are always cloud).';
+              f.appendChild(gi);              // 🔴 BUG-203 -- A GUEST IS INVITED AT THEIR OWN MAILBOX, never an address in this tenant.
+              f.appendChild(wuxField({ id:'wf-guestmail', label:'Guest’s external email', required:true, type:'email', value:s.guestEmail || '',
+                example:'e.g. anna.hansen@partner.example',
+                hint:'The address the B2B invitation is sent to -- the guest’s own mailbox at their organisation, never an address in this tenant.',
+                sub:'invitation recipient (becomes the guest account’s identity)',
+                onInput:(v)=>{ s.guestEmail = String(v || '').trim(); }
+              }));
+            }
             if (adminTemplates.length) {
               f.appendChild(wuxField({ id:'wf-tpl', label:'Start from template', type:'select', value:s.templateId,
                 sub:'templates/admin/*.admintemplate.json -- prestages tier, scheduling, TAP and forwarding; everything stays editable',
@@ -23137,11 +23245,23 @@
             }));
             // 2026-09-21 (operator: "we need to have the {Company} as a variable ... KONS-{Company}-{Initial}-{Tier}-c"):
             // the admin's own company. Fills {Company} in the name and is written to the account (companyName).
-            f.appendChild(wuxField({ id:'wf-company', label:'Company', value:s.company || '', example:'e.g. Contoso',
-              hint:'The admin’s own company &mdash; e.g. a consultant’s firm. Fills <code>{Company}</code> if your naming uses it, and is saved on the account. Optional.',
-              sub:'Account-Definitions-Admins.Company',
-              onInput:(v)=>{ s.company = v; s._engineUserName = null; rerender(); }
-            }));
+            if (!/^internal/i.test(String(s.adminType))) {
+              const cos = companyOptions(function () { try { rerender(); } catch (_) { } });
+              if (cos.length) {
+                f.appendChild(wuxField({ id:'wf-company', label:'Company', type:'select', value:s.company || '',
+                  hint:'The consultant’s company, from <b>External Companies (Consultants)</b>. Its reviews confirm this consultant; it fills <code>{Company}</code> if your naming uses it.',
+                  sub:'Account-Definitions-Admins.Company',
+                  options:[{ value:'', label:'(choose the company)' }].concat(cos),
+                  onInput:(v)=>{ s.company = v; s._engineUserName = null; rerender(); }
+                }));
+              } else {
+                const nc = document.createElement('div');
+                nc.id = 'wf-company-none';
+                nc.style.cssText = 'font-size:12px; color:#57606a; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:8px 10px; margin:2px 0 10px;';
+                nc.innerHTML = '<b>Company:</b> no external company is defined yet. Add it under <b>Reviews &amp; controls &rsaquo; External Companies (Consultants)</b>, then pick it here -- or create the admin now and link the company later.';
+                f.appendChild(nc);
+              }
+            }
             // R1: browse the suffixes this tenant's admins already use, instead of typing one.
             // Still an INPUT (a combo), not a <select>: a genuinely new domain must remain typeable
             // -- narrowing to nothing would be worse than the text box it replaces.
@@ -23180,6 +23300,12 @@
             if (!s.last.trim())  return 'Last name is required.';
             if (!s.initials.trim()) return 'Initials are required.';
             if (!s.upnSuffix || s.upnSuffix.indexOf('@') < 0) return 'UPN suffix must look like @yourdomain.tld.';
+            if (s.adminType === 'external-guest') {
+              const m = String(s.guestEmail || '').trim();
+              if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(m)) return 'Enter the guest’s external email address -- the invitation is sent there.';
+              const own = String(s.upnSuffix || '').trim().toLowerCase();
+              if (own && m.toLowerCase().slice(-own.length) === own) return 'That address is in this tenant’s own domain (' + own + '). A guest is invited at their OWN organisation’s mailbox.';
+            }
             return true;
           }
         },
@@ -23209,40 +23335,7 @@
                 rerender();
               }
             }));
-            f.appendChild(wuxField({ id:'wf-atype', label:'Admin type', required:true, type:'select', value:s.adminType,
-              sub:'Account-Definitions-Admins.AdminType -- drives the name prefix',
-              hint:'The types and their prefixes come from Settings &rsaquo; Naming (&ldquo;Prefix by admin type&rdquo;).',
-              // 2026-09-21 (wizard naming sweep): the types a tenant defines in Settings, each labelled with the prefix it
-              // really gets -- not a fixed list with fixed x- / g- labels. The three built-in types stay available.
-              options: adminTypeOptions(),
-              onInput:(v)=>{
-                s.adminType=v;
-                // keep the legacy UserType column coherent (Internal vs External).
-                s.userType = /^internal/i.test(String(v)) ? 'Internal' : 'External';
-                // external-guest = a cloud B2B identity: force Entra + no on-prem
-                // AD; the engine onboards it via the invitation path, not a create.
-                if (v==='external-guest') { s.environment='entra'; s.usage='Cloud'; s.platform='ID'; s.userType='Consultant'; }
-                rerender();
-              }
-            }));
-            if (s.adminType === 'external-guest') {
-              const gi = document.createElement('div');
-              gi.style.cssText = 'background:#fff8c5; border:1px solid #d4a72c; border-radius:6px; padding:8px 10px; font-size:11.5px; color:#54470d; margin:2px 0 10px;';
-              gi.innerHTML = '<b>Guest (invite) path.</b> External guests are onboarded via a <b>B2B invitation</b> ' +
-                '(not an account create). On Finish this wizard composes the invitation + a Consultant account ' +
-                'definition + the delegation placement — the same artefacts as the Onboarding tab. Environment is ' +
-                'locked to <b>Entra</b> (guests are always cloud).';
-              f.appendChild(gi);
-              // 🔴 BUG-203 -- A GUEST IS INVITED AT THEIR OWN MAILBOX. The wizard used to invite the
-              // composed ADMIN name at this tenant's own domain (an address that cannot receive an
-              // invitation). The guest's real external address is asked for here and is what is sent.
-              f.appendChild(wuxField({ id:'wf-guestmail', label:'Guest’s external email', required:true, type:'email', value:s.guestEmail || '',
-                example:'e.g. anna.hansen@partner.com',
-                hint:'The address the B2B invitation is sent to -- the guest’s own mailbox at their organisation, never an address in this tenant.',
-                sub:'invitation recipient (becomes the guest account’s identity)',
-                onInput:(v)=>{ s.guestEmail = String(v || '').trim(); }
-              }));
-            }
+            // (the admin type and the guest's invitation address are asked in step 1 since 2026-10-05)
             f.appendChild(wuxField({ id:'wf-env', label:'Environment', required:true, type:'select', value:s.environment,
               sub:'Account-Definitions-Admins.Environment -- drives the name suffix',
               hint:'The environments and their suffixes ({Platform}) come from Settings &rsaquo; Naming (&ldquo;Suffix by environment&rdquo;).',
@@ -23282,13 +23375,7 @@
             return f;
           },
           validate: (s) => {
-            if (s.adminType === 'external-guest') {
-              const m = String(s.guestEmail || '').trim();
-              if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(m)) return 'Enter the guest’s external email address -- the invitation is sent there.';
-              const own = String(s.upnSuffix || '').trim().toLowerCase();
-              if (own && m.toLowerCase().slice(-own.length) === own) return 'That address is in this tenant’s own domain (' + own + '). A guest is invited at their OWN organisation’s mailbox.';
-            }
-            return true;
+            return true;   // (the guest's address is checked in step 1, where it is asked since 2026-10-05)
           }
         },
         {
@@ -23307,7 +23394,14 @@
             creHdr.style.cssText = 'font-weight:600; font-size:12px; color:#24292f; margin:2px 0 6px;';
             creHdr.textContent = 'When to create / invite the account';
             f.appendChild(creHdr);
-            wuxDateField(f, { id:'wf-prov', label:'Create on (scheduled)', value:s.provisionDate,
+            wuxPresetDateField(f, { id:'wf-prov', label:'Create on', value:(s.provisionDate || 'Now'),
+              presets:[
+                { value:'Now',                         label:'Now (the next engine run)' },
+                { value:'FirstWorkdayNextWeek@07:00',   label:'First workday next week, 07:00' },
+                { value:'FirstWorkdayNextMonth-3d',     label:'3 days before the first workday next month' },
+                { value:'FirstWorkdayNextMonth@07:00',  label:'First workday next month, 07:00' }
+              ],
+              dateTime:'07:00', rerender, modeOf:()=>s._provMode, setMode:(m)=>{ s._provMode = m; },
               example:'e.g. FirstWorkdayNextMonth-3d or 2026-06-28 -- blank = next engine run',
               hint:(s.adminType==='external-guest'
                 ? 'For a guest this schedules WHEN the B2B invitation is sent.'
@@ -23328,7 +23422,13 @@
             tapNote.textContent = 'A Temporary Access Pass is issued to every admin (enforced). AD-only admins cannot hold one, so none is issued for them.';
             f.appendChild(tapNote);
             if (s.createTap === 'TRUE') {
-              wuxDateField(f, { id:'wf-tapstart', label:'TAP valid from', value:s.tapStartDate,
+              wuxPresetDateField(f, { id:'wf-tapstart', label:'TAP valid from', value:s.tapStartDate,
+                presets:[
+                  { value:'',                            label:'Immediately (when the account is created)' },
+                  { value:'FirstWorkdayNextWeek@08:00',  label:'First workday next week, 08:00' },
+                  { value:'FirstWorkdayNextMonth@08:00', label:'First workday next month, 08:00' }
+                ],
+                dateTime:'08:00', rerender, modeOf:()=>s._tapMode, setMode:(m)=>{ s._tapMode = m; },
                 example:'e.g. FirstWorkdayNextMonth@08:00 -- blank = immediately',
                 hint:'The engine creates the TAP close to this window (not at provisioning) so the code is fresh when the admin can actually use it.',
                 sub:'Account-Definitions-Admins.TAPStartDate',
@@ -23438,7 +23538,7 @@
             const wrap = document.createElement('div');
             if (guest) {
               // BUG-203: the guest is identified by the address the invitation goes to.
-              const gmail = String(s.guestEmail || '').trim() || '(guest email missing -- go back to Purpose & platform)';
+              const gmail = String(s.guestEmail || '').trim() || '(guest email missing -- go back to Person)';
               const impact = [{ csv:'(B2B invitation)', adds:1, what: gmail },
                               { csv:'Account-Definitions-Admins', adds:1, what:'Consultant: ' + gmail }];
               if (n > 0) impact.push({ csv:'PIM-Assignments-Admins', adds:n, what:[...s.roleGroupSel].join(', ') });

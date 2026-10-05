@@ -6405,7 +6405,9 @@ function Get-PimHomeOverview {
     # to the Approvals tab. (REQUIREMENTS §13/§27 H3/H4.)
     try {
         if (Get-Command Get-PimApprovalRequests -ErrorAction SilentlyContinue) {
-            $pend = @(Get-PimApprovalRequests -Status 'Pending')
+            # Operator 2026-10-05 ("i turned off approvals, but it shows 3 pending"): a Pending request past its TTL is EXPIRED -- it
+            # cannot be approved or executed -- so it is not waiting for anyone and must not count (it did: 3 stale offboards).
+            $pend = @(Get-PimApprovalRequests -Status 'Pending' | Where-Object { -not ((Get-Command Test-PimApprovalRequestExpired -ErrorAction SilentlyContinue) -and (Test-PimApprovalRequestExpired -Request $_)) })
             $tiles.approvals = [ordered]@{ ok = $true; pending = @($pend).Count; offboards = @($pend | Where-Object { (Test-PimApprovalAction -Action "$($_.action)") -eq 'offboard' }).Count; revokes = @($pend | Where-Object { (Test-PimApprovalAction -Action "$($_.action)") -eq 'revoke' }).Count }
         } else {
             $tiles.approvals = [ordered]@{ ok = $false; pending = 0; error = 'approval-gate library not loaded' }
