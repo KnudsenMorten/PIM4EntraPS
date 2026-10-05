@@ -2788,6 +2788,28 @@ function Add-PimRenameMemory {
     return , @($NewRows)
 }
 
+function ConvertTo-PimManagerTargetedRemovals {
+    <#
+      PURE. The assignment rows a commit DELETES, as targeted removals: a copy of each with Action = Remove (rows already
+      marked Remove are skipped -- they are already removals). Only the PIM-Assignments-* entities, whose providers act on
+      Remove rows in every mode (GetRemoveRows); every other entity is returned nothing (its delete stays a delete).
+    #>
+    param([string]$Base, [object[]]$Removed = @())
+    $out = New-Object System.Collections.Generic.List[object]
+    if ("$Base" -notmatch '^(?i)PIM-Assignments-') { return @() }
+    foreach ($r in @($Removed)) {
+        if ($null -eq $r) { continue }
+        $act = if ($r -is [System.Collections.IDictionary]) { "$($r['Action'])" } elseif ($r.PSObject.Properties['Action']) { "$($r.Action)" } else { '' }
+        if ($act.Trim() -ieq 'Remove') { continue }
+        $copy = [ordered]@{}
+        if ($r -is [System.Collections.IDictionary]) { foreach ($k in @($r.Keys)) { $copy[$k] = $r[$k] } }
+        else { foreach ($pp in $r.PSObject.Properties) { $copy[$pp.Name] = $pp.Value } }
+        $copy['Action'] = 'Remove'
+        $out.Add($copy)
+    }
+    return @($out.ToArray())
+}
+
 function Invoke-PimManagerSafeCommit {
     # The [M1] commit: snapshot -> transactional apply -> rollback-on-failure ->
     # prune. Used by PUT /api/csv/<base>. Returns the Invoke-PimCommitTransaction
@@ -4701,6 +4723,16 @@ function Invoke-PimManagerCsvPut {
         return 400
     }
     $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered -Base $base
+    # Operator 2026-10-05 ("why is the delta taking so long" -- 8 removals sat 'saved' for the next FULL run): a DELETED
+    # assignment row only left the desired state, and a delta run never prunes (Mode Full + Prune only), so the membership
+    # stayed in Entra until the nightly reconcile. An assignment row that is deleted is kept as a TARGETED REMOVAL instead
+    # (Action = Remove): targeted removals run in EVERY mode, so the next delta removes it (one call each), and the engine
+    # deletes the row once the removal is read back (row.remove.completed). Rows already marked Remove are left as they are.
+    $asRemoval = ConvertTo-PimManagerTargetedRemovals -Base $base -Removed @($diff.removes)
+    if ($asRemoval.Count) {
+        $rowsOrdered = @(@($rowsOrdered) + @($asRemoval))
+        $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered -Base $base
+    }
 
     # §79.9 / R25-05: the DELEGATED check runs HERE, on the diff as submitted -- BEFORE the offboard holds below are
     # computed and raised. It used to run after them, so an offboard-only commit (a disable plus a justification)
