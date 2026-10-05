@@ -3057,6 +3057,14 @@
           // wrong place, it must be per user in the top"). It was on the TAP table below, which is
           // a different, TAP-only list -- so the one place an operator manages an admin did not
           // include the verb that changes the admin.
+          // Operator 2026-10-05: Enable / Disable here and in the selection bar; Disable & remove delegations keeps the
+          // account (disabled) and takes all its delegations away. All three STAGE into Pending changes -- a disable is
+          // held for the offboard approval on commit like every disable (BUG-190), unless self-approval is on.
+          (String(a.accountStatus || 'Enabled').toLowerCase() === 'disabled'
+            ? '<button class="btn-sec acctEnable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) + ' title="Enable the account again (staged in Pending changes)." style="font-size:11px;">Enable</button> '
+            : '<button class="btn-sec acctDisable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) + ' title="Disable the account; its delegations stay (staged in Pending changes; a disable needs the offboard approval)." style="font-size:11px;">Disable</button> ') +
+          '<button class="btn-sec acctDisableStrip" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
+            ' title="Disable the account AND remove every delegation it has. The account stays in PIM, disabled (staged in Pending changes)." style="font-size:11px;">Disable &amp; remove delegations</button> ' +
           // REQ-ADM-UNMANAGE-1: out of PIM, Entra untouched (the account and its access stay; Import brings it back).
           '<button class="btn-sec acctUnmanage" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
             ' title="Take this admin out of PIM: every row that names it leaves the desired state. Nothing changes in Entra -- the account and the access it holds stay (listed as unmanaged / drift; Import brings it back)." style="font-size:11px;">Stop managing</button> ' +
@@ -3102,6 +3110,9 @@
       '<span>or set <input id="acctBulkDate" type="date"> <button class="btn-sec" id="acctBulkDateGo">Set date</button></span>' +
       '<button class="btn-sec" id="acctBulkTap">Reset TAP</button>' +
       '<button class="btn-sec" id="acctBulkRevoke">Revoke sessions</button>' +
+      '<button class="btn-sec" id="acctBulkEnable">Enable</button>' +
+      '<button class="btn-sec" id="acctBulkDisable">Disable</button>' +
+      '<button class="btn-sec" id="acctBulkDisableStrip">Disable &amp; remove delegations</button>' +
       '<button class="btn-sec" id="acctBulkClear">Clear selection</button></div>';
   }
   // PURE: the date N days / months after the LATER of today and the current auto-disable date (yyyy-mm-dd).
@@ -3168,6 +3179,10 @@
     on('acctBulkTap', function () { actions('tap'); });
     on('acctBulkRevoke', function () { actions('sessions'); });
     on('acctBulkClear', function () { acctGridState.sel.clear(); rerender(); });
+    const selIds = function () { return Array.from(acctGridState.sel).map(u => ({ upn: u, userName: String((rowsByUpn[u] || {}).userName || '') })); };
+    on('acctBulkEnable', function () { acctStageStatus(selIds(), 'Enabled', false); });
+    on('acctBulkDisable', function () { acctStageStatus(selIds(), 'Disabled', false); });
+    on('acctBulkDisableStrip', function () { acctStageStatus(selIds(), 'Disabled', true); });
   }
 
   // 🔴 THE ADMIN EDITOR WAS SIX IDENTICAL TEXT BOXES (operator, 2026-09-12: "where is the field to
@@ -3729,6 +3744,9 @@
     document.querySelectorAll('.acctTap').forEach(b => { b.onclick = () => resetAdminTap(b.dataset.upn); });
     document.querySelectorAll('.acctRetire').forEach(b => { b.onclick = () => acctMarkForManualRemoval(b.dataset.upn); });
     document.querySelectorAll('.acctUnmanage').forEach(b => { b.onclick = () => acctStopManaging(b.dataset.upn, b.dataset.user); });
+    document.querySelectorAll('.acctEnable').forEach(b => { b.onclick = () => acctStageStatus([{ upn: b.dataset.upn, userName: b.dataset.user }], 'Enabled', false); });
+    document.querySelectorAll('.acctDisable').forEach(b => { b.onclick = () => acctStageStatus([{ upn: b.dataset.upn, userName: b.dataset.user }], 'Disabled', false); });
+    document.querySelectorAll('.acctDisableStrip').forEach(b => { b.onclick = () => acctStageStatus([{ upn: b.dataset.upn, userName: b.dataset.user }], 'Disabled', true); });
     // §35.6: two surfaces, ONE workflow. This jump is what stops the grid and the wizard from
     // being two disconnected tools -- without it the operator leaves here, finds the wizard, and
     // re-identifies the same person by hand.
@@ -7225,7 +7243,7 @@
     { key: 'approvals', label: 'Approvals & policy',     match: ['setSelfApproveHost', 'setOpPolicyCard'] },
     { key: 'rings',     label: 'Deployment rings',       match: ['setRingsHost'] },
     { key: 'mail',      label: 'Mail & alerting',        match: ['setEmailControlsCard', 'setAlertingCard'] },
-    { key: 'access',    label: 'Access requests (RFA)',  match: ['setRfaBrokerHost'] },
+    { key: 'access',    label: 'Access requests (RFA)',  match: ['setRfaBrandingHost', 'setRfaBrokerHost'] },
     { key: 'hybrid',    label: 'Hybrid AD & workloads',  match: ['setHybridAdHost', /AD OU placement/i, 'setWorkloadExemptCard', 'setTemplatePacksHost'] },
     { key: 'tools',     label: 'Copy & tools',           match: ['setCopyHost'] },
   ];
@@ -7413,6 +7431,7 @@
 
     // 2.4.465 (operator 2026-09-30: "a customer must be able to define his groups naming convention for the hybrid solution")
     h += `<div id="setHybridAdHost"><div style="color:#57606a;font-size:12px;">Loading hybrid Active Directory settings…</div></div>`;
+    h += `<div id="setRfaBrandingHost"></div>`;   // operator 2026-10-05: the portal's company name + support e-mail
     h += `<div id="setRfaBrokerHost"></div>`;   // §82/§90: RFA broker & API (Pro; SuperAdmin)
     h += `<div id="setSelfApproveHost"></div>`;   // single-administrator tenants: allow self-approval (SuperAdmin)
     // §91.2 (operator 2026-10-02): the deployment rings are also defined HERE (managing tenant only; the card removes itself elsewhere)
@@ -7657,6 +7676,7 @@
     renderEnvironmentNameSection(document.getElementById('setEnvNameHost'));
     renderAdminDomainSection(document.getElementById('setAdminDomainHost'));
     renderHybridAdSection(document.getElementById('setHybridAdHost'));
+    renderRfaBrandingSection(document.getElementById('setRfaBrandingHost'));
     renderRfaBrokerSection(document.getElementById('setRfaBrokerHost'));
     renderSelfApproveSection(document.getElementById('setSelfApproveHost'));
     pimTenantMode().then(() => { const rh = document.getElementById('setRingsHost'); if (!rh) return; if (pimIsMspMaster()) renderDeploymentRingsCard(rh); else rh.remove(); }).catch(() => { });
@@ -10856,6 +10876,35 @@
         const r = await api('PUT', '/api/settings/environment-name', { value: v });
         await renderEnvironmentName((r && r.value) || '');
         if (msg) { msg.style.color = '#1a7f37'; msg.textContent = (r && r.value) ? 'Saved -- shown at the top as "' + r.value + '".' : 'Saved -- no environment name is shown.'; }
+      } catch (e) { if (msg) { msg.style.color = '#cf222e'; msg.textContent = String((e && e.message) || e); } }
+      btn.disabled = false;
+    };
+  }
+
+  // Operator 2026-10-05: what the RFA portal shows -- the company name (so people know where they sign in, "like
+  // environment name") and a support e-mail ("an option to send email for support"). The broker reads both.
+  async function renderRfaBrandingSection(host) {
+    if (!host) return;
+    const esc = escapeHtml;
+    let d = null, err = '';
+    try { d = await api('GET', '/api/settings/portal-branding'); } catch (e) { err = String((e && e.message) || e); }
+    let h = '<div class="set-card" id="setRfaBranding"><h3 style="margin:0 0 4px;font-size:14px;">Request portal: company name &amp; support</h3>' +
+            '<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Shown on the Request for Authorization (RFA) portal: the <b>company name</b> tells people where they are signing in, and the <b>support e-mail</b> is how they get help. Both optional.</div>';
+    if (err || !d) { host.innerHTML = h + '<div style="color:#cf222e;font-size:12px;">Could not read the portal settings: ' + esc(err || 'no answer') + '</div></div>'; return; }
+    const ro = d.canWrite ? '' : ' disabled';
+    h += '<div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">' +
+         '<label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#57606a;">Company name<input type="text" id="setRfaCompany" maxlength="' + (d.maxLength || 40) + '" style="min-width:240px" placeholder="e.g. Example Ltd" value="' + esc(d.companyName || '') + '"' + ro + '></label>' +
+         '<label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#57606a;">Support e-mail<input type="email" id="setRfaSupport" style="min-width:240px" placeholder="e.g. it-support@example.test" value="' + esc(d.supportEmail || '') + '"' + ro + '></label>' +
+         (d.canWrite ? '<button id="setRfaBrandingSave">Save</button>' : '<span style="font-size:11px;color:#57606a;">(SuperAdmin required to change)</span>') +
+         '<span id="setRfaBrandingMsg" style="font-size:12px;"></span></div>';
+    host.innerHTML = h + '</div>';
+    const btn = document.getElementById('setRfaBrandingSave');
+    if (btn) btn.onclick = async () => {
+      const msg = document.getElementById('setRfaBrandingMsg');
+      btn.disabled = true;
+      try {
+        const r = await api('PUT', '/api/settings/portal-branding', { companyName: document.getElementById('setRfaCompany').value, supportEmail: document.getElementById('setRfaSupport').value });
+        if (msg) { msg.style.color = '#1a7f37'; msg.textContent = 'Saved' + (r && r.companyName ? ' -- the portal shows "' + r.companyName + '"' : '') + '.'; }
       } catch (e) { if (msg) { msg.style.color = '#cf222e'; msg.textContent = String((e && e.message) || e); } }
       btn.disabled = false;
     };
@@ -16310,6 +16359,50 @@
     }
     return out;
   }
+  // Operator 2026-10-05: enable / disable an admin (one or many) and, optionally, remove every delegation it has -- STAGED
+  // into Pending changes like every edit: AccountStatus on the admin row; with -strip, the admin's PIM-Assignments-Admins
+  // rows are deleted, which the commit turns into targeted removals (applied by the next delta, 2.4.501). The admin row
+  // itself STAYS (disabled). A disable is held for the offboard approval on commit (BUG-190) unless self-approval is on.
+  async function acctStageStatus(ids, status, strip) {
+    if (!isServer) { alert('Static mode -- cannot edit. Restart with -Server.'); return; }
+    if (!roleAtLeast('Admin')) { alert('Admin role required.'); return; }
+    ids = (ids || []).filter(x => x && x.upn);
+    if (!ids.length) return;
+    const lc = s => String(s || '').trim().toLowerCase();
+    const isOne = (r, id) => { const u = lc(id.upn), n = lc(id.userName || (id.upn.split('@')[0])); return [r.UserPrincipalName, r.UserName, r.Username].some(v => lc(v) && (lc(v) === u || lc(v) === n)); };
+    const adm = await loadCsv('Account-Definitions-Admins'); ensurePending('Account-Definitions-Admins', adm.header, adm.rows);
+    const pa = pendingChanges['Account-Definitions-Admins'];
+    let pAsg = null;
+    if (strip) { const asg = await loadCsv('PIM-Assignments-Admins'); ensurePending('PIM-Assignments-Admins', asg.header, asg.rows); pAsg = pendingChanges['PIM-Assignments-Admins']; }
+    let nStatus = 0, nDel = 0; const missing = [];
+    const plan = ids.map(id => {
+      const ai = pa.rows.findIndex((r, i) => !pa.deletes.has(i) && isOne(r, id));
+      const del = pAsg ? pAsg.rows.map((r, i) => (!pAsg.deletes.has(i) && isOne(r, id)) ? i : -1).filter(i => i >= 0) : [];
+      if (ai < 0) missing.push(id.upn);
+      else if (String(pa.rows[ai].AccountStatus || '').toLowerCase() !== status.toLowerCase()) nStatus++;
+      nDel += del.length;
+      return { id, ai, del };
+    });
+    const who = ids.length === 1 ? '<b>' + escapeHtml(ids[0].upn) + '</b>' : '<b>' + ids.length + ' admins</b>';
+    const verb = status === 'Enabled' ? 'Enable' : (strip ? 'Disable & remove delegations' : 'Disable');
+    const body = '<p>' + escapeHtml(verb) + ': ' + who + '.</p><ul>' +
+      '<li>' + nStatus + ' account(s) set to <b>' + escapeHtml(status) + '</b>' + (nStatus < ids.length - missing.length ? ' (the others already are)' : '') + '</li>' +
+      (strip ? '<li>' + nDel + ' delegation(s) removed (removed in Entra by the next engine run after the commit)</li><li>The account stays in PIM, disabled.</li>' : '') +
+      (missing.length ? '<li style="color:#cf222e;">not a defined admin (skipped): ' + missing.map(escapeHtml).join(', ') + '</li>' : '') + '</ul>' +
+      (status === 'Disabled' ? '<p style="color:#57606a;">A disable is an offboard: on commit it is held for a second administrator&rsquo;s approval unless self-approval is switched on (Settings &rsaquo; Approvals &amp; policy).</p>' : '') +
+      '<p style="color:#57606a;">Nothing is saved yet -- review and commit under <b>Pending changes</b>.</p>';
+    if (!nStatus && !nDel) { await showConfirm('Nothing to change', body, false); return; }
+    const ok = await showConfirm(verb, body, status === 'Disabled', verb);
+    if (!ok) return;
+    for (const x of plan) {
+      if (x.ai >= 0) pa.rows[x.ai].AccountStatus = status;
+      for (const i of x.del) pAsg.deletes.add(i);
+    }
+    markBadges();
+    try { valRevalidateAfterFix(); } catch (_) { }
+    switchTab('save');
+  }
+
   async function acctStopManaging(upn, userName) {
     if (!isServer) { alert('Static mode -- cannot edit. Restart with -Server.'); return; }
     if (!roleAtLeast('Admin')) { alert('Admin role required.'); return; }
@@ -16327,7 +16420,7 @@
       '<p><b>Stop managing</b> takes <b>' + escapeHtml(upn) + '</b> out of PIM: every row that names this admin leaves the desired state.</p><ul>' + lines + '</ul>' +
       '<p><b>Nothing changes in Entra</b>: the account is not disabled or deleted, and the access it holds today stays. It is then listed under ' +
       '<b>Unmanaged admin accounts</b> and its memberships as drift -- <b>Import</b> there brings it back. To take the access away as well, use ' +
-      '<b>Mark for manual removal</b> (offboarding) instead.</p><p style="color:#57606a">Nothing is saved yet -- review and commit under <b>Pending changes</b>.</p>', true);
+      '<b>Disable &amp; remove delegations</b> instead (the account stays, disabled, with no access).</p><p style="color:#57606a">Nothing is saved yet -- review and commit under <b>Pending changes</b>.</p>', true, 'Stop managing');
     if (!ok) return;
     for (const x of plan) {
       const p = pendingChanges[x.base];
@@ -20403,7 +20496,7 @@
   // ===================================================================
   // Confirm modal
   // ===================================================================
-  function showConfirm(title, bodyHtml, dangerous) {
+  function showConfirm(title, bodyHtml, dangerous, okLabel) {
     return new Promise(resolve => {
       const bg = document.getElementById('modalBg');
       document.getElementById('modalTitle').textContent = title;
@@ -20411,7 +20504,7 @@
       const okBtn = document.getElementById('modalOk');
       const cancelBtn = document.getElementById('modalCancel');
       okBtn.className = dangerous ? 'danger' : 'primary';
-      okBtn.textContent = dangerous ? 'Delete' : 'OK';
+      okBtn.textContent = okLabel ? String(okLabel) : (dangerous ? 'Delete' : 'OK');
       cancelBtn.style.display = dangerous ? '' : 'none';
       bg.classList.add('active');
       const finish = (ok) => { bg.classList.remove('active'); okBtn.onclick = null; cancelBtn.onclick = null; resolve(ok); };

@@ -3,7 +3,7 @@
   §82 REQUEST FOR AUTHORIZATION (RFA) -- the PURE decision core (Pro). REQUIREMENTS §82.5-82.8.
 
   A disabled admin (typically a consultant) signs in to the public RFA portal with a one-time PIN mailed to the
-  ContactEmail on their admin row and asks to have the account ENABLED for a duration from the department's list.
+  address they read (ContactEmail, else MailForwardAddress -- Get-PimRfaReadableAddresses) and asks to have the account ENABLED for a duration from the department's list.
   Auto-approved -> enabled at once; approval required -> any one Owner of the department decides (24 h, then expired).
   The engine (rfa-sync job) applies the outcome to the admin row and ends the window.
 
@@ -156,18 +156,62 @@ function Get-PimRfaDurations {
     return @($out)
 }
 
+function Test-PimRfaMailAddress {
+    # PURE. A real e-mail address? ('FALSE' / 'TRUE' / blank / 'n/a' -- the sentinels the admin columns carry -- are not.)
+    param([AllowNull()][object]$Value)
+    $s = "$Value".Trim()
+    return [bool]($s -and $s -notmatch '^(?i)(true|false|yes|no|0|1|none|n/a)$' -and $s -match $script:PimRfaEmailPattern)
+}
+
+function Get-PimRfaPortalInfo {
+    <#
+      PURE. What the public portal page shows besides the sign-in (operator 2026-10-05): the company name (pim.Settings
+      'CompanyName', a plain string like EnvironmentName, at most 40 characters -- "so they know where they are signing
+      in") and a support address (pim.Settings 'SupportEmail', ONE e-mail address -- "Need help? Contact ..."). Empty =
+      not shown. A SupportEmail that is not an address is dropped (never published). Returns { companyName; supportEmail }.
+    #>
+    param([AllowNull()][object]$CompanyName, [AllowNull()][object]$SupportEmail)
+    $c = ("$CompanyName" -replace '[\x00-\x1f\x7f]', ' ').Trim()
+    if ($c.Length -gt 40) { $c = $c.Substring(0, 40).Trim() }
+    $s = "$SupportEmail".Trim()
+    if (-not (Test-PimRfaMailAddress $s)) { $s = '' }
+    return [pscustomobject]@{ companyName = $c; supportEmail = $s }
+}
+
+function Get-PimRfaReadableAddresses {
+    <#
+      PURE. The addresses on an admin row that the PERSON reads (operator 2026-10-05: "for consultants we use the
+      forwarder email address so they should be able to be found by their home email address. same with admins, it can
+      be their mail forward mail address or admin upn"). An admin account usually has no mailbox, so the PIN never goes
+      to the UPN. In order: ContactEmail, then MailForwardAddress (the forward / home address -- used whether or not
+      ForwardMailsToContact is on; the column holds the person's own address either way). Unique, lower-case-compared,
+      only real addresses. The FIRST one is where the PIN and the RFA mail go.
+    #>
+    param([AllowNull()][object]$Admin)
+    $out = @()
+    foreach ($col in 'ContactEmail', 'MailForwardAddress') {
+        $v = Get-PimRfaRowValue -Row $Admin -Name $col
+        if ((Test-PimRfaMailAddress $v) -and -not @($out | Where-Object { $_ -ieq $v }).Count) { $out += $v }
+    }
+    return @($out)
+}
+
 function Get-PimRfaEligibility {
     <#
       PURE. May this admin use RFA at all? Returns { eligible; mode; durations; contactEmail; reason }.
-      Refused: mode Off, no / malformed ContactEmail, AccountStatus Revoked, Lifecycle Retire, an offboarding date.
+      contactEmail = where the PIN goes: ContactEmail, else MailForwardAddress (Get-PimRfaReadableAddresses).
+      Refused: mode Off, no real address in either column, AccountStatus Revoked, Lifecycle Retire, an offboarding date.
     #>
     param([Parameter(Mandatory)][object]$Admin, [AllowNull()][object]$Department, [switch]$IsConsultant)
     $m = Get-PimRfaEffectiveMode -Admin $Admin -Department $Department -IsConsultant:$IsConsultant
-    $mail = Get-PimRfaRowValue -Row $Admin -Name 'ContactEmail'
+    $raw = Get-PimRfaRowValue -Row $Admin -Name 'ContactEmail'
+    $mail = "$(@(Get-PimRfaReadableAddresses -Admin $Admin)[0])"
     $no = { param($r) [pscustomobject]@{ eligible = $false; mode = $m.mode; durations = @(); contactEmail = $mail; reason = $r } }
     if ($m.mode -eq 'Off') { return (& $no $m.reason) }
-    if (-not $mail) { return (& $no 'no ContactEmail on the admin row -- the PIN has nowhere to go') }
-    if ($mail -notmatch $script:PimRfaEmailPattern) { return (& $no "ContactEmail '$mail' is not an e-mail address") }
+    if (-not $mail) {
+        if ($raw) { return (& $no "ContactEmail '$raw' is not an e-mail address, and there is no MailForwardAddress -- the PIN has nowhere to go") }
+        return (& $no 'no ContactEmail or MailForwardAddress on the admin row -- the PIN has nowhere to go')
+    }
     if ((Get-PimRfaRowValue -Row $Admin -Name 'AccountStatus') -ieq 'Revoked') { return (& $no 'AccountStatus=Revoked -- a revoked account cannot be re-enabled by request') }
     if ((Get-PimRfaRowValue -Row $Admin -Name 'Lifecycle') -match '(?i)^retire') { return (& $no 'Lifecycle=Retire -- the account is being offboarded') }
     if ((Get-PimRfaRowValue -Row $Admin -Name 'AutoDisableDate') -or (Get-PimRfaRowValue -Row $Admin -Name 'OffboardDate')) {
@@ -436,6 +480,8 @@ function Get-PimRfaEligibilityList {
     <#
       PURE. What the engine publishes to the RFA store: ONLY eligible accounts, keyed by a salted hash of the UPN,
       with the PIN address, the mode and the offered durations. No UPN, no name, no roles, no groups.
+      addressKeys = salted hashes ('|'-joined) of every address the person reads (ContactEmail, MailForwardAddress), so
+      the portal finds the account by those as well as by the admin UPN -- without the store holding them in clear.
     #>
     param([object[]]$Admins = @(), [object[]]$Departments = @(), [object[]]$Companies = @(), [Parameter(Mandatory)][string]$Salt,
           # §91.7: what the account may request AD HOC (group tags + display names, and the lengths) -- only when groups are offered
@@ -449,7 +495,8 @@ function Get-PimRfaEligibilityList {
         $dep = $byDept[(Get-PimRfaRowValue -Row $a -Name 'Department').ToLowerInvariant()]
         $el = Get-PimRfaEligibility -Admin $a -Department $dep -IsConsultant:(Test-PimRfaIsConsultant -Admin $a -Companies $Companies)
         if (-not $el.eligible) { continue }
-        $o = [pscustomobject]@{ accountKey = (Get-PimRfaAccountKey -Salt $Salt -UserPrincipalName $upn); contactEmail = $el.contactEmail; mode = $el.mode; durations = (@($el.durations) -join '|') }
+        $ak = @(Get-PimRfaReadableAddresses -Admin $a | ForEach-Object { Get-PimRfaAccountKey -Salt $Salt -UserPrincipalName $_ })
+        $o = [pscustomobject]@{ accountKey = (Get-PimRfaAccountKey -Salt $Salt -UserPrincipalName $upn); contactEmail = $el.contactEmail; mode = $el.mode; durations = (@($el.durations) -join '|'); addressKeys = ($ak -join '|') }
         $gs = @(Get-PimRfaRequestableGroups -Settings $Settings -Admin $a -Assignments $Assignments -Definitions $Definitions)
         if ($gs.Count) {
             # tag=name pairs, '|' between (a tag never holds '=' or '|'; a name's '|' is replaced)
