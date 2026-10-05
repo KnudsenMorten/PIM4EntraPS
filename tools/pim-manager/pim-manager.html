@@ -1120,6 +1120,7 @@
            difference), drop the duplicate source, and show the signed-in role instead. -->
       mode: <b id="modeLabel"></b>
       &nbsp;|&nbsp; you: <b id="whoRole" title=""></b>
+      &nbsp;|&nbsp; <label title="How numbers are shown in this browser (BRAND-2.6). Dates stay ISO; exports stay machine format.">numbers: <select id="numFmtSel" style="font-size:11px;padding:0 2px;"></select></label>
       <b id="src" hidden></b>
     </div>
   </div>
@@ -2597,13 +2598,17 @@
       if (groupItems === 0) { return; }
 
       // group toggles its own dropdown; one open at a time.
+      // BRAND-2.9 (operator 2026-10-04: "when i turn to next menu so it folders out automatically"): a click right after a
+      // HOVER-open must not fold the menu back in -- the pointer arrived, the menu opened, the click confirms it.
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const wasOpen = grp.classList.contains('open');
+        if (wasOpen && navMenuBarMode() && (Date.now() - (Number(grp.dataset.hoverOpenedAt) || 0)) < 700) return;
         closeAllNavGroups();
         if (!wasOpen) { grp.classList.add('open'); btn.setAttribute('aria-expanded', 'true'); }
       });
-      // keyboard: Esc closes, ArrowDown opens + focuses first item.
+      // keyboard: Esc closes, ArrowDown opens + focuses first item, ArrowLeft / ArrowRight move between groups (and keep a
+      // menu open when one was open -- BRAND-2.9).
       btn.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') { closeAllNavGroups(); }
         else if (e.key === 'ArrowDown') {
@@ -2611,6 +2616,7 @@
           grp.classList.add('open'); btn.setAttribute('aria-expanded', 'true');
           const first = menu.querySelector('.nav-group-item'); if (first) first.focus();
         }
+        else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); navMoveGroup(grp, e.key === 'ArrowRight' ? 1 : -1, grp.classList.contains('open')); }
       });
       menu.addEventListener('keydown', (e) => {
         const items = Array.prototype.slice.call(menu.querySelectorAll('.nav-group-item'));
@@ -2618,6 +2624,28 @@
         if (e.key === 'Escape') { closeAllNavGroups(); btn.focus(); }
         else if (e.key === 'ArrowDown') { e.preventDefault(); if (items[idx + 1]) items[idx + 1].focus(); }
         else if (e.key === 'ArrowUp') { e.preventDefault(); if (idx <= 0) btn.focus(); else items[idx - 1].focus(); }
+        else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); navMoveGroup(grp, e.key === 'ArrowRight' ? 1 : -1, true); }
+      });
+      // BRAND-2.9 MENU BAR on a desktop (wide screen + a real pointer): hovering a group opens it, moving to the next group
+      // swaps at once, leaving closes after a 250 ms grace so the pointer can travel into the menu. A keyboard user inside
+      // the menu keeps it open on mouse-leave. Phones / touch keep tap-to-open (navMenuBarMode is false there).
+      grp.addEventListener('mouseenter', () => {
+        if (!navMenuBarMode()) return;
+        if (grp.__closeTimer) { clearTimeout(grp.__closeTimer); grp.__closeTimer = null; }
+        if (!grp.classList.contains('open')) {
+          closeAllNavGroups();
+          grp.classList.add('open'); btn.setAttribute('aria-expanded', 'true');
+          grp.dataset.hoverOpenedAt = String(Date.now());
+        }
+      });
+      grp.addEventListener('mouseleave', () => {
+        if (!navMenuBarMode()) return;
+        if (grp.contains(document.activeElement) && document.activeElement !== btn) return;   // keyboard user inside the menu
+        grp.__closeTimer = setTimeout(() => {
+          grp.__closeTimer = null;
+          if (grp.matches(':hover')) return;
+          grp.classList.remove('open'); btn.setAttribute('aria-expanded', 'false');
+        }, 250);
       });
 
       grp.appendChild(btn);
@@ -2646,6 +2674,22 @@
         document.querySelector('#tabs .tab.active').dataset.tab : 'home');
     }
     return wired;
+  }
+
+  // BRAND-2.9: the desktop MENU BAR applies on a wide screen with a real pointer; phones and touch keep tap-to-open.
+  function navMenuBarMode() {
+    try { return window.matchMedia('(min-width: 881px) and (hover: hover) and (pointer: fine)').matches; } catch (_) { return false; }
+  }
+  // Move to the previous / next visible group (wrapping); open its menu when one was open (keyboard menu-bar behaviour).
+  function navMoveGroup(fromGrp, dir, openIt) {
+    const groups = Array.prototype.slice.call(document.querySelectorAll('#navGroups .nav-group'));
+    if (!groups.length) return;
+    const i = groups.indexOf(fromGrp);
+    const next = groups[(i + dir + groups.length) % groups.length];
+    const nb = next.querySelector('.nav-group-btn');
+    closeAllNavGroups();
+    if (openIt) { next.classList.add('open'); if (nb) nb.setAttribute('aria-expanded', 'true'); }
+    if (nb) nb.focus();
   }
 
   function closeAllNavGroups() {
@@ -4097,6 +4141,32 @@
     if (abs >= 60000) rel = diff >= 0 ? (rel + ' ago') : ('in ' + rel);
     return rel + ' (' + d.toISOString().replace('T', ' ').replace(/\..*$/, '') + 'Z)';
   }
+  // BRAND-2.6 (framework, operator 2026-10-04): every number a PERSON reads follows the VIEWER's regional format -- ONE
+  // formatter, Intl.NumberFormat with the chosen locale. The choice is per browser (the status line's "numbers" picker);
+  // Automatic = the browser language (an English browser on a Danish-region PC says en-US, so the explicit choice exists).
+  // Dates stay ISO; CSV / JSON exports and APIs stay invariant.
+  const PIM_NUMFMT_KEY = 'pimNumberFormat';
+  const PIM_NUMFMT_CHOICES = [['auto', 'Automatic'], ['da-DK', 'Danish 1.234,5'], ['en-US', 'English US 1,234.5'], ['en-GB', 'English UK 1,234.5'], ['de-DE', 'German 1.234,5']];
+  function pimNumberChoice() { let v = ''; try { v = localStorage.getItem(PIM_NUMFMT_KEY) || ''; } catch (_) { } return PIM_NUMFMT_CHOICES.some(c => c[0] === v) ? v : 'auto'; }
+  function pimNumberLocale() { const c = pimNumberChoice(); if (c !== 'auto') return c; try { return (navigator.languages && navigator.languages[0]) || navigator.language || 'en-US'; } catch (_) { return 'en-US'; } }
+  function fmtNum(n, opts) {
+    if (n === null || n === undefined || n === '') return '';
+    const x = Number(n);
+    if (!isFinite(x)) return String(n);
+    try { return new Intl.NumberFormat(pimNumberLocale(), opts || { maximumFractionDigits: 1 }).format(x); } catch (_) { return String(x); }
+  }
+  function initNumberFormatPicker() {
+    const sel = document.getElementById('numFmtSel');
+    if (!sel || sel.dataset.wired) return;
+    sel.dataset.wired = '1';
+    sel.innerHTML = PIM_NUMFMT_CHOICES.map(c => '<option value="' + c[0] + '"' + (c[0] === pimNumberChoice() ? ' selected' : '') + '>' + c[1] + '</option>').join('');
+    sel.addEventListener('change', () => {
+      try { localStorage.setItem(PIM_NUMFMT_KEY, sel.value); } catch (_) { }
+      const act = document.querySelector('#tabs .tab.active');
+      if (act && typeof switchTab === 'function') { try { switchTab(act.dataset.tab); } catch (_) { } }
+    });
+  }
+
   function homeTile(opts) {
     // opts: { title, value, sub, tone('green'|'amber'|'red'|'neutral'), tab, lines[] }
     const esc = escapeHtml;
@@ -4107,7 +4177,7 @@
     const linkHint = opts.tab ? '<div style="font-size:11px;color:#0969da;margin-top:8px;">Open ' + esc(opts.tab === 'map' ? 'Delegation Map' : opts.tab.charAt(0).toUpperCase() + opts.tab.slice(1)) + ' &rarr;</div>' : '';
     return '<div class="home-tile' + clickable + '" style="border:1px solid #d0d7de;border-left:4px solid ' + bar + ';border-radius:8px;padding:12px 14px;background:#fff;min-width:210px;">' +
       '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#57606a;font-weight:600;">' + esc(opts.title) + '</div>' +
-      '<div style="font-size:26px;font-weight:700;line-height:1.1;margin-top:4px;color:' + bar + ';">' + (opts.value != null ? opts.value : '&mdash;') + '</div>' +
+      '<div style="font-size:26px;font-weight:700;line-height:1.1;margin-top:4px;color:' + bar + ';">' + (opts.value != null ? (typeof opts.value === 'number' ? fmtNum(opts.value) : opts.value) : '&mdash;') + '</div>' +
       (opts.sub ? '<div style="font-size:12px;color:#24292f;margin-top:2px;">' + opts.sub + '</div>' : '') +
       lines + linkHint +
       '</div>';
@@ -11046,6 +11116,7 @@
       `<span style="color:#57606a;font-size:11px;margin-left:6px;">append-only &mdash; ${totalAll} event(s) in the ${esc(windowLabel)} (${data.monthsTotal || 0} month(s) on file), newest first. Before/after shown per change.</span>` +
       `<span style="flex:1 1 auto;"></span>` +
       `<button id="auditExportAll" class="ghost" style="font-size:12px;margin-right:6px;" title="Download the ENTIRE filtered trail (every match, not just this page) as CSV, with before/after">Export full trail (CSV)</button>` +
+      `<button id="auditEvidencePrint" class="ghost" style="font-size:12px;margin-right:6px;" title="A print-friendly page of the ENTIRE filtered trail, with the filter, the time range, who printed it and when (AUDIT-1.4). The print is recorded in the audit trail.">Print as evidence</button>` +
       exportBarHtml('audit') + `</div>`);
 
     // Category chips (with counts).
@@ -11150,6 +11221,70 @@
       } catch (e) { alert('Could not export the full audit trail: ' + (e && e.message ? e.message : e)); }
       finally { exAll.disabled = false; exAll.textContent = prev; }
     };
+    // AUDIT-1.4 (framework): PRINT AS EVIDENCE -- the same full filtered trail as the export (purpose=print, so the server
+    // records an audit.print event), laid out for paper: the filter, the time range, who printed it and when.
+    const pr = document.getElementById('auditEvidencePrint');
+    if (pr) pr.onclick = async () => {
+      pr.disabled = true; const prev = pr.textContent; pr.textContent = 'Preparing…';
+      try {
+        const resp = await fetch('/api/audit/export?' + filterQs() + '&purpose=print', { headers: { 'Accept': 'text/csv', 'Authorization': 'Bearer ' + PIM_TOKEN } });
+        if (!resp.ok) {
+          let b401 = null; if (resp.status === 401) { try { b401 = await resp.json(); } catch (_) { b401 = null; } }
+          throw new Error(resp.status === 401 ? http401Message(b401) : ('HTTP ' + resp.status));
+        }
+        const rows = auditParseCsv((await resp.text()).replace(/^﻿/, ''));
+        const html = auditEvidenceHtml(rows, auditState, (window.PIM_ROLE_BOOT && window.PIM_ROLE_BOOT.identity) || '', new Date());
+        const win = window.open('', '_blank');
+        if (!win) throw new Error('the browser blocked the print window -- allow pop-ups for this page');
+        win.document.open(); win.document.write(html); win.document.close();
+        try { win.focus(); win.print(); } catch (_) { }
+      } catch (e) { alert('Could not prepare the audit evidence: ' + (e && e.message ? e.message : e)); }
+      finally { pr.disabled = false; pr.textContent = prev; }
+    };
+  }
+
+  // RFC 4180 CSV -> array of rows (quoted fields, doubled quotes, newlines inside quotes).
+  function auditParseCsv(text) {
+    const rows = []; let row = [], cell = '', q = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (q) { if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += c; continue; }
+      if (c === '"') q = true;
+      else if (c === ',') { row.push(cell); cell = ''; }
+      else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+      else cell += c;
+    }
+    if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+    return rows.filter(r => r.length > 1 || (r[0] || '') !== '');
+  }
+
+  // The print-as-evidence page: a self-contained document (no scripts), black on white, the header block a reviewer needs.
+  function auditEvidenceHtml(rows, st, who, when) {
+    const esc = escapeHtml;
+    const header = rows[0] || [];
+    const body = rows.slice(1);
+    const pick = ['When (UTC)', 'Actor', 'Category', 'Action', 'Target', 'Result', 'Change'].map(h => header.indexOf(h)).filter(i => i >= 0);
+    const cat = (AUDIT_CATEGORIES.find(c => c.key === st.category) || { label: st.category || 'All' }).label;
+    const range = (st.from || st.to) ? ((st.from || 'start') + ' to ' + (st.to || 'now'))
+      : (st.months === 'all' ? 'full history' : ('last ' + st.months + ' months'));
+    const iso = (d) => d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+    return '<!doctype html><html><head><meta charset="utf-8"><title>Audit trail evidence ' + esc(iso(when)) + '</title><style>' +
+      'body{font:11px Segoe UI,Arial,sans-serif;color:#000;background:#fff;margin:18px;}h1{font-size:16px;margin:0 0 6px;}' +
+      'table.meta td{padding:1px 10px 1px 0;vertical-align:top;}table.ev{border-collapse:collapse;width:100%;margin-top:10px;}' +
+      'table.ev th,table.ev td{border:1px solid #888;padding:3px 5px;text-align:left;vertical-align:top;word-break:break-word;}' +
+      'table.ev th{background:#eee;}thead{display:table-header-group;}tr{page-break-inside:avoid;}' +
+      '@media print{body{margin:0;}}</style></head><body>' +
+      '<h1>PIM audit trail &mdash; evidence</h1><table class="meta">' +
+      '<tr><td><b>Printed by</b></td><td>' + esc(who || '(unknown)') + '</td></tr>' +
+      '<tr><td><b>Printed at</b></td><td>' + esc(iso(when)) + '</td></tr>' +
+      '<tr><td><b>Category</b></td><td>' + esc(cat) + '</td></tr>' +
+      '<tr><td><b>Search</b></td><td>' + esc(st.q || '(none)') + '</td></tr>' +
+      '<tr><td><b>Time range</b></td><td>' + esc(range) + '</td></tr>' +
+      '<tr><td><b>Events</b></td><td>' + fmtNum(body.length) + ' (the entire filtered trail, newest first; this print is itself recorded in the audit trail)</td></tr>' +
+      '</table><table class="ev"><thead><tr>' + pick.map(i => '<th>' + esc(header[i]) + '</th>').join('') + '</tr></thead><tbody>' +
+      (body.length ? body.map(r => '<tr>' + pick.map(i => '<td>' + esc(r[i] || '') + '</td>').join('') + '</tr>').join('')
+        : '<tr><td colspan="' + pick.length + '">No events match this filter.</td></tr>') +
+      '</tbody></table></body></html>';
   }
 
   // ===================================================================
@@ -28384,6 +28519,7 @@
     }
   })();
   buildNavGroups();
+  initNumberFormatPicker();   // BRAND-2.6: the per-browser number format choice in the status line
   (function navBadgeMirror() {
     const strip = document.getElementById('tabs');
     if (!strip || typeof MutationObserver === 'undefined') return;

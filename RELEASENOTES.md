@@ -14,6 +14,19 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.498 — Menus open on hover, numbers in your format, audit evidence print
+
+- **New: the menus work as a menu bar on a desktop.** Pointing at a menu opens it, moving to the next menu switches at
+  once, and the menu stays open long enough to move into it. Arrow keys move between menus. Phones and touch screens
+  still open a menu with a tap.
+- **New: numbers in your regional format.** Choose how numbers are shown (Automatic, Danish, English US, English UK
+  or German) in the status line. The choice is remembered in your browser. It applies to the numbers on the Home page
+  first. Dates stay in the ISO format (yyyy-MM-dd), and exports stay in machine format.
+- **New: print the audit trail as evidence.** The Audit page has a **Print as evidence** button. It prints the whole
+  filtered trail, headed by who printed it, when, the filter and the time range.
+- **Changed: exporting or printing the audit trail is itself recorded in the audit trail**, with the filter used and the
+  number of rows.
+
 ## v2.4.497 — Stricter update checks, release publishing to Invardia, one accessibility fix
 
 - **Changed: a Pro update must state its archive size.** An update whose signed description has no archive size is now
