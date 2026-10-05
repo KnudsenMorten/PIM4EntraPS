@@ -502,6 +502,11 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     [void](Initialize-PimNamingConventionSeed -ConnectionString $ConnectionString)
     [void](Invoke-PimRingOrderMigration -ConnectionString $ConnectionString)
     [void](Invoke-PimDepartmentRowKeyMigration -ConnectionString $ConnectionString)
+    # AUDIT-1.3: pim.AuditEvents is append-only IN THE DATABASE (trigger; PIM-AuditRetention.ps1). Never throws: a store
+    # that cannot take the guard still opens, and says so.
+    if (Get-Command Initialize-PimAuditAppendOnly -ErrorAction SilentlyContinue) { [void](Initialize-PimAuditAppendOnly -ConnectionString $ConnectionString) }
+    # AUDIT-1 actor: who initiated / approved each committed row (PIM-ChangeAttribution.ps1). Never fails the store open.
+    if (Get-Command Get-PimChangeAttributionDdl -ErrorAction SilentlyContinue) { try { [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimChangeAttributionDdl)) } catch { Write-Warning "[audit] pim.ChangeAttribution could not be created: $($_.Exception.Message)" } }
 }
 
 function Invoke-PimDepartmentRowKeyMigration {
@@ -1943,3 +1948,10 @@ function Import-PimSettingsFromStore {
     }
     return $n
 }
+
+# AUDIT-1.3: the append-only guard + the retention job ride with the store, so every loader of the store has them.
+$__auditRet = Join-Path $PSScriptRoot 'PIM-AuditRetention.ps1'
+if (Test-Path -LiteralPath $__auditRet) { . $__auditRet }
+# AUDIT-1 actor: the change attribution rides with the store too.
+$__chgAttr = Join-Path $PSScriptRoot 'PIM-ChangeAttribution.ps1'
+if (Test-Path -LiteralPath $__chgAttr) { . $__chgAttr }

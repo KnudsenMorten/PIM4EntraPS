@@ -10908,10 +10908,16 @@ function Write-PimAuditEvent {
         [string]$Actor = 'engine',
         [string]$CorrelationId = ''
     )
+    # AUDIT-1 (2026-10-05): an event written inside a scheduled job run carries that run -- account.create / tap.create
+    # had neither a run id nor a correlation id, so they could not be joined to the job (or the commit) that made them.
+    if (-not "$CorrelationId".Trim() -and "$($global:PIM_JobCorrelationId)".Trim()) { $CorrelationId = "$($global:PIM_JobCorrelationId)" }
+    # The JOB run when there is one: $script:PimAuditRunId is set once per module LOAD, so in the long-lived tick every run
+    # shared one id.
+    $runIdEff = if ("$($global:PIM_JobCorrelationId)".Trim()) { "$($global:PIM_JobCorrelationId)" } else { "$($script:PimAuditRunId)" }
     try {
         $evt = [ordered]@{
             ts            = [datetime]::UtcNow.ToString('o')
-            runId         = $script:PimAuditRunId
+            runId         = $runIdEff
             correlationId = $CorrelationId
             actor         = $Actor
             action        = $Action
@@ -10941,7 +10947,7 @@ function Write-PimAuditEvent {
                     Write-PimSqlAuditEvent -ConnectionString $cs -Actor $Actor -ActorSource 'engine' `
                         -Action $Action -Target $Target -Before $Before -After $After `
                         -Result $Result -WhatIf ([bool]$global:WhatIfMode) `
-                        -RunId "$($script:PimAuditRunId)" -CorrelationId $CorrelationId
+                        -RunId $runIdEff -CorrelationId $CorrelationId
                     $sqlOk = $true
                 }
             }

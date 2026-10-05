@@ -324,6 +324,16 @@ Register-PimJobHandler -Type 'uplink' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimUplinkJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
+# GUARD-1: the REAL 'licence-check' handler (msp.licence guard). A refused licence is a guard trip, not a failed run.
+Register-PimJobHandler -Type 'licence-check' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimLicenceCheckJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
+# AUDIT-1.3: the REAL 'audit-retention' handler. Keep-forever (the default) does nothing; a failed delete FAILS the run.
+Register-PimJobHandler -Type 'audit-retention' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimAuditRetentionJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
 # §95.4: the REAL 'install-key' handler. A refused or failed claim is reported in the result, never thrown.
 Register-PimJobHandler -Type 'install-key' -Handler {
     param($job, $now, $whatIf)

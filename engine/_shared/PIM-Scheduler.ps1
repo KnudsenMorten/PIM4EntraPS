@@ -64,6 +64,14 @@ $script:PimTickOnlyJobTypes += 'uplink'
 # (PIM-InvardiaUpdate.ps1). Inert unless the feature 'updates.invardia' is ON (it ships OFF).
 $script:PimJobTypes += 'install-key'
 $script:PimTickOnlyJobTypes += 'install-key'
+# AUDIT-1.3 (2026-10-05): 'audit-retention' deletes audit rows older than AuditRetentionMonths (min 13; unset = keep every
+# row, which is the default) through the append-only trigger's one door, and records audit.retention (PIM-AuditRetention.ps1).
+$script:PimJobTypes += 'audit-retention'
+$script:PimTickOnlyJobTypes += 'audit-retention'
+# GUARD-1 (2026-10-05): 'licence-check' trips the 'msp.licence' guard when this managing / managed tenant's Pro licence no
+# longer covers MSP (refused = critical) or is in grace (warning). A single tenant is not checked (PIM-Guard.ps1).
+$script:PimJobTypes += 'licence-check'
+$script:PimTickOnlyJobTypes += 'licence-check'
 # REQ-AR-2 (operator 2026-09-26): 'access-review-cycle' starts the per-DEPARTMENT access review campaigns the review rules
 # make due (PIM-AccessReviewCycle.ps1). Checks every 6 h; the cadence per department is the rule's cadenceDays.
 $script:PimJobTypes += 'access-review-cycle'
@@ -349,6 +357,8 @@ function Get-PimDefaultJobSchedule {
         [pscustomobject]@{ name='uplink'; type='uplink'; intervalMinutes=60; enabled=$true }
         # §95.4: every 6 h; inert until 'updates.invardia' is ON. Asks only while this install has no key and a Pro licence.
         [pscustomobject]@{ name='install-key'; type='install-key'; intervalMinutes=360; enabled=$true }
+        [pscustomobject]@{ name='audit-retention'; type='audit-retention'; intervalMinutes=1440; enabled=$true }
+        [pscustomobject]@{ name='licence-check'; type='licence-check'; intervalMinutes=60; enabled=$true }
         # REQ-AR-2: no-op until review rules are saved and enabled (Settings > Access reviews); Pro 'reviews.campaigns'.
         [pscustomobject]@{ name='access-review-cycle'; type='access-review-cycle'; intervalMinutes=360; enabled=$true }
         # §82: every tick (the tick runs every 5 min); inert until the RFA portal is deployed + enabled (Pro 'rfa.portal').
@@ -1252,6 +1262,20 @@ function Initialize-PimDefaultJobHandlers {
         # REQ-AR-2: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimAccessReviewCycleJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:access-review-cycle (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'licence-check' -Handler {
+        param($job,$now,$whatIf)
+        # GUARD-1: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimLicenceCheckJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:licence-check (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'audit-retention' -Handler {
+        param($job,$now,$whatIf)
+        # AUDIT-1.3: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimAuditRetentionJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:audit-retention (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'install-key' -Handler {

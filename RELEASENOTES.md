@@ -14,6 +14,36 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.499 — Tamper-proof audit trail, retention, request portal + consultants in the menu, more safety alerts
+
+- **Changed: the audit trail can no longer be edited, even directly in the database.** The database itself refuses any
+  change to an audit row. A row can only leave through the audit retention job, and only once it is older than the
+  retention period.
+- **Fixed: the audit trail names the person behind every change, not "engine".**
+  - A change the engine makes because someone committed it is now recorded with that person as the actor.
+  - When a second administrator committed it, or an approval authorised it, the approver is recorded too.
+  - The commit and every change it led to share one correlation id, so you can follow a request from the commit to each
+    change in Entra ID or Azure. Removals are attributed as well.
+  - Changes nobody asked for (a scheduled reconcile, an expiry) still say "engine".
+- **New: audit retention.** The Audit page shows how long the trail keeps its rows. By default it keeps every row, as
+  before. A SuperAdmin can set a retention period of 13 months or more. A daily job then removes older rows and
+  records each run in the audit trail itself.
+- **New: delegated administrators see their part of the audit trail.** A delegated administrator can now open the Audit
+  page. It shows their own actions and the events about the departments, groups and admins they own. The full export
+  and the evidence print stay with administrators.
+- **Changed: more numbers follow your number format**: durations, the audit counts, the search and table counters.
+- **New: the request portal and the consultants are easy to find.** The menu now says **Access requests (RFA portal)**
+  and has its own **Consultants & companies** entry. The page shows the portal link to hand out (with a Copy button) and
+  a **Manage companies** button.
+- **Changed: requesting the licence from Invardia and Pro updates from Invardia are ON by default.** Both can still be
+  switched off under Settings > Features.
+- **New: three more safety alerts.**
+  - A scope whose definitions disappeared while live items remain: alerted once.
+  - A managing or managed tenant whose Pro licence no longer covers MSP: alerted hourly (critical when refused, a
+    warning in the grace period).
+  - A drift check that finds more extras than the removal budget allows: an early warning, before the next apply holds
+    them.
+
 ## v2.4.498 — Menus open on hover, numbers in your format, audit evidence print
 
 - **New: the menus work as a menu bar on a desktop.** Pointing at a menu opens it, moving to the next menu switches at

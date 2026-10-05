@@ -2453,7 +2453,10 @@
         // §79.8 / §79.7 decision: the PIM owner page -- a department owner's own people, and their access end dates.
         { tab: 'owner',        label: 'My people',        desc: 'People in the departments you own — see when their access ends and extend it' },
         // §82: requests to have a disabled admin account enabled for a while + the company reviews of external consultants.
-        { tab: 'accessrequests', label: 'Access requests', desc: 'Requests to enable a disabled admin account for a while, IT overrides, and the company reviews of consultants' },
+        { tab: 'accessrequests', label: 'Access requests (RFA portal)', desc: 'The request portal link, requests to enable a disabled admin account for a while, and IT overrides' },
+        // Operator 2026-10-05 ("consultants mgmt in gui, i dont see it"): the consultant companies + their reviews get their own
+        // menu entry -- a deep link to the section on the same page (marked data-anchor, so the nav audit reads it as deliberate).
+        { tab: 'accessrequests', anchor: 'rfaConsultants', label: 'Consultants & companies', desc: 'The external companies, their consultants, and the company reviews that keep them confirmed' },
         { tab: 'conformance',  label: 'Tenant conformance', desc: 'Whether a tenant matches the standard it should' },
         { tab: 'reports',      label: 'Reports',          desc: 'Evidence you can hand to an auditor' },
         { tab: 'downlink',     label: 'Managed tenants',  desc: 'Push and check configuration in tenants you manage' },
@@ -2947,7 +2950,7 @@
            'value="' + escapeHtml(acctGridState.filter) + '" style="padding:3px 8px;font-size:12px;border:1px solid #d0d7de;border-radius:6px;width:240px;">' +
          '<button class="btn-sec" id="acctRefresh">Refresh</button>' +
          (d.canCreate ? '<button class="btn" id="acctNew">+ New admin</button>' : '') +
-         '<span style="color:#57606a;font-size:12px;">' + rows.length + ' of ' + acctGridState.rows.length + '</span></div>';
+         '<span style="color:#57606a;font-size:12px;">' + fmtNum(rows.length) + ' of ' + fmtNum(acctGridState.rows.length) + '</span></div>';
 
     // Honest about narrowing. "You are seeing a scoped list" is a different fact from
     // "there are only 3 admins", and an operator must be able to tell them apart.
@@ -8476,6 +8479,15 @@
       'When the time is up the account is disabled again (its roles are kept). ServiceNow can request through the API.</p>';
     if (!d.enabled) h += '<div style="background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:8px 10px;margin-bottom:10px;">The request portal is <b>switched off</b> (Settings &gt; Features: <i>Request for authorization (RFA) portal</i>, Pro). Nothing is taken in until it is on.</div>';
     else if (!d.deployed) h += '<div style="background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:8px 10px;margin-bottom:10px;">The public request portal is <b>not deployed</b> yet (no RFA store in the settings below). IT overrides still work.</div>';
+    // Operator 2026-10-05 ("add link to portal also"): where the people who ask for access go.
+    const portalUrl = String((d.settings && d.settings.portalUrl) || '').trim();
+    // (no regex literal with '//' here: the source-scope scanner reads it as a comment -- Test-PimAssertionScope)
+    if (d.enabled && d.deployed && portalUrl.toLowerCase().indexOf('https:' + '//') === 0) {
+      h += '<div id="rfaPortalLink" style="border:1px solid #d0d7de;border-left:4px solid #0969da;border-radius:6px;padding:8px 12px;margin-bottom:12px;background:#f6f8fa;">' +
+           '<b>Request portal</b> &mdash; give this link to the consultants and admins who ask for access: ' +
+           '<a href="' + escapeHtml(portalUrl) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(portalUrl) + '</a> ' +
+           '<button id="rfaCopyPortal" class="ghost" style="font-size:11px;padding:1px 8px;">Copy link</button></div>';
+    }
     const rows = (d.requests || []);
     h += '<table class="grid" style="width:100%;margin-bottom:14px;"><thead><tr><th>Requested</th><th>Person</th><th>Department (internal)</th><th>Company</th><th>What</th><th>Source</th><th>Status</th><th></th></tr></thead><tbody>';
     if (!rows.length) h += '<tr><td colspan="8" style="color:#57606a;">No requests yet.</td></tr>';
@@ -8497,9 +8509,10 @@
     }
     // company reviews
     const camps = (cr && cr.campaigns) || [];
-    h += '<h3 style="margin:18px 0 4px;">Company reviews (external consultants)</h3>' +
+    h += '<h3 id="rfaConsultants" style="margin:18px 0 4px;">Consultants &amp; companies</h3>' +
          '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">Each external company confirms its consultants on its cadence. Unanswered after 21 days = disabled (re-enabled through a request). ' +
-         'You can answer on the company\'s behalf. <a href="#" id="rfaEditCompanies">Edit companies</a> (' + ((cr && cr.companies) || 0) + ' defined).</div>';
+         'You can answer on the company\'s behalf.</div>' +
+         '<div style="margin-bottom:8px;"><button id="rfaEditCompanies">Manage companies</button> <span style="color:#57606a;font-size:12px;">' + fmtNum((cr && cr.companies) || 0) + ' compan' + (((cr && cr.companies) || 0) === 1 ? 'y' : 'ies') + ' defined' + (((cr && cr.companies) || 0) ? '' : ' -- add one so its consultants are reviewed') + '. A consultant is an admin linked to a company (Admins, column Company).</span></div>';
     if (!camps.length) h += '<div style="color:#57606a;">No company review yet.</div>';
     for (const c of camps) {
       const open = !c.closedUtc;
@@ -8539,6 +8552,12 @@
       try { const r = await api('POST', '/api/company-review/answer', { campaignId: b.dataset.c, upn: b.dataset.u, answer: b.dataset.a, leaveUntil: until }); msg(r.note || 'Recorded.'); renderAccessRequests(); } catch (e) { msg(e.message || String(e), true); }
     });
     const ec = document.getElementById('rfaEditCompanies');
+    const cpl = document.getElementById('rfaCopyPortal');
+    if (cpl) cpl.onclick = function () {
+      const a = document.querySelector('#rfaPortalLink a'); const u = a ? a.getAttribute('href') : '';
+      try { navigator.clipboard.writeText(u).then(function () { msg('The portal link is copied.'); }, function () { window.prompt('Copy the portal link:', u); }); }
+      catch (_) { window.prompt('Copy the portal link:', u); }
+    };
     if (ec) ec.onclick = function (ev) { ev.preventDefault(); switchTab('grid'); setTimeout(function () { try { currentGridBase = 'Account-Definitions-Companies'; renderGrid(currentGridBase); } catch (_) { } }, 300); };
     const toSet = document.getElementById('rfaToSettings');
     if (toSet) toSet.onclick = function (ev) { ev.preventDefault(); switchTab('settings'); setTimeout(function () { showSettingsSection('setRfaBrokerHost'); }, 600); };
@@ -9788,7 +9807,7 @@
     if (!tb) return;
     const vis = covVisibleRows(d);
     const shown = document.getElementById('covShown');
-    if (shown) shown.textContent = vis.length + ' of ' + asList(d.rows).length + ' shown';
+    if (shown) shown.textContent = fmtNum(vis.length) + ' of ' + fmtNum(asList(d.rows).length) + ' shown';
     const h = [];
     const cols = canStage ? 7 : 6;
     vis.forEach(r => {
@@ -11113,18 +11132,23 @@
     const windowLabel = (auditState.months === 'all') ? 'full history' : ('last ' + auditState.months + ' months');
     const h = [];
     h.push(`<div style="display:flex;align-items:center;margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Audit trail</span> ` +
-      `<span style="color:#57606a;font-size:11px;margin-left:6px;">append-only &mdash; ${totalAll} event(s) in the ${esc(windowLabel)} (${data.monthsTotal || 0} month(s) on file), newest first. Before/after shown per change.</span>` +
+      `<span style="color:#57606a;font-size:11px;margin-left:6px;">append-only &mdash; ${fmtNum(totalAll)} event(s) in the ${esc(windowLabel)} (${data.monthsTotal || 0} month(s) on file), newest first. Before/after shown per change.</span>` +
       `<span style="flex:1 1 auto;"></span>` +
-      `<button id="auditExportAll" class="ghost" style="font-size:12px;margin-right:6px;" title="Download the ENTIRE filtered trail (every match, not just this page) as CSV, with before/after">Export full trail (CSV)</button>` +
-      `<button id="auditEvidencePrint" class="ghost" style="font-size:12px;margin-right:6px;" title="A print-friendly page of the ENTIRE filtered trail, with the filter, the time range, who printed it and when (AUDIT-1.4). The print is recorded in the audit trail.">Print as evidence</button>` +
+      (data.scoped ? '' : `<button id="auditExportAll" class="ghost" style="font-size:12px;margin-right:6px;" title="Download the ENTIRE filtered trail (every match, not just this page) as CSV, with before/after">Export full trail (CSV)</button>` +
+      `<button id="auditEvidencePrint" class="ghost" style="font-size:12px;margin-right:6px;" title="A print-friendly page of the ENTIRE filtered trail, with the filter, the time range, who printed it and when (AUDIT-1.4). The print is recorded in the audit trail.">Print as evidence</button>`) +
       exportBarHtml('audit') + `</div>`);
+    // AUDIT-1.3: how long the trail keeps its rows (filled by auditRetentionLoad below; SuperAdmin may change it).
+    h.push('<div id="auditRetention" style="color:#57606a;font-size:11.5px;margin:-4px 0 8px;"></div>');
+    // AUDIT-1.3: a delegated administrator reads only their own scope (the server filters; the full-trail export and the
+    // evidence print stay Admin-only, so they are not offered).
+    if (data.scoped) h.push('<div id="auditScopedNote" style="border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;padding:6px 10px;font-size:12px;margin-bottom:8px;">You see the events in <b>your delegated scope</b>: your own actions, and events about the departments, groups and admins you own.</div>');
 
     // Category chips (with counts).
     h.push('<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">');
     for (const c of AUDIT_CATEGORIES) {
       const n = c.key === 'all' ? totalAll : (counts[c.key] || 0);
       const on = auditState.category === c.key;
-      h.push(`<button class="auditChip" data-cat="${c.key}" style="cursor:pointer;border:1px solid ${on ? '#0969da' : '#d0d7de'};background:${on ? '#0969da' : '#f6f8fa'};color:${on ? '#fff' : '#24292f'};border-radius:14px;padding:3px 10px;font-size:12px;">${esc(c.label)} <span style="opacity:.8;">${n}</span></button>`);
+      h.push(`<button class="auditChip" data-cat="${c.key}" style="cursor:pointer;border:1px solid ${on ? '#0969da' : '#d0d7de'};background:${on ? '#0969da' : '#f6f8fa'};color:${on ? '#fff' : '#24292f'};border-radius:14px;padding:3px 10px;font-size:12px;">${esc(c.label)} <span style="opacity:.8;">${fmtNum(n)}</span></button>`);
     }
     h.push('</div>');
 
@@ -11144,7 +11168,7 @@
       '</div>');
 
     const events = data.events || [];
-    h.push(`<div style="color:#57606a;font-size:11.5px;margin-bottom:4px;">${data.matchCount || 0} match(es)${(auditState.category !== 'all' || auditState.q) ? ' for the current filter' : ''} &mdash; page ${data.page} of ${data.pageCount}.</div>`);
+    h.push(`<div style="color:#57606a;font-size:11.5px;margin-bottom:4px;">${fmtNum(data.matchCount || 0)} match(es)${(auditState.category !== 'all' || auditState.q) ? ' for the current filter' : ''} &mdash; page ${data.page} of ${data.pageCount}.</div>`);
     h.push('<table class="grid" style="font-size:11.5px;"><thead><tr><th>When (UTC)</th><th>Actor</th><th>Category</th><th>Action</th><th>Target</th><th>Result</th><th>Change (before &rarr; after)</th></tr></thead><tbody>');
     if (events.length === 0) {
       h.push('<tr><td colspan="7" style="color:#57606a;padding:10px;">No events match the current filter.</td></tr>');
@@ -11221,6 +11245,7 @@
       } catch (e) { alert('Could not export the full audit trail: ' + (e && e.message ? e.message : e)); }
       finally { exAll.disabled = false; exAll.textContent = prev; }
     };
+    auditRetentionLoad();
     // AUDIT-1.4 (framework): PRINT AS EVIDENCE -- the same full filtered trail as the export (purpose=print, so the server
     // records an audit.print event), laid out for paper: the filter, the time range, who printed it and when.
     const pr = document.getElementById('auditEvidencePrint');
@@ -11240,6 +11265,28 @@
         try { win.focus(); win.print(); } catch (_) { }
       } catch (e) { alert('Could not prepare the audit evidence: ' + (e && e.message ? e.message : e)); }
       finally { pr.disabled = false; pr.textContent = prev; }
+    };
+  }
+
+  // AUDIT-1.3: the retention line on the Audit tab. 0 = keep every row (the default); 13+ months = the daily
+  // 'audit-retention' job deletes older rows and records it in this trail. A SuperAdmin changes it here (audited).
+  async function auditRetentionLoad() {
+    const el = document.getElementById('auditRetention');
+    if (!el) return;
+    let r;
+    try { r = await api('GET', '/api/settings/audit-retention'); } catch (e) { el.textContent = ''; return; }
+    const m = Number(r && r.months) || 0;
+    el.innerHTML = 'Retention: <b>' + (m ? (fmtNum(m) + ' months') : 'keep every row') + '</b>' +
+      (m ? ' &mdash; the daily audit-retention job deletes older rows and records each run here.' : ' &mdash; no row is ever deleted.') +
+      ' Rows can never be edited.' +
+      (r && r.canWrite ? ' <button id="auditRetentionEdit" class="ghost" style="font-size:11px;padding:1px 8px;">Change</button>' : '');
+    const b = document.getElementById('auditRetentionEdit');
+    if (b) b.onclick = async () => {
+      const v = window.prompt('Keep audit rows for how many months? 0 = keep every row; otherwise at least ' + ((r && r.minimum) || 13) + '.', String(m));
+      if (v === null) return;
+      try { await api('PUT', '/api/settings/audit-retention', { months: v.trim() }); }
+      catch (e) { alert('Could not change the audit retention: ' + (e && e.message ? e.message : e)); return; }
+      auditRetentionLoad();
     };
   }
 
@@ -11331,7 +11378,7 @@
     }
     if (total === 0) { strip.style.display = 'none'; strip.innerHTML = ''; return; }
     strip.style.display = '';
-    strip.innerHTML = '<b>Queued: ' + total + ' change(s)</b> <span style="color:#57606a;">&mdash; ' +
+    strip.innerHTML = '<b>Queued: ' + fmtNum(total) + ' change(s)</b> <span style="color:#57606a;">&mdash; ' +
       parts.join(' &middot; ') + '</span> &nbsp;<a id="aStripGo" style="cursor:pointer;color:#0969da;font-weight:600;">Review &amp; commit &rarr;</a>' +
       '<div style="color:#57606a;font-size:11px;margin-top:2px;">Nothing is written to the store until you commit.</div>';
     const go = document.getElementById('aStripGo');
@@ -12236,7 +12283,7 @@
             '<span class="pim-combo-label">' + escapeHtml(i.label) + '</span>' +
           '</div>').join('') +
           (hit.length > shown.length
-            ? '<div class="pim-combo-foot">showing ' + shown.length + ' of ' + hit.length + ' &mdash; keep typing to narrow</div>'
+            ? '<div class="pim-combo-foot">showing ' + fmtNum(shown.length) + ' of ' + fmtNum(hit.length) + ' &mdash; keep typing to narrow</div>'
             : '<div class="pim-combo-foot">' + hit.length + ' suggestion(s)' + (needle ? ' matching &ldquo;' + escapeHtml(q) + '&rdquo;' : '') + '</div>');
       }
       menu.style.display = '';
@@ -12757,8 +12804,8 @@
   function jobMinsAgo(mins) {
     const m = Math.max(0, Math.round(mins));
     if (m < 60) return m + 'm';
-    if (m < 1440) return (Math.round(m / 6) / 10) + 'h';
-    return (Math.round(m / 144) / 10) + 'd';
+    if (m < 1440) return fmtNum(Math.round(m / 6) / 10) + 'h';
+    return fmtNum(Math.round(m / 144) / 10) + 'd';
   }
   // ---------------------------------------------------------------------
   // §65.7 -- THE QUEUE TAB.
@@ -13581,7 +13628,7 @@
         ? '<span style="color:#1a7f37;font-weight:600;">PASS</span>'
         : ('<span style="color:#cf222e;font-weight:600;">FAIL</span>' + (histOpen.has(r.runId) ? '' : ' <span style="color:#8c959f;" title="a later run succeeded -- nothing to do">(healed)</span>'));
       const when = jobTimeAgo(r.startedUtc || r.finishedUtc);
-      const dur = (r.durationMs >= 1000) ? (Math.round(r.durationMs / 100) / 10) + 's' : ((r.durationMs || 0) + 'ms');
+      const dur = (r.durationMs >= 1000) ? fmtNum(Math.round(r.durationMs / 100) / 10) + 's' : (fmtNum(r.durationMs || 0) + 'ms');
       return '<div style="padding:5px 0;border-bottom:1px solid #eaeef2;font-size:12px;">' +
         badge + ' <span style="color:#57606a;" title="' + esc0(r.startedUtc || '') + '">' + esc0(when) + '</span>' +
         ' <span style="color:#8c959f;">(' + esc0(dur) + ')</span>' +
@@ -13674,7 +13721,7 @@
     } else {
       h += '<table class="set-table" style="max-width:1180px;"><tr><th>Result</th><th>Job</th><th>When</th><th>Duration</th><th>What happened</th><th></th></tr>';
       runs.forEach(r => {
-        const dur = (r.durationMs >= 1000) ? (Math.round(r.durationMs / 100) / 10) + 's' : ((r.durationMs || 0) + 'ms');
+        const dur = (r.durationMs >= 1000) ? fmtNum(Math.round(r.durationMs / 100) / 10) + 's' : (fmtNum(r.durationMs || 0) + 'ms');
         const res = r.ok ? '<span style="color:#1a7f37;font-weight:600;">PASS</span>'
                          : '<span style="color:#cf222e;font-weight:600;">FAIL</span>' + (openIds.has(r.runId) ? '' : ' <span style="color:#8c959f;" title="a later run of this job succeeded -- nothing to do">(healed)</span>');
         // 🔴 A TRIGGERED RUN CARRIES ITS WHOLE SCOPE LIST IN ITS NAME (operator, 2026-09-22: "looks
@@ -15263,7 +15310,7 @@
       return;
     }
     const h = [];
-    h.push('<div style="padding:6px 10px;color:#57606a;font-size:11px;border-bottom:1px solid #eaeef2;">' + data.count + ' match(es)' + (data.truncated ? ' (showing first ' + hits.length + ')' : '') + '</div>');
+    h.push('<div style="padding:6px 10px;color:#57606a;font-size:11px;border-bottom:1px solid #eaeef2;">' + fmtNum(data.count) + ' match(es)' + (data.truncated ? ' (showing first ' + hits.length + ')' : '') + '</div>');
     hits.forEach((hit, i) => {
       h.push('<div class="gsHit" data-i="' + i + '" role="button" tabindex="0" style="padding:7px 10px;cursor:pointer;border-bottom:1px solid #f3f5f7;font-size:12.5px;">' +
         globalSearchTypeBadge(hit.type) +
@@ -16602,7 +16649,7 @@
       <div class="toolbar">
         <input id="gridFilter" type="search" placeholder="filter rows…" autocomplete="off" value="${escapeHtml(gridView(base).filter)}" style="padding:3px 8px;font-size:12px;border:1px solid #d0d7de;border-radius:6px;width:200px;" title="Show only rows whose cells contain this text">
         ${gridView(base).problem ? '<span id="gridProblemBar" style="font-size:11.5px;background:#ffebe9;border:1px solid #ff8182;border-radius:6px;padding:2px 8px;">Showing the <b>' + gridView(base).problem.rows.size + '</b> row(s) with problem <b>' + escapeHtml(gridView(base).problem.code) + '</b>' + (gridView(base).problem.message ? ' &mdash; ' + escapeHtml(gridView(base).problem.message) : '') + ' <a href="#" id="gridProblemClear">Show all rows</a></span>' : ''}
-        ${__gridOrder.length !== p.rows.length ? '<span id="gridShown" style="font-size:11.5px;color:#9a6700;">' + __gridOrder.length + ' of ' + p.rows.length + ' shown</span>' : ''}
+        ${__gridOrder.length !== p.rows.length ? '<span id="gridShown" style="font-size:11.5px;color:#9a6700;">' + fmtNum(__gridOrder.length) + ' of ' + fmtNum(p.rows.length) + ' shown</span>' : ''}
         <button id="btnAddRow">+ Add row</button>
         <button id="btnReloadGrid">&#x21bb; Reload</button>
       </div>
@@ -18649,7 +18696,7 @@
       const csvs = Object.keys(bySev[sev]).sort();
       if (csvs.length === 0) continue;
       const totalSev = csvs.reduce((s, c) => s + bySev[sev][c].length, 0);
-      html.push('<div class="v-group"><div class="v-group-h">' + escapeHtml(sev) + ' (' + totalSev + ')</div>');
+      html.push('<div class="v-group"><div class="v-group-h">' + escapeHtml(sev) + ' (' + fmtNum(totalSev) + ')</div>');
       for (const c of csvs) {
         const items = bySev[sev][c];
         html.push('<div style="margin:6px 0 8px 0;"><div style="font-size:11.5px; color:#6e7681; margin-bottom:3px;"><b>' + escapeHtml(c) + '</b> &mdash; ' + items.length + '</div>');
@@ -26813,7 +26860,7 @@
       if (ri) {
         const why = [];
         if (ri.hitsT0T1) why.push('reaches a Tier-0/Tier-1 target');
-        if (ri.targetCount > threshold) why.push('reaches ' + ri.targetCount + ' targets (above the estate norm of ' + threshold.toFixed(1) + ')');
+        if (ri.targetCount > threshold) why.push('reaches ' + ri.targetCount + ' targets (above the estate norm of ' + fmtNum(threshold, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ')');
         if (why.length) { flags.push('overpriv'); reasons.overpriv = why.join('; ') + '.'; }
       }
       if (flags.length) {
