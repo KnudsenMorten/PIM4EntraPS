@@ -14440,27 +14440,36 @@
     return signin ? 'Your sign-in session is missing or expired -- reload the page to sign in again.'
                   : 'This page was loaded before the server restarted -- reload the page to continue.';
   }
-  function showStaleSessionBanner(kind) {
+  // BRAND-2.11 (framework, 2026-10-05: PIM, Invardia and SI tell people the same way that a new version is out). A deploy
+  // restarts the Manager, so the page's session ends with it; the 401 now carries the server's version. When it differs
+  // from the one this page was loaded with, the bar is calm and says WHAT happened ("updated to vX") instead of "expired".
+  // It never reloads by itself; staged changes are kept and put back after the reload.
+  function showStaleSessionBanner(kind, serverVersion) {
     if (_staleShown) return;
     _staleShown = true;
     const signin = (kind === 'signin');
+    const pageVer = String(((document.getElementById('versionBadge') || {}).textContent) || '').trim();
+    const newVer = String(serverVersion || '').trim();
+    const updated = !signin && newVer && pageVer && newVer !== pageVer && /^v?\d/.test(newVer);
     try {
       const d = document.createElement('div');
       d.id = 'pimStaleSession';
       d.setAttribute('role', 'alert');
-      d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#bc4c00;color:#fff;' +
+      d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:' + (updated ? '#0969da' : '#bc4c00') + ';color:#fff;' +
                         'padding:10px 16px;font:14px/1.4 system-ui,sans-serif;box-shadow:0 2px 6px rgba(0,0,0,.3);';
       // §70.12 -- "nothing was lost" was untrue for staged, uncommitted edits. They are now kept in
       // this browser and restored after the reload; say so, and count them.
       let staged = 0;
       try { staged = Object.keys(pendingChanges).filter(b => isDirty(b)).length; persistPendingDraft(); } catch (_) { }
-      d.innerHTML = (signin
+      d.innerHTML = (updated
+                      ? '<b>A new version of PIM Manager is available</b> (' + escapeHtml(newVer) + '; this page is ' + escapeHtml(pageVer) + '). Reload to continue &mdash; committed data is safe on the server. '
+                      : signin
                       ? '<b>Your sign-in session is missing or expired.</b> Reload to sign in again. Committed data is safe on the server. '
                       : '<b>Session expired.</b> The server restarted since this page was opened, so it can no ' +
                         'longer accept requests from it. Committed data is safe on the server. ') +
                     (staged ? 'Your <b>uncommitted pending changes</b> are kept in this browser and are put back after the reload &mdash; commit them afterwards. ' : '') +
                     '<button id="pimStaleReload" style="margin-left:12px;padding:4px 12px;border:0;border-radius:4px;' +
-                    'background:#fff;color:#bc4c00;font-weight:600;cursor:pointer;">Reload now</button>';
+                    'background:#fff;color:' + (updated ? '#0969da' : '#bc4c00') + ';font-weight:600;cursor:pointer;">' + (updated ? 'Reload' : 'Reload now') + '</button>';
       document.body.appendChild(d);
       const b = document.getElementById('pimStaleReload');
       if (b) b.addEventListener('click', () => location.reload());
@@ -14511,7 +14520,7 @@
         // principal (the sign-in session at the authentication edge is missing or expired) -- that is a
         // sign-in problem, not a server restart, and it is said as one. Any other 401 is the stale page token.
         const noPrincipal = /no authenticated principal/i.test(String((data && data.detail) || ''));
-        showStaleSessionBanner(noPrincipal ? 'signin' : 'restart');
+        showStaleSessionBanner(noPrincipal ? 'signin' : 'restart', String((data && data.version) || ''));
         const e401 = new Error(noPrincipal
           ? 'Your sign-in session is missing or expired -- reload the page to sign in again. Nothing is wrong with the data.'
           : 'This page was loaded before the server restarted, so its session is no longer valid. Reload the page to continue -- nothing is wrong with the data.');

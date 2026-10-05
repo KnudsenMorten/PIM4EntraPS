@@ -14,6 +14,12 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.506 — "A new version is available"
+
+- **Changed: after an update the Manager tells you a new version is available**, naming the new and the old version, in
+  a calm bar with a Reload button, instead of "Session expired". Your staged changes are kept and put back after the
+  reload, and the page never reloads by itself. The same behaviour is coming to Invardia and SecurityInsight.
+
 ## v2.4.505 — Times in your own time zone
 
 - **Changed: every time the Manager shows is in your browser's local time zone** (daylight saving included), never UTC.
