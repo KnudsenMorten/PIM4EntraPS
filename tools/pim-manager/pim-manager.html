@@ -1085,6 +1085,7 @@
     <div class="tab" data-tab="authoring" title="Bulk authoring — move an admin, clone a definition or Azure-RBAC delegation to many targets, bulk-attach, and import admins, each with a preview before commit.">Authoring</div>
     <div class="tab" data-tab="onboarding" title="Onboard a new admin — derive the name and metadata, place them in the right groups, and (for sensitive grants) route through second-person approval.">Onboarding</div>
     <div class="tab" data-tab="departments" title="Departments and their owners -- who approves and who is mailed for every delegation a department sponsors. Import them from Entra, or assign owners in bulk by uploading a CSV file.">Departments &amp; owners</div>
+    <div class="tab" data-tab="companies" title="The external companies whose consultants hold admin accounts: their 1-2 contacts (who answer the access reviews), the review cadence and the consultants of each.">External Companies (Consultants)</div>
     <div class="tab" data-tab="manageraccess" title="Who may read, change or administer this Manager -- your role, the role mapping and delegated portal profiles.">Manager access &amp; roles</div>
     <div class="tab" data-tab="emergency" title="The break-glass accounts PIM never revokes, disables or offboards, and the time-boxed emergency override.">Emergency access <span id="govEmergencyBadge" class="badge" style="display:none;background:#cf222e" title="Emergency override (break-glass) is ACTIVE">!</span></div>
     <div class="tab" data-tab="mailtemplates" title="The wording of every notification mail.">Mail templates</div>
@@ -1634,6 +1635,11 @@
     </div>
   </div>
   <!-- =========== REQ-L: Policy templates (read-only) =========== -->
+  <div id="companiesTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="companiesBody">
+      <div style="color:#57606a;font-size:12px;">Loading external companies&hellip;</div>
+    </div>
+  </div>
   <div id="workloadtemplatesTab" class="tab-panel">
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="workloadtemplatesBody">
       <div id="setTemplatePacksHost"><div style="color:#57606a;font-size:12px;">Loading workload templates&hellip;</div></div>
@@ -2465,7 +2471,7 @@
         { tab: 'accessrequests', label: 'Access requests (RFA portal)', desc: 'The request portal link, requests to enable a disabled admin account for a while, and IT overrides' },
         // Operator 2026-10-05 ("consultants mgmt in gui, i dont see it"): the consultant companies + their reviews get their own
         // menu entry -- a deep link to the section on the same page (marked data-anchor, so the nav audit reads it as deliberate).
-        { tab: 'accessrequests', anchor: 'rfaConsultants', label: 'External Companies (Consultants)', desc: 'The external companies, their consultants, and the company reviews that keep them confirmed' },
+        { tab: 'companies', label: 'External Companies (Consultants)', desc: 'The external companies, their consultants, and the company reviews that keep them confirmed' },
         { tab: 'reports',      label: 'Reports',          desc: 'Evidence you can hand to an auditor' },
         { tab: 'downlink',     label: 'Managed tenants',  desc: 'Push and check configuration in tenants you manage' },
         // REQ-N / REQ-O (operator 2026-09-19): managing tenant only (applyMspMasterOnlyTabs hides them elsewhere).
@@ -2871,6 +2877,7 @@
     if (name === 'authoring') renderAuthoring();
     if (name === 'onboarding') renderOnboarding();
     if (name === 'departments') renderDepartmentsPage();
+    if (name === 'companies') renderCompaniesPage();   // operator 2026-10-05: its own page, like Departments & owners
     if (name === 'manageraccess') renderSettingsAccessSection(document.getElementById('setAccessHost'));
     if (name === 'emergency') { renderSettingsBreakGlassSection(document.getElementById('setBreakGlassHost')); renderSettingsEmergencySection(document.getElementById('setEmergencyHost')); }
     if (name === 'mailtemplates') renderMailTemplatesSection(document.getElementById('setMailTemplatesHost'));
@@ -7880,6 +7887,91 @@
   // consumer -- nothing in the engine or the approval flow ever read it -- so it is gone: the server answers 410 to a
   // save, keeps the stored list read-only, and this page shows those names ONCE so nobody is silently dropped.
   // ===================================================================
+  // Operator 2026-10-05: one row per EXTERNAL company -- its 1-2 contacts (a consultancy manager, a support / helpdesk
+  // address) who get the access-review mail, sign in with a magic link and confirm or deny each consultant ("Hans no longer
+  // works with us" -> that account is offboarded); the review cadence; the sponsor department; and the consultants (admins
+  // linked to the company). Stored in Account-Definitions-Companies, saved through the normal commit (checks + audit).
+  async function renderCompaniesPage() {
+    const body = document.getElementById('companiesBody');
+    if (!body) return;
+    const esc = escapeHtml;
+    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode — companies need the server.</div>'; return; }
+    const canEdit = roleAtLeast('Admin');
+    body.innerHTML = stateLoading('Loading external companies… please wait', 'Reading the companies and their consultants from the store.');
+    const base = 'Account-Definitions-Companies';
+    let co, adm;
+    try { co = await loadCsv(base); ensurePending(base, co.header, co.rows); } catch (e) { body.innerHTML = stateError('Failed to load the companies', e.message); return; }
+    try { adm = await loadCsv('Account-Definitions-Admins'); } catch (_) { adm = { rows: [] }; }
+    const depts = (typeof deptOptions === 'function' ? deptOptions() : []) || [];
+    const ext = (pendingChanges[base].rows || []).map((r, i) => ({ r, i })).filter(x => !/^internal$/i.test(String(x.r.Type || '').trim()));
+    const people = (name) => (adm.rows || []).filter(a => String(a.Company || '').trim().toLowerCase() === String(name || '').trim().toLowerCase());
+    const cad = [[30, 'every month'], [90, 'every 3 months'], [180, 'every 6 months'], [365, 'every year']];
+    const ro = canEdit ? '' : ' disabled';
+    let h = '<div style="margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Reviews &amp; controls · External companies (consultants)</span>' +
+      (canEdit ? '' : ' <span style="margin-left:8px;font-size:11px;color:#57606a;">(read-only — Admin required to edit)</span>') + '</div>';
+    h += '<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">External companies &amp; their contacts</h3>' +
+      '<div style="color:#57606a;font-size:12.5px;margin-bottom:10px;line-height:1.5;max-width:1000px;">Each company that supplies consultants has <b>1-2 contacts</b> &mdash; a consultancy manager, a support / helpdesk address. ' +
+      'On the review cadence they get an <b>access-review mail</b> listing every consultant of their company with access here; they sign in with a <b>magic link</b> and confirm each person, or say they no longer work for them &mdash; that account is then <b>offboarded</b>. ' +
+      'Unanswered after 21 days = disabled. A consultant is an admin whose <b>Company</b> is set to the company (Admin accounts &rsaquo; Company).</div>';
+    h += '<table class="set-table" id="coTbl" style="width:100%;"><thead><tr><th>Company</th><th>Contacts (1-2 e-mail addresses)</th><th>Sponsor department</th><th>Review</th><th>Consultants</th><th>Notes</th><th></th></tr></thead><tbody>';
+    const rowHtml = (r, idx) => {
+      const ppl = people(r.Company);
+      const cd = parseInt(r.ReviewCadenceDays, 10) || 90;
+      const cadOpts = cad.some(c => c[0] === cd) ? cad : cad.concat([[cd, 'every ' + cd + ' days']]);
+      return '<tr data-idx="' + idx + '">' +
+        '<td><input class="coName" value="' + esc(r.Company || '') + '" placeholder="e.g. Example Consulting" style="width:180px;"' + ro + '></td>' +
+        '<td><input class="coContacts" value="' + esc(String(r.Contacts || '').split(/[|;,\s]+/).filter(Boolean).join('; ')) + '" placeholder="manager@example.test; helpdesk@example.test" style="width:300px;"' + ro + '></td>' +
+        '<td><select class="coDept"' + ro + '><option value="">(none)</option>' + depts.map(o => '<option value="' + esc(o.value) + '"' + (String(o.value) === String(r.SponsorDepartment || '') ? ' selected' : '') + '>' + esc(o.label || o.value) + '</option>').join('') + '</select></td>' +
+        '<td><select class="coCad"' + ro + '>' + cadOpts.map(c => '<option value="' + c[0] + '"' + (c[0] === cd ? ' selected' : '') + '>' + c[1] + '</option>').join('') + '</select></td>' +
+        '<td style="font-size:12px;">' + (ppl.length ? '<b>' + ppl.length + '</b>: ' + ppl.slice(0, 6).map(a => esc(a.DisplayName || a.UserPrincipalName || a.UserName || '')).join(', ') + (ppl.length > 6 ? ', &hellip;' : '') : '<span style="color:#57606a;">none linked yet</span>') + '</td>' +
+        '<td><input class="coNotes" value="' + esc(r.Notes || '') + '" style="width:160px;"' + ro + '></td>' +
+        '<td>' + (canEdit ? '<button class="btn-sec coDel" title="Remove this company (its consultants are not changed; unlink or offboard them on Admin accounts).">&#x2715;</button>' : '') + '</td></tr>';
+    };
+    h += ext.map(x => rowHtml(x.r, x.i)).join('');
+    h += '</tbody></table>';
+    if (!ext.length) h += '<div style="color:#57606a;font-size:12.5px;margin:8px 0;">No external company yet &mdash; add the first one.</div>';
+    if (canEdit) h += '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;"><button class="btn-sec" id="coAdd">+ Add company</button> <button id="coSave">Save companies</button> <span id="coMsg" style="font-size:12.5px;"></span></div>';
+    h += '</div>';
+    body.innerHTML = h;
+    const msg = (t, bad) => { const m = document.getElementById('coMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#1a7f37'; } };
+    const tbody = body.querySelector('#coTbl tbody');
+    const add = document.getElementById('coAdd');
+    if (add) add.onclick = () => { const tmp = document.createElement('tbody'); tmp.innerHTML = rowHtml({ Company: '', Contacts: '', SponsorDepartment: '', ReviewCadenceDays: '90', Notes: '' }, -1); tbody.appendChild(tmp.firstChild); wireDel(); };
+    const wireDel = () => body.querySelectorAll('.coDel').forEach(b => { b.onclick = () => { const tr = b.closest('tr'); if (tr) tr.remove(); }; });
+    wireDel();
+    const save = document.getElementById('coSave');
+    if (save) save.onclick = async () => {
+      const mailRx = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+      const out = [], seen = {};
+      for (const tr of Array.from(tbody.querySelectorAll('tr'))) {
+        const name = tr.querySelector('.coName').value.trim();
+        const contacts = tr.querySelector('.coContacts').value.split(/[|;,\s]+/).map(x => x.trim()).filter(Boolean);
+        if (!name && !contacts.length) continue;
+        if (!name) { msg('Every company needs a name.', true); return; }
+        if (seen[name.toLowerCase()]) { msg('"' + name + '" is listed twice.', true); return; }
+        seen[name.toLowerCase()] = true;
+        if (!contacts.length) { msg(name + ': add at least one contact -- the review mail goes there.', true); return; }
+        const bad = contacts.filter(c => !mailRx.test(c));
+        if (bad.length) { msg(name + ': not an e-mail address: ' + bad.join(', '), true); return; }
+        const idx = parseInt(tr.dataset.idx, 10);
+        const prev = idx >= 0 ? (pendingChanges[base].rows[idx] || {}) : {};
+        out.push(Object.assign({}, prev, { Company: name, Type: 'External', Contacts: contacts.join(';'), SponsorDepartment: tr.querySelector('.coDept').value,
+          ReviewCadenceDays: tr.querySelector('.coCad').value, Notes: tr.querySelector('.coNotes').value.trim() }));
+      }
+      // the INTERNAL companies are not shown here; they are kept exactly as they are
+      const internal = (pendingChanges[base].rows || []).filter(r => /^internal$/i.test(String(r.Type || '').trim()));
+      save.disabled = true; msg('Saving…');
+      try {
+        await api('PUT', '/api/csv/' + encodeURIComponent(base), commitPutBody(base, internal.concat(out)));
+        try { delete pendingChanges[base]; } catch (_) { }
+        try { if (typeof _coCache !== 'undefined') { _coCache = null; _coLoaded = false; } } catch (_) { }
+        msg('Saved ' + out.length + ' compan' + (out.length === 1 ? 'y' : 'ies') + '.');
+        setTimeout(renderCompaniesPage, 600);
+      } catch (e) { msg('Not saved: ' + String((e && e.message) || e), true); }
+      save.disabled = false;
+    };
+  }
+
   async function renderDepartmentsPage() {
     const body = document.getElementById('departmentsBody');
     if (!body) return;
@@ -8622,7 +8714,7 @@
       try { navigator.clipboard.writeText(u).then(function () { msg('The portal link is copied.'); }, function () { window.prompt('Copy the portal link:', u); }); }
       catch (_) { window.prompt('Copy the portal link:', u); }
     };
-    if (ec) ec.onclick = function (ev) { ev.preventDefault(); switchTab('grid'); setTimeout(function () { try { currentGridBase = 'Account-Definitions-Companies'; renderGrid(currentGridBase); } catch (_) { } }, 300); };
+    if (ec) ec.onclick = function (ev) { ev.preventDefault(); switchTab('companies'); };
     const toSet = document.getElementById('rfaToSettings');
     if (toSet) toSet.onclick = function (ev) { ev.preventDefault(); switchTab('settings'); setTimeout(function () { showSettingsSection('setRfaBrokerHost'); }, 600); };
   }
