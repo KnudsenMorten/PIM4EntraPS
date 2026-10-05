@@ -16912,6 +16912,11 @@
     // non-master's header; this is the same rule client-side, so a stale pending header cannot show them.
     if (REPL_KIND[base] && !_mspReplCtx) { mspReplicationContext().then(() => { if (currentGridBase === base) renderGrid(base); }); }
     const visHeader = header.filter(c => !replHiddenCol(base, c));
+    // Operator 2026-10-05 ("very confusing, dont show the sponsor group as the first column"): on a group table the GROUP
+    // comes first -- its name, description and tag -- and the sponsoring Department after the tag. Display order only;
+    // the stored row is unchanged.
+    { const di = visHeader.indexOf('Department'), ti = visHeader.indexOf('GroupTag');
+      if (di >= 0 && ti > di && String(base).indexOf('PIM-Definitions-') === 0) { visHeader.splice(di, 1); visHeader.splice(visHeader.indexOf('GroupTag') + 1, 0, 'Department'); } }
     const replReach = !!(REPL_KIND[base] && replIsMaster());
     // 🔴 The managed tenant's half of the same question (operator, 2026-09-22): the managing tenant sees
     // "Reach", the managed tenant has to see WHERE EACH ROW CAME FROM. Declared here so the count can be said
