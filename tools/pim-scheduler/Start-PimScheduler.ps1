@@ -101,6 +101,7 @@ if ($UseManagedIdentity -or "$env:PIM_UseManagedIdentity".Trim() -eq '1') { $glo
 . "$shared\PIM-FailureCatalog.ps1"    # classified item failures (cause/remedy/auto-fix), persisted in SQL
 . "$shared\PIM-EngineCore.ps1"        # NEW REST+SQL engine (diff + providers)
 . "$shared\PIM-DisableGuard.ps1"      # account-disable circuit breaker (incident 2026-06-15)
+. "$shared\PIM-Guard.ps1"             # GUARD-1: a guard trip -> state + audit + mail + telemetry
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAd.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAd.ps1" }   # §84 Pro: loaded only when present          # on-prem AD/gMSA-sMSA PLANNER + hybrid-worker seam (on-prem write is worker-only)
 if (Test-Path -LiteralPath "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1") { . "$shared\..\hybrid-ad\PIM-HybridAdGroups.ps1" }   # §84 Pro: loaded only when present    # §80.2 PIM-for-AD replacement: AD group mirror + JIT membership (hybrid worker only)
 . "$shared\PIM-EngineProviders.ps1"

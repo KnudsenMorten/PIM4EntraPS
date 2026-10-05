@@ -1666,6 +1666,21 @@ deployment is a supported choice) and no credentials lying around.
   signs in with its own Entra application, and only the applications you list are accepted. A system can also
   *propose* a change, which waits for an administrator instead of being applied. *(2.4.486)*
 
+- **An admin requests their own account back, for a set time (Pro).** ✅ 2026-10-03 — A disabled admin, typically a
+  consultant who is only switched on when needed, opens the access request portal, signs in with a one-time PIN sent to
+  their contact address (valid for 15 minutes) and asks for the account to be enabled for a period, for example 24 hours.
+  Depending on the rule for that admin or department, the request is approved at once or waits for the department's
+  approver. When the period ends the account is switched off again by itself. Every request, approval and expiry is
+  recorded in the audit trail. *(Proven live: 11 of 11 checks, everything cleaned up afterwards.)*
+- **Ask for temporary access to more groups, removed automatically (Pro).** ✅ 2026-10-03 — From the same portal, an admin
+  sees the permission groups you have chosen to offer and requests access to one they do not have yet. Approved access is
+  given for a set time (24 hours by default, changeable in Settings) and is **taken away automatically** when that time is
+  up. It is marked as ad-hoc everywhere it appears, so it is never mistaken for standing delegated access. *(Proven live:
+  19 of 19 checks, everything cleaned up afterwards.)*
+- **External companies confirm their consultants (Pro).** ✅ 2026-10-03 — Register each external company with its contact
+  person and a review cadence. On that cadence the company's contact receives the list of *their* consultants and confirms
+  who still works for them. A consultant the company reports as having left is **switched off at once**, and removing
+  their access waits for an internal approver, so nothing is deleted on an outside party's word alone.
 ## 14. Scale / Performance
 - **Built for large tenants.** The solution never bulk-lists hundreds of thousands of users
   or groups. It looks users up on demand and queries only the PIM-managed groups by name
@@ -1837,7 +1852,8 @@ deployment is a supported choice) and no credentials lying around.
   capability at no cost and is **never** gated. **Pro** covers the advanced integrations (workload
   connectors, Power BI, coverage & gaps, revoking current delegations, access reviews, the second approver,
   delegated administration, the tier-impact report, the evidence export and PIM for on-premises Active
-  Directory -- listed as Pro ✅ 2026-10-03) and the multi-tenant half
+  Directory -- listed as Pro ✅ 2026-10-03; the access request portal, temporary group access and the consultant
+  company review -- ✅ 2026-10-05) and the multi-tenant half
   (managing and managed tenants). **Each Pro capability is allowed only while an installed Pro licence
   covers that capability and this tenant** — otherwise it is refused, with the reason shown in plain words.
   The edition you choose records the commercial basis; what is actually unlocked is decided by the installed

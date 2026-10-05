@@ -244,7 +244,23 @@ function Invoke-PimUplinkCycle {
         if ("$($r.Status)" -eq 'ok') { $sent++; $marks[$p.job] = $p.finishedUtc }
         else { $failed++; $stopped = $true; $left++; $why += "$($p.job): $($r.Reason)" }
     }
-    $msg = "$($sender.Mode): $sent sent$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })"
+    # GUARD-1 (framework, 2026-10-04): every guard whose last trip is newer than its last send goes as a Kind 'guard' record
+    # (PIM-Guard.ps1). Invardia opens / updates the support ticket from it. Same budget and stop-at-first-failure as the runs.
+    $guardsSent = 0
+    if (-not $stopped -and (Get-Command Select-PimGuardTelemetryDue -ErrorAction SilentlyContinue)) {
+        $gs = $null; try { $gs = & $GetSetting 'GuardTrips' } catch { $gs = $null }
+        if ($gs -is [string]) { try { $gs = $gs | ConvertFrom-Json } catch { $gs = $null } }
+        foreach ($e in @(Select-PimGuardTelemetryDue -State $gs)) {
+            if ($stopped -or $sent -ge $budget) { $left++; continue }
+            $rec = New-PimGuardUplinkRecord -Entry $e -Mode $sender.Mode -Product $script:PimUplinkProduct -Version $Version -Ring $Ring -InstallId $iid -TenantId $TenantId
+            if (-not $rec) { continue }
+            $r = & $post $rec
+            if ("$($r.Status)" -eq 'ok') { $sent++; $guardsSent++; $e | Add-Member -NotePropertyName lastSentUtc -NotePropertyValue $NowUtc.ToString('o') -Force }
+            else { $failed++; $stopped = $true; $left++; $why += "guard $($e.guardId): $($r.Reason)" }
+        }
+        if ($guardsSent) { try { & $SetSetting 'GuardTrips' $gs } catch { $why += "guard send marks not saved: $($_.Exception.Message)" } }
+    }
+    $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })"
     & $SetSetting 'UplinkState' ([pscustomobject][ordered]@{ mode = $sender.Mode; lastHeartbeatUtc = $lastHb; runWatermarkUtc = $floor; jobMarks = [pscustomobject]$marks
                                                              consent = $consent; lastCycleUtc = $NowUtc.ToString('o'); lastResult = $msg })
     return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; message = $msg }

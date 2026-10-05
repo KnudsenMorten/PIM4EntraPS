@@ -363,6 +363,24 @@ function Get-PimDefaultActiveDirectoryGroupAdapter {
     }
 }
 
+function Get-PimHybridAdCreateFailureReason {
+    <#
+      PURE. AD's answer to a failed group create, in words that say what to fix. Measured on internal 2026-10-04: the OU for
+      new groups had inheritance OFF and no read right for the worker, so New-ADGroup answered "Cannot find an object with
+      identity: '<the OU>'" (and the job showed "The server is unwilling to process the request") -- neither says "grant read".
+    #>
+    param([string]$Message, [string]$Ou = '', [string]$GmsaName = "$(if ("$env:PIM_HybridAdGmsaName".Trim()) { $env:PIM_HybridAdGmsaName } else { $global:PIM_HybridAdGmsaName })")
+    $m = "$Message".Trim()
+    $grp = if ("$GmsaName".Trim()) { "$(("$GmsaName".Trim() -split '\\')[-1].TrimEnd('$'))-PermissionGroup" } else { "the worker's permission group" }
+    if (($m -match '(?i)cannot find an object with identity' -and ("$Ou".Trim() -and $m.IndexOf("$Ou".Trim(), [StringComparison]::OrdinalIgnoreCase) -ge 0)) -or $m -match '(?i)unwilling to (process|perform)') {
+        return "the worker's account cannot READ the OU for new groups ('$Ou') -- grant $grp Read on that OU (This object and all descendant objects; an OU with inheritance turned off hides it). AD said: $m"
+    }
+    if ($m -match '(?i)access is denied|insufficient access rights') {
+        return "the worker's account may not create groups in '$Ou' -- grant $grp 'Create Group objects' on that OU (Initialize-PimHybridWorkerAd -GroupsOu does). AD said: $m"
+    }
+    return $m
+}
+
 function Invoke-PimHybridAdGroupMirror {
     # Plan + (with -Apply) create/fix the AD groups. Returns @{ plan; results[] { name; op; status; reason } }.
     param([object[]]$Definitions, [Parameter(Mandatory)][hashtable]$Adapter, [string]$Ou, [switch]$Apply, [string]$Pattern)
@@ -377,7 +395,7 @@ function Invoke-PimHybridAdGroupMirror {
         if (-not $Apply) { $res.Add([pscustomobject]@{ name = $x.name; op = 'create'; status = 'plan'; reason = $x.reason }); continue }
         if (-not "$Ou".Trim()) { $res.Add([pscustomobject]@{ name = $x.name; op = 'create'; status = 'skipped'; reason = 'no OU for AD groups (setting HybridAdGroupsOu)' }); continue }
         try { & $Adapter.NewGroup $x $Ou | Out-Null; $res.Add([pscustomobject]@{ name = $x.name; op = 'create'; status = 'created'; reason = '' }) }
-        catch { $res.Add([pscustomobject]@{ name = $x.name; op = 'create'; status = 'failed'; reason = "$($_.Exception.Message)" }) }
+        catch { $res.Add([pscustomobject]@{ name = $x.name; op = 'create'; status = 'failed'; reason = (Get-PimHybridAdCreateFailureReason -Message "$($_.Exception.Message)" -Ou $Ou) }) }
     }
     foreach ($x in $plan.update) {
         if (-not $Apply) { $res.Add([pscustomobject]@{ name = $x.name; op = 'update'; status = 'plan'; reason = $x.reason }); continue }
