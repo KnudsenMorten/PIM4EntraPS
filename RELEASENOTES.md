@@ -14,6 +14,19 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.510 — Rolling back from a backup is SuperAdmin only, and the Job schedule shows local time
+
+- **Changed: restoring a table from a backup ("Backups / Undo") now needs the SuperAdmin role** (it was Admin). A restore
+  replaces the whole table and does not pass the commit approvals, so one Admin could undo a change two people approved.
+  The audit trail now lists what the restore changed, row by row, and names the person who restored; the engine starts
+  right away to apply it. Other roles see "SuperAdmin restores" instead of the button. A per-commit undo that goes through
+  the normal approvals is planned to replace it.
+- **Fixed: the Job schedule showed the next pull / next publish time in UTC.** It is now in your browser's time zone, like
+  every other time in the PIM Manager.
+- **Fixed: Discovery had no regular menu entry.** "Discovery: create what is new" under Access is now a normal menu item
+  (it still opens on the new items).
+- Internal: test fixes after the full test run (no change to how PIM behaves).
+
 ## v2.4.509 — PIM only ever removes what PIM manages
 
 - **Fixed: a full reconcile with removal (prune) could remove access that was granted outside PIM Manager.** It removed

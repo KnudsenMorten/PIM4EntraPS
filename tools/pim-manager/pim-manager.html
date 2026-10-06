@@ -2375,11 +2375,11 @@
         // grants, creates or hands over access now lives under Access, and every label names the
         // screen it actually opens.
         { tab: 'new',        label: 'Create access',         desc: 'Guided wizards: create an administrator (with a future creation date and TAP start), build a direct group, or delegate a permission' },
-        // §80.3 (operator 2026-09-29: "I need in the menu under Access to have a Create Discovered Resources"). A marked
-        // cross-link (anchor) into the ONE Discovery page, opened on its New view: create what discovery found without going
-        // through Audit & Settings. Discovery itself stays listed there.
-        // Operator 2026-10-01 (screenshot): moved up, right under Create access -- it is creation, not a table.
-        { tab: 'discovery', anchor: 'discInbox', discView: 'new', label: 'Discovery: create what is new',
+        // §80.3 (operator 2026-09-29: "I need in the menu under Access to have a Create Discovered Resources"): the ONE
+        // Discovery page, opened on its New view. Operator 2026-10-01 (screenshot): right under Create access -- it is
+        // creation, not a table. 2.4.500 ("one Discovery"): the entry under Audit & Settings is gone, so this is Discovery's
+        // only menu home -- a plain item, not a marked cross-link (anchor) to a page listed nowhere else.
+        { tab: 'discovery', discView: 'new', label: 'Discovery: create what is new',
           desc: 'What is new in the tenant -- Azure subscriptions and management groups, Power BI workspaces, administrative units, Entra, Defender XDR and Intune roles: tick and Create (staged in Pending changes), or ignore it' },        // 🔴 REQ-GRID (operator 2026-09-20: "this name and page is also misleading"). This entry read
         // "Change existing access ... Nothing new is created here" while the page it opens is headed
         // "Create & change access" and two of its four cards CREATE: Duplicate an existing group makes
@@ -10513,7 +10513,11 @@
     } else if (!c.error) {
       parts.push(`<div>Last ${verb}: <i>none recorded yet</i></div>`);
     }
-    if (c.nextDueText) parts.push(`<div>Next ${verb}: <b>${esc(c.nextDueText)}</b></div>`);
+    // BRAND-2.10: the next due INSTANT is shown in the browser's zone (nextDueUtc); the server's own words stay for the states
+    // that are not a time (disabled / run-now / first-run / due now), and a running job's start time is localised too.
+    const nextShown = (c.nextCode === 'in-progress' && lr && lr.startedUtc) ? `running now (started ${fmtTime(lr.startedUtc)})`
+      : (c.nextDueUtc && ['disabled', 'run-now', 'first-run', 'in-progress'].indexOf(c.nextCode) < 0) ? fmtTime(c.nextDueUtc) : c.nextDueText;
+    if (nextShown) parts.push(`<div>Next ${verb}: <b>${esc(nextShown)}</b></div>`);
     if (c.runNowPending) parts.push(`<div style="color:#0969da;">Run now requested at ${esc(fmtTime(c.runNowRequestedUtc))}${c.runNowRequestedBy ? ' by ' + esc(c.runNowRequestedBy) : ''} &mdash; runs on the next trigger (within ${esc(String(c.triggerMinutes || 5))} minutes)</div>`);
     parts.push(`<div style="color:#8c959f;">${esc(c.source === 'default' ? 'No cadence set here yet: the default applies (every 1440 min = daily, enabled).' : (c.note || ''))} Allowed ${esc(String(j.minIntervalMinutes || 5))}&ndash;${esc(String(j.maxIntervalMinutes || 1440))} min; the ${esc(c.jobName || 'job')} job checks every ${esc(String(c.triggerMinutes || 5))} min.</div>`);
     const btnLabel = (verb === 'publish') ? 'Publish now' : 'Run pull now';
@@ -16640,8 +16644,8 @@
   // ALL 3 POLICY KINDS (operator 2026-09-19: "did you fix policies for all 3 types, both in wizards and existing"). The
   // role and Azure-role policies live on the assignment rows, but the GROUP policy lives on the group's DEFINITION row --
   // so a delegations table of assignments alone could change two of the three. The scope therefore also holds the
-  // permission-group definition entities that carry a PolicyTemplate column (the group policy), and nothing else: the
-  // AU / admin / department entities and discovery's Resources stay under "All records".
+  // group definition entities (the group policy lives on them); the AU / admin entities and discovery's Resources stay
+  // under "All records".
   // 🪤 `var`, not `const`: renderGridList may run during init before this line (no TDZ).
   // Operator 2026-10-05 ("where is the departments, project groups, cross org groups"): every group type is listed --
   // the DIRECT groups people are members of (role, organisation, department, project, cross-org) and the INDIRECT
@@ -18574,7 +18578,9 @@
           '<span style="color:#57606a;min-width:200px;" title="' + escapeHtml(b.takenUtc || '') + '">' + escapeHtml(fmtTime(b.takenUtc, { seconds: true })) + '</span>' +
           '<span style="min-width:90px;">' + (b.rowCount || 0) + ' row(s)</span>' +
           '<span style="color:#57606a;flex:1;">' + escapeHtml(b.by || '') + ' &mdash; ' + escapeHtml(b.reason || '') + '</span>' +
-          '<button data-restore="' + escapeHtml(b.id) + '" data-base="' + escapeHtml(base) + '">Restore</button>' +
+          // BUG-292 (§96): a restore skips the commit approvals, so only a SuperAdmin restores (the API refuses everyone else).
+          (PIM_ROLE === 'SuperAdmin' ? '<button data-restore="' + escapeHtml(b.id) + '" data-base="' + escapeHtml(base) + '">Restore</button>'
+                                     : '<span style="color:#8c959f;font-size:11.5px;" title="A restore replaces the whole table and skips the commit approvals">SuperAdmin restores</span>') +
         '</div>').join('');
       sections.push('<div style="margin-bottom:14px;"><b>' + escapeHtml(base) + '</b> (keep last ' + (r.keep || 10) + ')' + rows + '</div>');
     }
