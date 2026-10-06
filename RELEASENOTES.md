@@ -14,6 +14,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## 2.4.516 -- 2026-10-06
+
+Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlier commit by mistake; 2.4.516 is built from the released code. Use 2.4.516, not 2.4.515.
+
 ## v2.4.515 — Undo, backup and restore, a pausable daily reconcile, releasing guards, and Remove from PIM
 
 - **New: Commit history & undo** (Audit & Settings). Every commit from the change journal -- who, when, who approved it,
