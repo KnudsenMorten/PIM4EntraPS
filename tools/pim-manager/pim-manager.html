@@ -2350,6 +2350,14 @@
     { id: 'overview', label: 'Overview',
       title: 'Privileged-estate health at a glance',
       items: ['home'] },
+    // Operator 2026-10-06: "i need a new menu left of Access called Admins Accounts" -- the accounts themselves (update,
+    // TAP, offboarding flag) and inviting a guest / consultant moved here from Access.
+    { id: 'admins', label: 'Admin accounts',
+      title: 'The privileged accounts: create, update, TAP, guests and consultants',
+      items: [
+        { tab: 'accounts',   label: 'Admin accounts & TAP',  desc: 'The privileged accounts themselves: update one, issue or reset its Temporary Access Pass, flag it for offboarding' },
+        { tab: 'onboarding', label: 'Invite a guest or consultant', desc: 'B2B guest invitation into the delegation model, and enable/disable a managed consultant account' }
+      ] },
     { id: 'access', label: 'Access',
       title: 'Who can reach what, and how to change it',
       items: [
@@ -2388,8 +2396,7 @@
         // Named for what it does. Creation genuinely lives in two places -- the guided wizards under
         // "Create access" and the bulk/derived actions here -- so the description says which is which
         // instead of denying that this one creates at all.
-        { tab: 'accounts',   label: 'Admin accounts & TAP',  desc: 'The privileged accounts themselves: update one, issue or reset its Temporary Access Pass, flag it for offboarding' },
-        { tab: 'onboarding', label: 'Invite a guest or consultant', desc: 'B2B guest invitation into the delegation model, and enable/disable a managed consultant account' },
+        // (2026-10-06: 'Admin accounts & TAP' and 'Invite a guest or consultant' moved to their own menu, Admin accounts.)
 
         // 🔴 71.26 -- THE DELEGATION GRID, WITH A NAME THAT SAYS WHAT IT IS FOR (operator 2026-09-16:
         // *"i am missing the grid overview (maybe it is in there, so i quickly can change an existing

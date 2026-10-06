@@ -14,6 +14,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.512 — An Admin accounts menu
+
+- **Changed: a new Admin accounts menu, left of Access.** It holds **Admin accounts & TAP** and **Invite a guest or
+  consultant**, which moved there from Access.
+
 ## v2.4.511 — Every configuration change is journaled; admin accounts in the delegations table
 
 - **New: a change journal.** Every change to PIM's configuration is now recorded with the full record before and after,
