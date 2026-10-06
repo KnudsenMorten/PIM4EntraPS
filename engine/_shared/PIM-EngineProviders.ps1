@@ -1602,6 +1602,17 @@ function Resolve-PimLiveGroupIdByName {
     } catch { Write-Verbose "group resolve ($Name): $($_.Exception.Message)" }
     return $null
 }
+function Get-PimLiveGroupIdsByName {
+    # SEC-86: EVERY live group with exactly this display name (a fresh, filtered read -- never the cache). $null when the
+    # read fails, so a caller that must prove uniqueness can refuse.
+    param([string]$Name)
+    $n = "$Name".Trim(); if (-not $n) { return @() }
+    try {
+        $esc = $n -replace "'", "''"
+        $r = @(Invoke-PimGraph -Headers @{ ConsistencyLevel = 'eventual' } -All -Path "/groups?`$filter=displayName eq '$esc'&`$count=true&`$select=id,displayName")
+        return , @($r | Where-Object { $_ -and "$($_.displayName)" -eq $n -and "$($_.id)" } | ForEach-Object { "$($_.id)" })
+    } catch { Write-Warning "  [engine] could not read the groups named '$n': $($_.Exception.Message)"; return $null }
+}
 function Get-PimAdminUpnDomain {
     # 🔑 REQ-T (2.4.377): THE DOMAIN AN ADMIN'S UPN IS BUILT AT, when the desired row carries only a bare UserName.
     # One resolver for every path that composes one (create, principal resolve, offboarding), in this order:
@@ -2757,6 +2768,7 @@ function New-PimAdminMembersProvider {
                     # one role group, all created 2026-03-02, returned only by the groupId-filtered list). Every desired or
                     # Remove row the principal read did not answer is CONFIRMED by a per-group read of its group.
                     [void](Add-PimConfirmedGroupMemberships -Live $live -Pairs @($ctx['liveConfirm:AdminMembers']) -Owned $owned -Keep $__keepM -Scope 'AdminMembers')
+                    $ctx['__pimLiveNarrowed'] = $true   # SEC-80: a partial read -- the ledger keeps what it did not see
                     return $live.ToArray()
                 }
             }
@@ -2926,6 +2938,7 @@ function New-PimGroupMembersProvider {
                     foreach ($m in @($__nr.rows)) { if (& $__keepM $m) { $live.Add($m) } }
                     # §70.21: confirm what the principal read did not answer (see AdminMembers) by a per-group read.
                     [void](Add-PimConfirmedGroupMemberships -Live $live -Pairs @($ctx['liveConfirm:GroupMembers']) -Owned $owned -Keep $__keepM -Scope 'GroupMembers')
+                    $ctx['__pimLiveNarrowed'] = $true   # SEC-80: a partial read -- the ledger keeps what it did not see
                     return $live.ToArray()
                 }
             }
@@ -7075,12 +7088,25 @@ function New-PimEntraRolesDirectProvider {
             Get-PimDirRoleSchedulePreload
             $__pe = Get-PimDirRoleScheduleReadError
             if ($__pe) { $ctx['__pimLiveReadError'] = "the directory role schedule preload was INCOMPLETE ($__pe)"; return @() }
+            # 🔴 SEC-81 (§33.38): ONLY the roles the rows name for that user. This read every tenant-scope role the user
+            # holds, so a role someone assigned by hand (outside PIM Manager) to a user with ANY Roles-Direct row was live,
+            # had no desired key, and a prune removed it. Desired AND Remove rows count (a Remove row must see its item).
+            $wantRoles = @{}
+            foreach ($d in $desired) {
+                $u0 = "$(Get-PimRowProp -Row $d -Names @('UserPrincipalName','Username','UPN','upn'))".Trim().ToLowerInvariant()
+                $r0 = "$(Get-PimRowProp -Row $d -Names @('RoleDefinitionName','RoleName'))".Trim().ToLowerInvariant()
+                if (-not $u0 -or -not $r0) { continue }
+                if (-not $wantRoles.ContainsKey($u0)) { $wantRoles[$u0] = @{} }
+                $wantRoles[$u0][$r0] = $true
+            }
             $live = New-Object System.Collections.Generic.List[object]
             foreach ($upn in $upns) {
                 $uid = Resolve-PimPrincipalId $upn; if (-not $uid) { continue }
                 $ctx['directUpnToId'][$upn.ToLowerInvariant()] = $uid
+                $named = $wantRoles["$upn".Trim().ToLowerInvariant()]
                 foreach ($s in (Get-PimLiveDirRoleSchedules -PrincipalId $uid)) {
                     if ("$($s.directoryScopeId)" -ne '/') { continue }   # tenant-scope direct roles only
+                    if (-not $named -or -not $named.ContainsKey("$($s.RoleDefinitionName)".Trim().ToLowerInvariant())) { continue }   # SEC-81
                     if ("$($s.graphAssignmentType)" -ieq 'Activated') { continue }   # an activation is not an assignment (68.6 rows 24-26)
                     $live.Add([pscustomobject]@{ principalId=$uid; UserPrincipalName=$upn; RoleDefinitionName=$s.RoleDefinitionName; AssignmentType=$s.AssignmentType; roleDefinitionId=$s.roleDefinitionId
                                                  directoryScopeId='/'; scheduleKnown=$s.scheduleKnown; startDateTime=$s.startDateTime; endDateTime=$s.endDateTime })
@@ -7290,10 +7316,18 @@ function Remove-PimAdminGroupMemberships {
     # active PIM-for-Groups schedule the principal holds DIRECTLY, then remove it from the groups it
     # is a direct member of. Per-principal filters -- never a tenant-wide scan. The filter result is
     # re-checked, not trusted. Returns @{ removed; errors }.
-    param([Parameter(Mandatory)][string]$PrincipalId)
+    # 🔴 SEC-85 (§33.38, operator 2026-10-06: "it must only impact defined perm per pim manager def"): ONLY the groups PIM
+    # manages (Get-PimSolutionOwnedGroups -- the group definitions, resolved live). This used to remove the admin from EVERY
+    # group it was a direct member of, groups PIM never defined included. Those are now left as they are and reported
+    # (skippedUnmanaged), never removed. Overrides the v1 parity this was written for (the "engine touches only defined" rule, §79.15).
+    # -Owned: the owned-group set (tests); default = Get-PimSolutionOwnedGroups. No owned set = nothing is removed (fail safe).
+    param([Parameter(Mandatory)][string]$PrincipalId, [object]$Owned = $null)
     $removed = 0
     $errors = New-Object System.Collections.Generic.List[string]
+    $skipped = New-Object System.Collections.Generic.List[string]
     $gone = '(?i)NotFound|does not exist|ResourceNotFound|404'
+    if ($null -eq $Owned) { try { $Owned = Get-PimSolutionOwnedGroups } catch { [void]$errors.Add("the groups PIM manages could not be resolved: $($_.Exception.Message)"); return [pscustomobject]@{ removed = 0; errors = $errors.ToArray(); skippedUnmanaged = @() } } }
+    $ownedIds = @{}; if ($Owned -and $Owned.byId) { foreach ($k in @($Owned.byId.Keys)) { $ownedIds["$k".ToLowerInvariant()] = $true } }
     foreach ($pair in @(@{ list = 'eligibilitySchedules'; req = 'eligibilityScheduleRequests' }, @{ list = 'assignmentSchedules'; req = 'assignmentScheduleRequests' })) {
         $rows = @()
         try { $rows = @(Invoke-PimGraph -All -Path ("/identityGovernance/privilegedAccess/group/{0}?`$filter=principalId eq '{1}'" -f $pair.list, $PrincipalId)) }
@@ -7302,6 +7336,7 @@ function Remove-PimAdminGroupMemberships {
             if ($null -eq $s -or "$($s.principalId)" -ne $PrincipalId) { continue }
             if ("$($s.memberType)" -match '(?i)^group$') { continue }   # inherited through a nested group
             $gid = "$($s.groupId)"; if (-not $gid) { continue }
+            if (-not $ownedIds.ContainsKey($gid.ToLowerInvariant())) { if (-not $skipped.Contains($gid)) { [void]$skipped.Add($gid) }; continue }   # SEC-85
             $acc = if ("$($s.accessId)".Trim()) { "$($s.accessId)" } else { 'member' }
             $body = New-PimGroupMembershipBody -PrincipalId $PrincipalId -GroupId $gid -AccessId $acc -Action 'adminRemove' -Justification 'PIM4EntraPS offboarding'
             try { Invoke-PimGraph -Method POST -Path "/identityGovernance/privilegedAccess/group/$($pair.req)" -Body $body | Out-Null; $removed++ }
@@ -7312,11 +7347,15 @@ function Remove-PimAdminGroupMemberships {
         foreach ($g in @(Invoke-PimGraph -All -Path "/users/$PrincipalId/memberOf/microsoft.graph.group?`$select=id,displayName,groupTypes")) {
             if ($null -eq $g -or -not "$($g.id)".Trim()) { continue }
             if (@($g.groupTypes) -contains 'DynamicMembership') { continue }   # a rule decides; nothing to remove
+            if (-not $ownedIds.ContainsKey("$($g.id)".ToLowerInvariant())) { $gn = "$($g.displayName) ($($g.id))"; if (-not $skipped.Contains($gn)) { [void]$skipped.Add($gn) }; continue }   # SEC-85
             try { Invoke-PimGraph -Method DELETE -Path "/groups/$($g.id)/members/$PrincipalId/`$ref" | Out-Null; $removed++ }
             catch { if ("$($_.Exception.Message)" -notmatch $gone) { [void]$errors.Add("member of $($g.displayName) ($($g.id)): $($_.Exception.Message)") } }
         }
     } catch { [void]$errors.Add("read memberOf: $($_.Exception.Message)") }
-    return [pscustomobject]@{ removed = $removed; errors = $errors.ToArray() }
+    if ($skipped.Count) {
+        Write-Host ("    [Offboard] {0}: {1} group membership(s) outside PIM Manager left as they are (report only): {2}" -f $PrincipalId, $skipped.Count, (@($skipped | Select-Object -First 5) -join ', ')) -ForegroundColor DarkYellow
+    }
+    return [pscustomobject]@{ removed = $removed; errors = $errors.ToArray(); skippedUnmanaged = $skipped.ToArray() }
 }
 
 function Invoke-PimAdminOffboardSteps {
@@ -7682,6 +7721,12 @@ function New-PimGroupRetirementProvider {
                 $gid = Resolve-PimLiveGroupIdByName $r.GroupName
                 if (-not $gid) { $x.complete = $true; $x.note = 'already gone -- remove the row (or its Retire flag) to finish'; [void]$live.Add($x); continue }
                 $x.groupId = "$gid"
+                # 🔴 SEC-86 (§33.38): the group is found by DISPLAY NAME and Entra allows duplicates -- a group someone made by
+                # hand with the same name could be the one emptied and deleted. Retire only a name that is UNIQUE live; an
+                # ambiguous name, or one whose uniqueness cannot be read, is refused (fail closed).
+                $__same = Get-PimLiveGroupIdsByName -Name "$($r.GroupName)"
+                if ($null -eq $__same) { $x.blocked = 'the uniqueness of the group name could not be read -- retirement refused (never delete on a guess)' }
+                elseif (@($__same).Count -gt 1) { $x.blocked = ("{0} live groups are named '{1}' (ids {2}) -- PIM cannot prove which one it manages, so it retires none. Rename or delete the extra group, then the next run retires the one left." -f @($__same).Count, $r.GroupName, (@($__same) -join ', ')) }
                 if ($stillDesired.ContainsKey($r.GroupName.ToLowerInvariant())) {
                     $x.blocked = 'the Groups provider still lists this group as desired, so the next groups deploy would re-create it -- retirement refused until Lifecycle=Retire rows are excluded from Get-PimGroupDefinitionRows'
                 }
@@ -7773,6 +7818,22 @@ function Resolve-PimGroupIdByTag {
     return Resolve-PimLiveGroupIdByName $nm
 }
 
+function Assert-PimWorkloadAssignmentNotShared {
+    <#
+      SEC-83 (§33.38). A Defender XDR / Intune role assignment can hold SEVERAL principals, and removing it is a DELETE of the
+      whole assignment -- so removing the PIM group's access that way would also take the access of every other principal on
+      it (a group PIM does not manage, for one). THROWS (a failed item, with the reason) unless the live row proves the
+      assignment holds exactly one principal. An unknown count is refused too: never delete on a guess.
+    #>
+    param([Parameter(Mandatory)][object]$Live, [string]$Workload = 'workload', [string]$Key = '')
+    $n = $null
+    if ($Live.PSObject.Properties['principalCount'] -and "$($Live.principalCount)".Trim()) { $n = [int]$Live.principalCount }
+    if ($n -eq 1) { return }
+    $why = if ($null -eq $n) { 'the number of principals it holds is unknown' } else { "it also holds $($n - 1) other principal(s)" }
+    throw ("WORKLOAD-ASSIGNMENT-SHARED: the {0} role assignment '{1}' (id {2}) was NOT removed -- {3}, and removing it deletes the whole assignment, which would take their access too. Remove the PIM group from it in the {0} portal (or split it), then the next run finds nothing to remove." -f `
+        $Workload, $(if ("$($Live.RoleDefinitionName)") { "$($Live.RoleDefinitionName)" } else { $Key }), "$($Live.assignmentId)", $why)
+}
+
 # ---------------------------------------------------------------------------
 # DefenderXdrRoles scope -- delegate a Microsoft Defender XDR (Microsoft 365
 # Defender Unified RBAC) role to a PIM GROUP. Desired = PIM-Assignments-Defender
@@ -7831,8 +7892,13 @@ function New-PimDefenderXdrRolesProvider {
             $ctx['defTagToName'] = Get-PimTagToGroupName
             $rows = @(Get-PimDefenderDesiredBindings -TagToName $ctx['defTagToName'])
             $ctx['defDesired'] = $rows
+            # SEC-83 (§33.38): Action=Remove rows are TARGETED removals. They were never read here, so a committed removal
+            # (2.4.501 turns a deleted row into one) was never applied and never cleaned up.
+            $ctx['removeRows:DefenderXdrRoles'] = @(Get-PimDesiredRows -Entity 'PIM-Assignments-Defender' | Where-Object {
+                (Test-PimRowIsRemove $_) -and (Get-PimRowProp -Row $_ -Names @('GroupTag')) -and (Get-PimRowProp -Row $_ -Names @('RoleDefinitionName','RoleName')) })
             @($rows)
         }
+        GetRemoveRows = { param($ctx) @(Select-PimRemoveRows -Rows @($ctx['removeRows:DefenderXdrRoles']) -Scope 'DefenderXdrRoles') }
         GetLive = {
             param($ctx)
             Ensure-PimContextLoaded
@@ -7858,7 +7924,8 @@ function New-PimDefenderXdrRolesProvider {
             # which group ids do we care about (the desired tags)? A live row is stamped with its group's TAG(s), so
             # desired and live share one key (Get-PimWorkloadRoleBindingKey).
             $wantGids = @{}; $gidTags = @{}
-            foreach ($d in $desired) {
+            foreach ($d in @(@($desired) + @($ctx['removeRows:DefenderXdrRoles']))) {   # SEC-83: a Remove row's group is read too
+                if ($null -eq $d) { continue }
                 $gt = Get-PimRowProp -Row $d -Names @('GroupTag'); if (-not $gt) { continue }
                 $gid = Resolve-PimGroupIdByTag -Tag $gt -TagToName $tagToName
                 if (-not $gid) { continue }
@@ -7998,6 +8065,9 @@ function New-PimDefenderXdrRolesProvider {
             param($item,$ctx)
             $aid = "$($item.live.assignmentId)"
             if (-not $aid) { throw "DefenderXdrRoles: no assignment id to remove for '$($item.key)'" }
+            # 🔴 SEC-83 (§33.38): the DELETE takes the WHOLE assignment. One that also holds another principal is refused --
+            # deleting it would take their access too (the same rule as the update path, DEFENDER-ASSIGNMENT-SHARED).
+            Assert-PimWorkloadAssignmentNotShared -Live $item.live -Workload 'Defender XDR' -Key "$($item.key)"
             Invoke-PimGraph -Beta -Method DELETE -Path "/roleManagement/defender/roleAssignments/$aid"
         }
     }
@@ -8088,8 +8158,12 @@ function New-PimIntuneRolesProvider {
                 [pscustomobject]$c
             })
             $ctx['intDesired'] = $rows
+            # SEC-83 (§33.38): Action=Remove rows are TARGETED removals (they were dropped above and never applied).
+            $ctx['removeRows:IntuneRoles'] = @(Get-PimDesiredRows -Entity 'PIM-Assignments-Intune' | Where-Object {
+                (Test-PimRowIsRemove $_) -and (Get-PimRowProp -Row $_ -Names @('GroupTag')) -and (Get-PimRowProp -Row $_ -Names @('RoleDefinitionName','RoleName')) })
             @($rows)
         }
+        GetRemoveRows = { param($ctx) @(Select-PimRemoveRows -Rows @($ctx['removeRows:IntuneRoles']) -Scope 'IntuneRoles') }
         GetLive = {
             param($ctx)
             Ensure-PimContextLoaded
@@ -8106,7 +8180,8 @@ function New-PimIntuneRolesProvider {
             if ($__rre -and ($desired.Count -or $wlDefs.Count)) { $ctx['__pimLiveReadError'] = "Intune role definitions (Graph deviceManagement/roleDefinitions): $__rre"; return @() }
             # A live row is stamped with its group's TAG(s), so desired and live share one key (Get-PimWorkloadRoleBindingKey).
             $wantGids = @{}; $gidTags = @{}
-            foreach ($d in $desired) {
+            foreach ($d in @(@($desired) + @($ctx['removeRows:IntuneRoles']))) {   # SEC-83: a Remove row's group is read too
+                if ($null -eq $d) { continue }
                 $gt = Get-PimRowProp -Row $d -Names @('GroupTag'); if (-not $gt) { continue }
                 $gid = Resolve-PimGroupIdByTag -Tag $gt -TagToName $tagToName
                 if (-not $gid) { continue }
@@ -8131,7 +8206,7 @@ function New-PimIntuneRolesProvider {
                         $pk = "$m".ToLowerInvariant(); if (-not $wantGids.ContainsKey($pk)) { continue }
                         foreach ($gt in @($gidTags[$pk])) {
                             $live.Add([pscustomobject]@{ principalId = "$m"; GroupTag = $gt; GroupName = "$($tagToName[$gt.ToLowerInvariant()])"; Workload = 'Intune'
-                                RoleDefinitionName = $rn; roleDefinitionId = $rid; assignmentId = "$($a.id)" })
+                                RoleDefinitionName = $rn; roleDefinitionId = $rid; assignmentId = "$($a.id)"; principalCount = @(@($a.members) | Where-Object { "$_" }).Count })
                         }
                     }
                 }
@@ -8192,6 +8267,8 @@ function New-PimIntuneRolesProvider {
             param($item,$ctx)
             $aid = "$($item.live.assignmentId)"
             if (-not $aid) { throw "IntuneRoles: no assignment id to remove for '$($item.key)'" }
+            # 🔴 SEC-83 (§33.38): an Intune assignment's members can include groups PIM does not manage; the DELETE takes them all.
+            Assert-PimWorkloadAssignmentNotShared -Live $item.live -Workload 'Intune' -Key "$($item.key)"
             Invoke-PimGraph -Method DELETE -Path "/deviceManagement/roleAssignments/$aid"
         }
     }
@@ -8310,19 +8387,41 @@ function New-PimEntraAppRoleProvider {
         refreshBefore = $true
         GetDesired = {
             param($ctx)
-            $ctx['appRoleTagToName'] = Get-PimTagToGroupName
+            Ensure-PimContextLoaded
+            $tagToName = Get-PimTagToGroupName
+            $ctx['appRoleTagToName'] = $tagToName
             # A row is valid when it names a GROUP (GroupTag) AND a TARGET APP (one of
             # ServicePrincipalId / AppId / AppDisplayName). The app-role value may be
-            # blank (-> default access). Action=Remove rows are dropped (prune handles
-            # removal of live-only rows under -Mode Full -Prune).
-            $rows = @(Get-PimDesiredRows -Entity 'PIM-Assignments-AppRole' | Where-Object {
-                (Get-PimRowProp -Row $_ -Names @('Action')) -ne 'Remove' -and
+            # blank (-> default access).
+            $all = @(Get-PimDesiredRows -Entity 'PIM-Assignments-AppRole' | Where-Object {
                 (Get-PimRowProp -Row $_ -Names @('GroupTag')) -and
                 ( (Get-PimRowProp -Row $_ -Names @('ServicePrincipalId','servicePrincipalId','resourceSpId','ResourceSpId')) -or
                   (Get-PimRowProp -Row $_ -Names @('AppId','ApplicationId','appId')) -or
                   (Get-PimRowProp -Row $_ -Names @('AppDisplayName','AppName','ResourceDisplayName')) ) })
-            @($rows)
+            # 🔴 SEC-82 (§33.38): rows are STAMPED with the resolved group id, service-principal id and app-role id, so a
+            # desired row keys like its live assignment (Get-PimAppRoleKey prefers the resolved ids). Unstamped, the keys never
+            # met ("tag:<tag>|<app>|<value>" vs "<gid>|<spid>|<roleid>"): every run planned every row as a CREATE again, and a
+            # prune targeted EVERY grant the group held on the app -- PIM's own included. What does not resolve stays
+            # unstamped (a create then fails loudly in ApplyCreate, as before). Remove rows are resolved the same way and kept
+            # apart as TARGETED removals (GetRemoveRows) -- they used to be dropped, so a Remove row was never applied.
+            $stamp = {
+                param($row)
+                $c = $row | Select-Object *
+                $gt = Get-PimRowProp -Row $row -Names @('GroupTag')
+                $gid = Resolve-PimGroupIdByTag -Tag $gt -TagToName $tagToName
+                if ($gid) { Add-Member -InputObject $c -NotePropertyName principalId -NotePropertyValue "$gid" -Force }
+                $sp = Resolve-PimAppServicePrincipal -Row $row
+                if ($sp -and "$($sp.id)") {
+                    Add-Member -InputObject $c -NotePropertyName resourceSpId -NotePropertyValue "$($sp.id)" -Force
+                    $rv = Get-PimRowProp -Row $row -Names @('AppRole','AppRoleValue','AppRoleName','AppRoleDisplayName')
+                    try { Add-Member -InputObject $c -NotePropertyName appRoleId -NotePropertyValue (Resolve-PimAppRoleId -Value $rv -AppRoles @($sp.appRoles)) -Force } catch { }
+                }
+                $c
+            }
+            $ctx['removeRows:EntraAppRole'] = @($all | Where-Object { Test-PimRowIsRemove $_ } | ForEach-Object { & $stamp $_ })
+            @($all | Where-Object { -not (Test-PimRowIsRemove $_) } | ForEach-Object { & $stamp $_ })
         }
+        GetRemoveRows = { param($ctx) @(Select-PimRemoveRows -Rows @($ctx['removeRows:EntraAppRole']) -Scope 'EntraAppRole') }
         GetLive = {
             param($ctx)
             Ensure-PimContextLoaded

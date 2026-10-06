@@ -507,6 +507,9 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     if (Get-Command Initialize-PimAuditAppendOnly -ErrorAction SilentlyContinue) { [void](Initialize-PimAuditAppendOnly -ConnectionString $ConnectionString) }
     # AUDIT-1 actor: who initiated / approved each committed row (PIM-ChangeAttribution.ps1). Never fails the store open.
     if (Get-Command Get-PimChangeAttributionDdl -ErrorAction SilentlyContinue) { try { [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimChangeAttributionDdl)) } catch { Write-Warning "[audit] pim.ChangeAttribution could not be created: $($_.Exception.Message)" } }
+    # SEC-80: the ledger of live items PIM manages (PIM-ManagedKeys.ps1) -- a prune removes only these. Never fails the open
+    # (a store without it reads as an empty ledger: nothing prunable).
+    if (Get-Command Get-PimManagedKeysDdl -ErrorAction SilentlyContinue) { try { [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimManagedKeysDdl)) } catch { Write-Warning "[engine] pim.ManagedKeys could not be created: $($_.Exception.Message)" } }
 }
 
 function Invoke-PimDepartmentRowKeyMigration {
@@ -1955,3 +1958,6 @@ if (Test-Path -LiteralPath $__auditRet) { . $__auditRet }
 # AUDIT-1 actor: the change attribution rides with the store too.
 $__chgAttr = Join-Path $PSScriptRoot 'PIM-ChangeAttribution.ps1'
 if (Test-Path -LiteralPath $__chgAttr) { . $__chgAttr }
+# SEC-80: the managed-key ledger rides with the store too.
+$__mgdKeys = Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1'
+if (Test-Path -LiteralPath $__mgdKeys) { . $__mgdKeys }
