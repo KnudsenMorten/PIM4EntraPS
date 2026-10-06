@@ -1086,6 +1086,7 @@
     <div class="tab" data-tab="authoring" title="Bulk authoring — move an admin, clone a definition or Azure-RBAC delegation to many targets, bulk-attach, and import admins, each with a preview before commit.">Authoring</div>
     <div class="tab" data-tab="onboarding" title="Onboard a new admin — derive the name and metadata, place them in the right groups, and (for sensitive grants) route through second-person approval.">Onboarding</div>
     <div class="tab" data-tab="departments" title="Departments and their owners -- who approves and who is mailed for every delegation a department sponsors. Import them from Entra, or assign owners in bulk by uploading a CSV file.">Departments &amp; owners</div>
+    <div class="tab" data-tab="adminimport" title="Import many administrators at once from a file or a paste: the UPN is the key; skip or overwrite existing ones. SuperAdmin only.">Import administrators</div>
     <div class="tab" data-tab="companies" title="The external companies whose consultants hold admin accounts: their 1-2 contacts (who answer the access reviews), the review cadence and the consultants of each.">External Companies (Consultants)</div>
     <div class="tab" data-tab="manageraccess" title="Who may read, change or administer this Manager -- your role, the role mapping and delegated portal profiles.">Manager access &amp; roles</div>
     <div class="tab" data-tab="emergency" title="The break-glass accounts PIM never revokes, disables or offboards, and the time-boxed emergency override.">Emergency access <span id="govEmergencyBadge" class="badge" style="display:none;background:#cf222e" title="Emergency override (break-glass) is ACTIVE">!</span></div>
@@ -1639,6 +1640,12 @@
   <div id="companiesTab" class="tab-panel">
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="companiesBody">
       <div style="color:#57606a;font-size:12px;">Loading external companies&hellip;</div>
+    </div>
+  </div>
+  <!-- Operator 2026-10-06: Import administrators, its own page under Admin accounts, SuperAdmin only. -->
+  <div id="adminimportTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="adminImportBody">
+      <div style="color:#57606a;font-size:12px;">Loading&hellip;</div>
     </div>
   </div>
   <div id="workloadtemplatesTab" class="tab-panel">
@@ -2356,7 +2363,9 @@
       title: 'The privileged accounts: create, update, TAP, guests and consultants',
       items: [
         { tab: 'accounts',   label: 'Admin accounts & TAP',  desc: 'The privileged accounts themselves: update one, issue or reset its Temporary Access Pass, flag it for offboarding' },
-        { tab: 'onboarding', label: 'Invite a guest or consultant', desc: 'B2B guest invitation into the delegation model, and enable/disable a managed consultant account' }
+        { tab: 'onboarding', label: 'Invite a guest or consultant', desc: 'B2B guest invitation into the delegation model, and enable/disable a managed consultant account' },
+        // Operator 2026-10-06: moved here from Create & change access (bulk); SuperAdmin only (applySuperAdminOnlyTabs).
+        { tab: 'adminimport', label: 'Import administrators', desc: 'Many admins at once from a file or a paste: the UPN is the key; skip or overwrite the ones that exist. SuperAdmin only.' }
       ] },
     { id: 'access', label: 'Access',
       title: 'Who can reach what, and how to change it',
@@ -2886,6 +2895,7 @@
     if (name === 'onboarding') renderOnboarding();
     if (name === 'departments') renderDepartmentsPage();
     if (name === 'companies') renderCompaniesPage();   // operator 2026-10-05: its own page, like Departments & owners
+    if (name === 'adminimport') renderAdminImportPage();   // operator 2026-10-06: under Admin accounts, SuperAdmin only
     if (name === 'manageraccess') renderSettingsAccessSection(document.getElementById('setAccessHost'));
     if (name === 'emergency') { renderSettingsBreakGlassSection(document.getElementById('setBreakGlassHost')); renderSettingsEmergencySection(document.getElementById('setEmergencyHost')); }
     if (name === 'mailtemplates') renderMailTemplatesSection(document.getElementById('setMailTemplatesHost'));
@@ -3029,7 +3039,7 @@
     rows.forEach(a => {
       const busy = acctGridState.busy === a.userPrincipalName;
       const st = String(a.accountStatus || 'Enabled');
-      const stColor = (/^(disabled|revoked)$/i.test(st)) ? '#cf222e' : '#1a7f37';
+      const stColor = (/^(disabled|revoked|deleted)$/i.test(st)) ? '#cf222e' : '#1a7f37';
       const flagged = a.alreadyFlagged;
       const dis = (ok) => (ok && !busy) ? '' : ' disabled';
       h += '<tr' + (flagged ? ' style="background:#fff8f6;"' : '') + '>' +
@@ -3080,6 +3090,9 @@
             : '<button class="btn-sec acctDisable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) + ' title="Disable the account; its delegations stay (staged in Pending changes; a disable needs the offboard approval)." style="font-size:11px;">Disable</button> ') +
           '<button class="btn-sec acctDisableStrip" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
             ' title="Disable the account AND remove every delegation it has. The account stays in PIM, disabled (staged in Pending changes)." style="font-size:11px;">Disable &amp; remove delegations</button> ' +
+          // §96.5 D1 (operator 2026-10-06: "i allow operators to delete an admin"): SuperAdmin only, typed confirmation.
+          (roleAtLeast('SuperAdmin') && !a.readOnly ? '<button class="btn-sec acctDelete" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' +
+            ' title="DELETE the account in Entra ID and remove every delegation it has (SuperAdmin; you type DELETE to confirm; held for the offboard approval; Entra keeps it restorable for 30 days)." style="font-size:11px;color:#cf222e;border-color:#cf222e;">Delete account</button> ' : '') +
           // REQ-ADM-UNMANAGE-1: out of PIM, Entra untouched (the account and its access stay; Import brings it back).
           '<button class="btn-sec acctUnmanage" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
             ' title="Take this admin out of PIM: every row that names it leaves the desired state. Nothing changes in Entra -- the account and the access it holds stay (listed as unmanaged / drift; Import brings it back)." style="font-size:11px;">Stop managing</button> ' +
@@ -3121,13 +3134,20 @@
       '<b>' + n + ' selected</b>' +
       '<span>Department (internal) <select id="acctBulkDept"><option value="">(none -- unlink)</option>' + dOpts + '</select> <button class="btn-sec" id="acctBulkDeptGo">Link</button></span>' +
       '<span>Company <select id="acctBulkCo"><option value="">(none -- unlink)</option>' + cOpts + '</select> <button class="btn-sec" id="acctBulkCoGo">Link</button></span>' +
-      '<span>Extend auto-disable by <input id="acctBulkExtN" type="number" min="1" max="999" value="3" style="width:56px;"> <select id="acctBulkExtU"><option value="m">months</option><option value="d">days</option></select> <button class="btn-sec" id="acctBulkExtGo">Extend</button></span>' +
-      '<span>or set <input id="acctBulkDate" type="date"> <button class="btn-sec" id="acctBulkDateGo">Set date</button></span>' +
+      // Operator 2026-10-06 ("this auto-extend is confusing ... what is what here"): BOTH controls change the ACCOUNT's
+      // auto-disable date (the day the account is disabled and loses its PIM access). Neither touches a delegation's own
+      // expiry -- that is set per delegation (Delegations -- edit in a table). One labelled group says so.
+      '<span id="acctBulkAutoDisable" style="display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;padding:3px 7px;border:1px solid #9cd0ff;border-radius:5px;background:#f0f8ff;" ' +
+        'title="The ACCOUNT\'s auto-disable date: on that day the account is disabled, its sessions revoked and its PIM access removed. Delegation expiry is separate (set per delegation).">' +
+        '<b>Account auto-disable date:</b> push out by <input id="acctBulkExtN" type="number" min="1" max="999" value="3" style="width:56px;"> <select id="acctBulkExtU"><option value="m">months</option><option value="d">days</option></select> <button class="btn-sec" id="acctBulkExtGo">Push out</button>' +
+        ' <span style="color:#57606a;">or set it to</span> <input id="acctBulkDate" type="date"> <button class="btn-sec" id="acctBulkDateGo">Set date</button>' +
+        ' <span style="color:#57606a;font-size:11px;">(the account, not its delegations)</span></span>' +
       '<button class="btn-sec" id="acctBulkTap">Reset TAP</button>' +
       '<button class="btn-sec" id="acctBulkRevoke">Revoke sessions</button>' +
       '<button class="btn-sec" id="acctBulkEnable">Enable</button>' +
       '<button class="btn-sec" id="acctBulkDisable">Disable</button>' +
       '<button class="btn-sec" id="acctBulkDisableStrip">Disable &amp; remove delegations</button>' +
+      (roleAtLeast('SuperAdmin') ? '<button class="btn-sec" id="acctBulkDelete" style="color:#cf222e;border-color:#cf222e;">Delete account(s)</button>' : '') +
       '<button class="btn-sec" id="acctBulkClear">Clear selection</button></div>';
   }
   // PURE: the date N days / months after the LATER of today and the current auto-disable date (yyyy-mm-dd).
@@ -3174,7 +3194,7 @@
       const n = parseInt(document.getElementById('acctBulkExtN').value, 10), u = document.getElementById('acctBulkExtU').value;
       if (!(n >= 1 && n <= 999)) { msg('Enter a whole number from 1 to 999.', true); return; }
       const without = Array.from(acctGridState.sel).filter(x => !/^\d{4}-\d{2}-\d{2}/.test(String((rowsByUpn[x] || {}).autoDisableDate || ''))).length;
-      if (!confirm('Extend the auto-disable date of ' + acctGridState.sel.size + ' account(s) by ' + n + (u === 'm' ? ' month(s)' : ' day(s)') + '?\n\nEach counts from its current date (or today when that is earlier).' + (without ? '\n\n' + without + ' of them have NO date yet (or a date expression): they GET one, ' + n + (u === 'm' ? ' month(s)' : ' day(s)') + ' from today.' : ''))) return;
+      if (!confirm('Push out the ACCOUNT auto-disable date of ' + acctGridState.sel.size + ' account(s) by ' + n + (u === 'm' ? ' month(s)' : ' day(s)') + '?\n\nThis is the day each account is disabled and loses its PIM access -- not a delegation\'s expiry.\nEach counts from its current date (or today when that is earlier).' + (without ? '\n\n' + without + ' of them have NO date yet (or a date expression): they GET one, ' + n + (u === 'm' ? ' month(s)' : ' day(s)') + ' from today.' : ''))) return;
       each('Extend auto-disable', a => ({ autoDisableDate: acctExtendDate(a.autoDisableDate, n, u) }));
     });
     on('acctBulkDateGo', function () {
@@ -3198,6 +3218,7 @@
     on('acctBulkEnable', function () { acctStageStatus(selIds(), 'Enabled', false); });
     on('acctBulkDisable', function () { acctStageStatus(selIds(), 'Disabled', false); });
     on('acctBulkDisableStrip', function () { acctStageStatus(selIds(), 'Disabled', true); });
+    on('acctBulkDelete', function () { acctStageDelete(selIds()); });
   }
 
   // 🔴 THE ADMIN EDITOR WAS SIX IDENTICAL TEXT BOXES (operator, 2026-09-12: "where is the field to
@@ -3762,6 +3783,7 @@
     document.querySelectorAll('.acctEnable').forEach(b => { b.onclick = () => acctStageStatus([{ upn: b.dataset.upn, userName: b.dataset.user }], 'Enabled', false); });
     document.querySelectorAll('.acctDisable').forEach(b => { b.onclick = () => acctStageStatus([{ upn: b.dataset.upn, userName: b.dataset.user }], 'Disabled', false); });
     document.querySelectorAll('.acctDisableStrip').forEach(b => { b.onclick = () => acctStageStatus([{ upn: b.dataset.upn, userName: b.dataset.user }], 'Disabled', true); });
+    document.querySelectorAll('.acctDelete').forEach(b => { b.onclick = () => acctStageDelete([{ upn: b.dataset.upn, userName: b.dataset.user }]); });
     // §35.6: two surfaces, ONE workflow. This jump is what stops the grid and the wizard from
     // being two disconnected tools -- without it the operator leaves here, finds the wizard, and
     // re-identifies the same person by hand.
@@ -5332,6 +5354,17 @@
       });
     });
   }
+  // Operator 2026-10-06: pages only a SuperAdmin sees (the server refuses the others too).
+  const SUPERADMIN_ONLY_TABS = ['adminimport'];
+  function applySuperAdminOnlyTabs() {
+    const sa = roleAtLeast('SuperAdmin');
+    SUPERADMIN_ONLY_TABS.forEach(k => {
+      document.querySelectorAll('#tabs .tab[data-tab="' + k + '"], #navGroups .nav-group-item[data-tab="' + k + '"]').forEach(t => {
+        t.style.display = sa ? '' : 'none';
+        t.dataset.superAdminOnly = sa ? 'shown' : 'hidden';
+      });
+    });
+  }
   function mspCrossLinksHtml(current) {
     const links = [['downlink', 'Managed tenants (per-tenant plan, projection policy, dry run)'], ['msptenants', 'Managed tenant registry'], ['replication', 'Replication overview']]
       .filter(x => x[0] !== current);
@@ -6371,6 +6404,7 @@
     const activeTab = document.querySelector('#tabs .tab.active');
     buildNavGroups();
     try { applyMspMasterOnlyTabs(); } catch (_) { }
+    try { applySuperAdminOnlyTabs(); } catch (_) { }
     const a = activeTab ? activeTab.dataset.tab : '';
     if (a && pimProPageLocked(a)) switchTab(a);   // opened by a deep link before the licence was read
     else if (a) { try { syncNavGroups(a); } catch (_) { } }
@@ -7951,6 +7985,165 @@
   // address) who get the access-review mail, sign in with a magic link and confirm or deny each consultant ("Hans no longer
   // works with us" -> that account is offboarded); the review cadence; the sponsor department; and the consultants (admins
   // linked to the company). Stored in Account-Definitions-Companies, saved through the normal commit (checks + audit).
+  // ===================================================================
+  // IMPORT ADMINISTRATORS (operator 2026-10-06: "this format must be 100% clear ... we must also have a Overwrite existing
+  // (replace) or Skip Existing parameter. UPN must be the key. Move this to admin accounts, but show only for super admins").
+  // The file: a HEADER line naming the columns (any order), then one admin per line; separator ; , or TAB (read from the
+  // header). The UPN is the key: a UPN that is already an admin is SKIPPED or OVERWRITTEN, as chosen. Nothing is written
+  // until the staged rows are committed under Pending changes.
+  // ===================================================================
+  const PIM_ADMIN_IMPORT_COLUMNS = [
+    { col: 'UserPrincipalName', req: true,  what: 'The admin account&rsquo;s sign-in name. <b>The key</b>: an admin with this UPN is skipped or overwritten. <code>UPN</code> is accepted as the column name.', ex: 'adm-jane.doe@example.com' },
+    { col: 'DisplayName',       req: false, what: 'Shown everywhere in PIM. Empty = FirstName + LastName.', ex: 'ADM Jane Doe' },
+    { col: 'FirstName',         req: false, what: 'Empty = the first word of DisplayName.', ex: 'Jane' },
+    { col: 'LastName',          req: false, what: 'Empty = the rest of DisplayName.', ex: 'Doe' },
+    { col: 'Initials',          req: false, what: 'Empty = first letter of FirstName + LastName.', ex: 'JD' },
+    { col: 'UserName',          req: false, what: 'Empty = the part of the UPN before the @. Must be unique.', ex: 'adm-jane.doe' },
+    { col: 'Department',        req: false, what: 'The sponsor department; it must exist under Departments &amp; owners.', ex: 'IT' },
+    { col: 'UsageLocation',     req: false, what: 'Two-letter country code (needed for licences).', ex: 'DK' },
+    { col: 'TargetPlatform',    req: false, what: 'As on Admin accounts.', ex: '' },
+    { col: 'Purpose',           req: false, what: 'As on Admin accounts.', ex: '' }
+  ];
+  // PURE. The header line -> { ok, delim, cols (canonical names), unknown[], error }.
+  function pimAdminImportHeader(text) {
+    const lines = String(text || '').split(/\r\n|\n|\r/).filter(l => l.trim());
+    if (!lines.length) return { ok: false, error: 'Nothing pasted.' };
+    const h = lines[0];
+    const delim = h.indexOf('\t') >= 0 ? '\t' : (h.indexOf(';') >= 0 ? ';' : ',');
+    const known = {}; PIM_ADMIN_IMPORT_COLUMNS.forEach(c => { known[c.col.toLowerCase()] = c.col; }); known['upn'] = 'UserPrincipalName';
+    const raw = h.split(delim).map(s => s.trim());
+    const cols = raw.map(s => known[s.toLowerCase()] || s);
+    const unknown = raw.filter(s => !known[s.toLowerCase()]);
+    if (cols.indexOf('UserPrincipalName') < 0) {
+      return { ok: false, delim, cols, unknown, error: 'The first line must be the HEADER and name the column UserPrincipalName (or UPN). It reads: "' + h + '"' };
+    }
+    const dup = cols.filter((c, i) => cols.indexOf(c) !== i);
+    if (dup.length) return { ok: false, delim, cols, unknown, error: 'A column is named twice in the header: ' + Array.from(new Set(dup)).join(', ') };
+    return { ok: true, delim, cols, unknown, lines: lines.length - 1 };
+  }
+  // PURE. What the import would do per row. existing = the admin rows now (pending view); rows = the server-built rows, in
+  // the file's order; fileCols = the canonical columns the file carries; mode = 'skip' | 'overwrite'.
+  // Each plan entry: { upn, action: 'new'|'replace'|'skip'|'invalid', reason, row, index (existing row index), changes[] }.
+  function pimAdminImportPlan(existing, rows, fileCols, mode) {
+    const lc = s => String(s || '').trim().toLowerCase();
+    const byUpn = {}, byUser = {};
+    (existing || []).forEach((r, i) => { if (!r || r.__deleted) return; if (lc(r.UserPrincipalName)) byUpn[lc(r.UserPrincipalName)] = i; if (lc(r.UserName)) byUser[lc(r.UserName)] = i; });
+    const seen = {};
+    (rows || []).forEach(r => { const u = lc(r.UserPrincipalName); if (u) seen[u] = (seen[u] || 0) + 1; });
+    const upnRx = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+    return (rows || []).map(r => {
+      const upn = String(r.UserPrincipalName || '').trim(), u = lc(upn);
+      if (!upn) return { upn: '', action: 'invalid', reason: 'no UserPrincipalName', row: r };
+      if (!upnRx.test(upn)) return { upn, action: 'invalid', reason: 'not a UPN (name@domain)', row: r };
+      if (seen[u] > 1) return { upn, action: 'invalid', reason: 'this UPN is in the file ' + seen[u] + ' times', row: r };
+      const at = byUpn[u];
+      const userAt = byUser[lc(r.UserName)];
+      if (at === undefined && userAt !== undefined) return { upn, action: 'invalid', reason: 'the user name "' + r.UserName + '" already belongs to ' + (existing[userAt].UserPrincipalName || 'another admin'), row: r };
+      if (at === undefined) return { upn, action: 'new', reason: '', row: r };
+      if (mode !== 'overwrite') return { upn, action: 'skip', reason: 'already an admin', row: r, index: at };
+      if (userAt !== undefined && userAt !== at && lc(r.UserName) && (fileCols || []).indexOf('UserName') >= 0) return { upn, action: 'invalid', reason: 'the user name "' + r.UserName + '" already belongs to ' + (existing[userAt].UserPrincipalName || 'another admin'), row: r };
+      const changes = [];
+      (fileCols || []).forEach(c => {
+        if (c === 'UserPrincipalName') return;
+        const v = String(r[c] == null ? '' : r[c]).trim();
+        if (!v) return;                                            // an empty cell keeps the stored value
+        if (String(existing[at][c] == null ? '' : existing[at][c]).trim() !== v) changes.push({ col: c, from: String(existing[at][c] || ''), to: v });
+      });
+      return changes.length ? { upn, action: 'replace', reason: '', row: r, index: at, changes } : { upn, action: 'skip', reason: 'already an admin, nothing different', row: r, index: at };
+    });
+  }
+  async function renderAdminImportPage() {
+    const body = document.getElementById('adminImportBody');
+    if (!body) return;
+    const esc = escapeHtml;
+    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode — the import needs the server.</div>'; return; }
+    if (!roleAtLeast('SuperAdmin')) { body.innerHTML = '<div style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#f6f8fa;font-size:12.5px;color:#57606a;">Importing administrators is for a <b>SuperAdmin</b>. You are signed in as <b>' + esc(PIM_ROLE) + '</b>.</div>'; return; }
+    const example = 'UserPrincipalName;DisplayName;Department;UsageLocation\nadm-jane.doe@example.com;ADM Jane Doe;IT;DK\nadm-john.smith@example.com;ADM John Smith;Finance;SE';
+    let h = '<div style="margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Admin accounts · Import administrators</span></div>';
+    h += '<div class="set-card" style="max-width:1100px;"><h3 style="margin:0 0 6px;font-size:14px;">The format</h3>' +
+      '<ol style="margin:0 0 8px 18px;padding:0;font-size:12.5px;line-height:1.6;color:#24292f;">' +
+      '<li>The <b>first line is the header</b>: the column names below, in any order. Only <b>UserPrincipalName</b> is required.</li>' +
+      '<li>Then <b>one administrator per line</b>.</li>' +
+      '<li>Separate the columns with <b>;</b> or <b>,</b> or a <b>TAB</b> (pasted from Excel) &mdash; the header decides which.</li>' +
+      '<li><b>The UPN is the key.</b> A UPN that is already an admin is <b>skipped</b> or <b>overwritten</b>, as you choose below.</li>' +
+      '<li>An empty cell is allowed: it is derived (see the table) for a new admin, and keeps the stored value when overwriting.</li></ol>' +
+      '<table class="set-table" style="width:100%;font-size:12px;"><thead><tr><th>Column</th><th>Required</th><th>What it is</th><th>Example</th></tr></thead><tbody>' +
+      PIM_ADMIN_IMPORT_COLUMNS.map(c => '<tr><td><code>' + c.col + '</code></td><td>' + (c.req ? '<b style="color:#cf222e;">required</b>' : 'optional') + '</td><td>' + c.what + '</td><td><code>' + esc(c.ex) + '</code></td></tr>').join('') +
+      '</tbody></table>' +
+      '<div style="margin-top:8px;font-size:12px;">Example (semicolon-separated):</div>' +
+      '<pre id="aiExample" style="margin:4px 0 0;padding:8px 10px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;font-size:12px;">' + esc(example) + '</pre>' +
+      '<div style="margin-top:8px;"><button class="btn-sec" id="aiTemplate">Download the template (.csv)</button> <button class="btn-sec" id="aiUseExample">Paste the example</button></div></div>';
+    h += '<div class="set-card" style="max-width:1100px;margin-top:12px;"><h3 style="margin:0 0 6px;font-size:14px;">Your administrators</h3>' +
+      '<div style="font-size:12px;color:#57606a;margin-bottom:6px;">Paste the text, or choose a .csv / .txt file.</div>' +
+      '<textarea id="aiText" rows="8" style="width:100%;box-sizing:border-box;font-family:Consolas,monospace;font-size:12px;" placeholder="UserPrincipalName;DisplayName;Department"></textarea>' +
+      '<div style="margin-top:6px;"><input type="file" id="aiFile" accept=".csv,.txt,.tsv,text/csv,text/plain"></div>' +
+      '<div style="margin-top:10px;font-size:12.5px;"><b>A UPN that is already an admin:</b> ' +
+      '<label style="margin-left:8px;"><input type="radio" name="aiMode" value="skip" checked> Skip existing (leave them as they are)</label> ' +
+      '<label style="margin-left:12px;"><input type="radio" name="aiMode" value="overwrite"> Overwrite existing (replace)</label>' +
+      '<div style="color:#57606a;font-size:11.5px;margin-top:3px;">Overwrite replaces the stored value of every column your file carries with a non-empty cell; the other columns of that admin keep their value.</div></div>' +
+      '<div style="margin-top:10px;"><button class="primary" id="aiPreview">Check &amp; preview</button> <span id="aiMsg" style="font-size:12.5px;"></span></div>' +
+      '<div id="aiResult" style="margin-top:10px;"></div></div>';
+    body.innerHTML = h;
+    const msg = (t, bad) => { const m = document.getElementById('aiMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#57606a'; } };
+    document.getElementById('aiUseExample').onclick = () => { document.getElementById('aiText').value = example; };
+    document.getElementById('aiTemplate').onclick = () => {
+      try {
+        const blob = new Blob([PIM_ADMIN_IMPORT_COLUMNS.map(c => c.col).join(';') + '\r\n' + PIM_ADMIN_IMPORT_COLUMNS.map(c => c.ex.replace(/;/g, ' ')).join(';') + '\r\n'], { type: 'text/csv' });
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'pim-import-administrators.csv'; document.body.appendChild(a); a.click(); a.remove();
+      } catch (e) { msg('The template could not be created: ' + e.message, true); }
+    };
+    document.getElementById('aiFile').onchange = (ev) => {
+      const f = ev.target.files && ev.target.files[0]; if (!f) return;
+      const rd = new FileReader(); rd.onload = () => { document.getElementById('aiText').value = String(rd.result || '').replace(/^﻿/, ''); msg('Read ' + f.name + '.'); }; rd.readAsText(f);
+    };
+    document.getElementById('aiPreview').onclick = async () => {
+      const text = document.getElementById('aiText').value;
+      const mode = (body.querySelector('input[name="aiMode"]:checked') || {}).value || 'skip';
+      const res = document.getElementById('aiResult'); res.innerHTML = '';
+      const hd = pimAdminImportHeader(text);
+      if (!hd.ok) { msg(hd.error, true); return; }
+      if (!hd.lines) { msg('The header is there, but no administrator lines follow it.', true); return; }
+      msg('Checking…');
+      let r;
+      try { r = await api('POST', '/api/authoring/import-admins', { text: text }); } catch (e) { msg('The server could not read it: ' + e.message, true); return; }
+      const adm = await loadCsv('Account-Definitions-Admins'); ensurePending('Account-Definitions-Admins', adm.header, adm.rows);
+      const pa = pendingChanges['Account-Definitions-Admins'];
+      const existing = pa.rows.map((x, i) => pa.deletes.has(i) ? Object.assign({ __deleted: true }, x) : x);
+      const plan = pimAdminImportPlan(existing, r.rows || [], hd.cols, mode);
+      const n = { new: 0, replace: 0, skip: 0, invalid: 0 }; plan.forEach(p => { n[p.action]++; });
+      const tone = { new: '#1a7f37', replace: '#9a6700', skip: '#57606a', invalid: '#cf222e' };
+      const word = { new: 'New', replace: 'Overwrite', skip: 'Skip', invalid: 'Invalid' };
+      res.innerHTML = (hd.unknown.length ? '<div style="color:#9a6700;font-size:12px;margin-bottom:6px;">Ignored column(s) &mdash; not an admin column: <b>' + esc(hd.unknown.join(', ')) + '</b></div>' : '') +
+        '<div style="font-size:12.5px;margin-bottom:6px;"><b>' + n.new + '</b> new &middot; <b>' + n.replace + '</b> overwritten &middot; <b>' + n.skip + '</b> skipped &middot; <b style="color:' + (n.invalid ? '#cf222e' : 'inherit') + ';">' + n.invalid + '</b> invalid</div>' +
+        '<table class="set-table" id="aiPlan" style="width:100%;font-size:12px;"><thead><tr><th>UPN</th><th>Display name</th><th>Department</th><th>What happens</th><th>Details</th></tr></thead><tbody>' +
+        plan.map(p => '<tr data-action="' + p.action + '"><td>' + esc(p.upn || '(none)') + '</td><td>' + esc(p.row.DisplayName || '') + '</td><td>' + esc(p.row.Department || '') + '</td>' +
+          '<td><b style="color:' + tone[p.action] + ';">' + word[p.action] + '</b></td><td>' + esc(p.reason || '') +
+          (p.changes ? p.changes.map(c => esc(c.col) + ': ' + esc(c.from || '(blank)') + ' &rarr; ' + esc(c.to)).join('<br>') : '') + '</td></tr>').join('') +
+        '</tbody></table>' +
+        (n.invalid ? '<div style="color:#cf222e;font-size:12.5px;margin-top:8px;">Fix the invalid line(s) first &mdash; nothing is staged while any line is invalid.</div>'
+          : (n.new + n.replace ? '<div style="margin-top:10px;"><button class="primary" id="aiStage">Stage ' + (n.new + n.replace) + ' change(s)</button> <span style="font-size:12px;color:#57606a;">Nothing is saved until you commit under Pending changes.</span></div>'
+            : '<div style="font-size:12.5px;margin-top:8px;color:#57606a;">Nothing to change.</div>'));
+      msg('');
+      const st = document.getElementById('aiStage');
+      if (st) st.onclick = () => {
+        let added = 0, replaced = 0;
+        for (const p of plan) {
+          if (p.action === 'new') {
+            const row = {}; pa.header.forEach(c => { row[c] = ''; });
+            Object.keys(p.row).forEach(k => { if (!pa.header.includes(k)) pa.header.push(k); row[k] = String(p.row[k] == null ? '' : p.row[k]); });
+            pa.rows.push(row); added++;
+          } else if (p.action === 'replace') {
+            p.changes.forEach(c => { if (!pa.header.includes(c.col)) pa.header.push(c.col); pa.rows[p.index][c.col] = c.to; });
+            replaced++;
+          }
+        }
+        markBadges();
+        res.innerHTML = '<div style="font-size:12.5px;color:#1a7f37;"><b>Staged:</b> ' + added + ' new, ' + replaced + ' overwritten. <a style="cursor:pointer;color:#0969da;font-weight:600;" id="aiGoSave">Review &amp; commit under Pending changes &rarr;</a></div>';
+        const g = document.getElementById('aiGoSave'); if (g) g.onclick = () => switchTab('save');
+      };
+    };
+  }
+
   async function renderCompaniesPage() {
     const body = document.getElementById('companiesBody');
     if (!body) return;
@@ -11882,13 +12075,8 @@
           '<div id="aClPreview" style="display:none;margin-top:8px;padding:8px 10px;border:1px solid #d0d7de;border-radius:6px;background:#f6f8fa;font-size:11.5px;"></div>' +
           '<div style="margin-top:8px;"><button id="aClGo" class="primary">Compute &amp; stage</button> <span id="aClMsg" style="font-size:11.5px;color:#57606a;"></span></div>' +
         '</div>' +
-        // Import admins
-        '<div class="auth-card" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#fff;">' +
-          '<b style="font-size:13px;">Import administrators</b>' +
-          '<div style="color:#57606a;font-size:11.5px;margin:3px 0 8px;">Paste CSV/TSV (UPN, DisplayName, Department, ...). Derives Initials/DisplayName and stages admin definition rows.</div>' +
-          '<textarea id="aImpText" rows="4" style="width:100%;box-sizing:border-box;font-family:Consolas,monospace;font-size:11.5px;" placeholder="upn@contoso.com;Jane Doe;IT"></textarea>' +
-          '<div style="margin-top:8px;"><button id="aImpGo" class="primary">Parse &amp; stage</button> <span id="aImpMsg" style="font-size:11.5px;color:#57606a;"></span></div>' +
-        '</div>' +
+        // Import admins: operator 2026-10-06 -- moved to Admin accounts › Import administrators (SuperAdmin only).
+        (roleAtLeast('SuperAdmin') ? '<div style="padding:8px 12px;border:1px dashed #d0d7de;border-radius:8px;font-size:12px;color:#57606a;">Importing administrators has moved to <a id="aImpMoved" style="cursor:pointer;color:#0969da;font-weight:600;">Admin accounts &rsaquo; Import administrators</a>.</div>' : '') +
         // Move admin
         '<div class="auth-card" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#fff;">' +
           '<b style="font-size:13px;">Move an admin between groups</b>' +
@@ -11951,9 +12139,12 @@
         const prev = mvUser.value;
         // BUG-95: display the account name; keep the full value (the assignments are keyed on
         // it) and expose it as the title so the domain form is still findable when needed.
-        mvUser.innerHTML = admins.length
-          ? admins.map(u => `<option value="${esc(u)}" title="${esc(u)}"${u === prev ? ' selected' : ''}>${esc(adminDisplayName(u))}</option>`).join('')
-          : '<option value="">(no admins found in assignments)</option>';
+        // Operator 2026-10-06 (screenshot: "(no admins found in assignments)" with 49 assignment rows): while the tables are
+        // still loading the picker says so -- an empty answer is only an answer once the load has finished. Sorted by name.
+        const sorted = admins.slice().sort((a, b) => String(adminDisplayName(a)).localeCompare(String(adminDisplayName(b)), undefined, { sensitivity: 'base' }));
+        mvUser.innerHTML = sorted.length
+          ? sorted.map(u => `<option value="${esc(u)}" title="${esc(u)}"${u === prev ? ' selected' : ''}>${esc(adminDisplayName(u))}</option>`).join('')
+          : (authPreloadDone ? '<option value="">(no admin has an assignment yet)</option>' : '<option value="">loading admins…</option>');
         fillMoveFromTags();
       }
       const mvToList = document.getElementById('aMvToList');
@@ -11982,6 +12173,12 @@
       const mvFrom = document.getElementById('aMvFrom');
       if (!mvUser || !mvFrom) return;
       const tags = collectAdminAssignedTags(mvUser.value);
+      // no admin picked (still loading, or none exists): no "nothing to move" claim about an admin nobody chose
+      if (!mvUser.value) {
+        mvFrom.innerHTML = '<option value="">(pick an admin first)</option>';
+        const n0 = document.getElementById('aMvNone'); if (n0) { n0.style.display = 'none'; n0.innerHTML = ''; }
+        return;
+      }
       mvFrom.innerHTML = tags.length
         ? tags.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('')
         : '<option value="">(nothing to move &mdash; this admin has no assignments yet)</option>';
@@ -12001,19 +12198,24 @@
       }
     }
     // First fill from the current cache, then refresh after the preload lands.
+    // The admin tables FIRST (the Move picker needs only them), then the definitions (the tag catalog); refill after each.
+    let authPreloadDone = false;
     fillAuthoringPickers();
     (async () => {
       try {
+        await Promise.all([loadCsv('PIM-Assignments-Admins').catch(() => null), loadCsv('Account-Definitions-Admins').catch(() => null)]);
+        authPreloadDone = true;
+        fillAuthoringPickers();
         await Promise.all(authDefBases.map(b => loadCsv(b).catch(() => null)));
-        await loadCsv('PIM-Assignments-Admins').catch(() => null);
-        await loadCsv('Account-Definitions-Admins').catch(() => null);
-      } finally { fillAuthoringPickers(); }
+      } finally { authPreloadDone = true; fillAuthoringPickers(); }
     })();
     const mvUserEl = document.getElementById('aMvUser');
     if (mvUserEl) mvUserEl.onchange = fillMoveFromTags;
 
     // Populate the clone source-file + row pickers from the definition CSVs.
-    const defBases = (PIM_DATA.csvBases || []).filter(b => b.group === 'Definitions').map(b => b.base);
+    // Operator 2026-10-06 (screenshot: "Type of group: Administrator accounts", "Copy from: loading..."): only GROUP types
+    // can be duplicated -- the direct and indirect group definitions -- never admin accounts, companies, AUs or resources.
+    const defBases = (PIM_DATA.csvBases || []).filter(b => b.group === 'Definitions' && (PIM_DELEGATION_GROUP_ENTITIES || []).indexOf(b.base) >= 0).map(b => b.base);
     const clBase = document.getElementById('aClBase');
     // REQ-GRID: the picker showed storage keys ("Account-Definitions-Admins") and said "no definition
     // FILES" when empty. The value stays the base -- only what the operator reads changes.
@@ -12029,11 +12231,13 @@
         // inserted. Lead with the group's NAME, fall back to its tag, and only then admit that
         // the record carries no identity at all -- which is a data problem worth saying out
         // loud, not a number to paper over it with.
+        // sorted by name, so a long list is findable (the value stays the row index)
         clRow.innerHTML = (d.rows || []).map((r, i) => {
           const label = r.GroupName || r[tagCol] || r.GroupDescription || '';
           const sub = (r.GroupName && r[tagCol]) ? ('  —  ' + r[tagCol]) : '';
-          return `<option value="${i}">${esc(label ? (label + sub) : '(this record has no name or tag)')}</option>`;
-        }).join('') || '<option value="">(nothing defined yet for this type)</option>';
+          return { i, text: label ? (label + sub) : '(this record has no name or tag)' };
+        }).sort((a, b) => a.text.localeCompare(b.text, undefined, { sensitivity: 'base' }))
+          .map(o => `<option value="${o.i}">${esc(o.text)}</option>`).join('') || '<option value="">(nothing defined yet for this type)</option>';
         clRow._rows = d.rows; clRow._tagCol = tagCol;
       } catch (e) { clRow.innerHTML = '<option value="">error</option>'; }
     }
@@ -12064,8 +12268,13 @@
       if (!raw.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
       box.style.display = '';
       box.innerHTML = '<div style="color:#57606a;margin-bottom:4px;">These will be created &mdash; the tag is generated from the name you typed:</div>' +
-        raw.map(n => '<div><b>' + escapeHtml(n) + '</b> <span style="color:#8c959f;">&rarr;</span> ' +
-          '<code style="font-size:11px;">' + escapeHtml(aClDeriveTag(n)) + '</code></div>').join('');
+        raw.map(n => {
+          const t = aClDeriveTag(n);
+          const taken = collectKnownGroupTags().some(k => String(k).toLowerCase() === t.toLowerCase());
+          return '<div><b>' + escapeHtml(n) + '</b> <span style="color:#8c959f;">&rarr;</span> ' +
+            '<code style="font-size:11px;">' + escapeHtml(t) + '</code>' +
+            (taken ? ' <b style="color:#cf222e;">already exists &mdash; pick another name</b>' : '') + '</div>';
+        }).join('');
     }
     const aClTagsEl = document.getElementById('aClTags');
     if (aClTagsEl) aClTagsEl.addEventListener('input', aClRenderPreview);
@@ -12080,6 +12289,11 @@
         const tags = document.getElementById('aClTags').value.split(',')
           .map(s => aClDeriveTag(s)).filter(Boolean);
         if (!tags.length) throw new Error('enter at least one new group name');
+        // A copy must be NEW: a tag that already exists (any group type, stored or staged) or is typed twice is refused here,
+        // instead of failing later as a duplicate key at commit.
+        const known = {}; collectKnownGroupTags().forEach(t => { known[String(t).toLowerCase()] = true; });
+        const clash = tags.filter((t, i) => known[t.toLowerCase()] || tags.findIndex(x => x.toLowerCase() === t.toLowerCase()) !== i);
+        if (clash.length) throw new Error('already exists (or typed twice): ' + Array.from(new Set(clash)).join(', ') + ' -- pick another name');
         const r = await api('POST', '/api/authoring/clone', { templateRow: tpl, newTags: tags, tagColumn: clRow._tagCol });
         msg.textContent = 'previewing...';
         const ok = await previewAuthoringAndConfirm('clone', clBase.value, r.rows || []);
@@ -12090,19 +12304,7 @@
         const a = document.getElementById('aClSave'); if (a) a.onclick = () => switchTab('save');
       } catch (e) { msg.style.color = '#cf222e'; msg.textContent = e.message; }
     };
-    (document.getElementById('aImpGo') || {}).onclick = async () => {
-      const msg = document.getElementById('aImpMsg'); msg.textContent = 'parsing...';
-      try {
-        const r = await api('POST', '/api/authoring/import-admins', { text: document.getElementById('aImpText').value });
-        msg.textContent = 'previewing...';
-        const ok = await previewAuthoringAndConfirm('import-admins', 'Account-Definitions-Admins', r.rows || []);
-        if (!ok) { msg.style.color = '#57606a'; msg.textContent = 'cancelled.'; return; }
-        const n = await stageComputedRows('Account-Definitions-Admins', r.rows || []);
-        msg.style.color = '#57606a';
-        msg.innerHTML = 'parsed ' + (r.parsed || 0) + ', staged ' + n + ' row(s) &mdash; <a style="cursor:pointer;color:#0969da;" id="aImpSave">Pending changes</a>';
-        const a = document.getElementById('aImpSave'); if (a) a.onclick = () => switchTab('save');
-      } catch (e) { msg.style.color = '#cf222e'; msg.textContent = e.message; }
-    };
+    (document.getElementById('aImpMoved') || {}).onclick = () => switchTab('adminimport');
     (document.getElementById('aMvGo') || {}).onclick = async () => {
       const msg = document.getElementById('aMvMsg'); msg.textContent = 'computing...';
       try {
@@ -12112,6 +12314,10 @@
         if (!username) throw new Error('pick an admin');
         if (!fromTag)  throw new Error('pick a source tag (the admin has no current assignments)');
         if (!toTag)    throw new Error('pick or type a destination tag');
+        // A move must land in a group that EXISTS, and not in one the admin is already in.
+        if (!collectKnownGroupTags().some(t => String(t).toLowerCase() === toTag.toLowerCase())) throw new Error('"' + toTag + '" is not a known group tag -- pick one from the list');
+        if (toTag.toLowerCase() === fromTag.toLowerCase()) throw new Error('the admin is already in "' + toTag + '" -- pick another destination');
+        if (collectAdminAssignedTags(username).some(t => String(t).toLowerCase() === toTag.toLowerCase())) throw new Error('the admin is already in "' + toTag + '" as well -- moving would duplicate it; remove the "' + fromTag + '" assignment instead');
         const r = await api('POST', '/api/authoring/move-admin', {
           username: username, fromTag: fromTag, toTag: toTag
         });
@@ -16536,6 +16742,21 @@
   // into Pending changes like every edit: AccountStatus on the admin row; with -strip, the admin's PIM-Assignments-Admins
   // rows are deleted, which the commit turns into targeted removals (applied by the next delta, 2.4.501). The admin row
   // itself STAYS (disabled). A disable is held for the offboard approval on commit (BUG-190) unless self-approval is on.
+  // §96.5 D1 (operator 2026-10-06: "i allow operators to delete an admin"): DELETE the account. SuperAdmin only; the
+  // operator types DELETE; staged as AccountStatus=Deleted + every delegation removed; the commit holds it for the offboard
+  // approval; the engine then deletes the account ONCE (Remove-PimAdminAccountApproved). Entra keeps it restorable 30 days.
+  async function acctStageDelete(ids) {
+    if (!roleAtLeast('SuperAdmin')) { alert('Deleting an admin account is for a SuperAdmin.'); return; }
+    ids = (ids || []).filter(x => x && x.upn);
+    if (!ids.length) return;
+    const who = ids.length === 1 ? ids[0].upn : (ids.length + ' admin accounts');
+    const typed = window.prompt('DELETE ' + who + ' in Entra ID?\n\nThe account(s) are deleted (not only disabled) after the commit and its approval, and every delegation is removed. ' +
+      'Entra keeps a deleted user restorable for 30 days (Entra admin center > Users > Deleted users).\n\nType DELETE to continue:');
+    if (typed == null) return;
+    if (String(typed).trim() !== 'DELETE') { alert('Not deleted: you did not type DELETE.'); return; }
+    await acctStageStatus(ids, 'Deleted', true);
+  }
+
   async function acctStageStatus(ids, status, strip) {
     if (!isServer) { alert('Static mode -- cannot edit. Restart with -Server.'); return; }
     if (!roleAtLeast('Admin')) { alert('Admin role required.'); return; }
@@ -16558,15 +16779,17 @@
     });
     const who = ids.length === 1 ? '<b>' + escapeHtml(ids[0].upn) + '</b>' : '<b>' + ids.length + ' admins</b>';
     // status '' = remove the delegations only; the account keeps its status (operator 2026-10-06, the delegations table).
-    const verb = !status ? 'Remove all delegations' : status === 'Enabled' ? 'Enable' : (strip ? 'Disable & remove delegations' : 'Disable');
+    const verb = !status ? 'Remove all delegations' : status === 'Deleted' ? 'Delete account' : status === 'Enabled' ? 'Enable' : (strip ? 'Disable & remove delegations' : 'Disable');
     const body = '<p>' + escapeHtml(verb) + ': ' + who + '.</p><ul>' +
       (status ? '<li>' + nStatus + ' account(s) set to <b>' + escapeHtml(status) + '</b>' + (nStatus < ids.length - missing.length ? ' (the others already are)' : '') + '</li>' : '') +
-      (strip ? '<li>' + nDel + ' delegation(s) removed (removed in Entra by the next engine run after the commit)</li><li>The account stays in PIM, ' + (status ? escapeHtml(status.toLowerCase()) : 'its status unchanged') + '.</li>' : '') +
+      (strip ? '<li>' + nDel + ' delegation(s) removed (removed in Entra by the next engine run after the commit)</li>' +
+        (status === 'Deleted' ? '<li><b style="color:#cf222e;">The account is DELETED in Entra ID</b> by the engine after the commit and its approval (restorable for 30 days under Entra Deleted users).</li>'
+                              : '<li>The account stays in PIM, ' + (status ? escapeHtml(status.toLowerCase()) : 'its status unchanged') + '.</li>') : '') +
       (missing.length ? '<li style="color:#cf222e;">not a defined admin (skipped): ' + missing.map(escapeHtml).join(', ') + '</li>' : '') + '</ul>' +
-      (status === 'Disabled' ? '<p style="color:#57606a;">A disable is an offboard: on commit it is held for a second administrator&rsquo;s approval unless self-approval is switched on (Settings &rsaquo; Approvals &amp; policy).</p>' : '') +
+      ((status === 'Disabled' || status === 'Deleted') ? '<p style="color:#57606a;">A disable or delete is an offboard: on commit it is held for a second administrator&rsquo;s approval unless self-approval is switched on (Settings &rsaquo; Approvals &amp; policy).</p>' : '') +
       '<p style="color:#57606a;">Nothing is saved yet -- review and commit under <b>Pending changes</b>.</p>';
     if (!nStatus && !nDel) { await showConfirm('Nothing to change', body, false); return; }
-    const ok = await showConfirm(verb, body, status === 'Disabled', verb);
+    const ok = await showConfirm(verb, body, status === 'Disabled' || status === 'Deleted', verb);
     if (!ok) return;
     for (const x of plan) {
       if (x.ai >= 0 && status) pa.rows[x.ai].AccountStatus = status;

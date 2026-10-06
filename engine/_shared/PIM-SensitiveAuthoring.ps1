@@ -187,7 +187,7 @@ function Test-PimAdminDisablingValue {
     $v = "$Value".Trim()
     if (-not $v) { return $false }
     $c = "$Column".Trim()
-    if ($c -ieq 'AccountStatus') { return ($v -match '(?i)^(disabled|revoked)$') }
+    if ($c -ieq 'AccountStatus') { return ($v -match '(?i)^(disabled|revoked|deleted)$') }   # Deleted (§96.5 D1) is held like a disable
     if ($c -ieq 'Lifecycle')     { return ($v -match '(?i)^retire') }
     if ($c -ieq 'AutoDisableDate' -or $c -ieq 'OffboardDate') {
         $parsed = $null

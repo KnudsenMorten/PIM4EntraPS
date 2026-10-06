@@ -842,6 +842,17 @@ reversible**. The logic lives in a pure, injectable core
   after the person who restored).
 - **Retention.** `Get-PimBackupRetentionPlan` (pure) keeps the newest N per entity (default 10) and
   prunes the oldest; applied after each commit. Snapshots live in `pim.Backups`.
+- **Deleting an admin account (2.4.513).** PIM never deletes a user account on its own: a reconcile or prune only reports an
+  account that is not defined. The one exception is an operator decision: a SuperAdmin chooses **Delete account** on Admin
+  accounts and types DELETE; the row is staged as `AccountStatus=Deleted` with every delegation removed, the commit holds it
+  for the offboard approval, and after that the engine deletes the account once -- sessions revoked first, never a
+  break-glass account, at most five per run, never an enabled account the disable circuit breaker did not allow, and a
+  switch per environment turns it off. Entra keeps a deleted user restorable for 30 days. A deleted account's row is never
+  provisioned again.
+- **Importing administrators (2.4.513).** Admin accounts › Import administrators (SuperAdmin): a header line naming the
+  columns, one administrator per line, `;` `,` or TAB; the UserPrincipalName is the key. Each line is previewed as new,
+  overwrite, skip or invalid before anything is staged; *Skip existing* leaves known admins alone, *Overwrite existing*
+  replaces the stored value of every column the file carries with a non-empty cell.
 - **The change journal (2.4.511).** Every write to the configuration store also writes `pim.CommitJournal`: one row per
   changed record with the full record before and after, who initiated it, who approved it, the source (a commit in the
   Manager, a restore, the change queue, a sync, a background job) and the commit id. It is written by the store's own

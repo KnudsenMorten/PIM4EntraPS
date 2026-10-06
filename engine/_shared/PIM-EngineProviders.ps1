@@ -153,12 +153,67 @@ function Get-PimAdminStatusDecision {
         [pscustomobject]@{ status = $status; desiredEnabled = $enabled; disable = [bool]$disable; mayEnable = [bool]$may
                            revokeSessions = [bool]$sessions; blocksCreate = [bool]$blocks; statusDriven = [bool]$statusDriven; reason = $reason }
     }
+    # §96.5 D1 (operator 2026-10-06: "i allow operators to delete an admin"): Deleted = the operator asked for the ACCOUNT to
+    # be deleted -- staged by a SuperAdmin, held for the offboard approval, then deleted ONCE by Remove-PimAdminAccountApproved
+    # (PIM-AdminAccountDelete.ps1). Never provisioned again; a prune / reconcile never sets or acts on it by itself.
+    if ($st -ieq 'Deleted')  { $x = (& $mk 'Deleted' $false $true $false $true $true 'AccountStatus=Deleted' $true); $x | Add-Member -NotePropertyName delete -NotePropertyValue $true; return $x }
     if ($st -ieq 'Revoked')  { return (& $mk 'Revoked'  $false $true $false $true  $true 'AccountStatus=Revoked'  $true) }
     if ($st -ieq 'Disabled') { return (& $mk 'Disabled' $false $true $false $false $true 'AccountStatus=Disabled' $true) }
     if ($offDue) { return (& $mk 'AutoDisabled' $false $true $false $false $true ("AutoDisableDate {0:yyyy-MM-dd HH:mm} UTC reached" -f $od.utc) $false) }
     if (-not $st)            { return (& $mk ''        $true $false $false $false $false 'AccountStatus not set' $false) }
     if ($st -ieq 'Enabled')  { return (& $mk 'Enabled' $true $false $true  $false $false 'AccountStatus=Enabled' $false) }
     return (& $mk $st $null $false $false $false $true "unknown AccountStatus '$st' (expected Enabled / Disabled / Revoked) -- the account is left as it is" $false)
+}
+
+$script:PimAdminDeleteMaxPerRun = 5
+function Test-PimAdminDeleteEnabled {
+    # §96.5 D1: the operator allows an operator-controlled account delete (default ON). A kill switch exists:
+    # $global:PIM_AdminAccountDeleteEnabled = $false, or env PIM_ADMIN_ACCOUNT_DELETE = 0 / false / off.
+    if ($null -ne $global:PIM_AdminAccountDeleteEnabled) { return [bool]$global:PIM_AdminAccountDeleteEnabled }
+    $e = "$env:PIM_ADMIN_ACCOUNT_DELETE".Trim()
+    if ($e -match '^(?i)(0|false|off|no)$') { return $false }
+    return $true
+}
+function Remove-PimAdminAccountApproved {
+    <#
+      §96.5 D1 (operator 2026-10-06: "I will only allow deletion of admins in a operator controlled action (delete in gui or
+      via api)" ... "i allow operators to delete an admin"). THE ONLY place PIM deletes a user account (Test-PimNoAccountDelete
+      allows exactly this one call, by its marker). It runs only for a row whose AccountStatus is Deleted -- a value only a
+      SuperAdmin stages in the Manager, held for the offboard approval before it is stored -- from the Admins scope's
+      ApplyUpdate. A prune or reconcile never reaches it: Admins.ApplyRemove reports only (71.22), and an absent row is never
+      a delete.
+      Guards (each refuses = nothing deleted, reported): the kill switch; no disable decision for this pass (fail closed); a
+      break-glass account; an MSP status change that did not verify; an ENABLED account the circuit breaker did not allow; more
+      than $script:PimAdminDeleteMaxPerRun deletes in one pass. Sessions are revoked first; Entra keeps a deleted user
+      restorable (Deleted users) for 30 days.
+    #>
+    param([Parameter(Mandatory)][object]$Item, [Parameter(Mandatory)][hashtable]$Context)
+    $l = $Item.live
+    $key = "$($Item.key)".Trim().ToLowerInvariant()
+    $uid = "$($l.id)".Trim()
+    $upn = "$($l.userPrincipalName)".Trim()
+    $refuse = { param($why) Write-Host ("    [!] {0}: NOT deleted -- {1}" -f $Item.key, $why) -ForegroundColor Yellow; return [pscustomobject]@{ pimApplied = $false; reason = "NOT deleted -- $why" } }
+    if (-not $uid) { return (& $refuse 'the account was not found (already deleted?)') }
+    if (-not (Test-PimAdminDeleteEnabled)) { return (& $refuse 'account delete is switched off on this environment (PIM_ADMIN_ACCOUNT_DELETE)') }
+    $st = $Context['adminsDisable']
+    if (-not $st) { return (& $refuse 'no circuit-breaker decision was made for this pass (fail closed)') }
+    if (@($st.breakGlass) -contains $key) { return (& $refuse 'BREAK-GLASS account -- never deleted') }
+    if ($st.unauthorized -is [hashtable] -and $st.unauthorized.ContainsKey($key)) { return (& $refuse "MSP status change NOT authorised: $($st.unauthorized[$key])") }
+    if ((Test-PimAdminValueTrue $l.accountEnabled) -and (-not $st.decision -or -not $st.decision.allowed)) {
+        $tr = if ($st.decision) { "$($st.decision.tripped)" } else { 'no-decision' }
+        return (& $refuse "account-disable circuit breaker [$tr]")
+    }
+    $n = [int]$Context['adminsDeletedCount']
+    if ($n -ge $script:PimAdminDeleteMaxPerRun) { return (& $refuse "more than $($script:PimAdminDeleteMaxPerRun) account deletes in one run -- the rest wait for the next run") }
+    try { Invoke-PimGraph -Method POST -Path "/users/$uid/revokeSignInSessions" -Body @{} | Out-Null } catch { Write-Warning ("  [admins] {0}: revoke before delete failed: {1}" -f $upn, $_.Exception.Message) }
+    $r = Invoke-PimGraph -Method DELETE -Path "/users/$uid"   # 71.21-operator-delete: the ONE allowed user delete (§96.5 D1)
+    $Context['adminsDeletedCount'] = $n + 1
+    Write-Host ("    [-] {0}: account DELETED (operator request, AccountStatus=Deleted; restorable from Entra Deleted users for 30 days)" -f $upn) -ForegroundColor Yellow
+    if (Get-Command Write-PimAdminLifecycleAudit -ErrorAction SilentlyContinue) {
+        Write-PimAdminLifecycleAudit -Action 'account.delete' -Target $upn -After @{ reason = 'AccountStatus=Deleted (operator request)'; restorableDays = 30; transport = 'rest' }
+    }
+    if ($null -eq $r -or "$r" -eq '') { return [pscustomobject]@{ pimApplied = $true; deleted = $upn } }
+    return $r
 }
 
 function Get-PimAdminAttributePlan {
@@ -630,6 +685,7 @@ function New-PimAdminsProvider {
             param($d,$l)
             $dec = Get-PimAdminStatusDecision -Row $d
             $on = Test-PimAdminValueTrue $l.accountEnabled
+            if ($dec.PSObject.Properties['delete'] -and $dec.delete) { return $false }   # the account still exists: delete it (ApplyUpdate)
             if ($dec.disable -and $on) { return $false }
             if ($dec.desiredEnabled -eq $true -and -not $on -and $dec.mayEnable) { return $false }
             return (@((Get-PimAdminAttributePlan -Desired $d -Live $l).Keys).Count -eq 0)
@@ -720,6 +776,10 @@ function New-PimAdminsProvider {
             $d = $item.desired; $l = $item.live
             $dec = Get-PimAdminStatusDecision -Row $d
             $on = Test-PimAdminValueTrue $l.accountEnabled
+            # §96.5 D1: AccountStatus=Deleted -> the ONE operator-controlled delete path (its own guards inside).
+            if ($dec.PSObject.Properties['delete'] -and $dec.delete) {
+                return (Remove-PimAdminAccountApproved -Item $item -Context $ctx)
+            }
             $attrs = Get-PimAdminAttributePlan -Desired $d -Live $l
             $body = @{}
             foreach ($k in @($attrs.Keys)) { $body[$k] = $attrs[$k] }
