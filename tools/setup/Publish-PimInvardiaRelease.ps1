@@ -13,7 +13,10 @@
   3. With -Apply only: sign in as the publisher app (client credentials, CERTIFICATE -- never a secret) for the Invardia
      Back Office audience, and POST https://invardia.com/api/releases/pim-manager?kind=code&version=<v> with the zip as
      the body. The app holds only the role Invardia.Publisher.pim-manager: it can publish pim-manager releases, nothing
-     else. Publishing registers the version; RELEASING it to a ring is the owner's act in Invardia's back office.
+     else. Framework UPDATE-1.7 (operator 2026-10-06: "Solution (si, pim) decides WHAT version and WHICH Ring to release
+     in updates, Invardia relays only"): -Ring <0-3> publishes AND releases to that ring in one call (&ring=N); without
+     -Ring the version is only registered. Ring 2 / 3 reach customers, so they need -OperatorApproval carrying the
+     operator's own words ("release <version> to ring 2"), printed in the plan and the result.
   Without -Apply it is a plan: the zip is built and checked, nothing is sent.
 
   Identity: client id + certificate thumbprint from -KeyVault (invardia-publisher-clientid-pim-manager /
@@ -36,6 +39,8 @@ param(
     [string]$Audience = 'api://a5a57537-c847-482b-8878-9a229cbca61b',
     [ValidateSet('code')][string]$Kind = 'code',
     [string]$OutDir = '',
+    [ValidateRange(-1, 3)][int]$Ring = -1,
+    [string]$OperatorApproval = '',
     [switch]$Apply
 )
 $ErrorActionPreference = 'Stop'
@@ -75,10 +80,13 @@ if ($bytes.Length -lt 4 -or $bytes[0] -ne 0x50 -or $bytes[1] -ne 0x4B) { throw '
 $sha = [System.Security.Cryptography.SHA256]::Create(); try { $hash = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
 Write-Host ("    {0}`n    {1} entries, {2:N0} bytes, SHA-256 {3}" -f $zip, $count, $bytes.Length, $hash)
 
-$url = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager?kind=$Kind&version=$Version"
+# UPDATE-1.7: PIM decides the ring. Ring 2 / 3 reach customers: only on the operator's own words (memory/ring-2 rule).
+if ($Ring -ge 2 -and -not "$OperatorApproval".Trim()) { throw "ring $Ring reaches customers -- pass -OperatorApproval with the operator's own words (e.g. 'release $Version to ring $Ring'); nothing was sent" }
+$url = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager?kind=$Kind&version=$Version" + $(if ($Ring -ge 0) { "&ring=$Ring" } else { '' })
+Write-Host ("    ring: {0}{1}" -f $(if ($Ring -ge 0) { "$Ring (published AND released to it)" } else { 'none (registered only, released to no ring)' }), $(if ("$OperatorApproval".Trim()) { " -- operator: '$OperatorApproval'" } else { '' }))
 if (-not $Apply) {
     Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply the zip is POSTed to $url as Invardia.Publisher.pim-manager (tenant $TenantId)." -ForegroundColor Yellow
-    return [pscustomobject]@{ published = $false; version = $Version; zip = $zip; sha256 = $hash; size = $bytes.Length; url = $url }
+    return [pscustomobject]@{ published = $false; version = $Version; ring = $Ring; zip = $zip; sha256 = $hash; size = $bytes.Length; url = $url }
 }
 
 Step 'publisher identity (certificate, from Key Vault unless passed)'

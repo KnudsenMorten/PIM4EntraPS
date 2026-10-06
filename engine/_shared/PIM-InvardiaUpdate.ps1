@@ -46,8 +46,8 @@ function Test-PimInvardiaManifestSignature {
 }
 function Test-PimInvardiaManifest {
     param([Parameter(Mandatory)][object]$Response, [object[]]$TrustedKeys = $script:InvardiaUpdateTrustedKeys,
-          [string]$Kind = 'code', [int]$AppliedSequence = 0, [string]$RunningVersion = '', [string]$Product = $script:PimInvardiaProduct)
-    Test-InvardiaManifest -Response $Response -TrustedKeys $TrustedKeys -Kind $Kind -AppliedSequence $AppliedSequence -RunningVersion $RunningVersion -Product $Product
+          [string]$Kind = 'code', [int]$AppliedSequence = 0, [string]$RunningVersion = '', [string]$Product = $script:PimInvardiaProduct, [int]$Ring = -1)
+    Test-InvardiaManifest -Response $Response -TrustedKeys $TrustedKeys -Kind $Kind -AppliedSequence $AppliedSequence -RunningVersion $RunningVersion -Product $Product -Ring $Ring
 }
 function Get-PimInvardiaPullReason {
     param([int]$Status, [AllowNull()][object]$Body, [string]$ErrorText = '')
@@ -57,8 +57,9 @@ function Get-PimInvardiaPullReason {
     $r
 }
 function Invoke-PimInvardiaManifestPull {
-    param([Parameter(Mandatory)][scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][string]$InstallKey, [Parameter(Mandatory)][string]$LicenceText, [string]$Kind = 'code')
-    $p = Invoke-InvardiaManifestPull -Product $script:PimInvardiaProduct -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -LicenceText $LicenceText -Kind $Kind
+    param([Parameter(Mandatory)][scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][string]$InstallKey, [Parameter(Mandatory)][string]$LicenceText, [string]$Kind = 'code',
+          [Parameter(Mandatory)][ValidateRange(0, 3)][int]$Ring)
+    $p = Invoke-InvardiaManifestPull -Product $script:PimInvardiaProduct -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -LicenceText $LicenceText -Kind $Kind -Ring $Ring
     if ($p.status -eq 401) { $p.reason = Get-PimInvardiaPullReason -Status 401 -Body $p.body }
     $p
 }
@@ -189,14 +190,20 @@ function Get-PimInvardiaUpdateTarget {
     #>
     param([Parameter(Mandatory)][scriptblock]$Http, [AllowEmptyString()][string]$InstallKey = '', [AllowEmptyString()][string]$LicenceText = '',
           [string]$BaseUrl = '', [int]$AppliedSequence = 0, [string]$RunningVersion = '', [string]$LastBuiltVersion = '',
-          [object[]]$TrustedKeys = $script:PimInvardiaUpdateTrustedKeys, [scriptblock]$Download, [string]$WorkDir = ([IO.Path]::GetTempPath()))
+          [object[]]$TrustedKeys = $script:PimInvardiaUpdateTrustedKeys, [scriptblock]$Download, [string]$WorkDir = ([IO.Path]::GetTempPath()),
+          # UPDATE-1.7: the environment's OWN ring (PIM_UPDATE_RING), sent with the pull; the manifest must be for it.
+          [string]$Ring = '')
     $res = @{ ok = $false; version = ''; sequence = 0; hold = $false; reason = ''; contextPath = '' }
     if (-not "$InstallKey".Trim()) { $res.reason = 'this install has no install key (PIM_UPLINK_KEY, or claimed by the install-key job)'; return $res }
     if (-not "$LicenceText".Trim()) { $res.reason = 'no licence is installed -- Pro updates need the Invardia-issued Pro licence'; return $res }
-    $p = Invoke-PimInvardiaManifestPull -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -LicenceText $LicenceText
+    $ringN = -1
+    if (-not [int]::TryParse("$Ring".Trim(), [ref]$ringN) -or $ringN -lt 0 -or $ringN -gt 3) {
+        $res.reason = "this environment has no update ring (PIM_UPDATE_RING = '$Ring', expected 0-3) -- PIM decides the ring, so a Pro pull without one is not made"; return $res
+    }
+    $p = Invoke-PimInvardiaManifestPull -Http $Http -BaseUrl $BaseUrl -InstallKey $InstallKey -LicenceText $LicenceText -Ring $ringN
     if ($p.status -eq 204) { $res.ok = $true; $res.reason = $p.reason; return $res }
     if ($p.status -ne 200) { $res.reason = $p.reason; return $res }
-    $v = Test-PimInvardiaManifest -Response $p.body -TrustedKeys $TrustedKeys -AppliedSequence $AppliedSequence -RunningVersion $RunningVersion
+    $v = Test-PimInvardiaManifest -Response $p.body -TrustedKeys $TrustedKeys -AppliedSequence $AppliedSequence -RunningVersion $RunningVersion -Ring $ringN
     if (-not $v.ok) { $res.reason = $v.reason; return $res }
     $res.sequence = $v.sequence; $res.reason = $v.reason
     if ($v.hold) { $res.ok = $true; $res.hold = $true; return $res }

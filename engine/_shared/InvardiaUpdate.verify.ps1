@@ -13,7 +13,7 @@
   * Test-InvardiaManifestSignature  RS256 (PKCS#1 v1.5, SHA-256) over the base64-DECODED manifest bytes;
   * Test-InvardiaManifest           signature + product + kind + version + SHA-256 + sequence (no replay) + https link;
                                     manualStep / minFromVersion HOLD;
-  * Invoke-InvardiaManifestPull     POST <base>/api/updates/<product>/manifest {kind, licence} + X-Invardia-Install-Key;
+  * Invoke-InvardiaManifestPull     POST <base>/api/updates/<product>/manifest {kind, licence, ring} + X-Invardia-Install-Key;
   * Save-InvardiaArchive / Test-InvardiaArchiveFile   the download is a zip of the SIGNED size + SHA-256.
   PS 5.1 + 7. No modules. Nothing here writes anything.
 #>
@@ -83,8 +83,10 @@ function Test-InvardiaManifest {
         ok=$false            refused (signature, shape, product, kind, replay) -- nothing moves
         ok=$true, hold=$true  verified, but the release asks for a manual step or a newer starting version -- nothing moves
     #>
+    # -Ring (framework UPDATE-1.7, 2026-10-06: the solution decides the ring, Invardia relays): the ring this environment
+    # asked for. A manifest for another ring, or one that names no ring, is refused. -1 = not checked (legacy callers only).
     param([Parameter(Mandatory)][object]$Response, [object[]]$TrustedKeys = $script:InvardiaUpdateTrustedKeys,
-          [string]$Kind = 'code', [int]$AppliedSequence = 0, [string]$RunningVersion = '', [Parameter(Mandatory)][string]$Product)
+          [string]$Kind = 'code', [int]$AppliedSequence = 0, [string]$RunningVersion = '', [Parameter(Mandatory)][string]$Product, [int]$Ring = -1)
     $no = { param($why) @{ ok = $false; hold = $false; reason = $why; version = ''; sequence = 0; sha256 = ''; size = 0; downloadUrl = ''; manifest = $null } }
     $g = { param($o, $n) if ($null -eq $o) { return $null }; if ($o -is [System.Collections.IDictionary]) { return $o[$n] }; $pp = $o.PSObject.Properties[$n]; if ($pp) { $pp.Value } }
     $b64 = "$(& $g $Response 'manifestB64')".Trim()
@@ -95,6 +97,10 @@ function Test-InvardiaManifest {
     $m = $null; try { $m = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) | ConvertFrom-Json } catch { return (& $no 'the signed manifest is not JSON') }
     if ("$($m.product)" -cne $Product) { return (& $no "the manifest is for '$($m.product)', not $Product") }
     if ("$($m.kind)" -cne $Kind) { return (& $no "the manifest is kind '$($m.kind)', not $Kind") }
+    if ($Ring -ge 0) {
+        $mr = -1; if (-not [int]::TryParse("$($m.ring)", [ref]$mr)) { return (& $no "the manifest names no ring (this environment asked for ring $Ring)") }
+        if ($mr -ne $Ring) { return (& $no "the manifest is for ring $mr, not ring $Ring that this environment asked for") }
+    }
     $ver = "$($m.version)".Trim(); if ($ver -notmatch '^\d+\.\d+\.\d+$') { return (& $no "the manifest names no release version ('$ver')") }
     $sha = "$($m.sha256)".Trim().ToLowerInvariant(); if ($sha -notmatch '^[0-9a-f]{64}$') { return (& $no 'the manifest carries no SHA-256') }
     $seq = 0; if (-not [int]::TryParse("$($m.sequence)", [ref]$seq) -or $seq -lt 1) { return (& $no 'the manifest carries no sequence') }
@@ -122,6 +128,7 @@ function Get-InvardiaPullReason {
         401 { return 'Invardia refused the install key (revoked, reset or wrong) -- claim a new one, or set the install key again' }
         403 { return "Invardia refused the licence$why -- updates need a valid Invardia-issued Pro licence for this tenant" }
         404 { return 'Invardia does not know the product' }
+        422 { return "Invardia refused the request$why -- the pull must carry this environment's ring (0-3)" }
         429 { return 'Invardia asked to wait (rate limit) -- the next run asks again' }
         0   { return "Invardia could not be reached: $ErrorText" }
         default { return "Invardia answered HTTP $Status$why" }
@@ -130,9 +137,12 @@ function Get-InvardiaPullReason {
 
 function Invoke-InvardiaManifestPull {
     <# The pull. -Http { param($Method, $Url, $Body, $Headers) } -> @{ status; body; error } (the product's own HTTP helper). #>
-    param([Parameter(Mandatory)][string]$Product, [Parameter(Mandatory)][scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][string]$InstallKey, [Parameter(Mandatory)][string]$LicenceText, [string]$Kind = 'code')
+    # -Ring (UPDATE-1.7): the environment's OWN ring (0-3), set in the product; Invardia answers with what the product
+    # published for that ring (204 when nothing). Required -- Invardia answers 422 without it.
+    param([Parameter(Mandatory)][string]$Product, [Parameter(Mandatory)][scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][string]$InstallKey, [Parameter(Mandatory)][string]$LicenceText, [string]$Kind = 'code',
+          [Parameter(Mandatory)][ValidateRange(0, 3)][int]$Ring)
     $base = if ("$BaseUrl".Trim()) { "$BaseUrl".Trim().TrimEnd('/') } else { $script:InvardiaUpdateDefaultBase }
-    $r = & $Http 'POST' "$base/api/updates/$Product/manifest" @{ kind = $Kind; licence = $LicenceText } @{ 'X-Invardia-Install-Key' = $InstallKey }
+    $r = & $Http 'POST' "$base/api/updates/$Product/manifest" @{ kind = $Kind; licence = $LicenceText; ring = $Ring } @{ 'X-Invardia-Install-Key' = $InstallKey }
     $pullStatus = [int]$r.status
     return @{ status = $pullStatus; body = $r.body; reason = $(if ($pullStatus -eq 200) { '' } else { Get-InvardiaPullReason -Status $pullStatus -Body $r.body -ErrorText "$($r.error)" }) }
 }

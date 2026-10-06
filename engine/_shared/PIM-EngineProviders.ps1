@@ -685,7 +685,8 @@ function New-PimAdminsProvider {
             param($d,$l)
             $dec = Get-PimAdminStatusDecision -Row $d
             $on = Test-PimAdminValueTrue $l.accountEnabled
-            if ($dec.PSObject.Properties['delete'] -and $dec.delete) { return $false }   # the account still exists: delete it (ApplyUpdate)
+            # the account still exists: delete it (ApplyUpdate) -- a LOCAL row only; a central Deleted is a disable (see ApplyUpdate)
+            if ($dec.PSObject.Properties['delete'] -and $dec.delete -and -not ((Get-Command Test-PimAdminRowIsCentral -ErrorAction SilentlyContinue) -and (Test-PimAdminRowIsCentral -Row $d))) { return $false }
             if ($dec.disable -and $on) { return $false }
             if ($dec.desiredEnabled -eq $true -and -not $on -and $dec.mayEnable) { return $false }
             return (@((Get-PimAdminAttributePlan -Desired $d -Live $l).Keys).Count -eq 0)
@@ -777,8 +778,15 @@ function New-PimAdminsProvider {
             $dec = Get-PimAdminStatusDecision -Row $d
             $on = Test-PimAdminValueTrue $l.accountEnabled
             # §96.5 D1: AccountStatus=Deleted -> the ONE operator-controlled delete path (its own guards inside).
-            if ($dec.PSObject.Properties['delete'] -and $dec.delete) {
+            # 🔴 A CENTRAL row (sent by the managing tenant) is never deleted HERE: the downlink copies AccountStatus verbatim, so
+            # a Deleted on the managing tenant would otherwise delete the account in every managed tenant. On a managed tenant a
+            # central Deleted is a DISABLE (the normal path below); deleting stays each tenant's own, local decision.
+            $__centralRow = (Get-Command Test-PimAdminRowIsCentral -ErrorAction SilentlyContinue) -and (Test-PimAdminRowIsCentral -Row $d)
+            if ($dec.PSObject.Properties['delete'] -and $dec.delete -and -not $__centralRow) {
                 return (Remove-PimAdminAccountApproved -Item $item -Context $ctx)
+            }
+            if ($dec.PSObject.Properties['delete'] -and $dec.delete -and $__centralRow) {
+                Write-Host ("    [admins] {0}: CENTRAL row says Deleted -- disabled here, never deleted by the managing tenant's word" -f $item.key) -ForegroundColor DarkYellow
             }
             $attrs = Get-PimAdminAttributePlan -Desired $d -Live $l
             $body = @{}
