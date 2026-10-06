@@ -14,6 +14,26 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.513 — Delete an admin account, a clear administrator import, and a clearer bulk page
+
+- **New: Delete account** on Admin accounts (each row and the selection bar), for a SuperAdmin. You type DELETE to confirm;
+  the account is staged as deleted with all its delegations removed, held for the offboard approval like a disable, and
+  then deleted in Entra ID by the engine. Break-glass accounts are never deleted, at most five accounts are deleted per
+  run, and Entra keeps a deleted user restorable for 30 days. PIM itself still never deletes an account because it is
+  missing from the definitions.
+- **New: Admin accounts › Import administrators** (SuperAdmin only), moved from Create & change access. The page shows the
+  exact format -- a header line, one administrator per line, every column with what it means and an example -- and offers
+  a template to download. **The UPN is the key**: choose **Skip existing** or **Overwrite existing (replace)**. Every line
+  is previewed as new, overwrite, skip or invalid (a duplicate UPN, a user name that belongs to someone else, a value that
+  is not a UPN) before anything is staged.
+- **Improved: Duplicate an existing group** offers only group types (no longer "Administrator accounts"), lists the groups
+  by name, and refuses a new name whose tag already exists -- shown while you type.
+- **Improved: Move an admin between groups** loads the admins first and says "loading" instead of "no admins found",
+  lists them by name, and refuses a destination that does not exist or that the admin is already in.
+- **Changed: the account auto-disable controls** in the Admin accounts selection bar are one labelled group, "Account
+  auto-disable date": push it out by N months / days, or set it. They change the account's date -- the day it is disabled
+  -- not the expiry of its delegations.
+
 ## v2.4.512 — An Admin accounts menu
 
 - **Changed: a new Admin accounts menu, left of Access.** It holds **Admin accounts & TAP** and **Invite a guest or

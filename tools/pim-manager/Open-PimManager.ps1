@@ -15017,7 +15017,11 @@ function Handle-Request {
                         Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; result = $d }); return 200
                     }
                     '/api/authoring/import-admins' {
-                        $people = if ($b.text) { ConvertFrom-PimAdminImportCsv -Text "$($b.text)" } else { @($b.people | ForEach-Object { ConvertTo-OrderedRow $_ }) }
+                        # Operator 2026-10-06: importing administrators is for a SuperAdmin only (the page is hidden for the others).
+                        if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                            Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to import administrators.' }; return 403
+                        }
+                        $people =if ($b.text) { ConvertFrom-PimAdminImportCsv -Text "$($b.text)" } else { @($b.people | ForEach-Object { ConvertTo-OrderedRow $_ }) }
                         $tpl = $null
                         if ("$($b.templateId)".Trim()) {
                             $tplDir = Join-Path $solutionRoot 'templates\admin'
