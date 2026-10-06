@@ -23,6 +23,8 @@ Set-StrictMode -Off
 $script:PimEngineProviders = @{}   # scope(lower) -> provider hashtable
 # §88 commit watcher: the engine records what it did with every WATCHED key (free; loaded with the core).
 if (-not (Get-Command Update-PimCommitOutcomes -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-CommitWatch.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-CommitWatch.ps1') }
+# SEC-80: a prune removes only what PIM manages (the managed-key ledger). Loaded with the core so no run prunes without it.
+if (-not (Get-Command Split-PimPruneByLedger -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1') }
 
 # ---- pure diff core (testable, no I/O) ------------------------------------
 function Get-PimChangeFieldDiff {
@@ -551,6 +553,9 @@ function Invoke-PimEngineScope {
     # provider is gated off) travel back in the scope result, so the run's job log / alerting can name them.
     $Context['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string]
     $Context['__pimLiveReadError'] = $null
+    # Per-scope read-quality flags (the Context is shared by every scope of a run): a partial read in one scope must not
+    # be taken for one in the next. SEC-80: __pimLiveNarrowed = the provider read only the principals the rows name.
+    $Context['__pimLiveIncomplete'] = $null; $Context['__pimLiveNarrowed'] = $false
     # REQ-U wave 2: structured live FINDINGS a provider raises from its own live read (the workload providers' orphan
     # group / unmanaged binding / wrong permissions warnings). They travel back as the scope result's `findings`; the
     # drift snapshot lists and counts them (PIM-DriftSnapshot.ps1).
@@ -648,6 +653,46 @@ function Invoke-PimEngineScope {
     }
     foreach ($__c in $__conflicts) {
         Write-Warning ("[engine] {0}: Remove row '{1}' names an assignment that another row ASSIGNS -- nothing removed. Delete one of the two rows." -f $Scope, $__c.key)
+    }
+
+    # --- SEC-80 (§33.38): A PRUNE REMOVES ONLY WHAT PIM MANAGES ------------------------------------------------------
+    # Operator 2026-10-06: "it must only impact defined perm per pim manager def, not things like delegations or admins
+    # that exist outside pim manager". A prune item is a live item no desired row has -- and a provider's live read is wider
+    # than PIM's definitions (every member of a PIM group, every grant a PIM group holds). The managed-key ledger
+    # (PIM-ManagedKeys.ps1) holds what PIM has matched to a row or created from one; a prune keeps only those, and every
+    # other item is UNMANAGED: reported, never removed. Targeted Action=Remove rows pass (the row is the definition).
+    # Fail closed: no ledger (unreadable, no store, module missing) = nothing is pruned. The DRIFT READ (a plan that can
+    # never write) still lists every extra -- listing them is its job (BUG-269).
+    $__driftReadPlan = [bool]($WhatIf -and $global:PIM_DriftReadPlan)
+    $__ledger = $null; $__ledgerCs = $null; $__ledgerErr = ''
+    if ($p.ApplyRemove -and (Get-Command Get-PimManagedKeys -ErrorAction SilentlyContinue)) {
+        if (-not ($global:PIM_ManagedKeysStore -is [hashtable]) -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) {
+            try { $__ledgerCs = Get-PimSqlSettingsConnectionString } catch { $__ledgerCs = $null }
+        }
+        if (($global:PIM_ManagedKeysStore -is [hashtable]) -or $__ledgerCs) {
+            try { $__ledger = Get-PimManagedKeys -ConnectionString $__ledgerCs -Scope $Scope }
+            catch { $__ledger = $null; $__ledgerErr = "$($_.Exception.Message)" }
+        } else { $__ledgerErr = 'no SQL store' }
+    } elseif (-not $p.ApplyRemove) { $__ledger = @{} }   # a provider that cannot remove manages nothing removable
+    $__unmanaged = @()
+    if ($doPrune -and -not $__driftReadPlan) {
+        if (Get-Command Split-PimPruneByLedger -ErrorAction SilentlyContinue) {
+            $__sp = Split-PimPruneByLedger -Remove @($diff.remove) -Ledger $__ledger
+            $__keepRm = @($__sp.remove); $__unmanaged = @($__sp.unmanaged)
+        } else {
+            $__keepRm = @(@($diff.remove) | Where-Object { $_ -and $_.PSObject.Properties['targeted'] -and $_.targeted })
+            $__unmanaged = @(@($diff.remove) | Where-Object { $_ -and -not ($_.PSObject.Properties['targeted'] -and $_.targeted) })
+            $__ledgerErr = 'the managed-key ledger module is not loaded'
+        }
+        if ($__unmanaged.Count) {
+            if ($null -eq $__ledger -and $__ledgerErr) {
+                Write-Warning ("[engine] {0}: the managed-key ledger could not be read ({1}) -- the prune removes NOTHING this run ({2} item(s) left alone)." -f $Scope, $__ledgerErr, $__unmanaged.Count)
+            }
+            Write-Host ("[engine] {0,-20} {1} live item(s) are not defined in PIM Manager -- left alone, never pruned (report only): {2}{3}" -f `
+                $Scope, $__unmanaged.Count, ((@($__unmanaged | Select-Object -First 5 | ForEach-Object { $_.key })) -join ', '), $(if ($__unmanaged.Count -gt 5) { ', ...' } else { '' })) -ForegroundColor DarkYellow
+        }
+        $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @($__keepRm); nochange = @($diff.nochange)
+                                   absent = @($diff.absent); conflicts = @($diff.conflicts) }
     }
 
     # Commit-queue-fed delta: restrict the diff to only the queued (entity,key) pairs.
@@ -883,6 +928,8 @@ function Invoke-PimEngineScope {
                 } else {
                     $script:__applied++; Write-Host ("    [{0}] {1}" -f $sym, $item.key) -ForegroundColor Green
                     & $watchAdd $op $item 'ok' ''
+                    # SEC-80: what PIM created now belongs to it; what it removed no longer does.
+                    if ($op -eq 'Create') { $script:__createdKeys.Add("$($item.key)") } elseif ($op -eq 'Remove') { $script:__removedKeys.Add("$($item.key)") }
                     Write-PimEngineChangeAudit -Scope $Scope -Entity $entity -Op $op -Item $item -Result 'ok'
                     if ($op -eq 'Remove' -and $item.PSObject.Properties['targeted'] -and $item.targeted -and $null -ne $item.row -and $item.rowKey) {
                         $script:__rowDone[$item.rowKey] = 1 + [int]$script:__rowDone[$item.rowKey]; $script:__rowObj[$item.rowKey] = $item.row
@@ -896,6 +943,7 @@ function Invoke-PimEngineScope {
                 if ($em -match '(?i)RoleAssignmentExists|already exist|references already exist|ConflictingObjects|existing assignment|A conflicting object|RoleAssignmentRequestPolicyValidationFailed.*active|The Role assignment already exists') {
                     $script:__skipped++; Write-Host ("    [=] {0} (exists -- validated, skipped)" -f $item.key) -ForegroundColor DarkGray
                     & $watchAdd 'NoChange' $item 'ok' ''
+                    if ($op -eq 'Create') { $script:__createdKeys.Add("$($item.key)") }   # SEC-80: it is there, as the row asks
                 } else {
                     # 🔴 §70.19 (2026-09-13): "Nesting is currently not supported" (an ACTIVE group nesting into a
                     # role-assignable group) used to be a separate branch that counted a SKIP and printed a yellow
@@ -923,6 +971,7 @@ function Invoke-PimEngineScope {
         }
     }
     $script:__applied = 0; $script:__errors = 0; $script:__skipped = 0; $script:__reportedShown = 0
+    $script:__createdKeys = New-Object System.Collections.Generic.List[string]; $script:__removedKeys = New-Object System.Collections.Generic.List[string]
     $script:__failures = New-Object System.Collections.Generic.List[object]
     $script:__rowDone = @{}; $script:__rowObj = @{}   # Remove rows: revoked item count + the row, by row key
     # Held by the removal budget (68.6 row 24): explicit Remove rows / type changes that did NOT apply.
@@ -989,6 +1038,22 @@ function Invoke-PimEngineScope {
             Write-Warning ("  [engine] {0}: the finished Remove rows were NOT cleaned up (they stay and are re-checked next run): {1} | {2}" -f $Scope, $_.Exception.Message, (Get-PimEngineErrorWhere -ErrorRecord $_))
         }
     }
+    # SEC-80: keep the managed-key ledger in step with this pass -- what PIM matched to a row or created joins it, what PIM
+    # removed leaves it, and (only after a COMPLETE live read: not narrowed, not partial) what is no longer live leaves it.
+    # Never fails the run; a ledger that falls behind only makes a later prune remove LESS (fail safe).
+    if (-not $WhatIf -and $p.ApplyRemove -and $null -ne $__ledger -and (Get-Command Update-PimManagedKeys -ErrorAction SilentlyContinue)) {
+        try {
+            $__liveComplete = (-not "$($Context['__pimLiveIncomplete'])".Trim()) -and (-not $Context['__pimLiveNarrowed'])
+            $__liveKeys = if ($__liveComplete) { @($live | Where-Object { $null -ne $_ } | ForEach-Object { "$(& $p.KeyOf $_)" }) } else { @() }
+            $__ld = Get-PimManagedKeysDelta -Ledger $__ledger -Matched @(@(@($diff.nochange) + @($diff.update)) | Where-Object { $_ } | ForEach-Object { "$($_.key)" }) `
+                -Created @($script:__createdKeys.ToArray()) -Removed @($script:__removedKeys.ToArray()) -LiveKeys $__liveKeys -LiveComplete:$__liveComplete
+            if (@($__ld.add).Count -or @($__ld.remove).Count) {
+                [void](Update-PimManagedKeys -ConnectionString $__ledgerCs -Scope $Scope -Add @($__ld.add) -Remove @($__ld.remove))
+            }
+        } catch {
+            Write-Warning ("  [engine] {0}: the managed-key ledger was NOT updated (a later prune removes less, never more): {1}" -f $Scope, $_.Exception.Message)
+        }
+    }
     if ([int]$script:__reportedShown -gt 3) { Write-Host ("    [r] ... and {0} more reported only -- NOT applied (same reason as above)" -f ([int]$script:__reportedShown - 3)) -ForegroundColor DarkYellow }
     Write-Host ("[engine] {0,-20} done  applied={1} skipped={2} errors={3}" -f $Scope, $script:__applied, $script:__skipped, $script:__errors) -ForegroundColor $(if ($script:__errors) { 'Yellow' } else { 'Green' })
     # The CURRENTLY-FAILING set for this scope (SQL). A WhatIf run applied nothing, so it proves nothing
@@ -1018,6 +1083,7 @@ function Invoke-PimEngineScope {
         failures=$script:__failures.ToArray()
         held=$__held.Count; absent=$__absent.Count; conflicts=$__conflicts.Count
         removeRowsDone=$__rowsDone
+        unmanaged=@($__unmanaged).Count           # SEC-80: live items a prune left alone (not defined in PIM Manager)
         noDefinitions=[bool]$__emptyDesiredRead   # REQ-AU-DRIFT-1: extras listed from a scope with no rows (drift read only)
         overRemoveBudget=$__overBudget            # BUG-269: drift read only -- { toRemove; budget } when an apply would hold
         warnings=@($Context['__pimScopeWarnings'])

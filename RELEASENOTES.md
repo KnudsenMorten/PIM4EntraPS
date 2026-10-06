@@ -14,6 +14,25 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.509 — PIM only ever removes what PIM manages
+
+- **Fixed: a full reconcile with removal (prune) could remove access that was granted outside PIM Manager.** It removed
+  every live item no row described. What the engine reads is wider than what you define: every member of a PIM group,
+  every role a PIM group holds, every grant on an app a row names. The engine now keeps a record of the items it manages
+  (matched to a row or created from one), and a prune removes only those. Everything else is reported as unmanaged and
+  left alone. If that record cannot be read, nothing is pruned. Scheduled runs never prune, so no environment lost access
+  this way.
+- **Fixed: direct Entra role rows only look at the roles they name.** A role someone assigned by hand to the same user is
+  no longer read, so it can never be a removal.
+- **Fixed: app-role assignments.** A desired assignment now matches its live grant, so it is no longer planned as new on
+  every run. A deleted app-role row (a removal) is now applied; it used to be ignored.
+- **Fixed: Defender XDR and Intune removals.** A deleted row (a removal) is now applied; it used to be ignored. An
+  assignment that also holds another principal is never deleted, because the delete would take that principal's access
+  too: the run reports it instead.
+- **Changed: offboarding removes the admin only from groups PIM manages.** Memberships in other groups are reported,
+  not removed.
+- **Fixed: group retirement refuses a group name that more than one live group carries.**
+
 ## v2.4.508 — Remove a group's delegations, with or without deleting the group
 
 - **New: two clean-up actions on a group, per row and for a selection.**
@@ -77,10 +96,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 ## v2.4.501 — Removals go live on the next run, permission templates in one place
 
-- **Fixed: a removed delegation is taken away on the next engine run, not overnight.** Deleting an assignment (Stop
-  managing, a row delete) only took the row out of the desired state, and only the nightly full reconcile removed the
-  membership in Entra. The removal is now applied by the next delta run, minutes after the commit, and the row disappears
-  once the removal is confirmed.
+- **Fixed: a removed delegation is taken away on the next engine run.** Deleting an assignment (Stop managing, a row
+  delete) only took the row out of the desired state, and no scheduled run removed the membership in Entra -- not the
+  nightly reconcile either (corrected 2026-10-06; this note first said the nightly run did). The removal is now applied by
+  the next delta run, minutes after the commit, and the row disappears once the removal is confirmed. A row deleted
+  before this version left its access in place: it shows as an extra on the Drift page.
 - **Changed: the permission templates moved from Create access to Audit & Settings > Workload templates**, next to the
   template packs. **Import...** opens them there.
 

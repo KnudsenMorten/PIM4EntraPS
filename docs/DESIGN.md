@@ -537,6 +537,24 @@ container, or from the scheduler with no `Connect-*` step.
   both guards. The same holds for any scope on the drift read (2.4.470): more extras than the removal
   budget are all listed, and the scope is marked "over the removal budget" (an automatic run would
   hold them); before, the budget dropped the whole list and the page read "in sync".
+- **A prune only removes what PIM manages (the managed-key ledger, `PIM-ManagedKeys.ps1`, table
+  `pim.ManagedKeys`).** What a provider reads live is wider than what PIM Manager defines: every member of
+  a PIM group, every role a PIM group holds, every assignment on an app a row names. So "live but not
+  desired" also covers access someone granted **by hand**, outside PIM. That access must never be touched
+  by PIM. The engine therefore keeps, per scope, a ledger of the live items it manages. A key enters the
+  ledger when a pass matches a live item to a desired row (nochange or update) or creates it from one.
+  It leaves when PIM removes the item, or when a **complete** live read no longer finds it (a narrowed or
+  partial read never drops a key). A prune removes **only ledger keys**. Every other live item without a row
+  is **unmanaged**: it is logged and counted (`unmanaged` in the scope result), and never removed.
+  - An unreadable ledger prunes nothing (fail closed).
+  - A provider whose desired and live keys do not correspond can never prune, because nothing it reads
+    ever enters the ledger.
+  - A targeted `Action=Remove` row is not a prune; it removes what it names, as before.
+  - The drift read (a plan that cannot write) still lists every extra, managed or not.
+  - The same rule holds outside the prune. Offboarding removes only the admin's memberships in groups
+    PIM defines, and reports the rest. A Defender XDR or Intune assignment that also holds another
+    principal is never deleted, because the delete would take that principal's access too. Group
+    retirement refuses a group name that more than one live group carries.
 - **Account-disable circuit breaker** (`PIM-DisableGuard.ps1`). A provider whose remove path
   *disables Entra accounts* (`accountEnabled=$false`) is the highest-blast-radius operation in
   the engine: the `Admins` provider's LIVE set is the **whole tenant user population**, so a
@@ -935,7 +953,7 @@ revoke page cannot drift apart.
 
 | verb | object | mechanism | the trap |
 |---|---|---|---|
-| **Stop managing** | the delegation **row** | the row leaves `pim.Rows` | **no scheduled job runs with `-Prune`** (`PIM-Scheduler.ps1`), so a live assignment whose desired row is gone is **reported, never removed**. Nothing is taken away. |
+| **Stop managing** | the delegation **row** | the row leaves `pim.Rows` | **no scheduled job runs with `-Prune`** (`PIM-Scheduler.ps1`), so a live assignment whose desired row is gone is **reported, never removed**. Nothing is taken away. Since 2.4.501 a row deleted in the Manager grid from an assignment entity is committed as an `Action=Remove` row instead (the next run removes the access). A row deleted **before** 2.4.501 left its access live, and no job removes it: it shows as an extra on the Drift page. |
 | **Remove** | the **access** the row grants | `Action=Remove` → the core's targeted removal (`GetRemoveRows` / `-RemoveRows`, `PIM-EngineCore.ps1`) removes exactly that live item **in every mode**, then `Complete-PimRemoveRows` deletes the row | none — this is the act that takes access away through desired state |
 | **Revoke** | the **live** assignment | `pim.ChangeQueue` `Kind='Action'` (`PIM-QueueActions.ps1`), **never written to `pim.Rows`** | the delegation row is untouched, so if it still says `Assign` the next run **re-creates** the access |
 | **Delete** | the **group object** | `Lifecycle=Retire` → `GroupRetirement` (order 92) | gated by `EnableGroupRetirement` + ownership-by-name + the removal budget |
