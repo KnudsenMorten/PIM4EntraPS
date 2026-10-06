@@ -676,6 +676,9 @@ function Assert-PimAdminPopulationComparable {
 #     same lesson as IMP-01 (an override that can neuter the guard is not a guard).
 # A trip DROPS the whole remove set for that scope -- never a partial removal -- and
 # ALERTS by email, because the operator's instruction was that this must be noticed.
+# §96.6 / BUG-291: the ONLY way past it is a guard RELEASE (PIM-GuardRelease.ps1): a SuperAdmin releases the exact held
+# plan (plan hash) for one run or until <= 24 h, and the engine raises the budget for that run to the plan's count, at
+# most 50. The configured budget itself still cannot be raised.
 # =============================================================================
 $script:PimRemoveBudgetDefault = 5
 $script:PimRemoveBudgetCeiling = 5
@@ -913,7 +916,8 @@ function Write-PimRemoveBudgetAlert {
                "so it applied NONE of them and left '{2}' exactly as it was. {3}") -f `
                $Decision.budget, $what, $Decision.scope, $(if ($kinds.Count) { '' } else { 'Nothing else in this run was affected.' })
     $action = ("Open Jobs > Engine logs &amp; errors and read the {0} held item(s) -- each one names exactly what it would have deleted. " +
-               "If they are all intended, apply them in batches of at most {1}. If they are NOT intended, nothing needs undoing: " +
+               "If they are all intended, apply them in batches of at most {1}, or a SuperAdmin releases exactly this plan for one run " +
+               "on Audit &amp; Settings &gt; Guards (at most 50). If they are NOT intended, nothing needs undoing: " +
                "no change was made.") -f $Decision.toRemove, $Decision.budget
     try {
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
@@ -931,7 +935,7 @@ function Write-PimRemoveBudgetAlert {
     # GUARD-1: state + audit 'guard.trip' + telemetry (the mail above IS this guard's mail)
     if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
         [void](Invoke-PimGuardTrip -GuardId 'engine.remove-budget' -Outcome halted -Area "$($Decision.scope)" -Job 'engine' -CallerMailed `
-            -Title ("{0} deletion(s) in '{1}' were blocked" -f $Decision.toRemove, $Decision.scope) -Detail $headline -ActionText 'Open Jobs > Engine logs & errors and read the held items.' `
+            -Title ("{0} deletion(s) in '{1}' were blocked" -f $Decision.toRemove, $Decision.scope) -Detail $headline -ActionText 'Open Jobs > Engine logs & errors and read the held items; to let exactly that plan through once, release it on Audit & Settings > Guards (at most 50).' `
             -Measured @{ toRemove = $Decision.toRemove } -Thresholds @{ budget = $Decision.budget } -HeldCount ([int]$Decision.toRemove))
     }
     if ($PassThru) { return $r }

@@ -1343,7 +1343,8 @@ function Invoke-PimPreflightValidation {
             $r = $rows[$i]
             if (Test-PimRowIsBlank -Row $r) { continue }
             $st = (Get-PimRowValue -Row $r -Column 'AccountStatus')
-            if ($st -ieq 'Disabled' -or $st -ieq 'Revoked') {
+            # Section 96.5 D1: Removed (remove from PIM) and Deleted disable the account too -- the same code is required.
+            if ($st -ieq 'Disabled' -or $st -ieq 'Revoked' -or $st -ieq 'Removed' -or $st -ieq 'Deleted') {
                 $code = Get-PimRowValue -Row $r -Column 'StatusChangeCode'
                 if (-not $code) {
                     $upn = Get-PimRowValue -Row $r -Column 'UserPrincipalName'

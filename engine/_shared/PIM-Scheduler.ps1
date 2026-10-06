@@ -68,6 +68,10 @@ $script:PimTickOnlyJobTypes += 'install-key'
 # row, which is the default) through the append-only trigger's one door, and records audit.retention (PIM-AuditRetention.ps1).
 $script:PimJobTypes += 'audit-retention'
 $script:PimTickOnlyJobTypes += 'audit-retention'
+# CONFIG-1.3 / PIM §96.3 (2026-10-06): 'config-backup' takes the daily configuration backup into pim.ConfigBackups (or records
+# "no change") and prunes past ConfigBackupRetentionDays (default 90; pinned kept) -- PIM-ConfigBackup.ps1. SQL only.
+$script:PimJobTypes += 'config-backup'
+$script:PimTickOnlyJobTypes += 'config-backup'
 # GUARD-1 (2026-10-05): 'licence-check' trips the 'msp.licence' guard when this managing / managed tenant's Pro licence no
 # longer covers MSP (refused = critical) or is in grace (warning). A single tenant is not checked (PIM-Guard.ps1).
 $script:PimJobTypes += 'licence-check'
@@ -358,6 +362,8 @@ function Get-PimDefaultJobSchedule {
         # §95.4: every 6 h; inert until 'updates.invardia' is ON. Asks only while this install has no key and a Pro licence.
         [pscustomobject]@{ name='install-key'; type='install-key'; intervalMinutes=360; enabled=$true }
         [pscustomobject]@{ name='audit-retention'; type='audit-retention'; intervalMinutes=1440; enabled=$true }
+        # CONFIG-1.3: daily (SCHED-1: the cadence counts from the job's finish); "Back up now" on Backups & restore runs one on demand.
+        [pscustomobject]@{ name='config-backup'; type='config-backup'; intervalMinutes=1440; enabled=$true }
         [pscustomobject]@{ name='licence-check'; type='licence-check'; intervalMinutes=60; enabled=$true }
         # REQ-AR-2: no-op until review rules are saved and enabled (Settings > Access reviews); Pro 'reviews.campaigns'.
         [pscustomobject]@{ name='access-review-cycle'; type='access-review-cycle'; intervalMinutes=360; enabled=$true }
@@ -1276,6 +1282,13 @@ function Initialize-PimDefaultJobHandlers {
         # AUDIT-1.3: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimAuditRetentionJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:audit-retention (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'config-backup' -Handler {
+        param($job,$now,$whatIf)
+        # CONFIG-1.3: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimConfigBackupJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:config-backup (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'install-key' -Handler {

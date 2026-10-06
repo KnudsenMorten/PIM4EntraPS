@@ -334,6 +334,12 @@ Register-PimJobHandler -Type 'audit-retention' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimAuditRetentionJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
+# CONFIG-1.3 / PIM §96.3: the REAL 'config-backup' handler (PIM-ConfigBackup.ps1, loaded with the store). A backup that
+# cannot be written FAILS the run (it throws); an unchanged configuration is recorded as "no change", not copied again.
+Register-PimJobHandler -Type 'config-backup' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimConfigBackupJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
 # §95.4: the REAL 'install-key' handler. A refused or failed claim is reported in the result, never thrown.
 Register-PimJobHandler -Type 'install-key' -Handler {
     param($job, $now, $whatIf)
@@ -396,7 +402,17 @@ $engineHandler = {
     param($job,$now,$whatIf)
     $scope = if ($job.PSObject.Properties['scope'] -and "$($job.scope)".Trim()) { "$($job.scope)" } else { 'All' }
     $mode  = if ("$($job.type)" -eq 'engine-full') { 'Full' } else { 'Delta' }
-    $res = Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf
+    # 96.5 / D4: a PAUSE stops ONLY the daily reconcile (commits, deltas and Run now still apply). Read right before it runs,
+    # so a pause set in the Manager a minute ago holds; the run is recorded as SKIPPED with who / since / why.
+    # Purpose 2: the daily reconcile also plans the removal of PIM-managed leftovers -- REPORT ONLY unless pim.Settings
+    # 'ReconcileRemovalMode' says enforce (PIM-ReconcileRemoval.ps1).
+    $__rrMode = ''
+    if ($mode -eq 'Full' -and (Get-Command Get-PimReconcileJobName -ErrorAction SilentlyContinue) -and "$($job.name)" -eq (Get-PimReconcileJobName)) {
+        $__gate = Get-PimReconcilePauseGate -Job $job -NowUtc $now -WhatIf:$whatIf
+        if ($__gate) { return $__gate }
+        $__rrMode = Get-PimReconcileRemovalMode
+    }
+    $res = if ($__rrMode) { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf -ReconcileRemoval $__rrMode } else { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf }
     # 🔴 BUG-134 -- A SCOPE NO PROVIDER SERVES IS A NO-OP THAT REPORTS SUCCESS, FOR EVER.
     # Invoke-PimEngineScope answers an unknown scope with { ok=$false; detail="no provider for
     # scope '<x>'" } and NO create/update/remove. This handler ignored `ok` and formatted the
@@ -486,6 +502,12 @@ $engineHandler = {
     $tail = ''
     if ($notChk.Count) { $tail += ' | ' + ($notChk -join '; ') }
     if ($warns.Count) { $tail += " | $($warns.Count) warning(s): " + (@($warns | Select-Object -First 5) -join '; ') + $(if ($warns.Count -gt 5) { "; +$($warns.Count - 5) more (see the run's log)" } else { '' }) }
+    if ($__rrMode) {
+        # 96.5: the removal plan in one line (the full report is on the Jobs page).
+        $__rrW = 0; $__rrC = 0; $__rrR = 0
+        foreach ($__x in @($res)) { if ($__x -and $__x.PSObject.Properties['reconcileRemoval'] -and $__x.reconcileRemoval) { $__rrW += [int]$__x.reconcileRemoval.wouldRemove; $__rrC += [int]$__x.reconcileRemoval.candidates }; if ($__x -and $__x.PSObject.Properties['reconcileRemoved']) { $__rrR += [int]$__x.reconcileRemoved } }
+        $tail += $(if ($__rrMode -eq 'enforce') { " | reconcile removal (enforce): $__rrR removed of $__rrW qualifying; $($__rrC - $__rrW) left alone" } else { " | reconcile removal (report only): would remove $__rrW; $($__rrC - $__rrW) held by a rule" })
+    }
     [pscustomobject]@{ ran=$true; detail=("engine $mode [$scope] " + ($sum -join ' ') + $tail); warnings=@($warns); notChecked=@($notChk); whatIf=[bool]$whatIf }
 }
 Register-PimJobHandler -Type 'engine-delta' -Handler $engineHandler
