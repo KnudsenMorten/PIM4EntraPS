@@ -33,7 +33,7 @@ function Get-PimLicenceRequestDecision {
         * a request is pending (state Pending + token) -> pull, unless now < nextPollUtc (then none, "waiting")
         * the licence is Pro for this tenant and ends later than 30 days from now -> none
         * otherwise (no licence, not Pro here, expired, grace, or ending within 30 days) -> knock
-      A Rejected state never knocks again by itself (Invardia's rule) -- the admin requests again.
+      A Rejected state never knocks again by itself (PIM's rule) -- the admin requests again.
     #>
     param([bool]$Enabled, $License, [bool]$ProHere, $State, [bool]$HasToken, [datetime]$NowUtc)
     $NowUtc = $NowUtc.ToUniversalTime()   # .NET compares DateTimes WITHOUT their kind -- everything here is UTC

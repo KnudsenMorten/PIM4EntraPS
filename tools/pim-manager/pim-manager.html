@@ -7955,7 +7955,11 @@
     let co, adm;
     try { co = await loadCsv(base); ensurePending(base, co.header, co.rows); } catch (e) { body.innerHTML = stateError('Failed to load the companies', e.message); return; }
     try { adm = await loadCsv('Account-Definitions-Admins'); } catch (_) { adm = { rows: [] }; }
-    const depts = (typeof deptOptions === 'function' ? deptOptions() : []) || [];
+    // Operator 2026-10-06 ("why does it not show depts that i can link to"): deptOptions() starts its load and answers []
+    // the first time -- the page rendered that empty answer and never again. Wait for the load, like the Admin accounts form.
+    let depts = (typeof deptOptions === 'function' ? deptOptions() : []) || [];
+    if (!depts.length && typeof _deptLoading !== 'undefined' && _deptLoading) { try { await _deptLoading; } catch (_) { } depts = deptOptions() || []; }
+    const deptNone = depts.length ? '(none)' : (_deptLoaded ? '(none -- no departments defined yet: Access › Departments & owners)' : '(none -- departments could not be read)');
     const ext = (pendingChanges[base].rows || []).map((r, i) => ({ r, i })).filter(x => !/^internal$/i.test(String(x.r.Type || '').trim()));
     const people = (name) => (adm.rows || []).filter(a => String(a.Company || '').trim().toLowerCase() === String(name || '').trim().toLowerCase());
     const cad = [[30, 'every month'], [90, 'every 3 months'], [180, 'every 6 months'], [365, 'every year']];
@@ -7974,7 +7978,7 @@
       return '<tr data-idx="' + idx + '">' +
         '<td><input class="coName" value="' + esc(r.Company || '') + '" placeholder="e.g. Example Consulting" style="width:180px;"' + ro + '></td>' +
         '<td><input class="coContacts" value="' + esc(String(r.Contacts || '').split(/[|;,\s]+/).filter(Boolean).join('; ')) + '" placeholder="manager@example.test; helpdesk@example.test" style="width:300px;"' + ro + '></td>' +
-        '<td><select class="coDept"' + ro + '><option value="">(none)</option>' + depts.map(o => '<option value="' + esc(o.value) + '"' + (String(o.value) === String(r.SponsorDepartment || '') ? ' selected' : '') + '>' + esc(o.label || o.value) + '</option>').join('') + '</select></td>' +
+        '<td><select class="coDept"' + ro + '><option value="">' + esc(deptNone) + '</option>' + depts.map(o => '<option value="' + esc(o.value) + '"' + (String(o.value) === String(r.SponsorDepartment || '') ? ' selected' : '') + '>' + esc(o.label || o.value) + '</option>').join('') + '</select></td>' +
         '<td><select class="coCad"' + ro + '>' + cadOpts.map(c => '<option value="' + c[0] + '"' + (c[0] === cd ? ' selected' : '') + '>' + c[1] + '</option>').join('') + '</select></td>' +
         '<td style="font-size:12px;">' + (ppl.length ? '<b>' + ppl.length + '</b>: ' + ppl.slice(0, 6).map(a => esc(a.DisplayName || a.UserPrincipalName || a.UserName || '')).join(', ') + (ppl.length > 6 ? ', &hellip;' : '') : '<span style="color:#57606a;">none linked yet</span>') + '</td>' +
         '<td><input class="coNotes" value="' + esc(r.Notes || '') + '" style="width:160px;"' + ro + '></td>' +
@@ -16541,15 +16545,16 @@
       const ai = pa.rows.findIndex((r, i) => !pa.deletes.has(i) && isOne(r, id));
       const del = pAsg ? pAsg.rows.map((r, i) => (!pAsg.deletes.has(i) && isOne(r, id)) ? i : -1).filter(i => i >= 0) : [];
       if (ai < 0) missing.push(id.upn);
-      else if (String(pa.rows[ai].AccountStatus || '').toLowerCase() !== status.toLowerCase()) nStatus++;
+      else if (status && String(pa.rows[ai].AccountStatus || '').toLowerCase() !== status.toLowerCase()) nStatus++;
       nDel += del.length;
       return { id, ai, del };
     });
     const who = ids.length === 1 ? '<b>' + escapeHtml(ids[0].upn) + '</b>' : '<b>' + ids.length + ' admins</b>';
-    const verb = status === 'Enabled' ? 'Enable' : (strip ? 'Disable & remove delegations' : 'Disable');
+    // status '' = remove the delegations only; the account keeps its status (operator 2026-10-06, the delegations table).
+    const verb = !status ? 'Remove all delegations' : status === 'Enabled' ? 'Enable' : (strip ? 'Disable & remove delegations' : 'Disable');
     const body = '<p>' + escapeHtml(verb) + ': ' + who + '.</p><ul>' +
-      '<li>' + nStatus + ' account(s) set to <b>' + escapeHtml(status) + '</b>' + (nStatus < ids.length - missing.length ? ' (the others already are)' : '') + '</li>' +
-      (strip ? '<li>' + nDel + ' delegation(s) removed (removed in Entra by the next engine run after the commit)</li><li>The account stays in PIM, disabled.</li>' : '') +
+      (status ? '<li>' + nStatus + ' account(s) set to <b>' + escapeHtml(status) + '</b>' + (nStatus < ids.length - missing.length ? ' (the others already are)' : '') + '</li>' : '') +
+      (strip ? '<li>' + nDel + ' delegation(s) removed (removed in Entra by the next engine run after the commit)</li><li>The account stays in PIM, ' + (status ? escapeHtml(status.toLowerCase()) : 'its status unchanged') + '.</li>' : '') +
       (missing.length ? '<li style="color:#cf222e;">not a defined admin (skipped): ' + missing.map(escapeHtml).join(', ') + '</li>' : '') + '</ul>' +
       (status === 'Disabled' ? '<p style="color:#57606a;">A disable is an offboard: on commit it is held for a second administrator&rsquo;s approval unless self-approval is switched on (Settings &rsaquo; Approvals &amp; policy).</p>' : '') +
       '<p style="color:#57606a;">Nothing is saved yet -- review and commit under <b>Pending changes</b>.</p>';
@@ -16557,7 +16562,7 @@
     const ok = await showConfirm(verb, body, status === 'Disabled', verb);
     if (!ok) return;
     for (const x of plan) {
-      if (x.ai >= 0) pa.rows[x.ai].AccountStatus = status;
+      if (x.ai >= 0 && status) pa.rows[x.ai].AccountStatus = status;
       for (const i of x.del) pAsg.deletes.add(i);
     }
     markBadges();
@@ -16653,6 +16658,9 @@
   var PIM_DIRECT_GROUP_ENTITIES = ['PIM-Definitions-Roles', 'PIM-Definitions-Organization', 'PIM-Definitions-Departments', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg'];
   var PIM_INDIRECT_GROUP_ENTITIES = ['PIM-Definitions-Tasks', 'PIM-Definitions-Services', 'PIM-Definitions-Processes'];
   var PIM_DELEGATION_GROUP_ENTITIES = PIM_DIRECT_GROUP_ENTITIES.concat(PIM_INDIRECT_GROUP_ENTITIES);
+  // Operator 2026-10-06 ("i am missing the admin accounts here so i can delete delegations ... remove them"): the admin
+  // accounts are listed too, first, with their own row actions (remove all delegations / disable & remove delegations).
+  var PIM_DELEGATION_ACCOUNT_ENTITIES = ['Account-Definitions-Admins'];
 
   // ===================================================================
   // REQ-GRID (operator 2026-09-20: "i hate this, as it looks like v1 csv files").
@@ -16698,7 +16706,8 @@
   function entityGroupLabel(g) { return PIM_ENTITY_GROUP_LABELS[String(g || '')] || String(g || ''); }
   function gridScopeMatches(b) {
     if (!gridScope) return true;
-    if (gridScope === 'delegations') return String(b.group || '') === 'Assignments' || (PIM_DELEGATION_GROUP_ENTITIES || []).indexOf(String(b.base || '')) >= 0;
+    if (gridScope === 'delegations') return String(b.group || '') === 'Assignments' || (PIM_DELEGATION_GROUP_ENTITIES || []).indexOf(String(b.base || '')) >= 0 ||
+      (PIM_DELEGATION_ACCOUNT_ENTITIES || []).indexOf(String(b.base || '')) >= 0;
     return true;
   }
 
@@ -16707,11 +16716,12 @@
     const bases = (PIM_DATA.csvBases || []).filter(b => gridScopeMatches(b));
     // Operator 2026-10-05: the list is grouped the way people think about it -- Direct groups, Indirect groups, Who gets
     // what, Other records -- not by storage ('Definitions' / 'Assignments').
-    const sectionOf = (b) => PIM_DIRECT_GROUP_ENTITIES.indexOf(b.base) >= 0 ? 'Direct groups'
+    const sectionOf = (b) => PIM_DELEGATION_ACCOUNT_ENTITIES.indexOf(b.base) >= 0 ? 'Admin accounts'
+      : PIM_DIRECT_GROUP_ENTITIES.indexOf(b.base) >= 0 ? 'Direct groups'
       : PIM_INDIRECT_GROUP_ENTITIES.indexOf(b.base) >= 0 ? 'Indirect groups'
       : String(b.group || '') === 'Assignments' ? 'Who gets what' : 'Other records';
     const groups = {};
-    ['Direct groups', 'Indirect groups', 'Who gets what', 'Other records'].forEach(s => { groups[s] = []; });
+    ['Admin accounts', 'Direct groups', 'Indirect groups', 'Who gets what', 'Other records'].forEach(s => { groups[s] = []; });
     for (const b of bases) groups[sectionOf(b)].push(b.base);
     Object.keys(groups).forEach(s => { if (!groups[s].length) delete groups[s]; });
     list.innerHTML = '';
@@ -17165,6 +17175,12 @@
             (canUnassignL ? (isRemoveRow
               ? '<button data-act="unassign-undo" class="row-unassign-on" title="This row is staged as Action=Remove: the engine will TAKE THIS ACCESS AWAY on its next run. Click to change it back to Assign.">&#x2296;</button> '
               : '<button data-act="unassign" class="row-unassign" title="REMOVE THIS ACCESS: the engine takes exactly this assignment away on its next run, then deletes the row. This is the one that actually takes access away -- the x only stops managing the row.">&#x2296;</button> ') : '') +
+            // Operator 2026-10-06: an ADMIN row in the delegations table can drop all its delegations here (staged, like
+            // Admin accounts' own buttons -- acctStageStatus), with or without disabling the account.
+            (base === 'Account-Definitions-Admins' && String(row.UserPrincipalName || '').trim()
+              ? '<button data-act="acct-strip" class="row-acct-strip" title="REMOVE ALL DELEGATIONS of this admin, KEEP THE ACCOUNT as it is: every group delegation naming this admin is removed by the next engine run. Staged in Pending changes.">&#x1F9F9;</button> ' +
+                '<button data-act="acct-disable-strip" class="row-acct-disable-strip" title="DISABLE this admin and REMOVE ALL its delegations (the account stays in PIM, disabled; a disable is held for the offboard approval). Staged in Pending changes.">&#x26D4;</button> '
+              : '') +
             '<button data-act="delete" title="Take this ROW out of PIM. The group is NOT deleted and nobody loses access -- PIM simply stops managing it. Use the bin to delete the group itself.">&#x2715;</button>';
         html.push(`<td class="row-actions row-actions-left">${actHtmlL}</td>`);
       }
@@ -17330,6 +17346,11 @@
         if (b.dataset.act === 'rename') { await actionRenameGroupTag(base, idx); return; }
         if (b.dataset.act === 'retire') { await pimGroupStripDelegations(base, [idx], true); renderGrid(base); return; }
         if (b.dataset.act === 'cleanup') { await pimGroupStripDelegations(base, [idx], false); renderGrid(base); return; }
+        if (b.dataset.act === 'acct-strip' || b.dataset.act === 'acct-disable-strip') {
+          const ar = p.rows[idx] || {};
+          await acctStageStatus([{ upn: String(ar.UserPrincipalName || '').trim(), userName: String(ar.UserName || '').trim() }], b.dataset.act === 'acct-strip' ? '' : 'Disabled', true);
+          return;
+        }
         if (b.dataset.act === 'unassign') { await actionRemoveAccess(base, idx); return; }
         if (b.dataset.act === 'unassign-undo') {
           p.rows[idx].Action = 'Assign';
