@@ -2946,7 +2946,8 @@ function Invoke-PimManagerBackupRestore {
         # (on the old file store that block had silently skipped).
         [void](Set-PimSqlEntityRowsTransactional -ConnectionString $script:PimSqlCs -Entity $plan.entity -Base $plan.base -Rows @($plan.rows) -AllowEmpty)
     }
-    return @{ ok = $true; entity = $plan.entity; rowCount = @($plan.rows).Count; preRestoreSnapshotId = $preId }
+    # BUG-292 (§96): the rows before and after, so the caller audits WHAT the restore changed and attributes it to the person.
+    return @{ ok = $true; entity = $plan.entity; base = $plan.base; rowCount = @($plan.rows).Count; preRestoreSnapshotId = $preId; beforeRows = @($curRows); afterRows = @($plan.rows) }
 }
 
 # ---------------------------------------------------------------------------
@@ -16105,8 +16106,11 @@ function Handle-Request {
         # [M1] Backups / undo. POST /api/backups/restore rolls an entity back to a
         # stored snapshot (operator undo) -- base + snapshot id come in the body.
         if ($path -eq '/api/backups/restore' -and $method -eq 'POST') {
-            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
-                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to roll back. Roles are stored in SQL -- ask a SuperAdmin to grant you access.' }
+            # 🔴 BUG-292 (§96, operator 2026-10-06): a restore replaces a whole entity and does not pass the commit's approval
+            # gates, so an Admin could revert a two-person-approved change alone. Until the journal-based undo (framework
+            # CONFIG-1.2) replaces it: SuperAdmin only, and audited with the rows it changed, attributed to the person.
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to roll back from a backup (a restore replaces the whole table and skips the commit approvals).' }
                 return 403
             }
             $script:lastHeartbeat = Get-Date
@@ -16127,7 +16131,12 @@ function Handle-Request {
                 $who = try { $ro = Get-PimManagerRole; if ("$($ro.identity)".Trim()) { "$($ro.identity)" } else { throw } }
                        catch { try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME } }
                 $who = Get-PimManagerRecordedActor -Who $who   # BUG-262
-                Write-PimMutationLog -BaseName $base -Adds 0 -Removes 0 -Modifies 0 -NewRowCount ([int]$r.rowCount) -Summary "Restored from backup $snapId ($([int]$r.rowCount) rows now; a backup of the state before the restore was kept as $($r.preRestoreSnapshotId))"
+                # BUG-292: the audit names what the restore changed (row by row) and records the restorer as the initiator, so
+                # the engine's applies name the person; it used to log 0 / 0 / 0, which also skipped the attribution.
+                $rd = $null; try { $rd = Compare-PimRowSets -Before @($r.beforeRows) -After @($r.afterRows) -Base $base } catch { $rd = $null }
+                $ra = if ($rd) { @($rd.adds).Count } else { 0 }; $rr = if ($rd) { @($rd.removes).Count } else { 0 }; $rm = if ($rd) { @($rd.modifies).Count } else { 0 }
+                Write-PimMutationLog -BaseName $base -Adds $ra -Removes $rr -Modifies $rm -NewRowCount ([int]$r.rowCount) -Diff $rd -Summary "Restored from backup $snapId by $who ($ra added, $rr removed, $rm changed; $([int]$r.rowCount) rows now; a backup of the state before the restore was kept as $($r.preRestoreSnapshotId))"
+                if (($ra + $rr + $rm) -gt 0) { try { [void](Start-PimManagerTickNow -Reason "restore:$base") } catch { } }
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; base = $base; restoredFrom = $snapId; entity = "$($r.entity)"; rowCount = [int]$r.rowCount; preRestoreSnapshotId = "$($r.preRestoreSnapshotId)"; by = "$who" })
                 return 200
             } catch {
