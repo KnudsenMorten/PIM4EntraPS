@@ -276,7 +276,7 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     $seqTmp = 0; if ([int]::TryParse("$($env:PIM_UPDATE_INVARDIA_SEQ)", [ref]$seqTmp)) { $script:PimInvardiaApplied = $seqTmp }
     $t = Get-PimInvardiaUpdateTarget -Http { param($m, $u, $b, $h) Invoke-PimLicenceHttp -Method $m -Url $u -Body $b -Headers $h } `
             -InstallKey $invKey -LicenceText $licText -BaseUrl $invBase -AppliedSequence $script:PimInvardiaApplied `
-            -RunningVersion "$($script:PimRunningVersion)" -LastBuiltVersion $lastBuilt
+            -RunningVersion "$($script:PimRunningVersion)" -LastBuiltVersion $lastBuilt -Ring $ring   # UPDATE-1.7: this environment's own ring
     Say "Invardia: $($t.reason)" $(if ($t.ok) { 'DarkGray' } else { 'Red' })
     $script:PimRingApproved = "$($t.version)"; $script:PimRingApprovedReason = "Invardia: $($t.reason)"
     if (-not $t.ok) {

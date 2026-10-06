@@ -14,6 +14,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.514 — A central admin is never deleted in a managed tenant; Pro updates follow the environment's own ring
+
+- **Fixed: a managing tenant could have deleted an admin account in every managed tenant.** The managed tenants copy a central
+  admin's status as it is, so "Delete account" on the managing tenant would have reached them all. A managed tenant now only
+  **disables** a central admin marked as deleted; deleting an account stays each tenant's own decision.
+- **Changed: Pro updates follow the ring PIM sets in the environment.** The update request carries the environment's own ring, and
+  an update published for another ring is refused. An environment with no ring set does not ask for Pro updates.
+
 ## v2.4.513 — Delete an admin account, a clear administrator import, and a clearer bulk page
 
 - **New: Delete account** on Admin accounts (each row and the selection bar), for a SuperAdmin. You type DELETE to confirm;
