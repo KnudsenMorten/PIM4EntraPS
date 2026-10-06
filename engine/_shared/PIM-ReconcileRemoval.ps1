@@ -14,9 +14,10 @@
   Items from before the journal fail rule 1 and are NEVER removed (report only). ADMINS ARE NEVER DELETED OR DISABLED by
   this: an admin-account scope is excluded before any rule is evaluated, whatever the journal says.
 
-  MODES (pim.Settings 'ReconcileRemovalMode'): 'report' (DEFAULT) plans and reports, removes nothing; 'enforce' hands the
-  qualifying items to the normal remove path (ledger, budget, audit, applied outcome). The operator approves the switch to
-  enforce after one release cycle of report on ring 1 (96.9) -- nothing in the product sets it.
+  MODES (pim.Settings 'ReconcileRemovalMode'): 'enforce' (DEFAULT since 2.4.517, operator 2026-10-06: "switch it on
+  everywhere + default") hands the qualifying items to the normal remove path (ledger, budget, audit, applied outcome);
+  'report' plans and reports, removes nothing. Only the exact word 'report' reports; empty / unset enforces, and any OTHER
+  word (a typo) reports -- a mistyped setting never removes more than the operator asked for.
 
   THE REPORT is stored per run in pim.TenantCache kind 'reconcile-removal' (like the drift snapshot) for the Jobs page:
   would remove N, and per item which rule held it.
@@ -49,14 +50,15 @@ function Get-PimReconcilePauseSettingName { $script:PimReconcilePauseSettingName
 
 # ---- the mode ---------------------------------------------------------------------------------------------------------
 function ConvertTo-PimReconcileRemovalMode {
-    <# PURE. Only the exact word 'enforce' enforces; anything else (empty, a typo, 'true') is 'report'. #>
+    <# PURE. Empty / unset = 'enforce' (the default); 'enforce' enforces; 'report' and any other word (a typo, 'true') = 'report'. #>
     param([AllowNull()][object]$Value)
-    if ("$Value".Trim().ToLowerInvariant() -eq 'enforce') { return 'enforce' }
+    $s = "$Value".Trim().ToLowerInvariant()
+    if (-not $s -or $s -eq 'enforce') { return 'enforce' }
     return 'report'
 }
 
 function Get-PimReconcileRemovalMode {
-    <# The configured mode (pim.Settings / $global:PIM_ReconcileRemovalMode / env PIM_ReconcileRemovalMode), default 'report'. #>
+    <# The configured mode (pim.Settings / $global:PIM_ReconcileRemovalMode / env PIM_ReconcileRemovalMode), default 'enforce'. #>
     $v = $null
     if (Get-Command Get-PimPolicySetting -ErrorAction SilentlyContinue) { try { $v = Get-PimPolicySetting -Name 'ReconcileRemovalMode' -Default $null } catch { $v = $null } }
     elseif ($global:PIM_NamingConventions -is [hashtable] -and $global:PIM_NamingConventions.ContainsKey('ReconcileRemovalMode')) { $v = $global:PIM_NamingConventions['ReconcileRemovalMode'] }
