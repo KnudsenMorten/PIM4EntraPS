@@ -1003,6 +1003,16 @@
   .set-table { border-collapse:collapse; font-size:12.5px; }
   .set-table th { text-align:left; padding:4px 8px; border-bottom:2px solid #d0d7de; font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:#57606a; }
   .set-table td { padding:3px 8px; border-bottom:1px solid #eef0f3; vertical-align:top; }
+  /* Operator 2026-10-06: "people are hitting the wrong button for wrong person ... too cramped" -- one admin per clearly
+     separated band: a thick divider, alternating shade, room, a whole-row hover, the selected row marked, and the admin's
+     name above that admin's own buttons. */
+  table.acct-grid > tbody > tr.acct-row > td { padding:12px 8px; border-top:3px solid #d0d7de; border-bottom:none; }
+  table.acct-grid > tbody > tr.acct-row.acct-alt > td { background:#f6f8fa; }
+  table.acct-grid > tbody > tr.acct-row.acct-flagged > td { background:#fff8f6; }
+  table.acct-grid > tbody > tr.acct-row.acct-picked > td { background:#ddf4ff; }
+  table.acct-grid > tbody > tr.acct-row:hover > td { background:#eaf2ff; }
+  .acct-actions { display:flex; flex-wrap:wrap; gap:6px; max-width:760px; }
+  .acct-actions-who { width:100%; font-size:11px; font-weight:700; color:#0969da; }
   .set-table input { font-size:12.5px; padding:3px 6px; border:1px solid #d0d7de; border-radius:5px; }
   .set-table input:disabled { background:#f6f8fa; color:#57606a; }
   .setMsg { margin-left:10px; font-size:12px; }
@@ -3060,7 +3070,7 @@
     // is simply too small now. width:100% makes the table USE the width it is given; the cap stays, far
     // wider, so an ultrawide does not stretch rows to an unreadable line length.
     h += acctBulkBarHtml(rows);
-    h += '<table class="set-table" style="width:100%;max-width:1900px;"><tr>' +
+    h += '<table class="set-table acct-grid" style="width:100%;max-width:1900px;"><tr>' +
          '<th style="width:26px;"><input type="checkbox" id="acctSelAll" title="Select every account shown (central admins are read-only and left out)"></th>' +
          '<th>Admin</th><th>Type</th>' +
          // 🔴 71.24 (operator 2026-09-16: "in the admin overview i need to see which sponsor dept an
@@ -3078,13 +3088,13 @@
          '<th>TAP</th><th>Mail forward</th><th title="Legacy per-admin ManagerEmail. Since 71.19 mail (including the TAP) goes to the sponsor department&#39;s owners; this is only a fallback.">Manager (legacy)</th>' +
          (syncCol === 'master' ? '<th>Sync to managed tenants</th>' : (syncCol === 'managed' ? '<th>From managing tenant</th>' : '')) +
          '<th style="min-width:300px;">Actions</th></tr>';
-    rows.forEach(a => {
+    rows.forEach((a, rowIx) => {
       const busy = acctGridState.busy === a.userPrincipalName;
       const st = String(a.accountStatus || 'Enabled');
       const stColor = (/^(disabled|revoked|deleted|removed)$/i.test(st)) ? '#cf222e' : '#1a7f37';
       const flagged = a.alreadyFlagged;
       const dis = (ok) => (ok && !busy) ? '' : ' disabled';
-      h += '<tr' + (flagged ? ' style="background:#fff8f6;"' : '') + '>' +
+      h += '<tr class="acct-row' + (rowIx % 2 ? ' acct-alt' : '') + (flagged ? ' acct-flagged' : '') + (acctGridState.sel.has(a.userPrincipalName) ? ' acct-picked' : '') + '"' + (flagged ? ' style="background:#fff8f6;"' : '') + '>' +
         '<td><input type="checkbox" class="acctSel" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + (acctGridState.sel.has(a.userPrincipalName) ? ' checked' : '') +
           ((a.readOnly || a.upnMissing) ? ' disabled title="' + escapeHtml(a.readOnlyWhy || 'read-only') + '"' : '') + '></td>' +
         '<td><div style="font-weight:600;">' + escapeHtml(a.displayName || a.userName || a.userPrincipalName) +
@@ -3108,7 +3118,7 @@
          syncCol === 'managed' ? '<td style="font-size:11.5px;" class="acctFromMaster">' + (a.source === 'central'
             ? '<span style="color:#8250df;" title="Received from the managing tenant -- read-only here">received from the managing tenant (read-only)</span>'
             : '<span style="color:#8c959f;">this tenant&rsquo;s own admin</span>') + '</td>' : '') +
-        '<td>' +
+        '<td><div class="acct-actions"><div class="acct-actions-who">&#9656; ' + escapeHtml(a.displayName || a.userName || a.userPrincipalName) + '</div>' +
           '<button class="btn-sec acctTap"    data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(a.canResetTap) +
             (a.resetTapWhy ? ' title="' + escapeHtml(a.resetTapWhy) + '"' : '') + ' style="font-size:11px;">Reset TAP</button> ' +
           '<button class="btn-sec acctRevoke" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(a.canRevokeSessions) +
@@ -3146,7 +3156,7 @@
             ' title="' + (a.readOnly ? escapeHtml(a.readOnlyWhy || 'read-only') + ' -- change it on the managing tenant' : 'Change display name, office user email (where mail for this admin is forwarded), company, department, manager, or whether it is synced to managed tenants.') + '" style="font-size:11px;">Edit</button> ' +
           '<button class="btn-sec acctAccess" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + ((a.accessLocked || (a.readOnly && a.source !== 'central')) ? ' disabled title="' + escapeHtml(a.readOnlyWhy || 'read-only') + '"' : '') +
             ' title="Give this admin access — opens the delegation wizard for this person." style="font-size:11px;">Give access →</button>' +
-        '</td></tr>' +
+        '</div></td></tr>' +
         // The inline editor for THIS admin, collapsed until Edit is pressed.
         '<tr class="acctEditRowTop" id="acctEditTop-' + escapeHtml(a.userPrincipalName) + '" hidden><td colspan="' + (syncCol ? 11 : 10) + '" style="background:#f6f8fa;padding:10px 12px;">' +
           '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">' +

@@ -14,6 +14,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## 2.4.518 -- 2026-10-06
+
+- **Admin accounts: one clear band per admin.** A thick divider and alternating shade between admins, more room, the whole row highlighted under the mouse, the selected row marked, and the admin's name written above that admin's own action buttons -- so a button is never pressed for the wrong person.
+
 ## 2.4.517 -- 2026-10-06
 
 - **The daily reconcile now removes by default.** Items PIM granted and you later removed in PIM are removed from the tenant by the daily reconcile, when all five safety rules hold. Set the reconcile removal mode to `report` to keep report-only. Admin accounts are never removed by the reconcile, and items from before the change journal are never removed.
