@@ -2515,6 +2515,8 @@ function Write-PimMutationLog {
         # change); -Approver = the approver of a maker/checker approval that authorised it. Both optional.
         [object]$Classification = $null,
         [string]$Approver = '',
+        # BUG-293 / CONFIG-1.1: the commit's own id (Invoke-PimManagerSafeCommit's result.commitId) -- one id per commit.
+        [string]$CommitId = '',
         [Parameter(Mandatory)][string]$BaseName,
         [Parameter(Mandatory)][int]$Adds,
         [Parameter(Mandatory)][int]$Removes,
@@ -2570,7 +2572,7 @@ function Write-PimMutationLog {
         }
         # AUDIT-1 actor: record who initiated / approved each changed row under a commit id (pim.ChangeAttribution), so the
         # engine's applied changes name the person, not 'engine'; the commit id is this event's CorrelationId.
-        $commitId = [guid]::NewGuid().ToString('N')
+        $commitId = if ("$CommitId".Trim()) { "$CommitId".Trim() } else { [guid]::NewGuid().ToString('N') }
         $ini = @(); $apv = @()
         if ((Get-Command ConvertTo-PimCommitAttributionEntries -ErrorAction SilentlyContinue) -and ($Adds + $Removes + $Modifies) -gt 0) {
             try {
@@ -2819,12 +2821,21 @@ function Invoke-PimManagerSafeCommit {
         [Parameter(Mandatory)][string]$Base,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$NewRows,
         [Parameter(Mandatory)][hashtable]$Current,   # @{ rows; header } pre-commit state
-        [bool]$SqlMode
+        [bool]$SqlMode,
+        # CONFIG-1.1 (§96.1): ONE commit id for the journal, CommitWatch, the attribution and the audit (BUG-293). The caller
+        # passes it on to Write-PimMutationLog (-CommitId $result.commitId). -Classification / -Approver: who initiated and
+        # approved each row (the same inputs Write-PimMutationLog's attribution uses), so the journal names the person per row.
+        [string]$CommitId = '',
+        [object]$Classification = $null,
+        [string]$Approver = '',
+        [string]$Source = 'gui'
     )
     # §91.23 BACKSTOP: every commit path (grid, departments, workloads, conformance) lands here -- a row the managing tenant
     # sent (Owner=MSP) is never changed or removed by a managed tenant's Manager, whichever page asked.
-    $__up = Test-PimManagerUplinkRowGate -Diff (Compare-PimRowSets -Before @($Current.rows) -After @($NewRows) -Base $Base) -Base $Base
+    $__diff = Compare-PimRowSets -Before @($Current.rows) -After @($NewRows) -Base $Base
+    $__up = Test-PimManagerUplinkRowGate -Diff $__diff -Base $Base
     if (-not $__up.allowed) { throw $__up.reason }
+    $commitId = if ("$CommitId".Trim()) { "$CommitId".Trim() } else { [guid]::NewGuid().ToString('N') }
     # SEC-16(b) -- the snapshot's `By` is evidence ("who committed this change"), so it must be the
     # signed-in principal, not the container's process user. Same defect as the audit writer.
     $who = try { $r = Get-PimManagerRole; if ("$($r.identity)".Trim()) { "$($r.identity)" } else { throw } }
@@ -2856,16 +2867,38 @@ function Invoke-PimManagerSafeCommit {
         $prune   = { [void](Invoke-PimSqlBackupRetention -ConnectionString $script:PimSqlCs -Entity $Base -Keep $script:PimBackupKeep) }
     }
 
+    # CONFIG-1.1: the store journals every row this apply writes, in the apply's own transaction, under this context.
+    $__jctx = $null
+    if (Get-Command New-PimCommitJournalContext -ErrorAction SilentlyContinue) {
+        $__attr = @{}
+        try {
+            $__committer = ''; try { $__committer = "$((Get-PimManagerRole).identity)".Trim() } catch { }
+            if (-not $__committer) { $__committer = "$who" }
+            if (Get-Command ConvertTo-PimCommitAttributionEntries -ErrorAction SilentlyContinue) {
+                foreach ($__e in @(ConvertTo-PimCommitAttributionEntries -Base $Base -Committer $__committer -Classification $Classification -Diff $__diff -Approver $Approver)) {
+                    $__attr["$($__e.key)".ToLowerInvariant()] = @{ initiatedBy = "$($__e.initiatedBy)"; approvedBy = "$($__e.approvedBy)" }
+                }
+            }
+        } catch { Write-Warning "  [journal] per-row initiators could not be resolved -- every row is journaled as the committer's: $($_.Exception.Message)" }
+        $__jctx = New-PimCommitJournalContext -CommitId $commitId -Source $Source -InitiatedBy "$who" -ApprovedBy $Approver -Attribution $__attr
+    }
     # §88: say how long the SQL part of a commit took and how much it really wrote, so a slow commit can be measured.
     $__sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $txResult = Invoke-PimCommitTransaction -Snapshot $snapshot -ApplyScript $apply -RestoreScript $restore -SaveSnapshotScript $save -PruneScript $prune
+    $__prevCtx = if ($__jctx) { Set-PimCommitJournalContext -Context $__jctx } else { $null }
+    try {
+        $txResult = Invoke-PimCommitTransaction -Snapshot $snapshot -ApplyScript $apply -RestoreScript $restore -SaveSnapshotScript $save -PruneScript $prune
+    } finally {
+        if ($__jctx) { [void](Set-PimCommitJournalContext -Context $__prevCtx) }
+    }
     $__sw.Stop()
+    if ($txResult) { $txResult | Add-Member -NotePropertyName commitId -NotePropertyValue $commitId -Force }
     # §88: record WHICH keys this commit changed, for the watcher. Never fails the commit (it has landed).
     try {
         if ($txResult -and $txResult.ok -and (Get-Command Add-PimCommitWatchRecord -ErrorAction SilentlyContinue) -and "$($script:PimSqlCs)".Trim()) {
             $__ch = @(Get-PimCommitChangedKeys -Base $Base -OldRows @($Current.rows) -NewRows @($NewRows))
-            $__rec = New-PimCommitWatchRecord -Entity $Base -Changes $__ch -By "$who"
-            if ($__rec -and (Add-PimCommitWatchRecord -ConnectionString $script:PimSqlCs -Record $__rec)) { $txResult | Add-Member -NotePropertyName commitId -NotePropertyValue "$($__rec.id)" -Force }
+            # BUG-293: the watcher record carries the SAME commit id as the journal / attribution / audit.
+            $__rec = New-PimCommitWatchRecord -Entity $Base -Changes $__ch -By "$who" -Id $commitId
+            if ($__rec) { [void](Add-PimCommitWatchRecord -ConnectionString $script:PimSqlCs -Record $__rec) }
         }
     } catch { Write-Warning "  [commit-watch] $Base committed, but the watcher could not record it: $($_.Exception.Message)" }
     try {
@@ -2944,10 +2977,17 @@ function Invoke-PimManagerBackupRestore {
         # it the store refused every restore-to-empty with a 500 -- BUG-05's shape on the SQL store, found
         # 2026-09-12 when Test-PimManagerEndpoints' FIX5 block first ran against a populated SQL entity
         # (on the old file store that block had silently skipped).
-        [void](Set-PimSqlEntityRowsTransactional -ConnectionString $script:PimSqlCs -Entity $plan.entity -Base $plan.base -Rows @($plan.rows) -AllowEmpty)
+        # CONFIG-1.1: journaled as a restore, under its own commit id, by the person who restored.
+        $restoreCommitId = [guid]::NewGuid().ToString('N')
+        $rWho = if ("$who".Trim()) { "$who" } else { 'unknown' }
+        $prevCtx = $null; $rCtx = $null
+        if (Get-Command New-PimCommitJournalContext -ErrorAction SilentlyContinue) { $rCtx = New-PimCommitJournalContext -CommitId $restoreCommitId -Source 'restore' -InitiatedBy $rWho; $prevCtx = Set-PimCommitJournalContext -Context $rCtx }
+        try {
+            [void](Set-PimSqlEntityRowsTransactional -ConnectionString $script:PimSqlCs -Entity $plan.entity -Base $plan.base -Rows @($plan.rows) -AllowEmpty)
+        } finally { if ($rCtx) { [void](Set-PimCommitJournalContext -Context $prevCtx) } }
     }
     # BUG-292 (§96): the rows before and after, so the caller audits WHAT the restore changed and attributes it to the person.
-    return @{ ok = $true; entity = $plan.entity; base = $plan.base; rowCount = @($plan.rows).Count; preRestoreSnapshotId = $preId; beforeRows = @($curRows); afterRows = @($plan.rows) }
+    return @{ ok = $true; entity = $plan.entity; base = $plan.base; rowCount = @($plan.rows).Count; preRestoreSnapshotId = $preId; beforeRows = @($curRows); afterRows = @($plan.rows); commitId = $restoreCommitId }
 }
 
 # ---------------------------------------------------------------------------
@@ -4991,8 +5031,9 @@ function Invoke-PimManagerCsvPut {
 
     # [M1] SAFE COMMIT: timestamped backup BEFORE the apply, all-or-nothing
     # transactional apply, automatic rollback-to-snapshot on any failure.
+    $mcApprover = if ($mc -and "$($mc.gate)" -eq 'approved' -and $mc.approval) { "$($mc.approval.approver)" } else { '' }
     try {
-        $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode
+        $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode -Classification $spClass -Approver $mcApprover
     } catch {
         # The store was left exactly as before (snapshot restored). Surface
         # the clear error so the operator sees the commit was reversed.
@@ -5007,9 +5048,8 @@ function Invoke-PimManagerCsvPut {
         try { [void](Set-PimApprovalRequestExecuted -Id "$($mc.approval.id)") }
         catch { Write-Warning "  [maker/checker] the approval $($mc.approval.id) that authorised this commit was NOT marked executed -- it could authorise another commit: $($_.Exception.Message)" }
     }
-    $mcApprover = if ($mc -and "$($mc.gate)" -eq 'approved' -and $mc.approval) { "$($mc.approval.approver)" } else { '' }
     Write-PimMutationLog -BaseName $base -Adds $diff.adds.Count -Removes $diff.removes.Count -Modifies $diff.modifies.Count -NewRowCount $rowsOrdered.Count -Diff $diff `
-        -Concurrency $concurrencyNote -ScopeMerged:([bool]$slice.filtered) -Classification $spClass -Approver $mcApprover
+        -Concurrency $concurrencyNote -ScopeMerged:([bool]$slice.filtered) -Classification $spClass -Approver $mcApprover -CommitId "$($commitRes.commitId)"
     # §70.21: start the engine now (debounced, so a multi-entity commit starts one run; the container takes
     # longer to start than the remaining entity writes, and a running tick re-checks between its jobs).
     if (($diff.adds.Count + $diff.removes.Count + $diff.modifies.Count) -gt 0) { try { [void](Start-PimManagerTickNow -Reason "commit:$base") } catch { } }
@@ -5463,7 +5503,7 @@ function Save-PimManagerDepartments {
             $snapshotId = "$($cres.snapshotId)"
             $entityOk = $true
             Write-PimMutationLog -BaseName $deptBase -Adds @($ddiff.adds).Count -Removes @($ddiff.removes).Count -Modifies @($ddiff.modifies).Count `
-                -NewRowCount $merged.Count -Diff $ddiff -Summary ("departments saved from Settings: {0} added, {1} removed, {2} changed (other definition columns preserved)" -f @($ddiff.adds).Count, @($ddiff.removes).Count, @($ddiff.modifies).Count)
+                -NewRowCount $merged.Count -Diff $ddiff -Summary ("departments saved from Settings: {0} added, {1} removed, {2} changed (other definition columns preserved)" -f @($ddiff.adds).Count, @($ddiff.removes).Count, @($ddiff.modifies).Count) -CommitId "$($cres.commitId)"
         } catch { $entityErr = "$($_.Exception.Message)" }
     } else {
         $entityErr = 'no SQL store is wired in this host (PIM v2 is SQL-only -- configure the store)'
@@ -15527,7 +15567,7 @@ function Handle-Request {
                         $wlSpec = Get-PimCsvSpec -BaseName $wlBase
                         $commitRes = Invoke-PimManagerSafeCommit -Base $wlBase -NewRows $newWl -Current @{ rows = $curWl; header = $(if ($wlSpec) { @($wlSpec.defaultHeader) } else { @() }) } -SqlMode $true
                         Write-PimMutationLog -BaseName $wlBase -Adds @($wlDiff.adds).Count -Removes @($wlDiff.removes).Count -Modifies @($wlDiff.modifies).Count -NewRowCount $newWl.Count -Diff $wlDiff `
-                            -Summary ("template '{0}' v{1} rolled forward (ring {2}): {3} binding(s) added to the desired state" -f $tpl.templateId, $tv, $confRing, @($plan.adds).Count)
+                            -Summary ("template '{0}' v{1} rolled forward (ring {2}): {3} binding(s) added to the desired state" -f $tpl.templateId, $tv, $confRing, @($plan.adds).Count) -CommitId "$($commitRes.commitId)"
                         try { [void](Start-PimManagerTickNow -Reason "conformance-deploy:$($tpl.templateId)") } catch { }
                     }
                     # The version stamp records what was COMMITTED as desired state (the engine applies it).
@@ -16127,15 +16167,15 @@ function Handle-Request {
             try {
                 $r = Invoke-PimManagerBackupRestore -Id $snapId -Confirm:$confirmRestore
                 if (-not "$base".Trim()) { $base = "$($r.entity)" }
-                # SEC-16(b) -- the `by` reported back to the caller must name the operator.
-                $who = try { $ro = Get-PimManagerRole; if ("$($ro.identity)".Trim()) { "$($ro.identity)" } else { throw } }
-                       catch { try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME } }
-                $who = Get-PimManagerRecordedActor -Who $who   # BUG-262
                 # BUG-292: the audit names what the restore changed (row by row) and records the restorer as the initiator, so
                 # the engine's applies name the person; it used to log 0 / 0 / 0, which also skipped the attribution.
                 $rd = $null; try { $rd = Compare-PimRowSets -Before @($r.beforeRows) -After @($r.afterRows) -Base $base } catch { $rd = $null }
                 $ra = if ($rd) { @($rd.adds).Count } else { 0 }; $rr = if ($rd) { @($rd.removes).Count } else { 0 }; $rm = if ($rd) { @($rd.modifies).Count } else { 0 }
-                Write-PimMutationLog -BaseName $base -Adds $ra -Removes $rr -Modifies $rm -NewRowCount ([int]$r.rowCount) -Diff $rd -Summary "Restored from backup $snapId by $who ($ra added, $rr removed, $rm changed; $([int]$r.rowCount) rows now; a backup of the state before the restore was kept as $($r.preRestoreSnapshotId))"
+                # SEC-16(b) -- the `by` reported back to the caller must name the operator.
+                $who = try { $ro = Get-PimManagerRole; if ("$($ro.identity)".Trim()) { "$($ro.identity)" } else { throw } }
+                       catch { try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $env:USERNAME } }
+                $who = Get-PimManagerRecordedActor -Who $who   # BUG-262
+                Write-PimMutationLog -BaseName $base -Adds $ra -Removes $rr -Modifies $rm -NewRowCount ([int]$r.rowCount) -Diff $rd -CommitId "$($r.commitId)" -Summary "Restored from backup $snapId by $who ($ra added, $rr removed, $rm changed; $([int]$r.rowCount) rows now; a backup of the state before the restore was kept as $($r.preRestoreSnapshotId))"
                 if (($ra + $rr + $rm) -gt 0) { try { [void](Start-PimManagerTickNow -Reason "restore:$base") } catch { } }
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; base = $base; restoredFrom = $snapId; entity = "$($r.entity)"; rowCount = [int]$r.rowCount; preRestoreSnapshotId = "$($r.preRestoreSnapshotId)"; by = "$who" })
                 return 200

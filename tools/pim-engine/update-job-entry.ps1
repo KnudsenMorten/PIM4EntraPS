@@ -238,8 +238,10 @@ if (-not $targetVer -and $targetImg) {
 # rather than a stale pin nobody remembers setting.
 $ring = "$($env:PIM_UPDATE_RING)".Trim()
 # §95.4 -- a Pro install whose updates come from Invardia's update platform (Deploy-PimUpdateJob -UpdateSource Invardia).
-# Invardia decides WHAT and WHETHER (its ring for this environment, a signed manifest); everything after the version is
-# known -- build, schema, roll, verify, rollback -- is this job's own, unchanged. PIM-InvardiaUpdate.ps1 has the rules.
+# PIM decides the release (framework GOVERNANCE Rule -1); Invardia signs and serves the manifest PIM published for the
+# environment's ring (today that ring is still set at Invardia -- moving to this environment's own ring, framework
+# UPDATE-1.7). Everything after the version is known -- build, schema, roll, verify, rollback -- is this job's own,
+# unchanged. PIM-InvardiaUpdate.ps1 has the rules.
 $updSource = "$($env:PIM_UPDATE_SOURCE)".Trim().ToLowerInvariant()
 $script:PimInvardiaContext = ''; $script:PimInvardiaSequence = 0; $script:PimInvardiaApplied = 0
 if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {

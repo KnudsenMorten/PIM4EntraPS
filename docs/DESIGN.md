@@ -837,9 +837,18 @@ reversible**. The logic lives in a pure, injectable core
 - **Undo / rollback.** `Get-PimSnapshotRestorePlan` turns a stored snapshot into a full-set replace
   that perfectly reproduces the pre-commit state — including rows the bad commit had deleted. The
   operator triggers it from the Review & Save **Backups / Undo** view (`GET /api/backups/<base>`
-  lists snapshots newest-first; `POST /api/backups/restore {base,id}` replays one, Admin-gated).
+  lists snapshots newest-first; `POST /api/backups/restore {base,id}` replays one, **SuperAdmin only since 2.4.510**: a
+  restore replaces the whole entity without the commit approvals, so it is audited with the rows it changed and named
+  after the person who restored).
 - **Retention.** `Get-PimBackupRetentionPlan` (pure) keeps the newest N per entity (default 10) and
   prunes the oldest; applied after each commit. Snapshots live in `pim.Backups`.
+- **The change journal (2.4.511).** Every write to the configuration store also writes `pim.CommitJournal`: one row per
+  changed record with the full record before and after, who initiated it, who approved it, the source (a commit in the
+  Manager, a restore, the change queue, a sync, a background job) and the commit id. It is written by the store's own
+  write functions **in the same database transaction as the change**, so a change never exists without its journal row;
+  a store that cannot write the journal refuses the change. The table is append-only in the database (a trigger refuses
+  every update and delete). A commit has ONE id, shared by the journal, the commit watcher, the change attribution and
+  the audit event. The journal is the base for per-commit undo and for removing only what PIM itself put in place.
 
 ### Design tenet — no fragile module dependencies (pure REST)
 
@@ -8947,9 +8956,11 @@ failure to send never affects any other job. An endpoint other than Invardia's c
 The install key is the Container Apps secret, or else the key claimed by the job `install-key` (§29.3).
 
 ### 29.3 Pro updates from Invardia (job `install-key`, feature `updates.invardia`, `PIM_UPDATE_SOURCE=invardia`)
-A Pro installation can take its updates from Invardia's update platform instead of the source archives. Invardia decides
-WHAT and WHETHER: one signed manifest per product, kind and ring, and the ring Invardia sets for the environment. PIM keeps
-HOW: build in its own registry, schema, roll, health gate, rollback.
+A Pro installation can take its updates from Invardia's update platform instead of the source archives. PIM owns the
+release: PIM decides which version goes to which ring, and Invardia signs and serves what PIM published (one signed
+manifest per product, kind and ring). Today the environment's ring is still set at Invardia; it is moving to the
+environment's own ring, set in PIM and sent with the pull. PIM also keeps HOW: build in its own registry, schema, roll,
+health gate, rollback.
 
 - **The install key.** The job `install-key` claims it with the installed licence and the real tenant, but only when the
   installation has no key and a Pro licence. The key is kept in a setting that no API returns. A key delivered as the

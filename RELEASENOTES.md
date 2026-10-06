@@ -14,6 +14,19 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.511 — Every configuration change is journaled; admin accounts in the delegations table
+
+- **New: a change journal.** Every change to PIM's configuration is now recorded with the full record before and after,
+  who made it, who approved it, where it came from (a commit in the Manager, a restore, a sync, a background job) and its
+  commit. The record is written in the same database transaction as the change, so a change can never exist without it;
+  the journal can only be added to, never changed. It is the base for the coming per-commit undo and for removals that
+  touch only what PIM itself put in place. Each commit now carries one id across the audit trail and the commit watcher.
+- **New: admin accounts in "Delegations — edit in a table".** The admin accounts are listed first. Each admin row has
+  **Remove all delegations** (the account stays as it is) and **Disable & remove delegations**; both are staged in
+  Pending changes like on the Admin accounts page.
+- **Fixed: External Companies showed no departments to choose as sponsor** the first time the page opened. It now waits
+  for the department list, and says so when no department is defined yet.
+
 ## v2.4.510 — Rolling back from a backup is SuperAdmin only, and the Job schedule shows local time
 
 - **Changed: restoring a table from a backup ("Backups / Undo") now needs the SuperAdmin role** (it was Admin). A restore

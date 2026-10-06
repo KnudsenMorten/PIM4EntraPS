@@ -510,6 +510,8 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     # SEC-80: the ledger of live items PIM manages (PIM-ManagedKeys.ps1) -- a prune removes only these. Never fails the open
     # (a store without it reads as an empty ledger: nothing prunable).
     if (Get-Command Get-PimManagedKeysDdl -ErrorAction SilentlyContinue) { try { [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimManagedKeysDdl)) } catch { Write-Warning "[engine] pim.ManagedKeys could not be created: $($_.Exception.Message)" } }
+    # CONFIG-1.1: the change journal (PIM-CommitJournal.ps1). Never fails the open -- without it every write is refused.
+    if (Get-Command Initialize-PimCommitJournal -ErrorAction SilentlyContinue) { [void](Initialize-PimCommitJournal -ConnectionString $ConnectionString) }
 }
 
 function Invoke-PimDepartmentRowKeyMigration {
@@ -730,21 +732,55 @@ function Get-PimSqlRow {
     return ($j | ConvertFrom-Json)
 }
 
-function Set-PimSqlRow {
-    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity, [Parameter(Mandatory)][string]$Key, [object]$Data)
-    $json = if ($null -ne $Data) { $Data | ConvertTo-Json -Depth 12 -Compress } else { '{}' }
-    $sql = @"
+function Invoke-PimSqlJournaledRowWrite {
+    <#
+      CONFIG-1.1: ONE row written (upsert, or delete with -Remove) together with its journal row, in ONE transaction:
+      read the stored JSON (UPDLOCK), write, and journal Add / Modify / Remove when the content changed. A byte-identical
+      upsert still stamps UpdatedUtc (unchanged behaviour) and leaves no journal row. Throws (rolled back) on any failure.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity, [Parameter(Mandatory)][string]$Key,
+          [AllowNull()][string]$Json, [switch]$Remove)
+    $c = New-PimSqlConnection -ConnectionString $ConnectionString
+    $tx = $null
+    try {
+        $c.Open(); $tx = $c.BeginTransaction()
+        $before = Get-PimRowJsonTx -Connection $c -Transaction $tx -Entity $Entity -Key $Key
+        $cmd = $c.CreateCommand(); $cmd.Transaction = $tx
+        [void]$cmd.Parameters.AddWithValue('@e', $Entity); [void]$cmd.Parameters.AddWithValue('@k', $Key)
+        if ($Remove) {
+            $cmd.CommandText = 'DELETE FROM pim.Rows WHERE Entity=@e AND [Key]=@k'
+            [void]$cmd.ExecuteNonQuery()
+            if ($null -ne $before) { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity $Entity -Key $Key -Op Remove -BeforeJson $before -AfterJson $null }
+        } else {
+            $cmd.CommandText = @"
 MERGE pim.Rows AS t USING (SELECT @e AS Entity, @k AS [Key]) AS s
   ON t.Entity = s.Entity AND t.[Key] = s.[Key]
 WHEN MATCHED THEN UPDATE SET DataJson = @d, UpdatedUtc = SYSUTCDATETIME()
 WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @k, @d, SYSUTCDATETIME());
 "@
-    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $sql -Parameters @{ e = $Entity; k = $Key; d = $json })
+            [void]$cmd.Parameters.AddWithValue('@d', $Json)
+            [void]$cmd.ExecuteNonQuery()
+            if ($null -eq $before) { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity $Entity -Key $Key -Op Add -BeforeJson $null -AfterJson $Json }
+            elseif (-not [string]::Equals($before, $Json, [StringComparison]::Ordinal)) { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity $Entity -Key $Key -Op Modify -BeforeJson $before -AfterJson $Json }
+        }
+        $tx.Commit(); $tx = $null
+    } catch {
+        if ($tx) { try { $tx.Rollback() } catch { Write-Warning "  [sql] transaction rollback failed: $($_.Exception.Message)" } }
+        throw
+    } finally {
+        if ($c) { $c.Close(); $c.Dispose() }
+    }
+}
+
+function Set-PimSqlRow {
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity, [Parameter(Mandatory)][string]$Key, [object]$Data)
+    $json = if ($null -ne $Data) { $Data | ConvertTo-Json -Depth 12 -Compress } else { '{}' }
+    Invoke-PimSqlJournaledRowWrite -ConnectionString $ConnectionString -Entity $Entity -Key $Key -Json $json
 }
 
 function Remove-PimSqlRow {
     param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity, [Parameter(Mandatory)][string]$Key)
-    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql "DELETE FROM pim.Rows WHERE Entity=@e AND [Key]=@k" -Parameters @{ e = $Entity; k = $Key })
+    Invoke-PimSqlJournaledRowWrite -ConnectionString $ConnectionString -Entity $Entity -Key $Key -Remove
 }
 
 # --- SQL-backed change queue (mirrors the JSON adapter) -------------------------
@@ -1074,8 +1110,15 @@ function Invoke-PimSqlCommit {
             }
             # 🔒 THE EFFECT AND THE STATUS CHANGE ARE ONE TRANSACTION (§65.8). A crash between them
             # leaves the entry 'committed' and therefore replayed -- never applied-but-not-done.
+            # CONFIG-1.1: the journal row joins that transaction; the entry's id is its commit id, its submitter and committer
+            # are the initiator and approver.
+            $qCtx = New-PimCommitJournalContext -CommitId "$($ch.id)".Replace('-', '') -Source 'queue' `
+                        -InitiatedBy $(if ("$($ch.by)".Trim()) { "$($ch.by)" } else { $who }) `
+                        -ApprovedBy $(if ("$($ch.committedBy)".Trim() -and "$($ch.committedBy)" -ne "$($ch.by)") { "$($ch.committedBy)" } else { '' })
+            $qBefore = Get-PimRowJsonTx -Connection $c -Transaction $tx -Entity "$($ch.entity)" -Key "$($ch.key)"
             if ("$($ch.op)" -eq 'Remove') {
                 [void](& $exec "DELETE FROM pim.Rows WHERE Entity=@e AND [Key]=@k" @{ e = "$($ch.entity)"; k = "$($ch.key)" })
+                if ($null -ne $qBefore) { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity "$($ch.entity)" -Key "$($ch.key)" -Op Remove -BeforeJson $qBefore -AfterJson $null -Context $qCtx }
             } else {
                 $json = if ($null -ne $ch.payload) { $ch.payload | ConvertTo-Json -Depth 12 -Compress } else { '{}' }
                 [void](& $exec @"
@@ -1084,6 +1127,8 @@ MERGE pim.Rows AS t USING (SELECT @e AS Entity, @k AS [Key]) AS s
 WHEN MATCHED THEN UPDATE SET DataJson = @d, UpdatedUtc = SYSUTCDATETIME()
 WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @k, @d, SYSUTCDATETIME());
 "@ @{ e = "$($ch.entity)"; k = "$($ch.key)"; d = $json })
+                if ($null -eq $qBefore) { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity "$($ch.entity)" -Key "$($ch.key)" -Op Add -BeforeJson $null -AfterJson $json -Context $qCtx }
+                elseif (-not [string]::Equals($qBefore, $json, [StringComparison]::Ordinal)) { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity "$($ch.entity)" -Key "$($ch.key)" -Op Modify -BeforeJson $qBefore -AfterJson $json -Context $qCtx }
             }
             $done++
             if ($FailAfter -ge 0 -and $done -gt $FailAfter) { throw "FailAfter=$FailAfter test seam" }
@@ -1344,6 +1389,9 @@ WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @
             $json = if ($null -ne $r) { $r | ConvertTo-Json -Depth 12 -Compress } else { '{}' }
             if ($currentJson.ContainsKey($k) -and [string]::Equals($currentJson[$k], $json, [StringComparison]::Ordinal)) { continue }
             & $exec $mergeSql @{ e = $Entity; k = $k; d = $json }
+            # CONFIG-1.1: the journal row rides in the same transaction (a failure rolls the whole set back).
+            if ($currentJson.ContainsKey($k)) { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity $Entity -Key $k -Op Modify -BeforeJson $currentJson[$k] -AfterJson $json }
+            else { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity $Entity -Key $k -Op Add -BeforeJson $null -AfterJson $json }
             $stmts++; $written++
             if ($FailAfter -ge 0 -and $stmts -ge $FailAfter) { throw "injected mid-commit failure after $stmts statement(s) (test seam)" }
         }
@@ -1371,6 +1419,7 @@ WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @
         foreach ($ck in $currentKeys) {
             if (-not $submitted.ContainsKey($ck)) {
                 & $exec "DELETE FROM pim.Rows WHERE Entity=@e AND [Key]=@k" @{ e = $Entity; k = $ck }
+                Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity $Entity -Key $ck -Op Remove -BeforeJson $currentJson[$ck] -AfterJson $null
                 $removed++; $stmts++
                 if ($FailAfter -ge 0 -and $stmts -ge $FailAfter) { throw "injected mid-commit failure after $stmts statement(s) (test seam)" }
             }
@@ -1551,12 +1600,17 @@ WHEN MATCHED THEN UPDATE SET DataJson = @d, UpdatedUtc = SYSUTCDATETIME()
 WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @k, @d, SYSUTCDATETIME());
 "@
         $n = 0
+        $beforeByKey = @{}; foreach ($x in $raw) { $beforeByKey["$($x.key)"] = "$($x.json)" }
         foreach ($it in @($plan.add) + @($plan.update)) {
             $cmd = $c.CreateCommand(); $cmd.Transaction = $tx; $cmd.CommandText = $mergeSql
+            $d = if ($null -ne $it.row) { $it.row | ConvertTo-Json -Depth 12 -Compress } else { '{}' }
             [void]$cmd.Parameters.AddWithValue('@e', $Entity)
             [void]$cmd.Parameters.AddWithValue('@k', "$($it.key)")
-            [void]$cmd.Parameters.AddWithValue('@d', $(if ($null -ne $it.row) { $it.row | ConvertTo-Json -Depth 12 -Compress } else { '{}' }))
+            [void]$cmd.Parameters.AddWithValue('@d', $d)
             [void]$cmd.ExecuteNonQuery()
+            # CONFIG-1.1: journaled in the same transaction.
+            if ($beforeByKey.ContainsKey("$($it.key)")) { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity $Entity -Key "$($it.key)" -Op Modify -BeforeJson $beforeByKey["$($it.key)"] -AfterJson $d }
+            else { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity $Entity -Key "$($it.key)" -Op Add -BeforeJson $null -AfterJson $d }
             $n++
             if ($FailAfter -ge 0 -and $n -ge $FailAfter) { throw "injected mid-commit failure after $n statement(s) (test seam)" }
         }
@@ -1961,3 +2015,6 @@ if (Test-Path -LiteralPath $__chgAttr) { . $__chgAttr }
 # SEC-80: the managed-key ledger rides with the store too.
 $__mgdKeys = Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1'
 if (Test-Path -LiteralPath $__mgdKeys) { . $__mgdKeys }
+# CONFIG-1.1: the change journal is written BY the store's write functions, so it must ride with the store.
+$__cmtJrn = Join-Path $PSScriptRoot 'PIM-CommitJournal.ps1'
+if (Test-Path -LiteralPath $__cmtJrn) { . $__cmtJrn }

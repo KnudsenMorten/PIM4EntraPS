@@ -104,12 +104,13 @@ function Get-PimCommitFieldChanges {
 
 function New-PimCommitWatchRecord {
     # PURE. The record one commit leaves. $null when the commit changed nothing.
-    param([Parameter(Mandatory)][string]$Entity, [object[]]$Changes = @(), [string]$By = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    # -Id: the commit's own id (CONFIG-1.1 / BUG-293: one id per commit, shared with the journal and the audit).
+    param([Parameter(Mandatory)][string]$Entity, [object[]]$Changes = @(), [string]$By = '', [datetime]$NowUtc = [datetime]::UtcNow, [string]$Id = '')
     $ch = @($Changes)
     if (-not $ch.Count) { return $null }
     $more = [Math]::Max(0, $ch.Count - $script:PimCommitWatchMaxKeys)
     return [pscustomobject]@{
-        id = [guid]::NewGuid().ToString('n'); entity = $Entity; committedUtc = $NowUtc.ToUniversalTime().ToString('o'); by = "$By"
+        id = $(if ("$Id".Trim()) { "$Id".Trim() } else { [guid]::NewGuid().ToString('n') }); entity = $Entity; committedUtc = $NowUtc.ToUniversalTime().ToString('o'); by = "$By"
         platform = [bool](@(Get-PimCommitWatchEntityScopes -Entity $Entity).Count)
         keys = @($ch | Select-Object -First $script:PimCommitWatchMaxKeys | ForEach-Object { [pscustomobject]@{ key = "$($_.key)"; op = "$($_.op)"; fields = @(if ($_.PSObject.Properties["fields"]) { $_.fields }) } })
         moreKeys = $more
