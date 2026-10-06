@@ -853,6 +853,10 @@ reversible**. The logic lives in a pure, injectable core
   columns, one administrator per line, `;` `,` or TAB; the UserPrincipalName is the key. Each line is previewed as new,
   overwrite, skip or invalid before anything is staged; *Skip existing* leaves known admins alone, *Overwrite existing*
   replaces the stored value of every column the file carries with a non-empty cell.
+- **Undo, backup and restore (2.4.515).** An undo is a new commit carrying the reverse of a journaled commit's rows,
+  committed through every gate and recorded with the commit it undoes. A configuration backup stores every configuration
+  entity and the non-secret settings (secrets are filtered by name and by value, and never stored); a restore stages the
+  rows picked from a backup as pending changes and commits them as a restore. Both are journaled like any commit.
 - **The change journal (2.4.511).** Every write to the configuration store also writes `pim.CommitJournal`: one row per
   changed record with the full record before and after, who initiated it, who approved it, the source (a commit in the
   Manager, a restore, the change queue, a sync, a background job) and the commit id. It is written by the store's own

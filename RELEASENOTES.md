@@ -14,6 +14,34 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## v2.4.515 — Undo, backup and restore, a pausable daily reconcile, releasing guards, and Remove from PIM
+
+- **New: Commit history & undo** (Audit & Settings). Every commit from the change journal -- who, when, who approved it,
+  what it changed. A SuperAdmin can undo any commit, an Admin only their own. You tick the rows to reverse; the undo is
+  staged in Pending changes and committed with the normal approvals, recorded as an undo of that commit, and can itself
+  be undone. A row someone changed again later is shown as "changed since" and left unticked.
+- **New: Backups & restore** (Audit & Settings). A daily configuration backup and "Back up now": departments, companies,
+  admins, groups, delegations, workload bindings, templates, settings, the break-glass list, the job schedule, rings and
+  the MSP registry. Secrets are never stored. Backups are kept 90 days by default (a SuperAdmin setting), pinned ones
+  longer. A SuperAdmin restores what they pick from a backup: the page shows what was added, removed or changed since, and
+  the ticked rows are committed as a normal, undoable restore.
+- **New: pause the daily reconcile** (SuperAdmin, with a reason and an optional end time); a banner shows it on Home and
+  Jobs. Commits, deltas and Run now keep applying. The daily reconcile now also **reports** which leftovers PIM itself put
+  in place it would remove, and which rule held each one -- it removes nothing yet, never touches admins, and never
+  touches anything that existed before the change journal.
+- **New: Guards** (Audit & Settings). Every protective guard shows whether it is holding something and exactly what. A
+  SuperAdmin can release that exact plan, with a reason, for one run or until a time (at most 24 hours); a changed plan
+  is held again. The removal budget can now be raised for one run (to at most 50). Some guards can never be released.
+- **New: Remove from PIM** on Admin accounts: every delegation is removed and the account is disabled but kept. And an
+  API for operators: `DELETE /api/admin-accounts/<upn>` and `POST /api/admin-accounts/remove-from-pim`.
+- **Changed: who may delete an admin account.** A delete by an operator is its own approval -- it is never parked for a
+  second person. A SuperAdmin or an Admin may delete any admin; a delegated operator only admins at or below its own
+  level and tier (a level-2 helpdesk can never delete a level-1 or level-0 admin).
+- **Changed: with "Allow an administrator to approve their own requests" on**, a disable or offboarding commits directly
+  and is recorded as self-approved, instead of waiting for an approval request.
+- **Engine:** each commit's result in the tenant is recorded per item (created, updated, removed, already present,
+  failed), credited to the commit that asked for it.
+
 ## v2.4.514 — A central admin is never deleted in a managed tenant; Pro updates follow the environment's own ring
 
 - **Fixed: a managing tenant could have deleted an admin account in every managed tenant.** The managed tenants copy a central

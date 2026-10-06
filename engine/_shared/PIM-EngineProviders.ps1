@@ -157,12 +157,20 @@ function Get-PimAdminStatusDecision {
     # be deleted -- staged by a SuperAdmin, held for the offboard approval, then deleted ONCE by Remove-PimAdminAccountApproved
     # (PIM-AdminAccountDelete.ps1). Never provisioned again; a prune / reconcile never sets or acts on it by itself.
     if ($st -ieq 'Deleted')  { $x = (& $mk 'Deleted' $false $true $false $true $true 'AccountStatus=Deleted' $true); $x | Add-Member -NotePropertyName delete -NotePropertyValue $true; return $x }
+    # §96.5 D1 (b) "Remove from PIM" (operator 2026-10-06: definition + every delegation removed, account DISABLED and KEPT).
+    # Removed = Disabled + "out of PIM's active lists": the account is disabled (and its sessions revoked), never enabled,
+    # never provisioned, never deleted, and no other attribute is reconciled any more (Equal / ApplyUpdate below).
+    # 🔒 ORDERING -- WHY THE ROW IS KEPT, NOT DROPPED: Admins.ApplyRemove only REPORTS an account that has no row (71.22),
+    # so dropping the definition row would leave the account ENABLED for ever. The row therefore stays, marked Removed, and
+    # the engine keeps the account disabled on every pass; the Manager hides it from the active lists. A disable can never
+    # be skipped because the row "already left". Held for the offboard approval like Disabled (Test-PimAdminDisablingValue).
+    if ($st -ieq 'Removed')  { $x = (& $mk 'Removed' $false $true $false $true $true 'AccountStatus=Removed (removed from PIM: disabled and kept)' $true); $x | Add-Member -NotePropertyName removed -NotePropertyValue $true; return $x }
     if ($st -ieq 'Revoked')  { return (& $mk 'Revoked'  $false $true $false $true  $true 'AccountStatus=Revoked'  $true) }
     if ($st -ieq 'Disabled') { return (& $mk 'Disabled' $false $true $false $false $true 'AccountStatus=Disabled' $true) }
     if ($offDue) { return (& $mk 'AutoDisabled' $false $true $false $false $true ("AutoDisableDate {0:yyyy-MM-dd HH:mm} UTC reached" -f $od.utc) $false) }
     if (-not $st)            { return (& $mk ''        $true $false $false $false $false 'AccountStatus not set' $false) }
     if ($st -ieq 'Enabled')  { return (& $mk 'Enabled' $true $false $true  $false $false 'AccountStatus=Enabled' $false) }
-    return (& $mk $st $null $false $false $false $true "unknown AccountStatus '$st' (expected Enabled / Disabled / Revoked) -- the account is left as it is" $false)
+    return (& $mk $st $null $false $false $false $true "unknown AccountStatus '$st' (expected Enabled / Disabled / Revoked / Removed / Deleted) -- the account is left as it is" $false)
 }
 
 $script:PimAdminDeleteMaxPerRun = 5
@@ -442,6 +450,17 @@ function Update-PimAdminsDisableDecision {
             # FAIL CLOSED: no breaker loaded means no disable, never an unguarded one.
             $decision = [pscustomobject]@{ allowed = $false; abort = $true; tripped = 'guard-not-loaded'; reason = 'PIM-DisableGuard.ps1 is not loaded in this process'; toDisable = $cand.Count; scanned = @($Live).Count }
         }
+        # §96.6 / GUARD-1.6: the ABSOLUTE cap (G2) on explicit disables is releasable for ONE run -- exactly this set of
+        # accounts (plan hash over their keys), at most 50 (literal ceiling). G1 / G3, break-glass (taken out above) and an
+        # unauthorised status change (taken out above) are never released. A plan (WhatIf) never uses a release.
+        if (-not $decision.allowed -and "$($decision.tripped)" -eq 'mass-disable' -and -not $Context['__pimWhatIf'] -and (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue)) {
+            $__gr = Invoke-PimGuardHoldOrRelease -GuardId 'engine.disable-guard' -Scope 'Admins' -Keys @($cand.Keys | ForEach-Object { "$_" }) -Count $cand.Count `
+                -Measured @{ toDisable = $cand.Count; scanned = @($Live).Count }
+            if ($__gr.released) {
+                $__d2 = Test-PimExplicitDisablePassAllowed -ToDisable $cand.Count -Scanned @($Live).Count -Desired $all -DesiredResolved $resolved -MaxCount ([Math]::Min([int]$__gr.release.raiseTo, 50))
+                if ($__d2.allowed) { $decision = $__d2; Write-Host ("    [admins] account-disable breaker RELEASED for this run (plan {0}): {1} account(s)" -f $__gr.planHash.Substring(0, 12), $cand.Count) -ForegroundColor Magenta }
+            }
+        } elseif (-not $Context['__pimWhatIf'] -and (Get-Command Clear-PimGuardHold -ErrorAction SilentlyContinue)) { [void](Clear-PimGuardHold -GuardId 'engine.disable-guard' -Scope 'Admins') }
         if (-not $decision.allowed) {
             if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) { Write-PimDisableAbortAlert -Scope 'Admins (AccountStatus / AutoDisableDate)' -Decision $decision }
             else { Write-Host ("[engine] Admins: explicit disables ABORTED [{0}] -- {1}" -f $decision.tripped, $decision.reason) -ForegroundColor Red }
@@ -449,6 +468,8 @@ function Update-PimAdminsDisableDecision {
             Write-Host ("    [admins] {0} account(s) to DISABLE as their row says: {1}" -f $cand.Count, (@($cand.Keys) -join ', ')) -ForegroundColor Yellow
         }
     }
+    # §96.6: nothing left to disable = nothing held any more (a stale hold must not be offered for release)
+    if ($cand.Count -eq 0 -and -not $Context['__pimWhatIf'] -and (Get-Command Clear-PimGuardHold -ErrorAction SilentlyContinue)) { [void](Clear-PimGuardHold -GuardId 'engine.disable-guard' -Scope 'Admins') }
     if ($bgHit.Count) { Write-Host ("    [admins] BREAK-GLASS never disabled, whatever its row says: {0}" -f ($bgHit -join ', ')) -ForegroundColor Yellow }
     if ($leftOff.Count) { Write-Host ("    [admins] {0} account(s) are DISABLED in the tenant and their AccountStatus is not explicitly 'Enabled' -- left disabled (set AccountStatus=Enabled to re-enable): {1}" -f $leftOff.Count, ($leftOff -join ', ')) -ForegroundColor DarkYellow }
     $Context['adminsDisable'] = [pscustomobject]@{ candidates = $cand; decision = $decision; unauthorized = $unauth; breakGlass = $bgHit.ToArray() }
@@ -688,6 +709,8 @@ function New-PimAdminsProvider {
             # the account still exists: delete it (ApplyUpdate) -- a LOCAL row only; a central Deleted is a disable (see ApplyUpdate)
             if ($dec.PSObject.Properties['delete'] -and $dec.delete -and -not ((Get-Command Test-PimAdminRowIsCentral -ErrorAction SilentlyContinue) -and (Test-PimAdminRowIsCentral -Row $d))) { return $false }
             if ($dec.disable -and $on) { return $false }
+            # §96.5 D1 (b): a Removed admin is equal once it is disabled -- its attributes are no longer PIM's business.
+            if ($dec.PSObject.Properties['removed'] -and $dec.removed) { return $true }
             if ($dec.desiredEnabled -eq $true -and -not $on -and $dec.mayEnable) { return $false }
             return (@((Get-PimAdminAttributePlan -Desired $d -Live $l).Keys).Count -eq 0)
         }
@@ -789,6 +812,10 @@ function New-PimAdminsProvider {
                 Write-Host ("    [admins] {0}: CENTRAL row says Deleted -- disabled here, never deleted by the managing tenant's word" -f $item.key) -ForegroundColor DarkYellow
             }
             $attrs = Get-PimAdminAttributePlan -Desired $d -Live $l
+            # §96.5 D1 (b): a Removed admin is only ever DISABLED (through the same guards below) -- no attribute PATCH, no
+            # enable, no delete. It is the same disable path as Disabled / Revoked, so the breaker, break-glass and MSP
+            # authorisation all apply unchanged.
+            if ($dec.PSObject.Properties['removed'] -and $dec.removed) { $attrs = [ordered]@{} }
             $body = @{}
             foreach ($k in @($attrs.Keys)) { $body[$k] = $attrs[$k] }
             $disabling = $false; $enabling = $false; $blocked = ''

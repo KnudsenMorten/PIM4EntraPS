@@ -512,6 +512,10 @@ IF COL_LENGTH('pim.TenantCache','UpdatedUtc') IS NULL ALTER TABLE pim.TenantCach
     if (Get-Command Get-PimManagedKeysDdl -ErrorAction SilentlyContinue) { try { [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimManagedKeysDdl)) } catch { Write-Warning "[engine] pim.ManagedKeys could not be created: $($_.Exception.Message)" } }
     # CONFIG-1.1: the change journal (PIM-CommitJournal.ps1). Never fails the open -- without it every write is refused.
     if (Get-Command Initialize-PimCommitJournal -ErrorAction SilentlyContinue) { [void](Initialize-PimCommitJournal -ConnectionString $ConnectionString) }
+    # CONFIG-1.1 / 96.1: the engine's applied outcome per row (PIM-CommitJournal.ps1). Never fails the open.
+    if (Get-Command Initialize-PimCommitApplied -ErrorAction SilentlyContinue) { [void](Initialize-PimCommitApplied -ConnectionString $ConnectionString) }
+    # CONFIG-1.3: the configuration backup tables (PIM-ConfigBackup.ps1). Never fails the open.
+    if (Get-Command Initialize-PimConfigBackupStore -ErrorAction SilentlyContinue) { [void](Initialize-PimConfigBackupStore -ConnectionString $ConnectionString) }
 }
 
 function Invoke-PimDepartmentRowKeyMigration {
@@ -2018,3 +2022,10 @@ if (Test-Path -LiteralPath $__mgdKeys) { . $__mgdKeys }
 # CONFIG-1.1: the change journal is written BY the store's write functions, so it must ride with the store.
 $__cmtJrn = Join-Path $PSScriptRoot 'PIM-CommitJournal.ps1'
 if (Test-Path -LiteralPath $__cmtJrn) { . $__cmtJrn }
+# PIM 96.5: the daily reconcile's removal report + pause / resume ride with the store (the scheduler, the engine and the
+# Manager all read them).
+$__rcnRem = Join-Path $PSScriptRoot 'PIM-ReconcileRemoval.ps1'
+if (Test-Path -LiteralPath $__rcnRem) { . $__rcnRem }
+# CONFIG-1.3 / PIM §96.3: the configuration backup (pim.ConfigBackups) rides with the store too.
+$__cfgBak = Join-Path $PSScriptRoot 'PIM-ConfigBackup.ps1'
+if (Test-Path -LiteralPath $__cfgBak) { . $__cfgBak }

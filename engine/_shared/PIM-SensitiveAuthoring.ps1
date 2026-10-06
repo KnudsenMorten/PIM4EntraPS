@@ -169,7 +169,7 @@ function Test-PimRowIsGuest {
 # The ONE rule the Manager's two admin write paths share (POST /api/admin-accounts/modify and the
 # Review & Save PUT of Account-Definitions-Admins), and the classifier below. It mirrors what the
 # engine acts on (PIM-EngineProviders.ps1 Get-PimAdminStatusDecision / Test-PimAdminOffboarded):
-#   AccountStatus = Disabled | Revoked            -> disabled (Revoked also revokes sessions)
+#   AccountStatus = Disabled | Revoked | Removed | Deleted -> disabled (Revoked / Removed also revoke sessions)
 #   Lifecycle     = Retire*                       -> offboarded (disable, sessions, memberships)
 #   AutoDisableDate / OffboardDate (legacy name) at or before NOW -> offboarded
 # Operator decision (2026-09-18): such a write IS an offboard, so it goes through the offboard
@@ -187,7 +187,7 @@ function Test-PimAdminDisablingValue {
     $v = "$Value".Trim()
     if (-not $v) { return $false }
     $c = "$Column".Trim()
-    if ($c -ieq 'AccountStatus') { return ($v -match '(?i)^(disabled|revoked|deleted)$') }   # Deleted (§96.5 D1) is held like a disable
+    if ($c -ieq 'AccountStatus') { return ($v -match '(?i)^(disabled|revoked|deleted|removed)$') }   # Deleted (§96.5 D1 a) and Removed (D1 b, remove from PIM) are held like a disable
     if ($c -ieq 'Lifecycle')     { return ($v -match '(?i)^retire') }
     if ($c -ieq 'AutoDisableDate' -or $c -ieq 'OffboardDate') {
         $parsed = $null

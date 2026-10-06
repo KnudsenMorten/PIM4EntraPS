@@ -253,6 +253,10 @@ if (Test-Path -LiteralPath $_policyTplCatalogLib) { . $_policyTplCatalogLib }
 # on PIM-SqlStore.ps1 (above) for the SQL backup adapter. Powers /api/backups/*.
 $_backupLib = Join-Path $solutionRoot 'engine\_shared\PIM-CommitBackup.ps1'
 if (Test-Path -LiteralPath $_backupLib) { . $_backupLib }
+# CONFIG-1.2 / §96.2: undo a commit -- the pure plan (inverse rows + conflicts) and the journal readers behind
+# GET /api/commit-history and /api/commit-history/<id>. The undo itself is staged and committed like any change.
+$_commitUndoLib = Join-Path $solutionRoot 'engine\_shared\PIM-CommitUndo.ps1'
+if (Test-Path -LiteralPath $_commitUndoLib) { . $_commitUndoLib }
 
 # Onboarding convenience flows (engine/_shared/PIM-Onboarding.ps1) -- guest invite
 # INTO the delegation model + self-service consultant enable/disable. Both produce
@@ -435,6 +439,9 @@ if (Test-Path -LiteralPath $_notifyLib) { . $_notifyLib }
 # GUARD-1: the Manager's own guards (commit delta guard, uplink-readonly, replication gate) record their trips the same way
 $_guardLib = Join-Path $solutionRoot 'engine\_shared\PIM-Guard.ps1'
 if (Test-Path -LiteralPath $_guardLib) { . $_guardLib }
+# §96.6 / GUARD-1.6: releasing a guard (Audit & Settings > Guards; /api/guards/<id>/release)
+$_guardRelLib = Join-Path $solutionRoot 'engine\_shared\PIM-GuardRelease.ps1'
+if (Test-Path -LiteralPath $_guardRelLib) { . $_guardRelLib }
 
 # Classified engine item failures (engine/_shared/PIM-FailureCatalog.ps1) -- the SAME catalog the engine
 # writes with, so the Manager shows exactly the cause/remedy/fixes the engine recorded.
@@ -2643,9 +2650,22 @@ function Request-PimManagerOffboardHold {
         [string]$Justification = '',
         [string]$Ticket = '',
         [string]$Requestor = '',
-        [string]$Via = 'manager'
+        [string]$Via = 'manager',
+        # Section 96.5 D1: WHAT was held (e.g. @{ AccountStatus = 'Removed' }), so the approved request stages THAT change
+        # (Get-PimManagerOffboardHeldIntent) instead of a plain AutoDisableDate. -StripDelegations: the approved request also
+        # stages the removal of every delegation (the REST routes; the GUI commits those removals itself). -RequestorRole: a
+        # held Deleted is carried only for a SuperAdmin requestor.
+        [System.Collections.IDictionary]$HeldFields = $null,
+        [switch]$StripDelegations,
+        [string]$RequestorRole = ''
     )
     $res = [ordered]@{ approvalRequired = $true; gate = 'offboard-approval'; upn = $Upn; approvalRaised = $false; approvalId = ''; note = '' }
+    $detail = $null
+    if (($HeldFields -and $HeldFields.Count) -or $StripDelegations) {
+        $hf = [ordered]@{}
+        if ($HeldFields) { foreach ($k in @($HeldFields.Keys)) { $hf["$k"] = "$($HeldFields[$k])" } }
+        $detail = [ordered]@{ kind = 'admin-status-hold'; held = $hf; stripDelegations = [bool]$StripDelegations; requestorRole = "$RequestorRole".Trim(); via = $Via }
+    }
     $just = "$Justification".Trim()
     $previewOff = $false
     try { if (Get-Command Resolve-PimGovernancePreview -ErrorAction SilentlyContinue) { $previewOff = -not (Test-PimGovernancePreviewEnabled -Resolved (Get-PimGovernancePreview) -Id 'approvalsPreview') } } catch { $previewOff = $false }
@@ -2657,7 +2677,7 @@ function Request-PimManagerOffboardHold {
         $res['note'] = "$What is an immediate OFFBOARD of '$Upn' and needs approval, but the approval-gate library is not loaded. It was NOT saved."
     } else {
         try {
-            $apr = Add-PimApprovalRequest -Requestor "$Requestor" -Action 'offboard' -Target $Upn -Justification $just -Ticket "$Ticket".Trim()
+            $apr = Add-PimApprovalRequest -Requestor "$Requestor" -Action 'offboard' -Target $Upn -Justification $just -Ticket "$Ticket".Trim() -Detail $detail
             $res['approvalRaised'] = $true
             $res['approvalId'] = "$($apr.id)"
             $res['note'] = "$What is an immediate OFFBOARD of '$Upn', so it was NOT saved: offboard approval request $($apr.id) was raised instead. A different administrator approves and executes it on the Approvals tab; that stages the disable for commit."
@@ -2828,7 +2848,9 @@ function Invoke-PimManagerSafeCommit {
         [string]$CommitId = '',
         [object]$Classification = $null,
         [string]$Approver = '',
-        [string]$Source = 'gui'
+        [string]$Source = 'gui',
+        # CONFIG-1.2 (§96.2): the commit this one undoes ('' = not an undo). Journaled as UndoOf on every row.
+        [string]$UndoOf = ''
     )
     # §91.23 BACKSTOP: every commit path (grid, departments, workloads, conformance) lands here -- a row the managing tenant
     # sent (Owner=MSP) is never changed or removed by a managed tenant's Manager, whichever page asked.
@@ -2880,7 +2902,7 @@ function Invoke-PimManagerSafeCommit {
                 }
             }
         } catch { Write-Warning "  [journal] per-row initiators could not be resolved -- every row is journaled as the committer's: $($_.Exception.Message)" }
-        $__jctx = New-PimCommitJournalContext -CommitId $commitId -Source $Source -InitiatedBy "$who" -ApprovedBy $Approver -Attribution $__attr
+        $__jctx = New-PimCommitJournalContext -CommitId $commitId -Source $Source -InitiatedBy "$who" -ApprovedBy $Approver -UndoOf $UndoOf -Attribution $__attr
     }
     # §88: say how long the SQL part of a commit took and how much it really wrote, so a slow commit can be measured.
     $__sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -4653,6 +4675,69 @@ function Get-PimManagerMcpTools {
     return @($tools.ToArray())
 }
 
+function Invoke-PimManagerCommitHistoryGet {
+    <#
+      CONFIG-1.2 / §96.2: GET /api/commit-history (the list) and GET /api/commit-history/<id> (one commit's rows + the undo
+      plan with conflict flags), from the change journal. ROLE-FILTERED HERE (D3): SuperAdmin = every commit; Admin = only
+      commits they initiated (and only their own rows are undoable); Delegated / Reader = 403. Read-only: the undo is staged
+      in the page and committed through PUT /api/csv/<base> with undoOf, so every commit gate applies.
+    #>
+    param([Parameter(Mandatory)][string]$path, $req, [Parameter(Mandatory)]$resp)
+    $script:lastHeartbeat = Get-Date
+    $chRole = Get-PimManagerRole
+    $chIsSuper = Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'
+    $chIsAdmin = Test-PimManagerRoleAtLeast -Minimum 'Admin'
+    if (-not $chIsAdmin) {
+        Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "Commit history and undo are for an Admin (own commits) or a SuperAdmin (every commit); your role is '$($chRole.role)'." }
+        return 403
+    }
+    # The role the plan uses: what the gate says, never a value from the request.
+    $chRoleName = if ($chIsSuper) { 'SuperAdmin' } else { 'Admin' }
+    $cs = (Get-PimManagerStoreCs)
+    if (-not $cs -or -not (Get-Command Get-PimCommitUndoHistory -ErrorAction SilentlyContinue)) {
+        Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is wired in this host, so the commit history cannot be read'; readable = $false }
+        return 503
+    }
+    try {
+        if ($path -eq '/api/commit-history') {
+            $days = 90; try { $dq = [int]"$($req.QueryString['days'])"; if ($dq -gt 0) { $days = [Math]::Min(3650, $dq) } } catch { }
+            $own = if ($chIsSuper) { '' } else { "$($chRole.identity)".Trim() }
+            if (-not $chIsSuper -and -not $own) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Your sign-in has no identity, so your own commits cannot be found.' }
+                return 403
+            }
+            $list = @(Get-PimCommitUndoHistory -ConnectionString $cs -OwnIdentity $own -Days $days -Top 200)
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ commits = @($list); scope = $(if ($chIsSuper) { 'all' } else { 'own' }); role = $chRoleName; identity = "$($chRole.identity)"; days = $days; readable = $true })
+            return 200
+        }
+        $chId = Resolve-PimCommitUndoId -Value ($path -replace '^/api/commit-history/', '')
+        if (-not $chId) {
+            Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'not a valid commit id' }
+            return 400
+        }
+        $entries = @(Get-PimCommitJournalEntries -ConnectionString $cs -CommitId $chId)
+        if (-not $entries.Count) {
+            Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "commit $chId is not in the change journal" }
+            return 404
+        }
+        $later = @(Get-PimCommitUndoLaterRows -ConnectionString $cs -CommitId $chId)
+        $plan = Get-PimCommitUndoPlan -CommitId $chId -Entries $entries -LaterRows $later -Role $chRoleName -Identity "$($chRole.identity)"
+        if (-not $plan.canSee) {
+            # An Admin asking for someone else's commit: 403 (the list never offered it).
+            Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "$($plan.reason)" }
+            return 403
+        }
+        $f = $entries[0]
+        Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+            commitId = $chId; committedUtc = (ConvertTo-PimCommitUndoUtc $f.CommittedUtc); initiatedBy = "$($f.InitiatedBy)"; approvedBy = "$($f.ApprovedBy)"
+            source = "$($f.Source)"; undoOf = "$($f.UndoOf)"; role = $chRoleName; rows = @($plan.rows); counts = $plan.counts })
+        return 200
+    } catch {
+        Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the change journal could not be read: $($_.Exception.Message)"; readable = $false }
+        return 500
+    }
+}
+
 function Invoke-PimManagerCsvPut {
     <#
       PUT /api/csv/<base> -- the COMMIT of one entity (moved here from the route unchanged, REQ 93): the role and delegation
@@ -4683,6 +4768,17 @@ function Invoke-PimManagerCsvPut {
         })
         return 400
     }
+    # CONFIG-1.4 / PIM §96.4: rows staged from a configuration backup are committed HERE, through every gate below, journaled
+    # with Source 'restore'. A restore is SuperAdmin only (§96.9 D3) -- an Admin's commit that claims to be one is refused.
+    $commitSource = 'gui'; $restoreFrom = ''
+    if ($body -and $body.PSObject.Properties['source'] -and "$($body.source)".Trim() -ieq 'restore') {
+        if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+            Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; base = $base; gate = 'restore-role'; error = "A restore from a configuration backup is SuperAdmin only -- nothing of $base was saved." })
+            return 403
+        }
+        $commitSource = 'restore'
+        $restoreFrom = if ($body.PSObject.Properties['restoreFrom']) { "$($body.restoreFrom)".Trim() } else { '' }
+    }
     $rowsRaw = @()
     if ($body -and $body.rows) { $rowsRaw = @($body.rows) }
     $rowsOrdered = @($rowsRaw | ForEach-Object { ConvertTo-OrderedRow $_ } | Where-Object { $_ -ne $null })
@@ -4693,6 +4789,30 @@ function Invoke-PimManagerCsvPut {
     # Explicit operator acknowledgement for the empty-set / large-delta guard.
     $confirmDestructive = $false
     if ($body -and ($null -ne $body.confirm) -and ("$($body.confirm)" -ieq 'true' -or "$($body.confirm)" -eq '1' -or $body.confirm -eq $true)) { $confirmDestructive = $true }
+    # CONFIG-1.2 / §96.2: an UNDO is this same commit (every gate below applies), labelled with the commit it reverses --
+    # journaled as Source 'undo' + UndoOf. Optional; absent = a normal commit. Server-side role check (D3): SuperAdmin may
+    # undo every commit, an Admin only one they initiated, a delegated administrator none.
+    $undoOf = ''
+    $undoProp = if ($body) { $body.PSObject.Properties['undoOf'] } else { $null }
+    if ($undoProp -and "$($undoProp.Value)".Trim()) {
+        $undoOf = Resolve-PimCommitUndoId -Value $undoProp.Value
+        if (-not $undoOf) {
+            Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{ ok = $false; base = $base; gate = 'undo'; error = 'undoOf is not a valid commit id. Nothing was saved.' })
+            return 400
+        }
+        $undoRole = Get-PimManagerRole
+        $undoEntries = @()
+        try { $undoEntries = @(Get-PimCommitJournalEntries -ConnectionString $script:PimSqlCs -CommitId $undoOf) } catch { $undoEntries = @() }
+        $undoAcc = if ($delegCtx -and $delegCtx.isDelegated) { @{ canSee = $false; reason = 'A delegated administrator cannot undo a commit (CONFIG-1.2).' } }
+                   else { Get-PimCommitUndoAccess -Role "$($undoRole.role)" -Identity "$($undoRole.identity)" -Entries $undoEntries }
+        if (-not $undoEntries.Count -or -not $undoAcc.canSee) {
+            $uSt = if (-not $undoEntries.Count) { 404 } else { 403 }
+            $uMsg = if (-not $undoEntries.Count) { "Commit $undoOf is not in the change journal, so it cannot be undone. Nothing was saved." } else { "$($undoAcc.reason) Nothing was saved." }
+            Write-PimManagerAuditEvent -Action 'config.undo' -Target $base -Result 'denied' -After ([ordered]@{ undoOf = $undoOf; reason = $uMsg })
+            Write-JsonResponse -Response $resp -Status $uSt -Body ([ordered]@{ ok = $false; base = $base; gate = 'undo'; undoOf = $undoOf; error = $uMsg })
+            return $uSt
+        }
+    }
 
     # Diff against current state (SQL or CSV) for the audit log AND the
     # pre-commit snapshot ([M1]). Capture header too, so an undo restores
@@ -4809,6 +4929,58 @@ function Invoke-PimManagerCsvPut {
     if ($base -eq 'Account-Definitions-Admins' -and (Get-Command Get-PimAdminDisableHolds -ErrorAction SilentlyContinue)) {
         $adh = Get-PimAdminDisableHolds -Before @($current.rows) -After @($rowsOrdered) -Base $base
         $offboardHolds = @($adh.holds)
+        # Section 96.5 D1 (a): AccountStatus=Deleted (delete the ACCOUNT) is a SuperAdmin decision -- the GUI hides the
+        # button for anyone else, and this is the server half: a commit from a lower role that stages it is refused whole.
+        $delHeld = @($offboardHolds | Where-Object { $_ -and $_.fields -and "$($_.fields['AccountStatus'])".Trim() -ieq 'Deleted' })
+        # Operator 2026-10-06: "Delegated operators too, within their level" / "a helpdesk peson on level 2 can not delete an
+        # admin on level 1 or 0" -- Test-PimPortalCanDeleteAdmin per admin (SuperAdmin any; Admin any; a delegated operator only
+        # at-or-below its level / tier ceiling). One refused admin refuses the commit whole -- nothing is saved.
+        $__delDenied = @()
+        if ($delHeld.Count -gt 0) {
+            $__isSa = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'); $__isAdm = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+            $__prof = if ($callerScope -is [System.Collections.IDictionary]) { $callerScope['profile'] } elseif ($callerScope -and $callerScope.PSObject.Properties['profile']) { $callerScope.profile } else { $null }
+            $__curByKey = @{}; foreach ($__r in @($current.rows)) { $__k = "$(Get-PimStoreRowKey -Base $base -Row $__r)".Trim().ToLowerInvariant(); if ($__k) { $__curByKey[$__k] = $__r } }
+            foreach ($__d in $delHeld) {
+                $__row = $__curByKey["$($__d.key)".Trim().ToLowerInvariant()]
+                if ($null -eq $__row) { $__delDenied += "$($__d.upn): a new row cannot be deleted"; continue }
+                $__ok = if (Get-Command Test-PimPortalCanDeleteAdmin -ErrorAction SilentlyContinue) { Test-PimPortalCanDeleteAdmin -Profile $(if ($__isSa -or ($__isAdm -and -not $__prof)) { $null } else { $__prof }) -AdminRow $__row -IsSuperAdmin:$__isSa -IsAdmin:($__isAdm -and -not $__prof) } else { [pscustomobject]@{ allowed = $__isSa; reason = 'SuperAdmin only (the rule could not be loaded)' } }
+                if (-not $__ok.allowed) { $__delDenied += "$($__d.upn): $($__ok.reason)" }
+            }
+        }
+        if ($__delDenied.Count -gt 0) {
+            Write-JsonResponse -Response $resp -Status 403 -Body ([ordered]@{ ok = $false; base = $base; gate = 'delete-level'
+                error = "Delete account refused -- nothing was saved: $($__delDenied -join '; ')"
+                denied = @($__delDenied) })
+            return 403
+        }
+        # Operator 2026-10-06 ("i am still not able to offboard", with self-approval ON): when ApprovalSelfApprove is ON the
+        # committer IS the approver -- the disabling change (offboard, Removed, Deleted) is committed directly, never parked,
+        # and each one is audited as self-approved. OFF (the default) keeps the second-person hold below.
+        $__selfApprove = $false
+        try { $__sa = Get-PimManagerSettingObject -Name 'ApprovalSelfApprove'; if ($__sa -and $__sa.PSObject.Properties['enabled']) { $__selfApprove = [bool]$__sa.enabled } } catch { $__selfApprove = $false }
+        # Operator 2026-10-06: "when an operator makes a delete, it is approved". A SuperAdmin's Delete account (typed DELETE in
+        # the Manager) IS the approval: it is never parked for a second person, whatever ApprovalSelfApprove says. The held
+        # Deleted values are put back onto the rows to store, and each delete is audited as operator-approved.
+        if ($delHeld.Count -gt 0) {   # every one passed Test-PimPortalCanDeleteAdmin above (a refusal returned 403)
+            $__byKey = @{}
+            for ($__i = 0; $__i -lt @($adh.rows).Count; $__i++) { $__k = "$(Get-PimStoreRowKey -Base $base -Row $adh.rows[$__i])".Trim().ToLowerInvariant(); if ($__k) { $__byKey[$__k] = $__i } }
+            foreach ($__d in $delHeld) {
+                $__k = "$($__d.key)".Trim().ToLowerInvariant()
+                if ($__byKey.ContainsKey($__k)) {
+                    $__row = $adh.rows[$__byKey[$__k]]
+                    foreach ($__c in @($__d.fields.Keys)) { if ($__row -is [System.Collections.IDictionary]) { $__row[$__c] = $__d.fields[$__c] } else { $__row | Add-Member -NotePropertyName $__c -NotePropertyValue $__d.fields[$__c] -Force } }
+                }
+                try { Write-PimManagerAuditEvent -Action 'admin.delete.operator-approved' -Target "$($__d.upn)" -Result 'ok' -After ([ordered]@{ base = $base; fields = $__d.fields; approvedBy = 'the operator who deleted it (operator decision 2026-10-06)' }) } catch { }
+            }
+            $offboardHolds = @($offboardHolds | Where-Object { -not ($_ -and $_.fields -and "$($_.fields['AccountStatus'])".Trim() -ieq 'Deleted') })
+            if ($offboardHolds.Count -eq 0) { $rowsOrdered = @($adh.rows); $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered -Base $base }
+        }
+        if ($__selfApprove -and $offboardHolds.Count -gt 0) {
+            foreach ($__h in $offboardHolds) {
+                try { Write-PimManagerAuditEvent -Action 'admin.offboard.self-approved' -Target "$($__h.upn)" -Result 'ok' -After ([ordered]@{ base = $base; fields = $__h.fields; kind = "$($__h.kind)"; selfApproved = $true }) } catch { }
+            }
+            $offboardHolds = @()
+        }
         if ($offboardHolds.Count -gt 0) {
             # Scope first: a held row outside the caller's portal scope is refused exactly as a write would be,
             # so no approval is ever raised against an admin the caller may not manage.
@@ -4838,7 +5010,8 @@ function Invoke-PimManagerCsvPut {
                     note = "'$($h.upn)' is a NEW admin row carrying $what, which would disable an existing account on the next engine run. The row was NOT saved: add the admin without it, then offboard it through the approval." }
             } else {
                 $hUpn = $(if ("$($h.upn)".Trim()) { "$($h.upn)".Trim() } else { "$($h.key)" })   # the row key (UserName) when no UPN
-            $r = Request-PimManagerOffboardHold -Upn $hUpn -What $what -Justification $just -Ticket $tick -Requestor "$((Get-PimManagerRole).identity)" -Via "review-save $base"
+            $r = Request-PimManagerOffboardHold -Upn $hUpn -What $what -Justification $just -Ticket $tick -Requestor "$((Get-PimManagerRole).identity)" -Via "review-save $base" `
+                    -HeldFields $h.fields -RequestorRole "$((Get-PimManagerRole).role)"
             }
             $r['kind'] = "$($h.kind)"; $r['held'] = $h.fields
             Write-PimManagerAuditEvent -Action 'admin.commit.offboard-held' -Target "$($h.upn)" -Result $(if ($r.approvalRaised) { 'ok' } else { 'denied' }) -After ([ordered]@{ held = $h.fields; kind = "$($h.kind)"; approvalRaised = [bool]$r.approvalRaised; approvalId = "$($r.approvalId)"; via = "review-save $base" })
@@ -5033,7 +5206,7 @@ function Invoke-PimManagerCsvPut {
     # transactional apply, automatic rollback-to-snapshot on any failure.
     $mcApprover = if ($mc -and "$($mc.gate)" -eq 'approved' -and $mc.approval) { "$($mc.approval.approver)" } else { '' }
     try {
-        $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode -Classification $spClass -Approver $mcApprover
+        $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode -Classification $spClass -Approver $mcApprover -Source $(if ($undoOf) { 'undo' } else { $commitSource }) -UndoOf $undoOf
     } catch {
         # The store was left exactly as before (snapshot restored). Surface
         # the clear error so the operator sees the commit was reversed.
@@ -5050,6 +5223,16 @@ function Invoke-PimManagerCsvPut {
     }
     Write-PimMutationLog -BaseName $base -Adds $diff.adds.Count -Removes $diff.removes.Count -Modifies $diff.modifies.Count -NewRowCount $rowsOrdered.Count -Diff $diff `
         -Concurrency $concurrencyNote -ScopeMerged:([bool]$slice.filtered) -Classification $spClass -Approver $mcApprover -CommitId "$($commitRes.commitId)"
+    # CONFIG-1.2: AUDIT-1 action config.undo -- which commit this one reverses, under the new commit's id.
+    if ($undoOf) {
+        try { Write-PimManagerAuditEvent -Action 'config.undo' -Target $base -Result 'ok' -After ([ordered]@{ undoOf = $undoOf; commitId = "$($commitRes.commitId)"; adds = $diff.adds.Count; removes = $diff.removes.Count; modifies = $diff.modifies.Count }) }
+        catch { Write-Warning "  [undo] the undo of $undoOf landed, but its config.undo audit event was not written: $($_.Exception.Message)" }
+    }
+    # CONFIG-1.4: AUDIT-1 action config.restore -- a commit of rows staged from a configuration backup.
+    if ($commitSource -eq 'restore') {
+        Write-PimManagerAuditEvent -Action 'config.restore' -Target $base -CorrelationId "$($commitRes.commitId)" -Result 'ok' `
+            -After ([ordered]@{ backupId = $restoreFrom; commitId = "$($commitRes.commitId)"; adds = $diff.adds.Count; removes = $diff.removes.Count; modifies = $diff.modifies.Count })
+    }
     # §70.21: start the engine now (debounced, so a multi-entity commit starts one run; the container takes
     # longer to start than the remaining entity writes, and a running tick re-checks between its jobs).
     if (($diff.adds.Count + $diff.removes.Count + $diff.modifies.Count) -gt 0) { try { [void](Start-PimManagerTickNow -Reason "commit:$base") } catch { } }
@@ -5076,6 +5259,7 @@ function Invoke-PimManagerCsvPut {
         rowsHash   = $newRowsHash
         concurrency = $concurrencyNote
     }
+    if ($undoOf) { $putOut['undoOf'] = $undoOf }   # CONFIG-1.2
     # BUG-190: the rest of the commit landed; the disabling value(s) were held for the offboard approval.
     # 202 (Accepted, not all applied) so no caller mistakes it for "everything I sent is now stored".
     $putStatus = 200
@@ -7981,6 +8165,101 @@ function Invoke-PimActiveAssignmentRevokeBatch {
     return $results.ToArray()
 }
 
+function Get-PimManagerOffboardHeldIntent {
+    <#
+      PURE. Section 96.5 D1 -- WHAT an approved offboard request stages, read from the detail Request-PimManagerOffboardHold
+      stored with it. A request with no detail (every request raised before this, the Approvals form, the owner page)
+      keeps the old outcome: AutoDisableDate = now. Only the two D1 statuses are carried: a held Removed is staged as
+      Removed (so "Remove from PIM" is still Removed after the approval, not a plain offboard), and a held Deleted ONLY when
+      a SuperAdmin raised the request (otherwise the plain offboard -- a disable -- and it says so). Every other held value
+      (Disabled, Revoked, a date, Lifecycle) keeps the existing outcome, AutoDisableDate = now, unchanged.
+      Returns @{ accountStatus = '' | Removed | Deleted; stripDelegations; note }.
+    #>
+    param([AllowNull()][object]$Detail)
+    $get = {
+        param($o, $n)
+        if ($null -eq $o) { return $null }
+        if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { return $o[$n] }; return $null }
+        $p = $o.PSObject.Properties[$n]; if ($p) { return $p.Value }; return $null
+    }
+    $held = & $get $Detail 'held'
+    $st = "$(& $get $held 'AccountStatus')".Trim()
+    $strip = ("$(& $get $Detail 'stripDelegations')".Trim() -match '^(?i)(true|1|yes)$')
+    $role = "$(& $get $Detail 'requestorRole')".Trim()
+    $out = [ordered]@{ accountStatus = ''; stripDelegations = [bool]$strip; note = '' }
+    if ($st -ieq 'Removed') { $out.accountStatus = 'Removed' }
+    elseif ($st -ieq 'Deleted') {
+        if ($role -ieq 'SuperAdmin') { $out.accountStatus = 'Deleted' }
+        else { $out.note = 'the request asked to DELETE the account but was not raised by a SuperAdmin -- staged as a plain offboard (disable) instead' }
+    }
+    return [pscustomobject]$out
+}
+
+function Get-PimManagerAdminDelegationRows {
+    # PURE. The PIM-Assignments-Admins rows (delegations) that name this admin -- Username is the UPN or the short UserName,
+    # case-insensitive -- minus rows already marked Action = Remove. The same match the GUI's acctStageStatus uses.
+    param([string]$Upn = '', [string]$UserName = '', [object[]]$Rows = @())
+    $u = "$Upn".Trim().ToLowerInvariant()
+    $n = "$UserName".Trim().ToLowerInvariant(); if (-not $n -and $u) { $n = ($u -split '@')[0] }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $who = @("$($r.Username)", "$($r.UserName)", "$($r.UserPrincipalName)") | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ }
+        if (-not @($who | Where-Object { ($u -and $_ -eq $u) -or ($n -and $_ -eq $n) }).Count) { continue }
+        if ("$($r.Action)".Trim() -ieq 'Remove') { continue }
+        $out.Add($r)
+    }
+    return @($out.ToArray())
+}
+
+function Get-PimManagerAdminRemovalPlan {
+    <#
+      PURE. Section 96.5 D1 -- the operator REST routes:
+        DELETE /api/admin-accounts/<upn>            (a) delete the ACCOUNT          -> AccountStatus = Deleted
+        POST   /api/admin-accounts/remove-from-pim  (b) remove the admin from PIM   -> AccountStatus = Removed (disabled, kept)
+      Both strip every delegation. Neither writes anything: the route raises the OFFBOARD approval with this plan, and the
+      approved request stages it for commit (Get-PimManagerOffboardHeldIntent). The Manager never calls Graph for either.
+      Gates (status, nothing raised): role (a: SuperAdmin; b: Admin or SuperAdmin) 403; the explicit confirm token
+      (a: DELETE; b: REMOVE) 400; a UPN 400; a justification (the approver reads it) 400; no admin row 404; already in that
+      state 409.
+    #>
+    param(
+        [Parameter(Mandatory)][ValidateSet('delete', 'remove')][string]$Mode,
+        [AllowEmptyString()][string]$Upn = '',
+        [AllowEmptyString()][string]$Role = '',
+        [AllowEmptyString()][string]$Confirm = '',
+        [AllowEmptyString()][string]$Justification = '',
+        [object[]]$AdminRows = @(),
+        [object[]]$AssignmentRows = @()
+    )
+    $isDel = ($Mode -eq 'delete')
+    $target = $(if ($isDel) { 'Deleted' } else { 'Removed' })
+    $token  = $(if ($isDel) { 'DELETE' } else { 'REMOVE' })
+    $res = [ordered]@{ status = 0; error = ''; upn = "$Upn".Trim(); userName = ''; accountStatus = $target; currentStatus = ''; heldFields = [ordered]@{ AccountStatus = $target }; delegations = @() }
+    $allowed = $(if ($isDel) { @('SuperAdmin') } else { @('Admin', 'SuperAdmin') })
+    if (@($allowed | Where-Object { $_ -ieq "$Role".Trim() }).Count -eq 0) {
+        $res.status = 403; $res.error = $(if ($isDel) { 'SuperAdmin role required to delete an admin account.' } else { 'Admin role required to remove an admin from PIM.' }); return [pscustomobject]$res
+    }
+    if ("$Confirm".Trim() -cne $token) {
+        $res.status = 400; $res.error = "confirmation required: send confirm = '$token' (in the body, or the X-PIM-Confirm header) -- nothing was requested."; return [pscustomobject]$res
+    }
+    if (-not $res.upn) { $res.status = 400; $res.error = 'userPrincipalName is required.'; return [pscustomobject]$res }
+    if (-not "$Justification".Trim()) {
+        $res.status = 400; $res.error = 'a justification is required -- the request is held for the offboard approval, and the approving administrator reads it.'; return [pscustomobject]$res
+    }
+    $found = Find-PimManagerOffboardAdminRow -Target $res.upn -Rows @($AdminRows)
+    if (-not $found.row) { $res.status = 404; $res.error = "'$($res.upn)' is not a managed admin account in this store."; return [pscustomobject]$res }
+    $row = $found.row
+    $res.upn = $(if ("$($row.UserPrincipalName)".Trim()) { "$($row.UserPrincipalName)".Trim() } else { $res.upn })
+    $res.userName = "$($row.UserName)".Trim()
+    $cur = "$($row.AccountStatus)".Trim(); $res.currentStatus = $cur
+    if ($cur -ieq $target) { $res.status = 409; $res.error = "'$($res.upn)' is already AccountStatus=$target -- nothing to request."; return [pscustomobject]$res }
+    if (-not $isDel -and $cur -ieq 'Deleted') { $res.status = 409; $res.error = "'$($res.upn)' is already marked for DELETE (AccountStatus=Deleted) -- Remove from PIM would not change that."; return [pscustomobject]$res }
+    $res.delegations = @(Get-PimManagerAdminDelegationRows -Upn $res.upn -UserName $res.userName -Rows @($AssignmentRows))
+    $res.status = 202
+    return [pscustomobject]$res
+}
+
 function Find-PimManagerOffboardAdminRow {
     # PURE. The ONE Account-Definitions-Admins row an approved offboard target names (UPN or UserName,
     # case-insensitive). Zero or several matches return an error, never a guess.
@@ -8014,13 +8293,16 @@ function New-PimManagerOffboardQueueInvoker {
         [string]$By = '',
         [scriptblock]$ReadRows = { param($entity) @(Get-PimSqlRows -ConnectionString (Get-PimManagerStoreCs) -Entity $entity) },
         [scriptblock]$Enqueue  = { param($change) Add-PimSqlQueueChange -ConnectionString (Get-PimManagerStoreCs) -Change $change },
-        [datetime]$NowUtc = [datetime]::UtcNow
+        [datetime]$NowUtc = [datetime]::UtcNow,
+        # Section 96.5 D1: the approval request's detail (Get-PimManagerOffboardHeldIntent) -- a held AccountStatus is staged
+        # as that status, and stripDelegations stages every delegation of the admin as a targeted removal (Action = Remove).
+        [AllowNull()][object]$Detail = $null
     )
     # 🪤 NOT a .GetNewClosure(): a closure runs in a fresh module scope that cannot see this script's
     # functions (Get-PimStoreRowKey, New-PimChange, ...). The context lives in script scope instead;
     # the Manager is single-threaded, so one approval executes at a time.
     $state = @{ queued = $false; queueId = ''; error = '' }
-    $script:PimOffboardQueueCtx = @{ RequestId = $RequestId; By = $By; ReadRows = $ReadRows; Enqueue = $Enqueue; NowUtc = $NowUtc; State = $state }
+    $script:PimOffboardQueueCtx = @{ RequestId = $RequestId; By = $By; ReadRows = $ReadRows; Enqueue = $Enqueue; NowUtc = $NowUtc; State = $state; Detail = $Detail }
     $invoker = {
         param($Step, $Target)
         $ctxQ = $script:PimOffboardQueueCtx; $state = $ctxQ.State; $ReadRows = $ctxQ.ReadRows; $Enqueue = $ctxQ.Enqueue
@@ -8035,15 +8317,43 @@ function New-PimManagerOffboardQueueInvoker {
         }
         $row = [ordered]@{}
         foreach ($p in $found.row.PSObject.Properties) { $row[$p.Name] = $p.Value }
-        $row['AutoDisableDate'] = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        # Section 96.5 D1: the request says WHAT was held. A held Removed (or a SuperAdmin's Deleted) is staged as exactly
+        # that -- the row keeps its other columns -- otherwise the plain offboard, unchanged: AutoDisableDate = now.
+        # Remove from PIM therefore stays Removed (disabled and kept) after the approval.
+        $intent = [pscustomobject]@{ accountStatus = ''; stripDelegations = $false; note = '' }   # no detail = the plain offboard
+        if ($null -ne $ctxQ.Detail) { $intent = Get-PimManagerOffboardHeldIntent -Detail $ctxQ.Detail }
+        $who = $(if ("$By".Trim()) { "$By" } else { 'unknown' })
+        if ($intent.accountStatus) { $row['AccountStatus'] = $intent.accountStatus }
+        else { $row['AutoDisableDate'] = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
         $key = Get-PimStoreRowKey -Base 'Account-Definitions-Admins' -Row ([pscustomobject]$row)
         if (-not $key) { $state.error = "the admin row for '$t' has no UserName -- it cannot be addressed in the store"; return [pscustomobject]@{ ok = $false; detail = $state.error } }
+        $what = $(if ($intent.accountStatus) { "AccountStatus=$($intent.accountStatus)" } else { 'mark for offboarding' })
         $change = New-PimChange -Entity 'Account-Definitions-Admins' -Key $key -Op 'Update' -Payload ([pscustomobject]$row) `
-                    -By $(if ("$By".Trim()) { "$By" } else { 'unknown' }) -Kind 'DesiredState' -Origin 'Authorised' `
-                    -Justification "approved offboard (approval request $RequestId): mark $t for offboarding"
+                    -By $who -Kind 'DesiredState' -Origin 'Authorised' `
+                    -Justification "approved offboard (approval request $RequestId): $what for $t"
         & $Enqueue $change
         $state.queued = $true; $state.queueId = "$($change.id)"
-        return [pscustomobject]@{ ok = $true; detail = "queued: AutoDisableDate set on the admin row (queue entry $($change.id)) -- commit it in Pending changes; the engine disables the account on its next run (PIM never deletes an account)" }
+        # The delegations (the REST routes ask for this; the GUI committed its removals itself): each becomes a targeted
+        # removal (Action = Remove), the same shape a deleted assignment row takes on commit (ConvertTo-PimManagerTargetedRemovals).
+        $nStrip = 0
+        if ($intent.stripDelegations) {
+            foreach ($ar in @(Get-PimManagerAdminDelegationRows -Upn "$($found.row.UserPrincipalName)" -UserName "$($found.row.UserName)" -Rows @(& $ReadRows 'PIM-Assignments-Admins'))) {
+                $rm = [ordered]@{}
+                if ($ar -is [System.Collections.IDictionary]) { foreach ($k in @($ar.Keys)) { $rm[$k] = $ar[$k] } } else { foreach ($p in $ar.PSObject.Properties) { $rm[$p.Name] = $p.Value } }
+                $rm['Action'] = 'Remove'
+                $ak = Get-PimStoreRowKey -Base 'PIM-Assignments-Admins' -Row ([pscustomobject]$rm)
+                if (-not $ak) { continue }
+                & $Enqueue (New-PimChange -Entity 'PIM-Assignments-Admins' -Key $ak -Op 'Update' -Payload ([pscustomobject]$rm) -By $who -Kind 'DesiredState' -Origin 'Authorised' `
+                              -Justification "approved offboard (approval request $RequestId): remove the delegation $ak of $t")
+                $nStrip++
+            }
+        }
+        $state['delegationsQueued'] = $nStrip
+        $tail = $(if ($intent.stripDelegations) { "; $nStrip delegation(s) queued for removal" } else { '' }) + $(if ($intent.note) { " ($($intent.note))" } else { '' })
+        if ($intent.accountStatus) {
+            return [pscustomobject]@{ ok = $true; detail = "queued: AccountStatus=$($intent.accountStatus) on the admin row (queue entry $($change.id))$tail -- commit it in Pending changes; the engine acts on its next run" }
+        }
+        return [pscustomobject]@{ ok = $true; detail = "queued: AutoDisableDate set on the admin row (queue entry $($change.id))$tail -- commit it in Pending changes; the engine disables the account on its next run (PIM never deletes an account)" }
     }
     return [pscustomobject]@{ Invoker = $invoker; State = $state }
 }
@@ -8738,6 +9048,129 @@ function Handle-Request {
             Write-PimManagerAuditEvent -Action 'settings.audit-retention.save' -Target 'AuditRetentionMonths' -Result 'ok' -Before @{ months = $before } -After @{ months = $want }
             Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; months = $want }
             return 200
+        }
+        # -------------------------------------------------------------------
+        # CONFIG-1.3 / 1.4 (framework) / PIM §96.3 + §96.4 -- configuration BACKUP and PICK-WHAT-YOU-RESTORE (PIM-ConfigBackup.ps1).
+        #   GET  /api/config-backups                      (Admin+)      the backups, the retention, what this role may do
+        #   POST /api/config-backups                      (Admin+)      "Back up now" { note? }
+        #   POST /api/config-backups/<id>/pin             (Admin+ pin, SuperAdmin unpin) { pinned }
+        #   GET  /api/config-backups/<id>/diff            (SuperAdmin)  the backup against NOW, per entity / row / field
+        #   POST /api/config-backups/<id>/restore-settings (SuperAdmin) { names } -- per setting, old -> new, audited config.restore
+        #   GET/PUT /api/settings/config-backup-retention  (GET Admin+, PUT SuperAdmin) ConfigBackupRetentionDays (default 90)
+        # Rows are NEVER restored here: the page stages them as pending changes and the normal commit writes them (PUT
+        # /api/csv/<base> with source 'restore' -> journal Source 'restore', SuperAdmin only -- Invoke-PimManagerCsvPut).
+        if ($path -eq '/api/settings/config-backup-retention' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $acc = Get-PimConfigBackupAccess -Role "$((Get-PimManagerRole).role)"
+            if (-not $acc.list) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to read the backup retention.' }; return 403 }
+            $d = 90; try { $d = Get-PimConfigBackupRetentionDays -ConnectionString (Get-PimManagerSettingCs) } catch { $d = 90 }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ days = $d; default = 90; minimum = 1; maximum = 3650; canWrite = [bool]$acc.retention }
+            return 200
+        }
+        if ($path -eq '/api/settings/config-backup-retention' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            $acc = Get-PimConfigBackupAccess -Role "$((Get-PimManagerRole).role)"
+            if (-not $acc.retention) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change how long configuration backups are kept.' }; return 403 }
+            $sb = Read-RequestJson -Request $req
+            $want = 90
+            try { $want = ConvertTo-PimConfigBackupRetentionDays $(if ($sb -and $sb.PSObject.Properties['days']) { $sb.days } else { $null }) }
+            catch { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($_.Exception.Message)" }; return 400 }
+            $cs = Get-PimManagerSettingCs
+            $before = 90; try { $before = Get-PimConfigBackupRetentionDays -ConnectionString $cs } catch { }
+            Set-PimSqlSetting -ConnectionString $cs -Name 'ConfigBackupRetentionDays' -ValueJson ("$want")
+            Write-PimManagerAuditEvent -Action 'settings.config-backup-retention.save' -Target 'ConfigBackupRetentionDays' -Result 'ok' -Before @{ days = $before } -After @{ days = $want }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; days = $want }
+            return 200
+        }
+        if ($path -eq '/api/config-backups' -and ($method -eq 'GET' -or $method -eq 'POST')) {
+            $script:lastHeartbeat = Get-Date
+            $cbRole = Get-PimManagerRole
+            $acc = Get-PimConfigBackupAccess -Role "$($cbRole.role)"
+            if (-not $acc.list) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required for configuration backups.' }; return 403 }
+            if (-not (Get-Command New-PimConfigBackup -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'the configuration backup library (PIM-ConfigBackup.ps1) is not loaded in this Manager' }; return 501 }
+            $cs = Get-PimManagerSettingCs
+            [void](Initialize-PimConfigBackupStore -ConnectionString $cs)
+            if ($method -eq 'POST') {
+                $sb = Read-RequestJson -Request $req
+                $note = if ($sb -and $sb.PSObject.Properties['note']) { "$($sb.note)".Trim() } else { '' }
+                if ($note.Length -gt 400) { $note = $note.Substring(0, 400) }
+                $me = Get-PimManagerRecordedActor -Who "$($cbRole.identity)"
+                try {
+                    $r = New-PimConfigBackup -ConnectionString $cs -TakenBy $me -Trigger 'manual' -Version "$(Get-PimSolutionVersion)" -Note $note
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; backup = $r })
+                    return 200
+                } catch {
+                    Write-PimManagerAuditEvent -Action 'config.backup' -Target 'pim.ConfigBackups' -After @{ trigger = 'manual'; error = "$($_.Exception.Message)" } -Result 'error'
+                    Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the backup was NOT taken: $($_.Exception.Message)" }
+                    return 500
+                }
+            }
+            $fmt = { param($t) if ($t -is [datetime]) { ([datetime]::SpecifyKind($t, [DateTimeKind]::Utc)).ToString('yyyy-MM-ddTHH:mm:ssZ') } elseif ($null -eq $t) { '' } else { "$t" } }
+            $list = @(Get-PimConfigBackupList -ConnectionString $cs | ForEach-Object {
+                $mf = $null; if ("$($_.ManifestJson)".Trim()) { try { $mf = $_.ManifestJson | ConvertFrom-Json } catch { $mf = $null } }
+                [ordered]@{ backupId = "$($_.BackupId)"; takenUtc = (& $fmt $_.TakenUtc); takenBy = "$($_.TakenBy)"; trigger = "$($_.Trigger)"; version = "$($_.Version)"
+                            pinned = [bool]$_.Pinned; pinnedBy = "$($_.PinnedBy)"; noChange = [bool]$_.NoChange; sameAs = "$($_.SameAs)"
+                            entities = [int]$_.Entities; items = [int]$_.Items; bytes = [int]$_.Bytes; note = "$($_.Note)"
+                            excludedSettings = @($(if ($mf) { @($mf.excludedSettings) } else { @() })); redactedCount = $(if ($mf) { @($mf.redacted).Count } else { 0 }) }
+            })
+            $days = Get-PimConfigBackupRetentionDays -ConnectionString $cs
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ backups = $list; retentionDays = $days; access = $acc; role = "$($cbRole.role)" })
+            return 200
+        }
+        if ($path -match '^/api/config-backups/([\w\.-]+)/pin$' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            $cbId = $Matches[1]
+            $cbRole = Get-PimManagerRole
+            $acc = Get-PimConfigBackupAccess -Role "$($cbRole.role)"
+            $sb = Read-RequestJson -Request $req
+            $want = -not ($sb -and $sb.PSObject.Properties['pinned'] -and "$($sb.pinned)" -match '(?i)^(false|0|no)$')
+            if ($want -and -not $acc.pin) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to pin a backup.' }; return 403 }
+            if (-not $want -and -not $acc.unpin) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to unpin a backup (an unpinned backup is removed after the retention).' }; return 403 }
+            $note = if ($sb -and $sb.PSObject.Properties['note']) { "$($sb.note)".Trim() } else { '' }
+            $ok = Set-PimConfigBackupPinned -ConnectionString (Get-PimManagerSettingCs) -BackupId $cbId -Pinned $want -By (Get-PimManagerRecordedActor -Who "$($cbRole.identity)") -Note $note
+            if (-not $ok) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "no backup $cbId" }; return 404 }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; backupId = $cbId; pinned = $want }
+            return 200
+        }
+        if ($path -match '^/api/config-backups/([\w\.-]+)/diff$' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $cbId = $Matches[1]
+            $acc = Get-PimConfigBackupAccess -Role "$((Get-PimManagerRole).role)"
+            if (-not $acc.diff) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to restore from a configuration backup.' }; return 403 }
+            try {
+                $df = Get-PimConfigBackupDiff -ConnectionString (Get-PimManagerSettingCs) -BackupId $cbId
+                if (-not $df) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "no backup $cbId" }; return 404 }
+                $bases = @($script:PimCsvBases | ForEach-Object { "$($_.base)" })
+                $view = @(ConvertTo-PimConfigBackupDiffView -Entities $df.entities -RestorableBases $bases)
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; backupId = $cbId; source = "$($df.backup.source)"; entities = $view })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the backup could not be compared: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+        if ($path -match '^/api/config-backups/([\w\.-]+)/restore-settings$' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            $cbId = $Matches[1]
+            $acc = Get-PimConfigBackupAccess -Role "$((Get-PimManagerRole).role)"
+            if (-not $acc.restore) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to restore from a configuration backup.' }; return 403 }
+            $sb = Read-RequestJson -Request $req
+            $names = @(if ($sb -and $sb.PSObject.Properties['names']) { @($sb.names) | ForEach-Object { "$_" } } else { @() })
+            if (-not $names.Count) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'nothing ticked -- pick the settings to restore' }; return 400 }
+            $cs = Get-PimManagerSettingCs
+            $bk = Get-PimConfigBackupContent -ConnectionString $cs -BackupId $cbId
+            if (-not $bk) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "no backup $cbId" }; return 404 }
+            $rs = Invoke-PimConfigBackupSettingsRestore -Backup $bk -Names $names `
+                -Reader { param($n) Get-PimManagerSetting -Name $n } `
+                -Writer { param($n, $j)
+                    # $null = the setting did not exist in the backup: cleared (NULL), never '' (a [string] parameter turns $null into '').
+                    if ($null -eq $j) { Set-PimSqlSetting -ConnectionString $cs -Name $n -Value $null } else { Set-PimSqlSetting -ConnectionString $cs -Name $n -ValueJson $j }
+                    $v = $null; if ($null -ne $j) { try { $v = $j | ConvertFrom-Json } catch { $v = $j } }
+                    try { Update-PimManagerSettingMirror -Name $n -Value $v } catch { } } `
+                -Audit { param($n, $b, $a) Write-PimManagerAuditEvent -Action 'config.restore' -Target "settings:$n" -Before @{ value = $b } -After @{ value = $a; backupId = $cbId } -Result 'ok' }
+            $st = if (@($rs.errors).Count) { 500 } else { 200 }
+            Write-JsonResponse -Response $resp -Status $st -Body ([ordered]@{ ok = (-not @($rs.errors).Count); backupId = $cbId; written = @($rs.written); skipped = @($rs.skipped); errors = @($rs.errors) })
+            return $st
         }
 
         if ($path -eq '/api/tenant-lists' -and $method -eq 'GET') {
@@ -9712,7 +10145,9 @@ function Handle-Request {
                         return 409
                     }
                 }
-                $qInv = New-PimManagerOffboardQueueInvoker -RequestId $apprId -By "$(Get-PimManagerActor)"
+                # Section 96.5 D1: the request's detail says what was held (Removed / a SuperAdmin's Deleted / strip delegations).
+                $apprDetail = $(if ($apprRec -and $apprRec.PSObject.Properties['detail']) { $apprRec.detail } else { $null })
+                $qInv = New-PimManagerOffboardQueueInvoker -RequestId $apprId -By "$(Get-PimManagerActor)" -Detail $apprDetail
                 $res = Invoke-PimOffboardExecution -RequestId $apprId -ConfirmBulk:$confirmBulk -ActionInvoker $qInv.Invoker `
                          -Desired $desired -DesiredResolved $true -ToDisable 1 -Scanned ([Math]::Max(1, @($desired).Count))
                 if (-not $res.request) {
@@ -10010,7 +10445,95 @@ function Handle-Request {
                 if ($gs -is [string]) { $gs = $gs | ConvertFrom-Json }
                 if ($gs) { $gl = @($gs.PSObject.Properties | ForEach-Object { $_.Value } | Sort-Object { "$($_.lastSeenUtc)" } -Descending) }
             } catch { $gl = @() }
-            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ guards = @($gl); total = @($gl).Count })
+            # §96.6 / GUARD-1.6: the Guards page -- every guard, its state, what it holds now (plan hash + items), its releases.
+            $gHolds = @(); $gRels = @(); $gCat = @(); $gSecond = $false; $gReadErr = ''
+            if (Get-Command Get-PimGuardsView -ErrorAction SilentlyContinue) {
+                try { $gHolds = @(Get-PimGuardHolds -Fresh); $gRels = @(Get-PimGuardReleases) } catch { $gReadErr = "$($_.Exception.Message)" }
+                try { $gCat = @(Get-PimGuardsView -Trips $gl -Holds $gHolds -Releases $gRels) } catch { $gReadErr = "$($_.Exception.Message)" }
+                $gSecond = [bool](Test-PimGuardReleaseSecondPersonOn)
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ guards = @($gl); total = @($gl).Count
+                catalog = @($gCat); holds = @($gHolds); releases = @($gRels); secondPerson = $gSecond
+                canRelease = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin'); me = "$((Get-PimManagerRole).identity)"
+                neverReleasable = @($(if (Get-Command Get-PimGuardNeverReleasable -ErrorAction SilentlyContinue) { Get-PimGuardNeverReleasable }))
+                readError = $gReadErr })
+            return 200
+        }
+        # §96.6 / GUARD-1.6: second person for a guard release (CONFIG-1.5 / D5) -- default OFF. GET any role, PUT SuperAdmin, audited.
+        if ($path -eq '/api/settings/guard-release-second-person' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $sp = $null; try { $sp = Get-PimManagerSettingObject -Name 'GuardReleaseSecondPerson' } catch { $sp = $null }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ enabled = [bool]($sp -and $sp.enabled); by = "$(if ($sp) { $sp.by })"; atUtc = "$(if ($sp) { $sp.atUtc })"; canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') })
+            return 200
+        }
+        if ($path -eq '/api/settings/guard-release-second-person' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change who must approve a guard release.' }; return 403 }
+            $body = Read-RequestJson -Request $req
+            if ($null -eq $body -or -not $body.PSObject.Properties['enabled']) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'enabled (true / false) is required' }; return 400 }
+            $before = $null; try { $before = Get-PimManagerSettingObject -Name 'GuardReleaseSecondPerson' } catch { $before = $null }
+            $val = [ordered]@{ enabled = [bool]$body.enabled; by = "$((Get-PimManagerRole).identity)"; atUtc = [datetime]::UtcNow.ToString('o') }
+            try { Set-PimManagerSettingObject -Name 'GuardReleaseSecondPerson' -Value $val }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the setting was NOT saved: $($_.Exception.Message)" }; return 500 }
+            Write-PimManagerAuditEvent -Action 'settings.guard-release-second-person' -Target 'GuardReleaseSecondPerson' -Before $before -After $val -Result 'ok'
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; enabled = [bool]$body.enabled })
+            return 200
+        }
+        # POST /api/guards/<guardId>/release { scope, planHash, mode: one-run|until, untilUtc, reason } -- SuperAdmin, audited.
+        # POST /api/guards/<guardId>/release/<releaseId>/approve -- the second person (a DIFFERENT SuperAdmin), audited.
+        # DELETE /api/guards/<guardId>/release/<releaseId> -- revoke, SuperAdmin, audited.
+        if ($path -match '^/api/guards/([a-z0-9][a-z0-9.-]{0,99})/release(?:/([0-9a-fA-F-]{36})(/approve)?)?$' -and $method -in @('POST', 'DELETE')) {
+            $script:lastHeartbeat = Get-Date
+            $gId = $Matches[1].ToLowerInvariant(); $rId = "$($Matches[2])"; $isApprove = [bool]$Matches[3]
+            if (-not (Get-Command New-PimGuardRelease -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = 'the guard release library is not loaded' }; return 500 }
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to release a guard.' }; return 403 }
+            $me = "$((Get-PimManagerRole).identity)"; $myRole = "$((Get-PimManagerRole).role)"
+            $now = [datetime]::UtcNow
+            # Read once, write with compare-and-set: an engine run that consumed a release in between is never overwritten.
+            $relText = $null
+            try { $relText = Get-PimGuardStoreText -Name 'GuardReleases'; $all = @(ConvertFrom-PimGuardList -Value $relText -Prop 'releases') }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the releases could not be read: $($_.Exception.Message)" }; return 500 }
+            $changedMeanwhile = 'The guard releases changed while you were saving (an engine run may have used one). Reload the Guards page and try again.'
+            if ($method -eq 'POST' -and -not $rId) {
+                $body = Read-RequestJson -Request $req
+                if ($null -eq $body) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'a JSON body is required' }; return 400 }
+                $scope = "$($body.scope)".Trim(); $mode = "$($body.mode)".Trim().ToLowerInvariant(); if (-not $mode) { $mode = 'one-run' }
+                if ($mode -notin @('one-run', 'until')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "mode must be 'one-run' or 'until'" }; return 400 }
+                $hold = $null; try { $hold = Get-PimGuardHold -Holds @(Get-PimGuardHolds -Fresh) -GuardId $gId -Scope $scope } catch { $hold = $null }
+                try {
+                    $rec = New-PimGuardRelease -GuardId $gId -Scope $scope -PlanHash "$($body.planHash)" -Hold $hold -Mode $mode -UntilUtc $body.untilUtc -Reason "$($body.reason)" `
+                        -By $me -Role $myRole -SecondPerson ([bool](Test-PimGuardReleaseSecondPersonOn)) -NowUtc $now
+                } catch {
+                    $msg = "$($_.Exception.Message)"
+                    $code = if ($msg -match 'does not match|holds nothing') { 409 } else { 400 }
+                    Write-PimManagerAuditEvent -Action 'guard.release' -Target $gId -After @{ scope = $scope; planHash = "$($body.planHash)"; mode = $mode; reason = "$($body.reason)" } -Result 'refused'
+                    Write-JsonResponse -Response $resp -Status $code -Body @{ ok = $false; error = $msg }; return $code
+                }
+                $w = 0
+                try { $w = Save-PimGuardReleases -Releases (@($all) + @($rec)) -NowUtc $now -ExpectedText $relText -Cas }
+                catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the release was NOT stored: $($_.Exception.Message)" }; return 500 }
+                if ([int]$w -ne 1) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; error = $changedMeanwhile }; return 409 }
+                Write-PimManagerAuditEvent -Action 'guard.release' -Target $gId -After $rec -Result 'ok'
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; release = $rec
+                    note = $(if ("$($rec.status)" -eq 'pending') { 'Waiting for a second SuperAdmin to approve it (Guards page).' } elseif ($rec.mode -eq 'one-run') { 'Released for the next run that holds exactly this plan.' } else { "Released until $($rec.expiresUtc) for exactly this plan." }) })
+                return 200
+            }
+            $cur = @($all | Where-Object { "$($_.id)" -eq $rId -and "$($_.guardId)" -eq $gId })
+            if (-not $cur.Count) { Write-JsonResponse -Response $resp -Status 404 -Body @{ ok = $false; error = "no release $rId of $gId" }; return 404 }
+            try {
+                $upd = if ($isApprove -and $method -eq 'POST') { Approve-PimGuardRelease -Release $cur[0] -By $me -Role $myRole -NowUtc $now }
+                       elseif (-not $isApprove -and $method -eq 'DELETE') { Revoke-PimGuardRelease -Release $cur[0] -By $me -Role $myRole -NowUtc $now }
+                       else { throw 'REFUSED -- use POST .../approve or DELETE .../<releaseId>.' }
+            } catch {
+                Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 409
+            }
+            $next = @($all | ForEach-Object { if ("$($_.id)" -eq $rId) { $upd } else { $_ } })
+            $w = 0
+            try { $w = Save-PimGuardReleases -Releases $next -NowUtc $now -ExpectedText $relText -Cas }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "NOT stored: $($_.Exception.Message)" }; return 500 }
+            if ([int]$w -ne 1) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; error = $changedMeanwhile }; return 409 }
+            Write-PimManagerAuditEvent -Action $(if ($isApprove) { 'guard.release.approve' } else { 'guard.release.revoke' }) -Target $gId -Before $cur[0] -After $upd -Result 'ok'
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; release = $upd })
             return 200
         }
         if ($path -eq '/api/jobs' -and $method -eq 'GET') {
@@ -10100,6 +10623,84 @@ function Handle-Request {
             $global:PIM_JobSchedule = @($merged.ToArray())   # live in-process runner picks it up
             Write-PimManagerAuditEvent -Action 'schedule.job.state' -Target "job:$name" -After @{ enabled = $en; intervalMinutes = $iv } -Result 'ok'
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; name = $name; enabled = $en; intervalMinutes = $iv })
+            return 200
+        }
+
+        # ----- 96.5: the DAILY RECONCILE -- pause / resume + the removal report ---------------------------------------
+        # GET  /api/reconcile/state  (any role)    -> the pause (who / since / why / until), the banner, the removal mode and
+        #                                             the last removal report (would remove N, held by rule X).
+        # POST /api/reconcile/pause  { reason, untilUtc? }  SuperAdmin, reason required, audited 'reconcile.pause'.
+        # POST /api/reconcile/resume { reason? }            SuperAdmin, audited 'reconcile.resume'.
+        # Decision D4: a pause stops ONLY the daily reconcile -- commits, deltas and Run now still apply. The scheduler reads
+        # pim.Settings 'ReconcilePause' right before it runs 'full-reconcile' (PIM-ReconcileRemoval.ps1).
+        if ($path -eq '/api/reconcile/state' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Test-PimReconcilePauseActive -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'the reconcile library (PIM-ReconcileRemoval.ps1) is not loaded' }
+                return 501
+            }
+            try {
+                $rcs = Get-PimManagerSettingCs
+                $st = Get-PimSqlSetting -ConnectionString $rcs -Name (Get-PimReconcilePauseSettingName)
+                $pz = Test-PimReconcilePauseActive -State $st -NowUtc ([datetime]::UtcNow)
+                $modeRaw = $null; try { $modeRaw = Get-PimSqlSetting -ConnectionString $rcs -Name 'ReconcileRemovalMode' } catch { $modeRaw = $null }
+                $rep = $null; try { $rep = Get-PimReconcileRemovalReport -ConnectionString $rcs } catch { $rep = $null }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                    job = (Get-PimReconcileJobName); pause = $pz; paused = [bool]$pz.paused; banner = "$($pz.banner)"
+                    removalMode = (ConvertTo-PimReconcileRemovalMode -Value $modeRaw); report = $rep
+                    canPause = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+                    note = 'A pause stops only the daily reconcile; commits, deltas and Run now still apply.' })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the reconcile state could not be read: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+        if (($path -eq '/api/reconcile/pause' -or $path -eq '/api/reconcile/resume') -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            $isPause = ($path -eq '/api/reconcile/pause')
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = ('SuperAdmin role required to {0} the daily reconcile.' -f $(if ($isPause) { 'pause' } else { 'resume' })) }
+                return 403
+            }
+            if (-not (Get-Command New-PimReconcilePauseState -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'the reconcile library (PIM-ReconcileRemoval.ps1) is not loaded' }
+                return 501
+            }
+            $body = Read-RequestJson -Request $req
+            $who = "$((Get-PimManagerRole).identity)".Trim(); if (-not $who) { $who = 'unknown' }
+            $now = [datetime]::UtcNow
+            $rcs = $null
+            try { $rcs = Get-PimManagerSettingCs } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }; return 500 }
+            $cur = $null; try { $cur = Get-PimSqlSetting -ConnectionString $rcs -Name (Get-PimReconcilePauseSettingName) } catch { $cur = $null }
+            $curA = Test-PimReconcilePauseActive -State $cur -NowUtc $now
+            if ($isPause) {
+                if ($curA.paused) {
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{ error = "The daily reconcile is already paused: $($curA.banner). Resume it first to pause it again with another reason."; pause = $curA }
+                    return 409
+                }
+                $reason = if ($body -and $body.PSObject.Properties['reason']) { "$($body.reason)" } else { '' }
+                $until = if ($body -and $body.PSObject.Properties['untilUtc']) { "$($body.untilUtc)" } else { '' }
+                try { $new = New-PimReconcilePauseState -By $who -Reason $reason -UntilUtc $until -NowUtc $now }
+                catch { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($_.Exception.Message)" }; return 400 }
+                $action = 'reconcile.pause'
+            } else {
+                if (-not $curA.paused) {
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{ error = $(if ($curA.lapsed) { 'The pause has already lapsed (its until-time passed); the daily reconcile runs again.' } else { 'The daily reconcile is not paused.' }); pause = $curA }
+                    return 409
+                }
+                $new = New-PimReconcileResumeState -Current $cur -By $who -Reason $(if ($body -and $body.PSObject.Properties['reason']) { "$($body.reason)" } else { '' }) -NowUtc $now
+                $action = 'reconcile.resume'
+            }
+            try { Set-PimSqlSetting -ConnectionString $rcs -Name (Get-PimReconcilePauseSettingName) -Value ([pscustomobject]$new) }
+            catch {
+                Write-PimManagerAuditEvent -Action $action -Target "job:$(Get-PimReconcileJobName)" -Before $cur -After $new -Result 'error'
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the pause state could NOT be stored: $($_.Exception.Message)" }
+                return 500
+            }
+            Write-PimManagerAuditEvent -Action $action -Target "job:$(Get-PimReconcileJobName)" -Before $cur -After $new -Result 'ok'
+            $after = Test-PimReconcilePauseActive -State ([pscustomobject]$new) -NowUtc $now
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; paused = [bool]$after.paused; pause = $after; banner = "$($after.banner)" })
             return 200
         }
 
@@ -12000,6 +12601,76 @@ function Handle-Request {
         # revoke. An arbitrary UPN in the body is refused; only an admin this caller may manage can
         # be modified, and the scope filter (§35.3) decides that where a portal profile exists.
         # ------------------------------------------------------------------
+        # Section 96.5 D1 (operator 2026-10-06: "deletion of admins in a operator controlled action (delete in gui or via api)"):
+        #   DELETE /api/admin-accounts/<upn>            (a) delete the ACCOUNT -- SuperAdmin, confirm = 'DELETE'
+        #   POST   /api/admin-accounts/remove-from-pim  (b) remove the admin from PIM (disabled + kept) -- Admin+, confirm = 'REMOVE'
+        # Body: { confirm, justification, ticket } (+ userPrincipalName for (b)); the confirm token may also come in the
+        # X-PIM-Confirm header. NOTHING IS WRITTEN HERE and the Manager makes NO directory call: the route raises the
+        # OFFBOARD approval carrying the plan (AccountStatus Deleted / Removed + strip every delegation). A DIFFERENT
+        # administrator approves and executes it on Approvals, which stages exactly that change for commit
+        # (New-PimManagerOffboardQueueInvoker); the engine acts on its next run -- for (a) Remove-PimAdminAccountApproved,
+        # the one guarded account delete; for (b) the ordinary disable path, with the row KEPT as Removed.
+        $admRemoveMode = ''
+        if ($method -eq 'DELETE' -and $path -match '^/api/admin-accounts/([^/]+)$') { $admRemoveMode = 'delete' }
+        elseif ($method -eq 'POST' -and $path -eq '/api/admin-accounts/remove-from-pim') { $admRemoveMode = 'remove' }
+        if ($admRemoveMode) {
+            $script:lastHeartbeat = Get-Date
+            $admPathUpn = $(if ($admRemoveMode -eq 'delete') { [uri]::UnescapeDataString("$($Matches[1])") } else { '' })
+            if (-not (Test-PimManagerRoleAtLeast -Minimum $(if ($admRemoveMode -eq 'delete') { 'SuperAdmin' } else { 'Admin' }))) {
+                $why = $(if ($admRemoveMode -eq 'delete') { 'SuperAdmin role required to delete an admin account.' } else { 'Admin role required to remove an admin from PIM.' })
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = $why }
+                return 403
+            }
+            $bodyIn = Read-RequestJson -Request $req
+            $admUpn = $(if ($admRemoveMode -eq 'delete') { $admPathUpn } else { "$(if ($bodyIn) { $bodyIn.userPrincipalName })".Trim() })
+            $admConfirm = "$(if ($bodyIn -and $bodyIn.PSObject.Properties['confirm']) { $bodyIn.confirm })".Trim()
+            if (-not $admConfirm) { $admConfirm = "$($req.Headers['X-PIM-Confirm'])".Trim() }
+            $admJust = "$(if ($bodyIn) { $bodyIn.justification })".Trim()
+            $admTicket = "$(if ($bodyIn) { $bodyIn.ticket })".Trim()
+            $cs = Get-PimManagerStoreCs
+            if (-not $cs -or -not (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no SQL store is wired in this host, so the request cannot be checked against the admin rows.' }
+                return 503
+            }
+            $role = Get-PimManagerRole
+            $admRows = @(); $asgRows = @()
+            try { $admRows = @(Get-PimSqlRows -ConnectionString $cs -Entity 'Account-Definitions-Admins') } catch { $admRows = @() }
+            try { $asgRows = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Assignments-Admins') } catch { $asgRows = @() }
+            # Section 35.3 -- an admin the caller may not manage answers exactly like an unknown one (404).
+            if ($admUpn -and (Get-Command Test-PimPortalCanManageAdmin -ErrorAction SilentlyContinue)) {
+                $prof = $null
+                if (Get-Command Read-PimPortalProfiles -ErrorAction SilentlyContinue) { try { $prof = Get-PimPortalProfile -Profiles (Read-PimPortalProfiles) -Identity "$($role.identity)" } catch { $prof = $null } }
+                if (-not (Test-PimPortalCanManageAdmin -Profile $prof -AdminName $admUpn -IsSuperAdmin:("$($role.role)" -eq 'SuperAdmin'))) {
+                    Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "'$admUpn' is not a managed admin account in this store." }
+                    return 404
+                }
+            }
+            $plan = Get-PimManagerAdminRemovalPlan -Mode $admRemoveMode -Upn $admUpn -Role "$($role.role)" -Confirm $admConfirm -Justification $admJust -AdminRows $admRows -AssignmentRows $asgRows
+            if ($plan.status -eq 404 -and $admUpn -and @(Get-PimManagerCentralAdminRows | Where-Object { "$($_.UserPrincipalName)".Trim() -ieq $admUpn }).Count) {
+                Write-JsonResponse -Response $resp -Status 409 -Body @{ error = "'$admUpn' is a CENTRAL admin managed by the managing tenant -- it is read-only here. Remove or delete it on the managing tenant." }
+                return 409
+            }
+            if ($plan.status -ne 202) {
+                Write-JsonResponse -Response $resp -Status $plan.status -Body @{ error = "$($plan.error)" }
+                return [int]$plan.status
+            }
+            $verbTxt = $(if ($admRemoveMode -eq 'delete') { 'Delete account' } else { 'Remove from PIM' })
+            $hold = Request-PimManagerOffboardHold -Upn $plan.upn -What "$verbTxt (AccountStatus '$($plan.accountStatus)', $(@($plan.delegations).Count) delegation(s) removed)" `
+                        -Justification $admJust -Ticket $admTicket -Requestor "$($role.identity)" -Via "api $method $path" `
+                        -HeldFields $plan.heldFields -StripDelegations -RequestorRole "$($role.role)"
+            $auditAction = $(if ($admRemoveMode -eq 'delete') { 'admin.delete.requested' } else { 'admin.remove-from-pim.requested' })
+            Write-PimManagerAuditEvent -Action $auditAction -Target $plan.upn -Result $(if ($hold.approvalRaised) { 'ok' } else { 'denied' }) `
+                -Before ([ordered]@{ accountStatus = "$($plan.currentStatus)" }) `
+                -After ([ordered]@{ accountStatus = "$($plan.accountStatus)"; delegations = @($plan.delegations).Count; approvalRaised = [bool]$hold.approvalRaised; approvalId = "$($hold.approvalId)"; by = "$($role.identity)"; via = 'api' })
+            $st = $(if ($hold.approvalRaised) { 202 } else { 409 })
+            $outBody = [ordered]@{ ok = [bool]$hold.approvalRaised; action = $(if ($admRemoveMode -eq 'delete') { 'delete-account' } else { 'remove-from-pim' })
+                upn = $plan.upn; accountStatus = $plan.accountStatus; delegations = @($plan.delegations).Count
+                directory = 'unchanged -- the Manager makes no directory call; the engine acts after the approval is executed and committed' }
+            foreach ($k in $hold.Keys) { if (-not $outBody.Contains($k)) { $outBody[$k] = $hold[$k] } }
+            Write-JsonResponse -Response $resp -Status $st -Body $outBody
+            return $st
+        }
+
         if ($path -eq '/api/admin-accounts/modify' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
@@ -14494,6 +15165,13 @@ function Handle-Request {
         # §88 COMMIT WATCHER: the recent commits with a live state per changed key (saved / applied / live / waiting /
         # failed / stored). ?since=<ISO> limits to commits at or after it; ?id=<commit id> returns one. Read-only, every role
         # that can see the Manager (it names only entities + row keys the reader already sees in the grids).
+        # CONFIG-1.2 / §96.2 COMMIT HISTORY + UNDO (read side). The list and one commit's rows with the undo plan, from the
+        # change journal. ROLE-FILTERED HERE, not in the page (D3): SuperAdmin = every commit; Admin = only commits they
+        # initiated (and only their own rows are undoable); Delegated / Reader = 403. The undo itself is staged in the
+        # page and committed through PUT /api/csv/<base> with undoOf -- every commit gate applies; nothing is written here.
+        # (/api/commits is the §88 commit WATCHER; this is the journal history.)
+        if ($path -eq '/api/commit-history' -and $method -eq 'GET') { return (Invoke-PimManagerCommitHistoryGet -path $path -req $req -resp $resp) }
+        if ($path -match '^/api/commit-history/[A-Za-z0-9_\-]+$' -and $method -eq 'GET') { return (Invoke-PimManagerCommitHistoryGet -path $path -req $req -resp $resp) }
         if ($path -eq '/api/commits' -and $method -eq 'GET') {
             $cs = (Get-PimManagerStoreCs)
             if (-not $cs -or -not (Get-Command Get-PimCommitWatchStatus -ErrorAction SilentlyContinue)) {

@@ -410,6 +410,58 @@ function Test-PimPortalCanManageAdmin {
     return ($managed -contains "$AdminName".ToLowerInvariant())
 }
 
+function Get-PimAdminPrivilegeLevel {
+    <#
+      PURE. An admin row's level / tier as ints (0 = most privileged), or $null when unknown: the row's own Level / TierLevel /
+      Tier first ('L2' / 'T1' / '2'), else the display name's convention "(Admin, Cloud, ID, L0, T0)".
+    #>
+    param([Parameter(Mandatory)][object]$Row)
+    $get = { param($n) if ($Row -is [System.Collections.IDictionary]) { "$($Row[$n])" } elseif ($Row.PSObject.Properties[$n]) { "$($Row.$n)" } else { '' } }
+    $num = { param($v, $prefix) $s = "$v".Trim(); if ($s -match "^(?i)${prefix}?(\d+)$") { return [int]$Matches[1] }; return $null }
+    $lvl = & $num (& $get 'Level') 'L'
+    $tier = & $num (& $get 'TierLevel') 'T'; if ($null -eq $tier) { $tier = & $num (& $get 'Tier') 'T' }
+    $dn = (& $get 'DisplayName')
+    if ($null -eq $lvl -and $dn -match '\bL(\d)\b') { $lvl = [int]$Matches[1] }
+    if ($null -eq $tier -and $dn -match '\bT(\d)\b') { $tier = [int]$Matches[1] }
+    return [pscustomobject]@{ level = $lvl; tier = $tier }
+}
+
+function Test-PimPortalCanDeleteAdmin {
+    <#
+      §96.5 D1 (operator 2026-10-06): "of couse a helpdesk peson on level 2 can not delete an admin on level 1 or 0" -- and
+      "Delegated operators too, within their level". May this caller DELETE this admin account?
+        * SuperAdmin: yes.            * Admin role without a delegated profile: yes (an administrator of the whole tenant).
+        * a delegated operator (portal profile): only with the account-operation right on that admin
+          (Test-PimPortalCanManageAdmin) AND the admin is at-or-below the profile's ceilings -- admin.level >= levelMax and,
+          when the profile has one, admin.tier >= tierMax (0 = most privileged). A profile without a level ceiling, or an admin
+          whose level / tier cannot be read where a ceiling applies, is REFUSED (fail closed).
+      Returns @{ allowed; reason }.
+    #>
+    param([AllowNull()][object]$Profile, [Parameter(Mandatory)][object]$AdminRow, [switch]$IsSuperAdmin, [switch]$IsAdmin)
+    if ($IsSuperAdmin) { return [pscustomobject]@{ allowed = $true; reason = 'SuperAdmin' } }
+    if ($null -eq $Profile) {
+        if ($IsAdmin) { return [pscustomobject]@{ allowed = $true; reason = 'Admin' } }
+        return [pscustomobject]@{ allowed = $false; reason = 'no administrator role and no delegated profile' }
+    }
+    $g = { param($n) if ($AdminRow -is [System.Collections.IDictionary]) { "$($AdminRow[$n])" } elseif ($AdminRow.PSObject.Properties[$n]) { "$($AdminRow.$n)" } else { '' } }
+    $name = (& $g 'UserPrincipalName'); if (-not $name.Trim()) { $name = (& $g 'UserName') }
+    $nameShort = (& $g 'UserName'); if (-not $nameShort.Trim()) { $nameShort = ($name -split '@')[0] }
+    if (-not ((Test-PimPortalCanManageAdmin -Profile $Profile -AdminName $name) -or (Test-PimPortalCanManageAdmin -Profile $Profile -AdminName $nameShort))) {
+        return [pscustomobject]@{ allowed = $false; reason = "your profile may not act on '$name' (manage-account / managed admins)" }
+    }
+    $lvMax = $null; if ($Profile.PSObject.Properties['levelMax'] -and "$($Profile.levelMax)".Trim() -ne '') { $n = 0; if ([int]::TryParse("$($Profile.levelMax)", [ref]$n)) { $lvMax = $n } }
+    $tiMax = $null; if ($Profile.PSObject.Properties['tierMax'] -and "$($Profile.tierMax)".Trim() -ne '') { $n = 0; if ([int]::TryParse("$($Profile.tierMax)", [ref]$n)) { $tiMax = $n } }
+    if ($null -eq $lvMax) { return [pscustomobject]@{ allowed = $false; reason = 'your profile has no level ceiling, so it cannot delete admin accounts' } }
+    $p = Get-PimAdminPrivilegeLevel -Row $AdminRow
+    if ($null -eq $p.level) { return [pscustomobject]@{ allowed = $false; reason = "the level of '$name' cannot be read -- not deleted (fail closed)" } }
+    if ($p.level -lt $lvMax) { return [pscustomobject]@{ allowed = $false; reason = "'$name' is level L$($p.level), above your level L$lvMax -- a level-$lvMax operator cannot delete it" } }
+    if ($null -ne $tiMax) {
+        if ($null -eq $p.tier) { return [pscustomobject]@{ allowed = $false; reason = "the tier of '$name' cannot be read -- not deleted (fail closed)" } }
+        if ($p.tier -lt $tiMax) { return [pscustomobject]@{ allowed = $false; reason = "'$name' is tier T$($p.tier), above your tier T$tiMax" } }
+    }
+    return [pscustomobject]@{ allowed = $true; reason = "within your ceiling (L$lvMax$(if ($null -ne $tiMax) { "/T$tiMax" }))" }
+}
+
 function Select-PimPortalVisibleRows {
     # Filter definition rows to those a profile can SEE. $IsSuperAdmin -> all.
     param([AllowNull()][object]$Profile, [object[]]$Rows = @(), [string]$Base, [switch]$IsSuperAdmin)

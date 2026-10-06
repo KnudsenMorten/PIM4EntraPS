@@ -16,6 +16,16 @@
   An unreadable ledger prunes nothing (fail safe).
 
   Test seam: $global:PIM_ManagedKeysStore = @{} keeps the ledger in memory (scope -> @{ key -> $true }) instead of SQL.
+  A value may also be a hashtable @{ confirmedUtc; commitId; sourceEntity; sourceKey } (a CONFIRMED key, below).
+
+  96.5 decision D2 (operator 2026-10-06): "matched" = RECOGNISED, which is NOT enough for the daily reconcile to remove a
+  leftover. The ledger therefore also says whether a key is CONFIRMED: ConfirmedUtc + CommitId (+ the store row it came
+  from, SourceEntity / SourceKey, so the reconcile can find that row's journal history). A key is confirmed ONLY when
+    (a) PIM CREATED it (the create applied), or
+    (b) a FULL live read after a PIM commit saw it live, where that commit's create had failed (the applied outcome
+        recorded 'failed' -- the platform took the request although the call errored).
+  A key PIM only MATCHED (it existed before PIM, was imported, or answered "already exists") is never confirmed.
+  Additive schema only: the columns are added to a table from an earlier build, never changed.
 #>
 
 function Get-PimManagedKeysDdl {
@@ -25,8 +35,16 @@ CREATE TABLE pim.ManagedKeys (
     Scope         NVARCHAR(50)  NOT NULL,
     [Key]         NVARCHAR(400) NOT NULL,
     FirstSeenUtc  DATETIME2     NOT NULL CONSTRAINT DF_ManagedKeys_First DEFAULT SYSUTCDATETIME(),
+    ConfirmedUtc  DATETIME2     NULL,
+    CommitId      NVARCHAR(64)  NULL,
+    SourceEntity  NVARCHAR(100) NULL,
+    SourceKey     NVARCHAR(400) NULL,
     CONSTRAINT PK_pim_ManagedKeys PRIMARY KEY (Scope, [Key])
 );
+IF COL_LENGTH('pim.ManagedKeys','ConfirmedUtc') IS NULL ALTER TABLE pim.ManagedKeys ADD ConfirmedUtc DATETIME2 NULL;
+IF COL_LENGTH('pim.ManagedKeys','CommitId') IS NULL ALTER TABLE pim.ManagedKeys ADD CommitId NVARCHAR(64) NULL;
+IF COL_LENGTH('pim.ManagedKeys','SourceEntity') IS NULL ALTER TABLE pim.ManagedKeys ADD SourceEntity NVARCHAR(100) NULL;
+IF COL_LENGTH('pim.ManagedKeys','SourceKey') IS NULL ALTER TABLE pim.ManagedKeys ADD SourceKey NVARCHAR(400) NULL;
 "@
 }
 
@@ -56,7 +74,7 @@ function Update-PimManagedKeys {
     $r = @(@($Remove) | ForEach-Object { Get-PimManagedKeyNorm $_ } | Where-Object { $_ } | Select-Object -Unique)
     if ($global:PIM_ManagedKeysStore -is [hashtable]) {
         if (-not $global:PIM_ManagedKeysStore.ContainsKey($s)) { $global:PIM_ManagedKeysStore[$s] = @{} }
-        foreach ($k in $a) { $global:PIM_ManagedKeysStore[$s][$k] = $true }
+        foreach ($k in $a) { if (-not $global:PIM_ManagedKeysStore[$s].ContainsKey($k)) { $global:PIM_ManagedKeysStore[$s][$k] = $true } }
         foreach ($k in $r) { [void]$global:PIM_ManagedKeysStore[$s].Remove($k) }
         return [pscustomobject]@{ added = $a.Count; removed = $r.Count }
     }
@@ -121,4 +139,94 @@ function Get-PimManagedKeysDelta {
         foreach ($k in @($Ledger.Keys)) { if (-not $live.ContainsKey($k) -and -not $seen.ContainsKey($k)) { $rem[$k] = $true } }
     }
     return [pscustomobject]@{ add = $add.ToArray(); remove = @($rem.Keys) }
+}
+
+function ConvertTo-PimManagedKeyRecord {
+    <# PURE. One ledger entry as a record (the in-memory value may be $true or a hashtable; a SQL row has the columns). #>
+    param([string]$Key, [AllowNull()][object]$Value)
+    $f = { param($n) if ($Value -is [System.Collections.IDictionary]) { $Value[$n] } elseif ($null -ne $Value -and $Value -isnot [bool] -and $Value.PSObject.Properties[$n]) { $Value.$n } else { $null } }
+    $nz = { param($v) if ($null -eq $v -or $v -is [DBNull] -or "$v".Trim() -eq '') { $null } else { $v } }
+    $conf = & $nz (& $f 'confirmedUtc'); if ($null -eq $conf) { $conf = & $nz (& $f 'ConfirmedUtc') }
+    $cid = & $nz (& $f 'commitId'); if ($null -eq $cid) { $cid = & $nz (& $f 'CommitId') }
+    $se = & $nz (& $f 'sourceEntity'); if ($null -eq $se) { $se = & $nz (& $f 'SourceEntity') }
+    $sk = & $nz (& $f 'sourceKey'); if ($null -eq $sk) { $sk = & $nz (& $f 'SourceKey') }
+    return [pscustomobject]@{ key = (Get-PimManagedKeyNorm $Key); confirmedUtc = $conf; commitId = $(if ($null -ne $cid) { "$cid" } else { '' })
+                              sourceEntity = $(if ($null -ne $se) { "$se" } else { '' }); sourceKey = $(if ($null -ne $sk) { "$sk" } else { '' })
+                              confirmed = ($null -ne $conf) }
+}
+
+function Get-PimManagedKeyRecords {
+    <#
+      96.5 / D2. The scope's ledger WITH its provenance: @{ key(lower) -> record { key; confirmed; confirmedUtc; commitId;
+      sourceEntity; sourceKey } }. THROWS when it cannot be read (the reconcile then removes nothing). A store from before
+      this build (no table, or no columns yet) reads as unconfirmed keys -- never as confirmed.
+    #>
+    param([string]$ConnectionString, [Parameter(Mandatory)][string]$Scope)
+    $s = "$Scope".Trim().ToLowerInvariant()
+    $h = @{}
+    if ($global:PIM_ManagedKeysStore -is [hashtable]) {
+        if ($global:PIM_ManagedKeysStore.ContainsKey($s)) { foreach ($k in @($global:PIM_ManagedKeysStore[$s].Keys)) { $h[$k] = ConvertTo-PimManagedKeyRecord -Key $k -Value $global:PIM_ManagedKeysStore[$s][$k] } }
+        return $h
+    }
+    if (-not "$ConnectionString".Trim()) { throw 'no SQL store to read the managed-key ledger from' }
+    $sql = @"
+IF OBJECT_ID('pim.ManagedKeys') IS NOT NULL AND COL_LENGTH('pim.ManagedKeys','ConfirmedUtc') IS NOT NULL
+    EXEC sp_executesql N'SELECT [Key], ConfirmedUtc, CommitId, SourceEntity, SourceKey FROM pim.ManagedKeys WHERE Scope = @s', N'@s NVARCHAR(50)', @s = @s;
+ELSE IF OBJECT_ID('pim.ManagedKeys') IS NOT NULL
+    SELECT [Key], CAST(NULL AS DATETIME2) AS ConfirmedUtc, CAST(NULL AS NVARCHAR(64)) AS CommitId, CAST(NULL AS NVARCHAR(100)) AS SourceEntity, CAST(NULL AS NVARCHAR(400)) AS SourceKey FROM pim.ManagedKeys WHERE Scope = @s;
+"@
+    foreach ($r in @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql $sql -Parameters @{ s = $s })) {
+        if ($r -and "$($r.Key)") { $rec = ConvertTo-PimManagedKeyRecord -Key "$($r.Key)" -Value $r; $h[$rec.key] = $rec }
+    }
+    return $h
+}
+
+function Set-PimManagedKeyConfirmations {
+    <#
+      96.5 / D2. Marks ledger keys CONFIRMED: -Items @(@{ key; commitId; sourceEntity; sourceKey }). A key not in the ledger
+      yet is added confirmed; a key already confirmed keeps its FIRST confirmation (time + commit), only a missing store
+      reference is filled in. Returns the number of items handled. Throws on a store error (the caller warns; a ledger that
+      falls behind only makes the reconcile remove LESS).
+    #>
+    param([string]$ConnectionString, [Parameter(Mandatory)][string]$Scope, [object[]]$Items = @(), [datetime]$NowUtc = [datetime]::UtcNow)
+    $s = "$Scope".Trim().ToLowerInvariant()
+    $f = { param($o, $n) if ($o -is [System.Collections.IDictionary]) { "$($o[$n])" } elseif ($null -ne $o -and $o.PSObject.Properties[$n]) { "$($o.$n)" } else { '' } }
+    $list = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($i in @($Items)) {
+        if ($null -eq $i) { continue }
+        $k = Get-PimManagedKeyNorm (& $f $i 'key'); if (-not $k -or $k.Length -gt 400 -or $seen.ContainsKey($k)) { continue }
+        $seen[$k] = $true
+        $list.Add([ordered]@{ k = $k; c = (& $f $i 'commitId').Trim(); e = (& $f $i 'sourceEntity').Trim(); sk = (& $f $i 'sourceKey').Trim() })
+    }
+    if (-not $list.Count) { return 0 }
+    if ($global:PIM_ManagedKeysStore -is [hashtable]) {
+        if (-not $global:PIM_ManagedKeysStore.ContainsKey($s)) { $global:PIM_ManagedKeysStore[$s] = @{} }
+        foreach ($x in $list) {
+            $cur = $global:PIM_ManagedKeysStore[$s][$x.k]
+            if ($cur -is [System.Collections.IDictionary] -and $cur['confirmedUtc']) {
+                if (-not "$($cur['sourceKey'])" -and $x.sk) { $cur['sourceEntity'] = $x.e; $cur['sourceKey'] = $x.sk }
+                continue
+            }
+            $global:PIM_ManagedKeysStore[$s][$x.k] = @{ confirmedUtc = $NowUtc.ToUniversalTime().ToString('o'); commitId = $x.c; sourceEntity = $x.e; sourceKey = $x.sk }
+        }
+        return $list.Count
+    }
+    if (-not "$ConnectionString".Trim()) { throw 'no SQL store to write the managed-key ledger to' }
+    # The DDL in its own batch: the MERGE below names the new columns, which must exist when it is compiled.
+    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql (Get-PimManagedKeysDdl))
+    $json = ConvertTo-Json -InputObject @($list.ToArray()) -Compress -Depth 4
+    [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Parameters @{ s = $s; j = $json; n = $NowUtc.ToUniversalTime() } -Sql @"
+MERGE pim.ManagedKeys AS t
+USING (SELECT DISTINCT j.k, NULLIF(j.c, '') AS c, NULLIF(j.e, '') AS e, NULLIF(j.sk, '') AS sk
+       FROM OPENJSON(@j) WITH (k NVARCHAR(400) '$.k', c NVARCHAR(64) '$.c', e NVARCHAR(100) '$.e', sk NVARCHAR(400) '$.sk') j) AS x
+   ON t.Scope = @s AND t.[Key] = x.k
+WHEN MATCHED AND (t.ConfirmedUtc IS NULL OR (t.SourceKey IS NULL AND x.sk IS NOT NULL)) THEN UPDATE SET
+    ConfirmedUtc = COALESCE(t.ConfirmedUtc, @n),
+    CommitId     = CASE WHEN t.ConfirmedUtc IS NULL THEN x.c ELSE t.CommitId END,
+    SourceEntity = CASE WHEN t.ConfirmedUtc IS NULL OR t.SourceKey IS NULL THEN x.e ELSE t.SourceEntity END,
+    SourceKey    = CASE WHEN t.ConfirmedUtc IS NULL OR t.SourceKey IS NULL THEN x.sk ELSE t.SourceKey END
+WHEN NOT MATCHED THEN INSERT (Scope, [Key], ConfirmedUtc, CommitId, SourceEntity, SourceKey) VALUES (@s, x.k, @n, x.c, x.e, x.sk);
+"@)
+    return $list.Count
 }

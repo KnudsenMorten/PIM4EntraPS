@@ -25,6 +25,15 @@ $script:PimEngineProviders = @{}   # scope(lower) -> provider hashtable
 if (-not (Get-Command Update-PimCommitOutcomes -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-CommitWatch.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-CommitWatch.ps1') }
 # SEC-80: a prune removes only what PIM manages (the managed-key ledger). Loaded with the core so no run prunes without it.
 if (-not (Get-Command Split-PimPruneByLedger -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1') }
+# §96.6 / GUARD-1.6: releasing a guard (one guard, one scope, one run or until <= 24 h, bound to the plan hash). Loaded with
+# the core so a held plan is always recorded for the Guards page and a release is always honoured.
+if (-not (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-GuardRelease.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-GuardRelease.ps1') }
+# Ledger confirmations (D2) need the newer ledger functions even where an older copy was loaded first.
+if (-not (Get-Command Set-PimManagedKeyConfirmations -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1') }
+# CONFIG-1.1 / 96.1: the applied outcome per row + the per-key commit resolution (BUG-294) read the change journal.
+if (-not (Get-Command Resolve-PimJournalCommitForKey -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-CommitJournal.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-CommitJournal.ps1') }
+# 96.5: the daily reconcile's removal of PIM-managed leftovers (report-only by default) is planned inside the scope pass.
+if (-not (Get-Command Get-PimReconcileRemovalPlan -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-ReconcileRemoval.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-ReconcileRemoval.ps1') }
 
 # ---- pure diff core (testable, no I/O) ------------------------------------
 function Get-PimChangeFieldDiff {
@@ -485,24 +494,20 @@ function Write-PimEngineChangeAudit {
         # attribution index is read once per run. No commit names it (a reconcile, an expiry): the actor stays 'engine'.
         $actor = 'engine'
         $after['jobRun'] = $corr
-        if (Get-Command Resolve-PimChangeAttribution -ErrorAction SilentlyContinue) {
-            try {
-                if ("$($global:PIM_ChangeAttributionRun)" -ne $corr -or $null -eq $global:PIM_ChangeAttributionIndex) {
-                    $acs = if ("$($global:PIM_EngineSqlCs)".Trim()) { "$($global:PIM_EngineSqlCs)" } elseif ("$($global:PIM_SqlConnectionString)".Trim()) { "$($global:PIM_SqlConnectionString)" } else { '' }
-                    $global:PIM_ChangeAttributionIndex = if ($acs) { Get-PimChangeAttributionIndex -ConnectionString $acs } else { @{} }
-                    $global:PIM_ChangeAttributionRun = $corr
-                }
-                $att = Resolve-PimChangeAttribution -Index $global:PIM_ChangeAttributionIndex -Entity $Entity -Row $row
-                if ($att) {
-                    $actor = "$($att.InitiatedBy)"
-                    $after['initiatedBy'] = "$($att.InitiatedBy)"
-                    if ("$($att.ApprovedBy)".Trim()) { $after['approvedBy'] = "$($att.ApprovedBy)" }
-                    $after['commitId'] = "$($att.CommitId)"
-                    $after['appliedBy'] = 'engine'
-                    $corr = "$($att.CommitId)"
-                } else { $after['initiatedBy'] = 'engine (no commit names this change: a scheduled reconcile or an automatic step)' }
-            } catch { $actor = 'engine' }
-        }
+        # BUG-294 (96.1): the commit is resolved per key AND per operation from the change journal (a create credits the
+        # commit that added the row); the latest-wins attribution answers only where the journal does not.
+        try {
+            $att = Resolve-PimEngineChangeCommit -Entity $Entity -Op $Op -Row $row
+            if ($att) {
+                $actor = "$($att.InitiatedBy)"
+                $after['initiatedBy'] = "$($att.InitiatedBy)"
+                if ("$($att.ApprovedBy)".Trim()) { $after['approvedBy'] = "$($att.ApprovedBy)" }
+                $after['commitId'] = "$($att.CommitId)"
+                $after['appliedBy'] = 'engine'
+                $after['commitFrom'] = "$($att.via)"
+                $corr = "$($att.CommitId)"
+            } else { $after['initiatedBy'] = 'engine (no commit names this change: a scheduled reconcile or an automatic step)' }
+        } catch { $actor = 'engine' }
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
             Write-PimAuditEvent -Action $action -Target $target -After $after -Result $Result -Actor $actor -CorrelationId $corr | Out-Null
             return
@@ -514,6 +519,90 @@ function Write-PimEngineChangeAudit {
             Write-PimSqlAuditEvent -ConnectionString $cs -Actor $actor -ActorSource 'engine' -Action $action -Target $target -After $after -Result $Result -CorrelationId $corr
         }
     } catch { Write-Warning ("    [audit] engine change {0} {1} was NOT recorded: {2}" -f $Op, $(if ($Item) { $Item.key } else { '' }), $_.Exception.Message) }
+}
+
+function Get-PimEngineItemStoreRefs {
+    <#
+      The stored row(s) an engine item may have come from, as @(@{ entity; key }): the row's SourceEntity, then the item's
+      entity, each with Get-PimStoreRowKey of the row (the same mapping the attribution uses). Empty when nothing maps.
+    #>
+    param([string]$Entity, [AllowNull()][object]$Row)
+    if ($null -eq $Row -or -not (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)) { return @() }
+    $f = { param($o, $n) if ($o -is [System.Collections.IDictionary]) { "$($o[$n])" } elseif ($o.PSObject.Properties[$n]) { "$($o.$n)" } else { '' } }
+    $bases = New-Object System.Collections.Generic.List[string]
+    $se = (& $f $Row 'SourceEntity').Trim(); if ($se) { $bases.Add($se) }
+    if ("$Entity".Trim() -and -not ($bases -contains "$Entity".Trim())) { $bases.Add("$Entity".Trim()) }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($b in $bases) {
+        $k = ''; try { $k = "$(Get-PimStoreRowKey -Base $b -Row $Row)".Trim() } catch { $k = '' }
+        if ($k) { $out.Add(@{ entity = $b; key = $k }) }
+    }
+    return @($out.ToArray())
+}
+
+function ConvertTo-PimJournalRowArray {
+    # pwsh 7 throws "Argument types do not match" on @() over a List[object] taken from a hashtable -- .ToArray() it.
+    param([AllowNull()][object]$Rows)
+    if ($null -eq $Rows) { return ,@() }
+    if ($Rows -is [System.Collections.Generic.List[object]]) { return ,$Rows.ToArray() }
+    return ,@($Rows)
+}
+
+function Resolve-PimEngineChangeCommit {
+    <#
+      Which commit asked for this change? (96.1 / BUG-294). Reads the change journal (recent window) and the attribution once
+      per engine run (the job's correlation id), then:
+        1. the JOURNAL, per store row the item maps to (Get-PimEngineItemStoreRefs) and per operation
+           (Resolve-PimJournalCommitForKey: a create credits the commit that ADDED the row); for the definitions family
+           also by group tag across every PIM-Definitions-* entity;
+        2. else the latest-wins ATTRIBUTION (pim.ChangeAttribution, incl. the 'name:<GroupName>' alias).
+      Returns { CommitId; InitiatedBy; ApprovedBy; CommittedUtc; Entity; Key; via = journal | attribution } or $null.
+    #>
+    param([string]$Entity, [string]$Op = '', [AllowNull()][object]$Row)
+    if ($null -eq $Row) { return $null }
+    $corr = "$($global:PIM_JobCorrelationId)"
+    $acs = if ("$($global:PIM_EngineSqlCs)".Trim()) { "$($global:PIM_EngineSqlCs)" } elseif ("$($global:PIM_SqlConnectionString)".Trim()) { "$($global:PIM_SqlConnectionString)" } else { '' }
+    if (Get-Command Get-PimCommitJournalKeyIndex -ErrorAction SilentlyContinue) {
+        if ("$($global:PIM_CommitJournalKeyIndexRun)" -ne $corr -or $null -eq $global:PIM_CommitJournalKeyIndex) {
+            $global:PIM_CommitJournalKeyIndex = if ($acs) { Get-PimCommitJournalKeyIndex -ConnectionString $acs } else { @{} }
+            $global:PIM_CommitJournalKeyIndexRun = $corr
+        }
+    }
+    $jix = $global:PIM_CommitJournalKeyIndex
+    if ($jix -is [hashtable] -and $jix.Count -and (Get-Command Resolve-PimJournalCommitForKey -ErrorAction SilentlyContinue)) {
+        $refs = @(Get-PimEngineItemStoreRefs -Entity $Entity -Row $Row)
+        foreach ($ref in $refs) {
+            $h = $jix[("{0}|{1}" -f $ref.entity, $ref.key).ToLowerInvariant()]
+            if ($h) {
+                $j = Resolve-PimJournalCommitForKey -History (ConvertTo-PimJournalRowArray $h) -Op $Op
+                if ($j) { return [pscustomobject]@{ CommitId = "$($j.CommitId)"; InitiatedBy = "$($j.InitiatedBy)"; ApprovedBy = $j.ApprovedBy; CommittedUtc = $j.CommittedUtc; Entity = "$($j.Entity)"; Key = "$($j.Key)"; via = 'journal' } }
+            }
+        }
+        # The definitions family: a policy / owner / AU change names the group, not the definitions entity it is stored in.
+        $rf = { param($n) if ($Row -is [System.Collections.IDictionary]) { "$($Row[$n])" } elseif ($Row.PSObject.Properties[$n]) { "$($Row.$n)" } else { '' } }
+        $fam = @(@((& $rf 'SourceEntity'), "$Entity") | Where-Object { $_ -match '^(?i)PIM-Definitions' })
+        $tag = & $rf 'GroupTag'
+        if ($fam.Count -and "$tag".Trim()) {
+            $best = $null
+            foreach ($ik in @($jix.Keys)) {
+                $parts = $ik.Split('|', 2)
+                if ($parts.Count -eq 2 -and $parts[0] -like 'pim-definitions-*' -and $parts[1] -eq "$tag".Trim().ToLowerInvariant()) {
+                    $j = Resolve-PimJournalCommitForKey -History (ConvertTo-PimJournalRowArray $jix[$ik]) -Op $Op
+                    if ($j -and (-not $best -or [long]$j.Id -gt [long]$best.Id)) { $best = $j }
+                }
+            }
+            if ($best) { return [pscustomobject]@{ CommitId = "$($best.CommitId)"; InitiatedBy = "$($best.InitiatedBy)"; ApprovedBy = $best.ApprovedBy; CommittedUtc = $best.CommittedUtc; Entity = "$($best.Entity)"; Key = "$($best.Key)"; via = 'journal' } }
+        }
+    }
+    if (Get-Command Resolve-PimChangeAttribution -ErrorAction SilentlyContinue) {
+        if ("$($global:PIM_ChangeAttributionRun)" -ne $corr -or $null -eq $global:PIM_ChangeAttributionIndex) {
+            $global:PIM_ChangeAttributionIndex = if ($acs -and (Get-Command Get-PimChangeAttributionIndex -ErrorAction SilentlyContinue)) { Get-PimChangeAttributionIndex -ConnectionString $acs } else { @{} }
+            $global:PIM_ChangeAttributionRun = $corr
+        }
+        $att = Resolve-PimChangeAttribution -Index $global:PIM_ChangeAttributionIndex -Entity $Entity -Row $Row
+        if ($att) { return [pscustomobject]@{ CommitId = "$($att.CommitId)"; InitiatedBy = "$($att.InitiatedBy)"; ApprovedBy = $att.ApprovedBy; CommittedUtc = $att.CommittedUtc; Entity = "$($att.Entity)"; Key = "$($att.Key)"; via = 'attribution' } }
+    }
+    return $null
 }
 
 # ---- orchestrator ---------------------------------------------------------
@@ -530,8 +619,13 @@ function Invoke-PimEngineScope {
         [switch]$WhatIf,
         [switch]$Prune,                              # destructive: actually remove live-not-in-desired (Full only)
         [hashtable]$Context = @{},
-        [object[]]$Changes
+        [object[]]$Changes,
+        # 96.5 purpose 2 -- only the daily reconcile passes it: 'report' plans + reports which PIM-managed leftovers it WOULD
+        # remove (nothing is removed); 'enforce' also removes the ones every rule allows. Empty = not a reconcile.
+        [string]$ReconcileRemoval = ''
     )
+    $__rrMode = "$ReconcileRemoval".Trim().ToLowerInvariant()
+    if ($__rrMode -and $__rrMode -ne 'enforce') { $__rrMode = 'report' }
     $p = Get-PimEngineProvider -Scope $Scope
     if (-not $p) { return [pscustomobject]@{ scope=$Scope; ok=$false; detail="no provider for scope '$Scope'" } }
 
@@ -579,6 +673,9 @@ function Invoke-PimEngineScope {
     # GroupMembers do: Get-PimLiveGroupMembershipsByPrincipal). Full + -Prune always reads everything.
     # Kill switch: NarrowDeltaMembershipReads = false.
     $__narrow = -not (($Mode -eq 'Full') -and $Prune)
+    # 96.5: the reconcile's removal plan looks for leftovers whose rows are GONE, i.e. principals no row names any more -- a
+    # narrowed read would never see them. The daily reconcile reads the whole scope.
+    if ($__rrMode -and $Mode -eq 'Full') { $__narrow = $false }
     if ($__narrow -and (Get-Command Test-PimNarrowDeltaMembershipReadsEnabled -ErrorAction SilentlyContinue) -and -not (Test-PimNarrowDeltaMembershipReadsEnabled)) { $__narrow = $false }
     $Context['__pimLiveNarrow'] = $__narrow
     $Context['__pimLiveNarrowReason'] = "$Mode, no prune"
@@ -608,12 +705,19 @@ function Invoke-PimEngineScope {
     #      a remove-only diff by construction, so the "0 desired = wrong store" heuristic
     #      doesn't apply.
     $doPrune = ($Mode -eq 'Full') -and $Prune
+    # §96.6: what kind of run this is -- a hold is cleared only by the same kind of run that recorded it, and the releases
+    # this run used are returned with the scope result.
+    $__runKind = "$Mode$(if ($Prune) { '+Prune' })$(if ($PSBoundParameters.ContainsKey('Changes') -and $null -ne $Changes) { '+Queue' })"
+    $__guardReleases = New-Object System.Collections.Generic.List[object]
+    $__canRelease = [bool](Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue)
     # GUARD-1 'engine.empty-desired' (2026-10-05): a FULL prune run remembers each scope's desired count, and alerts ONCE
     # when a scope that had definitions now has none while live items remain (gate 2 below then refuses the prune). Plans
     # (-WhatIf) and the remove-only scopes (allowEmptyDesiredPrune) are not counted. Never throws.
+    $__edT = $null
     if ($doPrune -and -not $WhatIf -and -not $p.allowEmptyDesiredPrune -and (Get-Command Invoke-PimEmptyDesiredGuard -ErrorAction SilentlyContinue)) {
-        [void](Invoke-PimEmptyDesiredGuard -Scope $Scope -DesiredCount @($desired).Count -LiveCount @($live).Count)
+        $__edT = Invoke-PimEmptyDesiredGuard -Scope $Scope -DesiredCount @($desired).Count -LiveCount @($live).Count
     }
+    if ($doPrune -and -not $WhatIf -and $__canRelease -and @($desired).Count -gt 0) { [void](Clear-PimGuardHold -GuardId 'engine.empty-desired' -Scope $Scope -RunKind $__runKind) }
     $__emptyDesiredRead = $false
     if ($doPrune -and @($desired).Count -eq 0 -and -not $p.allowEmptyDesiredPrune) {
         # REQ-AU-DRIFT-1 (operator 2026-09-30: "List extras, read-only"): the DRIFT SNAPSHOT may still LIST what is live in a
@@ -624,8 +728,23 @@ function Invoke-PimEngineScope {
             $__emptyDesiredRead = $true
             Write-Host ("[engine] {0,-20} no definitions -- drift read lists {1} live item(s) as extras (plan only, nothing is removed)" -f $Scope, @($live).Count) -ForegroundColor DarkYellow
         } else {
-            Write-Host ("[engine] {0,-20} prune SKIPPED -- desired set is empty (refusing to remove {1} live items; not authoritative)" -f $Scope, @($live).Count) -ForegroundColor Yellow
-            $doPrune = $false
+            # §96.6: the empty-desired gate is releasable for ONE run, bound to the plan (the live keys it would prune). A hold
+            # is recorded only once the gate has tripped for this scope (the transition), so a scope nobody defines stays
+            # silent. Released, the prune still removes only ledger keys (SEC-80) and the removal budget still caps it.
+            $__edRel = $null
+            if (-not $WhatIf -and $__canRelease -and @($live).Count -gt 0) {
+                $__edKeys = @(@($live) | ForEach-Object { try { "$(& $p.KeyOf $_)" } catch { '' } } | Where-Object { $_ })
+                $__edHolding = [bool]($__edT -and $__edT.trip) -or [bool](Get-PimGuardHold -Holds @(Get-PimGuardHolds) -GuardId 'engine.empty-desired' -Scope $Scope)
+                $__edRel = Invoke-PimGuardHoldOrRelease -GuardId 'engine.empty-desired' -Scope $Scope -Keys $__edKeys -Count @($live).Count -RunKind $__runKind `
+                    -Measured @{ desired = 0; live = @($live).Count } -NoHold:(-not $__edHolding)
+            }
+            if ($__edRel -and $__edRel.released) {
+                $__guardReleases.Add([pscustomobject]@{ guardId = 'engine.empty-desired'; releaseId = "$($__edRel.release.id)"; planHash = $__edRel.planHash })
+                Write-Host ("[engine] {0,-20} desired set is empty -- prune RELEASED for this run (managed items only, the removal budget still applies)" -f $Scope) -ForegroundColor Magenta
+            } else {
+                Write-Host ("[engine] {0,-20} prune SKIPPED -- desired set is empty (refusing to remove {1} live items; not authoritative)" -f $Scope, @($live).Count) -ForegroundColor Yellow
+                $doPrune = $false
+            }
         }
     }
     # v1 parity (68.6 rows 24-25): a provider may name explicit Remove rows (GetRemoveRows) and a
@@ -684,6 +803,23 @@ function Invoke-PimEngineScope {
             $__unmanaged = @(@($diff.remove) | Where-Object { $_ -and -not ($_.PSObject.Properties['targeted'] -and $_.targeted) })
             $__ledgerErr = 'the managed-key ledger module is not loaded'
         }
+        # §96.6: an UNREADABLE ledger is a guard ('engine.ledger-unreadable'): it holds the prune, records the held plan and
+        # trips GUARD-1; a SuperAdmin may release exactly that plan for ONE run (the removal budget below still applies).
+        if ($__unmanaged.Count -and $null -eq $__ledger -and $__ledgerErr -and -not $WhatIf -and $__canRelease) {
+            $__lgKeys = @(@($__unmanaged) | ForEach-Object { "$($_.key)" })
+            $__lg = Invoke-PimGuardHoldOrRelease -GuardId 'engine.ledger-unreadable' -Scope $Scope -Keys $__lgKeys -Count $__unmanaged.Count -RunKind $__runKind -Measured @{ unmanaged = $__unmanaged.Count }
+            if ($__lg.released) {
+                $__guardReleases.Add([pscustomobject]@{ guardId = 'engine.ledger-unreadable'; releaseId = "$($__lg.release.id)"; planHash = $__lg.planHash })
+                Write-Host ("[engine] {0,-20} the managed-key ledger could not be read ({1}) -- prune RELEASED for this run: {2} item(s)" -f $Scope, $__ledgerErr, $__unmanaged.Count) -ForegroundColor Magenta
+                $__keepRm = @(@($__keepRm) + @($__unmanaged)); $__unmanaged = @()
+            } elseif (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
+                [void](Invoke-PimGuardTrip -GuardId 'engine.ledger-unreadable' -Outcome refused -Area $Scope -Job 'engine' -HeldCount $__unmanaged.Count `
+                    -Title ("{0}: the managed-key ledger could not be read -- {1} prune item(s) held" -f $Scope, $__unmanaged.Count) `
+                    -Detail ("The prune of {0} removes only what PIM manages, and the list of what PIM manages could not be read ({1}). Nothing was removed." -f $Scope, $__ledgerErr) `
+                    -ActionText 'Fix the store access. If the held items must go now, review them on Audit & Settings > Guards and release that plan for one run.' `
+                    -Measured @{ held = $__unmanaged.Count })
+            }
+        } elseif ($doPrune -and -not $WhatIf -and $__canRelease -and $null -ne $__ledger) { [void](Clear-PimGuardHold -GuardId 'engine.ledger-unreadable' -Scope $Scope -RunKind $__runKind) }
         if ($__unmanaged.Count) {
             if ($null -eq $__ledger -and $__ledgerErr) {
                 Write-Warning ("[engine] {0}: the managed-key ledger could not be read ({1}) -- the prune removes NOTHING this run ({2} item(s) left alone)." -f $Scope, $__ledgerErr, $__unmanaged.Count)
@@ -693,6 +829,40 @@ function Invoke-PimEngineScope {
         }
         $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @($__keepRm); nochange = @($diff.nochange)
                                    absent = @($diff.absent); conflicts = @($diff.conflicts) }
+    }
+
+    # --- 96.5 PURPOSE 2: THE DAILY RECONCILE'S REMOVAL OF PIM-MANAGED LEFTOVERS ------------------------------------------
+    # Operator 2026-10-06: remove pending removals "only the ones that has been part of pim (not just recognized in the
+    # platform, but have been active in the platform) ... except if a similar has been configured"; admins never. Every live
+    # item no row has is checked against rules 1-5 (PIM-ReconcileRemoval.ps1). REPORT (the default) only plans and reports;
+    # ENFORCE hands the qualifying items to the normal remove path below (break-glass, budget, audit, applied outcome).
+    # A real prune (-Prune) has its own path above and is not planned twice. Never fails the pass.
+    $__rrPlan = $null
+    if ($__rrMode -and $Mode -eq 'Full' -and -not $doPrune -and -not $__driftReadPlan -and $p.ApplyRemove -and (Get-Command Get-PimReconcileRemovalPlan -ErrorAction SilentlyContinue)) {
+        try {
+            $__rrBudget = -1; if (Get-Command Get-PimRemoveBudget -ErrorAction SilentlyContinue) { try { $__rrBudget = [int](Get-PimRemoveBudget) } catch { $__rrBudget = -1 } }
+            $__rrCs = $__ledgerCs
+            if (-not $__rrCs -and -not ($global:PIM_ManagedKeysStore -is [hashtable]) -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) { try { $__rrCs = Get-PimSqlSettingsConnectionString } catch { $__rrCs = $null } }
+            $__rrLabel = $null
+            if (Get-Command Get-PimFailureItemLabel -ErrorAction SilentlyContinue) { $__rrLabel = { param($c) Get-PimFailureItemLabel -Key "$($c.key)" -Row $c.live } }
+            $__rrPlan = Get-PimReconcileRemovalPlan -Scope $Scope -Provider $p -Desired @($desired) -Live @($live) -KeyOf $p.KeyOf -HasTypes:([bool]$p.TypeKeyOf) `
+                -ClaimedKeys @(@($diff.remove) | Where-Object { $_ } | ForEach-Object { "$($_.key)" }) -LedgerConnectionString "$__rrCs" -Mode $__rrMode `
+                -Budget $__rrBudget -AlreadyRemoving @($diff.remove).Count -LabelOf $__rrLabel
+            $__rrHeld = @($__rrPlan.items | Where-Object { -not $_.eligible }).Count
+            if ([int]$__rrPlan.candidates -gt 0) {
+                Write-Host ("[engine] {0,-20} reconcile ({1}): {2} live item(s) not in the configuration -- would remove {3}, {4} held by a rule{5}" -f `
+                    $Scope, $__rrMode, $__rrPlan.candidates, $__rrPlan.wouldRemove, $__rrHeld, $(if ($__rrMode -eq 'report') { ' (REPORT ONLY: nothing is removed)' } else { '' })) -ForegroundColor DarkYellow
+            }
+            if ($__rrMode -eq 'enforce' -and @($__rrPlan.eligible).Count) {
+                $__rrAdd = @(foreach ($__e in @($__rrPlan.eligible)) { [pscustomobject]@{ key = "$($__e.key)"; live = $__e.live; reconcileRemoval = $true } })
+                $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @(@($diff.remove) + $__rrAdd); nochange = @($diff.nochange)
+                                           absent = @($diff.absent); conflicts = @($diff.conflicts) }
+            }
+            $__rrPlan.eligible = @()   # the live objects are not carried in the result; the verdicts are
+        } catch {
+            Write-Warning ("[engine] {0}: the reconcile removal plan could not be made (nothing is removed by it this run): {1}" -f $Scope, $_.Exception.Message)
+            $__rrPlan = [pscustomobject]@{ scope = $Scope; class = ''; mode = $__rrMode; candidates = 0; wouldRemove = 0; eligible = @(); items = @(); heldBy = @{}; error = "$($_.Exception.Message)" }
+        }
     }
 
     # Commit-queue-fed delta: restrict the diff to only the queued (entity,key) pairs.
@@ -773,6 +943,23 @@ function Invoke-PimEngineScope {
         $ent = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
         if ($global:PIM_DesiredResolved -is [hashtable] -and $global:PIM_DesiredResolved.ContainsKey($ent)) { $resolvedFlag = [bool]$global:PIM_DesiredResolved[$ent] }
         $decision = Test-PimDisablePassAllowed -ToDisable (@($diff.remove).Count) -Scanned (@($live).Count) -Desired $desired -DesiredResolved $resolvedFlag -FeatureOverride $p.disableFeatureOverride
+        # §96.6: ONLY the blast-radius trip (G2) is releasable -- never the opt-in (G3) or an unresolved desired set (G1). A
+        # release of exactly this disable set lifts the caps for ONE run to the plan's count, at most 50 accounts and 25 %
+        # (literal ceilings -- the breaker's own). The break-glass accounts were taken out of the set above, before this.
+        if (-not $decision.allowed -and "$($decision.tripped)" -eq 'mass-disable' -and -not $WhatIf -and $__canRelease) {
+            $__dN = @($diff.remove).Count; $__dS = @($live).Count
+            $__dPct = if ($__dS -gt 0) { 100.0 * $__dN / $__dS } else { -1 }
+            $__dg = Invoke-PimGuardHoldOrRelease -GuardId 'engine.disable-guard' -Scope $Scope -Keys @(@($diff.remove) | ForEach-Object { "$($_.key)" }) -Count $__dN -Percent $__dPct `
+                -RunKind $__runKind -Measured @{ toDisable = $__dN; scanned = $__dS }
+            if ($__dg.released) {
+                $__d2 = Test-PimDisablePassAllowed -ToDisable $__dN -Scanned $__dS -Desired $desired -DesiredResolved $resolvedFlag -FeatureOverride $p.disableFeatureOverride `
+                    -MaxCount ([Math]::Min([int]$__dg.release.raiseTo, 50)) -MaxPercent 25
+                if ($__d2.allowed) {
+                    $__guardReleases.Add([pscustomobject]@{ guardId = 'engine.disable-guard'; releaseId = "$($__dg.release.id)"; planHash = $__dg.planHash })
+                    $decision = $__d2
+                }
+            }
+        } elseif (-not $WhatIf -and $__canRelease -and $decision.allowed) { [void](Clear-PimGuardHold -GuardId 'engine.disable-guard' -Scope $Scope -RunKind $__runKind) }
         if (-not $decision.allowed) {
             if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) { Write-PimDisableAbortAlert -Scope $Scope -Decision $decision }
             else { Write-Host ("[engine] {0}: account-disable ABORTED [{1}] -- {2}" -f $Scope, $decision.tripped, $decision.reason) -ForegroundColor Red }
@@ -815,7 +1002,7 @@ function Invoke-PimEngineScope {
                 [void](Invoke-PimGuardTrip -GuardId 'drift.over-remove-budget' -Outcome warning -Area $Scope -Job 'drift' `
                     -Title ("{0}: {1} extra(s) found, over the removal budget of {2}" -f $Scope, $__rmTotal, $rbd.budget) `
                     -Detail ("The drift check found {0} live item(s) in {1} that the definitions do not have. That is over the removal budget ({2}), so the next apply will hold them instead of removing them." -f $__rmTotal, $Scope, $rbd.budget) `
-                    -ActionText 'Review the extras on the Drift page: define what should stay, and let the rest be removed in smaller steps or raise the removal budget for one run.' `
+                    -ActionText 'Review the extras on the Drift page: define what should stay, and let the rest be removed in smaller steps, or -- once the apply holds them -- release that exact plan for one run on Audit & Settings > Guards (at most 50).' `
                     -Measured @{ toRemove = $__rmTotal; scanned = @($live).Count } -Thresholds @{ budget = [int]$rbd.budget })
             }
             Write-Host ("[engine] {0,-20} drift read: {1} removal(s) are over the removal budget ({2}) -- LISTED; an apply would hold them" -f $Scope, $__rmTotal, $rbd.budget) -ForegroundColor DarkYellow
@@ -828,6 +1015,11 @@ function Invoke-PimEngineScope {
         $rb = Test-PimRemoveBudgetAllowed -ToRemove $__rmTotal -Scope $Scope -Scanned (@($live).Count) -Operation 'remove' `
                 -TypeChanges (@($__retype).Count + @(@($diff.remove) | Where-Object { $_ -and $_.PSObject.Properties['typeChange'] -and $_.typeChange }).Count) `
                 -RemoveRows  (@(@($diff.remove) | Where-Object { $_ -and $_.PSObject.Properties['targeted'] -and $_.targeted }).Count)
+        # §96.6 / BUG-291: G4 is releasable for EXACTLY this set (plan hash), one run, at most 50 (PIM-GuardRelease.ps1).
+        if (-not $WhatIf -and $__canRelease) {
+            $__g4 = Resolve-PimRemoveBudgetRelease -Decision $rb -Scope $Scope -Remove @($diff.remove) -Retype @($__retype) -Scanned @($live).Count -RunKind $__runKind
+            if ($__g4) { $__guardReleases.Add($__g4.used); $rb = $__g4.decision }
+        }
         if (-not $rb.allowed) {
             # A -WhatIf (plan / verify) run removes nothing: it is logged, never mailed as an engine failure.
             if (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue) { Write-PimRemoveBudgetAlert -Decision $rb -PlanOnly:([bool]$WhatIf) }
@@ -855,6 +1047,30 @@ function Invoke-PimEngineScope {
             $ref = Get-PimCommitWatchItemRef -Entity $wEnt -Item $wItem -Op $wOp
             if ($ref) { $script:__watch.Add([pscustomobject]@{ entity = $ref.entity; key = $ref.key; action = "$wOp"; result = "$wResult"; reason = "$wReason" }) }
         } catch { }
+    }
+    # CONFIG-1.1 / 96.1: the APPLIED OUTCOME per row -- what this pass did in the tenant for each item a commit names
+    # (created / updated / removed / already present / failed + error), written once at the end of a real run. D2: an item
+    # PIM CREATED is CONFIRMED in the ledger with the commit + store row it came from. Never fails the pass.
+    $outcomeAdd = {
+        param($oOp, $oItem, $oOutcome, $oErr)
+        if ($WhatIf) { return }
+        try {
+            $oEnt = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
+            $oRow = if ("$oOp" -eq 'Remove') { if ($oItem.PSObject.Properties['row'] -and $null -ne $oItem.row) { $oItem.row } elseif ($oItem.PSObject.Properties['live']) { $oItem.live } else { $null } } elseif ($oItem.PSObject.Properties['desired']) { $oItem.desired } else { $null }
+            $oCommit = $null
+            if (Get-Command Resolve-PimEngineChangeCommit -ErrorAction SilentlyContinue) { $oCommit = Resolve-PimEngineChangeCommit -Entity $oEnt -Op "$oOp" -Row $oRow }
+            if ($oCommit -and (Get-Command New-PimCommitAppliedRecord -ErrorAction SilentlyContinue)) {
+                $oRec = New-PimCommitAppliedRecord -Commit $oCommit -Scope "$Scope" -LiveKey "$($oItem.key)" -Op "$oOp" -Outcome $oOutcome -ErrorMessage "$oErr" -JobRun "$($global:PIM_JobCorrelationId)"
+                if ($oRec) { $script:__outcomes.Add($oRec) }
+            }
+            if ("$oOp" -eq 'Create' -and $oOutcome -eq 'ok') {
+                $oRef = $null
+                if ($oCommit -and "$($oCommit.Entity)" -and "$($oCommit.Key)") { $oRef = @{ entity = "$($oCommit.Entity)"; key = "$($oCommit.Key)" } }
+                else { $oRefs = @(Get-PimEngineItemStoreRefs -Entity $oEnt -Row $oRow); if ($oRefs.Count) { $oRef = $oRefs[0] } }
+                $script:__confirm.Add(@{ key = "$($oItem.key)"; commitId = $(if ($oCommit) { "$($oCommit.CommitId)" } else { '' })
+                                         sourceEntity = $(if ($oRef) { "$($oRef.entity)" } else { '' }); sourceKey = $(if ($oRef) { "$($oRef.key)" } else { '' }) })
+            }
+        } catch { Write-Verbose ("applied outcome of {0} not recorded: {1}" -f $oItem.key, $_.Exception.Message) }
     }
     $do = {
         param($op,$item,$handlerName)
@@ -930,7 +1146,9 @@ function Invoke-PimEngineScope {
                     & $watchAdd $op $item 'ok' ''
                     # SEC-80: what PIM created now belongs to it; what it removed no longer does.
                     if ($op -eq 'Create') { $script:__createdKeys.Add("$($item.key)") } elseif ($op -eq 'Remove') { $script:__removedKeys.Add("$($item.key)") }
+                    if ($op -eq 'Remove' -and $item.PSObject.Properties['reconcileRemoval'] -and $item.reconcileRemoval) { $script:__rrRemoved++ }
                     Write-PimEngineChangeAudit -Scope $Scope -Entity $entity -Op $op -Item $item -Result 'ok'
+                    & $outcomeAdd $op $item 'ok' ''
                     if ($op -eq 'Remove' -and $item.PSObject.Properties['targeted'] -and $item.targeted -and $null -ne $item.row -and $item.rowKey) {
                         $script:__rowDone[$item.rowKey] = 1 + [int]$script:__rowDone[$item.rowKey]; $script:__rowObj[$item.rowKey] = $item.row
                     }
@@ -944,6 +1162,8 @@ function Invoke-PimEngineScope {
                     $script:__skipped++; Write-Host ("    [=] {0} (exists -- validated, skipped)" -f $item.key) -ForegroundColor DarkGray
                     & $watchAdd 'NoChange' $item 'ok' ''
                     if ($op -eq 'Create') { $script:__createdKeys.Add("$($item.key)") }   # SEC-80: it is there, as the row asks
+                    # 96.1: 'already present' -- and D2: NOT confirmed (it may have existed before PIM asked for it).
+                    & $outcomeAdd $op $item 'exists' ''
                 } else {
                     # 🔴 §70.19 (2026-09-13): "Nesting is currently not supported" (an ACTIVE group nesting into a
                     # role-assignable group) used to be a separate branch that counted a SKIP and printed a yellow
@@ -953,6 +1173,7 @@ function Invoke-PimEngineScope {
                     $script:__errors++; Write-Host ("    [x] {0} {1} FAILED: {2}" -f $op, $item.key, $em) -ForegroundColor Red
                     & $watchAdd $op $item 'failed' $em
                     Write-PimEngineChangeAudit -Scope $Scope -Entity $entity -Op $op -Item $item -Result 'error' -ErrorMessage $em
+                    & $outcomeAdd $op $item 'error' $em
                     # Keep WHAT failed and WHY as data, not only as a log line nobody can reach from the
                     # Manager (operator, 2026-09-12: "the eror msg was useless"). PIM-FailureCatalog.ps1.
                     if (Get-Command New-PimEngineItemFailure -ErrorAction SilentlyContinue) {
@@ -973,6 +1194,8 @@ function Invoke-PimEngineScope {
     $script:__applied = 0; $script:__errors = 0; $script:__skipped = 0; $script:__reportedShown = 0
     $script:__createdKeys = New-Object System.Collections.Generic.List[string]; $script:__removedKeys = New-Object System.Collections.Generic.List[string]
     $script:__failures = New-Object System.Collections.Generic.List[object]
+    $script:__outcomes = New-Object System.Collections.Generic.List[object]; $script:__confirm = New-Object System.Collections.Generic.List[object]
+    $script:__rrRemoved = 0
     $script:__rowDone = @{}; $script:__rowObj = @{}   # Remove rows: revoked item count + the row, by row key
     # Held by the removal budget (68.6 row 24): explicit Remove rows / type changes that did NOT apply.
     # A plan (WhatIf) only shows them; an apply counts each as a failed item with the reason, so the
@@ -1053,6 +1276,35 @@ function Invoke-PimEngineScope {
         } catch {
             Write-Warning ("  [engine] {0}: the managed-key ledger was NOT updated (a later prune removes less, never more): {1}" -f $Scope, $_.Exception.Message)
         }
+        # D2 (96.5): CONFIRM what PIM created this pass; and on a FULL pass, what a commit's failed create left live after all
+        # (the live read now matches it). A key PIM only matched is never confirmed. A ledger that falls behind only makes
+        # the reconcile remove LESS.
+        if (Get-Command Set-PimManagedKeyConfirmations -ErrorAction SilentlyContinue) {
+            try {
+                $__conf = New-Object System.Collections.Generic.List[object]
+                foreach ($__c in $script:__confirm) { $__conf.Add($__c) }
+                if ($Mode -eq 'Full' -and (Get-Command Get-PimCommitAppliedFailedCreates -ErrorAction SilentlyContinue)) {
+                    $__matched = @(@(@($diff.nochange) + @($diff.update)) | Where-Object { $_ } | ForEach-Object { "$($_.key)" })
+                    if ($__matched.Count) {
+                        $__fc = Get-PimCommitAppliedFailedCreates -ConnectionString "$__ledgerCs" -Scope $Scope -LiveKeys $__matched
+                        foreach ($__fk in @($__fc.Keys)) { $__conf.Add(@{ key = $__fk; commitId = "$($__fc[$__fk].commitId)"; sourceEntity = "$($__fc[$__fk].sourceEntity)"; sourceKey = "$($__fc[$__fk].sourceKey)" }) }
+                    }
+                }
+                if ($__conf.Count) { [void](Set-PimManagedKeyConfirmations -ConnectionString $__ledgerCs -Scope $Scope -Items @($__conf.ToArray())) }
+            } catch {
+                Write-Warning ("  [engine] {0}: the ledger confirmations were NOT recorded (the reconcile removes less, never more): {1}" -f $Scope, $_.Exception.Message)
+            }
+        }
+    }
+    # CONFIG-1.1 / 96.1: the applied outcome per row, one round trip per pass. Never fails the run.
+    if (-not $WhatIf -and $script:__outcomes.Count -and (Get-Command Save-PimCommitAppliedOutcomes -ErrorAction SilentlyContinue)) {
+        try {
+            $__ocs = $null
+            if (-not ($global:PIM_CommitAppliedStore -is [System.Collections.Generic.List[object]]) -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) { try { $__ocs = Get-PimSqlSettingsConnectionString } catch { $__ocs = $null } }
+            [void](Save-PimCommitAppliedOutcomes -ConnectionString "$__ocs" -Items @($script:__outcomes.ToArray()))
+        } catch {
+            Write-Warning ("  [engine] {0}: the applied outcome of {1} item(s) was NOT recorded: {2}" -f $Scope, $script:__outcomes.Count, $_.Exception.Message)
+        }
     }
     if ([int]$script:__reportedShown -gt 3) { Write-Host ("    [r] ... and {0} more reported only -- NOT applied (same reason as above)" -f ([int]$script:__reportedShown - 3)) -ForegroundColor DarkYellow }
     Write-Host ("[engine] {0,-20} done  applied={1} skipped={2} errors={3}" -f $Scope, $script:__applied, $script:__skipped, $script:__errors) -ForegroundColor $(if ($script:__errors) { 'Yellow' } else { 'Green' })
@@ -1084,6 +1336,10 @@ function Invoke-PimEngineScope {
         held=$__held.Count; absent=$__absent.Count; conflicts=$__conflicts.Count
         removeRowsDone=$__rowsDone
         unmanaged=@($__unmanaged).Count           # SEC-80: live items a prune left alone (not defined in PIM Manager)
+        guardReleases=$__guardReleases.ToArray()  # §96.6: the guard releases this run used ({ guardId; releaseId; planHash })
+        reconcileRemoval=$__rrPlan                # 96.5: the daily reconcile's removal plan (report / enforce), $null otherwise
+        reconcileRemoved=[int]$script:__rrRemoved # 96.5: how many of them an ENFORCE pass really removed
+        appliedOutcomes=$script:__outcomes.Count  # 96.1: rows recorded in pim.CommitApplied by this pass
         noDefinitions=[bool]$__emptyDesiredRead   # REQ-AU-DRIFT-1: extras listed from a scope with no rows (drift read only)
         overRemoveBudget=$__overBudget            # BUG-269: drift read only -- { toRemove; budget } when an apply would hold
         warnings=@($Context['__pimScopeWarnings'])
@@ -1393,13 +1649,18 @@ function Invoke-PimEngine {
     #   -Mode Delta -FromQueue / -Changes : apply ONLY the queued (entity,key) changes
     # -WhatIf = plan only. This is the entrypoint the scheduler/launcher calls.
     [CmdletBinding()]
-    param([string]$Scope='All', [ValidateSet('Full','Delta')][string]$Mode='Delta', [switch]$WhatIf, [switch]$Prune, [hashtable]$Context=@{}, [object[]]$Changes, [switch]$FromQueue)
+    #   -ReconcileRemoval report|enforce : the DAILY RECONCILE (96.5) -- also plan the removal of PIM-managed leftovers
+    #                          (report = plan + store the report, remove nothing; enforce = remove what every rule allows)
+    param([string]$Scope='All', [ValidateSet('Full','Delta')][string]$Mode='Delta', [switch]$WhatIf, [switch]$Prune, [hashtable]$Context=@{}, [object[]]$Changes, [switch]$FromQueue,
+          [string]$ReconcileRemoval = '')
     # BUG-19: bound how stale the directory snapshot can be at the start of a run.
     [void](Update-PimEngineRunContext)
     if ($FromQueue -and -not $PSBoundParameters.ContainsKey('Changes')) { $Changes = Get-PimEngineQueueChanges }
     $useChanges = ($FromQueue -or $PSBoundParameters.ContainsKey('Changes'))
     $common = @{ Mode = $Mode; WhatIf = $WhatIf; Prune = $Prune; Context = $Context }
     if ($useChanges) { $common['Changes'] = @($Changes) }
+    $__rrRun = "$ReconcileRemoval".Trim().ToLowerInvariant()
+    if ($__rrRun) { if ($__rrRun -ne 'enforce') { $__rrRun = 'report' }; $common['ReconcileRemoval'] = $__rrRun }
 
     # 🔴 BUG-134: AN UNSERVED SCOPE IS A CONFIGURATION ERROR, NOT AN EMPTY RESULT.
     # This used to fall straight through to Invoke-PimEngineScope, which answers an unknown
@@ -1452,6 +1713,17 @@ function Invoke-PimEngine {
     # and the owner page read it). Best effort: a failed save never fails the run; the next run saves it.
     if (Get-Command Save-PimAutoExtendOutlook -ErrorAction SilentlyContinue) {
         try { [void](Save-PimAutoExtendOutlook) } catch { Write-Warning "[auto-extend] the upcoming-extension list was not saved: $($_.Exception.Message)" }
+    }
+    # 96.5: the daily reconcile's removal report (would remove N, held by rule X) -> pim.TenantCache 'reconcile-removal', for
+    # the Jobs page. Only a real run; a failed save never fails the run (the next run saves it).
+    if ($__rrRun -and $Mode -eq 'Full' -and -not $WhatIf -and (Get-Command ConvertTo-PimReconcileRemovalReport -ErrorAction SilentlyContinue)) {
+        try {
+            $__plans = @(foreach ($__o in $out) { if ($__o -and $__o.PSObject.Properties['reconcileRemoval'] -and $null -ne $__o.reconcileRemoval) { $__o.reconcileRemoval } })
+            $__rem = 0; foreach ($__o in $out) { if ($__o -and $__o.PSObject.Properties['reconcileRemoved']) { $__rem += [int]$__o.reconcileRemoved } }
+            $__doc = ConvertTo-PimReconcileRemovalReport -Plans $__plans -Mode $__rrRun -CorrelationId "$($global:PIM_JobCorrelationId)" -Removed $__rem
+            $__where = Save-PimReconcileRemovalReport -Doc $__doc
+            Write-Host ("[reconcile] {0} -> {1}" -f $__doc.summary, $__where) -ForegroundColor DarkYellow
+        } catch { Write-Warning "[reconcile] the removal report was not saved: $($_.Exception.Message)" }
     }
     # Preserve the single-scope return shape callers depend on (one object, not a 1-element array).
     if (@($res.scopes).Count -eq 1 -and -not $res.alias) { return $out[0] }

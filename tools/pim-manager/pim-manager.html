@@ -1093,6 +1093,7 @@
     <div class="tab" data-tab="mailtemplates" title="The wording of every notification mail.">Mail templates</div>
     <!-- REQ-L: read-only list of the activation policy templates, what each sets, and which delegations use it. -->
     <div class="tab" data-tab="policytemplates" title="Every activation policy template in this tenant, what it sets in plain words, and which delegations use it (read-only).">Policy templates</div>
+    <div class="tab" data-tab="guards" title="Every protective guard: clear or holding, what it holds right now, and its release (SuperAdmin: this plan, one run or until a time, at most 24 h).">Guards</div>
     <div class="tab" data-tab="workloadtemplates" title="The workload permission templates (Defender XDR, Intune, ...): which roles each grants, its version and approval, switch a pack on or off, and import it.">Workload templates</div>
     <div class="tab" data-tab="roleperms" title="Role Lookup answers all role questions — what a role can do, which roles grant an action (least-privilege first), who can activate a role, and compare two roles.">Role Lookup</div>
     <!-- 2026-09-14: the old 'governance' tab is GONE. Its sections each got a real home: drift -> its own page
@@ -1102,6 +1103,11 @@
     <!-- REQ-I + REQ-U: Coverage & gaps -- its own page (menu rule), read from the scheduler's stored coverage report. -->
     <div class="tab" data-tab="coverage" title="What PIM delegates and what it does not: every Entra role, Intune and Defender role, Power BI workspace and Azure scope with no delegation (a ready-made proposal for each, all pre-selected), orphan groups, and PIM for Groups groups PIM does not manage. Checked by the scheduler (every 12 hours by default).">Coverage &amp; gaps</div>
     <div class="tab" data-tab="audit" title="The audit trail you can defend — filter and search every change by entity, actor or date range, see before → after, and export the whole trail.">Audit</div>
+    <!-- CONFIG-1.2 / §96.2: every commit from the change journal, and undo one (SuperAdmin: every commit; Admin: their own). -->
+    <div class="tab" data-tab="commithistory" title="Every commit from the change journal: who, when, approved by, what changed -- open one and undo the rows you pick (staged in Pending changes, committed with the normal approvals).">Commit history</div>
+    <!-- CONFIG-1.3 / 1.4, PIM §96.3 + §96.4 (operator 2026-10-06): the daily configuration backup, Back up now, pin, and the
+         pick-what-you-restore diff (rows staged as pending changes, settings restored one by one). -->
+    <div class="tab" data-tab="configbackups" title="The daily configuration backup: back up now, pin a backup, and restore what you pick from one (SuperAdmin) -- staged as pending changes, never written straight into the store.">Backups &amp; restore</div>
     <div class="tab" data-tab="reports" title="&quot;Who can do what&quot; (and the reverse) — pick a person to see everything they can reach, or pick a role to see who can activate it. Printable + exportable.">Reports</div>
     <div class="tab" data-tab="conformance" title="Keep tenants current with the approved delegation templates — see how far behind each tenant is and roll the updates forward.">Tenant Baseline</div>
     <div class="tab" data-tab="downlink" title="MSP downlink — which of your central admins and roles reach each managed customer, what was held back and why, and the per-relationship projection policy.">MSP Downlink <span id="downlinkUnresBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
@@ -1458,6 +1464,13 @@
     </div>
   </div>
 
+  <!-- =========== CONFIG-1.3 / 1.4: Backups & restore =========== -->
+  <div id="configbackupsTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="configBackupsBody">
+      <div style="color:#57606a;font-size:12px;">Loading configuration backups&hellip;</div>
+    </div>
+  </div>
+
   <!-- =========== Audit tab (read-only append-only audit trail) =========== -->
   <div id="auditTab" class="tab-panel">
     <!-- REQ-Y: the Pro-feature notice (renderMspLicenceBanners) -- hidden unless this Pro feature is unlicensed / in grace. -->
@@ -1642,6 +1655,12 @@
       <div style="color:#57606a;font-size:12px;">Loading external companies&hellip;</div>
     </div>
   </div>
+  <!-- CONFIG-1.2 / §96.2: Commit history + undo, under Audit & Settings. Admin (own commits) and SuperAdmin (every commit). -->
+  <div id="commithistoryTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="commitHistoryBody">
+      <div style="color:#57606a;font-size:12px;">Loading&hellip;</div>
+    </div>
+  </div>
   <!-- Operator 2026-10-06: Import administrators, its own page under Admin accounts, SuperAdmin only. -->
   <div id="adminimportTab" class="tab-panel">
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="adminImportBody">
@@ -1666,6 +1685,12 @@
   <div id="policytemplatesTab" class="tab-panel">
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="policytemplatesBody">
       <div style="color:#57606a;font-size:12px;">Loading policy templates&hellip;</div>
+    </div>
+  </div>
+  <!-- §96.6 / GUARD-1.6 (operator 2026-10-06: "I need a way to release guards"): every guard, what it holds now, its release. -->
+  <div id="guardsTab" class="tab-panel">
+    <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="guardsBody">
+      <div style="color:#57606a;font-size:12px;">Loading guards&hellip;</div>
     </div>
   </div>
 
@@ -2499,6 +2524,11 @@
       title: 'Audit trail, configuration and help',
       items: [
         { tab: 'audit',    label: 'Audit trail', desc: 'Every change, who made it and when' },
+        // CONFIG-1.2 / §96.2 (operator 2026-10-06: "people make mistakes, so we need a way to undo a commit").
+        { tab: 'commithistory', label: 'Commit history & undo', desc: 'Every commit: who, when, approved by, what it changed -- and undo the rows you pick (Admin: your own commits; SuperAdmin: every commit)' },
+        // CONFIG-1.3 / 1.4, PIM §96.3 + §96.4 (operator 2026-10-06: "backup the configurations in pim"; "restore the backup, but
+        // be able to select what we want from the restore").
+        { tab: 'configbackups', label: 'Backups & restore', desc: 'The daily configuration backup, Back up now and pin; restore what you pick from a backup (SuperAdmin) -- staged as pending changes' },
         { tab: 'settings', label: 'Settings',    desc: 'Naming, filters, operational policy, alerting and permission templates' },
         // 2026-09-14 (operator: "we need a new menu-item under audit and settings with Newly discovered resources and
         // relevant settings. they are the wrong place").
@@ -2514,6 +2544,8 @@
         // Operator 2026-10-05: 'Tenant conformance' is the TENANT BASELINE -- how this tenant (and the fleet) compares with the
         // approved templates; it sits with the templates it rolls out.
         { tab: 'conformance',  label: 'Tenant Baseline', desc: 'How this tenant (and every managed tenant) compares with the approved templates, and roll a version out by ring' },
+        // §96.6 / GUARD-1.6 (operator 2026-10-06: "I need a way to release guards"): one page for every guard.
+        { tab: 'guards',   label: 'Guards',      desc: 'Every protective guard: clear or holding, what it holds right now, and its release -- this exact plan, one run or until a time (at most 24 h), SuperAdmin' },
 
         { tab: 'support',  label: 'Support',     desc: 'Diagnostics and help' },
       ] },
@@ -2896,16 +2928,19 @@
     if (name === 'departments') renderDepartmentsPage();
     if (name === 'companies') renderCompaniesPage();   // operator 2026-10-05: its own page, like Departments & owners
     if (name === 'adminimport') renderAdminImportPage();   // operator 2026-10-06: under Admin accounts, SuperAdmin only
+    if (name === 'commithistory') renderCommitHistoryPage();   // CONFIG-1.2 / §96.2: commit history + undo
     if (name === 'manageraccess') renderSettingsAccessSection(document.getElementById('setAccessHost'));
     if (name === 'emergency') { renderSettingsBreakGlassSection(document.getElementById('setBreakGlassHost')); renderSettingsEmergencySection(document.getElementById('setEmergencyHost')); }
     if (name === 'mailtemplates') renderMailTemplatesSection(document.getElementById('setMailTemplatesHost'));
     if (name === 'policytemplates') renderPolicyTemplatesPage();   // REQ-L
+    if (name === 'guards') renderGuardsPage();   // §96.6 / GUARD-1.6
     if (name === 'workloadtemplates') { renderTemplatePacksSection(document.getElementById('setTemplatePacksHost')); renderTemplates(); }   // operator 2026-10-05: its own page, with the permission templates (moved from Create access)
     if (name === 'roleperms') renderRolePerms();
     if (name === 'drift') renderDrift();
     if (name === 'coverage') renderCoverage();
     if (name === 'discovery') renderDiscovery();
     if (name === 'audit') renderAudit();
+    if (name === 'configbackups') renderConfigBackupsPage();   // CONFIG-1.3 / 1.4
     if (name === 'reports') renderReports();
     if (name === 'conformance') renderConformance();
     if (name === 'downlink') renderDownlink();
@@ -2961,7 +2996,7 @@
   // reset tap, create new admin, flag for deletion, revoke sessions."
   // ONE row per admin, every verb reachable without leaving it. Rows the caller may not manage
   // are never returned by the endpoint, so they cannot be drawn and cannot be bulk-selected.
-  const acctGridState = { rows: [], meta: null, busy: '', filter: '', sel: new Set() };   // sel: §89 multi-select (UPNs)
+  const acctGridState = { rows: [], meta: null, busy: '', filter: '', sel: new Set(), showRemoved: false };   // sel: §89 multi-select (UPNs); showRemoved: §96.5 D1 (b)
 
   async function renderAccountGrid(container) {
     if (!isServer) { container.innerHTML = '<div style="color:#57606a">Static mode &mdash; the account grid needs the server.</div>'; return; }
@@ -2974,10 +3009,15 @@
     const syncCol = pimIsMspMaster() ? 'master' : (pimIsMspManaged() ? 'managed' : '');
 
     const f = String(acctGridState.filter || '').trim().toLowerCase();
-    const rows = f ? acctGridState.rows.filter(a =>
+    // §96.5 D1 (b): an admin REMOVED FROM PIM (AccountStatus = Removed) is out of the active list -- its row is kept only so
+    // the engine keeps the account disabled. "Show removed from PIM" lists them again (to Enable one, say).
+    const isRemoved = a => String(a.accountStatus || '').toLowerCase() === 'removed';
+    const nRemoved = acctGridState.rows.filter(isRemoved).length;
+    const active = acctGridState.showRemoved ? acctGridState.rows : acctGridState.rows.filter(a => !isRemoved(a));
+    const rows = f ? active.filter(a =>
       (a.displayName || '').toLowerCase().indexOf(f) >= 0 ||
       (a.userPrincipalName || '').toLowerCase().indexOf(f) >= 0 ||
-      (a.adminType || '').toLowerCase().indexOf(f) >= 0) : acctGridState.rows;
+      (a.adminType || '').toLowerCase().indexOf(f) >= 0) : active;
 
     let h = '';
     h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">' +
@@ -2986,7 +3026,9 @@
            'value="' + escapeHtml(acctGridState.filter) + '" style="padding:3px 8px;font-size:12px;border:1px solid #d0d7de;border-radius:6px;width:240px;">' +
          '<button class="btn-sec" id="acctRefresh">Refresh</button>' +
          (d.canCreate ? '<button class="btn" id="acctNew">+ New admin</button>' : '') +
-         '<span style="color:#57606a;font-size:12px;">' + fmtNum(rows.length) + ' of ' + fmtNum(acctGridState.rows.length) + '</span></div>';
+         '<span style="color:#57606a;font-size:12px;">' + fmtNum(rows.length) + ' of ' + fmtNum(acctGridState.rows.length) + '</span>' +
+         (nRemoved ? '<label style="font-size:12px;color:#57606a;" title="Admins removed from PIM (AccountStatus = Removed): their delegations are gone and the account is disabled and kept. Hidden from the active list."><input type="checkbox" id="acctShowRemoved"' +
+           (acctGridState.showRemoved ? ' checked' : '') + '> Show removed from PIM (' + fmtNum(nRemoved) + ')</label>' : '') + '</div>';
 
     // Honest about narrowing. "You are seeing a scoped list" is a different fact from
     // "there are only 3 admins", and an operator must be able to tell them apart.
@@ -3039,7 +3081,7 @@
     rows.forEach(a => {
       const busy = acctGridState.busy === a.userPrincipalName;
       const st = String(a.accountStatus || 'Enabled');
-      const stColor = (/^(disabled|revoked|deleted)$/i.test(st)) ? '#cf222e' : '#1a7f37';
+      const stColor = (/^(disabled|revoked|deleted|removed)$/i.test(st)) ? '#cf222e' : '#1a7f37';
       const flagged = a.alreadyFlagged;
       const dis = (ok) => (ok && !busy) ? '' : ' disabled';
       h += '<tr' + (flagged ? ' style="background:#fff8f6;"' : '') + '>' +
@@ -3085,14 +3127,18 @@
           // Operator 2026-10-05: Enable / Disable here and in the selection bar; Disable & remove delegations keeps the
           // account (disabled) and takes all its delegations away. All three STAGE into Pending changes -- a disable is
           // held for the offboard approval on commit like every disable (BUG-190), unless self-approval is on.
-          (String(a.accountStatus || 'Enabled').toLowerCase() === 'disabled'
+          (/^(disabled|removed)$/.test(String(a.accountStatus || 'Enabled').toLowerCase())
             ? '<button class="btn-sec acctEnable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) + ' title="Enable the account again (staged in Pending changes)." style="font-size:11px;">Enable</button> '
             : '<button class="btn-sec acctDisable" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) + ' title="Disable the account; its delegations stay (staged in Pending changes; a disable needs the offboard approval)." style="font-size:11px;">Disable</button> ') +
           '<button class="btn-sec acctDisableStrip" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
             ' title="Disable the account AND remove every delegation it has. The account stays in PIM, disabled (staged in Pending changes)." style="font-size:11px;">Disable &amp; remove delegations</button> ' +
+          // §96.5 D1 (b): Remove from PIM -- every delegation removed, the account DISABLED and KEPT, the admin out of the active list.
+          (String(a.accountStatus || '').toLowerCase() === 'removed' ? '' :
+          '<button class="btn-sec acctRemoveFromPim" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
+            ' title="REMOVE this admin FROM PIM: every delegation is removed and the account is DISABLED and KEPT in Entra ID (not deleted). The admin leaves this list; PIM keeps the account disabled. Held for the offboard approval (staged in Pending changes)." style="font-size:11px;color:#bc4c00;">Remove from PIM</button> ') +
           // §96.5 D1 (operator 2026-10-06: "i allow operators to delete an admin"): SuperAdmin only, typed confirmation.
-          (roleAtLeast('SuperAdmin') && !a.readOnly ? '<button class="btn-sec acctDelete" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' +
-            ' title="DELETE the account in Entra ID and remove every delegation it has (SuperAdmin; you type DELETE to confirm; held for the offboard approval; Entra keeps it restorable for 30 days)." style="font-size:11px;color:#cf222e;border-color:#cf222e;">Delete account</button> ' : '') +
+          ((roleAtLeast('Admin') || PIM_ROLE === 'Delegated') && !a.readOnly ? '<button class="btn-sec acctDelete" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' +
+            ' title="DELETE the account in Entra ID and remove every delegation it has (SuperAdmin, Admin, or a delegated operator for admins at or below its level; you type DELETE to confirm -- your delete IS the approval; Entra keeps it restorable for 30 days)." style="font-size:11px;color:#cf222e;border-color:#cf222e;">Delete account</button> ' : '') +
           // REQ-ADM-UNMANAGE-1: out of PIM, Entra untouched (the account and its access stay; Import brings it back).
           '<button class="btn-sec acctUnmanage" data-upn="' + escapeHtml(a.userPrincipalName) + '" data-user="' + escapeHtml(a.userName || '') + '"' + dis(roleAtLeast('Admin') && !a.readOnly) +
             ' title="Take this admin out of PIM: every row that names it leaves the desired state. Nothing changes in Entra -- the account and the access it holds stay (listed as unmanaged / drift; Import brings it back)." style="font-size:11px;">Stop managing</button> ' +
@@ -3147,7 +3193,8 @@
       '<button class="btn-sec" id="acctBulkEnable">Enable</button>' +
       '<button class="btn-sec" id="acctBulkDisable">Disable</button>' +
       '<button class="btn-sec" id="acctBulkDisableStrip">Disable &amp; remove delegations</button>' +
-      (roleAtLeast('SuperAdmin') ? '<button class="btn-sec" id="acctBulkDelete" style="color:#cf222e;border-color:#cf222e;">Delete account(s)</button>' : '') +
+      '<button class="btn-sec" id="acctBulkRemoveFromPim" style="color:#bc4c00;" title="Every delegation removed; each account DISABLED and KEPT in Entra ID; the admins leave this list (held for the offboard approval).">Remove from PIM</button>' +
+      ((roleAtLeast('Admin') || PIM_ROLE === 'Delegated') ? '<button class="btn-sec" id="acctBulkDelete" style="color:#cf222e;border-color:#cf222e;">Delete account(s)</button>' : '') +
       '<button class="btn-sec" id="acctBulkClear">Clear selection</button></div>';
   }
   // PURE: the date N days / months after the LATER of today and the current auto-disable date (yyyy-mm-dd).
@@ -3219,6 +3266,7 @@
     on('acctBulkDisable', function () { acctStageStatus(selIds(), 'Disabled', false); });
     on('acctBulkDisableStrip', function () { acctStageStatus(selIds(), 'Disabled', true); });
     on('acctBulkDelete', function () { acctStageDelete(selIds()); });
+    on('acctBulkRemoveFromPim', function () { acctStageRemoveFromPim(selIds()); });
   }
 
   // 🔴 THE ADMIN EDITOR WAS SIX IDENTICAL TEXT BOXES (operator, 2026-09-12: "where is the field to
@@ -3784,6 +3832,9 @@
     document.querySelectorAll('.acctDisable').forEach(b => { b.onclick = () => acctStageStatus([{ upn: b.dataset.upn, userName: b.dataset.user }], 'Disabled', false); });
     document.querySelectorAll('.acctDisableStrip').forEach(b => { b.onclick = () => acctStageStatus([{ upn: b.dataset.upn, userName: b.dataset.user }], 'Disabled', true); });
     document.querySelectorAll('.acctDelete').forEach(b => { b.onclick = () => acctStageDelete([{ upn: b.dataset.upn, userName: b.dataset.user }]); });
+    document.querySelectorAll('.acctRemoveFromPim').forEach(b => { b.onclick = () => acctStageRemoveFromPim([{ upn: b.dataset.upn, userName: b.dataset.user }]); });
+    const shr = document.getElementById('acctShowRemoved');
+    if (shr) shr.onchange = () => { acctGridState.showRemoved = !!shr.checked; renderAccountGrid(container); };
     // §35.6: two surfaces, ONE workflow. This jump is what stops the grid and the wizard from
     // being two disconnected tools -- without it the operator leaves here, finds the wizard, and
     // re-identifies the same person by hand.
@@ -4480,6 +4531,8 @@
     // tick said OK. The banner renders a placeholder immediately and fills in asynchronously, so a
     // slow Graph read never delays the rest of the overview.
     h += '<div id="homePermBanner" style="margin-bottom:12px;"></div>';
+    // 96.5: "Daily reconcile PAUSED by <who> since <time>: <reason>" -- filled asynchronously, empty when not paused.
+    h += '<div id="homeReconcileBanner"></div>';
 
     // placeholder for the "what needs my attention" call-out -- filled in after the
     // tiles are computed (so it draws from the same data) and spliced in here.
@@ -4687,6 +4740,7 @@
     const rb = document.getElementById('homeRefresh');
     if (rb) rb.onclick = () => renderHome();
     loadPermissionHealth(false);
+    loadReconcileBanner('homeReconcileBanner');   // 96.5: the daily reconcile's pause banner (never blocks Home)
 
     // --- the heavy/live tiles (active-assignments + access reviews): ON DEMAND only (§70.1b) ---
     const homeLoadHeavy = async () => {
@@ -5356,12 +5410,21 @@
   }
   // Operator 2026-10-06: pages only a SuperAdmin sees (the server refuses the others too).
   const SUPERADMIN_ONLY_TABS = ['adminimport'];
+  const ADMIN_ONLY_TABS = ['commithistory'];   // CONFIG-1.2 / §96.2
   function applySuperAdminOnlyTabs() {
     const sa = roleAtLeast('SuperAdmin');
     SUPERADMIN_ONLY_TABS.forEach(k => {
       document.querySelectorAll('#tabs .tab[data-tab="' + k + '"], #navGroups .nav-group-item[data-tab="' + k + '"]').forEach(t => {
         t.style.display = sa ? '' : 'none';
         t.dataset.superAdminOnly = sa ? 'shown' : 'hidden';
+      });
+    });
+    // CONFIG-1.2 / §96.2: pages for an Admin or SuperAdmin only (Reader / Delegated: none; the server refuses them too).
+    const ad = roleAtLeast('Admin');
+    ADMIN_ONLY_TABS.forEach(k => {
+      document.querySelectorAll('#tabs .tab[data-tab="' + k + '"], #navGroups .nav-group-item[data-tab="' + k + '"]').forEach(t => {
+        t.style.display = ad ? '' : 'none';
+        t.dataset.adminOnly = ad ? 'shown' : 'hidden';
       });
     });
   }
@@ -7346,7 +7409,7 @@
     { key: 'mail',      label: 'Mail & alerting',        match: ['setEmailControlsCard', 'setAlertingCard'] },
     { key: 'access',    label: 'Access requests (RFA)',  match: ['setRfaBrandingHost', 'setRfaBrokerHost'] },
     { key: 'hybrid',    label: 'Hybrid AD & workloads',  match: ['setHybridAdHost', /AD OU placement/i, 'setWorkloadExemptCard', 'setTemplatePacksHost'] },
-    { key: 'tools',     label: 'Copy & tools',           match: ['setCopyHost'] },
+    { key: 'tools',     label: 'Copy & tools',           match: ['setCopyHost', 'setConfigBackupHost'] },
   ];
   function settingsCategoryOf(el) {
     const id = el.id || '';
@@ -7765,6 +7828,8 @@
     // default"; "this should also go into settings"). The job schedule went to its own page under Jobs.
     // The permission template packs moved to their own page, Audit & Settings > Workload templates (operator 2026-10-05).
     h += `<div id="setCopyHost" style="margin-top:18px;"></div>`;
+    // CONFIG-1.3: how long configuration backups are kept (ConfigBackupRetentionDays, default 90; SuperAdmin changes it).
+    h += `<div id="setConfigBackupHost" class="set-card" style="margin-top:18px;"></div>`;
 
     body.innerHTML = h;
     try { groupSettingsIntoCategories(body); } catch (e) { console.warn('settings categories', e); }   // operator: "restructure into categories"
@@ -7774,6 +7839,7 @@
     // inside each renderer, unchanged: role mapping + break-glass SuperAdmin, template toggles + mail edit Admin+.
     // Verified by tests/gui-headless/config-zone-wiring.js (every control present AND wired in its new home).
     renderSettingsCopySection(document.getElementById('setCopyHost'));
+    renderConfigBackupRetentionCard(document.getElementById('setConfigBackupHost'));
     renderEnvironmentNameSection(document.getElementById('setEnvNameHost'));
     renderAdminDomainSection(document.getElementById('setAdminDomainHost'));
     renderHybridAdSection(document.getElementById('setHybridAdHost'));
@@ -8052,6 +8118,142 @@
       return changes.length ? { upn, action: 'replace', reason: '', row: r, index: at, changes } : { upn, action: 'skip', reason: 'already an admin, nothing different', row: r, index: at };
     });
   }
+  // ===================================================================
+  // CONFIG-1.2 / §96.2 COMMIT HISTORY + UNDO (operator 2026-10-06: "people make mistakes, so we need a way to undo a commit
+  // in a undo-way (super user can see all, admin can undo his own changes)"). The list and each commit's rows come from the
+  // change journal (GET /api/commit-history[/<id>]); the SERVER filters by role (SuperAdmin every commit, Admin only their
+  // own, Delegated / Reader none). "Undo selected" STAGES the inverse rows into Pending changes -- nothing is written here;
+  // the normal commit (approvals, second approver, every gate) writes it, labelled undoOf (journal UndoOf, Source undo).
+  // A row changed again by a LATER commit is shown "changed since by <who>" and is NOT ticked.
+  // ===================================================================
+  const PENDING_UNDO_OF = {};   // base -> the commit id the staged undo reverses (sent as undoOf on that base's commit)
+  let CH_DETAIL = null;
+  function chFmtWhen(v) { try { return fmtTime(v) || String(v || ''); } catch (_) { return String(v || ''); } }
+  function chCell(v) { return (v == null) ? '' : (typeof v === 'object' ? JSON.stringify(v) : String(v)); }
+  // What changed in one plan row, in words: Modify = the fields that differ (before -> after); Add / Remove = the row's key.
+  function chRowChangeHtml(r) {
+    const esc = escapeHtml;
+    if (r.op === 'Modify') {
+      const b = r.before || {}, a = r.after || {};
+      const cols = Array.from(new Set(Object.keys(b).concat(Object.keys(a))));
+      const diffs = cols.filter(c => chCell(b[c]) !== chCell(a[c]));
+      if (!diffs.length) return '<span style="color:#57606a">no field changed</span>';
+      return diffs.map(c => '<div><code>' + esc(c) + '</code>: <span style="color:#cf222e;text-decoration:line-through;">' + esc(chCell(b[c]) || '(empty)') + '</span> &rarr; <span style="color:#1a7f37;">' + esc(chCell(a[c]) || '(empty)') + '</span></div>').join('');
+    }
+    const row = r.op === 'Remove' ? (r.before || {}) : (r.after || {});
+    const cols = Object.keys(row).filter(c => chCell(row[c]) !== '').slice(0, 6);
+    return cols.map(c => '<div><code>' + esc(c) + '</code>: ' + esc(chCell(row[c])) + '</div>').join('');
+  }
+  function chInverseLabel(r) {
+    return r.inverse === 'remove' ? 'remove the row it added' : r.inverse === 'add' ? 'add the removed row back' : r.inverse === 'modify' ? 'put the old values back' : '';
+  }
+  async function renderCommitHistoryPage() {
+    const body = document.getElementById('commitHistoryBody');
+    if (!body) return;
+    const esc = escapeHtml;
+    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode &mdash; the commit history needs the server.</div>'; return; }
+    if (!roleAtLeast('Admin')) { body.innerHTML = '<div id="chNoRole" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#f6f8fa;font-size:12.5px;color:#57606a;">The commit history and undo are for an <b>Admin</b> (your own commits) or a <b>SuperAdmin</b> (every commit). You are signed in as <b>' + esc(PIM_ROLE) + '</b>.</div>'; return; }
+    CH_DETAIL = null;
+    body.innerHTML = '<div style="color:#57606a;font-size:12px;">Loading the commit history&hellip;</div>';
+    let res;
+    try { res = await api('GET', '/api/commit-history'); }
+    catch (e) { body.innerHTML = '<div id="chErr" style="color:#cf222e;">The commit history could not be read: ' + esc((e && e.message) || 'error') + '</div>'; return; }
+    const list = asList(res && res.commits);
+    const own = res && res.scope === 'own';
+    let h = '<div style="margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Audit &amp; Settings &middot; Commit history</span></div>' +
+      '<div id="chScope" style="font-size:12.5px;color:#57606a;margin-bottom:10px;">' +
+      (own ? 'You see the commits <b>you</b> made (an Admin undoes only their own changes; a SuperAdmin sees every commit).' : 'You see <b>every</b> commit (SuperAdmin).') +
+      ' Open one to see what it changed, tick the rows to reverse and press <b>Undo selected</b>: the reverse is staged in <b>Pending changes</b> and committed like any change &mdash; with the same approvals.</div>';
+    if (!list.length) {
+      h += '<div id="chEmpty" style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#f6f8fa;font-size:12.5px;color:#57606a;">No commits in the last ' + esc(String((res && res.days) || 90)) + ' days' + (own ? ' that you made' : '') + '.</div>';
+      body.innerHTML = h; return;
+    }
+    h += '<table class="set-table" id="chTbl" style="width:100%;font-size:12px;"><thead><tr><th>When</th><th>By</th><th>Approved by</th><th>Source</th><th>What</th><th>Rows</th><th>Undo</th><th></th></tr></thead><tbody>' +
+      list.map(c => {
+        const what = (c.Entity ? esc(entityLabel(c.Entity)) : '') + (Number(c.Entities) > 1 ? ' +' + (Number(c.Entities) - 1) + ' more' : '');
+        const undo = c.UndoOf ? 'undoes <code>' + esc(String(c.UndoOf).slice(0, 8)) + '</code>' : (c.UndoneBy ? '<span style="color:#9a6700;">undone by <code>' + esc(String(c.UndoneBy).slice(0, 8)) + '</code></span>' : '');
+        return '<tr data-commit="' + esc(c.CommitId) + '"><td>' + esc(chFmtWhen(c.CommittedUtc)) + '</td><td>' + esc(c.InitiatedBy || '') + (Number(c.Initiators) > 1 ? ' <span style="color:#57606a">+' + (Number(c.Initiators) - 1) + '</span>' : '') + '</td>' +
+          '<td>' + esc(c.ApprovedBy || '') + '</td><td>' + esc(c.Source || '') + '</td><td>' + what + '</td><td>' + esc(String(c.Rows || 0)) + '</td><td>' + undo + '</td>' +
+          '<td><button type="button" class="btn-sec chOpen" data-commit="' + esc(c.CommitId) + '">Open</button></td></tr>';
+      }).join('') + '</tbody></table><div id="chDetail" style="margin-top:14px;"></div>';
+    body.innerHTML = h;
+    body.querySelectorAll('.chOpen').forEach(b => { b.onclick = () => chOpenCommit(b.dataset.commit); });
+  }
+  async function chOpenCommit(id) {
+    const host = document.getElementById('chDetail');
+    if (!host) return;
+    const esc = escapeHtml;
+    host.innerHTML = '<div style="color:#57606a;font-size:12px;">Loading commit ' + esc(String(id).slice(0, 8)) + '&hellip;</div>';
+    let d;
+    try { d = await api('GET', '/api/commit-history/' + encodeURIComponent(id)); }
+    catch (e) { host.innerHTML = '<div id="chDetailErr" style="color:#cf222e;">' + esc((e && e.body && e.body.error) || (e && e.message) || 'error') + '</div>'; return; }
+    CH_DETAIL = d;
+    const rows = asList(d && d.rows);
+    let h = '<div class="set-card" id="chDetailCard"><h3 style="margin:0 0 6px;font-size:14px;">Commit <code>' + esc(d.commitId) + '</code></h3>' +
+      '<div style="font-size:12px;color:#57606a;margin-bottom:8px;">' + esc(chFmtWhen(d.committedUtc)) + ' &middot; by <b>' + esc(d.initiatedBy || '') + '</b>' +
+      (d.approvedBy ? ' &middot; approved by <b>' + esc(d.approvedBy) + '</b>' : '') + ' &middot; source ' + esc(d.source || '') + (d.undoOf ? ' &middot; undoes <code>' + esc(d.undoOf) + '</code>' : '') + '</div>' +
+      '<table class="set-table" id="chRows" style="width:100%;font-size:12px;"><thead><tr><th><input type="checkbox" id="chAll" title="Tick every row that can be undone and has not changed since"></th><th>Record type</th><th>Key</th><th>What the commit did</th><th>Change</th><th>The undo will</th><th>Note</th></tr></thead><tbody>' +
+      rows.map((r, i) => '<tr class="' + (r.conflict ? 'chConflict' : '') + '" data-i="' + i + '"><td><input type="checkbox" class="chTick" data-i="' + i + '"' + (r.selected ? ' checked' : '') + (r.allowed ? '' : ' disabled') + '></td>' +
+        '<td>' + esc(entityLabel(r.entity)) + '</td><td><code>' + esc(r.key) + '</code></td><td>' + esc(r.op === 'Add' ? 'added' : r.op === 'Remove' ? 'removed' : 'changed') + '</td>' +
+        '<td>' + chRowChangeHtml(r) + '</td><td>' + esc(chInverseLabel(r)) + '</td>' +
+        '<td class="chNote" style="' + (r.conflict ? 'color:#9a6700;' : 'color:#57606a;') + '">' + (r.conflict && r.changedSince ? 'Changed since by <b>' + esc(r.changedSince.by) + '</b> in commit <code>' + esc(String(r.changedSince.commitId).slice(0, 8)) + '</code>' + (r.changedSince.utc ? ' (' + esc(chFmtWhen(r.changedSince.utc)) + ')' : '') + ' &mdash; not ticked; ticking it overwrites that later change.' : esc(r.note || '')) + '</td></tr>').join('') +
+      '</tbody></table><div style="margin-top:10px;"><button type="button" id="chUndoGo">Undo selected</button> <button type="button" class="btn-sec" id="chBack">Close</button> <span id="chMsg" style="font-size:12px;margin-left:8px;"></span></div>' +
+      '<div style="font-size:11.5px;color:#57606a;margin-top:6px;">Nothing is saved here. The undo is staged in Pending changes and committed with the normal approvals; the commit is recorded as an undo of this one, and can itself be undone.</div></div>';
+    host.innerHTML = h;
+    const upd = () => { const n = host.querySelectorAll('.chTick:checked').length; const g = document.getElementById('chUndoGo'); if (g) { g.textContent = 'Undo selected (' + n + ')'; g.disabled = n === 0; } };
+    host.querySelectorAll('.chTick').forEach(c => { c.onchange = upd; });
+    const all = document.getElementById('chAll');
+    if (all) all.onchange = () => { host.querySelectorAll('.chTick').forEach(c => { const r = rows[Number(c.dataset.i)]; if (!c.disabled && !(r && r.conflict)) c.checked = all.checked; }); upd(); };
+    document.getElementById('chBack').onclick = () => { host.innerHTML = ''; CH_DETAIL = null; };
+    document.getElementById('chUndoGo').onclick = async () => {
+      const pick = Array.from(host.querySelectorAll('.chTick:checked')).map(c => rows[Number(c.dataset.i)]).filter(r => r && r.allowed);
+      const res = await chStageUndo(d.commitId, pick);
+      const msg = document.getElementById('chMsg');
+      if (msg) msg.innerHTML = res.staged ? '' : '<span style="color:#cf222e;">Nothing was staged.</span>';
+      if (res.skipped.length) alert('Staged ' + res.staged + ' change(s). Not staged:\n' + res.skipped.map(s => '- ' + s).join('\n'));
+      if (res.staged) switchTab('save');
+    };
+    upd();
+  }
+  // Stage the inverse of the picked plan rows into pendingChanges -- the same store every edit uses. Add -> the row is
+  // deleted; Remove -> the before row is added back (or, if a row with that key exists again, its values are put back);
+  // Modify -> the before values are written over the row. Rows are found by the store key (pendingRowKey). Returns
+  // { staged, skipped[] }. The bases touched remember the undone commit (PENDING_UNDO_OF) for their commit's undoOf.
+  async function chStageUndo(commitId, picked) {
+    const out = { staged: 0, skipped: [] };
+    if (!isServer || !roleAtLeast('Admin')) { out.skipped.push('Admin role required.'); return out; }
+    const byBase = {};
+    for (const r of (picked || [])) { (byBase[r.entity] = byBase[r.entity] || []).push(r); }
+    const cellOf = (v) => (v == null) ? '' : (typeof v === 'object' ? JSON.stringify(v) : String(v));
+    for (const base of Object.keys(byBase)) {
+      let data;
+      try { data = await loadCsv(base); } catch (e) { byBase[base].forEach(r => out.skipped.push(base + ' / ' + r.key + ': this record type cannot be loaded here (' + ((e && e.message) || 'error') + ')')); continue; }
+      ensurePending(base, data.header || [], data.rows || []);
+      const p = pendingChanges[base];
+      let n = 0;
+      const find = (key) => { const k = String(key || '').trim().toLowerCase(); return k ? p.rows.findIndex((row, i) => !p.deletes.has(i) && pendingRowKey(base, row) === k) : -1; };
+      const put = (idx, src) => {
+        const cols = Array.from(new Set(p.header.concat(Object.keys(src || {}))));
+        for (const c of cols) { if (!p.header.includes(c)) p.header.push(c); p.rows[idx][c] = cellOf(src ? src[c] : ''); }
+      };
+      for (const r of byBase[base]) {
+        const at = find(r.key);
+        if (r.inverse === 'remove') {
+          if (at < 0) { out.skipped.push(entityLabel(base) + ' / ' + r.key + ': already gone'); continue; }
+          p.deletes.add(at); n++;
+        } else if (r.inverse === 'add' || r.inverse === 'modify') {
+          if (!r.row) { out.skipped.push(entityLabel(base) + ' / ' + r.key + ': no before record'); continue; }
+          if (at >= 0) put(at, r.row);
+          else { const row = {}; for (const c of p.header) row[c] = ''; p.rows.push(row); put(p.rows.length - 1, r.row); }
+          n++;
+        } else { out.skipped.push(entityLabel(base) + ' / ' + r.key + ': cannot be reversed'); }
+      }
+      if (n) { PENDING_UNDO_OF[base] = commitId; out.staged += n; }
+    }
+    markBadges();
+    try { valRevalidateAfterFix(); } catch (_) { }
+    return out;
+  }
   async function renderAdminImportPage() {
     const body = document.getElementById('adminImportBody');
     if (!body) return;
@@ -8142,6 +8344,219 @@
         const g = document.getElementById('aiGoSave'); if (g) g.onclick = () => switchTab('save');
       };
     };
+  }
+
+  // ===================================================================
+  // CONFIG-1.3 / 1.4 (framework), PIM §96.3 + §96.4 -- Backups & restore (operator 2026-10-06: "backup the configurations in
+  // pim ... save length must be configurable, default 90 days"; "restore the backup, but be able to select what we want").
+  // The page LISTS the backups (GET /api/config-backups), takes one now (Admin+), pins / unpins, and for a SuperAdmin compares a
+  // backup with NOW (GET .../diff): per entity, row and field -- added since / removed since / changed since. Ticked ROWS are
+  // STAGED into pendingChanges (marked restoreFrom, so the commit goes as a restore -- commitPutBody); nothing is written here.
+  // Ticked SETTINGS go through the server's settings writer one by one (POST .../restore-settings, old -> new); the break-glass
+  // list goes through its own maker/checker request (PUT /api/settings/breakglass-accounts).
+  // ===================================================================
+  let CB_STATE = { backups: [], access: {}, retentionDays: 90, diff: null, backupId: '' };
+  function cbValueText(v) {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'object') { try { return JSON.stringify(v); } catch (_) { return String(v); } }
+    return String(v);
+  }
+  function cbShort(v, n) { const s = cbValueText(v); const m = n || 80; return s.length > m ? s.slice(0, m - 1) + '…' : s; }
+  function cbWhen(t) { try { return (typeof fmtTime === 'function') ? fmtTime(t) : String(t || ''); } catch (_) { return String(t || ''); } }
+  async function renderConfigBackupRetentionCard(el) {
+    if (!el) return;
+    const esc = escapeHtml;
+    let r = null;
+    try { r = await api('GET', '/api/settings/config-backup-retention'); } catch (e) { el.innerHTML = '<h3 style="margin:0 0 4px;font-size:14px;">Configuration backups</h3><div style="color:#57606a;font-size:12px;">' + esc(e.message) + '</div>'; return; }
+    const d = Number(r && r.days) || 90;
+    el.innerHTML = '<h3 style="margin:0 0 4px;font-size:14px;">Configuration backups</h3>' +
+      '<div style="font-size:12.5px;color:#24292f;">Keep configuration backups for <b class="cbRetDays">' + fmtNum(d) + ' days</b> (default 90). Pinned backups are kept longer; the newest backup is always kept. ' +
+      'The daily <code>config-backup</code> job removes older ones and records it in the audit trail.</div>' +
+      (r && r.canWrite
+        ? '<div style="margin-top:6px;"><input type="number" class="cbRetIn" min="1" max="3650" value="' + d + '" style="width:90px;"> days <button type="button" class="btn-sec cbRetSave">Save</button> <span class="cbRetMsg" style="font-size:12px;"></span></div>'
+        : '<div style="margin-top:4px;font-size:11.5px;color:#57606a;">(a SuperAdmin changes this)</div>');
+    const save = el.querySelector('.cbRetSave');
+    if (save) save.onclick = async () => {
+      const m = el.querySelector('.cbRetMsg');
+      try { await api('PUT', '/api/settings/config-backup-retention', { days: el.querySelector('.cbRetIn').value }); if (m) { m.textContent = 'Saved.'; m.style.color = '#1a7f37'; } renderConfigBackupRetentionCard(el); }
+      catch (e) { if (m) { m.textContent = 'Not saved: ' + e.message; m.style.color = '#cf222e'; } }
+    };
+  }
+  async function renderConfigBackupsPage() {
+    const body = document.getElementById('configBackupsBody');
+    if (!body) return;
+    const esc = escapeHtml;
+    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode — backups need the server.</div>'; return; }
+    if (!roleAtLeast('Admin')) { body.innerHTML = '<div style="padding:12px;border:1px solid #d0d7de;border-radius:8px;background:#f6f8fa;font-size:12.5px;color:#57606a;">Configuration backups are for an <b>Admin</b> or <b>SuperAdmin</b>. You are signed in as <b>' + esc(PIM_ROLE) + '</b>.</div>'; return; }
+    body.innerHTML = stateLoading('Loading configuration backups… please wait', 'Reading the backup list from the store.');
+    let r;
+    try { r = await api('GET', '/api/config-backups'); } catch (e) { body.innerHTML = stateError('Failed to load the backups', e.message); return; }
+    CB_STATE.backups = (r && Array.isArray(r.backups)) ? r.backups : [];
+    CB_STATE.access = (r && r.access) || {};
+    CB_STATE.retentionDays = Number(r && r.retentionDays) || 90;
+    const acc = CB_STATE.access;
+    const latestReal = CB_STATE.backups.find(b => !b.noChange);
+    let h = '<div style="margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Audit &amp; Settings · Backups &amp; restore</span></div>';
+    h += '<div class="set-card" style="max-width:1200px;"><h3 style="margin:0 0 4px;font-size:14px;">Configuration backups</h3>' +
+      '<div style="color:#57606a;font-size:12.5px;line-height:1.5;margin-bottom:8px;max-width:1050px;">A backup holds the whole configuration at one moment: departments, external companies and consultants, admins, every group definition and delegation, workload bindings, templates, the settings (<b>never a secret</b>), the break-glass list and emergency override, the job schedule, feature gates, rings and the MSP registry. ' +
+      'It is taken <b>every day</b> by the <code>config-backup</code> job; an unchanged configuration is recorded as <b>no change</b> instead of a copy. ' +
+      'Kept for <b id="cbRetLine">' + fmtNum(CB_STATE.retentionDays) + ' days</b>; <b>pinned</b> backups are kept longer. Never in a backup: secrets, the audit trail, the change journal, caches and run logs.</div>';
+    if (acc.backupNow) h += '<div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><input id="cbNote" placeholder="Note (optional), e.g. before the reorganisation" style="width:320px;" maxlength="400"> <button class="primary" id="cbNow" type="button">Back up now</button> <span id="cbMsg" style="font-size:12.5px;"></span></div>';
+    h += '<table class="set-table" id="cbTbl" style="width:100%;font-size:12px;"><thead><tr><th>Taken</th><th>By</th><th>How</th><th>Version</th><th>Content</th><th>Pinned</th><th></th></tr></thead><tbody>';
+    h += CB_STATE.backups.map(b => '<tr data-id="' + esc(b.backupId) + '">' +
+      '<td title="' + esc(b.backupId) + '">' + esc(cbWhen(b.takenUtc)) + (b.note ? '<div style="color:#57606a;font-size:11px;">' + esc(b.note) + '</div>' : '') + '</td>' +
+      '<td>' + esc(b.takenBy || '') + '</td><td>' + esc(b.trigger === 'scheduled' ? 'daily job' : (b.trigger || '')) + '</td><td>' + esc(b.version || '') + '</td>' +
+      '<td>' + (b.noChange ? '<span style="color:#57606a;">no change since ' + esc(b.sameAs || '') + '</span>' : fmtNum(b.entities) + ' entities, ' + fmtNum(b.items) + ' items') + '</td>' +
+      '<td>' + (b.pinned ? '<b>pinned</b>' + (b.pinnedBy ? ' <span style="color:#57606a;font-size:11px;">by ' + esc(b.pinnedBy) + '</span>' : '') : '') + '</td>' +
+      '<td style="white-space:nowrap;">' +
+        (!b.pinned && acc.pin ? '<button type="button" class="btn-sec cbPin" data-id="' + esc(b.backupId) + '" data-pin="1">Pin</button> ' : '') +
+        (b.pinned && acc.unpin ? '<button type="button" class="btn-sec cbPin" data-id="' + esc(b.backupId) + '" data-pin="0">Unpin</button> ' : '') +
+        (acc.restore ? '<button type="button" class="btn-sec cbRestore" data-id="' + esc(b.backupId) + '">Restore&hellip;</button>' : '') +
+      '</td></tr>').join('');
+    h += '</tbody></table>';
+    if (!CB_STATE.backups.length) h += '<div id="cbEmpty" style="color:#57606a;font-size:12.5px;margin:8px 0;">No backup yet &mdash; the daily job takes the first one' + (acc.backupNow ? ', or press <b>Back up now</b>' : '') + '.</div>';
+    if (latestReal && (latestReal.excludedSettings || []).length) {
+      h += '<details style="margin-top:8px;font-size:12px;"><summary>Settings left out of the backups (' + latestReal.excludedSettings.length + ')' + (latestReal.redactedCount ? ' and ' + latestReal.redactedCount + ' secret value(s) removed' : '') + '</summary>' +
+        '<div style="color:#57606a;margin-top:4px;">' + latestReal.excludedSettings.map(x => esc(x.name) + ' <i>(' + esc(x.reason) + ')</i>').join(', ') + '</div></details>';
+    }
+    if (!acc.restore) h += '<div style="margin-top:8px;font-size:12px;color:#57606a;">Restoring from a backup is for a <b>SuperAdmin</b>.</div>';
+    h += '</div>';
+    h += '<div id="cbRetHost" class="set-card" style="max-width:1200px;margin-top:12px;"></div>';
+    h += '<div id="cbRestore" style="max-width:1200px;margin-top:12px;"></div>';
+    body.innerHTML = h;
+    renderConfigBackupRetentionCard(document.getElementById('cbRetHost'));
+    const msg = (t, bad) => { const m = document.getElementById('cbMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#1a7f37'; } };
+    const now = document.getElementById('cbNow');
+    if (now) now.onclick = async () => {
+      now.disabled = true; msg('Backing up…');
+      try {
+        const res = await api('POST', '/api/config-backups', { note: (document.getElementById('cbNote') || {}).value || '' });
+        const b = (res && res.backup) || {};
+        await renderConfigBackupsPage();
+        msg(b.noChange ? 'Nothing changed since ' + (b.sameAs || 'the last backup') + ' -- recorded as no change.' : 'Backup ' + (b.backupId || '') + ' taken.');
+      } catch (e) { msg('The backup was not taken: ' + e.message, true); now.disabled = false; }
+    };
+    body.querySelectorAll('.cbPin').forEach(btn => {
+      btn.onclick = async () => {
+        const pin = btn.dataset.pin === '1';
+        try { await api('POST', '/api/config-backups/' + encodeURIComponent(btn.dataset.id) + '/pin', { pinned: pin }); await renderConfigBackupsPage(); }
+        catch (e) { msg((pin ? 'Not pinned: ' : 'Not unpinned: ') + e.message, true); }
+      };
+    });
+    body.querySelectorAll('.cbRestore').forEach(btn => { btn.onclick = () => openConfigBackupRestore(btn.dataset.id); });
+  }
+  async function openConfigBackupRestore(id) {
+    const host = document.getElementById('cbRestore');
+    if (!host) return;
+    const esc = escapeHtml;
+    host.innerHTML = stateLoading('Comparing backup ' + id + ' with the configuration now… please wait', 'Every entity, row and field.');
+    let d;
+    try { d = await api('GET', '/api/config-backups/' + encodeURIComponent(id) + '/diff'); } catch (e) { host.innerHTML = stateError('The backup could not be compared', e.message); return; }
+    CB_STATE.diff = d; CB_STATE.backupId = id;
+    const ents = (d && Array.isArray(d.entities)) ? d.entities : [];
+    const changedEnts = ents.filter(e => (e.added || []).length + (e.removed || []).length + (e.changed || []).length > 0);
+    const opWord = { added: 'added since', removed: 'removed since', changed: 'changed since' };
+    const opDo = { added: 'restoring removes it', removed: 'restoring adds it back', changed: 'restoring puts the backup\'s values back' };
+    let h = '<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">Restore from backup <code>' + esc(id) + '</code></h3>' +
+      '<div style="color:#57606a;font-size:12.5px;line-height:1.5;margin-bottom:8px;">What changed since this backup. Tick what you want back. <b>Rows</b> are staged as <b>pending changes</b> and saved by the normal commit (approvals and every other check apply; the change journal records it as a restore, and it can be undone like any commit). <b>Settings</b> are restored one by one (old &rarr; new) when you press their button. Nothing else changes.</div>';
+    if (!changedEnts.length) h += '<div id="cbNoDiff" style="font-size:12.5px;color:#1a7f37;">Nothing differs &mdash; the configuration is the same as in this backup.</div>';
+    changedEnts.forEach(e => {
+      const ei = ents.indexOf(e);
+      const n = (e.added || []).length + (e.removed || []).length + (e.changed || []).length;
+      const canTick = e.restore === 'rows' || e.restore === 'settings';
+      h += '<div class="cbEnt" data-ei="' + ei + '" style="margin-top:12px;border-top:1px solid #d0d7de;padding-top:8px;">' +
+        '<div style="font-size:13px;font-weight:600;">' + (canTick ? '<label><input type="checkbox" class="cbEntAll" data-ei="' + ei + '"> ' : '<label>') + esc(e.entity) + '</label> ' +
+        '<span style="font-weight:400;color:#57606a;font-size:12px;">' + (e.added || []).length + ' added since &middot; ' + (e.removed || []).length + ' removed since &middot; ' + (e.changed || []).length + ' changed since &middot; ' + fmtNum(e.same || 0) + ' the same</span></div>' +
+        (e.howTo ? '<div style="color:#9a6700;font-size:12px;">' + esc(e.howTo) + '</div>' : '') +
+        '<table class="set-table" style="width:100%;font-size:12px;margin-top:4px;"><thead><tr><th style="width:24px;"></th><th>Row</th><th>What</th><th>Details</th></tr></thead><tbody>';
+      ['added', 'removed', 'changed'].forEach(op => {
+        (e[op] || []).forEach((it, ii) => {
+          const route = it.route || '';
+          const tickable = e.restore === 'rows' || (e.restore === 'settings' && route === 'direct');
+          let det = '';
+          if (op === 'changed') det = (it.fields || []).map(f => '<b>' + esc(f.field) + '</b>: ' + esc(cbShort(f.now)) + ' &rarr; ' + esc(cbShort(f.backup))).join('<br>');
+          else det = esc(cbShort(op === 'added' ? it.now : it.backup, 140));
+          let extra = '';
+          if (e.restore === 'settings' && route === 'breakglass' && op !== 'added') extra = ' <button type="button" class="btn-sec cbBg" data-ei="' + ei + '" data-op="' + op + '" data-ii="' + ii + '">Request this break-glass list</button> <span style="color:#57606a;">(a second SuperAdmin approves it)</span>';
+          else if (e.restore === 'settings' && route !== 'direct') extra = ' <span style="color:#57606a;">(not restored from a backup)</span>';
+          h += '<tr data-op="' + op + '">' +
+            '<td>' + (tickable ? '<input type="checkbox" class="cbItem" data-ei="' + ei + '" data-op="' + op + '" data-ii="' + ii + '">' : '') + '</td>' +
+            '<td><code>' + esc(it.key) + '</code></td><td>' + opWord[op] + ' <span style="color:#57606a;">&mdash; ' + opDo[op] + '</span></td><td>' + det + extra + '</td></tr>';
+        });
+      });
+      h += '</tbody></table></div>';
+    });
+    if (changedEnts.length) h += '<div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
+      '<button class="primary" id="cbStage" type="button">Stage the ticked rows</button> ' +
+      '<button class="btn-sec" id="cbSettings" type="button">Restore the ticked settings now</button> ' +
+      '<span id="cbRmsg" style="font-size:12.5px;"></span></div>';
+    h += '</div>';
+    host.innerHTML = h;
+    const rmsg = (t, bad) => { const m = document.getElementById('cbRmsg'); if (m) { m.innerHTML = t; m.style.color = bad ? '#cf222e' : '#1a7f37'; } };
+    host.querySelectorAll('.cbEntAll').forEach(cb => { cb.onchange = () => { host.querySelectorAll('.cbItem[data-ei="' + cb.dataset.ei + '"]').forEach(x => { x.checked = cb.checked; }); }; });
+    const ticked = () => Array.from(host.querySelectorAll('.cbItem')).filter(x => x.checked).map(x => ({ e: ents[Number(x.dataset.ei)], op: x.dataset.op, it: ents[Number(x.dataset.ei)][x.dataset.op][Number(x.dataset.ii)] }));
+    const st = document.getElementById('cbStage');
+    if (st) st.onclick = async () => {
+      const t = ticked().filter(x => x.e.restore === 'rows');
+      if (!t.length) { rmsg('Tick at least one row first.', true); return; }
+      try { const n = await stageConfigBackupRows(id, t); rmsg('Staged ' + n.staged + ' change(s)' + (n.skipped ? ' (' + n.skipped + ' already as in the backup)' : '') + '. <a style="cursor:pointer;color:#0969da;font-weight:600;" id="cbGoSave">Review &amp; commit under Pending changes &rarr;</a>'); const g = document.getElementById('cbGoSave'); if (g) g.onclick = () => switchTab('save'); }
+      catch (e) { rmsg('Nothing staged: ' + e.message, true); }
+    };
+    const ss = document.getElementById('cbSettings');
+    if (ss) ss.onclick = async () => {
+      const names = ticked().filter(x => x.e.restore === 'settings').map(x => x.it.key);
+      if (!names.length) { rmsg('Tick at least one setting first.', true); return; }
+      if (!window.confirm('Restore ' + names.length + ' setting(s) from backup ' + id + ' now?\n\n' + names.join('\n'))) return;
+      try {
+        const res = await api('POST', '/api/config-backups/' + encodeURIComponent(id) + '/restore-settings', { names: names });
+        rmsg('Restored: ' + ((res && res.written) || []).join(', ') + (((res && res.skipped) || []).length ? ' &middot; not restored: ' + res.skipped.map(s => escapeHtml(s.name + ' (' + s.reason + ')')).join('; ') : ''));
+      } catch (e) { rmsg('Settings not restored: ' + e.message, true); }
+    };
+    host.querySelectorAll('.cbBg').forEach(btn => {
+      btn.onclick = async () => {
+        const it = ents[Number(btn.dataset.ei)][btn.dataset.op][Number(btn.dataset.ii)];
+        const accounts = Array.isArray(it.backup) ? it.backup.map(String) : [];
+        const just = window.prompt('Why restore the break-glass list from backup ' + id + '? (a second SuperAdmin approves the request)', 'Restore from configuration backup ' + id);
+        if (just === null) return;
+        try {
+          const cur = await api('GET', '/api/settings/breakglass-accounts');
+          const res = await api('PUT', '/api/settings/breakglass-accounts', { accounts: accounts, justification: just, baseHash: (cur && cur.listHash) || '' });
+          rmsg(escapeHtml((res && res.note) || 'Request raised -- another SuperAdmin must approve it.'));
+        } catch (e) { rmsg('The break-glass request was not raised: ' + escapeHtml(e.message), true); }
+      };
+    });
+  }
+  // Stages the ticked rows of a backup diff into pendingChanges (CONFIG-1.4): added since -> the row is deleted; removed since
+  // -> the backup's row is added back; changed since -> the backup's values are put back into the fields that differ. Rows are
+  // matched by their store key (pendingRowKey). The entity is marked restoreFrom, so its commit goes as a restore.
+  async function stageConfigBackupRows(id, ticked) {
+    const byBase = {};
+    ticked.forEach(t => { (byBase[t.e.entity] = byBase[t.e.entity] || []).push(t); });
+    let staged = 0, skipped = 0;
+    for (const base of Object.keys(byBase)) {
+      const data = await loadCsv(base);
+      const p = ensurePending(base, data.header || [], data.rows || []);
+      p.restoreFrom = id;
+      const live = (k) => p.rows.findIndex((r, i) => !p.deletes.has(i) && pendingRowKey(base, r) === String(k || '').toLowerCase());
+      const put = (row, col, v) => { if (!p.header.includes(col)) p.header.push(col); row[col] = cbValueText(v); };
+      for (const t of byBase[base]) {
+        const idx = live(t.it.key);
+        if (t.op === 'added') { if (idx >= 0) { p.deletes.add(idx); staged++; } else skipped++; }
+        else if (t.op === 'removed') {
+          if (idx >= 0) { skipped++; continue; }
+          const row = {}; p.header.forEach(c => { row[c] = ''; });
+          const src = t.it.backup || {};
+          Object.keys(src).forEach(k => put(row, k, src[k]));
+          p.rows.push(row); staged++;
+        } else if (t.op === 'changed') {
+          if (idx < 0) { skipped++; continue; }
+          (t.it.fields || []).forEach(f => { if (f.field !== '*') put(p.rows[idx], f.field, f.backup); });
+          staged++;
+        }
+      }
+    }
+    markBadges();
+    return { staged: staged, skipped: skipped };
   }
 
   async function renderCompaniesPage() {
@@ -10550,6 +10965,7 @@
     'pending-check':               'Reports staged changes and queued actions that were started more than a day ago and never committed (Pending changes). Changes committed but not yet applied are checked every 30 minutes by verify-convergence.',
     'access-review-cycle':         'Starts the access review of each department whose review rule makes it due (Access reviews > Review rules): one review per group of the department, for the reviewers of the rule. Does nothing until a rule is switched on.',
     'target-check':                'Checks that the Azure resources, Azure roles and Entra roles your delegations point at still exist, and reports the ones that are gone (Coverage & gaps). It never removes anything -- you decide.',
+    'config-backup':               'Backs up the configuration (departments, companies, admins, group definitions, delegations, settings without secrets, break-glass list, job schedule, MSP registry) once a day; an unchanged configuration is recorded as "no change". Old backups are removed after the retention (default 90 days); pinned ones are kept (Audit & Settings > Backups & restore).',
     // REQ-U wave 2: per-NAME entries (looked up before the type) -- two discovery jobs read the workload role catalogs.
     'discovery-defender':          'Reads the Defender XDR roles and their permissions, and reports roles and permission groups no template knows yet.',
     'discovery-intune':            'Reads the Intune roles (built-in and custom), and reports roles no template knows yet.'
@@ -13725,6 +14141,105 @@
   // GUARD-1 (framework, operator 2026-10-04: "i need emails whenever guards are triggered"): every protective guard that
   // held, refused or skipped something is listed here -- what it protected, how often, the last values, what to do. The
   // same trip was mailed (once a day per guard), written to the audit trail and sent to Invardia as telemetry.
+  // ---- 96.5 THE DAILY RECONCILE: pause / resume + the removal report (operator 2026-10-06) ----------------------------
+  // Decision D4: a pause stops ONLY the daily reconcile -- commits, deltas and Run now still apply. Pause / Resume are a
+  // SuperAdmin's (reason required, optional until), audited by the server. Purpose 2 (removing PIM-managed leftovers) is
+  // REPORT ONLY until the operator switches it to enforce: "would remove N, held by rule X".
+  const RECONCILE_RULES = {
+    'admin': 'admin account -- never deleted or disabled by the reconcile',
+    '1': 'rule 1 -- not defined by a PIM commit (or from before the journal)',
+    '2': 'rule 2 -- not confirmed live because of PIM (only matched)',
+    '3': 'rule 3 -- not removed by PIM (the definition is still there)',
+    '4': 'rule 4 -- something similar is configured (or a shared workload assignment)',
+    '5': 'rule 5 -- a guard holds it (removal budget / empty definitions)'
+  };
+  function reconcileBannerHtml(p) {
+    if (!p || !p.paused) return '';
+    const until = p.untilUtc ? ' &mdash; until ' + escapeHtml(fmtTime(p.untilUtc)) : '';
+    return '<div class="reconcile-paused-banner" style="border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;padding:10px 12px;font-size:12.5px;margin-bottom:12px;">' +
+      '<b>Daily reconcile PAUSED</b> by <b>' + escapeHtml(p.by || 'unknown') + '</b> since ' + escapeHtml(fmtTime(p.sinceUtc)) + ': ' + escapeHtml(p.reason || '') + until +
+      '<div style="color:#57606a;font-size:11.5px;margin-top:3px;">Only the daily reconcile is paused &mdash; commits, deltas and Run now still apply.</div></div>';
+  }
+  async function loadReconcileBanner(hostId) {
+    const el = document.getElementById(hostId);
+    if (!el || !isServer) return;
+    let s;
+    try { s = await api('GET', '/api/reconcile/state'); } catch (_) { el.innerHTML = ''; return; }
+    el.innerHTML = reconcileBannerHtml(s && s.pause);
+  }
+  function reconcileReportHtml(rep, mode) {
+    if (!rep) return '<div style="color:#57606a;font-size:12px;">No removal report yet &mdash; the next daily reconcile writes one.</div>';
+    const held = rep.heldBy || {};
+    const heldTxt = Object.keys(RECONCILE_RULES).filter(k => Number(held[k]) > 0)
+      .map(k => '<span title="' + escapeHtml(RECONCILE_RULES[k]) + '">' + escapeHtml(k === 'admin' ? 'admin' : 'rule ' + k) + ': <b>' + escapeHtml(held[k]) + '</b></span>').join(' &middot; ');
+    let h = '<div style="font-size:12.5px;margin-bottom:6px;">' +
+      (rep.mode === 'enforce'
+        ? 'Last run (<b>enforce</b>): removed <b>' + escapeHtml(rep.removed) + '</b> of <b>' + escapeHtml(rep.wouldRemove) + '</b> qualifying'
+        : 'Last run (<b>report only</b>): would remove <b class="reconcile-would">' + escapeHtml(rep.wouldRemove) + '</b> &mdash; nothing was removed') +
+      ' &middot; ' + escapeHtml(rep.candidates) + ' live item(s) not in the configuration &middot; ' + escapeHtml(fmtTime(rep.generatedUtc)) + '</div>';
+    if (heldTxt) h += '<div style="font-size:12px;color:#57606a;margin-bottom:6px;">Held: ' + heldTxt + '</div>';
+    (rep.errors || []).forEach(e => { h += '<div style="font-size:12px;color:#9a6700;">' + escapeHtml(e) + '</div>'; });
+    const rows = [];
+    (rep.scopes || []).forEach(sc => (sc.items || []).forEach(it => rows.push({ scope: sc.scope, it: it })));
+    if (rows.length) {
+      h += '<details style="font-size:12px;"><summary style="cursor:pointer;">Items (' + rows.length + ')</summary>' +
+        '<table style="width:100%;border-collapse:collapse;margin-top:6px;"><thead><tr style="text-align:left;color:#57606a;border-bottom:1px solid #d0d7de;">' +
+        '<th style="padding:3px 6px;">Area</th><th style="padding:3px 6px;">Item</th><th style="padding:3px 6px;">Verdict</th><th style="padding:3px 6px;">Why</th></tr></thead><tbody>' +
+        rows.map(r => '<tr class="reconcile-item" style="border-bottom:1px solid #eaeef2;"><td style="padding:3px 6px;">' + escapeHtml(r.scope) + '</td>' +
+          '<td style="padding:3px 6px;">' + escapeHtml(r.it.label || r.it.key) + '</td>' +
+          '<td style="padding:3px 6px;white-space:nowrap;">' + (r.it.eligible ? '<b style="color:#cf222e;">' + (mode === 'enforce' ? 'removed' : 'would remove') + '</b>' : 'held (' + escapeHtml(r.it.rule === 'admin' ? 'admin' : 'rule ' + r.it.rule) + ')') + '</td>' +
+          '<td style="padding:3px 6px;color:#57606a;">' + escapeHtml(r.it.reason || '') + '</td></tr>').join('') +
+        '</tbody></table></details>';
+    }
+    return h;
+  }
+  async function renderReconcileSection(body) {
+    if (!body || !isServer) return;
+    let s;
+    try { s = await api('GET', '/api/reconcile/state'); } catch (_) { return; }
+    const p = (s && s.pause) || {};
+    const can = !!(s && s.canPause) && roleAtLeast('SuperAdmin');
+    const sec = document.createElement('div');
+    sec.id = 'reconcileSection';
+    sec.style.cssText = 'margin:0 0 14px;border:1px solid #d0d7de;border-radius:8px;padding:10px 12px;';
+    let h = reconcileBannerHtml(p);
+    h += '<div style="font-weight:600;margin-bottom:4px;">Daily reconcile <span style="color:#57606a;font-weight:400;font-size:11.5px;">&mdash; catch-up every day; removal of PIM-managed leftovers is <b>' +
+      escapeHtml(s.removalMode === 'enforce' ? 'ENFORCED' : 'report only') + '</b>' + (p.paused ? '' : ' &middot; running on its schedule') + '</span></div>';
+    h += reconcileReportHtml(s.report, s.removalMode);
+    if (can) {
+      h += p.paused
+        ? '<div style="margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;"><input id="reconcileResumeReason" placeholder="Reason (optional)" style="font-size:12px;min-width:220px;">' +
+          '<button id="reconcileResumeBtn" style="font-size:12px;">Resume daily reconcile</button></div>'
+        : '<div style="margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;"><input id="reconcilePauseReason" placeholder="Reason (required)" style="font-size:12px;min-width:220px;">' +
+          '<label style="font-size:12px;color:#57606a;">until (optional) <input id="reconcilePauseUntil" type="datetime-local" style="font-size:12px;"></label>' +
+          '<button id="reconcilePauseBtn" style="font-size:12px;">Pause daily reconcile</button></div>';
+    } else if (!p.paused) {
+      h += '<div style="margin-top:6px;color:#57606a;font-size:11.5px;">A SuperAdmin can pause the daily reconcile here.</div>';
+    }
+    h += '<div id="reconcileMsg" style="margin-top:6px;font-size:12px;min-height:14px;"></div>';
+    sec.innerHTML = h;
+    const old = document.getElementById('reconcileSection'); if (old) old.remove();
+    body.insertBefore(sec, body.firstChild);
+    const msg = (t, bad) => { const m = document.getElementById('reconcileMsg'); if (m) { m.style.color = bad ? '#cf222e' : '#1a7f37'; m.textContent = t; } };
+    const pb = document.getElementById('reconcilePauseBtn');
+    if (pb) pb.onclick = async () => {
+      const reason = (document.getElementById('reconcilePauseReason') || {}).value || '';
+      if (!reason.trim()) { msg('A reason is required to pause the daily reconcile.', true); return; }
+      const u = (document.getElementById('reconcilePauseUntil') || {}).value || '';
+      const body2 = { reason: reason.trim() };
+      if (u) { const d = new Date(u); if (isNaN(d.getTime())) { msg('The until-time is not a valid date.', true); return; } body2.untilUtc = d.toISOString(); }
+      pb.disabled = true;
+      try { await api('POST', '/api/reconcile/pause', body2); msg('Paused.'); renderReconcileSection(body); }
+      catch (e) { pb.disabled = false; msg(e.message, true); }
+    };
+    const rbtn = document.getElementById('reconcileResumeBtn');
+    if (rbtn) rbtn.onclick = async () => {
+      rbtn.disabled = true;
+      try { await api('POST', '/api/reconcile/resume', { reason: ((document.getElementById('reconcileResumeReason') || {}).value || '').trim() }); msg('Resumed.'); renderReconcileSection(body); }
+      catch (e) { rbtn.disabled = false; msg(e.message, true); }
+    };
+  }
+
   async function renderGuardsSection(body) {
     let d = null;
     try { d = await api('GET', '/api/guards'); } catch (_) { return; }
@@ -13753,6 +14268,119 @@
       rows + '</tbody></table>';
     const old = document.getElementById('guardsSection'); if (old) old.remove();
     body.insertBefore(sec, body.firstChild);
+  }
+
+  // §96.6 / GUARD-1.6 (operator 2026-10-06: "I need a way to release guards"): THE Guards page. Every guard, its state
+  // (clear / holding), what it holds right now (the items and the plan hash), and its release. A release is explicit and
+  // narrow: this guard, this scope, this exact plan (a changed plan needs a new release), ONE run or until a time (at most
+  // 24 h), SuperAdmin, a reason -- and, when the setting says so, a second SuperAdmin approves it. There is no "off" switch.
+  // The server decides every rule again (POST /api/guards/<id>/release); the page only offers what it may.
+  async function renderGuardsPage() {
+    const body = document.getElementById('guardsBody');
+    if (!body) return;
+    if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- the Guards page needs the server.</div>'; return; }
+    body.innerHTML = '<div style="color:#57606a;font-size:12px;">Loading guards&hellip;</div>';
+    let d = null;
+    try { d = await api('GET', '/api/guards'); }
+    catch (e) { body.innerHTML = '<div class="gp-error" style="color:#cf222e;">The guards could NOT be read: ' + escapeHtml(e.message) + '</div>'; return; }
+    d = d || {};
+    const cat = Array.isArray(d.catalog) ? d.catalog : [];
+    const rels = Array.isArray(d.releases) ? d.releases : [];
+    const can = !!d.canRelease && roleAtLeast('SuperAdmin');
+    const me = String(d.me || '').toLowerCase();
+    const short = h => String(h || '').slice(0, 12);
+    const badge = (txt, bg, fg) => '<span class="gp-badge" style="display:inline-block;padding:0 7px;border-radius:9px;font-size:11px;font-weight:600;background:' + bg + ';color:' + fg + ';">' + escapeHtml(txt) + '</span>';
+    const stateOf = g => g.never ? badge('never releasable', '#eaeef2', '#57606a')
+      : g.release === 'approval' ? badge('approved elsewhere', '#ddf4ff', '#0969da')
+      : g.state === 'holding' ? badge('holding', '#ffebe9', '#cf222e') : badge('clear', '#dafbe1', '#1a7f37');
+    const localNowPlus = hours => { const t = new Date(Date.now() + hours * 3600000 - new Date().getTimezoneOffset() * 60000); return t.toISOString().slice(0, 16); };
+    const holdHtml = (g, h) => {
+      const items = (h.items || []).map(k => '<li style="font-family:Consolas,monospace;font-size:11px;">' + escapeHtml(k) + '</li>').join('');
+      const form = (g.releasable && can)
+        ? '<div class="gp-release-form" data-guard="' + escapeHtml(g.guardId) + '" data-scope="' + escapeHtml(h.scope || '') + '" data-plan="' + escapeHtml(h.planHash || '') + '" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">' +
+          '<select class="gp-mode" title="How long the release lasts"><option value="one-run">One run</option><option value="until">Until a time (max 24 h)</option></select>' +
+          '<input class="gp-until" type="datetime-local" style="display:none;" value="' + localNowPlus(4) + '" title="Ends at (your local time, at most 24 h from now)">' +
+          '<input class="gp-reason" type="text" placeholder="Reason (at least 10 characters)" style="min-width:240px;">' +
+          '<button type="button" class="gp-release btn-sec" title="Release exactly this plan">Release this plan</button></div>'
+        : (g.releasable ? '<div class="gp-note" style="color:#8c959f;font-size:11px;margin-top:4px;">Only a SuperAdmin can release a guard.</div>' : '');
+      return '<div class="gp-hold" data-scope="' + escapeHtml(h.scope || '') + '" style="border-top:1px dashed #d0d7de;padding:4px 0;">' +
+        '<b>' + escapeHtml(h.scope || '(all)') + '</b>: ' + escapeHtml(String(h.count != null ? h.count : (h.items || []).length)) + ' item(s) held' +
+        (h.percent != null && h.percent !== '' ? ' (' + escapeHtml(String(h.percent)) + ' % of the scanned)' : '') +
+        ' &middot; plan <code class="gp-plan" title="' + escapeHtml(h.planHash || '') + '">' + escapeHtml(short(h.planHash)) + '</code>' +
+        ' &middot; last seen ' + escapeHtml(fmtTime(h.lastSeenUtc)) +
+        (items ? '<details class="gp-items"><summary style="cursor:pointer;font-size:11.5px;">What it holds' + (h.itemsTruncated ? ' (first 50)' : '') + '</summary><ul style="margin:4px 0 4px 18px;padding:0;">' + items + '</ul></details>' : '') +
+        form + '</div>';
+    };
+    const rows = cat.map(g => {
+      const holds = (g.holds || []).map(h => holdHtml(g, h)).join('');
+      return '<tr class="gp-guard" data-guard="' + escapeHtml(g.guardId) + '" data-state="' + escapeHtml(g.state || '') + '">' +
+        '<td style="padding:6px 8px;vertical-align:top;"><b>' + escapeHtml(g.title || g.guardId) + '</b><div style="color:#8c959f;font-size:11px;">' + escapeHtml(g.guardId) + '</div></td>' +
+        '<td style="padding:6px 8px;vertical-align:top;white-space:nowrap;">' + stateOf(g) +
+          (g.lastTripUtc ? '<div style="color:#8c959f;font-size:11px;">last trip ' + escapeHtml(fmtTime(g.lastTripUtc)) + (g.tripCount ? ' (' + escapeHtml(String(g.tripCount)) + 'x)' : '') + '</div>' : '') + '</td>' +
+        '<td style="padding:6px 8px;vertical-align:top;font-size:12px;"><div style="color:#57606a;">' + escapeHtml(g.what || '') + '</div>' +
+          (holds || (g.never || g.release !== 'release' ? '' : '<div style="color:#8c959f;font-size:11.5px;">Holds nothing right now.</div>')) + '</td></tr>';
+    }).join('');
+    const relRows = rels.slice().sort((a, b) => String(b.createdUtc || '').localeCompare(String(a.createdUtc || ''))).map(r => {
+      const st = r.state || r.status || '';
+      const live = st === 'pending' || st === 'active';
+      const mine = String(r.createdBy || '').toLowerCase() === me;
+      const acts = (can && st === 'pending' && !mine ? '<button type="button" class="gp-approve btn-sec" data-id="' + escapeHtml(r.id) + '" data-guard="' + escapeHtml(r.guardId) + '">Approve (second person)</button> ' : '') +
+        (can && live ? '<button type="button" class="gp-revoke btn-sec" data-id="' + escapeHtml(r.id) + '" data-guard="' + escapeHtml(r.guardId) + '">Revoke</button>' : '');
+      return '<tr class="gp-rel" data-id="' + escapeHtml(r.id) + '" data-state="' + escapeHtml(st) + '">' +
+        '<td style="padding:4px 8px;">' + escapeHtml(r.guardId) + '<div style="color:#8c959f;font-size:11px;">' + escapeHtml(r.scope || '') + ' &middot; plan <code title="' + escapeHtml(r.planHash || '') + '">' + escapeHtml(short(r.planHash)) + '</code></div></td>' +
+        '<td style="padding:4px 8px;">' + escapeHtml(r.mode === 'until' ? 'until ' + fmtTime(r.expiresUtc) : 'one run') + '</td>' +
+        '<td style="padding:4px 8px;"><b>' + escapeHtml(st) + '</b>' + (st === 'consumed' && r.consumedUtc ? '<div style="color:#8c959f;font-size:11px;">used ' + escapeHtml(fmtTime(r.consumedUtc)) + '</div>' : '') + '</td>' +
+        '<td style="padding:4px 8px;">' + escapeHtml(r.createdBy || '') + (r.approvedBy ? '<div style="color:#8c959f;font-size:11px;">approved by ' + escapeHtml(r.approvedBy) + '</div>' : '') + '</td>' +
+        '<td style="padding:4px 8px;max-width:320px;">' + escapeHtml(r.reason || '') + '</td>' +
+        '<td style="padding:4px 8px;white-space:nowrap;">' + acts + '</td></tr>';
+    }).join('');
+    const never = cat.filter(g => g.never);
+    body.innerHTML =
+      '<h2 style="font-size:16px;margin:0 0 4px;">Guards</h2>' +
+      '<div style="color:#57606a;font-size:12px;margin-bottom:10px;">Every guard that protects your tenant, whether it holds something right now, and its release. A release is narrow: ' +
+        'this guard, this scope, <b>this exact plan</b> (a changed plan needs a new release), for <b>one run</b> or until a time (at most 24 hours). It ends by itself; there is no switch that turns a guard off. ' +
+        'Releasing needs a SuperAdmin and a reason, and is recorded in the audit trail.</div>' +
+      (d.readError ? '<div class="gp-error" style="color:#cf222e;font-size:12px;margin-bottom:8px;">Guard state NOT CHECKED: ' + escapeHtml(d.readError) + '</div>' : '') +
+      (!cat.length ? '<div class="gp-error" style="color:#9a6700;font-size:12px;margin-bottom:8px;">The server returned no guard list -- the guard state could not be read, so nothing here can be released.</div>' : '') +
+      '<div id="gpSecond" style="font-size:12px;margin-bottom:10px;">Second person for a release: <b>' + (d.secondPerson ? 'ON' : 'OFF') + '</b> ' +
+        '<span style="color:#57606a;">' + (d.secondPerson ? '(a different SuperAdmin approves every release before a run may use it)' : '(one SuperAdmin may release alone)') + '</span>' +
+        (can ? ' <button type="button" id="gpSecondToggle" class="btn-sec">' + (d.secondPerson ? 'Turn off' : 'Require a second person') + '</button>' : '') + '</div>' +
+      '<table id="gpTable" style="width:100%;border-collapse:collapse;font-size:12.5px;"><thead><tr style="text-align:left;color:#57606a;border-bottom:1px solid #d0d7de;">' +
+        '<th style="padding:4px 8px;">Guard</th><th style="padding:4px 8px;">State</th><th style="padding:4px 8px;">What it does / holds now</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+      '<h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;margin:16px 0 4px;">Releases</h3>' +
+      (relRows ? '<table id="gpReleases" style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="text-align:left;color:#57606a;border-bottom:1px solid #d0d7de;">' +
+        '<th style="padding:4px 8px;">Guard</th><th style="padding:4px 8px;">How long</th><th style="padding:4px 8px;">State</th><th style="padding:4px 8px;">By</th><th style="padding:4px 8px;">Reason</th><th></th></tr></thead><tbody>' + relRows + '</tbody></table>'
+        : '<div id="gpReleases" style="color:#8c959f;font-size:12px;">No releases in the last 7 days.</div>') +
+      '<h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;margin:16px 0 4px;">Never releasable</h3>' +
+      '<ul id="gpNever" style="font-size:12px;margin:0 0 0 18px;padding:0;">' + never.map(g => '<li data-guard="' + escapeHtml(g.guardId) + '"><b>' + escapeHtml(g.title) + '</b> -- ' + escapeHtml(g.what || '') + '</li>').join('') + '</ul>';
+    const say = (msg, bad) => { const n = document.createElement('div'); n.className = 'gp-msg'; n.style.cssText = 'font-size:12px;margin:6px 0;color:' + (bad ? '#cf222e' : '#1a7f37'); n.textContent = msg; body.insertBefore(n, body.firstChild); };
+    body.querySelectorAll('.gp-release-form').forEach(f => {
+      const mode = f.querySelector('.gp-mode'), until = f.querySelector('.gp-until');
+      mode.addEventListener('change', () => { until.style.display = mode.value === 'until' ? '' : 'none'; });
+      f.querySelector('.gp-release').addEventListener('click', async () => {
+        const reason = (f.querySelector('.gp-reason').value || '').trim();
+        if (reason.length < 10) { say('A reason of at least 10 characters is required.', true); return; }
+        const payload = { scope: f.dataset.scope, planHash: f.dataset.plan, mode: mode.value, reason };
+        if (mode.value === 'until') { const t = new Date(until.value); if (isNaN(t.getTime())) { say('Pick when the release ends.', true); return; } payload.untilUtc = t.toISOString(); }
+        if (!confirm('Release ' + f.dataset.guard + ' for "' + (f.dataset.scope || '(all)') + '"?\n\nExactly this plan (' + short(f.dataset.plan) + '), ' + (mode.value === 'until' ? 'until ' + until.value : 'for ONE run') + '. A changed plan is held again.')) return;
+        try { const r = await api('POST', '/api/guards/' + encodeURIComponent(f.dataset.guard) + '/release', payload); await renderGuardsPage(); say((r && r.note) || 'Released.', false); }
+        catch (e) { say('Not released: ' + e.message, true); }
+      });
+    });
+    body.querySelectorAll('.gp-approve').forEach(b => b.addEventListener('click', async () => {
+      try { await api('POST', '/api/guards/' + encodeURIComponent(b.dataset.guard) + '/release/' + encodeURIComponent(b.dataset.id) + '/approve'); await renderGuardsPage(); say('Approved: the next run may use it.', false); }
+      catch (e) { say('Not approved: ' + e.message, true); }
+    }));
+    body.querySelectorAll('.gp-revoke').forEach(b => b.addEventListener('click', async () => {
+      if (!confirm('Revoke this release? The guard holds again from the next run.')) return;
+      try { await api('DELETE', '/api/guards/' + encodeURIComponent(b.dataset.guard) + '/release/' + encodeURIComponent(b.dataset.id)); await renderGuardsPage(); say('Revoked.', false); }
+      catch (e) { say('Not revoked: ' + e.message, true); }
+    }));
+    const tg = document.getElementById('gpSecondToggle');
+    if (tg) tg.addEventListener('click', async () => {
+      try { await api('PUT', '/api/settings/guard-release-second-person', { enabled: !d.secondPerson }); await renderGuardsPage(); }
+      catch (e) { say('Not changed: ' + e.message, true); }
+    });
   }
 
   async function renderJobs() {
@@ -13933,6 +14561,7 @@
     }
     body.innerHTML = h.join('');
     renderGuardsSection(body);   // GUARD-1: the guards that tripped, above the jobs (never blocks the jobs table)
+    renderReconcileSection(body);   // 96.5: the daily reconcile -- pause banner, Pause / Resume (SuperAdmin), the removal report
 
     // ---- per-row controls (Admin+): toggle enabled, edit cadence, Run now ----
     if (canRun) {
@@ -16601,6 +17230,7 @@
       }
     }
     for (const b of Object.keys(pendingChanges)) delete pendingChanges[b];
+    try { for (const b of Object.keys(PENDING_UNDO_OF)) delete PENDING_UNDO_OF[b]; } catch (_) { }   // CONFIG-1.2
     await sharedPull();
     return { ok: !failed.length, failed: failed };
   }
@@ -16746,15 +17376,27 @@
   // operator types DELETE; staged as AccountStatus=Deleted + every delegation removed; the commit holds it for the offboard
   // approval; the engine then deletes the account ONCE (Remove-PimAdminAccountApproved). Entra keeps it restorable 30 days.
   async function acctStageDelete(ids) {
-    if (!roleAtLeast('SuperAdmin')) { alert('Deleting an admin account is for a SuperAdmin.'); return; }
+    // Operator 2026-10-06: Admins and delegated operators too -- the SERVER decides per admin (a delegated operator only at-or-below
+    // its level / tier ceiling; Test-PimPortalCanDeleteAdmin) and refuses the commit whole otherwise.
+    if (!(roleAtLeast('Admin') || PIM_ROLE === 'Delegated')) { alert('Deleting an admin account needs an administrator or a delegated operator role.'); return; }
     ids = (ids || []).filter(x => x && x.upn);
     if (!ids.length) return;
     const who = ids.length === 1 ? ids[0].upn : (ids.length + ' admin accounts');
-    const typed = window.prompt('DELETE ' + who + ' in Entra ID?\n\nThe account(s) are deleted (not only disabled) after the commit and its approval, and every delegation is removed. ' +
+    const typed = window.prompt('DELETE ' + who + ' in Entra ID?\n\nThe account(s) are deleted (not only disabled) after you commit -- your delete is the approval -- and every delegation is removed. ' +
       'Entra keeps a deleted user restorable for 30 days (Entra admin center > Users > Deleted users).\n\nType DELETE to continue:');
     if (typed == null) return;
     if (String(typed).trim() !== 'DELETE') { alert('Not deleted: you did not type DELETE.'); return; }
     await acctStageStatus(ids, 'Deleted', true);
+  }
+  // §96.5 D1 (b) "Remove from PIM" (operator 2026-10-06, decision D1 = both): every delegation removed AND the account
+  // DISABLED and KEPT in Entra ID. Admin + SuperAdmin, like Disable & remove delegations; held for the offboard approval on
+  // commit. Staged as AccountStatus = Removed -- the row is KEPT (never dropped) on purpose: the engine only disables an
+  // account through its row (an account without a row is reported, never disabled, 71.22), so dropping the row would leave
+  // the account enabled. Removed rows are hidden from the Admin accounts list (Show removed from PIM brings them back) and
+  // the engine keeps them disabled; Enable brings an admin back.
+  async function acctStageRemoveFromPim(ids) {
+    if (!roleAtLeast('Admin')) { alert('Admin role required.'); return; }
+    await acctStageStatus(ids, 'Removed', true);
   }
 
   async function acctStageStatus(ids, status, strip) {
@@ -16779,17 +17421,19 @@
     });
     const who = ids.length === 1 ? '<b>' + escapeHtml(ids[0].upn) + '</b>' : '<b>' + ids.length + ' admins</b>';
     // status '' = remove the delegations only; the account keeps its status (operator 2026-10-06, the delegations table).
-    const verb = !status ? 'Remove all delegations' : status === 'Deleted' ? 'Delete account' : status === 'Enabled' ? 'Enable' : (strip ? 'Disable & remove delegations' : 'Disable');
+    const verb = !status ? 'Remove all delegations' : status === 'Deleted' ? 'Delete account' : status === 'Removed' ? 'Remove from PIM' : status === 'Enabled' ? 'Enable' : (strip ? 'Disable & remove delegations' : 'Disable');
+    const offb = (status === 'Disabled' || status === 'Deleted' || status === 'Removed');
     const body = '<p>' + escapeHtml(verb) + ': ' + who + '.</p><ul>' +
       (status ? '<li>' + nStatus + ' account(s) set to <b>' + escapeHtml(status) + '</b>' + (nStatus < ids.length - missing.length ? ' (the others already are)' : '') + '</li>' : '') +
       (strip ? '<li>' + nDel + ' delegation(s) removed (removed in Entra by the next engine run after the commit)</li>' +
-        (status === 'Deleted' ? '<li><b style="color:#cf222e;">The account is DELETED in Entra ID</b> by the engine after the commit and its approval (restorable for 30 days under Entra Deleted users).</li>'
+        (status === 'Deleted' ? '<li><b style="color:#cf222e;">The account is DELETED in Entra ID</b> by the engine after you commit -- your delete is the approval (restorable for 30 days under Entra Deleted users).</li>'
+          : status === 'Removed' ? '<li class="acctRemovedNote"><b>The account is DISABLED and KEPT in Entra ID</b> (its sessions revoked) -- it is not deleted. The admin leaves the Admin accounts list (<i>Show removed from PIM</i> lists it again) and PIM keeps it disabled; <b>Enable</b> brings it back.</li>'
                               : '<li>The account stays in PIM, ' + (status ? escapeHtml(status.toLowerCase()) : 'its status unchanged') + '.</li>') : '') +
       (missing.length ? '<li style="color:#cf222e;">not a defined admin (skipped): ' + missing.map(escapeHtml).join(', ') + '</li>' : '') + '</ul>' +
-      ((status === 'Disabled' || status === 'Deleted') ? '<p style="color:#57606a;">A disable or delete is an offboard: on commit it is held for a second administrator&rsquo;s approval unless self-approval is switched on (Settings &rsaquo; Approvals &amp; policy).</p>' : '') +
+      (offb ? '<p style="color:#57606a;">A disable, removal or delete is an offboard: on commit it is held for a second administrator&rsquo;s approval unless self-approval is switched on (Settings &rsaquo; Approvals &amp; policy).</p>' : '') +
       '<p style="color:#57606a;">Nothing is saved yet -- review and commit under <b>Pending changes</b>.</p>';
     if (!nStatus && !nDel) { await showConfirm('Nothing to change', body, false); return; }
-    const ok = await showConfirm(verb, body, status === 'Disabled' || status === 'Deleted', verb);
+    const ok = await showConfirm(verb, body, offb, verb);
     if (!ok) return;
     for (const x of plan) {
       if (x.ai >= 0 && status) pa.rows[x.ai].AccountStatus = status;
@@ -17409,7 +18053,10 @@
             // Admin accounts' own buttons -- acctStageStatus), with or without disabling the account.
             (base === 'Account-Definitions-Admins' && String(row.UserPrincipalName || '').trim()
               ? '<button data-act="acct-strip" class="row-acct-strip" title="REMOVE ALL DELEGATIONS of this admin, KEEP THE ACCOUNT as it is: every group delegation naming this admin is removed by the next engine run. Staged in Pending changes.">&#x1F9F9;</button> ' +
-                '<button data-act="acct-disable-strip" class="row-acct-disable-strip" title="DISABLE this admin and REMOVE ALL its delegations (the account stays in PIM, disabled; a disable is held for the offboard approval). Staged in Pending changes.">&#x26D4;</button> '
+                '<button data-act="acct-disable-strip" class="row-acct-disable-strip" title="DISABLE this admin and REMOVE ALL its delegations (the account stays in PIM, disabled; a disable is held for the offboard approval). Staged in Pending changes.">&#x26D4;</button> ' +
+                // §96.5 D1 (b): Remove from PIM -- delegations removed, account DISABLED and KEPT, row marked AccountStatus = Removed.
+                (String(row.AccountStatus || '').trim().toLowerCase() === 'removed' ? '' :
+                '<button data-act="acct-remove-from-pim" class="row-acct-remove-from-pim" title="REMOVE this admin FROM PIM: every delegation removed, the account DISABLED and KEPT in Entra ID (not deleted), the admin out of the active lists (AccountStatus = Removed). Held for the offboard approval. Staged in Pending changes.">&#x2B07;</button> ')
               : '') +
             '<button data-act="delete" title="Take this ROW out of PIM. The group is NOT deleted and nobody loses access -- PIM simply stops managing it. Use the bin to delete the group itself.">&#x2715;</button>';
         html.push(`<td class="row-actions row-actions-left">${actHtmlL}</td>`);
@@ -17579,6 +18226,11 @@
         if (b.dataset.act === 'acct-strip' || b.dataset.act === 'acct-disable-strip') {
           const ar = p.rows[idx] || {};
           await acctStageStatus([{ upn: String(ar.UserPrincipalName || '').trim(), userName: String(ar.UserName || '').trim() }], b.dataset.act === 'acct-strip' ? '' : 'Disabled', true);
+          return;
+        }
+        if (b.dataset.act === 'acct-remove-from-pim') {
+          const ar = p.rows[idx] || {};
+          await acctStageRemoveFromPim([{ upn: String(ar.UserPrincipalName || '').trim(), userName: String(ar.UserName || '').trim() }]);
           return;
         }
         if (b.dataset.act === 'unassign') { await actionRemoveAccess(base, idx); return; }
@@ -18309,6 +18961,7 @@
         // Refresh local cache + reset pending.
         await loadCsv(base, true);
         delete pendingChanges[base];
+        delete PENDING_UNDO_OF[base];   // CONFIG-1.2: the undo label went with this commit
         // §77.24: drop this base from the §70.12 draft NOW. A later base failing returned before markBadges(), so the
         // draft kept the bases already written; the next reload restored them and re-added their rows on top of the
         // stored copies (the 14 duplicate PIM-Assignments-Workloads keys).
@@ -18499,6 +19152,10 @@
   function commitPutBody(base, finalRows) {
     const b = { rows: finalRows };
     if (pendingChanges[base] && pendingChanges[base].baseRowsHash) b.baseRowsHash = pendingChanges[base].baseRowsHash;
+    // CONFIG-1.2 / §96.2: a staged undo labels this base's commit with the commit it reverses (journal UndoOf, Source undo).
+    if (pendingChanges[base] && PENDING_UNDO_OF[base]) b.undoOf = PENDING_UNDO_OF[base];
+    // CONFIG-1.4: rows staged from a configuration backup commit as a RESTORE (journal Source 'restore'; SuperAdmin only).
+    if (pendingChanges[base] && pendingChanges[base].restoreFrom) { b.source = 'restore'; b.restoreFrom = pendingChanges[base].restoreFrom; }
     return b;
   }
   // BUG-200: someone else committed this entity since it was loaded here. Nothing of THIS entity was
@@ -18743,6 +19400,7 @@
       return;
     }
     for (const b of Object.keys(pendingChanges)) delete pendingChanges[b];
+    try { for (const b of Object.keys(PENDING_UNDO_OF)) delete PENDING_UNDO_OF[b]; } catch (_) { }   // CONFIG-1.2
     markBadges();
     renderSaveTab();
     const status = document.getElementById('saveStatus');

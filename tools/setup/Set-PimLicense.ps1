@@ -55,6 +55,10 @@ param(
     [string]$AdminSecret,
     # 71.33: reach the store as the SIGNED-IN az user (a member of the SQL admin group) instead of -AdminAppId.
     [switch]$UseSignedInAccount,
+    # An Azure SQL access token the caller already holds (e.g. `az account get-access-token --resource
+    # https://database.windows.net/` from the environment's own operator profile). The process's managed identity is
+    # switched off for this run, so the store is reached as the token's principal -- never as the machine's MI.
+    [string]$SqlAccessToken,
     [string]$OutFile
 )
 
@@ -166,7 +170,15 @@ if ("$ConnectionString".Trim()) {
     $global:PIM_SqlDatabase = $Database
     if ($SqlServer -match '(?i)database\.windows\.net') {
         if (-not "$TenantId".Trim()) { Fail 'an Azure SQL store needs -TenantId (token auth)' }
-        if ($UseSignedInAccount) {
+        if ("$SqlAccessToken".Trim()) {
+            if ($UseSignedInAccount -or "$AdminAppId".Trim() -or "$AdminCertThumbprint".Trim() -or "$AdminSecret".Trim()) { Fail '-SqlAccessToken cannot be combined with -UseSignedInAccount or -AdminAppId/-AdminCertThumbprint/-AdminSecret' }
+            $global:PIM_TenantId = $TenantId
+            $global:PIM_ClientId = $null; $global:PIM_SqlClientId = $null; $global:PIM_CertThumbprint = $null; $global:PIM_SqlCertThumbprint = $null
+            $global:PIM_ClientSecret = $null; $global:PIM_SqlClientSecret = $null
+            $global:PIM_UseManagedIdentity = $false; $global:PIM_NoManagedIdentity = $true   # never the machine's MI
+            $global:PIM_SqlAccessToken = "$SqlAccessToken".Trim()
+            Note 'store identity: the supplied SQL access token' 'DarkGray'
+        } elseif ($UseSignedInAccount) {
             if ("$AdminAppId".Trim() -or "$AdminCertThumbprint".Trim() -or "$AdminSecret".Trim()) { Fail '-UseSignedInAccount cannot be combined with -AdminAppId/-AdminCertThumbprint/-AdminSecret' }
             . (Join-Path $here '_PimSignedIn.ps1')
             try { $who = Connect-PimSignedInSql -TenantId $TenantId; Note "store identity: signed-in user $($who.userName)" 'DarkGray' } catch { Fail "$($_.Exception.Message)" }
