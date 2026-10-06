@@ -14,6 +14,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 
 <!-- next release entry goes here -->
 
+## 2.4.517 -- 2026-10-06
+
+- **The daily reconcile now removes by default.** Items PIM granted and you later removed in PIM are removed from the tenant by the daily reconcile, when all five safety rules hold. Set the reconcile removal mode to `report` to keep report-only. Admin accounts are never removed by the reconcile, and items from before the change journal are never removed.
+- Test fix: a source scan no longer stops on Windows PowerShell 5.1 when test output paths exceed 260 characters.
+
 ## 2.4.516 -- 2026-10-06
 
 Same code as 2.4.515, rebuilt. The 2.4.515 build package was made from an earlier commit by mistake; 2.4.516 is built from the released code. Use 2.4.516, not 2.4.515.
