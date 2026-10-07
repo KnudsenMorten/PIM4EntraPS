@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.527 -- 2026-10-07
+
+- **PIM Activator page: one app for both channels.** When a single PIM Activator app serves both PROD and TEST, the page now shows that TEST uses it (and fills in its id) instead of reporting the TEST app as missing.
+
 ## 2.4.526 -- 2026-10-07
 
 - **Operations › PIM Activator.** One page to deploy the browser extension admins activate with:

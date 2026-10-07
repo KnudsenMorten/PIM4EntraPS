@@ -11144,18 +11144,26 @@ function Handle-Request {
             $apps = [ordered]@{}
             foreach ($c in 'Released', 'Test') {
                 $ch = Get-PimActivatorChannel -Channel $c
-                $a = [ordered]@{ channel = $c; label = $ch.label; name = $ch.appName; extensionId = $ch.id; found = $false; appId = ''; redirectOk = $false; readError = '' }
+                $a = [ordered]@{ channel = $c; label = $ch.label; name = $ch.appName; extensionId = $ch.id; found = $false; appId = ''; redirectOk = $false; readError = ''; sharedWith = ''; uris = @() }
                 try {
                     $esc = $ch.appName -replace "'", "''"
                     $r = @((Invoke-PimGraph -Path "/applications?`$filter=displayName eq '$esc'&`$select=appId,displayName,spa").value)
                     if ($r.Count) {
                         $a.found = $true; $a.appId = "$($r[0].appId)"
-                        $uris = @($r[0].spa.redirectUris)
+                        $uris = @($r[0].spa.redirectUris); $a.uris = $uris
                         $a.redirectOk = [bool](@($uris | Where-Object { "$_" -like "*$($ch.id)*" }).Count)
                     }
                 } catch { $a.readError = "$($_.Exception.Message)" }
                 $apps[$c] = $a
             }
+            # One app for both channels (Deploy-PimActivatorBackend -Channel Both): no separate TEST app, but the PROD app
+            # carries the TEST extension's redirect URIs -> the TEST channel signs in through the PROD app (found 2026-10-07
+            # on internal, which would otherwise show TEST as "not created").
+            $tst = $apps['Test']; $prd = $apps['Released']
+            if (-not $tst.found -and $prd.found -and @($prd.uris | Where-Object { "$_" -like "*$($tst.extensionId)*" }).Count) {
+                $tst.found = $true; $tst.appId = $prd.appId; $tst.redirectOk = $true; $tst.sharedWith = $prd.name
+            }
+            foreach ($k in @($apps.Keys)) { $apps[$k].Remove('uris') }
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                 tenantId = $tid; environmentName = $envName; apps = $apps
                 edgeReleased = (Get-PimActivatorEdgePolicy -Channels @('Released')); edgeBoth = (Get-PimActivatorEdgePolicy -Channels @('Released', 'Test'))
