@@ -166,6 +166,26 @@ function Send-PimUpdateOutcome {
         $saved = Save-PimUpdateState -ConnectionString $csState -Record $stateRec
         if ($saved.ok) { Say "update state: recorded ring '$($stateRec.ring)' / $Outcome in pim.Settings" 'DarkGray' }
         else { Say "update state: NOT recorded (the update itself is unaffected): $($saved.reason)" 'DarkGray' }
+        # 2026-10-07 (operator: "maybe it is a good idea to rerun that after each update"): after a successful roll, refresh
+        # the tenant cache and then the drift check at the engine's next tick (within 5 minutes) instead of up to 12 h / 4 h
+        # later -- a new version reads with new code, so its pages should not show what the old one cached. Queued in
+        # order (the tick drains triggers in list order); a trigger already queued for a type is not queued twice.
+        if ($Action -eq 'rolled' -and $Outcome -eq 'ok' -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
+            try {
+                $list = @(@(Get-PimSqlSetting -ConnectionString $csState -Name 'SchedulerTriggers') | Where-Object { $null -ne $_ })
+                $added = @()
+                foreach ($jt in 'tenant-cache', 'drift-snapshot') {
+                    if (@($list | Where-Object { "$($_.type)" -eq $jt }).Count) { continue }
+                    $list += [pscustomobject][ordered]@{ type = $jt; scope = 'All'; reason = "run-now:$jt (after the update to $ToVersion)"; requestedUtc = [datetime]::UtcNow.ToString('o'); job = $jt }
+                    $added += $jt
+                }
+                if ($added.Count) {
+                    # IMP-39: -ValueJson -- a one-element list through -Value is stored as a bare object, not an array.
+                    Set-PimSqlSetting -ConnectionString $csState -Name 'SchedulerTriggers' -ValueJson (ConvertTo-Json -InputObject @($list) -Depth 6 -Compress)
+                    Say "after the update: queued $($added -join ' + ') for the engine's next run" 'DarkGray'
+                }
+            } catch { Say "after the update: the cache refresh could not be queued ($($_.Exception.Message)) -- it runs on its own schedule" 'DarkGray' }
+        }
     } catch { }                                      # recording can never break the update
 }
 

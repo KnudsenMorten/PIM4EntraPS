@@ -14046,7 +14046,11 @@
         '<td style="padding:6px 8px;vertical-align:top;">' + (e.by ? esc(e.by) : '<span class="queueByMissing" style="color:#8c959f;font-style:italic;">not recorded (queued before 2.4.329)</span>') + '</td>' +
         '<td style="padding:6px 8px;vertical-align:top;color:#57606a;">' + pimUtcHtml(e.enqueuedUtc) + '</td>' +
         '<td style="padding:6px 8px;vertical-align:top;">' + esc(e.committedBy || '') + '</td>' +
-        '<td style="padding:6px 8px;vertical-align:top;">' + result + '</td>' +
+        '<td style="padding:6px 8px;vertical-align:top;">' + result +
+          // 2026-10-07 (operator: "you need to fix this or make a new buton so i can remove these from the queue"): every
+          // pending / failed entry has its own Remove button -- no ticking, no hunting for "Discard selected".
+          (discardable ? '<div><button class="queueRemoveBtn btn-sec" style="font-size:11px;padding:1px 8px;margin-top:2px;" data-id="' + esc(e.id) + '" title="Take this entry out of the queue. It is never applied; it stays in the history with your name and reason.">Remove from queue</button></div>' : '') +
+        '</td>' +
         '</tr>');
     });
     h.push('</tbody></table></div>');
@@ -14059,6 +14063,24 @@
   // the visible list never updated, and the entry still looked uncommitted.
   function wireQueue(host) {
     const rerender = function () { renderQueueInto(host || document.getElementById('saveQueueHost')); try { refreshQueueBadge(); } catch (_) {} };
+    // The per-entry "Remove from queue" (2026-10-07): the same server path as "Discard selected" (/api/queue/discard,
+    // reason required, audited), for ONE entry.
+    document.querySelectorAll('.queueRemoveBtn').forEach(function (b) {
+      b.onclick = async function () {
+        const reason = prompt('Remove this entry from the queue?\n\nIt is never applied. It stays in the history with your name and this reason.\n\nReason (required):', '');
+        if (reason === null) return;
+        if (!String(reason).trim()) { alert('A reason is required.'); return; }
+        b.disabled = true;
+        try {
+          const r = await api('POST', '/api/queue/discard', { ids: [b.dataset.id], reason: String(reason).trim() });
+          if (r && r.skipped > 0) {
+            const why = (r.results || []).filter(function (x) { return !x.discarded; }).map(function (x) { return x.reason; }).join('\n');
+            alert('Not removed:\n' + why);
+          }
+        } catch (e) { alert('Could not remove it: ' + (e && e.message ? e.message : 'unknown error')); }
+        rerender();
+      };
+    });
     // REQ-REV-DOWN-1: cancel an authorisation before it is published (after that, the tenants have
     // already been told -- which is why this is offered here and not after the fact).
     document.querySelectorAll('.dlIntentCancel').forEach(function (b) {
@@ -17608,7 +17630,30 @@
     return true;
   }
 
+  // 2026-10-07 (operator, screenshot "bug"): the record list was capped at calc(100vh - 150px), but it starts lower than
+  // 150 px (header, tabs, the guide box), so its bottom ran past the window and the last record type ("Workload roles")
+  // sat under the edge, unreachable. Size the list and the table from where they ACTUALLY start, on render, resize and
+  // scroll (the list is sticky, so its top changes as the page scrolls).
+  function fitGridPanes() {
+    const tab = document.getElementById('gridTab');
+    if (!tab || !tab.classList.contains('active')) return;
+    const narrow = window.matchMedia && window.matchMedia('(max-width: 760px)').matches;   // stacked layout: CSS heights rule
+    ['gridList', 'gridMain'].forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (narrow) { el.style.maxHeight = ''; return; }
+      const top = Math.max(0, el.getBoundingClientRect().top);
+      el.style.maxHeight = Math.max(200, window.innerHeight - top - 8) + 'px';
+    });
+  }
+  if (!window.__pimFitGridPanes) {
+    window.__pimFitGridPanes = true;
+    window.addEventListener('resize', fitGridPanes);
+    window.addEventListener('scroll', fitGridPanes, { passive: true });
+  }
+
   function renderGridList() {
+    requestAnimationFrame(fitGridPanes);
     const list = document.getElementById('gridList');
     const bases = (PIM_DATA.csvBases || []).filter(b => gridScopeMatches(b));
     // Operator 2026-10-05: the list is grouped the way people think about it -- Direct groups, Indirect groups, Who gets

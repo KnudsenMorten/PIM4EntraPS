@@ -996,15 +996,10 @@ function Invoke-PimEngineScope {
         $rbd = Test-PimRemoveBudgetAllowed -ToRemove $__rmTotal -Scope $Scope -Scanned (@($live).Count) -Operation 'remove'
         if (-not $rbd.allowed) {
             $__overBudget = [pscustomobject]@{ toRemove = $__rmTotal; budget = $rbd.budget }
-            # GUARD-1 'drift.over-remove-budget' (2026-10-05): the early warning -- nothing is held yet (this is a read), so
-            # the outcome is 'warning' (no ticket); the apply that would hold them trips 'engine.remove-budget' itself.
-            if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
-                [void](Invoke-PimGuardTrip -GuardId 'drift.over-remove-budget' -Outcome warning -Area $Scope -Job 'drift' `
-                    -Title ("{0}: {1} extra(s) found, over the removal budget of {2}" -f $Scope, $__rmTotal, $rbd.budget) `
-                    -Detail ("The drift check found {0} live item(s) in {1} that the definitions do not have. That is over the removal budget ({2}), so the next apply will hold them instead of removing them." -f $__rmTotal, $Scope, $rbd.budget) `
-                    -ActionText 'Review the extras on the Drift page: define what should stay, and let the rest be removed in smaller steps, or -- once the apply holds them -- release that exact plan for one run on Audit & Settings > Guards (at most 50).' `
-                    -Measured @{ toRemove = $__rmTotal; scanned = @($live).Count } -Thresholds @{ budget = [int]$rbd.budget })
-            }
+            # The GUARD-1 trip 'drift.over-remove-budget' (2026-10-05) is TURNED OFF (operator 2026-10-07: "this particular guard
+            # should be turned off, as nothing happens automatically"): the drift read is a plan that never writes, and nothing
+            # acts on an extra until an operator chooses on the Drift page -- the warning protected against nothing. The items
+            # are still listed; the real removal budget ('engine.remove-budget') still guards every run that writes.
             Write-Host ("[engine] {0,-20} drift read: {1} removal(s) are over the removal budget ({2}) -- LISTED; an apply would hold them" -f $Scope, $__rmTotal, $rbd.budget) -ForegroundColor DarkYellow
         }
     }

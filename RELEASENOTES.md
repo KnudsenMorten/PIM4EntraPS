@@ -13,6 +13,13 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.521 -- 2026-10-07
+
+- **Remove an entry from the change queue with one click.** Every pending or failed entry in the change queue has its own **Remove from queue** button (a reason is asked for and recorded). The entry is never applied and stays in the history.
+- **No false alarm for items the engine never touches.** The drift check no longer raises the "over the removal budget" warning on the Guards panel: nothing is removed from what it lists until you choose so on the Drift page. The items are still listed there.
+- **Fresh data right after every update.** After a successful update the engine refreshes the tenant cache and then the drift check at its next run, instead of hours later.
+- **The record list is no longer cut off.** The list of record types next to the table fits the window, so the last entries can be reached.
+
 ## 2.4.520 -- 2026-10-07
 
 - **Group owners follow Microsoft's guidance: no standing owners.** The standard PIM for Groups policy now requires an active owner assignment to end, after at most 180 days (Entra's own default). Before, it allowed permanent active owners, as the earlier version did. Owners that PIM Manager itself keeps on its groups are not affected: they are kept as group owners by the engine, not through owner assignments that expire.

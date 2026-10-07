@@ -51,8 +51,6 @@ function Get-PimGuardReleaseCatalog {
             what = 'Approved by its plan hash on the Approvals / Jobs page (valid 24 h).' }
         [pscustomobject]@{ guardId = 'engine.offboarding-approval'; title = 'Offboarding approval'; release = 'approval'; ceiling = $null; ceilingPercent = $null
             what = 'A disable or offboarding waits for its approval on the Approvals page.' }
-        [pscustomobject]@{ guardId = 'drift.over-remove-budget'; title = 'Drift over the removal budget'; release = 'info'; ceiling = $null; ceilingPercent = $null
-            what = 'An early warning from the drift read; the apply that holds it is released as the removal budget.' }
         [pscustomobject]@{ guardId = 'engine.reconcile-paused'; title = 'Daily reconcile paused'; release = 'info'; ceiling = $null; ceilingPercent = $null
             what = 'Resumed on the Jobs page (s96.5).' }
         [pscustomobject]@{ guardId = 'engine.break-glass'; title = 'Break-glass exclusion'; release = 'never'; ceiling = $null; ceilingPercent = $null
