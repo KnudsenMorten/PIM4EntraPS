@@ -13,6 +13,13 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.525 -- 2026-10-07
+
+- **Get Started.** A new menu item guides a new environment through the steps that make it work: licence, engine permissions, mail sender, departments and owners, roles, admin accounts, access mapping, policies, alert recipients, break-glass accounts and a first run, plus the optional PIM Activator and discovery. Each step is marked done or still open from your own data, with a progress bar, and opens the page that does the work. The menu shows a red **!** while a required step is still open.
+- **The drift report is biweekly by default.** "Configuration drift detected" now goes out every two weeks unless you choose otherwise, and the choice is also in Settings (under Alerting). The Drift page itself is always current.
+- **Clearer errors.** A role at an administrative unit whose group, unit or role cannot be found is now explained (with the fix) instead of "unrecognised failure".
+- **Licence alerts reach Invardia.** The MSP licence check now reports in a form Invardia accepts.
+
 ## 2.4.524 -- 2026-10-07
 
 - **Every mail names its environment.** The subject starts with the environment's name (for example "[Production] ..."), and every mail ends with a footer naming the environment, the tenant and its id, the PIM Manager version and the link to that environment -- never just "this tenant".

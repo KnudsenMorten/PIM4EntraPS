@@ -1094,6 +1094,7 @@
     <div class="tab" data-tab="accessrequests" title="Requests to have a disabled admin account enabled for a while (request for authorization), the company reviews of external consultants, and an IT override for a longer window.">Access requests</div>
     <div class="tab" data-tab="grid" title="The full editable grid of every desired-state row — for power users who want direct, spreadsheet-style editing across all entities.">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="authoring" title="Bulk authoring — move an admin, clone a definition or Azure-RBAC delegation to many targets, bulk-attach, and import admins, each with a preview before commit.">Authoring</div>
+    <div class="tab" data-tab="getstarted" title="Get started: the steps that make this environment work, each marked done or still open.">Get Started <span id="getStartedBadge" class="badge" style="display:none;background:#cf222e">!</span></div>
     <div class="tab" data-tab="onboarding" title="Onboard a new admin — derive the name and metadata, place them in the right groups, and (for sensitive grants) route through second-person approval.">Onboarding</div>
     <div class="tab" data-tab="departments" title="Departments and their owners -- who approves and who is mailed for every delegation a department sponsors. Import them from Entra, or assign owners in bulk by uploading a CSV file.">Departments &amp; owners</div>
     <div class="tab" data-tab="adminimport" title="Import many administrators at once from a file or a paste: the UPN is the key; skip or overwrite existing ones. SuperAdmin only.">Import administrators</div>
@@ -1150,6 +1151,7 @@
        audit sources. Tiles are real-data-or-honest-empty (no dead tiles): each is
        backed by /api/home (fast tiles) + /api/home?include=heavy (live tiles), and
        every tile links to the tab that owns its detail. -->
+  <div id="getstartedTab" class="tab-panel"><div id="getStartedBody" style="max-width:1100px;margin:0 auto;"></div></div>
   <div id="homeTab" class="tab-panel active">
     <!-- REQ-Y: the MSP licence notice (renderMspLicenceBanners) -- empty and hidden unless MSP mode lacks a licence. -->
     <div class="msp-lic-banner" data-page="home" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
@@ -2393,6 +2395,11 @@
     { id: 'overview', label: 'Overview',
       title: 'Privileged-estate health at a glance',
       items: ['home'] },
+    // 97.1 (operator 2026-10-07: "I want to have an Get Started in the menu, similar to how i have made it in ELDK ...
+    // it should show the incompleted steps"): the guided steps, each done / open from the data; a red ! while one is open.
+    { id: 'getstarted', label: 'Get Started',
+      title: 'The steps that make this environment work -- each one marked done or still open',
+      items: [{ tab: 'getstarted', label: 'Get Started', desc: 'Licence, permissions, mail, your departments, roles, admins and access, policies, alerts, break-glass and a first run -- step by step' }] },
     // Operator 2026-10-06: "i need a new menu left of Access called Admins Accounts" -- the accounts themselves (update,
     // TAP, offboarding flag) and inviting a guest / consultant moved here from Access.
     { id: 'admins', label: 'Admin accounts',
@@ -2933,6 +2940,7 @@
     injectTabGuidance(name);
     syncNavGroups(name);
     if (name === 'home') renderHome();
+    if (name === 'getstarted') renderGetStarted();
     if (name === 'map') renderAccessMap();
     // (the permission templates moved to Workload templates, operator 2026-10-05)
     if (name === 'grid') renderGridList();
@@ -4537,6 +4545,9 @@
   async function renderHome() {
     const body = document.getElementById('homeBody');
     if (!body) return;
+    // 97.1: the Get Started menu badge (red ! while a required step is open) -- evaluated shortly after the landing page,
+    // off its critical path, and only on the server (static mode has no data to judge by).
+    if (isServer && !renderHome.__gsQueued) { renderHome.__gsQueued = true; setTimeout(() => { try { evaluateGetStarted(); } catch (_) { } }, 2500); }
     const esc = escapeHtml;
     if (!isServer) {
       body.innerHTML = '<div style="color:#57606a;font-size:13px;">Static (read-only) mode &mdash; the Home overview needs the live Manager server to aggregate engine, job, validation and audit state.</div>';
@@ -7289,6 +7300,25 @@
     'target-missing': 'Delegations whose Azure resource or role no longer exists (daily target check)',
     'pending-uncommitted': 'Changes staged or queued more than a day ago and never committed (daily pending check)'
   };
+  // 2026-10-07 (operator: "Configuration drift detected should be a biweekly report by default, controllable in the
+  // settings"): the drift report cadence, under Alerting in Settings -- the same setting (and the same SuperAdmin-gated
+  // PUT /api/drift/settings) as the dropdown on the Drift page.
+  async function renderDriftReportSetting() {
+    const alertHost = document.getElementById('setAlertingBody'); if (!alertHost || !alertHost.parentNode) return;
+    let box = document.getElementById('setDriftReport');
+    if (!box) { box = document.createElement('div'); box.id = 'setDriftReport'; box.style.cssText = 'margin-top:12px;padding:8px 10px;border:1px solid #d0d7de;border-radius:6px;font-size:12.5px;'; alertHost.parentNode.insertBefore(box, alertHost.nextSibling); }
+    let d = null; try { d = await api('GET', '/api/drift'); } catch (_) { }
+    const cads = (d && d.alertCadences && d.alertCadences.length) ? d.alertCadences : ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly'];
+    const cur = (d && d.alertCadence) || 'biweekly';
+    const can = roleAtLeast('SuperAdmin');
+    box.innerHTML = '<b>Configuration drift report</b> &mdash; how often the "Configuration drift detected" mail is sent ' +
+      '<select id="setDriftCadence"' + (can ? '' : ' disabled title="SuperAdmin only"') + ' style="font-size:12px;margin:0 6px;">' +
+      cads.map(c => '<option value="' + escapeHtml(c) + '"' + (c === cur ? ' selected' : '') + '>' + escapeHtml(c) + '</option>').join('') + '</select>' +
+      '<span style="color:#57606a;">(default: biweekly). The Drift page itself is always current; this is only the mail.</span>';
+    const sel = document.getElementById('setDriftCadence');
+    if (sel && can) sel.onchange = async () => { try { await api('PUT', '/api/drift/settings', { alertCadence: sel.value }); sharedToast('The drift report now goes out ' + sel.value); } catch (e) { sharedToast('Not saved: ' + e.message, true); } };
+  }
+
   async function renderAlertingCard() {
     const host = document.getElementById('setAlertingBody');
     if (!host) return;
@@ -7902,6 +7932,7 @@
     // Alerting card is editable by Admin+ (separate from the SuperAdmin gate that
     // governs the rest of Settings) -- load + wire it regardless of canEdit.
     renderAlertingCard();
+    renderDriftReportSetting();
     renderWorkloadExemptionsCard();
 
     if (!canEdit) return;
@@ -10146,7 +10177,7 @@
       (items.length ? (exportBarHtml('govDrift') + ' ') : '') +
       // REQ-DRIFT-2: how often the drift MAIL goes out (the check itself keeps running every few hours).
       '<label style="font-size:12px;color:#57606a;" title="How often the drift alert mail is sent. A change in the drift between two mails waits for the next one; this page always shows the latest check.">Drift mail: <select id="driftCadence"' + (d.canSetCadence ? '' : ' disabled') + '>' +
-        asList(d.alertCadences && d.alertCadences.length ? d.alertCadences : ['daily', 'weekly', 'monthly', 'quarterly']).map(c => '<option value="' + esc(c) + '"' + (c === (d.alertCadence || 'monthly') ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select>' +
+        asList(d.alertCadences && d.alertCadences.length ? d.alertCadences : ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly']).map(c => '<option value="' + esc(c) + '"' + (c === (d.alertCadence || 'biweekly') ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select>' +
         (d.alertLastMailUtc ? ' <span style="font-size:11px;">last sent ' + esc(driftFmtUtc(d.alertLastMailUtc)) + '</span>' : '') + '</label> ' +
       (canApply ? '<button id="driftCheckNow" title="Queues a new drift check for the scheduler. This page stays usable; the result appears here in a few minutes.">Check now</button>' : '') +
       '<span id="driftCheckMsg" style="color:#57606a;font-size:11.5px;">' + esc(note || '') + '</span></div>');
@@ -12875,6 +12906,108 @@
   // Review & Save change records (the engine applies); the live invite send is
   // a separate confirmed step. Admin role + the portal capability required.
   // ===================================================================
+  // ===================================================================================================================
+  // 97.1 GET STARTED (operator 2026-10-07: "similar to how i have made it in ELDK ... it should show the incompleted steps").
+  // The ELDK pattern: every step's state is COMPUTED FROM THE DATA on each visit (never a manual tick); a progress bar,
+  // step pills (green check = done, red ! = a required step still open, grey = optional), "STEP x OF N", Back / Next,
+  // any step reachable; the menu carries a red ! while a required step is open (the tab badge, mirrored onto the menu).
+  // Each step explains itself and opens the page that does the work -- Get Started guides, it does not duplicate pages.
+  // ===================================================================================================================
+  const GET_STARTED_STEPS = [
+    { id: 'licence', title: 'Licence', required: true, tab: 'settings', action: 'Open Settings (Licence)',
+      what: 'Register the PIM Manager licence. Pro features and the updates from Invardia depend on it.',
+      check: c => { const s = String((c.licence && c.licence.status) || ''); return { done: s === 'Valid' || s === 'Grace', note: s ? ('licence: ' + s) : 'no licence registered' }; } },
+    { id: 'permissions', title: 'Engine permissions', required: true, tab: 'home', action: 'Open Overview (Verify permissions)',
+      what: 'The engine needs its Microsoft Graph and Azure rights for the workloads you use. Overview checks them and shows the exact grant for anything missing.',
+      check: c => { const p = c.perm || {}; const miss = (p.missingRequired || []).filter(Boolean).length; return { done: !!p.objectId && miss === 0 && String(p.severity || '') !== 'error', note: p.objectId ? (miss ? miss + ' permission(s) missing' : 'all required permissions held') : 'not checked yet' }; } },
+    { id: 'mail', title: 'Mail sender', required: true, tab: 'settings', action: 'Open Settings',
+      what: 'A shared mailbox PIM sends from (TAP codes, approvals, alerts), its send right scoped to that one mailbox. Set it up with the setup script Initialize-PimMailSender (also downloadable from invardia.com/support/pim).',
+      check: c => { const s = String((c.perm && c.perm.mail && c.perm.mail.sender) || ''); return { done: !!s, note: s ? ('sends as ' + s) : 'no sender: TAP codes and notifications are not sent' }; } },
+    { id: 'departments', title: 'Departments & owners', required: true, tab: 'departments', action: 'Open Departments & owners',
+      what: 'The departments that sponsor access, and their owners -- who approves and receives the mail. Create them, or import.',
+      check: c => ({ done: c.rows['PIM-Definitions-Departments'] > 0, note: c.rows['PIM-Definitions-Departments'] + ' department(s)' }) },
+    { id: 'roles', title: 'Roles & templates', required: true, tab: 'new', action: 'Open Create access',
+      what: 'The role groups people activate -- from the templates (pick and include) or your own.',
+      check: c => ({ done: c.rows['PIM-Definitions-Roles'] > 0, note: c.rows['PIM-Definitions-Roles'] + ' role group(s)' }) },
+    { id: 'admins', title: 'Admin accounts', required: true, tab: 'adminimport', action: 'Open Import administrators',
+      what: 'The separate admin accounts PIM manages -- create them, or import the ones you have.',
+      check: c => ({ done: c.rows['Account-Definitions-Admins'] > 0, note: c.rows['Account-Definitions-Admins'] + ' admin account(s)' }) },
+    { id: 'access', title: 'Access mapping', required: true, tab: 'map', action: 'Open the Delegation Map',
+      what: 'Who gets which role: drag admins onto roles in the map.',
+      check: c => ({ done: c.rows['PIM-Assignments-Admins'] > 0, note: c.rows['PIM-Assignments-Admins'] + ' assignment(s)' }) },
+    { id: 'policies', title: 'Policies', required: true, tab: 'approvals', action: 'Open Approvals',
+      what: 'PIM applies the activation policies from the templates (MFA, duration, approval). A first large change set waits for your approval.',
+      check: c => { const h = Number((c.jobs && c.jobs.heldCount) || 0); return { done: h === 0, note: h ? h + ' change set(s) waiting for your approval' : 'nothing waiting' }; } },
+    { id: 'alerts', title: 'Alert recipients', required: true, tab: 'settings', action: 'Open Settings (Alerting)',
+      what: 'Who receives the alerts when a guard holds something or a job fails.',
+      check: c => { const n = ((c.alerting && c.alerting.recipients) || []).filter(Boolean).length; return { done: n > 0, note: n + ' recipient(s)' }; } },
+    { id: 'breakglass', title: 'Break-glass accounts', required: true, tab: 'emergency', action: 'Open Emergency access',
+      what: 'The emergency accounts PIM must never touch -- define them before the first run.',
+      check: c => { const n = ((c.breakglass && (c.breakglass.effectiveAccounts || c.breakglass.accounts)) || []).length; return { done: n > 0, note: n + ' account(s)' }; } },
+    { id: 'firstrun', title: 'First run', required: true, tab: 'jobs', action: 'Open Jobs',
+      what: 'The engine applies your configuration. Run it now and see what it did.',
+      check: c => { const r = c.jobs && c.jobs.lastRun; return { done: !!(r && r.ok), note: r ? ((r.ok ? 'last run ok: ' : 'last run failed: ') + (r.name || '')) : 'no run yet' }; } },
+    { id: 'activator', title: 'PIM Activator', required: false, tab: 'home', action: 'Read about the PIM Activator',
+      what: 'The browser extension admins activate with. Deployment (Intune remediation, Edge for Business, the apps) gets its own page under Operations.',
+      check: () => ({ done: false, note: 'optional' }) },
+    { id: 'discovery', title: 'Discovery', required: false, tab: 'discovery', action: 'Open Discovery',
+      what: 'Let PIM find what is new (Azure subscriptions, Power BI workspaces, roles) and offer it to you.',
+      check: () => ({ done: false, note: 'optional' }) },
+  ];
+  let GET_STARTED_LAST = null;
+  async function evaluateGetStarted() {
+    const c = { rows: {} };
+    const safe = async (fn) => { try { return await fn(); } catch (_) { return null; } };
+    const [lic, perm, home, alerting, bg] = await Promise.all([
+      safe(() => api('GET', '/api/license')), safe(() => api('GET', '/api/permissions-health')), safe(() => api('GET', '/api/home')),
+      safe(() => api('GET', '/api/alerting')), safe(() => api('GET', '/api/settings/breakglass-accounts'))]);
+    c.licence = lic; c.perm = perm; c.jobs = home && home.tiles && home.tiles.jobs; c.alerting = alerting; c.breakglass = bg;
+    for (const b of ['PIM-Definitions-Departments', 'PIM-Definitions-Roles', 'Account-Definitions-Admins', 'PIM-Assignments-Admins']) {
+      const d = await safe(() => loadCsv(b)); c.rows[b] = (d && Array.isArray(d.rows)) ? d.rows.length : 0;
+    }
+    const steps = GET_STARTED_STEPS.map(s => { let r = { done: false, note: '' }; try { r = s.check(c) || r; } catch (_) { } return Object.assign({}, s, { done: !!r.done, note: r.note || '' }); });
+    GET_STARTED_LAST = steps;
+    const openRequired = steps.filter(s => s.required && !s.done).length;
+    const badge = document.getElementById('getStartedBadge');
+    if (badge) { badge.textContent = '!'; badge.style.display = openRequired ? '' : 'none'; }
+    try { const act = document.querySelector('#tabs .tab.active'); syncNavGroups(act ? act.dataset.tab : null); } catch (_) { }
+    return steps;
+  }
+  async function renderGetStarted(stepId) {
+    const host = document.getElementById('getStartedBody'); if (!host) return;
+    if (!GET_STARTED_LAST) host.innerHTML = '<div style="padding:20px;color:#57606a;">Checking where this environment stands&hellip;</div>';
+    const steps = await evaluateGetStarted();
+    const done = steps.filter(s => s.done).length, total = steps.length, pct = Math.round(100 * done / total);
+    let idx = stepId ? steps.findIndex(s => s.id === stepId) : -1;
+    if (idx < 0) idx = Math.max(0, steps.findIndex(s => s.required && !s.done));
+    const cur = steps[idx];
+    const pill = (s, i) => '<button class="gsPill" data-step="' + escapeHtml(s.id) + '" style="border-radius:16px;padding:4px 12px;margin:0 6px 6px 0;font-size:12.5px;cursor:pointer;border:1px solid ' +
+      (i === idx ? '#0969da;background:#0969da;color:#fff;' : s.done ? '#4ac26b;background:#dafbe1;color:#1a7f37;' : s.required ? '#ff8182;background:#ffebe9;color:#cf222e;' : '#d0d7de;background:#f6f8fa;color:#57606a;') + '">' +
+      (s.done ? '&#10003; ' : s.required ? '<b>!</b> ' : '') + escapeHtml(s.title) + (s.required ? '' : ' <span style="font-size:11px;opacity:.8;">(optional)</span>') + '</button>';
+    host.innerHTML =
+      '<h2 style="margin:6px 0 4px;">Get Started</h2>' +
+      '<div style="display:flex;justify-content:space-between;font-size:12px;color:#57606a;"><span class="gsCount">' + done + ' of ' + total + ' steps done</span><span>' + pct + '%</span></div>' +
+      '<div style="height:8px;background:#eaeef2;border-radius:4px;margin:4px 0 12px;"><div class="gsBar" style="height:8px;width:' + pct + '%;background:#0969da;border-radius:4px;"></div></div>' +
+      '<div class="gsPills">' + steps.map(pill).join('') + '</div>' +
+      '<div class="gsStep" style="border:1px solid #d0d7de;border-radius:8px;padding:16px 18px;margin-top:6px;background:#fff;">' +
+        '<div style="font-size:11px;letter-spacing:.6px;color:#0969da;font-weight:600;">STEP ' + (idx + 1) + ' OF ' + total + (cur.required ? '' : ' &middot; OPTIONAL') + '</div>' +
+        '<h3 style="margin:4px 0 6px;">' + escapeHtml(cur.title) + '</h3>' +
+        '<div style="font-size:13px;color:#24292f;margin-bottom:10px;">' + escapeHtml(cur.what) + '</div>' +
+        '<div class="gsState" style="font-size:12.5px;margin-bottom:12px;color:' + (cur.done ? '#1a7f37' : cur.required ? '#cf222e' : '#57606a') + ';">' + (cur.done ? '&#10003; Done' : cur.required ? '! Still open' : 'Optional') + (cur.note ? ' &middot; ' + escapeHtml(cur.note) : '') + '</div>' +
+        '<div style="display:flex;gap:8px;align-items:center;">' +
+          '<button class="gsBack btn-sec"' + (idx === 0 ? ' disabled' : '') + '>&larr; Back</button>' +
+          '<button class="gsGo primary" data-tab="' + escapeHtml(cur.tab) + '">' + escapeHtml(cur.action) + ' &rarr;</button>' +
+          '<button class="gsNext btn-sec"' + (idx === total - 1 ? ' disabled' : '') + '>Next &rarr;</button>' +
+          '<button class="gsRecheck ghost" style="margin-left:auto;font-size:12px;">Check again</button>' +
+        '</div></div>' +
+      (done === total ? '' : (steps.every(s => s.done || !s.required) ? '<div style="margin-top:10px;color:#1a7f37;font-size:12.5px;">Every required step is done -- this environment is ready. The optional ones can wait.</div>' : ''));
+    host.querySelectorAll('.gsPill').forEach(b => b.onclick = () => renderGetStarted(b.dataset.step));
+    const back = host.querySelector('.gsBack'); if (back) back.onclick = () => renderGetStarted(steps[Math.max(0, idx - 1)].id);
+    const next = host.querySelector('.gsNext'); if (next) next.onclick = () => renderGetStarted(steps[Math.min(total - 1, idx + 1)].id);
+    const go = host.querySelector('.gsGo'); if (go) go.onclick = () => { try { switchTab(go.dataset.tab); } catch (_) { } };
+    const re = host.querySelector('.gsRecheck'); if (re) re.onclick = () => renderGetStarted(cur.id);
+  }
+
   async function renderOnboarding() {
     const body = document.getElementById('onboardingBody');
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- onboarding needs the server.</div>'; return; }
