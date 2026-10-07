@@ -132,7 +132,7 @@ $script:PimFailureRules = @(
        fixes = @(@{ id = 'delete-row'; label = 'Remove this row'; kind = 'delete-row' }) }
 
     @{ code = 'ENTRA-ROLE-UNRESOLVED'
-       # 2026-10-07 (Invardia fix request 7429f13c, NunaGreen): RolesAUs says "unresolved group/AU/role" -- the same failure
+       # 2026-10-07 (Invardia fix request 7429f13c, a customer): RolesAUs says "unresolved group/AU/role" -- the same failure
        # with the administrative unit as a third part; it fell through to UNCLASSIFIED.
        match = { param($m, $row) $m -match '(?i)unresolved group/(AU/)?role' }
        title = 'Entra group, administrative unit or role could not be resolved'

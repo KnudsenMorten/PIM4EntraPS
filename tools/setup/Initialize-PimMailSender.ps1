@@ -97,7 +97,7 @@ param(
     # defect, which is why the offline gate now audits the whole family instead of naming them.
     [string]$AdminSecret,
     [string]$AdminCertThumbprint,
-    # 2026-10-07 (operator, NunaGreen: "you are welcome to fix this at nunagreen"): run as the SIGNED-IN az session
+    # 2026-10-07 (operator, at a customer: "you are welcome to fix this at <customer>"): run as the SIGNED-IN az session
     # instead -- the Invardia Support app (Connect-InvardiaSupport -AzCli) or a person -- with no secret or certificate
     # passed. -AdminAppId is then the signed-in app (it activates its own short-lived Exchange Administrator role).
     [switch]$UseSignedInAccount,
@@ -263,6 +263,27 @@ function Resolve-PimMailSenderAddress {
     # exists to prevent, arrived at from the other direction.
     if (-not $domain) { return [ordered]@{ sender = ''; domain = ''; reason = 'could not resolve a mail domain (no initial verified domain on the organization)' } }
     return [ordered]@{ sender = "$box@$domain"; domain = $domain; reason = '' }
+}
+
+function Resolve-PimMailSenderGraphKey {
+    <#
+      BUG-296 (found live at a customer 2026-10-07): what the ENGINE must store as MailSender is the key Microsoft Graph
+      addresses the mailbox by -- /users/<id | userPrincipalName>/sendMail -- NOT its mail address. Exchange gives a new
+      shared mailbox a UPN on the tenant's DEFAULT domain while -PrimarySmtpAddress put its mail on the initial
+      (onmicrosoft) domain; Graph then answers 404 for /users/<mail address> and the environment is mail-mute although
+      the mailbox, the scope and the send right are all correct.
+      PURE. -GraphUsers: the Graph users whose mail or proxyAddresses carry -Sender ($filter=mail eq ... OR
+      proxyAddresses/any). Returns @{ key; reason }: the UPN of the ONE matching user; -Sender itself when it already is
+      that UPN; '' + a reason when nobody or more than one user matches (refuse rather than pick).
+    #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Sender, [object[]]$GraphUsers = @())
+    $s = "$Sender".Trim()
+    $hits = @(@($GraphUsers) | Where-Object { $_ } | Where-Object {
+        $u = $_; ("$($u.userPrincipalName)" -ieq $s) -or ("$($u.mail)" -ieq $s) -or (@($u.proxyAddresses) | Where-Object { ("$_" -replace '^(?i)smtp:', '') -ieq $s }) })
+    $ids = @($hits | ForEach-Object { "$($_.id)$($_.userPrincipalName)" } | Select-Object -Unique)
+    if ($ids.Count -eq 0) { return [ordered]@{ key = ''; reason = "no directory user carries $s (the mailbox is not visible in Microsoft Graph yet)" } }
+    if ($ids.Count -gt 1) { return [ordered]@{ key = ''; reason = "more than one directory user carries $s -- refusing to pick one" } }
+    return [ordered]@{ key = "$($hits[0].userPrincipalName)".Trim(); reason = '' }
 }
 
 Write-Host ("=" * 78) -ForegroundColor Cyan
@@ -696,6 +717,33 @@ if ($existingMbx) {
     Add-Result 'mailbox' 'created' "$($seen.PrimarySmtpAddress)"
 }
 
+# --- 1b. THE KEY GRAPH SENDS AS (BUG-296) -----------------------------------------
+# The engine calls /users/<MailSender>/sendMail. Graph resolves an id or a userPrincipalName, never a bare mail address,
+# so the value persisted below is the mailbox's UPN (mail still goes out FROM the primary address $sender).
+Step "[1b] how Microsoft Graph addresses $sender"
+$graphKey = [ordered]@{ key = ''; reason = '' }; $gkReadError = ''
+$gkDeadline = (Get-Date).AddSeconds(180)
+do {
+    try {
+        $f = [uri]::EscapeDataString("mail eq '$sender' or userPrincipalName eq '$sender' or proxyAddresses/any(p:p eq 'smtp:$sender')")
+        $gu = @(GrAll -Path "users?`$filter=$f&`$select=id,userPrincipalName,mail,proxyAddresses"); $gkReadError = ''
+    } catch { $gu = @(); $gkReadError = ($_.Exception.Message -split "`n")[0] }
+    $graphKey = Resolve-PimMailSenderGraphKey -Sender $sender -GraphUsers $gu
+    if ($graphKey.key -or $gkReadError) { break }
+    Start-Sleep -Seconds 15
+} while ((Get-Date) -lt $gkDeadline)
+if ($gkReadError) {
+    # Could not LOOK (e.g. no User.Read.All on the onboarding identity): keep the old behaviour, but say what it risks.
+    Note "could not read the directory to find the mailbox's UPN ($gkReadError) -- storing $sender as it is; if Graph cannot resolve it, mail fails with 404: set MailSender to the mailbox's UPN." 'Yellow'
+    $graphKey = [ordered]@{ key = $sender; reason = '' }
+}
+if (-not $graphKey.key) { Add-Result 'graph-key' 'FAILED' $graphKey.reason; Fail "the mailbox $sender exists, but $($graphKey.reason). Re-run in a few minutes." }
+$storeSender = $graphKey.key
+if ($storeSender -ine $sender) { Note "Graph addresses this mailbox as $storeSender (its UPN); that is what the engine stores. Mail still goes out from $sender." 'Yellow' }
+else { Note "Graph addresses it by $storeSender" 'DarkGray' }
+Add-Result 'graph-key' 'ok' $storeSender
+$result.storeSender = $storeSender
+
 # --- 3. SCOPE THE SEND RIGHT TO THAT ONE MAILBOX -------------------------------
 # Exchange Online RBAC FOR APPLICATIONS, not an Application Access Policy. Both express "this app
 # may only touch this mailbox"; the RBAC one is chosen because it is the one that WORKS AND CAN BE
@@ -888,7 +936,7 @@ else { Add-Result 'mail-send-tenantwide' 'absent' 'correct (RBAC grants, scoped)
 Step '[4] persist the sender to pim.Settings'
 if (-not "$SqlServerFqdn".Trim()) {
     Note 'no -SqlServerFqdn given -- NOT persisted. The sender must reach the engine some other way' 'DarkYellow'
-    Note "(pass -MailSender '$sender' to Setup-PimContainers, or set 'MailSender' in pim.Settings by hand)" 'DarkYellow'
+    Note "(pass -MailSender '$storeSender' to Setup-PimContainers, or set 'MailSender' in pim.Settings by hand)" 'DarkYellow'
     Add-Result 'persist' 'skipped' 'no -SqlServerFqdn'
 } else {
     . (Join-Path $solRoot 'engine\_shared\PIM-SqlStore.ps1')
@@ -914,18 +962,18 @@ if (-not "$SqlServerFqdn".Trim()) {
     $global:PIM_SqlDatabase  = $SqlDatabase
     try {
         $cs = Get-PimSqlConnectionString -Server $SqlServerFqdn -Database $SqlDatabase
-        Set-PimSqlSetting -ConnectionString $cs -Name 'MailSender' -Value $sender
+        Set-PimSqlSetting -ConnectionString $cs -Name 'MailSender' -Value $storeSender
         # Read back through the same reader the ENGINE uses, not through a raw SELECT -- the point
         # is to prove what the engine will see, not that a row exists.
         $all = Get-PimAllSqlSettings -ConnectionString $cs
         $stored = "$($all['MailSender'])".Trim()
-        if ($stored -ne $sender) { throw "read-back mismatch: store holds '$stored', expected '$sender'" }
+        if ($stored -ne $storeSender) { throw "read-back mismatch: store holds '$stored', expected '$storeSender'" }
         Note "persisted to pim.Settings and verified: MailSender = $stored" 'Green'
         Add-Result 'persist' 'ok' $stored
     } catch {
         $m = ($_.Exception.Message -split "`n")[0]
         Add-Result 'persist' 'FAILED' $m
-        Fail "mailbox + grants are in place, but the sender could NOT be persisted to pim.Settings ($SqlServerFqdn/$SqlDatabase): $m  -- the environment is still MAIL-MUTE. Re-run, or pass -MailSender '$sender' to Setup-PimContainers."
+        Fail "mailbox + grants are in place, but the sender could NOT be persisted to pim.Settings ($SqlServerFqdn/$SqlDatabase): $m  -- the environment is still MAIL-MUTE. Re-run, or pass -MailSender '$storeSender' to Setup-PimContainers."
     }
 }
 
@@ -959,7 +1007,7 @@ Write-Host "  PRIVILEGED GRANTS STILL HELD by the setup identity $AdminAppId :" 
 Write-Host "    Exchange Administrator (directory role) : $exAdminLine" -ForegroundColor $pc
 Write-Host "    Exchange.ManageAsApp (app role)         : $(if ($manageAsAppState) { $manageAsAppState } else { 'not held' }) -- no expiry; inert without the directory role" -ForegroundColor $pc
 Write-Host ""
-Write-Host "  NEXT: pass -MailSender '$sender' to Setup-PimContainers (Initialize-PlatformEnvironment"
+Write-Host "  NEXT: pass -MailSender '$storeSender' to Setup-PimContainers (Initialize-PlatformEnvironment"
 Write-Host "        does this automatically), or set a 'MailSender' value in pim.Settings."
 Write-Host ""
 # Say only what was verified BY READ-BACK. An earlier summary asserted "Mail.Send, RESTRICTED to

@@ -272,7 +272,7 @@ deployment is a supported choice) and no credentials lying around.
   **"Use default" is the first choice and changes nothing**, so a group created without touching the
   field behaves exactly as before.
 - **The delegation table is in the menu, under the name of the job.** ✅ 2026-09-16 Access → *Delegations
-  — edit in a table* opens every existing delegation in one table, so changing an eligibility from 90 to
+  — all rows* opens every existing delegation in one table, so changing an eligibility from 90 to
   365 days, or switching a delegation to a policy that needs approval, is a couple of clicks. Edits queue
   in Pending changes and commit like any other change. *All records* remains as the raw view of
   everything, and the narrowed table says it is narrowed with one click back.

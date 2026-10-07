@@ -1,105 +1,153 @@
-﻿# _PimActivatorBackend.ps1 -- REST-first write helpers for the PIM Activator
-# backend deploy (app registration + service principal + delegated admin-consent
-# grants). Dot-source from Deploy-PimActivatorBackend.ps1; defines functions only
-# (no side effects on load).
+﻿# _PimActivatorBackend.ps1 -- Graph REST seam + write helpers for the PIM Activator backend deploy (app registration +
+# service principal + delegated admin-consent grants). Dot-source from Deploy-PimActivatorBackend.ps1; defines
+# functions only (no side effects on load).
 #
-# REST migration (REQUIREMENTS §19 -- "Write/activator/setup/EXO path"): the
-# backend's WRITE operations no longer require the Microsoft.Graph PowerShell SDK.
-# Every Graph call routes through Invoke-PaGraph, which talks pure Graph REST via
-# the module-free PIM-Rest data plane (Invoke-PimGraph) by default, and only falls
-# back to the SDK's Invoke-MgGraphRequest when $global:PIM_UseGraphSdk is set (the
-# documented opt-in fallback used elsewhere in the solution). Pure builders here
-# (body shapes, scope strings, scope-id resolution) are unit-tested offline with
-# no network and no modules; they are identical under both auth modes.
-#
-# Auth modes:
-#   * App-only (cert): -AppId + -CertificateThumbprint -> PIM-Rest mints a
-#     certificate-signed app-only token (no Graph SDK, no MSAL, PS 5.1-safe). This
-#     is the headless / automation path and is now FULLY module-free.
-#   * Interactive (break-glass human sign-in): the existing Edge loopback + PKCE
-#     flow in _PimActivatorAuth.ps1 establishes a Connect-MgGraph session; in that
-#     mode Invoke-PaGraph still issues raw REST through the SDK request pipeline
-#     unless $global:PIM_UseGraphSdk forces the legacy cmdlet path. No interactive
-#     fallback flow is introduced here (the package validator enforces NODEVCODE).
+# NO MODULES (owner 2026-10-07: "neither pim, si or invardia must have dependencies"): every Graph call goes through
+# Invoke-PaGraph -- plain Invoke-RestMethod with the session token that _PimActivatorAuth.ps1 establishes
+# (Set-PaGraphSession). Nothing from the engine tree is loaded either: the deploy is published as ONE standalone file
+# (tools/setup/Build-PimSupportScripts.ps1), which cannot carry the engine. Pure builders (body shapes, scope strings,
+# scope-id resolution) are unit-tested offline.
 
-# Load the module-free PIM-Rest data plane at dot-source time, into the CALLER's
-# scope. Dot-sourcing a script INSIDE a function would scope its functions to
-# that function (they vanish on return), so PIM-Rest must be sourced here at the
-# helper's top level -- this file is itself dot-sourced, so Invoke-PimGraph then
-# lands in the deploy script's scope. Idempotent + best-effort.
-$PaBackendDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
-    $PaRestPlane = Join-Path $PaBackendDir '..\..\engine\_shared\PIM-Rest.ps1'
-    if (Test-Path -LiteralPath $PaRestPlane) { . $PaRestPlane }
+# The session token, renewed through Update-PaGraphSession (_PimActivatorAuth.ps1) when it is within 5 minutes of
+# expiry and a renewal recipe exists. Throws when no one has signed in.
+function Get-PaGraphAccessToken {
+    if (-not $script:PaGraphToken) { throw 'Not signed in to Microsoft Graph (no session token) -- sign in first (Connect-PimActivatorGraph).' }
+    if ($script:PaGraphTokenRefresh -and $script:PaGraphTokenExpiresUtc -and
+        [datetime]::UtcNow -gt ([datetime]$script:PaGraphTokenExpiresUtc).AddMinutes(-5) -and
+        (Get-Command Update-PaGraphSession -ErrorAction SilentlyContinue)) {
+        Update-PaGraphSession
+    }
+    $script:PaGraphToken
 }
 
-# Back-compat shim: callers may still invoke Import-PaRestPlane explicitly. The
-# real load happens at dot-source above; this only covers the rare case where
-# PIM-Rest wasn't present then but is needed now (e.g. the helper was loaded
-# before the engine tree existed). No-op when Invoke-PimGraph is already defined.
-function Import-PaRestPlane {
-    if (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) { return }
-    $rest = Join-Path $PaBackendDir '..\..\engine\_shared\PIM-Rest.ps1'
-    if (Test-Path -LiteralPath $rest) { . $rest }   # note: caller should dot-source this file, not call this fn, for scope reasons
+# "https://graph.microsoft.com/v1.0/<path>" (or beta) from a v1.0/beta-relative path; absolute URLs (an
+# @odata.nextLink) pass through, "v1.0/..." / "beta/..." prefixes are honoured.
+function Resolve-PaGraphUri {
+    param([Parameter(Mandatory)][string]$Path, [switch]$Beta)
+    if ($Path -match '^https?://') { return $Path }
+    $rel = $Path.TrimStart('/')
+    if ($rel -match '^(v1\.0|beta)/') { return "https://graph.microsoft.com/$rel" }
+    $ver = if ($Beta) { 'beta' } else { 'v1.0' }
+    "https://graph.microsoft.com/$ver/$rel"
 }
 
-# True when the caller asked for the legacy Graph SDK path. Default is REST.
-function Test-PaUseGraphSdk { [bool]$global:PIM_UseGraphSdk }
+# HTTP status of a failed Invoke-RestMethod (5.1: WebException.Response; 7: HttpResponseException.Response), with the
+# message as the fallback ("(429)" in 5.1, "status code ... 429" in 7). 0 = unknown.
+function Get-PaHttpStatus {
+    param($ErrorRecord)
+    $ex = if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) { $ErrorRecord.Exception } else { $ErrorRecord }
+    try { if ($ex.Response -and $ex.Response.StatusCode) { return [int]$ex.Response.StatusCode } } catch { }
+    $m = "$($ex.Message)"
+    if ($m -match '\((\d{3})\)') { return [int]$Matches[1] }
+    if ($m -match 'status code[^0-9]{0,40}(\d{3})') { return [int]$Matches[1] }
+    0
+}
 
-# The single Graph seam used by every backend write. By default it calls the
-# module-free PIM-Rest data plane (Invoke-PimGraph); under $global:PIM_UseGraphSdk
-# it routes to the SDK's Invoke-MgGraphRequest so an operator who prefers the
-# legacy session pipeline keeps working. -Path is a v1.0/beta-relative Graph
-# path (e.g. "/applications?\$filter=..."); -Method/-Body as usual.
+# Seconds from a Retry-After header on a failed request, or $null.
+function Get-PaRetryAfterSeconds {
+    param($ErrorRecord)
+    $ex = if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) { $ErrorRecord.Exception } else { $ErrorRecord }
+    try {
+        $h = $ex.Response.Headers
+        if ($null -eq $h) { return $null }
+        if ($h.PSObject.Properties['RetryAfter'] -and $h.RetryAfter) {          # 7: HttpResponseHeaders
+            if ($h.RetryAfter.Delta) { return [int][Math]::Ceiling($h.RetryAfter.Delta.TotalSeconds) }
+            if ($h.RetryAfter.Date)  { return [int][Math]::Max(1, [Math]::Ceiling(($h.RetryAfter.Date.UtcDateTime - [datetime]::UtcNow).TotalSeconds)) }
+        }
+        $v = $null
+        try { $v = $h['Retry-After'] } catch { }                                # 5.1: WebHeaderCollection
+        if ($v -and "$v" -match '^\d+$') { return [int]"$v" }
+    } catch { }
+    $null
+}
+
+# The Graph error body (JSON) of a failed request, best effort: "<code>: <message>".
+function Get-PaGraphErrorText {
+    param($ErrorRecord)
+    $raw = $null
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord] -and $ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) { $raw = $ErrorRecord.ErrorDetails.Message }
+    if (-not $raw) {
+        try {
+            $resp = $ErrorRecord.Exception.Response
+            if ($resp -and ($resp | Get-Member -Name GetResponseStream -MemberType Method)) {
+                $raw = (New-Object System.IO.StreamReader($resp.GetResponseStream())).ReadToEnd()
+            }
+        } catch { }
+    }
+    if (-not $raw) { return "$($ErrorRecord.Exception.Message)" }
+    try {
+        $j = $raw | ConvertFrom-Json
+        if ($j.error) { return "$($j.error.code): $($j.error.message)" }
+    } catch { }
+    "$raw"
+}
+
+# The single Graph seam used by every backend call. -Path is a v1.0/beta-relative Graph path (e.g.
+# "/applications?`$filter=...") or an absolute URL. JSON bodies are sent as UTF-8 bytes. Collections come back as the
+# `value` items (all pages with -All, following @odata.nextLink); single resources as the object. 429/503/504 are
+# retried (Retry-After honoured, max -MaxRetries). Any other failure throws "Graph <METHOD> <uri> failed: HTTP <n>
+# <code>: <message>" -- so a 404 carries both "404" and "Request_ResourceNotFound" for the callers' not-found checks.
 function Invoke-PaGraph {
     param(
         [string]$Method = 'GET',
         [Parameter(Mandatory)][string]$Path,
         [object]$Body,
         [switch]$Beta,
-        [switch]$All
+        [switch]$All,
+        [int]$MaxRetries = 5
     )
-    if (Test-PaUseGraphSdk) {
-        # Legacy SDK pipeline. Normalise the path to the SDK's expected form
-        # ("v1.0/..." / "beta/...") without a leading slash.
-        $rel = $Path.TrimStart('/')
-        $ver = if ($Beta) { 'beta' } else { 'v1.0' }
-        $uri = if ($rel -match '^https?://' -or $rel -match '^(v1\.0|beta)/') { $rel } else { "$ver/$rel" }
-        $sdkArgs = @{ Method = $Method; Uri = $uri }
-        if ($null -ne $Body) {
-            # Pass a PRE-SERIALIZED JSON string, not a PS hashtable: Invoke-MgGraphRequest's
-            # serializer chokes on nested PS string arrays ("Self referencing loop detected
-            # ... spa.redirectUris[0].Chars"). A string body is sent verbatim.
-            $sdkArgs.Body = if ($Body -is [string]) { $Body } else { ($Body | ConvertTo-Json -Depth 12) }
-            $sdkArgs.ContentType = 'application/json'
-        }
-        $resp = Invoke-MgGraphRequest @sdkArgs
-        # Normalise to the SAME shape the REST data plane (Invoke-PimGraph) returns: the
-        # SDK wraps a collection as @{ value = @(...); '@odata.nextLink' = ... } whereas
-        # callers (@(Invoke-PaGraph ...), Get-PaProp on the element) expect the items
-        # array. Unwrap it (following nextLink for -All); single resources pass through.
-        if ($resp -is [System.Collections.IDictionary] -and $resp.Contains('value')) {
-            $items = @($resp['value'])
-            if ($All) {
-                $next = $resp['@odata.nextLink']
-                while ($next) {
-                    $page = Invoke-MgGraphRequest -Method GET -Uri $next
-                    $items += @($page['value'])
-                    $next = $page['@odata.nextLink']
-                }
-            }
-            return $items
-        }
-        return $resp
+    $uri = Resolve-PaGraphUri -Path $Path -Beta:$Beta
+    $bytes = $null
+    if ($null -ne $Body) {
+        $json = if ($Body -is [string]) { $Body } else { ConvertTo-Json -InputObject $Body -Depth 12 }
+        $bytes = [Text.Encoding]::UTF8.GetBytes($json)
     }
-    Import-PaRestPlane
-    Invoke-PimGraph -Method $Method -Path $Path -Body $Body -Beta:$Beta -All:$All
+
+    $send = {
+        param([string]$M, [string]$U, [byte[]]$B)
+        for ($try = 0; ; $try++) {
+            $p = @{ Method = $M; Uri = $U; Headers = @{ Authorization = "Bearer $(Get-PaGraphAccessToken)" }; ErrorAction = 'Stop' }
+            if ($null -ne $B) { $p.Body = $B; $p.ContentType = 'application/json; charset=utf-8' }
+            try { return Invoke-RestMethod @p }
+            catch {
+                $code = Get-PaHttpStatus $_
+                if (($code -in @(429, 503, 504)) -and ($try -lt $MaxRetries)) {
+                    $wait = Get-PaRetryAfterSeconds $_
+                    if (-not $wait -or $wait -lt 1) { $wait = [int][Math]::Min(60, [Math]::Pow(2, $try + 1)) }
+                    Write-Host "  Graph answered HTTP $code -- retry $($try + 1)/$MaxRetries in $wait s" -ForegroundColor DarkGray
+                    Start-Sleep -Seconds $wait
+                    continue
+                }
+                $codeText = if ($code) { "HTTP $code " } else { '' }
+                throw "Graph $M $U failed: $codeText$(Get-PaGraphErrorText $_)"
+            }
+        }
+    }
+
+    $resp = & $send $Method $uri $bytes
+    $isCollection = {
+        param($r)
+        if ($null -eq $r) { return $false }
+        if ($r -is [System.Collections.IDictionary]) { return $r.Contains('value') -and ($null -eq $r['value'] -or $r['value'] -is [array]) }
+        $vp = $r.PSObject.Properties['value']
+        [bool]($vp -and ($null -eq $vp.Value -or $vp.Value -is [array]))
+    }
+    if (-not (& $isCollection $resp)) { return $resp }
+
+    $items = New-Object System.Collections.Generic.List[object]
+    $page = $resp
+    while ($true) {
+        foreach ($i in @(Get-PaProp $page 'value')) { if ($null -ne $i) { $items.Add($i) } }
+        if (-not $All) { break }
+        $next = Get-PaProp $page '@odata.nextLink'
+        if (-not $next) { break }
+        $page = & $send 'GET' "$next" $null
+    }
+    $items.ToArray()
 }
 
-# Read a property off a Graph object case-insensitively (REST returns camelCase
-# 'appId'/'id'; the SDK's Invoke-MgGraphRequest returns a hashtable with the same
-# camelCase JSON keys; older SDK objects expose PascalCase). Returns $null when
-# absent. -Name is the canonical camelCase key (e.g. 'appId', 'id').
+# Read a property off a Graph object case-insensitively (REST returns camelCase 'appId'/'id'; hashtables and older
+# objects may carry PascalCase). Returns $null when absent. -Name is the canonical camelCase key (e.g. 'appId', 'id').
 function Get-PaProp {
     param([AllowNull()]$Object, [Parameter(Mandatory)][string]$Name)
     if ($null -eq $Object) { return $null }
@@ -117,8 +165,7 @@ function Get-PaProp {
 
 # Idempotently create-or-update an AllPrincipals oauth2PermissionGrant (tenant-
 # wide admin consent) from one client SP to one resource SP, over Graph REST via
-# Invoke-PaGraph. Mirrors the previous Get/New/Update-MgOauth2PermissionGrant
-# block. -ClientSpId/-ResourceSpId are SP object ids; -Scope a space-delimited
+# Invoke-PaGraph (GET by filter, then PATCH or POST). -ClientSpId/-ResourceSpId are SP object ids; -Scope a space-delimited
 # scope string. Returns nothing; writes a status line.
 function Set-PaOauth2Grant {
     param(

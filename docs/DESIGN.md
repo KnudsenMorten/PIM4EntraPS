@@ -889,26 +889,33 @@ in-box `System.Data.SqlClient` on Windows PS 5.1), pinned and stable. There is n
 practical REST data-plane for Azure SQL/TDS, so a driver is unavoidable —
 consistent with the principle.
 
-**Write paths follow the same tenet (REST migration).** The setup/deploy *write*
-scripts are being moved off the Graph/Az SDK onto the same `PIM-Rest` data plane.
-The **PIM Activator backend deploy** (`tools/pim-activator/Deploy-PimActivatorBackend.ps1`,
-which provisions the extension's Entra app registration + service principal +
-tenant-wide OAuth2 admin-consent grants) now routes every Graph write through a
-single seam, `Invoke-PaGraph` (in `tools/pim-activator/_PimActivatorBackend.ps1`):
-by default it calls the module-free `Invoke-PimGraph`, and only falls back to the
-SDK's `Invoke-MgGraphRequest` when `$global:PIM_UseGraphSdk` is set (the same opt-in
-toggle the engine/ContextBuilder honour). The REST request *shapes* are built by
-small pure functions (`Resolve-PaGraphScopeIds`, `New-PaRequiredResourceAccess`,
-`New-PaAppRegistrationBody`, `New-PaConsentScopeString`, `Set-PaOauth2Grant`,
-`Get-PaProp`) that are unit-tested offline with no network and no modules. The
-result: an **app-only (certificate) backend deploy is fully module-free** — PIM-Rest
-mints the cert-signed app-only token (no Graph SDK, no MSAL, PS 5.1-safe). The
-interactive *break-glass* human sign-in keeps the existing Edge-loopback + PKCE
-flow (delegated session via `Connect-MgGraph -AccessToken`), and no device-code
-flow is introduced anywhere (the package validator's NODEVCODE check still holds).
-The same conversion is pending for the remaining setup/EXO/Intune write scripts
-(tracked in the backlog).
+**Write paths follow the same tenet -- no PowerShell modules at all (owner rule, 2026-10-07).** Every script an admin runs
+to configure PIM is plain REST + .NET with a browser sign-in (auth code + PKCE on a localhost loopback, Microsoft Edge
+launched explicitly; never device code) and is published as ONE self-contained file at
+`https://invardia.com/support/pim/<Script>.ps1` (`tools/setup/Build-PimSupportScripts.ps1` inlines the helpers it
+dot-sources). For the PIM Activator that is `Deploy-PimActivatorBackend.ps1` (the Entra app + enterprise app + tenant-wide
+consent), `Publish-PimActivatorRemediation.ps1` (the Intune Remediation) and `Deploy-PimActivatorClient.ps1` (servers
+without Intune). The backend deploy keeps its token in the script (`_PimActivatorAuth.ps1`): a browser sign-in (renewed
+with its refresh token), an app-only certificate sign-in (an RS256 client assertion signed with the certificate from the
+store, PS 5.1 + 7), or `-AccessToken`. Every Graph call goes through one small seam, `Invoke-PaGraph`
+(`_PimActivatorBackend.ps1`: Bearer token, UTF-8 JSON, paging, 429/503 retry); the request shapes come from pure,
+unit-tested builders (`Resolve-PaGraphScopeIds`, `New-PaRequiredResourceAccess`, `New-PaAppRegistrationBody`,
+`New-PaConsentScopeString`, `Set-PaOauth2Grant`). A gate test fails on any module import, SDK cmdlet or device-code text.
 
+**Operations > PIM Activator (the Manager page).** A guided page like Get Started: five steps (the Entra apps, the settings
+catalog, the Intune remediation, Edge for Business, servers), each with a state read from the data. The Manager reads (the
+apps and their sign-in addresses, the published extension versions from the update manifests) and builds text (the filled
+Detect / Remediate pair, the Edge settings) -- it never writes to the tenant with its own identity. The **Create / Repair**
+and **Upload to Intune** buttons write with the CLICKING admin's own Microsoft sign-in: a popup to the Microsoft sign-in
+page (the Manager's sign-in app as the client, auth code + PKCE, only the scopes that button needs), answered by
+`/activator-signin` on the Manager's own address (postMessage + BroadcastChannel, same origin) and redeemed in the page
+(the redirect is a single-page-application address on the sign-in app, added by `Set-PimManagerEasyAuth.ps1`); the token
+stays in the browser and goes straight to Microsoft Graph. Edge for Business has no API, so its step is a guide that
+mirrors the admin center's "Manage extension" fields, and `POST /api/activator/edge-policy` turns the cards into the two
+settings to paste: `ExtensionSettings` (`{"*":{}, "<id>":{installation_mode, blocked_permissions, runtime_blocked_hosts,
+runtime_allowed_hosts, minimum_version_required, override_update_url, update_url, toolbar_state}}`) and
+`ExtensionInstallForcelist` (`<id>;<update url>`), both extensions in ONE policy (the service does not merge extension
+lists across policies). Every step also shows the script: download it from Invardia, then the exact command.
 **Exchange Online over REST.** The one Exchange need — setting a new admin
 account's mailbox forwarding — also goes through `PIM-Rest.ps1` (the `exo`
 audience) rather than the Exchange Online PowerShell module. It calls the
@@ -1962,7 +1969,7 @@ Entra or Azure role policy (a workload delegation has the group policy only); th
 Azure wizards do the same. Each picker lists only the templates written for its kind, blank reads
 `Use default (<standard>)` with that kind's standard template and stages nothing new, and a role picker says when the chosen
 assignment is Active and the role policy therefore does not apply. For existing delegations, *Delegations
-— edit in a table* also holds the permission-group definitions (Roles, Tasks, Services, Processes), so all
+— all rows* also holds the permission-group definitions (Roles, Tasks, Services, Processes), so all
 three `PolicyTemplate` columns are edited in one place; each column offers only its kind's templates and
 keeps, marks and flags a stored value of the other kind.
 
@@ -7148,7 +7155,7 @@ what the screen does, and an entry may deep-link to a *section* of a tab via `an
 | Menu | Entries |
 |---|---|
 | **Overview** | Home |
-| **Access** | Access map · Look up a role · Create access · Change existing access · Admin accounts & TAP · Invite a guest or consultant · **Departments & owners** (its own page since 2026-09-19, §18.9) · **Delegations — edit in a table** (§71.26: the records table scoped to the assignment entities) · All records (the raw view) |
+| **Access** | Access map · Look up a role · Create access · Change existing access · Admin accounts & TAP · Invite a guest or consultant · **Departments & owners** (its own page since 2026-09-19, §18.9) · **Delegations — all rows** (§71.26: the records table scoped to the assignment entities) · All records (the raw view) |
 | **Pending changes** | Check for problems · Review & commit queue (§18.1f) |
 | **Jobs** | Jobs & status · Engine logs & errors · Job schedule (§11.3a) |
 | **Reviews & controls** | Review current delegations · Approvals · Drift: live vs desired (§5.2) · **Coverage & gaps** · Access reviews · Tenant conformance · Reports · Managed tenants · **Managed tenant registry** and **Replication overview** (managing tenant only) |

@@ -105,7 +105,7 @@ Defaults wired into the script (since v2.4.57 / v2.4.58):
 | `-Channel` | `Released` | `Both` also registers the TEST build's redirect URIs — internal/dev tenant only, never a customer tenant (the app holds tenant-wide `RoleManagement.ReadWrite.Directory` consent) |
 | `-DisplayName` | `PIM Activator` | You want a per-env suffix (prod / staging / etc.) |
 | `-GrantConsent` | `$true` | Pass `:$false` to skip tenant-wide consent |
-| `-TenantId` | Active `Get-MgContext` tenant | Cross-check guard if you want a hard-fail on wrong tenant |
+| `-TenantId` | the home tenant of the account you sign in with | Name the tenant to sign in to (required for app-only `-AppId` + `-CertificateThumbprint`); the script refuses a token from another tenant |
 
 What it does:
 
@@ -329,7 +329,7 @@ Edge picks up new settings on its next policy refresh; `edge://policy` → **Rel
 with the same name exists (its assignments are kept), and reads it back:
 
 ```powershell
-Connect-MgGraph -Scopes DeviceManagementScripts.ReadWrite.All
+# no module needed: the script opens a browser sign-in (Intune Administrator) itself
 .\Publish-PimActivatorRemediation.ps1 -Name 'PIM Activator settings (PROD)' `
     -DetectScript .\Detect-PimActivator-PROD.ps1 -RemediateScript .\Remediate-PimActivator-PROD.ps1 `
     -AssignToGroupId <group-id> -EveryHours 1
