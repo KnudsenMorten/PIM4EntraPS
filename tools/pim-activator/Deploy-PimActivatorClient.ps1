@@ -155,7 +155,7 @@ param(
     # written 2linkIT's tenant id + client id into the customer's registry.
     # Now: when omitted (the common case), the script auto-discovers the
     # tenant + PIM Activator app registration from the LIVE Microsoft Graph
-    # context on the box (Connect-MgGraph runs interactively if not already
+    # tenant you sign in to (a browser sign-in opens, plain REST, no module, if not already
     # connected).
     # That guarantees the catalog matches the tenant the operator is signed
     # into right now -- never a stale file from elsewhere. Pass an explicit
@@ -219,11 +219,12 @@ if ($Channel -eq 'Test') {
 # Troubleshooting banner (script + solution + module + PS versions). Guarded:
 # this script is sometimes copied to a client box standalone, without the
 # sibling _PimActivatorAuth.ps1 -- skip the banner rather than break.
-$_authLib = Join-Path $PSScriptRoot '_PimActivatorAuth.ps1'
-if (Test-Path $_authLib) {
-    . $_authLib
-    Show-PimActivatorBanner -ScriptName 'Deploy-PimActivatorClient' -GraphModules 'Microsoft.Graph.Authentication' -GraphOptional
-}
+# No modules (owner 2026-10-07: "neither pim, si or invardia must have dependencies"): the helper is plain REST + a browser
+# sign-in. Loaded with the literal form below so Build-PimSupportScripts inlines it into the standalone download.
+try {
+    . (Join-Path $PSScriptRoot '_PimActivatorAuth.ps1')
+} catch { Write-Warning "the sign-in helper _PimActivatorAuth.ps1 could not be loaded ($($_.Exception.Message)) -- the live tenant lookup is skipped; pass -CatalogJsonPath, or use the standalone download https://invardia.com/support/pim/Deploy-PimActivatorClient.ps1" }
+if (Get-Command Show-PimActivatorBanner -ErrorAction SilentlyContinue) { Show-PimActivatorBanner -ScriptName 'Deploy-PimActivatorClient' }
 
 # HKLM requires admin. Fail fast with a clear message instead of letting
 # New-Item fault out mid-write with an opaque registry-permission error.
@@ -277,11 +278,11 @@ function Set-Reg {
 # Now: our row goes in the lowest slot nobody else uses (reusing ours if it is
 # already there); every other row carrying our id is removed.
 # ---------------------------------------------------------------------------
-$_policyLib = Join-Path $PSScriptRoot '_PimActivatorHybridPolicy.ps1'
-if (-not (Test-Path -LiteralPath $_policyLib)) {
-    throw "_PimActivatorHybridPolicy.ps1 was not found next to this script ($PSScriptRoot). It holds the slot + ExtensionSettings merge logic that keeps the organisation's own extension policies intact -- copy it alongside Deploy-PimActivatorClient.ps1 and re-run. Nothing was written."
+try {
+    . (Join-Path $PSScriptRoot '_PimActivatorHybridPolicy.ps1')
+} catch {
+    throw "_PimActivatorHybridPolicy.ps1 was not found next to this script ($PSScriptRoot). It holds the slot + ExtensionSettings merge logic that keeps the organisation's own extension policies intact -- copy it alongside Deploy-PimActivatorClient.ps1 (or use the standalone download https://invardia.com/support/pim/Deploy-PimActivatorClient.ps1) and re-run. Nothing was written."
 }
-. $_policyLib
 
 # (Matchers are built by the library, never with .GetNewClosure() -- see New-PaRowMatcher.)
 $isOurForcelistRow = New-PaRowMatcher -ExtensionId $ExtensionId
@@ -494,18 +495,17 @@ foreach ($root in $policyRoots) {
             # Live auto-discover from the connected Microsoft Graph context.
             # The same discover logic as before, so the same
             # catalog ends up in registry for non-Intune-managed boxes.
-            if (-not (Get-Module -ListAvailable Microsoft.Graph.Authentication)) {
-                Write-Warning "    Microsoft.Graph.Authentication module not installed; tenantCatalog skipped. Install with: Install-Module Microsoft.Graph.Authentication -Scope CurrentUser"
+            # Plain REST with a browser sign-in (auth code + PKCE, Microsoft Graph Command Line Tools public client) -- no module.
+            if (-not (Get-Command Get-PaInteractiveToken -ErrorAction SilentlyContinue)) {
+                Write-Warning "    the sign-in helper (_PimActivatorAuth.ps1) is not next to this script; tenantCatalog skipped. Pass -CatalogJsonPath, or download the standalone script from https://invardia.com/support/pim/Deploy-PimActivatorClient.ps1"
             } else {
-                Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
-                $ctx = Get-MgContext -ErrorAction SilentlyContinue
-                if (-not $ctx) {
-                    Write-Host "    -> connecting to Microsoft Graph (interactive) to auto-discover tenant + PIM Activator app..." -ForegroundColor Cyan
-                    try { Connect-MgGraph -Scopes 'Organization.Read.All','Application.Read.All' -NoWelcome -ErrorAction Stop; $ctx = Get-MgContext } catch { Write-Warning "    Connect-MgGraph failed: $($_.Exception.Message). tenantCatalog skipped."; $ctx = $null }
-                }
-                if ($ctx) {
+                $gTok = $null
+                Write-Host "    -> signing in to Microsoft Graph (browser) to auto-discover tenant + PIM Activator app..." -ForegroundColor Cyan
+                try { $gTok = "$((Get-PaInteractiveToken -Scopes @('Organization.Read.All', 'Application.Read.All')).access_token)" } catch { Write-Warning "    Sign-in failed: $($_.Exception.Message). tenantCatalog skipped."; $gTok = $null }
+                $gH = @{ Authorization = "Bearer $gTok" }
+                if ($gTok) {
                     try {
-                        $orgResp = Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/organization' -ErrorAction Stop
+                        $orgResp = Invoke-RestMethod -Method GET -Uri 'https://graph.microsoft.com/v1.0/organization' -Headers $gH -ErrorAction Stop
                         $org = @($orgResp.value)[0]
                         # BUG-220: select the app DETERMINISTICALLY -- by -ClientId, else by
                         # EXACT display name, and refuse when that is not unique. It used to
@@ -514,7 +514,7 @@ foreach ($root in $policyRoots) {
                         # 'PIM Activator (old)' registration could get the wrong clientId
                         # baked into every admin's browser.
                         $appFilter = if ($ClientId) { "appId eq '$ClientId'" } else { "displayName eq '$($AppDisplayName -replace "'", "''")'" }
-                        $appResp = Invoke-MgGraphRequest -Method GET -Uri ("https://graph.microsoft.com/v1.0/applications?`$filter={0}&`$select=appId,displayName" -f [uri]::EscapeDataString($appFilter)) -ErrorAction Stop
+                        $appResp = Invoke-RestMethod -Method GET -Uri ("https://graph.microsoft.com/v1.0/applications?`$filter={0}&`$select=appId,displayName" -f [uri]::EscapeDataString($appFilter)) -Headers $gH -ErrorAction Stop
                         $pick = Select-PaActivatorApp -Apps @($appResp.value) -ClientId $ClientId -DisplayName $AppDisplayName
                         $app = $pick.App
                         if (-not $org -or -not $app) {

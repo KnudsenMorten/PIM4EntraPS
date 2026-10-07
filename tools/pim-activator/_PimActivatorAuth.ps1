@@ -1,62 +1,47 @@
-# _PimActivatorAuth.ps1 -- shared Graph auth machinery for the pim-activator
-# deploy scripts. Dot-source from a sibling script; defines functions only
-# (no side effects on load). Extracted from Deploy-PimActivatorBackend.ps1
-# v2.4.148 after a field-debugging session proved every piece necessary:
-# servers whose default browser is legacy IE, stale Graph module versions
-# causing silent cmdlet failures, and cached MSAL contexts re-prompting on
-# every call.
+# _PimActivatorAuth.ps1 -- shared Microsoft Graph sign-in for the pim-activator deploy scripts. Dot-source from a
+# sibling script; defines functions only (no side effects on load).
+#
+# NO MODULES (owner 2026-10-07: "neither pim, si or invardia must have dependencies"): plain REST + .NET, nothing from
+# the PowerShell Gallery. The token lives in a script variable ($script:PaGraphToken, see _PimActivatorBackend.ps1) and
+# every Graph call goes through Invoke-PaGraph. Three ways in:
+#   * Interactive: browser sign-in, auth code + PKCE on a localhost loopback (the first-party "Microsoft Graph Command
+#     Line Tools" public client, so no extra app registration). Edge is launched explicitly -- servers whose default
+#     browser is legacy Internet Explorer mangle the redirect -- with the system default browser as the fallback when
+#     Edge is not installed.
+#   * App-only: -AppId + -CertificateThumbprint + -TenantId. The token is minted here: client_credentials with an RS256
+#     client assertion signed by the certificate (Cert:\CurrentUser\My or Cert:\LocalMachine\My). Windows PowerShell
+#     5.1 and PowerShell 7.
+#   * A token you already have (-AccessToken), for automation.
+# Also used by Deploy-PimActivatorClient.ps1 for its version banner only.
 
-# VERSION lives at the PIM4EntraPS solution root, two levels up from
-# tools/pim-activator/.
+# VERSION lives at the PIM4EntraPS solution root, two levels up from tools/pim-activator/. A standalone (built) copy
+# has no VERSION file next to it: then the version is read from the header line the build writes into the file.
 function Get-PimActivatorSolutionVersion {
     $f = Join-Path $PSScriptRoot '..\..\VERSION'
-    if (Test-Path $f) { 'v' + (Get-Content $f -TotalCount 1).Trim() } else { '(VERSION file not found)' }
-}
-
-# Mixed Microsoft.Graph submodule versions (a stale install loaded alongside
-# a newer one) cause cmdlets returning silent $null instead of erroring, and
-# token requests that bypass the cache and re-prompt interactively on every
-# call. Verify the loaded set agrees before doing anything; returns the
-# common version string.
-function Assert-GraphModuleVersions {
-    param([string[]]$Modules = @('Microsoft.Graph.Authentication'))
-    $loaded = @($Modules | ForEach-Object { Import-Module $_ -PassThru -ErrorAction Stop })
-    $vers   = @($loaded | ForEach-Object { $_.Version.ToString() } | Sort-Object -Unique)
-    if ($vers.Count -gt 1) {
-        $detail = ($loaded | ForEach-Object { "$($_.Name) $($_.Version)" }) -join ', '
-        throw "Mixed Microsoft.Graph module versions loaded in this session: $detail. All Microsoft.Graph.* submodules must be the SAME version -- this mismatch causes silent cmdlet failures and broken token caching. Fix: close ALL PowerShell sessions, remove the stale versions (Get-InstalledModule Microsoft.Graph* -AllVersions to inspect, Uninstall-Module <name> -RequiredVersion <old>), or Update-Module Microsoft.Graph -Force, then retry in a fresh session."
+    if (Test-Path -LiteralPath $f) { return 'v' + (Get-Content -LiteralPath $f -TotalCount 1).Trim() }
+    foreach ($self in @($PSCommandPath, $MyInvocation.ScriptName) | Where-Object { $_ }) {
+        try {
+            $head = @(Get-Content -LiteralPath $self -TotalCount 5 -ErrorAction Stop)
+            foreach ($l in $head) { if ($l -match '^# PIM Manager (\S+) --') { return 'v' + $Matches[1] + ' (standalone)' } }
+        } catch { }
     }
-    $vers[0]
+    '(VERSION file not found)'
 }
 
-# Standard troubleshooting banner: script + solution version, the exact
-# module versions in play, and the PowerShell runtime. Version drift (stale
-# Graph submodules, old Az, PS 5.1-vs-7 differences) has repeatedly been the
-# real root cause behind "weird" auth/deserialization failures -- having the
-# versions in every console capture removes a whole class of guesswork.
-# -GraphModules also VERIFIES the set loads at one common version
-# (Assert-GraphModuleVersions); -AzModules just reports what is installed.
+# Troubleshooting banner: script + solution version and the PowerShell runtime. -GraphModules / -AzModules are still
+# accepted for scripts that use those modules on an optional path (Deploy-PimActivatorClient.ps1); they are REPORTED
+# (installed version or "not installed"), never loaded. -GraphOptional is accepted for compatibility and changes
+# nothing any more -- nothing here can fail on a missing module.
 function Show-PimActivatorBanner {
     param(
         [Parameter(Mandatory)][string]$ScriptName,
         [string[]]$GraphModules,
         [string[]]$AzModules,
-        # For scripts where Graph is an optional code path (e.g. the client
-        # deploy's tenantCatalog auto-discovery): report instead of throwing
-        # when the module is missing or version-mixed.
         [switch]$GraphOptional
     )
     Write-Host "$ScriptName -- PIM4EntraPS $(Get-PimActivatorSolutionVersion)" -ForegroundColor Cyan
-    if ($GraphModules) {
-        try {
-            Write-Host "Graph SDK  : v$(Assert-GraphModuleVersions -Modules $GraphModules)" -ForegroundColor Cyan
-        } catch {
-            if (-not $GraphOptional) { throw }
-            Write-Host "Graph SDK  : unavailable -- $(($_.Exception.Message -split '\.')[0])" -ForegroundColor DarkYellow
-        }
-    }
-    foreach ($m in @($AzModules | Where-Object { $_ })) {
-        $mod = Get-Module -Name $m -ErrorAction SilentlyContinue
+    foreach ($m in @(@($GraphModules) + @($AzModules) | Where-Object { $_ })) {
+        $mod = Get-Module -Name $m -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $mod) { $mod = Get-Module -ListAvailable -Name $m -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1 }
         $v = if ($mod) { "v$($mod.Version)" } else { 'not installed' }
         Write-Host ("{0,-11}: {1}" -f $m, $v) -ForegroundColor Cyan
@@ -68,75 +53,171 @@ function Show-PimActivatorBanner {
 function Get-PaBrokenAuthHelp {
     @"
 This host cannot complete the sign-in. Known causes + fixes, in order of likelihood:
-  1. Mixed Microsoft.Graph module versions (confirmed field cause of silent failures + MSAL 'state mismatch' loops): Get-InstalledModule Microsoft.Graph* -AllVersions -- remove old versions, start a FRESH PowerShell session, retry.
-  2. The system default browser is legacy Internet Explorer, which mangles the auth redirect. This script defaults to -UseEdge (launches Edge explicitly) to avoid that; if you passed -UseEdge:`$false, drop it. To fix the host itself: Settings > Default apps > set Microsoft Edge as default for HTTP/HTTPS.
-  3. Stale pending sign-in tabs answering the listener with an old state: close ALL browser windows, retry once.
-  4. Run this script from another machine where sign-in works (it only talks to Graph -- nothing tenant-side requires this host).
-  5. Pre-connect with an access token minted via Az PowerShell's WAM broker (native account picker, no browser involved):
-       Connect-AzAccount -TenantId <tenant-id>     # if it opens a browser instead of a native window: Update-AzConfig -EnableLoginByWam `$true
-       `$t = Get-AzAccessToken -ResourceUrl 'https://graph.microsoft.com'
-       `$sec = if (`$t.Token -is [securestring]) { `$t.Token } else { ConvertTo-SecureString `$t.Token -AsPlainText -Force }
-       Connect-MgGraph -AccessToken `$sec
-     then re-run the deploy script in the same session.
+  1. The system default browser is legacy Internet Explorer, which mangles the auth redirect. This script launches Microsoft Edge explicitly (-UseEdge, the default); if you passed -UseEdge:`$false, drop it. To fix the host itself: Settings > Default apps > set Microsoft Edge as default for HTTP/HTTPS.
+  2. Stale pending sign-in tabs answering the listener with an old state: close ALL browser windows, retry once.
+  3. Something on this host blocks the localhost listener the browser answers to (a local firewall or proxy rule for 127.0.0.1): allow it, or run this script from another machine where sign-in works (it only talks to Microsoft Graph -- nothing tenant-side requires this host).
+  4. Bring a token: sign in somewhere that works, mint a Microsoft Graph access token with Application.ReadWrite.All, AppRoleAssignment.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All, and pass it with -AccessToken <token> (valid ~1 hour).
 "@
 }
 
-# Interactive sign-in forced through Microsoft Edge. MSAL offers no way to
-# pick the browser, so this runs the auth-code + PKCE flow itself: loopback
-# TcpListener (no HttpListener URL-ACL requirement, works non-elevated),
-# Edge launched explicitly on the authorize URL, token exchanged and handed
-# to Connect-MgGraph -AccessToken.
-function Connect-MgGraphViaEdge {
-    param([string[]]$Scopes, [string]$Tenant)
+# base64url (RFC 7515 section 2): no padding, URL-safe alphabet.
+function ConvertTo-PaB64Url {
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+    [Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+function ConvertFrom-PaB64Url {
+    param([Parameter(Mandatory)][string]$Text)
+    $s = $Text.Replace('-', '+').Replace('_', '/')
+    switch ($s.Length % 4) { 2 { $s += '==' } 3 { $s += '=' } }
+    [Convert]::FromBase64String($s)
+}
 
-    $clientId = '14d82eec-204b-4c2f-b7e8-296a70dab67e'   # Microsoft Graph Command Line Tools (same app Connect-MgGraph uses)
-    $edge = @(
-        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'),
-        (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe')
-    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-    if (-not $edge) { throw 'msedge.exe not found under Program Files -- cannot use -UseEdge on this host.' }
+# The claims of a JWT (no signature check -- Graph checks it; we only read tid/upn/wids/scp/roles/exp). $null when the
+# string is not a readable JWT (an opaque token, or garbage).
+function ConvertFrom-PaJwtClaims {
+    param([AllowEmptyString()][string]$Token)
+    if (-not $Token) { return $null }
+    $parts = $Token -split '\.'
+    if ($parts.Count -lt 2) { return $null }
+    try { [Text.Encoding]::UTF8.GetString((ConvertFrom-PaB64Url $parts[1])) | ConvertFrom-Json } catch { $null }
+}
 
-    # PKCE verifier + S256 challenge
+# Seconds since the Unix epoch (5.1-safe: no DateTimeOffset.ToUnixTimeSeconds dependency on the caller).
+function Get-PaUnixTime {
+    param([datetime]$Utc = [datetime]::UtcNow)
+    if ($Utc.Kind -eq [DateTimeKind]::Unspecified) { $Utc = [datetime]::SpecifyKind($Utc, [DateTimeKind]::Utc) }
+    [long][Math]::Floor(($Utc.ToUniversalTime() - (New-Object datetime(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc))).TotalSeconds)
+}
+
+# Store a Graph access token as THE session token: claims decoded, expiry noted, renewal recipe kept. -Refresh is a
+# plain hashtable (no scriptblock closures -- those cannot see this file's functions): @{ Kind = 'AppOnly'; TenantId;
+# ClientId; Thumbprint } or @{ Kind = 'RefreshToken'; RefreshToken; Tenant; Scopes }. None = cannot be renewed (a token
+# passed with -AccessToken).
+function Set-PaGraphSession {
+    param(
+        [Parameter(Mandatory)][string]$AccessToken,
+        [ValidateSet('Interactive', 'AppOnly', 'ProvidedToken')][string]$AuthType = 'ProvidedToken',
+        [int]$ExpiresInSeconds = 0,
+        [hashtable]$Refresh
+    )
+    $script:PaGraphToken  = $AccessToken
+    $script:PaTokenClaims = ConvertFrom-PaJwtClaims $AccessToken
+    $script:PaAuthType    = $AuthType
+    $exp = $null
+    if ($script:PaTokenClaims -and $script:PaTokenClaims.PSObject.Properties['exp']) { $exp = (New-Object datetime(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)).AddSeconds([double]$script:PaTokenClaims.exp) }
+    elseif ($ExpiresInSeconds -gt 0) { $exp = [datetime]::UtcNow.AddSeconds($ExpiresInSeconds) }
+    $script:PaGraphTokenExpiresUtc = $exp
+    $script:PaGraphTokenRefresh    = $Refresh
+}
+
+# Renew the session token from its recipe (called by Get-PaGraphAccessToken when the token is about to expire).
+function Update-PaGraphSession {
+    $r = $script:PaGraphTokenRefresh
+    if (-not $r) { return }
+    switch ($r.Kind) {
+        'AppOnly' {
+            $tok = Get-PaAppOnlyToken -TenantId $r.TenantId -ClientId $r.ClientId -CertificateThumbprint $r.Thumbprint
+            Set-PaGraphSession -AccessToken "$($tok.access_token)" -AuthType AppOnly -ExpiresInSeconds ([int]"0$($tok.expires_in)") -Refresh $r
+        }
+        'RefreshToken' {
+            $tok = Get-PaRefreshedToken -RefreshToken $r.RefreshToken -Tenant $r.Tenant -Scopes $r.Scopes
+            if ($tok.refresh_token) { $r.RefreshToken = "$($tok.refresh_token)" }
+            Set-PaGraphSession -AccessToken "$($tok.access_token)" -AuthType Interactive -ExpiresInSeconds ([int]"0$($tok.expires_in)") -Refresh $r
+        }
+    }
+}
+
+# PKCE verifier + S256 challenge (RFC 7636).
+function New-PaPkcePair {
     $bytes = New-Object byte[] 32
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-    $verifier  = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-    $sha       = [System.Security.Cryptography.SHA256]::Create()
-    $challenge = [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($verifier))).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-    $state     = [guid]::NewGuid().ToString('N')
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $verifier = ConvertTo-PaB64Url $bytes
+    $challenge = ConvertTo-PaB64Url ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::ASCII.GetBytes($verifier)))
+    [pscustomobject]@{ Verifier = $verifier; Challenge = $challenge }
+}
 
-    # Loopback listener on an OS-assigned free port. First-party public
-    # clients accept any localhost port on the redirect URI.
+# The Graph delegated scope string: bare names are qualified with the Graph resource, OIDC basics appended once.
+function Get-PaDelegatedScopeString {
+    param([Parameter(Mandatory)][string[]]$Scopes)
+    $q = @($Scopes | Where-Object { $_ } | ForEach-Object {
+        if ($_ -match '^(https?://|openid$|profile$|offline_access$|email$)') { $_ } else { "https://graph.microsoft.com/$_" }
+    })
+    (@($q) + @('openid', 'profile', 'offline_access') | Select-Object -Unique) -join ' '
+}
+
+# The authorize URL for the loopback auth-code + PKCE flow (pure, unit-tested).
+function New-PaAuthorizeUrl {
+    param(
+        [Parameter(Mandatory)][string]$Tenant,
+        [Parameter(Mandatory)][string]$ClientId,
+        [Parameter(Mandatory)][string]$RedirectUri,
+        [Parameter(Mandatory)][string]$Scope,
+        [Parameter(Mandatory)][string]$State,
+        [Parameter(Mandatory)][string]$CodeChallenge
+    )
+    "https://login.microsoftonline.com/$Tenant/oauth2/v2.0/authorize" +
+        "?client_id=$ClientId&response_type=code&response_mode=query" +
+        "&redirect_uri=$([uri]::EscapeDataString($RedirectUri))" +
+        "&scope=$([uri]::EscapeDataString($Scope))&state=$State" +
+        "&code_challenge=$CodeChallenge&code_challenge_method=S256&prompt=select_account"
+}
+
+# msedge.exe, or $null.
+function Get-PaEdgePath {
+    @(
+        $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe' }),
+        $(if ($env:ProgramFiles) { Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe' }),
+        $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\Application\msedge.exe' })
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+}
+
+# Microsoft Graph Command Line Tools (first-party public client; the same app the Graph PowerShell SDK signs in with).
+function Get-PaGraphCliClientId { '14d82eec-204b-4c2f-b7e8-296a70dab67e' }
+
+# Interactive browser sign-in: auth code + PKCE on a loopback TcpListener (no HttpListener URL-ACL, works non-elevated),
+# Edge launched explicitly (default browser when Edge is missing or -UseEdge:$false). Returns the token response.
+function Get-PaInteractiveToken {
+    param(
+        [Parameter(Mandatory)][string[]]$Scopes,
+        [string]$Tenant = 'organizations',
+        [bool]$UseEdge = $true
+    )
+    $clientId = Get-PaGraphCliClientId
+    $pkce  = New-PaPkcePair
+    $state = [guid]::NewGuid().ToString('N')
+    $scope = Get-PaDelegatedScopeString -Scopes $Scopes
+
+    # OS-assigned free port; first-party public clients accept any localhost port on the redirect URI.
     $tcp = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
     $tcp.Start()
-    $port     = ([System.Net.IPEndPoint]$tcp.LocalEndpoint).Port
-    $redirect = "http://localhost:$port/"
-
-    $scopeStr = [uri]::EscapeDataString(((@($Scopes) + 'openid', 'profile', 'offline_access') -join ' '))
-    $authUrl  = "https://login.microsoftonline.com/$Tenant/oauth2/v2.0/authorize" +
-                "?client_id=$clientId&response_type=code&response_mode=query" +
-                "&redirect_uri=$([uri]::EscapeDataString($redirect))" +
-                "&scope=$scopeStr&state=$state" +
-                "&code_challenge=$challenge&code_challenge_method=S256&prompt=select_account"
-
-    Write-Host "Launching Edge for sign-in (loopback listener on $redirect)..." -ForegroundColor Yellow
-    Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl)
+    $redirect = "http://localhost:$(([System.Net.IPEndPoint]$tcp.LocalEndpoint).Port)/"
+    $authUrl  = New-PaAuthorizeUrl -Tenant $Tenant -ClientId $clientId -RedirectUri $redirect -Scope $scope -State $state -CodeChallenge $pkce.Challenge
 
     $query = $null
     try {
+        $edge = if ($UseEdge) { Get-PaEdgePath } else { $null }
+        if ($edge) {
+            Write-Host "Launching Edge for sign-in (loopback listener on $redirect)..." -ForegroundColor Yellow
+            Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl)
+        } else {
+            if ($UseEdge) { Write-Host 'Microsoft Edge not found -- using the default browser.' -ForegroundColor DarkYellow }
+            Write-Host "Opening the default browser for sign-in (loopback listener on $redirect)..." -ForegroundColor Yellow
+            Start-Process $authUrl
+        }
+        Write-Host "If no browser opened, open this URL yourself:`n  $authUrl" -ForegroundColor DarkGray
         $deadline = (Get-Date).AddMinutes(5)
         while (-not $query) {
-            if ((Get-Date) -gt $deadline) { throw 'Timed out (5 min) waiting for the sign-in redirect from Edge.' }
+            if ((Get-Date) -gt $deadline) { throw 'Timed out (5 min) waiting for the sign-in redirect from the browser.' }
             if (-not $tcp.Pending()) { Start-Sleep -Milliseconds 200; continue }
             $client = $tcp.AcceptTcpClient()
             try {
                 $stream      = $client.GetStream()
-                $reader      = New-Object System.IO.StreamReader($stream)
-                $requestLine = $reader.ReadLine()
+                $requestLine = (New-Object System.IO.StreamReader($stream)).ReadLine()
                 $html   = '<html><body style="font-family:sans-serif"><h3>Sign-in complete.</h3>You can close this tab and return to PowerShell.</body></html>'
                 $writer = New-Object System.IO.StreamWriter($stream)
                 $writer.Write("HTTP/1.1 200 OK`r`nContent-Type: text/html`r`nContent-Length: $($html.Length)`r`nConnection: close`r`n`r`n$html")
                 $writer.Flush()
-                if ($requestLine -match '^GET /\?(\S+) HTTP') { $query = $Matches[1] }
+                if ($requestLine -match '^GET /\?(\S+) HTTP') { $query = $Matches[1] }   # favicon & co. are answered and ignored
             } finally { $client.Close() }
         }
     } finally { $tcp.Stop() }
@@ -146,56 +227,125 @@ function Connect-MgGraphViaEdge {
         $k, $v = $pair -split '=', 2
         $kv[$k] = if ($null -ne $v) { [uri]::UnescapeDataString(($v -replace '\+', ' ')) } else { '' }
     }
-    if ($kv['error'])             { throw "Sign-in failed: $($kv['error']) -- $($kv['error_description'])" }
-    if ($kv['state'] -ne $state)  { throw 'State mismatch on the loopback redirect -- the response did not come from this sign-in attempt. Close ALL browser windows and retry.' }
-    if (-not $kv['code'])         { throw 'Sign-in redirect carried no authorization code.' }
+    if ($kv['error'])            { throw "Sign-in failed: $($kv['error']) -- $($kv['error_description'])" }
+    if ($kv['state'] -ne $state) { throw 'State mismatch on the loopback redirect -- the response did not come from this sign-in attempt. Close ALL browser windows and retry.' }
+    if (-not $kv['code'])        { throw 'Sign-in redirect carried no authorization code.' }
 
-    $tok = Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$Tenant/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{
+    Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$Tenant/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{
         client_id     = $clientId
         grant_type    = 'authorization_code'
         code          = $kv['code']
         redirect_uri  = $redirect
-        code_verifier = $verifier
-        scope         = (@($Scopes) -join ' ')
+        code_verifier = $pkce.Verifier
+        scope         = $scope
     }
-
-    # Stash the token's claims: the wids claim lists the user's ACTIVE
-    # directory roles at issuance, readable without any directory-read scope
-    # (unlike /me/memberOf, which silently hides roles from lean tokens).
-    # Used by Assert-PaSessionRole for the activate-role-then-reconnect dance.
-    $script:PaTokenClaims = $null
-    try {
-        $payload = ($tok.access_token -split '\.')[1].Replace('-', '+').Replace('_', '/')
-        switch ($payload.Length % 4) { 2 { $payload += '==' } 3 { $payload += '=' } }
-        $script:PaTokenClaims = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json
-    } catch { }
-
-    Connect-MgGraph -AccessToken (ConvertTo-SecureString $tok.access_token -AsPlainText -Force) -NoWelcome -ErrorAction Stop | Out-Null
-    Write-Host 'Connected via Edge sign-in (token valid ~1 hour).' -ForegroundColor Green
 }
 
-# Active directory role template ids from the CURRENT session token's wids
-# claim. Only known for sessions established by Connect-MgGraphViaEdge;
-# returns $null (= unknown, not "no roles") for MSAL / operator-provided
-# token sessions.
+# Renew a delegated token with its refresh token (same public client, same scopes).
+function Get-PaRefreshedToken {
+    param([Parameter(Mandatory)][string]$RefreshToken, [Parameter(Mandatory)][string]$Tenant, [Parameter(Mandatory)][string[]]$Scopes)
+    Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$Tenant/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{
+        client_id     = (Get-PaGraphCliClientId)
+        grant_type    = 'refresh_token'
+        refresh_token = $RefreshToken
+        scope         = (Get-PaDelegatedScopeString -Scopes $Scopes)
+    }
+}
+
+# The certificate (with its private key) by thumbprint: CurrentUser\My first, then LocalMachine\My.
+function Get-PaCertificate {
+    param([Parameter(Mandatory)][string]$Thumbprint)
+    $tp = ($Thumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+    foreach ($loc in 'CurrentUser', 'LocalMachine') {
+        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', $loc)
+        try {
+            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+            $hit = @($store.Certificates.Find([System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $tp, $false)) | Select-Object -First 1
+        } finally { $store.Close() }
+        if ($hit) {
+            if (-not $hit.HasPrivateKey) { throw "Certificate $tp found in Cert:\$loc\My but without its private key -- app-only sign-in needs the key." }
+            return $hit
+        }
+    }
+    throw "Certificate $tp not found in Cert:\CurrentUser\My or Cert:\LocalMachine\My."
+}
+
+# RS256 signature over $Data with the certificate's private key. Old CSP-stored keys (PROV_RSA_FULL) cannot hash SHA-256;
+# for those the same key container is reopened under the enhanced (AES) provider, the classic 5.1 workaround.
+function Invoke-PaRsaSha256Sign {
+    param([Parameter(Mandatory)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate, [Parameter(Mandatory)][byte[]]$Data)
+    $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+    if (-not $rsa) { throw "Certificate $($Certificate.Thumbprint) has no RSA private key." }
+    try {
+        return $rsa.SignData($Data, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    } catch {
+        if ($rsa -isnot [System.Security.Cryptography.RSACryptoServiceProvider]) { throw }
+        $info = $rsa.CspKeyContainerInfo
+        $cp = New-Object System.Security.Cryptography.CspParameters(24, 'Microsoft Enhanced RSA and AES Cryptographic Provider', $info.KeyContainerName)
+        $cp.KeyNumber = [int]$info.KeyNumber
+        $cp.Flags = [System.Security.Cryptography.CspProviderFlags]::UseExistingKey
+        if ($info.MachineKeyStore) { $cp.Flags = $cp.Flags -bor [System.Security.Cryptography.CspProviderFlags]::UseMachineKeyStore }
+        $csp = New-Object System.Security.Cryptography.RSACryptoServiceProvider($cp)
+        try { return $csp.SignData($Data, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1) } finally { $csp.Dispose() }
+    }
+}
+
+# The client assertion for client_credentials (RFC 7523): header {alg RS256, typ JWT, x5t = base64url(SHA-1 cert hash)},
+# claims {aud = the v2 token endpoint, iss = sub = client id, jti, nbf, exp (10 min)}. Pure apart from the signature.
+function New-PaClientAssertion {
+    param(
+        [Parameter(Mandatory)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
+        [Parameter(Mandatory)][string]$ClientId,
+        [Parameter(Mandatory)][string]$TenantId,
+        [datetime]$NowUtc = [datetime]::UtcNow,
+        [int]$LifetimeSeconds = 600
+    )
+    $now = Get-PaUnixTime -Utc $NowUtc
+    $header = [ordered]@{ alg = 'RS256'; typ = 'JWT'; x5t = (ConvertTo-PaB64Url $Certificate.GetCertHash()) }
+    $claims = [ordered]@{
+        aud = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
+        iss = $ClientId
+        sub = $ClientId
+        jti = [guid]::NewGuid().ToString()
+        nbf = $now
+        exp = $now + $LifetimeSeconds
+    }
+    $enc = [Text.Encoding]::UTF8
+    $unsigned = (ConvertTo-PaB64Url $enc.GetBytes(($header | ConvertTo-Json -Compress))) + '.' + (ConvertTo-PaB64Url $enc.GetBytes(($claims | ConvertTo-Json -Compress)))
+    $sig = Invoke-PaRsaSha256Sign -Certificate $Certificate -Data $enc.GetBytes($unsigned)
+    $unsigned + '.' + (ConvertTo-PaB64Url $sig)
+}
+
+# App-only Graph token: client_credentials with the certificate assertion. Returns the token response.
+function Get-PaAppOnlyToken {
+    param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$ClientId, [Parameter(Mandatory)][string]$CertificateThumbprint)
+    $cert = Get-PaCertificate -Thumbprint $CertificateThumbprint
+    Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{
+        client_id             = $ClientId
+        grant_type            = 'client_credentials'
+        scope                 = 'https://graph.microsoft.com/.default'
+        client_assertion_type = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
+        client_assertion      = (New-PaClientAssertion -Certificate $cert -ClientId $ClientId -TenantId $TenantId)
+    }
+}
+
+# Active directory role template ids from the session token's wids claim (the user's ACTIVE roles at issuance, readable
+# without any directory-read scope -- unlike /me/memberOf, which hides roles from lean tokens). $null = unknown (no
+# token, or no wids claim), not "no roles".
 function Get-PaTokenRoleIds {
     if ($script:PaTokenClaims -and $script:PaTokenClaims.PSObject.Properties['wids']) { return @($script:PaTokenClaims.wids) }
     $null
 }
 
-# Ensure the session token carries at least one of the given directory role
-# template ids. Typical failure: the operator activated the PIM role AFTER
-# signing in, so the token predates the activation -- in that case disconnect
-# and re-run the supplied connect scriptblock ONCE to mint a fresh token,
-# then re-check. -SoftFail warns and continues instead of throwing (for
-# targets like Intune where a scoped, non-directory RBAC assignment can
-# authorize the writes without ever appearing in wids). No-op when the
-# session's roles cannot be determined.
+# Ensure the session token carries at least one of the given directory role template ids. Typical failure: the operator
+# activated the PIM role AFTER signing in, so the token predates the activation -- then run -Reconnect ONCE to mint a
+# fresh token, and re-check. Without -Reconnect (a token passed in, which cannot be renewed here) it stops with the
+# fix. -SoftFail warns and continues instead of throwing. No-op when the session's roles cannot be determined.
 function Assert-PaSessionRole {
     param(
         [Parameter(Mandatory)][string[]]$AnyOfRoleIds,
         [Parameter(Mandatory)][string]$RoleDescription,
-        [Parameter(Mandatory)][scriptblock]$Reconnect,
+        [scriptblock]$Reconnect,
         [switch]$SoftFail
     )
     $wids = Get-PaTokenRoleIds
@@ -203,8 +353,11 @@ function Assert-PaSessionRole {
     if (@($wids | Where-Object { $_ -in $AnyOfRoleIds }).Count -gt 0) { return }
 
     Write-Host "Session token does not carry $RoleDescription." -ForegroundColor Yellow
-    Write-Host 'If you activated it in PIM after signing in, the token predates the activation -- re-authenticating to pick it up...' -ForegroundColor Yellow
-    Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+    if (-not $Reconnect) {
+        if ($SoftFail) { Write-Host 'Continuing anyway (expect a 403 if the role is really missing).' -ForegroundColor DarkYellow; return }
+        throw "The access token does not carry $RoleDescription. Activate the role in PIM, mint a NEW token after the activation, and run this script again."
+    }
+    Write-Host 'If you activated it in PIM after signing in, the token predates the activation -- signing in again to pick it up...' -ForegroundColor Yellow
     & $Reconnect
 
     $wids = Get-PaTokenRoleIds
@@ -216,98 +369,87 @@ function Assert-PaSessionRole {
     throw "Even after a fresh sign-in, the session does not carry $RoleDescription. Activate it in PIM, wait for the activation to complete, then re-run this script."
 }
 
-# One-stop connect: discard cached MSAL contexts in Edge mode (they re-auth
-# through the SYSTEM DEFAULT browser -- field case: IE and Edge opened side
-# by side, the IE attempt died on state-mismatch), connect via Edge or MSAL,
-# verify scopes (skipped for provided tokens -- introspection is unreliable
-# and reconnecting would discard the token), enforce -TenantId, then probe
-# with a cheap /me call so a context that can no longer mint tokens is
-# reconnected cleanly instead of exploding mid-run. Returns the context.
+# One-stop sign-in. Establishes the session token (Set-PaGraphSession) and returns a context object:
+#   TenantId, Account, ClientId, AuthType (Interactive | AppOnly | ProvidedToken), Scopes (delegated scp), Roles (app roles).
+#   * -AccessToken           : use that token as is (no renewal; scope check reported, not enforced).
+#   * -AppId + -CertificateThumbprint (+ -TenantId) : app-only; the app needs the equivalent APPLICATION permissions
+#                              (Application.ReadWrite.All; DelegatedPermissionGrant.ReadWrite.All for consent grants).
+#   * otherwise              : interactive browser sign-in (Edge unless -UseEdge:$false).
+# Then a cheap probe (/me, or one application for app-only) proves the token works before any write.
 function Connect-PimActivatorGraph {
     param(
         [Parameter(Mandatory)][string[]]$RequiredScopes,
         [string]$TenantId,
         [bool]$UseEdge = $true,
-        # App-only (certificate) sign-in for headless/automation runs. When both
-        # are supplied the function connects app-only and skips the interactive
-        # machinery (Edge, delegated-scope verification, /me probe). The app
-        # must hold the equivalent APPLICATION permissions (Application.ReadWrite.All
-        # for app-reg CRUD; DelegatedPermissionGrant.ReadWrite.All for -GrantConsent).
         [string]$AppId,
-        [string]$CertificateThumbprint
+        [string]$CertificateThumbprint,
+        [string]$AccessToken
     )
+    $isGuid = { param($s) $s -match '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$' }
 
-    if ($AppId -and $CertificateThumbprint) {
-        if (-not $TenantId) { throw "App-only sign-in requires -TenantId." }
-        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
-        Connect-MgGraph -ClientId $AppId -TenantId $TenantId -CertificateThumbprint $CertificateThumbprint -NoWelcome -ErrorAction Stop | Out-Null
-        $ctx = Get-MgContext -ErrorAction Stop
-        # App-only probe (no /me in app context): read one application object.
-        try { Invoke-MgGraphRequest -Method GET -Uri 'v1.0/applications?$top=1&$select=id' | Out-Null }
-        catch { throw "App-only Graph connect succeeded but a test read failed: $($_.Exception.Message)" }
-        Write-Host "Connected app-only as $($ctx.AppName) ($($ctx.ClientId)) in tenant $($ctx.TenantId)." -ForegroundColor Green
+    if ($AccessToken) {
+        Set-PaGraphSession -AccessToken $AccessToken -AuthType ProvidedToken
+        Write-Host 'Using the access token passed with -AccessToken (no renewal -- valid ~1 hour from when it was minted).' -ForegroundColor Cyan
+    } elseif ($AppId -and $CertificateThumbprint) {
+        if (-not $TenantId) { throw 'App-only sign-in requires -TenantId.' }
+        $recipe = @{ Kind = 'AppOnly'; TenantId = $TenantId; ClientId = $AppId; Thumbprint = $CertificateThumbprint }
+        try { $tok = Get-PaAppOnlyToken -TenantId $TenantId -ClientId $AppId -CertificateThumbprint $CertificateThumbprint }
+        catch { throw "App-only token request failed (app $AppId, certificate $CertificateThumbprint, tenant $TenantId): $($_.Exception.Message)" }
+        Set-PaGraphSession -AccessToken "$($tok.access_token)" -AuthType AppOnly -ExpiresInSeconds ([int]"0$($tok.expires_in)") -Refresh $recipe
+    } else {
+        $tenant = if ($TenantId) { $TenantId } else { 'organizations' }
+        Write-Host "Signing in to Microsoft Graph in the browser (scopes: $($RequiredScopes -join ', '))..." -ForegroundColor Yellow
+        try { $tok = Get-PaInteractiveToken -Scopes $RequiredScopes -Tenant $tenant -UseEdge $UseEdge }
+        catch { throw ("Sign-in failed: $($_.Exception.Message)`n$(Get-PaBrokenAuthHelp)") }
+        $refresh = $null
+        if ($tok.refresh_token) { $refresh = @{ Kind = 'RefreshToken'; RefreshToken = "$($tok.refresh_token)"; Tenant = $tenant; Scopes = $RequiredScopes } }
+        Set-PaGraphSession -AccessToken "$($tok.access_token)" -AuthType Interactive -ExpiresInSeconds ([int]"0$($tok.expires_in)") -Refresh $refresh
+        Write-Host 'Signed in (token valid ~1 hour, renewed automatically).' -ForegroundColor Green
+    }
+
+    $c = $script:PaTokenClaims
+    $ctx = [pscustomobject]@{
+        TenantId = $(if ($c -and $c.PSObject.Properties['tid']) { "$($c.tid)" } elseif (& $isGuid $TenantId) { $TenantId } else { $null })
+        Account  = $(if ($c) { foreach ($n in 'upn', 'preferred_username', 'unique_name', 'app_displayname') { if ($c.PSObject.Properties[$n] -and $c.$n) { "$($c.$n)"; break } } })
+        ClientId = $(if ($c -and $c.PSObject.Properties['appid']) { "$($c.appid)" } elseif ($c -and $c.PSObject.Properties['azp']) { "$($c.azp)" } else { $AppId })
+        AuthType = $script:PaAuthType
+        Scopes   = @($(if ($c -and $c.PSObject.Properties['scp']) { "$($c.scp)" -split ' ' | Where-Object { $_ } }))
+        Roles    = @($(if ($c -and $c.PSObject.Properties['roles']) { $c.roles }))
+    }
+
+    if ($TenantId -and (& $isGuid $TenantId) -and $ctx.TenantId -and $ctx.TenantId -ne $TenantId) {
+        throw "Signed in to tenant $($ctx.TenantId) but -TenantId says $TenantId. Sign in to the correct tenant (or fix -TenantId)."
+    }
+
+    if ($ctx.AuthType -eq 'AppOnly') {
+        try { Invoke-PaGraph -Method GET -Path '/applications?$top=1&$select=id' | Out-Null }
+        catch { throw "App-only token minted but a test read failed: $($_.Exception.Message)" }
+        Write-Host "Connected app-only as appId $($ctx.ClientId) in tenant $($ctx.TenantId)." -ForegroundColor Green
         return $ctx
     }
 
-    $connectArgs = @{ Scopes = $RequiredScopes; NoWelcome = $true; ErrorAction = 'Stop' }
-    if ($TenantId) { $connectArgs['TenantId'] = $TenantId }
-
-    function Connect-Once {
-        if ($UseEdge) {
-            Connect-MgGraphViaEdge -Scopes $RequiredScopes -Tenant $(if ($TenantId) { $TenantId } else { 'organizations' })
-        } else {
-            Connect-MgGraph @connectArgs | Out-Null
-        }
+    if ($ctx.AuthType -eq 'ProvidedToken' -and $ctx.Roles.Count -gt 0 -and $ctx.Scopes.Count -eq 0) {
+        Write-Host 'The -AccessToken is an app-only token: skipping the delegated scope check.' -ForegroundColor DarkYellow
+        try { Invoke-PaGraph -Method GET -Path '/applications?$top=1&$select=id' | Out-Null }
+        catch { throw "The -AccessToken was rejected: $($_.Exception.Message)" }
+        return $ctx
     }
 
-    $ctx = Get-MgContext -ErrorAction SilentlyContinue
-    if ($UseEdge -and $ctx -and $ctx.TokenCredentialType -ne 'UserProvidedAccessToken') {
-        Write-Host 'Discarding cached MSAL Graph session (it would re-auth via the system default browser)...' -ForegroundColor Yellow
-        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
-        $ctx = $null
-    }
-    if (-not $ctx) {
-        Write-Host "Not connected to Microsoft Graph. Launching sign-in (scopes: $($RequiredScopes -join ', '))..." -ForegroundColor Yellow
-        Connect-Once
-        $ctx = Get-MgContext -ErrorAction Stop
-    }
-
-    $missingScopes = $RequiredScopes | Where-Object { $_ -notin $ctx.Scopes }
-    if ($missingScopes -and $ctx.TokenCredentialType -eq 'UserProvidedAccessToken') {
-        if (-not $UseEdge) {
-            Write-Host "Session uses a user-provided access token -- skipping scope verification (required: $($RequiredScopes -join ', '))." -ForegroundColor DarkYellow
-        }
-        $missingScopes = $null
-    }
-    if ($missingScopes) {
-        Write-Host "Current Graph session is missing required scopes: $($missingScopes -join ', '). Re-connecting..." -ForegroundColor Yellow
-        Connect-Once
-        $ctx = Get-MgContext -ErrorAction Stop
-        $stillMissing = $RequiredScopes | Where-Object { $_ -notin $ctx.Scopes }
-        if ($stillMissing -and $ctx.TokenCredentialType -ne 'UserProvidedAccessToken') {
-            throw "After re-connect, Graph session is STILL missing: $($stillMissing -join ', '). Admin consent may be required."
-        }
-    }
-
-    if ($TenantId -and $TenantId -ne $ctx.TenantId) {
-        throw "Connected to tenant $($ctx.TenantId) but -TenantId says $TenantId. Reconnect with the correct -TenantId."
+    $missing = @($RequiredScopes | Where-Object { $_ -notin $ctx.Scopes })
+    if ($missing.Count -gt 0 -and $ctx.Scopes.Count -gt 0) {
+        $msg = "The token is missing required delegated scopes: $($missing -join ', ')."
+        if ($ctx.AuthType -eq 'Interactive') { throw "$msg Consent to them for 'Microsoft Graph Command Line Tools' (an administrator may have to grant it) and run again." }
+        Write-Host "$msg Continuing -- calls that need them will fail with 403." -ForegroundColor DarkYellow
     }
 
     try {
-        Invoke-MgGraphRequest -Method GET -Uri 'v1.0/me?$select=id' | Out-Null
+        $me = Invoke-PaGraph -Method GET -Path '/me?$select=id,userPrincipalName'
+        if (-not $ctx.Account -and $me) { $ctx.Account = "$($me.userPrincipalName)" }
     } catch {
-        if ($ctx.TokenCredentialType -eq 'UserProvidedAccessToken' -and -not $UseEdge) {
-            throw ("The pre-connected access token was rejected: $($_.Exception.Message)`nProvided tokens expire after ~1 hour -- mint a fresh one and Connect-MgGraph -AccessToken again.")
+        if ($ctx.AuthType -eq 'ProvidedToken') {
+            throw ("The -AccessToken was rejected: $($_.Exception.Message)`nTokens expire after ~1 hour -- mint a fresh one.")
         }
-        Write-Host 'Cached Graph session can no longer mint tokens -- reconnecting fresh...' -ForegroundColor Yellow
-        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
-        try {
-            Connect-Once
-            $ctx = Get-MgContext -ErrorAction Stop
-            Invoke-MgGraphRequest -Method GET -Uri 'v1.0/me?$select=id' | Out-Null
-        } catch {
-            throw ("Re-connect failed: $($_.Exception.Message)`n$(Get-PaBrokenAuthHelp)")
-        }
+        throw ("Signed in, but Microsoft Graph rejected the token: $($_.Exception.Message)`n$(Get-PaBrokenAuthHelp)")
     }
     $ctx
 }

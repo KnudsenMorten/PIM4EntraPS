@@ -8554,6 +8554,32 @@ function Handle-Request {
     $path = $req.Url.AbsolutePath
     $method = $req.HttpMethod
 
+    # 97.2 (operator 2026-10-07: "there is no create buttons to create the things"; decision: the CLICKING ADMIN signs in):
+    # the redirect target of the page's own Microsoft sign-in (auth code + PKCE, a popup). It holds nothing: it hands the
+    # code back to the page that opened it (same origin only) and closes. The page redeems the code itself (SPA platform
+    # redirect on the Manager's sign-in app, Set-PimManagerEasyAuth.ps1), so the Manager never sees the admin's token.
+    if ($path -eq '/activator-signin' -and $method -eq 'GET') {
+        Write-HtmlResponse -Response $resp -Html @'
+<!doctype html><html><head><meta charset="utf-8"><title>Signed in</title></head><body style="font-family:Segoe UI,sans-serif;padding:24px;">
+<p id="m">Finishing the sign-in&hellip;</p>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search), h = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+  var get = function (k) { return q.get(k) || h.get(k) || ''; };
+  var msg = { type: 'pim-activator-signin', code: get('code'), state: get('state'), error: get('error'), error_description: get('error_description') };
+  var sent = false;
+  try { if (window.opener && !window.opener.closed) { window.opener.postMessage(msg, location.origin); sent = true; } } catch (e) { }
+  // The Microsoft sign-in page may cut window.opener; a same-origin channel reaches the page that started it anyway.
+  try { var bc = new BroadcastChannel('pim-activator-signin'); bc.postMessage(msg); sent = true; setTimeout(function () { bc.close(); }, 1000); } catch (e) { }
+  history.replaceState(null, '', location.pathname);
+  if (sent) { document.getElementById('m').textContent = msg.error ? ('Sign-in failed: ' + msg.error + ' ' + msg.error_description) : 'Signed in. You can close this window.'; setTimeout(function () { window.close(); }, 400); return; }
+  document.getElementById('m').textContent = msg.error ? ('Sign-in failed: ' + msg.error + ' ' + msg.error_description) : 'Signed in, but the PIM Manager page that started it is gone. Close this window and try again.';
+})();
+</script></body></html>
+'@
+        return 200
+    }
+
     # GET / -- serve the SPA. The token is embedded in a <meta> tag so the
     # JS can read it without exposing it on the URL after the first hop.
     if ($path -eq '/' -and $method -eq 'GET') {
@@ -11164,11 +11190,52 @@ function Handle-Request {
                 $tst.found = $true; $tst.appId = $prd.appId; $tst.redirectOk = $true; $tst.sharedWith = $prd.name
             }
             foreach ($k in @($apps.Keys)) { $apps[$k].Remove('uris') }
+            # What each channel publishes right now (its update manifest) -- the page's default "minimum version required".
+            # Cached 30 min; a failed read just leaves it empty (the page then shows the builder's floor).
+            $published = [ordered]@{ Released = ''; Test = '' }
+            foreach ($c in 'Released', 'Test') {
+                $ch = Get-PimActivatorChannel -Channel $c
+                $ck = "activatorPublished:$c"
+                if (-not $script:PimActivatorPublishedCache) { $script:PimActivatorPublishedCache = @{} }
+                $hit = $script:PimActivatorPublishedCache[$ck]
+                if ($hit -and ((Get-Date) - $hit.at).TotalMinutes -lt 30) { $published[$c] = $hit.v; continue }
+                try {
+                    $xml = (Invoke-WebRequest -Uri $ch.updateUrl -UseBasicParsing -TimeoutSec 8).Content
+                    if ($xml -is [byte[]]) { $xml = [Text.Encoding]::UTF8.GetString($xml) }
+                    $published[$c] = Get-PimActivatorPublishedVersion -UpdateXml "$xml" -ExtensionId $ch.id
+                    $script:PimActivatorPublishedCache[$ck] = @{ at = Get-Date; v = $published[$c] }
+                } catch { }
+            }
+            $exts = @(foreach ($c in 'Released', 'Test') { @{ channel = $c; minimumVersion = $(if ($published[$c]) { $published[$c] } else { $script:PimActivatorMinimumVersion }) } })
+            $signInClient = ''
+            if (Get-Command Get-PimActivatorSignInClient -ErrorAction SilentlyContinue) {
+                $signInClient = Get-PimActivatorSignInClient -IdToken "$($req.Headers['X-MS-TOKEN-AAD-ID-TOKEN'])" -AudienceSetting "$env:PIM_HOSTED_EASYAUTH_AUD"
+            }
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                 tenantId = $tid; environmentName = $envName; apps = $apps
-                edgeReleased = (Get-PimActivatorEdgePolicy -Channels @('Released')); edgeBoth = (Get-PimActivatorEdgePolicy -Channels @('Released', 'Test'))
+                edgeReleased = (Get-PimActivatorEdgePolicy -Extensions @($exts[0])); edgeBoth = (Get-PimActivatorEdgePolicy -Extensions $exts)
+                published = $published
+                # The page's own admin sign-in (create buttons): the Manager's sign-in app + this tenant. Empty client = the
+                # page falls back to the commands (a local Manager, or Easy Auth not in front).
+                signIn = [ordered]@{ clientId = $signInClient; tenantId = $tid; hosted = [bool]$script:PimHosted }
                 minimumVersion = $script:PimActivatorMinimumVersion })
             return 200
+        }
+        # 97.2: the Edge for Business policy for the per-extension choices on the page (the admin center's "Manage
+        # extension" fields). Text only -- the page's admin sign-in or the admin writes it.
+        if ($path -eq '/api/activator/edge-policy' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Get-PimActivatorEdgePolicy -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the PIM Activator builder is not loaded in this Manager' }; return 503 }
+            $b = Read-RequestJson -Request $req
+            try {
+                $ep = Get-PimActivatorEdgePolicy -Extensions @(@($b.extensions) | Where-Object { $_ })
+                if (-not @($ep.extensions).Count) { throw 'Pick at least one extension (PROD and / or TEST).' }
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; policy = $ep })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+                return 400
+            }
         }
         # 97.2: build the filled Remediation pair + the commands for the choices on the page. Generates text only -- nothing
         # is written to the tenant (the Manager stays read-only; an admin runs the commands / uploads the files).

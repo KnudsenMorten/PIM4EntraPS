@@ -1,8 +1,8 @@
 ﻿#Requires -Version 5.1
-# NOTE: no #Requires -Modules. The WRITE path is pure Graph REST via PIM-Rest
-# (REQUIREMENTS §19). App-only (cert) deployment is fully module-free; the
-# Microsoft.Graph SDK is only loaded on demand for the interactive break-glass
-# sign-in (see _PimActivatorAuth.ps1) or when $global:PIM_UseGraphSdk is set.
+# NO MODULES (owner 2026-10-07: "neither pim, si or invardia must have dependencies"): plain Microsoft Graph REST
+# (Invoke-RestMethod + .NET) in every mode -- browser sign-in, app-only certificate, or a token you pass. Windows
+# PowerShell 5.1 and PowerShell 7. Published standalone as https://invardia.com/support/pim/Deploy-PimActivatorBackend.ps1
+# (one file: tools/setup/Build-PimSupportScripts.ps1 inlines the two helpers below).
 <#
 .SYNOPSIS
     Create the Entra app registration that the PIM Activator Edge extension
@@ -52,12 +52,20 @@
         it, the popup renders "scoped to N Administrative Units" without
         names.)
 
+    Sign-in: no PowerShell modules are needed. By default the script opens
+    Microsoft Edge (the default browser when Edge is not installed) for an
+    interactive sign-in -- auth code + PKCE on a localhost loopback, using the
+    first-party "Microsoft Graph Command Line Tools" client, so no extra app
+    registration. Alternatives: -AccessToken <token> (a Microsoft Graph token
+    you already have) or app-only -AppId + -CertificateThumbprint + -TenantId.
+
     Caller (you) must have:
       - Graph scopes: Application.ReadWrite.All, AppRoleAssignment.ReadWrite.All,
                       DelegatedPermissionGrant.ReadWrite.All
       - Entra roles, ACTIVE in the session (PIM-eligible does NOT count until
-        activated -- activate in PIM FIRST, then Connect-MgGraph; a session
-        established before the activation will not carry the role):
+        activated -- activate in PIM FIRST, then run this script; a sign-in
+        made before the activation does not carry the role, and the script
+        signs you in once more when it sees that):
           * Application Administrator OR Cloud Application Administrator OR
             Global Administrator -- app registration + service principals
           * Privileged Role Administrator OR Global Administrator -- only when
@@ -80,19 +88,39 @@
     the caller to be Privileged Role Administrator or higher.
 
 .PARAMETER TenantId
-    Optional. If omitted, uses whatever Connect-MgGraph defaulted to (the
-    -TenantId you passed, or the home tenant of the signed-in account).
+    Optional for the browser sign-in (omitted = the home tenant of the account
+    you sign in with). Required for app-only sign-in.
+
+.PARAMETER AccessToken
+    A Microsoft Graph access token you already have (automation), with the
+    delegated scopes above (or the equivalent application permissions). Skips
+    the browser sign-in. Not renewed -- valid ~1 hour from when it was minted.
+
+.PARAMETER AppId
+    App-only sign-in: the client id of an app registration that holds
+    Application.ReadWrite.All (and DelegatedPermissionGrant.ReadWrite.All for
+    -GrantConsent) as APPLICATION permissions. Use with -CertificateThumbprint
+    and -TenantId.
+
+.PARAMETER CertificateThumbprint
+    App-only sign-in: thumbprint of that app's certificate, with its private
+    key, in Cert:\CurrentUser\My or Cert:\LocalMachine\My.
 
 .EXAMPLE
-    # Zero-arg -- script auto-runs Connect-MgGraph interactively if no
-    # context exists, with the right scopes:
+    # Zero-arg -- opens Edge for the sign-in, with the right scopes:
     .\Deploy-PimActivatorBackend.ps1
 
 .EXAMPLE
-    # Skip auto-connect by pre-connecting yourself (useful when scripting
-    # against a specific tenant):
-    Connect-MgGraph -TenantId <tenant-id> -Scopes 'Application.ReadWrite.All','AppRoleAssignment.ReadWrite.All','DelegatedPermissionGrant.ReadWrite.All'
-    .\Deploy-PimActivatorBackend.ps1 -ExtensionId 'abcd...wxyz' -GrantConsent
+    # A specific tenant:
+    .\Deploy-PimActivatorBackend.ps1 -TenantId <tenant-id> -ExtensionId 'abcd...wxyz' -GrantConsent
+
+.EXAMPLE
+    # Automation with a token you already have:
+    .\Deploy-PimActivatorBackend.ps1 -TenantId <tenant-id> -AccessToken $token
+
+.EXAMPLE
+    # Headless, app-only with a certificate:
+    .\Deploy-PimActivatorBackend.ps1 -TenantId <tenant-id> -AppId <app-id> -CertificateThumbprint <thumbprint>
 
 .NOTES
     Re-runnable: if an app with the same DisplayName already exists in the
@@ -129,71 +157,40 @@ param(
     # and a delegated approver will consent later via the Enterprise apps blade).
     [switch]$GrantConsent = $true,
 
-    # Default ON: run the interactive sign-in through Microsoft Edge
-    # explicitly instead of the system default browser. MSAL's interactive
-    # flow launches whatever the OS default handler is -- on servers that is
-    # often legacy Internet Explorer, which mangles the auth redirect and
-    # kills the flow with MSAL's 'state mismatch' error, re-prompting on
-    # every Graph call. Uses the same first-party 'Microsoft Graph Command
-    # Line Tools' app as Connect-MgGraph (auth-code + PKCE on a loopback
-    # listener), so no extra app registration or consent. Pass
-    # -UseEdge:$false to fall back to MSAL's default-browser flow.
+    # Default ON: open the browser sign-in in Microsoft Edge explicitly
+    # instead of the system default browser -- on servers that is often legacy
+    # Internet Explorer, which mangles the auth redirect. Falls back to the
+    # default browser when Edge is not installed. Pass -UseEdge:$false to use
+    # the default browser always.
     [switch]$UseEdge = $true,
 
     # App-only (certificate) sign-in for headless deployment. Supply both with
     # -TenantId; the app must hold Application.ReadWrite.All (app-reg CRUD) and,
     # for -GrantConsent, DelegatedPermissionGrant.ReadWrite.All. When used, the
-    # interactive Edge flow + delegated role pre-flight are skipped.
+    # browser sign-in + delegated role pre-flight are skipped.
     [string]$AppId,
-    [string]$CertificateThumbprint
+    [string]$CertificateThumbprint,
+
+    # A Microsoft Graph access token you already have (automation). Skips the
+    # browser sign-in; not renewed (valid ~1 hour from when it was minted).
+    [string]$AccessToken
 )
 
 $ErrorActionPreference = 'Stop'
-$script:PimActivatorAppOnly = [bool]($AppId -and $CertificateThumbprint)
+$script:PimActivatorAppOnly = [bool]($AppId -and $CertificateThumbprint -and -not $AccessToken)
+# Windows PowerShell 5.1 may default to TLS 1.0/1.1; Entra + Graph need 1.2.
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
 
-# Shared auth machinery: version banner, Graph SDK version-conflict check,
-# Edge-forced PKCE sign-in, session probe/heal. One implementation for all
-# pim-activator deploy scripts.
+# Shared sign-in (browser PKCE / app-only certificate / provided token) + the version banner.
 . (Join-Path $PSScriptRoot '_PimActivatorAuth.ps1')
-# REST-first write helpers (app reg / SPN / consent grant body builders +
-# Invoke-PaGraph routing). The backend's writes go through PIM-Rest by default.
+# Graph REST seam (Invoke-PaGraph) + the app reg / SP / consent-grant body builders.
 . (Join-Path $PSScriptRoot '_PimActivatorBackend.ps1')
 
-# Auth-mode -> Graph data-plane routing (REQUIREMENTS §19):
-#   * App-only (cert): point PIM-Rest at the SPN cert + tenant, run module-free.
-#   * Interactive: keep the SDK session pipeline (Invoke-PaGraph issues raw REST
-#     through it). $global:PIM_UseGraphSdk stays the explicit opt-in fallback.
-if ($script:PimActivatorAppOnly) {
-    $global:PIM_UseGraphSdk    = $false
-    $global:PIM_TenantId       = $TenantId
-    $global:PIM_ClientId       = $AppId
-    $global:PIM_CertThumbprint = $CertificateThumbprint
-    Import-PaRestPlane
-}
-else {
-    # INTERACTIVE sign-in: route every Graph write through the authenticated Graph SDK
-    # session that Connect-PimActivatorGraph establishes below. The module-free PIM-Rest
-    # data plane acquires its OWN token (MI / secret / cert / az) and CANNOT see the
-    # interactive Connect-MgGraph session — so without this the writes throw
-    # "could not acquire a token" on any machine that has neither az nor an SPN cert.
-    # (This realizes the documented intent: interactive == SDK session pipeline.)
-    $global:PIM_UseGraphSdk = $true
-    # Belt-and-suspenders: if any path still falls through to PIM-Rest, let it PROMPT the
-    # admin to sign in interactively (MSAL) rather than throwing. Headless/engine runs
-    # never set this, so unattended jobs still fail fast instead of hanging on a browser.
-    $global:PIM_InteractiveFallback = $true
-}
-
-# Banner: only assert/load the Graph SDK when we will actually use it (interactive
-# sign-in or the explicit SDK opt-in). App-only REST runs need no Graph modules.
-if ($script:PimActivatorAppOnly -and -not (Test-PaUseGraphSdk)) {
-    Show-PimActivatorBanner -ScriptName 'Deploy-PimActivatorBackend (REST / app-only)'
-} else {
-    Show-PimActivatorBanner -ScriptName 'Deploy-PimActivatorBackend' -GraphModules 'Microsoft.Graph.Authentication', 'Microsoft.Graph.Applications', 'Microsoft.Graph.Identity.SignIns'
-}
+$_mode = if ($AccessToken) { 'provided token' } elseif ($script:PimActivatorAppOnly) { 'app-only certificate' } else { 'browser sign-in' }
+Show-PimActivatorBanner -ScriptName "Deploy-PimActivatorBackend (REST, no modules; $_mode)"
 
 # ---------------------------------------------------------------------------
-# Connect (or verify) Microsoft Graph
+# Sign in to Microsoft Graph
 # ---------------------------------------------------------------------------
 
 $_requiredScopes = @(
@@ -202,19 +199,11 @@ $_requiredScopes = @(
     'DelegatedPermissionGrant.ReadWrite.All'
 )
 
-if ($script:PimActivatorAppOnly -and -not (Test-PaUseGraphSdk)) {
-    # Module-free app-only: PIM-Rest mints a cert-signed token; a cheap read
-    # proves the cert/SPN works before any write (parity with the SDK probe).
-    if (-not $TenantId) { throw "App-only sign-in requires -TenantId." }
-    try { Invoke-PaGraph -Method GET -Path '/applications?$top=1&$select=id' | Out-Null }
-    catch { throw "App-only Graph connect (REST) succeeded at token mint but a test read failed: $($_.Exception.Message)" }
-    Write-Host "Connected app-only (REST, no Graph SDK) as appId $AppId in tenant $TenantId." -ForegroundColor Green
-} else {
-    $ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -TenantId $TenantId -UseEdge:([bool]$UseEdge) -AppId $AppId -CertificateThumbprint $CertificateThumbprint
-    $TenantId = $ctx.TenantId
-    Write-Host "Tenant   : $TenantId"  -ForegroundColor Cyan
-    Write-Host "Signed-in: $($ctx.Account)" -ForegroundColor Cyan
-}
+if ($script:PimActivatorAppOnly -and -not $TenantId) { throw "App-only sign-in requires -TenantId." }
+$ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -TenantId $TenantId -UseEdge:([bool]$UseEdge) -AppId $AppId -CertificateThumbprint $CertificateThumbprint -AccessToken $AccessToken
+if ($ctx.TenantId) { $TenantId = $ctx.TenantId }
+Write-Host "Tenant   : $TenantId"  -ForegroundColor Cyan
+Write-Host "Signed-in: $(if ($ctx.Account) { $ctx.Account } else { $ctx.ClientId })" -ForegroundColor Cyan
 Write-Host ""
 
 # ---------------------------------------------------------------------------
@@ -224,7 +213,7 @@ Write-Host ""
 # PIM-eligible roles do NOT count until activated, and a Graph session
 # established BEFORE the activation may not reflect it. Check up front so the
 # operator gets one clear message instead of a confusing mid-run 403 (or the
-# SDK's silent-empty-result variant of one).
+# silent-empty-result variant of one).
 function Assert-ActiveEntraRoles {
     param([bool]$NeedsConsentRole)
 
@@ -235,11 +224,11 @@ function Assert-ActiveEntraRoles {
         PrivRoleAdmin = 'e8611ab8-c189-46e8-94e1-60213ab1f814'
     }
     try {
-        $resp = Invoke-MgGraphRequest -Method GET -Uri 'v1.0/me/memberOf/microsoft.graph.directoryRole?$select=displayName,roleTemplateId'
+        $active = @(Invoke-PaGraph -Method GET -Path '/me/memberOf/microsoft.graph.directoryRole?$select=displayName,roleTemplateId' -All)
     } catch {
         # Auth failures are NOT a skippable pre-flight problem -- every later
         # Graph call will hit the same wall. Stop with reconnect guidance.
-        if ("$_" -match 'authentication failed|msal-statemismatcherror|invalid_grant|AADSTS') {
+        if ("$_" -match 'authentication failed|InvalidAuthenticationToken|HTTP 401|invalid_grant|AADSTS') {
             throw ("Graph authentication failed: $($_.Exception.Message)`n$(Get-PaBrokenAuthHelp)")
         }
         # Best-effort otherwise: reading own role memberships can be blocked by
@@ -247,7 +236,6 @@ function Assert-ActiveEntraRoles {
         Write-Host "Pre-flight: could not read your active directory roles -- continuing without the check. ($($_.Exception.Message))" -ForegroundColor DarkYellow
         return
     }
-    $active = @($resp.value)
     if (-not $active) {
         # Empty is INCONCLUSIVE, not proof of no active roles: listing
         # directory-role memberships needs a directory-read scope
@@ -274,17 +262,19 @@ function Assert-ActiveEntraRoles {
         $problems += "-GrantConsent (tenant-wide admin consent incl. the protected RoleManagement.ReadWrite.Directory scope) needs an ACTIVE 'Privileged Role Administrator' or 'Global Administrator' role. Alternative: re-run with -GrantConsent:`$false and have an authorized admin consent later via the Enterprise applications blade."
     }
     if ($problems) {
-        throw ("Missing ACTIVE Entra roles:`n  - " + ($problems -join "`n  - ") + "`nIf these roles are PIM-eligible, activate them in PIM first, then run Disconnect-MgGraph and re-run this script so the new Graph session is established AFTER the activation.")
+        throw ("Missing ACTIVE Entra roles:`n  - " + ($problems -join "`n  - ") + "`nIf these roles are PIM-eligible, activate them in PIM first, then re-run this script so the sign-in happens AFTER the activation.")
     }
 }
 
-# Preferred check: the session token's wids claim (works with the lean Edge
-# token, where /me/memberOf hides roles without a directory-read scope) and
-# auto re-auths ONCE when the PIM activation postdates the token. Falls back
-# to the memberOf-based check for MSAL / operator-provided sessions where
-# the raw token is not in hand.
-if ($null -ne (Get-PaTokenRoleIds)) {
-    $_reconnect = { $script:ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -TenantId $TenantId -UseEdge:([bool]$UseEdge) }
+# Preferred check: the session token's wids claim (works with the lean token,
+# where /me/memberOf hides roles without a directory-read scope). A browser
+# sign-in is repeated ONCE when the PIM activation postdates the token; a token
+# passed with -AccessToken cannot be renewed here, so that case stops with the
+# fix. Falls back to the memberOf-based check when the token has no wids claim.
+# Delegated sessions only -- an app-only token's wids are the APP's roles.
+$_delegated = $ctx.AuthType -eq 'Interactive' -or ($ctx.AuthType -eq 'ProvidedToken' -and @($ctx.Scopes).Count -gt 0)
+if ($_delegated -and $null -ne (Get-PaTokenRoleIds)) {
+    $_reconnect = if ($ctx.AuthType -eq 'Interactive') { { $script:ctx = Connect-PimActivatorGraph -RequiredScopes $_requiredScopes -TenantId $TenantId -UseEdge:([bool]$UseEdge) } } else { $null }
     Assert-PaSessionRole -Reconnect $_reconnect `
         -AnyOfRoleIds @(
             '62e90394-69f5-4237-9190-012177145e10'   # Global Administrator
@@ -300,7 +290,7 @@ if ($null -ne (Get-PaTokenRoleIds)) {
             ) `
             -RoleDescription "an ACTIVE 'Privileged Role Administrator' or 'Global Administrator' role (needed for -GrantConsent; alternatively re-run with -GrantConsent:`$false)"
     }
-} elseif (-not $script:PimActivatorAppOnly) {
+} elseif ($_delegated) {
     Assert-ActiveEntraRoles -NeedsConsentRole:([bool]$GrantConsent)
 } else {
     Write-Host "App-only mode: skipping delegated role pre-flight (app permissions govern; calls will error clearly if insufficient)." -ForegroundColor DarkYellow
@@ -313,9 +303,8 @@ if ($null -ne (Get-PaTokenRoleIds)) {
 # First-party Microsoft service principals (Graph, ARM) are NOT guaranteed to
 # exist in every tenant -- fresh / lightly-used tenants only get them
 # instantiated on first use, so resolve-or-create instead of assuming
-# presence. Raw Invoke-MgGraphRequest throughout: the SDK's
-# New-MgServicePrincipal has been observed returning $null (no error, no Id)
-# on permission failures, masking the real API response entirely.
+# presence. Raw REST throughout, so a permission failure surfaces as the real
+# Graph error instead of a silent empty result.
 function Resolve-FirstPartySp {
     param([string]$AppId, [string]$Name)
 
@@ -345,7 +334,7 @@ function Resolve-FirstPartySp {
             throw "$Name service principal (appId $AppId) was created but is not yet queryable in tenant $TenantId -- Entra replication delay. Re-run this script in a minute."
         }
     }
-    # Project the raw hashtable onto the object shape downstream code consumes.
+    # Project the raw REST object onto the object shape downstream code consumes.
     [pscustomobject]@{
         Id                     = $raw.id
         DisplayName            = $raw.displayName
@@ -404,8 +393,8 @@ $asmScope = $asmSp.Oauth2PermissionScopes | Where-Object { $_.Value -eq 'user_im
 if (-not $asmScope) { throw "user_impersonation scope not found on Azure Service Management SP." }
 Write-Host ("  resolved {0,-45} -> {1}" -f 'user_impersonation (ASM)', $asmScope.Id) -ForegroundColor DarkGray
 
-# REST shape (lowercase keys) -- correct for both Invoke-PimGraph and the SDK's
-# raw Invoke-MgGraphRequest body. Built by the unit-tested pure helper.
+# REST shape (lowercase keys) Graph expects on applications create/PATCH.
+# Built by the unit-tested pure helper.
 $requiredResourceAccess = New-PaRequiredResourceAccess `
     -GraphAppId $graphAppId -GraphScopeIds $scopeMap `
     -AsmAppId $asmAppId -AsmScopeId $asmScope.Id
@@ -461,8 +450,8 @@ if ($existing.Count -eq 1) {
     $app = Invoke-PaGraph -Method POST -Path '/applications' -Body $createBody
 }
 
-# Normalise an id off a Graph object regardless of REST (camelCase) vs SDK
-# (the SDK's Invoke-MgGraphRequest returns a hashtable -- camelCase keys too).
+# Normalise an id off a Graph object (REST camelCase; Get-PaProp also
+# accepts PascalCase and hashtables).
 $appId    = Get-PaProp $app 'appId'
 $appObjId = Get-PaProp $app 'id'
 

@@ -13,6 +13,17 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.528 -- 2026-10-08
+
+- **Operations › PIM Activator, rebuilt as a guided page.** Five steps like Get Started (the Entra apps, the settings, the Intune remediation, Edge for Business, servers), each showing whether it is done, and the page now scrolls.
+- **Create buttons.** *Create / Repair* for the PROD and TEST apps and *Upload to Intune* (plus *Check Intune*) work right from the page: you sign in with your own Microsoft admin account in a small window, and only the permissions that button needs are asked for. The PIM Manager itself gets no new rights in your tenant.
+- **Edge for Business guide.** Microsoft offers no API for Edge for Business, so this step is a guide: one card per extension with exactly the fields the Microsoft 365 admin center asks for, and the two settings to paste (ExtensionSettings and ExtensionInstallForcelist, both extensions in one policy).
+- **Scripts without modules.** Every PIM Activator script (app registration, Intune upload, servers) needs no PowerShell module: plain REST and a browser sign-in. Each step shows where to download it and the exact command.
+- **External companies: an Edit button.** A company reads as text until you click Edit; a new company opens ready to fill in.
+- **Drift: Delete says it worked.** After Delete the row reads "queued for removal", and the same item is not queued twice.
+- **Mail sender fix.** Setting up the mail sender now stores the address Microsoft Graph knows the mailbox by, so mail no longer fails when the mailbox's sign-in name and mail address differ.
+- "Delegations — edit in a table" is now **"Delegations — all rows"**.
+
 ## 2.4.527 -- 2026-10-07
 
 - **PIM Activator page: one app for both channels.** When a single PIM Activator app serves both PROD and TEST, the page now shows that TEST uses it (and fills in its id) instead of reporting the TEST app as missing.

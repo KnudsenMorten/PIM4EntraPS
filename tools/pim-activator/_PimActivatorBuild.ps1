@@ -19,7 +19,7 @@ $script:PimActivatorChannels = [ordered]@{
     Released = [ordered]@{ id = 'eheocihmlppcophaeakmdenhgcookkab'; updateUrl = 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml'; label = 'PROD'; appName = 'PIM Activator' }
     Test     = [ordered]@{ id = 'glldnbmjpdkjemcnficagdhgienfdpoo'; updateUrl = 'https://knudsenmorten.github.io/PIM4EntraPS/updates-test.xml'; label = 'TEST'; appName = 'PIM Activator (TEST)' }
 }
-$script:PimActivatorMinimumVersion = '1.6.126'
+$script:PimActivatorMinimumVersion = '1.6.136'
 $script:PimActivatorInstallSource = 'https://knudsenmorten.github.io/*'
 
 function Get-PimActivatorChannel {
@@ -31,17 +31,90 @@ function Get-PimActivatorChannel {
 
 function Get-PimActivatorEdgePolicy {
     <#
-      PURE. The Edge management service settings for the chosen channels: @{ installSources; extensionSettingsJson;
-      minimumVersion }. One policy per AUDIENCE (README): test users get both channels, everyone else Released only.
+      PURE. The Edge management service policy for the chosen extensions -- the exact shape of the operator's working
+      internal policy "Extension, Force-install PIM Activator (TEST + PROD)" (admin center, 2026-10-07): ONE Cloud policy
+      with BOTH settings,
+        ExtensionSettings        {"*":{}, "<id>":{installation_mode, blocked_permissions, runtime_blocked_hosts,
+                                  runtime_allowed_hosts, minimum_version_required, override_update_url, update_url,
+                                  toolbar_state}, ...}
+        ExtensionInstallForcelist "<id>;<update url>" per extension
+      The service does NOT merge extension lists across policies, so both channels go in one policy when both are wanted.
+      -Extensions: @( @{ channel = 'Released'|'Test'; minimumVersion; toolbarState = default_hidden|default_shown|
+      force_shown; blockedHosts = @(); allowedHosts = @(); blockedPermissions = @(); overrideUpdateUrl = $true;
+      installationMode = force_installed|normal_installed } ). -Channels is the short form (defaults for each).
+      Returns @{ installSources; minimumVersion; extensionSettingsJson; extensionSettings (object); forcelist (array);
+      forcelistText; extensions (the normalised input) }.
     #>
-    param([string[]]$Channels = @('Released'))
-    $obj = [ordered]@{}
-    foreach ($c in @($Channels | Where-Object { $_ } | Select-Object -Unique)) {
-        $ch = Get-PimActivatorChannel -Channel $c
-        $obj[$ch.id] = [ordered]@{ installation_mode = 'force_installed'; update_url = $ch.updateUrl; override_update_url = $true; minimum_version_required = $script:PimActivatorMinimumVersion }
+    param([string[]]$Channels = @('Released'), [object[]]$Extensions = @())
+    $list = @($Extensions | Where-Object { $_ })
+    if (-not $list.Count) { $list = @($Channels | Where-Object { $_ } | Select-Object -Unique | ForEach-Object { @{ channel = $_ } }) }
+    $get = { param($o, $n) if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { $o[$n] } } elseif ($null -ne $o -and $o.PSObject.Properties[$n]) { $o.$n } }
+    $hosts = { param($v) @(@($v) | ForEach-Object { "$_" -split '[\r\n,]+' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique) }
+    $settings = [ordered]@{ '*' = [ordered]@{} }
+    $force = New-Object System.Collections.Generic.List[string]
+    $norm = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($e in $list) {
+        $ch = Get-PimActivatorChannel -Channel "$(& $get $e 'channel')"
+        if ($seen[$ch.id]) { continue }; $seen[$ch.id] = $true
+        $min = "$(& $get $e 'minimumVersion')".Trim(); if (-not $min) { $min = $script:PimActivatorMinimumVersion }
+        if ($min -notmatch '^\d+(\.\d+){0,3}$') { throw "Minimum version '$min' for $($ch.label) is not a version (e.g. 1.6.136)." }
+        $tb = "$(& $get $e 'toolbarState')".Trim(); if (-not $tb) { $tb = 'default_hidden' }
+        if ($tb -notin @('default_hidden', 'default_shown', 'force_shown')) { throw "Toolbar state '$tb' is not one of default_hidden, default_shown, force_shown." }
+        $mode = "$(& $get $e 'installationMode')".Trim(); if (-not $mode) { $mode = 'force_installed' }
+        if ($mode -notin @('force_installed', 'normal_installed')) { throw "Installation setting '$mode' is not force_installed or normal_installed." }
+        $ovr = & $get $e 'overrideUpdateUrl'; $ovr = if ($null -eq $ovr -or "$ovr" -eq '') { $true } else { [bool]$ovr -and "$ovr" -ne 'false' }
+        # @(): a script block returning an empty or one-item array unrolls it ($null / a bare string) -- the policy needs []
+        $blocked = @(& $hosts (& $get $e 'blockedHosts')); $allowed = @(& $hosts (& $get $e 'allowedHosts'))
+        $perms = @(@(& $get $e 'blockedPermissions') | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Select-Object -Unique)
+        $settings[$ch.id] = [ordered]@{
+            installation_mode = $mode; blocked_permissions = $perms; runtime_blocked_hosts = $blocked; runtime_allowed_hosts = $allowed
+            minimum_version_required = $min; override_update_url = [bool]$ovr; update_url = $ch.updateUrl; toolbar_state = $tb }
+        $force.Add("$($ch.id);$($ch.updateUrl)")
+        $norm.Add([ordered]@{ channel = $(if ($ch.label -eq 'TEST') { 'Test' } else { 'Released' }); id = $ch.id; name = $ch.appName; updateUrl = $ch.updateUrl
+                              minimumVersion = $min; toolbarState = $tb; installationMode = $mode; overrideUpdateUrl = [bool]$ovr
+                              blockedHosts = $blocked; allowedHosts = $allowed; blockedPermissions = $perms })
     }
+    # Compact, like the admin center's own export (and so empty arrays stay [] -- ConvertTo-Json keeps them as [] only
+    # with -InputObject on the whole object).
+    $json = ConvertTo-Json -InputObject $settings -Depth 6 -Compress
+    $json = $json -replace '"\*":\{\}', '"*":{}' -replace '"\*":\[\]', '"*":{}'
     return [ordered]@{ installSources = $script:PimActivatorInstallSource; minimumVersion = $script:PimActivatorMinimumVersion
-                       extensionSettingsJson = ($obj | ConvertTo-Json -Depth 5) }
+                       extensionSettingsJson = $json; extensionSettings = $settings; forcelist = $force.ToArray(); forcelistText = ($force.ToArray() -join ', ')
+                       extensions = $norm.ToArray() }
+}
+
+function Get-PimActivatorSignInClient {
+    <#
+      PURE. The client id the page's own admin sign-in uses = the Manager's sign-in (Easy Auth) app: the 'aud' of the id
+      token Easy Auth forwards (X-MS-TOKEN-AAD-ID-TOKEN), else the first GUID in PIM_HOSTED_EASYAUTH_AUD. Read only to
+      NAME the app -- identity is never taken from it (that stays Get-PimEasyAuthPrincipal's verified path). '' = unknown.
+    #>
+    param([string]$IdToken, [string]$AudienceSetting)
+    $guid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $parts = "$IdToken".Split('.')
+    if ($parts.Count -ge 2) {
+        try {
+            $p = $parts[1].Replace('-', '+').Replace('_', '/'); switch ($p.Length % 4) { 2 { $p += '==' } 3 { $p += '=' } }
+            $c = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
+            if ("$($c.aud)" -match $guid) { return "$($c.aud)".ToLowerInvariant() }
+        } catch { }
+    }
+    foreach ($a in @("$AudienceSetting" -split '[,;\s]+')) { if ($a.Trim() -match $guid) { return $a.Trim().ToLowerInvariant() } }
+    return ''
+}
+
+function Get-PimActivatorPublishedVersion {
+    <#
+      PURE. The version an update manifest (updates.xml / updates-test.xml, Google update2 format) publishes for an
+      extension id; '' when the text holds none.
+    #>
+    param([string]$UpdateXml, [Parameter(Mandatory)][string]$ExtensionId)
+    if (-not "$UpdateXml".Trim()) { return '' }
+    $rx = "(?s)<app\s+appid=['""]$([regex]::Escape($ExtensionId))['""][^>]*>.*?<updatecheck\b[^>]*\bversion=['""]([0-9.]+)['""]"
+    $m = [regex]::Match($UpdateXml, $rx)
+    if ($m.Success) { return $m.Groups[1].Value }
+    return ''
 }
 
 function New-PimActivatorCatalog {

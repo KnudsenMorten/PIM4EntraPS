@@ -1016,6 +1016,62 @@
   .set-table input { font-size:12.5px; padding:3px 6px; border:1px solid #d0d7de; border-radius:5px; }
   .set-table input:disabled { background:#f6f8fa; color:#57606a; }
   .setMsg { margin-left:10px; font-size:12px; }
+  /* 97.2 Operations > PIM Activator -- guided like Get Started (operator 2026-10-07: "the view ... is bad, i cannot
+     scoll down"). The scroll container is #activatorScrollBody (its id ends in "Body", so the tab-guide stacking rule
+     above applies and the body keeps min-height:0 -- it scrolls inside the panel). */
+  #activatorScrollBody, #getStartedScrollBody { flex:1 1 auto; min-height:0; overflow:auto; padding:14px 18px; }
+  #activatorBody { max-width:1100px; font-size:12.5px; color:#24292f; }
+  .act-head { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:10px; flex-wrap:wrap; }
+  .act-title { font-size:16px; font-weight:600; margin-bottom:2px; }
+  .act-sub, .act-dim { color:#57606a; font-size:12px; }
+  .act-who { font-size:11.5px; color:#57606a; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:5px 9px; max-width:380px; }
+  .act-prog { display:flex; justify-content:space-between; font-size:12px; color:#57606a; }
+  .act-bar { height:8px; background:#eaeef2; border-radius:4px; margin:4px 0 10px; }
+  .act-bar > div { height:8px; background:#0969da; border-radius:4px; }
+  .act-pills { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+  .act-pill { border-radius:16px; padding:4px 12px; font-size:12.5px; border:1px solid #d0d7de; background:#f6f8fa; color:#57606a; }
+  .act-pill.cur { border-color:#0969da; background:#0969da; color:#fff; }
+  .act-pill.done { border-color:#4ac26b; background:#dafbe1; color:#1a7f37; }
+  .act-pill.open { border-color:#ff8182; background:#ffebe9; color:#cf222e; }
+  .act-pill.manual { border-color:#d4a72c; background:#fff8c5; color:#7d4e00; }
+  .act-card { border:1px solid #d0d7de; border-radius:8px; padding:14px 16px; background:#fff; }
+  .act-kicker { font-size:11px; letter-spacing:.6px; color:#0969da; font-weight:600; }
+  .act-h { font-size:15px; font-weight:600; margin:2px 0 4px; }
+  .act-h2 { font-size:13px; font-weight:600; margin:14px 0 4px; }
+  .act-state { font-size:12px; margin-bottom:10px; color:#57606a; }
+  .act-state.ok, #activatorBody .ok { color:#1a7f37; }
+  .act-state.open, #activatorBody .bad { color:#cf222e; }
+  #activatorBody .warn { color:#9a6700; }
+  .act-p { margin:0 0 10px; line-height:1.45; max-width:900px; }
+  .act-tbl { border-collapse:collapse; width:100%; max-width:900px; }
+  .act-tbl td { padding:7px 8px; border-top:1px solid #eaeef2; vertical-align:top; }
+  .act-form { display:grid; grid-template-columns:190px minmax(0, 560px); gap:7px 12px; align-items:center; margin:4px 0 10px; }
+  .act-form input:not([type=checkbox]):not([type=radio]), .act-form select, .act-ext textarea, .act-ext select, .act-ext input:not([type=checkbox]) { font-size:12.5px; padding:4px 7px; border:1px solid #d0d7de; border-radius:5px; background:#fff; box-sizing:border-box; }
+  .act-form input:not([type=checkbox]):not([type=radio]):not(.act-num), .act-form select { width:100%; }
+  .act-num { width:90px; }
+  .act-row { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:center; }
+  .act-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+  .act-log { margin:8px 0; padding:8px 10px; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; font-size:12px; max-width:900px; }
+  .act-more { margin-top:8px; font-size:12px; }
+  .act-more > summary { cursor:pointer; color:#0969da; }
+  .act-code { position:relative; max-width:1000px; }
+  .act-code pre { background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:8px 64px 8px 10px; font-size:11.5px; white-space:pre-wrap; word-break:break-all; margin:6px 0; }
+  .act-code .actCopy { position:absolute; top:5px; right:5px; font-size:11px; }
+  .act-exts { display:grid; grid-template-columns:repeat(auto-fit, minmax(380px, 1fr)); gap:12px; margin:6px 0; }
+  .act-ext { border:1px solid #d0d7de; border-radius:8px; padding:10px 12px; background:#fff; }
+  .act-ext.off { opacity:.55; }
+  .act-ext-h { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-bottom:6px; }
+  .act-kv { display:grid; grid-template-columns:150px minmax(0, 1fr); gap:6px 10px; font-size:12px; align-items:start; }
+  .act-kv > span:nth-child(odd) { color:#57606a; font-weight:600; }
+  .act-kv textarea { width:100%; resize:vertical; }
+  .act-kv code { word-break:break-all; }
+  .act-guide { margin:4px 0 6px 18px; padding:0; line-height:1.55; max-width:900px; }
+  .act-setname { font-weight:600; margin-top:8px; }
+  .act-nav { display:flex; gap:8px; align-items:center; margin-top:14px; padding-top:10px; border-top:1px solid #eaeef2; }
+  /* External companies (operator 2026-10-07: "whre is the edit button"): a row reads as text until Edit. */
+  #coTbl tr.co-row:not(.co-editing) .co-in { display:none; }
+  #coTbl tr.co-row.co-editing .co-ro { display:none; }
+  #coTbl tr.co-row.co-editing > td { background:#f6f8fa; }
 </style>
 </head>
 <body>
@@ -1152,8 +1208,8 @@
        audit sources. Tiles are real-data-or-honest-empty (no dead tiles): each is
        backed by /api/home (fast tiles) + /api/home?include=heavy (live tiles), and
        every tile links to the tab that owns its detail. -->
-  <div id="getstartedTab" class="tab-panel"><div id="getStartedBody" style="max-width:1100px;margin:0 auto;"></div></div>
-  <div id="activatorTab" class="tab-panel"><div id="activatorBody" style="max-width:1100px;"></div></div>
+  <div id="getstartedTab" class="tab-panel"><div id="getStartedScrollBody"><div id="getStartedBody" style="max-width:1100px;margin:0 auto;"></div></div></div>
+  <div id="activatorTab" class="tab-panel"><div id="activatorScrollBody"><div id="activatorBody"></div></div></div>
   <div id="homeTab" class="tab-panel active">
     <!-- REQ-Y: the MSP licence notice (renderMspLicenceBanners) -- empty and hidden unless MSP mode lacks a licence. -->
     <div class="msp-lic-banner" data-page="home" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
@@ -2458,7 +2514,7 @@
         // grid overview somewhere in the menu."*). It WAS in there -- as "All records", which names the
         // DATA and not the JOB, so the one operator who needed it could not find it. Same table, same
         // queue-then-commit, narrowed to the assignment entities and labelled with the task.
-        { tab: 'grid', gridScope: 'delegations', label: 'Delegations — edit in a table',
+        { tab: 'grid', gridScope: 'delegations', label: 'Delegations — all rows',   // operator 2026-10-07: "no we dont use stupid words like table edit"
           // 🪤 The word "queue" is deliberately NOT in this description. Test-PimGuiHeadless (block QueueCounterAndTap)
           // asserts that exactly ONE menu entry leads to the pending-changes queue, by looking for
           // that word across the nav -- and a second entry that merely MENTIONS it reads, to that
@@ -3223,7 +3279,7 @@
       '<span>Company <select id="acctBulkCo"><option value="">(none -- unlink)</option>' + cOpts + '</select> <button class="btn-sec" id="acctBulkCoGo">Link</button></span>' +
       // Operator 2026-10-06 ("this auto-extend is confusing ... what is what here"): BOTH controls change the ACCOUNT's
       // auto-disable date (the day the account is disabled and loses its PIM access). Neither touches a delegation's own
-      // expiry -- that is set per delegation (Delegations -- edit in a table). One labelled group says so.
+      // expiry -- that is set per delegation (Delegations -- all rows). One labelled group says so.
       '<span id="acctBulkAutoDisable" style="display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;padding:3px 7px;border:1px solid #9cd0ff;border-radius:5px;background:#f0f8ff;" ' +
         'title="The ACCOUNT\'s auto-disable date: on that day the account is disabled, its sessions revoked and its PIM access removed. Delegation expiry is separate (set per delegation).">' +
         '<b>Account auto-disable date:</b> push out by <input id="acctBulkExtN" type="number" min="1" max="999" value="3" style="width:56px;"> <select id="acctBulkExtU"><option value="m">months</option><option value="d">days</option></select> <button class="btn-sec" id="acctBulkExtGo">Push out</button>' +
@@ -8660,21 +8716,28 @@
       (canEdit ? '' : ' <span style="margin-left:8px;font-size:11px;color:#57606a;">(read-only — Admin required to edit)</span>') + '</div>';
     h += '<div class="set-card"><h3 style="margin:0 0 4px;font-size:14px;">External companies &amp; their contacts</h3>' +
       '<div style="color:#57606a;font-size:12.5px;margin-bottom:10px;line-height:1.5;max-width:1000px;">Each company that supplies consultants has <b>1-2 contacts</b> &mdash; a consultancy manager, a support / helpdesk address. ' +
-      'On the review cadence they get an <b>access-review mail</b> listing every consultant of their company with access here; they sign in with a <b>magic link</b> and confirm each person, or say they no longer work for them &mdash; that account is then <b>offboarded</b>. ' +
+      'On the review cadence they get an <b>access-review mail</b> listing every consultant of their company with access here; they open the link in the mail and sign in with a <b>one-time code</b> sent to their address and confirm each person, or say they no longer work for them &mdash; that account is then <b>offboarded</b>. ' +
       'Unanswered after 21 days = disabled. A consultant is an admin whose <b>Company</b> is set to the company (Admin accounts &rsaquo; Company).</div>';
     h += '<table class="set-table" id="coTbl" style="width:100%;"><thead><tr><th>Company</th><th>Contacts (1-2 e-mail addresses)</th><th>Sponsor department</th><th>Review</th><th>Consultants</th><th>Notes</th><th></th></tr></thead><tbody>';
-    const rowHtml = (r, idx) => {
+    // Operator 2026-10-07 ("whre is the edit button i asked for"): a company reads as text with an Edit button, like a
+    // record; Edit opens its fields in place (Done closes them), a new company opens in edit mode. The inputs stay in the
+    // row (hidden while reading), so Save reads every company the same way.
+    const rowHtml = (r, idx, editing) => {
       const ppl = people(r.Company);
       const cd = parseInt(r.ReviewCadenceDays, 10) || 90;
       const cadOpts = cad.some(c => c[0] === cd) ? cad : cad.concat([[cd, 'every ' + cd + ' days']]);
-      return '<tr data-idx="' + idx + '">' +
-        '<td><input class="coName" value="' + esc(r.Company || '') + '" placeholder="e.g. Example Consulting" style="width:180px;"' + ro + '></td>' +
-        '<td><input class="coContacts" value="' + esc(String(r.Contacts || '').split(/[|;,\s]+/).filter(Boolean).join('; ')) + '" placeholder="manager@example.test; helpdesk@example.test" style="width:300px;"' + ro + '></td>' +
-        '<td><select class="coDept"' + ro + '><option value="">' + esc(deptNone) + '</option>' + depts.map(o => '<option value="' + esc(o.value) + '"' + (String(o.value) === String(r.SponsorDepartment || '') ? ' selected' : '') + '>' + esc(o.label || o.value) + '</option>').join('') + '</select></td>' +
-        '<td><select class="coCad"' + ro + '>' + cadOpts.map(c => '<option value="' + c[0] + '"' + (c[0] === cd ? ' selected' : '') + '>' + c[1] + '</option>').join('') + '</select></td>' +
+      const contacts = String(r.Contacts || '').split(/[|;,\s]+/).filter(Boolean);
+      const deptLabel = (depts.find(o => String(o.value) === String(r.SponsorDepartment || '')) || {}).label || r.SponsorDepartment || '';
+      const roTxt = (v, dim) => '<span class="co-ro"' + (dim ? ' style="color:#57606a;"' : '') + '>' + v + '</span>';
+      return '<tr data-idx="' + idx + '" class="co-row' + (editing ? ' co-editing' : '') + '">' +
+        '<td>' + roTxt('<b>' + esc(r.Company || '') + '</b>') + '<input class="coName co-in" value="' + esc(r.Company || '') + '" placeholder="e.g. Example Consulting" style="width:180px;"' + ro + '></td>' +
+        '<td>' + roTxt(contacts.length ? contacts.map(esc).join('<br>') : '(no contact yet)', !contacts.length) + '<input class="coContacts co-in" value="' + esc(contacts.join('; ')) + '" placeholder="manager@example.test; helpdesk@example.test" style="width:300px;"' + ro + '></td>' +
+        '<td>' + roTxt(deptLabel ? esc(deptLabel) : '(none)', !deptLabel) + '<select class="coDept co-in"' + ro + '><option value="">' + esc(deptNone) + '</option>' + depts.map(o => '<option value="' + esc(o.value) + '"' + (String(o.value) === String(r.SponsorDepartment || '') ? ' selected' : '') + '>' + esc(o.label || o.value) + '</option>').join('') + '</select></td>' +
+        '<td>' + roTxt(esc((cadOpts.find(c => c[0] === cd) || [cd, 'every ' + cd + ' days'])[1])) + '<select class="coCad co-in"' + ro + '>' + cadOpts.map(c => '<option value="' + c[0] + '"' + (c[0] === cd ? ' selected' : '') + '>' + c[1] + '</option>').join('') + '</select></td>' +
         '<td style="font-size:12px;">' + (ppl.length ? '<b>' + ppl.length + '</b>: ' + ppl.slice(0, 6).map(a => esc(a.DisplayName || a.UserPrincipalName || a.UserName || '')).join(', ') + (ppl.length > 6 ? ', &hellip;' : '') : '<span style="color:#57606a;">none linked yet</span>') + '</td>' +
-        '<td><input class="coNotes" value="' + esc(r.Notes || '') + '" style="width:160px;"' + ro + '></td>' +
-        '<td>' + (canEdit ? '<button class="btn-sec coDel" title="Remove this company (its consultants are not changed; unlink or offboard them on Admin accounts).">&#x2715;</button>' : '') + '</td></tr>';
+        '<td>' + roTxt(esc(r.Notes || ''), true) + '<input class="coNotes co-in" value="' + esc(r.Notes || '') + '" style="width:160px;"' + ro + '></td>' +
+        '<td style="white-space:nowrap;">' + (canEdit ? '<button class="btn-sec coEdit" title="Edit this company: name, contacts, sponsor department, review cadence, notes.">' + (editing ? 'Done' : '&#9998; Edit') + '</button> ' +
+          '<button class="btn-sec coDel" title="Remove this company (its consultants are not changed; unlink or offboard them on Admin accounts).">&#x2715;</button>' : '') + '</td></tr>';
     };
     h += ext.map(x => rowHtml(x.r, x.i)).join('');
     h += '</tbody></table>';
@@ -8685,8 +8748,11 @@
     const msg = (t, bad) => { const m = document.getElementById('coMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#1a7f37'; } };
     const tbody = body.querySelector('#coTbl tbody');
     const add = document.getElementById('coAdd');
-    if (add) add.onclick = () => { const tmp = document.createElement('tbody'); tmp.innerHTML = rowHtml({ Company: '', Contacts: '', SponsorDepartment: '', ReviewCadenceDays: '90', Notes: '' }, -1); tbody.appendChild(tmp.firstChild); wireDel(); };
-    const wireDel = () => body.querySelectorAll('.coDel').forEach(b => { b.onclick = () => { const tr = b.closest('tr'); if (tr) tr.remove(); }; });
+    if (add) add.onclick = () => { const tmp = document.createElement('tbody'); tmp.innerHTML = rowHtml({ Company: '', Contacts: '', SponsorDepartment: '', ReviewCadenceDays: '90', Notes: '' }, -1, true); tbody.appendChild(tmp.firstChild); wireDel(); const n = tbody.lastElementChild && tbody.lastElementChild.querySelector('.coName'); if (n) n.focus(); msg('New company: fill it in, then Save companies.'); };
+    const wireDel = () => {
+      body.querySelectorAll('.coDel').forEach(b => { b.onclick = () => { const tr = b.closest('tr'); if (tr) { tr.remove(); msg('Removed from the list -- Save companies to keep it.'); } }; });
+      body.querySelectorAll('.coEdit').forEach(b => { b.onclick = () => { const tr = b.closest('tr'); if (!tr) return; const on = tr.classList.toggle('co-editing'); b.innerHTML = on ? 'Done' : '&#9998; Edit'; if (on) { const n = tr.querySelector('.coName'); if (n) n.focus(); } else msg('Changed -- Save companies to keep it.'); }; });
+    };
     wireDel();
     const save = document.getElementById('coSave');
     if (save) save.onclick = async () => {
@@ -10292,7 +10358,8 @@
             // REQ-DRIFT-2: an EXTRA can be deleted (queued revoke, with every revoke gate) or kept (its desired row is staged).
             (canApply ? '<div>' +
               (it.type === 'extra' ? (it.revoke
-                  ? '<button class="driftDeleteBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;" data-sel="' + esc(sel) + '" title="Queue its removal (a revoke, committed on the Queue -- the engine carries it out)">Delete</button> '
+                  ? (DRIFT_QUEUED.has(String(sel)) ? '<span class="driftQueued" style="font-size:10.5px;color:#9a6700;" title="Its removal is queued: commit it on the Queue, the engine carries it out">&#10003; queued for removal</span> '
+                    : '<button class="driftDeleteBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;" data-sel="' + esc(sel) + '" title="Queue its removal (a revoke, committed on the Queue -- the engine carries it out)">Delete</button> ')
                   : '<button class="btn-sec" disabled style="font-size:10.5px;padding:1px 6px;margin-top:2px;" title="' + esc(it.revokeWhy || 'cannot be deleted from here') + '">Delete</button> ') : '') +
               (it.type === 'extra' ? (it.keep
                   ? '<button class="driftKeepBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;" data-sel="' + esc(sel) + '" title="Keep it: stage the PIM row that defines it (' + esc(it.keep.base) + '), so PIM manages it -- Review &amp; commit">Keep</button> '
@@ -10349,10 +10416,10 @@
     scopes.forEach(s => asList(s.items).forEach(it => { bySel[s.scope + '|' + it.key] = Object.assign({ scope: s.scope }, it); }));
     const tickedSel = () => Array.from(body.querySelectorAll('.govDriftSel')).filter(c => c.checked).map(c => c.getAttribute('data-sel'));
     const say = (t, bad) => { const m = document.getElementById('govDriftMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#9a6700'; } else if (bad) alert(t); else sharedToast(t); };
-    body.querySelectorAll('.driftDeleteBtn').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); driftDeleteExtras([bySel[b.dataset.sel]], say); });
+    body.querySelectorAll('.driftDeleteBtn').forEach(b => b.onclick = async (ev) => { ev.stopPropagation(); b.disabled = true; const ok = await driftDeleteExtras([Object.assign({ _sel: b.dataset.sel }, bySel[b.dataset.sel])], say); if (ok) { b.outerHTML = '<span class="driftQueued" style="font-size:10.5px;color:#9a6700;">&#10003; queued for removal</span>'; } else b.disabled = false; });
     body.querySelectorAll('.driftKeepBtn').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); driftKeepExtras([bySel[b.dataset.sel]], say); });
     const bulkDel = document.getElementById('govDriftDelete'), bulkKeep = document.getElementById('govDriftKeep'), bulkIgn = document.getElementById('govDriftIgnore');
-    if (bulkDel) bulkDel.onclick = () => { const its = tickedSel().map(k => bySel[k]).filter(x => x && x.type === 'extra' && x.revoke); if (!its.length) { say('Tick at least one extra that can be deleted.', true); return; } driftDeleteExtras(its, say); };
+    if (bulkDel) bulkDel.onclick = () => { const its = tickedSel().map(k => bySel[k]).filter(x => x && x.type === 'extra' && x.revoke); if (!its.length) { say('Tick at least one extra that can be deleted.', true); return; } driftDeleteExtras(tickedSel().filter(k => bySel[k] && bySel[k].type === 'extra' && bySel[k].revoke).map(k => Object.assign({ _sel: k }, bySel[k])), say).then(ok => { if (ok) renderDrift(); }); };
     if (bulkKeep) bulkKeep.onclick = () => { const its = tickedSel().map(k => bySel[k]).filter(x => x && x.type === 'extra' && x.keep); if (!its.length) { say('Tick at least one extra that can be kept.', true); return; } driftKeepExtras(its, say); };
     if (bulkIgn) bulkIgn.onclick = async () => {
       const its = tickedSel().map(k => bySel[k]).filter(Boolean);
@@ -10434,22 +10501,29 @@
 
   // REQ-DRIFT-2: DELETE an extra = queue its REVOKE through POST /api/revoke -- the same gates as Review current delegations
   // (Pro, break-glass skipped, count confirmation, the approval threshold). Queued, committed on the Queue, run by the engine.
+  // The drift items whose removal this page queued (by selection key): shown as "queued for removal" and never queued twice.
+  const DRIFT_QUEUED = new Set();
   async function driftDeleteExtras(its, say) {
+    const fresh = its.filter(it => it && it.revoke && !DRIFT_QUEUED.has(String(it._sel || (it.scope + '|' + it.key))));
+    if (its.length && !fresh.length) { say('Already queued for removal -- commit it on the Queue.', false); return false; }
+    its = fresh;
     const rows = its.filter(it => it && it.revoke).map(it => Object.assign({ id: it.scope + '|' + it.key }, it.revoke));
-    if (!rows.length) return;
+    if (!rows.length) return false;
     const why = (window.prompt('Delete ' + rows.length + ' extra item(s)?\n\n' + its.slice(0, 8).map(it => '- ' + (it.label || it.key)).join('\n') + (its.length > 8 ? '\n...' : '') +
       '\n\nEach is queued as a revoke: commit it on the Queue and the engine removes it. Justification (required, recorded with the revoke):', '') || '').trim();
-    if (!why) return;
+    if (!why) return false;
     let pv;
     try { pv = await api('POST', '/api/revoke', { rows, preview: true }); }
-    catch (e) { say('Not queued: ' + ((e && e.body && e.body.error) || e.message), true); return; }
-    if (pv && pv.approvalRequired) { say('Not queued: ' + rows.length + ' removal(s) is over the approval threshold -- use Reviews & controls > Review current delegations, which raises the approval request.', true); return; }
+    catch (e) { say('Not queued: ' + ((e && e.body && e.body.error) || e.message), true); return false; }
+    if (pv && pv.approvalRequired) { say('Not queued: ' + rows.length + ' removal(s) is over the approval threshold -- use Reviews & controls > Review current delegations, which raises the approval request.', true); return false; }
     try {
       const r = await api('POST', '/api/revoke', { rows, justification: why, confirmCount: (pv && pv.confirmRequired) ? pv.toRevokeCount : undefined });
       const q = asList(r && r.results).filter(x => x && x.ok).length;
       const sk = Number(r && r.skippedCount) || 0;
       say('Queued ' + q + ' removal(s)' + (sk ? ', ' + sk + ' skipped (break-glass)' : '') + ' -- commit them on the Queue; the drift clears after the engine ran and the next check.');
-    } catch (e) { say('Not queued: ' + ((e && e.body && e.body.error) || e.message), true); }
+      if (q) its.forEach(it => DRIFT_QUEUED.add(String(it._sel || (it.scope + '|' + it.key))));
+      return q > 0;
+    } catch (e) { say('Not queued: ' + ((e && e.body && e.body.error) || e.message), true); return false; }
   }
   // REQ-DRIFT-2: KEEP an extra = stage the PIM row that defines it (the Discovery "Create" path): it shows under Review &
   // commit, and once committed PIM manages it and the drift is gone.
@@ -13017,97 +13091,427 @@
   // 97.2 OPERATIONS > PIM ACTIVATOR (operator 2026-10-07: "a) Easy Setup of Intune (remediation jobs) b) Easy Setup of
   // Edge for Business c) Easy setup of the entra apps ... for PROD and TEST d) Easy build of the catalog for the settings
   // e) download & syntax for scripts ... for servers ... make it optional to which group or all devices or all users").
-  // The Manager is read-only towards the tenant: this page READS what exists, BUILDS the filled files and the exact
-  // commands, and an admin runs / uploads them. Edge is the supported path (Edge for Business + the Intune remediation);
-  // the remediation writes the settings for Edge AND Chrome.
+  // Review the same evening: "the view ... is bad, i cannot scoll down ... there is no create buttons to create the
+  // things" -> a guided page like Get Started (one step at a time, state from the data), and CREATE buttons that write
+  // with the CLICKING ADMIN's own Microsoft sign-in (auth code + PKCE in a popup, redeemed in this page; the Manager's
+  // identity gets no write permission and never sees the token). Edge for Business has NO API (operator, confirmed by a
+  // friend: "thre i no api for edge for business" / "so we must make a guide"): that step is a guide that mirrors the
+  // admin center's "Manage extension" fields, plus the two settings to paste. Every step also offers the script:
+  // download it from Invardia, then run it ("include the download url from invardia" / "and then run the deploy cmdlet").
   // ===================================================================================================================
+  const ACT_DL_BASE = 'https://invardia.com/support/pim/';
+  const ACT_GRAPH = '00000003-0000-0000-c000-000000000000', ACT_ASM = '797f4846-ba00-4fd7-ba43-dac1f8f63013';
+  // The delegated permissions the extension needs (same list as Deploy-PimActivatorBackend.ps1).
+  const ACT_NEEDED = ['PrivilegedAccess.ReadWrite.AzureADGroup', 'Group.Read.All', 'User.Read', 'RoleManagement.Read.Directory',
+    'RoleManagement.ReadWrite.Directory', 'AdministrativeUnit.Read.All', 'Application.Read.All'];
+  const ACT = { d: null, step: '', auth: { tokens: {}, account: '' }, built: null, edge: null, intune: {}, log: [] };
+
   function actDownload(name, text) {
     try { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); } catch (_) { }
   }
   function actCode(id, text) {
-    return '<div style="position:relative;"><pre id="' + id + '" style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;font-size:11.5px;white-space:pre-wrap;word-break:break-all;margin:6px 0;">' + escapeHtml(text) + '</pre>' +
-      '<button class="actCopy btn-sec"data-src="' + id + '" style="position:absolute;top:4px;right:4px;font-size:11px;">Copy</button></div>';
+    return '<div class="act-code"><pre id="' + id + '">' + escapeHtml(text) + '</pre><button class="actCopy btn-sec" data-src="' + id + '">Copy</button></div>';
   }
-  async function renderActivator() {
+  // "Download it from Invardia, then run it" -- the script path for every step.
+  function actScript(id, file, cmd) {
+    return actCode(id, 'Invoke-WebRequest ' + ACT_DL_BASE + file + ' -OutFile ' + file + '\n' + cmd);
+  }
+  function actB64Url(bytes) {
+    let s = ''; const b = new Uint8Array(bytes);
+    for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function actB64Utf8Bom(text) {
+    // the script text as UTF-8 WITH a BOM, so Windows PowerShell 5.1 on the device reads non-ASCII characters right
+    const u = new TextEncoder().encode(String(text || '')); const b = new Uint8Array(u.length + 3); b.set([0xEF, 0xBB, 0xBF]); b.set(u, 3);
+    let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+  function actAuthHelp(code, desc) {
+    const d = String(desc || '');
+    if (/AADSTS50011/.test(d)) return 'This Manager\'s sign-in app does not have the PIM Activator sign-in address (' + location.origin + '/activator-signin) yet. Run Set-PimManagerEasyAuth.ps1 for this environment once (it adds it), or use the script below.';
+    if (/AADSTS65001|consent/i.test(d)) return 'Consent is needed for the permissions this button asks for. Sign in as an administrator who may consent (Global Administrator or Privileged Role Administrator), or use the script below. (' + d.split('\n')[0] + ')';
+    return 'Sign-in failed: ' + (code || '') + ' ' + d.split('\n')[0];
+  }
+  // The clicking admin's own token for these Graph scopes. One popup; cached per scope set until it expires.
+  async function actToken(scopes) {
+    const si = (ACT.d && ACT.d.signIn) || {};
+    if (!si.clientId) throw new Error('This Manager cannot open a Microsoft sign-in here (it runs without its sign-in app in front). Use the script below instead.');
+    const key = scopes.slice().sort().join(' ');
+    const c = ACT.auth.tokens[key]; if (c && c.exp > Date.now() + 120000) return c.token;
+    const verifier = actB64Url(crypto.getRandomValues(new Uint8Array(32)));
+    const challenge = actB64Url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+    const state = actB64Url(crypto.getRandomValues(new Uint8Array(16)));
+    const redirect = location.origin + '/activator-signin';
+    const scope = scopes.join(' ') + ' openid profile offline_access';
+    const tenant = encodeURIComponent(si.tenantId || 'organizations');
+    const url = 'https://login.microsoftonline.com/' + tenant + '/oauth2/v2.0/authorize?client_id=' + encodeURIComponent(si.clientId) +
+      '&response_type=code&response_mode=query&redirect_uri=' + encodeURIComponent(redirect) + '&scope=' + encodeURIComponent(scope) +
+      '&state=' + state + '&code_challenge=' + challenge + '&code_challenge_method=S256' +
+      (ACT.auth.account ? '&login_hint=' + encodeURIComponent(ACT.auth.account) : '&prompt=select_account');
+    const w = window.open(url, 'pimActivatorSignIn', 'width=520,height=700');
+    if (!w) throw new Error('The browser blocked the sign-in window -- allow pop-ups for this page and click again.');
+    // The answer comes back from /activator-signin (same origin) by postMessage AND BroadcastChannel: the Microsoft sign-in
+    // page may cut the window.opener link, the channel does not need it.
+    const msg = await new Promise((resolve, reject) => {
+      let bc = null;
+      const done = (m) => { if (!m || m.type !== 'pim-activator-signin' || m.state !== state) return; cleanup(); resolve(m); };
+      const onMsg = (ev) => { if (ev.origin === location.origin) done(ev.data); };
+      const to = setTimeout(() => { cleanup(); reject(new Error('No answer from the sign-in window within 5 minutes.')); }, 300000);
+      function cleanup() { clearTimeout(to); window.removeEventListener('message', onMsg); try { if (bc) bc.close(); } catch (_) { } }
+      window.addEventListener('message', onMsg);
+      try { bc = new BroadcastChannel('pim-activator-signin'); bc.onmessage = (ev) => done(ev.data); } catch (_) { }
+    });
+    if (msg.error) throw new Error(actAuthHelp(msg.error, msg.error_description));
+    const r = await fetch('https://login.microsoftonline.com/' + tenant + '/oauth2/v2.0/token', { method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: si.clientId, grant_type: 'authorization_code', code: msg.code, redirect_uri: redirect, code_verifier: verifier, scope: scope }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.access_token) throw new Error(actAuthHelp(j.error, j.error_description));
+    try { const p = JSON.parse(atob(String(j.id_token || '').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); ACT.auth.account = p.preferred_username || p.upn || ACT.auth.account; } catch (_) { }
+    ACT.auth.tokens[key] = { token: j.access_token, exp: Date.now() + (Number(j.expires_in) || 3600) * 1000 };
+    actSignedInChip();
+    return j.access_token;
+  }
+  function actSignedInChip() {
+    const el = document.getElementById('actWho'); if (!el) return;
+    el.innerHTML = ACT.auth.account ? 'Signed in to Microsoft as <b>' + escapeHtml(ACT.auth.account) + '</b> (for the create buttons only)' : 'The create buttons ask you to sign in to Microsoft with your own admin account.';
+  }
+  async function actGraph(token, method, path, body) {
+    const url = /^https?:/.test(path) ? path : 'https://graph.microsoft.com/' + (/^(v1\.0|beta)\//.test(path) ? path : 'v1.0' + path);
+    for (let i = 0; ; i++) {
+      const r = await fetch(url, { method, headers: Object.assign({ Authorization: 'Bearer ' + token }, body !== undefined ? { 'Content-Type': 'application/json' } : {}), body: body !== undefined ? JSON.stringify(body) : undefined });
+      if ((r.status === 429 || r.status === 503 || r.status === 504) && i < 5) { const ra = Number(r.headers.get('Retry-After')) || (2 + i * 3); await new Promise(res => setTimeout(res, ra * 1000)); continue; }
+      const txt = await r.text(); let j = null; try { j = txt ? JSON.parse(txt) : null; } catch (_) { }
+      if (!r.ok) { const er = (j && j.error) || {}; const e = new Error(method + ' ' + path.split('?')[0] + ' -> HTTP ' + r.status + (er.code ? ' ' + er.code : '') + (er.message ? ': ' + er.message : '')); e.status = r.status; e.code = er.code || ''; throw e; }
+      return j;
+    }
+  }
+  async function actGraphAll(token, path) {
+    let j = await actGraph(token, 'GET', path), out = (j && j.value) || [];
+    while (j && j['@odata.nextLink']) { j = await actGraph(token, 'GET', j['@odata.nextLink']); out = out.concat((j && j.value) || []); }
+    return out;
+  }
+  function actLog(boxId, line, kind) {
+    const box = document.getElementById(boxId); if (!box) return;
+    box.style.display = '';
+    const c = kind === 'err' ? '#cf222e' : kind === 'ok' ? '#1a7f37' : '#57606a';
+    box.insertAdjacentHTML('beforeend', '<div style="color:' + c + ';">' + (kind === 'ok' ? '&#10003; ' : kind === 'err' ? '! ' : '&middot; ') + escapeHtml(line) + '</div>');
+  }
+
+  // ---- create / repair one Activator app (port of Deploy-PimActivatorBackend.ps1, REST in the browser) ----------------
+  async function actEnsureSp(tok, appId, name, logId) {
+    try { return await actGraph(tok, 'GET', "/servicePrincipals(appId='" + appId + "')?$select=id,displayName,oauth2PermissionScopes"); }
+    catch (e) { if (e.status !== 404) throw e; }
+    actLog(logId, name + ' is not in this tenant yet -- adding it');
+    await actGraph(tok, 'POST', '/servicePrincipals', { appId });
+    for (let i = 0; i < 6; i++) { await new Promise(r => setTimeout(r, 2000)); try { return await actGraph(tok, 'GET', "/servicePrincipals(appId='" + appId + "')?$select=id,displayName,oauth2PermissionScopes"); } catch (e) { if (e.status !== 404) throw e; } }
+    throw new Error(name + ' was added but is not readable yet -- try again in a minute.');
+  }
+  async function actEnsureApp(channel, grantConsent) {
+    const logId = 'actAppLog';
+    const ch = (ACT.d.apps || {})[channel] || {};
+    const scopes = ['https://graph.microsoft.com/Application.ReadWrite.All'].concat(grantConsent ? ['https://graph.microsoft.com/DelegatedPermissionGrant.ReadWrite.All'] : []);
+    actLog(logId, 'Signing you in (Application Administrator' + (grantConsent ? ' + Privileged Role Administrator for the consent' : '') + ')...');
+    const tok = await actToken(scopes);
+    const graphSp = await actEnsureSp(tok, ACT_GRAPH, 'Microsoft Graph', logId);
+    const asmSp = await actEnsureSp(tok, ACT_ASM, 'Azure Service Management', logId);
+    const byVal = {}; (graphSp.oauth2PermissionScopes || []).forEach(s => { byVal[s.value] = s.id; });
+    const missing = ACT_NEEDED.filter(n => !byVal[n]); if (missing.length) throw new Error('Microsoft Graph does not offer: ' + missing.join(', '));
+    const asmScope = (asmSp.oauth2PermissionScopes || []).find(s => s.value === 'user_impersonation');
+    if (!asmScope) throw new Error('Azure Service Management has no user_impersonation permission.');
+    const rra = [{ resourceAppId: ACT_GRAPH, resourceAccess: ACT_NEEDED.map(n => ({ id: byVal[n], type: 'Scope' })) },
+                 { resourceAppId: ACT_ASM, resourceAccess: [{ id: asmScope.id, type: 'Scope' }] }];
+    const name = ch.name || (channel === 'Test' ? 'PIM Activator (TEST)' : 'PIM Activator');
+    const found = await actGraphAll(tok, "/applications?$filter=" + encodeURIComponent("displayName eq '" + name.replace(/'/g, "''") + "'") + '&$select=id,appId,spa');
+    if (found.length > 1) throw new Error('More than one app is named "' + name + '" -- rename or delete the extra one first (refusing to guess).');
+    // Both forms per extension id: the launchWebAuthFlow redirect + the extension origin (SPA token redemption). Merged
+    // with what the app already has, never replaced.
+    const ids = [ch.extensionId].filter(Boolean);
+    const uris = []; ((found[0] && found[0].spa && found[0].spa.redirectUris) || []).forEach(u => uris.push(u));
+    ids.forEach(id => { uris.push('https://' + id + '.chromiumapp.org/'); uris.push('chrome-extension://' + id + '/'); });
+    const body = { signInAudience: 'AzureADMyOrg', spa: { redirectUris: Array.from(new Set(uris)) }, publicClient: { redirectUris: [] }, isFallbackPublicClient: false, requiredResourceAccess: rra };
+    let app;
+    if (found.length) { actLog(logId, 'Updating "' + name + '" (' + found[0].appId + ')'); await actGraph(tok, 'PATCH', '/applications/' + found[0].id, body); app = found[0]; }
+    else { actLog(logId, 'Creating "' + name + '"'); app = await actGraph(tok, 'POST', '/applications', Object.assign({ displayName: name }, body)); }
+    let sp = null;
+    try { sp = await actGraph(tok, 'GET', "/servicePrincipals(appId='" + app.appId + "')?$select=id"); } catch (e) { if (e.status !== 404) throw e; }
+    for (let i = 1; !sp && i <= 6; i++) {
+      try { sp = await actGraph(tok, 'POST', '/servicePrincipals', { appId: app.appId }); }
+      catch (e) { if (/NoBackingApplicationObject|does not reference a valid application/i.test(e.message) && i < 6) { actLog(logId, 'the new app is not replicated yet -- retry ' + i + '/6'); await new Promise(r => setTimeout(r, i * 5000)); } else throw e; }
+    }
+    actLog(logId, 'Enterprise app present (' + sp.id + ')');
+    if (grantConsent) {
+      const grant = async (resourceId, scope, label) => {
+        const ex = await actGraphAll(tok, '/oauth2PermissionGrants?$filter=' + encodeURIComponent("clientId eq '" + sp.id + "' and consentType eq 'AllPrincipals' and resourceId eq '" + resourceId + "'"));
+        if (ex.length) await actGraph(tok, 'PATCH', '/oauth2PermissionGrants/' + ex[0].id, { scope });
+        else await actGraph(tok, 'POST', '/oauth2PermissionGrants', { clientId: sp.id, consentType: 'AllPrincipals', resourceId, scope });
+        actLog(logId, label + ' consent granted for the whole tenant', 'ok');
+      };
+      await grant(graphSp.id, ACT_NEEDED.concat(['openid', 'profile', 'offline_access']).join(' '), 'Microsoft Graph');
+      await grant(asmSp.id, 'user_impersonation', 'Azure');
+    }
+    actLog(logId, '"' + name + '" is ready: client id ' + app.appId, 'ok');
+    return app.appId;
+  }
+
+  // ---- upload the Remediation to Intune (port of Publish-PimActivatorRemediation.ps1) -----------------------------------
+  async function actUploadRemediation(r, target, schedule) {
+    const logId = 'actIntuneLog';
+    const name = 'PIM Activator settings (' + (r.channel === 'Test' ? 'TEST' : 'PROD') + ')';
+    actLog(logId, 'Signing you in (Intune Administrator)...');
+    const tok = await actToken(['https://graph.microsoft.com/DeviceManagementScripts.ReadWrite.All']);
+    const base = 'beta/deviceManagement/deviceHealthScripts';
+    const all = await actGraphAll(tok, base + '?$select=id,displayName');
+    const match = all.filter(x => String(x.displayName) === name);
+    if (match.length > 1) throw new Error('More than one Remediation is named "' + name + '" -- delete the extra one first (refusing to guess which to update).');
+    const body = { displayName: name, description: 'PIM Activator -- from the PIM Manager (Operations > PIM Activator) ' + new Date().toISOString().slice(0, 16).replace('T', ' '),
+      publisher: 'PIM Manager', runAsAccount: 'system', runAs32Bit: false, enforceSignatureCheck: false,
+      detectionScriptContent: actB64Utf8Bom(r.detect), remediationScriptContent: actB64Utf8Bom(r.remediate) };
+    let id;
+    if (match.length) { id = match[0].id; await actGraph(tok, 'PATCH', base + '/' + id, body); actLog(logId, 'Updated "' + name + '"'); }
+    else { id = (await actGraph(tok, 'POST', base, Object.assign({ roleScopeTagIds: ['0'] }, body))).id; actLog(logId, 'Created "' + name + '"'); }
+    const back = await actGraph(tok, 'GET', base + '/' + id);
+    if (back.detectionScriptContent !== body.detectionScriptContent || back.remediationScriptContent !== body.remediationScriptContent || back.runAsAccount !== 'system' || back.runAs32Bit) throw new Error('"' + name + '" did not read back as uploaded -- check it in Intune.');
+    actLog(logId, 'Read back OK: the same scripts, runs as SYSTEM, 64-bit', 'ok');
+    if (target) {
+      const tgt = target === 'AllDevices' ? { '@odata.type': '#microsoft.graph.allDevicesAssignmentTarget' } : target === 'AllUsers' ? { '@odata.type': '#microsoft.graph.allLicensedUsersAssignmentTarget' } : { '@odata.type': '#microsoft.graph.groupAssignmentTarget', groupId: target };
+      const runSchedule = schedule.everyHours ? { '@odata.type': '#microsoft.graph.deviceHealthScriptHourlySchedule', interval: schedule.everyHours } : { '@odata.type': '#microsoft.graph.deviceHealthScriptDailySchedule', interval: 1, useUtc: false, time: (schedule.time || '09:00') + ':00' };
+      await actGraph(tok, 'POST', base + '/' + id + '/assign', { deviceHealthScriptAssignments: [{ target: tgt, runRemediationScript: true, runSchedule }] });
+      actLog(logId, 'Assigned to ' + (target === 'AllDevices' ? 'all devices' : target === 'AllUsers' ? 'all users' : 'group ' + target) + ', ' + (schedule.everyHours ? 'every ' + schedule.everyHours + ' hour(s)' : 'daily at ' + (schedule.time || '09:00')), 'ok');
+    }
+    ACT.intune[r.channel] = { found: true, id, name };
+    return id;
+  }
+  async function actCheckIntune() {
+    const logId = 'actIntuneLog';
+    const tok = await actToken(['https://graph.microsoft.com/DeviceManagementScripts.ReadWrite.All']);
+    const all = await actGraphAll(tok, 'beta/deviceManagement/deviceHealthScripts?$select=id,displayName');
+    for (const c of ['Released', 'Test']) {
+      const name = 'PIM Activator settings (' + (c === 'Test' ? 'TEST' : 'PROD') + ')';
+      const m = all.filter(x => String(x.displayName) === name);
+      ACT.intune[c] = { found: m.length > 0, id: m.length ? m[0].id : '', name };
+      actLog(logId, name + ': ' + (m.length ? 'exists in Intune' : 'not in Intune yet'), m.length ? 'ok' : '');
+    }
+  }
+
+  // ---- the steps -----------------------------------------------------------------------------------------------------
+  function actSteps() {
+    const a = (ACT.d && ACT.d.apps) || {}, p = a.Released || {}, t = a.Test || {};
+    const appsDone = !!(p.found && p.redirectOk);
+    return [
+      { id: 'apps', title: 'Entra apps', required: true, done: appsDone, note: appsDone ? ('PROD ready' + (t.found ? ', TEST ready' : ', no TEST app')) : (p.readError ? 'could not read the apps' : 'PROD app missing') },
+      { id: 'catalog', title: 'Settings', required: true, done: !!(p.appId || (ACT.built && ACT.built.ok)), note: ACT.built ? 'built for ' + (ACT.built.channel === 'Test' ? 'TEST' : 'PROD') : 'defaults from this environment' },
+      { id: 'intune', title: 'Intune remediation', required: true, done: !!(ACT.intune.Released && ACT.intune.Released.found), note: ACT.intune.Released ? (ACT.intune.Released.found ? 'in Intune' : 'not in Intune yet') : 'sign in to check' },
+      { id: 'edge', title: 'Edge for Business', required: true, done: false, manual: true, note: 'set in the Microsoft 365 admin center (no API)' },
+      { id: 'servers', title: 'Servers without Intune', required: false, done: false, note: 'optional' },
+    ];
+  }
+  async function renderActivator(stepId) {
     const host = document.getElementById('activatorBody'); if (!host) return;
-    host.innerHTML = '<div style="padding:16px;color:#57606a;">Reading the PIM Activator setup of this tenant&hellip;</div>';
-    let d = null;
-    try { d = await api('GET', '/api/activator'); } catch (e) { host.innerHTML = '<div style="color:#cf222e;padding:12px;">Could not read the Activator setup: ' + escapeHtml(e.message) + '</div>'; return; }
-    const apps = d.apps || {}, prod = apps.Released || {}, test = apps.Test || {};
-    const appRow = a => '<tr><td style="padding:4px 8px;"><b>' + escapeHtml(a.name || '') + '</b> <span style="color:#8c959f;font-size:11px;">' + escapeHtml(a.label || '') + '</span></td>' +
-      '<td style="padding:4px 8px;">' + (a.found && a.sharedWith ? '<span style="color:#1a7f37;">&#10003; uses the ' + escapeHtml(a.sharedWith) + ' app</span> <code style="font-size:11px;">' + escapeHtml(a.appId) + '</code>' : a.found ? '<span style="color:#1a7f37;">&#10003; exists</span> <code style="font-size:11px;">' + escapeHtml(a.appId) + '</code>' : (a.readError ? '<span style="color:#9a6700;">could not read: ' + escapeHtml(a.readError) + '</span>' : '<span style="color:#cf222e;">! not created yet</span>')) + '</td>' +
-      '<td style="padding:4px 8px;">' + (a.found ? (a.redirectOk ? '<span style="color:#1a7f37;">&#10003; redirect URIs</span>' : '<span style="color:#cf222e;">! redirect URIs missing</span>') : '') + '</td></tr>';
-    const sec = (n, t, inner) => '<div class="actSection" style="border:1px solid #d0d7de;border-radius:8px;padding:12px 14px;margin:0 0 12px;background:#fff;"><div style="font-size:11px;letter-spacing:.6px;color:#0969da;font-weight:600;">' + n + '</div><h3 style="margin:2px 0 6px;">' + t + '</h3>' + inner + '</div>';
+    if (!ACT.d || !stepId) {
+      host.innerHTML = '<div style="padding:16px;color:#57606a;">Reading the PIM Activator setup of this tenant&hellip;</div>';
+      try { ACT.d = await api('GET', '/api/activator'); } catch (e) { host.innerHTML = '<div style="color:#cf222e;padding:12px;">Could not read the Activator setup: ' + escapeHtml(e.message) + '</div>'; return; }
+    }
+    const d = ACT.d, steps = actSteps();
+    let idx = steps.findIndex(s => s.id === (stepId || ACT.step));
+    if (idx < 0) idx = Math.max(0, steps.findIndex(s => s.required && !s.done && !s.manual));
+    const cur = steps[idx]; ACT.step = cur.id;
+    const done = steps.filter(s => s.done).length, total = steps.length, pct = Math.round(100 * done / total);
+    const pill = (s, i) => '<button class="actPill act-pill' + (i === idx ? ' cur' : s.done ? ' done' : s.manual ? ' manual' : s.required ? ' open' : '') + '" data-step="' + s.id + '">' +
+      (s.done ? '&#10003; ' : s.manual ? '&#9998; ' : s.required ? '<b>!</b> ' : '') + (i + 1) + '. ' + escapeHtml(s.title) + (s.required ? '' : ' <span style="opacity:.75;">(optional)</span>') + '</button>';
     host.innerHTML =
-      '<h2 style="margin:6px 0 4px;">PIM Activator</h2>' +
-      '<div style="font-size:12.5px;color:#57606a;margin-bottom:10px;">The browser extension your admins activate PIM with. Edge is the supported path here: the <b>Edge management service</b> installs it, an <b>Intune remediation</b> gives it its settings (for Edge and Chrome). Chrome on its own is installed with the scripts plus an Intune policy. This page reads what exists in tenant <code>' + escapeHtml(d.tenantId || '') + '</code>, builds the files and the exact commands; you run them.</div>' +
-      sec('1', 'The Entra apps (PROD and TEST)', '<div style="font-size:12.5px;margin-bottom:6px;">The extension signs in through these app registrations. PROD for everyone; TEST only for the people who try new versions first.</div>' +
-        '<table style="border-collapse:collapse;font-size:12.5px;">' + appRow(prod) + appRow(test) + '</table>' +
-        '<div style="font-size:12px;color:#57606a;margin-top:6px;">Create or repair them (as Application Administrator + Privileged Role Administrator), from <code>tools\\pim-activator</code>:</div>' +
-        '<div id="actAppCmds"></div>') +
-      sec('2', 'Settings catalog', '<div style="font-size:12.5px;margin-bottom:6px;">What the extension shows: this tenant, the app it signs in with, and the defaults. Filled in from this environment &mdash; check it, change what you want.</div>' +
-        '<div style="display:grid;grid-template-columns:200px 1fr;gap:6px 10px;font-size:12.5px;max-width:760px;align-items:center;">' +
-          '<label>Name shown to admins</label><input id="actName" value="' + escapeHtml(d.environmentName || 'PIM') + '">' +
-          '<label>Channel</label><select id="actChannel"><option value="Released">PROD (released)</option><option value="Test">TEST</option></select>' +
-          '<label>App (client id)</label><input id="actClientId" value="' + escapeHtml(prod.appId || '') + '" placeholder="the PIM Activator app id">' +
-          '<label>Default justification</label><input id="actJust" value="Change in infrastructure">' +
-          '<label>Default duration (hours)</label><input id="actHours" type="number" min="1" max="24" value="8" style="width:80px;">' +
-          '<label>Group prefix (optional)</label><input id="actPrefix" placeholder="e.g. PIM- (only groups starting with this are listed)">' +
-          '<label>Auto-activate at most (optional)</label><input id="actAuto" type="number" min="0" max="100" placeholder="no limit" style="width:100px;">' +
-          '<label>Confirm when selecting (optional)</label><input id="actBulk" type="number" min="1" max="100" placeholder="no confirm" style="width:100px;">' +
-          '<label>Browsers</label><span><label><input type="checkbox" id="actEdge" checked> Edge</label> &nbsp; <label><input type="checkbox" id="actChrome" checked> Chrome</label></span>' +
-        '</div>') +
-      sec('3', 'Intune remediation (settings + repair on request)', '<div style="font-size:12.5px;margin-bottom:6px;">Writes the catalog above to every targeted device, every day. Who gets it:</div>' +
-        '<div style="font-size:12.5px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">' +
-          '<label><input type="radio" name="actTarget" value="group" checked> a group <input id="actGroupId" placeholder="group object id" style="width:290px;"></label>' +
-          '<label><input type="radio" name="actTarget" value="AllDevices"> all devices</label>' +
-          '<label><input type="radio" name="actTarget" value="AllUsers"> all users</label></div>' +
-        '<div style="margin-top:8px;"><button id="actBuild" class="primary">Build the remediation scripts</button> <span id="actBuildMsg" style="font-size:12px;"></span></div>' +
-        '<div id="actBuildOut"></div>') +
-      sec('4', 'Edge for Business (installs the extension)', '<div style="font-size:12.5px;">Microsoft 365 admin center &rsaquo; Settings &rsaquo; Microsoft Edge &rsaquo; Configuration policies (a <b>Cloud</b> policy assigned to the user group):</div>' +
-        '<ol style="font-size:12.5px;margin:6px 0 6px 18px;padding:0;"><li><b>Settings</b> &rsaquo; Add setting <b>ExtensionInstallSources</b> = <code>' + escapeHtml((d.edgeReleased || {}).installSources || '') + '</code></li>' +
-        '<li><b>Managed extensions</b> &rsaquo; <b>Import JSON</b> &rsaquo; paste the JSON below (Force, the update URL, &ldquo;use this update URL&rdquo;, minimum version ' + escapeHtml(d.minimumVersion || '') + ')</li>' +
-        '<li>One policy per <b>audience</b>: the service does not merge extension lists. Everyone: PROD only. Test users: a higher-priority policy with BOTH. A tenant-wide policy that force-installs other extensions must also carry these entries.</li></ol>' +
-        '<div style="font-size:12px;font-weight:600;">Everyone (PROD)</div>' + actCode('actEdgeProd', (d.edgeReleased || {}).extensionSettingsJson || '') +
-        '<div style="font-size:12px;font-weight:600;">Test users (PROD + TEST)</div>' + actCode('actEdgeBoth', (d.edgeBoth || {}).extensionSettingsJson || '')) +
-      sec('5', 'Servers and devices without Intune', '<div style="font-size:12.5px;">Run as administrator on the machine (writes the install + settings policies for Edge and Chrome), from <code>tools\\pim-activator</code>:</div><div id="actServerCmd"></div>' +
-        '<div style="font-size:12px;color:#57606a;">Domain-joined estates without Intune: <code>Deploy-PimActivatorHybrid.ps1 -Target DomainGpo</code> writes the same through a GPO.</div>');
-    const wireCopy = () => host.querySelectorAll('.actCopy').forEach(b => b.onclick = () => { const el = document.getElementById(b.dataset.src); try { navigator.clipboard.writeText(el ? el.textContent : ''); sharedToast('Copied'); } catch (_) { } });
-    const showCmds = (c) => {
-      document.getElementById('actAppCmds').innerHTML = actCode('actAppProdCmd', c.appProd) + actCode('actAppTestCmd', c.appTest);
-      document.getElementById('actServerCmd').innerHTML = actCode('actServerCmdText', c.server);
-      wireCopy();
+      '<div class="act-head"><div><div class="act-title">PIM Activator</div>' +
+        '<div class="act-sub">The browser extension your admins activate PIM with, in tenant <code>' + escapeHtml(d.tenantId || '') + '</code>. Edge is installed by <b>Edge for Business</b>, the <b>Intune remediation</b> gives it its settings (Edge and Chrome).</div></div>' +
+        '<div class="act-who" id="actWho"></div></div>' +
+      '<div class="act-prog"><span>' + done + ' of ' + total + ' steps done</span><span>' + pct + '%</span></div>' +
+      '<div class="act-bar"><div style="width:' + pct + '%;"></div></div>' +
+      '<div class="act-pills">' + steps.map(pill).join('') + '</div>' +
+      '<div class="act-card"><div class="act-kicker">STEP ' + (idx + 1) + ' OF ' + total + (cur.required ? '' : ' &middot; OPTIONAL') + '</div>' +
+        '<div class="act-h">' + escapeHtml(cur.title) + '</div>' +
+        '<div class="act-state ' + (cur.done ? 'ok' : cur.manual ? '' : cur.required ? 'open' : '') + '">' + (cur.done ? '&#10003; Done' : cur.manual ? '&#9998; Manual step' : cur.required ? '! Still open' : 'Optional') + (cur.note ? ' &middot; ' + escapeHtml(cur.note) : '') + '</div>' +
+        '<div id="actStepBody"></div>' +
+        '<div class="act-nav"><button class="actBack btn-sec"' + (idx === 0 ? ' disabled' : '') + '>&larr; Back</button>' +
+          '<button class="actNext primary"' + (idx === total - 1 ? ' disabled' : '') + '>Next &rarr;</button>' +
+          '<button class="actRe ghost" style="margin-left:auto;">Check again</button></div></div>';
+    actSignedInChip();
+    host.querySelectorAll('.actPill').forEach(b => b.onclick = () => renderActivator(b.dataset.step));
+    host.querySelector('.actBack').onclick = () => renderActivator(steps[Math.max(0, idx - 1)].id);
+    host.querySelector('.actNext').onclick = () => renderActivator(steps[Math.min(total - 1, idx + 1)].id);
+    host.querySelector('.actRe').onclick = () => { ACT.d = null; renderActivator(cur.id); };
+    const body = document.getElementById('actStepBody');
+    ({ apps: actStepApps, catalog: actStepCatalog, intune: actStepIntune, edge: actStepEdge, servers: actStepServers })[cur.id](body, d);
+    actWireCopy(host);
+  }
+  function actWireCopy(root) {
+    root.querySelectorAll('.actCopy').forEach(b => b.onclick = () => { const el = document.getElementById(b.dataset.src); try { navigator.clipboard.writeText(el ? el.textContent : ''); sharedToast('Copied'); } catch (_) { } });
+  }
+
+  function actStepApps(body, d) {
+    const a = d.apps || {}, prod = a.Released || {}, test = a.Test || {};
+    const row = (c, x) => '<tr><td><b>' + escapeHtml(x.name || '') + '</b><div class="act-dim">' + (c === 'Test' ? 'TEST -- only the people who try new versions first' : 'PROD -- everyone') + '</div></td>' +
+      '<td>' + (x.found && x.sharedWith ? '<span class="ok">&#10003; uses the ' + escapeHtml(x.sharedWith) + ' app</span>' : x.found ? '<span class="ok">&#10003; exists</span>' : x.readError ? '<span class="warn">could not read: ' + escapeHtml(x.readError) + '</span>' : '<span class="bad">! not created</span>') +
+        (x.appId ? '<div class="act-dim"><code>' + escapeHtml(x.appId) + '</code></div>' : '') + '</td>' +
+      '<td>' + (x.found ? (x.redirectOk ? '<span class="ok">&#10003; sign-in addresses</span>' : '<span class="bad">! sign-in addresses missing</span>') : '') + '</td>' +
+      '<td style="text-align:right;"><button class="actMkApp ' + (x.found && x.redirectOk ? 'btn-sec' : 'primary') + '" data-ch="' + c + '">' + (x.found ? 'Repair' : 'Create') + '</button></td></tr>';
+    body.innerHTML =
+      '<div class="act-p">The extension signs in through these app registrations. <b>Create</b> signs you in with your own Microsoft account (Application Administrator; Privileged Role Administrator for the consent) and creates or repairs the app right here -- the PIM Manager itself gets no write access.</div>' +
+      '<table class="act-tbl">' + row('Released', prod) + row('Test', test) + '</table>' +
+      '<label class="act-dim" style="display:block;margin:6px 0;"><input type="checkbox" id="actConsent" checked> Grant consent for the whole tenant (users are then not asked on first sign-in)</label>' +
+      '<div id="actAppLog" class="act-log" style="display:none;"></div>' +
+      '<details class="act-more"><summary>Or run the script yourself</summary>' +
+        actScript('actAppProdCmd', 'Deploy-PimActivatorBackend.ps1', '.\\Deploy-PimActivatorBackend.ps1 -TenantId ' + (d.tenantId || '') + " -Channel Released -DisplayName 'PIM Activator'") +
+        actScript('actAppTestCmd', 'Deploy-PimActivatorBackend.ps1', '.\\Deploy-PimActivatorBackend.ps1 -TenantId ' + (d.tenantId || '') + ' -Channel Test -ExtensionId ' + (test.extensionId || '') + " -DisplayName 'PIM Activator (TEST)'") + '</details>';
+    body.querySelectorAll('.actMkApp').forEach(b => b.onclick = async () => {
+      body.querySelectorAll('.actMkApp').forEach(x => x.disabled = true);
+      try { await actEnsureApp(b.dataset.ch, document.getElementById('actConsent').checked); ACT.d = null; setTimeout(() => renderActivator('apps'), 1500); }
+      catch (e) { actLog('actAppLog', e.message, 'err'); body.querySelectorAll('.actMkApp').forEach(x => x.disabled = false); }
+    });
+  }
+
+  function actCatalogBody() {
+    const v = id => (document.getElementById(id) || {}).value;
+    const ch = v('actChannel') || (ACT.form && ACT.form.channel) || 'Released';
+    return { channel: ch, name: v('actName'), clientId: String(v('actClientId') || '').trim(), defaultJustification: v('actJust'), defaultDurationHours: v('actHours'),
+      prefix: v('actPrefix'), autoActivateMaxGroups: v('actAuto'), bulkActivateConfirmThreshold: v('actBulk'),
+      browsers: [(document.getElementById('actEdgeB') || {}).checked ? 'Edge' : '', (document.getElementById('actChromeB') || {}).checked ? 'Chrome' : ''].filter(Boolean) };
+  }
+  function actStepCatalog(body, d) {
+    const a = d.apps || {}, prod = a.Released || {}, test = a.Test || {}, f = ACT.form || {};
+    const val = (k, dflt) => escapeHtml(f[k] !== undefined ? f[k] : dflt);
+    body.innerHTML =
+      '<div class="act-p">What the extension shows: this tenant, the app it signs in with, and the defaults. Filled in from this environment; change what you want. The Intune step writes it to the devices.</div>' +
+      '<div class="act-form">' +
+        '<label>Channel</label><select id="actChannel"><option value="Released">PROD (released)</option><option value="Test">TEST</option></select>' +
+        '<label>Name shown to admins</label><input id="actName" value="' + val('name', d.environmentName || 'PIM') + '">' +
+        '<label>App (client id)</label><input id="actClientId" value="' + val('clientId', prod.appId || '') + '" placeholder="the PIM Activator app id">' +
+        '<label>Default justification</label><input id="actJust" value="' + val('defaultJustification', 'Change in infrastructure') + '">' +
+        '<label>Default duration (hours)</label><input id="actHours" type="number" min="1" max="24" value="' + val('defaultDurationHours', '8') + '" class="act-num">' +
+        '<label>Group prefix</label><input id="actPrefix" value="' + val('prefix', '') + '" placeholder="optional, e.g. PIM- (only groups starting with this are listed)">' +
+        '<label>Auto-activate at most</label><input id="actAuto" type="number" min="0" max="100" value="' + val('autoActivateMaxGroups', '') + '" placeholder="no limit" class="act-num">' +
+        '<label>Confirm when selecting</label><input id="actBulk" type="number" min="1" max="100" value="' + val('bulkActivateConfirmThreshold', '') + '" placeholder="no confirm" class="act-num">' +
+        '<label>Browsers</label><span><label><input type="checkbox" id="actEdgeB"' + (f.browsers && f.browsers.indexOf('Edge') < 0 ? '' : ' checked') + '> Edge</label> &nbsp; <label><input type="checkbox" id="actChromeB"' + (f.browsers && f.browsers.indexOf('Chrome') < 0 ? '' : ' checked') + '> Chrome</label></span>' +
+      '</div>';
+    const ch = document.getElementById('actChannel'); ch.value = f.channel || 'Released';
+    const keep = () => { ACT.form = actCatalogBody(); };
+    body.querySelectorAll('input,select').forEach(el => el.addEventListener('change', keep));
+    ch.onchange = () => { const cid = document.getElementById('actClientId'); if (cid) cid.value = (ch.value === 'Test' ? test.appId : prod.appId) || ''; keep(); };
+    keep();
+  }
+
+  function actStepIntune(body, d) {
+    const f = ACT.form || {};
+    const t = ACT.target || { kind: 'group', group: '', time: '09:00', everyHours: '' };
+    body.innerHTML =
+      '<div class="act-p">The Remediation writes the settings from step 2 to every targeted device, every day (Edge and Chrome). <b>Upload to Intune</b> signs you in (Intune Administrator) and creates or updates <i>PIM Activator settings (' + ((f.channel || 'Released') === 'Test' ? 'TEST' : 'PROD') + ')</i> -- its existing assignments are replaced only when you pick a target.</div>' +
+      '<div class="act-form">' +
+        '<label>Who gets it</label><span class="act-row">' +
+          '<label><input type="radio" name="actTarget" value="group"' + (t.kind === 'group' ? ' checked' : '') + '> a group</label> <input id="actGroupId" value="' + escapeHtml(t.group) + '" placeholder="group object id" style="width:290px;">' +
+          '<label><input type="radio" name="actTarget" value="AllDevices"' + (t.kind === 'AllDevices' ? ' checked' : '') + '> all devices</label>' +
+          '<label><input type="radio" name="actTarget" value="AllUsers"' + (t.kind === 'AllUsers' ? ' checked' : '') + '> all users</label>' +
+          '<label><input type="radio" name="actTarget" value="none"' + (t.kind === 'none' ? ' checked' : '') + '> keep the assignments</label></span>' +
+        '<label>When</label><span class="act-row">daily at <input id="actTime" value="' + escapeHtml(t.time) + '" style="width:70px;"> or every <input id="actEvery" type="number" min="1" max="23" value="' + escapeHtml(t.everyHours) + '" placeholder="-" class="act-num"> hour(s)</span>' +
+      '</div>' +
+      '<div class="act-actions"><button id="actUpload" class="primary">Upload to Intune</button><button id="actCheckIntune" class="btn-sec">Check Intune</button><button id="actBuildFiles" class="btn-sec">Download the two files</button><span id="actBuildMsg" class="act-dim"></span></div>' +
+      '<div id="actIntuneLog" class="act-log" style="display:none;"></div>' +
+      '<details class="act-more"><summary>Or upload with the script</summary><div class="act-dim">Download the two files first (button above), then in that folder:</div><div id="actPubCmd"></div></details>' +
+      '<details class="act-more"><summary>Or by hand in Intune</summary><div class="act-dim">Devices &rsaquo; Scripts and remediations &rsaquo; Create: the two files, run as SYSTEM, 64-bit PowerShell, no signature check.</div></details>';
+    const readTarget = () => {
+      const k = (body.querySelector('input[name="actTarget"]:checked') || {}).value || 'group';
+      ACT.target = { kind: k, group: document.getElementById('actGroupId').value.trim(), time: document.getElementById('actTime').value.trim() || '09:00', everyHours: document.getElementById('actEvery').value.trim() };
+      return ACT.target;
     };
-    const tid = String(d.tenantId || '');
-    showCmds({ appProd: ".\\Deploy-PimActivatorBackend.ps1 -TenantId " + tid + " -Channel Released -DisplayName 'PIM Activator'",
-               appTest: ".\\Deploy-PimActivatorBackend.ps1 -TenantId " + tid + " -Channel Test -ExtensionId " + escapeHtml(test.extensionId || '') + " -DisplayName 'PIM Activator (TEST)'",
-               server: ".\\Deploy-PimActivatorClient.ps1 -Scope Machine -Browser Both -Channel Released" + (prod.appId ? ' -ClientId ' + prod.appId : '') });
-    const ch = document.getElementById('actChannel');
-    if (ch) ch.onchange = () => { const cid = document.getElementById('actClientId'); if (cid) cid.value = (ch.value === 'Test' ? test.appId : prod.appId) || ''; };
-    const btn = document.getElementById('actBuild');
-    if (btn) btn.onclick = async () => {
-      const msg = document.getElementById('actBuildMsg'), out = document.getElementById('actBuildOut');
-      const tgt = (host.querySelector('input[name="actTarget"]:checked') || {}).value || 'group';
-      const body = { channel: ch.value, name: document.getElementById('actName').value, clientId: document.getElementById('actClientId').value.trim(),
-        defaultJustification: document.getElementById('actJust').value, defaultDurationHours: document.getElementById('actHours').value,
-        prefix: document.getElementById('actPrefix').value, autoActivateMaxGroups: document.getElementById('actAuto').value, bulkActivateConfirmThreshold: document.getElementById('actBulk').value,
-        browsers: [document.getElementById('actEdge').checked ? 'Edge' : '', document.getElementById('actChrome').checked ? 'Chrome' : ''].filter(Boolean),
-        target: tgt === 'group' ? document.getElementById('actGroupId').value.trim() : tgt };
-      msg.textContent = 'Building…'; msg.style.color = '#57606a';
-      let r;
-      try { r = await api('POST', '/api/activator/build', body); } catch (e) { msg.textContent = 'Not built: ' + e.message; msg.style.color = '#cf222e'; return; }
-      msg.textContent = 'Built for ' + (r.channel === 'Test' ? 'TEST' : 'PROD') + '.'; msg.style.color = '#1a7f37';
-      out.innerHTML = '<div style="margin-top:8px;font-size:12.5px;">1. Download both files (the settings are filled in, identically): ' +
-        '<button id="actDlDetect" class="btn-sec">Detect-PimActivator.ps1</button> <button id="actDlRemediate" class="btn-sec">Remediate-PimActivator.ps1</button></div>' +
-        '<div style="font-size:12.5px;margin-top:6px;">2. Upload them to Intune (in the folder with the two files and <code>Publish-PimActivatorRemediation.ps1</code>):</div>' + actCode('actPublishCmd', r.commands.remediation) +
-        '<div style="font-size:12px;color:#57606a;">Or in Intune: Devices &rsaquo; Scripts and remediations &rsaquo; Create &rsaquo; the two files, run as SYSTEM, 64-bit.</div>' +
-        '<details style="font-size:12px;margin-top:6px;"><summary>The catalog that was built</summary>' + actCode('actCatalog', r.catalog) + '</details>';
-      document.getElementById('actDlDetect').onclick = () => actDownload('Detect-PimActivator.ps1', r.detect);
-      document.getElementById('actDlRemediate').onclick = () => actDownload('Remediate-PimActivator.ps1', r.remediate);
-      document.getElementById('actServerCmd').innerHTML = actCode('actServerCmdText', r.commands.server);
-      wireCopy();
+    const build = async () => {
+      const t2 = readTarget(), msg = document.getElementById('actBuildMsg');
+      const req = Object.assign({}, ACT.form || actCatalogBody(), { target: t2.kind === 'group' ? t2.group : t2.kind === 'none' ? '' : t2.kind });
+      if (!req.clientId) req.clientId = (((ACT.d.apps || {})[req.channel || 'Released']) || {}).appId || '';
+      msg.textContent = 'Building...';
+      const r = await api('POST', '/api/activator/build', req);
+      ACT.built = r; msg.textContent = 'Built for ' + (r.channel === 'Test' ? 'TEST' : 'PROD') + '.';
+      document.getElementById('actPubCmd').innerHTML = actScript('actPubCmdText', 'Publish-PimActivatorRemediation.ps1', r.commands.remediation); actWireCopy(body);
+      return r;
     };
-    wireCopy();
+    body.querySelectorAll('input').forEach(el => el.addEventListener('change', readTarget));
+    document.getElementById('actBuildFiles').onclick = async () => { try { const r = await build(); actDownload('Detect-PimActivator.ps1', r.detect); actDownload('Remediate-PimActivator.ps1', r.remediate); } catch (e) { actLog('actIntuneLog', e.message, 'err'); } };
+    document.getElementById('actCheckIntune').onclick = async () => { try { await actCheckIntune(); setTimeout(() => renderActivator('intune'), 800); } catch (e) { actLog('actIntuneLog', e.message, 'err'); } };
+    document.getElementById('actUpload').onclick = async (ev) => {
+      ev.target.disabled = true;
+      try {
+        const r = await build(), t2 = ACT.target;
+        if (t2.kind === 'group' && !/^[0-9a-fA-F-]{36}$/.test(t2.group)) throw new Error('Give the group object id, or pick all devices / all users / keep the assignments.');
+        const every = /^\d+$/.test(t2.everyHours) ? Math.min(23, Math.max(1, Number(t2.everyHours))) : 0;
+        if (!every && !/^\d{2}:\d{2}$/.test(t2.time)) throw new Error('The daily time must look like 09:00.');
+        await actUploadRemediation(r, t2.kind === 'group' ? t2.group : t2.kind === 'none' ? '' : t2.kind, { everyHours: every, time: t2.time });
+        setTimeout(() => renderActivator('intune'), 1200);
+      } catch (e) { actLog('actIntuneLog', e.message, 'err'); ev.target.disabled = false; }
+    };
+    build().catch(e => actLog('actIntuneLog', e.message, 'err'));
+  }
+
+  // Edge for Business: a guide that mirrors the admin center (no API exists).
+  function actStepEdge(body, d) {
+    const pub = d.published || {};
+    if (!ACT.edgeExt) ACT.edgeExt = ['Released', 'Test'].map(c => ({ channel: c, include: c === 'Released' || !!((d.apps || {}).Test || {}).found, minimumVersion: pub[c] || d.minimumVersion || '', toolbarState: 'default_hidden', installationMode: 'force_installed', overrideUpdateUrl: true, blockedHosts: '', allowedHosts: '' }));
+    const chInfo = c => ((d.apps || {})[c]) || {};
+    const card = (e, i) => {
+      const x = chInfo(e.channel), label = e.channel === 'Test' ? 'TEST' : 'PROD';
+      const upd = e.channel === 'Test' ? 'https://knudsenmorten.github.io/PIM4EntraPS/updates-test.xml' : 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml';
+      return '<div class="act-ext' + (e.include ? '' : ' off') + '"><div class="act-ext-h"><label><input type="checkbox" class="actExtOn" data-i="' + i + '"' + (e.include ? ' checked' : '') + '> <b>PIM Activator (' + label + ')</b></label>' +
+          '<span class="act-dim">' + (e.channel === 'Test' ? 'only for the test users' : 'everyone') + (pub[e.channel] ? ' &middot; published now: ' + escapeHtml(pub[e.channel]) : '') + '</span></div>' +
+        '<div class="act-kv">' +
+          '<span>Extension ID</span><span><code>' + escapeHtml(x.extensionId || '') + '</code></span>' +
+          '<span>Display name</span><span>PIM Activator (' + label + ')</span>' +
+          '<span>Description</span><span>PIM Activator (' + label + ')</span>' +
+          '<span>Source</span><span>External</span>' +
+          '<span>Installation setting</span><span><select class="actExtF" data-i="' + i + '" data-k="installationMode"><option value="force_installed">Force</option><option value="normal_installed">Normal (installed, the user can turn it off)</option></select></span>' +
+          '<span>Update URL</span><span><code>' + escapeHtml(upd) + '</code><br><label><input type="checkbox" class="actExtF" data-i="' + i + '" data-k="overrideUpdateUrl"' + (e.overrideUpdateUrl ? ' checked' : '') + '> Use this update URL for all extension updates</label></span>' +
+          '<span>Blocked hosts</span><span><textarea class="actExtF" data-i="' + i + '" data-k="blockedHosts" rows="1" placeholder="URL match patterns (empty)">' + escapeHtml(e.blockedHosts) + '</textarea></span>' +
+          '<span>Allowed hosts</span><span><textarea class="actExtF" data-i="' + i + '" data-k="allowedHosts" rows="1" placeholder="URL match patterns (empty)">' + escapeHtml(e.allowedHosts) + '</textarea></span>' +
+          '<span>Minimum version required</span><span><input class="actExtF act-num" style="width:100px;" data-i="' + i + '" data-k="minimumVersion" value="' + escapeHtml(e.minimumVersion) + '"></span>' +
+          '<span>Toolbar state</span><span><select class="actExtF" data-i="' + i + '" data-k="toolbarState"><option value="default_hidden">Hidden</option><option value="default_shown">Shown</option><option value="force_shown">Force shown</option></select></span>' +
+          '<span>File URL navigation</span><span class="act-dim">Extensions not allowed to be installed using File URLs (leave as it is)</span>' +
+          '<span>Block if selected permissions are requested</span><span class="act-dim">Not configured</span>' +
+        '</div></div>';
+    };
+    body.innerHTML =
+      '<div class="act-p">Edge for Business (the Edge management service) force-installs the extension. Microsoft offers <b>no API</b> for it, so this is a guide: the fields below are exactly what the Microsoft 365 admin center asks, and the two settings at the bottom can be pasted instead. Put <b>both</b> extensions in <b>one</b> policy when test users need both -- the service does not merge extension lists across policies.</div>' +
+      '<div class="act-exts">' + ACT.edgeExt.map(card).join('') + '</div>' +
+      '<div class="act-h2">The guide</div>' +
+      '<ol class="act-guide">' +
+        '<li>Open <a href="https://admin.microsoft.com/" target="_blank" rel="noopener">admin.microsoft.com</a> &rsaquo; <b>Settings</b> &rsaquo; <b>Microsoft Edge</b> &rsaquo; <b>Configuration policies</b>. (Edge Administrator or Global Administrator.)</li>' +
+        '<li><b>Create policy</b> (or open the one that already force-installs extensions for these users): Policy type <b>Cloud</b>, a name like <i>Extension, Force-install PIM Activator</i>, platforms Windows + macOS.</li>' +
+        '<li><b>Managed extensions</b> &rsaquo; <b>Add extension</b> per extension above: Extension ID, Source <b>External</b>, the update URL, then <b>Manage extension</b> with the values above. <i>Or</i> skip this and paste the two settings below under <b>Settings</b> &rsaquo; <b>Add setting</b>.</li>' +
+        '<li><b>Settings</b> &rsaquo; <b>Add setting</b> &rsaquo; <b>ExtensionInstallSources</b> = <code>' + escapeHtml(((d.edgeReleased || {}).installSources) || 'https://knudsenmorten.github.io/*') + '</code> (lets Edge install from the update URL).</li>' +
+        '<li><b>Assignments</b>: the group of admins who use the Activator (all admins for PROD; for a TEST + PROD policy, the test users, at a higher priority).</li>' +
+        '<li>Check on a device: <code>edge://policy</code> &rsaquo; Reload policies -- ExtensionSettings shows the ids; <code>edge://extensions</code> shows PIM Activator. The next sign-in can take up to an hour to pick it up.</li>' +
+      '</ol>' +
+      '<div class="act-h2">The two settings (Settings &rsaquo; Add setting)</div><div id="actEdgeOut" class="act-dim">Building&hellip;</div>';
+    const sync = async () => {
+      const out = document.getElementById('actEdgeOut');
+      const ext = ACT.edgeExt.filter(e => e.include).map(e => ({ channel: e.channel, minimumVersion: e.minimumVersion, toolbarState: e.toolbarState, installationMode: e.installationMode, overrideUpdateUrl: !!e.overrideUpdateUrl, blockedHosts: e.blockedHosts, allowedHosts: e.allowedHosts }));
+      if (!ext.length) { out.innerHTML = '<span class="bad">Tick at least one extension.</span>'; return; }
+      try {
+        const r = await api('POST', '/api/activator/edge-policy', { extensions: ext });
+        ACT.edge = r.policy;
+        out.innerHTML = '<div class="act-setname">ExtensionSettings <span class="act-dim">Configure extension management settings &middot; User override: Not allowed</span></div>' + actCode('actEdgeJson', r.policy.extensionSettingsJson) +
+          '<div class="act-setname">ExtensionInstallForcelist <span class="act-dim">Control which extensions are installed silently &middot; one line each</span></div>' + actCode('actEdgeForce', (r.policy.forcelist || []).join('\n')) +
+          '<button id="actEdgeDl" class="btn-sec">Download both as a file</button>';
+        actWireCopy(out);
+        document.getElementById('actEdgeDl').onclick = () => actDownload('pim-activator-edge-policy.txt', 'ExtensionSettings\r\n' + r.policy.extensionSettingsJson + '\r\n\r\nExtensionInstallForcelist\r\n' + (r.policy.forcelist || []).join('\r\n') + '\r\n\r\nExtensionInstallSources\r\n' + (r.policy.installSources || '') + '\r\n');
+      } catch (e) { out.innerHTML = '<span class="bad">' + escapeHtml(e.message) + '</span>'; }
+    };
+    body.querySelectorAll('select.actExtF').forEach(s => { s.value = ACT.edgeExt[Number(s.dataset.i)][s.dataset.k]; });
+    body.querySelectorAll('.actExtOn').forEach(cb => cb.onchange = () => { ACT.edgeExt[Number(cb.dataset.i)].include = cb.checked; cb.closest('.act-ext').classList.toggle('off', !cb.checked); sync(); });
+    body.querySelectorAll('.actExtF').forEach(el => el.addEventListener('change', () => { const e = ACT.edgeExt[Number(el.dataset.i)]; e[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value; sync(); }));
+    sync();
+  }
+
+  function actStepServers(body, d) {
+    const f = ACT.form || {}, ch = f.channel || 'Released', cid = f.clientId || ((d.apps || {}).Released || {}).appId || '';
+    body.innerHTML =
+      '<div class="act-p">Servers and devices without Intune: run as administrator on the machine. It writes the install and the settings policies for Edge and Chrome, the same as Edge for Business + the Remediation do.</div>' +
+      actScript('actServerCmd', 'Deploy-PimActivatorClient.ps1', '.\\Deploy-PimActivatorClient.ps1 -Scope Machine -Browser Both -Channel ' + ch + (/^[0-9a-fA-F-]{36}$/.test(cid) ? ' -ClientId ' + cid : '')) +
+      '<div class="act-dim">Domain-joined estates without Intune: <code>Deploy-PimActivatorHybrid.ps1 -Target DomainGpo</code> writes the same through a GPO.</div>';
   }
 
   async function renderOnboarding() {
@@ -14554,7 +14958,7 @@
     let d = null;
     try { d = await api('GET', '/api/guards'); } catch (_) { return; }
     const all = (d && d.guards) || [];
-    // 2026-10-07 (operator, NunaGreen: "how to get rid of these ... cannot click anything"): the panel listed EVERY trip
+    // 2026-10-07 (operator, at a customer: "how to get rid of these ... cannot click anything"): the panel listed EVERY trip
     // ever recorded, with no window -- a guard that held once stayed forever, against the self-healing rule (no manual
     // acknowledge). A guard that still holds trips again on every run (jobs run every 5-30 min), so only trips seen in the
     // last 2 hours are current; older ones fold into "earlier (n)".
@@ -18970,7 +19374,7 @@
       wrap.innerHTML = '<div class="empty" style="padding:12px 20px;">' +
         '<b>Nothing is waiting to be committed.</b> Anything you have just committed is already saved to the desired state &mdash; ' +
         'it is listed below under <b>Change queue &amp; recent commits</b> (state <i>saved</i>), and the engine applies it on its next run. ' +
-        'To stage more, edit a table under <b>Access &rsaquo; Delegations &mdash; edit in a table</b> or stage new objects from <b>Access &rsaquo; Create access</b>.' +
+        'To stage more, change the rows under <b>Access &rsaquo; Delegations &mdash; all rows</b> or stage new objects from <b>Access &rsaquo; Create access</b>.' +
         '</div>';
       // 🔴 §70.23 / BUG-111 again: this BLANKED #saveStatus, and the blank happens on the very render that
       // follows a successful commit (pendingChanges is empty by then) -- so "All commits succeeded" was wiped
