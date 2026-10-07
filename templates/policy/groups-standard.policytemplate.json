@@ -26,11 +26,11 @@
       { "recipientType": "Requestor", "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
       { "recipientType": "Approver",  "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true }
     ],
-    "_ownerV1": "PARITY AUDIT #4 (2026-09-13): the policy for the OWNER role of every managed group -- v1 set it on every PIM-* group (CSV L875-1022, $PIM_Policy[1]); v2 read only the member policy. Values are v1's: activation PT8H + MFA + Justification, eligible assignment P365D required, active assignment P365D NOT required, nothing on the admin path (BUG-21), the same nine notifications. The engine never manages approval on an owner policy (v1 did not).",
+    "_ownerV1": "PARITY AUDIT #4 (2026-09-13): the policy for the OWNER role of every managed group -- v1 set it on every PIM-* group (CSV L875-1022, $PIM_Policy[1]); v2 read only the member policy. Values are v1's: activation PT8H + MFA + Justification, eligible assignment P365D required, active assignment P365D NOT required (SUPERSEDED 2026-10-07 -- see _ownerMicrosoft), nothing on the admin path (BUG-21), the same nine notifications. The engine never manages approval on an owner policy (v1 did not).",
     "Owner": {
       "Expiration": {
         "EndUser_Assignment": { "maximumDuration": "PT8H",  "isExpirationRequired": true },
-        "Admin_Assignment":   { "maximumDuration": "P365D", "isExpirationRequired": false },
+        "Admin_Assignment":   { "maximumDuration": "P180D", "isExpirationRequired": true },
         "Admin_Eligibility":  { "maximumDuration": "P365D", "isExpirationRequired": true }
       },
       "Enablement": {
@@ -49,6 +49,7 @@
         { "recipientType": "Requestor", "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": false },
         { "recipientType": "Approver",  "caller": "EndUser", "level": "Assignment",  "notificationLevel": "All", "defaultRecipientsEnabled": true }
       ]
-    }
+    },
+    "_ownerMicrosoft": "2026-10-07 (operator, after a customer's held change set: 'i agree to this, fix now'): Admin_Assignment on the OWNER policy is now REQUIRED to expire, P180D (Entra's own default) -- Microsoft: 'keep zero permanently active assignments' / 'no standing owners or members in these privileged groups' (learn.microsoft.com, Entra roles best practices; PIM deployment plan). Overrides v1 parity (v1 allowed permanent active owners: P365D NOT required), the operator's decision. PIM's own owners are DIRECTORY owners (/groups/{id}/owners), not PIM owner schedules, and the engine ignores owner schedules (no auto-extend on them), so nothing PIM maintains can expire through this -- it governs owner assignments a person makes in PIM for Groups."
   }
 }

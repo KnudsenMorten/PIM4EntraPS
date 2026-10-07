@@ -13,6 +13,13 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.520 -- 2026-10-07
+
+- **Group owners follow Microsoft's guidance: no standing owners.** The standard PIM for Groups policy now requires an active owner assignment to end, after at most 180 days (Entra's own default). Before, it allowed permanent active owners, as the earlier version did. Owners that PIM Manager itself keeps on its groups are not affected: they are kept as group owners by the engine, not through owner assignments that expire.
+- **Times are shown in your local time.** Update times in the PIM Manager were shown in UTC, without saying so. They are now shown in your browser's local time.
+
+**Upgrade note:** an unchanged standard group template is upgraded automatically. If you changed yours, the Manager reports that a newer standard is available, and nothing changes until you take it over.
+
 ## 2.4.519 -- 2026-10-07
 
 Installation through Invardia support, rehearsed end to end on fresh test tenants (single tenant, Community, and a managing + managed tenant pair).

@@ -4297,8 +4297,15 @@
     if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
     if (typeof value === 'number') { const dn = new Date(value); return isNaN(dn.getTime()) ? null : dn; }
     const s = String(value).trim();
-    const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(:\d{2})?(?:[.,](\d+))?\s*(Z|[+\-]\d{2}:?\d{2})?$/i);
-    if (!m) return null;
+    let m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(:\d{2})?(?:[.,](\d+))?\s*(Z|[+\-]\d{2}:?\d{2})?$/i);
+    if (!m) {
+      // 2026-10-07 safety net: a server value that PowerShell turned into a [datetime] and then printed in invariant
+      // culture ("10/07/2026 11:16:16" = MM/dd/yyyy HH:mm:ss, always UTC here) -- read it as UTC instead of showing the
+      // raw UTC text as if it were local (operator, in a customer environment: "it doesnt even show it is utc").
+      const u = s.match(/^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2})(?::(\d{2}))?$/);
+      if (!u) return null;
+      m = [s, u[3] + '-' + u[1] + '-' + u[2], u[4] + ':' + u[5], ':' + (u[6] || '00'), '', 'Z'];
+    }
     let zone = m[5] || 'Z';
     if (/^z$/i.test(zone)) zone = 'Z'; else if (zone.indexOf(':') < 0) zone = zone.slice(0, 3) + ':' + zone.slice(3);
     const frac = m[4] ? '.' + (m[4] + '00').slice(0, 3) : '';
@@ -16263,8 +16270,8 @@
   function pimUtcHtml(iso) {
     const s = String(iso == null ? '' : iso).trim();
     if (!s) return '';
-    const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/);
-    if (!m) return escapeHtml(s);
+    // one parser for every shape it accepts (ISO, and the invariant-culture safety net)
+    if (!pimParseTime(s)) return escapeHtml(s);
     // BRAND-2.10: shown in the viewer's LOCAL zone; the tooltip keeps the stored value (UTC), which is allowed.
     return '<span title="' + escapeHtml(s + (/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? '' : ' (UTC)')) + '" style="white-space:nowrap;">' +
            escapeHtml(fmtTime(s)) + '</span>';
