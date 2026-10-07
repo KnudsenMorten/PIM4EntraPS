@@ -401,6 +401,10 @@ param(
     # -UpdateSourceUrlTemplate / $env:PIM_UPDATE_SOURCE_URL (or one already on the job) the updater
     # step REFUSES instead of installing an updater that would ignore its ring.
     [ValidateRange(0,3)][int]$UpdateRing = 2,
+    # §95.4 (2026-10-06) -- WHERE PRO UPDATES COME FROM. 'Invardia' = signed manifests + archives from Invardia for this
+    # environment's ring (the install key is claimed by the engine once the Pro licence is in). Forwarded to
+    # Deploy-PimUpdateJob; empty keeps whatever the job already carries.
+    [ValidateSet('', 'pim-src', 'Invardia')][string]$UpdateSource = '',
     # The HOST-SIDE ring gate (Update-PimContainers / Setup-PimContainers) refuses to roll an
     # environment to a version its ring does not approve. This is the only way past it, and it is
     # printed and audited. -Reason is mandatory with it.
@@ -2201,7 +2205,7 @@ function Invoke-DefaultStepRunner {
             if (-not (Test-Path $upj)) { return @{ ok=$false; ran=$true; detail="update-job deployer not found: $upj" } }
             # BUG-156: decided by the pure core, so a community install without a feed skips
             # cleanly instead of failing the step and rolling back a working environment.
-            switch (Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater) {
+            switch (Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource "$UpdateSource") {
                 'skip-flag'      { return @{ ok=$true; ran=$false; detail='skipped by -SkipUpdater -- this environment will NOT update itself' } }
                 'skip-community' { return @{ ok=$true; ran=$false; detail="community edition ($Scenario): no published update feed, so no in-cloud updater -- update with tools\setup\Update-PimCommunity.ps1 -Apply (it runs 'git pull' and re-runs this same command with the parameters saved by this deploy -- a re-run is the updater)" } }
             }
@@ -2227,6 +2231,7 @@ function Invoke-DefaultStepRunner {
                 # $env:PIM_UPDATE_SOURCE_URL, then the source the job already carries) -- the old
                 # "degrade to a roller" branch is gone, because a roller does not honour a ring.
                 if ("$UpdateSourceUrlTemplate".Trim()) { $upArgs['SourceUrlTemplate'] = "$UpdateSourceUrlTemplate".Trim() }
+                if ("$UpdateSource".Trim()) { $upArgs['UpdateSource'] = "$UpdateSource".Trim() }
                 $upArgs['TargetVersion']    = $tag
                 # This deploy just rolled the environment onto $tag, so that IS what it last built: its
                 # first nightly run rolls instead of rebuilding the same version.
@@ -2675,9 +2680,12 @@ Open-PimSetupHostWindow
 $pendingRingArgs = @{}
 $updaterPlanned = @($plan.steps | Where-Object { "$($_.key)" -eq 'updater' -and $_.do }).Count -gt 0
 if ($script:PimDeployRingExplicit -and $updaterPlanned -and "$AcrName".Trim() -and "$EnvName".Trim() -and
-    (Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater) -eq 'install') {
+    (Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource "$UpdateSource") -eq 'install') {
     $pendingRingArgs['PendingUpdateRing']      = $UpdateRing
     $pendingRingArgs['PendingUpdateSourceUrl'] = "$UpdateSourceUrlTemplate".Trim()
+    # §95.4: an Invardia updater has no feed URL of its own -- the gate is told the Invardia archive template, which is also
+    # what Deploy-PimUpdateJob writes on the job (_PimUpdateRing.ps1 Test-PimInvardiaUpdateSource recognises it).
+    if ("$UpdateSource".Trim() -eq 'Invardia' -and -not "$UpdateSourceUrlTemplate".Trim()) { $pendingRingArgs['PendingUpdateSourceUrl'] = 'https://invardia.com/api/updates/pim-manager/code/{version}/archive' }
     Info "ring gate: this run installs the updater on ring $UpdateRing -- infra/code are judged by that ring where the environment has none yet"
 }
 

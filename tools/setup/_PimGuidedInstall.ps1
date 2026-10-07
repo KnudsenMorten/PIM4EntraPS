@@ -129,6 +129,15 @@ function Test-PimInstallConfig {
     $lvl = "$(& $get 'supportAccess')".Trim().ToLowerInvariant(); if (-not $lvl) { $lvl = 'troubleshoot' }
     if ($lvl -notin 'troubleshoot', 'setup') { $err.Add("supportAccess must be troubleshoot or setup (got '$lvl')") }
     $c.supportAccess = $lvl
+    # §95.4 (2026-10-06): the update ring a PRO install follows -- 2 = design partners, 3 = broad (default). Ring 0/1 are
+    # Invardia's own and never a customer's. Not on the wizard page: an operator-run production install sets it in config.
+    $ur = "$(& $get 'updateRing')".Trim(); if (-not $ur) { $ur = '3' }
+    if ($ur -notin '2', '3') { $err.Add("updateRing must be 2 (design partners) or 3 (broad) (got '$ur')") }
+    $c.updateRing = $ur
+    # Invardia's bootstrap writes the install key it issued (2026-10-06): stored with the licence, so the engine never claims (409).
+    $ik = "$(& $get 'installKey')".Trim()
+    if ($ik -and $ik -notmatch '^inv-[A-Za-z0-9_-]{20,100}$') { $err.Add('installKey is not an Invardia install key (inv-...)') }
+    $c.installKey = $ik
     return @{ ok = ($err.Count -eq 0); errors = @($err); config = [pscustomobject]$c }
 }
 
@@ -164,6 +173,14 @@ function ConvertTo-PimInstallDeployArgs {
     if (@($portal).Count) { $a['EasyAuthAllowedPrincipals'] = @($portal) }
     if ($Config.allowAllMembers) { $a['EasyAuthAllowAllTenantUsers'] = $true }
     if ("$($Config.mailSender)".Trim()) { $a['MailSender'] = "$($Config.mailSender)".Trim() }
+    # 2026-10-06 (install rehearsal): a PRO install deployed as S2 with no feed got NO updater. Pro updates arrive signed,
+    # through Invardia, on this install's ring; the engine claims the install key once the licence is registered.
+    # Trials too (Invardia 2026-10-06: a trial licence claims an install key and pulls updates like Pro until it expires; a
+    # customer who buys keeps the same install).
+    if ("$($Config.edition)" -in 'pro', 'trial') {
+        $a['UpdateSource'] = 'Invardia'
+        $a['UpdateRing'] = [int]$(if ("$($Config.updateRing)".Trim()) { "$($Config.updateRing)".Trim() } else { '3' })
+    }
     return $a
 }
 
@@ -192,12 +209,22 @@ function Get-PimInstallRightsVerdict {
       Administrator or Global Administrator -- without it the install still completes; the directory steps end as
       warnings with the command for that person.
     #>
-    param([string[]]$AzureRoles = @(), [string[]]$DirectoryRoleTemplateIds = @())
+    param([string[]]$AzureRoles = @(), [string[]]$DirectoryRoleTemplateIds = @(),
+          # 2026-10-06 (install rehearsal): the Invardia Support app is an APPLICATION -- its Graph app permissions (the
+          # token's 'roles') do what a person's directory role does. Empty for a person.
+          [string[]]$AppRoles = @())
     $r = @($AzureRoles | ForEach-Object { "$_".Trim().ToLowerInvariant() })
     $azureOk = ($r -contains 'owner') -or (($r -contains 'contributor') -and (($r -contains 'user access administrator') -or ($r -contains 'role based access control administrator')))
     $pra = 'e8611ab8-c189-46e8-94e1-60213ab1f814'; $ga = '62e90394-69f5-4237-9190-012177145e10'
     $ids = @($DirectoryRoleTemplateIds | ForEach-Object { "$_".Trim().ToLowerInvariant() })
     $entraOk = ($ids -contains $pra) -or ($ids -contains $ga)
+    # The app permissions that carry the three directory steps: add the SQL admin group's members (a role-assignable
+    # group) and grant the identities their Graph app roles, and consent the Manager's sign-in.
+    $ar = @($AppRoles | ForEach-Object { "$_".Trim() })
+    if (-not $entraOk -and $ar.Count) {
+        $entraOk = (@('RoleManagement.ReadWrite.Directory', 'AppRoleAssignment.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All' | Where-Object { $ar -notcontains $_ }).Count -eq 0)
+        if (-not $entraOk) { return @{ azureOk = $azureOk; entraOk = $false; message = ((@($(if (-not $azureOk) { 'the Invardia Support app needs Owner (or Contributor + User Access Administrator) on the subscription' })) + @("the Invardia Support app lacks the Graph application permission(s) $((@('RoleManagement.ReadWrite.Directory', 'AppRoleAssignment.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All' | Where-Object { $ar -notcontains $_ })) -join ', ') -- the SQL admin group, the Graph permissions and the sign-in consent will end as hand-off actions")) | Where-Object { $_ }) -join '; ' } }
+    }
     $msg = @()
     if (-not $azureOk) { $msg += 'you need Owner (or Contributor + User Access Administrator) on the subscription' }
     if (-not $entraOk) { $msg += 'you are not an ACTIVE Privileged Role Administrator or Global Administrator -- the SQL admin group, the Graph permissions and the sign-in consent will end as hand-off actions (activate the role in PIM first if you have it)' }

@@ -396,6 +396,16 @@ function Test-PimMspBuildConfig {
     if ($authMode -eq 'Certificate' -and "$(& $V 'deployIdentity.certThumbprint')".Trim() -notmatch '^[0-9a-fA-F]{40}$') { $errors.Add("'deployIdentity.certThumbprint' must be a 40-hex certificate thumbprint (or remove 'deployIdentity' entirely to build as the signed-in az user)") }
     $ring = & $V 'updater.ring'
     if ($null -eq $ring -or "$ring" -notmatch '^[0-3]$') { $errors.Add("'updater.ring' must be 0..3") }
+    # §95.4 / 95.2a (2026-10-06, MSP rehearsal through the Invardia Support app): Pro updates from Invardia, the licence
+    # and the support app's access are build steps -- on EFIF/RIDE all three were hand work after the build.
+    $usrc = "$(& $V 'updater.source')".Trim()
+    if ($usrc -and $usrc -notin @('invardia', 'pim-src')) { $errors.Add("'updater.source' must be invardia (Pro updates, signed, through Invardia) or pim-src") }
+    $lic = "$(& $V 'licence.path')".Trim()
+    if ($lic -and $lic -notmatch '(?i)\.pimlicen[cs]e$') { $errors.Add("'licence.path' must name a .pimlicense file") }
+    $supApp = "$(& $V 'support.appId')".Trim()
+    if ($supApp -and $supApp -notmatch $script:PimMspGuid) { $errors.Add("'support.appId' must be a GUID (the Invardia Support app's client id)") }
+    $supLvl = "$(& $V 'support.access')".Trim()
+    if ($supLvl -and $supLvl -notin @('troubleshoot', 'setup')) { $errors.Add("'support.access' must be troubleshoot or setup") }
     # 🔴 71.29 -- FAIL FAST ON THE ADDRESS PLAN. Without it the hosting step's prereq refuses, but only after the
     # keyvault step has already run and ~6 minutes in. The config check is where that must surface: nothing is
     # touched, and the message says exactly which key to add. (Rehearsal 2026-09-17: both sides failed this way.)
@@ -579,6 +589,7 @@ function Get-PimMspBuildPlan {
     }
     if ("$(& $V 'logAnalyticsName')".Trim()) { $hosting['LogAnalyticsWorkspaceName'] = "$(& $V 'logAnalyticsName')".Trim() }
     if ("$(& $V 'imageTag')".Trim())        { $hosting['ImageTag'] = "$(& $V 'imageTag')".Trim() }
+    if ("$(& $V 'updater.source')".Trim() -eq 'invardia') { $hosting['UpdateSource'] = 'Invardia' }
     # 🔴 71.29 (rehearsal 2026-09-17) -- THE ADDRESS PLAN. The hosting step's FIRST action, `prereq`, refuses without
     # one ("PREREQ needs an address plan ... Refusing to guess: two environments sharing a CIDR cannot be un-peered"),
     # and the plan had no way to express one and never forwarded anything. So the one-shot build could NOT stand up a
@@ -693,6 +704,22 @@ function Get-PimMspBuildPlan {
     $steps.Add((New-PimMspBuildStep -Id 'scenario' -Title "deployment scenario $scenario in pim.Settings" -Script 'tools\setup\Set-PimScenario.ps1' -HostExe 'powershell' `
         -Arguments (@{ SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; Scenario = $scenario } + $storeArgs) -Switches $storeSwitches `
         -Why 'unset, every tenant resolves as S1 (single) -- no managing tenant publishes, no managed tenant pulls'))
+
+    # 2026-10-06 (MSP rehearsal): the Pro licence and the Invardia Support app's access were hand steps after every build.
+    $licPath = "$(& $V 'licence.path')".Trim()
+    if ($licPath) {
+        $licArgs = if ($signedIn) { @{ LicensePath = $licPath; SqlServer = $sqlFqdn; Database = $db; TenantId = $tid } } else { @{ LicensePath = $licPath; SqlServer = $sqlFqdn; Database = $db; TenantId = $tid; AdminAppId = $cid; AdminCertThumbprint = $thumb } }
+        $licArgs['RequireMspRole'] = $Role   # refuse a licence that cannot run MSP here, BEFORE it is stored
+        $steps.Add((New-PimMspBuildStep -Id 'licence' -Title 'register the Pro licence in this environment''s store (MSP is Pro, hard-enforced)' -Script 'tools\setup\Set-PimLicense.ps1' `
+            -Arguments $licArgs -Switches (@($storeSwitches) + 'QueueInstallKeyClaim') -Why 'without it the managing / managed tenant features stay off and the install key is never claimed'))
+    }
+    $supApp = "$(& $V 'support.appId')".Trim()
+    if ($supApp) {
+        $supLvl = if ("$(& $V 'support.access')".Trim()) { "$(& $V 'support.access')".Trim() } else { 'troubleshoot' }
+        $steps.Add((New-PimMspBuildStep -Id 'supportaccess' -Title "Invardia Support app access ($supLvl)" -Script 'tools\setup\Grant-PimSupportAccess.ps1' `
+            -Arguments @{ AppId = $supApp; Level = $supLvl; TenantId = $tid; SubscriptionId = $sub; ResourceGroup = $rg; SqlServer = $sqlFqdn; SqlDatabase = $db } `
+            -Why 'the one agreed support access method (framework 4.1a): the same grant the guided install makes'))
+    }
 
     if ($Role -eq 'Master') {
         $store = "$(& $V 'baseline.storageAccount')".Trim()

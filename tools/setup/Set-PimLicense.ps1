@@ -59,6 +59,18 @@ param(
     # https://database.windows.net/` from the environment's own operator profile). The process's managed identity is
     # switched off for this run, so the store is reached as the token's principal -- never as the machine's MI.
     [string]$SqlAccessToken,
+    # 2026-10-06 (with Invardia + SI): the install key Invardia issued with this installation (its bootstrap writes
+    # `installKey` to config.json). Stored as pim.Settings['InvardiaInstallKey'] so the engine does NOT claim one --
+    # a claim for an environment that already has a key is refused (409). Never printed.
+    [string]$InstallKey,
+    # 2026-10-06 (install rehearsal): with no -InstallKey, queue the engine's 'install-key' job as a "Run now" trigger (the
+    # same SchedulerTriggers entry the Manager writes), so the key is claimed at the next tick (5 min) -- not up to 6 h later,
+    # after the first 03:00 update has already found no key.
+    [switch]$QueueInstallKeyClaim,
+    # 2026-10-06 (MSP rehearsal): the MSP build's licence step names the role. A licence that does not cover MSP for this
+    # tenant is REFUSED before it is stored -- tonight a managed tenant got a single-tenant licence, and only its pull job
+    # found out ("the licence does not include MSP"). A managed tenant runs the managing company's MSP licence.
+    [ValidateSet('', 'Master', 'Slave')][string]$RequireMspRole = '',
     [string]$OutFile
 )
 
@@ -198,6 +210,15 @@ if ("$ConnectionString".Trim()) {
     catch { Fail "could not build a connection string: $($_.Exception.Message)" }
 } else { Fail 'supply -SqlServer (with -Database) or -ConnectionString' }
 
+if ($RequireMspRole) {
+    $msp = Test-PimMspLicense -TenantId "$TenantId".Trim() -Role $RequireMspRole -LicenseText $doc
+    if (-not $msp.ok) {
+        $who = if ($RequireMspRole -eq 'Slave') { 'A managed tenant runs the managing company''s MSP licence (it lists both tenants).' } else { 'The managing tenant needs an MSP licence that lists it.' }
+        Fail "this licence cannot run MSP here: $($msp.reason). $who Nothing was stored."
+    }
+    Note "MSP: $($msp.reason)" 'DarkGray'
+}
+
 # --- verify, store, read back ----------------------------------------------------------------
 $whatIfOnly = [bool]$WhatIfPreference -or -not $PSCmdlet.ShouldProcess("pim.Settings['License']", 'store the verified licence')
 try { $r = Import-PimLicenseToStore -ConnectionString $cs -LicenseText $doc -WhatIfOnly:$whatIfOnly }
@@ -218,6 +239,27 @@ if ($r.status -ne 'Valid') { Note "STATUS: $($r.status) -- $($r.reason)" 'Yellow
 if ($r.whatIf) {
     $result.ok = $true; $result.reason = "what-if -- the licence verifies ($($r.status)); nothing written"
     Write-ResultFile; Write-Host "RESULT: WHAT-IF -- $($result.reason)" -ForegroundColor Yellow; exit 0
+}
+if ("$InstallKey".Trim()) {
+    if ("$InstallKey".Trim() -notmatch '^inv-[A-Za-z0-9_-]{20,100}$') { Fail 'the install key is not an Invardia install key (inv-...) -- not stored' }
+    try {
+        Set-PimSqlSetting -ConnectionString $cs -Name 'InvardiaInstallKey' -Value "$InstallKey".Trim()
+        if ("$(Get-PimSqlSetting -ConnectionString $cs -Name 'InvardiaInstallKey')".Trim() -ne "$InstallKey".Trim()) { Fail 'read-back mismatch: the install key was not stored' }
+    } catch { Fail "the install key could not be stored: $($_.Exception.Message)" }
+    $result['installKey'] = 'stored'
+    Note 'install key: stored (the engine uses it; it does not claim another)' 'Gray'
+} elseif ($QueueInstallKeyClaim) {
+    try {
+        $cur = Get-PimSqlSetting -ConnectionString $cs -Name 'SchedulerTriggers'
+        $list = @(@($cur) | Where-Object { $null -ne $_ })
+        if (-not @($list | Where-Object { "$($_.type)" -eq 'install-key' }).Count) {
+            $list += [pscustomobject][ordered]@{ type = 'install-key'; scope = 'All'; reason = 'run-now:install-key (setup: licence registered)'; requestedUtc = [datetime]::UtcNow.ToString('o'); job = 'install-key' }
+            # IMP-39: -ValueJson -- a one-element list through -Value is stored as a bare object, not an array.
+            Set-PimSqlSetting -ConnectionString $cs -Name 'SchedulerTriggers' -ValueJson (ConvertTo-Json -InputObject @($list) -Depth 6 -Compress)
+        }
+        $result['installKey'] = 'claim queued'
+        Note 'install key: claim queued -- the engine claims it at its next run (within 5 minutes)' 'Gray'
+    } catch { Note "install key: the claim could not be queued ($($_.Exception.Message)) -- the engine's install-key job claims it within 6 hours" 'Yellow' }
 }
 $result.ok = $true
 $result.reason = "stored and read back: $($r.licenseId) ($($r.status): $($r.reason))"

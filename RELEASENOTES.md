@@ -13,6 +13,22 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.519 -- 2026-10-07
+
+Installation through Invardia support, rehearsed end to end on fresh test tenants (single tenant, Community, and a managing + managed tenant pair).
+
+- **A new Pro or trial installation updates itself from day one.** The installation sets up the nightly update job with Invardia as its source, on update ring 3 by default (ring 2 for design partners). Before, a Pro installation made by the guided install got no update job at all.
+- **The install key is in place within minutes.** The installation stores the install key Invardia issued with it. When none was issued, the installation queues the claim, so the engine claims the key at its next run (within five minutes) instead of up to six hours later.
+- **Invardia support can run the installation.** The setup scripts accept the Invardia Support app's own session, for its own tenant and subscriptions only. The rights check reads the app's own permissions, so it no longer warns falsely. An installation run by the Support app must name at least one person as the PIM Manager administrator: the app itself never becomes one.
+- **The managing and managed tenant build does the whole job.** It now also registers the licence, gives Invardia support its access, and sets up Pro updates from Invardia. It refuses a licence that cannot run the managing / managed tenant setup before storing it: a managed tenant runs the managing company's MSP licence.
+- **A new managed tenant's pull no longer fails while nothing is published for it yet.** It reports "nothing to apply" instead of failing and backing off.
+- **The post-install health check runs on a brand-new installation.** It installs the Azure CLI log extension it needs, and reads the live console log when the log workspace has nothing yet.
+- **Hand-run rolls respect Invardia's rings.** After installation, an environment on ring 2 or 3 that updates through Invardia is updated only by its own update job; a host-side roll is refused and names the job to start.
+
+- **Invardia's details everywhere.** Questions and licences go to info@invardia.com, support to portal.invardia.com or support@invardia.com, and the trial, order and pricing pages are linked from the README. The PIM Manager and the licence messages say "PIM Manager Pro" and point to Invardia.
+- **Corrected wording.** The Community edition is "updated with one command from the public release" (it has no in-cloud updater), and the README now says that the licence request and status telemetry are on by default and can be switched off.
+
+**Upgrade note:** none. Existing installations keep their update source and ring.
 
 ## 2.4.518 -- 2026-10-06
 
@@ -2273,7 +2289,7 @@ listing it offered a capability that does not exist.
 - **Free:** everything for a single tenant, including Entra ID roles, PIM for Groups, administrative units, Azure RBAC, Intune and Defender XDR, policies, drift, the wizards and the template import.
 - **Pro, single tenant:** Coverage & gaps and discovery, the Power BI / Exchange Online / app-role / Azure DevOps / Dataverse / Business Central / Power Platform connectors, revoking current delegations, access review campaigns, the second approver, delegated administration scopes, the tier-impact report and the evidence export.
 - **Pro, multi tenant:** MSP managing and managed tenants (publishing, downlink, replication and the fleet views).
-- Without a valid Pro licence bound to the tenant these features are off in the engine, the jobs and the portal, which says why. **Settings › Licence** shows the licence status and the command to register a licence file. For a licence, contact mok@mortenknudsen.net.
+- Without a valid Pro licence bound to the tenant these features are off in the engine, the jobs and the portal, which says why. **Settings › Licence** shows the licence status and the command to register a licence file. For a licence, contact info@invardia.com.
 
 **Workload prerequisite script.** `-EnableSentinel` (opt-in) enables Microsoft Sentinel on a dedicated, empty security workspace, registering the Sentinel resource providers first. The Power BI and Data Operations checks read the right values.
 
@@ -2681,7 +2697,7 @@ PIM Manager; nothing in the product's behaviour towards your directory changes.
 display fills in after the environment's update job has run once — until then it correctly reads
 "not recorded yet".
 
-**Interested in the licensed (multi-tenant) edition?** Mail **mok@mortenknudsen.net** for information.
+**Interested in the licensed (multi-tenant) edition?** Mail **info@invardia.com** for information.
 
 ## v2.4.368 — an environment never updates itself backward, and the update ring you configure is the ring you get
 
@@ -2725,7 +2741,7 @@ changes.
 an environment has been running on a ring you did not intend, re-run the deployment naming the ring you
 want; it is now applied and verified rather than silently defaulted.
 
-**Interested in the licensed (multi-tenant) edition?** Mail **mok@mortenknudsen.net** for information.
+**Interested in the licensed (multi-tenant) edition?** Mail **info@invardia.com** for information.
 
 ## v2.4.367 — MSP: the provider publishes from the cloud, managed tenants read a signed baseline over the network, and both sides can be deployed by a signed-in administrator
 

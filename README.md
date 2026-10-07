@@ -1078,8 +1078,7 @@ set of advanced single-tenant capabilities and the whole multi-tenant half. From
 jobs and the portal, and the portal says why. Everything in the free edition keeps working whatever the
 licence state.
 
-**Buy Pro at [invardia.com](https://invardia.com).** Licensed customers get support at
-**[portal.invardia.com](https://portal.invardia.com)**.
+**Try Pro free for 60 days at [invardia.com/trial](https://invardia.com/trial/), or buy it at [invardia.com/order](https://invardia.com/order/).** Licensed customers get support at **[portal.invardia.com](https://portal.invardia.com/)** or [support@invardia.com](mailto:support@invardia.com); questions to [info@invardia.com](mailto:info@invardia.com). See [Getting a licence](#getting-a-licence).
 
 ![Free vs Pro — the page a Pro menu item opens on a Community install](docs/img/manager-free-vs-pro.png)
 
@@ -1111,7 +1110,7 @@ Everything an organisation needs to govern its own tenant:
 - **administrator accounts and first-time access passes**, issued and tracked;
 - **permission templates imported by script** (`Import-PimPermissionTemplate.ps1`) and tenant preparation from one
   configuration file (`Invoke-PimTenantPrep.ps1`);
-- **self-updating from the public release**;
+- **updated with one command from the public release**;
 - **community support** (GitHub issues on the public repository).
 
 ### Pro — licensed capabilities for a single tenant
@@ -1211,21 +1210,49 @@ What an environment does before anyone changes a setting (the full table is in
 
 ### Getting a licence
 
-**Buy a Pro licence at [invardia.com](https://invardia.com)** — for the advanced single-tenant capabilities, or for
-the multi-tenant edition. You receive one signed licence file (and, for a Community installation, the Pro update feed
-used by [Upgrading to Pro](#upgrading-to-pro)). Questions before you buy:
-[mok@mortenknudsen.net](mailto:mok@mortenknudsen.net). The terms that apply to this code are in **[LICENSE](LICENSE)**.
+<p>
+  <a href="https://invardia.com/products/pim-manager/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/img/brand/invardia-reversed.svg">
+      <img src="docs/img/brand/invardia.svg" alt="Invardia" width="240">
+    </picture>
+  </a>
+</p>
+
+PIM Manager Pro is sold and supported by **Invardia**.
+
+| | |
+|---|---|
+| **Product page** | [invardia.com/products/pim-manager](https://invardia.com/products/pim-manager/) |
+| **Prices** | [invardia.com/pricing](https://invardia.com/pricing/) |
+| **Try Pro free for 60 days** | [invardia.com/trial](https://invardia.com/trial/) |
+| **Buy** | [invardia.com/order](https://invardia.com/order/) — for the advanced single-tenant capabilities, or for the managing / managed tenant edition |
+| **Questions before you buy** | [info@invardia.com](mailto:info@invardia.com) or [invardia.com/contact](https://invardia.com/contact/) |
+| **Your licences and installations** | [portal.invardia.com](https://portal.invardia.com/) |
+
+You receive one signed licence file by mail and in the portal (and, for a Community installation, the Pro update feed
+used by [Upgrading to Pro](#upgrading-to-pro)). The terms that apply to this code are in **[LICENSE](LICENSE)**.
+
+A Pro or trial installation made through Invardia updates itself from the first night: the installation sets up the
+nightly update job with Invardia as its source on its update ring, and the install key is in place within minutes.
+Invardia support can run the installation for you with its own Support app, limited to your tenant and subscriptions;
+you name the PIM Manager administrators, and the Support app never becomes one.
+
+Invardia is a brand owned and operated by 2LINKIT, a company founded and owned by Morten Knudsen. All agreements,
+licences and invoices for SecurityInsight and PIM Manager are issued by 2LINKIT, Strandvejen 21A, 6000 Kolding, Denmark
+(VAT no. DK39208032).
 
 ### Support
 
 | Edition | Where |
 |---|---|
 | **Community (free)** | Community support: GitHub issues on the public repository. |
-| **Pro (paid licence)** | **[portal.invardia.com](https://portal.invardia.com)** — the support portal for licensed customers, with an agreed response time. |
+| **Pro and trial** | **[portal.invardia.com](https://portal.invardia.com/)** > Support, or mail **[support@invardia.com](mailto:support@invardia.com)** (every mail gets a ticket number) — with an agreed response time for licensed customers. |
 
 ### What PIM sends to Invardia
 
-Nothing, until you switch it on. Two optional jobs talk to Invardia, each behind its own switch under **Settings > Features**:
+Two jobs talk to Invardia. Both are **on by default** in a new installation, and each has its own switch under
+**Settings > Features**, so you can turn either off at any time:
 
 - **Request the licence automatically** -- asks Invardia for this installation's licence when none is valid or yours ends
   within 30 days, then installs the signed file only after checking it here. It sends the tenant, the version and an

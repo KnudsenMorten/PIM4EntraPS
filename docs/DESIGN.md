@@ -857,6 +857,17 @@ reversible**. The logic lives in a pure, injectable core
   committed through every gate and recorded with the commit it undoes. A configuration backup stores every configuration
   entity and the non-secret settings (secrets are filtered by name and by value, and never stored); a restore stages the
   rows picked from a backup as pending changes and commits them as a restore. Both are journaled like any commit.
+- **The daily reconcile removes what PIM put in place and you removed (2.4.517).** Besides catching up what is missing,
+  the daily full reconcile removes a live item only when all five rules hold: a PIM commit defined it, it was active
+  because of PIM (PIM created it, or saw it live after a PIM commit), the latest journal entry for it is a removal,
+  nothing similar is still configured (Eligible and Active count as one delegation; shared Defender / Intune assignments
+  never), and the removal budget and a non-empty configuration pass. Items from before the journal are never removed;
+  admin accounts are never removed or disabled by it. Removal is the default; the setting `ReconcileRemovalMode=report`
+  keeps it report-only, and a SuperAdmin can pause the daily reconcile with a reason. Every run's plan is stored as a
+  report (would remove N, held by rule X).
+- **Admin accounts grid (2.4.518).** Each administrator is its own band: a thick divider, alternating shade, the whole
+  row highlighted on hover, a selected row marked, and the administrator's name written above that administrator's own
+  action buttons, so an action is never taken on the wrong person.
 - **The change journal (2.4.511).** Every write to the configuration store also writes `pim.CommitJournal`: one row per
   changed record with the full record before and after, who initiated it, who approved it, the source (a commit in the
   Manager, a restore, the change queue, a sync, a background job) and the commit id. It is written by the store's own
@@ -8293,9 +8304,9 @@ contacted, a tampered or foreign document is refused and never stored, and only 
 kept, not the file. **The public docs must not imply a technical gate that does not
 exist** — README's "Editions" section and `FEATURES.md` §29 both state the enforcement status in
 the same paragraph as the split, deliberately. The call to action for the licensed edition is a
-single mail address (`mok@mortenknudsen.net`) and nothing else: no phone number, no company
-internal domain, no tenant name. The sanitization gate accepts that address; it is the one
-deliberate contact detail in the public set.
+single public contact, Invardia's (`info@invardia.com`, with its trial, order and support pages), and nothing else: no
+personal address, no internal domain, no tenant name. Since 2026-10-07 Invardia's contact replaces the earlier personal
+address everywhere: the docs, the Manager and the engine's licence messages.
 
 #### 19a.2 Where the Pro code lives (2026-10-01)
 
@@ -8932,8 +8943,8 @@ before anyone approves it.
 
 ## 29. Talking to Invardia: the licence request and status telemetry
 
-PIM makes exactly two kinds of call to Invardia, the vendor site. **Both are scheduled jobs, and both are off until an
-administrator switches them on** (Settings > Features). Neither ever receives an instruction from Invardia: one fetches a
+PIM makes exactly two kinds of call to Invardia, the vendor site. **Both are scheduled jobs, and both are on by default in a new
+installation** (feature defaults `defaultEnabled` in the catalog); an administrator switches either off under Settings > Features. Neither ever receives an instruction from Invardia: one fetches a
 signed file that PIM checks itself, the other only sends.
 
 ### 29.1 The licence request (job `licence-request`, feature `licence.autoRequest`)
@@ -8966,16 +8977,24 @@ failure to send never affects any other job. An endpoint other than Invardia's c
   report is not delivered, it is tried again on the next cycle.
 - **Switched back on:** PIM first sends ONE *optin* report. Until that report is delivered, nothing else is sent. Nothing
   from the opted-out period is ever sent, because the reporting floor restarts at the opt-in.
-- **Never switched on:** nothing is ever sent, and invardia.com is never called.
+- **Switched off:** nothing is ever sent, and invardia.com is never called.
 
 The install key is the Container Apps secret, or else the key claimed by the job `install-key` (§29.3).
 
 ### 29.3 Pro updates from Invardia (job `install-key`, feature `updates.invardia`, `PIM_UPDATE_SOURCE=invardia`)
 A Pro installation can take its updates from Invardia's update platform instead of the source archives. PIM owns the
 release: PIM decides which version goes to which ring, and Invardia signs and serves what PIM published (one signed
-manifest per product, kind and ring). Today the environment's ring is still set at Invardia; it is moving to the
-environment's own ring, set in PIM and sent with the pull. PIM also keeps HOW: build in its own registry, schema, roll,
-health gate, rollback.
+manifest per product, kind and ring). The ring is the environment's own (`PIM_UPDATE_RING` on its update job), sent
+with the pull. PIM also keeps HOW: build in its own registry, schema, roll, health gate, rollback.
+
+- **At install.** The guided install and the MSP build set this up themselves. A Pro or trial installation gets its
+  update job with the Invardia source on its ring: ring 3 (broad) by default, ring 2 for a design partner. The licence
+  step stores the install key Invardia issued with the installation. When no key was issued, it queues the
+  `install-key` job, so the engine claims the key at its next run (within five minutes) rather than up to six hours
+  later. A Community installation has no in-cloud updater: it updates with `git pull` and a re-run of the deploy.
+- **Host-side rolls.** The install itself is allowed to roll its own version, because the host cannot read a signed
+  manifest before the key exists. Afterwards, a host-side roll of an environment on ring 2 or 3 that updates through
+  Invardia is refused. The environment updates itself with its update job.
 
 - **The install key.** The job `install-key` claims it with the installed licence and the real tenant, but only when the
   installation has no key and a Pro licence. The key is kept in a setting that no API returns. A key delivered as the

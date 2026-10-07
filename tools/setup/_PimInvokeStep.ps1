@@ -44,7 +44,7 @@ if ($spec.azPowerShell -and "$($spec.azPowerShell.mode)" -eq 'signedIn') {
     $armTok = "$(((az account get-access-token --subscription $c.subscriptionId --resource https://management.azure.com/ -o json 2>$null) | Out-String | ConvertFrom-Json).accessToken)"
     $graphTok = "$(((az account get-access-token --subscription $c.subscriptionId --resource https://graph.microsoft.com/ -o json 2>$null) | Out-String | ConvertFrom-Json).accessToken)"
     $ErrorActionPreference = 'Stop'
-    foreach ($t in @($armTok, $graphTok)) { $v = Test-PimSignedInToken -Token $t -TenantId $c.tenantId; if (-not $v.ok) { Write-Host "STEP REFUSED: $($v.reason)" -ForegroundColor Red; exit 1 } }
+    foreach ($t in @($armTok, $graphTok)) { $v = Test-PimSignedInToken -Token $t -TenantId $c.tenantId -AllowedAppId "$($id.supportAppId)"; if (-not $v.ok) { Write-Host "STEP REFUSED: $($v.reason)" -ForegroundColor Red; exit 1 } }
     Import-Module Az.Accounts -ErrorAction Stop -WarningAction SilentlyContinue
     Disable-AzContextAutosave -Scope Process | Out-Null
     Connect-AzAccount -AccessToken $armTok -MicrosoftGraphAccessToken $graphTok -AccountId $id.userName -Tenant $c.tenantId -Subscription $c.subscriptionId -Scope Process -WarningAction SilentlyContinue | Out-Null

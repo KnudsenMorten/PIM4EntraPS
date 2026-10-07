@@ -137,7 +137,11 @@ if (-not $StepRunner -and ($startAt -le [array]::FindIndex([object[]]$plan, [Pre
     }
     if ($feedOrigin) { Write-Host "    release feed resolved from: $feedOrigin" -ForegroundColor DarkGray }
 }
-if (-not $StepRunner -and ($startAt -le [array]::FindIndex([object[]]$plan, [Predicate[object]]{ param($s) $s.id -eq 'hosting' })) -and -not "$env:PIM_UPDATE_SOURCE_URL".Trim()) {
+# §95.4 (2026-10-06): 'updater.source' = invardia -- Pro updates arrive signed, through Invardia; there is no feed URL and
+# no SAS to hand over, so the refusal below does not apply.
+$fromInvardia = ("$(Get-PimMspBuildValue -Object $config -Path 'updater.source')".Trim() -eq 'invardia')
+if ($fromInvardia) { Write-Host '    release feed: Invardia (signed manifests for this environment''s ring; no feed URL, no SAS)' -ForegroundColor DarkGray }
+if (-not $fromInvardia -and -not $StepRunner -and ($startAt -le [array]::FindIndex([object[]]$plan, [Predicate[object]]{ param($s) $s.id -eq 'hosting' })) -and -not "$env:PIM_UPDATE_SOURCE_URL".Trim()) {
     # 🔴 REHEARSAL FINDING 2026-09-17: this refusal fires BEFORE anything is touched -- correct -- but it only
     # named a document, and that document only said "the same value the internal updater uses". An operator who
     # does not already have the link in hand is then stopped at step zero of a go-live with no command to run.

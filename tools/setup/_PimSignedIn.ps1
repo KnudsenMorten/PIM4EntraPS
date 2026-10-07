@@ -42,12 +42,32 @@ function ConvertFrom-PimJwtClaims {
     } catch { return $null }
 }
 
+function Get-PimSupportAppSession {
+    <#
+      PURE given -Environment (name -> value; default: this process). The Invardia Support app session that Invardia's
+      Connect-InvardiaSupport.ps1 -AzCli opened in THIS shell (framework 4.1a: the one agreed access method), or $null.
+      It is recognised only when the connect script's private az profile IS the active one (INVARDIA_SUPPORT_AZCONFIG ==
+      AZURE_CONFIG_DIR) -- a service principal signed in any other way is never treated as the support app.
+      Returns @{ tenantId; subscriptions[]; environment } or $null.
+    #>
+    param([hashtable]$Environment)
+    $get = { param($n) if ($Environment) { "$($Environment[$n])" } else { "$([Environment]::GetEnvironmentVariable($n))" } }
+    $dir = "$(& $get 'INVARDIA_SUPPORT_AZCONFIG')".Trim(); $cur = "$(& $get 'AZURE_CONFIG_DIR')".Trim()
+    if (-not $dir -or -not $cur -or $dir.TrimEnd('\', '/') -ne $cur.TrimEnd('\', '/')) { return $null }
+    $tid = "$(& $get 'INVARDIA_SUPPORT_TENANT')".Trim().ToLowerInvariant()
+    if ($tid -notmatch $script:PimSignedInGuid) { return $null }
+    $subs = @("$(& $get 'INVARDIA_SUPPORT_SUBSCRIPTIONS')" -split '[,;\s]+' | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ -match $script:PimSignedInGuid })
+    return @{ tenantId = $tid; subscriptions = $subs; environment = "$(& $get 'INVARDIA_SUPPORT_ENVIRONMENT')".Trim() }
+}
+
 function Test-PimSignedInAccount {
     <#
-      PURE. Judge an `az account show` object for the signed-in build. Returns @{ ok; reason; userName }.
+      PURE. Judge an `az account show` object for the signed-in build. Returns @{ ok; reason; userName; supportAppId }.
       Refused: no account, a service principal / managed identity, another tenant, another subscription.
+      ONE exception (operator 2026-10-06: "we have only one agreed method"): the Invardia Support app, signed in by
+      Invardia's connect script for exactly this tenant and an allowed subscription (Get-PimSupportAppSession).
     #>
-    param([object]$Account, [string]$TenantId, [string]$SubscriptionId)
+    param([object]$Account, [string]$TenantId, [string]$SubscriptionId, [hashtable]$Environment)
     $want = "$TenantId".Trim().ToLowerInvariant(); $sub = "$SubscriptionId".Trim().ToLowerInvariant()
     if ($want -notmatch $script:PimSignedInGuid -or $sub -notmatch $script:PimSignedInGuid) {
         return @{ ok = $false; reason = 'the tenant id and the subscription id must both be given explicitly (GUIDs) -- a signed-in build never relies on the default az context' }
@@ -57,6 +77,18 @@ function Test-PimSignedInAccount {
     }
     $type = "$($Account.user.type)".Trim().ToLowerInvariant()
     $name = "$($Account.user.name)".Trim()
+    $supportAppId = ''
+    if ($type -eq 'serviceprincipal') {
+        $sess = Get-PimSupportAppSession -Environment $Environment
+        if ($sess -and $sess.tenantId -eq $want -and ($sess.subscriptions -contains $sub) -and $name -match $script:PimSignedInGuid) {
+            $supportAppId = $name.ToLowerInvariant()
+            if ("$($Account.tenantId)".Trim().ToLowerInvariant() -ne $want) { return @{ ok = $false; reason = "the support app session is in tenant '$($Account.tenantId)', not '$want' -- REFUSING" } }
+            if ("$($Account.id)".Trim().ToLowerInvariant() -ne $sub) { return @{ ok = $false; reason = "az answered for subscription '$($Account.id)', not the requested '$sub' -- REFUSING" } }
+            return @{ ok = $true; reason = "signed in as the Invardia Support app $supportAppId (support environment '$($sess.environment)', tenant $want, subscription $sub)"; userName = "Invardia Support app ($supportAppId)"; supportAppId = $supportAppId }
+        }
+        if ($sess -and $sess.tenantId -ne $want) { return @{ ok = $false; reason = "the Invardia Support session in this shell is for tenant '$($sess.tenantId)', but the build config names '$want' -- REFUSING" } }
+        if ($sess -and -not ($sess.subscriptions -contains $sub)) { return @{ ok = $false; reason = "subscription $sub is not one the support environment allows ($($sess.subscriptions -join ', ')) -- REFUSING" } }
+    }
     if ($type -ne 'user') {
         return @{ ok = $false; reason = ("az is signed in as a $(if ($type) { $type } else { 'non-user account' }) ('$name'), not a person. " +
                  'The signed-in build runs as the administrator at the keyboard; an application identity belongs in deployIdentity (certificate mode).') }
@@ -75,13 +107,20 @@ function Test-PimSignedInToken {
       PURE. Assert a token belongs to a signed-in USER of -TenantId. Returns @{ ok; reason; objectId; userName; tenantId }.
       An application token (idtyp=app, or no user claims) is refused: that is a different principal wearing the same call.
     #>
-    param([string]$Token, [string]$TenantId)
+    # -AllowedAppId: the Invardia Support app's appId (from Test-PimSignedInAccount); an application token is accepted
+    # ONLY when its appid is exactly that app.
+    param([string]$Token, [string]$TenantId, [string]$AllowedAppId = '')
     $c = ConvertFrom-PimJwtClaims -Token $Token
     if (-not $c) { return @{ ok = $false; reason = 'the token could not be decoded' } }
     $tid = "$($c.tid)".Trim().ToLowerInvariant()
     if ($tid -ne "$TenantId".Trim().ToLowerInvariant()) { return @{ ok = $false; reason = "the token is for tenant '$tid', not '$TenantId' -- REFUSING" } }
     $upn = "$(if ($c.upn) { $c.upn } elseif ($c.unique_name) { $c.unique_name } elseif ($c.preferred_username) { $c.preferred_username } else { '' })".Trim()
     $idtyp = "$($c.idtyp)".Trim().ToLowerInvariant()
+    $appid = "$(if ($c.appid) { $c.appid } else { $c.azp })".Trim().ToLowerInvariant()
+    if ("$AllowedAppId".Trim() -and $appid -eq "$AllowedAppId".Trim().ToLowerInvariant() -and -not $upn) {
+        if ("$($c.oid)".Trim() -notmatch $script:PimSignedInGuid) { return @{ ok = $false; reason = 'the support app token carries no object id' } }
+        return @{ ok = $true; reason = ''; objectId = "$($c.oid)".Trim().ToLowerInvariant(); userName = "Invardia Support app ($appid)"; tenantId = $tid; supportApp = $true }
+    }
     if ($idtyp -eq 'app' -or (-not $upn -and $idtyp -ne 'user')) {
         return @{ ok = $false; reason = "the token is an APPLICATION token (appid '$($c.appid)'), not the signed-in user's -- REFUSING" }
     }
@@ -145,11 +184,11 @@ function Get-PimSignedInIdentity {
     $tok = $null
     try { $tok = "$(((& $Az @('account', 'get-access-token', '--subscription', "$SubscriptionId", '--resource', 'https://management.azure.com/', '-o', 'json')) | Out-String | ConvertFrom-Json).accessToken)" } catch { $tok = $null }
     if (-not "$tok".Trim()) { return @{ ok = $false; reason = "az could not issue a token for subscription $SubscriptionId (sign in again: az login --tenant $TenantId)" } }
-    $t = Test-PimSignedInToken -Token $tok -TenantId $TenantId
+    $t = Test-PimSignedInToken -Token $tok -TenantId $TenantId -AllowedAppId "$($a.supportAppId)"
     $tok = $null
     if (-not $t.ok) { return $t }
     return @{ ok = $true; reason = $a.reason; userName = $(if ($t.userName) { $t.userName } else { $a.userName }); objectId = $t.objectId
-              tenantId = "$TenantId".Trim().ToLowerInvariant(); subscriptionId = "$SubscriptionId".Trim().ToLowerInvariant() }
+              tenantId = "$TenantId".Trim().ToLowerInvariant(); subscriptionId = "$SubscriptionId".Trim().ToLowerInvariant(); supportAppId = "$($a.supportAppId)" }
 }
 
 function Set-PimSignedInGlobals {
@@ -179,8 +218,12 @@ function Connect-PimSignedInSql {
     if ($conf.Count) { throw "REFUSED: $($conf -join ', ') set in this session -- the SQL token would be minted for that identity, not the signed-in user. $(Get-PimSignedInConflictHint -Names $conf)" }
     if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { throw 'Connect-PimSignedInSql: engine\_shared\PIM-Rest.ps1 is not loaded.' }
     Set-PimSignedInGlobals -TenantId $TenantId
+    $allowApp = ''
+    if (Get-PimSupportAppSession) {
+        try { $acct = ((az account show -o json 2>$null) | Out-String | ConvertFrom-Json); if ("$($acct.user.type)" -ieq 'servicePrincipal') { $allowApp = "$($acct.user.name)" } } catch { }
+    }
     $tok = Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId
-    $t = Test-PimSignedInToken -Token "$tok" -TenantId $TenantId
+    $t = Test-PimSignedInToken -Token "$tok" -TenantId $TenantId -AllowedAppId $allowApp
     $tok = $null
     if (-not $t.ok) { throw "SQL as the signed-in user: $($t.reason)" }
     $global:PIM_SetupActor = $(if ($t.userName) { $t.userName } else { $t.objectId })

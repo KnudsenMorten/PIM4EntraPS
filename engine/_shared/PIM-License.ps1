@@ -374,7 +374,7 @@ Function Test-PimProFeature {
     if ($blockReason) {
         if (-not $Quiet -and -not $script:PimLicenseWarned["$Feature|$TenantId"]) {
             $script:PimLicenseWarned["$Feature|$TenantId"] = $true
-            Write-Host "[Pro] '$Feature' requires a PIM4EntraPS Pro license -- $blockReason. Core features continue to work normally." -ForegroundColor Yellow
+            Write-Host "[Pro] '$Feature' requires a PIM Manager Pro license -- $blockReason. Core features continue to work normally." -ForegroundColor Yellow
         }
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
             Write-PimAuditEvent -Action 'license.blocked' -Target $Feature -After @{ reason = $blockReason; tenantId = "$TenantId" }
@@ -477,7 +477,7 @@ Function Get-PimLicenseStatusText {
 # the Manager serves the same verdict on GET /api/license (Get-PimLicenseApiBody) for the Settings > Licence section and
 # the MSP-page banners.
 # =====================================================================================================================
-$script:PimLicenseContact = 'mok@mortenknudsen.net'
+$script:PimLicenseContact = 'info@invardia.com'
 # Operator 2026-10-01: "https://invardia.com ... is the website for buying pro version. it is also the support page
 # (portal.invardia.com) for support to paid licenses".
 $script:PimProBuyUrlDefault  = 'https://invardia.com'
@@ -530,7 +530,7 @@ Function Test-PimProLicence {
           reason = plain words ("no Pro licence is installed", "the licence expired 2027-09-19 ...", "the licence is for
                    another tenant ...").
           message= the one line a job logs, an API refusal carries and the GUI shows:
-                   "<Label> requires a PIM4EntraPS Pro licence -- <reason>. Contact <contact> for a licence; register it with: <command>"
+                   "<Label> requires a PIM Manager Pro licence -- <reason>. Contact <contact> for a licence; register it with: <command>"
         It NEVER consults Test-PimProLicenseEnforced.
     .PARAMETER LicenseText
         The stored document (pim.Settings['License'] as text). When BOUND it is used as-is (empty = nothing stored). When
@@ -620,7 +620,7 @@ Function Test-PimProLicence {
         $out.reason = 'no Pro licence is installed'
     }
     if (-not $out.ok) {
-        $out.message = ("{0} requires a PIM4EntraPS Pro licence -- {1}. Contact {2} for a licence; register it with: {3}" -f $Label, $out.reason, $out.contact, $out.command)
+        $out.message = ("{0} requires a PIM Manager Pro licence -- {1}. Contact {2} for a licence; register it with: {3}" -f $Label, $out.reason, $out.contact, $out.command)
     } elseif ($out.grace) {
         $out.message = ("{0}: licence expired {1}, grace until {2} -- contact {3} to renew" -f $Label, $out.validTo, $out.graceUntil, $out.contact)
     } else {
@@ -658,7 +658,7 @@ Function Test-PimMspLicense {
 Function Invoke-PimMspLicenseGate {
     <#
       REQ-Y. The MSP jobs' gate: runs Test-PimMspLicense and logs ONE line through -Log (param($message, $level)):
-        not ok -> ERROR  "MSP <role> requires a PIM4EntraPS Pro licence -- <reason>. Contact ... ; register it with: ..."
+        not ok -> ERROR  "MSP <role> requires a PIM Manager Pro licence -- <reason>. Contact ... ; register it with: ..."
         grace  -> WARN   "MSP <role>: licence expired <date>, grace until <date> -- contact ... to renew"
         ok     -> INFO   "MSP <role>: Pro licence for '<customer>', valid until <date>"
       Returns the Test-PimMspLicense result; the caller refuses (exit non-zero, nothing published / pulled) when not ok.
@@ -680,7 +680,7 @@ Function Invoke-PimMspLicenseGate {
         $cmd = Get-PimLicenseRegisterCommand -SqlServer $SqlServer -TenantId $TenantId
         $r = [pscustomobject]@{ ok = $false; status = 'Invalid'; grace = $false; customer = ''; sku = ''; validTo = ''; graceUntil = ''; tenantIds = @(); tenantId = "$TenantId"; role = $roleWord
             reason = "the licence check failed ($($_.Exception.Message))"; contact = "$script:PimLicenseContact"; command = $cmd
-            message = ("{0} requires a PIM4EntraPS Pro licence -- the licence check failed ({1}). Contact {2} for a licence; register it with: {3}" -f $(if ($Role -eq 'Slave') { 'Managed tenant (MSP)' } else { 'Managing tenant (MSP)' }), $_.Exception.Message, $script:PimLicenseContact, $cmd) }
+            message = ("{0} requires a PIM Manager Pro licence -- the licence check failed ({1}). Contact {2} for a licence; register it with: {3}" -f $(if ($Role -eq 'Slave') { 'Managed tenant (MSP)' } else { 'Managing tenant (MSP)' }), $_.Exception.Message, $script:PimLicenseContact, $cmd) }
     }
     $lvl = if (-not $r.ok) { 'ERROR' } elseif ($r.grace) { 'WARN' } else { 'INFO' }
     if ($Log) { & $Log $r.message $lvl }
