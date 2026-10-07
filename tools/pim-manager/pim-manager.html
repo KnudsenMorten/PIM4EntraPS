@@ -1094,6 +1094,7 @@
     <div class="tab" data-tab="accessrequests" title="Requests to have a disabled admin account enabled for a while (request for authorization), the company reviews of external consultants, and an IT override for a longer window.">Access requests</div>
     <div class="tab" data-tab="grid" title="The full editable grid of every desired-state row — for power users who want direct, spreadsheet-style editing across all entities.">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="authoring" title="Bulk authoring — move an admin, clone a definition or Azure-RBAC delegation to many targets, bulk-attach, and import admins, each with a preview before commit.">Authoring</div>
+    <div class="tab" data-tab="activator" title="Deploy the PIM Activator browser extension: Intune remediation, Edge for Business, the Entra apps, the settings catalog and server scripts.">PIM Activator</div>
     <div class="tab" data-tab="getstarted" title="Get started: the steps that make this environment work, each marked done or still open.">Get Started <span id="getStartedBadge" class="badge" style="display:none;background:#cf222e">!</span></div>
     <div class="tab" data-tab="onboarding" title="Onboard a new admin — derive the name and metadata, place them in the right groups, and (for sensitive grants) route through second-person approval.">Onboarding</div>
     <div class="tab" data-tab="departments" title="Departments and their owners -- who approves and who is mailed for every delegation a department sponsors. Import them from Entra, or assign owners in bulk by uploading a CSV file.">Departments &amp; owners</div>
@@ -1152,6 +1153,7 @@
        backed by /api/home (fast tiles) + /api/home?include=heavy (live tiles), and
        every tile links to the tab that owns its detail. -->
   <div id="getstartedTab" class="tab-panel"><div id="getStartedBody" style="max-width:1100px;margin:0 auto;"></div></div>
+  <div id="activatorTab" class="tab-panel"><div id="activatorBody" style="max-width:1100px;"></div></div>
   <div id="homeTab" class="tab-panel active">
     <!-- REQ-Y: the MSP licence notice (renderMspLicenceBanners) -- empty and hidden unless MSP mode lacks a licence. -->
     <div class="msp-lic-banner" data-page="home" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
@@ -2563,6 +2565,8 @@
         { tab: 'configbackups', label: 'Backups & restore', desc: 'The daily configuration backup, Back up now and pin; restore what you pick from a backup (SuperAdmin) -- staged as pending changes' },
         // §96.6 / GUARD-1.6 (operator 2026-10-06: "I need a way to release guards"): one page for every guard.
         { tab: 'guards',   label: 'Guards',      desc: 'Every protective guard: clear or holding, what it holds right now, and its release -- this exact plan, one run or until a time (at most 24 h), SuperAdmin' },
+        // 97.2 (operator 2026-10-07: "make a new menu item, PIM Activator, under Operation").
+        { tab: 'activator', label: 'PIM Activator', desc: 'Deploy the browser extension admins activate with: Intune remediation, Edge for Business, the Entra apps (PROD and TEST), the settings catalog, scripts for servers' },
         { tab: 'support',  label: 'Support',     desc: 'Diagnostics and help' },
       ] },
     { id: 'audit', label: 'Settings',
@@ -2941,6 +2945,7 @@
     syncNavGroups(name);
     if (name === 'home') renderHome();
     if (name === 'getstarted') renderGetStarted();
+    if (name === 'activator') renderActivator();
     if (name === 'map') renderAccessMap();
     // (the permission templates moved to Workload templates, operator 2026-10-05)
     if (name === 'grid') renderGridList();
@@ -12947,8 +12952,8 @@
     { id: 'firstrun', title: 'First run', required: true, tab: 'jobs', action: 'Open Jobs',
       what: 'The engine applies your configuration. Run it now and see what it did.',
       check: c => { const r = c.jobs && c.jobs.lastRun; return { done: !!(r && r.ok), note: r ? ((r.ok ? 'last run ok: ' : 'last run failed: ') + (r.name || '')) : 'no run yet' }; } },
-    { id: 'activator', title: 'PIM Activator', required: false, tab: 'home', action: 'Read about the PIM Activator',
-      what: 'The browser extension admins activate with. Deployment (Intune remediation, Edge for Business, the apps) gets its own page under Operations.',
+    { id: 'activator', title: 'PIM Activator', required: false, tab: 'activator', action: 'Open Operations > PIM Activator',
+      what: 'The browser extension admins activate with: the Entra apps, the settings catalog, the Intune remediation, Edge for Business and servers -- all on one page.',
       check: () => ({ done: false, note: 'optional' }) },
     { id: 'discovery', title: 'Discovery', required: false, tab: 'discovery', action: 'Open Discovery',
       what: 'Let PIM find what is new (Azure subscriptions, Power BI workspaces, roles) and offer it to you.',
@@ -13006,6 +13011,103 @@
     const next = host.querySelector('.gsNext'); if (next) next.onclick = () => renderGetStarted(steps[Math.min(total - 1, idx + 1)].id);
     const go = host.querySelector('.gsGo'); if (go) go.onclick = () => { try { switchTab(go.dataset.tab); } catch (_) { } };
     const re = host.querySelector('.gsRecheck'); if (re) re.onclick = () => renderGetStarted(cur.id);
+  }
+
+  // ===================================================================================================================
+  // 97.2 OPERATIONS > PIM ACTIVATOR (operator 2026-10-07: "a) Easy Setup of Intune (remediation jobs) b) Easy Setup of
+  // Edge for Business c) Easy setup of the entra apps ... for PROD and TEST d) Easy build of the catalog for the settings
+  // e) download & syntax for scripts ... for servers ... make it optional to which group or all devices or all users").
+  // The Manager is read-only towards the tenant: this page READS what exists, BUILDS the filled files and the exact
+  // commands, and an admin runs / uploads them. Edge is the supported path (Edge for Business + the Intune remediation);
+  // the remediation writes the settings for Edge AND Chrome.
+  // ===================================================================================================================
+  function actDownload(name, text) {
+    try { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); } catch (_) { }
+  }
+  function actCode(id, text) {
+    return '<div style="position:relative;"><pre id="' + id + '" style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;font-size:11.5px;white-space:pre-wrap;word-break:break-all;margin:6px 0;">' + escapeHtml(text) + '</pre>' +
+      '<button class="actCopy btn-sec"data-src="' + id + '" style="position:absolute;top:4px;right:4px;font-size:11px;">Copy</button></div>';
+  }
+  async function renderActivator() {
+    const host = document.getElementById('activatorBody'); if (!host) return;
+    host.innerHTML = '<div style="padding:16px;color:#57606a;">Reading the PIM Activator setup of this tenant&hellip;</div>';
+    let d = null;
+    try { d = await api('GET', '/api/activator'); } catch (e) { host.innerHTML = '<div style="color:#cf222e;padding:12px;">Could not read the Activator setup: ' + escapeHtml(e.message) + '</div>'; return; }
+    const apps = d.apps || {}, prod = apps.Released || {}, test = apps.Test || {};
+    const appRow = a => '<tr><td style="padding:4px 8px;"><b>' + escapeHtml(a.name || '') + '</b> <span style="color:#8c959f;font-size:11px;">' + escapeHtml(a.label || '') + '</span></td>' +
+      '<td style="padding:4px 8px;">' + (a.found ? '<span style="color:#1a7f37;">&#10003; exists</span> <code style="font-size:11px;">' + escapeHtml(a.appId) + '</code>' : (a.readError ? '<span style="color:#9a6700;">could not read: ' + escapeHtml(a.readError) + '</span>' : '<span style="color:#cf222e;">! not created yet</span>')) + '</td>' +
+      '<td style="padding:4px 8px;">' + (a.found ? (a.redirectOk ? '<span style="color:#1a7f37;">&#10003; redirect URIs</span>' : '<span style="color:#cf222e;">! redirect URIs missing</span>') : '') + '</td></tr>';
+    const sec = (n, t, inner) => '<div class="actSection" style="border:1px solid #d0d7de;border-radius:8px;padding:12px 14px;margin:0 0 12px;background:#fff;"><div style="font-size:11px;letter-spacing:.6px;color:#0969da;font-weight:600;">' + n + '</div><h3 style="margin:2px 0 6px;">' + t + '</h3>' + inner + '</div>';
+    host.innerHTML =
+      '<h2 style="margin:6px 0 4px;">PIM Activator</h2>' +
+      '<div style="font-size:12.5px;color:#57606a;margin-bottom:10px;">The browser extension your admins activate PIM with. Edge is the supported path here: the <b>Edge management service</b> installs it, an <b>Intune remediation</b> gives it its settings (for Edge and Chrome). Chrome on its own is installed with the scripts plus an Intune policy. This page reads what exists in tenant <code>' + escapeHtml(d.tenantId || '') + '</code>, builds the files and the exact commands; you run them.</div>' +
+      sec('1', 'The Entra apps (PROD and TEST)', '<div style="font-size:12.5px;margin-bottom:6px;">The extension signs in through these app registrations. PROD for everyone; TEST only for the people who try new versions first.</div>' +
+        '<table style="border-collapse:collapse;font-size:12.5px;">' + appRow(prod) + appRow(test) + '</table>' +
+        '<div style="font-size:12px;color:#57606a;margin-top:6px;">Create or repair them (as Application Administrator + Privileged Role Administrator), from <code>tools\\pim-activator</code>:</div>' +
+        '<div id="actAppCmds"></div>') +
+      sec('2', 'Settings catalog', '<div style="font-size:12.5px;margin-bottom:6px;">What the extension shows: this tenant, the app it signs in with, and the defaults. Filled in from this environment &mdash; check it, change what you want.</div>' +
+        '<div style="display:grid;grid-template-columns:200px 1fr;gap:6px 10px;font-size:12.5px;max-width:760px;align-items:center;">' +
+          '<label>Name shown to admins</label><input id="actName" value="' + escapeHtml(d.environmentName || 'PIM') + '">' +
+          '<label>Channel</label><select id="actChannel"><option value="Released">PROD (released)</option><option value="Test">TEST</option></select>' +
+          '<label>App (client id)</label><input id="actClientId" value="' + escapeHtml(prod.appId || '') + '" placeholder="the PIM Activator app id">' +
+          '<label>Default justification</label><input id="actJust" value="Change in infrastructure">' +
+          '<label>Default duration (hours)</label><input id="actHours" type="number" min="1" max="24" value="8" style="width:80px;">' +
+          '<label>Group prefix (optional)</label><input id="actPrefix" placeholder="e.g. PIM- (only groups starting with this are listed)">' +
+          '<label>Auto-activate at most (optional)</label><input id="actAuto" type="number" min="0" max="100" placeholder="no limit" style="width:100px;">' +
+          '<label>Confirm when selecting (optional)</label><input id="actBulk" type="number" min="1" max="100" placeholder="no confirm" style="width:100px;">' +
+          '<label>Browsers</label><span><label><input type="checkbox" id="actEdge" checked> Edge</label> &nbsp; <label><input type="checkbox" id="actChrome" checked> Chrome</label></span>' +
+        '</div>') +
+      sec('3', 'Intune remediation (settings + repair on request)', '<div style="font-size:12.5px;margin-bottom:6px;">Writes the catalog above to every targeted device, every day. Who gets it:</div>' +
+        '<div style="font-size:12.5px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">' +
+          '<label><input type="radio" name="actTarget" value="group" checked> a group <input id="actGroupId" placeholder="group object id" style="width:290px;"></label>' +
+          '<label><input type="radio" name="actTarget" value="AllDevices"> all devices</label>' +
+          '<label><input type="radio" name="actTarget" value="AllUsers"> all users</label></div>' +
+        '<div style="margin-top:8px;"><button id="actBuild" class="primary">Build the remediation scripts</button> <span id="actBuildMsg" style="font-size:12px;"></span></div>' +
+        '<div id="actBuildOut"></div>') +
+      sec('4', 'Edge for Business (installs the extension)', '<div style="font-size:12.5px;">Microsoft 365 admin center &rsaquo; Settings &rsaquo; Microsoft Edge &rsaquo; Configuration policies (a <b>Cloud</b> policy assigned to the user group):</div>' +
+        '<ol style="font-size:12.5px;margin:6px 0 6px 18px;padding:0;"><li><b>Settings</b> &rsaquo; Add setting <b>ExtensionInstallSources</b> = <code>' + escapeHtml((d.edgeReleased || {}).installSources || '') + '</code></li>' +
+        '<li><b>Managed extensions</b> &rsaquo; <b>Import JSON</b> &rsaquo; paste the JSON below (Force, the update URL, &ldquo;use this update URL&rdquo;, minimum version ' + escapeHtml(d.minimumVersion || '') + ')</li>' +
+        '<li>One policy per <b>audience</b>: the service does not merge extension lists. Everyone: PROD only. Test users: a higher-priority policy with BOTH. A tenant-wide policy that force-installs other extensions must also carry these entries.</li></ol>' +
+        '<div style="font-size:12px;font-weight:600;">Everyone (PROD)</div>' + actCode('actEdgeProd', (d.edgeReleased || {}).extensionSettingsJson || '') +
+        '<div style="font-size:12px;font-weight:600;">Test users (PROD + TEST)</div>' + actCode('actEdgeBoth', (d.edgeBoth || {}).extensionSettingsJson || '')) +
+      sec('5', 'Servers and devices without Intune', '<div style="font-size:12.5px;">Run as administrator on the machine (writes the install + settings policies for Edge and Chrome), from <code>tools\\pim-activator</code>:</div><div id="actServerCmd"></div>' +
+        '<div style="font-size:12px;color:#57606a;">Domain-joined estates without Intune: <code>Deploy-PimActivatorHybrid.ps1 -Target DomainGpo</code> writes the same through a GPO.</div>');
+    const wireCopy = () => host.querySelectorAll('.actCopy').forEach(b => b.onclick = () => { const el = document.getElementById(b.dataset.src); try { navigator.clipboard.writeText(el ? el.textContent : ''); sharedToast('Copied'); } catch (_) { } });
+    const showCmds = (c) => {
+      document.getElementById('actAppCmds').innerHTML = actCode('actAppProdCmd', c.appProd) + actCode('actAppTestCmd', c.appTest);
+      document.getElementById('actServerCmd').innerHTML = actCode('actServerCmdText', c.server);
+      wireCopy();
+    };
+    const tid = String(d.tenantId || '');
+    showCmds({ appProd: ".\\Deploy-PimActivatorBackend.ps1 -TenantId " + tid + " -Channel Released -DisplayName 'PIM Activator'",
+               appTest: ".\\Deploy-PimActivatorBackend.ps1 -TenantId " + tid + " -Channel Test -ExtensionId " + escapeHtml(test.extensionId || '') + " -DisplayName 'PIM Activator (TEST)'",
+               server: ".\\Deploy-PimActivatorClient.ps1 -Scope Machine -Browser Both -Channel Released" + (prod.appId ? ' -ClientId ' + prod.appId : '') });
+    const ch = document.getElementById('actChannel');
+    if (ch) ch.onchange = () => { const cid = document.getElementById('actClientId'); if (cid) cid.value = (ch.value === 'Test' ? test.appId : prod.appId) || ''; };
+    const btn = document.getElementById('actBuild');
+    if (btn) btn.onclick = async () => {
+      const msg = document.getElementById('actBuildMsg'), out = document.getElementById('actBuildOut');
+      const tgt = (host.querySelector('input[name="actTarget"]:checked') || {}).value || 'group';
+      const body = { channel: ch.value, name: document.getElementById('actName').value, clientId: document.getElementById('actClientId').value.trim(),
+        defaultJustification: document.getElementById('actJust').value, defaultDurationHours: document.getElementById('actHours').value,
+        prefix: document.getElementById('actPrefix').value, autoActivateMaxGroups: document.getElementById('actAuto').value, bulkActivateConfirmThreshold: document.getElementById('actBulk').value,
+        browsers: [document.getElementById('actEdge').checked ? 'Edge' : '', document.getElementById('actChrome').checked ? 'Chrome' : ''].filter(Boolean),
+        target: tgt === 'group' ? document.getElementById('actGroupId').value.trim() : tgt };
+      msg.textContent = 'Building…'; msg.style.color = '#57606a';
+      let r;
+      try { r = await api('POST', '/api/activator/build', body); } catch (e) { msg.textContent = 'Not built: ' + e.message; msg.style.color = '#cf222e'; return; }
+      msg.textContent = 'Built for ' + (r.channel === 'Test' ? 'TEST' : 'PROD') + '.'; msg.style.color = '#1a7f37';
+      out.innerHTML = '<div style="margin-top:8px;font-size:12.5px;">1. Download both files (the settings are filled in, identically): ' +
+        '<button id="actDlDetect" class="btn-sec">Detect-PimActivator.ps1</button> <button id="actDlRemediate" class="btn-sec">Remediate-PimActivator.ps1</button></div>' +
+        '<div style="font-size:12.5px;margin-top:6px;">2. Upload them to Intune (in the folder with the two files and <code>Publish-PimActivatorRemediation.ps1</code>):</div>' + actCode('actPublishCmd', r.commands.remediation) +
+        '<div style="font-size:12px;color:#57606a;">Or in Intune: Devices &rsaquo; Scripts and remediations &rsaquo; Create &rsaquo; the two files, run as SYSTEM, 64-bit.</div>' +
+        '<details style="font-size:12px;margin-top:6px;"><summary>The catalog that was built</summary>' + actCode('actCatalog', r.catalog) + '</details>';
+      document.getElementById('actDlDetect').onclick = () => actDownload('Detect-PimActivator.ps1', r.detect);
+      document.getElementById('actDlRemediate').onclick = () => actDownload('Remediate-PimActivator.ps1', r.remediate);
+      document.getElementById('actServerCmd').innerHTML = actCode('actServerCmdText', r.commands.server);
+      wireCopy();
+    };
+    wireCopy();
   }
 
   async function renderOnboarding() {

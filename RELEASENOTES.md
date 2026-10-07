@@ -13,6 +13,16 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.526 -- 2026-10-07
+
+- **Operations › PIM Activator.** One page to deploy the browser extension admins activate with:
+  - **the Entra apps**, PROD and TEST: whether each exists with the right redirect addresses, and the command that creates or repairs it;
+  - **the settings catalog**, filled in from this environment (name, app, default justification and duration, optional group prefix and limits);
+  - **the Intune remediation**: Build gives you both scripts with the settings filled in, ready to download, plus the upload command, targeted at a group, all devices or all users;
+  - **Edge for Business**: the ready JSON for everyone (PROD) and for test users (PROD + TEST);
+  - **servers and devices without Intune**: the exact install command.
+- The remediation upload script can now target all devices or all users, not only a group, and no longer needs any PowerShell module: you sign in in the browser and it asks only for the Intune permission it uses.
+
 ## 2.4.525 -- 2026-10-07
 
 - **Get Started.** A new menu item guides a new environment through the steps that make it work: licence, engine permissions, mail sender, departments and owners, roles, admin accounts, access mapping, policies, alert recipients, break-glass accounts and a first run, plus the optional PIM Activator and discovery. Each step is marked done or still open from your own data, with a progress bar, and opens the page that does the work. The menu shows a red **!** while a required step is still open.

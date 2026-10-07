@@ -1853,6 +1853,9 @@ if (Test-Path -LiteralPath $tenantSync) { . $tenantSync }
 # process never registers its handler (Register-PimActiveAssignmentsSnapshotHandler) and never calls it.
 $_activeAssignLib = Join-Path $solutionRoot 'engine\_shared\PIM-ActiveAssignments.ps1'
 if (Test-Path -LiteralPath $_activeAssignLib) { . $_activeAssignLib }
+# 97.2 Operations > PIM Activator: the pure builder (filled Remediation pair, Edge JSON, catalog, commands).
+$_activatorBuildLib = Join-Path $solutionRoot 'tools\pim-activator\_PimActivatorBuild.ps1'
+if (Test-Path -LiteralPath $_activatorBuildLib) { . $_activatorBuildLib }
 # Drift page (2026-09-14): the drift SNAPSHOT reader (engine/_shared/PIM-DriftSnapshot.ps1). The plan itself runs ONLY in
 # the scheduler (job 'drift-snapshot'); this process reads pim.TenantCache 'drift' and queues a refresh -- it never
 # registers the handler (Register-PimDriftSnapshotHandler) and never calls Invoke-PimDriftSnapshot.
@@ -11131,6 +11134,59 @@ function Handle-Request {
         # landing-page tiles. ?include=heavy adds the live active-assignments + access
         # reviews tiles (the GUI lazy-loads those after the fast tiles render). Every
         # tile is real-data-or-honest-empty; one bad source never blanks the page.
+        # 97.2 (operator 2026-10-07: "make a new menu item, PIM Activator, under Operation"): what this environment has
+        # (tenant, the PROD / TEST apps and their redirect URIs) and the defaults for the builder. Read-only.
+        if ($path -eq '/api/activator' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Get-PimActivatorChannel -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the PIM Activator builder (tools/pim-activator/_PimActivatorBuild.ps1) is not loaded in this Manager' }; return 503 }
+            $tid = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $tid) { $tid = "$($global:PIM_TenantId)".Trim() }; if (-not $tid) { $tid = "$env:PIM_TenantId".Trim() }
+            $envName = ''; try { $en = Get-PimSetting -Name 'EnvironmentName'; if ($en -is [string]) { $envName = $en.Trim() } elseif ($en -and $en.PSObject.Properties['name']) { $envName = "$($en.name)".Trim() } } catch { }
+            $apps = [ordered]@{}
+            foreach ($c in 'Released', 'Test') {
+                $ch = Get-PimActivatorChannel -Channel $c
+                $a = [ordered]@{ channel = $c; label = $ch.label; name = $ch.appName; extensionId = $ch.id; found = $false; appId = ''; redirectOk = $false; readError = '' }
+                try {
+                    $esc = $ch.appName -replace "'", "''"
+                    $r = @((Invoke-PimGraph -Path "/applications?`$filter=displayName eq '$esc'&`$select=appId,displayName,spa").value)
+                    if ($r.Count) {
+                        $a.found = $true; $a.appId = "$($r[0].appId)"
+                        $uris = @($r[0].spa.redirectUris)
+                        $a.redirectOk = [bool](@($uris | Where-Object { "$_" -like "*$($ch.id)*" }).Count)
+                    }
+                } catch { $a.readError = "$($_.Exception.Message)" }
+                $apps[$c] = $a
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
+                tenantId = $tid; environmentName = $envName; apps = $apps
+                edgeReleased = (Get-PimActivatorEdgePolicy -Channels @('Released')); edgeBoth = (Get-PimActivatorEdgePolicy -Channels @('Released', 'Test'))
+                minimumVersion = $script:PimActivatorMinimumVersion })
+            return 200
+        }
+        # 97.2: build the filled Remediation pair + the commands for the choices on the page. Generates text only -- nothing
+        # is written to the tenant (the Manager stays read-only; an admin runs the commands / uploads the files).
+        if ($path -eq '/api/activator/build' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Get-Command Set-PimActivatorRemediationSettings -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the PIM Activator builder is not loaded in this Manager' }; return 503 }
+            $b = Read-RequestJson -Request $req
+            try {
+                $channel = if ("$($b.channel)" -ieq 'Test') { 'Test' } else { 'Released' }
+                $tid = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $tid) { $tid = "$($global:PIM_TenantId)".Trim() }; if (-not $tid) { $tid = "$env:PIM_TenantId".Trim() }
+                $catalog = New-PimActivatorCatalog -Name "$($b.name)" -TenantId $tid -ClientId "$($b.clientId)" -DefaultJustification $(if ("$($b.defaultJustification)".Trim()) { "$($b.defaultJustification)" } else { 'Change in infrastructure' }) `
+                    -DefaultDurationHours $(if ("$($b.defaultDurationHours)" -match '^\d+$') { [int]$b.defaultDurationHours } else { 8 }) -Prefix "$($b.prefix)" -EntraPrefix "$($b.entraPrefix)" -AzurePrefix "$($b.azurePrefix)"
+                $auto = if ("$($b.autoActivateMaxGroups)" -match '^\d+$') { [int]$b.autoActivateMaxGroups } else { $null }
+                $bulk = if ("$($b.bulkActivateConfirmThreshold)" -match '^\d+$') { [int]$b.bulkActivateConfirmThreshold } else { $null }
+                $browsers = @(@($b.browsers) | Where-Object { $_ }); if (-not $browsers.Count) { $browsers = @('Edge', 'Chrome') }
+                $dir = Join-Path $solutionRoot 'tools\pim-activator\intune-remediation'
+                $det = Set-PimActivatorRemediationSettings -Text ([IO.File]::ReadAllText((Join-Path $dir 'Detect-PimActivator.ps1'))) -Channel $channel -Browsers $browsers -CatalogJson $catalog -AutoActivateMaxGroups $auto -BulkActivateConfirmThreshold $bulk
+                $rem = Set-PimActivatorRemediationSettings -Text ([IO.File]::ReadAllText((Join-Path $dir 'Remediate-PimActivator.ps1'))) -Channel $channel -Browsers $browsers -CatalogJson $catalog -AutoActivateMaxGroups $auto -BulkActivateConfirmThreshold $bulk
+                $cmd = Get-PimActivatorCommands -TenantId $tid -Channel $channel -Target "$($b.target)" -ClientId "$($b.clientId)"
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; channel = $channel; catalog = $catalog; detect = $det; remediate = $rem; commands = $cmd })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
+                return 400
+            }
+        }
         if ($path -eq '/api/home' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             $heavy = $false
