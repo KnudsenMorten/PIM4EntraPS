@@ -1,4 +1,4 @@
-﻿<#
+<#
   PIM4EntraPS -- ACTIVE-ASSIGNMENTS SNAPSHOT (REQUIREMENTS §70.1b option 2).
 
   🔴 WHY THIS FILE EXISTS. The Manager serves every HTTP request on ONE loop. GET
@@ -1011,4 +1011,50 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
     }
     if ("$($Entry.error)".Trim()) { $view['error'] = "$($Entry.error)" }
     return $view
+}
+
+# 2026-10-07: the MANAGED identity shared by the engine's drift read and Review current delegations (both load this file).
+function ConvertTo-PimManagedIdentity {
+    <#
+      PURE. One normalised identity for a live assignment, shared by the engine's drift read (what it MATCHED to a definition)
+      and the Review current delegations rows (what is live), so the two meet exactly:
+        g|<principalId>|<groupId>|<member|owner>                       PIM for Groups
+        r|<principalId>|<roleDefinitionGuid>|<directoryScopeId or />   Entra role
+        a|<principalId>|<roleDefinitionGuid>|<azure scope>             Azure role
+      '' when a part is missing (never a partial identity).
+    #>
+    param([string]$Kind, [string]$PrincipalId, [string]$GroupId = '', [string]$AccessId = '', [string]$RoleDefinitionId = '', [string]$Scope = '')
+    $p = "$PrincipalId".Trim().ToLowerInvariant(); if (-not $p) { return '' }
+    $guid = { param($v) $s = "$v".Trim().TrimEnd('/'); if ($s -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$') { $Matches[1].ToLowerInvariant() } else { $s.ToLowerInvariant() } }
+    switch ($Kind) {
+        'g' { $g = "$GroupId".Trim().ToLowerInvariant(); if (-not $g) { return '' }; $a = "$AccessId".Trim().ToLowerInvariant(); if (-not $a) { $a = 'member' }; return "g|$p|$g|$a" }
+        'r' { $r = & $guid $RoleDefinitionId; if (-not $r) { return '' }; $s = "$Scope".Trim().ToLowerInvariant(); if (-not $s) { $s = '/' }; return "r|$p|$r|$s" }
+        'a' { $r = & $guid $RoleDefinitionId; $s = "$Scope".Trim().TrimEnd('/').ToLowerInvariant(); if (-not $r -or -not $s) { return '' }; return "a|$p|$r|$s" }
+    }
+    return ''
+}
+
+function Get-PimManagedLiveIdentity {
+    <# PURE. The identity of one LIVE engine item (a provider's live row), or ''. Field names as the providers carry them. #>
+    param([AllowNull()][object]$Live)
+    if ($null -eq $Live) { return '' }
+    $f = { param($n) $v = $null; if ($Live -is [System.Collections.IDictionary]) { if ($Live.Contains($n)) { $v = $Live[$n] } } elseif ($Live.PSObject.Properties[$n]) { $v = $Live.$n }; "$v".Trim() }
+    $prin = & $f 'principalId'; if (-not $prin) { return '' }
+    if (& $f 'groupId') { return (ConvertTo-PimManagedIdentity -Kind 'g' -PrincipalId $prin -GroupId (& $f 'groupId') -AccessId (& $f 'accessId')) }
+    if (& $f 'AzScope') { return (ConvertTo-PimManagedIdentity -Kind 'a' -PrincipalId $prin -RoleDefinitionId (& $f 'roleDefinitionId') -Scope (& $f 'AzScope')) }
+    if (& $f 'roleDefinitionId') { return (ConvertTo-PimManagedIdentity -Kind 'r' -PrincipalId $prin -RoleDefinitionId (& $f 'roleDefinitionId') -Scope (& $f 'directoryScopeId')) }
+    return ''
+}
+
+function Get-PimActiveRowIdentity {
+    <# PURE. The identity of one Review current delegations row (PIM-ActiveAssignments shape), or ''. #>
+    param([AllowNull()][object]$Row)
+    if ($null -eq $Row) { return '' }
+    $f = { param($n) $v = $null; if ($Row -is [System.Collections.IDictionary]) { if ($Row.Contains($n)) { $v = $Row[$n] } } elseif ($Row.PSObject.Properties[$n]) { $v = $Row.$n }; "$v".Trim() }
+    switch (& $f 'type') {
+        'pim-for-groups' { return (ConvertTo-PimManagedIdentity -Kind 'g' -PrincipalId (& $f 'principalId') -GroupId (& $f 'groupId') -AccessId (& $f 'accessId')) }
+        'entra-role'     { return (ConvertTo-PimManagedIdentity -Kind 'r' -PrincipalId (& $f 'principalId') -RoleDefinitionId (& $f 'roleDefinitionId') -Scope (& $f 'directoryScopeId')) }
+        'azure-rbac'     { return (ConvertTo-PimManagedIdentity -Kind 'a' -PrincipalId (& $f 'principalId') -RoleDefinitionId (& $f 'roleDefinitionId') -Scope (& $f 'scope')) }
+    }
+    return ''
 }

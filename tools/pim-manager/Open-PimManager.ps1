@@ -16612,6 +16612,24 @@ function Handle-Request {
                     $body.rows = @($kept.ToArray())
                     $body['portalFiltered'] = $true
                 }
+                # 2026-10-07 (operator: "by default hide anything managed by pim manager ... this module is all about cleanup"):
+                # mark each row MANAGED when the engine's last drift read matched it to a definition (pim.TenantCache
+                # 'managed-live'). No list yet = managedKnown false -- the page then hides nothing and says why.
+                $body['managedKnown'] = $false
+                try {
+                    $ml = if (Get-Command Get-PimTenantCacheEntry -ErrorAction SilentlyContinue) { Get-PimTenantCacheEntry -Kind 'managed-live' } else { $null }
+                    if ($ml -and (Get-Command Get-PimActiveRowIdentity -ErrorAction SilentlyContinue)) {
+                        $mset = New-Object 'System.Collections.Generic.HashSet[string]'
+                        foreach ($i in @($ml.identities)) { if ("$i") { [void]$mset.Add("$i".ToLowerInvariant()) } }
+                        foreach ($row in @($body.rows)) {
+                            $isM = $mset.Contains((Get-PimActiveRowIdentity -Row $row))
+                            if ($row -is [System.Collections.IDictionary]) { $row['managed'] = $isM } else { $row | Add-Member -NotePropertyName managed -NotePropertyValue $isM -Force }
+                        }
+                        $body['managedKnown'] = $true
+                        $body['managedComputedUtc'] = "$($ml.computedUtc)"
+                        $body['managedComplete'] = [bool]$ml.complete
+                    }
+                } catch { $body['managedError'] = "$($_.Exception.Message)" }
                 Write-JsonResponse -Response $resp -Status 200 -Body $body
                 return 200
             } catch {

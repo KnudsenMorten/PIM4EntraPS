@@ -339,8 +339,25 @@ function Invoke-PimDriftSnapshot {
     }
     } finally { $global:PIM_DriftReadPlan = $null }
     try { Add-PimDriftPayloadNames -ScopeResults @($results.ToArray()) } catch { Write-Warning "[drift-snapshot] names for drift items could not be resolved: $($_.Exception.Message)" }
+    # 2026-10-07: the live identities the engine MATCHED to a definition, for Review current delegations (managed / not).
+    # Kept apart from the drift document (it is large and the Drift page does not need it); complete = every scope read.
+    $script:PimLastManagedLive = Get-PimManagedLiveSet -ScopeResults @($results.ToArray()) -NowUtc $NowUtc
     $sw.Stop()
     return (ConvertTo-PimDriftSnapshotDocument -ScopeResults @($results.ToArray()) -NowUtc $NowUtc -DurationSeconds $sw.Elapsed.TotalSeconds)
+}
+
+function Get-PimManagedLiveSet {
+    <# PURE. { computedUtc; complete; scopes; identities[] } from the drift read's per-scope results (managedLive). #>
+    param([object[]]$ScopeResults = @(), [datetime]$NowUtc = [datetime]::UtcNow)
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    $complete = $true; $scopes = New-Object System.Collections.Generic.List[string]
+    foreach ($r in @($ScopeResults)) {
+        if ($null -eq $r) { continue }
+        if (-not (Get-PimDriftSnapshotField $r 'ok') -or (Get-PimDriftSnapshotField $r 'error')) { $complete = $false }
+        $scopes.Add("$(Get-PimDriftSnapshotField $r 'scope')")
+        foreach ($i in @(Get-PimDriftSnapshotField $r 'managedLive')) { if ("$i".Trim()) { [void]$set.Add("$i".Trim().ToLowerInvariant()) } }
+    }
+    return [ordered]@{ computedUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); complete = $complete; scopes = @($scopes.ToArray()); identities = @($set) }
 }
 
 # ===========================================================================
@@ -494,6 +511,11 @@ function Invoke-PimDriftSnapshotJob {
     $doc['source'] = 'scheduler'
     $doc['correlationId'] = "$($global:PIM_JobCorrelationId)"
     $where = Set-PimTenantCacheEntry -Kind $kind -Value $doc
+    # Review current delegations reads which live assignments are MANAGED from here (pim.TenantCache kind 'managed-live').
+    if ($script:PimLastManagedLive) {
+        try { [void](Set-PimTenantCacheEntry -Kind 'managed-live' -Value $script:PimLastManagedLive) }
+        catch { Write-Warning "[drift-snapshot] the managed list for Review current delegations was not stored: $($_.Exception.Message)" }
+    }
     $scopeDocs = @($doc.scopes)
     $failedNames = @($scopeDocs | Where-Object { -not $_.ok } | ForEach-Object { "$($_.scope)" })
     # REQ-U wave 2: live workload warnings (orphan group / unmanaged binding / wrong permissions) are drift too.
