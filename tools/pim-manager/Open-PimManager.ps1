@@ -282,6 +282,8 @@ if (Test-Path -LiteralPath $_permLib) { . $_permLib }
 # §79.13 SHARED PENDING CHANGES (engine/_shared/PIM-SharedPending.ps1): staged changes live in SQL
 # (pim.Settings['PendingChanges']), one per row key (the lock), visible to every Manager user.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-SharedPending.ps1')
+# §98 DEMO MODE (engine/_shared/PIM-DemoMode.ps1): the pure rules of the live-demo role (setting DemoMode, default off).
+. (Join-Path $solutionRoot 'engine\_shared\PIM-DemoMode.ps1')
 # §88 COMMIT WATCHER: every commit records the keys it changed; GET /api/commits says per key saved / applied / live.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-CommitWatch.ps1')
 # §82 RFA + consultant lifecycle (Pro): loaded only when present -- the Community payload has neither folder.
@@ -645,6 +647,24 @@ function Get-PimEasyAuthPrincipal {
     return ''
 }
 
+function Get-PimEasyAuthPrincipalExtras {
+    <#
+      §98: the OTHER names and the group object ids in the auth edge's X-MS-CLIENT-PRINCIPAL claims blob. Called only
+      after Get-PimEasyAuthPrincipal has trusted this request's principal, and used only to decide demo-group
+      membership -- never identity, never a role grant. @{ names; groups }; empty on anything unreadable.
+    #>
+    param([Parameter(Mandatory)][System.Net.HttpListenerRequest]$Request)
+    $out = @{ names = @(); groups = @() }
+    $raw = "$($Request.Headers['X-MS-CLIENT-PRINCIPAL'])".Trim()
+    if (-not $raw -or -not (Get-Command ConvertFrom-PimBase64Url -ErrorAction SilentlyContinue)) { return $out }
+    $bytes = ConvertFrom-PimBase64Url -Text $raw
+    if (-not $bytes) { return $out }
+    $blob = $null; try { $blob = [System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json } catch { return $out }
+    if (Get-Command Get-PimPrincipalNamesFromBlob -ErrorAction SilentlyContinue) { $out.names = @(Get-PimPrincipalNamesFromBlob -Blob $blob) }
+    $out.groups = @(@($blob.claims) | Where-Object { $_ -and "$($_.typ)" -in @('groups', 'http://schemas.microsoft.com/ws/2008/06/identity/claims/groups') -and "$($_.val)".Trim() } | ForEach-Object { "$($_.val)".Trim() })
+    return $out
+}
+
 # ---------------------------------------------------------------------------
 # Manager RBAC (LIFECYCLE-GOVERNANCE phase 7) -- Reader / Delegated / Admin / SuperAdmin.
 # Identity = the Easy Auth principal (hosted) or the Windows user (local loopback).
@@ -759,6 +779,131 @@ function Limit-PimManagerRoleByLicence {
     return @{ role = $cap.role; identity = $Resolved.identity; source = $cap.source }
 }
 
+# ---------------------------------------------------------------------------
+# §98 DEMO MODE (owner 2026-10-07). The pure rules live in engine/_shared/PIM-DemoMode.ps1; these are the live
+# halves: the setting (pim.Settings DemoMode + DemoGuestGroup, read through a 15 s cache like ManagerAccess), the
+# group membership (the sign-in token's group claim, else the group's member list from Graph, cached 5 min), and the
+# request gate in Handle-Request. With DemoMode OFF -- the default -- Get-PimManagerDemoConfig answers off and NOTHING
+# else here runs: no Graph call, no role change, no gate.
+# ---------------------------------------------------------------------------
+function Get-PimManagerDemoConfig {
+    # @{ on; group }. Fail direction: a store that cannot be read = OFF (the store being down already stops every write).
+    $nowUtc = [datetime]::UtcNow
+    if ($script:PimDemoConfigCache -and ($nowUtc - $script:PimDemoConfigCache.at).TotalSeconds -le 15) { return $script:PimDemoConfigCache.value }
+    $rawOn = $null; $rawGroup = $null
+    try {
+        if ($script:PimSqlCs -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
+            $rawOn    = Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name 'DemoMode'
+            $rawGroup = Get-PimSqlSetting -ConnectionString $script:PimSqlCs -Name 'DemoGuestGroup'
+        } elseif ($global:PIM_NamingConventions -is [System.Collections.IDictionary]) {
+            $rawOn    = $global:PIM_NamingConventions['DemoMode']
+            $rawGroup = $global:PIM_NamingConventions['DemoGuestGroup']
+        }
+    } catch { $rawOn = $null }
+    $on = $false; $grp = 'Invardia-Demo-Guests'
+    if (Get-Command Test-PimDemoModeValue -ErrorAction SilentlyContinue) {
+        $on  = [bool](Test-PimDemoModeValue -Value $rawOn)
+        $grp = Resolve-PimDemoGuestGroupName -Value $rawGroup
+    }
+    $v = @{ on = $on; group = $grp }
+    $script:PimDemoConfigCache = @{ at = $nowUtc; value = $v }
+    return $v
+}
+
+function Get-PimManagerDemoGroup {
+    <#
+      The demo guest group's object id + its (transitive) user members, from Graph through the Manager's own identity
+      (the same Invoke-PimGraphGetAll every tenant read uses). Cached 5 minutes per group name. A group named by its
+      object id is read by id. Returns @{ ok; id; members; error } -- ok=$false when it could not be read.
+    #>
+    param([Parameter(Mandatory)][string]$Group)
+    $nowUtc = [datetime]::UtcNow
+    $c = $script:PimDemoGroupCache
+    if ($c -and $c.group -eq $Group -and ($nowUtc - $c.at).TotalSeconds -le 300) { return $c.value }
+    $out = @{ ok = $false; id = ''; members = @(); error = '' }
+    try {
+        if (-not (Get-Command Invoke-PimGraphGetAll -ErrorAction SilentlyContinue)) { throw 'no Graph reader in this Manager' }
+        $gid = ''
+        if ($Group -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { $gid = $Group.ToLowerInvariant() }
+        else {
+            $flt = [uri]::EscapeDataString("displayName eq '$($Group.Replace("'", "''"))'")
+            $hits = @(foreach ($x in @(Invoke-PimGraphGetAll -Uri "https://graph.microsoft.com/v1.0/groups?`$filter=$flt&`$select=id,displayName")) { $x })   # flattens the comma-return
+            if ($hits.Count -ne 1) { throw ("the demo guest group was found {0} time(s) by its name (expected exactly once)" -f $hits.Count) }
+            $gid = "$($hits[0].id)".ToLowerInvariant()
+        }
+        $mem = @(foreach ($x in @(Invoke-PimGraphGetAll -Uri "https://graph.microsoft.com/v1.0/groups/$gid/transitiveMembers/microsoft.graph.user?`$select=id,userPrincipalName,mail,otherMails&`$top=999")) { $x })   # flattens the comma-return of Invoke-PimGraphGetAll
+        $out = @{ ok = $true; id = $gid; members = $mem; error = '' }
+    } catch { $out.error = "$($_.Exception.Message)" }
+    $script:PimDemoGroupCache = @{ at = $nowUtc; group = $Group; value = $out }
+    return $out
+}
+
+function Get-PimManagerDemoMembership {
+    <#
+      Is THIS request's signed-in person a demo viewer? @{ viewer; reason }. Hosted only (a local / break-glass Manager
+      is the operator's own console and never a demo). 🔒 With demo mode on, membership that cannot be determined
+      counts as membership -- the write is refused, loudly, rather than allowed.
+    #>
+    param([string]$Identity)
+    $cfg = Get-PimManagerDemoConfig
+    if (-not $cfg.on) { return @{ viewer = $false; reason = 'demo mode off' } }
+    if (-not $script:PimHosted) { return @{ viewer = $false; reason = 'not hosted' } }
+    if (-not "$Identity".Trim()) { return @{ viewer = $false; reason = 'no identity' } }
+    $names = New-Object System.Collections.Generic.List[string]
+    $names.Add("$Identity")
+    foreach ($n in @($script:CurrentRequestNames)) { if ("$n".Trim()) { $names.Add("$n") } }
+    $g = Get-PimManagerDemoGroup -Group "$($cfg.group)"
+    $claims = @($script:CurrentRequestGroupIds | Where-Object { "$_".Trim() })
+    if ($claims.Count -and $g.id) {
+        $hitClaim = Test-PimDemoGroupMember -Identities @($names.ToArray()) -ClaimGroupIds $claims -GroupId $g.id -Members @()
+        if ($hitClaim.member) { return @{ viewer = $true; reason = $hitClaim.via } }
+    }
+    if (-not $g.ok) {
+        if (-not $script:PimDemoGroupWarned) {
+            $script:PimDemoGroupWarned = $true
+            Write-Warning ("  [demo] demo mode is ON and the demo guest group could not be read ({0}) -- every signed-in person is treated as a demo viewer until it can (fail closed)." -f $g.error)
+        }
+        return @{ viewer = $true; reason = 'demo group membership could not be checked (fail closed)' }
+    }
+    $hit = Test-PimDemoGroupMember -Identities @($names.ToArray()) -ClaimGroupIds $claims -GroupId $g.id -Members @($g.members)
+    return @{ viewer = [bool]$hit.member; reason = "$($hit.via)" }
+}
+
+function Get-PimManagerDemoBoot {
+    # What the page needs before first paint: is demo mode on, and is THIS viewer a demo viewer. No group name or id
+    # is handed to a visitor.
+    $cfg = Get-PimManagerDemoConfig
+    if (-not $cfg.on) { return @{ on = $false } }
+    $r = $null; try { $r = Get-PimManagerRole } catch { $r = $null }
+    $viewer = [bool]($r -and "$($r.role)" -eq 'Demo')
+    $b = [ordered]@{ on = $true; viewer = $viewer; message = (Get-PimDemoRefusalMessage) }
+    if (-not $viewer) { $b['group'] = "$($cfg.group)" }
+    return $b
+}
+
+function Invoke-PimManagerDemoGate {
+    <#
+      §98 -- the SERVER-SIDE boundary. Called at the top of the /api block (after the token + principal checks) and on
+      /mcp. Returns $null = carry on (demo mode off, or the caller is not a demo viewer, or the request is a read /
+      pure preview); otherwise it has WRITTEN the response and returns its status. Default deny: see
+      Get-PimDemoRequestDecision.
+    #>
+    param([Parameter(Mandatory)][string]$Method, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][object]$Response)
+    $cfg = Get-PimManagerDemoConfig
+    if (-not $cfg.on) { return $null }
+    $role = Get-PimManagerRole
+    if ("$($role.role)" -ne 'Demo') { return $null }
+    $d = Get-PimDemoRequestDecision -Method $Method -Path $Path
+    if ($d.allow) { return $null }
+    if ($d.kind -eq 'local-pending') {
+        Write-JsonResponse -Response $Response -Status 200 -Body (Get-PimDemoLocalPendingBody)
+        return 200
+    }
+    Write-Host ("  [demo] refused {0} {1} for a demo viewer" -f $Method, $Path) -ForegroundColor DarkYellow
+    Write-JsonResponse -Response $Response -Status 403 -Body (Get-PimDemoRefusalBody -Method $Method -Path $Path)
+    return 403
+}
+
 function Get-PimManagerRole {
     # Hosted: the Easy Auth principal captured for THIS request. Local: the interactive sign-in's UPN
     # (break-glass console) or the Windows user -- Get-PimManagerLocalIdentity.
@@ -771,6 +916,13 @@ function Get-PimManagerRole {
         # anonymous callers. 'None' ranks below Reader (Test-PimManagerRoleAtLeast refuses every minimum),
         # and the /api gate in Handle-Request answers 401 before any handler runs.
         return @{ role = 'None'; identity = '<unauthenticated>'; source = 'hosted: no authenticated principal (fail closed -- 401)' }
+    }
+    # §98 DEMO MODE: a member of the demo guest group is a 'Demo' viewer -- BEFORE every grant below, because the demo
+    # role is a cap (it ranks as Reader in Test-PimManagerRoleAtLeast), never an elevation. Demo mode off = this returns
+    # viewer=$false straight away and resolution continues exactly as before.
+    if ($script:PimHosted -and (Get-Command Get-PimManagerDemoMembership -ErrorAction SilentlyContinue)) {
+        $dm = Get-PimManagerDemoMembership -Identity "$who"
+        if ($dm.viewer) { return @{ role = 'Demo'; identity = $who; source = "demo mode: $($dm.reason)"; demo = $true } }
     }
     $whoLc  = "$who".ToLowerInvariant()
     # 🔒 SEC-15 / §36.3 phase 2 -- SQL is the AUTHORITATIVE home for Manager RBAC, in every mode.
@@ -927,7 +1079,9 @@ function Test-PimManagerRoleAtLeast {
     param([Parameter(Mandatory)][ValidateSet('Reader', 'Admin', 'SuperAdmin')][string]$Minimum)
     # Delegated ranks as Reader for write-gates (read-only); its scope filter limits what
     # it sees. Elevating Delegated to manage its own groups is a later epic phase.
-    $rank = @{ Reader = 0; Delegated = 0; Admin = 1; SuperAdmin = 2 }
+    # §98: Demo ranks as Reader -- a demo viewer passes exactly the gates a Reader passes, and every write is refused
+    # before its handler anyway (Invoke-PimManagerDemoGate).
+    $rank = @{ Reader = 0; Delegated = 0; Demo = 0; Admin = 1; SuperAdmin = 2 }
     $rank[(Get-PimManagerRole).role] -ge $rank[$Minimum]
 }
 
@@ -973,7 +1127,7 @@ function Get-PimManagerDelegatedContext {
     if (-not $role) { $out.reason = 'no caller'; return $out }
     $out.identity = "$($role.identity)"
     $r = "$($role.role)"
-    if ($r -in @('Admin', 'SuperAdmin', 'None')) { $out.reason = "role $r"; return $out }
+    if ($r -in @('Admin', 'SuperAdmin', 'None', 'Demo')) { $out.reason = "role $r"; return $out }
     if ("$($role.source)" -match 'INVALID') { $out.reason = 'ManagerAccess is invalid (fail closed)'; return $out }
     if (-not (Get-Command Get-PimDelegatedOwnership -ErrorAction SilentlyContinue)) { $out.reason = 'delegated-model library not loaded'; return $out }
     $defs = New-Object System.Collections.Generic.List[object]
@@ -3182,6 +3336,8 @@ $script:PimAlertEventCatalog += 'coverage'
 $script:PimAlertEventCatalog += 'target-missing'
 # §79.2: staged changes / queued actions nobody committed (the scheduler's 'pending-check' job, PIM-PendingCheck.ps1).
 $script:PimAlertEventCatalog += 'pending-uncommitted'
+# 97.1 / WIZARD-1: the Get Started steps that are done by a CONFIRMATION (their work happens outside the product).
+$script:PimGetStartedConfirmSteps = @('activator')
 
 function Get-PimAlertingConfig {
     # Returns the normalized alerting config (defaults applied), shape:
@@ -8031,7 +8187,7 @@ function Invoke-PimActiveAssignmentRevokeBatch {
     # and it would do it invisibly. Every row is failed with the same reason so the caller reports
     # it per row instead of throwing away the batch.
     $cs = (Get-PimManagerStoreCs)
-    if (-not $cs -or -not (Get-Command Add-PimSqlQueueChange -ErrorAction SilentlyContinue)) {
+    if (-not $cs -or -not (Get-Command Add-PimSqlQueueChangeUnlessPending -ErrorAction SilentlyContinue)) {
         foreach ($r in $Rows) {
             [void]$results.Add([ordered]@{ id = $(if ($r -and $r.id) { [string]$r.id } else { $null }); ok = $false
                 error = 'no SQL store is wired in this host, so the revoke cannot be queued -- and the Manager is not permitted to change the directory itself. Configure the store, then retry.' })
@@ -8151,12 +8307,28 @@ function Invoke-PimActiveAssignmentRevokeBatch {
             # revoked so two operators queuing the same revoke are visibly the same target.
             $key = "$($payload.principalId)|$type|$(if ($payload.roleAssignmentId) { $payload.roleAssignmentId } elseif ($payload.roleDefinitionId) { $payload.roleDefinitionId } else { $payload.groupId })"
             if ($isEligible) { $key += "|eligible$(if ($payload.scope) { '|' + $payload.scope })" }
+            # §33.0a de-dupe: the key is ALSO the identity a second identical revoke is matched on, so it must tell apart
+            # what the engine would remove differently -- an Entra role at an AU scope (not the directory) and a group
+            # OWNER (not a member). Added only for the non-default case, so every existing key is unchanged.
+            $dsi = "$($payload.directoryScopeId)".Trim()
+            if ($actionType -eq 'entra-role-revoke' -and $dsi -and $dsi -ne '/') { $key += "|scope:$dsi" }
+            $acc = "$($payload.accessId)".Trim()
+            if ($actionType -eq 'group-assignment-revoke' -and $acc -and $acc -ine 'member') { $key += "|$($acc.ToLowerInvariant())" }
             $change = New-PimChange -Entity 'PIM-Action-Revoke' -Key $key -Op 'Remove' `
                         -Payload ([pscustomobject]$payload) -By $who `
                         -Kind 'Action' -Origin 'Authorised' -Justification $Justification
-            Add-PimSqlQueueChange -ConnectionString $cs -Change $change
+            # §33.0a (operator 2026-10-07: three Delete clicks queued three identical revokes): the same revoke while an
+            # earlier one is still PENDING adds nothing and is answered "already queued" (ok + alreadyQueued + the id of
+            # the entry that is waiting). Only pending entries count -- a committed / applied / failed one never hides a
+            # new request. The check and the insert are one SQL statement, so two admins at once cannot both add it.
+            $enq = Add-PimSqlQueueChangeUnlessPending -ConnectionString $cs -Change $change
+            if (-not $enq.added) {
+                [void]$results.Add([ordered]@{ id = $rowId; ok = $true; queued = $true; alreadyQueued = $true; queueId = "$($enq.existingId)"; actionType = $actionType })
+                Write-Host ("  [revoke][{0}] ALREADY QUEUED -- principal {1} (the same revoke is still waiting for commit; nothing added)" -f $type, $r.principalId) -ForegroundColor DarkGray
+                continue
+            }
 
-            [void]$results.Add([ordered]@{ id = $rowId; ok = $true; queued = $true; queueId = "$($change.id)"; actionType = $actionType })
+            [void]$results.Add([ordered]@{ id = $rowId; ok = $true; queued = $true; alreadyQueued = $false; queueId = "$($change.id)"; actionType = $actionType })
             Write-Host ("  [revoke][{0}] QUEUED -- principal {1} (awaiting commit)" -f $type, $r.principalId) -ForegroundColor DarkGray
         } catch {
             $msg = "$($_.Exception.Message)"
@@ -8508,6 +8680,11 @@ function Invoke-Server {
             if ("$($env:PIM_MANAGER_TRACE_REQUESTS)" -eq '1') { Write-Host ("  [{0}] {1,-6} {2} ... started" -f $started.ToString('HH:mm:ss'), $ctx.Request.HttpMethod, $ctx.Request.Url.AbsolutePath) -ForegroundColor DarkGray }
             # Hosted: capture THIS request's Easy Auth principal for role resolution.
             if ($script:PimHosted) { try { $script:CurrentRequestPrincipal = Get-PimEasyAuthPrincipal -Request $ctx.Request } catch { $script:CurrentRequestPrincipal = $null } }
+            # §98: the other names + group claim of THIS request's (already trusted) principal, for the demo-group check only.
+            $script:CurrentRequestNames = @(); $script:CurrentRequestGroupIds = @()
+            if ($script:PimHosted -and "$script:CurrentRequestPrincipal".Trim()) {
+                try { $xc = Get-PimEasyAuthPrincipalExtras -Request $ctx.Request; $script:CurrentRequestNames = @($xc.names); $script:CurrentRequestGroupIds = @($xc.groups) } catch { }
+            }
             try {
                 $status = Handle-Request -Context $ctx -ExpectedToken $token
             } catch {
@@ -8647,6 +8824,8 @@ function Handle-Request {
             try { $dcb = Get-PimManagerDelegatedContext; if ($dcb.isDelegated) { $roleBoot = @{ role = 'Delegated'; identity = $roleBoot.identity; source = $dcb.source; derived = $true } } } catch { }
         }
         try { $roleBoot['accessBootstrap'] = (Get-PimManagerAccessBootstrapState) } catch { }
+        # §98: the demo banner renders before first paint (on = demo mode; viewer = THIS person is a demo viewer).
+        try { $roleBoot['demoMode'] = (Get-PimManagerDemoBoot) } catch { $roleBoot['demoMode'] = @{ on = $false } }
         $roleJson = ($roleBoot | ConvertTo-Json -Compress -Depth 4)
         # Feature flags baked at boot so the nav/tab render gates BEFORE first paint
         # (a toggle takes effect on reload). Best-effort -- on any failure fall back
@@ -8764,6 +8943,9 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status 401 -Body @{ error = 'unauthorized'; detail = 'send Authorization: Bearer <the page token>' }
             return 401
         }
+        # §98: a demo viewer never drives the MCP server (its commit tools would bypass the page) -- refused like any write.
+        $demoMcp = Invoke-PimManagerDemoGate -Method $method -Path $path -Response $resp
+        if ($null -ne $demoMcp) { return [int]$demoMcp }
         if ("$($req.ContentType)" -notmatch '^(?i)application/json') { Write-JsonResponse -Response $resp -Status 415 -Body @{ error = 'Content-Type must be application/json' }; return 415 }
         if (-not (Get-Command Invoke-PimMcpMessage -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = 'the MCP server is not part of this edition' }; return 404 }
         if (-not (Test-PimManagerProFeature -Key 'mcp.server' -Response $resp)) { return 403 }
@@ -8802,6 +8984,11 @@ function Handle-Request {
             }
             return 401
         }
+
+        # §98 DEMO MODE -- the server-side boundary, BEFORE every handler: a demo viewer's write is refused here with the
+        # friendly 403, and GET /api/pending answers "staged changes stay in this browser". Demo mode off = $null at once.
+        $demoSt = Invoke-PimManagerDemoGate -Method $method -Path $path -Response $resp
+        if ($null -ne $demoSt) { return [int]$demoSt }
 
         if ($path -eq '/api/heartbeat' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
@@ -8997,6 +9184,54 @@ function Handle-Request {
         # Operator 2026-10-04: the ENVIRONMENT's own name ("EFIF (test)"), shown in the header left of Mode and in the browser
         # tab, so several open Managers are told apart. pim.Settings 'EnvironmentName' (a plain string). Read: every signed-in
         # role (it is on every page). Change: SuperAdmin, audited. Never copied to another environment (it names THIS one).
+        # §98 DEMO MODE: GET (every signed-in role; a demo viewer is told only that it is on) / PUT { on; group } (SuperAdmin,
+        # audited). pim.Settings 'DemoMode' (true/false) + 'DemoGuestGroup' (display name or object id). A demo viewer never
+        # reaches the PUT: the demo gate above refuses it. Turning it on cannot lock out whoever turns it on unless they are
+        # in the demo group themselves -- the reply says who it applies to.
+        if ($path -eq '/api/settings/demo-mode' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $dcfg = Get-PimManagerDemoConfig
+            $isDemo = ("$((Get-PimManagerRole).role)" -eq 'Demo')
+            $dBody = [ordered]@{ on = [bool]$dcfg.on; viewer = $isDemo; canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') }
+            if (-not $isDemo) { $dBody['group'] = "$($dcfg.group)"; $dBody['defaultGroup'] = (Get-PimDemoDefaultGuestGroup) }
+            Write-JsonResponse -Response $resp -Status 200 -Body $dBody
+            return 200
+        }
+        if ($path -eq '/api/settings/demo-mode' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change demo mode.' }; return 403 }
+            $db = Read-RequestJson -Request $req
+            if (-not $db -or -not $db.PSObject.Properties['on']) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "send { on: true|false, group: '<demo guest group>' }" }; return 400 }
+            $wantOn = [bool](Test-PimDemoModeValue -Value $db.on)
+            $wantGroup = Resolve-PimDemoGuestGroupName -Value $(if ($db.PSObject.Properties['group']) { $db.group } else { $null })
+            if ($wantGroup.Length -gt 256) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'The demo guest group name can be at most 256 characters.' }; return 400 }
+            # 🔒 Turning it ON must not lock the environment out: membership that cannot be read counts as membership (fail
+            # closed), so a group that cannot be read -- or a caller who is in it -- would make every save refused,
+            # including the one that switches it off again. Both are refused here, and nothing is saved.
+            if ($wantOn) {
+                $script:PimDemoGroupCache = $null
+                $gChk = Get-PimManagerDemoGroup -Group $wantGroup
+                if (-not $gChk.ok) {
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; gate = 'demo-group'; error = "The demo guest group '$wantGroup' could not be read ($($gChk.error)). Nothing was saved -- with demo mode on, everyone would then be treated as a demo viewer." }
+                    return 409
+                }
+                $meWho = "$((Get-PimManagerRole).identity)"
+                $meNames = @($meWho) + @($script:CurrentRequestNames | Where-Object { "$_".Trim() })
+                if ((Test-PimDemoGroupMember -Identities $meNames -ClaimGroupIds @($script:CurrentRequestGroupIds) -GroupId $gChk.id -Members @($gChk.members)).member) {
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; gate = 'demo-self'; error = "You are a member of '$wantGroup' yourself -- turning demo mode on would make you a demo viewer and you could not turn it off again. Nothing was saved." }
+                    return 409
+                }
+            }
+            $before = Get-PimManagerDemoConfig
+            Set-PimManagerSettingObject -Name 'DemoGuestGroup' -Value $wantGroup
+            Set-PimManagerSettingObject -Name 'DemoMode' -Value $(if ($wantOn) { 'true' } else { 'false' })
+            $script:PimDemoConfigCache = $null; $script:PimDemoGroupCache = $null; $script:PimDemoGroupWarned = $false
+            Write-PimManagerAuditEvent -Action 'settings.demo-mode.save' -Target 'DemoMode' -Result 'ok' -Before @{ on = [bool]$before.on; group = "$($before.group)" } -After @{ on = $wantOn; group = $wantGroup }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; on = $wantOn; group = $wantGroup
+                note = $(if ($wantOn) { "Members of '$wantGroup' can now look and stage changes; nothing they do is saved. Everyone else keeps their role." } else { 'Demo mode is off: every role works as before.' }) })
+            return 200
+        }
+
         if ($path -eq '/api/settings/environment-name' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             $v = ''; try { $v = "$(Get-PimSetting -Name 'EnvironmentName')".Trim() } catch { $v = '' }
@@ -9415,6 +9650,57 @@ function Handle-Request {
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the live view could not be read: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+        # 97.1 / WIZARD-1 (owner 2026-10-07): a Get Started step whose work happens OUTSIDE the product (the PIM Activator
+        # rollout to the admins' browsers) is done by a CONFIRMATION, saved as a real setting -- pim.Settings
+        # 'GetStartedConfirmations' = { <step>: { by, utc } }. Only the steps named here can be confirmed; "done" for every
+        # other step is computed from its own data and can never be ticked.
+        if ($path -eq '/api/get-started' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                $gsRaw = Get-PimManagerSetting -Name 'GetStartedConfirmations'
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ confirmations = $(if ($gsRaw) { $gsRaw } else { [ordered]@{} }); confirmable = @($script:PimGetStartedConfirmSteps) })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the Get Started confirmations could not be read: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+        if ($path -eq '/api/get-started/confirm' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to confirm a Get Started step.' }
+                return 403
+            }
+            $body = Read-RequestJson -Request $req
+            $gsStep = if ($body -and $body.PSObject.Properties['step']) { "$($body.step)".Trim().ToLowerInvariant() } else { '' }
+            if ($gsStep -notin @($script:PimGetStartedConfirmSteps)) {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "'$gsStep' is not a step that is confirmed by hand -- its state is read from the data. Nothing was saved." }
+                return 400
+            }
+            $gsOn = [bool]($body.PSObject.Properties['confirmed'] -and ("$($body.confirmed)" -match '(?i)^(true|1|yes)$'))
+            # Read first: a read that FAILS must not be taken for "nothing confirmed yet", or this save would drop the others.
+            $gsCur = [ordered]@{}
+            try {
+                $gsRaw = Get-PimManagerSetting -Name 'GetStartedConfirmations'
+                if ($gsRaw -is [System.Collections.IDictionary]) { foreach ($k in @($gsRaw.Keys)) { $gsCur["$k"] = $gsRaw[$k] } }
+                elseif ($gsRaw) { foreach ($pp in @($gsRaw.PSObject.Properties)) { $gsCur["$($pp.Name)"] = $pp.Value } }
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the stored confirmations could not be read, so nothing was saved: $($_.Exception.Message)" }
+                return 500
+            }
+            $gsBefore = [bool]$gsCur.Contains($gsStep)
+            if ($gsOn) { $gsCur[$gsStep] = [ordered]@{ by = "$((Get-PimManagerRole).identity)"; utc = [datetime]::UtcNow.ToString('o') } }
+            elseif ($gsCur.Contains($gsStep)) { $gsCur.Remove($gsStep) }
+            try {
+                Set-PimManagerSetting -Name 'GetStartedConfirmations' -Value $gsCur
+                Write-PimManagerAuditEvent -Action 'settings.get-started.confirm' -Target "get-started:$gsStep" -Before @{ confirmed = $gsBefore } -After @{ confirmed = $gsOn } -Result 'ok'
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; step = $gsStep; confirmed = $gsOn; confirmations = $gsCur })
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "the confirmation was NOT saved: $($_.Exception.Message)" }
                 return 500
             }
         }
@@ -16917,6 +17203,7 @@ function Handle-Request {
                             principalId   = "$($rr.principalId)"
                             type          = "$($rr.type)"
                             justification = $justification
+                            alreadyQueued = [bool]($res -and $res.alreadyQueued)
                             error         = $(if ($ok) { $null } else { "$($res.error)" })
                         })
                 }
@@ -16959,10 +17246,13 @@ function Handle-Request {
                 # the wire shape; the reporting itself is made non-lying on the client side, which
                 # is where the empty-array substitution actually lives.
                 $resultsOut = @($results)
+                # §33.0a: how many of the rows were ALREADY waiting in the queue (nothing new added for them).
+                $alreadyQueuedCount = @($resultsOut | Where-Object { $_ -and $_.alreadyQueued }).Count
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                     ok           = $true
                     requested    = $rowsIn.Count
                     revoked      = $rowsToRevoke.Count
+                    alreadyQueuedCount = $alreadyQueuedCount
                     skipped      = @($plan.skipped)
                     skippedCount = $plan.skippedCount
                     results      = $resultsOut

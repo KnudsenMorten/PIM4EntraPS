@@ -11,14 +11,14 @@
   THE MODEL
     Azure SQL allows exactly ONE Entra admin. Giving it to ONE principal (the deploy SPN on public SQL, a
     SQL user-assigned identity on private SQL) meant every other identity that must administer the
-    database -- the unattended updater's schema step, the operator's troubleshooting identity -- needed a
+    database -- the unattended updater's schema step, the Invardia Support app -- needed a
     contained user created by that one principal, and an environment whose admin was a secret-only app
     could not be fixed unattended at all (EFIF/RIDE, UPD-15). The admin is therefore a SECURITY GROUP,
     default 'grp-pim-sql-admins', whose members are:
       * the environment's user-assigned identity  id-pim-<token>
       * the updater job's system-assigned identity (ca-pim-update)
       * the in-VNet SQL identity id-pim-sql-<token> on private SQL, so the in-cloud bootstrap still works
-      * the troubleshooting identity (by appId or object id), when given
+      * the Invardia Support app (by appId or object id: -SupportAppId / -SupportObjectId), when given
       * the previous admin, so converging never takes access away from whoever had it
     Contained users that exist keep working; nothing here drops one.
 
@@ -50,7 +50,7 @@
         1. create a NEW role-assignable security group, e.g. 'grp-pim-sql-admins-ra' (Entra admin center: Groups ->
            New group -> "Microsoft Entra roles can be assigned to the group" = Yes; or this helper's converge run by
            an identity that holds RoleManagement.ReadWrite.Directory, with -GroupName on the new name);
-        2. add the SAME members as the old group (the managed identities, the updater, the troubleshooting identity);
+        2. add the SAME members as the old group (the managed identities, the updater, the Invardia Support app);
         3. make the NEW group the SQL Entra admin: Initialize-PimSqlAdminGroup.ps1 -GroupObjectId <new group id>
            (it keeps the previous admin as a member and reads the admin back);
         4. only after the read-back, delete the OLD group; pass the new name (-SqlAdminGroupName) on later deploys.
@@ -384,7 +384,7 @@ function Invoke-PimSqlAdminGroup {
             $g = & $Graph -Method POST -Path '/groups' -Body ([ordered]@{
                     displayName = $GroupName; mailEnabled = $false; mailNickname = $nick; securityEnabled = $true
                     isAssignableToRole = $true
-                    description = 'PIM4EntraPS: Entra admin of the environment SQL server (managed identities + troubleshooting identity). Role-assignable: tier 0.' })
+                    description = 'PIM4EntraPS: Entra admin of the environment SQL server (managed identities + Invardia Support app). Role-assignable: tier 0.' })
             $gid = "$($g.id)".Trim()
             if (-not $gid) { throw 'the create returned no id' }
             $created = $true
@@ -494,7 +494,7 @@ function Invoke-PimSqlAdminGroupStep {
         environment identity : -EnvironmentIdentityName, else the one id-pim-* (not id-pim-sql-*) in the group
         SQL identity         : -SqlAdminIdentityName, else the one id-pim-sql-* in the group (private SQL)
         updater identity     : -UpdateJobName's system-assigned identity, when the job exists
-        troubleshooting      : -TroubleshootingAppId / -TroubleshootingObjectId
+        Invardia Support app : -SupportAppId / -SupportObjectId (old names -TroubleshootingAppId / -TroubleshootingObjectId still bind)
         extras               : -ExtraMembers @{ objectId; label } and -ExtraMemberObjectIds
       -NoDiscovery skips the two identity look-ups (a caller that knows exactly whom to add).
       Returns the Invoke-PimSqlAdminGroup result plus { members (resolved) }.
@@ -512,8 +512,8 @@ function Invoke-PimSqlAdminGroupStep {
         [string]$EnvironmentIdentityName,
         [string]$SqlAdminIdentityName,
         [string]$UpdateJobName = 'ca-pim-update',
-        [string]$TroubleshootingAppId,
-        [string]$TroubleshootingObjectId,
+        [Alias('TroubleshootingAppId')][string]$SupportAppId,
+        [Alias('TroubleshootingObjectId')][string]$SupportObjectId,
         [AllowEmptyCollection()][object[]]$ExtraMembers = @(),
         [AllowEmptyCollection()][string[]]$ExtraMemberObjectIds = @(),
         [ValidateSet('converge', 'membersOnly')][string]$Mode = 'converge',
@@ -562,11 +562,11 @@ function Invoke-PimSqlAdminGroupStep {
             else { [void]$resolveProblems.Add("read $UpdateJobName`: $m") }
         }
     }
-    if ("$TroubleshootingObjectId".Trim()) {
-        [void]$members.Add([pscustomobject]@{ objectId = "$TroubleshootingObjectId".Trim(); label = 'troubleshooting identity' })
-    } elseif ("$TroubleshootingAppId".Trim()) {
-        try { [void]$members.Add([pscustomobject]@{ objectId = (Resolve-PimServicePrincipalObjectId -Graph $Graph -AppId $TroubleshootingAppId); label = "troubleshooting identity (app $("$TroubleshootingAppId".Trim()))" }) }
-        catch { [void]$resolveProblems.Add("resolve the troubleshooting identity (app $TroubleshootingAppId): $($_.Exception.Message)") }
+    if ("$SupportObjectId".Trim()) {
+        [void]$members.Add([pscustomobject]@{ objectId = "$SupportObjectId".Trim(); label = 'Invardia Support app' })
+    } elseif ("$SupportAppId".Trim()) {
+        try { [void]$members.Add([pscustomobject]@{ objectId = (Resolve-PimServicePrincipalObjectId -Graph $Graph -AppId $SupportAppId); label = "Invardia Support app (app $("$SupportAppId".Trim()))" }) }
+        catch { [void]$resolveProblems.Add("resolve the Invardia Support app (app $SupportAppId): $($_.Exception.Message)") }
     }
     foreach ($x in @($ExtraMembers)) { if ($x) { [void]$members.Add($x) } }
     foreach ($x in @($ExtraMemberObjectIds)) { if ("$x".Trim()) { [void]$members.Add([pscustomobject]@{ objectId = "$x".Trim(); label = 'extra member' }) } }

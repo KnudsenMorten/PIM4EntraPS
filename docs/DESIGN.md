@@ -6298,6 +6298,26 @@ resources on **Audit & Settings → Newly discovered resources** (§18.1d). The 
 is gone. Visibility is role-gated. (The finer-grained `Delegated` / portal-admin model layers on
 top — §9.2.)
 
+#### 17.12a Demo mode — a live demo nobody can change (built, not yet released)
+
+For a public demo environment, **demo mode** (a setting, **off by default**, under **Settings → Features & edition →
+Demo mode**, SuperAdmin) turns every signed-in member of one Entra group — the **demo guest group** — into a **Demo**
+viewer. A Demo viewer can open every page a Reader can and **stage** changes, which stay in their own browser; every
+request that would change something — commit, approve, run now, revoke, any settings save, restore or job start, and the
+MCP server — is refused **by the server** with *"This is a live demo: you can try everything and stage changes, but
+nothing is saved."* The refusal happens before any handler runs and allows nothing by default: only reads and four pure
+previews (session keep-alive, the Review & Save diff, validation, wizard name derivation) get through, so a feature added
+later is closed to demo viewers until it is deliberately opened. A banner on every page says it is a demo.
+
+- **Who is a demo viewer** is decided from the sign-in token's group claim, or else the group's members as read from
+  Microsoft Graph with the Manager's own identity (cached a few minutes); a guest's home address is matched to their
+  guest account. If membership cannot be read while demo mode is on, the person is treated as a demo viewer — the safe
+  direction.
+- **It only ever takes rights away.** The Demo role ranks as Reader for every existing check, and it wins over any other
+  grant, so a group member who is also an administrator is still only a demo viewer. People outside the group keep their
+  own role. A local (emergency) Manager is never in demo mode.
+- **Off means unchanged.** With demo mode off, nothing of this runs: no group lookup, no extra check, the same answers.
+
 ### 17.13 Resource auto-discovery
 
 **The Discovery page is one list** (2.4.446). It shows what is in the tenant and not yet in PIM, grouped by kind: Azure
@@ -7352,6 +7372,16 @@ no longer resolves are hidden by default; **show deleted principals (N)** reveal
 revoke is queued (§18.1f); the row shows **revoke queued** until a later snapshot no longer contains
 it, and a completed revoke queues a fresh snapshot.
 
+**The same revoke is queued once.** `POST /api/revoke` adds a queue entry only when no **pending** entry
+exists for the same target (`pim.ChangeQueue` Entity `PIM-Action-Revoke` + Key + Op, checked and inserted in
+one statement, so two administrators at once cannot both add it). The key is the principal, the type and
+the assignment it removes (role-assignment id, role definition or group), plus the eligibility scope, an
+administrative-unit scope for an Entra role and the owner access for a group, so different removals never
+collide. A repeat answers that row `ok` + `alreadyQueued` with the id of the entry already waiting, and
+`alreadyQueuedCount` counts them; Review current delegations shows **ALREADY QUEUED** on the row and the
+drift Delete message says "already queued for removal (nothing added)". A committed, applied, failed or
+discarded entry never blocks a new request.
+
 **The revoke click stages under an explicit field contract, and can never be silent** (2026-09-18,
 §33.24 BUG-165). The page used to build the `POST /api/revoke` body from a hand-written nine-field
 subset of the snapshot row, which dropped `roleAssignmentId` / `roleAssignmentName` (the only way an
@@ -7441,6 +7471,51 @@ The Manager's commit is a **full-set replace** of one entity (`PUT /api/csv/<bas
 
 The **department** list (Access → Departments & owners) is a merge too (§18.9), and template approvals, promotions and
 deploys never write files (§6.3b).
+
+### 18.1i Get Started — a wizard of real forms
+
+**Get Started** (first in the menu) takes a new environment from empty to working, one step at a time, and every step is
+done **inside the wizard**: it never sends the administrator to another page to do the work.
+
+- **Shape.** "N of M steps done", a progress bar and one chip per step (green check = done, red ! = a required step still
+  open, grey = optional; any chip opens its step). One card per step: "STEP X OF N", the title, one sentence, the status
+  ("! Not done yet -- <why, in plain words>"), then the step's **own fields in one form**. Buttons: **Previous** (goes back,
+  saves nothing), **Save & exit** (saves, then Overview), **Save & next** (**Save & finish** on the last step). Enter in a
+  field is Save & next, never Previous.
+- **One store, one save.** A step writes through exactly the route its normal page uses, with that page's validation,
+  role check, audit and approval flow -- there is no second copy of any setting:
+
+  | Step | What the step shows and saves |
+  |---|---|
+  | Licence | the licence file or text → the licence registration (signature checked before anything is stored) |
+  | Engine permissions | what is missing, what it blocks, the exact grant to run, Check again (the page grants nothing itself) |
+  | Mail sender | the sender in use; the setup script (download from Invardia + the command); Send a test mail |
+  | Departments & owners | the departments; a new one with its owners (found by name) → the same department save as Access → Departments & owners; Import from Entra |
+  | Roles & templates | the template packs still to include (tick) and an own role group → staged in Pending changes, by the same code as the template cards and the role-group wizard |
+  | Admin accounts | the person (found by name, fills first / last name and initials), the kind of account, an optional role group → staged by the same code as the admin wizard (the engine names the account) |
+  | Access mapping | an admin account and a role group (two dropdowns) → one staged assignment |
+  | Policies | the held policy change sets with their Approve all, inside the step |
+  | Alert recipients | the recipients → the alerting save (the events, digest lists and webhook are kept); Save and send a test alert |
+  | Break-glass accounts | the accounts (found by name) and a justification → the maker/checker request (another SuperAdmin approves) |
+  | First run | the last run; Run now starts the full run |
+  | PIM Activator (optional) | the Activator's own guided steps, inside the step, and a confirmation that the rollout is done |
+  | Discovery (optional) | discovery on / off (the job's own switch); Save and look now |
+
+- **Refused = nothing written.** Every field of the step is checked before anything is sent; a save the page or the server
+  refuses shows the same step with the reason under the field.
+- **Staged steps.** Roles, admin accounts and access mapping stage their rows in Pending changes like the normal pages do; while
+  anything is staged, the wizard says so and offers **Commit now**, which is the normal Commit all (validation, second
+  approver, journal, engine start).
+- **Done is read from the data** on every visit (a registered licence, a department with rows, a run that finished ok, ...),
+  never from a stored tick. The one exception is a step whose work happens outside the product -- the PIM Activator rollout
+  to the admins' browsers: it is done by a **confirmation** that is saved as a real setting (`GET /api/get-started`,
+  `PUT /api/get-started/confirm`; Admin, audited, only the steps the server lists can be confirmed).
+- **Optional steps** move on with nothing filled. **Action buttons** (Run now, Send a test mail / alert) save the step first,
+  then stay on it with the result.
+- **People and groups are found by name** (search + dropdown); nobody pastes an object id.
+- **The menu's red !** shows while a required step is open. It is computed from the same checks, read from a one-minute
+  cache that every save clears.
+- **Roles.** A step that needs a SuperAdmin (licence, departments, break-glass) says so to anyone else and lets them move on.
 
 ### 18.2 UX goal — zero memorization
 
@@ -8711,7 +8786,7 @@ after a real live test (engine run / API check), never a parse-check (see
 | 1 | Manager, tick, update, downlink → Graph, ARM, SQL, Log Analytics | **system-assigned managed identity** | **none** | nowhere |
 | 2 | Container image pull from ACR | **user-assigned MI** (`id-pim-<token>`) | **none** | nowhere |
 | 3 | **Sign-in** (Container Apps built-in auth) | app registration | **client secret** | ACA secret, referenced by name |
-| 4 | **Operator troubleshooting** | SPN | **client secret** | the customer's Key Vault |
+| 4 | **Invardia Support app** (support work) | SPN | **client secret** | the customer's Key Vault |
 | 5 | Deploy / onboarding | SPN | **client secret** | the customer's Key Vault |
 
 Rows 1–2 are the product at rest. Rows 4–5 are humans, and exist only on the machine driving a
@@ -8830,7 +8905,7 @@ environment whose admin cannot be used unattended can then never be fixed unatte
 | the environment's user-assigned identity (`id-pim-<token>`) | the environment's own standing identity |
 | the in-network SQL identity (`id-pim-sql-<token>`), private SQL only | the in-cloud database bootstrap runs as it |
 | the deploy identity | creates contained users and applies the schema from the deploy host on public SQL |
-| the troubleshooting identity, when given | support access, used only for troubleshooting |
+| the Invardia Support app, when given (`-SupportAppId` / `-SupportObjectId`; the old `-TroubleshootingAppId` / `-TroubleshootingObjectId` still work) | support access, used only when support works on the environment |
 | whoever was admin before converging | converging never takes access away |
 
 Entra-only authentication stays on. Contained users that already exist keep working.
