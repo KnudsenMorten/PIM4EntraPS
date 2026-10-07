@@ -221,6 +221,27 @@ function Get-PimMailSendDenialMessage {
     return ("mail send DENIED as {0}: this identity has no Exchange 'Application Mail.Send' assignment for the sender mailbox '{1}' (sending is granted per mailbox by Exchange RBAC for Applications -- do NOT grant tenant-wide Graph Mail.Send). {2} Error: {3}" -f $who, $Sender, $fix, (($e -split "`n")[0]))
 }
 
+function Get-PimMailEnvironmentInfo {
+    <#
+      MAIL-1: what names THIS environment in a mail -- @{ name; tenantName; tenantId; version; portal }. name = the
+      environment name the Manager header shows (pim.Settings 'EnvironmentName', or $global:PIM_EnvironmentName), else the
+      tenant name, else the tenant id -- never "this tenant". Read once per process; never throws (a mail is never blocked).
+    #>
+    param([string]$PortalBase = '')
+    if (-not $script:PimMailEnvInfo) {
+        $name = "$($global:PIM_EnvironmentName)".Trim()
+        if (-not $name -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
+            try { $cs = Get-PimSqlSettingsConnectionString; if ($cs) { $v = Get-PimSqlSetting -ConnectionString $cs -Name 'EnvironmentName'; if ($v -is [string]) { $name = $v.Trim() } elseif ($v -and $v.PSObject.Properties['name']) { $name = "$($v.name)".Trim() } } } catch { }
+        }
+        $tn = "$($global:PIM_TenantName)".Trim(); $tid = "$($global:PIM_TenantId)".Trim()
+        $ver = ''
+        try { $vf = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'VERSION'; if (Test-Path -LiteralPath $vf) { $ver = "$(Get-Content -Raw -LiteralPath $vf)".Trim() } } catch { }
+        $script:PimMailEnvInfo = @{ name = $(if ($name) { $name } elseif ($tn) { $tn } else { $tid }); tenantName = $tn; tenantId = $tid; version = $ver }
+    }
+    $i = @{} + $script:PimMailEnvInfo; $i['portal'] = "$PortalBase".Trim()
+    return $i
+}
+
 function Send-PimNotifyMail {
     # Render type+tokens and send via Graph sendMail. Returns @{ sent; recipient; subject;
     # rendered; reason }. No send (returns rendered only) when -WhatIf / $global:WhatIfMode,
@@ -285,6 +306,23 @@ function Send-PimNotifyMail {
                  '" style="display:inline-block;background:#0969da;color:#ffffff;text-decoration:none;padding:8px 14px;border-radius:6px;">Open in PIM Manager &rarr;</a></p>'
         $r.BodyHtml = if ($r.BodyHtml -match '(?i)</body>') { [regex]::Replace($r.BodyHtml, '(?i)</body>', ($block -replace '\$', '$$$$') + '</body>', 1) } else { $r.BodyHtml + $block }
         $r.BodyText = "$($r.BodyText)`r`n`r`nOpen in PIM Manager: $($portal.url)"
+    }
+    # MAIL-1 (framework §12.3, operator 2026-10-07: "for all emails in any solution, we need to include environment name in
+    # the footer" -- a hold mail said only "this tenant"): EVERY mail names its environment, at this one chokepoint -- the
+    # subject starts with it and the footer carries environment, tenant name + id, PIM Manager version and the link.
+    $envInfo = Get-PimMailEnvironmentInfo -PortalBase "$($portal.base)"
+    if ($envInfo.name) {
+        # StartsWith, never -like: '[...]' is a wildcard character SET to -like ("[Contoso]*" matched "CUSTOM ...")
+        if (-not "$($r.Subject)".StartsWith("[$($envInfo.name)]", [System.StringComparison]::OrdinalIgnoreCase)) { $r.Subject = "[$($envInfo.name)] $($r.Subject)" }
+        $enc = { param($v) [System.Net.WebUtility]::HtmlEncode("$v") }
+        $foot = '<p class="pim-env-footer" style="margin:22px 0 0 0;padding-top:8px;border-top:1px solid #d0d7de;font-family:''Segoe UI'',Helvetica,Arial,sans-serif;font-size:12px;color:#57606a;">' +
+                'Environment: <b>' + (& $enc $envInfo.name) + '</b>' +
+                $(if ($envInfo.tenantName -or $envInfo.tenantId) { ' &middot; tenant ' + (& $enc $envInfo.tenantName) + $(if ($envInfo.tenantId) { ' (' + (& $enc $envInfo.tenantId) + ')' } else { '' }) } else { '' }) +
+                $(if ($envInfo.version) { ' &middot; PIM Manager ' + (& $enc $envInfo.version) } else { '' }) +
+                $(if ($envInfo.portal) { ' &middot; <a href="' + (& $enc $envInfo.portal) + '" style="color:#0969da;">' + (& $enc $envInfo.portal) + '</a>' } else { '' }) + '</p>'
+        $r.BodyHtml = if ($r.BodyHtml -match '(?i)</body>') { [regex]::Replace($r.BodyHtml, '(?i)</body>', ($foot -replace '\$', '$$$$') + '</body>', 1) } else { $r.BodyHtml + $foot }
+        $r.BodyText = "$($r.BodyText)`r`n`r`n-- Environment: $($envInfo.name)" + $(if ($envInfo.tenantName -or $envInfo.tenantId) { " | tenant $($envInfo.tenantName) ($($envInfo.tenantId))" } else { '' }) +
+                      $(if ($envInfo.version) { " | PIM Manager $($envInfo.version)" } else { '' }) + $(if ($envInfo.portal) { " | $($envInfo.portal)" } else { '' })
     }
     $sender = "$($global:PIM_MailSender)".Trim()
     if ($WhatIf -or $global:WhatIfMode) { return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'whatif' } }

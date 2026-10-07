@@ -816,7 +816,7 @@ function Invoke-PimEngineScope {
                 [void](Invoke-PimGuardTrip -GuardId 'engine.ledger-unreadable' -Outcome refused -Area $Scope -Job 'engine' -HeldCount $__unmanaged.Count `
                     -Title ("{0}: the managed-key ledger could not be read -- {1} prune item(s) held" -f $Scope, $__unmanaged.Count) `
                     -Detail ("The prune of {0} removes only what PIM manages, and the list of what PIM manages could not be read ({1}). Nothing was removed." -f $Scope, $__ledgerErr) `
-                    -ActionText 'Fix the store access. If the held items must go now, review them on Audit & Settings > Guards and release that plan for one run.' `
+                    -ActionText 'Fix the store access. If the held items must go now, review them on Operations > Guards and release that plan for one run.' `
                     -Measured @{ held = $__unmanaged.Count })
             }
         } elseif ($doPrune -and -not $WhatIf -and $__canRelease -and $null -ne $__ledger) { [void](Clear-PimGuardHold -GuardId 'engine.ledger-unreadable' -Scope $Scope -RunKind $__runKind) }

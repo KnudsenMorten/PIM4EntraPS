@@ -439,7 +439,7 @@ if (Test-Path -LiteralPath $_notifyLib) { . $_notifyLib }
 # GUARD-1: the Manager's own guards (commit delta guard, uplink-readonly, replication gate) record their trips the same way
 $_guardLib = Join-Path $solutionRoot 'engine\_shared\PIM-Guard.ps1'
 if (Test-Path -LiteralPath $_guardLib) { . $_guardLib }
-# §96.6 / GUARD-1.6: releasing a guard (Audit & Settings > Guards; /api/guards/<id>/release)
+# §96.6 / GUARD-1.6: releasing a guard (Operations > Guards; /api/guards/<id>/release)
 $_guardRelLib = Join-Path $solutionRoot 'engine\_shared\PIM-GuardRelease.ps1'
 if (Test-Path -LiteralPath $_guardRelLib) { . $_guardRelLib }
 

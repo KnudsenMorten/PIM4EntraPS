@@ -1327,7 +1327,7 @@
       </div>
     </div>
 
-    <!-- (Permission templates moved to Audit & Settings > Workload templates, operator 2026-10-05) -->
+    <!-- (Permission templates moved to Templates > Workload templates, operator 2026-10-05) -->
   </div>
 
   <!-- =========== Save tab =========== -->
@@ -2531,8 +2531,22 @@
         { tab: 'msptenants',   label: 'Managed tenant registry', desc: 'Name, tenant id, ring (managing tenant\'s copy) and tags of every managed tenant — add and edit them' },
         { tab: 'replication',  label: 'Replication overview', desc: 'Every admin, group, nesting and binding that replicates, and which managed tenants it reaches' },
       ] },
-    { id: 'audit', label: 'Audit & Settings',
-      title: 'Audit trail, configuration and help',
+    // 2026-10-07 (operator: "this menu is becoming too long. we need to move some to another menu to the left, fx Templates
+    // ... make an Operation ... Remove the Audit in the menu, just Settings"): the old 'Audit & Settings' menu is THREE --
+    // Templates and Operations to the left of Settings.
+    { id: 'templates', label: 'Templates',
+      title: 'The templates PIM applies: mail, policy and workload templates, and the tenant baseline',
+      items: [
+        { tab: 'mailtemplates', label: 'Mail templates', desc: 'The wording of every notification mail — edit in place, reset to the shipped default' },
+        // REQ-L (operator 2026-09-19: "i dont see the different policies anymore"): its own read-only page.
+        { tab: 'policytemplates', label: 'Policy templates', desc: 'Every activation policy template: what it sets in plain words (duration, MFA, approval, expiry, notifications) and which delegations use it' },
+        { tab: 'workloadtemplates', label: 'Workload templates', desc: 'The workload permission templates (Defender XDR, Intune, ...): the roles each grants, its version and approval, on or off' },
+        // Operator 2026-10-05: 'Tenant conformance' is the TENANT BASELINE -- how this tenant (and the fleet) compares with the
+        // approved templates; it sits with the templates it rolls out.
+        { tab: 'conformance',  label: 'Tenant Baseline', desc: 'How this tenant (and every managed tenant) compares with the approved templates, and roll a version out by ring' },
+      ] },
+    { id: 'operations', label: 'Operations',
+      title: 'What happened and how to put it right: audit, commits and undo, backups, guards and support',
       items: [
         { tab: 'audit',    label: 'Audit trail', desc: 'Every change, who made it and when' },
         // CONFIG-1.2 / §96.2 (operator 2026-10-06: "people make mistakes, so we need a way to undo a commit").
@@ -2540,6 +2554,13 @@
         // CONFIG-1.3 / 1.4, PIM §96.3 + §96.4 (operator 2026-10-06: "backup the configurations in pim"; "restore the backup, but
         // be able to select what we want from the restore").
         { tab: 'configbackups', label: 'Backups & restore', desc: 'The daily configuration backup, Back up now and pin; restore what you pick from a backup (SuperAdmin) -- staged as pending changes' },
+        // §96.6 / GUARD-1.6 (operator 2026-10-06: "I need a way to release guards"): one page for every guard.
+        { tab: 'guards',   label: 'Guards',      desc: 'Every protective guard: clear or holding, what it holds right now, and its release -- this exact plan, one run or until a time (at most 24 h), SuperAdmin' },
+        { tab: 'support',  label: 'Support',     desc: 'Diagnostics and help' },
+      ] },
+    { id: 'audit', label: 'Settings',
+      title: 'Configuration, who may use this Manager, and emergency access',
+      items: [
         { tab: 'settings', label: 'Settings',    desc: 'Naming, filters, operational policy, alerting and permission templates' },
         // 2026-09-14 (operator: "we need a new menu-item under audit and settings with Newly discovered resources and
         // relevant settings. they are the wrong place").
@@ -2548,17 +2569,6 @@
         // override and the break-glass accounts (IMP-39, SQL) are one subject.
         { tab: 'manageraccess', label: 'Manager access & roles', desc: 'Your role, and who may read, change or administer this Manager' },
         { tab: 'emergency', label: 'Emergency access (break-glass)', desc: 'The break-glass accounts PIM never touches, and the time-boxed override that lifts the approval requirement during an incident' },
-        { tab: 'mailtemplates', label: 'Mail templates', desc: 'The wording of every notification mail — edit in place, reset to the shipped default' },
-        // REQ-L (operator 2026-09-19: "i dont see the different policies anymore"): its own read-only page.
-        { tab: 'policytemplates', label: 'Policy templates', desc: 'Every activation policy template: what it sets in plain words (duration, MFA, approval, expiry, notifications) and which delegations use it' },
-        { tab: 'workloadtemplates', label: 'Workload templates', desc: 'The workload permission templates (Defender XDR, Intune, ...): the roles each grants, its version and approval, on or off' },
-        // Operator 2026-10-05: 'Tenant conformance' is the TENANT BASELINE -- how this tenant (and the fleet) compares with the
-        // approved templates; it sits with the templates it rolls out.
-        { tab: 'conformance',  label: 'Tenant Baseline', desc: 'How this tenant (and every managed tenant) compares with the approved templates, and roll a version out by ring' },
-        // §96.6 / GUARD-1.6 (operator 2026-10-06: "I need a way to release guards"): one page for every guard.
-        { tab: 'guards',   label: 'Guards',      desc: 'Every protective guard: clear or holding, what it holds right now, and its release -- this exact plan, one run or until a time (at most 24 h), SuperAdmin' },
-
-        { tab: 'support',  label: 'Support',     desc: 'Diagnostics and help' },
       ] },
   ];
   // Normalise an item entry to { tab, label, desc } -- a bare string keeps the flat-strip label.
@@ -7857,7 +7867,7 @@
     // 2026-09-14: permission template packs and mail templates -- formerly in the Governance page's collapsed
     // "Configuration" zone -- are their own sections here, expanded (operator: "maybe it must be moved and expanded by
     // default"; "this should also go into settings"). The job schedule went to its own page under Jobs.
-    // The permission template packs moved to their own page, Audit & Settings > Workload templates (operator 2026-10-05).
+    // The permission template packs moved to their own page, Templates > Workload templates (operator 2026-10-05).
     h += `<div id="setCopyHost" style="margin-top:18px;"></div>`;
     // CONFIG-1.3: how long configuration backups are kept (ConfigBackupRetentionDays, default 90; SuperAdmin changes it).
     h += `<div id="setConfigBackupHost" class="set-card" style="margin-top:18px;"></div>`;
@@ -8191,7 +8201,7 @@
     catch (e) { body.innerHTML = '<div id="chErr" style="color:#cf222e;">The commit history could not be read: ' + esc((e && e.message) || 'error') + '</div>'; return; }
     const list = asList(res && res.commits);
     const own = res && res.scope === 'own';
-    let h = '<div style="margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Audit &amp; Settings &middot; Commit history</span></div>' +
+    let h = '<div style="margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Operations &middot; Commit history</span></div>' +
       '<div id="chScope" style="font-size:12.5px;color:#57606a;margin-bottom:10px;">' +
       (own ? 'You see the commits <b>you</b> made (an Admin undoes only their own changes; a SuperAdmin sees every commit).' : 'You see <b>every</b> commit (SuperAdmin).') +
       ' Open one to see what it changed, tick the rows to reverse and press <b>Undo selected</b>: the reverse is staged in <b>Pending changes</b> and committed like any change &mdash; with the same approvals.</div>';
@@ -8427,7 +8437,7 @@
     CB_STATE.retentionDays = Number(r && r.retentionDays) || 90;
     const acc = CB_STATE.access;
     const latestReal = CB_STATE.backups.find(b => !b.noChange);
-    let h = '<div style="margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Audit &amp; Settings · Backups &amp; restore</span></div>';
+    let h = '<div style="margin-bottom:10px;"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Operations · Backups &amp; restore</span></div>';
     h += '<div class="set-card" style="max-width:1200px;"><h3 style="margin:0 0 4px;font-size:14px;">Configuration backups</h3>' +
       '<div style="color:#57606a;font-size:12.5px;line-height:1.5;margin-bottom:8px;max-width:1050px;">A backup holds the whole configuration at one moment: departments, external companies and consultants, admins, every group definition and delegation, workload bindings, templates, the settings (<b>never a secret</b>), the break-glass list and emergency override, the job schedule, feature gates, rings and the MSP registry. ' +
       'It is taken <b>every day</b> by the <code>config-backup</code> job; an unchanged configuration is recorded as <b>no change</b> instead of a copy. ' +
@@ -10996,7 +11006,7 @@
     'pending-check':               'Reports staged changes and queued actions that were started more than a day ago and never committed (Pending changes). Changes committed but not yet applied are checked every 30 minutes by verify-convergence.',
     'access-review-cycle':         'Starts the access review of each department whose review rule makes it due (Access reviews > Review rules): one review per group of the department, for the reviewers of the rule. Does nothing until a rule is switched on.',
     'target-check':                'Checks that the Azure resources, Azure roles and Entra roles your delegations point at still exist, and reports the ones that are gone (Coverage & gaps). It never removes anything -- you decide.',
-    'config-backup':               'Backs up the configuration (departments, companies, admins, group definitions, delegations, settings without secrets, break-glass list, job schedule, MSP registry) once a day; an unchanged configuration is recorded as "no change". Old backups are removed after the retention (default 90 days); pinned ones are kept (Audit & Settings > Backups & restore).',
+    'config-backup':               'Backs up the configuration (departments, companies, admins, group definitions, delegations, settings without secrets, break-glass list, job schedule, MSP registry) once a day; an unchanged configuration is recorded as "no change". Old backups are removed after the retention (default 90 days); pinned ones are kept (Operations > Backups & restore).',
     // REQ-U wave 2: per-NAME entries (looked up before the type) -- two discovery jobs read the workload role catalogs.
     'discovery-defender':          'Reads the Defender XDR roles and their permissions, and reports roles and permission groups no template knows yet.',
     'discovery-intune':            'Reads the Intune roles (built-in and custom), and reports roles no template knows yet.'
@@ -23020,7 +23030,7 @@
     const kindWords = { group: 'PIM for Groups', directoryRole: 'Entra ID roles', azureRole: 'Azure resource roles' };
     const otherLabel = (t) => kindWords[String((t && t.kind) || '')] || (kind === 'group' ? 'directory roles' : 'PIM for Groups');
     const hints = {
-      group: 'The activation policy of this delegation group (its PIM for Groups member and owner policy). Blank = the standard template. See Audit & Settings > Policy templates for what each one sets.',
+      group: 'The activation policy of this delegation group (its PIM for Groups member and owner policy). Blank = the standard template. See Templates > Policy templates for what each one sets.',
       directoryRole: 'The activation policy of this ROLE. An Entra role has ONE policy, so every row naming the role shares it; when rows disagree the approval template wins. An approval template takes its approvers from ApproverUpns. Blank = the standard template.',
       azureRole: 'The activation policy of this Azure role at this scope, shared by every row naming the same role and scope (approval wins). Approvers: ApproverUpns, else the owners of the groups assigned the role. Blank = the standard template.'
     };
@@ -23048,7 +23058,7 @@
   }
 
   // ===================================================================
-  // REQ-L -- THE POLICY TEMPLATES PAGE (Audit & Settings > Policy templates). The RULES are read-only here; a SuperAdmin
+  // REQ-L -- THE POLICY TEMPLATES PAGE (Templates > Policy templates). The RULES are read-only here; a SuperAdmin
   // can RENAME a template (display name only -- delegations point at its immutable id) and set the DEFAULT template per
   // kind (pim.Settings['PolicyTemplateDefaults']) -- operator 2026-09-19: "give policies an id so we can rename them",
   // "set default in settings". Neither write touches the tenant.

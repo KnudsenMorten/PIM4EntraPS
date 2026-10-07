@@ -13,6 +13,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.524 -- 2026-10-07
+
+- **Every mail names its environment.** The subject starts with the environment's name (for example "[Production] ..."), and every mail ends with a footer naming the environment, the tenant and its id, the PIM Manager version and the link to that environment -- never just "this tenant".
+- **Shorter menus.** "Audit & Settings" is three menus: **Templates** (mail, policy and workload templates, tenant baseline), **Operations** (audit trail, commit history and undo, backups and restore, guards, support) and **Settings** (settings, Manager access and roles, emergency access).
+
 ## 2.4.523 -- 2026-10-07
 
 - **Jobs: "ok" means ok.** A job that ran shows a green **ok**, also when it had nothing to change (it used to say "no-op" in yellow, which read like a warning). The result column is wider, shows two lines and expands with **more**.
