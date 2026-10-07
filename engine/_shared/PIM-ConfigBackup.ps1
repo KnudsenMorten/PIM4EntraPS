@@ -52,7 +52,7 @@ function Get-PimConfigBackupSettingDenyList {
         secret   = @('ApiKeys', 'InvardiaInstallKey', 'LicenceRequestToken', 'EmergencyPassphrase', 'SqlConnectionString',
                      'StorePointer', 'SqlStore', 'ClientSecret', 'SupportClientSecret')
         identity = @('License', 'Licence', 'LicenceState', 'Edition', 'EditionUpgrade', 'InstallId', 'TelemetryInstallId',
-                     'InstallKeyClaimState', 'SchedulerTickJobId')
+                     'InstallKeyClaimState', 'SchedulerTickJobId', 'DemoMode', 'DemoGuestGroup')   # s98: a restore never flips demo mode
         state    = @('UpdateState', 'SchedulerTriggers', 'JobRunHistory', 'ConvergenceState', 'EngineItemFailures',
                      'HybridWorkerHeartbeat', 'HybridAdSyncLive', 'HybridAdSyncLiveWatch', 'RecalcSignature', 'RecalcEntitySignatures',
                      'CommitWatch', 'CommitOutcomes', 'AlertFeed', 'DriftAlertState', 'UplinkState', 'LicenceRequestState',

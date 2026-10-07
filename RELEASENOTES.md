@@ -13,6 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.529 -- 2026-10-08
+
+- **Get Started is a real wizard.** Every step now has its own fields right in the step (licence, departments and owners, roles and templates, admin accounts, access mapping, policies, alert recipients, break-glass accounts, first run, PIM Activator, discovery) and saves through the same place as the normal page. Previous / Save & exit / Save & next; a refused save stays on the step with the reason under the field; people are found by name.
+- **No double removals.** Asking to remove something that is already waiting in the queue adds nothing and says "already queued".
+- **Demo mode** (off by default): visitors in a demo group can look at everything and stage changes, but nothing is saved; a banner says it is a live demo.
+- The setup scripts now call the support identity the **Invardia Support app** (`-SupportAppId`; the old parameter name still works).
+- **Large tenants:** the current-assignments snapshot is saved with a longer time limit, so a busy database no longer drops a snapshot of ten thousand assignments.
+
 ## 2.4.528 -- 2026-10-08
 
 - **Operations › PIM Activator, rebuilt as a guided page.** Five steps like Get Started (the Entra apps, the settings, the Intune remediation, Edge for Business, servers), each showing whether it is done, and the page now scrolls.

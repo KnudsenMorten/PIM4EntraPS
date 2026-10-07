@@ -125,11 +125,12 @@ param(
     [switch]$SkipSql,
     # ---- 2026-09-15 THE SQL ADMIN GROUP ------------------------------------------------------------
     # The SQL server's Entra admin converges on this security group, holding the environment identity,
-    # the SQL identity (private SQL), this deploy identity, the troubleshooting identity and whoever was
+    # the SQL identity (private SQL), this deploy identity, the Invardia Support app and whoever was
     # admin before. Same model on public and private SQL. -SkipSqlAdminGroup keeps the single-principal
     # admin of earlier versions.
     [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
-    [string]$TroubleshootingAppId,
+    # The Invardia Support app's application id (added to the SQL admin group). The old name -TroubleshootingAppId still binds.
+    [Alias('TroubleshootingAppId')][string]$SupportAppId,
     [switch]$SkipSqlAdminGroup,
     # IMP-49 t -- THIS host's public IP for the setup-host firewall rule. Without it the IP is read from
     # https://api.ipify.org, a third-party web service -- and that is now SAID on screen, every time.
@@ -521,7 +522,7 @@ if ($SkipSql) {
     $deployWho = if ($signedIn) { "(signed-in user $($signedIn.userName))" } else { "$AdminAppId" }
     # ---- 6a-group. 2026-09-15 -- converge the Entra admin onto the SQL ADMIN GROUP ---------------------
     # 🔑 A single-principal admin could administer the database alone; every other identity that must --
-    # the unattended updater's schema step, the operator's troubleshooting identity -- needed a contained
+    # the unattended updater's schema step, the Invardia Support app -- needed a contained
     # user made by that one principal, and an environment whose admin could not be used unattended was
     # stuck (EFIF/RIDE refused every release for two nights). A group holding all of them is the model on
     # public AND private SQL. Converged AFTER the server exists (a group admin is not a create-time option
@@ -545,7 +546,7 @@ if ($SkipSql) {
         }
         $r = Invoke-PimSqlAdminGroupStep -Graph $inv.Graph -Arm $inv.Arm -TenantId $inv.TenantId -SubscriptionId $SubscriptionId `
                 -ResourceGroup $rg -SqlServerName $sqlSrv -GroupName $SqlAdminGroupName -NoDiscovery -UpdateJobName 'ca-pim-update' `
-                -TroubleshootingAppId $TroubleshootingAppId -ExtraMembers $ExtraMembers -Mode converge
+                -SupportAppId $SupportAppId -ExtraMembers $ExtraMembers -Mode converge
         Write-PimSqlAdminGroupReport -Result $r -Indent '         '
         if ($r.ok) { $script:sqlAdminGroupOk = $true; return }
         if ($r.permissionDenied) {
@@ -614,7 +615,7 @@ if ($SkipSql) {
     } elseif ($adminNowLogin -and $adminNowLogin -ieq "$SqlAdminGroupName".Trim()) {
         # 🔴 NEVER MOVE A GROUP ADMIN BACK TO THE IDENTITY. The group was converged earlier (by a
         # privileged identity) and this run simply could not read its members -- moving the admin to the
-        # UAMI here would remove the updater and the troubleshooting identity from the database.
+        # UAMI here would remove the updater and the Invardia Support app from the database.
         Write-Warning "         the Entra admin is the SQL admin group '$SqlAdminGroupName' -- kept; its members were NOT verified by this run ($sqlAdminGroupSkipped)."
     } else {
         # Legacy single-principal design (no group rights, or -SkipSqlAdminGroup): the SQL identity is the admin.

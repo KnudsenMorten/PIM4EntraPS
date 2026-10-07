@@ -436,9 +436,10 @@ param(
     [string]$DbInitJobName = 'ca-pim-dbinit',
 
     # 71.18: forwarded to the prerequisites' SQL admin group step (they were not, so the group never got the
-    # troubleshooting identity and a non-default group name was ignored).
+    # Invardia Support app and a non-default group name was ignored).
     [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
-    [string]$TroubleshootingAppId,
+    # The Invardia Support app's application id. The old name -TroubleshootingAppId still binds.
+    [Alias('TroubleshootingAppId')][string]$SupportAppId,
 
     # 71.33 -- DEPLOY AS THE SIGNED-IN az USER (a customer administrator), not as a deploy application. No deploy
     # identity is created, no PEM exists, no SQL admin application is used: every sub-step runs as the signed-in user,
@@ -1572,7 +1573,7 @@ function Invoke-DefaultStepRunner {
                 # NAME. Take the first label rather than making the caller pass the same thing twice.
                 if ("$SqlServerFqdn".Trim())              { $prqShape['SqlServerName']       = ("$SqlServerFqdn".Trim() -split '\.')[0] }
                 if ("$SqlAdminGroupName".Trim())          { $prqShape['SqlAdminGroupName']   = "$SqlAdminGroupName".Trim() }
-                if ("$TroubleshootingAppId".Trim())       { $prqShape['TroubleshootingAppId'] = "$TroubleshootingAppId".Trim() }
+                if ("$SupportAppId".Trim())               { $prqShape['SupportAppId']        = "$SupportAppId".Trim() }
                 if ("$SetupHostIp".Trim())                { $prqShape['SetupHostIp']         = "$SetupHostIp".Trim() }   # IMP-49 t: no external lookup
                 $global:LASTEXITCODE = 0
                 try {

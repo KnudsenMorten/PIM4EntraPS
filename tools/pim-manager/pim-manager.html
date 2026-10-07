@@ -1020,6 +1020,26 @@
      scoll down"). The scroll container is #activatorScrollBody (its id ends in "Body", so the tab-guide stacking rule
      above applies and the body keeps min-height:0 -- it scrolls inside the panel). */
   #activatorScrollBody, #getStartedScrollBody { flex:1 1 auto; min-height:0; overflow:auto; padding:14px 18px; }
+  /* 97.1 Get Started -- one card per step with its own form (WIZARD-1) */
+  .gs-sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+  .gsFields { font-size:12.5px; color:#24292f; }
+  .gsFields input[type=text]:not(.pim-chip-entry), .gsFields select, .gsFields textarea { font:inherit; font-size:12.5px; padding:4px 7px; border:1px solid #d0d7de; border-radius:5px; width:420px; max-width:100%; box-sizing:border-box; }
+  .gs-l { display:block; font-size:12px; font-weight:600; margin:9px 0 3px; }
+  .gs-sub { font-size:12.5px; font-weight:600; margin:14px 0 2px; color:#24292f; }
+  .gs-hint { color:#57606a; font-size:12px; margin:6px 0; }
+  .gs-facts { font-size:12.5px; margin:0 0 8px; }
+  .gs-list { margin:2px 0 8px 18px; padding:0; font-size:12.5px; }
+  .gs-check { display:block; font-size:12.5px; margin:6px 0; }
+  .gs-row { display:flex; gap:12px; flex-wrap:wrap; }
+  .gs-actions { margin:10px 0 2px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .gs-code { position:relative; margin:4px 0 8px; }
+  .gs-code pre { background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:8px; font-size:11px; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 4px; }
+  .gsErr { display:none; color:#cf222e; font-size:12px; margin:3px 0 4px; }
+  .gsProblem { color:#82071e; border:1px solid #ff8182; background:#ffebe9; border-radius:6px; padding:6px 10px; font-size:12.5px; margin-bottom:8px; }
+  .gsNav { display:flex; gap:8px; align-items:center; margin-top:16px; border-top:1px solid #eaeef2; padding-top:12px; }
+  .gsStaged { margin:4px 0 8px; padding:8px 10px; border:1px solid #d4a72c; background:#fff8c5; border-radius:6px; font-size:12.5px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .gsExtra:empty { display:none; }
+  .gsExtra { margin-bottom:10px; }
   #activatorBody { max-width:1100px; font-size:12.5px; color:#24292f; }
   .act-head { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:10px; flex-wrap:wrap; }
   .act-title { font-size:16px; font-weight:600; margin-bottom:2px; }
@@ -2322,6 +2342,31 @@
       'or set <code>PIM_SuperAdmins</code> to your identity and restart the Manager.';
     bar.parentElement.insertBefore(div, bar.nextSibling);
   })();
+  // s98 DEMO MODE BANNER -- on every page while demo mode is on. A demo viewer reads that nothing they do is saved (the
+  // server refuses every write; this is only the hint); anyone else reads that demo mode is on for the demo group.
+  function showDemoBanner(forceViewer) {
+    const dm = (window.PIM_ROLE_BOOT && window.PIM_ROLE_BOOT.demoMode) || null;
+    if (!forceViewer && (!dm || !dm.on)) { return; }
+    const viewer = !!(forceViewer || (dm && dm.viewer));
+    const anchor = document.getElementById('tabRight');
+    const bar = anchor && anchor.parentElement;
+    if (!bar || !bar.parentElement) { return; }
+    let div = document.getElementById('demoModeBanner');
+    if (!div) {
+      div = document.createElement('div');
+      div.id = 'demoModeBanner';
+      div.setAttribute('role', 'status');
+      bar.parentElement.insertBefore(div, bar.nextSibling);
+    }
+    div.style.cssText = 'margin:6px 12px;padding:8px 12px;border:1px solid #54aeff;border-left:4px solid #0969da;border-radius:6px;background:#ddf4ff;color:#24292f;font-size:12.5px;';
+    if (viewer) {
+      div.setAttribute('data-viewer', '1');
+      div.innerHTML = '<b>Live demo.</b> You can try everything and stage changes, but nothing is saved.';
+    } else if (div.getAttribute('data-viewer') !== '1') {
+      div.innerHTML = '<b>Demo mode is on.</b> Members of the demo guest group can look and stage changes; nothing they do is saved. Your own role is unchanged.';
+    }
+  }
+  try { showDemoBanner(false); } catch (_) { }
   // Right-corner banner: NAME + GUID of the connected tenant (real context from
   // PIM_DATA), grouped under a "Tenant" caption. Show the name with the GUID
   // beside it; if the name is unknown, show the GUID alone (it becomes the name
@@ -4520,6 +4565,20 @@
   // Graph app-roles, Azure RBAC, and the SCOPED Exchange RBAC that carries mail. A green Graph
   // check says nothing about whether TAP mail can leave the building.
   // 🔑 "Could not check" renders as a WARNING that says the CHECK failed -- never as healthy.
+  // The exact grant for the engine identity's missing Graph permissions -- shown on Overview and in Get Started's
+  // "Engine permissions" step (97.1), one text for both.
+  function permFixScript(d, miss) {
+    const roles = (miss || []).map(m => String((m && m.role) || '').replace(/'/g, '')).filter(Boolean);
+    return "# Grant the engine identity its missing Microsoft Graph permissions (run once, as Global Administrator)\n" +
+      "Connect-MgGraph -TenantId '" + String(d.tenantId || '').replace(/'/g, '') + "' -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'\n" +
+      "$engine = '" + String(d.objectId || '').replace(/'/g, '') + "'   # " + String(d.identity || '').replace(/[\r\n]/g, ' ') + "\n" +
+      "$graph  = Get-MgServicePrincipal -Filter \"appId eq '00000003-0000-0000-c000-000000000000'\"\n" +
+      "foreach ($role in @(" + roles.map(r => "'" + r + "'").join(', ') + ")) {\n" +
+      "  $appRole = $graph.AppRoles | Where-Object { $_.Value -eq $role -and $_.AllowedMemberTypes -contains 'Application' }\n" +
+      "  New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $engine -PrincipalId $engine -ResourceId $graph.Id -AppRoleId $appRole.Id | Out-Null\n" +
+      "  Write-Host \"granted $role\"\n}\n" +
+      "# A new grant reaches the engine's token within ~30 minutes. Then press Verify permissions.";
+  }
   async function loadPermissionHealth(userAsked) {
     const el = document.getElementById('homePermBanner');
     if (!el) return;
@@ -4557,16 +4616,7 @@
       // the Manager is deliberately read-only (§65.4). It hands over the exact grant instead, for the engine
       // identity it just read, for a Global Administrator / Privileged Role Administrator to run once.
       if (d.objectId) {
-        const roles = miss.map(m => String(m.role || '').replace(/'/g, '')).filter(Boolean);
-        const script = "# Grant the engine identity its missing Microsoft Graph permissions (run once, as Global Administrator)\n" +
-          "Connect-MgGraph -TenantId '" + String(d.tenantId || '').replace(/'/g, '') + "' -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'\n" +
-          "$engine = '" + String(d.objectId).replace(/'/g, '') + "'   # " + String(d.identity || '').replace(/[\r\n]/g, ' ') + "\n" +
-          "$graph  = Get-MgServicePrincipal -Filter \"appId eq '00000003-0000-0000-c000-000000000000'\"\n" +
-          "foreach ($role in @(" + roles.map(r => "'" + r + "'").join(', ') + ")) {\n" +
-          "  $appRole = $graph.AppRoles | Where-Object { $_.Value -eq $role -and $_.AllowedMemberTypes -contains 'Application' }\n" +
-          "  New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $engine -PrincipalId $engine -ResourceId $graph.Id -AppRoleId $appRole.Id | Out-Null\n" +
-          "  Write-Host \"granted $role\"\n}\n" +
-          "# A new grant reaches the engine's token within ~30 minutes. Then press Verify permissions.";
+        const script = permFixScript(d, miss);
         inner += '<details style="margin-top:8px;" open><summary style="cursor:pointer;font-weight:600;">How to fix: grant the missing permission(s)</summary>' +
           '<div style="margin:6px 0 4px 0;font-size:11.5px;color:#57606a;">The portal cannot grant these itself (it is read-only on purpose: an identity that ' +
           'can grant permissions could give itself anything). Run this once in PowerShell as a Global Administrator:</div>' +
@@ -5108,7 +5158,9 @@
   // The SERVER enforces role on every endpoint; this only gates the UI so we
   // don't render write controls a lower role can't use.
   // ===================================================================
-  const PIM_ROLE_RANK = { Reader: 0, Delegated: 1, Admin: 2, SuperAdmin: 3 };
+  // s98: Demo ranks as Admin HERE ONLY, so a demo viewer can try every control and stage changes; the SERVER ranks Demo as
+  // Reader and refuses every write with "This is a live demo ..." (Invoke-PimManagerDemoGate) -- the page only shows.
+  const PIM_ROLE_RANK = { Reader: 0, Delegated: 1, Demo: 2, Admin: 2, SuperAdmin: 3 };
   function roleAtLeast(min) {
     return (PIM_ROLE_RANK[PIM_ROLE] || 0) >= (PIM_ROLE_RANK[min] || 0);
   }
@@ -7535,7 +7587,7 @@
   // A section no rule claims lands in "Other", so nothing can disappear. The last category is remembered per browser.
   const SETTINGS_CATEGORIES = [
     { key: 'naming',    label: 'Naming & accounts',      match: ['setEnvNameHost', 'setAdminDomainHost', 'setGroupNamingCard', /admin name prefixes/i, /naming conventions/i, /naming words/i, /^filters/i] },
-    { key: 'features',  label: 'Features & edition',     match: ['setFeaturesCard', 'setGovPreviewCard', 'setLicenceCard', 'setEditionCard', 'setScenarioCard', 'setFeatureGatesCard'] },
+    { key: 'features',  label: 'Features & edition',     match: ['setFeaturesCard', 'setDemoModeHost', 'setGovPreviewCard', 'setLicenceCard', 'setEditionCard', 'setScenarioCard', 'setFeatureGatesCard'] },
     { key: 'approvals', label: 'Approvals & policy',     match: ['setSelfApproveHost', 'setOpPolicyCard'] },
     { key: 'rings',     label: 'Deployment rings',       match: ['setRingsHost'] },
     { key: 'mail',      label: 'Mail & alerting',        match: ['setEmailControlsCard', 'setAlertingCard'] },
@@ -7628,6 +7680,8 @@
     // Operator 2026-10-04: this environment's own name ("Test (EU)"), shown in the header left of Mode and in the browser tab.
     h += `<div id="setEnvNameHost"><div style="color:#57606a;font-size:12px;">Loading environment name…</div></div>`;
     h += `<div id="setAdminDomainHost"><div style="color:#57606a;font-size:12px;">Loading admin account domain…</div></div>`;
+    // s98 demo mode: a live demo environment where visitors in the demo guest group can look and stage, never save.
+    h += `<div id="setDemoModeHost"><div style="color:#57606a;font-size:12px;">Loading demo mode…</div></div>`;
 
     // Operator 2026-09-21: "admin name prefixes must go befor naming conventions section (move up one)".
     const naming = s.naming || {};   // declared HERE: the prefixes card, the "Naming words" card and the naming table all read it
@@ -7973,6 +8027,7 @@
     renderSettingsCopySection(document.getElementById('setCopyHost'));
     renderConfigBackupRetentionCard(document.getElementById('setConfigBackupHost'));
     renderEnvironmentNameSection(document.getElementById('setEnvNameHost'));
+    renderDemoModeSection(document.getElementById('setDemoModeHost'));
     renderAdminDomainSection(document.getElementById('setAdminDomainHost'));
     renderHybridAdSection(document.getElementById('setHybridAdHost'));
     renderRfaBrandingSection(document.getElementById('setRfaBrandingHost'));
@@ -8958,8 +9013,9 @@
   // "Approve all" button. The approval carries over to the next run as long as that run adds no new weakening (engine
   // Test-PimPolicyBreaker), and the policy jobs are started straight away so nobody has to find "Run now".
   const POLICY_HOLD_JOBS = { 'GroupsPolicies': 'delta-policies', 'EntraRolePolicies': 'delta-policies', 'AzResPolicies': 'delta-pim-azure-policies' };
-  async function renderApprovalsPolicyHolds() {
-    const host = document.getElementById('apprPolicyHolds');
+  async function renderApprovalsPolicyHolds(hostArg) {
+    // 97.1: Get Started's "Policies" step renders this same panel (same Approve all) into its own card (hostArg).
+    const host = hostArg || document.getElementById('apprPolicyHolds');
     if (!host) return;
     if (!isServer) { host.innerHTML = ''; return; }
     host.innerHTML = '';
@@ -8989,11 +9045,11 @@
       host.appendChild(box);
       await renderPolicyHold(box, x.code);
     }
-    const btn = document.getElementById('apprAllBtn');
+    const btn = host.querySelector('#apprAllBtn');
     if (btn) btn.onclick = async () => {
       if (!confirm('Approve all ' + held.length + ' change set(s) -- ' + pol + ' policies' + (weak ? ', ' + weak + ' of the changes weaken a setting' : '') + '?\n\n' +
           'The policy jobs start straight away and make these changes. A later run is only held again if it would weaken something you have not approved here.')) return;
-      const msg = document.getElementById('apprAllMsg');
+      const msg = host.querySelector('#apprAllMsg');
       btn.disabled = true; msg.textContent = 'Approving…'; msg.style.color = '#57606a';
       try {
         const r = await api('POST', '/api/engine/policy-approve-all', {});
@@ -10518,9 +10574,15 @@
     if (pv && pv.approvalRequired) { say('Not queued: ' + rows.length + ' removal(s) is over the approval threshold -- use Reviews & controls > Review current delegations, which raises the approval request.', true); return false; }
     try {
       const r = await api('POST', '/api/revoke', { rows, justification: why, confirmCount: (pv && pv.confirmRequired) ? pv.toRevokeCount : undefined });
-      const q = asList(r && r.results).filter(x => x && x.ok).length;
+      const okRes = asList(r && r.results).filter(x => x && x.ok);
+      const q = okRes.length;
+      // The server answers a removal that is ALREADY waiting in the queue (queued from another tab, by a colleague, or
+      // before a reload) as "already queued" and adds nothing -- say so instead of counting it as new.
+      const aq = okRes.filter(x => x.alreadyQueued).length;
       const sk = Number(r && r.skippedCount) || 0;
-      say('Queued ' + q + ' removal(s)' + (sk ? ', ' + sk + ' skipped (break-glass)' : '') + ' -- commit them on the Queue; the drift clears after the engine ran and the next check.');
+      const nq = q - aq;
+      say((nq ? 'Queued ' + nq + ' removal(s)' : '') + (nq && aq ? ', ' : '') + (aq ? aq + ' already queued for removal (nothing added)' : '') + (!q ? 'Nothing queued' : '') +
+        (sk ? ', ' + sk + ' skipped (break-glass)' : '') + ' -- commit them on the Queue; the drift clears after the engine ran and the next check.');
       if (q) its.forEach(it => DRIFT_QUEUED.add(String(it._sel || (it.scope + '|' + it.key))));
       return q > 0;
     } catch (e) { say('Not queued: ' + ((e && e.body && e.body.error) || e.message), true); return false; }
@@ -10981,13 +11043,20 @@
   // at once, and the Ignored view has Re-add. Create STAGES a permission-group definition (Azure scope / Power BI
   // workspace -- review it under Review & commit) or ACCEPTS a new role into the catalog. Nothing is granted here.
   let PIM_DISC_VIEW = 'new';
+  // The ONE reader of each of these routes (the Discovery page, the template cards and the Get Started wizard use them).
+  async function pimGetDiscoveryInbox() {
+    return api('GET', '/api/discovery-inbox');
+  }
+  async function pimGetTemplates() {
+    return api('GET', '/api/templates');
+  }
   async function renderDiscovery() {
     const body = document.getElementById('discoveryBody');
     if (!body) return;
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- discovery needs the server.</div>'; return; }
     const esc = escapeHtml;
     let d = null, err = '';
-    try { d = await api('GET', '/api/discovery-inbox'); } catch (e) { err = String((e && e.body && e.body.error) || (e && e.message) || e); }
+    try { d = await pimGetDiscoveryInbox(); } catch (e) { err = String((e && e.body && e.body.error) || (e && e.message) || e); }
     if (err || !d) { body.innerHTML = '<div class="discReadError" style="font-size:12.5px;color:#cf222e;">Discovery could not be read: ' + esc(err || 'no answer') + '</div>'; return; }
     const items = asList(d.items);
     const counts = d.counts || {};
@@ -11796,6 +11865,36 @@
         const r = await api('PUT', '/api/settings/environment-name', { value: v });
         await renderEnvironmentName((r && r.value) || '');
         if (msg) { msg.style.color = '#1a7f37'; msg.textContent = (r && r.value) ? 'Saved -- shown at the top as "' + r.value + '".' : 'Saved -- no environment name is shown.'; }
+      } catch (e) { if (msg) { msg.style.color = '#cf222e'; msg.textContent = String((e && e.message) || e); } }
+      btn.disabled = false;
+    };
+  }
+
+  // s98 DEMO MODE (Settings > Features & edition): on / off and the demo guest group. SuperAdmin to change. While it is on,
+  // members of that group can look at every page and stage changes, and the server refuses every save they try.
+  async function renderDemoModeSection(host) {
+    if (!host) return;
+    const esc = escapeHtml;
+    let d = null, err = '';
+    try { d = await api('GET', '/api/settings/demo-mode'); } catch (e) { err = String((e && e.message) || e); }
+    let h = '<div class="set-card" id="setDemoMode"><h3 style="margin:0 0 4px;font-size:14px;">Demo mode</h3>' +
+            '<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">For a live demo environment. While demo mode is on, members of the <b>demo guest group</b> can open every page and stage changes, but nothing they do is saved: every commit, approval, job run, revoke and settings change is refused. Everyone else keeps their own role. Off by default.</div>';
+    if (err || !d) { host.innerHTML = h + '<div style="color:#cf222e;font-size:12px;">Could not read demo mode: ' + esc(err || 'no answer') + '</div></div>'; return; }
+    if (d.viewer) { host.innerHTML = h + '<div style="font-size:12px;">Demo mode is <b>on</b> -- you are viewing the live demo.</div></div>'; return; }
+    const ro = d.canWrite ? '' : ' disabled';
+    h += '<div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">' +
+         '<label style="display:flex;gap:6px;align-items:center;font-size:12px;"><input type="checkbox" id="setDemoModeOn"' + (d.on ? ' checked' : '') + ro + '> Demo mode on</label>' +
+         '<label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#57606a;">Demo guest group<input type="text" id="setDemoModeGroup" maxlength="256" style="min-width:240px" placeholder="' + esc(d.defaultGroup || '') + '" value="' + esc(d.group || '') + '"' + ro + '></label>' +
+         (d.canWrite ? '<button id="setDemoModeSave">Save</button>' : '<span style="font-size:11px;color:#57606a;">(SuperAdmin required to change)</span>') +
+         '<span id="setDemoModeMsg" style="font-size:12px;"></span></div>';
+    host.innerHTML = h + '</div>';
+    const btn = document.getElementById('setDemoModeSave');
+    if (btn) btn.onclick = async () => {
+      const msg = document.getElementById('setDemoModeMsg');
+      btn.disabled = true;
+      try {
+        const r = await api('PUT', '/api/settings/demo-mode', { on: !!document.getElementById('setDemoModeOn').checked, group: document.getElementById('setDemoModeGroup').value });
+        if (msg) { msg.style.color = '#1a7f37'; msg.textContent = 'Saved. ' + ((r && r.note) || ''); }
       } catch (e) { if (msg) { msg.style.color = '#cf222e'; msg.textContent = String((e && e.message) || e); } }
       btn.disabled = false;
     };
@@ -12986,105 +13085,631 @@
   // a separate confirmed step. Admin role + the portal capability required.
   // ===================================================================
   // ===================================================================================================================
-  // 97.1 GET STARTED (operator 2026-10-07: "similar to how i have made it in ELDK ... it should show the incompleted steps").
-  // The ELDK pattern: every step's state is COMPUTED FROM THE DATA on each visit (never a manual tick); a progress bar,
-  // step pills (green check = done, red ! = a required step still open, grey = optional), "STEP x OF N", Back / Next,
-  // any step reachable; the menu carries a red ! while a required step is open (the tab badge, mirrored onto the menu).
-  // Each step explains itself and opens the page that does the work -- Get Started guides, it does not duplicate pages.
+  // 97.1 GET STARTED -- a WIZARD of real forms (framework WIZARD-1; owner 2026-10-07: "show options in the wizard, dont
+  // link to things" / "all fields must be in the get started, writing to the same setting" / "people and groups found by
+  // name (search + dropdown), never by pasting an object id").
+  // The ELDK /Forms/Wizard pattern: "N of M steps done" + a bar + one chip per step (green check = done, red ! = a
+  // required step still open, grey = optional); ONE card per step with "STEP X OF N", the title, one sentence, the
+  // status ("! Not done yet -- <why>"), then the step's REAL FIELDS in ONE form; Previous (saves nothing) / Save & exit /
+  // Save & next (Save & finish on the last). A step writes through the SAME route the normal page uses (same validation,
+  // audit, maker/checker, staging + commit) -- never a second store. A refused save shows the SAME step with the reason
+  // under the field and writes nothing (every field is checked before anything is sent). Enter = Save & next (the first
+  // submit button of the form is a hidden Save & next; Previous is a plain button). An optional step's Save & next with
+  // nothing filled just moves on. A step that needs an action outside the product records a CONFIRMATION as a real setting
+  // (pim.Settings 'GetStartedConfirmations'), which is what makes it done. Action buttons (Run now, Send a test mail) save
+  // the step first, then stay. "Done" is computed from the data on every visit, never a stored tick; the menu's red ! is
+  // read from a short cache that a save clears.
   // ===================================================================================================================
   const GET_STARTED_STEPS = [
-    { id: 'licence', title: 'Licence', required: true, tab: 'settings', action: 'Open Settings (Licence)',
+    { id: 'licence', title: 'Licence', required: true, need: 'SuperAdmin',
       what: 'Register the PIM Manager licence. Pro features and the updates from Invardia depend on it.',
-      check: c => { const s = String((c.licence && c.licence.status) || ''); return { done: s === 'Valid' || s === 'Grace', note: s ? ('licence: ' + s) : 'no licence registered' }; } },
-    { id: 'permissions', title: 'Engine permissions', required: true, tab: 'home', action: 'Open Overview (Verify permissions)',
-      what: 'The engine needs its Microsoft Graph and Azure rights for the workloads you use. Overview checks them and shows the exact grant for anything missing.',
+      check: c => { const s = String((c.licence && c.licence.status) || ''); return { done: s === 'Valid' || s === 'Grace', note: (s && s !== 'Missing') ? ('licence: ' + s) : 'no licence registered' }; } },
+    { id: 'permissions', title: 'Engine permissions', required: true,
+      what: 'The engine needs its Microsoft Graph and Azure rights for the workloads you use. This step checks them and shows the exact grant for anything missing.',
       check: c => { const p = c.perm || {}; const miss = (p.missingRequired || []).filter(Boolean).length; return { done: !!p.objectId && miss === 0 && String(p.severity || '') !== 'error', note: p.objectId ? (miss ? miss + ' permission(s) missing' : 'all required permissions held') : 'not checked yet' }; } },
-    { id: 'mail', title: 'Mail sender', required: true, tab: 'settings', action: 'Open Settings',
-      what: 'A shared mailbox PIM sends from (TAP codes, approvals, alerts), its send right scoped to that one mailbox. Set it up with the setup script Initialize-PimMailSender (also downloadable from invardia.com/support/pim).',
+    { id: 'mail', title: 'Mail sender', required: true,
+      what: 'A shared mailbox PIM sends from (TAP codes, approvals, alerts), its send right scoped to that one mailbox.',
       check: c => { const s = String((c.perm && c.perm.mail && c.perm.mail.sender) || ''); return { done: !!s, note: s ? ('sends as ' + s) : 'no sender: TAP codes and notifications are not sent' }; } },
-    { id: 'departments', title: 'Departments & owners', required: true, tab: 'departments', action: 'Open Departments & owners',
-      what: 'The departments that sponsor access, and their owners -- who approves and receives the mail. Create them, or import.',
+    { id: 'departments', title: 'Departments & owners', required: true, need: 'SuperAdmin',
+      what: 'The departments that sponsor access, and their owners -- who approves and receives the mail.',
       check: c => ({ done: c.rows['PIM-Definitions-Departments'] > 0, note: c.rows['PIM-Definitions-Departments'] + ' department(s)' }) },
-    { id: 'roles', title: 'Roles & templates', required: true, tab: 'new', action: 'Open Create access',
-      what: 'The role groups people activate -- from the templates (pick and include) or your own.',
+    { id: 'roles', title: 'Roles & templates', required: true, need: 'Admin',
+      what: 'The role groups people activate -- include the templates, or add your own role group.',
       check: c => ({ done: c.rows['PIM-Definitions-Roles'] > 0, note: c.rows['PIM-Definitions-Roles'] + ' role group(s)' }) },
-    { id: 'admins', title: 'Admin accounts', required: true, tab: 'adminimport', action: 'Open Import administrators',
-      what: 'The separate admin accounts PIM manages -- create them, or import the ones you have.',
+    { id: 'admins', title: 'Admin accounts', required: true, need: 'Admin',
+      what: 'The separate admin accounts PIM manages. Find the person, and PIM creates their admin account after you commit.',
       check: c => ({ done: c.rows['Account-Definitions-Admins'] > 0, note: c.rows['Account-Definitions-Admins'] + ' admin account(s)' }) },
-    { id: 'access', title: 'Access mapping', required: true, tab: 'map', action: 'Open the Delegation Map',
-      what: 'Who gets which role: drag admins onto roles in the map.',
+    { id: 'access', title: 'Access mapping', required: true, need: 'Admin',
+      what: 'Who gets which role: pick an admin account and the role group it may activate.',
       check: c => ({ done: c.rows['PIM-Assignments-Admins'] > 0, note: c.rows['PIM-Assignments-Admins'] + ' assignment(s)' }) },
-    { id: 'policies', title: 'Policies', required: true, tab: 'approvals', action: 'Open Approvals',
-      what: 'PIM applies the activation policies from the templates (MFA, duration, approval). A first large change set waits for your approval.',
+    { id: 'policies', title: 'Policies', required: true,
+      what: 'PIM applies the activation policies from the templates (MFA, duration, approval). A first large change set waits for your approval here.',
       check: c => { const h = Number((c.jobs && c.jobs.heldCount) || 0); return { done: h === 0, note: h ? h + ' change set(s) waiting for your approval' : 'nothing waiting' }; } },
-    { id: 'alerts', title: 'Alert recipients', required: true, tab: 'settings', action: 'Open Settings (Alerting)',
+    { id: 'alerts', title: 'Alert recipients', required: true, need: 'Admin',
       what: 'Who receives the alerts when a guard holds something or a job fails.',
       check: c => { const n = ((c.alerting && c.alerting.recipients) || []).filter(Boolean).length; return { done: n > 0, note: n + ' recipient(s)' }; } },
-    { id: 'breakglass', title: 'Break-glass accounts', required: true, tab: 'emergency', action: 'Open Emergency access',
-      what: 'The emergency accounts PIM must never touch -- define them before the first run.',
+    { id: 'breakglass', title: 'Break-glass accounts', required: true, need: 'SuperAdmin',
+      what: 'The emergency accounts PIM must never touch -- define them before the first run. Another SuperAdmin approves the list.',
       check: c => { const n = ((c.breakglass && (c.breakglass.effectiveAccounts || c.breakglass.accounts)) || []).length; return { done: n > 0, note: n + ' account(s)' }; } },
-    { id: 'firstrun', title: 'First run', required: true, tab: 'jobs', action: 'Open Jobs',
+    { id: 'firstrun', title: 'First run', required: true, need: 'Admin',
       what: 'The engine applies your configuration. Run it now and see what it did.',
       check: c => { const r = c.jobs && c.jobs.lastRun; return { done: !!(r && r.ok), note: r ? ((r.ok ? 'last run ok: ' : 'last run failed: ') + (r.name || '')) : 'no run yet' }; } },
-    { id: 'activator', title: 'PIM Activator', required: false, tab: 'activator', action: 'Open Operations > PIM Activator',
-      what: 'The browser extension admins activate with: the Entra apps, the settings catalog, the Intune remediation, Edge for Business and servers -- all on one page.',
-      check: () => ({ done: false, note: 'optional' }) },
-    { id: 'discovery', title: 'Discovery', required: false, tab: 'discovery', action: 'Open Discovery',
+    { id: 'activator', title: 'PIM Activator', required: false, need: 'Admin',
+      what: 'The browser extension admins activate with: the Entra apps, the settings, the Intune remediation and Edge for Business. Do the steps here, then confirm the rollout.',
+      check: c => { const k = c.confirm && c.confirm.activator; return { done: !!k, note: k ? ('rolled out -- confirmed by ' + (k.by || 'an admin')) : 'the rollout is not confirmed yet' }; } },
+    { id: 'discovery', title: 'Discovery', required: false, need: 'Admin',
       what: 'Let PIM find what is new (Azure subscriptions, Power BI workspaces, roles) and offer it to you.',
-      check: () => ({ done: false, note: 'optional' }) },
+      check: c => { const j = c.discoveryJob; const on = !!(j && j.enabled); return { done: on && j.lastOk === true, note: !j ? 'discovery is not scheduled here' : !on ? 'switched off' : (j.lastOk === true ? 'on, and it has run' : 'on, it has not run yet') }; } },
   ];
-  let GET_STARTED_LAST = null;
-  async function evaluateGetStarted() {
+  let GET_STARTED_LAST = null, GS_FACTS = null, GS_CACHE_AT = 0, GS_CUR = '';
+  const GS_CACHE_MS = 60000;   // the menu badge reads this short cache; a save clears it
+  const GS_PEOPLE = {};        // UPN (lower case) -> display name, from the people search (fills first / last name)
+  async function gsFacts(force) {
     const c = { rows: {} };
     const safe = async (fn) => { try { return await fn(); } catch (_) { return null; } };
-    const [lic, perm, home, alerting, bg] = await Promise.all([
+    const [lic, perm, home, alerting, bg, gs, jobs] = await Promise.all([
       safe(() => api('GET', '/api/license')), safe(() => api('GET', '/api/permissions-health')), safe(() => api('GET', '/api/home')),
-      safe(() => api('GET', '/api/alerting')), safe(() => api('GET', '/api/settings/breakglass-accounts'))]);
+      safe(() => api('GET', '/api/alerting')), safe(() => api('GET', '/api/settings/breakglass-accounts')),
+      safe(() => api('GET', '/api/get-started')), safe(() => api('GET', '/api/jobs'))]);
     c.licence = lic; c.perm = perm; c.jobs = home && home.tiles && home.tiles.jobs; c.alerting = alerting; c.breakglass = bg;
+    c.confirm = (gs && gs.confirmations) || {};
+    c.jobList = Array.isArray(jobs && jobs.jobs) ? jobs.jobs : [];
+    c.discoveryJob = c.jobList.find(j => j && (j.type === 'discovery' || j.name === 'discovery')) || null;
+    c.fullJob = c.jobList.find(j => j && j.type === 'engine-full') || c.jobList.find(j => j && j.name === 'full-reconcile') || null;
     for (const b of ['PIM-Definitions-Departments', 'PIM-Definitions-Roles', 'Account-Definitions-Admins', 'PIM-Assignments-Admins']) {
-      const d = await safe(() => loadCsv(b)); c.rows[b] = (d && Array.isArray(d.rows)) ? d.rows.length : 0;
+      const d = await safe(() => loadCsv(b, !!force)); c.rows[b] = (d && Array.isArray(d.rows)) ? d.rows.length : 0;
     }
-    const steps = GET_STARTED_STEPS.map(s => { let r = { done: false, note: '' }; try { r = s.check(c) || r; } catch (_) { } return Object.assign({}, s, { done: !!r.done, note: r.note || '' }); });
-    GET_STARTED_LAST = steps;
-    const openRequired = steps.filter(s => s.required && !s.done).length;
+    return c;
+  }
+  function gsPaintBadge(steps) {
+    const openRequired = (steps || []).filter(s => s.required && !s.done).length;
     const badge = document.getElementById('getStartedBadge');
     if (badge) { badge.textContent = '!'; badge.style.display = openRequired ? '' : 'none'; }
     try { const act = document.querySelector('#tabs .tab.active'); syncNavGroups(act ? act.dataset.tab : null); } catch (_) { }
+  }
+  async function evaluateGetStarted(force) {
+    if (!force && GET_STARTED_LAST && (Date.now() - GS_CACHE_AT) < GS_CACHE_MS) { gsPaintBadge(GET_STARTED_LAST); return GET_STARTED_LAST; }
+    const c = await gsFacts(force);
+    const steps = GET_STARTED_STEPS.map(s => { let r = { done: false, note: '' }; try { r = s.check(c) || r; } catch (_) { } return Object.assign({}, s, { done: !!r.done, note: r.note || '' }); });
+    GET_STARTED_LAST = steps; GS_FACTS = c; GS_CACHE_AT = Date.now();
+    gsPaintBadge(steps);
     return steps;
   }
-  async function renderGetStarted(stepId) {
+  // ---- small helpers for the step forms ----
+  function gsErrText(e) {
+    return String((e && e.body && e.body.error) || (e && e.message) || e);
+  }
+  function gsErr(name) {
+    return '<div class="gsErr" data-for="' + name + '" role="alert"></div>';
+  }
+  function gsCode(id, text) {
+    return '<div class="gs-code"><pre id="' + id + '">' + escapeHtml(text) + '</pre><button type="button" class="gsCopy btn-sec" data-src="' + id + '">Copy</button></div>';
+  }
+  function gsSplit(v) {
+    return String(v || '').split(/[\r\n;,|]+/).map(x => x.trim()).filter(Boolean);
+  }
+  function gsVal(form, name) {
+    const el = form.querySelector('[name="' + name + '"]');
+    return el ? String(el.value || '').trim() : '';
+  }
+  // Rows of one record type as this page sees them: committed + what is staged here (pending changes).
+  async function gsRows(base) {
+    const p = pendingFinalRows(base);
+    if (p) return p;
+    let d = null;
+    try { d = await loadCsv(base); } catch (e) { if (!e || e.status !== 404) throw e; d = null; }
+    return (d && Array.isArray(d.rows)) ? d.rows : [];
+  }
+  async function gsRoleGroups() {
+    return (await gsRows('PIM-Definitions-Roles')).map(r => ({ tag: String(r.GroupTag || ''), name: String(r.GroupName || r.GroupTag || ''), tier: String(r.TierLevel || '') })).filter(r => r.tag);
+  }
+  async function gsPeopleSource(q) {
+    const r = await pimPeopleSource(q);
+    (r.items || []).forEach(i => { if (i && i.value) GS_PEOPLE[String(i.value).toLowerCase()] = String(i.label || ''); });
+    return r;
+  }
+  function gsStagedCount() {
+    let n = 0;
+    for (const base of Object.keys(pendingChanges || {})) {
+      if (!isDirty(base)) continue;
+      const st = pendingRowStates(base);
+      n += st.added + st.removed + st.modified;
+    }
+    return n;
+  }
+  // "Commit now" is the NORMAL commit (Review & commit's Commit all): validation, second approver, journal, engine start.
+  async function gsCommitNow() {
+    const b = document.getElementById('btnCommit');
+    if (!b || typeof b.onclick !== 'function') { sharedToast('Commit is not available on this page.', true); return; }
+    try { await b.onclick(); } catch (_) { }
+    GET_STARTED_LAST = null;
+    await renderGetStarted(GS_CUR);
+  }
+  // ---- the step forms: body(c, st) = the fields; load(c) = data the fields need; save(form, c, st) = the SAME route the
+  //      normal page uses -> { wrote, note } | { errors: { <field>: why } } (refused: nothing written); actions = buttons ----
+  const GS_FORMS = {
+    licence: {
+      body: (c) => {
+        const l = c.licence || {};
+        return '<div class="gs-facts">' + (l.status ? 'Now: <b>' + escapeHtml(String(l.statusText || l.status)) + '</b>' : 'No licence is registered yet.') + '</div>' +
+          '<label class="gs-l" for="gsLicFile">Licence file</label><input type="file" id="gsLicFile" accept=".json,.lic,.txt,application/json,text/plain">' +
+          '<label class="gs-l" for="gsLicText">Or paste its contents</label><textarea id="gsLicText" name="licenceText" rows="4" placeholder="the licence text you received from Invardia"></textarea>' + gsErr('licenceText') +
+          '<div class="gs-hint">The signature is checked before anything is stored. No licence yet? Buy Pro at <a href="https://invardia.com" target="_blank" rel="noopener">invardia.com</a> -- or leave it empty and press Save &amp; next to go on.</div>';
+      },
+      wire: (card) => {
+        const fileIn = card.querySelector('#gsLicFile'), textIn = card.querySelector('#gsLicText');
+        if (fileIn) fileIn.onchange = () => { const f = fileIn.files && fileIn.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => { if (textIn) textIn.value = String(rd.result || ''); }; rd.readAsText(f); };
+      },
+      save: async (form) => {
+        const text = gsVal(form, 'licenceText');
+        if (!text) return { wrote: false };
+        try { const r = await api('PUT', '/api/license', { text: text }); return { wrote: true, note: (r && r.detail) || 'Licence registered.' }; }
+        catch (e) { return { errors: { licenceText: 'Refused, nothing was stored: ' + gsErrText(e) } }; }
+      }
+    },
+    permissions: {
+      body: (c) => {
+        const d = c.perm || {};
+        const miss = (d.missingRequired || []).filter(m => m && typeof m === 'object');
+        let h = '';
+        if (!d.objectId) h += '<div class="gs-facts">The engine identity could not be read yet' + (d.detail ? ': ' + escapeHtml(String(d.detail)) : '.') + '</div>';
+        else h += '<div class="gs-facts">Engine identity: <b>' + escapeHtml(String(d.identity || d.objectId)) + '</b> -- ' + (miss.length ? '<b style="color:#cf222e;">' + miss.length + ' permission(s) missing</b>' : 'every required permission is held') + '.</div>';
+        if (miss.length) {
+          h += '<table class="set-table gsPermMissing"><tr><th>Missing permission</th><th>What it blocks</th></tr>' +
+            miss.map(m => '<tr><td><code>' + escapeHtml(String(m.role || '')) + '</code></td><td>' + escapeHtml(String(m.capability || '')) + '</td></tr>').join('') + '</table>';
+          if (d.objectId) h += '<div class="gs-hint">This page cannot grant permissions itself (on purpose: an identity that can grant permissions could give itself anything). A Global Administrator runs this once:</div>' + gsCode('gsPermScript', permFixScript(d, miss));
+        }
+        return h + '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>';
+      },
+      actions: {
+        recheck: async (x) => { x.say('Checking the engine identity...'); try { await api('GET', '/api/permissions-health?refresh=1'); } catch (_) { } GET_STARTED_LAST = null; await x.rerender(); }
+      }
+    },
+    mail: {
+      body: (c) => {
+        const s = String((c.perm && c.perm.mail && c.perm.mail.sender) || '');
+        const tid = String((c.perm && c.perm.tenantId) || '<tenant id>'), mi = String((c.perm && c.perm.objectId) || '<engine identity object id>');
+        return '<div class="gs-facts">' + (s ? 'PIM sends as <b>' + escapeHtml(s) + '</b>.' : 'No sender mailbox yet -- TAP codes, approvals and alerts are not sent.') + '</div>' +
+          '<div class="gs-hint">The mailbox and its send right (scoped to that one mailbox, never tenant-wide) are made by a setup script that an Exchange or Global Administrator runs once. Download it from Invardia, then run it:</div>' +
+          gsCode('gsMailCmd', 'Invoke-WebRequest https://invardia.com/support/pim/Initialize-PimMailSender.ps1 -OutFile Initialize-PimMailSender.ps1\n' +
+            '.\\Initialize-PimMailSender.ps1 -TenantId ' + tid + ' -AdminAppId <setup app id> -AdminCertThumbprint <certificate thumbprint> -ManagedIdentityObjectId ' + mi + ' -SqlServerFqdn <server>.database.windows.net') +
+          '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="test">Send a test mail</button> <button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>' +
+          '<div class="gs-hint">The test mail goes to the alert recipients (a later step).</div>';
+      },
+      actions: {
+        test: async (x) => { x.say('Sending...'); try { const r = await api('POST', '/api/alerting/test'); x.say((r && r.note) || ((r && r.ok) ? 'Sent.' : 'Not sent.'), !(r && r.ok)); } catch (e) { x.say('Not sent: ' + gsErrText(e), true); } },
+        recheck: async (x) => { try { await api('GET', '/api/permissions-health?refresh=1'); } catch (_) { } GET_STARTED_LAST = null; await x.rerender(); }
+      }
+    },
+    departments: {
+      load: async () => api('GET', '/api/settings'),
+      body: (c, s) => {
+        const deps = (s && Array.isArray(s.departments)) ? s.departments : [];
+        const own = (d) => (Array.isArray(d.owners) ? d.owners : gsSplit(d.owners)).join(', ');
+        return (deps.length ? '<div class="gs-facts">' + deps.length + ' department(s):</div><ul class="gs-list">' + deps.slice(0, 12).map(d => '<li><b>' + escapeHtml(String(d.name || '')) + '</b>' + (own(d) ? ' -- owners ' + escapeHtml(own(d)) : ' -- <span style="color:#cf222e;">no owners</span>') + '</li>').join('') + (deps.length > 12 ? '<li>and ' + (deps.length - 12) + ' more</li>' : '') + '</ul>' : '<div class="gs-facts">No departments yet.</div>') +
+          '<div class="gs-sub">Add a department</div>' +
+          '<label class="gs-l" for="gsDeptName">Name</label><input type="text" id="gsDeptName" name="deptName" placeholder="Finance">' + gsErr('deptName') +
+          '<label class="gs-l" for="gsDeptOwners">Owners -- they approve and receive the mail (search by name)</label><input type="text" id="gsDeptOwners" name="deptOwners">' + gsErr('deptOwners') +
+          '<label class="gs-l" for="gsDeptContact">Contact (optional)</label><input type="text" id="gsDeptContact" name="deptContact">' +
+          '<div class="gs-sub">Or import them from Entra</div>' +
+          '<div class="gs-hint">Every Entra group whose name matches the pattern becomes a department, its owners the group&rsquo;s owners. Departments you added yourself are kept.</div>' +
+          '<input type="text" name="deptPattern" value="' + escapeHtml(String((s && s.deptImportPattern) || 'ORG-*')) + '" style="width:160px;"> <button type="button" class="gsAction btn-sec" data-act="import">Import from Entra</button> <span class="gsActMsg"></span>';
+      },
+      wire: (card) => {
+        try { pimAttachChips(card.querySelector('[name="deptOwners"]'), pimAttachPeopleCombo); } catch (_) { }
+        try { pimAttachPeopleCombo(card.querySelector('[name="deptContact"]')); } catch (_) { }
+      },
+      save: async (form, c, s) => {
+        const name = gsVal(form, 'deptName'), owners = gsSplit(gsVal(form, 'deptOwners')), contact = gsVal(form, 'deptContact');
+        if (!name && !owners.length && !contact) return { wrote: false };
+        const deps = (s && Array.isArray(s.departments)) ? s.departments : [];
+        const errors = {};
+        if (!name) errors.deptName = 'Give the department a name.';
+        else if (deps.some(d => String(d.name || '').toLowerCase() === name.toLowerCase())) errors.deptName = name + ' already exists -- pick another name.';
+        if (!owners.length) errors.deptOwners = 'Add at least one owner -- the owners approve the access and receive the mail.';
+        if (Object.keys(errors).length) return { errors: errors };
+        const arr = deps.map(d => ({ name: d.name, owners: Array.isArray(d.owners) ? d.owners : gsSplit(d.owners), contact: d.contact || '', notes: d.notes || '' }))
+          .concat([{ name: name, owners: owners, contact: contact, notes: '' }]);
+        try { SETTINGS_DATA = await api('PUT', '/api/settings/departments', { value: arr }); return { wrote: true, note: 'Department ' + name + ' saved.' }; }
+        catch (e) { return { errors: { deptName: 'Not saved: ' + gsErrText(e) } }; }
+      },
+      actions: {
+        import: async (x) => {
+          const pattern = gsVal(x.form, 'deptPattern') || 'ORG-*';
+          x.say('Importing...');
+          try {
+            const r = await api('POST', '/api/settings/departments/import', { pattern: pattern });
+            if (r && r.settings) SETTINGS_DATA = r.settings;
+            const sm = (r && r.summary) || {};
+            sharedToast('Imported from Entra: ' + (sm.created || 0) + ' created, ' + (sm.updated || 0) + ' updated, ' + (sm.skipped || 0) + ' skipped.');
+            GET_STARTED_LAST = null; await x.rerender();
+          } catch (e) { x.say('Not imported: ' + gsErrText(e), true); }
+        }
+      }
+    },
+    roles: {
+      load: async () => {
+        let t = null;
+        try { t = await pimGetTemplates(); } catch (_) { t = null; }
+        return { packs: ((t && t.templates) || []).filter(p => p && !p.disabled && !p.error), roles: await gsRoleGroups() };
+      },
+      body: (c, s) => {
+        const packs = (s && s.packs) || [], roles = (s && s.roles) || [];
+        const open = packs.filter(p => Number(p.missingCount) > 0), current = packs.filter(p => !(Number(p.missingCount) > 0));
+        let h = roles.length ? '<div class="gs-facts">' + roles.length + ' role group(s): ' + escapeHtml(roles.slice(0, 8).map(r => r.name).join(', ')) + (roles.length > 8 ? ', ...' : '') + '</div>' : '<div class="gs-facts">No role groups yet.</div>';
+        h += '<div class="gs-sub">Include templates</div>';
+        if (open.length) h += open.map(p => '<label class="gs-check"><input type="checkbox" name="tplPack" value="' + escapeHtml(String(p.id)) + '"> <b>' + escapeHtml(String(p.name || p.id)) + '</b> -- ' + Number(p.missingCount) + ' new permission(s)' + (p.description ? '<div class="gs-hint" style="margin:0 0 0 22px;">' + escapeHtml(String(p.description)) + '</div>' : '') + '</label>').join('');
+        else h += '<div class="gs-hint">' + (packs.length ? 'Every template is already included.' : 'No templates are active here.') + '</div>';
+        if (current.length) h += '<div class="gs-hint">Already included: ' + escapeHtml(current.map(p => String(p.name || p.id)).join(', ')) + '</div>';
+        h += gsErr('tplPack');
+        h += '<div class="gs-sub">Or add your own role group</div>' +
+          '<label class="gs-l" for="gsRoleShort">Short name</label><input type="text" id="gsRoleShort" name="roleShort" placeholder="CloudEngineer">' + gsErr('roleShort') +
+          '<label class="gs-l" for="gsRoleDesc">Description (optional)</label><input type="text" id="gsRoleDesc" name="roleDesc" placeholder="Management and architecture, cloud">' +
+          '<div class="gs-hint">Named by your naming convention. Saved here as a change to commit -- nothing reaches the tenant until it is committed.</div>';
+        return h;
+      },
+      save: async (form, c, s) => {
+        const ids = Array.from(form.querySelectorAll('[name="tplPack"]')).filter(x => x.checked).map(x => x.value);
+        const short = gsVal(form, 'roleShort'), desc = gsVal(form, 'roleDesc');
+        if (!ids.length && !short) return { wrote: false };
+        const errors = {};
+        if (short) {
+          if (!/^[A-Za-z][A-Za-z0-9]*$/.test(short)) errors.roleShort = 'Use letters and digits only, no spaces (for example CloudEngineer).';
+          else {
+            const tag = buildRoleGroupTag(short, 'role');
+            if (((s && s.roles) || []).some(r => r.tag.toLowerCase() === String(tag).toLowerCase())) errors.roleShort = 'A role group ' + tag + ' already exists.';
+          }
+        }
+        if (Object.keys(errors).length) return { errors: errors };
+        let n = 0; const taken = [];
+        try {
+          for (const id of ids) {
+            const t = ((s && s.packs) || []).find(p => String(p.id) === id);
+            if (!t) continue;
+            const picks = {};
+            Object.keys(t.missing || {}).forEach(b => { picks[b] = (t.missing[b] || []).map(() => true); });
+            const r = await tplStagePackRows(t, picks);
+            n += r.n; taken.push(...r.keyTaken);
+          }
+          if (short) { await wizardRoleGroupStage(Object.assign(wizardRoleGroupDefaultState(), { shortName: short, description: desc })); n++; }
+        } catch (e) { markBadges(); return { errors: { _: 'Stopped: ' + gsErrText(e) + ' -- what was staged before this is still in Pending changes.' } }; }
+        markBadges();
+        return { wrote: true, note: n + ' change(s) staged -- commit them to create the role groups.' + (taken.length ? ' ' + taken.length + ' row(s) were already there and were left as they are.' : '') };
+      }
+    },
+    admins: {
+      load: async () => { await pimTenantMode(); return { admins: await gsRows('Account-Definitions-Admins'), roles: await gsRoleGroups() }; },
+      body: (c, s) => {
+        const admins = (s && s.admins) || [], roles = (s && s.roles) || [];
+        const def = adminTypeKey('');
+        return (admins.length ? '<div class="gs-facts">' + admins.length + ' admin account(s): ' + escapeHtml(admins.slice(0, 6).map(a => String(a.UserPrincipalName || a.UserName || '')).join(', ')) + (admins.length > 6 ? ', ...' : '') + '</div>' : '<div class="gs-facts">No admin accounts yet.</div>') +
+          '<div class="gs-sub">Add an admin account</div>' +
+          '<label class="gs-l" for="gsAdmPerson">The person (search by name)</label><input type="text" id="gsAdmPerson" name="adminPerson" placeholder="start typing a name">' +
+          '<div class="gs-row"><div><label class="gs-l" for="gsAdmFirst">First name</label><input type="text" id="gsAdmFirst" name="adminFirst" style="width:200px;">' + gsErr('adminFirst') + '</div>' +
+          '<div><label class="gs-l" for="gsAdmLast">Last name</label><input type="text" id="gsAdmLast" name="adminLast" style="width:200px;">' + gsErr('adminLast') + '</div>' +
+          '<div><label class="gs-l" for="gsAdmIni">Initials</label><input type="text" id="gsAdmIni" name="adminInitials" style="width:90px;">' + gsErr('adminInitials') + '</div></div>' +
+          '<label class="gs-l" for="gsAdmType">Kind of account</label><select id="gsAdmType" name="adminType">' +
+            '<option value="internal-adminuser"' + (def === 'internal-adminuser' ? ' selected' : '') + '>An admin account for an employee</option>' +
+            '<option value="external-adminuser"' + (def === 'external-adminuser' ? ' selected' : '') + '>An admin account for an external consultant</option></select>' +
+          '<label class="gs-l" for="gsAdmRole">May activate (optional)</label><select id="gsAdmRole" name="adminRole"><option value="">-- no role group yet --</option>' +
+            roles.map(r => '<option value="' + escapeHtml(r.tag) + '">' + escapeHtml(r.name) + '</option>').join('') + '</select>' + gsErr('adminRole') +
+          '<label class="gs-l" for="gsAdmAssign">How</label><select id="gsAdmAssign" name="adminAssign"><option value="Eligible">Eligible -- activates when needed (recommended)</option><option value="Active">Active -- always on</option></select>' +
+          '<div class="gs-hint">The account name follows your naming convention. Saved here as a change to commit; PIM creates the account after it is committed.</div>';
+      },
+      wire: (card) => {
+        const inp = card.querySelector('[name="adminPerson"]');
+        const first = card.querySelector('[name="adminFirst"]'), last = card.querySelector('[name="adminLast"]'), ini = card.querySelector('[name="adminInitials"]');
+        let iniAuto = true;
+        const syncIni = () => { if (iniAuto && ini) ini.value = ((String(first.value || '').trim()[0] || '') + (String(last.value || '').trim()[0] || '')).toUpperCase(); };
+        if (ini) ini.addEventListener('input', () => { iniAuto = !String(ini.value || '').trim(); });
+        if (first) first.addEventListener('input', syncIni);
+        if (last) last.addEventListener('input', syncIni);
+        if (inp) {
+          try { pimAttachCombo(inp, gsPeopleSource, { async: true, minChars: 2, itemLabel: 'person', hint: 'name, surname or UPN' }); } catch (_) { }
+          inp.addEventListener('change', () => {
+            const label = GS_PEOPLE[String(inp.value || '').toLowerCase()] || '';
+            const parts = label.split(/\s+/).filter(Boolean);
+            if (parts.length >= 2) { if (!first.value) first.value = parts[0]; if (!last.value) last.value = parts.slice(1).join(' '); syncIni(); }
+          });
+        }
+      },
+      save: async (form, c, s) => {
+        const first = gsVal(form, 'adminFirst'), last = gsVal(form, 'adminLast'), ini = gsVal(form, 'adminInitials'), person = gsVal(form, 'adminPerson');
+        const role = gsVal(form, 'adminRole');
+        if (!first && !last && !ini && !person) return { wrote: false };
+        const errors = {};
+        if (!first) errors.adminFirst = 'First name is required.';
+        if (!last) errors.adminLast = 'Last name is required.';
+        if (!ini) errors.adminInitials = 'Initials are required.';
+        else if (!/^[A-Za-z][A-Za-z0-9]{0,5}$/.test(ini)) errors.adminInitials = 'Letters (and a digit) only, no spaces.';
+        if (role && !((s && s.roles) || []).some(r => r.tag === role)) errors.adminRole = 'That role group is not defined here.';
+        if (Object.keys(errors).length) return { errors: errors };
+        const st = Object.assign(wizardAdminDefaultState(), { first: first, last: last, initials: ini, adminType: gsVal(form, 'adminType') || adminTypeKey(''), roleGroupSel: new Set(role ? [role] : []), assignmentType: gsVal(form, 'adminAssign') || 'Eligible' });
+        try { const r = await wizardAdminStage(st); return { wrote: true, note: 'Admin account ' + ((r && r.upn) || '') + ' staged -- commit it to create the account.' }; }
+        catch (e) { const m = gsErrText(e); return { errors: /already used/i.test(m) ? { adminInitials: m.replace('Go back to the Person step and use', 'Use') } : { _: 'Nothing was staged: ' + m } }; }
+      }
+    },
+    access: {
+      load: async () => ({ admins: await gsRows('Account-Definitions-Admins'), roles: await gsRoleGroups(), assigns: await gsRows('PIM-Assignments-Admins') }),
+      body: (c, s) => {
+        const admins = (s && s.admins) || [], roles = (s && s.roles) || [], assigns = (s && s.assigns) || [];
+        return '<div class="gs-facts">' + assigns.length + ' assignment(s) so far.</div>' +
+          '<label class="gs-l" for="gsAccAdmin">Admin account</label><select id="gsAccAdmin" name="accessAdmin"><option value="">-- pick an admin account --</option>' +
+            admins.filter(a => a && a.UserPrincipalName).map(a => '<option value="' + escapeHtml(String(a.UserPrincipalName)) + '">' + escapeHtml(String(a.DisplayName || a.UserPrincipalName)) + ' (' + escapeHtml(String(a.UserPrincipalName)) + ')</option>').join('') + '</select>' + gsErr('accessAdmin') +
+          '<label class="gs-l" for="gsAccRole">Role group</label><select id="gsAccRole" name="accessRole"><option value="">-- pick a role group --</option>' +
+            roles.map(r => '<option value="' + escapeHtml(r.tag) + '">' + escapeHtml(r.name) + '</option>').join('') + '</select>' + gsErr('accessRole') +
+          '<label class="gs-l" for="gsAccType">How</label><select id="gsAccType" name="accessType"><option value="Eligible">Eligible -- activates when needed (recommended)</option><option value="Active">Active -- always on</option></select>' +
+          '<div class="gs-hint">Saved here as a change to commit. The Access map shows the whole picture afterwards.</div>';
+      },
+      save: async (form, c, s) => {
+        const upn = gsVal(form, 'accessAdmin'), tag = gsVal(form, 'accessRole');
+        if (!upn && !tag) return { wrote: false };
+        const errors = {};
+        if (!upn) errors.accessAdmin = 'Pick the admin account.';
+        if (!tag) errors.accessRole = 'Pick the role group.';
+        if (upn && tag && ((s && s.assigns) || []).some(a => String(a.Username || '').toLowerCase() === upn.toLowerCase() && String(a.GroupTag || '').toLowerCase() === tag.toLowerCase())) errors.accessRole = upn + ' already has this role group.';
+        if (Object.keys(errors).length) return { errors: errors };
+        const tier = (((s && s.roles) || []).find(r => r.tag === tag) || {}).tier || '';
+        try {
+          await wuxStage('PIM-Assignments-Admins', {
+            Username: upn, GroupTag: tag,
+            AssignmentType: gsVal(form, 'accessType') || 'Eligible', Action: 'Assign',
+            UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
+            NumOfDaysWhenExpire: '365', Permanent: 'FALSE',
+            CPPlatform: '', Plane: '', TierLevel: tier, PermissionScope: '', SyncPlatform: ''
+          });
+        } catch (e) { return { errors: { _: 'Nothing was staged: ' + gsErrText(e) } }; }
+        return { wrote: true, note: upn + ' -> ' + tag + ' staged -- commit it to apply.' };
+      }
+    },
+    policies: {
+      body: (c) => {
+        const h = Number((c.jobs && c.jobs.heldCount) || 0);
+        return '<div class="gs-facts">' + (h ? h + ' change set(s) wait for your approval -- they are shown above, with what changes.' : 'Nothing is waiting for your approval. PIM applies the activation policies of your templates on its runs; a first large change set would wait here.') + '</div>';
+      },
+      mount: async (extra) => { try { await renderApprovalsPolicyHolds(extra); } catch (_) { } }
+    },
+    alerts: {
+      load: async () => api('GET', '/api/alerting'),
+      body: (c, a) => {
+        const senderSet = !!(a && (a.senderSet || a.enabled));
+        return (senderSet ? '' : '<div class="gs-hint" style="color:#9a6700;">No sender mailbox yet (step Mail sender), so alerts are prepared but not delivered until it is set up.</div>') +
+          '<label class="gs-l" for="gsAlertRecips">Recipients -- one mail address per line</label><textarea id="gsAlertRecips" name="alertRecipients" rows="3" placeholder="alerts@example.com">' + escapeHtml(((a && a.recipients) || []).join('\n')) + '</textarea>' + gsErr('alertRecipients') +
+          '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="test">Save and send a test alert</button> <span class="gsActMsg"></span></div>' +
+          '<div class="gs-hint">Which events alert, the daily digest and a Teams channel are set in Settings &gt; Alerting -- they are kept as they are.</div>';
+      },
+      save: async (form, c, a) => {
+        const list = gsSplit(gsVal(form, 'alertRecipients'));
+        const bad = list.filter(x => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x));
+        if (bad.length) return { errors: { alertRecipients: 'Not a mail address: ' + bad.join(', ') + ' -- nothing was saved.' } };
+        const cur = ((a && a.recipients) || []).map(x => String(x).toLowerCase()).sort().join('\n');
+        if (list.map(x => x.toLowerCase()).sort().join('\n') === cur) return { wrote: false };
+        const catalog = (a && a.eventCatalog) || Object.keys(PIM_ALERT_EVENT_LABELS);
+        const events = {};
+        catalog.forEach(ev => { events[ev] = (((a && a.events) || {})[ev] !== false); });
+        // The webhook is left out on purpose: absent = the stored one is kept (the server's rule).
+        const body = { recipients: list, digestRecipients: (a && a.digestRecipients) || [], tierReportRecipients: (a && a.tierReportRecipients) || [], events: events };
+        try { await api('PUT', '/api/alerting', body); if (a) a.recipients = list; return { wrote: true, note: 'Alert recipients saved.' }; }
+        catch (e) { return { errors: { alertRecipients: 'Not saved: ' + gsErrText(e) } }; }
+      },
+      actions: {
+        test: async (x) => {
+          if (!(await x.saveFirst())) return;
+          x.say('Sending a test alert...');
+          try { const r = await api('POST', '/api/alerting/test'); x.say((r && r.note) || ((r && r.ok) ? 'Sent.' : 'Not sent.'), !(r && r.ok)); }
+          catch (e) { x.say('Not sent: ' + gsErrText(e), true); }
+        }
+      }
+    },
+    breakglass: {
+      body: (c) => {
+        const b = c.breakglass || {};
+        const eff = (b.effectiveAccounts || b.accounts || []).map(String);
+        const req = b.request && b.request.open ? b.request : null;
+        return (eff.length ? '<div class="gs-facts">Protected now:</div><ul class="gs-list">' + eff.map(x => '<li><code>' + escapeHtml(x) + '</code></li>').join('') + '</ul>' : '<div class="gs-facts">No break-glass account is protected yet.</div>') +
+          (req ? '<div class="gs-hint" style="color:#9a6700;">A change raised by ' + escapeHtml(String(req.maker || 'a SuperAdmin')) + ' waits for another SuperAdmin to approve it (Audit &amp; Settings &gt; Emergency access).</div>' : '') +
+          '<label class="gs-l" for="gsBgAdd">Add accounts (search by name)</label><input type="text" id="gsBgAdd" name="bgAdd">' + gsErr('bgAdd') +
+          '<label class="gs-l" for="gsBgWhy">Why (kept with the request)</label><input type="text" id="gsBgWhy" name="bgWhy" placeholder="the two cloud-only emergency accounts">' + gsErr('bgWhy') +
+          '<div class="gs-hint">These accounts are exempt from every disable, revoke and offboard. The change is a request: another SuperAdmin approves it before the list changes.</div>';
+      },
+      wire: (card) => { try { pimAttachChips(card.querySelector('[name="bgAdd"]'), pimAttachPeopleCombo); } catch (_) { } },
+      save: async (form, c) => {
+        const add = gsSplit(gsVal(form, 'bgAdd')), why = gsVal(form, 'bgWhy');
+        if (!add.length) return { wrote: false };
+        const errors = {};
+        const bad = add.filter(x => !/^[^@\s]+@[^@\s]+$/.test(x));
+        const b = c.breakglass || {};
+        const cur = (b.accounts || []).map(String);
+        const fresh = add.filter(x => !cur.some(y => y.toLowerCase() === x.toLowerCase()));
+        if (bad.length) errors.bgAdd = 'Not a sign-in name (name@domain): ' + bad.join(', ') + '.';
+        else if (!fresh.length) errors.bgAdd = 'These accounts are already on the list.';
+        if (!why) errors.bgWhy = 'Say why -- these accounts are exempt from every disable, revoke and offboard.';
+        if (Object.keys(errors).length) return { errors: errors };
+        try {
+          await api('PUT', '/api/settings/breakglass-accounts', { accounts: cur.concat(fresh), justification: why, baseHash: b.listHash ? String(b.listHash) : '' });
+          return { wrote: true, note: 'Request raised -- another SuperAdmin must approve it before the list changes. Nothing has changed yet.' };
+        } catch (e) { return { errors: { bgAdd: 'Not requested: ' + gsErrText(e) } }; }
+      }
+    },
+    firstrun: {
+      body: (c) => {
+        const j = c.fullJob, r = c.jobs && c.jobs.lastRun;
+        let h = '<div class="gs-facts">' + (r ? 'Last engine run: <b>' + escapeHtml(String(r.name || '')) + '</b> ' + (r.ok ? '<span style="color:#1a7f37;">ok</span>' : '<span style="color:#cf222e;">failed</span>') + (r.whenUtc ? ' ' + escapeHtml(homeFmtWhen(r.whenUtc)) : '') + (r.detail ? ' -- ' + escapeHtml(String(r.detail).slice(0, 300)) : '') : 'The engine has not run yet.') + '</div>';
+        if (j) h += '<div class="gs-hint">The full run (' + escapeHtml(String(j.name)) + ') reconciles every area. ' + (j.lastRunUtc ? 'It last ran ' + escapeHtml(homeFmtWhen(j.lastRunUtc)) + (j.lastResult ? ': ' + escapeHtml(String(j.lastResult).slice(0, 200)) : '') + '.' : 'It has not run yet.') + '</div>' +
+          '<div class="gs-actions"><button type="button" class="gsAction primary" data-act="run">Run now</button> <button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>';
+        else h += '<div class="gs-hint">No full engine run is scheduled on this deployment.</div>';
+        return h;
+      },
+      actions: {
+        run: async (x) => {
+          const j = x.c.fullJob; if (!j) return;
+          x.say('Starting...');
+          try {
+            const r = await api('POST', '/api/jobs/run', { name: j.name });
+            x.say((r && r.status === 'queued') ? ((r.started ? 'Started' : 'Queued') + ' -- ' + (r.detail || 'it runs within a few minutes') + ' This step turns done when the run has finished.') : ((r && (r.note || r.detail)) || 'Started.'), !!(r && r.ok === false));
+          } catch (e) { x.say('Not started: ' + gsErrText(e), true); }
+        },
+        recheck: async (x) => { GET_STARTED_LAST = null; await x.rerender(); }
+      }
+    },
+    activator: {
+      body: (c) => {
+        const k = c.confirm && c.confirm.activator;
+        return '<label class="gs-check"><input type="checkbox" name="actConfirmed"' + (k ? ' checked' : '') + '> The PIM Activator is rolled out: it reaches my admins&rsquo; browsers (Edge for Business or Intune) and they sign in with it.</label>' + gsErr('actConfirmed') +
+          (k ? '<div class="gs-hint">Confirmed by ' + escapeHtml(String(k.by || '')) + (k.utc ? ' ' + escapeHtml(homeFmtWhen(k.utc)) : '') + '.</div>' : '');
+      },
+      mount: async (extra) => {
+        extra.innerHTML = '<div class="gsActHost"></div>';
+        try { await renderActivator('', extra.querySelector('.gsActHost')); } catch (_) { }
+      },
+      save: async (form, c) => {
+        const el = form.querySelector('[name="actConfirmed"]');
+        const on = !!(el && el.checked), was = !!(c.confirm && c.confirm.activator);
+        if (on === was) return { wrote: false };
+        try { await api('PUT', '/api/get-started/confirm', { step: 'activator', confirmed: on }); return { wrote: true, note: on ? 'Recorded: the PIM Activator is rolled out.' : 'The confirmation was removed.' }; }
+        catch (e) { return { errors: { actConfirmed: 'Not saved: ' + gsErrText(e) } }; }
+      }
+    },
+    discovery: {
+      load: async () => { let inbox = null; try { inbox = await pimGetDiscoveryInbox(); } catch (_) { inbox = null; } return { inbox: inbox }; },
+      body: (c, s) => {
+        const j = c.discoveryJob;
+        if (!j) return '<div class="gs-facts">Discovery is not scheduled on this deployment.</div>';
+        const items = asList(s && s.inbox && s.inbox.items).filter(x => x && x.state === 'new');
+        return '<label class="gs-check"><input type="checkbox" name="discOn"' + (j.enabled ? ' checked' : '') + '> Look for new things automatically' + (j.cadence ? ' (' + escapeHtml(String(j.cadence)) + ')' : '') + '</label>' + gsErr('discOn') +
+          '<div class="gs-facts">' + (s && s.inbox ? items.length + ' new item(s) found so far -- they wait under Discovery for you to create or ignore.' : 'What it found could not be read.') + '</div>' +
+          '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="run">Save and look now</button> <span class="gsActMsg"></span></div>';
+      },
+      save: async (form, c) => {
+        const j = c.discoveryJob; if (!j) return { wrote: false };
+        const el = form.querySelector('[name="discOn"]');
+        const on = !!(el && el.checked);
+        if (on === !!j.enabled) return { wrote: false };
+        try { await api('PUT', '/api/jobs/state', { name: j.name, enabled: on }); j.enabled = on; return { wrote: true, note: on ? 'Discovery is on.' : 'Discovery is off.' }; }
+        catch (e) { return { errors: { discOn: 'Not saved: ' + gsErrText(e) } }; }
+      },
+      actions: {
+        run: async (x) => {
+          if (!(await x.saveFirst())) return;
+          const j = x.c.discoveryJob; if (!j) return;
+          x.say('Starting...');
+          try { const r = await api('POST', '/api/jobs/run', { name: j.name }); x.say((r && (r.detail || r.note)) || 'Started -- new items show up under Discovery.'); }
+          catch (e) { x.say('Not started: ' + gsErrText(e), true); }
+        }
+      }
+    }
+  };
+  function gsShowErrors(card, errors) {
+    const prob = card.querySelector('.gsProblem');
+    const loose = [];
+    Object.keys(errors || {}).forEach(k => {
+      const el = k === '_' ? null : card.querySelector('.gsErr[data-for="' + k + '"]');
+      if (el) { el.textContent = String(errors[k]); el.style.display = 'block'; } else loose.push(String(errors[k]));
+    });
+    if (prob) { prob.textContent = loose.join(' '); prob.style.display = loose.length ? '' : 'none'; }
+  }
+  function gsClearErrors(card) {
+    card.querySelectorAll('.gsErr').forEach(el => { el.textContent = ''; el.style.display = 'none'; });
+    const prob = card.querySelector('.gsProblem'); if (prob) { prob.textContent = ''; prob.style.display = 'none'; }
+  }
+  async function renderGetStarted(stepId, opts) {
     const host = document.getElementById('getStartedBody'); if (!host) return;
+    if (!isServer) { host.innerHTML = '<div style="padding:20px;color:#57606a;">Get Started needs the server -- it reads and saves this environment&rsquo;s settings.</div>'; return; }
     if (!GET_STARTED_LAST) host.innerHTML = '<div style="padding:20px;color:#57606a;">Checking where this environment stands&hellip;</div>';
-    const steps = await evaluateGetStarted();
+    const steps = await evaluateGetStarted(true);
+    const c = GS_FACTS || { rows: {} };
     const done = steps.filter(s => s.done).length, total = steps.length, pct = Math.round(100 * done / total);
     let idx = stepId ? steps.findIndex(s => s.id === stepId) : -1;
     if (idx < 0) idx = Math.max(0, steps.findIndex(s => s.required && !s.done));
-    const cur = steps[idx];
-    const pill = (s, i) => '<button class="gsPill" data-step="' + escapeHtml(s.id) + '" style="border-radius:16px;padding:4px 12px;margin:0 6px 6px 0;font-size:12.5px;cursor:pointer;border:1px solid ' +
+    const cur = steps[idx]; GS_CUR = cur.id;
+    const f = GS_FORMS[cur.id] || {};
+    const blocked = !!(cur.need && !roleAtLeast(cur.need));
+    let st = null, loadErr = '';
+    if (f.load && !blocked) { try { st = await f.load(c); } catch (e) { loadErr = gsErrText(e); } }
+    const last = idx === total - 1;
+    const staged = gsStagedCount();
+    const openReq = steps.filter(s => s.required && !s.done);
+    const pill = (s, i) => '<button type="button" class="gsPill" data-step="' + escapeHtml(s.id) + '" data-gs-kind="' + (s.done ? 'done' : s.required ? 'open' : 'optional') + '" style="border-radius:16px;padding:4px 12px;margin:0 6px 6px 0;font-size:12.5px;cursor:pointer;border:1px solid ' +
       (i === idx ? '#0969da;background:#0969da;color:#fff;' : s.done ? '#4ac26b;background:#dafbe1;color:#1a7f37;' : s.required ? '#ff8182;background:#ffebe9;color:#cf222e;' : '#d0d7de;background:#f6f8fa;color:#57606a;') + '">' +
       (s.done ? '&#10003; ' : s.required ? '<b>!</b> ' : '') + escapeHtml(s.title) + (s.required ? '' : ' <span style="font-size:11px;opacity:.8;">(optional)</span>') + '</button>';
+    let fields = '';
+    if (blocked) fields = '<div class="gs-hint gsNeeds">Only ' + (cur.need === 'SuperAdmin' ? 'a SuperAdmin' : 'an Admin') + ' can do this step -- ask one of them. Save &amp; next moves on.</div>';
+    else if (loadErr) fields = '<div class="gsProblem" style="display:block;">This step could not read what it needs: ' + escapeHtml(loadErr) + '</div>';
+    else { try { fields = f.body ? f.body(c, st) : ''; } catch (e) { fields = '<div class="gsProblem" style="display:block;">' + escapeHtml(gsErrText(e)) + '</div>'; } }
     host.innerHTML =
       '<h2 style="margin:6px 0 4px;">Get Started</h2>' +
       '<div style="display:flex;justify-content:space-between;font-size:12px;color:#57606a;"><span class="gsCount">' + done + ' of ' + total + ' steps done</span><span>' + pct + '%</span></div>' +
       '<div style="height:8px;background:#eaeef2;border-radius:4px;margin:4px 0 12px;"><div class="gsBar" style="height:8px;width:' + pct + '%;background:#0969da;border-radius:4px;"></div></div>' +
       '<div class="gsPills">' + steps.map(pill).join('') + '</div>' +
-      '<div class="gsStep" style="border:1px solid #d0d7de;border-radius:8px;padding:16px 18px;margin-top:6px;background:#fff;">' +
+      (staged ? '<div class="gsStaged">' + staged + ' change(s) are saved on this page but not committed yet -- nothing reaches the tenant until they are committed. <button type="button" class="gsCommitNow primary">Commit now</button></div>' : '') +
+      '<div class="gsStep" data-gs-step="' + escapeHtml(cur.id) + '" style="border:1px solid #d0d7de;border-radius:8px;padding:16px 18px;margin-top:6px;background:#fff;">' +
+        ((opts && opts.finished) ? (openReq.length
+          ? '<div class="gsFinished" style="margin-bottom:10px;padding:8px 10px;border:1px solid #d4a72c;background:#fff8c5;border-radius:6px;font-size:12.5px;">That was the last step. Still open: ' + escapeHtml(openReq.map(s => s.title).join(', ')) + '.</div>'
+          : '<div class="gsFinished" style="margin-bottom:10px;padding:8px 10px;border:1px solid #4ac26b;background:#dafbe1;border-radius:6px;font-size:12.5px;"><b>Everything required is done.</b> You can still review or change any step: choose it above.</div>') : '') +
         '<div style="font-size:11px;letter-spacing:.6px;color:#0969da;font-weight:600;">STEP ' + (idx + 1) + ' OF ' + total + (cur.required ? '' : ' &middot; OPTIONAL') + '</div>' +
-        '<h3 style="margin:4px 0 6px;">' + escapeHtml(cur.title) + '</h3>' +
-        '<div style="font-size:13px;color:#24292f;margin-bottom:10px;">' + escapeHtml(cur.what) + '</div>' +
-        '<div class="gsState" style="font-size:12.5px;margin-bottom:12px;color:' + (cur.done ? '#1a7f37' : cur.required ? '#cf222e' : '#57606a') + ';">' + (cur.done ? '&#10003; Done' : cur.required ? '! Still open' : 'Optional') + (cur.note ? ' &middot; ' + escapeHtml(cur.note) : '') + '</div>' +
-        '<div style="display:flex;gap:8px;align-items:center;">' +
-          '<button class="gsBack btn-sec"' + (idx === 0 ? ' disabled' : '') + '>&larr; Back</button>' +
-          '<button class="gsGo primary" data-tab="' + escapeHtml(cur.tab) + '">' + escapeHtml(cur.action) + ' &rarr;</button>' +
-          '<button class="gsNext btn-sec"' + (idx === total - 1 ? ' disabled' : '') + '>Next &rarr;</button>' +
-          '<button class="gsRecheck ghost" style="margin-left:auto;font-size:12px;">Check again</button>' +
-        '</div></div>' +
-      (done === total ? '' : (steps.every(s => s.done || !s.required) ? '<div style="margin-top:10px;color:#1a7f37;font-size:12.5px;">Every required step is done -- this environment is ready. The optional ones can wait.</div>' : ''));
+        '<h3 class="gsTitle" style="margin:4px 0 6px;">' + escapeHtml(cur.title) + '</h3>' +
+        '<div class="gsWhat" style="font-size:13px;color:#24292f;margin-bottom:8px;">' + escapeHtml(cur.what) + '</div>' +
+        '<div class="gsState" data-gs-state="' + (cur.done ? 'done' : cur.required ? 'open' : 'optional') + '" style="font-size:12.5px;margin-bottom:12px;color:' + (cur.done ? '#1a7f37' : cur.required ? '#cf222e' : '#57606a') + ';">' +
+          (cur.done ? '&#10003; Done' : cur.required ? '! Not done yet' : 'Optional -- not done yet') + (cur.note ? ' -- ' + escapeHtml(cur.note) : '') + '</div>' +
+        '<div class="gsExtra"></div>' +
+        '<form class="gsForm" novalidate autocomplete="off">' +
+          // Enter = Save & next: the FIRST submit button of a form is the one Enter presses. Previous is a plain button.
+          '<button type="submit" class="gsDefault gs-sr-only" tabindex="-1" aria-hidden="true">Save and next</button>' +
+          '<div class="gsProblem" role="alert" style="display:none;"></div>' +
+          '<div class="gsFields">' + fields + '</div>' +
+          '<div class="gsNav">' +
+            '<button type="button" class="gsPrev btn-sec"' + (idx === 0 ? ' disabled' : '') + '>&larr; Previous</button>' +
+            '<span style="flex:1 1 auto;"></span>' +
+            '<button type="button" class="gsExit btn-sec">Save &amp; exit</button>' +
+            '<button type="button" class="gsSaveNext primary">' + (last ? 'Save &amp; finish' : 'Save &amp; next &rarr;') + '</button>' +
+          '</div>' +
+        '</form>' +
+      '</div>';
+    const card = host.querySelector('.gsStep');
+    const form = card.querySelector('.gsForm');
+    let busy = false;
+    const setBusy = (b) => { busy = b; card.querySelectorAll('.gsNav button, .gsAction').forEach(x => { if (b) { x.dataset.wasDisabled = x.disabled ? '1' : ''; x.disabled = true; } else { x.disabled = x.dataset.wasDisabled === '1'; } }); };
+    const runSave = async () => {
+      gsClearErrors(card);
+      if (blocked || loadErr || !f.save) return { wrote: false };
+      let r;
+      try { r = (await f.save(form, c, st)) || { wrote: false }; } catch (e) { r = { errors: { _: 'Nothing was saved: ' + gsErrText(e) } }; }
+      if (r.errors) { gsShowErrors(card, r.errors); return r; }
+      if (r.wrote) { GET_STARTED_LAST = null; if (r.note) { try { sharedToast(r.note); } catch (_) { } } }
+      return r;
+    };
+    const go = async (dir) => {
+      if (busy) return;
+      setBusy(true);
+      let r;
+      try { r = await runSave(); } finally { setBusy(false); }
+      if (r && r.errors) return;          // refused: the SAME step, the reason under the field, nothing written
+      if (dir === 'exit') { await evaluateGetStarted(true); try { switchTab('home'); } catch (_) { } return; }
+      if (last) { await renderGetStarted(cur.id, { finished: true }); return; }
+      await renderGetStarted(steps[idx + 1].id);
+    };
+    form.addEventListener('submit', (e) => { e.preventDefault(); go('next'); });
+    card.querySelector('.gsSaveNext').onclick = () => go('next');
+    card.querySelector('.gsExit').onclick = () => go('exit');
+    card.querySelector('.gsPrev').onclick = () => { if (!busy && idx > 0) renderGetStarted(steps[idx - 1].id); };   // saves nothing
     host.querySelectorAll('.gsPill').forEach(b => b.onclick = () => renderGetStarted(b.dataset.step));
-    const back = host.querySelector('.gsBack'); if (back) back.onclick = () => renderGetStarted(steps[Math.max(0, idx - 1)].id);
-    const next = host.querySelector('.gsNext'); if (next) next.onclick = () => renderGetStarted(steps[Math.min(total - 1, idx + 1)].id);
-    const go = host.querySelector('.gsGo'); if (go) go.onclick = () => { try { switchTab(go.dataset.tab); } catch (_) { } };
-    const re = host.querySelector('.gsRecheck'); if (re) re.onclick = () => renderGetStarted(cur.id);
+    const cn = host.querySelector('.gsCommitNow'); if (cn) cn.onclick = () => gsCommitNow();
+    card.querySelectorAll('.gsCopy').forEach(b => b.onclick = () => { const el = document.getElementById(b.dataset.src); try { navigator.clipboard.writeText(el ? el.textContent : ''); sharedToast('Copied'); } catch (_) { } });
+    const ctx = {
+      card: card, form: form, c: c, st: st,
+      rerender: () => renderGetStarted(cur.id),
+      say: (t, bad) => { const m = card.querySelector('.gsActMsg'); if (m) { m.textContent = t; m.style.color = bad ? '#cf222e' : '#1a7f37'; } },
+      // an action button saves the step first (a refused save stops it, with the reasons shown), then stays
+      saveFirst: async () => { const r = await runSave(); return !(r && r.errors); }
+    };
+    card.querySelectorAll('.gsAction').forEach(b => b.onclick = async () => {
+      const fn = f.actions && f.actions[b.dataset.act];
+      if (!fn || busy) return;
+      setBusy(true);
+      try { await fn(ctx); } catch (e) { ctx.say(gsErrText(e), true); } finally { if (b.isConnected) setBusy(false); }
+    });
+    if (!blocked && !loadErr && f.wire) { try { f.wire(card, c, st); } catch (_) { } }
+    if (!blocked && !loadErr && f.mount) { try { await f.mount(card.querySelector('.gsExtra'), c, st); } catch (_) { } }
   }
 
   // ===================================================================================================================
@@ -13307,8 +13932,13 @@
       { id: 'servers', title: 'Servers without Intune', required: false, done: false, note: 'optional' },
     ];
   }
-  async function renderActivator(stepId) {
-    const host = document.getElementById('activatorBody'); if (!host) return;
+  async function renderActivator(stepId, hostEl) {
+    // 97.1: Get Started's "PIM Activator" step shows these same steps inside its card (hostEl). One copy on the page at a
+    // time (the step bodies use ids), so the other host is emptied; opening the page itself (no step) takes it back.
+    let host = hostEl || ((stepId && ACT.host && ACT.host.isConnected) ? ACT.host : document.getElementById('activatorBody'));
+    if (!host) return;
+    if (ACT.host && ACT.host !== host && ACT.host.isConnected) ACT.host.innerHTML = '';
+    ACT.host = host;
     if (!ACT.d || !stepId) {
       host.innerHTML = '<div style="padding:16px;color:#57606a;">Reading the PIM Activator setup of this tenant&hellip;</div>';
       try { ACT.d = await api('GET', '/api/activator'); } catch (e) { host.innerHTML = '<div style="color:#cf222e;padding:12px;">Could not read the Activator setup: ' + escapeHtml(e.message) + '</div>'; return; }
@@ -16117,6 +16747,14 @@
           : 'This page was loaded before the server restarted, so its session is no longer valid. Reload the page to continue -- nothing is wrong with the data.');
         e401.status = 401; e401.staleSession = true; e401.signInRequired = noPrincipal; e401.body = data;
         throw e401;
+      }
+      // s98 DEMO MODE: the server refused a write for a demo viewer. Say exactly that -- no route, no status code -- and
+      // keep the demo banner in view.
+      if (r.status === 403 && data && data.demo === true) {
+        const eDemo = new Error(String(data.error || 'This is a live demo: you can try everything and stage changes, but nothing is saved.'));
+        eDemo.status = 403; eDemo.demo = true; eDemo.body = data;
+        try { showDemoBanner(true); } catch (_) { }
+        throw eDemo;
       }
       const err = new Error('API ' + method + ' ' + path + ' -> ' + r.status + ': ' + (data && data.error || text));
       // 🔑 KEEP THE STRUCTURED BODY. A non-2xx used to be flattened to a message string, which is
@@ -25171,7 +25809,13 @@
     } catch (_) {}
 
     await pimTenantMode();   // the MSP fields below exist only on the managing tenant
-    const state = {
+    const state = wizardAdminDefaultState();
+    wizardAdminSteps(state, adminTemplates);
+  }
+  // 97.1: the admin wizard's defaults and its staging are shared with Get Started's "Admin accounts" step, so both write
+  // exactly the same rows (one store, one save -- WIZARD-1).
+  function wizardAdminDefaultState() {
+    return {
       first:'', last:'', initials:'',
       // Purpose drives the naming convention (v2.4.171): Day2Day (default) =
       // Admin-INI-PLAT (one account spans multiple level/tier assignments, so
@@ -25197,6 +25841,8 @@
       lifetimeDays:365,
       templateId:''
     };
+  }
+  function wizardAdminSteps(state, adminTemplates) {
     wizSteps({
       title: 'New admin account', kind: 'admin', state,
       steps: [
@@ -25597,7 +26243,12 @@
           }
         }
       ],
-      onFinish: async (s) => {
+      onFinish: async (s) => { await wizardAdminStage(s); }
+    });
+  }
+  // The admin wizard's Finish -- also Get Started's "Admin accounts" Save (97.1): the same name derivation, the same
+  // duplicate-name refusal, the same rows.
+  async function wizardAdminStage(s) {
         // Resolve the admin UserName from the ENGINE (Resolve-PimAdminName via
         // /api/wizard/derive) so GUI + engine never drift; fall back to the
         // client composer in static mode / on error.
@@ -25649,8 +26300,7 @@
             CPPlatform:'', Plane:'', TierLevel:'', PermissionScope:'', SyncPlatform:''
           });
         }
-      }
-    });
+        return { upn: upn, userName: userName };
   }
   // Who already holds this admin name? Stored rows plus anything staged (an admin staged earlier in this session counts too).
   // Returns a short description of the holder, or '' when the name is free.
@@ -26849,7 +27499,12 @@
           }
         }
       ],
-      onFinish: async (s) => {
+      onFinish: async (s) => { await wizardRoleGroupStage(s); }
+    });
+  }
+  // The direct-group wizard's Finish -- also Get Started's "Roles & templates" Save for an own role group (97.1): the
+  // same AU check, the same definition row, the same nesting / admin rows.
+  async function wizardRoleGroupStage(s) {
         const dt = directType(s.directType);
         const tag = buildRoleGroupTag(s.shortName, s.directType);
         const name = buildRoleGroupName(s.shortName, s.directType, roleGroupNameTokens(s));
@@ -26914,8 +27569,15 @@
             CPPlatform:'', Plane:'', TierLevel:s.tier, PermissionScope:'', SyncPlatform:''
           });
         }
-      }
-    });
+        return { tag: tag, name: name, entity: dt.entity };
+  }
+  // The direct-group wizard's starting values (shared with Get Started, 97.1).
+  function wizardRoleGroupDefaultState() {
+    return {
+      shortName:'', description:'',
+      directType:'role', department:'', dims:{}, tier:'T1', auTag:'PIM-ROLES', isRoleAssignable:'TRUE',
+      permSel: new Set(), adminSel: new Set(), assignmentType:'Eligible', lifetimeDays: 365, policyTemplate: ''
+    };
   }
 
   // ===================================================================
@@ -28179,8 +28841,9 @@
       const row = REV.rows.find(x => x.id === r.id) || { principal:'?', role:'?', type:'?' };
       const label = (row.principal || '') + ' / ' + (row.role || '') + ' [' + (row.type || '') + ']';
       if (r.ok) {
-        out.push('<div class="rev-rs-row ok"><span class="rev-rs-status">' + (r.queued ? 'QUEUED' : 'OK') + '</span><span class="rev-rs-body">' +
-                 escapeHtml(label) + '</span></div>');
+        // The server answers the same revoke while an earlier one is still waiting as "already queued" (nothing added).
+        out.push('<div class="rev-rs-row ok"><span class="rev-rs-status">' + (r.alreadyQueued ? 'ALREADY QUEUED' : (r.queued ? 'QUEUED' : 'OK')) + '</span><span class="rev-rs-body">' +
+                 escapeHtml(label) + (r.alreadyQueued ? ' -- the same revoke is already waiting in the queue; nothing was added' : '') + '</span></div>');
       } else {
         out.push('<div class="rev-rs-row err"><span class="rev-rs-status">FAIL</span><span class="rev-rs-body">' +
                  escapeHtml(label) + ' -- ' + escapeHtml(r.error || 'unknown error') + '</span></div>');
@@ -28192,9 +28855,11 @@
     pane.innerHTML = out.join('');
 
     // BUG-165: and the same account, in one line, next to the button that was pressed.
+    const alreadyCount = results.filter(r => r && r.ok && r.alreadyQueued).length;
     const staged = okCount;
     const bits = [];
-    if (staged > 0) bits.push(staged + ' staged as pending change' + (staged === 1 ? '' : 's'));
+    if (staged - alreadyCount > 0) bits.push((staged - alreadyCount) + ' staged as pending change' + ((staged - alreadyCount) === 1 ? '' : 's'));
+    if (alreadyCount > 0) bits.push(alreadyCount + ' already queued (nothing added)');
     if (errCount > 0) bits.push(errCount + ' failed');
     if (refused.length > 0) bits.push(refused.length + ' refused');
     if (staged > 0) {
@@ -28611,13 +29276,46 @@
     })();
   }
 
+  // Stage the ticked rows of one template pack into Pending changes. ONE writer for the template card's "Import into
+  // pending" and Get Started's "Roles & templates" step (97.1), so both stage exactly the same rows.
+  // picks: { <base>: [bool per row of t.missing[base]] }. Returns { n, keyTaken }.
+  async function tplStagePackRows(t, picks) {
+    let n = 0;
+    // 🔴 §77.24 (a test environment 2026-09-21: "14 store key(s) of PIM-Assignments-Workloads are used by more than one row in
+    // this commit"): the store keeps ONE row per store key (Workloads: GroupTag alone), so a pack row whose store
+    // key a row already holds -- stored, or staged by an earlier import -- is never staged a second time. It is
+    // reported instead; changing that existing row is an edit of it, not an import.
+    const keyTaken = [];
+    for (const base of Object.keys(t.missing || {})) {
+      if (!picks[base] || !picks[base].some(Boolean)) continue;
+      const data = await loadCsv(base);
+      ensurePending(base, data.header, data.rows);
+      const p = pendingChanges[base];
+      const held = new Set();
+      p.rows.forEach((r, i) => { if (p.deletes && p.deletes.has(i)) return; const k = pendingRowKey(base, r); if (k) held.add(k); });
+      for (const [ti, tr] of (t.missing[base] || []).entries()) {
+        if (!picks[base][ti]) continue;
+        const row = {};
+        for (const c of p.header) row[c] = '';
+        for (const k of Object.keys(tr)) row[k] = String(tr[k] == null ? '' : tr[k]);
+        const rk = pendingRowKey(base, row);
+        if (rk && held.has(rk)) { keyTaken.push(base + ': ' + (tr.GroupTag || rk)); continue; }
+        for (const k of Object.keys(tr)) { if (!p.header.includes(k)) p.header.push(k); }
+        if (rk) held.add(rk);
+        p.rows.push(row);
+        n++;
+      }
+    }
+    return { n: n, keyTaken: keyTaken };
+  }
+
   async function renderTemplates() {
     try { renderEntraRoleAuCards(); } catch (_) { }
     const wrap = document.getElementById('tplCards');
     if (!wrap) return;
     if (!isServer) { wrap.innerHTML = '<div class="empty">Templates need server mode.</div>'; return; }
     try {
-      const r = await api('GET', '/api/templates');
+      const r = await pimGetTemplates();
       // Disabled packs are managed in Governance > Permission templates; they are
       // hidden from one-click import here (active packs only).
       const tpls = ((r && r.templates) || []).filter(t => !t.disabled);
@@ -28749,32 +29447,8 @@
           }
           btn.disabled = true; btn.textContent = 'Importing...';
           try {
-            let n = 0;
-            // 🔴 §77.24 (a test environment 2026-09-21: "14 store key(s) of PIM-Assignments-Workloads are used by more than one row in
-            // this commit"): the store keeps ONE row per store key (Workloads: GroupTag alone), so a pack row whose store
-            // key a row already holds -- stored, or staged by an earlier import -- is never staged a second time. It is
-            // reported instead; changing that existing row is an edit of it, not an import.
-            const keyTaken = [];
-            for (const base of Object.keys(t.missing || {})) {
-              if (!picks[base].some(Boolean)) continue;
-              const data = await loadCsv(base);
-              ensurePending(base, data.header, data.rows);
-              const p = pendingChanges[base];
-              const held = new Set();
-              p.rows.forEach((r, i) => { if (p.deletes && p.deletes.has(i)) return; const k = pendingRowKey(base, r); if (k) held.add(k); });
-              for (const [ti, tr] of (t.missing[base] || []).entries()) {
-                if (!picks[base][ti]) continue;
-                const row = {};
-                for (const c of p.header) row[c] = '';
-                for (const k of Object.keys(tr)) row[k] = String(tr[k] == null ? '' : tr[k]);
-                const rk = pendingRowKey(base, row);
-                if (rk && held.has(rk)) { keyTaken.push(base + ': ' + (tr.GroupTag || rk)); continue; }
-                for (const k of Object.keys(tr)) { if (!p.header.includes(k)) p.header.push(k); }
-                if (rk) held.add(rk);
-                p.rows.push(row);
-                n++;
-              }
-            }
+            const staged = await tplStagePackRows(t, picks);
+            const n = staged.n, keyTaken = staged.keyTaken;
             if (keyTaken.length) alert('Not staged -- ' + keyTaken.length + ' row(s) of this pack are for a group that already has its row (the store keeps one row per group; edit that row to change it):\n\n- ' + keyTaken.slice(0, 15).join('\n- ') + (keyTaken.length > 15 ? '\n- ... and ' + (keyTaken.length - 15) + ' more' : ''));
             markBadges();
             btn.textContent = '✓ ' + n + ' staged';

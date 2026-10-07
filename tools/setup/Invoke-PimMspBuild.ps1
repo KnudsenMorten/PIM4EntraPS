@@ -11,7 +11,7 @@
 
       both   keyvault (when keyVaultName + bootstrapAppId are set) -> hosting (Invoke-PimDeployAll -Scenario S3|S6: identity,
              prerequisites incl. SQL admin group, image, containers, schema, mail sender, Easy Auth, code, updater, access,
-             smoke gate) -> sqlgroup (tick + Manager + troubleshooting identity) -> access (tick Engine Graph set, Manager
+             smoke gate) -> sqlgroup (tick + Manager + Invardia Support app) -> access (tick Engine Graph set, Manager
              read-only set, Container Apps Jobs Operator on the tick, SchedulerTickJobId) -> scenario
       master registry -> publishnetwork (storage service endpoint on the managing tenant's own subnet) -> storage (public-but-signed:
              anonymous blob read; the managing tenant's subnet allowed, THEN firewall Deny) -> register-<n> + network-<n> (each managed

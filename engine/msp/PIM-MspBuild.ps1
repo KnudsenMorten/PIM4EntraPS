@@ -584,7 +584,7 @@ function Get-PimMspBuildPlan {
         SqlConnectionString = "Server=tcp:$sqlFqdn,1433;Database=$db;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
         AdminAppId = $cid; AdminCertPem = '{{pem:deploy}}'; SqlAdminClientId = $cid; SqlAdminCertThumbprint = $thumb
         ManagerSuperAdmins = "$(& $V 'managerSuperAdmins')".Trim()
-        UpdateRing = $updRing.ring; SqlAdminGroupName = 'grp-pim-sql-admins'; TroubleshootingAppId = $cid
+        UpdateRing = $updRing.ring; SqlAdminGroupName = 'grp-pim-sql-admins'; SupportAppId = $cid
         Exposure = $(if ("$(& $V 'exposure')".Trim()) { "$(& $V 'exposure')".Trim() } else { 'external' })
     }
     if ("$(& $V 'logAnalyticsName')".Trim()) { $hosting['LogAnalyticsWorkspaceName'] = "$(& $V 'logAnalyticsName')".Trim() }
@@ -667,7 +667,7 @@ function Get-PimMspBuildPlan {
     if ($signedIn) {
         # No deploy application, no PEM, no SQL admin application: Invoke-PimDeployAll -UseSignedInAccount runs every
         # sub-step as the signed-in user (and makes that user a member of the SQL admin group before any SQL is used).
-        foreach ($k in 'AdminAppId', 'AdminCertPem', 'SqlAdminClientId', 'SqlAdminCertThumbprint', 'TroubleshootingAppId') { $hosting.Remove($k) }
+        foreach ($k in 'AdminAppId', 'AdminCertPem', 'SqlAdminClientId', 'SqlAdminCertThumbprint', 'SupportAppId') { $hosting.Remove($k) }
         $hostingSwitches += 'UseSignedInAccount'
     }
     $sqlWindowArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerName = $sqlName }
@@ -682,17 +682,17 @@ function Get-PimMspBuildPlan {
 
     # (parenthesised: the comma operator binds tighter than +, so the unwrapped form built ONE string -- caught by B5)
     $members = @(("{{mi-job:$tick}}"), ("{{mi-app:$mgr}}"))
-    $sqlGroupArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerName = $sqlName; TenantId = $tid; ClientId = $cid; CertThumbprint = $thumb; TroubleshootingAppId = $cid; ExtraMemberObjectIds = $members }
+    $sqlGroupArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerName = $sqlName; TenantId = $tid; ClientId = $cid; CertThumbprint = $thumb; SupportAppId = $cid; ExtraMemberObjectIds = $members }
     if ($signedIn) {
         # Initialize-PimSqlAdminGroup with no -ClientId/-CertThumbprint = the signed-in az context (its own convention).
         # The signed-in administrator stays a member: it is who re-runs this build and who the store steps connect as.
         $sqlGroupArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerName = $sqlName; TenantId = $tid
                            ExtraMemberObjectIds = @(("{{mi-job:$tick}}"), ("{{mi-app:$mgr}}"), ('{{signed-in-user}}')) }
     }
-    $steps.Add((New-PimMspBuildStep -Id 'sqlgroup' -Title 'SQL admin group grp-pim-sql-admins: tick + Manager identities + the troubleshooting identity' `
+    $steps.Add((New-PimMspBuildStep -Id 'sqlgroup' -Title 'SQL admin group grp-pim-sql-admins: tick + Manager identities + the Invardia Support app' `
         -Script 'tools\setup\Initialize-PimSqlAdminGroup.ps1' -HostExe 'powershell' `
         -Arguments $sqlGroupArgs `
-        -Why 'the prerequisites add the environment, deploy and updater identities; the tick and Manager system identities and the troubleshooting SPN were never added'))
+        -Why 'the prerequisites add the environment, deploy and updater identities; the tick and Manager system identities and the Invardia Support app were never added'))
 
 
     $accessArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; TickJobName = $tick; ManagerApp = $mgr } + $storeArgs

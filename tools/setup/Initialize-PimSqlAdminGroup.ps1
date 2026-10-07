@@ -10,7 +10,7 @@
       * the environment's user-assigned identity  (id-pim-<token>; found in the resource group, or named)
       * the SQL identity id-pim-sql-<token>, when the environment has one (private SQL)
       * the nightly updater's system-assigned identity (ca-pim-update), when the job exists
-      * the troubleshooting identity (-TroubleshootingAppId or -TroubleshootingObjectId)
+      * the Invardia Support app (-SupportAppId or -SupportObjectId)
       * any -ExtraMemberObjectIds
       * the CURRENT admin, so converging never takes access away from whoever has it now
     Entra-only authentication is left as it is and verified afterwards. Existing contained database users
@@ -22,6 +22,14 @@
     being created by hand. See docs/DESIGN.md (the SQL admin group) and the framework contract in the
     repository's DOCS/REQUIREMENTS.md section 4.5.
 
+.PARAMETER SupportAppId
+    The application (client) id of the Invardia Support app; its service principal is added as a member.
+    The old name -TroubleshootingAppId still works.
+
+.PARAMETER SupportObjectId
+    The Invardia Support app's service principal object id, instead of -SupportAppId.
+    The old name -TroubleshootingObjectId still works.
+
 .PARAMETER MembersOnly
     Do not create the group or move the admin: only add the members, and only when the group already IS
     the server's admin. This is what Deploy-PimUpdateJob.ps1 does on every run.
@@ -31,7 +39,7 @@
 
 .EXAMPLE
     .\Initialize-PimSqlAdminGroup.ps1 -SubscriptionId <sub> -ResourceGroup rg-automateit-x -SqlServerName sql-ait-x `
-        -TenantId <tenant> -ClientId <deploy app id> -CertThumbprint <thumb> -TroubleshootingAppId <app id> -PlanOnly
+        -TenantId <tenant> -ClientId <deploy app id> -CertThumbprint <thumb> -SupportAppId <app id> -PlanOnly
 #>
 [CmdletBinding()]
 param(
@@ -45,8 +53,9 @@ param(
     [string]$EnvironmentIdentityName,
     [string]$SqlAdminIdentityName,
     [string]$UpdateJobName = 'ca-pim-update',
-    [string]$TroubleshootingAppId,
-    [string]$TroubleshootingObjectId,
+    # The Invardia Support app. The old names (-TroubleshootingAppId / -TroubleshootingObjectId) still bind.
+    [Alias('TroubleshootingAppId')][string]$SupportAppId,
+    [Alias('TroubleshootingObjectId')][string]$SupportObjectId,
     [string[]]$ExtraMemberObjectIds = @(),
     # Certificate auth from the local store. Omit both to use the signed-in az context.
     [string]$ClientId,
@@ -68,7 +77,7 @@ Write-Host "    auth: $(if ("$CertThumbprint".Trim()) { "certificate ($ClientId)
 $r = Invoke-PimSqlAdminGroupStep -Graph $inv.Graph -Arm $inv.Arm -TenantId $inv.TenantId -SubscriptionId $SubscriptionId `
         -ResourceGroup $ResourceGroup -SqlResourceGroup $SqlResourceGroup -SqlServerName $server -GroupName $GroupName -GroupObjectId $GroupObjectId `
         -EnvironmentIdentityName $EnvironmentIdentityName -SqlAdminIdentityName $SqlAdminIdentityName -UpdateJobName $UpdateJobName `
-        -TroubleshootingAppId $TroubleshootingAppId -TroubleshootingObjectId $TroubleshootingObjectId -ExtraMemberObjectIds $ExtraMemberObjectIds `
+        -SupportAppId $SupportAppId -SupportObjectId $SupportObjectId -ExtraMemberObjectIds $ExtraMemberObjectIds `
         -Mode $(if ($MembersOnly) { 'membersOnly' } else { 'converge' }) -DoNotKeepCurrentAdmin:$DoNotKeepCurrentAdmin -PlanOnly:$PlanOnly
 Write-PimSqlAdminGroupReport -Result $r
 

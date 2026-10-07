@@ -89,7 +89,8 @@ $script:PimSettingsNeverCopy = @(
     'MspRegistry', 'MspTenants', 'CentralAdmins',
     'SqlStore', 'StorePointer', 'Instances',
     'Licence', 'License',
-    'EnvironmentName'           # this environment's own display name (operator 2026-10-04) -- names THIS one
+    'EnvironmentName',          # this environment's own display name (operator 2026-10-04) -- names THIS one
+    'DemoMode', 'DemoGuestGroup' # s98: who may act here (a live demo); carried elsewhere it would cap that tenant's people
 )
 
 function Confirm-Copyable {

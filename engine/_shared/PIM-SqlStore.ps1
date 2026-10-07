@@ -399,10 +399,12 @@ function Invoke-PimSqlQuery {
 }
 
 function Invoke-PimSqlNonQuery {
-    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Sql, [hashtable]$Parameters = @{})
+    # -CommandTimeoutSec: 0 = the provider default (30 s). Large single-row writes (the tenant cache) pass more.
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Sql, [hashtable]$Parameters = @{}, [int]$CommandTimeoutSec = 0)
     $c = New-PimSqlConnection -ConnectionString $ConnectionString
     try {
         $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $Sql
+        if ($CommandTimeoutSec -gt 0) { $cmd.CommandTimeout = $CommandTimeoutSec }
         foreach ($k in $Parameters.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $Parameters[$k]) { [DBNull]::Value } else { $Parameters[$k] })) }
         return $cmd.ExecuteNonQuery()
     } finally { if ($c) { $c.Close(); $c.Dispose() } }
@@ -711,7 +713,7 @@ function Set-PimSqlTenantCache {
 MERGE pim.TenantCache AS t USING (SELECT @k AS Kind) AS s ON t.Kind = s.Kind
 WHEN MATCHED THEN UPDATE SET ValueJson=@v, RefreshedUtc=@r, UpdatedUtc=SYSUTCDATETIME()
 WHEN NOT MATCHED THEN INSERT (Kind, ValueJson, RefreshedUtc, UpdatedUtc) VALUES (@k, @v, @r, SYSUTCDATETIME());
-"@ -Parameters @{ k = $Kind; v = $json; r = $RefreshedUtc.ToUniversalTime() })
+"@ -Parameters @{ k = $Kind; v = $json; r = $RefreshedUtc.ToUniversalTime() } -CommandTimeoutSec 180)   # a large tenant's snapshot is one multi-MB row: 30 s timed out on a busy S0 (2026-10-08)
 }
 
 function Get-PimSqlTenantCache {
@@ -848,6 +850,32 @@ WHERE NOT EXISTS (SELECT 1 FROM pim.ChangeQueue WITH (UPDLOCK, HOLDLOCK)
                   WHERE Entity=@e AND [Key]=@k AND Op=@op AND Status IN ('pending','committed','applying','failed'));
 "@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = (ConvertTo-PimSqlUtcDateTime $Change.enqueuedUtc); by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just }
     return ([int]$n -gt 0)
+}
+
+function Add-PimSqlQueueChangeUnlessPending {
+    <#
+      §33.0a -- REVOKE DE-DUPE (operator 2026-10-07: three identical revokes were queued by three Delete clicks).
+      Inserts the change ONLY when no PENDING entry exists for the same Entity + Key + Op, in ONE statement
+      (INSERT ... WHERE NOT EXISTS under UPDLOCK/HOLDLOCK), so two admins clicking at once cannot both insert it.
+      🔒 PENDING ONLY, deliberately narrower than Add-PimSqlQueueChangeIfAbsent: an entry that is already
+      committed / applying / applied / failed is a decision (or an outcome) of its own, so a new revoke of the same
+      target is a new request and is queued -- the de-dupe never hides a request behind an older one.
+      Returns @{ added = $true|$false; existingId = '<id of the pending entry>' | '' }. THROWS on a store error.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][object]$Change)
+    $payload = if ($null -ne $Change.payload) { $Change.payload | ConvertTo-Json -Depth 12 -Compress } else { $null }
+    $kind    = if ("$($Change.kind)".Trim())   { "$($Change.kind)" }   else { 'DesiredState' }
+    $origin  = if ("$($Change.origin)".Trim()) { "$($Change.origin)" } else { 'Proposal' }
+    $just    = if ("$($Change.justification)".Trim()) { "$($Change.justification)" } else { $null }
+    $n = Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
+INSERT INTO pim.ChangeQueue (Id, Entity, [Key], Op, Payload, EnqueuedUtc, [By], Status, Kind, Origin, Justification)
+SELECT @id, @e, @k, @op, @p, @enq, @by, 'pending', @kind, @origin, @just
+WHERE NOT EXISTS (SELECT 1 FROM pim.ChangeQueue WITH (UPDLOCK, HOLDLOCK)
+                  WHERE Entity=@e AND [Key]=@k AND Op=@op AND Status='pending');
+"@ -Parameters @{ id = [guid]$Change.id; e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)"; p = $payload; enq = (ConvertTo-PimSqlUtcDateTime $Change.enqueuedUtc); by = "$($Change.by)"; kind = $kind; origin = $origin; just = $just }
+    if ([int]$n -gt 0) { return [pscustomobject]@{ added = $true; existingId = '' } }
+    $ex = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT TOP 1 Id FROM pim.ChangeQueue WHERE Entity=@e AND [Key]=@k AND Op=@op AND Status='pending' ORDER BY EnqueuedUtc" -Parameters @{ e = "$($Change.entity)"; k = "$($Change.key)"; op = "$($Change.op)" })
+    return [pscustomobject]@{ added = $false; existingId = $(if ($ex.Count) { "$($ex[0].Id)" } else { '' }) }
 }
 
 function Set-PimSqlQueueCommitted {
