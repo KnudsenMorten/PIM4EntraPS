@@ -1,4 +1,4 @@
-﻿<#
+<#
   PIM4EntraPS -- NEW engine core (REST + SQL, no modules). Replaces the legacy
   PIM-Baseline-Management-CSV chain.
 
@@ -1322,8 +1322,24 @@ function Invoke-PimEngineScope {
         }
     }
 
+    # 2026-10-07 (operator: "in the review current delegations ... by default hide anything managed by pim manager ... this
+    # module is all about cleanup, where we remove anything NOT managed by pim engine"): the DRIFT READ records which LIVE
+    # items the engine matched to a definition (nochange + update) -- their identity only (principal + group/access, or
+    # principal + role + scope). The Review current delegations page marks a live assignment MANAGED from this list.
+    $__managedLive = @()
+    if (($__driftRead -or ($WhatIf -and $global:PIM_DriftReadPlan)) -and (Get-Command Get-PimManagedLiveIdentity -ErrorAction SilentlyContinue)) {   # PIM-ActiveAssignments.ps1
+        $__ml = New-Object System.Collections.Generic.List[object]
+        foreach ($__m in @(@($diff.nochange) + @($diff.update))) {
+            if ($null -eq $__m -or -not $__m.PSObject.Properties['live'] -or $null -eq $__m.live) { continue }
+            $__id = Get-PimManagedLiveIdentity -Live $__m.live
+            if ($__id) { $__ml.Add($__id) }
+        }
+        $__managedLive = $__ml.ToArray()
+    }
+
     return [pscustomobject]@{
         scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf
+        managedLive=$__managedLive                # drift read only: the live identities the engine matched to a definition
         create=$diff.create.Count; update=$diff.update.Count; remove=$diff.remove.Count; nochange=$diff.nochange.Count
         applied=$script:__applied; skipped=$script:__skipped; errors=$script:__errors; plan=$plan.ToArray(); ok=($script:__errors -eq 0)
         disableAborted=$script:__disableAborted

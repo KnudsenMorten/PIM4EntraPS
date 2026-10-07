@@ -1752,6 +1752,7 @@
            to show them (tick on)"): assignments still held by principals that no longer exist are hidden unless ticked; the
            "deleted" chip then lists only them, so they can be selected all at once and revoked. -->
       <label id="revDeletedToggle" class="rev-deleted-toggle" title="Assignments still held by principals that no longer exist in the directory. Hidden by default; tick to show them."><input type="checkbox" id="revShowDeleted"> show deleted principals</label>
+      <label id="revManagedToggle" class="rev-deleted-toggle" title="Assignments PIM Manager manages (its engine matched them to your configuration). Hidden by default: this page is for cleaning up what PIM does NOT manage. Tick to show them, marked MANAGED."><input type="checkbox" id="revShowManaged"> show managed by PIM Manager</label>
       <span class="rev-type-chip rev-type-deleted" data-type="deleted" id="revChipDeletedWrap" style="display:none;" title="Only assignments held by deleted principals -- select all and revoke to clean them up">deleted <span class="n" id="revChipDeleted">&mdash;</span></span>
       <span id="revBusy" style="display:none;" class="rev-busy"><span class="rev-spin"></span>Loading the stored snapshot&hellip;</span>
       <input type="text" id="revSearch" placeholder="Filter Principal / Role / Scope..." style="min-width:280px">
@@ -3021,7 +3022,9 @@
     const f = String(acctGridState.filter || '').trim().toLowerCase();
     // §96.5 D1 (b): an admin REMOVED FROM PIM (AccountStatus = Removed) is out of the active list -- its row is kept only so
     // the engine keeps the account disabled. "Show removed from PIM" lists them again (to Enable one, say).
-    const isRemoved = a => String(a.accountStatus || '').toLowerCase() === 'removed';
+    // 2026-10-07 (operator: "this is confusing, why are you showing deleted accounts here"): a DELETED account (AccountStatus
+    // = Deleted) is hidden the same way -- its row stays only so the engine keeps the account gone.
+    const isRemoved = a => /^(removed|deleted)$/.test(String(a.accountStatus || '').toLowerCase());
     const nRemoved = acctGridState.rows.filter(isRemoved).length;
     const active = acctGridState.showRemoved ? acctGridState.rows : acctGridState.rows.filter(a => !isRemoved(a));
     const rows = f ? active.filter(a =>
@@ -3037,8 +3040,8 @@
          '<button class="btn-sec" id="acctRefresh">Refresh</button>' +
          (d.canCreate ? '<button class="btn" id="acctNew">+ New admin</button>' : '') +
          '<span style="color:#57606a;font-size:12px;">' + fmtNum(rows.length) + ' of ' + fmtNum(acctGridState.rows.length) + '</span>' +
-         (nRemoved ? '<label style="font-size:12px;color:#57606a;" title="Admins removed from PIM (AccountStatus = Removed): their delegations are gone and the account is disabled and kept. Hidden from the active list."><input type="checkbox" id="acctShowRemoved"' +
-           (acctGridState.showRemoved ? ' checked' : '') + '> Show removed from PIM (' + fmtNum(nRemoved) + ')</label>' : '') + '</div>';
+         (nRemoved ? '<label style="font-size:12px;color:#57606a;" title="Admins removed from PIM (the account is disabled and kept) or deleted (the account is deleted in Entra ID). Hidden from the active list."><input type="checkbox" id="acctShowRemoved"' +
+           (acctGridState.showRemoved ? ' checked' : '') + '> Show removed and deleted (' + fmtNum(nRemoved) + ')</label>' : '') + '</div>';
 
     // Honest about narrowing. "You are seeing a scoped list" is a different fact from
     // "there are only 3 admins", and an operator must be able to tell them apart.
@@ -3119,6 +3122,11 @@
             ? '<span style="color:#8250df;" title="Received from the managing tenant -- read-only here">received from the managing tenant (read-only)</span>'
             : '<span style="color:#8c959f;">this tenant&rsquo;s own admin</span>') + '</td>' : '') +
         '<td><div class="acct-actions"><div class="acct-actions-who">&#9656; ' + escapeHtml(a.displayName || a.userName || a.userPrincipalName) + '</div>' +
+          // 2026-10-07: a DELETED account offers no actions -- none of them can act on an account that no longer exists.
+          (String(a.accountStatus || '').toLowerCase() === 'deleted'
+            ? '<div class="acctDeletedNote" style="font-size:11.5px;color:#57606a;">Deleted in Entra ID. Entra keeps it restorable for 30 days (Entra admin center &rsaquo; Deleted users). PIM keeps this row so the account is not created again.</div></div></td></tr>'
+            : '') +
+          (String(a.accountStatus || '').toLowerCase() === 'deleted' ? '' :
           '<button class="btn-sec acctTap"    data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(a.canResetTap) +
             (a.resetTapWhy ? ' title="' + escapeHtml(a.resetTapWhy) + '"' : '') + ' style="font-size:11px;">Reset TAP</button> ' +
           '<button class="btn-sec acctRevoke" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + dis(a.canRevokeSessions) +
@@ -3156,7 +3164,7 @@
             ' title="' + (a.readOnly ? escapeHtml(a.readOnlyWhy || 'read-only') + ' -- change it on the managing tenant' : 'Change display name, office user email (where mail for this admin is forwarded), company, department, manager, or whether it is synced to managed tenants.') + '" style="font-size:11px;">Edit</button> ' +
           '<button class="btn-sec acctAccess" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + ((a.accessLocked || (a.readOnly && a.source !== 'central')) ? ' disabled title="' + escapeHtml(a.readOnlyWhy || 'read-only') + '"' : '') +
             ' title="Give this admin access — opens the delegation wizard for this person." style="font-size:11px;">Give access →</button>' +
-        '</div></td></tr>' +
+        '</div></td></tr>') +
         // The inline editor for THIS admin, collapsed until Edit is pressed.
         '<tr class="acctEditRowTop" id="acctEditTop-' + escapeHtml(a.userPrincipalName) + '" hidden><td colspan="' + (syncCol ? 11 : 10) + '" style="background:#f6f8fa;padding:10px 12px;">' +
           '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">' +
@@ -26597,6 +26605,8 @@
     selected: new Set(),   // row ids the operator has ticked
     typeFilter: 'all',     // all | entra-role | azure-rbac | pim-for-groups | deleted
     showDeleted: false,    // §70.22: rows held by DELETED principals are hidden unless ticked
+    showManaged: false,    // 2026-10-07: rows PIM Manager manages are hidden unless ticked (this page is for cleanup)
+    managedKnown: false,   // ...only once the engine's drift read has said which rows those are
     textFilter: '',        // free-text against principal/role/scope
     sortKey: 'principal',  // principal | role | scope | type | start | end
     sortDir: 1,            // 1 asc, -1 desc
@@ -26706,10 +26716,12 @@
     const id = String(r.principalId || '');
     const name = String(r.principal || '');
     const kind = String(r.principalKind || '');
-    const kindChip = kind && kind !== 'user'
-      ? '<span class="rev-kind rev-kind-' + escapeHtml(kind) + '">' + escapeHtml(kind === 'servicePrincipal' ? 'app' : kind) + '</span>' : '';
+    const kindChip = (kind && kind !== 'user'
+      ? '<span class="rev-kind rev-kind-' + escapeHtml(kind) + '">' + escapeHtml(kind === 'servicePrincipal' ? 'app' : kind) + '</span>' : '') +
+      // 2026-10-07 (operator: "a clear marking MANAGED"): shown only when "show managed by PIM Manager" is ticked.
+      (r.managed === true ? '<span class="rev-managed" title="PIM Manager manages this assignment: its engine keeps it as your configuration says. Removing it here does not stick -- change the configuration instead." style="display:inline-block;margin-left:6px;padding:0 6px;border-radius:10px;font-size:10.5px;font-weight:700;letter-spacing:.4px;color:#fff;background:#1a7f37;">MANAGED</span>' : '');
     if (!name || name === id) {
-      return '<span class="rev-p-unres" title="This object id could not be resolved in the directory">' + escapeHtml(id || '(unknown)') + '</span>';
+      return '<span class="rev-p-unres" title="This object id could not be resolved in the directory">' + escapeHtml(id || '(unknown)') + '</span>' + kindChip;
     }
     const isDeleted = (kind === 'deleted');
     return '<span class="rev-p-main' + (isDeleted ? ' rev-p-deleted' : '') + '">' + escapeHtml(name) + '</span>' + kindChip +
@@ -26752,6 +26764,8 @@
       const url = '/api/active-assignments' + (force ? '?refresh=1' : '');
       const data = await api('GET', url);
       REV.rows = Array.isArray(data && data.rows) ? data.rows : [];
+      REV.managedKnown = !!(data && data.managedKnown);
+      REV.managedComputedUtc = (data && data.managedComputedUtc) || '';
       // Surface-level read failures (auth / missing app-role / no subscription
       // scope) so the empty state shows an ACTIONABLE error instead of the
       // misleading "Cache may be empty -- click Refresh."
@@ -26833,6 +26847,8 @@
     let rows = REV.rows;
     // §70.22: deleted principals hidden by default; the 'deleted' chip (shown only when ticked) lists only them.
     if (!REV.showDeleted) rows = rows.filter(r => String(r.principalKind || '') !== 'deleted');
+    // 2026-10-07: what PIM Manager manages is hidden by default -- this page is for cleaning up what it does NOT manage.
+    if (!REV.showManaged) rows = rows.filter(r => r.managed !== true);
     if (tf === 'deleted') rows = rows.filter(r => String(r.principalKind || '') === 'deleted');
     else if (tf && tf !== 'all') rows = rows.filter(r => r.type === tf);
     if (q) {
@@ -26865,7 +26881,17 @@
 
     // Per-type counters (over the rows the operator can see: deleted principals count only when shown, §70.22).
     const deletedN = REV.rows.filter(r => String(r.principalKind || '') === 'deleted').length;
-    const countable = REV.showDeleted ? REV.rows : REV.rows.filter(r => String(r.principalKind || '') !== 'deleted');
+    const managedN = REV.rows.filter(r => r.managed === true).length;
+    const countable = (REV.showDeleted ? REV.rows : REV.rows.filter(r => String(r.principalKind || '') !== 'deleted'))
+      .filter(r => REV.showManaged || r.managed !== true);
+    const mgToggle = document.getElementById('revManagedToggle');
+    if (mgToggle) {
+      const mcb = document.getElementById('revShowManaged');
+      if (mcb) mcb.checked = !!REV.showManaged;
+      mgToggle.lastChild.textContent = REV.managedKnown
+        ? ' show managed by PIM Manager (' + managedN + ')'
+        : ' show managed by PIM Manager (not known yet: the drift check has not run on this version -- Jobs > drift-snapshot > Run now)';
+    }
     const counts = { all: countable.length, 'entra-role': 0, 'azure-rbac': 0, 'pim-for-groups': 0 };
     for (const r of countable) {
       if (counts.hasOwnProperty(r.type)) counts[r.type]++;
@@ -27552,6 +27578,13 @@
     document.querySelectorAll('#revTopBar .rev-type-chip').forEach(chip => {
       chip.onclick = () => { REV.typeFilter = chip.dataset.type; renderRevokeTable(); };
     });
+    const showMg = document.getElementById('revShowManaged');
+    if (showMg) showMg.onchange = () => {
+      REV.showManaged = !!showMg.checked;
+      // hiding them again must not leave hidden rows selected for a revoke
+      if (!REV.showManaged) { for (const r of REV.rows) { if (r.managed === true) REV.selected.delete(r.id); } }
+      renderRevokeTable();
+    };
     const showDel = document.getElementById('revShowDeleted');
     if (showDel) showDel.onchange = () => {
       REV.showDeleted = !!showDel.checked;

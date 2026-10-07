@@ -79,7 +79,7 @@
 #    best-effort try/catch, because a cache is a convenience. Measured 2026-09-20: 'tenant-domains' was never
 #    added when REQ-T shipped, so the domain cache was dead in both directions and the Settings dropdown had
 #    nothing to offer whenever the live Graph read was unavailable. ADD THE KIND IN THE SAME EDIT AS THE CACHE CALL.
-$script:PimTenantCacheKinds = @('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','target-check','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains','powerbi-workspaces','ad-servers')   # powerbi-workspaces: REQ-DISC-2 (the discovery-powerbi job); ad-servers: §80.2 server onboarding (written by the hybrid worker)
+$script:PimTenantCacheKinds = @('entra-roles','aus','pim-groups','azure-scopes','azure-rbac-roles','auth-methods','pim-activity','tenant-org','active-assignments','drift','coverage-report','target-check','workload-roles:defender','workload-roles:intune','workload-actions:defender','tenant-domains','powerbi-workspaces','ad-servers','managed-live')   # managed-live: the live assignments the engine matched to a definition (drift read; Review current delegations, 2026-10-07); powerbi-workspaces: REQ-DISC-2 (the discovery-powerbi job); ad-servers: §80.2 server onboarding (written by the hybrid worker)
 $script:PimTenantCacheMem   = @{}
 
 function Get-PimTenantCacheStoreCs {

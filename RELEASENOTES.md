@@ -13,6 +13,12 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.522 -- 2026-10-07
+
+- **Review current delegations shows what PIM Manager does NOT manage.** The page is for cleaning up access PIM Manager does not manage, so assignments it does manage are hidden by default. Tick **show managed by PIM Manager** to see them, each marked **MANAGED**. An assignment counts as managed when the engine matched it to your configuration in its last drift check (which also runs right after every update).
+- **Deleted admin accounts no longer look active.** On Admin accounts, deleted accounts are hidden with the removed ones (**Show removed and deleted**). A deleted account shows no actions, only that it was deleted and that Entra keeps it restorable for 30 days.
+- **Setup steps as single-file downloads.** PIM's setup scripts can be built as standalone files that Invardia publishes for download, starting with the step that gives Invardia support access to the PIM database.
+
 ## 2.4.521 -- 2026-10-07
 
 - **Remove an entry from the change queue with one click.** Every pending or failed entry in the change queue has its own **Remove from queue** button (a reason is asked for and recorded). The entry is never applied and stays in the history.
