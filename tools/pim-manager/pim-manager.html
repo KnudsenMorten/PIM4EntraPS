@@ -13699,7 +13699,9 @@
     else if (j.status === 'held' && j.approvedPending) { bg = '#dafbe1'; fg = '#1a7f37'; label = 'approved -- applies next run'; }   // 2026-09-21: an approved hold is not a blocker
     else if (j.status === 'held') { bg = '#fff1d6'; fg = '#9a6700'; label = 'needs approval'; }
     else if (j.status === 'failed') { bg = '#ffebe9'; fg = '#cf222e'; label = 'failed'; }
-    else if (j.status === 'completed') { bg = (j.lastRan ? '#dafbe1' : '#fff8c5'); fg = (j.lastRan ? '#1a7f37' : '#9a6700'); label = (j.lastRan ? 'ok' : 'no-op'); }
+    // 2026-10-07 (operator: "what is no-op ... people dont understand ... why not just ok ... state is green"): a run that
+    // completed with nothing to do IS ok -- green "ok", the same as a run that changed something. The result text says which.
+    else if (j.status === 'completed') { bg = '#dafbe1'; fg = '#1a7f37'; label = 'ok'; }
     let html = '<span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:' + bg + ';color:' + fg + ';">' + esc0(label) + '</span>';
     // [M6] overdue badge -- the job missed its scheduled fire window (didn't fire).
     if (j.overdue) {
@@ -14225,12 +14227,19 @@
     const held = rep.heldBy || {};
     const heldTxt = Object.keys(RECONCILE_RULES).filter(k => Number(held[k]) > 0)
       .map(k => '<span title="' + escapeHtml(RECONCILE_RULES[k]) + '">' + escapeHtml(k === 'admin' ? 'admin' : 'rule ' + k) + ': <b>' + escapeHtml(held[k]) + '</b></span>').join(' &middot; ');
-    let h = '<div style="font-size:12.5px;margin-bottom:6px;">' +
+    // 2026-10-07 (operator: "what is the purpose with this, very unclear ... do you pause or ?"): say it in plain words --
+    // what the last run did, and that what PIM did not create is left alone (the cleanup page is the place for that).
+    const nRem = Number(rep.removed) || 0, nWould = Number(rep.wouldRemove) || 0, nOther = Math.max(0, (Number(rep.candidates) || 0) - nWould);
+    let h = '<div class="reconcile-summary" style="font-size:12.5px;margin-bottom:6px;">' +
+      'Last run ' + escapeHtml(fmtTime(rep.generatedUtc)) + ': ' +
       (rep.mode === 'enforce'
-        ? 'Last run (<b>enforce</b>): removed <b>' + escapeHtml(rep.removed) + '</b> of <b>' + escapeHtml(rep.wouldRemove) + '</b> qualifying'
-        : 'Last run (<b>report only</b>): would remove <b class="reconcile-would">' + escapeHtml(rep.wouldRemove) + '</b> &mdash; nothing was removed') +
-      ' &middot; ' + escapeHtml(rep.candidates) + ' live item(s) not in the configuration &middot; ' + escapeHtml(fmtTime(rep.generatedUtc)) + '</div>';
-    if (heldTxt) h += '<div style="font-size:12px;color:#57606a;margin-bottom:6px;">Held: ' + heldTxt + '</div>';
+        ? (nRem ? 'removed <b>' + escapeHtml(nRem) + '</b> leftover(s) PIM had created and you have since taken out of the configuration'
+                : (nWould ? 'removed <b>0</b> of <b>' + escapeHtml(nWould) + '</b> leftover(s) -- see the items below' : 'everything matches your configuration -- nothing to remove'))
+        : (nWould ? 'would remove <b class="reconcile-would">' + escapeHtml(nWould) + '</b> leftover(s) PIM had created (report only -- nothing was removed)' : 'everything matches your configuration -- nothing to remove')) +
+      '.</div>';
+    if (nOther) h += '<div class="reconcile-other" style="font-size:12px;color:#57606a;margin-bottom:6px;">' + escapeHtml(nOther) +
+      ' assignment(s) exist that PIM did not create -- PIM leaves them alone. Clean them up on <a href="#" onclick="try{switchTab(\'revoke\')}catch(_){};return false;">Review current delegations</a>.</div>';
+    if (heldTxt) h += '<div style="font-size:11.5px;color:#8c959f;margin-bottom:6px;">Why left alone: ' + heldTxt + '</div>';
     (rep.errors || []).forEach(e => { h += '<div style="font-size:12px;color:#9a6700;">' + escapeHtml(e) + '</div>'; });
     const rows = [];
     (rep.scopes || []).forEach(sc => (sc.items || []).forEach(it => rows.push({ scope: sc.scope, it: it })));
@@ -14256,16 +14265,19 @@
     sec.id = 'reconcileSection';
     sec.style.cssText = 'margin:0 0 14px;border:1px solid #d0d7de;border-radius:8px;padding:10px 12px;';
     let h = reconcileBannerHtml(p);
-    h += '<div style="font-weight:600;margin-bottom:4px;">Daily reconcile <span style="color:#57606a;font-weight:400;font-size:11.5px;">&mdash; catch-up every day; removal of PIM-managed leftovers is <b>' +
-      escapeHtml(s.removalMode === 'enforce' ? 'ENFORCED' : 'report only') + '</b>' + (p.paused ? '' : ' &middot; running on its schedule') + '</span></div>';
+    h += '<div style="font-weight:600;margin-bottom:4px;">Daily reconcile <span style="color:#57606a;font-weight:400;font-size:11.5px;">&mdash; runs every day: brings everything in line with your configuration and removes access PIM itself created that you have since taken out of it' +
+      (s.removalMode === 'enforce' ? '' : ' (removal is <b>report only</b>: nothing is removed)') +
+      (p.paused ? '' : ' &middot; <span style="color:#1a7f37;">running</span>') + '</span></div>';
     h += reconcileReportHtml(s.report, s.removalMode);
     if (can) {
       h += p.paused
         ? '<div style="margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;"><input id="reconcileResumeReason" placeholder="Reason (optional)" style="font-size:12px;min-width:220px;">' +
           '<button id="reconcileResumeBtn" style="font-size:12px;">Resume daily reconcile</button></div>'
-        : '<div style="margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;"><input id="reconcilePauseReason" placeholder="Reason (required)" style="font-size:12px;min-width:220px;">' +
+        // not paused: the pause controls are an option, folded away (operator: "do you pause or ?")
+        : '<details class="reconcilePauseFold" style="margin-top:6px;"><summary style="cursor:pointer;color:#57606a;font-size:11.5px;">Pause... (only if you need it, e.g. during a large migration)</summary>' +
+          '<div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;"><input id="reconcilePauseReason" placeholder="Reason (required)" style="font-size:12px;min-width:220px;">' +
           '<label style="font-size:12px;color:#57606a;">until (optional) <input id="reconcilePauseUntil" type="datetime-local" style="font-size:12px;"></label>' +
-          '<button id="reconcilePauseBtn" style="font-size:12px;">Pause daily reconcile</button></div>';
+          '<button id="reconcilePauseBtn" style="font-size:12px;">Pause daily reconcile</button></div></details>';
     } else if (!p.paused) {
       h += '<div style="margin-top:6px;color:#57606a;font-size:11.5px;">A SuperAdmin can pause the daily reconcile here.</div>';
     }
@@ -14296,10 +14308,18 @@
   async function renderGuardsSection(body) {
     let d = null;
     try { d = await api('GET', '/api/guards'); } catch (_) { return; }
-    const list = (d && d.guards) || [];
-    if (!list.length || !body) return;
+    const all = (d && d.guards) || [];
+    // 2026-10-07 (operator, NunaGreen: "how to get rid of these ... cannot click anything"): the panel listed EVERY trip
+    // ever recorded, with no window -- a guard that held once stayed forever, against the self-healing rule (no manual
+    // acknowledge). A guard that still holds trips again on every run (jobs run every 5-30 min), so only trips seen in the
+    // last 2 hours are current; older ones fold into "earlier (n)".
+    const STANDING_MS = 2 * 60 * 60 * 1000;
+    const isCurrent = g => { const t = Date.parse(String(g.lastSeenUtc || '')); return !isNaN(t) && (Date.now() - t) <= STANDING_MS; };
+    const list = all.filter(isCurrent);
+    const earlier = all.filter(g => !isCurrent(g));
+    if (!all.length || !body) return;
     const esc0 = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    const rows = list.map(g => {
+    const rowOf = g => {
       const crit = g.severity === 'critical';
       const vals = Object.keys(g.measured || {}).map(k => esc0(k) + ' ' + esc0(g.measured[k])).join(', ');
       const thr = Object.keys(g.thresholds || {}).map(k => esc0(k) + ' ' + esc0(g.thresholds[k])).join(', ');
@@ -14310,15 +14330,18 @@
         '<td style="padding:6px 8px;white-space:nowrap;" title="first seen ' + esc0(fmtTime(g.firstSeenUtc)) + '">' + jobTimeAgo(g.lastSeenUtc) + '<div style="color:#8c959f;font-size:11px;">' + esc0(g.tripCount) + ' time(s)</div></td>' +
         '<td style="padding:6px 8px;font-size:11.5px;">' + (vals || '&mdash;') + (thr ? '<div style="color:#8c959f;">limit: ' + thr + '</div>' : '') + '</td>' +
         '<td style="padding:6px 8px;font-size:11.5px;max-width:360px;">' + esc0(g.actionText || '') + '</td></tr>';
-    }).join('');
+    };
+    const head = '<table style="width:100%;border-collapse:collapse;font-size:12.5px;"><thead><tr style="text-align:left;color:#57606a;border-bottom:1px solid #d0d7de;">' +
+      '<th style="padding:4px 8px;">Severity</th><th style="padding:4px 8px;">Guard</th><th style="padding:4px 8px;">Last trip</th><th style="padding:4px 8px;">Measured</th><th style="padding:4px 8px;">What to do</th></tr></thead><tbody>';
     const sec = document.createElement('div');
     sec.id = 'guardsSection';
     sec.style.cssText = 'margin:0 0 14px;border:1px solid #d0d7de;border-radius:8px;padding:10px 12px;';
     sec.innerHTML = '<div style="font-weight:600;margin-bottom:4px;">Guards that protected your data <span style="color:#57606a;font-weight:400;font-size:11.5px;">' +
       '&mdash; each held, refused or skipped something so nothing was lost; mailed once a day per guard, recorded in the audit trail</span></div>' +
-      '<table style="width:100%;border-collapse:collapse;font-size:12.5px;"><thead><tr style="text-align:left;color:#57606a;border-bottom:1px solid #d0d7de;">' +
-      '<th style="padding:4px 8px;">Severity</th><th style="padding:4px 8px;">Guard</th><th style="padding:4px 8px;">Last trip</th><th style="padding:4px 8px;">Measured</th><th style="padding:4px 8px;">What to do</th></tr></thead><tbody>' +
-      rows + '</tbody></table>';
+      (list.length ? head + list.map(rowOf).join('') + '</tbody></table>'
+        : '<div class="guardsNoneNow" style="color:#1a7f37;font-size:12px;">Nothing held right now -- no guard has tripped in the last 2 hours.</div>') +
+      (earlier.length ? '<details class="guardsEarlier" style="margin-top:6px;"><summary style="cursor:pointer;color:#57606a;font-size:12px;">earlier (' + earlier.length + ') -- no longer tripping</summary>' +
+        head + earlier.map(rowOf).join('') + '</tbody></table></details>' : '');
     const old = document.getElementById('guardsSection'); if (old) old.remove();
     body.insertBefore(sec, body.firstChild);
   }
@@ -14505,7 +14528,7 @@
       h.push('<table style="width:100%;border-collapse:collapse;font-size:12.5px;">');
       h.push('<thead><tr style="text-align:left;border-bottom:2px solid #d0d7de;color:#57606a;">' +
         '<th style="padding:6px 8px;">Job</th><th style="padding:6px 8px;">Cadence</th><th style="padding:6px 8px;">Enabled</th>' +
-        '<th style="padding:6px 8px;">Status</th><th style="padding:6px 8px;">Last run</th><th style="padding:6px 8px;">Result</th>' +
+        '<th style="padding:6px 8px;">Status</th><th style="padding:6px 8px;">Last run</th><th style="padding:6px 8px;width:45%;">Result</th>' +
         '<th style="padding:6px 8px;">Next run</th><th style="padding:6px 8px;text-align:right;">Actions</th></tr></thead><tbody>');
       let sawPullPlaceholder = false;
       jobs.forEach(j => {
@@ -14523,7 +14546,12 @@
         const dur = (j.lastDurationMs != null && j.lastDurationMs >= 0) ? (' <span style="color:#8c959f;">(' + (j.lastDurationMs >= 1000 ? (Math.round(j.lastDurationMs / 100) / 10) + 's' : j.lastDurationMs + 'ms') + ')</span>') : '';
         // Last run cell: explicit "no runs yet" for never-run jobs (not a bare dash).
         const lastCell = j.neverRun ? '<span style="color:#8c959f;">no runs yet</span>' : (jobTimeAgo(j.lastRunUtc) + dur);
-        const result = j.lastResult ? esc0(j.lastResult) : '<span style="color:#8c959f;">—</span>';
+        // 2026-10-07 (operator: "the view is terrible, so much text but the column is so narrow"): two lines, then "more" --
+        // the full text is one click away (and in the tooltip), never cut off.
+        const result = j.lastResult
+          ? ('<div class="jobResult" title="' + esc0(j.lastResult) + '" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">' + esc0(j.lastResult) + '</div>' +
+             (String(j.lastResult).length > 160 ? '<button class="ghost jobResultMore" style="font-size:10.5px;padding:0 4px;">more</button>' : ''))
+          : '<span style="color:#8c959f;">—</span>';
         // Next run: synthesized (computed from cadence) is shown but marked with ~.
         let nextCell;
         if (!j.enabled) { nextCell = '<span style="color:#8c959f;">—</span>'; }
@@ -14690,6 +14718,16 @@
     }
     document.querySelectorAll('.jobLogBtn').forEach(b => {
       b.onclick = () => openJobLog(b.dataset.runid, b.dataset.name, b.dataset.running === '1');
+    });
+    // the Result cell: two lines; "more" shows all of it, "less" folds it again
+    document.querySelectorAll('.jobResultMore').forEach(b => {
+      b.onclick = () => {
+        const box = b.previousElementSibling; if (!box) return;
+        const open = box.style.webkitLineClamp === 'unset';
+        box.style.webkitLineClamp = open ? '2' : 'unset';
+        box.style.display = open ? '-webkit-box' : 'block';
+        b.textContent = open ? 'more' : 'less';
+      };
     });
   }
 

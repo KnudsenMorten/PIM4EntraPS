@@ -13,6 +13,13 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.523 -- 2026-10-07
+
+- **Jobs: "ok" means ok.** A job that ran shows a green **ok**, also when it had nothing to change (it used to say "no-op" in yellow, which read like a warning). The result column is wider, shows two lines and expands with **more**.
+- **The guards panel clears itself.** It shows only guards that tripped in the last two hours; older ones fold into "earlier -- no longer tripping". Nothing to acknowledge.
+- **Daily reconcile, in plain words.** The card says what it does, that it is running, what the last run did, and that access PIM did not create is left alone (with a link to Review current delegations to clean it up). Pause is folded away as an option.
+- **Mail setup runs as the signed-in account.** The step that creates the notification mailbox and scopes its send right to that one mailbox can now run as the signed-in account or Invardia support, without a certificate.
+
 ## 2.4.522 -- 2026-10-07
 
 - **Review current delegations shows what PIM Manager does NOT manage.** The page is for cleaning up access PIM Manager does not manage, so assignments it does manage are hidden by default. Tick **show managed by PIM Manager** to see them, each marked **MANAGED**. An assignment counts as managed when the engine matched it to your configuration in its last drift check (which also runs right after every update).

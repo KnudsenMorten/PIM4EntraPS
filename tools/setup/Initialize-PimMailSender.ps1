@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   IMP-06 -- make an environment able to send its own notification mail, UNATTENDED.
@@ -97,6 +97,10 @@ param(
     # defect, which is why the offline gate now audits the whole family instead of naming them.
     [string]$AdminSecret,
     [string]$AdminCertThumbprint,
+    # 2026-10-07 (operator, NunaGreen: "you are welcome to fix this at nunagreen"): run as the SIGNED-IN az session
+    # instead -- the Invardia Support app (Connect-InvardiaSupport -AzCli) or a person -- with no secret or certificate
+    # passed. -AdminAppId is then the signed-in app (it activates its own short-lived Exchange Administrator role).
+    [switch]$UseSignedInAccount,
     # The engine SPN. It receives the scoped Mail.Send ONLY when no managed identity is named below
     # (a non-hosted engine sends as the SPN). With a managed identity it is still checked for a
     # tenant-wide Graph Mail.Send. Read from the environment's own Key Vault ('Modern-AppId') when
@@ -149,7 +153,21 @@ $ErrorActionPreference = 'Stop'
 # provisioned: this script creates a mailbox and grants Exchange rights, and finding out the
 # credential was unusable halfway through leaves a half-configured tenant nobody asked for.
 if ($AdminSecret -and $AdminCertThumbprint) { throw 'Initialize-PimMailSender: pass EITHER -AdminSecret OR -AdminCertThumbprint, not both.' }
-if (-not $AdminSecret -and -not $AdminCertThumbprint) { throw 'Initialize-PimMailSender: one of -AdminSecret / -AdminCertThumbprint is required.' }
+if ($UseSignedInAccount -and ($AdminSecret -or $AdminCertThumbprint)) { throw 'Initialize-PimMailSender: -UseSignedInAccount takes no -AdminSecret / -AdminCertThumbprint.' }
+if (-not $UseSignedInAccount -and -not $AdminSecret -and -not $AdminCertThumbprint) { throw 'Initialize-PimMailSender: one of -AdminSecret / -AdminCertThumbprint / -UseSignedInAccount is required.' }
+
+function Get-PimMailAdminToken {
+    # The admin (onboarding) identity's token for 'graph' | 'arm' | a resource URL: from the signed-in az session with
+    # -UseSignedInAccount, else the app's own secret / certificate. Never cached across identities (-Force).
+    param([Parameter(Mandatory)][string]$Resource)
+    if ($UseSignedInAccount) {
+        $url = switch ($Resource) { 'graph' { 'https://graph.microsoft.com' } 'arm' { 'https://management.azure.com' } default { $Resource } }
+        $tok = "$(az account get-access-token --tenant $TenantId --resource $url --query accessToken -o tsv 2>$null)".Trim()
+        if (-not $tok) { throw "Initialize-PimMailSender: the signed-in az session has no token for $url in tenant $TenantId (sign in first)." }
+        return $tok
+    }
+    return (Get-PimRestToken -Resource $Resource -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force)
+}
 
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\SOLUTIONS\PIM4EntraPS
@@ -257,7 +275,7 @@ Write-Host ("=" * 78) -ForegroundColor Cyan
 # secret -- it is cert-only -- and this script never gives it one.
 Step 'authenticate (onboarding SPN)'
 try {
-    $graphTok = Get-PimRestToken -Resource 'graph' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force
+    $graphTok = Get-PimMailAdminToken -Resource 'graph'
 } catch { Fail "could not acquire a Graph token as the onboarding SPN ($AdminAppId): $($_.Exception.Message)" }
 $GH = @{ Authorization = "Bearer $graphTok"; 'Content-Type' = 'application/json' }
 function Gr {
@@ -398,7 +416,7 @@ Step 'resolve the sending identity (managed identity when hosted)'
 $miOids = @($ManagedIdentityObjectId | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
 if (-not $miOids.Count -and "$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$TickJobName".Trim()) {
     try {
-        $armTok = Get-PimRestToken -Resource 'arm' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force
+        $armTok = Get-PimMailAdminToken -Resource 'arm'
         $job = Invoke-RestMethod -Headers @{ Authorization = "Bearer $armTok" } `
             -Uri "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$TickJobName`?api-version=2024-03-01"
     } catch { Fail "could not read tick job '$TickJobName' to resolve its managed identity: $($_.Exception.Message)" }
@@ -514,7 +532,7 @@ elseif ($PSCmdlet.ShouldProcess($AdminAppId, 'grant RoleManagement.ReadWrite.Dir
     } catch { Fail "could not grant RoleManagement.ReadWrite.Directory to the onboarding SPN: $($_.Exception.Message)" }
     # A token minted before the grant carries the OLD roles claim; re-mint until the claim shows the new role.
     $claimSeen = Confirm-Eventually -What 'RoleManagement.ReadWrite.Directory in the token' -Seconds 600 -Test {
-        $t = Get-PimRestToken -Resource 'graph' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force
+        $t = Get-PimMailAdminToken -Resource 'graph'
         $p = "$t".Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($p.Length % 4) { $p += '=' }
         $roles = @(([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json).roles)
         if ($roles -contains 'RoleManagement.ReadWrite.Directory') { $script:GH = @{ Authorization = "Bearer $t"; 'Content-Type' = 'application/json' }; $true } else { $false }
@@ -535,7 +553,7 @@ while ($true) {
         if ($m -notmatch '\b403\b|Forbidden|Authorization_RequestDenied' -or (Get-Date) -ge $exchReadUntil) { break }
         Note 'role read answered 403 -- retrying with a fresh token (a new permission takes effect on this path after the token carries it)' 'DarkYellow'
         Start-Sleep -Seconds 20
-        $t = Get-PimRestToken -Resource 'graph' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force
+        $t = Get-PimMailAdminToken -Resource 'graph'
         $script:GH = @{ Authorization = "Bearer $t"; 'Content-Type' = 'application/json' }
     }
 }
@@ -586,7 +604,7 @@ $initialDomain = "$(@(@($org.verifiedDomains) | Where-Object { $_.isInitial } | 
 $anchor = "UPN:SystemMailbox{bb558c35-97f1-4cb9-8ff7-d53741dc928c}@$initialDomain"
 function Invoke-Exo {
     param([Parameter(Mandatory)][string]$Cmdlet, [hashtable]$Parameters = @{})
-    $tok = Get-PimRestToken -Resource 'https://outlook.office365.com' -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force
+    $tok = Get-PimMailAdminToken -Resource 'https://outlook.office365.com'
     $h = @{ Authorization = "Bearer $tok"; 'Content-Type' = 'application/json'
             'X-ResponseFormat' = 'json'; 'X-AnchorMailbox' = $anchor }
     $body = @{ CmdletInput = @{ CmdletName = $Cmdlet; Parameters = $Parameters } } | ConvertTo-Json -Depth 10
@@ -879,6 +897,11 @@ if (-not "$SqlServerFqdn".Trim()) {
     # ambient token would authenticate successfully against the WRONG directory (BUG-34). The
     # onboarding SPN is the SQL server's Entra admin, so it is the identity that can write.
     $global:PIM_TenantId     = $TenantId
+    if ($UseSignedInAccount) {
+        # the signed-in session (a member of the SQL admin group) writes the store -- as Set-PimLicense -UseSignedInAccount
+        . (Join-Path $PSScriptRoot '_PimSignedIn.ps1')
+        $null = Connect-PimSignedInSql -TenantId $TenantId
+    } else {
     $global:PIM_ClientId     = $AdminAppId
     # Set only the credential that was actually supplied, and CLEAR the other -- a stale
     # global of the opposite kind would otherwise win inside Get-PimRestToken's chain and
@@ -886,6 +909,7 @@ if (-not "$SqlServerFqdn".Trim()) {
     # same two lines, as Grant-PimMiSql.
     $global:PIM_ClientSecret   = $AdminSecret
     $global:PIM_CertThumbprint = $AdminCertThumbprint
+    }
     $global:PIM_SqlServer    = $SqlServerFqdn
     $global:PIM_SqlDatabase  = $SqlDatabase
     try {
