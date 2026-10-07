@@ -277,7 +277,9 @@ function Invoke-PimLicenceCheckJob {
     $isGrace = [bool]($r.ok -and $r.grace)
     $why = if ("$($r.message)".Trim()) { "$($r.message)".Trim() } else { "$($r.reason)".Trim() }
     if (-not $WhatIf) {
-        & $Trip @{ GuardId = 'msp.licence'; Outcome = $(if ($isGrace) { 'warning' } else { 'refused' }); Area = $word; Job = 'licence-check'
+        # Area is an id (uplink contract: letters/digits/._- only) -- "managed tenant" with its space made Invardia answer 422
+        # (2026-10-07, RIDE); the readable words stay in the title.
+        & $Trip @{ GuardId = 'msp.licence'; Outcome = $(if ($isGrace) { 'warning' } else { 'refused' }); Area = $(if ($role -eq 'Slave') { 'msp-managed' } else { 'msp-managing' }); Job = 'licence-check'
             Title = $(if ($isGrace) { "MSP licence in its grace period ($word)" } else { "MSP refused: no valid Pro licence ($word)" })
             Detail = $why
             ActionText = $(if ($isGrace) { 'Renew the Pro licence before the grace period ends; after that the MSP publish / pull stops.' } else { 'Register a valid Pro licence that covers this tenant (Settings > Licence). Until then the MSP publish / pull refuses and the managed tenants receive no changes.' }) }

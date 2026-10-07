@@ -1,4 +1,4 @@
-﻿<#
+<#
   PIM4EntraPS -- DRIFT SNAPSHOT (live vs desired), built by the SCHEDULER, served by the Manager.
 
   🔴 WHY THIS FILE EXISTS (operator, 2026-09-14: "when i click access & drift, i get to something that looks like
@@ -550,11 +550,11 @@ function Invoke-PimDriftSnapshotJob {
             if (Test-PimAlertSettling -LastChangeUtc $__lc) { $__settling = $true; Write-Host ("[$type] drift found while the commit of {0:u} is still rolling out -- not mailed now" -f $__lc) -ForegroundColor DarkYellow }
         }
         # REQ-DRIFT-2 CADENCE (operator 2026-09-26: "monthly by default, but possible to define cadence as dropdown"): the
-        # drift mail goes out once per cadence (pim.Settings 'DriftAlertCadence', default monthly); a change in between
+        # drift mail goes out once per cadence (pim.Settings 'DriftAlertCadence', default biweekly since 2026-10-07); a change in between
         # waits for the next mail. The last send is kept in pim.Settings 'DriftAlertState'.
-        $__cad = 'monthly'; $__last = $null
+        $__cad = 'biweekly'; $__last = $null
         if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
-            try { $__cad = ConvertTo-PimDriftAlertCadence (Get-PimSetting -Name 'DriftAlertCadence') } catch { $__cad = 'monthly' }
+            try { $__cad = ConvertTo-PimDriftAlertCadence (Get-PimSetting -Name 'DriftAlertCadence') } catch { $__cad = 'biweekly' }
             try { $__st = Get-PimSetting -Name 'DriftAlertState'; if ($__st -is [string] -and "$__st".Trim()) { $__st = $__st | ConvertFrom-Json }; if ($__st) { $__last = $__st.lastMailUtc } } catch { $__last = $null }
         }
         $__due = Test-PimDriftAlertDue -Cadence $__cad -LastMailUtc $__last -NowUtc $NowUtc
@@ -781,14 +781,15 @@ function Get-PimDriftExtraActions {
 
 # The drift ALERT MAIL cadence (pim.Settings 'DriftAlertCadence'). The drift job keeps refreshing the page every run; this is
 # only how often the mail goes out. A change in the drift between two mails waits for the next one.
-$script:PimDriftAlertCadences = [ordered]@{ daily = 1; weekly = 7; monthly = 30; quarterly = 91 }
+# 2026-10-07 (operator: "Configuration drift detected should be a biweekly report by default, controllable in the settings"): biweekly, the default.
+$script:PimDriftAlertCadences = [ordered]@{ daily = 1; weekly = 7; biweekly = 14; monthly = 30; quarterly = 91 }
 function Get-PimDriftAlertCadenceNames { @($script:PimDriftAlertCadences.Keys) }
 function ConvertTo-PimDriftAlertCadence {
-    # PURE. A stored value -> daily | weekly | monthly | quarterly; anything else (unset, unreadable) = monthly (the default).
+    # PURE. A stored value -> daily | weekly | biweekly | monthly | quarterly; anything else (unset, unreadable) = biweekly (the default).
     param([AllowNull()][object]$Value)
     $v = "$Value".Trim().Trim('"').ToLowerInvariant()
     if ($script:PimDriftAlertCadences.Contains($v)) { return $v }
-    return 'monthly'
+    return 'biweekly'
 }
 function Test-PimDriftAlertDue {
     <# PURE. Is a drift mail due now? Never mailed = yes; else when the cadence has passed since the last drift mail. #>

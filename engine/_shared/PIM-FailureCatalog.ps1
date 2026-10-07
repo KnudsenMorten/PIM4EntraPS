@@ -132,10 +132,12 @@ $script:PimFailureRules = @(
        fixes = @(@{ id = 'delete-row'; label = 'Remove this row'; kind = 'delete-row' }) }
 
     @{ code = 'ENTRA-ROLE-UNRESOLVED'
-       match = { param($m, $row) $m -match '(?i)unresolved group/role' }
-       title = 'Entra group or role could not be resolved'
-       cause = 'Either the group for this GroupTag does not exist yet, or the role name is not in the tenant''s role catalog. (Before 2026-09-12 this also appeared for EVERY role because the scheduler never loaded the role catalog.)'
-       remedy = 'Check that the group exists (it is created by the Groups job) and that RoleDefinitionName matches an Entra role exactly.'
+       # 2026-10-07 (Invardia fix request 7429f13c, NunaGreen): RolesAUs says "unresolved group/AU/role" -- the same failure
+       # with the administrative unit as a third part; it fell through to UNCLASSIFIED.
+       match = { param($m, $row) $m -match '(?i)unresolved group/(AU/)?role' }
+       title = 'Entra group, administrative unit or role could not be resolved'
+       cause = 'Either the group for this GroupTag does not exist yet (or was deleted and is not recreated yet), the administrative unit does not exist, or the role name is not in the tenant''s role catalog. (Before 2026-09-12 this also appeared for EVERY role because the scheduler never loaded the role catalog.)'
+       remedy = 'Check that the group exists (it is created by the Groups job), that the administrative unit exists, and that RoleDefinitionName matches an Entra role exactly. A group recreated by the full reconcile resolves on the next run.'
        retryable = $true; severity = 'data'
        fixes = @() }
 
