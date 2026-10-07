@@ -49,6 +49,9 @@ function Get-PimUplinkRunOutcome {
     param([AllowNull()][object]$Run)
     $st = "$($Run.status)".Trim().ToLowerInvariant()
     if ($st -in @('running', 'skipped', 'unimplemented', 'outofscope', 'disabled', '')) { return '' }
+    # §95.2o: an INTERRUPTED run (the scheduler restarted for an update, the platform stopped the execution) is not a
+    # product failure -- reported as a warning, never as a failed run (Invardia fix request d0217f96).
+    if ($st -eq 'interrupted') { return 'warning' }
     if ($st -eq 'failed' -or ($Run.PSObject.Properties['ok'] -and -not [bool]$Run.ok)) { return 'failed' }
     if ($Run.PSObject.Properties['held'] -and [bool]$Run.held) { return 'warning' }
     if ($st -eq 'held') { return 'warning' }

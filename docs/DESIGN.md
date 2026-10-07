@@ -2654,15 +2654,16 @@ It uses the same image as the Manager, its own system-assigned managed identity,
 schedules, last/next run, triggers and run history in SQL `pim.Settings`. The queue of pending
 triggers is changed only by a compare-and-set on its row (2.4.471): a writer that finds the list
 changed since it read it re-reads and applies its change again, so a "Run now", a commit and the
-change detector queuing at the same moment never overwrite one another. A **SQL lease** guarantees
-one tick at a time; a tick renews its lease while it works (so a long job keeps its turn) and stops
-making changes if another run has taken the lease over. The lease records the job execution that
-holds it. A tick that finds the lease held asks the platform for that execution's status and, only
-when the platform reports it **ended** (succeeded, failed or stopped — e.g. a running pod the
-platform deleted after a failed first attempt), takes the lease over at once, closes that run's
-"running" records and runs its pending trigger. Anything it cannot confirm (no execution recorded,
-no read right, unknown status) waits for the lease to expire, as before. The tick's identity needs
-read access on its own job for this (the hosting access script grants it). On a server/VM the same code runs as a timer
+change detector queuing at the same moment never overwrite one another. **Job lanes** (below)
+guarantee that two runs never write the same area at once while runs on different areas go side by
+side; a run renews its locks while it works (so a long job keeps its area) and stops making changes
+if another run has taken one of its areas over. Every lock records the job execution that holds it.
+A run that finds an area held asks the platform for the holder's execution status and, only when the
+platform reports it **ended** (succeeded, failed or stopped — e.g. a running pod the platform deleted
+after a failed first attempt), takes the area over at once and closes that run's "running" records.
+Anything it cannot confirm (no execution recorded, no read right, unknown status) waits for the lock
+to expire. The tick's identity needs read access on its own job for this (the hosting access script
+grants it). On a server/VM the same code runs as a timer
 loop (`-IntervalSeconds`) or once per external cron start (`-Once`). The Manager never runs the
 engine: on-demand actions come through the **Manager API** as queue entries and triggers that the
 tick drains.
@@ -2688,9 +2689,11 @@ Key semantics:
   Admin-gated, audited `schedule.tick.start`). It is **conditional**: it needs the job's resource id
   (env `PIM_TickJobId` or `pim.Settings` `SchedulerTickJobId`) **and** the *Container Apps Jobs
   Operator* role for the Manager's managed identity, scoped to the tick job only. Without either it
-  degrades to the next cron start and says so in the response. It never starts a second execution
-  while a tick holds the lease, is debounced (45 s) so a multi-entity commit starts one execution,
-  and never fails the commit.
+  degrades to the next cron start and says so in the response. Runs in progress do not stop it — a
+  new execution works on the areas they do not hold; only when the most runs that may go side by
+  side are already running does it wait (one of them picks the work up when it finishes its current
+  job). It is debounced (45 s) so a multi-entity commit starts one execution, and never fails the
+  commit.
 - **In-tick pickup** — after each scheduled job a running tick repeats the cheap part of its start:
   the SQL change detector, a check for committed queue actions (`queue-apply`) and the trigger
   drain, so new work waits for the current job, not for the whole tick and the next cron start.
@@ -2728,10 +2731,61 @@ Key semantics:
   registers (`Get-PimTickOnlyJobTypes`: `engine-delta`, `engine-full`, `msp-pull`,
   `active-assignments-snapshot`, `drift-snapshot`, `verify-convergence`, `discovery`) persists a
   trigger (`pim.Settings` `SchedulerTriggers`, audited `schedule.job.run.queued`) and answers
-  **202 queued**, then asks for an immediate tick start. A request made while a tick is busy is kept
-  for its next drain.
+  **202 queued**, then asks for an immediate tick start. While another run works on the area the job
+  writes, the answer says so — *queued — starts when &lt;job&gt; has finished* — and the press waits in
+  the queue until that area is free. The light job types the Manager runs itself take the same area
+  locks; on a held area they are queued for the scheduler the same way.
 - **VM + container** — same code; `-IntervalSeconds` / `$env:PIM_SCHED_INTERVAL`,
-  `-Once` for an external cron, single-runner SQL lease.
+  `-Once` for an external cron, the same SQL area locks.
+
+**Job lanes: per-area locks instead of one tick-wide lease.** Up to 2.4.528 the whole tick
+ran under one lease, so a 30-minute full reconcile made every 5-minute tick skip, a Run now pressed
+meanwhile waited the whole time, and a job that had failed before the fix kept showing the old
+failure. Now:
+- **Areas.** Every engine scope belongs to one area — *groups* (administrative units, groups, their
+  owners, members and AU membership, retirement), *admins* (admin accounts, TAP, their group
+  memberships, offboarding), *entra-roles*, *policies* (group and Entra role policies), *azure*
+  (Azure roles and their policies), *workloads* and *reviews*. A job that is not an engine run but
+  writes one of those areas names it (the emergency override → policies, RFA and the consultant
+  review → admins, access review campaigns → reviews); queue actions → *queue*; the managed-tenant
+  pull → *msp*; the hybrid AD jobs → their own areas. Every job also holds its own job area, so the
+  same job never runs twice at once. Reports, snapshots and checks only hold their job area.
+- **Locks.** One `pim.Settings` row (`SchedulerLocks`, per scheduler instance) holds, per area, the
+  owner, the job, the run, when it was taken and when it expires, and the job execution. It is
+  changed only by a compare-and-set. A run takes **all** its areas or none; it holds them for as long
+  as it runs (renewed by the engine's per-item heartbeat) and releases them the moment it ends.
+- **Side by side.** Jobs on different areas run at the same time in overlapping executions (the
+  5-minute cron, a Run now start); two runs on the same area never do. At most **4** run side by side
+  (Graph throttling, CPU, SQL; `PIM_SCHED_MAX_PARALLEL`, 1–8). A due job whose area is held, or that
+  finds no free slot, is not run and not recorded — it stays due and a later pass runs it.
+- **One area at a time for a long run.** The daily full reconcile (and a trigger over every scope)
+  holds only its job area plus the area of the scope it is on: the engine asks the scope gate before
+  each scope, which releases the previous area first and takes the next one — waiting up to
+  15 minutes while another run writes it. A scope whose area stayed busy is reported **not checked**
+  (the run is not failed; the next run does it) and is never counted as reconciled. A run never holds
+  two areas and never waits while holding one, so two runs cannot block each other.
+- **The execution time limit.** A job is not started when it will not fit in what is left of the
+  current execution (its last run's duration, a full reconcile without one is assumed 35 minutes;
+  limit = the tick job's timeout, `PIM_SCHED_TIME_LIMIT_SECONDS`): it waits for the next execution
+  instead of being killed half-way. A fresh execution always starts it.
+- **Recorded when it ends.** Every run writes its result, with its own start and end time, the
+  moment it ends — and its next-run stamp, before its locks are released, so no other execution
+  starts it again. Each run gets its own clock (the tick's clock plus the time spent before it), so
+  a run that starts late in an execution judges expiries and waiting windows at its real time. A run
+  that another execution finished while this one waited is not run twice. The run history and the
+  scheduler state are written by compare-and-set and **merged** (another execution's newer stamps
+  are kept), because runs now finish side by side.
+- **During an update roll** a tick-wide lease written by the previous version is still respected
+  (that tick skips), so the two versions never run side by side.
+
+**Why a run never reported back.** A run whose execution ended before it recorded its result is
+closed as soon as its owner holds no lock any more (after a 3-minute grace; records without an owner
+keep the 30-minute rule), and the record says **why**: *interrupted by the update to &lt;version&gt;*
+(the record was written by another version), *the platform stopped the execution* (a roll, a manual
+stop), *the Manager restarted* (a Run now inside the Manager) — these are **interrupted**, not
+failures; *stopped at the execution time limit*, *its container stopped (out of memory or a crash)*
+and *the execution finished without recording this run* are **failed**; with no evidence it is
+interrupted. Telemetry reports an interrupted run as a warning, never as a failed run.
 
 | Job | Trigger | How |
 |---|---|---|
@@ -2869,9 +2923,28 @@ the read model without a new scheduler:
   failure of the job at once (`unackedFailureRunIds`). An acknowledged run still appears in history
   (audit intact); only its failure/overdue **signal** is suppressed.
 
+**Self-healing status (job lanes).** The state of a job is its latest run, and it heals by itself:
+- An **interrupted** run (an update restart, a platform stop, a Manager restart) says nothing about
+  the job: it is listed (grey "interrupted — runs again") and stepped over. Two in a row at the head
+  **are** failing ("interrupted again": too long for one execution, out of memory).
+- A failure is **healed** by a later clean run of any job that reconciled every scope of the failed
+  job and started after the failure ended (each clean engine run records the scopes it reconciled;
+  a scope it did not check is not one of them) — the row says which run healed it.
+- A run is **queued** (a Run now not yet started) or **waiting** (due, but another run works on the
+  same area, or no slot is free): the row says *queued — starts when &lt;job&gt; has finished* or
+  *waiting for &lt;job&gt; (since hh:mm)*, from the lock store and the trigger queue read once per view,
+  and is never shown overdue or failed for it. `GET /api/jobs` adds `waitingCount`, `queuedCount` and
+  `laneCap`; every row carries its page `group`, its `areas`, `queued`, `waitingFor` / `waitingArea` /
+  `waitingSinceUtc`, `interruptedCount` and `healedBy`.
+
 **Three Jobs pages** (`pim-manager.html`):
-- **Jobs & status** (`renderJobs()`) — in-progress jobs first, a top **"needs attention"** banner
-  (overdue/failing counts), an overdue badge + recent-failure count per row, a **History** modal
+- **Jobs & status** (`renderJobs()`) — one section per group (**Engine**, **Maintenance**, **Reports**,
+  **Updates**), what needs attention first in each (failing, needs approval, overdue, then running,
+  waiting and queued), **one line per job** (job, status with its waiting / queued badge, last run,
+  result, next run, Run now and Logs) and a folded **details panel** under it (▸: cadence counted from
+  the finish, on/off, type, what the job works on, last finished, healed-by, interrupted runs, History),
+  a top **"needs attention"** banner (overdue/failing counts), the header counts of running, queued
+  and waiting runs and how many may run side by side, a **History** modal
   (recent runs with pass/fail/when, each linking to its log), a per-row **Logs** modal with a
   **live tail** that re-polls an in-progress run's log every 2 s (auto-scrolling) until it finishes,
   and for Admin+ an **enabled** toggle, an inline **cadence** editor (`PUT /api/jobs/state`), **Run
