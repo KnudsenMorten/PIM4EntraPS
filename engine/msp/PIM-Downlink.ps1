@@ -4018,6 +4018,22 @@ function Sync-PimMasterToSlave {
 #   -EngineScope/-EngineMode : forwarded to Invoke-PimEngineCore (default All/Delta).
 #   -Doc/-PublicKey/-TenantId/-SlaveRing/... : forwarded to the downlink (managed only).
 #   -WhatIfMode : default ON (plan/preview; no live writes).
+function Get-PimEmptyStoreEngineVerdict {
+    <#
+      PURE. 2026-10-06 (MSP rehearsal, jm752): a brand-new managed tenant pulled the managing tenant's bundle fine, but nothing
+      was defined there yet -- so its store stayed empty, the engine's empty-desired PREFLIGHT refused, and every pull was
+      recorded FAILED (10 in a row, then back-off). The tick treats the same state as "touch nothing" (engine rule: only
+      defined objects). Returns the engine-apply step as OK-and-nothing-to-do ONLY when the refusal is exactly that preflight
+      AND this same run's pull succeeded -- a successful pull writes into this tenant's own store, so "empty" means "nothing
+      published yet", not "pointed at the wrong store" (which is what the preflight guards). Anything else -> $null (fail).
+    #>
+    param([AllowEmptyString()][string]$ErrorText, [bool]$DownlinkOk)
+    if (-not $DownlinkOk) { return $null }
+    if ("$ErrorText" -notmatch 'Preflight FAILED: the desired store .* has NO definition/admin rows') { return $null }
+    return [pscustomobject]@{ step = 'engine-apply'; ok = $true; skipped = $true
+                              detail = 'nothing is defined for this tenant yet (the managing tenant has published nothing that reaches it) -- the engine touches nothing; not a failure' }
+}
+
 function Invoke-PimScenarioDeploy {
     [CmdletBinding()]
     param(
@@ -4211,9 +4227,16 @@ function Invoke-PimScenarioDeploy {
                 return ([pscustomobject]@{ ok = $false; scenarioId = $run.scenarioId; plan = $run; steps = @($results.ToArray()); changeSummary = $summary })
             }
         } catch {
-            Write-Host "[scenario-run] engine apply failed: $($_.Exception.Message)" -ForegroundColor Red
-            $results.Add([pscustomobject]@{ step = 'engine-apply'; ok = $false; detail = "$($_.Exception.Message)" }) | Out-Null
-            return ([pscustomobject]@{ ok = $false; scenarioId = $run.scenarioId; plan = $run; steps = @($results.ToArray()) })
+            $__dlOk = [bool](@($results.ToArray()) | Where-Object { $_.step -eq 'downlink-sync' -and $_.ok })
+            $__empty = Get-PimEmptyStoreEngineVerdict -ErrorText "$($_.Exception.Message)" -DownlinkOk $__dlOk
+            if ($__empty) {
+                Write-Host "[scenario-run] $($__empty.detail)" -ForegroundColor DarkGray
+                $results.Add($__empty) | Out-Null
+            } else {
+                Write-Host "[scenario-run] engine apply failed: $($_.Exception.Message)" -ForegroundColor Red
+                $results.Add([pscustomobject]@{ step = 'engine-apply'; ok = $false; detail = "$($_.Exception.Message)" }) | Out-Null
+                return ([pscustomobject]@{ ok = $false; scenarioId = $run.scenarioId; plan = $run; steps = @($results.ToArray()) })
+            }
         }
     } else {
         Write-Host "[scenario-run] Invoke-PimEngineCore.ps1 not found -- engine step skipped." -ForegroundColor Yellow

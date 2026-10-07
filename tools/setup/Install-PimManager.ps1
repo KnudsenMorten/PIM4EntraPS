@@ -127,6 +127,11 @@ function Pre([string]$Id, [scriptblock]$Body) {
 Pre 'preflight-signin' {
     $script:who = Get-PimSignedInIdentity -TenantId $cfg.tenantId -SubscriptionId $cfg.subscriptionId -Az $Az
     if (-not $script:who.ok) { return @{ state = 'failed'; message = $script:who.reason; actionText = 'Sign in as yourself in this shell:'; actionCommand = "az login --tenant $($cfg.tenantId)" } }
+    # 2026-10-06 (SI finding K): with no superAdmins named, the PERSON who installs becomes the Manager's first SuperAdmin.
+    # The Invardia Support app is an application -- it must never be that admin. Refused before anything is written.
+    if ("$($script:who.supportAppId)".Trim() -and -not @($cfg.superAdmins | Where-Object { "$_".Trim() }).Count) {
+        return @{ state = 'failed'; message = 'the installation runs as the Invardia Support app, so it cannot make the installer the PIM Manager administrator -- name at least one person in superAdmins'; actionText = 'Add the administrator''s sign-in name to config.json, then resume:'; actionCommand = '"superAdmins": ["admin@contoso.com"]' }
+    }
     @{ state = 'ok'; message = "signed in as $($script:who.userName)" }
 }
 if ($preflightFailed) { Finish 2 }
@@ -142,9 +147,21 @@ Pre 'preflight-target' {
 $script:rights = $null
 Pre 'preflight-rights' {
     $roles = @((Az-Text @('role', 'assignment', 'list', '--assignee', $who.objectId, '--scope', "/subscriptions/$($cfg.subscriptionId)", '--include-inherited', '--include-groups', '--subscription', $cfg.subscriptionId, '--query', '[].roleDefinitionName', '-o', 'tsv')) -split "`r?`n" | Where-Object { "$_".Trim() })
-    $dir = Get-InstallRest 'https://graph.microsoft.com/v1.0/me/transitiveMemberOf/microsoft.graph.directoryRole?$select=roleTemplateId' 'https://graph.microsoft.com'
+    # 2026-10-06 (install rehearsal): the Invardia Support app is an application -- there is no /me. Read ITS directory roles
+    # and its Graph app permissions (the 'roles' claim of its own Graph token); the warning was false for it.
+    $appRoles = @()
+    if ("$($who.supportAppId)".Trim()) {
+        $dir = Get-InstallRest "https://graph.microsoft.com/v1.0/servicePrincipals/$($who.objectId)/transitiveMemberOf/microsoft.graph.directoryRole?`$select=roleTemplateId" 'https://graph.microsoft.com'
+        $gt = Az-Json @('account', 'get-access-token', '--subscription', $cfg.subscriptionId, '--resource', 'https://graph.microsoft.com')
+        try {
+            $seg = "$($gt.accessToken)".Split('.')[1].Replace('-', '+').Replace('_', '/'); $seg += '=' * ((4 - $seg.Length % 4) % 4)
+            $appRoles = @((([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($seg))) | ConvertFrom-Json).roles)
+        } catch { $appRoles = @() }
+    } else {
+        $dir = Get-InstallRest 'https://graph.microsoft.com/v1.0/me/transitiveMemberOf/microsoft.graph.directoryRole?$select=roleTemplateId' 'https://graph.microsoft.com'
+    }
     $tpl = @(@($dir.value) | ForEach-Object { "$($_.roleTemplateId)" })
-    $v = Get-PimInstallRightsVerdict -AzureRoles $roles -DirectoryRoleTemplateIds $tpl
+    $v = Get-PimInstallRightsVerdict -AzureRoles $roles -DirectoryRoleTemplateIds $tpl -AppRoles $appRoles
     $script:rights = $v
     if (-not $v.azureOk) { return @{ state = 'failed'; message = $v.message; actionText = 'Ask a subscription Owner to grant you Owner (or Contributor + User Access Administrator):'; actionCommand = "az role assignment create --assignee $($who.userName) --role Owner --scope /subscriptions/$($cfg.subscriptionId)" } }
     if (-not $v.entraOk) { return @{ state = 'warning'; message = $v.message } }
@@ -200,8 +217,8 @@ if (-not $summary -or "$($summary.status)" -notin 'success', 'unverified') {
 if ($done.Contains('licence')) { Emit 'licence' 'skipped' 'already registered (resume)' }
 else {
     Emit 'licence' 'started'
-    if (-not $InstallLicence) { $InstallLicence = { param($Path, $SqlFqdn, $TenantId) & (Join-Path $here 'Set-PimLicense.ps1') -LicensePath $Path -SqlServer $SqlFqdn -TenantId $TenantId -UseSignedInAccount | Out-Host; @{ ok = (-not $LASTEXITCODE) } } }
-    $lr = & $InstallLicence $LicencePath $names.sqlFqdn $cfg.tenantId
+    if (-not $InstallLicence) { $InstallLicence = { param($Path, $SqlFqdn, $TenantId, $Key) & (Join-Path $here 'Set-PimLicense.ps1') -LicensePath $Path -SqlServer $SqlFqdn -TenantId $TenantId -UseSignedInAccount -InstallKey "$Key" -QueueInstallKeyClaim:(-not "$Key".Trim()) | Out-Host; @{ ok = (-not $LASTEXITCODE) } } }
+    $lr = & $InstallLicence $LicencePath $names.sqlFqdn $cfg.tenantId "$($cfg.installKey)"
     if ($lr -and $lr.ok) { Emit 'licence' 'ok' "the $($cfg.edition) licence is registered -- the Pro features are on"; Mark 'licence' }
     else { Emit 'licence' 'failed' 'the licence could not be stored in the PIM database' 'Fix the cause above, then resume the installation:' $resumeCmd; Finish 1 }
 }

@@ -422,10 +422,13 @@ function Get-PimUpdaterStepDecision {
     param(
         [AllowEmptyString()][string]$Scenario,
         [AllowEmptyString()][string]$SourceUrlTemplate,
-        [switch]$SkipUpdater
+        [switch]$SkipUpdater,
+        # 2026-10-06 (install rehearsal): a PRO guided install deploys as S2 and registers its licence afterwards -- with
+        # no feed it got NO updater at all. Pro updates arrive signed, through Invardia, so 'Invardia' is a source.
+        [AllowEmptyString()][string]$UpdateSource = ''
     )
     if ($SkipUpdater) { return 'skip-flag' }
     if (("$Scenario".Trim().ToUpperInvariant() -in @('S2')) -and   # S4 (MSP on the free edition) is retired
-        -not "$SourceUrlTemplate".Trim()) { return 'skip-community' }
+        -not "$SourceUrlTemplate".Trim() -and "$UpdateSource".Trim() -ine 'Invardia') { return 'skip-community' }
     return 'install'
 }

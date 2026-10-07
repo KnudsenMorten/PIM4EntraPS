@@ -571,7 +571,7 @@ function Test-PimFeatureProLicence {
     param([Parameter(Mandatory)][string]$Key, [string]$TenantId, [string]$SqlServer, [string]$PublicCertB64, [AllowEmptyString()][AllowNull()][string]$LicenseText)
     $entry = Get-PimFeatureCatalogEntry -Key $Key
     if (-not $entry -or "$($entry.license)" -ne 'pro') {
-        return [pscustomobject]@{ key = $Key; required = $false; ok = $true; grace = $false; label = $(if ($entry) { "$($entry.label)" } else { $Key }); reason = 'free'; message = ''; contact = 'mok@mortenknudsen.net'; command = '' }
+        return [pscustomobject]@{ key = $Key; required = $false; ok = $true; grace = $false; label = $(if ($entry) { "$($entry.label)" } else { $Key }); reason = 'free'; message = ''; contact = 'info@invardia.com'; command = '' }
     }
     $tid = if ("$TenantId".Trim()) { "$TenantId".Trim() } elseif ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { '' }
     $srv = if ("$SqlServer".Trim()) { "$SqlServer".Trim() } elseif ("$($global:PIM_SqlServer)".Trim()) { "$($global:PIM_SqlServer)".Trim() } else { '' }
@@ -579,7 +579,7 @@ function Test-PimFeatureProLicence {
         # A process that loaded the catalog without PIM-License.ps1 cannot verify a licence: Pro stays off, and says why.
         $why = 'the licence verifier (PIM-License.ps1) is not loaded in this process'
         return [pscustomobject]@{ key = $Key; required = $true; ok = $false; grace = $false; label = "$($entry.label)"; reason = $why
-            message = "$($entry.label) requires a PIM4EntraPS Pro licence -- $why. Contact mok@mortenknudsen.net for a licence."; contact = 'mok@mortenknudsen.net'; command = '' }
+            message = "$($entry.label) requires a PIM Manager Pro licence -- $why. Contact info@invardia.com for a licence."; contact = 'info@invardia.com'; command = '' }
     }
     $a = @{ FeatureNames = @("$($entry.proFeature)"); Label = "$($entry.label)"; TenantId = $tid; SqlServer = $srv; UseCache = $true }
     if ($PublicCertB64) { $a['PublicCertB64'] = $PublicCertB64 }

@@ -58,6 +58,17 @@ $script:PimUpdateRingSleep = { param([int]$Seconds) Start-Sleep -Seconds $Second
 # preserved across a YAML redeploy.
 $script:PimUpdateRingControlPrefix = 'PIM_UPDATE_'
 
+function Test-PimInvardiaUpdateSource {
+    <#
+      PURE. §95.4: is this updater fed by INVARDIA (signed manifest per ring) rather than a pim-src channel.json?
+      Either the job says so (PIM_UPDATE_SOURCE=invardia) or its source is Invardia's archive endpoint, which is what
+      Deploy-PimUpdateJob writes for -UpdateSource Invardia.
+    #>
+    param([AllowEmptyString()][string]$Source, [AllowEmptyString()][string]$SourceUrl)
+    if ("$Source".Trim() -ieq 'invardia') { return $true }
+    return [bool]("$SourceUrl".Trim() -match '^https://([a-z0-9-]+\.)*invardia\.com/api/updates/')
+}
+
 function Hide-PimSasText {
     # Never let a signature reach a log, a transcript or an exception message.
     param([AllowEmptyString()][string]$Text)
@@ -432,6 +443,13 @@ function Test-PimRollRingGate {
             return $cv
         }
         if ($PendingRing -ge 0) {
+            # 2026-10-06 (install rehearsal): an INVARDIA updater is being installed by this run. Its approvals are signed
+            # manifests that can be read only with the install key, which the engine claims AFTER the licence is registered
+            # -- so the host cannot read them yet. This run IS the install: it installs the version the setup scripts carry
+            # (the version Invardia distributed). From now on the environment carries a ring and the branch below applies.
+            if (Test-PimInvardiaUpdateSource -SourceUrl "$PendingSourceUrl") {
+                return (& $r $true $false $PendingRing '' "the install of a Pro environment updated through Invardia (ring $PendingRing, installed by this run): it takes the version these setup scripts carry; from now on Invardia's signed manifest for ring $PendingRing decides.")
+            }
             # The ring this deploy is installing decides -- and it is gated exactly as if it were already there.
             $ringRaw = "$PendingRing"
             $how = ' (the ring this deploy run installs; the environment carries none yet)'
@@ -448,8 +466,13 @@ function Test-PimRollRingGate {
     if ($ring -lt 2) {
         return (& $r $true $false $ring '' "ring $ring$how gets every build by design -- a host-side roll is allowed (Invoke-PimUpdate advances ring$ring in channel.json after it verifies the roll).")
     }
+    $srcKind = if ($haveEnv -and $UpdaterEnv.Contains('PIM_UPDATE_SOURCE')) { "$($UpdaterEnv['PIM_UPDATE_SOURCE'])" } else { '' }
+    if (Test-PimInvardiaUpdateSource -Source $srcKind -SourceUrl $src) {
+        return (& $r $false $true $ring '' ("ring $ring$how is updated through Invardia: its approved version is a signed manifest the in-cloud updater reads with this install's key, not something a host-side roll can prove -- REFUSING. " +
+                "Let the environment update itself: az containerapp job start -n ca-pim-update -g <resource group> --subscription <subscription> (or pass -OverrideRingGate -Reason '<why>' with an explicit version)."))
+    }
     if (-not $src) { return (& $r $false $true $ring '' "ring $ring$how is configured but the updater has NO PIM_UPDATE_SOURCE_URL, so what ring $ring approves cannot be read -- REFUSING to roll.") }
-    $rep = Get-PimUpdateRingChannelReport -SourceUrlTemplate $src -Ring $ring -CurrentVersion '' -Fetch $Fetch
+    $rep =Get-PimUpdateRingChannelReport -SourceUrlTemplate $src -Ring $ring -CurrentVersion '' -Fetch $Fetch
     if (-not $rep.ok) { return (& $r $false $true $ring '' ("REFUSING to roll: " + $rep.message)) }
     if ($t -ne $rep.approved) {
         return (& $r $false $true $ring $rep.approved ("ring $ring$how approves $($rep.approved); this roll targets '$t' -- REFUSED. Nothing is released to ring $ring without the operator's approval: raise ring$ring.version in channel.json after approval, or pass -OverrideRingGate -Reason '<why>'."))

@@ -174,7 +174,7 @@ function Invoke-PimGuardTrip {
             $still = if ($u.entry.tripCount -gt 1) { " (still tripping: $($u.entry.tripCount) times since $($u.entry.firstSeenUtc.Substring(0, 16).Replace('T', ' ')) UTC)" } else { '' }
             $sev = if ($u.entry.severity -eq 'critical') { 'Action needed' } else { 'For your attention' }
             $subject = "$sev -- $(if ($Title) { $Title } else { "guard $($u.entry.guardId) tripped" })$still"
-            $headline = "PIM4EntraPS protected your data: nothing was lost. $Title"
+            $headline = "PIM Manager protected your data: nothing was lost. $Title"
             $body = [System.Net.WebUtility]::HtmlEncode("$Detail")
             try { $res.mailed = [bool](& $SendMail $subject $headline $body ([System.Net.WebUtility]::HtmlEncode("$ActionText"))) } catch { $res.mailed = $false }
             if ($res.mailed) { $u.entry.lastMailUtc = $NowUtc.ToUniversalTime().ToString('o'); $u.entry.tripsSinceMail = 0 }

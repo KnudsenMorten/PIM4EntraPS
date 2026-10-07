@@ -2661,7 +2661,7 @@
         // the product can tell what is behind it without hovering anything.
         if (proLocked) { item.classList.add('pro-locked'); item.dataset.proLocked = '1'; }
         item.innerHTML = '<span class="nav-item-main">' +
-            '<span class="nav-item-text">' + escapeHtml(spec.label || navTabLabel(tabEl)) + (proLocked ? '<span class="pro-tag" title="Part of PIM4EntraPS Pro">PRO</span>' : '') + '</span>' +
+            '<span class="nav-item-text">' + escapeHtml(spec.label || navTabLabel(tabEl)) + (proLocked ? '<span class="pro-tag" title="Part of PIM Manager Pro">PRO</span>' : '') + '</span>' +
             '<span class="nav-item-badge" aria-hidden="true"></span>' +
           '</span>' +
           (spec.desc ? '<span class="nav-item-desc">' + escapeHtml(spec.desc) + '</span>' : '');
@@ -4951,7 +4951,13 @@
               ' &nbsp;&middot;&nbsp; ' +
               '<a href="https://mortenknudsen.net" target="_blank" rel="noopener" style="color:#0969da; text-decoration:none;">mortenknudsen.net</a>' +
               ' &nbsp;&middot;&nbsp; ' +
-              '<a href="mailto:mok@mortenknudsen.net" style="color:#0969da; text-decoration:none;">mok@mortenknudsen.net</a>' +
+              '<a href="mailto:info@invardia.com" style="color:#0969da; text-decoration:none;">info@invardia.com</a>' +
+            '</div>' +
+            '<div style="margin-top:8px; color:#57606a;">PIM Manager Pro is sold and supported by ' +
+              '<a href="https://invardia.com/products/pim-manager/" target="_blank" rel="noopener" style="color:#0969da; text-decoration:none;">Invardia</a>' +
+              ' &ndash; a brand of 2LINKIT, founded and owned by Morten Knudsen. Support: ' +
+              '<a href="https://portal.invardia.com/" target="_blank" rel="noopener" style="color:#0969da; text-decoration:none;">portal.invardia.com</a>' +
+              ' or <a href="mailto:support@invardia.com" style="color:#0969da; text-decoration:none;">support@invardia.com</a>.' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -6325,7 +6331,7 @@
 
   // ===================================================================
   // ===================================================================
-  // REQ-Y (operator 2026-09-19): "managing tenant slave require license pro" / "write text to contact mok@mortenknudsen.net
+  // REQ-Y (operator 2026-09-19): "managing tenant slave require license pro" / "write text to contact info@invardia.com
   // for license" / "in gui" / "add info in settings to register license file" / "or cmdlet to run".
   // ONE source: GET /api/license (Get-PimLicenseApiBody) -- the licence in plain words and the MSP verdict for THIS
   // environment (mspRequired; mspState none | ok | grace | refused). The page never decides the verdict itself.
@@ -6336,7 +6342,7 @@
   //     notice, one line. Each links to Settings > Licence.
   // ===================================================================
   // var, not const/let: switchTab (defined earlier) reads these, and a TDZ error there would break navigation.
-  var PIM_LICENCE_CONTACT = 'mok@mortenknudsen.net';
+  var PIM_LICENCE_CONTACT = 'info@invardia.com';
   var PIM_LICENCE_BANNER_PAGES = ['home', 'downlink', 'msptenants', 'replication', 'jobschedule'];
   var PIM_LICENCE_CACHE = null;
   async function fetchLicence(force) {
@@ -6347,7 +6353,7 @@
   }
   function licenceMailtoHtml(d) {
     const c = (d && d.contact) || PIM_LICENCE_CONTACT;
-    return '<a class="lic-mailto" href="mailto:' + escapeHtml(c) + '?subject=' + encodeURIComponent('PIM4EntraPS Pro licence') + '">' + escapeHtml(c) + '</a>';
+    return '<a class="lic-mailto" href="mailto:' + escapeHtml(c) + '?subject=' + encodeURIComponent('PIM Manager Pro licence') + '">' + escapeHtml(c) + '</a>';
   }
   // PURE (exported for the harness): the MSP licence banner for one page, '' when there is nothing to say.
   function mspLicenceBannerHtml(d, page) {
@@ -6358,7 +6364,7 @@
     const base = 'border-radius:8px;padding:8px 12px;font-size:12.5px;';
     if (st === 'refused') {
       return '<div class="msp-lic-note" data-state="refused" data-page="' + escapeHtml(page || '') + '" style="' + base + 'background:#ffebe9;border:1px solid #cf222e;color:#82071e;">' +
-        '&#x26D4; <b>A ' + role + ' (MSP) requires a PIM4EntraPS Pro licence</b> -- ' + escapeHtml(d.mspReason || 'no Pro licence is installed') +
+        '&#x26D4; <b>A ' + role + ' (MSP) requires a PIM Manager Pro licence</b> -- ' + escapeHtml(d.mspReason || 'no Pro licence is installed') +
         '. Contact ' + licenceMailtoHtml(d) + ' for a licence.' + go + '</div>';
     }
     if (st === 'grace') {
@@ -6373,7 +6379,7 @@
     host.querySelectorAll('.lic-go-settings').forEach(a => { a.onclick = (e) => { e.preventDefault(); switchTab('settings'); navScrollToAnchor('setLicenceCard'); }; });
   }
   // PURE (exported for the harness): the notice for ONE Pro feature of the catalog (d.pro[key] from /api/license),
-  // '' when it is licensed or unknown. "Pro -- <label> requires a PIM4EntraPS Pro licence -- <reason>. Contact ..."
+  // '' when it is licensed or unknown. "Pro -- <label> requires a PIM Manager Pro licence -- <reason>. Contact ..."
   function proFeatureNoticeHtml(d, key) {
     const s = d && d.pro ? d.pro[key] : null;
     if (!s || s.state === 'ok') return '';
@@ -6385,7 +6391,7 @@
         ' -- contact ' + licenceMailtoHtml(d) + ' to renew.' + go + '</div>';
     }
     return '<div class="pro-lic-note" data-state="locked" data-feature="' + escapeHtml(key) + '" style="' + base + 'background:#fff1e5;border:1px solid #bc4c00;color:#762c00;">' +
-      '&#x1F512; <b>Pro -- ' + escapeHtml(s.label || key) + ' requires a PIM4EntraPS Pro licence</b> -- ' + escapeHtml(s.reason || 'no Pro licence is installed') +
+      '&#x1F512; <b>Pro -- ' + escapeHtml(s.label || key) + ' requires a PIM Manager Pro licence</b> -- ' + escapeHtml(s.reason || 'no Pro licence is installed') +
       '. Everything free keeps working. Contact ' + licenceMailtoHtml(d) + ' for a licence.' + go + '</div>';
   }
   // ===================================================================
@@ -6415,7 +6421,7 @@
     "reports, including standing access and expiring access, and the current delegations list",
     "administrator accounts and first-time access passes, issued and tracked",
     "permission templates imported by script (Import-PimPermissionTemplate.ps1) and tenant preparation from one configuration file (Invoke-PimTenantPrep.ps1)",
-    "self-updating from the public release",
+    "updated with one command from the public release",
     "community support (GitHub issues on the public repository)"];
   var PIM_EDITION_PRO_SINGLE = ["Coverage & gaps and discovery — what is and is not delegated through PIM across every workload, and the scheduled jobs that find new roles, groups and resources",
     "the other workload connectors — Power BI, enterprise-app roles, Azure DevOps, Dataverse, Business Central and Power Platform",
@@ -6488,12 +6494,12 @@
     const esc = escapeHtml;
     const contact = (d && d.contact) || PIM_LICENCE_CONTACT;
     const buyHref = (d && /^https:\/\//i.test(String(d.buyUrl || ''))) ? String(d.buyUrl)
-      : 'mailto:' + contact + '?subject=' + encodeURIComponent('Buy PIM4EntraPS Pro') + '&body=' + encodeURIComponent('Tenant: ' + ((d && d.tenantId) || '') + '\n');
+      : 'mailto:' + contact + '?subject=' + encodeURIComponent('Buy PIM Manager Pro') + '&body=' + encodeURIComponent('Tenant: ' + ((d && d.tenantId) || '') + '\n');
     const row = (label, inFree) => '<tr><td>' + esc(label) + '</td>' +
       '<td class="' + (inFree ? 'pro-yes">&#10003;' : 'pro-no">&mdash;') + '</td><td class="pro-yes">&#10003;</td></tr>';
     let h = '<div id="proUpgradePage" style="max-width:980px;">';
-    h += '<h2 style="margin:0 0 6px;">PIM4EntraPS Pro <span class="pro-tag">PRO</span></h2>';
-    if (wantedLabel) h += '<p style="margin:0 0 8px;font-size:14px;"><b>' + esc(wantedLabel) + '</b> is part of PIM4EntraPS Pro. This installation runs the free Community edition.</p>';
+    h += '<h2 style="margin:0 0 6px;">PIM Manager Pro <span class="pro-tag">PRO</span></h2>';
+    if (wantedLabel) h += '<p style="margin:0 0 8px;font-size:14px;"><b>' + esc(wantedLabel) + '</b> is part of PIM Manager Pro. This installation runs the free Community edition.</p>';
     h += '<p style="margin:0 0 12px;color:#57606a;">Everything in the free edition keeps working without a licence. Pro adds the features below for your tenant, and the MSP edition for managing customer tenants -- MSP is available in Pro only.</p>';
     h += '<p style="margin:0 0 16px;"><a class="btn" id="proBuyBtn" href="' + esc(buyHref) + '" target="_blank" rel="noopener">Buy Pro</a> ' +
       '<a href="#" class="lic-go-settings" id="proRegisterLink" style="margin-left:10px;">I have a licence file &rsaquo; register it</a>' +

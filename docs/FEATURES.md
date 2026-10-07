@@ -178,6 +178,18 @@ deployment is a supported choice) and no credentials lying around.
   app either read-only access to the PIM database (troubleshoot) or setup access (it may repair and upgrade: database
   administration and ownership of PIM's own app registrations and groups). The same command with a remove switch
   takes everything back. Nothing is granted twice, and every change is read back. *(2.4.488)*
+- **Pro updates arrive signed, through Invardia.** ✅ 2026-10-06 — A Pro installation claims its install key with its
+  licence, then takes each new version from Invardia for its own update ring: the release is signed, checked against a
+  key built into PIM, checked for its sequence (no replay, no step back) and its archive fingerprint, built in your own
+  registry and rolled out at night. Proven on four environments, which each pulled, verified and rolled two releases.
+  *(2.4.517)*
+- **A new installation updates itself from day one, and Invardia support can install it.** ✅ 2026-10-07 — The guided
+  install and the managing / managed tenant build set up Pro updates themselves: the update job, its ring (ring 3 by
+  default, ring 2 for design partners) and the install key, which is in place within minutes. Invardia support can run
+  the whole installation with its own Support app, limited to your tenant and subscriptions, and the app never becomes
+  your PIM Manager administrator. The managing / managed tenant build also registers the licence and gives support its
+  access, and refuses a licence that cannot run it. Rehearsed end to end on fresh tenants: a single tenant, a Community
+  installation, and a managing + managed tenant pair. *(2.4.519)*
 - **The access request broker deploys completely in one run.** ✅ 2026-10-04 — Deploying the access request broker
   now also registers its API, gives the broker its send right on your notification mailbox only, and tells PIM where
   the broker is. All three are read back and reported. If a step lacks what it needs, it prints the exact command
@@ -1952,7 +1964,7 @@ which Pro capabilities are on, and the command that registers a licence file:
 `tools\setup\Set-PimLicense.ps1 -LicensePath <file> ...` (verified first, stored in the environment's database, read
 back).
 
-**For a Pro licence, mail mok@mortenknudsen.net.**
+**For a Pro licence:** try it free for 60 days at [invardia.com/trial](https://invardia.com/trial/), buy it at [invardia.com/order](https://invardia.com/order/), or mail [info@invardia.com](mailto:info@invardia.com). Invardia – a brand of 2LINKIT, founded and owned by Morten Knudsen.
 
 ---
 *Items still in progress or planned are tracked internally in REQUIREMENTS.md and are not

@@ -754,7 +754,7 @@ function Limit-PimManagerRoleByLicence {
     if (-not $script:PimDelegatedLicenceWarned) {
         $script:PimDelegatedLicenceWarned = $true
         Write-Warning ("  [rbac] Delegated administration is a Pro feature and is NOT licensed here -- every Delegated " +
-                       "identity resolves as Reader until a licence is registered ($($cap.source)). Contact mok@mortenknudsen.net.")
+                       "identity resolves as Reader until a licence is registered ($($cap.source)). Contact info@invardia.com.")
     }
     return @{ role = $cap.role; identity = $Resolved.identity; source = $cap.source }
 }
@@ -4526,7 +4526,7 @@ function Get-PimManagerLicenseBody {
         return [ordered]@{ status = 'Invalid'; statusText = $why; reason = $why; mspRequired = [bool]$role
             mspRole = $(if ($role -eq 'Slave') { 'slave' } elseif ($role) { 'master' } else { '' }); mspOk = (-not $role)
             mspState = $(if ($role) { 'refused' } else { 'none' }); mspReason = $(if ($role) { $why } else { '' })
-            contact = 'mok@mortenknudsen.net'; canWrite = $canWrite
+            contact = 'info@invardia.com'; canWrite = $canWrite
             command = 'pwsh -File tools\setup\Set-PimLicense.ps1 -LicensePath <file> -SqlServer <server>.database.windows.net -TenantId <tenant> -AdminAppId <app id> -AdminCertThumbprint <thumbprint>' }
     }
 }
@@ -5288,10 +5288,10 @@ function Test-PimManagerProFeature {
     $pl = $null
     try { $pl = Test-PimFeatureProLicence -Key $Key -TenantId "$($global:PIM_TenantId)".Trim() -SqlServer $srv } catch { $pl = $null }
     if ($pl -and $pl.ok) { return $true }
-    $msg = if ($pl) { "$($pl.message)" } else { "this action requires a PIM4EntraPS Pro licence -- the licence check failed. Contact mok@mortenknudsen.net for a licence." }
+    $msg = if ($pl) { "$($pl.message)" } else { "this action requires a PIM Manager Pro licence -- the licence check failed. Contact info@invardia.com for a licence." }
     try { Write-PimManagerAuditEvent -Action 'license.refused' -Target $Key -After @{ reason = $msg } -Result 'refused' } catch { }
     Write-JsonResponse -Response $Response -Status 403 -Body ([ordered]@{ ok = $false; pro = $true; feature = $Key; error = $msg
-        contact = 'mok@mortenknudsen.net'; command = $(if ($pl) { "$($pl.command)" } else { '' }) })
+        contact = 'info@invardia.com'; command = $(if ($pl) { "$($pl.command)" } else { '' }) })
     return $false
 }
 
