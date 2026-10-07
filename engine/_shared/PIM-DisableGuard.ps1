@@ -1,4 +1,4 @@
-﻿<#
+<#
   PIM4EntraPS -- account-disable SAFETY GUARDS (circuit breaker).
 
   WHY THIS EXISTS (incident 2026-06-15)
@@ -820,7 +820,8 @@ function Send-PimSafetyAlert {
             AlertEvent  = $Event
             AlertDetail = $Detail
             AlertTab    = $Tab
-            TenantName  = $(if ("$($global:PIM_TenantName)".Trim()) { "$($global:PIM_TenantName)" } else { 'this tenant' })
+            # MAIL-1: never "this tenant" -- the environment's own name (operator: "i cannot see which tenant it is")
+            TenantName  = $(if (Get-Command Get-PimMailEnvironmentInfo -ErrorAction SilentlyContinue) { "$((Get-PimMailEnvironmentInfo).name)" } elseif ("$($global:PIM_TenantName)".Trim()) { "$($global:PIM_TenantName)" } else { "$($global:PIM_TenantId)" })
             Instance    = 'engine'
             WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
             # The verdict and the next step, kept OUT of the detail so the reader gets them first.
@@ -917,7 +918,7 @@ function Write-PimRemoveBudgetAlert {
                $Decision.budget, $what, $Decision.scope, $(if ($kinds.Count) { '' } else { 'Nothing else in this run was affected.' })
     $action = ("Open Jobs > Engine logs &amp; errors and read the {0} held item(s) -- each one names exactly what it would have deleted. " +
                "If they are all intended, apply them in batches of at most {1}, or a SuperAdmin releases exactly this plan for one run " +
-               "on Audit &amp; Settings &gt; Guards (at most 50). If they are NOT intended, nothing needs undoing: " +
+               "on Operations &gt; Guards (at most 50). If they are NOT intended, nothing needs undoing: " +
                "no change was made.") -f $Decision.toRemove, $Decision.budget
     try {
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
@@ -935,7 +936,7 @@ function Write-PimRemoveBudgetAlert {
     # GUARD-1: state + audit 'guard.trip' + telemetry (the mail above IS this guard's mail)
     if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
         [void](Invoke-PimGuardTrip -GuardId 'engine.remove-budget' -Outcome halted -Area "$($Decision.scope)" -Job 'engine' -CallerMailed `
-            -Title ("{0} deletion(s) in '{1}' were blocked" -f $Decision.toRemove, $Decision.scope) -Detail $headline -ActionText 'Open Jobs > Engine logs & errors and read the held items; to let exactly that plan through once, release it on Audit & Settings > Guards (at most 50).' `
+            -Title ("{0} deletion(s) in '{1}' were blocked" -f $Decision.toRemove, $Decision.scope) -Detail $headline -ActionText 'Open Jobs > Engine logs & errors and read the held items; to let exactly that plan through once, release it on Operations > Guards (at most 50).' `
             -Measured @{ toRemove = $Decision.toRemove } -Thresholds @{ budget = $Decision.budget } -HeldCount ([int]$Decision.toRemove))
     }
     if ($PassThru) { return $r }
