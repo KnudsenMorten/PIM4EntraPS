@@ -163,14 +163,21 @@ function Get-PimUpdateStateField {
     #>
     param([object]$Object, [Parameter(Mandatory)][string]$Key)
     if ($null -eq $Object) { return $null }
+    $v = $null
     if ($Object -is [System.Collections.IDictionary]) {
-        if ($Object.Contains($Key)) { return $Object[$Key] }
-        foreach ($k in $Object.Keys) { if ("$k" -eq $Key) { return $Object[$k] } }
-        return $null
+        if ($Object.Contains($Key)) { $v = $Object[$Key] }
+        else { foreach ($k in $Object.Keys) { if ("$k" -eq $Key) { $v = $Object[$k]; break } } }
+    } else {
+        $p = $Object.PSObject.Properties[$Key]
+        if ($p) { $v = $p.Value }
     }
-    $p = $Object.PSObject.Properties[$Key]
-    if ($p) { return $p.Value }
-    return $null
+    # 2026-10-07 (operator, in a customer environment:"why is time shown wrong and not in local time ... it doesnt even show it is utc"):
+    # pwsh 7's ConvertFrom-Json turns the stored ISO text into a [datetime], and "$value" then prints it in invariant
+    # US format ("10/07/2026 11:16:16") -- the GUI cannot parse that, so it showed the UTC clock as if it were local.
+    # A time leaves this reader as ISO 8601 UTC, which the GUI shows in the viewer's local zone.
+    if ($v -is [datetime]) { return $v.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+    if ($v -is [datetimeoffset]) { return $v.UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+    return $v
 }
 
 function Get-PimUpdateStateVerdict {

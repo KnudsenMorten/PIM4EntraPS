@@ -41,6 +41,9 @@ param(
     [string]$OutDir = '',
     [ValidateRange(-1, 3)][int]$Ring = -1,
     [string]$OperatorApproval = '',
+    # 2026-10-07: RELEASE an already-published version to -Ring (POST /api/releases/pim-manager/<kind>/rings/<ring> {version}).
+    # Versions are immutable: publishing one twice answers 409 versionExists -- promoting it to another ring is this call.
+    [switch]$Promote,
     [switch]$Apply
 )
 $ErrorActionPreference = 'Stop'
@@ -55,6 +58,37 @@ Step "release $Version (tag $tag)"
 & git -C $repo rev-parse --verify --quiet "refs/tags/$tag" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "the tag $tag does not exist -- publish only a tagged release" }
 
+if ($Promote) {
+    if ($Ring -lt 0) { throw '-Promote needs -Ring <0-3>' }
+    if ($Ring -ge 2 -and -not "$OperatorApproval".Trim()) { throw "ring $Ring reaches customers -- pass -OperatorApproval with the operator's own words (e.g. 'release $Version to ring $Ring'); nothing was sent" }
+    $purl = "$($Endpoint.TrimEnd('/'))/api/releases/pim-manager/$Kind/rings/$Ring"
+    Write-Host ("    promote: {0} -> ring {1}{2}" -f $Version, $Ring, $(if ("$OperatorApproval".Trim()) { " -- operator: '$OperatorApproval'" } else { '' }))
+    if (-not $Apply) { Write-Host "`nPLAN ONLY -- nothing was sent. With -Apply: POST $purl {version:$Version}." -ForegroundColor Yellow; return [pscustomobject]@{ promoted = $false; version = $Version; ring = $Ring; url = $purl } }
+    if (-not $ClientId -or -not $CertThumbprint) {
+        if (-not $KeyVault -or -not $KeyVaultSubscription) { throw "pass -ClientId and -CertThumbprint, or -KeyVault and -KeyVaultSubscription to read them" }
+        $kvArgs = @('keyvault', 'secret', 'show', '--vault-name', $KeyVault, '--subscription', $KeyVaultSubscription, '--query', 'value', '-o', 'tsv')
+        if (-not $ClientId) { $ClientId = (& az @kvArgs --name 'invardia-publisher-clientid-pim-manager' 2>$null | Select-Object -Last 1).Trim() }
+        if (-not $CertThumbprint) { $CertThumbprint = (& az @kvArgs --name 'invardia-publisher-thumbprint-pim-manager' 2>$null | Select-Object -Last 1).Trim() }
+    }
+    if ($ClientId -notmatch '^[0-9a-fA-F-]{36}$' -or $CertThumbprint -notmatch '^[0-9a-fA-F]{40}$') { throw 'publisher client id / certificate thumbprint not found (Key Vault or parameters)' }
+    . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
+    $token = Get-PimRestToken -Resource $Audience -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint -Force
+    if (-not "$token".Trim()) { throw 'no token for the Invardia Back Office audience' }
+    Step "POST $purl"
+    $status = 0; $content = ''
+    try {
+        $r = Invoke-WebRequest -Method POST -Uri $purl -Headers @{ Authorization = "Bearer $token" } -Body (@{ version = $Version } | ConvertTo-Json -Compress) -ContentType 'application/json' -TimeoutSec 120 -UseBasicParsing
+        $status = [int]$r.StatusCode; $content = "$($r.Content)"
+    } catch {
+        $resp = $_.Exception.Response
+        if (-not $resp) { throw "the promote request failed: $($_.Exception.Message)" }
+        $status = [int]$resp.StatusCode; $content = "$($_.ErrorDetails.Message)"; if (-not $content) { $content = "$($_.Exception.Message)" }
+    }
+    $ok = ($status -in 200, 201, 202)
+    Write-Host ("    HTTP {0} {1}" -f $status, $content.Substring(0, [Math]::Min(400, $content.Length))) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
+    if (-not $ok) { throw "Invardia refused the promotion (HTTP $status)" }
+    return [pscustomobject]@{ promoted = $true; version = $Version; ring = $Ring; status = $status; url = $purl }
+}
 Step 'build the release zip from the tag'
 if (-not $OutDir) { $OutDir = Join-Path ([IO.Path]::GetTempPath()) 'pim-invardia-release' }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
