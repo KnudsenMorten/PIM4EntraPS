@@ -14977,6 +14977,10 @@
     // never red "failed" (nothing broke).
     else if (j.status === 'held' && j.approvedPending) { bg = '#dafbe1'; fg = '#1a7f37'; label = 'approved -- applies next run'; }   // 2026-09-21: an approved hold is not a blocker
     else if (j.status === 'held') { bg = '#fff1d6'; fg = '#9a6700'; label = 'needs approval'; }
+    // §95.2o: an update restart / a platform stop cut the last run short -- not a failure, the next run decides. Twice in a
+    // row it counts as failing (unackedFailureCount) and is shown red.
+    else if (j.status === 'interrupted' && !((Number(j.unackedFailureCount) || 0) > 0)) { bg = '#eaeef2'; fg = '#57606a'; label = 'interrupted -- runs again'; }
+    else if (j.status === 'interrupted') { bg = '#ffebe9'; fg = '#cf222e'; label = 'interrupted again'; }
     else if (j.status === 'failed') { bg = '#ffebe9'; fg = '#cf222e'; label = 'failed'; }
     // 2026-10-07 (operator: "what is no-op ... people dont understand ... why not just ok ... state is green"): a run that
     // completed with nothing to do IS ok -- green "ok", the same as a run that changed something. The result text says which.
@@ -15738,6 +15742,43 @@
     });
   }
 
+  // §95.2o job lanes: the Jobs page sections, what needs attention first, and what a queued / due run waits for.
+  const JOB_GROUPS = ['Engine', 'Maintenance', 'Reports', 'Updates'];
+  const JOB_GROUP_HELP = {
+    Engine: 'applies your configuration to the tenant',
+    Maintenance: 'checks, snapshots, discovery and housekeeping',
+    Reports: 'mails and reports',
+    Updates: 'licence, telemetry and the update service'
+  };
+  function jobAttnRank(j) {
+    if (!j) return 9;
+    if ((Number(j.unackedFailureCount) || 0) > 0) return 0;
+    if (j.needsApproval) return 1;
+    if (j.overdue) return 2;
+    if (j.inProgress) return 3;
+    if (j.waitingFor || j.waitingForSlot || j.queued) return 4;
+    return 5;
+  }
+  function jobLaneBadge(j) {
+    if (!j || j.inProgress) return '';
+    const since = j.waitingSinceUtc || j.queuedSinceUtc || '';
+    const at = since ? (' (since ' + esc0(fmtTime(since)) + ')') : '';
+    let label = '', tip = '';
+    if (j.waitingFor) {
+      label = (j.queued ? 'queued -- starts when ' + esc0(j.waitingFor) + ' has finished' : 'waiting for ' + esc0(j.waitingFor)) + at;
+      tip = 'Another run (' + j.waitingFor + ') is working on the same area (' + (j.waitingArea || '') + '). Two runs never write the same area at once; this one starts as soon as that run has finished. Not overdue, not failed.';
+    } else if (j.waitingForSlot) {
+      label = 'waiting for a free slot' + at;
+      tip = 'The most runs that may go side by side are running. This one starts as soon as one of them finishes.';
+    } else if (j.queued) {
+      label = 'queued -- starts within a minute' + at;
+      tip = 'Run now was pressed; the scheduler starts it on its next pass.';
+    } else {
+      return '';
+    }
+    return ' <span class="jobLaneBadge" title="' + esc0(tip) + '" style="display:inline-block;margin-top:3px;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#ddf4ff;color:#0969da;">' + label + '</span>';
+  }
+
   async function renderJobs() {
     const body = document.getElementById('jobsBody');
     if (!isServer) { body.innerHTML = '<div style="color:#57606a">Static mode -- the Jobs view needs the server.</div>'; return; }
@@ -15750,6 +15791,8 @@
     const overdue = data.overdueCount || 0;     // [M6] jobs that missed their fire window
     const failing = data.failingCount || 0;     // jobs whose LATEST run failed (self-heals; no Ack -- 2026-09-21)
     const held = data.heldCount || 0;           // 71.13 jobs with a standing policy HOLD (needs approval)
+    const waitingN = data.waitingCount || 0;    // §95.2o runs waiting for an area another run is working on
+    const queuedN = data.queuedCount || 0;      // §95.2o Run now presses queued for the scheduler
     const canRun = !!data.canRun;            // Admin+ -> per-row controls are live
     const histCount = (data.historyCount != null) ? data.historyCount : null;
     window._jobsCanRun = canRun;
@@ -15767,7 +15810,10 @@
     h.push('<div id="jobsUpdateRing"></div>');
     h.push('<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">' +
       '<span style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">Scheduled &amp; recent jobs</span>' +
-      '<span style="color:#57606a;font-size:11.5px;">' + jobs.length + ' jobs' + (running ? (' &middot; <b style="color:#1a7f37;">' + running + ' running</b>') : '') + '</span>' +
+      '<span style="color:#57606a;font-size:11.5px;">' + jobs.length + ' jobs' + (running ? (' &middot; <b style="color:#1a7f37;">' + running + ' running</b>') : '') +
+        (queuedN ? (' &middot; <span class="jobsQueuedCount" style="color:#0969da;">' + queuedN + ' queued</span>') : '') +
+        (waitingN ? (' &middot; <span class="jobsWaitingCount" style="color:#0969da;" title="Runs wait while another run works on the same area; they start as soon as it has finished.">' + waitingN + ' waiting for another run</span>') : '') +
+        (data.laneCap ? (' &middot; <span style="color:#8c959f;" title="Jobs on different areas run side by side; two on the same area never do.">up to ' + data.laneCap + ' side by side</span>') : '') + '</span>' +
       '<span style="flex:1 1 auto;"></span>' +
       // [H5] export the run/failure-history snapshot as evidence (jobs healthy?
       // what ran / failed / when). Only offered when there is at least one job.
@@ -15789,9 +15835,9 @@
         '</div>');
     }
     if (canRun) {
-      h.push('<div style="color:#57606a;font-size:11.5px;margin-bottom:10px;">In-progress jobs are listed first. This page answers <b>did it run, what happened, run it now</b> &mdash; use <b>Run now</b> to execute a job immediately and the run appears below (running &rarr; completed) with its log. <b>When</b> a job runs, and whether it runs at all, is set in one place: <a href="#" class="jobsGoSchedule">Job schedule</a>.</div>');
+      h.push('<div style="color:#57606a;font-size:11.5px;margin-bottom:10px;">What needs attention is listed first in each group; <b>&#9656;</b> shows a job\'s cadence, what it works on and its history. This page answers <b>did it run, what happened, run it now</b> &mdash; use <b>Run now</b> to execute a job immediately and the run appears below (running &rarr; completed) with its log. Jobs on different areas run side by side; a Run now on an area another run is working on is queued and starts when that run has finished. <b>When</b> a job runs, and whether it runs at all, is set in one place: <a href="#" class="jobsGoSchedule">Job schedule</a>.</div>');
     } else {
-      h.push('<div style="color:#57606a;font-size:11.5px;margin-bottom:10px;">In-progress jobs are listed first. Cadence, last result and next run come from the live scheduler registry &amp; its run history. Editing schedules and running jobs requires the Admin role.</div>');
+      h.push('<div style="color:#57606a;font-size:11.5px;margin-bottom:10px;">What needs attention is listed first in each group; <b>&#9656;</b> shows details. Cadence, last result and next run come from the live scheduler registry &amp; its run history. Editing schedules and running jobs requires the Admin role.</div>');
     }
     // Explicit "no runs yet" banner so an empty history never reads as a dead view.
     if (histCount === 0) {
@@ -15804,13 +15850,14 @@
     if (jobs.length === 0) {
       h.push('<div class="empty" style="padding:24px;color:#57606a;">No jobs found. The scheduler has not registered a schedule yet (or its state store is empty).</div>');
     } else {
-      h.push('<table style="width:100%;border-collapse:collapse;font-size:12.5px;">');
-      h.push('<thead><tr style="text-align:left;border-bottom:2px solid #d0d7de;color:#57606a;">' +
-        '<th style="padding:6px 8px;">Job</th><th style="padding:6px 8px;">Cadence</th><th style="padding:6px 8px;">Enabled</th>' +
-        '<th style="padding:6px 8px;">Status</th><th style="padding:6px 8px;">Last run</th><th style="padding:6px 8px;width:45%;">Result</th>' +
-        '<th style="padding:6px 8px;">Next run</th><th style="padding:6px 8px;text-align:right;">Actions</th></tr></thead><tbody>');
+      // §95.2o (operator 2026-10-07: "if the gui layout for the job queue can be improved"): one section per group
+      // (Engine / Maintenance / Reports / Updates), what needs attention first, ONE line per job; the cadence, what the
+      // job works on and its history badges fold into a details panel under the line (the ▸ button).
       let sawPullPlaceholder = false;
-      jobs.forEach(j => {
+      const groupRows = {};
+      JOB_GROUPS.forEach(g => { groupRows[g] = []; });
+      jobs.slice().sort((a, b) => (jobAttnRank(a) - jobAttnRank(b)) || String(a.name || '').localeCompare(String(b.name || ''))).forEach(j => {
+        const rowH = [];
         const rowBg = (j.inProgress ? 'background:#f0fff4;' : '');
         const scope = j.scope ? (' <span style="color:#8c959f;">[' + esc0(j.scope) + ']</span>') : '';
         // 🔴 ONE PAGE OWNS THE SCHEDULE (operator, 2026-09-22: "this is very confusing - why do we
@@ -15899,19 +15946,54 @@
           ? '<div style="color:#8c959f;font-size:11px;margin-top:2px;">Not in use here &mdash; switched off and never run. Turn it on if this deployment uses it.</div>'
           : '';
         const pullNote = unusedNote;
-        h.push('<tr style="border-bottom:1px solid #eaeef2;' + (neverUsed ? 'opacity:.55;' : '') + rowBg + (j.overdue ? 'box-shadow:inset 3px 0 0 #d4a72c;' : (j.unackedFailureCount > 0 ? 'box-shadow:inset 3px 0 0 #cf222e;' : (j.needsApproval ? 'box-shadow:inset 3px 0 0 #d4a72c;' : ''))) + '">' +
-          '<td style="padding:6px 8px;"><b>' + esc0(j.name) + '</b>' + scope + '<div style="color:#8c959f;font-size:11px;">' + esc0(j.type) + '</div>' + pullNote + '</td>' +
-          '<td style="padding:6px 8px;">' + cadenceCell + '</td>' +
-          '<td style="padding:6px 8px;">' + enabledCell + '</td>' +
-          '<td style="padding:6px 8px;">' + jobStatusPill(j) + hybridWorkerBadge(j) + '</td>' +
-          '<td style="padding:6px 8px;" title="' + esc0(fmtTime(j.lastRunUtc, { seconds: true })) + '">' + lastCell + '</td>' +
+        const rowKey = 'jd-' + String(j.name || '').replace(/[^A-Za-z0-9_-]/g, '_');
+        rowH.push('<tr class="jobRow" data-job="' + esc0(j.name) + '" style="border-bottom:1px solid #eaeef2;' + (neverUsed ? 'opacity:.55;' : '') + rowBg + (j.overdue ? 'box-shadow:inset 3px 0 0 #d4a72c;' : (j.unackedFailureCount > 0 ? 'box-shadow:inset 3px 0 0 #cf222e;' : (j.needsApproval ? 'box-shadow:inset 3px 0 0 #d4a72c;' : ''))) + '">' +
+          '<td style="padding:6px 8px;white-space:nowrap;"><button class="ghost jobExpand" data-target="' + esc0(rowKey) + '" aria-expanded="false" title="Show the cadence, what this job works on and its recent history" style="font-size:11px;padding:0 4px;">&#9656;</button> <b>' + esc0(j.name) + '</b>' + scope + pullNote + '</td>' +
+          '<td style="padding:6px 8px;">' + jobStatusPill(j) + jobLaneBadge(j) + hybridWorkerBadge(j) + '</td>' +
+          '<td style="padding:6px 8px;white-space:nowrap;" title="' + esc0(fmtTime(j.lastRunUtc, { seconds: true })) + '">' + lastCell + '</td>' +
           '<td style="padding:6px 8px;max-width:280px;">' + result + '</td>' +
-          '<td style="padding:6px 8px;" title="' + esc0(fmtTime(j.nextRunUtc)) + (j.nextRunSynthesized ? ' (computed from cadence)' : '') +
+          '<td style="padding:6px 8px;white-space:nowrap;" title="' + esc0(fmtTime(j.nextRunUtc)) + (j.nextRunSynthesized ? ' (computed from cadence)' : '') +
             (j.lastFinishedUtc && j.intervalMinutes ? esc0(' = last run finished ' + fmtTime(j.lastFinishedUtc) + ' + ' + j.intervalMinutes + ' min') : '') + '">' + (j.overdue ? '<span style="color:#9a6700;font-weight:600;">' : '') + nextCell + (j.overdue ? '</span>' : '') + '</td>' +
-          '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' + (j.type === 'hybrid-ad-sync' ? '<button class="btn-sec jobsHybridLive" title="Watch the continuous PIM-for-AD sync live (TTL checks, adds, removes)">Live view</button> ' : '') + runBtn + ' ' + histBtn + ' ' + ackBtn + ' ' + logBtn + '</td>' +
+          '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' + (j.type === 'hybrid-ad-sync' ? '<button class="btn-sec jobsHybridLive" title="Watch the continuous PIM-for-AD sync live (TTL checks, adds, removes)">Live view</button> ' : '') + runBtn + ' ' + logBtn + '</td>' +
           '</tr>');
+        // the details panel: everything that used to widen the line
+        const areasTxt = asList(j.areas).length ? asList(j.areas).join(', ') : 'its own state only';
+        rowH.push('<tr class="jobDetailRow" id="' + esc0(rowKey) + '" style="display:none;background:#f6f8fa;"><td colspan="6" style="padding:8px 12px 10px 34px;font-size:12px;">' +
+          '<div class="jobDetail" style="display:flex;flex-wrap:wrap;gap:6px 22px;">' +
+            '<div><span style="color:#57606a;">Cadence</span> ' + cadenceCell + '</div>' +
+            '<div><span style="color:#57606a;">Enabled</span> ' + enabledCell + '</div>' +
+            '<div><span style="color:#57606a;">Type</span> <code>' + esc0(j.type) + '</code></div>' +
+            '<div title="Two runs on the same area never run side by side; runs on different areas do."><span style="color:#57606a;">Works on</span> ' + esc0(areasTxt) + '</div>' +
+            (j.lastFinishedUtc ? '<div><span style="color:#57606a;">Last finished</span> ' + esc0(fmtTime(j.lastFinishedUtc, { seconds: true })) + dur + '</div>' : '') +
+            (j.healedBy ? '<div class="jobHealedBy" style="color:#1a7f37;">healed by ' + esc0(j.healedBy) + ' (' + esc0(jobTimeAgo(j.healedAtUtc)) + ') -- a later clean run of the same scopes</div>' : '') +
+            (j.interruptedCount > 0 ? '<div class="jobInterrupted" style="color:#57606a;" title="A run was interrupted by an update restart or a platform stop. Not a failure: the next run decides the state. Two in a row show as failing.">' + esc0(String(j.interruptedCount)) + ' interrupted run(s) recently</div>' : '') +
+          '</div>' +
+          '<div style="margin-top:6px;">' + histBtn + ' ' + ackBtn + '</div>' +
+          (j.lastResult ? '<div style="margin-top:6px;color:#57606a;white-space:pre-wrap;word-break:break-word;">' + esc0(j.lastResult) + '</div>' : '') +
+          '</td></tr>');
+        const g = JOB_GROUPS.indexOf(j.group) >= 0 ? j.group : 'Maintenance';
+        groupRows[g].push(rowH.join(''));
       });
-      h.push('</tbody></table>');
+      JOB_GROUPS.forEach(g => {
+        const rows = groupRows[g];
+        if (!rows.length) return;
+        const inGroup = jobs.filter(x => (JOB_GROUPS.indexOf(x.group) >= 0 ? x.group : 'Maintenance') === g && String(x.type || '') !== 'msp-pull');
+        const attn = inGroup.filter(x => jobAttnRank(x) < 3).length;
+        const runningN = inGroup.filter(x => x.inProgress).length;
+        h.push('<div class="jobsGroup" data-group="' + esc0(g) + '" style="margin:14px 0 4px;">' +
+          '<div style="display:flex;align-items:baseline;gap:8px;border-bottom:1px solid #d0d7de;padding-bottom:3px;">' +
+          '<span style="font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;font-weight:600;">' + esc0(g) + '</span>' +
+          '<span style="color:#57606a;font-size:11.5px;">' + inGroup.length + ' job' + (inGroup.length === 1 ? '' : 's') +
+            (runningN ? ' &middot; <b style="color:#1a7f37;">' + runningN + ' running</b>' : '') +
+            (attn ? ' &middot; <b style="color:#cf222e;">' + attn + ' need' + (attn === 1 ? 's' : '') + ' attention</b>' : '') + '</span>' +
+          '<span style="flex:1 1 auto;"></span><span style="color:#8c959f;font-size:11px;">' + esc0(JOB_GROUP_HELP[g] || '') + '</span></div>');
+        h.push('<table class="jobsTable" style="width:100%;border-collapse:collapse;font-size:12.5px;">');
+        h.push('<thead><tr style="text-align:left;border-bottom:2px solid #d0d7de;color:#57606a;">' +
+          '<th style="padding:6px 8px;">Job</th><th style="padding:6px 8px;">Status</th><th style="padding:6px 8px;">Last run</th><th style="padding:6px 8px;width:45%;">Result</th>' +
+          '<th style="padding:6px 8px;">Next run</th><th style="padding:6px 8px;text-align:right;">Actions</th></tr></thead><tbody>');
+        h.push(rows.join(''));
+        h.push('</tbody></table></div>');
+      });
       if (sawPullPlaceholder) {
         h.push('<div style="margin-top:8px;color:#57606a;font-size:11.5px;">' +
           'The <b>definitions pull</b> is not in this list: on a managed tenant it is its own job (the Data Definition Updater), ' +
@@ -15951,6 +16033,10 @@
     document.querySelectorAll('.jobHistBtn').forEach(b => {
       b.onclick = () => openJobHistory(b.dataset.name);
     });
+    // §95.2o: one line per job; ▸ unfolds its details panel, ▾ folds it again
+    document.querySelectorAll('.jobExpand').forEach(b => {
+      b.onclick = () => toggleJobDetail(b);
+    });
 
     // [H5] export the jobs run/failure-history snapshot (evidence: what ran,
     // its result, when, and how far behind). Reuses the shared injection-safe
@@ -15963,7 +16049,7 @@
       rows: jobs.map(j => [
         j.name || '', j.type || '', j.scope || '', j.cadence || '',
         (j.enabled ? 'yes' : 'no'),
-        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.status === 'held' ? (j.approvedPending ? 'approved -- applies next run' : 'needs approval') : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown'))))),
+        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.status === 'held' ? (j.approvedPending ? 'approved -- applies next run' : 'needs approval') : (j.status === 'interrupted' ? 'interrupted' : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown')))))),
         (j.neverRun ? '' : (j.lastRunUtc || '')),
         (j.lastResult || ''),
         (j.lastOk === true ? 'true' : (j.lastOk === false ? 'false' : '')),
@@ -16010,6 +16096,14 @@
     });
   }
 
+  function toggleJobDetail(btn) {
+    const row = document.getElementById(btn.dataset.target);
+    if (!row) return;
+    const open = row.style.display !== 'none';
+    row.style.display = open ? 'none' : '';
+    btn.innerHTML = open ? '&#9656;' : '&#9662;';
+    btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+  }
   function jobsActionMsg(text, isErr) {
     const el = document.getElementById('jobsActionMsg');
     if (!el) return;
@@ -16033,6 +16127,12 @@
       const r = await api('POST', '/api/jobs/run', { name: name });
       // §70.19: an engine job is QUEUED for the scheduler (the Manager never runs the engine) -- say so,
       // instead of "Ran ... completed" for a run that has not happened yet.
+      if (r.status === 'queued' && r.waitingFor) {
+        // §95.2o: another run is working on the same area -- the press is queued, never lost, and says what it waits for.
+        await renderJobs();
+        jobsActionMsg('Queued ' + name + ' -- starts when ' + r.waitingFor + ' has finished (both work on ' + (r.waitingArea || 'the same area') + '). It stays in the list as "queued" until then.');
+        return;
+      }
       if (r.status === 'queued') {
         // §70.21: the Manager now also STARTS the tick job (r.started), so the run begins in about a minute.
         jobsActionMsg((r.started ? 'Started the engine for ' : 'Queued ') + name + ' — ' + (r.detail || 'it runs on the next tick') + ' Watch Jobs / Engine runs for trigger:' + name + '.');
@@ -16084,6 +16184,8 @@
       const ok = !!r.ok;
       const badge = (r.status === 'held')
         ? '<span style="color:#9a6700;font-weight:600;">HELD &mdash; needs approval</span>'
+        : (r.status === 'interrupted')
+        ? ('<span class="histInterrupted" style="color:#57606a;font-weight:600;" title="An update restart or a platform stop cut this run short -- not a failure; the next run decides.">INTERRUPTED</span>' + (histOpen.has(r.runId) ? ' <span style="color:#cf222e;">(again -- counts as failing)</span>' : ''))
         : ok
         ? '<span style="color:#1a7f37;font-weight:600;">PASS</span>'
         : ('<span style="color:#cf222e;font-weight:600;">FAIL</span>' + (histOpen.has(r.runId) ? '' : ' <span style="color:#8c959f;" title="a later run succeeded -- nothing to do">(healed)</span>'));
@@ -16122,11 +16224,17 @@
     const open = new Set();
     Object.keys(byJob).forEach(k => {
       const list = byJob[k].slice().sort((a, b) => String(b.startedUtc || '').localeCompare(String(a.startedUtc || '')));
+      // §95.2o: an interrupted run (update restart, platform stop) is stepped over -- unless two come in a row at the head
+      const intr = [];
+      let failedAny = false;
       for (const r of list) {
         if (r.status === 'unimplemented' || r.status === 'skipped' || /^no-handler/.test(String(r.detail || ''))) continue;
+        if (r.status === 'interrupted') { if (!failedAny && r.runId) intr.push(r.runId); continue; }
         if (r.ok || r.status === 'held') break;
+        failedAny = true;
         if (r.runId) open.add(r.runId);
       }
+      if (intr.length >= 2) intr.forEach(id => open.add(id));
     });
     return open;
   }

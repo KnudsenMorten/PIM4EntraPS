@@ -2009,6 +2009,14 @@ function Get-PimSchedulerStoreVerdict {
 # memory copy remains for ONE process (offline tests, a single tick) and is never presented as
 # persistence: a save that does not reach SQL warns.
 function Get-PimSchedulerState {
+    # §95.2o: the state is merged by compare-and-set (Save-PimSchedulerJobStamps) -- read the same raw row when it has one.
+    $cas = Get-PimCasStore
+    if ($cas) {
+        try {
+            $raw = Get-PimSqlSettingRaw -ConnectionString $cas.Cs -Name (Get-PimSchedulerSettingName -Base 'SchedulerState')
+            if ("$raw".Trim()) { $v = ConvertFrom-PimStoredJsonValue -Raw $raw; if ($v) { return $v } }
+        } catch { Write-Warning "  [scheduler] SchedulerState raw read failed -- trying the settings reader: $($_.Exception.Message)" }
+    }
     if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
         # B1-class hardening: Save-PimSchedulerState writes a STRING (already JSON), which
         # Set-PimSqlSetting then JSON-encodes again -- so the read comes back as text today and
@@ -2026,6 +2034,12 @@ function Get-PimSchedulerState {
 function Save-PimSchedulerState {
     param([Parameter(Mandatory)][object]$State)
     $script:PimSchedState = $State
+    # §95.2o: written the same way it is read and merged (compare-and-set on the raw row) wherever that store exists.
+    if (Get-PimCasStore) {
+        $r = Update-PimCasSetting -Name (Get-PimSchedulerSettingName -Base 'SchedulerState') -Depth 8 -Mutate { param($cur) $State }
+        if (-not $r.ok) { Write-Warning "[scheduler] SchedulerState did NOT persist. Every job will look due on the next tick." }
+        return
+    }
     $json = $State | ConvertTo-Json -Depth 8
     # 🔴 A PERSIST THAT FAILS SILENTLY IS INVISIBLE; ITS CONSEQUENCE IS NOT.
     # Every tick is a NEW process, so state that does not reach the store does not exist: the next
@@ -2058,10 +2072,18 @@ function Get-PimJobRunHistory {
     # Returns an array of run records (newest first). Optional -Name filters to one job.
     param([string]$Name)
     $all = $null
+    # §95.2o: where the ring is written by compare-and-set (Update-PimJobRunHistory), it is read from the same raw row.
+    $cas = Get-PimCasStore
+    if ($cas) {
+        try {
+            $raw = Get-PimSqlSettingRaw -ConnectionString $cas.Cs -Name 'JobRunHistory'
+            if ("$raw".Trim()) { $tmp = ConvertFrom-PimStoredJsonValue -Raw $raw; $all = @($tmp) }
+        } catch { Write-Warning "  [scheduler] JobRunHistory raw read failed -- trying the settings reader: $($_.Exception.Message)" }
+    }
     # NOTE (PS 5.1): assign ConvertFrom-Json to a temp FIRST, then @($tmp). Wrapping the
     # pipeline directly -- @(... | ConvertFrom-Json) -- collapses a JSON array into a
     # single Object[] element (count 1) on Windows PowerShell. The temp forces enumeration.
-    if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) {
+    if ($null -eq $all -and (Get-Command Get-PimSetting -ErrorAction SilentlyContinue)) {
         # §70.8: two stored shapes -- the legacy double-encoded JSON TEXT (a string that parses to the array), and
         # the compact single-encoded array (comes back already parsed). Accept both; a parse failure is warned,
         # never silently turned into "no history".
@@ -2078,9 +2100,43 @@ function Get-PimJobRunHistory {
     if ("$Name".Trim()) { $all = @($all | Where-Object { "$($_.name)" -eq "$Name" }) }
     return @($all | Sort-Object { "$($_.startedUtc)" } -Descending)
 }
+function Update-PimJobRunHistory {
+    <#
+      §95.2o: change the run-history ring by ONE compare-and-set (runs go side by side now; a plain read-modify-write lost
+      a finished record and brought its 'running' record back). -Mutate gets the current runs and RETURNS the new list
+      (or $null = no change). Without a compare-and-set store (one process): the old read-modify-write.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Mutate)
+    # NOT named $Mutate inside the wrapper below: Update-PimCasSetting has its own $Mutate, and dynamic scope would find it.
+    $historyMutate = $Mutate
+    $r = Update-PimCasSetting -Name 'JobRunHistory' -Depth 8 -Fallback {
+        $f = $null
+        if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { try { $v = Get-PimSetting -Name 'JobRunHistory'; if ($v -is [string]) { $t = $v | ConvertFrom-Json; $f = @($t) } elseif ($v) { $f = @($v) } } catch { } }
+        if ($null -eq $f) { $f = @($script:PimRunHistory) }
+        ,@(@($f) | Where-Object { $_ })
+    } -Mutate {
+        param($cur)
+        $n = & $historyMutate @(@($cur) | Where-Object { $_ })
+        if ($null -eq $n) { return $null }
+        ,@(Select-PimJobRunHistoryKept -Runs @($n))
+    }
+    if ($r.noStore) {
+        $n = & $Mutate @(Get-PimJobRunHistory)
+        if ($null -ne $n) { Save-PimJobRunHistory -Runs @(Select-PimJobRunHistoryKept -Runs @($n)) }
+        return
+    }
+    if ($r.ok -and $null -ne $r.value) { $script:PimRunHistory = @($r.value) }
+    if (-not $r.ok) { Write-Warning "[scheduler] JobRunHistory did NOT persist. Recent runs will not appear in the Jobs tab." }
+}
 function Save-PimJobRunHistory {
     param([object[]]$Runs = @())
     $script:PimRunHistory = @($Runs)
+    # §95.2o: a store that is written by compare-and-set is overwritten the same way, so the two never disagree.
+    if (Get-PimCasStore) {
+        $r = Update-PimCasSetting -Name 'JobRunHistory' -Depth 8 -Mutate { param($cur) ,@(@($Runs) | Where-Object { $_ }) }
+        if (-not $r.ok) { Write-Warning "[scheduler] JobRunHistory did NOT persist. Recent runs will not appear in the Jobs tab." }
+        return
+    }
     # Same cascade, same silence: run history that does not persist means the Jobs tab shows no
     # recent runs and an operator cannot tell a job that failed from one that never ran.
     # §70.8: the ARRAY is handed to the store, which serialises it ONCE (compact). This used to pass
@@ -2095,11 +2151,13 @@ function Save-PimJobRunHistory {
 function Add-PimJobRunRecord {
     # Append one finished run to the ring, trimming to $script:PimRunHistoryMax per job.
     param([Parameter(Mandatory)][object]$Run)
-    $all = @(Get-PimJobRunHistory)
     # drop any prior 'running' placeholder for the same runId (it's now finished)
-    if ("$($Run.runId)".Trim()) { $all = @($all | Where-Object { "$($_.runId)" -ne "$($Run.runId)" }) }
-    $all = @(@($Run) + $all)
-    Save-PimJobRunHistory -Runs @(Select-PimJobRunHistoryKept -Runs $all)
+    Update-PimJobRunHistory -Mutate {
+        param($all)
+        $all = @($all)
+        if ("$($Run.runId)".Trim()) { $all = @($all | Where-Object { "$($_.runId)" -ne "$($Run.runId)" }) }
+        ,@(@($Run) + $all)
+    }
 }
 
 # BUG-264 (remainder): the ring was PER NAME, and triggered runs carry one-off names ('trigger:engine-delta:<scope list>',
@@ -2182,7 +2240,9 @@ function Get-PimRunFailureHistory {
             type         = "$($r.type)"
             scope        = "$($r.scope)"
             ok           = [bool]$r.ok
-            failed       = (-not [bool]$r.ok)
+            # §95.2o: an INTERRUPTED run (an update restart, a platform stop) is not a failed run -- listed, never counted.
+            failed       = (-not [bool]$r.ok -and "$($r.status)" -ne 'interrupted')
+            interrupted  = ("$($r.status)" -eq 'interrupted')
             status       = "$($r.status)"
             detail       = "$($r.detail)"
             startedUtc   = "$($r.startedUtc)"
@@ -2370,6 +2430,9 @@ function Get-PimJobsStatus {
     $runsByName = @{}
     foreach ($hr in $history) { $hn = "$($hr.name)"; if (-not $runsByName.ContainsKey($hn)) { $runsByName[$hn] = New-Object System.Collections.ArrayList }; [void]$runsByName[$hn].Add($hr) }
     $acks = @(Get-PimRunAcknowledgements)        # [M6] muted runIds (failure/overdue signals cleared)
+    # §95.2o: the lanes, read ONCE for the view -- which areas are held by which run, and which Run now presses are queued.
+    $lockMap = $null; try { $lockMap = (Get-PimSchedulerLocksRaw).Map } catch { $lockMap = $null }
+    $pendTrig = @(); try { $pendTrig = @(Get-PimPendingTriggers) } catch { $pendTrig = @() }
     $jobScopeRead = $false; $jobScopeOnce = $null
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($j in @($Jobs)) {
@@ -2487,7 +2550,9 @@ function Get-PimJobsStatus {
         $lastAcked = ($lastRunId -and ($acks -contains $lastRunId))
         $finishedRuns = @($runs | Where-Object { "$($_.status)" -ne 'running' -and "$($_.finishedUtc)".Trim() })
         $recentWindow = @($finishedRuns | Sort-Object { "$($_.startedUtc)" } -Descending | Select-Object -First 10)
-        $allNotOk     = @($recentWindow | Where-Object { -not [bool]$_.ok })
+        # §95.2o: an interrupted run (update restart, platform stop) is not a failed run; two in a row at the head are (below).
+        $allNotOk     = @($recentWindow | Where-Object { -not [bool]$_.ok -and "$($_.status)" -ne 'interrupted' })
+        $interruptedRuns = @($recentWindow | Where-Object { "$($_.status)" -eq 'interrupted' })
         # 🔴 BUG-113 -- "NO HANDLER HERE" IS NOT A FAILED RUN, IT IS A MISSING CAPABILITY.
         # Measured in prod 2026-08-30: every single red count in the Jobs view -- tenant-cache 9,
         # reminders 9, daily-summary 9, tier-report 9, discovery-entra/azure/powerbi 5 each,
@@ -2516,12 +2581,21 @@ function Get-PimJobsStatus {
         # A placeholder ('unimplemented') / skipped run and a no-handler record say nothing about the job's health, so
         # they are stepped over, not treated as a recovery.
         $headFails = New-Object System.Collections.Generic.List[object]
+        # §95.2o: an INTERRUPTED run says nothing about the job (stepped over) -- unless it happens twice in a row at the head,
+        # then the job is failing ("interrupted N times in a row" is a real problem: too long, out of memory). A failure that a
+        # LATER clean run of OTHER jobs on the same scopes has fixed (it started after the failed run ended) is healed too.
+        $intrHead = New-Object System.Collections.Generic.List[object]
+        $jobScopeKeys = @(); if ("$($j.type)" -in @('engine-delta', 'engine-full')) { try { $jobScopeKeys = @(Get-PimEngineJobScopeKeys -Job $j) } catch { $jobScopeKeys = @() } }
+        $healedBy = $null
         foreach ($r in $recentWindow) {
             $st = "$($r.status)"
             if ($st -in @('unimplemented', 'skipped') -or "$($r.detail)" -match '^no-handler') { continue }
+            if ($st -eq 'interrupted') { if (-not $headFails.Count) { [void]$intrHead.Add($r) }; continue }
             if ([bool]$r.ok -or $st -eq 'held') { break }
+            if (-not $headFails.Count) { $healedBy = Get-PimCoveringCleanRun -FailedRun $r -ScopeKeys $jobScopeKeys -History $history; if ($healedBy) { break } }
             [void]$headFails.Add($r)
         }
+        if ($intrHead.Count -ge 2) { foreach ($x in @($intrHead.ToArray())) { $headFails.Insert(0, $x) } }
         $headIds = @($headFails.ToArray() | ForEach-Object { "$($_.runId)" })
         $recoveredFails = @($recentFails | Where-Object { "$($_.runId)" -notin $headIds })
         $unackedFails = [object[]]$headFails.ToArray()
@@ -2562,6 +2636,23 @@ function Get-PimJobsStatus {
         }
         if ($approvedPending) { $standingHeld = @() }
         if ($outOfScope) { $recentFails = @(); $unackedFails = @(); $recoveredFails = @(); $unrunnable = @(); $unimplemented = @(); $heldRuns = @(); $standingHeld = @() }
+        # §95.2o QUEUED / WAITING (operator 2026-10-07: "i have run them manually many times"): a Run now that is queued, or a
+        # due run, while another run holds the area it writes, says what it waits for -- never "overdue" or "failed".
+        $myTrig = @($pendTrig | Where-Object { $_ -and (("$(if ($_.PSObject.Properties['job']) { $_.job })".Trim() -eq $name) -or (-not "$(if ($_.PSObject.Properties['job']) { $_.job })".Trim() -and "$($_.type)" -eq "$($j.type)" -and "$($_.scope)" -eq "$(if ($j.PSObject.Properties['scope']) { $j.scope })")) })
+        $queued = [bool]($myTrig.Count -and -not $inProg -and -not $outOfScope)
+        $queuedSince = if ($queued) { $q0 = Get-PimUtcStamp $myTrig[0].requestedUtc; if ($null -ne $q0) { $q0.ToString('o') } else { '' } } else { '' }
+        $dueNow = $false; if ($en -and "$persistNext".Trim()) { $pnx = Get-PimUtcStamp $persistNext; $dueNow = ($null -ne $pnx -and $pnx -le $now) }
+        $waitingFor = ''; $waitingArea = ''; $waitingSince = ''; $waitingSlot = $false
+        if (($queued -or $dueNow) -and -not $inProg -and -not $outOfScope -and $null -ne $lockMap) {
+            $ls = $null; try { $ls = Get-PimJobLaneState -Job $j -Map $lockMap -NowUtc $now } catch { $ls = $null }
+            if ($ls -and $ls.conflict) {
+                $waitingFor = "$($ls.conflict.job)" -replace '^job:', ''
+                $waitingArea = "$($ls.conflict.area)"
+                $waitingSince = if ($queuedSince) { $queuedSince } else { "$persistNext" }
+            } elseif ($ls -and $ls.capReached) { $waitingSlot = $true; $waitingSince = if ($queuedSince) { $queuedSince } else { "$persistNext" } }
+        }
+        if ($waitingFor -or $waitingSlot -or $queued) { $od = [pscustomobject]@{ overdue = $false; expectedUtc = $od.expectedUtc; overdueByMinutes = 0; reason = 'waiting' } }
+        $jobAreas = @(); try { $jobAreas = @((Get-PimJobAreas -Job $j).areas) } catch { $jobAreas = @() }
         $rows.Add([pscustomobject]@{
             name            = $name
             type            = "$($j.type)"
@@ -2621,13 +2712,25 @@ function Get-PimJobsStatus {
             needsApproval      = [bool]($standingHeld.Count -gt 0)
             approvedPending    = [bool]$approvedPending   # held, but every change set it named is approved -- applies on the next run
             heldDetail         = $(if ($standingHeld.Count) { "$(@($standingHeld)[0].detail)" } else { '' })
+            # §95.2o lanes: the Jobs page section, what the job writes, and what a queued / due run waits for
+            group              = (Get-PimJobGroup -Type "$($j.type)")
+            areas              = @($jobAreas)
+            queued             = [bool]$queued
+            queuedSinceUtc     = "$queuedSince"
+            waitingFor         = "$waitingFor"
+            waitingArea        = "$waitingArea"
+            waitingForSlot     = [bool]$waitingSlot
+            waitingSinceUtc    = "$waitingSince"
+            interruptedCount   = $interruptedRuns.Count
+            healedBy           = $(if ($healedBy) { "$($healedBy.name)" } else { '' })
+            healedAtUtc        = $(if ($healedBy) { "$($healedBy.startedUtc)" } else { '' })
         })
     }
     # Running first, then what needs a person -- FAILED (unacknowledged), then NEEDS APPROVAL, then overdue -- then the rest
     # (operator 2026-09-21: "maybe sort the jobs so failed are top in list" / "hard to go through all"); within each group
     # by last activity (newest first), then name.
     $sorted = @($rows | Sort-Object `
-        @{ Expression = { if ($_.inProgress) { 0 } elseif ($_.unackedFailureCount -gt 0) { 1 } elseif ($_.needsApproval) { 2 } elseif ($_.overdue) { 3 } else { 4 } } }, `
+        @{ Expression = { if ($_.inProgress) { 0 } elseif ($_.unackedFailureCount -gt 0) { 1 } elseif ($_.needsApproval) { 2 } elseif ($_.overdue) { 3 } elseif ($_.waitingFor -or $_.waitingForSlot -or $_.queued) { 4 } else { 5 } } }, `
         @{ Expression = { "$($_.lastRunUtc)" }; Descending = $true }, `
         @{ Expression = { $_.name } })
     return [pscustomobject]@{
@@ -2638,6 +2741,10 @@ function Get-PimJobsStatus {
         failingCount = @($rows | Where-Object { $_.unackedFailureCount -gt 0 }).Count
         # 71.13: jobs with a standing HOLD (needs approval) -- counted under "needs attention", never under failing.
         heldCount    = @($rows | Where-Object { $_.needsApproval }).Count
+        # §95.2o: runs waiting for an area (or a free slot) and Run now presses queued -- shown, never counted as attention
+        waitingCount = @($rows | Where-Object { $_.waitingFor -or $_.waitingForSlot }).Count
+        queuedCount  = @($rows | Where-Object { $_.queued }).Count
+        laneCap      = (Get-PimLaneCap)
         total        = $rows.Count
         historyCount = $history.Count      # BUG-264: the Home tile's "any run recorded" without a second history read
     }
@@ -2744,6 +2851,10 @@ function Write-PimJobRunRecord {
         # [double]0 selects Max(Double,Double); [int64] holds the result.
         durationMs  = [int64][Math]::Max([double]0, ($fin - $StartedUtc.ToUniversalTime()).TotalMilliseconds)
         log         = (ConvertTo-PimRunLogText -Result $Result -Job $Job -StartedUtc $StartedUtc.ToUniversalTime())
+        # §95.2o: the engine scopes this run reconciled CLEANLY (a NOT CHECKED scope is not one), so a failure of another
+        # job on those scopes that ENDED before this run started is shown healed -- "it should have been fixed long ago".
+        scopes      = @(Get-PimRunCleanScopes -Job $Job -Result $Result)
+        version     = (Get-PimRunningVersion)
     }
     Add-PimJobRunRecord -Run $rec
     # ALERT-01: a finished run raises the failure alert HERE. Previously the ONLY
@@ -2763,7 +2874,7 @@ function Write-PimJobRunningRecord {
     # invisible in the Manager until it was over. The tick now writes a 'running' record at the START of every
     # engine job under the run's correlation id; Write-PimJobRunRecord replaces it by that same runId. Engine types
     # only: the short jobs finish within seconds, and every record is a pim.Settings write on a small database.
-    param([Parameter(Mandatory)][object]$Job, [Parameter(Mandatory)][string]$RunId, [datetime]$StartedUtc = [datetime]::UtcNow, [switch]$Trigger, [string]$Reason = '')
+    param([Parameter(Mandatory)][object]$Job, [Parameter(Mandatory)][string]$RunId, [datetime]$StartedUtc = [datetime]::UtcNow, [switch]$Trigger, [string]$Reason = '', [string[]]$Areas = @())
     if ("$($Job.type)" -notin @('engine-delta', 'engine-full', 'msp-pull')) { return }
     try {
         $scope = if ($Job.PSObject.Properties['scope']) { "$($Job.scope)" } else { '' }
@@ -2773,6 +2884,9 @@ function Write-PimJobRunningRecord {
             detail = "running since $($StartedUtc.ToUniversalTime().ToString('HH:mm:ss')) UTC$(if ($scope) { " (scope $scope)" })"
             trigger = [bool]$Trigger; reason = "$Reason"
             owner = "$($script:PimTickOwner)"   # BUG-268: the lease holder, so a takeover can close exactly its records
+            # §95.2o: what a later tick needs to say WHY this run never reported back (an update, a platform stop, a crash)
+            version = (Get-PimRunningVersion); execution = (Get-PimSchedulerExecutionName); instance = (Get-PimSchedulerInstance)
+            areas = @($Areas)
             startedUtc = $StartedUtc.ToUniversalTime().ToString('o'); finishedUtc = ''; durationMs = 0
             log = ("[{0}] job '{1}' started by the scheduler{2}" -f $StartedUtc.ToUniversalTime().ToString('o'), "$($Job.name)", $(if ($scope) { " scope=$scope" } else { '' }))
         })
@@ -2782,28 +2896,65 @@ function Write-PimJobRunningRecord {
 function Close-PimStaleRunningRecords {
     # -Owner (BUG-268): close every 'running' record written by THAT lease holder, whatever its age -- used once the
     # platform has confirmed the holder's execution ended. Records from builds before the owner field are left to the age rule.
-    param([datetime]$NowUtc = [datetime]::UtcNow, [int]$OlderThanMinutes = 30, [string]$Owner = '', [string]$Reason = '')
+    # §95.2o (Invardia fix request: "interrupted: the run started ... and never reported back", 5 hits on one release,
+    # one generic sentence for every cause): every closed record now says WHY (Get-PimInterruptedRunVerdict) -- an update restart or a
+    # platform stop is 'interrupted' (not a failure; the next run decides the job's state), a crash / the time limit / an
+    # execution that ended without a result is 'failed'.
+    # -ByLocks -LiveOwners: with per-area locks a run's owner holds a lock for as long as it runs, so a 'running' record
+    # whose owner holds NO lock any more (after a short grace) belongs to a run that ended without reporting back -- no
+    # 30-minute wait. Records without an owner (a Run now in the Manager, an older build) keep the age rule.
+    param([datetime]$NowUtc = [datetime]::UtcNow, [int]$OlderThanMinutes = 30, [string]$Owner = '', [string]$Reason = '',
+          [string]$PlatformStatus = '', [string]$Execution = '', [switch]$ByLocks, [string[]]$LiveOwners = @(),
+          [int]$LockGraceMinutes = $script:PimLockGraceMinutes, [string]$CurrentVersion = (Get-PimRunningVersion))
     try {
-        $all = @(Get-PimJobRunHistory)
-        $cut = $NowUtc.ToUniversalTime().AddMinutes(-$OlderThanMinutes)
-        # @( if ... ) -- an `if` expression unrolls a one-element array, and a bare [pscustomobject] has no .Count on 5.1
-        $stale = @(if ("$Owner".Trim()) {
-            $all | Where-Object { "$($_.status)" -eq 'running' -and -not "$($_.finishedUtc)".Trim() -and $_.PSObject.Properties['owner'] -and "$($_.owner)" -eq "$Owner" }
-        } else {
-            $all | Where-Object { "$($_.status)" -eq 'running' -and -not "$($_.finishedUtc)".Trim() -and (Get-PimUtcStamp $_.startedUtc) -and (Get-PimUtcStamp $_.startedUtc) -lt $cut }
-        })
-        if (-not $stale.Count) { return 0 }
-        $ids = @{}; foreach ($s in $stale) { $ids["$($s.runId)"] = $true }
-        $fixed = @($all | ForEach-Object {
-            if ($ids.ContainsKey("$($_.runId)") -and "$($_.status)" -eq 'running') {
-                $_.status = 'failed'; $_.ok = $false
-                $_.detail = if ("$Reason".Trim()) { "$Reason" } else { "interrupted: the run started $($_.startedUtc) and never reported back (the scheduler process ended while it ran)" }
-                $_.finishedUtc = $NowUtc.ToUniversalTime().ToString('o')
-            }
-            $_ })
-        Save-PimJobRunHistory -Runs $fixed
-        Write-Host "[scheduler] closed $($stale.Count) stale 'running' record(s) as interrupted" -ForegroundColor DarkYellow
-        return $stale.Count
+        $now = $NowUtc.ToUniversalTime()
+        $cut = $now.AddMinutes(-$OlderThanMinutes)
+        $graceCut = $now.AddMinutes(-[Math]::Max(0, $LockGraceMinutes))
+        $inst = Get-PimSchedulerInstance
+        $live = @{}; foreach ($o in @($LiveOwners)) { if ("$o".Trim()) { $live["$o"] = $true } }
+        $isStale = {
+            param($r)
+            if ("$($r.status)" -ne 'running' -or "$($r.finishedUtc)".Trim()) { return $false }
+            $own = if ($r.PSObject.Properties['owner']) { "$($r.owner)".Trim() } else { '' }
+            if ("$Owner".Trim()) { return ($own -eq "$Owner") }
+            $ri = if ($r.PSObject.Properties['instance']) { "$($r.instance)".Trim() } else { '' }
+            if ($ri -ne $inst) { return $false }                      # another scheduler instance's run is its own business
+            $st = Get-PimUtcStamp $r.startedUtc
+            if ($null -eq $st) { return $false }
+            if ($ByLocks -and $own) { return (-not $live.ContainsKey($own) -and $st -lt $graceCut) }
+            return ($st -lt $cut)
+        }
+        $limit = Get-PimSchedulerTimeLimitSeconds
+        $closed = @{ n = 0; causes = @() }
+        $verdictOf = {
+            param($r)
+            $ex = if ("$Execution".Trim()) { "$Execution".Trim() } elseif ($r.PSObject.Properties['execution']) { "$($r.execution)".Trim() } else { '' }
+            $ps = if ("$PlatformStatus".Trim()) { "$PlatformStatus".Trim() } elseif ($ex) { Get-PimLockHolderStatus -Execution $ex } else { '' }
+            Get-PimInterruptedRunVerdict -Run $r -CurrentVersion $CurrentVersion -PlatformStatus $ps -Execution $ex -NowUtc $now -TimeLimitSeconds $limit
+        }
+        Update-PimJobRunHistory -Mutate {
+            param($all)
+            $all = @($all)
+            $stale = @($all | Where-Object { & $isStale $_ })
+            $closed.n = $stale.Count
+            if (-not $stale.Count) { return $null }
+            $ids = @{}; foreach ($s in $stale) { $ids["$($s.runId)"] = $true }
+            ,@($all | ForEach-Object {
+                if ($ids.ContainsKey("$($_.runId)") -and "$($_.status)" -eq 'running') {
+                    $v = & $verdictOf $_
+                    # Add-Member -Force, never `$_.x = `: a record written by an older build may lack a field, and one failed
+                    # assignment would abort the whole close (nothing closed, nothing said).
+                    $_ | Add-Member -NotePropertyName status -NotePropertyValue "$($v.status)" -Force
+                    $_ | Add-Member -NotePropertyName ok -NotePropertyValue $false -Force
+                    $_ | Add-Member -NotePropertyName detail -NotePropertyValue $(if ("$Reason".Trim()) { "$Reason" } else { "$($v.detail)" }) -Force
+                    $_ | Add-Member -NotePropertyName finishedUtc -NotePropertyValue $now.ToString('o') -Force
+                    $_ | Add-Member -NotePropertyName interruptedCause -NotePropertyValue "$($v.cause)" -Force
+                    $closed.causes += "$($v.cause)"
+                }
+                $_ })
+        }
+        if ($closed.n) { Write-Host ("[scheduler] closed {0} 'running' record(s) whose run never reported back ({1})" -f $closed.n, (@($closed.causes | Select-Object -Unique) -join ', ')) -ForegroundColor DarkYellow }
+        return [int]$closed.n
     } catch { Write-Verbose "[scheduler] stale running records not closed: $($_.Exception.Message)"; return 0 }
 }
 
@@ -2834,6 +2985,24 @@ function Invoke-PimJobForceStart {
 
     $runId = [guid]::NewGuid().ToString('N')
     $started = $now
+    # §95.2o: Run now takes the same area locks as the scheduler. While another run holds the area this job writes, the
+    # press is QUEUED for the scheduler (never lost, never run beside it) and says what it waits for. A process that can
+    # only READ the locks (no compare-and-set store) runs as before.
+    $fsOwner = ''; $fsLocked = $false
+    if (-not $WhatIf) {
+        $fsOwner = Resolve-PimSchedulerOwner
+        $jl = Get-PimJobAreas -Job $Job
+        $lr = Request-PimAreaLocks -Owner $fsOwner -Areas (@($jl.job) + $(if ($jl.perScope) { @() } else { @($jl.areas) })) -Job "$($Job.name)" -RunId $runId -NowUtc $now
+        if ($lr.ok) { $fsLocked = $true }
+        elseif ($lr.conflict) {
+            $wf = "$($lr.conflict.job)" -replace '^job:', ''
+            $sc = if ($Job.PSObject.Properties['scope'] -and "$($Job.scope)".Trim()) { "$($Job.scope)" } else { 'All' }
+            [void](Add-PimJobTrigger -Type "$($Job.type)" -Scope $sc -Reason "run-now:$($Job.name)" -JobName "$($Job.name)" -NowUtc $now)
+            return [pscustomobject]@{ ok = $true; runId = ''; name = "$($Job.name)"; type = "$($Job.type)"; status = 'queued'; waitingFor = $wf; waitingArea = "$($lr.conflict.area)"
+                                      detail = "queued -- starts when $wf has finished (it works on the same area: $($lr.conflict.area))" }
+        }
+    }
+    try {
     # (1) in-progress placeholder -> GUI shows it move to "running" at the top.
     $placeholder = [pscustomobject]@{
         runId       = $runId
@@ -2851,6 +3020,8 @@ function Invoke-PimJobForceStart {
         durationMs  = 0
         log         = ("[{0}] job '{1}' FORCE-START requested{2}" -f $started.ToString('o'), "$($Job.name)", $(if ($Job.PSObject.Properties['scope'] -and "$($Job.scope)".Trim()) { " scope=$($Job.scope)" } else { '' }))
     }
+    # §95.2o: a locked Run now names its owner, so a Manager restart mid-run is closed (and said) as soon as its lock lapses
+    if ($fsLocked) { $placeholder | Add-Member -NotePropertyName owner -NotePropertyValue $fsOwner -Force; $placeholder | Add-Member -NotePropertyName version -NotePropertyValue (Get-PimRunningVersion) -Force }
     Add-PimJobRunRecord -Run $placeholder
 
     # (2) dispatch the real handler, then (3) replace the placeholder with the finished
@@ -2882,6 +3053,8 @@ function Invoke-PimJobForceStart {
         # [int64] holds a >24.9-day duration. Both are required (BUG-04).
         durationMs  = [int64][Math]::Max([double]0, ($fin - $started).TotalMilliseconds)
         log         = (ConvertTo-PimRunLogText -Result $res -Job $Job -StartedUtc $started)
+        scopes      = @(Get-PimRunCleanScopes -Job $Job -Result $res)   # §95.2o, as Write-PimJobRunRecord
+        version     = (Get-PimRunningVersion)
     }
     Add-PimJobRunRecord -Run $rec
     # ALERT-01: a finished run raises the failure alert HERE. Previously the ONLY
@@ -2893,6 +3066,9 @@ function Invoke-PimJobForceStart {
     # alerting fault must not take the tick down or lose run history.
     if (Get-Command Invoke-PimJobRunAlert -ErrorAction SilentlyContinue) { [void](Invoke-PimJobRunAlert -Run $rec) }
     return [pscustomobject]@{ ok = [bool]$res.ok; runId = $runId; name = "$($Job.name)"; type = "$($Job.type)"; status = $rec.status; detail = "$($res.detail)" }
+    } finally {
+        if ($fsLocked) { [void](Remove-PimAreaLocks -Owner $fsOwner -RunId $runId) }
+    }
 }
 
 # ---- on-demand triggers + change watermark --------------------------------
@@ -3391,10 +3567,26 @@ function Test-PimEngineRunClean {
     if ($in.PSObject.Properties['ran'] -and $in.ran -eq $false) { return $false }
     return $true
 }
+function Get-PimNotCheckedScopeKeys {
+    # PURE. The scopes an engine result reports NOT CHECKED ("<Scope> NOT CHECKED (...)" -- an area another run held, a
+    # read that failed): they ran no pass, so they never count as reconciled.
+    param([AllowNull()][object]$Result)
+    $in = if ($Result -and $Result.PSObject.Properties['result']) { $Result.result } else { $null }
+    if (-not $in -or -not $in.PSObject.Properties['notChecked']) { return @() }
+    return @(@($in.notChecked) | ForEach-Object { if ("$_" -match '^\s*([A-Za-z0-9_-]+)\s+NOT CHECKED') { $Matches[1].ToLowerInvariant() } } | Where-Object { $_ })
+}
+function Get-PimRunCleanScopes {
+    # The canonical scopes a CLEAN engine run reconciled (minus the ones it did not check); @() for anything else.
+    param([Parameter(Mandatory)][object]$Job, [AllowNull()][object]$Result)
+    if ("$($Job.type)" -notin @('engine-delta', 'engine-full')) { return @() }
+    if (-not (Test-PimEngineRunClean -Result $Result)) { return @() }
+    $skip = @(Get-PimNotCheckedScopeKeys -Result $Result)
+    return @(@(Get-PimEngineJobScopeKeys -Job $Job) | Where-Object { $_ -notin $skip })
+}
 function Add-PimTickReconciled {
     param([Parameter(Mandatory)][object]$Job, [AllowNull()][object]$Result)
     if (-not (Test-PimEngineRunClean -Result $Result)) { return }
-    foreach ($k in @(Get-PimEngineJobScopeKeys -Job $Job)) { $script:PimTickReconciled[$k] = "$($Job.name)" }
+    foreach ($k in @(Get-PimRunCleanScopes -Job $Job -Result $Result)) { $script:PimTickReconciled[$k] = "$($Job.name)" }
 }
 function Get-PimTickCoverage {
     # A scheduled DELTA whose scopes all had a clean pass earlier in this tick -> the covering job names; $null otherwise.
@@ -3410,11 +3602,129 @@ function Get-PimTickCoverage {
     return @($by.ToArray())
 }
 
+function Invoke-PimTickJobRun {
+    <#
+      §95.2o (operator 2026-10-07: "check why they dont fix themselves" / "why can we only have one job run at the same
+      time"). ONE job inside a tick, under its own area locks, recorded when IT ends -- not when the execution ends:
+        time-limit check -> lock its areas (or wait: the job stays due / the trigger stays queued) -> re-check it was not
+        just run by another execution -> 'running' record -> dispatch -> run record -> its own state stamps / its trigger
+        removed -> locks released.
+      -Kind scheduled | trigger | queue. Returns @{ outcome = ran | waiting | slot | store | elsewhere | deferred; result;
+      detail; started }. 'ran' is the only outcome that dispatched the job; every other one leaves it for a later run.
+    #>
+    param([Parameter(Mandatory)][object]$Job, [ValidateSet('scheduled', 'trigger', 'queue')][string]$Kind = 'scheduled',
+          [Parameter(Mandatory)][datetime]$TickNowUtc, [datetime]$WallStart = [datetime]::UtcNow, [switch]$WhatIf,
+          [string]$Owner = '', [switch]$UseLocks, [int]$LeaseTtlMinutes = 15, [string]$Reason = '', [string]$TriggerKey = '',
+          [object]$Slot = $null, [object[]]$History = @(), [int]$TimeLimitSeconds = 0, [datetime]$ExecWallStart = [datetime]::UtcNow)
+    $name = "$($Job.name)"
+    $isTrig = ($Kind -eq 'trigger')
+    $out = @{ outcome = 'ran'; result = $null; detail = ''; started = $null }
+    # (0) the execution time limit: a job that does not fit in what is left of this execution waits for the next one
+    # instead of being killed half-way (the 'running' record that then never reports back).
+    if ($Kind -ne 'queue' -and -not $WhatIf -and $TimeLimitSeconds -gt 0) {
+        $el = [int]([datetime]::UtcNow - $ExecWallStart).TotalSeconds
+        $est = Get-PimJobDurationEstimateSeconds -Job $Job -History $History
+        if (-not (Test-PimJobFitsExecution -ElapsedSeconds $el -LimitSeconds $TimeLimitSeconds -EstimateSeconds $est)) {
+            $out.outcome = 'deferred'
+            $out.detail = ("deferred to the next run: it needs about {0} min and this run has {1} min left" -f [Math]::Ceiling($est / 60.0), [Math]::Floor(($TimeLimitSeconds - $el) / 60.0))
+            return [pscustomobject]$out
+        }
+    }
+    $runId = [guid]::NewGuid().ToString('N')
+    $al = Get-PimJobAreas -Job $Job
+    $lockOn = ($UseLocks -and -not $WhatIf)
+    if ($lockOn) {
+        $want = @($al.job) + $(if ($al.perScope) { @() } else { @($al.areas) })
+        $lr = Request-PimAreaLocks -Owner $Owner -Areas $want -Job $name -RunId $runId -NowUtc ([datetime]::UtcNow) -TtlMinutes $LeaseTtlMinutes -Cap (Get-PimLaneCap)
+        if (-not $lr.ok) {
+            if ($lr.conflict) { $out.outcome = 'waiting'; $out.detail = ("waiting for {0} (area {1})" -f ("$($lr.conflict.job)" -replace '^job:', ''), $lr.conflict.area) }
+            elseif ($lr.capReached) { $out.outcome = 'slot'; $out.detail = ("waiting for a free slot: {0} runs are in progress (at most {1} side by side)" -f $lr.busy, (Get-PimLaneCap)) }
+            else { $out.outcome = 'store'; $out.detail = "not started: $($lr.error)" }
+            return [pscustomobject]$out
+        }
+    }
+    try {
+        # (1) another execution may have run it while this one waited: never run it twice.
+        if ($lockOn -and $Kind -eq 'scheduled') {
+            $sn = $null; try { $sn = @(@((Get-PimSchedulerState).jobs) | Where-Object { $_ -and "$($_.name)" -eq $name })[0] } catch { $sn = $null }
+            if ($sn) {
+                $cl = Get-PimUtcStamp $sn.lastRunUtc; $jl = $null; if ($Job.PSObject.Properties['lastRunUtc']) { $jl = Get-PimUtcStamp $Job.lastRunUtc }
+                if ($null -ne $cl -and $null -ne $jl -and $cl -gt $jl -and -not (Test-PimJobDue -Job $sn -NowUtc $TickNowUtc.Add([datetime]::UtcNow - $WallStart))) {
+                    foreach ($p in 'lastRunUtc', 'nextRunUtc', 'lastFinishedUtc') { if ($sn.PSObject.Properties[$p]) { $Job | Add-Member -NotePropertyName $p -NotePropertyValue "$($sn.$p)" -Force } }
+                    $out.outcome = 'elsewhere'; $out.detail = "already run by another execution at $("$($sn.lastRunUtc)")"
+                    return [pscustomobject]$out
+                }
+            }
+        }
+        if ($lockOn -and $isTrig -and "$TriggerKey".Trim()) {
+            $still = @(@(Get-PimPendingTriggers) | Where-Object { "$($_.type)|$($_.scope)|$($_.requestedUtc)" -eq $TriggerKey }).Count
+            if (-not $still) { $out.outcome = 'elsewhere'; $out.detail = 'already run by another execution'; return [pscustomobject]$out }
+        }
+        $started = [datetime]::UtcNow
+        $out.started = $started
+        $jobStart = $TickNowUtc.Add($started - $WallStart)
+        $coveredBy = if ($WhatIf -or $Kind -ne 'scheduled') { $null } else { Get-PimTickCoverage -Job $Job }   # §87 BUG-281
+        if ($coveredBy) {
+            $res = [pscustomobject]@{ name = $name; type = "$($Job.type)"; ok = $true; ran = $false; covered = $true
+                detail = ("covered -- its scopes were reconciled cleanly earlier in this tick by {0}; next run on its own cadence" -f (@($coveredBy) -join ', '))
+                ranUtc = $jobStart.ToString('o'); correlationId = $runId }
+            Write-Host ("[scheduler] {0}: {1}" -f $name, $res.detail) -ForegroundColor DarkGray
+        } else {
+            if (-not $WhatIf) { [void](Write-PimJobRunningRecord -Job $Job -RunId $runId -StartedUtc $started -Trigger:$isTrig -Reason $Reason -Areas @($al.areas)) }
+            # The scope gate belongs to THIS run only: a queue action applied between the scopes of an outer engine run (the
+            # between-scopes hook) must not gate -- or release -- the outer run's areas. Saved here, restored after.
+            $prevGate = $global:PIM_ScopeGateHook; $prevGateCtx = $script:PimScopeGateCtx
+            $global:PIM_ScopeGateHook = $null; $script:PimScopeGateCtx = $null
+            if ($lockOn -and $al.perScope) {
+                $script:PimScopeGateCtx = @{ owner = $Owner; runId = $runId; job = $name; ttl = $LeaseTtlMinutes; current = '' }
+                $global:PIM_ScopeGateHook = { param($s) Invoke-PimScopeGate -Scope $s }
+            }
+            # The job's OWN clock (the tick's clock + the wall time spent before it), not the tick's start: a job that starts
+            # 13 minutes into a tick judges expiries and grace windows at its real time.
+            try { $res = Invoke-PimScheduledJob -Job $Job -NowUtc $jobStart -WhatIf:$WhatIf -CorrelationId $runId }
+            catch {
+                $res = [pscustomobject]@{ name = $name; type = "$($Job.type)"; ok = $false; detail = "error: the scheduler failed while running this job: $($_.Exception.Message)"; ranUtc = $jobStart.ToString('o'); correlationId = $runId }
+            } finally {
+                $global:PIM_ScopeGateHook = $prevGate; $script:PimScopeGateCtx = $prevGateCtx
+            }
+            if ($isTrig) {
+                $res | Add-Member -NotePropertyName trigger -NotePropertyValue $true -Force
+                $res | Add-Member -NotePropertyName reason  -NotePropertyValue "$Reason" -Force
+            }
+            if (-not $WhatIf) { Add-PimTickReconciled -Job $Job -Result $res }   # §87
+        }
+        $out.result = $res
+        # (2) its record, the moment it ends. A record that cannot be built never takes the run's result with it.
+        try { Write-PimJobRunRecord -Job $Job -Result $res -StartedUtc $started -Trigger:$isTrig -Reason $Reason -RunId $runId | Out-Null }
+        catch { Write-Warning "[scheduler] the run record of '$name' could not be written: $($_.Exception.Message)" }
+        # (3) its own stamps (scheduled) / its trigger (trigger), BEFORE the locks go -- so no other execution can start it again.
+        if ($Kind -eq 'scheduled') {
+            # 🔴 lastRun = when THIS job started; SCHED-1: next = when THIS job FINISHED + its interval.
+            $slotAt = if ($Slot -is [datetime]) { $Slot } else { $jobStart }
+            $jobEnd = $TickNowUtc.Add([datetime]::UtcNow - $WallStart)
+            $nr = (Get-PimNextRunAfterRun -Job $Job -ScheduledUtc $slotAt -StartedUtc $jobStart -FinishedUtc $jobEnd).ToString('o')
+            $lr2 = $jobStart.ToString('o')
+            if ($Job.PSObject.Properties['nextRunUtc']) { $Job.nextRunUtc = $nr } else { $Job | Add-Member -NotePropertyName nextRunUtc -NotePropertyValue $nr -Force }
+            if ($Job.PSObject.Properties['lastRunUtc']) { $Job.lastRunUtc = $lr2 } else { $Job | Add-Member -NotePropertyName lastRunUtc -NotePropertyValue $lr2 -Force }
+            $Job | Add-Member -NotePropertyName lastFinishedUtc -NotePropertyValue ($jobEnd.ToString('o')) -Force
+            if ($lockOn) { try { [void](Save-PimSchedulerJobStamps -Jobs @($Job) -RanNames @($name) -NowUtc $jobEnd) } catch { Write-Warning "[scheduler] the stamps of '$name' were not saved: $($_.Exception.Message)" } }
+        }
+        if ($isTrig -and "$TriggerKey".Trim()) {
+            # BUG-275: the removal is one compare-and-set, so a trigger queued while it is written survives.
+            [void](Update-PimJobTriggerList -Mutate { param($cur) @($cur) | Where-Object { "$($_.type)|$($_.scope)|$($_.requestedUtc)" -ne $TriggerKey } })
+        }
+        return [pscustomobject]$out
+    } finally {
+        if ($lockOn) { [void](Remove-PimAreaLocks -Owner $Owner -RunId $runId) }
+    }
+}
+
 function Invoke-PimSchedulerTriggerDrain {
-    # The tick's "(b) TRIGGERS" block, unchanged in behaviour, made callable so the tick can also drain
-    # BETWEEN scheduled jobs. Runs every pending trigger (running record -> dispatch -> run record, with the
-    # trigger/reason members), then removes ONLY the triggers that ran. Emits the result objects -- and
-    # nothing else, so a caller can collect the output straight into its results list.
+    # The tick's "(b) TRIGGERS" block, made callable so the tick can also drain BETWEEN scheduled jobs. Runs every pending
+    # trigger whose areas are free (running record -> dispatch -> run record, with the trigger/reason members) and removes
+    # each one the moment it ran. §95.2o: a trigger whose area another run holds STAYS queued -- it runs as soon as that
+    # area is free, in this execution or the next. Emits the result objects -- and nothing else, so a caller can collect
+    # the output straight into its results list.
     param([datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf)
     $now = $NowUtc
     # 🔴 each trigger gets ITS OWN now: the caller's clock advanced by the wall time spent in this drain. One clock for
@@ -3423,28 +3733,19 @@ function Invoke-PimSchedulerTriggerDrain {
     $drainWall = [datetime]::UtcNow
     $out = New-Object System.Collections.Generic.List[object]
     $triggers = @(Get-PimPendingTriggers)
-    if ($triggers.Count) {
-        foreach ($tg in $triggers) {
-            # BUG-235 (77.4): a Run-now trigger carries the job it was pressed on -- record the run under that name.
-            $tname = if ($tg.PSObject.Properties['job'] -and "$($tg.job)".Trim()) { "$($tg.job)".Trim() } else { "trigger:$($tg.type):$($tg.scope)" }
-            $tjob = [pscustomobject]@{ name = $tname; type = "$($tg.type)"; scope = "$($tg.scope)"; enabled = $true }
-            $started = [datetime]::UtcNow
-            $tRunId = [guid]::NewGuid().ToString('N')
-            if (-not $WhatIf) { [void](Write-PimJobRunningRecord -Job $tjob -RunId $tRunId -StartedUtc $started -Trigger -Reason "$($tg.reason)") }
-            $r = Invoke-PimScheduledJob -Job $tjob -NowUtc ($now.Add($started - $drainWall)) -WhatIf:$WhatIf -CorrelationId $tRunId
-            $r | Add-Member -NotePropertyName trigger -NotePropertyValue $true -Force
-            $r | Add-Member -NotePropertyName reason  -NotePropertyValue "$($tg.reason)" -Force
-            if (-not $WhatIf) { Add-PimTickReconciled -Job $tjob -Result $r }   # §87
-            $out.Add($r)
-            Write-PimJobRunRecord -Job $tjob -Result $r -StartedUtc $started -Trigger -Reason "$($tg.reason)" -RunId $tRunId | Out-Null
-        }
-        # 🔴 §70.19: this was `Save-PimJobTriggers -Triggers @()` -- it cleared EVERY trigger, including one
-        # queued while these ran (a trigger run takes minutes; the Manager's "Run now" now queues here), so
-        # a request made mid-run vanished. Remove only what was actually run (type + scope + requestedUtc).
-        $ranKeys = @{}
-        foreach ($tg in $triggers) { $ranKeys["$($tg.type)|$($tg.scope)|$($tg.requestedUtc)"] = $true }
-        # BUG-275: the removal is one compare-and-set too, so a trigger queued while it is written survives.
-        [void](Update-PimJobTriggerList -Mutate { param($cur) @($cur) | Where-Object { -not $ranKeys.ContainsKey("$($_.type)|$($_.scope)|$($_.requestedUtc)") } })
+    $tc = $script:PimTickCtx
+    foreach ($tg in $triggers) {
+        # BUG-235 (77.4): a Run-now trigger carries the job it was pressed on -- record the run under that name.
+        $tname = if ($tg.PSObject.Properties['job'] -and "$($tg.job)".Trim()) { "$($tg.job)".Trim() } else { "trigger:$($tg.type):$($tg.scope)" }
+        $tjob = [pscustomobject]@{ name = $tname; type = "$($tg.type)"; scope = "$($tg.scope)"; enabled = $true }
+        # 🔴 §70.19: only what actually ran is removed (type + scope + requestedUtc), never the whole list -- a "Run now"
+        # pressed while these run must survive.
+        $key = "$($tg.type)|$($tg.scope)|$($tg.requestedUtc)"
+        $o = Invoke-PimTickJobRun -Job $tjob -Kind trigger -TriggerKey $key -Reason "$($tg.reason)" -TickNowUtc $now -WallStart $drainWall -WhatIf:$WhatIf `
+                -Owner $(if ($tc) { $tc.owner } else { '' }) -UseLocks:([bool]($tc -and $tc.useLocks)) -LeaseTtlMinutes $(if ($tc) { $tc.ttl } else { 15 }) `
+                -History $(if ($tc) { @($tc.history) } else { @() }) -TimeLimitSeconds $(if ($tc) { $tc.limit } else { 0 }) -ExecWallStart $(if ($tc) { $tc.wall } else { $drainWall })
+        if ($o.outcome -eq 'ran') { $out.Add($o.result) }
+        elseif ($o.outcome -ne 'elsewhere') { Write-Host ("[scheduler] {0}: {1}" -f $tname, $o.detail) -ForegroundColor DarkYellow }
     }
     return $out.ToArray()
 }
@@ -3452,18 +3753,22 @@ function Invoke-PimSchedulerTriggerDrain {
 function Invoke-PimSchedulerTick {
     # Run every due job once; advance each job's nextRunUtc; persist. Returns results.
     #
-    # BUG-36: the lease is taken HERE, around the TICK, not around the loop in
-    # Start-PimScheduler. The tick is the unit of work that must not run twice, and it is what
-    # an external cron invokes via `-Once` -- so protecting the loop alone would leave every
-    # cron-driven deployment (framework ESTATE-06) completely unguarded. Held for the duration
-    # and released in `finally`, so the next run starts immediately rather than waiting out the
-    # TTL. -NoLease is for offline tests that drive the tick directly.
+    # §95.2o (operator 2026-10-07): the tick no longer holds ONE lease for everything. Each job takes the locks of the
+    # AREAS it writes (PIM-JobLanes.ps1) for exactly as long as it runs, so a 30-minute full reconcile no longer makes every
+    # other tick skip, a Run now pressed meanwhile is queued and starts as soon as its area is free, and every run is
+    # recorded when it ends. Overlapping executions (the 5-minute cron, a Run now kick) therefore work side by side on
+    # different areas -- at most Get-PimLaneCap at once -- and two runs never write the same area.
+    # BUG-36 still holds: the guard is taken HERE, per job, not around the loop -- a cron `-Once` tick is guarded too.
+    # A tick-wide lease still held by a LIVE runner belongs to a run of the PREVIOUS version (during an update roll): it is
+    # respected (this tick skips), and taken over only when the platform says its execution ended (BUG-268).
+    # -NoLease is for offline tests that drive the tick directly (no lease, no locks).
     param([object[]]$Jobs, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$WhatIf,
           [string]$Owner, [int]$LeaseTtlMinutes = 15, [switch]$NoLease)
     $now = $NowUtc.ToUniversalTime()
     # BUG-54: was "$($env:COMPUTERNAME)-$PID", which is '-1' in every Linux container.
     if (-not "$Owner".Trim()) { $Owner = Resolve-PimSchedulerOwner }
-    $haveLease = $false
+    $haveLease = $false; $useLocks = $false
+    $script:PimExecStatusCache = @{}; $script:PimDeadLockOwners = @{}; $script:PimHeldAreas = @{}
     if (-not $NoLease) {
         # BUG-54: say WHICH of the two failures happened. A refused owner and a lost race are
         # different faults with different fixes, and reporting the second for the first is the
@@ -3473,52 +3778,45 @@ function Invoke-PimSchedulerTick {
             return @([pscustomobject]@{ name = 'lease'; type = 'lease'; ok = $false; ran = $false
                                         detail = "skipped: owner '$Owner' is not identifying -- an empty host half is shared by every instance" })
         }
-        $haveLease = Request-PimSchedulerLease -Owner $Owner -NowUtc $now -TtlMinutes $LeaseTtlMinutes
-        $deadTake = $null
-        if (-not $haveLease) {
+        $legacy = $null; try { $legacy = (Get-PimSchedulerLeaseRaw).Lease } catch { $legacy = $null }
+        if ($legacy -and "$($legacy.owner)".Trim() -and -not (Test-PimSchedulerLeaseFree -Lease $legacy -Owner $Owner -NowUtc $now)) {
             # BUG-268: the holder may be an execution the platform already ended -- take over instead of waiting out the TTL.
+            $deadTake = $null
             try { $deadTake = Resolve-PimSchedulerDeadLease -Owner $Owner -NowUtc $now -TtlMinutes $LeaseTtlMinutes } catch { $deadTake = $null }
             if ($deadTake -and $deadTake.TookOver) {
                 $haveLease = $true
                 Write-Host ("[scheduler] took over the lease from '{0}': the platform reports its execution '{1}' as {2}" -f $deadTake.DeadOwner, $deadTake.Execution, $deadTake.Status) -ForegroundColor DarkYellow
                 if (-not $WhatIf) {
-                    [void](Close-PimStaleRunningRecords -NowUtc $now -Owner $deadTake.DeadOwner `
-                            -Reason ("interrupted: the platform ended execution '{0}' ({1}) while this run was in progress; its pending trigger runs again" -f $deadTake.Execution, $deadTake.Status))
+                    [void](Close-PimStaleRunningRecords -NowUtc $now -Owner $deadTake.DeadOwner -PlatformStatus $deadTake.Status -Execution $deadTake.Execution)
                 }
-            }
-        }
-        if (-not $haveLease) {
-            # BUG-41: do not ASSERT contention -- report what was actually observed. The lease
-            # is only "held by another runner" if the store shows a live lease; otherwise the
-            # acquire failed for a different reason, which Request-PimSchedulerLease has just
-            # warned about in detail. Stating the wrong cause here cost a whole session.
-            $seen = $null; try { $seen = (Get-PimSchedulerLeaseRaw).Lease } catch { }
-            if ($seen) {
-                Write-Host "[scheduler] another runner holds the lease (owner '$($seen.owner)'); skipping tick" -ForegroundColor DarkYellow
-                if (-not (Test-PimSchedulerOwnerUsable -Owner "$($seen.owner)")) {
+            } else {
+                Write-Host "[scheduler] another runner holds the lease (owner '$($legacy.owner)'); skipping tick" -ForegroundColor DarkYellow
+                if (-not (Test-PimSchedulerOwnerUsable -Owner "$($legacy.owner)")) {
                     # Named on sight so nobody re-debugs it: a lease owned by '-1' was written by a
                     # PRE-BUG-54 build. Nothing can release it (no runner answers to that name), so it
                     # clears when the TTL expires and normal ticks resume by themselves.
                     Write-Host "[scheduler]   ^ that owner is non-identifying -- a leftover from a pre-build. It expires at its TTL; no action needed." -ForegroundColor DarkYellow
                 }
                 return @([pscustomobject]@{ name = 'lease'; type = 'lease'; ok = $true; ran = $false
-                                            detail = "skipped: lease held by '$($seen.owner)'" })
+                                            detail = "skipped: lease held by '$($legacy.owner)'" })
             }
-            Write-Host "[scheduler] lease NOT acquired and the store shows NO lease -- skipping tick (this is a store/write fault, not contention)" -ForegroundColor Red
-            return @([pscustomobject]@{ name = 'lease'; type = 'lease'; ok = $false; ran = $false
-                                        detail = 'skipped: lease could not be acquired and no lease is held -- the store did not accept the write' })
         }
-        # §70.18: holding the lease means no other runner is mid-job, so a scheduler 'running' record older than
-        # the lease TTL belongs to a tick that died (container timeout / restart). Close it as interrupted
-        # rather than showing "running" forever.
-        if (-not $WhatIf) { [void](Close-PimStaleRunningRecords -NowUtc $now -OlderThanMinutes ([Math]::Max(30, 2 * $LeaseTtlMinutes))) }
+        $useLocks = $true
+        # A 'running' record whose owner holds no lock any more belongs to a run that ended without reporting back (a
+        # restart, a crash, the time limit): close it now, saying why -- no 30-minute wait, no generic "interrupted".
+        if (-not $WhatIf) {
+            $liveOwners = @(); try { $liveOwners = @(Get-PimLiveLockOwners -Map (Get-PimSchedulerLocksRaw).Map -NowUtc $now) } catch { $liveOwners = @() }
+            if ($haveLease) { $liveOwners += $Owner }
+            [void](Close-PimStaleRunningRecords -NowUtc $now -ByLocks -LiveOwners $liveOwners -OlderThanMinutes ([Math]::Max(30, 2 * $LeaseTtlMinutes)))
+        }
     }
     # In-job heartbeat. Renewing only BETWEEN jobs was not enough: on internal (2026-09-13) one
-    # engine job spent 23 minutes in GroupsPolicies, the 15-minute lease lapsed, and the next
-    # cron tick started writing alongside it. The engine calls Invoke-PimSchedulerLeaseHeartbeat
-    # while it applies items; it is a no-op outside a leased tick.
-    if ($haveLease) {
-        $global:PIM_LeaseHeartbeat = [pscustomobject]@{ owner = $Owner; ttl = $LeaseTtlMinutes; lastUtc = $now; lost = $false }
+    # engine job spent 23 minutes in GroupsPolicies, the lease lapsed, and the next cron tick
+    # started writing alongside it. The engine calls Invoke-PimSchedulerLeaseHeartbeat while it
+    # applies items; it renews this owner's area locks (and the legacy lease when this tick took
+    # one over). A no-op outside a guarded tick.
+    if ($useLocks -or $haveLease) {
+        $global:PIM_LeaseHeartbeat = [pscustomobject]@{ owner = $Owner; ttl = $LeaseTtlMinutes; lastUtc = $now; lost = $false; locks = [bool]$useLocks; legacyLease = [bool]$haveLease }
         $script:PimTickOwner = $Owner
     }
     try {
@@ -3545,9 +3843,13 @@ function Invoke-PimSchedulerTick {
     # BUG-134: the RESOLVED list is what runs -- check THAT, not the shipped default (once/process).
     Write-PimJobScopeBindingReport -Schedule @($Jobs)
     $results = New-Object System.Collections.Generic.List[object]
+    $ranNames = New-Object System.Collections.Generic.List[string]
     $script:PimTickReconciled = @{}   # §87: a new tick starts with no scope reconciled
     $st = Get-PimSchedulerState
     $lastWm =if ($st -and $st.PSObject.Properties['lastWatermark']) { "$($st.lastWatermark)" } else { '' }
+    # §95.2o: what every job run of this tick needs -- the guard, the time limit, the durations to estimate from
+    $tickHist = @(); if (-not $WhatIf) { try { $tickHist = @(Get-PimJobRunHistory) } catch { $tickHist = @() } }
+    $script:PimTickCtx = @{ owner = $Owner; useLocks = [bool]$useLocks; ttl = $LeaseTtlMinutes; limit = (Get-PimSchedulerTimeLimitSeconds); wall = $wallStart; history = $tickHist }
 
     # §80.2 🔴 A SECONDARY INSTANCE (the hybrid worker) RUNS ITS OWN JOBS AND NOTHING ELSE. The watermark, the SQL change
     # detector, the queue pickup and the trigger drains below all CONSUME shared signals: run here they would eat the main
@@ -3588,6 +3890,7 @@ function Invoke-PimSchedulerTick {
     # `trigger:engine-delta:All` that had started at 07:17 -- ONE job, many scopes, so "between jobs" never came.
     # Queue actions do not depend on engine state, so the engine now calls this between its SCOPES as well
     # ($global:PIM_BetweenScopesHook, Invoke-PimEngine). Queue actions ONLY -- never a nested engine run.
+    # §95.2o: under the 'queue' area lock, so two executions never apply the same committed action.
     $queuePickup = {
         $n = 0
         if ($qaJob -and $sqlCs -and (Get-Command Get-PimSqlQueue -ErrorAction SilentlyContinue)) {
@@ -3597,15 +3900,13 @@ function Invoke-PimSchedulerTick {
                     $_ -and [int]"$(if ($_.PSObject.Properties['attempts']) { $_.attempts } else { 0 })" -eq 0 -and -not $qaSeen.ContainsKey("$($_.id)") })
             } catch { $fresh = @() }
             if ($fresh.Count -ge 1) {
-                foreach ($fe in $fresh) { $qaSeen["$($fe.id)"] = $true }
                 try {
-                    $qStarted = [datetime]::UtcNow
-                    $qRunId = [guid]::NewGuid().ToString('N')
-                    [void](Write-PimJobRunningRecord -Job $qaJob -RunId $qRunId -StartedUtc $qStarted)
-                    $qRes = Invoke-PimScheduledJob -Job $qaJob -NowUtc $now -CorrelationId $qRunId
-                    $results.Add($qRes)
-                    Write-PimJobRunRecord -Job $qaJob -Result $qRes -StartedUtc $qStarted -RunId $qRunId | Out-Null
-                    $n++
+                    $qo = Invoke-PimTickJobRun -Job $qaJob -Kind queue -TickNowUtc $now -WallStart $wallStart -Owner $Owner -UseLocks:$useLocks -LeaseTtlMinutes $LeaseTtlMinutes
+                    if ($qo.outcome -eq 'ran') {
+                        foreach ($fe in $fresh) { $qaSeen["$($fe.id)"] = $true }
+                        $results.Add($qo.result)
+                        $n++
+                    }
                 } catch { Write-Warning "[scheduler] in-run queue-apply pickup failed: $($_.Exception.Message)" }
             }
         }
@@ -3621,8 +3922,7 @@ function Invoke-PimSchedulerTick {
         }
     }
 
-    # (b) TRIGGERS: run on-demand requests NOW (event-driven), then clear them.
-    # Invoke-PimSchedulerTriggerDrain is this block, moved verbatim so (c) can call it between jobs.
+    # (b) TRIGGERS: run on-demand requests NOW (event-driven); each is removed the moment it ran.
     if (-not $secondary) {
         foreach ($tr in @(Invoke-PimSchedulerTriggerDrain -NowUtc ($now.Add([datetime]::UtcNow - $wallStart)) -WhatIf:$WhatIf)) { if ($null -ne $tr) { $results.Add($tr) } }
     }
@@ -3655,37 +3955,19 @@ function Invoke-PimSchedulerTick {
             $slot = $null
             if ($j.PSObject.Properties['nextRunUtc'] -and "$($j.nextRunUtc)".Trim()) { $slot = Get-PimUtcStamp $j.nextRunUtc }
             if ($null -eq $slot) { $slot = $now }
-            $started  = [datetime]::UtcNow
-            $jobStart = $now.Add($started - $wallStart)
-            $jRunId = [guid]::NewGuid().ToString('N')
-            $coveredBy = if ($WhatIf) { $null } else { Get-PimTickCoverage -Job $j }   # §87 BUG-281
-            if ($coveredBy) {
-                $res = [pscustomobject]@{ name = "$($j.name)"; type = "$($j.type)"; ok = $true; ran = $false; covered = $true
-                    detail = ("covered -- its scopes were reconciled cleanly earlier in this tick by {0}; next run on its own cadence" -f (@($coveredBy) -join ', '))
-                    ranUtc = $now.ToString('o'); correlationId = $jRunId }
-                Write-Host ("[scheduler] {0}: {1}" -f $j.name, $res.detail) -ForegroundColor DarkGray
-            } else {
-                if (-not $WhatIf) { [void](Write-PimJobRunningRecord -Job $j -RunId $jRunId -StartedUtc $started) }
-                $res = Invoke-PimScheduledJob -Job $j -NowUtc $now -WhatIf:$WhatIf -CorrelationId $jRunId
-                if (-not $WhatIf) { Add-PimTickReconciled -Job $j -Result $res }
-            }
-            $results.Add($res)
-            Write-PimJobRunRecord -Job $j -Result $res -StartedUtc $started -RunId $jRunId | Out-Null
-            # 🔴 Both stamps used to be the TICK start. A tick runs its jobs in sequence, so a job
-            # that started 13 minutes into the tick recorded a last run 13 minutes early, and its next
-            # slot drifted with every long tick. lastRun = when THIS job started (what run history
-            # records). 🔴 SCHED-1 (2026-10-04): next = when THIS job FINISHED + its interval, so a run longer than its
-            # cadence is never followed straight away by the next one. lastFinishedUtc is kept for the Jobs view and for
-            # re-deriving the next slot when the cadence changes (Resolve-PimSchedulerJobs).
-            $jobEnd = $now.Add([datetime]::UtcNow - $wallStart)
-            $nr = (Get-PimNextRunAfterRun -Job $j -ScheduledUtc $slot -StartedUtc $jobStart -FinishedUtc $jobEnd).ToString('o')
-            $lr = $jobStart.ToString('o')
-            if ($j.PSObject.Properties['nextRunUtc']) { $j.nextRunUtc = $nr } else { $j | Add-Member -NotePropertyName nextRunUtc -NotePropertyValue $nr -Force }
-            if ($j.PSObject.Properties['lastRunUtc']) { $j.lastRunUtc = $lr } else { $j | Add-Member -NotePropertyName lastRunUtc -NotePropertyValue $lr -Force }
-            $j | Add-Member -NotePropertyName lastFinishedUtc -NotePropertyValue ($jobEnd.ToString('o')) -Force
-            # Renew mid-tick: a scheduled run can outlive the TTL (a full reconcile is not
-            # quick), and a lapsed lease would let a second runner start while this one is
-            # still writing. Renewal is half-TTL-gated, so this is not a per-job store write.
+            $o = Invoke-PimTickJobRun -Job $j -Kind scheduled -Slot $slot -TickNowUtc $now -WallStart $wallStart -WhatIf:$WhatIf `
+                    -Owner $Owner -UseLocks:$useLocks -LeaseTtlMinutes $LeaseTtlMinutes -History $tickHist `
+                    -TimeLimitSeconds $script:PimTickCtx.limit -ExecWallStart $wallStart
+            if ($o.outcome -eq 'ran') {
+                $results.Add($o.result); $ranNames.Add("$($j.name)")
+            } elseif ($o.outcome -ne 'elsewhere') {
+                # waiting for an area / a free slot / the next execution: the job stays due, nothing is recorded as a run
+                $results.Add([pscustomobject]@{ name = "$($j.name)"; type = "$($j.type)"; ok = $true; ran = $false; waiting = $true; outcome = "$($o.outcome)"; detail = "$($o.detail)" })
+                Write-Host ("[scheduler] {0}: {1}" -f $j.name, $o.detail) -ForegroundColor DarkYellow
+                continue
+            } else { continue }
+            # Renew mid-tick: a scheduled run can outlive the TTL (a full reconcile is not quick), and a lapsed lock
+            # would let a second runner start while this one is still writing. Half-TTL-gated, not a per-job write.
             if ($haveLease -and (Test-PimSchedulerLeaseRenewDue -Lease (Get-PimSchedulerLeaseRaw).Lease -NowUtc ([datetime]::UtcNow) -TtlMinutes $LeaseTtlMinutes)) {
                 [void](Update-PimSchedulerLease -Owner $Owner -NowUtc ([datetime]::UtcNow) -TtlMinutes $LeaseTtlMinutes)
             }
@@ -3703,25 +3985,30 @@ function Invoke-PimSchedulerTick {
             }
         }
     }
-    Save-PimSchedulerState -State ([pscustomobject]@{ jobs = @($Jobs); lastWatermark = $lastWm; updatedUtc = $now.ToString('o') })
+    # §95.2o: the stamps are MERGED, never a whole-state overwrite -- another execution's newer stamps are kept.
+    [void](Save-PimSchedulerJobStamps -Jobs @($Jobs) -RanNames @($ranNames.ToArray()) -LastWatermark $lastWm -NowUtc $now)
     return $results.ToArray()
     }
     finally {
-        # Release even when a job threw. A crash that leaves the lease held would block every
+        # Release even when a job threw. A crash that leaves a lock held would block every
         # later run until the TTL expires -- for a cron deployment that is silent downtime.
         $global:PIM_LeaseHeartbeat = $null
         $global:PIM_BetweenScopesHook = $null
+        $global:PIM_ScopeGateHook = $null; $script:PimScopeGateCtx = $null
         $script:PimTickOwner = $null
+        $script:PimTickCtx = $null
+        if ($useLocks) { try { [void](Remove-PimAreaLocks -Owner $Owner) } catch { Write-Warning "[scheduler] this tick's area locks were NOT released ($($_.Exception.Message)) -- they expire at their TTL" } }
         if ($haveLease) { [void](Remove-PimSchedulerLease -Owner $Owner) }
     }
 }
 
 function Invoke-PimSchedulerLeaseHeartbeat {
     <#
-      Renew the tick's lease from INSIDE a long job. Time-gated in memory (a third of the TTL
+      Renew the tick's guard from INSIDE a long job. Time-gated in memory (a third of the TTL
       since the last renewal), so calling it once per applied item costs nothing between
-      renewals. Returns $false only when the lease is known LOST (someone else holds it), so a
-      caller can stop writing; $true otherwise, including when no leased tick is running.
+      renewals. Returns $false only when the guard is known LOST (someone else holds it), so a
+      caller can stop writing; $true otherwise, including when no guarded tick is running.
+      §95.2o: a lanes tick renews this owner's AREA LOCKS (and the legacy lease if it took one over).
     #>
     [CmdletBinding()]
     param([datetime]$NowUtc = [datetime]::UtcNow)
@@ -3731,6 +4018,17 @@ function Invoke-PimSchedulerLeaseHeartbeat {
     $now = $NowUtc.ToUniversalTime()
     $gap = [math]::Max(1, [int]$hb.ttl / 3)
     if (($now - [datetime]$hb.lastUtc).TotalMinutes -lt $gap) { return $true }
+    if ($hb.PSObject.Properties['locks'] -and $hb.locks) {
+        $u = $null; try { $u = Update-PimAreaLocks -Owner $hb.owner -NowUtc $now -TtlMinutes $hb.ttl } catch { $u = $null }
+        if ($u -and @($u.lost).Count) {
+            $hb.lost = $true
+            Write-Warning ("[scheduler] area lock LOST mid-job ({0}) -- this run stops applying further items." -f (@($u.lost) -join ', '))
+            return $false
+        }
+        if ($hb.PSObject.Properties['legacyLease'] -and $hb.legacyLease) { try { [void](Update-PimSchedulerLease -Owner $hb.owner -NowUtc $now -TtlMinutes $hb.ttl) } catch { Write-Warning "[scheduler] the taken-over lease was not renewed: $($_.Exception.Message)" } }
+        if ($u -and $u.ok) { $hb.lastUtc = $now }
+        return $true
+    }
     $ok = $false
     try { $ok = [bool](Update-PimSchedulerLease -Owner $hb.owner -NowUtc $now -TtlMinutes $hb.ttl) } catch { $ok = $false }
     if ($ok) { $hb.lastUtc = $now; return $true }
@@ -3780,3 +4078,6 @@ function Start-PimScheduler {
         Start-Sleep -Seconds $IntervalSeconds
     }
 }
+
+# §95.2o: the job lanes (per-area locks, the scope gate, the time limit, why a run was interrupted, the CAS state writes).
+. (Join-Path $PSScriptRoot 'PIM-JobLanes.ps1')

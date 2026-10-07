@@ -13,6 +13,13 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.530 -- 2026-10-08
+
+- **Jobs run side by side.** Jobs that work on different areas (groups, admins, Entra roles, policies, Azure, workloads, reviews) now run at the same time; two runs never work on the same area at once. *Run now* on a busy area is queued and says what it waits for ("queued -- starts when <job> has finished").
+- **Every run records its own result when it ends**, and a run cut short by an update or a platform restart is shown as *interrupted -- runs again* (grey), not as a failure; only twice in a row turns it red.
+- **Jobs page:** grouped into Engine / Maintenance / Reports / Updates, what needs attention first, one line per job with a details panel.
+- A role assignment refused because the group is not role-assignable now names that cause and its fix.
+
 ## 2.4.529 -- 2026-10-08
 
 - **Get Started is a real wizard.** Every step now has its own fields right in the step (licence, departments and owners, roles and templates, admin accounts, access mapping, policies, alert recipients, break-glass accounts, first run, PIM Activator, discovery) and saves through the same place as the normal page. Previous / Save & exit / Save & next; a refused save stays on the step with the reason under the field; people are found by name.

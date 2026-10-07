@@ -23,6 +23,13 @@ function Get-PimUtcStamp {
     [CmdletBinding()]
     param([Parameter(ValueFromPipeline)][AllowNull()][object]$Value)
     process {
+        # A [datetime] (pwsh 7's ConvertFrom-Json turns every ISO stamp read back from pim.Settings into one, Kind=Local):
+        # "$Value" would drop the zone and AssumeUniversal below would then read LOCAL time as UTC -- off by the host's UTC
+        # offset (seen 2026-10-08 on the test VM: a 5-minute-old run read as in the future). Unspecified keeps the old reading.
+        if ($Value -is [datetime]) {
+            if ($Value.Kind -eq [DateTimeKind]::Local) { return $Value.ToUniversalTime() }
+            return [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc)
+        }
         $s = "$Value".Trim()
         if (-not $s) { return $null }
         $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal

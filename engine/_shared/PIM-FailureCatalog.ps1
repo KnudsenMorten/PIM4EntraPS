@@ -131,6 +131,16 @@ $script:PimFailureRules = @(
        retryable = $false; severity = 'data'
        fixes = @(@{ id = 'delete-row'; label = 'Remove this row'; kind = 'delete-row' }) }
 
+    # §95.2o (a customer, 2026-10-07): Entra refuses an Entra ROLE on a group that is not role-assignable -- shown as
+    # "Unrecognised failure". The flag is fixed when the group is created and cannot be changed afterwards.
+    @{ code = 'ENTRA-GROUP-NOT-ROLE-ASSIGNABLE'
+       match = { param($m, $row) $m -match '(?i)InvalidRoleAssignment|not role[- ]assignable|isAssignableToRole' }
+       title = 'The group is not role-assignable, so Entra refuses the role'
+       cause = 'An Entra role can be given to a group only when the group was CREATED as role-assignable. This group exists without that flag (it was created outside PIM Manager, or before IsRoleAssignable was set on its definition), and the flag cannot be added to an existing group.'
+       remedy = 'Set IsRoleAssignable = TRUE on the group''s definition; the daily reconcile then recreates the group role-assignable and the role applies on the next run. Or give the role to another, role-assignable group.'
+       retryable = $false; severity = 'data'
+       fixes = @() }
+
     @{ code = 'ENTRA-ROLE-UNRESOLVED'
        # 2026-10-07 (Invardia fix request 7429f13c, a customer): RolesAUs says "unresolved group/AU/role" -- the same failure
        # with the administrative unit as a third part; it fell through to UNCLASSIFIED.

@@ -2894,6 +2894,7 @@ function Start-PimManagerTickNow {
     }
     if (Get-Command Get-PimSchedulerLeaseRaw -ErrorAction SilentlyContinue) {
         try {
+            # A tick-wide lease is held only by a run of the version before job lanes (during an update roll).
             $l = (Get-PimSchedulerLeaseRaw).Lease
             if ($l -and "$($l.owner)".Trim() -and "$($l.expiresUtc)".Trim()) {
                 $exp = [datetime]::MinValue
@@ -2901,6 +2902,18 @@ function Start-PimManagerTickNow {
                 if ([datetime]::TryParse("$($l.expiresUtc)", [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$exp) -and $exp.ToUniversalTime() -gt $now) {
                     return [pscustomobject]@{ started = $false; reason = 'running'; detail = 'an engine run is in progress; it picks this up as soon as its current step finishes' }
                 }
+            }
+        } catch { }
+    }
+    # §95.2o job lanes: other runs no longer block a start -- a new run works on the areas they do not hold. Only a full
+    # set of side-by-side runs (the lane cap) waits: one of them picks this up when it finishes its current job.
+    if (Get-Command Get-PimSchedulerLocksRaw -ErrorAction SilentlyContinue) {
+        try {
+            $lm = (Get-PimSchedulerLocksRaw).Map
+            $busy = @(Get-PimLiveLockOwners -Map $lm -NowUtc $now)
+            $cap = Get-PimLaneCap
+            if ($busy.Count -ge $cap) {
+                return [pscustomobject]@{ started = $false; reason = 'busy'; detail = "$($busy.Count) engine runs are in progress (at most $cap side by side); one of them starts this as soon as it finishes its current job" }
             }
         } catch { }
     }
@@ -10879,6 +10892,10 @@ function Handle-Request {
                     overdueCount = $(if ($vm.PSObject.Properties['overdueCount']) { [int]$vm.overdueCount } else { 0 })
                     failingCount = $(if ($vm.PSObject.Properties['failingCount']) { [int]$vm.failingCount } else { 0 })
                     heldCount    = $(if ($vm.PSObject.Properties['heldCount']) { [int]$vm.heldCount } else { 0 })   # 71.13 needs approval
+                    # §95.2o job lanes: runs waiting for an area / a slot, Run now presses queued, how many run side by side
+                    waitingCount = $(if ($vm.PSObject.Properties['waitingCount']) { [int]$vm.waitingCount } else { 0 })
+                    queuedCount  = $(if ($vm.PSObject.Properties['queuedCount']) { [int]$vm.queuedCount } else { 0 })
+                    laneCap      = $(if ($vm.PSObject.Properties['laneCap']) { [int]$vm.laneCap } else { 0 })
                     generatedUtc = "$($vm.generatedUtc)"
                     historyCount = [int]$histCount
                     canRun       = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
@@ -11093,21 +11110,39 @@ function Handle-Request {
                     Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "Could not queue '$name' for the scheduler: $qErr"; code = 'not-queued' }
                     return 503
                 }
+                # §95.2o (operator 2026-10-07: "i have run them manually many times"): say what the press waits for. While
+                # another run holds the area this job writes, it is queued -- "starts when <job> has finished" -- never lost.
+                $lane = $null
+                if (Get-Command Get-PimJobLaneState -ErrorAction SilentlyContinue) { try { $lane = Get-PimJobLaneState -Job $job } catch { $lane = $null } }
+                $waitFor = if ($lane -and $lane.conflict) { "$($lane.conflict.job)" -replace '^job:', '' } else { '' }
                 # §70.21: and start the tick job now instead of waiting for its next cron start.
                 $kick = Start-PimManagerTickNow -Reason "run-now:$name"
+                $detail = if ($waitFor) { "queued -- starts when $waitFor has finished (it works on the same area: $($lane.conflict.area)). The Manager never runs the engine itself." }
+                          elseif ($kick.started) { "queued as trigger:$($job.type):$jobScope and $($kick.detail) -- it starts within about a minute. The Manager never runs the engine itself." }
+                          else { "queued as trigger:$($job.type):$jobScope -- $($kick.detail). The Manager never runs the engine itself." }
                 Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{
                     ok     = $true
                     name   = $name
                     runId  = ''
                     status = 'queued'
                     started = [bool]$kick.started
-                    detail = $(if ($kick.started) { "queued as trigger:$($job.type):$jobScope and $($kick.detail) -- it starts within about a minute. The Manager never runs the engine itself." } else { "queued as trigger:$($job.type):$jobScope -- $($kick.detail). The Manager never runs the engine itself." })
+                    waitingFor  = $waitFor
+                    waitingArea = $(if ($waitFor) { "$($lane.conflict.area)" } else { '' })
+                    detail = $detail
                 })
                 return 202
             }
 
             try {
                 $r = Invoke-PimJobForceStart -Name $name -Job $job
+                if ("$($r.status)" -eq 'queued') {
+                    # §95.2o: another run holds the area this job writes -- Invoke-PimJobForceStart queued it for the scheduler.
+                    Write-PimManagerAuditEvent -Action 'schedule.job.run.queued' -Target "job:$name" -After @{ type = "$($job.type)"; waitingFor = "$($r.waitingFor)"; queued = $true } -Result 'ok'
+                    $kick = $null; try { $kick = Start-PimManagerTickNow -Reason "run-now:$name" } catch { $kick = $null }
+                    Write-JsonResponse -Response $resp -Status 202 -Body ([ordered]@{ ok = $true; name = $name; runId = ''; status = 'queued'; started = [bool]($kick -and $kick.started)
+                        waitingFor = "$($r.waitingFor)"; waitingArea = "$($r.waitingArea)"; detail = "$($r.detail)" })
+                    return 202
+                }
                 Write-PimManagerAuditEvent -Action 'schedule.job.run' -Target "job:$name" -After @{ runId = "$($r.runId)"; status = "$($r.status)" } -Result $(if ($r.ok) { 'ok' } else { 'error' })
                 # ALERT-01: engine-failure used to be fired HERE, and ONLY here -- which is
                 # exactly why it never fired for a scheduled run. It now fires from the two

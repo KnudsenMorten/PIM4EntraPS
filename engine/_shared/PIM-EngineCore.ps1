@@ -1712,6 +1712,20 @@ function Invoke-PimEngine {
     }
     $__nScopes = @($res.scopes).Count; $__iScope = 0
     foreach ($s in @($res.scopes)) {
+        # §95.2o: a scheduler run over several AREAS holds only the area of the scope it is on. The gate takes that area
+        # (waiting while another run writes it) before the scope runs; a scope whose area stayed busy is reported NOT
+        # CHECKED, never applied beside the other run. Only a real run; a plan writes nothing and is never gated.
+        if (-not $WhatIf -and $global:PIM_ScopeGateHook -is [scriptblock]) {
+            $__gate = $null
+            try { $__gate = & $global:PIM_ScopeGateHook $s } catch { $__gate = [pscustomobject]@{ ok = $false; detail = "the area lock could not be taken: $($_.Exception.Message)" } }
+            if ($__gate -and $__gate.PSObject.Properties['ok'] -and -not $__gate.ok) {
+                Write-Host ("[engine] {0}: NOT CHECKED -- {1}" -f $s, "$($__gate.detail)") -ForegroundColor DarkYellow
+                $out.Add([pscustomobject]@{ scope = $s; ok = $true; notChecked = $true; skippedReason = "$($__gate.detail)"; skipped = 0
+                    desired = 0; live = 0; create = 0; update = 0; remove = 0; nochange = 0; errors = 0; plan = @() })
+                $__iScope++
+                continue
+            }
+        }
         $out.Add((Invoke-PimEngineScope -Scope $s @common))
         $__iScope++
         # §70.22: a scheduler tick sets this so committed queue actions (TAP re-issue, revoke) are applied between the
