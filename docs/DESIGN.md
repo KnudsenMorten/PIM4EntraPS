@@ -903,19 +903,25 @@ unit-tested builders (`Resolve-PaGraphScopeIds`, `New-PaRequiredResourceAccess`,
 `New-PaConsentScopeString`, `Set-PaOauth2Grant`). A gate test fails on any module import, SDK cmdlet or device-code text.
 
 **Operations > PIM Activator (the Manager page).** A guided page like Get Started: five steps (the Entra apps, the settings
-catalog, the Intune remediation, Edge for Business, servers), each with a state read from the data. The Manager reads (the
-apps and their sign-in addresses, the published extension versions from the update manifests) and builds text (the filled
-Detect / Remediate pair, the Edge settings) -- it never writes to the tenant with its own identity. The **Create / Repair**
-and **Upload to Intune** buttons write with the CLICKING admin's own Microsoft sign-in: a popup to the Microsoft sign-in
-page (the Manager's sign-in app as the client, auth code + PKCE, only the scopes that button needs), answered by
-`/activator-signin` on the Manager's own address (postMessage + BroadcastChannel, same origin) and redeemed in the page
-(the redirect is a single-page-application address on the sign-in app, added by `Set-PimManagerEasyAuth.ps1`); the token
-stays in the browser and goes straight to Microsoft Graph. Edge for Business has no API, so its step is a guide that
-mirrors the admin center's "Manage extension" fields, and `POST /api/activator/edge-policy` turns the cards into the two
-settings to paste: `ExtensionSettings` (`{"*":{}, "<id>":{installation_mode, blocked_permissions, runtime_blocked_hosts,
-runtime_allowed_hosts, minimum_version_required, override_update_url, update_url, toolbar_state}}`) and
-`ExtensionInstallForcelist` (`<id>;<update url>`), both extensions in ONE policy (the service does not merge extension
-lists across policies). Every step also shows the script: download it from Invardia, then the exact command.
+catalog, the Intune remediation, Edge for Business, servers), each with a state read from the data. The page **writes
+nothing to the tenant** -- no create or upload buttons and no Microsoft sign-in in the page: the Manager reads (the apps,
+their sign-in addresses, whether each enterprise app requires assignment and who is assigned, the published extension
+versions from the update manifests) and every step shows the command to run, open by default, filled in with this
+environment's values: download the one script from Invardia, then run it. Each command is **self-contained** -- one file,
+nothing else to fetch: the Remediation script builds the Detect / Remediate pair itself from the Settings values (the same
+builder the page uses, with the two shipped scripts embedded in the published file), and the server install takes the
+tenant and app directly, so it needs no sign-in and no catalog file.
+**Who gets it** is the customer's choice, never everyone: a group per channel (PROD and TEST), picked by name from the
+directory and stored as a PIM setting (`ActivatorTargets`, Admin, confirmed in the directory, audited). The chosen group goes
+into every command as `-AssignToGroupId`, and each command says to whom it deploys. Without a group the scripts assign
+nobody and say so. The app script always sets the enterprise app to *Assignment required*, so only assigned people can sign
+in (direct, permanent members -- Entra does not pass app access through nested groups); it will not close an app that is open
+to everyone today unless a group is given in the same run, so current users are not locked out. There is no "all users" or
+"all devices" option. Edge for Business has no API, so its step is a guide: allow the install source first
+(`ExtensionInstallSources` = the folder of each update URL, e.g. `https://<host>/<path>/*`, never a whole site), then add the
+extensions with the values shown in the per-extension cards (each value with its own Copy) -- or paste `ExtensionSettings`
+(the JSON) and `ExtensionInstallForcelist` (one `<id>;<update url>` row per extension); both extensions in ONE policy (the
+service does not merge extension lists across policies), assigned to the chosen group.
 **Exchange Online over REST.** The one Exchange need — setting a new admin
 account's mailbox forwarding — also goes through `PIM-Rest.ps1` (the `exo`
 audience) rather than the Exchange Online PowerShell module. It calls the
@@ -2383,6 +2389,10 @@ normally has no mailbox of its own, so its mail goes to the account **owner's of
 | `ForwardMailsToContact = TRUE` and `MailForwardAddress` is a real address | `MailForwardAddress` |
 | otherwise `ManagerEmail`, if it is a real address | `ManagerEmail` |
 | otherwise | *(none)* — the caller refuses |
+
+The Manager no longer shows or edits `ManagerEmail` (2026-10-08): an admin is linked to a sponsor department, and that
+department's owners receive its mail. A value already stored stays in the row (nothing is migrated or lost) and is still
+read as the last fallback.
 
 "A real address" is the shared `Test-PimMailForwardAddressIsReal` predicate: the schema's sentinel
 values (`FALSE`, `no`, `0`, `none`, `n/a`, blank, `true`) are not addresses. The engine fires
@@ -5987,6 +5997,14 @@ the group's **owner** policy as well as the member policy, and applies the full 
 set. **RBAC prerequisite**: the engine identity needs `RoleManagementPolicy.ReadWrite.AzureADGroup`
 (+ `…Directory`); a refused policy read is reported as a **missing permission** naming it, never as
 "no member policy".
+**A new group's policy is allowed to be late.** PIM creates the policy of a new group in the background. For a
+few minutes after the group is created, its policy can answer "not found" when the engine reads it again before
+writing, and a single rule update can be refused as invalid. Nothing is written when that read fails. When the group
+was created within the waiting window (two hours, the same window after which a waiting item counts as failed
+again), the item is reported as **waiting** ("the new group's PIM policy is not ready yet") and the next run applies
+it. On an established group, or when the group's age cannot be read, the same failure stays a **failure**: "the
+group's PIM policy could not be read". A refused (403), throttled (429) or service-error (5xx) read keeps its own
+class. On a "not found" answer the engine also forgets the policy id it had, so the next run looks it up again.
 
 **Azure resource role policies (`AzResPolicies`, order 58).** For every Azure scope/role the desired
 rows name, the provider reads the ARM `roleManagementPolicies` assignment for that role at that
@@ -7407,6 +7425,26 @@ Queue entries move `pending → committed → applying → applied | failed`, or
   stale one with `409` (§18.1h). Since v2.4.426 the page re-reads the data, re-applies its edits and
   retries once when every edit still applies. Only a real overlap is shown, with a reload that keeps
   the staged edits.
+- **A large commit is set-based, and a slow one is never reported as lost** (§97.1, built, not yet
+  released). A commit of a few hundred staged rows (a template import) used to cost time per row in
+  two places: matching the staged changes against the stored rows re-derived every stored row's key
+  for every staged change (changes × rows, before and after the write), and every changed row was its
+  own SQL round trips (the row, its journal entry, its attribution on its own connection). Now:
+  - the staged changes are matched through a key index of the rows, built once per commit
+    (linear in changes + rows);
+  - the changed rows, the removals and one journal entry per row are written as **one statement
+    batch** per 500 rows inside the same single transaction (rows passed as one JSON parameter),
+    and the per-row attribution as one statement — a constant number of round trips, the same journal
+    content, the same all-or-nothing rollback and the same backup before the apply;
+  - every commit logs one timing line: the time of each stage (read, diff, gates, pending match,
+    backup + apply, audit, re-read, pending clean-up) and the SQL connections it opened.
+  **A timeout is not a failure.** The page sends each commit with its own id (`clientCommitId`) and
+  waits up to 5 minutes for it (other calls: 2 minutes). The server journals the commit under that id
+  and keeps its answer; if the page gets no answer it asks `GET /api/commit-status/<id>` and reports
+  what really happened — saved (and carries on), refused (the refusal itself), not saved (no record,
+  checked) — and, only when even that question goes unanswered, that it is **not known** whether the
+  commit was saved, never "not saved". A repeat of the same id is answered from the record and never
+  applied twice.
 - **Pending-change highlighting is by row key**, not by position, so adding a row does not paint
   every row below it as modified, and the badge counts real changes. A move or removal staged from
   the map merges into the edits already staged instead of replacing them, and a validation
@@ -7579,6 +7617,7 @@ done **inside the wizard**: it never sends the administrator to another page to 
   | Step | What the step shows and saves |
   |---|---|
   | Naming convention (step 1) | the admin word, tenant name, admin account patterns, PIM group pattern and role tag prefix, each with what it renders as → the naming save (the whole stored map, every other key kept); a confirmation "these names are right" makes it done. It comes first because templates and wizards name everything by it |
+  | Environment name | the short name shown at the top of every page and in the browser tab (e.g. Test (EU)) → the same save as Settings > Environment name (at most 40 characters, SuperAdmin). Done when a name is set |
   | Licence | the licence file or text → the licence registration (signature checked before anything is stored) |
   | Engine permissions | what is missing, what it blocks, the exact grant to run, Check again (the page grants nothing itself) |
   | Mail sender | the sender in use; the setup script (download from Invardia + the command); Send a test mail |
@@ -7616,7 +7655,7 @@ done **inside the wizard**: it never sends the administrator to another page to 
 - **People and groups are found by name** (search + dropdown); nobody pastes an object id.
 - **The menu's red !** shows while a required step is open. It is computed from the same checks, read from a one-minute
   cache that every save clears.
-- **Roles.** A step that needs a SuperAdmin (naming, licence, departments, break-glass) says so to anyone else and lets them move on.
+- **Roles.** A step that needs a SuperAdmin (naming, environment name, licence, departments, break-glass) says so to anyone else and lets them move on.
 
 ### 18.2 UX goal — zero memorization
 

@@ -1073,6 +1073,13 @@
   .act-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
   .act-log { margin:8px 0; padding:8px 10px; background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; font-size:12px; max-width:900px; }
   .act-more { margin-top:8px; font-size:12px; }
+  /* 97.2 (owner 2026-10-08): commands only, shown open, each with to whom it deploys; a group picker per channel */
+  .act-cmd { margin:4px 0 10px; max-width:900px; }
+  .act-deploys { font-size:12px; margin:2px 0 0; }
+  .act-pick { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; margin:4px 0 6px; font-size:12.5px; }
+  .act-pick-l { min-width:260px; font-weight:600; }
+  .act-copy-sm { font-size:11px; padding:1px 7px; margin-left:4px; }
+  .act-pick input { font-size:12.5px; padding:4px 7px; border:1px solid #d0d7de; border-radius:5px; }
   .act-more > summary { cursor:pointer; color:#0969da; }
   .act-code { position:relative; max-width:1000px; }
   .act-code pre { background:#f6f8fa; border:1px solid #d0d7de; border-radius:6px; padding:8px 64px 8px 10px; font-size:11.5px; white-space:pre-wrap; word-break:break-all; margin:6px 0; }
@@ -3211,9 +3218,10 @@
          // devine an AutoDisableDate"). The date the engine disables this account -- and nothing more
          // than disable: PIM never deletes an account.
          '<th title="On this date the engine DISABLES the account, revokes its sessions and removes its PIM access. PIM never deletes accounts.">Auto-disable</th>' +
-         // DOC-17 g / 71.19: ManagerEmail is a LEGACY fallback -- mail (TAP included) goes to the sponsor
-         // department's owners. The column says so, and an empty one is not an error.
-         '<th>TAP</th><th>Mail forward</th><th title="Legacy per-admin ManagerEmail. Since 71.19 mail (including the TAP) goes to the sponsor department&#39;s owners; this is only a fallback.">Manager (legacy)</th>' +
+         // 97.1 (owner 2026-10-08: "remove this manager mail, as we dont use that anymore. we link the manager to a dept and
+         // link the admin to a dept"): no ManagerEmail column -- mail (TAP included) goes to the sponsor department's owners.
+         // A stored ManagerEmail is kept (the editor no longer sends it, and the server leaves a field not sent untouched).
+         '<th>TAP</th><th>Mail forward</th>' +
          (syncCol === 'master' ? '<th>Sync to managed tenants</th>' : (syncCol === 'managed' ? '<th>From managing tenant</th>' : '')) +
          '<th style="min-width:300px;">Actions</th></tr>';
     rows.forEach((a, rowIx) => {
@@ -3241,7 +3249,6 @@
         // Operator, 2026-09-12: "mail forward must be shown above in the list" -- where this admin's
         // mail goes should be readable in the grid, not only inside Edit.
         '<td style="font-size:11.5px;">' + acctMailForwardCell(a) + '</td>' +
-        '<td style="font-size:11.5px;">' + (a.managerEmail ? escapeHtml(a.managerEmail) : '<span style="color:#8c959f;" title="Not needed: mail goes to the sponsor department&#39;s owners">&mdash;</span>') + '</td>' +
         (syncCol === 'master' ? '<td style="font-size:11.5px;" class="acctSyncCell">' + acctSyncCell(a) + '</td>' :
          syncCol === 'managed' ? '<td style="font-size:11.5px;" class="acctFromMaster">' + (a.source === 'central'
             ? '<span style="color:#8250df;" title="Received from the managing tenant -- read-only here">received from the managing tenant (read-only)</span>'
@@ -3450,8 +3457,7 @@
       '<select class="acctEditFldTop acctDeptSel" data-k="department" data-cur="' + esc(dept) + '" style="width:190px;">' +
         '<option value="">-- none --</option>' + (dept ? '<option value="' + esc(dept) + '" selected>' + esc(dept) + '</option>' : '') +
       '</select>');
-    h += lbl('Manager email (legacy fallback &mdash; mail goes to the sponsor department&rsquo;s owners)',
-      '<input class="acctEditFldTop" data-k="managerEmail" type="email" placeholder="manager@company.com" value="' + esc(a.managerEmail || '') + '" style="width:200px;">');
+    // (No "Manager email" field any more -- owner 2026-10-08: the admin's mail goes to its department's owners.)
     // 🔴 71.23 -- AUTO-DISABLE DATE, editable right here (operator: "i need to have this field on the
     // admin overview so i cna devine an AutoDisableDate"). The effect is spelled out under the field,
     // because "auto-disable" has to be unambiguous: it disables, and PIM never deletes an account.
@@ -3948,7 +3954,6 @@
           (payload.mailForwardAddress && !ACCT_MAIL_RX.test(payload.mailForwardAddress.trim())) ? 'Office user email address is not a valid email address.' :
           (payload.forwardMailsToContact === 'TRUE' && !String(payload.mailForwardAddress || '').trim()) ? 'Forward mail to the owner’s office user is TRUE, so enter the office user email address (or set it to FALSE).' :
           (payload.forwardMailsToContact === 'FALSE' && String(payload.mailForwardAddress || '').trim()) ? 'An office user email address is entered but sending is FALSE -- set it to TRUE, or clear the address.' :
-          (payload.managerEmail && !ACCT_MAIL_RX.test(payload.managerEmail.trim())) ? 'Manager email is not a valid email address.' :
           (payload.managementMode === 'msp' && !pimRingValid(payload.ring)) ? 'Sync to managed tenants is msp, so choose a Ring (' + pimRingRangeText() + ')' + ' -- without one the admin reaches no managed tenant.' : '';
         if (bad) { if (msg) { msg.textContent = bad; msg.style.color = '#cf222e'; } return; }
         if (msg) { msg.textContent = 'Saving ' + upn + '…'; msg.style.color = '#57606a'; }
@@ -8841,7 +8846,7 @@
       const internal = (pendingChanges[base].rows || []).filter(r => /^internal$/i.test(String(r.Type || '').trim()));
       save.disabled = true; msg('Saving…');
       try {
-        await api('PUT', '/api/csv/' + encodeURIComponent(base), commitPutBody(base, internal.concat(out)));
+        await commitPutOnce(base, internal.concat(out));   // §97.1: a timeout is asked about, never assumed lost
         try { delete pendingChanges[base]; } catch (_) { }
         try { if (typeof _coCache !== 'undefined') { _coCache = null; _coLoaded = false; } } catch (_) { }
         msg('Saved ' + out.length + ' compan' + (out.length === 1 ? 'y' : 'ies') + '.');
@@ -13115,6 +13120,12 @@
     { id: 'naming', title: 'Naming convention', required: true, need: 'SuperAdmin',
       what: 'How PIM names the groups and admin accounts it creates. Set it first: the templates and wizards in the next steps name everything by it.',
       check: c => { const k = c.confirm && c.confirm.naming; return { done: !!k, note: k ? ('confirmed by ' + (k.by || 'an admin')) : 'not confirmed yet -- check the names before you add templates' }; } },
+    // Owner 2026-10-08: "in the get started i also want to have one page with Environment name, instead of us having to go to
+    // settings afterwards". The SAME setting as Settings > Environment name (pim.Settings 'EnvironmentName', PUT
+    // /api/settings/environment-name, SuperAdmin, at most 40 characters). Done = a name is set.
+    { id: 'envname', title: 'Environment name', required: true, need: 'SuperAdmin',
+      what: 'A short name for this PIM environment, shown at the top of every page and in the browser tab, so several open PIM Managers are told apart -- e.g. Test (EU) or Production.',
+      check: c => { const v = String((c.envName && c.envName.value) || '').trim(); return { done: !!v, note: v ? ('shown as "' + v + '"') : 'no name set yet' }; } },
     { id: 'licence', title: 'Licence', required: true, need: 'SuperAdmin',
       what: 'Register the PIM Manager licence. Pro features and the updates from Invardia depend on it.',
       check: c => { const s = String((c.licence && c.licence.status) || ''); return { done: s === 'Valid' || s === 'Grace', note: (s && s !== 'Missing') ? ('licence: ' + s) : 'no licence registered' }; } },
@@ -13178,6 +13189,7 @@
       safe(() => api('GET', '/api/license')), safe(() => api('GET', '/api/permissions-health')), safe(() => api('GET', '/api/home')),
       safe(() => api('GET', '/api/alerting')), safe(() => api('GET', '/api/settings/breakglass-accounts')),
       safe(() => api('GET', '/api/get-started')), safe(() => api('GET', '/api/jobs'))]);
+    c.envName = await safe(() => api('GET', '/api/settings/environment-name'));
     c.licence = lic; c.perm = perm; c.jobs = home && home.tiles && home.tiles.jobs; c.alerting = alerting; c.breakglass = bg;
     c.confirm = (gs && gs.confirmations) || {};
     c.jobList = Array.isArray(jobs && jobs.jobs) ? jobs.jobs : [];
@@ -13392,6 +13404,26 @@
           catch (e) { return { errors: { namingConfirmed: (saved ? 'The naming was saved, but the confirmation was not: ' : 'Not saved: ') + gsErrText(e) } }; }
         }
         return { wrote: true, note: (saved ? 'Naming convention saved.' : '') + (on && !was ? (saved ? ' ' : '') + 'Recorded: the naming is right for this tenant.' : (!on && was ? ' The confirmation was removed.' : '')) };
+      }
+    },
+    envname: {
+      body: (c) => {
+        const d = c.envName || {};
+        const max = Number(d.maxLength) || 40;
+        return '<label class="gs-l" for="gsEnvName">Environment name</label><input type="text" id="gsEnvName" name="envName" maxlength="' + max + '" placeholder="e.g. Test (EU)" value="' + escapeHtml(String(d.value || '')) + '" style="min-width:260px;">' + gsErr('envName') +
+          '<div class="gs-hint">Shown as <b>Environment</b> at the top of every page and in the browser tab. The tenant name and Tenant ID stay shown as they are. The same setting as Settings &gt; Environment name.</div>';
+      },
+      save: async (form, c) => {
+        const d = c.envName || {};
+        const max = Number(d.maxLength) || 40;
+        const v = gsVal(form, 'envName').replace(/[\x00-\x1F\x7F]/g, ' ').trim();
+        if (v === String(d.value || '').trim()) return { wrote: false };
+        if (v.length > max) return { errors: { envName: 'The environment name can be at most ' + max + ' characters -- nothing was saved.' } };
+        try {
+          const r = await api('PUT', '/api/settings/environment-name', { value: v });
+          try { await renderEnvironmentName((r && r.value) || ''); } catch (_) { }
+          return { wrote: true, note: (r && r.value) ? 'Saved -- shown at the top as "' + r.value + '".' : 'Saved -- no environment name is shown.' };
+        } catch (e) { return { errors: { envName: 'Not saved: ' + gsErrText(e) } }; }
       }
     },
     licence: {
@@ -13909,21 +13941,20 @@
   // ===================================================================================================================
   // 97.2 OPERATIONS > PIM ACTIVATOR (operator 2026-10-07: "a) Easy Setup of Intune (remediation jobs) b) Easy Setup of
   // Edge for Business c) Easy setup of the entra apps ... for PROD and TEST d) Easy build of the catalog for the settings
-  // e) download & syntax for scripts ... for servers ... make it optional to which group or all devices or all users").
-  // Review the same evening: "the view ... is bad, i cannot scoll down ... there is no create buttons to create the
-  // things" -> a guided page like Get Started (one step at a time, state from the data), and CREATE buttons that write
-  // with the CLICKING ADMIN's own Microsoft sign-in (auth code + PKCE in a popup, redeemed in this page; the Manager's
-  // identity gets no write permission and never sees the token). Edge for Business has NO API (operator, confirmed by a
-  // friend: "thre i no api for edge for business" / "so we must make a guide"): that step is a guide that mirrors the
-  // admin center's "Manage extension" fields, plus the two settings to paste. Every step also offers the script:
-  // download it from Invardia, then run it ("include the download url from invardia" / "and then run the deploy cmdlet").
+  // e) download & syntax for scripts ... for servers"). A guided page like Get Started (one step at a time, state from the
+  // data). Owner 2026-10-08: "remove these buttons and leave only the cmdlets to run. remember that we can NOT deploy out.
+  // customer must define who (group) to deploy to - not everyone !!!" and "give option to dropdown group ... it does NOT
+  // say to whom it deploys when running cmdlets ... expand the cmdlets so it is shown by default": the page writes NOTHING
+  // to the tenant (no Create / Upload buttons, no in-page Microsoft sign-in). Every step shows its status (read-only), the
+  // published script with this environment's values filled in -- download from Invardia, then run -- Copy and Check again.
+  // WHO: a group per channel, picked from the directory (GET /api/directory/groups), saved as PIM's own setting
+  // ActivatorTargets (PUT /api/settings/activator-targets) and filled into every command as -AssignToGroupId; with no
+  // group the command assigns nobody, and says so. Never all users / all devices. Each command is SELF-CONTAINED (owner
+  // 2026-10-08: "this guide is wrong as it refers to 3 files"): one download, one command.
   // ===================================================================================================================
   const ACT_DL_BASE = 'https://invardia.com/support/pim/';
-  const ACT_GRAPH = '00000003-0000-0000-c000-000000000000', ACT_ASM = '797f4846-ba00-4fd7-ba43-dac1f8f63013';
-  // The delegated permissions the extension needs (same list as Deploy-PimActivatorBackend.ps1).
-  const ACT_NEEDED = ['PrivilegedAccess.ReadWrite.AzureADGroup', 'Group.Read.All', 'User.Read', 'RoleManagement.Read.Directory',
-    'RoleManagement.ReadWrite.Directory', 'AdministrativeUnit.Read.All', 'Application.Read.All'];
-  const ACT = { d: null, step: '', auth: { tokens: {}, account: '' }, built: null, edge: null, intune: {}, log: [] };
+  const ACT_GUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+  const ACT = { d: null, step: '', built: null, edge: null, form: null, sched: null, host: null, edgeExt: null, groups: {} };
 
   function actDownload(name, text) {
     try { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); } catch (_) { }
@@ -13931,197 +13962,79 @@
   function actCode(id, text) {
     return '<div class="act-code"><pre id="' + id + '">' + escapeHtml(text) + '</pre><button class="actCopy btn-sec" data-src="' + id + '">Copy</button></div>';
   }
-  // "Download it from Invardia, then run it" -- the script path for every step.
-  function actScript(id, file, cmd) {
-    return actCode(id, 'Invoke-WebRequest ' + ACT_DL_BASE + file + ' -OutFile ' + file + '\n' + cmd);
+  // One value an admin types into the Edge admin center, with its own small Copy (owner 2026-10-08: "make a copy button here").
+  function actCopyVal(id, value) {
+    return '<code id="' + id + '">' + escapeHtml(value) + '</code> <button class="actCopy btn-sec act-copy-sm" data-src="' + id + '">Copy</button>';
   }
-  function actB64Url(bytes) {
-    let s = ''; const b = new Uint8Array(bytes);
-    for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
-    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  function actPrettyJson(t) { try { return JSON.stringify(JSON.parse(t), null, 2); } catch (_) { return String(t || ''); } }
+  function actTarget(ch) { const t = (ACT.d && ACT.d.targets) || {}; return t[ch] && t[ch].groupId ? t[ch] : null; }
+  function actLabel(ch) { return ch === 'Test' ? 'TEST' : 'PROD'; }
+  // "PROD -- <group>" or "PROD -- no group chosen yet" -- never "everyone".
+  function actWhoText(ch) { const t = actTarget(ch); return actLabel(ch) + ' -- ' + (t ? (t.displayName || t.groupId) : 'no group chosen yet'); }
+  // "Download it from Invardia, then run it" + to whom it deploys. Shown open: the command IS the step.
+  function actScript(id, file, cmd, ch, what) {
+    const t = ch ? actTarget(ch) : null;
+    const who = !ch ? '' : t
+      ? '<div class="act-deploys ok">Deploys to: <b>' + escapeHtml(t.displayName || t.groupId) + '</b> <span class="act-dim">(' + escapeHtml(t.groupId) + ')</span></div>'
+      : '<div class="act-deploys warn">Deploys to: <b>nobody yet</b> -- nobody gets ' + escapeHtml(what || 'it') + ' until you assign a group (choose it above and the command carries it).</div>';
+    return '<div class="act-cmd">' + actCode(id, 'Invoke-WebRequest ' + ACT_DL_BASE + file + ' -OutFile ' + file + '\n' + cmd) + who + '</div>';
   }
-  function actB64Utf8Bom(text) {
-    // the script text as UTF-8 WITH a BOM, so Windows PowerShell 5.1 on the device reads non-ASCII characters right
-    const u = new TextEncoder().encode(String(text || '')); const b = new Uint8Array(u.length + 3); b.set([0xEF, 0xBB, 0xBF]); b.set(u, 3);
-    let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
-    return btoa(s);
+  async function actGroupSource(q) {
+    if (!isServer) return { items: [], error: 'static mode -- the directory needs the server' };
+    let r = null;
+    try { r = await api('GET', '/api/directory/groups?q=' + encodeURIComponent(q) + '&top=25', undefined, { timeoutMs: 20000 }); }
+    catch (e) { return { items: [], error: String(e && e.message ? e.message : e) }; }
+    const gs = (r && r.groups) || [];
+    gs.forEach(g => { ACT.groups[String(g.id).toLowerCase()] = g; });
+    return { items: gs.map(g => ({ value: g.id, label: g.displayName || g.id, sub: (g.kind || 'group') + ' group', type: 'group' })),
+      note: (r && r.truncated) ? 'more groups match -- keep typing to narrow' : ((r && r.matchMode === 'startswith') ? 'prefix match only' : '') };
   }
-  function actAuthHelp(code, desc) {
-    const d = String(desc || '');
-    if (/AADSTS50011/.test(d)) return 'This Manager\'s sign-in app does not have the PIM Activator sign-in address (' + location.origin + '/activator-signin) yet. Run Set-PimManagerEasyAuth.ps1 for this environment once (it adds it), or use the script below.';
-    if (/AADSTS65001|consent/i.test(d)) return 'Consent is needed for the permissions this button asks for. Sign in as an administrator who may consent (Global Administrator or Privileged Role Administrator), or use the script below. (' + d.split('\n')[0] + ')';
-    return 'Sign-in failed: ' + (code || '') + ' ' + d.split('\n')[0];
+  // The target-group picker for one channel: search by name, pick, saved at once (PIM's own setting, audited).
+  function actPicker(ch) {
+    const t = actTarget(ch), can = !!(ACT.d && ACT.d.canSetTargets);
+    return '<div class="act-pick"><span class="act-pick-l">' + escapeHtml(actWhoText(ch)) + '</span>' +
+      (can ? '<input class="actGroupPick" data-ch="' + ch + '" placeholder="' + (t ? 'change: type a group name' : 'choose the group: type its name') + '" style="width:300px;">' +
+             (t ? ' <button class="actGroupClear btn-sec" data-ch="' + ch + '">No group</button>' : '') +
+             ' <span class="actGroupMsg act-dim" data-ch="' + ch + '"></span>'
+           : ' <span class="act-dim">(an Admin chooses the group)</span>') + '</div>';
   }
-  // The clicking admin's own token for these Graph scopes. One popup; cached per scope set until it expires.
-  async function actToken(scopes) {
-    const si = (ACT.d && ACT.d.signIn) || {};
-    if (!si.clientId) throw new Error('This Manager cannot open a Microsoft sign-in here (it runs without its sign-in app in front). Use the script below instead.');
-    const key = scopes.slice().sort().join(' ');
-    const c = ACT.auth.tokens[key]; if (c && c.exp > Date.now() + 120000) return c.token;
-    const verifier = actB64Url(crypto.getRandomValues(new Uint8Array(32)));
-    const challenge = actB64Url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
-    const state = actB64Url(crypto.getRandomValues(new Uint8Array(16)));
-    const redirect = location.origin + '/activator-signin';
-    const scope = scopes.join(' ') + ' openid profile offline_access';
-    const tenant = encodeURIComponent(si.tenantId || 'organizations');
-    const url = 'https://login.microsoftonline.com/' + tenant + '/oauth2/v2.0/authorize?client_id=' + encodeURIComponent(si.clientId) +
-      '&response_type=code&response_mode=query&redirect_uri=' + encodeURIComponent(redirect) + '&scope=' + encodeURIComponent(scope) +
-      '&state=' + state + '&code_challenge=' + challenge + '&code_challenge_method=S256' +
-      (ACT.auth.account ? '&login_hint=' + encodeURIComponent(ACT.auth.account) : '&prompt=select_account');
-    const w = window.open(url, 'pimActivatorSignIn', 'width=520,height=700');
-    if (!w) throw new Error('The browser blocked the sign-in window -- allow pop-ups for this page and click again.');
-    // The answer comes back from /activator-signin (same origin) by postMessage AND BroadcastChannel: the Microsoft sign-in
-    // page may cut the window.opener link, the channel does not need it.
-    const msg = await new Promise((resolve, reject) => {
-      let bc = null;
-      const done = (m) => { if (!m || m.type !== 'pim-activator-signin' || m.state !== state) return; cleanup(); resolve(m); };
-      const onMsg = (ev) => { if (ev.origin === location.origin) done(ev.data); };
-      const to = setTimeout(() => { cleanup(); reject(new Error('No answer from the sign-in window within 5 minutes.')); }, 300000);
-      function cleanup() { clearTimeout(to); window.removeEventListener('message', onMsg); try { if (bc) bc.close(); } catch (_) { } }
-      window.addEventListener('message', onMsg);
-      try { bc = new BroadcastChannel('pim-activator-signin'); bc.onmessage = (ev) => done(ev.data); } catch (_) { }
+  async function actSaveTarget(ch, target) {
+    const body = {}; body[ch] = target;
+    const r = await api('PUT', '/api/settings/activator-targets', body);
+    if (ACT.d) ACT.d.targets = r.targets;
+    ACT.d = null;               // the commands come from the server: read them again
+    ACT.built = null;
+  }
+  function actWirePickers(root) {
+    root.querySelectorAll('.actGroupPick').forEach(inp => {
+      pimAttachCombo(inp, actGroupSource, { async: true, minChars: 2, itemLabel: 'group', hint: 'the group name' });
+      inp.addEventListener('change', async () => {
+        const id = String(inp.value || '').trim().toLowerCase(), ch = inp.dataset.ch;
+        const msg = root.querySelector('.actGroupMsg[data-ch="' + ch + '"]');
+        if (!ACT_GUID.test(id)) { if (msg) msg.textContent = 'pick a group from the list'; return; }
+        const g = ACT.groups[id] || { id, displayName: '' };
+        inp.value = g.displayName || id;
+        if (msg) msg.textContent = 'Saving...';
+        try { await actSaveTarget(ch, { groupId: id, displayName: g.displayName || '' }); renderActivator(ACT.step); }
+        catch (e) { if (msg) { msg.textContent = e.message; msg.className = 'actGroupMsg bad'; } }
+      });
     });
-    if (msg.error) throw new Error(actAuthHelp(msg.error, msg.error_description));
-    const r = await fetch('https://login.microsoftonline.com/' + tenant + '/oauth2/v2.0/token', { method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ client_id: si.clientId, grant_type: 'authorization_code', code: msg.code, redirect_uri: redirect, code_verifier: verifier, scope: scope }) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.access_token) throw new Error(actAuthHelp(j.error, j.error_description));
-    try { const p = JSON.parse(atob(String(j.id_token || '').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); ACT.auth.account = p.preferred_username || p.upn || ACT.auth.account; } catch (_) { }
-    ACT.auth.tokens[key] = { token: j.access_token, exp: Date.now() + (Number(j.expires_in) || 3600) * 1000 };
-    actSignedInChip();
-    return j.access_token;
-  }
-  function actSignedInChip() {
-    const el = document.getElementById('actWho'); if (!el) return;
-    el.innerHTML = ACT.auth.account ? 'Signed in to Microsoft as <b>' + escapeHtml(ACT.auth.account) + '</b> (for the create buttons only)' : 'The create buttons ask you to sign in to Microsoft with your own admin account.';
-  }
-  async function actGraph(token, method, path, body) {
-    const url = /^https?:/.test(path) ? path : 'https://graph.microsoft.com/' + (/^(v1\.0|beta)\//.test(path) ? path : 'v1.0' + path);
-    for (let i = 0; ; i++) {
-      const r = await fetch(url, { method, headers: Object.assign({ Authorization: 'Bearer ' + token }, body !== undefined ? { 'Content-Type': 'application/json' } : {}), body: body !== undefined ? JSON.stringify(body) : undefined });
-      if ((r.status === 429 || r.status === 503 || r.status === 504) && i < 5) { const ra = Number(r.headers.get('Retry-After')) || (2 + i * 3); await new Promise(res => setTimeout(res, ra * 1000)); continue; }
-      const txt = await r.text(); let j = null; try { j = txt ? JSON.parse(txt) : null; } catch (_) { }
-      if (!r.ok) { const er = (j && j.error) || {}; const e = new Error(method + ' ' + path.split('?')[0] + ' -> HTTP ' + r.status + (er.code ? ' ' + er.code : '') + (er.message ? ': ' + er.message : '')); e.status = r.status; e.code = er.code || ''; throw e; }
-      return j;
-    }
-  }
-  async function actGraphAll(token, path) {
-    let j = await actGraph(token, 'GET', path), out = (j && j.value) || [];
-    while (j && j['@odata.nextLink']) { j = await actGraph(token, 'GET', j['@odata.nextLink']); out = out.concat((j && j.value) || []); }
-    return out;
-  }
-  function actLog(boxId, line, kind) {
-    const box = document.getElementById(boxId); if (!box) return;
-    box.style.display = '';
-    const c = kind === 'err' ? '#cf222e' : kind === 'ok' ? '#1a7f37' : '#57606a';
-    box.insertAdjacentHTML('beforeend', '<div style="color:' + c + ';">' + (kind === 'ok' ? '&#10003; ' : kind === 'err' ? '! ' : '&middot; ') + escapeHtml(line) + '</div>');
-  }
-
-  // ---- create / repair one Activator app (port of Deploy-PimActivatorBackend.ps1, REST in the browser) ----------------
-  async function actEnsureSp(tok, appId, name, logId) {
-    try { return await actGraph(tok, 'GET', "/servicePrincipals(appId='" + appId + "')?$select=id,displayName,oauth2PermissionScopes"); }
-    catch (e) { if (e.status !== 404) throw e; }
-    actLog(logId, name + ' is not in this tenant yet -- adding it');
-    await actGraph(tok, 'POST', '/servicePrincipals', { appId });
-    for (let i = 0; i < 6; i++) { await new Promise(r => setTimeout(r, 2000)); try { return await actGraph(tok, 'GET', "/servicePrincipals(appId='" + appId + "')?$select=id,displayName,oauth2PermissionScopes"); } catch (e) { if (e.status !== 404) throw e; } }
-    throw new Error(name + ' was added but is not readable yet -- try again in a minute.');
-  }
-  async function actEnsureApp(channel, grantConsent) {
-    const logId = 'actAppLog';
-    const ch = (ACT.d.apps || {})[channel] || {};
-    const scopes = ['https://graph.microsoft.com/Application.ReadWrite.All'].concat(grantConsent ? ['https://graph.microsoft.com/DelegatedPermissionGrant.ReadWrite.All'] : []);
-    actLog(logId, 'Signing you in (Application Administrator' + (grantConsent ? ' + Privileged Role Administrator for the consent' : '') + ')...');
-    const tok = await actToken(scopes);
-    const graphSp = await actEnsureSp(tok, ACT_GRAPH, 'Microsoft Graph', logId);
-    const asmSp = await actEnsureSp(tok, ACT_ASM, 'Azure Service Management', logId);
-    const byVal = {}; (graphSp.oauth2PermissionScopes || []).forEach(s => { byVal[s.value] = s.id; });
-    const missing = ACT_NEEDED.filter(n => !byVal[n]); if (missing.length) throw new Error('Microsoft Graph does not offer: ' + missing.join(', '));
-    const asmScope = (asmSp.oauth2PermissionScopes || []).find(s => s.value === 'user_impersonation');
-    if (!asmScope) throw new Error('Azure Service Management has no user_impersonation permission.');
-    const rra = [{ resourceAppId: ACT_GRAPH, resourceAccess: ACT_NEEDED.map(n => ({ id: byVal[n], type: 'Scope' })) },
-                 { resourceAppId: ACT_ASM, resourceAccess: [{ id: asmScope.id, type: 'Scope' }] }];
-    const name = ch.name || (channel === 'Test' ? 'PIM Activator (TEST)' : 'PIM Activator');
-    const found = await actGraphAll(tok, "/applications?$filter=" + encodeURIComponent("displayName eq '" + name.replace(/'/g, "''") + "'") + '&$select=id,appId,spa');
-    if (found.length > 1) throw new Error('More than one app is named "' + name + '" -- rename or delete the extra one first (refusing to guess).');
-    // Both forms per extension id: the launchWebAuthFlow redirect + the extension origin (SPA token redemption). Merged
-    // with what the app already has, never replaced.
-    const ids = [ch.extensionId].filter(Boolean);
-    const uris = []; ((found[0] && found[0].spa && found[0].spa.redirectUris) || []).forEach(u => uris.push(u));
-    ids.forEach(id => { uris.push('https://' + id + '.chromiumapp.org/'); uris.push('chrome-extension://' + id + '/'); });
-    const body = { signInAudience: 'AzureADMyOrg', spa: { redirectUris: Array.from(new Set(uris)) }, publicClient: { redirectUris: [] }, isFallbackPublicClient: false, requiredResourceAccess: rra };
-    let app;
-    if (found.length) { actLog(logId, 'Updating "' + name + '" (' + found[0].appId + ')'); await actGraph(tok, 'PATCH', '/applications/' + found[0].id, body); app = found[0]; }
-    else { actLog(logId, 'Creating "' + name + '"'); app = await actGraph(tok, 'POST', '/applications', Object.assign({ displayName: name }, body)); }
-    let sp = null;
-    try { sp = await actGraph(tok, 'GET', "/servicePrincipals(appId='" + app.appId + "')?$select=id"); } catch (e) { if (e.status !== 404) throw e; }
-    for (let i = 1; !sp && i <= 6; i++) {
-      try { sp = await actGraph(tok, 'POST', '/servicePrincipals', { appId: app.appId }); }
-      catch (e) { if (/NoBackingApplicationObject|does not reference a valid application/i.test(e.message) && i < 6) { actLog(logId, 'the new app is not replicated yet -- retry ' + i + '/6'); await new Promise(r => setTimeout(r, i * 5000)); } else throw e; }
-    }
-    actLog(logId, 'Enterprise app present (' + sp.id + ')');
-    if (grantConsent) {
-      const grant = async (resourceId, scope, label) => {
-        const ex = await actGraphAll(tok, '/oauth2PermissionGrants?$filter=' + encodeURIComponent("clientId eq '" + sp.id + "' and consentType eq 'AllPrincipals' and resourceId eq '" + resourceId + "'"));
-        if (ex.length) await actGraph(tok, 'PATCH', '/oauth2PermissionGrants/' + ex[0].id, { scope });
-        else await actGraph(tok, 'POST', '/oauth2PermissionGrants', { clientId: sp.id, consentType: 'AllPrincipals', resourceId, scope });
-        actLog(logId, label + ' consent granted for the whole tenant', 'ok');
-      };
-      await grant(graphSp.id, ACT_NEEDED.concat(['openid', 'profile', 'offline_access']).join(' '), 'Microsoft Graph');
-      await grant(asmSp.id, 'user_impersonation', 'Azure');
-    }
-    actLog(logId, '"' + name + '" is ready: client id ' + app.appId, 'ok');
-    return app.appId;
-  }
-
-  // ---- upload the Remediation to Intune (port of Publish-PimActivatorRemediation.ps1) -----------------------------------
-  async function actUploadRemediation(r, target, schedule) {
-    const logId = 'actIntuneLog';
-    const name = 'PIM Activator settings (' + (r.channel === 'Test' ? 'TEST' : 'PROD') + ')';
-    actLog(logId, 'Signing you in (Intune Administrator)...');
-    const tok = await actToken(['https://graph.microsoft.com/DeviceManagementScripts.ReadWrite.All']);
-    const base = 'beta/deviceManagement/deviceHealthScripts';
-    const all = await actGraphAll(tok, base + '?$select=id,displayName');
-    const match = all.filter(x => String(x.displayName) === name);
-    if (match.length > 1) throw new Error('More than one Remediation is named "' + name + '" -- delete the extra one first (refusing to guess which to update).');
-    const body = { displayName: name, description: 'PIM Activator -- from the PIM Manager (Operations > PIM Activator) ' + new Date().toISOString().slice(0, 16).replace('T', ' '),
-      publisher: 'PIM Manager', runAsAccount: 'system', runAs32Bit: false, enforceSignatureCheck: false,
-      detectionScriptContent: actB64Utf8Bom(r.detect), remediationScriptContent: actB64Utf8Bom(r.remediate) };
-    let id;
-    if (match.length) { id = match[0].id; await actGraph(tok, 'PATCH', base + '/' + id, body); actLog(logId, 'Updated "' + name + '"'); }
-    else { id = (await actGraph(tok, 'POST', base, Object.assign({ roleScopeTagIds: ['0'] }, body))).id; actLog(logId, 'Created "' + name + '"'); }
-    const back = await actGraph(tok, 'GET', base + '/' + id);
-    if (back.detectionScriptContent !== body.detectionScriptContent || back.remediationScriptContent !== body.remediationScriptContent || back.runAsAccount !== 'system' || back.runAs32Bit) throw new Error('"' + name + '" did not read back as uploaded -- check it in Intune.');
-    actLog(logId, 'Read back OK: the same scripts, runs as SYSTEM, 64-bit', 'ok');
-    if (target) {
-      const tgt = target === 'AllDevices' ? { '@odata.type': '#microsoft.graph.allDevicesAssignmentTarget' } : target === 'AllUsers' ? { '@odata.type': '#microsoft.graph.allLicensedUsersAssignmentTarget' } : { '@odata.type': '#microsoft.graph.groupAssignmentTarget', groupId: target };
-      const runSchedule = schedule.everyHours ? { '@odata.type': '#microsoft.graph.deviceHealthScriptHourlySchedule', interval: schedule.everyHours } : { '@odata.type': '#microsoft.graph.deviceHealthScriptDailySchedule', interval: 1, useUtc: false, time: (schedule.time || '09:00') + ':00' };
-      await actGraph(tok, 'POST', base + '/' + id + '/assign', { deviceHealthScriptAssignments: [{ target: tgt, runRemediationScript: true, runSchedule }] });
-      actLog(logId, 'Assigned to ' + (target === 'AllDevices' ? 'all devices' : target === 'AllUsers' ? 'all users' : 'group ' + target) + ', ' + (schedule.everyHours ? 'every ' + schedule.everyHours + ' hour(s)' : 'daily at ' + (schedule.time || '09:00')), 'ok');
-    }
-    ACT.intune[r.channel] = { found: true, id, name };
-    return id;
-  }
-  async function actCheckIntune() {
-    const logId = 'actIntuneLog';
-    const tok = await actToken(['https://graph.microsoft.com/DeviceManagementScripts.ReadWrite.All']);
-    const all = await actGraphAll(tok, 'beta/deviceManagement/deviceHealthScripts?$select=id,displayName');
-    for (const c of ['Released', 'Test']) {
-      const name = 'PIM Activator settings (' + (c === 'Test' ? 'TEST' : 'PROD') + ')';
-      const m = all.filter(x => String(x.displayName) === name);
-      ACT.intune[c] = { found: m.length > 0, id: m.length ? m[0].id : '', name };
-      actLog(logId, name + ': ' + (m.length ? 'exists in Intune' : 'not in Intune yet'), m.length ? 'ok' : '');
-    }
+    root.querySelectorAll('.actGroupClear').forEach(b => b.onclick = async () => {
+      try { await actSaveTarget(b.dataset.ch, null); renderActivator(ACT.step); } catch (e) { sharedToast(e.message); }
+    });
   }
 
   // ---- the steps -----------------------------------------------------------------------------------------------------
   function actSteps() {
     const a = (ACT.d && ACT.d.apps) || {}, p = a.Released || {}, t = a.Test || {};
-    const appsDone = !!(p.found && p.redirectOk);
+    const assigned = x => !!(x.assignmentRequired === true && (x.assigned || []).length);
+    const appsDone = !!(p.found && p.redirectOk && assigned(p));
+    const appsNote = !p.found ? (p.readError ? 'could not read the apps' : 'PROD app missing')
+      : !p.redirectOk ? 'sign-in addresses missing' : p.assignmentRequired === false ? 'PROD app is open to EVERY user' : !assigned(p) ? 'nobody assigned yet' : ('PROD ready' + (t.found ? (assigned(t) || t.sharedWith ? ', TEST ready' : ', TEST: nobody assigned') : ', no TEST app'));
     return [
-      { id: 'apps', title: 'Entra apps', required: true, done: appsDone, note: appsDone ? ('PROD ready' + (t.found ? ', TEST ready' : ', no TEST app')) : (p.readError ? 'could not read the apps' : 'PROD app missing') },
-      { id: 'catalog', title: 'Settings', required: true, done: !!(p.appId || (ACT.built && ACT.built.ok)), note: ACT.built ? 'built for ' + (ACT.built.channel === 'Test' ? 'TEST' : 'PROD') : 'defaults from this environment' },
-      { id: 'intune', title: 'Intune remediation', required: true, done: !!(ACT.intune.Released && ACT.intune.Released.found), note: ACT.intune.Released ? (ACT.intune.Released.found ? 'in Intune' : 'not in Intune yet') : 'sign in to check' },
+      { id: 'apps', title: 'Entra apps', required: true, done: appsDone, note: appsNote },
+      { id: 'catalog', title: 'Settings', required: true, done: !!(p.appId || (ACT.built && ACT.built.ok)), note: ACT.built ? 'built for ' + actLabel(ACT.built.channel) : 'defaults from this environment' },
+      { id: 'intune', title: 'Intune remediation', required: true, done: false, manual: true, note: 'run the command (the Manager does not read Intune)' },
       { id: 'edge', title: 'Edge for Business', required: true, done: false, manual: true, note: 'set in the Microsoft 365 admin center (no API)' },
       { id: 'servers', title: 'Servers without Intune', required: false, done: false, note: 'optional' },
     ];
@@ -14146,19 +14059,19 @@
       (s.done ? '&#10003; ' : s.manual ? '&#9998; ' : s.required ? '<b>!</b> ' : '') + (i + 1) + '. ' + escapeHtml(s.title) + (s.required ? '' : ' <span style="opacity:.75;">(optional)</span>') + '</button>';
     host.innerHTML =
       '<div class="act-head"><div><div class="act-title">PIM Activator</div>' +
-        '<div class="act-sub">The browser extension your admins activate PIM with, in tenant <code>' + escapeHtml(d.tenantId || '') + '</code>. Edge is installed by <b>Edge for Business</b>, the <b>Intune remediation</b> gives it its settings (Edge and Chrome).</div></div>' +
-        '<div class="act-who" id="actWho"></div></div>' +
+        '<div class="act-sub">The browser extension your admins activate PIM with, in tenant <code>' + escapeHtml(d.tenantId || '') + '</code>. Edge is installed by <b>Edge for Business</b>, the <b>Intune remediation</b> gives it its settings (Edge and Chrome). ' +
+        'This page writes nothing to your tenant: each step gives you the command to run, filled in for this environment, and to whom it deploys.</div></div>' +
+        '<div class="act-who" id="actWho">Who gets it: <b>' + escapeHtml(actWhoText('Released')) + '</b><br><b>' + escapeHtml(actWhoText('Test')) + '</b></div></div>' +
       '<div class="act-prog"><span>' + done + ' of ' + total + ' steps done</span><span>' + pct + '%</span></div>' +
       '<div class="act-bar"><div style="width:' + pct + '%;"></div></div>' +
       '<div class="act-pills">' + steps.map(pill).join('') + '</div>' +
       '<div class="act-card"><div class="act-kicker">STEP ' + (idx + 1) + ' OF ' + total + (cur.required ? '' : ' &middot; OPTIONAL') + '</div>' +
         '<div class="act-h">' + escapeHtml(cur.title) + '</div>' +
-        '<div class="act-state ' + (cur.done ? 'ok' : cur.manual ? '' : cur.required ? 'open' : '') + '">' + (cur.done ? '&#10003; Done' : cur.manual ? '&#9998; Manual step' : cur.required ? '! Still open' : 'Optional') + (cur.note ? ' &middot; ' + escapeHtml(cur.note) : '') + '</div>' +
+        '<div class="act-state ' + (cur.done ? 'ok' : cur.manual ? '' : cur.required ? 'open' : '') + '">' + (cur.done ? '&#10003; Done' : cur.manual ? '&#9998; You run this' : cur.required ? '! Still open' : 'Optional') + (cur.note ? ' &middot; ' + escapeHtml(cur.note) : '') + '</div>' +
         '<div id="actStepBody"></div>' +
         '<div class="act-nav"><button class="actBack btn-sec"' + (idx === 0 ? ' disabled' : '') + '>&larr; Back</button>' +
           '<button class="actNext primary"' + (idx === total - 1 ? ' disabled' : '') + '>Next &rarr;</button>' +
           '<button class="actRe ghost" style="margin-left:auto;">Check again</button></div></div>';
-    actSignedInChip();
     host.querySelectorAll('.actPill').forEach(b => b.onclick = () => renderActivator(b.dataset.step));
     host.querySelector('.actBack').onclick = () => renderActivator(steps[Math.max(0, idx - 1)].id);
     host.querySelector('.actNext').onclick = () => renderActivator(steps[Math.min(total - 1, idx + 1)].id);
@@ -14166,31 +14079,30 @@
     const body = document.getElementById('actStepBody');
     ({ apps: actStepApps, catalog: actStepCatalog, intune: actStepIntune, edge: actStepEdge, servers: actStepServers })[cur.id](body, d);
     actWireCopy(host);
+    actWirePickers(host);
   }
   function actWireCopy(root) {
-    root.querySelectorAll('.actCopy').forEach(b => b.onclick = () => { const el = document.getElementById(b.dataset.src); try { navigator.clipboard.writeText(el ? el.textContent : ''); sharedToast('Copied'); } catch (_) { } });
+    root.querySelectorAll('.actCopy').forEach(b => b.onclick = () => { const el = document.getElementById(b.dataset.src); try { navigator.clipboard.writeText(el ? (el.tagName === 'INPUT' ? el.value : el.textContent) : ''); sharedToast('Copied'); } catch (_) { } });
   }
 
   function actStepApps(body, d) {
-    const a = d.apps || {}, prod = a.Released || {}, test = a.Test || {};
-    const row = (c, x) => '<tr><td><b>' + escapeHtml(x.name || '') + '</b><div class="act-dim">' + (c === 'Test' ? 'TEST -- only the people who try new versions first' : 'PROD -- everyone') + '</div></td>' +
+    const a = d.apps || {}, prod = a.Released || {}, test = a.Test || {}, c = d.commands || {};
+    const who = x => x.assignmentReadError ? '<span class="warn">could not read who may sign in: ' + escapeHtml(x.assignmentReadError) + '</span>'
+      : x.assignmentRequired === false ? '<span class="bad">! open to EVERY user (assignment not required)</span>'
+      : x.assignmentRequired === true ? ((x.assigned || []).length ? '<span class="ok">&#10003; only: ' + escapeHtml(x.assigned.map(p => p.displayName + (p.type && p.type !== 'Group' ? ' (' + p.type + ')' : '')).join(', ')) + '</span>' : '<span class="bad">! nobody assigned -- nobody can sign in</span>')
+      : '';
+    const row = (ch, x) => '<tr><td><b>' + escapeHtml(x.name || '') + '</b><div class="act-dim">' + escapeHtml(actWhoText(ch)) + '</div></td>' +
       '<td>' + (x.found && x.sharedWith ? '<span class="ok">&#10003; uses the ' + escapeHtml(x.sharedWith) + ' app</span>' : x.found ? '<span class="ok">&#10003; exists</span>' : x.readError ? '<span class="warn">could not read: ' + escapeHtml(x.readError) + '</span>' : '<span class="bad">! not created</span>') +
         (x.appId ? '<div class="act-dim"><code>' + escapeHtml(x.appId) + '</code></div>' : '') + '</td>' +
       '<td>' + (x.found ? (x.redirectOk ? '<span class="ok">&#10003; sign-in addresses</span>' : '<span class="bad">! sign-in addresses missing</span>') : '') + '</td>' +
-      '<td style="text-align:right;"><button class="actMkApp ' + (x.found && x.redirectOk ? 'btn-sec' : 'primary') + '" data-ch="' + c + '">' + (x.found ? 'Repair' : 'Create') + '</button></td></tr>';
+      '<td>' + (x.found ? who(x) : '') + '</td></tr>';
     body.innerHTML =
-      '<div class="act-p">The extension signs in through these app registrations. <b>Create</b> signs you in with your own Microsoft account (Application Administrator; Privileged Role Administrator for the consent) and creates or repairs the app right here -- the PIM Manager itself gets no write access.</div>' +
+      '<div class="act-p">The extension signs in through these app registrations. The script creates or repairs the app, sets it to <b>Assignment required</b> (only the people you assign can sign in) and assigns the group you choose here -- direct, permanent members (Entra does not pass app access through nested groups, and a PIM-eligible membership would lock someone out of the tool that activates it). Run it as an Application Administrator (Privileged Role Administrator for the tenant-wide consent).</div>' +
       '<table class="act-tbl">' + row('Released', prod) + row('Test', test) + '</table>' +
-      '<label class="act-dim" style="display:block;margin:6px 0;"><input type="checkbox" id="actConsent" checked> Grant consent for the whole tenant (users are then not asked on first sign-in)</label>' +
-      '<div id="actAppLog" class="act-log" style="display:none;"></div>' +
-      '<details class="act-more"><summary>Or run the script yourself</summary>' +
-        actScript('actAppProdCmd', 'Deploy-PimActivatorBackend.ps1', '.\\Deploy-PimActivatorBackend.ps1 -TenantId ' + (d.tenantId || '') + " -Channel Released -DisplayName 'PIM Activator'") +
-        actScript('actAppTestCmd', 'Deploy-PimActivatorBackend.ps1', '.\\Deploy-PimActivatorBackend.ps1 -TenantId ' + (d.tenantId || '') + ' -Channel Test -ExtensionId ' + (test.extensionId || '') + " -DisplayName 'PIM Activator (TEST)'") + '</details>';
-    body.querySelectorAll('.actMkApp').forEach(b => b.onclick = async () => {
-      body.querySelectorAll('.actMkApp').forEach(x => x.disabled = true);
-      try { await actEnsureApp(b.dataset.ch, document.getElementById('actConsent').checked); ACT.d = null; setTimeout(() => renderActivator('apps'), 1500); }
-      catch (e) { actLog('actAppLog', e.message, 'err'); body.querySelectorAll('.actMkApp').forEach(x => x.disabled = false); }
-    });
+      '<div class="act-h2">Who may sign in</div>' + actPicker('Released') + actPicker('Test') +
+      '<div class="act-h2">PROD app</div>' + actScript('actAppProdCmd', 'Deploy-PimActivatorBackend.ps1', c.appProd || '', 'Released', 'the PIM Activator (nobody can sign in)') +
+      '<div class="act-h2">TEST app</div>' + actScript('actAppTestCmd', 'Deploy-PimActivatorBackend.ps1', c.appTest || '', 'Test', 'the TEST build (nobody can sign in)') +
+      '<div class="act-dim">The script needs nothing else: it signs you in in the browser (no PowerShell modules), reads everything back and prints to whom it deploys.</div>';
   }
 
   function actCatalogBody() {
@@ -14204,7 +14116,7 @@
     const a = d.apps || {}, prod = a.Released || {}, test = a.Test || {}, f = ACT.form || {};
     const val = (k, dflt) => escapeHtml(f[k] !== undefined ? f[k] : dflt);
     body.innerHTML =
-      '<div class="act-p">What the extension shows: this tenant, the app it signs in with, and the defaults. Filled in from this environment; change what you want. The Intune step writes it to the devices.</div>' +
+      '<div class="act-p">What the extension shows: this tenant, the app it signs in with, and the defaults. Filled in from this environment; change what you want. The Intune and server commands carry these values.</div>' +
       '<div class="act-form">' +
         '<label>Channel</label><select id="actChannel"><option value="Released">PROD (released)</option><option value="Test">TEST</option></select>' +
         '<label>Name shown to admins</label><input id="actName" value="' + val('name', d.environmentName || 'PIM') + '">' +
@@ -14215,83 +14127,100 @@
         '<label>Auto-activate at most</label><input id="actAuto" type="number" min="0" max="100" value="' + val('autoActivateMaxGroups', '') + '" placeholder="no limit" class="act-num">' +
         '<label>Confirm when selecting</label><input id="actBulk" type="number" min="1" max="100" value="' + val('bulkActivateConfirmThreshold', '') + '" placeholder="no confirm" class="act-num">' +
         '<label>Browsers</label><span><label><input type="checkbox" id="actEdgeB"' + (f.browsers && f.browsers.indexOf('Edge') < 0 ? '' : ' checked') + '> Edge</label> &nbsp; <label><input type="checkbox" id="actChromeB"' + (f.browsers && f.browsers.indexOf('Chrome') < 0 ? '' : ' checked') + '> Chrome</label></span>' +
-      '</div>';
+      '</div>' +
+      // 97.2 (owner 2026-10-08: "i am missing the option to add the custom json structure for multi-tenant (optional). so the
+      // admins can select from different tenants in pim activator - it is part of the settings"): more tenants for the
+      // popup's tenant switcher. This environment is always the first; empty = this tenant only.
+      '<div class="act-h2">More tenants (optional)</div>' +
+      '<div class="act-p">For admins who work in several tenants: the PIM Activator lists each tenant here in its tenant switcher. A JSON array, one entry per tenant: <code>name</code>, <code>tenantId</code>, <code>clientId</code> (the PIM Activator app in THAT tenant) and optionally <code>defaultJustification</code>, <code>defaultDurationHours</code>, <code>prefix</code>, <code>entraPrefix</code>, <code>azurePrefix</code>, <code>groupNameFilter</code>, <code>entraGroupRegex</code>, <code>azureGroupRegex</code>, <code>bulkActivateConfirmThreshold</code>. This environment is always the first tenant. Empty = this tenant only. The Intune and server commands carry it.</div>' +
+      '<textarea id="actTenants" rows="6" style="width:100%;max-width:900px;font-family:Consolas,monospace;font-size:12px;" placeholder="[ ]">' + escapeHtml(d.additionalTenants ? actPrettyJson(d.additionalTenants) : '') + '</textarea>' +
+      '<div class="act-actions"><button id="actTenantsSample" class="btn-sec">Fill a sample</button>' +
+        (d.canSetTargets ? '<button id="actTenantsSave" class="primary">Save the tenants</button>' : '<span class="act-dim">(an Admin saves the tenants)</span>') +
+        '<span id="actTenantsMsg" class="act-dim"></span></div>';
+    const ta = document.getElementById('actTenants');
+    document.getElementById('actTenantsSample').onclick = () => {
+      const me = { name: (document.getElementById('actName') || {}).value || d.environmentName || 'PIM', tenantId: d.tenantId || '', clientId: (document.getElementById('actClientId') || {}).value || '' };
+      ta.value = JSON.stringify([me, { name: 'Other tenant', tenantId: '<tenant id of the other tenant>', clientId: '<its PIM Activator app id>' }], null, 2);
+      document.getElementById('actTenantsMsg').textContent = 'Replace the second entry with the other tenant, then Save. This environment (the first entry) is kept first either way.';
+    };
+    const sv = document.getElementById('actTenantsSave');
+    if (sv) sv.onclick = async () => {
+      const msg = document.getElementById('actTenantsMsg');
+      const txt = ta.value.trim();
+      if (txt) { try { const j = JSON.parse(txt); if (!Array.isArray(j)) throw new Error('it must be a JSON array [ ... ]'); } catch (e) { msg.textContent = 'Not valid: ' + e.message; msg.className = 'bad'; return; } }
+      msg.textContent = 'Saving...'; msg.className = 'act-dim';
+      try { await api('PUT', '/api/settings/activator-targets', { additionalTenants: txt }); ACT.d = null; ACT.built = null; renderActivator('catalog'); }
+      catch (e) { msg.textContent = e.message; msg.className = 'bad'; }
+    };
     const ch = document.getElementById('actChannel'); ch.value = f.channel || 'Released';
-    const keep = () => { ACT.form = actCatalogBody(); };
+    const keep = () => { ACT.form = actCatalogBody(); ACT.built = null; };
     body.querySelectorAll('input,select').forEach(el => el.addEventListener('change', keep));
     ch.onchange = () => { const cid = document.getElementById('actClientId'); if (cid) cid.value = (ch.value === 'Test' ? test.appId : prod.appId) || ''; keep(); };
     keep();
   }
-
-  function actStepIntune(body, d) {
-    const f = ACT.form || {};
-    const t = ACT.target || { kind: 'group', group: '', time: '09:00', everyHours: '' };
-    body.innerHTML =
-      '<div class="act-p">The Remediation writes the settings from step 2 to every targeted device, every day (Edge and Chrome). <b>Upload to Intune</b> signs you in (Intune Administrator) and creates or updates <i>PIM Activator settings (' + ((f.channel || 'Released') === 'Test' ? 'TEST' : 'PROD') + ')</i> -- its existing assignments are replaced only when you pick a target.</div>' +
-      '<div class="act-form">' +
-        '<label>Who gets it</label><span class="act-row">' +
-          '<label><input type="radio" name="actTarget" value="group"' + (t.kind === 'group' ? ' checked' : '') + '> a group</label> <input id="actGroupId" value="' + escapeHtml(t.group) + '" placeholder="group object id" style="width:290px;">' +
-          '<label><input type="radio" name="actTarget" value="AllDevices"' + (t.kind === 'AllDevices' ? ' checked' : '') + '> all devices</label>' +
-          '<label><input type="radio" name="actTarget" value="AllUsers"' + (t.kind === 'AllUsers' ? ' checked' : '') + '> all users</label>' +
-          '<label><input type="radio" name="actTarget" value="none"' + (t.kind === 'none' ? ' checked' : '') + '> keep the assignments</label></span>' +
-        '<label>When</label><span class="act-row">daily at <input id="actTime" value="' + escapeHtml(t.time) + '" style="width:70px;"> or every <input id="actEvery" type="number" min="1" max="23" value="' + escapeHtml(t.everyHours) + '" placeholder="-" class="act-num"> hour(s)</span>' +
-      '</div>' +
-      '<div class="act-actions"><button id="actUpload" class="primary">Upload to Intune</button><button id="actCheckIntune" class="btn-sec">Check Intune</button><button id="actBuildFiles" class="btn-sec">Download the two files</button><span id="actBuildMsg" class="act-dim"></span></div>' +
-      '<div id="actIntuneLog" class="act-log" style="display:none;"></div>' +
-      '<details class="act-more"><summary>Or upload with the script</summary><div class="act-dim">Download the two files first (button above), then in that folder:</div><div id="actPubCmd"></div></details>' +
-      '<details class="act-more"><summary>Or by hand in Intune</summary><div class="act-dim">Devices &rsaquo; Scripts and remediations &rsaquo; Create: the two files, run as SYSTEM, 64-bit PowerShell, no signature check.</div></details>';
-    const readTarget = () => {
-      const k = (body.querySelector('input[name="actTarget"]:checked') || {}).value || 'group';
-      ACT.target = { kind: k, group: document.getElementById('actGroupId').value.trim(), time: document.getElementById('actTime').value.trim() || '09:00', everyHours: document.getElementById('actEvery').value.trim() };
-      return ACT.target;
-    };
-    const build = async () => {
-      const t2 = readTarget(), msg = document.getElementById('actBuildMsg');
-      const req = Object.assign({}, ACT.form || actCatalogBody(), { target: t2.kind === 'group' ? t2.group : t2.kind === 'none' ? '' : t2.kind });
-      if (!req.clientId) req.clientId = (((ACT.d.apps || {})[req.channel || 'Released']) || {}).appId || '';
-      msg.textContent = 'Building...';
-      const r = await api('POST', '/api/activator/build', req);
-      ACT.built = r; msg.textContent = 'Built for ' + (r.channel === 'Test' ? 'TEST' : 'PROD') + '.';
-      document.getElementById('actPubCmd').innerHTML = actScript('actPubCmdText', 'Publish-PimActivatorRemediation.ps1', r.commands.remediation); actWireCopy(body);
-      return r;
-    };
-    body.querySelectorAll('input').forEach(el => el.addEventListener('change', readTarget));
-    document.getElementById('actBuildFiles').onclick = async () => { try { const r = await build(); actDownload('Detect-PimActivator.ps1', r.detect); actDownload('Remediate-PimActivator.ps1', r.remediate); } catch (e) { actLog('actIntuneLog', e.message, 'err'); } };
-    document.getElementById('actCheckIntune').onclick = async () => { try { await actCheckIntune(); setTimeout(() => renderActivator('intune'), 800); } catch (e) { actLog('actIntuneLog', e.message, 'err'); } };
-    document.getElementById('actUpload').onclick = async (ev) => {
-      ev.target.disabled = true;
-      try {
-        const r = await build(), t2 = ACT.target;
-        if (t2.kind === 'group' && !/^[0-9a-fA-F-]{36}$/.test(t2.group)) throw new Error('Give the group object id, or pick all devices / all users / keep the assignments.');
-        const every = /^\d+$/.test(t2.everyHours) ? Math.min(23, Math.max(1, Number(t2.everyHours))) : 0;
-        if (!every && !/^\d{2}:\d{2}$/.test(t2.time)) throw new Error('The daily time must look like 09:00.');
-        await actUploadRemediation(r, t2.kind === 'group' ? t2.group : t2.kind === 'none' ? '' : t2.kind, { everyHours: every, time: t2.time });
-        setTimeout(() => renderActivator('intune'), 1200);
-      } catch (e) { actLog('actIntuneLog', e.message, 'err'); ev.target.disabled = false; }
-    };
-    build().catch(e => actLog('actIntuneLog', e.message, 'err'));
+  // The build request: the Settings step + the schedule. The answer carries the self-contained commands.
+  async function actBuild() {
+    const req = Object.assign({}, ACT.form || {}, ACT.sched || {});
+    if (!req.channel) req.channel = 'Released';
+    if (!req.name) req.name = (ACT.d && ACT.d.environmentName) || 'PIM';
+    if (!req.clientId) req.clientId = (((ACT.d.apps || {})[req.channel]) || {}).appId || '';
+    if (!ACT_GUID.test(req.clientId)) return { ok: false, channel: req.channel, commands: { remediation: '', server: '' } };   // no app yet: step 1 first
+    const r = await api('POST', '/api/activator/build', req);
+    ACT.built = r;
+    return r;
   }
 
-  // Edge for Business: a guide that mirrors the admin center (no API exists).
+  function actStepIntune(body, d) {
+    const f = ACT.form || {}, ch = f.channel || 'Released';
+    const s = ACT.sched || { dailyTime: '09:00', everyHours: '' };
+    body.innerHTML =
+      '<div class="act-p">The Remediation writes the settings from step 2 to the devices of the group, every day (Edge and Chrome). <b>One download, one command</b>: the script builds <i>Detect-PimActivator.ps1</i> and <i>Remediate-PimActivator.ps1</i> for this environment itself (next to it), uploads them as <i>PIM Activator settings (' + actLabel(ch) + ')</i>, reads them back and assigns them to the group below -- or to nobody, when no group is chosen.</div>' +
+      '<div class="act-h2">Who gets it</div>' + actPicker(ch) +
+      '<div class="act-form"><label>When</label><span class="act-row">daily at <input id="actTime" value="' + escapeHtml(s.dailyTime || '09:00') + '" style="width:70px;"> or every <input id="actEvery" type="number" min="1" max="23" value="' + escapeHtml(s.everyHours || '') + '" placeholder="-" class="act-num"> hour(s)</span></div>' +
+      '<div class="act-h2">The command</div><div id="actPubCmd" class="act-dim">Building&hellip;</div>' +
+      '<div class="act-dim">What it needs: this one file, Windows PowerShell 5.1 or PowerShell 7, and an Intune Administrator sign-in in the browser (no PowerShell modules). Change the channel or the settings in step 2.</div>';
+    const show = async () => {
+      const out = document.getElementById('actPubCmd'); if (!out) return;
+      try {
+        const r = await actBuild(), cmd = (r.commands || {}).remediation || '';
+        out.className = '';
+        out.innerHTML = cmd ? actScript('actPubCmdText', 'Publish-PimActivatorRemediation.ps1', cmd, ch, 'the settings')
+          : '<span class="bad">Create the ' + actLabel(ch) + ' app first (step 1) -- the command needs its client id (or type it in step 2).</span>';
+        actWireCopy(out);
+      } catch (e) { out.innerHTML = '<span class="bad">' + escapeHtml(e.message) + '</span>'; }
+    };
+    const readSched = () => {
+      const t = (document.getElementById('actTime').value || '').trim(), e = (document.getElementById('actEvery').value || '').trim();
+      ACT.sched = { dailyTime: /^\d{2}:\d{2}$/.test(t) ? t : '09:00', everyHours: /^\d+$/.test(e) ? String(Math.min(23, Math.max(1, Number(e)))) : '' };
+      show();
+    };
+    body.querySelectorAll('#actTime,#actEvery').forEach(el => el.addEventListener('change', readSched));
+    show();
+  }
+
+  // Edge for Business: a guide that mirrors the admin center (no API exists). The policy goes to the chosen groups.
   function actStepEdge(body, d) {
     const pub = d.published || {};
     if (!ACT.edgeExt) ACT.edgeExt = ['Released', 'Test'].map(c => ({ channel: c, include: c === 'Released' || !!((d.apps || {}).Test || {}).found, minimumVersion: pub[c] || d.minimumVersion || '', toolbarState: 'default_hidden', installationMode: 'force_installed', overrideUpdateUrl: true, blockedHosts: '', allowedHosts: '' }));
     const chInfo = c => ((d.apps || {})[c]) || {};
+    // ExtensionInstallSources = the folder of each update URL shown (derived on the server, never a whole site)
+    const srcRows = ((d.edgeBoth || d.edgeReleased || {}).installSourcesList || []).filter(Boolean);
+    const grp = c => { const t = actTarget(c); return t ? '<b>' + escapeHtml(t.displayName || t.groupId) + '</b>' : '<span class="bad">no group chosen yet</span>'; };
     const card = (e, i) => {
-      const x = chInfo(e.channel), label = e.channel === 'Test' ? 'TEST' : 'PROD';
+      const x = chInfo(e.channel), label = actLabel(e.channel);
       const upd = e.channel === 'Test' ? 'https://knudsenmorten.github.io/PIM4EntraPS/updates-test.xml' : 'https://knudsenmorten.github.io/PIM4EntraPS/updates.xml';
       return '<div class="act-ext' + (e.include ? '' : ' off') + '"><div class="act-ext-h"><label><input type="checkbox" class="actExtOn" data-i="' + i + '"' + (e.include ? ' checked' : '') + '> <b>PIM Activator (' + label + ')</b></label>' +
-          '<span class="act-dim">' + (e.channel === 'Test' ? 'only for the test users' : 'everyone') + (pub[e.channel] ? ' &middot; published now: ' + escapeHtml(pub[e.channel]) : '') + '</span></div>' +
+          '<span class="act-dim">' + escapeHtml(actWhoText(e.channel)) + (pub[e.channel] ? ' &middot; published now: ' + escapeHtml(pub[e.channel]) : '') + '</span></div>' +
         '<div class="act-kv">' +
-          '<span>Extension ID</span><span><code>' + escapeHtml(x.extensionId || '') + '</code></span>' +
-          '<span>Display name</span><span>PIM Activator (' + label + ')</span>' +
-          '<span>Description</span><span>PIM Activator (' + label + ')</span>' +
+          '<span>Extension ID</span><span>' + actCopyVal('actExtId' + i, x.extensionId || '') + '</span>' +
+          '<span>Display name</span><span>' + actCopyVal('actExtName' + i, 'PIM Activator (' + label + ')') + '</span>' +
+          '<span>Description</span><span>' + actCopyVal('actExtDesc' + i, 'PIM Activator (' + label + ')') + '</span>' +
           '<span>Source</span><span>External</span>' +
           '<span>Installation setting</span><span><select class="actExtF" data-i="' + i + '" data-k="installationMode"><option value="force_installed">Force</option><option value="normal_installed">Normal (installed, the user can turn it off)</option></select></span>' +
-          '<span>Update URL</span><span><code>' + escapeHtml(upd) + '</code><br><label><input type="checkbox" class="actExtF" data-i="' + i + '" data-k="overrideUpdateUrl"' + (e.overrideUpdateUrl ? ' checked' : '') + '> Use this update URL for all extension updates</label></span>' +
+          '<span>Update URL</span><span>' + actCopyVal('actExtUpd' + i, upd) + '<br><label><input type="checkbox" class="actExtF" data-i="' + i + '" data-k="overrideUpdateUrl"' + (e.overrideUpdateUrl ? ' checked' : '') + '> Use this update URL for all extension updates</label></span>' +
           '<span>Blocked hosts</span><span><textarea class="actExtF" data-i="' + i + '" data-k="blockedHosts" rows="1" placeholder="URL match patterns (empty)">' + escapeHtml(e.blockedHosts) + '</textarea></span>' +
           '<span>Allowed hosts</span><span><textarea class="actExtF" data-i="' + i + '" data-k="allowedHosts" rows="1" placeholder="URL match patterns (empty)">' + escapeHtml(e.allowedHosts) + '</textarea></span>' +
-          '<span>Minimum version required</span><span><input class="actExtF act-num" style="width:100px;" data-i="' + i + '" data-k="minimumVersion" value="' + escapeHtml(e.minimumVersion) + '"></span>' +
+          '<span>Minimum version required</span><span><input class="actExtF act-num" style="width:100px;" data-i="' + i + '" data-k="minimumVersion" id="actExtMin' + i + '" value="' + escapeHtml(e.minimumVersion) + '"> <button class="actCopy btn-sec act-copy-sm" data-src="actExtMin' + i + '">Copy</button></span>' +
           '<span>Toolbar state</span><span><select class="actExtF" data-i="' + i + '" data-k="toolbarState"><option value="default_hidden">Hidden</option><option value="default_shown">Shown</option><option value="force_shown">Force shown</option></select></span>' +
           '<span>File URL navigation</span><span class="act-dim">Extensions not allowed to be installed using File URLs (leave as it is)</span>' +
           '<span>Block if selected permissions are requested</span><span class="act-dim">Not configured</span>' +
@@ -14299,17 +14228,22 @@
     };
     body.innerHTML =
       '<div class="act-p">Edge for Business (the Edge management service) force-installs the extension. Microsoft offers <b>no API</b> for it, so this is a guide: the fields below are exactly what the Microsoft 365 admin center asks, and the two settings at the bottom can be pasted instead. Put <b>both</b> extensions in <b>one</b> policy when test users need both -- the service does not merge extension lists across policies.</div>' +
+      '<div class="act-h2">Who gets it</div>' + actPicker('Released') + actPicker('Test') +
       '<div class="act-exts">' + ACT.edgeExt.map(card).join('') + '</div>' +
       '<div class="act-h2">The guide</div>' +
       '<ol class="act-guide">' +
         '<li>Open <a href="https://admin.microsoft.com/" target="_blank" rel="noopener">admin.microsoft.com</a> &rsaquo; <b>Settings</b> &rsaquo; <b>Microsoft Edge</b> &rsaquo; <b>Configuration policies</b>. (Edge Administrator or Global Administrator.)</li>' +
         '<li><b>Create policy</b> (or open the one that already force-installs extensions for these users): Policy type <b>Cloud</b>, a name like <i>Extension, Force-install PIM Activator</i>, platforms Windows + macOS.</li>' +
-        '<li><b>Managed extensions</b> &rsaquo; <b>Add extension</b> per extension above: Extension ID, Source <b>External</b>, the update URL, then <b>Manage extension</b> with the values above. <i>Or</i> skip this and paste the two settings below under <b>Settings</b> &rsaquo; <b>Add setting</b>.</li>' +
-        '<li><b>Settings</b> &rsaquo; <b>Add setting</b> &rsaquo; <b>ExtensionInstallSources</b> = <code>' + escapeHtml(((d.edgeReleased || {}).installSources) || 'https://knudsenmorten.github.io/*') + '</code> (lets Edge install from the update URL).</li>' +
-        '<li><b>Assignments</b>: the group of admins who use the Activator (all admins for PROD; for a TEST + PROD policy, the test users, at a higher priority).</li>' +
+        // 97.2 (owner 2026-10-08: "step 3 and 4 must be reversed. the notes about managed extension must refer to values on
+        // top of screen"): the install source first (Edge must allow it before it can install), then the extensions with
+        // the field names of the cards at the top of this step.
+        '<li><b>Settings</b> &rsaquo; <b>Add setting</b> &rsaquo; search <b>ExtensionInstallSources</b> and add the URL pattern row' + (srcRows.length === 1 ? '' : 's') + ' ' + srcRows.map((s, k) => actCopyVal('actGuideSrc' + k, s)).join(' ') + ' (where Edge may install from). <b>Not</b> the <i>id;update URL</i> rows.</li>' +
+        '<li><b>Managed extensions</b> &rsaquo; <b>Add extension</b>, once per card at the top of this step (<b>PIM Activator (PROD)</b>' + (ACT.edgeExt.filter(e => e.include).length > 1 ? ' and <b>PIM Activator (TEST)</b>' : '') + '): <b>Extension ID</b> and <b>Update URL</b> from the card, Source <b>External</b>; then <b>Manage extension</b> and set <b>Installation setting</b>, <b>Use this update URL for all extension updates</b>, <b>Blocked hosts</b>, <b>Allowed hosts</b>, <b>Minimum version required</b> and <b>Toolbar state</b> exactly as the card shows them.' +
+          ' <i>Or</i> instead of this step add the two settings below under <b>Settings</b> &rsaquo; <b>Add setting</b>: <b>ExtensionSettings</b> = the JSON (one value), <b>ExtensionInstallForcelist</b> = one row per extension (<i>id;update URL</i>), each added on its own.</li>' +
+        '<li><b>Assignments</b>: assign the PROD policy to ' + grp('Released') + ' -- <b>not everyone</b>. For test users who need both, a TEST + PROD policy assigned to ' + grp('Test') + ' at a higher priority.</li>' +
         '<li>Check on a device: <code>edge://policy</code> &rsaquo; Reload policies -- ExtensionSettings shows the ids; <code>edge://extensions</code> shows PIM Activator. The next sign-in can take up to an hour to pick it up.</li>' +
       '</ol>' +
-      '<div class="act-h2">The two settings (Settings &rsaquo; Add setting)</div><div id="actEdgeOut" class="act-dim">Building&hellip;</div>';
+      '<div class="act-h2">The settings (Settings &rsaquo; Add setting)</div><div id="actEdgeOut" class="act-dim">Building&hellip;</div>';
     const sync = async () => {
       const out = document.getElementById('actEdgeOut');
       const ext = ACT.edgeExt.filter(e => e.include).map(e => ({ channel: e.channel, minimumVersion: e.minimumVersion, toolbarState: e.toolbarState, installationMode: e.installationMode, overrideUpdateUrl: !!e.overrideUpdateUrl, blockedHosts: e.blockedHosts, allowedHosts: e.allowedHosts }));
@@ -14317,11 +14251,18 @@
       try {
         const r = await api('POST', '/api/activator/edge-policy', { extensions: ext });
         ACT.edge = r.policy;
-        out.innerHTML = '<div class="act-setname">ExtensionSettings <span class="act-dim">Configure extension management settings &middot; User override: Not allowed</span></div>' + actCode('actEdgeJson', r.policy.extensionSettingsJson) +
-          '<div class="act-setname">ExtensionInstallForcelist <span class="act-dim">Control which extensions are installed silently &middot; one line each</span></div>' + actCode('actEdgeForce', (r.policy.forcelist || []).join('\n')) +
-          '<button id="actEdgeDl" class="btn-sec">Download both as a file</button>';
+        // 97.2 (owner 2026-10-08: "you must add the 2 rows defined. make it easier to copy each row. step 4 url is wrong"):
+        // every row has its own Copy; each block is labelled with the setting name as the admin center search shows it.
+        const force = r.policy.forcelist || [], srcs = r.policy.installSourcesList || String(r.policy.installSources || '').split('\n').filter(Boolean);
+        out.innerHTML = '<div class="act-setname">ExtensionSettings <span class="act-dim">Configure extension management settings &middot; the JSON, one value &middot; User override: Not allowed</span></div>' + actCode('actEdgeJson', r.policy.extensionSettingsJson) +
+          '<div class="act-setname">ExtensionInstallForcelist <span class="act-dim">Control which extensions are installed silently &middot; add ' + force.length + ' row' + (force.length === 1 ? '' : 's') + ' (one per extension)</span></div>' +
+            force.map((row, i) => actCode('actEdgeForce' + i, row)).join('') +
+          '<div class="act-setname">ExtensionInstallSources <span class="act-dim">Configure extension and user script install sources &middot; the URL pattern row' + (srcs.length === 1 ? '' : 's') + ' (NOT the id;URL rows)</span></div>' +
+            srcs.map((row, i) => actCode('actEdgeSrc' + i, row)).join('') +
+          '<button id="actEdgeDl" class="btn-sec">Download all as a file</button>';
         actWireCopy(out);
-        document.getElementById('actEdgeDl').onclick = () => actDownload('pim-activator-edge-policy.txt', 'ExtensionSettings\r\n' + r.policy.extensionSettingsJson + '\r\n\r\nExtensionInstallForcelist\r\n' + (r.policy.forcelist || []).join('\r\n') + '\r\n\r\nExtensionInstallSources\r\n' + (r.policy.installSources || '') + '\r\n');
+        const assignTo = c => { const t = actTarget(c); return t ? (t.displayName || t.groupId) + ' (' + t.groupId + ')' : 'no group chosen yet -- choose one, never all users'; };
+        document.getElementById('actEdgeDl').onclick = () => actDownload('pim-activator-edge-policy.txt', 'Assign the policy to: PROD -- ' + assignTo('Released') + (ext.length > 1 ? '; TEST + PROD -- ' + assignTo('Test') : '') + '\r\n\r\nExtensionSettings\r\n' + r.policy.extensionSettingsJson + '\r\n\r\nExtensionInstallForcelist (one row each)\r\n' + force.join('\r\n') + '\r\n\r\nExtensionInstallSources (one row each)\r\n' + srcs.join('\r\n') + '\r\n\r\nTenant catalog (this tenant' + (d.additionalTenants ? ' + the more tenants of step 2' : '') + '): delivered by the Intune remediation or the server script (step 3 / 5) -- Edge for Business has no field for it.\r\n' + (d.additionalTenants ? 'More tenants: ' + d.additionalTenants + '\r\n' : ''));
       } catch (e) { out.innerHTML = '<span class="bad">' + escapeHtml(e.message) + '</span>'; }
     };
     body.querySelectorAll('select.actExtF').forEach(s => { s.value = ACT.edgeExt[Number(s.dataset.i)][s.dataset.k]; });
@@ -14331,11 +14272,19 @@
   }
 
   function actStepServers(body, d) {
-    const f = ACT.form || {}, ch = f.channel || 'Released', cid = f.clientId || ((d.apps || {}).Released || {}).appId || '';
     body.innerHTML =
-      '<div class="act-p">Servers and devices without Intune: run as administrator on the machine. It writes the install and the settings policies for Edge and Chrome, the same as Edge for Business + the Remediation do.</div>' +
-      actScript('actServerCmd', 'Deploy-PimActivatorClient.ps1', '.\\Deploy-PimActivatorClient.ps1 -Scope Machine -Browser Both -Channel ' + ch + (/^[0-9a-fA-F-]{36}$/.test(cid) ? ' -ClientId ' + cid : '')) +
-      '<div class="act-dim">Domain-joined estates without Intune: <code>Deploy-PimActivatorHybrid.ps1 -Target DomainGpo</code> writes the same through a GPO.</div>';
+      '<div class="act-p">Servers and devices without Intune: run as administrator on the machine. It writes the install and the settings policies for Edge and Chrome, the same as Edge for Business + the Remediation do, for everyone who uses that machine. Who may sign in stays the group assigned to the app in step 1.</div>' +
+      '<div id="actServerOut" class="act-dim">Building&hellip;</div>' +
+      '<div class="act-dim">What it needs: this one file, an elevated PowerShell. With the tenant and app filled in it signs in to nothing. Domain-joined estates without Intune: <code>Deploy-PimActivatorHybrid.ps1 -Target DomainGpo</code> writes the same through a GPO.</div>';
+    (async () => {
+      const out = document.getElementById('actServerOut');
+      let cmd = ((ACT.built || {}).commands || {}).server || '';
+      if (!cmd) { try { cmd = ((await actBuild()).commands || {}).server || ''; } catch (_) { cmd = (d.commands || {}).server || ''; } }
+      if (!out) return;
+      out.className = '';
+      out.innerHTML = actScript('actServerCmd', 'Deploy-PimActivatorClient.ps1', cmd || (d.commands || {}).server || '', '', '');
+      actWireCopy(out);
+    })();
   }
 
   async function renderOnboarding() {
@@ -20663,7 +20612,7 @@
         if (!Array.isArray(finalRows)) continue;   // §77.24: already written (or discarded) -- never PUT "no rows"
         let r;
         try {
-          r = await api('PUT', '/api/csv/' + encodeURIComponent(base), commitPutBody(base, finalRows));   // BUG-200
+          r = await commitPutOnce(base, finalRows);   // BUG-200; §97.1: a timeout asks the server what happened
         } catch (e1) {
           // 🔴 Operator 2026-09-25: "i was the only admin logged in ... it failed saying another admin had made changes,
           // which was me. i had to reload in order for it to work". The stored rows move WITHOUT another administrator:
@@ -20685,11 +20634,11 @@
           rebasePendingEntry(base, draft, freshC);
           finalRows = pendingFinalRows(base);
           if (!Array.isArray(finalRows)) continue;
-          r = await api('PUT', '/api/csv/' + encodeURIComponent(base), commitPutBody(base, finalRows));
+          r = await commitPutOnce(base, finalRows);
         }
         if (r && r.offboardHeld) heldAll.push({ base: base, body: r });
         if (r && r.commitId) commitWatchIds.push(r.commitId);
-        wrote.push(Object.assign(commitWriteSummary(base, r), { lines: _lines }));
+        wrote.push(Object.assign(commitWriteSummary(base, r), { lines: _lines, late: !!(r && r.confirmedAfterTimeout) }));
         delete SAVE_DIFFS[base];
         // Refresh local cache + reset pending.
         await loadCsv(base, true);
@@ -20706,14 +20655,19 @@
         if (status.dataset) status.dataset.sticky = '1';   // §70.23: a refusal must not be wiped either
         status.className = 'err';
         // 2.4.462: the failure is also the red box in the middle -- and it says which entities WERE written before it
-        const partial = wrote.length ? '<p style="margin:8px 0 0;"><b>Already saved before this failure:</b> ' + wrote.map(w => escapeHtml(w.base)).join(', ') + '. <b>Not saved:</b> ' + escapeHtml(base) + (bases.indexOf(base) < bases.length - 1 ? ' and ' + bases.slice(bases.indexOf(base) + 1).map(escapeHtml).join(', ') : '') + '.</p>' : '<p style="margin:8px 0 0;">Nothing was saved.</p>';
+        // §97.1: "not saved" only when it is KNOWN -- a commit whose outcome the server could not report is said as unknown.
+        const rest = bases.indexOf(base) < bases.length - 1 ? bases.slice(bases.indexOf(base) + 1) : [];
+        const partial = (e && e.outcomeUnknown)
+          ? '<p style="margin:8px 0 0;">' + (wrote.length ? '<b>Saved before this:</b> ' + wrote.map(w => escapeHtml(w.base)).join(', ') + '. ' : '') +
+            '<b>Not known whether saved:</b> ' + escapeHtml(base) + '.' + (rest.length ? ' <b>Not sent:</b> ' + rest.map(escapeHtml).join(', ') + '.' : '') + '</p>'
+          : (wrote.length ? '<p style="margin:8px 0 0;"><b>Already saved before this failure:</b> ' + wrote.map(w => escapeHtml(w.base)).join(', ') + '. <b>Not saved:</b> ' + escapeHtml(base) + (rest.length ? ' and ' + rest.map(escapeHtml).join(', ') : '') + '.</p>' : '<p style="margin:8px 0 0;">Nothing was saved.</p>');
         // 2026-10-02 (operator: "what buttom"): the box said "the buttons are next to Commit all, below this box" -- behind
         // it, where nobody could see them -- and flattened the panel to text ("#16)Show me these rows"). It now SHOWS the
         // panel, and its buttons work from inside the box (each closes the box and presses the real one).
         if (showOffboardHeldRefusal(status, base, e, wrote)) { commitRefusalOverlay(base, status, partial); return; }   // BUG-190
         if (showCommitRefusal(status, base, e, wrote)) { commitRefusalOverlay(base, status, partial); return; }   // BUG-200 conflict / maker-checker gate
-        status.textContent = 'FAILED on ' + base + ': ' + e.message;
-        commitOverlay('error', 'Commit FAILED on ' + base, '<p style="margin:0;">' + escapeHtml(e.message || String(e)) + '</p>' + partial);
+        status.textContent = ((e && e.outcomeUnknown) ? 'NOT CONFIRMED on ' : 'FAILED on ') + base + ': ' + e.message;
+        commitOverlay('error', ((e && e.outcomeUnknown) ? 'Commit NOT CONFIRMED on ' : 'Commit FAILED on ') + base,'<p style="margin:0;">' + escapeHtml(e.message || String(e)) + '</p>' + partial);
         return;
       }
     }
@@ -20732,7 +20686,9 @@
     const totalChanges = wrote.reduce(function (n, w) { return n + w.adds + w.removes + w.modifies; }, 0);
     const per = wrote.map(function (w) {
       return '<li><b>' + escapeHtml(w.base) + '</b> &mdash; ' + w.adds + ' added, ' + w.removes + ' removed, ' +
-             w.modifies + ' changed (' + w.rowCount + ' rows now)' + commitChangeListHtml(w.lines, 10) + '</li>';
+             w.modifies + ' changed (' + w.rowCount + ' rows now)' +
+             (w.late ? ' <span style="color:#57606a">(saved -- confirmed with the server after it took longer than the page waits)</span>' : '') +
+             commitChangeListHtml(w.lines, 10) + '</li>';
     }).join('');
     let summaryHtml = '<b>Committed ' + totalChanges + ' configuration change' + (totalChanges === 1 ? '' : 's') +
       '</b> to the desired state across ' + wrote.length + ' entit' + (wrote.length === 1 ? 'y' : 'ies') + '.' +
@@ -20889,7 +20845,65 @@
     if (pendingChanges[base] && PENDING_UNDO_OF[base]) b.undoOf = PENDING_UNDO_OF[base];
     // CONFIG-1.4: rows staged from a configuration backup commit as a RESTORE (journal Source 'restore'; SuperAdmin only).
     if (pendingChanges[base] && pendingChanges[base].restoreFrom) { b.source = 'restore'; b.restoreFrom = pendingChanges[base].restoreFrom; }
+    // §97.1: this commit's own id -- the server journals the commit under it and remembers its answer, so after a timeout
+    // the page asks what REALLY happened (GET /api/commit-status/<id>) instead of guessing.
+    b.clientCommitId = newClientCommitId();
     return b;
+  }
+  function newClientCommitId() {
+    let r = '';
+    try { const a = new Uint8Array(16); (window.crypto || window.msCrypto).getRandomValues(a); r = Array.from(a, x => ('0' + x.toString(16)).slice(-2)).join(''); }
+    catch (_) { r = Date.now().toString(16) + Math.random().toString(16).slice(2) + Math.random().toString(16).slice(2); }
+    return ('c' + r).slice(0, 33);
+  }
+  // 🔴 §97.1 (EFIF 2026-10-08): a 168-row commit took 132 s on the server, the page gave up at 120 s and said
+  // "Commit FAILED ... Not saved" -- for a commit the server HAD saved. A commit PUT now waits longer (the server is one
+  // request loop: nothing is gained by leaving early), and NO ANSWER IS NOT A FAILURE: commitPutOnce asks the server what
+  // happened to this commit id and reports that -- saved, refused (the refusal itself), or not saved -- and only when even
+  // that question gets no answer does it say it is NOT KNOWN (never "not saved" by assumption).
+  var PIM_COMMIT_TIMEOUT_MS = 300000;
+  var PIM_COMMIT_STATUS_RETRY_MS = 3000;
+  async function commitPutOnce(base, finalRows) {
+    const body = commitPutBody(base, finalRows);
+    try {
+      return await api('PUT', '/api/csv/' + encodeURIComponent(base), body, { timeoutMs: PIM_COMMIT_TIMEOUT_MS });
+    } catch (e) {
+      if (e && e.status) throw e;   // the server ANSWERED (a refusal / an error): that answer is the outcome
+      return await commitOutcomeAfterNoAnswer(base, body.clientCommitId, e);
+    }
+  }
+  async function commitOutcomeAfterNoAnswer(base, id, e0) {
+    const waited = Math.round(PIM_COMMIT_TIMEOUT_MS / 1000);
+    try { const st0 = document.getElementById('saveStatus'); if (st0) st0.textContent = 'The server has not answered the commit of ' + base + ' after ' + waited + ' s -- asking it whether it was saved ...'; } catch (_) { }
+    let st = null, lastErr = null;
+    for (let i = 0; i < 4; i++) {
+      try {
+        const s = await api('GET', '/api/commit-status/' + encodeURIComponent(id), undefined, { timeoutMs: PIM_COMMIT_TIMEOUT_MS });
+        if (s && s.state === 'running') { st = s; await new Promise(res => setTimeout(res, PIM_COMMIT_STATUS_RETRY_MS)); continue; }
+        st = s; break;
+      } catch (e) { lastErr = e; if (e && e.status) break; await new Promise(res => setTimeout(res, PIM_COMMIT_STATUS_RETRY_MS)); }
+    }
+    if (st && st.saved) {
+      // SAVED -- the server finished after the page stopped waiting. Carry on exactly as if it had answered.
+      return Object.assign({ ok: true, base: base }, st.body || {}, { confirmedAfterTimeout: true, commitStatus: st.state });
+    }
+    if (st && st.state === 'done') {
+      // The server answered this commit with a refusal or an error: show THAT (conflict, gates, ...), as if it had arrived.
+      const b = st.body || {};
+      const err = new Error('API PUT /api/csv/' + base + ' -> ' + st.status + ': ' + (b.error || 'refused'));
+      err.status = st.status; err.body = b; err.confirmedAfterTimeout = true;
+      throw err;
+    }
+    if (st && st.state === 'unknown' && st.journalReadable) {
+      const err = new Error('The server did not answer within ' + waited + ' s. It has no record of this commit, so ' + base + ' was NOT saved (checked with the server). Your changes are still staged -- commit again.');
+      err.notSavedVerified = true;
+      throw err;
+    }
+    const why = (lastErr && lastErr.message) ? ' (' + lastErr.message + ')' : (st && st.note ? ' (' + st.note + ')' : '');
+    const err = new Error('The server did not answer within ' + waited + ' s, and could not say what happened to the commit' + why + '. It is NOT KNOWN whether ' + base +
+      ' was saved -- it may already be stored. Reload this page and look at ' + base + ' before committing again.');
+    err.outcomeUnknown = true;
+    throw err;
   }
   // BUG-200: someone else committed this entity since it was loaded here. Nothing of THIS entity was
   // written. The operator's edits stay staged (and in the §70.12 draft); the reload re-applies them on

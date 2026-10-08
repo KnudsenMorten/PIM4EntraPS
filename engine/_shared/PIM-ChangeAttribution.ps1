@@ -90,11 +90,38 @@ USING (SELECT @e AS Entity, @k AS [Key]) AS s ON t.Entity = s.Entity AND t.[Key]
 WHEN MATCHED THEN UPDATE SET Op = @o, InitiatedBy = @i, ApprovedBy = @a, CommitId = @c, CommittedUtc = SYSUTCDATETIME()
 WHEN NOT MATCHED THEN INSERT (Entity, [Key], Op, InitiatedBy, ApprovedBy, CommitId) VALUES (@e, @k, @o, @i, @a, @c);
 "@
+    if ($Exec) {
+        foreach ($x in @($Entries)) {
+            if (-not $x) { continue }
+            $p = @{ e = $Entity; k = "$($x.key)"; o = "$($x.op)"; i = "$($x.initiatedBy)"; a = $(if ("$($x.approvedBy)".Trim()) { "$($x.approvedBy)" } else { $null }); c = $CommitId }
+            & $Exec $sql $p
+            $n++
+        }
+        return $n
+    }
+    # 🔴 §97.1 (EFIF 2026-10-08): this was one CONNECTION + one MERGE per entry -- 168 of each for a 168-row commit, every one
+    # its own transaction (a log flush each) on an S0 database. Now ONE statement per <= 500 entries (OPENJSON), the same
+    # upsert per (Entity, Key), the latest entry of a key winning as before.
+    $byKey = New-Object 'System.Collections.Specialized.OrderedDictionary' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($x in @($Entries)) {
-        if (-not $x) { continue }
-        $p = @{ e = $Entity; k = "$($x.key)"; o = "$($x.op)"; i = "$($x.initiatedBy)"; a = $(if ("$($x.approvedBy)".Trim()) { "$($x.approvedBy)" } else { $null }); c = $CommitId }
-        if ($Exec) { & $Exec $sql $p } else { [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $sql -Parameters $p) }
+        if (-not $x -or -not "$($x.key)".Trim()) { continue }
+        $it = [ordered]@{ k = "$($x.key)"; o = "$($x.op)"; i = "$($x.initiatedBy)"; a = $(if ("$($x.approvedBy)".Trim()) { "$($x.approvedBy)" } else { $null }) }
+        if ($byKey.Contains($it.k)) { $byKey[$it.k] = $it } else { $byKey.Add($it.k, $it) }
         $n++
+    }
+    if (-not $byKey.Count) { return $n }
+    $setSql = @'
+SET NOCOUNT ON;
+MERGE pim.ChangeAttribution AS t
+USING (SELECT k, o, i, a FROM OPENJSON(@j) WITH (k NVARCHAR(400) '$.k', o NVARCHAR(10) '$.o', i NVARCHAR(200) '$.i', a NVARCHAR(200) '$.a')) AS s
+  ON t.Entity = @e AND t.[Key] = s.k COLLATE DATABASE_DEFAULT
+WHEN MATCHED THEN UPDATE SET Op = s.o, InitiatedBy = s.i, ApprovedBy = s.a, CommitId = @c, CommittedUtc = SYSUTCDATETIME()
+WHEN NOT MATCHED THEN INSERT (Entity, [Key], Op, InitiatedBy, ApprovedBy, CommitId) VALUES (@e, s.k, s.o, s.i, s.a, @c);
+'@
+    $vals = @($byKey.Values)
+    for ($at = 0; $at -lt $vals.Count; $at += 500) {
+        $chunk = @($vals[$at..([Math]::Min($vals.Count, $at + 500) - 1)])
+        [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql $setSql -CommandTimeoutSec 120 -Parameters @{ e = $Entity; c = $CommitId; j = (ConvertTo-Json -InputObject @($chunk) -Depth 3 -Compress) })
     }
     return $n
 }

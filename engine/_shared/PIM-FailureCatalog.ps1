@@ -187,8 +187,13 @@ $script:PimFailureRules = @(
     # answered 400 "InvalidPolicyRule -- The policy rule is invalid." and the pull recorded FAILED; the next run applied it.
     # Recorded three times before (§68.4, RIDE 2026-09-15, EFIF 2.4.392) and it converged every time. A still-failing item
     # hours later is escalated back to a real failure by the waiting-window rule, so a genuinely invalid rule still surfaces.
+    # §97.3 (Invardia fleet watch 2026-10-08, a freshly built MSP managing tenant on 2.4.532): the RE-READ of a new group's
+    # owner policy answered "not found" before PIM had materialised it, and the item was "Unrecognised failure" beside a
+    # WAITING rule PATCH on the same group. The provider (Get-PimGroupPolicyRereadFailureMessage) now tags such a re-read
+    # [GROUP-POLICY-NOT-READY] -- ONLY when the group is new (created within Get-PimTransientWaitWindowMinutes) and the
+    # answer is one Test-PimGroupPolicyNotReadyAnswer lists -- so it lands HERE, on this one rule, not on a second copy.
     @{ code = 'GROUP-POLICY-NOT-READY'
-       match = { param($m, $row) $m -match '(?i)GroupsPolicies\b.*rule PATCH.*InvalidPolicyRule -- The policy rule is invalid' }
+       match = { param($m, $row) $m -match '(?i)\[GROUP-POLICY-NOT-READY\]|GroupsPolicies\b.*rule PATCH.*InvalidPolicyRule -- The policy rule is invalid' }
        title = 'The new group''s PIM policy is not ready for this rule yet'
        cause = 'PIM creates the policy of a new group in the background. For a few minutes after the group is created, a single rule update can be refused as "InvalidPolicyRule" even though the value is valid; the next run applies it.'
        remedy = 'Nothing to do if the group is new: the next run applies the rule. If it keeps failing for hours, the rule value itself is refused -- compare the rule in the message with the template.'
@@ -362,7 +367,39 @@ $script:PimFailureRules = @(
        remedy = 'Retried automatically. If it keeps failing, open a Microsoft support case for that scope, or remove the row.'
        retryable = $true; severity = 'environment'
        fixes = @() }
+
+    # §97.3: the re-read of an ESTABLISHED group's policy failed (or the group's age could not be read). LAST on purpose:
+    # a 403 / 429 / 5xx in the same message keeps its own, more precise class above; only what is otherwise unexplained
+    # lands here instead of UNCLASSIFIED. Not transient: an old group's policy that cannot be read is a real failure.
+    @{ code = 'GROUP-POLICY-UNREADABLE'
+       match = { param($m, $row) $m -match "(?i)GroupsPolicies: the \w+ policy of '[^']*' could not be re-read" }
+       title = 'The group''s PIM policy could not be read, so nothing was written'
+       cause = 'Before it changes a PIM for Groups policy the engine reads it again, and writes nothing when that read fails. The group is not new (or its creation time could not be read), so this is not the few minutes PIM needs to create a new group''s policy. A "not found" answer usually means the policy id the engine had is stale or the group is no longer onboarded to PIM for Groups.'
+       remedy = 'Read the raw Graph error. The engine forgets the policy id it had and looks it up again on the next run. If it keeps failing, open the group in Entra ID > PIM for Groups and check that its policy exists and the engine identity can read it.'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
 )
+
+function Get-PimTransientWaitWindowMinutes {
+    <# PURE. How long a transient item may wait before it counts as a real failure again (Test-PimEngineFailuresAreAllTransient),
+       and -- the same window -- how young a group must be for its unreadable policy to count as "not ready yet" (§97.3). #>
+    return 120
+}
+
+function Test-PimGroupPolicyNotReadyAnswer {
+    <#
+      PURE. §97.3: TRUE when a Graph error is one of the answers PIM gives for a group whose policy it has not materialised
+      yet: 404 / NotFound / ResourceNotFound, a 400 saying the policy "does not exist" / is "not found", or the rule PATCH's
+      "InvalidPolicyRule -- The policy rule is invalid" (the GROUP-POLICY-NOT-READY catalog rule's measured answer).
+      The ONE list of not-ready answers. It says nothing about the group's age -- the caller must prove the group is new.
+      A 403, 429 or 5xx is never "not ready".
+    #>
+    param([string]$Message)
+    $m = "$Message"
+    if (-not $m.Trim()) { return $false }
+    if ($m -match '(?i)HTTP (401|403|429|5\d\d)\b') { return $false }
+    return [bool]($m -match '(?i)HTTP 404\b|\bNotFound\b|ResourceNotFound|InvalidPolicyRule -- The policy rule is invalid|HTTP 400\b.{0,300}(does not exist|not found)')
+}
 
 function Get-PimFailureClassification {
     <# PURE. First matching rule wins (rules are ordered specific -> general). #>
@@ -513,7 +550,7 @@ function Test-PimEngineFailuresAreAllTransient {
       how many are waiting, and an item still waiting after `-MaxAgeMinutes` (its first-seen stamp)
       is treated as a real failure again -- something it needs is never coming.
     #>
-    param([object[]]$Failures, [int]$MaxAgeMinutes = 120, [datetime]$NowUtc = [datetime]::UtcNow)
+    param([object[]]$Failures, [int]$MaxAgeMinutes = (Get-PimTransientWaitWindowMinutes), [datetime]$NowUtc = [datetime]::UtcNow)
     $all = @($Failures | Where-Object { $_ })
     if (-not $all.Count) { return $false }
     foreach ($x in $all) {

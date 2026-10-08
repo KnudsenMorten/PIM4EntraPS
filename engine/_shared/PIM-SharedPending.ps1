@@ -49,8 +49,14 @@ function ConvertTo-PimSharedPendingRowMap {
     param([AllowNull()][object]$Row)
     $m = [ordered]@{}
     if ($null -eq $Row) { return $m }
-    if ($Row -is [System.Collections.IDictionary]) { foreach ($k in $Row.Keys) { $m["$k"] = (ConvertTo-PimSharedPendingText $Row[$k]) } }
-    else { foreach ($p in $Row.PSObject.Properties) { $m[$p.Name] = (ConvertTo-PimSharedPendingText $p.Value) } }
+    # §97.1: ConvertTo-PimSharedPendingText inlined -- this runs for every cell of every row a commit matches, and a function
+    # call per cell was most of a 300-row commit's pending match. Same text, same rules.
+    $ic = [Globalization.CultureInfo]::InvariantCulture
+    if ($Row -is [System.Collections.IDictionary]) {
+        foreach ($k in $Row.Keys) { $v = $Row[$k]; $m["$k"] = $(if ($null -eq $v) { '' } elseif ($v -is [datetime] -or $v -is [datetimeoffset]) { $v.ToString('o', $ic) } else { "$v" }) }
+    } else {
+        foreach ($p in $Row.PSObject.Properties) { $v = $p.Value; $m[$p.Name] = $(if ($null -eq $v) { '' } elseif ($v -is [datetime] -or $v -is [datetimeoffset]) { $v.ToString('o', $ic) } else { "$v" }) }
+    }
     return $m
 }
 
@@ -78,7 +84,8 @@ function ConvertFrom-PimSharedPendingJson {
 function ConvertFrom-PimSharedPendingJsonElement {
     param($E)
     switch ("$($E.ValueKind)") {
-        'Object' { $o = [ordered]@{}; foreach ($p in $E.EnumerateObject()) { $o[$p.Name] = (ConvertFrom-PimSharedPendingJsonElement $p.Value) }; return [pscustomobject]$o }
+        # §97.1: a string member (nearly every cell of a staged row) is read here, not by a recursive call per value.
+        'Object' { $o = [ordered]@{}; foreach ($p in $E.EnumerateObject()) { $pv = $p.Value; if ("$($pv.ValueKind)" -eq 'String') { $o[$p.Name] = $pv.GetString() } else { $o[$p.Name] = (ConvertFrom-PimSharedPendingJsonElement $pv) } }; return [pscustomobject]$o }
         'Array'  { $a = New-Object System.Collections.Generic.List[object]; foreach ($x in $E.EnumerateArray()) { $a.Add((ConvertFrom-PimSharedPendingJsonElement $x)) }; return ,($a.ToArray()) }
         'String' { return $E.GetString() }
         'Number' { $l = 0L; if ($E.TryGetInt64([ref]$l)) { return $l }; return $E.GetDouble() }
@@ -116,23 +123,30 @@ function Get-PimSharedPendingRowKey {
     # change can be matched to THE stored row it is about, never to "any row that happens to carry its values".
     param([string]$Base, [AllowNull()][object]$Row)
     if ($null -eq $Row) { return '' }
+    # §97.1: the key columns are read straight from a case-insensitive map of the row (no intermediate ordered map, no
+    # scriptblock per column) -- this runs once per row of every commit. Same values: text, trimmed; '' when absent.
+    $li = @{}
     $m = ConvertTo-PimSharedPendingRowMap $Row
-    $li = @{}; foreach ($kv in $m.GetEnumerator()) { $li["$($kv.Key)".ToLowerInvariant()] = "$($kv.Value)".Trim() }
-    $g = { param($n) $v = $li["$n".ToLowerInvariant()]; if ($null -eq $v) { '' } else { "$v" } }
-    $first = { param([string[]]$ns) foreach ($n in $ns) { $v = & $g $n; if ($v) { return $v } }; return '' }
-    $k = switch -Regex ("$Base") {
-        '^PIM-Definitions-AU$'                 { & $g 'AdministrativeUnitTag'; break }
-        '^PIM-Definitions-Departments$'        { & $first @('GroupTag', 'Department', 'DepartmentName', 'GroupName'); break }   # 2.4.462: group rows by tag
-        '^PIM-Definitions-'                    { & $g 'GroupTag'; break }
-        '^Account-Definitions-Admins(-Central)?$' { & $g 'UserName'; break }
-        '^PIM-Offboarding$'                    { & $first @('Username', 'UserName', 'UserPrincipalName', 'Upn'); break }
-        '^PIM-Discovery$'                      { & $first @('DiscoveryTag', 'Tag', 'GroupTag'); break }
-        '^PIM-Assignments-Admins$'             { (& $g 'Username') + '|' + (& $g 'GroupTag'); break }
-        '^PIM-Assignments-Groups$'             { (& $g 'TargetGroupTag') + '|' + (& $g 'SourceGroupTag'); break }
-        '^PIM-Assignments-Roles-Groups$'       { (& $g 'GroupTag') + '|' + (& $g 'RoleDefinitionName'); break }
-        '^PIM-Assignments-Roles-AUs$'          { (& $g 'GroupTag') + '|' + (& $g 'AdministrativeUnitTag') + '|' + (& $g 'RoleDefinitionName'); break }
-        '^PIM-Assignments-Azure-Resources$'    { (& $g 'GroupTag') + '|' + (& $g 'AzScope') + '|' + (& $g 'AzScopePermission'); break }
-        default                                { & $first @('GroupTag', 'GroupName') }
+    foreach ($kv in $m.GetEnumerator()) { $li[$kv.Key] = "$($kv.Value)".Trim() }   # @{} is case-insensitive
+    $first = ''
+    $cols = switch -Regex ("$Base") {
+        '^PIM-Definitions-AU$'                 { , @('AdministrativeUnitTag'); break }
+        '^PIM-Definitions-Departments$'        { $first = 'GroupTag,Department,DepartmentName,GroupName'; , @(); break }   # 2.4.462: group rows by tag
+        '^PIM-Definitions-'                    { , @('GroupTag'); break }
+        '^Account-Definitions-Admins(-Central)?$' { , @('UserName'); break }
+        '^PIM-Offboarding$'                    { $first = 'Username,UserName,UserPrincipalName,Upn'; , @(); break }
+        '^PIM-Discovery$'                      { $first = 'DiscoveryTag,Tag,GroupTag'; , @(); break }
+        '^PIM-Assignments-Admins$'             { , @('Username', 'GroupTag'); break }
+        '^PIM-Assignments-Groups$'             { , @('TargetGroupTag', 'SourceGroupTag'); break }
+        '^PIM-Assignments-Roles-Groups$'       { , @('GroupTag', 'RoleDefinitionName'); break }
+        '^PIM-Assignments-Roles-AUs$'          { , @('GroupTag', 'AdministrativeUnitTag', 'RoleDefinitionName'); break }
+        '^PIM-Assignments-Azure-Resources$'    { , @('GroupTag', 'AzScope', 'AzScopePermission'); break }
+        default                                { $first = 'GroupTag,GroupName'; , @() }
+    }
+    if ($first) {
+        $k = ''; foreach ($n in $first.Split(',')) { $v = $li[$n]; if ($v) { $k = "$v"; break } }
+    } else {
+        $k = (@(foreach ($n in @($cols)) { $v = $li[$n]; if ($null -eq $v) { '' } else { "$v" } }) -join '|')
     }
     $k = "$k".Trim()
     if (-not $k -or $k -match '^\|+$') { return '' }
@@ -245,6 +259,28 @@ function Merge-PimSharedPendingChanges {
     }
 }
 
+function New-PimSharedPendingRowIndex {
+    <#
+      PURE. §97.1: -Rows bucketed by the page's row key (Get-PimSharedPendingRowKey -Base), built ONCE -- O(rows) -- so a
+      caller that tests many changes against the same stored rows (the commit's classification, the clean-up after it)
+      looks each change's row up instead of re-deriving the key of every stored row per change (changes x rows). Rows
+      without a key are kept in .rows (the content-match path still sees them). Returns { base; byKey; rows }.
+    #>
+    param([string]$Base = '', [AllowNull()][AllowEmptyCollection()][object[]]$Rows = @())
+    $ix = @{}
+    $all = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $all.Add($r)
+        if (-not "$Base".Trim()) { continue }
+        $k = Get-PimSharedPendingRowKey -Base $Base -Row $r
+        if (-not $k) { continue }
+        if (-not $ix.ContainsKey($k)) { $ix[$k] = New-Object System.Collections.Generic.List[object] }
+        $ix[$k].Add($r)
+    }
+    [pscustomobject]@{ base = "$Base"; byKey = $ix; rows = $all.ToArray() }
+}
+
 function Test-PimSharedPendingSatisfied {
     # True when the stored rows already carry out $Change: add/modify -> a stored row matches its row; remove -> no stored
     # row matches what it removes.
@@ -253,13 +289,20 @@ function Test-PimSharedPendingSatisfied {
     # add / modify only when that row carries every column the change changes -- emptied cells included.
     # Without -Base, or when the change's key is not the one its own row gives (an unknown entity), the content match
     # is used, still with the emptied-cell rule.
-    param([AllowNull()][object]$Change, [AllowNull()][AllowEmptyCollection()][object[]]$StoredRows = @(), [string]$Base = '')
+    param([AllowNull()][object]$Change, [AllowNull()][AllowEmptyCollection()][object[]]$StoredRows = @(), [string]$Base = '',
+          # 🔴 §97.1 (EFIF 2026-10-08, a 168-row commit took 132 s): New-PimSharedPendingRowIndex of the stored rows, built ONCE
+          # by a caller that tests many changes. Without it every change re-derived the key of EVERY stored row -- changes x
+          # rows key derivations, twice per commit (classification + clean-up). Same answer either way.
+          [AllowNull()][object]$RowIndex = $null)
     $c = ConvertTo-PimSharedPendingChange $Change
     if (-not $c) { return $true }   # an unusable entry is dropped, never kept forever
     $exact = @(Get-PimSharedPendingChangedColumns $c)
     $own = if ($c.op -eq 'remove') { $c.before } else { $c.row }
     $byKey = ("$Base".Trim() -and (Get-PimSharedPendingRowKey -Base $Base -Row $own) -eq $c.key)
-    $cands = if ($byKey) { @(@($StoredRows) | Where-Object { $null -ne $_ -and (Get-PimSharedPendingRowKey -Base $Base -Row $_) -eq $c.key }) } else { @($StoredRows) }
+    $useIx = ($null -ne $RowIndex -and "$($RowIndex.base)" -eq "$Base")
+    if ($useIx -and -not @($StoredRows).Count) { $StoredRows = @($RowIndex.rows) }
+    $cands = if ($byKey -and $useIx) { if ($RowIndex.byKey.ContainsKey($c.key)) { @($RowIndex.byKey[$c.key].ToArray()) } else { @() } }
+             elseif ($byKey) { @(@($StoredRows) | Where-Object { $null -ne $_ -and (Get-PimSharedPendingRowKey -Base $Base -Row $_) -eq $c.key }) } else { @($StoredRows) }
     if ($c.op -eq 'remove') {
         if ($byKey) { return (@($cands).Count -eq 0) }
         foreach ($r in $cands) { if (Test-PimSharedPendingRowMatch -Wanted $c.before -Stored $r) { return $false } }
@@ -303,11 +346,12 @@ function Get-PimSharedPendingCommitClassification {
         $entries.Add([ordered]@{ op = 'modify'; row = (& $g 'after'); before = (& $g 'before'); cols = @(@(& $g 'diffCols') | Where-Object { "$_".Trim() } | ForEach-Object { "$_" }) })
     }
     foreach ($r in @($Diff.removes)) { if ($null -ne $r) { $entries.Add([ordered]@{ op = 'remove'; row = $null; before = $r; cols = @() }) } }
+    $afterIx = New-PimSharedPendingRowIndex -Base $Base -Rows @($AfterRows)   # §97.1: once, not once per entry
     foreach ($e in $entries) {
         $keys = @(@((Get-PimSharedPendingRowKey -Base $Base -Row $e.row), (Get-PimSharedPendingRowKey -Base $Base -Row $e.before)) | Where-Object { $_ } | Select-Object -Unique)
         $ch = $null; foreach ($k in $keys) { if ($byKey.ContainsKey($k)) { $ch = $byKey[$k]; break } }
         $isCarried = $false
-        if ($ch -and $ch.op -eq $e.op -and (Test-PimSharedPendingSatisfied -Change $ch -StoredRows $AfterRows -Base $Base)) {
+        if ($ch -and $ch.op -eq $e.op -and (Test-PimSharedPendingSatisfied -Change $ch -StoredRows $afterIx.rows -Base $Base -RowIndex $afterIx)) {
             $mine = @(Get-PimSharedPendingChangedColumns $ch | ForEach-Object { "$_".ToLowerInvariant() })
             $extra = @($e.cols | Where-Object { $mine -notcontains "$_".ToLowerInvariant() })
             $isCarried = ($e.op -eq 'remove' -or $extra.Count -eq 0)
@@ -328,9 +372,10 @@ function Select-PimSharedPendingOutstanding {
     # The changes the stored rows do NOT yet carry out. Returns { changes[]; cleared }.
     param([AllowNull()][AllowEmptyCollection()][object[]]$Changes = @(), [AllowNull()][AllowEmptyCollection()][object[]]$StoredRows = @(), [string]$Base = '')
     $keep = New-Object System.Collections.Generic.List[object]; $cleared = 0
+    $ix = New-PimSharedPendingRowIndex -Base $Base -Rows @($StoredRows)   # §97.1: once, not once per change
     foreach ($c in @($Changes)) {
         if ($null -eq $c) { continue }
-        if (Test-PimSharedPendingSatisfied -Change $c -StoredRows $StoredRows -Base $Base) { $cleared++ } else { $keep.Add($c) }
+        if (Test-PimSharedPendingSatisfied -Change $c -StoredRows $ix.rows -Base $Base -RowIndex $ix) { $cleared++ } else { $keep.Add($c) }
     }
     [pscustomobject]@{ changes = @($keep.ToArray()); cleared = $cleared }
 }

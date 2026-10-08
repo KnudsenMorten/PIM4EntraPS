@@ -2281,6 +2281,9 @@ function ConvertTo-PimCanonicalJsonString {
     # ConvertTo-Json escape differently -- a hash over those would differ by runtime).
     param([AllowNull()][AllowEmptyString()][string]$Value)
     if ($null -eq $Value) { return 'null' }
+    # §97.1: the common case -- nothing to escape -- without walking the string char by char in PowerShell (a 400-row
+    # hash was ~2.5 s of this loop). Same bytes either way.
+    if ($Value -notmatch '["\\\x00-\x1f]') { return '"' + $Value + '"' }
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append('"')
     foreach ($ch in $Value.ToCharArray()) {
@@ -2301,18 +2304,22 @@ function Get-PimRowsHash {
     # the FULL stored set before any scope filter; the PUT recomputes it from the store and compares.
     param([AllowNull()][AllowEmptyCollection()][object[]]$Rows = @())
     $items = New-Object System.Collections.Generic.List[string]
+    # §97.1: no pipeline and no function call per cell for the common no-escape value (same bytes -- the hash a page holds
+    # from an older Manager still matches).
+    $esc = '["\\\x00-\x1f]'
     foreach ($r in @($Rows)) {
         if ($null -eq $r) { continue }
-        $names = @()
-        if ($r -is [System.Collections.IDictionary]) { $names = @($r.Keys | ForEach-Object { "$_" }) }
-        else { $names = @($r.PSObject.Properties | ForEach-Object { $_.Name }) }
-        $sorted = [string[]]@($names)
+        $isD = $r -is [System.Collections.IDictionary]
+        $sorted = if ($isD) { [string[]]@(foreach ($k in $r.Keys) { "$k" }) } else { [string[]]@(foreach ($p in $r.PSObject.Properties) { $p.Name }) }
         [System.Array]::Sort($sorted, [System.StringComparer]::Ordinal)
         $parts = New-Object System.Collections.Generic.List[string]
         foreach ($n in $sorted) {
-            $v = if ($r -is [System.Collections.IDictionary]) { $r[$n] } else { $r.PSObject.Properties[$n].Value }
-            $vs = if ($null -eq $v) { $null } else { "$v" }
-            $parts.Add((ConvertTo-PimCanonicalJsonString $n) + ':' + (ConvertTo-PimCanonicalJsonString $vs))
+            $v = if ($isD) { $r[$n] } else { $r.PSObject.Properties[$n].Value }
+            $ks = if ($n -notmatch $esc) { '"' + $n + '"' } else { ConvertTo-PimCanonicalJsonString $n }
+            # (a null value always hashed as "" -- the [string] parameter of ConvertTo-PimCanonicalJsonString turned it into '')
+            if ($null -eq $v) { $parts.Add($ks + ':""'); continue }
+            $vs = "$v"
+            $parts.Add($ks + ':' + $(if ($vs -notmatch $esc) { '"' + $vs + '"' } else { ConvertTo-PimCanonicalJsonString $vs }))
         }
         $items.Add('{' + ($parts -join ',') + '}')
     }
@@ -2540,20 +2547,25 @@ function Compare-PimRowSets {
 
     # Natural (stable) key for a row, reusing the store's own key derivation so we
     # never invent a parallel keying scheme. Returns '' when unavailable.
+    # §97.1: the key helper is looked up ONCE per diff (Get-Command per row was a measurable part of a 400-row commit).
+    $__haveKey = [bool](Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)
     function _NaturalKey([string]$baseName, [object]$row) {
         if ($null -eq $row) { return '' }
         if (-not "$baseName".Trim()) { return '' }
-        if (-not (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)) { return '' }
+        if (-not $__haveKey) { return '' }
         try { return "$(Get-PimStoreRowKey -Base $baseName -Row $row)" } catch { return '' }
     }
 
     # Column-level field comparison between two rows -> array of differing columns.
     function _DiffCols([object]$beforeRow, [object]$afterRow) {
         $cols = New-Object System.Collections.ArrayList
-        $allCols = @()
-        if ($beforeRow -is [System.Collections.IDictionary]) { $allCols += @($beforeRow.Keys) } else { $allCols += @($beforeRow.PSObject.Properties.Name) }
-        if ($afterRow  -is [System.Collections.IDictionary]) { $allCols += @($afterRow.Keys)  } else { $allCols += @($afterRow.PSObject.Properties.Name) }
-        $allCols = $allCols | Select-Object -Unique
+        # §97.1: union of the column names, first-seen order, without a Select-Object -Unique pipeline per row.
+        $seenC = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)   # Select-Object -Unique was case-sensitive too
+        $allCols = New-Object System.Collections.Generic.List[string]
+        foreach ($side in @($beforeRow, $afterRow)) {
+            $names = if ($side -is [System.Collections.IDictionary]) { @($side.Keys) } else { @(foreach ($p in $side.PSObject.Properties) { $p.Name }) }
+            foreach ($nm in $names) { if ($seenC.Add("$nm")) { $allCols.Add("$nm") } }
+        }
         foreach ($c in $allCols) {
             $bv = if ($beforeRow -is [System.Collections.IDictionary]) { "$($beforeRow[$c])" } else { "$($beforeRow.PSObject.Properties[$c].Value)" }
             $av = if ($afterRow  -is [System.Collections.IDictionary]) { "$($afterRow[$c])"  } else { "$($afterRow.PSObject.Properties[$c].Value)" }
@@ -4915,6 +4927,100 @@ function Invoke-PimManagerCommitHistoryGet {
     }
 }
 
+# ---------------------------------------------------------------------------
+# §97.1 COMMIT OUTCOMES (EFIF 2026-10-08). A commit PUT carries the page's own id (clientCommitId, 8-64 of
+# [A-Za-z0-9_-]). Its answer is remembered here (newest $script:PimCommitOutcomeKeep, per process) and its journal rows
+# carry the same id, so after a browser timeout GET /api/commit-status/<id> says what REALLY happened -- saved, refused
+# (with the refusal), or unknown -- and a retry of the same id is answered, never applied a second time.
+# ---------------------------------------------------------------------------
+$script:PimCommitOutcomes = [ordered]@{}
+$script:PimCommitOutcomeKeep = 200
+function Get-PimManagerClientCommitId {
+    # PURE. The page's commit id from a PUT body, '' when absent or not of the allowed shape.
+    param([AllowNull()]$PutBody)
+    if ($null -eq $PutBody -or -not $PutBody.PSObject.Properties['clientCommitId']) { return '' }
+    $v = "$($PutBody.clientCommitId)".Trim()
+    if ($v -cmatch '^[A-Za-z0-9_\-]{8,64}$') { return $v }
+    return ''
+}
+function Get-PimManagerCommitOutcomeIdentity {
+    try { $r = Get-PimManagerRole; return "$($r.identity)".Trim().ToLowerInvariant() } catch { return '' }
+}
+function Set-PimManagerCommitOutcome {
+    param([Parameter(Mandatory)][string]$Id, [string]$Base = '', [ValidateSet('running', 'done')][string]$State = 'done', [int]$Status = 0, [string]$BodyText = '')
+    $script:PimCommitOutcomes[$Id] = [pscustomobject]@{ id = $Id; base = $Base; state = $State; status = $Status; bodyText = $BodyText
+                                                        identity = (Get-PimManagerCommitOutcomeIdentity); atUtc = [datetime]::UtcNow.ToString('o') }
+    while ($script:PimCommitOutcomes.Count -gt $script:PimCommitOutcomeKeep) { $script:PimCommitOutcomes.RemoveAt(0) }
+}
+function Get-PimManagerCommitOutcome {
+    # The remembered answer to commit -Id, for the SAME signed-in identity only ($null otherwise).
+    param([Parameter(Mandatory)][string]$Id)
+    if (-not $script:PimCommitOutcomes.Contains($Id)) { return $null }
+    $o = $script:PimCommitOutcomes[$Id]
+    if ("$($o.identity)" -ne (Get-PimManagerCommitOutcomeIdentity)) { return $null }
+    return $o
+}
+function Get-PimManagerCommitJournalSummary {
+    # How many journal rows commit -Id wrote (per op), optionally for one entity. $null when the journal cannot be read.
+    param([Parameter(Mandatory)][string]$Id, [string]$Base = '')
+    if (-not "$($script:PimSqlCs)".Trim()) { return $null }
+    try {
+        $rows = @(Invoke-PimSqlQuery -ConnectionString $script:PimSqlCs -Parameters @{ c = $Id; e = "$Base" } -Sql @"
+IF OBJECT_ID('pim.CommitJournal') IS NOT NULL
+SELECT Entity, Op, COUNT(*) AS N FROM pim.CommitJournal WHERE CommitId = @c AND (@e = '' OR Entity = @e) GROUP BY Entity, Op
+"@)
+        $s = [ordered]@{ rows = 0; adds = 0; removes = 0; modifies = 0; entities = @($rows | ForEach-Object { "$($_.Entity)" } | Select-Object -Unique) }
+        foreach ($r in $rows) {
+            $n = [int]$r.N; $s.rows += $n
+            switch ("$($r.Op)") { 'Add' { $s.adds += $n } 'Remove' { $s.removes += $n } default { $s.modifies += $n } }
+        }
+        return [pscustomobject]$s
+    } catch { return $null }
+}
+function New-PimManagerResponseCapture {
+    # Stands in for an HttpListenerResponse (the MCP commit tool uses the same shape): Write-JsonResponse writes into it.
+    $cap = [pscustomobject]@{ StatusCode = 0; ContentType = ''; ContentLength64 = 0; OutputStream = (New-Object System.IO.MemoryStream); Headers = (New-Object System.Net.WebHeaderCollection) }
+    $cap | Add-Member -MemberType ScriptMethod -Name AddHeader -Value { param($n, $v) $this.Headers[$n] = $v }
+    return $cap
+}
+function Copy-PimManagerCapturedResponse {
+    # Writes a captured JSON answer to the real response (client-abort tolerant, like Write-JsonResponse).
+    param([Parameter(Mandatory)]$Response, [int]$Status, [string]$BodyText = '')
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes("$BodyText")
+    try {
+        $Response.StatusCode = $Status
+        $Response.ContentType = 'application/json; charset=utf-8'
+        $Response.ContentLength64 = $bytes.LongLength
+        $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        $Response.OutputStream.Close()
+    } catch {
+        Write-Host ("  [net] client gone before the commit answer could be written ({0} bytes, status {1}) -- the outcome is kept for GET /api/commit-status: {2}" -f $bytes.Length, $Status, $_.Exception.Message) -ForegroundColor DarkGray
+    }
+}
+function Get-PimManagerCommitStatus {
+    <#
+      GET /api/commit-status/<id> (§97.1). What happened to the commit the page sent with clientCommitId <id>:
+        state 'done'    -- this process answered it: status + the answer itself (saved = 2xx);
+        state 'running' -- still being applied (another replica, or a page polling while it runs);
+        state 'journal' -- not in memory (restart / other replica) but in the change journal: it was SAVED;
+        state 'unknown' -- no record anywhere: the commit did not land (or never arrived). Never a guess.
+    #>
+    param([Parameter(Mandatory)][string]$Id)
+    $o = Get-PimManagerCommitOutcome -Id $Id
+    if ($o) {
+        $b = $null; try { $b = "$($o.bodyText)" | ConvertFrom-Json } catch { $b = $null }
+        return [ordered]@{ id = $Id; state = "$($o.state)"; base = "$($o.base)"; status = [int]$o.status
+                           saved = ("$($o.state)" -eq 'done' -and [int]$o.status -ge 200 -and [int]$o.status -lt 300); body = $b; atUtc = "$($o.atUtc)" }
+    }
+    $j = Get-PimManagerCommitJournalSummary -Id $Id
+    if ($j -and $j.rows -gt 0) {
+        return [ordered]@{ id = $Id; state = 'journal'; base = (@($j.entities) -join ','); status = 200; saved = $true
+                           body = [ordered]@{ ok = $true; commitId = $Id; adds = $j.adds; removes = $j.removes; modifies = $j.modifies } }
+    }
+    return [ordered]@{ id = $Id; state = 'unknown'; saved = $false; journalReadable = ($null -ne $j)
+                       note = $(if ($null -eq $j) { 'The change journal could not be read, so it is not known whether this commit was saved.' } else { 'No record of this commit: nothing of it was saved.' }) }
+}
+
 function Invoke-PimManagerCsvPut {
     <#
       PUT /api/csv/<base> -- the COMMIT of one entity (moved here from the route unchanged, REQ 93): the role and delegation
@@ -4922,7 +5028,48 @@ function Invoke-PimManagerCsvPut {
       optimistic concurrency (baseRowsHash), the safe commit, audit and the commit watcher. Writes its answer to -resp
       (an HttpListenerResponse, or the capture the MCP commit tool hands in) and returns the status.
     #>
-    param([Parameter(Mandatory)][string]$base, [Parameter(Mandatory)]$spec, [Parameter(Mandatory)]$resp, [AllowNull()]$PutBody)
+    param([Parameter(Mandatory)][string]$base, [Parameter(Mandatory)]$spec, [Parameter(Mandatory)]$resp, [AllowNull()]$PutBody,
+          # §97.1: internal -- the outer call already recorded this commit's outcome under its clientCommitId (below).
+          [switch]$OutcomeRecorded)
+    # 🔴 §97.1 (EFIF 2026-10-08: "Commit FAILED ... Not saved" for a commit the server DID save, 132 s): the page sends its
+    # own commit id (clientCommitId). The answer to that commit is remembered, so the page can ask after a timeout what
+    # REALLY happened (GET /api/commit-status/<id>) instead of reporting "not saved" by assumption, and a retry of the
+    # same commit is answered from the record instead of being applied twice.
+    $__ccid = Get-PimManagerClientCommitId -PutBody $PutBody
+    if ($__ccid -and -not $OutcomeRecorded) {
+        $__known = Get-PimManagerCommitOutcome -Id $__ccid
+        if ($__known -and "$($__known.state)" -eq 'done' -and "$($__known.base)" -eq $base) {
+            Write-Host "  [commit] $base`: commit $__ccid was already answered ($($__known.status)) -- replaying that answer, nothing applied twice" -ForegroundColor DarkGray
+            Copy-PimManagerCapturedResponse -Response $resp -Status ([int]$__known.status) -BodyText "$($__known.bodyText)"
+            return [int]$__known.status
+        }
+        # Not in this process's memory (a restart, another replica) but in the change journal: it landed. Never apply twice.
+        $__j = Get-PimManagerCommitJournalSummary -Id $__ccid -Base $base
+        if ($__j -and $__j.rows -gt 0) {
+            $__rh = ''; $__rn = 0
+            try { $__sr = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base); $__rn = $__sr.Count; $__rh = Get-PimRowsHash -Rows $__sr } catch { $__rh = '' }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; base = $base; path = 'sql'; alreadyCommitted = $true; commitId = $__ccid
+                adds = [int]$__j.adds; removes = [int]$__j.removes; modifies = [int]$__j.modifies; rowCount = $__rn; rowsHash = $__rh
+                note = "Commit $__ccid of $base is already in the change journal -- it was saved earlier; nothing was applied again." })
+            return 200
+        }
+        Set-PimManagerCommitOutcome -Id $__ccid -Base $base -State 'running'
+        $__cap = New-PimManagerResponseCapture
+        $__code = 500
+        try { $__code = Invoke-PimManagerCsvPut -base $base -spec $spec -resp $__cap -PutBody $PutBody -OutcomeRecorded }
+        catch {
+            $__err = [ordered]@{ ok = $false; base = $base; error = "$($_.Exception.Message)" }
+            Write-JsonResponse -Response $__cap -Status 500 -Body $__err
+            $__code = 500
+        }
+        $__txt = [System.Text.Encoding]::UTF8.GetString($__cap.OutputStream.ToArray())
+        Set-PimManagerCommitOutcome -Id $__ccid -Base $base -State 'done' -Status ([int]$__code) -BodyText $__txt
+        Copy-PimManagerCapturedResponse -Response $resp -Status ([int]$__code) -BodyText $__txt
+        return [int]$__code
+    }
+    # §97.1: where the time of a commit goes -- one line per commit ([commit-timing]), laps per stage + SQL connections.
+    $__tm = @{ sw = [System.Diagnostics.Stopwatch]::StartNew(); last = 0L; laps = (New-Object System.Collections.Generic.List[string]); sql0 = [int]$global:PIM_SqlConnectionCount }
+    $__lap = { param($n) $e = $__tm.sw.ElapsedMilliseconds; $__tm.laps.Add(('{0} {1}' -f $n, ($e - $__tm.last))); $__tm.last = $e }
     $sqlMode = $true
     # §79.9: a DELEGATED caller (role Delegated, or a Reader who owns a department) may commit too -- only rows they
     # own, inside their profile (checked below on the real diff, Test-PimDelegatedWrite).
@@ -5002,6 +5149,7 @@ function Invoke-PimManagerCsvPut {
     # baseRowsHash present + different -> 409, nothing written. Absent -> accepted (scripts, tests), and
     # the audit event says the commit was NOT concurrency-checked.
     $currentRowsHash = Get-PimRowsHash -Rows @($current.rows)
+    & $__lap 'read'
     $baseRowsHash = ''
     if ($body -and $body.PSObject.Properties['baseRowsHash']) { $baseRowsHash = "$($body.baseRowsHash)".Trim().ToLowerInvariant() }
     if ($baseRowsHash -and $baseRowsHash -ne $currentRowsHash) {
@@ -5061,6 +5209,7 @@ function Invoke-PimManagerCsvPut {
         return 400
     }
     $diff = Compare-PimRowSets -Before $current.rows -After $rowsOrdered -Base $base
+    & $__lap 'diff'
     # Operator 2026-10-05 ("why is the delta taking so long" -- 8 removals sat 'saved' for the next FULL run): a DELETED
     # assignment row only left the desired state, and a delta run never prunes (Mode Full + Prune only), so the membership
     # stayed in Entra until the nightly reconcile. An assignment row that is deleted is kept as a TARGETED REMOVAL instead
@@ -5292,6 +5441,7 @@ function Invoke-PimManagerCsvPut {
         }
     }
 
+    & $__lap 'gates'
     # §71.5 -- THE REPLICATION GATE, server-side, because the GUI is never the only gate. A
     # tenant that is not the managing tenant may not introduce or change Replicate (or Ring/Target on
     # a non-admin entity); on the managing tenant every changed row must pass the same check the wizard
@@ -5328,6 +5478,7 @@ function Invoke-PimManagerCsvPut {
             return 409
         }
     }
+    & $__lap 'pending-classify'
     if ($secondMode -ne 'off' -and $spClass) {
         $spUncarried = @($spClass.direct).Count
         $spSens = {
@@ -5381,15 +5532,17 @@ function Invoke-PimManagerCsvPut {
 
     # [M1] SAFE COMMIT: timestamped backup BEFORE the apply, all-or-nothing
     # transactional apply, automatic rollback-to-snapshot on any failure.
+    & $__lap 'uplink+replication'
     $mcApprover = if ($mc -and "$($mc.gate)" -eq 'approved' -and $mc.approval) { "$($mc.approval.approver)" } else { '' }
     try {
-        $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode -Classification $spClass -Approver $mcApprover -Source $(if ($undoOf) { 'undo' } else { $commitSource }) -UndoOf $undoOf
+        $commitRes = Invoke-PimManagerSafeCommit -Base $base -NewRows $rowsOrdered -Current $current -SqlMode:$sqlMode -Classification $spClass -Approver $mcApprover -Source $(if ($undoOf) { 'undo' } else { $commitSource }) -UndoOf $undoOf -CommitId $__ccid
     } catch {
         # The store was left exactly as before (snapshot restored). Surface
         # the clear error so the operator sees the commit was reversed.
         Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; base = $base; error = "$($_.Exception.Message)" }
         return 500
     }
+    & $__lap 'backup+apply'
     $writtenPath = 'sql'
     # 🔴 §33.28: an 'authoring' approval that authorised THIS commit is consumed ONCE, as the design says
     # (Set-PimApprovalRequestExecuted). The PUT never latched it, so one approval stayed usable for every
@@ -5400,6 +5553,7 @@ function Invoke-PimManagerCsvPut {
     }
     Write-PimMutationLog -BaseName $base -Adds $diff.adds.Count -Removes $diff.removes.Count -Modifies $diff.modifies.Count -NewRowCount $rowsOrdered.Count -Diff $diff `
         -Concurrency $concurrencyNote -ScopeMerged:([bool]$slice.filtered) -Classification $spClass -Approver $mcApprover -CommitId "$($commitRes.commitId)"
+    & $__lap 'audit'
     # CONFIG-1.2: AUDIT-1 action config.undo -- which commit this one reverses, under the new commit's id.
     if ($undoOf) {
         try { Write-PimManagerAuditEvent -Action 'config.undo' -Target $base -Result 'ok' -After ([ordered]@{ undoOf = $undoOf; commitId = "$($commitRes.commitId)"; adds = $diff.adds.Count; removes = $diff.removes.Count; modifies = $diff.modifies.Count }) }
@@ -5416,13 +5570,18 @@ function Invoke-PimManagerCsvPut {
 
     # BUG-200: hand back the hash of what is stored NOW, so a follow-up commit from the same page is
     # checked against its own result rather than against the pre-commit read.
+    & $__lap 'engine-start'
     $newRowsHash = ''
-    try { $newRowsHash = Get-PimRowsHash -Rows @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base) } catch { $newRowsHash = '' }
+    $__storedNow = $null
+    try { $__storedNow = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base); $newRowsHash = Get-PimRowsHash -Rows $__storedNow } catch { $newRowsHash = ''; $__storedNow = $null }
+    & $__lap 're-read'
     # §79.13: the shared pending changes this commit carried out leave the store -- whoever staged them.
     if ($script:PimSqlCs -and (Get-Command Invoke-PimSharedPendingReconcile -ErrorAction SilentlyContinue)) {
-        try { [void](Invoke-PimSharedPendingReconcile -ConnectionString $script:PimSqlCs -Bases @($base) -ReadRows { param($b) @(@(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $b) + @($pendingSubmittedEff)) }) }
+        # §97.1: the rows just re-read are handed in -- one read of the entity per commit, not a second one here.
+        try { [void](Invoke-PimSharedPendingReconcile -ConnectionString $script:PimSqlCs -Bases @($base) -ReadRows { param($b) if ($b -eq $base -and $null -ne $__storedNow) { @(@($__storedNow) + @($pendingSubmittedEff)) } else { @(@(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $b) + @($pendingSubmittedEff)) } }) }
         catch { Write-Warning "  [pending] the committed changes for $base were NOT cleared from the shared pending store: $($_.Exception.Message)" }
     }
+    & $__lap 'pending-reconcile'
     $putOut = [ordered]@{
         ok         = $true
         base       = $base
@@ -5448,6 +5607,12 @@ function Invoke-PimManagerCsvPut {
         $putOut['note'] = "Saved every other change. " + (@($holdRes | ForEach-Object { $_.note }) -join ' ')
         $putStatus = 202
     }
+    try {
+        $__sqlN = [int]$global:PIM_SqlConnectionCount - [int]$__tm.sql0
+        $__ms = $__tm.sw.ElapsedMilliseconds
+        Write-Host ("  [commit-timing] {0}: {1} row(s), {2} changed -- {3} (ms); total {4} ms; {5} SQL connection(s)" -f $base, @($rowsOrdered).Count, ($diff.adds.Count + $diff.removes.Count + $diff.modifies.Count), ($__tm.laps -join ', '), $__ms, $__sqlN) -ForegroundColor $(if ($__ms -ge 10000) { 'Yellow' } else { 'DarkGray' })
+        $putOut['timingMs'] = [int]$__ms
+    } catch { }
     Write-JsonResponse -Response $resp -Status $putStatus -Body $putOut
     return $putStatus
 }
@@ -8749,32 +8914,6 @@ function Handle-Request {
     $path = $req.Url.AbsolutePath
     $method = $req.HttpMethod
 
-    # 97.2 (operator 2026-10-07: "there is no create buttons to create the things"; decision: the CLICKING ADMIN signs in):
-    # the redirect target of the page's own Microsoft sign-in (auth code + PKCE, a popup). It holds nothing: it hands the
-    # code back to the page that opened it (same origin only) and closes. The page redeems the code itself (SPA platform
-    # redirect on the Manager's sign-in app, Set-PimManagerEasyAuth.ps1), so the Manager never sees the admin's token.
-    if ($path -eq '/activator-signin' -and $method -eq 'GET') {
-        Write-HtmlResponse -Response $resp -Html @'
-<!doctype html><html><head><meta charset="utf-8"><title>Signed in</title></head><body style="font-family:Segoe UI,sans-serif;padding:24px;">
-<p id="m">Finishing the sign-in&hellip;</p>
-<script>
-(function () {
-  var q = new URLSearchParams(location.search), h = new URLSearchParams((location.hash || '').replace(/^#/, ''));
-  var get = function (k) { return q.get(k) || h.get(k) || ''; };
-  var msg = { type: 'pim-activator-signin', code: get('code'), state: get('state'), error: get('error'), error_description: get('error_description') };
-  var sent = false;
-  try { if (window.opener && !window.opener.closed) { window.opener.postMessage(msg, location.origin); sent = true; } } catch (e) { }
-  // The Microsoft sign-in page may cut window.opener; a same-origin channel reaches the page that started it anyway.
-  try { var bc = new BroadcastChannel('pim-activator-signin'); bc.postMessage(msg); sent = true; setTimeout(function () { bc.close(); }, 1000); } catch (e) { }
-  history.replaceState(null, '', location.pathname);
-  if (sent) { document.getElementById('m').textContent = msg.error ? ('Sign-in failed: ' + msg.error + ' ' + msg.error_description) : 'Signed in. You can close this window.'; setTimeout(function () { window.close(); }, 400); return; }
-  document.getElementById('m').textContent = msg.error ? ('Sign-in failed: ' + msg.error + ' ' + msg.error_description) : 'Signed in, but the PIM Manager page that started it is gone. Close this window and try again.';
-})();
-</script></body></html>
-'@
-        return 200
-    }
-
     # GET / -- serve the SPA. The token is embedded in a <meta> tag so the
     # JS can read it without exposing it on the URL after the first hop.
     if ($path -eq '/' -and $method -eq 'GET') {
@@ -11533,16 +11672,23 @@ function Handle-Request {
         # reviews tiles (the GUI lazy-loads those after the fast tiles render). Every
         # tile is real-data-or-honest-empty; one bad source never blanks the page.
         # 97.2 (operator 2026-10-07: "make a new menu item, PIM Activator, under Operation"): what this environment has
-        # (tenant, the PROD / TEST apps and their redirect URIs) and the defaults for the builder. Read-only.
+        # (tenant, the PROD / TEST apps, their redirect URIs, who may sign in) + the self-contained commands. READ-ONLY:
+        # owner 2026-10-08 "remove these buttons and leave only the cmdlets to run ... customer must define who (group) to
+        # deploy to - not everyone" -- the page writes nothing to the tenant; an admin runs the commands. The only thing the
+        # page saves is PIM's own setting ActivatorTargets (PUT /api/settings/activator-targets).
         if ($path -eq '/api/activator' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command Get-PimActivatorChannel -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the PIM Activator builder (tools/pim-activator/_PimActivatorBuild.ps1) is not loaded in this Manager' }; return 503 }
             $tid = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $tid) { $tid = "$($global:PIM_TenantId)".Trim() }; if (-not $tid) { $tid = "$env:PIM_TenantId".Trim() }
             $envName = ''; try { $en = Get-PimSetting -Name 'EnvironmentName'; if ($en -is [string]) { $envName = $en.Trim() } elseif ($en -and $en.PSObject.Properties['name']) { $envName = "$($en.name)".Trim() } } catch { }
+            $targets = ConvertTo-PimActivatorTargets $null; $targetsError = ''
+            try { $targets = ConvertTo-PimActivatorTargets (Get-PimSetting -Name 'ActivatorTargets') } catch { $targetsError = "$($_.Exception.Message)" }
+            $xtText = ''; try { $xtText = "$(Get-PimSetting -Name 'ActivatorAdditionalTenants')".Trim() } catch { $targetsError = "$($_.Exception.Message)" }
             $apps = [ordered]@{}
             foreach ($c in 'Released', 'Test') {
                 $ch = Get-PimActivatorChannel -Channel $c
-                $a = [ordered]@{ channel = $c; label = $ch.label; name = $ch.appName; extensionId = $ch.id; found = $false; appId = ''; redirectOk = $false; readError = ''; sharedWith = ''; uris = @() }
+                $a = [ordered]@{ channel = $c; label = $ch.label; name = $ch.appName; extensionId = $ch.id; found = $false; appId = ''; redirectOk = $false; readError = ''; sharedWith = ''; uris = @()
+                                 assignmentRequired = $null; assigned = @(); assignmentReadError = '' }
                 try {
                     $esc = $ch.appName -replace "'", "''"
                     $r = @((Invoke-PimGraph -Path "/applications?`$filter=displayName eq '$esc'&`$select=appId,displayName,spa").value)
@@ -11561,7 +11707,23 @@ function Handle-Request {
             if (-not $tst.found -and $prd.found -and @($prd.uris | Where-Object { "$_" -like "*$($tst.extensionId)*" }).Count) {
                 $tst.found = $true; $tst.appId = $prd.appId; $tst.redirectOk = $true; $tst.sharedWith = $prd.name
             }
-            foreach ($k in @($apps.Keys)) { $apps[$k].Remove('uris') }
+            # WHO may sign in: "Assignment required" + the assigned users / groups of each enterprise app (read-only).
+            $spRead = @{}
+            foreach ($k in @($apps.Keys)) {
+                $a = $apps[$k]; $a.Remove('uris')
+                if (-not $a.appId) { continue }
+                if (-not $spRead.ContainsKey($a.appId)) {
+                    $v = @{ required = $null; assigned = @(); err = '' }
+                    try {
+                        $sp = Invoke-PimGraph -Path "/servicePrincipals(appId='$($a.appId)')?`$select=id,appRoleAssignmentRequired"
+                        $v.required = [bool]$sp.appRoleAssignmentRequired
+                        $v.assigned = @(@((Invoke-PimGraph -Path "/servicePrincipals/$($sp.id)/appRoleAssignedTo?`$select=principalId,principalDisplayName,principalType&`$top=100").value) |
+                            ForEach-Object { [ordered]@{ id = "$($_.principalId)".ToLowerInvariant(); displayName = "$($_.principalDisplayName)"; type = "$($_.principalType)" } })
+                    } catch { $v.err = "$($_.Exception.Message)" }
+                    $spRead[$a.appId] = $v
+                }
+                $a.assignmentRequired = $spRead[$a.appId].required; $a.assigned = @($spRead[$a.appId].assigned); $a.assignmentReadError = $spRead[$a.appId].err
+            }
             # What each channel publishes right now (its update manifest) -- the page's default "minimum version required".
             # Cached 30 min; a failed read just leaves it empty (the page then shows the builder's floor).
             $published = [ordered]@{ Released = ''; Test = '' }
@@ -11579,22 +11741,82 @@ function Handle-Request {
                 } catch { }
             }
             $exts = @(foreach ($c in 'Released', 'Test') { @{ channel = $c; minimumVersion = $(if ($published[$c]) { $published[$c] } else { $script:PimActivatorMinimumVersion }) } })
-            $signInClient = ''
-            if (Get-Command Get-PimActivatorSignInClient -ErrorAction SilentlyContinue) {
-                $signInClient = Get-PimActivatorSignInClient -IdToken "$($req.Headers['X-MS-TOKEN-AAD-ID-TOKEN'])" -AudienceSetting "$env:PIM_HOSTED_EASYAUTH_AUD"
+            $cmdArgs = @{ TenantId = $tid; Targets = $targets; ClientId = $prd.appId; TestClientId = $tst.appId; TestSharesProdApp = [bool]$tst.sharedWith }
+            try { $cmds = Get-PimActivatorCommands @cmdArgs -Settings @{ name = $(if ($envName) { $envName } else { 'PIM' }); additionalTenants = $xtText } }
+            catch {
+                # a stored extra-tenant list that no longer validates must not take the whole page down: say so, build without it
+                $targetsError = "the extra tenants could not be used: $($_.Exception.Message)"
+                $cmds = Get-PimActivatorCommands @cmdArgs -Settings @{ name = $(if ($envName) { $envName } else { 'PIM' }) }
             }
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                 tenantId = $tid; environmentName = $envName; apps = $apps
+                targets = $targets; additionalTenants = $xtText; targetsError = $targetsError; canSetTargets = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+                commands = $cmds
                 edgeReleased = (Get-PimActivatorEdgePolicy -Extensions @($exts[0])); edgeBoth = (Get-PimActivatorEdgePolicy -Extensions $exts)
                 published = $published
-                # The page's own admin sign-in (create buttons): the Manager's sign-in app + this tenant. Empty client = the
-                # page falls back to the commands (a local Manager, or Easy Auth not in front).
-                signIn = [ordered]@{ clientId = $signInClient; tenantId = $tid; hosted = [bool]$script:PimHosted }
                 minimumVersion = $script:PimActivatorMinimumVersion })
             return 200
         }
+        # 97.2 (owner 2026-10-08: "customer must define who (group) to deploy to - not everyone"; "give option to dropdown
+        # group"): the group per channel (PROD = Released, TEST = Test) that every command on the page assigns to. PIM's own
+        # setting pim.Settings['ActivatorTargets'] = { Released: { groupId, displayName } | null, Test: ... } -- nothing is
+        # written to the tenant here. Admin+, the group is confirmed in the directory, audited with before / after. A body key
+        # that is present replaces that channel (null / empty groupId clears it); a missing key leaves it as it is.
+        if ($path -eq '/api/settings/activator-targets' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to choose the PIM Activator target groups.' }; return 403 }
+            $sb = Read-RequestJson -Request $req
+            $before = $null
+            try { $before = ConvertTo-PimActivatorTargets (Get-PimSetting -Name 'ActivatorTargets') }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the stored target groups could not be read, so nothing was saved: $($_.Exception.Message)" }; return 500 }
+            $after = [ordered]@{ Released = $before.Released; Test = $before.Test }
+            foreach ($c in 'Released', 'Test') {
+                if (-not ($sb -and $sb.PSObject.Properties[$c])) { continue }
+                $t = $sb.$c
+                $gid = if ($t) { "$($t.groupId)".Trim() } else { '' }
+                if (-not $gid) { $after[$c] = $null; continue }
+                if ($gid -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "The $c group must be a group object id (pick it from the list)." }; return 400 }
+                $dn = ("$($t.displayName)" -replace '[\x00-\x1F\x7F]', ' ').Trim()
+                # Confirm it is a GROUP in this tenant and take its real name. A lookup that cannot run is an error, never
+                # "accepted unchecked" -- a wrong id here would go into every command.
+                if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no Graph client in this runtime -- the group could not be confirmed, so nothing was saved' }; return 503 }
+                try {
+                    $g = Invoke-PimGraph -Path "/groups/$gid`?`$select=id,displayName"
+                    if (-not $g -or "$($g.id)" -ine $gid) { throw 'not found' }
+                    $dn = "$($g.displayName)"
+                } catch {
+                    $m = "$($_.Exception.Message)"
+                    $st = if ($m -match '404|not found|Request_ResourceNotFound') { 400 } else { 502 }
+                    Write-JsonResponse -Response $resp -Status $st -Body @{ error = $(if ($st -eq 400) { "No group with id $gid in this tenant (a user or another object is not a group)." } else { "The group could not be confirmed in the directory: $m" }) }
+                    return $st
+                }
+                $after[$c] = [ordered]@{ groupId = $gid.ToLowerInvariant(); displayName = $dn }
+            }
+            # 97.2 (owner 2026-10-08: "the custom json structure for multi-tenant (optional)"): the extra tenants of the
+            # catalog, same route. Validated against what the extension reads; '' clears it (one tenant, as before).
+            $xtSave = $null
+            if ($sb -and $sb.PSObject.Properties['additionalTenants']) {
+                $tidX = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $tidX) { $tidX = "$($global:PIM_TenantId)".Trim() }; if (-not $tidX) { $tidX = "$env:PIM_TenantId".Trim() }
+                try { $xt = @(ConvertTo-PimActivatorExtraTenants -Json "$($sb.additionalTenants)" -ExcludeTenantId $tidX) }
+                catch { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($_.Exception.Message)" }; return 400 }
+                $xtSave = if ($xt.Count) { ConvertTo-Json -InputObject $xt -Depth 4 -Compress } else { '' }
+            }
+            $norm = ConvertTo-PimActivatorTargets $after
+            $changedTargets = @('Released', 'Test' | Where-Object { $sb -and $sb.PSObject.Properties[$_] }).Count -gt 0
+            if ($changedTargets) {
+                Set-PimManagerSettingObject -Name 'ActivatorTargets' -Value $norm
+                Write-PimManagerAuditEvent -Action 'settings.activator-targets.save' -Target 'ActivatorTargets' -Result 'ok' -Before $before -After $norm
+            }
+            if ($null -ne $xtSave) {
+                $xtBefore = ''; try { $xtBefore = "$(Get-PimSetting -Name 'ActivatorAdditionalTenants')" } catch { }
+                Set-PimSqlSetting -ConnectionString (Get-PimManagerSettingCs) -Name 'ActivatorAdditionalTenants' -ValueJson (ConvertTo-Json -InputObject "$xtSave" -Compress)
+                Write-PimManagerAuditEvent -Action 'settings.activator-tenants.save' -Target 'ActivatorAdditionalTenants' -Result 'ok' -Before @{ value = $xtBefore } -After @{ value = $xtSave }
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; targets = $norm; additionalTenants = $(if ($null -ne $xtSave) { $xtSave } else { '' }) }
+            return 200
+        }
         # 97.2: the Edge for Business policy for the per-extension choices on the page (the admin center's "Manage
-        # extension" fields). Text only -- the page's admin sign-in or the admin writes it.
+        # extension" fields). Text only -- the admin pastes it in the Microsoft 365 admin center (there is no API).
         if ($path -eq '/api/activator/edge-policy' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
             if (-not (Get-Command Get-PimActivatorEdgePolicy -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the PIM Activator builder is not loaded in this Manager' }; return 503 }
@@ -11609,25 +11831,30 @@ function Handle-Request {
                 return 400
             }
         }
-        # 97.2: build the filled Remediation pair + the commands for the choices on the page. Generates text only -- nothing
-        # is written to the tenant (the Manager stays read-only; an admin runs the commands / uploads the files).
+        # 97.2: the self-contained commands for the choices on the page (Settings step + schedule) and the filled pair
+        # (the SAME text Publish-PimActivatorRemediation.ps1 builds from those parameters: New-PimActivatorRemediationPair).
+        # Generates text only -- nothing is written to the tenant.
         if ($path -eq '/api/activator/build' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
-            if (-not (Get-Command Set-PimActivatorRemediationSettings -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the PIM Activator builder is not loaded in this Manager' }; return 503 }
+            if (-not (Get-Command New-PimActivatorRemediationPair -ErrorAction SilentlyContinue)) { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'the PIM Activator builder is not loaded in this Manager' }; return 503 }
             $b = Read-RequestJson -Request $req
             try {
                 $channel = if ("$($b.channel)" -ieq 'Test') { 'Test' } else { 'Released' }
                 $tid = "$env:PIM_HOSTED_AUTH_TENANT".Trim(); if (-not $tid) { $tid = "$($global:PIM_TenantId)".Trim() }; if (-not $tid) { $tid = "$env:PIM_TenantId".Trim() }
-                $catalog = New-PimActivatorCatalog -Name "$($b.name)" -TenantId $tid -ClientId "$($b.clientId)" -DefaultJustification $(if ("$($b.defaultJustification)".Trim()) { "$($b.defaultJustification)" } else { 'Change in infrastructure' }) `
-                    -DefaultDurationHours $(if ("$($b.defaultDurationHours)" -match '^\d+$') { [int]$b.defaultDurationHours } else { 8 }) -Prefix "$($b.prefix)" -EntraPrefix "$($b.entraPrefix)" -AzurePrefix "$($b.azurePrefix)"
+                $hrs = if ("$($b.defaultDurationHours)" -match '^\d+$') { [int]$b.defaultDurationHours } else { 8 }
+                $just = if ("$($b.defaultJustification)".Trim()) { "$($b.defaultJustification)" } else { 'Change in infrastructure' }
                 $auto = if ("$($b.autoActivateMaxGroups)" -match '^\d+$') { [int]$b.autoActivateMaxGroups } else { $null }
                 $bulk = if ("$($b.bulkActivateConfirmThreshold)" -match '^\d+$') { [int]$b.bulkActivateConfirmThreshold } else { $null }
                 $browsers = @(@($b.browsers) | Where-Object { $_ }); if (-not $browsers.Count) { $browsers = @('Edge', 'Chrome') }
-                $dir = Join-Path $solutionRoot 'tools\pim-activator\intune-remediation'
-                $det = Set-PimActivatorRemediationSettings -Text ([IO.File]::ReadAllText((Join-Path $dir 'Detect-PimActivator.ps1'))) -Channel $channel -Browsers $browsers -CatalogJson $catalog -AutoActivateMaxGroups $auto -BulkActivateConfirmThreshold $bulk
-                $rem = Set-PimActivatorRemediationSettings -Text ([IO.File]::ReadAllText((Join-Path $dir 'Remediate-PimActivator.ps1'))) -Channel $channel -Browsers $browsers -CatalogJson $catalog -AutoActivateMaxGroups $auto -BulkActivateConfirmThreshold $bulk
-                $cmd = Get-PimActivatorCommands -TenantId $tid -Channel $channel -Target "$($b.target)" -ClientId "$($b.clientId)"
-                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; channel = $channel; catalog = $catalog; detect = $det; remediate = $rem; commands = $cmd })
+                $xtText = ''; try { $xtText = "$(Get-PimSetting -Name 'ActivatorAdditionalTenants')".Trim() } catch { }
+                $pair = New-PimActivatorRemediationPair -TenantId $tid -ClientId "$($b.clientId)" -Name "$($b.name)" -Channel $channel -Browsers $browsers -DefaultJustification $just `
+                    -DefaultDurationHours $hrs -Prefix "$($b.prefix)" -EntraPrefix "$($b.entraPrefix)" -AzurePrefix "$($b.azurePrefix)" -AutoActivateMaxGroups $auto -BulkActivateConfirmThreshold $bulk -AdditionalTenantsJson $xtText
+                $targets = ConvertTo-PimActivatorTargets $null; try { $targets = ConvertTo-PimActivatorTargets (Get-PimSetting -Name 'ActivatorTargets') } catch { }
+                $settings = @{ name = "$($b.name)"; additionalTenants = $xtText; defaultJustification = $just; defaultDurationHours = $hrs; prefix = "$($b.prefix)"; entraPrefix = "$($b.entraPrefix)"; azurePrefix = "$($b.azurePrefix)"
+                               autoActivateMaxGroups = $(if ($null -ne $auto) { "$auto" } else { '' }); bulkActivateConfirmThreshold = $(if ($null -ne $bulk) { "$bulk" } else { '' }); browsers = $browsers }
+                $every = if ("$($b.everyHours)" -match '^\d+$') { [int]$b.everyHours } else { 0 }
+                $cmd = Get-PimActivatorCommands -TenantId $tid -Channel $channel -Targets $targets -Settings $settings -ClientId "$($b.clientId)" -TestClientId "$($b.clientId)" -DailyTime "$($b.dailyTime)" -EveryHours $every
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; channel = $channel; catalog = $pair.catalog; detect = $pair.detect; remediate = $pair.remediate; commands = $cmd })
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
@@ -14187,6 +14414,43 @@ function Handle-Request {
             }
             return 200
         }
+        # 97.2 (owner 2026-10-08: "give option to dropdown group"): the group lookup behind the PIM Activator target-group
+        # pickers. Same contract as /api/directory/people: Admin, a 2+ character query, $search first then startswith, and
+        # "the lookup did not run" (503 / 502) is never shown as "no groups".
+        if ($path -eq '/api/directory/groups' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to search the directory' }; return 403 }
+            $qs = @{}
+            try {
+                foreach ($pair in ("$($req.Url.Query)".TrimStart('?') -split '&')) {
+                    if (-not $pair) { continue }
+                    $kv = $pair -split '=', 2
+                    $qs[[uri]::UnescapeDataString($kv[0])] = if ($kv.Count -gt 1) { [uri]::UnescapeDataString($kv[1]) } else { '' }
+                }
+            } catch {}
+            $q = Resolve-PimDirectoryQuery -Query $qs['q'] -Top $qs['top']
+            if (-not $q.ok) { $st = Get-PimDirectorySearchHttpStatus -Code $q.code; Write-JsonResponse -Response $resp -Status $st -Body @{ error = $q.reason; code = $q.code }; return $st }
+            if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 503 -Body @{ error = 'no Graph client in this runtime -- the directory could not be searched'; code = 'graph-unavailable'; hint = 'This is NOT "no matches" -- the lookup did not run.' }
+                return 503
+            }
+            $mode = 'search'; $groups = $null; $searchErr = ''
+            try { $groups = @(Invoke-PimGraph -Path (Get-PimDirectoryGroupSearchPath -Term $q.term -Top $q.top) -Headers (Get-PimDirectorySearchHeaders) -All) }
+            catch { $searchErr = "$($_.Exception.Message)"; $groups = $null }
+            if ($null -eq $groups) {
+                $mode = 'startswith'
+                try { $groups = @(Invoke-PimGraph -Path (Get-PimDirectoryGroupFilterPath -Term $q.term -Top $q.top) -All) }
+                catch {
+                    Write-JsonResponse -Response $resp -Status 502 -Body @{ error = "directory search failed: $($_.Exception.Message)"; code = 'graph-error'; hint = 'This is NOT "no matches" -- the lookup failed.'; searchError = $searchErr }
+                    return 502
+                }
+            }
+            $shaped = @(@($groups) | ForEach-Object { ConvertTo-PimDirectoryGroup -Group $_ } | Where-Object { $null -ne $_ })
+            $page = Select-PimDirectoryPeoplePage -People $shaped -Top $q.top
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ query = $q.term; matchMode = $mode; count = @($page.people).Count; truncated = [bool]$page.truncated; groups = @($page.people)
+                note = $(if ($mode -eq 'startswith') { 'Prefix match only -- the tenant did not serve a full search.' } else { '' }) }
+            return 200
+        }
 
         if ($path -eq '/api/admin-sessions/revoke' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
@@ -15675,6 +15939,12 @@ function Handle-Request {
         # (/api/commits is the §88 commit WATCHER; this is the journal history.)
         if ($path -eq '/api/commit-history' -and $method -eq 'GET') { return (Invoke-PimManagerCommitHistoryGet -path $path -req $req -resp $resp) }
         if ($path -match '^/api/commit-history/[A-Za-z0-9_\-]+$' -and $method -eq 'GET') { return (Invoke-PimManagerCommitHistoryGet -path $path -req $req -resp $resp) }
+        # §97.1: what REALLY happened to the commit the page sent with clientCommitId <id> -- asked after a timeout, so the
+        # page reports saved / refused / not saved from the record, never "not saved" by assumption (Get-PimManagerCommitStatus).
+        if ($path -match '^/api/commit-status/[A-Za-z0-9_\-]{8,64}$' -and $method -eq 'GET') {
+            Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerCommitStatus -Id ($path -replace '^/api/commit-status/', ''))
+            return 200
+        }
         if ($path -eq '/api/commits' -and $method -eq 'GET') {
             $cs = (Get-PimManagerStoreCs)
             if (-not $cs -or -not (Get-Command Get-PimCommitWatchStatus -ErrorAction SilentlyContinue)) {

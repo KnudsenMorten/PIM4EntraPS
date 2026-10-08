@@ -4345,6 +4345,47 @@ function Get-PimGroupsPolicyKey {
     $gn
 }
 
+function Get-PimGroupCreatedUtc {
+    <#
+      §97.3: when the group was created (UTC), or $null when that cannot be read. The context cache first (a group the
+      Groups job created this run carries the createdDateTime Graph returned), else ONE read of /groups/{id}. $null makes
+      the caller treat the group as NOT new -- an unproven age never turns a failure into a wait (fail closed).
+    #>
+    param([string]$GroupId)
+    $id = "$GroupId".Trim(); if (-not $id) { return $null }
+    $raw = $null
+    $g = @($Global:Groups_All_ID) | Where-Object { $_ -and ("$($_.Id)" -eq $id -or "$($_.id)" -eq $id) } | Select-Object -First 1
+    if ($g -and $g.PSObject.Properties['createdDateTime'] -and "$($g.createdDateTime)".Trim()) { $raw = $g.createdDateTime }
+    if ($null -eq $raw) {
+        try { $raw = (Invoke-PimGraph -Path "/groups/$id`?`$select=id,createdDateTime").createdDateTime }
+        catch { Write-Verbose "group createdDateTime ($id): $($_.Exception.Message)"; return $null }
+    }
+    if ($raw -is [datetime]) { return $raw.ToUniversalTime() }
+    if (-not "$raw".Trim()) { return $null }
+    try { return [datetime]::Parse("$raw", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') } catch { return $null }
+}
+
+function Get-PimGroupPolicyRereadFailureMessage {
+    <#
+      PURE. §97.3 (Invardia fleet watch 2026-10-08, a freshly built MSP managing tenant, 2.4.532): the message to THROW when
+      the re-read of a group's policy failed. Nothing is written either way -- this only decides how the item is classified.
+        * the group is NEW (created within Get-PimTransientWaitWindowMinutes, the same window after which a waiting item
+          counts as failed again) AND Graph's answer is a not-ready one (Test-PimGroupPolicyNotReadyAnswer -- the one list)
+          -> tagged [GROUP-POLICY-NOT-READY]: WAITING, retried on a later run;
+        * anything else (an established group, an unknown age, a 403 / 429 / 5xx) -> the "could not be re-read" failure,
+          which the catalog classifies (PERMISSION-DENIED / THROTTLED / SERVICE-ERROR, else GROUP-POLICY-UNREADABLE).
+    #>
+    param([string]$GroupName, [string]$Role, [string]$ErrorMessage, [AllowNull()][object]$GroupCreatedUtc, [datetime]$NowUtc = [datetime]::UtcNow)
+    $fail = "GroupsPolicies: the $Role policy of '$GroupName' could not be re-read, so NOTHING was written: $ErrorMessage"
+    if ($null -eq $GroupCreatedUtc -or -not ($GroupCreatedUtc -is [datetime])) { return $fail }
+    if (-not (Get-Command Test-PimGroupPolicyNotReadyAnswer -ErrorAction SilentlyContinue) -or -not (Get-Command Get-PimTransientWaitWindowMinutes -ErrorAction SilentlyContinue)) { return $fail }
+    $window = [int](Get-PimTransientWaitWindowMinutes); if ($window -le 0) { $window = 120 }
+    $age = ($NowUtc.ToUniversalTime() - ([datetime]$GroupCreatedUtc).ToUniversalTime()).TotalMinutes
+    if ($age -lt -5 -or $age -gt $window) { return $fail }          # -5: a few minutes of clock skew, never a future group
+    if (-not (Test-PimGroupPolicyNotReadyAnswer -Message $ErrorMessage)) { return $fail }
+    return ("GroupsPolicies [GROUP-POLICY-NOT-READY]: the {0} policy of '{1}' (group created {2} min ago) is not readable yet, so NOTHING was written; it is retried on a later run: {3}" -f $Role, $GroupName, [int][Math]::Max(0, [Math]::Round($age)), $ErrorMessage)
+}
+
 function Invoke-PimGroupPolicyDriftUpdate {
     <#
       ApplyUpdate for an OWNER policy (#4) or a BASELINE group (#5): re-read the policy, PATCH ONLY the rules
@@ -4359,7 +4400,16 @@ function Invoke-PimGroupPolicyDriftUpdate {
     if (-not $polId) { throw (Get-PimGroupPolicyMissingMessage -GroupName $gn -GroupId $gid -Role $role) }
     $liveRules = $null
     try { $liveRules = @((Invoke-PimGraph -Path "/policies/roleManagementPolicies/$polId`?`$expand=rules").rules) }
-    catch { throw "GroupsPolicies: the $role policy of '$gn' could not be re-read, so NOTHING was written: $($_.Exception.Message)" }
+    catch {
+        # 🔒 NOTHING is written when the re-read fails -- this always throws. §97.3: only WHAT it throws depends on the answer
+        # and the group's age (a new group's not-ready policy WAITS, an established group's unreadable policy FAILS).
+        $err = "$($_.Exception.Message)"
+        if ($err -match '(?i)HTTP 404|not ?found|ResourceNotFound') {     # a stale id is never trusted again (§70.10)
+            try { Remove-PimGroupPolicyIdCached -GroupId "$gid" -Role $role; Save-PimGroupPolicyIdMap } catch { Write-Verbose "policy id cache drop ($gn/$role): $($_.Exception.Message)" }
+        }
+        $created = Get-PimGroupCreatedUtc -GroupId "$gid"
+        throw (Get-PimGroupPolicyRereadFailureMessage -GroupName $gn -Role $role -ErrorMessage $err -GroupCreatedUtc $created)
+    }
     $have = Get-PimGroupPolicyLiveFacets -Rules $liveRules
     $want = Get-PimGroupPolicyDesiredFacets -Desired $d
     $drifted = @{}; foreach ($k in @($want.Keys)) { if (-not $have.ContainsKey($k) -or "$($have[$k])" -ne "$($want[$k])") { $drifted[$k] = $true } }

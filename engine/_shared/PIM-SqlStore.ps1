@@ -85,6 +85,9 @@ function New-PimSqlConnection {
     param([Parameter(Mandatory)][string]$ConnectionString)
     $type = Resolve-PimSqlClientType
     $c = $type::new($ConnectionString)
+    # §97.1: every connection is counted, so a commit can say how many it opened ([commit-timing]) and a test can prove a
+    # bulk write does not open one per row.
+    $global:PIM_SqlConnectionCount = 1 + [int]$global:PIM_SqlConnectionCount
     if ($ConnectionString -notmatch '(?i)Integrated\s*Security') {
         # Acquire a FRESH token on EVERY connection. Get-PimRestToken caches per
         # resource with an expiry and auto-refreshes when near expiry, so this is
@@ -728,7 +731,16 @@ function Get-PimSqlTenantCache {
 function Get-PimSqlRows {
     param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Entity)
     $raw = Invoke-PimSqlQuery -ConnectionString $ConnectionString -Sql "SELECT [Key], DataJson FROM pim.Rows WHERE Entity = @e ORDER BY [Key]" -Parameters @{ e = $Entity }
-    return @($raw | ForEach-Object { if ("$($_.DataJson)".Trim()) { $_.DataJson | ConvertFrom-Json } })
+    # §97.1: parsed 200 rows per ConvertFrom-Json call, not one call per row (a 400-row entity was ~1 s of parser start-up,
+    # read twice per commit). Same objects, same order; a row whose JSON does not parse alone still fails the read.
+    $js = @($raw | Where-Object { "$($_.DataJson)".Trim() } | ForEach-Object { "$($_.DataJson)" })
+    $out = New-Object System.Collections.Generic.List[object]
+    for ($at = 0; $at -lt $js.Count; $at += 200) {
+        $chunk = $js[$at..([Math]::Min($js.Count, $at + 200) - 1)]
+        $parsed = ConvertFrom-Json -InputObject ('[' + ($chunk -join ',') + ']')   # assigned first: PS 5.1 emits the array as ONE object
+        foreach ($o in @($parsed)) { $out.Add($o) }
+    }
+    return @($out.ToArray())
 }
 
 function Get-PimSqlRow {
@@ -1354,6 +1366,68 @@ function Set-PimSqlEntityRows {
     return @{ rowCount = $submitted.Count; removed = $removed }
 }
 
+# §97.1: rows per set-based statement batch. One batch is one round trip; the JSON it carries stays far below any limit.
+$script:PimSqlRowBatchSize = 500
+
+function Invoke-PimSqlEntityRowBatchTx {
+    <#
+      §97.1 -- SET-BASED row writes on the caller's connection + transaction. -Items, in order: @{ k; op = Add|Modify|Remove;
+      d = the row JSON (Add/Modify); b = the stored JSON it replaces (Modify/Remove) }. Each batch of <= $script:PimSqlRowBatchSize
+      items is ONE statement batch (one round trip): the upserts (MERGE), the deletes, and one journal row per item in
+      the given order (CONFIG-1.1: the same rows Add-PimCommitJournalRowTx wrote one by one, with the per-key initiator /
+      approver of the ambient journal context). Returns the number of batches sent. Throws on failure (the caller's
+      transaction then rolls back). -FailAfter: test seam -- throw once that many items have been written.
+    #>
+    param([Parameter(Mandatory)][object]$Connection, [AllowNull()][object]$Transaction, [Parameter(Mandatory)][string]$Entity,
+          [AllowEmptyCollection()][object[]]$Items = @(), [int]$FailAfter = -1)
+    $sql = @'
+SET NOCOUNT ON;
+DECLARE @in TABLE (o INT NOT NULL, k NVARCHAR(400) COLLATE DATABASE_DEFAULT NOT NULL, op NVARCHAR(10) NOT NULL, d NVARCHAR(MAX) NULL,
+                   b NVARCHAR(MAX) NULL, i NVARCHAR(200) NOT NULL, a NVARCHAR(200) NULL);
+INSERT INTO @in (o, k, op, d, b, i, a)
+SELECT o, k, op, d, b, i, a FROM OPENJSON(@j) WITH (o INT '$.o', k NVARCHAR(400) '$.k', op NVARCHAR(10) '$.op', d NVARCHAR(MAX) '$.d',
+                                                   b NVARCHAR(MAX) '$.b', i NVARCHAR(200) '$.i', a NVARCHAR(200) '$.a');
+MERGE pim.Rows WITH (HOLDLOCK) AS t
+USING (SELECT k, d FROM @in WHERE op <> 'Remove') AS s ON t.Entity = @e AND t.[Key] = s.k
+WHEN MATCHED THEN UPDATE SET DataJson = s.d, UpdatedUtc = SYSUTCDATETIME()
+WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, s.k, s.d, SYSUTCDATETIME());
+DELETE t FROM pim.Rows AS t JOIN @in AS x ON t.Entity = @e AND t.[Key] = x.k WHERE x.op = 'Remove';
+INSERT INTO pim.CommitJournal (CommitId, Entity, [Key], Op, BeforeJson, AfterJson, InitiatedBy, ApprovedBy, Source, UndoOf)
+SELECT @jc, @e, k, op, b, CASE WHEN op = 'Remove' THEN NULL ELSE d END, i, a, @js, @ju FROM @in ORDER BY o;
+'@
+    $all = @($Items | Where-Object { $null -ne $_ })
+    if (-not $all.Count) { return 0 }
+    $ctx = Get-PimCommitJournalContext
+    $size = [Math]::Max(1, [int]$script:PimSqlRowBatchSize)
+    $batches = 0; $done = 0
+    for ($at = 0; $at -lt $all.Count; $at += $size) {
+        $chunk = @($all[$at..([Math]::Min($all.Count, $at + $size) - 1)])
+        $payload = New-Object System.Collections.Generic.List[object]
+        $o = 0
+        foreach ($x in $chunk) {
+            $who = Resolve-PimCommitJournalActor -Context $ctx -Key "$($x.k)"
+            $payload.Add([ordered]@{
+                o = $o; k = "$($x.k)"; op = "$($x.op)"
+                d = $(if ("$($x.d)" -ne '') { "$($x.d)" } else { $null })
+                b = $(if ("$($x.b)" -ne '') { "$($x.b)" } else { $null })
+                i = $(if ("$($who.initiatedBy)".Trim()) { "$($who.initiatedBy)" } else { 'system' })
+                a = $(if ("$($who.approvedBy)".Trim()) { "$($who.approvedBy)" } else { $null })
+            })
+            $o++
+        }
+        $cmd = $Connection.CreateCommand(); if ($Transaction) { $cmd.Transaction = $Transaction }
+        $cmd.CommandText = $sql
+        try { $cmd.CommandTimeout = 180 } catch { }
+        $p = [ordered]@{ e = $Entity; j = (ConvertTo-Json -InputObject @($payload.ToArray()) -Depth 3 -Compress)
+                         jc = "$($ctx.commitId)"; js = "$($ctx.source)"; ju = $(if ("$($ctx.undoOf)".Trim()) { "$($ctx.undoOf)" } else { $null }) }
+        foreach ($k in $p.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $p[$k]) { [DBNull]::Value } else { $p[$k] })) }
+        [void]$cmd.ExecuteNonQuery()
+        $batches++; $done += $chunk.Count
+        if ($FailAfter -ge 0 -and $done -ge $FailAfter) { throw "injected mid-commit failure after $done statement(s) (test seam)" }
+    }
+    return $batches
+}
+
 function Set-PimSqlEntityRowsTransactional {
     # TRANSACTIONAL full-set replace of an entity's rows (REQUIREMENTS.md s28 [M1]).
     # Identical SEMANTICS to Set-PimSqlEntityRows -- upsert every submitted row by
@@ -1383,50 +1457,42 @@ function Set-PimSqlEntityRowsTransactional {
         $tx = $c.BeginTransaction()
         $stmts = 0
 
-        $exec = {
-            param($sql, $params)
-            $cmd = $c.CreateCommand()
-            $cmd.Transaction = $tx
-            $cmd.CommandText = $sql
-            foreach ($k in $params.Keys) { [void]$cmd.Parameters.AddWithValue("@$k", $(if ($null -eq $params[$k]) { [DBNull]::Value } else { $params[$k] })) }
-            [void]$cmd.ExecuteNonQuery()
-        }
-
-        $mergeSql = @"
-MERGE pim.Rows AS t USING (SELECT @e AS Entity, @k AS [Key]) AS s
-  ON t.Entity = s.Entity AND t.[Key] = s.[Key]
-WHEN MATCHED THEN UPDATE SET DataJson = @d, UpdatedUtc = SYSUTCDATETIME()
-WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @k, @d, SYSUTCDATETIME());
-"@
+        # §97.1: the round trips this replace made (SqlConnection statistics; a fake connection has none -> -1).
+        $statsErr = ''; try { $c.StatisticsEnabled = $true } catch { $statsErr = "$($_.Exception.Message)" }
 
         # 1) read current keys AND their stored JSON (inside the tx for a consistent snapshot).
         $curCmd = $c.CreateCommand(); $curCmd.Transaction = $tx
         $curCmd.CommandText = "SELECT [Key], DataJson FROM pim.Rows WHERE Entity=@e"
         [void]$curCmd.Parameters.AddWithValue('@e', $Entity)
         $rd = $curCmd.ExecuteReader(); $currentKeys = New-Object System.Collections.Generic.List[string]
-        $currentJson = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+        # The key match is case-insensitive, like pim.Rows' own key (and the $submitted map below): a submitted 'A' IS the
+        # stored 'a' -- an update, journaled as a Modify of that row (never an Add plus a kept duplicate).
+        $currentJson = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
         while ($rd.Read()) { $ck0 = "$($rd.GetValue(0))"; $currentKeys.Add($ck0); $dj = $rd.GetValue(1); $currentJson[$ck0] = $(if ($null -eq $dj -or $dj -is [DBNull]) { '' } else { "$dj" }) }
         $rd.Close()
 
-        # 2) upsert the submitted rows that CHANGED.
+        # 2) the submitted rows that CHANGED -- planned here, written SET-BASED below.
         # §88 (operator 2026-10-02: "why is the commit so slow into the sql"): this used to MERGE EVERY submitted row --
         # the Manager submits the whole entity, so one changed admin on internal (659 rows) was 659 round trips to Azure
         # SQL inside the commit. A row whose JSON is byte-identical to what is stored is skipped: same data, and its
         # UpdatedUtc stays honest (the change detector still sees the rows that did change).
+        # 🔴 §97.1 (EFIF 2026-10-08, 168 template rows, 132 s): every CHANGED row was still TWO round trips (its MERGE +
+        # its journal INSERT) inside the transaction. The plan is now built in memory and written in ONE statement batch
+        # per <= $script:PimSqlRowBatchSize rows (Invoke-PimSqlEntityRowBatchTx): same rows, same journal rows, same
+        # single transaction, a constant number of round trips. Two rows with one key: the LAST wins (as before).
         $submitted = @{}; $written = 0
+        $plan = New-Object 'System.Collections.Specialized.OrderedDictionary' ([StringComparer]::OrdinalIgnoreCase)
         foreach ($r in @($Rows)) {
             $k = Get-PimStoreRowKey -Base $base -Row $r
             if (-not $k) { continue }
             $submitted[$k] = $true
             $json = if ($null -ne $r) { $r | ConvertTo-Json -Depth 12 -Compress } else { '{}' }
-            if ($currentJson.ContainsKey($k) -and [string]::Equals($currentJson[$k], $json, [StringComparison]::Ordinal)) { continue }
-            & $exec $mergeSql @{ e = $Entity; k = $k; d = $json }
-            # CONFIG-1.1: the journal row rides in the same transaction (a failure rolls the whole set back).
-            if ($currentJson.ContainsKey($k)) { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity $Entity -Key $k -Op Modify -BeforeJson $currentJson[$k] -AfterJson $json }
-            else { Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity $Entity -Key $k -Op Add -BeforeJson $null -AfterJson $json }
-            $stmts++; $written++
-            if ($FailAfter -ge 0 -and $stmts -ge $FailAfter) { throw "injected mid-commit failure after $stmts statement(s) (test seam)" }
+            if ($currentJson.ContainsKey($k) -and [string]::Equals($currentJson[$k], $json, [StringComparison]::Ordinal)) { if ($plan.Contains($k)) { $plan.Remove($k) }; continue }
+            # CONFIG-1.1: every written row gets its journal row in the same transaction (a failure rolls the whole set back).
+            $item = [ordered]@{ k = $k; op = $(if ($currentJson.ContainsKey($k)) { 'Modify' } else { 'Add' }); d = $json; b = $(if ($currentJson.ContainsKey($k)) { $currentJson[$k] } else { $null }) }
+            if ($plan.Contains($k)) { $plan[$k] = $item } else { $plan.Add($k, $item) }
         }
+        $written = $plan.Count
 
         # 🔴 AN EMPTY SUBMISSION AGAINST A NON-EMPTY ENTITY IS A WIPE, AND IT ARRIVES BY ACCIDENT.
         # -Rows defaults to @(). This is a FULL-SET REPLACE, so "no rows submitted" means "delete
@@ -1446,19 +1512,25 @@ WHEN NOT MATCHED THEN INSERT (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @
                    "almost always a failed upstream read, not an intent to clear the entity. " +
                    'Pass -AllowEmpty if you genuinely mean to empty it.')
         }
-        # 3) delete dropped keys.
+        # 3) delete dropped keys (after the upserts, journaled in that order -- as before).
         $removed = 0
+        $items = New-Object System.Collections.Generic.List[object]
+        foreach ($v in $plan.Values) { $items.Add($v) }
         foreach ($ck in $currentKeys) {
-            if (-not $submitted.ContainsKey($ck)) {
-                & $exec "DELETE FROM pim.Rows WHERE Entity=@e AND [Key]=@k" @{ e = $Entity; k = $ck }
-                Add-PimCommitJournalRowTx -Connection $c -Transaction $tx -Entity $Entity -Key $ck -Op Remove -BeforeJson $currentJson[$ck] -AfterJson $null
-                $removed++; $stmts++
-                if ($FailAfter -ge 0 -and $stmts -ge $FailAfter) { throw "injected mid-commit failure after $stmts statement(s) (test seam)" }
-            }
+            if (-not $submitted.ContainsKey($ck)) { $items.Add([ordered]@{ k = $ck; op = 'Remove'; d = $null; b = $currentJson[$ck] }); $removed++ }
         }
+        $batches = Invoke-PimSqlEntityRowBatchTx -Connection $c -Transaction $tx -Entity $Entity -Items @($items.ToArray()) -FailAfter $FailAfter
 
         $tx.Commit()
-        return @{ rowCount = $submitted.Count; removed = $removed; written = $written }
+        $rt = -1; $rtWhy = ''
+        try {
+            $st = $c.RetrieveStatistics()
+            $rtv = $null; foreach ($sk in @($st.Keys)) { if ("$sk" -eq 'ServerRoundtrips') { $rtv = $st[$sk] } }
+            if ($null -ne $rtv) { $rt = [int]$rtv } else { $rtWhy = "no ServerRoundtrips in the statistics ($(@($st.Keys) -join ','))" }
+        } catch { $rt = -1; $rtWhy = "$($_.Exception.Message)" }
+        if ($statsErr) { $rtWhy = "statistics could not be enabled: $statsErr; $rtWhy" }
+        # commands = statements sent on this connection after the open: the read + one per batch (+ begin/commit by the driver)
+        return @{ rowCount = $submitted.Count; removed = $removed; written = $written; batches = [int]$batches; commands = 1 + [int]$batches; roundTrips = $rt; roundTripsNote = $rtWhy }
     } catch {
         if ($tx) { try { $tx.Rollback() } catch { Write-Warning "  [sql] transaction rollback failed: $($_.Exception.Message)" } }
         throw

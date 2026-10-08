@@ -11,7 +11,8 @@
     * the Edge management service ExtensionSettings JSON ("Import JSON" on the Managed extensions tab) for the chosen
       channels, and the ExtensionInstallSources value;
     * the tenant catalog defaults from this environment (tenant id, the Activator app id, defaults);
-    * the exact commands: the apps (PROD + TEST), the Remediation upload (group / all devices / all users), the
+    * the exact, self-contained commands: the apps (PROD + TEST), the Remediation build + upload, each for the group the
+      customer chose (or nobody yet -- never all users / all devices; 2026-10-08), the
       server / no-Intune install.
 #>
 
@@ -20,7 +21,19 @@ $script:PimActivatorChannels = [ordered]@{
     Test     = [ordered]@{ id = 'glldnbmjpdkjemcnficagdhgienfdpoo'; updateUrl = 'https://knudsenmorten.github.io/PIM4EntraPS/updates-test.xml'; label = 'TEST'; appName = 'PIM Activator (TEST)' }
 }
 $script:PimActivatorMinimumVersion = '1.6.136'
-$script:PimActivatorInstallSource = 'https://knudsenmorten.github.io/*'
+
+function Get-PimActivatorInstallSourcePattern {
+    <#
+      PURE. 97.2 (owner 2026-10-08: "step 4 url is wrong"): the ExtensionInstallSources pattern for an update URL = its
+      FOLDER + '*' (https://<host>/<path>/updates.xml -> https://<host>/<path>/*) -- exactly where the page tells Edge
+      to install from, never a whole site. Follows the update URL wherever it is hosted.
+    #>
+    param([Parameter(Mandatory)][string]$UpdateUrl)
+    $u = $null
+    if (-not [uri]::TryCreate("$UpdateUrl".Trim(), [UriKind]::Absolute, [ref]$u) -or $u.Scheme -ne 'https') { throw "The update URL '$UpdateUrl' is not an https URL." }
+    $path = $u.AbsolutePath; $dir = $path.Substring(0, $path.LastIndexOf('/') + 1)
+    "https://$($u.Authority)$dir*"
+}
 
 function Get-PimActivatorChannel {
     <# PURE. Released | Test -> @{ id; updateUrl; label; appName }. Throws on anything else. #>
@@ -79,29 +92,11 @@ function Get-PimActivatorEdgePolicy {
     # with -InputObject on the whole object).
     $json = ConvertTo-Json -InputObject $settings -Depth 6 -Compress
     $json = $json -replace '"\*":\{\}', '"*":{}' -replace '"\*":\[\]', '"*":{}'
-    return [ordered]@{ installSources = $script:PimActivatorInstallSource; minimumVersion = $script:PimActivatorMinimumVersion
+    # ExtensionInstallSources: one pattern row per distinct update-URL folder of the chosen extensions (owner 2026-10-08).
+    $src = @($norm | ForEach-Object { Get-PimActivatorInstallSourcePattern -UpdateUrl $_.updateUrl } | Select-Object -Unique)
+    return [ordered]@{ installSources = ($src -join "`n"); installSourcesList = @($src); minimumVersion = $script:PimActivatorMinimumVersion
                        extensionSettingsJson = $json; extensionSettings = $settings; forcelist = $force.ToArray(); forcelistText = ($force.ToArray() -join ', ')
                        extensions = $norm.ToArray() }
-}
-
-function Get-PimActivatorSignInClient {
-    <#
-      PURE. The client id the page's own admin sign-in uses = the Manager's sign-in (Easy Auth) app: the 'aud' of the id
-      token Easy Auth forwards (X-MS-TOKEN-AAD-ID-TOKEN), else the first GUID in PIM_HOSTED_EASYAUTH_AUD. Read only to
-      NAME the app -- identity is never taken from it (that stays Get-PimEasyAuthPrincipal's verified path). '' = unknown.
-    #>
-    param([string]$IdToken, [string]$AudienceSetting)
-    $guid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-    $parts = "$IdToken".Split('.')
-    if ($parts.Count -ge 2) {
-        try {
-            $p = $parts[1].Replace('-', '+').Replace('_', '/'); switch ($p.Length % 4) { 2 { $p += '==' } 3 { $p += '=' } }
-            $c = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
-            if ("$($c.aud)" -match $guid) { return "$($c.aud)".ToLowerInvariant() }
-        } catch { }
-    }
-    foreach ($a in @("$AudienceSetting" -split '[,;\s]+')) { if ($a.Trim() -match $guid) { return $a.Trim().ToLowerInvariant() } }
-    return ''
 }
 
 function Get-PimActivatorPublishedVersion {
@@ -124,7 +119,10 @@ function New-PimActivatorCatalog {
     #>
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$ClientId,
           [string]$DefaultJustification = 'Change in infrastructure', [int]$DefaultDurationHours = 8,
-          [string]$Prefix = '', [string]$EntraPrefix = '', [string]$AzurePrefix = '')
+          [string]$Prefix = '', [string]$EntraPrefix = '', [string]$AzurePrefix = '',
+          # 97.2 (owner 2026-10-08: "the custom json structure for multi-tenant (optional). so the admins can select from
+          # different tenants"): more tenants for the popup's tenant switcher, a JSON array (ConvertTo-PimActivatorExtraTenants).
+          [string]$AdditionalTenantsJson = '')
     $guid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     if ("$TenantId" -notmatch $guid) { throw "TenantId is not a GUID: '$TenantId'" }
     if ("$ClientId" -notmatch $guid) { throw "ClientId (the PIM Activator app) is not a GUID: '$ClientId'" }
@@ -134,7 +132,59 @@ function New-PimActivatorCatalog {
     if ("$Prefix".Trim())      { $t['prefix'] = "$Prefix".Trim() }
     if ("$EntraPrefix".Trim()) { $t['entraPrefix'] = "$EntraPrefix".Trim() }
     if ("$AzurePrefix".Trim()) { $t['azurePrefix'] = "$AzurePrefix".Trim() }
-    return (ConvertTo-Json -InputObject @($t) -Depth 4)
+    $extra = @(ConvertTo-PimActivatorExtraTenants -Json $AdditionalTenantsJson -ExcludeTenantId $t.tenantId)
+    return (ConvertTo-Json -InputObject (@($t) + $extra) -Depth 4)
+}
+
+function ConvertTo-PimActivatorExtraTenants {
+    <#
+      PURE. The OPTIONAL extra tenants of the catalog (managed-schema.json tenantCatalog: an array of { name, tenantId,
+      clientId, defaultJustification?, defaultDurationHours?, prefix?, entraPrefix?, azurePrefix?, groupNameFilter?,
+      entraGroupRegex?, azureGroupRegex?, bulkActivateConfirmThreshold? }). Empty = none (one tenant, as before).
+      Throws on anything the extension would not read: not an array, a missing name / tenant id / client id, a key it does
+      not know, a value out of range, the same tenant twice. An entry for this environment's own tenant (-ExcludeTenantId)
+      is skipped: that tenant is always the first entry already.
+      Returns the normalised entries (ordered, ids lower case).
+    #>
+    param([string]$Json, [string]$ExcludeTenantId = '')
+    if (-not "$Json".Trim()) { return @() }
+    $guid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    if (-not "$Json".TrimStart().StartsWith('[')) { throw 'The extra tenants must be a JSON array: [ { "name": ..., "tenantId": ..., "clientId": ... } ].' }
+    try { $arr = ConvertFrom-Json -InputObject "$Json" -ErrorAction Stop } catch { throw "The extra tenants are not valid JSON: $($_.Exception.Message)" }
+    # Windows PowerShell 5.1 can answer broken text with $null instead of an error -- that is not "no tenants"
+    if ($null -eq $arr -and "$Json".Trim() -notmatch '^\[\s*\]$') { throw 'The extra tenants are not valid JSON (nothing could be read from it).' }
+    $known = @('name', 'tenantId', 'clientId', 'defaultJustification', 'defaultDurationHours', 'prefix', 'entraPrefix', 'azurePrefix', 'groupNameFilter', 'entraGroupRegex', 'azureGroupRegex', 'bulkActivateConfirmThreshold')
+    $seen = @{}; if ("$ExcludeTenantId".Trim()) { $seen["$ExcludeTenantId".ToLowerInvariant()] = 'this environment' }
+    $out = New-Object System.Collections.Generic.List[object]
+    $i = 0
+    foreach ($e in @($arr)) {
+        $i++
+        if ($null -eq $e -or $e -isnot [pscustomobject]) { throw "Extra tenant #${i} is not an object." }
+        $bad = @($e.PSObject.Properties.Name | Where-Object { $_ -cnotin $known })
+        if ($bad.Count) { throw "Extra tenant #${i}: unknown key(s) $($bad -join ', ') (allowed: $($known -join ', '))." }
+        $n = "$($e.name)".Trim(); $tid = "$($e.tenantId)".Trim(); $cid = "$($e.clientId)".Trim()
+        if (-not $n) { throw "Extra tenant #${i}: 'name' is required." }
+        if ($tid -notmatch $guid) { throw "Extra tenant #$i ($n): 'tenantId' must be a GUID." }
+        if ($cid -notmatch $guid) { throw "Extra tenant #$i ($n): 'clientId' (its PIM Activator app) must be a GUID." }
+        $k = $tid.ToLowerInvariant()
+        # this environment's own tenant is always the FIRST entry (built from the Settings step): an entry for it here is
+        # the sample's first row -- skipped, not doubled
+        if ("$ExcludeTenantId".Trim() -and $k -eq "$ExcludeTenantId".Trim().ToLowerInvariant()) { continue }
+        if ($seen.ContainsKey($k)) { throw "Extra tenant #$i ($n): tenant $k is already in the catalog ($($seen[$k]))." }
+        $seen[$k] = $n
+        $o = [ordered]@{ name = $n; tenantId = $k; clientId = $cid.ToLowerInvariant() }
+        foreach ($p in $known | Select-Object -Skip 3) {
+            if (-not $e.PSObject.Properties[$p] -or $null -eq $e.$p -or "$($e.$p)" -eq '') { continue }
+            $v = $e.$p
+            if ($p -eq 'defaultDurationHours') { if ("$v" -notmatch '^\d+$' -or [int]$v -lt 1 -or [int]$v -gt 24) { throw "Extra tenant #$i ($n): defaultDurationHours must be 1-24." }; $v = [int]$v }
+            elseif ($p -eq 'bulkActivateConfirmThreshold') { if ("$v" -notmatch '^\d+$' -or [int]$v -lt 1 -or [int]$v -gt 100) { throw "Extra tenant #$i ($n): bulkActivateConfirmThreshold must be 1-100." }; $v = [int]$v }
+            elseif ($p -in @('entraPrefix', 'azurePrefix') -and $v -is [array]) { $v = @($v | ForEach-Object { "$_" }) }
+            else { $v = "$v" }
+            $o[$p] = $v
+        }
+        $out.Add($o)
+    }
+    return $out.ToArray()   # unrolled on purpose: callers collect with @()
 }
 
 function Set-PimActivatorRemediationSettings {
@@ -169,21 +219,150 @@ function Set-PimActivatorRemediationSettings {
     return $out
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# 97.2 (owner 2026-10-08: "remove these buttons and leave only the cmdlets to run ... customer must define who (group) to
+# deploy to - not everyone"; then "give option to dropdown group ... the cmdlets doesn't add an assignment by default"; and
+# "this guide is wrong as it refers to 3 files, but the cmdlets show is missing 2 of them"). The page shows ONLY commands.
+# Each command is SELF-CONTAINED (one download from invardia.com/support/pim, nothing else to fetch) and names WHO it
+# deploys to: the customer's chosen group (-AssignToGroupId), or nobody yet when no group is chosen. Never all users / all
+# devices.
+# ---------------------------------------------------------------------------------------------------------------------
+
+# The shipped Detect / Remediate scripts. In the repository they are read from intune-remediation\ next to this file; the
+# standalone Publish-PimActivatorRemediation.ps1 that Build-PimSupportScripts makes carries them EMBEDDED (the builder
+# fills the table on the next line), so the published script needs no other file.
+$script:PimActivatorBuildDir = $PSScriptRoot
+$script:PimActivatorEmbeddedTemplates = @{}   # BUILD-EMBED: intune-remediation/Detect-PimActivator.ps1, intune-remediation/Remediate-PimActivator.ps1
+
+function Get-PimActivatorRemediationTemplate {
+    <#
+      The shipped text of Detect-PimActivator.ps1 / Remediate-PimActivator.ps1: the embedded copy when this runs as the
+      standalone download, else the file in intune-remediation\. Decoded like [IO.File]::ReadAllText (a BOM is dropped),
+      so both paths give the same text. Throws when neither is there.
+    #>
+    param([Parameter(Mandatory)][ValidateSet('Detect-PimActivator.ps1', 'Remediate-PimActivator.ps1')][string]$Name)
+    $b64 = $script:PimActivatorEmbeddedTemplates[$Name]
+    if ($b64) {
+        $ms = New-Object IO.MemoryStream (, [Convert]::FromBase64String($b64))
+        $sr = New-Object IO.StreamReader($ms, (New-Object Text.UTF8Encoding($false)), $true)
+        try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+    }
+    foreach ($d in @($script:PimActivatorBuildDir, $PSScriptRoot) | Where-Object { $_ } | Select-Object -Unique) {
+        $p = Join-Path $d "intune-remediation\$Name"
+        if (Test-Path -LiteralPath $p) { return [IO.File]::ReadAllText($p) }
+    }
+    throw "The shipped $Name was not found (embedded or in intune-remediation\). Download the standalone script again from https://invardia.com/support/pim/Publish-PimActivatorRemediation.ps1."
+}
+
+function New-PimActivatorRemediationPair {
+    <#
+      The filled Detect + Remediate pair for one environment -- the SAME text the Manager's Operations > PIM Activator
+      builds and the standalone Publish-PimActivatorRemediation.ps1 builds from its parameters (one function, so the two
+      cannot differ). Returns @{ channel; catalog; detect; remediate }.
+    #>
+    param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$ClientId, [string]$Name = 'PIM',
+          [ValidateSet('Released', 'Test')][string]$Channel = 'Released', [string[]]$Browsers = @('Edge', 'Chrome'),
+          [string]$DefaultJustification = 'Change in infrastructure', [int]$DefaultDurationHours = 8,
+          [string]$Prefix = '', [string]$EntraPrefix = '', [string]$AzurePrefix = '',
+          [Nullable[int]]$AutoActivateMaxGroups = $null, [Nullable[int]]$BulkActivateConfirmThreshold = $null,
+          [string]$AdditionalTenantsJson = '')
+    $cat = New-PimActivatorCatalog -Name $(if ("$Name".Trim()) { $Name } else { 'PIM' }) -TenantId $TenantId -ClientId $ClientId -DefaultJustification $DefaultJustification `
+        -DefaultDurationHours $DefaultDurationHours -Prefix $Prefix -EntraPrefix $EntraPrefix -AzurePrefix $AzurePrefix -AdditionalTenantsJson $AdditionalTenantsJson
+    $det = Set-PimActivatorRemediationSettings -Text (Get-PimActivatorRemediationTemplate -Name 'Detect-PimActivator.ps1') -Channel $Channel -Browsers $Browsers -CatalogJson $cat -AutoActivateMaxGroups $AutoActivateMaxGroups -BulkActivateConfirmThreshold $BulkActivateConfirmThreshold
+    $rem = Set-PimActivatorRemediationSettings -Text (Get-PimActivatorRemediationTemplate -Name 'Remediate-PimActivator.ps1') -Channel $Channel -Browsers $Browsers -CatalogJson $cat -AutoActivateMaxGroups $AutoActivateMaxGroups -BulkActivateConfirmThreshold $BulkActivateConfirmThreshold
+    [ordered]@{ channel = $Channel; catalog = $cat; detect = $det; remediate = $rem }
+}
+
+function ConvertTo-PimActivatorTargets {
+    <#
+      PURE. pim.Settings['ActivatorTargets'] normalised: @{ Released = @{ groupId; displayName } | $null; Test = ... }.
+      A value without a GUID group id is no target (never "everyone").
+    #>
+    param($Value)
+    $guid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $get = { param($o, $n) if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { $o[$n] } } elseif ($null -ne $o -and $o.PSObject.Properties[$n]) { $o.$n } }
+    $out = [ordered]@{ Released = $null; Test = $null }
+    foreach ($c in 'Released', 'Test') {
+        $t = & $get $Value $c
+        $gid = "$(& $get $t 'groupId')".Trim()
+        if ($gid -match $guid) {
+            $out[$c] = [ordered]@{ groupId = $gid.ToLowerInvariant(); displayName = ("$(& $get $t 'displayName')" -replace '[\x00-\x1F\x7F]', ' ').Trim() }
+        }
+    }
+    $out
+}
+
+function ConvertTo-PimActivatorPsLiteral {
+    # PURE. A PowerShell single-quoted literal ('' doubles a quote).
+    param([string]$Text)
+    "'" + ("$Text" -replace "'", "''") + "'"
+}
+
+function Get-PimActivatorWho {
+    # PURE. What a command deploys to, in words: the group, or nobody yet.
+    param($Target, [string]$Channel = 'Released')
+    $label = if ($Channel -eq 'Test') { 'TEST' } else { 'PROD' }
+    if ($Target -and "$($Target.groupId)") {
+        $n = if ("$($Target.displayName)".Trim()) { "$($Target.displayName)" } else { "$($Target.groupId)" }
+        return "$label -- $n"
+    }
+    "$label -- no group chosen yet (nobody gets it until you assign a group)"
+}
+
 function Get-PimActivatorCommands {
     <#
-      PURE. The exact command lines for this environment: the two apps, the Remediation upload with its target, and the
-      install for a server without Intune. -Target = a group id | 'AllDevices' | 'AllUsers'.
+      PURE. The exact, self-contained command lines for this environment. Each needs only its own script from
+      invardia.com/support/pim -- no other file. -Targets = the ActivatorTargets setting; a channel without a group gets
+      its command WITHOUT -AssignToGroupId (the scripts then assign nobody and say so). -Settings = the Settings step
+      (name, defaultJustification, defaultDurationHours, prefix, entraPrefix, azurePrefix, autoActivateMaxGroups,
+      bulkActivateConfirmThreshold, browsers) for the Remediation + server commands. -TestSharesProdApp: there is no
+      TEST app because the PROD app carries the TEST redirects -> the TEST group is added to the PROD app.
+      Returns @{ appProd; appTest; remediationProd; remediationTest; remediation (= -Channel); server (= -Channel);
+                 whoProd; whoTest; who (= -Channel) }. A Remediation command is '' while its channel has no app id.
     #>
     param([Parameter(Mandatory)][string]$TenantId, [ValidateSet('Released', 'Test')][string]$Channel = 'Released',
-          [string]$Target = '', [string]$RemediationName = '', [string]$ClientId = '')
-    $ch = Get-PimActivatorChannel -Channel $Channel
-    $rn = if ("$RemediationName".Trim()) { "$RemediationName".Trim() } else { "PIM Activator settings ($($ch.label))" }
-    $assign = if ($Target -ieq 'AllDevices') { ' -AssignAllDevices' } elseif ($Target -ieq 'AllUsers') { ' -AssignAllUsers' }
-              elseif ("$Target" -match '^[0-9a-fA-F-]{36}$') { " -AssignToGroupId $Target" } else { '' }
+          $Targets = $null, $Settings = $null, [string]$ClientId = '', [string]$TestClientId = '',
+          [string]$DailyTime = '', [int]$EveryHours = 0, [switch]$TestSharesProdApp)
+    $guid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $tg = ConvertTo-PimActivatorTargets $Targets
+    $get = { param($o, $n) if ($o -is [System.Collections.IDictionary]) { if ($o.Contains($n)) { $o[$n] } } elseif ($null -ne $o -and $o.PSObject.Properties[$n]) { $o.$n } }
+    $asg = { param($c) if ($tg[$c]) { " -AssignToGroupId $($tg[$c].groupId)" } else { '' } }
+    $appProd = ".\Deploy-PimActivatorBackend.ps1 -TenantId $TenantId -Channel Released -DisplayName 'PIM Activator'" + (& $asg 'Released')
+    $appTest = if ($TestSharesProdApp) { ".\Deploy-PimActivatorBackend.ps1 -TenantId $TenantId -Channel Both -DisplayName 'PIM Activator'" + (& $asg 'Test') }
+               else { ".\Deploy-PimActivatorBackend.ps1 -TenantId $TenantId -Channel Test -ExtensionId $($script:PimActivatorChannels.Test.id) -DisplayName 'PIM Activator (TEST)'" + (& $asg 'Test') }
+    # the settings shared by the Remediation + the server install (step 2)
+    $name = "$(& $get $Settings 'name')".Trim(); if (-not $name) { $name = 'PIM' }
+    $just = "$(& $get $Settings 'defaultJustification')".Trim(); if (-not $just) { $just = 'Change in infrastructure' }
+    $hrs = "$(& $get $Settings 'defaultDurationHours')"; $hrs = if ($hrs -match '^\d+$' -and [int]$hrs -ge 1 -and [int]$hrs -le 24) { [int]$hrs } else { 8 }
+    $br = @(@(& $get $Settings 'browsers') | Where-Object { "$_" -in @('Edge', 'Chrome') } | Select-Object -Unique); if (-not $br.Count) { $br = @('Edge', 'Chrome') }
+    $opt = ''
+    foreach ($k in 'Prefix', 'EntraPrefix', 'AzurePrefix') { $v = "$(& $get $Settings ($k.Substring(0,1).ToLower() + $k.Substring(1)))".Trim(); if ($v) { $opt += " -$k $(ConvertTo-PimActivatorPsLiteral $v)" } }
+    foreach ($k in 'AutoActivateMaxGroups', 'BulkActivateConfirmThreshold') { $v = "$(& $get $Settings ($k.Substring(0,1).ToLower() + $k.Substring(1)))".Trim(); if ($v -match '^\d+$') { $opt += " -$k $v" } }
+    # the optional extra tenants (multi-tenant catalog), validated, compact, as one PowerShell literal
+    $xt = @(ConvertTo-PimActivatorExtraTenants -Json "$(& $get $Settings 'additionalTenants')" -ExcludeTenantId $TenantId)
+    $xtArg = if ($xt.Count) { ' -AdditionalTenantsJson ' + (ConvertTo-PimActivatorPsLiteral (ConvertTo-Json -InputObject $xt -Depth 4 -Compress)) } else { '' }
+    $opt += $xtArg
+    $sched = if ($EveryHours -ge 1 -and $EveryHours -le 23) { " -EveryHours $EveryHours" } elseif ("$DailyTime" -match '^\d{2}:\d{2}$' -and "$DailyTime" -ne '09:00') { " -DailyTime $DailyTime" } else { '' }
+    $cidFor = { param($c) $x = if ($c -eq 'Test' -and "$TestClientId" -match $guid) { $TestClientId } elseif ("$ClientId" -match $guid) { $ClientId } else { '' }; "$x".ToLowerInvariant() }
+    $rem = {
+        param($c)
+        $cid = & $cidFor $c
+        if (-not $cid) { return '' }
+        ".\Publish-PimActivatorRemediation.ps1 -TenantId $TenantId -Channel $c -ClientId $cid -CatalogName $(ConvertTo-PimActivatorPsLiteral $name) -DefaultJustification $(ConvertTo-PimActivatorPsLiteral $just) -DefaultDurationHours $hrs -Browsers $($br -join ',')$opt" + (& $asg $c) + $sched
+    }
+    $srv = {
+        param($c)
+        $cid = & $cidFor $c
+        $line = ".\Deploy-PimActivatorClient.ps1 -Scope Machine -Browser Both -Channel $c"
+        if ($cid) { $line += " -TenantId $TenantId -ClientId $cid -TenantName $(ConvertTo-PimActivatorPsLiteral $name) -DefaultJustification $(ConvertTo-PimActivatorPsLiteral $just) -DefaultDurationHours $hrs$xtArg" }
+        $line
+    }
     [ordered]@{
-        appProd     = ".\Deploy-PimActivatorBackend.ps1 -TenantId $TenantId -Channel Released -DisplayName 'PIM Activator'"
-        appTest     = ".\Deploy-PimActivatorBackend.ps1 -TenantId $TenantId -Channel Test -ExtensionId $($script:PimActivatorChannels.Test.id) -DisplayName 'PIM Activator (TEST)'"
-        remediation = ".\Publish-PimActivatorRemediation.ps1 -TenantId $TenantId -Name '$rn' -DetectScript .\Detect-PimActivator.ps1 -RemediateScript .\Remediate-PimActivator.ps1$assign"
-        server      = ".\Deploy-PimActivatorClient.ps1 -Scope Machine -Browser Both -Channel $Channel" + $(if ("$ClientId" -match '^[0-9a-fA-F-]{36}$') { " -ClientId $ClientId" } else { '' })
+        appProd = $appProd; appTest = $appTest
+        remediationProd = (& $rem 'Released'); remediationTest = (& $rem 'Test'); remediation = (& $rem $Channel)
+        server = (& $srv $Channel)
+        whoProd = (Get-PimActivatorWho -Target $tg['Released'] -Channel Released); whoTest = (Get-PimActivatorWho -Target $tg['Test'] -Channel Test)
+        who = (Get-PimActivatorWho -Target $tg[$Channel] -Channel $Channel)
     }
 }
+

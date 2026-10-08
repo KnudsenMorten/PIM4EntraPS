@@ -203,6 +203,20 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [string]$AppDisplayName = 'PIM Activator',
 
+    # 97.2 (owner 2026-10-08, "one download + one command, nothing else"): with -TenantId AND -ClientId the tenant
+    # catalog is written from these values directly -- no sign-in, no -CatalogJsonPath file. -TenantName is the name
+    # admins see (default 'PIM'). The PIM Manager's Operations > PIM Activator page fills all three.
+    [Parameter(ParameterSetName = 'Install')]
+    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    [string]$TenantId,
+
+    [Parameter(ParameterSetName = 'Install')]
+    [string]$TenantName = 'PIM',
+
+    # Optional multi-tenant catalog: more tenants (JSON array of { name, tenantId, clientId, ... }) added after this one.
+    [Parameter(ParameterSetName = 'Install')]
+    [string]$AdditionalTenantsJson = '',
+
     [Parameter(Mandatory, ParameterSetName = 'Uninstall')]
     [switch]$Uninstall
 )
@@ -491,6 +505,31 @@ foreach ($root in $policyRoots) {
             Write-Warning "    -CatalogJsonPath '$CatalogJsonPath' not found. Falling back to live Entra auto-discover."
         }
 
+        # 97.2: -TenantId + -ClientId given -> the catalog from these values, no sign-in, no file.
+        if (-not $catalog -and $TenantId -and $ClientId) {
+            $catalog = [pscustomobject]@{
+                name                 = $(if ("$TenantName".Trim()) { "$TenantName".Trim() } else { 'PIM' })
+                tenantId             = $TenantId.ToLowerInvariant()
+                clientId             = $ClientId.ToLowerInvariant()
+                defaultJustification = $(if ($PSBoundParameters.ContainsKey('DefaultJustification')) { $DefaultJustification } else { 'Change in infrastructure' })
+                defaultDurationHours = $(if ($PSBoundParameters.ContainsKey('DefaultDurationHours')) { $DefaultDurationHours } else { 8 })
+            }
+            # the defaults went into THIS tenant's entry; the extra tenants keep their own (no override below)
+            $catFromParams = $true
+            Write-Host ("    -> catalog source: -TenantId / -ClientId (tenant '{0}' / {1}  clientId {2})" -f $catalog.name, $catalog.tenantId, $catalog.clientId) -ForegroundColor Cyan
+            if ("$AdditionalTenantsJson".Trim()) {
+                # the same rules the PIM Manager page and the Remediation apply (name + tenantId + clientId, known keys only)
+                $guidRx = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                $xtParsed = $null; try { $xtParsed = ConvertFrom-Json -InputObject $AdditionalTenantsJson } catch { throw "-AdditionalTenantsJson is not valid JSON: $($_.Exception.Message)" }
+                $xt = @($xtParsed)
+                foreach ($x in $xt) {
+                    if ("$($x.tenantId)" -notmatch $guidRx -or "$($x.clientId)" -notmatch $guidRx -or -not "$($x.name)".Trim()) { throw "-AdditionalTenantsJson: every tenant needs name, tenantId and clientId (GUIDs)." }
+                }
+                $catalog = @($catalog) + $xt
+                Write-Host "    -> plus $($xt.Count) more tenant(s) from -AdditionalTenantsJson" -ForegroundColor Cyan
+            }
+        }
+
         if (-not $catalog) {
             # Live auto-discover from the connected Microsoft Graph context.
             # The same discover logic as before, so the same
@@ -543,7 +582,7 @@ foreach ($root in $policyRoots) {
         # reads these from chrome.storage.managed.tenantCatalog and pre-fills
         # the Activate form with them. Add-Member -Force overwrites the property
         # if the entry already carried one. Opt-in: untouched unless passed.
-        if ($catalog -and ($PSBoundParameters.ContainsKey('DefaultJustification') -or $PSBoundParameters.ContainsKey('DefaultDurationHours'))) {
+        if ($catalog -and -not $catFromParams -and ($PSBoundParameters.ContainsKey('DefaultJustification') -or $PSBoundParameters.ContainsKey('DefaultDurationHours'))) {
             foreach ($entry in @($catalog)) {
                 if ($PSBoundParameters.ContainsKey('DefaultJustification')) {
                     $entry | Add-Member -NotePropertyName defaultJustification -NotePropertyValue $DefaultJustification -Force

@@ -127,16 +127,6 @@ $here = Split-Path -Parent $PSCommandPath
 # BUG-169: the sign-in consent scopes + the pure consent plan.
 . (Join-Path $here '_PimDeployGraph.ps1')
 
-function Get-PimEaActivatorSpaRedirects {
-    # PURE. 97.2: the SPA redirects the Manager page's own admin sign-in needs -- https://<host>/activator-signin for the
-    # platform name, its non-internal twin (an app on internal ingress is exposed under the same name without
-    # '.internal.') and every custom hostname. Lower case, unique.
-    param([string]$Fqdn, [string[]]$CustomHostnames = @())
-    $hosts = @("$Fqdn".Trim())
-    if ("$Fqdn" -match '\.internal\.') { $hosts += ("$Fqdn" -replace '\.internal\.', '.') }
-    $hosts += @($CustomHostnames | ForEach-Object { "$_".Trim() })
-    @($hosts | Where-Object { $_ } | ForEach-Object { "https://$($_.ToLowerInvariant())/activator-signin" } | Sort-Object -Unique)
-}
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 function Warn($m) { Write-Host "    $m" -ForegroundColor Yellow }
@@ -438,29 +428,6 @@ if ($PSCmdlet.ShouldProcess($appId, 'ensure reply URL, identifier URI and ID-tok
         $merged = @(@($ids) + @($wantIds) | Where-Object { "$_".Trim() } | Sort-Object -Unique)
         az ad app update --id $appId --identifier-uris @merged -o none 2>$null
     }
-    # 97.2 (operator 2026-10-07: "there is no create buttons"; decision: the CLICKING ADMIN signs in): the Manager page's
-    # own Microsoft sign-in (Operations > PIM Activator create buttons) redeems its code in the browser, which Entra allows
-    # only for a SINGLE-PAGE-APPLICATION redirect. Merged with whatever SPA redirects exist, never replacing; the platform
-    # name, its non-internal twin and every custom hostname on the app. No permission is added -- each button asks for its
-    # own delegated scopes at sign-in and works with the admin's own roles.
-    $spaWant = @(Get-PimEaActivatorSpaRedirects -Fqdn $fqdn -CustomHostnames @(@(az containerapp hostname list @subArgs -g $ResourceGroup -n $App --query "[].name" -o tsv 2>$null) | Where-Object { "$_".Trim() }))
-    $appOid = "$(@(az ad app show --id $appId --query id -o tsv 2>$null) | Select-Object -First 1)".Trim()
-    $spaOk = $false
-    if ($appOid) {
-        foreach ($wait in @(0, 3, 6, 12)) {
-            if ($wait) { Start-Sleep -Seconds $wait }
-            $spaNow = @(az ad app show --id $appId --query "spa.redirectUris" -o tsv 2>$null) | Where-Object { "$_".Trim() }
-            if (-not @($spaWant | Where-Object { $spaNow -notcontains $_ }).Count) { $spaOk = $true; break }
-            $bodyFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-ea-spa-" + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.json')
-            try {
-                $merged = @(@($spaNow) + @($spaWant) | Where-Object { "$_".Trim() } | Sort-Object -Unique)
-                Set-Content -LiteralPath $bodyFile -Encoding ascii -NoNewline -Value (ConvertTo-Json -InputObject @{ spa = @{ redirectUris = @($merged) } } -Compress -Depth 4)
-                az rest --method PATCH --uri "https://graph.microsoft.com/v1.0/applications/$appOid" --headers Content-Type=application/json --body "@$bodyFile" -o none 2>$null
-            } finally { Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue }
-        }
-    }
-    if ($spaOk) { Note "Activator sign-in redirect present: $($spaWant -join ', ')" }
-    else { Warn "could not add the PIM Activator sign-in redirect ($($spaWant -join ', ')) -- the create buttons on Operations > PIM Activator then fail with AADSTS50011; the commands on that page still work." }
     if ($idOk) { Note "identifiers present: api://$appId + $StableIdentifierUri" }
     else { Warn "could not set both identifier URIs -- the gate may not mint a token, and the next deploy may not FIND this app and could create a duplicate." }
     # A registration with no service principal in this tenant cannot be signed in to at all.
