@@ -944,7 +944,9 @@ try {
             if ("$SubscriptionId".Trim()) { $smokeArgs += @('-SubscriptionId', "$SubscriptionId".Trim()) }
             if ("$($buildPlan.imageTag)".Trim() -match '^\d+\.\d+\.\d+') { $smokeArgs += @('-ExpectedVersion', "$($buildPlan.imageTag)".Trim()) }
             Info ("verify inputs: app={0} rg={1}" -f $ManagerApp, $(if ("$ResourceGroup".Trim()) { $ResourceGroup } else { '(NONE -- the gate cannot read the app)' }))
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $smoke @smokeArgs
+            # PIM 99 (Cloud Shell): Windows PowerShell where the host has it (Windows, unchanged), else pwsh (Linux).
+            $childPs = $(if (Get-Command -Name 'powershell.exe' -CommandType Application -ErrorAction SilentlyContinue) { 'powershell.exe' } else { (Get-Process -Id $PID).Path })
+            & $childPs -NoProfile -ExecutionPolicy Bypass -File $smoke @smokeArgs
             $code = $LASTEXITCODE
         } else {
             # 🔴 BUG-160 -- A MISSING GATE IS UNVERIFIED, NOT UNHEALTHY. This said "treating as
@@ -1179,7 +1181,8 @@ if ($monPlan.action -eq 'noop') {
     if (Test-Path $monScript) {
         Step "   $($monPlan.action) synthetic monitor via $monScript"
         if ($PSCmdlet.ShouldProcess($monScript, $monPlan.action)) {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $monScript -IntervalMinutes $monPlan.intervalMinutes -Recipient $Recipient
+            $childPs = $(if (Get-Command -Name 'powershell.exe' -CommandType Application -ErrorAction SilentlyContinue) { 'powershell.exe' } else { (Get-Process -Id $PID).Path })   # PIM 99: pwsh where there is no Windows PowerShell
+            & $childPs -NoProfile -ExecutionPolicy Bypass -File $monScript -IntervalMinutes $monPlan.intervalMinutes -Recipient $Recipient
         }
     } else {
         Warn "synthetic-monitor deploy script not found ($monScript)."

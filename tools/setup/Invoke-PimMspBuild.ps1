@@ -178,7 +178,9 @@ for ($i = 0; $i -lt $plan.Count; $i++) {
     $s = $plan[$i]
     $mark = if ($i -lt $startAt) { 'skip' } elseif ("$($s.blocked)".Trim()) { 'N/A ' } else { '    ' }
     Write-Host ("  {0} [{1,2}] {2,-17} {3}" -f $mark, ($i + 1), $s.id, $s.title)
-    Write-Host ("               {0} {1}{2}" -f $s.host, $s.script, $(if (@($s.switches).Count) { ' -' + (@($s.switches) -join ' -') } else { '' })) -ForegroundColor DarkGray
+    $hp = if ($s.kind -eq 'script') { Resolve-PimMspStepHost -Requested $s.host } else { $null }   # Windows: unchanged; Cloud Shell: pwsh
+    $hostShown = if ($hp -and $hp.ok -and $hp.fallback) { 'pwsh' } else { $s.host }
+    Write-Host ("               {0} {1}{2}" -f $hostShown, $s.script, $(if (@($s.switches).Count) { ' -' + (@($s.switches) -join ' -') } else { '' })) -ForegroundColor DarkGray
 }
 $printOps = {
     Write-Host "`n--- operator steps (need a human or a decision; NOT automated) ---" -ForegroundColor Yellow
@@ -439,7 +441,7 @@ try {
             if (-not $r.ok) { throw "step '$($s.id)': unresolved $($r.missing -join ', ') for -$k (an earlier step did not produce it)" }
             $argsOut[$k] = $r.value
         }
-        $scriptPath = [IO.Path]::GetFullPath((Join-Path $solRoot $s.script))
+        $scriptPath = [IO.Path]::GetFullPath((Join-Path $solRoot (ConvertTo-PimMspStepScriptPath -Path $s.script)))   # Linux: '/' separators
         if ($StepRunner) {
             $res = & $StepRunner $s $argsOut
             $ok = [bool]$res.ok; $output = "$($res.output)"
@@ -453,7 +455,12 @@ try {
             }
             elseif ($s.azPowerShell) { $spec['azPowerShell'] = @{ tenantId = "$($config.tenantId)"; clientId = "$($config.deployIdentity.clientId)"; certThumbprint = "$($config.deployIdentity.certThumbprint)"; subscriptionId = "$($config.subscriptionId)" } }
             $spec | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $argsFile -Encoding UTF8
-            $exe = if ($s.host -eq 'powershell') { "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" } else { (Get-Process -Id $PID).Path }
+            # PIM 99 (Cloud Shell): 'powershell' is a preference -- Windows PowerShell where the host has it (Windows, unchanged),
+            # pwsh where it does not (Azure Cloud Shell, the guided install of a managed tenant).
+            $hostPick = Resolve-PimMspStepHost -Requested $s.host
+            if (-not $hostPick.ok) { throw "step '$($s.id)': $($hostPick.reason)" }
+            if ($hostPick.fallback) { Write-Host "    host: pwsh ($($hostPick.reason))" -ForegroundColor DarkGray }
+            $exe = $hostPick.exe
             $launcher = Join-Path $here '_PimInvokeStep.ps1'
             $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcher, '-Script', $scriptPath, '-ArgsFile', $argsFile)
             if ($s.capturesOutput) { $childArgs += @('-OutFile', $outFile) }

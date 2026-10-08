@@ -542,6 +542,57 @@ function New-PimMspBuildStep {
                        why = $Why; capturesOutput = [bool]$CapturesOutput; azPowerShell = [bool]$AzPowerShell; blocked = "$Blocked" }
 }
 
+function Resolve-PimMspStepHost {
+    <#
+      PURE (every host fact is a seam). PIM 99 "managed path in Cloud Shell": the executable ONE build step runs under.
+      A step asks for 'powershell' (Windows PowerShell 5.1 -- on Windows the SqlClient steps run there, because pwsh 7's
+      SqlClient login was measured failing on the MSP management host) or 'pwsh'. The request is a PREFERENCE, never a
+      requirement:
+        * 'powershell' on a host that HAS Windows PowerShell (Windows: %WINDIR%\System32\WindowsPowerShell\v1.0\powershell.exe)
+          -> that exe, exactly as before.
+        * 'powershell' on a host WITHOUT it (Azure Cloud Shell = Linux, pwsh 7 only -- where Invardia's bootstrap runs the
+          guided install of a MANAGED tenant) -> pwsh: the current process when it is pwsh, else pwsh from PATH.
+        * 'pwsh' -> the current process, exactly as before.
+      Returns @{ ok; exe; host ('powershell'|'pwsh'); requested; fallback (bool: a 'powershell' step runs under pwsh); reason }.
+      ok = $false only when no PowerShell can be found at all (the runner then refuses the step with the reason).
+    #>
+    param([string]$Requested = 'pwsh', [object]$IsWindowsHost = $null, [string]$WindowsDir = "$env:WINDIR", [string]$CurrentExe = '',
+          [scriptblock]$PathExists = $null, [scriptblock]$FindPwsh = $null)
+    $req = if ("$Requested".Trim() -eq 'powershell') { 'powershell' } else { 'pwsh' }
+    $onWin = if ($null -ne $IsWindowsHost) { [bool]$IsWindowsHost }
+             elseif ("$($PSVersionTable.PSEdition)" -ne 'Core') { $true }     # Windows PowerShell 5.1 runs only on Windows
+             else { [bool](Get-Variable -Name IsWindows -ValueOnly -ErrorAction SilentlyContinue) }
+    if (-not "$CurrentExe".Trim()) { try { $CurrentExe = "$((Get-Process -Id $PID).Path)" } catch { $CurrentExe = '' } }
+    if (-not $PathExists) { $PathExists = { param($p) Test-Path -LiteralPath $p -PathType Leaf } }
+    if (-not $FindPwsh) { $FindPwsh = { $c = Get-Command -Name 'pwsh' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { "$($c.Source)" } else { '' } } }
+    if ($req -eq 'pwsh') {
+        if ("$CurrentExe".Trim()) { return @{ ok = $true; exe = "$CurrentExe"; host = 'pwsh'; requested = $req; fallback = $false; reason = 'the current process' } }
+        $p = "$(& $FindPwsh)".Trim()
+        if ($p) { return @{ ok = $true; exe = $p; host = 'pwsh'; requested = $req; fallback = $false; reason = 'pwsh from PATH' } }
+        return @{ ok = $false; exe = ''; host = ''; requested = $req; fallback = $false; reason = 'no PowerShell executable found (the current process has no path and pwsh is not on PATH)' }
+    }
+    if ($onWin -and "$WindowsDir".Trim()) {
+        $wp = "$("$WindowsDir".Trim().TrimEnd('\','/'))\System32\WindowsPowerShell\v1.0\powershell.exe"
+        if ([bool](& $PathExists $wp)) { return @{ ok = $true; exe = $wp; host = 'powershell'; requested = $req; fallback = $false; reason = 'Windows PowerShell 5.1' } }
+    }
+    # No Windows PowerShell on this host: pwsh runs the step (the current process when it IS pwsh).
+    $leaf = if ("$CurrentExe".Trim()) { [IO.Path]::GetFileNameWithoutExtension(("$CurrentExe" -replace '\\', '/').Split('/')[-1]) } else { '' }
+    if ($leaf -match '^pwsh') { return @{ ok = $true; exe = "$CurrentExe"; host = 'pwsh'; requested = $req; fallback = $true; reason = 'no Windows PowerShell on this host -- pwsh (the current process)' } }
+    $p = "$(& $FindPwsh)".Trim()
+    if ($p) { return @{ ok = $true; exe = $p; host = 'pwsh'; requested = $req; fallback = $true; reason = 'no Windows PowerShell on this host -- pwsh from PATH' } }
+    return @{ ok = $false; exe = ''; host = ''; requested = $req; fallback = $true; reason = 'this step prefers Windows PowerShell, which this host does not have, and pwsh is not on PATH either' }
+}
+
+function ConvertTo-PimMspStepScriptPath {
+    <#
+      PURE. A plan's script paths are written Windows-style ('tools\setup\X.ps1', '..\PlatformConfiguration\...'). Each
+      separator becomes THIS host's: unchanged on Windows ('\'), '/' on Linux (Cloud Shell) -- .NET's GetFullPath and a child
+      `pwsh -File` treat a backslash there as part of a file name. -Separator is the seam.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [string]$Separator = "$([IO.Path]::DirectorySeparatorChar)")
+    return ("$Path" -replace '[\\/]', $Separator)
+}
+
 function Get-PimMspBuildPlan {
     <#
       PURE. The ordered, idempotent step list for one role. Every step re-runs safely (each script converges), so a failed

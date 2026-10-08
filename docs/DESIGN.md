@@ -4968,6 +4968,14 @@ tenant, the managing tenant's bundle address), the guided installer never claims
 already succeeded with the key gets no new install key; the installation keeps the one it has and continues as a re-run.
 Without a key nothing changes.
 
+**The managed-tenant build in Azure Cloud Shell (built, not yet proven live).** The guided install of a managed tenant
+runs from Invardia's installer in Azure Cloud Shell, which has PowerShell 7 on Linux and no Windows PowerShell. Some build
+steps (the ones that write to the store) prefer Windows PowerShell; that is now a preference, not a requirement. On a
+Windows host those steps still run under Windows PowerShell exactly as before; on a host without it they run under
+PowerShell 7 (the installer's own process). If no PowerShell executable can be found at all, the step is refused with the
+reason instead of being started. Each step's script path is written with the host's own path separator, and the other
+child PowerShell launches on the install path (the hosted health check, the monitor deployment) follow the same rule.
+
 #### Implementation note (2026-09-17) — the provider's Manager verifies the bundle the way a managed tenant does
 
 The MSP view in the managing tenant's Manager plans against a signed bundle. Its banner verdict uses the managed tenant's
