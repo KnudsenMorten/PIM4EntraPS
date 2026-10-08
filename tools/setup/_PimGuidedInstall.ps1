@@ -36,9 +36,11 @@ $script:PimInstallSteps = [ordered]@{
     'code'                 = 'Roll out the application'
     'updater'              = 'Updates'
     'access'               = 'PIM Manager access'
+    'alerting'             = 'Alert recipients'
     'verify'               = 'Deployment health check'
     'licence'              = 'Your licence'
     'support-app-access'   = 'Invardia support access'
+    'verify-install'       = 'End-of-install check'
     'health-check'         = 'Final health check'
     'completed'            = 'Installation complete'
 }
@@ -125,6 +127,11 @@ function Test-PimInstallConfig {
     $ms = "$(& $get 'mailSender')".Trim()
     if ($ms -and $ms -notmatch $upn) { $err.Add("mailSender '$ms' is not an e-mail address") }
     $c.mailSender = $ms
+    # INSTALL-HARDEN-1 item 5 (owner 2026-10-08): who gets the alerts. Invardia's wizard pre-fills it (and superAdmins) with
+    # the requester's address; empty = the SuperAdmins' mailboxes. A stored list is never overwritten by an install.
+    $ar = @(@(& $get 'alertRecipients') | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    foreach ($a in $ar) { if ($a -notmatch $upn) { $err.Add("alertRecipients entry '$a' is not an e-mail address") } }
+    $c.alertRecipients = @($ar)
     $sa = "$(& $get 'supportAppId')".Trim()
     if ($sa -and $sa -notmatch $script:PimInstallGuid) { $err.Add('supportAppId must be a GUID (the Invardia Support app''s client id)') }
     $c.supportAppId = $sa
@@ -176,6 +183,13 @@ function ConvertTo-PimInstallDeployArgs {
     if ($Config.allowAllMembers) { $a['EasyAuthAllowAllTenantUsers'] = $true }
     if ($Config.engineAzureRootUserAccessAdmin) { $a['EngineAzureRootUserAccessAdmin'] = $true }   # §97 opt-in
     if ("$($Config.mailSender)".Trim()) { $a['MailSender'] = "$($Config.mailSender)".Trim() }
+    # INSTALL-HARDEN-1: the alert recipients (else the SuperAdmins' mailboxes); the deploy's own end-of-install verify is
+    # skipped -- Install-PimManager runs it after the licence and the support access; and the deploy never posts to Invardia
+    # itself (the bootstrap's -Reporter does), so its tracking token is explicitly empty.
+    $ar = @($Config.alertRecipients | Where-Object { "$_".Trim() })
+    if ($ar.Count) { $a['AlertRecipients'] = @($ar) }
+    $a['SkipInstallVerify'] = $true
+    $a['InvardiaInstallToken'] = ''
     # 2026-10-06 (install rehearsal): a PRO install deployed as S2 with no feed got NO updater. Pro updates arrive signed,
     # through Invardia, on this install's ring; the engine claims the install key once the licence is registered.
     # Trials too (Invardia 2026-10-06: a trial licence claims an install key and pulls updates like Pro until it expires; a
@@ -194,7 +208,9 @@ function ConvertTo-PimInstallStepEvent {
     #>
     param([Parameter(Mandatory)][object]$DeployEvent, [string]$InstallId = '', [string]$ResumeCommand = '')
     $key = "$($DeployEvent.key)"
-    if ($key -eq 'appreg' -or -not $script:PimInstallSteps.Contains($key)) { return $null }
+    # INSTALL-HARDEN-1: the deploy's own 'verify-install' is skipped here -- the guided install runs ITS verify after the
+    # licence and the support access (its own 'verify-install' event); a 'skipped' one from the deploy would only confuse.
+    if (($key -in @('appreg', 'verify-install')) -or -not $script:PimInstallSteps.Contains($key)) { return $null }
     $state = "$($DeployEvent.state)"; $detail = "$($DeployEvent.detail)".Trim()
     if ($detail.Length -gt 400) { $detail = $detail.Substring(0, 400) + ' ...' }
     switch ($state) {

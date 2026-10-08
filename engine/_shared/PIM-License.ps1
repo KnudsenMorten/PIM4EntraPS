@@ -256,6 +256,8 @@ Function Get-PimLicense {
         GraceUntil = $null
         LicenseId  = ''
         Path       = $null
+        # Framework §12.6 LICENCE-DIMENSION: the SIGNED payload's optional `limits` object ($null = none = Pro Enterprise).
+        Limits     = $null
     }
 
     # 🔴 IMP-42 (§33.28) -- THE LICENCE LIVES IN SQL, NOT IN A FILE. It used to be found by scanning config/ for
@@ -298,6 +300,9 @@ Function Get-PimLicense {
         $result.ValidTo   = [datetime]::Parse("$($p.validTo)",   [System.Globalization.CultureInfo]::InvariantCulture).Date
         $graceDays = 30; if ($p.PSObject.Properties.Name -contains 'graceDays' -and "$($p.graceDays)" -match '^\d+$') { $graceDays = [int]$p.graceDays }
         $result.GraceUntil = $result.ValidTo.AddDays($graceDays)
+        # §12.6: read ONLY from the verified payload bytes ($p) -- a `limits` on the outer document ($doc) is unsigned and
+        # never read. Absent = Pro Enterprise (every licence issued before §12.6 is byte-identical and stays uncapped).
+        if ($p.PSObject.Properties.Name -contains 'limits') { $result.Limits = ConvertTo-PimLicenceLimits -Value $p.limits }
 
         $today = (Get-Date).Date
         if     ($today -lt $result.ValidFrom)  { $result.Status = 'NotYetValid'; $result.Reason = "license starts $($result.ValidFrom.ToString('yyyy-MM-dd'))" }
@@ -453,6 +458,155 @@ Function Get-PimEdition {
     $lic = Get-PimLicense
     if ((Test-PimLicenseIsProForTenant -License $lic -TenantId $TenantId).pro) { return $script:PimProEditionName }
     return $script:PimCommunityEditionName
+}
+
+# =====================================================================================================================
+# Framework DOCS/REQUIREMENTS.md §12.6 LICENCE-DIMENSION (owner 2026-10-08) -- PIM's half; PIM docs/REQUIREMENTS.md §95.2d.
+# Pro has two dimensions, decided by the SIGNED licence: Pro Business = the payload carries a `limits` object (PIM reads
+# `admins`: the number of managed admin accounts it covers); Pro Enterprise = no `limits`. Community and MSP unchanged.
+# Enforcement is a WARNING, never a stop: from 90% a banner; at/over the cap only a NEW managed admin account is refused
+# (Manager commit + staging + MCP -- the page only mirrors it). Nothing existing is disabled or touched, and the ENGINE
+# never reads the limit at all.
+# =====================================================================================================================
+$script:PimLicenceDimensionBusiness   = 'Pro Business'
+$script:PimLicenceDimensionEnterprise = 'Pro Enterprise'
+$script:PimLicenceUpgradeUrl          = 'invardia.com'
+# An admin row in one of these states is not counted: it is off, removed from PIM or deleted (the row only keeps it so).
+$script:PimAdminNotCountedStatuses    = @('disabled', 'removed', 'deleted', 'revoked')
+
+Function ConvertTo-PimLicenceLimits {
+    <#
+      PURE. The payload's `limits` value -> an ordered map name (lower-case) -> non-negative int, or $null when the value is
+      not an object (absent / null / a string / a number = no limits = Pro Enterprise). A key whose value is not a whole
+      number is dropped (never guessed); an empty object stays an (empty) map -- the licence IS Business, with no PIM cap.
+    #>
+    param([AllowNull()]$Value)
+    if ($null -eq $Value) { return $null }
+    $pairs = @()
+    if ($Value -is [System.Collections.IDictionary]) { foreach ($k in @($Value.Keys)) { $pairs += ,@("$k", $Value[$k]) } }
+    # 🪤 not `-is [pscustomobject]`: that is [psobject], true for a PSObject-WRAPPED string too, whose properties (Length)
+    # would read as a limit. The JSON object type itself is the only object accepted.
+    elseif ($Value.GetType().FullName -eq 'System.Management.Automation.PSCustomObject') { foreach ($pp in @($Value.PSObject.Properties)) { $pairs += ,@("$($pp.Name)", $pp.Value) } }
+    else { return $null }
+    $out = [ordered]@{}
+    foreach ($pr in $pairs) {
+        $n = "$($pr[0])".Trim().ToLowerInvariant(); $v = "$($pr[1])".Trim()
+        if ($n -and $v -match '^\d{1,9}$') { $out[$n] = [int]$v }
+    }
+    return $out
+}
+
+Function Get-PimLicenceDimension {
+    <#
+      PURE. 'Community' | 'Pro Business' | 'Pro Enterprise' for -License as THIS tenant sees it: not Pro here (the same verdict
+      as the badge, Test-PimLicenseIsProForTenant) = Community; Pro with a signed `limits` object = Pro Business; Pro without
+      = Pro Enterprise (every licence issued before §12.6, MSP included).
+    #>
+    param($License, [string]$TenantId)
+    if (-not $License -or -not (Test-PimLicenseIsProForTenant -License $License -TenantId $TenantId).pro) { return $script:PimCommunityEditionName }
+    $lim = $null; if ($License.PSObject.Properties['Limits']) { $lim = $License.Limits }
+    if ($null -ne $lim) { return $script:PimLicenceDimensionBusiness }
+    return $script:PimLicenceDimensionEnterprise
+}
+
+Function Get-PimLicenceAdminCap {
+    # PURE. The licence's managed-admin cap (int), or $null = no cap (Enterprise, Community, or a Business licence without `admins`).
+    param($License)
+    if (-not $License -or -not $License.PSObject.Properties['Limits'] -or $null -eq $License.Limits) { return $null }
+    $l = $License.Limits
+    if ($l -is [System.Collections.IDictionary] -and $l.Contains('admins')) { return [int]$l['admins'] }
+    return $null
+}
+
+Function Get-PimLicenceDimensionText {
+    # PURE. The one label every surface shows: "Pro Enterprise", "Pro Business (5 admins)", "Pro Business", "Community".
+    param($License, [string]$TenantId)
+    $d = Get-PimLicenceDimension -License $License -TenantId $TenantId
+    if ($d -ne $script:PimLicenceDimensionBusiness) { return $d }
+    $cap = Get-PimLicenceAdminCap -License $License
+    if ($null -ne $cap) { return ('{0} ({1} admin{2})' -f $d, $cap, $(if ($cap -eq 1) { '' } else { 's' })) }
+    return $d
+}
+
+Function Get-PimManagedAdminIdentities {
+    <#
+      PURE. The managed admin ACCOUNTS -- Account-Definitions-Admins rows -- that count against the cap, each counted once:
+      the identity is the UPN (lower-case), else the UserName. A row whose AccountStatus is Disabled / Removed / Deleted /
+      Revoked is not counted (it is off, or the row only keeps it gone). -All counts every row whatever its state (the "is
+      this account NEW" test). Returns a sorted, distinct string array.
+    #>
+    param([AllowNull()][object[]]$Rows, [switch]$All)
+    $seen = @{}
+    foreach ($r in @($Rows)) {
+        if ($null -eq $r) { continue }
+        $get = { param($n) if ($r -is [System.Collections.IDictionary]) { if ($r.Contains($n)) { "$($r[$n])" } else { '' } } elseif ($r.PSObject.Properties[$n]) { "$($r.$n)" } else { '' } }
+        $id = (& $get 'UserPrincipalName').Trim().ToLowerInvariant()
+        if (-not $id) { $id = (& $get 'UserName').Trim().ToLowerInvariant() }
+        if (-not $id) { continue }
+        if (-not $All -and ($script:PimAdminNotCountedStatuses -contains (& $get 'AccountStatus').Trim().ToLowerInvariant())) { continue }
+        $seen[$id] = $true
+    }
+    return @($seen.Keys | Sort-Object)
+}
+
+Function Get-PimAdminLicenceUsage {
+    <#
+      PURE. The admin usage against the licence, for /api/license, the banners and the refusal:
+        @{ dimension; dimensionText; cap ($null = none); count ($null when -Rows was not given); percent; state; message }
+        state: none (no cap, or the count is unknown) | ok (< 90%) | warn (>= 90%, below the cap) | at (= cap) | over (> cap)
+      message is the plain sentence the banner shows ('' for none/ok).
+    #>
+    param($License, [string]$TenantId, [AllowNull()][object[]]$Rows, [switch]$RowsKnown)
+    $dim = Get-PimLicenceDimension -License $License -TenantId $TenantId
+    $cap = if ($dim -eq $script:PimLicenceDimensionBusiness) { Get-PimLicenceAdminCap -License $License } else { $null }
+    $known = $RowsKnown -or $PSBoundParameters.ContainsKey('Rows')
+    $count = if ($known) { @(Get-PimManagedAdminIdentities -Rows $Rows).Count } else { $null }
+    $out = [ordered]@{ dimension = $dim; dimensionText = (Get-PimLicenceDimensionText -License $License -TenantId $TenantId); cap = $cap; count = $count; percent = $null; state = 'none'; message = '' }
+    if ($null -eq $cap -or $null -eq $count) { return $out }
+    $pct = if ($cap -gt 0) { [int][math]::Floor(100.0 * $count / $cap) } else { 100 }
+    $out.percent = $pct
+    $covers = "Your Pro Business licence covers $cap admin account$(if ($cap -eq 1) { '' } else { 's' })"
+    if ($count -gt $cap) {
+        $out.state = 'over'
+        $out.message = "$covers and $count are managed. Nothing is switched off, but a new admin account is refused -- upgrade to Pro Enterprise at $script:PimLicenceUpgradeUrl, or remove one."
+    } elseif ($count -eq $cap) {
+        $out.state = 'at'
+        $out.message = "$covers and all $count are in use. A new admin account is refused -- upgrade to Pro Enterprise at $script:PimLicenceUpgradeUrl, or remove one."
+    } elseif ($cap -gt 0 -and ($count * 10) -ge ($cap * 9)) {
+        $out.state = 'warn'
+        $out.message = "$covers and $count are in use ($pct%). Upgrade to Pro Enterprise at $script:PimLicenceUpgradeUrl before you add more."
+    } else {
+        $out.state = 'ok'
+    }
+    return $out
+}
+
+Function Test-PimAdminLicenceLimit {
+    <#
+      PURE. The server-side cap check for a change to Account-Definitions-Admins (the commit, staging, MCP).
+        -Before = the rows as they are; -After = the rows the change would leave.
+      Refused ONLY when the change brings in a NEW admin account (an identity in no -Before row, in any state) that is
+      counted, and the counted total afterwards exceeds the cap. Editing, disabling, removing or re-enabling an existing
+      account is never refused, and nothing already there is touched. No cap (Enterprise / Community / no `admins`) = ok.
+      Returns @{ ok; refused; cap; count; before; added[]; dimension; message }.
+    #>
+    param($License, [string]$TenantId, [AllowNull()][object[]]$Before, [AllowNull()][object[]]$After)
+    $u = Get-PimAdminLicenceUsage -License $License -TenantId $TenantId -Rows @($After) -RowsKnown
+    $res = [ordered]@{ ok = $true; refused = $false; cap = $u.cap; count = $u.count; before = @(Get-PimManagedAdminIdentities -Rows @($Before)).Count; added = @(); dimension = $u.dimension; message = '' }
+    if ($null -eq $u.cap) { return [pscustomobject]$res }
+    $known = @{}; foreach ($i in @(Get-PimManagedAdminIdentities -Rows @($Before) -All)) { $known[$i] = $true }
+    $added = @(@(Get-PimManagedAdminIdentities -Rows @($After)) | Where-Object { -not $known.ContainsKey($_) })
+    $res.added = @($added)
+    if ($added.Count -gt 0 -and $u.count -gt $u.cap) {
+        $res.ok = $false; $res.refused = $true
+        # 🪤 the list is built first: inside a -f argument list the comma binds tighter than +, so "(a) + b" there splits
+        # the array and the format string loses its arguments.
+        $names = (@($added | Select-Object -First 5) -join ', ')
+        if ($added.Count -gt 5) { $names += ', ...' }
+        $res.message = ("Your Pro Business licence covers {0} admin account{1} -- upgrade to Pro Enterprise at {2}, or remove one. Not saved: {3} new admin account{4} ({5}) would make {6}. Existing admin accounts are not changed." -f
+            $u.cap, $(if ($u.cap -eq 1) { '' } else { 's' }), $script:PimLicenceUpgradeUrl, $added.Count, $(if ($added.Count -eq 1) { '' } else { 's' }), $names, $u.count)
+    }
+    return [pscustomobject]$res
 }
 
 Function Get-PimLicenseStatusText {
@@ -693,10 +847,16 @@ Function Get-PimLicenseApiBody {
       environment. -MspRole '' = single (non-MSP): mspRequired false and the GUI shows no MSP banner. Read-only.
       mspState: none (single) | ok | grace | refused.
     #>
-    param([ValidateSet('', 'Master', 'Slave')][string]$MspRole = '', [string]$TenantId, [string]$SqlServer, [string]$PublicCertB64)
+    param([ValidateSet('', 'Master', 'Slave')][string]$MspRole = '', [string]$TenantId, [string]$SqlServer, [string]$PublicCertB64,
+          # §12.6: the stored Account-Definitions-Admins rows, for the admin usage (count / cap / state). Not given = count unknown.
+          [AllowNull()][object[]]$AdminRows, [string]$LicenseText)
     $la = @{ Refresh = $true }; if ($PublicCertB64) { $la['PublicCertB64'] = $PublicCertB64 }
+    if ($PSBoundParameters.ContainsKey('LicenseText') -and "$LicenseText".Trim()) { $la['LicenseText'] = "$LicenseText" }
     $lic = Get-PimLicense @la
+    $ua = @{ License = $lic; TenantId = $TenantId }; if ($PSBoundParameters.ContainsKey('AdminRows')) { $ua['Rows'] = @($AdminRows); $ua['RowsKnown'] = $true }
+    $usage = Get-PimAdminLicenceUsage @ua
     $ma = @{ Role = $(if ($MspRole) { $MspRole } else { 'Master' }); TenantId = $TenantId; SqlServer = $SqlServer }
+    if ($la.ContainsKey('LicenseText')) { $ma['LicenseText'] = $la['LicenseText'] }
     if ($PublicCertB64) { $ma['PublicCertB64'] = $PublicCertB64 }
     $m = Test-PimMspLicense @ma
     $pro = [bool](Test-PimLicenseIsProForTenant -License $lic -TenantId $TenantId).pro   # BUG-278: sku + tenant, as the gate
@@ -712,6 +872,11 @@ Function Get-PimLicenseApiBody {
         status       = "$($lic.Status)"
         statusText   = $statusText
         edition      = $(if ($pro) { $script:PimProEditionName } else { $script:PimCommunityEditionName })
+        # Framework §12.6: Pro Business (signed `limits`) | Pro Enterprise | Community; the limits as signed; the admin usage.
+        dimension     = "$($usage.dimension)"
+        dimensionText = "$($usage.dimensionText)"
+        limits        = $(if ($pro -and $null -ne $lic.Limits) { $lic.Limits } else { $null })
+        usage         = [ordered]@{ admins = [ordered]@{ cap = $usage.cap; count = $usage.count; percent = $usage.percent; state = $usage.state; message = $usage.message } }
         customer     = "$($lic.Customer)"
         sku          = "$($lic.Sku)"
         features     = @($lic.Features)

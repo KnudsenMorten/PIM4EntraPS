@@ -13,6 +13,24 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.535 -- 2026-10-08
+
+- **The install checks itself before it says "done".** The last install step prints one table -- administrators, the nightly
+  updater and its ring, the licence, mail, alert recipients, the engine's permissions and its Reader access at the tenant
+  root, sign-in, the setup network window, and for a managed tenant its link to the managing tenant -- repairs what it can,
+  and gives the exact command for anything left. Mail and the tenant-root access are warnings, never a failed install.
+- **Alert recipients are set by the install** (the address you give, or your SuperAdmins' mail), so alerts reach someone from
+  the first engine run.
+- **A brand-new Exchange organisation no longer fails the mail setup:** the install waits (up to about an hour) for Exchange
+  to accept the send right, with a progress line.
+- **Mail is checked piece by piece** in Get Started > Mail sender and on the Overview: the mailbox, each sending identity's
+  own proven send, no tenant-wide send right, the recipients (or, for SMTP, the settings, the password in Key Vault and a test
+  mail) -- each missing piece with its one-line script. Mail can be skipped for now and never turns the Overview red.
+- **Pro Business and Pro Enterprise.** PIM Manager shows your licence dimension in the header, on the Licence page and in
+  Get Started. A Pro Business licence covers a set number of managed admin accounts: from 90% it warns, and only a NEW admin
+  account beyond the limit is refused. Nothing already running is ever switched off.
+- Installs done through the Invardia Support app report each step to Invardia, like the guided install already does.
+
 ## 2.4.534 -- 2026-10-08
 
 - **Client onboarding** (was "PIM Activator"): the page now shows both ways to get the PIM Activator to your admins as equal

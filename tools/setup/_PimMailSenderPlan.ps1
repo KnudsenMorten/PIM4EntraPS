@@ -282,8 +282,35 @@ function Resolve-PimExoCreateOutcome {
     [CmdletBinding()] param([string]$Cmdlet, [AllowEmptyString()][AllowNull()][string]$ErrorText)
     if (Test-PimAlreadyExistsError -Text $ErrorText) { return 'exists' }
     if ("$ErrorText" -like '*InvalidOperationInDehydratedContextException*') { return 'dehydrated' }
+    # INSTALL-HARDEN-1 item 4 (2026-10-08, two new tenants): right after the organization was hydrated, Exchange answered
+    # New-ManagementRoleAssignment with 400 "You don't have access to create, change, or remove the ... management role
+    # assignment. You must be assigned a delegating role assignment ..." for ~40-60 minutes -- and then the same call
+    # worked. It is Exchange finishing the new organization's RBAC, not a missing right: a bounded wait, never a failure.
+    if (Test-PimExoNotReadyError -Text $ErrorText) { return 'notready' }
     if ("$Cmdlet" -eq 'New-ManagementRoleAssignment' -and (Test-PimExoNotFoundError -Text $ErrorText)) { return 'retry' }
     return 'fail'
+}
+
+function Test-PimExoNotReadyError {
+    <# Exchange's "the new organization's RBAC is not ready yet" answer (INSTALL-HARDEN-1 item 4). #>
+    [CmdletBinding()] param([AllowEmptyString()][AllowNull()][string]$Text)
+    return ("$Text" -match "(?i)must be assigned a delegating role assignment|don.t have access to create, change, or remove the .{0,200}management role assignment")
+}
+
+function Get-PimExoNotReadyWait {
+    <#
+      PURE. INSTALL-HARDEN-1 item 4 -- one decision of the bounded wait for a not-ready Exchange organization.
+      Returns @{ wait; sleepSeconds; message }: wait = $false once -ElapsedSeconds reaches -BoundSeconds (default 75 min);
+      the message is the plain progress line (or, past the bound, the one sentence the install fails with).
+    #>
+    [CmdletBinding()] param([int]$Attempt = 1, [double]$ElapsedSeconds = 0, [int]$BoundSeconds = 4500, [int]$IntervalSeconds = 150, [string]$What = 'the send right')
+    if ($ElapsedSeconds -ge $BoundSeconds) {
+        return @{ wait = $false; sleepSeconds = 0
+                  message = "Exchange has not finished preparing the new organization -- re-run in an hour (waited $([int]($ElapsedSeconds / 60)) minutes for $What)" }
+    }
+    $left = [Math]::Max(1, [int][Math]::Ceiling(($BoundSeconds - $ElapsedSeconds) / 60))
+    return @{ wait = $true; sleepSeconds = [int][Math]::Min($IntervalSeconds, [Math]::Max(1, $BoundSeconds - $ElapsedSeconds))
+              message = "Exchange is still preparing the new organization ($What, attempt $Attempt, $([int]($ElapsedSeconds / 60)) min waited, up to $left min more) -- this is normal for a new tenant" }
 }
 
 function Test-PimAssignmentDuration {
@@ -437,8 +464,14 @@ function Resolve-PimDeployMailSignedIn {
         * no / another tenant's account -> run = $false with that reason.
       Returns @{ run; appId; why; lines }.
     #>
+    # INSTALL-HARDEN-1 (owner 2026-10-08, the trial runs in the customer's Cloud Shell as a PERSON): a signed-in person who
+    # holds an ACTIVE Exchange Administrator or Global Administrator role (-PersonRoleTemplateIds: the 'wids' of their token,
+    # or their directory roles) AND for whom az mints an Exchange Online token (-PersonExoToken) runs it too: run = $true,
+    # person = $true, appId = '' -> Initialize-PimMailSender -UseSignedInAccount with no -AdminAppId (their own role; no app
+    # is granted anything). Anyone else stays the loud, non-fatal skip with the Get Started follow-up.
     [CmdletBinding()] param([object]$Account, [string]$TenantId, [string[]]$ManagedIdentityObjectId = @(), [string]$SubscriptionId, [string]$ResourceGroup,
-                            [string]$TickJobName, [string]$ManagerAppName, [string]$SqlServerFqdn)
+                            [string]$TickJobName, [string]$ManagerAppName, [string]$SqlServerFqdn,
+                            [string[]]$PersonRoleTemplateIds = @(), [bool]$PersonExoToken = $false)
     $cmd = New-PimMailSenderCommand -TenantId $TenantId -ManagedIdentityObjectId $ManagedIdentityObjectId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
                -TickJobName $TickJobName -ManagerAppName $ManagerAppName -SqlServerFqdn $SqlServerFqdn
     $after = @(
@@ -456,9 +489,15 @@ function Resolve-PimDeployMailSignedIn {
         return @{ run = $false; appId = ''; why = 'signed in to another tenant'; lines = @("mail sender: NOT RUN -- the signed-in az account is in tenant $tid, not $TenantId.") + $after }
     }
     if ($type -ieq 'servicePrincipal' -and $name -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
-        return @{ run = $true; appId = $name; why = 'signed-in application'; lines = @() }
+        return @{ run = $true; appId = $name; why = 'signed-in application'; lines = @(); person = $false }
     }
-    return @{ run = $false; appId = ''; why = 'signed-in deploy is a person'
+    $exoRoles = @('29232cdf-9323-42fd-ade2-1d097af3e4de', '62e90394-69f5-4237-9190-012177145e10')   # Exchange Administrator, Global Administrator
+    $held = @(@($PersonRoleTemplateIds) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ -in $exoRoles })
+    if ($held.Count -and $PersonExoToken) {
+        return @{ run = $true; appId = ''; person = $true; why = 'signed-in person with an active Exchange role'; lines = @() }
+    }
+    $whyPerson = if (-not $held.Count) { 'no ACTIVE Exchange Administrator or Global Administrator role' } else { 'no Exchange Online token from the signed-in session' }
+    return @{ run = $false; appId = ''; person = $true; why = "signed-in deploy is a person ($whyPerson)"
               lines = @("mail sender: NOT RUN -- this deploy is signed in as a person ($name). Creating the shared mailbox needs Exchange administration this run does not",
                         '  hold (an app identity with a time-boxed Exchange Administrator, or an administrator''s own browser sign-in). The environment is MAIL-MUTE until then.') + $after }
 }

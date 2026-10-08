@@ -349,7 +349,9 @@ function Get-PimPermissionHealth {
     $mailBroken = ((-not $mailConfigured) -or ($mailConfigured -and -not $mailUnknown -and -not $mailOk))
     $severity =
         if ($ok -and -not $missingOpt.Count) { 'ok' }
-        elseif ($missingReq.Count -or -not $azureOk -or $mailBroken -or $rootReaderRed) { 'error' }
+        # MAIL CHECK (owner 2026-10-08: "mail is optional"): mail -- missing, unproven or FAILING -- is AMBER, never red. Only a
+        # missing permission, no Azure scope where one is needed, or a red root Reader turn the banner red.
+        elseif ($missingReq.Count -or -not $azureOk -or $rootReaderRed) { 'error' }
         else { 'warning' }   # core fine; an optional connector is off, or mail is unproven
 
     $caps = @($missingReq | ForEach-Object { $_.capability } | Sort-Object -Unique)
@@ -370,6 +372,7 @@ function Get-PimPermissionHealth {
         # was held): a sender that is configured but not yet PROVEN is a warning by design (above), so the headline must not
         # say BLOCKED either. Everything else held + mail only unverified = core OK, verify mail.
         elseif (-not $missingReq.Count -and $azureOk -and -not $rootReaderRed -and $mailConfigured -and $mailUnknown) { 'Core PIM OK -- mail sending not verified yet (send a test alert)' }
+        elseif (-not $missingReq.Count -and $azureOk -and -not $rootReaderRed -and $mailBroken) { $(if (-not $mailConfigured) { 'Core PIM OK -- mail is not set up yet (optional: Get Started > Mail sender)' } else { 'Core PIM OK -- mail send FAILS (optional: Get Started > Mail sender shows what is missing)' }) }
         else { ("Core functionality is BLOCKED -- " + ($parts -join ', ')) }
 
     $detail = if ($ok) {

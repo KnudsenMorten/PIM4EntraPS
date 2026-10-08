@@ -682,6 +682,12 @@ function Get-PimMspBuildPlan {
     # (access, scenario, registry, register, publishjob / downlink) were refused by the SQL firewall. The build owns the
     # window instead: kept here, closed by the LAST step ('sqlclose' on a private store, 'sqlhostclose' otherwise).
     $hostingSwitches += 'KeepSetupHostRule'
+    # INSTALL-HARDEN-1 (owner 2026-10-08): the build runs ITS OWN end-of-install verify as its last step ('verify-install',
+    # after the licence, the support access and the managing tenant's steps), so the hosting step skips DeployAll's.
+    $hostingSwitches += 'SkipInstallVerify'
+    # Who gets the alerts: 'alertRecipients' (addresses), else the managerSuperAdmins' mailboxes (DeployAll 'alerting').
+    $alertTo = @(@(& $V 'alertRecipients') | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    if ($alertTo.Count) { $hosting['AlertRecipients'] = $alertTo }
     if ($hosting['Exposure'] -eq 'internal') {
         # The Manager FQDN does not resolve outside its VNet: the smoke gate cannot run from a build host (NOT a pass).
         $hostingSwitches += 'SkipHostedSmoke'
@@ -915,6 +921,34 @@ function Get-PimMspBuildPlan {
         $steps.Add((New-PimMspBuildStep -Id 'downlink' -Title "pull job $job (plain blob URL, signature-verified; system managed identity, Engine Graph set, SQL admin group; retraction report-only)" `
             -Script 'tools\setup\Deploy-PimDownlinkJob.ps1' -Arguments $dl -Switches $dlSwitches -Why 'no engine secret and no link secret: the job runs as its own system identity and reads a public-but-signed blob'))
     }
+    # INSTALL-HARDEN-1 -- THE END-OF-INSTALL VERIFY (owner 2026-10-08). A build interrupted INSIDE 'hosting' and resumed with
+    # -From the next step finished "complete" with no SuperAdmin and no updater (hosting's tail never ran), and every
+    # install that day ended with empty alert recipients. This step reads every result back, REPAIRS the SuperAdmins, the
+    # updater, the alert recipients and the engine's root Reader when they are missing, prints one table, and FAILS the
+    # build (exit 1, resume -From verify-install) when a required line is still red. It runs while the build's SQL window
+    # is open (it reads the store); the closing step after it removes the window and reads that back.
+    $vArgs = @{ Role = $Role; TenantId = $tid; SubscriptionId = $sub; ResourceGroup = $rg; SqlServerFqdn = $sqlFqdn; SqlDatabase = $db
+                ManagerApp = $mgr; TickJobName = $tick; EnvName = $env; AcrName = $acr
+                SuperAdmins = @($eaSupers); ResumeCommand = '{{resume}}'
+                SetupHostRuleOwner = $(if ($privateStore) { 'none' } else { 'caller' }); ClosingStep = $(if ($privateStore) { 'sqlclose' } else { 'sqlhostclose' }) }
+    if ($alertTo.Count) { $vArgs['AlertRecipients'] = $alertTo }
+    if ("$($updRing.ring)" -match "^[0-3]$") { $vArgs["UpdateRing"] = [int]$updRing.ring }
+    if ("$(& $V 'updater.source')".Trim() -eq 'invardia') { $vArgs['UpdateSource'] = 'Invardia' }
+    if ("$(& $V 'acr.agentPoolName')".Trim()) { $vArgs['AcrAgentPoolName'] = "$(& $V 'acr.agentPoolName')".Trim() }
+    if ($Role -eq 'Slave') {
+        $vArgs['DownlinkJobName'] = $job
+        if ($enrolMasterStore -and $enrolMasterStore -notmatch '^\{\{') { $vArgs['MasterStorageAccount'] = $enrolMasterStore }
+        if ("$(& $V 'master.subscriptionId')".Trim()) { $vArgs['MasterSubscriptionId'] = "$(& $V 'master.subscriptionId')".Trim() }
+        $vArgs['ManagingTenantStep'] = $(if ($enrol) { "with the enrollment key the managing tenant's enrolled-tenants job registers this tenant and allows its subnet by itself (daily, or its Manager's Run now)" }
+                                         else { "on the managing tenant: add this tenant to slaves[] (its subnetResourceId from this build's pullnetwork step) and run Invoke-PimMspBuild -Role Master -Apply -From register-<n>" })
+    }
+    $vSwitches = @('LicenceExpected')   # MSP is Pro, hard-enforced
+    if ($rootUaa) { $vSwitches += 'EngineAzureRootUserAccessAdmin' }
+    if ($signedIn) { $vSwitches += 'UseSignedInAccount' } else { $vArgs['ClientId'] = $cid; $vArgs['CertThumbprint'] = $thumb }
+    $steps.Add((New-PimMspBuildStep -Id 'verify-install' -Title 'END-OF-INSTALL VERIFY: SuperAdmins, updater + ring, licence, mail sender + every sending identity in scope, alert recipients, engine Graph + root Reader, sign-in, SQL window (repairs what it can; one table)' `
+        -Script 'tools\setup\Confirm-PimInstall.ps1' -HostExe 'powershell' -Arguments $vArgs -Switches $vSwitches `
+        -Why 'a build that was interrupted and resumed must not finish without what an earlier step should have left behind'))
+
     if ($privateStore) {
         $steps.Add((New-PimMspBuildStep -Id 'sqlclose' -Title "PRIVATE store: close the build window on $sqlName (no IP / Azure-services rule left: the environment's subnet only; read back)" `
             -Script 'tools\setup\Set-PimSqlBuildWindow.ps1' -Arguments ($sqlWindowArgs + @{ Mode = 'Close' }) `
@@ -1053,4 +1087,26 @@ function Resolve-PimMspBuildArgument {
     }
     $val = if ($Value -is [array]) { @($Value | ForEach-Object { & $one $_ }) } else { & $one $Value }
     return @{ ok = ($missing.Count -eq 0); value = $val; missing = @($missing.ToArray()) }
+}
+
+function Resolve-PimMspBuildImageTag {
+    <#
+      PURE. INSTALL-HARDEN-1 item 7 (2026-10-08): a resumed build took the WORKING TREE's VERSION as its image tag -- the
+      tree had been bumped since, only the previously built tag was in the registry, and the resume failed on a tag that
+      did not exist. The tag a build uses is now PINNED, in this order:
+        -Explicit (Invoke-PimMspBuild -ImageTag)  >  the config's imageTag  >  on a RESUME (-From): the tag of the image the
+        Manager runs now (what this build built and deployed)  >  '' = the VERSION file (a fresh build builds it).
+      Returns @{ tag; source; message }.
+    #>
+    param([string]$Explicit = '', [string]$ConfigTag = '', [bool]$Resuming = $false, [string]$ManagerImage = '')
+    if ("$Explicit".Trim()) { return @{ tag = "$Explicit".Trim(); source = 'parameter'; message = "image tag $("$Explicit".Trim()) (-ImageTag)" } }
+    if ("$ConfigTag".Trim()) { return @{ tag = "$ConfigTag".Trim(); source = 'config'; message = "image tag $("$ConfigTag".Trim()) (the config's imageTag)" } }
+    if ($Resuming) {
+        $img = "$ManagerImage".Trim()
+        if ($img -match '^[^@\s]+:([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})$') {
+            return @{ tag = $Matches[1]; source = 'manager'; message = "image tag $($Matches[1]) -- PINNED to the image the Manager runs (a resume never switches to the working tree's VERSION; pass -ImageTag to change it)" }
+        }
+        return @{ tag = ''; source = 'version'; message = "resume: the Manager's image could not be read$(if ($img) { " ('$img')" }) -- the working tree's VERSION is used; pass -ImageTag to pin the tag that was built" }
+    }
+    return @{ tag = ''; source = 'version'; message = 'image tag = the VERSION file (a fresh build builds it)' }
 }

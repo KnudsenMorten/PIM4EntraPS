@@ -1259,6 +1259,8 @@
   <div id="homeTab" class="tab-panel active">
     <!-- REQ-Y: the MSP licence notice (renderMspLicenceBanners) -- empty and hidden unless MSP mode lacks a licence. -->
     <div class="msp-lic-banner" data-page="home" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
+    <!-- Framework §12.6: the Pro Business admin-cap notice (renderAdminLicenceBanners) -- hidden below 90% and on Enterprise. -->
+    <div class="admin-lic-banner" data-page="home" style="display:none; flex:0 0 auto; margin:10px 18px 0;"></div>
     <div style="flex:1 1 auto; overflow:auto; padding:14px 18px;" id="homeBody">
       <div style="color:#57606a;font-size:12px;">Loading overview&hellip;</div>
     </div>
@@ -3288,6 +3290,8 @@
          '<span style="color:#57606a;font-size:12px;">' + fmtNum(rows.length) + ' of ' + fmtNum(acctGridState.rows.length) + '</span>' +
          (nRemoved ? '<label style="font-size:12px;color:#57606a;" title="Admins removed from PIM (the account is disabled and kept) or deleted (the account is deleted in Entra ID). Hidden from the active list."><input type="checkbox" id="acctShowRemoved"' +
            (acctGridState.showRemoved ? ' checked' : '') + '> Show removed and deleted (' + fmtNum(nRemoved) + ')</label>' : '') + '</div>';
+    // Framework §12.6: the Pro Business admin-cap banner (from 90%; filled from /api/license by renderAdminLicenceBanners).
+    h += '<div class="admin-lic-banner" data-page="admins" style="display:none;margin-bottom:10px;"></div>';
 
     // Honest about narrowing. "You are seeing a scoped list" is a different fact from
     // "there are only 3 admins", and an operator must be able to tell them apart.
@@ -3308,6 +3312,7 @@
                         : 'Admin accounts your role lets you manage appear here. Create one with + New admin above.');
       container.innerHTML = h;
       wireAccountGrid(container);
+      try { renderAdminLicenceBanners(container); } catch (_) { }
       return;
     }
 
@@ -3426,6 +3431,7 @@
     container.innerHTML = h;
     wireAccountGrid(container);
     wireAcctBulk(container);
+    try { renderAdminLicenceBanners(container); } catch (_) { }
   }
 
   // §89 / §91.9 (operator 2026-10-02: "i am missing the multiselect option in admin accounts so i can select multiple
@@ -4765,6 +4771,9 @@
       inner += '</table>';
     }
     inner += permRootLines(d);   // §97: Reader + User Access Administrator at the tenant root, each on its own line
+    // MAIL CHECK (owner 2026-10-08): each mail prerequisite on its own line, with its fix -- amber at most (mail is optional);
+    // "Verify permissions" re-reads it (?refresh=1).
+    try { inner += mailCheckLinesHtml(d.mailChecks, true); } catch (_) { }
     // The FIX, not just the finding (operator 2026-09-25: "have option to fix"). This page cannot grant
     // the roles itself -- an identity that can assign app roles to itself can give itself anything, so
     // the Manager is deliberately read-only (§65.4). It hands over the exact grant instead, for the engine
@@ -6680,6 +6689,34 @@
     }
     return '';
   }
+  // Framework DOCS/REQUIREMENTS.md §12.6 LICENCE-DIMENSION (owner 2026-10-08): Pro is Pro Business (the signed licence
+  // carries `limits`, PIM reads `admins`) or Pro Enterprise (no limits). The SERVER decides (GET /api/license: dimension,
+  // dimensionText, limits, usage.admins); the page only shows it and mirrors the cap -- the refusal of a NEW admin over
+  // the cap is the server's (commit, staging, MCP).
+  // PURE (exported for the harness): "Pro Enterprise" / "Pro Business (5 admins)", '' when not Pro or not read.
+  function licenceDimensionText(d) {
+    if (!d || d.loadError || d.edition !== 'Pro') return '';
+    return String(d.dimensionText || d.dimension || 'Pro Enterprise');
+  }
+  function adminLicenceUsage(d) { return (d && !d.loadError && d.usage && d.usage.admins) || null; }
+  // PURE (exported for the harness): the admin-cap banner for one page -- '' below 90%, on Enterprise / Community, or unknown.
+  //   warn (>= 90%) and at (= cap): AMBER; over (> cap): RED. Either way nothing is switched off -- it says so.
+  function adminLicenceBannerHtml(d, page) {
+    const u = adminLicenceUsage(d);
+    if (!u || ['warn', 'at', 'over'].indexOf(String(u.state)) < 0 || !u.message) return '';
+    const red = u.state === 'over';
+    const go = ' <a href="#" class="lic-go-settings" style="color:inherit;font-weight:600;">Settings &rsaquo; Licence</a>';
+    return '<div class="admin-lic-note" data-state="' + escapeHtml(String(u.state)) + '" data-page="' + escapeHtml(page || '') + '" style="border-radius:8px;padding:8px 12px;font-size:12.5px;' +
+      (red ? 'background:#ffebe9;border:1px solid #cf222e;color:#82071e;' : 'background:#fff8c5;border:1px solid #d4a72c;color:#6b4c00;') + '">' +
+      '&#x26A0; <b>' + escapeHtml(licenceDimensionText(d) || 'Pro Business') + ': ' + escapeHtml(String(u.count)) + ' of ' + escapeHtml(String(u.cap)) + ' admin accounts</b> -- ' +
+      escapeHtml(String(u.message)) + go + '</div>';
+  }
+  function renderAdminLicenceBanners(root) {
+    const hosts = Array.from((root || document).querySelectorAll('.admin-lic-banner'));
+    if (!hosts.length || typeof isServer === 'undefined' || !isServer) return;
+    const paint = (d) => hosts.forEach(h => { const html = adminLicenceBannerHtml(d, h.dataset.page || ''); h.innerHTML = html; h.style.display = html ? '' : 'none'; wireLicenceLinks(h); });
+    if (PIM_LICENCE_CACHE) paint(PIM_LICENCE_CACHE); else fetchLicence().then(paint).catch(() => { });
+  }
   function wireLicenceLinks(host) {
     if (!host) return;
     host.querySelectorAll('.lic-go-settings').forEach(a => { a.onclick = (e) => { e.preventDefault(); switchTab('settings'); navScrollToAnchor('setLicenceCard'); }; });
@@ -6772,9 +6809,17 @@
     const ed = pimBrandEdition(PIM_LICENCE_CACHE);
     h.dataset.edition = ed;
     h.querySelectorAll('.brand-logo').forEach(x => { x.hidden = x.dataset.ed !== ed; });
+    // §12.6: the PRO logo stays "PRO"; the dimension is its tooltip and a small line next to the version.
+    const dim = (ed === 'pro') ? licenceDimensionText(PIM_LICENCE_CACHE) : '';
+    h.dataset.dimension = dim;
+    if (dim) h.title = 'PIM Manager ' + dim; else h.removeAttribute('title');
+    let tag = document.getElementById('brandDimension');
+    if (dim && !tag) { tag = document.createElement('span'); tag.id = 'brandDimension'; tag.style.cssText = 'font-size:11px;font-weight:600;opacity:.85;margin-left:6px;white-space:nowrap;'; h.appendChild(tag); }
+    if (tag) { tag.textContent = dim; tag.style.display = dim ? '' : 'none'; }
   }
   function applyProMenuMarks() {
     try { applyBrandEdition(); } catch (_) { }
+    try { renderAdminLicenceBanners(document); } catch (_) { }
     Object.keys(PIM_PRO_PAGES).forEach(k => {
       const locked = pimProPageLocked(k);
       document.querySelectorAll('#tabs .tab[data-tab="' + k + '"]').forEach(t => {
@@ -6839,6 +6884,7 @@
     const proHosts = Array.from(document.querySelectorAll('.pro-lic-banner'));
     if ((!hosts.length && !proHosts.length) || !isServer) return;
     const d = await fetchLicence(force);
+    try { renderAdminLicenceBanners(document); } catch (_) { }   // §12.6: the admin-cap notice (Home, Admin accounts)
     hosts.forEach(h => {
       const html = mspLicenceBannerHtml(d, h.dataset.page || '');
       h.innerHTML = html;
@@ -6871,6 +6917,15 @@
       'Pro: the licensed features for a single tenant, and the multi-tenant half (managing tenant / managed tenants). Contact ' + licenceMailtoHtml(d) + '.</div>';
     h += '<table class="set-table" id="licStatusTbl">';
     h += row('Edition', '<b id="licEdition">' + (pro ? 'Pro' : 'Community') + '</b>');
+    // Framework §12.6: Pro Business (with the signed limits) or Pro Enterprise; the admin usage when the licence caps it.
+    if (pro) h += row('Licence', '<b id="licDimension" data-dimension="' + esc(String(d.dimension || 'Pro Enterprise')) + '">' + esc(licenceDimensionText(d)) + '</b>' +
+      (String(d.dimension || '') === 'Pro Business' ? ' <span style="color:#57606a;">-- the same features as Pro Enterprise, for up to the number of managed admin accounts the licence covers</span>' : ''));
+    const au = adminLicenceUsage(d);
+    if (pro && au && au.cap !== null && au.cap !== undefined) {
+      h += row('Admin accounts', '<span id="licAdminUsage" data-state="' + esc(String(au.state || '')) + '">' +
+        (au.count === null || au.count === undefined ? 'covers ' + esc(String(au.cap)) + ' managed admin accounts' : esc(String(au.count)) + ' of ' + esc(String(au.cap)) + ' managed admin accounts in use') +
+        (au.message ? '<div style="margin-top:2px;color:' + (au.state === 'over' ? '#82071e' : '#6b4c00') + ';">' + esc(String(au.message)) + '</div>' : '') + '</span>');
+    }
     h += row('Status', '<span id="licStatus">' + st + '</span>');
     if (d.customer) h += row('Customer', '<span id="licCustomer">' + esc(d.customer) + '</span>');
     if (d.validTo) h += row('Valid until', '<span id="licValidTo">' + esc(d.validTo) + (d.graceUntil ? ' (grace until ' + esc(d.graceUntil) + ')' : '') + '</span>');
@@ -13336,16 +13391,26 @@
     { id: 'mail', title: 'Mail sender', required: true,
       what: 'How PIM sends its mail (TAP codes, approvals, alerts): a shared mailbox, its send right scoped to that one mailbox -- or your SMTP relay.',
       check: c => {
+        // MAIL CHECK (owner 2026-10-08: "mail is optional, but include it in the get started + home and test exactly what is
+        // needed"): done = EVERY prerequisite line is ok (the server's Get-PimMailCheck). Required, but skippable like
+        // break-glass ("Skip for now" = GetStartedConfirmations 'mail-later'; Admins are reminded until it is complete).
+        const later = c.confirm && c.confirm['mail-later'];
+        const k = c.mail && c.mail.checks;
+        if (k && typeof k.complete === 'boolean') {
+          const open = (k.lines || []).filter(l => l && l.state !== 'ok');
+          return { done: k.complete, deferred: !k.complete && !!later,
+                   note: k.complete ? 'every prerequisite is in place and proven' : ((later ? 'skipped for now by ' + (later.by || 'an admin') + ' -- ' : '') + open.length + ' of ' + (k.lines || []).length + ' not complete: ' + open.map(l => l.title).join(', ')) };
+        }
         // MAIL-1: computed by the server from the data (mode + sender / relay + the latest test mail against THESE settings)
-        if (c.mail && typeof c.mail.done === 'boolean') return { done: c.mail.done, note: String(c.mail.note || '') };
+        if (c.mail && typeof c.mail.done === 'boolean') return { done: c.mail.done, deferred: !c.mail.done && !!later, note: String(c.mail.note || '') };
         const s = String((c.perm && c.perm.mail && c.perm.mail.sender) || ''); return { done: !!s, note: s ? ('sends as ' + s) : 'no sender: TAP codes and notifications are not sent' };
       } },
     { id: 'departments', title: 'Departments & owners', required: true, need: 'SuperAdmin',
       what: 'The departments that sponsor access, and their owners -- who approves and receives the mail.',
       check: c => ({ done: c.rows['PIM-Definitions-Departments'] > 0, note: c.rows['PIM-Definitions-Departments'] + ' department(s)' }) },
     { id: 'roles', title: 'Roles & templates', required: true, need: 'Admin',
-      what: 'The role groups people activate -- include the templates, or add your own role group.',
-      check: c => ({ done: c.rows['PIM-Definitions-Roles'] > 0, note: c.rows['PIM-Definitions-Roles'] + ' role group(s)' }) },
+      what: 'The ' + dimNounPlural() + ' people activate -- include the templates, or add your own ' + dimNoun() + '.',
+      check: c => ({ done: c.rows['PIM-Definitions-Roles'] > 0, note: c.rows['PIM-Definitions-Roles'] + ' ' + dimNoun() + '(s)' }) },
     // Optional (owner 2026-10-08: "remove the requirement in get started to add admins. we will do that later").
     { id: 'admins', title: 'Admin accounts', required: false, need: 'Admin',
       what: 'The separate admin accounts PIM manages. Find the person, and PIM creates their admin account after you commit. You can also do this later.',
@@ -13427,6 +13492,27 @@
     d.querySelector('.gsBgClose').onclick = () => d.remove();
     d.querySelector('.gsBgOpen').onclick = () => { d.remove(); GS_OPEN_AT = 'breakglass'; try { switchTab('getstarted'); } catch (_) { } };
   }
+  // Mail reminder (owner 2026-10-08: mail is optional, the Mail sender step is skippable): while the mail check is not
+  // complete and the step was skipped for now, every Admin sees ONE dismissible banner per browser session. Computed from the
+  // data, so it stops by itself once every mail line is green.
+  let GS_MAIL_REMINDED = false;
+  function gsRemindMail(steps) {
+    const ms = (steps || []).find(s => s.id === 'mail');
+    const old = document.getElementById('gsMailReminder');
+    if (!ms || ms.done || !ms.deferred || !roleAtLeast('Admin')) { if (old) old.remove(); return; }
+    if (GS_MAIL_REMINDED || old) return;
+    try { if (sessionStorage.getItem('pimGsMailReminded') === '1') { GS_MAIL_REMINDED = true; return; } } catch (_) { }
+    GS_MAIL_REMINDED = true;
+    try { sessionStorage.setItem('pimGsMailReminded', '1'); } catch (_) { }
+    const d = document.createElement('div');
+    d.id = 'gsMailReminder'; d.setAttribute('role', 'status');
+    d.style.cssText = 'position:fixed;top:130px;right:16px;max-width:460px;z-index:99996;border-radius:6px;padding:10px 14px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.2);background:#fff8c5;border:1px solid #d4a72c;color:#3b2300;';
+    d.innerHTML = '<b>Mail is not complete</b> -- Get Started &gt; Mail sender shows each missing line and the command that fixes it. Until then TAP codes, approvals and alerts may not be delivered. ' +
+      '<button type="button" class="gsMailOpen" style="font-size:12px;margin-left:4px;">Open</button> <button type="button" class="gsMailClose btn-sec" style="font-size:12px;">Dismiss</button>';
+    document.body.appendChild(d);
+    d.querySelector('.gsMailClose').onclick = () => d.remove();
+    d.querySelector('.gsMailOpen').onclick = () => { d.remove(); GS_OPEN_AT = 'mail'; try { switchTab('getstarted'); } catch (_) { } };
+  }
   async function evaluateGetStarted(force) {
     if (!force && GET_STARTED_LAST && (Date.now() - GS_CACHE_AT) < GS_CACHE_MS) { gsPaintBadge(GET_STARTED_LAST); return GET_STARTED_LAST; }
     const c = await gsFacts(force);
@@ -13434,6 +13520,7 @@
     GET_STARTED_LAST = steps; GS_FACTS = c; GS_CACHE_AT = Date.now();
     gsPaintBadge(steps);
     try { gsRemindBreakGlass(steps); } catch (_) { }
+    try { gsRemindMail(steps); } catch (_) { }
     return steps;
   }
   // ---- small helpers for the step forms ----
@@ -13491,6 +13578,26 @@
   //      Settings > Mail & alerting > Mail sending, writing through ONE route (PUT /api/settings/mail). The commands it prints
   //      download scripts that ARE published (https://invardia.com/support/pim/...) and sign in in the BROWSER -- never a
   //      certificate. The SMTP password goes to the environment's Key Vault; it is never shown again and never stored here.
+  // MAIL CHECK (owner 2026-10-08): every mail prerequisite as its own line -- in Get Started > Mail sender and in the Home
+  // permissions banner. Each line that is not ok carries its exact fix (the published script with this environment's values,
+  // a browser sign-in -- never a certificate -- or the PIM Manager page). Mail is optional: amber, never red.
+  function mailCheckLinesHtml(k, compact) {
+    if (!k || !Array.isArray(k.lines)) return '';
+    const mark = { ok: ['&#10003;', '#1a7f37', 'ok'], missing: ['&#9675;', '#9a6700', 'missing'], failed: ['&#10007;', '#9a6700', 'FAILS'], unproven: ['?', '#9a6700', 'not proven yet'], unknown: ['?', '#57606a', 'not checked'] };
+    let h = '<div class="mailCheck" style="margin-top:8px;">' +
+      '<div style="font-weight:600;' + (k.complete ? 'color:#1a7f37;' : 'color:#7d4e00;') + '">' + (compact ? 'Mail (optional): ' : 'What mail needs: ') +
+      escapeHtml(k.complete ? 'every prerequisite is in place and proven' : String(k.summary || '').replace(/^mail:\s*/, '')) + '</div>';
+    if (compact && k.complete) return h + '</div>';
+    h += '<table class="set-table mailCheckTable" style="margin-top:4px;max-width:900px;">';
+    k.lines.filter(l => l && typeof l === 'object').forEach(l => {
+      const mk = mark[l.state] || mark.unknown;
+      h += '<tr data-mail-line="' + escapeHtml(String(l.id || '')) + '" data-state="' + escapeHtml(String(l.state || '')) + '"><td style="width:22px;color:' + mk[1] + ';font-weight:700;">' + mk[0] + '</td>' +
+        '<td style="font-size:11.5px;"><b>' + escapeHtml(String(l.title || '')) + '</b> <span style="color:' + mk[1] + ';">(' + mk[2] + ')</span><div style="color:#57606a;">' + escapeHtml(String(l.detail || '')) + '</div>' +
+        (l.state !== 'ok' && String(l.fix || '').trim() ? '<pre class="mailFix" style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:6px;font-size:11px;white-space:pre-wrap;margin:4px 0 0 0;">' + escapeHtml(String(l.fix)) + '</pre>' : '') +
+        '</td></tr>';
+    });
+    return h + '</table></div>';
+  }
   function mailSetupCmdMailbox(m) {
     const s = (m && m.setup) || {};
     const v = (x, ph) => (String(x || '').trim() || ph);
@@ -13664,7 +13771,7 @@
     { key: 'AdminAccountPattern', label: 'Admin account name', hint: 'The name of a normal (day-to-day) admin account.', pattern: true },
     { key: 'AdminAccountPatternHighPriv', label: 'High-privilege admin account name (L0 / T0)', hint: 'The name of a high-privilege admin account.', pattern: true },
     { key: 'PimGroupPattern', label: 'PIM group name', hint: 'The name of a PIM group, built around its tag ({Role}).', pattern: true },
-    { key: 'GroupTypePrefixes.role', label: 'Role group tag prefix -- {GroupTypePrefix}', hint: 'The start of every role group tag, e.g. ROLE-.', map: 'GroupTypePrefixes', mapKey: 'role', dflt: 'ROLE-' }
+    { key: 'GroupTypePrefixes.role', label: 'Role tag prefix -- {GroupTypePrefix}', hint: 'The start of every ' + dimNoun() + ' tag, e.g. ROLE-.', map: 'GroupTypePrefixes', mapKey: 'role', dflt: 'ROLE-' }
   ];
   function gsNamingValue(n, f) {
     if (f.map) { const m = n[f.map]; const v = (m && typeof m === 'object') ? mapGet(m, f.mapKey) : undefined; return (v == null || String(v) === '') ? (f.dflt || '') : String(v); }
@@ -13674,7 +13781,7 @@
   function gsNamingFieldName(f) { return 'nm_' + f.key.replace(/\./g, '_'); }
   // Activation policies step: one block per kind of policy -- the default template (what a blank PolicyTemplate means;
   // picking a RequireApproval template is how approval is required) and that template's activation settings.
-  const GS_POLICY_KINDS = [['group', 'PIM for Groups (activating a role group)'], ['directoryRole', 'Entra ID roles'], ['azureRole', 'Azure resource roles']];
+  const GS_POLICY_KINDS = [['group', 'PIM for Groups (activating a ' + dimNoun() + ')'], ['directoryRole', 'Entra ID roles'], ['azureRole', 'Azure resource roles']];
   function gsPolicyKindHtml(kind, v, tplId, canEdit) {
     const tpls = ((v && v.templates) || []).filter(t => t.kind === kind);
     const code = (v && v.codeDefaults) || {}, dsrc = (v && v.defaultsSource) || {}, defs = (v && v.defaults) || {};
@@ -13795,7 +13902,10 @@
     licence: {
       body: (c) => {
         const l = c.licence || {};
-        return '<div class="gs-facts">' + (l.status ? 'Now: <b>' + escapeHtml(String(l.statusText || l.status)) + '</b>' : 'No licence is registered yet.') + '</div>' +
+        // §12.6: the licence dimension (Pro Business with its admin cap / Pro Enterprise) beside the status.
+        const gsDim = licenceDimensionText(l);
+        return '<div class="gs-facts">' + (l.status ? 'Now: <b>' + escapeHtml(String(l.statusText || l.status)) + '</b>' : 'No licence is registered yet.') +
+          (gsDim ? ' <span id="gsLicDimension">(' + escapeHtml(gsDim) + ')</span>' : '') + '</div>' +
           '<label class="gs-l" for="gsLicFile">Licence file</label><input type="file" id="gsLicFile" accept=".json,.lic,.txt,application/json,text/plain">' +
           '<label class="gs-l" for="gsLicText">Or paste its contents</label><textarea id="gsLicText" name="licenceText" rows="4" placeholder="the licence text you received from Invardia"></textarea>' + gsErr('licenceText') +
           '<div class="gs-hint">The signature is checked before anything is stored. No licence yet? Buy Pro at <a href="https://invardia.com" target="_blank" rel="noopener">invardia.com</a> -- or leave it empty and press Save &amp; next to go on.</div>';
@@ -13835,17 +13945,27 @@
       // MAIL-1: the TWO modes (shared mailbox: create via the published script, or use an existing one; SMTP relay: the
       // fields + the password that goes to Key Vault), the same form and route as Settings > Mail & alerting.
       load: async () => api('GET', '/api/settings/mail'),
-      body: (c, m) => mailSetupFieldsHtml(m, 'gsMail'),
+      body: (c, m) => {
+        const k = m && m.checks; const later = c.confirm && c.confirm['mail-later'];
+        return mailCheckLinesHtml(k, false) + mailSetupFieldsHtml(m, 'gsMail') +
+          ((k && !k.complete) ? '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="later"' + (later ? ' disabled' : '') + '>Skip for now</button> <span class="gsActMsg"></span></div>' +
+            '<div class="gs-hint">' + (later ? 'Skipped for now by ' + escapeHtml(String(later.by || '')) + '. ' : '') + 'Mail is optional: skipped, this step does not count as open -- but Admins are reminded when they sign in until every line above is green. Without mail, TAP codes, approvals and alerts are not delivered.</div>' : '');
+      },
       wire: (card) => mailSetupWire(card),
       save: async (form, c, m) => mailSetupSave(form, m),
       actions: {
+        later: async (x) => {
+          x.say('Saving...');
+          try { await api('PUT', '/api/get-started/confirm', { step: 'mail-later', confirmed: true }); GET_STARTED_LAST = null; await x.rerender(); }
+          catch (e) { x.say('Not saved: ' + gsErrText(e), true); }
+        },
         test: async (x) => {
           if (!(await x.saveFirst())) return;
           x.say('Sending a test mail...');
           try { const r = await mailSetupTest(x.form); x.say((r && r.note) || ((r && r.ok) ? 'Sent.' : 'Not sent.'), !(r && r.ok)); GET_STARTED_LAST = null; }
           catch (e) { const b = e && e.body; x.say('Not sent: ' + ((b && b.error) || gsErrText(e)), true); }
         },
-        recheck: async (x) => { GET_STARTED_LAST = null; await x.rerender(); }
+        recheck: async (x) => { x.say('Checking every mail prerequisite again...'); try { await api('GET', '/api/settings/mail?refresh=1'); } catch (_) { } GET_STARTED_LAST = null; await x.rerender(); }
       }
     },
     departments: {
@@ -13904,13 +14024,13 @@
         const packs = (s && s.packs) || [], roles = (s && s.roles) || [];
         const open = packs.filter(p => Number(p.missingCount) > 0), current = packs.filter(p => !(Number(p.missingCount) > 0));
         let h = (c.confirm && c.confirm.naming) ? '' : '<div class="gs-hint gsNamingFirst" style="color:#9a6700;">The naming convention is not confirmed yet (step 1). Templates are named by it when they are staged -- set it first.</div>';
-        h += roles.length ? '<div class="gs-facts">' + roles.length + ' role group(s): ' + escapeHtml(roles.slice(0, 8).map(r => r.name).join(', ')) + (roles.length > 8 ? ', ...' : '') + '</div>' : '<div class="gs-facts">No role groups yet.</div>';
+        h += roles.length ? '<div class="gs-facts">' + roles.length + ' ' + dimNoun() + '(s): ' + escapeHtml(roles.slice(0, 8).map(r => r.name).join(', ')) + (roles.length > 8 ? ', ...' : '') + '</div>' : '<div class="gs-facts">No ' + dimNounPlural() + ' yet.</div>';
         h += '<div class="gs-sub">Include templates</div>';
         if (open.length) h += open.map(p => '<label class="gs-check"><input type="checkbox" name="tplPack" value="' + escapeHtml(String(p.id)) + '"> <b>' + escapeHtml(String(p.name || p.id)) + '</b> -- ' + Number(p.missingCount) + ' new permission(s)' + (p.description ? '<div class="gs-hint" style="margin:0 0 0 22px;">' + escapeHtml(String(p.description)) + '</div>' : '') + '</label>').join('');
         else h += '<div class="gs-hint">' + (packs.length ? 'Every template is already included.' : 'No templates are active here.') + '</div>';
         if (current.length) h += '<div class="gs-hint">Already included: ' + escapeHtml(current.map(p => String(p.name || p.id)).join(', ')) + '</div>';
         h += gsErr('tplPack');
-        h += '<div class="gs-sub">Or add your own role group</div>' +
+        h += '<div class="gs-sub">Or add your own ' + dimNoun() + '</div>' +
           '<label class="gs-l" for="gsRoleShort">Short name</label><input type="text" id="gsRoleShort" name="roleShort" placeholder="CloudEngineer">' + gsErr('roleShort') +
           '<label class="gs-l" for="gsRoleDesc">Description (optional)</label><input type="text" id="gsRoleDesc" name="roleDesc" placeholder="Management and architecture, cloud">' +
           '<div class="gs-hint">Named by your naming convention. Saved here as a change to commit -- nothing reaches the tenant until it is committed.</div>';
@@ -13925,7 +14045,7 @@
           if (!/^[A-Za-z][A-Za-z0-9]*$/.test(short)) errors.roleShort = 'Use letters and digits only, no spaces (for example CloudEngineer).';
           else {
             const tag = buildRoleGroupTag(short, 'role');
-            if (((s && s.roles) || []).some(r => r.tag.toLowerCase() === String(tag).toLowerCase())) errors.roleShort = 'A role group ' + tag + ' already exists.';
+            if (((s && s.roles) || []).some(r => r.tag.toLowerCase() === String(tag).toLowerCase())) errors.roleShort = 'A ' + dimNoun() + ' ' + tag + ' already exists.';
           }
         }
         if (Object.keys(errors).length) return { errors: errors };
@@ -13943,7 +14063,7 @@
         } catch (e) { markBadges(); return { errors: { _: 'Stopped: ' + gsErrText(e) + ' -- what was staged before this is still in Pending changes.' } }; }
         markBadges();
         if (absent.length) { try { alert(tplNotInTenantText(absent)); } catch (_) { } }
-        return { wrote: true, note: n + ' change(s) staged -- commit them to create the role groups.' + (taken.length ? ' ' + taken.length + ' row(s) were already there and were left as they are.' : '') +
+        return { wrote: true, note: n + ' change(s) staged -- commit them to create the ' + dimNounPlural() + '.' + (taken.length ? ' ' + taken.length + ' row(s) were already there and were left as they are.' : '') +
           (absent.length ? ' ' + absent.length + ' row(s) were left out: their Entra role does not exist in this tenant.' : '') };
       }
     },
@@ -13961,7 +14081,7 @@
           '<label class="gs-l" for="gsAdmType">Kind of account</label><select id="gsAdmType" name="adminType">' +
             '<option value="internal-adminuser"' + (def === 'internal-adminuser' ? ' selected' : '') + '>An admin account for an employee</option>' +
             '<option value="external-adminuser"' + (def === 'external-adminuser' ? ' selected' : '') + '>An admin account for an external consultant</option></select>' +
-          '<label class="gs-l" for="gsAdmRole">May activate (optional)</label><select id="gsAdmRole" name="adminRole"><option value="">-- no role group yet --</option>' +
+          '<label class="gs-l" for="gsAdmRole">May activate (optional)</label><select id="gsAdmRole" name="adminRole"><option value="">-- no ' + dimNoun() + ' yet --</option>' +
             roles.map(r => '<option value="' + escapeHtml(r.tag) + '">' + escapeHtml(r.name) + '</option>').join('') + '</select>' + gsErr('adminRole') +
           '<label class="gs-l" for="gsAdmAssign">How</label><select id="gsAdmAssign" name="adminAssign"><option value="Eligible">Eligible -- activates when needed (recommended)</option><option value="Active">Active -- always on</option></select>' +
           '<div class="gs-hint">The account name follows your naming convention. Saved here as a change to commit; PIM creates the account after it is committed.</div>';
@@ -13992,7 +14112,7 @@
         if (!last) errors.adminLast = 'Last name is required.';
         if (!ini) errors.adminInitials = 'Initials are required.';
         else if (!/^[A-Za-z][A-Za-z0-9]{0,5}$/.test(ini)) errors.adminInitials = 'Letters (and a digit) only, no spaces.';
-        if (role && !((s && s.roles) || []).some(r => r.tag === role)) errors.adminRole = 'That role group is not defined here.';
+        if (role && !((s && s.roles) || []).some(r => r.tag === role)) errors.adminRole = 'That ' + dimNoun() + ' is not defined here.';
         if (Object.keys(errors).length) return { errors: errors };
         const st = Object.assign(wizardAdminDefaultState(), { first: first, last: last, initials: ini, adminType: gsVal(form, 'adminType') || adminTypeKey(''), roleGroupSel: new Set(role ? [role] : []), assignmentType: gsVal(form, 'adminAssign') || 'Eligible' });
         try { const r = await wizardAdminStage(st); return { wrote: true, note: 'Admin account ' + ((r && r.upn) || '') + ' staged -- commit it to create the account.' }; }
@@ -19128,6 +19248,9 @@
         const lockedKeys = new Set((b.locked || []).map(l => String((l && l.key) || '').toLowerCase()).filter(Boolean));
         await sharedRebuild(base, b.current, true, lockedKeys);
         sharedToast(SHARED.lockNote, true);
+      } else if (b && b.gate === 'licence-limit') {
+        // Framework §12.6: the server refused a NEW admin account over the Pro Business cap -- say it in its words.
+        sharedToast(String(b.error || 'Your Pro Business licence does not cover another admin account.') + ' The new account is only in this page; it cannot be committed.', true);
       } else if (!(b && b.gate === 'stale')) {
         sharedToast('Your change to ' + base + ' could not be shared: ' + (e && e.message ? e.message : e) + ' -- it is still staged in this page.', true);
       }
