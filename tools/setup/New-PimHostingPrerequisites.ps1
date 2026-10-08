@@ -266,7 +266,9 @@ Write-Host "[1] resource providers ..." -ForegroundColor Yellow
 # a wrong-tenant or a permissions fault and sends you to check logins and RBAC -- both of which are
 # fine. Measured on EFIF's subscription, which had every OTHER provider registered by this very
 # list. Registering here costs nothing when it is already registered (the loop probes first).
-$providers = 'Microsoft.App','Microsoft.ContainerRegistry','Microsoft.OperationalInsights','Microsoft.Network','Microsoft.Sql','Microsoft.Storage'
+# Microsoft.KeyVault (2026-10-08, a production MSP build on an EMPTY subscription): the managing tenant's signing-key vault
+# failed with 409 MissingSubscriptionRegistration at step signingkey -- every provider the build uses is registered HERE.
+$providers = 'Microsoft.App','Microsoft.ContainerRegistry','Microsoft.OperationalInsights','Microsoft.Network','Microsoft.Sql','Microsoft.Storage','Microsoft.KeyVault'
 foreach ($p in $providers) {
     $state = az provider show @subArgs --namespace $p --query registrationState -o tsv --only-show-errors 2>$null
     if ($state -ne 'Registered') {

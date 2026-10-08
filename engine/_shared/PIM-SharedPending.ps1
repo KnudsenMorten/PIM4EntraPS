@@ -452,6 +452,44 @@ function Update-PimSharedPendingStore {
     [pscustomobject]@{ ok = $false; written = $false; doc = $null; result = $null; reason = "the pending-changes store kept changing under this write ($Attempts attempts) -- try again" }
 }
 
+function Get-PimSharedPendingSummary {
+    <#
+      97.1 (owner 2026-10-08: "i have 300 so i need a discard all"): what is staged, counted -- total, per entity and per
+      person who staged it. PURE (reads the document only). Returns { total; byBase = {base: n}; byPerson = {who: n} }.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Doc)
+    $byBase = [ordered]@{}; $byPerson = [ordered]@{}; $total = 0
+    foreach ($k in @($Doc.bases.Keys | Sort-Object)) {
+        $chs = @(@($Doc.bases[$k].changes) | Where-Object { $_ })
+        if (-not $chs.Count) { continue }
+        $byBase[$k] = $chs.Count; $total += $chs.Count
+        foreach ($c in $chs) {
+            $who = "$($c.by)".Trim(); if (-not $who) { $who = '(unknown)' }
+            $hit = @($byPerson.Keys | Where-Object { "$_" -ieq $who }) | Select-Object -First 1
+            if ($hit) { $byPerson[$hit] = [int]$byPerson[$hit] + 1 } else { $byPerson[$who] = 1 }
+        }
+    }
+    [pscustomobject]@{ total = $total; byBase = $byBase; byPerson = $byPerson }
+}
+
+function Clear-PimSharedPendingDoc {
+    <#
+      97.1 -- a SuperAdmin's "Discard ALL pending changes (everyone's)": empty every entity's change set in the document
+      (each entity's version moves on, so an open page re-reads instead of re-sending what was discarded). PURE: it changes
+      the document it is given and nothing else; it never commits a row. -ExpectTotal (>= 0) = the count the person
+      confirmed: when the store holds a different number (someone staged or committed in between) nothing is cleared and
+      the result says so. Returns { cleared; mismatch; summary } (summary = what was there before).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Doc, [int]$ExpectTotal = -1)
+    $sum = Get-PimSharedPendingSummary -Doc $Doc
+    if ($ExpectTotal -ge 0 -and [int]$sum.total -ne $ExpectTotal) { return [pscustomobject]@{ cleared = 0; mismatch = $true; summary = $sum } }
+    foreach ($k in @($Doc.bases.Keys)) {
+        if (-not @($Doc.bases[$k].changes).Count) { continue }
+        $Doc.bases[$k] = @{ version = [int]$Doc.bases[$k].version + 1; changes = @() }
+    }
+    [pscustomobject]@{ cleared = [int]$sum.total; mismatch = $false; summary = $sum }
+}
+
 function Invoke-PimSharedPendingReconcile {
     # Drop, for each named entity (or every entity when -Bases is empty), the changes the stored rows already carry out.
     # -ReadRows { param($base) <stored rows> }. Returns { cleared; doc }.

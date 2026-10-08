@@ -3350,7 +3350,12 @@ $script:PimAlertEventCatalog += 'target-missing'
 # §79.2: staged changes / queued actions nobody committed (the scheduler's 'pending-check' job, PIM-PendingCheck.ps1).
 $script:PimAlertEventCatalog += 'pending-uncommitted'
 # 97.1 / WIZARD-1: the Get Started steps that are done by a CONFIRMATION (their work happens outside the product).
-$script:PimGetStartedConfirmSteps = @('activator')
+# 2026-10-08 (owner): 'naming' = "these names are right" (step 1), 'policies' = the activation policies verified and
+# approved, 'breakglass-later' = the break-glass step skipped for now (a deferral: the step stays not-done and every
+# SuperAdmin is reminded on sign-in until an account is protected). The ones that decide tenant-wide configuration need
+# SuperAdmin (PimGetStartedConfirmMinRole); the rest need Admin.
+$script:PimGetStartedConfirmSteps = @('activator', 'naming', 'policies', 'breakglass-later')
+$script:PimGetStartedConfirmMinRole = @{ 'naming' = 'SuperAdmin'; 'breakglass-later' = 'SuperAdmin' }
 
 function Get-PimAlertingConfig {
     # Returns the normalized alerting config (defaults applied), shape:
@@ -9181,6 +9186,47 @@ function Handle-Request {
             Write-PimManagerAuditEvent -Action 'pending.force-discard' -Target "$dBase|$dKey" -Result 'ok' -Before $u.result.found -After ([ordered]@{ by = $dWho; reason = $dWhy; stagedBy = "$($u.result.found.by)" })
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; base = $dBase; key = $dKey; discarded = $u.result.found; version = [int]$u.result.version })
             return 200
+        }
+        # 97.1 (owner 2026-10-08: "we need a way to see any pending things in the queue even though it is from another super
+        # admin and be able to cancel/flush them ... i have 300 so i need a discard all"): a SuperAdmin discards EVERY staged
+        # change of EVERY administrator at once. POST /api/pending-discard-all { reason; expectCount }. SuperAdmin; a reason
+        # is required; expectCount = the number the person confirmed -- a store that holds another number (someone staged or
+        # committed in between) is refused and nothing is discarded. Audited with the count per entity and per person, read
+        # back (the store must hold no staged change afterwards). It never commits anything: the stored rows are untouched.
+        if ($path -eq '/api/pending-discard-all' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = "Discarding every administrator's staged changes requires SuperAdmin. $(Get-PimAccessFixHint)" }; return 403 }
+            if (-not $script:PimSqlCs) { Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; gate = 'no-store'; error = 'no SQL store -- pending changes are not shared here' }; return 409 }
+            $aBody = Read-RequestJson -Request $req
+            $aWhy = if ($aBody -and $aBody.PSObject.Properties['reason']) { "$($aBody.reason)".Trim() } else { '' }
+            if (-not $aWhy) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'a reason is required -- the discard is audited with it. Nothing was discarded.' }; return 400 }
+            $aExp = -1; if ($aBody -and $aBody.PSObject.Properties['expectCount'] -and "$($aBody.expectCount)" -match '^\d+$') { $aExp = [int]$aBody.expectCount }
+            $aWho = "$((Get-PimManagerRole).identity)"
+            $u = Update-PimSharedPendingStore -ConnectionString $script:PimSqlCs -Mutate {
+                param($doc)
+                $r = Clear-PimSharedPendingDoc -Doc $doc -ExpectTotal $aExp
+                $doc['__result'] = $r
+                return ([int]$r.cleared -gt 0)
+            }
+            if (-not $u.ok) { Write-JsonResponse -Response $resp -Status 503 -Body @{ ok = $false; gate = 'busy'; error = "$($u.reason)" }; return 503 }
+            $r = $u.result
+            if ($r.mismatch) {
+                Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ ok = $false; gate = 'changed'; total = [int]$r.summary.total; byBase = $r.summary.byBase; byPerson = $r.summary.byPerson
+                    error = "The pending changes changed while you confirmed: there are $([int]$r.summary.total) now, you confirmed $aExp. Nothing was discarded -- look again and confirm the new number." })
+                return 409
+            }
+            # read back: nothing may be left staged
+            $left = 0
+            try { $left = [int](Get-PimSharedPendingSummary -Doc (Read-PimSharedPendingStore -ConnectionString $script:PimSqlCs).doc).total } catch { $left = -1 }
+            Write-PimManagerAuditEvent -Action 'pending.discard-all' -Target 'pending:*' -Result $(if ($left -eq 0) { 'ok' } else { 'error' }) `
+                -Before ([ordered]@{ total = [int]$r.summary.total; byBase = $r.summary.byBase; byPerson = $r.summary.byPerson }) -After ([ordered]@{ by = $aWho; reason = $aWhy; cleared = [int]$r.cleared; leftAfter = $left })
+            if ($left -ne 0) {
+                Write-JsonResponse -Response $resp -Status 500 -Body ([ordered]@{ ok = $false; cleared = [int]$r.cleared; left = $left
+                    error = $(if ($left -lt 0) { 'the discard was written, but the store could not be read back to prove it' } else { "the read-back still holds $left staged change(s) -- someone staged in between; look again" }) })
+                return 500
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; cleared = [int]$r.cleared; byBase = $r.summary.byBase; byPerson = $r.summary.byPerson; committed = 0 })
+            return 200
         }        if ($path -eq '/api/settings/pending-second-approver' -and $method -eq 'PUT') {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to change who may commit a change.' }; return 403 }
@@ -9692,6 +9738,11 @@ function Handle-Request {
             if ($gsStep -notin @($script:PimGetStartedConfirmSteps)) {
                 Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "'$gsStep' is not a step that is confirmed by hand -- its state is read from the data. Nothing was saved." }
                 return 400
+            }
+            $gsMin = if ($script:PimGetStartedConfirmMinRole.ContainsKey($gsStep)) { "$($script:PimGetStartedConfirmMinRole[$gsStep])" } else { 'Admin' }
+            if ($gsMin -ne 'Admin' -and -not (Test-PimManagerRoleAtLeast -Minimum $gsMin)) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ ok = $false; error = "$gsMin role required to confirm the Get Started step '$gsStep'. Nothing was saved." }
+                return 403
             }
             $gsOn = [bool]($body.PSObject.Properties['confirmed'] -and ("$($body.confirmed)" -match '(?i)^(true|1|yes)$'))
             # Read first: a read that FAILS must not be taken for "nothing confirmed yet", or this save would drop the others.

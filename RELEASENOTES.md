@@ -13,6 +13,23 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.532 -- 2026-10-08
+
+- **Discard all pending changes.** A SuperAdmin can now discard every pending (staged, not committed) change at once,
+  including colleagues' -- the page says how many and who staged them, asks for a reason, and commits nothing. The same
+  entity is no longer listed twice on the Pending changes page.
+- **Get Started, reworked.** Naming convention is step 1 (templates create names from it), then licence, engine permissions,
+  mail sender, departments, roles & templates, admin accounts (optional), policies (verify and approve, including a held
+  first change set), alert recipients, break-glass accounts (with "Skip for now" and a reminder for SuperAdmins), first run
+  and PIM Activator (optional). Access mapping and Discovery are no longer part of it. Engine permissions is done when every
+  permission is held (it wrongly waited for the mail sender); open steps say they are setup choices, not install failures.
+- **Templates leave out roles your tenant does not have**, and say which -- a commit is no longer blocked by them. Two role
+  names in the Entra roles reference set are updated to Microsoft's current names.
+- **Mail alerting** points to Get Started > Mail sender instead of internal setup text.
+- **Self-service managed tenants (MSP):** a managed tenant can be installed with an enrollment key from Invardia, which
+  creates its environment and licence and links it to its managing tenant; the managing tenant allows its network by itself.
+- Hosting prerequisites also register the Key Vault provider (an empty subscription failed the managing tenant's signing key).
+
 ## 2.4.531 -- 2026-10-08
 
 - **Engine permissions without modules.** When the engine lacks a permission, Overview and Get Started now show a download from Invardia plus one command (`Grant-PimEnginePermissions.ps1`) with this environment's values: you sign in in the browser, already-held permissions are left alone, and it also covers the Azure right (User Access Administrator) when that is the missing one.

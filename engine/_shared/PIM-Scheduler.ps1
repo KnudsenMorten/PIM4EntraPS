@@ -64,6 +64,11 @@ $script:PimTickOnlyJobTypes += 'uplink'
 # (PIM-InvardiaUpdate.ps1). Inert unless the feature 'updates.invardia' is ON (it ships OFF).
 $script:PimJobTypes += 'install-key'
 $script:PimTickOnlyJobTypes += 'install-key'
+# UPLINK-ENROL / PIM 99 (2026-10-08): 'enrolled-tenants' -- the MANAGING tenant reports its bundle facts to Invardia, reads the
+# managed tenants enrolled with its company's enrollment key and allows their pull subnets on its bundle store
+# (engine/msp/PIM-InvardiaEnrollment.ps1). On by default on a managing tenant only (Disable-PimUnconfiguredIntegrationJobs).
+$script:PimJobTypes += 'enrolled-tenants'
+$script:PimTickOnlyJobTypes += 'enrolled-tenants'
 # AUDIT-1.3 (2026-10-05): 'audit-retention' deletes audit rows older than AuditRetentionMonths (min 13; unset = keep every
 # row, which is the default) through the append-only trigger's one door, and records audit.retention (PIM-AuditRetention.ps1).
 $script:PimJobTypes += 'audit-retention'
@@ -361,6 +366,8 @@ function Get-PimDefaultJobSchedule {
         [pscustomobject]@{ name='uplink'; type='uplink'; intervalMinutes=60; enabled=$true }
         # §95.4: every 6 h; inert until 'updates.invardia' is ON. Asks only while this install has no key and a Pro licence.
         [pscustomobject]@{ name='install-key'; type='install-key'; intervalMinutes=360; enabled=$true }
+        # UPLINK-ENROL: daily (+ Run now on the Jobs page). Switched off below unless this environment is a managing tenant.
+        [pscustomobject]@{ name='enrolled-tenants'; type='enrolled-tenants'; intervalMinutes=1440; enabled=$true }
         [pscustomobject]@{ name='audit-retention'; type='audit-retention'; intervalMinutes=1440; enabled=$true }
         # CONFIG-1.3: daily (SCHED-1: the cadence counts from the job's finish); "Back up now" on Backups & restore runs one on demand.
         [pscustomobject]@{ name='config-backup'; type='config-backup'; intervalMinutes=1440; enabled=$true }
@@ -429,9 +436,33 @@ function Disable-PimUnconfiguredIntegrationJobs {
             $out += $c
             continue
         }
+        # UPLINK-ENROL: 'enrolled-tenants' only has work on a MANAGING tenant (it manages the bundle store's network rules);
+        # everywhere else it is off, whatever the stored schedule says -- same capability gate as servicenow-intake.
+        if ($j -and "$($j.type)" -eq 'enrolled-tenants' -and -not (Test-PimSchedulerManagingTenant)) {
+            $c = $j.PSObject.Copy()
+            try { $c.enabled = $false } catch { }
+            $out += $c
+            continue
+        }
         $out += $j
     }
     @($out)
+}
+
+function Test-PimSchedulerManagingTenant {
+    # Is this environment a MANAGING tenant (scenario role msp-master)? $false when the scenario cannot be resolved.
+    # $global:PIM_SchedulerManagingTenantOverride (bool) is the offline test seam.
+    if ($null -ne $global:PIM_SchedulerManagingTenantOverride) { return [bool]$global:PIM_SchedulerManagingTenantOverride }
+    # The tick does not dot-source the scenario profile (it carries the downlink), so a missing function is LOADED here,
+    # into this call's scope, from the file next to this one -- never a gate that silently stays off.
+    $sc = $null
+    try { $sc = Get-PimActiveScenario }
+    catch [System.Management.Automation.CommandNotFoundException] {
+        $sp = Join-Path $PSScriptRoot 'PIM-ScenarioProfile.ps1'
+        try { if (Test-Path -LiteralPath $sp) { . $sp; $sc = Get-PimActiveScenario } } catch { $sc = $null }
+    }
+    catch { $sc = $null }
+    return [bool]($sc -and "$($sc.role)" -eq 'msp-master')
 }
 
 function Merge-PimJobSchedule {
@@ -1296,6 +1327,13 @@ function Initialize-PimDefaultJobHandlers {
         # §95.4: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimInstallKeyJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:install-key (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'enrolled-tenants' -Handler {
+        param($job,$now,$whatIf)
+        # UPLINK-ENROL: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimEnrolledTenantsJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:enrolled-tenants (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'uplink' -Handler {

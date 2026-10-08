@@ -1416,6 +1416,7 @@
     <div class="save-toolbar">
       <button id="btnCommit" class="primary">Commit all</button>
       <button id="btnCancel">Cancel all pending</button>
+      <button id="btnDiscardEveryone" style="display:none;" title="SuperAdmin: discard every staged change of every administrator (asks first, audited; commits nothing)">Discard ALL pending changes (everyone&rsquo;s)</button>
       <button id="btnRefresh">Refresh from server</button>
       <button id="btnBackups" title="View and roll back to a timestamped pre-commit backup">Backups / Undo</button>
       <span class="spacer"></span>
@@ -7458,7 +7459,7 @@
     if (a.enabled) {
       h += `<div style="margin-bottom:8px;padding:6px 10px;background:#dafbe1;border:1px solid #4ac26b;border-radius:6px;font-size:12px;">Alerting is <b>ON</b> &mdash; ${esc(String((a.recipients||[]).length))} recipient(s), sender configured.</div>`;
     } else if (!a.senderSet) {
-      h += `<div style="margin-bottom:8px;padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;font-size:12px;"><b>Configure to enable.</b> No sender mailbox is configured (set <code>$global:PIM_MailSender</code> + grant the app Mail.Send), so alerts are prepared but not delivered.</div>`;
+      h += `<div style="margin-bottom:8px;padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;font-size:12px;"><b>Configure to enable.</b> No sender mailbox is set up yet, so alerts are prepared but not delivered. Set it up in <b>Get Started &gt; Mail sender</b>.</div>`;
     } else {
       h += `<div style="margin-bottom:8px;padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;font-size:12px;"><b>Configure to enable.</b> Add at least one recipient below to start receiving alerts.</div>`;
     }
@@ -13109,12 +13110,22 @@
   // read from a short cache that a save clears.
   // ===================================================================================================================
   const GET_STARTED_STEPS = [
+    // 97.1 (owner 2026-10-08: "the get started must start with naming convention as step 1"): templates and wizards name
+    // every new group and admin account by it, so a template staged before the naming is set is staged with the wrong names.
+    { id: 'naming', title: 'Naming convention', required: true, need: 'SuperAdmin',
+      what: 'How PIM names the groups and admin accounts it creates. Set it first: the templates and wizards in the next steps name everything by it.',
+      check: c => { const k = c.confirm && c.confirm.naming; return { done: !!k, note: k ? ('confirmed by ' + (k.by || 'an admin')) : 'not confirmed yet -- check the names before you add templates' }; } },
     { id: 'licence', title: 'Licence', required: true, need: 'SuperAdmin',
       what: 'Register the PIM Manager licence. Pro features and the updates from Invardia depend on it.',
       check: c => { const s = String((c.licence && c.licence.status) || ''); return { done: s === 'Valid' || s === 'Grace', note: (s && s !== 'Missing') ? ('licence: ' + s) : 'no licence registered' }; } },
     { id: 'permissions', title: 'Engine permissions', required: true,
       what: 'The engine needs its Microsoft Graph and Azure rights for the workloads you use. This step checks them and shows the exact grant for anything missing.',
-      check: c => { const p = c.perm || {}; const miss = (p.missingRequired || []).filter(Boolean).length; return { done: !!p.objectId && miss === 0 && String(p.severity || '') !== 'error', note: p.objectId ? (miss ? miss + ' permission(s) missing' : 'all required permissions held') : 'not checked yet' }; } },
+      check: c => {
+        // Permissions ONLY: the health's overall severity also covers MAIL (no sender = 'error'), which is its own step --
+        // reading it here kept this step red while it said "all required permissions held" (EFIFMGMT 2026-10-08).
+        const p = c.perm || {}; const miss = (p.missingRequired || []).filter(Boolean).length; const az = p.azureOk !== false;
+        return { done: !!p.objectId && miss === 0 && az, note: p.objectId ? (miss ? miss + ' permission(s) missing' : !az ? 'no Azure role-management right' : 'all required permissions held') : 'not checked yet' };
+      } },
     { id: 'mail', title: 'Mail sender', required: true,
       what: 'A shared mailbox PIM sends from (TAP codes, approvals, alerts), its send right scoped to that one mailbox.',
       check: c => { const s = String((c.perm && c.perm.mail && c.perm.mail.sender) || ''); return { done: !!s, note: s ? ('sends as ' + s) : 'no sender: TAP codes and notifications are not sent' }; } },
@@ -13124,30 +13135,38 @@
     { id: 'roles', title: 'Roles & templates', required: true, need: 'Admin',
       what: 'The role groups people activate -- include the templates, or add your own role group.',
       check: c => ({ done: c.rows['PIM-Definitions-Roles'] > 0, note: c.rows['PIM-Definitions-Roles'] + ' role group(s)' }) },
-    { id: 'admins', title: 'Admin accounts', required: true, need: 'Admin',
-      what: 'The separate admin accounts PIM manages. Find the person, and PIM creates their admin account after you commit.',
+    // Optional (owner 2026-10-08: "remove the requirement in get started to add admins. we will do that later").
+    { id: 'admins', title: 'Admin accounts', required: false, need: 'Admin',
+      what: 'The separate admin accounts PIM manages. Find the person, and PIM creates their admin account after you commit. You can also do this later.',
       check: c => ({ done: c.rows['Account-Definitions-Admins'] > 0, note: c.rows['Account-Definitions-Admins'] + ' admin account(s)' }) },
-    { id: 'access', title: 'Access mapping', required: true, need: 'Admin',
-      what: 'Who gets which role: pick an admin account and the role group it may activate.',
-      check: c => ({ done: c.rows['PIM-Assignments-Admins'] > 0, note: c.rows['PIM-Assignments-Admins'] + ' assignment(s)' }) },
+    // (The "Access mapping" step is gone -- owner 2026-10-08: "this option should be removed from the get started - we will
+    // do that later (mapping)". The Access map page and its code stay.)
+    // Policies (owner 2026-10-08: "seems incomplete - nothing to choose from" / "verify / approve policies in the get started"):
+    // the activation policies PIM will apply, per kind of policy, as real fields saved through the Policy templates page's
+    // routes; a held policy change set is approved inline (the Approvals route, its maker/checker rules); the admin then
+    // APPROVES the policies (a confirmation). Done = approved AND nothing held -- never "nothing waiting" alone.
     { id: 'policies', title: 'Policies', required: true,
-      what: 'PIM applies the activation policies from the templates (MFA, duration, approval). A first large change set waits for your approval here.',
-      check: c => { const h = Number((c.jobs && c.jobs.heldCount) || 0); return { done: h === 0, note: h ? h + ' change set(s) waiting for your approval' : 'nothing waiting' }; } },
+      what: 'The activation policies PIM applies (how long an activation lasts, MFA, justification, approval) for each kind of policy. Verify them, change what does not fit, and approve them.',
+      check: c => { const h = Number((c.jobs && c.jobs.heldCount) || 0); const k = c.confirm && c.confirm.policies;
+        return { done: h === 0 && !!k, note: h ? h + ' change set(s) waiting for your approval' : (k ? ('approved by ' + (k.by || 'an admin')) : 'not verified and approved yet') }; } },
     { id: 'alerts', title: 'Alert recipients', required: true, need: 'Admin',
       what: 'Who receives the alerts when a guard holds something or a job fails.',
       check: c => { const n = ((c.alerting && c.alerting.recipients) || []).filter(Boolean).length; return { done: n > 0, note: n + ' recipient(s)' }; } },
     { id: 'breakglass', title: 'Break-glass accounts', required: true, need: 'SuperAdmin',
       what: 'The emergency accounts PIM must never touch -- define them before the first run. Another SuperAdmin approves the list.',
-      check: c => { const n = ((c.breakglass && (c.breakglass.effectiveAccounts || c.breakglass.accounts)) || []).length; return { done: n > 0, note: n + ' account(s)' }; } },
+      // "Skip for now" (owner 2026-10-08: "make option to ignore temporarily, remind super admin when they login if still not
+      // filled out"): a DEFERRAL saved as a setting (GetStartedConfirmations 'breakglass-later', who + when). A deferred step
+      // is not counted as open, but it is NOT done: while no account is protected every SuperAdmin is reminded on sign-in
+      // (gsRemindBreakGlass), and the reminder stops by itself once an account is protected (read from the data).
+      check: c => { const n = ((c.breakglass && (c.breakglass.effectiveAccounts || c.breakglass.accounts)) || []).length; const later = c.confirm && c.confirm['breakglass-later'];
+        return { done: n > 0, deferred: n === 0 && !!later, note: n ? n + ' account(s)' : (later ? 'skipped for now by ' + (later.by || 'a SuperAdmin') + ' -- still to do' : '0 account(s)') }; } },
     { id: 'firstrun', title: 'First run', required: true, need: 'Admin',
       what: 'The engine applies your configuration. Run it now and see what it did.',
       check: c => { const r = c.jobs && c.jobs.lastRun; return { done: !!(r && r.ok), note: r ? ((r.ok ? 'last run ok: ' : 'last run failed: ') + (r.name || '')) : 'no run yet' }; } },
     { id: 'activator', title: 'PIM Activator', required: false, need: 'Admin',
       what: 'The browser extension admins activate with: the Entra apps, the settings, the Intune remediation and Edge for Business. Do the steps here, then confirm the rollout.',
       check: c => { const k = c.confirm && c.confirm.activator; return { done: !!k, note: k ? ('rolled out -- confirmed by ' + (k.by || 'an admin')) : 'the rollout is not confirmed yet' }; } },
-    { id: 'discovery', title: 'Discovery', required: false, need: 'Admin',
-      what: 'Let PIM find what is new (Azure subscriptions, Power BI workspaces, roles) and offer it to you.',
-      check: c => { const j = c.discoveryJob; const on = !!(j && j.enabled); return { done: on && j.lastOk === true, note: !j ? 'discovery is not scheduled here' : !on ? 'switched off' : (j.lastOk === true ? 'on, and it has run' : 'on, it has not run yet') }; } },
+    // (The "Discovery" step is gone -- owner 2026-10-08: "remove this as part of get started". The Discovery page and job stay.)
   ];
   let GET_STARTED_LAST = null, GS_FACTS = null, GS_CACHE_AT = 0, GS_CUR = '';
   const GS_CACHE_MS = 60000;   // the menu badge reads this short cache; a save clears it
@@ -13170,17 +13189,39 @@
     return c;
   }
   function gsPaintBadge(steps) {
-    const openRequired = (steps || []).filter(s => s.required && !s.done).length;
+    const openRequired = (steps || []).filter(s => s.required && !s.done && !s.deferred).length;
     const badge = document.getElementById('getStartedBadge');
     if (badge) { badge.textContent = '!'; badge.style.display = openRequired ? '' : 'none'; }
     try { const act = document.querySelector('#tabs .tab.active'); syncNavGroups(act ? act.dataset.tab : null); } catch (_) { }
   }
+  // Break-glass reminder (owner 2026-10-08): while no break-glass account is protected -- skipped for now or never set --
+  // every SuperAdmin sees ONE dismissible banner per browser session. It is computed from the data on each evaluation, so
+  // it stops by itself once an account is protected (no acknowledgement step).
+  let GS_BG_REMINDED = false, GS_OPEN_AT = '';
+  function gsRemindBreakGlass(steps) {
+    const bg = (steps || []).find(s => s.id === 'breakglass');
+    const old = document.getElementById('gsBgReminder');
+    if (!bg || bg.done || !roleAtLeast('SuperAdmin')) { if (old) old.remove(); return; }
+    if (GS_BG_REMINDED || old) return;
+    try { if (sessionStorage.getItem('pimGsBgReminded') === '1') { GS_BG_REMINDED = true; return; } } catch (_) { }
+    GS_BG_REMINDED = true;
+    try { sessionStorage.setItem('pimGsBgReminded', '1'); } catch (_) { }
+    const d = document.createElement('div');
+    d.id = 'gsBgReminder'; d.setAttribute('role', 'status');
+    d.style.cssText = 'position:fixed;top:70px;right:16px;max-width:460px;z-index:99997;border-radius:6px;padding:10px 14px;font:13px/1.4 system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.2);background:#fff8c5;border:1px solid #d4a72c;color:#3b2300;';
+    d.innerHTML = '<b>Break-glass accounts are still not set up</b> -- Get Started &gt; Break-glass accounts. Until they are, PIM protects no emergency account. ' +
+      '<button type="button" class="gsBgOpen" style="font-size:12px;margin-left:4px;">Open</button> <button type="button" class="gsBgClose btn-sec" style="font-size:12px;">Dismiss</button>';
+    document.body.appendChild(d);
+    d.querySelector('.gsBgClose').onclick = () => d.remove();
+    d.querySelector('.gsBgOpen').onclick = () => { d.remove(); GS_OPEN_AT = 'breakglass'; try { switchTab('getstarted'); } catch (_) { } };
+  }
   async function evaluateGetStarted(force) {
     if (!force && GET_STARTED_LAST && (Date.now() - GS_CACHE_AT) < GS_CACHE_MS) { gsPaintBadge(GET_STARTED_LAST); return GET_STARTED_LAST; }
     const c = await gsFacts(force);
-    const steps = GET_STARTED_STEPS.map(s => { let r = { done: false, note: '' }; try { r = s.check(c) || r; } catch (_) { } return Object.assign({}, s, { done: !!r.done, note: r.note || '' }); });
+    const steps = GET_STARTED_STEPS.map(s => { let r = { done: false, note: '' }; try { r = s.check(c) || r; } catch (_) { } return Object.assign({}, s, { done: !!r.done, deferred: !r.done && !!r.deferred, note: r.note || '' }); });
     GET_STARTED_LAST = steps; GS_FACTS = c; GS_CACHE_AT = Date.now();
     gsPaintBadge(steps);
+    try { gsRemindBreakGlass(steps); } catch (_) { }
     return steps;
   }
   // ---- small helpers for the step forms ----
@@ -13235,7 +13276,124 @@
   }
   // ---- the step forms: body(c, st) = the fields; load(c) = data the fields need; save(form, c, st) = the SAME route the
   //      normal page uses -> { wrote, note } | { errors: { <field>: why } } (refused: nothing written); actions = buttons ----
+  // Naming step: the fields a new tenant has to decide before anything is named, each with what it renders as. Saved as
+  // the FULL naming map through PUT /api/settings/naming (the server REPLACES the map, BUG-236) -- the same route and
+  // the same rules as Settings > Naming conventions (a blank pattern or a blank tag prefix is refused, AdminWord blank =
+  // 'Admin'). The confirmation ("these names are right") is what makes the step done.
+  const GS_NAMING_FIELDS = [
+    { key: 'AdminWord', label: 'Admin word -- {AdminWord}', hint: 'The word your admin accounts use, e.g. Admin or adm.' },
+    { key: 'TenantCommonName', label: 'Tenant common name -- {TenantCommonName} (optional)', hint: 'A short name for this tenant. Blank = the token disappears.', optional: true },
+    { key: 'AdminAccountPattern', label: 'Admin account name', hint: 'The name of a normal (day-to-day) admin account.', pattern: true },
+    { key: 'AdminAccountPatternHighPriv', label: 'High-privilege admin account name (L0 / T0)', hint: 'The name of a high-privilege admin account.', pattern: true },
+    { key: 'PimGroupPattern', label: 'PIM group name', hint: 'The name of a PIM group, built around its tag ({Role}).', pattern: true },
+    { key: 'GroupTypePrefixes.role', label: 'Role group tag prefix -- {GroupTypePrefix}', hint: 'The start of every role group tag, e.g. ROLE-.', map: 'GroupTypePrefixes', mapKey: 'role', dflt: 'ROLE-' }
+  ];
+  function gsNamingValue(n, f) {
+    if (f.map) { const m = n[f.map]; const v = (m && typeof m === 'object') ? mapGet(m, f.mapKey) : undefined; return (v == null || String(v) === '') ? (f.dflt || '') : String(v); }
+    if (f.key === 'AdminWord') return (n.AdminWord == null || String(n.AdminWord).trim() === '') ? 'Admin' : String(n.AdminWord);
+    return n[f.key] == null ? '' : String(n[f.key]);
+  }
+  function gsNamingFieldName(f) { return 'nm_' + f.key.replace(/\./g, '_'); }
+  // Activation policies step: one block per kind of policy -- the default template (what a blank PolicyTemplate means;
+  // picking a RequireApproval template is how approval is required) and that template's activation settings.
+  const GS_POLICY_KINDS = [['group', 'PIM for Groups (activating a role group)'], ['directoryRole', 'Entra ID roles'], ['azureRole', 'Azure resource roles']];
+  function gsPolicyKindHtml(kind, v, tplId, canEdit) {
+    const tpls = ((v && v.templates) || []).filter(t => t.kind === kind);
+    const code = (v && v.codeDefaults) || {}, dsrc = (v && v.defaultsSource) || {}, defs = (v && v.defaults) || {};
+    const cur = dsrc[kind] === 'setting' ? String(defs[kind] || '') : '';
+    const effId = tplId != null ? (tplId || String(code[kind] || defs[kind] || '')) : String(defs[kind] || code[kind] || '');
+    const t = tpls.find(x => x.id === effId) || null;
+    const dis = canEdit ? '' : ' disabled';
+    const selVal = tplId != null ? tplId : cur;
+    let h = '<div class="gsPolKind" data-kind="' + kind + '" style="border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;margin:6px 0;">' +
+      '<div style="font-weight:600;font-size:12.5px;">' + escapeHtml((GS_POLICY_KINDS.find(k => k[0] === kind) || [kind, kind])[1]) + '</div>' +
+      '<label class="gs-l" for="gsPolDef-' + kind + '">Policy template used where a delegation names none</label>' +
+      '<select id="gsPolDef-' + kind + '" name="polDef-' + kind + '" class="gsPolDef" data-kind="' + kind + '"' + dis + '>' +
+        '<option value=""' + (selVal === '' ? ' selected' : '') + '>built-in default (' + escapeHtml(String(code[kind] || '')) + ')</option>' +
+        tpls.map(x => '<option value="' + escapeHtml(x.id) + '"' + (selVal === x.id ? ' selected' : '') + '>' + escapeHtml(x.name && x.name !== x.id ? x.name : x.id) + (x.approval && x.approval.required ? ' -- approval required' : '') + '</option>').join('') +
+      '</select>' + gsErr('polDef-' + kind);
+    if (!t) return h + '<div class="gs-hint">This template is not in the tenant&rsquo;s template store -- its settings cannot be shown.</div></div>';
+    const e = (t.edit && t.edit.member) || null;
+    const ap = t.approval || {};
+    h += '<div class="gs-facts gsPolApproval">Approval to activate: <b>' + (ap.required ? 'required' + (ap.approversText ? ' -- approvers: ' + escapeHtml(String(ap.approversText)) : '') : 'not required') + '</b>' +
+      (ap.required ? '' : ' (to require it, pick a template marked &ldquo;approval required&rdquo; above)') + '</div>';
+    const ex = (e && e.expiration && e.expiration.EndUser_Assignment) || null;
+    if (e && ex) {
+      h += '<label class="gs-l" for="gsPolDur-' + kind + '">An activation lasts at most</label>' +
+        ptSelect('gsPolDur', 'id="gsPolDur-' + kind + '" name="polDur-' + kind + '" data-kind="' + kind + '" data-tpl="' + escapeHtml(t.id) + '"' + dis, PT_ACTIVATION_OPTS, ex.maximumDuration) + gsErr('polDur-' + kind);
+      const checks = (e.activationChecks || []).map(String);
+      h += '<div class="gs-l">To activate, require</div>' + PT_CHECKS.map(cc => '<label class="gs-check" style="display:inline-block;margin-right:14px;"><input type="checkbox" class="gsPolChk" name="polChk-' + kind + '-' + cc[0] + '" data-kind="' + kind + '" data-tpl="' + escapeHtml(t.id) + '" data-check="' + cc[0] + '"' + (checks.indexOf(cc[0]) >= 0 ? ' checked' : '') + dis + '> ' + escapeHtml(cc[1]) + '</label>').join('') + gsErr('polChk-' + kind);
+    } else {
+      h += '<div class="gs-facts">An activation lasts at most <b>' + escapeHtml(String((t.activation && t.activation.text) || 'not set')) + '</b>; to activate: <b>' + escapeHtml(String(t.activationChecks || 'nothing extra')) + '</b>.</div>';
+    }
+    return h + '</div>';
+  }
   const GS_FORMS = {
+    naming: {
+      load: async () => { const s = await api('GET', '/api/settings'); return { naming: (s && s.naming) || {} }; },
+      body: (c, st) => {
+        const n = (st && st.naming) || {};
+        const k = c.confirm && c.confirm.naming;
+        let h = '<div class="gs-facts">Every new group and admin account is named by these patterns -- the templates in step Roles &amp; templates too. A change applies to new names only; an existing group keeps its name.</div>';
+        h += GS_NAMING_FIELDS.map(f => {
+          const nm = gsNamingFieldName(f), v = gsNamingValue(n, f);
+          return '<label class="gs-l" for="gs-' + nm + '">' + escapeHtml(f.label) + '</label><input type="text" id="gs-' + nm + '" name="' + nm + '" value="' + escapeHtml(v) + '" style="width:100%;max-width:520px;">' +
+            (f.pattern ? '<div class="gs-hint gsNamingRender" data-for="' + nm + '">' + escapeHtml(f.hint) + ' Renders as: <code>' + escapeHtml(renderNamingPatternExample(v, n)) + '</code></div>' : '<div class="gs-hint">' + escapeHtml(f.hint) + '</div>') + gsErr(nm);
+        }).join('');
+        h += '<label class="gs-check"><input type="checkbox" name="namingConfirmed"' + (k ? ' checked' : '') + '> These names are right for this tenant.</label>' + gsErr('namingConfirmed') +
+          (k ? '<div class="gs-hint">Confirmed by ' + escapeHtml(String(k.by || '')) + (k.utc ? ' ' + escapeHtml(homeFmtWhen(k.utc)) : '') + '.</div>' : '') +
+          '<div class="gs-hint">Every other naming key (environment suffixes, admin-type prefixes, administrative units) is kept as it is; they are set in Settings &gt; Naming conventions.</div>';
+        return h;
+      },
+      wire: (card, c, st) => {
+        const n = (st && st.naming) || {};
+        GS_NAMING_FIELDS.filter(f => f.pattern).forEach(f => {
+          const nm = gsNamingFieldName(f), inp = card.querySelector('[name="' + nm + '"]'), out = card.querySelector('.gsNamingRender[data-for="' + nm + '"] code');
+          if (inp && out) inp.addEventListener('input', () => { out.textContent = renderNamingPatternExample(inp.value, n); });
+        });
+      },
+      save: async (form, c, st) => {
+        const n = (st && st.naming) || {};
+        const errors = {}, edits = {};
+        for (const f of GS_NAMING_FIELDS) {
+          const nm = gsNamingFieldName(f); let v = gsVal(form, nm);
+          if (f.key === 'AdminWord' && !v) v = 'Admin';
+          if (v === gsNamingValue(n, f)) continue;
+          if (!v && f.pattern) { errors[nm] = 'A name pattern cannot be blank -- PIM could not name what it creates.'; continue; }
+          if (!v && f.map) { errors[nm] = 'A tag prefix cannot be blank -- tags of different types would collide.'; continue; }
+          edits[f.key] = v;
+        }
+        if (Object.keys(errors).length) return { errors: errors };
+        const cb = form.querySelector('[name="namingConfirmed"]');
+        const on = !!(cb && cb.checked), was = !!(c.confirm && c.confirm.naming);
+        if (!Object.keys(edits).length && on === was) return { wrote: false };
+        let saved = false;
+        if (Object.keys(edits).length) {
+          // the FULL stored map + the edited keys (the server replaces the map)
+          const obj = {};
+          Object.keys(n).forEach(k => { obj[k] = n[k]; });
+          for (const f of GS_NAMING_FIELDS) {
+            if (!(f.key in edits)) continue;
+            if (f.map) {
+              const m = Object.assign({}, (obj[f.map] && typeof obj[f.map] === 'object') ? obj[f.map] : {});
+              const hit = Object.keys(m).find(x => x.toLowerCase() === f.mapKey) || f.mapKey;
+              m[hit] = edits[f.key]; obj[f.map] = m;
+            } else obj[f.key] = edits[f.key];
+          }
+          try {
+            SETTINGS_DATA = await api('PUT', '/api/settings/naming', { value: obj });
+            if (typeof PIM_NAMING === 'object' && PIM_NAMING) Object.keys(obj).forEach(k => { PIM_NAMING[k] = obj[k]; });
+            if (st) st.naming = obj;
+            saved = true;
+          } catch (e) { return { errors: { _: 'Not saved: ' + gsErrText(e) } }; }
+        }
+        if (on !== was) {
+          try { await api('PUT', '/api/get-started/confirm', { step: 'naming', confirmed: on }); }
+          catch (e) { return { errors: { namingConfirmed: (saved ? 'The naming was saved, but the confirmation was not: ' : 'Not saved: ') + gsErrText(e) } }; }
+        }
+        return { wrote: true, note: (saved ? 'Naming convention saved.' : '') + (on && !was ? (saved ? ' ' : '') + 'Recorded: the naming is right for this tenant.' : (!on && was ? ' The confirmation was removed.' : '')) };
+      }
+    },
     licence: {
       body: (c) => {
         const l = c.licence || {};
@@ -13345,7 +13503,8 @@
       body: (c, s) => {
         const packs = (s && s.packs) || [], roles = (s && s.roles) || [];
         const open = packs.filter(p => Number(p.missingCount) > 0), current = packs.filter(p => !(Number(p.missingCount) > 0));
-        let h = roles.length ? '<div class="gs-facts">' + roles.length + ' role group(s): ' + escapeHtml(roles.slice(0, 8).map(r => r.name).join(', ')) + (roles.length > 8 ? ', ...' : '') + '</div>' : '<div class="gs-facts">No role groups yet.</div>';
+        let h = (c.confirm && c.confirm.naming) ? '' : '<div class="gs-hint gsNamingFirst" style="color:#9a6700;">The naming convention is not confirmed yet (step 1). Templates are named by it when they are staged -- set it first.</div>';
+        h += roles.length ? '<div class="gs-facts">' + roles.length + ' role group(s): ' + escapeHtml(roles.slice(0, 8).map(r => r.name).join(', ')) + (roles.length > 8 ? ', ...' : '') + '</div>' : '<div class="gs-facts">No role groups yet.</div>';
         h += '<div class="gs-sub">Include templates</div>';
         if (open.length) h += open.map(p => '<label class="gs-check"><input type="checkbox" name="tplPack" value="' + escapeHtml(String(p.id)) + '"> <b>' + escapeHtml(String(p.name || p.id)) + '</b> -- ' + Number(p.missingCount) + ' new permission(s)' + (p.description ? '<div class="gs-hint" style="margin:0 0 0 22px;">' + escapeHtml(String(p.description)) + '</div>' : '') + '</label>').join('');
         else h += '<div class="gs-hint">' + (packs.length ? 'Every template is already included.' : 'No templates are active here.') + '</div>';
@@ -13370,7 +13529,7 @@
           }
         }
         if (Object.keys(errors).length) return { errors: errors };
-        let n = 0; const taken = [];
+        let n = 0; const taken = [], absent = [];
         try {
           for (const id of ids) {
             const t = ((s && s.packs) || []).find(p => String(p.id) === id);
@@ -13378,12 +13537,14 @@
             const picks = {};
             Object.keys(t.missing || {}).forEach(b => { picks[b] = (t.missing[b] || []).map(() => true); });
             const r = await tplStagePackRows(t, picks);
-            n += r.n; taken.push(...r.keyTaken);
+            n += r.n; taken.push(...r.keyTaken); absent.push(...(r.notInTenant || []));
           }
           if (short) { await wizardRoleGroupStage(Object.assign(wizardRoleGroupDefaultState(), { shortName: short, description: desc })); n++; }
         } catch (e) { markBadges(); return { errors: { _: 'Stopped: ' + gsErrText(e) + ' -- what was staged before this is still in Pending changes.' } }; }
         markBadges();
-        return { wrote: true, note: n + ' change(s) staged -- commit them to create the role groups.' + (taken.length ? ' ' + taken.length + ' row(s) were already there and were left as they are.' : '') };
+        if (absent.length) { try { alert(tplNotInTenantText(absent)); } catch (_) { } }
+        return { wrote: true, note: n + ' change(s) staged -- commit them to create the role groups.' + (taken.length ? ' ' + taken.length + ' row(s) were already there and were left as they are.' : '') +
+          (absent.length ? ' ' + absent.length + ' row(s) were left out: their Entra role does not exist in this tenant.' : '') };
       }
     },
     admins: {
@@ -13438,43 +13599,83 @@
         catch (e) { const m = gsErrText(e); return { errors: /already used/i.test(m) ? { adminInitials: m.replace('Go back to the Person step and use', 'Use') } : { _: 'Nothing was staged: ' + m } }; }
       }
     },
-    access: {
-      load: async () => ({ admins: await gsRows('Account-Definitions-Admins'), roles: await gsRoleGroups(), assigns: await gsRows('PIM-Assignments-Admins') }),
-      body: (c, s) => {
-        const admins = (s && s.admins) || [], roles = (s && s.roles) || [], assigns = (s && s.assigns) || [];
-        return '<div class="gs-facts">' + assigns.length + ' assignment(s) so far.</div>' +
-          '<label class="gs-l" for="gsAccAdmin">Admin account</label><select id="gsAccAdmin" name="accessAdmin"><option value="">-- pick an admin account --</option>' +
-            admins.filter(a => a && a.UserPrincipalName).map(a => '<option value="' + escapeHtml(String(a.UserPrincipalName)) + '">' + escapeHtml(String(a.DisplayName || a.UserPrincipalName)) + ' (' + escapeHtml(String(a.UserPrincipalName)) + ')</option>').join('') + '</select>' + gsErr('accessAdmin') +
-          '<label class="gs-l" for="gsAccRole">Role group</label><select id="gsAccRole" name="accessRole"><option value="">-- pick a role group --</option>' +
-            roles.map(r => '<option value="' + escapeHtml(r.tag) + '">' + escapeHtml(r.name) + '</option>').join('') + '</select>' + gsErr('accessRole') +
-          '<label class="gs-l" for="gsAccType">How</label><select id="gsAccType" name="accessType"><option value="Eligible">Eligible -- activates when needed (recommended)</option><option value="Active">Active -- always on</option></select>' +
-          '<div class="gs-hint">Saved here as a change to commit. The Access map shows the whole picture afterwards.</div>';
-      },
-      save: async (form, c, s) => {
-        const upn = gsVal(form, 'accessAdmin'), tag = gsVal(form, 'accessRole');
-        if (!upn && !tag) return { wrote: false };
-        const errors = {};
-        if (!upn) errors.accessAdmin = 'Pick the admin account.';
-        if (!tag) errors.accessRole = 'Pick the role group.';
-        if (upn && tag && ((s && s.assigns) || []).some(a => String(a.Username || '').toLowerCase() === upn.toLowerCase() && String(a.GroupTag || '').toLowerCase() === tag.toLowerCase())) errors.accessRole = upn + ' already has this role group.';
-        if (Object.keys(errors).length) return { errors: errors };
-        const tier = (((s && s.roles) || []).find(r => r.tag === tag) || {}).tier || '';
-        try {
-          await wuxStage('PIM-Assignments-Admins', {
-            Username: upn, GroupTag: tag,
-            AssignmentType: gsVal(form, 'accessType') || 'Eligible', Action: 'Assign',
-            UpdateExisting: 'FALSE', AutoExtend: 'TRUE',
-            NumOfDaysWhenExpire: '365', Permanent: 'FALSE',
-            CPPlatform: '', Plane: '', TierLevel: tier, PermissionScope: '', SyncPlatform: ''
-          });
-        } catch (e) { return { errors: { _: 'Nothing was staged: ' + gsErrText(e) } }; }
-        return { wrote: true, note: upn + ' -> ' + tag + ' staged -- commit it to apply.' };
-      }
-    },
     policies: {
-      body: (c) => {
-        const h = Number((c.jobs && c.jobs.heldCount) || 0);
-        return '<div class="gs-facts">' + (h ? h + ' change set(s) wait for your approval -- they are shown above, with what changes.' : 'Nothing is waiting for your approval. PIM applies the activation policies of your templates on its runs; a first large change set would wait here.') + '</div>';
+      load: async () => ({ view: ptNormalizeView(await api('GET', '/api/policy-templates')) }),
+      body: (c, st) => {
+        const v = st && st.view;
+        const held = Number((c.jobs && c.jobs.heldCount) || 0);
+        const k = c.confirm && c.confirm.policies;
+        const canEdit = !!(v && v.canEdit) && roleAtLeast('SuperAdmin');
+        let h = held ? '<div class="gs-facts" style="color:#9a6700;">' + held + ' policy change set(s) wait for your approval -- shown above, each with what changes (current &rarr; new). Approve them there.</div>' : '';
+        if (!v || v.readable === false) return h + '<div class="gsProblem" style="display:block;">The policy templates could not be read' + (v && v.reason ? ': ' + escapeHtml(String(v.reason)) : '') + ' -- nothing can be verified yet.</div>';
+        h += '<div class="gs-facts">The policies PIM applies when someone activates. Verify each kind' + (canEdit ? ', change what does not fit' : '') + ', then approve.</div>';
+        h += GS_POLICY_KINDS.map(kd => gsPolicyKindHtml(kd[0], v, null, canEdit)).join('');
+        if (!canEdit) h += '<div class="gs-hint">Only a SuperAdmin can change these policies; you can verify and approve them.</div>';
+        h += '<label class="gs-check"><input type="checkbox" name="polApproved"' + (k ? ' checked' : '') + '> I have verified these activation policies and approve them.</label>' + gsErr('polApproved') +
+          (k ? '<div class="gs-hint">Approved by ' + escapeHtml(String(k.by || '')) + (k.utc ? ' ' + escapeHtml(homeFmtWhen(k.utc)) : '') + '.</div>' : '') +
+          '<div class="gs-hint">A change here changes the TEMPLATE: the engine plans it on its next run, and a change to many policies is held with its WhatIf until someone approves it. Notifications and the owner policy are set on the Policy templates page.</div>';
+        return h;
+      },
+      wire: (card, c, st) => {
+        const v = st && st.view; if (!v) return;
+        const canEdit = !!v.canEdit && roleAtLeast('SuperAdmin');
+        // picking another template for a kind shows THAT template's settings (what will apply), not the old one's
+        card.addEventListener('change', (ev) => {
+          const sel = ev.target;
+          if (!sel || !sel.classList || !sel.classList.contains('gsPolDef')) return;
+          const box = sel.closest('.gsPolKind'); if (!box) return;
+          const tmp = document.createElement('div'); tmp.innerHTML = gsPolicyKindHtml(sel.dataset.kind, v, sel.value, canEdit);
+          box.replaceWith(tmp.firstElementChild);
+        });
+      },
+      save: async (form, c, st) => {
+        const v = st && st.view;
+        const cb = form.querySelector('[name="polApproved"]');
+        const on = !!(cb && cb.checked), was = !!(c.confirm && c.confirm.policies);
+        const canEdit = !!(v && v.canEdit) && roleAtLeast('SuperAdmin');
+        // 1. the per-kind defaults -- PUT /api/settings/policy-template-defaults (the Policy templates page's route)
+        let defBody = null, rules = [];
+        if (v && canEdit) {
+          const dsrc = v.defaultsSource || {}, defs = v.defaults || {};
+          const now = {}, want = {};
+          GS_POLICY_KINDS.forEach(kd => { const kk = kd[0]; now[kk] = dsrc[kk] === 'setting' ? String(defs[kk] || '') : ''; const s = form.querySelector('[name="polDef-' + kk + '"]'); want[kk] = s ? s.value : now[kk]; });
+          if (GS_POLICY_KINDS.some(kd => want[kd[0]] !== now[kd[0]])) defBody = want;
+          // 2. each shown template's activation settings -- PUT /api/policy-templates/rules, ONLY what changed (ptEditorChanges' shape)
+          const byTpl = {};
+          ((v.templates) || []).forEach(t => { byTpl[t.id] = t; });
+          GS_POLICY_KINDS.forEach(kd => {
+            const kk = kd[0];
+            const durSel = form.querySelector('[name="polDur-' + kk + '"]');
+            const tid = durSel ? durSel.dataset.tpl : '';
+            const t = tid ? byTpl[tid] : null;
+            const e = t && t.edit && t.edit.member; if (!e) return;
+            const body = { id: t.id, part: 'member' };
+            const ex = (e.expiration || {}).EndUser_Assignment;
+            if (ex && durSel.value !== String(ex.maximumDuration)) body.expiration = { EndUser_Assignment: { maximumDuration: durSel.value } };
+            const cur = (e.activationChecks || []).map(String);
+            const wantC = Array.from(form.querySelectorAll('.gsPolChk[data-kind="' + kk + '"]')).filter(x => x.checked).map(x => x.dataset.check);
+            // checks the wizard does not show (another enabled rule) are kept as they are
+            const keep = cur.filter(x => !PT_CHECKS.some(p => p[0] === x));
+            const next = keep.concat(wantC);
+            if (cur.slice().sort().join(',') !== next.slice().sort().join(',')) body.activationChecks = next;
+            if (body.expiration || body.activationChecks) rules.push({ kind: kk, body: body });
+          });
+        }
+        if (!defBody && !rules.length && on === was) return { wrote: false };
+        const done = [];
+        if (defBody) {
+          try { await api('PUT', '/api/settings/policy-template-defaults', defBody); done.push('the default templates'); pimPolicyTplCache = null; }
+          catch (e) { return { errors: { ['polDef-' + GS_POLICY_KINDS[0][0]]: 'Not saved: ' + gsErrText(e) } }; }
+        }
+        for (const r of rules) {
+          try { await api('PUT', '/api/policy-templates/rules', r.body); done.push(r.body.id); pimPolicyTplCache = null; }
+          catch (e) { return { errors: { ['polDur-' + r.kind]: 'Not saved: ' + gsErrText(e) + (done.length ? ' (saved before this: ' + done.join(', ') + ')' : '') } }; }
+        }
+        if (on !== was) {
+          try { await api('PUT', '/api/get-started/confirm', { step: 'policies', confirmed: on }); }
+          catch (e) { return { errors: { polApproved: (done.length ? 'Saved ' + done.join(', ') + ', but the approval was not recorded: ' : 'Not saved: ') + gsErrText(e) } }; }
+        }
+        return { wrote: true, note: (done.length ? 'Saved: ' + done.join(', ') + '. The engine plans it on its next run.' : '') + (on && !was ? (done.length ? ' ' : '') + 'Recorded: the activation policies are verified and approved.' : (!on && was ? ' The approval was removed.' : '')) };
       },
       mount: async (extra) => { try { await renderApprovalsPolicyHolds(extra); } catch (_) { } }
     },
@@ -13519,7 +13720,16 @@
           (req ? '<div class="gs-hint" style="color:#9a6700;">A change raised by ' + escapeHtml(String(req.maker || 'a SuperAdmin')) + ' waits for another SuperAdmin to approve it (Audit &amp; Settings &gt; Emergency access).</div>' : '') +
           '<label class="gs-l" for="gsBgAdd">Add accounts (search by name)</label><input type="text" id="gsBgAdd" name="bgAdd">' + gsErr('bgAdd') +
           '<label class="gs-l" for="gsBgWhy">Why (kept with the request)</label><input type="text" id="gsBgWhy" name="bgWhy" placeholder="the two cloud-only emergency accounts">' + gsErr('bgWhy') +
-          '<div class="gs-hint">These accounts are exempt from every disable, revoke and offboard. The change is a request: another SuperAdmin approves it before the list changes.</div>';
+          '<div class="gs-hint">These accounts are exempt from every disable, revoke and offboard. The change is a request: another SuperAdmin approves it before the list changes.</div>' +
+          (eff.length ? '' : '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="later"' + ((c.confirm && c.confirm['breakglass-later']) ? ' disabled' : '') + '>Skip for now</button> <span class="gsActMsg"></span></div>' +
+            '<div class="gs-hint">' + ((c.confirm && c.confirm['breakglass-later']) ? 'Skipped for now by ' + escapeHtml(String(c.confirm['breakglass-later'].by || '')) + '. ' : '') + 'Skipped, this step does not count as open -- but every SuperAdmin is reminded when they sign in until a break-glass account is protected.</div>');
+      },
+      actions: {
+        later: async (x) => {
+          x.say('Saving...');
+          try { await api('PUT', '/api/get-started/confirm', { step: 'breakglass-later', confirmed: true }); GET_STARTED_LAST = null; await x.rerender(); }
+          catch (e) { x.say('Not saved: ' + gsErrText(e), true); }
+        }
       },
       wire: (card) => { try { pimAttachChips(card.querySelector('[name="bgAdd"]'), pimAttachPeopleCombo); } catch (_) { } },
       save: async (form, c) => {
@@ -13578,34 +13788,6 @@
         try { await api('PUT', '/api/get-started/confirm', { step: 'activator', confirmed: on }); return { wrote: true, note: on ? 'Recorded: the PIM Activator is rolled out.' : 'The confirmation was removed.' }; }
         catch (e) { return { errors: { actConfirmed: 'Not saved: ' + gsErrText(e) } }; }
       }
-    },
-    discovery: {
-      load: async () => { let inbox = null; try { inbox = await pimGetDiscoveryInbox(); } catch (_) { inbox = null; } return { inbox: inbox }; },
-      body: (c, s) => {
-        const j = c.discoveryJob;
-        if (!j) return '<div class="gs-facts">Discovery is not scheduled on this deployment.</div>';
-        const items = asList(s && s.inbox && s.inbox.items).filter(x => x && x.state === 'new');
-        return '<label class="gs-check"><input type="checkbox" name="discOn"' + (j.enabled ? ' checked' : '') + '> Look for new things automatically' + (j.cadence ? ' (' + escapeHtml(String(j.cadence)) + ')' : '') + '</label>' + gsErr('discOn') +
-          '<div class="gs-facts">' + (s && s.inbox ? items.length + ' new item(s) found so far -- they wait under Discovery for you to create or ignore.' : 'What it found could not be read.') + '</div>' +
-          '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="run">Save and look now</button> <span class="gsActMsg"></span></div>';
-      },
-      save: async (form, c) => {
-        const j = c.discoveryJob; if (!j) return { wrote: false };
-        const el = form.querySelector('[name="discOn"]');
-        const on = !!(el && el.checked);
-        if (on === !!j.enabled) return { wrote: false };
-        try { await api('PUT', '/api/jobs/state', { name: j.name, enabled: on }); j.enabled = on; return { wrote: true, note: on ? 'Discovery is on.' : 'Discovery is off.' }; }
-        catch (e) { return { errors: { discOn: 'Not saved: ' + gsErrText(e) } }; }
-      },
-      actions: {
-        run: async (x) => {
-          if (!(await x.saveFirst())) return;
-          const j = x.c.discoveryJob; if (!j) return;
-          x.say('Starting...');
-          try { const r = await api('POST', '/api/jobs/run', { name: j.name }); x.say((r && (r.detail || r.note)) || 'Started -- new items show up under Discovery.'); }
-          catch (e) { x.say('Not started: ' + gsErrText(e), true); }
-        }
-      }
     }
   };
   function gsShowErrors(card, errors) {
@@ -13625,11 +13807,12 @@
     const host = document.getElementById('getStartedBody'); if (!host) return;
     if (!isServer) { host.innerHTML = '<div style="padding:20px;color:#57606a;">Get Started needs the server -- it reads and saves this environment&rsquo;s settings.</div>'; return; }
     if (!GET_STARTED_LAST) host.innerHTML = '<div style="padding:20px;color:#57606a;">Checking where this environment stands&hellip;</div>';
+    if (!stepId && GS_OPEN_AT) { stepId = GS_OPEN_AT; GS_OPEN_AT = ''; }   // the break-glass reminder's Open
     const steps = await evaluateGetStarted(true);
     const c = GS_FACTS || { rows: {} };
     const done = steps.filter(s => s.done).length, total = steps.length, pct = Math.round(100 * done / total);
     let idx = stepId ? steps.findIndex(s => s.id === stepId) : -1;
-    if (idx < 0) idx = Math.max(0, steps.findIndex(s => s.required && !s.done));
+    if (idx < 0) idx = Math.max(0, steps.findIndex(s => s.required && !s.done && !s.deferred));
     const cur = steps[idx]; GS_CUR = cur.id;
     const f = GS_FORMS[cur.id] || {};
     const blocked = !!(cur.need && !roleAtLeast(cur.need));
@@ -13637,10 +13820,11 @@
     if (f.load && !blocked) { try { st = await f.load(c); } catch (e) { loadErr = gsErrText(e); } }
     const last = idx === total - 1;
     const staged = gsStagedCount();
-    const openReq = steps.filter(s => s.required && !s.done);
-    const pill = (s, i) => '<button type="button" class="gsPill" data-step="' + escapeHtml(s.id) + '" data-gs-kind="' + (s.done ? 'done' : s.required ? 'open' : 'optional') + '" style="border-radius:16px;padding:4px 12px;margin:0 6px 6px 0;font-size:12.5px;cursor:pointer;border:1px solid ' +
-      (i === idx ? '#0969da;background:#0969da;color:#fff;' : s.done ? '#4ac26b;background:#dafbe1;color:#1a7f37;' : s.required ? '#ff8182;background:#ffebe9;color:#cf222e;' : '#d0d7de;background:#f6f8fa;color:#57606a;') + '">' +
-      (s.done ? '&#10003; ' : s.required ? '<b>!</b> ' : '') + escapeHtml(s.title) + (s.required ? '' : ' <span style="font-size:11px;opacity:.8;">(optional)</span>') + '</button>';
+    const openReq = steps.filter(s => s.required && !s.done && !s.deferred);
+    // a step skipped for now (break-glass) is grey like an optional one: not open, not done
+    const pill = (s, i) => '<button type="button" class="gsPill" data-step="' + escapeHtml(s.id) + '" data-gs-kind="' + (s.done ? 'done' : s.deferred ? 'deferred' : s.required ? 'open' : 'optional') + '" style="border-radius:16px;padding:4px 12px;margin:0 6px 6px 0;font-size:12.5px;cursor:pointer;border:1px solid ' +
+      (i === idx ? '#0969da;background:#0969da;color:#fff;' : s.done ? '#4ac26b;background:#dafbe1;color:#1a7f37;' : (s.required && !s.deferred) ? '#ff8182;background:#ffebe9;color:#cf222e;' : '#d0d7de;background:#f6f8fa;color:#57606a;') + '">' +
+      (s.done ? '&#10003; ' : (s.required && !s.deferred) ? '<b>!</b> ' : '') + escapeHtml(s.title) + (s.deferred ? ' <span style="font-size:11px;opacity:.8;">(skipped for now)</span>' : s.required ? '' : ' <span style="font-size:11px;opacity:.8;">(optional)</span>') + '</button>';
     let fields = '';
     if (blocked) fields = '<div class="gs-hint gsNeeds">Only ' + (cur.need === 'SuperAdmin' ? 'a SuperAdmin' : 'an Admin') + ' can do this step -- ask one of them. Save &amp; next moves on.</div>';
     else if (loadErr) fields = '<div class="gsProblem" style="display:block;">This step could not read what it needs: ' + escapeHtml(loadErr) + '</div>';
@@ -13650,6 +13834,7 @@
       '<div style="display:flex;justify-content:space-between;font-size:12px;color:#57606a;"><span class="gsCount">' + done + ' of ' + total + ' steps done</span><span>' + pct + '%</span></div>' +
       '<div style="height:8px;background:#eaeef2;border-radius:4px;margin:4px 0 12px;"><div class="gsBar" style="height:8px;width:' + pct + '%;background:#0969da;border-radius:4px;"></div></div>' +
       '<div class="gsPills">' + steps.map(pill).join('') + '</div>' +
+      (openReq.length ? '<div class="gsSetupNote" style="font-size:12px;color:#57606a;margin:0 0 8px;">The installation is complete. A red step is a setup choice only you can make for your organisation (who, which roles, where mail goes) -- not an installation failure.</div>' : '') +
       (staged ? '<div class="gsStaged">' + staged + ' change(s) are saved on this page but not committed yet -- nothing reaches the tenant until they are committed. <button type="button" class="gsCommitNow primary">Commit now</button></div>' : '') +
       '<div class="gsStep" data-gs-step="' + escapeHtml(cur.id) + '" style="border:1px solid #d0d7de;border-radius:8px;padding:16px 18px;margin-top:6px;background:#fff;">' +
         ((opts && opts.finished) ? (openReq.length
@@ -13658,8 +13843,8 @@
         '<div style="font-size:11px;letter-spacing:.6px;color:#0969da;font-weight:600;">STEP ' + (idx + 1) + ' OF ' + total + (cur.required ? '' : ' &middot; OPTIONAL') + '</div>' +
         '<h3 class="gsTitle" style="margin:4px 0 6px;">' + escapeHtml(cur.title) + '</h3>' +
         '<div class="gsWhat" style="font-size:13px;color:#24292f;margin-bottom:8px;">' + escapeHtml(cur.what) + '</div>' +
-        '<div class="gsState" data-gs-state="' + (cur.done ? 'done' : cur.required ? 'open' : 'optional') + '" style="font-size:12.5px;margin-bottom:12px;color:' + (cur.done ? '#1a7f37' : cur.required ? '#cf222e' : '#57606a') + ';">' +
-          (cur.done ? '&#10003; Done' : cur.required ? '! Not done yet' : 'Optional -- not done yet') + (cur.note ? ' -- ' + escapeHtml(cur.note) : '') + '</div>' +
+        '<div class="gsState" data-gs-state="' + (cur.done ? 'done' : cur.deferred ? 'deferred' : cur.required ? 'open' : 'optional') + '" style="font-size:12.5px;margin-bottom:12px;color:' + (cur.done ? '#1a7f37' : (cur.required && !cur.deferred) ? '#cf222e' : '#57606a') + ';">' +
+          (cur.done ? '&#10003; Done' : cur.deferred ? 'Skipped for now' : cur.required ? '! Not done yet' : 'Optional -- not done yet') + (cur.note ? ' -- ' + escapeHtml(cur.note) : '') + '</div>' +
         '<div class="gsExtra"></div>' +
         '<form class="gsForm" novalidate autocomplete="off">' +
           // Enter = Save & next: the FIRST submit button of a form is the one Enter presses. Previous is a plain button.
@@ -18651,6 +18836,9 @@
       if (p && sharedUnsynced(base)) { sharedPush(base, 0); continue; }   // our own edits go up first; the push rebases
       try { await sharedRebuild(base, entry, false); changed = true; } catch (_) { }
     }
+    // An entity the server no longer lists (committed / discarded by anyone) has nothing staged: forget its old set, so
+    // the counts on the page (the discard-all button) never show changes that are gone.
+    for (const k of Object.keys(SHARED.bases)) { if (!names.has(k)) delete SHARED.bases[k]; }
     SHARED.pulled = true;
     if (changed) {
       markBadgesQuiet();
@@ -20094,10 +20282,30 @@
   // ===================================================================
   // Save tab
   // ===================================================================
+  // 97.1 (owner 2026-10-08: the page listed PIM-Assignments-Roles-Groups and PIM-Assignments-Workloads TWICE, same counts,
+  // same person): renderSaveTab is async and is started again by the shared pull / a push while an earlier run still
+  // waits on its diffs -- the earlier run then appended its remaining cards under the newer run's. Only the NEWEST run
+  // draws: a run that has been superseded stops at its next await.
+  let SAVE_RENDER_GEN = 0;
+  // Everyone's staged changes, counted (the SuperAdmin's discard-all confirms these numbers).
+  function sharedEveryoneSummary() {
+    const byPerson = {}, byBase = {}; let total = 0;
+    for (const base of Object.keys(SHARED.bases || {})) {
+      const chs = ((SHARED.bases[base] || {}).changes || []);
+      if (!chs.length) continue;
+      byBase[base] = chs.length; total += chs.length;
+      chs.forEach(c => { const k = String(c.by || '(unknown)'); byPerson[k] = (byPerson[k] || 0) + 1; });
+    }
+    return { total, byPerson, byBase };
+  }
   async function renderSaveTab() {
+    const gen = ++SAVE_RENDER_GEN;
     renderSaveValBanner();
     const wrap = document.getElementById('saveCards');
     wrap.innerHTML = '';
+    // SuperAdmin: discard EVERYONE's staged changes (POST /api/pending-discard-all) -- shown while anything is staged.
+    const dAll = document.getElementById('btnDiscardEveryone');
+    if (dAll) { const sm = sharedEveryoneSummary(); dAll.style.display = (SHARED.on && roleAtLeast('SuperAdmin') && sm.total > 0) ? '' : 'none'; dAll.textContent = 'Discard ALL pending changes (everyone’s, ' + sm.total + ')'; }
     // §79.13: pending changes are SHARED -- say so, and (SuperAdmin) choose when a second administrator must commit.
     if (SHARED.on) {
       const sh = document.createElement('div');
@@ -20138,20 +20346,27 @@
       const st = document.getElementById('saveStatus');
       if (st && st.dataset.sticky !== '1') { st.textContent = ''; st.className = ''; }
     }
-    for (const base of bases) {
+    // Every card is placed FIRST (synchronously, one per entity), then filled; a superseded run stops (SAVE_RENDER_GEN).
+    const cards = bases.map(base => {
       const card = document.createElement('div');
       card.className = 'save-card';
       card.id = 'save-card-' + base;
       card.innerHTML = `<h3>${escapeHtml(base)}</h3>${sharedStagersHtml(base)}<div class="counts">computing diff...</div>`;
       wrap.appendChild(card);
+      return { base, card };
+    });
+    for (const { base, card } of cards) {
       try {
         const finalRows = pendingFinalRows(base);
         const diff = await api('POST', '/api/diff/' + encodeURIComponent(base), { rows: finalRows });
+        if (gen !== SAVE_RENDER_GEN) return;
         renderSaveCard(card, base, diff);
       } catch (e) {
+        if (gen !== SAVE_RENDER_GEN) return;
         card.querySelector('.counts').innerHTML = `<span style="color:#cf222e">diff failed: ${escapeHtml(e.message)}</span>`;
       }
     }
+    if (gen !== SAVE_RENDER_GEN) return;
     // Pending changes IS the queue: show the directory-action queue in the SAME panel, and keep
     // the menu counter honest while we are here.
     try { await renderQueueInto(document.getElementById('saveQueueHost')); } catch (e) { /* never break the save panel */ }
@@ -20926,6 +21141,40 @@
     if (status.dataset) status.dataset.sticky = '0';
     status.textContent = 'All pending changes discarded.';
     status.className = '';
+  };
+
+  // 97.1 (owner 2026-10-08: "there is a button where i can discard all the pending colleagues changes. but i have 300 so i
+  // need a discard all"): SuperAdmin only. Says how many and who staged them, asks for a reason, then POST
+  // /api/pending-discard-all with the count confirmed (the server refuses if the number changed meanwhile). Commits nothing.
+  (document.getElementById('btnDiscardEveryone') || {}).onclick = async () => {
+    if (!SHARED.on || !roleAtLeast('SuperAdmin')) return;
+    try { await sharedFlush(); await sharedPull(); } catch (_) { }
+    const sm = sharedEveryoneSummary();
+    const st = document.getElementById('saveStatus');
+    if (!sm.total) { st.textContent = 'Nothing is staged.'; st.className = ''; return; }
+    const me = String(SHARED.me || '').toLowerCase();
+    const who = Object.keys(sm.byPerson).map(k => '- ' + k + (k.toLowerCase() === me ? ' (you)' : '') + ': ' + sm.byPerson[k]).join('\n');
+    const what = Object.keys(sm.byBase).map(k => '- ' + k + ': ' + sm.byBase[k]).join('\n');
+    if (!window.confirm('Discard ALL ' + sm.total + ' pending change(s) -- everyone\'s, not only yours?\n\nStaged by:\n' + who + '\n\nIn:\n' + what +
+        '\n\nNothing is committed and nothing in the tenant changes; the staged changes are thrown away for every administrator. This cannot be undone.')) return;
+    const why = window.prompt('Why are you discarding everyone\'s pending changes? (recorded in the audit log)', '');
+    if (!why || !String(why).trim()) { st.textContent = 'A reason is required -- nothing was discarded.'; st.className = 'err'; return; }
+    try {
+      const r = await api('POST', '/api/pending-discard-all', { reason: String(why).trim(), expectCount: sm.total });
+      for (const b of Object.keys(pendingChanges)) delete pendingChanges[b];
+      try { for (const b of Object.keys(PENDING_UNDO_OF)) delete PENDING_UNDO_OF[b]; } catch (_) { }
+      try { persistPendingDraft(); } catch (_) { }
+      await sharedPull();
+      markBadgesQuiet(); renderSaveTab();
+      if (st.dataset) st.dataset.sticky = '1';
+      st.textContent = 'Discarded all ' + ((r && r.cleared) || sm.total) + ' pending change(s) of every administrator. Nothing was committed.';
+      st.className = '';
+    } catch (e) {
+      if (st.dataset) st.dataset.sticky = '1';
+      st.textContent = 'NOT discarded: ' + ((e && e.body && e.body.error) || (e && e.message) || 'refused');
+      st.className = 'err';
+      try { await sharedPull(); renderSaveTab(); } catch (_) { }
+    }
   };
 
   (document.getElementById('btnRefresh') || {}).onclick = async () => {
@@ -29395,9 +29644,53 @@
 
   // Stage the ticked rows of one template pack into Pending changes. ONE writer for the template card's "Import into
   // pending" and Get Started's "Roles & templates" step (97.1), so both stage exactly the same rows.
-  // picks: { <base>: [bool per row of t.missing[base]] }. Returns { n, keyTaken }.
+  // picks: { <base>: [bool per row of t.missing[base]] }. Returns { n, keyTaken, notInTenant }.
+  // 97.1 (owner 2026-10-08, a new managing tenant: "these roles in the template dont exist"): a pack row that grants an
+  // Entra role the TENANT does not have can never be applied, and the commit refuses it (PIM-STALE-001 checks the same
+  // 'entra-roles' tenant cache, by displayName, case-insensitive). Such rows are LEFT OUT here and named in notInTenant
+  // ("<base>: <role> (<group>)"); a group definition whose every picked role binding was left out goes with them, so no
+  // empty group is created. With no role list to check against, nothing is left out (the commit's check still runs).
+  const TPL_ROLE_BASES = ['PIM-Assignments-Roles-Groups', 'PIM-Assignments-Roles-AUs'];
+  async function tplTenantRoleNames() {
+    let c = getCachedList('entraRoles');
+    if ((!c.items || !c.items.length) && isServer) { try { await refreshTenantLists({ silent: true }); } catch (_) { } c = getCachedList('entraRoles'); }
+    const items = (c && c.items) || [];
+    if (!items.length) return null;
+    const set = new Set();
+    items.forEach(r => { const nm = r && (r.displayName || r.DisplayName || r.name); if (nm) set.add(String(nm).trim().toLowerCase()); });
+    return set.size ? { names: set, count: set.size } : null;
+  }
+  function tplNotInTenantPlan(t, picks, roles) {
+    const out = { skip: {}, rows: [] };   // skip: "<base>#<i>" -> true
+    if (!roles) return out;
+    for (const base of TPL_ROLE_BASES) {
+      (((t && t.missing) || {})[base] || []).forEach((tr, i) => {
+        if (!(picks[base] && picks[base][i])) return;
+        const rn = String((tr && tr.RoleDefinitionName) || '').trim();
+        if (rn && !roles.names.has(rn.toLowerCase())) { out.skip[base + '#' + i] = true; out.rows.push(base + ': ' + rn + (tr.GroupTag ? ' (' + tr.GroupTag + ')' : '')); }
+      });
+    }
+    // a unit whose every picked binding is left out: its group definition goes too (never an orphan group)
+    ((t && t.units) || []).forEach(u => {
+      if (!u || !u.definition) return;
+      const picked = (u.bindings || []).filter(b => picks[b.base] && picks[b.base][Number(b.i)]);
+      if (picked.length && picked.every(b => out.skip[b.base + '#' + Number(b.i)]) && picks[u.definition.base] && picks[u.definition.base][Number(u.definition.i)]) {
+        out.skip[u.definition.base + '#' + Number(u.definition.i)] = true;
+        out.rows.push(u.definition.base + ': group ' + (u.groupName || u.tag) + ' (all its roles are missing in this tenant)');
+      }
+    });
+    return out;
+  }
+  function tplNotInTenantText(rows) {
+    const r = rows || [];
+    return 'Left out -- ' + r.length + ' row(s) of the template grant an Entra role that does not exist in this tenant (checked against its role definitions; the commit would refuse them as PIM-STALE-001):\n\n- ' +
+      r.slice(0, 20).join('\n- ') + (r.length > 20 ? '\n- ... and ' + (r.length - 20) + ' more' : '') +
+      '\n\nEverything else was staged. A role that is added to the tenant later can be staged again from the template.';
+  }
   async function tplStagePackRows(t, picks) {
     let n = 0;
+    const hasRoleRows = TPL_ROLE_BASES.some(b => (picks[b] || []).some(Boolean) && (((t && t.missing) || {})[b] || []).length);
+    const plan = tplNotInTenantPlan(t, picks, hasRoleRows ? await tplTenantRoleNames() : null);
     // 🔴 §77.24 (a test environment 2026-09-21: "14 store key(s) of PIM-Assignments-Workloads are used by more than one row in
     // this commit"): the store keeps ONE row per store key (Workloads: GroupTag alone), so a pack row whose store
     // key a row already holds -- stored, or staged by an earlier import -- is never staged a second time. It is
@@ -29412,6 +29705,7 @@
       p.rows.forEach((r, i) => { if (p.deletes && p.deletes.has(i)) return; const k = pendingRowKey(base, r); if (k) held.add(k); });
       for (const [ti, tr] of (t.missing[base] || []).entries()) {
         if (!picks[base][ti]) continue;
+        if (plan.skip[base + '#' + ti]) continue;   // its Entra role is not in this tenant (named in notInTenant)
         const row = {};
         for (const c of p.header) row[c] = '';
         for (const k of Object.keys(tr)) row[k] = String(tr[k] == null ? '' : tr[k]);
@@ -29423,7 +29717,7 @@
         n++;
       }
     }
-    return { n: n, keyTaken: keyTaken };
+    return { n: n, keyTaken: keyTaken, notInTenant: plan.rows };
   }
 
   async function renderTemplates() {
@@ -29566,6 +29860,7 @@
           try {
             const staged = await tplStagePackRows(t, picks);
             const n = staged.n, keyTaken = staged.keyTaken;
+            if ((staged.notInTenant || []).length) alert(tplNotInTenantText(staged.notInTenant));
             if (keyTaken.length) alert('Not staged -- ' + keyTaken.length + ' row(s) of this pack are for a group that already has its row (the store keeps one row per group; edit that row to change it):\n\n- ' + keyTaken.slice(0, 15).join('\n- ') + (keyTaken.length > 15 ? '\n- ... and ' + (keyTaken.length - 15) + ' more' : ''));
             markBadges();
             btn.textContent = '✓ ' + n + ' staged';
