@@ -1200,9 +1200,10 @@ function Test-PimReplicationWriteAllowed {
     # managed tenant never edits what the managing tenant sends. So off the managing tenant an admin's Ring / Target are refused too
     # (the v2 engine reads an admin's Ring only in the MSP downlink), and so is switching ManagementMode to msp.
     $fields = @('Replicate','Ring','Target')
+    $haveKey = [bool](Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue)   # §97.1: once per gate, not once per row
     $keyOf = {
         param($r)
-        if (Get-Command Get-PimStoreRowKey -ErrorAction SilentlyContinue) { return (Get-PimStoreRowKey -Base $Entity -Row $r) }
+        if ($haveKey) { return (Get-PimStoreRowKey -Base $Entity -Row $r) }
         return "$(Get-PimDownlinkValue -Object $r -Key 'GroupTag')$(Get-PimDownlinkValue -Object $r -Key 'UserName')"
     }
     $cur = @{}

@@ -79,6 +79,15 @@
     edge://extensions (Developer Mode -> Load unpacked). Used to build the
     SPA redirect URI: https://<ExtensionId>.chromiumapp.org/
 
+.PARAMETER AssignToGroupId
+    The object id of the group whose members may use the PIM Activator. The app is
+    always set to "Assignment required", so only assigned people can sign in; this
+    group is assigned to it and read back. Direct, permanent members only (Entra does
+    not pass app access through nested groups; a PIM-eligible membership would lock
+    the person out of the tool that activates it). Not given: nobody can sign in until
+    a group is assigned. An existing app that is open to everyone today is not closed
+    without a group (that would lock every current user out).
+
 .PARAMETER DisplayName
     Display name of the app registration. Default: "PIM Activator".
 
@@ -107,7 +116,11 @@
     key, in Cert:\CurrentUser\My or Cert:\LocalMachine\My.
 
 .EXAMPLE
-    # Zero-arg -- opens Edge for the sign-in, with the right scopes:
+    # The command the PIM Manager page shows: this tenant, PROD, for the group of admins who use it:
+    .\Deploy-PimActivatorBackend.ps1 -TenantId <tenant-id> -Channel Released -DisplayName 'PIM Activator' -AssignToGroupId <group-id>
+
+.EXAMPLE
+    # Zero-arg -- opens Edge for the sign-in, with the right scopes (nobody assigned yet):
     .\Deploy-PimActivatorBackend.ps1
 
 .EXAMPLE
@@ -173,7 +186,15 @@ param(
 
     # A Microsoft Graph access token you already have (automation). Skips the
     # browser sign-in; not renewed (valid ~1 hour from when it was minted).
-    [string]$AccessToken
+    [string]$AccessToken,
+
+    # 97.2 (owner 2026-10-08: "customer must define who (group) to deploy to - not
+    # everyone"): the app is ALWAYS set to "Assignment required" (appRoleAssignmentRequired),
+    # so only people you assign can sign in to the PIM Activator. -AssignToGroupId assigns
+    # that group (direct members; read back). Not given = nobody can sign in until you
+    # assign a group (Enterprise applications > the app > Users and groups, or re-run with it).
+    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    [string]$AssignToGroupId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -481,6 +502,61 @@ if (-not $sp) {
 $spId = Get-PaProp $sp 'id'
 
 # ---------------------------------------------------------------------------
+# WHO may sign in (97.2, owner 2026-10-08): "Assignment required" + the group
+# ---------------------------------------------------------------------------
+# Without appRoleAssignmentRequired every user in the tenant can sign in to the
+# app (and, with the tenant-wide consent below, get its tokens). With it, only
+# the people assigned to the enterprise app can. A group assignment covers the
+# group's DIRECT members (Entra does not pass app access through nested groups),
+# and the membership must be permanent: a PIM-eligible membership would lock the
+# person out of the very tool that activates it.
+$_assignedNow = @(Invoke-PaGraph -Method GET -Path "/servicePrincipals/$spId/appRoleAssignedTo?`$select=id,principalId,principalDisplayName,principalType" -All)
+$_spNow = Invoke-PaGraph -Method GET -Path "/servicePrincipals/$spId`?`$select=id,appRoleAssignmentRequired"
+if (-not [bool](Get-PaProp $_spNow 'appRoleAssignmentRequired')) {
+    if ($existing.Count -eq 1 -and -not $AssignToGroupId -and -not $_assignedNow.Count) {
+        # An app that is in use and open to everyone: switching it to "assignment required" with nobody assigned would
+        # lock every current user out at once. Refuse, and say what to run.
+        throw ("'$DisplayName' (appId $appId) is open to EVERY user today and nobody is assigned to it. Setting 'Assignment required' now would lock " +
+               "every current user out. Re-run with -AssignToGroupId <group object id> (the admins who use the PIM Activator) -- the group is " +
+               "assigned first, then the app is closed to everyone else.")
+    }
+}
+if ($AssignToGroupId) {
+    $_hit = @($_assignedNow | Where-Object { "$(Get-PaProp $_ 'principalId')" -ieq $AssignToGroupId })
+    if ($_hit.Count) {
+        Write-Host "Group $AssignToGroupId ($(Get-PaProp $_hit[0] 'principalDisplayName')) is already assigned to the app." -ForegroundColor DarkGray
+    } else {
+        Write-Host "Assigning group $AssignToGroupId to '$DisplayName' (default access)..." -ForegroundColor Cyan
+        $_new = Invoke-PaGraph -Method POST -Path "/servicePrincipals/$spId/appRoleAssignedTo" -Body @{
+            principalId = $AssignToGroupId; resourceId = $spId; appRoleId = '00000000-0000-0000-0000-000000000000' }
+        if ("$(Get-PaProp $_new 'principalType')" -and "$(Get-PaProp $_new 'principalType')" -ne 'Group') {
+            # Not a group (a user or a service principal id was passed): take back what was just added.
+            try { Invoke-PaGraph -Method DELETE -Path "/servicePrincipals/$spId/appRoleAssignedTo/$(Get-PaProp $_new 'id')" | Out-Null } catch { }
+            throw "$AssignToGroupId is a $(Get-PaProp $_new 'principalType'), not a group -- the assignment was removed again. Pass the object id of a GROUP."
+        }
+    }
+}
+if (-not [bool](Get-PaProp $_spNow 'appRoleAssignmentRequired')) {
+    Invoke-PaGraph -Method PATCH -Path "/servicePrincipals/$spId" -Body @{ appRoleAssignmentRequired = $true } | Out-Null
+}
+# read back: assignment required, and the group is there
+$_spBack = Invoke-PaGraph -Method GET -Path "/servicePrincipals/$spId`?`$select=id,appRoleAssignmentRequired"
+if (-not [bool](Get-PaProp $_spBack 'appRoleAssignmentRequired')) { throw "'$DisplayName': 'Assignment required' did not read back as set -- check Enterprise applications > $DisplayName > Properties." }
+$_assignedBack = @(Invoke-PaGraph -Method GET -Path "/servicePrincipals/$spId/appRoleAssignedTo?`$select=id,principalId,principalDisplayName,principalType" -All)
+$_groupName = ''
+if ($AssignToGroupId) {
+    $_g = @($_assignedBack | Where-Object { "$(Get-PaProp $_ 'principalId')" -ieq $AssignToGroupId -and "$(Get-PaProp $_ 'principalType')" -eq 'Group' })
+    if (-not $_g.Count) { throw "'$DisplayName': group $AssignToGroupId did not read back as assigned -- check Enterprise applications > $DisplayName > Users and groups." }
+    $_groupName = "$(Get-PaProp $_g[0] 'principalDisplayName')"
+}
+Write-Host "Assignment required: ON (read back) -- only assigned users and groups can sign in." -ForegroundColor Green
+if ($_assignedBack.Count) {
+    Write-Host ("Deploys to: " + (@($_assignedBack | ForEach-Object { "$(Get-PaProp $_ 'principalDisplayName') ($(Get-PaProp $_ 'principalType'))" }) -join ', ')) -ForegroundColor Green
+} else {
+    Write-Host "Deploys to: NOBODY yet -- nobody can sign in until you assign a group: re-run with -AssignToGroupId <group object id>, or Enterprise applications > $DisplayName > Users and groups > Add." -ForegroundColor Yellow
+}
+
+# ---------------------------------------------------------------------------
 # Optional: tenant-wide admin consent for the delegated scopes
 # ---------------------------------------------------------------------------
 
@@ -534,6 +610,10 @@ Write-Host ""
     ClientId    = $appId
     AppObjectId = $appObjId
     SpObjectId  = $spId
+    AssignmentRequired = $true
+    AssignedGroupId    = $(if ($AssignToGroupId) { $AssignToGroupId.ToLowerInvariant() } else { '' })
+    AssignedGroupName  = $_groupName
+    AssignedTo         = @($_assignedBack | ForEach-Object { "$(Get-PaProp $_ 'principalDisplayName')" })
     RedirectUri = $redirectUri
     Scopes      = $needed
 }

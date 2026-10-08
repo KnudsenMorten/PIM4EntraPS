@@ -1,50 +1,108 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Uploads a Detect + Remediate script pair to Intune as a Remediation -- creates it, or updates it in place when a
-    Remediation with the same name exists (its assignments are kept). Optional: assign it to a group, all devices or
-    all users.
+    Builds the PIM Activator Intune Remediation (Detect + Remediate) for your tenant and uploads it -- creates it, or
+    updates it in place when a Remediation with the same name exists. ONE file, ONE command: nothing else to download.
 
 .DESCRIPTION
-    For Detect-PimActivator.ps1 + Remediate-PimActivator.ps1 in .\intune-remediation (after you have edited their
-    SETTINGS block -- identically in both), or the pair the PIM Manager builds under Operations > PIM Activator.
-    Always uploaded as: run as SYSTEM, 64-bit PowerShell, no signature check.
+    97.2 (owner 2026-10-08: "this guide is wrong as it refers to 3 files, but the cmdlets show is missing 2 of them"):
+    the script builds Detect-PimActivator.ps1 + Remediate-PimActivator.ps1 ITSELF from the parameters (the same text
+    the PIM Manager's Operations > PIM Activator page builds for the same settings), writes them next to itself
+    (-OutDir), then uploads them. Always: run as SYSTEM, 64-bit PowerShell, no signature check.
+    -DetectScript / -RemediateScript upload your own pair instead (an override).
+
+    WHO GETS IT (owner 2026-10-08: "customer must define who (group) to deploy to - not everyone" / "confirm that the
+    cmdlets doesn't add an assignment by default"): -AssignToGroupId assigns the Remediation to THAT group (it replaces
+    the Remediation's assignments) and reads the assignment back. Without it NOTHING is assigned -- a new Remediation
+    reaches nobody until you assign a group; an existing one keeps the assignments it has. There is no "all users" /
+    "all devices" option.
 
     NO MODULES (owner 2026-10-07: "neither pim, si or invardia must have dependencies"): plain REST. You sign in in the
     browser (Edge) as an Intune administrator; the script asks Microsoft Graph for DeviceManagementScripts.ReadWrite.All
     only. -AccessToken takes a token you already have instead (automation).
 
 .EXAMPLE
+    # PROD, assigned to the group of admins who use the Activator (the command the PIM Manager page shows):
+    .\Publish-PimActivatorRemediation.ps1 -TenantId <tenant id> -Channel Released -ClientId <PIM Activator app id> `
+        -CatalogName 'Contoso' -AssignToGroupId <group object id>
+.EXAMPLE
+    # Upload a pair you edited yourself, no assignment yet:
     .\Publish-PimActivatorRemediation.ps1 -TenantId <tenant id> -Name 'PIM Activator settings (TEST)' `
         -DetectScript .\Detect-PimActivator.ps1 -RemediateScript .\Remediate-PimActivator.ps1
-.EXAMPLE
-    .\Publish-PimActivatorRemediation.ps1 -TenantId <tenant id> -Name 'PIM Activator settings (PROD)' `
-        -DetectScript .\Detect-PimActivator.ps1 -RemediateScript .\Remediate-PimActivator.ps1 -AssignAllDevices -EveryHours 1
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Name,
-    [Parameter(Mandatory)][string]$DetectScript,
-    [Parameter(Mandatory)][string]$RemediateScript,
-    # The tenant to sign in to (its id or a verified domain). Not given = your home tenant.
+    # The tenant to sign in to and to write into the extension's catalog (its id).
     [string]$TenantId = 'organizations',
+    # Released (PROD) or Test -- which extension the Remediation configures.
+    [ValidateSet('Released', 'Test')][string]$Channel = 'Released',
+    # The PIM Activator app registration of that channel (its Application (client) id) -- step 1 of the page.
+    [string]$ClientId,
+    # The settings step of the page: the name admins see, the activation defaults, the optional filters and limits.
+    [string]$CatalogName = 'PIM',
+    [string]$DefaultJustification = 'Change in infrastructure',
+    [ValidateRange(1, 24)][int]$DefaultDurationHours = 8,
+    [string]$Prefix = '',
+    [string]$EntraPrefix = '',
+    [string]$AzurePrefix = '',
+    [ValidateRange(0, 100)][int]$AutoActivateMaxGroups = -1,
+    [ValidateRange(0, 100)][int]$BulkActivateConfirmThreshold = -1,
+    [string[]]$Browsers = @('Edge', 'Chrome'),
+    # Optional: more tenants for the popup's tenant switcher (multi-tenant), a JSON array of
+    # { name, tenantId, clientId, ... } -- this tenant stays the first entry. Empty = this tenant only.
+    [string]$AdditionalTenantsJson = '',
+    # The Remediation's name in Intune. Default 'PIM Activator settings (PROD)' / '(TEST)'.
+    [string]$Name,
+    # Overrides: upload these two files instead of building them.
+    [string]$DetectScript,
+    [string]$RemediateScript,
+    # Where the built pair is written (default: next to this script).
+    [string]$OutDir,
     # A Microsoft Graph access token with DeviceManagementScripts.ReadWrite.All -- skips the browser sign-in.
     [string]$AccessToken,
     [string]$Description = '',
-    # Assign to this Entra group (user or device group). REPLACES the Remediation's assignments. Not given = unchanged.
-    [ValidatePattern('^[0-9a-fA-F-]{36}$')][string]$AssignToGroupId,
-    # 97.2 (operator 2026-10-07: "make it optional to which group or all devices or all users"): instead of a group,
-    # every device or every (licensed) user. Exactly one of -AssignToGroupId / -AssignAllDevices / -AssignAllUsers.
-    [switch]$AssignAllDevices,
-    [switch]$AssignAllUsers,
+    # Assign to this Entra group (user or device group). REPLACES the Remediation's assignments. Not given = NOTHING is
+    # assigned (nobody gets it until you assign a group).
+    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')][string]$AssignToGroupId,
     [ValidatePattern('^\d{2}:\d{2}$')][string]$DailyTime = '09:00',
     # With an assignment: run every N hours instead of daily (e.g. 1 = every hour).
     [ValidateRange(1, 23)][int]$EveryHours
 )
 $ErrorActionPreference = 'Stop'
-if (@(@([bool]$AssignToGroupId, [bool]$AssignAllDevices, [bool]$AssignAllUsers) | Where-Object { $_ }).Count -gt 1) { throw 'Pass ONE of -AssignToGroupId, -AssignAllDevices or -AssignAllUsers.' }
-foreach ($f in $DetectScript, $RemediateScript) { if (-not (Test-Path -LiteralPath $f)) { throw "Script not found: $f" } }
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+# The pure builder (catalog + the filled pair) and the shipped Detect / Remediate text. Loaded with the literal form below
+# so Build-PimSupportScripts inlines it (with the two scripts embedded) into the standalone download.
+. (Join-Path $PSScriptRoot '_PimActivatorBuild.ps1')
+
+$label = if ($Channel -eq 'Test') { 'TEST' } else { 'PROD' }
+if (-not "$Name".Trim()) { $Name = "PIM Activator settings ($label)" }
+$here = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+if (-not "$OutDir".Trim()) { $OutDir = $here }
+
+# ---- the pair: built from the parameters, or the two files given -------------------------------------------------------
+if ($DetectScript -or $RemediateScript) {
+    if (-not ($DetectScript -and $RemediateScript)) { throw 'Pass BOTH -DetectScript and -RemediateScript (or neither, and the script builds them).' }
+    foreach ($f in $DetectScript, $RemediateScript) { if (-not (Test-Path -LiteralPath $f)) { throw "Script not found: $f" } }
+    $detPath = (Resolve-Path -LiteralPath $DetectScript).Path; $remPath = (Resolve-Path -LiteralPath $RemediateScript).Path
+    Write-Host "Using your own pair: $detPath + $remPath" -ForegroundColor Cyan
+} else {
+    $guid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    if ("$TenantId" -notmatch $guid) { throw '-TenantId <tenant id> is required to build the Remediation (it goes into the extension''s catalog). Copy the command from the PIM Manager (Operations > PIM Activator > Intune remediation).' }
+    if ("$ClientId" -notmatch $guid) { throw "-ClientId <PIM Activator app id> is required to build the Remediation -- create the app first (Deploy-PimActivatorBackend.ps1) and use its client id." }
+    $br = @(@($Browsers) | ForEach-Object { "$_" -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $pair = New-PimActivatorRemediationPair -TenantId $TenantId -ClientId $ClientId -Name $CatalogName -Channel $Channel -Browsers $br `
+        -DefaultJustification $DefaultJustification -DefaultDurationHours $DefaultDurationHours -Prefix $Prefix -EntraPrefix $EntraPrefix -AzurePrefix $AzurePrefix `
+        -AutoActivateMaxGroups $(if ($AutoActivateMaxGroups -ge 0) { $AutoActivateMaxGroups } else { $null }) -BulkActivateConfirmThreshold $(if ($BulkActivateConfirmThreshold -ge 0) { $BulkActivateConfirmThreshold } else { $null }) `
+        -AdditionalTenantsJson $AdditionalTenantsJson
+    New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+    $detPath = Join-Path $OutDir 'Detect-PimActivator.ps1'; $remPath = Join-Path $OutDir 'Remediate-PimActivator.ps1'
+    # UTF-8 WITH a BOM, so Windows PowerShell 5.1 on the device reads non-ASCII characters right (same bytes as the page).
+    $enc = New-Object Text.UTF8Encoding($true)
+    [IO.File]::WriteAllText($detPath, $pair.detect, $enc); [IO.File]::WriteAllText($remPath, $pair.remediate, $enc)
+    Write-Host "Built the Remediation for $label (tenant $TenantId, app $ClientId, '$CatalogName'): $detPath + $remPath" -ForegroundColor Cyan
+}
+$who = if ($AssignToGroupId) { "group $AssignToGroupId" } else { 'NOBODY yet (no -AssignToGroupId)' }
+Write-Host "Deploys to: $who" -ForegroundColor Cyan
 
 function ConvertTo-PaB64Url([byte[]]$Bytes) { [Convert]::ToBase64String($Bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
 
@@ -81,7 +139,7 @@ function Get-PaGraphToken {
             } finally { $c.Close() }
         }
     } finally { $tcp.Stop() }
-    $kv = @{}; foreach ($p in ($query -split '&')) { $k, $v = $p -split '=', 2; $kv[$k] = [uri]::UnescapeDataString("$v" -replace '\+', ' ') }
+    $kv = @{}; foreach ($p in ($query -split '&')) { $k, $v = $p -split '=', 2; $kv[$k] = [uri]::UnescapeDataString(("$v" -replace '\+', ' ')) }   # (( )): inside a method call the -replace comma is an argument separator
     if ($kv['error']) { throw "Sign-in failed: $($kv['error']) -- $($kv['error_description'])" }
     if ($kv['state'] -ne $state) { throw 'Sign-in answer did not match (state) -- close all browser windows and run again.' }
     $r = Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$Tenant/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{
@@ -110,13 +168,13 @@ $body = [ordered]@{
     runAsAccount             = 'system'
     runAs32Bit               = $false
     enforceSignatureCheck    = $false
-    detectionScriptContent   = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $DetectScript)))
-    remediationScriptContent = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $RemediateScript)))
+    detectionScriptContent   = [Convert]::ToBase64String([IO.File]::ReadAllBytes($detPath))
+    remediationScriptContent = [Convert]::ToBase64String([IO.File]::ReadAllBytes($remPath))
 }
 if ($match) {
     $id = "$($match[0].id)"
     [void](Invoke-PaGraph PATCH "$base/$id" $body)
-    Write-Host "[OK] Updated '$Name' ($id) -- assignments unchanged." -ForegroundColor Green
+    Write-Host "[OK] Updated '$Name' ($id)." -ForegroundColor Green
 } else {
     $body['roleScopeTagIds'] = @('0')
     $id = "$((Invoke-PaGraph POST $base $body).id)"
@@ -130,21 +188,25 @@ if ("$($back.detectionScriptContent)" -ne $body.detectionScriptContent -or "$($b
 }
 Write-Host '     read back OK: same scripts, runs as SYSTEM, 64-bit.' -ForegroundColor DarkGray
 
-if ($AssignToGroupId -or $AssignAllDevices -or $AssignAllUsers) {
+if ($AssignToGroupId) {
     $schedule = if ($EveryHours) { @{ '@odata.type' = '#microsoft.graph.deviceHealthScriptHourlySchedule'; interval = $EveryHours } }
                 else { @{ '@odata.type' = '#microsoft.graph.deviceHealthScriptDailySchedule'; interval = 1; useUtc = $false; time = "$DailyTime`:00" } }
-    $target = if ($AssignAllDevices) { @{ '@odata.type' = '#microsoft.graph.allDevicesAssignmentTarget' } }
-              elseif ($AssignAllUsers) { @{ '@odata.type' = '#microsoft.graph.allLicensedUsersAssignmentTarget' } }
-              else { @{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = $AssignToGroupId } }
-    $who = if ($AssignAllDevices) { 'all devices' } elseif ($AssignAllUsers) { 'all users' } else { "group $AssignToGroupId" }
     $asg = @{ deviceHealthScriptAssignments = @(@{
-        target               = $target
+        target               = @{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = $AssignToGroupId }
         runRemediationScript = $true
         runSchedule          = $schedule
     }) }
     [void](Invoke-PaGraph POST "$base/$id/assign" $asg)
-    Write-Host ("[OK] Assigned to $who, {0}." -f $(if ($EveryHours) { "every $EveryHours hour(s)" } else { "daily at $DailyTime" })) -ForegroundColor Green
+    # read the assignment back: exactly this group, nothing wider
+    $got = @((Invoke-PaGraph GET "$base/$id/assignments").value)
+    $hit = @($got | Where-Object { "$($_.target.groupId)" -ieq $AssignToGroupId -and "$($_.target.'@odata.type')" -match 'groupAssignmentTarget' })
+    if ($got.Count -ne 1 -or $hit.Count -ne 1) { throw "'$Name' ($id): the assignment did not read back as ONLY group $AssignToGroupId ($($got.Count) assignment(s)) -- check it in Intune > Devices > Scripts and remediations." }
+    Write-Host ("[OK] Assigned to group $AssignToGroupId only, {0} (read back)." -f $(if ($EveryHours) { "every $EveryHours hour(s)" } else { "daily at $DailyTime" })) -ForegroundColor Green
 } else {
     $n = @((Invoke-PaGraph GET "$base/$id/assignments").value).Count
-    Write-Host ("     assignments: {0}" -f $(if ($n) { "$n (unchanged)" } else { 'none yet -- assign it in Intune or re-run with -AssignToGroupId / -AssignAllDevices / -AssignAllUsers' })) -ForegroundColor $(if ($n) { 'DarkGray' } else { 'Yellow' })
+    if ($n) { Write-Host "     assignments: $n (unchanged -- this run assigned nothing)" -ForegroundColor DarkGray }
+    else {
+        Write-Host "     NOT ASSIGNED to anyone yet -- nobody gets it. Assign it to a group: re-run with -AssignToGroupId <group object id>," -ForegroundColor Yellow
+        Write-Host "     or in Intune > Devices > Scripts and remediations > '$Name' > Properties > Assignments (a group, never all users / all devices)." -ForegroundColor Yellow
+    }
 }

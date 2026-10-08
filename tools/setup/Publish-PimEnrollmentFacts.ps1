@@ -49,7 +49,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-. (Join-Path $solRoot 'engine\msp\PIM-InvardiaEnrollment.ps1')
+$__enrollLib = Join-Path $solRoot 'engine\msp\PIM-InvardiaEnrollment.ps1'
+if (-not (Test-Path -LiteralPath $__enrollLib)) { throw 'Self-service managed tenants (enrollment) are part of PIM Manager Pro (MSP) -- this edition does not include them.' }
+. $__enrollLib
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m, $c = 'DarkGray') { Write-Host "    $m" -ForegroundColor $c }
 

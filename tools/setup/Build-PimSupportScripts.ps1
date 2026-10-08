@@ -20,7 +20,9 @@
                                           Invardia Support app as members (gives Invardia support access to the store).
       Deploy-PimActivatorBackend.ps1   -- create / update the PIM Activator app registration in a tenant (browser
                                           sign-in, no PowerShell modules).
-      Publish-PimActivatorRemediation.ps1 -- upload the Detect / Remediate pair to Intune as a Remediation (+ assign).
+      Publish-PimActivatorRemediation.ps1 -- BUILD the Detect / Remediate pair for the tenant from its parameters (both
+                                          shipped scripts embedded) and upload it to Intune as a Remediation (+ assign
+                                          to a group when -AssignToGroupId is given; nobody otherwise).
       Deploy-PimActivatorClient.ps1    -- install the extension + its settings on a machine without Intune (servers).
       Grant-PimEnginePermissions.ps1   -- give the engine identity its missing application permissions + Azure roles
                                           (the command PIM Manager shows on Overview and in Get Started; no modules).
@@ -44,7 +46,21 @@ function Expand-PimSupportScript {
     # each). -BaseDir is the folder of the file whose text this is: a helper resolves against it, and the helper's
     # own dot-sources against the helper's folder.
     param([string]$Text, [string]$BaseDir, [System.Collections.Generic.HashSet[string]]$Seen, [System.Collections.Generic.HashSet[string]]$SeenPaths)
-    $rx = [regex]('(?m)^(?<indent>[ \t]*)\.\s*\(Join-Path\s+\$PSScriptRoot\s+''(?<file>[^'']+\.ps1)''\)[^\r\n]*(?=\r?$)')
+    # 97.2 (owner 2026-10-08: "are all 3 files published at invardia"): a helper can carry DATA files too. A line
+    #   $script:<Var> = @{}   # BUILD-EMBED: <file>, <file>
+    # becomes a table <file name> -> base64 of that file's bytes (resolved against -BaseDir), so the standalone needs no
+    # file next to it. In the repository the table stays empty and the helper reads the files themselves.
+    $erx = [regex]('(?m)^(?<lhs>[ \t]*\$script:[A-Za-z0-9_]+) = @\{\}[ \t]*# BUILD-EMBED: (?<list>[^\r\n]+?)[ \t]*(?=\r?$)')
+    $Text = $erx.Replace($Text, {
+        param($m)
+        $pairs = foreach ($f in @($m.Groups['list'].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+            $p = [IO.Path]::GetFullPath((Join-Path $BaseDir ($f -replace '/', '\')))
+            if (-not (Test-Path -LiteralPath $p)) { throw "embedded file not found: $f (looked in $BaseDir)" }
+            "'$(Split-Path $p -Leaf)' = '$([Convert]::ToBase64String([IO.File]::ReadAllBytes($p)))'"
+        }
+        "$($m.Groups['lhs'].Value) = @{ $($pairs -join '; ') }   # embedded by Build-PimSupportScripts: $($m.Groups['list'].Value)"
+    })
+    $rx =[regex]('(?m)^(?<indent>[ \t]*)\.\s*\(Join-Path\s+\$PSScriptRoot\s+''(?<file>[^'']+\.ps1)''\)[^\r\n]*(?=\r?$)')
     return $rx.Replace($Text, {
         param($m)
         $f = $m.Groups['file'].Value

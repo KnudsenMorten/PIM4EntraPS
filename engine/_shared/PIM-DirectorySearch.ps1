@@ -198,3 +198,40 @@ function Get-PimDirectorySearchHttpStatus {
         default             { return 500 }
     }
 }
+
+# ---------------------------------------------------------------------------------------------------------------------
+# 97.2 (owner 2026-10-08: "give option to dropdown group"): the GROUP lookup behind GET /api/directory/groups -- the
+# PIM Activator page's target-group pickers. Same two rules as the people lookup: a blank / 1-character query is refused
+# (never "every group"), and the term is escaped for the syntax it lands in.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimDirectoryGroupSearchPath {
+    # PRIMARY: $search on displayName (matches a word inside the name). Needs ConsistencyLevel: eventual.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Term, [int]$Top = 20)
+    $t = ConvertTo-PimGraphSearchTerm -Term $Term
+    $phrase = '"displayName:' + $t + '"'
+    $take = $Top + 1
+    return "/groups?`$search=$([uri]::EscapeDataString($phrase))&`$top=$take&`$select=id,displayName,description,securityEnabled,mailEnabled,groupTypes&`$orderby=displayName"
+}
+
+function Get-PimDirectoryGroupFilterPath {
+    # FALLBACK: $filter + startswith (prefix only).
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Term, [int]$Top = 20)
+    $t = ConvertTo-PimODataStringLiteral -Term $Term
+    $f = "startswith(displayName,'$t')"
+    $take = $Top + 1
+    return "/groups?`$filter=$([uri]::EscapeDataString($f))&`$top=$take&`$select=id,displayName,description,securityEnabled,mailEnabled,groupTypes"
+}
+
+function ConvertTo-PimDirectoryGroup {
+    # One Graph group as a picker row: id (the value a target stores), name, and its kind so two same-named groups can be
+    # told apart. Narrow on purpose.
+    [CmdletBinding()]
+    param($Group)
+    if ($null -eq $Group) { return $null }
+    $id = "$($Group.id)".Trim(); $dn = "$($Group.displayName)".Trim()
+    if (-not $id) { return $null }
+    $kind = if (@($Group.groupTypes) -contains 'Unified') { 'Microsoft 365' } elseif ([bool]$Group.securityEnabled) { 'security' } else { 'distribution' }
+    return [pscustomobject]@{ id = $id.ToLowerInvariant(); displayName = $dn; kind = $kind; description = "$($Group.description)".Trim() }
+}

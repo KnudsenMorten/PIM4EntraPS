@@ -13,6 +13,22 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.533 -- 2026-10-08
+
+- **PIM Activator: commands only, and you choose who.** The page no longer creates or uploads anything itself: each step
+  shows its status and the ready-to-run command from Invardia (always expanded, one Copy per value). You pick the group per
+  channel (PROD / TEST) by name; the command assigns the extension's app and the Intune remediation to that group only.
+  Nothing is assigned by default -- and the PIM Activator app now requires an assignment, so nobody can sign in until a
+  group is assigned. The Intune remediation is one download and one command (it builds its detection and remediation
+  scripts itself). The Edge for Business guide is corrected: the install source first (derived from the update URL, not the
+  whole site), then the extensions, with the exact setting names. Optional: more tenants for the Activator to choose from.
+- **Large commits are fast.** Committing hundreds of rows at once took minutes and could time out in the browser; it now
+  takes seconds. A slow commit is never reported as "not saved" when it was saved -- the page asks the server what happened.
+- **Get Started:** an Environment name step (step 2). Admin accounts: the legacy manager e-mail is gone (mail goes to the
+  department's owners).
+- **A new group's PIM policy that is not readable yet** now waits and is retried, instead of failing the run.
+- The community edition no longer loads the Pro enrollment library.
+
 ## 2.4.532 -- 2026-10-08
 
 - **Discard all pending changes.** A SuperAdmin can now discard every pending (staged, not committed) change at once,
