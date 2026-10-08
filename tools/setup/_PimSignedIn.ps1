@@ -240,7 +240,9 @@ function Invoke-PimSignedInSqlAdminMembership {
           [Parameter(Mandatory)][string]$SqlServerName, [Parameter(Mandatory)][string]$UserObjectId, [string]$GroupName = 'grp-pim-sql-admins',
           # test seam: @{ Graph; Arm; TenantId } instead of the signed-in az context
           [object]$Invokers)
-    if (-not (Get-Command Invoke-PimSqlAdminGroupStep -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '_PimSqlAdminGroup.ps1') }
+    # Loaded on demand through a variable path: Build-PimSupportScripts.ps1 inlines the literal dot-source-of-a-Join-Path
+    # lines, and a standalone script that inlines THIS file (Initialize-PimMailSender.ps1) never calls this function.
+    if (-not (Get-Command Invoke-PimSqlAdminGroupStep -ErrorAction SilentlyContinue)) { $__sag = Join-Path $PSScriptRoot '_PimSqlAdminGroup.ps1'; . $__sag }
     $inv = if ($Invokers) { $Invokers } else { New-PimSqlAdminGroupInvokers -SubscriptionId $SubscriptionId -TenantId $TenantId }
     $srv = ("$SqlServerName".Trim() -split '\.')[0]
     $sqlRg = $ResourceGroup

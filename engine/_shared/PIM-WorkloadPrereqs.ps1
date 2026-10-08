@@ -15,6 +15,13 @@
     * REQ-W (2.4.380) -- the ASSIGNMENT gate (Get-PimWorkloadAssignmentGate): the engine (PIM-WorkloadRoles.ps1
       Get-PimWorkloadAssignmentHold) holds a NEW workload role assignment while its workload is not green; the Manager
       and the GUI only SAY so. Nothing is refused at staging and every group is created.
+    * §97.1 (owner 2026-10-08: "we dont support certificates ... does the engine not have the necessary permissions for
+      this") -- the SELF-CHECK: the tick job 'workload-prereqs' (engine\_shared\PIM-WorkloadPrereqSelfCheck.ps1) runs every
+      check an API can answer AS THE ENGINE ITSELF, daily and on "Check again", and records it here (ranBy 'engine
+      self-check'), MERGED with what a person recorded (Merge-PimWorkloadPrereqRecord): a portal confirmation is kept, a
+      verified result the engine cannot read itself is kept. Portal-only steps are confirmed in the Manager
+      (Set-PimWorkloadPrereqAttestation, POST /api/workload-prereqs/confirm). A fix that needs a grant is the published
+      browser-sign-in script (Get-PimWorkloadPrereqFixCommand) -- never a certificate command.
 
   🔒 TEMPLATES STAY CLEAN. No prerequisite is written into templates\*.template.json; the template -> workload mapping
   lives HERE (Get-PimWorkloadPrereqTemplateMap), so a pack is only rows.
@@ -90,7 +97,7 @@ function Get-PimWorkloadPrereqCatalog {
     $c['DefenderXdr'] = @{ workload = 'DefenderXdr'; title = 'Microsoft Defender XDR (Unified RBAC)'; checks = @(
         @{ id = 'defender.engineRole'; name = 'Engine identity holds Graph RoleManagement.ReadWrite.Defender'; kind = 'api'; required = $true; fixable = $true
            fix = 'grants the Microsoft Graph application role to the engine identity (id from the one role map, verified against the live Graph service principal) and reads it back'
-           manualStep = 'Run tools\setup\Initialize-PimHostingAccess.ps1 (managed identity) or setup\Grant-PimGraphAppRoles.ps1 (engine application) -- both grant the one role map.'
+           manualStep = 'An administrator grants it with the published Grant-PimEnginePermissions.ps1 (browser sign-in, no PowerShell modules) -- PIM Manager shows the exact command on this prerequisite and on Overview. PIM never grants itself a permission.'
            learn = "$($L.graphPerms)#rolemanagementreadwritedefender" }
         @{ id = 'defender.urbacReachable'; name = 'Unified RBAC answers (Graph beta roleManagement/defender/roleDefinitions = 200)'; kind = 'api'; required = $true; fixable = $false
            fix = ''
@@ -98,7 +105,7 @@ function Get-PimWorkloadPrereqCatalog {
            learn = $L.urbacActivate }
         @{ id = 'defender.urbacWorkloads'; name = 'The workloads PIM delegates are activated for Unified RBAC'; kind = 'portal'; required = $true; fixable = $false
            fix = ''
-           manualStep = 'Microsoft Defender portal > System > Permissions > Microsoft Defender XDR > Roles > Workload settings: turn on every workload PIM delegates (Endpoint, Identity, Office 365, Sentinel workspaces via View Workspaces) > Activate. Portal only: no API exposes the activation state, so the script reports what the live roles imply ("inferred") and you confirm it with -ConfirmPortalStep defender.urbacWorkloads.'
+           manualStep = 'Microsoft Defender portal > System > Permissions > Microsoft Defender XDR > Roles > Workload settings: turn on every workload PIM delegates (Endpoint, Identity, Office 365, Sentinel workspaces via View Workspaces) > Activate. Portal only: no API exposes the activation state, so PIM reports what the live roles imply ("inferred") and you confirm it with Confirm on this prerequisite in PIM Manager.'
            learn = $L.urbacActivate }
         # Measured by the lead on internal 2026-09-19 (read-only): the catalog GET beta/roleManagement/defender/
         # resourceNamespaces?$expand=resourceActions answers 200 with 77 actions, microsoft.xdr/dataops/*/read|manage among
@@ -107,21 +114,23 @@ function Get-PimWorkloadPrereqCatalog {
         # this catalog check AND the Sentinel checks below. Never probed by creating a role (no probe writes).
         @{ id = 'defender.dataOpsCatalog'; name = 'Data Operations permissions are in the Defender permission catalog (beta resourceNamespaces lists microsoft.xdr/dataops/)'; kind = 'api'; required = $true; fixable = $false; dataOperations = $true
            fix = ''
-           manualStep = 'Data Operations (Preview) is a Unified RBAC permission group that follows Microsoft Sentinel: measured on three tenants, the catalog listed microsoft.xdr/dataops/ only where Sentinel was enabled. Not listed? Do the Sentinel checks below (enable Sentinel on a workspace, connect it to the Defender portal), then re-run. Listed but a role using it is refused? The Defender-portal connection below is missing.'
+           manualStep = 'Data Operations (Preview) is a Unified RBAC permission group that follows Microsoft Sentinel: measured on three tenants, the catalog listed microsoft.xdr/dataops/ only where Sentinel was enabled. Not listed? Do the Sentinel checks below (enable Sentinel on a workspace, connect it to the Defender portal), then press Check again. Listed but a role using it is refused? The Defender-portal connection below is missing.'
            learn = $L.urbacPerms }
-        @{ id = 'defender.sentinelEnabled'; name = 'Microsoft Sentinel is enabled on a Log Analytics workspace (ARM onboardingStates/default = 200)'; kind = 'api'; required = $true; fixable = $false; dataOperations = $true
+        # confirmable 'notChecked' (§97.1): the engine's self-check only sees the workspaces it has Reader on, so "none
+        # found" is NOT CHECKED there -- an administrator who knows the security workspace has Sentinel confirms it.
+        @{ id = 'defender.sentinelEnabled'; name = 'Microsoft Sentinel is enabled on a Log Analytics workspace (ARM onboardingStates/default = 200)'; kind = 'api'; required = $true; fixable = $false; dataOperations = $true; confirmable = 'notChecked'
            fix = ''
-           manualStep = "Azure portal > Microsoft Sentinel > Create > choose the Log Analytics workspace > Add; then onboard it to the Defender portal (next check). Or re-run with -EnableSentinel (opt-in, because Sentinel bills per GB the workspace ingests): it enables Sentinel on a dedicated security workspace -- -SentinelWorkspaceId, else law-sentinel-<suffix> in the PIM resource group, created empty -- and refuses PIM's own log workspace. Pass -SentinelWorkspaceId <workspace resource id> to check or enable a specific one. Data Operations prerequisites: $($L.urbacPerms) and $($L.sentinelDefender)"
+           manualStep = "Azure portal > Microsoft Sentinel > Create > choose the Log Analytics workspace > Add; then onboard it to the Defender portal (next check). If PIM cannot see your security workspace, press Confirm on this prerequisite in PIM Manager. Or run the published Initialize-PimWorkloadPrereqs.ps1 with -EnableSentinel (opt-in, because Sentinel bills per GB the workspace ingests): it enables Sentinel on a dedicated security workspace -- -SentinelWorkspaceId, else law-sentinel-<suffix> in the PIM resource group, created empty -- and refuses PIM's own log workspace. Pass -SentinelWorkspaceId <workspace resource id> to check or enable a specific one. Data Operations prerequisites: $($L.urbacPerms) and $($L.sentinelDefender)"
            learn = $L.sentinelOnboard }
         @{ id = 'defender.sentinelInDefender'; name = 'Data Operations: a Sentinel workspace is connected to the Defender portal (or the Sentinel data lake is onboarded)'; kind = 'portal'; required = $true; fixable = $false; dataOperations = $true
            fix = ''
-           manualStep = "Microsoft Defender portal > System > Settings > Microsoft Sentinel > Workspaces > Connect a workspace (pick the primary workspace), or onboard the Microsoft Sentinel data lake from the Defender portal. Portal only (no public API). Until this is done the tenant LISTS the Data Operations permissions but refuses to store a role that uses them. Then confirm with -ConfirmPortalStep defender.sentinelInDefender. Not using Data Operations roles? Run with -SkipDataOperations. Learn: $($L.urbacPerms)"
+           manualStep = "Microsoft Defender portal > System > Settings > Microsoft Sentinel > Workspaces > Connect a workspace (pick the primary workspace), or onboard the Microsoft Sentinel data lake from the Defender portal. Portal only (no public API). Until this is done the tenant LISTS the Data Operations permissions but refuses to store a role that uses them. Then press Confirm on this prerequisite in PIM Manager. Not using Data Operations roles? Press Not used. Learn: $($L.urbacPerms)"
            learn = $L.sentinelDefender }
     ) }
     $c['Intune'] = @{ workload = 'Intune'; title = 'Microsoft Intune (RBAC roles)'; checks = @(
         @{ id = 'intune.engineRole'; name = 'Engine identity holds Graph DeviceManagementRBAC.ReadWrite.All'; kind = 'api'; required = $true; fixable = $true
            fix = 'grants the Microsoft Graph application role to the engine identity (the one role map) and reads it back'
-           manualStep = 'Run tools\setup\Initialize-PimHostingAccess.ps1 (managed identity) or setup\Grant-PimGraphAppRoles.ps1 (engine application).'
+           manualStep = 'An administrator grants it with the published Grant-PimEnginePermissions.ps1 (browser sign-in, no PowerShell modules) -- PIM Manager shows the exact command on this prerequisite and on Overview. PIM never grants itself a permission.'
            learn = "$($L.graphPerms)#devicemanagementrbacreadwriteall" }
         @{ id = 'intune.rbacReadable'; name = 'Intune RBAC answers (Graph deviceManagement/roleDefinitions = 200)'; kind = 'api'; required = $true; fixable = $false
            fix = ''
@@ -143,11 +152,11 @@ function Get-PimWorkloadPrereqCatalog {
            learn = $L.fabricSpAdmin }
         @{ id = 'powerbi.tenantSetting'; name = 'Fabric tenant setting "Service principals can access read-only admin APIs" is on for that group'; kind = 'api'; required = $true; fixable = $true; confirmable = 'notChecked'
            fix = 'enables the setting through the Fabric admin API (POST /v1/admin/tenantsettings/{name}/update), KEEPING every security group already listed and adding this one, then reads it back. Only possible when the caller may call Fabric admin APIs (a Fabric administrator, or a service principal an admin-API setting already allows).'
-           manualStep = 'Fabric admin portal (app.fabric.microsoft.com) > Settings > Admin portal > Tenant settings > Admin API settings > "Service principals can access read-only admin APIs" > Enabled > Specific security groups > add the group > Apply. Needs a Fabric administrator. If this identity cannot read tenant settings, confirm the step with -ConfirmPortalStep powerbi.tenantSetting.'
+           manualStep = 'Fabric admin portal (app.fabric.microsoft.com) > Settings > Admin portal > Tenant settings > Admin API settings > "Service principals can access read-only admin APIs" > Enabled > Specific security groups > add the group > Apply. Needs a Fabric administrator. If PIM cannot read the tenant settings itself, press Confirm on this prerequisite in PIM Manager once the setting is on.'
            learn = $L.fabricSpAdmin }
         @{ id = 'powerbi.adminApi'; name = 'The engine identity gets 200 from the Power BI admin API (GET admin/groups)'; kind = 'api'; required = $false; fixable = $false
            fix = ''
-           manualStep = 'A confirmation, not a prerequisite: it can only run where the engine''s own certificate is on this host (-EngineAppId + -EngineCertThumbprint). A tenant-setting change can take a while to apply; re-run later if it still answers 401.'
+           manualStep = 'A confirmation, not a prerequisite: PIM''s own daily self-check calls it as the engine. A tenant-setting change can take a while to apply; press Check again later if it still answers 401.'
            learn = $L.fabricSpAdmin }
     ) }
     $c['AzureRbac'] = @{ workload = 'AzureRbac'; title = 'Azure RBAC (resource roles)'; checks = @(
@@ -157,17 +166,17 @@ function Get-PimWorkloadPrereqCatalog {
            learn = $L.azureRoles }
         @{ id = 'azure.uaa'; name = 'Engine identity holds User Access Administrator (or Owner) at every Azure scope PIM manages'; kind = 'api'; required = $true; fixable = $true
            fix = 'OPT-IN (-GrantAzureUserAccessAdministrator): assigns User Access Administrator at each uncovered scope through ARM and reads it back. Never automatic -- it is standing privilege (SEC-34).'
-           manualStep = 'Azure portal > <scope> > Access control (IAM) > Add role assignment > User Access Administrator > Members: the engine identity. Role Based Access Control Administrator is NOT enough: PIM writes roleEligibilityScheduleRequests and roleManagementPolicies, which that role''s actions (roleAssignments write/delete only) do not include.'
+           manualStep = 'Azure portal > <scope> > Access control (IAM) > Add role assignment > User Access Administrator > Members: the engine identity -- or the published Grant-PimEnginePermissions.ps1 -AzureRoleAssignments (browser sign-in; PIM Manager shows the command). Role Based Access Control Administrator is NOT enough: PIM writes roleEligibilityScheduleRequests and roleManagementPolicies, which that role''s actions (roleAssignments write/delete only) do not include.'
            learn = $L.azureRoles }
     ) }
     $c['EntraRoles'] = @{ workload = 'EntraRoles'; title = 'Entra ID roles and PIM for Groups'; checks = @(
         @{ id = 'entra.engineRoles'; name = 'Engine identity holds the full Graph application role set (the one role map)'; kind = 'api'; required = $true; fixable = $true
            fix = 'grants each missing Microsoft Graph application role of the Engine role map (ids verified against the live Graph service principal) and reads them back'
-           manualStep = 'Run tools\setup\Initialize-PimHostingAccess.ps1 (managed identity) or setup\Grant-PimGraphAppRoles.ps1 (engine application).'
+           manualStep = 'An administrator grants it with the published Grant-PimEnginePermissions.ps1 (browser sign-in, no PowerShell modules) -- PIM Manager shows the exact command on this prerequisite and on Overview. PIM never grants itself a permission.'
            learn = $L.graphPerms }
         @{ id = 'entra.p2License'; name = 'The tenant is licensed for PIM (Microsoft Entra ID P2 service plan)'; kind = 'api'; required = $true; fixable = $false; confirmable = 'any'
            fix = ''
-           manualStep = 'Microsoft 365 admin center > Billing > Licenses: Microsoft Entra ID P2 (or Microsoft Entra ID Governance). Licensed through Governance only? This check looks for the AAD_PREMIUM_P2 service plan; confirm with -ConfirmPortalStep entra.p2License.'
+           manualStep = 'Microsoft 365 admin center > Billing > Licenses: Microsoft Entra ID P2 (or Microsoft Entra ID Governance). Licensed through Governance only? This check looks for the AAD_PREMIUM_P2 service plan; press Confirm on this prerequisite in PIM Manager.'
            learn = $L.pimLicense }
     ) }
     if ("$Workload".Trim()) {
@@ -246,13 +255,16 @@ function Get-PimWorkloadAssignmentGate {
     #>
     param([AllowEmptyString()][string]$Workload, [object[]]$View = @(), [string]$StoreError = '')
     $w = "$Workload".Trim()
-    $out = [ordered]@{ workload = $w; held = $false; state = ''; reason = ''; reasons = @(); command = '' }
+    $out = [ordered]@{ workload = $w; held = $false; state = ''; reason = ''; reasons = @(); command = ''; next = '' }
     if (-not $w -or (Get-PimWorkloadPrereqUngated) -contains $w -or (Get-PimWorkloadPrereqWorkloads) -notcontains $w) { return $out }
     $v = @($View | Where-Object { $_ -and "$($_.workload)" -eq $w })[0]
     $st = if ("$StoreError".Trim()) { 'unreadable' } elseif ($v) { "$($v.state)" } else { 'notRun' }
     if (-not $st) { $st = 'notRun' }
     $out.state = $st
-    $out.command = if ($v -and "$($v.command)".Trim()) { "$($v.command)" } else { "tools\setup\Initialize-PimWorkloadPrereqs.ps1 -Workload $w" }
+    # §97.1: a command only when a FIX needs one (the view decides -- Get-PimWorkloadPrereqFixCommand); otherwise the next
+    # step in words (PIM checks itself / confirm the portal step). Never a script to "record" a check PIM can make itself.
+    $out.command = if ($v -and "$($v.command)".Trim()) { "$($v.command)" } else { '' }
+    $out.next = if ($v -and $v.PSObject.Properties['next'] -and "$($v.next)".Trim()) { "$($v.next)" } else { Get-PimWorkloadPrereqNextStep -State $st }
     if ($st -in @('ok', 'stale')) { return $out }
     # Lead decision 2026-09-19 (operator: "you decide"): AZURE is held only when the script RAN and found it not ready
     # (failed / incomplete). Never checked or unreadable is NOT a hold for Azure: v1 assigned Azure roles with no
@@ -263,7 +275,7 @@ function Get-PimWorkloadAssignmentGate {
         'failed'     { @(@($v.failed) | Where-Object { $_ } | ForEach-Object { "missing: $_" }) }
         'incomplete' { @(@($v.pending) | Where-Object { $_ } | ForEach-Object { "not confirmed: $_" }) }
         'unreadable' { @("the prerequisite status could not be read ($StoreError)") }
-        default      { @('the prerequisite script has never run for this workload') }
+        default      { @('PIM has not checked this workload yet (its daily self-check, or Check again)') }
     }
     if (-not @($reasons).Count) { $reasons = @("prerequisites $st") }
     $out.held = $true
@@ -284,7 +296,7 @@ function Get-PimTemplateAssignmentGate {
     $held = New-Object System.Collections.Generic.List[object]
     foreach ($w in $ws) {
         $g = Get-PimWorkloadAssignmentGate -Workload $w -View $View -StoreError $StoreError
-        if ($g.held) { $held.Add([ordered]@{ workload = $w; state = $g.state; reason = $g.reason; reasons = @($g.reasons); command = $g.command }) }
+        if ($g.held) { $held.Add([ordered]@{ workload = $w; state = $g.state; reason = $g.reason; reasons = @($g.reasons); command = $g.command; next = $g.next }) }
     }
     return [ordered]@{ workloads = @($ws); held = @($held.ToArray()) }
 }
@@ -351,11 +363,17 @@ function New-PimWorkloadPrereqCheck {
     #>
     param([Parameter(Mandatory)][string]$Id,
           [Parameter(Mandatory)][ValidateSet('ok', 'fixed', 'confirmed', 'skipped', 'failed', 'manual', 'notChecked')][string]$Status,
-          [string]$Detail = '')
+          [string]$Detail = '',
+          # §97.1: who recorded THIS check and when (a merged record mixes the engine's self-check with a person's
+          # confirmations, so the record's ranBy alone no longer says who decided each check).
+          [string]$By = '', [string]$CheckedUtc = '',
+          # §97.1: machine-readable facts for the fix command (missingRoles = Graph roles the engine lacks;
+          # missingScopes = Azure scopes without User Access Administrator; groupName = the Power BI admin-API group).
+          [hashtable]$Data = @{})
     $d = Get-PimWorkloadPrereqCheckDef -Id $Id
     if (-not $d) { throw "New-PimWorkloadPrereqCheck: '$Id' is not in the prerequisite catalog." }
     $req = $true; if ($d.ContainsKey('required')) { $req = [bool]$d.required }
-    return [pscustomobject][ordered]@{
+    $o = [ordered]@{
         id         = $Id
         name       = "$($d.name)"
         status     = $Status
@@ -366,6 +384,10 @@ function New-PimWorkloadPrereqCheck {
         manualStep = $(if ($Status -in @('ok', 'fixed', 'skipped')) { '' } else { "$($d.manualStep)" })
         learn      = "$($d.learn)"
     }
+    if ("$By".Trim()) { $o['by'] = "$By".Trim() }
+    if ("$CheckedUtc".Trim()) { $o['checkedUtc'] = "$CheckedUtc".Trim() }
+    foreach ($k in @($Data.Keys)) { if ($o.Contains("$k")) { continue }; $o["$k"] = $Data[$k] }
+    return [pscustomobject]$o
 }
 
 function Get-PimWorkloadPrereqResult {
@@ -374,7 +396,9 @@ function Get-PimWorkloadPrereqResult {
       state: ok | failed | incomplete (see the header). ok = (state -eq 'ok').
     #>
     param([Parameter(Mandatory)][string]$Workload, [object[]]$Checks = @(), [Parameter(Mandatory)][datetime]$RanUtc,
-          [string]$RanBy = '', [string]$ToolVersion = '', [string]$TenantId = '', [string]$EngineIdentity = '')
+          [string]$RanBy = '', [string]$ToolVersion = '', [string]$TenantId = '', [string]$EngineIdentity = '',
+          # §97.1: the engine's service principal object id -- the fix command (Grant-PimEnginePermissions) needs it.
+          [string]$EngineObjectId = '')
     $all = @($Checks | Where-Object { $_ })
     $req = @($all | Where-Object { $_.required })
     $failed  = @($req | Where-Object { $_.status -eq 'failed' })
@@ -394,6 +418,7 @@ function Get-PimWorkloadPrereqResult {
         toolVersion    = "$ToolVersion"
         tenantId       = "$TenantId"
         engineIdentity = "$EngineIdentity"
+        engineObjectId = "$EngineObjectId"
         checks         = @($all)
     }
 }
@@ -606,23 +631,292 @@ function ConvertFrom-PimTickJobId {
     return $null
 }
 
+# --- §97.1: the published scripts a FIX points at (framework rule 3: no modules, browser sign-in) -----------------------
+function Get-PimWorkloadPrereqSupportScriptUrl {
+    # The published, standalone copy of a support script (tools\setup\Build-PimSupportScripts.ps1 -> invardia.com).
+    param([Parameter(Mandatory)][string]$Script)
+    return "https://invardia.com/support/pim/$Script"
+}
+
+function Get-PimWorkloadPrereqDownload {
+    # 'Invoke-WebRequest <url> -OutFile <file>; .\<file>' -- one line a person pastes into PowerShell.
+    param([Parameter(Mandatory)][string]$Script)
+    return ("Invoke-WebRequest {0} -OutFile {1}; .\{1}" -f (Get-PimWorkloadPrereqSupportScriptUrl -Script $Script), $Script)
+}
+
 function Get-PimWorkloadPrereqCommand {
     <#
-      The exact command to run for one workload, from this environment's known values; anything the Manager does not
-      know is a <placeholder>. The identity is never filled in: the certificate is the operator's, on their host.
+      §97.1 (owner 2026-10-08: "we dont support certificates"). The command a person runs to FIX one workload's
+      prerequisites that PIM cannot fix itself (create the Power BI admin-API group and add the engine, switch the Fabric
+      tenant setting, enable Sentinel on a dedicated workspace): the PUBLISHED Initialize-PimWorkloadPrereqs.ps1, browser
+      sign-in, no PowerShell modules. NEVER an identity on the command line -- no certificate, no client id, no secret:
+      the person signs in in the browser. Anything the Manager does not know is a <placeholder>.
+      Recording the result is not this command's job: PIM's own self-check (job workload-prereqs) records it -- the person
+      presses Check again afterwards.
     #>
     param([Parameter(Mandatory)][string]$Workload, [hashtable]$Env = @{})
     $v = { param($k, $ph) $x = "$($Env[$k])".Trim(); if ($x) { $x } else { $ph } }
-    $parts = @('.\tools\setup\Initialize-PimWorkloadPrereqs.ps1', "-Workload $Workload",
-               "-TenantId $(& $v 'tenantId' '<tenant-id>')", "-SubscriptionId $(& $v 'subscriptionId' '<hosting-subscription-id>')",
-               "-ResourceGroup $(& $v 'resourceGroup' '<resource-group>')")
-    $tj = "$($Env['tickJobName'])".Trim()
-    if ($tj -and $tj -ne 'ca-pim-tick') { $parts += "-TickJobName $tj" }
-    $parts += "-SqlServerFqdn $(& $v 'sqlServerFqdn' '<sql-server>.database.windows.net')"
-    $db = "$($Env['sqlDatabase'])".Trim()
-    if ($db -and $db -ne 'PimPlatform') { $parts += "-SqlDatabase $db" }
-    $parts += '-ClientId <management-app-id> -CertThumbprint <certificate-thumbprint>'
+    $parts = @((Get-PimWorkloadPrereqDownload -Script 'Initialize-PimWorkloadPrereqs.ps1'), "-Workload $Workload",
+               "-TenantId $(& $v 'tenantId' '<tenant-id>')")
+    $oid = "$($Env['engineObjectId'])".Trim()
+    if ($oid) { $parts += "-EngineObjectId $oid" }
+    if (-not $oid -or $Workload -in @('DefenderXdr', 'AzureRbac')) {
+        # Without the engine's object id the script finds it from the hosted tick job; Defender (the dedicated Sentinel
+        # workspace) and Azure (the scopes) also need the hosting subscription + resource group.
+        $parts += "-SubscriptionId $(& $v 'subscriptionId' '<hosting-subscription-id>')"
+        $parts += "-ResourceGroup $(& $v 'resourceGroup' '<resource-group>')"
+        $tj = "$($Env['tickJobName'])".Trim()
+        if ($tj -and $tj -ne 'ca-pim-tick') { $parts += "-TickJobName $tj" }
+    }
     return ($parts -join ' ')
+}
+
+function Get-PimWorkloadPrereqGrantCommand {
+    <#
+      §97.1. The published Grant-PimEnginePermissions.ps1 one-liner (browser sign-in, no modules -- the same script
+      Overview > Verify permissions shows) for the Graph application roles and Azure role assignments the engine lacks.
+      '' when there is nothing to grant.
+    #>
+    param([string]$TenantId, [string]$EngineObjectId, [string[]]$GraphPermissions = @(), [string[]]$AzureScopes = @())
+    $roles = @(@($GraphPermissions) | ForEach-Object { "$_" -replace '[^A-Za-z0-9._-]', '' } | Where-Object { $_ } | Select-Object -Unique)
+    $scopes = @(@($AzureScopes) | ForEach-Object { "$_".Trim() -replace "'", '' } | Where-Object { $_ } | Select-Object -Unique)
+    if (-not $roles.Count -and -not $scopes.Count) { return '' }
+    $tid = "$TenantId".Trim(); if (-not $tid) { $tid = '<tenant-id>' }
+    $oid = "$EngineObjectId".Trim(); if (-not $oid) { $oid = '<engine-object-id>' }
+    $c = (Get-PimWorkloadPrereqDownload -Script 'Grant-PimEnginePermissions.ps1') + " -TenantId '$tid' -EngineObjectId '$oid'"
+    if ($roles.Count) { $c += ' -GraphPermissions ' + (@($roles | ForEach-Object { "'$_'" }) -join ',') }
+    if ($scopes.Count) { $c += ' -AzureRoleAssignments ' + (@($scopes | ForEach-Object { "'User Access Administrator@$_'" }) -join ',') }
+    return $c
+}
+
+function Get-PimWorkloadPrereqRecordField {
+    # A field of a stored record / check that may be a hashtable or a parsed JSON object. $null when absent.
+    param([object]$Object, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) { if ($Object.Contains($Name)) { return $Object[$Name] }; return $null }
+    if ($Object.PSObject.Properties[$Name]) { return $Object.$Name }
+    return $null
+}
+
+function Get-PimWorkloadPrereqFixCommand {
+    <#
+      PURE. §97.1 -- the ONE command the page shows for a workload that is not green, decided from what the record
+      says is missing:
+        * engine Graph roles missing (defender / intune / entra engine-role checks FAILED) and/or User Access
+          Administrator missing at Azure scopes (azure.uaa FAILED)  -> Grant-PimEnginePermissions.ps1 (published)
+        * something only a person can create (Power BI group / membership / Fabric tenant setting, Sentinel on a
+          workspace)                                                -> Initialize-PimWorkloadPrereqs.ps1 (published)
+        * only portal steps / checks PIM could not read / a failure only a portal step fixes (Unified RBAC activation,
+          the licence)                                              -> '' (the page shows the step, and Confirm)
+        * an engine-role failure whose roles are not recorded       -> Initialize-PimWorkloadPrereqs.ps1 (it says what)
+      Both scripts sign in in the browser; neither command ever carries a certificate or any credential.
+    #>
+    param([Parameter(Mandatory)][string]$Workload, [object]$Record, [hashtable]$Env = @{})
+    if (-not $Record) { return '' }
+    $st = "$(Get-PimWorkloadPrereqRecordField -Object $Record -Name 'state')"
+    if ($st -eq 'ok') { return '' }
+    $e = @{}; foreach ($k in @($Env.Keys)) { $e[$k] = $Env[$k] }
+    $oid = "$(Get-PimWorkloadPrereqRecordField -Object $Record -Name 'engineObjectId')".Trim()
+    if (-not $oid -and "$(Get-PimWorkloadPrereqRecordField -Object $Record -Name 'engineIdentity')" -match '\(([0-9a-fA-F-]{36})\)\s*$') { $oid = $Matches[1] }
+    if ($oid -and -not "$($e['engineObjectId'])".Trim()) { $e['engineObjectId'] = $oid }
+    $tid = "$($e['tenantId'])".Trim(); if (-not $tid) { $tid = "$(Get-PimWorkloadPrereqRecordField -Object $Record -Name 'tenantId')".Trim(); if ($tid) { $e['tenantId'] = $tid } }
+    $single = @{ 'defender.engineRole' = 'RoleManagement.ReadWrite.Defender'; 'intune.engineRole' = 'DeviceManagementRBAC.ReadWrite.All' }
+    $roles = New-Object System.Collections.Generic.List[string]; $scopes = New-Object System.Collections.Generic.List[string]
+    $needScript = $false; $unknownFailure = $false
+    foreach ($c in @(Get-PimWorkloadPrereqRecordField -Object $Record -Name 'checks')) {
+        if (-not $c) { continue }
+        $id = "$($c.id)"; $s = "$($c.status)"
+        if ([bool]$c.ok -or $s -in @('ok', 'fixed', 'confirmed', 'skipped')) { continue }
+        $req = $true; if ($c.PSObject.Properties['required']) { $req = [bool]$c.required }
+        if (-not $req) { continue }
+        switch -Regex ($id) {
+            '^(defender\.engineRole|intune\.engineRole|entra\.engineRoles)$' {
+                if ($s -ne 'failed') { break }
+                $m = @(Get-PimWorkloadPrereqRecordField -Object $c -Name 'missingRoles' | Where-Object { "$_".Trim() })
+                if (-not $m.Count -and $single.ContainsKey($id)) { $m = @($single[$id]) }
+                if (-not $m.Count -and "$($c.detail)" -match 'missing: ([A-Za-z0-9., -]+?)(\s\(|\s--|$)') { $m = @($Matches[1] -split '\s*,\s*' | Where-Object { $_ -match '^[A-Za-z][A-Za-z0-9.-]+\.[A-Za-z0-9.-]+$' }) }
+                if ($m.Count) { foreach ($r in $m) { if (-not $roles.Contains("$r")) { $roles.Add("$r") } } } else { $unknownFailure = $true }
+                break
+            }
+            '^azure\.uaa$' {
+                if ($s -ne 'failed') { break }
+                $m = @(Get-PimWorkloadPrereqRecordField -Object $c -Name 'missingScopes' | Where-Object { "$_".Trim() })
+                if ($m.Count) { foreach ($x in $m) { if (-not $scopes.Contains("$x")) { $scopes.Add("$x") } } } else { $unknownFailure = $true }
+                break
+            }
+            '^powerbi\.(group|groupMember)$' { if ($s -eq 'failed') { $needScript = $true }; break }
+            '^powerbi\.tenantSetting$'      { if ($s -eq 'failed') { $needScript = $true }; break }
+            '^defender\.sentinelEnabled$'   { if ($s -eq 'failed') { $needScript = $true }; break }
+            default {
+                # A failure the script can fix (the catalog says fixable) -> the script; one only a portal step fixes
+                # (Unified RBAC activation, a licence, a Power BI permission to remove) -> no command: the page shows
+                # the check's own "To do", and Confirm where nothing can verify it.
+                $def = Get-PimWorkloadPrereqCheckDef -Id $id
+                if ($s -eq 'failed' -and $def -and [bool]$def.fixable) { $needScript = $true }
+            }
+        }
+    }
+    $cmds = New-Object System.Collections.Generic.List[string]
+    $g = Get-PimWorkloadPrereqGrantCommand -TenantId "$($e['tenantId'])" -EngineObjectId "$($e['engineObjectId'])" -GraphPermissions @($roles) -AzureScopes @($scopes)
+    if ($g) { $cmds.Add($g) }
+    if ($needScript -or ($unknownFailure -and -not $cmds.Count)) { $cmds.Add((Get-PimWorkloadPrereqCommand -Workload $Workload -Env $e)) }
+    return (@($cmds) -join '; ')
+}
+
+function Get-PimWorkloadPrereqNextStep {
+    # PURE. The next step in words for one workload state (§97.1 -- PIM checks itself; a person only fixes or confirms).
+    param([string]$State, [string]$Command = '', [int]$Confirmable = 0)
+    switch ("$State") {
+        'ok'         { return '' }
+        'notRun'     { return 'Not checked yet. PIM checks this itself every day (job workload-prereqs) -- press Check again to check now.' }
+        'stale'      { return 'The last check is older than the re-check window. PIM re-checks it every day -- press Check again to check now.' }
+        'unreadable' { return 'The prerequisite status could not be read from the store.' }
+    }
+    $p = New-Object System.Collections.Generic.List[string]
+    if ("$Command".Trim()) { $p.Add('Run the command below once as an administrator (it signs you in in the browser; no PowerShell modules), then press Check again.') }
+    if ($Confirmable -gt 0) { $p.Add('Do the portal step(s) listed, then press Confirm on each.') }
+    if (-not $p.Count) { $p.Add('See each check below: fix what it names, then press Check again.') }
+    return ($p -join ' ')
+}
+
+function ConvertTo-PimWorkloadPrereqUtcText {
+    # A stored date -> 'yyyy-MM-ddTHH:mm:ssZ' ('' when unreadable). pwsh 7's ConvertFrom-Json hands a [datetime].
+    param([object]$Value)
+    if ($null -eq $Value) { return '' }
+    if ($Value -is [datetime]) {
+        $d = if ($Value.Kind -eq [DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc) } else { $Value.ToUniversalTime() }
+        return $d.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+    $p = [datetime]::MinValue
+    if ([datetime]::TryParse("$Value", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$p)) { return $p.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+    return ''
+}
+
+function Get-PimWorkloadPrereqStoredRecord {
+    # The stored record of one workload from pim.Settings 'WorkloadPrereqs' (hashtable or parsed JSON). $null when absent.
+    param([object]$Stored, [Parameter(Mandatory)][string]$Workload)
+    if (-not $Stored) { return $null }
+    if ($Stored -is [System.Collections.IDictionary]) { if ($Stored.Contains($Workload)) { return $Stored[$Workload] }; return $null }
+    if ($Stored.PSObject.Properties[$Workload]) { return $Stored.$Workload }
+    return $null
+}
+
+function Copy-PimWorkloadPrereqCheck {
+    # A stored check as a fresh [pscustomobject] (every property kept), with -Set fields overwritten.
+    param([Parameter(Mandatory)][object]$Check, [hashtable]$Set = @{})
+    $o = [ordered]@{}
+    if ($Check -is [System.Collections.IDictionary]) { foreach ($k in $Check.Keys) { $o["$k"] = $Check[$k] } }
+    else { foreach ($p in $Check.PSObject.Properties) { $o[$p.Name] = $p.Value } }
+    foreach ($k in @($Set.Keys)) { $o["$k"] = $Set[$k] }
+    return [pscustomobject]$o
+}
+
+function Merge-PimWorkloadPrereqRecord {
+    <#
+      PURE. §97.1 -- one workload's NEW result (-Fresh, from Get-PimWorkloadPrereqResult: the engine's self-check or a
+      person's script run) merged onto what was stored (-Stored, $null = nothing), check by check:
+        * a stored CONFIRMED check is kept while the new result could still be confirmed (Test-PimWorkloadPrereqConfirmable)
+          and is not itself verified ok -- a portal confirmation survives every daily self-check;
+        * a stored SKIPPED Data Operations check is kept (a person said Data Operations roles are not used);
+        * a new result that could not decide (notChecked / manual) keeps a stored DECIDED one (ok / fixed / failed) --
+          e.g. a Fabric administrator verified the tenant setting that the engine cannot read itself;
+        * everything else: the new result wins (an API-verified answer replaces an older one).
+      A kept check says so (kept = $true) and keeps who recorded it and when (by / checkedUtc). The state is recomputed.
+      Returns the merged record (same shape as Get-PimWorkloadPrereqResult).
+    #>
+    param([object]$Stored, [Parameter(Mandatory)][object]$Fresh)
+    $wl = "$($Fresh.workload)"
+    $storedChecks = @{}
+    $sBy = "$(Get-PimWorkloadPrereqRecordField -Object $Stored -Name 'ranBy')"
+    $sAt = ConvertTo-PimWorkloadPrereqUtcText -Value (Get-PimWorkloadPrereqRecordField -Object $Stored -Name 'ranUtc')
+    foreach ($c in @(Get-PimWorkloadPrereqRecordField -Object $Stored -Name 'checks')) { if ($c -and "$($c.id)") { $storedChecks["$($c.id)"] = $c } }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($c in @($Fresh.checks)) {
+        if (-not $c) { continue }
+        $s = $storedChecks["$($c.id)"]
+        $keep = $false
+        if ($s -and -not [bool]$c.ok) {
+            $ss = "$($s.status)"; $def = Get-PimWorkloadPrereqCheckDef -Id "$($c.id)"
+            if ($ss -eq 'confirmed' -and (Test-PimWorkloadPrereqConfirmable -Id "$($c.id)" -Status "$($c.status)")) { $keep = $true }
+            elseif ($ss -eq 'skipped' -and $def -and $def.ContainsKey('dataOperations') -and $def.dataOperations) { $keep = $true }
+            elseif ("$($c.status)" -in @('notChecked', 'manual') -and $ss -in @('ok', 'fixed', 'failed')) { $keep = $true }
+        }
+        if ($keep) {
+            $set = @{ kept = $true }
+            if (-not (Get-PimWorkloadPrereqRecordField -Object $s -Name 'by') -and $sBy) { $set['by'] = $sBy }
+            if (-not (Get-PimWorkloadPrereqRecordField -Object $s -Name 'checkedUtc') -and $sAt) { $set['checkedUtc'] = $sAt }
+            $set['latest'] = "$($c.status): $($c.detail)".Trim()
+            $out.Add((Copy-PimWorkloadPrereqCheck -Check $s -Set $set))
+        } else { $out.Add($c) }
+    }
+    $ran = [datetime]::UtcNow
+    $p = ConvertTo-PimWorkloadPrereqUtcText -Value $Fresh.ranUtc
+    if ($p) { $ran = [datetime]::Parse($p, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') }
+    $oid = "$($Fresh.engineObjectId)"; if (-not $oid) { $oid = "$(Get-PimWorkloadPrereqRecordField -Object $Stored -Name 'engineObjectId')" }
+    return (Get-PimWorkloadPrereqResult -Workload $wl -Checks @($out.ToArray()) -RanUtc $ran -RanBy "$($Fresh.ranBy)" -ToolVersion "$($Fresh.toolVersion)" `
+              -TenantId "$($Fresh.tenantId)" -EngineIdentity "$($Fresh.engineIdentity)" -EngineObjectId $oid)
+}
+
+function Set-PimWorkloadPrereqAttestation {
+    <#
+      PURE. §97.1 -- the Manager's Confirm / Not used / Withdraw on ONE check (Admin+, audited by the caller), recorded
+      exactly like -ConfirmPortalStep: 'confirmed' = attested, not API-verified, and says who and when.
+        confirm   -- only where Test-PimWorkloadPrereqConfirmable allows it (a portal step, a check PIM could not read,
+                     the P2 licence). An API-verified failure can never be confirmed away.
+        skip      -- a Data Operations check: "Data Operations roles are not used" (recorded 'skipped', like
+                     -SkipDataOperations).
+        withdraw  -- undo a confirmation / skip: back to 'manual' (portal step) or 'notChecked'; the next self-check decides.
+      -Stored = the whole pim.Settings 'WorkloadPrereqs' value. Returns @{ ok; code (HTTP); error; value (the whole new
+      setting); before; after } -- nothing is written here.
+    #>
+    param([object]$Stored, [Parameter(Mandatory)][string]$Workload, [Parameter(Mandatory)][string]$CheckId,
+          [Parameter(Mandatory)][ValidateSet('confirm', 'skip', 'withdraw')][string]$Action, [string]$By = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    $res = [ordered]@{ ok = $false; code = 400; error = ''; value = $null; before = $null; after = $null }
+    if ((Get-PimWorkloadPrereqWorkloads) -notcontains $Workload) { $res.error = "unknown workload '$Workload'"; return $res }
+    $def = Get-PimWorkloadPrereqCheckDef -Id $CheckId
+    if (-not $def -or -not @((Get-PimWorkloadPrereqCatalog -Workload $Workload)[$Workload].checks | Where-Object { $_.id -eq $CheckId }).Count) { $res.error = "'$CheckId' is not a check of $Workload"; return $res }
+    $rec = Get-PimWorkloadPrereqStoredRecord -Stored $Stored -Workload $Workload
+    if (-not $rec) { $res.code = 409; $res.error = "PIM has not checked $Workload yet -- press Check again first, then confirm what it cannot check itself."; return $res }
+    $checks = @(Get-PimWorkloadPrereqRecordField -Object $rec -Name 'checks' | Where-Object { $_ })
+    $cur = @($checks | Where-Object { "$($_.id)" -eq $CheckId })[0]
+    $curStatus = if ($cur) { "$($cur.status)" } else { 'notChecked' }
+    $who = if ("$By".Trim()) { "$By".Trim() } else { 'an administrator' }
+    $at = $NowUtc.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $new = $null
+    switch ($Action) {
+        'confirm' {
+            if ($curStatus -eq 'confirmed') { $res.code = 409; $res.error = 'already confirmed'; return $res }
+            if (-not (Test-PimWorkloadPrereqConfirmable -Id $CheckId -Status $curStatus)) {
+                $res.code = 409
+                $res.error = $(if ([bool]$cur.ok) { "'$($def.name)' is already verified ($curStatus) -- nothing to confirm." } else { "'$($def.name)' was verified through an API as $curStatus -- it cannot be confirmed away. Fix it, then press Check again." })
+                return $res
+            }
+            $new = New-PimWorkloadPrereqCheck -Id $CheckId -Status 'confirmed' -By $who -CheckedUtc $at -Detail ("confirmed in PIM Manager by {0} at {1} (attested, not API-verified). Before: {2}" -f $who, $at, "$($cur.detail)".Trim())
+        }
+        'skip' {
+            if (-not ($def.ContainsKey('dataOperations') -and $def.dataOperations)) { $res.code = 409; $res.error = "'$($def.name)' cannot be marked as not used -- only the Data Operations checks can."; return $res }
+            if ($curStatus -eq 'skipped') { $res.code = 409; $res.error = 'already marked as not used'; return $res }
+            $new = New-PimWorkloadPrereqCheck -Id $CheckId -Status 'skipped' -By $who -CheckedUtc $at -Detail ("marked as not used in PIM Manager by {0} at {1}: no Data Operations role is delegated." -f $who, $at)
+        }
+        'withdraw' {
+            if ($curStatus -notin @('confirmed', 'skipped')) { $res.code = 409; $res.error = "'$($def.name)' is $curStatus -- there is no confirmation to withdraw."; return $res }
+            $back = if ($def.kind -eq 'portal') { 'manual' } else { 'notChecked' }
+            $new = New-PimWorkloadPrereqCheck -Id $CheckId -Status $back -By $who -CheckedUtc $at -Detail ("the confirmation was withdrawn in PIM Manager by {0} at {1}; PIM checks it again at its next self-check." -f $who, $at)
+        }
+    }
+    $list = New-Object System.Collections.Generic.List[object]; $done = $false
+    foreach ($c in $checks) { if ("$($c.id)" -eq $CheckId) { $list.Add($new); $done = $true } else { $list.Add($c) } }
+    if (-not $done) { $list.Add($new) }
+    $ranText = ConvertTo-PimWorkloadPrereqUtcText -Value (Get-PimWorkloadPrereqRecordField -Object $rec -Name 'ranUtc')
+    $ran = if ($ranText) { [datetime]::Parse($ranText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') } else { $NowUtc }
+    $f = { param($n) "$(Get-PimWorkloadPrereqRecordField -Object $rec -Name $n)" }
+    $newRec = Get-PimWorkloadPrereqResult -Workload $Workload -Checks @($list.ToArray()) -RanUtc $ran -RanBy (& $f 'ranBy') -ToolVersion (& $f 'toolVersion') `
+                -TenantId (& $f 'tenantId') -EngineIdentity (& $f 'engineIdentity') -EngineObjectId (& $f 'engineObjectId')
+    $res.before = [ordered]@{ check = $CheckId; status = $curStatus; state = (& $f 'state') }
+    $res.after = [ordered]@{ check = $CheckId; status = "$($new.status)"; state = "$($newRec.state)"; by = $who }
+    $res.value = Merge-PimWorkloadPrereqsSetting -Current $Stored -Result $newRec
+    $res.ok = $true; $res.code = 200
+    return $res
 }
 
 function Get-PimWorkloadPrereqView {
@@ -630,19 +924,18 @@ function Get-PimWorkloadPrereqView {
       What the Manager shows (GET /api/workload-prereqs): per workload the stored result judged against NOW.
         state: ok | failed | incomplete | stale (older than -StaleDays) | notRun
         chip : green (ok) | red (failed) | amber (everything else -- "not checked" is never green)
+      §97.1: command = the FIX command only (Get-PimWorkloadPrereqFixCommand; '' when PIM can check / the person can
+      confirm it in the page), next = the next step in words, and per check what the page may offer: canConfirm
+      (Confirm), canSkip (Not used), canWithdraw (Withdraw). selfChecked = the record came from PIM's own self-check.
       -Stored = pim.Settings 'WorkloadPrereqs' (parsed) or $null; -Env feeds the command.
     #>
     param([object]$Stored, [hashtable]$Env = @{}, [Parameter(Mandatory)][datetime]$NowUtc, [int]$StaleDays = 30)
     $cat = Get-PimWorkloadPrereqCatalog
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($w in (Get-PimWorkloadPrereqWorkloads)) {
-        $r = $null
-        if ($Stored) {
-            if ($Stored -is [System.Collections.IDictionary]) { if ($Stored.Contains($w)) { $r = $Stored[$w] } }
-            elseif ($Stored.PSObject.Properties[$w]) { $r = $Stored.$w }
-        }
-        $cmd = Get-PimWorkloadPrereqCommand -Workload $w -Env $Env
-        $v = [ordered]@{ workload = $w; title = $cat[$w].title; command = $cmd; state = 'notRun'; chip = 'amber'; ranUtc = ''; ranBy = ''; ageDays = $null; failed = @(); pending = @(); checks = @() }
+        $r = Get-PimWorkloadPrereqStoredRecord -Stored $Stored -Workload $w
+        $v = [ordered]@{ workload = $w; title = $cat[$w].title; command = ''; next = ''; state = 'notRun'; chip = 'amber'; ranUtc = ''; ranBy = ''; selfChecked = $false
+                         ageDays = $null; failed = @(); pending = @(); checks = @(); engineObjectId = '' }
         if ($r) {
             # 🪤 pwsh 7's ConvertFrom-Json turns an ISO string into a [datetime] (the Manager's read), PS 5.1 leaves it a
             # string (the setup script's read). Take either; never stringify a [datetime] and re-parse it.
@@ -653,7 +946,17 @@ function Get-PimWorkloadPrereqView {
                 $okDate = [datetime]::TryParse("$($r.ranUtc)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$ran)
             }
             $v.ranUtc = $(if ($okDate) { $ran.ToString('yyyy-MM-ddTHH:mm:ssZ') } else { "$($r.ranUtc)" }); $v.ranBy = "$($r.ranBy)"
-            $v.failed = @($r.failed | Where-Object { $_ }); $v.pending = @($r.pending | Where-Object { $_ }); $v.checks = @($r.checks | Where-Object { $_ })
+            $v.selfChecked = ("$($r.ranBy)" -eq 'engine self-check')
+            $v.engineObjectId = "$(Get-PimWorkloadPrereqRecordField -Object $r -Name 'engineObjectId')"
+            $v.failed = @($r.failed | Where-Object { $_ }); $v.pending = @($r.pending | Where-Object { $_ })
+            $v.checks = @(@($r.checks | Where-Object { $_ }) | ForEach-Object {
+                $id = "$($_.id)"; $s = "$($_.status)"; $d = Get-PimWorkloadPrereqCheckDef -Id $id
+                Copy-PimWorkloadPrereqCheck -Check $_ -Set @{
+                    canConfirm  = ((-not [bool]$_.ok) -and $s -ne 'confirmed' -and [bool](Test-PimWorkloadPrereqConfirmable -Id $id -Status $s))
+                    canSkip     = ([bool]($d -and $d.ContainsKey('dataOperations') -and $d.dataOperations) -and $s -ne 'skipped' -and -not [bool]$_.ok)
+                    canWithdraw = ($s -in @('confirmed', 'skipped'))
+                    kind        = $(if ($d) { "$($d.kind)" } else { '' })
+                } })
             $st = "$($r.state)"
             if (-not $st) { $st = $(if ([bool]$r.ok) { 'ok' } else { 'failed' }) }
             if (-not $okDate) { $st = 'incomplete'; $v.pending = @($v.pending) + @('the stored run has no readable date') }
@@ -663,7 +966,10 @@ function Get-PimWorkloadPrereqView {
             }
             $v.state = $st
             $v.chip = $(switch ($st) { 'ok' { 'green' } 'failed' { 'red' } default { 'amber' } })
+            $envW = @{}; foreach ($k in @($Env.Keys)) { $envW[$k] = $Env[$k] }
+            $v.command = Get-PimWorkloadPrereqFixCommand -Workload $w -Record $r -Env $envW
         }
+        $v.next = Get-PimWorkloadPrereqNextStep -State $v.state -Command $v.command -Confirmable @($v.checks | Where-Object { $_.canConfirm }).Count
         $out.Add([pscustomobject]$v)
     }
     return $out.ToArray()

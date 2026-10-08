@@ -404,3 +404,61 @@ function Get-PimTenantWideMailSendVerdict {
     }
     return [pscustomobject]@{ ok = $true; held = @(); detail = ("no tenant-wide Graph Mail.Send on {0} (sending is carried by the per-mailbox Exchange RBAC scope)" -f ((@($t | ForEach-Object { "$($_.label)" })) -join '; ')) }
 }
+
+function New-PimMailSenderCommand {
+    <#
+      MAIL-1 (framework 12.3 (b)-(d), owner 2026-10-08): the command that sets up the shared mailbox AFTERWARDS -- the
+      published download plus a browser sign-in call (no certificate, no secret), with every value of this environment
+      that is known filled in and a <placeholder> for the rest. PURE. Returns the lines (download, run).
+    #>
+    [CmdletBinding()] param([string]$TenantId, [string[]]$ManagedIdentityObjectId = @(), [string]$SubscriptionId, [string]$ResourceGroup,
+                            [string]$TickJobName, [string]$ManagerAppName, [string]$SqlServerFqdn)
+    $v = { param($x, $ph) if ("$x".Trim()) { "$x".Trim() } else { $ph } }
+    $run = '.\Initialize-PimMailSender.ps1 -TenantId ' + (& $v $TenantId '<tenant id>')
+    $mi = @(@($ManagedIdentityObjectId) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
+    if ($mi.Count) { $run += ' -ManagedIdentityObjectId ' + ($mi -join ',') }
+    if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and ("$TickJobName".Trim() -or "$ManagerAppName".Trim())) {
+        $run += " -SubscriptionId $("$SubscriptionId".Trim()) -ResourceGroup $("$ResourceGroup".Trim())"
+        if ("$TickJobName".Trim()) { $run += " -TickJobName $("$TickJobName".Trim())" }
+        if ("$ManagerAppName".Trim()) { $run += " -ManagerAppName $("$ManagerAppName".Trim())" }
+    } elseif (-not $mi.Count) { $run += ' -ManagedIdentityObjectId <manager identity object id>,<engine job identity object id>' }
+    $run += ' -SqlServerFqdn ' + (& $v $SqlServerFqdn '<server>.database.windows.net')
+    return @('Invoke-WebRequest https://invardia.com/support/pim/Initialize-PimMailSender.ps1 -OutFile Initialize-PimMailSender.ps1', $run)
+}
+
+function Resolve-PimDeployMailSignedIn {
+    <#
+      MAIL-1 (framework 12.3 (a)): in a SIGNED-IN deploy, may the mail-sender step run? PURE over `az account show`.
+        * the signed-in principal is an APPLICATION (user.type servicePrincipal -- the Invardia Support app) in the
+          deploy's tenant -> run = $true, appId = user.name: Initialize-PimMailSender -UseSignedInAccount -AdminAppId
+          <appId> activates its own time-boxed Exchange Administrator through PIM and creates the mailbox now;
+        * a PERSON (user.type user) -> run = $false: loud and not fatal, and `lines` say exactly how to finish it
+          afterwards (PIM Manager > Get Started > Mail sender, or the published script, browser sign-in);
+        * no / another tenant's account -> run = $false with that reason.
+      Returns @{ run; appId; why; lines }.
+    #>
+    [CmdletBinding()] param([object]$Account, [string]$TenantId, [string[]]$ManagedIdentityObjectId = @(), [string]$SubscriptionId, [string]$ResourceGroup,
+                            [string]$TickJobName, [string]$ManagerAppName, [string]$SqlServerFqdn)
+    $cmd = New-PimMailSenderCommand -TenantId $TenantId -ManagedIdentityObjectId $ManagedIdentityObjectId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
+               -TickJobName $TickJobName -ManagerAppName $ManagerAppName -SqlServerFqdn $SqlServerFqdn
+    $after = @(
+        '  DO IT AFTERWARDS (no certificate): PIM Manager > Get Started > Mail sender -- choose Shared mailbox (it prints this',
+        '  command with the values filled in: an Exchange or Global Administrator runs it and signs in in the browser) or SMTP relay:',
+        "    $($cmd[0])",
+        "    $($cmd[1])")
+    $type = "$($Account.user.type)".Trim()
+    $name = "$($Account.user.name)".Trim()
+    $tid  = "$($Account.tenantId)".Trim()
+    if (-not $Account -or -not $name) {
+        return @{ run = $false; appId = ''; why = 'no signed-in az account'; lines = @('mail sender: NOT RUN -- no signed-in az account could be read.') + $after }
+    }
+    if ("$TenantId".Trim() -and $tid -and $tid -ine "$TenantId".Trim()) {
+        return @{ run = $false; appId = ''; why = 'signed in to another tenant'; lines = @("mail sender: NOT RUN -- the signed-in az account is in tenant $tid, not $TenantId.") + $after }
+    }
+    if ($type -ieq 'servicePrincipal' -and $name -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+        return @{ run = $true; appId = $name; why = 'signed-in application'; lines = @() }
+    }
+    return @{ run = $false; appId = ''; why = 'signed-in deploy is a person'
+              lines = @("mail sender: NOT RUN -- this deploy is signed in as a person ($name). Creating the shared mailbox needs Exchange administration this run does not",
+                        '  hold (an app identity with a time-boxed Exchange Administrator, or an administrator''s own browser sign-in). The environment is MAIL-MUTE until then.') + $after }
+}

@@ -381,6 +381,27 @@ try {
             Say "FAILED manager access: $($_.Exception.Message)" 'Red'; $failed++
         }
     }
+    # ---- THE UPDATE RING THE DEPLOY SET, same route, same reason (2026-10-08) --------------------
+    # Deploy-PimUpdateJob records the ring it wrote onto the update job in pim.Settings['UpdateState'] (kind
+    # 'deploy'), so a fresh install's header says "ring N -- no update run yet" instead of "not recorded". On a
+    # private store that write cannot be made from the deploy host, so it is handed in here as
+    # PIM_DBINIT_UPDATE_SEED. One implementation (Invoke-PimUpdateStateDeploySeed): a REAL run record is never
+    # replaced, and a read failure writes nothing. A REPORTING record: its failure is a warning, never a failed job.
+    if (-not $failed -and "$($env:PIM_DBINIT_UPDATE_SEED)".Trim()) {
+        Step 'update ring record'
+        try {
+            . (Join-Path $solRoot 'engine/_shared/PIM-UpdateState.ps1')
+            $sd = "$($env:PIM_DBINIT_UPDATE_SEED)".Trim() | ConvertFrom-Json
+            $cfgUtc = "$($sd.configuredUtc)"
+            if ($sd.configuredUtc -is [datetime]) { $cfgUtc = $sd.configuredUtc.ToUniversalTime().ToString('o') }
+            $sr = Invoke-PimUpdateStateDeploySeed -ConnectionString $cs -Environment "$($sd.environment)" -Ring "$($sd.ring)" `
+                      -Source "$($sd.source)" -InstalledVersion "$($sd.installedVersion)" -Hold ([bool]$sd.hold) -ConfiguredUtc $cfgUtc
+            if ($sr.ok) { Say "update state: $($sr.reason)" 'Green' }
+            else { Say "update state NOT recorded ($($sr.reason)) -- the update job records it on its first run" 'Yellow' }
+        } catch {
+            Say "update state NOT recorded: $($_.Exception.Message) -- the update job records it on its first run" 'Yellow'
+        }
+    }
 } finally {
     try { $conn.Close() } catch { }
 }

@@ -162,6 +162,75 @@ function New-PimIdentityRecord {
     }
 }
 
+# ---------------------------------------------------------------------------------------------
+# §97 (owner, 2026-10-08) -- THE ENGINE'S AZURE RIGHTS AT THE TENANT ROOT MANAGEMENT GROUP.
+#
+# Live on a production managing tenant: Home went red with "The ENGINE was refused a permission" because Discovery
+# (the tick's managed identity) got `GET /providers/Microsoft.Management/managementGroups -> HTTP 403 AuthorizationFailed`.
+# The engine held Reader on its hosting subscription only. Owner: "why is this not set automatically by the install of
+# the pim solution or informed about" / "default it should not set user admin on tenant root - but make it supported
+# (optional)" / "permissions is crucial in the get started".
+#   * Reader at the tenant root            -- DEFAULT, granted by the install; read-only; Discovery needs it to see Azure.
+#   * User Access Administrator at the root -- OPTIONAL (SEC-34 stays opt-in); needed only to assign Azure resource roles.
+# Both are shown, each on its own line, in Get Started 'Engine permissions' and on the Home permission banner.
+# ---------------------------------------------------------------------------------------------
+$script:PimRoleReader   = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
+$script:PimRoleUaa      = '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9'
+$script:PimRoleOwner    = '8e3af657-a8ff-443c-a75c-2fe8c4bcb635'
+$script:PimRoleContrib  = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
+$script:PimRoleRbacAdm  = 'f58310d9-a9f6-439a-9e8d-f62e7b41a168'
+
+function Get-PimTenantRootScope {
+    # PURE. '/providers/Microsoft.Management/managementGroups/<tenant id>' -- the Tenant Root Group's id IS the tenant id.
+    param([string]$TenantId)
+    $t = "$TenantId".Trim()
+    if (-not $t) { $t = '<tenant id>' }
+    "/providers/Microsoft.Management/managementGroups/$t"
+}
+
+function Get-PimRootAzureHoldings {
+    <#
+      PURE. From the engine identity's role assignments (ARM roleAssignments, as returned by an assignedTo() read --
+      which includes the ones INHERITED from management groups), decide what it holds AT THE TENANT ROOT:
+        reader          -- can READ Azure tenant-wide (Reader, or any role whose actions include */read:
+                           User Access Administrator, Owner, Contributor, Role Based Access Control Administrator)
+        userAccessAdmin -- can ASSIGN Azure roles tenant-wide (User Access Administrator, Owner, RBAC Administrator)
+      -Readable:$false (the assignments could not be read) -> both $null = UNKNOWN, never "missing" and never "held".
+    #>
+    param([object[]]$Assignments = @(), [string]$TenantId, [bool]$Readable = $true)
+    if (-not $Readable -or -not "$TenantId".Trim()) { return [pscustomobject]@{ reader = $null; userAccessAdmin = $null; scope = (Get-PimTenantRootScope -TenantId $TenantId) } }
+    $root = (Get-PimTenantRootScope -TenantId $TenantId).ToLowerInvariant()
+    $guids = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($a in @($Assignments | Where-Object { $_ })) {
+        $p = if ($a.PSObject.Properties['properties'] -and $a.properties) { $a.properties } else { $a }
+        $sc = "$($p.scope)".Trim().TrimEnd('/').ToLowerInvariant()
+        if ($sc -ne $root -and $sc -ne '/') { continue }
+        $rd = "$($p.roleDefinitionId)".Trim().TrimEnd('/')
+        if ($rd) { [void]$guids.Add(($rd -split '/')[-1]) }
+    }
+    $uaa = $false; foreach ($g in @($script:PimRoleUaa, $script:PimRoleOwner, $script:PimRoleRbacAdm)) { if ($guids.Contains($g)) { $uaa = $true } }
+    $rdr = $uaa; foreach ($g in @($script:PimRoleReader, $script:PimRoleContrib)) { if ($guids.Contains($g)) { $rdr = $true } }
+    [pscustomobject]@{ reader = $rdr; userAccessAdmin = $uaa; scope = (Get-PimTenantRootScope -TenantId $TenantId) }
+}
+
+function Get-PimRootAzureFixCommand {
+    <#
+      PURE. The exact grant for the engine identity at the tenant root -- the published, self-contained Invardia script
+      (REST + browser sign-in, no PowerShell modules; framework rule 3). -Roles: 'Reader' and/or
+      'User Access Administrator'; nothing else is accepted (the engine never needs Owner/Contributor).
+    #>
+    param([string]$TenantId, [string]$EngineObjectId, [string[]]$Roles = @('Reader'))
+    $ok = @('Reader', 'User Access Administrator')
+    $rl = @(@($Roles) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    foreach ($r in $rl) { if ($r -notin $ok) { throw "Get-PimRootAzureFixCommand: role '$r' is refused -- only Reader and User Access Administrator are granted at the tenant root." } }
+    $tid = if ("$TenantId".Trim()) { "$TenantId".Trim() } else { '<tenant id>' }
+    $oid = if ("$EngineObjectId".Trim()) { "$EngineObjectId".Trim() } else { '<engine object id>' }
+    $scope = Get-PimTenantRootScope -TenantId $tid
+    $specs = @($rl | ForEach-Object { "'$_@$scope'" }) -join ','
+    "Invoke-WebRequest https://invardia.com/support/pim/Grant-PimEnginePermissions.ps1 -OutFile Grant-PimEnginePermissions.ps1`n" +
+    ".\Grant-PimEnginePermissions.ps1 -TenantId '$tid' -EngineObjectId '$oid' -AzureRoleAssignments $specs"
+}
+
 function Get-PimPermissionHealth {
     <#
       Compare what the RUNTIME identity holds against what the code needs.
@@ -195,7 +264,15 @@ function Get-PimPermissionHealth {
         # delegations (PIM-Assignments-Azure-Resources rows). 0 = not needed, so their absence blocks nothing -- the engine
         # touches only what is defined, and asking for User Access Administrator at the root for nothing is standing Tier-0
         # privilege. -1 (the default) = unknown -> the old rule (needed), so a store that cannot be counted never hides a gap.
-        [int]$AzureDelegationCount   = -1
+        [int]$AzureDelegationCount   = -1,
+        # §97 (owner 2026-10-08): what the engine holds AT THE TENANT ROOT management group ($null = not checked).
+        # Reader there is REQUIRED (Discovery cannot see Azure without it) -- amber when no Azure delegation is defined,
+        # red when one is. User Access Administrator there is OPTIONAL and only reported (the any-scope rule above
+        # decides whether Azure role assignment works).
+        [object]$RootReaderHeld      = $null,
+        [object]$RootUaaHeld         = $null,
+        [string]$TenantId            = '',
+        [string]$EngineObjectId      = ''
     )
 
     $required = @(Get-PimRequiredGraphCapabilities)
@@ -230,6 +307,20 @@ function Get-PimPermissionHealth {
     $azureHeld = (@($AzureRoleScopes) | Where-Object { "$_".Trim() }).Count -gt 0
     $azureNotNeeded = ($AzureDelegationCount -eq 0)
     $azureOk = ($azureHeld -or $azureNotNeeded)
+    # §97 -- the tenant-root lines. Only an explicit $false is "missing"; $null is "not checked" (never a finding).
+    $rootReaderMissing = ($RootReaderHeld -is [bool] -and -not $RootReaderHeld)
+    $rootUaaMissing    = ($RootUaaHeld -is [bool] -and -not $RootUaaHeld)
+    $stateOf = { param($v) if ($v -is [bool]) { if ($v) { 'held' } else { 'missing' } } else { 'unknown' } }
+    $azureRoot = [pscustomobject]@{
+        scope                 = (Get-PimTenantRootScope -TenantId $TenantId)
+        reader                = (& $stateOf $RootReaderHeld)
+        readerRequired        = $true
+        readerFix             = (Get-PimRootAzureFixCommand -TenantId $TenantId -EngineObjectId $EngineObjectId -Roles @('Reader'))
+        userAccessAdmin       = (& $stateOf $RootUaaHeld)
+        # Optional (SEC-34 opt-in): needed only to ASSIGN Azure resource roles, i.e. when Azure delegations are defined.
+        userAccessAdminNeeded = (-not $azureNotNeeded)
+        userAccessAdminFix    = (Get-PimRootAzureFixCommand -TenantId $TenantId -EngineObjectId $EngineObjectId -Roles @('User Access Administrator'))
+    }
 
     # Mail: configured AND proven. A configured sender that cannot send is not "ok" -- the whole
     # point is that TAP delivery and every notification silently stop.
@@ -243,7 +334,10 @@ function Get-PimPermissionHealth {
     # 🪤 OPTIONAL MUST NOT DRAG THE VERDICT RED. `ok` means "core PIM works" -- a tenant that never
     # bought Intune or Defender is HEALTHY, and saying otherwise trains people to ignore the banner.
     # The optional set is reported separately as "these workloads are off".
-    $ok = ($missingReq.Count -eq 0 -and $azureOk -and $mailOk)
+    $ok = ($missingReq.Count -eq 0 -and $azureOk -and $mailOk -and -not $rootReaderMissing)
+    # §97: no Reader at the root = Discovery is blind to Azure. AMBER while no Azure delegation is defined (nothing the
+    # engine must apply depends on it), RED once one is (or the count is unknown -- a gap is never hidden by a failed read).
+    $rootReaderRed = ($rootReaderMissing -and -not $azureNotNeeded)
     # A missing Graph role stops a whole capability dead, so it is an ERROR. Azure RBAC absent is
     # equally fatal to the Azure half. Mail that is merely UNPROVEN is a warning, not an error --
     # over-stating it would train the reader to ignore this banner, which is how the next real
@@ -255,13 +349,14 @@ function Get-PimPermissionHealth {
     $mailBroken = ((-not $mailConfigured) -or ($mailConfigured -and -not $mailUnknown -and -not $mailOk))
     $severity =
         if ($ok -and -not $missingOpt.Count) { 'ok' }
-        elseif ($missingReq.Count -or -not $azureOk -or $mailBroken) { 'error' }
+        elseif ($missingReq.Count -or -not $azureOk -or $mailBroken -or $rootReaderRed) { 'error' }
         else { 'warning' }   # core fine; an optional connector is off, or mail is unproven
 
     $caps = @($missingReq | ForEach-Object { $_.capability } | Sort-Object -Unique)
     $parts = @()
     if ($missingReq.Count)  { $parts += ("{0} REQUIRED Graph permission(s) missing" -f $missingReq.Count) }
     if (-not $azureOk)      { $parts += 'no Azure role-management scope' }
+    if ($rootReaderMissing) { $parts += 'Discovery cannot see Azure (no Reader at the tenant root)' }
     if (-not $mailConfigured) { $parts += 'no mail sender configured' }
     elseif ($mailUnknown)   { $parts += 'mail not verified' }
     elseif (-not $mailOk)   { $parts += 'mail send FAILS' }
@@ -269,10 +364,12 @@ function Get-PimPermissionHealth {
     $headline =
         if ($ok -and -not $missingOpt.Count) { 'Permissions OK' }
         elseif ($ok) { ("Core PIM OK -- {0} optional workload(s) unavailable" -f $offConnectors.Count) }
+        # §97: the only gap is the root Reader and nothing Azure is delegated -> amber, said as what it is, not BLOCKED.
+        elseif (-not $missingReq.Count -and $azureOk -and $rootReaderMissing -and -not $rootReaderRed -and -not $mailBroken -and -not $mailUnknown) { 'Core PIM OK -- Discovery: Azure not visible (grant Reader at the tenant root)' }
         # Operator 2026-10-04 (internal: "critical Core functionality is BLOCKED -- mail not verified" while every permission
         # was held): a sender that is configured but not yet PROVEN is a warning by design (above), so the headline must not
         # say BLOCKED either. Everything else held + mail only unverified = core OK, verify mail.
-        elseif (-not $missingReq.Count -and $azureOk -and $mailConfigured -and $mailUnknown) { 'Core PIM OK -- mail sending not verified yet (send a test alert)' }
+        elseif (-not $missingReq.Count -and $azureOk -and -not $rootReaderRed -and $mailConfigured -and $mailUnknown) { 'Core PIM OK -- mail sending not verified yet (send a test alert)' }
         else { ("Core functionality is BLOCKED -- " + ($parts -join ', ')) }
 
     $detail = if ($ok) {
@@ -282,7 +379,7 @@ function Get-PimPermissionHealth {
         $d
     } else {
         # Say "missing permissions" only when a permission IS missing -- a mail-only problem is not a permission gap.
-        $d = if ($missingReq.Count -or -not $azureOk) { "$IdentityName is missing REQUIRED permissions, so the engine CANNOT complete work it reports as scheduled." }
+        $d = if ($missingReq.Count -or -not $azureOk -or $rootReaderRed) { "$IdentityName is missing REQUIRED permissions, so the engine CANNOT complete work it reports as scheduled." }
              else { "$IdentityName holds every required Graph and Azure permission." }
         if ($caps.Count)   { $d += "  Blocked: " + ($caps -join '; ') + "." }
         if (-not $azureOk) { $d += "  Azure resource roles cannot be assigned at any scope (needs User Access Administrator, typically at the tenant root management group)." }
@@ -291,6 +388,14 @@ function Get-PimPermissionHealth {
         elseif (-not $mailOk)     { $d += "  Mail sending FAILS: the scoped Exchange RBAC assignment for '$MailSender' is missing or wrong (Mail.Send is deliberately NOT granted as a Graph role)." }
         if ($offConnectors.Count) { $d += "  Separately, these optional workloads are off: " + ($offConnectors -join ', ') + "." }
         $d
+    }
+
+    if ($rootReaderMissing) {
+        $detail += "  Discovery cannot see Azure: $IdentityName has no Reader at the tenant root management group ($($azureRoot.scope)), so management groups and subscriptions are not listed. Grant Reader at the tenant root (read-only; the install does this by default) -- run: " + ($azureRoot.readerFix -replace "`n", ' ; ')
+    }
+    if ($rootUaaMissing) {
+        $detail += $(if ($azureNotNeeded) { "  User Access Administrator at the tenant root: not granted -- needed only to assign Azure resource roles (none are defined, so nothing is blocked)." }
+                     else { "  User Access Administrator at the tenant root: not granted -- needed to assign the Azure resource roles you have defined. Grant it with: " + ($azureRoot.userAccessAdminFix -replace "`n", ' ; ') })
     }
 
     $shape = { param($x) [pscustomobject]@{ role = $x.role; capability = $x.capability; tier = "$($x.tier)"; connector = "$($x.connector)" } }
@@ -305,6 +410,7 @@ function Get-PimPermissionHealth {
         brokenCapabilities = $caps
         azureOk = $azureOk
         azureNeeded = (-not $azureNotNeeded)
+        azureRoot = $azureRoot
         mail = [pscustomobject]@{ sender = "$MailSender"; configured = $mailConfigured; ok = $mailOk; verified = (-not $mailUnknown) }
         headline = $headline
         detail = $detail

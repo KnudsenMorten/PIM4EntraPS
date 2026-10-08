@@ -491,12 +491,12 @@ Function Get-PimLicenseContact { "$script:PimLicenseContact" }
 Function Get-PimLicenseRegisterCommand {
     <#
       PURE. The supported way to register an issued licence file (tools/setup/Set-PimLicense.ps1), with this environment's
-      store server and tenant filled in when known; placeholders otherwise. Never carries a secret.
+      store server and tenant filled in when known; placeholders otherwise. Never carries a secret -- and never a certificate (97.1, owner 2026-10-08: "we dont support certificates"): it signs in as the az account in that window (a member of the store's SQL admin group, or the Invardia Support app session).
     #>
     param([string]$SqlServer, [string]$TenantId)
     $srv = "$SqlServer".Trim(); if (-not $srv) { $srv = '<server>.database.windows.net' }
     $tid = "$TenantId".Trim();  if (-not $tid) { $tid = '<tenant>' }
-    return ("pwsh -File tools\setup\Set-PimLicense.ps1 -LicensePath <file> -SqlServer {0} -TenantId {1} -AdminAppId <app id> -AdminCertThumbprint <thumbprint>" -f $srv, $tid)
+    return ("pwsh -File tools\setup\Set-PimLicense.ps1 -LicensePath <file> -SqlServer {0} -TenantId {1} -UseSignedInAccount" -f $srv, $tid)
 }
 
 Function ConvertFrom-PimLicenseSettingRaw {

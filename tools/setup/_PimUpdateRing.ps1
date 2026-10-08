@@ -916,6 +916,47 @@ function Get-PimUpdaterSqlGrantPlan {
         message = "no SQL-admin credential (-SqlAdminClientId + -SqlAdminCertThumbprint) -- the database user for '$UpdateJobName' was NOT granted. Re-run with it, or run the INFRA step. Until then the updater REFUSES every release that moves the version." }
 }
 
+function Get-PimUpdateStateSeedPlan {
+    <#
+      PURE. 2026-10-08 (owner: "the page does not show the update ring. you need to apply that as part of the
+      deployment"). HOW the deploy records the ring it has just set on the update job in the environment's own
+      store (pim.Settings['UpdateState'], kind 'deploy' -- engine/_shared/PIM-UpdateState.ps1), so a fresh install's
+      header reads "ring N -- no update run yet" instead of "not recorded" until its first nightly run.
+        none    -- -SkipUpdateStateSeed, -WhatIf, no store, or no ring: nothing is written (says why)
+        host    -- SQL reachable from this host (public) + an identity the deploy already uses for SQL (the
+                   signed-in az user, or the SQL-admin certificate SPN): written from here
+        dbinit  -- SQL is private and the in-cloud bootstrap job exists: the seed rides that job (it already
+                   writes pim.Settings from inside for the same reason -- gates, access)
+        later   -- no route from here: nothing is written; the update job records the ring on its first run
+      Never a failure: a reporting record must not fail a deploy.
+    #>
+    param([bool]$Skip, [bool]$WhatIf, [bool]$HasStore, [AllowEmptyString()][string]$Ring = '',
+          [bool]$SqlPrivate, [bool]$DbInitJobExists, [bool]$UseSignedInAccount, [bool]$HaveCertCredential,
+          [string]$UpdateJobName = 'ca-pim-update', [string]$DbInitJobName = 'ca-pim-dbinit')
+    if ($Skip)   { return [pscustomobject]@{ action = 'none'; message = '-SkipUpdateStateSeed: the ring is NOT recorded now; the Manager shows "not recorded" until the update job first runs' } }
+    if ($WhatIf) { return [pscustomobject]@{ action = 'none'; message = "-WhatIf: would record ring $Ring in pim.Settings['UpdateState'] (installed, no update run yet)" } }
+    if (-not $HasStore) { return [pscustomobject]@{ action = 'none'; message = 'no SQL store -- nothing to record the ring in' } }
+    if (-not "$Ring".Trim()) { return [pscustomobject]@{ action = 'none'; message = "'$UpdateJobName' carries no ring -- nothing to record" } }
+    if ($SqlPrivate) {
+        if ($DbInitJobExists) { return [pscustomobject]@{ action = 'dbinit'; message = "SQL is private: the ring is recorded from inside the environment by '$DbInitJobName'" } }
+        return [pscustomobject]@{ action = 'later'; message = "SQL is private and '$DbInitJobName' does not exist: the ring is recorded by '$UpdateJobName' on its first run (start it now to see it at once)" }
+    }
+    if ($UseSignedInAccount -or $HaveCertCredential) { return [pscustomobject]@{ action = 'host'; message = 'recording the ring in the store from this host, as the identity this deploy uses for SQL' } }
+    return [pscustomobject]@{ action = 'later'; message = "no SQL identity given (-UseSignedInAccount, or -SqlAdminClientId + -SqlAdminCertThumbprint): the ring is recorded by '$UpdateJobName' on its first run (start it now to see it at once)" }
+}
+
+function Get-PimUpdateStateSeedSource {
+    <#
+      PURE. The update SOURCE the deploy records with the ring: what this deploy passed, else what the job already
+      carries, else Invardia when the source address is Invardia's, else the default 'pim-src'.
+    #>
+    param([AllowEmptyString()][string]$UpdateSource, [System.Collections.IDictionary]$ExistingEnv = @{}, [AllowEmptyString()][string]$SourceUrl)
+    if ("$UpdateSource".Trim()) { return "$UpdateSource".Trim().ToLowerInvariant() }
+    if ($ExistingEnv -and $ExistingEnv.Contains('PIM_UPDATE_SOURCE') -and "$($ExistingEnv['PIM_UPDATE_SOURCE'])".Trim()) { return "$($ExistingEnv['PIM_UPDATE_SOURCE'])".Trim().ToLowerInvariant() }
+    if (Test-PimInvardiaUpdateSource -Source '' -SourceUrl $SourceUrl) { return 'invardia' }
+    return 'pim-src'
+}
+
 function Merge-PimDbInitPrincipals {
     <#
       PURE. Add one principal to the bootstrap job's PIM_DBINIT_PRINCIPALS JSON array without dropping any

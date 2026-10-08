@@ -202,6 +202,11 @@ param(
     [string]$AzureRbacManagementGroupId = '',
     [switch]$SkipAzureRbac,
     [switch]$RequireAzureRbac,          # make a failed role assignment fail the deploy
+    # §97 (owner 2026-10-08): the tick (engine) identity ALSO gets Reader at the TENANT ROOT management group by default, so
+    # Discovery can list management groups + subscriptions (a production managing tenant went red on that 403). User
+    # Access Administrator there is opt-in (SEC-34): this switch. Never fatal -- a refusal warns with the exact fix.
+    [switch]$EngineAzureRootUserAccessAdmin,
+    [switch]$SkipEngineAzureRootAccess,
 
     # --- on-prem/AD DNS (hub clients resolve the env FQDN here); blank = skip ---
     [string]$DnsServer      = '',
@@ -1393,6 +1398,11 @@ $envYamlJob
         else {
             Grant-PimMiAzureRbac -MiObjectId $jobOid -Name $TickJobName -SubscriptionId $SubscriptionId `
                 -Roles $AzureRbacRoles -ManagementGroupId $AzureRbacManagementGroupId -Required:$RequireAzureRbac
+            # §97 -- Reader (default) [+ User Access Administrator, opt-in] at the tenant root, read back, never fatal.
+            if (-not $SkipEngineAzureRootAccess -and "$TenantId".Trim()) {
+                [void](Grant-PimEngineRootAzureAccess -MiObjectId $jobOid -Name $TickJobName -TenantId $TenantId -SubscriptionId $SubscriptionId `
+                           -IncludeUserAccessAdministrator:$EngineAzureRootUserAccessAdmin)
+            }
         }
         Note "MI $jobAppId granted SQL (db user [$TickJobName]) + Graph app-roles + Azure RBAC"
         Note "fire one now: az containerapp job start --subscription $SubscriptionId -g $ResourceGroup -n $TickJobName"

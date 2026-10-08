@@ -69,6 +69,11 @@ $script:PimTickOnlyJobTypes += 'install-key'
 # (engine/msp/PIM-InvardiaEnrollment.ps1). On by default on a managing tenant only (Disable-PimUnconfiguredIntegrationJobs).
 $script:PimJobTypes += 'enrolled-tenants'
 $script:PimTickOnlyJobTypes += 'enrolled-tenants'
+# §97.1 (owner 2026-10-08: "we dont support certificates ... does the engine not have the necessary permissions for this"):
+# 'workload-prereqs' -- the engine checks every API-checkable workload prerequisite AS ITSELF and records it in pim.Settings
+# 'WorkloadPrereqs' (engine/_shared/PIM-WorkloadPrereqSelfCheck.ps1). Read-only towards the tenant. Tick-only: 'Check again' QUEUES it.
+$script:PimJobTypes += 'workload-prereqs'
+$script:PimTickOnlyJobTypes += 'workload-prereqs'
 # AUDIT-1.3 (2026-10-05): 'audit-retention' deletes audit rows older than AuditRetentionMonths (min 13; unset = keep every
 # row, which is the default) through the append-only trigger's one door, and records audit.retention (PIM-AuditRetention.ps1).
 $script:PimJobTypes += 'audit-retention'
@@ -368,6 +373,8 @@ function Get-PimDefaultJobSchedule {
         [pscustomobject]@{ name='install-key'; type='install-key'; intervalMinutes=360; enabled=$true }
         # UPLINK-ENROL: daily (+ Run now on the Jobs page). Switched off below unless this environment is a managing tenant.
         [pscustomobject]@{ name='enrolled-tenants'; type='enrolled-tenants'; intervalMinutes=1440; enabled=$true }
+        # §97.1: daily -- the workload prerequisites, checked by the engine itself (Check again on the prerequisite chips = Run now).
+        [pscustomobject]@{ name='workload-prereqs'; type='workload-prereqs'; intervalMinutes=1440; enabled=$true }
         [pscustomobject]@{ name='audit-retention'; type='audit-retention'; intervalMinutes=1440; enabled=$true }
         # CONFIG-1.3: daily (SCHED-1: the cadence counts from the job's finish); "Back up now" on Backups & restore runs one on demand.
         [pscustomobject]@{ name='config-backup'; type='config-backup'; intervalMinutes=1440; enabled=$true }
@@ -1327,6 +1334,14 @@ function Initialize-PimDefaultJobHandlers {
         # §95.4: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimInstallKeyJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:install-key (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'workload-prereqs' -Handler {
+        param($job,$now,$whatIf)
+        # §97.1: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimWorkloadPrereqSelfCheckJob) --
+        # it reads Graph / ARM / Fabric as the engine, which never runs on the Manager's request loop.
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:workload-prereqs (wired by Start-PimScheduler; the Manager only queues it)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'enrolled-tenants' -Handler {

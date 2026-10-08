@@ -47,6 +47,22 @@ function Clear-PimRestTokenCache {
     $script:PimTokenCache = @{}
 }
 
+function Add-PimRestSessionToken {
+    <#
+      97.1 -- hand a token the CALLER already holds (a setup script's browser sign-in: auth code + PKCE, no modules) to
+      the token cache, so every Invoke-PimGraph / Invoke-PimArm / Invoke-PimRest / SQL call in THIS process uses it.
+      Only for the attended interactive mode ($global:PIM_Interactive): the key is exactly the one Get-PimRestToken
+      computes for that mode, so the engine's own identities (managed identity, certificate) can never pick it up.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Resource, [Parameter(Mandatory)][string]$Token, [datetime]$ExpiresUtc = ((Get-Date).ToUniversalTime().AddMinutes(50)), [string]$TenantId)
+    $aud = Resolve-PimRestResource -Resource $Resource
+    $tenant = Get-PimTenantId -TenantId $TenantId
+    $cid = if ($global:PIM_ClientId) { $global:PIM_ClientId } elseif ($env:AZURE_CLIENT_ID) { $env:AZURE_CLIENT_ID } else { $null }
+    if (-not $script:PimTokenCache) { $script:PimTokenCache = @{} }
+    $script:PimTokenCache[("$aud|$tenant|$cid|interactive").ToLowerInvariant()] = [pscustomobject]@{ token = $Token; expiresUtc = $ExpiresUtc.ToUniversalTime() }
+}
+
 function Resolve-PimRestResource {
   param([Parameter(Mandatory)][string]$Resource)
   # 🪤 $script: IS NOT A CLOSURE FOR A DOT-SOURCED FUNCTION. It binds to the script scope

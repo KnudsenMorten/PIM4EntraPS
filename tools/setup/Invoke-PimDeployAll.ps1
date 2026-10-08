@@ -337,6 +337,10 @@ param(
     [string]$AzureRbacManagementGroupId,
     [switch]$SkipAzureRbac,
     [switch]$RequireAzureRbac,
+    # §97 (owner 2026-10-08): the engine gets Reader at the tenant root by default (Setup-PimContainers); User Access
+    # Administrator there is opt-in (SEC-34) -- this switch forwards that choice.
+    [switch]$EngineAzureRootUserAccessAdmin,
+    [switch]$SkipEngineAzureRootAccess,
 
     # --- engine identity: deploy-validation tests AND (IMP-08) the containers' Graph auth ---
     # These are now forwarded to Setup-PimContainers as well. Without them the hosted engine falls
@@ -1696,6 +1700,8 @@ function Invoke-DefaultStepRunner {
             if ($AzureRbacManagementGroupId) { $reach['AzureRbacManagementGroupId'] = $AzureRbacManagementGroupId }
             if ($SkipAzureRbac)              { $reach['SkipAzureRbac']              = $true }
             if ($RequireAzureRbac)           { $reach['RequireAzureRbac']           = $true }
+            if ($EngineAzureRootUserAccessAdmin) { $reach['EngineAzureRootUserAccessAdmin'] = $true }   # §97 opt-in
+            if ($SkipEngineAzureRootAccess)      { $reach['SkipEngineAzureRootAccess']      = $true }
             # 71.40 -- the Manager's baseline trust + document URL (absent unless set, so nothing changes for anyone else).
             if (@($BaselineTrustedKeys | Where-Object { "$_".Trim() }).Count) { $reach['BaselineTrustedKeys'] = @($BaselineTrustedKeys | Where-Object { "$_".Trim() }) }
             if ("$BaselineDocUrl".Trim())    { $reach['BaselineDocUrl']             = "$BaselineDocUrl".Trim() }
@@ -1841,7 +1847,7 @@ function Invoke-DefaultStepRunner {
                 } elseif ("$EnvLabel".Trim()) {
                     # §94: PIM-Engine@ is the tenant's first environment's sender -- each labelled one gets its own mailbox
                     $mailArgs['MailboxName'] = "PIM-Engine-$EnvLabel"
-                    $mailArgs['DisplayName'] = "PIM4EntraPS Engine ($EnvLabel, notifications)"
+                    $mailArgs['DisplayName'] = "PIM Manager ($EnvLabel, notifications)"
                 }
                 # Without this the script THROWS on its own first line -- "one of -AdminSecret /
                 # -AdminCertThumbprint is required" -- and this step's deliberate
@@ -1858,22 +1864,35 @@ function Invoke-DefaultStepRunner {
                 # prompt nobody was there to answer. A missing argument that THROWS is a bug; a
                 # missing argument that PROMPTS is a hang, and a hang in a nightly job is
                 # indistinguishable from a network outage until someone reads the console.
+                $mailSignedInApp = ''
                 if ($UseSignedInAccount) {
-                    # 71.33 -- Initialize-PimMailSender provisions Exchange with an APPLICATION identity (app-only Exchange
-                    # token, a directory role for that app). A signed-in user's az token carries no Exchange scope, so this
-                    # step cannot run here. Loud and not fatal, exactly like the no-identity case below.
-                    Warn 'mail sender: NOT RUN -- a signed-in deploy has no application identity, and Exchange provisioning needs one.'
-                    Warn '  This environment is MAIL-MUTE until Initialize-PimMailSender.ps1 is run with an identity that holds Exchange Administrator,'
-                    Warn '  or the shared sender mailbox + scoped send right are created by an Exchange administrator by hand.'
-                    return @{ ok=$true; ran=$false; detail='DEGRADED: mail sender not run (signed-in deploy) -- environment is mail-mute' }
+                    # MAIL-1 (framework 12.3 (a), owner 2026-10-08: "why did it not create the mailbox during the initial
+                    # deployment"). Exchange provisioning needs an APPLICATION identity (app-only Exchange token + a
+                    # time-boxed directory role for that app). A signed-in deploy run as the Invardia Support app IS one:
+                    # Initialize-PimMailSender -UseSignedInAccount -AdminAppId <that app> activates its own Exchange
+                    # Administrator through PIM and creates the mailbox + the scoped send right in this run (proven live
+                    # 2026-10-07/08). Only a signed-in PERSON is skipped -- loud, not fatal, and saying how to finish it.
+                    $mailAcct = $null
+                    try { $mailAcct = ((az account show @azSubArgs -o json 2>$null) | Out-String | ConvertFrom-Json) } catch { $mailAcct = $null }
+                    if (-not (Get-Command Resolve-PimDeployMailSignedIn -ErrorAction SilentlyContinue)) { . (Join-Path $here '_PimMailSenderPlan.ps1') }
+                    $mailPlan = Resolve-PimDeployMailSignedIn -Account $mailAcct -TenantId $TenantId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
+                                    -TickJobName $(if ($WorkerMode -eq 'cron') { $TickJobName } else { '' }) -ManagerAppName $ManagerApp -SqlServerFqdn $SqlServerFqdn
+                    if (-not $mailPlan.run) {
+                        foreach ($l in @($mailPlan.lines)) { Warn $l }
+                        return @{ ok=$true; ran=$false; detail="DEGRADED: mail sender not run ($($mailPlan.why)) -- environment is mail-mute until it is set up from PIM Manager > Get Started > Mail sender" }
+                    }
+                    $mailSignedInApp = "$($mailPlan.appId)"
+                    $mailArgs['UseSignedInAccount'] = $true
+                    $mailArgs['AdminAppId'] = $mailSignedInApp
+                    Write-Host "    mail: the signed-in deploy runs as the application $mailSignedInApp -- it creates the sender mailbox + the scoped send right now" -ForegroundColor DarkGray
                 }
-                if (-not $storeAdminArgs.Count) {
+                if (-not $mailSignedInApp -and -not $storeAdminArgs.Count) {
                     Warn 'mail sender: SKIPPED -- no SQL admin identity was supplied, and this step cannot authenticate without one.'
-                    Warn '  Pass -SqlAdminClientId with -SqlAdminCertThumbprint (or -SqlAdminClientSecret), or run Initialize-PimMailSender.ps1 yourself afterwards.'
+                    Warn '  Pass -SqlAdminClientId with -SqlAdminClientSecret, or do it afterwards: PIM Manager > Get Started > Mail sender (shared mailbox: a browser sign-in command; or SMTP relay).'
                     Warn '  This environment is MAIL-MUTE until then: TAPs will be minted and delivered nowhere.'
                     return @{ ok=$true; ran=$false; detail='DEGRADED: mail sender skipped (no admin identity) -- environment is mail-mute' }
                 }
-                $mailArgs += $storeAdminArgs
+                if (-not $mailSignedInApp) { $mailArgs += $storeAdminArgs }
                 # -EngineAppId is the SPN that RECEIVES the scoped Mail.Send -- a different identity
                 # from the admin that performs the grant, and without it the script gets as far as
                 # resolving the sender and then stops:

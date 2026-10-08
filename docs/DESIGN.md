@@ -2077,6 +2077,25 @@ See §17.7 for the full template/approval mechanics.
   keeps winning — measured against an out-of-scope mailbox, tenant-wide `Mail.Send` allowed sending
   as ANY mailbox while the scoped assignment alone refused it. So granting Graph `Mail.Send` would
   not add capability; it would remove the restriction.
+- **Mail transport — two modes, one setting** (built 2026-10-08, not yet released). `pim.Settings`
+  `MailMode` = `sharedMailbox` (the default when absent) | `smtp` | `none`, read by every mail at the one
+  send chokepoint (`engine/_shared/PIM-MailTransport.ps1`, called from `Send-PimNotifyMail`):
+  - *sharedMailbox* — Graph `sendMail` as above. The mailbox and its scoped send right are created by
+    `Initialize-PimMailSender.ps1`, which signs in **in the browser** when no credential is passed (auth
+    code + PKCE on a localhost loopback, no device code, no module; the administrator acts with their own
+    Exchange role, so nothing is granted to any app), or runs as the setup app with its secret, or as the
+    signed-in deployment — a deployment signed in as an application creates the mailbox in the same run.
+  - *smtp* — `System.Net.Mail.SmtpClient` (STARTTLS or none; implicit TLS on 465 is not supported and
+    refused). `pim.Settings` `SmtpRelay` = { host, port, security, username, from, vaultName, secretName }.
+    The **password is never in the database or the page**: it is a secret in the environment's own Key
+    Vault, read at send time by the sending identity. The Manager writes it with its own identity when it
+    may; otherwise `Set-PimSmtpRelayPassword.ps1` (browser sign-in) writes it and grants the sending
+    identities read access on **that one secret**.
+  - *none* — every send returns "switched off" (also to the TAP readiness probe).
+  The Manager's Get Started > Mail sender and Settings > Mail & alerting > Mail sending are one form over
+  `GET/PUT /api/settings/mail`; `POST /api/settings/mail/test` sends a test mail and records the result
+  against the settings it proved, so "done" follows the data (a changed relay makes an old proof stale).
+  Both scripts are published as standalone downloads with every release.
 - **Deleting** a provisioned admin *account* (test cleanup / offboarding) needs more than the
   Graph app roles above — user delete is a privileged directory operation requiring an
   appropriate directory role (e.g. the management SPN's GA membership). The engine *creates*
@@ -3524,6 +3543,24 @@ is decided by its **release ring**, never by "newest available":
   as current (everything is stamped with when it was recorded, with a banner past 48h). A ring move stays
   an operator act on the update job; the panel says so, there is no write endpoint, and a test fails if
   one appears.
+- **The deployment records the ring too, so a fresh install is not "not recorded"** (2026-10-08). A new
+  environment has no update run until its first scheduled run, yet the deployment has just set
+  `PIM_UPDATE_RING` on the update job and read it back. `Deploy-PimUpdateJob.ps1` (which every deploy path —
+  the one-shot deploy, the guided install and the managing-tenant build — goes through) therefore writes a
+  record of **kind `deploy`** into the same `pim.Settings['UpdateState']`: ring, update source, installed
+  version, when — and **no run stamp, approved version or outcome**. The verdict shows it as
+  **"ring N — installed, no update run yet"**, with `ringSource = deployment`, so the label always says where
+  it came from; after 48h without a run it is flagged as stale ("check its executions"). Rules it keeps:
+  **it never replaces a real run record** — over one it only sets `configured*` fields, and when a deploy
+  *changed* the ring after the last run the header shows the new ring flagged "not run on this ring yet"
+  while the run's facts stay attributed to the ring that run read; **a failed read writes nothing** (it
+  could be hiding a run record); and it is **best-effort** — a record that does not land is a warning, never
+  a failed deploy. Route: public SQL is written from the deploy host as the SQL identity the deploy already
+  uses (signed-in operator or the SQL-admin certificate); private SQL rides the in-cloud database bootstrap
+  job (`PIM_DBINIT_UPDATE_SEED`), the same route that already writes feature gates and access from inside.
+  The first update run replaces the record with an ordinary run record (which now also carries `kind` and
+  `source`). The Manager still makes no ARM call: its identity holds rights on the tick job only, not on the
+  update job, and none were added.
 - **Where a feed is needed.** The in-cloud updater requires a published source feed (archives + `channel.json`).
   A community installation from the public repository has none and updates by `git pull` plus re-running the
   one-shot deploy (§11.7).
@@ -5518,39 +5555,53 @@ rows exist:
 | `devops` | Azure DevOps resource (`499b84ac-1321-427f-aa17-267ca6975798`) | Azure DevOps grants access by **nesting** the Entra group into an org/project security group (not a flat role). Built as a **membership-model** connector (`azure-devops`) using the Graph API: resolveContainer = the Entra group's subject descriptor (client-side `originId == groupId` match), `roles` = the org/project security groups, assign = `PUT memberships/{group}/{subject}`. Per-row `Resource = org`. |
 | `powerplatform` | `https://service.powerapps.com/` (BAP admin) | Power Platform **environment roles** (Environment Admin / Maker): flat `roleAssignments` on the BAP admin environment scope with the PIM group as principal. Built as a flat connector (`power-platform`) with static roles + per-row `Resource = environment id`. Pairs with `PIM-PowerPlatformDiscovery.ps1` (environment auto-detect → proposed PIM groups). |
 
-### 15.4a Workload prerequisites — one script per workload, a chip in the GUI
+### 15.4a Workload prerequisites — checked by PIM itself, a chip in the GUI
 
 Some workloads need tenant-side preparation before a connector can bind anything. That preparation is **not** in the
-permission templates (a pack stays pure rows); it is checked by one setup script, run per workload:
-
-`tools/setup/Initialize-PimWorkloadPrereqs.ps1 -Workload DefenderXdr | Intune | PowerBI | AzureRbac | EntraRoles`
+permission templates (a pack stays pure rows). **PIM checks it itself**: the scheduler job `workload-prereqs` (daily, and
+on demand with **Check again** on any prerequisite chip) runs every check an API can answer **as the engine's own
+identity**, read-only, and records the result. A person is only needed for what the engine cannot do or see: a grant, a
+group or setting only an administrator may create, or a portal-only step.
 
 - **One catalog** (`engine/_shared/PIM-WorkloadPrereqs.ps1`) holds every prerequisite: a stable check id, whether an
-  API can check or fix it, the exact portal path when only a human can, and the Microsoft Learn link. The script, the
-  Manager and the tests read the same definitions; the pack → workload link (e.g. the Sentinel pack → Azure RBAC) lives
-  there too.
-- **Checks and fixes.** Defender XDR: the engine's `RoleManagement.ReadWrite.Defender` (granted), Unified RBAC answering
-  (beta `roleManagement/defender/roleDefinitions`), the activated workloads (portal only — reported as *inferred* from the
-  live roles), and for Data Operations the permission catalog (`resourceNamespaces`), Sentinel enabled on a workspace
-  (ARM `onboardingStates`) and the workspace connected to the Defender portal / data lake (portal only). Intune: the
-  engine's `DeviceManagementRBAC.ReadWrite.All` (granted) and the Intune RBAC read. Power BI: a security group (created),
-  the engine identity in it (added), no admin-consent Power BI application permission on it (reported), and the Fabric
-  tenant setting *Service principals can access read-only admin APIs* for that group (enabled through the Fabric admin API
-  when the caller may, keeping every group already listed). Azure RBAC: User Access Administrator (or Owner) for the
-  engine at every managed scope — assigned only with an explicit opt-in switch. Entra roles: the full Graph role map
-  (granted) and the P2 service plan. Every change is read back; `-WhatIf` changes nothing.
-- **Honest states.** A check the caller cannot read is *not checked* (never passed); a portal-only step stays pending until
-  the operator confirms it with `-ConfirmPortalStep <id>` (recorded as attested, not verified). An API-verified failure
-  cannot be confirmed away.
-- **Recorded in the store** as `pim.Settings['WorkloadPrereqs']` (per workload: run time, who, state, every check), read
-  back and audited. `GET /api/workload-prereqs` returns it with the exact command for this environment, and the GUI shows a
-  chip per workload on the permission-template cards, in the workload wizards and on the Coverage & gaps page:
-  **green** *prerequisites OK — checked &lt;when&gt;*, **amber** *not checked — run …* / *re-check* (older than 30 days) /
-  *incomplete*, **red** *prerequisites missing: &lt;checks&gt;* — each with the command, copyable.
+  API can check or fix it, the exact portal path when only a human can, and the Microsoft Learn link. The self-check, the
+  fix script, the Manager and the tests read the same definitions; the pack → workload link (e.g. the Sentinel pack →
+  Azure RBAC) lives there too.
+- **The checks.** Defender XDR: the engine's `RoleManagement.ReadWrite.Defender`, Unified RBAC answering (beta
+  `roleManagement/defender/roleDefinitions`), the activated workloads (portal only — reported as *inferred* from the live
+  roles), and for Data Operations the permission catalog (`resourceNamespaces`), Sentinel enabled on a workspace (ARM
+  `onboardingStates`) and the workspace connected to the Defender portal / data lake (portal only). Intune: the engine's
+  `DeviceManagementRBAC.ReadWrite.All` and the Intune RBAC read. Power BI: the admin-API security group, the engine identity
+  in it, no admin-consent Power BI application permission on it, and the Fabric tenant setting *Service principals can
+  access read-only admin APIs* for that group. Azure RBAC: User Access Administrator (or Owner) for the engine at every
+  managed scope. Entra roles: the full Graph role map of the engine and the P2 service plan.
+- **The self-check** (`engine/_shared/PIM-WorkloadPrereqSelfCheck.ps1`) runs the same checks in a read-only mode: it never
+  grants, creates or changes anything. The engine's Graph roles are read from its own app-role assignments, or from its
+  own token when those cannot be read; the required list is the one role map, read from its source (never a second list).
+  A 403 to the engine at an Azure scope means it holds nothing there; workspaces it cannot see make Sentinel *not
+  checked*, never *missing*. Every check records who decided it and when.
+- **Merged, never overwritten** (`Merge-PimWorkloadPrereqRecord`): a portal confirmation survives every self-check; a
+  Data Operations *not used* is kept; a result the engine cannot decide keeps a person's verified one; an API-verified
+  answer replaces an older one (a grant that was taken away is seen). The merged record is written to
+  `pim.Settings['WorkloadPrereqs']`, read back and audited (`settings.workloadprereqs.selfcheck`).
+- **Honest states.** A check that cannot be read is *not checked* (never passed). A portal-only step, a check PIM could not
+  read, or a P2 licence held through Microsoft Entra ID Governance is **confirmed in the Manager** (Confirm, Admin+;
+  *Not used* for the Data Operations checks; Withdraw undoes it) — recorded as attested, not verified, naming who and when,
+  and audited. An API-verified failure can never be confirmed away.
+- **The fix command is never a certificate.** When a fix needs a person, the chip shows one published, standalone script
+  (browser sign-in, no PowerShell modules): `Grant-PimEnginePermissions.ps1` for a missing Graph application permission or
+  User Access Administrator at a scope, `Initialize-PimWorkloadPrereqs.ps1 -Workload <name>` for the Power BI group /
+  membership / Fabric setting or Sentinel on a dedicated workspace. Afterwards the person presses Check again; PIM records
+  the result itself. The same script still accepts the signed-in az account (the Invardia Support app) and, from the
+  repository, a certificate identity for existing automation — PIM never prints either.
+- **In the GUI.** `GET /api/workload-prereqs` returns the judged record per workload; a chip per workload sits on the
+  permission-template cards, in the workload wizards and on the Coverage & gaps page: **green** *prerequisites OK — checked
+  &lt;when&gt; by PIM itself*, **amber** *not checked yet* / *re-check* (older than 30 days) / *incomplete*, **red**
+  *prerequisites missing: &lt;checks&gt;* — with the next step in words, the checks still open (each with its portal step,
+  its Learn link and Confirm where allowed), the fix command when there is one, and Check again.
 - **`-EnableSentinel` (opt-in).** For Defender Data Operations: enables Microsoft Sentinel on a dedicated, empty security
   workspace (named, or created in the PIM resource group), registering `Microsoft.SecurityInsights` and
   `Microsoft.OperationsManagement` first. PIM's own log workspace is refused (Sentinel would bill every log line).
-
 ### 15.4b The assignment gate — groups always, workload assignments per workload (v2.4.380)
 
 A permission group is **always created**. Only a **new workload role assignment** waits for that workload's
@@ -5559,7 +5610,8 @@ create step of the Intune, Defender XDR, workload-connector and Azure providers,
 held note:
 
 - **held** when the workload's recorded state is failed, incomplete, never run or unreadable — the item is reported
-  *HELD* with the reasons and the command, counted as skipped, and the scope does not fail;
+  *HELD* with the reasons and the next step, counted as skipped, and the scope does not fail. Green comes from PIM's own
+  self-check (15.4a), so Entra roles and Intune on a fully permissioned engine assign with no human step;
 - **not held** when it is ok or merely stale (a once-green workload keeps assigning after the 30-day re-check window);
 - **never** for Entra ID roles, and for **Azure** only when a prerequisite run actually found a problem (never checked
   is not a hold — Azure assignments have always run without the script);
@@ -7328,6 +7380,23 @@ hooking each one). Groups are **collapsible** (one open at a time; outside-click
 `Arrow`/`Esc` navigate). The bar is **responsive** — it compacts like the flat strip
 and stacks into a vertical accordion under ~880px.
 
+**Blocking counts — what waits for a person.** Anything that waits for a person's decision
+and holds work back is counted on the menu itself, so nobody has to find it by chance.
+`GET /api/attention` (every role, read-only) reads the existing states — held policy change
+sets (the mass-change circuit breaker), pending approval requests, access requests waiting
+for a department Owner, a break-glass account change waiting for a second SuperAdmin, a guard
+holding a plan and a guard release waiting for a second SuperAdmin, staged changes that a
+second administrator must commit, and workload assignments held by their prerequisites —
+and returns one item per kind with its count, the page that holds it, whether the caller can
+act and, if not, who can. The top-menu entry gets a red count and the submenu entry the same
+count (e.g. *Reviews & controls (2)* → *Approvals (2)*); the Overview's first line lists
+each item with a link to its page and, for a role that cannot act, who can. The counts are
+read on page load, every 30 seconds and on a page change, and clear by themselves once the
+item is decided — there is no acknowledge. Informational counts (the pending-changes queue,
+mirrored page counts) keep their own indicator and never use the blocking red. An item that
+is already approved for its exact plan (or released) waits for the engine, not a person, and
+is not counted.
+
 **No dead/orphan menu (integrity).** `buildNavGroups()` records any `NAV_GROUPS`
 entry whose `data-tab` does not exist in `window.PIM_NAV_DROPPED`, so a typo can never
 silently hide a view. The headless validator's nav-walk asserts the complementary
@@ -7501,6 +7570,28 @@ no longer resolves are hidden by default; **show deleted principals (N)** reveal
 revoke is queued (§18.1f); the row shows **revoke queued** until a later snapshot no longer contains
 it, and a completed revoke queues a fresh snapshot.
 
+**PIM Manager's own access is hidden by default.** Three more groups are left out unless their tick is on --
+**show PIM Manager's own identities**, **show the Invardia Support app**, **show break-glass accounts** -- each
+with its count, and once shown each row carries a badge (**PIM MANAGER**, **SUPPORT APP**, **BREAK-GLASS**).
+The server marks every row (`ownKind`) from facts, never from a name first:
+- *PIM Manager*: the service principal the Manager runs as and every app id the installation configured for
+  itself (the engine app of an installation without containers); every managed identity whose resource id lies
+  in the Manager's own resource group (the engine job, the Manager, the update / publish jobs); every service
+  principal that is a member of PIM's own SQL admin group.
+- *Invardia Support app*: the service principal tagged `InvardiaSupport` (the support app script tags what it
+  creates), or the application behind the read-only SQL user the support access script creates from the app's
+  SID. Only for a support app made before the tag existed is a display name starting "Invardia Support" used,
+  and the response says so. A support app is never also counted as PIM Manager.
+- *Break-glass*: the accounts set in PIM Manager (Settings > Break-glass), by object id or UPN. If that list
+  cannot be read nothing is marked here and the page says why -- the revoke guard still refuses every row.
+
+The lookups cost a few Graph reads and are kept for 10 minutes per set of service principals in the list.
+A group that could not be checked says so on its tick and in the note under the bar, and its rows stay listed.
+One rule (`revHiddenReason`) decides what a tick hides, so the type chips, the table and a small **n hidden
+(...)** note (every hidden row, by group) always agree; select-all takes only shown rows and unticking a group
+drops its rows from the selection. Showing break-glass rows does not make them revocable: the revoke preview
+skips them and nothing is staged.
+
 **The same revoke is queued once.** `POST /api/revoke` adds a queue entry only when no **pending** entry
 exists for the same target (`pim.ChangeQueue` Entity `PIM-Action-Revoke` + Key + Op, checked and inserted in
 one statement, so two administrators at once cannot both add it). The key is the principal, the type and
@@ -7619,7 +7710,7 @@ done **inside the wizard**: it never sends the administrator to another page to 
   | Naming convention (step 1) | the admin word, tenant name, admin account patterns, PIM group pattern and role tag prefix, each with what it renders as → the naming save (the whole stored map, every other key kept); a confirmation "these names are right" makes it done. It comes first because templates and wizards name everything by it |
   | Environment name | the short name shown at the top of every page and in the browser tab (e.g. Test (EU)) → the same save as Settings > Environment name (at most 40 characters, SuperAdmin). Done when a name is set |
   | Licence | the licence file or text → the licence registration (signature checked before anything is stored) |
-  | Engine permissions | what is missing, what it blocks, the exact grant to run, Check again (the page grants nothing itself) |
+  | Engine permissions | what is missing, what it blocks, the exact grant to run, Check again (the page grants nothing itself). Two Azure lines are always shown: **Reader at the tenant root management group** (required -- Discovery cannot see management groups and subscriptions without it) and **User Access Administrator at the tenant root** (required only when Azure resource delegations are defined, otherwise an informational line with its command) |
   | Mail sender | the sender in use; the setup script (download from Invardia + the command); Send a test mail |
   | Departments & owners | the departments; a new one with its owners (found by name) → the same department save as Access → Departments & owners; Import from Entra |
   | Roles & templates | the template packs still to include (tick) and an own role group → staged in Pending changes, by the same code as the template cards and the role-group wizard. A template row that grants an Entra role this tenant does not have is left out and named (see below) |
@@ -7632,6 +7723,16 @@ done **inside the wizard**: it never sends the administrator to another page to 
 
   Access mapping and Discovery are not Get Started steps: they are done later on their own pages.
 
+- **The engine's Azure rights at the tenant root.** The install grants the engine identity the built-in **Reader** role at
+  the tenant root management group by default -- read-only, idempotent, read back -- so Discovery can list management groups
+  and subscriptions. **User Access Administrator** there is an explicit option of the install (standing privilege over every
+  subscription, needed only to assign Azure resource roles). When the installing account may not assign roles at the root,
+  the install does not fail: it prints the exact command (the published, module-free `Grant-PimEnginePermissions.ps1` with
+  the tenant and the engine's object id, browser sign-in), and the Engine permissions step stays open with the same command.
+  The permission check reads the engine's role assignments (including those inherited from the root); an assignment list it
+  cannot read is reported as "not checked", never as missing. A refused Discovery list of management groups or
+  subscriptions is its own failure, **Discovery: Azure not visible**: amber on Overview while no Azure resource delegation
+  is defined (nothing waits on it), red once one is.
 - **Refused = nothing written.** Every field of the step is checked before anything is sent; a save the page or the server
   refuses shows the same step with the reason under the field.
 - **Staged steps.** Roles and admin accounts stage their rows in Pending changes like the normal pages do; while
@@ -8414,7 +8515,8 @@ is held only when a prerequisite run found a problem. Removals, updates and type
 
 **Workload prerequisites.** A recorded result is *stale* after **30 days** (amber *re-check*); stale still assigns.
 Opt-in switches are off unless passed: `-GrantAzureUserAccessAdministrator`, `-EnableSentinel`; `-SkipDataOperations`
-is off (Data Operations is checked). A portal-only step stays pending until confirmed with `-ConfirmPortalStep`.
+is off (Data Operations is checked). A portal-only step stays pending until confirmed (Confirm in the Manager, or
+`-ConfirmPortalStep`). The self-check job `workload-prereqs` runs daily and is on by default; it only reads.
 
 **Licences.** A licence runs until its `validTo`, then a **grace period** (the licence's `graceDays`, **30** when the
 file does not say) keeps the Pro capabilities running with a warning; after that they switch off. Free capabilities are
@@ -8888,6 +8990,15 @@ procedures, the suite inventory, how to run them, and current pass counts live i
 `TESTS.md`** — refer there for anything operational. Mark a feature "done" only
 after a real live test (engine run / API check), never a parse-check (see
 `REQUIREMENTS.md` for status).
+
+**Hotfix lane (2026-10-08).** The full offline suite (~300 suites) gates feature releases and runs nightly; an urgent fix
+runs only the suites that can see what it changed. `tests/Get-PimAffectedSuites.ps1` derives that set from the code
+itself -- every suite's own file references plus what those files load or run, transitively, with "hub" files (the
+Manager, the scheduler, the engine module) counted only when the suite names the library or its functions -- and always
+adds the structural guards that read whole trees (code audit, hygiene gates, the Windows PowerShell 5.1 parse check,
+the source sanitization scan, the release gates). Documents select only the suites that read them; a file the map
+cannot place selects the full suite (fail safe). The selected suites run on the dedicated test machine, one process
+each under the host their own `#Requires` asks for.
 
 ---
 

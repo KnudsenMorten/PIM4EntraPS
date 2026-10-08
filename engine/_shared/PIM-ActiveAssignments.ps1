@@ -382,13 +382,13 @@ function Get-PimActiveAssignmentSurfaceHint {
             if (-not $isAuth) { return '' }
             return ("Engine SPN is missing the Graph app-role to read Entra-role active assignments " +
                     "(roleManagement/directory). Grant RoleManagement.Read.Directory (or RoleManagement.ReadWrite.Directory) " +
-                    "via setup/Grant-PimGraphAppRoles.ps1 -TenantId <tid> -AdminClientId <mgmtSpn> -AdminCertThumbprint <thumb> -EngineAppId <engineSpn>.")
+                    "with the published Grant-PimEnginePermissions.ps1 (browser sign-in, no modules) -- Overview > Verify permissions shows the exact command.")
         }
         'pim-for-groups' {
             if (-not $isAuth) { return '' }
             return ("Engine SPN is missing the Graph app-role to read PIM-for-Groups active assignments " +
                     "(identityGovernance/privilegedAccess/group). Grant PrivilegedAccess.Read.AzureADGroup " +
-                    "(or PrivilegedAccess.ReadWrite.AzureADGroup) via setup/Grant-PimGraphAppRoles.ps1.")
+                    "(or PrivilegedAccess.ReadWrite.AzureADGroup) with the published Grant-PimEnginePermissions.ps1 (browser sign-in) -- Overview > Verify permissions shows the exact command.")
         }
         'azure-rbac' {
             return ("Engine SPN cannot read Azure-RBAC active assignments. Grant it at least Reader on the " +

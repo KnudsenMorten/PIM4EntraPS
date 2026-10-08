@@ -1,7 +1,7 @@
 {
   "_comment": "The guided-install contract of the PIM Manager (GUIDED-INSTALL 4.1-4.6). Invardia's wizard asks exactly these questions and writes the answers to config.json for tools/setup/Install-PimManager.ps1, which validates them again (Test-PimInstallConfig). 'maps' = what the answer drives. Kept in step with Install-PimManager by tests/Test-PimGuidedInstall.ps1.",
   "product": "pim-manager",
-  "version": "2.4.533",
+  "version": "2.4.534",
   "entryPoint": "Install-PimManager -ConfigPath <config.json> -LicencePath <file> -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]",
   "exitCodes": { "0": "succeeded (warnings allowed)", "1": "a step failed -- fix it and -Resume", "2": "preflight failed -- nothing was changed", "3": "bad answers or a bad licence -- nothing was changed" },
   "pages": [
@@ -22,6 +22,7 @@
     { "key": "mspRole", "page": "network", "type": "enum", "default": "single", "options": ["single"], "help": "Managing and managed tenants (MSP) are set up with support, not by the guided install.", "maps": "Scenario S2 + the licence" },
     { "key": "portalUsers", "page": "access", "type": "upnList", "help": "Who may sign in to the PIM Manager. Default: the super-admins.", "maps": "EasyAuthAllowedPrincipals" },
     { "key": "allowAllMembers", "page": "access", "type": "bool", "default": false, "help": "Every member account of the tenant may sign in (guests never).", "maps": "EasyAuthAllowAllTenantUsers" },
+    { "key": "engineAzureRootUserAccessAdmin", "page": "access", "type": "bool", "default": false, "help": "Optional. Also give the PIM engine User Access Administrator at the tenant root management group, so it can assign the Azure resource roles you delegate. Off by default: the engine always gets read-only Reader there (Discovery), and Get Started shows the command to add User Access Administrator later.", "maps": "EngineAzureRootUserAccessAdmin" },
     { "key": "superAdmins", "page": "access", "type": "upnList", "help": "Default: you (the account running the install).", "maps": "ManagerSuperAdmins" },
     { "key": "mailSender", "page": "access", "type": "email", "help": "The mailbox PIM sends from. Needs an Exchange Administrator; without one the install completes and mail is set up later.", "maps": "MailSender" },
     { "key": "supportAppId", "page": "support", "type": "guid", "help": "The Invardia Support app of this tenant (pre-filled from the support environment). Empty = no support access.", "maps": "Grant-PimSupportAccess -AppId" },

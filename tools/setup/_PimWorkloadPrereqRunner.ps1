@@ -47,9 +47,19 @@ function Invoke-PimPrereqProbe {
 
 function Test-PimPrereqShould {
     # The ShouldProcess gate the script passes in (-WhatIf / -Confirm). Absent = allowed (tests pass their own).
+    # 97.1: the engine's SELF-CHECK (Ctx.selfCheck) never changes anything -- it only reads, as the engine.
     param([hashtable]$Ctx, [string]$Target, [string]$Action)
+    if ($Ctx.ContainsKey('selfCheck') -and $Ctx.selfCheck) { return $false }
     if ($Ctx.ContainsKey('should') -and $Ctx.should) { return [bool](& $Ctx.should $Target $Action) }
     return $true
+}
+
+function Get-PimPrereqNotDoneReason {
+    # Why a fix was NOT made, in the words of the run: the person's -WhatIf / declined prompt, or the engine's
+    # self-check, which never grants or creates anything (97.1).
+    param([hashtable]$Ctx, [string]$Verb = 'changed')
+    if ($Ctx.ContainsKey('selfCheck') -and $Ctx.selfCheck) { return "not $Verb -- PIM only checks; an administrator fixes it with the command PIM Manager shows" }
+    return "not ${Verb}: -WhatIf or declined"
 }
 
 function Resolve-PimPrereqEngineIdentity {
@@ -111,11 +121,21 @@ function Invoke-PimPrereqGraphRoleCheck {
     #>
     param([hashtable]$Ctx, [Parameter(Mandatory)][string]$CheckId, [Parameter(Mandatory)][string[]]$Required)
     $r = Invoke-PimPrereqProbe { Get-PimPrereqEngineGraphRoleNames -Ctx $Ctx }
+    $src = ''
+    if (-not $r.ok -and $Ctx.ContainsKey('tokenRoles') -and @($Ctx.tokenRoles | Where-Object { "$_".Trim() }).Count) {
+        # 97.1 self-check: the engine's OWN token lists the application roles it holds -- no read permission needed.
+        # A grant made in the last hour may not be in the token yet (Entra token caching): it shows on the next check.
+        $r = @{ ok = $true; value = @($Ctx.tokenRoles | Where-Object { "$_".Trim() }); error = '' }; $src = ' (read from the engine''s own token)'
+    }
     if (-not $r.ok) {
         return (New-PimWorkloadPrereqCheck -Id $CheckId -Status 'notChecked' -Detail "could not read the engine identity's app-role assignments: $($r.error) (the caller needs Application.Read.All or Directory.Read.All)")
     }
     $v = Test-PimPrereqGraphRoles -Held @($r.value) -Required $Required
-    if ($v.ok) { return (New-PimWorkloadPrereqCheck -Id $CheckId -Status 'ok' -Detail "holds all $(@($Required).Count): $(@($Required) -join ', ')") }
+    if ($v.ok) { return (New-PimWorkloadPrereqCheck -Id $CheckId -Status 'ok' -Detail "holds all $(@($Required).Count): $(@($Required) -join ', ')$src") }
+    if ($Ctx.ContainsKey('selfCheck') -and $Ctx.selfCheck) {
+        return (New-PimWorkloadPrereqCheck -Id $CheckId -Status 'failed' -Data @{ missingRoles = @($v.missing) } `
+                  -Detail "missing: $(@($v.missing) -join ', ')$src -- PIM never grants itself a permission: an administrator grants it with the published Grant-PimEnginePermissions.ps1 (browser sign-in)")
+    }
     $gsp = Get-PimPrereqGraphSp -Ctx $Ctx
     $live = @{}; foreach ($ar in @($gsp.appRoles)) { if (@($ar.allowedMemberTypes) -contains 'Application') { $live["$($ar.value)"] = "$($ar.id)" } }
     $problems = New-Object System.Collections.Generic.List[string]
@@ -130,12 +150,12 @@ function Invoke-PimPrereqGraphRoleCheck {
         if (-not $p.ok) { $problems.Add("$name grant failed: $($p.error)") }
     }
     if (-not $attempted) {
-        $why = if ($problems.Count) { " ($($problems -join '; '))" } else { ' (not granted: -WhatIf or declined)' }
-        return (New-PimWorkloadPrereqCheck -Id $CheckId -Status 'failed' -Detail "missing: $(@($v.missing) -join ', ')$why")
+        $why = if ($problems.Count) { " ($($problems -join '; '))" } else { " ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'granted'))" }
+        return (New-PimWorkloadPrereqCheck -Id $CheckId -Status 'failed' -Data @{ missingRoles = @($v.missing) } -Detail "missing: $(@($v.missing) -join ', ')$why")
     }
     $back = Test-PimPrereqGraphRoles -Held @(Get-PimPrereqEngineGraphRoleNames -Ctx $Ctx -Refresh) -Required $Required
     if ($back.ok) { return (New-PimWorkloadPrereqCheck -Id $CheckId -Status 'fixed' -Detail "granted $(@($v.missing) -join ', ') and read back (a running engine picks new roles up with its next token)") }
-    return (New-PimWorkloadPrereqCheck -Id $CheckId -Status 'failed' -Detail "still missing after the grant: $(@($back.missing) -join ', ')$(if ($problems.Count) { ' -- ' + ($problems -join '; ') })")
+    return (New-PimWorkloadPrereqCheck -Id $CheckId -Status 'failed' -Data @{ missingRoles = @($back.missing) } -Detail "still missing after the grant: $(@($back.missing) -join ', ')$(if ($problems.Count) { ' -- ' + ($problems -join '; ') })")
 }
 
 function Get-PimPrereqSentinelWorkspaceId {
@@ -282,6 +302,10 @@ function Invoke-PimPrereqDefenderXdr {
         if ($on.Count) { $out.Add((New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'ok' -Detail "Sentinel is enabled on: $($on -join ', ')")) }
         elseif ($unreadable.Count) { $out.Add((New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'notChecked' -Detail "the onboarding state could not be read for: $($unreadable -join ', ') (the caller needs Reader on the workspace)")) }
         elseif ($Ctx.enableSentinel) { $out.Add((Enable-PimPrereqSentinel -Ctx $Ctx)) }
+        elseif ($Ctx.ContainsKey('selfCheck') -and $Ctx.selfCheck) {
+            # 97.1: the engine only sees the workspaces it has Reader on -- "none of those" is not "none in the tenant".
+            $out.Add((New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'notChecked' -Detail "none of the $($ws.Count) Log Analytics workspace(s) the engine can see has Sentinel enabled -- it may not have Reader on your security workspace. Sentinel enabled there? Press Confirm."))
+        }
         else { $out.Add((New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'failed' -Detail "no Sentinel-enabled workspace among the $($ws.Count) workspace(s) the caller can see (run with -EnableSentinel to enable it on a dedicated workspace)")) }
     } elseif ($Ctx.enableSentinel -and -not @($out | Where-Object { $_.id -eq 'defender.sentinelEnabled' }).Count) {
         $out.Add((Enable-PimPrereqSentinel -Ctx $Ctx))
@@ -321,6 +345,8 @@ function Invoke-PimPrereqAsEngine {
     # One GET AS THE ENGINE -- only possible where the engine's own certificate is on this host (an engine
     # application; a managed identity can never be signed in as from here). Returns a probe result.
     param([hashtable]$Ctx, [Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][string]$Resource)
+    # 97.1: in the engine's self-check the caller IS the engine -- the call needs no second sign-in.
+    if ($Ctx.ContainsKey('selfCheck') -and $Ctx.selfCheck) { return (Invoke-PimPrereqProbe { Invoke-PimRest -Url $Url -Resource $Resource }) }
     if (-not "$($Ctx.engineCertThumbprint)".Trim() -or -not "$($Ctx.engine.appId)".Trim()) {
         return @{ ok = $false; code = 0; value = $null; error = 'not run: the engine is a managed identity or its certificate is not on this host (-EngineAppId + -EngineCertThumbprint)'; skipped = $true }
     }
@@ -342,7 +368,7 @@ function Invoke-PimPrereqPowerBI {
     elseif (@($g.value).Count -eq 1) {
         $gid = "$(@($g.value)[0].id)"
         if (-not [bool]@($g.value)[0].securityEnabled) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "'$gname' exists but is not a security group")); $gid = '' }
-        else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'ok' -Detail "'$gname' ($gid)")) }
+        else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'ok' -Detail "'$gname' ($gid)" -Data @{ groupName = $gname })) }
     } else {
         if (Test-PimPrereqShould -Ctx $Ctx -Target $gname -Action 'create security group') {
             $nick = ($gname -replace '[^A-Za-z0-9]', '')
@@ -366,7 +392,7 @@ function Invoke-PimPrereqPowerBI {
             }
             if ($back -and $back.ok -and [bool]$back.value.securityEnabled) { $gid = "$($back.value.id)"; $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'fixed' -Detail "created '$gname' ($gid) and read it back")) }
             else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "could not create '$gname': $(if ($c.ok) { 'read-back failed' } else { $c.error })")) }
-        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "'$gname' does not exist (not created: -WhatIf or declined)")) }
+        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "'$gname' does not exist ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'created'))" -Data @{ groupName = $gname })) }
     }
     # 2. The engine identity is a member.
     if (-not $gid) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'notChecked' -Detail 'no usable group yet')) }
@@ -383,7 +409,7 @@ function Invoke-PimPrereqPowerBI {
             $m2 = Invoke-PimPrereqProbe $readMembers
             if ($m2.ok -and @($m2.value) -contains $Ctx.engine.objectId) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'fixed' -Detail "added $($Ctx.engine.displayName) and read it back")) }
             else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'failed' -Detail "could not add the engine identity: $(if ($a.ok) { 'read-back did not show it' } else { $a.error })")) }
-        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'failed' -Detail 'the engine identity is not a member (not added: -WhatIf or declined)')) }
+        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'failed' -Detail "the engine identity is not a member ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'added'))" -Data @{ groupName = $gname })) }
     }
     # 3. No admin-consent Power BI application permission on the engine identity.
     $ids = Get-PimWorkloadPrereqGraphRoleIds
@@ -413,7 +439,7 @@ function Invoke-PimPrereqPowerBI {
             $bv = if ($back.ok) { Test-PimFabricReadOnlyAdminSetting -Settings @($back.value) -GroupId $gid } else { @{ ok = $false; detail = $back.error } }
             if ($bv.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'fixed' -Detail "enabled for '$gname' (existing groups kept) and read back")) }
             else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'failed' -Detail "could not enable it: $(if ($u.ok) { $bv.detail } else { $u.error })")) }
-        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'failed' -Detail "$($v.detail) (not changed: -WhatIf or declined)")) }
+        } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'failed' -Detail "$($v.detail) ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'changed'))")) }
     }
     # 5. Confirmation: the admin API as the engine (optional).
     $e = Invoke-PimPrereqAsEngine -Ctx $Ctx -Url 'https://api.powerbi.com/v1.0/myorg/admin/groups?$top=1' -Resource 'powerbi'
@@ -438,8 +464,13 @@ function Invoke-PimPrereqAzureRbac {
     $readAt = { param($s) @(Invoke-PimArm -All -Path "$s/providers/Microsoft.Authorization/roleAssignments?`$filter=atScope() and assignedTo('$oid')" -ApiVersion '2022-04-01') }
     $covered = New-Object System.Collections.Generic.List[string]; $missing = New-Object System.Collections.Generic.List[string]
     $unread = New-Object System.Collections.Generic.List[string]; $fixed = New-Object System.Collections.Generic.List[string]; $notes = New-Object System.Collections.Generic.List[string]
+    $missingScopes = New-Object System.Collections.Generic.List[string]   # 97.1: the bare scopes, for the fix command
     foreach ($s in $scopes) {
         $r = Invoke-PimPrereqProbe { & $readAt $s }
+        # 97.1 self-check: the ENGINE reading its own assignments. Any role at (or above) the scope includes the read, so a
+        # 403 for the engine itself means it holds nothing there -- in particular no User Access Administrator / Owner.
+        $selfMiss = ($Ctx.ContainsKey('selfCheck') -and $Ctx.selfCheck -and $r.code -eq 403)
+        if (-not $r.ok -and $selfMiss) { $missing.Add($s); $missingScopes.Add($s); $notes.Add("$s answered 403 to the engine itself (it holds no role there)"); continue }
         if (-not $r.ok) { $unread.Add("$s (HTTP $($r.code))"); continue }
         # atScope() already limits the rows to assignments AT or ABOVE this scope (management groups included), so
         # every row applies; the scope itself is passed as the "within" target for each of them.
@@ -453,17 +484,17 @@ function Invoke-PimPrereqAzureRbac {
             $b = Invoke-PimPrereqProbe { & $readAt $s }
             $brows = if ($b.ok) { @($b.value | ForEach-Object { $q = if ($_.PSObject.Properties['properties']) { $_.properties } else { $_ }; [pscustomobject]@{ roleDefinitionId = "$($q.roleDefinitionId)"; scope = '' } }) } else { @() }
             if ($b.ok -and (Test-PimAzureScopeCoverage -Scope $s -Assignments $brows).covered) { $fixed.Add($s) }
-            else { $missing.Add("$s (assignment failed: $(if ($p.ok) { 'read-back did not show it' } else { $p.error }))") }
-        } else { $missing.Add($s) }
+            else { $missing.Add("$s (assignment failed: $(if ($p.ok) { 'read-back did not show it' } else { $p.error }))"); $missingScopes.Add($s) }
+        } else { $missing.Add($s); $missingScopes.Add($s) }
     }
     $parts = @()
     if ($covered.Count) { $parts += "covered: $($covered -join ', ')" }
     if ($fixed.Count)   { $parts += "assigned + read back: $($fixed -join ', ')" }
-    if ($missing.Count) { $parts += "MISSING: $($missing -join ', ')$(if (-not $Ctx.grantUaa) { ' (re-run with -GrantAzureUserAccessAdministrator to assign it, or use the portal step)' })" }
+    if ($missing.Count) { $parts += "MISSING: $($missing -join ', ')$(if ($Ctx.ContainsKey('selfCheck') -and $Ctx.selfCheck) { ' (an administrator assigns User Access Administrator there with the published Grant-PimEnginePermissions.ps1 -- PIM never grants itself a role)' } elseif (-not $Ctx.grantUaa) { ' (re-run with -GrantAzureUserAccessAdministrator to assign it, or use the portal step)' })" }
     if ($unread.Count)  { $parts += "not readable by the caller: $($unread -join ', ')" }
     if ($notes.Count)   { $parts += ($notes -join '; ') }
     $status = if ($missing.Count) { 'failed' } elseif ($unread.Count) { 'notChecked' } elseif ($fixed.Count) { 'fixed' } else { 'ok' }
-    $out.Add((New-PimWorkloadPrereqCheck -Id 'azure.uaa' -Status $status -Detail ($parts -join ' | ')))
+    $out.Add((New-PimWorkloadPrereqCheck -Id 'azure.uaa' -Status $status -Detail ($parts -join ' | ') -Data $(if ($missingScopes.Count) { @{ missingScopes = @($missingScopes.ToArray()) } } else { @{} })))
     return $out.ToArray()
 }
 

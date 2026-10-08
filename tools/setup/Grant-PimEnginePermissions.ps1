@@ -49,6 +49,12 @@
     .\Grant-PimEnginePermissions.ps1 -TenantId '<tenant id>' -EngineObjectId '<object id>' -GraphPermissions 'Group.ReadWrite.All','User.ReadWrite.All'
 .EXAMPLE
     .\Grant-PimEnginePermissions.ps1 -TenantId '<tenant id>' -EngineObjectId '<object id>' -AzureRoleAssignments 'User Access Administrator@/providers/Microsoft.Management/managementGroups/<tenant id>'
+.EXAMPLE
+    .\Grant-PimEnginePermissions.ps1 -TenantId '<tenant id>' -EngineObjectId '<object id>' -AzureRoleAssignments 'Reader@/providers/Microsoft.Management/managementGroups/<tenant id>'
+    Reader (read-only) at the tenant root management group -- what Discovery needs to see Azure. The install grants it by
+    default; run this when the installing account could not. Add
+    ,'User Access Administrator@/providers/Microsoft.Management/managementGroups/<tenant id>' only when the engine must
+    assign the Azure resource roles you delegate (optional).
 #>
 [CmdletBinding()]
 param(

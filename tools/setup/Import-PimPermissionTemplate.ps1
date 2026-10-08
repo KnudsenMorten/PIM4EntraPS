@@ -288,7 +288,7 @@ try {
             $pr.prereqs = @($pr.prereqs) + @([pscustomobject]@{ workload = $w; state = $state; held = [bool]$g.held; command = "$($g.command)" })
             if ($g.held) {
                 $pr.held = @($pr.held) + @($w)
-                Write-Host "    ${lead}; the $w role assignments are HELD by the engine until its prerequisites are green (run: $($g.command))" -ForegroundColor Yellow
+                Write-Host "    ${lead}; the $w role assignments are HELD by the engine until its prerequisites are green ($(if ("$($g.command)".Trim()) { "run: $($g.command)" } else { "$($g.next)" }))" -ForegroundColor Yellow
                 if ($g.reason) { Note "  $($g.reason)" }
             } else {
                 Note "workload $w prerequisites: $state$(if ((Get-PimWorkloadPrereqUngated) -contains $w) { ' (never held)' })"

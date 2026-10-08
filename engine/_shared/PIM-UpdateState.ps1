@@ -20,6 +20,13 @@
   shipped has NO record, and the answer is "not recorded yet" -- never a guessed ring, never a default.
   A ring the Manager invented would be worse than no ring at all: the operator would act on it.
 
+  2026-10-08 -- THE DEPLOYMENT RECORDS THE RING TOO. A fresh install has no update run until its nightly
+  schedule, so its header said "not recorded" although the ring was set on the update job minutes earlier
+  (owner: "you need to apply that as part of the deployment"). Deploy-PimUpdateJob.ps1 therefore writes a
+  record of kind 'deploy' (New-PimUpdateStateDeployRecord) with the ring it has just written AND read back
+  off the job -- a fact, not a guess -- which the verdict shows as "installed -- no update run yet", labelled
+  as coming from the deployment. It never replaces a real run record: over one it only sets configured*.
+
   IT MUST NEVER AFFECT THE UPDATE. The writer is best-effort in exactly the way Sec.56.6's blob write is:
   it never throws, and a store that cannot be written is reported to the job log and nothing else. A
   reporting feature that could stop the fleet updating is strictly worse than no reporting.
@@ -101,6 +108,9 @@ function New-PimUpdateStateRecord {
         [AllowEmptyString()][AllowNull()][string]$RunId,
         [int]$DurationSeconds = 0,
         [object]$Previous,
+        # 2026-10-08: where this environment's updates come from (PIM_UPDATE_SOURCE: 'invardia' / 'pim-src').
+        # Optional; an older caller that does not pass it records ''.
+        [AllowEmptyString()][AllowNull()][string]$Source,
         [datetime]$NowUtc = [datetime]::UtcNow
     )
     $ts = $NowUtc.ToUniversalTime().ToString('o')
@@ -122,10 +132,14 @@ function New-PimUpdateStateRecord {
 
     [ordered]@{
         schema             = (Get-PimUpdateStateSchema)
+        # 'run' = written by an update run. The deployment writes kind 'deploy' (New-PimUpdateStateDeployRecord)
+        # until the first run replaces it. A record with no kind (written before 2026-10-08) is a run record.
+        kind               = 'run'
         runId              = "$RunId"
         tsUtc              = $ts
         environment        = "$Environment".Trim()
         ring               = "$Ring".Trim()
+        source             = "$Source".Trim().ToLowerInvariant()
         hold               = [bool]$Hold
         approvedVersion    = "$ApprovedVersion".Trim()
         approvedReason     = "$ApprovedReason".Trim()
@@ -180,6 +194,156 @@ function Get-PimUpdateStateField {
     return $v
 }
 
+function Test-PimUpdateStateRunRecord {
+    <#
+      PURE. Is this stored value a record written by an UPDATE RUN (as opposed to nothing, a corrupt value, or the
+      deployment's initial record)? A record with no 'kind' was written before 2026-10-08 and is a run record.
+      This is the guard behind "the deployment never overwrites a real run record".
+    #>
+    param([object]$Record)
+    if ($null -eq $Record -or $Record -is [string]) { return $false }
+    $isObj = ($Record -is [System.Collections.IDictionary]) -or ($Record.PSObject -and @($Record.PSObject.Properties).Count -gt 0)
+    if (-not $isObj) { return $false }
+    if ("$(Get-PimUpdateStateField -Object $Record -Key 'kind')".Trim() -ieq 'deploy') { return $false }
+    $ts   = "$(Get-PimUpdateStateField -Object $Record -Key 'tsUtc')".Trim()
+    $ring = "$(Get-PimUpdateStateField -Object $Record -Key 'ring')".Trim()
+    return [bool]($ts -or $ring)
+}
+
+function New-PimUpdateStateDeployRecord {
+    <#
+      PURE. 2026-10-08 (owner, on a freshly installed production environment whose header said "Update ring: not
+      recorded"): "you need to apply that as part of the deployment". The deployment KNOWS the ring -- it has just
+      written PIM_UPDATE_RING onto the update job and read it back -- so it records it in the environment's own store,
+      instead of the Manager saying "not recorded" until the first nightly run.
+
+      Returns @{ mode; record }:
+        mode 'seed'     -- there was no record (or a corrupt one, or an earlier deployment record): a new deployment
+                           record (kind 'deploy'), which the verdict shows as "installed -- no update run yet".
+        mode 'annotate' -- a REAL run record exists. It is NEVER replaced: its run fields stay exactly as the updater
+                           wrote them, and only the configured* fields are set, so a ring changed by this deploy shows
+                           as "set at deployment, not run yet" until the next run.
+
+      Still "never a guess": every field here is a fact the deployment itself just wrote and verified, and the
+      record says it came from the deployment (kind 'deploy' / configured*), not from an update run.
+    #>
+    param(
+        [object]$Existing,
+        [AllowEmptyString()][string]$Environment = '',
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Ring,
+        [AllowEmptyString()][AllowNull()][string]$Source,
+        [AllowEmptyString()][AllowNull()][string]$InstalledVersion,
+        [bool]$Hold = $false,
+        [datetime]$NowUtc = [datetime]::UtcNow,
+        # The deploy's own clock when it is carried into an in-cloud job (dbinit): the record says WHEN the deploy set
+        # the ring, not when a later job happened to apply it.
+        [AllowEmptyString()][AllowNull()][string]$ConfiguredUtc
+    )
+    $ts = if ("$ConfiguredUtc".Trim()) { "$ConfiguredUtc".Trim() } else { $NowUtc.ToUniversalTime().ToString('o') }
+    $src = "$Source".Trim().ToLowerInvariant()
+    $ver = "$InstalledVersion".Trim()
+    if (Test-PimUpdateStateRunRecord -Record $Existing) {
+        $copy = [ordered]@{}
+        if ($Existing -is [System.Collections.IDictionary]) { foreach ($k in $Existing.Keys) { $copy["$k"] = $Existing[$k] } }
+        else { foreach ($p in $Existing.PSObject.Properties) { $copy[$p.Name] = $p.Value } }
+        # Times out of pwsh 7's ConvertFrom-Json come back as [datetime]; keep them ISO so the record round-trips.
+        foreach ($k in @($copy.Keys)) {
+            if ($copy[$k] -is [datetime]) { $copy[$k] = $copy[$k].ToUniversalTime().ToString('o') }
+            elseif ($copy[$k] -is [datetimeoffset]) { $copy[$k] = $copy[$k].UtcDateTime.ToString('o') }
+        }
+        $copy['configuredRing']    = "$Ring".Trim()
+        $copy['configuredSource']  = $src
+        $copy['configuredVersion'] = $ver
+        $copy['configuredUtc']     = $ts
+        return [pscustomobject]@{ mode = 'annotate'; record = $copy }
+    }
+    $rec = [ordered]@{
+        schema            = (Get-PimUpdateStateSchema)
+        kind              = 'deploy'
+        runId             = ''
+        tsUtc             = ''            # NO update run yet -- deliberately empty, never the deploy time
+        recordedUtc       = $ts
+        environment       = "$Environment".Trim()
+        ring              = "$Ring".Trim()
+        source            = $src
+        hold              = [bool]$Hold
+        installedVersion  = $ver
+        runningVersion    = $ver
+        lastBuiltVersion  = $ver
+        approvedVersion   = ''
+        approvedReason    = ''
+        targetVersion     = ''
+        action            = ''
+        outcome           = ''
+        error             = ''
+        lastSuccessUtc    = ''
+        lastSuccessVersion = ''
+        lastSuccessAction = ''
+        configuredRing    = "$Ring".Trim()
+        configuredSource  = $src
+        configuredVersion = $ver
+        configuredUtc     = $ts
+    }
+    return [pscustomobject]@{ mode = 'seed'; record = $rec }
+}
+
+function Invoke-PimUpdateStateDeploySeed {
+    <#
+      Write the deployment's update-state record (New-PimUpdateStateDeployRecord) into pim.Settings['UpdateState'].
+      Returns @{ ok; mode; reason }. NEVER throws -- a deploy must not fail because a reporting record did not land.
+
+      RULE -- A READ FAILURE REFUSES THE WRITE. Read-PimUpdateState returns $null for "no record" AND for "the read
+      failed"; treating the second as the first would overwrite a real run record with a seed. So the read here
+      is strict: it throws on failure, and a throw means nothing is written.
+      Used by the deploy host (Deploy-PimUpdateJob, public SQL) and by the in-cloud bootstrap job (private SQL).
+    #>
+    param(
+        [AllowEmptyString()][AllowNull()][string]$ConnectionString,
+        [AllowEmptyString()][string]$Environment = '',
+        [AllowEmptyString()][string]$Ring = '',
+        [AllowEmptyString()][AllowNull()][string]$Source,
+        [AllowEmptyString()][AllowNull()][string]$InstalledVersion,
+        [bool]$Hold = $false,
+        [AllowEmptyString()][AllowNull()][string]$ConfiguredUtc,
+        [datetime]$NowUtc = [datetime]::UtcNow,
+        # Test seams. Reader: { param($cs, $name) } returns the stored value (throw = read failed).
+        # Writer: { param($cs, $name, $value) } (throw = write failed).
+        [scriptblock]$Reader,
+        [scriptblock]$Writer
+    )
+    try {
+        if (-not "$ConnectionString".Trim()) { return [pscustomobject]@{ ok = $false; mode = ''; reason = 'no SQL store to record it in' } }
+        if (-not "$Ring".Trim()) { return [pscustomobject]@{ ok = $false; mode = ''; reason = 'no ring to record (the update job carries none)' } }
+        $r = $Reader
+        if (-not $r) {
+            if (-not (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
+                return [pscustomobject]@{ ok = $false; mode = ''; reason = 'the SQL settings store is not loaded in this process' }
+            }
+            $r = { param($cs, $n) Get-PimSqlSetting -ConnectionString $cs -Name $n }
+        }
+        $existing = $null
+        try { $existing = & $r $ConnectionString (Get-PimUpdateStateSettingName) }
+        catch { return [pscustomobject]@{ ok = $false; mode = ''; reason = "the existing record could not be read, so nothing was written (a real run record must never be overwritten): $($_.Exception.Message)" } }
+        if ($existing -is [string]) { try { $existing = $existing | ConvertFrom-Json } catch { } }
+        $plan = New-PimUpdateStateDeployRecord -Existing $existing -Environment $Environment -Ring $Ring -Source $Source `
+                    -InstalledVersion $InstalledVersion -Hold $Hold -NowUtc $NowUtc -ConfiguredUtc $ConfiguredUtc
+        $saved = Save-PimUpdateState -ConnectionString $ConnectionString -Record $plan.record -Writer $Writer
+        if (-not $saved.ok) { return [pscustomobject]@{ ok = $false; mode = $plan.mode; reason = "$($saved.reason)" } }
+        # Read it back: a write that silently did nothing looks exactly like one that worked.
+        $back = $null
+        try { $back = & $r $ConnectionString (Get-PimUpdateStateSettingName) } catch { $back = $null }
+        if ($back -is [string]) { try { $back = $back | ConvertFrom-Json } catch { } }
+        $key = if ($plan.mode -eq 'seed') { 'ring' } else { 'configuredRing' }
+        if ($null -ne $back -and "$(Get-PimUpdateStateField -Object $back -Key $key)".Trim() -ne "$Ring".Trim()) {
+            return [pscustomobject]@{ ok = $false; mode = $plan.mode; reason = "written, but the read-back carries $key '$(Get-PimUpdateStateField -Object $back -Key $key)', not '$Ring'" }
+        }
+        $why = if ($plan.mode -eq 'seed') { "recorded ring $Ring (installed, no update run yet)" } else { "a real update-run record exists and was kept; ring $Ring recorded as the configured ring" }
+        return [pscustomobject]@{ ok = $true; mode = $plan.mode; reason = $why }
+    } catch {
+        return [pscustomobject]@{ ok = $false; mode = ''; reason = "$($_.Exception.Message)" }
+    }
+}
+
 function Get-PimUpdateStateVerdict {
     <#
       PURE. Everything the GUI shows about this environment's ring, from the recorded document plus the
@@ -194,7 +358,9 @@ function Get-PimUpdateStateVerdict {
         recorded / malformed / ring / ringLabel / hold / held / behind / failing / stale
         runningVersion / approvedVersion / lastBuiltVersion / targetVersion
         lastRunUtc / lastOutcome / lastAction / lastError / lastSuccessUtc / lastSuccessVersion
-        state ('unknown'|'current'|'behind'|'held'|'failing') / headline / message / recordedAgeHours
+        state ('unknown'|'installed'|'current'|'behind'|'held'|'failing') / headline / message / recordedAgeHours
+        ringSource ('update run'|'deployment'|'') / noRunYet / ringPending / lastRunRing / configuredRing /
+        configuredUtc / source / installedVersion
     #>
     param(
         [object]$Record,
@@ -228,6 +394,17 @@ function Get-PimUpdateStateVerdict {
         state              = 'unknown'
         headline           = 'ring not recorded'
         message            = ''
+        # 2026-10-08 -- WHERE the ring shown came from, so the label is never a guess:
+        #   'update run' (the updater recorded it) / 'deployment' (the deploy set it on the update job and recorded
+        #   it; no run on it yet) / '' (not recorded). noRunYet = installed, the update job has not run yet.
+        ringSource         = ''
+        noRunYet           = $false
+        ringPending        = $false
+        lastRunRing        = ''
+        configuredRing     = ''
+        configuredUtc      = ''
+        source             = ''
+        installedVersion   = ''
     }
 
     if ($null -eq $Record -or ("$Record".Trim() -eq '' -and -not ($Record -is [System.Collections.IDictionary]))) {
@@ -242,6 +419,52 @@ function Get-PimUpdateStateVerdict {
         $out.malformed = $true
         $out.message   = 'The recorded update state could not be read (the stored value is not an update record). ' +
                          'The next update run overwrites it; until then the ring is not known here.'
+        return [pscustomobject]$out
+    }
+
+    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+
+    # ---- 2026-10-08: the DEPLOYMENT's record -- installed, no update run yet ----------------------------------
+    # Written by the deploy (New-PimUpdateStateDeployRecord) with the ring it just set on the update job and read
+    # back. It answers "which ring" truthfully, and NOTHING else: no approved version, no outcome, no behind.
+    if ("$(Get-PimUpdateStateField -Object $Record -Key 'kind')".Trim() -ieq 'deploy') {
+        $dRing = "$(Get-PimUpdateStateField -Object $Record -Key 'ring')".Trim()
+        if (-not $dRing) {
+            $out.malformed = $true
+            $out.message   = 'The deployment record carries no ring, so nothing about this environment can be read from it. ' +
+                             'The next update run overwrites it.'
+            return [pscustomobject]$out
+        }
+        $dUtc = "$(Get-PimUpdateStateField -Object $Record -Key 'recordedUtc')".Trim()
+        $out.recorded         = $true
+        $out.noRunYet         = $true
+        $out.ringSource       = 'deployment'
+        $out.ring             = $dRing
+        $out.ringLabel        = (Get-PimUpdateRingLabel -Ring $dRing)
+        $out.configuredRing   = $dRing
+        $out.configuredUtc    = $dUtc
+        $out.hold             = [bool](Get-PimUpdateStateField -Object $Record -Key 'hold')
+        $out.held             = $out.hold
+        $out.source           = "$(Get-PimUpdateStateField -Object $Record -Key 'source')".Trim()
+        $out.installedVersion = "$(Get-PimUpdateStateField -Object $Record -Key 'installedVersion')".Trim()
+        $out.lastBuiltVersion = "$(Get-PimUpdateStateField -Object $Record -Key 'lastBuiltVersion')".Trim()
+        if (-not $out.runningVersion) { $out.runningVersion = $out.installedVersion }
+        $p = [datetime]::MinValue
+        if ($dUtc -and [datetime]::TryParse($dUtc, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$p)) {
+            $age = ($NowUtc.ToUniversalTime() - $p).TotalHours
+            if ($age -lt 0) { $age = 0 }
+            $out.recordedAgeHours = [math]::Round($age, 1)
+            # A nightly job that has not run in this long after its deployment is itself a finding.
+            $out.stale = ($age -gt $StaleAfterHours)
+        } else { $out.stale = $true }
+        $out.state    = if ($out.held) { 'held' } else { 'installed' }
+        $out.headline = $out.ringLabel
+        $dBits = New-Object System.Collections.Generic.List[string]
+        $dBits.Add("$($out.ringLabel) was set on the update job when this environment was deployed. The update job has not run yet, " +
+                   'so no approved version or update outcome is known here; its first scheduled run records them.')
+        if ($out.held) { $dBits.Add('This environment is HELD (PIM_UPDATE_HOLD=1): its ring is not consulted and it does not move.') }
+        if ($out.stale) { $dBits.Add('The update job has not reported since this environment was deployed -- check its executions.') }
+        $out.message = ($dBits -join ' ')
         return [pscustomobject]$out
     }
 
@@ -291,6 +514,30 @@ function Get-PimUpdateStateVerdict {
         $out.stale = $true
     }
 
+    $out.ringSource  = 'update run'
+    $out.lastRunRing = $ring
+    $out.source      = "$(Get-PimUpdateStateField -Object $Record -Key 'source')".Trim()
+
+    # ---- 2026-10-08: a deploy AFTER the last run that changed the ring. The run record is kept as the updater
+    # wrote it (New-PimUpdateStateDeployRecord 'annotate'); the ring shown is the one the deploy set, labelled as
+    # coming from the deployment, because that is the ring the next run uses.
+    $cfgRing = "$(Get-PimUpdateStateField -Object $Record -Key 'configuredRing')".Trim()
+    $cfgUtc  = "$(Get-PimUpdateStateField -Object $Record -Key 'configuredUtc')".Trim()
+    if ($cfgRing) {
+        $out.configuredRing = $cfgRing
+        $out.configuredUtc  = $cfgUtc
+        $cfgParsed = [datetime]::MinValue
+        $cfgLater  = $true
+        if ($cfgUtc -and [datetime]::TryParse($cfgUtc, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$cfgParsed) -and
+            $parsed -ne [datetime]::MinValue) { $cfgLater = ($cfgParsed -gt $parsed) }
+        if ($cfgLater -and (Get-PimUpdateRingLabel -Ring $cfgRing) -ne (Get-PimUpdateRingLabel -Ring $ring)) {
+            $out.ringPending = $true
+            $out.ring        = $cfgRing
+            $out.ringLabel   = (Get-PimUpdateRingLabel -Ring $cfgRing)
+            $out.ringSource  = 'deployment'
+        }
+    }
+
     $out.failing = ($out.lastOutcome -eq 'failed')
 
     # ---- behind. Only ever asserted when BOTH versions parse. "I cannot compare these" is not "behind",
@@ -313,15 +560,22 @@ function Get-PimUpdateStateVerdict {
     $out.headline = $out.ringLabel
 
     $bits = New-Object System.Collections.Generic.List[string]
+    # The approved version belongs to the ring the last run READ -- name that ring, not a newer configured one.
+    $apprLabel = if ($out.ringPending) { Get-PimUpdateRingLabel -Ring $out.lastRunRing } else { $out.ringLabel }
+    if ($out.ringPending) {
+        $bits.Add("$($out.ringLabel) was set on the update job by a deployment after the last update run, which ran on " +
+                  "$(Get-PimUpdateRingLabel -Ring $out.lastRunRing); the next run is the first on $($out.ringLabel). " +
+                  'The values below are from that last run.')
+    }
     if ($out.held) {
         $bits.Add('This environment is HELD (PIM_UPDATE_HOLD=1): its ring is not consulted and it does not move.')
     }
     if ($out.behind) {
-        $bits.Add("It runs $($out.runningVersion); $($out.ringLabel) approves $($out.approvedVersion).")
+        $bits.Add("It runs $($out.runningVersion); $apprLabel approves $($out.approvedVersion).")
     } elseif ($out.approvedVersion -and $out.runningVersion -and $out.approvedVersion -eq $out.runningVersion) {
-        $bits.Add("It runs $($out.runningVersion), which is what $($out.ringLabel) approves.")
+        $bits.Add("It runs $($out.runningVersion), which is what $apprLabel approves.")
     } elseif (-not $out.approvedVersion) {
-        $bits.Add("The last update run read no approved version for $($out.ringLabel).")
+        $bits.Add("The last update run read no approved version for $apprLabel.")
     }
     if ($out.failing) {
         $bits.Add("The last update run FAILED at the '$($out.lastAction)' step.")

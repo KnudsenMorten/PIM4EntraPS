@@ -54,6 +54,10 @@
 # one definition of "what makes a deployed environment reachable and Azure-sighted".
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-Reachability.ps1')
 
+# §97 -- the PURE tenant-root helpers (Get-PimTenantRootScope / Get-PimRootAzureFixCommand): the install prints the SAME
+# fix command the Manager's Get Started step shows, so a refused grant reads the same everywhere.
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-PermissionHealth.ps1')
+
 # The guarded `az` shadow. Every script that dot-sources this file is az-driven, so the guard
 # belongs here rather than in each of them: az writes ordinary WARNINGS to stderr, and under
 # $ErrorActionPreference='Stop' PowerShell 5.1 makes any such write terminating. See _PimAz.ps1.
@@ -1132,6 +1136,83 @@ function Grant-PimMiAzureRbac {
     }
     if ($granted) { Write-Host "    granted $granted Azure role assignment(s) to $Name" -ForegroundColor DarkGray }
     else { Write-Host "    Azure RBAC already present for $Name" -ForegroundColor DarkGray }
+}
+
+function Get-PimEngineRootAzurePlan {
+    <#
+      PURE. §97 (owner 2026-10-08) -- what the install grants the ENGINE identity at the tenant root management group.
+
+      Live on a production managing tenant: Discovery (the tick's managed identity) got
+      `GET /providers/Microsoft.Management/managementGroups -> HTTP 403 AuthorizationFailed` and Home went red, because the
+      engine held Reader on its hosting subscription only. Owner: "why is this not set automatically by the install of the
+      pim solution or informed about" / "default it should not set user admin on tenant root - but make it supported
+      (optional)".
+        * Reader                      -- ALWAYS (the default): read-only, lets Discovery see management groups + subscriptions.
+        * User Access Administrator   -- ONLY with -IncludeUserAccessAdministrator (SEC-34 stays opt-in): standing
+                                         tier-0 over every subscription, needed only to assign Azure resource roles.
+      Nothing else is ever planned here -- no Owner, no Contributor (Azure WRITE rights stay out of the default install).
+    #>
+    param([Parameter(Mandatory)][string]$TenantId, [switch]$IncludeUserAccessAdministrator)
+    $tid = "$TenantId".Trim()
+    if ($tid -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { throw "Get-PimEngineRootAzurePlan: -TenantId must be the tenant id (a GUID) -- the Tenant Root Group's id IS the tenant id: '$TenantId'." }
+    $roles = @('Reader')
+    if ($IncludeUserAccessAdministrator) { $roles += 'User Access Administrator' }
+    [pscustomobject]@{ scope = "/providers/Microsoft.Management/managementGroups/$($tid.ToLowerInvariant())"; roles = $roles }
+}
+
+function Grant-PimEngineRootAzureAccess {
+    <#
+      §97 -- grant the engine identity Reader (default) [+ User Access Administrator, opt-in] at the tenant root management
+      group. Idempotent (an existing assignment is left alone), every grant READ BACK.
+
+      🔑 NEVER FAILS THE INSTALL. Assigning at the tenant root needs Owner / User Access Administrator THERE (a Global
+      Administrator first turns on "Access management for Azure resources"); the deploying identity often has neither. A
+      refusal WARNS loudly, prints the exact fix (the published Grant-PimEnginePermissions.ps1 with this tenant and engine
+      object id, and the az equivalent), and returns ok=$false -- and the Manager's Get Started 'Engine permissions' step
+      shows the same command until it is done.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string]$MiObjectId,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$TenantId,
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [switch]$IncludeUserAccessAdministrator
+    )
+    $plan = Get-PimEngineRootAzurePlan -TenantId $TenantId -IncludeUserAccessAdministrator:$IncludeUserAccessAdministrator
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'   # native az stderr must not be fatal on 5.1; every call is read back
+    $rows = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($role in $plan.roles) {
+            $have = az role assignment list --subscription $SubscriptionId --assignee $MiObjectId --scope $plan.scope --role $role `
+                        --query "[0].roleDefinitionName" -o tsv --only-show-errors 2>$null
+            if ("$have".Trim() -eq $role) { $rows.Add([pscustomobject]@{ role = $role; state = 'already there' }) | Out-Null; continue }
+            if (-not $PSCmdlet.ShouldProcess("$Name @ $($plan.scope)", "grant $role")) { $rows.Add([pscustomobject]@{ role = $role; state = 'would grant' }) | Out-Null; continue }
+            az role assignment create --subscription $SubscriptionId --assignee-object-id $MiObjectId --assignee-principal-type ServicePrincipal `
+                --role $role --scope $plan.scope -o none --only-show-errors 2>$null
+            # Read back rather than trust the exit code: RoleAssignmentExists exits non-zero and IS success.
+            $now = az role assignment list --subscription $SubscriptionId --assignee $MiObjectId --scope $plan.scope --role $role `
+                       --query "[0].roleDefinitionName" -o tsv --only-show-errors 2>$null
+            $rows.Add([pscustomobject]@{ role = $role; state = $(if ("$now".Trim() -eq $role) { 'granted' } else { 'refused' }) }) | Out-Null
+        }
+    } finally { $ErrorActionPreference = $eap }
+
+    $refused = @($rows | Where-Object { $_.state -eq 'refused' } | ForEach-Object { $_.role })
+    $fix = ''
+    if ($refused.Count) {
+        $fix = Get-PimRootAzureFixCommand -TenantId $TenantId -EngineObjectId $MiObjectId -Roles $refused
+        $azCmd = @($refused | ForEach-Object { "az role assignment create --assignee-object-id $MiObjectId --assignee-principal-type ServicePrincipal --role '$_' --scope $($plan.scope)" }) -join "`n      "
+        Write-Warning ("  ENGINE AZURE ACCESS NOT GRANTED: $Name ($MiObjectId) still lacks " + ($refused -join ' + ') + " at the tenant root management group $($plan.scope). " +
+                       "Discovery cannot see Azure until Reader is there (the Manager's Get Started > Engine permissions step stays open and shows this command). " +
+                       "The installing identity needs Owner or User Access Administrator at the tenant root (a Global Administrator first turns on 'Access management for Azure resources' in Microsoft Entra ID > Properties). " +
+                       "The install continues. Fix -- as a Global Administrator, browser sign-in, no modules:")
+        Write-Host ("      " + ($fix -replace "`n", "`n      ")) -ForegroundColor Yellow
+        Write-Host  "      or with az:" -ForegroundColor Yellow
+        Write-Host ("      " + $azCmd) -ForegroundColor Yellow
+    } else {
+        foreach ($r in $rows) { Write-Host ("    {0} at the tenant root for {1}: {2}" -f $r.role, $Name, $r.state) -ForegroundColor DarkGray }
+    }
+    [pscustomobject]@{ ok = (-not $refused.Count); scope = $plan.scope; results = @($rows.ToArray()); refused = $refused; fix = $fix }
 }
 
 function Get-PimGsaPrivateLinkGuidance {
