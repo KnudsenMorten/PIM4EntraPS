@@ -2729,7 +2729,9 @@ function Invoke-DeployValidation {
             }
             # BUG-25: `| Out-Host` -- a native child's stdout is SUCCESS-stream output too, so
             # without it the smoke's console text becomes part of this function's return value.
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $smoke | Out-Host
+            # PIM 99 (Cloud Shell): Windows PowerShell where the host has it (Windows, unchanged), else pwsh (Linux).
+            $childPs = $(if (Get-Command -Name 'powershell.exe' -CommandType Application -ErrorAction SilentlyContinue) { 'powershell.exe' } else { (Get-Process -Id $PID).Path })
+            & $childPs -NoProfile -ExecutionPolicy Bypass -File $smoke | Out-Host
             $smokeExit = $LASTEXITCODE
             # BUG-216: the smoke's contract is 0 = passed, 1 = failed, 2 = SKIPPED checks (not a pass).
             if ($smokeExit -eq 2) { Warn 'verify: the hosted smoke SKIPPED checks (exit 2) -- UNVERIFIED, not a pass; nothing is rolled back for it.' }

@@ -13,6 +13,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.537 -- 2026-10-09
+
+- **A managed tenant can be installed from Azure Cloud Shell.** The install steps that used Windows PowerShell now run under
+  PowerShell 7 when Windows PowerShell is not there (Linux / Cloud Shell); on Windows nothing changes.
+
 ## 2.4.536 -- 2026-10-09
 
 - **Install with an enrollment key -- also a single tenant.** An enrollment key from Invardia now installs a single-tenant
