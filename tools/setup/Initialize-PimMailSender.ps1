@@ -59,6 +59,19 @@
   REST-only: no ExchangeOnlineManagement module, no Graph SDK, no `az`. Exchange is driven through
   the `/adminapi/beta/<tenant>/InvokeCommand` endpoint that the EXO V3 module itself uses.
 
+  🔒 HOW IT SIGNS IN (MAIL-1, framework 12.3, owner 2026-10-08: "we dont use certificates here, either interactive
+  login or secret. not certificates"). Four ways, decided before anything is touched (Resolve-PimMailSetupAuthMode):
+    * nothing passed           -> BROWSER sign-in (the default for a person): an Exchange or Global Administrator signs
+                                  in in Edge (auth code + PKCE on localhost, no device code, no module). The person acts
+                                  with their OWN Exchange role -- no app is granted Exchange.ManageAsApp or a directory
+                                  role, so that whole step is skipped. -AdminAppId is not needed.
+    * -AdminAppId -AdminSecret -> the Invardia Support app (the setup / support identity; its secret is the one
+                                  allowed exception, framework 4.1a). It activates its own time-boxed Exchange
+                                  Administrator through PIM.
+    * -UseSignedInAccount      -> the signed-in az session (the deploy's own run as the Support app, or a person).
+    * -AdminCertThumbprint     -> still accepted for old callers; never what a page or a document prints.
+  Published standalone at https://invardia.com/support/pim/Initialize-PimMailSender.ps1 (Build-PimSupportScripts.ps1).
+
 .PARAMETER OutFile
   Where to write the result JSON ({ ok, sender, ... }). This is how the orchestrator gets the sender
   UPN back: each onboarding step runs in its OWN process with stdout redirected to a log, so a
@@ -66,11 +79,16 @@
   UPN to Setup-PimContainers as -MailSender.
 
 .EXAMPLE
+  # A person (Exchange or Global Administrator), browser sign-in -- what PIM Manager's Get Started prints:
+  .\Initialize-PimMailSender.ps1 -TenantId <tid> -ManagedIdentityObjectId <managerMiObjectId>,<tickMiObjectId> `
+       -SqlServerFqdn <server>.database.windows.net
+
+.EXAMPLE
   # From another process (a deploy step, a scheduled task): `pwsh -File` passes every argument as a
   # STRING, so a PowerShell array literal ('a','b') arrives as ONE value. Pass several managed
   # identities comma-separated with no quotes or spaces -- the script splits and validates them.
-  pwsh -NoProfile -File tools\setup\Initialize-PimMailSender.ps1 -TenantId <tid> -AdminAppId <appId> `
-       -AdminCertThumbprint <thumbprint> -ManagedIdentityObjectId <tickMiObjectId>,<managerMiObjectId> `
+  pwsh -NoProfile -File tools\setup\Initialize-PimMailSender.ps1 -TenantId <tid> -AdminAppId <supportAppId> `
+       -AdminSecret <secret> -ManagedIdentityObjectId <tickMiObjectId>,<managerMiObjectId> `
        -SqlServerFqdn <server>.database.windows.net
 
 .NOTES
@@ -87,8 +105,9 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$TenantId,
-    # The ONBOARDING SPN -- privileged, provisioning-time. See the identity note above.
-    [Parameter(Mandatory)][string]$AdminAppId,
+    # The ONBOARDING SPN -- privileged, provisioning-time. See the identity note above. Not needed (and refused alone)
+    # for the browser sign-in: the person who signs in acts with their own Exchange role.
+    [string]$AdminAppId,
     # ONE of these. 🔴 The secret used to be Mandatory, which made a CLIENT SECRET structurally
     # required to provision the sender mailbox -- against the repo-root rule ("authenticate as its
     # SPN using a CERTIFICATE, never a client secret") and unsatisfiable where the onboarding SPN
@@ -117,6 +136,8 @@ param(
     [string]$SubscriptionId,
     [string]$ResourceGroup,
     [string]$TickJobName,
+    # MAIL-1: and the Manager container app's (it sends the alert notices) -- same ARM read, same rule.
+    [string]$ManagerAppName,
     # EXPLICIT, off by default: also remove the older scoped assignment that names the engine SPN.
     # Left in place by default -- it is scoped to the same single mailbox, so it widens nothing,
     # and removing a working send right is the operator's call, not a side effect.
@@ -129,7 +150,7 @@ param(
     # guessing one produces a mailbox nobody can receive from.
     [string]$MailboxName  = 'PIM-Engine',
     [string]$MailDomain,
-    [string]$DisplayName  = 'PIM4EntraPS Engine (notifications)',
+    [string]$DisplayName  = 'PIM Manager (notifications)',
     # Where the sender is PERSISTED (IMP-06a runtime half). Writing it to pim.Settings is what lets
     # this script run AFTER the containers are already deployed: the store overrides the deploy-time
     # env var and a cold-booted tick Job hydrates it on its next run, so no redeploy is needed.
@@ -149,17 +170,31 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# EITHER a secret OR a certificate, never both and never neither. Checked before anything is
-# provisioned: this script creates a mailbox and grants Exchange rights, and finding out the
-# credential was unusable halfway through leaves a half-configured tenant nobody asked for.
-if ($AdminSecret -and $AdminCertThumbprint) { throw 'Initialize-PimMailSender: pass EITHER -AdminSecret OR -AdminCertThumbprint, not both.' }
-if ($UseSignedInAccount -and ($AdminSecret -or $AdminCertThumbprint)) { throw 'Initialize-PimMailSender: -UseSignedInAccount takes no -AdminSecret / -AdminCertThumbprint.' }
-if (-not $UseSignedInAccount -and -not $AdminSecret -and -not $AdminCertThumbprint) { throw 'Initialize-PimMailSender: one of -AdminSecret / -AdminCertThumbprint / -UseSignedInAccount is required.' }
+$here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+# Every helper is dot-sourced by a literal path relative to this script's folder, so Build-PimSupportScripts.ps1 can
+# inline it: the published file at https://invardia.com/support/pim/Initialize-PimMailSender.ps1 is ONE standalone script.
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')
+. (Join-Path $PSScriptRoot '_PimMailSenderPlan.ps1')          # pure planners (tested offline)
+. (Join-Path $PSScriptRoot '_PimMailSetup.ps1')               # how it signs in + the browser sign-in
+
+# EITHER a secret OR a certificate (or the signed-in az session, or the browser), never two at once. Checked before
+# anything is provisioned: this script creates a mailbox and grants Exchange rights, and finding out the credential was
+# unusable halfway through leaves a half-configured tenant nobody asked for. ("pass EITHER" / "-AdminAppId is required"
+# are the refusals; the decision is Resolve-PimMailSetupAuthMode in _PimMailSetup.ps1, tested offline.)
+$authPlan = Resolve-PimMailSetupAuthMode -AdminAppId $AdminAppId -AdminSecret $AdminSecret -AdminCertThumbprint $AdminCertThumbprint -UseSignedInAccount:$UseSignedInAccount
+if ($authPlan.reason) { throw "Initialize-PimMailSender: $($authPlan.reason)" }
+$script:PimMailAuthMode = $authPlan.mode
+$browserMode = ($script:PimMailAuthMode -eq 'browser')
+if ($browserMode -and -not (Test-PimMsInteractiveHost)) {
+    throw 'Initialize-PimMailSender: no credential was passed, so this run signs in in the BROWSER -- and this session is not interactive. Run it in a PowerShell window, or pass -AdminAppId + -AdminSecret (the Invardia Support app).'
+}
 
 function Get-PimMailAdminToken {
-    # The admin (onboarding) identity's token for 'graph' | 'arm' | a resource URL: from the signed-in az session with
-    # -UseSignedInAccount, else the app's own secret / certificate. Never cached across identities (-Force).
+    # The admin (onboarding) identity's token for 'graph' | 'arm' | a resource URL: the browser sign-in (the person),
+    # the signed-in az session with -UseSignedInAccount, else the app's own secret / certificate. Never cached across
+    # identities (-Force).
     param([Parameter(Mandatory)][string]$Resource)
+    if ($script:PimMailAuthMode -eq 'browser') { return (Get-PimMsBrowserToken -Resource $Resource -TenantId $TenantId) }
     if ($UseSignedInAccount) {
         $url = switch ($Resource) { 'graph' { 'https://graph.microsoft.com' } 'arm' { 'https://management.azure.com' } default { $Resource } }
         $tok = "$(az account get-access-token --tenant $TenantId --resource $url --query accessToken -o tsv 2>$null)".Trim()
@@ -168,11 +203,6 @@ function Get-PimMailAdminToken {
     }
     return (Get-PimRestToken -Resource $Resource -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force)
 }
-
-$here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-$solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\SOLUTIONS\PIM4EntraPS
-. (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')
-. (Join-Path $here '_PimMailSenderPlan.ps1')          # pure planners (tested offline)
 
 # Both refusals happen BEFORE anything is touched: a malformed argument found halfway through leaves
 # a half-configured tenant.
@@ -190,7 +220,7 @@ $exoResourceAppId   = '00000002-0000-0ff1-ce00-000000000000'   # Office 365 Exch
 $result = [ordered]@{
     ok = $false; sender = ''; tenantId = $TenantId; engineAppId = ''; sendIdentities = @()
     exchangePlan = ''; mailboxCreated = $false; mailSendGranted = $false
-    accessPolicyCreated = $false; privilegedGrants = $null; steps = @(); reason = ''
+    accessPolicyCreated = $false; privilegedGrants = $null; steps = @(); reason = ''; authMode = "$($authPlan.mode)"; persisted = $false
 }
 function Note($m, $c = 'Gray') { Write-Host "    $m" -ForegroundColor $c }
 function Step($m) { Write-Host "`n--- $m ---" -ForegroundColor Cyan }
@@ -294,10 +324,11 @@ Write-Host ("=" * 78) -ForegroundColor Cyan
 # The onboarding SPN authenticates with a SECRET here because that is the credential the estate
 # onboarding path already carries for it (workbook / kv-automatit-dev). The ENGINE never uses a
 # secret -- it is cert-only -- and this script never gives it one.
-Step 'authenticate (onboarding SPN)'
+$adminLabel = if ($browserMode) { 'the administrator signing in in the browser' } else { "the onboarding SPN ($AdminAppId)" }
+Step $(if ($browserMode) { 'authenticate (browser sign-in: an Exchange or Global Administrator)' } else { 'authenticate (onboarding SPN)' })
 try {
     $graphTok = Get-PimMailAdminToken -Resource 'graph'
-} catch { Fail "could not acquire a Graph token as the onboarding SPN ($AdminAppId): $($_.Exception.Message)" }
+} catch { Fail "could not acquire a Graph token as $adminLabel : $($_.Exception.Message)" }
 $GH = @{ Authorization = "Bearer $graphTok"; 'Content-Type' = 'application/json' }
 function Gr {
     param([string]$Method = 'GET', [Parameter(Mandatory)][string]$Path, [object]$Body)
@@ -322,7 +353,8 @@ function GrAll {
     }
     return $items
 }
-Note "onboarding SPN: $AdminAppId" 'DarkGray'
+if ($browserMode) { Note "signed in as $(Get-PimMsSignedInUpn) (browser sign-in; no app identity is used or granted anything)" 'DarkGray' }
+else { Note "onboarding SPN: $AdminAppId" 'DarkGray' }
 
 # 🔴 THE ONBOARDING SPN CANNOT GRANT ITSELF. The header says this script's identity "already
 # elevates itself to Global Administrator + Owner" -- true of the estate's onboarding SPN, and NOT
@@ -435,7 +467,9 @@ Note "sender: $sender" 'Green'
 # --- resolve the SENDING identity (hosted: the tick job's managed identity) -------------
 Step 'resolve the sending identity (managed identity when hosted)'
 $miOids = @($ManagedIdentityObjectId | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
-if (-not $miOids.Count -and "$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$TickJobName".Trim()) {
+# MAIL-1 (2026-10-08): ADDED to the identities passed, not only used when none are -- PIM Manager's Get Started passes
+# its own managed identity by object id and names the tick job, whose identity it may not be able to read itself.
+if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$TickJobName".Trim()) {
     try {
         $armTok = Get-PimMailAdminToken -Resource 'arm'
         $job = Invoke-RestMethod -Headers @{ Authorization = "Bearer $armTok" } `
@@ -443,8 +477,19 @@ if (-not $miOids.Count -and "$SubscriptionId".Trim() -and "$ResourceGroup".Trim(
     } catch { Fail "could not read tick job '$TickJobName' to resolve its managed identity: $($_.Exception.Message)" }
     $pick = Get-PimJobManagedIdentityPrincipalId -Job $job
     if ($pick.reason) { Fail "tick job '$TickJobName': $($pick.reason)" }
-    $miOids = @($pick.principalId)
+    if ($miOids -notcontains "$($pick.principalId)") { $miOids += "$($pick.principalId)" }
     Note "tick job '$TickJobName' sends as its $($pick.kind)-assigned managed identity $($pick.principalId)" 'DarkGray'
+}
+if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and "$ManagerAppName".Trim()) {
+    try {
+        $armTok = Get-PimMailAdminToken -Resource 'arm'
+        $app = Invoke-RestMethod -Headers @{ Authorization = "Bearer $armTok" } `
+            -Uri "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$ManagerAppName`?api-version=2024-03-01"
+    } catch { Fail "could not read the Manager app '$ManagerAppName' to resolve its managed identity: $($_.Exception.Message)" }
+    $pick = Get-PimJobManagedIdentityPrincipalId -Job $app
+    if ($pick.reason) { Fail "Manager app '$ManagerAppName': $($pick.reason)" }
+    if ($miOids -notcontains "$($pick.principalId)") { $miOids += "$($pick.principalId)" }
+    Note "Manager app '$ManagerAppName' sends as its $($pick.kind)-assigned managed identity $($pick.principalId)" 'DarkGray'
 }
 $miSps = @()
 foreach ($oid in $miOids) {
@@ -490,8 +535,17 @@ if (-not $mailSendRole) { Fail 'Mail.Send app-role not found on the Graph servic
 # Transient, and on the provisioning identity by design (see the header). Two things are needed:
 # the Exchange.ManageAsApp app-role, and the Exchange Administrator DIRECTORY role -- the app-role
 # alone yields a token whose `roles` claim is empty and an admin endpoint that answers 401.
+$manageAsAppState = ''; $exchAdminState = $null
+# 🔒 BROWSER SIGN-IN: NOTHING IS GRANTED TO ANY APP. The person who signed in acts with their OWN Exchange Administrator /
+# Global Administrator role (a delegated token), so the transient app grants below -- Exchange.ManageAsApp, the
+# time-boxed Exchange Administrator through PIM -- have no subject and are skipped as a whole. An admin without an
+# Exchange role is refused by Exchange itself at the readiness wait below, with Exchange's own message.
+if ($browserMode) {
+    Step 'Exchange administration: the signed-in administrator''s own role (nothing is granted)'
+    Note "Exchange is administered as $(Get-PimMsSignedInUpn) -- an Exchange Administrator or Global Administrator role is needed" 'DarkGray'
+} else {
 Step 'enable Exchange administration for the onboarding SPN (transient, provisioning-time)'
-$adminSp = (Gr -Path "servicePrincipals?`$filter=appId eq '$AdminAppId'").value | Select-Object -First 1
+$adminSp =(Gr -Path "servicePrincipals?`$filter=appId eq '$AdminAppId'").value | Select-Object -First 1
 if (-not $adminSp) { Fail "onboarding service principal not found for appId $AdminAppId" }
 
 $exoSp = (Gr -Path "servicePrincipals?`$filter=appId eq '$exoResourceAppId'").value | Select-Object -First 1
@@ -607,6 +661,7 @@ elseif ($PSCmdlet.ShouldProcess($AdminAppId, "activate Exchange Administrator th
     $exchAdminState = Read-ExchAdminGrant
     Note "Exchange Administrator active until $(if ($exchAdminState.endDateTime) { $exchAdminState.endDateTime.ToString('u') } else { '(no end)' }) (verified by read-back)" 'Green'
 }
+}   # end: app identity (not the browser sign-in)
 
 if ($WhatIfPreference) {
     Note 'WhatIf: stopping before any Exchange call' 'DarkYellow'
@@ -622,7 +677,10 @@ $exoUri = "https://outlook.office365.com/adminapi/beta/$TenantId/InvokeCommand"
 # The tenant's INITIAL (*.onmicrosoft.com) domain. `$initialDomain` used to be read here and assigned nowhere, so the
 # anchor ended in "@" -- harmless only because EXO falls back when the anchor mailbox does not resolve.
 $initialDomain = "$(@(@($org.verifiedDomains) | Where-Object { $_.isInitial } | Select-Object -First 1).name)".Trim()
-$anchor = "UPN:SystemMailbox{bb558c35-97f1-4cb9-8ff7-d53741dc928c}@$initialDomain"
+# A delegated (browser) token anchors on the signed-in person, an app-only one on the system mailbox -- as the EXO V3
+# module does (Get-PimMsExoAnchor). The Exchange token is minted first so the person's UPN is known.
+if ($browserMode) { try { [void](Get-PimMailAdminToken -Resource 'https://outlook.office365.com') } catch { Fail "could not sign in to Exchange Online: $($_.Exception.Message)" } }
+$anchor = Get-PimMsExoAnchor -Mode $script:PimMailAuthMode -Upn (Get-PimMsSignedInUpn) -InitialDomain $initialDomain
 function Invoke-Exo {
     param([Parameter(Mandatory)][string]$Cmdlet, [hashtable]$Parameters = @{})
     $tok = Get-PimMailAdminToken -Resource 'https://outlook.office365.com'
@@ -936,16 +994,30 @@ else { Add-Result 'mail-send-tenantwide' 'absent' 'correct (RBAC grants, scoped)
 Step '[4] persist the sender to pim.Settings'
 if (-not "$SqlServerFqdn".Trim()) {
     Note 'no -SqlServerFqdn given -- NOT persisted. The sender must reach the engine some other way' 'DarkYellow'
-    Note "(pass -MailSender '$storeSender' to Setup-PimContainers, or set 'MailSender' in pim.Settings by hand)" 'DarkYellow'
+    Note "(PIM Manager: Get Started > Mail sender > Shared mailbox > 'Use this mailbox': $storeSender; or pass -MailSender '$storeSender' to Setup-PimContainers)" 'DarkYellow'
     Add-Result 'persist' 'skipped' 'no -SqlServerFqdn'
 } else {
-    . (Join-Path $solRoot 'engine\_shared\PIM-SqlStore.ps1')
+    . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-SqlStore.ps1')
     # An EXPLICIT credential beats ambient managed identity in New-PimSqlConnection, which matters
     # here: mgmt1 has an MI of its own, and an MI can only mint tokens for ITS OWN tenant, so an
     # ambient token would authenticate successfully against the WRONG directory (BUG-34). The
     # onboarding SPN is the SQL server's Entra admin, so it is the identity that can write.
     $global:PIM_TenantId     = $TenantId
-    if ($UseSignedInAccount) {
+    $persistErr = ''
+    if ($browserMode) {
+        # The person's own SQL token (Azure PowerShell public client, from the browser sign-in). No app credential is set,
+        # managed identity is switched off (a VM's own would otherwise win), and the token is placed in the store's
+        # per-identity token cache under the "no app credential" key -- the cache is read before any other source, so
+        # the connection presents exactly this person and nothing ambient (never the az CLI's default account).
+        foreach ($n in 'PIM_ClientId', 'PIM_ClientSecret', 'PIM_CertThumbprint', 'PIM_SqlClientId', 'PIM_SqlClientSecret', 'PIM_SqlCertThumbprint', 'PIM_SqlAccessToken') { Set-Variable -Scope Global -Name $n -Value $null }
+        $global:PIM_NoManagedIdentity = $true
+        try {
+            $sqlTok = Get-PimMailAdminToken -Resource 'https://database.windows.net'
+            $script:PimSqlTokenCache = @{ key = 'sql|||False'; token = $sqlTok; expires = (Get-Date).ToUniversalTime().AddMinutes(45) }
+            $global:PIM_SetupActor = Get-PimMsSignedInUpn
+        } catch { $persistErr = "could not sign in to Azure SQL: $($_.Exception.Message)" }
+    }
+    elseif ($UseSignedInAccount) {
         # the signed-in session (a member of the SQL admin group) writes the store -- as Set-PimLicense -UseSignedInAccount
         . (Join-Path $PSScriptRoot '_PimSignedIn.ps1')
         $null = Connect-PimSignedInSql -TenantId $TenantId
@@ -961,19 +1033,33 @@ if (-not "$SqlServerFqdn".Trim()) {
     $global:PIM_SqlServer    = $SqlServerFqdn
     $global:PIM_SqlDatabase  = $SqlDatabase
     try {
+        if ($persistErr) { throw $persistErr }
         $cs = Get-PimSqlConnectionString -Server $SqlServerFqdn -Database $SqlDatabase
         Set-PimSqlSetting -ConnectionString $cs -Name 'MailSender' -Value $storeSender
+        # MAIL-1: this script sets up the SHARED MAILBOX mode, so it also says so (an environment switched to the SMTP
+        # relay goes back to the mailbox it was just given).
+        Set-PimSqlSetting -ConnectionString $cs -Name 'MailMode' -Value 'sharedMailbox'
         # Read back through the same reader the ENGINE uses, not through a raw SELECT -- the point
         # is to prove what the engine will see, not that a row exists.
         $all = Get-PimAllSqlSettings -ConnectionString $cs
         $stored = "$($all['MailSender'])".Trim()
         if ($stored -ne $storeSender) { throw "read-back mismatch: store holds '$stored', expected '$storeSender'" }
-        Note "persisted to pim.Settings and verified: MailSender = $stored" 'Green'
+        Note "persisted to pim.Settings and verified: MailSender = $stored, MailMode = $("$($all['MailMode'])".Trim())" 'Green'
         Add-Result 'persist' 'ok' $stored
+        $result.persisted = $true
     } catch {
         $m = ($_.Exception.Message -split "`n")[0]
-        Add-Result 'persist' 'FAILED' $m
-        Fail "mailbox + grants are in place, but the sender could NOT be persisted to pim.Settings ($SqlServerFqdn/$SqlDatabase): $m  -- the environment is still MAIL-MUTE. Re-run, or pass -MailSender '$storeSender' to Setup-PimContainers."
+        if ($browserMode) {
+            # From a person's own PC the store is often out of reach (a private endpoint, a firewall) -- and the hard part,
+            # the mailbox and its scoped send right, IS done. So this is NOT a failure here: PIM Manager stores the sender.
+            Add-Result 'persist' 'manual' $m
+            $result.persisted = $false
+            Note "the sender could not be written to the store from this computer ($m)." 'Yellow'
+            Note "FINISH IT IN PIM MANAGER: Get Started > Mail sender > Shared mailbox > 'Use this mailbox': $storeSender -- then Send a test mail." 'Yellow'
+        } else {
+            Add-Result 'persist' 'FAILED' $m
+            Fail "mailbox + grants are in place, but the sender could NOT be persisted to pim.Settings ($SqlServerFqdn/$SqlDatabase): $m  -- the environment is still MAIL-MUTE. Re-run, or pass -MailSender '$storeSender' to Setup-PimContainers."
+        }
     }
 }
 
@@ -992,6 +1078,12 @@ Write-Host ""
 # IMP-31 -- SAY WHAT PRIVILEGE IS LEFT BEHIND, AND UNTIL WHEN. The old run granted the provisioning
 # identity tenant-wide Exchange administration and never mentioned it again; the tenant's own alerting
 # was how anyone found out.
+if ($browserMode) {
+    # Nothing was granted to any identity in a browser run -- the administrator used their own role, which they keep.
+    $result.privilegedGrants = [ordered]@{ identity = (Get-PimMsSignedInUpn); exchangeAdministrator = $null; exchangeManageAsApp = 'not used (browser sign-in)' }
+    Write-Host "  PRIVILEGED GRANTS: none -- the administrator $(Get-PimMsSignedInUpn) used their own role; no app was granted anything." -ForegroundColor Green
+    Write-Host ""
+} else {
 try { $exchAdminNow = Read-ExchAdminGrant } catch { $exchAdminNow = $exchAdminState }
 $exAdminLine = if (-not $exchAdminNow.active) { 'not active (expired or never granted)' }
                elseif ($exchAdminNow.kind -eq 'permanent') { 'ACTIVE, PERMANENT (standing privilege outside PIM -- remove it with a DIFFERENT administrator: an identity cannot remove its own directory role)' }
@@ -1007,8 +1099,13 @@ Write-Host "  PRIVILEGED GRANTS STILL HELD by the setup identity $AdminAppId :" 
 Write-Host "    Exchange Administrator (directory role) : $exAdminLine" -ForegroundColor $pc
 Write-Host "    Exchange.ManageAsApp (app role)         : $(if ($manageAsAppState) { $manageAsAppState } else { 'not held' }) -- no expiry; inert without the directory role" -ForegroundColor $pc
 Write-Host ""
-Write-Host "  NEXT: pass -MailSender '$storeSender' to Setup-PimContainers (Initialize-PlatformEnvironment"
-Write-Host "        does this automatically), or set a 'MailSender' value in pim.Settings."
+}
+if ($result.persisted) {
+    Write-Host "  NEXT: PIM Manager > Get Started > Mail sender > Send a test mail."
+} else {
+    Write-Host "  NEXT: PIM Manager > Get Started > Mail sender > Shared mailbox > 'Use this mailbox': $storeSender, then Send a test mail"
+    Write-Host "        (or pass -MailSender '$storeSender' to Setup-PimContainers, or set 'MailSender' in pim.Settings)."
+}
 Write-Host ""
 # Say only what was verified BY READ-BACK. An earlier summary asserted "Mail.Send, RESTRICTED to
 # that mailbox" while the app was in fact unscoped -- an unverified security claim is worse than

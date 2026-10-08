@@ -343,6 +343,10 @@ $_breakGlassLib = Join-Path $solutionRoot 'engine\_shared\PIM-BreakGlassAccounts
 if (Test-Path -LiteralPath $_breakGlassLib) { . $_breakGlassLib }
 # Break-glass MAKER/CHECKER (operator 2026-09-19): a change to that list is a pending request a SECOND SuperAdmin
 # approves (pim.Settings 'BreakGlassAccountsChange'). Only the Manager loads this; the engine reads the list alone.
+# Review page (owner 2026-10-08): which rows are PIM Manager's own identities, the Invardia Support app or a break-glass
+# account -- hidden by default on Review active assignments, each behind its own tick. Pure lib; the Manager binds Graph + SQL.
+$_reviewOwnLib = Join-Path $solutionRoot 'engine\_shared\PIM-ReviewOwnPrincipals.ps1'
+if (Test-Path -LiteralPath $_reviewOwnLib) { . $_reviewOwnLib }
 $_breakGlassChangeLib = Join-Path $solutionRoot 'engine\_shared\PIM-BreakGlassChange.ps1'
 . $_breakGlassChangeLib
 $_approvalGateLib = Join-Path $solutionRoot 'engine\_shared\PIM-ApprovalGate.ps1'
@@ -4094,6 +4098,114 @@ function Get-PimAdminTapState {
     }
     return $out.ToArray()
 }
+# ===================================================================================================================
+# MAIL-1 (framework DOCS/REQUIREMENTS.md 12.3, owner 2026-10-08): "2 options: shared mailbox or smtp relay" / "we dont use
+# certificates here, either interactive login or secret". The Manager's half: what Get Started > Mail sender and
+# Settings > Mail & alerting show (the mode, the sender, the relay, the commands with this environment's values), the save
+# (pim.Settings MailMode / MailSender / SmtpRelay -- never a password), the relay password into the environment's Key
+# Vault (as the Manager's own managed identity, when it may), and the test mail that proves a mode.
+# ===================================================================================================================
+function Get-PimManagerMailIdentities {
+    <#
+      The managed identities that SEND (the Manager's own and the engine job's), plus the subscription / resource group
+      they live in, for the setup commands the page prints. Read once and kept 10 minutes; never throws (a part that cannot
+      be read stays '' and the page prints a placeholder for it).
+    #>
+    if ($script:PimMailIdCache -and ((Get-Date) - $script:PimMailIdCache.at).TotalMinutes -lt 10) { return $script:PimMailIdCache.value }
+    $o = [ordered]@{ managerObjectId = ''; tickObjectId = ''; subscriptionId = ''; resourceGroup = ''; tickJobName = ''; reason = '' }
+    try {
+        $appId = "$($global:PIM_RuntimeAppId)"
+        if (-not $appId) { $appId = "$($env:AZURE_CLIENT_ID)" }
+        if (-not $appId -and (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { $t = $null; try { $t = Get-PimRestToken -Resource graph } catch { }; $appId = Get-PimTokenAppId -Token "$t" }
+        if ($appId) {
+            $self = @((Invoke-PimGraph -Path ("/servicePrincipals?`$filter=appId eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $appId)).value) | Select-Object -First 1
+            if ($self -and "$($self.servicePrincipalType)" -eq 'ManagedIdentity') {
+                $o.managerObjectId = "$($self.id)"
+                $rid = @(@($self.alternativeNames) | Where-Object { "$_" -match '^/subscriptions/' }) | Select-Object -First 1
+                if ("$rid" -match '(?i)^/subscriptions/([^/]+)/resourcegroups/([^/]+)/') { $o.subscriptionId = $Matches[1]; $o.resourceGroup = $Matches[2] }
+                $job = if ("$($env:PIM_ENGINE_JOB_NAME)".Trim()) { "$($env:PIM_ENGINE_JOB_NAME)".Trim() } else { 'ca-pim-tick' }
+                $tj = Get-PimManagerTickJobId
+                if ($tj -match '(?i)/jobs/([^/]+)$') { $job = $Matches[1] }
+                $o.tickJobName = $job
+                $rgPrefix = ("$rid" -replace '(?i)^(/subscriptions/[^/]+/resourcegroups/[^/]+/).*$', '$1').ToLowerInvariant()
+                $cands = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $job)
+                $eng = @(@($cands.value) | Where-Object { @($_.alternativeNames) | Where-Object { "$_".ToLowerInvariant().StartsWith($rgPrefix) } }) | Select-Object -First 1
+                if ($eng) { $o.tickObjectId = "$($eng.id)" }
+            } elseif ($self) { $o.reason = 'this Manager does not run as a managed identity (a local run): the identities are named by the deploy' }
+        } else { $o.reason = 'the identity this Manager runs as could not be resolved' }
+    } catch { $o.reason = "$(($_.Exception.Message -split "`n")[0])" }
+    $script:PimMailIdCache = @{ at = (Get-Date); value = $o }
+    return $o
+}
+
+function Get-PimManagerMailState {
+    # The Get Started / Settings answer: mode, sender, relay (no password), the verdict, and this environment's setup values.
+    if (-not "$($global:PIM_MailSender)".Trim() -and (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue)) { try { [void](Initialize-PimEmailControlsFromStore -Force) } catch { } }
+    $mode = ''; $sender = "$($global:PIM_MailSender)".Trim(); $relayRaw = $null; $last = $null
+    try { $mode = ConvertTo-PimMailMode -Value (Get-PimManagerSetting -Name 'MailMode') } catch { }
+    if (-not $mode) { $mode = Get-PimMailMode }
+    try { $v = Get-PimManagerSetting -Name 'MailSender'; if ("$v".Trim()) { $sender = "$v".Trim().Trim('"') } } catch { }
+    try { $relayRaw = Get-PimManagerSetting -Name 'SmtpRelay' } catch { }
+    try { $last = Get-PimManagerSetting -Name 'MailLastTest' } catch { }
+    $relay = ConvertTo-PimSmtpRelayConfig -Value $relayRaw
+    $state = Get-PimMailSetupState -Mode $mode -Sender $sender -SmtpRelay $relayRaw -LastTest $last
+    $ids = Get-PimManagerMailIdentities
+    $tid = if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() }
+    $sqlSrv = if ("$($global:PIM_SqlServer)".Trim()) { "$($global:PIM_SqlServer)".Trim() } else { "$($env:PIM_SqlServer)".Trim() }
+    $sqlDb = if ("$($global:PIM_SqlDatabase)".Trim()) { "$($global:PIM_SqlDatabase)".Trim() } else { "$($env:PIM_SqlDatabase)".Trim() }
+    return [ordered]@{
+        mode = $mode; modes = @(Get-PimMailModeCatalog); sender = $sender
+        smtp = $(if ($relayRaw) { $relay.config } else { $null }); smtpErrors = $(if ($relayRaw) { $relay.errors } else { @{} })
+        done = [bool]$state.done; note = "$($state.note)"; proven = $state.proven
+        lastTest = $last
+        canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+        setup = [ordered]@{
+            tenantId = $tid; managerObjectId = "$($ids.managerObjectId)"; tickObjectId = "$($ids.tickObjectId)"
+            subscriptionId = "$($ids.subscriptionId)"; resourceGroup = "$($ids.resourceGroup)"; tickJobName = "$($ids.tickJobName)"
+            sqlServer = $sqlSrv; sqlDatabase = $sqlDb; vaultHint = "$($global:PIM_EmergencyVault)".Trim(); reason = "$($ids.reason)"
+            mailboxScript = 'https://invardia.com/support/pim/Initialize-PimMailSender.ps1'
+            passwordScript = 'https://invardia.com/support/pim/Set-PimSmtpRelayPassword.ps1'
+        }
+    }
+}
+
+function Set-PimManagerVaultSecret {
+    <#
+      Write the SMTP relay password into the environment's Key Vault AS THIS MANAGER'S OWN IDENTITY. Returns @{ ok; reason }.
+      Refused (401/403/404 or no network path) = the Manager may not write there -- the page then prints the setup script
+      (Set-PimSmtpRelayPassword.ps1), which a person runs with their own rights. The value is never logged or returned.
+      -Writer is the test seam: param($Vault, $Name, $Value) -> nothing (throws on refusal).
+    #>
+    param([Parameter(Mandatory)][string]$VaultName, [Parameter(Mandatory)][string]$SecretName, [Parameter(Mandatory)][string]$Value, [scriptblock]$Writer)
+    try {
+        if ($Writer) { & $Writer $VaultName $SecretName $Value }
+        else {
+            $tok = Get-PimRestToken -Resource 'https://vault.azure.net'
+            [void](Invoke-RestMethod -Method PUT -Uri ("https://{0}.vault.azure.net/secrets/{1}?api-version=7.4" -f $VaultName, $SecretName) `
+                -Headers @{ Authorization = "Bearer $tok"; 'Content-Type' = 'application/json' } -Body (@{ value = $Value; contentType = 'PIM Manager SMTP relay password' } | ConvertTo-Json) -ErrorAction Stop)
+        }
+        return @{ ok = $true; reason = '' }
+    } catch {
+        $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)".Replace($Value, '***')
+        $why = if ($m -match '(?i)\b403\b|Forbidden') { "this Manager's identity may not write secrets in Key Vault '$VaultName'" }
+               elseif ($m -match '(?i)\b401\b|Unauthorized') { "Key Vault '$VaultName' refused this Manager's sign-in" }
+               elseif ($m -match '(?i)\b404\b|NotFound|could not be resolved|No such host|name or service') { "Key Vault '$VaultName' was not found from this Manager (name, or a private network path)" }
+               else { (($m -split "`n")[0]).Trim() }
+        return @{ ok = $false; reason = $why }
+    }
+}
+
+function Save-PimManagerMailLastTest {
+    # Record what the latest test mail proved, against WHICH settings (Get-PimMailTestFingerprint): a later change to the
+    # relay or the mailbox makes this proof stale, so the Get Started step is computed from the data, never a stored tick.
+    param([bool]$Ok, [string]$Reason, [string]$To)
+    try {
+        $st = Get-PimManagerMailState
+        $fp = Get-PimMailTestFingerprint -Mode $st.mode -Sender $st.sender -Smtp $st.smtp
+        Set-PimManagerSetting -Name 'MailLastTest' -Value ([ordered]@{ ok = $Ok; fingerprint = $fp; mode = $st.mode; at = (Get-Date).ToUniversalTime().ToString('o'); reason = "$Reason"; to = "$To"; by = (Get-PimManagerActorName) })
+    } catch { Write-Warning "  [mail] the test-mail result could not be recorded: $($_.Exception.Message)" }
+}
+
 function Send-PimManagerAlert {
     # Fan an alert out to every configured recipient for ONE event type, through the
     # existing Send-PimNotifyMail path (the 'alert-notice' template). Honours the
@@ -4716,7 +4828,7 @@ function Get-PimManagerLicenseBody {
             mspRole = $(if ($role -eq 'Slave') { 'slave' } elseif ($role) { 'master' } else { '' }); mspOk = (-not $role)
             mspState = $(if ($role) { 'refused' } else { 'none' }); mspReason = $(if ($role) { $why } else { '' })
             contact = 'info@invardia.com'; canWrite = $canWrite
-            command = 'pwsh -File tools\setup\Set-PimLicense.ps1 -LicensePath <file> -SqlServer <server>.database.windows.net -TenantId <tenant> -AdminAppId <app id> -AdminCertThumbprint <thumbprint>' }
+            command = (Get-PimLicenseRegisterCommand -SqlServer '' -TenantId '') }
     }
 }
 
@@ -6758,6 +6870,234 @@ function Get-PimManagerPreflightStamp {
     return $stamp
 }
 
+# =====================================================================================================================
+# Framework §12.5 PENDING-1 / PIM §97.3 (owner 2026-10-08: "if there is a pending task like an approval, show it very
+# clearly in the main menu + submenu. here are 2 approvals that noone knows of that is blocking"). GET /api/attention:
+# everything that waits for a PERSON's decision and BLOCKS work, counted from the EXISTING states only -- nothing new is
+# invented here, and nothing is acknowledged: a count clears by itself when the item is decided (the source changes).
+#   policy-holds    the policy mass-change breaker's held change sets (Groups / Entra role / Azure role)  -> Approvals
+#   approvals       maker/checker requests (offboard / revoke / disable / authoring), Pending, not expired -> Approvals
+#   rfa             access requests (RFA) waiting for a department Owner                                  -> Access requests
+#   breakglass      a break-glass account list change waiting for a second SuperAdmin                      -> Emergency access
+#   guard-holds     a releasable guard holding an exact plan (removal budget, disable breaker, ...)        -> Guards
+#   guard-releases  a guard release waiting for a second SuperAdmin                                        -> Guards
+#   second-approver staged changes that a DIFFERENT administrator must commit (setting PendingSecondApprover) -> Pending changes
+#   workload-holds  a workload whose prerequisites are not green while binding rows wait to be assigned   -> Coverage & gaps
+# NOT counted (informational, or not a person's decision): the pending-changes queue count (its own indicator), failed
+# jobs / validation errors (alarms), access-review campaigns, the paused daily reconcile (a decision already taken),
+# Get Started steps. The viewer-independent reads are cached 15 s; any write request clears the cache.
+# =====================================================================================================================
+# REQ-U / REQ-W: the judged workload-prerequisite view, shared by /api/workload-prereqs, /api/templates and /api/attention.
+function Get-PimManagerWorkloadPrereqState {
+    # The judged per-workload view + the store error; shared by /api/workload-prereqs and the /api/templates
+    # assignment gate (REQ-W), so the chip and the held note can never disagree.
+    $stored = $null; $storeErr = ''
+    try { $stored = Get-PimManagerSettingObject -Name 'WorkloadPrereqs' } catch { $storeErr = "$($_.Exception.Message)" }
+    $tick = "$env:PIM_TickJobId".Trim()
+    if (-not $tick) { try { $tick = "$(Get-PimSetting -Name 'SchedulerTickJobId')".Trim().Trim('"') } catch { $tick = '' } }
+    $tj = ConvertFrom-PimTickJobId -Id $tick
+    $envVals = @{
+        tenantId      = "$($global:PIM_TenantId)".Trim()
+        sqlServerFqdn = $(if ("$($global:PIM_SqlServer)".Trim()) { "$($global:PIM_SqlServer)".Trim() } else { "$env:PIM_SqlServer".Trim() })
+        sqlDatabase   = $(if ("$($global:PIM_SqlDatabase)".Trim()) { "$($global:PIM_SqlDatabase)".Trim() } else { "$env:PIM_SqlDatabase".Trim() })
+    }
+    if ($tj) { $envVals.subscriptionId = $tj.subscriptionId; $envVals.resourceGroup = $tj.resourceGroup; $envVals.tickJobName = $tj.jobName }
+    $view = @(Get-PimWorkloadPrereqView -Stored $stored -Env $envVals -NowUtc ([datetime]::UtcNow) -StaleDays (Get-PimWorkloadPrereqStaleDays))
+    if ($storeErr) { foreach ($v in $view) { $v.state = 'unreadable'; $v.chip = 'amber'; $v.command = ''; $v.next = (Get-PimWorkloadPrereqNextStep -State 'unreadable') } }
+    return @{ view = $view; storeErr = $storeErr }
+}
+function Get-PimManagerAttentionSources {
+    $src = [ordered]@{ policyHolds = @(); approvals = @(); rfa = @(); guardHolds = @(); guardReleases = @(); secondApprover = $null; workloadHolds = @(); errors = @() }
+    $errs = New-Object System.Collections.Generic.List[string]
+    $toInt = { param($v) $n = 0; [void][int]::TryParse("$v", [ref]$n); $n }
+    # 1. the policy mass-change holds -- the engine lib in an ISOLATED child scope (BUG-261: the module copy cannot see the
+    #    Manager's Get-PimSetting), the same read as GET /api/engine/policy-hold.
+    try {
+        $engLib = Join-Path $solutionRoot 'engine\_shared\PIM-EngineProviders.ps1'
+        if (Test-Path -LiteralPath $engLib) {
+            $src.policyHolds = @(& {
+                    param($lib)
+                    . $lib
+                    foreach ($p in @('GroupsPolicies', 'EntraRolePolicies', 'AzResPolicies')) {
+                        $h = $null; try { $h = Get-PimPolicyMassHold -Provider $p } catch { $h = $null }
+                        if (-not ($h -and "$($h.planHash)".Trim())) { continue }
+                        # Approved already (this exact plan, approval not expired): it waits for the next engine run, not a person.
+                        $a = $null; try { $a = Get-PimPolicyMassChangeApproval -Provider $p } catch { $a = $null }
+                        if ($a -and "$($a.planHash)".Trim().ToLowerInvariant() -eq "$($h.planHash)".Trim().ToLowerInvariant()) {
+                            $exp = [datetime]::MinValue
+                            if (-not "$($a.expiresUtc)".Trim() -or ([datetime]::TryParse("$($a.expiresUtc)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$exp) -and $exp -gt [datetime]::UtcNow)) { continue }
+                        }
+                        [pscustomobject]@{ provider = $p; changes = "$($h.changes)"; weakening = "$($h.weakening)" }
+                    }
+                } $engLib | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ provider = $_.provider; changes = (& $toInt $_.changes); weakening = (& $toInt $_.weakening) } })
+        }
+    } catch { $errs.Add("policy holds: $($_.Exception.Message)") }
+    # 2. maker/checker approval requests -- the SAME rule as the Overview tile (an expired one waits for nobody).
+    try {
+        if (Get-Command Get-PimApprovalRequests -ErrorAction SilentlyContinue) {
+            $src.approvals = @(Get-PimApprovalRequests -Status 'Pending' | Where-Object { $_ -and -not ((Get-Command Test-PimApprovalRequestExpired -ErrorAction SilentlyContinue) -and (Test-PimApprovalRequestExpired -Request $_)) } |
+                ForEach-Object { [pscustomobject]@{ id = "$($_.id)"; action = "$($_.action)"; requestor = "$($_.requestor)" } })
+        }
+    } catch { $errs.Add("approval requests: $($_.Exception.Message)") }
+    # 3. access requests (RFA) waiting for a department Owner -- only where the Pro RFA library and the SQL store exist.
+    try {
+        $cs = "$(Get-PimManagerStoreCs)"
+        $rfaOn = [bool]($cs -and (Get-Command New-PimRfaRequest -ErrorAction SilentlyContinue) -and (Get-Command Get-PimSqlSettingRaw -ErrorAction SilentlyContinue))
+        if ($rfaOn -and (Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue)) { $rfaOn = [bool](Test-PimFeatureAvailable -Key 'rfa.portal' -Quiet) }
+        if ($rfaOn) {
+            $raw = Get-PimSqlSettingRaw -ConnectionString $cs -Name 'RfaRequests'
+            if ("$raw".Trim()) {
+                $src.rfa = @(@(($raw | ConvertFrom-Json).requests) | Where-Object { $_ -and "$($_.state)" -eq 'pending-approval' } |
+                    ForEach-Object { [pscustomobject]@{ upn = "$($_.upn)"; department = "$($_.department)" } })
+            }
+        }
+    } catch { $errs.Add("access requests: $($_.Exception.Message)") }
+    # 4. guards: a hold of a RELEASABLE guard (the policy breaker's own holds are item 1), and releases awaiting a 2nd person.
+    try {
+        if (Get-Command Get-PimGuardHolds -ErrorAction SilentlyContinue) {
+            $relKind = @{}; if (Get-Command Get-PimGuardReleaseCatalog -ErrorAction SilentlyContinue) { foreach ($g in @(Get-PimGuardReleaseCatalog)) { $relKind["$($g.guardId)"] = "$($g.release)" } }
+            $now = [datetime]::UtcNow
+            $rels = @(@(Get-PimGuardReleases) | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ r = $_; state = (Get-PimGuardReleaseState -Release $_ -NowUtc $now) } })
+            # A hold with an ACTIVE or PENDING release of that exact plan is not waiting for a release (a pending one is counted below).
+            $covered = @{}; foreach ($x in @($rels | Where-Object { $_.state -in @('active', 'pending') })) { $covered[("{0}|{1}|{2}" -f "$($x.r.guardId)", "$($x.r.scope)", "$($x.r.planHash)").ToLowerInvariant()] = $true }
+            $src.guardHolds = @(@(Get-PimGuardHolds -Fresh) | Where-Object { $_ -and "$($_.planHash)".Trim() -and $relKind["$($_.guardId)".Trim().ToLowerInvariant()] -eq 'release' -and
+                    -not $covered[("{0}|{1}|{2}" -f "$($_.guardId)", "$($_.scope)", "$($_.planHash)").ToLowerInvariant()] } |
+                ForEach-Object { [pscustomobject]@{ guardId = "$($_.guardId)"; scope = "$($_.scope)"; count = (& $toInt $_.count) } })
+            $src.guardReleases = @($rels | Where-Object { $_.state -eq 'pending' } | ForEach-Object { [pscustomobject]@{ guardId = "$($_.r.guardId)"; createdBy = "$($_.r.createdBy)" } })
+        }
+    } catch { $errs.Add("guards: $($_.Exception.Message)") }
+    # 5. the second approver: a staged change its stager may not commit (off = nothing waits for a second person).
+    try {
+        $mode = 'off'; try { $sv = "$(Get-PimSetting -Name 'PendingSecondApprover')".Trim().ToLowerInvariant(); if ($sv -in @('sensitive', 'all')) { $mode = $sv } } catch { }
+        if ($mode -ne 'off' -and "$($script:PimSqlCs)".Trim() -and (Get-Command Read-PimSharedPendingStore -ErrorAction SilentlyContinue)) {
+            $doc = (Read-PimSharedPendingStore -ConnectionString $script:PimSqlCs).doc
+            $stagers = New-Object System.Collections.Generic.List[string]
+            foreach ($b in @($doc.bases.Keys)) {
+                foreach ($c in @($doc.bases[$b].changes)) {
+                    if (-not $c) { continue }
+                    if ($mode -eq 'sensitive') {
+                        $sens = $true
+                        if (Get-Command Get-PimAuthoringSensitivity -ErrorAction SilentlyContinue) {
+                            $op = "$(Get-PimSharedPendingField $c 'op')"; $r = if ($op -eq 'remove') { Get-PimSharedPendingField $c 'before' } else { Get-PimSharedPendingField $c 'row' }
+                            try { $sens = [bool](Get-PimAuthoringSensitivity -Action 'review-save' -Base $b -Rows @([pscustomobject]$r)).sensitive } catch { $sens = $true }   # unknown = sensitive (fail closed)
+                        }
+                        if (-not $sens) { continue }
+                    }
+                    $stagers.Add("$(Get-PimSharedPendingField $c 'by')".Trim().ToLowerInvariant())
+                }
+            }
+            if ($stagers.Count) { $src.secondApprover = [pscustomobject]@{ mode = $mode; stagers = @($stagers.ToArray()) } }
+        }
+    } catch { $errs.Add("second approver: $($_.Exception.Message)") }
+    # 6. workload prerequisites that HOLD an assignment: a held workload (Get-PimWorkloadAssignmentGate, the engine's rule)
+    #    that has at least one binding row waiting for it.
+    try {
+        if ((Get-Command Get-PimManagerWorkloadPrereqState -ErrorAction SilentlyContinue) -and (Get-Command Get-PimWorkloadAssignmentGate -ErrorAction SilentlyContinue) -and (Get-Command Get-PimWorkloadPrereqForBinding -ErrorAction SilentlyContinue)) {
+            $ps = Get-PimManagerWorkloadPrereqState
+            $held = @{}
+            foreach ($w in @(Get-PimWorkloadPrereqWorkloads)) { $g = Get-PimWorkloadAssignmentGate -Workload $w -View @($ps.view) -StoreError "$($ps.storeErr)"; if ($g.held) { $held[$w] = $g } }
+            if ($held.Count) {
+                $waiting = @{}
+                foreach ($base in @('PIM-Assignments-Intune', 'PIM-Assignments-Defender', 'PIM-Assignments-Azure-Resources', 'PIM-Assignments-Workloads')) {
+                    if ((Get-Command Get-PimCsvSpec -ErrorAction SilentlyContinue) -and -not (Get-PimCsvSpec -BaseName $base)) { continue }
+                    $rows = @(); try { $rows = @((Read-PimRows -BaseName $base -NoScope).rows) } catch { continue }
+                    foreach ($r in $rows) { $w = Get-PimWorkloadPrereqForBinding -Entity $base -Row $r; if ($w -and $held.ContainsKey($w)) { $waiting[$w] = 1 + [int]$waiting[$w] } }
+                }
+                $src.workloadHolds = @($waiting.Keys | Sort-Object | ForEach-Object { [pscustomobject]@{ workload = "$_"; rows = [int]$waiting[$_]; state = "$($held[$_].state)" } })
+            }
+        }
+    } catch { $errs.Add("workload prerequisites: $($_.Exception.Message)") }
+    $src.errors = @($errs.ToArray())
+    return [pscustomobject]$src
+}
+
+function Get-PimManagerAttention {
+    <#
+      The GET /api/attention body for THIS caller: { generatedUtc; total; items = @( { id; tab; count; text; canAct; who } ); errors }.
+      Every role sees every item (read-only for one who cannot act, with who can). Sources: Get-PimManagerAttentionSources
+      (cached 15 s; a write request clears it) + the break-glass request (one SQL row, per caller: canApprove).
+    #>
+    param([switch]$Fresh, [object]$Sources)
+    $now = [datetime]::UtcNow
+    $s = $Sources
+    if (-not $s) {
+        $c = $script:PimAttentionCache
+        if (-not $Fresh -and $c -and ($now - [datetime]$c.atUtc).TotalSeconds -lt 15) { $s = $c.src }
+        else { $s = Get-PimManagerAttentionSources; $script:PimAttentionCache = @{ atUtc = $now; src = $s } }
+    }
+    $role = Get-PimManagerRole
+    $me = "$($role.identity)".Trim().ToLowerInvariant()
+    $isAdmin = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+    $isSuper = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+    $plural = { param([int]$n, [string]$one, [string]$many) if ($n -eq 1) { "$n $one" } else { "$n $many" } }
+    $items = New-Object System.Collections.Generic.List[object]
+    $errs = New-Object System.Collections.Generic.List[string]; foreach ($e in @($s.errors)) { if ("$e".Trim()) { $errs.Add("$e") } }
+
+    $ph = @($s.policyHolds)
+    if ($ph.Count) {
+        $pol = 0; foreach ($h in $ph) { $pol += [int]$h.changes }
+        $names = @{ GroupsPolicies = 'PIM for Groups'; EntraRolePolicies = 'Entra role'; AzResPolicies = 'Azure role' }
+        $items.Add([ordered]@{ id = 'policy-holds'; tab = 'approvals'; count = $ph.Count
+            text = ("{0} held by the circuit breaker ({1}; {2}) -- nothing is written until it is approved" -f (& $plural $ph.Count 'policy change set' 'policy change sets'), (& $plural $pol 'policy' 'policies'), ((@($ph | ForEach-Object { $names["$($_.provider)"] }) -join ', ')))
+            canAct = $isAdmin; who = 'an Admin or SuperAdmin approves it (Reviews & controls > Approvals)' })
+    }
+    $ap = @($s.approvals)
+    if ($ap.Count) {
+        $selfOn = $false; try { $so = Get-PimManagerSettingObject -Name 'ApprovalSelfApprove'; if ($so -and $so.PSObject.Properties['enabled']) { $selfOn = [bool]$so.enabled } } catch { }
+        $mine = @($ap | Where-Object { "$($_.requestor)".Trim().ToLowerInvariant() -eq $me }).Count
+        $acts = @($ap | ForEach-Object { "$($_.action)" } | Where-Object { $_ } | Sort-Object -Unique) -join ', '
+        $items.Add([ordered]@{ id = 'approvals'; tab = 'approvals'; count = $ap.Count
+            text = ("{0} waiting for a checker{1}" -f (& $plural $ap.Count 'approval request' 'approval requests'), $(if ($acts) { " ($acts)" } else { '' }))
+            canAct = [bool]($isAdmin -and ($selfOn -or $mine -lt $ap.Count)); who = 'an Admin other than the one who raised it decides it' })
+    }
+    $rf = @($s.rfa)
+    if ($rf.Count) {
+        $own = $false
+        if (-not $isAdmin) { try { $idx = Get-PimManagerDepartmentOwnerIndex; foreach ($r in $rf) { if ($idx -and @("$($idx["$($r.department)".Trim().ToLowerInvariant()])" -split '[|,;\s]+' | ForEach-Object { "$_".Trim().ToLowerInvariant() }) -contains $me) { $own = $true; break } } } catch { } }
+        $items.Add([ordered]@{ id = 'rfa'; tab = 'accessrequests'; count = $rf.Count
+            text = ("{0} waiting for a department Owner to approve" -f (& $plural $rf.Count 'access request' 'access requests'))
+            canAct = [bool]($isAdmin -or $own); who = 'an Owner of the department, or an Admin, decides it' })
+    }
+    try {
+        if ("$($script:PimSqlCs)".Trim() -and (Get-Command Get-PimBreakGlassChangeRequest -ErrorAction SilentlyContinue)) {
+            $bgv = Get-PimManagerBreakGlassRequestView
+            if ($bgv -and $bgv.open) {
+                $items.Add([ordered]@{ id = 'breakglass'; tab = 'emergency'; count = 1
+                    text = ("1 break-glass account change raised by {0} is waiting for a second SuperAdmin" -f $(if ("$($bgv.maker)".Trim()) { "$($bgv.maker)" } else { 'an administrator' }))
+                    canAct = [bool]$bgv.canApprove; who = 'a SuperAdmin other than the one who raised it approves it' })
+            }
+        }
+    } catch { $errs.Add("break-glass request: $($_.Exception.Message)") }
+    $gh = @($s.guardHolds)
+    if ($gh.Count) {
+        $items.Add([ordered]@{ id = 'guard-holds'; tab = 'guards'; count = $gh.Count
+            text = ("{0} holding a plan -- the engine skips it until it is released or the plan changes ({1})" -f (& $plural $gh.Count 'guard is' 'guards are'), ((@($gh | ForEach-Object { "$($_.guardId)$(if ("$($_.scope)".Trim()) { " / $($_.scope)" })" }) | Select-Object -First 4) -join ', '))
+            canAct = $isSuper; who = 'a SuperAdmin releases it (Operations > Guards)' })
+    }
+    $gr = @($s.guardReleases)
+    if ($gr.Count) {
+        $items.Add([ordered]@{ id = 'guard-releases'; tab = 'guards'; count = $gr.Count
+            text = ("{0} waiting for a second SuperAdmin" -f (& $plural $gr.Count 'guard release' 'guard releases'))
+            canAct = [bool]($isSuper -and @($gr | Where-Object { "$($_.createdBy)".Trim().ToLowerInvariant() -ne $me }).Count); who = 'a SuperAdmin other than the one who released it approves it' })
+    }
+    $sa = $s.secondApprover
+    if ($sa -and @($sa.stagers).Count) {
+        $n = @($sa.stagers).Count
+        $items.Add([ordered]@{ id = 'second-approver'; tab = 'save'; count = $n
+            text = ("{0} must be committed by a second administrator (second approver: {1})" -f (& $plural $n 'staged change' 'staged changes'), "$($sa.mode)")
+            canAct = [bool]($isAdmin -and @($sa.stagers | Where-Object { "$_" -ne $me }).Count); who = 'an Admin other than the one who staged it commits it' })
+    }
+    $wh = @($s.workloadHolds)
+    if ($wh.Count) {
+        $rows = 0; foreach ($w in $wh) { $rows += [int]$w.rows }
+        $items.Add([ordered]@{ id = 'workload-holds'; tab = 'coverage'; count = $wh.Count
+            text = ("{0} held: the prerequisites of {1} are not green, so {2} wait (run Initialize-PimWorkloadPrereqs.ps1)" -f (& $plural $wh.Count 'workload assignment area' 'workload assignment areas'), ((@($wh | ForEach-Object { "$($_.workload) ($($_.state))" })) -join ', '), (& $plural $rows 'assignment' 'assignments'))
+            canAct = $isSuper; who = 'the person who runs the prerequisite script for that workload (a SuperAdmin / the platform operator)' })
+    }
+    $total = 0; foreach ($i in $items) { $total += [int]$i.count }
+    return [ordered]@{ generatedUtc = $now.ToString('o'); total = $total; items = @($items.ToArray()); errors = @($errs.ToArray()) }
+}
+
 function Get-PimHomeGraphData {
     <#
       BUG-264 (remainder): the Home overview's delegation tiles rebuilt the whole map model (Build-PimGraphData, ~0.7 s on
@@ -8182,6 +8522,40 @@ function Get-PimBreakGlassIdentifiers {
     return @($list | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
 }
 
+# Review page (owner 2026-10-08): PIM Manager's own identities + the Invardia Support app, as the directory and the store
+# state them (PIM-ReviewOwnPrincipals.ps1). Cached 10 minutes per set of service principals in the list -- it costs a few
+# Graph reads, and this route is on the Manager's one request loop.
+function Get-PimManagerSelfAppId {
+    $a = "$($global:PIM_RuntimeAppId)"
+    if (-not $a) { $a = "$($env:AZURE_CLIENT_ID)" }
+    if (-not $a -and (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) -and (Get-Command Get-PimTokenAppId -ErrorAction SilentlyContinue)) {
+        $tok = $null; try { $tok = Get-PimRestToken -Resource graph } catch { $tok = $null }
+        if ($tok) { $a = Get-PimTokenAppId -Token "$tok" }
+    }
+    return "$a".Trim()
+}
+function Get-PimManagerReviewOwnPrincipals {
+    param([string[]]$ServicePrincipalIds = @())
+    if (-not (Get-Command Get-PimReviewOwnPrincipals -ErrorAction SilentlyContinue)) { return $null }
+    $key = (@($ServicePrincipalIds | ForEach-Object { "$_".ToLowerInvariant() } | Sort-Object -Unique) -join ',')
+    $c = $script:PimReviewOwnCache
+    if ($c -and "$($c.key)" -eq $key -and ((Get-Date) - $c.at).TotalMinutes -lt 10) { return $c.result }
+    $productApps = @(@($global:PIM_ClientId, $global:PIM_EngineClientId, $global:PIM_ManagedIdentityClientId, $global:PIM_ManagerMiAppId,
+                       $global:PIM_SqlClientId, $global:PIM_SqlAdminIdentityClientId, $env:AZURE_CLIENT_ID) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
+    $graph = { param($Method, $Path, $Body) if ($null -ne $Body) { Invoke-PimGraph -Method $Method -Path $Path -Body $Body } else { Invoke-PimGraph -Method $Method -Path $Path } }
+    $sqlSid = $null
+    if ("$($script:PimSqlCs)".Trim() -and (Get-Command Invoke-PimSqlScalar -ErrorAction SilentlyContinue)) {
+        $cs = "$($script:PimSqlCs)"
+        # Grant-PimSupportAccess makes this contained user FROM THE APP'S SID -- the SID is the support app's app id.
+        $sqlSid = { Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT TOP 1 sid FROM sys.database_principals WHERE name = N'invardia-support' AND type IN ('E','X')" }.GetNewClosure()
+    }
+    $groupName = if ("$($env:PIM_SQL_ADMIN_GROUP)".Trim()) { "$($env:PIM_SQL_ADMIN_GROUP)".Trim() } else { 'grp-pim-sql-admins' }
+    $r = Get-PimReviewOwnPrincipals -ServicePrincipalIds $ServicePrincipalIds -SelfAppId (Get-PimManagerSelfAppId) -ProductAppIds $productApps `
+            -Graph $graph -SqlSupportSid $sqlSid -SqlAdminGroupName $groupName
+    if ($r -and ($r.productKnown -or $r.supportKnown)) { $script:PimReviewOwnCache = @{ at = (Get-Date); key = $key; result = $r } }
+    return $r
+}
+
 # Decide whether a single revoke row targets a protected break-glass principal.
 # Matches the row's principalId (object id) OR principal label (UPN) against the
 # configured identifier set, case-insensitively. IMP-39: an UNREADABLE list protects every row.
@@ -8913,6 +9287,8 @@ function Handle-Request {
     $resp = $Context.Response
     $path = $req.Url.AbsolutePath
     $method = $req.HttpMethod
+    # PIM §97.3: any write may decide something that waits for a person -- the next GET /api/attention reads fresh.
+    if ($method -ne 'GET' -and $path -like '/api/*') { $script:PimAttentionCache = $null }
 
     # GET / -- serve the SPA. The token is embedded in a <meta> tag so the
     # JS can read it without exposing it on the URL after the first hop.
@@ -11861,6 +12237,19 @@ function Handle-Request {
                 return 400
             }
         }
+        # Framework §12.5 PENDING-1 / PIM §97.3: what waits for a person and BLOCKS work -- the menu + submenu count badges and
+        # the Overview line. Read-only, every role (a role that cannot act sees it too, with who can). ?fresh=1 skips the 15 s cache.
+        if ($path -eq '/api/attention' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $fresh = $false; try { $fresh = ("$($req.QueryString['fresh'])" -eq '1') } catch { }
+            try {
+                Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerAttention -Fresh:$fresh)
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)"; total = 0; items = @() }
+                return 500
+            }
+        }
         if ($path -eq '/api/home' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             $heavy = $false
@@ -12056,6 +12445,82 @@ function Handle-Request {
             }
         }
 
+        # ----- MAIL-1: how this environment sends mail (framework 12.3; PIM REQUIREMENTS 97.1) -------------------------
+        #   GET  /api/settings/mail            (any role) mode, sender, relay (NO password), done + note, setup values
+        #   PUT  /api/settings/mail            (Admin)    { mode, sender?, smtp?: { host, port, security, username, from,
+        #                                                   vaultName, secretName }, password? } -- validated as a whole
+        #                                                   (refused = 400 { errors }, nothing written); the password goes
+        #                                                   to Key Vault only, never to pim.Settings; audited without it
+        #   POST /api/settings/mail/test       (Admin)    { to? } a test mail through the CURRENT mode, to -to or the caller;
+        #                                                   the result is recorded against these settings (MailLastTest)
+        if ($path -eq '/api/settings/mail' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerMailState); return 200 }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }; return 500 }
+        }
+        if ($path -eq '/api/settings/mail' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to change how mail is sent.' }; return 403 }
+            $mb = Read-RequestJson -Request $req
+            $errors = [ordered]@{}
+            $wantMode = ConvertTo-PimMailMode -Value $(if ($mb -and $mb.PSObject.Properties['mode']) { $mb.mode } else { '' })
+            if (-not $wantMode) { $errors['mode'] = 'Choose how mail is sent: shared mailbox or SMTP relay (or none).' }
+            $wantSender = if ($mb -and $mb.PSObject.Properties['sender']) { "$($mb.sender)".Trim() } else { $null }
+            if ($null -ne $wantSender -and $wantSender -and -not (Test-PimMailAddress -Value $wantSender)) { $errors['sender'] = "Not a mail address: $wantSender" }
+            $pw = if ($mb -and $mb.PSObject.Properties['password']) { "$($mb.password)" } else { '' }
+            $relay = $null
+            if ($mb -and $mb.PSObject.Properties['smtp'] -and $null -ne $mb.smtp) {
+                # the password travels BESIDE the record, never inside it (ConvertTo-PimSmtpRelayConfig refuses one inside)
+                $relay = ConvertTo-PimSmtpRelayConfig -Value $mb.smtp
+                foreach ($k in @($relay.errors.Keys)) { $errors["smtp.$k"] = $relay.errors[$k] }
+            } elseif ($wantMode -eq 'smtp') {
+                try { $relay = ConvertTo-PimSmtpRelayConfig -Value (Get-PimManagerSetting -Name 'SmtpRelay') } catch { $relay = $null }
+                if (-not $relay -or -not $relay.ok) { $errors['smtp.host'] = 'Fill in the SMTP relay (server, port, From address).' }
+            }
+            if ($pw -and $relay -and $relay.ok -and -not $relay.config.username) { $errors['smtp.username'] = 'A password needs a user name.' }
+            if ($pw -and $relay -and $relay.ok -and -not $relay.config.vaultName) { $errors['smtp.vaultName'] = 'Enter the Key Vault the password is kept in.' }
+            if ($errors.Count) { Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{ ok = $false; error = 'Nothing was saved: ' + (@($errors.Values) -join ' '); errors = $errors }); return 400 }
+            $before = $null; try { $s0 = Get-PimManagerMailState; $before = [ordered]@{ mode = $s0.mode; sender = $s0.sender; smtp = $s0.smtp } } catch { }
+            try {
+                $pwRes = $null
+                if ($pw) {
+                    $pwRes = Set-PimManagerVaultSecret -VaultName "$($relay.config.vaultName)" -SecretName "$($relay.config.secretName)" -Value $pw
+                    $pw = $null
+                }
+                if ($relay -and $mb.PSObject.Properties['smtp'] -and $null -ne $mb.smtp) { Set-PimManagerSetting -Name 'SmtpRelay' -Value $relay.config; $global:PIM_SmtpRelay = $relay.config }
+                if ($wantSender) { Set-PimManagerSetting -Name 'MailSender' -Value $wantSender; $global:PIM_MailSender = $wantSender }
+                Set-PimManagerSetting -Name 'MailMode' -Value $wantMode; $global:PIM_MailMode = $wantMode
+                $after = Get-PimManagerMailState
+                Write-PimManagerAuditEvent -Action 'settings.mail.save' -Target 'MailMode,MailSender,SmtpRelay' -Result 'ok' -Before $before `
+                    -After ([ordered]@{ mode = $after.mode; sender = $after.sender; smtp = $after.smtp; passwordToKeyVault = $(if ($pwRes) { [bool]$pwRes.ok } else { $null }) })
+                $after['password'] = $(if ($pwRes) { [ordered]@{ stored = [bool]$pwRes.ok; reason = "$($pwRes.reason)" } } else { $null })
+                Write-JsonResponse -Response $resp -Status 200 -Body $after
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "Not saved: $($_.Exception.Message)" }; return 500 }
+        }
+        if ($path -eq '/api/settings/mail/test' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to send a test mail.' }; return 403 }
+            $tb = Read-RequestJson -Request $req
+            $to = if ($tb -and $tb.PSObject.Properties['to']) { "$($tb.to)".Trim() } else { '' }
+            if (-not $to) { try { $to = "$((Get-PimManagerRole).identity)".Trim() } catch { $to = '' } }
+            if (-not (Test-PimMailAddress -Value $to)) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "Enter the address the test mail goes to$(if ($to) { " ($to is not a mail address)" })."; errors = @{ to = 'Enter a mail address.' } }; return 400 }
+            try {
+                $tenantCtx = try { Get-PimManagerTenantContext } catch { @{ tenantName = ''; tenantId = '' } }
+                $r = Send-PimNotifyMail -Type 'alert-notice' -Recipient $to -Tokens @{
+                    AlertTitle = 'PIM Manager test mail'; AlertEvent = 'mail-test'; AlertTab = 'settings'; TenantName = "$($tenantCtx.tenantName)"; Instance = "$($script:PimInstanceName)"
+                    AlertDetail = 'This test mail was sent from Get Started / Settings > Mail & alerting to prove that this environment can send mail.'
+                    AlertHeadline = 'Mail from PIM Manager works.'; AlertAction = 'Nothing to do -- this was a test.'
+                    WhenUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
+                $ok = [bool]$r.sent
+                Save-PimManagerMailLastTest -Ok $ok -Reason "$($r.reason)" -To $to
+                Write-PimManagerAuditEvent -Action 'settings.mail.test' -Target "mail:$to" -Result $(if ($ok) { 'ok' } else { 'failed' }) -After ([ordered]@{ sent = $ok; via = "$($r.sentAs)"; reason = "$($r.reason)" })
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $ok; to = $to; via = "$($r.sentAs)"; reason = "$($r.reason)"
+                    note = $(if ($ok) { "Test mail sent to $to." } else { "Not sent: $($r.reason)" }) })
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500 }
+        }
+
         # Send a TEST alert through the real notify path so an admin can confirm the
         # wiring (or see the honest "configure a sender to enable" reason). Admin+.
         if ($path -eq '/api/alerting/test' -and $method -eq 'POST') {
@@ -12069,6 +12534,8 @@ function Handle-Request {
                 # sees a fresh result (and a fresh recorded-send-proof feed entry).
                 $r = Send-PimManagerAlert -Event 'engine-failure' -Title 'PIM Manager test alert' -Detail 'This is a test alert sent from the Home/Settings alerting panel to confirm delivery.' -LinkTab 'home' -DebounceMinutes 0
                 $ok = ($r.sent -gt 0)
+                # MAIL-1: a test alert that reached the mail path is also proof (or disproof) of the current mail mode
+                if ($r.fired -and @($r.recipients).Count) { Save-PimManagerMailLastTest -Ok $ok -Reason "$($r.reason)" -To (@($r.recipients) -join ';') }
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                     ok         = $ok
                     fired      = [bool]$r.fired
@@ -12076,7 +12543,7 @@ function Handle-Request {
                     recipients = @($r.recipients)
                     reason     = "$($r.reason)"
                     recorded   = [bool]$r.recorded
-                    note       = $(if ($ok) { "Test alert sent to $([int]$r.sent) recipient(s)." } else { "Not sent: $($r.reason). Configure a sender mailbox (`$global:PIM_MailSender`) and at least one recipient to enable delivery." })
+                    note       = $(if ($ok) { "Test alert sent to $([int]$r.sent) recipient(s)." } else { "Not sent: $($r.reason). Set up mail sending (Settings > Mail & alerting > Mail sending: a shared mailbox or your SMTP relay) and at least one recipient to enable delivery." })
                 })
                 return 200
             } catch {
@@ -13005,6 +13472,11 @@ function Handle-Request {
             # Home load. Every request behind it waited (a wizard's data loads timed out the E2E). The answer is kept for
             # 5 minutes; ?refresh=1 (the "Verify permissions" button) checks again at once.
             $permRefresh = $false; try { $permRefresh = ("$($req.Url.Query)" -match '(?:^|[?&])refresh=1') } catch { }
+            # 97.1: "Verify permissions" is what an admin presses after a grant -- it also queues PIM's own workload
+            # prerequisite check (job workload-prereqs, read-only), so a held Intune / Defender assignment follows the grant.
+            if ($permRefresh -and (Test-PimManagerRoleAtLeast -Minimum 'Admin') -and (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue)) {
+                try { [void](Add-PimJobTrigger -Type 'workload-prereqs' -Scope 'All' -Reason 'verify-permissions' -JobName 'workload-prereqs') } catch { Write-Verbose "workload-prereqs not queued: $($_.Exception.Message)" }
+            }
             if (-not $permRefresh -and $script:PimPermHealthCache -and ((Get-Date) - $script:PimPermHealthCache.at).TotalSeconds -lt 300) {
                 $cached = $script:PimPermHealthCache.body; $cached['cached'] = $true
                 Write-JsonResponse -Response $resp -Status 200 -Body $cached
@@ -13098,6 +13570,10 @@ function Handle-Request {
                 try { [void](Initialize-PimEmailControlsFromStore -Force) } catch { }
             }
             $mailSender = "$($global:PIM_MailSender)".Trim()
+            # MAIL-1: an SMTP relay environment sends as the relay's From address -- it has no sender MAILBOX to report.
+            if ((Get-Command Get-PimMailMode -ErrorAction SilentlyContinue) -and (Get-PimMailMode) -eq 'smtp') {
+                $rl = Get-PimSmtpRelayConfig; $mailSender = if ($rl.ok) { "$($rl.config.from)" } else { '' }
+            }
             # Mail: the PROOF is the alert feed -- every alert records how many recipients it was actually sent to. The latest
             # real (not dry-run) attempt decides: delivered -> proven; attempted and failed -> broken; none recorded -> unknown.
             $mailProof = $null
@@ -13115,9 +13591,29 @@ function Handle-Request {
             if ($script:PimSqlCs -and (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
                 try { $azDefs = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Assignments-Azure-Resources').Count } catch { $azDefs = -1 }
             }
+            # §97 (owner 2026-10-08): what the engine holds AT THE TENANT ROOT management group -- Reader (required: Discovery
+            # cannot see Azure without it) and User Access Administrator (optional; needed only to assign Azure resource roles).
+            # ASK AZURE: the root's own assignments when this Manager may read them, else a subscription's assignedTo() list,
+            # which carries the ones INHERITED from the root. Unreadable = $null = "not checked", never "missing".
+            $permTid = $(if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() })
+            $rootReader = $null; $rootUaa = $null
+            if ($oid -and $permTid -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue) -and (Get-Command Get-PimRootAzureHoldings -ErrorAction SilentlyContinue)) {
+                $rootAsg = $null
+                try { $rootAsg = @((Invoke-PimArm -Path ("/providers/Microsoft.Management/managementGroups/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $permTid, $oid)).value) } catch { $rootAsg = $null }
+                if ($null -eq $rootAsg) {
+                    try {
+                        $s1 = @((Invoke-PimArm -Path '/subscriptions' -ApiVersion '2022-12-01').value | Select-Object -First 1)
+                        if ($s1.Count) { $rootAsg = @((Invoke-PimArm -Path ("/subscriptions/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $s1[0].subscriptionId, $oid)).value) }
+                    } catch { $rootAsg = $null }
+                }
+                if ($null -ne $rootAsg) {
+                    $rh = Get-PimRootAzureHoldings -Assignments $rootAsg -TenantId $permTid
+                    $rootReader = $rh.reader; $rootUaa = $rh.userAccessAdmin
+                }
+            }
             $health = Get-PimPermissionHealth -GrantedGraphRoles $granted -AzureRoleScopes $azScopes `
                         -IdentityName $identityName -GraphReadable $readable -MailSender $mailSender -MailSendOk $mailProof `
-                        -AzureDelegationCount $azDefs
+                        -AzureDelegationCount $azDefs -RootReaderHeld $rootReader -RootUaaHeld $rootUaa -TenantId $permTid -EngineObjectId $oid
             # Say WHY the check failed -- "could not be checked" with no cause left the operator nothing to act on.
             if (-not $readable -and $permReadErr -and $health.PSObject.Properties['detail']) { $health.detail = "$($health.detail) Cause: $permReadErr" }
             $identities = @()
@@ -13134,7 +13630,24 @@ function Handle-Request {
             if (Get-Command Get-PimEngineItemFailures -ErrorAction SilentlyContinue) {
                 try { $engineDenied = @(@(Get-PimEngineItemFailures) | Where-Object { $_ -and "$($_.code)" -eq 'PERMISSION-DENIED' }) } catch { $engineDenied = @() }
             }
+            # §97 (owner 2026-10-08): Discovery's management-group / subscription LIST refused (AZURE-NOT-VISIBLE) is the engine
+            # not SEEING Azure. With NO Azure resource delegation defined nothing waits on it -> AMBER "Discovery: Azure not
+            # visible" with the fix; with delegations defined (or the count unknown) it is a real refusal -> RED like any other.
+            $azNotVisible = @()
+            if (Get-Command Get-PimEngineItemFailures -ErrorAction SilentlyContinue) {
+                try { $azNotVisible = @(@(Get-PimEngineItemFailures) | Where-Object { $_ -and "$($_.code)" -eq 'AZURE-NOT-VISIBLE' }) } catch { $azNotVisible = @() }
+            }
+            $azNotVisibleAmber = ($azNotVisible.Count -gt 0 -and $azDefs -eq 0)
+            if ($azNotVisible.Count -and -not $azNotVisibleAmber) { $engineDenied = @($engineDenied) + @($azNotVisible) }
             $hOk = [bool]$health.ok; $hSev = "$($health.severity)"; $hHead = "$($health.headline)"; $hDetail = "$($health.detail)"
+            if ($azNotVisibleAmber -and -not $engineDenied.Count) {
+                $rootFix = Get-PimRootAzureFixCommand -TenantId $permTid -EngineObjectId $oid -Roles @('Reader')
+                $hOk = $false
+                if ($hSev -ne 'error') { $hSev = 'warning' }
+                if ($hSev -eq 'warning') { $hHead = 'Discovery: Azure not visible -- the engine cannot list management groups or subscriptions (grant Reader at the tenant root)' }
+                $hDetail = "Discovery: Azure not visible. The engine identity was refused the Azure management-group / subscription list ($($azNotVisible.Count) item(s)); no Azure resource delegation is defined, so nothing waits on it. Grant Reader (read-only) at the tenant root management group -- run: " +
+                           ($rootFix -replace "`n", ' ; ') + "  $hDetail"
+            }
             if ($engineDenied.Count) {
                 $hOk = $false; $hSev = 'error'
                 $hHead = "The ENGINE was refused a permission on $($engineDenied.Count) item(s) -- those changes are NOT being deployed."
@@ -13162,6 +13675,10 @@ function Handle-Request {
                 missingOptional = @(@($health.missingOptional) | Where-Object { $null -ne $_ })
                 unavailableConnectors = @(@($health.unavailableConnectors) | Where-Object { $null -ne $_ -and "$_".Trim() })
                 azureOk    = $health.azureOk
+                azureNeeded = $health.azureNeeded
+                # §97: Reader + User Access Administrator at the tenant root, each with its exact fix (Get Started + Home).
+                azureRoot  = $health.azureRoot
+                azureNotVisible = [ordered]@{ count = @($azNotVisible).Count; amber = [bool]$azNotVisibleAmber }
                 mail       = $health.mail
                 identities = @($identities)
                 connectors = @(Get-PimWorkloadConnectorRequirements | ForEach-Object { [ordered]@{ connector="$($_.connector)"; surface="$($_.surface)"; model="$($_.model)"; tier="$($_.tier)"; grant="$($_.grant)" } })
@@ -15640,29 +16157,49 @@ function Handle-Request {
         # -------------------------------------------------------------------
         # -------------------------------------------------------------------
         # REQ-U (prereqs) -- GET /api/workload-prereqs (any role, read-only). Operator 2026-09-19: "refer to script in gui
-        # and show with green if prereq has run". The last tools\setup\Initialize-PimWorkloadPrereqs.ps1 result per
-        # workload (pim.Settings 'WorkloadPrereqs'), judged against NOW (older than 30 days = re-check), with the exact
-        # command to run built from this environment's known values (placeholders for what the Manager cannot know --
-        # never the operator's certificate). Only the script records a result, so there is no write endpoint.
-        # A store that cannot be read is said as such -- never shown as "not run" (rule 7).
+        # and show with green if prereq has run". 97.1 (owner 2026-10-08: "we dont support certificates ... does the engine
+        # not have the necessary permissions for this"): the result per workload (pim.Settings 'WorkloadPrereqs') is
+        # recorded by PIM ITSELF -- the tick's 'workload-prereqs' job, daily + "Check again" (Run now on that job) -- merged
+        # with what a person confirmed; judged against NOW (older than 30 days = re-check). The command is the FIX command
+        # only (the published browser-sign-in scripts, never a certificate); portal-only steps are confirmed with
+        # POST /api/workload-prereqs/confirm below. A store that cannot be read is said as such -- never "not run" (rule 7).
         # -------------------------------------------------------------------
-        function Get-PimManagerWorkloadPrereqState {
-            # The judged per-workload view + the store error; shared by /api/workload-prereqs and the /api/templates
-            # assignment gate (REQ-W), so the chip and the held note can never disagree.
-            $stored = $null; $storeErr = ''
-            try { $stored = Get-PimManagerSettingObject -Name 'WorkloadPrereqs' } catch { $storeErr = "$($_.Exception.Message)" }
-            $tick = "$env:PIM_TickJobId".Trim()
-            if (-not $tick) { try { $tick = "$(Get-PimSetting -Name 'SchedulerTickJobId')".Trim().Trim('"') } catch { $tick = '' } }
-            $tj = ConvertFrom-PimTickJobId -Id $tick
-            $envVals = @{
-                tenantId      = "$($global:PIM_TenantId)".Trim()
-                sqlServerFqdn = $(if ("$($global:PIM_SqlServer)".Trim()) { "$($global:PIM_SqlServer)".Trim() } else { "$env:PIM_SqlServer".Trim() })
-                sqlDatabase   = $(if ("$($global:PIM_SqlDatabase)".Trim()) { "$($global:PIM_SqlDatabase)".Trim() } else { "$env:PIM_SqlDatabase".Trim() })
+        # Get-PimManagerWorkloadPrereqState is defined at script level (PIM §97.3: GET /api/attention reads it too).
+        # 97.1 -- POST /api/workload-prereqs/confirm { workload, checkId, action: confirm | skip | withdraw } (Admin+, audited).
+        # The page's Confirm / Not used / Withdraw on a prerequisite PIM cannot check itself (a portal-only step, a check it
+        # could not read, the P2 licence through Governance), recorded exactly like -ConfirmPortalStep: 'confirmed' =
+        # attested, not API-verified, naming who and when. An API-verified failure can never be confirmed away
+        # (Set-PimWorkloadPrereqAttestation decides; nothing else is written here).
+        if ($path -eq '/api/workload-prereqs/confirm' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to confirm a prerequisite.' }
+                return 403
             }
-            if ($tj) { $envVals.subscriptionId = $tj.subscriptionId; $envVals.resourceGroup = $tj.resourceGroup; $envVals.tickJobName = $tj.jobName }
-            $view = @(Get-PimWorkloadPrereqView -Stored $stored -Env $envVals -NowUtc ([datetime]::UtcNow) -StaleDays (Get-PimWorkloadPrereqStaleDays))
-            if ($storeErr) { foreach ($v in $view) { $v.state = 'unreadable'; $v.chip = 'amber' } }
-            return @{ view = $view; storeErr = $storeErr }
+            $body = Read-RequestJson -Request $req
+            $wl = "$($body.workload)".Trim(); $cid = "$($body.checkId)".Trim(); $act = "$($body.action)".Trim().ToLowerInvariant()
+            if (-not $act) { $act = 'confirm' }
+            if (-not $wl -or -not $cid -or $act -notin @('confirm', 'skip', 'withdraw')) {
+                Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'workload, checkId and action (confirm | skip | withdraw) are required' }
+                return 400
+            }
+            $stored = $null
+            try { $stored = Get-PimManagerSettingObject -Name 'WorkloadPrereqs' }
+            catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "The prerequisite status could not be read from the store: $($_.Exception.Message)" }; return 503 }
+            $who = Get-PimManagerActorName
+            $r = Set-PimWorkloadPrereqAttestation -Stored $stored -Workload $wl -CheckId $cid -Action $act -By $who -NowUtc ([datetime]::UtcNow)
+            if (-not $r.ok) {
+                Write-PimManagerAuditEvent -Action "settings.workloadprereqs.$act" -Target "WorkloadPrereqs:${wl}:$cid" -Result 'refused' -After @{ error = "$($r.error)" }
+                Write-JsonResponse -Response $resp -Status ([int]$r.code) -Body @{ ok = $false; error = "$($r.error)" }
+                return [int]$r.code
+            }
+            try { Set-PimManagerSettingObject -Name 'WorkloadPrereqs' -Value $r.value }
+            catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "Not saved -- the store refused the write: $($_.Exception.Message)" }; return 503 }
+            Write-PimManagerAuditEvent -Action "settings.workloadprereqs.$act" -Target "WorkloadPrereqs:${wl}:$cid" -Result 'ok' -Before $r.before -After $r.after
+            $__ps = Get-PimManagerWorkloadPrereqState
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; workload = $wl; checkId = $cid; action = $act; after = $r.after
+                workloads = @($__ps.view) })
+            return 200
         }
         if ($path -eq '/api/workload-prereqs' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
@@ -15670,7 +16207,9 @@ function Handle-Request {
             $view = @($__ps.view); $storeErr = "$($__ps.storeErr)"
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{
                 ok = (-not $storeErr); storeError = $storeErr; staleDays = (Get-PimWorkloadPrereqStaleDays)
-                script = 'tools\setup\Initialize-PimWorkloadPrereqs.ps1'
+                script = 'Initialize-PimWorkloadPrereqs.ps1'
+                # 97.1: PIM checks the prerequisites itself; "Check again" = Run now on this job (POST /api/jobs/run).
+                selfCheckJob = 'workload-prereqs'
                 workloads = $view
                 templateWorkloads = (Get-PimWorkloadPrereqTemplateMap)
                 connectorWorkloads = (Get-PimWorkloadPrereqConnectorMap)
@@ -17403,6 +17942,35 @@ function Handle-Request {
                         $body['managedComplete'] = [bool]$ml.complete
                     }
                 } catch { $body['managedError'] = "$($_.Exception.Message)" }
+                # Owner 2026-10-08: PIM Manager's own identities, the Invardia Support app and the break-glass accounts set in
+                # PIM Manager are hidden on this page by default (each behind its own tick). Each row gains ownKind =
+                # product | support | breakglass | '' -- facts from the directory and the store, never a guess by name first.
+                $body['ownKnown'] = [ordered]@{ product = $false; support = $false; breakGlass = $false }
+                $ownErr = New-Object System.Collections.Generic.List[string]
+                $ownProduct = @(); $ownSupport = @(); $ownBg = @()
+                if (Get-Command Get-PimReviewRowField -ErrorAction SilentlyContinue) {
+                    try {
+                        $spIds = @(@($body.rows) | Where-Object { (Get-PimReviewRowField $_ 'principalKind') -eq 'servicePrincipal' } | ForEach-Object { Get-PimReviewRowField $_ 'principalId' } | Where-Object { $_ } | Select-Object -Unique)
+                        $own = Get-PimManagerReviewOwnPrincipals -ServicePrincipalIds $spIds
+                        if ($own) {
+                            $ownProduct = @($own.product); $ownSupport = @($own.support)
+                            $body.ownKnown.product = [bool]$own.productKnown; $body.ownKnown.support = [bool]$own.supportKnown
+                            foreach ($e in @($own.errors)) { $ownErr.Add("$e") }
+                            if (@($own.fallbackNameMatches).Count) { $body['supportNameFallback'] = $true }
+                        }
+                    } catch { $ownErr.Add("PIM Manager's own identities could not be read: $($_.Exception.Message)") }
+                    try {
+                        if (Get-Command Get-PimBreakGlassAccountStatus -ErrorAction SilentlyContinue) {
+                            $bgS = Get-PimBreakGlassAccountStatus -ConnectionString "$($script:PimSqlCs)"
+                            if ($bgS.storeConfigured -and -not $bgS.storeOk) { $ownErr.Add("the break-glass list could not be read ($($bgS.error)) -- break-glass rows are not marked here; a revoke still protects them") }
+                            else { $ownBg = @($bgS.accounts); $body.ownKnown.breakGlass = $true }
+                        }
+                    } catch { $ownErr.Add("the break-glass list could not be read: $($_.Exception.Message)") }
+                    $body['ownCounts'] = Set-PimReviewRowOwnKind -Rows @($body.rows) -Product $ownProduct -Support $ownSupport -BreakGlass $ownBg
+                }
+                $body['productPrincipalIds'] = @($ownProduct)
+                $body['supportPrincipalIds'] = @($ownSupport)
+                $body['ownErrors'] = @($ownErr)
                 Write-JsonResponse -Response $resp -Status 200 -Body $body
                 return 200
             } catch {

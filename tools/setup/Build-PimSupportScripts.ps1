@@ -26,6 +26,13 @@
       Deploy-PimActivatorClient.ps1    -- install the extension + its settings on a machine without Intune (servers).
       Grant-PimEnginePermissions.ps1   -- give the engine identity its missing application permissions + Azure roles
                                           (the command PIM Manager shows on Overview and in Get Started; no modules).
+      Initialize-PimWorkloadPrereqs.ps1 -- fix a workload prerequisite PIM cannot fix itself (Power BI admin-API group,
+                                          Fabric tenant setting, Sentinel on a dedicated workspace); browser sign-in, no
+                                          modules (97.1: the command the prerequisite chips show; PIM records the result itself).
+      Initialize-PimMailSender.ps1     -- MAIL-1 shared mailbox: create the sender mailbox + its send right scoped to that
+                                          one mailbox (browser sign-in or the Support app's secret; Get Started > Mail sender).
+      Set-PimSmtpRelayPassword.ps1     -- MAIL-1 SMTP relay: the relay password into the environment's Key Vault + read
+                                          access on that one secret for the sending identities.
 
 .EXAMPLE
     .\tools\setup\Build-PimSupportScripts.ps1 -OutDir C:\ProgramData\Invardia\handover\support-scripts\pim-manager\2.4.522
@@ -33,7 +40,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$OutDir,
-    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1')
+    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1')
 )
 $ErrorActionPreference = 'Stop'
 $setup = $PSScriptRoot

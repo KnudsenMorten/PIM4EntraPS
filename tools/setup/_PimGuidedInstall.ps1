@@ -120,6 +120,8 @@ function Test-PimInstallConfig {
         $c[$k] = @($list)
     }
     $c.allowAllMembers = [bool](& $get 'allowAllMembers')
+    # §97 (owner 2026-10-08): opt-in only -- Reader at the tenant root is always granted, User Access Administrator only on request.
+    $c.engineAzureRootUserAccessAdmin = [bool](& $get 'engineAzureRootUserAccessAdmin')
     $ms = "$(& $get 'mailSender')".Trim()
     if ($ms -and $ms -notmatch $upn) { $err.Add("mailSender '$ms' is not an e-mail address") }
     $c.mailSender = $ms
@@ -172,6 +174,7 @@ function ConvertTo-PimInstallDeployArgs {
     }
     if (@($portal).Count) { $a['EasyAuthAllowedPrincipals'] = @($portal) }
     if ($Config.allowAllMembers) { $a['EasyAuthAllowAllTenantUsers'] = $true }
+    if ($Config.engineAzureRootUserAccessAdmin) { $a['EngineAzureRootUserAccessAdmin'] = $true }   # §97 opt-in
     if ("$($Config.mailSender)".Trim()) { $a['MailSender'] = "$($Config.mailSender)".Trim() }
     # 2026-10-06 (install rehearsal): a PRO install deployed as S2 with no feed got NO updater. Pro updates arrive signed,
     # through Invardia, on this install's ring; the engine claims the install key once the licence is registered.

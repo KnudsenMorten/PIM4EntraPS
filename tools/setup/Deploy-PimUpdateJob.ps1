@@ -92,7 +92,11 @@ param(
     # identity is made a member of it on every run, so its schema step can log in without a contained user.
     # Never creates the group and never moves the admin -- that is Initialize-PimSqlAdminGroup.ps1.
     [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
-    [switch]$SkipSqlAdminGroup
+    [switch]$SkipSqlAdminGroup,
+    # 2026-10-08 -- the deploy RECORDS the ring it sets in the environment's store (pim.Settings['UpdateState'],
+    # kind 'deploy'), so the Manager header shows "ring N -- no update run yet" instead of "not recorded" until the
+    # first nightly run. Never replaces a real run record. This switch turns it off.
+    [switch]$SkipUpdateStateSeed
 )
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $PSCommandPath
@@ -545,6 +549,32 @@ if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
 # updater correctly turns into "NOT ROLLING", every night. Same helpers as the tick (Setup-PimContainers):
 # Resolve-PimMiAppId, then Grant-PimMiSql on public SQL, or the in-cloud bootstrap job on private SQL.
 $sqlGrantProblem = ''
+# ---- 2a. 2026-10-08 -- HOW the ring this deploy sets is recorded in the store (step 4a writes it) ---------------
+# Decided here so that, on private SQL, the seed can ride the bootstrap-job run the grant below may start anyway.
+$seedDbInitExists = $false
+if ($SqlPrivate -and -not $SkipUpdateStateSeed -and -not $WhatIfPreference) {
+    $seedDbInitExists = [bool](@(az containerapp job list @sub -g $ResourceGroup --query "[].name" -o tsv 2>$null) |
+                               Where-Object { "$_".Trim() -eq $DbInitJobName })
+}
+$seedPlan = Get-PimUpdateStateSeedPlan -Skip ([bool]$SkipUpdateStateSeed) -WhatIf ([bool]$WhatIfPreference) `
+                -HasStore ([bool]($storePlan.hasStore -and $storePlan.writes.Contains('PIM_SqlServer'))) -Ring "$($ringPlan.ring)" `
+                -SqlPrivate ([bool]$SqlPrivate) -DbInitJobExists $seedDbInitExists `
+                -UseSignedInAccount ([bool]($UseSignedInAccount -and "$TenantId".Trim())) `
+                -HaveCertCredential ([bool]("$SqlAdminClientId".Trim() -and "$SqlAdminCertThumbprint".Trim() -and "$TenantId".Trim())) `
+                -UpdateJobName $JobName -DbInitJobName $DbInitJobName
+$seedVersion = if ("$LastBuiltVersion".Trim()) { "$LastBuiltVersion".Trim() }
+               elseif ("$TargetVersion".Trim()) { "$TargetVersion".Trim() }
+               elseif ($ringPlan.writes.Contains('PIM_UPDATE_LAST_BUILT')) { "$($ringPlan.writes['PIM_UPDATE_LAST_BUILT'])" }
+               elseif ("$TargetImage" -match ':(?<t>[^:/]+)$') { $Matches['t'] } else { '' }
+$seedInfo = [ordered]@{
+    environment      = $ResourceGroup
+    ring             = "$($ringPlan.ring)"
+    source           = (Get-PimUpdateStateSeedSource -UpdateSource "$UpdateSource" -ExistingEnv $existingEnv -SourceUrl "$($ringPlan.sourceUrl)")
+    installedVersion = $seedVersion
+    hold             = [bool]("$($existingEnv['PIM_UPDATE_HOLD'])".Trim() -eq '1')
+    configuredUtc    = [datetime]::UtcNow.ToString('o')
+}
+$seedRode = $false     # set when the seed went in with the grant's bootstrap-job run
 # ---- 2b. 2026-09-15 -- THE SQL ADMIN GROUP: the updater identity joins it -------------------------
 # 🔑 Where the server's Entra admin is the SQL admin group, membership IS the database access -- no
 # contained user, no SQL connection from this host, and it works the same on public and private SQL.
@@ -633,8 +663,11 @@ if (-not $WhatIfPreference -and $storePlan.hasStore) {
                     Note "[$JobName] is already one of $DbInitJobName's principals -- created by its last run"
                 } else {
                     # ARM, never az: the value is a JSON array, and cmd.exe strips its quotes (measured twice).
+                    $dbWrites = [ordered]@{ PIM_DBINIT_PRINCIPALS = $merged.json }
+                    # 2026-10-08: the update-state seed (step 4a) rides this same run instead of starting a second one.
+                    if ($seedPlan.action -eq 'dbinit') { $dbWrites['PIM_DBINIT_UPDATE_SEED'] = ($seedInfo | ConvertTo-Json -Compress); $seedRode = $true }
                     [void](Invoke-PimUpdateJobEnvWrites -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $DbInitJobName `
-                               -Writes ([ordered]@{ PIM_DBINIT_PRINCIPALS = $merged.json }) -ContainerName $DbInitJobName -ArmInvoker $armInvoker)
+                               -Writes $dbWrites -ContainerName $DbInitJobName -ArmInvoker $armInvoker)
                     $exec = "$(az containerapp job start @sub -g $ResourceGroup -n $DbInitJobName --query name -o tsv 2>$null)".Trim()
                     if (-not $exec) { throw "could not start '$DbInitJobName'." }
                     Note "execution $exec -- waiting"
@@ -699,7 +732,63 @@ $curVer = if ("$LastBuiltVersion".Trim()) { "$LastBuiltVersion".Trim() }
           elseif ("$TargetVersion".Trim()) { "$TargetVersion".Trim() }
           elseif ($ringPlan.writes.Contains('PIM_UPDATE_LAST_BUILT')) { "$($ringPlan.writes['PIM_UPDATE_LAST_BUILT'])" }
           elseif ("$TargetImage" -match ':(?<t>[^:/]+)$') { $Matches['t'] } else { '' }
-$chRep = Get-PimUpdateRingChannelReport -SourceUrlTemplate $ringPlan.sourceUrl -Ring $ringPlan.ring -CurrentVersion $curVer
+
+# ---- 4a. 2026-10-08 -- RECORD THE RING IN THE ENVIRONMENT'S OWN STORE ---------------------------------------
+# 🔴 Owner, on a freshly installed production environment whose header said "Update ring: not recorded": "the page
+# does not show the update ring. you need to apply that as part of the deployment. it seems to pull data from wrong
+# place". The Manager reads pim.Settings['UpdateState'], which only the update job wrote -- after its first run, at
+# its next 03:00. This deploy has just written PIM_UPDATE_RING onto the job and read it back (step 3), so it records
+# that fact now: a record of kind 'deploy' ("installed -- no update run yet"). Over a REAL run record it only sets
+# the configured* fields (Invoke-PimUpdateStateDeploySeed), and a read failure writes nothing.
+# Best-effort by design: a reporting record never fails a deploy -- it says what happened, in yellow if it did not.
+Step "record the update ring in the store ($($seedPlan.action))"
+switch ($seedPlan.action) {
+    'host' {
+        try {
+            $solRootS = Split-Path -Parent (Split-Path -Parent $here)
+            . (Join-Path $here '_PimSetupSql.ps1')                          # Connect-PimSetupStore (+ PIM-Rest / PIM-SqlStore)
+            . (Join-Path $solRootS 'engine\_shared\PIM-UpdateState.ps1')    # Invoke-PimUpdateStateDeploySeed
+            $seedDb = if ($storePlan.writes.Contains('PIM_SqlDatabase')) { "$($storePlan.writes['PIM_SqlDatabase'])" } else { 'PimPlatform' }
+            $seedCs = if ($UseSignedInAccount) {
+                          Connect-PimSetupStore -SqlServerFqdn "$($storePlan.writes['PIM_SqlServer'])" -SqlDatabase $seedDb -TenantId $TenantId -UseSignedInAccount
+                      } else {
+                          Connect-PimSetupStore -SqlServerFqdn "$($storePlan.writes['PIM_SqlServer'])" -SqlDatabase $seedDb -TenantId $TenantId `
+                              -ClientId $SqlAdminClientId -CertThumbprint $SqlAdminCertThumbprint
+                      }
+            $sr = Invoke-PimUpdateStateDeploySeed -ConnectionString $seedCs -Environment $seedInfo.environment -Ring $seedInfo.ring `
+                      -Source $seedInfo.source -InstalledVersion $seedInfo.installedVersion -Hold $seedInfo.hold -ConfiguredUtc $seedInfo.configuredUtc
+            if ($sr.ok) { Note "update state: $($sr.reason) -- the Manager header shows $(Get-PimUpdateRingLabel -Ring $seedInfo.ring) now" }
+            else { Warn "update state NOT recorded ($($sr.reason)). The Manager shows 'not recorded' until '$JobName' first runs." }
+        } catch {
+            Warn "update state NOT recorded: $($_.Exception.Message). The Manager shows 'not recorded' until '$JobName' first runs."
+        }
+    }
+    'dbinit' {
+        if ($seedRode) { Note "the ring was handed to '$DbInitJobName' with its database-user run above (see that execution's log)" }
+        else {
+            try {
+                [void](Invoke-PimUpdateJobEnvWrites -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $DbInitJobName `
+                           -Writes ([ordered]@{ PIM_DBINIT_UPDATE_SEED = ($seedInfo | ConvertTo-Json -Compress) }) -ContainerName $DbInitJobName -ArmInvoker $armInvoker)
+                $sx = "$(az containerapp job start @sub -g $ResourceGroup -n $DbInitJobName --query name -o tsv 2>$null)".Trim()
+                if (-not $sx) { throw "could not start '$DbInitJobName'." }
+                Note "execution $sx -- waiting"
+                $sst = ''
+                for ($i = 0; $i -lt 60; $i++) {
+                    Start-Sleep -Seconds 10
+                    $sst = "$(az containerapp job execution show @sub -g $ResourceGroup -n $DbInitJobName --job-execution-name $sx --query properties.status -o tsv 2>$null)".Trim()
+                    if ($sst -in @('Succeeded', 'Failed', 'Degraded')) { break }
+                }
+                if ($sst -eq 'Succeeded') { Note "update state recorded from inside the environment ($sx) -- an older '$DbInitJobName' image ignores it, and then '$JobName' records it on its first run" }
+                else { Warn "'$DbInitJobName' execution $sx ended '$sst' -- the ring may not be recorded until '$JobName' first runs." }
+            } catch {
+                Warn "update state NOT recorded in-cloud: $(Hide-PimSasText "$($_.Exception.Message)"). The Manager shows 'not recorded' until '$JobName' first runs."
+            }
+        }
+    }
+    default { Note $seedPlan.message }
+}
+
+$chRep =Get-PimUpdateRingChannelReport -SourceUrlTemplate $ringPlan.sourceUrl -Ring $ringPlan.ring -CurrentVersion $curVer
 switch ($chRep.level) {
     'ok'    { Write-Host "==> ring $($ringPlan.ring): $($chRep.message)" -ForegroundColor Green }
     'warn'  { Write-Host "==> ring $($ringPlan.ring): $($chRep.message)" -ForegroundColor Yellow }

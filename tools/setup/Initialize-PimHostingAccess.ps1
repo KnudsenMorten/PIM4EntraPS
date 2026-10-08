@@ -4,7 +4,9 @@
     71.18 -- converge the hosting identities' access on an EXISTING environment: the tick's Graph app roles (Engine set),
     the Manager's Graph app roles (read-only Manager set), the Manager's right to start the tick now
     ('Container Apps Jobs Operator' on ca-pim-tick only), the tick's right to read its own executions ('Reader' on
-    ca-pim-tick only, BUG-268) and pim.Settings 'SchedulerTickJobId'.
+    ca-pim-tick only, BUG-268), pim.Settings 'SchedulerTickJobId' and -- §97 -- the tick's Reader at the TENANT ROOT
+    management group (Discovery cannot see Azure without it; User Access Administrator there only with
+    -EngineAzureRootUserAccessAdmin).
 
 .DESCRIPTION
     Before this script those four were done ONLY inside Setup-PimContainers.ps1 (the infra step) -- or not at all (the
@@ -33,6 +35,11 @@ param(
     [string]$CertThumbprint,
     [switch]$UseSignedInAccount,
     [switch]$SkipGraph,
+    # §97 (owner 2026-10-08): the engine (tick) identity gets Reader at the tenant root management group by DEFAULT
+    # (read-only; Discovery lists management groups + subscriptions with it). User Access Administrator there is OPT-IN
+    # (SEC-34): this switch. A refusal never fails this script -- it warns and prints the exact Grant-PimEnginePermissions.ps1 command.
+    [switch]$EngineAzureRootUserAccessAdmin,
+    [switch]$SkipAzureRootAccess,
     [switch]$SkipTickStart
 )
 $ErrorActionPreference = 'Stop'
@@ -55,6 +62,15 @@ if (-not $SkipGraph) {
     if ($PSCmdlet.ShouldProcess($tickOid, 'Grant-PimMiGraph Engine')) { Grant-PimMiGraph -MiObjectId $tickOid -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId -RoleSet Engine }
     Step "Graph app roles: $ManagerApp (read-only Manager set)"
     if ($PSCmdlet.ShouldProcess($mgrOid, 'Grant-PimMiGraph Manager')) { Grant-PimMiGraph -MiObjectId $mgrOid -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId -RoleSet Manager }
+}
+
+# §97 -- the engine's Azure sight. Live 2026-10-08 on a production managing tenant: Discovery 403'd on the management-group
+# list and Home went red, because the tick held Reader on its hosting subscription only.
+if (-not $SkipAzureRootAccess) {
+    Step "Azure: Reader$(if ($EngineAzureRootUserAccessAdmin) { ' + User Access Administrator' }) for $TickJobName at the tenant root management group"
+    $rootAccess = Grant-PimEngineRootAzureAccess -MiObjectId $tickOid -Name $TickJobName -TenantId $TenantId -SubscriptionId $SubscriptionId `
+                      -IncludeUserAccessAdministrator:$EngineAzureRootUserAccessAdmin
+    if ($rootAccess.ok) { Note 'present and read back' } else { Note 'NOT granted -- see the warning above; the install continues and Get Started > Engine permissions shows the fix' }
 }
 
 if (-not $SkipTickStart) {

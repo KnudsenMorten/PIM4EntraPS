@@ -719,9 +719,14 @@ function Get-PimMspBuildPlan {
 
 
     $accessArgs = @{ SubscriptionId = $sub; ResourceGroup = $rg; SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; TickJobName = $tick; ManagerApp = $mgr } + $storeArgs
-    $steps.Add((New-PimMspBuildStep -Id 'access' -Title 'tick Graph (Engine set), Manager Graph (read-only set), Manager may start the tick, SchedulerTickJobId' `
+    # §97 (owner 2026-10-08): the access step also grants the tick Reader at the tenant root management group (default,
+    # read-only -- Discovery's sight of Azure). User Access Administrator there is opt-in (SEC-34): 'engineAzure.rootUserAccessAdmin': true.
+    $accessSwitches = @($storeSwitches)
+    $rootUaa = [bool](& $V 'engineAzure.rootUserAccessAdmin')
+    if ($rootUaa) { $accessSwitches += 'EngineAzureRootUserAccessAdmin' }
+    $steps.Add((New-PimMspBuildStep -Id 'access' -Title ("tick Graph (Engine set), Manager Graph (read-only set), Manager may start the tick, SchedulerTickJobId, tick Reader at the tenant root" + $(if ($rootUaa) { ' + User Access Administrator (opted in)' } else { '' })) `
         -Script 'tools\setup\Initialize-PimHostingAccess.ps1' -HostExe 'powershell' `
-        -Arguments $accessArgs -Switches $storeSwitches `
+        -Arguments $accessArgs -Switches $accessSwitches `
         -Why 'the infra step (the only place these were granted) is SKIPPED on an existing environment; EFIF and RIDE held 12 and 9 roles and lacked the 5 required ones'))
 
     $steps.Add((New-PimMspBuildStep -Id 'scenario' -Title "deployment scenario $scenario in pim.Settings" -Script 'tools\setup\Set-PimScenario.ps1' -HostExe 'powershell' `

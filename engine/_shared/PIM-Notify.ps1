@@ -23,6 +23,9 @@ if ($PSScriptRoot) {
     # The ONE mail template store (SQL pim.Settings['MailTemplates']) the send path renders from.
     $__pimMailStore = Join-Path $PSScriptRoot 'PIM-MailTemplateStore.ps1'
     if (Test-Path -LiteralPath $__pimMailStore) { . $__pimMailStore }
+    # MAIL-1: the transport (shared mailbox | SMTP relay | none) -- the one setting every mail of this environment follows.
+    $__pimMailTransport = Join-Path $PSScriptRoot 'PIM-MailTransport.ps1'
+    if (Test-Path -LiteralPath $__pimMailTransport) { . $__pimMailTransport }
 }
 
 # --- EMAIL CONTROLS authority (the GUI-state == actual-behavior fix) -----------
@@ -325,7 +328,25 @@ function Send-PimNotifyMail {
                       $(if ($envInfo.version) { " | PIM Manager $($envInfo.version)" } else { '' }) + $(if ($envInfo.portal) { " | $($envInfo.portal)" } else { '' })
     }
     $sender = "$($global:PIM_MailSender)".Trim()
+    # MAIL-1 (framework 12.3, owner 2026-10-08: "2 options: shared mailbox or smtp relay"): ONE setting picks the transport.
+    # 'none' is checked BEFORE -WhatIf on purpose: Test-PimTapMailReady probes with -WhatIf, and a switched-off environment
+    # must answer "not sent" there too (the trap that function's docstring describes for a missing sender).
+    $mailMode = if (Get-Command Get-PimMailMode -ErrorAction SilentlyContinue) { Get-PimMailMode } else { 'sharedMailbox' }
+    if ($mailMode -eq 'none') { return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'mail is switched off (Settings > Mail & alerting: mail mode none)' } }
     if ($WhatIf -or $global:WhatIfMode) { return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'whatif' } }
+    if ($mailMode -eq 'smtp') {
+        $relay = Get-PimSmtpRelayConfig
+        if (-not $relay.ok) {
+            $why = 'the SMTP relay is not configured correctly: ' + (@($relay.errors.Values) -join ' ')
+            Write-Warning "  [Mail] $why -- rendered only, not sent."
+            return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = $why; sentAs = 'smtp' }
+        }
+        if (-not $rcpt) { return @{ sent = $false; subject = $r.Subject; rendered = $r; reason = 'no recipient' } }
+        if (-not $rcptList.Count) { $rcptList = @($rcpt) }
+        $sm = Send-PimSmtpMail -Config $relay.config -Recipients $rcptList -Subject $r.Subject -BodyHtml $r.BodyHtml -BodyText $r.BodyText -Attachments $Attachments
+        if (-not $sm.sent) { Write-Warning "  [Mail] send failed ($Type -> $rcpt) via SMTP relay: $($sm.reason)" }
+        return @{ sent = [bool]$sm.sent; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = "$($sm.reason)"; sentAs = 'smtp' }
+    }
     if (-not $sender) { Write-Warning "  [Mail] `$global:PIM_MailSender not set -- rendered only, not sent."; return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'no sender' } }
     if (-not $rcpt)   { return @{ sent = $false; subject = $r.Subject; rendered = $r; reason = 'no recipient' } }
     if (-not $rcptList.Count) { $rcptList = @($rcpt) }
@@ -408,10 +429,18 @@ function Test-PimTapMailReady {
     # original defect was that it never happened at all), and is skipped only once a sender is
     # actually populated. An unset sender re-reads every time, so a store that becomes reachable
     # mid-run is still picked up.
-    if ((-not "$($global:PIM_MailSender)".Trim()) -and (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue)) {
+    if (((-not "$($global:PIM_MailSender)".Trim()) -or (-not "$($global:PIM_MailMode)".Trim())) -and (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue)) {
+        # once per process (Initialize-PimEmailControlsFromStore remembers a successful read), so not once per admin row
         try { [void](Initialize-PimEmailControlsFromStore) } catch { }
     }
-    if (-not "$($global:PIM_MailSender)".Trim()) {
+    # MAIL-1: an SMTP relay environment has no sender MAILBOX -- it is ready when its relay record is valid.
+    $tapMode = if (Get-Command Get-PimMailMode -ErrorAction SilentlyContinue) { Get-PimMailMode } else { 'sharedMailbox' }
+    if ($tapMode -eq 'none') { return @{ ok = $false; reason = 'mail is switched off for this environment (mail mode none) -- the TAP cannot be delivered' } }
+    if ($tapMode -eq 'smtp') {
+        $relay = Get-PimSmtpRelayConfig
+        if (-not $relay.ok) { return @{ ok = $false; reason = 'the SMTP relay is not configured correctly: ' + (@($relay.errors.Values) -join ' ') } }
+    }
+    elseif (-not "$($global:PIM_MailSender)".Trim()) {
         return @{ ok = $false; reason = 'no notification sender is configured (PIM_MailSender) -- the tenant cannot send mail at all' }
     }
     if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {

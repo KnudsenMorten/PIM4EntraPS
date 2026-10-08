@@ -171,6 +171,10 @@ if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\
 # §95.4: job 'install-key' -- claim the Invardia install key (OFF unless 'updates.invardia'); the uplink + Pro updates use it.
 . "$shared\PIM-InvardiaUpdate.ps1"
 # UPLINK-ENROL (PIM 99): job 'enrolled-tenants' -- the managing tenant allows its enrolled managed tenants' subnets by itself.
+# §97.1: job 'workload-prereqs' -- the engine checks the workload prerequisites itself (read-only) and records them. The runner
+# (the same checks a person's Initialize-PimWorkloadPrereqs.ps1 makes, read-only in self-check mode) is loaded HERE, at file scope.
+. "$shared\PIM-WorkloadPrereqSelfCheck.ps1"
+if (Test-Path -LiteralPath "$shared\..\..\tools\setup\_PimWorkloadPrereqRunner.ps1") { . "$shared\..\..\tools\setup\_PimWorkloadPrereqRunner.ps1" }
 if (Test-Path -LiteralPath "$shared\..\msp\PIM-InvardiaEnrollment.ps1") { . "$shared\..\msp\PIM-InvardiaEnrollment.ps1" }   # Pro (MSP): loaded only when present -- the community payload has no engine\msp
 # REQ-AR-2: job 'access-review-cycle' -- the per-department access review campaigns.
 if (Test-Path -LiteralPath "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1") { . "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1" }   # §84 Pro: loaded only when present
@@ -358,6 +362,11 @@ if (Get-Command Invoke-PimEnrolledTenantsJob -ErrorAction SilentlyContinue) {
         param($job, $now, $whatIf)
         Invoke-PimEnrolledTenantsJob -Job $job -NowUtc $now -WhatIf:$whatIf
     }
+}
+# §97.1: the REAL 'workload-prereqs' handler. A store that cannot be read / written or a read-back mismatch FAILS the run.
+Register-PimJobHandler -Type 'workload-prereqs' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimWorkloadPrereqSelfCheckJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
 # §79.2: the REAL 'pending-check' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
 Register-PimJobHandler -Type 'pending-check' -Handler {

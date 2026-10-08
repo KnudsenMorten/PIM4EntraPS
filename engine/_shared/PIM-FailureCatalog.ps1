@@ -344,6 +344,19 @@ $script:PimFailureRules = @(
        retryable = $false; severity = 'data'
        fixes = @() }
 
+    # §97 (owner 2026-10-08, live on a production managing tenant): Discovery's LIST of management groups (or
+    # subscriptions) refused with 403 is not "a change that is not being deployed" -- it is the engine not being able to
+    # SEE Azure, because it holds Reader on its hosting subscription only. Ahead of PERMISSION-DENIED so it gets its own
+    # code; the Manager shows it AMBER while no Azure resource delegation is defined and RED once one is.
+    @{ code = 'AZURE-NOT-VISIBLE'
+       match = { param($m, $row) ($m -match '(?i)\b403\b|Forbidden|AuthorizationFailed') -and
+                 ($m -match '(?i)/providers/Microsoft\.Management/managementGroups(\?|\s|$)' -or $m -match '(?i)(^|\s)/subscriptions(\?|\s|$)' -or $m -match '(?i)management\.azure\.com/subscriptions(\?|\s|$)') }
+       title = 'Discovery: Azure not visible'
+       cause = 'Azure refused to LIST the management groups or subscriptions for the engine identity. It holds no Reader at the tenant root management group, so Discovery cannot see Azure (management groups, subscriptions and everything below them).'
+       remedy = 'Grant the engine identity Reader (read-only) at the tenant root management group /providers/Microsoft.Management/managementGroups/<tenant id>. The install does this by default; when the installing account could not, a Global Administrator runs the published Grant-PimEnginePermissions.ps1 with -AzureRoleAssignments ''Reader@/providers/Microsoft.Management/managementGroups/<tenant id>'' (Get Started > Engine permissions shows it with your values).'
+       retryable = $true; severity = 'environment'
+       fixes = @() }
+
     @{ code = 'PERMISSION-DENIED'
        match = { param($m, $row) $m -match '(?i)\b403\b|Forbidden|AuthorizationFailed|InsufficientPermissions|Authorization_RequestDenied' }
        title = 'The engine identity lacks a permission'

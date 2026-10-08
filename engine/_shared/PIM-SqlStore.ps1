@@ -2107,6 +2107,15 @@ function Import-PimSettingsFromStore {
         $__sender = "$($global:PIM_NamingConventions['MailSender'])".Trim()
         if ($__sender) { $global:PIM_MailSender = $__sender }
     }
+    # MAIL-1 (framework 12.3): the TRANSPORT -- MailMode (none | sharedMailbox | smtp) and the SmtpRelay record (no
+    # password: that lives in Key Vault). Same fail-safe direction as the sender: only a valid, non-blank value writes.
+    if ($global:PIM_NamingConventions.ContainsKey('MailMode') -and (Get-Command ConvertTo-PimMailMode -ErrorAction SilentlyContinue)) {
+        $__mode = ConvertTo-PimMailMode -Value $global:PIM_NamingConventions['MailMode']
+        if ($__mode) { $global:PIM_MailMode = $__mode }
+    }
+    if ($global:PIM_NamingConventions.ContainsKey('SmtpRelay') -and $null -ne $global:PIM_NamingConventions['SmtpRelay']) {
+        $global:PIM_SmtpRelay = $global:PIM_NamingConventions['SmtpRelay']
+    }
     return $n
 }
 

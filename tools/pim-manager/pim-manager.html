@@ -135,11 +135,29 @@
     display:none; width:7px; height:7px; border-radius:50%; background:#cf222e;
   }
   .nav-group.has-attn > .nav-group-btn .nav-attn { display:inline-block; }
-  /* the dot becomes a counter when it is carrying the queue count */
+  /* the dot becomes a counter when it is carrying the queue count. PIM §97.3 / framework §12.5: the queue count is
+     INFORMATIONAL (it has its own indicator), so it is blue -- red counts are reserved for what BLOCKS work. */
   .nav-group > .nav-group-btn .nav-attn.nav-attn-count {
-    width:auto; height:16px; min-width:16px; padding:0 5px; border-radius:999px; color:#fff;
+    width:auto; height:16px; min-width:16px; padding:0 5px; border-radius:999px; color:#fff; background:#0969da;
     font-size:10.5px; font-weight:700; line-height:16px; text-align:center; margin-right:5px;
   }
+  /* PIM §97.3 / framework §12.5 PENDING-1: the BLOCKING count -- something waits for a person's decision (an approval, a
+     held change set, a guard hold, a second approver). Red, white ring, on the top-menu entry AND on the submenu entry. */
+  .nav-block-count, .nav-block-badge {
+    display:none; min-width:16px; height:16px; line-height:16px; padding:0 5px; box-sizing:border-box; border-radius:999px;
+    background:#cf222e; color:#fff; font-size:10.5px; font-weight:700; text-align:center; box-shadow:0 0 0 2px #fff, 0 0 0 3px #cf222e;
+  }
+  .nav-group.has-block > .nav-group-btn .nav-block-count { display:inline-block; }
+  .nav-group.has-block > .nav-group-btn { color:#cf222e; font-weight:600; }
+  .nav-group-item.has-block .nav-block-badge { display:inline-block; }
+  .nav-group-item.has-block .nav-item-text { color:#cf222e; font-weight:600; }
+  /* the mirrored badge of the same entry is a subset of the blocking count -- one number per entry */
+  .nav-group-item.has-block .nav-item-badge { display:none !important; }
+  #homeBlockingLine .homeBlock { margin:0 0 12px; padding:10px 12px; border:1px solid #cf222e; border-left:6px solid #cf222e; border-radius:6px; background:#ffebe9; font-size:13px; }
+  #homeBlockingLine .homeBlockHead { font-weight:700; color:#cf222e; margin-bottom:4px; }
+  #homeBlockingLine .homeBlockRow { margin:3px 0; color:#1f2328; }
+  #homeBlockingLine .homeBlockOpen { color:#0969da; cursor:pointer; text-decoration:underline; font-weight:600; }
+  #homeBlockingLine .homeBlockWho { color:#57606a; font-size:12px; }
   .nav-group-menu {
     display:none; position:absolute; top:100%; left:0; margin-top:0;
     min-width:230px; background:#fff; border:1px solid #d0d7de; border-radius:0 0 8px 8px;
@@ -160,9 +178,10 @@
   .nav-group-item:hover, .nav-group-item:focus-visible { background:#f3f6fb; color:#0969da; outline:none; }
   .nav-group-item.active { color:#0969da; font-weight:600; background:#eef4fd; }
   .nav-group-menu { min-width:300px; }
+  /* PIM §97.3: a mirrored (non-blocking) count is blue unless its source badge carries its own colour (an alarm stays red) */
   .nav-group-item .nav-item-badge {
     display:none; min-width:14px; padding:0 6px; height:15px; line-height:15px;
-    text-align:center; border-radius:10px; background:#cf222e; color:#fff;
+    text-align:center; border-radius:10px; background:#0969da; color:#fff;
     font-size:10px; font-weight:600;
   }
   .nav-group-item.has-badge .nav-item-badge { display:inline-block; }
@@ -1177,7 +1196,7 @@
     <div class="tab" data-tab="accessrequests" title="Requests to have a disabled admin account enabled for a while (request for authorization), the company reviews of external consultants, and an IT override for a longer window.">Access requests</div>
     <div class="tab" data-tab="grid" title="The full editable grid of every desired-state row — for power users who want direct, spreadsheet-style editing across all entities.">Advanced View (grid) <span id="gridDirtyBadge" class="badge" style="display:none">0</span></div>
     <div class="tab" data-tab="authoring" title="Bulk authoring — move an admin, clone a definition or Azure-RBAC delegation to many targets, bulk-attach, and import admins, each with a preview before commit.">Authoring</div>
-    <div class="tab" data-tab="activator" title="Deploy the PIM Activator browser extension: Intune remediation, Edge for Business, the Entra apps, the settings catalog and server scripts.">PIM Activator</div>
+    <div class="tab" data-tab="activator" title="Client onboarding: give your admins the PIM Activator browser extension -- with Intune, or on PCs and servers without Intune (a script).">Client onboarding</div>
     <div class="tab" data-tab="getstarted" title="Get started: the steps that make this environment work, each marked done or still open.">Get Started <span id="getStartedBadge" class="badge" style="display:none;background:#cf222e">!</span></div>
     <div class="tab" data-tab="onboarding" title="Onboard a new admin — derive the name and metadata, place them in the right groups, and (for sensitive grants) route through second-person approval.">Onboarding</div>
     <div class="tab" data-tab="departments" title="Departments and their owners -- who approves and who is mailed for every delegation a department sponsors. Import them from Entra, or assign owners in bulk by uploading a CSV file.">Departments &amp; owners</div>
@@ -1841,6 +1860,13 @@
            "deleted" chip then lists only them, so they can be selected all at once and revoked. -->
       <label id="revDeletedToggle" class="rev-deleted-toggle" title="Assignments still held by principals that no longer exist in the directory. Hidden by default; tick to show them."><input type="checkbox" id="revShowDeleted"> show deleted principals</label>
       <label id="revManagedToggle" class="rev-deleted-toggle" title="Assignments PIM Manager manages (its engine matched them to your configuration). Hidden by default: this page is for cleaning up what PIM does NOT manage. Tick to show them, marked MANAGED."><input type="checkbox" id="revShowManaged"> show managed by PIM Manager</label>
+      <!-- Owner 2026-10-08 ("default it must not show permissions related to pim manager + invardia support app + emergency accounts
+           delegations (defined in PIM manager). make option to tick them on"): three more groups, hidden by default, one tick each.
+           The server marks each row (ownKind) from what the directory and the store state; nothing here guesses by name. -->
+      <label id="revProductToggle" class="rev-deleted-toggle" title="The access PIM Manager itself runs with: its own managed identities (the engine job, the Manager, the update and publish jobs) or, for an installation without containers, its engine app. Hidden by default; removing it would stop PIM Manager. Tick to show them, marked PIM MANAGER."><input type="checkbox" id="revShowProduct"> show PIM Manager's own identities</label>
+      <label id="revSupportToggle" class="rev-deleted-toggle" title="The access of the Invardia Support app in this tenant (the support access you granted). Hidden by default; it is taken back with the support access script, not here. Tick to show it, marked SUPPORT APP."><input type="checkbox" id="revShowSupport"> show the Invardia Support app</label>
+      <label id="revBreakGlassToggle" class="rev-deleted-toggle" title="The emergency (break-glass) accounts set in PIM Manager (Settings > Break-glass). Hidden by default. Tick to show them, marked BREAK-GLASS. A revoke never touches them: they are skipped and reported."><input type="checkbox" id="revShowBreakGlass"> show break-glass accounts</label>
+      <span id="revHiddenNote" class="rev-hidden-note" style="display:none;font-size:11px;color:#57606a;" title="Rows not listed because a tick above is off -- nothing is left out silently."></span>
       <span class="rev-type-chip rev-type-deleted" data-type="deleted" id="revChipDeletedWrap" style="display:none;" title="Only assignments held by deleted principals -- select all and revoke to clean them up">deleted <span class="n" id="revChipDeleted">&mdash;</span></span>
       <span id="revBusy" style="display:none;" class="rev-busy"><span class="rev-spin"></span>Loading the stored snapshot&hellip;</span>
       <input type="text" id="revSearch" placeholder="Filter Principal / Role / Scope..." style="min-width:280px">
@@ -2675,7 +2701,7 @@
         // §96.6 / GUARD-1.6 (operator 2026-10-06: "I need a way to release guards"): one page for every guard.
         { tab: 'guards',   label: 'Guards',      desc: 'Every protective guard: clear or holding, what it holds right now, and its release -- this exact plan, one run or until a time (at most 24 h), SuperAdmin' },
         // 97.2 (operator 2026-10-07: "make a new menu item, PIM Activator, under Operation").
-        { tab: 'activator', label: 'PIM Activator', desc: 'Deploy the browser extension admins activate with: Intune remediation, Edge for Business, the Entra apps (PROD and TEST), the settings catalog, scripts for servers' },
+        { tab: 'activator', label: 'Client onboarding', desc: 'The PIM Activator browser extension on the PCs of your admins -- with Intune, or without it (a script for PCs and servers). Deploy the browser extension admins activate with: Intune remediation, Edge for Business, the Entra apps (PROD and TEST), the settings catalog, scripts for servers' },
         { tab: 'support',  label: 'Support',     desc: 'Diagnostics and help' },
       ] },
     { id: 'audit', label: 'Settings',
@@ -2759,7 +2785,7 @@
       btn.setAttribute('aria-expanded', 'false');
       if (g.title) btn.title = g.title;
       btn.innerHTML = '<span class="nav-attn" aria-hidden="true"></span>' +
-        escapeHtml(g.label) + ' <span class="nav-caret" aria-hidden="true">&#9662;</span>';
+        escapeHtml(g.label) + ' <span class="nav-block-count"></span><span class="nav-caret" aria-hidden="true">&#9662;</span>';
 
       const menu = document.createElement('div');
       menu.className = 'nav-group-menu';
@@ -2794,6 +2820,7 @@
         item.innerHTML = '<span class="nav-item-main">' +
             '<span class="nav-item-text">' + escapeHtml(spec.label || navTabLabel(tabEl)) + (proLocked ? '<span class="pro-tag" title="Part of PIM Manager Pro">PRO</span>' : '') + '</span>' +
             '<span class="nav-item-badge" aria-hidden="true"></span>' +
+            '<span class="nav-block-badge"></span>' +
           '</span>' +
           (spec.desc ? '<span class="nav-item-desc">' + escapeHtml(spec.desc) + '</span>' : '');
         item.addEventListener('click', () => { if (spec.gridScope !== undefined) setGridScope(spec.gridScope); if (spec.discView) PIM_DISC_VIEW = spec.discView; switchTab(tabKey); closeAllNavGroups(); navScrollToAnchor(spec.anchor); });
@@ -2881,8 +2908,94 @@
       }
       syncNavGroups(document.querySelector('#tabs .tab.active') ?
         document.querySelector('#tabs .tab.active').dataset.tab : 'home');
+      try { applyAttentionBadges(); } catch (_) { }   // §97.3: a rebuild (applyProMenuMarks) keeps the blocking counts
     }
     return wired;
+  }
+
+  // ===================================================================
+  // PIM §97.3 / framework §12.5 PENDING-1 (owner 2026-10-08: "if there is a pending task like an approval, show it very
+  // clearly in the main menu + submenu. here are 2 approvals that noone knows of that is blocking"). GET /api/attention
+  // lists what waits for a PERSON and blocks work (held policy change sets, approval requests, access requests waiting for
+  // an Owner, a break-glass change, guard holds and releases, a second approver, held workload assignments). Each item names
+  // the page (tab) that holds it: that submenu entry and its top-menu entry get the red count, Overview gets one line per
+  // item. Computed from the data on every page load and every 30 s -- no acknowledge: a decided item is gone on the next read.
+  // ===================================================================
+  let PIM_ATTENTION = null, PIM_ATTENTION_AT = 0, PIM_ATTENTION_BUSY = null;
+  function refreshAttention(force) {
+    if (!isServer) return Promise.resolve(null);
+    if (PIM_ATTENTION_BUSY) return PIM_ATTENTION_BUSY;
+    if (!force && PIM_ATTENTION && (Date.now() - PIM_ATTENTION_AT) < 5000) return Promise.resolve(PIM_ATTENTION);
+    PIM_ATTENTION_BUSY = api('GET', '/api/attention').then(d => {
+      // A read that failed keeps the last answer (never a false "nothing is blocking"); a malformed one is ignored.
+      if (d && Array.isArray(d.items)) { PIM_ATTENTION = d; PIM_ATTENTION_AT = Date.now(); }
+      try { applyAttentionBadges(); } catch (_) { }
+      try { renderHomeBlockingLine(); } catch (_) { }
+      return PIM_ATTENTION;
+    }).catch(() => PIM_ATTENTION).finally(() => { PIM_ATTENTION_BUSY = null; });
+    return PIM_ATTENTION_BUSY;
+  }
+  function attentionItems() { return (PIM_ATTENTION && Array.isArray(PIM_ATTENTION.items)) ? PIM_ATTENTION.items.filter(i => i && i.tab && (Number(i.count) || 0) > 0) : []; }
+  // "Reviews & controls > Approvals" -- where the item is, in the words of the menu.
+  function attentionPageName(tab) {
+    for (const g of NAV_GROUPS) {
+      for (const e of g.items) {
+        const s = navItemSpec(e);
+        if (s.tab !== tab) continue;
+        const el = document.querySelector('#tabs .tab[data-tab="' + tab + '"]');
+        const label = s.label || navTabLabel(el) || tab;
+        return (g.items.length > 1 || label !== g.label) ? (g.label + ' › ' + label) : label;
+      }
+    }
+    return tab;
+  }
+  function applyAttentionBadges() {
+    const byTab = {};
+    attentionItems().forEach(i => { byTab[i.tab] = (byTab[i.tab] || 0) + (Number(i.count) || 0); });
+    const whyOf = (tab) => attentionItems().filter(i => i.tab === tab).map(i => i.count + ' ' + String(i.text || '').replace(/^\d+\s+/, '') + (i.canAct ? '' : ' (read-only for you: ' + (i.who || '') + ')')).join('\n');
+    document.querySelectorAll('#navGroups .nav-group').forEach(grp => {
+      const seen = {};
+      let n = 0;
+      grp.querySelectorAll('.nav-group-item').forEach(item => {
+        const tab = item.dataset.tab;
+        const c = byTab[tab] || 0;
+        let b = item.querySelector('.nav-block-badge');
+        if (!b) { const main = item.querySelector('.nav-item-main') || item; b = document.createElement('span'); b.className = 'nav-block-badge'; main.appendChild(b); }
+        b.textContent = c ? String(c) : '';
+        item.classList.toggle('has-block', c > 0);
+        if (c) { b.title = whyOf(tab); b.setAttribute('aria-label', c + ' waiting for a decision -- blocking'); } else { b.removeAttribute('title'); b.removeAttribute('aria-label'); }
+        if (c && !seen[tab]) { seen[tab] = true; n += c; }
+      });
+      const btn = grp.querySelector('.nav-group-btn');
+      let gb = btn && btn.querySelector('.nav-block-count');
+      if (btn && !gb) { gb = document.createElement('span'); gb.className = 'nav-block-count'; const caret = btn.querySelector('.nav-caret'); btn.insertBefore(gb, caret || null); }
+      if (gb) {
+        gb.textContent = n ? String(n) : '';
+        if (n) { gb.title = n + ' waiting for a decision -- blocking work. Open the menu to see where.'; gb.setAttribute('aria-label', n + ' waiting for a decision'); } else { gb.removeAttribute('title'); gb.removeAttribute('aria-label'); }
+      }
+      grp.classList.toggle('has-block', n > 0);
+    });
+  }
+  // Overview: one line per blocking item, linking to its page; a role that cannot act is told who can.
+  function renderHomeBlockingLine() {
+    const host = document.getElementById('homeBlockingLine');
+    if (!host) return;
+    const items = attentionItems();
+    if (!items.length) { host.innerHTML = ''; return; }
+    const esc = escapeHtml;
+    const total = items.reduce((a, i) => a + (Number(i.count) || 0), 0);
+    const allAppr = items.every(i => i.tab === 'approvals');
+    const head = total + ' ' + (allAppr ? (total === 1 ? 'approval is' : 'approvals are') : (total === 1 ? 'item is' : 'items are')) + ' blocking work -- waiting for a decision';
+    host.innerHTML = '<div class="homeBlock" role="alert"><div class="homeBlockHead">' + esc(head) + '</div>' +
+      items.map(i => '<div class="homeBlockRow" data-attn="' + esc(i.id || '') + '"><b>' + esc(String(i.count)) + '</b> ' + esc(String(i.text || '').replace(/^\d+\s+/, '')) +
+        ' &mdash; <a class="homeBlockOpen" data-tab="' + esc(i.tab) + '" tabindex="0">open ' + esc(attentionPageName(i.tab)) + '</a>' +
+        (i.canAct ? '' : ' <span class="homeBlockWho">(read-only for you: ' + esc(i.who || 'another role decides it') + ')</span>') + '</div>').join('') +
+      '</div>';
+    host.querySelectorAll('.homeBlockOpen').forEach(a => {
+      const go = () => { switchTab(a.dataset.tab); };
+      a.addEventListener('click', go);
+      a.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+    });
   }
 
   // BRAND-2.9: the desktop MENU BAR applies on a wide screen with a real pointer; phones and touch keep tap-to-open.
@@ -2926,16 +3039,16 @@
         // it was never mirrored and the grouped menu showed nothing while work sat in the queue.
         // Reported live 2026-09-12: "i queue one, but i dont get a new box with unprocessed changes".
         // 🔑 Any visible, non-zero badge counts; the item shows the largest of them.
-        let shown = '';
+        let shown = '', shownBg = '';
         document.querySelectorAll('#tabs .tab[data-tab="' + tabKey + '"] .badge').forEach(srcBadge => {
           const t = (srcBadge.textContent || '').trim();
           if (srcBadge.style.display === 'none' || t === '' || t === '0') return;
-          if (!shown || (Number(t) || 0) > (Number(shown) || 0)) shown = t;
+          if (!shown || (Number(t) || 0) > (Number(shown) || 0)) { shown = t; shownBg = srcBadge.style.backgroundColor || ''; }
         });
         const itemBadge = item.querySelector('.nav-item-badge');
         const visible = !!shown;
         item.classList.toggle('has-badge', visible);
-        if (itemBadge) itemBadge.textContent = shown;
+        if (itemBadge) { itemBadge.textContent = shown; itemBadge.style.background = shownBg; }   // §97.3: the source's own colour (an alarm stays red), else the CSS blue
         if (visible) groupAttn = true;
       });
       grp.classList.toggle('active', groupActive);
@@ -3054,6 +3167,7 @@
     syncNavGroups(name);
     if (name === 'home') renderHome();
     if (name === 'getstarted') renderGetStarted();
+    try { refreshAttention(false); } catch (_) { }   // §97.3: a page change re-reads the blocking counts (at most every 5 s)
     if (name === 'activator') renderActivator();
     if (name === 'map') renderAccessMap();
     // (the permission templates moved to Workload templates, operator 2026-10-05)
@@ -4576,8 +4690,29 @@
   // standalone Invardia support script Grant-PimEnginePermissions.ps1 (REST + browser sign-in, no PowerShell modules)
   // with THIS environment's tenant id, engine object id, missing Graph permissions and -- when Azure resource
   // delegations need it -- User Access Administrator at the tenant root management group.
+  // §97 (owner 2026-10-08: "permissions is crucial in the get started"): the engine's two Azure rights at the TENANT ROOT
+  // management group. Reader is REQUIRED (Discovery cannot see Azure without it; the install grants it by default).
+  // User Access Administrator is OPTIONAL (SEC-34 opt-in) -- needed only to assign Azure resource roles, so it is required
+  // only when Azure delegations are defined and otherwise an informational line. Both are always shown, never omitted.
+  function permRootReaderMissing(d) { return !!(d && d.azureRoot && d.azureRoot.reader === 'missing'); }
+  function permRootUaaNeededMissing(d) { return !!(d && d.azureRoot && d.azureRoot.userAccessAdmin === 'missing' && d.azureRoot.userAccessAdminNeeded); }
+  function permRootLines(d) {
+    const r = (d && d.azureRoot) || null;
+    if (!r) return '';
+    const st = (v) => v === 'held' ? '<b style="color:#1a7f37;">held</b>' : v === 'missing' ? '<b style="color:#cf222e;">not granted</b>' : '<b>not checked</b>';
+    let h = '<div class="permRootLines" style="margin-top:6px;font-size:11.5px;">' +
+      '<div class="permRootReader">Reader at the tenant root management group: ' + st(r.reader) +
+        (r.reader === 'missing' ? ' -- <b>required</b>: Discovery cannot see Azure (management groups, subscriptions) without it. Grant it with the command below.' : r.reader === 'held' ? ' -- Discovery can see Azure.' : ' -- the role assignments could not be read.') + '</div>' +
+      '<div class="permRootUaa">User Access Administrator at the tenant root management group: ' +
+        (r.userAccessAdmin === 'missing'
+          ? (r.userAccessAdminNeeded ? '<b style="color:#cf222e;">not granted</b> -- <b>required</b>: you have defined Azure resource delegations, and assigning their roles needs it. Grant it with the command below.'
+                                     : '<b>not granted</b> -- needed only to assign Azure resource roles (none are defined, so nothing is blocked). Optional; grant it with: <code>' + escapeHtml(String(r.userAccessAdminFix || '').split('\n').pop()) + '</code>')
+          : st(r.userAccessAdmin) + (r.userAccessAdmin === 'held' ? ' -- Azure resource roles can be assigned.' : ' -- the role assignments could not be read.')) + '</div>' +
+      '</div>';
+    return h;
+  }
   function permFixNeeded(d, miss) {
-    return !!(d && d.objectId && ((miss || []).length || d.azureOk === false));
+    return !!(d && d.objectId && ((miss || []).length || d.azureOk === false || permRootReaderMissing(d) || permRootUaaNeededMissing(d)));
   }
   function permFixScript(d, miss) {
     const guid = (s) => String(s || '').replace(/[^0-9A-Za-z-]/g, '');
@@ -4586,7 +4721,10 @@
     const who = String(d.identity || '').replace(/[\r\n]/g, ' ').trim();
     let cmd = '.\\Grant-PimEnginePermissions.ps1' + (tid ? " -TenantId '" + tid + "'" : '') + " -EngineObjectId '" + oid + "'";
     if (roles.length) cmd += ' -GraphPermissions ' + roles.map(r => "'" + r + "'").join(',');
-    if (d.azureOk === false && tid) cmd += " -AzureRoleAssignments 'User Access Administrator@/providers/Microsoft.Management/managementGroups/" + tid + "'";
+    const az = [];
+    if (permRootReaderMissing(d) && tid) az.push("'Reader@/providers/Microsoft.Management/managementGroups/" + tid + "'");
+    if ((d.azureOk === false || permRootUaaNeededMissing(d)) && tid) az.push("'User Access Administrator@/providers/Microsoft.Management/managementGroups/" + tid + "'");
+    if (az.length) cmd += ' -AzureRoleAssignments ' + az.join(',');
     return '# Give the engine identity' + (who ? ' (' + who + ')' : '') + ' its missing permissions. Run once in PowerShell as a Global Administrator.\n' +
       '# No PowerShell modules needed: you sign in in the browser. Already-held permissions are left alone.\n' +
       'Invoke-WebRequest https://invardia.com/support/pim/Grant-PimEnginePermissions.ps1 -OutFile Grant-PimEnginePermissions.ps1\n' +
@@ -4626,6 +4764,7 @@
                                    '</td><td style="font-size:11.5px;">' + escapeHtml(m.capability) + '</td></tr>'; });
       inner += '</table>';
     }
+    inner += permRootLines(d);   // §97: Reader + User Access Administrator at the tenant root, each on its own line
     // The FIX, not just the finding (operator 2026-09-25: "have option to fix"). This page cannot grant
     // the roles itself -- an identity that can assign app roles to itself can give itself anything, so
     // the Manager is deliberately read-only (§65.4). It hands over the exact grant instead, for the engine
@@ -4701,6 +4840,8 @@
     // `no member policy` failures in two hours from ONE absent app-role, while the deploy and every
     // tick said OK. The banner renders a placeholder immediately and fills in asynchronously, so a
     // slow Graph read never delays the rest of the overview.
+    // §97.3 / framework §12.5: what BLOCKS work and waits for a person -- the first line on the page (GET /api/attention).
+    h += '<div id="homeBlockingLine"></div>';
     h += '<div id="homePermBanner" style="margin-bottom:12px;"></div>';
     // 96.5: "Daily reconcile PAUSED by <who> since <time>: <reason>" -- filled asynchronously, empty when not paused.
     h += '<div id="homeReconcileBanner"></div>';
@@ -4888,6 +5029,8 @@
     h += homeLegendHtml();
 
     body.innerHTML = h;
+    // §97.3: the blocking line -- from the last attention read at once, then a fresh read (page load = computed again).
+    try { renderHomeBlockingLine(); refreshAttention(true); } catch (_) { }
 
     // fill the "what needs my attention" call-out from the items the tiles collected.
     const co = document.getElementById('homeAttnCallout');
@@ -6768,7 +6911,7 @@
       h += '</table>';
     }
     // 🔴 Operator 2026-09-20: "how can a customer register a license when they dont have my admin cert".
-    // Registering used to mean running Set-PimLicense.ps1 with -AdminAppId / -AdminCertThumbprint -- store
+    // Registering used to mean running Set-PimLicense.ps1 with a store certificate identity -- store
     // credentials a customer does not have. Register it HERE instead: the server verifies OUR signature
     // before it writes, so a wrong or tampered file is refused and nothing is stored. The command line
     // stays below for an operator who has the store credentials and prefers it.
@@ -6781,11 +6924,11 @@
         '<div style="margin-top:6px;"><button class="btn" id="licRegister">Register licence</button> <span id="licImportMsg" style="font-size:12px;"></span></div>' +
         '</div>';
     }
-    h += '<div style="margin-top:10px;font-size:12px;color:#57606a;">Or, if you have the deployment&rsquo;s store credentials, register it from a shell:</div>' +
+    h += '<div style="margin-top:10px;font-size:12px;color:#57606a;">Or register it from a shell, signed in to <code>az</code> in that window (a member of the store&rsquo;s SQL admin group, or the Invardia Support app session):</div>' +
       '<div class="lic-cmd-row" style="display:flex;gap:6px;align-items:flex-start;margin-top:4px;min-width:0;">' +
       '<code class="lic-cmd" style="flex:1 1 auto;min-width:0;overflow-wrap:anywhere;font-size:11px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:4px 8px;">' + esc(d.command || '') + '</code>' +
       '<button type="button" class="btn-sec lic-copy" style="font-size:11px;padding:2px 8px;">Copy</button></div>' +
-      '<div style="font-size:11px;color:#57606a;margin-top:3px;"><code>-AdminAppId</code> / <code>-AdminCertThumbprint</code> are <b>this deployment&rsquo;s own</b> admin application and certificate &mdash; the identity that reaches its SQL store. They are not ours, and you do not need them if you register above.</div>';
+      '<div style="font-size:11px;color:#57606a;margin-top:3px;"><code>-UseSignedInAccount</code> signs in as <b>the account signed in to az</b> in that window &mdash; no certificate, no secret. You do not need it at all if you register above.</div>';
     // Operator 2026-10-01: Pro is bought at invardia.com; paid licences get support at portal.invardia.com.
     const buyUrl = (d && /^https:\/\//i.test(String(d.buyUrl || ''))) ? String(d.buyUrl) : 'https://invardia.com';
     const supUrl = (d && /^https:\/\//i.test(String(d.supportUrl || ''))) ? String(d.supportUrl) : 'https://portal.invardia.com';
@@ -6962,8 +7105,18 @@
     behind:  { fg: '#9a6700', bg: '#fff8c5', bd: '#d4a72c', word: 'BEHIND its ring' },
     held:    { fg: '#0550ae', bg: '#ddf4ff', bd: '#54aeff', word: 'HELD (frozen)' },
     current: { fg: '#1a7f37', bg: '#dafbe1', bd: '#1a7f37', word: 'up to date' },
+    // 2026-10-08: a fresh install -- the deployment recorded the ring it set on the update job, which
+    // has not run yet. A fact about the ring, nothing about versions or outcomes: neutral, not green.
+    installed: { fg: '#0969da', bg: '#ddf4ff', bd: '#54aeff', word: 'installed -- no update run yet' },
     unknown: { fg: '#57606a', bg: '#eaeef2', bd: '#d0d7de', word: 'not recorded yet' }
   };
+  // Where the ring shown came from -- said on the surface, so a label is never mistaken for a guess.
+  function ringSourceWords(v) {
+    if (!v) return '';
+    if (v.ringSource === 'deployment') return 'set on the update job when this environment was deployed';
+    if (v.ringSource === 'update run') return 'recorded by the last update run';
+    return '';
+  }
   function ringStyle(state) { return PIM_RING_STATE_STYLE[state] || PIM_RING_STATE_STYLE.unknown; }
 
   // The updater's own action vocabulary, in words. "none" is the NORMAL nightly outcome (the ring
@@ -7016,7 +7169,15 @@
     // The flag is shown ONLY when the environment is not simply healthy -- a permanent
     // green chip in the header trains people to stop reading it.
     const st = ringStyle(v.state);
-    if (v.state === 'current' || v.state === 'unknown') {
+    // 2026-10-08: "no update run yet" (fresh install) and "not run on this ring yet" (a deploy changed
+    // the ring after the last run) are flagged -- the ring is real, but nothing has run on it.
+    const pendingWord = v.noRunYet ? 'no update run yet' : (v.ringPending ? 'not run on this ring yet' : '');
+    if (pendingWord && (v.state === 'installed' || v.state === 'current')) {
+      const ps = ringStyle('installed');
+      flag.textContent = pendingWord;
+      flag.style.display = '';
+      flag.style.color = ps.fg; flag.style.background = ps.bg; flag.style.border = '1px solid ' + ps.bd;
+    } else if (v.state === 'current' || v.state === 'unknown' || v.state === 'installed') {
       flag.style.display = 'none';
     } else {
       flag.textContent = (v.state === 'behind' ? 'behind' : (v.state === 'held' ? 'held' : 'failed'));
@@ -7024,8 +7185,10 @@
       flag.style.color = st.fg; flag.style.background = st.bg; flag.style.border = '1px solid ' + st.bd;
     }
     const when = ringRecordedAgo(v);
+    const fromWhere = ringSourceWords(v);
     g.title = (v.recorded
         ? 'This environment is on ' + (v.ringLabel || 'an unrecorded ring') + ' -- ' + st.word +
+          (fromWhere ? ' (' + fromWhere + ')' : '') +
           (when ? ' (' + when + ')' : '') + (v.message ? '\n' + v.message : '')
         : (v.message || 'This environment has not recorded an update run yet.')) +
       '\n\nA ring is changed on the update job by an operator, never from this page. See Jobs for the full picture.';
@@ -7067,10 +7230,34 @@
            '</div>';
       h += '<div style="font-size:11.5px;color:#57606a;margin-top:8px;">The update job records it on its next run. ' +
            'Until then nothing here is a guess &mdash; no ring is assumed.</div>';
+    } else if (v.noRunYet) {
+      // 2026-10-08: a fresh install. The ring is the one the DEPLOYMENT set on the update job (and read
+      // back); the job has not run yet, so there is no approved version, outcome or "behind" to show --
+      // and none is invented. Every row says where it came from.
+      if (v.message) h += '<div class="updRingMessage updRingNoRunYet" style="font-size:12px;color:' + st.fg + ';margin-bottom:8px;">' + esc(v.message) + '</div>';
+      h += '<table class="updRingTable" style="font-size:12px;border-collapse:collapse;">';
+      h += row('Update ring', val(v.ringLabel) + ' <span class="updRingSource" style="color:#8c959f;font-size:11px;">(' + esc(ringSourceWords(v)) + ')</span>');
+      if (v.source) h += row('Update source', val(v.source));
+      h += row('Version running now', val(v.runningVersion) + ' <span style="color:#8c959f;font-size:11px;">(this Manager process)</span>');
+      if (v.installedVersion) h += row('Version installed by the deployment', val(v.installedVersion));
+      h += row('Recorded', (v.configuredUtc ? '<b>' + pimUtcHtml(v.configuredUtc) + '</b>' : '<span style="color:#8c959f;">not recorded</span>') +
+               ' <span style="color:#8c959f;font-size:11px;">' + esc(ringRecordedAgo(v)) + '</span>');
+      h += row('Last update run', '<span class="updRingNoRun" style="color:#57606a;">none yet &mdash; the update job runs on its schedule and records its first run here</span>', 'updRingLastRun');
+      h += row('Frozen (hold)', v.held
+               ? '<b class="updRingHeld" style="color:' + PIM_RING_STATE_STYLE.held.fg + ';">yes &mdash; PIM_UPDATE_HOLD is set, so this environment does not move</b>'
+               : '<span style="color:#57606a;">no</span>');
+      h += '</table>';
+      if (v.stale) {
+        h += '<div class="updRingStale" style="margin-top:8px;font-size:11.5px;color:#7d4e00;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:6px 8px;">' +
+             '&#9888; The update job has not reported since this environment was deployed (' + esc(ringRecordedAgo(v)) + ') &mdash; check its executions.</div>';
+      }
     } else {
       if (v.message) h += '<div class="updRingMessage" style="font-size:12px;color:' + st.fg + ';margin-bottom:8px;">' + esc(v.message) + '</div>';
       h += '<table class="updRingTable" style="font-size:12px;border-collapse:collapse;">';
-      h += row('Update ring', val(v.ringLabel));
+      h += row('Update ring', val(v.ringLabel) + (ringSourceWords(v)
+               ? ' <span class="updRingSource' + (v.ringPending ? ' updRingPending' : '') + '" style="color:#8c959f;font-size:11px;">(' + esc(ringSourceWords(v)) +
+                 (v.ringPending ? ', after the last update run &mdash; not run on it yet' : '') + ')</span>'
+               : ''));
       h += row('Version running now', val(v.runningVersion) + ' <span style="color:#8c959f;font-size:11px;">(this Manager process)</span>');
       h += row('Version this ring approves', (v.approvedVersion ? val(v.approvedVersion) : '<span style="color:#8c959f;">not recorded</span>') +
                (v.approvedReason ? ' <span style="color:#8c959f;font-size:11px;">' + esc(v.approvedReason) + '</span>' : ''), 'updRingApproved');
@@ -7464,7 +7651,7 @@
     if (a.enabled) {
       h += `<div style="margin-bottom:8px;padding:6px 10px;background:#dafbe1;border:1px solid #4ac26b;border-radius:6px;font-size:12px;">Alerting is <b>ON</b> &mdash; ${esc(String((a.recipients||[]).length))} recipient(s), sender configured.</div>`;
     } else if (!a.senderSet) {
-      h += `<div style="margin-bottom:8px;padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;font-size:12px;"><b>Configure to enable.</b> No sender mailbox is set up yet, so alerts are prepared but not delivered. Set it up in <b>Get Started &gt; Mail sender</b>.</div>`;
+      h += `<div style="margin-bottom:8px;padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;font-size:12px;"><b>Configure to enable.</b> No way to send mail is set up yet (Mail sending above: a shared mailbox or your SMTP relay), so alerts are prepared but not delivered.</div>`;
     } else {
       h += `<div style="margin-bottom:8px;padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;font-size:12px;"><b>Configure to enable.</b> Add at least one recipient below to start receiving alerts.</div>`;
     }
@@ -7604,7 +7791,7 @@
     { key: 'features',  label: 'Features & edition',     match: ['setFeaturesCard', 'setDemoModeHost', 'setGovPreviewCard', 'setLicenceCard', 'setEditionCard', 'setScenarioCard', 'setFeatureGatesCard'] },
     { key: 'approvals', label: 'Approvals & policy',     match: ['setSelfApproveHost', 'setOpPolicyCard'] },
     { key: 'rings',     label: 'Deployment rings',       match: ['setRingsHost'] },
-    { key: 'mail',      label: 'Mail & alerting',        match: ['setEmailControlsCard', 'setAlertingCard'] },
+    { key: 'mail',      label: 'Mail & alerting',        match: ['setMailTransportCard', 'setEmailControlsCard', 'setAlertingCard'] },
     { key: 'access',    label: 'Access requests (RFA)',  match: ['setRfaBrandingHost', 'setRfaBrokerHost'] },
     { key: 'hybrid',    label: 'Hybrid AD & workloads',  match: ['setHybridAdHost', /AD OU placement/i, 'setWorkloadExemptCard', 'setTemplatePacksHost'] },
     { key: 'tools',     label: 'Copy & tools',           match: ['setCopyHost', 'setConfigBackupHost'] },
@@ -7999,6 +8186,11 @@
          `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Enable or disable each advanced capability per customer. A disabled feature is completely inert &mdash; the engine, scheduled jobs and integrations all skip it (no writes, no emails) no matter how they are triggered. Newly-shipped advanced features start <b>off</b> so an upgrade never springs a new behaviour on a customer. Core features are always on and shown for reference. Items needing Pro are locked until the edition above covers them.</div>` +
          `<div id="setFeatureGatesBody"><div style="color:#57606a;font-size:12px;">Loading feature customization&hellip;</div></div></div>`;
 
+    // --- MAIL-1: how mail is sent (shared mailbox | SMTP relay) -- the same form + route as Get Started > Mail sender.
+    h += `<div class="set-card" id="setMailTransportCard"><h3 style="margin:0 0 4px;font-size:14px;">Mail sending</h3>` +
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">How every PIM mail leaves this environment: a <b>shared mailbox</b> (Exchange Online, sent by PIM's own identity, the send right scoped to that one mailbox) or your <b>SMTP relay</b> (the password is kept in the environment's Key Vault). A test mail proves the choice.</div>` +
+         `<div id="setMailTransportBody"><div style="color:#57606a;font-size:12px;">Loading mail sending&hellip;</div></div></div>`;
+
     // --- Email controls (REQUIREMENTS s29): global kill switch + redirect + allowlist.
     h += `<div class="set-card" id="setEmailControlsCard"><h3 style="margin:0 0 4px;font-size:14px;">Email controls</h3>` +
          `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">A global <b>email kill switch</b> stops every outbound email instantly (every alert, digest and notification becomes a no-op). Optionally redirect <b>all</b> mail to one address (for testing), or restrict sending to an allowlist of addresses. Honoured by every send path and every scheduled job.</div>` +
@@ -8057,6 +8249,7 @@
     renderEditionCard(canEdit);
     renderScenarioCard(canEdit);
     renderFeatureGatesCard(canEdit);
+    renderMailTransportCard();
     renderEmailControlsCard(canEdit);
     renderOpPolicyCard(canEdit);
     // Alerting card is editable by Admin+ (separate from the SuperAdmin gate that
@@ -11198,6 +11391,7 @@
     'owner-review':                'Asks each department\'s owners, by mail, to confirm who still needs privileged access: on My people they Keep, Extend or Remove each person (a removal is approved by a PIM administrator). Off until you turn it on; its interval is the review cycle.',
     'pending-check':               'Reports staged changes and queued actions that were started more than a day ago and never committed (Pending changes). Changes committed but not yet applied are checked every 30 minutes by verify-convergence.',
     'access-review-cycle':         'Starts the access review of each department whose review rule makes it due (Access reviews > Review rules): one review per group of the department, for the reviewers of the rule. Does nothing until a rule is switched on.',
+    'workload-prereqs':            'Checks the workload prerequisites (Defender XDR, Intune, Power BI, Azure RBAC, Entra roles) as PIM\'s own identity and shows the result on the templates and Coverage & gaps; a held role assignment is made once they are green. Read-only: it never grants or creates anything.',
     'target-check':                'Checks that the Azure resources, Azure roles and Entra roles your delegations point at still exist, and reports the ones that are gone (Coverage & gaps). It never removes anything -- you decide.',
     'config-backup':               'Backs up the configuration (departments, companies, admins, group definitions, delegations, settings without secrets, break-glass list, job schedule, MSP registry) once a day; an unchanged configuration is recorded as "no change". Old backups are removed after the retention (default 90 days); pinned ones are kept (Operations > Backups & restore).',
     // REQ-U wave 2: per-NAME entries (looked up before the type) -- two discovery jobs read the workload role catalogs.
@@ -13135,11 +13329,17 @@
         // Permissions ONLY: the health's overall severity also covers MAIL (no sender = 'error'), which is its own step --
         // reading it here kept this step red while it said "all required permissions held" (EFIFMGMT 2026-10-08).
         const p = c.perm || {}; const miss = (p.missingRequired || []).filter(Boolean).length; const az = p.azureOk !== false;
-        return { done: !!p.objectId && miss === 0 && az, note: p.objectId ? (miss ? miss + ' permission(s) missing' : !az ? 'no Azure role-management right' : 'all required permissions held') : 'not checked yet' };
+        // §97: Reader at the tenant root is required (Discovery); User Access Administrator there only when Azure delegations exist.
+        const rdr = !permRootReaderMissing(p), uaa = !permRootUaaNeededMissing(p);
+        return { done: !!p.objectId && miss === 0 && az && rdr && uaa, note: p.objectId ? (miss ? miss + ' permission(s) missing' : !az ? 'no Azure role-management right' : !rdr ? 'no Reader at the tenant root -- Discovery cannot see Azure' : !uaa ? 'no User Access Administrator at the tenant root (Azure delegations are defined)' : 'all required permissions held') : 'not checked yet' };
       } },
     { id: 'mail', title: 'Mail sender', required: true,
-      what: 'A shared mailbox PIM sends from (TAP codes, approvals, alerts), its send right scoped to that one mailbox.',
-      check: c => { const s = String((c.perm && c.perm.mail && c.perm.mail.sender) || ''); return { done: !!s, note: s ? ('sends as ' + s) : 'no sender: TAP codes and notifications are not sent' }; } },
+      what: 'How PIM sends its mail (TAP codes, approvals, alerts): a shared mailbox, its send right scoped to that one mailbox -- or your SMTP relay.',
+      check: c => {
+        // MAIL-1: computed by the server from the data (mode + sender / relay + the latest test mail against THESE settings)
+        if (c.mail && typeof c.mail.done === 'boolean') return { done: c.mail.done, note: String(c.mail.note || '') };
+        const s = String((c.perm && c.perm.mail && c.perm.mail.sender) || ''); return { done: !!s, note: s ? ('sends as ' + s) : 'no sender: TAP codes and notifications are not sent' };
+      } },
     { id: 'departments', title: 'Departments & owners', required: true, need: 'SuperAdmin',
       what: 'The departments that sponsor access, and their owners -- who approves and receives the mail.',
       check: c => ({ done: c.rows['PIM-Definitions-Departments'] > 0, note: c.rows['PIM-Definitions-Departments'] + ' department(s)' }) },
@@ -13174,7 +13374,7 @@
     { id: 'firstrun', title: 'First run', required: true, need: 'Admin',
       what: 'The engine applies your configuration. Run it now and see what it did.',
       check: c => { const r = c.jobs && c.jobs.lastRun; return { done: !!(r && r.ok), note: r ? ((r.ok ? 'last run ok: ' : 'last run failed: ') + (r.name || '')) : 'no run yet' }; } },
-    { id: 'activator', title: 'PIM Activator', required: false, need: 'Admin',
+    { id: 'activator', title: 'Client onboarding', required: false, need: 'Admin',
       what: 'The browser extension admins activate with: the Entra apps, the settings, the Intune remediation and Edge for Business. Do the steps here, then confirm the rollout.',
       check: c => { const k = c.confirm && c.confirm.activator; return { done: !!k, note: k ? ('rolled out -- confirmed by ' + (k.by || 'an admin')) : 'the rollout is not confirmed yet' }; } },
     // (The "Discovery" step is gone -- owner 2026-10-08: "remove this as part of get started". The Discovery page and job stay.)
@@ -13185,12 +13385,12 @@
   async function gsFacts(force) {
     const c = { rows: {} };
     const safe = async (fn) => { try { return await fn(); } catch (_) { return null; } };
-    const [lic, perm, home, alerting, bg, gs, jobs] = await Promise.all([
+    const [lic, perm, home, alerting, bg, gs, jobs, mail] = await Promise.all([
       safe(() => api('GET', '/api/license')), safe(() => api('GET', '/api/permissions-health')), safe(() => api('GET', '/api/home')),
       safe(() => api('GET', '/api/alerting')), safe(() => api('GET', '/api/settings/breakglass-accounts')),
-      safe(() => api('GET', '/api/get-started')), safe(() => api('GET', '/api/jobs'))]);
+      safe(() => api('GET', '/api/get-started')), safe(() => api('GET', '/api/jobs')), safe(() => api('GET', '/api/settings/mail'))]);
     c.envName = await safe(() => api('GET', '/api/settings/environment-name'));
-    c.licence = lic; c.perm = perm; c.jobs = home && home.tiles && home.tiles.jobs; c.alerting = alerting; c.breakglass = bg;
+    c.licence = lic; c.perm = perm; c.mail = mail; c.jobs = home && home.tiles && home.tiles.jobs; c.alerting = alerting; c.breakglass = bg;
     c.confirm = (gs && gs.confirmations) || {};
     c.jobList = Array.isArray(jobs && jobs.jobs) ? jobs.jobs : [];
     c.discoveryJob = c.jobList.find(j => j && (j.type === 'discovery' || j.name === 'discovery')) || null;
@@ -13286,6 +13486,172 @@
     GET_STARTED_LAST = null;
     await renderGetStarted(GS_CUR);
   }
+  // ---- MAIL-1 (framework 12.3; PIM REQUIREMENTS 97.1; owner 2026-10-08: "2 options: shared mailbox or smtp relay" / "we
+  //      dont use certificates here, either interactive login or secret"). ONE form, used by Get Started > Mail sender AND
+  //      Settings > Mail & alerting > Mail sending, writing through ONE route (PUT /api/settings/mail). The commands it prints
+  //      download scripts that ARE published (https://invardia.com/support/pim/...) and sign in in the BROWSER -- never a
+  //      certificate. The SMTP password goes to the environment's Key Vault; it is never shown again and never stored here.
+  function mailSetupCmdMailbox(m) {
+    const s = (m && m.setup) || {};
+    const v = (x, ph) => (String(x || '').trim() || ph);
+    const mi = [s.managerObjectId, s.tickObjectId].map(x => String(x || '').trim()).filter(Boolean);
+    let run = '.\\Initialize-PimMailSender.ps1 -TenantId ' + v(s.tenantId, '<tenant id>');
+    if (mi.length) run += ' -ManagedIdentityObjectId ' + mi.join(',');
+    if (!s.tickObjectId && s.subscriptionId && s.resourceGroup && s.tickJobName) run += ' -SubscriptionId ' + s.subscriptionId + ' -ResourceGroup ' + s.resourceGroup + ' -TickJobName ' + s.tickJobName;
+    else if (!mi.length) run += ' -ManagedIdentityObjectId <manager identity object id>,<engine job identity object id>';
+    run += ' -SqlServerFqdn ' + v(s.sqlServer, '<server>.database.windows.net');
+    return 'Invoke-WebRequest ' + v(s.mailboxScript, 'https://invardia.com/support/pim/Initialize-PimMailSender.ps1') + ' -OutFile Initialize-PimMailSender.ps1\n' + run;
+  }
+  function mailSetupCmdPassword(m, smtp) {
+    const s = (m && m.setup) || {}; smtp = smtp || (m && m.smtp) || {};
+    const v = (x, ph) => (String(x || '').trim() || ph);
+    const mi = [s.managerObjectId, s.tickObjectId].map(x => String(x || '').trim()).filter(Boolean);
+    return 'Invoke-WebRequest ' + v(s.passwordScript, 'https://invardia.com/support/pim/Set-PimSmtpRelayPassword.ps1') + ' -OutFile Set-PimSmtpRelayPassword.ps1\n' +
+      '.\\Set-PimSmtpRelayPassword.ps1 -TenantId ' + v(s.tenantId, '<tenant id>') + ' -SubscriptionId ' + v(s.subscriptionId, '<subscription id>') +
+      ' -VaultName ' + v(smtp.vaultName || s.vaultHint, '<key vault name>') + (smtp.secretName && smtp.secretName !== 'PIM-SmtpRelayPassword' ? ' -SecretName ' + smtp.secretName : '') +
+      ' -ManagedIdentityObjectId ' + (mi.length ? mi.join(',') : '<manager identity object id>,<engine job identity object id>');
+  }
+  // The fields. prefix keeps element ids unique when the Settings card and Get Started are both in the DOM.
+  function mailSetupFieldsHtml(m, prefix) {
+    m = m || {}; const p = prefix || 'gsMail';
+    const mode = m.mode === 'smtp' ? 'smtp' : (m.mode === 'none' ? 'none' : 'sharedMailbox');
+    const s = m.smtp || {};
+    const val = (x) => escapeHtml(String(x == null ? '' : x));
+    const radio = (v, label) => '<label class="mailModeOpt" style="display:block;margin:2px 0;"><input type="radio" name="mailMode" value="' + v + '"' + (mode === v ? ' checked' : '') + '> ' + label + '</label>';
+    return '<div class="gs-facts mailNote">' + escapeHtml(String(m.note || '')) + '</div>' +
+      '<div class="gs-l">How PIM Manager sends mail</div>' +
+      radio('sharedMailbox', '<b>Shared mailbox</b> (Exchange Online) -- PIM sends as its own identity, scoped to that one mailbox. No password.') +
+      radio('smtp', '<b>SMTP relay</b> -- a mail server you already use (host, port, user name and password).') +
+      (mode === 'none' ? radio('none', '<b>None</b> -- mail is switched off.') : '') + gsErr('mode') +
+      '<div class="mailSec" data-mail-sec="sharedMailbox"' + (mode === 'sharedMailbox' ? '' : ' style="display:none;"') + '>' +
+        '<div class="gs-sub">Create the shared mailbox</div>' +
+        '<div class="gs-hint">An Exchange or Global Administrator downloads the setup script from Invardia and runs it once. It signs in in the browser (no certificate, no PowerShell modules), creates the mailbox, scopes the send right to that one mailbox (never tenant-wide) and fills it in here:</div>' +
+        gsCode(p + 'MailboxCmd', mailSetupCmdMailbox(m)) +
+        '<label class="gs-l" for="' + p + 'Sender">Or use a mailbox that already exists</label>' +
+        '<input type="text" id="' + p + 'Sender" name="mailSender" value="' + val(m.sender) + '" placeholder="pim-notifications@yourdomain.com">' + gsErr('sender') +
+        '<div class="gs-hint">The script scopes an existing mailbox too: add <code>-MailboxName &lt;name&gt; -MailDomain &lt;domain&gt;</code> to the command.</div>' +
+      '</div>' +
+      '<div class="mailSec" data-mail-sec="smtp"' + (mode === 'smtp' ? '' : ' style="display:none;"') + '>' +
+        '<div class="gs-sub">SMTP relay</div>' +
+        '<label class="gs-l" for="' + p + 'Host">Server</label><input type="text" id="' + p + 'Host" name="smtpHost" value="' + val(s.host) + '" placeholder="smtp.example.com">' + gsErr('smtpHost') +
+        '<label class="gs-l" for="' + p + 'Port">Port</label><input type="text" id="' + p + 'Port" name="smtpPort" value="' + val(s.port || 587) + '" style="width:90px;">' + gsErr('smtpPort') +
+        '<label class="gs-l" for="' + p + 'Sec">Encryption</label><select id="' + p + 'Sec" name="smtpSecurity"><option value="starttls"' + (s.security !== 'none' ? ' selected' : '') + '>STARTTLS (recommended)</option><option value="none"' + (s.security === 'none' ? ' selected' : '') + '>None (an internal relay only)</option></select>' + gsErr('smtpSecurity') +
+        '<label class="gs-l" for="' + p + 'From">From address</label><input type="text" id="' + p + 'From" name="smtpFrom" value="' + val(s.from) + '" placeholder="pim@yourdomain.com">' + gsErr('smtpFrom') +
+        '<label class="gs-l" for="' + p + 'User">User name (leave empty when the relay needs no sign-in)</label><input type="text" id="' + p + 'User" name="smtpUser" value="' + val(s.username) + '">' + gsErr('smtpUser') +
+        '<label class="gs-l" for="' + p + 'Pw">Password</label><input type="password" id="' + p + 'Pw" name="smtpPassword" value="" autocomplete="new-password" placeholder="' + (s.username ? 'unchanged -- type to replace it' : '') + '">' + gsErr('smtpPassword') +
+        '<label class="gs-l" for="' + p + 'Vault">Key Vault that keeps the password</label><input type="text" id="' + p + 'Vault" name="smtpVault" value="' + val(s.vaultName || ((m.setup || {}).vaultHint) || '') + '" placeholder="the environment\'s key vault">' + gsErr('smtpVault') +
+        '<label class="gs-l" for="' + p + 'Secret">Secret name</label><input type="text" id="' + p + 'Secret" name="smtpSecret" value="' + val(s.secretName || 'PIM-SmtpRelayPassword') + '">' + gsErr('smtpSecret') +
+        '<div class="gs-hint">The password is written to that Key Vault (never to the settings, never shown again) and read when a mail is sent. If PIM Manager may not write the vault, a person who may runs this once (browser sign-in, it asks for the password):</div>' +
+        gsCode(p + 'PwCmd', mailSetupCmdPassword(m, s)) +
+      '</div>' +
+      '<label class="gs-l" for="' + p + 'TestTo">Send the test mail to</label><input type="text" id="' + p + 'TestTo" name="mailTestTo" value="" placeholder="your own address (empty = you)">' + gsErr('to') +
+      '<div class="gs-actions"><button type="button" class="gsAction mailTestBtn btn-sec" data-act="test">Save and send a test mail</button> <button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>';
+  }
+  function mailSetupWire(root) {
+    if (!root) return;
+    const show = () => {
+      const sel = root.querySelector('input[name="mailMode"]:checked');
+      const v = sel ? sel.value : 'sharedMailbox';
+      root.querySelectorAll('.mailSec').forEach(el => { el.style.display = el.dataset.mailSec === v ? '' : 'none'; });
+    };
+    root.querySelectorAll('input[name="mailMode"]').forEach(r => r.addEventListener('change', show));
+    show();
+  }
+  // Read the form -> the PUT body. Fields of the mode NOT chosen are not sent (switching never loses the other settings).
+  function mailSetupCollect(root, m) {
+    const g = (n) => { const el = root.querySelector('[name="' + n + '"]'); return el ? String(el.value || '').trim() : ''; };
+    const sel = root.querySelector('input[name="mailMode"]:checked');
+    const body = { mode: sel ? sel.value : ((m && m.mode) || 'sharedMailbox') };
+    if (body.mode === 'sharedMailbox') { const s = g('mailSender'); if (s && s !== String((m && m.sender) || '')) body.sender = s; }
+    if (body.mode === 'smtp') {
+      body.smtp = { host: g('smtpHost'), port: g('smtpPort'), security: g('smtpSecurity') || 'starttls', from: g('smtpFrom'), username: g('smtpUser'), vaultName: g('smtpVault'), secretName: g('smtpSecret') };
+      const pwEl = root.querySelector('[name="smtpPassword"]'); const pw = pwEl ? String(pwEl.value || '') : '';
+      if (pw) body.password = pw;
+    }
+    return body;
+  }
+  // Checked in the page first (nothing is sent when a field is wrong), then the server checks again.
+  function mailSetupValidate(body) {
+    const e = {};
+    const isMail = (x) => /^[^@\s<>"(),;:]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(String(x || ''));
+    if (body.sender && !isMail(body.sender)) e.sender = 'Not a mail address: ' + body.sender;
+    if (body.smtp) {
+      if (!body.smtp.host) e.smtpHost = 'Enter the SMTP server (for example smtp.example.com).';
+      const port = Number(body.smtp.port || 587);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) e.smtpPort = 'Not a port: ' + body.smtp.port + ' (1-65535)';
+      else if (port === 465) e.smtpPort = 'Port 465 (implicit TLS) is not supported -- use 587 with STARTTLS.';
+      if (!body.smtp.from) e.smtpFrom = 'Enter the From address the mail is sent as.'; else if (!isMail(body.smtp.from)) e.smtpFrom = 'Not a mail address: ' + body.smtp.from;
+      if (body.smtp.username && !body.smtp.vaultName) e.smtpVault = 'Enter the Key Vault that keeps the password.';
+      if (body.password && !body.smtp.username) e.smtpUser = 'A password needs a user name.';
+    }
+    return e;
+  }
+  function mailSetupMapErrors(errors) {
+    const map = { 'smtp.host': 'smtpHost', 'smtp.port': 'smtpPort', 'smtp.security': 'smtpSecurity', 'smtp.from': 'smtpFrom', 'smtp.username': 'smtpUser', 'smtp.vaultName': 'smtpVault', 'smtp.secretName': 'smtpSecret', 'smtp.password': 'smtpPassword' };
+    const out = {}; Object.keys(errors || {}).forEach(k => { out[map[k] || k] = errors[k]; }); return out;
+  }
+  // Save through PUT /api/settings/mail -> { wrote, note, state } | { errors }. Nothing changed -> { wrote: false }.
+  async function mailSetupSave(root, m) {
+    const body = mailSetupCollect(root, m);
+    const changed = body.mode !== ((m && m.mode) || 'sharedMailbox') || !!body.sender || !!body.smtp;
+    if (!changed) return { wrote: false };
+    const errs = mailSetupValidate(body);
+    if (Object.keys(errs).length) return { errors: errs };
+    try {
+      const r = await api('PUT', '/api/settings/mail', body);
+      const pwEl = root.querySelector('[name="smtpPassword"]'); if (pwEl) pwEl.value = '';
+      let note = body.mode === 'smtp' ? 'SMTP relay saved.' : (body.mode === 'none' ? 'Mail switched off.' : 'Shared mailbox saved.');
+      if (r && r.password && r.password.stored === false) note += ' The password was NOT stored: ' + r.password.reason + ' -- run the Key Vault command shown here.';
+      else if (r && r.password && r.password.stored) note += ' Password stored in Key Vault.';
+      return { wrote: true, note: note, state: r, passwordRefused: !!(r && r.password && r.password.stored === false) };
+    } catch (e) {
+      const b = e && e.body;
+      if (b && b.errors) return { errors: mailSetupMapErrors(b.errors) };
+      return { errors: { _: 'Nothing was saved: ' + gsErrText(e) } };
+    }
+  }
+  async function mailSetupTest(root) {
+    const el = root.querySelector('[name="mailTestTo"]'); const to = el ? String(el.value || '').trim() : '';
+    return api('POST', '/api/settings/mail/test', to ? { to: to } : {});
+  }
+  // Settings > Mail & alerting > Mail sending: the same fields, a Save button, the same test mail.
+  async function renderMailTransportCard() {
+    const host = document.getElementById('setMailTransportBody'); if (!host) return;
+    let m = null;
+    try { m = await api('GET', '/api/settings/mail'); }
+    catch (e) { host.innerHTML = '<div style="color:#cf222e;font-size:12px;">Could not read how mail is sent: ' + escapeHtml(gsErrText(e)) + '</div>'; return; }
+    const canWrite = !!(m && m.canWrite);
+    host.innerHTML = '<form class="mailSetupForm" novalidate autocomplete="off"><div class="gsProblem" role="alert" style="display:none;"></div>' + mailSetupFieldsHtml(m, 'setMail') +
+      (canWrite ? '<div style="margin-top:8px;"><button type="button" class="primary mailSaveBtn">Save</button></div>' : '<div class="gs-hint">Only an Admin can change how mail is sent.</div>') + '</form>';
+    const form = host.querySelector('.mailSetupForm');
+    mailSetupWire(form);
+    form.addEventListener('submit', (e) => e.preventDefault());
+    form.querySelectorAll('.gsCopy').forEach(b => b.onclick = () => { const el = document.getElementById(b.dataset.src); try { navigator.clipboard.writeText(el ? el.textContent : ''); sharedToast('Copied'); } catch (_) { } });
+    const say = (t, bad) => { const el = form.querySelector('.gsActMsg'); if (el) { el.textContent = t; el.style.color = bad ? '#cf222e' : '#1a7f37'; } };
+    const save = async () => {
+      gsClearErrors(form);
+      const r = await mailSetupSave(form, m);
+      if (r.errors) { gsShowErrors(form, r.errors); return false; }
+      if (r.wrote) { try { sharedToast(r.note); } catch (_) { } if (r.state) m = r.state; GET_STARTED_LAST = null; }
+      return true;
+    };
+    const sb = form.querySelector('.mailSaveBtn'); if (sb) sb.onclick = async () => { sb.disabled = true; try { if (await save()) await renderMailTransportCard(); } finally { if (sb.isConnected) sb.disabled = false; } };
+    const tb = form.querySelector('.mailTestBtn');
+    if (tb) {
+      if (!canWrite) tb.disabled = true;
+      tb.onclick = async () => {
+        tb.disabled = true;
+        try {
+          if (!(await save())) return;
+          say('Sending a test mail...');
+          try { const r = await mailSetupTest(form); say((r && r.note) || ((r && r.ok) ? 'Sent.' : 'Not sent.'), !(r && r.ok)); GET_STARTED_LAST = null; }
+          catch (e) { const b = e && e.body; say('Not sent: ' + ((b && b.error) || gsErrText(e)), true); }
+        } finally { if (tb.isConnected) tb.disabled = false; }
+      };
+    }
+    const rb = form.querySelector('.gsAction[data-act="recheck"]'); if (rb) rb.onclick = () => renderMailTransportCard();
+  }
+
   // ---- the step forms: body(c, st) = the fields; load(c) = data the fields need; save(form, c, st) = the SAME route the
   //      normal page uses -> { wrote, note } | { errors: { <field>: why } } (refused: nothing written); actions = buttons ----
   // Naming step: the fields a new tenant has to decide before anything is named, each with what it renders as. Saved as
@@ -13457,6 +13823,7 @@
             miss.map(m => '<tr><td><code>' + escapeHtml(String(m.role || '')) + '</code></td><td>' + escapeHtml(String(m.capability || '')) + '</td></tr>').join('') + '</table>';
         }
         if (d.objectId && d.azureOk === false) h += '<div class="gs-facts">Azure resource roles cannot be assigned yet: the engine identity needs <b>User Access Administrator</b> at the tenant root management group.</div>';
+        if (d.objectId) h += permRootLines(d);   // §97: both tenant-root lines, always shown
         if (permFixNeeded(d, miss)) h += '<div class="gs-hint">This page cannot grant permissions itself (on purpose: an identity that can grant permissions could give itself anything). A Global Administrator downloads the script from Invardia and runs it once (no PowerShell modules needed, sign-in in the browser):</div>' + gsCode('gsPermScript', permFixScript(d, miss));
         return h + '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>';
       },
@@ -13465,19 +13832,20 @@
       }
     },
     mail: {
-      body: (c) => {
-        const s = String((c.perm && c.perm.mail && c.perm.mail.sender) || '');
-        const tid = String((c.perm && c.perm.tenantId) || '<tenant id>'), mi = String((c.perm && c.perm.objectId) || '<engine identity object id>');
-        return '<div class="gs-facts">' + (s ? 'PIM sends as <b>' + escapeHtml(s) + '</b>.' : 'No sender mailbox yet -- TAP codes, approvals and alerts are not sent.') + '</div>' +
-          '<div class="gs-hint">The mailbox and its send right (scoped to that one mailbox, never tenant-wide) are made by a setup script that an Exchange or Global Administrator runs once. Download it from Invardia, then run it:</div>' +
-          gsCode('gsMailCmd', 'Invoke-WebRequest https://invardia.com/support/pim/Initialize-PimMailSender.ps1 -OutFile Initialize-PimMailSender.ps1\n' +
-            '.\\Initialize-PimMailSender.ps1 -TenantId ' + tid + ' -AdminAppId <setup app id> -AdminCertThumbprint <certificate thumbprint> -ManagedIdentityObjectId ' + mi + ' -SqlServerFqdn <server>.database.windows.net') +
-          '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="test">Send a test mail</button> <button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>' +
-          '<div class="gs-hint">The test mail goes to the alert recipients (a later step).</div>';
-      },
+      // MAIL-1: the TWO modes (shared mailbox: create via the published script, or use an existing one; SMTP relay: the
+      // fields + the password that goes to Key Vault), the same form and route as Settings > Mail & alerting.
+      load: async () => api('GET', '/api/settings/mail'),
+      body: (c, m) => mailSetupFieldsHtml(m, 'gsMail'),
+      wire: (card) => mailSetupWire(card),
+      save: async (form, c, m) => mailSetupSave(form, m),
       actions: {
-        test: async (x) => { x.say('Sending...'); try { const r = await api('POST', '/api/alerting/test'); x.say((r && r.note) || ((r && r.ok) ? 'Sent.' : 'Not sent.'), !(r && r.ok)); } catch (e) { x.say('Not sent: ' + gsErrText(e), true); } },
-        recheck: async (x) => { try { await api('GET', '/api/permissions-health?refresh=1'); } catch (_) { } GET_STARTED_LAST = null; await x.rerender(); }
+        test: async (x) => {
+          if (!(await x.saveFirst())) return;
+          x.say('Sending a test mail...');
+          try { const r = await mailSetupTest(x.form); x.say((r && r.note) || ((r && r.ok) ? 'Sent.' : 'Not sent.'), !(r && r.ok)); GET_STARTED_LAST = null; }
+          catch (e) { const b = e && e.body; x.say('Not sent: ' + ((b && b.error) || gsErrText(e)), true); }
+        },
+        recheck: async (x) => { GET_STARTED_LAST = null; await x.rerender(); }
       }
     },
     departments: {
@@ -14034,9 +14402,9 @@
     return [
       { id: 'apps', title: 'Entra apps', required: true, done: appsDone, note: appsNote },
       { id: 'catalog', title: 'Settings', required: true, done: !!(p.appId || (ACT.built && ACT.built.ok)), note: ACT.built ? 'built for ' + actLabel(ACT.built.channel) : 'defaults from this environment' },
-      { id: 'intune', title: 'Intune remediation', required: true, done: false, manual: true, note: 'run the command (the Manager does not read Intune)' },
+      { id: 'intune', title: 'Intune remediation', required: false, done: false, manual: true, note: 'with Intune: run the command (the Manager does not read Intune)' },
       { id: 'edge', title: 'Edge for Business', required: true, done: false, manual: true, note: 'set in the Microsoft 365 admin center (no API)' },
-      { id: 'servers', title: 'Servers without Intune', required: false, done: false, note: 'optional' },
+      { id: 'servers', title: 'PCs & servers without Intune', required: false, done: false, manual: true, note: 'no Intune? run the script on each PC or server' },
     ];
   }
   async function renderActivator(stepId, hostEl) {
@@ -14058,7 +14426,7 @@
     const pill = (s, i) => '<button class="actPill act-pill' + (i === idx ? ' cur' : s.done ? ' done' : s.manual ? ' manual' : s.required ? ' open' : '') + '" data-step="' + s.id + '">' +
       (s.done ? '&#10003; ' : s.manual ? '&#9998; ' : s.required ? '<b>!</b> ' : '') + (i + 1) + '. ' + escapeHtml(s.title) + (s.required ? '' : ' <span style="opacity:.75;">(optional)</span>') + '</button>';
     host.innerHTML =
-      '<div class="act-head"><div><div class="act-title">PIM Activator</div>' +
+      '<div class="act-head"><div><div class="act-title">Client onboarding &middot; PIM Activator</div>' +
         '<div class="act-sub">The browser extension your admins activate PIM with, in tenant <code>' + escapeHtml(d.tenantId || '') + '</code>. Edge is installed by <b>Edge for Business</b>, the <b>Intune remediation</b> gives it its settings (Edge and Chrome). ' +
         'This page writes nothing to your tenant: each step gives you the command to run, filled in for this environment, and to whom it deploys.</div></div>' +
         '<div class="act-who" id="actWho">Who gets it: <b>' + escapeHtml(actWhoText('Released')) + '</b><br><b>' + escapeHtml(actWhoText('Test')) + '</b></div></div>' +
@@ -14178,16 +14546,28 @@
       '<div class="act-h2">Who gets it</div>' + actPicker(ch) +
       '<div class="act-form"><label>When</label><span class="act-row">daily at <input id="actTime" value="' + escapeHtml(s.dailyTime || '09:00') + '" style="width:70px;"> or every <input id="actEvery" type="number" min="1" max="23" value="' + escapeHtml(s.everyHours || '') + '" placeholder="-" class="act-num"> hour(s)</span></div>' +
       '<div class="act-h2">The command</div><div id="actPubCmd" class="act-dim">Building&hellip;</div>' +
-      '<div class="act-dim">What it needs: this one file, Windows PowerShell 5.1 or PowerShell 7, and an Intune Administrator sign-in in the browser (no PowerShell modules). Change the channel or the settings in step 2.</div>';
+      '<div class="act-dim">What it needs: this one file, Windows PowerShell 5.1 or PowerShell 7, and an Intune Administrator sign-in in the browser (no PowerShell modules). Change the channel or the settings in step 2.</div>' +
+      // Owner 2026-10-08: "only support scripts or hand in Intune. make the download the two files next to the create by scripts.
+      // it must expand by default" -- the by-hand route, open, next to the command. A download only: nothing is sent to Intune.
+      '<details id="actHand" class="act-hand" open><summary class="act-h2">Or by hand in Intune</summary>' +
+      '<div class="act-row"><button type="button" id="actHandDl" class="btn-sec" disabled>Download the two files</button> <span id="actHandMsg" class="act-dim"></span></div>' +
+      '<div class="act-dim">Intune admin center &rsaquo; Devices &rsaquo; Scripts and remediations &rsaquo; Create: <i>Detect-PimActivator.ps1</i> as the detection script, <i>Remediate-PimActivator.ps1</i> as the remediation script; run as SYSTEM, 64-bit PowerShell, no signature check. Assign it to the group above (' + escapeHtml(actLabel(ch)) + ') -- never all users / all devices.</div></details>';
     const show = async () => {
       const out = document.getElementById('actPubCmd'); if (!out) return;
+      const dl = document.getElementById('actHandDl'), hm = document.getElementById('actHandMsg');
       try {
         const r = await actBuild(), cmd = (r.commands || {}).remediation || '';
         out.className = '';
         out.innerHTML = cmd ? actScript('actPubCmdText', 'Publish-PimActivatorRemediation.ps1', cmd, ch, 'the settings')
           : '<span class="bad">Create the ' + actLabel(ch) + ' app first (step 1) -- the command needs its client id (or type it in step 2).</span>';
         actWireCopy(out);
-      } catch (e) { out.innerHTML = '<span class="bad">' + escapeHtml(e.message) + '</span>'; }
+        if (dl) {
+          const ok = !!(r && r.detect && r.remediate);
+          dl.disabled = !ok;
+          if (hm) hm.textContent = ok ? 'built for ' + actLabel(ch) + ' with the settings from step 2' : 'needs the ' + actLabel(ch) + ' app first (step 1)';
+          dl.onclick = () => { actDownload('Detect-PimActivator.ps1', r.detect); setTimeout(() => actDownload('Remediate-PimActivator.ps1', r.remediate), 400); };
+        }
+      } catch (e) { out.innerHTML = '<span class="bad">' + escapeHtml(e.message) + '</span>'; if (hm) hm.textContent = ''; }
     };
     const readSched = () => {
       const t = (document.getElementById('actTime').value || '').trim(), e = (document.getElementById('actEvery').value || '').trim();
@@ -14273,7 +14653,7 @@
 
   function actStepServers(body, d) {
     body.innerHTML =
-      '<div class="act-p">Servers and devices without Intune: run as administrator on the machine. It writes the install and the settings policies for Edge and Chrome, the same as Edge for Business + the Remediation do, for everyone who uses that machine. Who may sign in stays the group assigned to the app in step 1.</div>' +
+      '<div class="act-p"><b>No Intune yet?</b> Onboard each admin PC (or server) with this script instead of the Intune remediation -- run it as administrator on the machine. It writes the install and the settings policies for Edge and Chrome, the same as Edge for Business + the Remediation do, for everyone who uses that machine. Who may sign in stays the group assigned to the app in step 1.</div>' +
       '<div id="actServerOut" class="act-dim">Building&hellip;</div>' +
       '<div class="act-dim">What it needs: this one file, an elevated PowerShell. With the tenant and app filled in it signs in to nothing. Domain-joined estates without Intune: <code>Deploy-PimActivatorHybrid.ps1 -Target DomainGpo</code> writes the same through a GPO.</div>';
     (async () => {
@@ -15187,7 +15567,8 @@
     if (!b) {
       b = document.createElement('span');
       b.className = 'badge queue-badge';
-      b.style.cssText = 'background:#cf222e;color:#fff;border-radius:999px;min-width:18px;height:18px;' +
+      // §97.3 / framework §12.5: the queue count is INFORMATIONAL -- blue; red counts mean "blocked, waiting for a decision".
+      b.style.cssText = 'background:#0969da;color:#fff;border-radius:999px;min-width:18px;height:18px;' +
         'display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;' +
         'line-height:1;padding:0 5px;margin-left:6px;box-shadow:0 0 0 2px #fff;vertical-align:top;' +
         'position:relative;top:-6px;cursor:pointer;';
@@ -20856,7 +21237,7 @@
     catch (_) { r = Date.now().toString(16) + Math.random().toString(16).slice(2) + Math.random().toString(16).slice(2); }
     return ('c' + r).slice(0, 33);
   }
-  // 🔴 §97.1 (EFIF 2026-10-08): a 168-row commit took 132 s on the server, the page gave up at 120 s and said
+  // 🔴 §97.1 (a test environment, 2026-10-08): a 168-row commit took 132 s on the server, the page gave up at 120 s and said
   // "Commit FAILED ... Not saved" -- for a commit the server HAD saved. A commit PUT now waits longer (the server is one
   // request loop: nothing is gained by leaving early), and NO ANSWER IS NOT A FAILURE: commitPutOnce asks the server what
   // happened to this commit id and reports that -- saved, refused (the refusal itself), or not saved -- and only when even
@@ -21330,6 +21711,7 @@
   // VAL_STATE.report is the live report from /api/preflight; VAL_STATE.filters
   // drives the UI; blockOnErrors mirrors the "Block Save" toggle.
   const VAL_STATE = {
+    queueQuiet: true,                                    // the commit queue shows only BLOCKING errors (owner 2026-10-08)
     report: null,                                        // { violations, ranAt, cacheFreshness, summary }
     inFlight: false,
     blockOnErrors: true,
@@ -23240,7 +23622,10 @@
       bar.innerHTML = '<div class="save-val-banner err">' +
         '<span>&#9888; <b>' + s.errors + '</b> validation error(s) (Block-Save toggle is OFF -- you can still commit).</span>' +
         '<span class="spacer"></span><a data-act="show-val">Show validation errors</a></div>';
-    } else if (s.warnings > 0 || s.infos > 0) {
+    } else if ((s.warnings > 0 || s.infos > 0) && !VAL_STATE.queueQuiet) {
+      // Owner 2026-10-08: "it makes no sense to show these problems in the commit queue. it is only relevant if there are
+      // blockers" -- the queue shows ERRORS only (above); warnings and info notes live on Check for problems. The old
+      // banner below stays reachable for the validation page itself (queueQuiet = false there).
       // §70.20 (operator 2026-09-13: "i want ability to hide this, it is mostly noise" -- "0 warning(s), 425 info(s)").
       // Info findings are FYI (e.g. "this AU will be created"), not something to review before every commit: with no
       // warnings the line is a quiet grey note, and either form can be hidden (remembered in this browser) until the
@@ -23262,6 +23647,8 @@
       if (hide) hide.onclick = () => { try { localStorage.setItem('pimValBannerHidden', sig); } catch (_) { } renderSaveValBanner(); };
       const unhide = bar.querySelector('a[data-act=unhide-val]');
       if (unhide) unhide.onclick = () => { try { localStorage.removeItem('pimValBannerHidden'); } catch (_) { } renderSaveValBanner(); };
+    } else if (s.warnings > 0 || s.infos > 0) {
+      bar.innerHTML = '';   // queue: nothing blocks -> nothing to show (warnings / notes are on Check for problems)
     } else {
       bar.innerHTML = '<div class="save-val-banner warn" style="background:#dafbe1; border-color:#1a7f37; color:#1a7f37;">' +
         '<span>&#10003; All pre-flight checks pass.</span></div>';
@@ -28336,6 +28723,12 @@
     showDeleted: false,    // §70.22: rows held by DELETED principals are hidden unless ticked
     showManaged: false,    // 2026-10-07: rows PIM Manager manages are hidden unless ticked (this page is for cleanup)
     managedKnown: false,   // ...only once the engine's drift read has said which rows those are
+    // 2026-10-08 (owner): hidden unless ticked -- PIM Manager's own identities, the Invardia Support app, break-glass accounts
+    showProduct: false,
+    showSupport: false,
+    showBreakGlass: false,
+    ownKnown: null,        // { product, support, breakGlass } from the server: false = could not be checked
+    ownErrors: [],
     textFilter: '',        // free-text against principal/role/scope
     sortKey: 'principal',  // principal | role | scope | type | start | end
     sortDir: 1,            // 1 asc, -1 desc
@@ -28441,6 +28834,33 @@
   // principal is -- a group or an app holding a directory role reads very differently from a
   // person. An id that could not be resolved is called out as deleted rather than left blank:
   // a role still held by a principal that no longer exists is a finding.
+  // Owner 2026-10-08 ("default it must not show permissions related to pim manager + invardia support app + emergency
+  // accounts delegations (defined in PIM manager). make option to tick them on"). The server sets r.ownKind.
+  const REV_OWN = {
+    product:    { flag: 'showProduct',    label: 'PIM MANAGER', bg: '#6639ba', note: 'PIM Manager',
+                  title: 'PIM Manager runs with this access (one of its own identities). Removing it stops PIM Manager.' },
+    support:    { flag: 'showSupport',    label: 'SUPPORT APP', bg: '#0969da', note: 'Invardia Support app',
+                  title: 'The Invardia Support app. Its access is granted and taken back with the support access script.' },
+    breakglass: { flag: 'showBreakGlass', label: 'BREAK-GLASS', bg: '#cf222e', note: 'break-glass',
+                  title: 'An emergency (break-glass) account set in PIM Manager. A revoke never touches it: it is skipped and reported.' }
+  };
+  function revOwnKind(r) { const k = String((r && r.ownKind) || ''); return REV_OWN[k] ? k : ''; }
+  function revOwnBadge(r) {
+    const k = revOwnKind(r);
+    if (!k) return '';
+    const d = REV_OWN[k];
+    return '<span class="rev-own rev-own-' + k + '" title="' + escapeHtml(d.title) + '" style="display:inline-block;margin-left:6px;padding:0 6px;border-radius:10px;font-size:10.5px;font-weight:700;letter-spacing:.4px;color:#fff;background:' + d.bg + ';">' + d.label + '</span>';
+  }
+  // The ONE rule for which rows a tick hides -- the table, the chips' counts and the "n hidden" note all use it.
+  // Returns the reason a row is hidden ('deleted' | 'managed' | 'product' | 'support' | 'breakglass') or ''.
+  function revHiddenReason(r) {
+    if (!REV.showDeleted && String(r.principalKind || '') === 'deleted') return 'deleted';
+    const k = revOwnKind(r);
+    if (k && !REV[REV_OWN[k].flag]) return k;
+    if (!REV.showManaged && r.managed === true) return 'managed';
+    return '';
+  }
+
   function revPrincipalCell(r) {
     const id = String(r.principalId || '');
     const name = String(r.principal || '');
@@ -28448,7 +28868,9 @@
     const kindChip = (kind && kind !== 'user'
       ? '<span class="rev-kind rev-kind-' + escapeHtml(kind) + '">' + escapeHtml(kind === 'servicePrincipal' ? 'app' : kind) + '</span>' : '') +
       // 2026-10-07 (operator: "a clear marking MANAGED"): shown only when "show managed by PIM Manager" is ticked.
-      (r.managed === true ? '<span class="rev-managed" title="PIM Manager manages this assignment: its engine keeps it as your configuration says. Removing it here does not stick -- change the configuration instead." style="display:inline-block;margin-left:6px;padding:0 6px;border-radius:10px;font-size:10.5px;font-weight:700;letter-spacing:.4px;color:#fff;background:#1a7f37;">MANAGED</span>' : '');
+      (r.managed === true ? '<span class="rev-managed" title="PIM Manager manages this assignment: its engine keeps it as your configuration says. Removing it here does not stick -- change the configuration instead." style="display:inline-block;margin-left:6px;padding:0 6px;border-radius:10px;font-size:10.5px;font-weight:700;letter-spacing:.4px;color:#fff;background:#1a7f37;">MANAGED</span>' : '') +
+      // Owner 2026-10-08: shown only when that group's tick is on (hidden by default).
+      revOwnBadge(r);
     if (!name || name === id) {
       return '<span class="rev-p-unres" title="This object id could not be resolved in the directory">' + escapeHtml(id || '(unknown)') + '</span>' + kindChip;
     }
@@ -28495,6 +28917,8 @@
       REV.rows = Array.isArray(data && data.rows) ? data.rows : [];
       REV.managedKnown = !!(data && data.managedKnown);
       REV.managedComputedUtc = (data && data.managedComputedUtc) || '';
+      REV.ownKnown = (data && data.ownKnown) || null;
+      REV.ownErrors = (data && Array.isArray(data.ownErrors)) ? data.ownErrors : [];
       // Surface-level read failures (auth / missing app-role / no subscription
       // scope) so the empty state shows an ACTIONABLE error instead of the
       // misleading "Cache may be empty -- click Refresh."
@@ -28575,9 +28999,9 @@
     const tf = REV.typeFilter;
     let rows = REV.rows;
     // §70.22: deleted principals hidden by default; the 'deleted' chip (shown only when ticked) lists only them.
-    if (!REV.showDeleted) rows = rows.filter(r => String(r.principalKind || '') !== 'deleted');
     // 2026-10-07: what PIM Manager manages is hidden by default -- this page is for cleaning up what it does NOT manage.
-    if (!REV.showManaged) rows = rows.filter(r => r.managed !== true);
+    // 2026-10-08: so are PIM Manager's own identities, the Invardia Support app and the break-glass accounts (revHiddenReason).
+    rows = rows.filter(r => !revHiddenReason(r));
     if (tf === 'deleted') rows = rows.filter(r => String(r.principalKind || '') === 'deleted');
     else if (tf && tf !== 'all') rows = rows.filter(r => r.type === tf);
     if (q) {
@@ -28611,8 +29035,31 @@
     // Per-type counters (over the rows the operator can see: deleted principals count only when shown, §70.22).
     const deletedN = REV.rows.filter(r => String(r.principalKind || '') === 'deleted').length;
     const managedN = REV.rows.filter(r => r.managed === true).length;
-    const countable = (REV.showDeleted ? REV.rows : REV.rows.filter(r => String(r.principalKind || '') !== 'deleted'))
-      .filter(r => REV.showManaged || r.managed !== true);
+    const countable = REV.rows.filter(r => !revHiddenReason(r));
+    // Owner 2026-10-08: the three own-access groups -- a count on each tick, and every hidden row counted in the note.
+    const ownN = { product: 0, support: 0, breakglass: 0 };
+    for (const r of REV.rows) { const k = revOwnKind(r); if (k) ownN[k]++; }
+    const ownTog = { product: ['revProductToggle', 'revShowProduct', "show PIM Manager's own identities", 'product'],
+                     support: ['revSupportToggle', 'revShowSupport', 'show the Invardia Support app', 'support'],
+                     breakglass: ['revBreakGlassToggle', 'revShowBreakGlass', 'show break-glass accounts', 'breakGlass'] };
+    for (const k in ownTog) {
+      const t = ownTog[k], lab = document.getElementById(t[0]), cbx = document.getElementById(t[1]);
+      if (cbx) cbx.checked = !!REV[REV_OWN[k].flag];
+      if (lab) {
+        const known = !REV.ownKnown || REV.ownKnown[t[3]] !== false;
+        lab.lastChild.textContent = ' ' + t[2] + (known ? ' (' + ownN[k] + ')' : ' (could not be checked -- see the note below the bar)');
+      }
+    }
+    const hiddenBy = {};
+    let hiddenN = 0;
+    for (const r of REV.rows) { const why = revHiddenReason(r); if (why) { hiddenN++; hiddenBy[why] = (hiddenBy[why] || 0) + 1; } }
+    const hn = document.getElementById('revHiddenNote');
+    if (hn) {
+      const names = { product: 'PIM Manager', support: 'Invardia Support app', breakglass: 'break-glass', managed: 'managed', deleted: 'deleted' };
+      const parts = Object.keys(names).filter(k => hiddenBy[k]).map(k => hiddenBy[k] + ' ' + names[k]);
+      hn.textContent = hiddenN ? (hiddenN + ' hidden (' + parts.join(', ') + ')') : '';
+      hn.style.display = hiddenN ? '' : 'none';
+    }
     const mgToggle = document.getElementById('revManagedToggle');
     if (mgToggle) {
       const mcb = document.getElementById('revShowManaged');
@@ -29286,6 +29733,9 @@
     if (REV.refreshQueued && !REV.snapshotMissing) bits.push('A new read is <b>queued</b> for the scheduler (within ~5 min). The table below is still the snapshot shown above; reopen the tab or press Refresh later to see it.');
     if (REV.stale) bits.push('This snapshot is <b>stale</b> (older than two cadences). Check the <b>active-assignments-snapshot</b> job on the Jobs page.');
     if (REV.revokeQueued.size > 0) bits.push(REV.revokeQueued.size + ' row(s) marked <b>revoke queued</b> stay listed until the engine applies the revoke and the next snapshot is read.');
+    // Owner 2026-10-08: when PIM Manager could not tell which rows are its own / the support app's / break-glass, say so --
+    // those rows are then listed like any other, never silently dropped.
+    if (Array.isArray(REV.ownErrors) && REV.ownErrors.length) bits.push('Not every row of PIM Manager\'s own access could be recognised: ' + REV.ownErrors.map(e => escapeHtml(String(e))).join('; ') + '.');
     note.innerHTML = bits.join(' ');
     note.style.display = bits.length ? 'block' : 'none';
     note.classList.toggle('warn', !!REV.stale);
@@ -29317,6 +29767,17 @@
       if (!REV.showManaged) { for (const r of REV.rows) { if (r.managed === true) REV.selected.delete(r.id); } }
       renderRevokeTable();
     };
+    // Owner 2026-10-08: PIM Manager's own identities / the Invardia Support app / break-glass -- hidden by default, one tick each.
+    [['revShowProduct', 'product'], ['revShowSupport', 'support'], ['revShowBreakGlass', 'breakglass']].forEach(([cbId, kind]) => {
+      const cb = document.getElementById(cbId);
+      if (!cb) return;
+      cb.onchange = () => {
+        REV[REV_OWN[kind].flag] = !!cb.checked;
+        // hiding them again must not leave hidden rows selected for a revoke
+        if (!cb.checked) { for (const r of REV.rows) { if (revOwnKind(r) === kind) REV.selected.delete(r.id); } }
+        renderRevokeTable();
+      };
+    });
     const showDel = document.getElementById('revShowDeleted');
     if (showDel) showDel.onchange = () => {
       REV.showDeleted = !!showDel.checked;
@@ -29339,10 +29800,10 @@
   // ===================================================================
   // REQ-U (prereqs) -- WORKLOAD PREREQUISITE CHIPS. Operator 2026-09-19: "make prereqscript that i must run per
   // workload" / "dont put in template" / "refer to script in gui and show with green if prereq has run".
-  // GET /api/workload-prereqs returns, per workload, the last Initialize-PimWorkloadPrereqs.ps1 result judged by the
-  // server (state + chip colour) and the exact command. Chips: GREEN "prerequisites OK -- checked <when>", AMBER
-  // "not checked -- run ..." / "re-check" (older than 30 days) / "incomplete" (a portal step to confirm, or a check
-  // the caller could not read), RED "prerequisites missing: <failed checks>". Never green for "not checked".
+  // GET /api/workload-prereqs returns, per workload, the last result judged by the server (state + chip colour). 97.1: the
+  // result is recorded by PIM itself (job workload-prereqs) merged with what a person confirmed. Chips: GREEN "prerequisites
+  // OK -- checked <when> by PIM itself", AMBER "not checked yet" / "re-check" (older than 30 days) / "incomplete" (a portal
+  // step to confirm, or a check PIM could not read), RED "prerequisites missing: <failed checks>". Never green for "not checked".
   //   renderWorkloadPrereqChips(hostEl, workload)
   //     workload: 'DefenderXdr' | ['Intune', ...] | 'template:<pack id>' | 'connector:<connector id>' | omitted = all
   //     workloads with a "Workload prerequisites" heading (the compact section for the Coverage & gaps page).
@@ -29365,7 +29826,39 @@
     if (s.indexOf('connector:') === 0) return ((data.connectorWorkloads || {})[s.slice(10)] || []).map(String);
     return [s];
   }
-  function pimWorkloadPrereqChipHtml(w, data) {
+  // 97.1 (owner 2026-10-08: "we dont support certificates ... does the engine not have the necessary permissions for this"):
+  // PIM checks the prerequisites ITSELF (job workload-prereqs, daily; Check again = Run now on it). The chip shows what is
+  // left: the FIX command only when a grant / a creation needs a person (published browser-sign-in scripts, never a
+  // certificate), and Confirm / Not used / Withdraw on what PIM cannot check itself (Admin+, audited server-side).
+  const PREREQ_STATUS_WORD = { ok: 'OK', fixed: 'fixed', confirmed: 'confirmed (attested)', skipped: 'not used', failed: 'missing', manual: 'portal step to do', notChecked: 'not checked' };
+  function pimWorkloadPrereqWho(by) {
+    const b = String(by || '');
+    return b === 'engine self-check' ? 'PIM itself' : b;
+  }
+  function pimWorkloadPrereqChecksHtml(w, canAct) {
+    const esc = escapeHtml;
+    const checks = (w.checks || []).filter(c => c && (!c.ok || c.canWithdraw || c.status === 'confirmed' || c.status === 'skipped'));
+    const open = checks.filter(c => !c.ok);
+    if (!checks.length) return '';
+    const items = checks.map(c => {
+      const st = String(c.status || 'notChecked');
+      const btns = canAct ? [
+        c.canConfirm ? '<button class="prereq-act" type="button" data-action="confirm" data-workload="' + esc(w.workload) + '" data-check="' + esc(c.id) + '" title="Record that this step is done (attested by you, not API-verified). Withdraw undoes it." style="font-size:10.5px;padding:1px 6px;">Confirm</button>' : '',
+        c.canSkip ? '<button class="prereq-act" type="button" data-action="skip" data-workload="' + esc(w.workload) + '" data-check="' + esc(c.id) + '" title="No Data Operations role is delegated: this check does not apply." style="font-size:10.5px;padding:1px 6px;">Not used</button>' : '',
+        c.canWithdraw ? '<button class="prereq-act" type="button" data-action="withdraw" data-workload="' + esc(w.workload) + '" data-check="' + esc(c.id) + '" title="Undo the confirmation; PIM checks it again at its next self-check." style="font-size:10.5px;padding:1px 6px;">Withdraw</button>' : ''
+      ].join(' ') : '';
+      const who = c.by ? ' &middot; ' + esc(pimWorkloadPrereqWho(c.by)) + (c.checkedUtc ? ' ' + esc(fmtTime(c.checkedUtc)) : '') : '';
+      return '<li class="prereq-check" data-check="' + esc(c.id) + '" data-status="' + esc(st) + '" style="margin:3px 0;">' +
+        '<b>' + esc(c.name || c.id) + '</b> &mdash; ' + esc(PREREQ_STATUS_WORD[st] || st) + who +
+        (c.detail ? '<div style="color:#57606a;overflow-wrap:anywhere;">' + esc(c.detail) + '</div>' : '') +
+        (c.manualStep && !c.ok ? '<div style="overflow-wrap:anywhere;"><i>To do:</i> ' + esc(c.manualStep) + (c.learn ? ' <a href="' + esc(c.learn) + '" target="_blank" rel="noopener">Learn</a>' : '') + '</div>' : '') +
+        (btns.trim() ? '<div style="margin-top:2px;">' + btns + '</div>' : '') + '</li>';
+    }).join('');
+    return '<details class="prereq-details"' + (open.length && w.chip !== 'green' ? ' open' : '') + ' style="margin-top:3px;"><summary style="cursor:pointer;">' +
+      (open.length ? open.length + ' check' + (open.length === 1 ? '' : 's') + ' to look at' : 'confirmed by a person') + '</summary>' +
+      '<ul style="margin:2px 0 0 16px;padding:0;color:#24292f;">' + items + '</ul></details>';
+  }
+  function pimWorkloadPrereqChipHtml(w, data, canAct) {
     const esc = escapeHtml;
     const pal = { green: ['#dafbe1', '#1a7f37', '#1a7f37'], amber: ['#fff8c5', '#d4a72c', '#9a6700'], red: ['#ffebe9', '#cf222e', '#cf222e'] };
     let chip = String(w.chip || 'amber'); if (!pal[chip]) chip = 'amber';
@@ -29373,21 +29866,29 @@
     const when = w.ranUtc ? fmtTime(w.ranUtc) : '';
     const ago = (w.ageDays != null && w.ageDays !== '') ? ' (' + w.ageDays + ' day' + (Number(w.ageDays) === 1 ? '' : 's') + ' ago)' : '';
     const title = w.title || w.workload;
+    const who = pimWorkloadPrereqWho(w.ranBy);
     let text;
     if (data.loadError) text = 'prerequisite status could not be read: ' + data.loadError;
     else if (state === 'unreadable') text = 'prerequisite status could not be read from the store: ' + (data.storeError || '');
-    else if (state === 'ok') text = 'prerequisites OK -- checked ' + when + ago + (w.ranBy ? ' by ' + w.ranBy : '');
-    else if (state === 'failed') text = 'prerequisites missing: ' + ((w.failed || []).join('; ') || 'see the last run');
+    else if (state === 'ok') text = 'prerequisites OK -- checked ' + when + ago + (who ? ' by ' + who : '');
+    else if (state === 'failed') text = 'prerequisites missing: ' + ((w.failed || []).join('; ') || 'see the last check');
     else if (state === 'stale') text = 're-check -- prerequisites last checked ' + when + ago + ', older than ' + (data.staleDays || 30) + ' days';
-    else if (state === 'incomplete') text = 'prerequisites incomplete: ' + ((w.pending || []).join('; ') || 'see the last run') + (when ? ' (checked ' + when + ')' : '');
-    else text = 'not checked -- run Initialize-PimWorkloadPrereqs.ps1 -Workload ' + w.workload;
+    else if (state === 'incomplete') text = 'prerequisites incomplete: ' + ((w.pending || []).join('; ') || 'see the last check') + (when ? ' (checked ' + when + (who ? ' by ' + who : '') + ')' : '');
+    else text = 'not checked yet -- PIM checks this itself every day';
     const icon = chip === 'green' ? '&#x2713;' : (chip === 'red' ? '&#x2717;' : '&#x26A0;');
     const cmd = String(w.command || '');
+    const next = (state !== 'ok' && !data.loadError) ? String(w.next || '') : '';
+    const recheck = (canAct && !data.loadError && state !== 'unreadable') ?
+      '<button class="prereq-recheck" type="button" data-workload="' + esc(w.workload) + '" title="PIM checks the prerequisites itself (job ' + esc(data.selfCheckJob || 'workload-prereqs') + '). This queues a check now; the result appears here within a few minutes." style="font-size:10.5px;padding:1px 6px;">Check again</button>' : '';
     return '<div class="prereq-chip" data-workload="' + esc(w.workload) + '" data-state="' + esc(state) + '" data-chip="' + chip + '" ' +
       'style="background:' + pal[chip][0] + ';border:1px solid ' + pal[chip][1] + ';color:' + pal[chip][2] + ';border-radius:6px;padding:4px 8px;margin:4px 0;font-size:11.5px;min-width:0;">' +
-      '<span>' + icon + ' <b>' + esc(title) + '</b>: ' + esc(text) + '</span>' +
-      (cmd ? '<div style="display:flex;gap:6px;align-items:center;margin-top:3px;min-width:0;"><code class="prereq-cmd" style="flex:1;min-width:0;overflow-x:auto;white-space:nowrap;font-size:10.5px;color:#24292f;background:#ffffffa0;padding:1px 4px;border-radius:4px;">' + esc(cmd) + '</code>' +
+      '<div style="display:flex;gap:6px;align-items:flex-start;min-width:0;"><span style="flex:1;min-width:0;overflow-wrap:anywhere;">' + icon + ' <b>' + esc(title) + '</b>: ' + esc(text) + '</span>' + recheck + '</div>' +
+      (next ? '<div class="prereq-next" style="color:#57606a;margin-top:2px;overflow-wrap:anywhere;">' + esc(next) + '</div>' : '') +
+      (state !== 'ok' ? pimWorkloadPrereqChecksHtml(w, canAct) : '') +
+      (cmd ? '<div style="margin-top:3px;color:#57606a;">To fix, run once as an administrator (browser sign-in, no PowerShell modules):</div>' +
+        '<div style="display:flex;gap:6px;align-items:center;margin-top:2px;min-width:0;"><code class="prereq-cmd" style="flex:1;min-width:0;overflow-x:auto;white-space:nowrap;font-size:10.5px;color:#24292f;background:#ffffffa0;padding:1px 4px;border-radius:4px;">' + esc(cmd) + '</code>' +
         '<button class="prereq-copy" type="button" style="font-size:10.5px;padding:1px 6px;">Copy</button></div>' : '') +
+      '<div class="prereq-msg" style="color:#57606a;font-size:11px;"></div>' +
       '</div>';
   }
   async function renderWorkloadPrereqChips(hostEl, workload) {
@@ -29397,10 +29898,11 @@
     const names = pimWorkloadPrereqNames(data, workload);
     const all = (workload == null || workload === '' || workload === '*');
     if (!names.length) { hostEl.innerHTML = ''; return; }
+    const canAct = (typeof roleAtLeast === 'function') ? roleAtLeast('Admin') : false;
     const byName = {}; (data.workloads || []).forEach(w => { byName[w.workload] = w; });
     let h = all ? '<div class="prereq-head" style="font-size:13px;font-weight:600;margin:6px 0 2px;">Workload prerequisites</div>' +
-      '<div style="font-size:11px;color:#57606a;margin-bottom:4px;">Run <code>' + escapeHtml(data.script || 'tools\\setup\\Initialize-PimWorkloadPrereqs.ps1') + '</code> once per workload you delegate; it checks, fixes what an API can fix, and records the result here.</div>' : '';
-    for (const n of names) h += pimWorkloadPrereqChipHtml(byName[n] || { workload: n, state: 'notRun', chip: 'amber', command: '' }, data);
+      '<div style="font-size:11px;color:#57606a;margin-bottom:4px;">PIM checks these itself every day, as its own identity, and records the result here. Where it needs you, a chip says what: a command to run once (browser sign-in, no modules), or a portal step to confirm.</div>' : '';
+    for (const n of names) h += pimWorkloadPrereqChipHtml(byName[n] || { workload: n, state: 'notRun', chip: 'amber', command: '' }, data, canAct);
     hostEl.innerHTML = h;
     hostEl.querySelectorAll('.prereq-copy').forEach(b => b.onclick = () => {
       const code = b.parentNode && b.parentNode.querySelector('.prereq-cmd');
@@ -29410,6 +29912,30 @@
         if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(txt).then(done, () => {}); return; }
       } catch (_) {}
       try { const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); done(); } catch (_) {}
+    });
+    const msgOf = (el) => { const c = el && el.closest ? el.closest('.prereq-chip') : null; return c ? c.querySelector('.prereq-msg') : null; };
+    hostEl.querySelectorAll('.prereq-recheck').forEach(b => b.onclick = async () => {
+      const m = msgOf(b); b.disabled = true;
+      try {
+        const r = await api('POST', '/api/jobs/run', { name: data.selfCheckJob || 'workload-prereqs' });
+        _pimPrereqCache = null;
+        if (m) m.textContent = 'Check queued -- ' + ((r && r.detail) || 'the result appears here within a few minutes') + '.';
+      } catch (e) {
+        if (m) m.textContent = 'Could not queue a check: ' + ((e && e.body && e.body.error) || (e && e.message) || e);
+        b.disabled = false;
+      }
+    });
+    hostEl.querySelectorAll('.prereq-act').forEach(b => b.onclick = async () => {
+      const m = msgOf(b); b.disabled = true;
+      try {
+        const r = await api('POST', '/api/workload-prereqs/confirm', { workload: b.getAttribute('data-workload'), checkId: b.getAttribute('data-check'), action: b.getAttribute('data-action') });
+        if (r && Array.isArray(r.workloads)) _pimPrereqCache = { at: Date.now(), promise: Promise.resolve(Object.assign({}, data, { workloads: r.workloads })) };
+        else _pimPrereqCache = null;
+        await renderWorkloadPrereqChips(hostEl, workload);
+      } catch (e) {
+        if (m) m.textContent = 'Not recorded: ' + ((e && e.body && e.body.error) || (e && e.message) || e);
+        b.disabled = false;
+      }
     });
   }
 
@@ -29421,7 +29947,8 @@
   // workload's prerequisites are not green. This note says so, AMBER, on the template card, the wizards and the Coverage
   // & gaps proposals, from the same /api/workload-prereqs data as the chips. The rule is the server's
   // (Get-PimWorkloadAssignmentGate): held = failed | incomplete | notRun | unreadable; STALE is not held (a once-green
-  // workload keeps assigning); Entra roles are never held (ungatedWorkloads).
+  // workload keeps assigning); Entra roles are never held (ungatedWorkloads). 97.1: the note shows the fix command only
+  // when there is one; otherwise the next step in words (PIM checks itself / confirm the portal step).
   //   renderWorkloadHeldNote(hostEl, workload, serverHeld?, opts?)  workload: as renderWorkloadPrereqChips;
   //     serverHeld: /api/templates' assignmentGate.held (the server's verdict wins when given); opts.compact = one line.
   // ===================================================================
@@ -29435,22 +29962,23 @@
     if (state === 'failed') reasons = (w.failed || []).map(x => 'missing: ' + x);
     else if (state === 'incomplete') reasons = (w.pending || []).map(x => 'not confirmed: ' + x);
     else if (state === 'unreadable') reasons = ['the prerequisite status could not be read' + ((data && (data.storeError || data.loadError)) ? ': ' + (data.storeError || data.loadError) : '')];
-    else reasons = ['the prerequisite script has never run for this workload'];
+    else reasons = ['PIM has not checked this workload yet (its daily self-check, or Check again)'];
     if (!reasons.length) reasons = ['prerequisites ' + state];
-    return { workload: String(w.workload), state, reasons, command: String(w.command || ('tools\\setup\\Initialize-PimWorkloadPrereqs.ps1 -Workload ' + w.workload)) };
+    return { workload: String(w.workload), state, reasons, command: String(w.command || ''), next: String(w.next || '') };
   }
   function pimWorkloadHeldNoteHtml(entries, compact) {
     const esc = escapeHtml;
     if (!entries.length) return '';
+    const what = (e) => e.command ? 'run: ' + e.command : (e.next || 'see Workload prerequisites');
     if (compact) {
       return '<span class="prereq-held" data-held="1" data-workload="' + esc(entries.map(e => e.workload).join(',')) + '" style="color:#9a6700;font-size:11px;" title="' +
-        esc(entries.map(e => e.workload + ': ' + e.reasons.join('; ') + ' -- run: ' + e.command).join('\n')) + '">&#x26A0; ' +
+        esc(entries.map(e => e.workload + ': ' + e.reasons.join('; ') + ' -- ' + what(e)).join('\n')) + '">&#x26A0; ' +
         esc(entries.map(e => e.workload).join(', ')) + ' role assignment held (prerequisites)</span>';
     }
     return entries.map(e => '<div class="prereq-held" data-held="1" data-workload="' + esc(e.workload) + '" data-state="' + esc(e.state) + '" ' +
       'style="background:#fff8c5;border:1px solid #d4a72c;color:#6b4c00;border-radius:6px;padding:4px 8px;margin:4px 0;font-size:11.5px;min-width:0;overflow-wrap:anywhere;">' +
-      '&#x26A0; <b>Groups are created now; the ' + esc(e.workload) + ' role assignment is HELD until its prerequisites are green</b> -- run: ' +
-      '<code style="font-size:10.5px;background:#ffffffa0;padding:1px 4px;border-radius:4px;">' + esc(e.command) + '</code>' +
+      '&#x26A0; <b>Groups are created now; the ' + esc(e.workload) + ' role assignment is HELD until its prerequisites are green</b> -- ' +
+      (e.command ? 'run: <code style="font-size:10.5px;background:#ffffffa0;padding:1px 4px;border-radius:4px;">' + esc(e.command) + '</code>' : esc(e.next || 'see Workload prerequisites')) +
       '<ul style="margin:2px 0 0 18px;padding:0;">' + e.reasons.map(r => '<li>' + esc(r) + '</li>').join('') + '</ul></div>').join('');
   }
   async function renderWorkloadHeldNote(hostEl, workload, serverHeld, opts) {
@@ -29463,7 +29991,7 @@
       const ungated = Array.isArray(data.ungatedWorkloads) ? data.ungatedWorkloads : ['EntraRoles'];
       entries = serverHeld.filter(h => h && ungated.indexOf(String(h.workload)) < 0).map(h => ({ workload: String(h.workload), state: String(h.state || ''),
         reasons: (Array.isArray(h.reasons) && h.reasons.length) ? h.reasons.map(String) : [String(h.reason || 'prerequisites not green')],
-        command: String(h.command || ('tools\\setup\\Initialize-PimWorkloadPrereqs.ps1 -Workload ' + h.workload)) }));
+        command: String(h.command || ''), next: String(h.next || '') }));
     } else {
       const byName = {}; (data.workloads || []).forEach(w => { byName[w.workload] = w; });
       entries = pimWorkloadPrereqNames(data, workload).map(n => pimWorkloadHeldEntry(byName[n] || { workload: n, state: 'notRun', command: '' }, data)).filter(Boolean);
@@ -31853,6 +32381,8 @@
   // Free edition: once the licence is read, the Pro pages are listed as PRO (and open the Free vs Pro page).
   if (isServer) { try { fetchLicence().then(applyProMenuMarks).catch(() => { }); } catch (e) { } }
   if (isServer) { try { loadAdminDomain(); } catch (e) { } }         // REQ-T: this tenant's Admin account domain + verified domains
+  // §97.3 / framework §12.5 PENDING-1: the blocking counts in the menu + submenu, read now and every 30 s (and on a page change).
+  if (isServer) { try { refreshAttention(true); setInterval(() => { refreshAttention(true); }, 30000); } catch (e) { } }
   // Prime caches for any definition CSVs (so the GroupTag dropdowns have data).
   if (isServer) {
     (async () => {

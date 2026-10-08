@@ -13,6 +13,31 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.534 -- 2026-10-08
+
+- **Client onboarding** (was "PIM Activator"): the page now shows both ways to get the PIM Activator to your admins as equal
+  routes -- with **Intune** (one command, or by hand: "Download the two files", open next to the command) or on **PCs and
+  servers without Intune** (one script, run as administrator on each machine).
+- **Blocking items are shown in the menu.** Anything that waits for a person and blocks work -- an approval, a held change
+  set, a request a second administrator must approve, a guard holding a plan -- puts a count on its top-menu entry and on
+  the submenu entry, and a line on the Overview. It clears itself when decided. Counts that are only informational (the
+  pending-changes queue, warnings such as gaps) no longer show in the red "blocking" colour.
+- **The commit queue shows only what blocks a commit.** Warnings and informational notes stay on Check for problems.
+- **Mail: a shared mailbox or your own SMTP relay.** Get Started > Mail sender and Settings > Mail & alerting offer both. The
+  install creates the shared mailbox when it runs as the Invardia Support app; afterwards one published script does it (browser
+  sign-in, no certificate). For SMTP the password is kept only in the environment's Key Vault. A test mail proves it.
+- **Workload prerequisites are checked by PIM itself** (daily, and on Check again): its own permissions, licences and the
+  workload APIs. Entra ID roles and Intune need no onboarding when the engine holds its permissions; only portal-only steps
+  ask for a Confirm. The prerequisite script is published at Invardia, signs in in the browser and needs no certificate.
+- **Engine Azure access at the tenant root:** the install gives the engine read-only Reader there (Discovery sees every
+  management group and subscription). User Access Administrator is an option, for when the engine should assign the Azure
+  resource roles you delegate. Get Started > Engine permissions checks both and shows the one-line command when either is
+  missing; without Azure delegations a missing Reader is a warning, not an error.
+- **Review page:** PIM Manager's own identities, the Invardia Support app and your break-glass accounts are hidden by default,
+  each with its own tick to show them.
+- **Update ring on a fresh install:** the header shows the ring the install configured ("no update run yet") instead of
+  "not recorded".
+
 ## 2.4.533 -- 2026-10-08
 
 - **PIM Activator: commands only, and you choose who.** The page no longer creates or uploads anything itself: each step
@@ -2341,7 +2366,7 @@ importantly, the matching that decides which live accounts PIM manages. Previous
 leave PIM unable to recognise its own admin accounts, which meant creating them again on every run.
 
 **One naming template for every tenant.** A new `{TenantCommonName}` variable holds the short name of the
-tenant (for example `EFIF` or `RIDE`), so a single pattern serves every customer instead of the name being
+tenant (for example `CONTOSO` or `FABRIKAM`), so a single pattern serves every customer instead of the name being
 written into the pattern itself. Leave it blank and it disappears cleanly — existing names are unchanged.
 Both fields sit together in Settings → Naming with a live example, and every supported variable is listed,
 with its meaning, in the click-to-insert legend beside the pattern fields.

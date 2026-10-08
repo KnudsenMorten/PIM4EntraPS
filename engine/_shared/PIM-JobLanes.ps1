@@ -73,7 +73,7 @@ $script:PimJobGroupByType = @{
     'hybrid-ad-apply' = 'Engine'; 'hybrid-ad-groups' = 'Engine'; 'hybrid-ad-sync' = 'Engine'; 'hybrid-ad-changes' = 'Engine'
     'hybrid-ad-servers' = 'Engine'; 'hybrid-ad-sync-servers' = 'Engine'; 'rfa-sync' = 'Engine'
     'reminders' = 'Reports'; 'escalations' = 'Reports'; 'daily-summary' = 'Reports'; 'tier-report' = 'Reports'
-    'owner-review' = 'Reports'; 'autoextend-report' = 'Reports'; 'coverage' = 'Reports'; 'target-check' = 'Reports'; 'pending-check' = 'Reports'
+    'owner-review' = 'Reports'; 'autoextend-report' = 'Reports'; 'coverage' = 'Reports'; 'target-check' = 'Reports'; 'pending-check' = 'Reports'; 'workload-prereqs' = 'Reports'
     'licence-request' = 'Updates'; 'licence-check' = 'Updates'; 'uplink' = 'Updates'; 'install-key' = 'Updates'; 'enrolled-tenants' = 'Updates'
 }
 
