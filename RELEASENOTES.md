@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.531 -- 2026-10-08
+
+- **Engine permissions without modules.** When the engine lacks a permission, Overview and Get Started now show a download from Invardia plus one command (`Grant-PimEnginePermissions.ps1`) with this environment's values: you sign in in the browser, already-held permissions are left alone, and it also covers the Azure right (User Access Administrator) when that is the missing one.
+
 ## 2.4.530 -- 2026-10-08
 
 - **Jobs run side by side.** Jobs that work on different areas (groups, admins, Entra roles, policies, Azure, workloads, reviews) now run at the same time; two runs never work on the same area at once. *Run now* on a busy area is queued and says what it waits for ("queued -- starts when <job> has finished").

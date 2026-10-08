@@ -4565,18 +4565,26 @@
   // Graph app-roles, Azure RBAC, and the SCOPED Exchange RBAC that carries mail. A green Graph
   // check says nothing about whether TAP mail can leave the building.
   // 🔑 "Could not check" renders as a WARNING that says the CHECK failed -- never as healthy.
-  // The exact grant for the engine identity's missing Graph permissions -- shown on Overview and in Get Started's
-  // "Engine permissions" step (97.1), one text for both.
+  // The exact grant for the engine identity's missing permissions -- shown on Overview and in Get Started's
+  // "Engine permissions" step (97.1), one text for both. Framework rule 3 (no module dependencies): the command runs the
+  // standalone Invardia support script Grant-PimEnginePermissions.ps1 (REST + browser sign-in, no PowerShell modules)
+  // with THIS environment's tenant id, engine object id, missing Graph permissions and -- when Azure resource
+  // delegations need it -- User Access Administrator at the tenant root management group.
+  function permFixNeeded(d, miss) {
+    return !!(d && d.objectId && ((miss || []).length || d.azureOk === false));
+  }
   function permFixScript(d, miss) {
-    const roles = (miss || []).map(m => String((m && m.role) || '').replace(/'/g, '')).filter(Boolean);
-    return "# Grant the engine identity its missing Microsoft Graph permissions (run once, as Global Administrator)\n" +
-      "Connect-MgGraph -TenantId '" + String(d.tenantId || '').replace(/'/g, '') + "' -Scopes 'AppRoleAssignment.ReadWrite.All','Application.Read.All'\n" +
-      "$engine = '" + String(d.objectId || '').replace(/'/g, '') + "'   # " + String(d.identity || '').replace(/[\r\n]/g, ' ') + "\n" +
-      "$graph  = Get-MgServicePrincipal -Filter \"appId eq '00000003-0000-0000-c000-000000000000'\"\n" +
-      "foreach ($role in @(" + roles.map(r => "'" + r + "'").join(', ') + ")) {\n" +
-      "  $appRole = $graph.AppRoles | Where-Object { $_.Value -eq $role -and $_.AllowedMemberTypes -contains 'Application' }\n" +
-      "  New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $engine -PrincipalId $engine -ResourceId $graph.Id -AppRoleId $appRole.Id | Out-Null\n" +
-      "  Write-Host \"granted $role\"\n}\n" +
+    const guid = (s) => String(s || '').replace(/[^0-9A-Za-z-]/g, '');
+    const roles = (miss || []).map(m => String((m && m.role) || '').replace(/[^A-Za-z0-9._-]/g, '')).filter(Boolean);
+    const tid = guid(d.tenantId), oid = guid(d.objectId);
+    const who = String(d.identity || '').replace(/[\r\n]/g, ' ').trim();
+    let cmd = '.\\Grant-PimEnginePermissions.ps1' + (tid ? " -TenantId '" + tid + "'" : '') + " -EngineObjectId '" + oid + "'";
+    if (roles.length) cmd += ' -GraphPermissions ' + roles.map(r => "'" + r + "'").join(',');
+    if (d.azureOk === false && tid) cmd += " -AzureRoleAssignments 'User Access Administrator@/providers/Microsoft.Management/managementGroups/" + tid + "'";
+    return '# Give the engine identity' + (who ? ' (' + who + ')' : '') + ' its missing permissions. Run once in PowerShell as a Global Administrator.\n' +
+      '# No PowerShell modules needed: you sign in in the browser. Already-held permissions are left alone.\n' +
+      'Invoke-WebRequest https://invardia.com/support/pim/Grant-PimEnginePermissions.ps1 -OutFile Grant-PimEnginePermissions.ps1\n' +
+      cmd + '\n' +
       "# A new grant reaches the engine's token within ~30 minutes. Then press Verify permissions.";
   }
   async function loadPermissionHealth(userAsked) {
@@ -4611,18 +4619,18 @@
       miss.forEach(m => { inner += '<tr><td style="font-family:ui-monospace,monospace;font-size:11px;">' + escapeHtml(m.role) +
                                    '</td><td style="font-size:11.5px;">' + escapeHtml(m.capability) + '</td></tr>'; });
       inner += '</table>';
-      // The FIX, not just the finding (operator 2026-09-25: "have option to fix"). This page cannot grant
-      // the roles itself -- an identity that can assign app roles to itself can give itself anything, so
-      // the Manager is deliberately read-only (§65.4). It hands over the exact grant instead, for the engine
-      // identity it just read, for a Global Administrator / Privileged Role Administrator to run once.
-      if (d.objectId) {
-        const script = permFixScript(d, miss);
-        inner += '<details style="margin-top:8px;" open><summary style="cursor:pointer;font-weight:600;">How to fix: grant the missing permission(s)</summary>' +
-          '<div style="margin:6px 0 4px 0;font-size:11.5px;color:#57606a;">The portal cannot grant these itself (it is read-only on purpose: an identity that ' +
-          'can grant permissions could give itself anything). Run this once in PowerShell as a Global Administrator:</div>' +
-          '<pre id="permFixScript" style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px;font-size:11px;white-space:pre-wrap;max-width:900px;">' +
-          escapeHtml(script) + '</pre><button id="permFixCopy" style="font-size:12px;">Copy script</button></details>';
-      }
+    }
+    // The FIX, not just the finding (operator 2026-09-25: "have option to fix"). This page cannot grant
+    // the roles itself -- an identity that can assign app roles to itself can give itself anything, so
+    // the Manager is deliberately read-only (§65.4). It hands over the exact grant instead, for the engine
+    // identity it just read, for a Global Administrator / Privileged Role Administrator to run once.
+    if (permFixNeeded(d, miss)) {
+      const script = permFixScript(d, miss);
+      inner += '<details style="margin-top:8px;" open><summary style="cursor:pointer;font-weight:600;">How to fix: grant the missing permission(s)</summary>' +
+        '<div style="margin:6px 0 4px 0;font-size:11.5px;color:#57606a;">The portal cannot grant these itself (it is read-only on purpose: an identity that ' +
+        'can grant permissions could give itself anything). Download the script from Invardia and run it once in PowerShell as a Global Administrator:</div>' +
+        '<pre id="permFixScript" style="background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:8px;font-size:11px;white-space:pre-wrap;max-width:900px;">' +
+        escapeHtml(script) + '</pre><button id="permFixCopy" style="font-size:12px;">Copy script</button></details>';
     }
     const offConn = (d.unavailableConnectors || []).filter(c => c != null && String(c).trim());
     if (offConn.length) {
@@ -13257,8 +13265,9 @@
         if (miss.length) {
           h += '<table class="set-table gsPermMissing"><tr><th>Missing permission</th><th>What it blocks</th></tr>' +
             miss.map(m => '<tr><td><code>' + escapeHtml(String(m.role || '')) + '</code></td><td>' + escapeHtml(String(m.capability || '')) + '</td></tr>').join('') + '</table>';
-          if (d.objectId) h += '<div class="gs-hint">This page cannot grant permissions itself (on purpose: an identity that can grant permissions could give itself anything). A Global Administrator runs this once:</div>' + gsCode('gsPermScript', permFixScript(d, miss));
         }
+        if (d.objectId && d.azureOk === false) h += '<div class="gs-facts">Azure resource roles cannot be assigned yet: the engine identity needs <b>User Access Administrator</b> at the tenant root management group.</div>';
+        if (permFixNeeded(d, miss)) h += '<div class="gs-hint">This page cannot grant permissions itself (on purpose: an identity that can grant permissions could give itself anything). A Global Administrator downloads the script from Invardia and runs it once (no PowerShell modules needed, sign-in in the browser):</div>' + gsCode('gsPermScript', permFixScript(d, miss));
         return h + '<div class="gs-actions"><button type="button" class="gsAction btn-sec" data-act="recheck">Check again</button> <span class="gsActMsg"></span></div>';
       },
       actions: {
