@@ -170,7 +170,10 @@ function Get-PimInstallVerifyRows {
         $okState = if ($repaired) { 'repaired' } else { 'ok' }
         $readable = ($null -ne $f) -and ((Get-PimFactValue $f 'readable') -ne $false)
         $readErr = "$(Get-PimFactValue $f 'error')".Trim()
-        $unread = "could not be read$(if ($readErr) { ": $readErr" })"
+        # a STORE read that failed (Confirm-PimInstall marks it store = $true) is worded as unreadable -- "not checked (could
+        # not read the store: <reason>)" -- never as the thing being missing; a required line stays not-done (fail closed).
+        $unread = if ($null -ne $f -and [bool](Get-PimFactValue $f 'store')) { "not checked (could not read the store$(if ($readErr) { ": $readErr" }))" }
+                  else { "could not be read$(if ($readErr) { ": $readErr" })" }
         switch ($id) {
             'superadmins' {
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'failed' $unread (& $fx $id))); break }

@@ -4954,6 +4954,20 @@ and never written to a log, the store or telemetry. Trust is unchanged: the mana
 signature does not verify against the pinned identifiers, and the managing tenant's registration of the tenant (ring and
 tags) stays the managing company's decision. Without an enrollment key the builds work exactly as described above.
 
+**Enrollment keys for single-tenant installs, and one command for the customer (built, not yet released).** An enrollment
+key also installs a single (non-MSP) environment and links it to the customer's account at Invardia: the deploy claims the
+tenant first, before anything is created, receives the licence and the install key the same way, and registers both in the
+store before the application is rolled out. A key issued for a managed tenant is refused on a single install with a plain
+sentence that names the managed-tenant install; until Invardia issues single-tenant keys, the deploy says so and points to
+the licence file. The guided installer takes the key in its answers instead of a licence file: for a single tenant it runs
+the claim and the normal deployment, and for a managed tenant it runs the managed-tenant build described above with the same
+key, reporting every step to the installation's status page. The key is shown only masked, never saved with the deployment
+settings, and removed from the installer's answers once the licence is registered. Each installation has exactly one
+claimant: when Invardia's own installer has already claimed the key and handed over the install key (and, for a managed
+tenant, the managing tenant's bundle address), the guided installer never claims again. A tenant whose installation has
+already succeeded with the key gets no new install key; the installation keeps the one it has and continues as a re-run.
+Without a key nothing changes.
+
 #### Implementation note (2026-09-17) — the provider's Manager verifies the bundle the way a managed tenant does
 
 The MSP view in the managing tenant's Manager plans against a signed bundle. Its banner verdict uses the managed tenant's

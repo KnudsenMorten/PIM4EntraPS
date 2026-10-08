@@ -7035,7 +7035,7 @@ function Get-PimManagerWorkloadPrereqState {
     return @{ view = $view; storeErr = $storeErr }
 }
 function Get-PimManagerAttentionSources {
-    $src = [ordered]@{ policyHolds = @(); approvals = @(); rfa = @(); guardHolds = @(); guardReleases = @(); secondApprover = $null; workloadHolds = @(); errors = @() }
+    $src = [ordered]@{ policyHolds = @(); approvals = @(); offboardApproved = @(); rfa = @(); guardHolds = @(); guardReleases = @(); secondApprover = $null; workloadHolds = @(); errors = @() }
     $errs = New-Object System.Collections.Generic.List[string]
     $toInt = { param($v) $n = 0; [void][int]::TryParse("$v", [ref]$n); $n }
     # 1. the policy mass-change holds -- the engine lib in an ISOLATED child scope (BUG-261: the module copy cannot see the
@@ -7065,6 +7065,13 @@ function Get-PimManagerAttentionSources {
         if (Get-Command Get-PimApprovalRequests -ErrorAction SilentlyContinue) {
             $src.approvals = @(Get-PimApprovalRequests -Status 'Pending' | Where-Object { $_ -and -not ((Get-Command Test-PimApprovalRequestExpired -ErrorAction SilentlyContinue) -and (Test-PimApprovalRequestExpired -Request $_)) } |
                 ForEach-Object { [pscustomobject]@{ id = "$($_.id)"; action = "$($_.action)"; requestor = "$($_.requestor)" } })
+            # Owner 2026-10-08: an APPROVED offboard request that nobody queued for the engine yet blocks too -- counted for 7 days
+            # after its approval (an approved request never expires, so without a window it would light the badge forever).
+            $__obCut = [datetime]::UtcNow.AddDays(-7)
+            $src.offboardApproved = @(Get-PimApprovalRequests -Status 'Approved' | Where-Object {
+                    $_ -and "$($_.action)" -eq 'offboard' -and -not "$($_.executedUtc)".Trim() -and
+                    $(try { [datetime]::Parse("$($_.decidedUtc)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal') -ge $__obCut } catch { $false }) } |
+                ForEach-Object { [pscustomobject]@{ id = "$($_.id)"; target = "$($_.target)"; decidedUtc = "$($_.decidedUtc)" } })
         }
     } catch { $errs.Add("approval requests: $($_.Exception.Message)") }
     # 3. access requests (RFA) waiting for a department Owner -- only where the Pro RFA library and the SQL store exist.
@@ -7177,6 +7184,12 @@ function Get-PimManagerAttention {
         $items.Add([ordered]@{ id = 'approvals'; tab = 'approvals'; count = $ap.Count
             text = ("{0} waiting for a checker{1}" -f (& $plural $ap.Count 'approval request' 'approval requests'), $(if ($acts) { " ($acts)" } else { '' }))
             canAct = [bool]($isAdmin -and ($selfOn -or $mine -lt $ap.Count)); who = 'an Admin other than the one who raised it decides it' })
+    }
+    $obA = @($s.offboardApproved)
+    if ($obA.Count) {
+        $items.Add([ordered]@{ id = 'offboard-approved'; tab = 'approvals'; count = $obA.Count
+            text = ("{0} approved but not queued for the engine yet -- press Queue offboard for the engine" -f (& $plural $obA.Count 'offboard request' 'offboard requests'))
+            canAct = $isAdmin; who = 'an Admin or SuperAdmin queues it (Reviews & controls > Approvals)' })
     }
     $rf = @($s.rfa)
     if ($rf.Count) {

@@ -407,6 +407,7 @@ function Test-PimMspBuildConfig {
     if ($usrc -and $usrc -notin @('invardia', 'pim-src')) { $errors.Add("'updater.source' must be invardia (Pro updates, signed, through Invardia) or pim-src") }
     $lic = "$(& $V 'licence.path')".Trim()
     if ($lic -and $lic -notmatch '(?i)\.pimlicen[cs]e$') { $errors.Add("'licence.path' must name a .pimlicense file") }
+    if ("$(& $V 'licence.installKeyPath')".Trim() -and -not $lic) { $errors.Add("'licence.installKeyPath' goes with 'licence.path' (the install key Invardia issued with that licence)") }
     $supApp = "$(& $V 'support.appId')".Trim()
     if ($supApp -and $supApp -notmatch $script:PimMspGuid) { $errors.Add("'support.appId' must be a GUID (the Invardia Support app's client id)") }
     $supLvl = "$(& $V 'support.access')".Trim()
@@ -491,7 +492,10 @@ function Test-PimMspBuildConfig {
         # identity, no SAS, no rotation -- trust is the bundle signature, access is the managing tenant's storage network rule.
         if ($enrolPending) { $warnings.Add('enrollment: every master{} value missing from this config is filled from the managing tenant facts Invardia returns at the enroll step') }
         $mTid = "$(& $V 'master.tenantId')".Trim()
-        if ($mTid -notmatch $script:PimMspGuid -and -not ($enrolPending -and -not $mTid)) { $errors.Add("'master.tenantId' must be a GUID (the managing tenant this tenant pulls from)") }
+        # an enrolled tenant (a claim now, or one Invardia's bootstrap made: licence.installKeyPath) may not know the managing
+        # tenant's id -- the claim's managing block need not carry it, and nothing in the pull uses it.
+        $enrolled = ($enrolPending -or [bool]"$(& $V 'licence.installKeyPath')".Trim())
+        if ($mTid -notmatch $script:PimMspGuid -and -not ($enrolled -and -not $mTid)) { $errors.Add("'master.tenantId' must be a GUID (the managing tenant this tenant pulls from)") }
         $mStoreName = "$(& $V 'master.storageAccount')".Trim()
         if (-not $mStoreName) { if (-not $enrolPending) { $errors.Add("'master.storageAccount' is required (where the managing tenant publishes the signed bundle)") } }
         elseif ($mStoreName -notmatch '^[a-z0-9]{3,24}$') { $errors.Add("'master.storageAccount' '$mStoreName' is not a storage account name (3-24 lowercase letters/digits)") }
@@ -753,8 +757,13 @@ function Get-PimMspBuildPlan {
     elseif ($licPath) {
         $licArgs = if ($signedIn) { @{ LicensePath = $licPath; SqlServer = $sqlFqdn; Database = $db; TenantId = $tid } } else { @{ LicensePath = $licPath; SqlServer = $sqlFqdn; Database = $db; TenantId = $tid; AdminAppId = $cid; AdminCertThumbprint = $thumb } }
         $licArgs['RequireMspRole'] = $Role   # refuse a licence that cannot run MSP here, BEFORE it is stored
+        # framework 8.6 (2026-10-08): Invardia's bootstrap claimed the enrollment key itself and handed over the install key
+        # (as a FILE: 'licence.installKeyPath', a path, never the key). It is stored with the licence and nothing claims again
+        # -- every claim kills the previous key, so there is exactly ONE claimant per install.
+        $ikPath = "$(& $V 'licence.installKeyPath')".Trim()
+        if ($ikPath) { $licArgs['InstallKeyPath'] = $ikPath }
         $steps.Add((New-PimMspBuildStep -Id 'licence' -Title 'register the Pro licence in this environment''s store (MSP is Pro, hard-enforced)' -Script 'tools\setup\Set-PimLicense.ps1' `
-            -Arguments $licArgs -Switches (@($storeSwitches) + 'QueueInstallKeyClaim') -Why 'without it the managing / managed tenant features stay off and the install key is never claimed'))
+            -Arguments $licArgs -Switches $(if ($ikPath) { @($storeSwitches) } else { @($storeSwitches) + 'QueueInstallKeyClaim' }) -Why 'without it the managing / managed tenant features stay off and the install key is never claimed'))
     }
     $supApp = "$(& $V 'support.appId')".Trim()
     if ($supApp) {
@@ -869,6 +878,10 @@ function Get-PimMspBuildPlan {
         $enArgs = @{ Role = 'Master'; SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; SubscriptionId = $sub; ResourceGroup = $rg; StorageAccount = $store; Container = $container
                      ManagerApp = $mgr; TickPrincipalId = "{{mi-job:$tick}}"; Access = $masterAccess } + $storeArgs
         if ("$InvardiaBaseUrl".Trim()) { $enArgs['InvardiaBaseUrl'] = "$InvardiaBaseUrl".Trim() }
+        # The managing tenant's Manager pins NO key (only managed tenants pin the master's key) -- pass the id(s) from the master
+        # config (`signingKeyIds`, what the signingkey step printed), else the step falls back to the Manager's pin (live 2026-10-08).
+        $__mSk = @(@(& $V 'signingKeyIds') | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { "$_".Trim() })
+        if ($__mSk.Count) { $enArgs['SigningKeyIds'] = ($__mSk -join ',') }
         $steps.Add((New-PimMspBuildStep -Id 'enrollment' -Title "self-service managed tenants: record + report the bundle facts to Invardia; let the tick's enrolled-tenants job manage $store's network rules (that account only)" `
             -Script 'tools\setup\Publish-PimEnrollmentFacts.ps1' -HostExe 'powershell' -Arguments $enArgs -Switches $storeSwitches `
             -Why 'a managed tenant built with an enrollment key gets this store''s address and key ids from Invardia, and its subnet is allowed here without a person'))

@@ -13,6 +13,18 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.536 -- 2026-10-09
+
+- **Install with an enrollment key -- also a single tenant.** An enrollment key from Invardia now installs a single-tenant
+  environment too (the environment, its licence and its install key come from the key -- no licence file needed), and the
+  guided installer takes the key for a managed tenant of an MSP as well. A retried install after a failure claims again; a
+  tenant that is already installed keeps its key.
+- **The managing tenant reports its bundle details to Invardia by itself**, so tenants enrolled with a key link to it and are
+  let in to its bundle without anyone doing it by hand.
+- **The end-of-install check can be run on its own** at any time (it now reads the store with the signed-in account) -- a
+  health check of an existing installation.
+- **An approved offboard request that nobody queued for the engine** counts as a blocking item in the menu badge for 7 days.
+
 ## 2.4.535 -- 2026-10-08
 
 - **The install checks itself before it says "done".** The last install step prints one table -- administrators, the nightly
