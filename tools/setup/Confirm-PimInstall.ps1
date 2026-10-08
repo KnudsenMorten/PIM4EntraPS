@@ -82,6 +82,18 @@ $here = $PSScriptRoot
 . (Join-Path $here '_PimInstallVerify.ps1')
 # the tenant-root helpers (Get-PimTenantRootScope / Get-PimRootAzureHoldings / Get-PimRootAzureFixCommand), pure
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-PermissionHealth.ps1')
+# 🔴 The store: Connect-PimSetupStore + its token provider (PIM-Rest: Get-PimRestToken) + the reads (PIM-SqlStore:
+# Get-PimSqlSetting / Invoke-PimSqlScalar) -- loaded HERE, AT FILE SCOPE. The live proof on a managing tenant
+# (2026-10-08, the check run ON ITS OWN through the Invardia Support app) failed every store line twice over, and both
+# were the one 71.32 scoping trap: _PimSetupSql.ps1 was dot-sourced INSIDE Get-CvStore, so everything it loads was
+# discarded when that function returned --
+#   1. "The term 'Get-PimSqlSetting' is not recognized" (inside an install the caller had happened to load the store);
+#   2. with the store loaded, "Login failed for user ''": New-PimSqlConnection found NO Get-PimRestToken, so the
+#      connection carried no token at all -- in -UseSignedInAccount mode the signed-in az session's SQL token
+#      (https://database.windows.net/, minted and checked by Connect-PimSignedInSql) never reached it. The SPN path
+#      had the same hole. Loaded at file scope, both identities reach every store read.
+# Always loaded (never "only if a caller has not"): what a caller happened to load is exactly what hid cause 1 inside an install.
+. (Join-Path $here '_PimSetupSql.ps1')
 $norm = { param($l) @(@($l) | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
 $SuperAdmins = @(& $norm $SuperAdmins); $AlertRecipients = @(& $norm $AlertRecipients)
 $sqlServer = ("$SqlServerFqdn".Trim() -split '\.')[0]
@@ -116,13 +128,31 @@ function Invoke-CvGraph([string]$Path, [switch]$All) {
     while ($u) { $r = Invoke-RestMethod -Uri $u -Headers @{ Authorization = "Bearer $tok" } -TimeoutSec 60; $items += @($r.value); $u = "$($r.'@odata.nextLink')" }
     return $items
 }
+function New-CvStoreError([string]$Message) {
+    # A store read that failed is "not checked (could not read the store: <reason>)", never "<the thing> is missing":
+    # the exception carries a marker the fact keeps (store = $true) so the row can say so.
+    $m = (("$Message" -split "`n")[0]) -replace '^Exception calling "[^"]+" with "\d+" argument\(s\): ', ''
+    $e = [System.InvalidOperationException]::new("$m".Trim().Trim('"')); $e.Data['pimStore'] = $true
+    return $e
+}
 function Get-CvStore {
     if ($script:cv.ContainsKey('cs')) { return $script:cv['cs'] }
-    . (Join-Path $here '_PimSetupSql.ps1')
-    $script:cv['cs'] = Connect-PimSetupStore -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId @idArgs
+    # a connect that failed once fails every store line with the same reason (no second sign-in attempt per line)
+    if ($script:cv.ContainsKey('csErr')) { throw (New-CvStoreError $script:cv['csErr']) }
+    try { $script:cv['cs'] = Connect-PimSetupStore -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId @idArgs }
+    catch { $script:cv['csErr'] = "$($_.Exception.Message)"; throw (New-CvStoreError $script:cv['csErr']) }
     return $script:cv['cs']
 }
-function Get-CvSetting([string]$Name) { $cs = Get-CvStore; $v = Get-PimSqlSetting -ConnectionString $cs -Name $Name; if ($v -is [string]) { try { $v = $v | ConvertFrom-Json } catch { } }; return $v }
+function Invoke-CvStoreRead([scriptblock]$Read) {
+    # Every store read runs through here: connect (signed-in az token, or the SPN), then the read; any failure is a STORE failure.
+    $cs = Get-CvStore
+    try { return (& $Read $cs) } catch { throw (New-CvStoreError "$($_.Exception.Message)") }
+}
+function Get-CvSetting([string]$Name) {
+    $v = Invoke-CvStoreRead { param($cs) Get-PimSqlSetting -ConnectionString $cs -Name $Name }
+    if ($v -is [string]) { try { $v = $v | ConvertFrom-Json } catch { } }
+    return $v
+}
 function Get-CvMiOid([string]$Kind, [string]$Name) {
     $k = "mi:${Kind}:${Name}"; if ($script:cv.ContainsKey($k)) { return $script:cv[$k] }
     $a = if ($Kind -eq 'job') { @('containerapp', 'job', 'show') } else { @('containerapp', 'show') }
@@ -154,14 +184,13 @@ function Get-CvFact([string]$Id) {
                 return @{ readable = $true; jobExists = $true; ringEnv = $ring; wantRing = $(if ($UpdateRing -ge 0) { "$UpdateRing" } else { '' }); seedSupported = $seed; stateRing = "$(Get-PimFactValue $us 'ring')".Trim() }
             }
             'licence' {
-                $cs = Get-CvStore
                 $sol = Split-Path -Parent (Split-Path -Parent $here)
                 if (-not (Get-Command Get-PimLicense -ErrorAction SilentlyContinue)) { . (Join-Path $sol 'engine\_shared\PIM-License.ps1') }
-                $raw = Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT ValueJson FROM pim.Settings WHERE Name = N'License'"
+                $raw = Invoke-CvStoreRead { param($cs) Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT ValueJson FROM pim.Settings WHERE Name = N'License'" }
                 $txt = ConvertFrom-PimLicenseSettingRaw $raw
                 $st = ''; if ($txt) { try { $st = "$((Get-PimLicense -LicenseText $txt).Status)" } catch { $st = 'Unreadable' } }
-                $key = "$(Get-PimSqlSetting -ConnectionString $cs -Name 'InvardiaInstallKey')".Trim()
-                $trig = @(@(Get-PimSqlSetting -ConnectionString $cs -Name 'SchedulerTriggers') | Where-Object { $_ -and "$($_.type)" -eq 'install-key' })
+                $key = "$(Invoke-CvStoreRead { param($cs) Get-PimSqlSetting -ConnectionString $cs -Name 'InvardiaInstallKey' })".Trim()
+                $trig = @(@(Invoke-CvStoreRead { param($cs) Get-PimSqlSetting -ConnectionString $cs -Name 'SchedulerTriggers' }) | Where-Object { $_ -and "$($_.type)" -eq 'install-key' })
                 $claim = Get-CvSetting 'InstallKeyClaimState'
                 return @{ readable = $true; present = [bool]$txt; status = $st; installKey = ([bool]$key -or "$(Get-PimFactValue $claim 'action')" -eq 'claimed'); claimQueued = [bool]$trig.Count }
             }
@@ -266,7 +295,10 @@ function Get-CvFact([string]$Id) {
                 return @{ readable = $true; status = "$($last.properties.status)"; at = "$($last.properties.startTime)" }
             }
         }
-    } catch { return @{ readable = $false; error = (("$($_.Exception.Message)" -split "`n")[0]) } }
+    } catch {
+        $ex = $_.Exception
+        return @{ readable = $false; error = (("$($ex.Message)" -split "`n")[0]); store = [bool]($ex.Data -and $ex.Data.Contains('pimStore')) }
+    }
     return $null
 }
 
@@ -360,6 +392,9 @@ if ($eoid) { $fix['engine-graph'] = $fix['engine-graph'].Replace('<engine job ob
 $rows0 = Get-PimInstallVerifyRows -Role $Role -Facts $facts -Fix $fix -LicenceExpected ([bool]$LicenceExpected)
 foreach ($r in @($rows0 | Where-Object { ($_.state -eq 'failed' -and $_.id -in 'superadmins', 'updater', 'alerting', 'engine-root-reader', 'sql-host-rule') -or ($_.state -eq 'warning' -and $_.id -eq 'engine-root-reader') })) {
     if ($r.id -eq 'sql-host-rule' -and -not [bool](Get-PimFactValue $facts[$r.id] 'readable')) { continue }
+    # a line the STORE could not be read for is never "repaired": what is there is unknown, and a write (Set-PimManagerAccess,
+    # Set-PimAlertRecipients) over an unread value could replace what an administrator chose. It stays not-done (fail closed).
+    if ((Get-PimFactValue $facts[$r.id] 'readable') -eq $false -and [bool](Get-PimFactValue $facts[$r.id] 'store')) { continue }
     if (Invoke-CvRepair $r.id $facts[$r.id]) {
         $again = Get-CvFact $r.id
         if ($again -is [System.Collections.IDictionary]) { $again['repaired'] = $true } elseif ($again) { $again | Add-Member -NotePropertyName repaired -NotePropertyValue $true -Force }

@@ -22,6 +22,14 @@
   install continues. -Resume re-runs from where it stopped: completed preflight / licence / support steps are skipped,
   and the deploy itself is idempotent (each of its steps checks what exists first).
 
+  ENROLLMENT KEY instead of a licence file (framework 8.6 "SINGLE-TENANT enrollment too", owner 2026-10-08): with
+  'enrollmentKey' in config.json (or -EnrollmentKey) -LicencePath is not needed. After the preflight, step 'enroll' claims
+  this tenant at Invardia FIRST (the environment is created under the customer, the licence signed -- asked again until
+  ready -- and an install key issued); step 'licence' registers that licence and stores the install key (from files in a
+  restricted per-run folder). A managed-tenant key, a refused key, or Invardia not issuing single-tenant enrollment yet =
+  exit 3 with one plain sentence, nothing deployed. The key is never printed (masked) and is removed from config.json once
+  the licence is registered.
+
   Reporter events: @{ installId; step = @{ id; title }; state = started|ok|warning|failed|skipped|completed; message;
   action = @{ text; command }; detail; outputs }. The bootstrap adds seq and at. This script never calls invardia.com.
 
@@ -32,7 +40,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ConfigPath,
-    [Parameter(Mandatory)][string]$LicencePath,
+    # The licence file -- required unless the answers carry an Invardia enrollment key (config 'enrollmentKey', or
+    # -EnrollmentKey): then the licence comes from the enrollment (framework 8.6 "SINGLE-TENANT enrollment too").
+    [string]$LicencePath = '',
     [scriptblock]$Reporter,
     [string]$StatePath = '',
     [switch]$Resume,
@@ -46,7 +56,16 @@ param(
     [string]$TestLicenceCertB64,
     [scriptblock]$Http,
     # INSTALL-HARDEN-1: param([hashtable]$VerifyArgs) -> @{ done; failed[]; warnings[]; sentence; rows[] } (Confirm-PimInstall.ps1)
-    [scriptblock]$VerifyInstall
+    [scriptblock]$VerifyInstall,
+    # framework 8.6: the enrollment key on the command line (else config.json 'enrollmentKey'). Never printed (masked).
+    [string]$EnrollmentKey = '',
+    [string]$InvardiaBaseUrl = "$($env:PIM_INVARDIA_BASE_URL)",
+    # --- test seams: Invardia (param($method, $url, $body, $headers) -> @{ status; body }) and the licence-poll wait ---
+    [scriptblock]$EnrollmentHttp,
+    [scriptblock]$EnrollmentSleep,
+    [int]$EnrollmentTimeoutSeconds = 900,
+    # test seam: param([hashtable]$MspArgs, [scriptblock]$OnStep) -> exit code, in place of Invoke-PimMspBuild (mspRole managed)
+    [scriptblock]$MspBuild
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -85,16 +104,33 @@ function Get-InstallRest([string]$Url, [string]$Resource) {
     if (-not "$($t.accessToken)") { return $null }
     try { return (& $Http $Url "$($t.accessToken)") } catch { return $null }
 }
-function Finish([int]$Code) { $global:LASTEXITCODE = $Code; exit $Code }
+$script:enrolDir = ''
+function Finish([int]$Code) {
+    # framework 8.6: the per-run directory with the claimed licence + install key never outlives the run.
+    if ($script:enrolDir) { Remove-PimEnrollmentRunDirectory -Path $script:enrolDir; $script:enrolDir = '' }
+    $global:LASTEXITCODE = $Code; exit $Code
+}
 
 # ================================================================== 1. config + licence
 Emit 'config' 'started'
 $raw = $null
 try { $raw = Get-Content -Raw -LiteralPath $ConfigPath -ErrorAction Stop | ConvertFrom-Json } catch { $raw = $null }
-$chk = Test-PimInstallConfig -Config $raw
+$chk = Test-PimInstallConfig -Config $raw -HasEnrollmentKey:([bool]"$EnrollmentKey".Trim())
 if (-not $chk.ok) { Emit 'config' 'failed' ("the answers cannot be used: " + (@($chk.errors) -join '; ')) 'Correct the answers in the wizard and download the command again.'; Finish 3 }
 $cfg = $chk.config
 $installId = $cfg.installId
+# framework 8.6 "SINGLE-TENANT enrollment too": the enrollment key lives in THIS variable only (never in $cfg).
+$enrolKey = if ("$EnrollmentKey".Trim()) { "$EnrollmentKey".Trim() } else { "$($chk.enrollmentKey)" }
+$enrolKeyInConfig = [bool]"$($chk.enrollmentKey)"
+$EnrollmentKey = ''; $chk.enrollmentKey = ''
+# ONE CLAIMANT PER INSTALL (Invardia 2026-10-08): every claim kills the previous install key. Answers that already carry
+# installKey were claimed by Invardia's bootstrap (Install-Invardia -EnrollmentKey) -- this install then NEVER claims; an
+# enrollment key beside it is informational only and is never sent.
+if ($enrolKey -and "$($cfg.installKey)".Trim()) { $enrolKey = ''; $enrolKeyInConfig = $false }
+if ($chk.enrollmentKeyIgnored -or (-not $enrolKey -and "$($cfg.installKey)".Trim() -and "$($raw.enrollmentKey)".Trim())) { Write-Host '    the enrollment key is not used: Invardia''s installer already claimed this installation (installKey is in the answers) -- nothing is claimed again' -ForegroundColor DarkGray }
+$enrolling = [bool]$enrolKey
+if ($enrolling -or "$($cfg.mspRole)" -eq 'managed') { $enrolLib = Join-Path $sol 'engine\msp\PIM-InvardiaEnrollment.ps1'; if (Test-Path -LiteralPath $enrolLib) { . $enrolLib } else { Emit 'config' 'failed' 'enrollment keys and managed tenants come with PIM Manager Pro; this copy is the Community edition' 'Install with the licence file, or download PIM Manager Pro from invardia.com.'; Finish 3 } }
+if ($enrolling -and -not (Test-PimEnrollmentKeyFormat -Key $enrolKey)) { Emit 'config' 'failed' 'the enrollment key is not an Invardia enrollment key (ek- followed by 43 letters, digits, - or _)' 'Copy the key again from invardia.com and download the command again.'; Finish 3 }
 if (-not "$StatePath".Trim()) {
     $homeDir = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
     $base = if (Test-Path -LiteralPath (Join-Path $homeDir 'clouddrive')) { Join-Path $homeDir 'clouddrive' } else { $homeDir }
@@ -104,18 +140,36 @@ $state = Read-PimInstallState -StatePath $StatePath
 $done = New-Object System.Collections.Generic.List[string]
 if ($Resume -and $state.installId -eq $installId) { foreach ($c in $state.completed) { $done.Add("$c") | Out-Null } }
 function Mark([string]$Id) { if (-not $done.Contains($Id)) { $done.Add($Id) | Out-Null }; Save-PimInstallState -StatePath $StatePath -InstallId $installId -Completed @($done) }
-$resumeCmd = "Install-PimManager -ConfigPath '$ConfigPath' -LicencePath '$LicencePath' -StatePath '$StatePath' -Resume"
+$resumeCmd = if ($enrolling -and -not "$LicencePath".Trim()) { "Install-PimManager -ConfigPath '$ConfigPath' -StatePath '$StatePath' -Resume" } else { "Install-PimManager -ConfigPath '$ConfigPath' -LicencePath '$LicencePath' -StatePath '$StatePath' -Resume" }
 
 # the licence: a Pro licence for THIS tenant, verifiable offline. Anything else is a bad bundle (exit 3).
+function Get-InstallLicenceProblem([string]$Text, [string]$What) {
+    $l = $null
+    try { if ("$Text".Trim()) { $l = if ($TestLicenceCertB64) { Get-PimLicense -LicenseText $Text -PublicCertB64 $TestLicenceCertB64 } else { Get-PimLicense -LicenseText $Text } } } catch { $l = $null }
+    $why = if (-not $l) { "$What could not be read" }
+           elseif ("$($l.Status)" -notin 'Valid', 'Grace') { "the licence is $($l.Status): $($l.Reason)" }
+           elseif ("$($l.Sku)" -notmatch '^(?i)pro(-.+)?$') { "the licence is a '$($l.Sku)' licence, not Pro" }
+           elseif (-not ($b = Test-PimLicenseTenantBinding -License $l -TenantId $cfg.tenantId).ok) { $b.reason }   # LIC anti-copy: bound, and to THIS tenant
+           else { '' }
+    return @{ lic = $l; why = $why }
+}
 $lic = $null; $licText = ''
-try { $licText = Get-Content -Raw -LiteralPath $LicencePath -ErrorAction Stop; $lic = if ($TestLicenceCertB64) { Get-PimLicense -LicenseText $licText -PublicCertB64 $TestLicenceCertB64 } else { Get-PimLicense -LicenseText $licText } } catch { $lic = $null }
-$licWhy = if (-not $lic) { "the licence file '$LicencePath' could not be read" }
-          elseif ("$($lic.Status)" -notin 'Valid', 'Grace') { "the licence is $($lic.Status): $($lic.Reason)" }
-          elseif ("$($lic.Sku)" -notmatch '^(?i)pro(-.+)?$') { "the licence is a '$($lic.Sku)' licence, not Pro" }
-          elseif (-not ($licBind = Test-PimLicenseTenantBinding -License $lic -TenantId $cfg.tenantId).ok) { $licBind.reason }   # LIC anti-copy: bound, and to THIS tenant
-          else { '' }
-if ($licWhy) { Emit 'config' 'failed' $licWhy 'Download the installation bundle again from invardia.com, or contact support.'; Finish 3 }
-Emit 'config' 'ok' ("installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: $($lic.Customer), valid until $($lic.ValidTo)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
+$licenceDone = $done.Contains('licence')
+if ($enrolling) {
+    # framework 8.6: the licence comes from the enrollment (claimed after the preflight, step 'enroll'); a licence file is not used.
+    if ("$LicencePath".Trim()) { Write-Host "    the licence file '$LicencePath' is not used: the enrollment returns this tenant's licence" -ForegroundColor Yellow }
+    Write-Host ("    enrollment key: {0} -- sent only in the claim to Invardia, never written to a log, the state file or the support outputs" -f (Get-PimEnrollmentKeyMask -Key $enrolKey)) -ForegroundColor DarkGray
+    Emit 'config' 'ok' ("installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: from your Invardia enrollment (after the checks)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
+} elseif (-not "$LicencePath".Trim() -and $licenceDone) {
+    Emit 'config' 'ok' ("installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: already registered (resume)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
+} else {
+    if (-not "$LicencePath".Trim()) { Emit 'config' 'failed' 'no licence: give the licence file (-LicencePath) or an Invardia enrollment key (enrollmentKey in the answers)' 'Download the installation bundle again from invardia.com, or contact support.'; Finish 3 }
+    try { $licText = Get-Content -Raw -LiteralPath $LicencePath -ErrorAction Stop } catch { $licText = '' }
+    $lp = Get-InstallLicenceProblem -Text $licText -What "the licence file '$LicencePath'"
+    $lic = $lp.lic
+    if ($lp.why) { Emit 'config' 'failed' $lp.why 'Download the installation bundle again from invardia.com, or contact support.'; Finish 3 }
+    Emit 'config' 'ok' ("installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: $($lic.Customer), valid until $($lic.ValidTo)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
+}
 $names = Get-PimInstallNames -Config $cfg
 
 # ================================================================== 2. preflight
@@ -205,7 +259,85 @@ Pre 'preflight-sql-region' {
 if ($preflightFailed) { Finish 2 }
 if ($PreflightOnly) { Write-Host 'preflight passed -- nothing was changed (-PreflightOnly)' -ForegroundColor Green; Finish 0 }
 
-# ================================================================== 3. deploy
+# ================================================================== 2b. framework 8.6: the ENROLLMENT (single tenant)
+# Claimed FIRST -- before anything is deployed: Invardia creates this environment under the customer, signs its licence
+# (asynchronously; asked again until ready) and issues the install key. A managed-tenant key (the answer carries a managing
+# block), a refused key, or Invardia not issuing single-tenant enrollment yet = exit 3 with one plain sentence; nothing is
+# deployed. Every claim issues a NEW install key, so once the licence step has stored one a resume does not claim again.
+$enrolLicPath = ''; $enrolKeyPath = ''; $alreadyInstalled = $false
+$managedInstall = ("$($cfg.mspRole)" -eq 'managed')
+if ($enrolling -and -not $managedInstall) {
+    if ($licenceDone) { Emit 'enroll' 'skipped' 'already linked and licensed (resume) -- not claimed again, so the stored install key stays valid' }
+    else {
+        Emit 'enroll' 'started'
+        $script:enrolDir = New-PimEnrollmentRunDirectory
+        $eh = if ($EnrollmentHttp) { $EnrollmentHttp } else { { param($m, $u, $b, $h) Invoke-PimEnrollmentHttp -Method $m -Url $u -Body $b -Headers $h } }
+        $es = if ($EnrollmentSleep) { $EnrollmentSleep } else { { param($sec) Start-Sleep -Seconds $sec } }
+        $eb = ''; try { $eb = Resolve-PimEnrollmentBaseUrl -BaseUrl $InvardiaBaseUrl } catch { Emit 'enroll' 'failed' "$($_.Exception.Message)"; Finish 3 }
+        $sc = Invoke-PimEnrollmentSingleClaim -Http $eh -BaseUrl $eb -EnrollmentKey $enrolKey -TenantId $cfg.tenantId -SubscriptionId $cfg.subscriptionId -Directory $script:enrolDir `
+                -TimeoutSeconds $EnrollmentTimeoutSeconds -Sleep $es -Progress { param($msg) Emit 'enroll' 'waiting' "$msg" }
+        $enrolKey = ''   # used once
+        if (-not $sc.ok -and $sc.alreadyInstalled) {
+            # Owner 2026-10-08: the install already succeeded with this key -- no new key; the stored licence + key are kept and
+            # the install goes on as a re-run of the existing one (the deploy is idempotent; the licence step is skipped).
+            $alreadyInstalled = $true
+            Emit 'enroll' 'warning' "$($sc.reason)"
+        } elseif (-not $sc.ok) {
+            Emit 'enroll' 'failed' "$($sc.reason)" $(if ($sc.refused) { 'Nothing was installed. Check the key, or install with the licence file:' } else { 'Nothing was installed yet. Resume when Invardia answers:' }) $(if ($sc.refused) { "Install-PimManager -ConfigPath '$ConfigPath' -LicencePath <licence file>" } else { $resumeCmd })
+            Finish $(if ($sc.refused) { 3 } else { 1 })
+        }
+        if (-not $alreadyInstalled) {
+        $lp = Get-InstallLicenceProblem -Text $sc.licenceText -What 'the licence Invardia returned'
+        if ($lp.why) { Emit 'enroll' 'failed' "the enrollment's licence cannot be used: $($lp.why)" 'Contact Invardia support (support@invardia.com); nothing was installed.'; Finish 3 }
+        $lic = $lp.lic
+        $enrolLicPath = $sc.licencePath; $enrolKeyPath = $sc.installKeyPath
+        Emit 'enroll' 'ok' "linked to your Invardia account as environment '$($sc.environmentHandle)'; licence: $($lic.Customer), valid until $($lic.ValidTo)"
+        }
+    }
+}
+
+# ================================================================== 2c. framework 8.6: a MANAGED tenant of an MSP
+# Owner 2026-10-08: the customer receives ONE command when the managing company issues an enrollment key. With mspRole
+# 'managed' this install IS the managed-tenant build (Invoke-PimMspBuild -Role Slave, signed-in, -EnrollmentKey): claim ->
+# licence + install key -> link to the managing tenant from the claim's managing block -> pull subnet reported -> pull job.
+# Nothing is re-implemented here; every step of that build reaches -Reporter with its own id and title.
+$mspCode = $null
+if ($managedInstall) {
+    $script:enrolDir = New-PimEnrollmentRunDirectory
+    $bootLic = ''; $bootKey = ''
+    if (-not $enrolling) {
+        # Invardia's bootstrap claimed: its licence file + the install key (written to a FILE here; the build reads the file)
+        # go to the build's licence step, the handed-over managing block is the master{} block, and NOTHING claims again.
+        $bootLic = Join-Path $script:enrolDir 'bootstrap.pimlicense'; [IO.File]::WriteAllText($bootLic, "$licText", (New-Object Text.UTF8Encoding($false)))
+        $bootKey = Join-Path $script:enrolDir 'bootstrap.installkey'; [IO.File]::WriteAllText($bootKey, "$($cfg.installKey)", (New-Object Text.UTF8Encoding($false)))
+    }
+    $mspCfg = ConvertTo-PimInstallMspSlaveConfig -Config $cfg -SignedInUpn $who.userName -LicencePath $bootLic -InstallKeyPath $bootKey
+    $mspCfgPath = Join-Path $script:enrolDir 'managed-tenant.json'   # ids, names and file PATHS only -- never a key
+    [IO.File]::WriteAllText($mspCfgPath, ($mspCfg | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
+    $mspArgs = @{ Role = 'Slave'; ConfigPath = $mspCfgPath; Apply = $true; InvardiaInstallToken = ''; EnrollmentTimeoutSeconds = $EnrollmentTimeoutSeconds }
+    if ($enrolling) { $mspArgs['EnrollmentKey'] = $enrolKey }
+    if ("$InvardiaBaseUrl".Trim()) { $mspArgs['InvardiaBaseUrl'] = "$InvardiaBaseUrl".Trim() }
+    if ($EnrollmentHttp) { $mspArgs['EnrollmentHttp'] = $EnrollmentHttp }
+    if ($EnrollmentSleep) { $mspArgs['EnrollmentSleep'] = $EnrollmentSleep }
+    $enrolKey = ''
+    $mspOnStep = { param($ev)
+        $st = "$($ev.state)"; if ($st -notin 'started', 'ok', 'warning', 'failed', 'skipped', 'waiting') { return }
+        $a = @{ StepId = "$($ev.key)"; State = $st; Message = "$($ev.detail)"; Title = "$($ev.name)"; InstallId = $installId }
+        if ($st -eq 'failed') { $a['ActionText'] = 'Fix the cause above, then resume the installation:'; $a['ActionCommand'] = $resumeCmd }
+        Send-Event (New-PimInstallEvent @a)
+    }
+    if (-not $MspBuild) { $MspBuild = { param([hashtable]$A, [scriptblock]$OnStep) $global:LASTEXITCODE = 0; & (Join-Path $here 'Invoke-PimMspBuild.ps1') @A -OnStep $OnStep | Out-Host; [int]$LASTEXITCODE } }
+    try { $mspCode = @(& $MspBuild $mspArgs $mspOnStep) | Select-Object -Last 1 } catch { Emit 'verify' 'failed' "the managed-tenant build stopped: $($_.Exception.Message)" 'Fix the cause above, then resume the installation:' $resumeCmd; Finish 1 }
+    $mspArgs = $null
+    if ([int]$mspCode -notin 0, 2) {
+        if (-not @($events | Where-Object { $_.state -eq 'failed' }).Count) { Emit 'verify' 'failed' "the managed-tenant build did not complete (exit $mspCode)" 'Fix the cause above, then resume the installation:' $resumeCmd }
+        Finish $(if (@($events | Where-Object { $_.state -eq 'failed' -and "$($_.step.id)" -eq 'enroll' }).Count) { 3 } else { 1 })
+    }
+    Mark 'licence'
+    if ("$($raw.enrollmentKey)".Trim()) { try { if (Remove-PimInstallConfigEnrollmentKey -ConfigPath $ConfigPath) { Write-Host '    the enrollment key was removed from config.json (it is no longer needed)' -ForegroundColor DarkGray } } catch { Write-Host '    could not remove the enrollment key from config.json -- delete that line yourself' -ForegroundColor Yellow } }
+}
+
+if (-not $managedInstall) {# ================================================================== 3. deploy
 $deployArgs = ConvertTo-PimInstallDeployArgs -Config $cfg -SignedInUpn $who.userName
 $onStep = { param($ev) $e = ConvertTo-PimInstallStepEvent -DeployEvent $ev -InstallId $installId -ResumeCommand $resumeCmd; if ($e) { Send-Event $e; if ("$($e.state)" -in 'ok', 'warning', 'skipped') { Mark "$($e.step.id)" } } }
 if (-not $Deploy) { $Deploy = { param([hashtable]$DeployArgs, [scriptblock]$OnStep) & (Join-Path $here 'Invoke-PimDeployAll.ps1') @DeployArgs -OnStep $OnStep } }
@@ -220,11 +352,20 @@ if (-not $summary -or "$($summary.status)" -notin 'success', 'unverified') {
 
 # ================================================================== 4. licence, support access, health, outputs
 if ($done.Contains('licence')) { Emit 'licence' 'skipped' 'already registered (resume)' }
+elseif ($alreadyInstalled) { Emit 'licence' 'skipped' 'already installed with this enrollment key: the stored licence and install key are kept'; Mark 'licence' }
 else {
     Emit 'licence' 'started'
-    if (-not $InstallLicence) { $InstallLicence = { param($Path, $SqlFqdn, $TenantId, $Key) & (Join-Path $here 'Set-PimLicense.ps1') -LicensePath $Path -SqlServer $SqlFqdn -TenantId $TenantId -UseSignedInAccount -InstallKey "$Key" -QueueInstallKeyClaim:(-not "$Key".Trim()) | Out-Host; @{ ok = (-not $LASTEXITCODE) } } }
-    $lr = & $InstallLicence $LicencePath $names.sqlFqdn $cfg.tenantId "$($cfg.installKey)"
-    if ($lr -and $lr.ok) { Emit 'licence' 'ok' "the $($cfg.edition) licence is registered -- the Pro features are on"; Mark 'licence' }
+    # framework 8.6: an enrolled install hands the install key over as a FILE (-InstallKeyPath), never as an argument.
+    if (-not $InstallLicence) { $InstallLicence = { param($Path, $SqlFqdn, $TenantId, $Key, $KeyPath)
+        if ("$KeyPath".Trim()) { & (Join-Path $here 'Set-PimLicense.ps1') -LicensePath $Path -SqlServer $SqlFqdn -TenantId $TenantId -UseSignedInAccount -InstallKeyPath "$KeyPath" | Out-Host }
+        else { & (Join-Path $here 'Set-PimLicense.ps1') -LicensePath $Path -SqlServer $SqlFqdn -TenantId $TenantId -UseSignedInAccount -InstallKey "$Key" -QueueInstallKeyClaim:(-not "$Key".Trim()) | Out-Host }
+        @{ ok = (-not $LASTEXITCODE) } } }
+    $lr = if ($enrolling) { & $InstallLicence $enrolLicPath $names.sqlFqdn $cfg.tenantId '' $enrolKeyPath } else { & $InstallLicence $LicencePath $names.sqlFqdn $cfg.tenantId "$($cfg.installKey)" }
+    if ($lr -and $lr.ok) {
+        Emit 'licence' 'ok' "the $($cfg.edition) licence is registered -- the Pro features are on"; Mark 'licence'
+        # framework 8.6: the key has done its job -- no copy of it stays in the answers on disk (a resume no longer needs it).
+        if ("$($raw.enrollmentKey)".Trim()) { try { if (Remove-PimInstallConfigEnrollmentKey -ConfigPath $ConfigPath) { Write-Host '    the enrollment key was removed from config.json (it is no longer needed)' -ForegroundColor DarkGray } } catch { Write-Host "    could not remove the enrollment key from config.json -- delete that line yourself" -ForegroundColor Yellow } }
+    }
     else { Emit 'licence' 'failed' 'the licence could not be stored in the PIM database' 'Fix the cause above, then resume the installation:' $resumeCmd; Finish 1 }
 }
 
@@ -271,8 +412,10 @@ if (-not [bool]$vr.done) {
 if (@($vr.warnings).Count) { Emit 'verify-install' 'warning' "$($vr.sentence)" -Detail ([ordered]@{ lines = $vRows }) }
 else { Emit 'verify-install' 'ok' "$($vr.sentence)" -Detail ([ordered]@{ lines = $vRows }) }
 
+}   # end: not a managed-tenant install (2c ran the managed-tenant build instead of 3 - 4b)
+
 Emit 'health-check' 'started'
-$healthy = ("$($summary.status)" -eq 'success') -and [bool]$summary.healthy
+$healthy = if ($managedInstall) { [int]$mspCode -eq 0 } else { ("$($summary.status)" -eq 'success') -and [bool]$summary.healthy }
 $warnings = @($events | Where-Object { $_.state -eq 'warning' } | ForEach-Object { $_.step.id } | Select-Object -Unique)
 if ($healthy -and -not $warnings.Count) { Emit 'health-check' 'ok' 'the PIM Manager is deployed and healthy' }
 elseif ($healthy) { Emit 'health-check' 'warning' "deployed and healthy; still waiting for: $($warnings -join ', ')" }

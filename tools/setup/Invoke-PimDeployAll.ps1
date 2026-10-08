@@ -78,6 +78,13 @@
     reported DEGRADED / WARNING (e.g. mail sender skipped). Called for every planned step, including the skipped
     ones. A failing reporter never fails the deploy. Install-PimManager.ps1 maps these to its customer events.
 
+.PARAMETER EnrollmentKey
+    framework 8.6 "SINGLE-TENANT enrollment too": an Invardia enrollment key (ek-...) for THIS (single) tenant. With -Apply
+    the tenant is claimed FIRST (step 'enroll': Invardia creates the environment under the customer and signs its licence),
+    and step 'licence' (after 'features') registers that licence + stores the install key. A managed-tenant key, a refused
+    key, or Invardia not yet issuing single-tenant enrollment = a plain sentence, exit 1, nothing touched. Never printed
+    (masked), logged or saved in the deploy profile. Without it the plan and every step's arguments are unchanged.
+
 .EXAMPLE
     .\Invoke-PimDeployAll.ps1 -Source sync-automateit -TenantId <tid> -SubscriptionId <sub> `
         -ResourceGroup rg-pim -VnetName vnet -VnetResourceGroup rg-net -AcrName myacr `
@@ -478,7 +485,20 @@ param(
     # Invardia with this token (or $env:INVARDIA_INSTALL_TOKEN). Best effort -- a failed post never fails the deploy.
     [string]$InvardiaInstallToken = '',
     [string]$InvardiaInstallEventsUrl = 'https://invardia.com/api/install/events',
-    [scriptblock]$InvardiaInstallHttp
+    [scriptblock]$InvardiaInstallHttp,
+    # --- framework 8.6 "SINGLE-TENANT enrollment too" (PIM REQUIREMENTS 99, owner 2026-10-08) ---
+    # An Invardia ENROLLMENT KEY (ek-...): with -Apply the deploy CLAIMS this tenant FIRST (before anything is touched) --
+    # Invardia creates the environment under the customer and signs its licence (asynchronously; asked again until ready,
+    # at most -EnrollmentTimeoutSeconds) -- and the 'licence' step (after 'features') registers that licence and stores
+    # the install key of the LAST claim (every claim issues a new one). A key for a MANAGED tenant (the answer carries a
+    # managing block) is refused: that is Invoke-PimMspBuild -Role Slave. The key is a bearer secret: sent only in the
+    # claim, never printed (only masked), logged, saved in the deploy profile or passed to a step. Without it: no change.
+    [string]$EnrollmentKey,
+    [string]$InvardiaBaseUrl = "$($env:PIM_INVARDIA_BASE_URL)",
+    # TEST seams: param($method, $url, $body, $headers) -> @{ status; body } and param($seconds), as in Invoke-PimMspBuild.
+    [scriptblock]$EnrollmentHttp,
+    [scriptblock]$EnrollmentSleep,
+    [int]$EnrollmentTimeoutSeconds = 900
 )
 $ErrorActionPreference = 'Stop'
 
@@ -512,6 +532,13 @@ if ("$EnvLabel".Trim()) {
 }
 # The deploy profile (Update-PimCommunity.ps1) is taken from the same script-scope $PSBoundParameters, for the same reason.
 $script:PimDeployBound = @{} + $PSBoundParameters
+# framework 8.6: the enrollment key is taken into ONE variable and out of everything that is saved or replayed (the deploy
+# profile Update-PimCommunity re-runs must never claim again -- a claim issues a new install key).
+$script:PimEnrolKey = "$EnrollmentKey".Trim(); $EnrollmentKey = ''
+foreach ($k in 'EnrollmentKey', 'EnrollmentHttp', 'EnrollmentSleep', 'EnrollmentTimeoutSeconds', 'InvardiaBaseUrl') { [void]$script:PimDeployBound.Remove($k) }
+$script:PimEnrolling = [bool]$script:PimEnrolKey
+$script:PimEnrollDir = ''
+$script:PimEnrollResult = $null
 # §99 install tracking: an UNPASSED token comes from the session ($env:INVARDIA_INSTALL_TOKEN, set by the Support-app runner);
 # an explicitly EMPTY one (the guided install -- Invardia's bootstrap posts itself -- and the MSP build's hosting step, whose
 # own loop posts) stays empty, so no step is ever posted twice.
@@ -554,6 +581,12 @@ function Restore-PimCallerAzContext {
 # A -AdminCertPem the CALLER supplied is never touched: that is their file, not ours.
 $script:PimEphemeralPem = $null
 function Clear-PimEphemeralPem {
+    # framework 8.6: the enrollment's per-run directory (the claimed licence + install key) goes with the PEM, on every exit.
+    if ($script:PimEnrollDir) {
+        if (Get-Command Remove-PimEnrollmentRunDirectory -ErrorAction SilentlyContinue) { Remove-PimEnrollmentRunDirectory -Path $script:PimEnrollDir }
+        else { Remove-Item -LiteralPath $script:PimEnrollDir -Recurse -Force -ErrorAction SilentlyContinue }
+        $script:PimEnrollDir = ''
+    }
     if (-not $script:PimEphemeralPem) { return }
     if (Test-Path -LiteralPath $script:PimEphemeralPem) {
         try {
@@ -639,6 +672,60 @@ if (-not $PSBoundParameters.ContainsKey('AcrSku') -or -not "$AcrSku".Trim()) {
 # default-safe: a bare run is plan-only (-WhatIf). -Apply opens the gate.
 $applyGate = [bool]$Apply
 if ($ValidateOnly) { $applyGate = $true }   # validate-only still "runs" its single step
+
+# =================================================================================================
+# framework 8.6 "SINGLE-TENANT enrollment too" (owner 2026-10-08: "in single it must still link to customer").
+# The CLAIM runs here, FIRST -- before the deploy identity, before any probe or step -- so a refused key leaves the tenant
+# exactly as it was. Its result is reported by the plan's 'enroll' step; the licence + the install key of the LAST claim
+# are FILES in a restricted per-run directory, handed to the 'licence' step and deleted when the run ends.
+# =================================================================================================
+if ($script:PimEnrolling -and $ValidateOnly) {
+    Write-Host '    enrollment key: not used with -ValidateOnly (nothing is claimed)' -ForegroundColor Yellow
+    $script:PimEnrolling = $false; $script:PimEnrolKey = ''
+}
+if ($script:PimEnrolling) {
+    $enrolBase = ''; $enrolWhy = ''
+    # Enrollment is Pro code: a Community copy does not carry it, and says so instead of failing on a missing function.
+    $enrolLib = Join-Path $solRoot 'engine\msp\PIM-InvardiaEnrollment.ps1'; if (Test-Path -LiteralPath $enrolLib) { . $enrolLib } else { $enrolWhy = 'enrollment keys come with PIM Manager Pro; this copy is the Community edition -- install with the licence file' }
+    if (-not $enrolWhy) { try { $enrolBase = Resolve-PimEnrollmentBaseUrl -BaseUrl $InvardiaBaseUrl } catch { $enrolWhy = "$($_.Exception.Message)" } }
+    if (-not $enrolWhy -and -not (Test-PimEnrollmentKeyFormat -Key $script:PimEnrolKey)) { $enrolWhy = 'the enrollment key is not in the expected form (ek- followed by 43 letters, digits, - or _). Copy it again from invardia.com.' }
+    if (-not $enrolWhy -and ("$TenantId".Trim() -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$' -or "$SubscriptionId".Trim() -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')) { $enrolWhy = 'an enrollment needs -TenantId and -SubscriptionId (GUIDs): Invardia links this tenant and subscription to your company' }
+    # The licence step stores the licence + the new install key from THIS host: a store it cannot reach would leave the claimed
+    # key nowhere (and the previous one is dead the moment Invardia answers). Refused before the claim, not after it.
+    if (-not $enrolWhy -and (-not "$SqlServerFqdn".Trim() -or $SqlPrivateEndpoint)) { $enrolWhy = 'an enrollment stores the licence and the install key from this machine, so it needs -SqlServerFqdn on a store this machine reaches (not a private SQL endpoint). Install with the licence file instead (Set-PimLicense.ps1 from inside the network).' }
+    if (Get-Command Get-PimEnrollmentKeyMask -ErrorAction SilentlyContinue) { Write-Host ("    enrollment key: {0} -- sent only in the claim to {1}, never written to a log, the store, the deploy profile or telemetry" -f (Get-PimEnrollmentKeyMask -Key $script:PimEnrolKey), $(if ($enrolBase) { $enrolBase } else { 'Invardia' })) -ForegroundColor DarkGray }
+    if (-not $enrolWhy -and $applyGate) {
+        Write-Host '==> enroll: claiming this tenant at Invardia (environment, licence, install key)' -ForegroundColor Cyan
+        $enrolHttp = if ($EnrollmentHttp) { $EnrollmentHttp } else { { param($m, $u, $b, $h) Invoke-PimEnrollmentHttp -Method $m -Url $u -Body $b -Headers $h } }
+        $enrolSleep = if ($EnrollmentSleep) { $EnrollmentSleep } else { { param($sec) Start-Sleep -Seconds $sec } }
+        $script:PimEnrollDir = New-PimEnrollmentRunDirectory
+        $sc = Invoke-PimEnrollmentSingleClaim -Http $enrolHttp -BaseUrl $enrolBase -EnrollmentKey $script:PimEnrolKey -TenantId "$TenantId".Trim() -SubscriptionId "$SubscriptionId".Trim() `
+                -Directory $script:PimEnrollDir -TimeoutSeconds $EnrollmentTimeoutSeconds -Sleep $enrolSleep -Progress { param($msg) Write-Host "    $msg" -ForegroundColor DarkGray }
+        $script:PimEnrolKey = ''   # used once; never kept for a later step
+        if ($sc.ok) {
+            $script:PimEnrollResult = @{ ok = $true; ran = $true; detail = "enrolled at Invardia as environment '$($sc.environmentHandle)'; the licence + install key go to the licence step (files in this run's restricted directory)"
+                                         licencePath = $sc.licencePath; installKeyPath = $sc.installKeyPath }
+            Write-Host "    $($script:PimEnrollResult.detail)" -ForegroundColor Gray
+        } elseif ($sc.alreadyInstalled) {
+            # Owner 2026-10-08: the tenant's install already succeeded with this key -- Invardia rotates nothing and returns no key.
+            # The stored licence + install key are KEPT (never overwritten with nothing); the deploy goes on as a plain re-run.
+            Write-Host "    $($sc.reason)" -ForegroundColor Yellow
+            Write-Host '    continuing as a re-run of the existing installation: no enroll / licence step, the stored licence and install key stay' -ForegroundColor Yellow
+            $script:PimEnrolling = $false
+            Remove-PimEnrollmentRunDirectory -Path $script:PimEnrollDir; $script:PimEnrollDir = ''
+        } else { $enrolWhy = "$($sc.reason)" }
+    }
+    if ($enrolWhy) {
+        Write-Host "`nENROLLMENT REFUSED: $enrolWhy" -ForegroundColor Red
+        Write-Host '    Nothing in this tenant was changed by the deploy.' -ForegroundColor Red
+        if ($OnStep) {
+            foreach ($stEv in 'started', 'failed') { try { & $OnStep ([pscustomobject]@{ key = 'enroll'; name = 'Claim this tenant with the Invardia enrollment key'; state = $stEv; detail = $(if ($stEv -eq 'failed') { $enrolWhy } else { '' }) }) | Out-Null } catch { } }
+        }
+        if ($script:PimEnrollDir) { Remove-PimEnrollmentRunDirectory -Path $script:PimEnrollDir; $script:PimEnrollDir = '' }
+        Get-PimDeploySummary -StepOutcomes @([pscustomobject]@{ key = 'enroll'; ran = $true; ok = $false })
+        exit 1
+    }
+}
 
 # =================================================================================================
 # 0. THE DEPLOY IDENTITY -- created here when it was not supplied.
@@ -1327,6 +1414,9 @@ $planArgs = @{}
 # above. Without this the plan re-derives hosted from the update source and silently disagrees with
 # the steps that already ran against the corrected value.
 if ($Descriptor -or $Scenario -or $NotHosted) { $planArgs['HostedOverride'] = $hosted }
+# framework 8.6: with an enrollment key the plan carries 'enroll' (first) and 'licence' (after features). Without one the
+# plan is built exactly as before -- the switch is not even passed.
+if ($script:PimEnrolling) { $planArgs['Enrollment'] = $true; $facts['enroll'] = $true; $facts['licence'] = $true }
 $plan = Get-PimDeployAllPlan -Source $Source -Facts $facts -Apply:$applyGate -ValidateOnly:$ValidateOnly @planArgs
 
 Write-Host ""
@@ -2416,6 +2506,29 @@ function Invoke-DefaultStepRunner {
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
         }
+        'licence' {
+            # framework 8.6 single-tenant enrollment: register the licence the claim returned and store the install key of the
+            # LAST claim -- both read from FILES (the key is never an argument). Set-PimLicense verifies the document before
+            # the store is touched and reads both back. A failure halts the deploy BEFORE 'code' (nothing to roll back).
+            $lp = "$($Ctx['enrollLicencePath'])"; $kp = "$($Ctx['enrollInstallKeyPath'])"
+            if (-not $lp -or -not $kp -or -not (Test-Path -LiteralPath $lp) -or -not (Test-Path -LiteralPath $kp)) { return @{ ok=$false; ran=$true; detail='the licence and install key of the enrollment are missing -- run the deploy again with -EnrollmentKey' } }
+            $sl = Join-Path $here 'Set-PimLicense.ps1'
+            $slArgs = @{ LicensePath = $lp; InstallKeyPath = $kp; SqlServer = $SqlServerFqdn; Database = $SqlDatabase; TenantId = $TenantId }
+            if ($UseSignedInAccount) {
+                $whyL = Confirm-PimSignedInSqlAccess
+                if ($whyL) { return @{ ok=$false; ran=$true; detail="licence: $whyL" } }
+                $slArgs['UseSignedInAccount'] = $true
+            } elseif ("$SqlAdminClientId".Trim() -and "$SqlAdminCertThumbprint".Trim()) {
+                $slArgs['AdminAppId'] = $SqlAdminClientId; $slArgs['AdminCertThumbprint'] = $SqlAdminCertThumbprint
+            } elseif ("$SqlAdminClientId".Trim() -and "$SqlAdminClientSecret".Trim()) {
+                $slArgs['AdminAppId'] = $SqlAdminClientId; $slArgs['AdminSecret'] = $SqlAdminClientSecret
+            } else { return @{ ok=$false; ran=$true; detail='licence: no signed-in account or store admin identity can write the store -- run the deploy again with -UseSignedInAccount (or -SqlAdminClientId)' } }
+            if (-not $PSCmdlet.ShouldProcess('pim.Settings License + InvardiaInstallKey', 'register the enrolled licence + install key')) { return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' } }
+            $global:LASTEXITCODE = 0
+            try { & $sl @slArgs | Out-Host } catch { return @{ ok=$false; ran=$true; detail="the enrolled licence could not be stored: $($_.Exception.Message)" } }
+            $okL = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
+            return @{ ok=$okL; ran=$true; detail=$(if ($okL) { 'the enrolled licence is registered and the install key stored (Pro features on)' } else { "the enrolled licence could not be stored (exit $LASTEXITCODE) -- run the deploy again with -EnrollmentKey" }) }
+        }
         'alerting' {
             # INSTALL-HARDEN-1 item 5. NEVER fatal (a halt would roll the code back): a failure here is a WARNING, and the
             # end-of-install verify's 'alerting' line is what refuses "done".
@@ -2455,7 +2568,7 @@ function Invoke-DefaultStepRunner {
             if ($script:PimDeployRingExplicit) { $cvArgs['UpdateRing'] = $UpdateRing }
             if ("$UpdateSource".Trim()) { $cvArgs['UpdateSource'] = "$UpdateSource".Trim() }
             if ((Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource ("$UpdateSource".Trim())) -ne 'install') { $cvArgs['NoUpdater'] = $true }
-            if ($LicenceExpected -or "$UpdateSource".Trim() -eq 'Invardia') { $cvArgs['LicenceExpected'] = $true }
+            if ($LicenceExpected -or "$UpdateSource".Trim() -eq 'Invardia' -or $script:PimEnrollResult) { $cvArgs['LicenceExpected'] = $true }
             if ("$script:PimMailDeferredReason".Trim()) { $cvArgs['MailDeferredReason'] = "$script:PimMailDeferredReason" }
             if ($EngineAzureRootUserAccessAdmin) { $cvArgs['EngineAzureRootUserAccessAdmin'] = $true }
             $w = $script:PimSetupHostWindow
@@ -2765,6 +2878,8 @@ function Get-PimDeployValidationStepVerdict {
 # =============================================================================
 $runner = if ($StepRunner) { $StepRunner } else { { param($k,$ctx) Invoke-DefaultStepRunner -Key $k -Ctx $ctx } }
 $ctx = @{ source=$Source; hosted=$hosted; tenantId=$TenantId; resourceGroup=$ResourceGroup; managerApp=$ManagerApp; imageTag=$ImageTag }
+# framework 8.6: the claimed licence + install key reach the 'licence' step as FILE PATHS only (never the key itself).
+if ($script:PimEnrollResult) { $ctx['enrollLicencePath'] = "$($script:PimEnrollResult.licencePath)"; $ctx['enrollInstallKeyPath'] = "$($script:PimEnrollResult.installKeyPath)" }
 
 # capture pre-deploy rollback target (prior ACA revision) BEFORE any code change.
 # Skipped under the -StepRunner test seam (would hit real az and probe a non-existent RG).
@@ -2846,7 +2961,8 @@ foreach ($s in $plan.steps) {
     }
     Step "$($s.key): RUN -- $($s.name)"
     Send-PimDeployStepEvent $s 'started' ''
-    $res = & $runner $s.key $ctx
+    # framework 8.6: the claim already ran FIRST (before anything was touched); this step reports its outcome.
+    $res = if ("$($s.key)" -eq 'enroll') { $(if ($script:PimEnrollResult) { @{ ok = $true; ran = $true; detail = "$($script:PimEnrollResult.detail)" } } else { @{ ok = $false; ran = $true; detail = 'the enrollment claim did not run' } }) } else { & $runner $s.key $ctx }
     if (-not $res) { $res = @{ ok=$false; ran=$true; detail='runner returned nothing' } }
     # A runner may return a hashtable, a PSCustomObject, or (defensively) a scalar.
     # Read 'ok'/'ran'/'detail' WITHOUT assuming ContainsKey (PSCustomObject/String lack it).

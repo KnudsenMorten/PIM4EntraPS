@@ -44,6 +44,10 @@ param(
     [string]$ManagerApp = 'ca-pim-manager',
     [string]$TickPrincipalId,
     [ValidateSet('publicSigned', 'privateEndpoint')][string]$Access = 'publicSigned',
+    # Master: the signing key id(s) (43-char RFC 7638 thumbprints; identifiers, not secrets). The managing tenant's Manager
+    # pins NO key (only managed tenants pin the master's key), so the pin cannot be the source there: the build passes the
+    # id its signingkey step printed (master config `signingKeyIds`). The Manager's pin stays the fallback (live 2026-10-08).
+    [string[]]$SigningKeyIds = @(),
     [string]$PullSubnetId,
     [string]$InvardiaBaseUrl = ''
 )
@@ -119,7 +123,11 @@ if ($Role -eq 'Master') {
     $envList = @(); try { $envList = @("$envJson" | ConvertFrom-Json) } catch { $envList = @() }
     $pinVal = "$(@($envList | Where-Object { "$($_.name)" -eq 'PIM_BaselineTrustedKeys' }) | Select-Object -First 1 | ForEach-Object { $_.value })"
     $keyIds = @("$pinVal" -split '[,;\s]+' | Where-Object { $_ -cmatch '^[A-Za-z0-9_-]{43}$' })
-    if (-not $keyIds.Count) { throw "$ManagerApp pins no signing key id (PIM_BaselineTrustedKeys) -- run the build's signingkey step first" }
+    $given = @(@($SigningKeyIds) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $badGiven = @($given | Where-Object { $_ -cnotmatch '^[A-Za-z0-9_-]{43}$' })
+    if ($badGiven.Count) { throw "-SigningKeyIds: not a signing key id (43 characters, base64url): $($badGiven -join ', ')" }
+    if ($given.Count) { $keyIds = @($given + $keyIds | Select-Object -Unique) }
+    if (-not $keyIds.Count) { throw "no signing key id: pass -SigningKeyIds (the id the build's signingkey step printed, master config signingKeyIds) -- the managing tenant's Manager pins none" }
     Note "pinned: $($keyIds -join ', ')"
 }
 

@@ -114,7 +114,11 @@ param(
     # and events address. Every step is posted (best effort; a failed post never fails the build; nothing secret is sent).
     [string]$InvardiaInstallToken = '',
     [string]$InvardiaInstallEventsUrl = 'https://invardia.com/api/install/events',
-    [scriptblock]$InvardiaInstallHttp
+    [scriptblock]$InvardiaInstallHttp,
+    # framework 8.6 (owner 2026-10-08): the guided install (Install-PimManager, mspRole 'managed' + an enrollment key) runs
+    # THIS build and reports every step through its -Reporter: called with @{ key; name; state; detail } for each step
+    # event (the same events the install tracking posts). A failing callback never fails the build.
+    [scriptblock]$OnStep
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -232,6 +236,13 @@ $prevSubscription = ''
 # §99 install tracking. This loop is the ONE poster: the variable is taken out of the environment for the run, so no child
 # step (the hosting step runs Invoke-PimDeployAll) posts the same install a second time; it is put back afterwards.
 $tracker = New-PimInstallTracker -Token "$InvardiaInstallToken" -EventsUrl "$InvardiaInstallEventsUrl" -Http $InvardiaInstallHttp
+$script:PimMspFailMessage = ''
+function Send-PimMspStepEvent {
+    # One step event: posted to Invardia (install tracking, best effort) AND handed to -OnStep (the guided install's reporter).
+    param([object]$Tracker, [string]$StepId, [string]$Title = '', [string]$State, [string]$Message = '')
+    if ($OnStep) { try { & $OnStep ([pscustomobject]@{ key = $StepId; name = $Title; state = $State; detail = $Message }) | Out-Null } catch { } }
+    return (Send-PimInstallTrackEvent -Tracker $Tracker -StepId $StepId -Title $Title -State $State -Message $Message)
+}
 $prevInstallTokenEnv = $env:INVARDIA_INSTALL_TOKEN
 if ($null -ne $prevInstallTokenEnv) { Remove-Item Env:\INVARDIA_INSTALL_TOKEN -ErrorAction SilentlyContinue }
 if ($tracker.enabled) { Write-Host "    install tracking: every step is reported to Invardia ($($tracker.url)); a failed report never fails the build" -ForegroundColor DarkGray }
@@ -239,7 +250,7 @@ $curStep = $null
 try {
     if ($StepRunner -and $enrolling) { $null = New-Item -ItemType Directory -Force -Path $runDir }   # tests: the enrolled licence + key files land here
     if (-not $StepRunner) {
-        $null = New-PimRestrictedProfileDir -Path $runDir
+        $null = New-PimEnrollmentRunDirectory -Path $runDir   # the same ACL as New-PimRestrictedProfileDir on Windows; mode 700 in Cloud Shell (Linux)
         if ($extDir) { $env:AZURE_EXTENSION_DIR = $extDir; Write-Host "    az extensions for this run: $extDir" -ForegroundColor DarkGray }
         if ($authMode -eq 'Certificate') {
             Write-Host "`n==> az certificate login as the deploy identity $($config.deployIdentity.clientId)" -ForegroundColor Cyan
@@ -311,24 +322,44 @@ try {
         $s = $plan[$i]
         Write-Host ("`n==> [{0}/{1}] {2}: {3}" -f ($i + 1), $plan.Count, $s.id, $s.title) -ForegroundColor Cyan
         $curStep = $s
-        if (-not "$($s.blocked)".Trim()) { [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId $s.id -Title $s.title -State started) }
+        if (-not "$($s.blocked)".Trim()) { [void](Send-PimMspStepEvent -Tracker $tracker -StepId $s.id -Title $s.title -State started) }
         if ("$($s.kind)" -eq 'enroll') {
             $http = if ($EnrollmentHttp) { $EnrollmentHttp } else { { param($m, $u, $b, $h) Invoke-PimEnrollmentHttp -Method $m -Url $u -Body $b -Headers $h } }
             $sleep = if ($EnrollmentSleep) { $EnrollmentSleep } else { { param($sec) Start-Sleep -Seconds $sec } }
             $claim = Invoke-PimEnrollmentClaimUntilReady -Http $http -BaseUrl $invBase -EnrollmentKey $enrolKey -TenantId "$($config.tenantId)" -SubscriptionId "$($config.subscriptionId)" `
                         -TimeoutSeconds $EnrollmentTimeoutSeconds -Sleep $sleep -Progress { param($msg) Write-Host "    $msg" -ForegroundColor DarkGray }
+            if (-not $claim.ok -and $claim.alreadyInstalled) {
+                # Owner 2026-10-08 (via Invardia): this tenant's install already SUCCEEDED with the key -- no new install key, nothing
+                # rotated. The environment keeps its stored licence + key (never overwritten with nothing); the build goes on as a
+                # re-run WITHOUT the enrollment (no licence / enrollreport step), its master block from the answer or the config.
+                Write-Host "    $($claim.reason)" -ForegroundColor Yellow
+                $merge = Merge-PimEnrollmentMaster -Config $config -Managing $claim.managing
+                $config = $merge.config
+                if (-not (Test-PimEnrollmentMasterComplete -Config $config)) {
+                    Write-Host "`nSTEP FAILED: enroll -- $($claim.reason) The managing tenant's bundle address is not known here: add the master block the first build printed to this config, then run the build again without the key." -ForegroundColor Red
+                    $exitCode = 1; $script:PimMspFailMessage = "$($claim.reason)"
+                    break
+                }
+                $nextId = if (($i + 1) -lt $plan.Count) { "$($plan[[Math]::Max($startAt, $i + 1)].id)" } else { '' }
+                $plan = @(Get-PimMspBuildPlan -Role $Role -Config $config -InvardiaBaseUrl $planBase)
+                $ops = @(Get-PimMspOperatorSteps -Role $Role -Config $config)
+                $from2 = [Math]::Max(0, [array]::IndexOf([string[]]@($plan | ForEach-Object { $_.id }), $nextId))
+                $order = @(Get-PimMspBuildRunOrder -StepIds @($plan | ForEach-Object { $_.id }) -StartAt $from2)
+                $ordIx = 0
+                $enrolKey = ''
+                [void](Send-PimMspStepEvent -Tracker $tracker -StepId 'enroll' -Title $s.title -State warning -Message "$($claim.reason)")
+                continue
+            }
             if (-not $claim.ok) {
                 Write-Host "`nENROLLMENT REFUSED: $($claim.reason)" -ForegroundColor Red
                 Write-Host '    Nothing in this tenant was changed by the build.' -ForegroundColor Red
-                $exitCode = 1
+                $exitCode = 1; $script:PimMspFailMessage = "$($claim.reason)"
                 break
             }
             $c = $claim.claim
             # Only the LAST claim's install key exists any more (every claim issues a new one): that is the one handed on.
-            $licFile = Join-Path $runDir 'enrolled.pimlicense'; $keyFile = Join-Path $runDir 'enrolled.installkey'
-            [IO.File]::WriteAllText($licFile, "$($c.licenceText)", (New-Object Text.UTF8Encoding($false)))
-            [IO.File]::WriteAllText($keyFile, "$($c.installKey)", (New-Object Text.UTF8Encoding($false)))
-            $Resolved['{{enroll:licencepath}}'] = $licFile; $Resolved['{{enroll:installkeypath}}'] = $keyFile
+            $files = Save-PimEnrollmentClaimFiles -Directory $runDir -Claim $c   # shared with the single-tenant path
+            $Resolved['{{enroll:licencepath}}'] = $files.licencePath; $Resolved['{{enroll:installkeypath}}'] = $files.installKeyPath
             $managing = $c.managing
             if (-not $managing -and -not (Test-PimEnrollmentMasterComplete -Config $config)) {
                 # The managing tenant has not reported its facts at claim time: ask Invardia again with THIS tenant's new key.
@@ -338,7 +369,7 @@ try {
             if (-not $managing -and -not (Test-PimEnrollmentMasterComplete -Config $config)) {
                 Write-Host "`nSTEP FAILED: enroll -- your managing company's tenant has not reported its bundle address to Invardia yet, and this config has no master block." -ForegroundColor Red
                 Write-Host '    Ask the managing company to run its managing tenant build (or its enrolled-tenants job), or add the master block it gives you to this config, then run the build again with -EnrollmentKey.' -ForegroundColor Red
-                $exitCode = 1
+                $exitCode = 1; $script:PimMspFailMessage = "your managing company's tenant has not reported its bundle address to Invardia yet, and this config has no master block"
                 break
             }
             $merge = Merge-PimEnrollmentMaster -Config $config -Managing $managing
@@ -348,7 +379,7 @@ try {
             if (-not $chk2.ok) {
                 foreach ($e in $chk2.errors) { Write-Host "  [x] $e" -ForegroundColor Red }
                 Write-Host "`nSTEP FAILED: enroll -- the configuration is not complete with what Invardia returned." -ForegroundColor Red
-                $exitCode = 1
+                $exitCode = 1; $script:PimMspFailMessage = "the configuration is not complete with what Invardia returned: $(@($chk2.errors) -join '; ')"
                 break
             }
             Write-Host "    enrolled at Invardia as environment '$($c.environmentHandle)'; licence + install key are handed to the licence step (files in this run's restricted directory)" -ForegroundColor Gray
@@ -368,14 +399,14 @@ try {
             $ordIx = 0
             $enrolKey = ''   # used once; never kept for later steps
             Write-Host "    [OK] enroll" -ForegroundColor Green
-            [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId 'enroll' -Title $s.title -State ok -Message "enrolled as environment '$($c.environmentHandle)'")
+            [void](Send-PimMspStepEvent -Tracker $tracker -StepId 'enroll' -Title $s.title -State ok -Message "enrolled as environment '$($c.environmentHandle)'")
             continue
         }
         if ("$($s.blocked)".Trim()) {
             # Never executed, never resolved -- and never reported as done.
             Write-Host "    NOT RUN: $($s.blocked)" -ForegroundColor Yellow
             $notRun.Add($s.id)
-            [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId $s.id -Title $s.title -State skipped -Message "not run: $($s.blocked)")
+            [void](Send-PimMspStepEvent -Tracker $tracker -StepId $s.id -Title $s.title -State skipped -Message "not run: $($s.blocked)")
             continue
         }
         if ($s.why) { Write-Host "    why: $($s.why)" -ForegroundColor DarkGray }
@@ -443,11 +474,11 @@ try {
             Write-Host "    (output captured for the next step; not printed)" -ForegroundColor DarkGray
         }
         Write-Host "    [OK] $($s.id)" -ForegroundColor Green
-        [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId $s.id -Title $s.title -State ok)
+        [void](Send-PimMspStepEvent -Tracker $tracker -StepId $s.id -Title $s.title -State ok)
     }
 } catch {
     # a refusal or an unresolved argument THROWS out of the loop: it is the failed last event, then rethrown as before
-    if ($curStep) { [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId $curStep.id -Title $curStep.title -State failed -Message "$($_.Exception.Message)") }
+    if ($curStep) { [void](Send-PimMspStepEvent -Tracker $tracker -StepId $curStep.id -Title $curStep.title -State failed -Message "$($_.Exception.Message)") }
     $curStep = $null
     throw
 } finally {
@@ -463,12 +494,12 @@ try {
 }
 & $printOps
 if ($exitCode) {
-    if ($curStep) { [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId $curStep.id -Title $curStep.title -State failed -Message "the step failed -- fix the cause and resume with -From $($curStep.id)") }
+    if ($curStep) { [void](Send-PimMspStepEvent -Tracker $tracker -StepId $curStep.id -Title $curStep.title -State failed -Message $(if ($script:PimMspFailMessage) { $script:PimMspFailMessage } else { "the step failed -- fix the cause and resume with -From $($curStep.id)" })) }
     exit $exitCode
 }
 if ($notRun.Count) {
     Write-Host "`nBUILD INCOMPLETE ($Role): every runnable step succeeded, but these did NOT run: $($notRun -join ', '). See NOT RUN above and the operator steps." -ForegroundColor Yellow
-    [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId 'build-incomplete' -Title 'Build incomplete' -State warning -Message "not run: $($notRun -join ', ')")
+    [void](Send-PimMspStepEvent -Tracker $tracker -StepId 'build-incomplete' -Title 'Build incomplete' -State warning -Message "not run: $($notRun -join ', ')")
     exit 2
 }
 Write-Host "`nBUILD COMPLETE ($Role). Work through the operator steps above." -ForegroundColor Green

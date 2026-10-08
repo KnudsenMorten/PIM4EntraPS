@@ -1,8 +1,9 @@
 {
   "_comment": "The guided-install contract of the PIM Manager (GUIDED-INSTALL 4.1-4.6). Invardia's wizard asks exactly these questions and writes the answers to config.json for tools/setup/Install-PimManager.ps1, which validates them again (Test-PimInstallConfig). 'maps' = what the answer drives. Kept in step with Install-PimManager by tests/Test-PimGuidedInstall.ps1.",
   "product": "pim-manager",
-  "version": "2.4.535",
-  "entryPoint": "Install-PimManager -ConfigPath <config.json> -LicencePath <file> -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]",
+  "version": "2.4.536",
+  "entryPoint": "Install-PimManager -ConfigPath <config.json> [-LicencePath <file>] -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]",
+  "licenceOrKey": "-LicencePath is required unless config.json carries enrollmentKey: an enrollment key (framework 8.6) makes the install claim the tenant at Invardia, which returns the licence and the install key.",
   "exitCodes": { "0": "succeeded (warnings allowed)", "1": "a step failed -- fix it and -Resume", "2": "preflight failed -- nothing was changed", "3": "bad answers or a bad licence -- nothing was changed" },
   "pages": [
     { "id": "target", "title": "Where to install" },
@@ -19,7 +20,10 @@
     { "key": "exposure", "page": "network", "type": "enum", "default": "external", "options": ["external"], "help": "The guided install builds the external shape: the PIM Manager is reachable on the internet behind Microsoft Entra sign-in. A private-network install is a consultant-led setup.", "maps": "Exposure" },
     { "key": "vnetAddressPrefix", "page": "network", "type": "cidr", "default": "10.220.0.0/22", "maps": "PrereqVnetAddressPrefix" },
     { "key": "subnetAddressPrefix", "page": "network", "type": "cidr", "default": "10.220.0.0/23", "help": "A /23 or larger (Azure Container Apps), inside the VNet range.", "maps": "PrereqSubnetAddressPrefix" },
-    { "key": "mspRole", "page": "network", "type": "enum", "default": "single", "options": ["single"], "help": "Managing and managed tenants (MSP) are set up with support, not by the guided install.", "maps": "Scenario S2 + the licence" },
+    { "key": "mspRole", "page": "network", "type": "enum", "default": "single", "options": ["single", "managed"], "help": "single = this tenant only. managed = a tenant managed by an MSP (managing company): needs the enrollment key that company got from Invardia; the install links it to the managing tenant. A managing tenant is set up with support.", "maps": "single: Scenario S2 + the licence; managed: Invoke-PimMspBuild -Role Slave (S6) -EnrollmentKey" },
+    { "key": "enrollmentKey", "page": "target", "type": "secret", "setBy": "invardia", "help": "Optional for single, required for managed. The Invardia enrollment key (ek-...). With it no licence file is needed: the install claims this tenant at Invardia, which returns the licence and the install key. A bearer secret: never shown, never logged, removed from config.json once the licence is registered.", "maps": "the enroll step (claim) + the licence step" },
+    { "key": "adminPrefixes", "page": "network", "type": "stringList", "requiredWhen": "mspRole=managed", "help": "Managed tenant only: the name prefix(es) of the admin accounts the managing company manages in this tenant (e.g. Admin-).", "maps": "adminPrefixes of the managed-tenant build" },
+    { "key": "slaveRing", "page": "network", "type": "enum", "default": "2", "options": ["0", "1", "2"], "help": "Managed tenant only: the ring of this tenant for the managing company's policy bundle (2 = production).", "maps": "slaveRing of the managed-tenant build" },
     { "key": "portalUsers", "page": "access", "type": "upnList", "help": "Who may sign in to the PIM Manager. Default: the super-admins.", "maps": "EasyAuthAllowedPrincipals" },
     { "key": "allowAllMembers", "page": "access", "type": "bool", "default": false, "help": "Every member account of the tenant may sign in (guests never).", "maps": "EasyAuthAllowAllTenantUsers" },
     { "key": "engineAzureRootUserAccessAdmin", "page": "access", "type": "bool", "default": false, "help": "Optional. Also give the PIM engine User Access Administrator at the tenant root management group, so it can assign the Azure resource roles you delegate. Off by default: the engine always gets read-only Reader there (Discovery), and Get Started shows the command to add User Access Administrator later.", "maps": "EngineAzureRootUserAccessAdmin" },
@@ -37,6 +41,7 @@
     { "id": "preflight-providers", "title": "Azure resource providers" },
     { "id": "preflight-names", "title": "Resource names" },
     { "id": "preflight-sql-region", "title": "Azure SQL in the chosen region" },
+    { "id": "enroll", "title": "Link to your Invardia account" },
     { "id": "prereq", "title": "Network, registry, identity and database" },
     { "id": "image", "title": "Container image" },
     { "id": "infra", "title": "Container Apps environment and apps" },
@@ -56,6 +61,15 @@
     { "id": "health-check", "title": "Final health check" },
     { "id": "completed", "title": "Installation complete" }
   ],
+  "managedSteps": ["enroll", "hosting", "sqlgroup", "access", "scenario", "licence", "pullnetwork", "enrollreport", "downlink", "verify-install", "sqlhostclose"],
+  "minimalConfig": {
+    "single": ["installId", "tenantId", "subscriptionId", "location", "superAdmins", "alertRecipients", "enrollmentKey"],
+    "managed": ["installId", "tenantId", "subscriptionId", "location", "superAdmins", "alertRecipients", "enrollmentKey", "mspRole", "adminPrefixes"],
+    "singleClaimedByInvardia": ["installId", "tenantId", "subscriptionId", "location", "superAdmins", "alertRecipients", "installKey"],
+    "managedClaimedByInvardia": ["installId", "tenantId", "subscriptionId", "location", "superAdmins", "alertRecipients", "installKey", "mspRole", "adminPrefixes", "managing"],
+    "claimedByInvardiaNeeds": "-LicencePath <the claimed licence file>. ONE claimant per install: with installKey in the answers Install-PimManager never claims (an enrollmentKey beside it is ignored, never sent). managing = the claim's managing block { bundleStorage, container, signingKeyIds[], tenantId? }.",
+    "managing": "a managing tenant (MSP) is not a guided install: Invoke-PimMspBuild -Role Master with support"
+  },
   "outputs": ["subscriptionId", "resourceGroup", "sqlServerId", "logAnalyticsWorkspaceId", "keyVaultId", "runtimeIdentity", "runtimeIdentityClientId", "version", "portalUrl"],
   "requiredRights": [
     "Owner, or Contributor + User Access Administrator, on the subscription (required -- the preflight stops without it)",

@@ -29,6 +29,12 @@
                    tenants: [ { tenantId, environmentHandle, subscriptionId, pullSubnetIds[], claimedAt } ] }
                Each pull subnet is allowed on the bundle store; the job never removes a rule it did not add itself.
 
+    SINGLE-TENANT enrollment (framework 8.6 "SINGLE-TENANT enrollment too", owner 2026-10-08): the same CLAIM from a single
+    (non-MSP) install -- Invoke-PimDeployAll -EnrollmentKey and Install-PimManager's 'enrollmentKey' call
+    Invoke-PimEnrollmentSingleClaim: managing must be null (a managing block = an MSP key = refused), the licence is polled
+    the same way, and the licence + install key go to the licence step as files (Save-PimEnrollmentClaimFiles, shared with the
+    managed-tenant build). Until Invardia issues kind 'single' it answers 409 managingTenant / noMspLicence: said plainly.
+
     RULE: the enrollment key (ek-...) is a bearer secret that mints licences. It is used for the claim only: never printed
           (only masked), never written to a file, the store, the plan, a step's arguments or telemetry.
     RULE: Invardia's error text is never shown; its 'error' code picks one plain sentence.
@@ -91,9 +97,13 @@ function Get-PimEnrollmentRefusalMessage {
       internal ids); only its status + error CODE pick the sentence (live contract 2026-10-08):
         401 key | 403 keyRevoked, keyExpired | 422 invalid, productMismatch |
         409 managingTenant, tenantBelongsToAnotherCompany, noMspLicence, keyLimit, tenantLimit
+      -Kind Single (a SINGLE-tenant install, framework 8.6 "SINGLE-TENANT enrollment too"): the same codes in the words of a
+      customer installing its own tenant (no managing company), and 409 managingTenant | noMspLicence -- what Invardia answers
+      a single key until it issues kind 'single' -- says so: "Invardia does not issue single-tenant enrollment yet".
     #>
-    param([int]$Status, [AllowNull()][object]$Body)
+    param([int]$Status, [AllowNull()][object]$Body, [ValidateSet('Managed', 'Single')][string]$Kind = 'Managed')
     $code = Get-PimEnrollmentErrorCode -Body $Body
+    if ($Kind -eq 'Single') { return (Get-PimEnrollmentSingleRefusalMessage -Status $Status -Code $code) }
     switch -Regex ($code) {
         '^(?i)keyRevoked$'                    { return 'this enrollment key has been revoked. Ask your managing company for a new one. Nothing was created.' }
         '^(?i)keyExpired$'                    { return 'this enrollment key has expired. Ask your managing company for a new one. Nothing was created.' }
@@ -117,6 +127,37 @@ function Get-PimEnrollmentRefusalMessage {
     }
     if ($Status -ge 500) { return "Invardia could not complete the enrollment right now (HTTP $Status). Run the build again later; nothing was created here." }
     return "Invardia did not accept the enrollment (HTTP $Status). Ask your managing company to check its enrollment key."
+}
+
+$script:PimEnrollmentAlreadyInstalled = 'this tenant is already installed with this enrollment key -- re-run the install with its existing configuration (or Install-PimManager -Resume). The install key it already has is kept.'
+$script:PimEnrollmentSingleNotYet ='Invardia does not issue single-tenant enrollment yet -- use the licence file (it comes with your installation from invardia.com). Nothing was installed.'
+$script:PimEnrollmentSingleManaged = 'this key is for a managed tenant -- use the MSP managed-tenant install (tools/setup/Invoke-PimMspBuild.ps1 -Role Slave -EnrollmentKey ...). Nothing was installed here.'
+
+function Get-PimEnrollmentSingleRefusalMessage {
+    # PURE. A refused SINGLE-tenant claim -> ONE plain sentence (status + Invardia's error CODE only; its text is never shown).
+    param([int]$Status, [string]$Code = '')
+    switch -Regex ("$Code".Trim()) {
+        '^(?i)(managingTenant|noMspLicence)$'  { return $script:PimEnrollmentSingleNotYet }
+        '^(?i)keyRevoked$'                    { return 'this enrollment key has been revoked. Get a new one at invardia.com; nothing was installed.' }
+        '^(?i)keyExpired$'                    { return 'this enrollment key has expired. Get a new one at invardia.com; nothing was installed.' }
+        '^(?i)productMismatch$'               { return 'this enrollment key is not for PIM Manager. Use a PIM Manager enrollment key from invardia.com.' }
+        '^(?i)invalid$'                       { return 'Invardia refused the request as incomplete. Check the tenant id and subscription id, then run the installation again.' }
+        '^(?i)tenantBelongsToAnotherCompany$' { return 'this tenant is already registered to another company at Invardia. Contact Invardia support (support@invardia.com); nothing was installed.' }
+        '^(?i)keyLimit$'                      { return 'this enrollment key has already been used for as many tenants as it allows. Get a new key at invardia.com; nothing was installed.' }
+        '^(?i)tenantLimit$'                   { return 'your Invardia licence covers no more tenants. Raise the limit at invardia.com; nothing was installed.' }
+        '^(?i)key$'                           { return 'the enrollment key was not accepted. Check that it was copied completely, or get a new one at invardia.com.' }
+    }
+    switch ($Status) {
+        401 { return 'the enrollment key was not accepted. Check that it was copied completely, or get a new one at invardia.com.' }
+        403 { return 'Invardia refused this enrollment key. Get a new one at invardia.com; nothing was installed.' }
+        404 { return 'Invardia''s enrollment service did not answer. Try again later, or install with the licence file instead.' }
+        409 { return 'Invardia cannot enrol this tenant with this key. Check the key at invardia.com, or install with the licence file; nothing was installed.' }
+        422 { return 'Invardia refused the request as incomplete. Check the tenant id and subscription id, then run the installation again.' }
+        429 { return 'Invardia is limiting enrollment requests right now. Wait a few minutes, then run the installation again.' }
+        0   { return 'Invardia could not be reached. Check that this machine can open https://invardia.com, then run the installation again.' }
+    }
+    if ($Status -ge 500) { return "Invardia could not complete the enrollment right now (HTTP $Status). Run the installation again later; nothing was installed." }
+    return "Invardia did not accept the enrollment (HTTP $Status). Check the enrollment key at invardia.com."
 }
 
 function Get-PimEnrollmentSha256Hex {
@@ -216,11 +257,16 @@ function Invoke-PimEnrollmentClaim {
     <#
       ONE claim, seams injected. Returns @{ ok; status; reason; claim } -- 'claim' is ConvertFrom-PimEnrollmentClaimResponse's
       result (it may be pending). The key goes into the request body and NOWHERE else: no field of the result carries it.
+      -Kind Single: a single-tenant install. Refusals use the single-tenant sentences, and an answer that carries a
+      'managing' block at all (even one of nulls: an MSP key whose managing tenant has not reported) is REFUSED -- a single
+      key answers managing: null. The install key of such an answer is dropped, never returned.
     #>
     param([Parameter(Mandatory)][scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][string]$EnrollmentKey,
-          [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$SubscriptionId)
+          [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$SubscriptionId,
+          [ValidateSet('Managed', 'Single')][string]$Kind = 'Managed')
     if (-not (Test-PimEnrollmentKeyFormat -Key $EnrollmentKey)) {
-        return @{ ok = $false; status = 0; reason = 'the enrollment key is not in the expected form (ek- followed by 43 letters, digits, - or _). Copy it again from your managing company.'; claim = $null }
+        $from = if ($Kind -eq 'Single') { 'from invardia.com' } else { 'from your managing company' }
+        return @{ ok = $false; status = 0; reason = "the enrollment key is not in the expected form (ek- followed by 43 letters, digits, - or _). Copy it again $from."; claim = $null }
     }
     if ("$TenantId".Trim() -notmatch $script:PimEnrollmentGuid -or "$SubscriptionId".Trim() -notmatch $script:PimEnrollmentGuid) {
         return @{ ok = $false; status = 0; reason = 'the tenant id and subscription id must be GUIDs'; claim = $null }
@@ -230,7 +276,18 @@ function Invoke-PimEnrollmentClaim {
     try { $r = & $Http 'POST' "$base/api/enrollments/claim" (New-PimEnrollmentClaimBody -EnrollmentKey $EnrollmentKey -TenantId $TenantId -SubscriptionId $SubscriptionId) @{} }
     catch { $r = @{ status = 0; body = $null } }
     $st = 0; try { $st = [int]$r.status } catch { $st = 0 }
-    if ($st -ne 200 -and $st -ne 201) { return @{ ok = $false; status = $st; reason = (Get-PimEnrollmentRefusalMessage -Status $st -Body $r.body); claim = $null } }
+    if ($st -ne 200 -and $st -ne 201) { return @{ ok = $false; status = $st; reason = (Get-PimEnrollmentRefusalMessage -Status $st -Body $r.body -Kind $Kind); claim = $null } }
+    # Owner 2026-10-08 (via Invardia): a key may be claimed again while the tenant's install has NOT succeeded (a fresh install
+    # key each time); once it has, Invardia answers installKey: null + alreadyInstalled: true and rotates nothing. Never a key
+    # to store -- the caller keeps the install key it already has and goes on without the enrollment where it can.
+    if ($r.body -and $r.body.PSObject.Properties['alreadyInstalled'] -and [bool]$r.body.alreadyInstalled -and -not "$($r.body.installKey)".Trim()) {
+        $am = $null; if ($Kind -ne 'Single') { $am = ConvertFrom-PimEnrollmentManaging -Managing $r.body.managing; if ($am -and $am.ContainsKey('bad')) { $am = $null } }
+        return @{ ok = $false; status = $st; alreadyInstalled = $true; claim = $null; managing = $am; environmentHandle = "$($r.body.environmentHandle)".Trim()
+                  reason = $script:PimEnrollmentAlreadyInstalled }
+    }
+    if ($Kind -eq 'Single' -and $r.body -and $r.body.PSObject.Properties['managing'] -and $null -ne $r.body.managing) {
+        return @{ ok = $false; status = $st; reason = $script:PimEnrollmentSingleManaged; claim = $null; managedKey = $true }
+    }
     $c = ConvertFrom-PimEnrollmentClaimResponse -Body $r.body
     if (-not $c.ok) { return @{ ok = $false; status = $st; reason = $c.reason; claim = $null } }
     return @{ ok = $true; status = $st; reason = "enrolled as $($c.environmentHandle)"; claim = $c }
@@ -246,17 +303,19 @@ function Invoke-PimEnrollmentClaimUntilReady {
     #>
     param([Parameter(Mandatory)][scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][string]$EnrollmentKey,
           [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$SubscriptionId,
-          [int]$TimeoutSeconds = 900, [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [scriptblock]$Progress = { param($m) })
+          [int]$TimeoutSeconds = 900, [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [scriptblock]$Progress = { param($m) },
+          [ValidateSet('Managed', 'Single')][string]$Kind = 'Managed')
     $waited = 0; $n = 0
     while ($true) {
         $n++
-        $r = Invoke-PimEnrollmentClaim -Http $Http -BaseUrl $BaseUrl -EnrollmentKey $EnrollmentKey -TenantId $TenantId -SubscriptionId $SubscriptionId
+        $r = Invoke-PimEnrollmentClaim -Http $Http -BaseUrl $BaseUrl -EnrollmentKey $EnrollmentKey -TenantId $TenantId -SubscriptionId $SubscriptionId -Kind $Kind
         $r['claims'] = $n
         if (-not $r.ok -or -not $r.claim.pending) { return $r }
         $wait = [Math]::Min(120, [Math]::Max(5, [int]$r.claim.pollAfterSeconds))
         if ($waited + $wait -gt $TimeoutSeconds) {
+            $again = if ($Kind -eq 'Single') { 'Run the installation again in a few minutes with the same enrollment key' } else { 'Run the build again in a few minutes (Invoke-PimMspBuild ... -From enroll)' }
             return @{ ok = $false; status = $r.status; claims = $n; claim = $null
-                      reason = "Invardia is still signing this tenant's licence after $([Math]::Round($waited / 60, 1)) minutes. Run the build again in a few minutes (Invoke-PimMspBuild ... -From enroll); the enrollment itself is kept." }
+                      reason = "Invardia is still signing this tenant's licence after $([Math]::Round($waited / 60, 1)) minutes. $again; the enrollment itself is kept." }
         }
         & $Progress ("Invardia is signing the licence -- asking again in $wait s (waited $waited s so far)")
         & $Sleep $wait
@@ -277,6 +336,94 @@ function Add-PimEnrollmentLicenceToRunOrder {
     $open = [array]::IndexOf([string[]]$StepIds, 'sqlopen')
     if ($o.Count -and $open -ge 0 -and $o[0] -eq $open) { return @(@($o[0]) + @($lic) + @($o | Select-Object -Skip 1)) }
     return @(@($lic) + $o)
+}
+
+# ---- shared by every install path that takes an enrollment key (MSP managed tenant + single tenant) -------------------
+
+function New-PimEnrollmentRunDirectory {
+    <#
+      A per-run directory for the claimed licence + install key: only the running account (+ SYSTEM and Administrators on
+      Windows) can read it; on Linux (Azure Cloud Shell) mode 700. -Path optional (default: a new folder under the temp
+      directory). Returns the path. The caller removes it with Remove-PimEnrollmentRunDirectory when the run ends.
+    #>
+    param([string]$Path = '')
+    if (-not "$Path".Trim()) { $Path = Join-Path ([IO.Path]::GetTempPath()) ('pim-enrol-' + [guid]::NewGuid().ToString('N')) }
+    $null = [IO.Directory]::CreateDirectory($Path)
+    $onWindows = ("$env:OS" -eq 'Windows_NT')
+    if ($onWindows) {
+        $acl = New-Object System.Security.AccessControl.DirectorySecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        foreach ($id in @($me, 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') | Select-Object -Unique) {
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+        }
+        Set-Acl -Path $Path -AclObject $acl
+    } else {
+        $done = $false
+        try { [IO.File]::SetUnixFileMode($Path, [IO.UnixFileMode]'UserRead, UserWrite, UserExecute'); $done = $true } catch { $done = $false }
+        if (-not $done) { & chmod 700 $Path 2>$null }
+    }
+    return $Path
+}
+
+function Save-PimEnrollmentClaimFiles {
+    <#
+      The claim's licence (decoded, checksum-verified) and its install key as two FILES in -Directory (UTF-8, no BOM), so
+      neither is ever a command-line or step argument. Returns @{ licencePath; installKeyPath }. Only the LAST claim's key
+      is ever written (every claim issues a new one).
+    #>
+    param([Parameter(Mandatory)][string]$Directory, [Parameter(Mandatory)][object]$Claim)
+    $lic = Join-Path $Directory 'enrolled.pimlicense'; $key = Join-Path $Directory 'enrolled.installkey'
+    $enc = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($lic, "$($Claim.licenceText)", $enc)
+    [IO.File]::WriteAllText($key, "$($Claim.installKey)", $enc)
+    return @{ licencePath = $lic; installKeyPath = $key }
+}
+
+function Remove-PimEnrollmentRunDirectory {
+    # Overwrite every file in the run directory (a licence-minting install key), then delete it. Never throws.
+    param([string]$Path)
+    if (-not "$Path".Trim() -or -not (Test-Path -LiteralPath $Path)) { return }
+    try {
+        foreach ($f in @(Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue)) {
+            try { $len = [int]$f.Length; if ($len -gt 0) { [IO.File]::WriteAllBytes($f.FullName, (New-Object byte[] $len)) } } catch { }
+        }
+    } catch { }
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Invoke-PimEnrollmentSingleClaim {
+    <#
+      framework 8.6 "SINGLE-TENANT enrollment too" -- the claim of a SINGLE-tenant install (Invoke-PimDeployAll -EnrollmentKey,
+      Install-PimManager's 'enrollmentKey'). Seams injected; the same calls as the managed-tenant build:
+        1. claim (product pim-manager, tenantId, subscriptionId) -- -Kind Single: managing must be null, else REFUSED
+        2. the async licence: claim again after pollAfterSeconds until 'ready' (bounded), SHA-256 checked, decoded
+        3. -Directory given: the licence + the LAST claim's install key written there (Save-PimEnrollmentClaimFiles)
+      Returns @{ ok; status; reason; refused (Invardia said no: a 4xx, or a managed key); claims; environmentHandle;
+                 licenceText; licence = @{ licenceId; fileName; validFrom; validUntil }; licencePath; installKeyPath }.
+      The enrollment key is in NO field of the result, and neither is the install key (it is only in the file).
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Http, [string]$BaseUrl = '', [Parameter(Mandatory)][string]$EnrollmentKey,
+          [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$SubscriptionId, [string]$Directory = '',
+          [int]$TimeoutSeconds = 900, [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }, [scriptblock]$Progress = { param($m) })
+    $r = Invoke-PimEnrollmentClaimUntilReady -Http $Http -BaseUrl $BaseUrl -EnrollmentKey $EnrollmentKey -TenantId $TenantId -SubscriptionId $SubscriptionId `
+            -TimeoutSeconds $TimeoutSeconds -Sleep $Sleep -Progress $Progress -Kind Single
+    $st = 0; try { $st = [int]$r.status } catch { $st = 0 }
+    $out = @{ ok = $false; status = $st; reason = "$($r.reason)"; refused = $false; claims = [int]$r.claims; environmentHandle = ''; licenceText = ''; licence = @{}; licencePath = ''; installKeyPath = '' }
+    $out['alreadyInstalled'] = [bool]$r.alreadyInstalled
+    if (-not $r.ok) {
+        if ($r.alreadyInstalled) { $out.environmentHandle = "$($r.environmentHandle)"; return $out }   # not a refusal: nothing to store, the tenant has its key
+        $out.refused = ([bool]$r.managedKey) -or ($st -ge 400 -and $st -lt 500 -and $st -ne 404 -and $st -ne 429)
+        return $out
+    }
+    $c = $r.claim
+    $out.ok = $true; $out.environmentHandle = "$($c.environmentHandle)"; $out.licenceText = "$($c.licenceText)"; $out.licence = $c.licence
+    $out.reason = "enrolled at Invardia as environment '$($c.environmentHandle)'"
+    if ("$Directory".Trim()) {
+        $files = Save-PimEnrollmentClaimFiles -Directory $Directory -Claim $c
+        $out.licencePath = $files.licencePath; $out.installKeyPath = $files.installKeyPath
+    }
+    return $out
 }
 
 function Get-PimEnrollmentManagingFacts {

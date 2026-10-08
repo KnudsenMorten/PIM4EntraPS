@@ -50,8 +50,13 @@ function Get-PimDeployStepCatalog {
       order -- it walks THIS list. Order is load-bearing: identity/grants before prereq, prereq before
       the image (az acr build needs the registry), the image before infra (infra pins its digest),
       infra before schema, schema before code, code before verify; rollback is verify-driven.
+      -Enrollment (framework 8.6 "SINGLE-TENANT enrollment too"; PIM REQUIREMENTS 99): the deploy was given an Invardia
+      enrollment key. Two steps are added -- 'enroll' FIRST (the claim: environment, licence, install key) and 'licence'
+      after 'features' (the store exists; the containers that 'code' rolls boot licensed). Without it the catalog is
+      exactly the list below, step for step.
     #>
-    @(
+    param([switch]$Enrollment)
+    $cat = @(
         [pscustomobject]@{ key='appreg';   name='Engine app-registration + Graph/Azure grants'; rollbackable=$false; hostedOnly=$false }
         # 🔴 BUG-68 (operator decision 2026-08-17) -- THE TWO STEPS THAT MAKE A GREENFIELD TENANT
         # POSSIBLE. Before these, the catalog could only ever UPDATE something a human had already
@@ -145,6 +150,14 @@ function Get-PimDeployStepCatalog {
         # required line fails the run (it never rolls the code back: the code is fine, the install is not finished).
         [pscustomobject]@{ key='verify-install'; name='End-of-install verify (SuperAdmins, updater, licence, mail, alerts, engine rights, sign-in, SQL window)'; rollbackable=$false; hostedOnly=$true }
     )
+    if (-not $Enrollment) { return $cat }
+    $out = New-Object System.Collections.Generic.List[object]
+    $out.Add([pscustomobject]@{ key='enroll'; name='Claim this tenant with the Invardia enrollment key (environment, licence, install key)'; rollbackable=$false; hostedOnly=$false }) | Out-Null
+    foreach ($c in $cat) {
+        $out.Add($c) | Out-Null
+        if ($c.key -eq 'features') { $out.Add([pscustomobject]@{ key='licence'; name='Register the licence the enrollment returned + store the install key'; rollbackable=$false; hostedOnly=$false }) | Out-Null }
+    }
+    return $out.ToArray()
 }
 
 # ---- per-step gate/skip decision (pure) -----------------------------------
@@ -228,7 +241,9 @@ function Get-PimDeployAllPlan {
         # its own, so the plan and the runner disagreed: the header printed hosted=True while the
         # plan printed hosted=False and gated `hostedOnly` steps on the stale value. Caught by
         # Test-PimDeployDescriptor.ps1 before it ever ran against a tenant.
-        [object]$HostedOverride = $null
+        [object]$HostedOverride = $null,
+        # framework 8.6 single-tenant enrollment: the 'enroll' + 'licence' steps (Get-PimDeployStepCatalog -Enrollment).
+        [switch]$Enrollment
     )
     if (-not $Facts) { $Facts = @{} }
     $srcProfile = Get-PimUpdateSourceProfile -Source $Source
@@ -236,7 +251,7 @@ function Get-PimDeployAllPlan {
     if ($null -ne $HostedOverride) { $hosted = [bool]$HostedOverride }
 
     $steps = New-Object System.Collections.Generic.List[object]
-    foreach ($step in (Get-PimDeployStepCatalog)) {
+    foreach ($step in (Get-PimDeployStepCatalog -Enrollment:$Enrollment)) {
         $key = "$($step.key)"
         # NEEDED fact: explicit value wins; absent/null => fail-safe NEEDED=$true (verify always).
         $needed = $true
