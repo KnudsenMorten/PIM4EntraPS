@@ -22,6 +22,8 @@
                                           sign-in, no PowerShell modules).
       Publish-PimActivatorRemediation.ps1 -- upload the Detect / Remediate pair to Intune as a Remediation (+ assign).
       Deploy-PimActivatorClient.ps1    -- install the extension + its settings on a machine without Intune (servers).
+      Grant-PimEnginePermissions.ps1   -- give the engine identity its missing application permissions + Azure roles
+                                          (the command PIM Manager shows on Overview and in Get Started; no modules).
 
 .EXAMPLE
     .\tools\setup\Build-PimSupportScripts.ps1 -OutDir C:\ProgramData\Invardia\handover\support-scripts\pim-manager\2.4.522
@@ -29,7 +31,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$OutDir,
-    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1')
+    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1')
 )
 $ErrorActionPreference = 'Stop'
 $setup = $PSScriptRoot
