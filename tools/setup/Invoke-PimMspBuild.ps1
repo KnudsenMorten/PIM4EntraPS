@@ -71,6 +71,26 @@
 .PARAMETER StepRunner
     TEST seam: a scriptblock param($step, $resolvedArgs) returning @{ ok; output }. Replaces process launch, az login and
     placeholder resolution by az (placeholders are then resolved from -Resolved).
+
+.PARAMETER EnrollmentKey
+    UPLINK-ENROL (managed tenant only): the enrollment key the managing company got from Invardia (or 'enrollmentKey' in the
+    config). The build then claims this tenant FIRST (step 'enroll'): Invardia creates the environment, signs the licence
+    (asynchronously -- the build asks again until it is ready, at most -EnrollmentTimeoutSeconds), returns an install key and
+    the managing tenant's bundle address + signing key ids, and the rest of the build uses them. The key is a bearer secret:
+    it is sent only in the claim, and is never printed (only masked), logged, stored or passed to a step.
+    EVERY CLAIM ISSUES A NEW INSTALL KEY at Invardia (the previous one stops working), so:
+      * -EnrollmentKey given on the command line ALWAYS claims, and the licence step (which stores the new key) always runs
+        after the claim -- also on a -From resume that starts later;
+      * a key found only in the CONFIG FILE is used only while the config has no complete master{} block (a first build).
+        Once the master block is there (the first build prints it), a re-run does not claim again, so re-running a completed
+        build never replaces the running environment's key by accident.
+
+.PARAMETER InvardiaBaseUrl
+    The Invardia address for the enrollment calls (default https://invardia.com; $env:PIM_INVARDIA_BASE_URL overrides).
+
+.PARAMETER EnrollmentHttp / EnrollmentSleep / EnrollmentTimeoutSeconds
+    TEST seams: param($method, $url, $body, $headers) -> @{ status; body } in place of the real HTTPS call; param($seconds) in
+    place of Start-Sleep while the licence is signed; the polling bound (default 900 s).
 #>
 [CmdletBinding()]
 param(
@@ -81,25 +101,50 @@ param(
     [string]$UpdateSourceUrl,
     [string]$UpdateSourceUrlFile = "$($env:PIM_UPDATE_SOURCE_URL_FILE)",
     [scriptblock]$StepRunner,
-    [hashtable]$Resolved = @{}
+    [hashtable]$Resolved = @{},
+    [string]$EnrollmentKey,
+    [string]$InvardiaBaseUrl = "$($env:PIM_INVARDIA_BASE_URL)",
+    [scriptblock]$EnrollmentHttp,
+    [scriptblock]$EnrollmentSleep,
+    [int]$EnrollmentTimeoutSeconds = 900
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
+. (Join-Path $solRoot 'engine\msp\PIM-InvardiaEnrollment.ps1')
 . (Join-Path $here '_PimSasCertLogin.ps1')
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "config not found: $ConfigPath" }
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
-$chk = Test-PimMspBuildConfig -Role $Role -Config $config
+# UPLINK-ENROL: the enrollment key is taken OUT of the config object at once, so nothing below (config check, plan, step
+# arguments, printed output) can ever see it. It lives in this one variable until the claim, and is cleared after it.
+$enrolKey = "$EnrollmentKey".Trim()
+$keyInFile = $false; $fileKeyIgnored = $false
+if ($config.PSObject.Properties['enrollmentKey']) {
+    $fileKey = "$($config.enrollmentKey)".Trim()
+    $keyInFile = [bool]$fileKey
+    $config.PSObject.Properties.Remove('enrollmentKey')
+    # A claim issues a NEW install key: a key left in the file must not re-claim a tenant that is already built.
+    if (-not $enrolKey -and $fileKey) {
+        if ($Role -eq 'Slave' -and (Test-PimEnrollmentMasterComplete -Config $config)) { $fileKeyIgnored = $true } else { $enrolKey = $fileKey }
+    }
+    $fileKey = ''
+}
+$enrolling = [bool]$enrolKey
+$chk = Test-PimMspBuildConfig -Role $Role -Config $config -Enrollment:$enrolling
 foreach ($w in $chk.warnings) { Write-Host "  [warn] $w" -ForegroundColor Yellow }
+if ($enrolling -and -not (Test-PimEnrollmentKeyFormat -Key $enrolKey)) { $chk.ok = $false; $chk.errors = @($chk.errors) + 'the enrollment key is not in the expected form (ek- followed by 43 letters, digits, - or _) -- copy it again from your managing company' }
+$invBase = ''
+if ($enrolling) { try { $invBase = Resolve-PimEnrollmentBaseUrl -BaseUrl $InvardiaBaseUrl } catch { $chk.ok = $false; $chk.errors = @($chk.errors) + "$($_.Exception.Message)" } }
 if (-not $chk.ok) {
     foreach ($e in $chk.errors) { Write-Host "  [x] $e" -ForegroundColor Red }
     Write-Host 'REFUSED: fix the config; nothing was touched.' -ForegroundColor Red
     exit 1
 }
-$plan = @(Get-PimMspBuildPlan -Role $Role -Config $config)
-$ops = @(Get-PimMspOperatorSteps -Role $Role -Config $config)
+$planBase = if ("$InvardiaBaseUrl".Trim()) { $invBase } else { '' }
+$plan = @(Get-PimMspBuildPlan -Role $Role -Config $config -Enrollment:$enrolling -InvardiaBaseUrl $planBase)
+$ops = @(Get-PimMspOperatorSteps -Role $Role -Config $config -Enrollment:$enrolling)
 $authMode = Get-PimMspBuildAuthMode -Config $config
 $startAt = 0
 if ("$From".Trim()) {
@@ -109,6 +154,12 @@ if ("$From".Trim()) {
 
 Write-Host ("=== PIM4EntraPS one-shot MSP build: {0} ({1}) tenant {2} -- {3} ===" -f $Role, $(if ($Role -eq 'Master') { 'S3' } else { 'S6' }), $config.tenantId, $(if ($Apply) { 'APPLY' } else { 'PLAN ONLY' })) -ForegroundColor Cyan
 Write-Host ("    identity: {0}" -f $(if ($authMode -eq 'SignedIn') { 'the SIGNED-IN az user (no deployIdentity in the config)' } else { "certificate identity $($config.deployIdentity.clientId)" })) -ForegroundColor DarkGray
+if ($enrolling) {
+    Write-Host ("    enrollment key: {0} -- sent only in the claim to {1}, never written to a log, the store or telemetry" -f (Get-PimEnrollmentKeyMask -Key $enrolKey), $invBase) -ForegroundColor DarkGray
+    Write-Host '    a claim issues a NEW install key (the previous one stops working); the licence step that stores it always runs after the claim (on a -From resume, as the next step)' -ForegroundColor DarkGray
+}
+if ($keyInFile) { Write-Host '    [warn] the config file holds the enrollment key (a bearer secret): prefer -EnrollmentKey, and remove it from the file after the build' -ForegroundColor Yellow }
+if ($fileKeyIgnored) { Write-Host '    the config file''s enrollment key is NOT used: this tenant is already enrolled (master block present). Pass -EnrollmentKey to claim again -- that issues a new install key.' -ForegroundColor Yellow }
 for ($i = 0; $i -lt $plan.Count; $i++) {
     $s = $plan[$i]
     $mark = if ($i -lt $startAt) { 'skip' } elseif ("$($s.blocked)".Trim()) { 'N/A ' } else { '    ' }
@@ -169,6 +220,7 @@ $prevExtDirSet = [bool]$env:AZURE_EXTENSION_DIR
 $extDir = Get-PimMspBuildAzExtensionDir -Current "$env:AZURE_EXTENSION_DIR" -UserProfile "$env:USERPROFILE"
 $prevSubscription = ''
 try {
+    if ($StepRunner -and $enrolling) { $null = New-Item -ItemType Directory -Force -Path $runDir }   # tests: the enrolled licence + key files land here
     if (-not $StepRunner) {
         $null = New-PimRestrictedProfileDir -Path $runDir
         if ($extDir) { $env:AZURE_EXTENSION_DIR = $extDir; Write-Host "    az extensions for this run: $extDir" -ForegroundColor DarkGray }
@@ -210,9 +262,73 @@ try {
     # store step, and a previous run may have closed it). Get-PimMspBuildRunOrder is pure and offline-tested.
     $order = @(Get-PimMspBuildRunOrder -StepIds @($plan | ForEach-Object { $_.id }) -StartAt $startAt)
     if ($order.Count -and $startAt -lt $plan.Count -and $order[0] -ne $startAt) { Write-Host "    resume inside the SQL build window: running 'sqlopen' first" -ForegroundColor DarkGray }
-    foreach ($i in $order) {
+    # UPLINK-ENROL: the claim is idempotent at Invardia and everything after it depends on what it returns, so a -From resume
+    # with an enrollment key runs it again first.
+    if ($enrolling -and $order -notcontains 0) { $order = @(0) + @($order) }
+    # $ordIx, never $k: the argument loop below iterates `foreach ($k in $s.args.Keys)` and would clobber the counter.
+    $ordIx = 0
+    while ($ordIx -lt $order.Count) {
+        $i = $order[$ordIx]; $ordIx++
         $s = $plan[$i]
         Write-Host ("`n==> [{0}/{1}] {2}: {3}" -f ($i + 1), $plan.Count, $s.id, $s.title) -ForegroundColor Cyan
+        if ("$($s.kind)" -eq 'enroll') {
+            $http = if ($EnrollmentHttp) { $EnrollmentHttp } else { { param($m, $u, $b, $h) Invoke-PimEnrollmentHttp -Method $m -Url $u -Body $b -Headers $h } }
+            $sleep = if ($EnrollmentSleep) { $EnrollmentSleep } else { { param($sec) Start-Sleep -Seconds $sec } }
+            $claim = Invoke-PimEnrollmentClaimUntilReady -Http $http -BaseUrl $invBase -EnrollmentKey $enrolKey -TenantId "$($config.tenantId)" -SubscriptionId "$($config.subscriptionId)" `
+                        -TimeoutSeconds $EnrollmentTimeoutSeconds -Sleep $sleep -Progress { param($msg) Write-Host "    $msg" -ForegroundColor DarkGray }
+            if (-not $claim.ok) {
+                Write-Host "`nENROLLMENT REFUSED: $($claim.reason)" -ForegroundColor Red
+                Write-Host '    Nothing in this tenant was changed by the build.' -ForegroundColor Red
+                $exitCode = 1
+                break
+            }
+            $c = $claim.claim
+            # Only the LAST claim's install key exists any more (every claim issues a new one): that is the one handed on.
+            $licFile = Join-Path $runDir 'enrolled.pimlicense'; $keyFile = Join-Path $runDir 'enrolled.installkey'
+            [IO.File]::WriteAllText($licFile, "$($c.licenceText)", (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText($keyFile, "$($c.installKey)", (New-Object Text.UTF8Encoding($false)))
+            $Resolved['{{enroll:licencepath}}'] = $licFile; $Resolved['{{enroll:installkeypath}}'] = $keyFile
+            $managing = $c.managing
+            if (-not $managing -and -not (Test-PimEnrollmentMasterComplete -Config $config)) {
+                # The managing tenant has not reported its facts at claim time: ask Invardia again with THIS tenant's new key.
+                $mf = Get-PimEnrollmentManagingFacts -Http $http -BaseUrl $invBase -InstallKey $c.installKey
+                if ($mf.ok -and $mf.managing) { $managing = $mf.managing }
+            }
+            if (-not $managing -and -not (Test-PimEnrollmentMasterComplete -Config $config)) {
+                Write-Host "`nSTEP FAILED: enroll -- your managing company's tenant has not reported its bundle address to Invardia yet, and this config has no master block." -ForegroundColor Red
+                Write-Host '    Ask the managing company to run its managing tenant build (or its enrolled-tenants job), or add the master block it gives you to this config, then run the build again with -EnrollmentKey.' -ForegroundColor Red
+                $exitCode = 1
+                break
+            }
+            $merge = Merge-PimEnrollmentMaster -Config $config -Managing $managing
+            foreach ($w in $merge.warnings) { Write-Host "    [warn] $w" -ForegroundColor Yellow }
+            $config = $merge.config
+            $chk2 = Test-PimMspBuildConfig -Role $Role -Config $config -Enrollment
+            if (-not $chk2.ok) {
+                foreach ($e in $chk2.errors) { Write-Host "  [x] $e" -ForegroundColor Red }
+                Write-Host "`nSTEP FAILED: enroll -- the configuration is not complete with what Invardia returned." -ForegroundColor Red
+                $exitCode = 1
+                break
+            }
+            Write-Host "    enrolled at Invardia as environment '$($c.environmentHandle)'; licence + install key are handed to the licence step (files in this run's restricted directory)" -ForegroundColor Gray
+            if (@($merge.filled).Count) {
+                Write-Host "    master block filled from the managing tenant's facts: $(@($merge.filled) -join ', ')" -ForegroundColor Gray
+                $mb = [ordered]@{}; foreach ($p in $config.master.PSObject.Properties) { $mb[$p.Name] = $p.Value }
+                Write-Host '    to build again WITHOUT the key, add this to the config (identifiers only, no secret):' -ForegroundColor DarkGray
+                Write-Host ('      "master": ' + (ConvertTo-Json -InputObject $mb -Depth 4 -Compress)) -ForegroundColor DarkGray
+            }
+            # Re-plan from the filled config: every {{enroll:...}} master placeholder is now a real value.
+            $plan = @(Get-PimMspBuildPlan -Role $Role -Config $config -Enrollment -InvardiaBaseUrl $planBase)
+            $ops = @(Get-PimMspOperatorSteps -Role $Role -Config $config -Enrollment)
+            $order = @(Get-PimMspBuildRunOrder -StepIds @($plan | ForEach-Object { $_.id }) -StartAt ([Math]::Max($startAt, $i + 1)))
+            # The claim just made the environment's previous install key worthless: the licence step that stores the new
+            # one ALWAYS runs, also when a -From resume starts after it.
+            $order = @(Add-PimEnrollmentLicenceToRunOrder -StepIds @($plan | ForEach-Object { $_.id }) -Order $order)
+            $ordIx = 0
+            $enrolKey = ''   # used once; never kept for later steps
+            Write-Host "    [OK] enroll" -ForegroundColor Green
+            continue
+        }
         if ("$($s.blocked)".Trim()) {
             # Never executed, never resolved -- and never reported as done.
             Write-Host "    NOT RUN: $($s.blocked)" -ForegroundColor Yellow

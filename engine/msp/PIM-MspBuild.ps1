@@ -376,9 +376,14 @@ function Test-PimMspBuildConfig {
               certificate mode (a signed-in managed-tenant build never holds the managing tenant's certificate -- the steps that need it
               are planned as NOT RUNNABLE, see Get-PimMspBuildPlan).
     #>
-    param([Parameter(Mandatory)][ValidateSet('Master','Slave')][string]$Role, [Parameter(Mandatory)][object]$Config)
+    # UPLINK-ENROL (PIM 99): -Enrollment = the build was given an enrollment key. A managed tenant's master{} block may then
+    # be empty -- the 'enroll' step fills it from what Invardia returns (and the licence comes from the claim too).
+    param([Parameter(Mandatory)][ValidateSet('Master','Slave')][string]$Role, [Parameter(Mandatory)][object]$Config, [switch]$Enrollment)
     $errors = New-Object System.Collections.Generic.List[string]
     $warnings = New-Object System.Collections.Generic.List[string]
+    $enrolPending = ($Enrollment -and $Role -eq 'Slave')
+    if ($Enrollment -and $Role -eq 'Master') { $errors.Add('an enrollment key enrols a MANAGED tenant (-Role Slave). A managing tenant is not enrolled -- remove the key from this build.') }
+    if ($enrolPending -and "$(Get-PimMspBuildValue -Object $Config -Path 'licence.path')".Trim()) { $warnings.Add("'licence.path' is ignored: the enrollment returns this tenant's licence") }
     foreach ($k in @(Find-PimMspBuildSecretKeys -Object $Config)) { $errors.Add("REFUSED: '$k' looks like a credential -- a build config holds ids and names only (certificate thumbprints, never secrets)") }
     $V = { param($p) Get-PimMspBuildValue -Object $Config -Path $p }
     $authMode = Get-PimMspBuildAuthMode -Config $Config
@@ -484,9 +489,11 @@ function Test-PimMspBuildConfig {
     } else {
         # 71.34 PUBLIC-BUT-SIGNED (DESIGN 13.7): the managed tenant needs NOTHING from the managing tenant but the blob's address. No master
         # identity, no SAS, no rotation -- trust is the bundle signature, access is the managing tenant's storage network rule.
-        if ("$(& $V 'master.tenantId')".Trim() -notmatch $script:PimMspGuid) { $errors.Add("'master.tenantId' must be a GUID (the managing tenant this tenant pulls from)") }
+        if ($enrolPending) { $warnings.Add('enrollment: every master{} value missing from this config is filled from the managing tenant facts Invardia returns at the enroll step') }
+        $mTid = "$(& $V 'master.tenantId')".Trim()
+        if ($mTid -notmatch $script:PimMspGuid -and -not ($enrolPending -and -not $mTid)) { $errors.Add("'master.tenantId' must be a GUID (the managing tenant this tenant pulls from)") }
         $mStoreName = "$(& $V 'master.storageAccount')".Trim()
-        if (-not $mStoreName) { $errors.Add("'master.storageAccount' is required (where the managing tenant publishes the signed bundle)") }
+        if (-not $mStoreName) { if (-not $enrolPending) { $errors.Add("'master.storageAccount' is required (where the managing tenant publishes the signed bundle)") } }
         elseif ($mStoreName -notmatch '^[a-z0-9]{3,24}$') { $errors.Add("'master.storageAccount' '$mStoreName' is not a storage account name (3-24 lowercase letters/digits)") }
         if ($null -ne (& $V 'master.deployIdentity')) { $warnings.Add("'master.deployIdentity' is no longer used: a managed tenant pulls the public-but-signed bundle with no managing tenant credential (71.34) -- remove it.") }
         $dlCron = "$(& $V 'downlinkCron')".Trim()
@@ -494,7 +501,7 @@ function Test-PimMspBuildConfig {
         # 71.35 TRUST ANCHOR: the managing tenant's signing key id(s), from the managing tenant's build output (its 'signingkey' step) --
         # never from the bundle store. More than one may be pinned, so a key roll never breaks this tenant.
         $pins = @(@(& $V 'master.signingKeyIds') | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { "$_".Trim() })
-        if (-not $pins.Count) { $errors.Add("'master.signingKeyIds' is required: the key id(s) the managing tenant's build printed at its 'signingkey' step. The pull REFUSES a bundle signed by a key this tenant does not pin (71.35).") }
+        if (-not $pins.Count -and -not $enrolPending) { $errors.Add("'master.signingKeyIds' is required: the key id(s) the managing tenant's build printed at its 'signingkey' step. The pull REFUSES a bundle signed by a key this tenant does not pin (71.35).") }
         foreach ($pin in $pins) { if ($pin -cnotmatch '^[A-Za-z0-9_-]{43}$') { $errors.Add("'master.signingKeyIds' entry '$pin' is not a signing key id (43 characters of base64url, as printed by the managing tenant's signingkey step)") } }
         $sacc = Get-PimBaselineAccessMode -Role Slave -Config $Config
         if ($sacc -notin @('publicSigned', 'privateEndpoint')) { $errors.Add("'master.access' must be publicSigned (default) or privateEndpoint") }
@@ -536,8 +543,14 @@ function Get-PimMspBuildPlan {
       PURE. The ordered, idempotent step list for one role. Every step re-runs safely (each script converges), so a failed
       build resumes with -From <id>. Script paths are relative to the solution root (PlatformConfiguration ones to the repo).
     #>
-    param([Parameter(Mandatory)][ValidateSet('Master','Slave')][string]$Role, [Parameter(Mandatory)][object]$Config)
+    # UPLINK-ENROL (PIM 99): -Enrollment (managed tenant only) puts the in-process 'enroll' claim FIRST, takes the licence and
+    # the install key from it, and reports the pull subnet id ('enrollreport'). Until the claim has run, master{} values the
+    # config does not carry are {{enroll:...}} placeholders; the runner re-plans from the filled config right after the claim,
+    # so a placeholder can only ever reach a script as an UNRESOLVED error. Without -Enrollment the plan is unchanged.
+    # -InvardiaBaseUrl: the Invardia address the enrollment steps use ('' = https://invardia.com).
+    param([Parameter(Mandatory)][ValidateSet('Master','Slave')][string]$Role, [Parameter(Mandatory)][object]$Config, [switch]$Enrollment, [string]$InvardiaBaseUrl = '')
     $V = { param($p) Get-PimMspBuildValue -Object $Config -Path $p }
+    $enrol = ($Enrollment -and $Role -eq 'Slave')
     $tid = "$(& $V 'tenantId')".Trim(); $sub = "$(& $V 'subscriptionId')".Trim(); $rg = "$(& $V 'resourceGroup')".Trim()
     $loc = "$(& $V 'location')".Trim(); $token = "$(& $V 'token')".Trim()
     $sqlName = "$(& $V 'sqlServerName')".Trim(); $sqlFqdn = "$sqlName.database.windows.net"
@@ -558,6 +571,16 @@ function Get-PimMspBuildPlan {
     $storeArgs = if ($signedIn) { @{ TenantId = $tid } } else { $certArgs }
     $storeSwitches = if ($signedIn) { @('UseSignedInAccount') } else { @() }
     $steps = New-Object System.Collections.Generic.List[object]
+    $enrolMasterStore = "$(& $V 'master.storageAccount')".Trim(); if (-not $enrolMasterStore -and $enrol) { $enrolMasterStore = '{{enroll:storageaccount}}' }
+    $enrolPins = @(@(& $V 'master.signingKeyIds') | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { "$_".Trim() })
+    if (-not $enrolPins.Count -and $enrol) { $enrolPins = @('{{enroll:signingkeyids}}') }
+
+    if ($enrol) {
+        $st = New-PimMspBuildStep -Id 'enroll' -Title 'claim this tenant with the enrollment key (Invardia): environment, licence, install key, the managing tenant''s bundle address and signing key ids' `
+            -Script '(in the build process)' -Why 'the managing company''s enrollment key replaces the hand steps: no environment to register, no licence to re-issue, no master block to copy'
+        $st.kind = 'enroll'
+        $steps.Add($st)
+    }
 
     if ($kv -and $bootApp) {
         $steps.Add((New-PimMspBuildStep -Id 'keyvault' -Title 'tenant Key Vault + the bootstrap identity''s read grant' `
@@ -629,10 +652,10 @@ function Get-PimMspBuildPlan {
     # Both are identifiers, never credentials: the URL is the plain blob URL (no query string -- refused downstream).
     $mgrDocUrl = ''
     if ($Role -eq 'Slave') {
-        $mgrStore = "$(& $V 'master.storageAccount')".Trim()
+        $mgrStore = $enrolMasterStore
         $mgrCont  = if ("$(& $V 'master.container')".Trim()) { "$(& $V 'master.container')".Trim() } else { 'baselines' }
         if ($mgrStore) { $mgrDocUrl = Get-PimBaselinePullUrl -StorageAccount $mgrStore -Container $mgrCont }
-        $mgrPins = @(@(& $V 'master.signingKeyIds') | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { "$_".Trim() })
+        $mgrPins = @($enrolPins)
         if ($mgrPins.Count) { $hosting['BaselineTrustedKeys'] = $mgrPins }
     } else {
         $mgrStore = "$(& $V 'baseline.storageAccount')".Trim()
@@ -707,7 +730,16 @@ function Get-PimMspBuildPlan {
 
     # 2026-10-06 (MSP rehearsal): the Pro licence and the Invardia Support app's access were hand steps after every build.
     $licPath = "$(& $V 'licence.path')".Trim()
-    if ($licPath) {
+    if ($enrol) {
+        # UPLINK-ENROL: the licence and the install key come from the claim. Both are FILES in the build's restricted per-run
+        # directory (resolved after the claim), so neither value is ever an argument; Set-PimLicense verifies the licence
+        # (signature + MSP role) exactly as a hand-supplied file, and stores the key as claimed.
+        $licArgs = if ($signedIn) { @{ SqlServer = $sqlFqdn; Database = $db; TenantId = $tid } } else { @{ SqlServer = $sqlFqdn; Database = $db; TenantId = $tid; AdminAppId = $cid; AdminCertThumbprint = $thumb } }
+        $licArgs['LicensePath'] = '{{enroll:licencepath}}'; $licArgs['InstallKeyPath'] = '{{enroll:installkeypath}}'; $licArgs['RequireMspRole'] = $Role
+        $steps.Add((New-PimMspBuildStep -Id 'licence' -Title 'register the licence the enrollment returned + store the install key (MSP is Pro, hard-enforced)' -Script 'tools\setup\Set-PimLicense.ps1' `
+            -Arguments $licArgs -Switches @($storeSwitches) -Why 'the enrollment re-signed the managing company''s MSP licence with this tenant; it is verified before it is stored'))
+    }
+    elseif ($licPath) {
         $licArgs = if ($signedIn) { @{ LicensePath = $licPath; SqlServer = $sqlFqdn; Database = $db; TenantId = $tid } } else { @{ LicensePath = $licPath; SqlServer = $sqlFqdn; Database = $db; TenantId = $tid; AdminAppId = $cid; AdminCertThumbprint = $thumb } }
         $licArgs['RequireMspRole'] = $Role   # refuse a licence that cannot run MSP here, BEFORE it is stored
         $steps.Add((New-PimMspBuildStep -Id 'licence' -Title 'register the Pro licence in this environment''s store (MSP is Pro, hard-enforced)' -Script 'tools\setup\Set-PimLicense.ps1' `
@@ -819,6 +851,16 @@ function Get-PimMspBuildPlan {
         $steps.Add((New-PimMspBuildStep -Id 'publish' -Title "first publish: start $publishJob and WAIT for Succeeded (the job reads the blob back anonymously and verifies it)" `
             -Script 'tools\setup\Start-PimBaselinePublish.ps1' -Arguments @{ SubscriptionId = $sub; ResourceGroup = $rg; JobName = $publishJob } -Switches $idSwitch `
             -Why 'a managed tenant has nothing to pull until baseline-latest.json exists; this host cannot read it (its network is denied), the job can'))
+        # UPLINK-ENROL (PIM 99): the managing tenant's half. It RECORDS its bundle facts (pim.Settings MspBundleFacts: store,
+        # container, the signing key ids its Manager pins), REPORTS them to Invardia with its own install key (when it has
+        # one yet; the daily 'enrolled-tenants' job repeats it), and grants the tick's managed identity a role on THIS ONE
+        # storage account (read + write of the account = its network rules) so that job can allow enrolled tenants' subnets.
+        $enArgs = @{ Role = 'Master'; SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; SubscriptionId = $sub; ResourceGroup = $rg; StorageAccount = $store; Container = $container
+                     ManagerApp = $mgr; TickPrincipalId = "{{mi-job:$tick}}"; Access = $masterAccess } + $storeArgs
+        if ("$InvardiaBaseUrl".Trim()) { $enArgs['InvardiaBaseUrl'] = "$InvardiaBaseUrl".Trim() }
+        $steps.Add((New-PimMspBuildStep -Id 'enrollment' -Title "self-service managed tenants: record + report the bundle facts to Invardia; let the tick's enrolled-tenants job manage $store's network rules (that account only)" `
+            -Script 'tools\setup\Publish-PimEnrollmentFacts.ps1' -HostExe 'powershell' -Arguments $enArgs -Switches $storeSwitches `
+            -Why 'a managed tenant built with an enrollment key gets this store''s address and key ids from Invardia, and its subnet is allowed here without a person'))
     } else {
         # 71.34 -- NO READ LINK, NO ROTATION, NO MASTER CREDENTIAL (operator 2026-09-17: "go back to original design").
         # The SAS + weekly certificate rotation is gone from the plan entirely (not behind a flag). The managed tenant:
@@ -826,7 +868,7 @@ function Get-PimMspBuildPlan {
         #                  for the managing tenant (the managing tenant's storage VNet rule names it; nothing is exchanged but an address)
         #   downlink    -- the pull job gets the PLAIN blob URL (no query string, no ACA secret); the pull still REFUSES a
         #                  bundle whose signature does not verify (Test-PimBaselineDoc), so the network grants reach, not trust.
-        $mStore = "$(& $V 'master.storageAccount')".Trim()
+        $mStore = $enrolMasterStore
         $mContainer = if ("$(& $V 'master.container')".Trim()) { "$(& $V 'master.container')".Trim() } else { 'baselines' }
         $job = if ("$(& $V 'downlinkJobName')".Trim()) { "$(& $V 'downlinkJobName')".Trim() } else { 'ca-pim-downlink-s6' }
         $endpoint = if ("$(& $V 'baselineServiceEndpoint')".Trim()) { "$(& $V 'baselineServiceEndpoint')".Trim() } else { 'Microsoft.Storage.Global' }
@@ -841,13 +883,22 @@ function Get-PimMspBuildPlan {
         $steps.Add((New-PimMspBuildStep -Id 'pullnetwork' -Title "service endpoint $endpoint on this environment's subnet; print the subnet id for the master" `
             -Script 'tools\setup\Initialize-PimBaselinePullNetwork.ps1' `
             -Arguments @{ SubscriptionId = $sub; ResourceGroup = $rg; EnvName = $env; ServiceEndpoint = $endpoint; MasterStorageAccount = $mStore; MasterContainer = $mContainer } `
-            -Why "the managing tenant's bundle store denies every network it has not named; it names this subnet"))
+            -Why "the managing tenant's bundle store denies every network it has not named; it names this subnet" -CapturesOutput:$enrol))
+        if ($enrol) {
+            # UPLINK-ENROL: the subnet id is persisted (pim.Settings MspPullSubnetId) and REPORTED to Invardia with this tenant's
+            # install key; the managing tenant's 'enrolled-tenants' job reads it there and allows it on its bundle store.
+            $repArgs = @{ Role = 'Slave'; PullSubnetId = '{{step:pullnetwork}}'; SqlServerFqdn = $sqlFqdn; SqlDatabase = $db } + $storeArgs
+            if ("$InvardiaBaseUrl".Trim()) { $repArgs['InvardiaBaseUrl'] = "$InvardiaBaseUrl".Trim() }
+            $steps.Add((New-PimMspBuildStep -Id 'enrollreport' -Title 'record this tenant''s pull subnet id and report it to Invardia (the managing tenant allows it by itself)' `
+                -Script 'tools\setup\Publish-PimEnrollmentFacts.ps1' -HostExe 'powershell' -Arguments $repArgs -Switches $storeSwitches `
+                -Why 'with an enrollment there is nobody to hand the subnet id to: the managing tenant''s enrolled-tenants job reads it from Invardia'))
+        }
         }
         $dl = @{ Scenario = 'S6'; TenantId = $tid; SlaveRing = $(if (Test-PimRingValue -Value "$(& $V 'slaveRing')") { [int](& $V 'slaveRing') } else { 0 })
                  ResourceGroup = $rg; EnvName = $env; AcrName = $acr; SubscriptionId = $sub; JobName = $job; BaselineUrl = (Get-PimBaselinePullUrl -StorageAccount $mStore -Container $mContainer)
                  SqlServerFqdn = $sqlFqdn; SqlDatabase = $db; SlaveAdminPrefixes = @(& $V 'adminPrefixes' | Where-Object { "$_".Trim() })
                  # 71.35 TRUST ANCHOR: the pinned signing key id(s) -- config, not a secret, never read from the bundle store.
-                 BaselineTrustedKeys = @(@(& $V 'master.signingKeyIds') | Where-Object { $null -ne $_ -and "$_".Trim() } | ForEach-Object { "$_".Trim() }) }
+                 BaselineTrustedKeys = @($enrolPins) }
         if (-not $signedIn) { $dl['SqlAdminClientId'] = $cid; $dl['SqlAdminCertThumbprint'] = $thumb }   # signed-in: the job joins the SQL admin group as the signed-in user
         if ("$(& $V 'imageTag')".Trim()) { $dl['ImageTag'] = "$(& $V 'imageTag')".Trim() }
         # The pull cadence (operator 2026-09-18: "can the pull run every 30 min" ... "gui must be made to control"). The CADENCE
@@ -891,8 +942,9 @@ function Get-PimMspOperatorSteps {
       PURE. The steps that need a human or a decision, each with the exact command. Printed by the runner after the build
       and listed in the Friday runbook. NOT automated on purpose.
     #>
-    param([Parameter(Mandatory)][ValidateSet('Master','Slave')][string]$Role, [Parameter(Mandatory)][object]$Config)
+    param([Parameter(Mandatory)][ValidateSet('Master','Slave')][string]$Role, [Parameter(Mandatory)][object]$Config, [switch]$Enrollment)
     $V = { param($p) Get-PimMspBuildValue -Object $Config -Path $p }
+    $enrol = ($Enrollment -and $Role -eq 'Slave')
     $rg = "$(& $V 'resourceGroup')".Trim(); $sub = "$(& $V 'subscriptionId')".Trim(); $sql = "$(& $V 'sqlServerName')".Trim()
     $out = New-Object System.Collections.Generic.List[object]
     $out.Add([pscustomobject]@{ id = 'exchange'; title = 'Exchange Online plan present (TAP mail)'; when = 'before the build'
@@ -907,6 +959,10 @@ function Get-PimMspOperatorSteps {
         if ((Get-PimBaselineAccessMode -Role Slave -Config $Config) -eq 'privateEndpoint') {
             $out.Add([pscustomobject]@{ id = 'peering'; title = "global VNet peering between this tenant's VNet and the managing tenant's VNet (OPERATOR -- the per-tenant deploy identities cannot authorise it)"; when = 'before the first pull succeeds'
                 command = "Both directions, allowVirtualNetworkAccess on, no gateway transit: see the runbook's peering section (an identity with Network Contributor on BOTH VNets, e.g. an admin guest in the other tenant, az login to both tenants, then az network vnet peering create --remote-vnet <full id> in each). Until it is Connected on both sides the pull job's executions fail with a connect timeout to $("$(& $V 'master.privateEndpointIp')".Trim()):443." })
+        } elseif ($enrol) {
+            # UPLINK-ENROL: nothing to hand over -- the subnet id went to Invardia (enrollreport), the managing tenant's job allows it.
+            $out.Add([pscustomobject]@{ id = 'enrolled-network'; title = "the managing tenant allows this tenant's subnet by itself (enrollment)"; when = 'after the build; before the first pull succeeds'
+                command = "Nothing to do here. The managing tenant's 'enrolled-tenants' job (daily; Jobs > Run now on the managing tenant for at once) reads this tenant's subnet id from Invardia and allows it on its bundle store. Until then the pull job's executions fail with 403 (AuthorizationFailure) -- the bundle is refused by the network, never accepted unsigned." })
         } else {
         # 71.34: the ONLY thing the managing tenant needs from a managed tenant for the pull to work is an address.
         $out.Add([pscustomobject]@{ id = 'master-network'; title = "the managing tenant lets this tenant's subnet read the bundle (one-time; nothing expires)"; when = 'after the pullnetwork step; before the first pull succeeds'
@@ -915,8 +971,13 @@ function Get-PimMspOperatorSteps {
                        "Until then the pull job's executions fail with 403 (AuthorizationFailure) -- the bundle is refused by the network, never accepted unsigned.") })
         }
         # 71.35: the trust anchor comes from the managing tenant's BUILD OUTPUT, not from its bundle store.
+        if ($enrol) {
+            $out.Add([pscustomobject]@{ id = 'enrolled-signing-key'; title = "the managing tenant's signing key id(s) came with the enrollment"; when = 'after the build'
+                command = "The enroll step pinned the key id(s) Invardia returned for your managing company (the managing tenant reported them with its own install key). To keep them across re-runs without the key, add the master block the build printed to this config. On a key roll the managing company's tenant reports the new id; re-run this build -From enroll (idempotent) to pin it." })
+        } else {
         $out.Add([pscustomobject]@{ id = 'master-signing-key'; title = "pin the managing tenant's signing key id(s) in this build config"; when = 'before this build (the config check refuses without it)'
             command = "master.signingKeyIds = [ '<the id the managing tenant's signingkey step printed>' ]. Ask the MSP for it over a channel you already trust -- never copy it from the bundle store. On a key roll the MSP gives you the NEW id first: add it (keep the old one), re-run -From downlink, and only then does the managing tenant switch." })
+        }
     } else {
         if ((Get-PimBaselineAccessMode -Role Master -Config $Config) -eq 'privateEndpoint') {
             $out.Add([pscustomobject]@{ id = 'slave-network'; title = 'each managed tenant: the privateEndpointIp + a global VNet peering (OPERATOR)'; when = 'after the privateendpoint step; before each managed tenant''s first pull'

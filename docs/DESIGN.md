@@ -4888,6 +4888,24 @@ subnet and prints the subnet identifier; the managing tenant creates its signing
 step converges, so the full builds repeat them as no-ops. The two values travel between administrators, never through
 the bundle store.
 
+**Self-service managed tenants with an enrollment key (built, not yet released).** A managing company can let its customers
+add managed tenants without a hand-over. Invardia issues the company an enrollment key tied to its managing tenant (with a
+tenant limit, an expiry and revocation). The managed tenant's build is given that key and claims the tenant with it first:
+Invardia creates the environment, re-signs the company's managed-service licence with the new tenant and returns that licence,
+the environment's install key and the managing tenant's bundle address and signing key identifiers. Licence signing is
+asynchronous: the build asks again at the interval Invardia gives, for a bounded time, and checks the returned file against its
+checksum. The build verifies and stores the licence exactly as a licence file supplied by hand, pins the returned key
+identifiers, and reports its pull subnet back to Invardia. Each claim issues a new install key and retires the previous one,
+so the build always stores the key of its last claim, and re-running a completed build does not claim again unless the
+administrator passes the enrollment key explicitly. The managing tenant reports its own bundle address and key identifiers through its install key,
+and a daily job (also runnable on demand) reads its enrolled tenants and adds each one's subnet to the bundle store's network
+rules. That job only ever adds rules, removes only a rule it added itself for a tenant that is no longer enrolled, records
+every change in the audit log, and names what it allowed in its run log. Its identity holds a role limited to the network
+settings of that one storage account and no data access. The enrollment key is a secret: it is sent once, shown only masked,
+and never written to a log, the store or telemetry. Trust is unchanged: the managed tenant still refuses any bundle whose
+signature does not verify against the pinned identifiers, and the managing tenant's registration of the tenant (ring and
+tags) stays the managing company's decision. Without an enrollment key the builds work exactly as described above.
+
 #### Implementation note (2026-09-17) — the provider's Manager verifies the bundle the way a managed tenant does
 
 The MSP view in the managing tenant's Manager plans against a signed bundle. Its banner verdict uses the managed tenant's
@@ -7560,35 +7578,45 @@ done **inside the wizard**: it never sends the administrator to another page to 
 
   | Step | What the step shows and saves |
   |---|---|
+  | Naming convention (step 1) | the admin word, tenant name, admin account patterns, PIM group pattern and role tag prefix, each with what it renders as → the naming save (the whole stored map, every other key kept); a confirmation "these names are right" makes it done. It comes first because templates and wizards name everything by it |
   | Licence | the licence file or text → the licence registration (signature checked before anything is stored) |
   | Engine permissions | what is missing, what it blocks, the exact grant to run, Check again (the page grants nothing itself) |
   | Mail sender | the sender in use; the setup script (download from Invardia + the command); Send a test mail |
   | Departments & owners | the departments; a new one with its owners (found by name) → the same department save as Access → Departments & owners; Import from Entra |
-  | Roles & templates | the template packs still to include (tick) and an own role group → staged in Pending changes, by the same code as the template cards and the role-group wizard |
-  | Admin accounts | the person (found by name, fills first / last name and initials), the kind of account, an optional role group → staged by the same code as the admin wizard (the engine names the account) |
-  | Access mapping | an admin account and a role group (two dropdowns) → one staged assignment |
-  | Policies | the held policy change sets with their Approve all, inside the step |
+  | Roles & templates | the template packs still to include (tick) and an own role group → staged in Pending changes, by the same code as the template cards and the role-group wizard. A template row that grants an Entra role this tenant does not have is left out and named (see below) |
+  | Admin accounts (optional) | the person (found by name, fills first / last name and initials), the kind of account, an optional role group → staged by the same code as the admin wizard (the engine names the account). Optional: admins can be added later |
+  | Policies | per kind of policy (PIM for Groups, Entra ID roles, Azure resource roles): the template used where a delegation names none (a RequireApproval template is how approval is required), how long an activation lasts, and whether activation asks for MFA, a justification or a ticket → the Policy templates page's saves (the default per kind; the template's rules, only what changed); held policy change sets with their Approve all, inside the step; then **approve** the policies (a confirmation). Done = approved and nothing held |
   | Alert recipients | the recipients → the alerting save (the events, digest lists and webhook are kept); Save and send a test alert |
-  | Break-glass accounts | the accounts (found by name) and a justification → the maker/checker request (another SuperAdmin approves) |
+  | Break-glass accounts | the accounts (found by name) and a justification → the maker/checker request (another SuperAdmin approves). **Skip for now** saves a deferral: the step no longer counts as open, but every SuperAdmin is reminded on sign-in until an account is protected |
   | First run | the last run; Run now starts the full run |
-  | PIM Activator (optional) | the Activator's own guided steps, inside the step, and a confirmation that the rollout is done |
-  | Discovery (optional) | discovery on / off (the job's own switch); Save and look now |
+  | PIM Activator (optional, last) | the Activator's own guided steps, inside the step, and a confirmation that the rollout is done |
+
+  Access mapping and Discovery are not Get Started steps: they are done later on their own pages.
 
 - **Refused = nothing written.** Every field of the step is checked before anything is sent; a save the page or the server
   refuses shows the same step with the reason under the field.
-- **Staged steps.** Roles, admin accounts and access mapping stage their rows in Pending changes like the normal pages do; while
+- **Staged steps.** Roles and admin accounts stage their rows in Pending changes like the normal pages do; while
   anything is staged, the wizard says so and offers **Commit now**, which is the normal Commit all (validation, second
   approver, journal, engine start).
+- **Template roles the tenant does not have.** Staging a template (here or on the template cards) leaves out every row
+  that grants an Entra role whose name is not among the tenant's role definitions -- the same list the commit's
+  PIM-STALE-001 check reads -- and a group whose every role is missing goes with them, so no empty group is created. The
+  administrator is told which rows were left out and why. Without a role list to check against nothing is left out (the
+  commit still checks).
 - **Done is read from the data** on every visit (a registered licence, a department with rows, a run that finished ok, ...),
-  never from a stored tick. The one exception is a step whose work happens outside the product -- the PIM Activator rollout
-  to the admins' browsers: it is done by a **confirmation** that is saved as a real setting (`GET /api/get-started`,
-  `PUT /api/get-started/confirm`; Admin, audited, only the steps the server lists can be confirmed).
+  never from a stored tick. The exception is a decision only a person can make -- the naming is right, the activation
+  policies are approved, the PIM Activator rollout is done, break-glass is skipped for now: it is a **confirmation** saved
+  as a real setting (`GET /api/get-started`, `PUT /api/get-started/confirm`; audited; only the steps the server lists;
+  naming and the break-glass deferral need a SuperAdmin, the others an Admin). A deferral never makes a step done.
+- **Break-glass reminder.** While no break-glass account is protected, a SuperAdmin sees one dismissible reminder per
+  browser session ("Break-glass accounts are still not set up -- Get Started > Break-glass accounts"). It is computed from
+  the data, so it stops by itself once an account is protected.
 - **Optional steps** move on with nothing filled. **Action buttons** (Run now, Send a test mail / alert) save the step first,
   then stay on it with the result.
 - **People and groups are found by name** (search + dropdown); nobody pastes an object id.
 - **The menu's red !** shows while a required step is open. It is computed from the same checks, read from a one-minute
   cache that every save clears.
-- **Roles.** A step that needs a SuperAdmin (licence, departments, break-glass) says so to anyone else and lets them move on.
+- **Roles.** A step that needs a SuperAdmin (naming, licence, departments, break-glass) says so to anyone else and lets them move on.
 
 ### 18.2 UX goal — zero memorization
 
@@ -9080,7 +9108,10 @@ stage only rows they own.
 matched to the staged changes by row key, and one that changes a row another person staged is refused unless it is
 exactly their change. A staged removal counts as done only when the row is gone; a change that clears a field only when
 the field is empty. Direct edits count as the committer's own for the second-approver rule, including under
-"sensitive". An administrator can discard a colleague's staged change with a recorded reason.
+"sensitive". An administrator can discard a colleague's staged change with a recorded reason. A **SuperAdmin** can
+discard **everyone's** staged changes at once (**Discard ALL pending changes**): the confirmation names how many, who
+staged them and in which record types; a reason is required; the server refuses if the number changed while the person
+confirmed, reads the store back afterwards and audits the count per record type and per person. Nothing is committed.
 
 ### 28.6 MSP: decisions that travel to managed tenants
 Besides the rows it publishes, the managing tenant signs **decisions** into the bundle: a withdrawal (remove this row), a

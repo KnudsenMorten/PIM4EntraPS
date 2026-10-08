@@ -74,7 +74,7 @@ $script:PimJobGroupByType = @{
     'hybrid-ad-servers' = 'Engine'; 'hybrid-ad-sync-servers' = 'Engine'; 'rfa-sync' = 'Engine'
     'reminders' = 'Reports'; 'escalations' = 'Reports'; 'daily-summary' = 'Reports'; 'tier-report' = 'Reports'
     'owner-review' = 'Reports'; 'autoextend-report' = 'Reports'; 'coverage' = 'Reports'; 'target-check' = 'Reports'; 'pending-check' = 'Reports'
-    'licence-request' = 'Updates'; 'licence-check' = 'Updates'; 'uplink' = 'Updates'; 'install-key' = 'Updates'
+    'licence-request' = 'Updates'; 'licence-check' = 'Updates'; 'uplink' = 'Updates'; 'install-key' = 'Updates'; 'enrolled-tenants' = 'Updates'
 }
 
 function Get-PimJobGroup {

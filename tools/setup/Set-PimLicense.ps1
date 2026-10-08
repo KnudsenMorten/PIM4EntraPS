@@ -63,6 +63,10 @@ param(
     # `installKey` to config.json). Stored as pim.Settings['InvardiaInstallKey'] so the engine does NOT claim one --
     # a claim for an environment that already has a key is refused (409). Never printed.
     [string]$InstallKey,
+    # UPLINK-ENROL (PIM 99): the install key in a FILE (the MSP build's enroll step writes the one Invardia returned into its
+    # restricted per-run directory), so the key is never a command-line or step argument. Stored exactly like -InstallKey,
+    # and the claim state is recorded as 'claimed' (the engine's install-key job then has nothing to do).
+    [string]$InstallKeyPath,
     # 2026-10-06 (install rehearsal): with no -InstallKey, queue the engine's 'install-key' job as a "Run now" trigger (the
     # same SchedulerTriggers entry the Manager writes), so the key is claimed at the next tick (5 min) -- not up to 6 h later,
     # after the first 03:00 update has already found no key.
@@ -240,11 +244,22 @@ if ($r.whatIf) {
     $result.ok = $true; $result.reason = "what-if -- the licence verifies ($($r.status)); nothing written"
     Write-ResultFile; Write-Host "RESULT: WHAT-IF -- $($result.reason)" -ForegroundColor Yellow; exit 0
 }
+$keyFromFile = $false
+if ("$InstallKeyPath".Trim()) {
+    if ("$InstallKey".Trim()) { Fail 'supply -InstallKey OR -InstallKeyPath, not both' }
+    if (-not (Test-Path -LiteralPath $InstallKeyPath)) { Fail 'the install key file does not exist -- not stored' }
+    $InstallKey = "$(Get-Content -LiteralPath $InstallKeyPath -Raw)".Trim()
+    $keyFromFile = $true
+}
 if ("$InstallKey".Trim()) {
     if ("$InstallKey".Trim() -notmatch '^inv-[A-Za-z0-9_-]{20,100}$') { Fail 'the install key is not an Invardia install key (inv-...) -- not stored' }
     try {
         Set-PimSqlSetting -ConnectionString $cs -Name 'InvardiaInstallKey' -Value "$InstallKey".Trim()
         if ("$(Get-PimSqlSetting -ConnectionString $cs -Name 'InvardiaInstallKey')".Trim() -ne "$InstallKey".Trim()) { Fail 'read-back mismatch: the install key was not stored' }
+        if ($keyFromFile) {
+            # The same record Invoke-PimInstallKeyClaimCycle writes after a claim (Settings > Licence shows it).
+            Set-PimSqlSetting -ConnectionString $cs -Name 'InstallKeyClaimState' -Value ([pscustomobject][ordered]@{ action = 'claimed'; message = 'install key issued with the enrollment'; atUtc = [datetime]::UtcNow.ToString('o'); licenceHash = '' })
+        }
     } catch { Fail "the install key could not be stored: $($_.Exception.Message)" }
     $result['installKey'] = 'stored'
     Note 'install key: stored (the engine uses it; it does not claim another)' 'Gray'

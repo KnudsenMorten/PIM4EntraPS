@@ -170,6 +170,8 @@ if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\
 . "$shared\PIM-Uplink.ps1"
 # §95.4: job 'install-key' -- claim the Invardia install key (OFF unless 'updates.invardia'); the uplink + Pro updates use it.
 . "$shared\PIM-InvardiaUpdate.ps1"
+# UPLINK-ENROL (PIM 99): job 'enrolled-tenants' -- the managing tenant allows its enrolled managed tenants' subnets by itself.
+. "$shared\..\msp\PIM-InvardiaEnrollment.ps1"
 # REQ-AR-2: job 'access-review-cycle' -- the per-department access review campaigns.
 if (Test-Path -LiteralPath "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1") { . "$shared\..\access-reviews\PIM-AccessReviewCycle.ps1" }   # §84 Pro: loaded only when present
 if (Test-Path -LiteralPath "$shared\..\rfa\PIM-RfaSync.ps1") { . "$shared\..\rfa\PIM-RfaSync.ps1" }   # §82 Pro: loaded only when present
@@ -348,6 +350,12 @@ Register-PimJobHandler -Type 'install-key' -Handler {
 Register-PimJobHandler -Type 'licence-request' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimLicenceRequestJob -Job $job -NowUtc $now -WhatIf:$whatIf
+}
+# UPLINK-ENROL: the REAL 'enrolled-tenants' handler. Invardia not live yet (404) ends OK with that sentence; a refused key,
+# an unreadable store or a write that does not read back FAILS the run (it throws).
+Register-PimJobHandler -Type 'enrolled-tenants' -Handler {
+    param($job, $now, $whatIf)
+    Invoke-PimEnrolledTenantsJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
 # §79.2: the REAL 'pending-check' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
 Register-PimJobHandler -Type 'pending-check' -Handler {
