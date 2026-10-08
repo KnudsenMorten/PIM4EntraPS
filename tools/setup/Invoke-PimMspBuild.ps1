@@ -106,7 +106,15 @@ param(
     [string]$InvardiaBaseUrl = "$($env:PIM_INVARDIA_BASE_URL)",
     [scriptblock]$EnrollmentHttp,
     [scriptblock]$EnrollmentSleep,
-    [int]$EnrollmentTimeoutSeconds = 900
+    [int]$EnrollmentTimeoutSeconds = 900,
+    # INSTALL-HARDEN-1 item 7: the image tag this build uses. Unset: the config's imageTag; on a -From resume the tag of the
+    # image the Manager runs now (never the working tree's VERSION, which may have been bumped since the build ran).
+    [string]$ImageTag,
+    # §99 "Support-app installs report their steps to Invardia": the tracked install's token (or $env:INVARDIA_INSTALL_TOKEN)
+    # and events address. Every step is posted (best effort; a failed post never fails the build; nothing secret is sent).
+    [string]$InvardiaInstallToken = '',
+    [string]$InvardiaInstallEventsUrl = 'https://invardia.com/api/install/events',
+    [scriptblock]$InvardiaInstallHttp
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -114,6 +122,8 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
 . (Join-Path $solRoot 'engine\msp\PIM-InvardiaEnrollment.ps1')
 . (Join-Path $here '_PimSasCertLogin.ps1')
+. (Join-Path $here '_PimInstallTracking.ps1')
+if (-not $PSBoundParameters.ContainsKey('InvardiaInstallToken')) { $InvardiaInstallToken = "$($env:INVARDIA_INSTALL_TOKEN)".Trim() }
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "config not found: $ConfigPath" }
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
@@ -219,6 +229,13 @@ $notRun = New-Object System.Collections.Generic.List[string]
 $prevExtDirSet = [bool]$env:AZURE_EXTENSION_DIR
 $extDir = Get-PimMspBuildAzExtensionDir -Current "$env:AZURE_EXTENSION_DIR" -UserProfile "$env:USERPROFILE"
 $prevSubscription = ''
+# §99 install tracking. This loop is the ONE poster: the variable is taken out of the environment for the run, so no child
+# step (the hosting step runs Invoke-PimDeployAll) posts the same install a second time; it is put back afterwards.
+$tracker = New-PimInstallTracker -Token "$InvardiaInstallToken" -EventsUrl "$InvardiaInstallEventsUrl" -Http $InvardiaInstallHttp
+$prevInstallTokenEnv = $env:INVARDIA_INSTALL_TOKEN
+if ($null -ne $prevInstallTokenEnv) { Remove-Item Env:\INVARDIA_INSTALL_TOKEN -ErrorAction SilentlyContinue }
+if ($tracker.enabled) { Write-Host "    install tracking: every step is reported to Invardia ($($tracker.url)); a failed report never fails the build" -ForegroundColor DarkGray }
+$curStep = $null
 try {
     if ($StepRunner -and $enrolling) { $null = New-Item -ItemType Directory -Force -Path $runDir }   # tests: the enrolled licence + key files land here
     if (-not $StepRunner) {
@@ -258,6 +275,28 @@ try {
         $globals = @{ PIM_TenantId = "$($config.tenantId)" }   # NO application identity reaches a step
     }
 
+    # INSTALL-HARDEN-1 item 7 -- PIN THE IMAGE TAG. A resume reads the image the Manager runs (what this build built and
+    # deployed) instead of the working tree's VERSION; -ImageTag and the config's imageTag win over both.
+    $mgrImage = ''
+    $cfgTag = "$(Get-PimMspBuildValue -Object $config -Path 'imageTag')".Trim()
+    if ("$From".Trim() -and -not "$ImageTag".Trim() -and -not $cfgTag) {
+        if ($StepRunner) { $mgrImage = "$($Resolved['{{manager-image}}'])" }
+        else {
+            $mgrName = if ("$(Get-PimMspBuildValue -Object $config -Path 'managerApp')".Trim()) { "$(Get-PimMspBuildValue -Object $config -Path 'managerApp')".Trim() } else { 'ca-pim-manager' }
+            $ErrorActionPreference = 'Continue'
+            $mgrImage = "$(az containerapp show --subscription $config.subscriptionId -g $config.resourceGroup -n $mgrName --query 'properties.template.containers[0].image' -o tsv --only-show-errors 2>$null)".Trim()
+            $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = 0
+        }
+    }
+    $pin = Resolve-PimMspBuildImageTag -Explicit "$ImageTag" -ConfigTag $cfgTag -Resuming ([bool]"$From".Trim()) -ManagerImage $mgrImage
+    Write-Host "    $($pin.message)" -ForegroundColor $(if ($pin.source -eq 'manager') { 'Yellow' } else { 'DarkGray' })
+    if ($pin.tag -and $pin.tag -ne $cfgTag) {
+        $config | Add-Member -NotePropertyName imageTag -NotePropertyValue $pin.tag -Force
+        $plan = @(Get-PimMspBuildPlan -Role $Role -Config $config -Enrollment:$enrolling -InvardiaBaseUrl $planBase)
+    }
+    # the fix of a repairable verify line: re-run the verify (it repairs), with the build's own command
+    $Resolved['{{resume}}'] = "Invoke-PimMspBuild.ps1 -Role $Role -ConfigPath '$ConfigPath' -Apply -From verify-install"
+
     # 71.36: a -From resume INSIDE a private store's build window re-opens the window first (the step that failed may be a
     # store step, and a previous run may have closed it). Get-PimMspBuildRunOrder is pure and offline-tested.
     $order = @(Get-PimMspBuildRunOrder -StepIds @($plan | ForEach-Object { $_.id }) -StartAt $startAt)
@@ -271,6 +310,8 @@ try {
         $i = $order[$ordIx]; $ordIx++
         $s = $plan[$i]
         Write-Host ("`n==> [{0}/{1}] {2}: {3}" -f ($i + 1), $plan.Count, $s.id, $s.title) -ForegroundColor Cyan
+        $curStep = $s
+        if (-not "$($s.blocked)".Trim()) { [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId $s.id -Title $s.title -State started) }
         if ("$($s.kind)" -eq 'enroll') {
             $http = if ($EnrollmentHttp) { $EnrollmentHttp } else { { param($m, $u, $b, $h) Invoke-PimEnrollmentHttp -Method $m -Url $u -Body $b -Headers $h } }
             $sleep = if ($EnrollmentSleep) { $EnrollmentSleep } else { { param($sec) Start-Sleep -Seconds $sec } }
@@ -327,12 +368,14 @@ try {
             $ordIx = 0
             $enrolKey = ''   # used once; never kept for later steps
             Write-Host "    [OK] enroll" -ForegroundColor Green
+            [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId 'enroll' -Title $s.title -State ok -Message "enrolled as environment '$($c.environmentHandle)'")
             continue
         }
         if ("$($s.blocked)".Trim()) {
             # Never executed, never resolved -- and never reported as done.
             Write-Host "    NOT RUN: $($s.blocked)" -ForegroundColor Yellow
             $notRun.Add($s.id)
+            [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId $s.id -Title $s.title -State skipped -Message "not run: $($s.blocked)")
             continue
         }
         if ($s.why) { Write-Host "    why: $($s.why)" -ForegroundColor DarkGray }
@@ -400,8 +443,15 @@ try {
             Write-Host "    (output captured for the next step; not printed)" -ForegroundColor DarkGray
         }
         Write-Host "    [OK] $($s.id)" -ForegroundColor Green
+        [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId $s.id -Title $s.title -State ok)
     }
+} catch {
+    # a refusal or an unresolved argument THROWS out of the loop: it is the failed last event, then rethrown as before
+    if ($curStep) { [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId $curStep.id -Title $curStep.title -State failed -Message "$($_.Exception.Message)") }
+    $curStep = $null
+    throw
 } finally {
+    if ($null -ne $prevInstallTokenEnv) { $env:INVARDIA_INSTALL_TOKEN = $prevInstallTokenEnv }
     if (Test-Path -LiteralPath $runDir) {
         foreach ($w in 0, 2, 5) { if ($w) { Start-Sleep -Seconds $w }; Remove-Item -LiteralPath $runDir -Recurse -Force -ErrorAction SilentlyContinue; if (-not (Test-Path -LiteralPath $runDir)) { break } }
         if (Test-Path -LiteralPath $runDir) { Write-Warning "could not remove the per-run directory $runDir (it holds a certificate PEM) -- delete it." }
@@ -412,10 +462,16 @@ try {
     }
 }
 & $printOps
-if ($exitCode) { exit $exitCode }
+if ($exitCode) {
+    if ($curStep) { [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId $curStep.id -Title $curStep.title -State failed -Message "the step failed -- fix the cause and resume with -From $($curStep.id)") }
+    exit $exitCode
+}
 if ($notRun.Count) {
     Write-Host "`nBUILD INCOMPLETE ($Role): every runnable step succeeded, but these did NOT run: $($notRun -join ', '). See NOT RUN above and the operator steps." -ForegroundColor Yellow
+    [void](Send-PimInstallTrackEvent -Tracker $tracker -StepId 'build-incomplete' -Title 'Build incomplete' -State warning -Message "not run: $($notRun -join ', ')")
     exit 2
 }
 Write-Host "`nBUILD COMPLETE ($Role). Work through the operator steps above." -ForegroundColor Green
+$verOut = ''; try { $verOut = "$(Get-Content -Raw -LiteralPath (Join-Path $solRoot 'VERSION'))".Trim() } catch { }
+[void](Complete-PimInstallTracker -Tracker $tracker -Outputs ([ordered]@{ role = $Role; version = $verOut; imageTag = "$($pin.tag)"; resourceGroup = "$($config.resourceGroup)" }))
 exit 0

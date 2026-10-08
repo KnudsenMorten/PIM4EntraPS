@@ -14,7 +14,10 @@
     3. deploys with Invoke-PimDeployAll (the external, signed-in Container Apps shape; the public release), reporting
        every step                                                                                        -> exit 1 when failed
     4. registers the licence (the Pro features switch on at once), grants the Invardia Support app its access when
-       config.json names one, checks health, and reports 'completed' with the outputs Invardia's support needs -> exit 0
+       config.json names one, runs the END-OF-INSTALL CHECK ('verify-install', Confirm-PimInstall.ps1: SuperAdmins, updater +
+       ring, licence + install key, mail sender + both sending identities in scope, alert recipients, the engine's Graph
+       rights + Reader at the tenant root, sign-in, the SQL window; repairs what it can; a failed required line = exit 1
+       with that line's fix), checks health, and reports 'completed' with the outputs Invardia's support needs -> exit 0
   A step that needs a higher role than the installer holds ends as a WARNING with the command for the right person; the
   install continues. -Resume re-runs from where it stopped: completed preflight / licence / support steps are skipped,
   and the deploy itself is idempotent (each of its steps checks what exists first).
@@ -41,7 +44,9 @@ param(
     [scriptblock]$GrantSupport,
     [scriptblock]$ResolveHost,
     [string]$TestLicenceCertB64,
-    [scriptblock]$Http
+    [scriptblock]$Http,
+    # INSTALL-HARDEN-1: param([hashtable]$VerifyArgs) -> @{ done; failed[]; warnings[]; sentence; rows[] } (Confirm-PimInstall.ps1)
+    [scriptblock]$VerifyInstall
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -234,6 +239,37 @@ else {
     if ($gr -and $gr.ok) { Emit 'support-app-access' 'ok' "the Invardia Support app has '$($cfg.supportAccess)' access"; Mark 'support-app-access' }
     else { Emit 'support-app-access' 'warning' 'the Invardia Support app could not be given its access with your rights' 'Ask a Privileged Role Administrator to run:' $grantCmd }
 }
+
+# ================================================================== 4b. INSTALL-HARDEN-1: the END-OF-INSTALL VERIFY
+# Owner 2026-10-08: "make sure that customers requesting a trial version will not have these issues". Every result the
+# install must leave is read back -- SuperAdmins, updater + ring, licence + install key, mail sender + both sending
+# identities in scope, alert recipients, the engine's Graph rights and its Reader at the tenant root, sign-in, the SQL
+# window -- what is missing is repaired where it can be, and the install is NOT 'completed' while a required line fails.
+# Always run (also on -Resume): it is a check, and re-running it is how a repaired line turns green.
+Emit 'verify-install' 'started'
+$mailEv = @($events | Where-Object { "$($_.step.id)" -eq 'mailsender' -and "$($_.state)" -eq 'warning' }) | Select-Object -Last 1
+$vArgs = @{ Role = 'Single'; TenantId = $cfg.tenantId; SubscriptionId = $cfg.subscriptionId; ResourceGroup = $names.resourceGroup; SqlServerFqdn = $names.sqlFqdn
+            SqlDatabase = $names.sqlDatabase; ManagerApp = $names.managerApp; EnvName = $names.environment; AcrName = $names.acr
+            SuperAdmins = @("$($deployArgs['ManagerSuperAdmins'])" -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            AlertRecipients = @($cfg.alertRecipients); LicenceExpected = $true; SetupHostRuleOwner = 'this'; UseSignedInAccount = $true; ResumeCommand = $resumeCmd
+            OutFile = (Join-Path $StatePath 'verify-install.json') }
+if ($deployArgs.Contains('UpdateRing')) { $vArgs['UpdateRing'] = [int]$deployArgs['UpdateRing'] }
+if ($deployArgs.Contains('UpdateSource')) { $vArgs['UpdateSource'] = "$($deployArgs['UpdateSource'])" }
+if ($cfg.engineAzureRootUserAccessAdmin) { $vArgs['EngineAzureRootUserAccessAdmin'] = $true }
+if ($mailEv) { $vArgs['MailDeferredReason'] = "$($mailEv.message)" }
+if (-not $VerifyInstall) { $VerifyInstall = { param([hashtable]$A) @(& (Join-Path $here 'Confirm-PimInstall.ps1') @A) | Where-Object { $_ -and $_.PSObject.Properties['done'] } | Select-Object -Last 1 } }
+$vr = $null
+try { $vr = & $VerifyInstall $vArgs } catch { $vr = $null; Write-Verbose "verify-install threw: $($_.Exception.Message)" }
+$vRows = @(@($vr.rows) | Where-Object { $_ } | ForEach-Object { [ordered]@{ id = "$($_.id)"; title = "$($_.title)"; state = "$($_.state)"; detail = "$($_.detail)"; fix = "$($_.fix)" } })
+if (-not $vr) { Emit 'verify-install' 'failed' 'the end-of-install check could not run' 'Fix the cause above, then resume the installation:' $resumeCmd; Finish 1 }
+if (-not [bool]$vr.done) {
+    $bad = @($vRows | Where-Object { $_.state -eq 'failed' })
+    $first = @($bad | Select-Object -First 1)
+    Emit 'verify-install' 'failed' "$($vr.sentence)" "Fix: $(if ($first) { "$($first[0].title) -- " })the command below, then resume the installation:" $(if ($first -and "$($first[0].fix)".Trim()) { "$($first[0].fix)" } else { $resumeCmd }) -Detail ([ordered]@{ lines = $vRows })
+    Finish 1
+}
+if (@($vr.warnings).Count) { Emit 'verify-install' 'warning' "$($vr.sentence)" -Detail ([ordered]@{ lines = $vRows }) }
+else { Emit 'verify-install' 'ok' "$($vr.sentence)" -Detail ([ordered]@{ lines = $vRows }) }
 
 Emit 'health-check' 'started'
 $healthy = ("$($summary.status)" -eq 'success') -and [bool]$summary.healthy

@@ -137,7 +137,13 @@ function Get-PimDeployStepCatalog {
         # 🔒 Survives a CSV import by construction: the import writes pim.Rows, and its only touch
         # on Settings adds keys that do not already exist.
         [pscustomobject]@{ key='access';   name='Manager access (SuperAdmin in SQL, so the environment can be administered)'; rollbackable=$false; hostedOnly=$true }
+        # INSTALL-HARDEN-1 item 5 (owner 2026-10-08): the alert recipients were EMPTY after every install -- nothing wrote
+        # them, so no alert reached anyone. Set from -AlertRecipients, else the SuperAdmins' mailboxes; never overwritten.
+        [pscustomobject]@{ key='alerting'; name='Alert recipients (pim.Settings Alerting; never overwrites a stored list)'; rollbackable=$false; hostedOnly=$false }
         [pscustomobject]@{ key='verify';   name='Verify (hosted smoke + deploy-validation tests)';rollbackable=$false; hostedOnly=$false }
+        # INSTALL-HARDEN-1: the END-OF-INSTALL VERIFY -- reads every result back, repairs what it can, ONE table; a failed
+        # required line fails the run (it never rolls the code back: the code is fine, the install is not finished).
+        [pscustomobject]@{ key='verify-install'; name='End-of-install verify (SuperAdmins, updater, licence, mail, alerts, engine rights, sign-in, SQL window)'; rollbackable=$false; hostedOnly=$true }
     )
 }
 

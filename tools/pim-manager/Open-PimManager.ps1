@@ -3370,7 +3370,7 @@ $script:PimAlertEventCatalog += 'pending-uncommitted'
 # approved, 'breakglass-later' = the break-glass step skipped for now (a deferral: the step stays not-done and every
 # SuperAdmin is reminded on sign-in until an account is protected). The ones that decide tenant-wide configuration need
 # SuperAdmin (PimGetStartedConfirmMinRole); the rest need Admin.
-$script:PimGetStartedConfirmSteps = @('activator', 'naming', 'policies', 'breakglass-later')
+$script:PimGetStartedConfirmSteps = @('activator', 'naming', 'policies', 'breakglass-later', 'mail-later')   # 'mail-later': Mail sender skipped for now (owner 2026-10-08: mail is optional)
 $script:PimGetStartedConfirmMinRole = @{ 'naming' = 'SuperAdmin'; 'breakglass-later' = 'SuperAdmin' }
 
 function Get-PimAlertingConfig {
@@ -4138,8 +4138,71 @@ function Get-PimManagerMailIdentities {
     return $o
 }
 
+function Get-PimManagerMailChecks {
+    <#
+      MAIL CHECK (owner 2026-10-08: "mail is optional, but include it in the get started + home and test exactly what is
+      needed, provide scripts so customer can run it"). Reads the FACTS for Get-PimMailCheck (PIM-MailTransport.ps1, pure):
+      the stored mode + sender + relay, the sender as Microsoft Graph resolves it, each sending identity's own last real send
+      (pim.Settings 'MailSendProof', written by Send-PimNotifyMail) and whether it holds a tenant-wide Graph Mail.Send, the
+      alert recipients, the relay password's readability (read as THIS Manager; the value is discarded at once) and the
+      latest test mail. Kept 5 minutes; -Refresh (Verify permissions / Check again) reads again. Never throws.
+    #>
+    param([switch]$Refresh)
+    if (-not $Refresh -and $script:PimMailCheckCache -and ((Get-Date) - $script:PimMailCheckCache.at).TotalSeconds -lt 300) { return $script:PimMailCheckCache.value }
+    $facts = @{}
+    try {
+        $modeRaw = $null; try { $modeRaw = Get-PimManagerSetting -Name 'MailMode' } catch { }
+        $facts['mode'] = ConvertTo-PimMailMode -Value $modeRaw
+        $sender = "$($global:PIM_MailSender)".Trim()
+        try { $v = Get-PimManagerSetting -Name 'MailSender'; if ("$v".Trim()) { $sender = "$v".Trim().Trim('"') } } catch { }
+        $facts['sender'] = $sender
+        try { $facts['smtp'] = Get-PimManagerSetting -Name 'SmtpRelay' } catch { }
+        try { $facts['lastTest'] = Get-PimManagerSetting -Name 'MailLastTest' } catch { }
+        try { $facts['alertRecipients'] = @((Get-PimAlertingConfig).recipients) } catch { $facts['alertRecipients'] = @() }
+        $ids = Get-PimManagerMailIdentities
+        $tid = if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() }
+        $facts['setup'] = @{ tenantId = $tid; managerObjectId = "$($ids.managerObjectId)"; tickObjectId = "$($ids.tickObjectId)"; subscriptionId = "$($ids.subscriptionId)"
+                             sqlServer = $(if ("$($global:PIM_SqlServer)".Trim()) { "$($global:PIM_SqlServer)".Trim() } else { "$($env:PIM_SqlServer)".Trim() }); vaultHint = "$($global:PIM_EmergencyVault)".Trim() }
+        $mode = if ($facts['mode']) { $facts['mode'] } elseif ($sender) { 'sharedMailbox' } else { '' }
+        if ($mode -eq 'sharedMailbox' -and $sender) {
+            try {
+                $u = Invoke-PimGraph -Path ("/users/{0}?`$select=id,userPrincipalName,mail" -f [uri]::EscapeDataString($sender))
+                $facts['senderLookup'] = @{ found = [bool]"$($u.id)"; upn = "$($u.userPrincipalName)" }
+            } catch {
+                $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)"
+                $facts['senderLookup'] = if ($m -match '(?i)\b404\b|Request_ResourceNotFound|does not exist') { @{ found = $false } } else { @{ found = $null; error = (($m -split "`n")[0]).Trim() } }
+            }
+        }
+        $proof = $null; try { $proof = Get-PimManagerSetting -Name 'MailSendProof' } catch { }
+        if ($proof -is [string]) { try { $proof = $proof | ConvertFrom-Json } catch { $proof = $null } }
+        $pget = { param($n) if ($null -eq $proof) { $null } elseif ($proof -is [System.Collections.IDictionary]) { $proof[$n] } elseif ($proof.PSObject.Properties[$n]) { $proof.$n } else { $null } }
+        $graphSpId = ''
+        try { $graphSpId = "$((@((Invoke-PimGraph -Path "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id").value) | Select-Object -First 1).id)" } catch { $graphSpId = '' }
+        $idList = @()
+        foreach ($x in @(@{ role = 'engine'; oid = "$($ids.tickObjectId)"; label = "engine job $(if ("$($ids.tickJobName)".Trim()) { $ids.tickJobName } else { 'ca-pim-tick' })" }, @{ role = 'manager'; oid = "$($ids.managerObjectId)"; label = 'PIM Manager' })) {
+            $tw = $null
+            if ($x.oid -and $graphSpId) { try { $tw = Test-PimTenantWideMailSend -Assignments @(Invoke-PimGraph -All -Path "/servicePrincipals/$($x.oid)/appRoleAssignments") -GraphSpId $graphSpId } catch { $tw = $null } }
+            $idList += @{ role = $x.role; label = $x.label; proof = (& $pget $x.role); tenantWideMailSend = $tw }
+        }
+        $facts['identities'] = $idList
+        if ($mode -eq 'smtp') {
+            $relay = ConvertTo-PimSmtpRelayConfig -Value $facts['smtp']
+            if ($relay.ok -and "$($relay.config.username)".Trim()) {
+                try { $pw = Get-PimSmtpRelayPassword -Config $relay.config; $facts['smtpPassword'] = @{ readable = [bool]"$pw" ; reason = $(if (-not "$pw") { 'the secret is empty' } else { '' }) }; $pw = $null }
+                catch { $facts['smtpPassword'] = @{ readable = $false; reason = (("$($_.Exception.Message)" -split "`n")[0]).Trim() } }
+            }
+        }
+    } catch { Write-Verbose "  [mail check] facts incomplete: $($_.Exception.Message)" }
+    $chk = Get-PimMailCheck -Facts $facts
+    $out = [ordered]@{ mode = $chk.mode; complete = [bool]$chk.complete; summary = "$($chk.summary)"; lines = @($chk.lines); checkedUtc = (Get-Date).ToUniversalTime().ToString('o') }
+    $script:PimMailCheckCache = @{ at = (Get-Date); value = $out }
+    return $out
+}
+
 function Get-PimManagerMailState {
     # The Get Started / Settings answer: mode, sender, relay (no password), the verdict, and this environment's setup values.
+    # -NoChecks: without the MAIL CHECK lines (a caller that only needs the stored values, e.g. recording a test mail).
+    param([switch]$NoChecks, [switch]$RefreshChecks)
     if (-not "$($global:PIM_MailSender)".Trim() -and (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue)) { try { [void](Initialize-PimEmailControlsFromStore -Force) } catch { } }
     $mode = ''; $sender = "$($global:PIM_MailSender)".Trim(); $relayRaw = $null; $last = $null
     try { $mode = ConvertTo-PimMailMode -Value (Get-PimManagerSetting -Name 'MailMode') } catch { }
@@ -4166,6 +4229,8 @@ function Get-PimManagerMailState {
             mailboxScript = 'https://invardia.com/support/pim/Initialize-PimMailSender.ps1'
             passwordScript = 'https://invardia.com/support/pim/Set-PimSmtpRelayPassword.ps1'
         }
+        # MAIL CHECK: every prerequisite as its own line (Get Started > Mail sender, the Home banner). Mail is optional.
+        checks = $(if ($NoChecks) { $null } else { Get-PimManagerMailChecks -Refresh:$RefreshChecks })
     }
 }
 
@@ -4200,7 +4265,8 @@ function Save-PimManagerMailLastTest {
     # relay or the mailbox makes this proof stale, so the Get Started step is computed from the data, never a stored tick.
     param([bool]$Ok, [string]$Reason, [string]$To)
     try {
-        $st = Get-PimManagerMailState
+        $script:PimMailCheckCache = $null   # MAIL CHECK: a new test result is read again
+        $st = Get-PimManagerMailState -NoChecks
         $fp = Get-PimMailTestFingerprint -Mode $st.mode -Sender $st.sender -Smtp $st.smtp
         Set-PimManagerSetting -Name 'MailLastTest' -Value ([ordered]@{ ok = $Ok; fingerprint = $fp; mode = $st.mode; at = (Get-Date).ToUniversalTime().ToString('o'); reason = "$Reason"; to = "$To"; by = (Get-PimManagerActorName) })
     } catch { Write-Warning "  [mail] the test-mail result could not be recorded: $($_.Exception.Message)" }
@@ -4814,7 +4880,11 @@ function Get-PimManagerLicenseBody {
     $canWrite = $false
     try { $canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') } catch { $canWrite = $false }
     try {
-        $b = Get-PimLicenseApiBody -MspRole $role -TenantId "$($global:PIM_TenantId)".Trim() -SqlServer $srv
+        # Framework §12.6: the stored admin rows give the managed-admin usage (Pro Business cap). Unreadable = count unknown
+        # (no banner) -- never a guess, and never a reason to fail the licence read.
+        $la = @{}
+        if ($script:PimSqlCs) { try { $la['AdminRows'] = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'Account-Definitions-Admins') } catch { } }
+        $b = Get-PimLicenseApiBody -MspRole $role -TenantId "$($global:PIM_TenantId)".Trim() -SqlServer $srv @la
         $b['canWrite'] = $canWrite
         # §95.2: the licence request client's state for the admin -- status + message only, NEVER the pull token.
         $lrState = $null; try { $lrState = Get-PimSetting -Name 'LicenceRequestState' } catch { $lrState = $null }
@@ -4930,11 +5000,21 @@ function Get-PimManagerMcpTools {
             $rest = @(@($cur.changes) | Where-Object { "$($_.key)" -ne $key })
             $m2 = Merge-PimSharedPendingChanges -Current @($cur.changes) -Submitted (@($rest) + @([pscustomobject]$new)) -By $who
             if (-not $m2.ok) { $doc['__result'] = @{ gate = 'locked'; locked = @($m2.locked) }; return $false }
+            # Framework §12.6: the same Pro Business cap as the page's staging route and the commit.
+            if ($base -eq 'Account-Definitions-Admins') {
+                $mStored = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $base)
+                $lc = Get-PimManagerAdminLicenceCheck -Before @(Get-PimManagerPendingAppliedRows -Base $base -Rows $mStored -Changes @($cur.changes)) -After @(Get-PimManagerPendingAppliedRows -Base $base -Rows $mStored -Changes @($m2.changes))
+                if ($lc.refused) { $doc['__result'] = @{ gate = 'licence-limit'; message = "$($lc.message)"; check = $lc }; return $false }
+            }
             $doc.bases[$base] = @{ version = [int]$cur.version + 1; changes = @($m2.changes) }
             $doc['__result'] = @{ gate = 'ok' }; return $true
         }
         if (-not $u.ok) { throw "$($u.reason)" }
         if ($u.result.gate -eq 'locked') { throw ("locked: another administrator has staged the same row -- " + ((@($u.result.locked) | ForEach-Object { "$($_.key) by $($_.by)" }) -join '; ')) }
+        if ($u.result.gate -eq 'licence-limit') {
+            try { Write-PimManagerAuditEvent -Action 'licence.limit.refused' -Target $base -Result 'denied' -After ([ordered]@{ via = 'mcp'; by = $who; cap = $u.result.check.cap; count = $u.result.check.count; added = @($u.result.check.added) }) } catch { }
+            throw "$($u.result.message)"
+        }
         Write-PimManagerAuditEvent -Action 'pending.stage' -Target $base -Result 'ok' -After ([ordered]@{ by = $who; via = 'mcp'; op = $op; key = $key })
         [ordered]@{ staged = $true; entity = $base; op = $op; key = $key; next = 'Commit it with commit_staged, or in the PIM Manager: Pending changes > Review & commit.' } }))
     $tools.Add((New-PimMcpTool -Name 'commit_staged' -Kind commit -MinRole Admin -Description 'COMMIT the changes YOU staged on one entity, through exactly the same commit as the Manager''s Review & commit: validation, the second-approver rule, Tier 0/1 approval, the offboarding hold and concurrency checks all apply, and a refusal says why. The engine then applies the committed rows; follow it with the commit id in the Manager''s commit watcher.' `
@@ -5133,6 +5213,50 @@ function Get-PimManagerCommitStatus {
                        note = $(if ($null -eq $j) { 'The change journal could not be read, so it is not known whether this commit was saved.' } else { 'No record of this commit: nothing of it was saved.' }) }
 }
 
+function Get-PimManagerPendingAppliedRows {
+    <#
+      PURE (given Get-PimSharedPendingRowKey). Framework §12.6: the rows -Rows would be once the staged -Changes (the shared
+      pending shape { key; op add|modify|remove; row }) were committed -- so the licence cap judges a STAGED set exactly as
+      it will judge the commit. A modify / remove drops the stored row of that key; an add / modify appends its row.
+    #>
+    param([Parameter(Mandatory)][string]$Base, [AllowNull()][object[]]$Rows, [AllowNull()][object[]]$Changes)
+    $drop = @{}
+    foreach ($c in @($Changes)) { if ($null -ne $c -and "$($c.op)" -in @('modify', 'remove')) { $drop["$($c.key)"] = $true } }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @($Rows)) { if ($null -eq $r) { continue }; if ($drop.Count -and $drop.ContainsKey("$(Get-PimSharedPendingRowKey -Base $Base -Row $r)")) { continue }; $out.Add($r) }
+    foreach ($c in @($Changes)) { if ($null -ne $c -and "$($c.op)" -in @('add', 'modify') -and $null -ne $c.row) { $out.Add([pscustomobject]$c.row) } }
+    return @($out.ToArray())
+}
+function Get-PimManagerAdminLicenceCheck {
+    <#
+      Framework §12.6 LICENCE-DIMENSION, PIM's server-side enforcement: Test-PimAdminLicenceLimit (engine/_shared/
+      PIM-License.ps1) against THIS environment's licence and tenant. A licence that cannot be read is NOT a refusal -- the
+      cap is a commercial warning, never a stop (the badge and Settings > Licence say what is wrong with the licence).
+    #>
+    param([AllowNull()][object[]]$Before, [AllowNull()][object[]]$After)
+    if (-not (Get-Command Test-PimAdminLicenceLimit -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ ok = $true; refused = $false; message = '' } }
+    try {
+        $lic = Get-PimLicense
+        return (Test-PimAdminLicenceLimit -License $lic -TenantId "$($global:PIM_TenantId)".Trim() -Before @($Before) -After @($After))
+    } catch { return [pscustomobject]@{ ok = $true; refused = $false; message = ''; error = "$($_.Exception.Message)" } }
+}
+function Invoke-PimManagerAdminLicenceGate {
+    <#
+      §12.6: the ONE refusal the commit, the staging route and the MCP stage tool share. Returns 0 when the change may go
+      on; otherwise writes 409 { gate = 'licence-limit'; error = <the plain sentence> } to -Response, audits it, returns 409.
+      Only Account-Definitions-Admins is ever judged; every other entity returns 0.
+    #>
+    param([Parameter(Mandatory)][string]$Base, [AllowNull()][object[]]$Before, [AllowNull()][object[]]$After, $Response, [string]$Via = 'gui', [switch]$NoResponse)
+    if ($Base -ne 'Account-Definitions-Admins') { return 0 }
+    $chk = Get-PimManagerAdminLicenceCheck -Before @($Before) -After @($After)
+    if (-not $chk.refused) { return 0 }
+    try { Write-PimManagerAuditEvent -Action 'licence.limit.refused' -Target $Base -Result 'denied' -After ([ordered]@{ via = $Via; cap = $chk.cap; count = $chk.count; added = @($chk.added) }) } catch { }
+    if (-not $NoResponse -and $Response) {
+        Write-JsonResponse -Response $Response -Status 409 -Body ([ordered]@{ ok = $false; base = $Base; gate = 'licence-limit'; error = "$($chk.message)"
+            cap = $chk.cap; count = $chk.count; added = @($chk.added); dimension = "$($chk.dimension)" })
+    }
+    return 409
+}
 function Invoke-PimManagerCsvPut {
     <#
       PUT /api/csv/<base> -- the COMMIT of one entity (moved here from the route unchanged, REQ 93): the role and delegation
@@ -5356,6 +5480,10 @@ function Invoke-PimManagerCsvPut {
             return 403
         }
     }
+    # Framework §12.6 LICENCE-DIMENSION: a Pro Business licence covers N managed admin accounts. A commit that brings in a
+    # NEW one beyond N is refused whole (nothing saved); edits, disables and removals of existing admins always pass.
+    $__licGate = Invoke-PimManagerAdminLicenceGate -Base $base -Before @($current.rows) -After @($rowsOrdered) -Response $resp -Via $commitSource
+    if ($__licGate) { return $__licGate }
     # 🔴 BUG-190 (adjacent path, operator decision 2026-09-18 for /modify, applied here as the SAME rule): an
     # admin row that would DISABLE the account on the next engine run -- AccountStatus Disabled/Revoked,
     # Lifecycle Retire, an AutoDisableDate/OffboardDate at or before now -- is an OFFBOARD. Review & Save wrote
@@ -9630,12 +9758,22 @@ function Handle-Request {
             $sub = @(); if ($pBody -and $pBody.changes) { $sub = @($pBody.changes) }
             $baseVer = -1; if ($pBody -and $null -ne $pBody.baseVersion -and "$($pBody.baseVersion)" -match '^\d+$') { $baseVer = [int]$pBody.baseVersion }
             $who = "$((Get-PimManagerRole).identity)"
+            # §12.6: the stored admin rows, so the licence cap can judge the staged set as it will judge the commit.
+            $pStored = $null
+            if ($pBase -eq 'Account-Definitions-Admins') { try { $pStored = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $pBase) } catch { $pStored = $null } }
             $u = Update-PimSharedPendingStore -ConnectionString $script:PimSqlCs -Mutate {
                 param($doc)
                 $cur = if ($doc.bases.ContainsKey($pBase)) { $doc.bases[$pBase] } else { @{ version = 0; changes = @() } }
                 if ($baseVer -ge 0 -and $baseVer -ne [int]$cur.version) { $doc['__result'] = @{ gate = 'stale'; current = $cur }; return $false }
                 $m = Merge-PimSharedPendingChanges -Current @($cur.changes) -Submitted $sub -By $who
                 if (-not $m.ok) { $doc['__result'] = @{ gate = 'locked'; locked = @($m.locked); current = $cur }; return $false }
+                # Framework §12.6: staging a NEW managed admin account beyond the Pro Business cap is refused here too (the
+                # commit refuses it anyway; refusing at staging says so before anyone reviews it). Judged on the WHOLE staged
+                # set: stored rows + what was staged before (before) vs + what is staged now (after).
+                if ($null -ne $pStored) {
+                    $lc = Get-PimManagerAdminLicenceCheck -Before @(Get-PimManagerPendingAppliedRows -Base $pBase -Rows @($pStored) -Changes @($cur.changes)) -After @(Get-PimManagerPendingAppliedRows -Base $pBase -Rows @($pStored) -Changes @($m.changes))
+                    if ($lc.refused) { $doc['__result'] = @{ gate = 'licence-limit'; check = $lc; current = $cur }; return $false }
+                }
                 # 🔴 R25-16: a DELEGATED caller may stage -- and so lock -- only rows they own. Staging used to accept any
                 # entity and key from them, which let anyone who may stage hold any row locked with no way for others to clear it.
                 if ($pDeleg -and $pDeleg.isDelegated) {
@@ -9655,6 +9793,13 @@ function Handle-Request {
             if ($r.gate -eq 'stale') {
                 Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ ok = $false; gate = 'stale'; base = $pBase; current = $curOut
                     error = "Someone else staged or committed a change to $pBase since this page last looked. Nothing was written; the page re-reads and re-applies your edits." })
+                return 409
+            }
+            if ($r.gate -eq 'licence-limit') {
+                $lc = $r.check
+                Write-PimManagerAuditEvent -Action 'licence.limit.refused' -Target $pBase -Result 'denied' -After ([ordered]@{ via = 'stage'; by = $who; cap = $lc.cap; count = $lc.count; added = @($lc.added) })
+                Write-JsonResponse -Response $resp -Status 409 -Body ([ordered]@{ ok = $false; gate = 'licence-limit'; base = $pBase; current = $curOut
+                    error = "$($lc.message)"; cap = $lc.cap; count = $lc.count; added = @($lc.added); dimension = "$($lc.dimension)" })
                 return 409
             }
             if ($r.gate -eq 'not-yours') {
@@ -12455,7 +12600,7 @@ function Handle-Request {
         #                                                   the result is recorded against these settings (MailLastTest)
         if ($path -eq '/api/settings/mail' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
-            try { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerMailState); return 200 }
+            try { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerMailState -RefreshChecks:("$($req.Url.Query)" -match "(?:^|[?&])refresh=1")); return 200 }
             catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }; return 500 }
         }
         if ($path -eq '/api/settings/mail' -and $method -eq 'PUT') {
@@ -12490,6 +12635,7 @@ function Handle-Request {
                 if ($relay -and $mb.PSObject.Properties['smtp'] -and $null -ne $mb.smtp) { Set-PimManagerSetting -Name 'SmtpRelay' -Value $relay.config; $global:PIM_SmtpRelay = $relay.config }
                 if ($wantSender) { Set-PimManagerSetting -Name 'MailSender' -Value $wantSender; $global:PIM_MailSender = $wantSender }
                 Set-PimManagerSetting -Name 'MailMode' -Value $wantMode; $global:PIM_MailMode = $wantMode
+                $script:PimMailCheckCache = $null   # MAIL CHECK: changed settings are checked again
                 $after = Get-PimManagerMailState
                 Write-PimManagerAuditEvent -Action 'settings.mail.save' -Target 'MailMode,MailSender,SmtpRelay' -Result 'ok' -Before $before `
                     -After ([ordered]@{ mode = $after.mode; sender = $after.sender; smtp = $after.smtp; passwordToKeyVault = $(if ($pwRes) { [bool]$pwRes.ok } else { $null }) })
@@ -13680,6 +13826,8 @@ function Handle-Request {
                 azureRoot  = $health.azureRoot
                 azureNotVisible = [ordered]@{ count = @($azNotVisible).Count; amber = [bool]$azNotVisibleAmber }
                 mail       = $health.mail
+                # MAIL CHECK: every mail prerequisite as its own line (amber, never red -- mail is optional); Verify permissions re-reads it
+                mailChecks = $(try { Get-PimManagerMailChecks -Refresh:$permRefresh } catch { $null })
                 identities = @($identities)
                 connectors = @(Get-PimWorkloadConnectorRequirements | ForEach-Object { [ordered]@{ connector="$($_.connector)"; surface="$($_.surface)"; model="$($_.model)"; tier="$($_.tier)"; grant="$($_.grant)" } })
                 checkedUtc = (Get-Date).ToUniversalTime().ToString('o')

@@ -165,7 +165,13 @@ param(
     # role is now granted THROUGH PIM as a time-bound assignment that expires on its own -- it used to be
     # a permanent assignment outside PIM, which the SPN could not remove again (Graph refuses a self-
     # removal) and which the tenant's alerting flagged. ISO 8601, PT15M..PT24H.
-    [string]$ExchangeAdminDuration = 'PT4H'
+    [string]$ExchangeAdminDuration = 'PT4H',
+    # INSTALL-HARDEN-1 item 4: how long to wait for a just-hydrated Exchange organization that still refuses RBAC creates
+    # ("you must be assigned a delegating role assignment"; measured ~40-60 min), and how often to try again.
+    [ValidateRange(1, 240)][int]$ExchangeReadyMinutes = 75,
+    [ValidateRange(10, 900)][int]$ExchangeReadyIntervalSeconds = 150,
+    # one plain progress line per wait (the deploy forwards it to the install's reporter as a 'waiting' event)
+    [scriptblock]$OnProgress
 )
 
 $ErrorActionPreference = 'Stop'
@@ -185,6 +191,16 @@ $authPlan = Resolve-PimMailSetupAuthMode -AdminAppId $AdminAppId -AdminSecret $A
 if ($authPlan.reason) { throw "Initialize-PimMailSender: $($authPlan.reason)" }
 $script:PimMailAuthMode = $authPlan.mode
 $browserMode = ($script:PimMailAuthMode -eq 'browser')
+# INSTALL-HARDEN-1 (owner 2026-10-08; the trial runs in the customer's Cloud Shell as a PERSON): -UseSignedInAccount with no
+# -AdminAppId is the signed-in PERSON's delegated az token -- like the browser sign-in, that person's own Exchange
+# Administrator / Global Administrator role does the work and no app is granted anything.
+$personSignedIn = ($script:PimMailAuthMode -eq 'signedIn' -and -not "$AdminAppId".Trim())
+$delegatedMode = ($browserMode -or $personSignedIn)
+function Get-PimMailSignedInUpn {
+    if ($browserMode) { return (Get-PimMsSignedInUpn) }
+    if ($personSignedIn) { try { return "$(az account show --query user.name -o tsv 2>$null)".Trim() } catch { return '' } }
+    return ''
+}
 if ($browserMode -and -not (Test-PimMsInteractiveHost)) {
     throw 'Initialize-PimMailSender: no credential was passed, so this run signs in in the BROWSER -- and this session is not interactive. Run it in a PowerShell window, or pass -AdminAppId + -AdminSecret (the Invardia Support app).'
 }
@@ -354,6 +370,7 @@ function GrAll {
     return $items
 }
 if ($browserMode) { Note "signed in as $(Get-PimMsSignedInUpn) (browser sign-in; no app identity is used or granted anything)" 'DarkGray' }
+elseif ($personSignedIn) { Note "signed in as $(Get-PimMailSignedInUpn) (a person's signed-in az session; no app identity is used or granted anything)" 'DarkGray' }
 else { Note "onboarding SPN: $AdminAppId" 'DarkGray' }
 
 # 🔴 THE ONBOARDING SPN CANNOT GRANT ITSELF. The header says this script's identity "already
@@ -540,9 +557,9 @@ $manageAsAppState = ''; $exchAdminState = $null
 # Global Administrator role (a delegated token), so the transient app grants below -- Exchange.ManageAsApp, the
 # time-boxed Exchange Administrator through PIM -- have no subject and are skipped as a whole. An admin without an
 # Exchange role is refused by Exchange itself at the readiness wait below, with Exchange's own message.
-if ($browserMode) {
+if ($delegatedMode) {
     Step 'Exchange administration: the signed-in administrator''s own role (nothing is granted)'
-    Note "Exchange is administered as $(Get-PimMsSignedInUpn) -- an Exchange Administrator or Global Administrator role is needed" 'DarkGray'
+    Note "Exchange is administered as $(Get-PimMailSignedInUpn) -- an Exchange Administrator or Global Administrator role is needed" 'DarkGray'
 } else {
 Step 'enable Exchange administration for the onboarding SPN (transient, provisioning-time)'
 $adminSp =(Gr -Path "servicePrincipals?`$filter=appId eq '$AdminAppId'").value | Select-Object -First 1
@@ -680,7 +697,8 @@ $initialDomain = "$(@(@($org.verifiedDomains) | Where-Object { $_.isInitial } | 
 # A delegated (browser) token anchors on the signed-in person, an app-only one on the system mailbox -- as the EXO V3
 # module does (Get-PimMsExoAnchor). The Exchange token is minted first so the person's UPN is known.
 if ($browserMode) { try { [void](Get-PimMailAdminToken -Resource 'https://outlook.office365.com') } catch { Fail "could not sign in to Exchange Online: $($_.Exception.Message)" } }
-$anchor = Get-PimMsExoAnchor -Mode $script:PimMailAuthMode -Upn (Get-PimMsSignedInUpn) -InitialDomain $initialDomain
+$anchor = if ($personSignedIn) { Get-PimMsExoAnchor -Mode 'browser' -Upn (Get-PimMailSignedInUpn) -InitialDomain $initialDomain }
+          else { Get-PimMsExoAnchor -Mode $script:PimMailAuthMode -Upn (Get-PimMsSignedInUpn) -InitialDomain $initialDomain }
 function Invoke-Exo {
     param([Parameter(Mandatory)][string]$Cmdlet, [hashtable]$Parameters = @{})
     $tok = Get-PimMailAdminToken -Resource 'https://outlook.office365.com'
@@ -847,6 +865,7 @@ function Invoke-ExoWhenHydrated {
     param([Parameter(Mandatory)][string]$Cmdlet, [hashtable]$Parameters = @{}, [int]$Seconds = 3600, [string]$What = 'object',
           [int]$MaterialiseSeconds = 600)
     $stop = (Get-Date).AddSeconds($Seconds); $matStop = (Get-Date).AddSeconds($MaterialiseSeconds); $n = 0
+    $notReadyStart = $null; $notReadyN = 0
     while ($true) {
         $n++
         try { return @{ ok = $true; existed = $false; value = (Invoke-Exo -Cmdlet $Cmdlet -Parameters $Parameters) } }
@@ -860,6 +879,17 @@ function Invoke-ExoWhenHydrated {
                     if ((Get-Date) -ge $stop) { return @{ ok = $false; error = 'organization still dehydrated'; detail = $raw } }
                     if ($n -eq 1 -or ($n % 5) -eq 0) { Note "waiting for organization customization to take effect ($What, attempt $n)" 'DarkGray' }
                     Start-Sleep -Seconds 60
+                }
+                'notready' {
+                    # INSTALL-HARDEN-1 item 4: a just-hydrated organization refuses RBAC creates ("delegating role
+                    # assignment") for ~40-60 min. Bounded (-ExchangeReadyMinutes, default 75), a plain line every attempt.
+                    if (-not $notReadyStart) { $notReadyStart = Get-Date }
+                    $notReadyN++
+                    $w = Get-PimExoNotReadyWait -Attempt $notReadyN -ElapsedSeconds ((Get-Date) - $notReadyStart).TotalSeconds -BoundSeconds ($ExchangeReadyMinutes * 60) -IntervalSeconds $ExchangeReadyIntervalSeconds -What $What
+                    if (-not $w.wait) { return @{ ok = $false; error = $w.message; detail = $raw } }
+                    Note $w.message 'DarkYellow'
+                    if ($OnProgress) { try { & $OnProgress $w.message | Out-Null } catch { } }
+                    Start-Sleep -Seconds $w.sleepSeconds
                 }
                 'retry' {
                     if ((Get-Date) -ge $matStop) { return @{ ok = $false; error = "Exchange never made the new service principal usable within ${MaterialiseSeconds}s"; detail = $raw } }
@@ -1078,10 +1108,10 @@ Write-Host ""
 # IMP-31 -- SAY WHAT PRIVILEGE IS LEFT BEHIND, AND UNTIL WHEN. The old run granted the provisioning
 # identity tenant-wide Exchange administration and never mentioned it again; the tenant's own alerting
 # was how anyone found out.
-if ($browserMode) {
-    # Nothing was granted to any identity in a browser run -- the administrator used their own role, which they keep.
-    $result.privilegedGrants = [ordered]@{ identity = (Get-PimMsSignedInUpn); exchangeAdministrator = $null; exchangeManageAsApp = 'not used (browser sign-in)' }
-    Write-Host "  PRIVILEGED GRANTS: none -- the administrator $(Get-PimMsSignedInUpn) used their own role; no app was granted anything." -ForegroundColor Green
+if ($delegatedMode) {
+    # Nothing was granted to any identity in a browser / signed-in person run -- the administrator used their own role, which they keep.
+    $result.privilegedGrants = [ordered]@{ identity = (Get-PimMailSignedInUpn); exchangeAdministrator = $null; exchangeManageAsApp = 'not used (delegated sign-in)' }
+    Write-Host "  PRIVILEGED GRANTS: none -- the administrator $(Get-PimMailSignedInUpn) used their own role; no app was granted anything." -ForegroundColor Green
     Write-Host ""
 } else {
 try { $exchAdminNow = Read-ExchAdminGrant } catch { $exchAdminNow = $exchAdminState }

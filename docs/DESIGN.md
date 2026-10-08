@@ -59,6 +59,7 @@ the alternative was found to fail in practice.
 27. [Identity, credentials and self-healing](#27-identity-credentials-and-self-healing)
 28. [Change control, ownership and daily checks (2026-09)](#28-change-control-ownership-and-daily-checks-2026-09)
 29. [Talking to Invardia: the licence request and status telemetry](#29-talking-to-invardia-the-licence-request-and-status-telemetry)
+30. [Finishing an install: the end-of-install check, alert recipients and install tracking](#30-finishing-an-install-the-end-of-install-check-alert-recipients-and-install-tracking)
 
 ---
 
@@ -8652,6 +8653,32 @@ A Community copy without those folders still loads the engine, the scheduler and
 queued Pro action there ends as "part of the Pro edition, not installed" instead of failing. The
 offline payload gate builds exactly that copy on every test run.
 
+#### 19a.3 Pro Business and Pro Enterprise (licence dimension, 2026-10-08 -- built, not yet released)
+
+Pro comes in two dimensions with the same features. **Pro Enterprise** has no limits. **Pro Business**
+covers a stated number of **managed admin accounts**. The dimension is decided by the signed licence
+alone: a Business licence carries a `limits` object (`{ "admins": N }`) inside its signed payload; an
+Enterprise licence carries none, so every licence issued before this change reads as Enterprise and
+nothing about it changes. A `limits` value outside the signed payload is ignored, and a payload changed
+after signing does not verify at all. Community and the MSP (managing / managed tenant) licences are
+unchanged.
+
+- **What counts.** Each admin account the product manages, once (by sign-in name), unless its status is
+  Disabled, Removed, Deleted or Revoked. Groups, service principals and the people in the Manager's own
+  roles do not count.
+- **A warning, never a stop.** From 90% of the limit, Home and Admin accounts show a notice; at the
+  limit it is amber, above it red. Only a **new** managed admin account that would take the total above
+  the limit is refused -- by the server, when the change is staged and again when it is committed (the
+  page and the assistant tools use the same check) -- with one sentence: *"Your Pro Business licence
+  covers N admin accounts -- upgrade to Pro Enterprise, or remove one."* Editing, disabling, removing or
+  re-enabling an existing admin is never refused, nothing already running is switched off, and the
+  engine itself never reads the limit.
+- **Where it shows.** The header keeps the PRO logo and adds the dimension ("Pro Business (5 admins)" /
+  "Pro Enterprise"); Settings > Licence has a Licence row and, for Business, the admin usage; the Get
+  Started licence step shows it beside the status; `GET /api/license` returns `dimension`,
+  `dimensionText`, `limits` and `usage.admins` (`cap`, `count`, `percent`, `state` = none / ok / warn /
+  at / over, `message`). The status telemetry does not carry the dimension yet.
+
 ---
 
 ## 20. Launcher flavors
@@ -9350,3 +9377,87 @@ with the pull. PIM also keeps HOW: build in its own registry, schema, roll, heal
 - **Rollback.** Invardia rolls back by releasing a higher sequence that names an older version. Such a signed rollback
   may move an environment down. A first pull, with no applied sequence yet, may not.
 - **Applied sequence.** After a good roll the job records the applied sequence on itself.
+
+## 30. Finishing an install: the end-of-install check, alert recipients and install tracking
+*(Built 2026-10-08, not yet released.)* An install is finished only when what it should leave behind is really there. Each
+of these was seen missing after an install that reported success: no SuperAdmin after an install that was interrupted and
+resumed, no update job, no alert recipients, and a send right for only one of the two identities that send mail.
+
+### 30.1 The end-of-install check
+Every install path ends with the same check: the one-shot deploy (step `verify-install`), the managing and managed tenant
+build (step `verify-install`, before the build closes its SQL window), and the guided / trial install (step
+`verify-install`, after the licence and the support access). It reads every result back, repairs what it can, prints ONE
+table and does not call the install done while a required line fails.
+
+| Line | Required | Repaired by the check |
+|---|---|---|
+| SuperAdmins in the PIM Manager store | yes | yes (Manager access is written again) |
+| Updater job + update ring (+ the update-state record) | yes (not for a Community install without a release feed) | yes (the update job is installed again, on the image that runs) |
+| Licence registered + install key stored or queued | Pro, trial and MSP | no (the licence page, or the resume) |
+| Mail sender set + EVERY sending identity in scope (Exchange `Test-ServicePrincipalAuthorization`) | no -- mail is optional: every incomplete case is a warning (Get Started > Mail sender shows each prerequisite, see 30.7) | no (the published mail-sender script, or Get Started > Mail sender) |
+| Alert recipients | yes | yes |
+| Engine Microsoft Graph permissions | yes | no (the published permissions script) |
+| Engine Reader at the tenant root | no -- a warning with the exact command for a Global Administrator | one grant attempt |
+| Engine first run | no (a follow-up) | no |
+| Sign-in: Easy Auth on, every SuperAdmin allowed | yes | no |
+| SQL setup-host firewall rule removed | yes | yes, when this run opened it |
+| Managed tenant: registered, pull subnet allowed, first pull | a warning with the exact step when the managing tenant cannot be read from the managed tenant | no |
+
+A failed line carries its fix: a published script with a browser sign-in, a PIM Manager page, or the command that re-runs
+the check (the install's own resume). Never a certificate. A failed check fails the deploy but never rolls the code back:
+the code is healthy, the install is not finished.
+
+### 30.2 Alert recipients
+The install sets who gets the alerts when nobody has: the addresses it was given (`alertRecipients`; a trial: the address
+of the person who requested it), otherwise the SuperAdmins' mailboxes (an account without a mailbox is skipped). A list
+that is already set is never overwritten. The value has the shape the PIM Manager's Alerting page writes, and everything
+else on that page (the report lists, the event switches, the webhook) is kept.
+
+### 30.3 Exchange that is still preparing a new organization
+Right after a new Exchange organization is prepared, Exchange can refuse the scoped send right with "you must be assigned
+a delegating role assignment" for up to an hour, and then accept the same request. The mail-sender setup waits for it (up
+to 75 minutes, a progress line every attempt, shown in the install's progress as waiting) and then stops with one
+sentence: Exchange has not finished preparing the new organization -- re-run in an hour.
+
+### 30.4 A person installing in Cloud Shell
+The trial install runs as the person who requested it. When that person holds an active Exchange Administrator or Global
+Administrator role, the install creates the notification mailbox and both send rights with that person's own role; no
+application is granted anything. Without such a role the install completes, and the end-of-install check ends with the
+Get Started > Mail sender follow-up.
+
+### 30.5 The image a resumed build uses
+A managing / managed tenant build that is resumed (`-From`) deploys the image the PIM Manager runs, not the version of the
+working copy it is started from (which may have moved on). `-ImageTag` or the build configuration's `imageTag` decide it
+explicitly; a new build builds its own version.
+
+### 30.6 Install tracking (Support-app installs)
+A build or deploy run with the Invardia Support app can report each step to Invardia, so the installation appears on
+Invardia's Installations page while it runs. The runner receives an install-tracking token (opened by Invardia for that
+installation) and posts one event per step state: a sequence number, the step, the state (started, ok, warning, failed,
+skipped, waiting, completed), the time, the duration and one plain message line; at the end a `done` event, or the failed
+step stays the last event. Reporting is best effort: a report that fails is warned about once and then stops, and never
+fails or slows the install. Messages are scrubbed of anything credential-shaped, and the token travels only as a request
+header. The guided install does not post itself: Invardia's bootstrap reports its steps.
+
+### 30.7 The mail check: exactly what mail needs, line by line
+Mail is optional: an install never fails on it, the Home banner shows it in amber at most, and the Get Started step
+Mail sender can be skipped for now (Admins are then reminded once per session until it is complete). What mail needs is
+checked one prerequisite at a time, and the same lines appear in Get Started > Mail sender and in the Home permissions
+banner; "Verify permissions" and "Check again" check again at once.
+
+| Mode | Line | Proven by |
+|---|---|---|
+| both | a mail mode is chosen | the stored mode (shared mailbox is the default) |
+| shared mailbox | the sender mailbox exists | Microsoft Graph resolving the address PIM sends as |
+| shared mailbox | the engine job's scoped send right | the engine job's own last real send ("not proven yet" until it has sent) |
+| shared mailbox | the PIM Manager's scoped send right | the Manager's own last real send -- Send a test mail proves it |
+| shared mailbox | no tenant-wide Graph Mail.Send on either identity | their Microsoft Graph application permissions |
+| SMTP relay | server, port, From address and user set | the stored relay settings |
+| SMTP relay | the password in Key Vault, readable by the sender | the PIM Manager reading the secret (the value is discarded) |
+| SMTP relay | a test mail through these settings | the latest test mail, for exactly these settings |
+| both | alert recipients | the Alerting settings |
+
+Each sending identity records the result of its own last real send, so a send right is never assumed to work. A line
+that is not complete shows its fix: the published setup script with this environment's values (an Exchange or Global
+Administrator signs in in the browser; it creates or scopes the mailbox, gives both identities their send right and
+removes a tenant-wide permission), the SMTP password script, or the PIM Manager page. Never a certificate.

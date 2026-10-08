@@ -245,6 +245,42 @@ function Get-PimMailEnvironmentInfo {
     return $i
 }
 
+function Save-PimMailSendProof {
+    <#
+      MAIL CHECK (owner 2026-10-08: "test exactly what is needed"): record THIS identity's last REAL send result, so Get
+      Started > Mail sender and the Home banner can say per sending identity "proven" / "failed" / "not proven yet" instead
+      of guessing that its scoped send right works. pim.Settings 'MailSendProof' = { engine: {...}; manager: {...} }, each
+      @{ ok; at; reason; mode; sender }. The role is the Manager when this process is the Manager (Set-PimManagerSetting is
+      loaded), else the engine; $global:PIM_MailProofRole overrides. Written at most every 15 minutes per process unless the
+      result or the settings change. NEVER throws: a proof that cannot be written must not fail the mail.
+      TEST seam: $global:PIM_MailProofWriter = param($Role, $Record).
+    #>
+    param([bool]$Ok, [string]$Reason = '', [string]$Mode = '', [string]$Sender = '')
+    try {
+        $role = if ("$($global:PIM_MailProofRole)".Trim()) { "$($global:PIM_MailProofRole)".Trim() } elseif (Get-Command Set-PimManagerSetting -ErrorAction SilentlyContinue) { 'manager' } else { 'engine' }
+        $one = "$Reason" -replace "[\r\n]+", ' '; if ($one.Length -gt 300) { $one = $one.Substring(0, 300) }
+        $rec = [ordered]@{ ok = $Ok; at = (Get-Date).ToUniversalTime().ToString('o'); reason = $one; mode = "$Mode"; sender = "$Sender".Trim() }
+        $key = "$role|$Ok|$Mode|$("$Sender".Trim().ToLowerInvariant())"
+        if ($script:PimMailProofLast -and $script:PimMailProofLast.key -eq $key -and ((Get-Date) - $script:PimMailProofLast.at).TotalMinutes -lt 15) { return }
+        $script:PimMailProofLast = @{ key = $key; at = (Get-Date) }
+        if ($global:PIM_MailProofWriter -is [scriptblock]) { & $global:PIM_MailProofWriter $role $rec | Out-Null; return }
+        $merge = { param($cur) $o = [ordered]@{}; if ($cur) { foreach ($p in @($cur.PSObject.Properties)) { if ($p.Name -in 'engine', 'manager') { $o[$p.Name] = $p.Value } } }; $o[$role] = $rec; $o }
+        if (Get-Command Set-PimManagerSetting -ErrorAction SilentlyContinue) {
+            $cur = $null; try { $cur = Get-PimManagerSetting -Name 'MailSendProof' } catch { }
+            if ($cur -is [string]) { try { $cur = $cur | ConvertFrom-Json } catch { $cur = $null } }
+            Set-PimManagerSetting -Name 'MailSendProof' -Value (& $merge $cur)
+            return
+        }
+        if ((Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) -and (Get-Command Set-PimSqlSetting -ErrorAction SilentlyContinue)) {
+            $cs = Get-PimSqlSettingsConnectionString
+            if (-not $cs) { return }
+            $cur = $null; try { $cur = Get-PimSqlSetting -ConnectionString $cs -Name 'MailSendProof' } catch { }
+            if ($cur -is [string]) { try { $cur = $cur | ConvertFrom-Json } catch { $cur = $null } }
+            Set-PimSqlSetting -ConnectionString $cs -Name 'MailSendProof' -Value (& $merge $cur)
+        }
+    } catch { Write-Verbose "  [Mail] the send proof could not be recorded: $($_.Exception.Message)" }
+}
+
 function Send-PimNotifyMail {
     # Render type+tokens and send via Graph sendMail. Returns @{ sent; recipient; subject;
     # rendered; reason }. No send (returns rendered only) when -WhatIf / $global:WhatIfMode,
@@ -345,6 +381,7 @@ function Send-PimNotifyMail {
         if (-not $rcptList.Count) { $rcptList = @($rcpt) }
         $sm = Send-PimSmtpMail -Config $relay.config -Recipients $rcptList -Subject $r.Subject -BodyHtml $r.BodyHtml -BodyText $r.BodyText -Attachments $Attachments
         if (-not $sm.sent) { Write-Warning "  [Mail] send failed ($Type -> $rcpt) via SMTP relay: $($sm.reason)" }
+        Save-PimMailSendProof -Ok ([bool]$sm.sent) -Reason "$($sm.reason)" -Mode 'smtp' -Sender "$($relay.config.from)"
         return @{ sent = [bool]$sm.sent; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = "$($sm.reason)"; sentAs = 'smtp' }
     }
     if (-not $sender) { Write-Warning "  [Mail] `$global:PIM_MailSender not set -- rendered only, not sent."; return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = 'no sender' } }
@@ -361,7 +398,11 @@ function Send-PimNotifyMail {
     # parameter list, and an unconditional -UseManagedIdentity would break every one of them.
     $graphArgs = @{ Method = 'POST'; Path = "/users/$sender/sendMail"; Body = $body }
     if ($sendAs.kind -eq 'managed-identity') { $graphArgs['UseManagedIdentity'] = $true }
-    try { Invoke-PimGraph @graphArgs | Out-Null; return @{ sent = $true; recipient = $rcpt; subject = $r.Subject; rendered = $r; sentAs = $sendAs.kind } }
+    try {
+        Invoke-PimGraph @graphArgs | Out-Null
+        Save-PimMailSendProof -Ok $true -Mode 'sharedMailbox' -Sender $sender
+        return @{ sent = $true; recipient = $rcpt; subject = $r.Subject; rendered = $r; sentAs = $sendAs.kind }
+    }
     catch {
         $em = "$($_.Exception.Message) $($_.ErrorDetails.Message)".Trim()
         $obs = ''
@@ -373,6 +414,7 @@ function Send-PimNotifyMail {
         $denied = Get-PimMailSendDenialMessage -Identity $sendAs -Sender $sender -ErrorText $em -ObservedAppId $obs
         $why = if ($denied) { $denied } else { $em }
         Write-Warning "  [Mail] send failed ($Type -> $rcpt) as $($sendAs.label): $why"
+        Save-PimMailSendProof -Ok $false -Reason "$why" -Mode 'sharedMailbox' -Sender $sender
         return @{ sent = $false; recipient = $rcpt; subject = $r.Subject; rendered = $r; reason = $why; sentAs = $sendAs.kind }
     }
 }

@@ -463,7 +463,22 @@ param(
     [scriptblock]$StepRunner,
 
     # --- guided install (§95.2): a per-step event callback, see .PARAMETER OnStep ---
-    [scriptblock]$OnStep
+    [scriptblock]$OnStep,
+
+    # --- INSTALL-HARDEN-1 (PIM REQUIREMENTS §99, owner 2026-10-08) ---
+    # Who gets the alerts ('alerting' step): these addresses, else the -ManagerSuperAdmins' mailboxes. A non-empty stored
+    # list is never overwritten.
+    [string[]]$AlertRecipients = @(),
+    # The END-OF-INSTALL VERIFY ('verify-install', the last step) is skipped only by a caller that runs its own (the MSP
+    # build and the guided install do, after the steps they add -- the licence, the support access, the managing tenant).
+    [switch]$SkipInstallVerify,
+    # The licence line of the verify is REQUIRED (Pro / trial / MSP). Default: required when the updates come from Invardia.
+    [switch]$LicenceExpected,
+    # Support-app install tracking (§99 "Support-app installs report their steps to Invardia"): each step is posted to
+    # Invardia with this token (or $env:INVARDIA_INSTALL_TOKEN). Best effort -- a failed post never fails the deploy.
+    [string]$InvardiaInstallToken = '',
+    [string]$InvardiaInstallEventsUrl = 'https://invardia.com/api/install/events',
+    [scriptblock]$InvardiaInstallHttp
 )
 $ErrorActionPreference = 'Stop'
 
@@ -497,6 +512,11 @@ if ("$EnvLabel".Trim()) {
 }
 # The deploy profile (Update-PimCommunity.ps1) is taken from the same script-scope $PSBoundParameters, for the same reason.
 $script:PimDeployBound = @{} + $PSBoundParameters
+# §99 install tracking: an UNPASSED token comes from the session ($env:INVARDIA_INSTALL_TOKEN, set by the Support-app runner);
+# an explicitly EMPTY one (the guided install -- Invardia's bootstrap posts itself -- and the MSP build's hosting step, whose
+# own loop posts) stays empty, so no step is ever posted twice.
+if (-not $PSBoundParameters.ContainsKey('InvardiaInstallToken')) { $InvardiaInstallToken = "$($env:INVARDIA_INSTALL_TOKEN)".Trim() }
+$script:PimMailDeferredReason = ''
 
 # An array cannot cross `pwsh -File` (the S1 driver and the MSP build call this script that way), so
 # callers pass one comma-separated string -- which binds as ONE element. Split it here, once.
@@ -1290,6 +1310,10 @@ if (-not $ValidateOnly) {
 # deploy rather than to skip on an inference. Both honour -WhatIf through the same gate.
 $facts['mailsender'] = $true
 $facts['features']   = $true
+# INSTALL-HARDEN-1: the alert recipients are re-asserted every deploy (never overwritten when set); the end-of-install verify
+# runs unless a caller that runs its own asked to skip it.
+$facts['alerting']       = $true
+$facts['verify-install'] = (-not $SkipInstallVerify)
 # verify is always NEEDED (always prove a deploy) unless explicitly skipped.
 $facts['verify'] = (-not $SkipVerify)
 
@@ -1875,17 +1899,42 @@ function Invoke-DefaultStepRunner {
                     $mailAcct = $null
                     try { $mailAcct = ((az account show @azSubArgs -o json 2>$null) | Out-String | ConvertFrom-Json) } catch { $mailAcct = $null }
                     if (-not (Get-Command Resolve-PimDeployMailSignedIn -ErrorAction SilentlyContinue)) { . (Join-Path $here '_PimMailSenderPlan.ps1') }
+                    # INSTALL-HARDEN-1 (the trial: a PERSON in Cloud Shell): does the person hold an ACTIVE Exchange / Global
+                    # Administrator role, and does az mint them an Exchange Online token? Then their own role creates the
+                    # mailbox (no app is granted anything). Read from the token's 'wids' claim, else their directory roles.
+                    $personRoles = @(); $personExo = $false
+                    if ("$($mailAcct.user.type)" -ieq 'user') {
+                        $exoTok = "$(az account get-access-token @azSubArgs --resource https://outlook.office365.com --query accessToken -o tsv 2>$null)".Trim()
+                        $global:LASTEXITCODE = 0
+                        $personExo = [bool]$exoTok
+                        if ($exoTok) {
+                            try { $seg = $exoTok.Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($seg.Length % 4) { $seg += '=' }
+                                  $personRoles = @((([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($seg))) | ConvertFrom-Json).wids) } catch { $personRoles = @() }
+                        }
+                        if (-not @($personRoles | Where-Object { $_ }).Count) {
+                            try { $personRoles = @(@((Invoke-PimTenantGraphGet -Path '/me/transitiveMemberOf/microsoft.graph.directoryRole?$select=roleTemplateId').value) | ForEach-Object { "$($_.roleTemplateId)" }) } catch { $personRoles = @() }
+                        }
+                    }
                     $mailPlan = Resolve-PimDeployMailSignedIn -Account $mailAcct -TenantId $TenantId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup `
-                                    -TickJobName $(if ($WorkerMode -eq 'cron') { $TickJobName } else { '' }) -ManagerAppName $ManagerApp -SqlServerFqdn $SqlServerFqdn
+                                    -TickJobName $(if ($WorkerMode -eq 'cron') { $TickJobName } else { '' }) -ManagerAppName $ManagerApp -SqlServerFqdn $SqlServerFqdn `
+                                    -PersonRoleTemplateIds $personRoles -PersonExoToken $personExo
                     if (-not $mailPlan.run) {
                         foreach ($l in @($mailPlan.lines)) { Warn $l }
+                        $script:PimMailDeferredReason = "$($mailPlan.why)"
                         return @{ ok=$true; ran=$false; detail="DEGRADED: mail sender not run ($($mailPlan.why)) -- environment is mail-mute until it is set up from PIM Manager > Get Started > Mail sender" }
                     }
                     $mailSignedInApp = "$($mailPlan.appId)"
                     $mailArgs['UseSignedInAccount'] = $true
-                    $mailArgs['AdminAppId'] = $mailSignedInApp
-                    Write-Host "    mail: the signed-in deploy runs as the application $mailSignedInApp -- it creates the sender mailbox + the scoped send right now" -ForegroundColor DarkGray
+                    if ($mailPlan.person) {
+                        $mailSignedInApp = '(signed-in person)'
+                        Write-Host "    mail: the signed-in person $($mailAcct.user.name) holds an active Exchange role -- their own role creates the sender mailbox + the scoped send right now" -ForegroundColor DarkGray
+                    } else {
+                        $mailArgs['AdminAppId'] = $mailSignedInApp
+                        Write-Host "    mail: the signed-in deploy runs as the application $mailSignedInApp -- it creates the sender mailbox + the scoped send right now" -ForegroundColor DarkGray
+                    }
                 }
+                # INSTALL-HARDEN-1 item 4: the bounded Exchange wait reports each attempt to the install's reporter ('waiting').
+                if ($OnStep) { $mailArgs['OnProgress'] = { param($m) Send-PimDeployStepEvent ([pscustomobject]@{ key = 'mailsender'; name = 'mail sender' }) 'waiting' "$m" } }
                 if (-not $mailSignedInApp -and -not $storeAdminArgs.Count) {
                     Warn 'mail sender: SKIPPED -- no SQL admin identity was supplied, and this step cannot authenticate without one.'
                     Warn '  Pass -SqlAdminClientId with -SqlAdminClientSecret, or do it afterwards: PIM Manager > Get Started > Mail sender (shared mailbox: a browser sign-in command; or SMTP relay).'
@@ -2367,6 +2416,65 @@ function Invoke-DefaultStepRunner {
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
         }
+        'alerting' {
+            # INSTALL-HARDEN-1 item 5. NEVER fatal (a halt would roll the code back): a failure here is a WARNING, and the
+            # end-of-install verify's 'alerting' line is what refuses "done".
+            $ar = Join-Path $here 'Set-PimAlertRecipients.ps1'
+            if (-not "$SqlServerFqdn".Trim()) { return @{ ok=$true; ran=$false; detail='WARNING: no -SqlServerFqdn -- alert recipients not set' } }
+            if ($SqlPrivateEndpoint) { return @{ ok=$true; ran=$false; detail='WARNING: private SQL -- this host has no route; set them in PIM Manager > Settings > Alerting' } }
+            $arArgs = @{ SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase; TenantId = $TenantId; SubscriptionId = $SubscriptionId
+                         AlertRecipients = @($AlertRecipients); SuperAdmins = @("$ManagerSuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+            if ($UseSignedInAccount) {
+                $whyR = Confirm-PimSignedInSqlAccess
+                if ($whyR) { return @{ ok=$true; ran=$false; detail="WARNING: alert recipients not set: $whyR" } }
+                $arArgs['UseSignedInAccount'] = $true
+            } elseif ("$SqlAdminClientId".Trim() -and "$SqlAdminCertThumbprint".Trim()) {
+                $arArgs['ClientId'] = $SqlAdminClientId; $arArgs['CertThumbprint'] = $SqlAdminCertThumbprint
+            } else { return @{ ok=$true; ran=$false; detail='WARNING: no certificate or signed-in store identity -- alert recipients not set; PIM Manager > Settings > Alerting' } }
+            if (-not $PSCmdlet.ShouldProcess('pim.Settings Alerting', 'set the alert recipients when empty')) { return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' } }
+            $global:LASTEXITCODE = 0
+            try { & $ar @arArgs | Out-Host } catch { return @{ ok=$true; ran=$true; detail="WARNING: alert recipients not set: $($_.Exception.Message)" } }
+            switch ([int]$LASTEXITCODE) {
+                0 { return @{ ok=$true; ran=$true; detail='alert recipients set (or kept: an existing list is never overwritten)' } }
+                2 { return @{ ok=$true; ran=$true; detail='WARNING: no alert recipient could be resolved (no address given, no SuperAdmin mailbox) -- PIM Manager > Settings > Alerting' } }
+                default { return @{ ok=$true; ran=$true; detail="WARNING: alert recipients not set (exit $LASTEXITCODE) -- the end-of-install verify reports it" } }
+            }
+        }
+        'verify-install' {
+            # INSTALL-HARDEN-1: the END-OF-INSTALL VERIFY. Runs while this run's SQL window is still open (it reads the
+            # store), and -- when this run opened 'AllowSetupHost' -- removes it itself and reads that back, so the
+            # 'SQL setup host rule closed' line is a fact, not a promise.
+            $cv = Join-Path $here 'Confirm-PimInstall.ps1'
+            if ($SqlPrivateEndpoint) { return @{ ok=$true; ran=$false; detail='WARNING: private SQL -- this host has no route to the store; run tools\setup\Confirm-PimInstall.ps1 from inside the network' } }
+            $cvArgs = @{ Role = 'Single'; TenantId = $TenantId; SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase
+                         ManagerApp = $ManagerApp; TickJobName = $TickJobName; UpdateJobName = $UpdateJobName; EnvName = $EnvName; AcrName = $AcrName; ImageRepo = $ImageRepo
+                         SuperAdmins = @("$ManagerSuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ }); AlertRecipients = @($AlertRecipients) }
+            $wt = $script:PimSetupHostWindow
+            if ($wt -and $wt.target -and "$($wt.target.rg)".Trim()) { $cvArgs['SqlResourceGroup'] = "$($wt.target.rg)".Trim() }
+            if ("$AcrAgentPoolName".Trim()) { $cvArgs['AcrAgentPoolName'] = "$AcrAgentPoolName".Trim() }
+            if ($script:PimDeployRingExplicit) { $cvArgs['UpdateRing'] = $UpdateRing }
+            if ("$UpdateSource".Trim()) { $cvArgs['UpdateSource'] = "$UpdateSource".Trim() }
+            if ((Get-PimUpdaterStepDecision -Scenario "$Scenario" -SourceUrlTemplate "$UpdateSourceUrlTemplate" -SkipUpdater:$SkipUpdater -UpdateSource ("$UpdateSource".Trim())) -ne 'install') { $cvArgs['NoUpdater'] = $true }
+            if ($LicenceExpected -or "$UpdateSource".Trim() -eq 'Invardia') { $cvArgs['LicenceExpected'] = $true }
+            if ("$script:PimMailDeferredReason".Trim()) { $cvArgs['MailDeferredReason'] = "$script:PimMailDeferredReason" }
+            if ($EngineAzureRootUserAccessAdmin) { $cvArgs['EngineAzureRootUserAccessAdmin'] = $true }
+            $w = $script:PimSetupHostWindow
+            if ($KeepSetupHostRule) { $cvArgs['SetupHostRuleOwner'] = 'caller' }
+            elseif (-not $w -or -not $w.plan -or ("$($w.plan.reason)" -like 'not applicable*')) { $cvArgs['SetupHostRuleOwner'] = 'none' }
+            elseif ($w.plan.closeAtEnd) { $cvArgs['SetupHostRuleOwner'] = 'this'; $cvArgs['CloseSetupHostRule'] = $true }
+            else { $cvArgs['SetupHostRuleOwner'] = 'none' }   # a rule that pre-dates this run belongs to another window
+            if ($UseSignedInAccount) { $cvArgs['UseSignedInAccount'] = $true }
+            elseif ("$SqlAdminClientId".Trim() -and "$SqlAdminCertThumbprint".Trim()) { $cvArgs['ClientId'] = $SqlAdminClientId; $cvArgs['CertThumbprint'] = $SqlAdminCertThumbprint }
+            else { return @{ ok=$true; ran=$false; detail='WARNING: verify-install not run -- no certificate or signed-in identity can read the store (a client secret cannot); run tools\setup\Confirm-PimInstall.ps1 -UseSignedInAccount' } }
+            $global:LASTEXITCODE = 0
+            $cvOut = $null
+            try { $cvOut = @(& $cv @cvArgs) | Where-Object { $_ -and $_.PSObject.Properties['done'] } | Select-Object -Last 1 }
+            catch { return @{ ok=$false; ran=$true; detail="the end-of-install verify could not run: $($_.Exception.Message)" } }
+            $okV = ($LASTEXITCODE -eq 0) -and $cvOut -and [bool]$cvOut.done
+            if ($okV -and $cvArgs['CloseSetupHostRule']) { $script:PimSetupHostWindow = $null }   # closed (and read back) by the verify
+            $sent = if ($cvOut) { "$($cvOut.sentence)" } else { 'the end-of-install verify returned no verdict' }
+            return @{ ok=$okV; ran=$true; detail=$(if ($okV -and @($cvOut.warnings).Count) { "WARNING: $sent" } else { $sent }) }
+        }
         'verify' {
             return (Invoke-DeployValidation)
         }
@@ -2717,10 +2825,17 @@ $halted = $false
 # §95.2 guided install: one event per step state. A reporter that throws is logged and ignored -- reporting must
 # never be the reason a deploy fails.
 function Send-PimDeployStepEvent([object]$Step, [string]$State, [string]$Detail) {
+    # §99 Support-app install tracking: the same event, posted to Invardia (best effort, scrubbed, never fatal).
+    if ($script:PimInstallTracker -and $script:PimInstallTracker.enabled) {
+        [void](Send-PimInstallTrackEvent -Tracker $script:PimInstallTracker -StepId "$($Step.key)" -Title "$($Step.name)" -State $State -Message "$Detail")
+    }
     if (-not $OnStep) { return }
     try { & $OnStep ([pscustomobject]@{ key = "$($Step.key)"; name = "$($Step.name)"; state = $State; detail = "$Detail" }) | Out-Null }
     catch { Write-Verbose "OnStep reporter failed: $($_.Exception.Message)" }
 }
+. (Join-Path $here '_PimInstallTracking.ps1')
+$script:PimInstallTracker = New-PimInstallTracker -Token "$InvardiaInstallToken" -EventsUrl "$InvardiaInstallEventsUrl" -Http $InvardiaInstallHttp
+if ($script:PimInstallTracker.enabled) { Info "install tracking: every step is reported to Invardia ($($script:PimInstallTracker.url)); a failed report never fails the deploy" }
 
 foreach ($s in $plan.steps) {
     if (-not $s.do) {
@@ -2783,7 +2898,9 @@ foreach ($s in $plan.steps) {
     if ($s.key -eq 'verify') { $verifyResult = $res }
 
     # a failed step (other than verify -- verify failure drives rollback below) HALTS the run.
-    if (-not $ok -and $s.key -ne 'verify') {
+    # INSTALL-HARDEN-1: nor 'verify-install' -- the LAST step; its failure fails the run (summary 'failed', exit 1) but must
+    # never roll the code back: the deployed code is healthy, the INSTALL is not finished (the table says what is missing).
+    if (-not $ok -and $s.key -notin 'verify', 'verify-install') {
         Warn "step '$($s.key)' FAILED -- halting the deploy."
         $halted = $true
         break
@@ -2848,6 +2965,11 @@ if ($needRollback -and $codeRan) {
 # SUMMARY.
 # =============================================================================
 $summary = Get-PimDeploySummary -StepOutcomes @($outcomes.ToArray()) -Verdict $verdict -RolledBack $rolledBack
+# §99: the closing tracking event -- 'done' on success; after a failure the failed step stays the last event.
+if ($script:PimInstallTracker -and $script:PimInstallTracker.enabled) {
+    $verOut = ''; try { $verOut = "$(Get-Content -Raw -LiteralPath (Join-Path $solRoot 'VERSION'))".Trim() } catch { }
+    [void](Complete-PimInstallTracker -Tracker $script:PimInstallTracker -Failed:("$($summary.status)" -ne 'success') -Outputs ([ordered]@{ version = $verOut; resourceGroup = "$ResourceGroup"; status = "$($summary.status)" }))
+}
 Write-Host ""
 Step "DONE. status=$($summary.status) healthy=$($summary.healthy) rolledBack=$($summary.rolledBack)"
 foreach ($o in $summary.steps) { Info ("  {0,-8} ran={1} ok={2}" -f $o.key, $o.ran, $o.ok) }

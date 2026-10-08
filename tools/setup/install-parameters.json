@@ -1,7 +1,7 @@
 {
   "_comment": "The guided-install contract of the PIM Manager (GUIDED-INSTALL 4.1-4.6). Invardia's wizard asks exactly these questions and writes the answers to config.json for tools/setup/Install-PimManager.ps1, which validates them again (Test-PimInstallConfig). 'maps' = what the answer drives. Kept in step with Install-PimManager by tests/Test-PimGuidedInstall.ps1.",
   "product": "pim-manager",
-  "version": "2.4.534",
+  "version": "2.4.535",
   "entryPoint": "Install-PimManager -ConfigPath <config.json> -LicencePath <file> -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]",
   "exitCodes": { "0": "succeeded (warnings allowed)", "1": "a step failed -- fix it and -Resume", "2": "preflight failed -- nothing was changed", "3": "bad answers or a bad licence -- nothing was changed" },
   "pages": [
@@ -24,7 +24,8 @@
     { "key": "allowAllMembers", "page": "access", "type": "bool", "default": false, "help": "Every member account of the tenant may sign in (guests never).", "maps": "EasyAuthAllowAllTenantUsers" },
     { "key": "engineAzureRootUserAccessAdmin", "page": "access", "type": "bool", "default": false, "help": "Optional. Also give the PIM engine User Access Administrator at the tenant root management group, so it can assign the Azure resource roles you delegate. Off by default: the engine always gets read-only Reader there (Discovery), and Get Started shows the command to add User Access Administrator later.", "maps": "EngineAzureRootUserAccessAdmin" },
     { "key": "superAdmins", "page": "access", "type": "upnList", "help": "Default: you (the account running the install).", "maps": "ManagerSuperAdmins" },
-    { "key": "mailSender", "page": "access", "type": "email", "help": "The mailbox PIM sends from. Needs an Exchange Administrator; without one the install completes and mail is set up later.", "maps": "MailSender" },
+    { "key": "mailSender", "page": "access", "type": "email", "help": "The mailbox PIM sends from. Created by the install when the installer holds an ACTIVE Exchange Administrator or Global Administrator role (both sending identities get the scoped send right); without one the install completes and the end-of-install check shows the Get Started > Mail sender command.", "maps": "MailSender" },
+    { "key": "alertRecipients", "page": "access", "type": "emailList", "help": "Who gets the alerts (engine failures, drift, break-glass use, ...). Default: the super-admins' mailboxes. A list that is already set is never overwritten.", "maps": "AlertRecipients" },
     { "key": "supportAppId", "page": "support", "type": "guid", "help": "The Invardia Support app of this tenant (pre-filled from the support environment). Empty = no support access.", "maps": "Grant-PimSupportAccess -AppId" },
     { "key": "supportAccess", "page": "support", "type": "enum", "default": "troubleshoot", "options": ["troubleshoot", "setup"], "help": "troubleshoot = read the database and its schema; setup = also repair and upgrade (SQL admin group member, owner of PIM's own apps and groups).", "maps": "Grant-PimSupportAccess -Level" }
   ],
@@ -47,9 +48,11 @@
     { "id": "code", "title": "Roll out the application" },
     { "id": "updater", "title": "Updates" },
     { "id": "access", "title": "PIM Manager access" },
+    { "id": "alerting", "title": "Alert recipients" },
     { "id": "verify", "title": "Deployment health check" },
     { "id": "licence", "title": "Your licence" },
     { "id": "support-app-access", "title": "Invardia support access" },
+    { "id": "verify-install", "title": "End-of-install check" },
     { "id": "health-check", "title": "Final health check" },
     { "id": "completed", "title": "Installation complete" }
   ],
@@ -57,7 +60,8 @@
   "requiredRights": [
     "Owner, or Contributor + User Access Administrator, on the subscription (required -- the preflight stops without it)",
     "Privileged Role Administrator, active (recommended) -- without it the SQL admin group, the Graph permissions and the sign-in consent end as hand-off actions with the exact command",
-    "Exchange Administrator for the notification mailbox (optional, later)"
+    "Exchange Administrator or Global Administrator, active, for the notification mailbox (optional -- without it the end-of-install check ends with the Get Started > Mail sender follow-up)",
+    "Owner or User Access Administrator at the tenant root management group (recommended; a Global Administrator who turned on Access management for Azure resources) -- the install gives the engine Reader there; without that right the end-of-install check ends with a WARNING and the exact command for that person (the install is not stopped -- owner decision of 2026-10-08)"
   ],
   "runsIn": "Azure Cloud Shell (PowerShell 7) as the signed-in account -- never a secret. Also PowerShell 7 or Windows PowerShell 5.1 on Windows with the Azure CLI.",
   "licence": "A Pro licence bound to the tenant above (a trial or a paid licence). A licence for another tenant, or one that names no tenant, is refused (exit 3).",
