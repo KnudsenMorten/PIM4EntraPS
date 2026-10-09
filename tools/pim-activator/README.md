@@ -1,7 +1,7 @@
 # PIM Activator (browser extension)
 
-Companion **Manifest V3** browser extension to the **PIM4EntraPS** PowerShell
-module — bulk-activate every PIM assignment you're eligible for from a single
+**Manifest V3** browser extension, part of **PIM Manager** (Invardia;
+support: https://portal.invardia.com) — bulk-activate every PIM assignment you're eligible for from a single
 toolbar popup, instead of clicking through the Entra portal one role at a
 time.
 

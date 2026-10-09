@@ -845,13 +845,35 @@ function Get-PimGroupActivityFromTenant {
             if (-not $r -or $msg -match '(?i)no answer' -or $code -eq 429 -or $code -ge 500) { $transient++ }
             $bad += "$($tagged[$i]): $msg"
         }
+        $unanswered = @{}
         if ($bad.Count) {
             $what = if ($transient -eq $bad.Count) { 'THROTTLED (HTTP 429) -- ' } else { '' }
-            throw ("{0}{1} of {2} group activity read(s) failed: {3}" -f $what, $bad.Count, $tagged.Count, (@($bad | Select-Object -First 3) -join '; '))
+            # 2.4.543 (internal 2026-10-09, §100.44): on a busy big tenant SOME groups always stay throttled, so an
+            # all-or-nothing read never refreshed. When every failure is throttling and at least one group answered: keep
+            # the answered groups, and carry each unanswered group's PREVIOUS value from the cache -- the list converges a
+            # little more on every run instead of never. Nothing answered, or a real error = throw as before.
+            if ($transient -eq $bad.Count -and $batched.Count -gt 0) {
+                foreach ($gid in $tagged) { if (-not $batched.ContainsKey($gid)) { $unanswered[$gid] = $true } }
+                $script:PimActivityPartial = "{0} of {1} groups read; {2} throttled kept their previous value" -f $batched.Count, $tagged.Count, $unanswered.Count
+            } else {
+                throw ("{0}{1} of {2} group activity read(s) failed: {3}" -f $what, $bad.Count, $tagged.Count, (@($bad | Select-Object -First 3) -join '; '))
+            }
+        } else { $script:PimActivityPartial = $null }
+        if ($unanswered.Count) {
+            $prev = $null; try { $prev = Get-PimTenantCacheEntry -Kind 'pim-activity' } catch { $prev = $null }
+            if ($prev -is [string]) { try { $prev = $prev | ConvertFrom-Json } catch { $prev = $null } }
+            foreach ($gid in @($unanswered.Keys)) {
+                $k = "$($owned.byId[$gid].tag)".Trim().ToLowerInvariant()
+                $pv = $null
+                if ($prev -is [System.Collections.IDictionary]) { if ($prev.Contains($k)) { $pv = $prev[$k] } }
+                elseif ($prev -and $prev.PSObject.Properties[$k]) { $pv = $prev.$k }
+                if ("$pv") { $map[$k] = "$pv" }
+            }
         }
     }
     foreach ($gid in @($owned.byId.Keys)) {
         $tag = "$($owned.byId[$gid].tag)".Trim(); if (-not $tag) { continue }
+        if ($unanswered -and $unanswered.ContainsKey($gid)) { continue }   # 2.4.543: carried from the cache above, never re-read one by one
         $reqs = @()
         if ($batched.ContainsKey($gid)) { $reqs = $batched[$gid] }
         else {

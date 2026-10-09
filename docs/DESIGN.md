@@ -8930,7 +8930,10 @@ still equals the canonical id — catches accidental key drift before signing),
 **VERSION** (popup version badge is wired to `chrome.runtime.getManifest().version`
 so it can't lie), **NODEVCODE** (no device-code grant anywhere — MS blocks it via
 managed CA; the supported path is Edge PKCE loopback), **PKCE** (`launchWebAuthFlow`
-+ `code_challenge` present), **BRANDING** (name + attribution footer), and
++ `code_challenge` present), **BRANDING** (name; the footer reads "PIM Activator – part of
+PIM Manager" with **Support** → `https://portal.invardia.com` and **Invardia** → `https://invardia.com`; and no
+shipped file carries the internal solution name, a personal name or the GitHub repository — the fixed update
+feed URL excepted; Error severity since 1.6.137, owner 2026-10-09), and
 **NOSECRET** (no real tenant/subscription GUIDs baked into shipped files — now also
 scanning `popup-config.js`; all-zero and single-repeat placeholder GUIDs are
 allowed). It is now **wired as a hard preflight** inside the `-Repack`/`-PackOnly`
@@ -8941,6 +8944,12 @@ Error-severity finding throws and aborts, so a drifted id or a leaked GUID block
 the build before signing. Covered by `tests/PIM.Activator.Tests.ps1` (offline, 29
 assertions across 7 Describe blocks: validator + gate wiring/ordering +
 configurable threshold + getting-started tip).
+
+**Branding and "Report bug" (1.6.137, owner 2026-10-09).** Everything the extension shows names the product
+**PIM Manager** (Invardia); the manifest `author` is Invardia and `homepage_url` is `https://invardia.com`. The
+extension id, permissions and `update_url` are unchanged. The load-failure card's **Report bug** still shows the
+scrubbed text for review first (SEC-41); its button now copies that text and opens the support portal
+(`https://portal.invardia.com`) instead of a public GitHub issue.
 
 ### Companion projects (combinable, same author)
 

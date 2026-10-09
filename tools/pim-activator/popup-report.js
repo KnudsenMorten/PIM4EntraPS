@@ -1,13 +1,13 @@
-// PIM Activator -- scrub text before it goes into a PUBLIC GitHub issue
+// PIM Activator -- scrub text before it leaves the device in a "Report bug" request
 // (no DOM, no chrome.* APIs -- unit-testable under Node like popup-config.js).
 //
-// SEC-41 (2026-09-18): the "Report bug" link used to open a public issue on the
-// project's GitHub repository pre-filled with the customer's TENANT ID and the raw
-// error text -- which carries object ids, UPNs, e-mail addresses and domain names
-// straight from Graph / Entra. A public issue is readable by anyone and indexed.
+// SEC-41 (2026-09-18): the "Report bug" link used to open a public issue
+// pre-filled with the customer's TENANT ID and the raw error text -- which carries
+// object ids, UPNs, e-mail addresses and domain names straight from Graph / Entra.
 // Now the report text is (1) built WITHOUT the tenant id, (2) passed through
 // redactForPublicReport(), and (3) shown to the user for review before anything
-// is opened -- they submit exactly what they saw.
+// is copied -- they send exactly what they saw. Since 1.6.137 it is copied for a
+// request on the PIM Manager support portal instead of a public issue.
 
 const RULES = [
   // Bearer / JWT-shaped tokens first (they contain dots that the domain rule would eat).

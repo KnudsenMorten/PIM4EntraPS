@@ -13,6 +13,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.543 -- 2026-10-09
+
+- Stale-access check on large, busy tenants: the group-activity list now refreshes every group that answers and keeps the previous value only for groups Microsoft Graph is still throttling, so it converges run by run instead of staying old.
+- PIM Activator 1.6.137: the extension now carries the PIM Manager name. The footer reads "PIM Activator – part of PIM Manager" with a **Support** link to the support portal and an **Invardia** link, and **Report bug** copies the cleaned-up error text and opens the support portal instead of a public GitHub issue. The extension id, permissions and update location are unchanged, so installed browsers update in place with no policy change.
+
 ## 2.4.542 -- 2026-10-09
 
 - Tenant data refresh: the group-activity list reads every group again (2.4.540-2.4.541 read only the first group of each batch and reported the rest as failed).

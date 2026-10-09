@@ -247,7 +247,7 @@ async function loadConfig() {
   // user's saved manual config on every reload, causing the "Save and continue"
   // button to appear broken (it saves, but the next reload shows onboarding
   // again because the catalog overrides it). Symptom reproed 2026-06-10
-  // against a customer-tenant box whose registry still had 2linkIT's
+  // against a customer-tenant box whose registry still had another tenant's
   // catalog from before v2.4.111.
   const manualTid = String(u.userTenantId || '').trim().toLowerCase()
   const manualCid = String(u.userClientId || '').trim().toLowerCase()
@@ -1878,7 +1878,7 @@ async function hydrateGroupNames(token, groupIds) {
 
 // ---------------------------------------------------------------------------
 // Nested permission groups (two-tier PIM-for-Groups nesting -- DESIGN.md 3.1).
-// PIM4EntraPS nests a role group inside permission groups ("PIM-Entra-ID-...",
+// PIM Manager nests a role group inside permission groups ("PIM-Entra-ID-...",
 // "PIM-AzRes-...", "PIM-PowerBI-..."). Those second-tier permission groups need
 // NO separate discovery call: once a role group is active the user is the
 // transitive eligible member of its permission groups, and they surface in the
@@ -3449,7 +3449,7 @@ function categoriseGroupByName(nameOrRow) {
   return 'workload'   // Defender, Intune, PowerBI, custom apps, or unknown.
 }
 
-// Derive the granted role from the GROUP NAME using the PIM4EntraPS naming
+// Derive the granted role from the GROUP NAME using the PIM Manager naming
 // convention (e.g. "PIM-Entra-ID-ApplicationAdministrator-L1-T0-CP-ID" ->
 // "Application Administrator"). This is the authoritative fallback when the
 // Graph role query returns nothing -- a role group is usually only ELIGIBLE
@@ -3901,7 +3901,7 @@ function render() {
     // null = bulk fetch hasn't completed; show no line yet (silent loading).
     // [] = fetch done, group grants no roles of that type; skip.
     // v1.4.6+: show ALL roles + scopes per group, no roll-up. Role groups
-    // in PIM4EntraPS routinely have 10-30+ nested task-group grants and
+    // in PIM Manager routinely have 10-30+ nested task-group grants and
     // the operator needs to see every line to evaluate the activation.
     const entraPreview = (r.previewEntraRoles || [])
     const entraExtra   = 0
@@ -4264,8 +4264,8 @@ async function maybeShowGettingStartedTip(readyCount) {
 // Render a visible, self-explaining failure state instead of leaving the
 // popup stuck on "Loading...". `phase` is a short tag (token / graph / arm /
 // network / timeout) that classifies what failed so the user (and a support
-// engineer reading a screenshot) can act. Adds a "Report bug" link that opens
-// the GitHub issues page with the diagnostic pre-filled, and dumps the full
+// engineer reading a screenshot) can act. Adds a "Report bug" link that copies
+// the scrubbed diagnostic and opens the support portal, and dumps the full
 // error to the console so a hang is always diagnosable.
 function showLoadFailure(phase, err, opts = {}) {
   const msg = (err && err.message) ? err.message : String(err || 'Unknown error')
@@ -4293,7 +4293,7 @@ function showLoadFailure(phase, err, opts = {}) {
   }
   // Replace the (empty) list area with an actionable error card.
   if (els.list) {
-    // SEC-41: the report goes to a PUBLIC GitHub issue. It carries NO tenant id, the
+    // SEC-41: the report leaves the device (pasted into a support request). It carries NO tenant id, the
     // error text is scrubbed of ids / UPNs / e-mails / tokens (popup-report.js), and
     // the user reviews (and can edit) the exact text before anything is opened.
     const reportBody = buildPublicReportBody({
@@ -4309,10 +4309,10 @@ function showLoadFailure(phase, err, opts = {}) {
         '<button id="load-retry" class="primary" style="font-size:12px;">Retry</button>' +
         '<a id="load-report" href="#" style="margin-left:10px;font-size:11.5px;color:#0969da;text-decoration:none;">Report bug</a>' +
         '<div id="load-report-review" style="display:none;margin-top:10px;">' +
-          '<div style="font-weight:700;margin-bottom:4px;">This opens a PUBLIC GitHub issue.</div>' +
-          '<div style="margin-bottom:6px;">Tenant and object ids, e-mail addresses and tokens have been replaced with placeholders. Check the text below and remove anything else that identifies your organisation before you submit.</div>' +
+          '<div style="font-weight:700;margin-bottom:4px;">Send this to PIM Manager support.</div>' +
+          '<div style="margin-bottom:6px;">Tenant and object ids, e-mail addresses and tokens have been replaced with placeholders. Check the text below and remove anything else that identifies your organisation. The button copies it and opens the support portal -- paste it into your support request.</div>' +
           '<textarea id="load-report-text" rows="7" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:10.5px;border:1px solid #f0c08a;border-radius:4px;padding:6px 7px;margin-bottom:8px;resize:vertical;"></textarea>' +
-          '<button id="load-report-open" class="primary" style="font-size:12px;">Open public GitHub issue</button>' +
+          '<button id="load-report-open" class="primary" style="font-size:12px;">Copy and open support portal</button>' +
           '<button id="load-report-cancel" style="font-size:11.5px;margin-left:8px;">Cancel</button>' +
         '</div>' +
       '</div>'
@@ -4333,11 +4333,15 @@ function showLoadFailure(phase, err, opts = {}) {
     const openBtn = document.getElementById('load-report-open')
     if (openBtn && reviewText) openBtn.onclick = () => {
       // Step 2: the user's reviewed text -- scrubbed once more in case something
-      // identifying was pasted in -- is what goes to the public issue.
-      const title = encodeURIComponent('[PIM Activator] PIM assignments failed to load (' + redactForPublicReport(phase) + ')')
-      const bodyTxt = encodeURIComponent(redactForPublicReport(reviewText.value))
+      // identifying was pasted in -- is what is copied for the support request.
+      const title = '[PIM Activator] PIM assignments failed to load (' + redactForPublicReport(phase) + ')'
+      const bodyTxt = title + '\n\n' + redactForPublicReport(reviewText.value)
+      try { reviewText.value = bodyTxt; reviewText.select() } catch { /* */ }
       try {
-        window.open('https://github.com/KnudsenMorten/PIM4EntraPS/issues/new?title=' + title + '&body=' + bodyTxt, '_blank')
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(bodyTxt).catch(() => { /* the text stays selected in the box */ })
+      } catch { /* the text is still selected in the review box */ }
+      try {
+        window.open('https://portal.invardia.com', '_blank')
       } catch { /* popups blocked -- the console diagnostic above is still available */ }
     }
   }
