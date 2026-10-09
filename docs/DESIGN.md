@@ -679,6 +679,19 @@ top of the engine delta — it does NOT reimplement reconciliation.**
   because PIM never deletes an AU. An AU-scoped role on a PIM group can be deleted (an Entra-role revoke at the AU scope) and
   kept (its `PIM-Assignments-Roles-AUs` row) once the AU is defined: the drift job stamps the group's tag and the AU's PIM
   tag on the live row for that.
+- **Import into PIM / Delete / Ignore, and Apply now never touches an extra (2.4.538).** "Keep" is named **Import into PIM**
+  for what it does. A **group** that is extra in the `Groups` area (it carries the tenant's naming prefix, so the lean group
+  read lists it, but no definition names it -- typically made by the customer's own infrastructure code) gets a `keep` row
+  (its group definition under the exact live name and description) and a `retire` row (the same with `Lifecycle=Retire`).
+  **Import** files the row under the definition kind the operator picks; the Groups provider keys on the name, so the
+  committed row *matches* the existing group and nothing is created; a name or tag PIM already defines is refused.
+  **Delete** of a group stages the retirement (typed DELETE, a tier-0 warning), and the engine's group retirement then
+  deletes it -- only where `EnableGroupRetirement` is on, only a name with the naming prefix that is unique live, inside
+  the removal budget; a delegation's Delete stays its queued revoke. The engine itself never deletes an undefined group:
+  the Groups provider has no remove, and the daily reconcile removes only ledger-confirmed, journal-removed items.
+  **Apply now** sends only the ticked missing / changed items (`driftApplySelection`), asks no question about extras and
+  says to choose Import, Delete or Ignore for them. Review & commit names a drift-staged add **IMPORT** (green) or
+  **DELETE** (red, any `Lifecycle=Retire` row); the change queue leads every queued removal with a red **DELETE**.
 - **Stop managing and Import an admin (2.4.455).** **Stop managing** (Admin accounts, and an admin node on the Access map)
   stages the removal of every row that names the admin -- the definition row and the assignment rows, by sign-in name or
   short user name in any case -- and takes the name out of owner / sponsor / approver / notify cells. Nothing changes in
@@ -4178,8 +4191,9 @@ runtime is **built and verified live** (§11.8 status); S5 is being decommission
                                                                    status summary (counts only)
 ```
 
-Provenance, not a permission gate: master-originated rows (Owner=MSP) are refreshed
-on each pull; rows the managed tenant owns locally (Owner=Local) stay autonomous.
+Owner is a gate on both sides (§13.3a): master-originated rows (Owner=MSP) are refreshed
+on each pull and are read-only locally; rows the managed tenant owns locally (Owner=Local) stay
+autonomous, and the pull never overwrites, takes over or retracts them.
 Tamper / forge / roll-back / replay are all rejected by the signature + version +
 expiry checks (§13.10). The verify step also refuses a bundle from a revoked signer and stops the
 pull while a verified central kill stands; the anti-rollback floor is kept in the managed tenant's
@@ -4472,10 +4486,25 @@ identity (hosted) or a per-tenant certificate application | GDAP (CSP niche) | o
   L0  Network         : private endpoints; separate VNets; no cross-tenant DB path
 ```
 
-The `Owner` tag (`Owner=MSP` | `Owner=Local`) is **provenance, not a permission
-gate**: MSP rows are refreshed on each baseline pull (so not hand-edited locally —
-overwrite-avoidance, not forbidden); local rows are the customer's, fully
+The `Owner` tag (`Owner=MSP` | `Owner=Local`, an unstamped row counts as Local) is a
+**gate on both sides** (changed 2026-10-09 — it used to be described as provenance only).
+See §13.3a for what each side may and may not do. Local rows are the customer's, fully
 autonomous (any Purpose incl. privileged, no MSP request, no MSP approval).
+
+#### 13.3a Owner semantics — when the managing and the managed tenant define the same thing
+
+A managed tenant can end up holding a row with the same key as one the managing tenant
+replicates: it imported the same permission template, defined the same group itself, or
+gave a central admin local access to a master group. The rules:
+
+| Side | Rule |
+|---|---|
+| **Pull (managed tenant)** | A row is written, updated or retracted **only if it is `Owner=MSP`**. A row with the same key that is not `Owner=MSP` is never overwritten, never stamped MSP and never retracted — in every group-definition entity (Roles, Services, Organization, Tasks, Departments, Processes, Projects, Cross-org), nesting, role binding, resource binding, AU definition and membership. Each such row is skipped and reported as **"deferred: held locally"** in the pull output and in the acceptance record (`deferredHeldLocally`). The "which groups does the customer already have" read covers the same entity list the apply writes (one shared list), so such a group is deferred in the plan as well. |
+| **Manager (managed tenant)** | An `Owner=MSP` row cannot be changed or removed, and a new row cannot claim `Owner=MSP` (§91.23). A **local group definition whose GroupTag or GroupName the managing tenant already defines** — in any definition entity — is refused: *"This group is owned by the managing tenant -- extend it locally instead (add members, roles or nesting to it)"*. Extending the master group locally (members, role bindings, nestings onto it) is allowed and stays local. There is no local override of a master group. |
+| **Validator** | The same GroupTag, or the same GroupName under two tags, defined in two group-definition entities is an **error** (`PIM-DEFDUP-001` / `-002`), not silently resolved. |
+| **Engine tag map** | A local definition never displaces the managing tenant's definition of the same tag, so the master's memberships stay in the master's group; any tag defined for two groups is flagged by name. |
+| **Template import** | A template group that the store already defines (the master's included) is adopted, not defined again. What the import adds on a master group is stamped `Owner=Local`; a template can never set `Owner=MSP`. The master later changing or dropping that group does not touch these rows. |
+| **v1 → v2 cutover import** | Replaces only the customer's rows; `Owner=MSP` rows are kept, and a CSV row with the same key is skipped. |
 **Optional** (off by default): a customer/MSP can mark baseline entries `Enforced`
 so the engine refuses a local override of those specific keys — a deliberate
 opt-in, not the default. (An earlier hard `CK_LocalAdmins_NoHighPriv` data-layer

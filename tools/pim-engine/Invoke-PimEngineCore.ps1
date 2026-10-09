@@ -211,6 +211,9 @@ if (-not $env:PIM_SkipPreflight) {
                    "Seed it (tools\setup\Initialize-PimTenantStore.ps1 writes the default template on a new store) or set the tenant's own " +
                    "convention in the Manager (Settings > Naming), then re-run.") -f $__ncV.reason
         }
+        # NAME-1 (2026-10-09): a key that is present but BLANK no longer stops the run -- the shipped default is used for it
+        # (Get-PimNamingConvention), and it is said here, loudly, every run until the tenant sets its own pattern.
+        if (@($__ncV.blank).Count) { Write-Warning ("    Naming : {0}" -f $__ncV.reason) }
         Write-Host "    Naming : from the store ($(@(Get-PimRequiredNamingConventionKeys).Count) required key(s) present)" -ForegroundColor DarkCyan
     }
     # 2) Tenant identity actually works -- mint a Graph token + resolve the org, so a wrong/missing

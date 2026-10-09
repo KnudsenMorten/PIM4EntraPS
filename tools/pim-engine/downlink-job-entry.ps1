@@ -171,6 +171,21 @@ if (-not $licErr) {
 $mspLic = Invoke-PimMspLicenseGate -Role Slave -TenantId $TenantId -LicenseText $licText -StoreError $licErr -SqlServer "$env:PIM_SqlServer".Trim() -Log $cadenceLog
 if (-not $mspLic.ok) { Stop-DownlinkJob -Code 2 -State failed -Detail "$($mspLic.message)" }
 
+# --- 0c) GATE-1 (owner-approved 2026-10-09): THE msp.downlink SWITCH GATES THE REAL PULL. It used to gate only the tick's
+# placeholder msp-pull job, so switching "MSP downlink / fan-out" off in Settings stopped nothing. A STORED off = no pull,
+# recorded as 'held' with the reason (the Manager's Job schedule and Home show it); nothing stored = ON, as before.
+$dlSwitchErr = "$cadenceErr"; $dlSwitchRaw = $null
+if (-not $dlSwitchErr) {
+    try { $dlSwitchRaw = (Read-PimJobCadenceValues -ConnectionString $cadenceCs -Object 'pim.Settings' -Names @('FeatureGates'))['FeatureGates'] }
+    catch { $dlSwitchErr = "$($_.Exception.Message)" }
+}
+$dlSwitch = Resolve-PimMspDownlinkSwitch -FeatureGatesRaw $dlSwitchRaw -StoreError $dlSwitchErr
+if (-not $dlSwitch.run) {
+    JobLog ("SKIPPED: {0}" -f $dlSwitch.reason) 'WARN'
+    Stop-DownlinkJob -Code 0 -State held -Detail "$($dlSwitch.reason)"
+}
+if ("$dlSwitchErr".Trim()) { JobLog $dlSwitch.reason 'WARN' }
+
 # Load the scenario + downlink + downlink-job cores (placement / verdict helpers).
 . (Join-Path $shared 'PIM-ScenarioProfile.ps1')   # also dot-sources PIM-Downlink.ps1
 . (Join-Path $shared '..\msp\PIM-DownlinkJob.ps1')

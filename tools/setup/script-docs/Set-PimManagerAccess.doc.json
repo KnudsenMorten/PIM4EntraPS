@@ -1,0 +1,40 @@
+{
+  "script": "Set-PimManagerAccess.ps1",
+  "product": "pim",
+  "title": "Set who may use PIM Manager",
+  "purpose": "Sets who may use PIM Manager and at what level (Reader, Admin, SuperAdmin or Delegated) by writing the ManagerAccess setting in the environment's store: it merges with what is stored, refuses a model with no SuperAdmin, and reads the result back.",
+  "whenToRun": "To give the first SuperAdmin access to a new environment, or to add, change or (with -Replace) remove Manager users when the Manager itself cannot be used for it. PIM Manager names this script when nobody has access yet.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Set-PimManagerAccess.ps1",
+  "runAs": [
+    { "kind": "other", "name": "Member of the environment's SQL admin group (grp-pim-sql-admins), signed in with az login", "scope": "the environment's SQL database", "why": "The access model lives in pim.Settings; only the SQL admin group may write it. With -UseSignedInAccount the signed-in az user is used (asserted to be a user in -TenantId). Alternatively the admin application's certificate (-AdminAppId + -AdminCertThumbprint)." }
+  ],
+  "changes": [
+    { "target": "Environment SQL database", "action": "update", "object": "pim.Settings row 'ManagerAccess' (the list of identity = role entries: Reader, Admin, SuperAdmin, Delegated)", "scope": "this environment's PIM Manager", "why": "Decides who may use PIM Manager and at what level. Merged with what is stored, keyed on identity; -Replace drops entries that are not in the input. A model with no SuperAdmin is refused unless -AllowNoSuperAdmin.", "undo": "Run the script again with the previous entries (and -Replace to drop what was added)." },
+    { "target": "Local file (only with -OutFile)", "action": "create", "object": "the result file named by -OutFile (ok, reason, installed / replaced / removed identities)", "scope": "this computer", "why": "For a caller that runs the script unattended and reads the outcome.", "undo": "Delete the file." }
+  ],
+  "parameters": [
+    { "name": "TenantId", "required": true, "default": null, "help": "The environment's tenant id." },
+    { "name": "SqlServerFqdn", "required": true, "default": null, "help": "The environment's SQL server (<name>.database.windows.net)." },
+    { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The environment's database." },
+    { "name": "UseSignedInAccount", "required": false, "default": false, "help": "Reach the store as the signed-in az user (a member of the SQL admin group). The recommended way." },
+    { "name": "AdminAppId", "required": false, "default": null, "help": "Automation: the admin application's client id (with -AdminCertThumbprint) instead of -UseSignedInAccount." },
+    { "name": "AdminCertThumbprint", "required": false, "default": null, "help": "Automation: the thumbprint of the admin application's certificate in the local machine store." },
+    { "name": "AdminSecret", "required": false, "default": null, "help": "Legacy automation only: a client secret for -AdminAppId. Not for customer use; prefer -UseSignedInAccount." },
+    { "name": "AccessJson", "required": true, "default": null, "help": "A JSON file path or raw JSON: { \"managerAccess\": [ { \"identity\": \"<UPN, object id or group>\", \"role\": \"Reader|Admin|SuperAdmin|Delegated\" } ] }." },
+    { "name": "Replace", "required": false, "default": false, "help": "Replace the stored list instead of merging; the entries it drops are listed first." },
+    { "name": "AllowNoSuperAdmin", "required": false, "default": false, "help": "Allow a model with no SuperAdmin (only when the container settings still carry one)." },
+    { "name": "OutFile", "required": false, "default": null, "help": "Write the outcome as JSON to this file." }
+  ],
+  "readsOnly": [
+    "pim.Settings 'ManagerAccess' (the stored model; a read failure stops the script)",
+    "pim.Settings 'License' (only when a NEW Delegated user is added -- scoped Manager users need a Pro licence)"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in / token for Azure SQL)",
+    "<server>.database.windows.net:1433"
+  ],
+  "whatIf": "Validates the input, reads the stored model, prints the resulting model (entries, SuperAdmin count, what -Replace would remove) and 'What if: Performing the operation \"write N entr(y/ies): <identity>=<role>, ...\" on target \"pim.Settings['ManagerAccess'] in <server>/<database>\"', then stops: nothing is written.",
+  "undo": "Run the script again with the previous list and -Replace. The previous list is printed as 'already stored' at the start of every run.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Set-PimManagerAccess/"
+}

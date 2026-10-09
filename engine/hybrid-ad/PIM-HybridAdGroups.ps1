@@ -43,18 +43,22 @@ function Get-PimHybridAdSetting {
 # 2.4.465 (operator 2026-09-30: "a customer must be able to define his groups naming convention for the hybrid solution"):
 # every hybrid knob, in ONE catalog -- the Manager's Settings > Hybrid Active Directory card lists, validates and saves exactly
 # these (each its own pim.Settings row; blank = the default, which is DERIVED from the tenant's own naming where it can be).
+# GS-NAMING-ALL (owner 2026-10-09): 'naming = $true' marks a knob that NAMES something -- the Get Started Naming step shows
+# exactly those (GET /api/settings/naming-catalog), with 'example' = what it renders as ({value} = the field, {=Key} =
+# another field, {@groupPrefix} / {@entraSuffix} / {@adSuffix} = derived from the naming; 'exampleTokens' fills this
+# knob's own tokens). A knob without the flag (batch size, parallelism, never-remove list) is not naming.
 $script:PimHybridAdSettingCatalog = @(
-    [ordered]@{ name = 'HybridAdGroupMarker'; label = 'AD group marker'; default = '-S_AD'; help = 'The end of a PIM group name that marks it as ALSO an on-premises AD group. The mirrored pattern is your group prefix + * + this marker.' }
-    [ordered]@{ name = 'HybridAdGroupPattern'; label = 'Pattern override'; default = ''; help = 'Leave blank to derive it (prefix + * + marker). Set a full wildcard only when your AD groups do not follow that shape.' }
-    [ordered]@{ name = 'HybridAdCloudSuffix'; label = 'Cloud admin suffix'; default = ''; help = 'The end of a cloud admin account name that is swapped for the AD suffix. Blank = the Entra suffix of your naming conventions.' }
-    [ordered]@{ name = 'HybridAdAccountSuffix'; label = 'AD admin suffix'; default = ''; help = 'The end of the matching AD admin account. Blank = the AD suffix of your naming conventions. Only users carrying it are ever removed from an AD group.' }
-    [ordered]@{ name = 'HybridAdGroupsOu'; label = 'OU for new AD groups'; default = ''; help = 'Distinguished name of the OU where missing AD groups are created (OU=...,DC=...). Blank = groups are never created, only kept in sync.' }
-    [ordered]@{ name = 'HybridAdServerGroupFormat'; label = 'Per-server group format'; default = '{prefix}AD-SRV-{server}{cloud}{marker}'; help = 'The name of the group that becomes local administrator on one server. Tokens: {prefix} {server} {cloud} {marker}. {server} is required.' }
-    [ordered]@{ name = 'HybridAdServerAdminsGroup'; label = 'Shared server-admins group'; default = ''; help = 'A group every onboarded server also gets in its local Administrators (and that the worker''s account is a member of). Blank = none.' }
-    [ordered]@{ name = 'HybridAdProtectedMembers'; label = 'Never remove'; default = ''; help = 'Comma-separated account names the sync never removes from an AD group.' }
+    [ordered]@{ name = 'HybridAdGroupMarker'; label = 'AD group marker'; naming = $true; example = '{@groupPrefix}*{value}'; default = '-S_AD'; help = 'The end of a PIM group name that marks it as ALSO an on-premises AD group. The mirrored pattern is your group prefix + * + this marker.' }
+    [ordered]@{ name = 'HybridAdGroupPattern'; label = 'Pattern override'; naming = $true; example = '{value}'; blankExample = '{@groupPrefix}*{=HybridAdGroupMarker}'; default = ''; help = 'Leave blank to derive it (prefix + * + marker). Set a full wildcard only when your AD groups do not follow that shape.' }
+    [ordered]@{ name = 'HybridAdCloudSuffix'; label = 'Cloud admin suffix'; naming = $true; example = 'Admin-ABC{=HybridAdCloudSuffix|@entraSuffix} -> Admin-ABC{=HybridAdAccountSuffix|@adSuffix}'; default = ''; help = 'The end of a cloud admin account name that is swapped for the AD suffix. Blank = the Entra suffix of your naming conventions.' }
+    [ordered]@{ name = 'HybridAdAccountSuffix'; label = 'AD admin suffix'; naming = $true; example = 'Admin-ABC{=HybridAdCloudSuffix|@entraSuffix} -> Admin-ABC{=HybridAdAccountSuffix|@adSuffix}'; default = ''; help = 'The end of the matching AD admin account. Blank = the AD suffix of your naming conventions. Only users carrying it are ever removed from an AD group.' }
+    [ordered]@{ name = 'HybridAdGroupsOu'; label = 'OU for new AD groups'; naming = $true; default = ''; help = 'Distinguished name of the OU where missing AD groups are created (OU=...,DC=...). Blank = groups are never created, only kept in sync.' }
+    [ordered]@{ name = 'HybridAdServerGroupFormat'; label = 'Per-server group format'; naming = $true; example = '{value}'; exampleTokens = [ordered]@{ prefix = '{@groupPrefix}'; server = 'FS01'; cloud = '{=HybridAdCloudSuffix|@entraSuffix}'; marker = '{=HybridAdGroupMarker}' }; default = '{prefix}AD-SRV-{server}{cloud}{marker}'; help = 'The name of the group that becomes local administrator on one server. Tokens: {prefix} {server} {cloud} {marker}. {server} is required.' }
+    [ordered]@{ name = 'HybridAdServerAdminsGroup'; label = 'Shared server-admins group'; naming = $true; default = ''; help = 'A group every onboarded server also gets in its local Administrators (and that the worker''s account is a member of). Blank = none.' }
+    [ordered]@{ name = 'HybridAdProtectedMembers'; label = 'Never remove'; naming = $false; default = ''; help = 'Comma-separated account names the sync never removes from an AD group.' }
     # 2026-10-04 scale (operator: "it could run fx 50 servers per batch"): the server lane's parallel Graph reads
-    [ordered]@{ name = 'HybridAdSyncBatchSize'; label = 'Groups per batch'; default = '50'; help = 'How many AD groups one parallel batch reads from Graph per pass (the server lane cuts its groups into batches of this size). 1-1000.' }
-    [ordered]@{ name = 'HybridAdSyncParallel'; label = 'Batches at once'; default = '8'; help = 'How many batches run at the same time (PowerShell 7 on the hybrid worker). Higher is faster until Graph starts throttling. 1-64.' }
+    [ordered]@{ name = 'HybridAdSyncBatchSize'; label = 'Groups per batch'; naming = $false; default = '50'; help = 'How many AD groups one parallel batch reads from Graph per pass (the server lane cuts its groups into batches of this size). 1-1000.' }
+    [ordered]@{ name = 'HybridAdSyncParallel'; label = 'Batches at once'; naming = $false; default = '8'; help = 'How many batches run at the same time (PowerShell 7 on the hybrid worker). Higher is faster until Graph starts throttling. 1-64.' }
 )
 
 function Get-PimHybridAdSettingCatalog { return $script:PimHybridAdSettingCatalog }

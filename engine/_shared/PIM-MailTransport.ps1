@@ -18,6 +18,9 @@
   replaces the Key Vault read. PS 5.1 + 7.
 #>
 Set-StrictMode -Off
+# SCRIPT-DOC-1 (framework 12.7 + 12.10 item 11): every command this file builds for a person to run comes from the ONE
+# command form in tools\setup\_PimScriptDoc.ps1 -- save, verify the checksum, read the documentation page, run.
+. (Join-Path $PSScriptRoot '..\..\tools\setup\_PimScriptDoc.ps1')
 
 function Get-PimMailModeCatalog { @('none', 'sharedMailbox', 'smtp') }
 function Get-PimSmtpRelayDefaultSecretName { 'PIM-SmtpRelayPassword' }
@@ -141,6 +144,8 @@ function New-PimSmtpMailMessage {
     foreach ($a in @($Attachments | Where-Object { $_ -and $_.bytes -and "$($_.name)".Trim() })) {
         $ct = if ("$($a.contentType)".Trim()) { "$($a.contentType)" } else { 'application/octet-stream' }
         $att = New-Object System.Net.Mail.Attachment((New-Object System.IO.MemoryStream(, [byte[]]$a.bytes)), "$($a.name)", $ct)
+        # MAIL-2: an inline image (the logo, <img src="cid:pim-logo">) is sent with its Content-ID and an inline disposition
+        if ("$($a.contentId)".Trim()) { $att.ContentId = "$($a.contentId)".Trim(); if ($a.isInline) { $att.ContentDisposition.Inline = $true } }
         $m.Attachments.Add($att)
     }
     return $m
@@ -238,6 +243,9 @@ function Get-PimMailSetupState {
 # amber on Home and a skippable Get Started step -- it never turns anything red and never fails an install.
 # A line is @{ id; title; state = ok | missing | failed | unproven | unknown; detail; fix }. 'unproven' = "not proven
 # yet": the check never GUESSES that a send right works -- only the identity's own last real send (or test mail) proves it.
+# 'waiting' (MAIL-STEP-PROOF, owner 2026-10-09) = the ENGINE job's send right is not proven yet: an INFO line that counts as
+# complete (the customer cannot prove it on demand; Send test mail queues an engine test send). Only a recorded engine
+# send FAILURE turns that row red.
 # =====================================================================================================================
 $script:PimGraphMailSendAppRoleId = 'b633e1c5-b582-4048-a93e-9f11b44c7e96'   # Microsoft Graph application permission Mail.Send
 
@@ -256,13 +264,13 @@ function Get-PimMailSetupCommand {
     if ($Kind -eq 'mailbox') {
         $run = '.\Initialize-PimMailSender.ps1 -TenantId ' + (& $v (& $g $Setup 'tenantId') '<tenant id>') + ' -ManagedIdentityObjectId ' + $miArg +
                ' -SqlServerFqdn ' + (& $v (& $g $Setup 'sqlServer') '<server>.database.windows.net')
-        return @('Invoke-WebRequest https://invardia.com/support/pim/Initialize-PimMailSender.ps1 -OutFile Initialize-PimMailSender.ps1', $run)
+        return @(Get-PimSupportScriptCommand -Script 'Initialize-PimMailSender' -Run @($run))
     }
     $vault = & $v (& $g $Smtp 'vaultName') (& $v (& $g $Setup 'vaultHint') '<key vault name>')
     $sec = & $g $Smtp 'secretName'
     $run = '.\Set-PimSmtpRelayPassword.ps1 -TenantId ' + (& $v (& $g $Setup 'tenantId') '<tenant id>') + ' -SubscriptionId ' + (& $v (& $g $Setup 'subscriptionId') '<subscription id>') +
            ' -VaultName ' + $vault + $(if ($sec -and $sec -ne (Get-PimSmtpRelayDefaultSecretName)) { " -SecretName $sec" } else { '' }) + ' -ManagedIdentityObjectId ' + $miArg
-    return @('Invoke-WebRequest https://invardia.com/support/pim/Set-PimSmtpRelayPassword.ps1 -OutFile Set-PimSmtpRelayPassword.ps1', $run)
+    return @(Get-PimSupportScriptCommand -Script 'Set-PimSmtpRelayPassword' -Run @($run))
 }
 
 function Get-PimMailSendProofVerdict {
@@ -290,6 +298,9 @@ function Get-PimMailCheck {
         identities    @(@{ role = engine|manager; label; proof; tenantWideMailSend = $true|$false|$null })
         smtpPassword  @{ readable = $true|$false|$null; reason }        -- the Manager reading the secret (never its value)
         setup         the values the fix commands carry (tenantId, managerObjectId, tickObjectId, subscriptionId, sqlServer, vaultHint)
+        engineTest    the engine test request (pim.Settings 'MailEngineTest') -- only words the engine row while it waits
+        setupCheck    the mail-sender script's read-back (pim.Settings 'MailSenderSetupCheck'): with the Manager's successful
+                      test mail it grants the engine row at once (Get-PimMailSetupCheckVerdict)
       Returns @{ mode; complete; lines[]; summary }. complete = every line ok. Mail is optional: the caller shows an
       incomplete check as amber / a skippable step, never red.
     #>
@@ -345,7 +356,23 @@ function Get-PimMailCheck {
             switch ($pv.state) {
                 'ok'     { & $add "mail-send-$role" $title 'ok' "$(if ($lbl) { "$lbl -- " })$($pv.detail)" '' }
                 'failed' { & $add "mail-send-$role" $title 'failed' "$(if ($lbl) { "$lbl -- " })$($pv.detail)" $mbFix }
-                default  { & $add "mail-send-$role" $title 'unproven' "$(if ($lbl) { "$lbl -- " })$($pv.detail) -- $prove (no guess: only a real send proves the scoped send right)" "$prove`nIf it fails: $mbFix" }
+                default  {
+                    $sc = if ($role -eq 'engine') { Get-PimMailSetupCheckVerdict -SetupCheck (& $f 'setupCheck') -Sender $sender -Setup $setup -ManagerProof (& $gv (@($ids | Where-Object { "$(& $gv $_ 'role')" -eq 'manager' }) | Select-Object -First 1) 'proof') } else { $null }
+                    if ($sc -and $sc.ok) {
+                        # MAIL-STEP-PROOF (owner 2026-10-09: "why dont you trigger somehing or accept that we just did a test
+                        # mail"): the setup script's read-back confirmed the scoped Mail.Send for BOTH identities in ONE scope
+                        # on this mailbox, and the Manager's own test mail through it succeeded -> granted, at once.
+                        & $add "mail-send-$role" $title 'ok' "$(if ($lbl) { "$lbl -- " })$($sc.detail)" ''
+                    } elseif ($role -eq 'engine') {
+                        # MAIL-STEP-PROOF (owner 2026-10-09: "i have run 3 cmdlet, and test mail works - but it still shows
+                        # eros"): the engine job cannot be proven by the customer on demand -- only its own send proves it. Not
+                        # proven yet is therefore an INFO line ('waiting'): it never makes the step "not done", shows no "If it
+                        # fails" command, and only a RECORDED engine failure ('failed' above) turns it red.
+                        & $add "mail-send-$role" $title 'waiting' "$(if ($lbl) { "$lbl -- " })$(Get-PimMailEngineWaitingDetail -EngineTest (& $f 'engineTest') -Sender $sender -StaleProof:($pv.detail -match 'other settings'))" ''
+                    } else {
+                        & $add "mail-send-$role" $title 'unproven' "$(if ($lbl) { "$lbl -- " })$($pv.detail) -- $prove (no guess: only a real send proves the scoped send right)" "$prove`nIf it fails: $mbFix"
+                    }
+                }
             }
         }
         $tw = @($ids | Where-Object { (& $gv $_ 'tenantWideMailSend') -eq $true } | ForEach-Object { "$(& $gv $_ 'label')" })
@@ -357,10 +384,64 @@ function Get-PimMailCheck {
     $rec = @(@(& $f 'alertRecipients') | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if ($rec.Count) { & $add 'mail-alerts' 'Alert recipients' 'ok' ($rec -join ', ') '' }
     else { & $add 'mail-alerts' 'Alert recipients' 'missing' 'nobody receives the alerts' 'PIM Manager > Settings > Alerting > Recipients (Get Started > Alert recipients)' }
-    $notOk = @($lines | Where-Object { $_.state -ne 'ok' })
-    $summary = if (-not $notOk.Count) { 'mail: every prerequisite is in place and proven' }
+    # MAIL-STEP-PROOF: 'waiting' (the engine job's first send has not happened yet) is information, not an open item --
+    # complete = every line ok OR waiting; proven = every line ok.
+    $notOk = @($lines | Where-Object { $_.state -ne 'ok' -and $_.state -ne 'waiting' })
+    $waiting = @($lines | Where-Object { $_.state -eq 'waiting' })
+    $summary = if (-not $notOk.Count -and -not $waiting.Count) { 'mail: every prerequisite is in place and proven' }
+               elseif (-not $notOk.Count) { "mail: every prerequisite is in place -- waiting for the engine's first send to prove its send right (not a problem)" }
                else { "mail: $($notOk.Count) of $($lines.Count) not complete -- $(@($notOk | ForEach-Object { $_.title }) -join ', ')" }
-    return [pscustomobject][ordered]@{ mode = $mode; complete = (-not $notOk.Count); lines = @($lines.ToArray()); summary = $summary }
+    return [pscustomobject][ordered]@{ mode = $mode; complete = (-not $notOk.Count); proven = (-not $notOk.Count -and -not $waiting.Count); waiting = $waiting.Count; lines = @($lines.ToArray()); summary = $summary }
+}
+
+function Get-PimMailSetupCheckVerdict {
+    <#
+      PURE (MAIL-STEP-PROOF). Is the ENGINE job's send right confirmed without an engine send? Yes only when ALL hold:
+        * -SetupCheck (pim.Settings 'MailSenderSetupCheck', stored by Initialize-PimMailSender from its read-back) is ok,
+          for THIS sender, and names ONE scope;
+        * it lists BOTH sending identities -- the Manager's and the engine job's object ids as this Manager knows them
+          (-Setup managerObjectId / tickObjectId; an unknown id = not confirmed);
+        * the Manager's own last send (-ManagerProof: its test mail) through this mailbox SUCCEEDED.
+      Returns @{ ok; detail }.
+    #>
+    param([AllowNull()]$SetupCheck, [string]$Sender, [AllowNull()]$Setup, [AllowNull()]$ManagerProof)
+    $g = { param($o, $n) if ($null -eq $o) { $null } elseif ($o -is [System.Collections.IDictionary]) { $o[$n] } elseif ($o.PSObject.Properties[$n]) { $o.$n } else { $null } }
+    $no = { param($why) @{ ok = $false; detail = $why } }
+    if ($SetupCheck -is [string]) { try { $SetupCheck = $SetupCheck | ConvertFrom-Json } catch { $SetupCheck = $null } }
+    if ($null -eq $SetupCheck -or -not ("$(& $g $SetupCheck 'ok')" -match '(?i)^true$')) { return (& $no 'no confirmed setup check') }
+    if ("$(& $g $SetupCheck 'sender')".Trim() -ine "$Sender".Trim()) { return (& $no 'the setup check was for another mailbox') }
+    $scope = "$(& $g $SetupCheck 'scope')".Trim()
+    if (-not $scope) { return (& $no 'the setup check names no scope') }
+    $oids = @(@(& $g $SetupCheck 'identities') | ForEach-Object { "$(& $g $_ 'objectId')".Trim().ToLowerInvariant() } | Where-Object { $_ })
+    $mgr = "$(& $g $Setup 'managerObjectId')".Trim().ToLowerInvariant(); $eng = "$(& $g $Setup 'tickObjectId')".Trim().ToLowerInvariant()
+    if (-not $mgr -or -not $eng -or $oids -notcontains $mgr -or $oids -notcontains $eng) { return (& $no 'the setup check does not cover both sending identities') }
+    $mp = Get-PimMailSendProofVerdict -Proof $ManagerProof -Mode 'sharedMailbox' -Sender $Sender
+    if ($mp.state -ne 'ok') { return (& $no "the Manager's test mail has not succeeded through this mailbox") }
+    $at = "$(& $g $SetupCheck 'at')".Trim()
+    return @{ ok = $true; detail = "granted -- confirmed by the setup check (scoped Mail.Send for both identities in $scope$(if ($at) { ", $at" })) and the test mail" }
+}
+
+function Get-PimMailEngineWaitingDetail {
+    <#
+      PURE (MAIL-STEP-PROOF). The INFO text of the engine row while the engine job has not proven its send right yet, from
+      the engine test request the Manager queued (pim.Settings 'MailEngineTest': @{ status = queued | sending | sent | failed;
+      queuedUtc; to; sender; at; reason }). A request for another sender is ignored (the mailbox changed since).
+    #>
+    param([AllowNull()]$EngineTest, [string]$Sender, [switch]$StaleProof)
+    $g = { param($n) if ($null -eq $EngineTest) { $null } elseif ($EngineTest -is [System.Collections.IDictionary]) { $EngineTest[$n] } elseif ($EngineTest.PSObject.Properties[$n]) { $EngineTest.$n } else { $null } }
+    $base = "waiting for the engine's first send$(if ($StaleProof) { ' with these settings' })"
+    $st = "$(& $g 'status')".Trim().ToLowerInvariant()
+    $ts = "$(& $g 'sender')".Trim()
+    if ($EngineTest -and $st -and (-not $ts -or -not "$Sender".Trim() -or $ts -ieq "$Sender".Trim())) {
+        $to = "$(& $g 'to')".Trim(); $q = "$(& $g 'queuedUtc')".Trim()
+        switch ($st) {
+            'queued'  { return "$base -- engine test mail queued$(if ($q) { " $q" })$(if ($to) { " to $to" }); proven in about a minute" }
+            'sending' { return "$base -- the engine is sending its test mail$(if ($to) { " to $to" }) now" }
+            'sent'    { return "$base -- the engine reported its test mail sent$(if ("$(& $g 'at')".Trim()) { " ($("$(& $g 'at')".Trim()))" }); its proof is read on the next check" }
+            'failed'  { return "$base -- the engine test mail was not sent: $("$(& $g 'reason')".Trim()) (this is not a refused send right; Send test mail queues a new one)" }
+        }
+    }
+    return "$base -- Send test mail (Get Started > Mail sender) queues an engine test mail; a TAP code, a reminder or an alert proves it too"
 }
 
 function Test-PimTenantWideMailSend {

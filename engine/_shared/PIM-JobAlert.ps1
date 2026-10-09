@@ -346,7 +346,13 @@ function Send-PimJobAlertViaNotify {
         WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
     }
     $sent = 0; $lastReason = ''
-    foreach ($rcpt in $cfg.recipients) {
+    # MAIL-2 item 2: each recipient's Notifications -- this alert on/off and their severity floor, read at send time.
+    $alertRcpts = @($cfg.recipients)
+    if ((Get-Command Get-PimMailNotificationPrefsFromStore -ErrorAction SilentlyContinue) -and (Get-Command Select-PimNotificationRecipients -ErrorAction SilentlyContinue)) {
+        $alertRcpts = @((Select-PimNotificationRecipients -Prefs (Get-PimMailNotificationPrefsFromStore) -Recipients $alertRcpts -Type $Event -Kind 'alert').keep)
+        if (-not $alertRcpts.Count) { return $true }   # handled: every recipient switched this alert off (or it is below their floor)
+    }
+    foreach ($rcpt in $alertRcpts) {
         try {
             $r = Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $rcpt
             if ($r.sent) { $sent++ } elseif ($r.reason) { $lastReason = "$($r.reason)" }

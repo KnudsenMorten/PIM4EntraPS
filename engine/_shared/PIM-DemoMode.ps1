@@ -18,9 +18,10 @@
     * DEFAULT DENY for writes. A demo viewer's request is allowed only when its method is a read (GET / HEAD / OPTIONS)
       or it is one of a short, named list of pure computations (Get-PimDemoPreviewRoutes) that write nothing. A route
       added to the Manager later is therefore refused for a demo viewer until somebody decides otherwise.
-    * Membership that cannot be checked is treated as membership (fail CLOSED): with demo mode on, a viewer whose
-      membership cannot be determined is a demo viewer. A demo environment that cannot tell a visitor from an
-      operator must refuse the write, not allow it.
+    * A demo group that cannot be READ makes NOBODY a demo viewer (ACC-1, owner-approved 2026-10-09): every signed-in
+      person keeps their own role -- a visitor without one is refused by the normal access check, an administrator
+      keeps working -- a warning is logged and Home shows it. (It used to make everyone, SuperAdmins too, a demo
+      viewer: one failed Graph read took an environment away from its administrators.)
 #>
 
 function Get-PimDemoDefaultGuestGroup { 'Invardia-Demo-Guests' }

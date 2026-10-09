@@ -1,0 +1,60 @@
+{
+  "script": "Install-PimManager.ps1",
+  "product": "pim",
+  "title": "Install PIM Manager (guided install)",
+  "purpose": "Install PIM Manager into your own Azure subscription in one guided run: check the answers and the licence, check your sign-in, rights and subscription, deploy PIM Manager, register the licence, give the Invardia Support app its access when you named one, and verify the installation.",
+  "whenToRun": "Once, to install PIM Manager -- normally started for you by Invardia's installer (Azure Cloud Shell or PowerShell on Windows) with the answers from the installation wizard. Run it again with -Resume after fixing a failed step. Run it with -WhatIf first to see the checks and every step without changing anything.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Install-PimManager.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Owner", "scope": "the target subscription", "why": "The deploy creates the resource group and its resources and assigns Azure roles to the identities it creates (Contributor + User Access Administrator is the equivalent). The check 'preflight-rights' refuses without it and prints the az role assignment create --role Owner command for a subscription Owner." },
+    { "kind": "entraRole", "name": "Privileged Role Administrator", "scope": "tenant", "why": "Microsoft Graph application permissions for the engine and Manager identities, the role-assignable SQL admin group, the Invardia Support app's group membership. Global Administrator also works. Without an Entra admin role the install continues with a warning and the command for the right person." },
+    { "kind": "entraRole", "name": "Application Administrator", "scope": "tenant", "why": "The Manager's sign-in app registration and, at support level 'setup', ownership of PIM's own app registrations for the Invardia Support app (so its Application.ReadWrite.OwnedBy is enough later)." },
+    { "kind": "exchange", "name": "Exchange Administrator", "scope": "Exchange Online (optional)", "why": "Only for the mail sender (shared mailbox + its scoped send right). Without it the step is a warning with the command for an Exchange Administrator." },
+    { "kind": "other", "name": "Signed in to az as yourself (or the Invardia Support app session opened by Invardia's connect script)", "scope": "the tenant and subscription in the answers", "why": "Never a secret or certificate: a service principal, another tenant or another subscription is refused before anything is touched. When the Invardia Support app installs, it needs Owner on the subscription and the Graph application permissions RoleManagement.ReadWrite.Directory, AppRoleAssignment.ReadWrite.All and DelegatedPermissionGrant.ReadWrite.All (granted by Invardia's New-InvardiaSupportApp.ps1, checked here)." }
+  ],
+  "changes": [
+    { "target": "Invardia", "action": "create", "object": "the enrollment of this tenant (only with an enrollment key)", "why": "Invardia creates the environment under your account, signs the licence and issues the install key.", "undo": "Ask Invardia support to remove the environment." },
+    { "target": "Azure", "action": "create", "object": "the whole PIM Manager deployment (Invoke-PimDeployAll.ps1, signed in, external Container Apps): resource group, virtual network, container registry, Log Analytics, Azure SQL server + database, managed identities, Container Apps environment, the Manager app, the tick, bootstrap and updater jobs", "why": "PIM Manager runs entirely in your own subscription.", "undo": "Delete the resource group (export the database first). The deploy's own page lists every object: https://invardia.com/docs/pim/scripts/Invoke-PimDeployAll/" },
+    { "target": "Microsoft Graph", "action": "grant", "object": "the tick job identity (engine set) and the Manager identity (read-only set)", "permission": "Microsoft Graph application permissions -- the engine set (role, group and PIM-for-Groups assignment, role-assignable groups, administrative units, Temporary Access Passes, access reviews, Defender and Intune roles; RoleManagement.ReadWrite.Directory, AppRoleAssignment.ReadWrite.All, ...) and the read-only set; never a tenant-wide Mail.Send", "scope": "tenant", "why": "The engine applies the access you define; the Manager only reads.", "undo": "Remove the app role assignments of the identities (Enterprise applications > Permissions)." },
+    { "target": "Azure RBAC", "action": "grant", "object": "the managed identities", "permission": "AcrPull (registry), Reader (subscription; tenant root management group for the engine), Contributor (the updater, on the resource group)", "scope": "registry / subscription / tenant root / resource group", "why": "Image pull without passwords, Azure discovery, the nightly update.", "undo": "Remove the role assignments." },
+    { "target": "Entra ID", "action": "create", "object": "group grp-pim-sql-admins (role-assignable) as the SQL server's Entra admin; you (the person installing) are added as a member", "why": "The store steps connect to Azure SQL as you; the group is the one admin of the store.", "undo": "Remove yourself from the group; set another admin and delete it." },
+    { "target": "Azure SQL", "action": "grant", "object": "database users (CREATE USER from each identity's application id)", "permission": "db_datareader, db_datawriter, db_ddladmin", "scope": "the PIM database", "why": "The containers read and write the store and apply the schema.", "undo": "DROP USER [<name>]." },
+    { "target": "Entra ID", "action": "create", "object": "the Manager's sign-in app registration with delegated sign-in consent, assignment required; the portal users from the answers assigned (appRoleAssignedTo), or a members-only group", "why": "Only the people you named sign in to the Manager.", "undo": "Delete the app registration and the group." },
+    { "target": "Azure SQL", "action": "update", "object": "pim.Settings: ManagerAccess (the superAdmins, or you), feature gates, alert recipients", "why": "A new installation has an administrator and working alerts from the start.", "undo": "Change them in the Manager's Settings." },
+    { "target": "Azure SQL", "action": "update", "object": "pim.Settings License + InvardiaInstallKey (Set-PimLicense.ps1)", "why": "The Pro features switch on with the licence; the install key lets the installation fetch its updates from Invardia.", "undo": "Remove the licence in Settings > Licence." },
+    { "target": "Azure SQL", "action": "grant", "object": "the Invardia Support app (only when the answers name one; Grant-PimSupportAccess.ps1), level troubleshoot", "permission": "a contained database user with db_datareader + VIEW DEFINITION", "scope": "the PIM database", "why": "Invardia support can read the store and its schema to help you, nothing else.", "undo": "Grant-PimSupportAccess.ps1 -Remove (or DROP USER [invardia-support])." },
+    { "target": "Entra ID", "action": "grant", "object": "the Invardia Support app, level setup only", "permission": "member of grp-pim-sql-admins (members/$ref) + owner of PIM's own app registrations and groups (owners/$ref): the Manager's sign-in app, the access request API app, the members group, the SQL admin group", "scope": "those objects only", "why": "Invardia support can repair the installation; as owner its Application.ReadWrite.OwnedBy is enough.", "undo": "Grant-PimSupportAccess.ps1 -Remove takes back the membership, the ownerships and the database user." },
+    { "target": "Exchange Online", "action": "create", "object": "the shared sender mailbox + an Exchange RBAC send right (Application Mail.Send) scoped to that one mailbox for the Manager and tick identities (only with Exchange Administrator)", "why": "Notification mail is sent by the solution's own identities from one mailbox only.", "undo": "Remove the management role assignment and scope, then the mailbox." },
+    { "target": "Local machine", "action": "create", "object": "the state file state.json and verify-install.json in the state folder (clouddrive/invardia/<install id> in Cloud Shell, else your home folder); the enrollment key is removed from config.json once the licence is registered", "why": "-Resume continues where a run stopped; the key is a bearer secret and must not stay on disk.", "undo": "Delete the state folder." }
+  ],
+  "parameters": [
+    { "name": "ConfigPath", "required": true, "default": null, "help": "The answers (config.json) from the installation wizard." },
+    { "name": "LicencePath", "required": false, "default": null, "help": "The licence file; not needed with an enrollment key." },
+    { "name": "Reporter", "required": false, "default": null, "help": "Callback that receives every step event (Invardia's installer uses it to report progress)." },
+    { "name": "StatePath", "required": false, "default": "clouddrive/invardia/<install id> (Cloud Shell) or ~/invardia/<install id>", "help": "Folder for the resume state." },
+    { "name": "Resume", "required": false, "default": false, "help": "Continue a stopped installation; completed checks and steps are skipped." },
+    { "name": "PreflightOnly", "required": false, "default": false, "help": "Run only the checks." },
+    { "name": "EnrollmentKey", "required": false, "default": null, "help": "Invardia enrollment key instead of a licence file (never printed; removed from config.json after use)." },
+    { "name": "InvardiaBaseUrl", "required": false, "default": "https://invardia.com", "help": "Invardia address for the enrollment." },
+    { "name": "EnrollmentTimeoutSeconds", "required": false, "default": 900, "help": "How long to wait for Invardia to sign the licence." }
+  ],
+  "readsOnly": [
+    "Checks: az account show / get-access-token (who you are, tenant, subscription), your Azure role assignments on the subscription, your directory roles (transitiveMemberOf: Global Administrator, Privileged Role Administrator, Application Administrator), the resource providers, the resource group, the SQL server and registry names, Azure SQL capabilities in the region.",
+    "After the deploy: the tick job's identity, the Manager's address, the SQL server and Log Analytics ids for the outputs; the end-of-install check reads every result back (SuperAdmins, updater, licence, mail sender, alerts, engine rights, sign-in, the SQL window) and repairs what it can -- a required line that would fail stops the install with its fix.",
+    "Database role db_owner is only checked, never granted."
+  ],
+  "network": [
+    "management.azure.com",
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+    "<server>.database.windows.net (TCP 1433)",
+    "<registry>.azurecr.io",
+    "outlook.office365.com (Exchange Online admin API, mail sender)",
+    "invardia.com (only with an enrollment key: the claim and the licence poll)",
+    "the Azure CLI extension index (azcliextensionsync.blob.core.windows.net): az installs its 'containerapp' extension once when missing -- az's own download, checked against the index's sha256"
+  ],
+  "whatIf": "Runs the checks (reads only) and then prints what the installation would do, step by step, including the deploy's own plan with every object, permission and scope -- and stops before the first change: no Invardia claim, no Azure / Entra ID / SQL / Exchange change, no state file. The end-of-install check repairs, so it is named but not run.",
+  "undo": "Delete the resource group (export the database first), the Entra objects the deploy created (the Manager's sign-in app, grp-pim-sql-admins, the members group), the Reader assignment at the tenant root management group, the Exchange scoped send right and mailbox; Grant-PimSupportAccess.ps1 -Remove takes back the Invardia Support app's access.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Install-PimManager/"
+}

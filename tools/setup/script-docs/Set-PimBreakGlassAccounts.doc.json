@@ -1,0 +1,41 @@
+{
+  "script": "Set-PimBreakGlassAccounts.ps1",
+  "product": "pim",
+  "title": "Set the break-glass accounts (operator route)",
+  "purpose": "Replaces the list of break-glass (emergency) accounts that PIM Manager never disables, revokes or offboards, writing it straight to the environment's store with a justification; for when the normal two-person route in PIM Manager cannot be used.",
+  "whenToRun": "Only when the Manager's own route (one SuperAdmin requests, a second approves) cannot work: an environment with a single SuperAdmin, or a Manager that is down while an emergency account must be protected now. PIM Manager points the only SuperAdmin to this script.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Set-PimBreakGlassAccounts.ps1",
+  "runAs": [
+    { "kind": "other", "name": "Member of the environment's SQL admin group (grp-pim-sql-admins), signed in with az login", "scope": "the environment's SQL database", "why": "The list lives in pim.Settings and every write is audited; only the SQL admin group may write it. With -UseSignedInAccount the signed-in az user is used. Alternatively the admin application's certificate (-AdminAppId + -AdminCertThumbprint), or a ready -ConnectionString to a local SQL Server." }
+  ],
+  "changes": [
+    { "target": "Environment SQL database", "action": "update", "object": "pim.Settings row 'BreakGlassAccounts' (the complete list of UPNs / object ids)", "scope": "this environment: PIM Manager and its engine", "why": "Accounts on the list are exempt from every disable, revoke and offboard PIM does. Written compare-and-set against the list just read, then read back.", "undo": "Run the script again with the previous list (it is printed as 'stored now' at the start of every run)." },
+    { "target": "Environment SQL database", "action": "create", "object": "pim.AuditEvents event 'breakglass.accounts.set' (actor, ActorSource 'setup', justification, added and removed accounts)", "scope": "this environment's audit trail", "why": "Every change to the emergency list is audited with who and why.", "undo": "None -- the audit trail is append-only by design." },
+    { "target": "Local file (only with -OutFile)", "action": "create", "object": "the result file named by -OutFile", "scope": "this computer", "why": "For a caller that reads the outcome.", "undo": "Delete the file." }
+  ],
+  "parameters": [
+    { "name": "Accounts", "required": true, "default": null, "help": "The COMPLETE new list (UPNs and/or object ids). It replaces the stored list." },
+    { "name": "Justification", "required": true, "default": null, "help": "Why -- recorded on the audit event." },
+    { "name": "ConfirmEmpty", "required": false, "default": false, "help": "Required to store an EMPTY list (it removes the protection from every emergency account)." },
+    { "name": "ConnectionString", "required": false, "default": null, "help": "A ready connection string to the store (e.g. a local SQL Server with Integrated security) instead of -SqlServer." },
+    { "name": "SqlServer", "required": false, "default": null, "help": "The store's server (alias -SqlServerFqdn). An Azure SQL FQDN connects with a token." },
+    { "name": "Database", "required": false, "default": "PimPlatform", "help": "The database (alias -SqlDatabase)." },
+    { "name": "TenantId", "required": false, "default": null, "help": "The tenant id; required for an Azure SQL store." },
+    { "name": "UseSignedInAccount", "required": false, "default": false, "help": "Reach the store as the signed-in az user (a member of the SQL admin group). The recommended way." },
+    { "name": "AdminAppId", "required": false, "default": null, "help": "Automation: the admin application's client id (with -AdminCertThumbprint)." },
+    { "name": "AdminCertThumbprint", "required": false, "default": null, "help": "Automation: the thumbprint of the admin application's certificate in the local machine store." },
+    { "name": "OutFile", "required": false, "default": null, "help": "Write the outcome as JSON to this file." }
+  ],
+  "readsOnly": [
+    "pim.Settings 'BreakGlassAccounts' (the stored list and its snapshot hash; a store that cannot be read is not written)",
+    "the PIM Manager's open break-glass change request, if any (reported: it will be refused as stale after this write)"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in / token for Azure SQL)",
+    "<server>.database.windows.net:1433 (or the SQL Server in -ConnectionString)"
+  ],
+  "whatIf": "Validates the entries, reads the stored list, prints what would be added and removed, 'What if: Performing the operation \"replace the break-glass account list with: <accounts> (audited as 'breakglass.accounts.set')\" on target \"pim.Settings['BreakGlassAccounts'] in <server>/<database>\"' and 'What if: would store N account(s) ...'. Nothing is written and no audit event is recorded.",
+  "undo": "Run the script again with the list it printed as 'stored now' and a justification. The audit events stay.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Set-PimBreakGlassAccounts/"
+}

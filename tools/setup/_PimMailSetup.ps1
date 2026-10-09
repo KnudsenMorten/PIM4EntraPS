@@ -159,10 +159,10 @@ function Get-PimMsInteractiveToken {
     try {
         $edge = if ($UseEdge) { Get-PimMsEdgePath } else { $null }
         Write-Host "Signing in for $What -- the browser answers to $redirect ..." -ForegroundColor Yellow
-        if ($edge) { Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl) }
+        if ($edge) { Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl) -WhatIf:$false }
         else {
             if ($UseEdge) { Write-Host 'Microsoft Edge not found -- using the default browser.' -ForegroundColor DarkYellow }
-            Start-Process $authUrl
+            Start-Process $authUrl -WhatIf:$false
         }
         Write-Host "If no browser opened, open this address yourself:`n  $authUrl" -ForegroundColor DarkGray
         $deadline = (Get-Date).AddMinutes(5)

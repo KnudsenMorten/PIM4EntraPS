@@ -1,12 +1,17 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
-  IMP-06 -- make an environment able to send its own notification mail, UNATTENDED.
+  Set up the shared mailbox PIM Manager sends its notification mail from: create the mailbox, give each sending identity a send right scoped to that one mailbox (Exchange RBAC for applications), remove any tenant-wide Microsoft Graph Mail.Send from those identities, and store the sender in the PIM store.
 
 .DESCRIPTION
+  IMP-06 / MAIL-1 -- make an environment able to send its own notification mail, UNATTENDED.
+  Run it with -WhatIf first: it signs in, reads, and prints every change it would make (mailbox, Exchange
+  registration, scope, scoped send right, revoked tenant-wide Mail.Send, the stored setting) without making any.
+
   Operator directive 2026-08-12: *"the onboarding scripts must handle this prep unattended"*. Doing
   these steps by hand in a portal is the DEFECT, not the workaround: every future tenant would
-  otherwise land in the state EFIF was in -- engine provisions fine, mail never sends, and nothing
+  otherwise land in the state a test tenant was in -- engine provisions fine, mail never sends, and nothing
   reports an error.
 
   Why "nothing reports an error" is the whole point. With no sender configured the notify path
@@ -22,7 +27,7 @@
        🪤 `assignedPlans` reporting `exchange = Enabled` is NOT the signal. EXCHANGE_S_FOUNDATION
        rides along with Entra P2 and reports exactly that while mailbox creation is impossible --
        it provisions directory objects only. The signal is an Exchange service plan in
-       `subscribedSkus` BEYOND Foundation (e.g. EXCHANGE_S_STANDARD). Measured on EFIF: the org
+       `subscribedSkus` BEYOND Foundation (e.g. EXCHANGE_S_STANDARD). Measured on a test tenant: the org
        looked mail-capable and `New-Mailbox -Shared` would still have failed, for a reason the
        status does not hint at.
     1. CREATE THE SHARED SENDER MAILBOX (default `PIM-Engine@<initial domain>`). A shared mailbox
@@ -33,7 +38,7 @@
 
   ⚠️ STEPS 2 AND 3 ARE INVERTED FROM IMP-06 AS WRITTEN, and the inversion is load-bearing.
   The finding said "grant Mail.Send, then scope it with an Application Access Policy". Measured in
-  EFIF, doing exactly that leaves the app UNSCOPED: Exchange RBAC does not RESTRICT a tenant-wide
+  a test tenant, doing exactly that leaves the app UNSCOPED: Exchange RBAC does not RESTRICT a tenant-wide
   Graph consent, it GRANTS scoped access in its own right, and a tenant-wide consent alongside it
   keeps winning. Proven both directions, ~60 minutes apart so propagation is not the explanation:
     * WITH the Graph consent    -- in-scope send ACCEPTED, out-of-scope send ACCEPTED  (unscoped)
@@ -52,7 +57,7 @@
   itself to Global Administrator + Owner, so it is the correct holder of a transient Exchange grant.
   Net result: the engine SPN ends up with `Mail.Send` SCOPED TO ONE MAILBOX and nothing else.
 
-  Measured on EFIF before this script existed: the engine SPN held ~100 Graph app-roles but NOT
+  Measured on a test tenant before this script existed: the engine SPN held ~100 Graph app-roles but NOT
   Mail.Send, NOT Exchange.ManageAsApp, and no directory role at all -- its EXO token came back with
   an empty `roles` claim and the admin endpoint answered 401.
 
@@ -73,15 +78,33 @@
   Published standalone at https://invardia.com/support/pim/Initialize-PimMailSender.ps1 (Build-PimSupportScripts.ps1).
 
 .PARAMETER OutFile
-  Where to write the result JSON ({ ok, sender, ... }). This is how the orchestrator gets the sender
-  UPN back: each onboarding step runs in its OWN process with stdout redirected to a log, so a
-  return value cannot travel any other way. Initialize-PlatformEnvironment reads it and passes the
-  UPN to Setup-PimContainers as -MailSender.
+  Where to write the result JSON ({ ok, sender, ... }). This is how a calling deploy gets the sender
+  UPN back: each setup step runs in its OWN process with stdout redirected to a log, so a
+  return value cannot travel any other way.
+
+.PARAMETER MailboxName
+  The mailbox name (the part before the @) -- your company's naming. Default PIM-Engine.
+
+.PARAMETER MailDomain
+  The mailbox domain, one of the tenant's verified domains. Default: the tenant's initial (onmicrosoft.com) domain.
+
+.PARAMETER DisplayName
+  The mailbox display name (what recipients see as the sender). Default 'PIM Manager (notifications)'.
+
+.PARAMETER ScopeName
+  The Exchange management scope name. Default '<MailboxName>-SendScope'; an existing scope for this mailbox is kept.
+
+.PARAMETER AssignmentNamePrefix
+  The prefix of the Exchange role-assignment names ('<prefix>-<short id>-MailSend'). Default: the mailbox name.
+
+.PARAMETER AllowThisIpTemporarily
+  Opt-in: if the PIM database refuses this computer (SQL firewall), add a temporary rule for this IP, save the sender,
+  and always remove the rule again. Without it, no firewall rule is changed and PIM Manager finishes the step.
 
 .EXAMPLE
   # A person (Exchange or Global Administrator), browser sign-in -- what PIM Manager's Get Started prints:
-  .\Initialize-PimMailSender.ps1 -TenantId <tid> -ManagedIdentityObjectId <managerMiObjectId>,<tickMiObjectId> `
-       -SqlServerFqdn <server>.database.windows.net
+  .\Initialize-PimMailSender.ps1 -TenantId <tid> -MailboxName pim-notify -MailDomain contoso.com -DisplayName 'PIM notifications' `
+       -ManagedIdentityObjectId <managerMiObjectId>,<tickMiObjectId> -SqlServerFqdn <server>.database.windows.net
 
 .EXAMPLE
   # From another process (a deploy step, a scheduled task): `pwsh -File` passes every argument as a
@@ -101,6 +124,21 @@
   attempted immediately after this script may still fail; that is Microsoft-side propagation, not a
   misconfiguration. The policy is verified as EXISTING here, which is what this script can honestly
   assert.
+
+  PERMISSIONS (full list with scope, reason and undo: Initialize-PimMailSender.doc.json / the documentation page)
+    The person running it: Exchange Administrator or Global Administrator (browser sign-in); to store the sender,
+    membership of the SQL server's admin group. With -AdminAppId + -AdminSecret the Invardia Support app needs
+    AppRoleAssignment.ReadWrite.All + RoleManagement.ReadWrite.Directory to give itself the transient grants below.
+    It creates / grants: the shared mailbox (New-Mailbox -Shared); per sending identity New-ServicePrincipal (Exchange
+    registration) and New-ManagementRoleAssignment 'Application Mail.Send' on a New-ManagementScope that matches ONLY
+    the sender mailbox; it REMOVES a tenant-wide Graph Mail.Send (application) from the sending identities and the
+    engine identity; it writes MailSender + MailMode to pim.Settings. App sign-in only: Exchange.ManageAsApp (app role)
+    and a time-bound Exchange Administrator (through PIM) on the setup app itself, and RoleManagement.ReadWrite.Directory
+    (self-heal) when the setup app lacks it.
+    Transcript: <temp>\pim-manager-logs\Initialize-PimMailSender-<utc>.log (path printed at the start and the end).
+
+.LINK
+  https://invardia.com/docs/pim/scripts/Initialize-PimMailSender/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -145,12 +183,24 @@ param(
     [string]$KeyVaultName,
     [string]$BootstrapAppId,
     [string]$BootstrapThumbprint,
+    # MAIL-NAMING (100.14, owner 2026-10-09: "companies have their own naming"): the company names the mailbox.
     # Local part of the sender mailbox. The domain is the tenant's initial (onmicrosoft.com) domain
     # unless -MailDomain says otherwise -- a freshly-onboarded tenant has no custom domain, and
-    # guessing one produces a mailbox nobody can receive from.
+    # guessing one produces a mailbox nobody can receive from. A mailbox that already exists under that address is
+    # used as it is (not created again). PIM Manager's Get Started > Mail sender prints the command with these filled in.
     [string]$MailboxName  = 'PIM-Engine',
     [string]$MailDomain,
     [string]$DisplayName  = 'PIM Manager (notifications)',
+    # The Exchange names this script creates, also the company's: the management scope (default '<MailboxName>-SendScope')
+    # and the role-assignment name prefix (default <MailboxName> -> '<prefix>-<short id>-MailSend'). A scope that already
+    # restricts to this mailbox, and assignments already held by the sending identities, are KEPT under their existing
+    # names (an install from before 2.4.538: 'PIM4EntraPS-Sender', 'PIM4EntraPS-MI-<id>-MailSend') -- never duplicated.
+    [string]$ScopeName,
+    [string]$AssignmentNamePrefix,
+    # Opt-in, off by default: when the store refuses this computer's IP (the Azure SQL firewall), add a TEMPORARY firewall
+    # rule for exactly that IP, write the sender, and ALWAYS remove the rule again (finally). Needs the signed-in person's
+    # (or app's) Azure rights on the SQL server; honours -WhatIf / -Confirm. Without it no firewall is changed.
+    [switch]$AllowThisIpTemporarily,
     # Where the sender is PERSISTED (IMP-06a runtime half). Writing it to pim.Settings is what lets
     # this script run AFTER the containers are already deployed: the store overrides the deploy-time
     # env var and a cold-booted tick Job hydrates it on its next run, so no redeploy is needed.
@@ -179,9 +229,12 @@ $ErrorActionPreference = 'Stop'
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 # Every helper is dot-sourced by a literal path relative to this script's folder, so Build-PimSupportScripts.ps1 can
 # inline it: the published file at https://invardia.com/support/pim/Initialize-PimMailSender.ps1 is ONE standalone script.
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')               # 12.7: the Documentation line + the run transcript
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')
 . (Join-Path $PSScriptRoot '_PimMailSenderPlan.ps1')          # pure planners (tested offline)
 . (Join-Path $PSScriptRoot '_PimMailSetup.ps1')               # how it signs in + the browser sign-in
+$null = Start-PimScriptRun -Script 'Initialize-PimMailSender'
+try {
 
 # EITHER a secret OR a certificate (or the signed-in az session, or the browser), never two at once. Checked before
 # anything is provisioned: this script creates a mailbox and grants Exchange rights, and finding out the credential was
@@ -229,6 +282,15 @@ if ($miParse.reason) { throw "Initialize-PimMailSender: -ManagedIdentityObjectId
 $ManagedIdentityObjectId = @($miParse.ids)
 $durCheck = Test-PimAssignmentDuration -Duration $ExchangeAdminDuration
 if (-not $durCheck.ok) { throw "Initialize-PimMailSender: -ExchangeAdminDuration: $($durCheck.reason)" }
+# MAIL-NAMING (100.14): the company's names, checked before anything is touched.
+$nameErr = Test-PimMailboxLocalPart -Value $MailboxName
+if ($nameErr) { throw "Initialize-PimMailSender: -MailboxName: $nameErr" }
+foreach ($nv in @(@{ n = 'ScopeName'; v = $ScopeName }, @{ n = 'AssignmentNamePrefix'; v = $AssignmentNamePrefix })) {
+    $e = Test-PimExoObjectName -Value $nv.v -What "-$($nv.n)"
+    if ($e) { throw "Initialize-PimMailSender: $e" }
+}
+if ("$MailDomain".Trim() -and "$MailDomain".Trim() -notmatch '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$') { throw "Initialize-PimMailSender: -MailDomain '$MailDomain' is not a domain name" }
+if (-not "$AssignmentNamePrefix".Trim()) { $AssignmentNamePrefix = ConvertTo-PimExoNamePart -Value $MailboxName }
 
 $graphResourceAppId = '00000003-0000-0000-c000-000000000000'   # Microsoft Graph
 $exoResourceAppId   = '00000002-0000-0ff1-ce00-000000000000'   # Office 365 Exchange Online
@@ -244,9 +306,16 @@ function Add-Result($name, $state, $detail) { $result.steps += [ordered]@{ step 
 
 function Write-ResultFile {
     if (-not "$OutFile".Trim()) { return }
+    # 12.7: under -WhatIf nothing is written outside the temp folder -- the result file then only goes to a path in it.
+    $tmpRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    $outFull = try { [IO.Path]::GetFullPath($OutFile) } catch { "$OutFile" }
+    if ($WhatIfPreference -and -not $outFull.StartsWith($tmpRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        Note "WhatIf: the result file $OutFile is NOT written (it is outside the temp folder)" 'DarkYellow'
+        return
+    }
     try {
         $dir = Split-Path -Parent $OutFile
-        if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir -WhatIf:$false | Out-Null }
         # -WhatIf:$false deliberately. This file is a LOCAL REPORT of what happened (or would
         # happen), not a change to the environment -- and under -WhatIf the write was suppressed
         # while the script still logged "result written", which is a log that lies.
@@ -338,7 +407,7 @@ Write-Host ("=" * 78) -ForegroundColor Cyan
 
 # --- tokens -------------------------------------------------------------------
 # The onboarding SPN authenticates with a SECRET here because that is the credential the estate
-# onboarding path already carries for it (workbook / kv-automatit-dev). The ENGINE never uses a
+# onboarding path already carries for it (workbook / the build key vault). The ENGINE never uses a
 # secret -- it is cert-only -- and this script never gives it one.
 $adminLabel = if ($browserMode) { 'the administrator signing in in the browser' } else { "the onboarding SPN ($AdminAppId)" }
 Step $(if ($browserMode) { 'authenticate (browser sign-in: an Exchange or Global Administrator)' } else { 'authenticate (onboarding SPN)' })
@@ -354,7 +423,7 @@ function Gr {
     Invoke-RestMethod @a
 }
 # 🔴 A COLLECTION READ MUST FOLLOW THE PAGES. Graph returns at most 100 items per page, and the
-# onboarding SPN this runs as holds ~100 Graph app roles on its own (measured on EFIF/RIDE 2026-09-18),
+# onboarding SPN this runs as holds ~100 Graph app roles on its own (measured on two test tenants 2026-09-18),
 # so a first-page-only read of its appRoleAssignments could miss Exchange.ManageAsApp, plan a grant,
 # and hit 400 "already exists" -- the fatal re-run of BUG-166 (a).
 function GrAll {
@@ -450,7 +519,9 @@ catch { Fail "could not read subscribedSkus: $($_.Exception.Message)" }
 # assignedPlans still says "exchange = Enabled". The decision itself is Select-PimExchangeMailboxPlans
 # (pure, tested offline) -- it used to be inline here, where nothing could exercise it.
 $exchangePlans = @(Select-PimExchangeMailboxPlans -SubscribedSkus $skus)
-foreach ($s in $skus) { Note ("sku {0,-28} enabled={1}" -f $s.skuPartNumber, $s.prepaidUnits.enabled) 'DarkGray' }
+# MAIL-NAMING 100.14 item 4 (owner 2026-10-09, noise): every SKU of the tenant only with -Verbose -- the line that matters
+# is the Exchange verdict below (plan found / not found).
+foreach ($s in $skus) { Write-Verbose ("sku {0,-28} enabled={1}" -f $s.skuPartNumber, $s.prepaidUnits.enabled) }
 
 if (-not $exchangePlans.Count) {
     Add-Result 'precondition' 'FAILED' 'no Exchange service plan beyond EXCHANGE_S_FOUNDATION'
@@ -468,7 +539,7 @@ no Exchange Online plan in this tenant -- a shared sender mailbox CANNOT be crea
 "@
 }
 $result.exchangePlan = ($exchangePlans -join ', ')
-Note "Exchange plan(s) beyond Foundation: $($exchangePlans -join ', ')" 'Green'
+Note "Exchange Online plan: found ($($exchangePlans -join ', '))" 'Green'
 Add-Result 'precondition' 'ok' ($exchangePlans -join ', ')
 
 # --- resolve the sender address ------------------------------------------------
@@ -534,7 +605,7 @@ if ($EngineAppId) {
     if (-not $engineSp -and -not $miSps.Count) { Fail "engine service principal not found for appId $EngineAppId" }
     if ($engineSp) { Note "engine SPN: $EngineAppId (objectId $($engineSp.id))" 'DarkGray' }
 }
-$sendPlan = Resolve-PimMailSendPrincipals -ManagedIdentitySps $miSps -EngineSp $engineSp
+$sendPlan = Resolve-PimMailSendPrincipals -ManagedIdentitySps $miSps -EngineSp $engineSp -AssignmentNamePrefix $AssignmentNamePrefix
 if ($sendPlan.reason) { Fail $sendPlan.reason }
 $sendPrincipals = @($sendPlan.principals)
 $result.sendIdentities = @($sendPrincipals | ForEach-Object { [ordered]@{ kind = $_.kind; appId = $_.appId; objectId = $_.objectId } })
@@ -589,7 +660,7 @@ elseif ($PSCmdlet.ShouldProcess($AdminAppId, 'grant Exchange.ManageAsApp')) {
 
 # 🔒 THE EXCHANGE ADMINISTRATOR ROLE IS TIME-BOUND, AND GRANTED THROUGH PIM.
 # It used to be POSTed to roleManagement/directory/roleAssignments: a PERMANENT active assignment made
-# outside PIM. Measured 2026-09-18 on EFIF and RIDE: the tenants' own alerting flagged it ("assigned
+# outside PIM. Measured 2026-09-18 on two test tenants: the tenants' own alerting flagged it ("assigned
 # outside of PIM"), and the SPN holding it could NOT remove it -- Graph refuses a self-removal
 # ("Removing self from ... built-in role is not allowed"). A privileged-access product must not leave
 # exactly the standing privilege it exists to prevent. Now: an active assignment through
@@ -642,12 +713,18 @@ while ($true) {
     catch {
         $exchReadErr = $_
         $m = "$($_.Exception.Message) $($_.ErrorDetails.Message)"
-        if ($m -notmatch '\b403\b|Forbidden|Authorization_RequestDenied' -or (Get-Date) -ge $exchReadUntil) { break }
+        if ($m -notmatch '\b403\b|Forbidden|Authorization_RequestDenied' -or (Get-Date) -ge $exchReadUntil -or $WhatIfPreference) { break }
         Note 'role read answered 403 -- retrying with a fresh token (a new permission takes effect on this path after the token carries it)' 'DarkYellow'
         Start-Sleep -Seconds 20
         $t = Get-PimMailAdminToken -Resource 'graph'
         $script:GH = @{ Authorization = "Bearer $t"; 'Content-Type' = 'application/json' }
     }
+}
+if ($exchReadErr -and $WhatIfPreference) {
+    # 12.7: the read needs RoleManagement.ReadWrite.Directory, which -WhatIf did not grant above -- say so, preview the activation.
+    Note "WhatIf: the Exchange Administrator state of the setup app cannot be read yet ($((("$($exchReadErr.Exception.Message)") -split "`n")[0])) -- this step cannot be previewed exactly; run without -WhatIf to apply" 'DarkYellow'
+    $exchAdminState = [pscustomobject]@{ active = $false; kind = ''; endDateTime = $null }
+    $exchReadErr = $null
 }
 try { if ($exchReadErr) { throw $exchReadErr } }
 catch { Fail "could not read the onboarding SPN's active directory roles, so cannot tell whether Exchange Administrator is already active -- refusing to guess: $($_.Exception.Message)" }
@@ -680,11 +757,11 @@ elseif ($PSCmdlet.ShouldProcess($AdminAppId, "activate Exchange Administrator th
 }
 }   # end: app identity (not the browser sign-in)
 
-if ($WhatIfPreference) {
-    Note 'WhatIf: stopping before any Exchange call' 'DarkYellow'
-    Add-Result 'exchange' 'whatif' 'would create mailbox + access policy'
-    $result.ok = $true; Write-ResultFile; exit 0
-}
+# 12.7 (-WhatIf): from here on Exchange is READ (Get-* cmdlets) and every create / remove / store write is announced
+# through ShouldProcess instead of made. An app identity whose Exchange grants were skipped above may not be able to read
+# Exchange yet -- then steps [1]-[3] say they cannot be previewed, and only what can be read is shown.
+$whatIfRun = [bool]$WhatIfPreference
+$exoPreviewable = $true
 
 # --- Exchange Online admin REST ------------------------------------------------
 # The transport the EXO V3 module uses internally. Token audience is outlook.office365.com; a token
@@ -744,17 +821,27 @@ while ((Get-Date) -lt $deadline) {
     catch {
         $lastErr = ($_.Exception.Message -split "`n")[0]
         Note "attempt $attempt : not ready yet ($lastErr)" 'DarkGray'
+        if ($whatIfRun) { break }   # a preview does not wait for grants it did not make
         Start-Sleep -Seconds 20
     }
 }
-if (-not $ready) {
+if (-not $ready -and $whatIfRun) {
+    $exoPreviewable = $false
+    Note "WhatIf: Exchange administration is not usable for this sign-in yet ($lastErr) -- steps [1]-[3] cannot be previewed; run without -WhatIf to apply. Without -WhatIf they would: create the shared mailbox $sender, register each sending identity in Exchange, create the scope for $sender only and give each identity 'Application Mail.Send' on it." 'DarkYellow'
+    Add-Result 'exchange-ready' 'whatif' 'not previewable (Exchange not usable for this sign-in yet)'
+}
+elseif (-not $ready) {
     Add-Result 'exchange-ready' 'FAILED' $lastErr
     Fail "Exchange admin endpoint never became usable within ${TimeoutSeconds}s (last error: $lastErr). Both app-role propagation and EXO org provisioning can cause this; re-running is safe and idempotent."
 }
-Note "Exchange administration usable after $attempt attempt(s)" 'Green'
-Add-Result 'exchange-ready' 'ok' "$attempt attempt(s)"
+if ($ready) {
+    Note "Exchange administration usable after $attempt attempt(s)" 'Green'
+    Add-Result 'exchange-ready' 'ok' "$attempt attempt(s)"
+}
 
 # --- 1. CREATE THE SHARED SENDER MAILBOX ---------------------------------------
+$mbxPlanned = $false   # -WhatIf: the mailbox does not exist and would be created
+if ($exoPreviewable) {
 Step "[1] shared sender mailbox  $sender"
 $existingMbx = $null
 # Not-found is the normal first-run path. ANY OTHER failure is "could not look", and it used to be
@@ -769,6 +856,10 @@ if ($mbxRead.outcome -eq 'found') { $existingMbx = @($mbxRead.value.value) | Sel
 if ($existingMbx) {
     Note "mailbox already exists (RecipientTypeDetails=$($existingMbx.RecipientTypeDetails))" 'DarkGray'
     Add-Result 'mailbox' 'already' "$($existingMbx.PrimarySmtpAddress)"
+} elseif (-not $PSCmdlet.ShouldProcess("Exchange Online mailbox $sender", "create the shared sender mailbox (New-Mailbox -Shared, display name '$DisplayName')")) {
+    if (-not $whatIfRun) { Fail "the shared mailbox $sender was not created (declined) -- nothing further is changed" }
+    $mbxPlanned = $true
+    Add-Result 'mailbox' 'whatif' "would create $sender"
 } else {
     try {
         [void](Invoke-Exo -Cmdlet 'New-Mailbox' -Parameters @{
@@ -792,6 +883,7 @@ if ($existingMbx) {
     $result.mailboxCreated = $true
     Add-Result 'mailbox' 'created' "$($seen.PrimarySmtpAddress)"
 }
+}   # end: $exoPreviewable (step [1])
 
 # --- 1b. THE KEY GRAPH SENDS AS (BUG-296) -----------------------------------------
 # The engine calls /users/<MailSender>/sendMail. Graph resolves an id or a userPrincipalName, never a bare mail address,
@@ -799,6 +891,11 @@ if ($existingMbx) {
 Step "[1b] how Microsoft Graph addresses $sender"
 $graphKey = [ordered]@{ key = ''; reason = '' }; $gkReadError = ''
 $gkDeadline = (Get-Date).AddSeconds(180)
+if ($mbxPlanned -or -not $exoPreviewable) {
+    # -WhatIf: the mailbox does not exist yet, so the key Graph will address it by is known only once it is created.
+    Note "WhatIf: the mailbox's directory UPN is known only after it is created -- the preview uses $sender" 'DarkYellow'
+    $graphKey = [ordered]@{ key = $sender; reason = '' }
+} else {
 do {
     try {
         $f = [uri]::EscapeDataString("mail eq '$sender' or userPrincipalName eq '$sender' or proxyAddresses/any(p:p eq 'smtp:$sender')")
@@ -813,6 +910,7 @@ if ($gkReadError) {
     Note "could not read the directory to find the mailbox's UPN ($gkReadError) -- storing $sender as it is; if Graph cannot resolve it, mail fails with 404: set MailSender to the mailbox's UPN." 'Yellow'
     $graphKey = [ordered]@{ key = $sender; reason = '' }
 }
+}   # end: the mailbox exists (step [1b] read)
 if (-not $graphKey.key) { Add-Result 'graph-key' 'FAILED' $graphKey.reason; Fail "the mailbox $sender exists, but $($graphKey.reason). Re-run in a few minutes." }
 $storeSender = $graphKey.key
 if ($storeSender -ine $sender) { Note "Graph addresses this mailbox as $storeSender (its UPN); that is what the engine stores. Mail still goes out from $sender." 'Yellow' }
@@ -823,7 +921,7 @@ $result.storeSender = $storeSender
 # --- 3. SCOPE THE SEND RIGHT TO THAT ONE MAILBOX -------------------------------
 # Exchange Online RBAC FOR APPLICATIONS, not an Application Access Policy. Both express "this app
 # may only touch this mailbox"; the RBAC one is chosen because it is the one that WORKS AND CAN BE
-# READ BACK. Measured in EFIF: Get-ApplicationAccessPolicy answers 404 and New-ApplicationAccessPolicy
+# READ BACK. Measured in a test tenant: Get-ApplicationAccessPolicy answers 404 and New-ApplicationAccessPolicy
 # answers 400/500, so an AAP could be neither verified nor made idempotent -- and an unverifiable
 # security control is not a security control. Get-ManagementRoleAssignment / Get-ManagementScope
 # both read cleanly, so every step below is gated on a real read-back.
@@ -832,6 +930,10 @@ $result.storeSender = $storeSender
 #   New-ServicePrincipal          register the engine app inside Exchange
 #   New-ManagementScope           a recipient scope matching EXACTLY the sender mailbox
 #   New-ManagementRoleAssignment  'Application Mail.Send' bound to the app AND that scope
+# A first name for the -WhatIf preview (before Exchange is read): -ScopeName, else '<mailbox>-SendScope'. Once the scopes are
+# read, Resolve-PimMailSenderScope decides it for real (an existing scope for this mailbox is adopted under its own name).
+$scopeName = if ("$ScopeName".Trim()) { "$ScopeName".Trim() } else { Get-PimMailSenderScopeName -Sender $sender }
+if ($exoPreviewable) {
 Step "[3] scope the send right to $sender (Exchange RBAC for applications)"
 
 # 3a. hydrate the organization. A fresh EXO tenant is "dehydrated" and REFUSES every custom RBAC
@@ -846,10 +948,12 @@ $dehydratedMarker = 'InvalidOperationInDehydratedContextException'
 try {
     $oc = (Invoke-Exo -Cmdlet 'Get-OrganizationConfig').value[0]
     if ("$($oc.IsDehydrated)" -eq 'True') {
-        Note 'organization is dehydrated -- enabling customization' 'DarkYellow'
-        try { [void](Invoke-Exo -Cmdlet 'Enable-OrganizationCustomization') } catch {
-            # Already-enabled is reported as an error by this cmdlet; not fatal.
-            Note "Enable-OrganizationCustomization: $((($_.Exception.Message) -split "`n")[0])" 'DarkGray'
+        if ($PSCmdlet.ShouldProcess('Exchange Online organization', 'enable organization customization (Enable-OrganizationCustomization; needed before any custom RBAC object)')) {
+            Note 'organization is dehydrated -- enabling customization' 'DarkYellow'
+            try { [void](Invoke-Exo -Cmdlet 'Enable-OrganizationCustomization') } catch {
+                # Already-enabled is reported as an error by this cmdlet; not fatal.
+                Note "Enable-OrganizationCustomization: $((($_.Exception.Message) -split "`n")[0])" 'DarkGray'
+            }
         }
     } else { Note 'organization reports hydrated' 'DarkGray' }
 } catch { Note "could not read organization config: $((($_.Exception.Message) -split "`n")[0])" 'DarkYellow' }
@@ -860,7 +964,7 @@ function Invoke-ExoWhenHydrated {
     #   exists     -> SUCCESS (idempotent re-run; BUG-166 -- it used to be fatal)
     #   dehydrated -> wait for organization customization (up to -Seconds)
     #   retry      -> Exchange has not materialised a service principal created moments ago
-    #                 (New-ManagementRoleAssignment answers 404; measured on EFIF/RIDE) -- bounded wait
+    #                 (New-ManagementRoleAssignment answers 404; measured on two test tenants) -- bounded wait
     #   fail       -> returned at once: a real failure must not be hidden behind a long wait
     param([Parameter(Mandatory)][string]$Cmdlet, [hashtable]$Parameters = @{}, [int]$Seconds = 3600, [string]$What = 'object',
           [int]$MaterialiseSeconds = 600)
@@ -910,9 +1014,10 @@ function Invoke-ExoWhenHydrated {
 #     identity's was reported "already present" and never created -- and the hosted engine, which
 #     sends as that managed identity, was refused with nothing in this log to say why. The plan
 #     matches assignments by ASSIGNEE.
-$scopeName = Get-PimMailSenderScopeName -Sender $sender   # §94: per mailbox, except the default one (unchanged for existing tenants)
+# The scope name is decided AFTER the reads below (Resolve-PimMailSenderScope): a scope that already restricts to this
+# sender is adopted under its existing name; else -ScopeName; else '<mailbox>-SendScope' (§94: one scope per mailbox).
 # 🔴 BUG-166 (b) -- these three used to end in `catch { @() }`, so "I could not read the scopes" became
-# "there are no scopes": measured on EFIF/RIDE, Get-ManagementScope answered 401 during the Exchange
+# "there are no scopes": measured on two test tenants, Get-ManagementScope answered 401 during the Exchange
 # Administrator propagation, the plan said "create", and New-ManagementScope then failed with
 # ADObjectAlreadyExistsException. A plan is only as good as the reads under it: an unreadable one
 # STOPS the run (re-running is safe), it never plans a create.
@@ -932,6 +1037,10 @@ foreach ($c in $pre.Keys) {
     $preRead[$c] = @($rr.value.value)
 }
 $exoSpList = $preRead['Get-ServicePrincipal']; $scopes = $preRead['Get-ManagementScope']; $assigns = $preRead['Get-ManagementRoleAssignment']
+$scopePick = Resolve-PimMailSenderScope -Sender $sender -ScopeName $ScopeName -Scopes $scopes
+$scopeName = $scopePick.name
+if ($scopePick.note) { Note $scopePick.note 'DarkGray' }
+$result.scopeName = $scopeName
 $engineOid = if ($engineSp) { "$($engineSp.id)" } else { '' }
 $exoPlan = @(New-PimMailSenderExoPlan -ExoServicePrincipals $exoSpList -Scopes $scopes -Assignments $assigns `
     -Principals $sendPrincipals -Sender $sender -ScopeName $scopeName -EngineAppId $EngineAppId -EngineObjectId $engineOid `
@@ -939,14 +1048,22 @@ $exoPlan = @(New-PimMailSenderExoPlan -ExoServicePrincipals $exoSpList -Scopes $
 if (-not $exoPlan.Count) {
     Note 'Exchange registration, scope and scoped Application Mail.Send assignment(s) already present' 'DarkGray'
     $result.accessPolicyCreated = $true; Add-Result 'exo-scoped-send' 'already' "$scopeName"
+    $script:PimScopedSendConfirmed = $true   # MAIL-STEP-PROOF: read cleanly above, every sending identity holds its assignment
 }
+$exoDone = 0
 foreach ($item in $exoPlan) {
+    if (-not $PSCmdlet.ShouldProcess("Exchange Online ($sender)", "$($item.cmdlet): $($item.what)")) {
+        if (-not $whatIfRun) { Fail "Exchange change declined ($($item.cmdlet): $($item.what)) -- the scoped send right is incomplete; re-run to finish" }
+        Add-Result "exo:$($item.cmdlet)" 'whatif' "would $($item.what)"
+        continue
+    }
     $r = Invoke-ExoWhenHydrated -Cmdlet $item.cmdlet -What $item.what -Parameters $item.parameters
     if (-not $r.ok) { Add-Result "exo:$($item.cmdlet)" 'FAILED' "$($r.error) $($r.detail)"; Fail "could not $($item.what): $($r.error)" }
     if ($r.existed) { Note "$($item.cmdlet): $($item.what) -- already present, nothing changed" 'DarkGray' }
     else { Note "$($item.cmdlet): $($item.what)" 'Green' }
+    $exoDone++
 }
-if ($exoPlan.Count) {
+if ($exoDone) {
     # Read back -- the whole reason RBAC was chosen over an Application Access Policy. EVERY sending
     # identity must hold its own assignment, not merely "some" assignment in the scope.
     $confirmedScope = Confirm-Eventually -What 'scoped Mail.Send assignment' -Seconds 120 -Test {
@@ -954,20 +1071,22 @@ if ($exoPlan.Count) {
         $spNow = @((Invoke-Exo -Cmdlet 'Get-ServicePrincipal').value)
         @($sendPrincipals | Where-Object {
             $ids = Get-PimExoAssigneeIds -ExoServicePrincipals $spNow -AppId $_.appId -ObjectId $_.objectId
-            -not @(Select-PimExoMailSendAssignment -Assignments $now -ScopeName $scopeName -AssigneeIds $ids -AssignmentName $_.assignmentName).Count
+            -not @(Select-PimExoMailSendAssignment -Assignments $now -ScopeName $scopeName -AssigneeIds $ids -AssignmentName $_.assignmentName -AlternateNames @($_.legacyAssignmentNames)).Count
         }).Count -eq 0
     }
     if (-not $confirmedScope) { Add-Result 'exo-scoped-send' 'FAILED' 'not present on read-back'; Fail 'the scoped Mail.Send assignment was created but is not present on read-back for every sending identity' }
     Note "scoped Application Mail.Send assignment(s) verified for: $((@($sendPrincipals | ForEach-Object { $_.appId })) -join ', ') -> $scopeName" 'Green'
     $result.accessPolicyCreated = $true; Add-Result 'exo-scoped-send' 'created' "$($exoPlan.Count) change(s) -> $scopeName"
+    $script:PimScopedSendConfirmed = $true   # MAIL-STEP-PROOF: verified on read-back for EVERY sending identity
 }
 if ($EngineAppId -and -not $RemoveEngineSpnAssignment -and @($sendPrincipals | Where-Object { $_.kind -eq 'managed-identity' }).Count) {
     Note "the engine SPN's older scoped assignment (if any) is LEFT in place -- pass -RemoveEngineSpnAssignment to remove it" 'DarkGray'
 }
+}   # end: $exoPreviewable (step [3])
 
 # --- 2. ENSURE THE ENGINE SPN DOES *NOT* HOLD TENANT-WIDE Mail.Send -------------
 # 🔒 THIS IS INVERTED FROM IMP-06 AS WRITTEN, AND THE INVERSION IS THE WHOLE POINT.
-# IMP-06 step 3 said "grant the engine SPN Mail.Send" and step 4 said "scope it". Measured in EFIF:
+# IMP-06 step 3 said "grant the engine SPN Mail.Send" and step 4 said "scope it". Measured in a test tenant:
 # doing both leaves the app UNSCOPED. Exchange RBAC for Applications does not RESTRICT a tenant-wide
 # Graph consent -- it GRANTS scoped access in its own right, and a tenant-wide consent sitting
 # alongside it simply keeps winning.
@@ -1023,13 +1142,15 @@ else { Add-Result 'mail-send-tenantwide' 'absent' 'correct (RBAC grants, scoped)
 # POSSIBLE: without a configured sender the notify path still renders and returns quietly.
 Step '[4] persist the sender to pim.Settings'
 if (-not "$SqlServerFqdn".Trim()) {
-    Note 'no -SqlServerFqdn given -- NOT persisted. The sender must reach the engine some other way' 'DarkYellow'
-    Note "(PIM Manager: Get Started > Mail sender > Shared mailbox > 'Use this mailbox': $storeSender; or pass -MailSender '$storeSender' to Setup-PimContainers)" 'DarkYellow'
+    Note "Saved: no -- no -SqlServerFqdn was given. Finish in PIM Manager: Get Started > Mail sender > Check and send a test mail (mailbox $storeSender)" 'DarkYellow'
     Add-Result 'persist' 'skipped' 'no -SqlServerFqdn'
+} elseif (-not $PSCmdlet.ShouldProcess("$SqlServerFqdn / $SqlDatabase (pim.Settings)", "store MailSender = $storeSender and MailMode = sharedMailbox")) {
+    # -WhatIf (or declined): no SQL connection is opened at all.
+    Add-Result 'persist' 'whatif' "would store MailSender = $storeSender"
 } else {
     . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-SqlStore.ps1')
     # An EXPLICIT credential beats ambient managed identity in New-PimSqlConnection, which matters
-    # here: mgmt1 has an MI of its own, and an MI can only mint tokens for ITS OWN tenant, so an
+    # here: a build machine has an MI of its own, and an MI can only mint tokens for ITS OWN tenant, so an
     # ambient token would authenticate successfully against the WRONG directory (BUG-34). The
     # onboarding SPN is the SQL server's Entra admin, so it is the identity that can write.
     $global:PIM_TenantId     = $TenantId
@@ -1062,7 +1183,8 @@ if (-not "$SqlServerFqdn".Trim()) {
     }
     $global:PIM_SqlServer    = $SqlServerFqdn
     $global:PIM_SqlDatabase  = $SqlDatabase
-    try {
+    $script:PimMailStoredAll = $null
+    $writeSender = {
         if ($persistErr) { throw $persistErr }
         $cs = Get-PimSqlConnectionString -Server $SqlServerFqdn -Database $SqlDatabase
         Set-PimSqlSetting -ConnectionString $cs -Name 'MailSender' -Value $storeSender
@@ -1072,28 +1194,96 @@ if (-not "$SqlServerFqdn".Trim()) {
         # Read back through the same reader the ENGINE uses, not through a raw SELECT -- the point
         # is to prove what the engine will see, not that a row exists.
         $all = Get-PimAllSqlSettings -ConnectionString $cs
+        $st = "$($all['MailSender'])".Trim()
+        if ($st -ne $storeSender) { throw "read-back mismatch: store holds '$st', expected '$storeSender'" }
+        $script:PimMailStoredAll = $all
+        # MAIL-STEP-PROOF (owner 2026-10-09: "why dont you trigger somehing or accept that we just did a test mail"): store
+        # what step [3]'s read-back CONFIRMED -- the scoped Application Mail.Send assignment for every sending identity, in
+        # ONE scope on THIS mailbox -- so PIM Manager can show the engine job's send right as granted (with the Manager's
+        # own test mail) without waiting for an engine send. Only a confirmed read-back is stored; never a guess. Written
+        # here, inside the write, so a temporary firewall rule (-AllowThisIpTemporarily) covers it too.
+        $chk = New-PimMailSenderSetupCheck -Confirmed ([bool]$script:PimScopedSendConfirmed) -Sender $storeSender -ScopeName "$scopeName" -Principals $sendPrincipals -By "$($global:PIM_SetupActor)"
+        if ($chk) {
+            try { Set-PimSqlSetting -ConnectionString $cs -Name 'MailSenderSetupCheck' -Value $chk; Note "stored the setup check for PIM Manager: scoped Mail.Send confirmed for $(@($chk.identities).Count) sending identit$(if (@($chk.identities).Count -eq 1) { 'y' } else { 'ies' }) in $scopeName" 'Green' }
+            catch { Note "the setup check could not be stored ($(($_.Exception.Message -split "`n")[0])) -- PIM Manager proves the engine at its first send instead" 'Yellow' }
+        }
+    }
+    # MAIL-NAMING 100.14 item 5: -AllowThisIpTemporarily -- the temporary SQL firewall rule (ARM, as the identity that signed
+    # in here). The server is found by its name in -SubscriptionId, else in every subscription that identity can see.
+    $sqlServerName = ("$SqlServerFqdn".Trim() -split '\.')[0]
+    $script:PimSqlServerId = ''
+    $armApi = '2021-11-01'
+    $findSqlServer = {
+        if ($script:PimSqlServerId) { return $script:PimSqlServerId }
+        $h = @{ Authorization = "Bearer $(Get-PimMailAdminToken -Resource 'arm')" }
+        $subs = if ("$SubscriptionId".Trim()) { @("$SubscriptionId".Trim()) } else {
+            @((Invoke-RestMethod -Headers $h -Uri 'https://management.azure.com/subscriptions?api-version=2020-01-01').value | ForEach-Object { "$($_.subscriptionId)" } | Select-Object -First 50) }
+        foreach ($s in $subs) {
+            try { $hit = @((Invoke-RestMethod -Headers $h -Uri "https://management.azure.com/subscriptions/$s/providers/Microsoft.Sql/servers?api-version=$armApi").value | Where-Object { "$($_.name)" -ieq $sqlServerName }) | Select-Object -First 1 } catch { $hit = $null }
+            if ($hit) { $script:PimSqlServerId = "$($hit.id)"; return $script:PimSqlServerId }
+        }
+        throw "the SQL server '$sqlServerName' was not found in the subscription(s) this sign-in can see$(if (-not "$SubscriptionId".Trim()) { ' (pass -SubscriptionId)' })"
+    }
+    $addRule = {
+        param($ip)
+        $sid = & $findSqlServer
+        $rn = New-PimSqlTempFirewallRuleName -Ip $ip
+        $u = "https://management.azure.com$sid/firewallRules/$rn`?api-version=$armApi"
+        [void](Invoke-RestMethod -Method PUT -Uri $u -Headers @{ Authorization = "Bearer $(Get-PimMailAdminToken -Resource 'arm')"; 'Content-Type' = 'application/json' } `
+                   -Body (@{ properties = @{ startIpAddress = $ip; endIpAddress = $ip } } | ConvertTo-Json -Depth 4))
+        Note "temporary SQL firewall rule '$rn' added for $ip (it is removed again right after the write)" 'DarkYellow'
+        return $u
+    }
+    $removeRule = {
+        param($u)
+        [void](Invoke-RestMethod -Method DELETE -Uri $u -Headers @{ Authorization = "Bearer $(Get-PimMailAdminToken -Resource 'arm')" })
+    }
+    $scriptCmdlet = $PSCmdlet   # THIS script's ShouldProcess (-WhatIf / -Confirm), not the helper function's
+    $mayAddRule = { param($ip) $scriptCmdlet.ShouldProcess("SQL server $SqlServerFqdn", "add a TEMPORARY firewall rule for $ip, write the sender, remove the rule") }
+    $wr = Invoke-PimSqlWriteWithTemporaryFirewall -Write $writeSender -AllowThisIpTemporarily:$AllowThisIpTemporarily -AddRule $addRule -RemoveRule $removeRule -ShouldProcess $mayAddRule
+    if ($wr.ruleAdded) {
+        if ($wr.ruleRemoved) { Note 'temporary SQL firewall rule removed again' 'DarkGray' }
+        else { Write-Host "    WARNING: the temporary SQL firewall rule could NOT be removed ($($wr.removeError)). Remove it now: SQL server $sqlServerName > Networking > rule $(("$($wr.rule)" -split '/firewallRules/')[-1] -replace '\?.*$', '')" -ForegroundColor Red }
+    }
+    $finish = "Finish in PIM Manager: Get Started > Mail sender > Check and send a test mail (mailbox $storeSender)"
+    if ($wr.ok) {
+        $all = $script:PimMailStoredAll
         $stored = "$($all['MailSender'])".Trim()
-        if ($stored -ne $storeSender) { throw "read-back mismatch: store holds '$stored', expected '$storeSender'" }
-        Note "persisted to pim.Settings and verified: MailSender = $stored, MailMode = $("$($all['MailMode'])".Trim())" 'Green'
+        Note "Saved: yes -- pim.Settings MailSender = $stored, MailMode = $("$($all['MailMode'])".Trim()) (verified by read-back)" 'Green'
         Add-Result 'persist' 'ok' $stored
         $result.persisted = $true
-    } catch {
-        $m = ($_.Exception.Message -split "`n")[0]
+    } else {
+        $m = ("$($wr.error)" -split "`n")[0]
+        $short = if ($wr.whatIf) { "Saved: no -- the temporary firewall rule was not added (-WhatIf / declined). $finish" }
+                 elseif ($wr.firewall) { "Saved: no -- this PC cannot reach the PIM database (firewall). $finish$(if (-not $AllowThisIpTemporarily) { ', or re-run with -AllowThisIpTemporarily' })." }
+                 else { "Saved: no -- $m. $finish." }
         if ($browserMode) {
             # From a person's own PC the store is often out of reach (a private endpoint, a firewall) -- and the hard part,
             # the mailbox and its scoped send right, IS done. So this is NOT a failure here: PIM Manager stores the sender.
             Add-Result 'persist' 'manual' $m
             $result.persisted = $false
-            Note "the sender could not be written to the store from this computer ($m)." 'Yellow'
-            Note "FINISH IT IN PIM MANAGER: Get Started > Mail sender > Shared mailbox > 'Use this mailbox': $storeSender -- then Send a test mail." 'Yellow'
+            Note $short 'Yellow'
         } else {
             Add-Result 'persist' 'FAILED' $m
-            Fail "mailbox + grants are in place, but the sender could NOT be persisted to pim.Settings ($SqlServerFqdn/$SqlDatabase): $m  -- the environment is still MAIL-MUTE. Re-run, or pass -MailSender '$storeSender' to Setup-PimContainers."
+            Fail "mailbox + grants are in place, but the sender is not saved. $short"
         }
     }
 }
 
 # --- summary --------------------------------------------------------------------
+if ($whatIfRun) {
+    # 12.7: the preview ends here -- say what WOULD change, and that nothing did.
+    $result.ok = $true
+    Write-Host ""
+    Write-Host ("=" * 78) -ForegroundColor Cyan
+    Write-Host " WHATIF / PREVIEW -- nothing was changed" -ForegroundColor Yellow
+    Write-Host ("=" * 78) -ForegroundColor Cyan
+    foreach ($s in @($result.steps | Where-Object { "$($_.state)" -eq 'whatif' })) { Write-Host "  would: $($s.step) -- $($s.detail)" }
+    if (-not @($result.steps | Where-Object { "$($_.state)" -eq 'whatif' }).Count) { Write-Host '  nothing to change: the mailbox, its scoped send right and the stored sender are already in place (as far as could be read).' }
+    Write-Host "  Run the same command without -WhatIf to apply."
+    Write-ResultFile
+    exit 0
+}
 $result.ok = $true
 Write-Host ""
 Write-Host ("=" * 78) -ForegroundColor Cyan
@@ -1101,7 +1291,12 @@ Write-Host " MAIL SENDER READY" -ForegroundColor Green
 Write-Host ("=" * 78) -ForegroundColor Cyan
 Write-Host "  sender        : $sender"
 Write-Host "  send right    : Exchange RBAC 'Application Mail.Send' -> scope '$scopeName' -> $sender ONLY"
-foreach ($p in $sendPrincipals) { Write-Host "  sends as      : $($p.kind) $($p.appId)  (assignment $($p.assignmentName))" }
+foreach ($p in $sendPrincipals) {
+    # the name the assignment really has: an existing (adopted) one keeps its name, a new one got the planned name
+    $held = @(Select-PimExoMailSendAssignment -Assignments $assigns -ScopeName $scopeName -AssigneeIds (Get-PimExoAssigneeIds -ExoServicePrincipals $exoSpList -AppId $p.appId -ObjectId $p.objectId) -AssignmentName $p.assignmentName -AlternateNames @($p.legacyAssignmentNames)) | Select-Object -First 1
+    $an = if ($held -and "$($held.Name)".Trim()) { "$($held.Name)".Trim() } else { $p.assignmentName }
+    Write-Host "  sends as      : $($p.kind) $($p.appId)  (assignment $an)"
+}
 Write-Host "  tenant-wide   : NO Graph Mail.Send on any sending identity or the engine SPN -- by design"
 Write-Host "  exchange plan : $($result.exchangePlan)"
 Write-Host ""
@@ -1133,8 +1328,7 @@ Write-Host ""
 if ($result.persisted) {
     Write-Host "  NEXT: PIM Manager > Get Started > Mail sender > Send a test mail."
 } else {
-    Write-Host "  NEXT: PIM Manager > Get Started > Mail sender > Shared mailbox > 'Use this mailbox': $storeSender, then Send a test mail"
-    Write-Host "        (or pass -MailSender '$storeSender' to Setup-PimContainers, or set 'MailSender' in pim.Settings)."
+    Write-Host "  NEXT: PIM Manager > Get Started > Mail sender > Check and send a test mail (mailbox $storeSender)."
 }
 Write-Host ""
 # Say only what was verified BY READ-BACK. An earlier summary asserted "Mail.Send, RESTRICTED to
@@ -1142,9 +1336,10 @@ Write-Host ""
 # none, because it stops anyone from checking.
 Write-Host "  VERIFIED BY READ-BACK: mailbox exists; scoped RBAC assignment exists; no tenant-wide" -ForegroundColor Green
 Write-Host "  Graph Mail.Send is present on any sending identity." -ForegroundColor Green
-Write-Host "  🪤 The restriction was proven in EFIF with a second out-of-scope mailbox (in-scope send" -ForegroundColor DarkGray
-Write-Host "     accepted, out-of-scope send ErrorAccessDenied). This script does NOT re-prove it per" -ForegroundColor DarkGray
-Write-Host "     tenant -- that would mean creating a decoy mailbox in a customer tenant. If you need" -ForegroundColor DarkGray
-Write-Host "     that assurance here, do it deliberately and delete the decoy afterwards." -ForegroundColor DarkGray
+Write-Host "  The restriction was proven in a test tenant with a second out-of-scope mailbox (in-scope send" -ForegroundColor DarkGray
+Write-Host "  accepted, out-of-scope send ErrorAccessDenied). This script does NOT re-prove it in your" -ForegroundColor DarkGray
+Write-Host "  tenant -- that would mean creating a decoy mailbox. If you need that assurance here, do it" -ForegroundColor DarkGray
+Write-Host "  deliberately and delete the decoy afterwards." -ForegroundColor DarkGray
 Write-ResultFile
 exit 0
+} finally { Stop-PimScriptRun -Script 'Initialize-PimMailSender' }

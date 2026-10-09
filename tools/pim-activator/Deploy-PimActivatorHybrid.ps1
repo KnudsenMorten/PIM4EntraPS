@@ -1,6 +1,9 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
+    Deploys the PIM Activator browser-extension policy (force-install, install source, extension settings and a multi-tenant catalog) to on-premises or standalone machines without Intune: as a JSON artifact, as this machine's local policy (HKLM), or as an Active Directory Group Policy Object.
+
     Hybrid (on-prem / standalone) setup for the PIM Activator browser extension
     -- the on-prem sibling of the Edge management service + Intune Remediation path. An MSP deploys the
     SAME client-side managed configuration (forcelist + sources + extension
@@ -18,6 +21,9 @@
     to an Intune-managed one.
 
 .DESCRIPTION
+    Documentation (purpose, who may run it, every change and permission, -WhatIf, undo):
+    https://invardia.com/docs/pim/scripts/Deploy-PimActivatorHybrid/
+
     Config source: a JSON file (typically on a UNC share) holding the MSP's
     per-tenant Activator config for up to 25 tenants. Pass it with
     -TenantConfigJsonPath (alias -ConfigUncPath). Schema -- the file is EITHER
@@ -114,13 +120,6 @@
     bulkActivateConfirmThreshold DWORD next to tenantCatalog. A per-tenant value inside
     the catalog still wins for that tenant.
 
-.NOTES (existing policies)
-    The org's own extension policies are never overwritten: our forcelist /
-    sources rows go into the slot already holding our id, else the lowest free slot, and
-    our ExtensionSettings entry is MERGED into the org's dictionary. LocalGpo reads the
-    machine's HKLM policy keys first; DomainGpo reads the target GPO first and also treats
-    the slots in effect on THIS machine as taken (another GPO may own them).
-
 .EXAMPLE
     .\Deploy-PimActivatorHybrid.ps1 -TenantConfigJsonPath \\fs01\pim\tenants.json -Target Json
 
@@ -138,8 +137,17 @@
 
 .NOTES
     -Target LocalGpo / DomainGpo require an elevated (admin) session.
-    -Target DomainGpo requires the GroupPolicy module (RSAT) + a writable AD.
+    -Target DomainGpo requires the GroupPolicy module (RSAT, part of Windows) + a writable AD.
     -Target Json needs neither admin nor a domain.
+    Existing policies: the org's own extension policies are never overwritten: our forcelist /
+    sources rows go into the slot already holding our id, else the lowest free slot, and
+    our ExtensionSettings entry is MERGED into the org's dictionary. LocalGpo reads the
+    machine's HKLM policy keys first; DomainGpo reads the target GPO first and also treats
+    the slots in effect on THIS machine as taken (another GPO may own them).
+    A transcript of the run is written to <temp>\pim-manager-logs\ (its path is printed).
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Deploy-PimActivatorHybrid/
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
@@ -213,6 +221,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 12.7 run frame: "Documentation: <page>" as the first line + a transcript in the temp folder (its path printed at the end).
+. (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Deploy-PimActivatorHybrid'
+try {
 
 # ---- Channel defaults (Test = the SEPARATE test id + update manifest) -------
 if ($Channel -eq 'Test') {
@@ -414,7 +427,7 @@ switch ($Target) {
             $opLabel = ("HKLM\{0}  {1} = {2}" -f $e.Key, $e.ValueName, ($(if ($v.Length -gt 60) { $v.Substring(0,60) + '...' } else { $v })))
             $verb = switch ($e.Action) { 'Remove' { 'Remove local machine policy value' } 'RemoveKeyIfEmpty' { 'Remove empty local policy key' } default { 'Set local machine policy' } }
             if ($PSCmdlet.ShouldProcess($opLabel, $verb)) {
-                $applied = @(Invoke-PaPolicyRegistryOps -Hive 'HKLM:' -Entries @($e))
+                $applied = @(Invoke-PaPolicyRegistryOps -Hive 'HKLM:' -Entries @($e) -Confirm:$false)   # already confirmed above
                 foreach ($line in $applied) { Write-Host ("  [OK] {0}/{1}: {2}" -f $e.Browser, $e.Policy, $line) -ForegroundColor Green }
             } else {
                 Write-Host ("  [WhatIf] would {0} HKLM\{1}  {2} ({3})" -f $(if ($e.Action) { $e.Action.ToLower() } else { 'set' }), $e.Key, $e.ValueName, $e.ValueKind) -ForegroundColor Yellow
@@ -542,4 +555,6 @@ switch ($Target) {
 }
 
 Write-Host ''
-Write-Host "Done ($Target)." -ForegroundColor Green
+if ($WhatIfPreference) { Write-Host "PREVIEW (-WhatIf) complete ($Target): nothing was written. Run the same command without -WhatIf to apply." -ForegroundColor Yellow }
+else { Write-Host "Done ($Target)." -ForegroundColor Green }
+} finally { Stop-PimScriptRun -Script 'Deploy-PimActivatorHybrid' }

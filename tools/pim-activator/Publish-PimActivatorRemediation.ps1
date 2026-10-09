@@ -1,10 +1,16 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
-    Builds the PIM Activator Intune Remediation (Detect + Remediate) for your tenant and uploads it -- creates it, or
-    updates it in place when a Remediation with the same name exists. ONE file, ONE command: nothing else to download.
+    Builds the PIM Activator Intune Remediation (Detect + Remediate) for your tenant and uploads it to Intune -- creates it, or updates it in place when a Remediation with the same name exists -- and assigns it to the one group you name (nobody otherwise).
 
 .DESCRIPTION
+    Documentation (purpose, who may run it, every change and permission, -WhatIf, undo):
+    https://invardia.com/docs/pim/scripts/Publish-PimActivatorRemediation/
+    -WhatIf signs in, reads Intune and prints every change it would make; it uploads, assigns and writes nothing (the
+    pair it would upload is built in the temp folder so you can read it).
+
+    ONE file, ONE command: nothing else to download.
     97.2 (owner 2026-10-08: "this guide is wrong as it refers to 3 files, but the cmdlets show is missing 2 of them"):
     the script builds Detect-PimActivator.ps1 + Remediate-PimActivator.ps1 ITSELF from the parameters (the same text
     the PIM Manager's Operations > PIM Activator page builds for the same settings), writes them next to itself
@@ -29,8 +35,15 @@
     # Upload a pair you edited yourself, no assignment yet:
     .\Publish-PimActivatorRemediation.ps1 -TenantId <tenant id> -Name 'PIM Activator settings (TEST)' `
         -DetectScript .\Detect-PimActivator.ps1 -RemediateScript .\Remediate-PimActivator.ps1
+.EXAMPLE
+    # Preview: what it would upload and assign -- changes nothing:
+    .\Publish-PimActivatorRemediation.ps1 -TenantId <tenant id> -ClientId <PIM Activator app id> -AssignToGroupId <group object id> -WhatIf
+.NOTES
+    A transcript of the run is written to <temp>\pim-manager-logs\ (its path is printed).
+.LINK
+    https://invardia.com/docs/pim/scripts/Publish-PimActivatorRemediation/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     # The tenant to sign in to and to write into the extension's catalog (its id).
     [string]$TenantId = 'organizations',
@@ -73,8 +86,14 @@ $ErrorActionPreference = 'Stop'
 # The pure builder (catalog + the filled pair) and the shipped Detect / Remediate text. Loaded with the literal form below
 # so Build-PimSupportScripts inlines it (with the two scripts embedded) into the standalone download.
 . (Join-Path $PSScriptRoot '_PimActivatorBuild.ps1')
+# 12.7 run frame: "Documentation: <page>" as the first line + a transcript in the temp folder (its path printed at the end).
+. (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Publish-PimActivatorRemediation'
+try {
+$_preview = [bool]$WhatIfPreference
+if ($_preview) { Write-Host 'PREVIEW (-WhatIf): signs in and reads; every change is listed as "What if:" and none is made.' -ForegroundColor Yellow }
 
-$label = if ($Channel -eq 'Test') { 'TEST' } else { 'PROD' }
+$label =if ($Channel -eq 'Test') { 'TEST' } else { 'PROD' }
 if (-not "$Name".Trim()) { $Name = "PIM Activator settings ($label)" }
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 if (-not "$OutDir".Trim()) { $OutDir = $here }
@@ -94,12 +113,17 @@ if ($DetectScript -or $RemediateScript) {
         -DefaultJustification $DefaultJustification -DefaultDurationHours $DefaultDurationHours -Prefix $Prefix -EntraPrefix $EntraPrefix -AzurePrefix $AzurePrefix `
         -AutoActivateMaxGroups $(if ($AutoActivateMaxGroups -ge 0) { $AutoActivateMaxGroups } else { $null }) -BulkActivateConfirmThreshold $(if ($BulkActivateConfirmThreshold -ge 0) { $BulkActivateConfirmThreshold } else { $null }) `
         -AdditionalTenantsJson $AdditionalTenantsJson
-    New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-    $detPath = Join-Path $OutDir 'Detect-PimActivator.ps1'; $remPath = Join-Path $OutDir 'Remediate-PimActivator.ps1'
+    $writeDir = $OutDir
+    if (-not $PSCmdlet.ShouldProcess($OutDir, 'Write Detect-PimActivator.ps1 + Remediate-PimActivator.ps1 (the pair it uploads)')) {
+        # preview: the pair goes to the temp folder instead, so it can still be read (and is what would be uploaded)
+        $writeDir = Join-Path ([IO.Path]::GetTempPath()) ('pim-activator-preview-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    }
+    if (-not (Test-Path -LiteralPath $writeDir)) { New-Item -ItemType Directory -Force -Path $writeDir -WhatIf:$false | Out-Null }
+    $detPath = Join-Path $writeDir 'Detect-PimActivator.ps1'; $remPath = Join-Path $writeDir 'Remediate-PimActivator.ps1'
     # UTF-8 WITH a BOM, so Windows PowerShell 5.1 on the device reads non-ASCII characters right (same bytes as the page).
     $enc = New-Object Text.UTF8Encoding($true)
     [IO.File]::WriteAllText($detPath, $pair.detect, $enc); [IO.File]::WriteAllText($remPath, $pair.remediate, $enc)
-    Write-Host "Built the Remediation for $label (tenant $TenantId, app $ClientId, '$CatalogName'): $detPath + $remPath" -ForegroundColor Cyan
+    Write-Host "Built the Remediation for $label (tenant $TenantId, app $ClientId, '$CatalogName'): $detPath + $remPath$(if ($writeDir -ne $OutDir) { ' (preview copy in the temp folder)' })" -ForegroundColor Cyan
 }
 $who = if ($AssignToGroupId) { "group $AssignToGroupId" } else { 'NOBODY yet (no -AssignToGroupId)' }
 Write-Host "Deploys to: $who" -ForegroundColor Cyan
@@ -123,7 +147,7 @@ function Get-PaGraphToken {
     $edge = @((Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'), (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe')) |
             Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
     Write-Host 'Sign in in the browser window as an Intune administrator ...' -ForegroundColor Yellow
-    if ($edge) { Start-Process -FilePath $edge -ArgumentList @('--new-window', $url) } else { Start-Process $url }
+    if ($edge) { Start-Process -FilePath $edge -ArgumentList @('--new-window', $url) -WhatIf:$false } else { Start-Process $url -WhatIf:$false }   # -WhatIf still signs in
     $query = $null
     try {
         $deadline = (Get-Date).AddMinutes(5)
@@ -171,11 +195,24 @@ $body = [ordered]@{
     detectionScriptContent   = [Convert]::ToBase64String([IO.File]::ReadAllBytes($detPath))
     remediationScriptContent = [Convert]::ToBase64String([IO.File]::ReadAllBytes($remPath))
 }
+$_what = "Detect + Remediate scripts (sha256 $((Get-FileHash -LiteralPath $detPath -Algorithm SHA256).Hash.Substring(0, 12))... / $((Get-FileHash -LiteralPath $remPath -Algorithm SHA256).Hash.Substring(0, 12))...), run as SYSTEM, 64-bit, no signature check"
+$_scheduleText = if ($EveryHours) { "every $EveryHours hour(s)" } else { "daily at $DailyTime" }
 if ($match) {
     $id = "$($match[0].id)"
+    if (-not $PSCmdlet.ShouldProcess("Intune Remediation '$Name' ($id)", "Update (PATCH deviceHealthScripts): $_what")) {
+        if ($AssignToGroupId) { [void]$PSCmdlet.ShouldProcess("Intune Remediation '$Name' ($id)", "Assign to group $AssignToGroupId ONLY (replaces its assignments), $_scheduleText") }
+        Write-Host 'PREVIEW (-WhatIf) complete: nothing was uploaded, assigned or changed. Run the same command without -WhatIf to apply.' -ForegroundColor Yellow
+        return
+    }
     [void](Invoke-PaGraph PATCH "$base/$id" $body)
     Write-Host "[OK] Updated '$Name' ($id)." -ForegroundColor Green
 } else {
+    if (-not $PSCmdlet.ShouldProcess("Intune Remediation '$Name'", "Create (POST deviceHealthScripts): $_what")) {
+        $asgText = if ($AssignToGroupId) { "group $AssignToGroupId ONLY, $_scheduleText" } else { 'NOBODY (no -AssignToGroupId)' }
+        if ($AssignToGroupId) { [void]$PSCmdlet.ShouldProcess("Intune Remediation '$Name'", "Assign to $asgText") }
+        Write-Host 'PREVIEW (-WhatIf) complete: nothing was uploaded, assigned or changed. Run the same command without -WhatIf to apply.' -ForegroundColor Yellow
+        return
+    }
     $body['roleScopeTagIds'] = @('0')
     $id = "$((Invoke-PaGraph POST $base $body).id)"
     Write-Host "[OK] Created '$Name' ($id)." -ForegroundColor Green
@@ -196,6 +233,7 @@ if ($AssignToGroupId) {
         runRemediationScript = $true
         runSchedule          = $schedule
     }) }
+    if (-not $PSCmdlet.ShouldProcess("Intune Remediation '$Name' ($id)", "Assign to group $AssignToGroupId ONLY (replaces its assignments), $_scheduleText")) { return }
     [void](Invoke-PaGraph POST "$base/$id/assign" $asg)
     # read the assignment back: exactly this group, nothing wider
     $got = @((Invoke-PaGraph GET "$base/$id/assignments").value)
@@ -210,3 +248,4 @@ if ($AssignToGroupId) {
         Write-Host "     or in Intune > Devices > Scripts and remediations > '$Name' > Properties > Assignments (a group, never all users / all devices)." -ForegroundColor Yellow
     }
 }
+} finally { Stop-PimScriptRun -Script 'Publish-PimActivatorRemediation' }

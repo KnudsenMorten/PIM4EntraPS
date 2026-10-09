@@ -1,11 +1,21 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
-    Force-install the PIM Activator browser extension (Edge, Chrome, or both)
-    via Chromium enterprise policy. Designed for unattended Intune / Group
-    Policy / Configuration Manager rollout.
+    Installs the PIM Activator browser extension on this machine (Edge, Chrome or both) through local Chromium enterprise policy in the registry -- force-install, install source, extension settings and the tenant catalog -- for servers and machines without Intune; -Uninstall removes only what it wrote.
 
 .DESCRIPTION
+    Documentation (purpose, who may run it, every change and permission, -WhatIf, undo):
+    https://invardia.com/docs/pim/scripts/Deploy-PimActivatorClient/
+    -WhatIf reads the machine's current policies (and signs in only when the tenant catalog is auto-discovered) and
+    prints every registry value it would set or remove; it writes nothing.
+
+    The extension itself is downloaded by the BROWSER, not by this script: the forcelist names the update manifest
+    (-UpdateUrl) and the browser installs and updates the signed CRX from it (Chromium accepts a CRX only when its
+    signing key matches the extension id).
+
+    Designed for unattended Intune / Group Policy / Configuration Manager rollout.
+
     Writes the Chromium policies that tell the browser to install + auto-update
     the extension from the given -UpdateUrl on next launch
     (ExtensionInstallForcelist, ExtensionInstallSources, ExtensionSettings), plus
@@ -61,12 +71,15 @@
     Exact display name used to find the app registration when -ClientId is not given.
     Default 'PIM Activator' (what Deploy-PimActivatorBackend.ps1 creates).
 
-.NOTES (existing policies)
-    The org's own extension policies are never overwritten: our rows go
-    into the slot already holding our id, else the lowest free slot, and our
-    ExtensionSettings entry is MERGED into the org's dictionary. Same layout and the
-    same code (_PimActivatorHybridPolicy.ps1) as Deploy-PimActivatorHybrid.ps1 -Target
-    LocalGpo, so the two writers cannot disagree. That file must sit next to this one.
+.PARAMETER TenantId
+    With -ClientId: write the tenant catalog from these values (no sign-in, no file).
+
+.PARAMETER AutoActivateMaxGroups
+    Per-device cap on auto-activation: 0 = off, N = at most N groups, -1 = remove the cap. Not passed = left alone.
+
+.EXAMPLE
+    # Preview: every registry value it would set -- writes nothing:
+    .\Deploy-PimActivatorClient.ps1 -Scope Machine -Browser Both -TenantId <tenant id> -ClientId <app id> -WhatIf
 
 .EXAMPLE
     # Default per-machine install (HKLM, requires admin, applies to every
@@ -116,10 +129,19 @@
     # -> Add: eheocihmlppcophaeakmdenhgcookkab;https://knudsenmorten.github.io/PIM4EntraPS/updates.xml
 
 .NOTES
+    Existing policies: the org's own extension policies are never overwritten: our rows go
+    into the slot already holding our id, else the lowest free slot, and our
+    ExtensionSettings entry is MERGED into the org's dictionary. Same layout and the
+    same code (_PimActivatorHybridPolicy.ps1) as Deploy-PimActivatorHybrid.ps1 -Target
+    LocalGpo, so the two writers cannot disagree. That file must sit next to this one.
     Tested on Edge for Business 120+ and Chrome 120+. Both browsers pick up
     policy changes on next launch; no reboot required.
+    A transcript of the run is written to <temp>\pim-manager-logs\ (its path is printed).
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Deploy-PimActivatorClient/
 #>
-[CmdletBinding(DefaultParameterSetName = 'Install')]
+[CmdletBinding(DefaultParameterSetName = 'Install', SupportsShouldProcess)]
 param(
     # Extension id is constant across every install of this distribution
     # (derived from manifest.json "key" field). Default so the vanilla call
@@ -223,6 +245,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# 12.7 run frame: "Documentation: <page>" as the first line + a transcript in the temp folder (its path printed at the end).
+# To run it on a server on its own, use the standalone download: it has this helper (and the two below) inlined.
+. (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Deploy-PimActivatorClient'
+try {
+$_preview = [bool]$WhatIfPreference
+if ($_preview) { Write-Host 'PREVIEW (-WhatIf): reads this machine''s policies; every registry value it would set or remove is listed, none is written.' -ForegroundColor Yellow }
+
 # ---- Channel defaults (Test writes the SEPARATE test forcelist + catalog) ----
 if ($Channel -eq 'Test') {
     if (-not $PSBoundParameters.ContainsKey('ExtensionId')) { $ExtensionId = 'glldnbmjpdkjemcnficagdhgienfdpoo' }
@@ -244,7 +274,9 @@ if (Get-Command Show-PimActivatorBanner -ErrorAction SilentlyContinue) { Show-Pi
 # New-Item fault out mid-write with an opaque registry-permission error.
 if ($Scope -eq 'Machine') {
     $isAdmin = ([Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if (-not $isAdmin) {
+    if (-not $isAdmin -and $_preview) {
+        Write-Warning '-Scope Machine writes to HKLM and needs an elevated session to APPLY; this preview only reads, so it continues.'
+    } elseif (-not $isAdmin) {
         throw "-Scope Machine writes to HKLM and requires elevation. Re-run from an elevated PowerShell session, or pass -Scope User to write only the current-user HKCU forcelist."
     }
 }
@@ -353,8 +385,8 @@ if ($Uninstall) {
 
         # The 3rdparty\extensions\<id> tree (tenantCatalog) is keyed by OUR id -- all ours.
         $catalogRoot = Join-Path $root.Path "3rdparty\extensions\$ExtensionId"
-        if (Test-Path -LiteralPath $catalogRoot) {
-            Remove-Item -LiteralPath $catalogRoot -Recurse -Force -ErrorAction SilentlyContinue
+        if ((Test-Path -LiteralPath $catalogRoot) -and $PSCmdlet.ShouldProcess($catalogRoot, 'Remove the registry key (tenant catalog + per-device settings of this extension)')) {
+            Remove-Item -LiteralPath $catalogRoot -Recurse -Force -ErrorAction SilentlyContinue -WhatIf:$false
             Write-Host "  [$($root.Name)] removed 3rdparty\extensions\$ExtensionId" -ForegroundColor DarkGray
         }
     }
@@ -363,6 +395,7 @@ if ($Uninstall) {
         Write-Warning "Uninstall finished with $uninstallProblems ExtensionSettings value(s) left untouched (see above) -- remove the '$ExtensionId' entry from them by hand."
         exit 1
     }
+    if ($_preview) { Write-Host 'PREVIEW (-WhatIf) complete: nothing was removed. Run the same command without -WhatIf to apply.' -ForegroundColor Yellow; return }
     Write-Host "Done. Restart $Browser to apply." -ForegroundColor Green
     return
 }
@@ -604,10 +637,14 @@ foreach ($root in $policyRoots) {
                 # whether the catalog has 1 or many tenants.
                 $catalogMin = ConvertTo-Json -InputObject @($catalog) -Depth 10 -Compress
                 $catalogKey = Join-Path $root.Path "3rdparty\extensions\$ExtensionId\policy"
-                New-PolicyKey -Path $catalogKey
-                Set-Reg -Path $catalogKey -Name 'tenantCatalog' -Value $catalogMin
                 $tenantCount = @($catalog).Count
-                Write-Host "    -> tenantCatalog written ($tenantCount tenant(s)) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor DarkGray
+                if ($PSCmdlet.ShouldProcess("$catalogKey\tenantCatalog", "Set registry value (String): the tenant catalog, $tenantCount tenant(s) -- $catalogMin")) {
+                    New-PolicyKey -Path $catalogKey
+                    Set-Reg -Path $catalogKey -Name 'tenantCatalog' -Value $catalogMin
+                    Write-Host "    -> tenantCatalog written ($tenantCount tenant(s)) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor DarkGray
+                } else {
+                    Write-Host "    -> would write tenantCatalog ($tenantCount tenant(s)) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor Yellow
+                }
             } catch {
                 Write-Warning "    Tenant catalog write failed: $($_.Exception.Message). Other policies were still written."
                 $catalogMissing.Add($root.Name)
@@ -622,12 +659,14 @@ foreach ($root in $policyRoots) {
     # REG_DWORD; -1 = removed (no limit).
     if ($PSBoundParameters.ContainsKey('AutoActivateMaxGroups')) {
         $amKey = Join-Path $root.Path "3rdparty\extensions\$ExtensionId\policy"
-        if ($AutoActivateMaxGroups -ge 0) {
+        $amTxt = if ($AutoActivateMaxGroups -eq 0) { 'auto-activation OFF' } elseif ($AutoActivateMaxGroups -gt 0) { "at most $AutoActivateMaxGroups group(s)" } else { 'no limit' }
+        if (-not $PSCmdlet.ShouldProcess("$amKey\autoActivateMaxGroups", $(if ($AutoActivateMaxGroups -ge 0) { "Set registry value (DWord) = $AutoActivateMaxGroups ($amTxt)" } else { 'Remove registry value (no limit)' }))) {
+            Write-Host "    -> would $(if ($AutoActivateMaxGroups -ge 0) { "set autoActivateMaxGroups = $AutoActivateMaxGroups ($amTxt)" } else { 'remove autoActivateMaxGroups (no limit)' }) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor Yellow
+        } elseif ($AutoActivateMaxGroups -ge 0) {
             Set-Reg -Path $amKey -Name 'autoActivateMaxGroups' -Value $AutoActivateMaxGroups -Kind DWord
-            $amTxt = if ($AutoActivateMaxGroups -eq 0) { 'auto-activation OFF' } else { "at most $AutoActivateMaxGroups group(s)" }
             Write-Host "    -> autoActivateMaxGroups = $AutoActivateMaxGroups ($amTxt) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor DarkGray
         } else {
-            if (Test-Path -LiteralPath $amKey) { Remove-ItemProperty -LiteralPath $amKey -Name 'autoActivateMaxGroups' -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $amKey) { Remove-ItemProperty -LiteralPath $amKey -Name 'autoActivateMaxGroups' -ErrorAction SilentlyContinue -WhatIf:$false }
             Write-Host "    -> autoActivateMaxGroups removed (no limit) under 3rdparty\extensions\$ExtensionId\policy" -ForegroundColor DarkGray
         }
     }
@@ -642,6 +681,10 @@ if ($catalogMissing.Count -gt 0) {
 }
 
 Write-Host ""
+if ($_preview) {
+    Write-Host 'PREVIEW (-WhatIf) complete: nothing was written. Run the same command without -WhatIf (elevated for -Scope Machine) to apply.' -ForegroundColor Yellow
+    return
+}
 Write-Host "Done. Restart $Browser (or wait for next launch) to apply policy." -ForegroundColor Green
 Write-Host ""
 Write-Host "First-run user experience:" -ForegroundColor Yellow
@@ -654,3 +697,4 @@ Write-Host "     signs in once -> defaults pre-filled ($_jdefault / ${_ddefault}
 Write-Host "  4. Activate / My Access tabs are live. Sign-in lasts for the browser session."
 if ($Browser -in @('Edge','Both'))   { Write-Host "Validate force-install: edge://policy   -> search 'ExtensionInstallForcelist' / extension id." -ForegroundColor DarkGray }
 if ($Browser -in @('Chrome','Both')) { Write-Host "Validate force-install: chrome://policy -> search 'ExtensionInstallForcelist' / extension id." -ForegroundColor DarkGray }
+} finally { Stop-PimScriptRun -Script 'Deploy-PimActivatorClient' }

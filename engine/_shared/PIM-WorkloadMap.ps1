@@ -360,6 +360,12 @@ function Get-PimWorkloadReconStatus {
 
     $crawledUtc = if ($CrawlMap) { "$($CrawlMap.crawledUtc)" } else { '' }
 
+    # 100.17 CUSTOM-WORKLOAD: a group-only workload has no application API to crawl -- the access IS the group's
+    # membership, which drift / review / the group providers check. Said as such, never 'not yet crawled' / 'missing'.
+    if ((Get-Command Test-PimCustomWorkloadId -ErrorAction SilentlyContinue) -and (Test-PimCustomWorkloadId -Id $wl)) {
+        return [ordered]@{ status = 'grouponly'; reason = 'custom workload (group-only): the access is the PIM group''s membership -- nothing to crawl in the application'; crawledUtc = $crawledUtc }
+    }
+
     # Is it live? Look up the workload's crawled assignments.
     $wlNode = $null
     if ($CrawlMap -and $CrawlMap.workloads) {
@@ -414,7 +420,7 @@ function Get-PimWorkloadReconSummary {
         [object[]]$Exemptions = @(),
         [datetime]$AsOf = ([datetime]::UtcNow)
     )
-    $c = [ordered]@{ mapped = 0; missing = 0; exempted = 0; unknown = 0; total = 0 }
+    $c = [ordered]@{ mapped = 0; missing = 0; exempted = 0; unknown = 0; groupOnly = 0; total = 0 }
     foreach ($r in @($Rows)) {
         if (-not "$($r.Workload)".Trim() -or -not "$($r.RoleName)".Trim() -or -not "$($r.GroupTag)".Trim()) { continue }
         $st = Get-PimWorkloadReconStatus -Row $r -CrawlMap $CrawlMap -Exemptions $Exemptions -AsOf $AsOf
@@ -424,6 +430,7 @@ function Get-PimWorkloadReconSummary {
             'mapped'   { $c.mapped++ }
             'missing'  { $c.missing++ }
             'exempted' { $c.exempted++ }
+            'grouponly' { $c.groupOnly++ }   # 100.17
             default    { $c.unknown++ }
         }
     }

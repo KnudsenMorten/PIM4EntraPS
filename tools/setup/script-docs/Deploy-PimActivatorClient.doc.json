@@ -1,0 +1,53 @@
+{
+  "script": "Deploy-PimActivatorClient.ps1",
+  "product": "pim",
+  "title": "PIM Activator: install the extension on a machine without Intune",
+  "purpose": "Installs the PIM Activator browser extension on this machine (Edge, Chrome or both) through local Chromium enterprise policy in the registry -- force-install, install source, extension settings and the tenant catalog -- for servers and machines without Intune; -Uninstall removes only what it wrote.",
+  "whenToRun": "On a server or a machine that is not managed by Intune, once (PIM Manager > Operations > PIM Activator > Servers shows the command with your tenant and app). Re-run to change the settings; -Uninstall to remove them.",
+  "standalone": true,
+  "sourcePath": "tools/pim-activator/Deploy-PimActivatorClient.ps1",
+  "runAs": [
+    { "kind": "other", "name": "Local Administrator (elevated PowerShell)", "scope": "this machine; only for -Scope Machine (HKLM, the default)", "why": "machine policy lives under HKLM. -Scope User (HKCU, the current user only) needs no elevation." },
+    { "kind": "other", "name": "Delegated sign-in: Organization.Read.All, Application.Read.All (read only)", "scope": "Microsoft Graph, for the first-party app Microsoft Graph Command Line Tools", "why": "ONLY when neither -TenantId + -ClientId nor -CatalogJsonPath is given: the tenant and the PIM Activator app are looked up live. The command PIM Manager shows passes both, so it signs in to nothing." }
+  ],
+  "changes": [
+    { "target": "this machine's registry", "action": "update", "object": "<HKLM or HKCU>\\SOFTWARE\\Policies\\Microsoft\\Edge and \\Google\\Chrome \\ExtensionInstallForcelist: one row '<extension id>;<update URL>' in the slot already holding our id, else the lowest free slot; other rows carrying our id are removed", "why": "the browser installs and keeps the extension updated", "undo": "Deploy-PimActivatorClient.ps1 -Uninstall (removes only our rows)" },
+    { "target": "this machine's registry", "action": "update", "object": "...\\ExtensionInstallSources: one row with the update host pattern (https://<host>/*)", "why": "allows the install where a hardened baseline restricts install sources", "undo": "-Uninstall (kept while another forcelist row still installs from that host)" },
+    { "target": "this machine's registry", "action": "update", "object": "...\\ExtensionSettings: our entry (force_installed, runtime_allowed_hosts) merged into the organisation's dictionary -- their entries are kept", "why": "an extension update can never be silently disabled as a permission expansion", "undo": "-Uninstall (takes only our id out)" },
+    { "target": "this machine's registry", "action": "update", "object": "...\\ExtensionInstallAllowlist: one row with our id -- only with -WriteAllowlist", "why": "for environments that block every extension ('*' blocklist)", "undo": "-Uninstall" },
+    { "target": "this machine's registry", "action": "create", "object": "...\\3rdparty\\extensions\\<extension id>\\policy\\tenantCatalog (tenant name, tenant id, app client id, activation defaults; plus -AdditionalTenantsJson tenants)", "why": "the extension's 'Use centrally deployed' setup reads it", "undo": "-Uninstall (removes the whole 3rdparty\\extensions\\<extension id> key)" },
+    { "target": "this machine's registry", "action": "update", "object": "...\\3rdparty\\extensions\\<extension id>\\policy\\autoActivateMaxGroups (DWORD) -- only with -AutoActivateMaxGroups (-1 removes it)", "why": "per-device cap on auto-activation", "undo": "re-run with -AutoActivateMaxGroups -1, or -Uninstall" },
+    { "target": "this machine's registry", "action": "remove", "object": "with -Uninstall: our forcelist / allowlist / install-source rows, our ExtensionSettings entry and the 3rdparty\\extensions\\<extension id> key -- nothing of the organisation's", "why": "removes the PIM Activator from this machine (the browser uninstalls it on its next start)", "undo": "run the install again" }
+  ],
+  "parameters": [
+    { "name": "Scope", "required": false, "default": "Machine", "help": "Machine (HKLM, every user, needs elevation) or User (HKCU, the current user only)." },
+    { "name": "Browser", "required": false, "default": "Both", "help": "Edge, Chrome or Both." },
+    { "name": "Channel", "required": false, "default": "Released", "help": "Released, or Test (the separate TEST extension id and update manifest)." },
+    { "name": "TenantId", "required": false, "default": null, "help": "With -ClientId: the tenant catalog is written from these values (no sign-in)." },
+    { "name": "ClientId", "required": false, "default": null, "help": "Application (client) id of the PIM Activator app registration. Without it the app is looked up by exact -AppDisplayName (sign-in)." },
+    { "name": "TenantName", "required": false, "default": "PIM", "help": "The tenant name the users see in the extension." },
+    { "name": "AdditionalTenantsJson", "required": false, "default": "", "help": "Optional: more tenants for the extension's tenant switcher (JSON array of name, tenantId, clientId)." },
+    { "name": "DefaultJustification", "required": false, "default": "Change in infrastructure", "help": "The justification the extension pre-fills (overrides the catalog's)." },
+    { "name": "DefaultDurationHours", "required": false, "default": 8, "help": "The activation length the extension pre-fills, 1-24 hours (overrides the catalog's)." },
+    { "name": "AutoActivateMaxGroups", "required": false, "default": "not set (left alone)", "help": "Per-device cap on auto-activation: 0 = off, N = at most N groups, -1 = remove the cap." },
+    { "name": "CatalogJsonPath", "required": false, "default": null, "help": "A tenant catalog JSON file to write instead of -TenantId/-ClientId or the live lookup." },
+    { "name": "SkipTenantCatalog", "required": false, "default": false, "help": "Write only the install policies, no tenant catalog." },
+    { "name": "WriteAllowlist", "required": false, "default": false, "help": "Also write ExtensionInstallAllowlist (only where every extension is blocked)." },
+    { "name": "AppDisplayName", "required": false, "default": "PIM Activator", "help": "Exact display name used to find the app when -ClientId is not given (must be unique)." },
+    { "name": "ExtensionId", "required": false, "default": "eheocihmlppcophaeakmdenhgcookkab", "help": "The extension id; change it only for a fork." },
+    { "name": "UpdateUrl", "required": false, "default": "https://knudsenmorten.github.io/PIM4EntraPS/updates.xml", "help": "The update manifest the browser installs and updates the extension from (self-hosting)." },
+    { "name": "Uninstall", "required": false, "default": false, "help": "Remove only what this script wrote for the extension id." }
+  ],
+  "readsOnly": [
+    "this machine's current Edge / Chrome extension policies (so the organisation's own rows and settings are kept)",
+    "only without -TenantId + -ClientId: the tenant (organization) and the PIM Activator app registration, by exact name or -ClientId"
+  ],
+  "network": [
+    "none when -TenantId and -ClientId are given (the command PIM Manager shows)",
+    "login.microsoftonline.com, graph.microsoft.com -- only for the live lookup",
+    "knudsenmorten.github.io -- by the BROWSER afterwards, not by this script: the update manifest and the signed extension package (Chromium installs a package only when its signing key matches the extension id)"
+  ],
+  "whatIf": "Reads this machine's policies and prints every registry value it would set or remove (forcelist slot, install source, ExtensionSettings entry, tenant catalog, per-device cap). Nothing is written. A preview of -Scope Machine runs without elevation.",
+  "undo": "Deploy-PimActivatorClient.ps1 -Uninstall (same -Scope, -Browser and -Channel): removes only this script's rows, entries and keys; the browser removes the extension on its next start.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Deploy-PimActivatorClient/"
+}

@@ -204,6 +204,10 @@ if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\access-reviews\PIM-Acces
 # parallel), and the secure store-and-forward ServiceNow->Manager intake broker. No
 # network here; the send is the existing channel layer.
 . (Join-Path $PSScriptRoot 'PIM-Notifications.ps1')
+# MAIL-2 (framework §12.11): the designed mail/report layout + per-recipient notification preferences / audience links.
+. (Join-Path $PSScriptRoot 'PIM-MailLayout.ps1')
+. (Join-Path $PSScriptRoot 'PIM-MailNotifications.ps1')
+. (Join-Path $PSScriptRoot 'PIM-GetStartedReminder.ps1')
 # The ONE mail template store (SQL pim.Settings['MailTemplates'], seeded from templates/mail).
 . (Join-Path $PSScriptRoot 'PIM-MailTemplateStore.ps1')
 

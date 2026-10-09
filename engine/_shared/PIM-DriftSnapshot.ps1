@@ -237,6 +237,8 @@ function ConvertTo-PimDriftSnapshotDocument {
             if ("$($it.type)" -eq 'extra') {
                 $xa = Get-PimDriftExtraActions -Scope "$($sd.scope)" -Payload $payloads["$($sd.scope)|$($it.key)"]
                 $row['revoke'] = $xa.revoke; $row['revokeWhy'] = $xa.revokeWhy; $row['keep'] = $xa.keep; $row['keepWhy'] = $xa.keepWhy
+                # DRIFT-EXTRAS (100.12): a group extra's Delete is its staged retirement (a definition row), not a revoke.
+                if ($xa.Contains('retire') -and $null -ne $xa['retire']) { $row['retire'] = $xa['retire'] }
             }
             $items.Add($row)
         }
@@ -772,6 +774,26 @@ function Get-PimDriftExtraActions {
         $row = [ordered]@{ AUDisplayName = $dn; AUDescription = (& $f 'description'); AdministrativeUnitTag = (ConvertTo-PimDriftAuTag -DisplayName $dn) }
         if (& $f 'visibility') { $row['Visibility'] = (& $f 'visibility') }
         $out.keep = [ordered]@{ base = 'PIM-Definitions-AU'; row = $row }
+        return $out
+    }
+    if ($Scope -eq 'Groups' -and ((& $f 'displayName') -or (& $f 'DisplayName'))) {
+        # 🔴 DRIFT-EXTRAS (PIM 100.12, owner 2026-10-09): a GROUP that exists in Entra, carries the tenant's naming prefix (so the
+        # lean context lists it) and that no PIM definition names -- typically created by the customer's own infrastructure
+        # code. The engine NEVER deletes it: the Groups provider has no ApplyRemove, and the daily reconcile removes only what
+        # PIM's ledger + journal say PIM made. Three explicit choices on the Drift page, never a default:
+        #   Import into PIM -- stage the group DEFINITION row under its exact live name. The Groups provider keys on the name,
+        #                      so the committed row MATCHES the existing group (adopted, nochange) -- never a second group.
+        #   Delete          -- stage the same row with Lifecycle=Retire: the normal group-retirement path (commit, the
+        #                      EnableGroupRetirement switch, naming prefix, unique live name, removal budget) deletes it.
+        #   Ignore          -- hide it (pim.Settings 'DriftIgnores'), reversible.
+        $dn = if (& $f 'displayName') { & $f 'displayName' } else { & $f 'DisplayName' }
+        $desc = & $f 'description'; if (-not $desc) { $desc = & $f 'Description' }
+        $gid = & $f 'id'; if (-not $gid) { $gid = & $f 'Id' }
+        $out.revokeWhy = 'a group is not a delegation the revoke queue removes -- Delete stages its retirement (Lifecycle=Retire) instead'
+        $row = [ordered]@{ GroupName = $dn; GroupDescription = $desc }
+        $out.keep = [ordered]@{ base = 'PIM-Definitions-Roles'; kind = 'group'; groupId = $gid; row = $row }
+        $rrow = [ordered]@{ GroupName = $dn; GroupDescription = $desc; Lifecycle = 'Retire' }
+        $out['retire'] = [ordered]@{ base = 'PIM-Definitions-Roles'; kind = 'group'; groupId = $gid; row = $rrow }
         return $out
     }
     $out.revokeWhy = 'nothing the revoke queue can address -- remove it at its source'

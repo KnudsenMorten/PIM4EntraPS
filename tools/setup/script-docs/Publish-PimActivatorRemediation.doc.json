@@ -1,0 +1,50 @@
+{
+  "script": "Publish-PimActivatorRemediation.ps1",
+  "product": "pim",
+  "title": "PIM Activator: upload the Intune Remediation",
+  "purpose": "Builds the PIM Activator Intune Remediation (Detect + Remediate) for your tenant and uploads it to Intune -- creates it, or updates it in place when a Remediation with the same name exists -- and assigns it to the one group you name (nobody otherwise).",
+  "whenToRun": "On Intune-managed devices, after the PIM Activator app registration exists (Deploy-PimActivatorBackend.ps1): PIM Manager > Operations > PIM Activator > Intune remediation shows the command with your settings. Run it again after changing the settings, or to assign the Remediation to a group.",
+  "standalone": true,
+  "sourcePath": "tools/pim-activator/Publish-PimActivatorRemediation.ps1",
+  "runAs": [
+    { "kind": "entraRole", "name": "Intune Administrator", "scope": "tenant", "why": "creates / updates a Remediation (device health script) and assigns it. Global Administrator also works." },
+    { "kind": "other", "name": "Delegated sign-in: DeviceManagementScripts.ReadWrite.All", "scope": "Microsoft Graph, for the first-party app Microsoft Graph Command Line Tools", "why": "the browser sign-in asks for this one delegated permission only; it acts within your Intune role. Automation: -AccessToken with the same permission." }
+  ],
+  "changes": [
+    { "target": "this computer", "action": "create", "object": "Detect-PimActivator.ps1 and Remediate-PimActivator.ps1 in -OutDir (default: next to the script), built from the parameters", "why": "the pair that is uploaded, kept so you can read exactly what the devices run", "undo": "delete the two files" },
+    { "target": "Microsoft Intune", "action": "create", "object": "Remediation (deviceHealthScript) -Name, default 'PIM Activator settings (PROD)' / '(TEST)': the Detect + Remediate scripts, run as SYSTEM, 64-bit PowerShell, no signature check; updated in place when one with that exact name exists", "why": "it writes the PIM Activator browser policies (force-install + tenant catalog + settings) on the devices it is assigned to, every day", "undo": "Intune admin center > Devices > Scripts and remediations > the Remediation > Delete" },
+    { "target": "Remediation -Name", "action": "grant", "object": "assignment to group -AssignToGroupId (user or device group); REPLACES the Remediation's assignments", "permission": "Remediation assignment: runs on the group's devices daily at -DailyTime, or every -EveryHours hours", "scope": "only that group -- never all users or all devices; without -AssignToGroupId nothing is assigned", "why": "who gets the PIM Activator settings", "undo": "Intune > the Remediation > Properties > Assignments > remove the group" }
+  ],
+  "parameters": [
+    { "name": "TenantId", "required": true, "default": "organizations", "help": "Your tenant id: the sign-in tenant and the tenant written into the extension's catalog (required unless you upload your own pair)." },
+    { "name": "Channel", "required": false, "default": "Released", "help": "Released (PROD) or Test: which extension the Remediation configures." },
+    { "name": "ClientId", "required": true, "default": null, "help": "Application (client) id of the PIM Activator app registration of that channel (required unless you upload your own pair)." },
+    { "name": "CatalogName", "required": false, "default": "PIM", "help": "The tenant name the users see in the extension." },
+    { "name": "DefaultJustification", "required": false, "default": "Change in infrastructure", "help": "The justification the extension pre-fills." },
+    { "name": "DefaultDurationHours", "required": false, "default": 8, "help": "The activation length the extension pre-fills (1-24 hours)." },
+    { "name": "Prefix", "required": false, "default": "", "help": "Optional group-name prefix filter." },
+    { "name": "EntraPrefix", "required": false, "default": "", "help": "Optional prefix of the groups that carry Entra roles." },
+    { "name": "AzurePrefix", "required": false, "default": "", "help": "Optional prefix of the groups that carry Azure roles." },
+    { "name": "AutoActivateMaxGroups", "required": false, "default": -1, "help": "Optional per-device cap on auto-activation (0 = off). -1 = not set." },
+    { "name": "BulkActivateConfirmThreshold", "required": false, "default": -1, "help": "Optional: ask for confirmation above this many groups. -1 = not set." },
+    { "name": "Browsers", "required": false, "default": "Edge, Chrome", "help": "Which browsers the Remediation configures." },
+    { "name": "AdditionalTenantsJson", "required": false, "default": "", "help": "Optional: more tenants for the extension's tenant switcher (JSON array of name, tenantId, clientId)." },
+    { "name": "Name", "required": false, "default": "PIM Activator settings (PROD) / (TEST)", "help": "The Remediation's name in Intune (an existing one with exactly this name is updated)." },
+    { "name": "DetectScript", "required": false, "default": null, "help": "Override: upload this detection script instead of building it (with -RemediateScript)." },
+    { "name": "RemediateScript", "required": false, "default": null, "help": "Override: upload this remediation script instead of building it (with -DetectScript)." },
+    { "name": "OutDir", "required": false, "default": "the script's folder", "help": "Where the built pair is written." },
+    { "name": "AccessToken", "required": false, "default": null, "help": "Automation: a Microsoft Graph token with DeviceManagementScripts.ReadWrite.All; skips the browser sign-in." },
+    { "name": "Description", "required": false, "default": "uploaded by Publish-PimActivatorRemediation.ps1 <date>", "help": "The Remediation's description in Intune." },
+    { "name": "AssignToGroupId", "required": false, "default": null, "help": "Object id of the group that gets the Remediation (replaces its assignments). Not given: nothing is assigned." },
+    { "name": "DailyTime", "required": false, "default": "09:00", "help": "With an assignment: the daily run time (device local time)." },
+    { "name": "EveryHours", "required": false, "default": null, "help": "With an assignment: run every N hours (1-23) instead of daily." }
+  ],
+  "readsOnly": [
+    "the tenant's Remediations (to find one with the same name)",
+    "the Remediation after the upload (read back: same scripts, SYSTEM, 64-bit) and its assignments"
+  ],
+  "network": [ "login.microsoftonline.com", "graph.microsoft.com" ],
+  "whatIf": "Signs in, reads Intune, builds the pair in the temp folder (so you can read it) and prints a 'What if:' line for the Remediation it would create or update (with the scripts' checksums) and the group assignment it would make. Nothing is uploaded, assigned or written next to the script.",
+  "undo": "Delete the Remediation in the Intune admin center (Devices > Scripts and remediations). Devices keep the policies it already wrote until you remove them (Deploy-PimActivatorClient.ps1 -Uninstall on a device, or a Remediation that removes them).",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Publish-PimActivatorRemediation/"
+}

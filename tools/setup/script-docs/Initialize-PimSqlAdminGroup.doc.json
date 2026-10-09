@@ -1,0 +1,94 @@
+{
+  "script": "Initialize-PimSqlAdminGroup.ps1",
+  "product": "pim",
+  "title": "Make the SQL admin group the Entra admin of the PIM Manager database server",
+  "purpose": "Make a role-assignable security group (default grp-pim-sql-admins) the Microsoft Entra admin of a PIM Manager environment's Azure SQL server, with the environment's managed identities, the nightly updater and the Invardia Support app as its members.",
+  "whenToRun": "Once per environment when the install could not set up the SQL admin group itself (the installing identity did not hold the rights to create a role-assignable group), when PIM Manager or the updater reports that its identity cannot log in to the database, or when Invardia support needs access to the store. Safe to run again: a second run reports no changes.",
+  "standalone": true,
+  "sourcePath": "tools/setup/Initialize-PimSqlAdminGroup.ps1",
+  "runAs": [
+    {
+      "kind": "entraRole",
+      "name": "Privileged Role Administrator",
+      "scope": "tenant",
+      "why": "The group is role-assignable (tier 0): only a Privileged Role Administrator or a Global Administrator can create such a group or change its members. Without it the group is not created and the current SQL admin is left as it is."
+    },
+    {
+      "kind": "azureRbac",
+      "name": "Contributor",
+      "scope": "the Azure SQL server (or its resource group); Owner works too",
+      "why": "Sets the server's Microsoft Entra admin (Microsoft.Sql/servers/administrators/write) and reads it back."
+    },
+    {
+      "kind": "azureRbac",
+      "name": "Reader",
+      "scope": "the environment's resource group",
+      "why": "Finds the environment's user-assigned identities (id-pim-*) and the updater job's identity."
+    },
+    {
+      "kind": "other",
+      "name": "az login as the person running it (signed-in az context)",
+      "scope": "the subscription named with -SubscriptionId",
+      "why": "The script takes its Microsoft Graph and Azure Resource Manager tokens from the az sign-in and refuses a token for another tenant. A certificate identity (-ClientId + -CertThumbprint) is for automation from the repository only; it then needs the Graph application permissions Group.Create and GroupMember.ReadWrite.All (or Group.ReadWrite.All), Directory.Read.All and RoleManagement.ReadWrite.Directory."
+    }
+  ],
+  "changes": [
+    {
+      "target": "Microsoft Graph",
+      "action": "create",
+      "object": "security group grp-pim-sql-admins (or -GroupName), role-assignable (isAssignableToRole = true), only when it does not exist",
+      "permission": "",
+      "scope": "tenant",
+      "why": "One group as the SQL admin means every identity that must administer the store gets access by membership, without a database login created by hand. Role-assignable so that a Groups Administrator, a User Administrator or a group owner cannot add themselves to it.",
+      "undo": "Delete the group in the Entra admin center (Groups) -- only after another Microsoft Entra admin has been set on the SQL server, or nobody can administer the database."
+    },
+    {
+      "target": "Microsoft Graph",
+      "action": "grant",
+      "object": "member of grp-pim-sql-admins: the environment identity (id-pim-<token>), the SQL identity (id-pim-sql-<token>, private SQL only), the nightly updater's identity (ca-pim-update), the Invardia Support app (-SupportAppId / -SupportObjectId), every -ExtraMemberObjectIds, and the previous SQL admin (kept, so nobody loses access)",
+      "permission": "group member of the SQL server's Microsoft Entra admin group = administrator of the SQL server and every database on it",
+      "scope": "the environment's Azure SQL server",
+      "why": "The updater checks the database schema before it rolls a release, the Manager and engine read and write the store, and Invardia support needs access to the store to help.",
+      "undo": "Remove the member from the group (Entra admin center > Groups > grp-pim-sql-admins > Members). Removing the PIM identities stops PIM Manager."
+    },
+    {
+      "target": "Azure Resource Manager",
+      "action": "update",
+      "object": "Microsoft Entra admin of the Azure SQL server (Microsoft.Sql/servers/administrators/ActiveDirectory) set to the group",
+      "permission": "",
+      "scope": "the Azure SQL server named with -SqlServerName",
+      "why": "Azure SQL allows exactly one Microsoft Entra admin; making it the group gives every member access. Entra-only authentication is not changed (only read before and after). Existing contained database users are not touched.",
+      "undo": "Set the previous admin back (the script prints it): Azure portal > the SQL server > Microsoft Entra ID > Set admin."
+    }
+  ],
+  "parameters": [
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The subscription of the environment (always named explicitly; never the default az context)." },
+    { "name": "ResourceGroup", "required": true, "default": null, "help": "The environment's resource group (where its identities and the updater job are)." },
+    { "name": "SqlServerName", "required": true, "default": null, "help": "The Azure SQL server name or FQDN." },
+    { "name": "SqlResourceGroup", "required": false, "default": "the -ResourceGroup", "help": "The resource group of the SQL server when it is not the environment's." },
+    { "name": "TenantId", "required": false, "default": "the subscription's tenant", "help": "The tenant id; every token is checked against it." },
+    { "name": "GroupName", "required": false, "default": "grp-pim-sql-admins", "help": "The SQL admin group's name." },
+    { "name": "GroupObjectId", "required": false, "default": null, "help": "Use this existing group (object id) instead of looking it up by name." },
+    { "name": "EnvironmentIdentityName", "required": false, "default": "the one id-pim-* identity in the resource group", "help": "The environment's user-assigned identity, when there is more than one candidate." },
+    { "name": "SqlAdminIdentityName", "required": false, "default": "the one id-pim-sql-* identity in the resource group", "help": "The in-network SQL identity (private SQL)." },
+    { "name": "UpdateJobName", "required": false, "default": "ca-pim-update", "help": "The nightly updater job whose system-assigned identity becomes a member." },
+    { "name": "SupportAppId", "required": false, "default": null, "help": "The Invardia Support app's application id; its service principal becomes a member. The old name -TroubleshootingAppId still works." },
+    { "name": "SupportObjectId", "required": false, "default": null, "help": "The Invardia Support app's service principal object id, instead of -SupportAppId. The old name -TroubleshootingObjectId still works." },
+    { "name": "ExtraMemberObjectIds", "required": false, "default": null, "help": "More object ids to make members." },
+    { "name": "ClientId", "required": false, "default": null, "help": "Automation from the repository only: with -CertThumbprint, a certificate identity instead of the az sign-in." },
+    { "name": "CertThumbprint", "required": false, "default": null, "help": "Automation from the repository only: the certificate (local store) of -ClientId." },
+    { "name": "MembersOnly", "required": false, "default": "off", "help": "Only add the members, and only when the group already is the server's admin; never create the group or move the admin." },
+    { "name": "DoNotKeepCurrentAdmin", "required": false, "default": "off", "help": "Do not make the current SQL admin a member of the group." },
+    { "name": "PlanOnly", "required": false, "default": "off", "help": "Read everything and print the plan; change nothing (as -WhatIf)." }
+  ],
+  "readsOnly": [
+    "the group (by name or id), whether it is a security group and role-assignable, and its members",
+    "the SQL server's current Microsoft Entra admin and its Entra-only authentication setting",
+    "the user-assigned identities in the resource group and the updater job's identity",
+    "the Invardia Support app's service principal (by application id)"
+  ],
+  "network": [ "graph.microsoft.com", "management.azure.com", "login.microsoftonline.com (through az)" ],
+  "whatIf": "Signs in and reads everything, prints the plan, then one \"What if:\" line per change it would make: create the role-assignable group, add each member (by name and object id), make the group the SQL server's Microsoft Entra admin (and who the admin was). Nothing is created or changed.",
+  "undo": "Set the previous Microsoft Entra admin back on the SQL server, then remove the members the script added (or delete the group if the script created it). Nothing else is changed by the script.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Initialize-PimSqlAdminGroup/"
+}

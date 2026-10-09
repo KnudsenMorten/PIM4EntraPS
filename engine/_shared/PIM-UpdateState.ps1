@@ -103,7 +103,10 @@ function New-PimUpdateStateRecord {
         [AllowEmptyString()][AllowNull()][string]$LastBuiltVersion,  # PIM_UPDATE_LAST_BUILT
         [AllowEmptyString()][AllowNull()][string]$TargetVersion,     # what this run tried to move to
         [ValidateSet('none','built','rolled','schema','failed')][string]$Action = 'none',
-        [ValidateSet('ok','failed','skipped')][string]$Outcome = 'ok',
+        # 2026-10-09: 'ahead' = the environment runs a NEWER version than its ring approves (rolled ahead on purpose) --
+        # a healthy run that changed nothing. 'attention' = the run stopped on something an operator must decide (e.g. the
+        # Invardia replay watermark belongs to another ring) -- not a product failure, and PIM keeps running.
+        [ValidateSet('ok','failed','skipped','ahead','attention')][string]$Outcome = 'ok',
         [AllowEmptyString()][AllowNull()][string]$ErrorText,
         [AllowEmptyString()][AllowNull()][string]$RunId,
         [int]$DurationSeconds = 0,
@@ -123,7 +126,7 @@ function New-PimUpdateStateRecord {
         $lastSuccessVersion = "$(Get-PimUpdateStateField -Object $Previous -Key 'lastSuccessVersion')"
         $lastSuccessAction  = "$(Get-PimUpdateStateField -Object $Previous -Key 'lastSuccessAction')"
     }
-    if ($Outcome -eq 'ok') {
+    if ($Outcome -in @('ok', 'ahead')) {   # ahead of the ring is a healthy run
         $lastSuccessUtc     = $ts
         $lastSuccessVersion = "$TargetVersion".Trim()
         if (-not $lastSuccessVersion) { $lastSuccessVersion = "$RunningVersion".Trim() }
@@ -152,7 +155,7 @@ function New-PimUpdateStateRecord {
         # Only ever populated on a failure. An 'ok' record carrying error text is a contradiction the
         # GUI would have to guess about. Redacted through the SAME scrubber the blob record uses when
         # it is available -- error text from a failed source fetch routinely contains a SAS.
-        error              = $(if ($Outcome -eq 'failed') {
+        error              = $(if ($Outcome -in @('failed', 'attention')) {
                                   if (Get-Command Remove-PimTelemetrySecret -ErrorAction SilentlyContinue) {
                                       Remove-PimTelemetrySecret -Text $ErrorText
                                   } else {
@@ -358,7 +361,8 @@ function Get-PimUpdateStateVerdict {
         recorded / malformed / ring / ringLabel / hold / held / behind / failing / stale
         runningVersion / approvedVersion / lastBuiltVersion / targetVersion
         lastRunUtc / lastOutcome / lastAction / lastError / lastSuccessUtc / lastSuccessVersion
-        state ('unknown'|'installed'|'current'|'behind'|'held'|'failing') / headline / message / recordedAgeHours
+        state ('unknown'|'installed'|'current'|'ahead'|'behind'|'held'|'attention'|'failing') / headline / message / recordedAgeHours
+        attention / ahead (2026-10-09)
         ringSource ('update run'|'deployment'|'') / noRunYet / ringPending / lastRunRing / configuredRing /
         configuredUtc / source / installedVersion
     #>
@@ -378,6 +382,8 @@ function Get-PimUpdateStateVerdict {
         held               = $false
         behind             = $false
         failing            = $false
+        attention          = $false   # 2026-10-09: the last run stopped on an operator decision (not a failure)
+        ahead              = $false   # 2026-10-09: runs a NEWER version than its ring approves (healthy, green)
         stale              = $false
         runningVersion     = "$RunningVersion".Trim()
         approvedVersion    = ''
@@ -538,13 +544,18 @@ function Get-PimUpdateStateVerdict {
         }
     }
 
-    $out.failing = ($out.lastOutcome -eq 'failed')
+    $out.failing   = ($out.lastOutcome -eq 'failed')
+    $out.attention = ($out.lastOutcome -eq 'attention')
 
     # ---- behind. Only ever asserted when BOTH versions parse. "I cannot compare these" is not "behind",
     # and an environment wrongly painted amber teaches an operator to ignore the colour.
     $rv = ConvertTo-PimUpdateStateVersion -Value $out.runningVersion
     $av = ConvertTo-PimUpdateStateVersion -Value $out.approvedVersion
     if ($rv -and $av -and $rv -lt $av) { $out.behind = $true }
+    # ---- 2026-10-09: AHEAD. An environment rolled ahead of its ring on purpose runs the approved version or newer --
+    # owner's rule: green when running the latest approved or newer. Asserted from the versions when both parse, else
+    # from the run's own 'ahead' outcome (the updater compared them with the highest version it knows).
+    if ($rv -and $av) { $out.ahead = ($rv -gt $av) } elseif ($out.lastOutcome -eq 'ahead') { $out.ahead = $true }
 
     # ---- one state for the colour. Precedence: failure first (something went wrong), then HOLD, then
     # behind, then current.
@@ -552,10 +563,13 @@ function Get-PimUpdateStateVerdict {
     # what a hold does. Painting it amber-behind reports the consequence and hides the cause, and sends
     # an operator to investigate a state they created on purpose. `behind` stays true as its own flag,
     # so nothing is hidden; only the headline colour changes.
-    if     ($out.failing) { $out.state = 'failing' }
-    elseif ($out.held)    { $out.state = 'held' }
-    elseif ($out.behind)  { $out.state = 'behind' }
-    else                  { $out.state = 'current' }
+    # 2026-10-09: attention after failing (an operator decision, not a fault); ahead is a GREEN state after behind.
+    if     ($out.failing)   { $out.state = 'failing' }
+    elseif ($out.attention) { $out.state = 'attention' }
+    elseif ($out.held)      { $out.state = 'held' }
+    elseif ($out.behind)    { $out.state = 'behind' }
+    elseif ($out.ahead)     { $out.state = 'ahead' }
+    else                    { $out.state = 'current' }
 
     $out.headline = $out.ringLabel
 
@@ -570,15 +584,24 @@ function Get-PimUpdateStateVerdict {
     if ($out.held) {
         $bits.Add('This environment is HELD (PIM_UPDATE_HOLD=1): its ring is not consulted and it does not move.')
     }
+    $runTxt = ("$($out.runningVersion)" -replace '^(?i)v', '')
     if ($out.behind) {
         $bits.Add("It runs $($out.runningVersion); $apprLabel approves $($out.approvedVersion).")
+    } elseif ($out.ahead -and $out.approvedVersion) {
+        # 2026-10-09 (owner): calm, and true -- rolled ahead of the ring is healthy.
+        $bits.Add("Running $runTxt, newer than $apprLabel's approved $($out.approvedVersion).")
     } elseif ($out.approvedVersion -and $out.runningVersion -and $out.approvedVersion -eq $out.runningVersion) {
         $bits.Add("It runs $($out.runningVersion), which is what $apprLabel approves.")
     } elseif (-not $out.approvedVersion) {
         $bits.Add("The last update run read no approved version for $apprLabel.")
     }
+    # 2026-10-09 (owner: "i had 3 customer calling me already saying it had failed"): never alarm when PIM keeps running.
+    # The step and the recorded detail stay available (lastAction / lastError) for an admin on the Jobs page.
+    $keeps = if ($runTxt) { "PIM keeps running $runTxt" } else { 'PIM keeps running its current version' }
     if ($out.failing) {
-        $bits.Add("The last update run FAILED at the '$($out.lastAction)' step.")
+        $bits.Add("Last update check did not complete (at the '$($out.lastAction)' step) -- $keeps; nothing to do.")
+    } elseif ($out.attention) {
+        $bits.Add("Last update check needs a look -- $keeps. The details below name the one setting to change.")
     }
     if ($out.stale) {
         $bits.Add('The values below are what was last RECORDED, not a live reading -- the update job has not reported recently.')

@@ -255,13 +255,15 @@ function Get-PimEpInteractiveToken {
     $query = $null
     try {
         $edge = if ($UseEdge) { Get-PimEpEdgePath } else { $null }
+        # -WhatIf:$false -- the sign-in is a READ the preview needs: an inherited -WhatIf would stop Start-Process from
+        # opening the browser and the run would wait 5 minutes for an answer that never comes.
         if ($edge) {
             Write-Host "Opening Microsoft Edge for sign-in (answer comes back to $redirect)..." -ForegroundColor Yellow
-            Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl)
+            Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl) -WhatIf:$false
         } else {
             if ($UseEdge) { Write-Host 'Microsoft Edge not found -- using the default browser.' -ForegroundColor DarkYellow }
             Write-Host "Opening the default browser for sign-in (answer comes back to $redirect)..." -ForegroundColor Yellow
-            Start-Process $authUrl
+            Start-Process $authUrl -WhatIf:$false
         }
         Write-Host "If no browser opened, open this address yourself:`n  $authUrl" -ForegroundColor DarkGray
         $deadline = (Get-Date).AddMinutes(5)

@@ -26,6 +26,9 @@
 #>
 
 Set-StrictMode -Off
+# SCRIPT-DOC-1 (framework 12.7 + 12.10 item 11): every command this file builds for a person to run comes from the ONE
+# command form in tools\setup\_PimScriptDoc.ps1 -- save, verify the checksum, read the documentation page, run.
+. (Join-Path $PSScriptRoot '..\..\tools\setup\_PimScriptDoc.ps1')
 
 # The Graph application permissions the engine's own code paths require, each mapped to the
 # capability it unlocks so the portal can say WHAT BREAKS, not just which GUID is absent.
@@ -227,8 +230,7 @@ function Get-PimRootAzureFixCommand {
     $oid = if ("$EngineObjectId".Trim()) { "$EngineObjectId".Trim() } else { '<engine object id>' }
     $scope = Get-PimTenantRootScope -TenantId $tid
     $specs = @($rl | ForEach-Object { "'$_@$scope'" }) -join ','
-    "Invoke-WebRequest https://invardia.com/support/pim/Grant-PimEnginePermissions.ps1 -OutFile Grant-PimEnginePermissions.ps1`n" +
-    ".\Grant-PimEnginePermissions.ps1 -TenantId '$tid' -EngineObjectId '$oid' -AzureRoleAssignments $specs"
+    (Get-PimSupportScriptCommand -Script 'Grant-PimEnginePermissions' -Run @(".\Grant-PimEnginePermissions.ps1 -TenantId '$tid' -EngineObjectId '$oid' -AzureRoleAssignments $specs")) -join "`n"
 }
 
 function Get-PimPermissionHealth {

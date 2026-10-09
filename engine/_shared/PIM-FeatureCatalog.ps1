@@ -103,7 +103,9 @@ $script:PimFeatureCatalog = @(
 
     # ---- Notifications / Email (advanced) -------------------------------------
     [ordered]@{ key='alerting.email';   label='Email alerting';          group='Notifications';tier='advanced'; license='free'; scope='single'; defaultEnabled=$false; dependsOn=@();                       proFeature='';                  description='Email notifications for engine-failure / drift / expiring-access / break-glass and the daily/tier digests. Off = no mail is sent.' }
-    [ordered]@{ key='alerting.webhook'; label='Teams / webhook alerting';group='Notifications';tier='advanced'; license='free'; scope='single'; defaultEnabled=$false; dependsOn=@('alerting.email');       proFeature='';                  description='Post alerts to a Microsoft Teams / generic webhook in addition to email. Off = no webhook POST.' }
+    # GATE-1 (owner-approved 2026-10-09): this switch is now the gate of the webhook send (Send-PimWebhookAlert). Default ON (and
+    # no dependency on alerting.email -- the webhook is its own channel) so an install that posts today keeps posting on upgrade.
+    [ordered]@{ key='alerting.webhook'; label='Teams / webhook alerting';group='Notifications';tier='advanced'; license='free'; scope='single'; defaultEnabled=$true; dependsOn=@();       proFeature='';                  description='Post alerts to a Microsoft Teams / generic webhook (Settings > Alerting sets the URL). Off = no webhook POST.' }
 
     # ---- Workload connectors / integrations (advanced, Pro) -------------------
     # 🔴 v1 PARITY: v1 applied workload bindings whenever its PIM-Assignments-Workloads file existed
@@ -151,7 +153,10 @@ $script:PimFeatureCatalog = @(
     [ordered]@{ key='mcp.server';         label='MCP server (AI assistants and agents)'; group='Governance'; tier='advanced'; license='pro'; scope='single'; defaultEnabled=$false; dependsOn=@(); proFeature='McpServer'; description='A Model Context Protocol endpoint on the Manager (/mcp): an AI assistant signed in with your Entra account reads who has what, pending changes, jobs and problems, stages changes, and commits them through the same checks as the Manager -- your own Manager role decides what it may do. Every call is audited.' }
 
     # ---- MSP (advanced, Pro) --------------------------------------------------
-    [ordered]@{ key='msp.downlink';     label='MSP downlink / fan-out';  group='MSP';          tier='advanced'; license='pro';  scope='multi'; defaultEnabled=$false; dependsOn=@('engine.reconcile');     proFeature='MspFanout';         description='Fan a central admin baseline out to managed customer tenants (pull-not-push). Off = no fan-out runs.' }
+    # GATE-1 (owner-approved 2026-10-09): this switch now gates the REAL pull (downlink-job-entry.ps1) and publish (publish-job-entry.ps1),
+    # not only the placeholder msp-pull tick job. Default ON so no managing or managed tenant stops replicating on upgrade (the jobs
+    # ran without asking before); a deliberately stored OFF stops both and the job's last-run record says so.
+    [ordered]@{ key='msp.downlink';     label='MSP downlink / fan-out';  group='MSP';          tier='advanced'; license='pro';  scope='multi'; defaultEnabled=$true; dependsOn=@('engine.reconcile');     proFeature='MspFanout';         description='Fan a central admin baseline out to managed customer tenants (pull-not-push). Off = no publish on the managing tenant and no pull on a managed tenant.' }
 
     # ---- Scheduler / automated jobs (advanced) --------------------------------
     [ordered]@{ key='licence.autoRequest'; label='Request the licence from Invardia automatically'; group='Automation'; tier='advanced'; license='free'; scope='single'; defaultEnabled=$true; dependsOn=@('scheduler.jobs'); proFeature=''; description='Every 30 minutes, when no Pro licence is valid for this tenant or it ends within 30 days, PIM asks Invardia for its licence and installs the signed file after checking it here (signature, Pro, this tenant). Sends the product, the tenant id, the version and an installation id, plus the id and end date of the installed licence when there is one -- nothing else. On by default (owner decision 2026-10-05); switch it off here.' }

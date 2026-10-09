@@ -72,12 +72,68 @@ function Test-PimNamingConventionsUsable {
     if ($Stored -is [System.Collections.IDictionary]) { foreach ($k in @($Stored.Keys)) { $have["$k"] = $Stored[$k] } }
     elseif ($Stored -is [System.Management.Automation.PSCustomObject]) { foreach ($p in $Stored.PSObject.Properties) { $have[$p.Name] = $p.Value } }
     else { return @{ ok = $false; missing = $req; reason = "pim.Settings['NamingConventions'] is a $($Stored.GetType().Name), not a convention map" } }
-    $missing = @($req | Where-Object { -not $have.ContainsKey($_) -or -not "$($have[$_])".Trim() })
+    $missing = @($req | Where-Object { -not $have.ContainsKey($_) })
     if ($missing.Count) {
-        return @{ ok = $false; missing = @($missing)
+        return @{ ok = $false; missing = @($missing); blank = @()
                   reason = ("pim.Settings['NamingConventions'] is missing: " + ($missing -join ', ')) }
     }
-    return @{ ok = $true; missing = @(); reason = 'the store carries a complete naming convention' }
+    # 🔴 NAME-1 (owner-approved 2026-10-09, PIM REQUIREMENTS §100.3): a key that is PRESENT but BLANK used to stop every
+    # engine run here. A blank pattern names nothing, so the engine now uses the SHIPPED default for that key
+    # (Get-PimNamingConvention does the substitution) and says so loudly; the Manager refuses to SAVE a blank one
+    # (Test-PimNamingSaveAllowed), so a blank can only come from an older version or a hand edit of the store.
+    $blank = @($req | Where-Object { -not "$($have[$_])".Trim() })
+    if ($blank.Count) {
+        return @{ ok = $true; missing = @(); blank = @($blank)
+                  reason = ("pim.Settings['NamingConventions'] has a BLANK " + ($blank -join ', ') + " -- the shipped default is used for it (" +
+                            (@($blank | ForEach-Object { "$_ = '$(Get-PimNamingConvention -ShippedOnly -Key $_)'" }) -join '; ') + "); set the tenant's own value in Settings > Naming") }
+    }
+    return @{ ok = $true; missing = @(); blank = @(); reason = 'the store carries a complete naming convention' }
+}
+
+function ConvertTo-PimAdminDomainHistory {
+    <#
+      ACC-1 (owner-approved 2026-10-09) -- PURE. The admin domains used before, newest first: -Previous (the domain being
+      left) in front of -History (the stored list: an array, a JSON array text or a comma list), -New (the domain now in
+      use) removed, duplicates removed, bare domains (no '@'), at most 20. The engine looks for a bare-UserName admin at
+      these too (Get-PimAdminUpnDomainCandidates), so offboarding still finds an account created before a domain change.
+    #>
+    [CmdletBinding()] param([AllowNull()][object]$History, [string]$Previous = '', [string]$New = '')
+    $h = $History
+    if ($h -is [string]) { $s = "$h".Trim(); if ($s.StartsWith('[')) { try { $h = $s | ConvertFrom-Json } catch { $h = @($s -split '[,;\s]+') } } else { $h = @($s -split '[,;\s]+') } }
+    $newD = "$New".Trim().TrimStart('@').ToLowerInvariant()
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($d in @(@("$Previous") + @($h))) {
+        $v = "$d".Trim().TrimStart('@').ToLowerInvariant()
+        if (-not $v -or $v -eq $newD -or $out.Contains($v)) { continue }
+        $out.Add($v)
+        if ($out.Count -ge 20) { break }
+    }
+    return @($out.ToArray())
+}
+
+function Test-PimNamingSaveAllowed {
+    <#
+      NAME-1 -- PURE. May this naming map be SAVED? A name-producing key (Get-PimRequiredNamingConventionKeys) may not be
+      blank, and may not be dropped when the stored map has it: a blank pattern names nothing. -New = the map the PUT
+      would store; -Current = the stored map (or $null). Returns @{ ok; refused = @(keys); message }.
+    #>
+    [CmdletBinding()] param([AllowNull()][object]$New, [AllowNull()][object]$Current)
+    $read = {
+        param($m)
+        $h = @{}
+        if ($m -is [System.Collections.IDictionary]) { foreach ($k in @($m.Keys)) { $h["$k"] = $m[$k] } }
+        elseif ($null -ne $m -and $m.PSObject) { foreach ($p in $m.PSObject.Properties) { $h[$p.Name] = $p.Value } }
+        $h
+    }
+    $n = & $read $New; $c = & $read $Current
+    $refused = @(foreach ($k in @(Get-PimRequiredNamingConventionKeys)) {
+        if ($n.ContainsKey($k)) { if (-not "$($n[$k])".Trim()) { $k } }
+        elseif ($c.ContainsKey($k) -and "$($c[$k])".Trim()) { $k }
+    })
+    if (-not $refused.Count) { return @{ ok = $true; refused = @(); message = '' } }
+    return @{ ok = $false; refused = @($refused)
+              message = ("These naming patterns cannot be empty: " + ($refused -join ', ') + ". Every admin account and group name is built from them. " +
+                         "Nothing was saved -- give each a pattern (the shipped default is shown under More info).") }
 }
 
 function Get-PimShippedNamingConventions {
@@ -169,12 +225,123 @@ function Get-PimNamingConvention {
     }
     if ($global:PIM_NamingConventions -is [hashtable]) {
         foreach ($k in @($global:PIM_NamingConventions.Keys)) { $conv[$k] = $global:PIM_NamingConventions[$k] }
+        # NAME-1 (2026-10-09): a BLANK name-producing pattern names nothing -- keep the shipped default for it, and say so
+        # once per process (the engine preflight says it too). Only these four keys: a blank optional key stays blank.
+        foreach ($rk in @('AdminAccountPattern', 'AdminAccountPatternHighPriv', 'PimGroupPattern', 'ResourceGroupPattern')) {
+            if ($global:PIM_NamingConventions.ContainsKey($rk) -and -not "$($global:PIM_NamingConventions[$rk])".Trim()) {
+                $conv[$rk] = $defaults[$rk]
+                if (-not $script:PimNamingBlankWarned) { $script:PimNamingBlankWarned = @{} }
+                if (-not $script:PimNamingBlankWarned.ContainsKey($rk)) {
+                    $script:PimNamingBlankWarned[$rk] = $true
+                    Write-Warning ("  [naming] '{0}' is BLANK in this tenant's naming convention -- the shipped default '{1}' is used. Set the tenant's own pattern in Settings > Naming." -f $rk, $defaults[$rk])
+                }
+            }
+        }
     }
     if ($Key) {
         if ($conv.ContainsKey($Key)) { return $conv[$Key] }
         return $null
     }
     return $conv
+}
+
+# ---------------------------------------------------------------------------
+# GS-NAMING-ALL (owner 2026-10-09: "get started naming must include all parameters in settings related to that"):
+# THE catalog of naming settings. The Manager's Get Started Naming step builds its fields from this list (served by
+# GET /api/settings/naming-catalog, merged with the hybrid AD catalog's naming knobs), so a naming key added HERE shows
+# up in the step without a page change. tests/Test-PimNamingCatalog.ps1 fails when a key of the shipped naming map (or
+# a key the Settings > Naming conventions page knows) is missing from this catalog.
+#   group   : admin | groups | hybrid | breakglass | other   (Get-PimNamingSettingGroups gives the labels + order)
+#   common  : shown first, outside the expandable groups
+#   kind    : word | text | pattern (non-blank, renders) | list (comma-separated) | map (one field per sub-key)
+#             | pick (one of another map's keys, 'pickFrom') | domain (a verified domain; saved via 'admin-domain')
+#   store   : naming (the NamingConventions map, PUT /api/settings/naming) | admin-domain (PUT /api/settings/admin-domain)
+#   example : what the field renders as -- {value} = this field, {=Key} / {=Map.sub} = another field, the naming tokens
+#   default : filled from the SHIPPED map (Get-PimNamingConvention -ShippedOnly), so a default lives in one place.
+# ---------------------------------------------------------------------------
+function Get-PimNamingSettingGroups {
+    [CmdletBinding()] param()
+    return @(
+        [ordered]@{ id = 'admin'; label = 'Admin accounts' }
+        [ordered]@{ id = 'groups'; label = 'Groups & roles' }
+        [ordered]@{ id = 'hybrid'; label = 'Hybrid Active Directory' }
+        [ordered]@{ id = 'breakglass'; label = 'Break-glass' }
+        [ordered]@{ id = 'other'; label = 'Other naming keys (not built in)' }
+    )
+}
+
+function Get-PimNamingSettingPreservedKeys {
+    # Keys of the stored naming map the step never shows but always KEEPS on save (edited elsewhere or retired).
+    [CmdletBinding()] param()
+    return @('TagPrefixToCsv', 'DirectGroupDimension')
+}
+
+function Get-PimNamingSettingCatalog {
+    [CmdletBinding()] param()
+    $items = @(
+        # ---- common (shown first) ----
+        [ordered]@{ key = 'AdminWord'; label = 'Admin word -- {AdminWord}'; group = 'admin'; common = $true; kind = 'word'; store = 'naming'
+            help = 'The word your admin accounts use, e.g. Admin or adm. Blank = Admin.'; example = '{=AdminAccountPattern}' }
+        [ordered]@{ key = 'TenantCommonName'; label = 'Tenant common name -- {TenantCommonName} (optional)'; group = 'admin'; common = $true; kind = 'text'; store = 'naming'; optional = $true
+            help = 'A short name for this tenant. Blank = the token disappears.'; example = '{=AdminAccountPattern}' }
+        [ordered]@{ key = 'AdminAccountPattern'; label = 'Admin account name'; group = 'admin'; common = $true; kind = 'pattern'; store = 'naming'
+            help = 'The name of a normal (day-to-day) admin account. The engine creates admin accounts with this name.' }
+        [ordered]@{ key = 'AdminAccountPatternHighPriv'; label = 'High-privilege admin account name (L0 / T0)'; group = 'admin'; common = $true; kind = 'pattern'; store = 'naming'
+            help = 'The name of a high-privilege admin account.' }
+        [ordered]@{ key = 'PimGroupPattern'; label = 'PIM group name'; group = 'groups'; common = $true; kind = 'pattern'; store = 'naming'
+            help = 'The name of a PIM group, built around its tag ({Role}). The engine and the Manager translate tag <-> group name with it.' }
+        [ordered]@{ key = 'GroupTypePrefixes'; label = 'Group tag prefixes -- {GroupTypePrefix}'; group = 'groups'; common = $true; kind = 'map'; store = 'naming'; required = $true
+            help = 'The start of the tag of each type of group (role, organisation, department, project, cross-org), e.g. ROLE-. A prefix cannot be blank: tags of different types would collide.'; example = '{value}Helpdesk' }
+        # ---- Admin accounts ----
+        [ordered]@{ key = 'AdminAccountUpnSuffix'; label = 'Admin account domain'; group = 'admin'; kind = 'domain'; store = 'admin-domain'; optional = $true
+            help = 'The verified domain new admin accounts are created in. Blank = the tenant''s default domain.'; example = '{=AdminAccountPattern}@{value}' }
+        [ordered]@{ key = 'AdminAccountDisplayNameSuffix'; label = 'Admin display name suffix'; group = 'admin'; kind = 'text'; store = 'naming'; keepSpaces = $true; optional = $true
+            help = 'Added after the person''s name in an admin account''s display name, e.g. "Jane Doe (Admin)".'; example = 'Jane Doe{value}' }
+        [ordered]@{ key = 'AdminAccountPatterns'; label = 'Recognised admin name starts'; group = 'admin'; kind = 'list'; store = 'naming'; optional = $true
+            help = 'How PIM RECOGNISES admin accounts: names starting with these are treated as admin accounts (offboarding and disable checks). Comma-separated. Blank = the start of the two admin patterns.' }
+        [ordered]@{ key = 'AdminTypePrefixes'; label = 'Admin name prefixes per admin type -- {AdminTypePrefix}'; group = 'admin'; kind = 'map'; store = 'naming'
+            help = 'The start of an admin account name per admin type (internal, external, guest). Blank = no prefix.'; example = '{value}{AdminWord}-{Initial}{Platform}' }
+        [ordered]@{ key = 'AdminTypeDefault'; label = 'Default admin type'; group = 'admin'; kind = 'pick'; pickFrom = 'AdminTypePrefixes'; store = 'naming'
+            help = 'The admin type used when a row does not name one -- it picks the prefix above.' }
+        [ordered]@{ key = 'EnvironmentSuffixes'; label = 'Environment suffixes -- {Platform} / {EnvironmentSuffix}'; group = 'admin'; kind = 'map'; store = 'naming'
+            help = 'The end of an admin account or group name per environment (Entra ID, Active Directory).'; example = '{AdminWord}-{Initial}{value}' }
+        [ordered]@{ key = 'EnvironmentDefault'; label = 'Default environment'; group = 'admin'; kind = 'pick'; pickFrom = 'EnvironmentSuffixes'; store = 'naming'
+            help = 'The environment used when a row does not name one -- it picks the suffix above.' }
+        # ---- Groups & roles ----
+        [ordered]@{ key = 'PimGroupAuPattern'; label = 'Permission group name inside an administrative unit'; group = 'groups'; kind = 'pattern'; store = 'naming'
+            help = 'Name of a permission group scoped to an administrative unit: {Role} = the group''s tag without its AU part, {AdminUnit} = the AU. While it is the shipped default, those groups keep the permission-group naming.' }
+        [ordered]@{ key = 'ResourceGroupPattern'; label = 'Permission group name'; group = 'groups'; kind = 'pattern'; store = 'naming'
+            help = 'Name of a PERMISSION group (Entra role, Azure role, workload role): {Workload} / {Service}, {Scope}, {Permission}, {Level}, {Tier}, {Plane}, {Domain}, {Platform}. While it is the shipped default, permission groups keep the PIM group pattern around their tag.' }
+        [ordered]@{ key = 'AdminUnitNamePattern'; label = 'Administrative unit name'; group = 'groups'; kind = 'pattern'; store = 'naming'
+            help = 'Display name of an administrative unit a wizard creates for new groups. {AdminUnit} = the AU tag without its PIM- prefix.' }
+        [ordered]@{ key = 'GroupTypeAdminUnits'; label = 'Administrative unit per group type'; group = 'groups'; kind = 'map'; store = 'naming'
+            help = 'The administrative unit a new group of each type is placed in.' }
+        [ordered]@{ key = 'PermissionGroupAdminUnits'; label = 'Administrative unit per privilege level'; group = 'groups'; kind = 'map'; store = 'naming'
+            help = 'The administrative unit a new permission group is placed in, by its privilege level.' }
+        [ordered]@{ key = 'ServiceNames'; label = 'Service names -- {Service}'; group = 'groups'; kind = 'map'; store = 'naming'
+            help = 'The first part of a permission-group tag per service.'; example = '{value}-UserAdministrator-L1-T0-CP-ID' }
+        [ordered]@{ key = 'PimGroupTagRegex'; label = 'Group tag check (regular expression, advanced)'; group = 'groups'; kind = 'text'; store = 'naming'; optional = $true
+            help = 'Optional: a regular expression every group tag must match; the Manager then warns about tags that do not. Blank = the built-in check.' }
+        # ---- Hybrid Active Directory (the naming-map keys; the hybrid knobs come from the hybrid AD catalog) ----
+        [ordered]@{ key = 'PathAdmins'; label = 'AD OU (Day2Day Admins)'; group = 'hybrid'; kind = 'text'; store = 'naming'; optional = $true
+            help = 'Only with on-premises Active Directory: the OU where new general admin accounts are created (OU=...,DC=...). Blank = not used.' }
+        [ordered]@{ key = 'PathAdminsL0T0'; label = 'AD OU (High Priv Admins)'; group = 'hybrid'; kind = 'text'; store = 'naming'; optional = $true
+            help = 'Only with on-premises Active Directory: the OU where new high-privilege (L0 / T0) admin accounts are created. Blank = not used.' }
+    )
+    $shipped = Get-PimNamingConvention -ShippedOnly
+    foreach ($it in $items) {
+        if ($shipped.ContainsKey($it.key)) {
+            $d = $shipped[$it.key]
+            if ($it.kind -eq 'map' -and $d -is [System.Collections.IDictionary]) {
+                $m = [ordered]@{}; foreach ($k in @($d.Keys)) { $m["$k"] = "$($d[$k])" }
+                $it['default'] = $m; $it['subKeys'] = @($d.Keys | ForEach-Object { "$_" })
+            } elseif ($it.kind -eq 'list') { $it['default'] = (@($d) -join ', ') }
+            elseif ($null -eq $d) { $it['default'] = '' }
+            else { $it['default'] = "$d" }
+        } elseif (-not $it.Contains('default')) { $it['default'] = '' }
+        foreach ($f in 'common', 'optional', 'required', 'keepSpaces') { if (-not $it.Contains($f)) { $it[$f] = $false } }
+    }
+    return $items
 }
 
 # ---------------------------------------------------------------------------

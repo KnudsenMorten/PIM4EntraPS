@@ -599,8 +599,10 @@ function Invoke-PaPolicyRegistryOps {
         Set|Remove|RemoveKeyIfEmpty) to a local registry hive ('HKLM:' / 'HKCU:').
         Shared by Deploy-PimActivatorClient.ps1 and Deploy-PimActivatorHybrid.ps1 -Target
         LocalGpo so both write the same layout. Returns one line per op applied.
+        12.7 -WhatIf: every op goes through ShouldProcess; under -WhatIf (the caller's
+        preference is inherited) nothing is written and each line reads "would ...".
     #>
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$Hive,
         [Parameter(Mandatory)] $Entries
@@ -611,9 +613,10 @@ function Invoke-PaPolicyRegistryOps {
         $action = if ($e.PSObject.Properties['Action'] -and $e.Action) { $e.Action } else { 'Set' }
         switch ($action) {
             'Set' {
-                if (-not (Test-Path -LiteralPath $path)) { New-Item -Path $path -Force | Out-Null }
                 $kind = if ($e.ValueKind -eq 'Dword') { 'DWord' } else { 'String' }
-                New-ItemProperty -LiteralPath $path -Name $e.ValueName -Value $e.Value -PropertyType $kind -Force | Out-Null
+                if (-not $PSCmdlet.ShouldProcess("$path\$($e.ValueName)", "Set registry value ($kind)")) { $done.Add("would set    $path\$($e.ValueName)"); continue }
+                if (-not (Test-Path -LiteralPath $path)) { New-Item -Path $path -Force -WhatIf:$false | Out-Null }
+                New-ItemProperty -LiteralPath $path -Name $e.ValueName -Value $e.Value -PropertyType $kind -Force -WhatIf:$false | Out-Null
                 $done.Add("set    $path\$($e.ValueName)")
             }
             'Remove' {
@@ -621,7 +624,8 @@ function Invoke-PaPolicyRegistryOps {
                 # ExtensionSettings default entry) or '?' through as a name.
                 if ("$($e.ValueName)" -match '[\*\?\[\]]') { throw "Refusing to remove registry value '$($e.ValueName)' under $path -- the name contains a wildcard character." }
                 if ((Test-Path -LiteralPath $path) -and (@((Get-Item -LiteralPath $path).GetValueNames()) -contains $e.ValueName)) {
-                    Remove-ItemProperty -LiteralPath $path -Name $e.ValueName -Force
+                    if (-not $PSCmdlet.ShouldProcess("$path\$($e.ValueName)", 'Remove registry value')) { $done.Add("would remove $path\$($e.ValueName)"); continue }
+                    Remove-ItemProperty -LiteralPath $path -Name $e.ValueName -Force -WhatIf:$false
                     $done.Add("remove $path\$($e.ValueName)")
                 }
             }
@@ -629,7 +633,8 @@ function Invoke-PaPolicyRegistryOps {
                 if (Test-Path -LiteralPath $path) {
                     $it = Get-Item -LiteralPath $path
                     if (@($it.GetValueNames() | Where-Object { "$_" }).Count -eq 0 -and $it.SubKeyCount -eq 0) {
-                        Remove-Item -LiteralPath $path -Force
+                        if (-not $PSCmdlet.ShouldProcess($path, 'Remove empty registry key')) { $done.Add("would remove empty key $path"); continue }
+                        Remove-Item -LiteralPath $path -Force -WhatIf:$false
                         $done.Add("remove empty key $path")
                     }
                 }

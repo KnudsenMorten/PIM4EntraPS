@@ -1,10 +1,15 @@
 ﻿#Requires -Version 5.1
+
 <#
 .SYNOPSIS
+  Sets who may use PIM Manager and at what level (Reader, Admin, SuperAdmin or Delegated) by writing the
+  ManagerAccess setting in the environment's store: it merges with what is stored, refuses a model with no
+  SuperAdmin, and reads the result back.
+
+.DESCRIPTION
   DEPLOY-3 / SEC-15 -- install Manager RBAC (Reader / Admin / SuperAdmin / Delegated) into the
   store. The supported way to say who may use the Manager, and at what level.
 
-.DESCRIPTION
   §36.3 phase 2 gave portal PROFILES an auditable home in `pim.Settings`. Manager RBAC -- the
   coarser question of whether you can write at all -- was still set as container app settings
   (`PIM_SuperAdmins` / `PIM_Admins` / `PIM_DelegatedAdmins`), by hand, with an
@@ -36,10 +41,15 @@
   Path to a JSON file, or the raw JSON: `{ "managerAccess": [ { "identity": "...", "role": "..." } ] }`
   role is one of Reader | Admin | SuperAdmin | Delegated.
 
+  -WhatIf validates the input, reads the stored model, prints the resulting model and the write it would make, and
+  writes nothing.
+
 .EXAMPLE
-  pwsh -File Set-PimManagerAccess.ps1 -TenantId <t> -SqlServerFqdn sql-x.database.windows.net `
-       -AdminAppId <appid> -AdminCertThumbprint <thumb> `
+  pwsh -File Set-PimManagerAccess.ps1 -TenantId <t> -SqlServerFqdn sql-x.database.windows.net -UseSignedInAccount `
        -AccessJson '{"managerAccess":[{"identity":"a@x.io","role":"SuperAdmin"}]}' -WhatIf
+
+.LINK
+  https://invardia.com/docs/pim/scripts/Set-PimManagerAccess/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -62,6 +72,9 @@ $here = Split-Path -Parent $PSCommandPath
 $sol  = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-SqlStore.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Set-PimManagerAccess'
+try {
 
 $VALID = @('Reader','Admin','SuperAdmin','Delegated')
 $result = [ordered]@{ ok = $false; reason = ''; installed = @(); replaced = @(); removed = @(); whatIf = [bool]$WhatIfPreference }
@@ -155,11 +168,11 @@ if ($newDelegated.Count) {
     if ($lic.grace) { Write-Host "WARNING: $($lic.message)" -ForegroundColor Yellow }
 }
 
-if ($WhatIfPreference) { $result.ok = $true; $result.reason = 'what-if -- nothing written'; Write-ResultFile; Write-Host "RESULT: WHAT-IF -- nothing written" -ForegroundColor Yellow; exit 0 }
-
-if ($PSCmdlet.ShouldProcess("pim.Settings['ManagerAccess']", "write $($final.Count) entr(y/ies)")) {
-    Set-PimSqlSetting -ConnectionString $cs -Name 'ManagerAccess' -Value ([ordered]@{ managerAccess = $final })
+$model = (@($final) | ForEach-Object { "$($_.identity)=$($_.role)" }) -join ', '
+if (-not $PSCmdlet.ShouldProcess("pim.Settings['ManagerAccess'] in $SqlServerFqdn/$SqlDatabase", "write $($final.Count) entr(y/ies): $model")) {
+    $result.ok = $true; $result.reason = 'what-if -- nothing written'; Write-ResultFile; Write-Host "RESULT: WHAT-IF -- nothing written" -ForegroundColor Yellow; exit 0
 }
+Set-PimSqlSetting -ConnectionString $cs -Name 'ManagerAccess' -Value ([ordered]@{ managerAccess = $final })
 
 # --- read back --------------------------------------------------------------
 $verified = 0
@@ -178,3 +191,4 @@ Write-Host "  NOTE: the Manager reads this at BOOT. Roll or restart the app for 
 Write-Host "        SQL is consulted FIRST; PIM_SuperAdmins/PIM_Admins env vars still work and are" -ForegroundColor DarkGray
 Write-Host "        checked next, so nothing is stranded mid-migration." -ForegroundColor DarkGray
 exit 0
+} finally { Stop-PimScriptRun -Script 'Set-PimManagerAccess' }

@@ -1,0 +1,165 @@
+{
+  "schema": "pim-environment-report-expected/1",
+  "about": "Framework §12.8 ENV-REPORT-1: the permissions PIM Manager DECLARES for each of its identities. The environment report reads what each identity really holds and marks every grant expected / missing / extra against this file. The Graph sets must equal the setup maps in tools/setup/_PimSetupShared.ps1 (Engine and Manager role sets) -- tests/Test-PimEnvironmentReport.ps1 fails if they drift. When SCRIPT-DOC-1 manifests (tools/setup/script-docs/*.doc.json) exist, the report lists them as a second source; this file stays the one the comparison uses.",
+  "azureScopes": {
+    "tenantRoot": "the tenant root management group",
+    "resourceGroup": "the resource group PIM Manager runs in",
+    "engineJob": "the engine's scheduled job",
+    "self": "the identity's own Azure resource",
+    "keyVault": "a Key Vault (or one secret in it)",
+    "registry": "the container registry",
+    "storage": "a storage account (or a container in it)",
+    "any": "any scope"
+  },
+  "identities": [
+    {
+      "role": "engine",
+      "label": "Engine (scheduled job managed identity)",
+      "match": { "managedIdentityName": "ca-pim-tick" },
+      "purpose": "Runs the engine: applies every committed change to Entra ID and Azure. The only identity that writes to the tenant.",
+      "graph": [
+        { "permission": "Directory.Read.All", "why": "Read users, groups and roles to compare what is defined with what is live" },
+        { "permission": "User.ReadWrite.All", "why": "Create and manage the admin accounts PIM defines" },
+        { "permission": "Group.ReadWrite.All", "why": "Create and manage the PIM groups" },
+        { "permission": "RoleManagement.ReadWrite.Directory", "why": "Create role-assignable groups and manage their members and owners" },
+        { "permission": "RoleEligibilitySchedule.ReadWrite.Directory", "why": "Assign Entra directory roles (eligible)" },
+        { "permission": "RoleEligibilitySchedule.Remove.Directory", "why": "Remove eligible Entra role assignments PIM manages" },
+        { "permission": "RoleAssignmentSchedule.ReadWrite.Directory", "why": "Assign Entra directory roles (active)" },
+        { "permission": "RoleAssignmentSchedule.Remove.Directory", "why": "Remove active Entra role assignments PIM manages" },
+        { "permission": "RoleManagement.Read.All", "why": "Read role definitions and assignments" },
+        { "permission": "RoleManagementPolicy.Read.Directory", "why": "Read the Entra role activation policies" },
+        { "permission": "RoleManagementPolicy.ReadWrite.Directory", "why": "Set the Entra role activation policies (duration, MFA, approval)" },
+        { "permission": "RoleManagementPolicy.Read.AzureADGroup", "why": "Read the PIM for Groups activation policies" },
+        { "permission": "RoleManagementPolicy.ReadWrite.AzureADGroup", "why": "Set the PIM for Groups activation policies (duration, MFA, approval)" },
+        { "permission": "PrivilegedAccess.ReadWrite.AzureADGroup", "why": "PIM for Groups (eligible and active memberships)" },
+        { "permission": "PrivilegedEligibilitySchedule.ReadWrite.AzureADGroup", "why": "Eligible group assignments" },
+        { "permission": "PrivilegedEligibilitySchedule.Remove.AzureADGroup", "why": "Remove eligible group assignments PIM manages" },
+        { "permission": "PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup", "why": "Active group assignments" },
+        { "permission": "PrivilegedAssignmentSchedule.Remove.AzureADGroup", "why": "Remove active group assignments PIM manages" },
+        { "permission": "AdministrativeUnit.ReadWrite.All", "why": "Administrative units and their scoped roles" },
+        { "permission": "UserAuthenticationMethod.ReadWrite.All", "why": "Issue and reset Temporary Access Passes for new admin accounts" },
+        { "permission": "Domain.Read.All", "why": "Resolve the tenant default domain for admin account names" },
+        { "permission": "Policy.Read.All", "why": "Read the Temporary Access Pass policy (one-time use, lifetime)" },
+        { "permission": "AccessReview.Read.All", "why": "Read access reviews" },
+        { "permission": "AccessReview.ReadWrite.All", "why": "Create the group access reviews" },
+        { "permission": "AppRoleAssignment.ReadWrite.All", "why": "Enterprise-application role delegations" },
+        { "permission": "Application.Read.All", "why": "Read the target application of an enterprise-application role" },
+        { "permission": "RoleManagement.ReadWrite.Defender", "why": "Defender XDR role delegations" },
+        { "permission": "DeviceManagementRBAC.ReadWrite.All", "why": "Intune role and scope-tag delegations" }
+      ],
+      "graphForbidden": [ { "permission": "Mail.Send", "why": "Tenant-wide Mail.Send could send as ANY mailbox; sending is scoped to one mailbox with Exchange RBAC for Applications" } ],
+      "directoryRoles": [],
+      "azure": [
+        { "role": "Reader", "scope": "tenantRoot", "required": true, "coveredBy": [ "User Access Administrator", "Owner", "Contributor", "Role Based Access Control Administrator" ], "why": "Discovery lists management groups and subscriptions (read-only)" },
+        { "role": "User Access Administrator", "scope": "tenantRoot", "required": false, "coveredBy": [ "Owner", "Role Based Access Control Administrator" ], "why": "Only needed when Azure resource role delegations are defined: assigns Azure resource roles" },
+        { "role": "Reader", "scope": "self", "required": true, "coveredBy": [ "Contributor", "Owner" ], "why": "Reads its own job executions (one engine run at a time)" },
+        { "role": "AcrPull", "scope": "registry", "required": false, "coveredBy": [ "Contributor", "Owner" ], "why": "Pulls the engine image when the registry is reached with the managed identity" },
+        { "role": "Key Vault Secrets User", "scope": "keyVault", "required": false, "why": "Reads the SMTP relay password (SMTP relay mail mode only)" }
+      ],
+      "sql": [
+        { "role": "db_datareader", "required": true, "why": "Reads the configuration store" },
+        { "role": "db_datawriter", "required": true, "why": "Records runs, the change queue and the journal" },
+        { "role": "db_ddladmin", "required": true, "why": "Applies the store schema on upgrade" }
+      ],
+      "sqlForbidden": [ "db_owner" ],
+      "exchange": [ { "role": "Application Mail.Send", "scope": "the sender mailbox (management scope)", "required": false, "when": "sharedMailbox", "why": "Sends TAP codes, reminders and alerts as the one sender mailbox" } ]
+    },
+    {
+      "role": "manager",
+      "label": "PIM Manager (web app managed identity)",
+      "match": { "managedIdentityName": "ca-pim-manager", "self": true },
+      "purpose": "Serves the PIM Manager pages. Read-only in the directory: every change it takes is queued and applied by the engine.",
+      "graph": [
+        { "permission": "Directory.Read.All", "why": "Read users, groups and roles for the pages" },
+        { "permission": "Domain.Read.All", "why": "Resolve the tenant default domain for admin account names" },
+        { "permission": "User.Read.All", "why": "Read users" },
+        { "permission": "Group.Read.All", "why": "Read groups" },
+        { "permission": "AdministrativeUnit.Read.All", "why": "Read administrative units" },
+        { "permission": "Application.Read.All", "why": "Read applications (enterprise-application roles, PIM Activator apps)" },
+        { "permission": "AccessReview.Read.All", "why": "Show access reviews" },
+        { "permission": "RoleManagement.Read.All", "why": "Read role definitions and assignments" },
+        { "permission": "RoleManagementPolicy.Read.Directory", "why": "Show the Entra role activation policies" },
+        { "permission": "RoleManagementPolicy.Read.AzureADGroup", "why": "Show the PIM for Groups activation policies" },
+        { "permission": "RoleEligibilitySchedule.Read.Directory", "why": "Show eligible Entra role assignments" },
+        { "permission": "RoleAssignmentSchedule.Read.Directory", "why": "Show active Entra role assignments" },
+        { "permission": "PrivilegedAccess.Read.AzureADGroup", "why": "Show PIM for Groups memberships" },
+        { "permission": "PrivilegedEligibilitySchedule.Read.AzureADGroup", "why": "Show eligible group assignments" },
+        { "permission": "PrivilegedAssignmentSchedule.Read.AzureADGroup", "why": "Show active group assignments" }
+      ],
+      "graphForbidden": [ { "permission": "Mail.Send", "why": "Tenant-wide Mail.Send could send as ANY mailbox; sending is scoped to one mailbox with Exchange RBAC for Applications" } ],
+      "directoryRoles": [],
+      "azure": [
+        { "role": "Container Apps Jobs Operator", "scope": "engineJob", "required": true, "coveredBy": [ "Contributor", "Owner" ], "why": "Commit and Run now start the engine job" },
+        { "role": "AcrPull", "scope": "registry", "required": false, "coveredBy": [ "Contributor", "Owner" ], "why": "Pulls the Manager image when the registry is reached with the managed identity" },
+        { "role": "Key Vault Secrets User", "scope": "keyVault", "required": false, "why": "Reads the emergency passphrase hash and the SMTP relay password (when configured)" }
+      ],
+      "sql": [
+        { "role": "db_datareader", "required": true, "why": "Reads the configuration store" },
+        { "role": "db_datawriter", "required": true, "why": "Stages changes, settings and the audit trail" },
+        { "role": "db_ddladmin", "required": true, "why": "Applies the store schema on first start" }
+      ],
+      "sqlForbidden": [ "db_owner" ],
+      "exchange": [ { "role": "Application Mail.Send", "scope": "the sender mailbox (management scope)", "required": false, "when": "sharedMailbox", "why": "Sends the test mail and approval mails as the one sender mailbox" } ]
+    },
+    {
+      "role": "updater",
+      "label": "Updater (update job managed identity)",
+      "match": { "managedIdentityName": "ca-pim-update" },
+      "purpose": "Builds or pulls the approved release and rolls the Manager and the engine job to it.",
+      "graph": [],
+      "directoryRoles": [],
+      "azure": [
+        { "role": "Contributor", "scope": "resourceGroup", "required": true, "coveredBy": [ "Owner" ], "why": "Updates the container app and jobs to the approved image (scoped to this resource group only)" },
+        { "role": "AcrPull", "scope": "registry", "required": false, "coveredBy": [ "Contributor", "Owner" ], "why": "Reads the registry it builds into" }
+      ],
+      "sql": [
+        { "role": "db_datareader", "required": false, "why": "Records the update state" },
+        { "role": "db_datawriter", "required": false, "why": "Records the update state" }
+      ],
+      "sqlForbidden": [ "db_owner" ]
+    },
+    {
+      "role": "support",
+      "label": "Invardia Support app (application)",
+      "declared": false,
+      "purpose": "Invardia's support and setup application, created at the customer's request. Its Graph grants are set by Invardia; its store access is read-only.",
+      "sql": [ { "role": "db_datareader", "required": false, "why": "Reads the store when the customer asks for support" } ],
+      "sqlForbidden": [ "db_owner" ]
+    },
+    {
+      "role": "activator",
+      "label": "PIM Activator (app registration, delegated)",
+      "purpose": "The browser extension admins activate their eligible access with. Acts only as the signed-in admin (delegated); it has no application permission.",
+      "delegated": [
+        { "permission": "PrivilegedAccess.ReadWrite.AzureADGroup", "why": "Activate and deactivate PIM for Groups memberships" },
+        { "permission": "Group.Read.All", "why": "List and name the eligible groups" },
+        { "permission": "User.Read", "why": "The signed-in user" },
+        { "permission": "RoleManagement.Read.Directory", "why": "My access: resolve Entra role assignments per group" },
+        { "permission": "RoleManagement.ReadWrite.Directory", "why": "Activate and deactivate direct Entra role assignments" },
+        { "permission": "AdministrativeUnit.Read.All", "why": "My access: administrative unit names" },
+        { "permission": "Application.Read.All", "required": false, "why": "Still consented by the setup script; not used by the current extension" },
+        { "permission": "user_impersonation", "why": "Azure Resource Manager token for Azure role activation" }
+      ],
+      "graph": [],
+      "directoryRoles": []
+    }
+  ],
+  "dataFlows": [
+    { "id": "browser-signin", "from": "Admin browser", "to": "PIM Manager", "direction": "inbound", "protocol": "HTTPS (TLS)", "auth": "Microsoft Entra ID sign-in in front of the app (App Service authentication); a PIM Manager role from the store", "data": "the PIM Manager pages and API (configuration, reports)", "enabledWhen": "always" },
+    { "id": "manager-sql", "from": "PIM Manager", "to": "SQL database", "direction": "outbound", "protocol": "TDS over TLS", "auth": "managed identity (Microsoft Entra token), no password", "data": "configuration, staged changes, audit trail, settings", "enabledWhen": "sql" },
+    { "id": "engine-sql", "from": "Engine job", "to": "SQL database", "direction": "outbound", "protocol": "TDS over TLS", "auth": "managed identity (Microsoft Entra token), no password", "data": "configuration, runs, change queue, journal", "enabledWhen": "sql" },
+    { "id": "engine-graph", "from": "Engine job", "to": "Microsoft Graph", "direction": "outbound", "protocol": "HTTPS (REST)", "auth": "managed identity, application permissions (app-only)", "data": "admin accounts, groups, role and group assignments, activation policies", "enabledWhen": "always" },
+    { "id": "engine-arm", "from": "Engine job", "to": "Azure Resource Manager", "direction": "outbound", "protocol": "HTTPS (REST)", "auth": "managed identity, Azure RBAC", "data": "management groups and subscriptions (discovery), Azure role assignments", "enabledWhen": "always" },
+    { "id": "manager-graph", "from": "PIM Manager", "to": "Microsoft Graph", "direction": "outbound", "protocol": "HTTPS (REST)", "auth": "managed identity, read-only application permissions", "data": "directory reads for the pages", "enabledWhen": "always" },
+    { "id": "manager-job", "from": "PIM Manager", "to": "Engine job", "direction": "outbound", "protocol": "HTTPS (Azure Resource Manager)", "auth": "managed identity, Container Apps Jobs Operator on the engine job only", "data": "start an engine run after a commit or Run now", "enabledWhen": "always" },
+    { "id": "mail-graph", "from": "Engine job / PIM Manager", "to": "Exchange Online (Microsoft Graph sendMail)", "direction": "outbound", "protocol": "HTTPS (REST)", "auth": "managed identity, Exchange RBAC for Applications scoped to the sender mailbox", "data": "TAP codes, approvals, reminders, alerts (mail to the recipients)", "enabledWhen": "mail:sharedMailbox" },
+    { "id": "mail-smtp", "from": "Engine job / PIM Manager", "to": "SMTP relay", "direction": "outbound", "protocol": "SMTP with TLS", "auth": "relay user name + password read from Key Vault", "data": "TAP codes, approvals, reminders, alerts", "enabledWhen": "mail:smtp" },
+    { "id": "uplink", "from": "Engine job", "to": "Invardia (invardia.com)", "direction": "outbound", "protocol": "HTTPS", "auth": "anonymous, or the Pro install key", "data": "status telemetry: which jobs ran and their outcome, version, edition, licence state (no tenant data; error text only with a Pro install key, secrets removed)", "enabledWhen": "feature:telemetry.uplink" },
+    { "id": "update-invardia", "from": "Updater job", "to": "Invardia (invardia.com)", "direction": "outbound", "protocol": "HTTPS", "auth": "the release is signed; the updater verifies the signature before it builds", "data": "the approved release (source archive and signed manifest)", "enabledWhen": "feature:updates.invardia" },
+    { "id": "update-community", "from": "Updater job", "to": "GitHub (public release)", "direction": "outbound", "protocol": "HTTPS", "auth": "public download; verified against the published checksum", "data": "the Community release", "enabledWhen": "community" },
+    { "id": "update-registry", "from": "Updater job", "to": "Container registry", "direction": "outbound", "protocol": "HTTPS", "auth": "managed identity (Azure RBAC)", "data": "the container image of the approved release", "enabledWhen": "always" },
+    { "id": "licence", "from": "Engine job", "to": "Invardia (invardia.com)", "direction": "outbound", "protocol": "HTTPS", "auth": "the install key; the licence document is signed and verified offline", "data": "the licence request and the signed licence (no tenant data beyond the tenant id it is bound to)", "enabledWhen": "feature:licence.autoRequest" },
+    { "id": "msp-bundle", "from": "Managing tenant", "to": "Managed tenants", "direction": "outbound", "protocol": "HTTPS (storage)", "auth": "signed bundle verified by the managed tenant + network restriction (no shared key)", "data": "the replicated delegation model (admins, groups, bindings)", "enabledWhen": "msp" },
+    { "id": "activator", "from": "PIM Activator (admin browser)", "to": "Microsoft Graph / Azure Resource Manager", "direction": "outbound", "protocol": "HTTPS (REST)", "auth": "the admin's own sign-in (delegated); the extension holds no application permission", "data": "the admin's eligible assignments and their activation requests", "enabledWhen": "activator" }
+  ]
+}

@@ -1,0 +1,189 @@
+{
+  "script": "Initialize-PimWorkloadPrereqs.ps1",
+  "product": "pim",
+  "title": "Check and fix a workload's prerequisites for PIM Manager",
+  "purpose": "Check, and fix, the prerequisites of ONE workload PIM Manager delegates into (Defender XDR, Intune, Power BI, Azure roles, Entra roles) that PIM cannot fix itself.",
+  "whenToRun": "When a prerequisite chip in PIM Manager (template cards, the workload wizards, Coverage & gaps) shows this command for a workload, with your environment's values filled in. PIM checks every prerequisite an API can answer itself every day; this script is for what needs a person with more rights than the engine has. Safe to run again: what is already in place is reported and left alone.",
+  "standalone": true,
+  "sourcePath": "tools/setup/Initialize-PimWorkloadPrereqs.ps1",
+  "runAs": [
+    {
+      "kind": "other",
+      "name": "delegated Microsoft Graph scopes Application.Read.All and AppRoleAssignment.ReadWrite.All, plus per workload: RoleManagement.Read.Defender (DefenderXdr), DeviceManagementRBAC.Read.All (Intune), Group.ReadWrite.All and GroupMember.ReadWrite.All (PowerBI), Organization.Read.All (EntraRoles)",
+      "scope": "the browser sign-in (first-party public client 'Microsoft Graph Command Line Tools')",
+      "why": "What the browser sign-in asks for, for the checks and the fixes of the chosen workload only. A check the caller cannot read (for example without Directory.Read.All, or LicenseAssignment.Read.All for the licence list) is reported as NOT CHECKED, never as passed."
+    },
+    {
+      "kind": "other",
+      "name": "delegated Azure access (user_impersonation) through the first-party public client 'Microsoft Azure PowerShell'",
+      "scope": "Azure Resource Manager, plus Fabric (PowerBI) and the store (with -SqlServerFqdn) from the same sign-in",
+      "why": "Needed for DefenderXdr (Sentinel), AzureRbac, PowerBI (Fabric tenant setting), to find the engine identity from the hosted tick job, and to record the result in the store."
+    },
+    {
+      "kind": "entraRole",
+      "name": "Privileged Role Administrator",
+      "scope": "tenant",
+      "why": "Granting the engine a missing Graph application permission (DefenderXdr: RoleManagement.ReadWrite.Defender; Intune: DeviceManagementRBAC.ReadWrite.All; EntraRoles: the engine's Graph role map) needs a Privileged Role Administrator or a Global Administrator."
+    },
+    {
+      "kind": "entraRole",
+      "name": "Groups Administrator",
+      "scope": "tenant (PowerBI only)",
+      "why": "Creates the Power BI admin-API security group and adds the engine identity to it (a User Administrator works too)."
+    },
+    {
+      "kind": "entraRole",
+      "name": "Fabric Administrator",
+      "scope": "tenant (PowerBI only)",
+      "why": "Reads and changes the Fabric tenant setting 'Service principals can access read-only admin APIs'. Without it the check is NOT CHECKED and the portal step is shown."
+    },
+    {
+      "kind": "azureRbac",
+      "name": "User Access Administrator",
+      "scope": "each Azure scope in your delegation rows and -AzureScope (AzureRbac with -GrantAzureUserAccessAdministrator only; Owner works too)",
+      "why": "Assigns User Access Administrator to the engine identity at that scope."
+    },
+    {
+      "kind": "azureRbac",
+      "name": "Contributor",
+      "scope": "the subscription of the dedicated Sentinel workspace (DefenderXdr with -EnableSentinel only)",
+      "why": "Creates the dedicated Log Analytics workspace, registers the Microsoft.OperationsManagement and Microsoft.SecurityInsights resource providers and enables Microsoft Sentinel on it."
+    },
+    {
+      "kind": "azureRbac",
+      "name": "Reader",
+      "scope": "the hosting resource group and the Log Analytics workspaces",
+      "why": "Finds the engine identity from the tick job when -EngineObjectId is not given, and reads whether Sentinel is enabled."
+    },
+    {
+      "kind": "entraRole",
+      "name": "Security Administrator",
+      "scope": "tenant (DefenderXdr portal step only)",
+      "why": "Not used by the script: the script reports the portal step 'activate the Unified RBAC workloads', which a Security Administrator does in the Microsoft Defender portal."
+    },
+    {
+      "kind": "other",
+      "name": "member of the environment's SQL admin group (only to record the result with -SqlServerFqdn)",
+      "scope": "the environment's store",
+      "why": "Without it nothing is recorded here; press Check again in PIM Manager and PIM records it itself."
+    }
+  ],
+  "changes": [
+    {
+      "target": "Microsoft Graph",
+      "action": "grant",
+      "object": "application permission for the engine identity (app role assignment on Microsoft Graph, POST servicePrincipals/{engine}/appRoleAssignments) -- only the ones missing; a role is granted only when the role map's id is the live id",
+      "permission": "DefenderXdr: RoleManagement.ReadWrite.Defender; Intune: DeviceManagementRBAC.ReadWrite.All; EntraRoles: the engine's full Graph role map (repository runs only)",
+      "scope": "tenant (application permissions apply tenant-wide)",
+      "why": "The engine assigns the Defender / Intune / Entra roles you delegate through these permissions.",
+      "undo": "Entra admin center > Enterprise applications > the engine identity > Permissions > remove the permission."
+    },
+    {
+      "target": "Microsoft Graph",
+      "action": "create",
+      "object": "security group -PowerBiSecurityGroupName (default grp-pim-powerbi-admin-api), only when it does not exist (PowerBI)",
+      "permission": "",
+      "scope": "tenant",
+      "why": "Microsoft's rule for the read-only Power BI admin APIs: the service principal must be in a security group the Fabric tenant setting allows.",
+      "undo": "Delete the group (first remove it from the Fabric tenant setting)."
+    },
+    {
+      "target": "Microsoft Graph",
+      "action": "grant",
+      "object": "member of the Power BI admin-API security group: the engine identity (PowerBI)",
+      "permission": "group membership that the Fabric setting 'Service principals can access read-only admin APIs' allows",
+      "scope": "the Power BI admin-API security group",
+      "why": "Lets the engine call the read-only Power BI admin APIs to manage Power BI workspace access.",
+      "undo": "Remove the engine identity from the group."
+    },
+    {
+      "target": "Microsoft Fabric",
+      "action": "update",
+      "object": "tenant setting 'Service principals can access read-only admin APIs' (AllowServicePrincipalsUseReadAdminAPIs): enabled for the group, every group already in it kept (PowerBI)",
+      "permission": "",
+      "scope": "the Fabric / Power BI tenant",
+      "why": "Without it the engine's Power BI admin API calls are refused.",
+      "undo": "Fabric admin portal > Tenant settings > Admin API settings > remove the group (or disable the setting if the script enabled it)."
+    },
+    {
+      "target": "Azure Resource Manager",
+      "action": "grant",
+      "object": "Azure role assignment for the engine identity (Microsoft.Authorization/roleAssignments) at each scope it is missing (AzureRbac, OPT-IN with -GrantAzureUserAccessAdministrator)",
+      "permission": "User Access Administrator (an Owner or User Access Administrator already held there counts; Reader and Role Based Access Control Administrator are reported, not granted)",
+      "scope": "each Azure scope in your PIM-Assignments-Azure-Resources rows and -AzureScope",
+      "why": "The engine assigns the Azure resource roles you delegate. It is standing privilege, so it is opt-in.",
+      "undo": "Azure portal > the scope > Access control (IAM) > remove the engine identity's User Access Administrator assignment."
+    },
+    {
+      "target": "Azure Resource Manager",
+      "action": "create",
+      "object": "dedicated Log Analytics workspace law-sentinel-<suffix> (PerGB2018, 30 days) in -ResourceGroup, or -SentinelWorkspaceId; never PIM's own log workspace (DefenderXdr, OPT-IN with -EnableSentinel; billed per GB ingested)",
+      "permission": "",
+      "scope": "the hosting resource group",
+      "why": "Defender Data Operations roles need Microsoft Sentinel on a workspace.",
+      "undo": "Delete the workspace (and its Sentinel solution)."
+    },
+    {
+      "target": "Azure Resource Manager",
+      "action": "update",
+      "object": "resource provider registration Microsoft.OperationsManagement and Microsoft.SecurityInsights on the workspace's subscription, when not registered (-EnableSentinel)",
+      "permission": "",
+      "scope": "the workspace's subscription",
+      "why": "Sentinel cannot be enabled without them.",
+      "undo": "Unregister the providers (only when nothing else in the subscription uses them)."
+    },
+    {
+      "target": "Azure Resource Manager",
+      "action": "create",
+      "object": "Microsoft Sentinel on the workspace (Microsoft.SecurityInsights onboardingStates/default) (-EnableSentinel)",
+      "permission": "",
+      "scope": "the dedicated workspace",
+      "why": "Defender Data Operations roles need Microsoft Sentinel on a workspace.",
+      "undo": "Remove Microsoft Sentinel from the workspace (Microsoft Sentinel > Settings > Remove Microsoft Sentinel)."
+    },
+    {
+      "target": "Azure SQL",
+      "action": "update",
+      "object": "pim.Settings 'WorkloadPrereqs': this workload's result merged in (a confirmation made in PIM Manager is kept), read back and audited -- only with -SqlServerFqdn and access to the store",
+      "permission": "",
+      "scope": "the environment's store",
+      "why": "PIM Manager shows the result on the template cards and Coverage & gaps.",
+      "undo": "Press Check again in PIM Manager: PIM records its own result."
+    }
+  ],
+  "parameters": [
+    { "name": "Workload", "required": true, "default": null, "help": "DefenderXdr, Intune, PowerBI, AzureRbac or EntraRoles." },
+    { "name": "TenantId", "required": true, "default": null, "help": "Your tenant id; every sign-in and token is checked against it." },
+    { "name": "SubscriptionId", "required": false, "default": null, "help": "The hosting subscription (finds the engine identity from the tick job; holds the dedicated Sentinel workspace)." },
+    { "name": "ResourceGroup", "required": false, "default": null, "help": "The hosting resource group." },
+    { "name": "TickJobName", "required": false, "default": "ca-pim-tick", "help": "The engine's job (its identity is the engine identity when -EngineObjectId is not given)." },
+    { "name": "SqlServerFqdn", "required": false, "default": null, "help": "The environment's store; without it (or access to it) the result is not recorded here." },
+    { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The store's database." },
+    { "name": "ClientId", "required": false, "default": null, "help": "Automation from the repository only: a certificate identity (with -CertThumbprint). Never shown by PIM Manager." },
+    { "name": "CertThumbprint", "required": false, "default": null, "help": "Automation from the repository only: the certificate of -ClientId." },
+    { "name": "UseSignedInAccount", "required": false, "default": "off", "help": "Use the account signed in to az in this window (the Invardia Support app session, or a person) instead of the browser sign-in." },
+    { "name": "UseEdge", "required": false, "default": "$true", "help": "$true opens Microsoft Edge for the sign-in; $false the default browser." },
+    { "name": "EngineObjectId", "required": false, "default": "the tick job's identity", "help": "The engine identity's object id (shown in PIM Manager)." },
+    { "name": "EngineAppId", "required": false, "default": null, "help": "The engine application's id, instead of -EngineObjectId." },
+    { "name": "EngineCertThumbprint", "required": false, "default": null, "help": "Only with an engine application whose certificate is on this computer: test the Power BI admin API as the engine." },
+    { "name": "ConfirmPortalStep", "required": false, "default": null, "help": "Check ids of portal steps you have done; recorded as confirmed (attested, not verified)." },
+    { "name": "SkipDataOperations", "required": false, "default": "off", "help": "DefenderXdr: skip the Data Operations / Sentinel checks." },
+    { "name": "SentinelWorkspaceId", "required": false, "default": null, "help": "DefenderXdr: the Log Analytics workspace to check (and, with -EnableSentinel, enable)." },
+    { "name": "EnableSentinel", "required": false, "default": "off", "help": "DefenderXdr, OPT-IN (billed per GB ingested): enable Microsoft Sentinel on a dedicated workspace." },
+    { "name": "PowerBiSecurityGroupName", "required": false, "default": "grp-pim-powerbi-admin-api", "help": "PowerBI: the admin-API security group." },
+    { "name": "AzureScope", "required": false, "default": null, "help": "AzureRbac: more Azure scopes to check." },
+    { "name": "GrantAzureUserAccessAdministrator", "required": false, "default": "off", "help": "AzureRbac, OPT-IN: assign User Access Administrator to the engine where it is missing." }
+  ],
+  "readsOnly": [
+    "the engine identity and its application permissions; Microsoft Graph's and the Power BI Service's service principals",
+    "Defender Unified RBAC role definitions and the permission catalog; the Log Analytics workspaces (Azure Resource Graph) and their Sentinel state",
+    "Intune role definitions; the tenant's licences (AAD_PREMIUM_P2)",
+    "the Power BI admin-API group and its members; the Fabric tenant settings",
+    "the engine's Azure role assignments at each scope; the delegation rows in the store (AzureRbac)",
+    "the stored result in pim.Settings 'WorkloadPrereqs' (to merge)"
+  ],
+  "network": [ "login.microsoftonline.com", "graph.microsoft.com", "management.azure.com", "api.fabric.microsoft.com", "api.powerbi.com", "<server>.database.windows.net (only with -SqlServerFqdn)", "localhost (the browser returns the sign-in to a local port on this computer)" ],
+  "whatIf": "Signs in, runs every check of the workload, and prints one \"What if:\" line per fix it would make (grant a Graph application permission, create the Power BI group, add the engine to it, enable the Fabric setting, assign User Access Administrator, create the Sentinel workspace, register the providers, enable Sentinel). A fix that depends on an earlier one not made yet says it cannot be previewed. Nothing is changed and nothing is recorded; the exit code is 0.",
+  "undo": "Reverse each change listed above: remove the engine's new application permissions and Azure role assignments, remove the engine from the Power BI group (or delete the group), take the group out of the Fabric setting, and remove Sentinel / the dedicated workspace if the script created them.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Initialize-PimWorkloadPrereqs/"
+}

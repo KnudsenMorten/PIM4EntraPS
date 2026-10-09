@@ -214,8 +214,10 @@ function Get-PimTemplatePackPlan {
         }
     }
     $storeTags = @{}; $storeNameToTag = @{}
+    $mspTags = @{}   # §100.6: store tags whose definition the managing tenant sent (Owner=MSP)
     foreach ($r in $defRows) {
         $rt = "$(([pscustomobject]$r).GroupTag)".Trim(); $rn = "$(([pscustomobject]$r).GroupName)".Trim()
+        if ($rt -and "$(([pscustomobject]$r).Owner)".Trim() -ieq 'msp') { $mspTags[$rt.ToLowerInvariant()] = $true }
         if ($rt) { $storeTags[$rt.ToLowerInvariant()] = $rt }
         if ($rn -and $rt -and -not $storeNameToTag.ContainsKey($rn.ToLowerInvariant())) { $storeNameToTag[$rn.ToLowerInvariant()] = $rt }
     }
@@ -266,6 +268,21 @@ function Get-PimTemplatePackPlan {
         }
         return [pscustomobject]$copy
     }
+    # 🔒 §100.6 MSP-COLLIDE -- WHAT A TEMPLATE ADDS IS LOCAL. A pack can never claim provenance: any Owner it carries is
+    # dropped, and a row that lands ON a group the managing tenant sent (an adopted master group: a binding, a nesting) is
+    # stamped Owner=Local, so it reads as the customer's own extension of that group. The downlink never takes over or
+    # retracts a non-MSP row, so the master later changing or dropping that group leaves these rows where they are.
+    $localize = {
+        param($Row)
+        $onMsp = $false; $hasOwner = $false
+        foreach ($c in @('GroupTag', 'SourceGroupTag', 'TargetGroupTag')) { $p = $Row.PSObject.Properties[$c]; if ($p -and $mspTags.ContainsKey("$($p.Value)".Trim().ToLowerInvariant())) { $onMsp = $true } }
+        if ($Row.PSObject.Properties['Owner']) { $hasOwner = $true }
+        if (-not $onMsp -and -not $hasOwner) { return $Row }
+        $copy = [ordered]@{}
+        foreach ($p in $Row.PSObject.Properties) { if ($p.Name -ne 'Owner') { $copy[$p.Name] = $p.Value } }
+        if ($onMsp) { $copy['Owner'] = 'Local' }
+        return [pscustomobject]$copy
+    }
     foreach ($baseProp in $tpl.rows.PSObject.Properties) {
         $base = $baseProp.Name
         if ($known -notcontains $base) { continue }
@@ -294,6 +311,7 @@ function Get-PimTemplatePackPlan {
             # ADOPTION: a definition the store already has is never offered; rows pointing at it take the store's tag.
             if ($base -like 'PIM-Definitions-*' -and $base -ne 'PIM-Definitions-AU' -and $adoptedTags.ContainsKey("$($conv.GroupTag)".Trim().ToLowerInvariant())) { continue }
             $conv = & $retagRow $conv
+            $conv = & $localize $conv
             $k = Get-PimTemplateRowKey -Base $base -Row $conv
             if ($k -and -not $existing.ContainsKey($k.ToLowerInvariant())) {
                 $sk = if ($storeKeyed) { "$(Get-PimStoreRowKey -Base $base -Row $conv)".ToLowerInvariant() } else { '' }

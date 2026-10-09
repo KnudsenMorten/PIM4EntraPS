@@ -5,6 +5,12 @@ if (-not (Get-Command Test-PimRingValue -ErrorAction SilentlyContinue)) { . (Joi
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-DateSafe.ps1')
 }
+# 95.2c / 100.15: the ONE role-assignable rule the engine creates with (PIM-RA-003..006 below read the same facts).
+if (-not (Get-Command Get-PimRoleAssignableFacts -ErrorAction SilentlyContinue) -or
+    -not (Get-Command Get-PimRoleAssignableGroupLimit -ErrorAction SilentlyContinue)) {
+    $_raLib = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-RoleAssignable.ps1'
+    if (Test-Path -LiteralPath $_raLib) { . $_raLib }
+}
 <#
 .SYNOPSIS
     Pre-flight validator for PIM Manager.
@@ -415,6 +421,12 @@ function Invoke-PimPreflightValidation {
     )
     $groupTagIndex = @{} # GroupTag (lower) -> @{ Tag, Csv, Row, IsRoleAssignable, TierLevel, Kind }
     $allGroupTags  = New-Object System.Collections.ArrayList
+    # 🔴 §100.6 MSP-COLLIDE gap D -- ONE GROUP, ONE DEFINITION. The same GroupTag (or the same GroupName) defined in two
+    # group-definition entities used to be resolved by keeping the FIRST silently here, while the engine's tag map kept the
+    # LAST -- so the master's memberships could land in a local group. It is now an ERROR on the second row. Resources is
+    # left out (discovery's entity; the engine never creates from it).
+    $dupTagSeen  = @{}   # tag (lower)  -> @{ Csv; Row; Name }
+    $dupNameSeen = @{}   # name (lower) -> @{ Csv; Row; Tag }
     foreach ($db in $defGroupBases) {
         if (-not $loaded.ContainsKey($db)) { continue }
         $rows = $loaded[$db].rows
@@ -423,6 +435,26 @@ function Invoke-PimPreflightValidation {
             $tag = Get-PimRowValue -Row $r -Column 'GroupTag'
             if (-not $tag) { continue }
             $key = $tag.ToLowerInvariant()
+            if ($db -ne 'PIM-Definitions-Resources') {
+                $gnD = "$(Get-PimRowValue -Row $r -Column 'GroupName')".Trim()
+                $ownD = "$(Get-PimRowValue -Row $r -Column 'Owner')".Trim()
+                $ownTxt = if ($ownD -ieq 'msp') { ' (this row was sent by the managing tenant)' } else { '' }
+                if ($dupTagSeen.ContainsKey($key) -and $dupTagSeen[$key].Csv -ne $db) {
+                    $first = $dupTagSeen[$key]
+                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-DEFDUP-001' -Csv $db -Row $i -Column 'GroupTag' -Subject $tag -Target $first.Csv `
+                        -Message "GroupTag '$tag' is defined twice: in $($first.Csv) (row $($first.Row + 1), '$($first.Name)') and here ('$gnD')$ownTxt. One tag must name ONE group -- otherwise memberships and roles for it land in whichever definition is read last." `
+                        -Suggestion "Remove one of the two definitions. If one belongs to the managing tenant, keep it and extend that group locally (add members, roles or nesting to it)."))
+                } elseif (-not $dupTagSeen.ContainsKey($key)) { $dupTagSeen[$key] = @{ Csv = $db; Row = $i; Name = $gnD } }
+                if ($gnD) {
+                    $nk = $gnD.ToLowerInvariant()
+                    if ($dupNameSeen.ContainsKey($nk) -and $dupNameSeen[$nk].Csv -ne $db -and $dupNameSeen[$nk].Tag.ToLowerInvariant() -ne $key) {
+                        $firstN = $dupNameSeen[$nk]
+                        [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-DEFDUP-002' -Csv $db -Row $i -Column 'GroupName' -Subject $gnD -Target $firstN.Csv `
+                            -Message "GroupName '$gnD' is defined twice under two tags: '$($firstN.Tag)' in $($firstN.Csv) (row $($firstN.Row + 1)) and '$tag' here$ownTxt. The engine adopts the existing Entra group by name, so both tags would drive ONE group." `
+                            -Suggestion "Remove one of the two definitions. If one belongs to the managing tenant, keep it and extend that group locally (add members, roles or nesting to it)."))
+                    } elseif (-not $dupNameSeen.ContainsKey($nk)) { $dupNameSeen[$nk] = @{ Csv = $db; Row = $i; Tag = "$tag" } }
+                }
+            }
             $kind = if ($db -eq 'PIM-Definitions-Roles') { 'role-group' } else { 'permission-group' }
             $ira = (Get-PimRowValue -Row $r -Column 'IsRoleAssignable').ToUpperInvariant()
             $tier = Get-PimRowValue -Row $r -Column 'TierLevel'
@@ -861,6 +893,99 @@ function Invoke-PimPreflightValidation {
                     -Message "AssignmentType=Active is not supported for nesting the group '$ra2Member' into the role-assignable group '$ra2Container'. Entra refuses it, so this delegation can never deploy; Entra requires Eligible." `
                     -Suggestion "Change AssignmentType to 'Eligible' (members of '$ra2Member' activate '$ra2Container' just-in-time). An Active nesting into a role-assignable group is rejected by Entra on every engine run."))
             }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # 95.2c / 100.15 (operator approved 2026-10-07, "Tier 0 only") -- the role-assignable MISCONFIGURATION check.
+    # PIM-RA-001 above is "an Entra-role group that is not role-assignable" (error). Here:
+    #   PIM-RA-003 (warning) a NON-role-assignable group nested into a Tier-0 role-assignable group -- a Groups
+    #              Administrator or the member group's owners can change its members and so reach the Tier-0 group;
+    #   PIM-RA-004 (info)    a role-assignable group on Tier 1/2 that holds no Entra role and does not reach a Tier-0
+    #              one -- not needed, and it uses one of the tenant's 500 (never changed: the flag is immutable);
+    #   PIM-RA-005 (info; a warning from 80% and over the limit -- never an error) the count vs the 500 limit;
+    #   PIM-RA-006 (warning, with the policy templates below) an Entra-role elevation group without approval.
+    # The facts come from Get-PimRoleAssignableFacts (engine/_shared/PIM-RoleAssignable.ps1) -- the engine's own rule.
+    # ------------------------------------------------------------------
+    $raFacts = @{}
+    $raCount = 0
+    if (Get-Command Get-PimRoleAssignableFacts -ErrorAction SilentlyContinue) {
+        try {
+            $raDefs = New-Object System.Collections.Generic.List[object]
+            foreach ($db in $defGroupBases) {
+                if (-not $loaded.ContainsKey($db)) { continue }
+                foreach ($r in @($loaded[$db].rows)) {
+                    $t = Get-PimRowValue -Row $r -Column 'GroupTag'; if (-not $t) { continue }
+                    $raDefs.Add([pscustomobject]@{ GroupTag = $t; TierLevel = (Get-PimRowValue -Row $r -Column 'TierLevel'); SourceEntity = $db })
+                }
+            }
+            $raBind = New-Object System.Collections.Generic.List[object]
+            foreach ($csv in @('PIM-Assignments-Roles-Groups', 'PIM-Assignments-Roles-AUs')) {
+                if (-not $loaded.ContainsKey($csv)) { continue }
+                foreach ($r in @($loaded[$csv].rows)) {
+                    if (Test-PimRowIsBlank -Row $r) { continue }
+                    if ((Get-PimRowValue -Row $r -Column 'Action') -match '^(?i)remove') { continue }
+                    $raBind.Add([pscustomobject]@{ GroupTag = (Get-PimRowValue -Row $r -Column 'GroupTag') })
+                }
+            }
+            $raNest = New-Object System.Collections.Generic.List[object]
+            if ($loaded.ContainsKey('PIM-Assignments-Groups')) {
+                foreach ($r in @($loaded['PIM-Assignments-Groups'].rows)) {
+                    if (Test-PimRowIsBlank -Row $r) { continue }
+                    if ((Get-PimRowValue -Row $r -Column 'Action') -match '^(?i)remove') { continue }
+                    $raNest.Add([pscustomobject]@{ TargetGroupTag = (Get-PimRowValue -Row $r -Column 'TargetGroupTag'); SourceGroupTag = (Get-PimRowValue -Row $r -Column 'SourceGroupTag') })
+                }
+            }
+            $raFacts = Get-PimRoleAssignableFacts -Definitions $raDefs.ToArray() -RoleBindings $raBind.ToArray() -Nestings $raNest.ToArray()
+        } catch { $raFacts = @{} }
+        $raTierNum = { param($v) $m = [regex]::Match("$v", '(?i)^\s*T?(\d+)\s*$'); if ($m.Success) { [int]$m.Groups[1].Value } else { $null } }
+        $raName = { param($g, $t) if ($g -and "$($g.GroupName)".Trim()) { "$($g.GroupName)" } else { "$t" } }
+
+        # PIM-RA-003
+        if ($loaded.ContainsKey('PIM-Assignments-Groups')) {
+            $rows = $loaded['PIM-Assignments-Groups'].rows
+            for ($i = 0; $i -lt $rows.Count; $i++) {
+                $r = $rows[$i]
+                if (Test-PimRowIsBlank -Row $r) { continue }
+                if ((Get-PimRowValue -Row $r -Column 'Action') -match '^(?i)remove') { continue }
+                $src = Get-PimRowValue -Row $r -Column 'SourceGroupTag'; $tgt = Get-PimRowValue -Row $r -Column 'TargetGroupTag'
+                if (-not $src -or -not $tgt) { continue }
+                $ck = $src.ToLowerInvariant(); $mk = $tgt.ToLowerInvariant()
+                if (-not $groupTagIndex.ContainsKey($ck) -or -not $groupTagIndex.ContainsKey($mk)) { continue }
+                $c = $groupTagIndex[$ck]; $m = $groupTagIndex[$mk]
+                if (-not $c.IsRoleAssignable -or (& $raTierNum $c.TierLevel) -ne 0 -or $m.IsRoleAssignable) { continue }
+                $cn = & $raName $c $src; $mn = & $raName $m $tgt
+                [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-RA-003' -Csv 'PIM-Assignments-Groups' -Row $i -Column 'TargetGroupTag' `
+                    -Subject $mn -Target $cn -FixCsv "$($m.Csv)" -FixRow $m.Row -FixColumn 'IsRoleAssignable' -FixValue 'TRUE' `
+                    -Message "The group '$mn' is nested into the Tier-0 role-assignable group '$cn', but is not role-assignable itself. A Groups Administrator or the owners of '$mn' can change its members, and so reach '$cn' -- the protection role-assignable gives '$cn' does not cover its members." `
+                    -Suggestion "Make '$mn' role-assignable (IsRoleAssignable=TRUE on its definition in $($m.Csv)). Entra cannot add the flag to an existing group: delete '$mn' in Entra ID and the engine recreates it role-assignable on its next run. Or remove this nesting."))
+            }
+        }
+
+        # PIM-RA-004 + the count for PIM-RA-005
+        foreach ($k in @($groupTagIndex.Keys)) {
+            $g = $groupTagIndex[$k]
+            if (-not $g.IsRoleAssignable) { continue }
+            $raCount++
+            $f = if ($raFacts.ContainsKey($k)) { $raFacts[$k] } else { $null }
+            $tn = & $raTierNum $g.TierLevel
+            if ($null -eq $tn -or $tn -eq 0) { continue }
+            if ($f -and ($f.HoldsEntraRole -or $f.NestsIntoTier0EntraRole)) { continue }
+            $gn = & $raName $g $g.Tag
+            [void]$violations.Add((New-PimViolation -Severity 'info' -Code 'PIM-RA-004' -Csv "$($g.Csv)" -Row $g.Row -Column 'IsRoleAssignable' `
+                -Subject $gn -Target $gn `
+                -Message "'$gn' is role-assignable on Tier $tn but holds no Entra ID role and does not reach a Tier-0 one. Microsoft requires role-assignable only for a group assigned an Entra role; this one uses one of the tenant's $(Get-PimRoleAssignableGroupLimit) role-assignable groups." `
+                -Suggestion "Nothing to do for an existing group -- Entra cannot change the flag, and PIM leaves it as it is. For a group not created yet, set IsRoleAssignable=FALSE on its definition."))
+        }
+        $raLimit = Get-PimRoleAssignableGroupLimit
+        if ($raCount -gt 0) {
+            # Never an ERROR: any error blocks EVERY commit, and groups that already exist keep working over the limit --
+            # only a NEW role-assignable group is refused by Entra. So: info, a warning from 80% and over the limit.
+            $raSev = if ($raCount -ge [int]($raLimit * 0.8)) { 'warning' } else { 'info' }
+            [void]$violations.Add((New-PimViolation -Severity $raSev -Code 'PIM-RA-005' -Csv '<global>' -Row $null -Column 'IsRoleAssignable' `
+                -Subject "$raCount" -Target "$raLimit" `
+                -Message "$raCount of the tenant's $raLimit role-assignable groups are defined here$(if ($raCount -gt $raLimit) { ' -- OVER the limit: Entra refuses to create more' } elseif ($raSev -eq 'warning') { ' -- 80% or more of the limit' } else { '' }). Groups created outside PIM Manager count toward the same limit." `
+                -Suggestion "Keep role-assignable for groups that hold an Entra ID role or reach a Tier-0 one (PIM-RA-004 lists the others)."))
         }
     }
 
@@ -1829,6 +1954,48 @@ function Invoke-PimPreflightValidation {
     }
 
     # ------------------------------------------------------------------
+    # PIM-RA-006 (95.2c, warning): an Entra-role ELEVATION group without approval. Microsoft recommends approval on
+    # eligible assignments for groups used to elevate into Entra roles. Approval counts when the group's own activation
+    # policy (its PolicyTemplate, blank = the group default) carries one, OR every Entra-role binding row of the group
+    # links a role policy that does (blank = the Entra-role default). Resolved exactly like PIM-APR-001 above; when the
+    # template store cannot be read, a template id/name containing "approval" counts (the shipped naming).
+    # ------------------------------------------------------------------
+    try {
+        $raHasApproval = {
+            param([string]$value, [string]$kind)
+            $k = & $resolveTpl $value
+            if (-not $k) { $k = if ("$value".Trim()) { "$value".Trim() } else { "$($tplDefaults[$kind])" } }
+            if ($policyTpls.Count -gt 0 -and $policyTpls.ContainsKey($k)) { return ($policyTpls[$k].ApprovalMode -ne 'None') }
+            return ("$k" -match '(?i)approval')
+        }
+        $raRoleRows = @{}   # tag (lower) -> @( PolicyTemplate values of its Entra-role binding rows )
+        foreach ($csv in @('PIM-Assignments-Roles-Groups', 'PIM-Assignments-Roles-AUs')) {
+            if (-not $loaded.ContainsKey($csv)) { continue }
+            foreach ($r in @($loaded[$csv].rows)) {
+                if (Test-PimRowIsBlank -Row $r) { continue }
+                if ((Get-PimRowValue -Row $r -Column 'Action') -match '^(?i)remove') { continue }
+                $t = Get-PimRowValue -Row $r -Column 'GroupTag'; if (-not $t) { continue }
+                $tk = $t.ToLowerInvariant()
+                if (-not $raRoleRows.ContainsKey($tk)) { $raRoleRows[$tk] = New-Object System.Collections.Generic.List[string] }
+                $raRoleRows[$tk].Add((Get-PimRowValue -Row $r -Column 'PolicyTemplate'))
+            }
+        }
+        foreach ($tk in @($raRoleRows.Keys | Sort-Object)) {
+            if (-not $groupTagIndex.ContainsKey($tk)) { continue }   # FK rules own an undefined tag
+            $g = $groupTagIndex[$tk]
+            $gRow = $loaded["$($g.Csv)"].rows[$g.Row]
+            $grpOk = & $raHasApproval (Get-PimRowValue -Row $gRow -Column 'PolicyTemplate') 'group'
+            $roleOk = @($raRoleRows[$tk] | Where-Object { -not (& $raHasApproval $_ 'directoryRole') }).Count -eq 0
+            if ($grpOk -or $roleOk) { continue }
+            $gn = if ("$($g.GroupName)".Trim()) { "$($g.GroupName)" } else { "$($g.Tag)" }
+            [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-RA-006' -Csv "$($g.Csv)" -Row $g.Row -Column 'PolicyTemplate' `
+                -Subject $gn -Target $gn `
+                -Message "'$gn' elevates into an Entra ID role, but neither its own activation policy nor its Entra-role policy requires approval. Microsoft recommends approval on groups used to elevate into Entra roles." `
+                -Suggestion "Link an approval template (e.g. Groups_RequireApproval) on the group's PolicyTemplate, or EntraIDRoles_RequireApproval on its Entra-role rows, and give the group owners to approve. If self-activation is deliberate here, acknowledge this warning."))
+        }
+    } catch { }
+
+    # ------------------------------------------------------------------
     # REQ-L / §68.6 #37(c): the PolicyTemplate column on the ROLE-ASSIGNMENT entities (Roles-Groups, Roles-AUs,
     # Azure-Resources). The engine reads it per role (Get-PimManagedRolePolicyTargets) and per Azure (scope, role)
     # (Get-PimAzResPolicyTargets), blank = the per-kind default (EntraIDRoles_Standard for an Entra role, AzureRoles_Standard
@@ -1892,6 +2059,11 @@ function Invoke-PimPreflightValidation {
                     ForEach-Object { $_.Name -replace '\.connector\.json$', '' })
             }
         } catch { $connectorIds = @() }
+        # 100.17 CUSTOM-WORKLOAD: a custom (group-only) workload is a catalog entry too -- its id is valid here. The
+        # rows being validated may come with the workload just created (pending); the store read is the defined set.
+        $customWl = @()
+        try { if (Get-Command Read-PimCustomWorkloads -ErrorAction SilentlyContinue) { $customWl = @(Read-PimCustomWorkloads) } } catch { $customWl = @() }
+        if ($connectorIds.Count -gt 0) { foreach ($cw in $customWl) { if ("$($cw.id)".Trim()) { $connectorIds += "$($cw.id)".Trim().ToLowerInvariant() } } }
 
         $rows = $loaded['PIM-Assignments-Workloads'].rows
         for ($i = 0; $i -lt $rows.Count; $i++) {
@@ -2239,5 +2411,7 @@ function Invoke-PimPreflightValidation {
             expiredToActive = $expiredToActive
             total           = @($finalViolations).Count
         }
+        # 95.2c: role-assignable groups defined here vs Entra's per-tenant limit (PIM-RA-005 says it in words).
+        roleAssignable = [ordered]@{ count = [int]$raCount; limit = $(if (Get-Command Get-PimRoleAssignableGroupLimit -ErrorAction SilentlyContinue) { Get-PimRoleAssignableGroupLimit } else { 500 }) }
     }
 }

@@ -1,9 +1,15 @@
 ﻿#Requires -Version 5.1
+
 <#
 .SYNOPSIS
+  Install PIM Manager into your own Azure subscription in one guided run: check the answers and the licence, check your sign-in, rights and subscription, deploy PIM Manager, register the licence, give the Invardia Support app its access when you named one, and verify the installation.
   §95.2 -- the GUIDED INSTALL of the PIM Manager: the one command Invardia's bootstrap calls (GUIDED-INSTALL §4.2).
 
 .DESCRIPTION
+  -WhatIf: runs the checks (sign-in, subscription, rights, resource providers, names, SQL in the region -- reads only),
+  then prints what the installation WOULD do -- the deploy's own plan included -- and stops before the first change
+  (no Invardia enrollment claim, no Azure / Entra / SQL change, no state file outside the temp folder).
+
   Install-PimManager -ConfigPath <config.json> -LicencePath <file> -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]
 
   Runs in Azure Cloud Shell (PowerShell 7, Linux) or PowerShell 7 / Windows PowerShell 5.1 on Windows, as the SIGNED-IN
@@ -36,8 +42,27 @@
 .EXAMPLE
   ./Install-PimManager.ps1 -ConfigPath ~/clouddrive/invardia/ab12/config.json -LicencePath ~/clouddrive/invardia/ab12/Contoso.pimlicense `
       -Reporter { param($e) "$($e.step.id) $($e.state) $($e.message)" | Write-Host }
+.EXAMPLE
+  ./Install-PimManager.ps1 -ConfigPath ~/clouddrive/invardia/ab12/config.json -LicencePath ~/clouddrive/invardia/ab12/Contoso.pimlicense -WhatIf
+  The checks, then every step the installation would take; nothing is changed.
+
+.NOTES
+  PERMISSIONS (the full list, with scope, reason and undo, is on the documentation page and in Install-PimManager.doc.json):
+  The person running it needs: Owner (or Contributor + User Access Administrator) on the subscription; in Entra ID
+  Privileged Role Administrator (Graph app roles for the managed identities, the role-assignable SQL admin group) and
+  Application Administrator (the Manager's sign-in app). Exchange Administrator only for the mail sender step.
+  It creates: a resource group with a virtual network, a container registry, a Log Analytics workspace, Azure SQL server +
+  database, managed identities, the Container Apps environment, the Manager app and its jobs (tick, updater), the Entra
+  sign-in app and its members group, the SQL admin group grp-pim-sql-admins. It grants: Microsoft Graph application
+  permissions to the engine job identity (the engine set) and the Manager identity (a read-only set); AcrPull, Reader,
+  Contributor (updater, on the resource group) and Reader at the tenant root to the engine; SQL database roles
+  (db_datareader, db_datawriter, db_ddladmin) to the identities; the Invardia Support app's access when named.
+  Logs: a transcript of the run in the temp folder (pim-manager-logs); its path is printed.
+
+.LINK
+  https://invardia.com/docs/pim/scripts/Install-PimManager/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$ConfigPath,
     # The licence file -- required unless the answers carry an Invardia enrollment key (config 'enrollmentKey', or
@@ -73,6 +98,9 @@ $sol = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $here '_PimGuidedInstall.ps1')
 . (Join-Path $here '_PimSignedIn.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-License.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')     # framework 12.7: the Documentation line + the transcript
+$null = Start-PimScriptRun -Script 'Install-PimManager'
+try {
 
 if (-not $Az) { $Az = { param([string[]]$AzArgs) $ErrorActionPreference = 'Continue'; & az @AzArgs 2>$null } }
 if (-not $ResolveHost) { $ResolveHost = { param([string]$HostName) try { @([System.Net.Dns]::GetHostAddresses($HostName)).Count -gt 0 } catch { $false } } }
@@ -139,7 +167,8 @@ if (-not "$StatePath".Trim()) {
 $state = Read-PimInstallState -StatePath $StatePath
 $done = New-Object System.Collections.Generic.List[string]
 if ($Resume -and $state.installId -eq $installId) { foreach ($c in $state.completed) { $done.Add("$c") | Out-Null } }
-function Mark([string]$Id) { if (-not $done.Contains($Id)) { $done.Add($Id) | Out-Null }; Save-PimInstallState -StatePath $StatePath -InstallId $installId -Completed @($done) }
+# -WhatIf: the state file lives outside the temp folder (clouddrive / home), so a preview never writes it.
+function Mark([string]$Id) { if (-not $done.Contains($Id)) { $done.Add($Id) | Out-Null }; if (-not $WhatIfPreference) { Save-PimInstallState -StatePath $StatePath -InstallId $installId -Completed @($done) } }
 $resumeCmd = if ($enrolling -and -not "$LicencePath".Trim()) { "Install-PimManager -ConfigPath '$ConfigPath' -StatePath '$StatePath' -Resume" } else { "Install-PimManager -ConfigPath '$ConfigPath' -LicencePath '$LicencePath' -StatePath '$StatePath' -Resume" }
 
 # the licence: a Pro licence for THIS tenant, verifiable offline. Anything else is a bad bundle (exit 3).
@@ -258,6 +287,37 @@ Pre 'preflight-sql-region' {
 }
 if ($preflightFailed) { Finish 2 }
 if ($PreflightOnly) { Write-Host 'preflight passed -- nothing was changed (-PreflightOnly)' -ForegroundColor Green; Finish 0 }
+
+# ================================================================== framework 12.7: -WhatIf = the checks above + this preview
+# Everything after this point writes (Invardia, Azure, Entra ID, SQL, the state file), so a preview stops HERE and only
+# describes it. The deploy's own plan is read with Invoke-PimDeployAll in its plan-only mode (reads only).
+if ($WhatIfPreference) {
+    $wiManaged = ("$($cfg.mspRole)" -eq 'managed')
+    Write-Host ''
+    Write-Host 'WHAT IF -- the checks passed. The installation WOULD now do this (nothing below is done under -WhatIf):' -ForegroundColor Cyan
+    if ($enrolling -and -not $wiManaged) {
+        Write-Host "  What if: claim tenant $($cfg.tenantId) at Invardia with the enrollment key (Invardia creates the environment under your account, signs the licence and issues an install key) -- a change at Invardia, not previewed" -ForegroundColor Yellow
+    }
+    if ($wiManaged) {
+        Write-Host "  What if: run the MANAGED-TENANT build (Invoke-PimMspBuild.ps1 -Role Slave -Apply) in subscription $($cfg.subscriptionId): enrollment claim, hosting, SQL admin group, the engine and Manager identities' Graph app roles, the pull network rule and the signed-bundle pull job." -ForegroundColor Yellow
+        Write-Host '  That build cannot be previewed from here: its plan depends on the enrollment claim''s answer (the managing tenant''s bundle address). Run without -WhatIf to apply.' -ForegroundColor Yellow
+    } else {
+        $wiArgs = @{}
+        $wiDeploy = ConvertTo-PimInstallDeployArgs -Config $cfg -SignedInUpn $who.userName
+        foreach ($k in @($wiDeploy.Keys)) { if ("$k" -ne 'Apply') { $wiArgs[$k] = $wiDeploy[$k] } }
+        $wiArgs['WhatIf'] = $true
+        Write-Host "  What if: deploy PIM Manager into resource group '$($names.resourceGroup)' ($($cfg.location)) -- the deploy's plan, read now:" -ForegroundColor Yellow
+        try { $null = @(& $Deploy $wiArgs { param($ev) }) }
+        catch { Write-Host "    the deploy plan could not be read: $($_.Exception.Message)" -ForegroundColor Yellow }
+        Write-Host "  What if: register the $($cfg.edition) licence in the PIM database (pim.Settings License + the install key; Set-PimLicense.ps1)" -ForegroundColor Yellow
+        if ("$($cfg.supportAppId)".Trim()) {
+            Write-Host "  What if: give the Invardia Support app $($cfg.supportAppId) '$($cfg.supportAccess)' access (Grant-PimSupportAccess.ps1: a contained SQL user with db_datareader + VIEW DEFINITION; at 'setup' also membership of the SQL admin group and ownership of PIM's own app registrations and groups)" -ForegroundColor Yellow
+        }
+        Write-Host '  What if: run the end-of-install check (Confirm-PimInstall.ps1). It REPAIRS what it can, so it is not run under -WhatIf -- run without -WhatIf to apply.' -ForegroundColor Yellow
+    }
+    Write-Host 'WHAT IF -- nothing was changed.' -ForegroundColor Green
+    Finish 0
+}
 
 # ================================================================== 2b. framework 8.6: the ENROLLMENT (single tenant)
 # Claimed FIRST -- before anything is deployed: Invardia creates this environment under the customer, signs its licence
@@ -438,3 +498,4 @@ $outputs = [ordered]@{
 Mark 'completed'
 Emit 'completed' 'completed' $(if ($outputs.portalUrl) { "open the PIM Manager: $($outputs.portalUrl)" } else { 'installation complete' }) -Outputs $outputs
 Finish 0
+} finally { Stop-PimScriptRun -Script 'Install-PimManager' }   # framework 12.7: "Log written: <path>" on every exit

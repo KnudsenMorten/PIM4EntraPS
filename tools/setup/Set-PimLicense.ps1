@@ -1,9 +1,14 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
-  IMP-42 -- import an issued PIM4EntraPS licence into the store (pim.Settings['License']).
+  Registers an issued PIM Manager licence in the environment's store: it verifies the signed licence document first,
+  stores it as the License setting, reads it back and verifies it again; optionally stores the Invardia install key
+  or queues its claim.
 
 .DESCRIPTION
+  IMP-42 -- import an issued PIM4EntraPS licence into the store (pim.Settings['License']).
+
   PIM v2 keeps the licence in SQL, not in a file. It used to be FOUND by scanning config/ for
   *.pimlicense / *.aitlicense -- a directory the container image excludes, so every hosted
   environment read "Missing" whatever had been issued. Nothing reads such a file any more: the
@@ -31,14 +36,20 @@
   admin app (-TenantId -AdminAppId with -AdminCertThumbprint or -AdminSecret) or as the signed-in az user
   (-UseSignedInAccount, a member of the SQL admin group) -- exactly like Set-PimManagerAccess.ps1.
 
-.EXAMPLE
-  pwsh -File Set-PimLicense.ps1 -LicensePath .\Contoso.pimlicense -SqlServer sql-x.database.windows.net `
-       -TenantId <t> -AdminAppId <appid> -AdminCertThumbprint <thumb>
-.EXAMPLE
-  pwsh -File Set-PimLicense.ps1 -LicensePath .\Contoso.pimlicense -SqlServer sql-x.database.windows.net `
-       -TenantId <t> -AdminAppId <appid> -AdminSecret <client secret>
+  -WhatIf verifies the document, reads what the store holds now, prints the licence, what it replaces and every write it
+  would make (the License setting, the install key or its claim), and writes nothing.
+
 .EXAMPLE
   pwsh -File Set-PimLicense.ps1 -LicensePath .\Contoso.pimlicense -SqlServer sql-x.database.windows.net -TenantId <t> -UseSignedInAccount -WhatIf
+.EXAMPLE
+  pwsh -File Set-PimLicense.ps1 -LicensePath .\Contoso.pimlicense -SqlServer sql-x.database.windows.net -TenantId <t> -UseSignedInAccount
+.EXAMPLE
+  # automation: the admin application's certificate instead of the signed-in user
+  pwsh -File Set-PimLicense.ps1 -LicensePath .\Contoso.pimlicense -SqlServer sql-x.database.windows.net `
+       -TenantId <t> -AdminAppId <appid> -AdminCertThumbprint <thumb>
+
+.LINK
+  https://invardia.com/docs/pim/scripts/Set-PimLicense/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -84,6 +95,7 @@ $sol  = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-SqlStore.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-License.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 
 # Set-PimLicense / Get-PimLicenseFromStore speak to the store through Get-PimSetting / Set-PimSetting (the
 # Manager and the scheduler bind those to their own store). Bind them here to the store this script targets.
@@ -159,6 +171,8 @@ function Import-PimLicenseToStore {
 # Dot-sourced (the offline test): define the functions, run nothing.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
+$null = Start-PimScriptRun -Script 'Set-PimLicense'
+try {
 $result = [ordered]@{ ok = $false; reason = ''; whatIf = [bool]$WhatIfPreference }
 function Write-ResultFile { if ("$OutFile".Trim()) { try { $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $OutFile -Encoding UTF8 } catch {} } }
 function Fail($m) { $result.reason = $m; Write-ResultFile; Write-Host "RESULT: FAILED -- $m" -ForegroundColor Red; exit 1 }
@@ -224,7 +238,8 @@ if ($RequireMspRole) {
 }
 
 # --- verify, store, read back ----------------------------------------------------------------
-$whatIfOnly = [bool]$WhatIfPreference -or -not $PSCmdlet.ShouldProcess("pim.Settings['License']", 'store the verified licence')
+$storeName = $(if ("$SqlServer".Trim()) { "$SqlServer/$Database" } else { 'the store' })
+$whatIfOnly = -not $PSCmdlet.ShouldProcess("pim.Settings['License'] in $storeName", 'store the verified licence')
 try { $r = Import-PimLicenseToStore -ConnectionString $cs -LicenseText $doc -WhatIfOnly:$whatIfOnly }
 catch { Fail "$($_.Exception.Message)" }
 
@@ -241,6 +256,11 @@ if ("$($r.previousLicenseId)".Trim()) { Note "replaces: $($r.previousLicenseId)"
 if ($r.status -ne 'Valid') { Note "STATUS: $($r.status) -- $($r.reason)" 'Yellow' }
 
 if ($r.whatIf) {
+    Note "What if: would store licence $($r.licenseId) in pim.Settings['License'] ($storeName) and read it back" 'Yellow'
+    $keyGiven = [bool]("$InstallKey".Trim() -or "$InstallKeyPath".Trim())
+    $claimText = $(if ("$InstallKeyPath".Trim()) { " and the claim state in pim.Settings['InstallKeyClaimState']" } else { '' })
+    if ($keyGiven) { Note "What if: would store the install key in pim.Settings['InvardiaInstallKey']$claimText" 'Yellow' }
+    elseif ($QueueInstallKeyClaim) { Note "What if: would queue the engine's install-key claim in pim.Settings['SchedulerTriggers']" 'Yellow' }
     $result.ok = $true; $result.reason = "what-if -- the licence verifies ($($r.status)); nothing written"
     Write-ResultFile; Write-Host "RESULT: WHAT-IF -- $($result.reason)" -ForegroundColor Yellow; exit 0
 }
@@ -282,3 +302,4 @@ Write-ResultFile
 Write-Host "RESULT: OK -- $($result.reason)" -ForegroundColor Green
 Write-Host "  NOTE: the containers cache the licence per process; it is picked up on the next start/roll." -ForegroundColor DarkGray
 exit 0
+} finally { Stop-PimScriptRun -Script 'Set-PimLicense' }

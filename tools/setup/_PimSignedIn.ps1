@@ -199,7 +199,7 @@ function Set-PimSignedInGlobals {
     #>
     param([Parameter(Mandatory)][string]$TenantId)
     foreach ($n in 'PIM_ClientId', 'PIM_ClientSecret', 'PIM_CertThumbprint', 'PIM_SqlClientId', 'PIM_SqlClientSecret', 'PIM_SqlCertThumbprint', 'PIM_SqlAccessToken', 'PIM_UseManagedIdentity') {
-        Set-Variable -Scope Global -Name $n -Value $null
+        Set-Variable -Scope Global -Name $n -Value $null -WhatIf:$false
     }
     $global:PIM_TenantId = "$TenantId".Trim()
     $global:PIM_NoManagedIdentity = $true

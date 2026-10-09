@@ -367,13 +367,11 @@ if ("$SlaveSqlServer".Trim()) {
         # publishes. Measured live against HOGYM on the second run, minutes after the first.
         # An UNSTAMPED row still counts as the customer's -- absent provenance fails safe to Local,
         # exactly as the apply's prune scoping does.
-        $tags = @()
-        foreach ($__e in @('PIM-Definitions-Roles','PIM-Definitions-Services','PIM-Definitions-Organization','PIM-Definitions-Tasks','PIM-Definitions')) {
-            $tags += @(Get-PimSqlRows -ConnectionString $slaveCs -Entity $__e |
-                        Where-Object { "$($_.Owner)" -ne 'MSP' } |
-                        ForEach-Object { "$($_.GroupTag)" } | Where-Object { $_ })
-        }
-        $tags = @($tags | Select-Object -Unique)
+        # 🔴 §100.6 MSP-COLLIDE gap A: EVERY definition entity -- the same list the definition apply writes
+        # (Get-PimDownlinkDefinitionEntities, PIM-Downlink.ps1). This read covered only Roles/Services/Organization/
+        # Tasks/legacy, so a customer's own Departments/Processes/Projects/CrossOrg group looked absent and was
+        # overwritten + stamped Owner=MSP by the apply.
+        $tags = @(Get-PimDownlinkCustomerGroupTags -ReadRows { param($__e) @(Get-PimSqlRows -ConnectionString $slaveCs -Entity $__e) })
         if ($tags.Count) {
             $dlArgs['SlaveGroupTags'] = $tags
             Write-Host "  slave store: $SlaveSqlServer/$SlaveSqlDatabase ($($tags.Count) group tag(s) available)" -ForegroundColor DarkGray

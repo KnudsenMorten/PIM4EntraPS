@@ -1,7 +1,9 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
-  MAIL-1 -- put the SMTP relay password of a PIM Manager environment into its Key Vault, and let the environment read it.
+  Put the SMTP relay password of a PIM Manager environment into its Key Vault, and let the environment's managed
+  identities read that one secret. -WhatIf shows every change first and asks for no password.
 
 .DESCRIPTION
   Owner 2026-10-08: "remember i need to have 2 options: shared mailbox or smtp relay solution" / "we dont use certificates
@@ -19,12 +21,17 @@
 
   Sign-in: in the BROWSER by default (Edge, auth code + PKCE, no device code, no module), or the Invardia Support app
   (-AdminAppId + -AdminSecret). No certificate. The password comes from -Password (a SecureString) or a prompt (typed
-  twice) -- never as plain text on the command line. -WhatIf reads and plans, and writes nothing.
+  twice) -- never as plain text on the command line. -WhatIf signs in, reads and prints every change it would make
+  ("What if: ..."), asks for no password and writes nothing (no secret, no role assignment, no vault, no -OutFile).
   Published standalone at https://invardia.com/support/pim/Set-PimSmtpRelayPassword.ps1 (Build-PimSupportScripts.ps1).
 
 .EXAMPLE
   .\Set-PimSmtpRelayPassword.ps1 -TenantId <tenant id> -SubscriptionId <subscription id> -VaultName <vault> `
-      -ManagedIdentityObjectId <manager identity object id>,<engine job identity object id>
+      -ManagedIdentityObjectId <manager identity object id>,<engine job identity object id> -WhatIf
+  Preview; then the same command without -WhatIf (it asks for the password twice).
+
+.LINK
+  https://invardia.com/docs/pim/scripts/Set-PimSmtpRelayPassword/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -43,6 +50,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimMailSetup.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Set-PimSmtpRelayPassword'
+try {
 
 $authPlan = Resolve-PimMailSetupAuthMode -AdminAppId $AdminAppId -AdminSecret $AdminSecret
 if ($authPlan.reason) { throw "Set-PimSmtpRelayPassword: $($authPlan.reason)" }
@@ -57,11 +67,16 @@ $result = [ordered]@{ ok = $false; vault = $VaultName; secretName = $SecretName;
 function Note($m, $c = 'Gray') { Write-Host "    $m" -ForegroundColor $c }
 function Step($m) { Write-Host "`n--- $m ---" -ForegroundColor Cyan }
 function Done {
-    if ("$OutFile".Trim()) { try { ($result | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $OutFile -Encoding utf8 -WhatIf:$false } catch { Write-Warning "could not write -OutFile: $($_.Exception.Message)" } }
+    if (-not "$OutFile".Trim()) { return }
+    if ($WhatIfPreference) { Write-Host "What if: would write the result to $OutFile (not written under -WhatIf)"; return }
+    try { ($result | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $OutFile -Encoding utf8 } catch { Write-Warning "could not write -OutFile: $($_.Exception.Message)" }
 }
 function Fail($why) { $result.reason = $why; Done; Write-Host "`nRESULT: FAILED -- $why" -ForegroundColor Red; exit 1 }
 
 function Get-Tok([string]$Resource) {
+    # The sign-in is a READ the -WhatIf preview needs: an inherited -WhatIf would stop Start-Process from opening the
+    # browser (the run would then wait 5 minutes for nothing). Local to this function only.
+    $WhatIfPreference = $false
     if ($authPlan.mode -eq 'secret') { return (Get-PimMsAppToken -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -Resource $Resource) }
     return (Get-PimMsBrowserToken -Resource $Resource -TenantId $TenantId)
 }
@@ -81,8 +96,9 @@ Write-Host ('=' * 78) -ForegroundColor Cyan
 Write-Host " PIM MANAGER -- SMTP RELAY PASSWORD -> Key Vault $VaultName / $SecretName" -ForegroundColor Cyan
 Write-Host ('=' * 78) -ForegroundColor Cyan
 
-# --- the password, before anything is touched -------------------------------------------------------------------------
-if (-not $Password) {
+# --- the password, before anything is touched (not under -WhatIf: a preview needs no secret) -----------------------------
+if ($WhatIfPreference) { Note 'WhatIf: the password is not asked for -- it is asked (twice) when you run without -WhatIf.' 'DarkYellow' }
+elseif (-not $Password) {
     $p1 = Read-Host -AsSecureString 'SMTP relay password'
     $p2 = Read-Host -AsSecureString 'Type it again'
     $b1 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($p1); $b2 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($p2)
@@ -91,7 +107,7 @@ if (-not $Password) {
     if (-not $same) { Fail 'the two passwords differ -- nothing was changed' }
     $Password = $p1
 }
-if ($Password.Length -lt 1) { Fail 'the password is empty -- nothing was changed' }
+if (-not $WhatIfPreference -and $Password.Length -lt 1) { Fail 'the password is empty -- nothing was changed' }
 
 # --- 1. the vault --------------------------------------------------------------------------------------------------------
 Step "[1] Key Vault $VaultName in subscription $SubscriptionId"
@@ -112,12 +128,20 @@ if (-not $vault) {
         if (-not $vault) { Fail "Key Vault $VaultName was created but is not readable yet -- re-run in a few minutes" }
         $result.vaultCreated = $true
         Note "created (Azure RBAC authorisation): $($vault.id)" 'Green'
-    } else { Note "WhatIf: would create Key Vault $VaultName in $ResourceGroup" 'DarkYellow'; $result.ok = $true; Done; exit 0 }
+    } else {
+        # -WhatIf: the vault does not exist yet; the next steps are previewed against the id it WOULD get.
+        $vault = [pscustomobject]@{ id = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.KeyVault/vaults/$VaultName"; properties = [pscustomobject]@{ enableRbacAuthorization = $true } }
+    }
 } else { Note "found: $($vault.id)" 'DarkGray' }
 if ($vault.properties -and -not $vault.properties.enableRbacAuthorization) { Note 'this vault uses ACCESS POLICIES, not Azure RBAC: the read grants below do not apply -- give the managed identities "Get" on secrets in its access policies.' 'Yellow' }
 
 if ($WhatIfPreference) {
-    Note "WhatIf: would write secret $SecretName and grant 'Key Vault Secrets User' on it to: $($miIds -join ', ')" 'DarkYellow'
+    # PowerShell's own "What if:" line for every change the run would make (ShouldProcess answers $false under -WhatIf).
+    [void]$PSCmdlet.ShouldProcess("Key Vault $VaultName, secret $SecretName", 'write the SMTP relay password (Key Vault data plane; the value is never printed)')
+    [void]$PSCmdlet.ShouldProcess("Key Vault $VaultName ($($vault.id))", "ONLY IF Key Vault refuses the write: assign Azure role 'Key Vault Secrets Officer' on this vault to the signed-in account")
+    $secScope = Get-PimKvSecretScope -VaultId "$($vault.id)" -SecretName $SecretName
+    foreach ($oid in $miIds) { [void]$PSCmdlet.ShouldProcess("managed identity $oid", "assign Azure role 'Key Vault Secrets User' on the secret only ($secScope)") }
+    if (-not $miIds.Count) { Note 'WhatIf: no -ManagedIdentityObjectId given -- nobody would be granted read access.' 'Yellow' }
     $result.ok = $true; Done; exit 0
 }
 
@@ -186,3 +210,4 @@ Write-Host "  read by        : $(if ($miIds.Count) { $miIds -join ', ' } else { 
 Write-Host '  NEXT           : PIM Manager > Settings > Mail & alerting (or Get Started > Mail sender) > SMTP relay: the same'
 Write-Host "                   vault and secret name, then Send a test mail. A new grant can take a few minutes to apply."
 exit 0
+} finally { Stop-PimScriptRun -Script 'Set-PimSmtpRelayPassword' }

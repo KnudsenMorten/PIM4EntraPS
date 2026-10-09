@@ -236,3 +236,56 @@ function ConvertTo-PimFeatureFlagOverrides {
     }
     return $overrides
 }
+
+# ---------------------------------------------------------------------------
+# 🔴 FLAGS-1 (owner-approved 2026-10-09, PIM REQUIREMENTS §100.3): a page switched OFF used to lose only its MENU
+# entry -- a ?tab= link still opened it and the server refused nothing. The flag is now enforced in two places:
+#   * the page: switchTab shows "this page is turned off" for a hidden page (any route into it: menu, deep link, code);
+#   * the server: the API routes that belong ONLY to that page answer 403 { gate = 'feature-off' } while it is off.
+# A route another page also uses is NOT listed (switching one page off must not break another): the GUI surfaces share
+# /api/rows, /api/approvals, /api/role-lookup, /api/downlink-intents ... and stay open. Always-on pages have no routes here.
+# ---------------------------------------------------------------------------
+$script:PimFeatureFlagRoutes = [ordered]@{
+    accessreview = @('^/api/access-reviews(/|$)', '^/api/access-review-campaigns(/|$)', '^/api/access-review-rules(/|$)')
+    conformance  = @('^/api/conformance(/|$)')
+    downlink     = @('^/api/downlink(/|$)')
+    roleperms    = @('^/api/role-permissions(/|$)')
+    support      = @('^/api/support(/|$)')
+}
+
+function Get-PimFeatureFlagRoutes {
+    # PURE. flag id -> the API route patterns that belong only to that page (a copy).
+    $o = [ordered]@{}
+    foreach ($k in $script:PimFeatureFlagRoutes.Keys) { $o[$k] = @($script:PimFeatureFlagRoutes[$k]) }
+    return $o
+}
+
+function Get-PimFeatureFlagOffMessage {
+    param([string]$Label = 'This page')
+    $l = "$Label".Trim(); if (-not $l) { $l = 'This page' }
+    return ("{0} is turned off in this PIM Manager. A SuperAdmin can turn it on under Settings > Features." -f $l)
+}
+
+function Get-PimFeatureFlagRouteDecision {
+    <#
+      PURE. Is this API request refused because its page is switched off? -Flags = the effective id->bool map
+      (Resolve-PimFeatureFlags .flags). Returns $null (carry on) or @{ feature; label; status = 403; message }.
+      A flag missing from -Flags is treated as ON: an unknown state never hides a page.
+    #>
+    param([string]$Path = '', [AllowNull()][object]$Flags)
+    $p = "$Path"
+    if (-not $p.StartsWith('/api/')) { return $null }
+    foreach ($id in $script:PimFeatureFlagRoutes.Keys) {
+        $on = $true
+        if ($Flags -is [System.Collections.IDictionary]) { if ($Flags.Contains($id)) { $on = [bool]$Flags[$id] } }
+        elseif ($null -ne $Flags -and $Flags.PSObject.Properties[$id]) { $on = [bool]$Flags.$id }
+        if ($on) { continue }
+        foreach ($rx in @($script:PimFeatureFlagRoutes[$id])) {
+            if ($p -match $rx) {
+                $label = (@(Get-PimFeatureFlagCatalog | Where-Object { "$($_.id)" -eq $id }) | Select-Object -First 1).label
+                return @{ feature = $id; label = "$label"; status = 403; message = (Get-PimFeatureFlagOffMessage -Label "The $label page") }
+            }
+        }
+    }
+    return $null
+}

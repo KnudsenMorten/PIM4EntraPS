@@ -1745,6 +1745,8 @@ function New-PimAcceptanceRecord {
         autoIncludedCount = (& $countOf $Plan.autoIncluded)
         wouldRetract     = @(@($ApplyResults) | Where-Object { $_ } | ForEach-Object { @($_.wouldRetract) + @($_.retractHeld) } | Where-Object { "$_".Trim() })
         retracted        = [int]((@($ApplyResults) | Where-Object { $_ } | ForEach-Object { [int]$_.removed } | Measure-Object -Sum).Sum)
+        # §100.6 MSP-COLLIDE -- '<entity>|<key>' the master sent but a LOCAL row already holds: "deferred: held locally".
+        deferredHeldLocally = @(@($ApplyResults) | Where-Object { $_ } | ForEach-Object { @($_.deferred) } | Where-Object { "$_".Trim() })
         decidedBy        = "$DecidedBy"
         decidedAtUtc     = $NowUtc.ToString('o')
     }
@@ -3302,6 +3304,8 @@ function Invoke-PimManagedDownlink {
                 foreach ($d in @($plan.definitions.defer)) {
                     Write-Host "[downlink]   DEFERRED $($d.GroupTag): $($d.reason)" -ForegroundColor DarkGray
                 }
+                # §100.6: a row the customer holds under the master's key is skipped, never overwritten -- and said.
+                foreach ($x in @($defApply.deferred)) { if ("$x".Trim()) { Write-Host "[downlink]   DEFERRED $x -- deferred: held locally (a local row has this key; not taken over, not retracted)" -ForegroundColor DarkGray } }
             }
             # REQ-REV-DOWN-1 -- the managing tenant's AUTHORISED withdrawals, taken from the VERIFIED bundle
             # (never from an argument a caller could invent). Named rows only; everything else still
@@ -3313,6 +3317,7 @@ function Invoke-PimManagedDownlink {
             $assignApply = Invoke-PimDownlinkAssignmentApply -ConnectionString $SlaveStoreConnectionString `
                 -Assignments @($plan.assignments) -Withdrawals $withdrawKeys -WithdrawnAdmins $adminWithdrawKeys `
                 -AllowFullPrune:$AllowFullPrune -AllowRetraction:$AllowRetraction -WhatIfMode:$WhatIfMode
+            foreach ($x in @($assignApply.deferred)) { if ("$x".Trim()) { Write-Host "[downlink]   DEFERRED $x -- deferred: held locally (a local membership row has this key; not taken over, not retracted)" -ForegroundColor DarkGray } }
             foreach ($x in @($assignApply.withdrawn)) {
                 if ("$x".Trim()) { Write-Host "[downlink]   WITHDRAWN $x (revoked on the managing tenant, authorised in the signed bundle)" -ForegroundColor Cyan }
             }
@@ -3408,10 +3413,13 @@ function Invoke-PimManagedDownlink {
 # 📌 OWNER IS THE PROJECT'S EXISTING PROVENANCE VOCABULARY -- do not invent another.
 # `Owner` = MSP | Local is the documented split (docs/REQUIREMENTS.md s4 + s19,
 # sql/platform-schema.sql; the retired local store pim.LocalAdmins was Owner='Local'
-# provenance). Crucially the tag is PROVENANCE, NOT A GATE --
-# "local plane fully autonomous; Owner tag = provenance not a gate" (s4) -- which is
-# exactly how it is used here: it scopes what the SYNC may retract, and constrains
-# the customer not at all.
+# provenance). 🔒 §100.6 MSP-COLLIDE (2026-10-09): Owner=MSP is now a GATE ON BOTH SIDES,
+# not provenance only. Here (the managed tenant's pull) it scopes what the SYNC may write and
+# retract: a row with the same key that is NOT Owner=MSP is the customer's and is never
+# overwritten, never stamped MSP, never retracted -- it is skipped and reported
+# "deferred: held locally". On the Manager side the customer may not change/remove an
+# Owner=MSP row (§91.23) nor define a second group with an MSP-owned tag/GroupName.
+# The local plane stays autonomous for everything else (local rows, also ON master groups).
 #
 # 🔒 EMPTY-DESIRED GUARD. An empty projection does NOT prune, mirroring the engine's
 # mass-disable guard: "the managing tenant published nothing this run" and "the managing tenant
@@ -3449,20 +3457,30 @@ function Invoke-PimDownlinkAssignmentApply {
     # default -- the customer's rows predate this feature and must never be
     # inferred into MSP ownership, because that would make them prunable.
     $ownedKeys = @{}
+    # §100.6 MSP-COLLIDE gap C: the keys a NON-MSP row holds (the customer's own '<user>|<tag>', e.g. a bare central
+    # username a template or an operator gave local access). Such a key is NEVER taken over: overwriting it stamped it
+    # Owner=MSP, and the next master change then retracted -- deleted -- the customer's own row.
+    $foreignKeys = @{}
     foreach ($e in $existing) {
-        if ("$(Get-PimDownlinkValue -Object $e -Key 'Owner')" -ne $Owner) { continue }
         $u = "$(Get-PimDownlinkValue -Object $e -Key 'Username')"; if (-not $u) { $u = "$(Get-PimDownlinkValue -Object $e -Key 'UserName')" }
-        $ownedKeys[(& $keyOf $u "$(Get-PimDownlinkValue -Object $e -Key 'GroupTag')")] = $true
+        $ek = & $keyOf $u "$(Get-PimDownlinkValue -Object $e -Key 'GroupTag')"
+        if ("$(Get-PimDownlinkValue -Object $e -Key 'Owner')" -ne $Owner) {
+            if ("$ek".Trim() -and "$ek" -notmatch '^\|+$') { $foreignKeys[$ek.ToLowerInvariant()] = $true }
+            continue
+        }
+        $ownedKeys[$ek] = $true
     }
     $foreign = @($existing).Count - $ownedKeys.Count
 
     $created = 0; $updated = 0; $desiredKeys = @{}
+    $deferred = New-Object System.Collections.Generic.List[string]
     foreach ($a in @($Assignments)) {
         $u = "$(Get-PimDownlinkValue -Object $a -Key 'UserName')"; if (-not $u) { $u = "$(Get-PimDownlinkValue -Object $a -Key 'Username')" }
         $tag = "$(Get-PimDownlinkValue -Object $a -Key 'GroupTag')"
         if (-not "$u".Trim() -or -not "$tag".Trim()) { continue }
         $k = & $keyOf $u $tag
         $desiredKeys[$k] = $true
+        if ($foreignKeys.ContainsKey($k.ToLowerInvariant())) { $deferred.Add("$entity|$k") | Out-Null; continue }
         # 'Username' (lower n) is the natural-key property Get-PimStoreRowKey reads for
         # this entity; writing 'UserName' would derive a BLANK key and drop the row.
         # The value is the BARE central login name on purpose: Resolve-PimPrincipalId
@@ -3525,12 +3543,42 @@ function Invoke-PimDownlinkAssignmentApply {
     }
     # ${entity} braces are required: "$entity:" parses '$entity:' as a SCOPE qualifier.
     $detail = "${entity}: +$created ~$updated -$removed (left $foreign local row(s) untouched)"
+    if ($deferred.Count) { $detail += "; $($deferred.Count) row(s) deferred: held locally (the customer has a row with that key -- not taken over)" }
     if ($withdrawn.Count) { $detail += "; $($withdrawn.Count) row(s) withdrawn on the managing tenant's authorisation (revoked centrally)" }
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced row(s) because the projection was EMPTY -- pass -AllowFullPrune to withdraw them" }
     if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) synced row(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in)" }
     if ($retractHeld.Count) { $detail += "; HELD: $($retractHeld.Count) retraction(s) exceed the removal budget of $budget -- NOTHING withdrawn" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
-    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; wouldRetract = $wouldRetract; retractHeld = $retractHeld; retractionBudget = $budget; withdrawn = @($withdrawn); detail = $detail }
+    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = $wouldPrune; wouldRetract = $wouldRetract; retractHeld = $retractHeld; retractionBudget = $budget; withdrawn = @($withdrawn); deferred = @($deferred.ToArray()); detail = $detail }
+}
+
+function Get-PimDownlinkDefinitionEntities {
+    # PURE. §100.6 MSP-COLLIDE gap A -- THE ONE LIST of entities a group definition can live in on a managed tenant: the
+    # eight the engine reads (Get-PimGroupDefinitionRows) plus the legacy 'PIM-Definitions' an early sync wrote. Used by
+    # BOTH the definition apply below (write + prune) and the pull's "customer already has this tag" read
+    # (setup/Invoke-PimDownlinkSync.ps1). Two copies drifted: the read covered 4 + legacy, so a customer's own
+    # Processes / Projects / CrossOrg / Departments group looked absent and the apply overwrote it, stamped Owner=MSP.
+    return @('PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks',
+             'PIM-Definitions-Departments', 'PIM-Definitions-Processes', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg',
+             'PIM-Definitions')
+}
+
+function Get-PimDownlinkCustomerGroupTags {
+    # §100.6 gap A -- which group tags the CUSTOMER already defines in the managed tenant's store (every definition entity
+    # of Get-PimDownlinkDefinitionEntities). Rows this sync owns (Owner=MSP) are excluded (BUG-65); an UNSTAMPED row
+    # counts as the customer's -- absent provenance fails safe to Local. -ReadRows: scriptblock param($entity) -> rows.
+    param([Parameter(Mandatory)][scriptblock]$ReadRows, [string]$Owner = 'MSP')
+    $tags = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    foreach ($e in @(Get-PimDownlinkDefinitionEntities)) {
+        foreach ($r in @(& $ReadRows $e)) {
+            if ($null -eq $r) { continue }
+            if ("$(Get-PimDownlinkValue -Object $r -Key 'Owner')" -eq $Owner) { continue }
+            $t = "$(Get-PimDownlinkValue -Object $r -Key 'GroupTag')".Trim()
+            if ($t -and -not $seen.ContainsKey($t.ToLowerInvariant())) { $seen[$t.ToLowerInvariant()] = $true; $tags.Add($t) }
+        }
+    }
+    return @($tags.ToArray())
 }
 
 # ---------------------------------------------------------------------------
@@ -3586,19 +3634,22 @@ function Invoke-PimDownlinkDefinitionApply {
     # unreachable garbage that nothing withdraws.
     # §71.7 (a): Departments / Processes / Projects / CrossOrg groups now travel too, so they are
     # written back to (and pruned from) their own entities like the other four.
-    $defEntities = @('PIM-Definitions-Roles','PIM-Definitions-Services','PIM-Definitions-Organization','PIM-Definitions-Tasks',
-                     'PIM-Definitions-Departments','PIM-Definitions-Processes','PIM-Definitions-Projects','PIM-Definitions-CrossOrg','PIM-Definitions')
+    # §100.6: ONE list, shared with the pull's "customer already has this tag" read (Invoke-PimDownlinkSync.ps1).
+    $defEntities = @(Get-PimDownlinkDefinitionEntities)
     $work = @()
     foreach ($e in $defEntities) {
         $rows = if ($groupsByEntity.ContainsKey($e)) { @($groupsByEntity[$e].ToArray()) } else { @() }
         # Departments is keyed the store's way (Department first -- Get-PimStoreRowKey), and it is ALSO
-        # the customer's department/owner store, so a row there that is not ours is NEVER taken over:
-        # an MSP DEPT- group sponsored by 'IT' must not overwrite the customer's own 'IT' owner row.
+        # the customer's department/owner store: an MSP DEPT- group sponsored by 'IT' must not overwrite
+        # the customer's own 'IT' owner row.
+        # 🔴 §100.6 MSP-COLLIDE gaps A/B: a row there that is not ours is NEVER taken over -- in EVERY entity, not only
+        # Departments. Overwriting a customer's Processes/Projects/CrossOrg row (or a nesting / role binding a template
+        # added on a master group) stamped it Owner=MSP, and the next master change RETRACTED -- deleted -- it.
         $isDept = ($e -eq 'PIM-Definitions-Departments')
-        $work += @{ Entity = $e; Rows = $rows; Keys = @('GroupTag'); IsGroupClass = $true; UseStoreKey = $isDept; NeverTakeOver = $isDept }
+        $work += @{ Entity = $e; Rows = $rows; Keys = @('GroupTag'); IsGroupClass = $true; UseStoreKey = $isDept; NeverTakeOver = $true }
     }
-    $work += @{ Entity = 'PIM-Assignments-Groups';       Rows = @($DefinitionPlan.nestings);     Keys = @('TargetGroupTag', 'SourceGroupTag') }
-    $work += @{ Entity = 'PIM-Assignments-Roles-Groups'; Rows = @($DefinitionPlan.roleBindings); Keys = @('GroupTag', 'RoleDefinitionName') }
+    $work += @{ Entity = 'PIM-Assignments-Groups';       Rows = @($DefinitionPlan.nestings);     Keys = @('TargetGroupTag', 'SourceGroupTag'); NeverTakeOver = $true; AddAction = $true }
+    $work += @{ Entity = 'PIM-Assignments-Roles-Groups'; Rows = @($DefinitionPlan.roleBindings); Keys = @('GroupTag', 'RoleDefinitionName'); NeverTakeOver = $true; AddAction = $true }
     # §71: tenant-scoped resource bindings + the AU definitions they need. Only ever non-empty when the
     # master EXPLICITLY replicated them; a customer row carrying the same key is never taken over.
     $resByEntity = @{ 'PIM-Assignments-Roles-AUs' = @(); 'PIM-Assignments-Azure-Resources' = @(); 'PIM-Assignments-Workloads' = @() }
@@ -3612,6 +3663,7 @@ function Invoke-PimDownlinkDefinitionApply {
     $work += @{ Entity = 'PIM-Definitions-AU';              Rows = @($DefinitionPlan.aus);                             Keys = @('AdministrativeUnitTag'); NeverTakeOver = $true }
 
     $created = 0; $updated = 0; $removed = 0; $foreign = 0; $parts = @(); $takeOverRefused = 0
+    $deferred = New-Object System.Collections.Generic.List[string]   # §100.6: "<entity>|<key>" held by a customer row
     $wouldPrune = New-Object System.Collections.Generic.List[string]
     $stalePending = New-Object System.Collections.Generic.List[object]   # @{ Entity; Key } -- decided after every entity is read
     foreach ($w in $work) {
@@ -3650,7 +3702,7 @@ function Invoke-PimDownlinkDefinitionApply {
             $k = & $keyFor $r
             if (-not "$k".Trim() -or "$k" -match '^\|+$') { continue }
             $desired[$k] = $true
-            if ($w.NeverTakeOver -and $foreignKeys.ContainsKey($k.ToLowerInvariant())) { $takeOverRefused++; continue }
+            if ($w.NeverTakeOver -and $foreignKeys.ContainsKey($k.ToLowerInvariant())) { $takeOverRefused++; $deferred.Add("$entity|$k") | Out-Null; continue }
             # rebuild as a plain ordered row + the Owner stamp; the bundle rows are
             # PSCustomObjects from JSON and must not be written back verbatim.
             $row = [ordered]@{}
@@ -3663,7 +3715,8 @@ function Invoke-PimDownlinkDefinitionApply {
                 $row[$p.Name] = "$($p.Value)"
             }
             $row['Owner'] = $Owner
-            if (-not $row.Contains('Action') -and ($w.IsGroupClass -or -not $w.NeverTakeOver)) { $row['Action'] = 'Assign' }
+            # (AddAction: the nestings + role bindings always got the Action column; NeverTakeOver no longer tells them apart.)
+            if (-not $row.Contains('Action') -and ($w.IsGroupClass -or $w.AddAction)) { $row['Action'] = 'Assign' }
             if ($ownedKeys.ContainsKey($k)) { $updated++ } else { $created++ }
             $wrote++
             if (-not $WhatIfMode) { Set-PimSqlRow -ConnectionString $ConnectionString -Entity $entity -Key $k -Data $row }
@@ -3706,12 +3759,12 @@ function Invoke-PimDownlinkDefinitionApply {
         }
     }
     $detail = "definitions +$created ~$updated -$removed ($($parts -join ' ')); left $foreign customer-owned row(s) untouched"
-    if ($takeOverRefused) { $detail += "; $takeOverRefused row(s) NOT written -- the customer already has a row with that key" }
+    if ($takeOverRefused) { $detail += "; $takeOverRefused row(s) deferred: held locally (the customer already has a row with that key -- not taken over)" }
     if ($wouldPrune.Count) { $detail += "; REFUSED to prune $($wouldPrune.Count) synced row(s) because the managing tenant published none -- pass -AllowFullPrune to withdraw them" }
     if ($wouldRetract.Count) { $detail += "; WOULD REMOVE $($wouldRetract.Count) synced row(s) that no longer reach this tenant -- reported only (retraction needs the removal opt-in)" }
     if ($retractHeld.Count) { $detail += "; HELD: $($retractHeld.Count) retraction(s) exceed the removal budget of $budget -- NOTHING withdrawn" }
     if ($WhatIfMode) { $detail = "[whatif] $detail" }
-    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = @($wouldPrune.ToArray()); wouldRetract = $wouldRetract; retractHeld = $retractHeld; retractionBudget = $budget; takeOverRefused = $takeOverRefused; detail = $detail }
+    return @{ ok = $true; created = $created; updated = $updated; removed = $removed; skippedForeign = $foreign; wouldPrune = @($wouldPrune.ToArray()); wouldRetract = $wouldRetract; retractHeld = $retractHeld; retractionBudget = $budget; takeOverRefused = $takeOverRefused; deferred = @($deferred.ToArray()); detail = $detail }
 }
 
 function Get-PimDownlinkRetractionBudget {
