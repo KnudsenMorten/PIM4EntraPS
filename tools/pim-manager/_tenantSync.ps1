@@ -826,14 +826,34 @@ function Get-PimGroupActivityFromTenant {
     # 2.4.371: the owned-group set resolves in the Manager too (Get-PimTenantSyncOwnedGroups) -- no engine dependency.
     $owned = Get-PimTenantSyncOwnedGroups
     $map = [ordered]@{}
+    # 2.4.540 (internal 2026-10-09, mail "too many requests"): ~377 single GETs one after another were throttled (429)
+    # right after an update queued tenant-cache + drift on top of the normal jobs. Read them through /$batch (20 per
+    # round-trip, paced on Retry-After, the throttled items retried as a batch) -- the active-assignments snapshot's path.
+    $tagged = @($owned.byId.Keys | Where-Object { "$($owned.byId[$_].tag)".Trim() })
+    $batched = @{}
+    if ($tagged.Count -and (Get-Command Invoke-PimGraphBatchGet -ErrorAction SilentlyContinue)) {
+        $res = @(Invoke-PimGraphBatchGet -Paths @($tagged | ForEach-Object { "/identityGovernance/privilegedAccess/group/assignmentScheduleRequests?`$filter=groupId eq '$_'&`$select=action,status,createdDateTime" }))
+        $bad = @()
+        for ($i = 0; $i -lt $tagged.Count; $i++) {
+            $r = $res[$i]
+            if ($r -and $r.ok) { $batched[$tagged[$i]] = @($r.items); continue }
+            $msg = if ($r) { "$($r.error)" } else { 'no answer' }
+            if (Test-PimTenantSyncPermissionError -Message $msg) { throw "PERMISSION: PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup is not granted to the engine identity ($msg)" }
+            $bad += "$($tagged[$i]): $msg"
+        }
+        if ($bad.Count) { throw ("{0} of {1} group activity read(s) failed: {2}" -f $bad.Count, $tagged.Count, (@($bad | Select-Object -First 3) -join '; ')) }
+    }
     foreach ($gid in @($owned.byId.Keys)) {
         $tag = "$($owned.byId[$gid].tag)".Trim(); if (-not $tag) { continue }
         $reqs = @()
-        try {
-            $reqs = Invoke-PimGraphGetAll -Uri ("https://graph.microsoft.com/v1.0/identityGovernance/privilegedAccess/group/assignmentScheduleRequests?`$filter=groupId eq '{0}'&`$select=action,status,createdDateTime" -f $gid)   # returns ,@(...) -- wrapping it in @() would NEST the list
-        } catch {
-            if (Test-PimTenantSyncPermissionError -Message "$($_.Exception.Message)") { throw "PERMISSION: PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup is not granted to the engine identity ($($_.Exception.Message))" }
-            throw
+        if ($batched.ContainsKey($gid)) { $reqs = $batched[$gid] }
+        else {
+            try {
+                $reqs = Invoke-PimGraphGetAll -Uri ("https://graph.microsoft.com/v1.0/identityGovernance/privilegedAccess/group/assignmentScheduleRequests?`$filter=groupId eq '{0}'&`$select=action,status,createdDateTime" -f $gid)   # returns ,@(...) -- wrapping it in @() would NEST the list
+            } catch {
+                if (Test-PimTenantSyncPermissionError -Message "$($_.Exception.Message)") { throw "PERMISSION: PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup is not granted to the engine identity ($($_.Exception.Message))" }
+                throw
+            }
         }
         $last = $null
         foreach ($q in @($reqs)) {
@@ -910,6 +930,14 @@ function Invoke-PimTenantListRefresh {
                     # is skipped and why. Reported so it is visible, never counted against the refresh.
                     if (-not $Quiet) { Write-Host ("    {0,-22} SKIPPED -- {1}" -f $label, $_.Exception.Message) -ForegroundColor DarkYellow }
                     $results[$kind] = @{ ok = $true; skipped = $true; count = 0; reason = "$($_.Exception.Message)" }
+                    continue
+                }
+                # 2.4.540: an OPTIONAL list that failed for a TRANSIENT reason (Graph throttling 429, a 5xx, a timeout) keeps its
+                # last good cache (nothing was written) and is reported STALE -- not a failed refresh, not an alert mail. It
+                # refreshes on the next run. A required list, or a real error, still fails the refresh.
+                if ($step.optional -and "$($_.Exception.Message)" -match '(?i)\b429\b|too many requests|throttl|\b50[0-4]\b|timed out|service unavailable') {
+                    if (-not $Quiet) { Write-Host ("    {0,-22} STALE -- kept the last refresh, transient: {1}" -f $label, $_.Exception.Message) -ForegroundColor DarkYellow }
+                    $results[$kind] = @{ ok = $true; stale = $true; count = 0; reason = "$($_.Exception.Message)" }
                     continue
                 }
                 if (-not $Quiet) {
