@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.546 -- 2026-10-10
+
+- Status telemetry also reports the number of Entra groups (adoption dashboard).
+
 ## 2.4.545 -- 2026-10-10
 
 - Status telemetry reports the tenant size to Invardia (enabled member users, guests, service principals) so the dashboard can show adoption; counts that cannot be read are left out.

@@ -365,7 +365,7 @@ function Invoke-PimUplinkCycle {
             $hbCounts = @{ sqlUsedMb = [int64]$SqlSpace['sqlUsedMb']; sqlMaxMb = [int64]$SqlSpace['sqlMaxMb'] }
         }
         if ($sender.Mode -eq 'identified' -and $AssetCounts) {
-            foreach ($k in 'users', 'guests', 'servicePrincipals') {
+            foreach ($k in 'users', 'guests', 'servicePrincipals', 'groups') {
                 $n = 0L
                 if ($AssetCounts.ContainsKey($k) -and $null -ne $AssetCounts[$k] -and [long]::TryParse("$($AssetCounts[$k])", [ref]$n) -and $n -ge 0) {
                     if ($null -eq $hbCounts) { $hbCounts = @{} }
@@ -504,7 +504,7 @@ function Invoke-PimUplinkJob {
     $assets = $null
     try {
         $tc = & $get 'TenantObjectCounts'; if ($tc -is [string] -and "$tc".Trim()) { $tc = $tc | ConvertFrom-Json }
-        if ($tc) { $assets = @{ users = $tc.Members; guests = $tc.Guests; servicePrincipals = $tc.ServicePrincipals } }
+        if ($tc) { $assets = @{ users = $tc.Members; guests = $tc.Guests; servicePrincipals = $tc.ServicePrincipals; groups = $tc.Groups } }
     } catch { $assets = $null }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $(if ($WhatIf) { 0 } else { 2500 }) `
