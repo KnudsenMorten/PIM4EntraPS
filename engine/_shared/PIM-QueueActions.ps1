@@ -70,6 +70,12 @@ function Get-PimQueueActionCatalog {
         @{ type='access-review-reviewers'
            description='Set who reviews an access-review definition (verified by reading the definition''s reviewers back)'
            verifiable=$true }
+        # 🔒 PIM 100.22 (d) (owner 2026-10-09: "delete must go into the queue with extra commit" / "queue + own commit, then
+        # delete"): Delete of a whole EXTRA group on the Drift page. An explicit per-item delete intent -- committed ON ITS OWN --
+        # so it acts even with group retirement switched off; every other guard still applies (Invoke-PimQueueGroupDelete).
+        @{ type='group-delete'
+           description='Delete ONE Entra group the Drift page listed as an extra (its own commit; prefix, unique name, not defined in PIM, no break-glass member, removal budget; verified by the group being gone)'
+           verifiable=$true }
     ) | ForEach-Object { [pscustomobject]$_ }
 }
 
@@ -319,6 +325,138 @@ function Get-PimQueueActionBreakGlassRefusal {
     return $null
 }
 
+function Get-PimQueueGroupDeleteEntity { 'PIM-Action-GroupDelete' }
+
+function Test-PimQueueEntryNeedsOwnCommit {
+    <#
+      PURE. PIM 100.22 (d): a queue entry that must be committed ON ITS OWN -- the explicit Delete of a whole group from the
+      Drift page. The Manager's bulk commits skip it (and say so); only its own explicit commit (one id, deleteCommit) moves it.
+    #>
+    param([AllowNull()][object]$Entry)
+    if ($null -eq $Entry) { return $false }
+    $ent = if ($Entry -is [System.Collections.IDictionary]) { "$($Entry['entity'])" } else { "$($Entry.entity)" }
+    if ($ent -eq (Get-PimQueueGroupDeleteEntity)) { return $true }
+    $p = if ($Entry -is [System.Collections.IDictionary]) { $Entry['payload'] } else { $Entry.payload }
+    $t = if ($null -eq $p) { '' } elseif ($p -is [System.Collections.IDictionary]) { "$($p['type'])" } elseif ($p.PSObject.Properties['type']) { "$($p.type)" } else { '' }
+    return ($t -eq 'group-delete')
+}
+
+function Invoke-PimQueueGroupDelete {
+    <#
+      🔒 PIM 100.22 (d) (owner 2026-10-09) -- the ENGINE half of Drift > Delete of a whole extra group.
+      The entry is an explicit per-item delete intent: an administrator typed DELETE (tier-0 warning shown), it went into
+      the change queue as ONE red DELETE item, and it was committed ON ITS OWN. That -- not the global EnableGroupRetirement
+      switch -- is the authority, so it acts even with group retirement switched off. Every other guard still applies, and
+      each is checked BEFORE the first directory write (a refusal changes nothing):
+        1. the payload names the group (id + name) and says it was staged by the Drift page   -> else terminal
+        2. the removal budget (G4) over the group deletes of this drain                        -> trip = terminal, mailed
+        3. the name carries the tenant's naming prefix (Get-PimManagedGroupPrefixes)            -> else terminal
+        4. the group id still exists (404 = already gone = verified) and still carries that name -> else terminal
+        5. the name is UNIQUE live (SEC-86: never delete one of two same-named groups)          -> else terminal
+        6. no PIM definition names it now (an Import after the Delete wins: never delete a defined group) -> else terminal
+        7. no break-glass account is a (transitive) member; an unreadable list refuses           -> terminal / retried
+      Then the retirement steps (the group's directory role assignments, its members, the group) and a READ-BACK.
+      Seams for tests: -Budget, -Prefixes, -DefinedGroupNames, -BreakGlassAccounts.
+      Returns the action shape @{ ok; terminal; verification; detail }.
+    #>
+    param(
+        [Parameter(Mandatory)][object]$Entry,
+        [Parameter(Mandatory)][scriptblock]$Graph,
+        [string]$ConnectionString = '',
+        [object]$Budget,
+        [string[]]$Prefixes,
+        [scriptblock]$DefinedGroupNames,
+        [string[]]$BreakGlassAccounts
+    )
+    $p = $Entry.payload
+    $refuse = { param($terminal, $why) [pscustomobject]@{ ok = $false; terminal = [bool]$terminal; verification = 'none'; detail = "group-delete REFUSED -- nothing was changed: $why" } }
+    $gid = "$($p.groupId)".Trim(); $gn = "$($p.groupName)".Trim()
+    if (-not $gid -or -not $gn) { return (& $refuse $true 'the entry does not name the group (groupId + groupName) -- queue the Delete again from the Drift page') }
+    if ("$($p.stagedFrom)".Trim() -ne 'drift-extra') { return (& $refuse $true "the entry was not staged by the Drift page's Delete (stagedFrom='$($p.stagedFrom)') -- PIM deletes only a group it staged for deletion") }
+
+    # 2. the removal budget (computed over the whole drain by Invoke-PimQueueActionDrain)
+    if ($null -eq $Budget) {
+        if (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue) { $Budget = Test-PimRemoveBudgetAllowed -ToRemove 1 -Scope 'GroupDelete' -Scanned 1 -Operation 'delete group' }
+        else { return (& $refuse $false 'the removal budget (PIM-DisableGuard.ps1) is not loaded in this engine -- refusing to delete a group (fail closed). It will be retried.') }
+    }
+    if (-not [bool]$Budget.allowed) { return (& $refuse $true "removal budget: $($Budget.reason)") }
+
+    # 3. the naming prefix
+    if ($null -eq $Prefixes) {
+        if (Get-Command Get-PimManagedGroupPrefixes -ErrorAction SilentlyContinue) { $Prefixes = @(Get-PimManagedGroupPrefixes) }
+        else { return (& $refuse $false 'the group naming prefix cannot be read in this engine (PIM-EngineProviders.ps1 not loaded). It will be retried.') }
+    }
+    $Prefixes = @($Prefixes | Where-Object { "$_".Trim() })
+    if (-not $Prefixes.Count) { return (& $refuse $true "the tenant's group naming pattern has no literal prefix, so PIM cannot prove by name that '$gn' is in its naming space -- set GroupPrefix (pim.Settings) to the prefix your groups carry, then queue the Delete again") }
+    if (-not @($Prefixes | Where-Object { $gn.StartsWith("$_", [System.StringComparison]::OrdinalIgnoreCase) }).Count) {
+        return (& $refuse $true "'$gn' does not carry the engine naming prefix ($($Prefixes -join ', ')) -- PIM never deletes a group outside its naming space")
+    }
+
+    # 4. the group by id: gone = done; another name = not the group that was staged
+    $g = $null
+    try { $g = & $Graph 'GET' ("/groups/$gid`?`$select=id,displayName,isAssignableToRole") $null }
+    catch {
+        if ("$($_.Exception.Message)" -match '(?i)Request_ResourceNotFound|ResourceNotFound|\b404\b|does not exist') {
+            return [pscustomobject]@{ ok = $true; verification = 'verified'; detail = "the group '$gn' ($gid) no longer exists -- nothing left to delete" }
+        }
+        throw
+    }
+    if (-not $g -or "$($g.id)".Trim() -ne $gid) { return (& $refuse $false "the group $gid could not be read back. It will be retried.") }
+    if ("$($g.displayName)".Trim() -ine $gn) { return (& $refuse $true "the group $gid is now named '$($g.displayName)', not '$gn' as when the Delete was staged -- queue the Delete again from the Drift page if it should go") }
+
+    # 5. unique live name
+    $q = $gn.Replace("'", "''")
+    $same = @(@(& $Graph 'GET' ("/groups?`$filter=displayName eq '$([uri]::EscapeDataString($q))'&`$select=id") $null $true) | Where-Object { $_ -and "$($_.id)".Trim() })
+    if ($same.Count -gt 1) { return (& $refuse $true ("{0} live groups are named '{1}' (ids {2}) -- PIM cannot prove which one was staged, so it deletes none. Rename or delete the other group first." -f $same.Count, $gn, (@($same | ForEach-Object { "$($_.id)" }) -join ', '))) }
+
+    # 6. defined in PIM now (an Import into PIM after the Delete wins)
+    if (-not $DefinedGroupNames) {
+        if (Get-Command Get-PimGroupDefinitionRows -ErrorAction SilentlyContinue) { $DefinedGroupNames = { @(Get-PimGroupDefinitionRows -IncludeRetired | ForEach-Object { "$($_.GroupName)" }) } }
+        else { return (& $refuse $false 'the PIM group definitions cannot be read in this engine (PIM-EngineProviders.ps1 not loaded). It will be retried.') }
+    }
+    $defined = $null
+    try { $defined = @(& $DefinedGroupNames) } catch { return (& $refuse $false "the PIM group definitions could not be read ($($_.Exception.Message)) -- never delete on a guess. It will be retried.") }
+    if (@($defined | Where-Object { "$_".Trim() -ieq $gn }).Count) { return (& $refuse $true "'$gn' is now DEFINED in PIM (imported after the Delete was queued) -- PIM never deletes a group it defines. Discard this entry, or remove the definition first.") }
+
+    # 7. break-glass: no break-glass account may lose this group's access with it
+    if ($null -eq $BreakGlassAccounts) {
+        if (-not (Get-Command Get-PimBreakGlassAccountStatus -ErrorAction SilentlyContinue)) { return (& $refuse $false 'the break-glass account library is not loaded in this engine, so the members cannot be proven NOT to include a break-glass account. It will be retried.') }
+        $st = $null
+        try { $st = Get-PimBreakGlassAccountStatus -ConnectionString "$ConnectionString" -NoCache } catch { $st = $null }
+        if (-not $st) { return (& $refuse $false 'the break-glass account list could not be read. It will be retried.') }
+        if ($st.storeConfigured -and -not $st.storeOk) { return (& $refuse $false "the break-glass account list is UNREADABLE ($($st.error)). It will be retried.") }
+        $BreakGlassAccounts = @($st.accounts)
+    }
+    $bg = @($BreakGlassAccounts | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    $tm = @(@(& $Graph 'GET' ("/groups/$gid/transitiveMembers?`$select=id,userPrincipalName") $null $true) | Where-Object { $_ })
+    $hit = @($tm | Where-Object { ($bg -contains "$($_.id)".Trim().ToLowerInvariant()) -or ("$($_.userPrincipalName)".Trim() -and ($bg -contains "$($_.userPrincipalName)".Trim().ToLowerInvariant())) })
+    if ($hit.Count) { return (& $refuse $true ("a BREAK-GLASS account is a member of '{0}' ({1}) -- PIM never takes access away from a break-glass account. Remove it from the group first (or from the break-glass list, if that is really intended), then queue the Delete again." -f $gn, (@($hit | ForEach-Object { if ("$($_.userPrincipalName)") { "$($_.userPrincipalName)" } else { "$($_.id)" } }) -join ', '))) }
+
+    # --- every guard passed: the retirement steps (the same order as the GroupRetirement provider), then read back
+    $warn = New-Object System.Collections.Generic.List[string]
+    $nRa = 0; $nMem = 0
+    try {
+        foreach ($ra in @(& $Graph 'GET' ("/roleManagement/directory/roleAssignments?`$filter=principalId eq '$gid'") $null $true)) {
+            if ($null -eq $ra -or "$($ra.principalId)" -ne $gid -or -not "$($ra.id)") { continue }
+            try { & $Graph 'DELETE' ("/roleManagement/directory/roleAssignments/$($ra.id)") $null | Out-Null; $nRa++ } catch { [void]$warn.Add("role assignment $($ra.id): $($_.Exception.Message)") }
+        }
+    } catch { [void]$warn.Add("role assignment read: $($_.Exception.Message)") }
+    try {
+        foreach ($m in @(& $Graph 'GET' ("/groups/$gid/members?`$select=id") $null $true)) {
+            if ($null -eq $m -or -not "$($m.id)") { continue }
+            try { & $Graph 'DELETE' ("/groups/$gid/members/$($m.id)/`$ref") $null | Out-Null; $nMem++ } catch { [void]$warn.Add("member $($m.id): $($_.Exception.Message)") }
+        }
+    } catch { [void]$warn.Add("member read: $($_.Exception.Message)") }
+    & $Graph 'DELETE' ("/groups/$gid") $null | Out-Null
+    $still = $null
+    try { $still = & $Graph 'GET' ("/groups/$gid`?`$select=id") $null }
+    catch { if ("$($_.Exception.Message)" -match '(?i)Request_ResourceNotFound|ResourceNotFound|\b404\b|does not exist') { $still = $null } else { $still = 'unknown' } }
+    $what = "'$gn' ($gid) DELETED from Entra ID: $nRa directory role assignment(s) and $nMem member(s) removed first$(if ($warn.Count) { "; $($warn.Count) warning(s): $(@($warn | Select-Object -First 3) -join '; ')" })"
+    if ("$still" -eq 'unknown') { return [pscustomobject]@{ ok = $true; verification = 'indeterminate'; detail = "$what -- the read-back could not be performed" } }
+    if ($null -eq $still) { return [pscustomobject]@{ ok = $true; verification = 'verified'; detail = "$what -- the group is gone (read back)" } }
+    return [pscustomobject]@{ ok = $false; verification = 'indeterminate'; detail = "$what, but the group is still present on read-back (directory may not have caught up) -- retried" }
+}
+
 function Invoke-PimQueueAction {
     [CmdletBinding()]
     param(
@@ -328,7 +466,9 @@ function Invoke-PimQueueAction {
         [scriptblock]$MailInvoker,
         # The store the break-glass list is read from (the drain passes its own). Empty = the process's
         # configured store (Resolve-PimBreakGlassStore), which is what a bare call gets.
-        [string]$ConnectionString = ''
+        [string]$ConnectionString = '',
+        # PIM 100.22 (d): the removal-budget decision over this drain's group deletes (Invoke-PimQueueActionDrain computes it)
+        [object]$GroupDeleteBudget
     )
     $p = $Entry.payload
     $type = "$($p.type)".Trim()
@@ -388,6 +528,11 @@ function Invoke-PimQueueAction {
 
     try {
         switch ($type) {
+
+            'group-delete' {
+                # PIM 100.22 (d): every guard + the deletion + the read-back live in Invoke-PimQueueGroupDelete.
+                return (Invoke-PimQueueGroupDelete -Entry $Entry -Graph $graph -ConnectionString $ConnectionString -Budget $GroupDeleteBudget)
+            }
 
             { $eligible -and $_ -in @('entra-role-revoke','group-assignment-revoke','azure-rbac-revoke') } {
                 $r = Invoke-PimQueueEligibleRevoke -Type $type -Payload $p -Justification "$($Entry.justification)" -Graph $graph -Arm $arm
@@ -702,6 +847,16 @@ function Invoke-PimQueueActionDrain {
     $who = if ("$AppliedBy".Trim()) { "$AppliedBy" } else { "$env:COMPUTERNAME" }
     $results = New-Object System.Collections.Generic.List[object]
     $applied = 0; $failedN = 0; $retrying = 0
+    # 🔒 PIM 100.22 (d): the removal budget (G4) over EVERY group delete this drain would carry out -- decided once, before the
+    # first one, so a batch over the budget deletes NONE (never a partial mass-deletion) and the trip is mailed.
+    $gdN = @($committed | Where-Object { "$($_.payload.type)".Trim() -eq 'group-delete' }).Count
+    $gdBudget = $null
+    if ($gdN -gt 0) {
+        if (Get-Command Test-PimRemoveBudgetAllowed -ErrorAction SilentlyContinue) {
+            $gdBudget = Test-PimRemoveBudgetAllowed -ToRemove $gdN -Scope 'GroupDelete' -Scanned $gdN -Operation 'delete group'
+            if (-not $gdBudget.allowed -and (Get-Command Write-PimRemoveBudgetAlert -ErrorAction SilentlyContinue)) { try { Write-PimRemoveBudgetAlert -Decision $gdBudget } catch { Write-Warning "  [queue] the removal-budget alert could not be sent: $($_.Exception.Message)" } }
+        } else { $gdBudget = [pscustomobject]@{ allowed = $false; reason = 'the removal budget (PIM-DisableGuard.ps1) is not loaded in this engine -- refusing to delete groups (fail closed)' } }
+    }
 
     foreach ($e in @($committed | Sort-Object { "$($_.enqueuedUtc)" })) {
         $id = [guid]"$($e.id)"
@@ -719,7 +874,7 @@ UPDATE pim.ChangeQueue
             continue
         }
 
-        $r = Invoke-PimQueueAction -Entry $e -GraphInvoker $GraphInvoker -ArmInvoker $ArmInvoker -MailInvoker $MailInvoker -ConnectionString $ConnectionString
+        $r = Invoke-PimQueueAction -Entry $e -GraphInvoker $GraphInvoker -ArmInvoker $ArmInvoker -MailInvoker $MailInvoker -ConnectionString $ConnectionString -GroupDeleteBudget $gdBudget
         $attempts = [int]$e.attempts + 1
         # 🔴 §70.15 LOG-03: the Manager audited only the REQUEST ("revoke.active-assignment" ok = QUEUED); the revoke,
         # TAP reset or session revoke the engine then EXECUTED left no audit event at all. One row per executed
@@ -732,7 +887,9 @@ UPDATE pim.ChangeQueue
                 Write-PimSqlAuditEvent -ConnectionString $ConnectionString -Actor 'engine' -ActorSource 'engine' `
                     -Action ("queue.action.$("$($pa.type)".Trim()).$(if ($r.ok) { 'applied' } else { 'failed' })") `
                     -Target ("$("$($pa.type)".Trim()): " + (@($what) -join ', ')) `
-                    -After ([ordered]@{ queueId = "$($e.id)"; requestedBy = "$($e.requestedBy)$($e.enqueuedBy)"; justification = "$($e.justification)"
+                    -After ([ordered]@{ queueId = "$($e.id)"; requestedBy = $(if ("$($e.requestedBy)$($e.enqueuedBy)".Trim()) { "$($e.requestedBy)$($e.enqueuedBy)" } else { "$($e.by)" }); justification = "$($e.justification)"
+                                        # PIM 100.22 (d): who authorised it and when (a group delete is its own commit)
+                                        committedBy = "$($e.committedBy)"; committedUtc = "$($e.committedUtc)"; enqueuedUtc = "$($e.enqueuedUtc)"
                                         payload = $pa; verification = "$($r.verification)"; detail = "$($r.detail)"; attempt = $attempts }) `
                     -Result $(if ($r.ok) { 'ok' } else { 'error' }) -CorrelationId "$($global:PIM_JobCorrelationId)"
             }

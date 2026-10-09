@@ -224,6 +224,12 @@ function Format-PimQueueEntryDisplay {
         $tail = @($kind, $at) | Where-Object { "$_".Trim() }
         return ("Remove {0} from {1}{2}" -f $who, $target, $(if ($tail) { ' (' + ($tail -join ', ') + ')' } else { '' }))
     }
+    if ($type -eq 'group-delete') {
+        # PIM 100.22 (d): the Drift page's Delete of a whole extra group -- committed on its own.
+        $gn = Get-PimQueuePayloadValue -Payload $p -Name 'groupName'; if (-not $gn) { $gn = $key }
+        $t0 = Get-PimQueuePayloadValue -Payload $p -Name 'tier0'
+        return ("Delete the group {0} from Entra ID (its members and roles go with it){1} -- commit it on its own" -f $gn, $(if ("$t0" -match '(?i)^true$') { ' -- TIER-0 / highly privileged' } else { '' }))
+    }
     if ($type -eq 'tap-reset') {
         $u = Get-PimQueuePayloadValue -Payload $p -Name 'userPrincipalName'; if (-not $u) { $u = $key }
         $rcpt = Get-PimQueuePayloadValue -Payload $p -Name 'recipient'

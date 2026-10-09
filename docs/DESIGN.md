@@ -682,13 +682,20 @@ top of the engine delta — it does NOT reimplement reconciliation.**
 - **Import into PIM / Delete / Ignore, and Apply now never touches an extra (2.4.538).** "Keep" is named **Import into PIM**
   for what it does. A **group** that is extra in the `Groups` area (it carries the tenant's naming prefix, so the lean group
   read lists it, but no definition names it -- typically made by the customer's own infrastructure code) gets a `keep` row
-  (its group definition under the exact live name and description) and a `retire` row (the same with `Lifecycle=Retire`).
+  (its group definition under the exact live name and description) and a `groupDelete` descriptor (the group id + name).
   **Import** files the row under the definition kind the operator picks; the Groups provider keys on the name, so the
   committed row *matches* the existing group and nothing is created; a name or tag PIM already defines is refused.
-  **Delete** of a group stages the retirement (typed DELETE, a tier-0 warning), and the engine's group retirement then
-  deletes it -- only where `EnableGroupRetirement` is on, only a name with the naming prefix that is unique live, inside
-  the removal budget; a delegation's Delete stays its queued revoke. The engine itself never deletes an undefined group:
-  the Groups provider has no remove, and the daily reconcile removes only ledger-confirmed, journal-removed items.
+  **Delete** of a group (typed DELETE, a tier-0 warning) puts ONE red DELETE item into the change queue (a queued action
+  `group-delete`), accepted only for a group the stored drift check lists as an extra by id and name. It is committed **on
+  its own** -- its own "Commit this DELETE" on its queue row; Commit all and Commit selected skip it and say so (the server
+  commits it only as the single id of a request carrying the explicit delete flag). The engine then deletes the group on its
+  next run **even with `EnableGroupRetirement` off** -- the committed item is the per-item intent -- behind every other guard:
+  the removal budget over all group deletes of the run (over it, none is deleted), the naming prefix, the id still carrying
+  the queued name, a unique live name, not defined in PIM by then, no break-glass account among its (transitive) members;
+  it removes the group's directory role assignments and members first and reads the deletion back. Who queued it, who
+  committed it and when are audited. A delegation's Delete stays its queued revoke. The engine itself never deletes an
+  undefined group otherwise: the Groups provider has no remove, and the daily reconcile removes only ledger-confirmed,
+  journal-removed items.
   **Apply now** sends only the ticked missing / changed items (`driftApplySelection`), asks no question about extras and
   says to choose Import, Delete or Ignore for them. Review & commit names a drift-staged add **IMPORT** (green) or
   **DELETE** (red, any `Lifecycle=Retire` row); the change queue leads every queued removal with a red **DELETE**.
@@ -8706,8 +8713,9 @@ offline payload gate builds exactly that copy on every test run.
 
 #### 19a.3 Pro Business and Pro Enterprise (licence dimension, 2026-10-08 -- built, not yet released)
 
-Pro comes in two dimensions with the same features. **Pro Enterprise** has no limits. **Pro Business**
-covers a stated number of **managed admin accounts**. The dimension is decided by the signed licence
+Pro comes in two dimensions with the same features (see "Which features a Pro licence unlocks"
+below). **Pro Enterprise** has no limits. **Pro Business** covers a stated number of **managed admin
+accounts**. The dimension is decided by the signed licence
 alone: a Business licence carries a `limits` object (`{ "admins": N }`) inside its signed payload; an
 Enterprise licence carries none, so every licence issued before this change reads as Enterprise and
 nothing about it changes. A `limits` value outside the signed payload is ignored, and a payload changed
@@ -8729,6 +8737,26 @@ unchanged.
   Started licence step shows it beside the status; `GET /api/license` returns `dimension`,
   `dimensionText`, `limits` and `usage.admins` (`cap`, `count`, `percent`, `state` = none / ok / warn /
   at / over, `message`). The status telemetry does not carry the dimension yet.
+- **Which features a Pro licence unlocks (v2.4.539, 2026-10-09).** A licence carries a signed list of
+  features. Licences issued before a newer Pro feature existed (the consultant company review, the access
+  request portal, the access request API, the AI assistant endpoint) did not list it, so a paying customer
+  saw it as "not licensed". The licence now names the **edition**, and the product maps the edition to
+  features -- a new feature never needs a re-signed licence. The rule, applied by the one licence check
+  every Pro feature, job and page uses:
+  1. the licence itself must be valid (or in its grace period), a Pro licence, and bound to this tenant --
+     otherwise nothing Pro is unlocked, as before;
+  2. **Pro Enterprise** (no signed `limits`) unlocks every **single-tenant** Pro feature of the feature
+     catalog, current and future, whatever its feature list says -- *included in Pro Enterprise*;
+  3. **Pro Business** (signed `limits`) unlocks the same features; only its admin-account limit differs
+     -- *included in Pro Business (limits apply)*;
+  4. **Pro MSP** -- the `Pro-MSP` sku, or a licence whose list names the multi-tenant feature or `*`, as
+     every MSP licence issued so far does -- adds the multi-tenant (managing / managed tenant) feature --
+     *included in Pro MSP*; any other Pro licence: *needs the MSP licence*;
+  5. the feature list is otherwise informational; it can name an explicit add-on outside an edition.
+  Only the verified payload is read: a sku, list or `limits` outside the signature is ignored, and a
+  payload changed after signing does not verify. `GET /api/license` returns the reason per feature
+  (`pro.<key>.basis` = enterprise / business / msp / needs-msp / listed / not-listed / licence, and
+  `basisText`), and **Settings > Licence** shows it in a column beside each Pro feature.
 
 ---
 
@@ -9359,7 +9387,8 @@ before anyone approves it.
 
 PIM makes exactly two kinds of call to Invardia, the vendor site. **Both are scheduled jobs, and both are on by default in a new
 installation** (feature defaults `defaultEnabled` in the catalog); an administrator switches either off under Settings > Features. Neither ever receives an instruction from Invardia: one fetches a
-signed file that PIM checks itself, the other only sends.
+signed file that PIM checks itself, the other sends -- and reads only one note back, that the installed licence was
+re-issued, which makes the first one ask for the new file (29.1).
 
 ### 29.1 The licence request (job `licence-request`, feature `licence.autoRequest`)
 Every 30 minutes, when no Pro licence is valid for this tenant or the installed one ends within 30 days, PIM asks Invardia
@@ -9367,6 +9396,14 @@ for its licence and then asks again for the result. It sends the product, the ve
 A delivered licence is installed only after PIM has checked it here: the file's hash, the signature against the trusted
 signers, that it is Pro, and that it names this tenant, the tenant the managed identity's own token is issued in. A
 rejection is shown in Settings > Licence and never asked again automatically.
+
+**A re-issued licence (2.4.539).** When Invardia re-issues a licence, the answer to the daily heartbeat (29.2) names the
+licence that replaces the installed one (`supersededBy`). PIM keeps that id in its settings (`LicenceSupersededBy`) and the
+next licence request run -- within 30 minutes -- asks for the new licence, sending the installed licence's id, even though
+the installed licence is still valid. Invardia approves the successor of a re-issued licence by itself; the delivery goes
+through exactly the same checks as any other, so the heartbeat answer alone can never install or change a licence. The
+note is removed once the new licence is installed. A missing or malformed answer changes nothing, and a rejection still
+stops further requests until the administrator asks again.
 
 ### 29.2 Status telemetry (job `uplink`, feature `telemetry.uplink`)
 Every hour PIM sends one report per job that ran since the last send, and once a day a heartbeat. A job that ran many times

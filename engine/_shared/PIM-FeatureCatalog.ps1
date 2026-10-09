@@ -3,7 +3,10 @@
 if (-not (Get-Command Write-PimSwallowed -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-Swallow.ps1') }
 # REQ-Y: the hard Pro gate (Test-PimFeatureProLicence) verifies the licence with PIM-License.ps1 -- load it wherever the
 # catalog is loaded, so no process can end up with the gate but without the verifier (which would read "not licensed").
-if (-not (Get-Command Test-PimProLicence -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-License.ps1') }
+# BUG-297 (REQUIREMENTS 100.38, 2026-10-09): ALWAYS, never "only if Test-PimProLicence is not visible yet". A PARENT script's
+# copy is visible here too, and run from this script its $script: trusted signing certificates do not exist -- every stored
+# licence would read Invalid and every Pro feature locked. Loaded here, the certificates live in this file's caller's scope.
+. (Join-Path $PSScriptRoot 'PIM-License.ps1')
 
 # =============================================================================
 # PIM-FeatureCatalog.ps1 -- the SINGLE source of truth for customizable
@@ -162,6 +165,7 @@ $script:PimFeatureCatalog = @(
     [ordered]@{ key='licence.autoRequest'; label='Request the licence from Invardia automatically'; group='Automation'; tier='advanced'; license='free'; scope='single'; defaultEnabled=$true; dependsOn=@('scheduler.jobs'); proFeature=''; description='Every 30 minutes, when no Pro licence is valid for this tenant or it ends within 30 days, PIM asks Invardia for its licence and installs the signed file after checking it here (signature, Pro, this tenant). Sends the product, the tenant id, the version and an installation id, plus the id and end date of the installed licence when there is one -- nothing else. On by default (owner decision 2026-10-05); switch it off here.' }
     [ordered]@{ key='updates.invardia'; label='Pro updates from Invardia'; group='Automation'; tier='advanced'; license='free'; scope='single'; defaultEnabled=$true; dependsOn=@('scheduler.jobs'); proFeature=''; description='For a Pro install: PIM claims its Invardia install key with its licence and this tenant, so the nightly update can take signed releases from Invardia for the ring Invardia has set for this environment. An update is installed only after its signature, its release number and its archive checksum are checked here; a release that asks for a manual step is held. The update source itself is chosen when the update job is deployed. On by default (owner decision 2026-10-05); switch it off here.' }
     [ordered]@{ key='telemetry.uplink'; label='Send status telemetry to Invardia'; group='Automation'; tier='advanced'; license='free'; scope='single'; defaultEnabled=$true; dependsOn=@('scheduler.jobs'); proFeature=''; description='Every hour PIM reports which jobs ran and whether they succeeded, and once a day its version, edition and licence state. Without an install key it is anonymous: no tenant, no server name, no error text -- only an error class and rounded counts. With a Pro install key from Invardia the reports carry the error text (secrets removed), so Invardia support can see a failure before you call. On by default (owner decision 2026-10-04, framework UPDATE-1.4); switch it off here to stop it -- an opt-out is reported once.' }
+    [ordered]@{ key='telemetry.setup'; label='Send setup health to Invardia'; group='Automation'; tier='advanced'; license='free'; scope='single'; defaultEnabled=$true; dependsOn=@('telemetry.uplink'); proFeature=''; description='Once a day and whenever it changes, PIM tells Invardia support the state of its critical settings (updater deployed and scheduled, update ring, install key, licence, mail sender, alert recipients, engine permissions, last successful run, backup) as ok / missing / wrong / unknown, and how many engine permissions are missing, so support can help before you call. Only with a Pro install key (an anonymous Community install sends nothing of this); no names, no tenant data, no secrets. On by default (owner decision 2026-10-09, framework UPLINK-SETUP); switch it off here.' }
     [ordered]@{ key='scheduler.jobs';   label='Scheduled jobs';          group='Automation';   tier='advanced'; license='free'; scope='single'; defaultEnabled=$false; dependsOn=@();                       proFeature='';                  description='The in-container/VM scheduler that drives reminders, digests, discovery, queue-apply, tenant-cache and engine runs on a cadence. Off = no scheduled job runs (manual/commit triggers still work via their own gates).' }
 )
 
@@ -649,7 +653,7 @@ function Select-PimWorkloadRowsLicensed {
 function Get-PimProFeatureStates {
     <#
       REQ-Y. Every license='pro' catalog entry with its hard-gate verdict, for GET /api/license and the GUI's
-      "Pro -- contact" notices: key -> @{ label; scope; ok; grace; state (ok|grace|locked); reason; message }.
+      "Pro -- contact" notices: key -> @{ label; scope; ok; grace; state (ok|grace|locked); reason; message; basis; basisText }.
     #>
     [CmdletBinding()] param([string]$TenantId, [string]$SqlServer, [string]$PublicCertB64)
     $out = [ordered]@{}
@@ -659,7 +663,11 @@ function Get-PimProFeatureStates {
         if ($PublicCertB64) { $a['PublicCertB64'] = $PublicCertB64 }
         $r = Test-PimFeatureProLicence @a
         $out["$($f.key)"] = [ordered]@{ label = "$($f.label)"; scope = "$($f.scope)"; description = "$($f.description)"; proFeature = "$($f.proFeature)"; ok = [bool]$r.ok; grace = [bool]$r.grace
-            state = $(if (-not $r.ok) { 'locked' } elseif ($r.grace) { 'grace' } else { 'ok' }); reason = "$($r.reason)"; message = "$($r.message)" }
+            state = $(if (-not $r.ok) { 'locked' } elseif ($r.grace) { 'grace' } else { 'ok' }); reason = "$($r.reason)"; message = "$($r.message)"
+            # §100.32 / framework §12.6a: why -- 'enterprise' (included in Pro Enterprise), 'business' (included in Pro
+            # Business (limits apply)), 'msp' (included in Pro MSP), 'needs-msp', 'listed' / 'not-listed' (an add-on), or
+            # 'licence' (the licence itself decides; see reason).
+            basis = "$($r.basis)"; basisText = "$($r.basisText)" }
     }
     return $out
 }

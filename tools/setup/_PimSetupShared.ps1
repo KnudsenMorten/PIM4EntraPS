@@ -1138,6 +1138,60 @@ function Grant-PimMiAzureRbac {
     else { Write-Host "    Azure RBAC already present for $Name" -ForegroundColor DarkGray }
 }
 
+function Get-PimManagerRgReaderScope {
+    <#
+      PURE. PIM 100.22 (b) (owner 2026-10-09) -- the ONE scope the Manager's managed identity gets 'Reader' on: the PIM
+      resource group itself (never the subscription, never the tenant root), so the Environment report
+      (Get-PimManagerEnvironmentReport) can read the installation's own architecture -- the container apps, jobs, registry,
+      SQL server, Key Vault, network -- and nothing else. Refuses an empty or malformed name (fail closed: never a broader scope).
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup)
+    $s = "$SubscriptionId".Trim(); $g = "$ResourceGroup".Trim()
+    if ($s -notmatch '^[0-9a-fA-F-]{36}$') { throw "Get-PimManagerRgReaderScope: '$SubscriptionId' is not a subscription id." }
+    if (-not $g -or $g -match '[/\\]') { throw "Get-PimManagerRgReaderScope: '$ResourceGroup' is not a resource group name." }
+    return "/subscriptions/$s/resourceGroups/$g"
+}
+
+function Grant-PimManagerRgReader {
+    <#
+      PIM 100.22 (b) (owner 2026-10-09): the install grants the Manager's managed identity (ca-pim-manager) 'Reader' on the PIM
+      resource group ONLY, so the Environment report reads the architecture. IDEMPOTENT: listed first, created only when
+      absent, then READ BACK (a duplicate assignment exits non-zero and is success; a silent no-op exits zero and is not).
+      Returns @{ ok; present (held before); created; scope; reason }. -Required makes a refusal fatal (throws), otherwise it
+      WARNS with the exact command -- the Environment report degrades, nothing else does.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string]$MiObjectId,
+        [string]$Name = 'ca-pim-manager',
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$ResourceGroup,
+        [switch]$Required
+    )
+    $scope = Get-PimManagerRgReaderScope -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
+    $oid = "$MiObjectId".Trim()
+    $cmd = "az role assignment create --subscription $SubscriptionId --assignee-object-id $oid --assignee-principal-type ServicePrincipal --role Reader --scope $scope"
+    $read = {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        # the scopes listed, filtered HERE (a JMESPath filter with quotes is fragile through az.cmd): Reader AT the resource group
+        try { $v = @(az role assignment list --subscription $SubscriptionId --assignee $oid --scope $scope --role Reader --query "[].scope" -o tsv --only-show-errors 2>$null) }
+        finally { $ErrorActionPreference = $eap }
+        $global:LASTEXITCODE = 0
+        return [bool](@($v | ForEach-Object { "$_" -split "`r?`n" } | Where-Object { "$_".Trim().TrimEnd('/') -ieq $scope }).Count)
+    }
+    if (& $read) { Write-Host "    Reader for $Name on the resource group ${ResourceGroup}: already assigned" -ForegroundColor DarkGray; return @{ ok = $true; present = $true; created = $false; scope = $scope; reason = 'already assigned' } }
+    if (-not $PSCmdlet.ShouldProcess("$Name @ $scope", 'grant Reader (resource group only)')) { return @{ ok = $false; present = $false; created = $false; scope = $scope; reason = 'skipped by ShouldProcess' } }
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { az role assignment create --subscription $SubscriptionId --assignee-object-id $oid --assignee-principal-type ServicePrincipal --role Reader --scope $scope -o none --only-show-errors 2>$null }
+    finally { $ErrorActionPreference = $eap }
+    $global:LASTEXITCODE = 0
+    if (& $read) { Write-Host "    Reader for $Name on the resource group ${ResourceGroup}: assigned and read back" -ForegroundColor DarkGray; return @{ ok = $true; present = $false; created = $true; scope = $scope; reason = 'assigned and read back' } }
+    $msg = "Reader for '$Name' ($oid) on the resource group $ResourceGroup was NOT granted (the deploying identity needs User Access Administrator or Owner on the resource group). The Environment report cannot read the architecture until it is. Grant it with: $cmd"
+    if ($Required) { throw $msg }
+    Write-Warning "  $msg"
+    return @{ ok = $false; present = $false; created = $false; scope = $scope; reason = $msg }
+}
+
 function Get-PimEngineRootAzurePlan {
     <#
       PURE. §97 (owner 2026-10-08) -- what the install grants the ENGINE identity at the tenant root management group.
@@ -1254,6 +1308,35 @@ and on-prem/peered clients resolve the private names. The Manager stays private
 function Show-PimGsaPrivateLinkGuidance {
     [CmdletBinding()] param([string]$ManagerFqdn)
     Write-Host (Get-PimGsaPrivateLinkGuidance -ManagerFqdn $ManagerFqdn) -ForegroundColor Yellow
+}
+
+function Get-PimSetupTenantObjectCounts {
+    <#
+      100.31 / framework 12.15 -- the tenant's users, groups and service principals by Microsoft Graph $count
+      (ConsistencyLevel: eventual), as the INSTALLING identity (its az context, pinned to -SubscriptionId). The token's
+      tenant is asserted against -ExpectedTenantId (BUG-150: the default az context on a host with two logins is another
+      company's tenant). Never throws: Get-PimTenantObjectCounts' @{ ok; Users; Groups; ServicePrincipals; Objects; error }.
+      Needs engine/_shared/PIM-TenantSizing.ps1 loaded.
+    #>
+    param([string]$SubscriptionId, [string]$ExpectedTenantId)
+    $none = { param($why) [pscustomobject]@{ ok = $false; Users = $null; Groups = $null; ServicePrincipals = $null; Objects = $null; error = $why } }
+    $tokArgs = @('account', 'get-access-token', '--resource', 'https://graph.microsoft.com', '--query', 'accessToken', '-o', 'tsv')
+    if ("$SubscriptionId".Trim()) { $tokArgs += @('--subscription', "$SubscriptionId") }
+    $tok = ''
+    try { $tok = "$(& az @tokArgs 2>$null)".Trim() } catch { $tok = '' }
+    $global:LASTEXITCODE = 0
+    if (-not $tok) { return (& $none 'no Microsoft Graph token from the az context') }
+    if ("$ExpectedTenantId".Trim()) {
+        $tid = ''
+        try {
+            $seg = $tok.Split('.')[1].Replace('-', '+').Replace('_', '/')
+            switch ($seg.Length % 4) { 2 { $seg += '==' } 3 { $seg += '=' } }
+            $tid = "$(([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($seg)) | ConvertFrom-Json).tid)"
+        } catch { $tid = '' }
+        if ($tid -ne "$ExpectedTenantId".Trim()) { return (& $none "the Graph token is for tenant '$tid', not '$ExpectedTenantId' -- not counted") }
+    }
+    $h = @{ Authorization = "Bearer $tok"; ConsistencyLevel = 'eventual' }
+    return (Get-PimTenantObjectCounts -GraphGet { param($p) Invoke-RestMethod -Method GET -Uri ('https://graph.microsoft.com/v1.0' + $p) -Headers $h -TimeoutSec 60 })
 }
 
 function Test-PimJobCron {

@@ -8869,6 +8869,7 @@ function New-PimWorkloadConnectorsProvider {
             $cache = @{}
             $live = New-Object System.Collections.Generic.List[object]
             $seen = @{}
+            $rmDataErr = New-Object System.Collections.Generic.List[object]   # 100.27
             $assignKeys = @{}; foreach ($a in @($d.assign)) { $assignKeys[(Get-PimWorkloadConnectorKey -Row $a)] = $true }
             foreach ($r in $rows) {
                 $b = Resolve-PimWorkloadBinding -Row $r -Connectors $connectors -TagToName $tagToName -Cache $cache
@@ -8880,7 +8881,13 @@ function New-PimWorkloadConnectorsProvider {
                     # Assign: no live item -> Create -> ApplyCreate raises the error as a failure item.
                     # Remove: an 'error' live item -> targeted removal -> ApplyRemove raises it the same
                     # way. Without it the core would read the row as "already absent" and succeed.
-                    if ($isRemove -and -not $seen.ContainsKey($b.key) -and -not $assignKeys.ContainsKey($b.key)) { $o.wlcState = 'error'; $o['wlcError'] = $b.error; $live.Add([pscustomobject]$o); $seen[$b.key] = $true }
+                    if ($isRemove -and -not $seen.ContainsKey($b.key) -and -not $assignKeys.ContainsKey($b.key)) {
+                        $o.wlcState = 'error'; $o['wlcError'] = $b.error
+                        $lo = [pscustomobject]$o
+                        $live.Add($lo); $seen[$b.key] = $true
+                        # 100.27: the row's own data is what is missing -> ask the records whether it was ever applied (below).
+                        if (Test-PimWorkloadRemoveDataError -Message $b.error) { $rmDataErr.Add(@{ item = $lo; key = $b.key; connector = $b.connector }) }
+                    }
                     continue
                 }
                 if ($b.present) {
@@ -8898,6 +8905,29 @@ function New-PimWorkloadConnectorsProvider {
                         Write-Host ("    [workloads] exempted -- {0} (not created: {1})" -f $b.key, $e.reason) -ForegroundColor DarkYellow
                         if (-not $seen.ContainsKey($b.key)) { $live.Add([pscustomobject]$o); $seen[$b.key] = $true }
                         break
+                    }
+                }
+            }
+            # 🔴 100.27 REMOVE-NEVER-APPLIED. A Remove row that cannot be resolved because of its own data: when the ledger
+            # (pim.ManagedKeys) AND the applied outcomes (pim.CommitApplied) both show the binding was NEVER applied, the
+            # removal is a no-op SUCCESS -- ApplyRemove calls nothing, the core deletes the Remove row, and the failure clears
+            # on this run. Applied, or the records unreadable: it keeps failing, with a message that says what to fill in.
+            if ($rmDataErr.Count) {
+                $ev = $null
+                if (Get-Command Get-PimEverAppliedKeys -ErrorAction SilentlyContinue) {
+                    $evCs = $null
+                    if (-not ($global:PIM_ManagedKeysStore -is [hashtable]) -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) { try { $evCs = Get-PimSqlSettingsConnectionString } catch { $evCs = $null } }
+                    $ev = Get-PimEverAppliedKeys -ConnectionString $evCs -Scope 'WorkloadConnectors' -Keys @($rmDataErr | ForEach-Object { "$($_.key)" })
+                }
+                foreach ($x in $rmDataErr) {
+                    $k = "$($x.key)".ToLowerInvariant()
+                    if ($ev -and $ev.ok -and -not $ev.applied.ContainsKey($k)) {
+                        $x.item.wlcState = 'never-applied'
+                        Write-Host ("    [workloads] {0}: never applied by PIM Manager -- the Remove is done without calling the workload ({1})" -f $x.key, ("$($x.item.wlcError)" -split ':')[0]) -ForegroundColor DarkGray
+                    } else {
+                        $by = if ($ev -and $ev.applied.ContainsKey($k)) { "$($ev.applied[$k])" } else { '' }
+                        $re = if ($ev) { "$($ev.error)" } else { 'the ledger reader (PIM-ManagedKeys.ps1) is not loaded' }
+                        $x.item.wlcError = Format-PimWorkloadRemoveNeedsData -Message "$($x.item.wlcError)" -AppliedBy $by -ReadError $re -Connector $x.connector -Workload "$($x.item.Workload)"
                     }
                 }
             }
@@ -8922,6 +8952,11 @@ function New-PimWorkloadConnectorsProvider {
         }
         ApplyRemove = {
             param($item, $ctx)
+            # 100.27: never applied -> nothing in the workload to take away. Success WITHOUT a call; the core then deletes
+            # the Remove row (it is a one-time instruction) and the failure of this binding clears on this run.
+            if ("$($item.live.wlcState)" -eq 'never-applied') {
+                return [pscustomobject]@{ neverApplied = $true; detail = ("never applied by PIM Manager -- nothing to remove in the workload ({0})" -f ("$($item.live.wlcError)" -split ':')[0]) }
+            }
             if ("$($item.live.wlcError)".Trim()) { throw "$($item.live.wlcError)" }
             $b = $null; if ($ctx['wlcBind']) { $b = $ctx['wlcBind']['remove|' + (Get-PimWorkloadConnectorKey -Row $item.live)] }
             # Only a Remove ROW removes. The live set is built from rows alone, so a prune has nothing

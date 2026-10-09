@@ -31,6 +31,8 @@
                                           modules (97.1: the command the prerequisite chips show; PIM records the result itself).
       Initialize-PimMailSender.ps1     -- MAIL-1 shared mailbox: create the sender mailbox + its send right scoped to that
                                           one mailbox (browser sign-in or the Support app's secret; Get Started > Mail sender).
+      Set-PimSqlTier.ps1               -- 100.37: the SQL database to S0 minimum (never Basic) with a 250 GB max size, optional
+                                          tier pin (pim-sql-tier-pin); the same plan as the installer and the updater.
       Set-PimSmtpRelayPassword.ps1     -- MAIL-1 SMTP relay: the relay password into the environment's Key Vault + read
                                           access on that one secret for the sending identities.
 
@@ -56,7 +58,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$OutDir,
-    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1'),
+    [string[]]$Scripts = @('Initialize-PimSqlAdminGroup.ps1', 'pim-activator/Deploy-PimActivatorBackend.ps1', 'pim-activator/Publish-PimActivatorRemediation.ps1', 'pim-activator/Deploy-PimActivatorClient.ps1', 'Grant-PimEnginePermissions.ps1', 'Initialize-PimWorkloadPrereqs.ps1', 'Initialize-PimMailSender.ps1', 'Set-PimSmtpRelayPassword.ps1', 'Set-PimSqlTier.ps1'),
     # 12.10 item 11: the code-signing certificate (thumbprint of a certificate WITH its private key in CurrentUser\My or
     # LocalMachine\My). Empty = not signed, said loudly.
     [string]$SigningCertThumbprint = "$env:PIM_CODESIGN_THUMBPRINT",

@@ -923,8 +923,11 @@ function Get-PimArmActiveRoleAssignmentsViaArg {
     REST only: no Az module (REQUIREMENTS 67.3). Throws when the query fails, so a caller can say so
     and fall back instead of rendering an empty list as "no assignments".
     Output: { Id; Name; Scope; PrincipalId; PrincipalType; RoleDefinitionId (GUID); RoleDefinitionName }.
+    -Stream (100.31 SNAPSHOT-OOM, 2026-10-09): emit each row to the pipeline as its page arrives instead of returning
+    the whole set at the end, so a caller that projects rows (`... -Stream | ForEach-Object { }`) holds ONE page of
+    raw rows, not every role assignment in the tenant twice.
   #>
-  param([int]$PageSize = 1000)
+  param([int]$PageSize = 1000, [switch]$Stream)
   $kql = @(
     'authorizationresources'
     '| where type =~ ''microsoft.authorization/roleassignments'''
@@ -942,14 +945,17 @@ function Get-PimArmActiveRoleAssignmentsViaArg {
     foreach ($r in @($resp.data)) {
       if ($null -eq $r) { continue }
       $guid = "$($r.roleGuid)"; if (-not $guid) { $guid = ("$($r.roleDefinitionId)" -split '/')[-1] }
-      $out.Add([pscustomobject]@{
+      $o = [pscustomobject]@{
         Id = "$($r.id)"; Name = "$($r.name)"; Scope = "$($r.scope)"; PrincipalId = "$($r.principalId)"; PrincipalType = "$($r.principalType)"
         RoleDefinitionId = $guid; RoleDefinitionName = $(if ("$($r.roleName)".Trim()) { "$($r.roleName)" } else { $null })
-      })
+      }
+      if ($Stream) { $o } else { $out.Add($o) }
     }
+    if ($resp -and $resp.PSObject.Properties['data']) { $resp.data = $null }   # the raw page goes as soon as it is projected
     $skipToken = $null
     if ($resp -and $resp.PSObject.Properties['$skipToken'] -and "$($resp.'$skipToken')".Trim()) { $skipToken = "$($resp.'$skipToken')" }
   } while ($skipToken)
+  if ($Stream) { return }
   # Unrolled on purpose: `@(Get-PimArmActiveRoleAssignmentsViaArg | ForEach-Object ...)` must see ROWS, not one array.
   return $out.ToArray()
 }

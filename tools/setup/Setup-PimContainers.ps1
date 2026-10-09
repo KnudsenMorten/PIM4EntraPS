@@ -235,6 +235,15 @@ param(
     [string]$TickCron        = '*/5 * * * *',     # UTC, 5 fields
     [string]$TickJobName     = 'ca-pim-tick',
     [int]$TickReplicaTimeout = 3600,              # a full reconcile must fit inside this
+    # 🔴 100.31 / framework 12.15 TENANT-SIZING-1 (2026-10-09): the tick is SIZED FOR THE TENANT. A ~10.8k-object tenant ran
+    # the active-assignments snapshot out of memory at the 0.5 CPU / 1 GiB every tenant got. The users + groups + service
+    # principals are counted here ONCE (Graph $count) and the job gets the band for that count (engine/_shared/
+    # PIM-TenantSizing.ps1: < 5,000 default, 5,000-14,999 2 CPU / 4 GiB / 7200 s, >= 15,000 4 CPU / 8 GiB / 14400 s), raise
+    # only; PIM_Bootstrap_Cpu_Tick / PIM_Bootstrap_Memory_Tick / PIM_Bootstrap_ReplicaTimeout_Tick in this process's
+    # environment win. The counts and the size are RECORDED on the job (pim-sizing-* tags) for the updater, the end-of-install
+    # check and the environment report. -TenantObjectCounts @{ Users; Groups; ServicePrincipals } skips the count (a caller
+    # that already counted); a failed count keeps the recorded one, else the default -- and says so.
+    [hashtable]$TenantObjectCounts,
     # Manager replicas. 0 = SCALE TO ZERO: the GUI costs nothing while nobody is using it and
     # cold-starts on the first request. Nothing is lost by being asleep -- the Manager is a
     # read/write front end over SQL, not a listener that could miss an event.
@@ -335,6 +344,7 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
 . "$here\_PimSetupShared.ps1"
 . "$solRoot\engine\_shared\PIM-Rest.ps1"
 . "$solRoot\engine\_shared\PIM-SqlStore.ps1"
+. "$solRoot\engine\_shared\PIM-TenantSizing.ps1"   # 100.31 the tick's size for this tenant (pure; Get-PimContainerJobResources)
 # §84 P1: the cron check is Test-PimJobCron (_PimSetupShared.ps1) -- this used to dot-source PIM-DownlinkJob.ps1, an MSP
 # (Pro) file, for one 5-field check, so a Community copy without the MSP code could not run setup.
 
@@ -1284,6 +1294,11 @@ $envYaml
         }
         Grant-PimMiAzureRbac -MiObjectId $oid -Name $w.name -SubscriptionId $SubscriptionId `
             -Roles $wRoles -ManagementGroupId $AzureRbacManagementGroupId -Required:$RequireAzureRbac
+        # PIM 100.22 (b) (owner 2026-10-09): the Manager ALSO gets Reader on the PIM resource group ONLY, so the Environment
+        # report reads the installation's own architecture. Idempotent + read back; Confirm-PimInstall verifies / repairs it.
+        if ("$($w.name)" -match 'manager') {
+            [void](Grant-PimManagerRgReader -MiObjectId $oid -Name $w.name -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Required:$RequireAzureRbac)
+        }
     }
     Note "MI $appId granted SQL (db user [$($w.name)]) + AcrPull + Graph app-roles + Azure RBAC"
 }
@@ -1320,6 +1335,33 @@ if ($WorkerMode -eq 'cron') {
     }
     if ($jobSecretsYaml) { $jobRegistryYaml = "$jobSecretsYaml`n$jobRegistryYaml" }
     $envIdForJob = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null
+
+    # 🔴 100.31 / framework 12.15 -- THE TICK'S SIZE FOR THIS TENANT (Get-PimContainerJobResources decides; this only reads).
+    # What the job runs now and what was recorded on it are read first: an existing job is never made smaller, and a failed
+    # count falls back to the counts recorded at its last sizing rather than to "small".
+    $tickCur = $null; $tickRec = $null
+    if ($jobExists) {
+        try {
+            $jo = (az containerapp job show @subArgs -g $ResourceGroup -n $TickJobName -o json 2>$null | Out-String) | ConvertFrom-Json
+            $jr = @($jo.properties.template.containers)[0].resources
+            $tickCur = @{ Cpu = "$($jr.cpu)"; Memory = "$($jr.memory)"; ReplicaTimeout = "$($jo.properties.configuration.replicaTimeout)" }
+            $tickRec = ConvertFrom-PimTenantSizingTags -Tags $jo.tags -Job $TickJobName
+        } catch { $tickCur = $null; $tickRec = $null }
+    }
+    $tickCounts = $null; $tickCountSource = 'none'
+    if ($TenantObjectCounts) { $tickCounts = $TenantObjectCounts; $tickCountSource = 'caller' }
+    elseif (-not $WhatIfPreference) {
+        $cnt = Get-PimSetupTenantObjectCounts -SubscriptionId $SubscriptionId -ExpectedTenantId $TenantId
+        if ($cnt.ok) { $tickCounts = @{ Users = $cnt.Users; Groups = $cnt.Groups; ServicePrincipals = $cnt.ServicePrincipals }; $tickCountSource = 'graph' }
+        elseif ($tickRec -and $tickRec.recorded) { $tickCounts = $tickRec.counts; $tickCountSource = 'recorded'; Warn "tenant size: the Graph count failed ($($cnt.error)) -- using the counts recorded on $TickJobName ($($tickRec.sizedUtc))" }
+        else { Warn "tenant size: the Graph count failed ($($cnt.error)) and none is recorded -- the tick keeps the default size; Confirm-PimInstall and the next update size it once a count is readable" }
+    }
+    $envSizing = @{}; foreach ($ev in [Environment]::GetEnvironmentVariables().GetEnumerator()) { $envSizing["$($ev.Key)"] = "$($ev.Value)" }
+    $tickSize = Get-PimContainerJobResources -Job $TickJobName -Counts $tickCounts -Current $tickCur -DefaultReplicaTimeout $TickReplicaTimeout `
+                    -Settings (Get-PimJobSizingSettings -Environment $envSizing -Recorded $(if ($tickRec) { $tickRec.settings } else { @{} }))
+    Note ("tick size: {0} CPU / {1}, replicaTimeout {2} s ({3}; counts: {4})" -f $tickSize.Cpu, $tickSize.Memory, $tickSize.ReplicaTimeout, $tickSize.Source, $tickCountSource)
+    foreach ($tn in @($tickSize.Notes)) { Note "  $tn" }
+    $TickReplicaTimeout = [int]$tickSize.ReplicaTimeout
     $jobYaml = @"
 location: $Location
 $jobIdentityYaml
@@ -1343,7 +1385,7 @@ $jobRegistryYaml
         args: ["-NoProfile","-File","/app/PIM4EntraPS/tools/pim-scheduler/Start-PimScheduler.ps1","-Once"]
         env:
 $envYamlJob
-        resources: { cpu: 0.5, memory: 1Gi }
+        resources: { cpu: $($tickSize.Cpu), memory: $($tickSize.Memory) }
 "@
     $jobAction = $(if ($jobExists) { 'update' } else { 'create' })
     Note "job yaml: triggerType=Schedule cron='$TickCron' timeout=${TickReplicaTimeout}s parallelism=1"
@@ -1376,6 +1418,18 @@ $envYamlJob
         # the old image. A Job has no revisions to inspect, so the deployed reference is the only
         # thing that can be checked -- which is why it has to be a digest to mean anything.
         Assert-PimDeployedImage -Kind job -Name $TickJobName -Expected $image
+        # 100.31 -- RECORD the sizing on the job (Merge: the customer's own tags stay). The updater re-sizes from these when
+        # its own count fails, Confirm-PimInstall compares the job with them, and the environment report shows them.
+        try {
+            $tickJobId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$TickJobName"
+            $sizeTags = Get-PimTenantSizingTags -Counts $tickCounts -Size $tickSize -CountSource $tickCountSource
+            $tagArgs = @($sizeTags.Keys | Where-Object { "$($sizeTags[$_])".Trim() } | ForEach-Object { "$_=$($sizeTags[$_])" })
+            if ($tagArgs.Count) {
+                az tag update @subArgs --resource-id $tickJobId --operation Merge --tags @tagArgs --only-show-errors -o none 2>$null | Out-Null
+                if ($LASTEXITCODE) { Warn "could not record the tick's sizing tags on $TickJobName (exit $LASTEXITCODE) -- the size is applied; the next update records it" } else { Note "recorded the sizing on $TickJobName ($($sizeTags['pim-sizing-size']), $($sizeTags['pim-sizing-objects']) objects)" }
+                $global:LASTEXITCODE = 0
+            }
+        } catch { Warn "could not record the tick's sizing tags: $($_.Exception.Message)" }
         # The Job's SYSTEM identity needs exactly what a worker app needed: a contained DB user
         # and the directory app-roles. Without these the tick starts and then 403s/`Login failed`,
         # which looks like a scheduling problem and is not.

@@ -17,7 +17,8 @@
     disabled / risk / requires / recommended / docUrl, docUrl = the page above, no duplicate key) and writes NOTHING when
     a check fails. It then writes into -OutDir:
         settings-catalog.json   the catalog, stamped with the PIM version it was built from
-        SHA256SUMS.txt          its checksum
+        SHA256SUMS.txt          the checksum of EVERY file in the folder (100.30: one list, shared with the security pack
+                                and the setup catalog -- tools\setup\_PimHandoverSums.ps1)
         README.txt              what the folder is, for Invardia
     The hand-over folder for a release is C:\ProgramData\Invardia\handover\docs\pim-manager\<version>\ (the same
     handover\docs\<product>\<version>\ pattern the other products use). Run it with every release that changes the
@@ -82,10 +83,6 @@ $utf8 = New-Object System.Text.UTF8Encoding $false
 $catOut = Join-Path $OutDir 'settings-catalog.json'
 [IO.File]::WriteAllText($catOut, (($out | ConvertTo-Json -Depth 12) + "`n"), $utf8)
 
-$sha = [System.Security.Cryptography.SHA256]::Create()
-try { $hash = ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($catOut)))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
-[IO.File]::WriteAllText((Join-Path $OutDir 'SHA256SUMS.txt'), "$hash  settings-catalog.json`n", $utf8)
-
 $n = @($doc.settings).Count
 $readme = @"
 PIM Manager $version -- settings documentation hand-over (framework 12.9 SETTING-INFO-1)
@@ -99,5 +96,8 @@ For value settings (type other than boolean) 'enabled' reads "When set" and 'dis
 The same text is shown in PIM Manager's More info panel, which ends with "Read more on invardia.com".
 "@
 [IO.File]::WriteAllText((Join-Path $OutDir 'README.txt'), $readme.Replace("`r`n", "`n"), $utf8)
+# 100.30: the folder's ONE SHA256SUMS.txt over EVERY file in it (the security pack and the setup catalog share the folder).
+. (Join-Path $setup '_PimHandoverSums.ps1')
+[void](Write-PimHandoverSums -Dir $OutDir)
 Write-Host ("Settings catalog {0}: {1} settings -> {2}" -f $version, $n, $OutDir) -ForegroundColor Green
 [pscustomobject]@{ ok = $true; version = $version; settings = $n; outDir = $OutDir; files = @('settings-catalog.json', 'SHA256SUMS.txt', 'README.txt') }

@@ -710,8 +710,12 @@ function Initialize-PimNamingConventionSeed {
 # --- tenant-list cache (pim.TenantCache) -------------------------------------------
 function Set-PimSqlTenantCache {
     # Upsert one cache kind. -Value is the whole document (e.g. @{ refreshedUtc; items }).
-    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Kind, [object]$Value, [datetime]$RefreshedUtc = [datetime]::UtcNow)
-    $json = if ($null -ne $Value) { $Value | ConvertTo-Json -Depth 12 -Compress } else { $null }
+    # -ValueJson (100.31 SNAPSHOT-OOM): the document ALREADY serialised by the caller (the active-assignments snapshot
+    # writes its rows one at a time into one compact string); stored as given, never parsed or re-serialised here.
+    param([Parameter(Mandatory)][string]$ConnectionString, [Parameter(Mandatory)][string]$Kind, [object]$Value, [datetime]$RefreshedUtc = [datetime]::UtcNow,
+          [AllowNull()][string]$ValueJson = $null)
+    $json = if ($PSBoundParameters.ContainsKey('ValueJson')) { $(if ("$ValueJson" -ne '') { $ValueJson } else { $null }) }
+            elseif ($null -ne $Value) { $Value | ConvertTo-Json -Depth 12 -Compress } else { $null }
     [void](Invoke-PimSqlNonQuery -ConnectionString $ConnectionString -Sql @"
 MERGE pim.TenantCache AS t USING (SELECT @k AS Kind) AS s ON t.Kind = s.Kind
 WHEN MATCHED THEN UPDATE SET ValueJson=@v, RefreshedUtc=@r, UpdatedUtc=SYSUTCDATETIME()

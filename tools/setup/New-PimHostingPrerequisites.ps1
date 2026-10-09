@@ -140,6 +140,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimSqlAdminGroup.ps1')     # the SQL admin group (plan + converge + read-back)
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-TenantSizing.ps1')   # Get-PimSqlTierPlan
 
 function Get-PimEffective { param([string]$Override,[string]$Derived)
     if ("$Override".Trim()) { "$Override".Trim() } else { $Derived }
@@ -634,8 +635,34 @@ if ($SkipSql) {
         Write-Host "         Entra admin verified: $sqlUami (single-principal admin: $sqlAdminGroupSkipped)"
     }
     }   # end of the private-SQL branch
-    az sql db create @subArgs -g $rg -s $sqlSrv -n $sqlDb --service-objective $SqlServiceObjective `
+    # 100.37 (owner 2026-10-09): a Standard database is CREATED with a 250 GB max size (a tier raise later does not grow it
+    # by itself -- an S2 with Basic's 2 GB limit filled up and every write failed "has reached its size quota").
+    # Never Basic (owner 2026-10-09: S0 is the minimum): a -SqlServiceObjective Basic is created as S0, and said.
+    if ("$SqlServiceObjective" -match '^(?i)basic$') { Write-Warning "    -SqlServiceObjective Basic is below PIM's minimum -- the database is created as S0 (100.37)"; $SqlServiceObjective = 'S0' }
+    $createMax = @(); if ("$SqlServiceObjective" -match '^(?i)S\d+$') { $createMax = @('--max-size', '250GB') }
+    az sql db create @subArgs -g $rg -s $sqlSrv -n $sqlDb --service-objective $SqlServiceObjective @createMax `
         --tags purpose=automateit estate=$Token --only-show-errors -o none 2>$null | Out-Null
+    # 100.31 / 100.37 -- the create above is a no-op on an EXISTING database, so its tier, max size and tier pin are read
+    # back: Basic -> S0 (never on a 'pim-sql-tier-pin' database), every Standard database gets the 250 GB max size
+    # (Get-PimSqlTierPlan; never lowered; owner 2026-10-09: PIM's database is S0, Pro too -- no S2 rule).
+    $dbCur = $null
+    try { $dbCur = (az sql db show @subArgs -g $rg -s $sqlSrv -n $sqlDb --query '{so:currentServiceObjectiveName, pool:elasticPoolName, max:maxSizeBytes, tags:tags}' -o json --only-show-errors 2>$null | Out-String) | ConvertFrom-Json } catch { $dbCur = $null }
+    $dbPin = $null; if ($dbCur -and $dbCur.tags -and $dbCur.tags.PSObject.Properties['pim-sql-tier-pin']) { $dbPin = "$($dbCur.tags.'pim-sql-tier-pin')" }
+    $tier = Get-PimSqlTierPlan -Current "$($dbCur.so)" -ElasticPool "$($dbCur.pool)" -CurrentMaxSizeBytes $dbCur.max -Pin $dbPin
+    if ($tier.action -eq 'raise' -or $tier.maxSizeAction -eq 'set') {
+        Write-Host "    SQL database ${sqlDb}: $($tier.reason)"
+        $updArgs = @()
+        if ($tier.action -eq 'raise') { $updArgs += @('--service-objective', $tier.target) }
+        if ($tier.maxSizeAction -eq 'set') { $updArgs += @('--max-size', '250GB') }
+        az sql db update @subArgs -g $rg -s $sqlSrv -n $sqlDb @updArgs --only-show-errors -o none 2>$null | Out-Null
+        $after = $null
+        try { $after = (az sql db show @subArgs -g $rg -s $sqlSrv -n $sqlDb --query '{so:currentServiceObjectiveName, max:maxSizeBytes}' -o json --only-show-errors 2>$null | Out-String) | ConvertFrom-Json } catch { $after = $null }
+        $gb = { param($b) if ("$b" -match '^\d+$') { '{0:N0} GB' -f ([int64]$b / 1GB) } else { 'unknown' } }
+        Write-Host ("    SQL database {0}: {1}, max size {2} -> {3} (read back)" -f $sqlDb, "$($after.so)", (& $gb $dbCur.max), (& $gb $after.max))
+        if ($tier.action -eq 'raise' -and "$($after.so)" -ne $tier.target) { Write-Warning "    the database is '$($after.so)' after the raise to $($tier.target) (a tier change can take minutes; the updater raises it again on its next run)" }
+        if ($tier.maxSizeAction -eq 'set' -and -not ("$($after.max)" -match '^\d+$' -and [int64]$after.max -ge [int64]$tier.maxSizeBytes)) { Write-Warning "    the max size did not read back as 250 GB -- the updater sets it again on its next run" }
+    } else { Write-Host "    SQL database ${sqlDb}: $($tier.reason)" -ForegroundColor DarkGray }
+    $global:LASTEXITCODE = 0
     # ACA reaches SQL from inside the VNet; allow Azure services + this host for setup/tests.
     az sql server firewall-rule create @subArgs -g $rg -s $sqlSrv -n AllowAzureServices `
         --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0 --only-show-errors -o none 2>$null | Out-Null

@@ -17,7 +17,13 @@ $script:PimInstallGuid = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
 
 # The stable step ids (the status page and support tickets refer to them) and their titles in customer language.
 # Order = run order. DeployAll's 'appreg' step is never shown: a guided install runs on managed identities only.
-$script:PimInstallSteps = [ordered]@{
+# 🔴 INSTALL-FIX-EVIDA (REQUIREMENTS 100.25 item 3, 2026-10-09): the functions below read the catalog through
+# Get-PimInstallStepCatalog, NEVER as $script:PimInstallSteps. Install-PimManager hands its -OnStep scriptblock to
+# Invoke-PimDeployAll.ps1 -- a CHILD script, where $script: is the deploy's own script scope and this catalog does not
+# exist: ConvertTo-PimInstallStepEvent threw on $null.Contains(), the deploy's Send-PimDeployStepEvent swallowed it
+# (Write-Verbose), and not one deploy step reached the Reporter (a production install sat on 'preflight' at Invardia for
+# an hour while it deployed). A function is found through the caller chain wherever the scriptblock runs.
+function Get-PimInstallStepCatalog { return [ordered]@{
     'config'               = 'Check your answers'
     'preflight-signin'     = 'Your sign-in'
     'preflight-target'     = 'Tenant and subscription'
@@ -44,10 +50,13 @@ $script:PimInstallSteps = [ordered]@{
     'verify-install'       = 'End-of-install check'
     'health-check'         = 'Final health check'
     'completed'            = 'Installation complete'
-}
+} }
+# kept for readers that enumerate the ids in the scope that loaded this file (tests, Get-PimInstallParameters callers)
+$script:PimInstallSteps = Get-PimInstallStepCatalog
 
 function Get-PimInstallStepTitle([string]$Id) {
-    if ($script:PimInstallSteps.Contains($Id)) { return $script:PimInstallSteps[$Id] }
+    $cat = Get-PimInstallStepCatalog
+    if ($cat.Contains($Id)) { return $cat[$Id] }
     return $Id
 }
 
@@ -305,7 +314,7 @@ function ConvertTo-PimInstallStepEvent {
     $key = "$($DeployEvent.key)"
     # INSTALL-HARDEN-1: the deploy's own 'verify-install' is skipped here -- the guided install runs ITS verify after the
     # licence and the support access (its own 'verify-install' event); a 'skipped' one from the deploy would only confuse.
-    if (($key -in @('appreg', 'verify-install')) -or -not $script:PimInstallSteps.Contains($key)) { return $null }
+    if (($key -in @('appreg', 'verify-install')) -or -not (Get-PimInstallStepCatalog).Contains($key)) { return $null }
     $state = "$($DeployEvent.state)"; $detail = "$($DeployEvent.detail)".Trim()
     if ($detail.Length -gt 400) { $detail = $detail.Substring(0, 400) + ' ...' }
     switch ($state) {

@@ -254,6 +254,9 @@ if (-not $NoHandover) {
     [IO.File]::WriteAllText((Join-Path $OutDir 'security-pack.json'), $outJson, $utf8)
     [IO.File]::WriteAllText((Join-Path $OutDir 'security-pack.md'), $md, $utf8)
     [IO.File]::WriteAllText((Join-Path $OutDir 'security-pack.html'), $html, $utf8)
+    # 100.30: the folder's ONE SHA256SUMS.txt over EVERY file in it (settings docs + setup catalog share the folder).
+    . (Join-Path $PSScriptRoot '_PimHandoverSums.ps1')
+    [void](Write-PimHandoverSums -Dir $OutDir)
     Write-Host "security pack $Version ($Date) -> $OutDir"
     Write-Host '  security-pack.json  security-pack.md  security-pack.html (print to PDF: A4, page numbers from the page itself)'
 }

@@ -390,6 +390,21 @@
                 line-height:1; padding:0 3px; }
   .pim-chip-x:hover { color:#cf222e; }
   .pim-chip-entry { border:none; outline:none; font-size:12px; padding:2px; }
+  /* 100.29 ADMIN-FILTERS -- the Admin accounts filter chips (BRAND-2: white controls, blue when on) + the privilege badge. */
+  .acct-fbar { display:flex; flex-wrap:wrap; align-items:center; gap:6px 14px; margin:0 0 10px; font-size:12px; }
+  .acct-fgroup { display:inline-flex; flex-wrap:wrap; align-items:center; gap:4px; }
+  .acct-fgroup-l { color:#57606a; font-weight:600; margin-right:2px; }
+  .acct-fchip { display:inline-flex; align-items:center; gap:5px; padding:2px 9px; border:1px solid #d0d7de; border-radius:12px;
+                background:#fff; color:#1f2328; font-size:11.5px; cursor:pointer; user-select:none; }
+  .acct-fchip:hover { border-color:#0969da; }
+  .acct-fchip.on { background:#ddf4ff; color:#0a3069; border-color:#0969da; box-shadow:0 0 0 1px #0969da inset; }
+  .acct-fchip.zero:not(.on) { opacity:.55; }
+  .acct-fchip .n { font-weight:600; color:#57606a; }
+  .acct-fchip.on .n { color:#0a3069; }
+  .acct-fclear { font-size:12px; color:#0969da; cursor:pointer; text-decoration:underline; background:none; border:none; padding:0; }
+  .acct-priv { display:inline-block; font-size:10px; font-weight:600; border-radius:10px; padding:0 6px; margin-left:4px; vertical-align:1px; cursor:help; }
+  .acct-priv.hp { color:#cf222e; background:#ffebe9; border:1px solid #ffcecb; }
+  .acct-priv.d2d { color:#57606a; background:#f6f8fa; border:1px solid #d0d7de; }
   .pim-combo-foot { padding:5px 11px; font-size:10.5px; color:#57606a; background:#f6f8fa; position:sticky; bottom:0; }
   /* [M8] Risk overlay -- per-node orphan / stale / over-privileged flags. */
   #mapBoard.risk-on .map-item.risk-orphan   { border-color:#cf222e; background:#ffebe9; }
@@ -3339,7 +3354,97 @@
   // reset tap, create new admin, flag for deletion, revoke sessions."
   // ONE row per admin, every verb reachable without leaving it. Rows the caller may not manage
   // are never returned by the endpoint, so they cannot be drawn and cannot be bulk-selected.
-  const acctGridState = { rows: [], meta: null, busy: '', filter: '', sel: new Set(), showRemoved: false };   // sel: §89 multi-select (UPNs); showRemoved: §96.5 D1 (b)
+  const acctGridState = { rows: [], meta: null, busy: '', filter: '', sel: new Set(), showRemoved: false, chips: null };   // sel: §89 multi-select (UPNs); showRemoved: §96.5 D1 (b); chips: 100.29
+
+  // ===== 100.29 ADMIN-FILTERS =================================================
+  // Owner 2026-10-09: "i need a way to filter between external vs. internal admins and also high priv vs. day2day".
+  // Chips above the table, one group per facet. Within a group the chips are OR (internal + guest), across groups AND
+  // (external AND high-priv). Each chip's count is "how many rows you would see if you also ticked this", i.e. the rows
+  // that pass every OTHER group + the text filter. The privilege class and platform are decided by the SERVER
+  // (GET /api/admin-accounts privilegeClass / privilegeReason / platform -- Get-PimManagerAdminPrivilegeClass); the page
+  // only reads them. The ticked chips are remembered per browser (localStorage; a blocked store just forgets).
+  const ACCT_FILTER_KEY = 'pim.acctFilters.v1';
+  const ACCT_FILTER_GROUPS = [
+    { id: 'type',     label: 'Type',       tip: 'From the admin type (Settings > Naming conventions > Prefix by admin type): internal-adminuser = internal, external-adminuser = external, external-guest = guest.' },
+    { id: 'priv',     label: 'Privilege',  tip: 'High-priv = the name matches the high-priv naming pattern (AdminAccountPatternHighPriv), OR its level is L0 / tier T0 (the row, or an L0 / T0 marker in its name or display name, e.g. "(Admin, Cloud, ID, L0, T0)"), OR Purpose = HighPriv. Day-to-day = the rest. Tier-0 delegations are not checked here.' },
+    { id: 'platform', label: 'Platform',   tip: 'Cloud = an Entra ID admin; AD = an on-premises Active Directory admin (TargetPlatform = AD, hybrid).' },
+    { id: 'dept',     label: 'Department', tip: 'The internal sponsor department; "none" = no department linked.' },
+    { id: 'status',   label: 'Status',     tip: 'The account status the engine enforces.' }
+  ];
+  const ACCT_FILTER_LABELS = {
+    type: { internal: 'internal', external: 'external', guest: 'guest' },
+    priv: { 'high-priv': 'high-priv', 'day-to-day': 'day-to-day', unknown: 'not classified' },
+    platform: { cloud: 'cloud (Entra)', ad: 'AD (hybrid)' },
+    dept: { '': 'none' }
+  };
+  function acctFacets(a) {
+    a = a || {};
+    const t = String(a.adminType || '').toLowerCase();
+    const type = /guest/.test(t) ? 'guest' : (/extern/.test(t) ? 'external' : 'internal');
+    const pc = String(a.privilegeClass || '').toLowerCase();
+    const priv = (pc === 'high-priv' || pc === 'day-to-day') ? pc : 'unknown';
+    const pl = String(a.platform || '').toLowerCase();
+    const platform = (pl === 'ad' || pl === 'cloud') ? pl : (/^ad$/i.test(String(a.targetPlatform || '')) ? 'ad' : 'cloud');
+    return { type: type, priv: priv, platform: platform, dept: String(a.department || '').trim(), status: String(a.accountStatus || 'Enabled').trim().toLowerCase() || 'enabled' };
+  }
+  function acctChipsLoad() {
+    const c = {}; ACCT_FILTER_GROUPS.forEach(g => { c[g.id] = []; });
+    try {
+      const raw = localStorage.getItem(ACCT_FILTER_KEY);
+      const o = raw ? JSON.parse(raw) : null;
+      if (o && typeof o === 'object') ACCT_FILTER_GROUPS.forEach(g => { if (Array.isArray(o[g.id])) c[g.id] = o[g.id].map(v => String(v)); });
+    } catch (_) { }
+    return c;
+  }
+  function acctChipsSave(c) { try { localStorage.setItem(ACCT_FILTER_KEY, JSON.stringify(c || {})); } catch (_) { } }
+  function acctChips() { if (!acctGridState.chips) acctGridState.chips = acctChipsLoad(); return acctGridState.chips; }
+  function acctChipsActive(c) { c = c || acctChips(); return ACCT_FILTER_GROUPS.some(g => (c[g.id] || []).length > 0); }
+  // Does row a pass the text filter and every chip group except `skip`?
+  function acctPasses(a, f, c, skip) {
+    if (f && !((a.displayName || '').toLowerCase().indexOf(f) >= 0 || (a.userPrincipalName || '').toLowerCase().indexOf(f) >= 0 ||
+               (a.adminType || '').toLowerCase().indexOf(f) >= 0)) return false;
+    const fc = acctFacets(a);
+    for (const g of ACCT_FILTER_GROUPS) {
+      if (g.id === skip) continue;
+      const on = c[g.id] || [];
+      if (on.length && on.indexOf(fc[g.id]) < 0) return false;
+    }
+    return true;
+  }
+  function acctChipLabel(gid, v) { const m = ACCT_FILTER_LABELS[gid] || {}; return Object.prototype.hasOwnProperty.call(m, v) ? m[v] : v; }
+  function acctFilterBarHtml(base, f) {
+    const c = acctChips();
+    let h = '<div class="acct-fbar" id="acctFilterBar">';
+    ACCT_FILTER_GROUPS.forEach(g => {
+      const counts = {};
+      base.forEach(a => { const v = acctFacets(a)[g.id]; if (acctPasses(a, f, c, g.id)) counts[v] = (counts[v] || 0) + 1; else if (!(v in counts)) counts[v] = 0; });
+      // the values the data has, in a stable order (+ a remembered value no row has any more, so it can be unticked)
+      let vals = Object.keys(counts);
+      (c[g.id] || []).forEach(v => { if (vals.indexOf(v) < 0) { vals.push(v); counts[v] = 0; } });
+      const order = Object.keys(ACCT_FILTER_LABELS[g.id] || {});
+      vals.sort((x, y) => { const ix = order.indexOf(x), iy = order.indexOf(y);
+        if (ix >= 0 || iy >= 0) return (ix < 0 ? 99 : ix) - (iy < 0 ? 99 : iy);
+        if (x === '') return 1; if (y === '') return -1; return x.localeCompare(y); });
+      if (g.id === 'priv') vals = vals.filter(v => v !== 'unknown' || counts[v] > 0 || (c.priv || []).indexOf(v) >= 0);
+      if (!vals.length) return;
+      h += '<span class="acct-fgroup" data-group="' + g.id + '"><span class="acct-fgroup-l" title="' + escapeHtml(g.tip) + '">' + escapeHtml(g.label) + '</span>';
+      vals.forEach(v => {
+        const on = (c[g.id] || []).indexOf(v) >= 0;
+        h += '<button type="button" class="acct-fchip' + (on ? ' on' : '') + (counts[v] ? '' : ' zero') + '" data-group="' + g.id + '" data-value="' + escapeHtml(v) + '"' +
+             ' aria-pressed="' + (on ? 'true' : 'false') + '" title="' + escapeHtml(g.tip) + '">' + escapeHtml(acctChipLabel(g.id, v)) +
+             ' <span class="n">' + fmtNum(counts[v] || 0) + '</span></button>';
+      });
+      h += '</span>';
+    });
+    if (f || acctChipsActive(c)) h += '<button type="button" class="acct-fclear" id="acctClearFilters">Clear filters</button>';
+    return h + '</div>';
+  }
+  function acctPrivBadge(a) {
+    const p = acctFacets(a).priv;
+    if (p === 'unknown') return '';
+    return ' <span class="acct-priv ' + (p === 'high-priv' ? 'hp' : 'd2d') + '" data-priv="' + p + '" title="' + escapeHtml(a.privilegeReason || '') + '">' +
+           (p === 'high-priv' ? 'High-priv' : 'Day-to-day') + '</span>';
+  }
 
   async function renderAccountGrid(container) {
     if (!isServer) { container.innerHTML = '<div style="color:#57606a">Static mode &mdash; the account grid needs the server.</div>'; return; }
@@ -3359,10 +3464,10 @@
     const isRemoved = a => /^(removed|deleted)$/.test(String(a.accountStatus || '').toLowerCase());
     const nRemoved = acctGridState.rows.filter(isRemoved).length;
     const active = acctGridState.showRemoved ? acctGridState.rows : acctGridState.rows.filter(a => !isRemoved(a));
-    const rows = f ? active.filter(a =>
-      (a.displayName || '').toLowerCase().indexOf(f) >= 0 ||
-      (a.userPrincipalName || '').toLowerCase().indexOf(f) >= 0 ||
-      (a.adminType || '').toLowerCase().indexOf(f) >= 0) : active;
+    // 100.29: the text filter AND every ticked chip group (acctPasses); "N of M" counts what is left.
+    const chips = acctChips();
+    const anyChip = acctChipsActive(chips);
+    const rows = (f || anyChip) ? active.filter(a => acctPasses(a, f, chips, null)) : active;
 
     let h = '';
     h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">' +
@@ -3374,6 +3479,7 @@
          '<span style="color:#57606a;font-size:12px;">' + fmtNum(rows.length) + ' of ' + fmtNum(acctGridState.rows.length) + '</span>' +
          (nRemoved ? '<label style="font-size:12px;color:#57606a;" title="Admins removed from PIM (the account is disabled and kept) or deleted (the account is deleted in Entra ID). Hidden from the active list."><input type="checkbox" id="acctShowRemoved"' +
            (acctGridState.showRemoved ? ' checked' : '') + '> Show removed and deleted (' + fmtNum(nRemoved) + ')</label>' : '') + '</div>';
+    h += acctFilterBarHtml(active, f);
     // Framework §12.6: the Pro Business admin-cap banner (from 90%; filled from /api/license by renderAdminLicenceBanners).
     h += '<div class="admin-lic-banner" data-page="admins" style="display:none;margin-bottom:10px;"></div>';
 
@@ -3391,8 +3497,8 @@
     }
 
     if (!rows.length) {
-      h += stateEmpty(f ? 'No admin accounts match that filter' : 'No admin accounts you can manage',
-                      f ? 'Clear the filter to see all accounts in scope.'
+      h += stateEmpty((f || anyChip) ? 'No admin accounts match that filter' : 'No admin accounts you can manage',
+                      (f || anyChip) ? 'Clear the filters to see all accounts in scope.'
                         : 'Admin accounts your role lets you manage appear here. Create one with + New admin above.');
       container.innerHTML = h;
       wireAccountGrid(container);
@@ -3436,7 +3542,7 @@
       h += '<tr class="acct-row' + (rowIx % 2 ? ' acct-alt' : '') + (flagged ? ' acct-flagged' : '') + (acctGridState.sel.has(a.userPrincipalName) ? ' acct-picked' : '') + '"' + (flagged ? ' style="background:#fff8f6;"' : '') + '>' +
         '<td><input type="checkbox" class="acctSel" data-upn="' + escapeHtml(a.userPrincipalName) + '"' + (acctGridState.sel.has(a.userPrincipalName) ? ' checked' : '') +
           ((a.readOnly || a.upnMissing) ? ' disabled title="' + escapeHtml(a.readOnlyWhy || 'read-only') + '"' : '') + '></td>' +
-        '<td><div style="font-weight:600;">' + escapeHtml(a.displayName || a.userName || a.userPrincipalName) +
+        '<td><div style="font-weight:600;">' + escapeHtml(a.displayName || a.userName || a.userPrincipalName) + acctPrivBadge(a) +
           (a.source === 'central' ? ' <span class="acctCentralBadge" title="' + escapeHtml(a.readOnlyWhy || 'central admin') + '" style="font-size:10px;font-weight:600;color:#8250df;border:1px solid #d8b9ff;border-radius:10px;padding:0 6px;">central</span>' : '') + '</div>' +
           (a.upnMissing
             ? '<div class="acct-upn-missing" style="color:#cf222e;font-size:11px;font-weight:600;" title="' + escapeHtml(a.upnMissingWhy || '') + '">⚠ no UPN (' + escapeHtml(a.userName || '') + ') — not a valid admin</div></td>'
@@ -4172,6 +4278,20 @@
         const f2 = document.getElementById('acctFilter'); if (f2) { f2.focus(); f2.setSelectionRange(f2.value.length, f2.value.length); }
       }); };
     }
+    // 100.29: a chip toggles its value in its group (remembered per browser); Clear filters drops chips + text.
+    container.querySelectorAll('.acct-fchip').forEach(b => {
+      b.onclick = () => {
+        const c = acctChips(); const g = b.dataset.group; const v = b.dataset.value || '';
+        const list = c[g] || (c[g] = []); const ix = list.indexOf(v);
+        if (ix >= 0) list.splice(ix, 1); else list.push(v);
+        acctChipsSave(c); renderAccountGrid(container);
+      };
+    });
+    const clr = document.getElementById('acctClearFilters');
+    if (clr) clr.onclick = () => {
+      const c = acctChips(); ACCT_FILTER_GROUPS.forEach(g => { c[g.id] = []; });
+      acctChipsSave(c); acctGridState.filter = ''; renderAccountGrid(container);
+    };
     const nw = document.getElementById('acctNew');
     // 🔴 §70.20 (operator 2026-09-13: "new admin button is not working"): both buttons called a showTab function that does not
     // exist (the function is switchTab) -- every click threw a ReferenceError and did nothing. They open their wizards.
@@ -6780,6 +6900,19 @@
     return String(d.dimensionText || d.dimension || 'Pro Enterprise');
   }
   function adminLicenceUsage(d) { return (d && !d.loadError && d.usage && d.usage.admins) || null; }
+  // PURE (exported for the harness). §100.32 (owner 2026-10-09): WHY one Pro feature of Settings > Licence is licensed or
+  // not, from the server's verdict (d.pro[key].basis / basisText): "included in Pro Enterprise", "included in Pro Business
+  // (limits apply)", "included in Pro MSP", "needs the MSP licence", or the licence's own reason (framework §12.6a: the
+  // licence names the edition, the product maps it to features). An older server sends no basis: the locked row then
+  // shows its reason, a licensed row nothing.
+  function licProFeatureWhy(s) {
+    if (!s) return '';
+    const b = String(s.basis || '');
+    const words = { enterprise: 'included in Pro Enterprise', business: 'included in Pro Business (limits apply)', msp: 'included in Pro MSP', 'needs-msp': 'needs the MSP licence', listed: 'listed in the licence', 'not-listed': 'not listed in the licence' };
+    if (b === 'licence') return String(s.basisText || s.reason || '');
+    if (words[b]) return String(s.basisText || words[b]);
+    return s.state === 'locked' ? String(s.reason || '') : '';
+  }
   // PURE (exported for the harness): the admin-cap banner for one page -- '' below 90%, on Enterprise / Community, or unknown.
   //   warn (>= 90%) and at (= cap): AMBER; over (> cap): RED. Either way nothing is switched off -- it says so.
   function adminLicenceBannerHtml(d, page) {
@@ -7000,7 +7133,8 @@
     h += row('Edition', '<b id="licEdition">' + (pro ? 'Pro' : 'Community') + '</b>');
     // Framework §12.6: Pro Business (with the signed limits) or Pro Enterprise; the admin usage when the licence caps it.
     if (pro) h += row('Licence', '<b id="licDimension" data-dimension="' + esc(String(d.dimension || 'Pro Enterprise')) + '">' + esc(licenceDimensionText(d)) + '</b>' +
-      (String(d.dimension || '') === 'Pro Business' ? ' <span style="color:#57606a;">-- the same features as Pro Enterprise, for up to the number of managed admin accounts the licence covers</span>' : ''));
+      (String(d.dimension || '') === 'Pro Business' ? ' <span style="color:#57606a;">-- every single-tenant Pro feature, as Pro Enterprise, for up to the number of managed admin accounts the licence covers</span>'
+        : ' <span style="color:#57606a;">-- every single-tenant Pro feature is included, also the ones added after the licence was issued</span>'));
     const au = adminLicenceUsage(d);
     if (pro && au && au.cap !== null && au.cap !== undefined) {
       h += row('Admin accounts', '<span id="licAdminUsage" data-state="' + esc(String(au.state || '')) + '">' +
@@ -7042,7 +7176,11 @@
       proKeys.forEach(k => {
         const s = d.pro[k] || {};
         const word = s.state === 'ok' ? '<span style="color:#1a7f37;">licensed</span>' : s.state === 'grace' ? '<span style="color:#9a6700;">licensed (grace)</span>' : '<span style="color:#bc4c00;">Pro -- not licensed</span>';
-        h += '<tr data-feature="' + esc(k) + '" data-state="' + esc(s.state || '') + '"><td style="padding:2px 10px 2px 0;">' + esc(s.label || k) + '</td><td style="color:#57606a;padding-right:10px;">' + (s.scope === 'multi' ? 'multi-tenant' : 'single tenant') + '</td><td>' + word + '</td></tr>';
+        // §100.32: WHY -- "included in Pro Enterprise" / "included in Pro Business (limits apply)" / "included in Pro MSP", or
+        // "needs the MSP licence" / the licence's own reason (expired, another tenant). The server decides; the page only says it.
+        const why = licProFeatureWhy(s);
+        h += '<tr data-feature="' + esc(k) + '" data-state="' + esc(s.state || '') + '" data-basis="' + esc(String(s.basis || '')) + '"><td style="padding:2px 10px 2px 0;">' + esc(s.label || k) + '</td><td style="color:#57606a;padding-right:10px;">' + (s.scope === 'multi' ? 'multi-tenant' : 'single tenant') + '</td><td>' + word + '</td>' +
+          '<td class="lic-why" style="color:#57606a;padding-left:10px;">' + esc(why) + '</td></tr>';
       });
       h += '</table>';
     }
@@ -7312,12 +7450,13 @@
     const b = document.getElementById('updateRingBadge');
     // 🔒 2026-10-09 (owner, after three customers called about a header that said "failed" while PIM ran fine):
     // "it must not show failed, just the version and green, not anything about any pending".
-    // The header shows ONLY "ring N · <running version>", in the normal brand style, for EVERY state. No flag, no
-    // colour change, no failed / behind / held / pending / ahead word -- here or in the tooltip. The detail lives on
-    // the Jobs page (renderUpdateRingPanelInto), worded calmly; real updater failures still reach Invardia by telemetry.
+    // The header shows ONLY "ring N", in the normal brand style, for EVERY state (owner 2026-10-09: "any reason to show
+    // version two times" -- the version badge left of the edition already shows it). No flag, no colour change, no
+    // failed / behind / held / pending / ahead word -- here or in the tooltip. The detail lives on the Jobs page
+    // (renderUpdateRingPanelInto), worded calmly; real updater failures still reach Invardia by telemetry.
     const ver = String(v.runningVersion || '').replace(/^v/i, '');
     const ringPart = (v.recorded && v.ring) ? (v.ringLabel || '') : '';
-    b.textContent = (ringPart && ver) ? (ringPart + ' · ' + ver) : (ringPart || ver || 'not recorded');
+    b.textContent = ringPart || ver || 'not recorded';   // no ring recorded yet: the version, as before
     g.title = 'PIM Manager ' + (ver ? ver : '') + (ringPart ? ' on update ' + ringPart : '') + '.' +
       '\nA ring is changed on the update job by an operator, never from this page. Update details are on the Jobs page.';
     g.style.display = '';
@@ -9655,6 +9794,83 @@
     };
   }
 
+  // ===================================================================
+  // PIM 100.24 DEPT-OWNER-ACCESS (owner 2026-10-09: "it wuld be nice that the reader access is default for any dept owners
+  // defined with their normal access (tick on by default, maybe options to create admin account there as well if dept
+  // manager fx needs business central admininistator role"). A NEW owner (Access > Departments & owners, Get Started)
+  // shows "Give PIM Manager Reader access (their normal account)" -- ON by default (setting DepartmentOwnersGetReader) --
+  // and "Also create an admin account" (off), which opens the New admin account wizard pre-filled for that person. The
+  // server adds the Reader through the MAIL-2 audited path: unknown users only, an existing role is never changed; an owner
+  // who is removed keeps the role and is listed for the admin to decide. tests/Test-PimDeptOwnerAccess.ps1.
+  // ===================================================================
+  var _deptOwnerLastResult = '';
+  // PURE: the owners in `cur` that are not in `orig` (case-insensitive; '|' ';' ',' separated), in typed order.
+  function pimDeptNewOwners(orig, cur) {
+    const split = (v) => String(v || '').split(/[|;,]/).map(x => x.trim()).filter(Boolean);
+    const had = {}; split(orig).forEach(x => { had[x.toLowerCase()] = true; });
+    const seen = {}, out = [];
+    split(cur).forEach(x => { const k = x.toLowerCase(); if (!had[k] && !seen[k]) { seen[k] = true; out.push(x); } });
+    return out;
+  }
+  // PURE: the two choices for each new owner. readerOn = the tick's default.
+  function pimDeptOwnerAccessHtml(owners, readerOn) {
+    const list = (owners || []).filter(Boolean);
+    if (!list.length) return '';
+    const esc = escapeHtml;
+    let h = '<div class="dept-owner-access" style="margin-top:4px;padding:6px 8px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;font-size:11.5px;">';
+    list.forEach(o => {
+      h += '<div class="dept-owner-new" data-owner="' + esc(o) + '" style="margin:2px 0;"><b>' + esc(o) + '</b><br>' +
+        '<label style="margin-right:10px;"><input type="checkbox" class="deptOwnerReader" data-owner="' + esc(o) + '"' + (readerOn !== false ? ' checked' : '') + '> Give PIM Manager Reader access (their normal account)</label>' +
+        '<label><input type="checkbox" class="deptOwnerAdmin" data-owner="' + esc(o) + '"> Also create an admin account</label></div>';
+    });
+    h += '<div class="dept-owner-help" style="color:#57606a;margin-top:2px;">Approving others never needs an admin account; create one only if this person will hold a privileged role.</div></div>';
+    return h;
+  }
+  // PURE: what the save did -- who was added as Reader, who already had a role (unchanged), who was removed as an owner but
+  // keeps their role, and a "Create admin account" button per owner whose admin tick was on.
+  function pimDeptOwnerReaderResultHtml(r, adminWanted) {
+    const esc = escapeHtml, parts = [];
+    const added = (r && Array.isArray(r.added)) ? r.added : [];
+    const known = (r && Array.isArray(r.known)) ? r.known : [];
+    const gone = (r && Array.isArray(r.removedKeepAccess)) ? r.removedKeepAccess : [];
+    const adm = (adminWanted || []).filter(a => a && a.upn);
+    if (added.length) parts.push('<div class="dept-owner-added" style="padding:6px 10px;background:#ddf4ff;border:1px solid #54aeff;border-radius:6px;margin-bottom:4px;"><b>' + esc(added.join(', ')) + '</b> ' + (added.length === 1 ? 'was' : 'were') + ' <b>added as Reader</b> in PIM Manager (their normal account), so the links in their mails open. No existing role was changed.</div>');
+    if (known.length) parts.push('<div class="dept-owner-known" style="padding:6px 10px;background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;margin-bottom:4px;">Already PIM Manager users, role unchanged: ' + known.map(k => esc(String(k.identity || k)) + (k.role ? ' (' + esc(String(k.role)) + ')' : '')).join(', ') + '.</div>');
+    if (gone.length) parts.push('<div class="dept-owner-removed" style="padding:6px 10px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;margin-bottom:4px;">No longer an owner, but <b>keeps their PIM Manager role</b>: ' + gone.map(g => esc(String(g.identity)) + ' (' + esc(String(g.role || '')) + ')').join(', ') + ' &mdash; remove it under Manager access &amp; roles if it is no longer needed.</div>');
+    if (r && r.error) parts.push('<div class="dept-owner-error" style="padding:6px 10px;background:#ffebe9;border:1px solid #ff8182;border-radius:6px;margin-bottom:4px;">' + esc(String(r.error)) + '</div>');
+    if (adm.length) parts.push('<div class="dept-owner-adminbtns" style="margin-bottom:4px;">' + adm.map(a => '<button type="button" class="btn-sec deptOwnerAdminBtn" data-upn="' + esc(a.upn) + '" data-dept="' + esc(a.department || '') + '">Create admin account for ' + esc(a.upn) + '</button>').join(' ') + '</div>');
+    return parts.join('');
+  }
+  // PURE: the admin-account wizard's pre-fill for a department owner -- name from the display name (or the UPN's local
+  // part), the department, the owner's normal account (PIM mail about the admin goes there), tier default T1.
+  function pimAdminPrefillFromOwner(upn, department, displayName) {
+    const cap = (w) => w ? w.charAt(0).toUpperCase() + w.slice(1) : '';
+    let words = String(displayName || '').trim().split(/\s+/).filter(Boolean);
+    if (!words.length) words = String(upn || '').split('@')[0].split(/[._-]+/).filter(Boolean).map(w => cap(w.toLowerCase()));
+    return { first: words[0] || '', last: words.slice(1).join(' '), department: String(department || '').trim(),
+             sourceUpn: String(upn || '').trim(), tier: 'T1', level: 'L3', purpose: 'Day2Day', fromOwner: true };
+  }
+  // Apply that pre-fill onto the wizard state (wizardAdminDefaultState). Everything stays editable.
+  function pimApplyAdminWizardPrefill(s, p) {
+    if (!s || !p) return s;
+    if (p.first) s.first = String(p.first);
+    if (p.last) s.last = String(p.last);
+    s.purpose = p.purpose || 'Day2Day'; s.useLongForm = false;
+    s.tier = p.tier || 'T1'; s.level = p.level || 'L3';
+    s.department = String(p.department || '');
+    s.mailForwardAddress = String(p.sourceUpn || '');
+    s.prefillNote = 'Pre-filled for department owner <b>' + escapeHtml(s.mailForwardAddress) + '</b>' + (s.department ? ' (' + escapeHtml(s.department) + ')' : '') +
+      ': PIM&rsquo;s mail about this admin account goes to their normal account. The name follows your naming convention; everything stays editable.';
+    return s;
+  }
+  function pimOpenOwnerAdminWizard(upn, department) { return wizardAdmin(pimAdminPrefillFromOwner(upn, department)); }
+  // The "Create admin account for ..." buttons in the result note (rendered after a save, also after the re-render).
+  document.addEventListener('click', (ev) => {
+    const b = ev.target && ev.target.closest && ev.target.closest('.deptOwnerAdminBtn');
+    if (!b) return;
+    try { pimOpenOwnerAdminWizard(b.dataset.upn, b.dataset.dept); } catch (_) { }
+  });
+
   async function renderDepartmentsPage() {
     const body = document.getElementById('departmentsBody');
     if (!body) return;
@@ -9686,12 +9902,15 @@
     h += `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">The source the delegation-approval workflow and the mail use to resolve <b>department → owner(s)/approver(s)</b>. ` +
          `<b>Owners</b> here = the <u>people</u> (pipe/semicolon/comma-separated UPNs) who approve / own this department — not the <code>{Owner}</code> initials token used in name patterns. ` +
          `A department, not a named person, sponsors a delegation, so it survives reorganisations.</div>`;
+    // PIM 100.24: the result of the last save (who was added as Reader, who keeps a role), shown once after the re-render.
+    if (_deptOwnerLastResult) { h += `<div id="deptOwnerResult">${_deptOwnerLastResult}</div>`; _deptOwnerLastResult = ''; }
+    else h += `<div id="deptOwnerResult"></div>`;
     h += `<table class="set-table" id="setDeptsTbl"><tr><th>Department</th><th>Owners / approvers (UPNs)</th><th>Contact</th><th>Notes</th>${canEdit ? '<th></th>' : ''}</tr>`;
     (s.departments || []).forEach(d => {
       const owners = Array.isArray(d.owners) ? d.owners.join('; ') : (d.owners || '');
       h += `<tr class="deptRow">` +
         `<td><input class="setDeptName" value="${esc(d.name || '')}"${ro} style="width:180px"></td>` +
-        `<td><input class="setDeptOwners" value="${esc(owners)}"${ro} style="width:260px"></td>` +
+        `<td><input class="setDeptOwners" value="${esc(owners)}" data-orig="${esc(owners)}"${ro} style="width:260px"><div class="deptOwnerNew"></div></td>` +
         `<td><input class="setDeptContact" value="${esc(d.contact || '')}"${ro} style="width:200px"></td>` +
         `<td><input class="setDeptNotes" value="${esc(d.notes || '')}"${ro} style="width:160px"></td>` +
         (canEdit ? `<td><button class="btn-sec setRowDel" title="remove">✕</button></td>` : '') + `</tr>`;
@@ -9699,6 +9918,10 @@
     h += `</table>`;
     if (!(s.departments || []).length) h += `<div style="color:#9a6700;font-size:12px;margin-top:6px;">No departments are defined yet &mdash; import them from Entra or add them here.</div>`;
     if (canEdit) h += `<div style="margin-top:6px;"><button class="btn-sec" id="setDeptsAdd">+ Add department</button> <button class="btn" id="setDeptsSave">Save departments</button> <span class="setMsg" id="setDeptsMsg"></span></div>`;
+    // PIM 100.24 DEPT-OWNER-ACCESS: the default of the per-owner Reader tick (setting DepartmentOwnersGetReader, default ON).
+    const ownerReaderDefault = s.departmentOwnersGetReader !== false;
+    h += `<div style="margin-top:8px;font-size:12px;color:#57606a;"><label><input type="checkbox" id="deptOwnerReaderDefault"${ownerReaderDefault ? ' checked' : ''}${ro}> ` +
+         `New owners get PIM Manager Reader access (their normal account) by default</label> ${settingInfoBtn('DepartmentOwnersGetReader')} <span class="setMsg" id="deptOwnerReaderDefaultMsg"></span></div>`;
     h += `</div>`;
     // Import departments from Entra by naming convention (default ORG-*). Pulls matching Entra groups in as departments
     // (owners from the group's owners), idempotent upsert -- re-import updates, never duplicates, manual depts kept.
@@ -9733,18 +9956,60 @@
       const tbl = document.getElementById('setDeptsTbl');
       const tr = document.createElement('tr');
       tr.className = 'deptRow';
-      tr.innerHTML = `<td><input class="setDeptName" style="width:180px"></td><td><input class="setDeptOwners" style="width:260px"></td><td><input class="setDeptContact" style="width:200px"></td><td><input class="setDeptNotes" style="width:160px"></td>` +
+      tr.innerHTML = `<td><input class="setDeptName" style="width:180px"></td><td><input class="setDeptOwners" data-orig="" style="width:260px"><div class="deptOwnerNew"></div></td><td><input class="setDeptContact" style="width:200px"></td><td><input class="setDeptNotes" style="width:160px"></td>` +
         `<td><button class="btn-sec setRowDel" title="remove">✕</button></td>`;
       tbl.appendChild(tr);
       tr.querySelector('.setRowDel').onclick = () => tr.remove();
       pimWireSettingsPickers();
     };
+    // PIM 100.24: a NEW owner in a row shows the two choices under its Owners cell -- Reader for their normal account (ON
+    // by default) and "Also create an admin account" (off). Re-drawn on every change of the owners; ticks are kept.
+    const refreshOwnerAccess = (tr) => {
+      const inp = tr && tr.querySelector('.setDeptOwners'), host = tr && tr.querySelector('.deptOwnerNew');
+      if (!inp || !host) return;
+      const keep = {};
+      host.querySelectorAll('input[data-owner]').forEach(c => { keep[c.className + '|' + String(c.dataset.owner).toLowerCase()] = c.checked; });
+      const fresh = pimDeptNewOwners(inp.dataset.orig || '', inp.value);
+      host.innerHTML = pimDeptOwnerAccessHtml(fresh, ownerReaderDefault);
+      host.querySelectorAll('input[data-owner]').forEach(c => { const k = c.className + '|' + String(c.dataset.owner).toLowerCase(); if (Object.prototype.hasOwnProperty.call(keep, k)) c.checked = keep[k]; });
+    };
+    const deptTbl = document.getElementById('setDeptsTbl');
+    if (deptTbl) {
+      const onOwners = (ev) => { const t = ev.target; if (t && t.classList && t.classList.contains('setDeptOwners')) refreshOwnerAccess(t.closest('tr')); };
+      deptTbl.addEventListener('change', onOwners); deptTbl.addEventListener('input', onOwners);
+    }
+    const defTick = document.getElementById('deptOwnerReaderDefault');
+    if (defTick) defTick.onchange = async () => {
+      const m = document.getElementById('deptOwnerReaderDefaultMsg');
+      try { await api('PUT', '/api/settings/department-owners-reader', { enabled: !!defTick.checked }); if (m) { m.textContent = 'Saved ✓'; m.style.color = '#116329'; } }
+      catch (e) { defTick.checked = !defTick.checked; if (m) { m.textContent = 'Not saved: ' + ((e && e.body && e.body.error) || e.message); m.style.color = '#cf222e'; } }
+    };
+    // The per-owner choices at save time: who gets Reader, and who wants an admin account (with their department).
+    const ownerChoices = () => {
+      const reader = [], admin = [];
+      document.querySelectorAll('#setDeptsTbl tr.deptRow').forEach(tr => {
+        const dn = ((tr.querySelector('.setDeptName') || {}).value || '').trim();
+        tr.querySelectorAll('input.deptOwnerReader').forEach(c => { if (c.checked && reader.indexOf(c.dataset.owner) < 0) reader.push(c.dataset.owner); });
+        tr.querySelectorAll('input.deptOwnerAdmin').forEach(c => { if (c.checked) admin.push({ upn: c.dataset.owner, department: dn }); });
+      });
+      return { reader, admin };
+    };
     const saveDepts = async (arr, confirmed) => {
       const msg = document.getElementById('setDeptsMsg');
       msg.textContent = 'Saving…'; msg.style.color = '#57606a';
+      const ch = ownerChoices();
       try {
-        SETTINGS_DATA = await api('PUT', '/api/settings/departments', confirmed ? { value: arr, confirm: true } : { value: arr });
-        msg.textContent = 'Saved ✓'; msg.style.color = '#116329'; setTimeout(renderDepartmentsPage, 600);
+        // grantReaderToOwners + readerOwners: exactly the owners whose Reader tick is on (the server adds unknown users only).
+        const req = { value: arr, grantReaderToOwners: ch.reader.length > 0, readerOwners: ch.reader };
+        if (confirmed) req.confirm = true;
+        SETTINGS_DATA = await api('PUT', '/api/settings/departments', req);
+        _deptOwnerLastResult = pimDeptOwnerReaderResultHtml(SETTINGS_DATA && SETTINGS_DATA.ownerReaders, ch.admin);
+        const res = document.getElementById('deptOwnerResult'); if (res) res.innerHTML = _deptOwnerLastResult;
+        msg.textContent = 'Saved ✓'; msg.style.color = '#116329';
+        // "Also create an admin account": the admin-account wizard opens pre-filled for the (first) ticked owner; the others
+        // are buttons in the result note.
+        if (ch.admin.length) { try { pimOpenOwnerAdminWizard(ch.admin[0].upn, ch.admin[0].department); } catch (_) { } }
+        setTimeout(renderDepartmentsPage, 600);
       } catch (e) {
         // BUG-177: a save that would remove departments is a 409 the operator confirms -- the server's words, verbatim.
         if (e && e.status === 409 && e.body && e.body.confirmRequired && !confirmed) {
@@ -9769,6 +10034,7 @@
         if (r.settings) SETTINGS_DATA = r.settings;
         const sm = r.summary || {};
         msg.textContent = `Imported ✓ created ${sm.created || 0}, updated ${sm.updated || 0}, skipped ${sm.skipped || 0}`;
+        _deptOwnerLastResult = pimDeptOwnerReaderResultHtml(r.ownerReaders, []);   // PIM 100.24: who was added as Reader
         msg.style.color = '#116329';
         setTimeout(renderDepartmentsPage, 900);
       } catch (e) { msg.textContent = 'Failed: ' + e.message; msg.style.color = '#cf222e'; }
@@ -9791,6 +10057,7 @@
           if (r.settings) SETTINGS_DATA = r.settings;
           const sm = r.summary || {};
           msg.textContent = `Imported ✓ created ${sm.created || 0}, updated ${sm.updated || 0}, renamed ${sm.renamed || 0}`;
+          _deptOwnerLastResult = pimDeptOwnerReaderResultHtml(r.ownerReaders, []);   // PIM 100.24: who was added as Reader
           msg.style.color = '#116329';
           setTimeout(renderDepartmentsPage, 900);
         } catch (e) { msg.textContent = 'Failed: ' + e.message; msg.style.color = '#cf222e'; }
@@ -11240,9 +11507,9 @@
               (it.type === 'extra' ? (it.keep
                   ? '<button class="driftKeepBtn driftImportBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;color:#1a7f37;" data-sel="' + esc(sel) + '" title="Import into PIM: stage the PIM row that defines this EXISTING ' + (it.keep.kind === 'group' ? 'group (adopted by its exact name -- never a second group)' : 'item') + ' (' + esc(it.keep.base) + '), so PIM manages it from now on -- Review &amp; commit">Import into PIM</button> '
                   : '<button class="btn-sec" disabled style="font-size:10.5px;padding:1px 6px;margin-top:2px;" title="' + esc(it.keepWhy || 'cannot be imported from here') + '">Import into PIM</button> ') : '') +
-              (it.type === 'extra' ? ((it.revoke || it.retire)
-                  ? (DRIFT_QUEUED.has(String(sel)) ? '<span class="driftQueued" style="font-size:10.5px;color:#cf222e;" title="Its removal is queued or staged: commit it, the engine carries it out">&#10003; ' + (it.revoke ? 'queued for removal' : 'staged for deletion') + '</span> '
-                    : '<button class="driftDeleteBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;color:#cf222e;" data-sel="' + esc(sel) + '" title="' + (it.revoke ? 'Delete: queue its removal (a revoke, committed on the Queue -- the engine carries it out)' : 'Delete: stage the group&rsquo;s retirement (Lifecycle=Retire, Review &amp; commit) -- the engine deletes it only where group retirement is switched on') + '">Delete</button> ')
+              (it.type === 'extra' ? ((it.revoke || driftGroupDeleteOf(it))
+                  ? (DRIFT_QUEUED.has(String(sel)) ? '<span class="driftQueued" style="font-size:10.5px;color:#cf222e;" title="Its removal is queued: commit it, the engine carries it out">&#10003; ' + (it.revoke ? 'queued for removal' : 'DELETE queued -- commit it on its own') + '</span> '
+                    : '<button class="driftDeleteBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;color:#cf222e;" data-sel="' + esc(sel) + '" title="' + (it.revoke ? 'Delete: queue its removal (a revoke, committed on the Queue -- the engine carries it out)' : 'Delete: queue ONE red DELETE item for this whole group. It is committed on its own (Commit this DELETE in the Change queue); the engine then deletes the group on its next run, also when group retirement is switched off') + '">Delete</button> ')
                   : '<button class="btn-sec" disabled style="font-size:10.5px;padding:1px 6px;margin-top:2px;" title="' + esc(it.revokeWhy || 'cannot be deleted from here') + '">Delete</button> ') : '') +
               '<button class="driftIgnoreBtn btn-sec" style="font-size:10.5px;padding:1px 6px;margin-top:2px;" data-scope="' + esc(s.scope) + '" data-key="' + esc(it.key) + '" data-label="' + esc(it.label || it.key) + '" data-type="' + esc(it.type) + '" title="Hide this finding from the counts, this page and the drift mail (listed below as ignored -- Re-add brings it back)">Ignore</button></div>' : '') +
             '</td></tr>');
@@ -11272,7 +11539,7 @@
         // removes, deletes or imports an extra -- a ticked extra is left out of what it sends. Each extra gets an explicit choice.
         '<div id="driftActionsHelp" style="color:#57606a;font-size:11px;margin-top:4px;"><b>Apply now</b> fixes <b>missing</b> and <b>changed</b> items: it queues an engine reconcile (started now) that re-applies PIM&rsquo;s desired state &mdash; create and update only, it removes nothing. It never changes an <b>extra</b>. ' +
         'For an extra choose one: <b style="color:#1a7f37;">Import into PIM</b> stages the PIM row that defines the existing object, so PIM manages it from now on (Review &amp; commit &mdash; nothing new is created); ' +
-        '<b style="color:#cf222e;">Delete</b> removes it from the tenant (a queued revoke, or for a whole group its retirement &mdash; you commit it, the engine carries it out, every guard and approval applies); ' +
+        '<b style="color:#cf222e;">Delete</b> removes it from the tenant (a queued revoke; for a whole group ONE red DELETE item that you commit <b>on its own</b> &mdash; the engine carries it out, every guard and approval applies); ' +
         '<b>Ignore</b> just hides it here and in the drift mail (listed below, Re-add brings it back; nothing is changed).</div>');
     } else if (!canApply && items.length) {
       h.push('<div style="color:#8c959f;font-size:11.5px;margin-top:6px;">Admin role required to apply remediation.</div>');
@@ -11300,19 +11567,19 @@
     body.querySelectorAll('.driftDeleteBtn').forEach(b => b.onclick = async (ev) => {
       ev.stopPropagation(); b.disabled = true;
       const it = Object.assign({ _sel: b.dataset.sel }, bySel[b.dataset.sel]);
-      // DRIFT-EXTRAS (100.12): a whole GROUP is deleted through its staged retirement, a delegation through its queued revoke.
-      const ok = it.revoke ? await driftDeleteExtras([it], say) : await driftRetireExtras([it], say);
-      if (ok) { b.outerHTML = '<span class="driftQueued" style="font-size:10.5px;color:#cf222e;">&#10003; ' + (it.revoke ? 'queued for removal' : 'staged for deletion') + '</span>'; } else b.disabled = false;
+      // DRIFT-EXTRAS (100.12) / PIM 100.22 (d): a whole GROUP becomes ONE queued DELETE (its own commit), a delegation its queued revoke.
+      const ok = it.revoke ? await driftDeleteExtras([it], say) : await driftGroupDeleteExtras([it], say);
+      if (ok) { b.outerHTML = '<span class="driftQueued" style="font-size:10.5px;color:#cf222e;">&#10003; ' + (it.revoke ? 'queued for removal' : 'DELETE queued -- commit it on its own') + '</span>'; } else b.disabled = false;
     });
     body.querySelectorAll('.driftKeepBtn').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); driftKeepExtras([bySel[b.dataset.sel]], say); });
     const bulkDel = document.getElementById('govDriftDelete'), bulkKeep = document.getElementById('govDriftKeep'), bulkIgn = document.getElementById('govDriftIgnore');
     if (bulkDel) bulkDel.onclick = async () => {
       const ticked = tickedSel().filter(k => bySel[k] && bySel[k].type === 'extra').map(k => Object.assign({ _sel: k }, bySel[k]));
-      const rev = ticked.filter(x => x.revoke), ret = ticked.filter(x => !x.revoke && x.retire);
+      const rev = ticked.filter(x => x.revoke), ret = ticked.filter(x => !x.revoke && driftGroupDeleteOf(x));
       if (!rev.length && !ret.length) { say('Tick at least one extra that can be deleted.', true); return; }
       let ok = false;
       if (rev.length) ok = (await driftDeleteExtras(rev, say)) || ok;
-      if (ret.length) ok = (await driftRetireExtras(ret, say)) || ok;
+      if (ret.length) ok = (await driftGroupDeleteExtras(ret, say)) || ok;
       if (ok) renderDrift();
     };
     if (bulkKeep) bulkKeep.onclick = () => { const its = tickedSel().map(k => bySel[k]).filter(x => x && x.type === 'extra' && x.keep); if (!its.length) { say('Tick at least one extra that can be imported into PIM.', true); return; } driftKeepExtras(its, say); };
@@ -11539,45 +11806,54 @@
     try { valRevalidateAfterFix(); } catch (_) { }
     say('Import: staged ' + added + ' row(s)' + (had ? ' (' + had + ' already defined in PIM under the same name or tag -- nothing added for them)' : '') + ' -- review and commit them under Review & commit (shown as IMPORT); the drift clears after the next check.');
   }
-  // DRIFT-EXTRAS: DELETE a whole GROUP that is an extra = stage its RETIREMENT (its definition row with Lifecycle=Retire). That is
-  // the engine's one group-deletion path, with all of its guards: you commit it (and the second approver, where set), the
-  // engine deletes only where group retirement is switched on (Settings), only a name that carries the tenant's naming prefix
-  // and is UNIQUE live, inside the removal budget. A tier-0 / role-assignable group is said out loud first.
-  async function driftRetireExtras(its, say) {
-    const stage = (its || []).filter(it => it && it.retire && it.retire.row && it.retire.row.GroupName && !DRIFT_QUEUED.has(String(it._sel || (it.scope + '|' + it.key))));
-    if (!stage.length) { say('Already staged for deletion -- commit it under Review & commit.', false); return false; }
-    const names = stage.map(s => String(s.retire.row.GroupName));
+  // PIM 100.22 (d). PURE: the group a Drift extra's Delete removes -- { groupId, groupName } from the 2.4.538 field 'groupDelete',
+  // or from the 100.12 'retire' descriptor of a check stored before the update; null when the item is not a whole group.
+  function driftGroupDeleteOf(it) {
+    if (!it) return null;
+    const gd = it.groupDelete;
+    if (gd && gd.groupId && gd.groupName) return { groupId: String(gd.groupId), groupName: String(gd.groupName) };
+    const rt = it.retire;
+    if (rt && rt.groupId && rt.row && rt.row.GroupName) return { groupId: String(rt.groupId), groupName: String(rt.row.GroupName) };
+    return null;
+  }
+  // 🔒 PIM 100.22 (d) (owner 2026-10-09: "delete must go into the queue with extra commit" / "queue + own commit, then delete").
+  // DELETE a whole GROUP that is an extra = ONE red DELETE item in the change queue (POST /api/drift/group-delete), after a typed
+  // DELETE and the tier-0 warning. It is committed ON ITS OWN ("Commit this DELETE" in the Change queue -- Commit all and Commit
+  // selected skip it and say so); the engine then deletes the group on its next run, also when group retirement is switched
+  // off, within the removal budget and behind the prefix / unique-name / not-defined / break-glass guards.
+  async function driftGroupDeleteExtras(its, say) {
+    const stage = (its || []).filter(it => driftGroupDeleteOf(it) && !DRIFT_QUEUED.has(String(it._sel || (it.scope + '|' + it.key))));
+    if (!stage.length) { say('Already queued for deletion -- commit it on its own in the Change queue (Commit this DELETE).', false); return false; }
+    const names = stage.map(s => driftGroupDeleteOf(s).groupName);
     const tier0 = names.filter(n => /(^|[-_])t0([-_]|$)|tier.?0|global.?admin|privilegedrole|rootowner|highpriv/i.test(n));
     const typed = window.prompt('DELETE ' + stage.length + ' group(s) from the tenant?\n\n' + names.slice(0, 8).map(n => '- ' + n).join('\n') + (names.length > 8 ? '\n...' : '') +
       (tier0.length ? '\n\nWARNING: ' + tier0.length + ' of them look like TIER-0 / highly privileged groups. Deleting one removes every member and every role it holds. If your own infrastructure code created it, delete it THERE instead, or it will simply be created again.' : '') +
-      '\n\nThis stages the group\'s retirement (Lifecycle=Retire). Nothing happens until you commit it under Review & commit; the engine then empties and deletes the group, and only where group retirement is switched on. To keep it, use Import into PIM or Ignore instead.\n\nType DELETE to stage the deletion:', '');
-    if (String(typed || '').trim() !== 'DELETE') { say('Nothing staged for deletion.', false); return false; }
-    // the retirement row is filed where the snapshot says (the engine's retirement reads every group-definition entity)
-    const base = String(stage[0].retire.base || 'PIM-Definitions-Roles');
-    const data = await loadCsv(base);
-    ensurePending(base, data.header, data.rows);
-    const pc = pendingChanges[base];
-    let n = 0, flipped = 0;
+      '\n\nEach group becomes ONE red DELETE item in the change queue. Nothing happens until you commit it ON ITS OWN (Commit this DELETE in the Change queue -- Commit all skips it). The engine then empties and deletes the group on its next run, also when group retirement is switched off. To keep it, use Import into PIM or Ignore instead.\n\nType DELETE to queue the deletion:', '');
+    if (String(typed || '').trim() !== 'DELETE') { say('Nothing queued for deletion.', false); return false; }
+    let n = 0, unstaged = 0; const bad = [];
     for (const s of stage) {
-      const r0 = Object.assign({}, s.retire.row);
-      r0.GroupTag = r0.GroupTag || driftTagFromGroupName(r0.GroupName);
-      // the group is already staged (an Import a moment ago) -> that row becomes the retirement, never a second row
-      const ex = pc.rows.find(r => String(r.GroupName || '').trim().toLowerCase() === String(r0.GroupName).trim().toLowerCase());
-      if (ex) { if (pc.header.indexOf('Lifecycle') < 0) pc.header.push('Lifecycle'); ex.Lifecycle = 'Retire'; flipped++; driftStagedMark(base, ex, 'delete'); }
-      else {
-        const dup = await driftGroupDefinedAnywhere(r0.GroupName, r0.GroupTag);
-        if (dup) { say('"' + r0.GroupName + '" is already defined in PIM (' + dup.base + ') -- retire it on its own page (Lifecycle = Retire); nothing staged here.', true); continue; }
-        const row = {}; pc.header.forEach(h => { row[h] = ''; });
-        Object.keys(r0).forEach(k => { row[k] = r0[k]; if (pc.header.indexOf(k) < 0) pc.header.push(k); });
-        pc.rows.push(row); driftStagedMark(base, row, 'delete');
+      const g = driftGroupDeleteOf(s);
+      // an Import of the same group staged a moment ago would make PIM DEFINE it (and the engine refuses to delete a defined
+      // group) -- the Delete wins: the staged import row is taken out again, never committed alongside the delete
+      for (const k of DRIFT_GROUP_KINDS) {
+        const pc = pendingChanges['PIM-Definitions-' + k];
+        if (!pc || !Array.isArray(pc.rows)) continue;
+        const before = pc.rows.length;
+        // (an EXTRA has no stored definition by name, so the only row with its name here is the staged import)
+        pc.rows = pc.rows.filter(r => String(r.GroupName || '').trim().toLowerCase() !== g.groupName.trim().toLowerCase());
+        unstaged += before - pc.rows.length;
       }
-      n++;
-      DRIFT_QUEUED.add(String(s._sel || (s.scope + '|' + s.key)));
+      try {
+        const r = await api('POST', '/api/drift/group-delete', { groupId: g.groupId, groupName: g.groupName, confirm: 'DELETE' });
+        if (r && r.queued) { n++; DRIFT_QUEUED.add(String(s._sel || (s.scope + '|' + s.key))); }
+      } catch (e) { bad.push(g.groupName + ': ' + ((e && e.body && e.body.error) || e.message)); }
     }
-    if (!n) return false;
-    markBadges();
-    try { valRevalidateAfterFix(); } catch (_) { }
-    say('Delete: staged the retirement of ' + n + ' group(s)' + (flipped ? ' (' + flipped + ' staged import(s) turned into the deletion)' : '') + ' -- commit it under Review & commit (shown in red as DELETE); the engine deletes the group where group retirement is switched on.');
+    if (unstaged) { try { markBadges(); } catch (_) { } }
+    try { refreshQueueBadge(); } catch (_) { }
+    if (!n) { say('Nothing queued for deletion' + (bad.length ? ': ' + bad.join('; ') : '.'), true); return false; }
+    say('Delete: queued ' + n + ' DELETE item(s)' + (unstaged ? ' (the staged import of the same group was taken out again)' : '') +
+      ' -- each is committed ON ITS OWN: Commit this DELETE in the Change queue (Pending changes). The engine then deletes the group on its next run.' +
+      (bad.length ? ' Not queued: ' + bad.join('; ') : ''), !!bad.length);
     return true;
   }
 
@@ -14482,7 +14758,10 @@
   // MAIL-NAMING (100.14, owner 2026-10-09: "we must be able to define the name of the shared mailbox ... it must be
   // possible to define as parameter on the scripts" / "you build the cmdlet after user fills in the name of the shared
   // mailbox"): mb = { name, domain, displayName } as step 1 has them NOW -- the command carries exactly those values.
-  function mailPsArg(x) { const t = String(x == null ? '' : x).trim(); return /^[A-Za-z0-9._@-]+$/.test(t) ? t : "'" + t.replace(/'/g, "''") + "'"; }
+  function mailPsArg(x) {
+    const t = String(x == null ? '' : x).trim();
+    return /^[A-Za-z0-9._@-]+$/.test(t) ? t : "'" + t.replace(/'/g, "''") + "'";
+  }
   function mailSetupCmdMailbox(m, mb) {
     const s = (m && m.setup) || {};
     mb = mb || (m && m.mailbox) || {};
@@ -14630,7 +14909,10 @@
     // MAIL-STEP-PROOF: the test mail also queues the ENGINE's own test send; its row is 'waiting' (information, not open)
     // until that proof lands -- the rows are re-read (mailWatchEngineProof, bounded) and redrawn here when it does.
     const note = t ? mailTestMessage(t) : ('Not sent: ' + tErr);
-    const senderHtml = '<div class="mbxUsed" style="font-size:12px;margin-top:6px;">Sender: <b>' + escapeHtml(String((used && used.used && used.used.sender) || (used && used.sender) || '')) + '</b> -- ' + escapeHtml(note) + '</div>';
+    // 100.25 item 4: the address the customer chose; the UPN Microsoft Graph sends by (BUG-296) only as its detail
+    const uu = (used && used.used) || {}, uAddr = String(uu.address || ''), uKey = String(uu.sender || '');
+    const senderTxt = (uAddr && uKey && uAddr.toLowerCase() !== uKey.toLowerCase()) ? uAddr + ' (mailbox UPN ' + uKey + ')' : String(uKey || uAddr || (used && (used.senderShown || used.sender)) || '');
+    const senderHtml = '<div class="mbxUsed" style="font-size:12px;margin-top:6px;">Sender: <b>' + escapeHtml(senderTxt) + '</b> -- ' + escapeHtml(note) + '</div>';
     if (out) out.innerHTML = senderHtml + mailCheckLinesHtml(chk && chk.checks, false);
     if (out) mailMarkEngineQueued(out, t);
     if (out && t && t.engineTest && t.engineTest.queued) {
@@ -15230,6 +15512,10 @@
           '<div class="gs-sub">Add a department</div>' +
           '<label class="gs-l" for="gsDeptName">Name</label><input type="text" id="gsDeptName" name="deptName" placeholder="Finance">' + gsErr('deptName') +
           '<label class="gs-l" for="gsDeptOwners">Owners -- they approve and receive the mail (search by name)</label><input type="text" id="gsDeptOwners" name="deptOwners">' + gsErr('deptOwners') +
+          // PIM 100.24 DEPT-OWNER-ACCESS: the same two choices as Access > Departments & owners.
+          '<div class="gs-dept-owner-access" style="font-size:12px;margin:4px 0 6px;"><label><input type="checkbox" id="gsDeptOwnerReader" name="deptOwnerReader"' + ((s && s.departmentOwnersGetReader === false) ? '' : ' checked') + '> Give PIM Manager Reader access (their normal account)</label> ' + settingInfoBtn('DepartmentOwnersGetReader') +
+          '<br><label><input type="checkbox" id="gsDeptOwnerAdmin" name="deptOwnerAdmin"> Also create an admin account</label>' +
+          '<div class="gs-hint">Approving others never needs an admin account; create one only if this person will hold a privileged role.</div></div>' +
           '<label class="gs-l" for="gsDeptContact">Contact (optional)</label><input type="text" id="gsDeptContact" name="deptContact">' +
           '<div class="gs-sub">Or import them from Entra</div>' +
           '<div class="gs-hint">Every Entra group whose name matches the pattern becomes a department, its owners the group&rsquo;s owners. Departments you added yourself are kept.</div>' +
@@ -15250,7 +15536,18 @@
         if (Object.keys(errors).length) return { errors: errors };
         const arr = deps.map(d => ({ name: d.name, owners: Array.isArray(d.owners) ? d.owners : gsSplit(d.owners), contact: d.contact || '', notes: d.notes || '' }))
           .concat([{ name: name, owners: owners, contact: contact, notes: '' }]);
-        try { SETTINGS_DATA = await api('PUT', '/api/settings/departments', { value: arr }); return { wrote: true, note: 'Department ' + name + ' saved.' }; }
+        // PIM 100.24: the owners get Reader on their normal account when the tick is on (unknown users only, no role changed).
+        const rdBox = form.querySelector('[name="deptOwnerReader"]'), adBox = form.querySelector('[name="deptOwnerAdmin"]');
+        const readerOn = !!(rdBox && rdBox.checked), adminOn = !!(adBox && adBox.checked);
+        try {
+          SETTINGS_DATA = await api('PUT', '/api/settings/departments', { value: arr, grantReaderToOwners: readerOn, readerOwners: readerOn ? owners : [] });
+          const orr = (SETTINGS_DATA && SETTINGS_DATA.ownerReaders) || {};
+          let note = 'Department ' + name + ' saved.';
+          if (orr.added && orr.added.length) note += ' ' + orr.added.join(', ') + ' added as Reader in PIM Manager (their normal account).';
+          if (orr.error) note += ' ' + orr.error;
+          if (adminOn && owners.length) { note += ' The admin-account wizard is open for ' + owners[0] + '.'; try { pimOpenOwnerAdminWizard(owners[0], name); } catch (_) { } }
+          return { wrote: true, note: note };
+        }
         catch (e) { return { errors: { deptName: 'Not saved: ' + gsErrText(e) } }; }
       },
       actions: {
@@ -17243,6 +17540,7 @@
         (e.display ? esc(e.display) : (esc(e.op || '') + ' &middot; ' + esc(e.entity || ''))) + '</div>' +
         (e.key ? ('<div class="queueRawKey" style="color:#8c959f;font-size:10.5px;word-break:break-all;">' + esc(e.op || '') + ' &middot; ' + esc(e.entity || '') + ' &middot; ' + esc(e.key) + '</div>') : '') +
         (st === 'discarded' ? ('<div style="color:#57606a;font-size:11px;">discarded' + (e.discardedBy ? ' by ' + esc(e.discardedBy) : '') + (e.discardReason ? ': &ldquo;' + esc(e.discardReason) + '&rdquo;' : '') + '</div>') : '') +
+        (e.ownCommittable ? '<div class="queueOwnCommitNote" style="color:#cf222e;font-size:11px;font-weight:600;">Committed on its own &mdash; Commit selected / Commit all never include it.</div>' : '') +
         (e.justification ? ('<div style="color:#57606a;font-size:11px;font-style:italic;">&ldquo;' + esc(e.justification) + '&rdquo;</div>') : '');
       // A failed entry shows its error. §65.8 keeps failures rather than deleting them, so the
       // table must actually show why -- a retained failure nobody can read is not an improvement.
@@ -17264,6 +17562,9 @@
         '<td style="padding:6px 8px;vertical-align:top;">' + result +
           // 2026-10-07 (operator: "you need to fix this or make a new buton so i can remove these from the queue"): every
           // pending / failed entry has its own Remove button -- no ticking, no hunting for "Discard selected".
+          // 🔒 PIM 100.22 (d) (owner: "queue + own commit, then delete"): a group DELETE has its OWN commit -- never ticked into
+          // Commit selected / Commit all (the server marks it not committable there and skips it if sent).
+          (e.ownCommittable ? '<div><button class="queueOwnCommitBtn" style="font-size:11px;padding:1px 8px;margin-top:2px;color:#fff;background:#cf222e;border-color:#cf222e;" data-id="' + esc(e.id) + '" data-what="' + esc(e.display || e.key || '') + '" title="Commit ONLY this deletion. The engine deletes the group on its next run (also when group retirement is switched off), within the removal budget and every guard.">Commit this DELETE</button></div>' : '') +
           (discardable ? '<div><button class="queueRemoveBtn btn-sec" style="font-size:11px;padding:1px 8px;margin-top:2px;" data-id="' + esc(e.id) + '" title="Take this entry out of the queue. It is never applied; it stays in the history with your name and reason.">Remove from queue</button></div>' : '') +
         '</td>' +
         '</tr>');
@@ -17293,6 +17594,21 @@
             alert('Not removed:\n' + why);
           }
         } catch (e) { alert('Could not remove it: ' + (e && e.message ? e.message : 'unknown error')); }
+        rerender();
+      };
+    });
+    // 🔒 PIM 100.22 (d): the ONE explicit commit of a group DELETE -- its own request (one id + deleteCommit), never a bulk one.
+    document.querySelectorAll('.queueOwnCommitBtn').forEach(function (b) {
+      b.onclick = async function () {
+        if (!confirm('Commit this DELETE on its own?\n\n' + (b.dataset.what || '') + '\n\nThe engine deletes the group on its next run -- also when group retirement is switched off -- within the removal budget and every guard. Its members and roles go with it. This cannot be undone from PIM.')) return;
+        b.disabled = true;
+        try {
+          const r = await api('POST', '/api/queue/commit', { ids: [b.dataset.id], deleteCommit: true });
+          if (!r || !r.committed) {
+            const why = ((r && r.results) || []).filter(function (x) { return !x.committed; }).map(function (x) { return x.reason; }).join('\n');
+            alert('Not committed:\n' + (why || 'unknown reason'));
+          }
+        } catch (e) { alert('Commit failed: ' + (e && e.message ? e.message : 'unknown error')); }
         rerender();
       };
     });
@@ -18265,8 +18581,18 @@
     // BUG-210: the column is Username (Open-PimManager.ps1 entity header, and what the engine's failure
     // row carries -- engFailLabel reads r.Username). 'UserPrincipalName' is not a column of this entity,
     // so the criteria never named the admin and the fix matched every row of the group, or none.
-    'PIM-Assignments-Admins':          ['Username', 'GroupTag']
+    'PIM-Assignments-Admins':          ['Username', 'GroupTag'],
+    // 100.27: a workload binding is the connector + group + target + role. NOT Action: the engine's row reads a blank
+    // Action as 'Assign', so matching on it would miss the very row the grid holds.
+    'PIM-Assignments-Workloads':       ['Workload', 'GroupTag', 'Resource', 'Scope', 'RoleName']
   };
+  // 100.27 (owner 2026-10-09): on a workload binding "Remove this row" read as "the engine removes it" -- it STOPS PIM
+  // managing the binding (deletes the row; one PIM never applied is deleted outright, nothing is called in the workload).
+  // Failures recorded before 2.4.539 still carry the old label, so the page says it the same way for them.
+  function engFixLabel(item, fx) {
+    if (fx && fx.kind === 'delete-row' && item && item.entity === 'PIM-Assignments-Workloads') return 'Stop managing this binding (delete the row)';
+    return (fx && fx.label) || '';
+  }
   function engFailCriteria(item) {
     const row = item.row || {};
     const keys = ENG_FAIL_ROW_KEYS[item.entity] || Object.keys(row);
@@ -18535,7 +18861,7 @@
            (POLICY_HOLD_PROVIDERS[code] ? '<div class="azresHoldHost" data-code="' + esc(code) + '"></div>' : '');
       const fixes = f.fixes || [];
       if (fixes.length && g.length > 1) {
-        h += '<div style="margin-top:6px;">' + fixes.map(fx => '<button class="btn-sec engFixAll" data-code="' + esc(code) + '" data-fix="' + esc(fx.id) + '" style="font-size:11px;">' + esc(fx.label) + ' &mdash; all ' + g.length + '</button>').join(' ') + '</div>';
+        h += '<div style="margin-top:6px;">' + fixes.map(fx => '<button class="btn-sec engFixAll" data-code="' + esc(code) + '" data-fix="' + esc(fx.id) + '" style="font-size:11px;">' + esc(engFixLabel(f, fx)) + ' &mdash; all ' + g.length + '</button>').join(' ') + '</div>';
       }
       h += '<table class="set-table" style="margin-top:8px;max-width:100%;"><tr><th>Item</th><th>Failing since</th><th>Runs</th><th>Raw error</th><th></th></tr>';
       g.forEach((it, i) => {
@@ -18551,7 +18877,7 @@
              '<td style="font-size:11px;white-space:nowrap;" title="' + esc(fmtTime(it.firstSeenUtc)) + '">' + esc(jobTimeAgo(it.firstSeenUtc)) + '</td>' +
              '<td style="font-size:11px;">' + esc(String(it.count || 1)) + '</td>' +
              '<td style="font-size:11px;max-width:420px;word-break:break-word;color:#57606a;">' + esc(it.message || '') + '</td>' +
-             '<td style="white-space:nowrap;">' + (it.fixes || []).map(fx => '<button class="btn-sec engFixOne" data-code="' + esc(code) + '" data-i="' + i + '" data-fix="' + esc(fx.id) + '" style="font-size:11px;">' + esc(fx.label) + '</button>').join(' ') + '</td></tr>';
+             '<td style="white-space:nowrap;">' + (it.fixes || []).map(fx => '<button class="btn-sec engFixOne" data-code="' + esc(code) + '" data-i="' + i + '" data-fix="' + esc(fx.id) + '" style="font-size:11px;"' + (fx.kind === 'delete-row' && it.entity === 'PIM-Assignments-Workloads' ? ' title="PIM stops managing this binding: the row is deleted. A binding PIM never applied is deleted outright -- nothing is called in the workload. One PIM did apply is removed from the workload on the next run."' : '') + '>' + esc(engFixLabel(it, fx)) + '</button>').join(' ') + '</td></tr>';
       });
       h += '</table></div>';
     });
@@ -19665,7 +19991,7 @@
     const b = pimScriptDocsBoot();
     if (Array.isArray(b.scripts) && b.scripts.length) return b.scripts;
     return ['Initialize-PimSqlAdminGroup', 'Deploy-PimActivatorBackend', 'Publish-PimActivatorRemediation', 'Deploy-PimActivatorClient',
-            'Grant-PimEnginePermissions', 'Initialize-PimWorkloadPrereqs', 'Initialize-PimMailSender', 'Set-PimSmtpRelayPassword',
+            'Grant-PimEnginePermissions', 'Initialize-PimWorkloadPrereqs', 'Initialize-PimMailSender', 'Set-PimSmtpRelayPassword', 'Set-PimSqlTier',
             'Install-PimManager', 'Invoke-PimDeployAll', 'Invoke-PimMspBuild', 'Copy-PimSettings', 'Set-PimManagerAccess',
             'Set-PimBreakGlassAccounts', 'Set-PimEmergencyPassphrase', 'Find-PimStrayTestObjects', 'Set-PimLicense', 'Deploy-PimActivatorHybrid'];
   }
@@ -22430,17 +22756,22 @@
     // (TAP re-issue, revoke) was pending in the Change queue right below, and "Commit all" ignored it -- it only
     // looked at configuration edits. "All" means all: commit the committable queue entries too.
     let queueIds = [];
+    // 🔒 PIM 100.22 (d) (owner: "queue + own commit, then delete"): a group DELETE is never part of "Commit all" -- it is
+    // committed on its own (Commit this DELETE in the Change queue). Counted here so the commit SAYS it was left out.
+    let ownCommitN = 0;
     try {
       const q = await api('GET', '/api/queue');
-      queueIds = ((q && q.entries) || []).filter(e => e && e.committable).map(e => e.id);
+      queueIds = ((q && q.entries) || []).filter(e => e && e.committable && !e.ownCommit).map(e => e.id);
+      ownCommitN = ((q && q.entries) || []).filter(e => e && e.ownCommittable).length;
     } catch (_) { queueIds = []; }
-    if (bases.length === 0 && queueIds.length === 0) { status.textContent = 'Nothing to commit.'; return; }
+    const ownCommitNote = ownCommitN ? (' ' + ownCommitN + ' group DELETE item' + (ownCommitN === 1 ? ' was' : 's were') + ' NOT committed: a group DELETE is committed on its own -- use Commit this DELETE on its row in the Change queue.') : '';
+    if (bases.length === 0 && queueIds.length === 0) { status.textContent = ownCommitN ? ('Nothing committed.' + ownCommitNote) : 'Nothing to commit.'; return; }
     if (bases.length === 0) {
       if (!confirm('Commit ' + queueIds.length + ' queued action' + (queueIds.length === 1 ? '' : 's') + '?\n\nThe engine applies ' + (queueIds.length === 1 ? 'it' : 'them') + ' on its next run. This authorises real changes to the directory.')) { status.textContent = 'Commit cancelled.'; return; }
       try {
         const r = await api('POST', '/api/queue/commit', { ids: queueIds });
         status.textContent = 'Committed ' + ((r && r.committed != null) ? r.committed : queueIds.length) + ' queued action(s) -- ' + ((r && r.engine) ? r.engine : 'the engine applies them on its next run') + '.' +
-          ((r && r.skipped > 0) ? ' ' + r.skipped + ' not committed (see the queue).' : '');
+          ((r && r.skipped > 0) ? ' ' + r.skipped + ' not committed (see the queue).' : '') + ownCommitNote;
         status.className = (r && r.skipped > 0) ? 'err' : 'ok';
         if (status.dataset) status.dataset.sticky = '1';
       } catch (e) { status.textContent = 'Committing the queued actions FAILED: ' + e.message; status.className = 'err'; if (status.dataset) status.dataset.sticky = '1'; }
@@ -22614,6 +22945,8 @@
       catch (e) { summaryHtml += ' <b style="color:#cf222e">Committing the queued actions FAILED: ' + escapeHtml(e.message) + '</b>'; status.className = 'err'; }
       try { renderQueueInto(document.getElementById('saveQueueHost')); refreshQueueBadge(); } catch (_) { }
     }
+    // PIM 100.22 (d): a group DELETE waits for its own commit -- said here, never committed with the rest.
+    if (ownCommitN) summaryHtml += ' <b class="commitOwnCommitNote" style="color:#cf222e">' + escapeHtml(ownCommitNote.trim()) + '</b>';
     // BUG-190: say which disabling changes were NOT saved, and offer the offboard approval for each.
     for (const h of heldAll) summaryHtml += offboardHeldHtml(h.base, h.body, false);
     status.innerHTML = summaryHtml;
@@ -22896,6 +23229,16 @@
     // this turns that into the two things the operator actually needs: see them, or fix them.
     if (e && e.status === 400 && e.body && e.body.gate === 'duplicate-key') {
       showCommitDuplicateKeys(status, base, e.body, wrote);
+      return true;
+    }
+    // PIM 100.22 (f) (owner 2026-10-09): a NEW duplicate group tag is refused -- say which tag, where it is already used, and
+    // what to do (an existing duplicate is never refused; it is a warning on Check for problems).
+    if (e && e.status === 400 && e.body && e.body.gate === 'duplicate-tag') {
+      status.innerHTML = '<b class="commitDupTag">Not committed: ' + escapeHtml(base) + ' would create a duplicate group tag.</b>' +
+        '<ul style="margin:4px 0 4px 18px;">' + asList(e.body.refused).map(r => '<li><code>' + escapeHtml(String((r && r.tag) || '')) + '</code> (' + escapeHtml(String((r && r.key) || '')) + '): ' +
+          escapeHtml(String((r && r.why) || '')) + '</li>').join('') + '</ul>' +
+        '<div style="color:#57606a">Nothing was saved for ' + escapeHtml(base) + '; your changes stay staged.' +
+        (wrote.length ? ' Already committed in this run: ' + wrote.map(w => escapeHtml(w.base)).join(', ') + '.' : '') + '</div>';
       return true;
     }
     if (!(e && e.status === 409 && e.body)) return false;
@@ -27671,7 +28014,11 @@
       out.stages.push({ base: 'PIM-Assignments-Workloads', row: Object.assign({
         Workload: s.workload || '', RoleName: role, GroupTag: tag, Scope: s.scope || '',
         Action: 'Assign', Notes: 'staged by the Create resource delegation wizard'
-      }, wuxReplicationFields(s, 'resource')) });
+      },
+      // 100.26: the per-row target (BC environment, Dataverse org, ...) -- without it the engine cannot apply the row. Only
+      // a per-row-resource connector carries it, so every other workload stages the same bytes as before.
+      (pimWorkloadResourceFormat(s.workload) && String(s.resource || '').trim()) ? { Resource: String(s.resource).trim() } : {},
+      wuxReplicationFields(s, 'resource')) });
     }
     return out;
   }
@@ -27807,6 +28154,10 @@
       wlCatalog.custom = {};
       all.forEach(w => { if (w && w.custom) wlCatalog.custom[String(w.id).toLowerCase()] = w; });
       wlCatalog.customError = String((r && r.customError) || '');
+      // 100.26: which connectors need a per-row Resource, and its format (example filled in with this tenant's id).
+      wlCatalog.tenantId = String((r && r.tenantId) || '');
+      wlCatalog.resource = {};
+      all.forEach(w => { if (w && w.perRowResource) wlCatalog.resource[String(w.id).toLowerCase()] = w.resourceFormat || { label: 'Resource' }; });
       wlCatalog.items = all.map(w => (w && w.custom)
         ? { value: w.id, label: w.name || w.id, type: 'CUSTOM', desc: 'custom workload, group-only -- ' + (w.description || ((w.roles || []).length + ' role(s)')) }
         : { value: w.id, label: w.name || w.id, type: 'workload', sub: w.id });
@@ -27867,12 +28218,48 @@
       loadWorkloadCatalog(rerender); rerender();
     } catch (e) { q.err = 'Not added: ' + String((e && e.body && e.body.errors && e.body.errors.length) ? e.body.errors.join(' ') : ((e && e.message) || e)); rerender(); }
   }
-  function loadWorkloadRoles(id, onDone) {
+  // ===== 100.26 WIZARD-RESOURCE-REQUIRED ======================================
+  // Owner 2026-10-09 (internal, "trying to setup new workload group"): the wizard staged two business-central rows with
+  // no Resource, and the engine failed WORKLOAD-RESOURCE-MISSING on every run. A connector with perRowResource makes the
+  // scope field REQUIRED, shows the connector's own format + an example with this tenant's id, checks it before staging,
+  // and lists the roles of THAT target (a BC environment's permission sets) so a name that does not exist is caught.
+  function pimWorkloadResourceFormat(id) {
     const k = String(id || '').trim().toLowerCase();
-    if (!k || !isServer) return;
-    if (wlRoleCache[k] && (wlRoleCache[k].items || wlRoleCache[k].loading)) return;
+    return (k && wlCatalog.resource) ? (wlCatalog.resource[k] || null) : null;
+  }
+  // The Resource against the format: '' when fine, else the message (format + example in it).
+  function pimWorkloadResourceError(id, value) {
+    const rf = pimWorkloadResourceFormat(id);
+    if (!rf) return '';
+    const v = String(value || '').trim();
+    const how = (rf.format ? ' Format: ' + rf.format + (rf.example ? ', e.g. ' + rf.example : '') + '.' : '');
+    if (!v) return (rf.label || 'Resource') + ' is required for this workload -- the engine cannot apply the binding without it.' + how;
+    if (rf.pattern) {
+      let ok = true; try { ok = new RegExp(rf.pattern, 'i').test(v); } catch (_) { ok = true; }
+      if (!ok) return '"' + v + '" is not a valid ' + (rf.label || 'Resource') + '.' + how;
+    }
+    return '';
+  }
+  // The group-name scope segment for a per-row Resource: the environment / org / app part, not the whole id
+  // ('<tenant-id>/Production' -> 'Production', 'contoso.crm4.dynamics.com' -> 'contoso', a GUID -> its first 8).
+  function pimWorkloadResourceScope(value) {
+    let v = String(value || '').trim();
+    if (!v) return '';
+    if (v.indexOf('/') >= 0) v = v.split('/').filter(Boolean).pop() || '';
+    else if (/^[A-Za-z0-9-]+\.[A-Za-z0-9.-]+$/.test(v)) v = v.split('.')[0];
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(v)) v = v.slice(0, 8);
+    else if (/^Default-[0-9a-f]{8}-/i.test(v)) v = 'Default';
+    return v.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  }
+  function loadWorkloadRoles(id, onDone, resource) {
+    const wid = String(id || '').trim().toLowerCase();
+    const res = String(resource || '').trim();
+    // 100.26: a per-row-resource connector's roles belong to ONE target -- cached per workload + resource.
+    const k = wid + (res ? '|' + res.toLowerCase() : '');
+    if (!wid || !isServer) return;
+    if (wlRoleCache[k] && (wlRoleCache[k].items || wlRoleCache[k].loading || wlRoleCache[k].error)) return;
     wlRoleCache[k] = { items: null, loading: true, error: '' };
-    api('GET', '/api/workload-roles?id=' + encodeURIComponent(k)).then(r => {
+    api('GET', '/api/workload-roles?id=' + encodeURIComponent(wid) + (res ? '&resource=' + encodeURIComponent(res) : '')).then(r => {
       wlRoleCache[k].items = ((r && (r.roles || r.value)) || []).map(x => ({
         key: (x.name || x.displayName || x.roleName || String(x)),
         label: (x.name || x.displayName || x.roleName || String(x)),
@@ -27898,6 +28285,7 @@
       auScope: '',                     // entra AU subset (only if all roles AU-scopable)
       scopeType: 'subscription', scopePath: '', scopeName: '',   // azure
       workload: '', scope: '',         // workload
+      resource: '',                    // 100.26: the per-row Resource of a perRowResource connector
       owners: '',
       policyTemplate: '',              // REQ-L: '' = Use default
       entraRolePolicyTemplate: '',     // ALL 3 POLICY KINDS: the Entra ROLE's policy ('' = Use default = EntraIDRoles_Standard)
@@ -28080,7 +28468,7 @@
                 onInput:(v)=>{
                   // 100.17: "+ Custom (quick)" opens the inline form instead of becoming a workload id.
                   if (v === PIM_WL_QUICK) { s._quick = { name: '', role: '', tier: '1', err: '' }; s.workload = ''; s.roles = []; rerender(); return; }
-                  s.workload=v; s.roles=[]; s.scopeValues = {}; rerender();
+                  s.workload=v; s.roles=[]; s.scopeValues = {}; s.resource = ''; s._resFor = ''; rerender();
                 }
               });
               f.appendChild(wlFld);
@@ -28121,6 +28509,27 @@
                     onInput: (v) => { s.scopeValues[lv] = String(v || '').trim(); s.scope = cwLv.map(l => s.scopeValues[l]).filter(Boolean).join('-'); }
                   }));
                 });
+              } else if (pimWorkloadResourceFormat(s.workload)) {
+                // 100.26: this connector works per TARGET (a BC environment, a Dataverse org, a DevOps organisation, an
+                // app) -- the row's Resource. Required, in the connector's own format, prefilled with this tenant's id.
+                const rf = pimWorkloadResourceFormat(s.workload);
+                if (s._resFor !== s.workload) { s._resFor = s.workload; if (!String(s.resource || '').trim() && rf.prefill) s.resource = rf.prefill; }
+                const rErr = String(s.resource || '').trim() ? pimWorkloadResourceError(s.workload, s.resource) : '';
+                const resFld = wuxField({ id:'wr-wlres', label: (rf.label || 'Resource') + ' (required)', required:true, value: s.resource || '',
+                  example: rf.example ? ('e.g. ' + rf.example) : '',
+                  hint: escapeHtml((rf.format ? 'Format: ' + rf.format + '. ' : '') + (rf.text || '')) +
+                        ' <span class="wr-wlres-err" style="color:#cf222e;">' + escapeHtml(rErr) + '</span>',
+                  onInput:(v)=>{
+                    s.resource = String(v || '').trim(); s.scope = pimWorkloadResourceScope(s.resource);
+                    // checked as you type (no re-render, so the cursor stays): the format, before anything can be staged
+                    const el = resFld.querySelector('.wr-wlres-err'); if (el) el.textContent = s.resource ? pimWorkloadResourceError(s.workload, s.resource) : '';
+                  }
+                });
+                resFld.classList.add('wr-wlres');
+                // leaving the field re-renders, so the derived group name follows the target
+                { const ri = resFld.querySelector('input'); if (ri) ri.addEventListener('change', () => rerender()); }
+                f.appendChild(resFld);
+                if (!s.scope && s.resource) s.scope = pimWorkloadResourceScope(s.resource);
               } else {
               const wlscFld = wuxField({ id:'wr-wlsc', label:'Scope within the workload (optional)', value:s.scope,
                 example:'pick one you have used before, or type a new one',
@@ -28142,6 +28551,8 @@
             }
             if (s.target === 'workload' && s._quick) return 'Create the custom workload (or cancel the quick form) first.';
             if (s.target === 'workload' && !s.workload.trim()) return 'Workload is required.';
+            // 100.26: a per-row-resource connector needs its target before anything is staged.
+            if (s.target === 'workload') { const re = pimWorkloadResourceError(s.workload, s.resource); if (re) return re; }
             return true;
           }
         },
@@ -28210,8 +28621,10 @@
               // comma-separated free-text box for the one field where the exact platform spelling
               // matters most.
               const wk = String(s.workload).trim().toLowerCase();
-              loadWorkloadRoles(wk, rerender);
-              const rc = wlRoleCache[wk];
+              // 100.26: a per-row-resource connector lists the roles of the chosen target (?resource=).
+              const wres = pimWorkloadResourceFormat(wk) ? String(s.resource || '').trim() : '';
+              loadWorkloadRoles(wk, rerender, wres);
+              const rc = wlRoleCache[wk + (wres ? '|' + wres.toLowerCase() : '')];
               if (rc && rc.items) roleItems = rc.items;
               // 100.17: a custom workload's roles can be extended right here (saved to its definition).
               const cwR = pimCustomWorkloadOf(s.workload);
@@ -28247,7 +28660,9 @@
                 // failing is a legitimate state in some tenants -- but it is not an empty catalog.
                 n.innerHTML = rc.error
                   ? ('Could not read roles for <b>' + escapeHtml(s.workload) + '</b>: ' + escapeHtml(rc.error) +
-                     '<br>This is <b>not</b> &ldquo;no roles exist&rdquo; &mdash; the lookup failed. Type the role name(s) exactly as the platform spells them.')
+                     '<br>This is <b>not</b> &ldquo;no roles exist&rdquo; &mdash; the lookup failed. Type the role name(s) exactly as the platform spells them.' +
+                     // 100.26: say what happens to a name that does not exist in that target.
+                     (wres ? '<br><span class="wr-roles-unverified" style="color:#cf222e;">Not verified against <b>' + escapeHtml(wres) + '</b>: a role name that does not exist there fails on the engine\'s first run (WORKLOAD-ROLE-NOT-FOUND) and the binding is not applied.</span>' : ''))
                   : ('Loading roles for ' + escapeHtml(s.workload) + '&hellip;');
                 f.appendChild(n);
               }
@@ -28505,7 +28920,7 @@
     return r;
   }
 
-  async function wizardAdmin() {
+  async function wizardAdmin(prefill) {
     // Phase 2: fetch admin templates up front so the picker renders
     // synchronously inside step 1. Best-effort -- no templates = no picker.
     let adminTemplates = [];
@@ -28516,6 +28931,8 @@
 
     await pimTenantMode();   // the MSP fields below exist only on the managing tenant
     const state = wizardAdminDefaultState();
+    // PIM 100.24: opened from Departments & owners ("Also create an admin account") -- pre-filled for that owner.
+    if (prefill && typeof prefill === 'object') pimApplyAdminWizardPrefill(state, prefill);
     wizardAdminSteps(state, adminTemplates);
   }
   // 97.1: the admin wizard's defaults and its staging are shared with Get Started's "Admin accounts" step, so both write
@@ -28561,6 +28978,13 @@
               'It lands as one row in <b>Account-Definitions-Admins</b> (SQL). ' +
               'You give the person and platform; the wizard composes the UPN, display name, and short login name to match the existing naming convention.'
             ));
+            if (s.prefillNote) {   // PIM 100.24: opened for a department owner
+              const pn = document.createElement('div');
+              pn.className = 'wf-owner-prefill';
+              pn.style.cssText = 'background:#ddf4ff; border:1px solid #54aeff; border-radius:6px; padding:8px 10px; font-size:11.5px; margin:2px 0 10px;';
+              pn.innerHTML = s.prefillNote;
+              f.appendChild(pn);
+            }
             // Operator 2026-10-05: the admin TYPE is the first question -- it decides the name prefix, whether this is a
             // consultant (and then which company), and whether it is a local account or a B2B guest.
             f.appendChild(wuxField({ id:'wf-atype', label:'Admin type', required:true, type:'select', value:s.adminType,
@@ -28996,7 +29420,12 @@
           // 68.6 row 35: managed-tenant tags only mean something for an msp admin.
           Target: (s.managementMode === 'msp' && s.slaveTags && s.slaveTags.size) ? [...s.slaveTags].map(t => 'tag:' + t).join(';') : '',
           Template: s.templateId || ''
-        }, wuxReplicationFields(s, 'admin')));   // §71: Replicate/Ring/Target from the Replication section (master only)
+        },
+        // PIM 100.24: an admin account created for a department owner carries their department and their normal account
+        // (PIM's mail about the admin goes there -- the same columns Admin accounts > Edit sets).
+        s.department ? { Department: String(s.department).trim() } : {},
+        s.mailForwardAddress ? { ForwardMailsToContact: 'TRUE', MailForwardAddress: String(s.mailForwardAddress).trim() } : {},
+        wuxReplicationFields(s, 'admin')));   // §71: Replicate/Ring/Target from the Replication section (master only)
         for (const tag of s.roleGroupSel) {
           await wuxStage('PIM-Assignments-Admins', {
             Username: upn, GroupTag: tag,

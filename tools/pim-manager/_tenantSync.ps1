@@ -96,14 +96,23 @@ function Set-PimTenantCacheEntry {
     # Persist one cache kind (the whole document). Returns 'sql:pim.TenantCache/<kind>' or 'memory:<kind>'.
     param(
         [Parameter(Mandatory)][ValidateScript({ $script:PimTenantCacheKinds -contains $_ })][string]$Kind,
-        [Parameter(Mandatory)][AllowNull()][object]$Value
+        [AllowNull()][object]$Value,
+        # 100.31 SNAPSHOT-OOM: a document the caller already serialised (one compact string) -- stored as is.
+        [AllowNull()][string]$ValueJson = $null
     )
+    $hasJson = $PSBoundParameters.ContainsKey('ValueJson')
+    if (-not $hasJson -and -not $PSBoundParameters.ContainsKey('Value')) { throw 'Set-PimTenantCacheEntry: pass -Value or -ValueJson' }
     $cs = Get-PimTenantCacheStoreCs
     if ($cs -and (Get-Command Set-PimSqlTenantCache -ErrorAction SilentlyContinue)) {
-        Set-PimSqlTenantCache -ConnectionString $cs -Kind $Kind -Value $Value
+        if ($hasJson) {
+            if ((Get-Command Set-PimSqlTenantCache).Parameters.ContainsKey('ValueJson')) { Set-PimSqlTenantCache -ConnectionString $cs -Kind $Kind -ValueJson $ValueJson }
+            else { Set-PimSqlTenantCache -ConnectionString $cs -Kind $Kind -Value $(if ("$ValueJson" -ne '') { $ValueJson | ConvertFrom-Json } else { $null }) }
+        } else {
+            Set-PimSqlTenantCache -ConnectionString $cs -Kind $Kind -Value $Value
+        }
         return "sql:pim.TenantCache/$Kind"
     }
-    $script:PimTenantCacheMem[$Kind] = ($Value | ConvertTo-Json -Depth 12 -Compress)
+    $script:PimTenantCacheMem[$Kind] = $(if ($hasJson) { $ValueJson } else { ($Value | ConvertTo-Json -Depth 12 -Compress) })
     Write-Warning ("  [tenant-cache] '{0}' kept in this process only -- no SQL store is configured (PIM v2 is SQL-only)" -f $Kind)
     return "memory:$Kind"
 }

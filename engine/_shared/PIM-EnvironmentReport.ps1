@@ -22,6 +22,8 @@
 Set-StrictMode -Off
 
 $script:PimEnvReportLibDir = $PSScriptRoot
+# 100.31 / framework 12.15: a job's size vs the tenant count recorded on it (pure). Loaded HERE, never behind a Get-Command guard.
+. (Join-Path $PSScriptRoot 'PIM-TenantSizing.ps1')
 
 function Get-PimEnvReportSchema { 'pim-environment-report/1' }
 
@@ -451,6 +453,19 @@ function Get-PimEnvironmentReport {
                         $e.details['trigger'] = "$(Get-PimEnvReportField $jc 'triggerType')"
                         $e.details['schedule'] = "$(Get-PimEnvReportField (Get-PimEnvReportField $jc 'scheduleTriggerConfig') 'cronExpression')"
                         $e.details['image'] = "$(@(Get-PimEnvReportField (Get-PimEnvReportField $p 'template') 'containers')[0].image)"
+                        # 100.31 / framework 12.15: each job's size + the tenant count it was sized from (its pim-sizing-* tags)
+                        $jres = Get-PimEnvReportField (@(Get-PimEnvReportField (Get-PimEnvReportField $p 'template') 'containers')[0]) 'resources'
+                        $e.details['cpu'] = "$(Get-PimEnvReportField $jres 'cpu')"
+                        $e.details['memory'] = "$(Get-PimEnvReportField $jres 'memory')"
+                        $e.details['replicaTimeout'] = "$(Get-PimEnvReportField $jc 'replicaTimeout')"
+                        $szRec = ConvertFrom-PimTenantSizingTags -Tags (Get-PimEnvReportField $d 'tags') -Job $cd.name
+                        if ($szRec.recorded) {
+                            $e.details['sizedForObjects'] = "$($szRec.objects)"
+                            $e.details['sizedFrom'] = ("{0} users + {1} groups + {2} service principals ({3}, {4}; {5})" -f $szRec.counts.Users, $szRec.counts.Groups, $szRec.counts.ServicePrincipals, $szRec.counted, $szRec.sizedUtc, $szRec.source)
+                            $szU = Test-PimJobUndersized -Counts $szRec.counts -Cpu $e.details['cpu'] -Memory $e.details['memory'] -ReplicaTimeout ([int]"0$($e.details['replicaTimeout'])") -SubscriptionId $sub -ResourceGroup $rgN -JobName $cd.name
+                            $e.details['sizing'] = "$($szU.reason)"
+                            if ($szU.undersized) { $e.details['sizingFix'] = "$($szU.command)" }
+                        } elseif ("$($cd.name)" -match '(?i)-tick$') { $e.details['sizing'] = 'no tenant size recorded on this job (installed before 2.4.539) -- the next update records it' }
                         $e.exposure = 'no ingress (outbound only)'
                     }
                     'microsoft.app/managedenvironments' {
@@ -912,6 +927,7 @@ function Get-PimEnvironmentReport {
     foreach ($r in @($resources | Where-Object { $_.readable })) {
         $d = $r.details
         switch ("$($r.type)".ToLowerInvariant()) {
+            'microsoft.app/jobs' { if ("$($d['sizingFix'])".Trim()) { & $addF 'medium' 'capacity' "$($r.name) is smaller than this tenant needs" "$($d['sizing']). An undersized engine job runs out of memory (the next update raises it by itself)." "$($d['sizingFix'])" } }
             'microsoft.app/containerapps' { if ($d['ingressExternal'] -and -not @($d['ipRestrictions']).Count) { & $addF 'medium' 'network' "$($r.name) is reachable from the internet" 'External ingress with no IP restriction; every request still needs a Microsoft Entra sign-in and a PIM Manager role.' 'Container app > Ingress > IP restrictions: allow only your admin networks (or put the app behind a private environment)' }
                                             if ($d['allowInsecure']) { & $addF 'high' 'network' "$($r.name) accepts plain HTTP" 'allowInsecure is on' 'Container app > Ingress: switch off "Allow insecure connections"' } }
             'microsoft.sql/servers' { if ("$($d['publicNetworkAccess'])" -ine 'Disabled' -and $d['firewallRules'] -isnot [string] -and @($d['firewallRules']).Count) {
@@ -930,7 +946,7 @@ function Get-PimEnvironmentReport {
         if ($ls -eq 'Grace') { & $addF 'high' 'licence' 'The Pro licence has expired (grace period)' "$(Get-PimEnvReportField $lv 'statusText')" 'Renew the licence at invardia.com (contact info@invardia.com); register it in Settings > Licence' }
         elseif ($ls -eq 'Valid' -and "$(Get-PimEnvReportField $lv 'validTo')") {
             $vt = [datetime]::MinValue
-            if ([datetime]::TryParse("$(Get-PimEnvReportField $lv 'validTo')", [ref]$vt) -and ($vt - $NowUtc).TotalDays -lt 30) { & $addF 'medium' 'licence' "The Pro licence expires on $(Get-PimEnvReportField $lv 'validTo')" "$([math]::Max(0, [int]($vt - $NowUtc).TotalDays)) day(s) left" 'Renew the licence at invardia.com (contact info@invardia.com)' }
+            if ([datetime]::TryParse("$(Get-PimEnvReportField $lv 'validTo')", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$vt) -and ($vt - $NowUtc).TotalDays -lt 30) { & $addF 'medium' 'licence' "The Pro licence expires on $(Get-PimEnvReportField $lv 'validTo')" "$([math]::Max(0, [int]($vt - $NowUtc).TotalDays)) day(s) left" 'Renew the licence at invardia.com (contact info@invardia.com)' }
         }
         elseif ($ls -notin @('Valid', 'Missing', '')) { & $addF 'high' 'licence' "The licence is $ls" "$(Get-PimEnvReportField $lv 'statusText')" 'Settings > Licence: register a valid licence (contact info@invardia.com)' }
     }

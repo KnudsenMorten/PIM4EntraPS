@@ -171,6 +171,8 @@ if (Test-Path -LiteralPath "$shared\..\coverage\PIM-Coverage.ps1") { . "$shared\
 # §95.3: job 'uplink' -- status telemetry to Invardia (OFF unless 'telemetry.uplink'); the framework client is a pinned copy.
 . "$shared\AitUplink.framework.ps1"
 . "$shared\PIM-Uplink.ps1"
+# PIM 100.10 (framework 8.7 UPLINK-SETUP): the setup report + the control list (one source with Home) + the ring resolver.
+. "$shared\PIM-UplinkSetup.ps1"
 # §95.4: job 'install-key' -- claim the Invardia install key (OFF unless 'updates.invardia'); the uplink + Pro updates use it.
 . "$shared\PIM-InvardiaUpdate.ps1"
 # UPLINK-ENROL (PIM 99): job 'enrolled-tenants' -- the managing tenant allows its enrolled managed tenants' subnets by itself.

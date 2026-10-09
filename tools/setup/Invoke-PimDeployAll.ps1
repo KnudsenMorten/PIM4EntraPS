@@ -175,6 +175,9 @@ param(
     # In cron mode this Job IS the workload -- the five worker apps do not exist. The infra
     # readiness probe therefore has to know its name (BUG-46), not just the Manager's.
     [string]$TickJobName     = 'ca-pim-tick',
+    # 100.31 / framework 12.15: @{ Users; Groups; ServicePrincipals } already counted by the caller -- forwarded to
+    # Setup-PimContainers, which otherwise counts the tenant itself (Graph $count) and sizes the tick for it.
+    [hashtable]$TenantObjectCounts,
     # IMP-06a: UPN of the shared sender mailbox, forwarded to Setup-PimContainers so BOTH the
     # Manager and the tick Job get it. Optional -- an environment with no Exchange plan cannot
     # have one -- but its absence is REPORTED by Setup-PimContainers rather than left silent,
@@ -1482,6 +1485,7 @@ function Get-PimDeployAllStepChanges {
                          "Entra ID: Microsoft Graph application permissions -> $TickJobName identity (the engine set) and $ManagerApp identity (the read-only set) @ tenant",
                          "Azure: $(@($AzureRbacRoles) -join ', ') -> $TickJobName identity @ $(if ("$AzureRbacManagementGroupId".Trim()) { "management group $AzureRbacManagementGroupId" } else { $sub })",
                          "Azure: Reader$(if ($EngineAzureRootUserAccessAdmin) { ' + User Access Administrator' }) -> $TickJobName identity @ tenant root management group$(if ($SkipEngineAzureRootAccess) { ' (skipped: -SkipEngineAzureRootAccess)' })",
+                         "Azure: Reader -> $ManagerApp identity @ resource group $rg only (the Environment report reads the architecture; PIM 100.22 b)",
                          "Azure SQL: database users for $ManagerApp and $TickJobName with db_datareader, db_datawriter, db_ddladmin @ $SqlDatabase") }
         'sqlaccess'  { @("Azure: subnet service endpoint Microsoft.Sql + a virtual network rule on $sql (Azure-services firewall rule verified)") }
         'schema'     { @("Azure SQL: idempotent schema upgrade of $SqlDatabase (never destructive)") }
@@ -1995,8 +1999,10 @@ function Invoke-DefaultStepRunner {
                         $deployId['AdminAppId'] = $AdminAppId
                         if ($AdminCertPem) { $deployId['AdminCertPem'] = $AdminCertPem } else { $deployId['AdminSecret'] = $AdminSecret }
                     }
+                    $tickSizing = @{}
+                    if ($TenantObjectCounts) { $tickSizing['TenantObjectCounts'] = $TenantObjectCounts }   # 100.31
                     try {
-                    & $setup @deployId -SubscriptionId $SubscriptionId -TenantId $TenantId -Location $Location `
+                    & $setup @deployId @tickSizing -SubscriptionId $SubscriptionId -TenantId $TenantId -Location $Location `
                         -ResourceGroup $ResourceGroup -VnetName $VnetName -VnetResourceGroup $VnetResourceGroup `
                         @infraSubnet `
                         -EnvName $EnvName -AcrName $AcrName -ImageRepo $ImageRepo -ImageTag (Get-EffectiveImageTag) `

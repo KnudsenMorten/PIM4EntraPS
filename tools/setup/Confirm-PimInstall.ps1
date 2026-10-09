@@ -17,6 +17,9 @@
       alerting            the alert recipients are not empty                                               REPAIRS (Set-PimAlertRecipients)
       engine-graph        the engine job holds every required Microsoft Graph app role
       engine-root-reader  the engine job holds Reader at the tenant root management group                    REPAIRS (one grant attempt)
+      manager-rg-reader   the Manager holds Reader on the PIM resource group only (the Environment report)   REPAIRS (one grant attempt; a WARNING, never a stop)
+      engine-size         the engine job is at least the size its tenant count needs (framework 12.15; WARNING with the az
+                          command for that tier -- 2.0 CPU / 4Gi / 7200 s from 5,000 objects, 4.0 / 8Gi / 14400 s from 15,000)
       easyauth            Easy Auth is on and every SuperAdmin may sign in
       sql-host-rule       no 'AllowSetupHost' SQL firewall rule is left                                      REPAIRS when this run owns it
       managed tenant only: registered on the managing tenant, its pull subnet allowed, the first pull OK
@@ -75,13 +78,21 @@ param(
     [switch]$NoRepair,
     [string]$OutFile,
     [scriptblock]$Probe,
-    [scriptblock]$Repair
+    [scriptblock]$Repair,
+    # TEST seams (INSTALL-FIX-EVIDA 100.25): -StoreRead param($kind, $name) -> the store's value for that setting, in place of
+    # the SQL read ($kind 'raw' = the ValueJson column as stored; 'setting' = as Get-PimSqlSetting returns it). A -Probe that
+    # answers '<live>' for a line lets that line run its real code against -StoreRead. -TestLicenceCertB64: an ephemeral
+    # licensing certificate for the licence line (never the real key).
+    [scriptblock]$StoreRead,
+    [string]$TestLicenceCertB64
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 . (Join-Path $here '_PimInstallVerify.ps1')
 # the tenant-root helpers (Get-PimTenantRootScope / Get-PimRootAzureHoldings / Get-PimRootAzureFixCommand), pure
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-PermissionHealth.ps1')
+# 100.31: the engine job's size for the tenant (Test-PimJobUndersized / ConvertFrom-PimTenantSizingTags), pure
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-TenantSizing.ps1')
 # SCRIPT-DOC-1 (framework 12.7): every fix command this check prints carries the script's doc page + the checksum check
 . (Join-Path $here '_PimScriptDoc.ps1')
 # 🔴 The store: Connect-PimSetupStore + its token provider (PIM-Rest: Get-PimRestToken) + the reads (PIM-SqlStore:
@@ -96,6 +107,12 @@ $here = $PSScriptRoot
 #      had the same hole. Loaded at file scope, both identities reach every store read.
 # Always loaded (never "only if a caller has not"): what a caller happened to load is exactly what hid cause 1 inside an install.
 . (Join-Path $here '_PimSetupSql.ps1')
+# 🔴 INSTALL-FIX-EVIDA (100.25 item 1, 2026-10-09): the licence functions -- loaded HERE, AT FILE SCOPE, ALWAYS. The licence
+# line loaded PIM-License.ps1 only "if Get-PimLicense is not loaded yet", INSIDE Get-CvFact. Install-PimManager (the caller)
+# has it loaded, so nothing was loaded here, and the caller's Get-PimLicense ran in THIS script, where its $script: trusted
+# signing certificates do not exist -- every licence read "Invalid", and a production install refused "done" while its licence
+# step had just stored and read back a Valid licence. Loaded here, the certificates live in this script's own scope.
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-License.ps1')
 $norm = { param($l) @(@($l) | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
 $SuperAdmins = @(& $norm $SuperAdmins); $AlertRecipients = @(& $norm $AlertRecipients)
 $sqlServer = ("$SqlServerFqdn".Trim() -split '\.')[0]
@@ -150,8 +167,13 @@ function Invoke-CvStoreRead([scriptblock]$Read) {
     $cs = Get-CvStore
     try { return (& $Read $cs) } catch { throw (New-CvStoreError "$($_.Exception.Message)") }
 }
+function Get-CvSettingRaw([string]$Name) {
+    # the ValueJson column exactly as stored (a licence is a JSON string literal holding the licence document)
+    if ($StoreRead) { return (& $StoreRead 'raw' $Name) }
+    return (Invoke-CvStoreRead { param($cs) Invoke-PimSqlScalar -ConnectionString $cs -Sql 'SELECT ValueJson FROM pim.Settings WHERE Name = @n' -Parameters @{ n = $Name } })
+}
 function Get-CvSetting([string]$Name) {
-    $v = Invoke-CvStoreRead { param($cs) Get-PimSqlSetting -ConnectionString $cs -Name $Name }
+    $v = if ($StoreRead) { & $StoreRead 'setting' $Name } else { Invoke-CvStoreRead { param($cs) Get-PimSqlSetting -ConnectionString $cs -Name $Name } }
     if ($v -is [string]) { try { $v = $v | ConvertFrom-Json } catch { } }
     return $v
 }
@@ -163,7 +185,7 @@ function Get-CvMiOid([string]$Kind, [string]$Name) {
 }
 
 function Get-CvFact([string]$Id) {
-    if ($Probe) { return (& $Probe $Id $ctx) }
+    if ($Probe) { $pf = & $Probe $Id $ctx; if (-not ($pf -is [string] -and $pf -eq '<live>')) { return $pf } }
     try {
         switch ($Id) {
             'superadmins' {
@@ -186,20 +208,29 @@ function Get-CvFact([string]$Id) {
                 return @{ readable = $true; jobExists = $true; ringEnv = $ring; wantRing = $(if ($UpdateRing -ge 0) { "$UpdateRing" } else { '' }); seedSupported = $seed; stateRing = "$(Get-PimFactValue $us 'ring')".Trim() }
             }
             'licence' {
-                $sol = Split-Path -Parent (Split-Path -Parent $here)
-                if (-not (Get-Command Get-PimLicense -ErrorAction SilentlyContinue)) { . (Join-Path $sol 'engine\_shared\PIM-License.ps1') }
-                $raw = Invoke-CvStoreRead { param($cs) Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT ValueJson FROM pim.Settings WHERE Name = N'License'" }
-                $txt = ConvertFrom-PimLicenseSettingRaw $raw
-                $st = ''; if ($txt) { try { $st = "$((Get-PimLicense -LicenseText $txt).Status)" } catch { $st = 'Unreadable' } }
-                $key = "$(Invoke-CvStoreRead { param($cs) Get-PimSqlSetting -ConnectionString $cs -Name 'InvardiaInstallKey' })".Trim()
-                $trig = @(@(Invoke-CvStoreRead { param($cs) Get-PimSqlSetting -ConnectionString $cs -Name 'SchedulerTriggers' }) | Where-Object { $_ -and "$($_.type)" -eq 'install-key' })
+                # pim.Settings stores the licence as a JSON STRING LITERAL holding the document: always unwrap it
+                # (ConvertFrom-PimLicenseSettingRaw, loaded at file scope above) -- the raw string itself never reaches Get-PimLicense.
+                $txt = ConvertFrom-PimLicenseSettingRaw (Get-CvSettingRaw 'License')
+                $st = ''; $why = ''
+                if ($txt) {
+                    try { $lic = if ($TestLicenceCertB64) { Get-PimLicense -LicenseText $txt -PublicCertB64 $TestLicenceCertB64 } else { Get-PimLicense -LicenseText $txt }; $st = "$($lic.Status)"; $why = "$($lic.Reason)" }
+                    catch { $st = 'Unreadable'; $why = "$($_.Exception.Message)" }
+                }
+                $key = "$(Get-CvSetting 'InvardiaInstallKey')".Trim()
+                $trig = @(@(Get-CvSetting 'SchedulerTriggers') | Where-Object { $_ -and "$($_.type)" -eq 'install-key' })
                 $claim = Get-CvSetting 'InstallKeyClaimState'
-                return @{ readable = $true; present = [bool]$txt; status = $st; installKey = ([bool]$key -or "$(Get-PimFactValue $claim 'action')" -eq 'claimed'); claimQueued = [bool]$trig.Count }
+                return @{ readable = $true; present = [bool]$txt; status = $st; reason = $(if ($st -notin 'Valid', 'Grace') { $why } else { '' }); installKey = ([bool]$key -or "$(Get-PimFactValue $claim 'action')" -eq 'claimed'); claimQueued = [bool]$trig.Count }
             }
             'mailsender' {
                 $sender = "$(Get-CvSetting 'MailSender')".Trim().Trim('"')
                 $f = @{ readable = $true; sender = $sender; deferredReason = "$MailDeferredReason".Trim(); exoReachable = $false; identities = @(); exoError = '' }
                 if (-not $sender) { return $f }
+                # INSTALL-FIX-EVIDA (100.25 item 4): the PRIMARY SMTP address the customer chose. MailSender is the mailbox's UPN
+                # (BUG-296); the address is the record the mail-sender setup stored (pim.Settings 'MailSenderAddress', only while
+                # it belongs to THIS sender), else the directory's own 'mail' of that UPN (Microsoft Graph, no Exchange needed).
+                $rec = $null; try { $rec = Get-CvSetting 'MailSenderAddress' } catch { $rec = $null }
+                $f.address = if ($rec -and "$(Get-PimFactValue $rec 'sender')".Trim() -ieq $sender) { "$(Get-PimFactValue $rec 'address')".Trim() } else { '' }
+                if (-not $f.address -and -not $StoreRead) { try { $f.address = "$((Invoke-CvGraph "users/$([uri]::EscapeDataString($sender))?`$select=mail").mail)".Trim() } catch { $f.address = '' } }
                 $ids = @()
                 foreach ($res in @(@{ kind = 'job'; name = $TickJobName; label = "engine job $TickJobName" }, @{ kind = 'app'; name = $ManagerApp; label = "Manager $ManagerApp" })) {
                     $oid = ''; try { $oid = Get-CvMiOid $res.kind $res.name } catch { $oid = '' }
@@ -249,10 +280,39 @@ function Get-CvFact([string]$Id) {
                 $hold = Get-PimRootAzureHoldings -Assignments $asg -TenantId $TenantId
                 return @{ readable = $true; reader = [bool]$hold.reader; scope = $scope; objectId = $oid }
             }
+            'manager-rg-reader' {
+                # PIM 100.22 (b): Reader assigned AT the resource group itself (never read as "covered" by something wider).
+                if (-not (Get-Command Get-PimManagerRgReaderScope -ErrorAction SilentlyContinue)) { . (Join-Path $here '_PimSetupShared.ps1') }
+                $oid = Get-CvMiOid 'app' $ManagerApp
+                if (-not $oid) { return @{ readable = $false; error = "the Manager '$ManagerApp' has no managed identity" } }
+                $scope = Get-PimManagerRgReaderScope -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
+                $asg = @(Invoke-CvAzJson @('role', 'assignment', 'list', '--assignee', $oid, '--scope', $scope, '--role', 'Reader'))
+                $held = @($asg | Where-Object { $_ -and "$($_.scope)".TrimEnd('/') -ieq $scope })
+                return @{ readable = $true; reader = [bool]$held.Count; scope = $scope; objectId = $oid }
+            }
             'engine-first-run' {
                 $ex = @(Invoke-CvAzJson @('containerapp', 'job', 'execution', 'list', '-g', $ResourceGroup, '-n', $TickJobName))
                 $last = @($ex | Sort-Object { "$($_.properties.startTime)" } -Descending) | Select-Object -First 1
                 return @{ readable = $true; status = "$($last.properties.status)"; at = "$($last.properties.startTime)" }
+            }
+            'engine-size' {
+                # 100.31 / framework 12.15: the job's size vs the tier for the tenant count RECORDED on it at install (its
+                # pim-sizing-* tags); no recorded count -> counted now (Graph $count as the installer). Never a stop.
+                $jo = Invoke-CvAzJson @('containerapp', 'job', 'show', '-g', $ResourceGroup, '-n', $TickJobName)
+                if (-not $jo) { return @{ readable = $false; error = "the engine job '$TickJobName' was not found" } }
+                $res = @($jo.properties.template.containers)[0].resources
+                $rec = ConvertFrom-PimTenantSizingTags -Tags $jo.tags -Job $TickJobName
+                $counts = $rec.counts; $from = "recorded $($rec.sizedUtc)"
+                if (-not $rec.recorded) {
+                    $tok = Get-CvToken 'https://graph.microsoft.com'
+                    if (-not $tok) { return @{ readable = $false; error = 'no tenant size is recorded on the job, and no Microsoft Graph token to count it' } }
+                    $cnt = Get-PimTenantObjectCounts -GraphGet { param($p) Invoke-RestMethod -Uri ('https://graph.microsoft.com/v1.0' + $p) -Headers @{ Authorization = "Bearer $tok"; ConsistencyLevel = 'eventual' } -TimeoutSec 60 }
+                    if (-not $cnt.ok) { return @{ readable = $false; error = "no tenant size is recorded on the job, and counting failed: $($cnt.error)" } }
+                    $counts = @{ Users = $cnt.Users; Groups = $cnt.Groups; ServicePrincipals = $cnt.ServicePrincipals }; $from = 'counted now'
+                }
+                $u = Test-PimJobUndersized -Counts $counts -Cpu "$($res.cpu)" -Memory "$($res.memory)" -ReplicaTimeout ([int]"0$($jo.properties.configuration.replicaTimeout)") `
+                        -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $TickJobName
+                return @{ readable = $true; undersized = [bool]$u.undersized; reason = "$($u.reason) ($from)"; command = "$($u.command)" }
             }
             'easyauth' {
                 $auth = Invoke-CvAzJson @('containerapp', 'auth', 'show', '-g', $ResourceGroup, '-n', $ManagerApp)
@@ -349,6 +409,14 @@ function Invoke-CvRepair([string]$Id, $Fact) {
                 $r = Grant-PimEngineRootAzureAccess -MiObjectId $oid -Name $TickJobName -TenantId $TenantId -SubscriptionId $SubscriptionId -IncludeUserAccessAdministrator:$EngineAzureRootUserAccessAdmin
                 return [bool]$r.ok
             }
+            'manager-rg-reader' {
+                $oid = "$(Get-PimFactValue $Fact 'objectId')"; if (-not $oid) { try { $oid = Get-CvMiOid 'app' $ManagerApp } catch { $oid = '' } }
+                if (-not $oid) { return $false }
+                if (-not (Get-Command Grant-PimManagerRgReader -ErrorAction SilentlyContinue)) { . (Join-Path $here '_PimSetupShared.ps1') }
+                Write-Host '    repair: grant the Manager Reader on the PIM resource group only (one attempt)' -ForegroundColor Yellow
+                $r = Grant-PimManagerRgReader -MiObjectId $oid -Name $ManagerApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
+                return [bool]$r.ok
+            }
             'sql-host-rule' {
                 if ($SetupHostRuleOwner -ne 'this' -or -not $CloseSetupHostRule) { return $false }
                 Write-Host "    repair: remove this run's 'AllowSetupHost' from $sqlServer" -ForegroundColor Yellow
@@ -373,11 +441,14 @@ $fix['mailsender'] = (@('PIM Manager > Get Started > Mail sender (shared mailbox
 $fix['alerting'] = (@('PIM Manager > Settings > Alerting > Recipients', (& $viaResume 'this')) | Where-Object { $_ }) -join "`n"
 $fix['engine-graph'] = (Get-PimSupportScriptCommand -Script 'Grant-PimEnginePermissions' -Run @(".\Grant-PimEnginePermissions.ps1 -TenantId '$TenantId' -EngineObjectId '<engine job object id>' -GraphPermissions <the missing ones above>   (a Privileged Role Administrator, browser sign-in)")) -join "`n"
 $fix['engine-root-reader'] = ''
+# PIM 100.22 (b): the Manager's Reader on the resource group -- the exact command (the object id is filled in below once read)
+$fix['manager-rg-reader'] = "az role assignment create --subscription $SubscriptionId --assignee-object-id <Manager managed identity object id> --assignee-principal-type ServicePrincipal --role Reader --scope /subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup`n(an Owner or User Access Administrator of the resource group; or Azure portal > the resource group > Access control (IAM) > Add role assignment > Reader > the managed identity $ManagerApp)"
 $fix['easyauth'] = (@("Microsoft Entra admin center > Enterprise applications > the PIM Manager's sign-in application > Users and groups: assign the SuperAdmins (or a group that holds them)", (& $viaResume 'the check')) | Where-Object { $_ }) -join "`n"
 $fix['sql-host-rule'] = "az sql server firewall-rule delete --subscription $SubscriptionId -g $sqlRg -s $sqlServer -n AllowSetupHost   (or Azure portal > SQL server > Networking: remove 'AllowSetupHost')"
 $fix['msp-registered'] = 'on the managing tenant: Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <its config> -Apply -From register-<n> (with an enrollment key this happens by itself)'
 $fix['msp-subnet'] = "on the managing tenant: add this tenant's pull subnet id as slaves[<n>].subnetResourceId, then Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <its config> -Apply -From network-<n> (with an enrollment key this happens by itself)"
 $fix['msp-first-pull'] = "az containerapp job start -n $DownlinkJobName -g $ResourceGroup --subscription $SubscriptionId   (after the managing tenant allows the subnet)"
+$fix['engine-size'] = (Get-PimJobSizeCommand -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $TickJobName -Cpu '2.0' -Memory '4.0Gi' -ReplicaTimeout 7200) + '   (4.0 CPU / 8Gi / 14400 from 15,000 objects)'
 $fix['engine-first-run'] = 'PIM Manager > Home (the engine status and its last run), or Settings > Job schedule > Run now'
 
 # ============================================================================ run
@@ -389,10 +460,13 @@ foreach ($id in $lineIds) { $facts[$id] = Get-CvFact $id }
 $eoid = "$(Get-PimFactValue $facts['engine-root-reader'] 'objectId')"
 $fix['engine-root-reader'] = (Get-PimRootAzureFixCommand -TenantId $TenantId -EngineObjectId $eoid -Roles @('Reader')) + "`n(a Global Administrator, browser sign-in; first turn on Microsoft Entra ID > Properties > Access management for Azure resources)"
 if ($eoid) { $fix['engine-graph'] = $fix['engine-graph'].Replace('<engine job object id>', $eoid) }
+$moid = "$(Get-PimFactValue $facts['manager-rg-reader'] 'objectId')"
+if ($moid) { $fix['manager-rg-reader'] = $fix['manager-rg-reader'].Replace('<Manager managed identity object id>', $moid) }
 
 # Repair pass: a line that FAILS and has a repair is repaired once, then read again.
 $rows0 = Get-PimInstallVerifyRows -Role $Role -Facts $facts -Fix $fix -LicenceExpected ([bool]$LicenceExpected)
-foreach ($r in @($rows0 | Where-Object { ($_.state -eq 'failed' -and $_.id -in 'superadmins', 'updater', 'alerting', 'engine-root-reader', 'sql-host-rule') -or ($_.state -eq 'warning' -and $_.id -eq 'engine-root-reader') })) {
+foreach ($r in @($rows0 | Where-Object { ($_.state -eq 'failed' -and $_.id -in 'superadmins', 'updater', 'alerting', 'engine-root-reader', 'sql-host-rule') -or ($_.state -eq 'warning' -and $_.id -eq 'engine-root-reader') -or
+                                    ($_.state -eq 'warning' -and $_.id -eq 'manager-rg-reader' -and [bool](Get-PimFactValue $facts[$_.id] 'readable')) })) {
     if ($r.id -eq 'sql-host-rule' -and -not [bool](Get-PimFactValue $facts[$r.id] 'readable')) { continue }
     # a line the STORE could not be read for is never "repaired": what is there is unknown, and a write (Set-PimManagerAccess,
     # Set-PimAlertRecipients) over an unread value could replace what an administrator chose. It stays not-done (fail closed).
