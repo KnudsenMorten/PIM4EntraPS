@@ -988,7 +988,14 @@ function Invoke-PimTenantListRefresh {
             }
             if ($csC -and (Get-Command Get-PimTenantObjectCounts -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) -and (Get-Command Set-PimSqlSetting -ErrorAction SilentlyContinue)) {
                 $oc = Get-PimTenantObjectCounts -GraphGet { param($p) Invoke-PimGraph -Path $p -Headers @{ ConsistencyLevel = 'eventual' } }
-                if ($oc.ok) { Set-PimSqlSetting -ConnectionString $csC -Name 'TenantObjectCounts' -Value ([ordered]@{ Users = $oc.Users; Groups = $oc.Groups; ServicePrincipals = $oc.ServicePrincipals; recordedUtc = (Get-Date).ToUniversalTime().ToString('o') }) | Out-Null }
+                if ($oc.ok) {
+                    # framework 8.11 ASSET-COUNTS: enabled MEMBER users and guests too (two more $count calls); a count that
+                    # cannot be read is left out (null), never 0.
+                    $cnt1 = { param($p) $n = 0L; try { $raw = Invoke-PimGraph -Path $p -Headers @{ ConsistencyLevel = 'eventual' }; if ([long]::TryParse(("$raw".Trim().Trim([char]0xFEFF)), [ref]$n)) { return $n } } catch { }; return $null }
+                    $members = & $cnt1 "/users/`$count?`$filter=userType eq 'Member' and accountEnabled eq true"
+                    $guests = & $cnt1 "/users/`$count?`$filter=userType eq 'Guest'"
+                    Set-PimSqlSetting -ConnectionString $csC -Name 'TenantObjectCounts' -Value ([ordered]@{ Users = $oc.Users; Groups = $oc.Groups; ServicePrincipals = $oc.ServicePrincipals; Members = $members; Guests = $guests; recordedUtc = (Get-Date).ToUniversalTime().ToString('o') }) | Out-Null
+                }
             }
         } catch { if (-not $Quiet) { Write-Host "    tenant object counts not recorded: $($_.Exception.Message)" -ForegroundColor DarkYellow } }
 

@@ -310,6 +310,9 @@ function Invoke-PimUplinkCycle {
           [bool]$SetupEnabled = $false, [AllowNull()][object]$SetupFacts = $null, [bool]$SetupExtended = $false,
           # PIM 100.36: @{ sqlUsedMb; sqlMaxMb } (Get-PimUplinkSqlSpace) -> the IDENTIFIED heartbeat's Counts; $null = left out.
           [AllowNull()][hashtable]$SqlSpace = $null,
+          # framework 8.11 ASSET-COUNTS (owner 2026-10-10): @{ users; guests; servicePrincipals } the tick recorded
+          # (pim.Settings 'TenantObjectCounts') -> the IDENTIFIED heartbeat's Counts; a missing / non-number key is left out.
+          [AllowNull()][hashtable]$AssetCounts = $null,
           # PIM 100.34: send FixKind unless PIM_UPLINK_FIXKIND is 0/false/off/no (ON by default -- Invardia live 6f2dce4).
           [bool]$FixKind = (Test-PimUplinkFixKindEnabled))
     $NowUtc = $NowUtc.ToUniversalTime()
@@ -360,6 +363,15 @@ function Invoke-PimUplinkCycle {
         if ($sender.Mode -eq 'identified' -and $SqlSpace -and $SqlSpace.ContainsKey('sqlUsedMb') -and $SqlSpace.ContainsKey('sqlMaxMb') -and
             $null -ne $SqlSpace['sqlUsedMb'] -and $null -ne $SqlSpace['sqlMaxMb'] -and [int64]$SqlSpace['sqlMaxMb'] -gt 0) {
             $hbCounts = @{ sqlUsedMb = [int64]$SqlSpace['sqlUsedMb']; sqlMaxMb = [int64]$SqlSpace['sqlMaxMb'] }
+        }
+        if ($sender.Mode -eq 'identified' -and $AssetCounts) {
+            foreach ($k in 'users', 'guests', 'servicePrincipals') {
+                $n = 0L
+                if ($AssetCounts.ContainsKey($k) -and $null -ne $AssetCounts[$k] -and [long]::TryParse("$($AssetCounts[$k])", [ref]$n) -and $n -ge 0) {
+                    if ($null -eq $hbCounts) { $hbCounts = @{} }
+                    $hbCounts[$k] = $n
+                }
+            }
         }
         $hb = New-AitUplinkReport -Kind heartbeat @common -Edition (Get-PimUplinkEdition -License $License -ProHere $ProHere) -Hosting 'container' `
                 -RuntimeIdentity $RuntimeIdentity -LicenceState (Get-PimUplinkLicenceState -License $License) -Counts $hbCounts
@@ -488,8 +500,14 @@ function Invoke-PimUplinkJob {
         $spaceSql = $script:PimUplinkSqlSpaceQuery
         $sqlSpace = Get-PimUplinkSqlSpace -Query { Invoke-PimSqlQuery -ConnectionString $cs -Sql $spaceSql }
     }
+    # framework 8.11 ASSET-COUNTS: what the tick's tenant-cache refresh recorded (members / guests / service principals).
+    $assets = $null
+    try {
+        $tc = & $get 'TenantObjectCounts'; if ($tc -is [string] -and "$tc".Trim()) { $tc = $tc | ConvertFrom-Json }
+        if ($tc) { $assets = @{ users = $tc.Members; guests = $tc.Guests; servicePrincipals = $tc.ServicePrincipals } }
+    } catch { $assets = $null }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $(if ($WhatIf) { 0 } else { 2500 }) `
-            -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace
+            -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets
     [pscustomobject]@{ ran = [bool]$r.ran; whatIf = [bool]$WhatIf; detail = "uplink: $($r.message)" }
 }

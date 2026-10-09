@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.545 -- 2026-10-10
+
+- Status telemetry reports the tenant size to Invardia (enabled member users, guests, service principals) so the dashboard can show adoption; counts that cannot be read are left out.
+
 ## 2.4.544 -- 2026-10-10
 
 - Automatic job sizing works when the updater may not read the directory: the engine records the tenant counts and the update uses them (no more Graph count failed lines).
