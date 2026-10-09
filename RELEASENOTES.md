@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.542 -- 2026-10-09
+
+- Tenant data refresh: the group-activity list reads every group again (2.4.540-2.4.541 read only the first group of each batch and reported the rest as failed).
+
 ## 2.4.541 -- 2026-10-09
 
 - Tenant data refresh: group-activity reads that Microsoft Graph throttled until no answer came back are now treated as throttling too -- the last refresh is kept and no alert mail is sent.

@@ -832,7 +832,7 @@ function Get-PimGroupActivityFromTenant {
     $tagged = @($owned.byId.Keys | Where-Object { "$($owned.byId[$_].tag)".Trim() })
     $batched = @{}
     if ($tagged.Count -and (Get-Command Invoke-PimGraphBatchGet -ErrorAction SilentlyContinue)) {
-        $res = @(Invoke-PimGraphBatchGet -Paths @($tagged | ForEach-Object { "/identityGovernance/privilegedAccess/group/assignmentScheduleRequests?`$filter=groupId eq '$_'&`$select=action,status,createdDateTime" }))
+        $res = Invoke-PimGraphBatchGet -Paths @($tagged | ForEach-Object { "/identityGovernance/privilegedAccess/group/assignmentScheduleRequests?`$filter=groupId eq '$_'&`$select=action,status,createdDateTime" })   # 2.4.542: NOT @(...) -- the function returns ,$results (one array); @() nested it so only slot 0 held an answer and every other group read "no answer"
         $bad = @(); $transient = 0
         for ($i = 0; $i -lt $tagged.Count; $i++) {
             $r = $res[$i]
