@@ -90,6 +90,7 @@
       "directoryRoles": [],
       "azure": [
         { "role": "Container Apps Jobs Operator", "scope": "engineJob", "required": true, "coveredBy": [ "Contributor", "Owner" ], "why": "Commit and Run now start the engine job" },
+        { "role": "Reader", "scope": "resourceGroup", "required": true, "coveredBy": [ "Contributor", "Owner" ], "why": "The Environment report reads the installation's own architecture (apps, jobs, registry, SQL, Key Vault, network) -- the PIM resource group only (PIM 100.22 b)" },
         { "role": "AcrPull", "scope": "registry", "required": false, "coveredBy": [ "Contributor", "Owner" ], "why": "Pulls the Manager image when the registry is reached with the managed identity" },
         { "role": "Key Vault Secrets User", "scope": "keyVault", "required": false, "why": "Reads the emergency passphrase hash and the SMTP relay password (when configured)" }
       ],

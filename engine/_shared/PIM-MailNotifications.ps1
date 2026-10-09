@@ -237,8 +237,11 @@ function Merge-PimManagerReaderEntries {
           are users already, so no Reader row is written beside their real grant;
         * a new entry is { identity; role = 'Reader'; source = 'mail-recipient'; addedBy; addedUtc }.
       Matching is case-insensitive on the identity (the Manager matches the same way).
+      -Source: why the entry was added -- 'mail-recipient' (MAIL-2) or 'department-owner' (PIM 100.24 DEPT-OWNER-ACCESS).
     #>
-    param([object[]]$Entries = @(), [string[]]$Addresses = @(), [string[]]$AlsoKnown = @(), [string]$AddedBy = '', [string]$NowUtc = '')
+    param([object[]]$Entries = @(), [string[]]$Addresses = @(), [string[]]$AlsoKnown = @(), [string]$AddedBy = '', [string]$NowUtc = '',
+          [string]$Source = 'mail-recipient')
+    $src = if ("$Source".Trim()) { "$Source".Trim() } else { 'mail-recipient' }
     $stamp = if ("$NowUtc".Trim()) { "$NowUtc".Trim() } else { [datetime]::UtcNow.ToString('o') }
     $known = @{}
     $out = New-Object System.Collections.Generic.List[object]
@@ -260,7 +263,7 @@ function Merge-PimManagerReaderEntries {
         if ($seen.ContainsKey($lk)) { continue }; $seen[$lk] = $true
         if ($addr -notmatch '^[^@\s;,]+@[^@\s;,]+\.[^@\s;,]+$') { $bad.Add($addr); continue }
         if ($known.ContainsKey($lk)) { $kn.Add([pscustomobject]@{ identity = $addr; role = $known[$lk] }); continue }
-        $out.Add([pscustomobject]@{ identity = $addr; role = 'Reader'; source = 'mail-recipient'; addedBy = "$AddedBy"; addedUtc = $stamp })
+        $out.Add([pscustomobject]@{ identity = $addr; role = 'Reader'; source = $src; addedBy = "$AddedBy"; addedUtc = $stamp })
         $known[$lk] = 'Reader'
         $added.Add($addr)
     }
@@ -273,7 +276,7 @@ function Get-PimRemovedRecipientReaders {
       silently. Returns the removed addresses that still hold an entry, with their role, so the page can show them to the
       admin ("keeps Reader access -- remove it under Manager access & roles if it is no longer needed").
     #>
-    param([string[]]$Before = @(), [string[]]$After = @(), [object[]]$Entries = @())
+    param([string[]]$Before = @(), [string[]]$After = @(), [object[]]$Entries = @(), [string[]]$AutoSources = @('mail-recipient'))
     $now = @{}; foreach ($a in @($After)) { if ("$a".Trim()) { $now["$a".Trim().ToLowerInvariant()] = $true } }
     $roles = @{}
     foreach ($e in @($Entries)) { $id = "$(Get-PimMailPrefField $e 'identity')".Trim(); if ($id) { $roles[$id.ToLowerInvariant()] = [pscustomobject]@{ role = "$(Get-PimMailPrefField $e 'role')"; source = "$(Get-PimMailPrefField $e 'source')" } } }
@@ -283,9 +286,62 @@ function Get-PimRemovedRecipientReaders {
         $lk = "$b".Trim().ToLowerInvariant()
         if (-not $lk -or $seen.ContainsKey($lk) -or $now.ContainsKey($lk)) { continue }
         $seen[$lk] = $true
-        if ($roles.ContainsKey($lk)) { $out.Add([pscustomobject]@{ identity = "$b".Trim(); role = $roles[$lk].role; autoAdded = ($roles[$lk].source -eq 'mail-recipient') }) }
+        if ($roles.ContainsKey($lk)) { $out.Add([pscustomobject]@{ identity = "$b".Trim(); role = $roles[$lk].role; autoAdded = (@($AutoSources) -contains $roles[$lk].source) }) }
     }
     return @($out.ToArray())
+}
+
+function Get-PimDepartmentOwnerSet {
+    # PURE. Every owner identity on a department list, de-duplicated case-insensitively, in first-seen order. A department
+    # is @{ name; owners } where owners is an array or a '|' / ';' / ',' joined string (the stored shape).
+    param([object[]]$Departments = @())
+    $seen = @{}; $out = New-Object System.Collections.Generic.List[string]
+    foreach ($d in @($Departments)) {
+        if ($null -eq $d) { continue }
+        $raw = Get-PimMailPrefField $d 'owners'
+        if ($null -eq $raw) { $raw = Get-PimMailPrefField $d 'Owners' }
+        foreach ($o in @(@($raw) | ForEach-Object { "$_" -split '[|;,]' })) {
+            $s = "$o".Trim(); if (-not $s) { continue }
+            if (-not $seen.ContainsKey($s.ToLowerInvariant())) { $seen[$s.ToLowerInvariant()] = $true; $out.Add($s) }
+        }
+    }
+    return @($out.ToArray())
+}
+
+function Get-PimDepartmentOwnerReaderPlan {
+    <#
+      PURE. PIM 100.24 DEPT-OWNER-ACCESS (owner 2026-10-09: "the reader access is default for any dept owners defined with
+      their normal access (tick on by default ...)"). Given the departments BEFORE and AFTER a save, decide whose normal
+      account is offered to Manager access as a Reader:
+        * -Grant $false                  -> nobody (the tick was off / grantReaderToOwners = false);
+        * -Only <addresses> (the page's per-owner ticks) -> exactly those, and only when they ARE an owner after the save
+          -- this path never grants Reader to somebody who is not an owner;
+        * otherwise                      -> every owner who is NEW in this save (not an owner of any department before).
+          An owner who already was one is not re-offered: an admin who removed their Reader on purpose is not overridden
+          by the next unrelated department save.
+      Whether an address actually becomes a Reader is Merge-PimManagerReaderEntries' call (unknown identities only; an
+      existing role is never changed). -removed = owners of no department any more; the caller lists the ones that still
+      hold a Manager role (Get-PimRemovedRecipientReaders) -- the role is left for the admin to decide.
+      Returns @{ grant = string[]; newOwners = string[]; removed = string[]; before = string[]; after = string[] }.
+    #>
+    param([object[]]$Before = @(), [object[]]$After = @(), [bool]$Grant = $true, [AllowNull()][string[]]$Only = $null)
+    $b = @(Get-PimDepartmentOwnerSet -Departments $Before)
+    $a = @(Get-PimDepartmentOwnerSet -Departments $After)
+    $bk = @{}; foreach ($x in $b) { $bk[$x.ToLowerInvariant()] = $true }
+    $ak = @{}; foreach ($x in $a) { $ak[$x.ToLowerInvariant()] = $x }
+    $new = @($a | Where-Object { -not $bk.ContainsKey($_.ToLowerInvariant()) })
+    $removed = @($b | Where-Object { -not $ak.ContainsKey($_.ToLowerInvariant()) })
+    $grantList = @()
+    if ($Grant) {
+        if ($null -ne $Only) {
+            $seen = @{}
+            $grantList = @(foreach ($o in @($Only)) {
+                $k = "$o".Trim().ToLowerInvariant()
+                if ($k -and $ak.ContainsKey($k) -and -not $seen.ContainsKey($k)) { $seen[$k] = $true; $ak[$k] }
+            })
+        } else { $grantList = $new }
+    }
+    return [pscustomobject]@{ grant = @($grantList); newOwners = @($new); removed = @($removed); before = $b; after = $a }
 }
 
 function Get-PimMailReportLastSent {

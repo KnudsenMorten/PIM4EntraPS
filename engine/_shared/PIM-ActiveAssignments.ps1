@@ -101,6 +101,108 @@ function Get-PimActiveAssignmentsGroupPrefix {
     return $pfx
 }
 
+function Get-PimActiveAssignmentsGraphItems {
+    # 100.31 SNAPSHOT-OOM (2026-10-09). Emit a Graph collection's items to the PIPELINE one page at a time, following
+    # @odata.nextLink. `Invoke-PimGraph -All` aggregates every page first; a consumer that projects as it goes
+    # (`Get-PimActiveAssignmentsGraphItems -Path ... | ForEach-Object { <project> }`) then holds one raw page, not the
+    # whole collection plus its projection. A response with no `value` (an invoker that already returns the items)
+    # is emitted as is. Errors throw, exactly like Invoke-PimGraph.
+    param([Parameter(Mandatory)][string]$Path)
+    $next = $Path
+    while ($next) {
+        $resp = Invoke-PimGraph -Path $next
+        $next = $null
+        if ($null -eq $resp) { break }
+        if (($resp -isnot [array]) -and $resp.PSObject -and $resp.PSObject.Properties['value']) {
+            foreach ($v in @($resp.value)) { if ($null -ne $v) { $v } }
+            $nl = $resp.PSObject.Properties['@odata.nextLink']
+            if ($nl -and "$($nl.Value)".Trim()) { $next = "$($nl.Value)" }
+        } else {
+            foreach ($v in @($resp)) { if ($null -ne $v) { $v } }
+        }
+        $resp = $null
+    }
+}
+
+function ConvertTo-PimActiveAssignmentsJsonString {
+    # 100.31. PURE. One JSON string literal (quotes included) for a value of a snapshot row: $null -> null, a bool ->
+    # true/false, a number -> invariant digits, anything else -> its string, escaped per RFC 8259.
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return 'null' }
+    if ($Value -is [bool]) { if ($Value) { return 'true' } else { return 'false' } }
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) { return ([System.Convert]::ToString($Value, [System.Globalization.CultureInfo]::InvariantCulture)) }
+    $s = [string]$Value
+    if ($s -notmatch '[\x00-\x1f"\\]') { return '"' + $s + '"' }
+    $sb = New-Object System.Text.StringBuilder ($s.Length + 8)
+    [void]$sb.Append('"')
+    foreach ($ch in $s.ToCharArray()) {
+        switch ($ch) {
+            '"'  { [void]$sb.Append('\"'); continue }
+            '\'  { [void]$sb.Append('\\'); continue }
+            "`n" { [void]$sb.Append('\n'); continue }
+            "`r" { [void]$sb.Append('\r'); continue }
+            "`t" { [void]$sb.Append('\t'); continue }
+            default { if ([int]$ch -lt 0x20) { [void]$sb.Append(('\u{0:x4}' -f [int]$ch)) } else { [void]$sb.Append($ch) } }
+        }
+    }
+    [void]$sb.Append('"')
+    return $sb.ToString()
+}
+
+function ConvertTo-PimActiveAssignmentsSnapshotJson {
+    <#
+      100.31 SNAPSHOT-OOM (2026-10-09). The stored 'active-assignments' document as ONE compact JSON string, written row by
+      row into a StringBuilder. Same document as `$Entry | ConvertTo-Json -Depth 12 -Compress` (same keys, same order,
+      same values -- Test-PimSnapshotMemory compares the two parsed), without ConvertTo-Json's intermediate copy of
+      every row: on a ~20k-row tenant that copy plus the rows was what ran a 1 GiB tick out of memory.
+      Rows are flat (string / bool / number / null values); every other field is small and goes through ConvertTo-Json.
+    #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Entry)
+    $sb = New-Object System.Text.StringBuilder 65536
+    $keyQuoted = @{}
+    [void]$sb.Append('{')
+    $first = $true
+    foreach ($k in @($Entry.Keys)) {
+        if (-not $first) { [void]$sb.Append(',') }
+        $first = $false
+        [void]$sb.Append((ConvertTo-PimActiveAssignmentsJsonString -Value ([string]$k))).Append(':')
+        $v = $Entry[$k]
+        if ("$k" -eq 'rows') {
+            [void]$sb.Append('[')
+            $firstRow = $true
+            foreach ($row in @($v)) {
+                if ($null -eq $row) { continue }
+                if (-not $firstRow) { [void]$sb.Append(',') }
+                $firstRow = $false
+                [void]$sb.Append('{')
+                $firstField = $true
+                foreach ($fk in @($row.Keys)) {
+                    if (-not $firstField) { [void]$sb.Append(',') }
+                    $firstField = $false
+                    $kq = $keyQuoted[$fk]
+                    if ($null -eq $kq) { $kq = (ConvertTo-PimActiveAssignmentsJsonString -Value ([string]$fk)) + ':'; $keyQuoted[$fk] = $kq }
+                    [void]$sb.Append($kq)
+                    $fv = $row[$fk]
+                    # fast path inline (the common case: a plain string); everything else through the escaper
+                    if ($null -eq $fv) { [void]$sb.Append('null') }
+                    elseif (($fv -is [string]) -and ($fv -notmatch '[\x00-\x1f"\\]')) { [void]$sb.Append('"').Append($fv).Append('"') }
+                    else { [void]$sb.Append((ConvertTo-PimActiveAssignmentsJsonString -Value $fv)) }
+                }
+                [void]$sb.Append('}')
+            }
+            [void]$sb.Append(']')
+        } elseif ($null -eq $v -or $v -is [string] -or $v -is [bool] -or $v -is [int] -or $v -is [long]) {
+            [void]$sb.Append((ConvertTo-PimActiveAssignmentsJsonString -Value $v))
+        } elseif ($v -is [array]) {
+            [void]$sb.Append((ConvertTo-Json -InputObject @($v) -Depth 8 -Compress))
+        } else {
+            [void]$sb.Append((ConvertTo-Json -InputObject $v -Depth 8 -Compress))
+        }
+    }
+    [void]$sb.Append('}')
+    return $sb.ToString()
+}
+
 function Select-PimActiveAssignmentsPimGroupCandidates {
     # BUG-217 (§33.28). PURE. The groups whose PIM-for-Groups assignments the Revoke snapshot reads: EVERY group that
     # can carry one -- security-enabled or Microsoft 365 -- whatever it is called. A mail-only distribution list is
@@ -177,7 +279,14 @@ function Get-PimManagerLookupCaches {
             # what the revoke screen must show. So the cache is no longer prefix-filtered: ALL groups, paged 999 at a
             # time (a 30k-group tenant is ~30 list calls), with the two fields the snapshot needs to skip groups that
             # can never carry a PIM-for-Groups assignment (dynamic membership, mail-only distribution lists).
-            $script:PimManager_Groups = @(Invoke-PimGraph -Path "/groups?`$select=id,displayName,description,groupTypes,securityEnabled&`$top=999" -All | ConvertTo-PimSdkShape)
+            # 🔴 100.31 SNAPSHOT-OOM (2026-10-09): page by page, each group projected at once to the five fields (SDK casing;
+            # PowerShell property names are case-insensitive, so .id / .displayName still answer). The old
+            # `-All | ConvertTo-PimSdkShape` held every raw page AND a doubled-property copy of the whole group list.
+            $script:PimManager_Groups = @(Get-PimActiveAssignmentsGraphItems -Path "/groups?`$select=id,displayName,description,groupTypes,securityEnabled&`$top=999" | ForEach-Object {
+                $sec = $null; if ($_.PSObject.Properties['securityEnabled']) { $sec = $_.securityEnabled }
+                $gt = @(); if ($null -ne $_.groupTypes) { $gt = @($_.groupTypes) }
+                [pscustomobject]@{ Id = "$($_.id)"; DisplayName = [string]$_.displayName; Description = [string]$_.description; GroupTypes = $gt; SecurityEnabled = $sec }
+            })
         } else {
             $script:PimManager_Groups = @(Get-MgGroup -All)
         }
@@ -261,8 +370,12 @@ function Resolve-PimManagerPrincipalIdBatch {
     # so ~700 assignment rows collapse to a single request. Best-effort: a failure here leaves
     # the ids unresolved (the caller still renders the GUID) and never breaks the table.
     param([string[]]$Ids)
-    $need = @($Ids | Where-Object { $_ -and -not $script:PimManager_ResolvedById.ContainsKey("$_") } |
-                     Select-Object -Unique)
+    # 100.31: de-duplicated through a set, in first-seen order -- `Select-Object -Unique` compares every id with every
+    # earlier one (O(n^2)), which on a ~17k-principal snapshot is minutes of CPU for nothing.
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $needList = New-Object System.Collections.Generic.List[string]
+    foreach ($x in @($Ids)) { $sx = "$x"; if ($sx -and -not $script:PimManager_ResolvedById.ContainsKey($sx) -and $seen.Add($sx)) { $needList.Add($sx) } }
+    $need = $needList.ToArray()
     if (-not $need -or $need.Count -eq 0) { return }
     if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { return }
     for ($i = 0; $i -lt $need.Count; $i += 1000) {
@@ -440,27 +553,15 @@ function Invoke-PimActiveAssignmentsSnapshot {
     # TODO v2.4.3: replace with Get-EntraRoleAssignmentsPreloaded helper once
     # ported into engine/_shared/PIM-Functions.psm1 (mirror of the
     # Get-PimGroupSchedulesPreloaded pattern). For now: direct -All call.
-    $entraRows = @()
-    try {
-        if ($restGraph) {
-            # REST: same collection, camelCase -> reshape to SDK casing so the
-            # ScheduleInfo/Expiration nested fields below resolve unchanged.
-            $entraRows = @(Invoke-PimGraph -Path '/roleManagement/directory/roleAssignmentSchedules' -All | ConvertTo-PimSdkShape)
-        } else {
-            $entraRows = @(Get-MgRoleManagementDirectoryRoleAssignmentSchedule -All -ErrorAction Stop)
-        }
-    } catch {
-        $em = "$($_.Exception.Message)"
-        Write-Warning "  [revoke] entra-role assignment-schedules load failed: $em"
-        [void]$surfaceErrors.Add([ordered]@{
-            surface = 'entra-role'
-            error   = $em
-            hint    = (Get-PimActiveAssignmentSurfaceHint -Surface 'entra-role' -ErrorMessage $em)
-        })
-        $entraRows = @()
-    }
-    foreach ($e in $entraRows) {
-        if (-not $e) { continue }
+    # 🔴 100.31 SNAPSHOT-OOM (2026-10-09, a ~10.8k-object tenant at 0.5 CPU / 1 GiB: System.OutOfMemoryException). Every
+    # surface is now PROJECTED AS IT IS READ: a raw Graph / Resource Graph page becomes rows and is released before the
+    # next page is fetched (Get-PimActiveAssignmentsGraphItems / Get-PimArmActiveRoleAssignmentsViaArg -Stream piped into
+    # the row builder), the PIM-for-Groups items are released as they are built, and the stored document is written as
+    # ONE compact string (ConvertTo-PimActiveAssignmentsSnapshotJson) instead of ConvertTo-Json over every row. A surface
+    # that fails part-way drops the rows it had added, so the stored result is what it always was: all of a surface or none.
+    $addEntraRow = {
+        param($e)
+        if (-not $e) { return }
         $principalLabel = Resolve-PimManagerPrincipalLabel -PrincipalId ([string]$e.PrincipalId)
         $roleLabel      = Resolve-PimManagerEntraRoleName -RoleDefinitionId ([string]$e.RoleDefinitionId)
         $scopeLabel     = Resolve-PimManagerDirectoryScope -DirectoryScopeId ([string]$e.DirectoryScopeId)
@@ -491,6 +592,25 @@ function Invoke-PimActiveAssignmentsSnapshot {
             justification    = ''  # Entra role assignment schedules don't carry the original activation justification on the assignment object.
         })
     }
+    $entraStart = $rows.Count
+    try {
+        if ($restGraph) {
+            # REST, page by page: each schedule becomes a row as its page arrives (property names are case-insensitive,
+            # so the PascalCase reads in the builder resolve on the camelCase REST objects; nested ones are tolerated).
+            Get-PimActiveAssignmentsGraphItems -Path '/roleManagement/directory/roleAssignmentSchedules' | ForEach-Object { & $addEntraRow $_ }
+        } else {
+            foreach ($e in @(Get-MgRoleManagementDirectoryRoleAssignmentSchedule -All -ErrorAction Stop)) { & $addEntraRow $e }
+        }
+    } catch {
+        $em = "$($_.Exception.Message)"
+        Write-Warning "  [revoke] entra-role assignment-schedules load failed: $em"
+        [void]$surfaceErrors.Add([ordered]@{
+            surface = 'entra-role'
+            error   = $em
+            hint    = (Get-PimActiveAssignmentSurfaceHint -Surface 'entra-role' -ErrorMessage $em)
+        })
+        if ($rows.Count -gt $entraStart) { $rows.RemoveRange($entraStart, $rows.Count - $entraStart) }   # all of a surface or none
+    }
 
     # ---- Azure-RBAC active assignments -------------------------------------
     # REQUIREMENTS 67.3: ONE Azure Resource Graph query over REST (Get-PimArmActiveRoleAssignmentsViaArg,
@@ -499,18 +619,45 @@ function Invoke-PimActiveAssignmentsSnapshot {
     # subscriptions list plus one instances read per subscription, which also never saw a management group
     # without a subscription under it. Each row carries its roleAssignmentId, which an ACTIVE revoke needs
     # (the per-subscription rows had none, so queueing one threw). If the query fails the old walk still runs.
+    $addAzRow = {
+        param($a)
+        if (-not $a) { return }
+        $principalLabel = Resolve-PimManagerPrincipalLabel -PrincipalId ([string]$a.PrincipalId)
+        $roleName       = if ($a.RoleDefinitionName) { [string]$a.RoleDefinitionName } else { [string]$a.RoleDefinitionId }
+        $azRow = [ordered]@{
+            id               = "azure-rbac:$($a.Id)"
+            type             = 'azure-rbac'
+            principal        = $principalLabel
+            principalId      = [string]$a.PrincipalId
+            role             = $roleName
+            roleDefinitionId = [string]$a.RoleDefinitionId
+            scope            = [string]$a.Scope
+            directoryScopeId = ''
+            start            = ''  # ARG row doesn't carry start/end for the assignment record.
+            end              = ''
+            justification    = ''
+        }
+        if ($a.PSObject.Properties['RoleAssignmentId'] -and "$($a.RoleAssignmentId)".Trim()) {
+            $azRow['roleAssignmentId']   = [string]$a.RoleAssignmentId
+            $azRow['roleAssignmentName'] = [string]$a.RoleAssignmentName
+        }
+        [void]$rows.Add($azRow)
+    }
     $azRows = @()
     $argDone = $false
     if ((Get-Command Get-PimArmActiveRoleAssignmentsViaArg -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) {
+        $azStart = $rows.Count
         try {
-            $azRows = @(Get-PimArmActiveRoleAssignmentsViaArg | ForEach-Object {
-                [pscustomobject]@{ Id = $_.Id; PrincipalId = $_.PrincipalId; RoleDefinitionId = $_.RoleDefinitionId; RoleDefinitionName = $_.RoleDefinitionName
-                                   Scope = $_.Scope; RoleAssignmentId = $_.Id; RoleAssignmentName = $_.Name; PrincipalType = $_.PrincipalType }
-            })
+            # 100.31: streamed -- each Resource Graph row becomes a snapshot row as its page arrives.
+            Get-PimArmActiveRoleAssignmentsViaArg -Stream | ForEach-Object {
+                & $addAzRow ([pscustomobject]@{ Id = $_.Id; PrincipalId = $_.PrincipalId; RoleDefinitionId = $_.RoleDefinitionId; RoleDefinitionName = $_.RoleDefinitionName
+                                                Scope = $_.Scope; RoleAssignmentId = $_.Id; RoleAssignmentName = $_.Name; PrincipalType = $_.PrincipalType })
+            }
             $argDone = $true
-            Write-Host ("  [revoke] azure-rbac: {0} role assignment(s) from one Resource Graph query" -f $azRows.Count) -ForegroundColor DarkGray
+            Write-Host ("  [revoke] azure-rbac: {0} role assignment(s) from one Resource Graph query" -f ($rows.Count - $azStart)) -ForegroundColor DarkGray
         } catch {
             Write-Warning ("  [revoke] Resource Graph role-assignment query failed ({0}) -- falling back to the per-subscription read." -f $_.Exception.Message)
+            if ($rows.Count -gt $azStart) { $rows.RemoveRange($azStart, $rows.Count - $azStart) }
             $azRows = @()
             $restArm = [bool](Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)
         }
@@ -578,29 +725,8 @@ function Invoke-PimActiveAssignmentsSnapshot {
             hint    = 'Ensure engine/_shared/PIM-Rest.ps1 is dot-sourced (hosted) so Invoke-PimArm is available.'
         })
     }
-    foreach ($a in $azRows) {
-        if (-not $a) { continue }
-        $principalLabel = Resolve-PimManagerPrincipalLabel -PrincipalId ([string]$a.PrincipalId)
-        $roleName       = if ($a.RoleDefinitionName) { [string]$a.RoleDefinitionName } else { [string]$a.RoleDefinitionId }
-        $azRow = [ordered]@{
-            id               = "azure-rbac:$($a.Id)"
-            type             = 'azure-rbac'
-            principal        = $principalLabel
-            principalId      = [string]$a.PrincipalId
-            role             = $roleName
-            roleDefinitionId = [string]$a.RoleDefinitionId
-            scope            = [string]$a.Scope
-            directoryScopeId = ''
-            start            = ''  # ARG row doesn't carry start/end for the assignment record.
-            end              = ''
-            justification    = ''
-        }
-        if ($a.PSObject.Properties['RoleAssignmentId'] -and "$($a.RoleAssignmentId)".Trim()) {
-            $azRow['roleAssignmentId']   = [string]$a.RoleAssignmentId
-            $azRow['roleAssignmentName'] = [string]$a.RoleAssignmentName
-        }
-        [void]$rows.Add($azRow)
-    }
+    foreach ($a in $azRows) { & $addAzRow $a }
+    $azRows = $null
 
     # ---- PIM-for-Groups active assignments ---------------------------------
     # Graph REFUSES an unfiltered list on assignmentSchedules ('MissingParameters:
@@ -612,7 +738,7 @@ function Invoke-PimActiveAssignmentsSnapshot {
     #      with ResourceTypeNotSupported anyway).
     #   2. Queries go through /v1.0/$batch, 20 per round-trip -- a per-group
     #      sequential loop took >4 minutes on a real tenant.
-    $pimGroupRows = @()
+    $pimGroupRows = New-Object System.Collections.Generic.List[object]   # 100.31: .Add, never += (each += copied the whole array)
     # 🔴 BUG-217 (§33.28): EVERY group that can be a PIM-for-Groups group -- not only the '<prefix>' ones. A group
     # qualifies unless it is a mail-only distribution list (not security-enabled and not a Microsoft 365 group);
     # dynamic groups are dropped just below. Cost stays bounded: one filtered read per group, 20 per $batch
@@ -631,15 +757,17 @@ function Invoke-PimActiveAssignmentsSnapshot {
         $gFail = 0
         $gFirstErr = $null
         $gRes = Invoke-PimGraphBatchGet -Paths @($pimGroupsToQuery | ForEach-Object { "/identityGovernance/privilegedAccess/group/assignmentSchedules?`$filter=groupId eq '$($_.Id)'" })
+        if ($null -ne $gRes -and $gRes -isnot [System.Collections.IList]) { $gRes = @($gRes) }   # 100.31: one answer can arrive unrolled; the release below assigns by index
         for ($i = 0; $i -lt $pimGroupsToQuery.Count; $i++) {
-            $gr = $gRes[$i]
-            if ($gr -and $gr.ok) { foreach ($v in @($gr.items)) { if ($null -ne $v) { $pimGroupRows += $v } }; continue }
+            $gr = $gRes[$i]; $gRes[$i] = $null   # 100.31: released as it is consumed
+            if ($gr -and $gr.ok) { foreach ($v in @($gr.items)) { if ($null -ne $v) { $pimGroupRows.Add($v) } }; continue }
             if ($gr -and (Test-PimGroupNotPimOnboardedError -Message "$($gr.error)")) { continue }   # BUG-217: not a PIM group -- nothing to list, not a failure
             $gFail++
             $errText = if ($gr) { "$($gr.error)" } else { 'no response' }
             if (-not $gFirstErr -and $gr -and ($gr.status -eq 401 -or $gr.status -eq 403 -or $errText -match 'HTTP (401|403)\b')) { $gFirstErr = $errText }
             if ($gFail -le 3) { Write-Warning ("  [revoke] assignmentSchedules for group '{0}' failed: {1}" -f $pimGroupsToQuery[$i].DisplayName, $errText) }
         }
+        $gRes = $null
         if ($gFail -gt 3) { Write-Warning ("  [revoke] assignmentSchedules failed for {0} group(s) total (first 3 shown)." -f $gFail) }
         if ($pimGroupRows.Count -eq 0 -and $gFail -ge $pimGroupsToQuery.Count -and $gFirstErr) {
             [void]$surfaceErrors.Add([ordered]@{
@@ -671,7 +799,7 @@ function Invoke-PimActiveAssignmentsSnapshot {
                 }
                 foreach ($br in @($resp.responses)) {
                     if ($br.status -ge 200 -and $br.status -lt 300 -and $br.body -and $br.body.value) {
-                        foreach ($v in @($br.body.value)) { $pimGroupRows += $v }
+                        foreach ($v in @($br.body.value)) { $pimGroupRows.Add($v) }
                     } elseif ($br.status -ge 400 -and -not (Test-PimGroupNotPimOnboardedError -Message "$(if ($br.body -and $br.body.error) { "$($br.body.error.code) $($br.body.error.message)" })")) {
                         $gFail++
                         $errCode = if ($br.body -and $br.body.error) { $br.body.error.code } else { $br.status }
@@ -708,7 +836,8 @@ function Invoke-PimActiveAssignmentsSnapshot {
         foreach ($n in $Names) { $pr = $Obj.PSObject.Properties[$n]; if ($pr -and $null -ne $pr.Value) { return $pr.Value } }
         return $null
     }
-    foreach ($p in $pimGroupRows) {
+    for ($pgi = 0; $pgi -lt $pimGroupRows.Count; $pgi++) {
+        $p = $pimGroupRows[$pgi]; $pimGroupRows[$pgi] = $null   # 100.31: the raw schedule goes once its row exists
         if (-not $p) { continue }
         $principalId = "$(& $pf $p @('PrincipalId','principalId'))"
         $groupId     = "$(& $pf $p @('GroupId','groupId'))"
@@ -753,6 +882,7 @@ function Invoke-PimActiveAssignmentsSnapshot {
             justification    = $just
         })
     }
+    $pimGroupRows.Clear()
 
     # ---- BUG-98: second pass -- resolve every principal that the filtered caches missed ----
     # Done ONCE here rather than per surface: all three row builders have run, so the distinct
@@ -760,8 +890,15 @@ function Invoke-PimActiveAssignmentsSnapshot {
     # Every row also gains principalKind so the GUI can tell a person from a group or an app on
     # a screen whose whole job is deciding whose access to revoke.
     try {
-        $unresolved = @($rows | Where-Object { $_.principalId -and ("$($_.principal)" -eq "$($_.principalId)" -or -not $_.principal) } |
-                                ForEach-Object { [string]$_.principalId } | Select-Object -Unique)
+        # 100.31: one pass over the rows into a set (the pipeline + Select-Object -Unique was O(n^2) on ~20k rows).
+        $unresolvedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+        $unresolvedList = New-Object System.Collections.Generic.List[string]
+        foreach ($row in $rows) {
+            $rpid = [string]$row.principalId
+            if ($rpid -and ("$($row.principal)" -eq $rpid -or -not $row.principal) -and $unresolvedSet.Add($rpid)) { $unresolvedList.Add($rpid) }
+        }
+        $unresolved = $unresolvedList.ToArray()
+        $unresolvedSet = $null; $unresolvedList = $null
         if ($unresolved.Count -gt 0) {
             Write-Host ("  [revoke] resolving {0} principal id(s) the name caches did not cover ..." -f $unresolved.Count) -ForegroundColor DarkGray
             Resolve-PimManagerPrincipalIdBatch -Ids $unresolved
@@ -779,11 +916,13 @@ function Invoke-PimActiveAssignmentsSnapshot {
 
     $sw.Stop()
     $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+    $byType = @{ 'entra-role' = 0; 'azure-rbac' = 0; 'pim-for-groups' = 0 }
+    foreach ($row in $rows) { $t = "$($row.type)"; if ($byType.ContainsKey($t)) { $byType[$t]++ } }   # 100.31: one pass, no pipeline copies
     $counts = [ordered]@{
         total           = $rows.Count
-        'entra-role'    = @($rows | Where-Object { $_.type -eq 'entra-role' }).Count
-        'azure-rbac'    = @($rows | Where-Object { $_.type -eq 'azure-rbac' }).Count
-        'pim-for-groups' = @($rows | Where-Object { $_.type -eq 'pim-for-groups' }).Count
+        'entra-role'    = $byType['entra-role']
+        'azure-rbac'    = $byType['azure-rbac']
+        'pim-for-groups' = $byType['pim-for-groups']
     }
     Write-Host ("  [revoke] active-assignments loaded: {0} total ({1}e + {2}a + {3}g) in {4}s" -f $counts.total, $counts['entra-role'], $counts['azure-rbac'], $counts['pim-for-groups'], $elapsed) -ForegroundColor DarkGray
 
@@ -857,7 +996,7 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
     $errs = @($snap.surfaceErrors)
     $entry = [ordered]@{
         refreshedUtc  = "$($snap.refreshedUtc)"
-        rows          = @($snap.rows)
+        rows          = $snap.rows   # 100.31: the same array, not an @() copy of it
         counts        = $snap.counts
         surfaceErrors = $errs
         partial       = [bool]$snap.partial
@@ -867,7 +1006,13 @@ function Invoke-PimActiveAssignmentsSnapshotJob {
         source        = 'scheduler'
         correlationId = "$($global:PIM_JobCorrelationId)"
     }
-    $where = Set-PimTenantCacheEntry -Kind $kind -Value $entry
+    # 🔴 100.31 SNAPSHOT-OOM: ONE compact string written row by row, not `ConvertTo-Json -Depth 12` over the whole document
+    # (which built a second, dictionary-shaped copy of every row before it wrote a character). The rows are released
+    # before the SQL write, so the write holds the string and nothing else.
+    $json = ConvertTo-PimActiveAssignmentsSnapshotJson -Entry $entry
+    $entry['rows'] = $null; $snap['rows'] = $null
+    $where = Set-PimTenantCacheEntry -Kind $kind -ValueJson $json
+    $json = $null
     $c = $snap.counts
     $sum = "{0} total ({1} entra-role, {2} azure-rbac, {3} pim-for-groups) in {4}s -> {5}" -f $c.total, $c['entra-role'], $c['azure-rbac'], $c['pim-for-groups'], $snap.elapsedSec, $where
     if (-not $snap.ok) {

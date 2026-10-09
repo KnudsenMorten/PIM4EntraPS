@@ -53,7 +53,7 @@ $script:PimTickOnlyJobTypes += 'target-check'
 $script:PimJobTypes += 'pending-check'
 $script:PimTickOnlyJobTypes += 'pending-check'
 # §95.2 (2026-10-04): 'licence-request' asks Invardia for this install's licence and installs the signed file (PIM-LicenceRequest.ps1).
-# Inert unless the feature 'licence.autoRequest' is ON (it ships OFF -- PIM's first call to invardia.com).
+# Inert unless the feature 'licence.autoRequest' is ON (ON by default since the owner's decision 2026-10-05; switchable).
 $script:PimJobTypes += 'licence-request'
 $script:PimTickOnlyJobTypes += 'licence-request'
 # §95.3 (2026-10-04): 'uplink' sends PIM's status telemetry (a daily heartbeat + one run report per job) to the Invardia-hosted

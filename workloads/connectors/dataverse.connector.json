@@ -4,6 +4,7 @@
   "auth": "dataverse",
   "membershipModel": true,
   "perRowResource": true,
+  "resourceFormat": { "label": "Dataverse environment host", "format": "<org>.crm<n>.dynamics.com", "example": "contoso.crm4.dynamics.com", "prefill": "", "pattern": "^[A-Za-z0-9-]+\\.crm[0-9]*\\.dynamics\\.com$" },
   "containerKind": "group team",
   "status": "structure built v2.4.186 -- nested-membership adapter (Entra group -> Dataverse group team -> security role). Live-validation pending a Dataverse environment + the Entra group provisioned as a group team.",
   "permissionsNeeded": ["Dataverse: a security role with prvReadTeam + prvAssignRole (e.g. System Administrator) for the app user; the Entra group must already exist as a Dataverse GROUP TEAM (teamtype=2)"],

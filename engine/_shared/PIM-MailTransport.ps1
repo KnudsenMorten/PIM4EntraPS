@@ -205,6 +205,24 @@ function Get-PimMailTestFingerprint {
     return "$m"
 }
 
+function Get-PimMailSenderShown {
+    <#
+      PURE (INSTALL-FIX-EVIDA, REQUIREMENTS 100.25 item 4). What a person SEES as the mail sender. MailSender stays the mailbox's
+      UPN -- the key Microsoft Graph sends by (BUG-296), often on the tenant's initial domain -- but the customer chose the PRIMARY
+      SMTP address (name@their domain). -Record = pim.Settings 'MailSenderAddress' { sender; address } as the mail-sender setup
+      (Initialize-PimMailSender, Get Started > Mail sender step 2) stored it; it counts only while its 'sender' is still -Sender.
+      Returns @{ address; upn; text }: text = "<address> (mailbox UPN <upn>)" when they differ, else the sender as it is.
+    #>
+    param([AllowEmptyString()][string]$Sender, [AllowNull()][object]$Record)
+    $s = "$Sender".Trim().Trim('"')
+    if ($Record -is [string] -and "$Record".Trim()) { try { $Record = $Record | ConvertFrom-Json } catch { $Record = $null } }
+    $g = { param($n) if ($null -eq $Record) { '' } elseif ($Record -is [System.Collections.IDictionary]) { "$($Record[$n])".Trim() } elseif ($Record.PSObject.Properties[$n]) { "$($Record.$n)".Trim() } else { '' } }
+    $addr = ''
+    if ($s -and (& $g 'sender') -ieq $s) { $addr = & $g 'address' }
+    if (-not $addr -or $addr -ieq $s) { return @{ address = $s; upn = $s; text = $s } }
+    return @{ address = $addr; upn = $s; text = "$addr (mailbox UPN $s)" }
+}
+
 function Get-PimMailSetupState {
     <#
       PURE: the Get Started / Settings verdict for mail, from the stored values. Returns @{ mode; done; note; sender; smtp }.
@@ -213,7 +231,9 @@ function Get-PimMailSetupState {
         none          -- never done (nothing can be sent; the note says so).
       -LastTest: @{ ok; fingerprint; at; reason } as the test-mail route stores it (pim.Settings 'MailLastTest').
     #>
-    param([string]$Mode, [string]$Sender, [AllowNull()][object]$SmtpRelay, [AllowNull()][object]$LastTest)
+    param([string]$Mode, [string]$Sender, [AllowNull()][object]$SmtpRelay, [AllowNull()][object]$LastTest,
+          # 100.25 item 4: pim.Settings 'MailSenderAddress' -- the note names the PRIMARY SMTP address, the UPN as detail
+          [AllowNull()][object]$SenderAddressRecord)
     $m = ConvertTo-PimMailMode -Value $Mode; if (-not $m) { $m = 'sharedMailbox' }
     $smtp = ConvertTo-PimSmtpRelayConfig -Value $SmtpRelay
     $fp = Get-PimMailTestFingerprint -Mode $m -Sender $Sender -Smtp $smtp.config
@@ -230,8 +250,9 @@ function Get-PimMailSetupState {
         }
         default {
             if (-not $s) { return @{ mode = 'sharedMailbox'; done = $false; note = 'no sender: TAP codes and notifications are not sent'; sender = ''; proven = $null } }
-            if ($proof -eq $false) { return @{ mode = 'sharedMailbox'; done = $false; note = "sends as $s, but the test mail failed: $($LastTest.reason)"; sender = $s; proven = $false } }
-            return @{ mode = 'sharedMailbox'; done = $true; note = "sends as $s$(if ($proof -eq $true) { ' -- test mail sent' })"; sender = $s; proven = $proof }
+            $shown = (Get-PimMailSenderShown -Sender $s -Record $SenderAddressRecord).text
+            if ($proof -eq $false) { return @{ mode = 'sharedMailbox'; done = $false; note = "sends as $shown, but the test mail failed: $($LastTest.reason)"; sender = $s; proven = $false } }
+            return @{ mode = 'sharedMailbox'; done = $true; note = "sends as $shown$(if ($proof -eq $true) { ' -- test mail sent' })"; sender = $s; proven = $proof }
         }
     }
 }
@@ -342,7 +363,13 @@ function Get-PimMailCheck {
     elseif ($mode -eq 'sharedMailbox') {
         $lk = & $f 'senderLookup'; $found = & $gv $lk 'found'
         if (-not $sender) { & $add 'mail-mailbox' 'Sender mailbox exists' 'missing' 'no sender mailbox is set' $mbFix }
-        elseif ($found -eq $true) { & $add 'mail-mailbox' 'Sender mailbox exists' 'ok' "$sender (Microsoft Graph resolves it$(if ("$(& $gv $lk 'upn')".Trim() -and "$(& $gv $lk 'upn')".Trim() -ine $sender) { " as $(& $gv $lk 'upn')" }))" '' }
+        elseif ($found -eq $true) {
+            # 100.25 item 4: name the PRIMARY SMTP address the customer chose (the stored record, else the directory's 'mail' of
+            # the UPN the lookup returned); the stored sender is the UPN (BUG-296) and is shown as the detail.
+            $shownSender = Get-PimMailSenderShown -Sender $sender -Record (& $f 'senderAddress')
+            $lkMail = "$(& $gv $lk 'mail')".Trim()
+            if ($shownSender.address -ieq $sender -and $lkMail -and $lkMail -ine $sender) { $shownSender = Get-PimMailSenderShown -Sender $sender -Record @{ sender = $sender; address = $lkMail } }
+            & $add 'mail-mailbox' 'Sender mailbox exists' 'ok' "$($shownSender.text) (Microsoft Graph resolves it$(if ("$(& $gv $lk 'upn')".Trim() -and "$(& $gv $lk 'upn')".Trim() -ine $sender) { " as $(& $gv $lk 'upn')" }))" '' }
         elseif ($found -eq $false) { & $add 'mail-mailbox' 'Sender mailbox exists' 'failed' "Microsoft Graph does not find '$sender' -- PIM sends as exactly this address" $mbFix }
         else { & $add 'mail-mailbox' 'Sender mailbox exists' 'unknown' "'$sender' could not be looked up$(if ("$(& $gv $lk 'error')".Trim()) { ": $(& $gv $lk 'error')" })" $mbFix }
         $ids = @(@(& $f 'identities') | Where-Object { $_ })

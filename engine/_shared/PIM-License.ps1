@@ -74,6 +74,16 @@ $script:PimProEditionName       = 'Pro'
 # PawPolicy, Lifecycle, AzureDiscovery (now 'Discovery'), DefinitionImport, PermissionWizard.
 $script:PimProFeatureCatalog = @('AccessReviews', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'EvidenceExport', 'HybridAd', 'MakerChecker', 'McpServer', 'MspFanout',
     'PortalAdmins', 'Revoke', 'Rfa', 'TierReport', 'WorkloadConnectors')
+# PRO-FEATURES-MISSING (PIM REQUIREMENTS §100.32, owner 2026-10-09: "i cannot use any of the features" on a Pro licence issued
+# before ConsultantLifecycle / Rfa / BrokerApi / McpServer existed). The SINGLE-TENANT Pro features: the catalog's scope='single'
+# Pro names (Get-PimCatalogProFeatureNames -Scope single). Framework §12.6a LICENCE-FEATURES (owner 2026-10-09): the licence
+# names the EDITION, the product maps edition -> features, no re-signing for a new feature ever. Every Pro licence -- Pro
+# Enterprise AND Pro Business (Business differs only by its signed `limits`, §12.6) -- grants every one of these, current and
+# future, whatever its features[] list says. MSP (scope='multi', MspFanout) is never in this list: it is the Pro MSP edition
+# (sku Pro-MSP, or a licence naming MspFanout / '*' as every MSP licence issued so far does). Must equal the catalog's
+# single-tenant list (tests/Test-PimProEnterpriseFeatures.ps1).
+$script:PimProSingleTenantFeatures = @('AccessReviews', 'BrokerApi', 'ConsultantLifecycle', 'Coverage', 'Discovery', 'EvidenceExport', 'HybridAd', 'MakerChecker', 'McpServer',
+    'PortalAdmins', 'Revoke', 'Rfa', 'TierReport', 'WorkloadConnectors')
 
 $script:PimLicenseCache = $null
 $script:PimLicenseWarned = @{}
@@ -82,6 +92,45 @@ Function Get-PimProFeatureCatalog {
     # The gateable Pro feature names. The SQL data store is deliberately ABSENT
     # (SQL is part of the free edition -- operator decision 2026-06-12).
     @($script:PimProFeatureCatalog)
+}
+
+Function Get-PimProSingleTenantFeatures {
+    # The single-tenant Pro feature names every Pro licence grants without listing them (§100.32, framework §12.6a).
+    @($script:PimProSingleTenantFeatures)
+}
+
+Function Get-PimLicenceFeatureGrant {
+    <#
+      PURE. §100.32 / framework §12.6a -- does the licence's EDITION cover -FeatureNames, and why? Status, sku-is-Pro and
+      tenant are NOT judged here (Test-PimProLicence does that around it); -License is a Get-PimLicense result, so everything
+      read is from the SIGNED payload (Sku, Features, Limits) -- nothing unsigned can widen it.
+        enterprise -- every name is a single-tenant Pro feature, no signed `limits`  -> covers ("included in Pro Enterprise")
+        business   -- every name is a single-tenant Pro feature, signed `limits`     -> covers ("included in Pro Business (limits apply)")
+        msp        -- an MSP name, and the licence is the MSP edition: sku Pro-MSP, or features[] names MspFanout / msp.downlink /
+                      Msp / '*' (every MSP licence issued so far)                    -> covers ("included in Pro MSP")
+        needs-msp  -- an MSP name on a licence that is not the MSP edition           -> not covered ("needs the MSP licence")
+        listed     -- any other name (an explicit add-on) that features[] names or '*' -> covers ("listed in the licence")
+        not-listed -- any other name the list lacks                                  -> not covered
+      The features[] list is NEVER the gate for an edition feature (single-tenant Pro, MSP): it only identifies an MSP licence
+      issued before the Pro-MSP sku, and names explicit add-ons. Returns @{ covers; basis; text }.
+    #>
+    param($License, [string[]]$FeatureNames)
+    $features = @(@($(if ($License) { $License.Features } else { @() })) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $names = @(@($FeatureNames) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $isBusiness = [bool]($License -and $License.PSObject.Properties['Limits'] -and $null -ne $License.Limits)
+    $sku = if ($License) { "$($License.Sku)".Trim() } else { '' }
+    $isMsp = ($sku -match '^(?i)pro-msp$') -or ($features -contains '*') -or (@($features | Where-Object { $script:PimMspLicenseFeatures -contains $_ }).Count -gt 0)
+    if ($names.Count -gt 0 -and @($names | Where-Object { $script:PimProSingleTenantFeatures -notcontains $_ }).Count -eq 0) {
+        if ($isBusiness) { return [pscustomobject]@{ covers = $true; basis = 'business'; text = 'included in Pro Business (limits apply)' } }
+        return [pscustomobject]@{ covers = $true; basis = 'enterprise'; text = 'included in Pro Enterprise' }
+    }
+    if (@($names | Where-Object { $script:PimMspLicenseFeatures -contains $_ }).Count -gt 0) {
+        if ($isMsp) { return [pscustomobject]@{ covers = $true; basis = 'msp'; text = 'included in Pro MSP' } }
+        return [pscustomobject]@{ covers = $false; basis = 'needs-msp'; text = 'needs the MSP licence' }
+    }
+    if ($features -contains '*') { return [pscustomobject]@{ covers = $true; basis = 'listed'; text = 'listed in the licence (all Pro features)' } }
+    foreach ($n in $names) { if ($features -contains $n) { return [pscustomobject]@{ covers = $true; basis = 'listed'; text = 'listed in the licence' } } }
+    return [pscustomobject]@{ covers = $false; basis = 'not-listed'; text = 'not listed in the licence' }
 }
 
 # --- Distribution policy (internal) ----------------------------------------
@@ -366,8 +415,8 @@ Function Test-PimProFeature {
 
     if ($lic.Status -notin @('Valid', 'Grace')) {
         $blockReason = $lic.Reason
-    } elseif (-not (($lic.Features -contains '*') -or ($lic.Features -contains $Feature))) {
-        $blockReason = "license for '$($lic.Customer)' does not include feature '$Feature' (features: $($lic.Features -join ', '))"
+    } elseif (-not ($grant = Get-PimLicenceFeatureGrant -License $lic -FeatureNames @($Feature)).covers) {   # §100.32 / §12.6a: every Pro licence = every single-tenant Pro feature
+        $blockReason = "license for '$($lic.Customer)' does not include feature '$Feature' -- $($grant.text) (features: $($lic.Features -join ', '))"
     } else {
         if (-not $TenantId) {
             try { $ctx = Get-MgContext -ErrorAction SilentlyContinue; if ($ctx -and $ctx.TenantId) { $TenantId = $ctx.TenantId } } catch { }
@@ -711,6 +760,9 @@ Function Test-PimProLicence {
     $out = [ordered]@{
         ok = $false; status = 'Missing'; grace = $false; customer = ''; sku = ''; validTo = ''; graceUntil = ''
         tenantIds = @(); tenantId = $tid; label = "$Label"; reason = ''; message = ''
+        # §100.32: WHY the feature is (or is not) licensed -- enterprise | business | msp | needs-msp | listed | not-listed, or
+        # 'licence' when the licence itself (missing, expired, another tenant, not Pro) decides; basisText says it in words.
+        basis = ''; basisText = ''
         contact = "$script:PimLicenseContact"; command = (Get-PimLicenseRegisterCommand -SqlServer $SqlServer -TenantId $TenantId)
     }
     $lic = $null
@@ -734,8 +786,11 @@ Function Test-PimProLicence {
         $out.graceUntil = $(if ($lic.GraceUntil) { $lic.GraceUntil.ToString('yyyy-MM-dd') } else { '' })
         $out.tenantIds  = @($lic.TenantIds | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
         $features = @($lic.Features | ForEach-Object { "$_".Trim() })
-        $covers = ($features -contains '*')
-        foreach ($f in @($FeatureNames)) { if ("$f".Trim() -and ($features -contains "$f".Trim())) { $covers = $true } }
+        # §100.32 / framework §12.6a (owner 2026-10-09): the licence names the EDITION. Every Pro licence (Enterprise and
+        # Business alike) covers every single-tenant Pro feature, current and future; MSP needs the Pro MSP edition; the
+        # features[] list only names add-ons. The verdict reads only the verified payload (Sku, Features, Limits).
+        $grant = Get-PimLicenceFeatureGrant -License $lic -FeatureNames $FeatureNames
+        $covers = [bool]$grant.covers
         switch ("$($lic.Status)") {
             'Missing'     { $out.reason = 'no Pro licence is installed' }
             'Invalid'     { $out.reason = "the stored licence is not valid ($($lic.Reason))" }
@@ -756,11 +811,16 @@ Function Test-PimProLicence {
                 if ("$($lic.Sku)".Trim() -notmatch '^(?i)pro(-.+)?$') {
                     $out.reason = "the licence is a '$("$($lic.Sku)".Trim())' licence, not Pro"
                 } elseif (-not $covers) {
-                    $out.reason = "the licence does not include $word (features: $(($features -join ', ')))"
+                    $out.reason = switch ("$($grant.basis)") {
+                        'needs-msp' { "the licence does not include $word -- it needs the MSP licence (features: $(($features -join ', ')))" }
+                        default     { "the licence does not include $word (features: $(($features -join ', ')))" }
+                    }
+                    $out.basis = "$($grant.basis)"; $out.basisText = "$($grant.text)"
                 } elseif (-not ($bind = Test-PimLicenseTenantBinding -License $lic -TenantId $TenantId).ok) {
                     $out.reason = $bind.reason
                 } else {
                     $out.ok = $true
+                    $out.basis = "$($grant.basis)"; $out.basisText = "$($grant.text)"
                     if ("$($lic.Status)" -eq 'Grace') {
                         $out.grace = $true
                         $out.reason = "the licence expired $($out.validTo), grace until $($out.graceUntil)"
@@ -773,6 +833,7 @@ Function Test-PimProLicence {
     } elseif (-not $out.reason) {
         $out.reason = 'no Pro licence is installed'
     }
+    if (-not $out.basis) { $out.basis = 'licence'; $out.basisText = "$($out.reason)" }
     if (-not $out.ok) {
         $out.message = ("{0} requires a PIM Manager Pro licence -- {1}. Contact {2} for a licence; register it with: {3}" -f $Label, $out.reason, $out.contact, $out.command)
     } elseif ($out.grace) {

@@ -12,7 +12,7 @@
       "route": "/api/settings/feature-gates",
       "type": "boolean",
       "default": "Off",
-      "feature": "staged-changes",
+      "feature": "second-approver",
       "confirmOn": false,
       "confirmOff": true,
       "info": {
@@ -92,7 +92,7 @@
       "route": "/api/settings/feature-gates",
       "type": "boolean",
       "default": "Off, but on automatically while Intune, Defender XDR or workload assignment rows exist",
-      "feature": "workload-roles",
+      "feature": "entra-azure-intune-defender",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -112,7 +112,7 @@
       "route": "/api/settings/feature-gates",
       "type": "boolean",
       "default": "Off, but on automatically while app-role or workload assignment rows exist",
-      "feature": "workload-roles",
+      "feature": "more-workload-connectors",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -132,7 +132,7 @@
       "route": "/api/settings/feature-gates",
       "type": "boolean",
       "default": "Off",
-      "feature": "workload-roles",
+      "feature": "more-workload-connectors",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -212,7 +212,7 @@
       "route": "/api/settings/feature-gates",
       "type": "boolean",
       "default": "Off in the catalog; the standard deployment switches it on",
-      "feature": "managing-and-managed-tenants",
+      "feature": "msp-define-once",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -232,7 +232,7 @@
       "route": "/api/settings/feature-gates",
       "type": "boolean",
       "default": "On",
-      "feature": "editions-and-licensing",
+      "feature": "signed-licence",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -252,7 +252,7 @@
       "route": "/api/settings/feature-gates",
       "type": "boolean",
       "default": "On",
-      "feature": "updates-and-rings",
+      "feature": "signed-updates",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -286,6 +286,26 @@
       }
     },
     {
+      "key": "FeatureGates.telemetry.setup",
+      "label": "Send setup health to Invardia",
+      "where": "Settings > Features & edition > Feature customization",
+      "route": "/api/settings/feature-gates",
+      "type": "boolean",
+      "default": "On",
+      "feature": "",
+      "confirmOn": true,
+      "confirmOff": false,
+      "info": {
+        "what": "Adds a setup report to the hourly uplink run: once a day and whenever something changes, the state of the critical settings (updater deployed and scheduled, update ring, install key, licence, mail sender, alert recipients, engine permissions, last successful run, backup, update pinned) as ok, missing, wrong or unknown, plus how many engine permissions are expected, missing and extra. The same list drives the health lines on Home.",
+        "enabled": "With a Pro install key, the next uplink run sends the setup report, then one a day and one on every change. Invardia support sees what is missing and can help before you call. Without an install key nothing of this is sent.",
+        "disabled": "No setup report is sent. The hourly job reports and the daily heartbeat are not affected (they have their own switch).",
+        "risk": "When on, it sends the state of your settings (ids, ok / missing / wrong / unknown, counts and the names of missing Graph permissions) to invardia.com. Never names of people or groups, tenant data, error text or secrets. Reversible: switch it off and nothing more is sent.",
+        "requires": "A Pro install key (identified telemetry). 'Send status telemetry to Invardia' on. SuperAdmin to change it. Outbound HTTPS to Invardia's uplink.",
+        "recommended": "On, so Invardia support can see an unfinished setup or a broken updater before it becomes an incident.",
+        "docUrl": "https://invardia.com/docs/pim/settings/FeatureGates.telemetry.setup/"
+      }
+    },
+    {
       "key": "FeatureGates.scheduler.jobs",
       "label": "Scheduled jobs",
       "where": "Settings > Features & edition > Feature customization",
@@ -312,7 +332,7 @@
       "route": "/api/settings/governance-preview",
       "type": "boolean",
       "default": "Off",
-      "feature": "admin-lifecycle",
+      "feature": "second-approver",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -332,7 +352,7 @@
       "route": "/api/settings/governance-preview",
       "type": "boolean",
       "default": "Off",
-      "feature": "workload-roles",
+      "feature": "permission-template-packs",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -352,7 +372,7 @@
       "route": "/api/settings/edition",
       "type": "choice",
       "default": "Not set (shows Pro when a valid Pro licence for this tenant is installed, otherwise Core)",
-      "feature": "editions-and-licensing",
+      "feature": "free-and-pro",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -372,7 +392,7 @@
       "route": "/api/settings/scenario",
       "type": "choice",
       "default": "Single tenant (used when nothing is set)",
-      "feature": "managing-and-managed-tenants",
+      "feature": "msp-define-once",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -392,7 +412,7 @@
       "route": "/api/license",
       "type": "text",
       "default": "None (Free (Community) edition)",
-      "feature": "editions-and-licensing",
+      "feature": "signed-licence",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -452,7 +472,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "On",
-      "feature": "staged-changes",
+      "feature": "create-access-wizard",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -472,7 +492,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "On",
-      "feature": "staged-changes",
+      "feature": "pending-changes",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -492,7 +512,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "On",
-      "feature": "staged-changes",
+      "feature": "pending-changes",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -512,7 +532,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "On",
-      "feature": "drift-and-standing-access",
+      "feature": "revoke-access",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -532,7 +552,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "On",
-      "feature": "safety-guards",
+      "feature": "second-approver",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -572,7 +592,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "On",
-      "feature": "drift-and-standing-access",
+      "feature": "drift-detection",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -672,7 +692,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "On",
-      "feature": "admin-lifecycle",
+      "feature": "create-access-wizard",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -692,7 +712,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "On",
-      "feature": "consultant-lifecycle",
+      "feature": "invite-consultants",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -712,7 +732,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "On",
-      "feature": "staged-changes",
+      "feature": "pending-changes",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -732,7 +752,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "On",
-      "feature": "reports",
+      "feature": "tier-impact-report",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -772,7 +792,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "Off",
-      "feature": "managing-and-managed-tenants",
+      "feature": "msp-fleet-conformance",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -792,7 +812,7 @@
       "route": "/api/settings/feature-flags",
       "type": "boolean",
       "default": "On on a managing tenant; locked off everywhere else",
-      "feature": "managing-and-managed-tenants",
+      "feature": "msp-preview",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -832,7 +852,7 @@
       "route": "/api/settings/admin-domain",
       "type": "choice",
       "default": "Blank (the tenant's default domain)",
-      "feature": "admin-lifecycle",
+      "feature": "naming-conventions",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -892,7 +912,7 @@
       "route": "/api/settings/naming",
       "type": "map",
       "default": "internal-adminuser: none, external-adminuser: x-, external-guest: none",
-      "feature": "admin-lifecycle",
+      "feature": "naming-conventions",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -912,7 +932,7 @@
       "route": "/api/settings/naming",
       "type": "map",
       "default": "entra: -ID, ad: -AD",
-      "feature": "admin-lifecycle",
+      "feature": "naming-conventions",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -992,7 +1012,7 @@
       "route": "/api/settings/naming",
       "type": "map",
       "default": "entra: Entra-ID, azure: Azure, powerbi: PowerBI, powerplatform: PowerPlatform, bundle: Bundle",
-      "feature": "workload-roles",
+      "feature": "naming-conventions",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1012,7 +1032,7 @@
       "route": "/api/settings/naming",
       "type": "text",
       "default": "Admin",
-      "feature": "admin-lifecycle",
+      "feature": "naming-conventions",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1032,7 +1052,7 @@
       "route": "/api/settings/naming",
       "type": "text",
       "default": "Blank (the token disappears)",
-      "feature": "admin-lifecycle",
+      "feature": "naming-conventions",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1052,7 +1072,7 @@
       "route": "/api/settings/naming",
       "type": "text",
       "default": "{AdminTypePrefix}{AdminWord}-{Initial}{Platform} (e.g. admin-abc-id)",
-      "feature": "admin-lifecycle",
+      "feature": "naming-conventions",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1072,7 +1092,7 @@
       "route": "/api/settings/naming",
       "type": "text",
       "default": "{AdminWord}-{Initial}-L0-T0{Platform} (e.g. admin-abc-l0-t0-id)",
-      "feature": "admin-lifecycle",
+      "feature": "naming-conventions",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1092,7 +1112,7 @@
       "route": "/api/settings/naming",
       "type": "text",
       "default": " (Admin)",
-      "feature": "admin-lifecycle",
+      "feature": "naming-conventions",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1112,7 +1132,7 @@
       "route": "/api/settings/naming",
       "type": "list",
       "default": "Admin-, x-Admin, g-Admin",
-      "feature": "admin-lifecycle",
+      "feature": "naming-conventions",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1132,7 +1152,7 @@
       "route": "/api/settings/naming",
       "type": "choice",
       "default": "internal-adminuser",
-      "feature": "admin-lifecycle",
+      "feature": "naming-conventions",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1152,7 +1172,7 @@
       "route": "/api/settings/naming",
       "type": "choice",
       "default": "entra",
-      "feature": "admin-lifecycle",
+      "feature": "naming-conventions",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1232,7 +1252,7 @@
       "route": "/api/settings/naming",
       "type": "text",
       "default": "PIM-{Workload}-{Scope}-{Permission}-L{Level}-T{Tier}-{Plane}-{Platform}",
-      "feature": "workload-roles",
+      "feature": "naming-conventions",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1272,7 +1292,7 @@
       "route": "/api/settings/naming",
       "type": "text",
       "default": "Blank (no AD admin accounts are created)",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1292,7 +1312,7 @@
       "route": "/api/settings/naming",
       "type": "text",
       "default": "Blank (no high-privilege AD admin accounts are created)",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1332,7 +1352,7 @@
       "route": "/api/settings/hybrid-ad",
       "type": "text",
       "default": "-S_AD",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1352,7 +1372,7 @@
       "route": "/api/settings/hybrid-ad",
       "type": "text",
       "default": "Blank (derived: your group prefix + * + the AD group marker)",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1372,7 +1392,7 @@
       "route": "/api/settings/hybrid-ad",
       "type": "text",
       "default": "Blank (the Entra suffix of your naming conventions, -ID as shipped)",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1392,7 +1412,7 @@
       "route": "/api/settings/hybrid-ad",
       "type": "text",
       "default": "Blank (the AD suffix of your naming conventions, -AD as shipped)",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1412,7 +1432,7 @@
       "route": "/api/settings/hybrid-ad",
       "type": "text",
       "default": "Blank (groups are never created, only kept in sync)",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1432,7 +1452,7 @@
       "route": "/api/settings/hybrid-ad",
       "type": "text",
       "default": "{prefix}AD-SRV-{server}{cloud}{marker} (for example PIM-AD-SRV-FS01-ID-S_AD)",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1452,7 +1472,7 @@
       "route": "/api/settings/hybrid-ad",
       "type": "text",
       "default": "Blank (none)",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1472,7 +1492,7 @@
       "route": "/api/settings/hybrid-ad",
       "type": "list",
       "default": "Blank (no extra protected accounts)",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": true,
       "confirmOff": true,
       "info": {
@@ -1492,7 +1512,7 @@
       "route": "/api/settings/hybrid-ad",
       "type": "number",
       "default": "50 groups",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1512,7 +1532,7 @@
       "route": "/api/settings/hybrid-ad",
       "type": "number",
       "default": "8 batches",
-      "feature": "hybrid-active-directory",
+      "feature": "pim-for-active-directory",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1692,7 +1712,7 @@
       "route": "/api/settings/approval-self-approve",
       "type": "boolean",
       "default": "Off",
-      "feature": "safety-guards",
+      "feature": "second-approver",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1706,13 +1726,33 @@
       }
     },
     {
+      "key": "DepartmentOwnersGetReader",
+      "label": "Give new department owners Reader access (their normal account)",
+      "where": "Access > Departments & owners (also Get Started > Departments & owners)",
+      "route": "/api/settings/department-owners-reader",
+      "type": "boolean",
+      "default": "On",
+      "feature": "access-map",
+      "confirmOn": false,
+      "confirmOff": false,
+      "info": {
+        "what": "Department owners approve access requests and receive the mail about their department, and the links in that mail open PIM Manager. This sets whether the tick 'Give PIM Manager Reader access (their normal account)' is on when you add an owner. It applies to departments saved on the page, in Get Started and through the Entra and CSV imports.",
+        "enabled": "When on (the default): an owner who is new in a save and is not yet a PIM Manager user is added to Manager access as a Reader with their normal account, and the page says who was added. Someone who already has a role keeps it unchanged -- never upgraded, never downgraded. You can still untick it for a single owner before you save.",
+        "disabled": "When off: the tick starts off, and imports add nobody. Owners still approve and receive mail; the links open only for those you give access under Manager access & roles yourself.",
+        "risk": "Low. Reader is view-only: a Reader sees configuration and assignments but cannot change anything. Removing an owner does not remove their role -- the page lists them so you decide. Reversible: switch it off; Readers already added stay until you remove them.",
+        "requires": "SuperAdmin to change it and to save departments. Free (Community) and Pro.",
+        "recommended": "On. Approving others never needs an admin account; create one only for an owner who will hold a privileged role themselves.",
+        "docUrl": "https://invardia.com/docs/pim/settings/DepartmentOwnersGetReader/"
+      }
+    },
+    {
       "key": "DeploymentRings",
       "label": "Deployment rings",
       "where": "Settings > Deployment rings (managing tenant only); also on MSP > Managed tenant registry",
       "route": "/api/msp/deployment-rings",
       "type": "list",
       "default": "Three rings: 0 Dev, 1 Test, 2 Broad, no tag rules",
-      "feature": "managing-and-managed-tenants",
+      "feature": "msp-rollout-rings",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1852,7 +1892,7 @@
       "route": "/api/settings/email-controls",
       "type": "boolean",
       "default": "Off",
-      "feature": "safety-guards",
+      "feature": "alerts-and-notifications",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1872,7 +1912,7 @@
       "route": "/api/settings/email-controls",
       "type": "text",
       "default": "Blank (no redirect)",
-      "feature": "safety-guards",
+      "feature": "alerts-and-notifications",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1892,7 +1932,7 @@
       "route": "/api/settings/email-controls",
       "type": "list",
       "default": "Empty (no restriction)",
-      "feature": "safety-guards",
+      "feature": "alerts-and-notifications",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -1932,7 +1972,7 @@
       "route": "/api/alerting",
       "type": "list",
       "default": "Blank (the digest goes to the alert recipients)",
-      "feature": "reports",
+      "feature": "alerts-and-notifications",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -1952,7 +1992,7 @@
       "route": "/api/alerting",
       "type": "list",
       "default": "Blank (the tier report goes to the alert recipients)",
-      "feature": "reports",
+      "feature": "tier-impact-report",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -2032,7 +2072,7 @@
       "route": "/api/settings/operational-policy",
       "type": "choice",
       "default": "1 day (P1D)",
-      "feature": "pim-policies",
+      "feature": "policy-templates",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -2052,7 +2092,7 @@
       "route": "/api/settings/operational-policy",
       "type": "choice",
       "default": "365 days (P365D)",
-      "feature": "pim-policies",
+      "feature": "policy-templates",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -2072,7 +2112,7 @@
       "route": "/api/settings/operational-policy",
       "type": "boolean",
       "default": "On",
-      "feature": "pim-policies",
+      "feature": "policy-templates",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -2092,7 +2132,7 @@
       "route": "/api/workload-exemptions",
       "type": "list",
       "default": "Empty (no exemptions)",
-      "feature": "workload-roles",
+      "feature": "entra-azure-intune-defender",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -2152,7 +2192,7 @@
       "route": "/api/settings/autoextend",
       "type": "number",
       "default": "14 days",
-      "feature": "admin-lifecycle",
+      "feature": "admin-accounts",
       "confirmOn": false,
       "confirmOff": false,
       "info": {
@@ -2172,7 +2212,7 @@
       "route": "/api/settings/autoextend",
       "type": "boolean",
       "default": "On",
-      "feature": "admin-lifecycle",
+      "feature": "admin-accounts",
       "confirmOn": false,
       "confirmOff": true,
       "info": {
@@ -2192,7 +2232,7 @@
       "route": "/api/settings/pending-second-approver",
       "type": "choice",
       "default": "Off",
-      "feature": "staged-changes",
+      "feature": "second-approver",
       "confirmOn": false,
       "confirmOff": true,
       "info": {
@@ -2212,7 +2252,7 @@
       "route": "/api/settings/guard-release-second-person",
       "type": "boolean",
       "default": "Off",
-      "feature": "safety-guards",
+      "feature": "safety-brake",
       "confirmOn": false,
       "confirmOff": true,
       "info": {
@@ -2232,7 +2272,7 @@
       "route": "/api/settings/breakglass-accounts",
       "type": "list",
       "default": "Empty",
-      "feature": "safety-guards",
+      "feature": "break-glass-override",
       "confirmOn": true,
       "confirmOff": true,
       "info": {
@@ -2272,7 +2312,7 @@
       "route": "/api/settings/policy-template-defaults",
       "type": "choice",
       "default": "Built-in default (Groups_Standard)",
-      "feature": "pim-policies",
+      "feature": "policy-templates",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -2292,7 +2332,7 @@
       "route": "/api/settings/policy-template-defaults",
       "type": "choice",
       "default": "Built-in default (EntraIDRoles_Standard)",
-      "feature": "pim-policies",
+      "feature": "policy-templates",
       "confirmOn": true,
       "confirmOff": false,
       "info": {
@@ -2312,7 +2352,7 @@
       "route": "/api/settings/policy-template-defaults",
       "type": "choice",
       "default": "Built-in default (AzureRoles_Standard)",
-      "feature": "pim-policies",
+      "feature": "policy-templates",
       "confirmOn": true,
       "confirmOff": false,
       "info": {

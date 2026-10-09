@@ -65,6 +65,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlStore.ps1')         # connection + query/DDL, over the container's MI
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateTelemetry.ps1')  # §56.6 one record per run, write-only
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateState.ps1')      # §71.43 the SAME run, recorded IN the environment
+. (Join-Path $solRoot 'engine\_shared\PIM-FailureCatalog.ps1')   # 100.31 the OOM code the sizing self-correct reads
+. (Join-Path $solRoot 'engine\_shared\PIM-TenantSizing.ps1')     # 100.31 the tick's size for this tenant + the SQL tier / max size (100.37)
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
 
@@ -887,6 +889,31 @@ if ($tickJob) {
         [void](Set-PimAcaJobImage -SubscriptionId $sub -ResourceGroup $rg -Name $tickJob -Image $targetImg -ContainerName $container)
     } catch { $jobFailed += $tickJob; Say "  tick job not rolled: $($_.Exception.Message)" 'Yellow' }
 }
+
+# ---- 2a. 100.31 / framework 12.15 -- THE TICK'S SIZE FOR THIS TENANT, ON EVERY UPDATE -----------------------------------
+# Same rule as the install (engine/_shared/PIM-TenantSizing.ps1): users + groups + service principals by Graph $count, else
+# the counts recorded on the job; raise only; PIM_Bootstrap_*_Tick on this job wins. SELF-CORRECT: a run that ran out of
+# memory or hit the time limit since the job was last sized raises it one band and one timeout step (max 6 h). Never fails
+# the update -- a sizing problem is reported, the roll stands.
+# The pim.Settings database: Basic -> S0 (raise only; owner 2026-10-09: S0 for every install, Pro too; never on a database tagged
+# pim-sql-tier-pin) and EVERY Standard database gets its 250 GB max size (100.37: a tier raise does not grow it; an existing
+# DB at 2 GB is fixed HERE, on its next update).
+try {
+    $runs = @()
+    $csSize = $null; try { $csSize = Get-PimSqlConnectionString } catch { $csSize = $null }
+    if ($csSize) {
+        try { $rawRuns = Get-PimSqlSettingRaw -ConnectionString $csSize -Name 'JobRunHistory'; if ("$rawRuns".Trim()) { $tmpRuns = "$rawRuns" | ConvertFrom-Json; if ($tmpRuns -is [string]) { $tmpRuns = $tmpRuns | ConvertFrom-Json }; $runs = @($tmpRuns) } }
+        catch { Say "  sizing: the run history could not be read ($($_.Exception.Message)) -- no self-correct this run" 'Yellow' }
+    }
+    $armSeam = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
+    $graphSeam = { param($p) Invoke-PimGraph -Path $p -Headers @{ ConsistencyLevel = 'eventual' } }
+    $envMap = @{}; foreach ($ev in [Environment]::GetEnvironmentVariables().GetEnumerator()) { $envMap["$($ev.Key)"] = "$($ev.Value)" }
+    $sz = Invoke-PimJobSizingUpdate -SubscriptionId $sub -ResourceGroup $rg -JobName $tickJob -Arm $armSeam -Graph $graphSeam -Runs $runs -Environment $envMap
+    foreach ($l in @($sz.log)) { Say "  sizing: $l" 'DarkGray' }
+    Say ("sizing: $($sz.detail)") $(if (-not $sz.ok) { 'Yellow' } elseif ($sz.changed) { 'Cyan' } else { 'DarkGray' })
+    $sqlSz = Invoke-PimSqlTierUpdate -SubscriptionId $sub -Server "$($env:PIM_SqlServer)" -Database $(if ("$($env:PIM_SqlDatabase)".Trim()) { "$($env:PIM_SqlDatabase)".Trim() } else { 'PimPlatform' }) -Arm $armSeam
+    Say ("sizing: $($sqlSz.detail)") $(if (-not $sqlSz.ok) { 'Yellow' } elseif ($sqlSz.changed) { 'Cyan' } else { 'DarkGray' })
+} catch { Say "  sizing skipped: $($_.Exception.Message)" 'Yellow' }
 
 # ---- 2b. §53.5 -- EVERY OTHER JOB IN THIS ENVIRONMENT THAT RUNS THE SAME IMAGE -----------------
 # 🔴 The hardcoded three (Manager, tick, self) left everything else to drift FOREVER. Measured at an

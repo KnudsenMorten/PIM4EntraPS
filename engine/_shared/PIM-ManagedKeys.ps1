@@ -230,3 +230,44 @@ WHEN NOT MATCHED THEN INSERT (Scope, [Key], ConfirmedUtc, CommitId, SourceEntity
 "@)
     return $list.Count
 }
+
+function Get-PimEverAppliedKeys {
+    <#
+      100.27 REMOVE-NEVER-APPLIED (owner 2026-10-09: "it will not go away in internal"). Which of -Keys (live keys of one
+      scope) PIM has EVER applied, by the two records the engine keeps: the managed-key ledger (pim.ManagedKeys -- PIM matched
+      or created the item) and the applied outcome per commit (pim.CommitApplied -- created / updated / already present).
+      Returns @{ ok; applied = @{ key(lower) -> 'ledger' | 'created' | 'updated' | 'already present' }; error }.
+      ok = $false when EITHER record could not be read: the caller must then treat every key as possibly applied (a Remove
+      that is skipped wrongly would leave access in place, so "never applied" is only ever concluded from a complete read).
+      Test seams: $global:PIM_ManagedKeysStore and $global:PIM_CommitAppliedStore.
+    #>
+    param([string]$ConnectionString, [Parameter(Mandatory)][string]$Scope, [string[]]$Keys = @())
+    $want = @{}; foreach ($k in @($Keys)) { $n = Get-PimManagedKeyNorm $k; if ($n) { $want[$n] = $true } }
+    $out = @{}
+    if (-not $want.Count) { return [pscustomobject]@{ ok = $true; applied = $out; error = '' } }
+    try {
+        $ledger = Get-PimManagedKeys -ConnectionString $ConnectionString -Scope $Scope
+        foreach ($k in @($want.Keys)) { if ($ledger.ContainsKey($k)) { $out[$k] = 'ledger' } }
+        $rows = @()
+        if ($global:PIM_CommitAppliedStore -is [System.Collections.Generic.List[object]]) {
+            $rows = @($global:PIM_CommitAppliedStore | Where-Object { "$($_.Scope)" -ieq $Scope })
+        } elseif ($global:PIM_ManagedKeysStore -is [hashtable]) {
+            $rows = @()   # an in-memory ledger without an in-memory outcome store: the ledger is the whole answer
+        } else {
+            if (-not "$ConnectionString".Trim()) { throw 'no SQL store to read the applied outcomes from' }
+            $json = ConvertTo-Json -InputObject @($want.Keys) -Compress
+            $rows = @(Invoke-PimSqlQuery -ConnectionString $ConnectionString -Parameters @{ s = $Scope; j = $json } -Sql @"
+IF OBJECT_ID('pim.CommitApplied') IS NOT NULL
+SELECT LiveKey, Result FROM pim.CommitApplied
+WHERE Scope = @s AND Result IN ('created', 'updated', 'already present') AND LOWER(LiveKey) IN (SELECT LOWER([value]) FROM OPENJSON(@j))
+"@)
+        }
+        foreach ($r in $rows) {
+            $lk = Get-PimManagedKeyNorm "$($r.LiveKey)"
+            if ($want.ContainsKey($lk) -and -not $out.ContainsKey($lk) -and "$($r.Result)" -in @('created', 'updated', 'already present')) { $out[$lk] = "$($r.Result)" }
+        }
+        return [pscustomobject]@{ ok = $true; applied = $out; error = '' }
+    } catch {
+        return [pscustomobject]@{ ok = $false; applied = $out; error = "$($_.Exception.Message)" }
+    }
+}

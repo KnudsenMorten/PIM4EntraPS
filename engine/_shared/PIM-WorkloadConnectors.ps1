@@ -573,6 +573,87 @@ function Resolve-PimWorkloadBinding {
     return $b
 }
 
+# ---------------------------------------------------------------------------
+# 100.26 WIZARD-RESOURCE-REQUIRED (owner 2026-10-09, internal: two business-central rows staged by the wizard with no
+# Resource -> WORKLOAD-RESOURCE-MISSING on every run). A connector with perRowResource carries resourceFormat
+# { label; format; example; prefill; pattern } -- {tenantId} in example / prefill is this tenant's id. The wizard makes the
+# field REQUIRED and checks the pattern before staging; the validator flags a missing Resource at commit.
+# ---------------------------------------------------------------------------
+function Get-PimWorkloadResourceFormat {
+    # PURE. The connector's per-row Resource format with {tenantId} filled in; $null for a connector without perRowResource.
+    param([AllowNull()][object]$Connector, [string]$TenantId = '')
+    if (-not $Connector -or -not $Connector.perRowResource) { return $null }
+    $rf = $Connector.resourceFormat
+    $tid = "$TenantId".Trim(); if (-not $tid) { $tid = '<tenant-id>' }
+    $fill = { param($v) ("$v" -replace '\{tenantId\}', $tid) }
+    $text = if ($Connector.prerequisites -and "$($Connector.prerequisites.perRowResource)".Trim()) { "$($Connector.prerequisites.perRowResource)" } else { '' }
+    return [ordered]@{
+        label   = $(if ($rf -and "$($rf.label)".Trim()) { "$($rf.label)" } else { 'Resource' })
+        format  = $(if ($rf) { "$($rf.format)" } else { '' })
+        example = $(if ($rf) { & $fill $rf.example } else { '' })
+        prefill = $(if ($rf -and "$TenantId".Trim()) { & $fill $rf.prefill } else { '' })
+        pattern = $(if ($rf) { "$($rf.pattern)" } else { '' })
+        text    = $text
+    }
+}
+
+function Test-PimWorkloadResourceValue {
+    <#
+      PURE. A Resource value against the connector's format: @{ ok; error }. Empty on a perRowResource connector = not ok
+      (the engine fails WORKLOAD-RESOURCE-MISSING on every run). A value that does not match the pattern = not ok, with the
+      format and example in the message. A connector without perRowResource accepts anything.
+    #>
+    param([AllowNull()][object]$Connector, [AllowNull()][string]$Value, [string]$TenantId = '')
+    $f = Get-PimWorkloadResourceFormat -Connector $Connector -TenantId $TenantId
+    if (-not $f) { return [pscustomobject]@{ ok = $true; error = '' } }
+    $v = "$Value".Trim()
+    $hint = $(if ($f.format) { " Format: $($f.format)$(if ($f.example) { ", e.g. $($f.example)" })." } else { '' })
+    if (-not $v) { return [pscustomobject]@{ ok = $false; error = ("{0} is required for '{1}' -- the engine cannot apply (or later remove) the binding without it.{2}" -f $f.label, "$($Connector.id)", $hint) } }
+    if ($f.pattern) {
+        $m = $false; try { $m = [bool]($v -match $f.pattern) } catch { $m = $true }
+        if (-not $m) { return [pscustomobject]@{ ok = $false; error = ("'{0}' is not a valid {1}.{2}" -f $v, $f.label, $hint) } }
+    }
+    return [pscustomobject]@{ ok = $true; error = '' }
+}
+
+# ---------------------------------------------------------------------------
+# 100.27 REMOVE-NEVER-APPLIED (owner 2026-10-09: "i have said remove + cmmit + rerun jobs" / "it will not go away in
+# internal"). A Remove row whose binding cannot even be RESOLVED because the row lacks data (no Resource, an unknown
+# connector, a role or group that does not exist) used to fail on every run: removing needs the same missing data as
+# assigning. When the engine's own records show the binding was NEVER applied, there is nothing in the workload to take
+# away -- the Remove is done without calling the workload. When it WAS applied (or that cannot be read), it fails with a
+# plain message that says what to fill in.
+# ---------------------------------------------------------------------------
+function Test-PimWorkloadRemoveDataError {
+    # PURE. TRUE for a resolution error caused by the ROW's own data (never a listing / permission / service failure,
+    # which can hide a binding that IS live and must keep failing until the removal really happens).
+    param([string]$Message)
+    return [bool]("$Message" -match '^(WORKLOAD-RESOURCE-MISSING|WORKLOAD-CONNECTOR-UNKNOWN|WORKLOAD-ROLE-NOT-FOUND|WORKLOAD-GROUP-UNRESOLVED):')
+}
+
+function Format-PimWorkloadRemoveNeedsData {
+    <#
+      PURE. The message for a Remove that needs data the row lacks and that was (or may have been) applied.
+      -AppliedBy: 'ledger' | 'created' | 'updated' | 'already present' (the record that proves it), or '' when the records
+      could not be read (-ReadError says why).
+    #>
+    param([string]$Message, [string]$AppliedBy = '', [string]$ReadError = '', [AllowNull()][object]$Connector, [string]$Workload = '')
+    $name = if ($Connector -and "$($Connector.name)".Trim()) { "$($Connector.name)" } elseif ("$Workload".Trim()) { "$Workload" } else { 'the workload' }
+    $rerr = if ("$ReadError".Trim()) { "$ReadError" } else { 'no record store' }
+    $why = "PIM Manager could not read whether it ever applied this binding ($rerr), so it does not skip the removal"
+    if ("$AppliedBy".Trim()) { $why = "PIM Manager APPLIED this binding (its records say: $AppliedBy)" }
+    $fix = switch -Regex ("$Message") {
+        '^WORKLOAD-RESOURCE-MISSING' {
+            $fmt = if ($Connector -and $Connector.prerequisites -and "$($Connector.prerequisites.perRowResource)".Trim()) { " ($($Connector.prerequisites.perRowResource))" } else { '' }
+            "fill in the row's Resource with the target it was applied in$fmt and commit -- the next run removes it"
+        }
+        '^WORKLOAD-ROLE-NOT-FOUND' { "correct RoleName to the role it was applied with and commit -- the next run removes it" }
+        '^WORKLOAD-GROUP-UNRESOLVED' { "correct GroupTag to the group it was applied to and commit -- the next run removes it" }
+        default { "correct the Workload column to the connector it was applied through and commit -- the next run removes it" }
+    }
+    return ("WORKLOAD-REMOVE-NEEDS-DATA: removing this binding has to call {0}, and the row lacks what that call needs. {1}. Fix: {2}. Or remove the access in {0} yourself and then stop managing the binding (delete this row). Cause: {3}" -f $name, $why, $fix, "$Message")
+}
+
 function Invoke-PimWorkloadBindingAssign {
     # Create the binding (v1 L2921-2926 membership, L2967-2976 flat).
     param([Parameter(Mandatory)][object]$Binding)

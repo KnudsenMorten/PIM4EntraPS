@@ -13,8 +13,139 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.539 -- 2026-10-09
+
+- **Your Pro licence covers every feature of its edition, also the newer ones.** A Pro licence issued before
+  the consultant company review, the access request portal, the access request API or the AI assistant endpoint
+  existed did not list them, so they showed as "Pro -- not licensed" for a paying customer. The licence now names
+  the edition and the product decides what the edition includes: Pro Enterprise and Pro Business unlock every
+  single-tenant Pro feature, current and future (Business differs only by its admin-account limit); Pro MSP adds
+  the managing / managed tenant features. No new licence is needed when a feature is added. An expired licence
+  unlocks nothing. The licence signature check is unchanged.
+- **Settings ▸ Licence says why.** Each Pro feature now shows the reason beside it: *included in Pro Enterprise*,
+  *included in Pro Business (limits apply)*, *included in Pro MSP*, *needs the MSP licence*, or the licence's own
+  reason.
+- **A Pro environment is always recognised as Pro by the update and deployment scripts.** When one setup script ran
+  another, the inner script could check the stored licence without its trusted signing certificates, read a valid Pro
+  licence as invalid, and treat the environment as the free edition (or show its Pro features as locked). The licence
+  check now always carries its certificates, whichever script runs it.
+- **The update ring travels with every status report.** The hourly status telemetry now always names the environment's
+  update ring (1, 2 or 3), also where the ring is set only on the update job: it is read from the ring the deployment and
+  the last update run recorded in the environment. Invardia's dashboard can then show each environment's update level
+  against what its ring approved, instead of "unknown".
+- **Setup health to Invardia (Pro, with an install key).** A new switch, Settings > Features & edition > "Send setup health
+  to Invardia" (on by default), adds one setup report a day -- and one on every change -- to the status telemetry: the
+  state of the critical settings (updater deployed, its nightly schedule, update ring, update pinned on purpose, install
+  key, licence, mail sender, alert recipients, engine permissions, last successful engine run, configuration backup) as
+  ok, missing, wrong or unknown, every one every time, plus how many engine permissions are expected, missing and extra.
+  Only ids, states and counts are sent -- never names of people or groups, tenant data, error text or secrets; an
+  anonymous Community install sends nothing of this.
+- **Home shows the same control list.** A critical setting that is missing or wrong (for example no alert recipient, or a
+  configuration backup that failed) is shown as a health line on Home with what to do -- the same evaluation the setup
+  report sends, so Home and Invardia support never disagree.
+- **Database space in the daily status report (with an install key).** The daily heartbeat to Invardia now carries how
+  much of PIM's SQL database is used and its maximum size (in MB), so Invardia support can warn before the database runs
+  full. An anonymous Community install sends neither; when the size cannot be read, both are left out.
+- **The end-of-install check reads your licence correctly.** It no longer reports "the licence is Invalid" (and refuses to
+  finish the installation) right after the licence step stored and verified a valid licence; a licence that really is not
+  valid now shows the reason.
+- **An installation that updates through Invardia no longer warns about channel.json.** The updater step says
+  "update source: Invardia (ring N)" instead of "channel.json could NOT be read -- this environment will NOT update".
+- **A tracked installation shows every deployment step as it happens.** The network, registry, database, image, apps,
+  identities, mail, updater, access and alerting steps each report started and their result to the installation tracker
+  while they run -- before, only the checks before and the steps after the deployment were reported.
+- **The mail sender is shown by the address you chose.** The end-of-install check and Get Started > Mail sender show the
+  mailbox's primary address (for example name@yourdomain), with the mailbox's sign-in name (often on the tenant's initial
+  domain) as detail. PIM still sends through the sign-in name, as before.
+- **The delegation wizard asks for the target of a per-environment workload.** For Business Central, Dataverse, Azure
+  DevOps, Power Platform and enterprise-app roles, "Scope within the workload (optional)" is now a required field in the
+  workload's own format -- for Business Central "<tenant-id>/<environment>", prefilled with your tenant id -- and the wizard
+  refuses an empty or malformed value before anything is staged. The Roles step lists the roles of that environment when
+  PIM can read them; when it cannot, you type the name and the page warns that it is not verified. Committing a binding
+  row without its target is refused (new check PIM-WL-005; a target in the wrong format is a warning, PIM-WL-006).
+- **Removing a workload binding that was never applied no longer fails forever.** When a binding PIM Manager never applied
+  (it could not -- for example the row had no target) is removed, the next run completes the removal without calling the
+  workload, deletes the row and clears it from Failing now. Deleting such a row in Pending changes deletes it outright. A
+  binding PIM did apply still has to be removed in the workload; when the row lacks what that needs, the failure says so
+  and what to fill in. On Failing now the button on a workload binding now reads **Stop managing this binding (delete the
+  row)**.
+- **Status telemetry names the cause of a failed run.** A failed run is reported with the failure code the engine gave it
+  (for example "workload-resource-missing" or "permission-denied") instead of "unclassified". Each code is also marked as a
+  configuration matter for you or a product defect for us; that mark is sent once Invardia has switched the field on.
+  Nothing else in what is sent changes.
+- **A re-issued licence reaches your installation by itself.** When Invardia re-issues your licence, the installation
+  learns it from the answer to its daily status report and asks for the new licence within 30 minutes -- also while the
+  old one is still valid. The new file is installed only after the same checks as always (signature, Pro, your tenant,
+  dates), so nothing is trusted on Invardia's word. Needs the automatic licence request, which is on by default (Settings
+  ▸ Features), and status telemetry.
+- **The active-assignments read no longer runs out of memory on a large tenant.** The scheduled job that refreshes the
+  list on Reviews & controls > Revoke now handles Microsoft Graph and Azure Resource Graph results one page at a time.
+  It also writes the stored list in one pass, without holding a second copy of every assignment. On a tenant with tens of
+  thousands of assignments the job stopped with "System.OutOfMemoryException"; it now completes in a fraction of the
+  memory. The stored list and the Revoke screen are unchanged.
+- **The engine job is sized for your tenant, at install and on every update.** The installer counts your users, groups
+  and service principals (Microsoft Graph `$count`) and sizes the engine job (`ca-pim-tick`) for that count:
+  under 5,000 objects it keeps the default (0.5 CPU / 1 GiB); from 5,000 it gets 2 CPU / 4 GiB with a 2-hour time limit;
+  from 15,000, 4 CPU / 8 GiB with a 4-hour limit (the largest size Azure Container Apps offers). Every update counts again
+  and only ever raises the size. A size you set yourself (`PIM_Bootstrap_Cpu_Tick`, `PIM_Bootstrap_Memory_Tick`,
+  `PIM_Bootstrap_ReplicaTimeout_Tick`) wins. If the job ran out of memory or hit its time limit since it was last sized,
+  the next update raises it one size and its time limit one step, up to 6 hours. The counts and the size are recorded on
+  the job and shown in the environment report. The end-of-install check warns when the job is smaller than the tenant
+  needs and gives you the command that fixes it.
+- **The database is never Basic, and every Standard database has a 250 GB maximum size.** The main database is S0
+  (Standard) at minimum, for every edition: a Basic database is raised to S0 at install and on every update, and no other
+  tier is changed automatically -- a larger tier is never lowered, and Premium, vCore and elastic-pool databases are not
+  touched. To keep a database on a tier you chose, tag it `pim-sql-tier-pin` (for example `S0`); its tier is then never
+  changed. Raising a tier does not raise the maximum size, so a database moved up from Basic kept Basic's 2 GB limit and
+  stopped accepting writes once full ("has reached its size quota"). New databases are created with a 250 GB maximum, and
+  every update raises an existing Standard database below 250 GB to 250 GB (logged before and after), also when its tier
+  is pinned. A larger limit is never lowered. The 250 GB maximum is included in the Standard price.
+- **New setup script `Set-PimSqlTier.ps1`.** Applies the same database rule on demand -- or sets the Standard tier you
+  choose (`-Tier S0`, `S1`, `S2`, ...; never Basic) with the 250 GB maximum size -- and with `-Pin` tags the database so
+  updates keep its tier. It prints the database before and after, waits until Azure confirms the change, and `-WhatIf`
+  shows the change first. No PowerShell module: you sign in in the browser. Download it from
+  https://invardia.com/support/pim/Set-PimSqlTier.ps1.
+- **"Out of memory" is now a named failure.** An engine run that ran out of memory is reported as "The engine job ran out
+  of memory", with the command that raises the job to the next size. It was reported as unclassified.
+- **The environment report reads the licence expiry date the same way on every server.** The "licence expires soon"
+  finding parsed the date with the server's regional format; it now reads it independent of the language settings.
+- **Upgrade note:** the first update to 2.4.539 raises `ca-pim-tick` on a tenant with 5,000 or more users, groups and
+  service principals, and raises a Basic database to S0. A larger job size costs a little more while the job runs.
+
 ## 2.4.538 -- 2026-10-09
 
+- **Drift: deleting a whole extra group is its own, separate commit.** Delete on an extra group (Reviews & controls >
+  Drift, after typing DELETE and the tier-0 warning) now puts ONE red DELETE item into the change queue instead of staging
+  a retirement row. It is committed on its own with **Commit this DELETE** on its row in the Change queue; Commit all and
+  Commit selected leave it out and say so. Once committed, the engine deletes the group on its next run -- also when
+  automatic group retirement is switched off -- within the removal budget, and only a group the drift check listed as an
+  extra, that carries your naming prefix, whose name is unique, that is not defined in PIM and that has no break-glass
+  account as a member. Who queued it, who committed it and when are in the audit log.
+- **The installation gives PIM Manager read access to its own resource group.** The install (single tenant, managing and
+  managed tenant) grants the PIM Manager's managed identity Reader on the PIM resource group only, so the Environment report
+  can show the architecture; the end-of-install check verifies it and grants it when missing (a warning with the exact
+  command if the installer may not). The security pack and the script documentation list the new permission.
+- **A new duplicate group tag is refused.** Committing a group definition whose tag another definition already uses is
+  refused: "This tag is already used by <entity>/<row>; pick another tag or edit the existing definition". Duplicates that
+  already exist keep working as before (the later definition wins) and show as a warning with how to fix them, so they no
+  longer block other commits.
+- **Department owners get PIM Manager Reader access by default.** When you add an owner under Access > Departments &
+  owners (or in Get Started), a tick "Give PIM Manager Reader access (their normal account)" is on by default: on save the
+  owner's normal account is added to Manager access as a Reader, so the links in their approval mail open, and the page
+  says who was "added as Reader". Only people who are not yet PIM Manager users are added -- an existing role is never
+  changed. Removing an owner does not remove their role; the page lists them so you decide. The Entra and CSV imports
+  grant the same way, with a summary of who was added. The default is a setting (More info explains it). Next to the tick,
+  "Also create an admin account" (off by default) opens the New admin account wizard pre-filled for that person -- name,
+  department, their normal account for PIM's mail, day-2-day tier 1 -- for an owner who will hold a privileged role
+  themselves. Approving others never needs an admin account.
+- **Admin accounts: filter internal vs external and high-privilege vs day-to-day.** Filter chips above the table --
+  Type (internal / external / guest), Privilege (high-priv / day-to-day), Platform (cloud (Entra) / AD (hybrid)),
+  Department (including "none") and Status -- combine with each other and with the text filter (several chips in one
+  group = any of them; chips in different groups = all of them). Each chip shows how many admins it would leave, "N of M"
+  follows every active filter, "Clear filters" resets them, and the browser remembers your chips. Each admin carries a
+  High-priv / Day-to-day badge; hover it for the reason. An admin is high-privilege when its name matches the high-priv
+  naming pattern, when its level is L0 or its tier T0 (its own level / tier, or an L0 / T0 marker in its name or display
+  name), or when its purpose is HighPriv; every other admin is day-to-day.
 - **Get Started > Mail sender turns green once mail works.** The step no longer stays "Not done yet" (with a red dot on
   Overview and Get Started) only because the engine job has not sent a mail yet. Until its first send, the engine's line is
   shown as information ("waiting for the engine's first send"), without a fix command; only a send the engine actually

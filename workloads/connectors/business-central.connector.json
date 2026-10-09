@@ -4,6 +4,7 @@
   "auth": "businesscentral",
   "membershipModel": true,
   "perRowResource": true,
+  "resourceFormat": { "label": "Business Central environment", "format": "<tenant-id>/<environment>", "example": "{tenantId}/Production", "prefill": "{tenantId}/", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/[A-Za-z0-9_-]+$" },
   "containerKind": "security group",
   "status": "structure built -- nested-membership adapter (Entra security group -> BC security group container -> permission sets). Live-validation pending a BC environment with the Entra group provisioned as a BC security group + the engine SPN registered as a BC app user with SUPER. Automation-API entity/path names follow the v2.0 securityGroups + permissionSets API; confirm against a live environment's $metadata before flipping status to delivered.",
   "permissionsNeeded": ["Business Central: an app user (the engine SPN) with the SUPER permission set in the target environment; the Entra group must already exist as a BC SECURITY GROUP (linked to the Entra group objectId) so permission sets can be attached to it"],

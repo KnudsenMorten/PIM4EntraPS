@@ -237,8 +237,8 @@ function ConvertTo-PimDriftSnapshotDocument {
             if ("$($it.type)" -eq 'extra') {
                 $xa = Get-PimDriftExtraActions -Scope "$($sd.scope)" -Payload $payloads["$($sd.scope)|$($it.key)"]
                 $row['revoke'] = $xa.revoke; $row['revokeWhy'] = $xa.revokeWhy; $row['keep'] = $xa.keep; $row['keepWhy'] = $xa.keepWhy
-                # DRIFT-EXTRAS (100.12): a group extra's Delete is its staged retirement (a definition row), not a revoke.
-                if ($xa.Contains('retire') -and $null -ne $xa['retire']) { $row['retire'] = $xa['retire'] }
+                # DRIFT-EXTRAS (100.12) / PIM 100.22 (d): a group extra's Delete is ONE queued group delete (its own commit), not a revoke.
+                if ($xa.Contains('groupDelete') -and $null -ne $xa['groupDelete']) { $row['groupDelete'] = $xa['groupDelete'] }
             }
             $items.Add($row)
         }
@@ -783,17 +783,19 @@ function Get-PimDriftExtraActions {
         # PIM's ledger + journal say PIM made. Three explicit choices on the Drift page, never a default:
         #   Import into PIM -- stage the group DEFINITION row under its exact live name. The Groups provider keys on the name,
         #                      so the committed row MATCHES the existing group (adopted, nochange) -- never a second group.
-        #   Delete          -- stage the same row with Lifecycle=Retire: the normal group-retirement path (commit, the
-        #                      EnableGroupRetirement switch, naming prefix, unique live name, removal budget) deletes it.
+        #   Delete          -- 🔒 PIM 100.22 (d) (owner 2026-10-09: "queue + own commit, then delete"): ONE red DELETE item in
+        #                      the change queue (action 'group-delete', POST /api/drift/group-delete), committed ON ITS OWN; the
+        #                      engine then deletes the group on its next run EVEN WITH group retirement switched off (a per-item
+        #                      explicit intent, not the global switch) -- behind the prefix, unique-name, not-defined, break-glass
+        #                      and removal-budget guards (Invoke-PimQueueGroupDelete). It replaced the staged Lifecycle=Retire row.
         #   Ignore          -- hide it (pim.Settings 'DriftIgnores'), reversible.
         $dn = if (& $f 'displayName') { & $f 'displayName' } else { & $f 'DisplayName' }
         $desc = & $f 'description'; if (-not $desc) { $desc = & $f 'Description' }
         $gid = & $f 'id'; if (-not $gid) { $gid = & $f 'Id' }
-        $out.revokeWhy = 'a group is not a delegation the revoke queue removes -- Delete stages its retirement (Lifecycle=Retire) instead'
+        $out.revokeWhy = 'a group is not a delegation the revoke queue removes -- Delete queues the deletion of the whole group instead (its own commit)'
         $row = [ordered]@{ GroupName = $dn; GroupDescription = $desc }
         $out.keep = [ordered]@{ base = 'PIM-Definitions-Roles'; kind = 'group'; groupId = $gid; row = $row }
-        $rrow = [ordered]@{ GroupName = $dn; GroupDescription = $desc; Lifecycle = 'Retire' }
-        $out['retire'] = [ordered]@{ base = 'PIM-Definitions-Roles'; kind = 'group'; groupId = $gid; row = $rrow }
+        if ("$gid".Trim()) { $out['groupDelete'] = [ordered]@{ action = 'group-delete'; kind = 'group'; groupId = "$gid".Trim(); groupName = "$dn".Trim() } }
         return $out
     }
     $out.revokeWhy = 'nothing the revoke queue can address -- remove it at its source'

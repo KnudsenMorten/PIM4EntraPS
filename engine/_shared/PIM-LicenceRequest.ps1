@@ -15,8 +15,16 @@
   VERIFY offline -- the SHA-256, the signature against the trusted signers, sku Pro, the REAL tenant in tenantIds, the
          dates -- then store it exactly as Set-PimLicense does. Nothing Invardia sends is trusted before that.
 
-  🔒 OFF by default: the feature gate 'licence.autoRequest' must be switched on. It is PIM's first call to invardia.com,
-  and the operator confirms it in the PIM session (a decision relayed by another session is not that confirmation).
+  SUPERSEDED (§100.39, framework §12.6b): Invardia re-issues a licence (§12.6a) and says so in the heartbeat response
+         (`supersededBy: <licenceId>`, PIM-Uplink.ps1 stores it in pim.Settings 'LicenceSupersededBy' -- a plain string id).
+         When that id differs from the installed licence's id the job KNOCKS with currentLicenceId even though the
+         installed licence is valid and far from its end; Invardia auto-approves the successor and the normal pull
+         delivers it -- verified offline exactly like any other delivery. The hint is cleared once the installed licence
+         IS the successor, and after any install (a still-superseded licence is reported again by the next heartbeat, so
+         a mismatching id can never loop the knock).
+
+  🔒 The feature gate 'licence.autoRequest' is ON by default (owner decision 2026-10-05, PIM-FeatureCatalog.ps1) and
+  switchable in Settings > Features.
   🔒 The tenant sent is the REAL one (Resolve-PimLicenseTenantId: the managed identity's own token; an SPN's configured
      tenant), never a value a customer can edit to fetch another tenant's licence.
   The pull token (it only fetches this install's licence; 30 days) is kept in pim.Settings 'LicenceRequestToken', a
@@ -28,33 +36,47 @@ $script:PimLicenceRenewDays = 30
 
 function Get-PimLicenceRequestDecision {
     <#
-      PURE. What the job does this run: @{ action = none|knock|pull; reason }.
+      PURE. What the job does this run: @{ action = none|knock|pull; reason; clearHint }.
         * gate off                                    -> none
         * a request is pending (state Pending + token) -> pull, unless now < nextPollUtc (then none, "waiting")
+        * a Rejected state                            -> none (never re-requested by itself; the admin requests again)
+        * §100.39: Invardia says the installed licence is superseded (-SupersededBy = a licence id that is NOT the
+          installed licence's id) -> knock, even when the installed licence is valid for years
         * the licence is Pro for this tenant and ends later than 30 days from now -> none
         * otherwise (no licence, not Pro here, expired, grace, or ending within 30 days) -> knock
-      A Rejected state never knocks again by itself (PIM's rule) -- the admin requests again.
+      clearHint = $true when -SupersededBy names the licence that IS installed (the successor arrived): the job clears it.
     #>
-    param([bool]$Enabled, $License, [bool]$ProHere, $State, [bool]$HasToken, [datetime]$NowUtc)
+    param([bool]$Enabled, $License, [bool]$ProHere, $State, [bool]$HasToken, [datetime]$NowUtc, [string]$SupersededBy = '')
     $NowUtc = $NowUtc.ToUniversalTime()   # .NET compares DateTimes WITHOUT their kind -- everything here is UTC
-    if (-not $Enabled) { return @{ action = 'none'; reason = "the licence request client is off (feature 'licence.autoRequest')" } }
+    $hint = "$SupersededBy".Trim()
+    $curId = if ($License) { "$($License.LicenseId)".Trim() } else { '' }
+    $clear = [bool]($hint -and $curId -and $hint -ieq $curId)
+    if (-not $Enabled) { return @{ action = 'none'; reason = "the licence request client is off (feature 'licence.autoRequest')"; clearHint = $clear } }
     $st = "$($State.status)"
     if ($st -eq 'Pending' -and $HasToken) {
         $next = $null; try { if ("$($State.nextPollUtc)") { $next = ([datetime]"$($State.nextPollUtc)").ToUniversalTime() } } catch { }
-        if ($next -and $NowUtc -lt $next) { return @{ action = 'none'; reason = "waiting for Invardia (next check $($next.ToString('u')))" } }
-        return @{ action = 'pull'; reason = 'a request is pending at Invardia' }
-    }
-    $validTo = $null; try { if ($License -and $License.ValidTo) { $validTo = ([datetime]$License.ValidTo).ToUniversalTime() } } catch { }
-    if ($ProHere -and "$($License.Status)" -eq 'Valid' -and $validTo -and $validTo -gt $NowUtc.AddDays($script:PimLicenceRenewDays)) {
-        return @{ action = 'none'; reason = "the licence is valid until $($validTo.ToString('yyyy-MM-dd'))" }
+        if ($next -and $NowUtc -lt $next) { return @{ action = 'none'; reason = "waiting for Invardia (next check $($next.ToString('u')))"; clearHint = $clear } }
+        return @{ action = 'pull'; reason = 'a request is pending at Invardia'; clearHint = $clear }
     }
     # Invardia's contract (2026-10-04): a rejection is shown to the admin and NEVER re-requested automatically -- the
     # admin clears it (Settings > Licence: "request again", which removes LicenceRequestState) after talking to Invardia.
-    if ($st -eq 'Rejected') { return @{ action = 'none'; reason = "Invardia rejected the licence request$(if ("$($State.reason)") { ": $($State.reason)" }) -- contact Invardia, then request again" } }
+    # Checked BEFORE the superseded hint: a refused successor (e.g. the old licence was revoked) must not knock every 30 min.
+    $rejected = @{ action = 'none'; reason = "Invardia rejected the licence request$(if ("$($State.reason)") { ": $($State.reason)" }) -- contact Invardia, then request again"; clearHint = $clear }
+    if ($st -eq 'Rejected' -and $hint -and -not $clear) { return $rejected }
+    # §100.39 / framework §12.6b: a re-issued licence reaches the install by itself -- Invardia auto-approves the successor
+    # of a superseded currentLicenceId; the delivery is still verified offline (Test-PimLicenceDelivery).
+    if ($hint -and $curId -and -not $clear) {
+        return @{ action = 'knock'; reason = "Invardia re-issued the licence (superseded by $hint)"; clearHint = $false }
+    }
+    $validTo = $null; try { if ($License -and $License.ValidTo) { $validTo = ([datetime]$License.ValidTo).ToUniversalTime() } } catch { }
+    if ($ProHere -and "$($License.Status)" -eq 'Valid' -and $validTo -and $validTo -gt $NowUtc.AddDays($script:PimLicenceRenewDays)) {
+        return @{ action = 'none'; reason = "the licence is valid until $($validTo.ToString('yyyy-MM-dd'))"; clearHint = $clear }
+    }
+    if ($st -eq 'Rejected') { return $rejected }
     $why = if (-not $License -or "$($License.Status)" -eq 'Missing') { 'no licence is installed' }
            elseif (-not $ProHere) { 'the installed licence is not a Pro licence for this tenant' }
            else { "the licence ends $($validTo.ToString('yyyy-MM-dd')) (within $($script:PimLicenceRenewDays) days)" }
-    return @{ action = 'knock'; reason = $why }
+    return @{ action = 'knock'; reason = $why; clearHint = $clear }
 }
 
 function New-PimLicenceKnockBody {
@@ -105,7 +127,10 @@ function Invoke-PimLicenceRequestCycle {
     $lic = if ($PublicCertB64) { $null } else { try { Get-PimLicense -Refresh } catch { $null } }
     if ($PublicCertB64) { $t = & $GetSetting 'License'; if ($t) { $lic = Get-PimLicense -LicenseText "$t" -PublicCertB64 $PublicCertB64 } }
     $proHere = [bool]($lic -and (Test-PimLicenseIsProForTenant -License $lic -TenantId $tid).pro)
-    $d = Get-PimLicenceRequestDecision -Enabled $Enabled -License $lic -ProHere $proHere -State $state -HasToken ([bool]$token) -NowUtc $NowUtc
+    # §100.39: the superseded hint the heartbeat stored (PIM-Uplink.ps1). A plain string id; anything else is ignored.
+    $hint = ''; try { $hv = & $GetSetting 'LicenceSupersededBy'; if ($hv -is [string]) { $hint = $hv.Trim() } } catch { $hint = '' }
+    $d = Get-PimLicenceRequestDecision -Enabled $Enabled -License $lic -ProHere $proHere -State $state -HasToken ([bool]$token) -NowUtc $NowUtc -SupersededBy $hint
+    if ($d.clearHint) { & $SetSetting 'LicenceSupersededBy' ''; $hint = '' }   # the successor IS installed
     $save = { param($Status, $Msg, $Extra) $o = [ordered]@{ status = $Status; message = $Msg; updatedUtc = $NowUtc.ToString('o') }
               if ($state) { foreach ($k in 'requestId', 'requestedUtc', 'nextPollUtc') { if ($state.PSObject.Properties[$k] -and -not ($Extra -and $Extra.Contains($k))) { $o[$k] = $state.$k } } }
               if ($Extra) { foreach ($k in $Extra.Keys) { $o[$k] = $Extra[$k] } }
@@ -124,7 +149,7 @@ function Invoke-PimLicenceRequestCycle {
         }
         & $SetSetting 'LicenceRequestToken' "$($r.body.pullToken)"
         $wait = [Math]::Max(60, [int]"0$($r.body.pollAfterSeconds)")
-        $st = & $save 'Pending' "licence requested $($NowUtc.ToString('yyyy-MM-dd')), waiting for Invardia" ([ordered]@{ requestId = "$($r.body.requestId)"; requestedUtc = $NowUtc.ToString('o'); nextPollUtc = $NowUtc.AddSeconds($wait).ToString('o') })
+        $st = & $save 'Pending' "licence requested $($NowUtc.ToString('yyyy-MM-dd')), waiting for Invardia$(if ($d.reason -match '^Invardia re-issued') { " ($($d.reason))" })" ([ordered]@{ requestId = "$($r.body.requestId)"; requestedUtc = $NowUtc.ToString('o'); nextPollUtc = $NowUtc.AddSeconds($wait).ToString('o') })
         if ("$($r.body.status)" -ne 'Approved') { return @{ action = 'knock'; ok = $true; state = $st; message = $st.message } }
         $token = "$($r.body.pullToken)"   # automatic renewal: Approved on the first knock -> pull at once
     }
@@ -146,6 +171,9 @@ function Invoke-PimLicenceRequestCycle {
             if (-not $v.ok) { $st = & $save 'Error' "NOT installed: $($v.reason)" $null; return @{ action = 'pull'; ok = $false; state = $st; message = $st.message } }
             & $StoreLicence $v.text
             & $SetSetting 'LicenceRequestToken' ''
+            # §100.39: the hint was about the licence that is now replaced -- cleared after ANY install. If the new one is
+            # still superseded, the next heartbeat says so again (at most one knock a day, never a loop on a mismatched id).
+            if ($hint) { & $SetSetting 'LicenceSupersededBy' '' }
             $st = & $save 'Installed' "installed, valid to $(([datetime]$v.licence.ValidTo).ToString('yyyy-MM-dd'))" ([ordered]@{ nextPollUtc = '' })
             return @{ action = 'pull'; ok = $true; state = $st; message = $st.message }
         }

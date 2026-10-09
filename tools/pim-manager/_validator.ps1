@@ -383,6 +383,7 @@ function Invoke-PimPreflightValidation {
     # ------------------------------------------------------------------
     $bases = Get-PimCsvBases
     $loaded = @{}
+    $savedDefTags = @{}   # PIM 100.22 (f): definition entity -> @{ tag (lower) = $true } in the SAVED store
     # SQL-only (2026-09-12): data lives in pim.Rows. Read-PimRows is the single chokepoint; there is
     # no on-disk presence check any more (PIM-IO-001 "file not present" is gone with the file store).
     foreach ($spec in $bases) {
@@ -398,6 +399,17 @@ function Invoke-PimPreflightValidation {
         # rule below cross-references the pending world consistently -- a partial overlay would
         # report phantom foreign-key breaks between pending and saved rows, which is worse than
         # the deadlock it replaces.
+        # PIM 100.22 (f): the tags each definition entity holds in the SAVED store, read before the overlay below replaces
+        # them -- so a duplicate that already exists (warning + fix hint, last-wins) is told apart from a NEW one (refused).
+        if ($base -like 'PIM-Definitions-*') {
+            $savedTags = @{}
+            foreach ($sr in @($loaded[$base].rows)) {
+                if ($null -eq $sr) { continue }
+                $st = "$(Get-PimRowValue -Row $sr -Column 'GroupTag')".Trim()
+                if ($st) { $savedTags[$st.ToLowerInvariant()] = $true }
+            }
+            $savedDefTags[$base] = $savedTags
+        }
         if ($PendingRows -and $PendingRows.ContainsKey($base)) {
             $pend = @($PendingRows[$base])
             $hdr  = @($loaded[$base].header)
@@ -441,10 +453,30 @@ function Invoke-PimPreflightValidation {
                 $ownTxt = if ($ownD -ieq 'msp') { ' (this row was sent by the managing tenant)' } else { '' }
                 if ($dupTagSeen.ContainsKey($key) -and $dupTagSeen[$key].Csv -ne $db) {
                     $first = $dupTagSeen[$key]
-                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-DEFDUP-001' -Csv $db -Row $i -Column 'GroupTag' -Subject $tag -Target $first.Csv `
-                        -Message "GroupTag '$tag' is defined twice: in $($first.Csv) (row $($first.Row + 1), '$($first.Name)') and here ('$gnD')$ownTxt. One tag must name ONE group -- otherwise memberships and roles for it land in whichever definition is read last." `
-                        -Suggestion "Remove one of the two definitions. If one belongs to the managing tenant, keep it and extend that group locally (add members, roles or nesting to it)."))
-                } elseif (-not $dupTagSeen.ContainsKey($key)) { $dupTagSeen[$key] = @{ Csv = $db; Row = $i; Name = $gnD } }
+                    # 🔒 PIM 100.22 (f) (owner 2026-10-09): a duplicate that ALREADY EXISTS in the saved store keeps last-wins
+                    # (Get-PimTagToGroupName: the later definition entity, never displacing a managing-tenant one) and is a
+                    # WARNING with the fix hint -- it must not block every other commit. A NEW duplicate (one side is staged,
+                    # not saved) is REFUSED: an error on the staged row, which the Manager's commit gate refuses as well.
+                    $savedHere  = ($savedDefTags.ContainsKey($db) -and $savedDefTags[$db].ContainsKey($key))
+                    $savedFirst = ($savedDefTags.ContainsKey($first.Csv) -and $savedDefTags[$first.Csv].ContainsKey($key))
+                    if ($savedHere -and $savedFirst) {
+                        $order = @('PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks',
+                                   'PIM-Definitions-Departments', 'PIM-Definitions-Processes', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg')
+                        $win = if ("$($first.Owner)" -ieq 'msp' -and $ownD -ine 'msp') { $first }
+                               elseif ($ownD -ieq 'msp' -and "$($first.Owner)" -ine 'msp') { @{ Csv = $db; Row = $i; Name = $gnD } }
+                               elseif ($order.IndexOf($db) -gt $order.IndexOf($first.Csv)) { @{ Csv = $db; Row = $i; Name = $gnD } } else { $first }
+                        [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-DEFDUP-001' -Csv $db -Row $i -Column 'GroupTag' -Subject $tag -Target $first.Csv `
+                            -Message "GroupTag '$tag' is defined twice (an existing duplicate): in $($first.Csv) (row $($first.Row + 1), '$($first.Name)') and here ('$gnD')$ownTxt. Memberships and roles for it resolve to '$($win.Name)' in $($win.Csv) (the later definition wins; a managing-tenant definition is never displaced by a local one)." `
+                            -Suggestion "Fix: remove one of the two definitions, or give one of them its own tag. If one belongs to the managing tenant, keep it and extend that group locally (add members, roles or nesting to it)."))
+                    } else {
+                        # the staged side is the new one: the error sits on THAT row and names the definition that already holds the tag
+                        $newCsv = $db; $newRow = $i; $oldCsv = $first.Csv; $oldRow = $first.Row; $oldName = $first.Name
+                        if ($savedHere -and -not $savedFirst) { $newCsv = $first.Csv; $newRow = $first.Row; $oldCsv = $db; $oldRow = $i; $oldName = $gnD }
+                        [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-DEFDUP-001' -Csv $newCsv -Row $newRow -Column 'GroupTag' -Subject $tag -Target $oldCsv `
+                            -Message "This tag is already used by $oldCsv/row $($oldRow + 1)$(if ($oldName) { " ('$oldName')" }); pick another tag or edit the existing definition. (GroupTag '$tag': one tag must name ONE group.)$ownTxt" `
+                            -Suggestion "Pick another tag for the new definition, or edit the existing definition in $oldCsv instead of adding a second one."))
+                    }
+                } elseif (-not $dupTagSeen.ContainsKey($key)) { $dupTagSeen[$key] = @{ Csv = $db; Row = $i; Name = $gnD; Owner = $ownD } }
                 if ($gnD) {
                     $nk = $gnD.ToLowerInvariant()
                     if ($dupNameSeen.ContainsKey($nk) -and $dupNameSeen[$nk].Csv -ne $db -and $dupNameSeen[$nk].Tag.ToLowerInvariant() -ne $key) {
@@ -2052,11 +2084,19 @@ function Invoke-PimPreflightValidation {
     # ------------------------------------------------------------------
     if ($loaded.ContainsKey('PIM-Assignments-Workloads')) {
         $connectorIds = @()
+        $connectorDefs = @{}   # 100.26: id -> parsed definition (perRowResource + resourceFormat)
         try {
             $connDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'workloads\connectors'
             if (Test-Path -LiteralPath $connDir) {
-                $connectorIds = @(Get-ChildItem -LiteralPath $connDir -Filter '*.connector.json' |
-                    ForEach-Object { $_.Name -replace '\.connector\.json$', '' })
+                foreach ($cf in @(Get-ChildItem -LiteralPath $connDir -Filter '*.connector.json')) {
+                    $cid = $cf.Name -replace '\.connector\.json$', ''
+                    $connectorIds += $cid
+                    try {
+                        $craw = [System.IO.File]::ReadAllText($cf.FullName, (New-Object System.Text.UTF8Encoding($false)))
+                        if ($craw.Length -gt 0 -and [int][char]$craw[0] -eq 0xFEFF) { $craw = $craw.Substring(1) }
+                        $connectorDefs[$cid.ToLowerInvariant()] = ($craw | ConvertFrom-Json)
+                    } catch { }
+                }
             }
         } catch { $connectorIds = @() }
         # 100.17 CUSTOM-WORKLOAD: a custom (group-only) workload is a catalog entry too -- its id is valid here. The
@@ -2102,6 +2142,30 @@ function Invoke-PimPreflightValidation {
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-WL-003' -Csv 'PIM-Assignments-Workloads' -Row $i -Column 'Action' `
                     -Message "Action '$action' is not recognised (valid: Assign, Remove, or blank = Assign). The engine treats unknown actions as errors at apply time." `
                     -Suggestion "Change Action to Assign or Remove (or clear it for the Assign default)."))
+            }
+
+            # PIM-WL-005 / PIM-WL-006 (100.26 WIZARD-RESOURCE-REQUIRED, owner 2026-10-09): a per-row-resource connector
+            # (business-central, dataverse, azure-devops, power-platform, entra-approle) needs the row's Resource -- without it
+            # the engine fails WORKLOAD-RESOURCE-MISSING on EVERY run. Caught at commit, not at the engine run. A Remove row is
+            # not judged: one for a binding that was never applied completes without it (100.27).
+            $cdef = if ($wl) { $connectorDefs[$wl.ToLowerInvariant()] } else { $null }
+            if ($cdef -and $cdef.perRowResource -and $action -ine 'Remove') {
+                $res = (Get-PimRowValue -Row $r -Column 'Resource').Trim()
+                $rf = $cdef.resourceFormat
+                $fmtTxt = if ($rf -and "$($rf.format)".Trim()) { "$($rf.format)$(if ("$($rf.example)".Trim()) { ", e.g. $("$($rf.example)" -replace '\{tenantId\}', '<tenant-id>')" })" } elseif ($cdef.prerequisites -and "$($cdef.prerequisites.perRowResource)".Trim()) { "$($cdef.prerequisites.perRowResource)" } else { 'see the connector''s prerequisites' }
+                $lbl = if ($rf -and "$($rf.label)".Trim()) { "$($rf.label)" } else { 'Resource' }
+                if (-not $res) {
+                    [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-WL-005' -Csv 'PIM-Assignments-Workloads' -Row $i -Column 'Resource' `
+                        -Message "Resource is empty -- workload '$wl' works per target ($lbl), so the engine cannot apply this binding and fails it (WORKLOAD-RESOURCE-MISSING) on every run." `
+                        -Suggestion "Set Resource to the $lbl ($fmtTxt). The Create resource delegation wizard asks for it."))
+                } elseif ($rf -and "$($rf.pattern)".Trim()) {
+                    $okPat = $true; try { $okPat = [bool]($res -match "$($rf.pattern)") } catch { $okPat = $true }
+                    if (-not $okPat) {
+                        [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-WL-006' -Csv 'PIM-Assignments-Workloads' -Row $i -Column 'Resource' `
+                            -Message "Resource '$res' does not look like a $lbl for workload '$wl' -- the engine will most likely not find it." `
+                            -Suggestion "Use the format $fmtTxt."))
+                    }
+                }
             }
         }
     }

@@ -6,7 +6,8 @@
     ('Container Apps Jobs Operator' on ca-pim-tick only), the tick's right to read its own executions ('Reader' on
     ca-pim-tick only, BUG-268), pim.Settings 'SchedulerTickJobId' and -- §97 -- the tick's Reader at the TENANT ROOT
     management group (Discovery cannot see Azure without it; User Access Administrator there only with
-    -EngineAzureRootUserAccessAdmin).
+    -EngineAzureRootUserAccessAdmin), and -- PIM 100.22 (b) -- the Manager's 'Reader' on the PIM resource group ONLY (the
+    Environment report reads the architecture with it).
 
 .DESCRIPTION
     Before this script those four were done ONLY inside Setup-PimContainers.ps1 (the infra step) -- or not at all (the
@@ -40,7 +41,9 @@ param(
     # (SEC-34): this switch. A refusal never fails this script -- it warns and prints the exact Grant-PimEnginePermissions.ps1 command.
     [switch]$EngineAzureRootUserAccessAdmin,
     [switch]$SkipAzureRootAccess,
-    [switch]$SkipTickStart
+    [switch]$SkipTickStart,
+    # PIM 100.22 (b): skip the Manager's Reader on the resource group (the Environment report then cannot read the architecture)
+    [switch]$SkipManagerRgReader
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimSetupShared.ps1')
@@ -110,5 +113,16 @@ if (-not $SkipTickStart) {
         if ($back -ne $tickId) { throw "read-back FAILED: SchedulerTickJobId is '$back'" }
         Write-PimSetupAudit -ConnectionString $cs -Action 'settings.scheduler.tickjobid' -Target 'SchedulerTickJobId' -Before $cur -After $tickId
         Note 'set and read back (the Manager starts the tick immediately after a commit)'
+    }
+}
+
+# PIM 100.22 (b) (owner 2026-10-09): the Manager's managed identity gets 'Reader' on THIS resource group only, so the
+# Environment report (Operations > Environment report) reads the installation's own architecture. Idempotent, read back;
+# last, so a refusal (the deploying identity lacks User Access Administrator / Owner here) stops nothing above it.
+if (-not $SkipManagerRgReader) {
+    Step "'Reader' for $ManagerApp on the resource group $ResourceGroup only (the Environment report)"
+    if ($PSCmdlet.ShouldProcess("$ManagerApp @ $ResourceGroup", 'role assignment Reader (resource group only)')) {
+        $rgr = Grant-PimManagerRgReader -MiObjectId $mgrOid -Name $ManagerApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
+        if ($rgr.ok) { Note "$($rgr.reason)" } else { throw "$($rgr.reason)" }
     }
 }

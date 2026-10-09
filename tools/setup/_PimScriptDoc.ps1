@@ -33,6 +33,7 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/Initialize-PimWorkloadPrereqs.ps1';           Standalone = $true }
     @{ Path = 'setup/Initialize-PimMailSender.ps1';                Standalone = $true }
     @{ Path = 'setup/Set-PimSmtpRelayPassword.ps1';                Standalone = $true }
+    @{ Path = 'setup/Set-PimSqlTier.ps1';                          Standalone = $true }
     @{ Path = 'setup/Install-PimManager.ps1';                      Standalone = $false }
     @{ Path = 'setup/Invoke-PimDeployAll.ps1';                     Standalone = $false }
     @{ Path = 'setup/Invoke-PimMspBuild.ps1';                      Standalone = $false }

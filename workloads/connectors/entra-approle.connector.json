@@ -3,6 +3,7 @@
   "name": "Generic Entra app-role grant (gallery / SaaS apps incl. SAP, ServiceNow)",
   "auth": "graph",
   "perRowResource": true,
+  "resourceFormat": { "label": "Enterprise application (service principal object id)", "format": "<service principal object id>", "example": "00000000-0000-0000-0000-000000000000", "prefill": "", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
   "status": "structure built v2.4.183 -- Graph appRoleAssignedTo, the single mechanism behind 100+ gallery/SaaS apps. Live-validation pending a tenant with a target SP that exposes app roles.",
   "permissionsNeeded": ["AppRoleAssignment.ReadWrite.All", "Application.Read.All (to list a target SP's appRoles)"],
   "prerequisites": {

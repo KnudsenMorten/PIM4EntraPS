@@ -1,0 +1,72 @@
+{
+  "script": "Set-PimSqlTier.ps1",
+  "product": "pim",
+  "title": "Set the PIM Manager SQL database tier and its 250 GB maximum size",
+  "purpose": "Set the PIM Manager SQL database to the right Standard tier with a 250 GB maximum size, and optionally pin its tier so updates never change it.",
+  "whenToRun": "When the end-of-install check, the environment report or support says the database is Basic or below the 250 GB maximum size (for example after \"has reached its size quota\"), when you want the database on a specific Standard tier, or to pin its tier. Installs and updates apply the same rule by themselves; this script does it now.",
+  "standalone": true,
+  "sourcePath": "tools/setup/Set-PimSqlTier.ps1",
+  "runAs": [
+    {
+      "kind": "azureRbac",
+      "name": "SQL DB Contributor",
+      "scope": "the PIM SQL server (or its resource group); Contributor or Owner work too",
+      "why": "Reads the database and changes its tier, its maximum size and its tags."
+    },
+    {
+      "kind": "other",
+      "name": "browser sign-in to Azure (first-party public client 'Microsoft Azure PowerShell'), the session's Invoke-AzRestMethod (the Invardia Support app's shim, or an Azure PowerShell sign-in), or the Invardia Support app (-AdminAppId + -AdminSecret)",
+      "scope": "Azure Resource Manager in your tenant",
+      "why": "No PowerShell module and no certificate. The Support app's secret is accepted only for Invardia support; a person signs in in the browser."
+    }
+  ],
+  "changes": [
+    {
+      "target": "Azure Resource Manager",
+      "action": "update",
+      "object": "the SQL database -Database (default PimPlatform) on -Server: its tier (sku: Basic -> S0, or the Standard tier -Tier; never Basic, never lowered by the plan)",
+      "permission": "",
+      "scope": "the database only",
+      "why": "PIM's database is S0 (Standard) at minimum; Basic is too small for PIM's store.",
+      "undo": "Azure portal > the database > Compute + storage: set the previous tier back (a lower tier must fit the data)."
+    },
+    {
+      "target": "Azure Resource Manager",
+      "action": "update",
+      "object": "the SQL database's maximum size (properties.maxSizeBytes) to 250 GB when it is lower; never lowered",
+      "permission": "",
+      "scope": "the database only",
+      "why": "Raising a tier does not raise the maximum size: a database moved up from Basic keeps a 2 GB limit and stops accepting writes when full. 250 GB is included in the Standard price.",
+      "undo": "Azure portal > the database > Compute + storage > Data max size: set the previous size back (it must still hold the data)."
+    },
+    {
+      "target": "Azure Resource Manager",
+      "action": "update",
+      "object": "the SQL database's tag pim-sql-tier-pin = <tier> -- only with -Pin; the database's other tags are kept",
+      "permission": "",
+      "scope": "the database only",
+      "why": "PIM's updater then never changes the database's tier (it still keeps the 250 GB maximum size).",
+      "undo": "Azure portal > the database > Tags: delete the pim-sql-tier-pin tag."
+    }
+  ],
+  "parameters": [
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The subscription that holds the PIM SQL server." },
+    { "name": "ResourceGroup", "required": true, "default": null, "help": "The resource group of the PIM SQL server." },
+    { "name": "Server", "required": true, "default": null, "help": "The SQL server name or its FQDN (sql-x or sql-x.database.windows.net)." },
+    { "name": "Database", "required": false, "default": "PimPlatform", "help": "The PIM database." },
+    { "name": "Tier", "required": false, "default": "the plan: Basic -> S0, any other tier kept", "help": "A Standard tier (S0, S1, S2, S3, S4, S6, S7, S9, S12) to set; never Basic. Changing the tier of a pinned database needs -Pin." },
+    { "name": "Pin", "required": false, "default": "off", "help": "Tag the database pim-sql-tier-pin = its tier, so updates never change its tier." },
+    { "name": "TenantId", "required": false, "default": null, "help": "Your tenant id, for the browser sign-in or with -AdminAppId + -AdminSecret. Not needed in a session that has Invoke-AzRestMethod." },
+    { "name": "AdminAppId", "required": false, "default": null, "help": "Invardia support only: the Invardia Support app's application id (with -AdminSecret and -TenantId) instead of the browser sign-in." },
+    { "name": "AdminSecret", "required": false, "default": null, "help": "Invardia support only: the Invardia Support app's secret." },
+    { "name": "ReadBackMinutes", "required": false, "default": "20", "help": "How long to wait for the change to be confirmed (a tier change runs online and can take minutes)." },
+    { "name": "PollSeconds", "required": false, "default": "20", "help": "Seconds between the read-backs." }
+  ],
+  "readsOnly": [
+    "the SQL database (tier, maximum size, status, elastic pool, tags), before and after the change"
+  ],
+  "network": [ "login.microsoftonline.com", "management.azure.com", "localhost (the browser returns the sign-in to a local port on this computer)" ],
+  "whatIf": "Signs in, reads the database, prints its tier, maximum size and pin, and one \"What if:\" line with the change it would make (tier, maximum size, pin tag). Nothing is changed.",
+  "undo": "Set the previous tier and maximum size back in the Azure portal (the database > Compute + storage), and delete the pim-sql-tier-pin tag if the script added it.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Set-PimSqlTier/"
+}

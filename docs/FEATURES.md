@@ -1872,6 +1872,16 @@ deployment is a supported choice) and no credentials lying around.
   **licence**, not by the edition dropdown. A capability you are not licensed for is shown dimmed and
   labelled, never hidden, so everything stays discoverable. Changing the edition or any feature switch is
   restricted to a senior administrator and recorded in the audit trail.
+- **Your Pro licence covers every Pro feature of its edition -- also the ones added after it was issued.**
+  v2.4.539 (2026-10-09) — the licence names your **edition**, and the product decides which features that
+  edition includes, so a new feature never needs a new licence. **Pro Enterprise** and **Pro Business** both
+  include every single-tenant Pro capability, current and future; Pro Business differs only by the number of
+  managed admin accounts it covers. **Pro MSP** adds the multi-tenant half (managing and managed tenants). A
+  licence bought before the consultant company review, the access request portal, the access request API or
+  the AI assistant endpoint existed no longer shows those as "not licensed". An expired licence unlocks
+  nothing, as before. **Settings ▸ Licence** now says, for every Pro feature, **why** it is or is not
+  available: *included in Pro Enterprise*, *included in Pro Business (limits apply)*, *included in Pro MSP*,
+  *needs the MSP licence*, or the licence's own reason (for example that it has expired).
 - **Register your licence from the portal — no database credentials needed.** ✅ 2026-09-20 — **Settings ▸
   Licence** has a **Register a licence** control: pick the issued licence file or paste its contents. The
   document is checked against our signing certificate **before** anything is stored, so a file that does not

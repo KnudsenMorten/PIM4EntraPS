@@ -493,6 +493,19 @@ function New-PimMailSenderSetupCheck {
                        at = $NowUtc.ToUniversalTime().ToString('o'); by = "$By".Trim(); source = 'Initialize-PimMailSender' }
 }
 
+function New-PimMailSenderAddressRecord {
+    <#
+      PURE (INSTALL-FIX-EVIDA, REQUIREMENTS 100.25 item 4). The record Initialize-PimMailSender stores in pim.Settings
+      'MailSenderAddress': the mailbox's PRIMARY SMTP address -- what the customer chose (name@their domain) -- next to the
+      MailSender it belongs to (the mailbox's UPN, BUG-296: what Microsoft Graph sends by, often on the initial domain).
+      PIM Manager and the end-of-install check SHOW the address with the UPN as detail, and only while 'sender' is still
+      the stored MailSender (a later change of sender makes the record stale, never wrong). No address -> $null.
+    #>
+    param([string]$Sender, [string]$Address, [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not "$Sender".Trim() -or -not "$Address".Trim()) { return $null }
+    return [ordered]@{ sender = "$Sender".Trim(); address = "$Address".Trim(); at = $NowUtc.ToUniversalTime().ToString('o'); source = 'Initialize-PimMailSender' }
+}
+
 function Select-PimTenantWideMailSend {
     # appRoleAssignments on one service principal that are the TENANT-WIDE Graph Mail.Send.
     [CmdletBinding()] param([object[]]$Assignments = @(), [string]$GraphSpId, [string]$MailSendRoleId)

@@ -44,6 +44,13 @@ $script:PimUpdateRingHere = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Pa
 $script:PimUpdateRingShared = Join-Path (Split-Path -Parent (Split-Path -Parent $script:PimUpdateRingHere)) 'engine\_shared'
 . (Join-Path $script:PimUpdateRingShared 'PIM-UpdateSource.ps1')        # Get-PimUpdateChannelUrl / Get-PimRingVersion
 . (Join-Path $script:PimUpdateRingShared 'PIM-ArmContainerApps.ps1')    # Set-PimAcaJobEnvValue (ARM read-modify-write)
+# BUG-297 (REQUIREMENTS 100.25 / 100.38, 2026-10-09): the licence functions -- loaded HERE, AT FILE SCOPE, ALWAYS. Get-PimEnvironmentEdition
+# loaded PIM-License.ps1 only "if Get-PimLicense is not loaded yet", INSIDE the function. When a PARENT script had already
+# loaded it, nothing was loaded and the parent's Get-PimLicense ran in THIS script, where its $script: trusted signing
+# certificates do not exist -- every stored licence read Invalid and a Pro environment read 'community' (the 71.32 /
+# BUG-79-6b scoping trap, the same mechanism as 100.25 item 1 in Confirm-PimInstall). Loaded here, the certificates live in
+# the scope of the script that dot-sources this file.
+. (Join-Path $script:PimUpdateRingShared 'PIM-License.ps1')               # Get-PimLicense / Test-PimLicenseIsProForTenant
 
 $script:PimUpdateRingDefault = 2
 # IMP-36: the Platform Updates Ring accepts 0..3, and EVERY reader of PIM_UPDATE_RING goes through
@@ -374,6 +381,29 @@ function Get-PimUpdateRingChannelReport {
     return (& $mk 'ok' $appr "ring $Ring approves $appr -- the version this environment is on (no move).")
 }
 
+function Get-PimUpdateSourceReport {
+    <#
+      INSTALL-FIX-EVIDA (REQUIREMENTS 100.25 item 2, 2026-10-09): what the updater install prints about the version source.
+      An updater fed by INVARDIA (PIM_UPDATE_SOURCE=invardia, or Invardia's archive address -- Test-PimInvardiaUpdateSource)
+      has NO channel.json: Invardia's signed manifest per ring decides. Reading one anyway printed "ring 2: channel.json could
+      NOT be read (404) -- ring 2 approves NOTHING ... this environment will NOT update" in red on a production install that
+      updates fine. So: Invardia -> no read at all (-Fetch is never called), line "update source: Invardia (ring N)", level
+      ok; any other source -> Get-PimUpdateRingChannelReport, line "ring N: <its message>".
+      Returns the channel report's shape (ok, level, approved, message, backward) plus source + line.
+    #>
+    param([AllowEmptyString()][string]$Source, [AllowEmptyString()][string]$SourceUrlTemplate, [int]$Ring, [AllowEmptyString()][string]$CurrentVersion, [scriptblock]$Fetch)
+    if (Test-PimInvardiaUpdateSource -Source $Source -SourceUrl $SourceUrlTemplate) {
+        return [pscustomobject]@{ ok = $true; level = 'ok'; approved = ''; backward = $false; source = 'invardia'
+                                  message = "Invardia's signed manifest for ring $Ring decides which version this environment takes (no channel.json is read)."
+                                  line = "update source: Invardia (ring $Ring)" }
+    }
+    $a = @{ SourceUrlTemplate = $SourceUrlTemplate; Ring = $Ring; CurrentVersion = $CurrentVersion }
+    if ($Fetch) { $a['Fetch'] = $Fetch }
+    $rep = Get-PimUpdateRingChannelReport @a
+    return [pscustomobject]@{ ok = $rep.ok; level = $rep.level; approved = $rep.approved; backward = [bool]$rep.backward; source = 'pim-src'
+                              message = $rep.message; line = "ring ${Ring}: $($rep.message)" }
+}
+
 function Test-PimRollRingGate {
     <#
       PURE (apart from the -Fetch seam). May a HOST-SIDE roll move this environment to -TargetVersion?
@@ -606,7 +636,7 @@ function Get-PimEnvironmentEdition {
         return [pscustomobject]@{ edition = ''; reason = "the environment's store could not be read ($($_.Exception.Message))" }
     }
     if (-not "$doc".Trim()) { return [pscustomobject]@{ edition = 'community'; reason = 'no Pro licence is stored in this environment' } }
-    if (-not (Get-Command Get-PimLicense -ErrorAction SilentlyContinue)) { . (Join-Path $shared 'PIM-License.ps1') }
+    # BUG-297: PIM-License.ps1 is loaded at this file's scope (top) -- never a Get-Command-guarded load here.
     $lic = $null
     try { $lic = Get-PimLicense -LicenseText "$doc" } catch { return [pscustomobject]@{ edition = ''; reason = "the stored licence could not be evaluated ($($_.Exception.Message))" } }
     # BUG-278: the same verdict as the badge and the gate (sku Pro + this tenant), not "any Valid licence".

@@ -53,6 +53,19 @@ $script:PimFailureRules = @(
        retryable = $false; severity = 'policy'
        fixes = @() }
 
+    # 100.31 SNAPSHOT-OOM (2026-10-09, live on a production tenant of ~10.8k identity objects, ca-pim-tick at 0.5 CPU /
+    # 1 GiB): the active-assignments-snapshot job died with "Exception of type 'System.OutOfMemoryException' was thrown."
+    # and telemetry filed it UNCLASSIFIED. Ahead of every data / environment rule: an out-of-memory job is the cause, and
+    # whatever HTTP status or Graph text the same message happens to quote is not. The interrupted-execution text
+    # ("out of memory or a crash", PIM-JobLanes) is a guess, not evidence, and is deliberately NOT matched.
+    @{ code = 'ENGINE-OUT-OF-MEMORY'
+       match = { param($m, $row) $m -match '(?i)System\.OutOfMemoryException|OutOfMemoryException|Insufficient memory to continue|\bOOMKilled\b|exit code 137\b' }
+       title = 'The engine job ran out of memory'
+       cause = 'The scheduled engine job (ca-pim-tick) ran out of memory while it ran, so it was stopped and its work is not done. A tenant of 5,000 or more users, groups and service principals needs more than the 0.5 CPU / 1 GiB a small tenant''s job gets. The next update raises the job one size by itself (it reads this failure); the command below does it now.'
+       remedy = 'the engine job ran out of memory -- raise ca-pim-tick to the next size (2 CPU / 4 GiB, replica timeout 7200 s; 4 CPU / 8 GiB, 14400 s from 15,000 objects): az containerapp job update -g <resource group> -n ca-pim-tick --cpu 2.0 --memory 4Gi --replica-timeout 7200'
+       retryable = $false; severity = 'environment'
+       fixes = @() }
+
     # One or more per-rule PATCHes on an Azure resource PIM policy did not apply. Ahead of the generic
     # rules because the message quotes ARM's raw per-rule errors, which may contain any of their words.
     @{ code = 'AZ-POLICY-RULE-FAILED'
@@ -235,21 +248,33 @@ $script:PimFailureRules = @(
     # ---- workload bindings (PIM-Assignments-Workloads, WorkloadConnectors scope) ----------------
     # The provider prefixes its data problems with these codes, so they are matched exactly and never
     # confused with a permission or service error in the same message.
+    # 🔴 100.27 REMOVE-NEVER-APPLIED: a Remove row that lacks the data its removal needs, for a binding PIM Manager DID
+    # apply (or could not prove it never did). FIRST of the workload rules: the message quotes the original
+    # WORKLOAD-RESOURCE-MISSING / -ROLE-NOT-FOUND / ... cause, which would otherwise win. (A never-applied one is no
+    # failure at all -- the engine completes it without calling the workload.)
+    @{ code = 'WORKLOAD-REMOVE-NEEDS-DATA'
+       match = { param($m, $row) $m -match 'WORKLOAD-REMOVE-NEEDS-DATA' }
+       title = 'Removing this workload binding needs data the row does not have'
+       cause = 'PIM Manager applied this binding, so taking it away has to call the workload, and the row lacks what that call needs (the message says which: the Resource, the role, the group or the connector).'
+       remedy = 'Fill in what the message names with the value the binding was applied with and commit -- the next run removes it. Or remove the access in the workload yourself, then stop managing the binding (delete the row).'
+       retryable = $false; severity = 'data'
+       fixes = @(@{ id = 'delete-row'; label = 'Stop managing this binding (delete the row)'; kind = 'delete-row' }) }
+
     @{ code = 'WORKLOAD-CONNECTOR-UNKNOWN'
        match = { param($m, $row) $m -match 'WORKLOAD-CONNECTOR-UNKNOWN' }
        title = 'Workload row names a connector that does not exist'
        cause = 'The Workload column must be the id of a shipped workload connector (the error lists the supported ids). The row is not applied at all.'
-       remedy = 'Correct the Workload column to a supported connector id, or remove the row.'
+       remedy = 'Correct the Workload column to a supported connector id, or stop managing the binding (delete the row -- a binding that was never applied is deleted outright).'
        retryable = $false; severity = 'data'
-       fixes = @(@{ id = 'delete-row'; label = 'Remove this row'; kind = 'delete-row' }) }
+       fixes = @(@{ id = 'delete-row'; label = 'Stop managing this binding (delete the row)'; kind = 'delete-row' }) }
 
     @{ code = 'WORKLOAD-ROLE-NOT-FOUND'
        match = { param($m, $row) $m -match 'WORKLOAD-ROLE-NOT-FOUND' }
        title = 'Workload role name does not exist'
        cause = 'The workload has no role with this RoleName (the error lists the roles it does have). For Defender XDR a custom role must be created first; roles are matched by exact name.'
-       remedy = 'Correct RoleName to an existing role, create the custom role in the workload, or remove the row.'
+       remedy = 'Correct RoleName to an existing role, create the custom role in the workload, or stop managing the binding (delete the row).'
        retryable = $true; severity = 'data'
-       fixes = @(@{ id = 'delete-row'; label = 'Remove this row'; kind = 'delete-row' }) }
+       fixes = @(@{ id = 'delete-row'; label = 'Stop managing this binding (delete the row)'; kind = 'delete-row' }) }
 
     @{ code = 'WORKLOAD-GROUP-UNRESOLVED'
        match = { param($m, $row) $m -match 'WORKLOAD-GROUP-UNRESOLVED' }
@@ -263,9 +288,9 @@ $script:PimFailureRules = @(
        match = { param($m, $row) $m -match 'WORKLOAD-RESOURCE-MISSING' }
        title = 'Workload row is missing its Resource'
        cause = 'This connector works per target (an app, an environment, an organisation) and the row does not say which.'
-       remedy = 'Fill in the Resource column as the connector''s prerequisites describe, or remove the row.'
+       remedy = 'Fill in the Resource column as the connector''s prerequisites describe (the delegation wizard now asks for it), or stop managing the binding (delete the row -- one that was never applied is deleted outright, nothing is called in the workload).'
        retryable = $false; severity = 'data'
-       fixes = @(@{ id = 'delete-row'; label = 'Remove this row'; kind = 'delete-row' }) }
+       fixes = @(@{ id = 'delete-row'; label = 'Stop managing this binding (delete the row)'; kind = 'delete-row' }) }
 
     @{ code = 'WORKLOAD-CONTAINER-MISSING'
        match = { param($m, $row) $m -match 'WORKLOAD-CONTAINER-MISSING' }
@@ -392,6 +417,33 @@ $script:PimFailureRules = @(
        retryable = $true; severity = 'environment'
        fixes = @() }
 )
+
+# 100.34 UPLINK-ERRORCLASS: what a code means for Invardia's fix-request triage. customer-config = the customer's data,
+# policy or environment is what has to change (auto-fix / "fix the data" / grant a permission) -- support shows it, no
+# product fix request. product-defect = PIM itself must change (an unexplained failure, an engine that does not converge,
+# a Microsoft-side error PIM should absorb). A rule may override its severity's default with fixKind; these three do.
+$script:PimFailureFixKindOverrides = @{ 'SERVICE-ERROR' = 'product-defect'; 'THROTTLED' = 'product-defect'; 'GROUP-POLICY-UNREADABLE' = 'product-defect' }
+
+function Get-PimFailureCatalogCodes {
+    <# PURE. Every code the catalog can give (UNCLASSIFIED included), upper-case. #>
+    return @(@($script:PimFailureRules | ForEach-Object { "$($_.code)" }) + 'UNCLASSIFIED')
+}
+
+function Get-PimFailureFixKind {
+    <#
+      PURE. 100.34: a catalog code -> 'customer-config' | 'product-defect'. A rule's severity data / policy / environment is
+      customer-config (the fix is in the customer's rows, Azure policy or tenant); transient / info / unknown, UNCLASSIFIED,
+      CONVERGENCE and any code the catalog does not know are product-defect (absent = product-defect at Invardia too).
+    #>
+    param([string]$Code)
+    $c = "$Code".Trim().ToUpperInvariant()
+    if (-not $c) { return 'product-defect' }
+    if ($script:PimFailureFixKindOverrides.ContainsKey($c)) { return $script:PimFailureFixKindOverrides[$c] }
+    $rule = @($script:PimFailureRules | Where-Object { "$($_.code)" -eq $c }) | Select-Object -First 1
+    if (-not $rule) { return 'product-defect' }
+    if ("$($rule.severity)" -in @('data', 'policy', 'environment')) { return 'customer-config' }
+    return 'product-defect'
+}
 
 function Get-PimTransientWaitWindowMinutes {
     <# PURE. How long a transient item may wait before it counts as a real failure again (Test-PimEngineFailuresAreAllTransient),

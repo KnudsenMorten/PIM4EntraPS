@@ -28,7 +28,9 @@ $script:PimInstallVerifyLines = [ordered]@{
     'alerting'           = 'Alert recipients'
     'engine-graph'       = 'Engine Microsoft Graph permissions'
     'engine-root-reader' = 'Engine Reader at the tenant root'
+    'manager-rg-reader'  = 'Manager Reader on the PIM resource group'
     'engine-first-run'   = 'Engine first run'
+    'engine-size'        = 'Engine job sized for the tenant'
     'easyauth'           = 'Sign-in (Easy Auth) + SuperAdmins allowed'
     'sql-host-rule'      = 'SQL setup host rule closed'
     'msp-registered'     = 'Registered on the managing tenant'
@@ -39,7 +41,7 @@ $script:PimInstallVerifyLines = [ordered]@{
 function Get-PimInstallVerifyLineIds {
     <# PURE. The line ids a role checks, in order. Single + Master: the common lines. Slave (managed tenant): + the three MSP lines. #>
     param([ValidateSet('Single', 'Master', 'Slave')][string]$Role = 'Single')
-    $ids = @('superadmins', 'updater', 'licence', 'mailsender', 'alerting', 'engine-graph', 'engine-root-reader', 'engine-first-run', 'easyauth', 'sql-host-rule')
+    $ids = @('superadmins', 'updater', 'licence', 'mailsender', 'alerting', 'engine-graph', 'engine-root-reader', 'manager-rg-reader', 'engine-first-run', 'engine-size', 'easyauth', 'sql-host-rule')
     if ($Role -eq 'Slave') { $ids += @('msp-registered', 'msp-subnet', 'msp-first-pull') }
     return $ids
 }
@@ -201,7 +203,8 @@ function Get-PimInstallVerifyRows {
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'failed' $unread (& $fx $id))); break }
                 if (-not [bool](Get-PimFactValue $f 'present')) { $rows.Add((New-PimInstallVerifyRow $id 'failed' 'no licence is registered -- the Pro features are off' (& $fx $id))); break }
                 $st = "$(Get-PimFactValue $f 'status')".Trim()
-                if ($st -and $st -notin 'Valid', 'Grace') { $rows.Add((New-PimInstallVerifyRow $id 'failed' "the licence is $st" (& $fx $id))); break }
+                $why = "$(Get-PimFactValue $f 'reason')".Trim()
+                if ($st -and $st -notin 'Valid', 'Grace') { $rows.Add((New-PimInstallVerifyRow $id 'failed' "the licence is $st$(if ($why) { " ($why)" })" (& $fx $id))); break }
                 if ([bool](Get-PimFactValue $f 'installKey')) { $rows.Add((New-PimInstallVerifyRow $id 'ok' 'registered; install key stored')); break }
                 if ([bool](Get-PimFactValue $f 'claimQueued')) { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'registered; the install key claim is queued -- the engine claims it on its next run (about 5 minutes)' (& $fx $id))); break }
                 $rows.Add((New-PimInstallVerifyRow $id 'failed' 'registered, but no install key is stored or queued -- Pro updates cannot be pulled' (& $fx $id)))
@@ -217,6 +220,10 @@ function Get-PimInstallVerifyRows {
                     else { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'no mail sender is set -- TAPs and alerts are rendered and delivered nowhere' (& $fx $id))) }
                     break
                 }
+                # INSTALL-FIX-EVIDA (100.25 item 4): MailSender is the mailbox's UPN on purpose (BUG-296: Graph sends by UPN), often on the
+                # initial domain -- but the customer chose the PRIMARY SMTP address (name@their domain). Show that one, the UPN as detail.
+                $addr = "$(Get-PimFactValue $f 'address')".Trim()
+                if ($addr -and $addr -ine $sender) { $sender = "$addr (mailbox UPN $sender)" }
                 if (-not [bool](Get-PimFactValue $f 'exoReachable')) {
                     $rows.Add((New-PimInstallVerifyRow $id 'warning' "sender $sender set; Exchange is not reachable for the installer, so the send rights could not be tested$(if ("$(Get-PimFactValue $f 'exoError')".Trim()) { " ($(Get-PimFactValue $f 'exoError'))" })" (& $fx $id))); break
                 }
@@ -251,6 +258,14 @@ function Get-PimInstallVerifyRows {
                 # owner 2026-10-08 ("rgr 1"): the root Reader follows the mail pattern -- a WARNING with the exact command, never a stop.
                 else { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'NO Reader at the tenant root -- Discovery cannot see management groups or subscriptions until a Global Administrator runs the command' (& $fx $id))) }
             }
+            'manager-rg-reader' {
+                # PIM 100.22 (b) (owner 2026-10-09): the Manager's Reader on the PIM resource group ONLY -- the Environment report
+                # reads the architecture with it. Never a stop (a report, not the engine): missing after the one repair attempt =
+                # a WARNING with the exact command; not readable = a WARNING too.
+                if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' $unread (& $fx $id) $false)); break }
+                if ((Get-PimFactValue $f 'reader') -eq $true) { $rows.Add((New-PimInstallVerifyRow $id $okState "Reader at $(Get-PimFactValue $f 'scope')$(if ($repaired) { ' (granted by the verify)' })" '' $false)) }
+                else { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'NO Reader on the PIM resource group -- the Environment report cannot read the architecture until it is granted (resource group only, never wider)' (& $fx $id) $false)) }
+            }
             'engine-first-run' {
                 # Informational follow-up, never a stop: right after an install the tick may simply not have run yet (5 min).
                 $st = "$(Get-PimFactValue $f 'status')".Trim()
@@ -258,6 +273,16 @@ function Get-PimInstallVerifyRows {
                 if ($st -eq 'Succeeded') { $rows.Add((New-PimInstallVerifyRow $id 'ok' "the engine job's latest run succeeded$(if ("$(Get-PimFactValue $f 'at')".Trim()) { " ($(Get-PimFactValue $f 'at'))" })" '' $false)) }
                 elseif (-not $st) { $rows.Add((New-PimInstallVerifyRow $id 'warning' 'the engine job has not run yet -- it starts within 5 minutes; check the PIM Manager Home page' (& $fx $id) $false)) }
                 else { $rows.Add((New-PimInstallVerifyRow $id 'warning' "the engine job's latest run: $st -- open the PIM Manager Home page for the reason" (& $fx $id) $false)) }
+            }
+            'engine-size' {
+                # 100.31 / framework 12.15: a WARNING (never a stop) when the engine job is below the size its RECORDED tenant
+                # count needs, with the az command for THAT tier. Fact: { readable; undersized; reason; command } from
+                # Test-PimJobUndersized (engine/_shared/PIM-TenantSizing.ps1). The updater raises it too, on its next run.
+                if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'warning' $unread '' $false)); break }
+                $cmd = "$(Get-PimFactValue $f 'command')".Trim()
+                if ([bool](Get-PimFactValue $f 'undersized')) {
+                    $rows.Add((New-PimInstallVerifyRow $id 'warning' "UNDERSIZED: $(Get-PimFactValue $f 'reason') -- it can run out of memory (the next update raises it by itself)" $(if ($cmd) { $cmd } else { & $fx $id }) $false))
+                } else { $rows.Add((New-PimInstallVerifyRow $id 'ok' "$(Get-PimFactValue $f 'reason')" '' $false)) }
             }
             'easyauth' {
                 if (-not $readable) { $rows.Add((New-PimInstallVerifyRow $id 'failed' $unread (& $fx $id))); break }

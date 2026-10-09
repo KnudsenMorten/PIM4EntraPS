@@ -1197,6 +1197,13 @@ if (-not "$SqlServerFqdn".Trim()) {
         $st = "$($all['MailSender'])".Trim()
         if ($st -ne $storeSender) { throw "read-back mismatch: store holds '$st', expected '$storeSender'" }
         $script:PimMailStoredAll = $all
+        # INSTALL-FIX-EVIDA (100.25 item 4): MailSender is the UPN (above); the PRIMARY SMTP address the customer chose ($sender)
+        # is stored beside it, so PIM Manager and the end-of-install check show that address (with the UPN as detail).
+        $addrRec = New-PimMailSenderAddressRecord -Sender $storeSender -Address $sender
+        if ($addrRec) {
+            try { Set-PimSqlSetting -ConnectionString $cs -Name 'MailSenderAddress' -Value $addrRec }
+            catch { Note "the mailbox's address could not be stored ($(($_.Exception.Message -split "`n")[0])) -- PIM Manager shows the UPN $storeSender instead" 'Yellow' }
+        }
         # MAIL-STEP-PROOF (owner 2026-10-09: "why dont you trigger somehing or accept that we just did a test mail"): store
         # what step [3]'s read-back CONFIRMED -- the scoped Application Mail.Send assignment for every sending identity, in
         # ONE scope on THIS mailbox -- so PIM Manager can show the engine job's send right as granted (with the Manager's

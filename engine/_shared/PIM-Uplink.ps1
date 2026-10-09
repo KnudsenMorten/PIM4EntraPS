@@ -15,12 +15,16 @@
                           secret (secretref) -> environment variable. The key proves the environment; the tenant in the
                           body is only compared for mismatch. Error text shortened + redacted before it leaves.
   WHEN
-    * heartbeat: once per 24 h.
+    * heartbeat: once per 24 h. Identified only (PIM 100.36): Counts { sqlUsedMb, sqlMaxMb } -- the store's allocated data
+      pages and max size, MB (Get-PimUplinkSqlSpace); a failed / empty read leaves both out, never a 0.
     * run: per job NAME, the newest finished run since the last send; Outcome = failed if ANY run of it failed since,
       warning if one was held, else ok. One report per job per cycle -- never one per run: rfa-sync runs every tick and
       Invardia allows 30 POSTs a minute per IP (shared behind a NAT): at most 20 per cycle, 2.5 s apart,
       the first failure stops the cycle, and each job keeps its own watermark so nothing is skipped or sent twice.
     * skipped / unimplemented / running runs are not reported (nothing ran), and the uplink job never reports itself.
+    * setup (PIM 100.10, framework 8.7): identified only, feature 'telemetry.setup', daily + on every change -- the control
+      list, permission counts (+ Get Started steps / findings with PIM_UPLINK_SETUP_EXTENDED=1). PIM-UplinkSetup.ps1.
+    * every record carries Ring: PIM_UPDATE_RING, else the ring recorded in pim.Settings['UpdateState'] (Resolve-PimUplinkRing).
   🔒 OFF until the feature 'telemetry.uplink' is switched on. The owner decided "ON by default" for Community
      (2026-10-03, relayed in Invardia's design doc); PIM ships it OFF until the operator confirms it in the PIM session,
      exactly like 'licence.autoRequest' -- a decision relayed by another session is not that confirmation.
@@ -126,13 +130,51 @@ function Get-PimUplinkLicenceState {
 }
 
 function Get-PimUplinkErrorClass {
-    <# The failure catalog code for a failed run's text (Get-PimFailureClassification), lower-cased by the framework. #>
+    <#
+      The failure catalog code for a failed run's text, lower-cased by the framework. Invardia's ErrorClass list is closed by
+      SHAPE ([a-z0-9-]{1,40}, packages/core uplink.ts); the catalog codes are its values.
+      🔴 100.34 (Invardia triage 2026-10-09: 11 of 12 PIM fix requests titled "unclassified"). A failed run's text is the
+      job SUMMARY (Format-PimFailureSummary: "3 item(s) failed: 2x <title> [WORKLOAD-RESOURCE-MISSING]; 1x ..."), not a raw
+      error, so the catalog's raw-error rules matched nothing and every classified failure went up as UNCLASSIFIED. The
+      code the engine already put in brackets wins -- the first known one, which is the largest group (the summary is
+      sorted by count); UNCLASSIFIED only when the engine itself said so or nothing is known. A convergence verdict is
+      CONVERGENCE. Only then is the raw text classified.
+    #>
     param([string]$Text)
     if (-not "$Text".Trim()) { return '' }
+    $known = @{}
+    if (Get-Command Get-PimFailureCatalogCodes -ErrorAction SilentlyContinue) { try { foreach ($c in @(Get-PimFailureCatalogCodes)) { $known["$c"] = $true } } catch { } }
+    foreach ($m in [regex]::Matches("$Text", '\[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\]')) {
+        $code = $m.Groups[1].Value
+        if ($code -ne 'UNCLASSIFIED' -and $known.ContainsKey($code)) { return $code }
+    }
+    if ("$Text" -match '(?i)CONVERGENCE FAILURE') { return 'CONVERGENCE' }
     if (Get-Command Get-PimFailureClassification -ErrorAction SilentlyContinue) {
-        try { return "$((Get-PimFailureClassification -Message $Text).code)" } catch { }
+        try { $c = "$((Get-PimFailureClassification -Message $Text).code)"; if ($c) { return $c } } catch { }
     }
     return 'UNCLASSIFIED'
+}
+
+function Get-PimUplinkFixKind {
+    <#
+      100.34. customer-config | product-defect for an ErrorClass, from the failure catalog (Get-PimFailureFixKind). Invardia
+      raises a fix request only for product defects and shows customer-config items to support. '' for a run with no class.
+    #>
+    param([string]$ErrorClass)
+    $c = "$ErrorClass".Trim(); if (-not $c) { return '' }
+    if (Get-Command Get-PimFailureFixKind -ErrorAction SilentlyContinue) { try { return "$(Get-PimFailureFixKind -Code $c)" } catch { } }
+    return 'product-defect'
+}
+
+function Test-PimUplinkFixKindEnabled {
+    <#
+      100.34 (Invardia 2026-10-09: the §8.4 run report gets an optional FixKind, absent = product-defect). Invardia's side is
+      LIVE (6f2dce4, migration 046: a customer-config report opens NO fix request, it shows as "Needs customer action"), so
+      the field is ON by default from 2.4.539; PIM_UPLINK_FIXKIND = 0 / false / off / no switches it off (escape hatch).
+      The class itself (ErrorClass) is sent either way.
+    #>
+    param([AllowNull()][string]$Value = $env:PIM_UPLINK_FIXKIND)
+    return -not [bool]("$Value".Trim() -match '^(?i)(0|false|off|no)$')
 }
 
 function Get-PimUplinkConsentAction {
@@ -175,18 +217,101 @@ function New-PimUplinkConsentReport {
     return [pscustomobject]$o
 }
 
+# PIM 100.36 (owner via Invardia 2026-10-09: "telemetry must collect available sql db space remaining in health telemetry"):
+# allocated data pages (ROWS files) and the database's max size, both MB. Azure SQL; on a server without a max size
+# (MaxSizeInBytes NULL / -1) nothing is reported.
+$script:PimUplinkSqlSpaceQuery = @'
+SELECT CAST(DATABASEPROPERTYEX(DB_NAME(), 'MaxSizeInBytes') AS bigint) / 1048576 AS maxMb,
+       (SELECT SUM(CAST(FILEPROPERTY(name, 'SpaceUsed') AS bigint)) * 8 / 1024 FROM sys.database_files WHERE type_desc = 'ROWS') AS usedMb
+'@
+
+function Get-PimUplinkSqlSpace {
+    <#
+      PIM 100.36. The heartbeat's SQL space numbers: @{ sqlUsedMb; sqlMaxMb } (integers, MB), or $null. -Query { } runs the SQL
+      above and returns its row (the job binds Invoke-PimSqlQuery with the store's MI connection; tests pass a stub). A query
+      that throws, returns nothing, or a value that is missing / not a number / not positive (max) = $null: BOTH keys are
+      then left out -- never a 0, never a guess. Never throws.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Query)
+    try {
+        $row = @(& $Query) | Select-Object -First 1
+        if ($null -eq $row) { return $null }
+        $u = Get-PimUplinkField $row 'usedMb'; $m = Get-PimUplinkField $row 'maxMb'
+        $ui = [int64]0; $mi = [int64]0
+        if ($null -eq $u -or $null -eq $m -or $u -is [DBNull] -or $m -is [DBNull]) { return $null }
+        if (-not [int64]::TryParse("$u", [ref]$ui) -or -not [int64]::TryParse("$m", [ref]$mi)) { return $null }
+        if ($ui -lt 0 -or $mi -le 0) { return $null }
+        return @{ sqlUsedMb = $ui; sqlMaxMb = $mi }
+    } catch { return $null }
+}
+
+function Get-PimUplinkField {
+    # A property of a PSCustomObject / DataRow-like object or a dictionary, $null when absent (PIM-Uplink.ps1 stands alone).
+    param([AllowNull()][object]$Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) { if ($Object.Contains($Name)) { return $Object[$Name] }; return $null }
+    $p = $Object.PSObject.Properties[$Name]; if ($p) { return $p.Value }
+    return $null
+}
+
+function Send-PimUplinkRecord {
+    <#
+      §100.39 (framework §12.6b): the framework's Send-AitUplink, WITH the response body. Send-AitUplink throws the body away
+      (`$null = Invoke-RestMethod ...`), and sync/_AitUplink.ps1 ships to every customer with no review step, so it is NOT
+      changed: this wrapper calls it unchanged -- same https / credential guards, headers, timeout, never-throw -- and a
+      function-local Invoke-RestMethod (PowerShell resolves commands through the caller's scopes; both files are dot-sourced,
+      not modules) hands the call to the real cmdlet and keeps what it returned. Returns Send-AitUplink's
+      { Status; Reason; Sent } + Body (the parsed JSON response, or $null). Never throws.
+      -Transport is a test seam: { <Invoke-RestMethod's arguments> } -> the response. Default = the real cmdlet.
+    #>
+    param([Parameter(Mandatory)][object]$Record, [AllowNull()][string]$Endpoint, [AllowNull()][string]$AccessCode, [scriptblock]$Transport = $null)
+    $box = @{ body = $null }
+    $xport = if ($Transport) { $Transport } else { { Microsoft.PowerShell.Utility\Invoke-RestMethod @args } }
+    function Invoke-RestMethod { $resp = & $xport @args; $box.body = $resp; $resp }
+    $r = $null
+    try { $r = Send-AitUplink -Record $Record -Endpoint $Endpoint -AccessCode $AccessCode } catch { $r = [pscustomobject]@{ Status = 'failed'; Reason = "uplink POST failed: $($_.Exception.Message)"; Sent = $false } }
+    $o = [ordered]@{ Status = "$($r.Status)"; Reason = "$($r.Reason)"; Sent = [bool]$r.Sent; Body = $null }
+    if ("$($r.Status)" -eq 'ok') { $o['Body'] = $box.body }
+    return [pscustomobject]$o
+}
+
+function Get-PimUplinkSupersededBy {
+    <#
+      PURE. §100.39 / framework §12.6b: the licence id in a heartbeat response's `supersededBy`, or '' -- an object, a
+      dictionary or JSON text; anything malformed (no field, not a string, not an id shape) is ''. Never throws.
+    #>
+    param([AllowNull()][object]$Body)
+    try {
+        if ($null -eq $Body) { return '' }
+        if ($Body -is [string]) { if (-not $Body.Trim().StartsWith('{')) { return '' }; $Body = $Body | ConvertFrom-Json -ErrorAction Stop }
+        $v = Get-PimUplinkField $Body 'supersededBy'
+        if ($v -isnot [string]) { return '' }
+        $v = $v.Trim()
+        if ($v -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$') { return '' }
+        return $v
+    } catch { return '' }
+}
+
 function Invoke-PimUplinkCycle {
     <#
       One cycle with every seam injected (tests run it offline):
         -GetSetting { param($Name) } / -SetSetting { param($Name, $Value) } -- pim.Settings
-        -Send { param($Record, $Endpoint, $AccessCode) }                     -- returns @{ Status; Reason } (Send-AitUplink)
+        -Send { param($Record, $Endpoint, $AccessCode) }                     -- returns @{ Status; Reason; Body? } (Send-PimUplinkRecord)
+          §100.39: a heartbeat response carrying `supersededBy: <licenceId>` is stored in pim.Settings 'LicenceSupersededBy'
+          (a plain string); the licence-request job (every 30 min) then knocks with currentLicenceId (PIM-LicenceRequest.ps1).
         -Runs <job run history>  -License <Get-PimLicense>  -ProHere <bool>
       Returns @{ ran; mode; sent; failed; heartbeat; message }.
     #>
     param([Parameter(Mandatory)][scriptblock]$GetSetting, [Parameter(Mandatory)][scriptblock]$SetSetting, [Parameter(Mandatory)][scriptblock]$Send,
           [bool]$Enabled = $false, [string]$InstallKey = '', [string]$Version = '', [AllowNull()][object]$Ring, [object[]]$Runs = @(),
           [AllowNull()][object]$License, [bool]$ProHere = $false, [string]$TenantId = '', [string]$RuntimeIdentity = 'mi-container',
-          [datetime]$NowUtc = [datetime]::UtcNow, [int]$MaxPerCycle = $script:PimUplinkMaxRunsPerCycle, [int]$PauseMs = 0)
+          [datetime]$NowUtc = [datetime]::UtcNow, [int]$MaxPerCycle = $script:PimUplinkMaxRunsPerCycle, [int]$PauseMs = 0,
+          # PIM 100.10 / framework 8.7 UPLINK-SETUP: the Kind=setup report (identified mode only; daily + on change).
+          [bool]$SetupEnabled = $false, [AllowNull()][object]$SetupFacts = $null, [bool]$SetupExtended = $false,
+          # PIM 100.36: @{ sqlUsedMb; sqlMaxMb } (Get-PimUplinkSqlSpace) -> the IDENTIFIED heartbeat's Counts; $null = left out.
+          [AllowNull()][hashtable]$SqlSpace = $null,
+          # PIM 100.34: send FixKind unless PIM_UPLINK_FIXKIND is 0/false/off/no (ON by default -- Invardia live 6f2dce4).
+          [bool]$FixKind = (Test-PimUplinkFixKindEnabled))
     $NowUtc = $NowUtc.ToUniversalTime()
     $endpoint = "$(& $GetSetting 'UplinkEndpoint')".Trim()
     $sender = Resolve-AitUplinkSender -Enabled $Enabled -InstallKey $InstallKey -Endpoint $endpoint
@@ -218,7 +343,7 @@ function Invoke-PimUplinkCycle {
         else { foreach ($p in $state.jobMarks.PSObject.Properties) { $marks["$($p.Name)"] = "$($p.Value)" } }
     }
     $common = @{ Mode = $sender.Mode; Product = $script:PimUplinkProduct; Version = $Version; Ring = $Ring; InstallId = $iid; TenantId = $TenantId; Now = $NowUtc }
-    $sent = 0; $failed = 0; $why = @(); $hbSent = $false; $stopped = $false; $budget = [Math]::Max(1, $MaxPerCycle)
+    $sent = 0; $failed = 0; $why = @(); $supNote = ''; $hbSent = $false; $stopped = $false; $budget = [Math]::Max(1, $MaxPerCycle)
     $post = { param($rec) if ($sent -gt 0 -and $PauseMs -gt 0) { Start-Sleep -Milliseconds $PauseMs }; & $Send $rec $sender.Endpoint $sender.AccessCode }
     # §11 opt-in: switched back ON after an opt-out -> ONE 'optin' report FIRST. Until it lands nothing else is sent (Invardia
     # still has this environment as opted out), and nothing from the opted-out period is ever sent: the floor restarts NOW.
@@ -230,10 +355,52 @@ function Invoke-PimUplinkCycle {
         else { $failed++; $stopped = $true; $consent = 'off'; $why += "optin: $($r.Reason)" }
     }
     if (-not $stopped -and (Get-PimUplinkHeartbeatDue -LastHeartbeatUtc $lastHb -NowUtc $NowUtc)) {
+        # PIM 100.36: the SQL space, identified heartbeat only, both numbers or neither (never a 0 / a guess).
+        $hbCounts = $null
+        if ($sender.Mode -eq 'identified' -and $SqlSpace -and $SqlSpace.ContainsKey('sqlUsedMb') -and $SqlSpace.ContainsKey('sqlMaxMb') -and
+            $null -ne $SqlSpace['sqlUsedMb'] -and $null -ne $SqlSpace['sqlMaxMb'] -and [int64]$SqlSpace['sqlMaxMb'] -gt 0) {
+            $hbCounts = @{ sqlUsedMb = [int64]$SqlSpace['sqlUsedMb']; sqlMaxMb = [int64]$SqlSpace['sqlMaxMb'] }
+        }
         $hb = New-AitUplinkReport -Kind heartbeat @common -Edition (Get-PimUplinkEdition -License $License -ProHere $ProHere) -Hosting 'container' `
-                -RuntimeIdentity $RuntimeIdentity -LicenceState (Get-PimUplinkLicenceState -License $License)
+                -RuntimeIdentity $RuntimeIdentity -LicenceState (Get-PimUplinkLicenceState -License $License) -Counts $hbCounts
+        # §100.39 / framework §12.6b: the IDENTIFIED heartbeat names the installed licence (Invardia 1.0.230: optional `LicenceId`,
+        # a GUID; a bad value refuses the whole report) so Invardia can answer `supersededBy`. Anonymous never carries it.
+        $lid = if ($License) { "$($License.LicenseId)".Trim().ToLowerInvariant() } else { '' }
+        if ($hb -and $sender.Mode -eq 'identified' -and $lid -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') {
+            $hb | Add-Member -NotePropertyName 'LicenceId' -NotePropertyValue $lid -Force
+        }
         $r = & $post $hb
         if ("$($r.Status)" -eq 'ok') { $sent++; $hbSent = $true; $lastHb = $NowUtc.ToString('o') } else { $failed++; $stopped = $true; $why += "heartbeat: $($r.Reason)" }
+        # §100.39: Invardia re-issued the installed licence -> keep its successor's id for the licence-request job. Only a
+        # well-formed id is kept; a missing / malformed answer changes nothing; nothing here can fail the cycle.
+        if ("$($r.Status)" -eq 'ok') {
+            try {
+                $sup = ''; if ($r -is [System.Collections.IDictionary]) { if ($r.Contains('Body')) { $sup = Get-PimUplinkSupersededBy -Body $r['Body'] } }
+                           elseif ($r.PSObject.Properties['Body']) { $sup = Get-PimUplinkSupersededBy -Body $r.Body }
+                if ($sup) {
+                    $prevSup = ''; try { $pv = & $GetSetting 'LicenceSupersededBy'; if ($pv -is [string]) { $prevSup = $pv.Trim() } } catch { }
+                    if ($prevSup -ne $sup) { & $SetSetting 'LicenceSupersededBy' $sup }
+                    $supNote = "; Invardia re-issued the licence (superseded by $sup) -- the licence request asks for it"
+                }
+            } catch { $supNote = "" }
+        }
+    }
+    # PIM 100.10 (framework 8.7): the SETUP report -- identified only (anonymous Community sends nothing of this), its own
+    # switch, once a day and on every change of state. Its state (UplinkSetupState) moves only when the report landed.
+    $setupSent = $false
+    if (-not $stopped -and $SetupEnabled -and $sender.Mode -eq 'identified' -and $null -ne $SetupFacts -and (Get-Command New-PimSetupReport -ErrorAction SilentlyContinue)) {
+        $sst = $null; try { $sst = & $GetSetting 'UplinkSetupState' } catch { $sst = $null }
+        if ($sst -is [string]) { try { $sst = $sst | ConvertFrom-Json } catch { $sst = $null } }
+        $prevSince = $null; if ($sst -and $sst.PSObject.Properties['since']) { $prevSince = $sst.since }
+        $edition = Get-PimUplinkEdition -License $License -ProHere $ProHere
+        $rep = New-PimSetupReport -Facts $SetupFacts -Product $script:PimUplinkProduct -Version $Version -Ring $Ring -Edition $edition -Extended:$SetupExtended -PreviousSince $prevSince -NowUtc $NowUtc
+        if (Get-PimSetupReportDue -State $sst -Fingerprint $rep.fingerprint -NowUtc $NowUtc) {
+            $r = & $post $rep.record
+            if ("$($r.Status)" -eq 'ok') {
+                $sent++; $setupSent = $true
+                & $SetSetting 'UplinkSetupState' ([pscustomobject][ordered]@{ lastSentUtc = $NowUtc.ToString('o'); fingerprint = $rep.fingerprint; extended = [bool]$SetupExtended; since = [pscustomobject]$rep.since })
+            } else { $failed++; $stopped = $true; $why += "setup: $($r.Reason)" }
+        }
     }
     $plan = Get-PimUplinkRunPlan -Runs $Runs -SinceUtc $floor -SinceByJob $marks
     $left = 0
@@ -243,6 +410,9 @@ function Invoke-PimUplinkCycle {
         $cls = if ($p.outcome -eq 'failed') { Get-PimUplinkErrorClass -Text $p.errorText } else { '' }
         $rec = New-AitUplinkReport -Kind run @common -Job $p.job -Outcome $p.outcome -DurationMs $p.durationMs -ErrorClass $cls -ErrorText $p.errorText `
                  -Counts @{ runs = $p.runCount }
+        # 100.34: fixKind beside the class -- added HERE, not in the framework client (sync/_AitUplink.ps1 must stay
+        # byte-identical), and only behind PIM_UPLINK_FIXKIND until Invardia's schema has the field.
+        if ($rec -and $cls -and $FixKind) { $rec | Add-Member -NotePropertyName 'FixKind' -NotePropertyValue (Get-PimUplinkFixKind -ErrorClass $cls) -Force }
         $r = & $post $rec
         if ("$($r.Status)" -eq 'ok') { $sent++; $marks[$p.job] = $p.finishedUtc }
         else { $failed++; $stopped = $true; $left++; $why += "$($p.job): $($r.Reason)" }
@@ -263,10 +433,10 @@ function Invoke-PimUplinkCycle {
         }
         if ($guardsSent) { try { & $SetSetting 'GuardTrips' $gs } catch { $why += "guard send marks not saved: $($_.Exception.Message)" } }
     }
-    $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })"
+    $msg = "$($sender.Mode): $sent sent$(if ($guardsSent) { " ($guardsSent guard record(s))" })$(if ($setupSent) { ' (setup report)' })$(if ($failed) { ", $failed failed -- $(@($why | Select-Object -First 3) -join '; ')" })$(if ($left) { ", $left left for the next cycle" })$supNote"
     & $SetSetting 'UplinkState' ([pscustomobject][ordered]@{ mode = $sender.Mode; lastHeartbeatUtc = $lastHb; runWatermarkUtc = $floor; jobMarks = [pscustomobject]$marks
                                                              consent = $consent; lastCycleUtc = $NowUtc.ToString('o'); lastResult = $msg })
-    return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; message = $msg }
+    return @{ ran = $true; mode = $sender.Mode; sent = $sent; failed = $failed; left = $left; heartbeat = $hbSent; setup = $setupSent; message = $msg }
 }
 
 function Invoke-PimUplinkJob {
@@ -287,17 +457,39 @@ function Invoke-PimUplinkJob {
     # PLAIN scriptblocks, never .GetNewClosure() (Test-PimHybridWorker L19): they read $cs / $WhatIf through dynamic scope.
     $get = { param($n) Get-PimSqlSetting -ConnectionString $cs -Name $n }
     $set = { param($n, $v) if (-not $WhatIf) { Set-PimSqlSetting -ConnectionString $cs -Name $n -Value $v } }
-    $send = { param($rec, $ep, $code) if ($WhatIf) { @{ Status = 'ok'; Reason = 'what-if' } } else { Send-AitUplink -Record $rec -Endpoint $ep -AccessCode $code } }
+    # §100.39: Send-PimUplinkRecord = the framework's Send-AitUplink, unchanged, plus the response body (supersededBy).
+    $send = { param($rec, $ep, $code) if ($WhatIf) { @{ Status = 'ok'; Reason = 'what-if' } } else { Send-PimUplinkRecord -Record $rec -Endpoint $ep -AccessCode $code } }
     $sol = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $verFile = Join-Path $sol 'VERSION'
     $ver = if (Test-Path -LiteralPath $verFile) { "$(Get-Content -Raw -LiteralPath $verFile)".Trim() } elseif ($env:PIM_VERSION) { "$env:PIM_VERSION" } else { '' }
     $tid = ''; if (Get-Command Resolve-PimLicenseTenantId -ErrorAction SilentlyContinue) { try { $tid = "$(Resolve-PimLicenseTenantId)" } catch { } }
     $lic = $null; try { $lic = Get-PimLicense } catch { $lic = $null }
     $proHere = $false; if ($lic -and (Get-Command Test-PimLicenseIsProForTenant -ErrorAction SilentlyContinue)) { try { $proHere = [bool](Test-PimLicenseIsProForTenant -License $lic -TenantId $tid).pro } catch { } }
-    $ring = $null; $rp = 0; if ([int]::TryParse("$env:PIM_UPDATE_RING", [ref]$rp)) { $ring = $rp }
+    if (-not (Get-Command Resolve-PimUplinkRing -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-UplinkSetup.ps1') }
+    # 100.10 (Invardia 2026-10-09: "update level unknown" for every PIM install -- Reports.Ring empty): PIM_UPDATE_RING is set on
+    # the UPDATE job only, and this job runs in the tick job. The environment's own record (UpdateState) carries the ring too.
+    $us = $null; try { $us = & $get 'UpdateState'; if ($us -is [string]) { $us = $us | ConvertFrom-Json } } catch { $us = $null }
+    $ring = Resolve-PimUplinkRing -EnvRing "$env:PIM_UPDATE_RING" -UpdateState $us
     $rid = if ($env:IDENTITY_ENDPOINT -or $env:MSI_ENDPOINT) { 'mi-container' } else { 'spn-certificate' }
     $runs = @(); if (Get-Command Get-PimJobRunHistory -ErrorAction SilentlyContinue) { try { $runs = @(Get-PimJobRunHistory) } catch { $runs = @() } }
-    $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $(if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { Resolve-PimInvardiaInstallKey -GetSetting $get } else { "$env:PIM_UPLINK_KEY" }) -Version $ver -Ring $ring `
-            -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $(if ($WhatIf) { 0 } else { 2500 })
+    $key = if (Get-Command Resolve-PimInvardiaInstallKey -ErrorAction SilentlyContinue) { Resolve-PimInvardiaInstallKey -GetSetting $get } else { "$env:PIM_UPLINK_KEY" }
+    # 100.10: the setup report -- its own switch (feature 'telemetry.setup', ON by default; it only ever sends with an install key).
+    $setupOn = [bool]((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key 'telemetry.setup' -Quiet))
+    $facts = $null
+    if ($on -and $setupOn -and "$key".Trim()) {
+        $msp = ''; $down = $null
+        try { if (Get-Command Get-PimActiveScenario -ErrorAction SilentlyContinue) { $sc = Get-PimActiveScenario; if ("$($sc.role)" -eq 'msp-managed') { $msp = 'Slave' } elseif ("$($sc.role)" -eq 'msp-master') { $msp = 'Master' } } } catch { }
+        try { if ($msp -eq 'Slave' -and (Get-Command Test-PimFeatureEnabled -ErrorAction SilentlyContinue)) { $down = [bool](Test-PimFeatureEnabled -Key 'msp.downlink') } } catch { $down = $null }
+        try { $facts = Get-PimSetupFacts -GetSetting $get -Runs $runs -License $lic -ProHere $proHere -InstallKey $key -MspRole $msp -DownlinkOn $down -NowUtc $NowUtc } catch { $facts = $null }
+    }
+    # 100.36: the SQL space for the IDENTIFIED heartbeat (the store's own MI connection); a failed read = both numbers left out.
+    $sqlSpace = $null
+    if ($on -and "$key".Trim() -and (Get-Command Invoke-PimSqlQuery -ErrorAction SilentlyContinue)) {
+        $spaceSql = $script:PimUplinkSqlSpaceQuery
+        $sqlSpace = Get-PimUplinkSqlSpace -Query { Invoke-PimSqlQuery -ConnectionString $cs -Sql $spaceSql }
+    }
+    $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
+            -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $(if ($WhatIf) { 0 } else { 2500 }) `
+            -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace
     [pscustomobject]@{ ran = [bool]$r.ran; whatIf = [bool]$WhatIf; detail = "uplink: $($r.message)" }
 }

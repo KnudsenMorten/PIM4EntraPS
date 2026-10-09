@@ -785,7 +785,7 @@ function Get-PimMspBuildPlan {
     $accessSwitches = @($storeSwitches)
     $rootUaa = [bool](& $V 'engineAzure.rootUserAccessAdmin')
     if ($rootUaa) { $accessSwitches += 'EngineAzureRootUserAccessAdmin' }
-    $steps.Add((New-PimMspBuildStep -Id 'access' -Title ("tick Graph (Engine set), Manager Graph (read-only set), Manager may start the tick, SchedulerTickJobId, tick Reader at the tenant root" + $(if ($rootUaa) { ' + User Access Administrator (opted in)' } else { '' })) `
+    $steps.Add((New-PimMspBuildStep -Id 'access' -Title ("tick Graph (Engine set), Manager Graph (read-only set), Manager may start the tick, SchedulerTickJobId, tick Reader at the tenant root" + $(if ($rootUaa) { ' + User Access Administrator (opted in)' } else { '' }) + ', Manager Reader on the resource group only (Environment report)') `
         -Script 'tools\setup\Initialize-PimHostingAccess.ps1' -HostExe 'powershell' `
         -Arguments $accessArgs -Switches $accessSwitches `
         -Why 'the infra step (the only place these were granted) is SKIPPED on an existing environment; EFIF and RIDE held 12 and 9 roles and lacked the 5 required ones'))

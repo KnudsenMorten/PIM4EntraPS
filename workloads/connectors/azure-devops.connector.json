@@ -4,6 +4,7 @@
   "auth": "devops",
   "membershipModel": true,
   "perRowResource": true,
+  "resourceFormat": { "label": "Azure DevOps organisation", "format": "<organisation name>", "example": "contoso", "prefill": "", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,49}$" },
   "containerKind": "graph subject",
   "status": "structure built -- nested-membership adapter mapped to the Azure DevOps Graph API. Azure DevOps grants access by NESTING the Entra group into a DevOps SECURITY GROUP (org- or project-scoped), not by a flat role object, so it uses the membership adapter: resolveContainer = the Entra group's DevOps SUBJECT descriptor; the 'roles' are the org/project security groups; assign = PUT memberships/{group}/{subject}. Live-validation pending an Azure DevOps org the engine SPN is an admin of (Project Collection Administrators) + the org connected to the same Entra tenant.",
   "permissionsNeeded": ["Azure DevOps: the engine SPN added to the org as a member of 'Project Collection Administrators' (or Project Administrators for project-scoped groups); the org must be backed by the same Entra tenant so the Entra group has a DevOps subject descriptor"],
