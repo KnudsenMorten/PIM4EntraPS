@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.541 -- 2026-10-09
+
+- Tenant data refresh: group-activity reads that Microsoft Graph throttled until no answer came back are now treated as throttling too -- the last refresh is kept and no alert mail is sent.
+
 ## 2.4.540 -- 2026-10-09
 
 - Tenant data refresh no longer fails (or mails an alert) when Microsoft Graph briefly throttles the optional group-activity list: it keeps the last refresh and reads group activity in batches.
