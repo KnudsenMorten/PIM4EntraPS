@@ -439,7 +439,10 @@ function Invoke-PimJobSizingUpdate {
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [string]$JobName = 'ca-pim-tick',
           [Parameter(Mandatory)][scriptblock]$Arm, [scriptblock]$Graph, [object[]]$Runs = @(), [hashtable]$Environment = @{},
-          [datetime]$NowUtc = [datetime]::UtcNow)
+          [datetime]$NowUtc = [datetime]::UtcNow,
+          # 2.4.544: the counts the TICK recorded (pim.Settings 'TenantObjectCounts') -- used when the updater's own Graph
+          # count is refused (its identity has no directory read right: HTTP 403 on every environment, 2026-10-09).
+          [AllowNull()][object]$StoredCounts = $null)
     $log = New-Object System.Collections.Generic.List[string]
     $path = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$JobName"
     try {
@@ -453,7 +456,12 @@ function Invoke-PimJobSizingUpdate {
         if ($Graph) {
             $cnt = Get-PimTenantObjectCounts -GraphGet $Graph
             if ($cnt.ok) { $counts = @{ Users = $cnt.Users; Groups = $cnt.Groups; ServicePrincipals = $cnt.ServicePrincipals }; $countSrc = 'graph' }
+            elseif ("$($cnt.error)" -match '\b403\b|Authorization_RequestDenied|Insufficient privileges') { $log.Add('the updater identity may not count tenant objects (Graph 403) -- using the counts the engine recorded') }
             else { $log.Add("Graph count failed ($($cnt.error))") }
+        }
+        if (-not $counts -and $StoredCounts -and $null -ne $StoredCounts.Users -and $null -ne $StoredCounts.Groups -and $null -ne $StoredCounts.ServicePrincipals) {
+            $counts = @{ Users = [long]$StoredCounts.Users; Groups = [long]$StoredCounts.Groups; ServicePrincipals = [long]$StoredCounts.ServicePrincipals }; $countSrc = 'engine'
+            $log.Add("counts recorded by the engine ($($StoredCounts.recordedUtc)): $($counts.Users) users, $($counts.Groups) groups, $($counts.ServicePrincipals) service principals")
         }
         if (-not $counts -and $rec.recorded) { $counts = $rec.counts; $countSrc = 'recorded'; $log.Add("using the counts recorded on the job ($($rec.sizedUtc))") }
         $sc = Get-PimJobSelfCorrection -Runs $Runs -SinceUtc $rec.sizedUtc

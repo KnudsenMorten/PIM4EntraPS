@@ -908,7 +908,9 @@ try {
     $armSeam = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
     $graphSeam = { param($p) Invoke-PimGraph -Path $p -Headers @{ ConsistencyLevel = 'eventual' } }
     $envMap = @{}; foreach ($ev in [Environment]::GetEnvironmentVariables().GetEnumerator()) { $envMap["$($ev.Key)"] = "$($ev.Value)" }
-    $sz = Invoke-PimJobSizingUpdate -SubscriptionId $sub -ResourceGroup $rg -JobName $tickJob -Arm $armSeam -Graph $graphSeam -Runs $runs -Environment $envMap
+    $stored = $null   # 2.4.544: the counts the tick recorded -- the fallback when this identity's Graph count is refused (403)
+    if ($csSize) { try { $rawC = Get-PimSqlSettingRaw -ConnectionString $csSize -Name 'TenantObjectCounts'; if ("$rawC".Trim()) { $stored = "$rawC" | ConvertFrom-Json; if ($stored -is [string]) { $stored = $stored | ConvertFrom-Json } } } catch { $stored = $null } }
+    $sz = Invoke-PimJobSizingUpdate -SubscriptionId $sub -ResourceGroup $rg -JobName $tickJob -Arm $armSeam -Graph $graphSeam -Runs $runs -Environment $envMap -StoredCounts $stored
     foreach ($l in @($sz.log)) { Say "  sizing: $l" 'DarkGray' }
     Say ("sizing: $($sz.detail)") $(if (-not $sz.ok) { 'Yellow' } elseif ($sz.changed) { 'Cyan' } else { 'DarkGray' })
     $sqlSz = Invoke-PimSqlTierUpdate -SubscriptionId $sub -Server "$($env:PIM_SqlServer)" -Database $(if ("$($env:PIM_SqlDatabase)".Trim()) { "$($env:PIM_SqlDatabase)".Trim() } else { 'PimPlatform' }) -Arm $armSeam
