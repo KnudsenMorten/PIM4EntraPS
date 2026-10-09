@@ -976,6 +976,22 @@ function Invoke-PimTenantListRefresh {
             }
         }
 
+        # 2.4.544 (framework 12.15 "else what the last collection recorded"): the UPDATER's identity may not $count tenant
+        # objects (Graph 403 on every environment, 2026-10-09), so the tick -- which holds the Graph read rights -- records
+        # users / groups / service principals here; the updater's sizing reads pim.Settings 'TenantObjectCounts' on a 403.
+        # Best effort: never fails or slows the refresh beyond three $count calls.
+        try {
+            $csC = Get-PimTenantCacheStoreCs
+            if (-not (Get-Command Get-PimTenantObjectCounts -ErrorAction SilentlyContinue)) {
+                $tsz = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-TenantSizing.ps1'   # the tick does not load it otherwise
+                if (Test-Path -LiteralPath $tsz) { . $tsz }
+            }
+            if ($csC -and (Get-Command Get-PimTenantObjectCounts -ErrorAction SilentlyContinue) -and (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) -and (Get-Command Set-PimSqlSetting -ErrorAction SilentlyContinue)) {
+                $oc = Get-PimTenantObjectCounts -GraphGet { param($p) Invoke-PimGraph -Path $p -Headers @{ ConsistencyLevel = 'eventual' } }
+                if ($oc.ok) { Set-PimSqlSetting -ConnectionString $csC -Name 'TenantObjectCounts' -Value ([ordered]@{ Users = $oc.Users; Groups = $oc.Groups; ServicePrincipals = $oc.ServicePrincipals; recordedUtc = (Get-Date).ToUniversalTime().ToString('o') }) | Out-Null }
+            }
+        } catch { if (-not $Quiet) { Write-Host "    tenant object counts not recorded: $($_.Exception.Message)" -ForegroundColor DarkYellow } }
+
         # IMP-49 b (ss33.28): this returned ok=$true even when EVERY step had failed, so the tenant-cache job read green
         # over an empty refresh. ok is now true only when no REQUIRED step failed; an optional step that is skipped
         # (permission not granted) is reported, not failed.

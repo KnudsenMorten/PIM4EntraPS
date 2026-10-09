@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.544 -- 2026-10-10
+
+- Automatic job sizing works when the updater may not read the directory: the engine records the tenant counts and the update uses them (no more Graph count failed lines).
+
 ## 2.4.543 -- 2026-10-09
 
 - Stale-access check on large, busy tenants: the group-activity list now refreshes every group that answers and keeps the previous value only for groups Microsoft Graph is still throttling, so it converges run by run instead of staying old.
