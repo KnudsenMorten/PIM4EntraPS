@@ -1,17 +1,17 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    The two scheduled tasks behind the FAST RELEASE PATH (PIM REQUIREMENTS 100.20; framework 12.1 SPEED RULE item 2), as
+    The scheduled task behind the FAST RELEASE PATH (PIM REQUIREMENTS 100.20; framework 12.1 SPEED RULE item 2), as
     Windows Task Scheduler DEFINITIONS -- written as XML and printed; registered only with -Apply (schtasks.exe, no modules).
 
 .DESCRIPTION
-      PIM nightly full suite       daily at -NightlyAt (default 01:30): Invoke-PimNightlySuite.ps1 -- the whole offline
-                                   suite on origin/main on the test VM; red -> a fix request.
+      (No nightly full suite: dropped by the owner 2026-10-09, framework 12.1 -- the full suite runs at every feature
+       release; Invoke-PimNightlySuite.ps1 stays as an ON-DEMAND tool, never scheduled.)
       PIM post-roll smoke watcher  every -WatchEveryMinutes (default 15): Invoke-PimPostRollSmoke.ps1 -EnvironmentsFile
                                    <file> -IfChanged -- every Manager roll in the listed ring-1 environments (the in-cloud
                                    updater's included) is smoked once; red -> rolled back to the last-good image.
                                    Defined only when -EnvironmentsFile exists.
-    Both run as the CURRENT user with an interactive token (the az profiles and the VM key are that user's; a stored
+    It runs as the CURRENT user with an interactive token (the az profiles and the VM key are that user's; a stored
     password is the operator's choice: -LogonType Password, schtasks prompts for it). The XML goes to -OutDir. Without
     -Apply nothing is registered -- this is the step the operator takes on the machine that should run them.
 .EXAMPLE
@@ -21,7 +21,6 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$NightlyAt = '01:30',
     [ValidateRange(5, 240)][int]$WatchEveryMinutes = 15,
     [string]$EnvironmentsFile = '',
     [string]$OutDir = $(Join-Path $env:ProgramData 'pim\tasks'),
@@ -30,7 +29,6 @@ param(
     [switch]$Apply
 )
 $ErrorActionPreference = 'Stop'
-if ($NightlyAt -notmatch '^([01]\d|2[0-3]):[0-5]\d$') { throw "-NightlyAt: HH:mm, not '$NightlyAt'" }
 $pw = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 $pwPath = if ($pw) { $pw.Source } else { 'pwsh.exe' }
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -54,11 +52,7 @@ function New-PimTaskXml([string]$Description, [string]$TriggerXml, [string]$Argu
 </Task>
 "@
 }
-$start = (Get-Date).Date.AddDays(1).ToString('yyyy-MM-dd') + 'T' + $NightlyAt + ':00'
 $tasks = [ordered]@{}
-$tasks['PIM nightly full suite'] = New-PimTaskXml -Description 'PIM fast release path: the full offline suite on origin/main on the test VM; red -> a fix request (fix-requests.jsonl).' `
-    -TriggerXml "<CalendarTrigger><StartBoundary>$start</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>" `
-    -Arguments ('-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot 'Invoke-PimNightlySuite.ps1') + '"') -LimitHours 4
 if ($EnvironmentsFile -and (Test-Path -LiteralPath $EnvironmentsFile)) {
     $wStart = (Get-Date).AddMinutes(5).ToString('yyyy-MM-ddTHH:mm:00')
     $tasks['PIM post-roll smoke watcher'] = New-PimTaskXml -Description 'PIM fast release path: smoke every Manager roll once (-IfChanged); red -> roll back to the last-good image and hold the updater.' `
