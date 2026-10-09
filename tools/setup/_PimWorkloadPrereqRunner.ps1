@@ -62,6 +62,13 @@ function Get-PimPrereqNotDoneReason {
     return "not ${Verb}: -WhatIf or declined"
 }
 
+function Get-PimPrereqNotPreviewable {
+    # Framework 12.7: under -WhatIf, a step that depends on an earlier fix that was NOT made says so -- '' otherwise.
+    param([hashtable]$Ctx, [Parameter(Mandatory)][string]$Steps)
+    if ($Ctx.ContainsKey('whatIf') -and $Ctx.whatIf) { return "; $Steps cannot be previewed -- run without -WhatIf to apply" }
+    return ''
+}
+
 function Resolve-PimPrereqEngineIdentity {
     <#
       The ENGINE identity whose prerequisites are checked (not the caller). One of, in order:
@@ -191,7 +198,7 @@ function Enable-PimPrereqSentinel {
     if (-not $w.ok -and $w.code -ne 404) { return (New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'notChecked' -Detail "could not read workspace '$name': $($w.error)") }
     if (-not $w.ok) {
         if (-not (Test-PimPrereqShould -Ctx $Ctx -Target $name -Action 'create Log Analytics workspace (PerGB2018, 30 days retention)')) {
-            return (New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'failed' -Detail "workspace '$name' does not exist (not created: -WhatIf or declined)")
+            return (New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'failed' -Detail "workspace '$name' does not exist (not created: -WhatIf or declined)$(Get-PimPrereqNotPreviewable -Ctx $Ctx -Steps 'registering Microsoft.OperationsManagement + Microsoft.SecurityInsights and enabling Microsoft Sentinel on it')")
         }
         $rg = Invoke-PimPrereqProbe { Invoke-PimArm -Path $rgId -ApiVersion '2021-04-01' }
         if (-not $rg.ok) { return (New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'failed' -Detail "could not read resource group for '$name': $($rg.error)") }
@@ -210,7 +217,7 @@ function Enable-PimPrereqSentinel {
         $st = Invoke-PimPrereqProbe { Invoke-PimArm -Path "/subscriptions/$subId/providers/$rp" -ApiVersion '2021-04-01' }
         if ($st.ok -and "$($st.value.registrationState)" -eq 'Registered') { continue }
         if (-not (Test-PimPrereqShould -Ctx $Ctx -Target "subscription $subId" -Action "register resource provider $rp")) {
-            return (New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'failed' -Detail "resource provider $rp is not registered (not registered: -WhatIf or declined)$(if ($done.Count) { '; ' + ($done -join '; ') })")
+            return (New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'failed' -Detail "resource provider $rp is not registered (not registered: -WhatIf or declined)$(if ($done.Count) { '; ' + ($done -join '; ') })$(Get-PimPrereqNotPreviewable -Ctx $Ctx -Steps 'enabling Microsoft Sentinel on the workspace')")
         }
         $r = Invoke-PimPrereqProbe { Invoke-PimArm -Method POST -Path "/subscriptions/$subId/providers/$rp/register" -ApiVersion '2021-04-01' }
         if (-not $r.ok) { return (New-PimWorkloadPrereqCheck -Id 'defender.sentinelEnabled' -Status 'failed' -Detail "could not register resource provider ${rp}: $($r.error)$(if ($done.Count) { '; ' + ($done -join '; ') })") }
@@ -395,7 +402,7 @@ function Invoke-PimPrereqPowerBI {
         } else { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.group' -Status 'failed' -Detail "'$gname' does not exist ($(Get-PimPrereqNotDoneReason -Ctx $Ctx -Verb 'created'))" -Data @{ groupName = $gname })) }
     }
     # 2. The engine identity is a member.
-    if (-not $gid) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'notChecked' -Detail 'no usable group yet')) }
+    if (-not $gid) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.groupMember' -Status 'notChecked' -Detail "no usable group yet$(Get-PimPrereqNotPreviewable -Ctx $Ctx -Steps "adding $($Ctx.engine.displayName) to '$gname'")")) }
     else {
         # The TYPED cast: measured 2026-09-19 on internal, the plain /members list returned [] while the managed identity
         # was a member (audit "Add member to group: success"; /members/microsoft.graph.servicePrincipal and the MI's
@@ -426,7 +433,7 @@ function Invoke-PimPrereqPowerBI {
     if (-not $ts.ok) {
         $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'notChecked' -Detail "the caller may not read Fabric tenant settings (HTTP $($ts.code)) -- it must be a Fabric administrator or a service principal an admin-API setting allows. Do the portal step, then re-run. $($ts.error)".Trim()))
     } elseif (-not $gid) {
-        $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'notChecked' -Detail 'no usable group yet, so the setting cannot be scoped to it'))
+        $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'notChecked' -Detail "no usable group yet, so the setting cannot be scoped to it$(Get-PimPrereqNotPreviewable -Ctx $Ctx -Steps "enabling 'Service principals can access read-only admin APIs' for '$gname'")"))
     } else {
         $v = Test-PimFabricReadOnlyAdminSetting -Settings @($ts.value) -GroupId $gid
         if ($v.ok) { $out.Add((New-PimWorkloadPrereqCheck -Id 'powerbi.tenantSetting' -Status 'ok' -Detail $v.detail)) }

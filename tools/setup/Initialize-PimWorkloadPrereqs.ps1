@@ -1,8 +1,10 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
-    REQ-U (prereqs) / 97.1 -- FIX the prerequisites of ONE workload PIM delegates into that PIM cannot fix itself, and
-    check them. You sign in in the browser; no PowerShell modules, no certificate.
+    Check, and fix, the prerequisites of ONE workload PIM Manager delegates into (Defender XDR, Intune, Power BI, Azure
+    roles, Entra roles) that PIM cannot fix itself. You sign in in the browser; no PowerShell modules, no certificate.
+    -WhatIf checks everything and prints every fix it would make, changing nothing.
 
 .DESCRIPTION
     PIM checks every workload prerequisite an API can answer ITSELF, every day (job 'workload-prereqs'; "Check again" on
@@ -60,6 +62,13 @@
 .EXAMPLE
     # Sentinel on a dedicated workspace for Defender Data Operations roles (opt-in: billed per GB ingested):
     .\Initialize-PimWorkloadPrereqs.ps1 -Workload DefenderXdr -TenantId <tenant-id> -SubscriptionId <hosting-subscription-id> -ResourceGroup <resource-group> -EnableSentinel
+
+.EXAMPLE
+    .\Initialize-PimWorkloadPrereqs.ps1 -Workload PowerBI -TenantId <tenant-id> -EngineObjectId <engine-object-id> -WhatIf
+    Preview: every check runs, every fix is printed as "What if: ..." and nothing is changed or recorded.
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Initialize-PimWorkloadPrereqs/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -100,6 +109,9 @@ $ErrorActionPreference = 'Stop'
 # Repository-only helpers: the store (Connect-PimSetupStore, the SQL writer) and the one Graph role map. The published
 # standalone file has neither; it then fixes and checks, and PIM's own self-check records the result.
 foreach ($__f in @('_PimSetupShared.ps1', '_PimSetupSql.ps1')) { $__p = Join-Path $PSScriptRoot $__f; if (Test-Path -LiteralPath $__p) { . $__p } }
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Initialize-PimWorkloadPrereqs'
+try {
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 
@@ -122,12 +134,12 @@ if ($mode -eq 'certificate') {
     $cs = Connect-PimSetupStore -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId -UseSignedInAccount
 } elseif ($mode -eq 'signedIn') {
     # The az session in this window (the Invardia Support app, or a person) -- PIM-Rest's az path, tenant asserted per token.
-    foreach ($g in 'PIM_ClientId', 'PIM_CertThumbprint', 'PIM_ClientSecret') { Set-Variable -Scope Global -Name $g -Value $null }
+    foreach ($g in 'PIM_ClientId', 'PIM_CertThumbprint', 'PIM_ClientSecret') { Set-Variable -Scope Global -Name $g -Value $null -WhatIf:$false }
     $global:PIM_UseManagedIdentity = $false; $global:PIM_Interactive = $false; $global:PIM_TenantId = "$TenantId".Trim()
 } else {
     # Browser sign-in (97.1, framework rule 3). Graph with the delegated scopes THIS workload's checks and fixes need;
     # Azure (+ the store / Fabric through its refresh token) only when the workload needs them.
-    foreach ($g in 'PIM_ClientId', 'PIM_CertThumbprint', 'PIM_ClientSecret') { Set-Variable -Scope Global -Name $g -Value $null }
+    foreach ($g in 'PIM_ClientId', 'PIM_CertThumbprint', 'PIM_ClientSecret') { Set-Variable -Scope Global -Name $g -Value $null -WhatIf:$false }
     $global:PIM_UseManagedIdentity = $false; $global:PIM_Interactive = $true; $global:PIM_TenantId = "$TenantId".Trim()
     $graphScopes = @('Application.Read.All', 'AppRoleAssignment.ReadWrite.All') + @(switch ($Workload) {
         'DefenderXdr' { 'RoleManagement.Read.Defender' }
@@ -190,6 +202,7 @@ $ctx = @{
     powerBiGroupName = $PowerBiSecurityGroupName; azureScopes = @($AzureScope); grantUaa = [bool]$GrantAzureUserAccessAdministrator
     engineCertThumbprint = $EngineCertThumbprint; graphSp = $null; engineAssignments = $null; azureRows = @()
     should = { param($t, $a) $__cmdlet.ShouldProcess($t, $a) }.GetNewClosure()
+    whatIf = [bool]$WhatIfPreference   # the runner says which LATER step cannot be previewed when an earlier fix was not made
 }
 if ($Workload -eq 'AzureRbac' -and $cs) {
     try { $ctx.azureRows = @(Get-PimSqlRows -ConnectionString $cs -Entity 'PIM-Assignments-Azure-Resources') }
@@ -239,6 +252,12 @@ if ($cs -and $PSCmdlet.ShouldProcess("pim.Settings WorkloadPrereqs", "record the
     }
 }
 if (-not $recorded -and -not $WhatIfPreference) { Note 'Next: press Check again on this prerequisite in PIM Manager -- PIM checks it itself and records the result.' }
+if ($WhatIfPreference) {
+    # A preview: the state above is BEFORE the fixes the "What if:" lines name, so it is not an exit code.
+    Write-Host 'What if: nothing was changed and nothing was recorded. Run the same command without -WhatIf to apply the fixes above.'
+    exit 0
+}
 if ($result.state -eq 'failed') { exit 1 }
 if ($result.state -ne 'ok') { exit 2 }
 exit 0
+} finally { Stop-PimScriptRun -Script 'Initialize-PimWorkloadPrereqs' }

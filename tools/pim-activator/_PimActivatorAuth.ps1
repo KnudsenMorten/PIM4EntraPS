@@ -198,11 +198,11 @@ function Get-PaInteractiveToken {
         $edge = if ($UseEdge) { Get-PaEdgePath } else { $null }
         if ($edge) {
             Write-Host "Launching Edge for sign-in (loopback listener on $redirect)..." -ForegroundColor Yellow
-            Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl)
+            Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl) -WhatIf:$false   # opening the sign-in page is not a change: -WhatIf still signs in
         } else {
             if ($UseEdge) { Write-Host 'Microsoft Edge not found -- using the default browser.' -ForegroundColor DarkYellow }
             Write-Host "Opening the default browser for sign-in (loopback listener on $redirect)..." -ForegroundColor Yellow
-            Start-Process $authUrl
+            Start-Process $authUrl -WhatIf:$false
         }
         Write-Host "If no browser opened, open this URL yourself:`n  $authUrl" -ForegroundColor DarkGray
         $deadline = (Get-Date).AddMinutes(5)

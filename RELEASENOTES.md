@@ -13,6 +13,150 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.538 -- 2026-10-09
+
+- **Get Started > Mail sender turns green once mail works.** The step no longer stays "Not done yet" (with a red dot on
+  Overview and Get Started) only because the engine job has not sent a mail yet. Until its first send, the engine's line is
+  shown as information ("waiting for the engine's first send"), without a fix command; only a send the engine actually
+  failed makes it red. Send test mail now proves both sending identities: PIM Manager sends its test at once and the
+  engine job sends one more test as its own identity at its next run (started at once when PIM Manager may start it) --
+  the page says "Engine test mail queued -- proven in about a minute" and updates the line when the proof arrives. When
+  the mail-sender setup script confirmed the scoped send right for both identities and the test mail works, the engine's
+  line is green right away. The Overview mail line, the menu badges and the daily Get Started reminder follow the same rule.
+- **Custom workloads (for example SAP).** Templates > Custom workloads defines your own workload -- an application PIM has
+  no connector for -- with its roles (each with a tier), optional scope levels (such as System and Client) and, if you want,
+  its own group name pattern. "Start from SAP example" prefills a starting point to adapt. A custom workload appears in
+  Create > Resource delegation beside the connectors (marked CUSTOM); the picker's last entry, "+ Custom (quick)...",
+  defines one on the spot from a name and a first role. PIM creates and maintains one Entra permission group per
+  delegated role, with its nesting and PIM-for-Groups eligibility and policy, and the application gives access to the
+  group's active members (SSO group claim, SCIM or its own role mapping) -- PIM never calls the application. A custom
+  workload exports as a template (its definition and the structure of its delegations, no people) and imports into
+  another environment, where its delegations are staged in Pending changes. It cannot be deleted while a delegation uses it.
+- **The delegation wizard is easier to read.** The wizard dialog uses the available screen (up to 1000 px wide), a picker
+  takes the full width of its field and opens in place instead of being cut off by the dialog, and every picker entry
+  wraps: the name on the first line, its description in grey below.
+
+- **Get Started > Naming convention shows every naming setting.** Besides the admin word, tenant name, admin account names,
+  PIM group name and group tag prefixes (shown first), the step now holds every other naming setting of Settings in
+  expandable groups -- Admin accounts (domain, display name suffix, admin type prefixes, environment suffixes, defaults),
+  Groups & roles (permission group and administrative unit names, administrative units per group type and level, service
+  names) and Hybrid Active Directory (the AD group marker and pattern, account suffixes, OUs, the per-server group) -- each
+  with what it renders as. Saving keeps every setting the step does not show.
+- **Your organisation names the mail sender mailbox.** Get Started > Mail sender (and Settings > Mail) now sets up a shared
+  mailbox in two steps: **Name and create the mailbox** -- the mailbox name, a verified domain of your tenant and the display
+  name, with the setup command built from what you type -- and **Validate**, which makes that mailbox the sender, sends a
+  test mail and shows every mail check. The setup script takes the same names as parameters (`-MailboxName`, `-MailDomain`,
+  `-DisplayName`), and the Exchange scope and role-assignment names now follow your mailbox name (`-ScopeName`,
+  `-AssignmentNamePrefix`); an existing installation keeps its existing Exchange names, nothing is created twice. When
+  your computer cannot reach the PIM database, the script says so in one line, and `-AllowThisIpTemporarily` can add a
+  temporary database firewall rule for your IP that is always removed again. The tenant's licence list is shown only with
+  `-Verbose`.
+- **"More info" next to every setting.** Every setting on the Settings pages (and in the Get Started steps that set one) has
+  a More info button that opens, in place, what the setting does, what changes when it is on and when it is off, the risk
+  and how to undo it, what it needs (permissions, edition, other settings), its default and the recommended value -- with a
+  link to the full page for that setting on invardia.com. A setting that removes access, silences mail, widens who can do
+  something or turns a safeguard off now shows that consequence in the confirmation before the change is made.
+- **A security review pack for your CISO.** PIM Manager now comes with a security pack written for the people who approve
+  it: architecture, every identity, every permission with why it is needed and what breaks without it, the data it reads,
+  stores and sends, vendor access and how to remove it, updates and supply chain, change control, a threat model with the
+  controls and the open gaps, a compliance mapping, uninstall, and every script you run with its rights and its state today.
+  It is linked from Support, the Licence card and Get Started, and prints to PDF.
+- **Every script you run explains itself, previews itself and leaves a log.** Each setup, support and installer script now
+  has a documentation page at Invardia (what it does, who may run it, every permission it needs and every change and grant
+  it makes, with scope, reason and how to undo it). PIM Manager shows a "What does this script do?" link next to every
+  script command it offers, the script's own help (`Get-Help -Full`, `Get-Help -Online`) lists the same permissions and
+  links the page, and the script prints the page address as its first line.
+- **-WhatIf in every script.** Run any of them with `-WhatIf` first: it signs in, reads, and prints every change it would
+  make -- and makes none. A step that depends on an earlier change says it cannot be previewed.
+- **Save, verify, read, run.** The commands PIM Manager shows now download the script, check it against the published
+  SHA-256 checksum (and show its signature status) before it runs -- never a download piped straight into PowerShell.
+  Each script writes a local transcript of what it did and prints where it is.
+- **The daily changes mail is redesigned.** It opens with a summary -- how many changes, by how many people, and which need a
+  look (removals, tier-0 roles such as Global Administrator, released safety guards, break-glass changes) -- then lists every
+  change grouped by kind with before -> after. It carries the PIM Manager logo, a blue button to the right page for the reader
+  (SOC analyst: the audit trail for that day; posture: the delegation map; manager: the change history) and a plain link to
+  the PIM Manager.
+- **Notifications per recipient** (Settings > Mail & alerting > Alerting > Notifications): each recipient's audience, which
+  reports and alerts they get, and the lowest alert severity. A recipient who is not a PIM Manager user is added as a
+  Reader so the links in their mails open; nobody's existing role is changed.
+- **Settings > Reports** shows every report and alert in one place: cadence, recipients, link or attached report, last sent,
+  next run.
+- **Export PDF** next to Print on every report and list with an export bar: logo, summary, page numbers, date and tenant.
+- **A daily reminder while Get Started is not complete**: the open required steps, why each matters and a button to each,
+  to the alert recipients; it stops by itself when the required steps are done.
+- **Environment report (Operations > Environment report).** An architecture and security report of your PIM Manager environment, read live:
+  every identity it uses by name and id, each identity's permissions marked expected / missing / extra against what PIM Manager
+  declares, the Azure resources and their network exposure, features and security settings, data flows, change history and
+  findings with the fix. Export it as a print-ready PDF (cover, contents, page numbers, diagrams) or as JSON. Admin and SuperAdmin
+  only; it names identities and permissions, never a secret value; what PIM Manager cannot read is marked not readable.
+- **The update ring in the header is calm: just the ring and the version.** The header shows `ring N · <version>` and
+  nothing else -- no "failed", "behind", "held" or "pending" flag. The full update picture stays on the Jobs page, worded
+  calmly: a check that did not complete says PIM keeps running its version; an environment running a newer version
+  than its ring approves is shown as up to date (green).
+- **Fix: an environment ahead of its update ring is no longer reported as a failed update.** When an environment runs a
+  newer version than its ring approves (rolled ahead on purpose), the nightly update now records "ahead", changes
+  nothing -- it still never rolls backward by itself, and nothing is downloaded or built -- and ends successfully.
+- **Fix: moving an environment between update rings no longer blocks its updates.** The protection against replayed
+  update manifests is now kept per ring, because release sequences are numbered per ring. A value recorded before this
+  release whose ring is unknown is never guessed: the update stops with a "needs a look" note naming the one setting to
+  change, instead of a failure.
+- **Fix: a held environment no longer tries to move to the version pinned at install** when it is managed by an update ring.
+- **Drift: an extra now has three clear choices, and Apply now never touches one.** An item that is in the tenant but not
+  in PIM (for example a group your own infrastructure code creates with the PIM naming prefix) offers **Import into PIM**
+  (stage the PIM row that defines the existing object -- a group is adopted by its exact name, never created a second
+  time), **Delete** (remove it from the tenant: a queued removal, or for a whole group its staged retirement, with a
+  warning for tier-0 groups and every existing guard and approval) and **Ignore** (hide it, listed and reversible). "Keep"
+  is renamed Import into PIM. **Apply now** fixes missing and changed items only: ticked extras are left out of what it
+  sends, no question is asked, and the page says to choose Import, Delete or Ignore for them. Nothing was ever deleted by
+  Apply now -- it queues a create/update reconcile that removes nothing. Pending changes and the change queue now label
+  each entry **IMPORT** (green) or **DELETE** (red), so the two can no longer be confused.
+- **A managed tenant's own groups and access are never overwritten by the managing tenant.** When a managed tenant
+  already has a group, nesting, role binding or membership with the same key as one the managing tenant replicates
+  (for example because both imported the same permission template), the pull now leaves the local row exactly as it is,
+  never takes it over and never removes it later, and reports it as "deferred: held locally". This now covers every
+  group type, including process, project and cross-org groups. The PIM Manager refuses a local group that reuses a
+  managing-tenant group's tag or name ("extend it locally instead"), the validator reports the same group defined twice
+  as an error, rows a template adds on a managing-tenant group are marked local, and the v1 to v2 import keeps the rows
+  the managing tenant sent.
+- **Fix: new groups are no longer created role-assignable by default.** Following Microsoft's guidance, a group is created
+  role-assignable only when it needs to be: a permission group that holds an Entra ID role (then locked to Yes), or a job
+  role / department / organisation / project / cross-org group on Tier 0 or nested into a permission group holding a
+  Tier-0 Entra ID role. Every other group -- for example a Tier 1 department group -- defaults to No. The wizards show the
+  default with a one-line reason and follow Tier, Type and nesting live until you change the value yourself; a group
+  definition that leaves the setting blank follows the same rule when it is created. Existing groups are never changed
+  (Entra cannot change this setting on a group that exists).
+- **The new direct group wizard is titled for the group you create** -- "New department group", "New organisation group",
+  "New project group", "New cross-org group" or "New role group" -- and the title follows the Type of group as you change it.
+- **A role-assignable check in validation.** It reports an Entra-role group that is not role-assignable (error), a group
+  nested into a Tier-0 role-assignable group without being role-assignable itself (warning, with a one-click fix on its
+  definition), role-assignable Tier 1/2 groups that need not be (information), how many role-assignable groups are defined
+  against the tenant's limit of 500 (a warning from 80% and over it), and an Entra-role elevation group without
+  approval (warning).
+- **Operational policy now takes effect.** "Require MFA on activation", "Max activation duration" and "Max eligibility
+  duration" are applied by the engine on top of every policy template, on the groups and roles PIM Manager manages: MFA is
+  added to activation checks that lack it, and a longer activation or eligibility is shortened to the maximum. They never
+  loosen a template, and the defaults change none of the shipped templates. The five values on that card that nothing could
+  use (default activation duration and the four connection-check values) are removed.
+  **Upgrade note:** if one of your own policy templates sets activation checks without MFA, the next engine run adds MFA to
+  the policies that use it (through the usual policy-change safety checks). Switch "Require MFA on activation" off first if
+  that is not wanted.
+- **Demo mode: an unreadable demo group no longer locks out administrators.** If the demo guest group cannot be read,
+  nobody is treated as a demo viewer (everyone keeps their own role); Home says so.
+- **A blank naming pattern is refused when you save it**, and a blank one already in the store no longer stops the engine:
+  the shipped default is used for it, with a warning in every run and on Home.
+- **A page switched off in Settings > Features is really off** -- also when opened from a link -- and the server refuses
+  the requests that belong only to that page.
+- **"Teams / webhook alerting" now switches the webhook on and off.** It is on by default, so a webhook that posts today keeps
+  posting.
+- **"MSP downlink / fan-out" now stops the real replication** (the publish on a managing tenant, the pull on a managed tenant)
+  when switched off; the run is recorded as held and Home says so. It is on by default, so replication that runs today keeps
+  running.
+- **Access is never left on past its window:** a missing or wrong request-portal store, or the portal being switched off, no
+  longer stops the step that disables an account (and removes an ad-hoc membership) when its window ends.
+- **Offboarding after an admin domain change** finds an admin account that was created at an earlier admin domain; PIM
+  remembers the domains used before and the account's id once found.
+- **Clearing the email redirect takes effect at once** in the running PIM Manager (it used to need a restart).
+
 ## 2.4.537 -- 2026-10-09
 
 - **A managed tenant can be installed from Azure Cloud Shell.** The install steps that used Windows PowerShell now run under

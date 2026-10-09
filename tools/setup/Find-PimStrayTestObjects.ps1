@@ -1,9 +1,13 @@
 ﻿#Requires -Version 5.1
+
 <#
 .SYNOPSIS
-  SEC-14 -- find TEST-HARNESS objects left behind in a tenant. READ-ONLY. Deletes nothing.
+  Finds groups and administrative units left behind by test runs (names starting with a test marker) in a tenant, and
+  reports the directory roles they hold and who are their members and owners. Read-only: it changes nothing.
 
 .DESCRIPTION
+  SEC-14 -- find TEST-HARNESS objects left behind in a tenant. READ-ONLY. Deletes nothing.
+
   On 2026-06-14 a live marker harness ran against the PRODUCTION tenant and left
   332 groups + 16 administrative units holding 240 Entra directory-role assignments --
   Global Administrator among them -- for 77 DAYS. Nothing detected it. The operator found it
@@ -41,8 +45,12 @@
   READ-ONLY BY CONSTRUCTION -- it issues GETs only. Cleanup is a separate, deliberate act:
   tests\live\Manage-PimCoreEngineTest.ps1 -Cleanup. Detection and deletion are kept apart on
   purpose: a sweep that could delete would eventually be run by someone who meant only to look.
+  -WhatIf is accepted (12.7) and changes nothing: the run is read-only either way.
+
+.LINK
+  https://invardia.com/docs/pim/scripts/Find-PimStrayTestObjects/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [string[]]$Marker = @('PIMCOREENGINE-', 'PIMTEST-'),
     [switch]$FailIfFound
@@ -51,6 +59,10 @@ $ErrorActionPreference = 'Stop'
 $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # tools\setup -> tools -> <solution root>
 . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Find-PimStrayTestObjects'
+try {
+if ($WhatIfPreference) { Write-Host 'What if: this script is read-only -- it runs the same with and without -WhatIf and changes nothing.' -ForegroundColor Yellow }
 
 function Line($m, $c = 'Gray') { Write-Host $m -ForegroundColor $c }
 
@@ -115,3 +127,4 @@ Line ("    tests\live\Manage-PimCoreEngineTest.ps1 -Cleanup   (deletes ONLY mark
 
 if ($FailIfFound) { exit 3 }
 exit 0
+} finally { Stop-PimScriptRun -Script 'Find-PimStrayTestObjects' }

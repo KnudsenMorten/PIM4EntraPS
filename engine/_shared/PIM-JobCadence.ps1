@@ -396,6 +396,32 @@ function Complete-PimJobCadenceRun {
     return $done
 }
 
+function Resolve-PimMspDownlinkSwitch {
+    <#
+      🔴 GATE-1 (owner-approved 2026-10-09, PIM REQUIREMENTS §100.3) -- PURE. Does the 'msp.downlink' switch (Settings >
+      Features & edition, pim.Settings 'FeatureGates' = { gates: { 'msp.downlink': bool } }) allow the REAL pull
+      (downlink-job-entry.ps1) / publish (publish-job-entry.ps1)? It used to gate only the placeholder msp-pull tick job.
+        * a STORED false (bool, or the text false/0/no/off) = OFF: no pull / no publish, recorded as 'held' with the reason;
+        * stored true, nothing stored, or an unreadable value = ON -- exactly what every existing install did before, so
+          nothing switches off on upgrade (the catalog default is ON too);
+        * a store that cannot be read = ON, loudly: the pull/publish is signature-verified and safe to repeat, and the
+          cadence gate already decided the same way for the same store.
+      Returns @{ run; reason; explicit }.
+    #>
+    param([AllowNull()][object]$FeatureGatesRaw, [string]$StoreError = '')
+    if ("$StoreError".Trim()) { return @{ run = $true; explicit = $false; reason = "the msp.downlink switch could not be read ($StoreError) -- running as before" } }
+    $r = $FeatureGatesRaw
+    if ($r -is [string]) { $s = "$r".Trim(); if (-not $s) { $r = $null } else { try { $r = $s | ConvertFrom-Json } catch { $r = $null } } }
+    if ($r -is [string]) { try { $r = $r | ConvertFrom-Json } catch { $r = $null } }   # a JSON string literal holding the JSON
+    $gates = Get-PimJobCadenceValue -Object $r -Key 'gates'
+    if ($null -eq $gates) { $gates = $r }
+    $v = Get-PimJobCadenceValue -Object $gates -Key 'msp.downlink'
+    if ($null -eq $v) { return @{ run = $true; explicit = $false; reason = 'msp.downlink is not set (default ON)' } }
+    $on = if ($v -is [bool]) { [bool]$v } elseif ("$v".Trim() -match '^(?i)(false|0|no|off)$') { $false } else { $true }
+    if ($on) { return @{ run = $true; explicit = $true; reason = 'msp.downlink is ON' } }
+    return @{ run = $false; explicit = $true; reason = "msp.downlink is switched OFF (Settings > Features & edition: 'MSP downlink / fan-out') -- nothing is pulled or published until it is switched on" }
+}
+
 function Get-PimJobCadenceSkipFromLog {
     <# PURE. Did an execution's log end in a gate skip? @{ skipped; code; line } (the LAST marker line wins). #>
     param([AllowNull()][string]$LogText)
@@ -487,7 +513,9 @@ function Get-PimPublishJobControlViewSql {
       could not read them and every bundle shipped none.
     #>
     $d = (Get-PimJobCadenceDefinition -Job 'publish')
-    $v1 = "CREATE OR ALTER VIEW pim.vw_PublishJobControl AS SELECT Name, ValueJson, UpdatedUtc FROM pim.Settings WHERE Name IN (N''$($d.scheduleKey)'', N''$($d.runNowKey)'', N''$($d.lastRunKey)'', N''License'', N''DeploymentRings'', N''DownlinkIntents'')"
+    # GATE-1 (2026-10-09): + 'FeatureGates' -- the msp.downlink switch the publish job now obeys (the on/off map of the optional
+    # features; no secret, no identity).
+    $v1 = "CREATE OR ALTER VIEW pim.vw_PublishJobControl AS SELECT Name, ValueJson, UpdatedUtc FROM pim.Settings WHERE Name IN (N''$($d.scheduleKey)'', N''$($d.runNowKey)'', N''$($d.lastRunKey)'', N''License'', N''DeploymentRings'', N''DownlinkIntents'', N''FeatureGates'')"
     $v2 = "CREATE OR ALTER VIEW pim.vw_PublishJobLastRun AS SELECT Name, ValueJson, UpdatedUtc FROM pim.Settings WHERE Name = N''$($d.lastRunKey)'' WITH CHECK OPTION"
     return ("IF OBJECT_ID(N'pim.Settings') IS NULL THROW 50001, 'pim.Settings does not exist in this store -- the Manager has not initialised it', 1;`n" +
             "EXEC (N'$v1');`nEXEC (N'$v2');")

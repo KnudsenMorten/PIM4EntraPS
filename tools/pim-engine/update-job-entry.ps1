@@ -108,16 +108,22 @@ $script:PimRunningVersion     = ''
 function Send-PimUpdateOutcome {
     param(
         [ValidateSet('none','built','rolled','schema','failed')][string]$Action = 'none',
-        [ValidateSet('ok','failed','skipped')][string]$Outcome = 'ok',
+        # 2026-10-09: 'ahead' (runs a newer version than its ring approves -- healthy, nothing changed) and 'attention'
+        # (stopped on an operator decision, e.g. the replay watermark's ring is unknown) are recorded as such in the
+        # environment's own state, so the Manager never paints them as a failed update.
+        [ValidateSet('ok','failed','skipped','ahead','attention')][string]$Outcome = 'ok',
         [string]$ToVersion, [string]$ErrorText
     )
     if ($script:PimTelemetrySent) { return }        # one record per run, never two
     $script:PimTelemetrySent = $true
+    # The vendor telemetry keeps its closed vocabulary: ahead = a good run with nothing to do ('ok'); attention is still
+    # something an operator has to act on, so Invardia sees it ('failed', with the actionable text).
+    $telOutcome = switch ($Outcome) { 'ahead' { 'ok' } 'attention' { 'failed' } default { $Outcome } }
     try {
         if (-not (Get-Command New-PimUpdateTelemetryRecord -ErrorAction SilentlyContinue)) { return }
         $rec = New-PimUpdateTelemetryRecord -Environment $rg -Ring "$($env:PIM_UPDATE_RING)" `
                     -FromVersion "$($env:PIM_UPDATE_LAST_BUILT)" -ToVersion $ToVersion `
-                    -Action $Action -Outcome $Outcome -ErrorText $ErrorText `
+                    -Action $Action -Outcome $telOutcome -ErrorText $ErrorText `
                     -DurationSeconds ([int]([datetime]::UtcNow - $script:PimUpdateStartedUtc).TotalSeconds)
         [void](Send-PimUpdateTelemetry -Record $rec -Log { param($m) Say $m 'DarkGray' })
     } catch { }                                      # telemetry can never break the update
@@ -264,12 +270,20 @@ $ring = "$($env:PIM_UPDATE_RING)".Trim()
 # UPDATE-1.7). Everything after the version is known -- build, schema, roll, verify, rollback -- is this job's own,
 # unchanged. PIM-InvardiaUpdate.ps1 has the rules.
 $updSource = "$($env:PIM_UPDATE_SOURCE)".Trim().ToLowerInvariant()
-$script:PimInvardiaContext = ''; $script:PimInvardiaSequence = 0; $script:PimInvardiaApplied = 0
+$script:PimInvardiaContext = ''; $script:PimInvardiaSequence = 0; $script:PimInvardiaApplied = 0; $script:PimInvardiaAhead = $false
 if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     Say "PIM_UPDATE_HOLD=1 -- this environment is frozen; the ring channel is not consulted." 'Yellow'
     # §71.43 -- a held environment has NO approved version to show, and saying so is the point: the
     # Manager must not display the last version some earlier run happened to read as if it still applied.
     $script:PimRingApprovedReason = 'this environment is HELD (PIM_UPDATE_HOLD=1) -- the ring channel was not consulted'
+    # 2026-10-09: a ring-managed environment never moves on PIM_UPDATE_TARGET_VERSION. The install writes that pin
+    # (Invoke-PimDeployAll / Confirm-PimInstall -> Deploy-PimUpdateJob -TargetVersion = the installed tag) and every ring
+    # branch below replaces it -- but a HELD ring environment used to fall through to that stale install pin and try to
+    # roll to it (measured: two ring-2 environments still carry 2.4.531 from their install while running 2.4.537).
+    if ($ring -or $updSource -eq 'invardia') {
+        if ($targetVer) { Say "  PIM_UPDATE_TARGET_VERSION=$targetVer is ignored: a ring-managed environment moves only on its ring, and a held one not at all." 'DarkGray' }
+        $targetVer = ''
+    }
 } elseif ($updSource -eq 'invardia') {
     . (Join-Path $solRoot 'engine\_shared\PIM-LicenceRequest.ps1')   # Invoke-PimLicenceHttp (5.1 + 7, a non-2xx is a status)
     . (Join-Path $solRoot 'engine\_shared\PIM-InvardiaUpdate.ps1')
@@ -294,12 +308,31 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
     $licText = ConvertTo-PimInvardiaLicenceText -Value $(try { Get-PimSqlSetting -ConnectionString $csInv -Name 'License' } catch { $null })
     $invKey = Resolve-PimInvardiaInstallKey -GetSetting { param($n) Get-PimSqlSetting -ConnectionString $csInv -Name $n }
     $invBase = ''; try { $invBase = "$(Get-PimSqlSetting -ConnectionString $csInv -Name 'LicenceRequestBaseUrl')".Trim() } catch { }
-    $seqTmp = 0; if ([int]::TryParse("$($env:PIM_UPDATE_INVARDIA_SEQ)", [ref]$seqTmp)) { $script:PimInvardiaApplied = $seqTmp }
+    # 2026-10-09 -- the replay watermark is PER RING (PIM_UPDATE_INVARDIA_SEQ_R<ring>): Invardia numbers sequences per ring,
+    # so one value for the environment refused the home ring's lower sequence forever after a ring move. The legacy single
+    # value is honoured only with evidence of its ring (Resolve-PimInvardiaAppliedSequence has the migration rules).
+    $seqRes = Resolve-PimInvardiaAppliedSequence -JobEnv ([Environment]::GetEnvironmentVariables()) -Ring $ring
+    $script:PimInvardiaApplied = [int]$seqRes.applied
+    Say "Invardia replay watermark: $($seqRes.reason)" 'DarkGray'
+    # The highest version this environment is known to have reached: a manifest below it is AHEAD (nothing fetched).
+    $highestKnown = ''
+    $hk = @(@("$($script:PimRunningVersion)", $lastBuilt, "$($env:PIM_UPDATE_LAST_GOOD)") | ForEach-Object { ConvertTo-PimUpdateVersion -Value $_ } | Where-Object { $_ } | Sort-Object -Descending)
+    if ($hk.Count) { $highestKnown = "$($hk[0])" }
     $t = Get-PimInvardiaUpdateTarget -Http { param($m, $u, $b, $h) Invoke-PimLicenceHttp -Method $m -Url $u -Body $b -Headers $h } `
             -InstallKey $invKey -LicenceText $licText -BaseUrl $invBase -AppliedSequence $script:PimInvardiaApplied `
-            -RunningVersion "$($script:PimRunningVersion)" -LastBuiltVersion $lastBuilt -Ring $ring   # UPDATE-1.7: this environment's own ring
-    Say "Invardia: $($t.reason)" $(if ($t.ok) { 'DarkGray' } else { 'Red' })
+            -RunningVersion "$($script:PimRunningVersion)" -LastBuiltVersion $lastBuilt -Ring $ring `
+            -UnprovenLegacySequence ([int]$seqRes.unprovenLegacy) -HighestKnownVersion $highestKnown `
+            -AllowDowngrade:("$($env:PIM_UPDATE_ALLOW_DOWNGRADE)".Trim() -eq '1')   # UPDATE-1.7: this environment's own ring
+    Say "Invardia: $($t.reason)" $(if ($t.ok) { 'DarkGray' } elseif ($t.attention) { 'Yellow' } else { 'Red' })
     $script:PimRingApproved = "$($t.version)"; $script:PimRingApprovedReason = "Invardia: $($t.reason)"
+    $script:PimInvardiaAhead = [bool]$t.ahead
+    if ($t.attention) {
+        # 🔒 NEEDS ATTENTION, not a failure: nothing moved, PIM keeps running, and the reason names the one setting to
+        # change. Exit 0 -- an operator decision is not a broken updater (a Failed execution would also count toward the
+        # watchdog's "restore the last-known-good updater image", which cannot fix a watermark).
+        Send-PimUpdateOutcome -Action 'none' -Outcome 'attention' -ErrorText "Invardia: $($t.reason)"
+        exit 0
+    }
     if (-not $t.ok) {
         # 🔒 Refused or failed = NOTHING moves, and the run is FAILED so the fleet view shows it (never a quiet night).
         Send-PimUpdateOutcome -Action 'none' -Outcome 'failed' -ErrorText "Invardia: $($t.reason)"
@@ -353,9 +386,9 @@ if ("$($env:PIM_UPDATE_HOLD)".Trim() -eq '1') {
 
 $plan = Get-PimUpdateSourcePlan -TargetVersion $targetVer -SourceUrlTemplate $srcUrlTpl `
                                 -LastBuiltVersion $lastBuilt -LoginServer $loginServer -Repository $imageRepo
-Say "plan: $($plan.action) -- $($plan.reason)" 'DarkGray'
 
 if ($plan.action -eq 'none') {
+    Say "plan: $($plan.action) -- $($plan.reason)" 'DarkGray'
     # 🪤 NOT AN ERROR, AND NOT SILENCE EITHER. An environment whose ring has approved nothing new
     # is the NORMAL nightly outcome. Saying so is what makes a quiet log trustworthy.
     Say 'no approved target for this ring. Nothing to do.' 'DarkGray'
@@ -379,6 +412,24 @@ $dg = Get-PimUpdateDowngradeDecision -TargetVersion "$($plan.version)" -RunningV
 # so it may go down. Never on a first pull (nothing applied yet = no proof of what this environment had) and never on a
 # replay (a lower sequence is refused before this point).
 if ($dg.note) { Say "  $($dg.note)" 'DarkGray' }
+# ---- 2026-10-09 -- AHEAD OF THE RING IS HEALTHY, NOT A FAILURE ------------------------------------------------------
+# MEASURED (2026-10-09 03:00 UTC, two ring-2 environments the operator had rolled ahead through ring 1):
+#     [update] REFUSING TO ROLL BACKWARD: ring 2 approves 2.4.535, but this environment is on 2.4.537
+# -> outcome 'failed', exit 1, and the Manager's update badge turned red at customers. The environment was AHEAD on
+# purpose. Owner's rule: green when running the latest approved version or newer; red only for a real failure.
+# 🔒 BUG-162 is kept exactly: it never rolls backward unattended. The run records 'ahead', changes NOTHING -- no
+# fetch, no build (this check sits BEFORE the build step and before the plan is announced), no roll -- and exits 0.
+# An UNREADABLE target ('unknown' direction) is still refused and still a failure: that is not "ahead", it is unprovable.
+$isAhead = [bool]$script:PimInvardiaAhead -or (-not $dg.allowed -and "$($dg.direction)" -eq 'backward')
+if ($isAhead) {
+    $aheadFrom = if ("$($dg.from)".Trim()) { "$($dg.from)".Trim() } else { $runningVer }
+    $ringWord = if ($ring) { "ring $ring" } else { 'this environment''s pin' }
+    Say "ahead of ring: $ringWord approves $($plan.version); this environment runs $aheadFrom (newer). Nothing to do." 'Green'
+    Say '  It is NOT rolled back (an unattended update never goes backward -- BUG-162), and nothing is fetched or built.' 'DarkGray'
+    Say "  It takes the ring's next release once that is newer than $aheadFrom." 'DarkGray'
+    Send-PimUpdateOutcome -Action 'none' -Outcome 'ahead'
+    exit 0
+}
 if (-not $dg.allowed) {
     Say $dg.message 'Red'
     Say "  $($dg.detail)" 'Red'
@@ -389,6 +440,7 @@ if ($dg.overridden) {
     Say $dg.message 'Yellow'
     Say "  $($dg.detail)" 'Yellow'
 }
+Say "plan: $($plan.action) -- $($plan.reason)" 'DarkGray'
 
 if ($plan.action -eq 'build') {
     $ctx    = Join-Path ([IO.Path]::GetTempPath()) ("pim-src-{0}.tar.gz" -f $plan.version)
@@ -911,11 +963,19 @@ if ($selfJob) {
             } catch { Say "  could not record the last-known-good image: $($_.Exception.Message)" 'Yellow' }
         }
         # §95.4: the Invardia sequence this environment APPLIED -- a lower one is refused from now on (no replay).
-        if ($script:PimInvardiaSequence -gt $script:PimInvardiaApplied) {
+        # 2026-10-09: PER RING -- PIM_UPDATE_INVARDIA_SEQ_R<ring> is the watermark this ring's next pull is checked
+        # against. The legacy pair (PIM_UPDATE_INVARDIA_SEQ + PIM_UPDATE_INVARDIA_SEQ_RING) is written beside it, so the
+        # single value always says which ring it belongs to from now on (an older updater image still reads the value).
+        $seqVar = Get-PimInvardiaSequenceVariableName -Ring $ring
+        if ($script:PimInvardiaSequence -gt $script:PimInvardiaApplied -and $seqVar) {
             try {
                 [void](Set-PimAcaJobEnvValue -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob `
+                         -VariableName $seqVar -Value "$($script:PimInvardiaSequence)")
+                [void](Set-PimAcaJobEnvValue -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob `
                          -VariableName 'PIM_UPDATE_INVARDIA_SEQ' -Value "$($script:PimInvardiaSequence)")
-                Say "  recorded the applied Invardia sequence: $($script:PimInvardiaSequence)" 'DarkGray'
+                [void](Set-PimAcaJobEnvValue -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob `
+                         -VariableName 'PIM_UPDATE_INVARDIA_SEQ_RING' -Value "$ring")
+                Say "  recorded the applied Invardia sequence for ring $ring`: $($script:PimInvardiaSequence) ($seqVar)" 'DarkGray'
             } catch { Say "  could not record the applied Invardia sequence (the same release is simply seen again next run): $($_.Exception.Message)" 'Yellow' }
         }
         Say "stamping $selfJob (takes effect on the NEXT run, by design)"

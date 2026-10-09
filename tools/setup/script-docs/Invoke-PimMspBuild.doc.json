@@ -1,0 +1,72 @@
+{
+  "script": "Invoke-PimMspBuild.ps1",
+  "product": "pim",
+  "title": "Build a managing or managed tenant (MSP build)",
+  "purpose": "Build a managing tenant (an MSP's own PIM Manager that publishes a signed baseline) or a managed tenant (a customer's PIM Manager that pulls it) end to end from one configuration file of ids and names. Without -Apply it only prints the plan.",
+  "whenToRun": "When an MSP sets up its managing tenant, and when a managed tenant is set up (the guided install runs it for a managed tenant with an enrollment key). Order: build the managing tenant, build the managed tenant (it prints its subnet id), add that id to the managing tenant's config and re-run -From network-<n>. Run it without -Apply (or with -WhatIf) first.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Invoke-PimMspBuild.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Owner", "scope": "the target subscription", "why": "The hosting step creates the resources and assigns Azure roles to the identities (Contributor + User Access Administrator is the equivalent)." },
+    { "kind": "entraRole", "name": "Privileged Role Administrator", "scope": "tenant", "why": "Microsoft Graph application permissions for the tick, Manager, publish and pull identities; members of the role-assignable SQL admin group. Global Administrator also works." },
+    { "kind": "entraRole", "name": "Application Administrator", "scope": "tenant", "why": "The Manager's sign-in app registration and the Invardia Support app's ownerships (Application.ReadWrite.OwnedBy)." },
+    { "kind": "entraRole", "name": "Groups Administrator", "scope": "tenant", "why": "The SQL admin group and the Manager's members group." },
+    { "kind": "exchange", "name": "Exchange Administrator", "scope": "Exchange Online (optional)", "why": "Only when the mail sender is provisioned by this build." },
+    { "kind": "other", "name": "Signed in to az as yourself (no deployIdentity in the config), or the certificate deploy identity named in the config", "scope": "the tenant and subscription in the config", "why": "The build refuses another tenant, another subscription, a signed-in service principal, and any variable that would make a step authenticate as somebody else. The config may hold no secret." }
+  ],
+  "changes": [
+    { "target": "Invardia", "action": "create", "object": "the enrollment of this managed tenant (only with an enrollment key; step enroll)", "why": "Invardia creates the environment, signs the licence, issues an install key and returns the managing tenant's bundle address and signing key ids.", "undo": "Ask the managing company / Invardia support to remove the environment." },
+    { "target": "Azure", "action": "create", "object": "the whole hosting (step hosting = Invoke-PimDeployAll.ps1 -Scenario S3 or S6): resource group, network, registry, Log Analytics, SQL, Container Apps environment, the Manager, the tick / bootstrap / updater jobs, the sign-in app, the SQL admin group, schema, mail sender, code", "why": "Each tenant runs its own PIM Manager in its own subscription.", "undo": "Delete the resource group; see https://invardia.com/docs/pim/scripts/Invoke-PimDeployAll/ for every object." },
+    { "target": "Azure", "action": "create", "object": "tenant Key Vault + the bootstrap identity's read grant (step keyvault, only when keyVaultName + bootstrapAppId are set)", "why": "The managing tenant's own vault.", "undo": "Delete the vault (soft-delete applies)." },
+    { "target": "Entra ID", "action": "grant", "object": "the tick and Manager identities and the Invardia Support app (step sqlgroup; Initialize-PimSqlAdminGroup.ps1)", "permission": "member of grp-pim-sql-admins (members/$ref)", "scope": "the SQL admin group", "why": "They reach the store through the one admin group.", "undo": "Remove them from the group." },
+    { "target": "Microsoft Graph", "action": "grant", "object": "the tick identity (engine set) and the Manager identity (read-only set) (step access; Initialize-PimHostingAccess.ps1)", "permission": "Microsoft Graph application permissions: the engine set incl. RoleManagement.ReadWrite.Directory, AppRoleAssignment.ReadWrite.All, Application.Read.All, RoleManagement.ReadWrite.Defender, DeviceManagementRBAC.ReadWrite.All, AccessReview.Read.All (appRoleAssignments); the read-only set for the Manager; never a tenant-wide Mail.Send", "scope": "tenant", "why": "The engine applies access; the Manager reads.", "undo": "Remove the app role assignments." },
+    { "target": "Azure RBAC", "action": "grant", "object": "the Manager identity", "permission": "Container Apps Jobs Operator", "scope": "the tick job", "why": "The Manager may start the engine (Run now / commit).", "undo": "Remove the role assignment." },
+    { "target": "Azure RBAC", "action": "grant", "object": "the tick identity", "permission": "Reader (+ User Access Administrator only when opted in)", "scope": "tenant root management group", "why": "Azure discovery across subscriptions.", "undo": "Remove the role assignment." },
+    { "target": "Azure SQL", "action": "update", "object": "pim.Settings SchedulerTickJobId, the scenario, the licence + install key (steps access, scenario, licence; Set-PimScenario.ps1, Set-PimLicense.ps1)", "why": "The environment knows its engine job, its role in the MSP pair and its licence.", "undo": "Change them in Settings." },
+    { "target": "Azure SQL", "action": "grant", "object": "the Invardia Support app (step supportaccess when support.appId is set; Grant-PimSupportAccess.ps1)", "permission": "troubleshoot: a contained database user (CREATE USER) with db_datareader + VIEW DEFINITION; setup: also member of grp-pim-sql-admins and owner (owners/$ref) of PIM's own app registrations and groups", "scope": "the PIM database / those objects", "why": "Invardia support can help (and at 'setup' repair).", "undo": "Grant-PimSupportAccess.ps1 -Remove." },
+    { "target": "Azure SQL", "action": "create", "object": "managing tenant registry schema: platform.Tenants, pim.CentralAdmins, targeting columns; one row per managed tenant with its ring and tags (steps registry, register-<n>; Initialize-PimMasterRegistry.ps1, Register-PimManagedTenant.ps1)", "why": "Which tenants the managing tenant publishes to.", "undo": "Remove the tenant rows in the Manager." },
+    { "target": "Azure", "action": "create", "object": "managing tenant: storage service endpoint on its subnet, the signed-baseline storage account + container (anonymous blob read; its own subnet allowed, then firewall Deny), a storage network rule per managed tenant subnet (steps publishnetwork, storage, network-<n>; New-PimBaselineStorage.ps1, Set-PimBaselineNetworkAccess.ps1)", "why": "Public-but-signed: managed tenants read the bundle over a network the firewall names; trust is the signature.", "undo": "Delete the storage account; remove the network rules." },
+    { "target": "Azure RBAC", "action": "grant", "object": "the publish job's managed identity (and the signed-in builder for the first upload)", "permission": "Storage Blob Data Contributor", "scope": "the baseline container", "why": "The publish job writes the signed bundle.", "undo": "Remove the role assignment." },
+    { "target": "Azure", "action": "create", "object": "a non-exportable RSA signing key in Key Vault (step signingkey; New-PimBaselineSigningKey.ps1); the key id is printed for the managed tenants to pin", "why": "The bundle is signed; managed tenants refuse a bundle that does not verify.", "undo": "Disable / delete the key (managed tenants then refuse new bundles)." },
+    { "target": "Azure RBAC", "action": "grant", "object": "the publish job's managed identity (and the builder to read the key)", "permission": "Key Vault Crypto User (Key Vault Reader for the builder; Key Vault Administrator or Key Vault Crypto Officer are what the person needs to create the key)", "scope": "the signing key / vault", "why": "The publish job signs with the key; nobody can export it.", "undo": "Remove the role assignments." },
+    { "target": "Azure", "action": "create", "object": "the publish job ca-pim-publish (daily + on demand, system identity) and its first run (steps publishjob, publish; Deploy-PimBaselinePublishJob.ps1, Start-PimBaselinePublish.ps1)", "why": "The managing tenant publishes the signed baseline in the cloud, no signing host.", "undo": "Delete the job." },
+    { "target": "Azure SQL", "action": "grant", "object": "the publish job's identity", "permission": "a database user with db_datareader (db_datawriter / db_ddladmin / db_owner are refused for it)", "scope": "the managing tenant's PIM database", "why": "It reads what to publish, nothing else.", "undo": "DROP USER for the publish job." },
+    { "target": "Azure", "action": "create", "object": "managed tenant: storage service endpoint on its subnet (the subnet id is printed for the managing tenant), the pull job (plain blob URL, signature-verified, system identity) with AcrPull on the registry (steps pullnetwork, downlink; Initialize-PimBaselinePullNetwork.ps1, Deploy-PimDownlinkJob.ps1)", "why": "The managed tenant pulls the bundle; retraction is report-only.", "undo": "Delete the pull job; remove the service endpoint." },
+    { "target": "Microsoft Graph", "action": "grant", "object": "the pull job's managed identity", "permission": "the engine set of Microsoft Graph application permissions (incl. RoleManagement.ReadWrite.Directory) + member of grp-pim-sql-admins", "scope": "tenant / the SQL admin group", "why": "It applies the managing tenant's baseline in this tenant.", "undo": "Remove the app role assignments and the membership." },
+    { "target": "Azure", "action": "create", "object": "private networking options (only when configured): the SQL build window AllowSetupHost (opened and closed by the build), a private endpoint for the bundle store, privatelink DNS (Set-PimSqlBuildWindow.ps1, Set-PimBaselinePrivateEndpoint.ps1, Initialize-PimBaselinePrivateDns.ps1, Close-PimSqlSetupHostRule.ps1)", "why": "Private stores are reached only while the build needs them.", "undo": "Remove the private endpoint / DNS records; the firewall rule is removed by the build's last step." },
+    { "target": "Invardia", "action": "update", "object": "self-service managed tenants: the bundle facts (address, signing key ids) and a managed tenant's pull subnet id (steps enrollment, enrollreport; Publish-PimEnrollmentFacts.ps1)", "why": "Invardia hands them to the other side of the pair.", "undo": "Ask Invardia support." }
+  ],
+  "parameters": [
+    { "name": "Role", "required": true, "default": null, "help": "Master (managing tenant, S3) or Slave (managed tenant, S6)." },
+    { "name": "ConfigPath", "required": true, "default": null, "help": "The build config: ids and names only (no secret is accepted)." },
+    { "name": "Apply", "required": false, "default": false, "help": "Build. Without it (or with -WhatIf) the plan and the operator steps are printed." },
+    { "name": "From", "required": false, "default": null, "help": "Resume at this step id." },
+    { "name": "UpdateSourceUrl", "required": false, "default": null, "help": "The release feed URL template (a credential: never printed or saved)." },
+    { "name": "UpdateSourceUrlFile", "required": false, "default": "$env:PIM_UPDATE_SOURCE_URL_FILE", "help": "A one-line file holding the release feed URL." },
+    { "name": "EnrollmentKey", "required": false, "default": null, "help": "Managed tenant: the Invardia enrollment key (never printed or stored)." },
+    { "name": "InvardiaBaseUrl", "required": false, "default": "https://invardia.com", "help": "Invardia address for the enrollment." },
+    { "name": "EnrollmentTimeoutSeconds", "required": false, "default": 900, "help": "How long to wait for the signed licence." },
+    { "name": "ImageTag", "required": false, "default": "the config's imageTag, else the running image on a resume", "help": "The image tag the build uses." },
+    { "name": "InvardiaInstallToken", "required": false, "default": "$env:INVARDIA_INSTALL_TOKEN", "help": "Tracked install: every step is reported to Invardia." },
+    { "name": "InvardiaInstallEventsUrl", "required": false, "default": "https://invardia.com/api/install/events", "help": "Where tracked steps are reported." },
+    { "name": "OnStep", "required": false, "default": null, "help": "Callback per step event (the guided install's reporter)." }
+  ],
+  "readsOnly": [
+    "The config (validated: no key or value may look like a credential), the plan (engine/msp/PIM-MspBuild.ps1), the signed-in identity (az account show, a token's tenant and user-ness), the managed identities' object ids when a step needs them, the running Manager image on a resume.",
+    "Directory roles named only to say who must run a step it cannot: Global Administrator, Privileged Role Administrator, Application Administrator, Groups Administrator, Exchange Administrator.",
+    "The end-of-install check (Confirm-PimInstall.ps1) reads every result back; a required line that would fail ends the build with its fix."
+  ],
+  "network": [
+    "management.azure.com",
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+    "<server>.database.windows.net (TCP 1433)",
+    "<storage>.blob.core.windows.net (the signed baseline)",
+    "<vault>.vault.azure.net (the signing key)",
+    "invardia.com (enrollment, enrolled-tenant facts, tracked install)",
+    "the Azure CLI extension index (azcliextensionsync.blob.core.windows.net): az installs its 'containerapp' extension once when missing (hosting step) -- az's own download, checked against the index's sha256"
+  ],
+  "whatIf": "Prints the plan (every step with the script it runs, NOT RUNNABLE steps with the reason), the operator steps, and one 'What if:' line per step naming what it would change and in which tenant and subscription. -WhatIf wins over -Apply: no claim at Invardia, no sign-in, nothing created or granted. Each step's own script can be previewed with its -WhatIf.",
+  "undo": "Delete each tenant's resource group (export the database first) and the Entra objects the hosting step created; on a managing tenant also the baseline storage, the signing key and the publish job, and the managed tenants' rows; Grant-PimSupportAccess.ps1 -Remove for the Invardia Support app. See each change's undo.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Invoke-PimMspBuild/"
+}

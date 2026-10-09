@@ -16,6 +16,10 @@
   tools/setup/Test-PimTenantReady.ps1 (which checks no sending identity holds a tenant-wide
   Graph Mail.Send). Dot-sourceable: defines functions only.
 #>
+# 12.7 / 12.10 item 11: the command for the person (New-PimMailSenderCommand) is the save-verify-preview-run form with the
+# documentation link -- built by _PimScriptDoc.ps1, loaded here so EVERY loader of this file has it (Confirm-PimInstall,
+# Invoke-PimDeployAll, Install-PimEngineAppRegistration, Test-PimTenantReady, the mail scripts).
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 
 
 function Get-PimJobManagedIdentityPrincipalId {
@@ -66,7 +70,13 @@ function Resolve-PimMailSendPrincipals {
       REFUSED: the parameter must never become a way to hand a send right to an arbitrary app.
       Returns { principals = @({ kind; appId; objectId; displayName; assignmentName }); reason }.
     #>
-    [CmdletBinding()] param([object[]]$ManagedIdentitySps = @(), [object]$EngineSp)
+    # MAIL-NAMING (100.14, owner 2026-10-09: "companies have their own naming"): the Exchange names follow the company's
+    # mailbox -- -AssignmentNamePrefix (default: the mailbox name) -> '<prefix>-<short id>-MailSend'. The names earlier
+    # releases forced on every tenant ('PIM4EntraPS-MI-<short id>-MailSend', 'PIM4EntraPS-Engine-MailSend') travel along
+    # as legacyAssignmentNames, so an existing assignment is RECOGNISED (adopted), never duplicated.
+    [CmdletBinding()] param([object[]]$ManagedIdentitySps = @(), [object]$EngineSp, [string]$AssignmentNamePrefix = 'PIM-Engine')
+    $pfx = ConvertTo-PimExoNamePart -Value $AssignmentNamePrefix
+    if (-not $pfx) { $pfx = 'PIM-Engine' }
     $out = New-Object System.Collections.Generic.List[object]
     foreach ($sp in @($ManagedIdentitySps | Where-Object { $null -ne $_ })) {
         $type = "$($sp.servicePrincipalType)".Trim()
@@ -79,12 +89,14 @@ function Resolve-PimMailSendPrincipals {
         $oid = "$($sp.id)".Trim()
         $short = $oid.Substring(0, [Math]::Min(8, $oid.Length))
         $out.Add([pscustomobject]@{ kind = 'managed-identity'; appId = "$($sp.appId)".Trim(); objectId = $oid
-                                    displayName = ("PIM4EntraPS Engine MI {0}" -f $short)
-                                    assignmentName = ("PIM4EntraPS-MI-{0}-MailSend" -f $short) })
+                                    displayName = ("{0} sender {1}" -f $pfx, $short)
+                                    assignmentName = ("{0}-{1}-MailSend" -f $pfx, $short)
+                                    legacyAssignmentNames = @(("PIM4EntraPS-MI-{0}-MailSend" -f $short)) })
     }
     if ($out.Count -eq 0 -and $null -ne $EngineSp -and "$($EngineSp.appId)".Trim()) {
         $out.Add([pscustomobject]@{ kind = 'engine-spn'; appId = "$($EngineSp.appId)".Trim(); objectId = "$($EngineSp.id)".Trim()
-                                    displayName = 'PIM4EntraPS Engine'; assignmentName = 'PIM4EntraPS-Engine-MailSend' })
+                                    displayName = ("{0} sender (engine app)" -f $pfx); assignmentName = ("{0}-App-MailSend" -f $pfx)
+                                    legacyAssignmentNames = @('PIM4EntraPS-Engine-MailSend') })
     }
     if ($out.Count -eq 0) {
         return [pscustomobject]@{ principals = @(); reason = 'no sending identity: pass -ManagedIdentityObjectId (hosted: the tick job''s managed identity), -SubscriptionId/-ResourceGroup/-TickJobName to resolve it, or -EngineAppId for a non-hosted engine' }
@@ -112,28 +124,82 @@ function Select-PimExoMailSendAssignment {
       created -- the send would then be refused with nothing in the setup log to say why.
       Matched by assignee; the assignment Name is used only when the record names no assignee.
     #>
-    [CmdletBinding()] param([object[]]$Assignments = @(), [string]$ScopeName = 'PIM4EntraPS-Sender',
-                            [string[]]$AssigneeIds = @(), [string]$AssignmentName = '')
+    # -AlternateNames (MAIL-NAMING 100.14): the names earlier releases gave the same assignment -- matched like
+    # -AssignmentName, so a legacy-named assignment is adopted rather than created a second time.
+    [CmdletBinding()] param([object[]]$Assignments = @(), [string]$ScopeName = 'PIM-Engine-SendScope',
+                            [string[]]$AssigneeIds = @(), [string]$AssignmentName = '', [string[]]$AlternateNames = @())
     $want = @($AssigneeIds | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
+    $names = @(@($AssignmentName) + @($AlternateNames) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim().ToLowerInvariant() })
     return @(@($Assignments) | Where-Object {
         $null -ne $_ -and "$($_.Role)" -eq 'Application Mail.Send' -and "$($_.CustomResourceScope)" -eq $ScopeName -and (
             ($want -contains "$($_.RoleAssignee)".Trim().ToLowerInvariant()) -or
             ($want -contains "$($_.RoleAssigneeName)".Trim().ToLowerInvariant()) -or
-            (-not "$($_.RoleAssignee)$($_.RoleAssigneeName)".Trim() -and "$AssignmentName".Trim() -and "$($_.Name)" -eq $AssignmentName))
+            (-not "$($_.RoleAssignee)$($_.RoleAssigneeName)".Trim() -and $names.Count -and ($names -contains "$($_.Name)".Trim().ToLowerInvariant())))
     })
+}
+
+function ConvertTo-PimExoNamePart {
+    # PURE. A mailbox name (or a company-given prefix) as a safe part of an Exchange object name: letters, digits, '-'.
+    param([AllowEmptyString()][AllowNull()][string]$Value)
+    return (("$Value".Trim() -replace '[^A-Za-z0-9-]', '-') -replace '-{2,}', '-').Trim('-')
+}
+
+function Test-PimExoObjectName {
+    <# PURE. MAIL-NAMING: a company-given Exchange object name (-ScopeName / -AssignmentNamePrefix). Returns '' or the reason. #>
+    param([AllowEmptyString()][AllowNull()][string]$Value, [string]$What = 'name')
+    $v = "$Value".Trim()
+    if (-not $v) { return '' }
+    if ($v -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$') { return "$What '$v' is not usable as an Exchange object name (letters, digits, space, '.', '_' and '-'; at most 64 characters, starting with a letter or digit)" }
+    return ''
+}
+
+function Test-PimMailboxLocalPart {
+    <# PURE. MAIL-NAMING: the mailbox name the company chose (the part before the @). Returns '' or the reason. #>
+    param([AllowEmptyString()][AllowNull()][string]$Value)
+    $v = "$Value".Trim()
+    if (-not $v) { return 'no mailbox name was given' }
+    if ($v -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$' -or $v -match '\.\.') { return "'$v' is not usable as a mailbox name (letters, digits, '.', '_' and '-'; at most 64 characters, not starting or ending with '.', '_' or '-')" }
+    return ''
 }
 
 function Get-PimMailSenderScopeName {
     <#
-      PURE. The Exchange management scope a sender's send right lives in. The DEFAULT mailbox (PIM-Engine@) keeps the
-      historic 'PIM4EntraPS-Sender', so every existing tenant is unchanged. Any other mailbox -- a second environment in the
-      same tenant (§94: PIM-Engine-r1-pro@) -- gets its own 'PIM4EntraPS-Sender-<mailbox>', because a scope is a tenant
-      singleton and sharing one meant sending as the other environment's mailbox.
+      PURE. MAIL-NAMING (100.14, owner 2026-10-09): the DEFAULT name of the Exchange management scope for a NEW sender --
+      neutral and following the company's mailbox name: '<mailbox>-SendScope' (PIM-Engine@ -> 'PIM-Engine-SendScope').
+      Per mailbox, because a scope is a tenant singleton (§94: sharing one meant sending as another environment's mailbox).
+      An existing tenant's scope is ADOPTED by Resolve-PimMailSenderScope, never renamed or duplicated.
     #>
     param([Parameter(Mandatory)][string]$Sender)
-    $local = ("$Sender" -split '@')[0].Trim()
-    if (-not $local -or $local -ieq 'PIM-Engine') { return 'PIM4EntraPS-Sender' }
-    return ('PIM4EntraPS-Sender-' + ($local -replace '[^A-Za-z0-9-]', '-'))
+    $local = ConvertTo-PimExoNamePart -Value (("$Sender" -split '@')[0])
+    if (-not $local) { $local = 'PIM-Engine' }
+    return ($local + '-SendScope')
+}
+
+function Test-PimLegacyMailSenderScopeName {
+    # PURE. The names earlier releases gave the scope ('PIM4EntraPS-Sender', 'PIM4EntraPS-Sender-<mailbox>').
+    param([AllowEmptyString()][AllowNull()][string]$Name)
+    return ("$Name" -match '^(?i)PIM4EntraPS-Sender(-.+)?$')
+}
+
+function Resolve-PimMailSenderScope {
+    <#
+      PURE. MAIL-NAMING (100.14): WHICH scope this sender's send right lives in, given the scopes that already exist.
+        1. a scope that already restricts to EXACTLY this sender is ADOPTED, whatever it is called (a legacy
+           'PIM4EntraPS-Sender*' first) -- a re-run, or an install from before 2.4.538, keeps its scope and assignments;
+        2. else the company's -ScopeName;
+        3. else the neutral default '<mailbox>-SendScope'.
+      Returns @{ name; adopted; note }.
+    #>
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Sender, [string]$ScopeName = '', [object[]]$Scopes = @())
+    $mine = @(@($Scopes) | Where-Object { $null -ne $_ -and "$($_.Name)".Trim() -and "$($_.RecipientRestrictionFilter)".IndexOf("'$Sender'", [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+    if ($mine.Count) {
+        $pick = @($mine | Where-Object { Test-PimLegacyMailSenderScopeName -Name $_.Name }) + @($mine | Where-Object { -not (Test-PimLegacyMailSenderScopeName -Name $_.Name) })
+        $n = "$($pick[0].Name)".Trim()
+        $note = if ("$ScopeName".Trim() -and "$ScopeName".Trim() -ne $n) { "the existing scope '$n' already restricts to $Sender -- kept (not renamed to '$("$ScopeName".Trim())', never a second scope)" } else { "the existing scope '$n' (restricts to $Sender) is reused" }
+        return [pscustomobject]@{ name = $n; adopted = $true; note = $note }
+    }
+    if ("$ScopeName".Trim()) { return [pscustomobject]@{ name = "$ScopeName".Trim(); adopted = $false; note = '' } }
+    return [pscustomobject]@{ name = (Get-PimMailSenderScopeName -Sender $Sender); adopted = $false; note = '' }
 }
 
 function New-PimMailSenderExoPlan {
@@ -145,8 +211,11 @@ function New-PimMailSenderExoPlan {
     #>
     [CmdletBinding()]
     param([object[]]$ExoServicePrincipals = @(), [object[]]$Scopes = @(), [object[]]$Assignments = @(),
-          [object[]]$Principals = @(), [string]$Sender, [string]$ScopeName = 'PIM4EntraPS-Sender',
+          [object[]]$Principals = @(), [string]$Sender, [string]$ScopeName = '',
           [string]$EngineAppId = '', [string]$EngineObjectId = '', [switch]$RemoveEngineSpnAssignment)
+    # MAIL-NAMING (100.14): no -ScopeName = the scope that already restricts to this sender (adopted), else the neutral
+    # '<mailbox>-SendScope' (Resolve-PimMailSenderScope).
+    if (-not "$ScopeName".Trim()) { $ScopeName = (Resolve-PimMailSenderScope -Sender $Sender -Scopes $Scopes).name }
     $plan = New-Object System.Collections.Generic.List[object]
     foreach ($p in @($Principals)) {
         $known = @(@($ExoServicePrincipals) | Where-Object { $null -ne $_ -and "$($_.AppId)".Trim().ToLowerInvariant() -eq "$($p.appId)".ToLowerInvariant() })
@@ -166,8 +235,7 @@ function New-PimMailSenderExoPlan {
         $flt = "$($existingScope.RecipientRestrictionFilter)"
         if ($flt.Trim() -and $flt.IndexOf("'$Sender'", [StringComparison]::OrdinalIgnoreCase) -lt 0) {
             throw ("the Exchange scope '$ScopeName' already exists for ANOTHER mailbox ($flt), not $Sender -- refusing to attach this " +
-                   "sender's identities to it. Give this environment its own scope (Initialize-PimMailSender derives '$ScopeName-<mailbox>' " +
-                   "for any mailbox other than the default).")
+                   "sender's identities to it. Give this environment its own scope (-ScopeName, or leave it out: the default is '<mailbox>-SendScope').")
         }
     }
     foreach ($p in @($Principals)) {
@@ -175,13 +243,13 @@ function New-PimMailSenderExoPlan {
         # §94: the same identity's send right on ANOTHER of our sender scopes is the wrong-mailbox grant above -- remove it
         # first (assignment names are tenant-unique, so the right one could not be created beside it).
         foreach ($wrong in @(@($Assignments) | Where-Object { $null -ne $_ -and "$($_.Role)" -eq 'Application Mail.Send' -and
-                    "$($_.CustomResourceScope)" -like 'PIM4EntraPS-Sender*' -and "$($_.CustomResourceScope)" -ne $ScopeName } |
-                    Where-Object { @(Select-PimExoMailSendAssignment -Assignments @($_) -ScopeName "$($_.CustomResourceScope)" -AssigneeIds $ids -AssignmentName $p.assignmentName).Count })) {
+                    "$($_.CustomResourceScope)" -ne $ScopeName -and ((Test-PimLegacyMailSenderScopeName -Name "$($_.CustomResourceScope)") -or "$($_.CustomResourceScope)" -like '*-SendScope') } |
+                    Where-Object { @(Select-PimExoMailSendAssignment -Assignments @($_) -ScopeName "$($_.CustomResourceScope)" -AssigneeIds $ids -AssignmentName $p.assignmentName -AlternateNames @($p.legacyAssignmentNames)).Count })) {
             $idn = if ("$($wrong.Identity)".Trim()) { "$($wrong.Identity)".Trim() } else { "$($wrong.Name)".Trim() }
             $plan.Add([pscustomobject]@{ cmdlet = 'Remove-ManagementRoleAssignment'; what = "remove $($p.kind) $($p.appId)'s send right on the OTHER scope $($wrong.CustomResourceScope) ($idn)"
                                          parameters = @{ Identity = $idn; Confirm = $false } })
         }
-        if (-not @(Select-PimExoMailSendAssignment -Assignments $Assignments -ScopeName $ScopeName -AssigneeIds $ids -AssignmentName $p.assignmentName).Count) {
+        if (-not @(Select-PimExoMailSendAssignment -Assignments $Assignments -ScopeName $ScopeName -AssigneeIds $ids -AssignmentName $p.assignmentName -AlternateNames @($p.legacyAssignmentNames)).Count) {
             $plan.Add([pscustomobject]@{ cmdlet = 'New-ManagementRoleAssignment'; what = "scoped send right for $($p.kind) $($p.appId)"
                                          parameters = @{ App = $p.appId; Role = 'Application Mail.Send'; CustomResourceScope = $ScopeName; Name = $p.assignmentName } })
         }
@@ -200,7 +268,7 @@ function New-PimMailSenderExoPlan {
 
 # =============================================================================================
 # 2026-09-18 (REQUIREMENTS §33.25 BUG-166 / BUG-167, §33.23 IMP-31). The same script failed partway on
-# BOTH EFIF and RIDE, three times, from ONE pattern: a transient failure on a READ silently became a
+# TWO customer tenants, three times, from ONE pattern: a transient failure on a READ silently became a
 # wrong PLAN. The decisions below separate "absent" from "could not read" and "already there" from
 # "failed", so the script can be idempotent by construction and the rules are provable offline.
 # =============================================================================================
@@ -249,7 +317,7 @@ function Test-PimExoNotFoundError {
 function Test-PimTransientReadError {
     <#
       A read that failed for a reason that passes: role propagation (401/403 while the Exchange
-      Administrator grant is still arriving -- measured on EFIF/RIDE, this is exactly how
+      Administrator grant is still arriving -- measured on two customer tenants, this is exactly how
       Get-ManagementScope "failed"), throttling, a server hiccup. Worth a bounded retry; never worth
       treating as "absent".
     #>
@@ -276,7 +344,7 @@ function Resolve-PimExoCreateOutcome {
         'dehydrated' -- the org is not customisable yet: wait (Invoke-ExoWhenHydrated's existing loop)
         'retry'      -- New-ManagementRoleAssignment right after New-ServicePrincipal: Exchange has not
                         MATERIALISED the service principal yet and answers 404 / not found (measured on
-                        EFIF and RIDE). Bounded retry.
+                        two customer tenants). Bounded retry.
         'fail'       -- a real failure, reported at once
     #>
     [CmdletBinding()] param([string]$Cmdlet, [AllowEmptyString()][AllowNull()][string]$ErrorText)
@@ -409,6 +477,22 @@ function Test-PimGrantOverlong {
     return $out
 }
 
+function New-PimMailSenderSetupCheck {
+    <#
+      PURE (MAIL-STEP-PROOF, owner 2026-10-09: "why dont you trigger somehing or accept that we just did a test mail"). The
+      record Initialize-PimMailSender stores in pim.Settings 'MailSenderSetupCheck' when its step [3] read-back CONFIRMED the
+      scoped Application Mail.Send assignment for every sending identity, in ONE management scope on THIS mailbox. PIM Manager
+      reads it: with its own successful test mail on the same mailbox the engine job's row is "granted -- confirmed by the
+      setup check and the test mail". -Confirmed $false (not read back) or no identity -> $null: nothing is stored, never a guess.
+    #>
+    param([bool]$Confirmed, [string]$Sender, [string]$ScopeName, [object[]]$Principals = @(), [string]$By = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    if (-not $Confirmed -or -not "$Sender".Trim() -or -not "$ScopeName".Trim()) { return $null }
+    $ids = @(@($Principals) | Where-Object { $_ -and ("$($_.objectId)".Trim() -or "$($_.appId)".Trim()) } | ForEach-Object { [ordered]@{ kind = "$($_.kind)"; appId = "$($_.appId)".Trim(); objectId = "$($_.objectId)".Trim() } })
+    if (-not $ids.Count) { return $null }
+    return [ordered]@{ ok = $true; scopedMailSend = 'confirmed'; sender = "$Sender".Trim(); scope = "$ScopeName".Trim(); identities = $ids
+                       at = $NowUtc.ToUniversalTime().ToString('o'); by = "$By".Trim(); source = 'Initialize-PimMailSender' }
+}
+
 function Select-PimTenantWideMailSend {
     # appRoleAssignments on one service principal that are the TENANT-WIDE Graph Mail.Send.
     [CmdletBinding()] param([object[]]$Assignments = @(), [string]$GraphSpId, [string]$MailSendRoleId)
@@ -436,12 +520,22 @@ function New-PimMailSenderCommand {
     <#
       MAIL-1 (framework 12.3 (b)-(d), owner 2026-10-08): the command that sets up the shared mailbox AFTERWARDS -- the
       published download plus a browser sign-in call (no certificate, no secret), with every value of this environment
-      that is known filled in and a <placeholder> for the rest. PURE. Returns the lines (download, run).
+      that is known filled in and a <placeholder> for the rest. PURE. Returns the lines of Get-PimSupportScriptCommand
+      (12.7 / 12.10 item 11): the download, the checksum check, the signature status, the documentation link (with the
+      -WhatIf hint), then the run line (always the LAST line).
     #>
+    # MAIL-NAMING (100.14, owner 2026-10-09: "it must be possible to define as parameter on the scripts"): the company's
+    # mailbox name, domain and display name travel in the command (-MailboxName / -MailDomain / -DisplayName) whenever
+    # they are known -- the script's own defaults otherwise.
     [CmdletBinding()] param([string]$TenantId, [string[]]$ManagedIdentityObjectId = @(), [string]$SubscriptionId, [string]$ResourceGroup,
-                            [string]$TickJobName, [string]$ManagerAppName, [string]$SqlServerFqdn)
+                            [string]$TickJobName, [string]$ManagerAppName, [string]$SqlServerFqdn,
+                            [string]$MailboxName, [string]$MailDomain, [string]$DisplayName)
     $v = { param($x, $ph) if ("$x".Trim()) { "$x".Trim() } else { $ph } }
+    $q = { param($x) $t = "$x".Trim(); if ($t -match '^[A-Za-z0-9._@-]+$') { $t } else { "'" + $t.Replace("'", "''") + "'" } }
     $run = '.\Initialize-PimMailSender.ps1 -TenantId ' + (& $v $TenantId '<tenant id>')
+    if ("$MailboxName".Trim()) { $run += ' -MailboxName ' + (& $q $MailboxName) }
+    if ("$MailDomain".Trim())  { $run += ' -MailDomain ' + (& $q $MailDomain) }
+    if ("$DisplayName".Trim()) { $run += ' -DisplayName ' + (& $q $DisplayName) }
     $mi = @(@($ManagedIdentityObjectId) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
     if ($mi.Count) { $run += ' -ManagedIdentityObjectId ' + ($mi -join ',') }
     if ("$SubscriptionId".Trim() -and "$ResourceGroup".Trim() -and ("$TickJobName".Trim() -or "$ManagerAppName".Trim())) {
@@ -450,7 +544,7 @@ function New-PimMailSenderCommand {
         if ("$ManagerAppName".Trim()) { $run += " -ManagerAppName $("$ManagerAppName".Trim())" }
     } elseif (-not $mi.Count) { $run += ' -ManagedIdentityObjectId <manager identity object id>,<engine job identity object id>' }
     $run += ' -SqlServerFqdn ' + (& $v $SqlServerFqdn '<server>.database.windows.net')
-    return @('Invoke-WebRequest https://invardia.com/support/pim/Initialize-PimMailSender.ps1 -OutFile Initialize-PimMailSender.ps1', $run)
+    return @(Get-PimSupportScriptCommand -Script 'Initialize-PimMailSender' -Run @($run))
 }
 
 function Resolve-PimDeployMailSignedIn {
@@ -476,9 +570,8 @@ function Resolve-PimDeployMailSignedIn {
                -TickJobName $TickJobName -ManagerAppName $ManagerAppName -SqlServerFqdn $SqlServerFqdn
     $after = @(
         '  DO IT AFTERWARDS (no certificate): PIM Manager > Get Started > Mail sender -- choose Shared mailbox (it prints this',
-        '  command with the values filled in: an Exchange or Global Administrator runs it and signs in in the browser) or SMTP relay:',
-        "    $($cmd[0])",
-        "    $($cmd[1])")
+        '  command with the values filled in: an Exchange or Global Administrator runs it and signs in in the browser) or SMTP relay:') +
+        @(@($cmd) | ForEach-Object { "    $_" })
     $type = "$($Account.user.type)".Trim()
     $name = "$($Account.user.name)".Trim()
     $tid  = "$($Account.tenantId)".Trim()
@@ -500,4 +593,59 @@ function Resolve-PimDeployMailSignedIn {
     return @{ run = $false; appId = ''; person = $true; why = "signed-in deploy is a person ($whyPerson)"
               lines = @("mail sender: NOT RUN -- this deploy is signed in as a person ($name). Creating the shared mailbox needs Exchange administration this run does not",
                         '  hold (an app identity with a time-boxed Exchange Administrator, or an administrator''s own browser sign-in). The environment is MAIL-MUTE until then.') + $after }
+}
+
+# =============================================================================================
+# MAIL-NAMING 100.14 item 5 (owner 2026-10-09): the store write from a customer PC fails at the Azure SQL firewall
+# ("Client with IP address ... is not allowed"). Default: no firewall change, a short message, PIM Manager finishes it.
+# Opt-in -AllowThisIpTemporarily: a temporary rule for exactly that IP, the write, and the rule ALWAYS removed (finally).
+# =============================================================================================
+function Get-PimSqlFirewallBlockedIp {
+    # PURE. The IP Azure SQL refused (error 40615), or '' when the error is not the firewall.
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    $m = [regex]::Match("$Text", "(?i)Client with IP address '(?<ip>[0-9a-fA-F:.]+)' is not allowed")
+    if ($m.Success) { return $m.Groups['ip'].Value }
+    return ''
+}
+
+function New-PimSqlTempFirewallRuleName {
+    # PURE. A rule name that says what it is and when it was made (removed again by the same run).
+    param([Parameter(Mandatory)][string]$Ip, [datetime]$Now = [datetime]::UtcNow)
+    return ('PimSetupTemp-' + ($Ip -replace '[^0-9A-Za-z]', '-') + '-' + $Now.ToUniversalTime().ToString('yyyyMMddHHmmss'))
+}
+
+function Invoke-PimSqlWriteWithTemporaryFirewall {
+    <#
+      The write, and -- only with -AllowThisIpTemporarily, only when the write was refused by the SQL firewall, and only
+      when -ShouldProcess agrees (-WhatIf = no) -- one temporary rule for the refused IP, the write retried while the rule
+      takes effect, and the rule REMOVED in finally whether the write worked or not. The calls are injected
+      (-Write / -AddRule param($ip) -> handle / -RemoveRule param($handle) / -ShouldProcess param($ip) -> bool / -Sleep),
+      so the whole decision is tested offline.
+      Returns @{ ok; firewall; ip; whatIf; ruleAdded; ruleRemoved; rule; error; removeError }.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][scriptblock]$Write, [switch]$AllowThisIpTemporarily, [scriptblock]$AddRule, [scriptblock]$RemoveRule,
+          [scriptblock]$ShouldProcess, [int]$Attempts = 9, [int]$DelaySeconds = 20, [scriptblock]$Sleep)
+    $r = [ordered]@{ ok = $false; firewall = $false; ip = ''; whatIf = $false; ruleAdded = $false; ruleRemoved = $false; rule = $null; error = ''; removeError = '' }
+    $txt = { param($e) ("$($e.Exception.Message) $($e.ErrorDetails.Message)" -replace '\s+', ' ').Trim() }
+    try { & $Write; $r.ok = $true; return $r } catch { $r.error = & $txt $_ }
+    $r.ip = Get-PimSqlFirewallBlockedIp -Text $r.error
+    if (-not $r.ip) { return $r }
+    $r.firewall = $true
+    if (-not $AllowThisIpTemporarily -or -not $AddRule -or -not $RemoveRule) { return $r }
+    if ($ShouldProcess -and -not (& $ShouldProcess $r.ip)) { $r.whatIf = $true; return $r }
+    try {
+        try { $r.rule = & $AddRule $r.ip; $r.ruleAdded = $true }
+        catch { $r.error = "could not add the temporary firewall rule: $(& $txt $_)"; return $r }
+        for ($i = 1; $i -le [Math]::Max(1, $Attempts); $i++) {
+            if ($Sleep) { & $Sleep $DelaySeconds } else { Start-Sleep -Seconds $DelaySeconds }   # a new rule takes a moment to apply
+            try { & $Write; $r.ok = $true; $r.error = ''; break }
+            catch { $r.error = & $txt $_; if (-not (Get-PimSqlFirewallBlockedIp -Text $r.error)) { break } }
+        }
+    } finally {
+        if ($r.ruleAdded) {
+            try { & $RemoveRule $r.rule; $r.ruleRemoved = $true } catch { $r.removeError = & $txt $_ }
+        }
+    }
+    return $r
 }

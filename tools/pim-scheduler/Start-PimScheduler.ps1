@@ -98,6 +98,9 @@ if ($UseManagedIdentity -or "$env:PIM_UseManagedIdentity".Trim() -eq '1') { $glo
 . "$shared\PIM-Lifecycle.ps1"         # reminders / expirations
 . "$shared\PIM-Notify.ps1"            # mail notifications (REST sendMail) -- so the daily-summary / tier-report / escalation jobs can actually send AND the send path hydrates EmailControls (kill switch / redirect / allowlist) from pim.Settings for this cold scheduler process
 . "$shared\PIM-MailTemplateStore.ps1"  # the ONE mail template store (pim.Settings MailTemplates); merged/seeded at wiring below
+. "$shared\PIM-MailLayout.ps1"         # MAIL-2: the designed mail / report layout (the daily changes + tier report mails)
+. "$shared\PIM-MailNotifications.ps1"  # MAIL-2: per-recipient Notifications + audience links, read by every sender at send time
+. "$shared\PIM-GetStartedReminder.ps1" # MAIL-2 item 8: the daily Get Started reminder (run by the daily-summary job)
 . "$shared\PIM-FailureCatalog.ps1"    # classified item failures (cause/remedy/auto-fix), persisted in SQL
 . "$shared\PIM-EngineCore.ps1"        # NEW REST+SQL engine (diff + providers)
 . "$shared\PIM-DisableGuard.ps1"      # account-disable circuit breaker (incident 2026-06-15)
@@ -788,6 +791,14 @@ if ($Once) {
             try { $wd = Invoke-PimHybridSyncWatchdogCheck -Lane $lane; if ($wd.action -ne 'none' -or $lane -eq 'hybrid-ad-sync') { Write-Host "  [$lane watchdog] $($wd.action): $($wd.detail)" -ForegroundColor $(if ($wd.action -eq 'killed') { 'Yellow' } else { 'DarkGray' }) } }
             catch { Write-Host "  [$lane watchdog] check failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         }
+    }
+    # MAIL-STEP-PROOF (owner 2026-10-09: "i have run 3 cmdlet, and test mail works - but it still shows eros"): Send test mail
+    # in the Manager queues ONE engine test send (pim.Settings 'MailEngineTest') and starts this job; it is sent FIRST, as the
+    # engine job's own identity, so its send proof lands within about a minute. Main tick only (a hybrid worker is not the
+    # engine's mail identity). Never throws -- it must not cost the tick.
+    if (-not $WhatIf -and -not "$Instance".Trim() -and -not "$($env:PIM_SCHED_INSTANCE)".Trim() -and (Get-Command Invoke-PimMailEngineTest -ErrorAction SilentlyContinue)) {
+        try { $_met = Invoke-PimMailEngineTest; if ($_met.ran) { Write-Host "  [mail] $($_met.detail)" -ForegroundColor $(if ($_met.sent) { 'Green' } else { 'Yellow' }) } }
+        catch { Write-Host "  [mail] engine test mail skipped: $($_.Exception.Message)" -ForegroundColor Yellow }
     }
     @(Invoke-PimSchedulerTick -WhatIf:$WhatIf -LeaseTtlMinutes $ttl) | ForEach-Object { Write-Host ("  {0,-20} {1}" -f $_.name, $_.detail) }
     if (-not $WhatIf) { Invoke-PimUpdaterWatchdogIfConfigured }

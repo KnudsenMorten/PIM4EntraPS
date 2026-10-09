@@ -1,0 +1,50 @@
+{
+  "script": "Deploy-PimActivatorHybrid.ps1",
+  "product": "pim",
+  "title": "PIM Activator: deploy to machines without Intune (local policy or AD Group Policy)",
+  "purpose": "Deploys the PIM Activator browser-extension policy (force-install, install source, extension settings and a multi-tenant catalog) to on-premises or standalone machines without Intune: as a JSON artifact, as this machine's local policy (HKLM), or as an Active Directory Group Policy Object.",
+  "whenToRun": "When admins work from domain-joined or standalone machines that Intune does not manage (often MSPs with many tenants): -Target DomainGpo once per domain, -Target LocalGpo per standalone machine, -Target Json to inspect the values first. Re-run after changing the tenant config file.",
+  "standalone": false,
+  "sourcePath": "tools/pim-activator/Deploy-PimActivatorHybrid.ps1",
+  "runAs": [
+    { "kind": "other", "name": "Local Administrator (elevated PowerShell)", "scope": "this machine; -Target LocalGpo and DomainGpo", "why": "local machine policy lives under HKLM. -Target Json needs no elevation." },
+    { "kind": "other", "name": "Active Directory: create and edit Group Policy Objects (Group Policy Creator Owners, or delegated edit on the GPO) and link GPOs on the OU", "scope": "the domain; -Target DomainGpo only", "why": "creates or updates the GPO and optionally links it to -LinkToOu. Needs the Windows GroupPolicy module (RSAT, part of Windows)." }
+  ],
+  "changes": [
+    { "target": "file system", "action": "create", "object": "-Target Json: the managed-config JSON artifact at -OutputPath (default next to the script)", "why": "inspect or import the exact values", "undo": "delete the file" },
+    { "target": "this machine's registry (HKLM)", "action": "update", "object": "-Target LocalGpo: under SOFTWARE\\Policies\\Microsoft\\Edge and \\Google\\Chrome -- ExtensionInstallForcelist row, ExtensionInstallSources row, our ExtensionSettings entry merged into the organisation's (with -MinimumVersion as minimum_version_required), and 3rdparty\\extensions\\<extension id>\\policy\\ tenantCatalog, bulkActivateConfirmThreshold (-BulkThreshold), autoActivateMaxGroups (-AutoActivateMaxGroups); stray rows carrying our id are removed", "why": "the browser installs the extension and the users get the tenant catalog -- the same values the Intune path writes", "undo": "remove those values (Deploy-PimActivatorClient.ps1 -Uninstall -Scope Machine removes the same rows)" },
+    { "target": "Active Directory", "action": "create", "object": "-Target DomainGpo: Group Policy Object -GpoName (default '[PimActivator] client settings') when it does not exist", "why": "carries the policy to the domain's machines", "undo": "delete the GPO in Group Policy Management" },
+    { "target": "Group Policy Object -GpoName", "action": "update", "object": "the same registry policy values as LocalGpo (Set-GPRegistryValue); our stray values are removed (Remove-GPRegistryValue); slots used by other GPOs on this machine are never taken", "why": "the same configuration as the Intune path", "undo": "delete the GPO, or remove the values in its Computer Configuration > Preferences / Administrative Templates" },
+    { "target": "Active Directory OU -LinkToOu", "action": "create", "object": "a link of the GPO to that OU -- only with -LinkToOu (otherwise the GPO stays unlinked)", "why": "applies the policy to the machines in that OU", "undo": "remove the link in Group Policy Management" }
+  ],
+  "parameters": [
+    { "name": "TenantConfigJsonPath", "required": true, "default": null, "help": "Path (local or UNC) to the per-tenant config JSON (up to 25 tenants: name, tenantId, clientId, optional defaults). Alias -ConfigUncPath. Without it the script prints its usage." },
+    { "name": "Target", "required": false, "default": "Json", "help": "Json (artifact only), LocalGpo (this machine's HKLM policy) or DomainGpo (an AD Group Policy Object)." },
+    { "name": "OutputPath", "required": false, "default": "pim-activator-hybrid-managed-config.json next to the script", "help": "-Target Json: where the artifact is written." },
+    { "name": "GpoName", "required": false, "default": "[PimActivator] client settings", "help": "-Target DomainGpo: the GPO to create or update." },
+    { "name": "LinkToOu", "required": false, "default": null, "help": "-Target DomainGpo: distinguished name of an OU to link the GPO to. Omitted: the GPO is left unlinked." },
+    { "name": "Browser", "required": false, "default": "Both", "help": "Both, Edge or Chrome." },
+    { "name": "Channel", "required": false, "default": "Released", "help": "Released, or Test (the TEST extension id and update manifest)." },
+    { "name": "DefaultJustification", "required": false, "default": null, "help": "Overrides the pre-filled justification on every tenant entry." },
+    { "name": "DefaultDurationHours", "required": false, "default": null, "help": "Overrides the pre-filled activation length (1-24 hours) on every tenant entry." },
+    { "name": "MinimumVersion", "required": false, "default": null, "help": "Optional minimum extension version; an older install is disabled until it updates." },
+    { "name": "BulkThreshold", "required": false, "default": null, "help": "Optional tenant-wide bulk-activate confirmation threshold (1-100)." },
+    { "name": "AutoActivateMaxGroups", "required": false, "default": null, "help": "Optional per-device cap on auto-activation (0 = off)." },
+    { "name": "MaxTenants", "required": false, "default": 25, "help": "The most tenants the config may hold." },
+    { "name": "ExtensionId", "required": false, "default": "eheocihmlppcophaeakmdenhgcookkab", "help": "The extension id; change it only for a fork." },
+    { "name": "UpdateUrl", "required": false, "default": "https://knudsenmorten.github.io/PIM4EntraPS/updates.xml", "help": "The update manifest the browsers install the extension from." },
+    { "name": "SourcePattern", "required": false, "default": "https://knudsenmorten.github.io/*", "help": "The ExtensionInstallSources pattern." }
+  ],
+  "readsOnly": [
+    "the tenant config JSON file (validated before anything is written)",
+    "-Target LocalGpo: this machine's current extension policies",
+    "-Target DomainGpo: the GPO's current values and the policy in effect on this machine (slots another GPO owns)"
+  ],
+  "network": [
+    "none to the internet -- the config file (local or UNC share) and, for DomainGpo, the domain controller",
+    "knudsenmorten.github.io -- by the BROWSERS afterwards, not by this script: the update manifest and the signed extension package"
+  ],
+  "whatIf": "Validates the config and prints every value it would write: the artifact path (Json), every HKLM value it would set or remove (LocalGpo, no elevation needed for the preview), or the GPO it would create, its values and the OU link (DomainGpo). Nothing is written.",
+  "undo": "Json: delete the file. LocalGpo: Deploy-PimActivatorClient.ps1 -Uninstall -Scope Machine (removes the same rows) or delete the values. DomainGpo: delete the GPO (or its link) in Group Policy Management; machines drop the policy at their next Group Policy refresh.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Deploy-PimActivatorHybrid/"
+}

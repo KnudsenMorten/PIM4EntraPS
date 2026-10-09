@@ -281,8 +281,8 @@ function Get-PimInteractiveToken {
     (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe')
   ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
   Write-Host "  [interactive] sign-in required for $Audience (loopback $redirect)" -ForegroundColor Yellow
-  if ($edge) { Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl) }
-  else { Start-Process $authUrl }   # fall back to default browser if Edge absent
+  if ($edge) { Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl) -WhatIf:$false }
+  else { Start-Process $authUrl -WhatIf:$false }   # fall back to default browser if Edge absent
 
   $query = $null
   try {

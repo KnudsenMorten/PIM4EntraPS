@@ -1,0 +1,45 @@
+{
+  "script": "Copy-PimSettings.ps1",
+  "product": "pim",
+  "title": "Copy settings from one PIM Manager environment to another",
+  "purpose": "Copies named PIM Manager settings (for example the naming conventions) from one environment's store to another environment's store: it reads both, shows the difference, backs up the target's current value, and only with -Apply overwrites it and reads it back.",
+  "whenToRun": "When a new or rebuilt environment should start from settings that are already right in another environment (for example a managing tenant's naming conventions for a managed tenant). Settings that name the environment itself (who may use it, break-glass state, trust pins, store pointers, licence, environment name, demo mode) are refused.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Copy-PimSettings.ps1",
+  "runAs": [
+    { "kind": "other", "name": "Source store reader (application with a certificate, member of the source SQL admin group)", "scope": "the source environment's SQL database (pim.Settings)", "why": "Reads the setting from the source store. The identity is given with -FromClientId / -FromCertThumbprint and its certificate must be in the local machine certificate store." },
+    { "kind": "other", "name": "Target store writer (application with a certificate, member of the target SQL admin group)", "scope": "the target environment's SQL database (pim.Settings)", "why": "Reads the target's current value and, with -Apply, writes the new one. Given with -ToClientId / -ToCertThumbprint." }
+  ],
+  "changes": [
+    { "target": "Target environment SQL database", "action": "update", "object": "pim.Settings row for each -Name (one JSON document per setting)", "scope": "the target environment only", "why": "The point of the script: the target gets the source's value (with -MergeKeys, the source's top-level keys plus the keys only the target has).", "undo": "Run the script again with -From and -To swapped, or import the TARGET-BEFORE backup file it wrote." },
+    { "target": "Local temp folder", "action": "create", "object": "<Name>-SOURCE-<time>.json and <Name>-TARGET-BEFORE-<time>.json backups in -BackupDir (default: <temp>\\pim-settings-copy)", "scope": "this computer", "why": "The target's value before any change, so it can be restored; taken on every run, also a dry run.", "undo": "Delete the backup files." }
+  ],
+  "parameters": [
+    { "name": "Name", "required": true, "default": null, "help": "The setting(s) to copy, e.g. NamingConventions. There is no 'copy everything'." },
+    { "name": "FromServer", "required": true, "default": null, "help": "The source store's SQL server (FQDN)." },
+    { "name": "FromDatabase", "required": false, "default": "PimPlatform", "help": "The source database." },
+    { "name": "FromTenantId", "required": true, "default": null, "help": "The source tenant id." },
+    { "name": "FromClientId", "required": true, "default": null, "help": "Application (client) id of the identity that reads the source store." },
+    { "name": "FromCertThumbprint", "required": true, "default": null, "help": "Thumbprint of that identity's certificate in the local machine store." },
+    { "name": "ToServer", "required": true, "default": null, "help": "The target store's SQL server (FQDN)." },
+    { "name": "ToDatabase", "required": false, "default": "PimPlatform", "help": "The target database." },
+    { "name": "ToTenantId", "required": true, "default": null, "help": "The target tenant id." },
+    { "name": "ToClientId", "required": true, "default": null, "help": "Application (client) id of the identity that writes the target store." },
+    { "name": "ToCertThumbprint", "required": true, "default": null, "help": "Thumbprint of that identity's certificate in the local machine store." },
+    { "name": "BackupDir", "required": false, "default": "<temp>\\pim-settings-copy", "help": "Where the backups are written before anything changes." },
+    { "name": "MergeKeys", "required": false, "default": false, "help": "For an object setting: keep the top-level keys only the target has (the source's keys win). Arrays and plain values are replaced whole." },
+    { "name": "Apply", "required": false, "default": false, "help": "Write. Without it the script only shows what would change." }
+  ],
+  "readsOnly": [
+    "pim.Settings in the source store (the named settings)",
+    "pim.Settings in the target store (the named settings, before and after the write)"
+  ],
+  "network": [
+    "login.microsoftonline.com (tokens for Azure SQL, certificate sign-in)",
+    "<source server>.database.windows.net:1433",
+    "<target server>.database.windows.net:1433"
+  ],
+  "whatIf": "Reads both stores, prints the source and target values and 'What if: Performing the operation \"overwrite with the source value\" on target \"pim.Settings['<Name>'] in <server>/<database> (tenant <id>)\"'. Nothing is written to either store; a backup in the temp folder is still taken, a backup elsewhere is only announced.",
+  "undo": "Run the same command with the From and To values swapped (it restores the previous environment's value), or write back the TARGET-BEFORE backup file. The local backups can be deleted.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Copy-PimSettings/"
+}

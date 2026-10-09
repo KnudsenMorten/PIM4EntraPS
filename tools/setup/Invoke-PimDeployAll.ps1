@@ -1,6 +1,8 @@
 ﻿#requires -Version 5.1
+
 <#
 .SYNOPSIS
+    Deploy or update the whole of PIM Manager in your own Azure subscription in one run: the hosting resources, the container image, the containers and their identities, the database schema, the mail sender, sign-in, the code, the nightly updater and the first administrators -- then verify it. Without -Apply it only prints the plan.
     PIM4EntraPS -- ONE-SHOT "deploy everything" orchestrator: stand up OR update the WHOLE
     solution end-to-end for a target customer/environment, then PROVE it with the test-tenant
     validation. REQUIREMENTS.md sec.3 (Setup / Deploy) -- the "one-shot deploy everything" item.
@@ -37,7 +39,9 @@
     Invoke-PimUpdate.ps1 (which itself owns the build/deploy/schema/verify/rollback lifecycle).
 
     MODES:
-      -WhatIf        : plan only (DEFAULT-SAFE). Prints the ordered plan; makes NO changes.
+      -WhatIf        : plan only (DEFAULT-SAFE). Prints the ordered plan and every change each step would make; makes NO
+                       changes. An explicit -WhatIf wins over -Apply / -ValidateOnly (no Invardia claim, no firewall
+                       window, no deploy identity, no step runs).
       -Apply         : run the needed steps in order (idempotent); verify; rollback on failure.
       -ValidateOnly  : run ONLY the test-tenant validation (smoke + deploy-validation tests).
 
@@ -105,6 +109,24 @@
 .NOTES
     PS 5.1-safe. Pure decision core: engine/_shared/PIM-DeployAll.ps1. Offline tests:
     tests/Test-PimDeployAll.ps1. Live deploy+validate against a test tenant = the release gate.
+
+    PERMISSIONS (the full list, with scope, reason and undo, is on the documentation page and in Invoke-PimDeployAll.doc.json):
+    The person (or deploy identity) running it needs: Owner (or Contributor + User Access Administrator) on the
+    subscription; in Entra ID Privileged Role Administrator (Graph application permissions for the engine and Manager
+    identities, the role-assignable SQL admin group) and Application Administrator (the engine and sign-in app
+    registrations); Exchange Administrator only for the mail sender step; Owner / User Access Administrator at the tenant
+    root management group for the engine's Reader there (otherwise a warning with the command for the right person).
+    It creates: resource group, virtual network + subnet, container registry, Log Analytics workspace, Azure SQL server +
+    database, managed identities, Container Apps environment, the Manager app, the tick / bootstrap / updater jobs, the
+    engine app registration (unless -SkipAppReg), the Manager's sign-in app + members group, grp-pim-sql-admins.
+    It grants: Microsoft Graph application permissions (engine set to the tick identity and the engine app; read-only set
+    to the Manager identity; DelegatedPermissionGrant for the sign-in consent); AcrPull, Reader, Contributor (updater, on
+    the resource group) and Reader at the tenant root (User Access Administrator only with
+    -EngineAzureRootUserAccessAdmin); SQL roles db_datareader, db_datawriter, db_ddladmin; Exchange scoped send right.
+    Logs: a transcript of the run in the temp folder (pim-manager-logs); its path is printed.
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Invoke-PimDeployAll/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -501,6 +523,12 @@ param(
     [int]$EnrollmentTimeoutSeconds = 900
 )
 $ErrorActionPreference = 'Stop'
+# framework 12.7: the Documentation line first, and a transcript of the run -- stopped by the file-scope finally at the end
+# of this script on every exit (the plan-only return, the refused enrollment, the trap's rethrow, the final exit), and by
+# the PowerShell.Exiting event on an interrupt.
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Invoke-PimDeployAll'
+try {
 
 # =================================================================================================
 # BUG-162 (rehearsal master dp998, 2026-09-17) -- $PSBoundParameters IS PER FUNCTION, NOT PER SCRIPT,
@@ -605,7 +633,7 @@ function Clear-PimEphemeralPem {
 }
 # Covers the paths a try/finally around the body would miss: a throw from a nested step, and the
 # operator interrupting the run.
-$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action { Restore-PimCallerAzContext; Clear-PimEphemeralPem }
+$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action { Restore-PimCallerAzContext; Clear-PimEphemeralPem; Stop-PimScriptRun -Script 'Invoke-PimDeployAll' }
 # 🪤 A BARE `throw` INSIDE A TRAP DISCARDS THE ERROR AND RAISES "ScriptHalted", so the one line
 # that says what actually went wrong is replaced by a word that says nothing. Measured at a customer
 # 2026-09-11: an infra failure surfaced only as "ScriptHalted" at this line. Rethrow $_.
@@ -672,6 +700,13 @@ if (-not $PSBoundParameters.ContainsKey('AcrSku') -or -not "$AcrSku".Trim()) {
 # default-safe: a bare run is plan-only (-WhatIf). -Apply opens the gate.
 $applyGate = [bool]$Apply
 if ($ValidateOnly) { $applyGate = $true }   # validate-only still "runs" its single step
+# framework 12.7: an explicit -WhatIf (or one inherited from the caller, e.g. Install-PimManager -WhatIf) ALWAYS means plan
+# only -- it wins over -Apply and -ValidateOnly. Before this, -Apply -WhatIf opened the gate: the Invardia enrollment claim,
+# the deploy identity and the setup-host firewall window are not ShouldProcess-guarded and would have run.
+if ($WhatIfPreference -and $applyGate) {
+    Write-Host '    -WhatIf: plan only -- it wins over -Apply / -ValidateOnly; nothing is claimed, created or granted.' -ForegroundColor Yellow
+    $applyGate = $false
+}
 
 # =================================================================================================
 # framework 8.6 "SINGLE-TENANT enrollment too" (owner 2026-10-08: "in single it must still link to customer").
@@ -725,6 +760,7 @@ if ($script:PimEnrolling) {
         Get-PimDeploySummary -StepOutcomes @([pscustomobject]@{ key = 'enroll'; ran = $true; ok = $false })
         exit 1
     }
+    if (-not $applyGate) { Write-Host "    What if: claim tenant $TenantId at Invardia with the enrollment key (Invardia creates the environment, signs the licence, issues an install key) -- not done in plan-only mode" -ForegroundColor Yellow }
 }
 
 # =================================================================================================
@@ -1424,6 +1460,53 @@ Write-Host "  DEPLOY-ALL PLAN ($(if($plan.whatIf){'WHATIF'}else{'APPLY'}); hoste
 $i = 0
 foreach ($s in $plan.steps) { $i++; Write-Host ("    {0}. {1,-8} [{2,-20}] {3}" -f $i, $s.key, $s.action, $s.reason) }
 Write-Host ""
+
+function Get-PimDeployAllStepChanges {
+    # framework 12.7 -- PURE given the script's parameters: what ONE step would create / grant, as lines "object -- permission
+    # @ scope". Printed under the plan in plan-only mode, so a preview names every change, not only the step. The full
+    # list with reasons and undo is Invoke-PimDeployAll.doc.json (the documentation page).
+    param([string]$Key)
+    $rg = $(if ("$ResourceGroup".Trim()) { "$ResourceGroup".Trim() } else { '<resource group>' })
+    $sub = $(if ("$SubscriptionId".Trim()) { "/subscriptions/$("$SubscriptionId".Trim())" } else { '<subscription>' })
+    $sql = $(if ("$SqlServerFqdn".Trim()) { "$SqlServerFqdn".Trim() } else { '<SQL server>' })
+    switch ($Key) {
+        'enroll'     { @("Invardia: claim tenant $TenantId (environment, signed licence, install key)") }
+        'appreg'     { @("Entra ID: app registration + service principal '$EngineAppDisplayName' with a certificate credential",
+                         "Entra ID: Microsoft Graph application permissions with admin consent (the engine set) -> '$EngineAppDisplayName' @ tenant") }
+        'prereq'     { @("Azure: resource group $rg, virtual network + subnet, container registry $AcrName ($AcrSku), Log Analytics workspace, managed identity, Azure SQL server $sql + database $SqlDatabase",
+                         "Azure: AcrPull -> the pull identity @ registry $AcrName",
+                         "Entra ID: group $SqlAdminGroupName (role-assignable) as the SQL server's Entra admin; members: the environment identities$(if ("$SupportAppId".Trim()) { ' + the Invardia Support app' })",
+                         "Azure SQL: firewall rule AllowSetupHost for this host's public IP (removed at the end of the run)") }
+        'image'      { @("Azure: build + push image $ImageRepo`:$(Get-EffectiveImageTag) in registry $AcrName (az acr build from this folder's source)") }
+        'infra'      { @("Azure: Container Apps environment $EnvName ($Exposure), app $ManagerApp, job $TickJobName ($TickCron), bootstrap job $DbInitJobName",
+                         "Entra ID: Microsoft Graph application permissions -> $TickJobName identity (the engine set) and $ManagerApp identity (the read-only set) @ tenant",
+                         "Azure: $(@($AzureRbacRoles) -join ', ') -> $TickJobName identity @ $(if ("$AzureRbacManagementGroupId".Trim()) { "management group $AzureRbacManagementGroupId" } else { $sub })",
+                         "Azure: Reader$(if ($EngineAzureRootUserAccessAdmin) { ' + User Access Administrator' }) -> $TickJobName identity @ tenant root management group$(if ($SkipEngineAzureRootAccess) { ' (skipped: -SkipEngineAzureRootAccess)' })",
+                         "Azure SQL: database users for $ManagerApp and $TickJobName with db_datareader, db_datawriter, db_ddladmin @ $SqlDatabase") }
+        'sqlaccess'  { @("Azure: subnet service endpoint Microsoft.Sql + a virtual network rule on $sql (Azure-services firewall rule verified)") }
+        'schema'     { @("Azure SQL: idempotent schema upgrade of $SqlDatabase (never destructive)") }
+        'mailsender' { @("Exchange Online: the shared sender mailbox$(if ("$MailSender".Trim()) { " $MailSender" }) + an Exchange RBAC send right scoped to that one mailbox for the Manager and tick identities") }
+        'features'   { @("Azure SQL: pim.Settings feature gates ON: $(@($FeatureGates) -join ', ')") }
+        'easyauth'   { @("Entra ID: the Manager's sign-in app registration + a client secret held by the container app, delegated sign-in consent (openid, profile, email, User.Read) @ tenant",
+                         "Entra ID: sign-in restricted (assignment required) to $(if (@($EasyAuthAllowedPrincipals).Count) { @($EasyAuthAllowedPrincipals) -join ', ' } elseif ($EasyAuthAllowAllTenantUsers) { 'a members-only dynamic group' } else { 'the principals already assigned' })") }
+        'code'       { @("Azure: roll $ManagerApp (and the jobs) to image $(Get-EffectiveImageTag)") }
+        'updater'    { @("Azure: job $UpdateJobName ($UpdateCron, ring $UpdateRing) with Contributor -> its identity @ $rg (and the registry), AcrPull @ registry, membership of $SqlAdminGroupName") }
+        'access'     { @("Azure SQL: pim.Settings ManagerAccess SuperAdmin: $(if ("$ManagerSuperAdmins".Trim()) { $ManagerSuperAdmins } else { '(none named)' })") }
+        'alerting'   { @("Azure SQL: pim.Settings Alerting recipients (only when the stored list is empty)") }
+        'licence'    { @("Azure SQL: pim.Settings License + InvardiaInstallKey (from the enrollment)") }
+        'verify'     { @("reads only: hosted smoke + deploy-validation tests") }
+        'verify-install' { @("the end-of-install check (it repairs what it can)") }
+        default      { @() }
+    }
+}
+if ($plan.whatIf) {
+    Write-Host "  WHAT THE PLAN WOULD CHANGE (steps marked to run on -Apply; plan-only makes none of these):" -ForegroundColor Cyan
+    foreach ($s in $plan.steps) {
+        if ("$($s.action)" -match '^(?i)skip') { continue }
+        foreach ($line in @(Get-PimDeployAllStepChanges -Key "$($s.key)")) { Write-Host ("    What if: [{0}] {1}" -f $s.key, $line) -ForegroundColor Yellow }
+    }
+    Write-Host ""
+}
 
 # =================================================================================================
 # 🔴 IMP-49 t -- THE SETUP-HOST FIREWALL WINDOW: opened for this run, closed at its end.
@@ -3170,3 +3253,4 @@ Clear-PimEphemeralPem
 $summary
 # BUG-216: 'unverified' is not success either -- a deploy nothing verified must not exit 0.
 if ($summary.status -eq 'failed' -or $summary.status -eq 'rolledback' -or $summary.status -eq 'unverified') { exit 1 }
+} finally { Stop-PimScriptRun -Script 'Invoke-PimDeployAll' }   # framework 12.7: "Log written: <path>" on every exit

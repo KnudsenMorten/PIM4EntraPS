@@ -1,0 +1,76 @@
+{
+  "script": "Grant-PimEnginePermissions.ps1",
+  "product": "pim",
+  "title": "Grant the PIM Manager engine identity its missing permissions",
+  "purpose": "Give the PIM Manager engine identity the Microsoft Graph (and other API) application permissions and Azure role assignments it is missing.",
+  "whenToRun": "When PIM Manager shows this command (Overview > permission check, or the Get Started step \"Engine permissions\"), with your environment's values filled in. PIM Manager itself never grants a permission: an identity that could, could give itself anything. Safe to run again: what the engine already holds is reported and left alone.",
+  "standalone": true,
+  "sourcePath": "tools/setup/Grant-PimEnginePermissions.ps1",
+  "runAs": [
+    {
+      "kind": "entraRole",
+      "name": "Privileged Role Administrator",
+      "scope": "tenant",
+      "why": "Granting an application permission (an app role assignment) to a service principal needs a Privileged Role Administrator or a Global Administrator. Only needed for -GraphPermissions / -AppRoles."
+    },
+    {
+      "kind": "azureRbac",
+      "name": "User Access Administrator",
+      "scope": "each scope in -AzureRoleAssignments (for the tenant root: the root management group); Owner works too",
+      "why": "Creating an Azure role assignment needs User Access Administrator or Owner at that scope. At the tenant root a Global Administrator first turns on 'Access management for Azure resources' (Microsoft Entra ID > Properties). Only needed for -AzureRoleAssignments."
+    },
+    {
+      "kind": "other",
+      "name": "delegated Microsoft Graph scopes AppRoleAssignment.ReadWrite.All and Application.Read.All",
+      "scope": "the browser sign-in (first-party public client 'Microsoft Graph Command Line Tools')",
+      "why": "What the browser sign-in asks for: read the engine identity and the API's permissions, and create the app role assignment. No PowerShell module, no certificate, no secret."
+    },
+    {
+      "kind": "other",
+      "name": "delegated Azure Resource Manager access (user_impersonation)",
+      "scope": "the second browser sign-in (first-party public client 'Microsoft Azure PowerShell'), only for Azure roles",
+      "why": "Reads role definitions and the engine's role assignments, and creates the missing assignment as you."
+    }
+  ],
+  "changes": [
+    {
+      "target": "Microsoft Graph",
+      "action": "grant",
+      "object": "application permission for the engine identity: an app role assignment (POST servicePrincipals/{API}/appRoleAssignedTo) for each name in -GraphPermissions (Microsoft Graph, e.g. Group.ReadWrite.All) and -AppRoles (another API, as <permission>@<API application id>)",
+      "permission": "each application permission you pass -- PIM Manager's command names exactly the ones its permission check found missing",
+      "scope": "tenant (application permissions apply tenant-wide)",
+      "why": "The engine applies the access you define in PIM Manager through these APIs; without the permission that part of the engine fails.",
+      "undo": "Entra admin center > Enterprise applications > the engine identity > Permissions > remove the permission (or DELETE servicePrincipals/{engine}/appRoleAssignments/{id})."
+    },
+    {
+      "target": "Azure Resource Manager",
+      "action": "grant",
+      "object": "Azure role assignment for the engine identity (Microsoft.Authorization/roleAssignments, principalType ServicePrincipal) for each '<role>@<scope>' in -AzureRoleAssignments",
+      "permission": "the Azure role you pass, by name or role definition id: Reader (what PIM Manager asks for at the tenant root, so discovery can see Azure), optionally User Access Administrator (only when the engine must assign the Azure resource roles you delegate); Owner, Contributor and Role Based Access Control Administrator are also recognised by name, any other name is looked up at the scope",
+      "scope": "the scope you pass: the tenant root management group, a management group, a subscription or a resource group",
+      "why": "Discovery reads Azure with Reader; assigning delegated Azure resource roles needs User Access Administrator. PIM Manager never asks for Owner or Contributor.",
+      "undo": "Azure portal > the scope > Access control (IAM) > Role assignments > remove the engine identity's assignment."
+    }
+  ],
+  "parameters": [
+    { "name": "TenantId", "required": false, "default": "the tenant you sign in to", "help": "Your tenant id; a sign-in that lands in another tenant is refused." },
+    { "name": "EngineObjectId", "required": true, "default": null, "help": "Object id of the engine identity's service principal (shown in PIM Manager)." },
+    { "name": "GraphPermissions", "required": false, "default": null, "help": "Microsoft Graph application permissions to grant, e.g. 'Group.ReadWrite.All','RoleManagement.ReadWrite.Directory'." },
+    { "name": "AppRoles", "required": false, "default": null, "help": "Application permissions of other APIs as '<permission>@<API application id>'." },
+    { "name": "AzureRoleAssignments", "required": false, "default": null, "help": "Azure roles as '<role name or role definition id>@<scope>'." },
+    { "name": "UseEdge", "required": false, "default": "$true", "help": "$true opens Microsoft Edge for the sign-in; $false the default browser." },
+    { "name": "GraphAccessToken", "required": false, "default": null, "help": "Automation: a Microsoft Graph token (delegated AppRoleAssignment.ReadWrite.All + Application.Read.All) instead of the browser sign-in." },
+    { "name": "ArmAccessToken", "required": false, "default": null, "help": "Automation: an Azure Resource Manager token instead of the second browser sign-in." },
+    { "name": "PlanOnly", "required": false, "default": "off", "help": "Read and report what would be granted; change nothing (as -WhatIf)." },
+    { "name": "PassThru", "required": false, "default": "off", "help": "Also return the result rows as objects." }
+  ],
+  "readsOnly": [
+    "the engine identity's service principal (name, type) and the application permissions it already holds",
+    "each API's service principal and the application permissions it offers (Microsoft Graph, or the API in -AppRoles)",
+    "Azure role definitions (by name) and the engine identity's role assignments at and above each scope"
+  ],
+  "network": [ "login.microsoftonline.com", "graph.microsoft.com", "management.azure.com", "localhost (the browser returns the sign-in to a local port on this computer)" ],
+  "whatIf": "Signs in and reads, prints the plan (already there / would grant / refused per permission), then one \"What if:\" line per grant: the application permission and the API, or the Azure role and its scope. Nothing is granted.",
+  "undo": "Remove each app role assignment from the engine identity (Entra admin center > Enterprise applications > the engine identity > Permissions) and each Azure role assignment (Access control (IAM) at the scope). The script creates nothing else.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Grant-PimEnginePermissions/"
+}

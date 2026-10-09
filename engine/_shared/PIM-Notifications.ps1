@@ -1,6 +1,10 @@
 ﻿# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
+# MAIL-2: the designed layout + notification preferences the daily-changes report is built with (same defensive load).
+if (-not (Get-Command New-PimMailDocument -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-MailLayout.ps1') }
+if (-not (Get-Command Get-PimAudienceLink -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-MailNotifications.ps1') }
+if (-not (Get-Command Invoke-PimGetStartedReminder -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-GetStartedReminder.ps1') }
 <#
   PIM4EntraPS -- notification BATCH logic (REQUIREMENTS §12): pure aggregation +
   render-prep for the four notification features, plus the secure ServiceNow->Manager
@@ -180,7 +184,16 @@ function ConvertTo-PimDailySummaryTokens {
     $wStart = "$($Summary.windowStartUtc)"; try { $wStart = ([datetime]$Summary.windowStartUtc).ToString('yyyy-MM-dd HH:mm') } catch {}
     $wEnd   = "$($Summary.windowEndUtc)";   try { $wEnd   = ([datetime]$Summary.windowEndUtc).ToString('yyyy-MM-dd HH:mm') } catch {}
     $label = if ("$TenantLabel".Trim()) { " - $TenantLabel" } else { '' }
+    $adm = ConvertTo-PimDailySummaryHtmlList -Records $Summary.admins
+    $del = ConvertTo-PimDailySummaryHtmlList -Records $Summary.delegations
+    $rem = ConvertTo-PimDailySummaryHtmlList -Records $Summary.removals
     @{
+        # MAIL-2: the designed template's tokens. ConvertTo-PimDailyChangesTokens replaces ReportHtml with the full report;
+        # a caller with only the summary still gets a readable body (the three lists), never an empty mail.
+        ReportHtml       = ('<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#24292f;padding:16px;"><h3>New privileged admins</h3>' + $adm + '<h3>New delegations / assignments</h3>' + $del + '<h3>Removals / offboardings</h3>' + $rem + '</div>')
+        RiskyCount       = '0'
+        RiskyNote        = ''
+        ActorCount       = "$(@($Summary.byActor.Keys).Count)"
         TenantLabel      = $label
         WindowStart      = "$wStart UTC"
         WindowEnd        = "$wEnd UTC"
@@ -188,11 +201,245 @@ function ConvertTo-PimDailySummaryTokens {
         NewAdminCount    = "$(@($Summary.admins).Count)"
         DelegationCount  = "$(@($Summary.delegations).Count)"
         RemovalCount     = "$(@($Summary.removals).Count)"
-        NewAdminList     = ConvertTo-PimDailySummaryHtmlList -Records $Summary.admins
-        DelegationList   = ConvertTo-PimDailySummaryHtmlList -Records $Summary.delegations
-        RemovalList      = ConvertTo-PimDailySummaryHtmlList -Records $Summary.removals
+        NewAdminList     = $adm
+        DelegationList   = $del
+        RemovalList      = $rem
         Date             = (Get-Date).ToString('yyyy-MM-dd')
     }
+}
+
+# ---------------------------------------------------------------------------
+# (1b) DAILY CHANGES -- the redesigned daily mail (framework §12.11 MAIL-2, PIM §100.5; owner via Invardia 2026-10-09:
+# "fx daily changes must be improved in pim"). Summary first (how many, by whom, what kind, anything risky), grouped
+# tables with before -> after, the audience button, the logo. PURE: events in, report object / HTML out.
+# ---------------------------------------------------------------------------
+
+# The Entra / Azure / AD roles a grant of which is called out as RISKY (tier-0 control-plane roles).
+$script:PimRiskyRoleNames = @(
+    'Global Administrator', 'Privileged Role Administrator', 'Privileged Authentication Administrator', 'Security Administrator',
+    'Conditional Access Administrator', 'Application Administrator', 'Cloud Application Administrator', 'Hybrid Identity Administrator',
+    'Authentication Policy Administrator', 'Partner Tier2 Support', 'Intune Administrator', 'Exchange Administrator',
+    'User Access Administrator', 'Domain Admins', 'Enterprise Admins', 'Schema Admins'
+)
+
+function Get-PimChangeAreaLabel {
+    # PURE. The entity a commit wrote -> what a reader calls it.
+    param([string]$Target)
+    $t = "$Target" -replace '\s*\(.*$', ''
+    switch -Regex ($t) {
+        '^PIM-Assignments-Admins$'          { return 'Admin to group' }
+        '^PIM-Assignments-Groups$'          { return 'Group nesting' }
+        '^PIM-Assignments-Roles-Groups$'    { return 'Entra role' }
+        '^PIM-Assignments-Roles-AUs$'       { return 'Entra role in an administrative unit' }
+        '^PIM-Assignments-Azure-Resources$' { return 'Azure role' }
+        '^PIM-Assignments-Workloads$'       { return 'Workload role' }
+        '^PIM-Assignments-'                 { return 'Delegation' }
+        '^Account-Definitions-Admins$'      { return 'Admin account' }
+        '^settings:breakglass'              { return 'Break-glass accounts' }
+        default                             { return $(if ($t) { $t } else { 'Other' }) }
+    }
+}
+
+function Get-PimChangeRiskReason {
+    <#
+      PURE. Why ONE change needs a look ('' = it does not). Risky, defined from the data (MAIL-2 / §100.5):
+        * a safety guard released (guard.release*, the second-person guard release setting)
+        * a break-glass account change (settings.breakglass-accounts.*, or the text names break-glass)
+        * an emergency override (emergency.*)
+        * a removal / offboarding / revoke
+        * a grant of a tier-0 role (Global Administrator, Privileged Role Administrator, ... Owner on Azure) or of Tier 0 access
+    #>
+    param([string]$Kind = '', [string]$Action = '', [string]$Text = '')
+    $a = "$Action".Trim().ToLowerInvariant(); $t = "$Text"
+    if ($a -match 'guard\.release|guard-release') { return 'a safety guard was released' }
+    if ($a -match 'break-?glass' -or $t -match '(?i)break-?glass') { return 'break-glass account change' }
+    if ($a -match '^emergency\.') { return 'emergency override' }
+    if ($Kind -eq 'Removed' -or $a -match 'offboard|remove|revoke|delete') { return 'access removed' }
+    foreach ($n in $script:PimRiskyRoleNames) { if ($t.IndexOf($n, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return "privileged role: $n" } }
+    if ($t -match "(?i)Azure role '(Owner|User Access Administrator)'") { return "privileged Azure role: $($Matches[1])" }
+    if ($t -match '(?i)(^|[^A-Za-z0-9])T0([^A-Za-z0-9]|$)') { return 'Tier 0 access' }
+    return ''
+}
+
+function ConvertFrom-PimCommitChangeLine {
+    # PURE. One readable commit sentence ("Added: ...", "Removed: ...", "Changed: X -- Col: a -> b; Col2: c -> d") ->
+    # @{ kind; what; before; after }.
+    param([string]$Line)
+    $l = "$Line".Trim()
+    $kind = 'Changed'; $rest = $l
+    if ($l -match '^(Added|Removed|Changed):\s*(.*)$') { $kind = $Matches[1]; $rest = $Matches[2] }
+    $before = ''; $after = ''; $what = $rest
+    if ($kind -eq 'Changed' -and $rest -match '^(.*?)\s+--\s+(.+)$') {
+        $what = $Matches[1]
+        $b = New-Object System.Collections.Generic.List[string]; $a = New-Object System.Collections.Generic.List[string]
+        foreach ($part in ($Matches[2] -split ';\s*')) {
+            if ($part -match '^\s*([^:]+):\s*(.*?)\s+->\s+(.*)$') { $b.Add("$($Matches[1].Trim()): $($Matches[2].Trim())"); $a.Add("$($Matches[1].Trim()): $($Matches[3].Trim())") }
+        }
+        $before = ($b.ToArray() -join '; '); $after = ($a.ToArray() -join '; ')
+    } elseif ($kind -eq 'Added') { $before = '(none)'; $after = 'added' }
+    elseif ($kind -eq 'Removed') { $before = 'present'; $after = '(removed)' }
+    return [pscustomobject]@{ kind = $kind; what = $what; before = $before; after = $after }
+}
+
+function Get-PimDailyChangesReport {
+    <#
+      PURE. Fold audit events into the DAILY CHANGES report. Same window, the same ok / not-whatIf / no-activation rules and
+      the same Manager-commit expansion as Get-PimDailySummary; in addition:
+        * a commit that recorded its row sentences (after.changes, v2.4.348+) becomes ONE row per changed row, with
+          before -> after for a change;
+        * safety events are rows too, even though they are not delegations: guard releases, break-glass account changes,
+          emergency overrides;
+        * every row is judged RISKY or not (Get-PimChangeRiskReason).
+      Returns @{ windowStartUtc; windowEndUtc; total; rows[]; risky[]; byKind{}; byActor[] (actor, changes, risky);
+                 actorCount; removals; summary (the Get-PimDailySummary result, for the old tokens) }.
+    #>
+    param([object[]]$Events = @(), [datetime]$NowUtc = [datetime]::UtcNow, [Nullable[datetime]]$SinceUtc)
+    $end = $NowUtc.ToUniversalTime()
+    $start = if ($SinceUtc) { ([datetime]$SinceUtc).ToUniversalTime() } else { $end.AddDays(-1) }
+    $rows = New-Object System.Collections.Generic.List[object]
+    $add = {
+        param($ts, $actor, $kind, $area, $what, $before, $after, $action, $target)
+        $why = Get-PimChangeRiskReason -Kind $kind -Action $action -Text ("$what $before $after $target")
+        $rows.Add([pscustomobject]@{
+            ts = $ts.ToString('o'); when = $ts.ToString('yyyy-MM-dd HH:mm') + ' UTC'
+            actor = $(if ("$actor".Trim()) { "$actor".Trim() } else { 'engine' })
+            kind = $kind; area = $area; what = "$what"; before = "$before"; after = "$after"
+            risky = [bool]$why; riskReason = $why; action = "$action"; target = "$target"
+        })
+    }
+    foreach ($e in @($Events)) {
+        if ($null -eq $e) { continue }
+        $res = Get-PimNotifyField -Item $e -Name 'result'
+        if ($res -and $res -ne 'ok') { continue }
+        if ("$(Get-PimNotifyField -Item $e -Name 'whatIf')".Trim().ToLowerInvariant() -in @('true', '1', 'yes')) { continue }
+        $tsRaw = Get-PimNotifyField -Item $e -Name 'ts'; if (-not "$tsRaw".Trim()) { $tsRaw = Get-PimNotifyField -Item $e -Name 'enqueuedUtc' }
+        $ts = Get-PimUtcStamp $tsRaw
+        if ($null -eq $ts -or $ts -lt $start -or $ts -gt $end) { continue }
+        $action = Get-PimNotifyField -Item $e -Name 'action'; $target = Get-PimNotifyField -Item $e -Name 'target'; $actor = Get-PimNotifyField -Item $e -Name 'actor'
+        $al = "$action".Trim().ToLowerInvariant()
+        if ($al -match 'activat') { continue }   # Entra-native, never in this report (two-approval model)
+        # A commit with its row sentences: one row per changed row.
+        if ($al -in @('config.save', 'config.csv.save') -and "$target" -match '^(Account-Definitions-Admins|PIM-Assignments-.+)$') {
+            $after = $null
+            if ($e -is [System.Collections.IDictionary]) { if ($e.Contains('after')) { $after = $e['after'] } } else { $p = $e.PSObject.Properties['after']; if ($p) { $after = $p.Value } }
+            if ($after -is [string]) { try { $after = $after | ConvertFrom-Json } catch { $after = $null } }
+            $lines = @()
+            if ($null -ne $after) {
+                $ch = if ($after -is [System.Collections.IDictionary]) { if ($after.Contains('changes')) { $after['changes'] } } else { $pp = $after.PSObject.Properties['changes']; if ($pp) { $pp.Value } }
+                $lines = @(@($ch) | Where-Object { "$_".Trim() -and "$_" -notmatch '^\(the row details' })
+            }
+            if ($lines.Count) {
+                foreach ($ln in $lines) { $c = ConvertFrom-PimCommitChangeLine -Line "$ln"; & $add $ts $actor $c.kind (Get-PimChangeAreaLabel -Target $target) $c.what $c.before $c.after $action $target }
+                continue
+            }
+            # An older commit (counts only): the summary's own expansion, one row per kind.
+            foreach ($x in @(Expand-PimSummaryCommitEvent -AuditEvent $e)) {
+                $cat = Get-PimSummaryActionCategory -Action "$($x.action)"
+                if (-not $cat) { continue }
+                $k = switch ($cat) { 'admin' { 'Added' } 'removal' { 'Removed' } default { if ("$($x.action)" -match 'update') { 'Changed' } else { 'Added' } } }
+                & $add $ts $actor $k (Get-PimChangeAreaLabel -Target $target) "$($x.target)" '' '' "$($x.action)" $target
+            }
+            continue
+        }
+        # Safety events -- rows even though they are not delegations.
+        if ($al -match '^guard\.release|^settings\.guard-release') { & $add $ts $actor 'Guard release' 'Safety guard' "$target" '' '' $action $target; continue }
+        if ($al -match '^settings\.breakglass-accounts\.') { & $add $ts $actor 'Break-glass' 'Break-glass accounts' ("$target ($($al -replace '^settings\.breakglass-accounts\.', ''))") '' '' $action $target; continue }
+        if ($al -match '^emergency\.') { & $add $ts $actor 'Emergency' 'Emergency override' ("$target ($al)") '' '' $action $target; continue }
+        # Every other delegation / account lifecycle event the summary counts.
+        $cat = Get-PimSummaryActionCategory -Action "$action"
+        if (-not $cat) { continue }
+        $k = switch ($cat) { 'admin' { 'Added' } 'removal' { 'Removed' } default { 'Added' } }
+        $area = if ($cat -eq 'admin') { 'Admin account' } else { Get-PimChangeAreaLabel -Target $target }
+        & $add $ts $actor $k $area "$target" '' '' $action $target
+    }
+    $all = @($rows.ToArray() | Sort-Object ts)
+    $byKind = [ordered]@{}
+    foreach ($k in 'Added', 'Changed', 'Removed', 'Guard release', 'Break-glass', 'Emergency') { $n = @($all | Where-Object { $_.kind -eq $k }).Count; if ($n) { $byKind[$k] = $n } }
+    $byActor = @($all | Group-Object actor | ForEach-Object { [pscustomobject]@{ actor = $_.Name; changes = $_.Count; risky = @($_.Group | Where-Object { $_.risky }).Count } } | Sort-Object @{ Expression = 'changes'; Descending = $true }, actor)
+    [pscustomobject]@{
+        windowStartUtc = $start.ToString('o'); windowEndUtc = $end.ToString('o')
+        total = $all.Count; rows = $all; risky = @($all | Where-Object { $_.risky })
+        byKind = $byKind; byActor = $byActor; actorCount = @($byActor).Count
+        removals = @($all | Where-Object { $_.kind -eq 'Removed' }).Count
+        summary = (Get-PimDailySummary -Events $Events -NowUtc $NowUtc -SinceUtc $start)
+    }
+}
+
+function ConvertTo-PimDailyChangesHtml {
+    <#
+      PURE. The daily-changes report as designed HTML (MAIL-2 items 1, 4, 7): summary first, the risky changes in a red box,
+      the audience button, then by kind / by person / every change grouped by kind with before -> after.
+        -Audience   soc | posture | manager (picks the button) ; -PortalBase  the Manager address ('' = no links)
+        -Environment @{ name; tenantName; tenantId; version } ; -Print  the print-ready document (no row cap) for the PDF copy
+    #>
+    param([Parameter(Mandatory)][object]$Report, [ValidateSet('soc', 'posture', 'manager')][string]$Audience = 'manager', [string]$PortalBase = '',
+          [hashtable]$Environment = @{}, [switch]$Print, [int]$MaxRowsPerKind = 40)
+    $enc = { param($v) ConvertTo-PimMailText $v }
+    $ws = [datetime]::Parse("$($Report.windowStartUtc)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
+    $we = [datetime]::Parse("$($Report.windowEndUtc)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
+    $dayQ = 'from=' + $ws.ToString('yyyy-MM-dd') + '&to=' + $we.ToString('yyyy-MM-dd')
+    $btn = Get-PimAudienceLink -Type 'daily-summary' -Audience $Audience -Base $PortalBase -Query $dayQ
+    $auditAll = (Get-PimAudienceLink -Type 'daily-summary' -Audience 'soc' -Base $PortalBase -Query $dayQ).url
+    $homeUrl = if ("$PortalBase".Trim()) { (Get-PimAudienceLink -Type 'home' -Base $PortalBase -LinkTab 'home').url -replace '/\?tab=home$', '/' } else { '' }
+    $notif = (Get-PimAudienceLink -Type 'settings' -Base $PortalBase -LinkTab 'settings' -Query 'section=notifications').url
+    $total = [int]$Report.total; $risky = @($Report.risky); $actors = [int]$Report.actorCount
+    $kinds = $Report.byKind
+    $kindTxt = (@($kinds.Keys | ForEach-Object { '{0} {1}' -f $kinds[$_], "$_".ToLowerInvariant() }) -join ', ')
+    $headline = if ($total -eq 0) { 'No delegation, admin account or safety changes in this window.' }
+                else { ('{0} change(s) by {1} {2}: {3}. {4}' -f $total, $actors, $(if ($actors -eq 1) { 'person' } else { 'people' }), $kindTxt,
+                        $(if ($risky.Count) { "$($risky.Count) need(s) a look." } else { 'Nothing risky.' })) }
+    $tiles = New-PimMailSummaryTiles -Tiles @(
+        @{ label = 'Changes'; value = "$total"; tone = 'accent' }
+        @{ label = 'Need a look'; value = "$($risky.Count)"; tone = $(if ($risky.Count) { 'danger' } else { 'good' }); hint = $(if ($risky.Count) { 'removals, tier-0 roles, guards, break-glass' } else { 'nothing risky' }) }
+        @{ label = 'People'; value = "$actors"; tone = 'neutral' }
+        @{ label = 'Removed'; value = "$([int]$Report.removals)"; tone = $(if ([int]$Report.removals) { 'warning' } else { 'neutral' }) }
+    )
+    $summary = $tiles + '<p style="font-family:' + (Get-PimMailBrand).font + ';font-size:14px;margin:10px 0 0 0;">' + (& $enc $headline) + '</p>'
+    if ($risky.Count) {
+        $rt = New-PimMailTable -Columns @(@{ key = 'when'; label = 'When' }, @{ key = 'actor'; label = 'Who' }, @{ key = 'what'; label = 'What' }, @{ key = 'riskReason'; label = 'Why it needs a look' }) `
+                               -Rows $risky -MaxRows $(if ($Print) { 0 } else { 15 }) -MoreUrl $auditAll -MoreLabel 'See them in the audit trail'
+        $summary += New-PimMailCallout -Tone 'danger' -Title ("Needs a look ({0})" -f $risky.Count) -Html $rt
+    }
+    $body = ''
+    if ($total -gt 0) {
+        $kt = New-PimMailTable -Columns @(@{ key = 'kind'; label = 'Kind' }, @{ key = 'n'; label = 'Changes' }) -Rows @($kinds.Keys | ForEach-Object { [pscustomobject]@{ kind = $_; n = $kinds[$_] } })
+        $pt = New-PimMailTable -Columns @(@{ key = 'actor'; label = 'Person' }, @{ key = 'changes'; label = 'Changes' }, @{ key = 'risky'; label = 'Need a look' }) -Rows @($Report.byActor)
+        $body += '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr><td valign="top" style="width:48%;padding-right:2%;">' + (New-PimMailSection -Title 'By kind' -Html $kt) +
+                 '</td><td valign="top" style="width:50%;">' + (New-PimMailSection -Title 'By person' -Html $pt) + '</td></tr></table>'
+        foreach ($k in @($kinds.Keys)) {
+            $kr = @($Report.rows | Where-Object { $_.kind -eq $k })
+            $rowsHtml = @($kr | ForEach-Object {
+                $w = (& $enc $_.what); if ($_.risky) { $w = '<span style="color:#cf222e;font-weight:600;">&#9888;</span> ' + $w }
+                [pscustomobject]@{ when = $_.when; actor = $_.actor; area = $_.area; what = $w; before = $_.before; after = $_.after }
+            })
+            $cols = @(@{ key = 'when'; label = 'When'; width = '96px' }, @{ key = 'actor'; label = 'Who' }, @{ key = 'area'; label = 'Area' }, @{ key = 'what'; label = 'What'; html = $true })
+            if (@($kr | Where-Object { "$($_.before)$($_.after)".Trim() -and $_.kind -eq 'Changed' }).Count) { $cols += @(@{ key = 'before'; label = 'Before' }, @{ key = 'after'; label = 'After' }) }
+            $body += New-PimMailSection -Title ("{0} ({1})" -f $k, $kr.Count) -Html (New-PimMailTable -Columns $cols -Rows $rowsHtml -MaxRows $(if ($Print) { 0 } else { $MaxRowsPerKind }) -MoreUrl $auditAll -MoreLabel 'See all of them in the audit trail')
+        }
+        $body += '<p style="font-family:' + (Get-PimMailBrand).font + ';font-size:12px;color:#57606a;margin:14px 0 0 0;">Activation of eligible roles is handled and notified natively by Entra PIM and is not listed here. Every change above is recorded in the audit trail.</p>'
+    }
+    $sub = ('{0} UTC to {1} UTC' -f $ws.ToString('yyyy-MM-dd HH:mm'), $we.ToString('yyyy-MM-dd HH:mm'))
+    $pre = $headline
+    return (New-PimMailDocument -Title 'Daily changes' -Subtitle $sub -Preheader $pre -SummaryHtml $summary -BodyHtml $body `
+                -Button $(if ($btn.url) { @{ url = $btn.url; label = $btn.label } } else { $null }) -HomeUrl $homeUrl -NotificationsUrl $notif `
+                -Environment $Environment -AudienceLabel (Get-PimMailAudienceLabel $Audience) -GeneratedUtc $we -Print:$Print)
+}
+
+function ConvertTo-PimDailyChangesTokens {
+    <#
+      The daily-summary template tokens for ONE audience: every token the old template used (ConvertTo-PimDailySummaryTokens,
+      so a customer-EDITED template keeps rendering) plus ReportHtml (the designed body), RiskyCount, ActorCount and the
+      subject's TotalChanges from the report.
+    #>
+    param([Parameter(Mandatory)][object]$Report, [string]$TenantLabel = '', [ValidateSet('soc', 'posture', 'manager')][string]$Audience = 'manager', [string]$PortalBase = '', [hashtable]$Environment = @{})
+    $t = ConvertTo-PimDailySummaryTokens -Summary $Report.summary -TenantLabel $TenantLabel
+    $t['TotalChanges'] = "$([int]$Report.total)"
+    $t['RiskyCount'] = "$(@($Report.risky).Count)"
+    $t['ActorCount'] = "$([int]$Report.actorCount)"
+    $t['RiskyNote'] = $(if (@($Report.risky).Count) { ", $(@($Report.risky).Count) need a look" } else { '' })
+    $t['ReportHtml'] = ConvertTo-PimDailyChangesHtml -Report $Report -Audience $Audience -PortalBase $PortalBase -Environment $Environment
+    $t['PortalQuery'] = ''
+    return $t
 }
 
 # ---------------------------------------------------------------------------
@@ -292,6 +539,8 @@ function ConvertTo-PimTierReportTokens {
     $rep = @($Report)
     $label = if ("$TenantLabel".Trim()) { " - $TenantLabel" } else { '' }
     @{
+        # MAIL-2: the designed body; ConvertTo-PimTierReportDesignedTokens replaces it per audience. A summary-only fallback here.
+        ReportHtml  = ('<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#24292f;padding:16px;"><table cellpadding="6" style="border-collapse:collapse;border:1px solid #d0d7de;"><tr><th align="left">User</th><th align="left">Highest tier</th><th align="left">Level(s)</th><th align="left">Grants</th></tr>' + (ConvertTo-PimTierReportHtmlRows -Report $rep) + '</table></div>')
         TenantLabel = $label
         T0Count     = "$(@($rep | Where-Object { [int]$_.highestTier -eq 0 }).Count)"
         T1Count     = "$(@($rep | Where-Object { [int]$_.highestTier -eq 1 }).Count)"
@@ -299,6 +548,36 @@ function ConvertTo-PimTierReportTokens {
         ReportRows  = ConvertTo-PimTierReportHtmlRows -Report $rep
         Date        = (Get-Date).ToString('yyyy-MM-dd')
     }
+}
+
+function ConvertTo-PimTierReportDesignedTokens {
+    <#
+      MAIL-2 items 1, 4, 7: the tier report in the designed layout, for ONE audience -- tiles (Tier 0 / Tier 1 holders, people),
+      the blue button (SOC: investigate in reports; posture: the delegation map; manager: access reviews), the table with the
+      Tier 0 holders first. Every old token stays (an edited template keeps rendering).
+    #>
+    param([Parameter(Mandatory)][object[]]$Report, [string]$TenantLabel = '', [ValidateSet('soc', 'posture', 'manager')][string]$Audience = 'manager',
+          [string]$PortalBase = '', [hashtable]$Environment = @{}, [datetime]$NowUtc = [datetime]::UtcNow, [switch]$Print)
+    $t = ConvertTo-PimTierReportTokens -Report $Report -TenantLabel $TenantLabel
+    $rep = @($Report)
+    $t0 = @($rep | Where-Object { [int]$_.highestTier -eq 0 }); $t1 = @($rep | Where-Object { [int]$_.highestTier -eq 1 })
+    $btn = Get-PimAudienceLink -Type 'tier-report' -Audience $Audience -Base $PortalBase
+    $homeUrl = if ("$PortalBase".Trim()) { (Get-PimAudienceLink -Type 'home' -Base $PortalBase -LinkTab 'home').url -replace '/\?tab=home$', '/' } else { '' }
+    $notif = (Get-PimAudienceLink -Type 'settings' -Base $PortalBase -LinkTab 'settings' -Query 'section=notifications').url
+    $tiles = New-PimMailSummaryTiles -Tiles @(
+        @{ label = 'Tier 0 holders'; value = "$($t0.Count)"; tone = $(if ($t0.Count) { 'danger' } else { 'good' }) }
+        @{ label = 'Tier 1 holders'; value = "$($t1.Count)"; tone = $(if ($t1.Count) { 'warning' } else { 'good' }) }
+        @{ label = 'People'; value = "$($rep.Count)"; tone = 'accent' })
+    $sum = $tiles + '<p style="font-family:' + (Get-PimMailBrand).font + ';font-size:14px;margin:10px 0 0 0;">' + (ConvertTo-PimMailText ("{0} people hold Tier 0 or Tier 1 access: {1} at Tier 0, {2} at Tier 1. Review anyone you do not expect." -f $rep.Count, $t0.Count, $t1.Count)) + '</p>'
+    $rows = @($rep | ForEach-Object { [pscustomobject]@{ user = $_.user; tier = ('Tier ' + [int]$_.highestTier); levels = $(if (@($_.levels).Count) { (@($_.levels | ForEach-Object { "L$_" }) -join ', ') } else { '' }); grants = [int]$_.grantCount
+        groups = ((@($_.grants | ForEach-Object { "$($_.tag)" } | Where-Object { $_ } | Select-Object -Unique) | Select-Object -First 6) -join ', ') } })
+    $cols = @(@{ key = 'user'; label = 'Person' }, @{ key = 'tier'; label = 'Highest tier' }, @{ key = 'levels'; label = 'Level(s)' }, @{ key = 'grants'; label = 'Grants' }, @{ key = 'groups'; label = 'Groups' })
+    $body = New-PimMailSection -Title ("Tier 0 ({0})" -f $t0.Count) -Html (New-PimMailTable -Columns $cols -Rows @($rows | Where-Object { $_.tier -eq 'Tier 0' }) -EmptyText 'Nobody holds Tier 0 access.' -MaxRows $(if ($Print) { 0 } else { 60 }) -MoreUrl $btn.url)
+    $body += New-PimMailSection -Title ("Tier 1 ({0})" -f $t1.Count) -Html (New-PimMailTable -Columns $cols -Rows @($rows | Where-Object { $_.tier -eq 'Tier 1' }) -EmptyText 'Nobody holds Tier 1 access.' -MaxRows $(if ($Print) { 0 } else { 60 }) -MoreUrl $btn.url)
+    $t['ReportHtml'] = New-PimMailDocument -Title 'Tier 0 / Tier 1 access' -Subtitle ('as of ' + $NowUtc.ToUniversalTime().ToString('yyyy-MM-dd HH:mm') + ' UTC') -Preheader ("{0} Tier 0 and {1} Tier 1 holders" -f $t0.Count, $t1.Count) `
+        -SummaryHtml $sum -BodyHtml $body -Button $(if ($btn.url) { @{ url = $btn.url; label = $btn.label } } else { $null }) -HomeUrl $homeUrl -NotificationsUrl $notif `
+        -Environment $Environment -AudienceLabel (Get-PimMailAudienceLabel $Audience) -GeneratedUtc $NowUtc -Print:$Print
+    return $t
 }
 
 # ---------------------------------------------------------------------------
@@ -350,8 +629,9 @@ function Get-PimDigestRecipients {
       Returns @{ recipients; source }.
     #>
     [CmdletBinding()]
-    param([ValidateSet('daily-summary','tier-report')][string]$Kind = 'daily-summary')
-    $g = if ($Kind -eq 'tier-report') { $global:PIM_TierReportRecipients } else { $global:PIM_DigestRecipients }
+    # 'alerts' (MAIL-2 item 8, the Get Started reminder): the alert recipients only -- no report-specific list.
+    param([ValidateSet('daily-summary','tier-report','alerts')][string]$Kind = 'daily-summary')
+    $g = if ($Kind -eq 'tier-report') { $global:PIM_TierReportRecipients } elseif ($Kind -eq 'alerts') { $null } else { $global:PIM_DigestRecipients }
     $inj = @(@($g) | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
     if ($inj.Count) { return [pscustomobject]@{ recipients = $inj; source = 'injected' } }
     $raw = $null
@@ -363,7 +643,7 @@ function Get-PimDigestRecipients {
     }
     for ($i = 0; $i -lt 2 -and $raw -is [string]; $i++) { if ("$raw".Trim()) { try { $raw = $raw | ConvertFrom-Json } catch { $raw = $null } } else { $raw = $null } }
     if ($null -eq $raw) { return [pscustomobject]@{ recipients = @(); source = 'none' } }
-    $specific = if ($Kind -eq 'tier-report') { 'tierReportRecipients' } else { 'digestRecipients' }
+    $specific = if ($Kind -eq 'tier-report') { 'tierReportRecipients' } elseif ($Kind -eq 'alerts') { 'recipients' } else { 'digestRecipients' }
     foreach ($name in @($specific, 'recipients')) {
         $v = $null
         if ($raw -is [System.Collections.IDictionary]) { if ($raw.Contains($name)) { $v = $raw[$name] } }

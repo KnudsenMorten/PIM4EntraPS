@@ -1,9 +1,14 @@
 ﻿#Requires -Version 5.1
+
 <#
 .SYNOPSIS
-  The OUT-OF-BAND operator route for the break-glass ACCOUNT list (pim.Settings['BreakGlassAccounts']).
+  Replaces the list of break-glass (emergency) accounts that PIM Manager never disables, revokes or offboards, writing
+  it straight to the environment's store with a justification; for when the normal two-person route in PIM Manager
+  cannot be used.
 
 .DESCRIPTION
+  The OUT-OF-BAND operator route for the break-glass ACCOUNT list (pim.Settings['BreakGlassAccounts']).
+
   In the Manager a change to the break-glass list is MAKER/CHECKER (operator 2026-09-19): one SuperAdmin
   raises a request, a SECOND SuperAdmin approves it, and only then does it apply
   (engine/_shared/PIM-BreakGlassChange.ps1). That is the normal route.
@@ -38,10 +43,12 @@
   app (-TenantId -AdminAppId -AdminCertThumbprint) or as the signed-in az user (-UseSignedInAccount).
 
 .EXAMPLE
-  pwsh -File Set-PimBreakGlassAccounts.ps1 -SqlServer sql-x.database.windows.net -TenantId <t> `
-       -AdminAppId <appid> -AdminCertThumbprint <thumb> `
+  pwsh -File Set-PimBreakGlassAccounts.ps1 -SqlServer sql-x.database.windows.net -TenantId <t> -UseSignedInAccount `
        -Accounts 'breakglass01@contoso.onmicrosoft.com','breakglass02@contoso.onmicrosoft.com' `
        -Justification 'only one SuperAdmin in this environment' -WhatIf
+
+.LINK
+  https://invardia.com/docs/pim/scripts/Set-PimBreakGlassAccounts/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -65,6 +72,7 @@ $sol  = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $sol 'engine\_shared\PIM-SqlStore.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-BreakGlassAccounts.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-BreakGlassChange.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 
 function Invoke-PimBreakGlassAccountsSetup {
     <#
@@ -116,6 +124,8 @@ function Invoke-PimBreakGlassAccountsSetup {
 # Dot-sourced (the offline test): define the functions, run nothing.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
+$null = Start-PimScriptRun -Script 'Set-PimBreakGlassAccounts'
+try {
 $result = [ordered]@{ ok = $false; reason = ''; whatIf = [bool]$WhatIfPreference }
 function Write-ResultFile { if ("$OutFile".Trim()) { try { $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $OutFile -Encoding UTF8 } catch {} } }
 function Fail($m) { $result.reason = $m; Write-ResultFile; Write-Host "RESULT: FAILED -- $m" -ForegroundColor Red; exit 1 }
@@ -155,7 +165,8 @@ if ("$ConnectionString".Trim()) {
 if (-not "$actor".Trim()) { $actor = 'setup' }
 
 # --- validate, read, write, read back --------------------------------------------------------
-$whatIfOnly = [bool]$WhatIfPreference -or -not $PSCmdlet.ShouldProcess("pim.Settings['BreakGlassAccounts']", 'replace the break-glass account list')
+$listText = $(if (@($Accounts | Where-Object { "$_".Trim() }).Count) { (@($Accounts | Where-Object { "$_".Trim() }) -join ', ') } else { '(empty)' })
+$whatIfOnly = -not $PSCmdlet.ShouldProcess("pim.Settings['BreakGlassAccounts'] in $(if ("$SqlServer".Trim()) { "$SqlServer/$Database" } else { 'the store' })", "replace the break-glass account list with: $listText (audited as 'breakglass.accounts.set')")
 try { $r = Invoke-PimBreakGlassAccountsSetup -ConnectionString $cs -Accounts $Accounts -Justification $Justification -Actor $actor -ConfirmEmpty:$ConfirmEmpty -WhatIfOnly:$whatIfOnly }
 catch { Fail "$($_.Exception.Message)" }
 
@@ -165,6 +176,8 @@ Note ("add        : " + $(if (@($r.added).Count) { @($r.added) -join ', ' } else
 Note ("remove     : " + $(if (@($r.removed).Count) { @($r.removed) -join ', ' } else { '-' })) $(if (@($r.removed).Count) { 'Yellow' } else { 'Gray' })
 if ("$($r.openRequest)".Trim()) { Note "NOTE: $($r.openRequest)" 'Yellow' }
 if ($r.whatIf) {
+    if ($r.changed) { Note ("What if: would store $(@($r.accounts).Count) account(s) in pim.Settings['BreakGlassAccounts'] (compare-and-set) and write the audit event 'breakglass.accounts.set'") 'Yellow' }
+    else { Note 'What if: the stored list already matches -- nothing would be written' 'Yellow' }
     $result.ok = $true; $result.reason = 'what-if -- nothing written'
     Write-ResultFile; Write-Host "RESULT: WHAT-IF -- nothing written" -ForegroundColor Yellow; exit 0
 }
@@ -178,3 +191,4 @@ Write-ResultFile
 Write-Host "RESULT: OK -- $($result.reason)" -ForegroundColor Green
 Write-Host "  NOTE: the Manager and the engine read the list on their next check (within a minute)." -ForegroundColor DarkGray
 exit 0
+} finally { Stop-PimScriptRun -Script 'Set-PimBreakGlassAccounts' }

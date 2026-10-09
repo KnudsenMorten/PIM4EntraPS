@@ -1,6 +1,8 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
+    Build a managing tenant (an MSP's own PIM Manager that publishes a signed baseline) or a managed tenant (a customer's PIM Manager that pulls it) end to end from one configuration file of ids and names. Without -Apply it only prints the plan.
     71.18 -- THE ONE-SHOT MSP BUILD: a managing tenant (S3) or a MANAGED tenant (S6, locally hosted pull), end to end, from a
     machine-local config of ids and names. Signed-in administrator OR certificate identity; the environments it builds
     run as managed identities. Plan by default; -Apply to build.
@@ -91,8 +93,28 @@
 .PARAMETER EnrollmentHttp / EnrollmentSleep / EnrollmentTimeoutSeconds
     TEST seams: param($method, $url, $body, $headers) -> @{ status; body } in place of the real HTTPS call; param($seconds) in
     place of Start-Sleep while the licence is signed; the polling bound (default 900 s).
+
+.PARAMETER WhatIf
+    The plan and the operator steps only, exactly as without -Apply -- and it wins over -Apply: nothing is claimed at
+    Invardia, signed in, created or granted. Each step's script can be previewed on its own with its own -WhatIf.
+
+.NOTES
+    PERMISSIONS (the full list, with scope, reason and undo, is on the documentation page and in Invoke-PimMspBuild.doc.json):
+    The person running it needs (signed-in mode): Owner (or Contributor + User Access Administrator) on the subscription;
+    in Entra ID Privileged Role Administrator, Application Administrator and Groups Administrator; Exchange Administrator
+    only for the mail sender. Certificate mode: the deploy identity named in the config with the same rights.
+    It creates and grants everything Invoke-PimDeployAll does (the 'hosting' step), plus: the SQL admin group members
+    (tick, Manager, Invardia Support app); the engine Graph set to the tick identity and the read-only set to the Manager
+    identity; Container Apps Jobs Operator for the Manager on the tick job; Reader at the tenant root for the tick; on a
+    managing tenant the signed-baseline storage (Storage Blob Data Contributor for the publish job), the Key Vault signing
+    key (Key Vault Crypto User for the publish job), the publish job and its SQL reader user, the managed-tenant network
+    rules; on a managed tenant the storage service endpoint and the pull job (engine Graph set, SQL admin group member).
+    Logs: a transcript of the run in the temp folder (pim-manager-logs); its path is printed.
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Invoke-PimMspBuild/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][ValidateSet('Master','Slave')][string]$Role,
     [Parameter(Mandatory)][string]$ConfigPath,
@@ -127,7 +149,12 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $solRoot 'engine\msp\PIM-InvardiaEnrollment.ps1')
 . (Join-Path $here '_PimSasCertLogin.ps1')
 . (Join-Path $here '_PimInstallTracking.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')     # framework 12.7: the Documentation line + the transcript
+$null = Start-PimScriptRun -Script 'Invoke-PimMspBuild'
+try {
 if (-not $PSBoundParameters.ContainsKey('InvardiaInstallToken')) { $InvardiaInstallToken = "$($env:INVARDIA_INSTALL_TOKEN)".Trim() }
+# framework 12.7: -WhatIf is the plan -- it wins over -Apply (the claim, the sign-in and every step write).
+if ($WhatIfPreference -and $Apply) { Write-Host '    -WhatIf: plan only -- it wins over -Apply; nothing is claimed, created or granted.' -ForegroundColor Yellow; $Apply = $false }
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) { throw "config not found: $ConfigPath" }
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
@@ -186,7 +213,19 @@ $printOps = {
     Write-Host "`n--- operator steps (need a human or a decision; NOT automated) ---" -ForegroundColor Yellow
     foreach ($o in $ops) { Write-Host ("  [{0}] {1}  (when: {2})`n        {3}" -f $o.id, $o.title, $o.when, $o.command) }
 }
-if (-not $Apply) { & $printOps; Write-Host "`nPLAN ONLY -- re-run with -Apply to build." -ForegroundColor Cyan; exit 0 }
+if (-not $Apply) {
+    & $printOps
+    if ($WhatIfPreference) {
+        # framework 12.7: name what each step would change -- the step's script and its target (its own -WhatIf shows the detail).
+        Write-Host "`n--- what the build WOULD change (nothing is done under -WhatIf) ---" -ForegroundColor Yellow
+        for ($i = $startAt; $i -lt $plan.Count; $i++) {
+            $s = $plan[$i]
+            if ("$($s.blocked)".Trim()) { Write-Host ("  What if: [{0}] NOT RUNNABLE: {1}" -f $s.id, $s.blocked) -ForegroundColor DarkGray; continue }
+            Write-Host ("  What if: [{0}] {1} -- {2} in tenant {3} / subscription {4}" -f $s.id, $s.title, $(if ("$($s.script)".Trim()) { $s.script } else { 'the build itself' }), $config.tenantId, $config.subscriptionId) -ForegroundColor Yellow
+        }
+    }
+    Write-Host "`nPLAN ONLY -- re-run with -Apply to build." -ForegroundColor Cyan; exit 0
+}
 # The release feed URL carries its SAS, so it lives in this session's environment only (Invoke-PimDeployAll reads it) --
 # never in the config file. Without it the updater cannot be deployed, so refuse before touching anything.
 # THE RELEASE FEED. Three sources, in this order and no others: -UpdateSourceUrl, the distributable FEED FILE, then
@@ -513,3 +552,4 @@ Write-Host "`nBUILD COMPLETE ($Role). Work through the operator steps above." -F
 $verOut = ''; try { $verOut = "$(Get-Content -Raw -LiteralPath (Join-Path $solRoot 'VERSION'))".Trim() } catch { }
 [void](Complete-PimInstallTracker -Tracker $tracker -Outputs ([ordered]@{ role = $Role; version = $verOut; imageTag = "$($pin.tag)"; resourceGroup = "$($config.resourceGroup)" }))
 exit 0
+} finally { Stop-PimScriptRun -Script 'Invoke-PimMspBuild' }   # framework 12.7: "Log written: <path>" on every exit

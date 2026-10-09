@@ -82,6 +82,8 @@ $here = $PSScriptRoot
 . (Join-Path $here '_PimInstallVerify.ps1')
 # the tenant-root helpers (Get-PimTenantRootScope / Get-PimRootAzureHoldings / Get-PimRootAzureFixCommand), pure
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-PermissionHealth.ps1')
+# SCRIPT-DOC-1 (framework 12.7): every fix command this check prints carries the script's doc page + the checksum check
+. (Join-Path $here '_PimScriptDoc.ps1')
 # 🔴 The store: Connect-PimSetupStore + its token provider (PIM-Rest: Get-PimRestToken) + the reads (PIM-SqlStore:
 # Get-PimSqlSetting / Invoke-PimSqlScalar) -- loaded HERE, AT FILE SCOPE. The live proof on a managing tenant
 # (2026-10-08, the check run ON ITS OWN through the Invardia Support app) failed every store line twice over, and both
@@ -369,7 +371,7 @@ $fix['licence'] = (@('PIM Manager > Settings > Licence: upload the .pimlicense f
 $mailCmd = New-PimMailSenderCommand -TenantId $TenantId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -TickJobName $TickJobName -ManagerAppName $ManagerApp -SqlServerFqdn $SqlServerFqdn
 $fix['mailsender'] = (@('PIM Manager > Get Started > Mail sender (shared mailbox: an Exchange or Global Administrator runs this in a browser sign-in; it also gives BOTH identities the scoped send right):') + @($mailCmd)) -join "`n"
 $fix['alerting'] = (@('PIM Manager > Settings > Alerting > Recipients', (& $viaResume 'this')) | Where-Object { $_ }) -join "`n"
-$fix['engine-graph'] = "Invoke-WebRequest https://invardia.com/support/pim/Grant-PimEnginePermissions.ps1 -OutFile Grant-PimEnginePermissions.ps1`n.\Grant-PimEnginePermissions.ps1 -TenantId '$TenantId' -EngineObjectId '<engine job object id>' -GraphPermissions <the missing ones above>   (a Privileged Role Administrator, browser sign-in)"
+$fix['engine-graph'] = (Get-PimSupportScriptCommand -Script 'Grant-PimEnginePermissions' -Run @(".\Grant-PimEnginePermissions.ps1 -TenantId '$TenantId' -EngineObjectId '<engine job object id>' -GraphPermissions <the missing ones above>   (a Privileged Role Administrator, browser sign-in)")) -join "`n"
 $fix['engine-root-reader'] = ''
 $fix['easyauth'] = (@("Microsoft Entra admin center > Enterprise applications > the PIM Manager's sign-in application > Users and groups: assign the SuperAdmins (or a group that holds them)", (& $viaResume 'the check')) | Where-Object { $_ }) -join "`n"
 $fix['sql-host-rule'] = "az sql server firewall-rule delete --subscription $SubscriptionId -g $sqlRg -s $sqlServer -n AllowSetupHost   (or Azure portal > SQL server > Networking: remove 'AllowSetupHost')"

@@ -1,9 +1,14 @@
 ﻿#Requires -Version 5.1
+
 <#
 .SYNOPSIS
-  REQ-F -- provision the EMERGENCY OVERRIDE passphrase for one environment, so break-glass can actually be activated.
+  Sets up the emergency override (break-glass) passphrase of one PIM Manager environment: stores its SHA-256 hash as a
+  secret in the environment's key vault, gives the Manager's managed identity read access to that one secret, and
+  points the Manager at the vault.
 
 .DESCRIPTION
+  REQ-F -- provision the EMERGENCY OVERRIDE passphrase for one environment, so break-glass can actually be activated.
+
   The Manager's Settings -> Emergency override (break-glass) checks the operator's passphrase against the key vault
   secret PIM-EmergencyPasscode in the vault named by the Manager's PIM_EmergencyVault. Measured 2026-09-19: NO
   Manager had PIM_EmergencyVault and no setup script provisioned the passphrase, so every activation was refused
@@ -31,9 +36,15 @@
 .PARAMETER VaultResourceGroup  The vault's resource group (default: -ResourceGroup).
 .PARAMETER Passphrase          The passphrase, as a SecureString. Omit it to be prompted.
 
+  -WhatIf asks for no passphrase: it signs in, reads the Manager app, the vault and its role assignments, prints every
+  change it would make (the secret, the grant, the app setting) and writes nothing.
+
 .EXAMPLE
   pwsh -File Set-PimEmergencyPassphrase.ps1 -SubscriptionId <sub> -ResourceGroup rg-pim -VaultName kv-pim-x `
-       -TenantId <t> -AdminAppId <appid> -AdminCertThumbprint <thumb> -WhatIf
+       -TenantId <t> -UseSignedInAccount -WhatIf
+
+.LINK
+  https://invardia.com/docs/pim/scripts/Set-PimEmergencyPassphrase/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -57,6 +68,7 @@ $here = Split-Path -Parent $PSCommandPath
 $sol  = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-ArmContainerApps.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 
 # Key Vault Secrets User (built-in role, read secret values).
 $script:PimKvSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
@@ -199,6 +211,8 @@ function Invoke-PimEmergencyPassphraseSetup {
 # Dot-sourced (the offline test): define the functions, run nothing.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
+$null = Start-PimScriptRun -Script 'Set-PimEmergencyPassphrase'
+try {
 $result = [ordered]@{ ok = $false; reason = ''; whatIf = [bool]$WhatIfPreference }
 function Write-ResultFile { if ("$OutFile".Trim()) { try { $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $OutFile -Encoding UTF8 } catch {} } }
 function Fail($m) { $result.reason = $m; Write-ResultFile; Write-Host "RESULT: FAILED -- $m" -ForegroundColor Red; exit 1 }
@@ -226,7 +240,11 @@ if ($UseSignedInAccount) {
 }
 
 # --- the passphrase (SecureString only; typed twice when prompted) ---------------------------
-if (-not $Passphrase) {
+# 12.7: -WhatIf writes nothing, so it needs no passphrase -- a placeholder hash plans the same steps.
+if ($WhatIfPreference -and -not $Passphrase) {
+    Note 'What if: no passphrase is asked for -- nothing will be stored' 'Yellow'
+    $hash = '0' * 64
+} elseif (-not $Passphrase) {
     $p1 = Read-Host -AsSecureString -Prompt 'Emergency passphrase (min 12 characters)'
     $p2 = Read-Host -AsSecureString -Prompt 'Type it again'
     $h1 = ''; $h2 = ''
@@ -237,14 +255,14 @@ if (-not $Passphrase) {
     try { $hash = ConvertTo-PimEmergencyPassphraseHash -Passphrase $Passphrase } catch { Fail "$($_.Exception.Message)" }
 }
 
-$whatIfOnly = [bool]$WhatIfPreference -or -not $PSCmdlet.ShouldProcess("$VaultName/$SecretName + $ManagerApp", 'store the emergency passphrase hash, grant the Manager read access, set PIM_EmergencyVault')
+$whatIfOnly = -not $PSCmdlet.ShouldProcess("key vault $VaultName secret $SecretName + container app $ManagerApp (subscription $SubscriptionId)", "store the emergency passphrase hash, grant the Manager identity 'Key Vault Secrets User' on that secret, set PIM_EmergencyVault")
 try {
     $r = Invoke-PimEmergencyPassphraseSetup -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ManagerApp $ManagerApp -ContainerName $ContainerName `
             -VaultName $VaultName -VaultResourceGroup $VaultResourceGroup -SecretName $SecretName -PassphraseHash $hash -WhatIfOnly:$whatIfOnly
 } catch { Fail "$($_.Exception.Message)" }
 $hash = $null
 foreach ($k in $r.PSObject.Properties.Name) { $result[$k] = $r.$k }
-foreach ($line in @($r.plan)) { Note $line }
+foreach ($line in @($r.plan)) { if ($r.whatIf) { Note "What if: would $line" 'Yellow' } else { Note $line } }
 if ($r.whatIf) {
     $result.ok = $true; $result.reason = 'what-if -- nothing written'
     Write-ResultFile; Write-Host 'RESULT: WHAT-IF -- nothing written' -ForegroundColor Yellow; exit 0
@@ -255,3 +273,4 @@ Write-ResultFile
 Write-Host "RESULT: OK -- $($result.reason)" -ForegroundColor Green
 Write-Host '  NOTE: a new role assignment can take a few minutes to apply. Settings -> Emergency override shows "Passphrase: configured" once the Manager can read it.' -ForegroundColor DarkGray
 exit 0
+} finally { Stop-PimScriptRun -Script 'Set-PimEmergencyPassphrase' }

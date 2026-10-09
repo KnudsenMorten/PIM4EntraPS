@@ -1,10 +1,15 @@
 ﻿#Requires -Version 5.1
+
 <#
 .SYNOPSIS
+    Copies named PIM Manager settings (for example the naming conventions) from one environment's store to another
+    environment's store: it reads both, shows the difference, backs up the target's current value, and only with
+    -Apply overwrites it and reads it back.
+
+.DESCRIPTION
     Export settings from one PIM tenant and import them into another (operator, 2026-09-22:
     "make info on the settings on how to export/import between tenants (script)").
 
-.DESCRIPTION
     Settings live in `pim.Settings` as one JSON document per name (naming conventions, schedules,
     manager access, ...). Copying one between tenants -- a managing tenant's naming conventions to a managed
     tenant, a known-good schedule to a new environment -- was a hand-written SQL job every time, and
@@ -41,9 +46,11 @@
 
 .PARAMETER Apply
     Write. Without it the script only reports what WOULD change (and still takes the backup).
+    -WhatIf (with or without -Apply) reads both stores, shows the difference and prints the overwrite it would make;
+    it writes nothing to either store, and a backup outside the temp folder is only announced.
 
 .EXAMPLE
-    # master EFIF -> managed tenant RIDE, naming conventions, dry run
+    # managing tenant -> managed tenant, naming conventions, dry run
     .\Copy-PimSettings.ps1 -Name NamingConventions `
         -FromServer sql-a.database.windows.net -FromTenantId <a> -FromClientId <a> -FromCertThumbprint <a> `
         -ToServer   sql-b.database.windows.net -ToTenantId   <b> -ToClientId   <b> -ToCertThumbprint   <b>
@@ -51,6 +58,9 @@
 .EXAMPLE
     # ...and for real
     .\Copy-PimSettings.ps1 -Name NamingConventions ... -Apply
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Copy-PimSettings/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -76,6 +86,9 @@ $sol  = Split-Path -Parent (Split-Path -Parent $here)        # ...\SOLUTIONS\PIM
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-SqlStore.ps1')
 . (Join-Path $here '_PimSettingsCopy.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Copy-PimSettings'
+try {
 
 # 🔒 Settings that describe WHO this environment is, or WHO may act in it. Copying one of these
 # between tenants does not configure the target -- it points the target at the source's identities.
@@ -113,7 +126,16 @@ function Use-Tenant {
 }
 
 if (-not "$BackupDir".Trim()) { $BackupDir = Join-Path ([IO.Path]::GetTempPath()) 'pim-settings-copy' }
-if (-not (Test-Path -LiteralPath $BackupDir)) { New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null }
+# 12.7: -WhatIf writes nothing outside the temp folder. A backup in the temp folder (the default) is still taken -- it is
+# what makes the dry run's diff restorable -- and a backup anywhere else is only announced.
+$backupInTemp = ([IO.Path]::GetFullPath($BackupDir)).StartsWith(([IO.Path]::GetFullPath([IO.Path]::GetTempPath())), [StringComparison]::OrdinalIgnoreCase)
+$backupWrites = $backupInTemp -or -not $WhatIfPreference
+function Save-Backup {
+    param([string]$Path, [string]$Value)
+    if (-not $backupWrites) { Write-Host "  What if: would write the backup $Path" -ForegroundColor Yellow; return }
+    Set-Content -Path $Path -Value $Value -Encoding UTF8 -WhatIf:$false -Confirm:$false
+}
+if ($backupWrites -and -not (Test-Path -LiteralPath $BackupDir)) { New-Item -ItemType Directory -Force -Path $BackupDir -WhatIf:$false -Confirm:$false | Out-Null }
 $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
 
 foreach ($n in @($Name)) { Confirm-Copyable -SettingName $n }
@@ -130,7 +152,7 @@ foreach ($n in @($Name)) {
     $src = $null
     try { $src = Get-PimSqlSetting -ConnectionString $csFrom -Name $n } catch { throw ("could not read '$n' from the source: $($_.Exception.Message)") }
     if ($null -eq $src) { Write-Host "  the SOURCE has no such setting -- skipped (nothing is cleared in the target)" -ForegroundColor Yellow; continue }
-    Set-Content -Path (Join-Path $BackupDir ("{0}-SOURCE-{1}.json" -f $n, $stamp)) -Value ($src | ConvertTo-Json -Depth 12) -Encoding UTF8
+    Save-Backup -Path (Join-Path $BackupDir ("{0}-SOURCE-{1}.json" -f $n, $stamp)) -Value ($src | ConvertTo-Json -Depth 12)
 
     $csTo = Use-Tenant -TenantId $ToTenantId -ClientId $ToClientId -Thumbprint $ToCertThumbprint -Server $ToServer -Database $ToDatabase
     $dst = $null
@@ -146,8 +168,8 @@ foreach ($n in @($Name)) {
     # 🔑 The target's CURRENT value is saved before anything is written, every run -- including a dry
     # run. Restoring is this same script with -From/-To swapped, or an import of this file.
     $backupFile = Join-Path $BackupDir ("{0}-TARGET-BEFORE-{1}.json" -f $n, $stamp)
-    Set-Content -Path $backupFile -Value $dstJson -Encoding UTF8
-    Write-Host ("  target backup: {0}" -f $backupFile)
+    Save-Backup -Path $backupFile -Value $dstJson
+    if ($backupWrites) { Write-Host ("  target backup: {0}" -f $backupFile) }
 
     if (($srcJson -replace '\s', '') -eq ($dstJson -replace '\s', '')) {
         Write-Host '  identical already -- nothing to do.' -ForegroundColor DarkGray
@@ -157,7 +179,7 @@ foreach ($n in @($Name)) {
     Write-Host '  TARGET (now):' -ForegroundColor Yellow; Write-Host ('    ' + ($(if ($dstJson) { $dstJson } else { '(not set)' }) -replace "`r?`n", "`n    "))
 
     if (-not $Apply) { Write-Host '  would be overwritten with SOURCE (re-run with -Apply)' -ForegroundColor Yellow; continue }
-    if ($PSCmdlet.ShouldProcess("$ToTenantId / $n", 'overwrite with the source value')) {
+    if ($PSCmdlet.ShouldProcess("pim.Settings['$n'] in $ToServer/$ToDatabase (tenant $ToTenantId)", 'overwrite with the source value')) {
         Set-PimSqlSetting -ConnectionString $csTo -Name $n -Value $src
         $after = Get-PimSqlSetting -ConnectionString $csTo -Name $n
         $afterJson = $(if ($null -ne $after) { ($after | ConvertTo-Json -Depth 12) } else { '' })
@@ -172,3 +194,4 @@ foreach ($n in @($Name)) {
 
 Write-Host ("`nDone. {0} setting(s) changed in {1}." -f $changed, $ToTenantId) -ForegroundColor Cyan
 if (-not $Apply) { Write-Host 'Dry run -- re-run with -Apply to write.' -ForegroundColor Yellow }
+} finally { Stop-PimScriptRun -Script 'Copy-PimSettings' }

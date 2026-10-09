@@ -110,6 +110,14 @@ function Get-PimWorkloadConnectorCatalog {
         $id = "$($c.id)".Trim().ToLowerInvariant()
         if ($id) { $h[$id] = $c }
     }
+    # 100.17 CUSTOM-WORKLOAD: the environment's custom workloads (pim.Settings['CustomWorkloads'], PIM-CustomWorkloads.ps1)
+    # join the catalog as GROUP-ONLY entries. A shipped connector id always wins (custom ids carry the 'custom-' prefix,
+    # so the two never meet). Resolve-PimWorkloadBinding never calls an API for a group-only entry.
+    if (Get-Command Get-PimCustomWorkloadConnectors -ErrorAction SilentlyContinue) {
+        $custom = @{}
+        try { $custom = Get-PimCustomWorkloadConnectors } catch { Write-Warning ("  [workloads] custom workloads could not be read: {0}" -f $_.Exception.Message); $custom = @{} }
+        foreach ($k in @($custom.Keys)) { if (-not $h.ContainsKey($k)) { $h[$k] = $custom[$k] } }
+    }
     return $h
 }
 
@@ -489,6 +497,21 @@ function Resolve-PimWorkloadBinding {
     }
     $b.groupId = "$gid"
     $tokens = @{ groupId = "$gid"; groupTag = "$($Row.GroupTag)"; resource = "$($Row.Resource)"; scope = "$($Row.Scope)"; company = "$($Row.Company)" }
+    # 100.17 CUSTOM-WORKLOAD -- a GROUP-ONLY workload: the application consumes the Entra group's membership (SSO claim,
+    # SCIM, its own role mapping), so the binding IS the group. It is satisfied once the group exists; the role is checked
+    # against the workload's DEFINITION, never a live listing. No token, no API call.
+    if ($conn.groupOnly) {
+        $role = @(@($conn.roles) | Where-Object { "$($_.name)" -ieq "$($Row.RoleName)".Trim() }) | Select-Object -First 1
+        if (-not $role) {
+            $b.error = ("WORKLOAD-ROLE-NOT-FOUND: custom workload '{0}' defines no role named '{1}'. Valid: {2}" -f $wid, $Row.RoleName, ((@($conn.roles) | ForEach-Object { "$($_.name)" }) -join ', '))
+            return $b
+        }
+        $b.role = $role
+        $tokens['roleId'] = "$($role.id)"; $tokens['roleName'] = "$($role.name)"
+        $b.tokens = $tokens
+        $b.present = $true
+        return $b
+    }
 
     $rk = "$wid|$($Row.Resource)|$($Row.Scope)|$($Row.Company)".ToLowerInvariant()
     if (-not $Cache.roles.ContainsKey($rk)) {
@@ -554,6 +577,8 @@ function Invoke-PimWorkloadBindingAssign {
     # Create the binding (v1 L2921-2926 membership, L2967-2976 flat).
     param([Parameter(Mandatory)][object]$Binding)
     $conn = $Binding.connector
+    # 100.17: a group-only workload has nothing to create in the application -- the group is the binding.
+    if ($conn -and $conn.groupOnly) { return [pscustomobject]@{ pimApplied = $false; reason = ("custom workload '{0}' is group-only -- the application reads the group's membership; PIM calls no API" -f $conn.id) } }
     $tokens = @{} + $Binding.tokens
     $tokens['newId'] = [guid]::NewGuid().ToString()
     $body = $null
@@ -569,6 +594,9 @@ function Invoke-PimWorkloadBindingRemove {
     #>
     param([Parameter(Mandatory)][object]$Binding)
     $conn = $Binding.connector
+    # 100.17: a group-only workload has nothing to detach in the application. Access ends with the group's membership and
+    # eligibility (offboarding / review / a removed delegation), which the group providers handle like any permission group.
+    if ($conn -and $conn.groupOnly) { return [pscustomobject]@{ pimApplied = $false; reason = ("custom workload '{0}' is group-only -- nothing to detach in the application; remove the group's membership or definition to end the access" -f $conn.id) } }
     $tokens = @{} + $Binding.tokens
     if (-not $Binding.membership) {
         $ex = $Binding.existing

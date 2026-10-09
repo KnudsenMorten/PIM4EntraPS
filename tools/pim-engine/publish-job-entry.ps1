@@ -91,7 +91,7 @@ $cadenceGate = Invoke-PimJobCadenceGate -Job 'publish' -Log $cadenceLog `
     -CompareAndSet { param($n, $v, $e) Set-PimJobCadenceValueIfUnchanged -ConnectionString $cs -Object 'pim.vw_PublishJobLastRun' -Name $n -NewJson $v -ExpectedJson $e }
 if (-not $cadenceGate.run) { JobLog '==== nothing to publish on this trigger (see the cadence line above) ===='; exit 0 }
 function Stop-PublishJob {
-    param([int]$Code, [ValidateSet('succeeded', 'failed')][string]$State, [string]$Detail, [string]$Version = '')
+    param([int]$Code, [ValidateSet('succeeded', 'failed', 'held')][string]$State, [string]$Detail, [string]$Version = '')
     [void](Complete-PimJobCadenceRun -Gate $cadenceGate -State $State -Detail $Detail -Version $Version -Log $cadenceLog `
         -Write { param($n, $j) Write-PimJobCadenceValue -ConnectionString $cs -Object 'pim.vw_PublishJobLastRun' -Name $n -Json $j })
     exit $Code
@@ -115,6 +115,16 @@ if (-not $licTenant -and "$($env:IDENTITY_HEADER)".Trim()) {
 }
 $mspLic = Invoke-PimMspLicenseGate -Role Master -TenantId $licTenant -LicenseText $licText -StoreError $licErr -SqlServer "$SqlServer".Trim() -Log $cadenceLog
 if (-not $mspLic.ok) { Stop-PublishJob -Code 2 -State failed -Detail "$($mspLic.message)" }
+
+# GATE-1 (owner-approved 2026-10-09): the msp.downlink switch gates the REAL publish (it used to gate only the tick's
+# placeholder job). Read through the control view (FeatureGates is exposed there, Get-PimPublishJobControlViewSql); an older
+# view without the row reads as "not set" = ON, exactly as before. A STORED off = no publish, recorded as 'held'.
+$pubSwitchErr = ''; $pubSwitchRaw = $null
+try { $pubSwitchRaw = (Read-PimJobCadenceValues -ConnectionString $cs -Object 'pim.vw_PublishJobControl' -Names @('FeatureGates'))['FeatureGates'] }
+catch { $pubSwitchErr = "$($_.Exception.Message)" }
+$pubSwitch = Resolve-PimMspDownlinkSwitch -FeatureGatesRaw $pubSwitchRaw -StoreError $pubSwitchErr
+if (-not $pubSwitch.run) { JobLog ("SKIPPED: {0}" -f $pubSwitch.reason) 'WARN'; Stop-PublishJob -Code 0 -State held -Detail "$($pubSwitch.reason)" }
+if ($pubSwitchErr) { JobLog $pubSwitch.reason 'WARN' }
 
 . (Join-Path $shared 'PIM-AccountRest.ps1')          # Send-PimRestBlob (Put Blob, bearer token)
 . (Join-Path $shared 'PIM-ChangeQueue.ps1')

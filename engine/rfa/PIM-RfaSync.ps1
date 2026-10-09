@@ -123,14 +123,37 @@ function Invoke-PimRfaSyncJob {
     $cs = $null
     if (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) { try { $cs = Get-PimSqlSettingsConnectionString } catch { $cs = $null } }
     if (-not $cs) { throw '[rfa-sync] no SQL store -- the admin rows and the requests cannot be read' }
+    # 🔴 RFA-2 (owner-approved 2026-10-09, PIM REQUIREMENTS §100.3): ACCESS NEVER STAYS ON PAST ITS WINDOW. A blank / wrong
+    # RFA store account, or the portal switched off / its licence lapsed, used to return here BEFORE the steps -- so the
+    # step that disables an account (and removes an ad-hoc membership) when its window ends never ran, and access granted
+    # stayed on. Now only taking in NEW requests and publishing to the portal need the store / the feature: the steps
+    # that END access (end, expire, cancel) and the self-healing row plan always run while there is anything to close.
+    $closeOnly = $false; $closeWhy = ''
     if ((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and -not (Test-PimFeatureAvailable -Key 'rfa.portal' -Quiet)) {
-        return [pscustomobject]@{ ran = $false; skipped = $true; whatIf = [bool]$WhatIf; failed = $false; detail = 'rfa-sync: the RFA portal is not enabled or not licensed (Pro) -- nothing to do' }
+        $closeOnly = $true; $closeWhy = 'the RFA portal is not enabled or not licensed (Pro)'
     }
     $settings = Get-PimSqlSetting -ConnectionString $cs -Name 'RfaSettings'
-    if (-not $Store) { $Store = New-PimRfaStore -Settings $settings }
-    if (-not $Store) { return [pscustomobject]@{ ran = $false; skipped = $true; whatIf = [bool]$WhatIf; failed = $false; detail = 'rfa-sync: no RFA store configured (RfaSettings.storeAccount) -- deploy the RFA portal first' } }
+    $storeErr = ''
+    if (-not $Store -and -not $closeOnly) { try { $Store = New-PimRfaStore -Settings $settings } catch { $Store = $null; $storeErr = "the RFA store could not be opened: $($_.Exception.Message)" } }
+    if (-not $Store -and -not $closeOnly -and -not $storeErr) { $storeErr = 'no RFA store configured (RfaSettings.storeAccount)' }
+    if ($closeOnly -or $storeErr) {
+        # Anything to close? An open request in the mirror, or an admin row RFA enabled (RfaWindowEndUtc set). Nothing = the
+        # quiet skip as before (an environment that never used RFA).
+        $openReq = @(); try { $openReq = @((Read-PimRfaMirror -ConnectionString $cs).requests | Where-Object { $_ -and "$($_.state)" -notin $script:PimRfaTerminalStates }) } catch { $openReq = @() }
+        $rfaRows = @(); try { $rfaRows = @(Get-PimSqlRows -ConnectionString $cs -Entity 'Account-Definitions-Admins' | Where-Object { "$(Get-PimRfaRowValue -Row $_ -Name 'RfaWindowEndUtc')".Trim() }) } catch { $rfaRows = @() }
+        if (-not $openReq.Count -and -not $rfaRows.Count) {
+            $why = if ($closeOnly) { "$closeWhy -- nothing to do" } else { "$storeErr -- deploy the RFA portal first" }
+            return [pscustomobject]@{ ran = $false; skipped = $true; whatIf = [bool]$WhatIf; failed = $false; detail = "rfa-sync: $why" }
+        }
+        $closeOnly = $true
+        if (-not $closeWhy) { $closeWhy = $storeErr }
+    }
     $log = New-Object System.Collections.Generic.List[string]; $errors = New-Object System.Collections.Generic.List[string]
     $mails = New-Object System.Collections.Generic.List[object]
+    if ($closeOnly) {
+        $errors.Add("$closeWhy -- no new request is taken in and the portal is not updated; windows that end are still closed")
+        $log.Add("CLOSE-ONLY: $closeWhy")
+    }
 
     # ---- inputs -----------------------------------------------------------------------------------------------
     $admins = @(Get-PimSqlRows -ConnectionString $cs -Entity 'Account-Definitions-Admins')
@@ -148,7 +171,7 @@ function Invoke-PimRfaSyncJob {
     $companyName = ''; try { $companyName = "$(Get-PimSqlSetting -ConnectionString $cs -Name 'CompanyName')" } catch { $companyName = '' }
     $supportEmail = ''; try { $supportEmail = "$(Get-PimSqlSetting -ConnectionString $cs -Name 'SupportEmail')" } catch { $supportEmail = '' }
     $salt = "$(if ($settings) { $settings.salt })".Trim()
-    if (-not $salt) {
+    if (-not $salt -and -not $closeOnly) {
         $b = New-Object byte[] 16; $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create(); try { $rng.GetBytes($b) } finally { $rng.Dispose() }
         $salt = ($b | ForEach-Object { $_.ToString('x2') }) -join ''
         $s2 = if ($settings) { $settings.PSObject.Copy() } else { [pscustomobject]@{} }
@@ -165,7 +188,16 @@ function Invoke-PimRfaSyncJob {
     try { $ak = Get-PimSqlSetting -ConnectionString $cs -Name 'ApiKeys'; if ($ak -and $ak.PSObject.Properties['keys']) { $apiKeys = @($ak.keys) } } catch { $apiKeys = @() }
     $portalUrl = "$(if ($settings) { $settings.portalUrl })".Trim()
     $managerUrl = "$(if (Get-Command Resolve-PimManagerMailUrl -ErrorAction SilentlyContinue) { try { Resolve-PimManagerMailUrl } catch { '' } })"
-    $storeRows = @{}; foreach ($r in @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaRequests' -PartitionKey 'req')) { $storeRows["$($r.RowKey)"] = $r }
+    $storeRows = @{}
+    if (-not $closeOnly) {
+        # RFA-2: a store that is configured but cannot be READ (a wrong account) is close-only too -- it used to throw here,
+        # before the steps, so no window that ended was closed.
+        try { foreach ($r in @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaRequests' -PartitionKey 'req')) { $storeRows["$($r.RowKey)"] = $r } }
+        catch {
+            $storeRows = @{}; $closeOnly = $true; $closeWhy = "the RFA store could not be read: $($_.Exception.Message)"
+            $errors.Add("$closeWhy -- no new request is taken in and the portal is not updated; windows that end are still closed"); $log.Add("CLOSE-ONLY: $closeWhy")
+        }
+    }
 
     # ---- 2 + 3: intake and steps, in memory -------------------------------------------------------------------
     $m = Read-PimRfaMirror -ConnectionString $cs
@@ -254,6 +286,8 @@ function Invoke-PimRfaSyncJob {
         if ("$($r.state)" -in $script:PimRfaTerminalStates) { continue }
         $step = Get-PimRfaRequestStep -Request $r -NowUtc $now
         if ($step.action -eq 'none') { continue }
+        # RFA-2: close-only never OPENS access (no store / portal off) -- an approved request waits; ending steps always run.
+        if ($closeOnly -and $step.action -eq 'enable') { $log.Add("$($r.id) $($r.upn): enable held (close-only)"); continue }
         $n = Invoke-PimRfaRequestStep -Request $r -Action $step.action -NowUtc $now
         $i = $reqs.IndexOf($r); $reqs[$i] = $n
         $end = ConvertFrom-PimRfaUtc $n.windowEndUtc
@@ -320,7 +354,7 @@ function Invoke-PimRfaSyncJob {
         try { $res = Send-PimNotifyMail -Type 'rfa-notice' -Tokens $tok -Recipient $ml.to; if ($res -and $res.PSObject.Properties['sent'] -and -not $res.sent -and "$($res.reason)" -notmatch '(?i)whatif|held') { $errors.Add("mail to $($ml.to) not sent: $($res.reason)") } }
         catch { $errors.Add("mail to $($ml.to) failed: $($_.Exception.Message)") }
     }
-    try {
+    if (-not $closeOnly) { try {
         $cfg = @(Get-PimRfaStoreEntities -Store $Store -Table 'RfaConfig' -PartitionKey 'config' | Where-Object { "$($_.RowKey)" -eq 'salt' })[0]
         if (-not $cfg -or "$($cfg.value)" -ne $salt) { Set-PimRfaStoreEntity -Store $Store -Table 'RfaConfig' -PartitionKey 'config' -RowKey 'salt' -Entity @{ value = $salt } }
         # §90: what the broker needs for a fast API answer (the engine re-checks every request): the allowed apps + the
@@ -365,7 +399,7 @@ function Invoke-PimRfaSyncJob {
             $at = ConvertFrom-PimRfaUtc $sr.submittedUtc
             if ($at -and ($now - $at).TotalDays -gt 30 -and -not (& $find "$($sr.RowKey)")) { Remove-PimRfaStoreEntity -Store $Store -Table 'RfaRequests' -PartitionKey 'req' -RowKey "$($sr.RowKey)" }
         }
-    } catch { $errors.Add("the RFA store could not be updated: $($_.Exception.Message)") }
+    } catch { $errors.Add("the RFA store could not be updated: $($_.Exception.Message)") } }
 
     $detail = "rfa-sync: $(@($keep).Count) request(s), $touchedAdmins account row(s), $touchedGroups membership row(s), $($mails.Count) mail(s)" + $(if ($log.Count) { ' | ' + ($log -join '; ') }) + $(if ($errors.Count) { ' | ERRORS: ' + ($errors -join '; ') })
     return [pscustomobject]@{ ran = $true; skipped = $false; whatIf = $false; failed = [bool]$errors.Count; detail = $detail }

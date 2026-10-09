@@ -1,0 +1,49 @@
+{
+  "script": "Set-PimLicense.ps1",
+  "product": "pim",
+  "title": "Register the PIM Manager licence",
+  "purpose": "Registers an issued PIM Manager licence in the environment's store: it verifies the signed licence document first, stores it as the License setting, reads it back and verifies it again; optionally stores the Invardia install key or queues its claim.",
+  "whenToRun": "When a licence file has been issued (a new Pro licence, a renewal or a replacement) and it cannot be registered in PIM Manager itself (Settings > Licence, SuperAdmin). The licence page shows this command with the environment's server and tenant filled in. The installer runs it for you.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Set-PimLicense.ps1",
+  "runAs": [
+    { "kind": "other", "name": "Member of the environment's SQL admin group (grp-pim-sql-admins), signed in with az login", "scope": "the environment's SQL database", "why": "The licence is kept in pim.Settings; only the SQL admin group may write it. With -UseSignedInAccount the signed-in az user is used (the recommended way). Alternatively an Azure SQL access token (-SqlAccessToken), the admin application (-AdminAppId with -AdminCertThumbprint), or a ready -ConnectionString to a local SQL Server." }
+  ],
+  "changes": [
+    { "target": "Environment SQL database", "action": "update", "object": "pim.Settings row 'License' (the signed licence document exactly as issued)", "scope": "this environment's PIM Manager and engine", "why": "Switches on the features the licence covers. The document is verified BEFORE the store is written (a tampered or foreign-signed document, a non-Pro licence or one not bound to this tenant is refused), then read back and verified again.", "undo": "Register the previous licence file again (the replaced licence id is printed as 'replaces:'), or remove the License setting to return to Community." },
+    { "target": "Environment SQL database", "action": "create", "object": "pim.Settings row 'EditionUpgrade' (only when the environment was Community until now)", "scope": "this environment", "why": "Records the Community-to-Pro conversion so the update ring keeps working until the upgrade step gives the environment its Pro updater.", "undo": "Remove the EditionUpgrade setting." },
+    { "target": "Environment SQL database", "action": "update", "object": "pim.Settings rows 'InvardiaInstallKey' and (with -InstallKeyPath) 'InstallKeyClaimState' -- only with -InstallKey / -InstallKeyPath", "scope": "this environment", "why": "Stores the install key Invardia issued with this installation so the engine does not claim another one. The key is never printed.", "undo": "Remove the two settings; the engine's install-key job then claims a key again." },
+    { "target": "Environment SQL database", "action": "update", "object": "pim.Settings row 'SchedulerTriggers' (adds one 'install-key' run-now entry) -- only with -QueueInstallKeyClaim and no key given", "scope": "this environment's engine", "why": "So the engine claims the install key at its next run (within 5 minutes) instead of up to 6 hours later.", "undo": "None needed -- the entry is consumed by the next engine run." },
+    { "target": "Local file (only with -OutFile)", "action": "create", "object": "the result file named by -OutFile (licence id, status, features; never the install key)", "scope": "this computer", "why": "For a caller that reads the outcome.", "undo": "Delete the file." }
+  ],
+  "parameters": [
+    { "name": "LicensePath", "required": false, "default": null, "help": "The issued licence file (.pimlicense / .aitlicense). Its content is imported; the file is not kept. Give this or -LicenseJson." },
+    { "name": "LicenseJson", "required": false, "default": null, "help": "The issued licence document as text, instead of -LicensePath." },
+    { "name": "ConnectionString", "required": false, "default": null, "help": "A ready connection string to the store (e.g. a local SQL Server) instead of -SqlServer." },
+    { "name": "SqlServer", "required": false, "default": null, "help": "The store's server (alias -SqlServerFqdn). An Azure SQL FQDN connects with a token." },
+    { "name": "Database", "required": false, "default": "PimPlatform", "help": "The database (alias -SqlDatabase)." },
+    { "name": "TenantId", "required": false, "default": null, "help": "The tenant id; required for an Azure SQL store. The licence must name this tenant." },
+    { "name": "UseSignedInAccount", "required": false, "default": false, "help": "Reach the store as the signed-in az user (a member of the SQL admin group). The recommended way." },
+    { "name": "SqlAccessToken", "required": false, "default": null, "help": "Automation: an Azure SQL access token the caller already holds; the machine's managed identity is never used." },
+    { "name": "AdminAppId", "required": false, "default": null, "help": "Automation: the admin application's client id (with -AdminCertThumbprint or -AdminSecret)." },
+    { "name": "AdminCertThumbprint", "required": false, "default": null, "help": "Automation: the thumbprint of the admin application's certificate in the local machine store." },
+    { "name": "AdminSecret", "required": false, "default": null, "help": "Legacy automation only: a client secret for -AdminAppId. Not for customer use; prefer -UseSignedInAccount." },
+    { "name": "InstallKey", "required": false, "default": null, "help": "The install key Invardia issued with this installation (inv-...). Stored, never printed." },
+    { "name": "InstallKeyPath", "required": false, "default": null, "help": "The install key in a file (so it is never a command-line argument); the claim state is recorded as 'claimed'." },
+    { "name": "QueueInstallKeyClaim", "required": false, "default": false, "help": "With no key given: queue the engine's install-key claim for its next run." },
+    { "name": "RequireMspRole", "required": false, "default": "", "help": "'Master' or 'Slave' (managing / managed tenant): refuse, before storing, a licence that does not cover MSP for this tenant." },
+    { "name": "OutFile", "required": false, "default": null, "help": "Write the outcome as JSON to this file." }
+  ],
+  "readsOnly": [
+    "the licence file named by -LicensePath (and the key file named by -InstallKeyPath)",
+    "pim.Settings 'License' (what is stored now, to report the licence it replaces; a store that cannot be read is not written)",
+    "pim.Settings 'SchedulerTriggers' (only with -QueueInstallKeyClaim, so an install-key entry is not added twice)"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in / token for Azure SQL)",
+    "<server>.database.windows.net:1433 (or the SQL Server in -ConnectionString)"
+  ],
+  "whatIf": "Verifies the licence document, reads what is stored now and prints the licence (id, customer, SKU, valid to, features, bound tenants, what it replaces), 'What if: Performing the operation \"store the verified licence\" on target \"pim.Settings['License'] in <server>/<database>\"' and 'What if: would store licence <id> ...' (plus the install key or its claim when asked). Nothing is written.",
+  "undo": "Register the previous licence file again (its id is printed as 'replaces:'), or remove the License setting to return the environment to Community. Remove InvardiaInstallKey / InstallKeyClaimState to have the engine claim a key again.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Set-PimLicense/"
+}

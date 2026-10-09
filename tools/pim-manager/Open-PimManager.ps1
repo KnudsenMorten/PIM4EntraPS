@@ -279,6 +279,13 @@ if (Test-Path -LiteralPath $_govLib) { . $_govLib }
 # needs, so the portal can say so out loud. (REQUIREMENTS §63.6.)
 $_permLib = Join-Path $solutionRoot 'engine\_shared\PIM-PermissionHealth.ps1'
 if (Test-Path -LiteralPath $_permLib) { . $_permLib }
+# SCRIPT-DOC-1 (framework 12.7 + 12.10 item 11): THE constants of where a script's documentation page, download and
+# checksum list live -- handed to the page at boot (window.PIM_SCRIPT_DOCS) so every command it shows carries the doc link.
+. (Join-Path $solutionRoot 'tools\setup\_PimScriptDoc.ps1')
+# §12.8 ENV-REPORT-1: the architecture & security report of THIS environment (GET /api/environment-report, Operations >
+# Environment report). Pure builder; the Manager binds its live sources in Get-PimManagerEnvironmentReport.
+$_envReportLib = Join-Path $solutionRoot 'engine\_shared\PIM-EnvironmentReport.ps1'
+if (Test-Path -LiteralPath $_envReportLib) { . $_envReportLib }
 # §79.13 SHARED PENDING CHANGES (engine/_shared/PIM-SharedPending.ps1): staged changes live in SQL
 # (pim.Settings['PendingChanges']), one per row key (the lock), visible to every Manager user.
 . (Join-Path $solutionRoot 'engine\_shared\PIM-SharedPending.ps1')
@@ -323,6 +330,10 @@ $_workloadPrereqLib = Join-Path $solutionRoot 'engine\_shared\PIM-WorkloadPrereq
 # offer the same rows and both ADOPT a group the store already defines.
 $_templatePacksLib = Join-Path $solutionRoot 'engine\_shared\PIM-TemplatePacks.ps1'
 . $_templatePacksLib
+# 100.17 CUSTOM-WORKLOAD -- custom (group-only) workloads (engine/_shared/PIM-CustomWorkloads.ps1): Templates > Custom
+# workloads, the Workload picker's custom entries + "+ Custom (quick)", the wizard derivation and the template export/import.
+$_customWorkloadsLib = Join-Path $solutionRoot 'engine\_shared\PIM-CustomWorkloads.ps1'
+. $_customWorkloadsLib
 # Settings > Copy settings (export on one environment, import on another) -- engine/_shared/PIM-SettingsTransfer.ps1.
 $_settingsTransferLib = Join-Path $solutionRoot 'engine\_shared\PIM-SettingsTransfer.ps1'
 if (Test-Path -LiteralPath $_settingsTransferLib) { . $_settingsTransferLib }
@@ -474,8 +485,8 @@ if (Test-Path -LiteralPath $_replOverviewLib) { . $_replOverviewLib }
 
 # Operational-policy settings (engine/_shared/PIM-OperationalPolicy.ps1) -- the
 # PURE normalize/validate/clamp helpers behind the Settings config surface
-# (REQUIREMENTS [M7]): expiry-policy defaults, MFA-on-activation toggle, and
-# connection-sanity config. Persisted to the SAME pim.Settings store the engine
+# (REQUIREMENTS [M7]): the MFA-on-activation floor and the activation / eligibility
+# ceilings (OPPOL-1: applied by the engine). Persisted to the SAME pim.Settings store the engine
 # + jobs read (Get-/Set-PimOperationalPolicy below), so a GUI edit == runtime.
 $_opPolicyLib = Join-Path $solutionRoot 'engine\_shared\PIM-OperationalPolicy.ps1'
 if (Test-Path -LiteralPath $_opPolicyLib) { . $_opPolicyLib }
@@ -863,14 +874,31 @@ function Get-PimManagerDemoMembership {
         if ($hitClaim.member) { return @{ viewer = $true; reason = $hitClaim.via } }
     }
     if (-not $g.ok) {
+        # 🔴 ACC-1 (owner-approved 2026-10-09, PIM REQUIREMENTS §100.3): an unreadable demo group used to make EVERY
+        # signed-in person -- SuperAdmins too -- a demo viewer, so one failed Graph read took an environment's
+        # administrators away from it. Now: nobody is a demo viewer until the group can be read (their own role
+        # applies, exactly as with demo mode off), a warning is logged once, and Home shows it (Get-PimManagerDemoHealth).
+        # A token group claim that names the group still makes that person a demo viewer (checked above).
         if (-not $script:PimDemoGroupWarned) {
             $script:PimDemoGroupWarned = $true
-            Write-Warning ("  [demo] demo mode is ON and the demo guest group could not be read ({0}) -- every signed-in person is treated as a demo viewer until it can (fail closed)." -f $g.error)
+            Write-Warning ("  [demo] demo mode is ON but the demo guest group could not be read ({0}) -- NOBODY is treated as a demo viewer until it can; every signed-in person keeps their own role." -f $g.error)
         }
-        return @{ viewer = $true; reason = 'demo group membership could not be checked (fail closed)' }
+        return @{ viewer = $false; reason = 'demo group membership could not be checked (nobody is a demo viewer until it can)' }
     }
     $hit = Test-PimDemoGroupMember -Identities @($names.ToArray()) -ClaimGroupIds $claims -GroupId $g.id -Members @($g.members)
     return @{ viewer = [bool]$hit.member; reason = "$($hit.via)" }
+}
+
+function Get-PimManagerDemoHealth {
+    <#
+      ACC-1: the Home/health line for demo mode. $null when demo mode is off or this Manager is not hosted (nothing to say);
+      otherwise @{ on; groupOk; group; error }. groupOk=$false = the demo guest group cannot be read, so nobody is treated as
+      a demo viewer (Get-PimManagerDemoMembership) -- the visitors see nothing and the administrators keep their roles.
+    #>
+    $cfg = Get-PimManagerDemoConfig
+    if (-not $cfg.on -or -not $script:PimHosted) { return $null }
+    $g = $null; try { $g = Get-PimManagerDemoGroup -Group "$($cfg.group)" } catch { $g = @{ ok = $false; error = "$($_.Exception.Message)" } }
+    return [ordered]@{ on = $true; groupOk = [bool]$g.ok; group = "$($cfg.group)"; error = "$($g.error)" }
 }
 
 function Get-PimManagerDemoBoot {
@@ -2479,7 +2507,13 @@ function Test-PimManagerUplinkRowGate {
     # of a synced row would otherwise be adopted -- and later pruned -- by the downlink). Local rows that point at central
     # objects (a central admin in a local group) are ordinary local rows and are never refused here.
     # -Diff: Compare-PimRowSets output. Returns @{ allowed; refused = @(@{ op; key; why }); reason }.
-    param([Parameter(Mandatory)][object]$Diff, [string]$Base = '')
+    # 🔴 §100.6 MSP-COLLIDE gap D: -MspDefinitionRows = every Owner=MSP group definition in ANY definition entity
+    # (Get-PimManagerMspDefinitionRows: @{ Entity; GroupTag; GroupName }). A LOCAL definition added to a group-definition
+    # entity that reuses such a GroupTag or GroupName is refused: a second definition of the master's group flipped its tag
+    # to customer-owned on the next pull (the master's bindings/nestings on it went stale -> retracted) and split one tag
+    # over two GroupNames. The customer extends the master group locally instead (members, roles, nesting).
+    # An explicit local override is deliberately NOT offered (no small, clean shape: the master's row would then go stale).
+    param([Parameter(Mandatory)][object]$Diff, [string]$Base = '', [object[]]$MspDefinitionRows = @())
     $isUp = { param($r) if ($null -eq $r) { return $false }
               $v = if ($r -is [System.Collections.IDictionary]) { $r['Owner'] } elseif ($r.PSObject.Properties['Owner']) { $r.Owner } else { $null }
               return ("$v".Trim() -ieq 'msp') }
@@ -2502,10 +2536,75 @@ function Test-PimManagerUplinkRowGate {
         }
     }
     foreach ($r in @($Diff.adds)) { if (& $isUp $r) { $out.Add([ordered]@{ op = 'add'; key = (& $keyOf $r); why = 'a new row cannot be marked as sent by the managing tenant (Owner=MSP) -- clear Owner to make it a local row' }) } }
+    # §100.6 gap D -- a local group DEFINITION that reuses a master group's tag or name, in any definition entity.
+    $ownedMsg = 'This group is owned by the managing tenant -- extend it locally instead (add members, roles or nesting to it)'
+    $isDefBase = ("$Base" -match '^(?i)PIM-Definitions-(Roles|Services|Organization|Tasks|Departments|Processes|Projects|CrossOrg)$')
+    if ($isDefBase -and @($MspDefinitionRows).Count) {
+        $fv = { param($r, $n) if ($null -eq $r) { '' } elseif ($r -is [System.Collections.IDictionary]) { "$($r[$n])".Trim() } elseif ($r.PSObject.Properties[$n]) { "$($r.PSObject.Properties[$n].Value)".Trim() } else { '' } }
+        $mspTag = @{}; $mspName = @{}
+        foreach ($d in @($MspDefinitionRows)) {
+            $t = & $fv $d 'GroupTag'; $nm = & $fv $d 'GroupName'; $de = & $fv $d 'Entity'
+            if ($t) { $mspTag[$t.ToLowerInvariant()] = $de }
+            if ($nm) { $mspName[$nm.ToLowerInvariant()] = $de }
+        }
+        $hitOf = {
+            param($r)
+            $t = & $fv $r 'GroupTag'; $nm = & $fv $r 'GroupName'
+            if ($t -and $mspTag.ContainsKey($t.ToLowerInvariant())) { return "GroupTag '$t' (defined in $($mspTag[$t.ToLowerInvariant()]))" }
+            if ($nm -and $mspName.ContainsKey($nm.ToLowerInvariant())) { return "GroupName '$nm' (defined in $($mspName[$nm.ToLowerInvariant()]))" }
+            return ''
+        }
+        foreach ($r in @($Diff.adds)) {
+            if (& $isUp $r) { continue }   # already refused above
+            $h = & $hitOf $r
+            if ($h) { $out.Add([ordered]@{ op = 'add'; key = (& $keyOf $r); why = "$ownedMsg -- $h" }) }
+        }
+        foreach ($m in @($Diff.modifies)) {
+            if ($null -eq $m) { continue }
+            $b = & $side $m 'before'; $a = & $side $m 'after'
+            if ((& $isUp $b) -or (& $isUp $a)) { continue }   # handled above
+            # a local row RENAMED / re-tagged onto the master's group is the same collision
+            $h = & $hitOf $a
+            if ($h -and -not (& $hitOf $b)) { $out.Add([ordered]@{ op = 'modify'; key = (& $keyOf $a); why = "$ownedMsg -- $h" }) }
+        }
+    }
     if (-not $out.Count) { return @{ allowed = $true; refused = @(); reason = '' } }
+    if (@($out | Where-Object { "$($_.why)".StartsWith($ownedMsg) }).Count -eq $out.Count) {
+        $txt0 = (@($out | Select-Object -First 5 | ForEach-Object { "$($_.key): $($_.why)" }) -join '; ')
+        return @{ allowed = $false; refused = @($out.ToArray()); reason = "$ownedMsg. Nothing was saved. $txt0" }
+    }
     $txt = (@($out | Select-Object -First 5 | ForEach-Object { "$($_.key): $($_.why)" }) -join '; ')
     return @{ allowed = $false; refused = @($out.ToArray())
               reason = "Read-only: $($out.Count) row(s) in this commit come from the managing tenant (uplink) -- $txt. They are changed on the managing tenant and arrive here on the next pull. Nothing was saved. You CAN add local rows, including local access for a central admin." }
+}
+function Get-PimManagerMspDefinitionRows {
+    # §100.6 gap D -- every group definition the managing tenant sent (Owner=MSP), in ANY definition entity, as
+    # @{ Entity; GroupTag; GroupName } for Test-PimManagerUplinkRowGate -MspDefinitionRows. Read only for a commit to a
+    # group-definition entity (nothing else can collide). -ReadRows: optional param($entity) -> rows (tests); default the
+    # SQL store. An unreadable entity is skipped with a warning: the downlink's own never-take-over rule still protects
+    # both sides, so this read failing must not block an unrelated commit.
+    param([string]$Base = '', [scriptblock]$ReadRows)
+    if ("$Base" -notmatch '^(?i)PIM-Definitions-(Roles|Services|Organization|Tasks|Departments|Processes|Projects|CrossOrg)$') { return @() }
+    if (-not $ReadRows) {
+        if (-not $script:PimSqlCs -or -not (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) { return @() }
+        $ReadRows = { param($e) @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity $e) }
+    }
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($e in @('PIM-Definitions-Roles', 'PIM-Definitions-Services', 'PIM-Definitions-Organization', 'PIM-Definitions-Tasks',
+                     'PIM-Definitions-Departments', 'PIM-Definitions-Processes', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg')) {
+        $rows = @()
+        try { $rows = @(& $ReadRows $e) } catch { Write-Warning "  [msp-collide] could not read $e to check for managing-tenant groups: $($_.Exception.Message)"; continue }
+        foreach ($r in $rows) {
+            if ($null -eq $r) { continue }
+            $own = if ($r -is [System.Collections.IDictionary]) { $r['Owner'] } elseif ($r.PSObject.Properties['Owner']) { $r.Owner } else { '' }
+            if ("$own".Trim() -ine 'msp') { continue }
+            $t = if ($r -is [System.Collections.IDictionary]) { $r['GroupTag'] } elseif ($r.PSObject.Properties['GroupTag']) { $r.GroupTag } else { '' }
+            $n = if ($r -is [System.Collections.IDictionary]) { $r['GroupName'] } elseif ($r.PSObject.Properties['GroupName']) { $r.GroupName } else { '' }
+            if (-not "$t".Trim() -and -not "$n".Trim()) { continue }
+            $out.Add([pscustomobject]@{ Entity = $e; GroupTag = "$t".Trim(); GroupName = "$n".Trim() })
+        }
+    }
+    return @($out.ToArray())
 }
 function Compare-PimRowSets {
     # Per-row diff between two row arrays for the Review & Save preview.
@@ -3041,7 +3140,7 @@ function Invoke-PimManagerSafeCommit {
     # §91.23 BACKSTOP: every commit path (grid, departments, workloads, conformance) lands here -- a row the managing tenant
     # sent (Owner=MSP) is never changed or removed by a managed tenant's Manager, whichever page asked.
     $__diff = Compare-PimRowSets -Before @($Current.rows) -After @($NewRows) -Base $Base
-    $__up = Test-PimManagerUplinkRowGate -Diff $__diff -Base $Base
+    $__up = Test-PimManagerUplinkRowGate -Diff $__diff -Base $Base -MspDefinitionRows @(Get-PimManagerMspDefinitionRows -Base $Base)
     if (-not $__up.allowed) { throw $__up.reason }
     $commitId = if ("$CommitId".Trim()) { "$CommitId".Trim() } else { [guid]::NewGuid().ToString('N') }
     # SEC-16(b) -- the snapshot's `By` is evidence ("who committed this change"), so it must be the
@@ -3333,6 +3432,20 @@ function ConvertTo-PimManagerAdminAssignmentUpns {
     return @(ConvertTo-PimAdminAssignmentUpnRows -Rows @($Rows) -AdminMap $map -Domain $dom)
 }
 
+function Update-PimManagerAdminDomainHistory {
+    <#
+      ACC-1 (2026-10-09): append the admin domain being LEFT to pim.Settings 'AdminDomainHistory' (newest first, at most 20,
+      the new current domain dropped from it). Never throws: a failed write is warned -- the domain change itself goes on.
+    #>
+    param([string]$Previous, [string]$New)
+    try {
+        $cur = $null; try { $cur = Get-PimManagerSetting -Name 'AdminDomainHistory' } catch { $cur = $null }
+        $list = @(ConvertTo-PimAdminDomainHistory -History $cur -Previous $Previous -New $New)
+        Set-PimManagerSetting -Name 'AdminDomainHistory' -Value @($list)
+        return $list
+    } catch { Write-Warning "  [admin-domain] the previous admin domain could not be recorded: $($_.Exception.Message)"; return @() }
+}
+
 function Update-PimManagerSettingMirror {
     # 🔴 2026-09-21 (operator: "i turned this off and restarted browser but it continus to block me"): at start-up EVERY
     # pim.Settings row is copied into $global:PIM_NamingConventions, and the feature gate (Get-PimFeatureStoreValue) reads
@@ -3346,6 +3459,12 @@ function Update-PimManagerSettingMirror {
         try { $v = ($v | ConvertTo-Json -Depth 30 -Compress) | ConvertFrom-Json } catch { $v = $Value }
     }
     $global:PIM_NamingConventions[$Name] = $v
+    # MAIL-2 (owner-approved 2026-10-09): the email controls are read by the send path from $global:PIM_Mail*, not from this
+    # mirror -- so a save (any path that writes 'EmailControls') applies them live HERE, the SAVED record being authoritative:
+    # a cleared redirect is cleared and a switched-off kill switch is off. (A cold process hydrates the same way.)
+    if ($Name -eq 'EmailControls' -and (Get-Command Set-PimEmailControlsGlobals -ErrorAction SilentlyContinue)) {
+        try { [void](Set-PimEmailControlsGlobals -EmailControls $v -Authoritative) } catch { Write-Warning "  [mail] the saved email controls could not be applied live: $($_.Exception.Message)" }
+    }
 }
 # ---------------------------------------------------------------------------
 # Alerting configuration (REQUIREMENTS §27 H2). Persisted in the SAME store as
@@ -3515,6 +3634,143 @@ function Set-PimAlertingConfig {
     return (Get-PimAlertingConfig)
 }
 
+function Get-PimAlertingAllRecipients {
+    # Every address on any Alerting list (alerts, daily changes, tier report) -- one de-duplicated list.
+    param([object]$Config)
+    $c = if ($Config) { $Config } else { Get-PimAlertingConfig }
+    $seen = @{}; $out = New-Object System.Collections.Generic.List[string]
+    foreach ($a in @(@($c.recipients) + @($c.digestRecipients) + @($c.tierReportRecipients))) {
+        $s = "$a".Trim(); if (-not $s) { continue }
+        if (-not $seen.ContainsKey($s.ToLowerInvariant())) { $seen[$s.ToLowerInvariant()] = $true; $out.Add($s) }
+    }
+    return @($out.ToArray())
+}
+
+function Get-PimManagerAccessEntries {
+    # The stored ManagerAccess entries (SQL pim.Settings). THROWS when the store cannot be read -- a caller about to WRITE
+    # the map must not mistake "could not read" for "empty" (that would wipe every grant).
+    $raw = Get-PimManagerSetting -Name 'ManagerAccess'
+    if ($raw -is [string] -and "$raw".Trim()) { $raw = "$raw" | ConvertFrom-Json }
+    if ($null -eq $raw) { return @() }
+    return @(if ($raw.PSObject.Properties['managerAccess']) { $raw.managerAccess } else { $raw })
+}
+
+function Add-PimManagerRecipientReaders {
+    <#
+      MAIL-2 item 5 (framework §12.11) -- AUTO-READER. Every mail recipient who is not yet a Manager user is added to SQL
+      ManagerAccess as a READER, so the audience links in their mails open. Merge-PimManagerReaderEntries decides (pure):
+      only unknown identities are added; an existing entry -- any role -- is never changed; an identity granted by env
+      (PIM_SuperAdmins / PIM_Admins / PIM_DelegatedAdmins) counts as a user already. Written with a read-back, audited
+      ('access.reader.auto'), the role cache dropped. Never throws: a recipient save must not fail over this; the result
+      says what happened. Returns @{ added; known; error }.
+    #>
+    param([string[]]$Addresses = @())
+    $out = [ordered]@{ added = @(); known = @(); error = '' }
+    if (-not @($Addresses | Where-Object { "$_".Trim() }).Count) { return $out }
+    try {
+        $entries = @(Get-PimManagerAccessEntries)
+        $envIds = @(("$env:PIM_SuperAdmins;$env:PIM_Admins;$env:PIM_DelegatedAdmins" -split '[,;]+') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $who = ''; try { $who = "$((Get-PimManagerRole).identity)" } catch { }
+        $m = Merge-PimManagerReaderEntries -Entries $entries -Addresses $Addresses -AlsoKnown $envIds -AddedBy $who
+        $out.known = @($m.known)
+        if (-not @($m.added).Count) { return $out }
+        $value = [pscustomobject]@{ managerAccess = @($m.entries) }
+        Set-PimManagerSetting -Name 'ManagerAccess' -Value $value
+        $back = @(Get-PimManagerAccessEntries)
+        if ($back.Count -ne @($m.entries).Count) { throw "read-back mismatch: wrote $(@($m.entries).Count) entr(y/ies), store holds $($back.Count)" }
+        $script:PimManagerAccessCache = $null
+        if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
+        $global:PIM_NamingConventions['ManagerAccess'] = $value
+        $out.added = @($m.added)
+        Write-PimManagerAuditEvent -Action 'access.reader.auto' -Target ("readers:{0}" -f @($m.added).Count) -After ([ordered]@{ added = @($m.added); role = 'Reader'; reason = 'added as a mail recipient (MAIL-2 auto-Reader)' }) -Result 'ok'
+    } catch {
+        $out.error = "recipients saved, but they could NOT be added as Readers: $($_.Exception.Message)"
+        try { Write-PimManagerAuditEvent -Action 'access.reader.auto' -Target 'readers' -After @{ error = "$($_.Exception.Message)" } -Result 'error' } catch { }
+    }
+    return $out
+}
+
+function Get-PimManagerMailNotificationsBody {
+    # GET /api/mail-notifications: the effective preference of every recipient on any Alerting list (plus any stored one),
+    # each with the lists it is on and its Manager role; the report catalog, audiences, severities, per-report attach.
+    $cfg = Get-PimAlertingConfig
+    $prefs = Get-PimMailNotificationPrefsFromStore
+    $addrs = New-Object System.Collections.Generic.List[string]; $seen = @{}
+    foreach ($a in @(@(Get-PimAlertingAllRecipients -Config $cfg) + @($prefs.recipients | ForEach-Object { "$($_.address)" }))) {
+        $s = "$a".Trim(); if ($s -and -not $seen.ContainsKey($s.ToLowerInvariant())) { $seen[$s.ToLowerInvariant()] = $true; $addrs.Add($s) }
+    }
+    $roles = @{}
+    try { foreach ($e in @(Get-PimManagerAccessEntries)) { $id = "$($e.identity)".Trim(); if ($id) { $roles[$id.ToLowerInvariant()] = "$($e.role)" } } } catch { }
+    $inList = { param($list, $a) [bool](@($list | Where-Object { "$_".Trim().ToLowerInvariant() -eq $a.ToLowerInvariant() }).Count) }
+    $rows = foreach ($a in $addrs) {
+        $p = Get-PimRecipientNotificationPref -Prefs $prefs -Address $a
+        [ordered]@{
+            address = $a; audience = $p.audience; reports = $p.reports; alerts = $p.alerts; severityFloor = $p.severityFloor; stored = [bool]$p.stored
+            lists = [ordered]@{ alerts = (& $inList $cfg.recipients $a); dailyChanges = (& $inList $cfg.digestRecipients $a); tierReport = (& $inList $cfg.tierReportRecipients $a) }
+            managerRole = $(if ($roles.ContainsKey($a.ToLowerInvariant())) { $roles[$a.ToLowerInvariant()] } else { '' })
+        }
+    }
+    [ordered]@{
+        recipients = @($rows); reports = $prefs.reports
+        catalog = @(Get-PimMailReportCatalog); audiences = @(Get-PimMailAudiences | ForEach-Object { [ordered]@{ key = $_; label = (Get-PimMailAudienceLabel $_) } })
+        severities = @(Get-PimMailSeverities); canEdit = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+    }
+}
+
+function Save-PimManagerMailNotifications {
+    # Normalise + store pim.Settings['MailNotifications'] (recipients and/or per-report attach). A part not passed is KEPT.
+    param([object[]]$Recipients, [object]$Reports, [switch]$HasRecipients, [switch]$HasReports)
+    $cur = Get-PimMailNotificationPrefsFromStore
+    $rec = if ($HasRecipients) { @($Recipients) } else { @($cur.recipients) }
+    $rep = if ($HasReports) { $Reports } else { $cur.reports }
+    if ($HasReports -and $Reports) {
+        # a partial reports body (one report's attach) merges over the stored ones
+        $m = [ordered]@{}; foreach ($k in @($cur.reports.Keys)) { $m[$k] = $cur.reports[$k] }
+        $names = if ($Reports -is [System.Collections.IDictionary]) { @($Reports.Keys) } else { @($Reports.PSObject.Properties | ForEach-Object { $_.Name }) }
+        foreach ($n in $names) { $m["$n"] = Get-PimMailPrefField $Reports "$n" }
+        $rep = $m
+    }
+    $norm = ConvertTo-PimMailNotificationPrefs ([ordered]@{ recipients = $rec; reports = $rep })
+    Set-PimManagerSetting -Name 'MailNotifications' -Value $norm
+    return $norm
+}
+
+function Get-PimManagerReportsOverview {
+    <#
+      MAIL-2 item 6 -- ONE view of every report and alert PIM sends: cadence (the job schedule), on/off, recipients (the
+      Alerting list it goes to, minus those who switched it off), attach-PDF, last sent, next run.
+    #>
+    $cfg = Get-PimAlertingConfig
+    $prefs = Get-PimMailNotificationPrefsFromStore
+    $last = Get-PimMailReportLastSent
+    $jobs = @{}
+    try {
+        $eff = @(Get-PimManagerEffectiveSchedule)
+        $vm = if ($eff.Count -gt 0) { Get-PimJobsStatus -Jobs $eff } else { Get-PimJobsStatus }
+        foreach ($j in @($vm.jobs)) { if (-not $jobs.ContainsKey("$($j.type)")) { $jobs["$($j.type)"] = $j } }
+    } catch { }
+    $feedLast = @{}
+    try { foreach ($f in @(Get-PimManagerAlertFeed)) { $ev = "$($f.event)"; $at = "$($f.timestampUtc)"; if (-not $at) { $at = "$($f.ts)" }; if ($ev -and [int]"$($f.sent)" -gt 0 -and (-not $feedLast.ContainsKey($ev) -or "$at" -gt "$($feedLast[$ev])")) { $feedLast[$ev] = $at } } } catch { }
+    $rows = foreach ($c in @(Get-PimMailReportCatalog)) {
+        $list = switch ("$($c.recipientList)") { 'digestRecipients' { if (@($cfg.digestRecipients).Count) { @($cfg.digestRecipients) } else { @($cfg.recipients) } } 'tierReportRecipients' { if (@($cfg.tierReportRecipients).Count) { @($cfg.tierReportRecipients) } else { @($cfg.recipients) } } 'recipients' { @($cfg.recipients) } default { @() } }
+        $ownList = switch ("$($c.recipientList)") { 'digestRecipients' { @($cfg.digestRecipients) } 'tierReportRecipients' { @($cfg.tierReportRecipients) } 'recipients' { @($cfg.recipients) } default { @() } }
+        $sel = if ($c.kind -ne 'transactional' -and $list.Count) { Select-PimNotificationRecipients -Prefs $prefs -Recipients $list -Type $c.type -Kind $c.kind } else { $null }
+        $j = if ("$($c.job)".Trim() -and $jobs.ContainsKey("$($c.job)")) { $jobs["$($c.job)"] } else { $null }
+        $enabled = if ($c.kind -eq 'alert') { [bool]($cfg.events.ContainsKey($c.type) -and $cfg.events[$c.type]) } elseif ($j) { [bool]$j.enabled } else { $true }
+        $ls = if ($last.ContainsKey($c.type)) { "$(Get-PimMailPrefField $last[$c.type] 'at')" } elseif ($feedLast.ContainsKey($c.type)) { "$($feedLast[$c.type])" } else { '' }
+        [ordered]@{
+            type = $c.type; kind = $c.kind; label = $c.label; plain = $c.plain; severity = $c.severity
+            job = "$($c.job)"; cadence = $(if ($j) { "$($j.cadence)" } elseif ($c.kind -eq 'alert') { 'when it happens' } else { '' }); intervalMinutes = $(if ($j) { [int]$j.intervalMinutes } else { $null })
+            enabled = $enabled
+            recipientList = "$($c.recipientList)"; ownRecipients = @($ownList); usesFallback = [bool]($c.recipientList -in @('digestRecipients', 'tierReportRecipients') -and -not $ownList.Count)
+            recipients = $(if ($sel) { @($sel.keep) } else { @() }); switchedOff = $(if ($sel) { @($sel.skipped | ForEach-Object { $_.address }) } else { @() })
+            attach = $(if ($c.kind -eq 'report') { "$($prefs.reports[$c.type].attach)" } else { '' })
+            lastSentUtc = $ls; nextRunUtc = $(if ($j) { "$($j.nextRunUtc)" } else { '' })
+        }
+    }
+    [ordered]@{ reports = @($rows); canEdit = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin'); canEditCadence = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') }
+}
+
 function Send-PimWebhookAlert {
     # Outbound webhook delivery for ONE alert (the channel-layer I/O for the Teams /
     # generic webhook channel -- mirrors what Send-PimNotifyMail is for the mail
@@ -3531,6 +3787,12 @@ function Send-PimWebhookAlert {
     $res = [ordered]@{ attempted = $false; sent = $false; kind = ''; reason = '' }
     $cfg = $Config; if (-not $cfg) { $cfg = Get-PimAlertingConfig }
     if (-not [bool]$cfg.webhookEnabled) { $res.reason = $(if ("$($cfg.webhookReason)".Trim()) { "$($cfg.webhookReason)" } else { 'no webhook configured' }); return $res }
+    # 🔴 GATE-1 (owner-approved 2026-10-09): the 'alerting.webhook' switch (Settings > Features & edition) was checked
+    # nowhere -- the webhook fired on any valid URL. It is now the gate. Its default is ON, so an install that posts
+    # today keeps posting on upgrade; switched OFF = no webhook POST (the alert still goes by mail).
+    if ((Get-Command Test-PimFeatureEnabled -ErrorAction SilentlyContinue) -and -not (Test-PimFeatureEnabled -Key 'alerting.webhook')) {
+        $res.reason = "webhook alerting is switched off (Settings > Features & edition: 'Teams / webhook alerting')"; return $res
+    }
     if (-not (Get-Command New-PimWebhookPayload -ErrorAction SilentlyContinue)) { $res.reason = 'channel core not loaded'; return $res }
     $kind = "$($cfg.webhookKind)"; if (-not $kind) { $kind = 'generic' }
     $res.kind = $kind
@@ -4158,6 +4420,11 @@ function Get-PimManagerMailChecks {
         $facts['sender'] = $sender
         try { $facts['smtp'] = Get-PimManagerSetting -Name 'SmtpRelay' } catch { }
         try { $facts['lastTest'] = Get-PimManagerSetting -Name 'MailLastTest' } catch { }
+        # MAIL-STEP-PROOF: the queued engine test send words the engine row while it waits for its first send
+        try { $et = Get-PimManagerSetting -Name 'MailEngineTest'; if ($et -is [string]) { try { $et = $et | ConvertFrom-Json } catch { $et = $null } }; $facts['engineTest'] = $et } catch { }
+        # ...and the mail-sender script's read-back (Initialize-PimMailSender step [4]): scoped Mail.Send confirmed for BOTH
+        # identities in one scope -- with the Manager's own successful test mail the engine row is granted at once
+        try { $sck = Get-PimManagerSetting -Name 'MailSenderSetupCheck'; if ($sck -is [string]) { try { $sck = $sck | ConvertFrom-Json } catch { $sck = $null } }; $facts['setupCheck'] = $sck } catch { }
         try { $facts['alertRecipients'] = @((Get-PimAlertingConfig).recipients) } catch { $facts['alertRecipients'] = @() }
         $ids = Get-PimManagerMailIdentities
         $tid = if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() }
@@ -4194,9 +4461,57 @@ function Get-PimManagerMailChecks {
         }
     } catch { Write-Verbose "  [mail check] facts incomplete: $($_.Exception.Message)" }
     $chk = Get-PimMailCheck -Facts $facts
-    $out = [ordered]@{ mode = $chk.mode; complete = [bool]$chk.complete; summary = "$($chk.summary)"; lines = @($chk.lines); checkedUtc = (Get-Date).ToUniversalTime().ToString('o') }
+    $out = [ordered]@{ mode = $chk.mode; complete = [bool]$chk.complete; proven = [bool]$chk.proven; waiting = [int]$chk.waiting; summary = "$($chk.summary)"; lines = @($chk.lines); checkedUtc = (Get-Date).ToUniversalTime().ToString('o') }
     $script:PimMailCheckCache = @{ at = (Get-Date); value = $out }
     return $out
+}
+
+function ConvertTo-PimManagerMailboxSetup {
+    <#
+      PURE. MAIL-NAMING (100.14, owner 2026-10-09: "we must be able to define the name of the shared mailbox ... as
+      companies have their own naming"): what Get Started > Mail sender step 1 shows -- the stored pim.Settings
+      'MailboxSetup' { name; domain; displayName; existing }, else (an install whose sender was set before) the sender's own
+      name and domain, else the script's defaults (PIM-Engine @ the initial domain, 'PIM Manager (notifications)').
+      Returns { name; domain; displayName; existing; address; saved; defaults }.
+    #>
+    param($Value, [string]$Sender, [object[]]$Domains = @())
+    if ($Value -is [string] -and "$Value".Trim()) { try { $Value = $Value | ConvertFrom-Json } catch { $Value = $null } }
+    $g = { param($n) if ($null -eq $Value) { '' } elseif ($Value -is [System.Collections.IDictionary]) { "$($Value[$n])".Trim() } elseif ($Value.PSObject.Properties[$n]) { "$($Value.$n)".Trim() } else { '' } }
+    $initial = "$(@(@($Domains) | Where-Object { $_ -and $_.isInitial }) | Select-Object -First 1 | ForEach-Object { $_.id })".Trim()
+    $defaults = [ordered]@{ name = 'PIM-Engine'; domain = $initial; displayName = 'PIM Manager (notifications)' }
+    $name = & $g 'name'; $domain = & $g 'domain'; $display = & $g 'displayName'
+    $saved = [bool]$name
+    $existing = $false
+    if ($saved) { $existing = ("$(& $g 'existing')" -match '^(?i)(true|1)$') }
+    elseif ("$Sender".Trim() -match '^([^@\s]+)@([^@\s]+)$') { $name = $Matches[1]; $domain = $Matches[2]; $existing = $true }
+    if (-not $name) { $name = $defaults.name }
+    if (-not $domain) { $domain = $defaults.domain }
+    if (-not $display) { $display = $defaults.displayName }
+    return [ordered]@{ name = $name; domain = $domain; displayName = $display; existing = [bool]$existing
+                       address = $(if ($name -and $domain) { "$name@$domain" } else { '' }); saved = $saved; defaults = $defaults }
+}
+
+function Test-PimManagerMailboxSetup {
+    <#
+      PURE. MAIL-NAMING: the step-1 fields, refused field by field (the same rules as Initialize-PimMailSender's -MailboxName
+      / -MailDomain / -DisplayName). -Domains = the tenant's verified domains; when they are known the domain must be one.
+      Returns { ok; errors; value = { name; domain; displayName; existing } }.
+    #>
+    param($Body, [object[]]$Domains = @())
+    $g = { param($n) if ($null -eq $Body) { '' } elseif ($Body -is [System.Collections.IDictionary]) { "$($Body[$n])".Trim() } elseif ($Body.PSObject.Properties[$n]) { "$($Body.$n)".Trim() } else { '' } }
+    $e = [ordered]@{}
+    $name = & $g 'name'; $domain = (& $g 'domain').TrimStart('@').ToLowerInvariant(); $display = & $g 'displayName'
+    if (-not $name) { $e['mbxName'] = 'Enter the mailbox name (the part before the @), for example PIM-Engine.' }
+    elseif ($name -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$' -or $name -match '\.\.') { $e['mbxName'] = "Not usable as a mailbox name: $name (letters, digits, '.', '_' and '-'; at most 64; not starting or ending with '.', '_' or '-')." }
+    $known = @(@($Domains) | Where-Object { $_ } | ForEach-Object { "$($_.id)".ToLowerInvariant() })
+    if (-not $domain) { $e['mbxDomain'] = 'Choose the domain.' }
+    elseif ($domain -notmatch '^[a-z0-9-]+(\.[a-z0-9-]+)+$') { $e['mbxDomain'] = "Not a domain: $domain" }
+    elseif ($known.Count -and $known -notcontains $domain) { $e['mbxDomain'] = "$domain is not a verified domain of this tenant." }
+    if (-not $display) { $e['mbxDisplay'] = 'Enter the display name (what recipients see as the sender).' }
+    elseif ($display.Length -gt 256 -or $display -match '[\x00-\x1f]') { $e['mbxDisplay'] = 'The display name is too long or has control characters.' }
+    $ex = & $g 'existing'
+    return [ordered]@{ ok = ($e.Count -eq 0); errors = $e
+                       value = [ordered]@{ name = $name; domain = $domain; displayName = $display; existing = [bool]($ex -match '^(?i)(true|1)$') } }
 }
 
 function Get-PimManagerMailState {
@@ -4216,8 +4531,14 @@ function Get-PimManagerMailState {
     $tid = if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() }
     $sqlSrv = if ("$($global:PIM_SqlServer)".Trim()) { "$($global:PIM_SqlServer)".Trim() } else { "$($env:PIM_SqlServer)".Trim() }
     $sqlDb = if ("$($global:PIM_SqlDatabase)".Trim()) { "$($global:PIM_SqlDatabase)".Trim() } else { "$($env:PIM_SqlDatabase)".Trim() }
+    # MAIL-NAMING (100.14): the company's mailbox name / domain / display name (pim.Settings 'MailboxSetup'), the tenant's
+    # verified domains for the picker, and the defaults the script uses.
+    $doms = @(); try { $doms = @((Get-PimManagerTenantDomains).domains) } catch { $doms = @() }
+    $mbRaw = $null; try { $mbRaw = Get-PimManagerSetting -Name 'MailboxSetup' } catch { }
+    $mailbox = ConvertTo-PimManagerMailboxSetup -Value $mbRaw -Sender $sender -Domains $doms
     return [ordered]@{
         mode = $mode; modes = @(Get-PimMailModeCatalog); sender = $sender
+        mailbox = $mailbox; domains = @($doms)
         smtp = $(if ($relayRaw) { $relay.config } else { $null }); smtpErrors = $(if ($relayRaw) { $relay.errors } else { @{} })
         done = [bool]$state.done; note = "$($state.note)"; proven = $state.proven
         lastTest = $last
@@ -4226,8 +4547,8 @@ function Get-PimManagerMailState {
             tenantId = $tid; managerObjectId = "$($ids.managerObjectId)"; tickObjectId = "$($ids.tickObjectId)"
             subscriptionId = "$($ids.subscriptionId)"; resourceGroup = "$($ids.resourceGroup)"; tickJobName = "$($ids.tickJobName)"
             sqlServer = $sqlSrv; sqlDatabase = $sqlDb; vaultHint = "$($global:PIM_EmergencyVault)".Trim(); reason = "$($ids.reason)"
-            mailboxScript = 'https://invardia.com/support/pim/Initialize-PimMailSender.ps1'
-            passwordScript = 'https://invardia.com/support/pim/Set-PimSmtpRelayPassword.ps1'
+            mailboxScript = (Get-PimSupportScriptUrl -Script 'Initialize-PimMailSender')
+            passwordScript = (Get-PimSupportScriptUrl -Script 'Set-PimSmtpRelayPassword')
         }
         # MAIL CHECK: every prerequisite as its own line (Get Started > Mail sender, the Home banner). Mail is optional.
         checks = $(if ($NoChecks) { $null } else { Get-PimManagerMailChecks -Refresh:$RefreshChecks })
@@ -4272,6 +4593,31 @@ function Save-PimManagerMailLastTest {
     } catch { Write-Warning "  [mail] the test-mail result could not be recorded: $($_.Exception.Message)" }
 }
 
+function Request-PimManagerMailEngineTest {
+    <#
+      MAIL-STEP-PROOF (owner 2026-10-09: "i have run 3 cmdlet, and test mail works - but it still shows eros"). The Manager's
+      test mail proves only the Manager's own identity; the engine job (ca-pim-tick) sends as ANOTHER identity. So Send test
+      mail also queues ONE engine test send (pim.Settings 'MailEngineTest', New-PimMailEngineTestRequest) and starts the tick
+      through the existing Run-now path (Start-PimManagerTickNow: needs Jobs Operator on the tick job, else the next cron start).
+      The engine sends it as its own identity first thing in that run and records the proof as a real send does.
+      Shared mailbox only (the mode with a per-identity send right). Returns @{ queued; started; detail; note }. Never throws.
+    #>
+    param([Parameter(Mandatory)][string]$To)
+    $o = [ordered]@{ queued = $false; started = $false; detail = ''; note = '' }
+    try {
+        $st = Get-PimManagerMailState -NoChecks
+        if ("$($st.mode)" -ne 'sharedMailbox' -or -not "$($st.sender)".Trim()) { $o.detail = 'no engine test: only a shared mailbox has a per-identity send right'; return $o }
+        $rec = New-PimMailEngineTestRequest -To $To -By "$(try { Get-PimManagerActorName } catch { '' })" -Mode 'sharedMailbox' -Sender "$($st.sender)"
+        Set-PimManagerSetting -Name 'MailEngineTest' -Value $rec
+        $script:PimMailCheckCache = $null
+        $o.queued = $true
+        $k = $null; try { $k = Start-PimManagerTickNow -Reason 'mail engine test' } catch { $k = [pscustomobject]@{ started = $false; detail = "$($_.Exception.Message)" } }
+        $o.started = [bool]$k.started; $o.detail = "$($k.detail)"
+        $o.note = if ($o.started) { 'Engine test mail queued -- proven in about a minute.' } else { "Engine test mail queued -- the engine sends it at its next run ($($k.detail))." }
+    } catch { $o.detail = "the engine test mail could not be queued: $($_.Exception.Message)"; $o.note = "Engine test mail NOT queued: $($_.Exception.Message)" }
+    return $o
+}
+
 function Send-PimManagerAlert {
     # Fan an alert out to every configured recipient for ONE event type, through the
     # existing Send-PimNotifyMail path (the 'alert-notice' template). Honours the
@@ -4288,7 +4634,9 @@ function Send-PimManagerAlert {
         # 2026-09-21: the verdict and the next step, first in the mail (HTML-safe; blank = the template defaults)
         [string]$Headline = '',
         [string]$Action = '',
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        # MAIL-2: the Settings "Send test alert" proves delivery to EVERY recipient, whatever their Notifications say
+        [switch]$IgnoreNotifications
     )
     $cfg = Get-PimAlertingConfig
     $webhookOn = [bool]$cfg.webhookEnabled
@@ -4325,8 +4673,14 @@ function Send-PimManagerAlert {
         WhenUtc     = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
     }
     $sent = 0; $lastReason = ''
+    # MAIL-2 item 2: each recipient's Notifications -- this alert on/off and their severity floor, read at send time. The
+    # test alert (Settings > Send test alert, -IgnoreNotifications) still reaches everyone: it proves delivery.
+    $alertRcpts = @($cfg.recipients)
+    if ($mailPossible -and -not $IgnoreNotifications -and (Get-Command Select-PimNotificationRecipients -ErrorAction SilentlyContinue)) {
+        try { $alertRcpts = @((Select-PimNotificationRecipients -Prefs (Get-PimMailNotificationPrefsFromStore) -Recipients $alertRcpts -Type $Event -Kind 'alert').keep) } catch { $alertRcpts = @($cfg.recipients) }
+    }
     if ($mailPossible) {
-        foreach ($rcpt in $cfg.recipients) {
+        foreach ($rcpt in $alertRcpts) {
             try {
                 $r = if ($WhatIf) { Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $rcpt -WhatIf } else { Send-PimNotifyMail -Type 'alert-notice' -Tokens $tokens -Recipient $rcpt }
                 if ($r.sent) { $sent++ } elseif ($r.reason) { $lastReason = "$($r.reason)" }
@@ -4379,9 +4733,10 @@ function Send-PimManagerAlert {
 # engine + scheduler/jobs that read pim.Settings see exactly what the GUI saved.
 # The normalize/validate/clamp logic lives in the shared engine lib
 # (PIM-OperationalPolicy.ps1) so the engine and the GUI agree on the value.
-# Covers ONLY the three knobs that did not already exist: expiry-policy defaults,
-# MFA-on-activation toggle, connection-sanity config. (Notification/alert config
-# is the separate, already-shipped Alerting surface above.)
+# Covers the three FLOORS the engine applies to every policy template it writes
+# (OPPOL-1, 2026-10-09): Require MFA on activation, max activation duration, max
+# eligibility duration -- applied in Get-PimEnginePolicyTemplates. (Notification/alert
+# config is the separate, already-shipped Alerting surface above.)
 # ---------------------------------------------------------------------------
 function Get-PimOperationalPolicy {
     # Returns @{ value=<ordered policy>; warnings=<string[]>; catalogs=@{..} }.
@@ -4610,7 +4965,36 @@ function Set-PimFeatureFlags {
     try { $isMaster = [bool](Test-PimManagerIsMspMaster) } catch { $isMaster = $false }
     $overrides = ConvertTo-PimFeatureFlagOverrides -Raw $Flags -IsMspMaster $isMaster
     Set-PimManagerSetting -Name 'FeatureFlags' -Value ([ordered]@{ flags = $overrides })
+    $script:PimFeatureFlagGateCache = $null   # FLAGS-1: the route gate sees the change at once
     return (Get-PimFeatureFlags)
+}
+
+function Invoke-PimManagerFeatureFlagGate {
+    <#
+      FLAGS-1 -- the SERVER half of a page switched off in Settings > Features. Returns $null (carry on) or the status it
+      has WRITTEN: 403 { ok = $false; gate = 'feature-off'; feature; error }. The effective flags are cached 15 s (a save
+      clears the cache). A flag map that cannot be read refuses nothing -- a read failure must not hide every page.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][object]$Response)
+    if (-not (Get-Command Get-PimFeatureFlagRouteDecision -ErrorAction SilentlyContinue)) { return $null }
+    if (-not "$Path".StartsWith('/api/')) { return $null }
+    # cheap first: only a route that belongs to a switchable page reads the flags at all
+    $routes = Get-PimFeatureFlagRoutes; $isPageRoute = $false
+    foreach ($k in @($routes.Keys)) { foreach ($rx in @($routes[$k])) { if ("$Path" -match $rx) { $isPageRoute = $true; break } }; if ($isPageRoute) { break } }
+    if (-not $isPageRoute) { return $null }
+    $nowUtc = [datetime]::UtcNow
+    $c = $script:PimFeatureFlagGateCache
+    $flags = $null
+    if ($c -and ($nowUtc - $c.at).TotalSeconds -le 15) { $flags = $c.flags }
+    else {
+        try { $flags = (Get-PimFeatureFlags).flags } catch { $flags = $null }
+        $script:PimFeatureFlagGateCache = @{ at = $nowUtc; flags = $flags }
+    }
+    if ($null -eq $flags) { return $null }
+    $d = Get-PimFeatureFlagRouteDecision -Path $Path -Flags $flags
+    if (-not $d) { return $null }
+    Write-JsonResponse -Response $Response -Status 403 -Body ([ordered]@{ ok = $false; gate = 'feature-off'; feature = "$($d.feature)"; error = "$($d.message)" })
+    return 403
 }
 
 # ---------------------------------------------------------------------------
@@ -5738,7 +6122,7 @@ function Invoke-PimManagerCsvPut {
     }
 
     # §91.23: rows the managing tenant sent (Owner=MSP) are read-only here.
-    $upGate = Test-PimManagerUplinkRowGate -Diff $diff -Base $base
+    $upGate = Test-PimManagerUplinkRowGate -Diff $diff -Base $base -MspDefinitionRows @(Get-PimManagerMspDefinitionRows -Base $base)
     if (-not $upGate.allowed) {
         Write-PimManagerAuditEvent -Action 'commit.uplink-readonly' -Target $base -Result 'denied' -After ([ordered]@{ refused = @($upGate.refused) })
         if (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
@@ -6310,6 +6694,37 @@ function Get-PimManagerDepartmentImportPattern {
     $p = "$stored".Trim()
     if (-not $p) { return 'ORG-*' }
     return $p
+}
+
+function Get-PimManagerNamingCatalogView {
+    <#
+      GS-NAMING-ALL (owner 2026-10-09): the ONE list of naming settings the Get Started Naming step renders -- the naming
+      catalog (engine/_shared/PIM-Naming.ps1 Get-PimNamingSettingCatalog) + every hybrid AD knob flagged 'naming'
+      (engine/hybrid-ad/PIM-HybridAdGroups.ps1, only when that library is loaded), each with where it is stored. The
+      naming-map values come from GET /api/settings (the step saves the FULL map back); a hybrid knob carries its stored
+      value here because it is its own pim.Settings row (saved through PUT /api/settings/hybrid-ad).
+    #>
+    $items = New-Object System.Collections.Generic.List[object]
+    if (Get-Command Get-PimNamingSettingCatalog -ErrorAction SilentlyContinue) { foreach ($it in @(Get-PimNamingSettingCatalog)) { $items.Add($it) } }
+    $hybrid = $false
+    if (Get-Command Get-PimHybridAdSettingCatalog -ErrorAction SilentlyContinue) {
+        $hybrid = $true
+        foreach ($c in @(Get-PimHybridAdSettingCatalog)) {
+            if (-not ($c.Contains('naming') -and $c.naming)) { continue }
+            $v = ''
+            if (Get-Command Get-PimHybridAdSetting -ErrorAction SilentlyContinue) { try { $v = "$(Get-PimHybridAdSetting -Name $c.name -Default '')".Trim() } catch { $v = '' } }
+            $h = [ordered]@{ key = "$($c.name)"; label = "$($c.label)"; help = "$($c.help)"; group = 'hybrid'; common = $false; kind = 'text'; store = 'hybrid-ad'
+                default = "$($c.default)"; optional = $true; required = $false; keepSpaces = $false; value = $v }
+            foreach ($f in 'example', 'blankExample', 'exampleTokens') { if ($c.Contains($f)) { $h[$f] = $c[$f] } }
+            $items.Add($h)
+        }
+    }
+    $groups = if (Get-Command Get-PimNamingSettingGroups -ErrorAction SilentlyContinue) { @(Get-PimNamingSettingGroups) } else { @() }
+    $keep = if (Get-Command Get-PimNamingSettingPreservedKeys -ErrorAction SilentlyContinue) { @(Get-PimNamingSettingPreservedKeys) } else { @() }
+    return [ordered]@{
+        groups = $groups; items = $items.ToArray(); preserved = $keep; hybridAvailable = $hybrid
+        canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')
+    }
 }
 
 function Get-PimManagerSettingsBundle {
@@ -7259,6 +7674,41 @@ function Get-PimHomeGraphData {
     return $g
 }
 
+function Get-PimManagerHealthNotices {
+    <#
+      §100.3 (2026-10-09): the health lines Home shows for settings that are in a state the operator must know about.
+      Each @{ id; sev = 'amber'|'red'; text; tab }. Every source is guarded -- a failed read adds nothing, never an error tile.
+        demo-group-unreadable   ACC-1   demo mode on, the demo guest group cannot be read -> nobody is a demo viewer
+        msp-downlink-off        GATE-1  a managing / managed tenant with the msp.downlink switch OFF -> no publish / no pull
+        naming-blank            NAME-1  a required naming pattern is blank in the store -> the engine uses the shipped default
+    #>
+    $out = New-Object System.Collections.Generic.List[object]
+    try {
+        $dh = Get-PimManagerDemoHealth
+        if ($dh -and -not $dh.groupOk) {
+            $out.Add([ordered]@{ id = 'demo-group-unreadable'; sev = 'amber'; tab = 'settings'
+                text = ("Demo mode is on, but the demo guest group '{0}' cannot be read -- nobody is treated as a demo viewer until it can (visitors see nothing; everyone else keeps their role). {1}" -f $dh.group, $dh.error).Trim() })
+        }
+    } catch { }
+    try {
+        $mspRole = Get-PimManagerMspLicenseRole
+        if ($mspRole -and (Get-Command Test-PimFeatureEnabled -ErrorAction SilentlyContinue) -and -not (Test-PimFeatureEnabled -Key 'msp.downlink')) {
+            $what = if ($mspRole -eq 'Master') { 'nothing is published to the managed tenants' } else { 'nothing is pulled from the managing tenant' }
+            $out.Add([ordered]@{ id = 'msp-downlink-off'; sev = 'amber'; tab = 'settings'; text = "MSP downlink / fan-out is switched off in Settings > Features & edition -- $what until it is switched on." })
+        }
+    } catch { }
+    try {
+        if (Get-Command Test-PimNamingConventionsUsable -ErrorAction SilentlyContinue) {
+            $nc = $null; try { $nc = Get-PimManagerSetting -Name 'NamingConventions' } catch { $nc = $null }
+            if ($null -ne $nc) {
+                $v = Test-PimNamingConventionsUsable -Stored $nc
+                if (@($v.blank).Count) { $out.Add([ordered]@{ id = 'naming-blank'; sev = 'amber'; tab = 'settings'; text = "Naming: $(@($v.blank) -join ', ') is blank -- the engine uses the shipped default for it. Set your own pattern in Settings > Naming." }) }
+            }
+        }
+    } catch { }
+    return @($out.ToArray())
+}
+
 function Get-PimHomeOverview {
     [CmdletBinding()]
     param([switch]$IncludeHeavy)
@@ -7333,6 +7783,10 @@ function Get-PimHomeOverview {
                                  else { [ordered]@{ ok = $false; error = 'the unmanaged-admin report library (PIM-UnmanagedAdmins.ps1) is not loaded in this Manager' } }
     } catch { $tiles.unmanagedAdmins = [ordered]@{ ok = $false; error = "$($_.Exception.Message)" } }
     $hT['unmanagedAdmins'] = $hsw.ElapsedMilliseconds; $hsw.Reset(); $hsw.Start()
+
+    # ---- 1c. §100.3: settings health lines (demo group unreadable, MSP downlink off, a blank naming pattern) -----------
+    try { $tiles.health = [ordered]@{ ok = $true; notices = @(Get-PimManagerHealthNotices) } } catch { $tiles.health = [ordered]@{ ok = $false; notices = @(); error = "$($_.Exception.Message)" } }
+    $hT['health'] = $hsw.ElapsedMilliseconds; $hsw.Reset(); $hsw.Start()
 
     # ---- 2. Engine & jobs health (scheduler) ---------------------------------
     # last run / result / FAILED jobs / next run / running, red-green.
@@ -8663,6 +9117,322 @@ function Get-PimBreakGlassIdentifiers {
     return @($list | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
 }
 
+# §12.8 ENV-REPORT-1: the /api/permissions-health body as a function, so the environment report reuses the SAME check (one
+# implementation: the identity resolution, the Graph app-role read, the Azure / tenant-root reads and the engine's own refusals).
+# Returns the body (cached 5 minutes unless -Refresh), or $null when engine/_shared/PIM-PermissionHealth.ps1 is not loaded.
+function Get-PimManagerPermissionHealthBody {
+    param([switch]$Refresh)
+    $permRefresh = [bool]$Refresh
+    if (-not $permRefresh -and $script:PimPermHealthCache -and ((Get-Date) - $script:PimPermHealthCache.at).TotalSeconds -lt 300) {
+        $cached = $script:PimPermHealthCache.body; $cached['cached'] = $true
+        return $cached
+    }
+    if (-not (Get-Command Get-PimPermissionHealth -ErrorAction SilentlyContinue)) {
+        return $null
+    }
+    $identityName = 'the engine identity'; $granted = @(); $readable = $false; $azScopes = @(); $oid = ''; $permReadErr = ''
+    try {
+        # WHO AM I, AND WHO IS THE ENGINE. 🔴 Operator 2026-09-25 on 2.4.423 (internal): "it doesnt show
+        # permissions and have option to fix". Two defects:
+        #   1. The hosted Manager runs as a SYSTEM-assigned managed identity with no AZURE_CLIENT_ID, and
+        #      $global:PIM_RuntimeAppId is set nowhere -- so no app id, no object id, no Graph call at all, and
+        #      "could not be checked" on every environment built that way. The token the Manager really calls
+        #      Graph with names its principal (`appid`), so that is now the fallback.
+        #   2. Even resolved, it was the WRONG principal. The banner speaks for "the engine identity", but a
+        #      hosted Manager holds the READ-ONLY set (§65.4) -- the engine is the scheduled job's own managed
+        #      identity (ca-pim-tick), a different principal. Checking the Manager against the engine's list
+        #      would report every write permission missing. So: find the engine job's identity in the SAME
+        #      resource group as this Manager (a managed identity's alternativeNames carry its resource id)
+        #      and check THAT. Run locally, the Manager and the engine share one app identity -> check itself.
+        $appId = "$($global:PIM_RuntimeAppId)"
+        if (-not $appId) { $appId = "$($env:AZURE_CLIENT_ID)" }
+        if (-not $appId -and (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) {
+            $tok = $null
+            try { $tok = Get-PimRestToken -Resource graph } catch { $tok = $null }
+            $appId = Get-PimTokenAppId -Token "$tok"
+        }
+        if (-not $appId) { throw 'the identity this Manager runs as could not be resolved (no client id configured, and no app id in its Graph token)' }
+        $self = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=appId eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $appId)
+        if (-not $self.value) { throw "no service principal found for this Manager's app id $appId" }
+        $self = $self.value[0]
+        $selfRid = @(@($self.alternativeNames) | Where-Object { "$_" -match '^/subscriptions/' }) | Select-Object -First 1
+        if ("$($self.servicePrincipalType)" -eq 'ManagedIdentity' -and $selfRid) {
+            $engineJob = if ("$($env:PIM_ENGINE_JOB_NAME)".Trim()) { "$($env:PIM_ENGINE_JOB_NAME)".Trim() } else { 'ca-pim-tick' }
+            $rgPrefix = ("$selfRid" -replace '(?i)^(/subscriptions/[^/]+/resourcegroups/[^/]+/).*$', '$1').ToLowerInvariant()
+            $cands = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $engineJob)
+            $eng = @(@($cands.value) | Where-Object { @($_.alternativeNames) | Where-Object { "$_".ToLowerInvariant().StartsWith($rgPrefix) } }) | Select-Object -First 1
+            if (-not $eng) { throw "the engine job's managed identity '$engineJob' was not found in this Manager's resource group ($rgPrefix) -- is the engine job deployed with a system-assigned identity?" }
+            $oid = "$($eng.id)"; $identityName = "$($eng.displayName) (engine job)"
+        } else {
+            $oid = "$($self.id)"; $identityName = "$($self.displayName)"
+        }
+        if ($oid) {
+            $graphSp = Invoke-PimGraph -Path "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id,appRoles"
+            $gid = "$($graphSp.value[0].id)"
+            $roleById = @{}; foreach ($r in $graphSp.value[0].appRoles) { $roleById["$($r.id)"] = "$($r.value)" }
+            $asg = @(Invoke-PimGraph -All -Path "/servicePrincipals/$oid/appRoleAssignments")
+            $granted = @($asg | Where-Object { "$($_.resourceId)" -eq $gid } | ForEach-Object { $roleById["$($_.appRoleId)"] } | Where-Object { $_ })
+            $readable = $true
+        }
+    } catch {
+        # 🪤 UNREADABLE IS NOT HEALTHY. Leaving $readable=$false makes the verdict say the
+        # CHECK failed -- the one thing this endpoint must never report as a clean bill.
+        $readable = $false
+        $permReadErr = "$($_.Exception.Message)"
+    }
+    if (-not $readable -and -not $permReadErr -and -not $oid) { $permReadErr = 'the identity this Manager runs as could not be resolved (no client id configured, and no app id in its Graph token)' }
+    # Azure: can it manage role assignments anywhere? Any scope will do for the verdict.
+    # 🔴 Operator 2026-09-25 on 2.4.424 ("why can you not fix this" -- "Core functionality is BLOCKED -- no Azure
+    # role-management scope"): the verdict came from $global:PIM_AzureScopes, which the hosted Manager never sets,
+    # so it said NO while ca-pim-tick held User Access Administrator at the tenant root. ASK AZURE: every
+    # subscription this Manager can read, role assignments assignedTo() the engine identity -- that filter also
+    # returns the ones INHERITED from management groups, which is where the tenant-root grant lives.
+    try {
+        if ($global:PIM_AzureScopes) { $azScopes = @($global:PIM_AzureScopes) }
+    } catch { }
+    if (-not @($azScopes).Count -and $oid -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) {
+        # Owner, User Access Administrator, Role Based Access Control Administrator -- the roles that can write role assignments.
+        $rbacWriters = @('8e3af657-a8ff-443c-a75c-2fe8c4bcb635', '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9', 'f58310d9-a9f6-439a-9e8d-f62e7b41a168')
+        try {
+            $subs = @((Invoke-PimArm -Path '/subscriptions' -ApiVersion '2022-12-01').value | Select-Object -First 10)
+            $found = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+            foreach ($s in $subs) {
+                $ra = Invoke-PimArm -Path ("/subscriptions/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $s.subscriptionId, $oid)
+                foreach ($a in @($ra.value)) {
+                    $rd = "$($a.properties.roleDefinitionId)".ToLowerInvariant()
+                    if ($rbacWriters | Where-Object { $rd.EndsWith($_) }) { [void]$found.Add("$($a.properties.scope)") }
+                }
+                if ($found.Count) { break }
+            }
+            $azScopes = @($found)
+        } catch { }
+    }
+    # BUG-237's fix, on THIS surface too (operator 2026-09-25 on 2.4.426, "still wrong": "no mail sender configured"
+    # right after a restart, while the sender is set). The sender is hydrated from SQL lazily -- by the send path
+    # and the Alerting status -- so a fresh Manager process read it here as empty. Read it the same way they do.
+    if (-not "$($global:PIM_MailSender)".Trim() -and (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue)) {
+        try { [void](Initialize-PimEmailControlsFromStore -Force) } catch { }
+    }
+    $mailSender = "$($global:PIM_MailSender)".Trim()
+    # MAIL-1: an SMTP relay environment sends as the relay's From address -- it has no sender MAILBOX to report.
+    if ((Get-Command Get-PimMailMode -ErrorAction SilentlyContinue) -and (Get-PimMailMode) -eq 'smtp') {
+        $rl = Get-PimSmtpRelayConfig; $mailSender = if ($rl.ok) { "$($rl.config.from)" } else { '' }
+    }
+    # Mail: the PROOF is the alert feed -- every alert records how many recipients it was actually sent to. The latest
+    # real (not dry-run) attempt decides: delivered -> proven; attempted and failed -> broken; none recorded -> unknown.
+    $mailProof = $null
+    if ($mailSender -and $script:PimSqlCs -and (Get-Command Read-PimAlertFeedSql -ErrorAction SilentlyContinue)) {
+        try {
+            $lastReal = @(Read-PimAlertFeedSql -ConnectionString $script:PimSqlCs) |
+                Where-Object { $_ -and $_.fired -and -not $_.whatIf -and ([int]$_.sent -gt 0 -or "$($_.reason)" -match '(?i)forbidden|denied|403|failed|error') } |
+                Sort-Object { "$($_.ts)" } -Descending | Select-Object -First 1
+            if ($lastReal) { $mailProof = ([int]$lastReal.sent -gt 0) }
+        } catch { $mailProof = $null }
+    }
+    # Operator 2026-10-04 (RIDE): Azure rights are needed only when Azure resource delegations are DEFINED. -1 = the
+    # store could not be counted -> the strict rule stays (a gap is never hidden by a failed read).
+    $azDefs = -1
+    if ($script:PimSqlCs -and (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
+        try { $azDefs = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Assignments-Azure-Resources').Count } catch { $azDefs = -1 }
+    }
+    # §97 (owner 2026-10-08): what the engine holds AT THE TENANT ROOT management group -- Reader (required: Discovery
+    # cannot see Azure without it) and User Access Administrator (optional; needed only to assign Azure resource roles).
+    # ASK AZURE: the root's own assignments when this Manager may read them, else a subscription's assignedTo() list,
+    # which carries the ones INHERITED from the root. Unreadable = $null = "not checked", never "missing".
+    $permTid = $(if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() })
+    $rootReader = $null; $rootUaa = $null
+    if ($oid -and $permTid -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue) -and (Get-Command Get-PimRootAzureHoldings -ErrorAction SilentlyContinue)) {
+        $rootAsg = $null
+        try { $rootAsg = @((Invoke-PimArm -Path ("/providers/Microsoft.Management/managementGroups/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $permTid, $oid)).value) } catch { $rootAsg = $null }
+        if ($null -eq $rootAsg) {
+            try {
+                $s1 = @((Invoke-PimArm -Path '/subscriptions' -ApiVersion '2022-12-01').value | Select-Object -First 1)
+                if ($s1.Count) { $rootAsg = @((Invoke-PimArm -Path ("/subscriptions/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $s1[0].subscriptionId, $oid)).value) }
+            } catch { $rootAsg = $null }
+        }
+        if ($null -ne $rootAsg) {
+            $rh = Get-PimRootAzureHoldings -Assignments $rootAsg -TenantId $permTid
+            $rootReader = $rh.reader; $rootUaa = $rh.userAccessAdmin
+        }
+    }
+    $health = Get-PimPermissionHealth -GrantedGraphRoles $granted -AzureRoleScopes $azScopes `
+                -IdentityName $identityName -GraphReadable $readable -MailSender $mailSender -MailSendOk $mailProof `
+                -AzureDelegationCount $azDefs -RootReaderHeld $rootReader -RootUaaHeld $rootUaa -TenantId $permTid -EngineObjectId $oid
+    # Say WHY the check failed -- "could not be checked" with no cause left the operator nothing to act on.
+    if (-not $readable -and $permReadErr -and $health.PSObject.Properties['detail']) { $health.detail = "$($health.detail) Cause: $permReadErr" }
+    $identities = @()
+    if ($oid) {
+        $identities += (New-PimIdentityRecord -Name $identityName -Kind ManagedIdentity -ObjectId $oid `
+                          -Purpose 'Runs the engine: applies every committed change to the tenant' -IsRuntime $true -Health $health)
+    }
+    # 🔴 §70.18 / §70.19 (operator 2026-09-13: "why have you not told me that you are missing permissions --
+    # fundamentally an issue"). This check reads THIS process's identity -- the Manager's. The ENGINE runs as
+    # a different managed identity (the scheduled job), and on internal that identity lacked
+    # RoleManagement.ReadWrite.Directory: every new role-assignable group got HTTP 403 while this banner
+    # stayed green. The engine's own refusals are the ground truth, so they now decide the banner first.
+    $engineDenied = @()
+    if (Get-Command Get-PimEngineItemFailures -ErrorAction SilentlyContinue) {
+        try { $engineDenied = @(@(Get-PimEngineItemFailures) | Where-Object { $_ -and "$($_.code)" -eq 'PERMISSION-DENIED' }) } catch { $engineDenied = @() }
+    }
+    # §97 (owner 2026-10-08): Discovery's management-group / subscription LIST refused (AZURE-NOT-VISIBLE) is the engine
+    # not SEEING Azure. With NO Azure resource delegation defined nothing waits on it -> AMBER "Discovery: Azure not
+    # visible" with the fix; with delegations defined (or the count unknown) it is a real refusal -> RED like any other.
+    $azNotVisible = @()
+    if (Get-Command Get-PimEngineItemFailures -ErrorAction SilentlyContinue) {
+        try { $azNotVisible = @(@(Get-PimEngineItemFailures) | Where-Object { $_ -and "$($_.code)" -eq 'AZURE-NOT-VISIBLE' }) } catch { $azNotVisible = @() }
+    }
+    $azNotVisibleAmber = ($azNotVisible.Count -gt 0 -and $azDefs -eq 0)
+    if ($azNotVisible.Count -and -not $azNotVisibleAmber) { $engineDenied = @($engineDenied) + @($azNotVisible) }
+    $hOk = [bool]$health.ok; $hSev = "$($health.severity)"; $hHead = "$($health.headline)"; $hDetail = "$($health.detail)"
+    if ($azNotVisibleAmber -and -not $engineDenied.Count) {
+        $rootFix = Get-PimRootAzureFixCommand -TenantId $permTid -EngineObjectId $oid -Roles @('Reader')
+        $hOk = $false
+        if ($hSev -ne 'error') { $hSev = 'warning' }
+        if ($hSev -eq 'warning') { $hHead = 'Discovery: Azure not visible -- the engine cannot list management groups or subscriptions (grant Reader at the tenant root)' }
+        $hDetail = "Discovery: Azure not visible. The engine identity was refused the Azure management-group / subscription list ($($azNotVisible.Count) item(s)); no Azure resource delegation is defined, so nothing waits on it. Grant Reader (read-only) at the tenant root management group -- run: " +
+                   ($rootFix -replace "`n", ' ; ') + "  $hDetail"
+    }
+    if ($engineDenied.Count) {
+        $hOk = $false; $hSev = 'error'
+        $hHead = "The ENGINE was refused a permission on $($engineDenied.Count) item(s) -- those changes are NOT being deployed."
+        $ex = @($engineDenied | Select-Object -First 3 | ForEach-Object {
+            $what = if ("$($_.label)".Trim()) { "$($_.label)" } else { "$($_.scope) $($_.key)" }
+            "$what [$($_.scope)]: $("$($_.message)".Substring(0, [Math]::Min(180, "$($_.message)".Length)))" })
+        $hDetail = "The scheduled engine job's managed identity (not this Manager's) was denied by Graph/Azure: " + ($ex -join ' | ') +
+                   ". Grant the missing permission to the engine identity; a new grant can take up to ~30 minutes to reach its token. " +
+                   "Jobs > Engine logs & errors lists every item. (Manager identity check: $($health.headline))"
+    }
+    $permBody = ([ordered]@{
+        ok         = $hOk
+        severity   = $hSev
+        headline   = $hHead
+        detail     = $hDetail
+        engineDenied = @($engineDenied | ForEach-Object { [ordered]@{ scope = "$($_.scope)"; key = "$($_.key)"; label = "$($_.label)"; message = "$($_.message)"; lastSeenUtc = "$($_.lastSeenUtc)"; count = $_.count } })
+        identity   = "$($health.identity)"
+        objectId   = "$oid"
+        tenantId   = $(if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() })
+        grantedCount = @($granted).Count
+        # BUG-250 (§78 live GUI sweep, 2026-09-24): when the check itself cannot run, $health carries none of
+        # these lists and `@($null)` serialises as [null] -- the page then threw on m.role and the Home banner
+        # stayed on "Checking permissions..." forever, hiding the very explanation it exists to show.
+        missingRequired = @(@($health.missingRequired) | Where-Object { $null -ne $_ })
+        missingOptional = @(@($health.missingOptional) | Where-Object { $null -ne $_ })
+        unavailableConnectors = @(@($health.unavailableConnectors) | Where-Object { $null -ne $_ -and "$_".Trim() })
+        azureOk    = $health.azureOk
+        azureNeeded = $health.azureNeeded
+        # §97: Reader + User Access Administrator at the tenant root, each with its exact fix (Get Started + Home).
+        azureRoot  = $health.azureRoot
+        azureNotVisible = [ordered]@{ count = @($azNotVisible).Count; amber = [bool]$azNotVisibleAmber }
+        mail       = $health.mail
+        # MAIL CHECK: every mail prerequisite as its own line (amber, never red -- mail is optional); Verify permissions re-reads it
+        mailChecks = $(try { Get-PimManagerMailChecks -Refresh:$permRefresh } catch { $null })
+        identities = @($identities)
+        connectors = @(Get-PimWorkloadConnectorRequirements | ForEach-Object { [ordered]@{ connector="$($_.connector)"; surface="$($_.surface)"; model="$($_.model)"; tier="$($_.tier)"; grant="$($_.grant)" } })
+        checkedUtc = (Get-Date).ToUniversalTime().ToString('o')
+        cached     = $false
+    })
+    # an UNREADABLE check is not cached: the next load tries again
+    if ([bool]$readable) { $script:PimPermHealthCache = @{ at = (Get-Date); body = $permBody } } else { $script:PimPermHealthCache = $null }
+    return $permBody
+}
+
+# §12.8 ENV-REPORT-1 (owner 2026-10-09: "documentation ... with all relevant architecture and security info from the customer
+# env. name of identies, permissions, features, flows, everything. it must be exportable to pdf in nice report"). Binds the
+# LIVE sources of this environment to the pure builder (engine/_shared/PIM-EnvironmentReport.ps1): the SAME functions the
+# Home / Get Started / Settings / Support pages use (permission check, mail check, licence, update state, own identities,
+# break-glass list, feature catalog, commit journal, audit trail), plus Microsoft Graph, Azure Resource Manager and SQL as
+# THIS Manager's own identity. Whatever it may not read is reported "not readable: <reason>" by the builder, never omitted.
+# Kept 5 minutes (it makes a few dozen reads on the Manager's one request loop); -Refresh reads again. Never a secret value.
+function Get-PimManagerEnvironmentReport {
+    param([switch]$Refresh)
+    if (-not $Refresh -and $script:PimEnvReportCache -and ((Get-Date) - $script:PimEnvReportCache.at).TotalSeconds -lt 300) {
+        $c = $script:PimEnvReportCache.body; $c['cached'] = $true; return $c
+    }
+    $envRepCs = ''; try { $envRepCs = "$(Get-PimManagerStoreCs)".Trim() } catch { $envRepCs = '' }
+    $envRepRefresh = [bool]$Refresh
+    $envRepGraph = { param($Method, $Path, $Body) if ($null -ne $Body) { Invoke-PimGraph -Method $Method -Path $Path -Body $Body } else { Invoke-PimGraph -Method $Method -Path $Path } }
+    $envRepArm = { param($Path) Invoke-PimArm -Path $Path }
+    $envRepSql = $null
+    if ($envRepCs -and (Get-Command Invoke-PimSqlQuery -ErrorAction SilentlyContinue)) { $envRepSql = { param($Query) Invoke-PimSqlQuery -ConnectionString $envRepCs -Sql $Query } }
+    $envRepSources = @{
+        tenant          = { $t = Get-PimManagerTenantContext; [ordered]@{ tenantId = "$($t.tenantId)"; tenantName = "$($t.tenantName)" } }
+        version         = { Get-PimSolutionVersion }
+        environmentName = { $v = Get-PimSetting -Name 'EnvironmentName'; if ($v -is [string]) { $v.Trim() } elseif ($v -and $v.PSObject.Properties['name']) { "$($v.name)".Trim() } else { '' } }
+        mode            = { "$(Get-PimManagerMspLicenseRole)" }
+        edition         = { Get-PimEditionConfig }
+        license         = { Get-PimManagerLicenseBody }
+        updateState     = { if (-not $envRepCs) { throw 'no SQL store is wired in this host' }; Get-PimUpdateStateVerdict -Record (Read-PimUpdateState -ConnectionString $envRepCs) -RunningVersion (Get-PimSolutionVersion) }
+        diagnostics     = { Get-PimSupportDiagnostics }
+        permissionHealth = { $b = Get-PimManagerPermissionHealthBody -Refresh:$envRepRefresh; if ($null -eq $b) { throw 'the permission check (PIM-PermissionHealth.ps1) is not loaded in this build' }; $b }
+        identityContext = {
+            $i = Get-PimManagerMailIdentities
+            if (-not "$($i.managerObjectId)" -and "$($i.reason)") { throw "$($i.reason)" }
+            [ordered]@{ selfAppId = (Get-PimManagerSelfAppId); managerObjectId = "$($i.managerObjectId)"; tickObjectId = "$($i.tickObjectId)"; subscriptionId = "$($i.subscriptionId)"
+                        resourceGroup = "$($i.resourceGroup)"; tickJobName = "$($i.tickJobName)"; tickJobId = (Get-PimManagerTickJobId) }
+        }
+        ownPrincipals   = {
+            $r = Get-PimManagerReviewOwnPrincipals -ServicePrincipalIds @()
+            if (-not $r) { throw 'the own-identity reader (PIM-ReviewOwnPrincipals.ps1) is not loaded in this build' }
+            if (-not $r.productKnown -and @($r.errors).Count) { throw (@($r.errors) -join '; ') }
+            $r
+        }
+        breakGlass      = { if (-not (Get-Command Get-PimBreakGlassAccountStatus -ErrorAction SilentlyContinue)) { throw 'the break-glass library is not loaded' }; Get-PimBreakGlassAccountStatus -ConnectionString $envRepCs }
+        mail            = {
+            $m = Get-PimManagerMailState -RefreshChecks:$envRepRefresh
+            [ordered]@{ mode = "$($m.mode)"; sender = "$($m.sender)"; smtp = $(if ($m.smtp) { [ordered]@{ from = "$($m.smtp.from)"; host = "$($m.smtp.host)"; vaultName = "$($m.smtp.vaultName)" } } else { $null }); checks = $m.checks }
+        }
+        featureGates    = { Get-PimFeatureGates }
+        featureFlags    = { Get-PimFeatureFlags }
+        securitySettings = {
+            $rows = New-Object System.Collections.Generic.List[object]
+            $obj = { param($n) try { Get-PimManagerSettingObject -Name $n } catch { $null } }
+            $sa = & $obj 'ApprovalSelfApprove'; $rows.Add([ordered]@{ name = 'Approver may approve their own request'; value = $(if ($sa -and $sa.enabled) { 'on' } else { 'off' }); why = 'off = maker and checker are always two people' })
+            $gr = & $obj 'GuardReleaseSecondPerson'; $rows.Add([ordered]@{ name = 'Guard release needs a second person'; value = $(if ($gr -and $gr.enabled) { 'on' } else { 'off' }); why = 'on = releasing a protective guard needs a second SuperAdmin' })
+            $ps = ''; try { $ps = "$(Get-PimSetting -Name 'PendingSecondApprover')".Trim().Trim('"') } catch { $ps = '' }
+            $rows.Add([ordered]@{ name = 'Second approver for pending changes'; value = $(if ($ps) { $ps } else { 'default' }); why = 'who must approve a commit besides the person who staged it' })
+            try { $dm = Get-PimManagerDemoConfig; $rows.Add([ordered]@{ name = 'Demo mode'; value = $(if ($dm.on) { 'on' } else { 'off' }); why = 'on = a demo group sees the Manager read-only' }) } catch { }
+            try { $pp = Get-PimManagerEmergencyPassphraseStatus; $rows.Add([ordered]@{ name = 'Emergency override passphrase'; value = $(if ($pp.configured) { "configured ($($pp.source))" } else { 'not configured' }); why = 'the passphrase that unlocks the time-boxed emergency override (the value is never shown)' }) } catch { }
+            try { $ec = Get-PimManagerSetting -Name 'EmailControls'; $ks = Get-PimFeatureCatalogValue -Object $ec -Key 'killSwitch'; $rd = Get-PimFeatureCatalogValue -Object $ec -Key 'redirectAllTo'
+                  $rows.Add([ordered]@{ name = 'Mail kill switch / redirect'; value = "kill switch $(if ($ks) { 'ON' } else { 'off' })$(if ("$rd".Trim()) { ", all mail redirected to $rd" })"; why = 'stops or redirects every notification mail' }) } catch { }
+            try { $am = Get-PimAuditRetentionMonths -ConnectionString (Get-PimManagerSettingCs); $rows.Add([ordered]@{ name = 'Audit retention'; value = $(if ([int]$am -gt 0) { "$am months" } else { 'keep every event' }); why = 'how long the audit trail is kept' }) } catch { }
+            try { $lr = [bool](Test-PimFeatureEnabled -Key 'licence.autoRequest'); $rows.Add([ordered]@{ name = 'Licence auto-request'; value = $(if ($lr) { 'on' } else { 'off' }); why = 'requests the licence from Invardia automatically' }) } catch { }
+            @($rows.ToArray())
+        }
+        commits         = { if (-not $envRepCs -or -not (Get-Command Get-PimCommitUndoHistory -ErrorAction SilentlyContinue)) { throw 'no SQL store is wired in this host' }; @(Get-PimCommitUndoHistory -ConnectionString $envRepCs -Days 365 -Top 60) }
+        settingsAudit   = { @(Get-PimManagerAuditEvents -Months 12 -NoPayload | Where-Object { "$($_.action)" -match '^(settings|emergency|config|licence|access|manager|guard|api-key|msp|downlink|schedule)\.' -and "$($_.action)" -ne 'manager.login' } | Sort-Object { "$($_.ts)" } -Descending | Select-Object -First 60) }
+        config          = {
+            [ordered]@{
+                containerAppName = "$($env:CONTAINER_APP_NAME)".Trim(); envDnsSuffix = "$($env:CONTAINER_APP_ENV_DNS_SUFFIX)".Trim()
+                hostnames = @("$($env:PIM_MANAGER_HOSTNAMES)" -split '[,;\s]+' | Where-Object { "$_".Trim() })
+                sqlServer = $(if ("$($global:PIM_SqlServer)".Trim()) { "$($global:PIM_SqlServer)".Trim() } else { "$($env:PIM_SqlServer)".Trim() })
+                sqlDatabase = $(if ("$($global:PIM_SqlDatabase)".Trim()) { "$($global:PIM_SqlDatabase)".Trim() } else { "$($env:PIM_SqlDatabase)".Trim() })
+                keyVault = "$($global:PIM_EmergencyVault)".Trim(); registry = ''; hosted = [bool]("$($env:PIM_HOSTED)" -eq '1')
+                engineAppId = $(if ("$($global:PIM_EngineClientId)".Trim()) { "$($global:PIM_EngineClientId)".Trim() } else { "$($global:PIM_ClientId)".Trim() })
+                sqlAdminGroup = $(if ("$($env:PIM_SQL_ADMIN_GROUP)".Trim()) { "$($env:PIM_SQL_ADMIN_GROUP)".Trim() } else { 'grp-pim-sql-admins' })
+            }
+        }
+        definedGroups   = {
+            if (-not $envRepCs) { throw 'no SQL store is wired in this host' }
+            $names = New-Object System.Collections.Generic.List[string]; $n = 0
+            foreach ($ent in 'PIM-Definitions-Roles', 'PIM-Definitions-Tasks', 'PIM-Definitions-Services', 'PIM-Definitions-Processes', 'PIM-Definitions-Resources', 'PIM-Definitions-Organization', 'PIM-Definitions-Projects', 'PIM-Definitions-CrossOrg') {
+                foreach ($row in @(Get-PimSqlRows -ConnectionString $envRepCs -Entity $ent)) {
+                    if (-not $row) { continue }; $n++
+                    $nm = ''; foreach ($col in 'GroupName', 'Name', 'DisplayName') { if ($row.PSObject.Properties[$col] -and "$($row.$col)".Trim()) { $nm = "$($row.$col)".Trim(); break } }
+                    if ($nm -and $names.Count -lt 60) { $names.Add($nm) }
+                }
+            }
+            [ordered]@{ count = $n; names = @($names.ToArray()) }
+        }
+        activatorApps   = { if (-not (Get-Command Get-PimActivatorChannel -ErrorAction SilentlyContinue)) { throw 'the PIM Activator builder is not loaded in this Manager' }; @('Released', 'Test' | ForEach-Object { "$((Get-PimActivatorChannel -Channel $_).appName)" }) }
+        scriptDocs      = { $d = Join-Path $solutionRoot 'tools\setup\script-docs'; if (Test-Path -LiteralPath $d) { @(Get-ChildItem -LiteralPath $d -Filter '*.doc.json' | ForEach-Object { $_.Name }) } else { @() } }
+    }
+    $who = ''; try { $who = "$((Get-PimManagerRole).identity)" } catch { $who = '' }
+    $rep = Get-PimEnvironmentReport -Sources $envRepSources -Graph $envRepGraph -Arm $envRepArm -Sql $envRepSql -RequestedBy $who
+    $rep['cached'] = $false
+    $script:PimEnvReportCache = @{ at = (Get-Date); body = $rep }
+    return $rep
+}
+
 # Review page (owner 2026-10-08): PIM Manager's own identities + the Invardia Support app, as the directory and the store
 # state them (PIM-ReviewOwnPrincipals.ps1). Cached 10 minutes per set of service principals in the list -- it costs a few
 # Graph reads, and this route is on the Manager's one request loop.
@@ -9511,6 +10281,14 @@ function Handle-Request {
         # reads. Best-effort -> {} so the resolver applies the OFF defaults.
         $govPreviewJson = '{}'
         try { $govPreviewJson = ConvertTo-PimJson -Body (Get-PimGovernancePreview) } catch { Write-Warning "governance-preview boot skipped: $($_.Exception.Message)" }
+        # SCRIPT-DOC-1: the doc / download / checksum constants + the in-scope script names (tools\setup\_PimScriptDoc.ps1)
+        $scriptDocsJson = 'null'
+        try {
+            $scriptDocsJson = ConvertTo-PimJson -Body ([ordered]@{
+                docBase = $script:PimScriptDocBaseUrl; supportBase = $script:PimSupportScriptBaseUrl; sumsUrl = $script:PimSupportScriptSumsUrl
+                scripts = @($script:PimScriptDocScripts | ForEach-Object { Get-PimScriptDocName -Script $_.Path })
+            })
+        } catch { Write-Warning "script-docs boot skipped: $($_.Exception.Message)" }
         # SQL-only: the page is always served from the SQL store.
         $modeLabel = "SQL: $($global:PIM_SqlDatabase)"
         # 🔴 SEC-29 -- STORED XSS THROUGH THE BOOT DATA. These values go into an inline <script> (and two
@@ -9531,6 +10309,7 @@ function Handle-Request {
             '__PIM_ROLE__'          = (ConvertTo-PimScriptSafeJson $roleJson)
             '__PIM_FEATUREFLAGS__'  = (ConvertTo-PimScriptSafeJson $featureFlagsJson)
             '__PIM_GOVPREVIEW__'    = (ConvertTo-PimScriptSafeJson $govPreviewJson)
+            '__PIM_SCRIPT_DOCS__'   = (ConvertTo-PimScriptSafeJson $scriptDocsJson)
         }
         $html = Expand-PimBootTemplate -Html $html -Values $bootValues
         Write-HtmlResponse -Response $resp -Html $html
@@ -9663,6 +10442,12 @@ function Handle-Request {
         # friendly 403, and GET /api/pending answers "staged changes stay in this browser". Demo mode off = $null at once.
         $demoSt = Invoke-PimManagerDemoGate -Method $method -Path $path -Response $resp
         if ($null -ne $demoSt) { return [int]$demoSt }
+
+        # 🔴 FLAGS-1 (owner-approved 2026-10-09): a page switched OFF in Settings > Features refuses its own API routes
+        # (engine/_shared/PIM-FeatureFlags.ps1 Get-PimFeatureFlagRouteDecision) -- it used to hide only the menu entry.
+        $flagSt = $null
+        if (Get-Command Invoke-PimManagerFeatureFlagGate -ErrorAction SilentlyContinue) { $flagSt = Invoke-PimManagerFeatureFlagGate -Path $path -Response $resp }
+        if ($null -ne $flagSt) { return [int]$flagSt }
 
         if ($path -eq '/api/heartbeat' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
@@ -10222,6 +11007,26 @@ function Handle-Request {
         # pim.Settings or the per-instance JSON). Naming + filters are
         # default-seeded on read so they are never empty.
         # -------------------------------------------------------------------
+        # -------------------------------------------------------------------
+        # Framework §12.9 SETTING-INFO-1 (owner 2026-10-09: "more info button per setting"): the settings catalog the
+        # "More info" panels and the switch-on confirmations render from (tools/pim-manager/settings-catalog.json, the
+        # ONE source -- also handed over to Invardia for the long pages). Read-only public documentation text, so every
+        # signed-in role may read it (a demo viewer too); it carries no tenant data.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/settings/info-catalog' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                if ($null -eq $script:PimSettingInfoCatalog) {
+                    $catFile = Join-Path $PSScriptRoot 'settings-catalog.json'
+                    $script:PimSettingInfoCatalog = ([System.IO.File]::ReadAllText($catFile) | ConvertFrom-Json)
+                }
+                Write-JsonResponse -Response $resp -Status 200 -Body $script:PimSettingInfoCatalog
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "settings catalog could not be read: $($_.Exception.Message)" }
+                return 500
+            }
+        }
         if ($path -eq '/api/settings' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             try {
@@ -10308,6 +11113,17 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status $st -Body ([ordered]@{ ok = (-not $errors.Count); written = $written.ToArray(); errors = $errors.ToArray()
                 skipped = @($apply | Where-Object { $_ -notin $written.ToArray() }) })
             return $st
+        }
+        # GS-NAMING-ALL (owner 2026-10-09): the naming settings catalog the Get Started Naming step builds its fields from.
+        if ($path -eq '/api/settings/naming-catalog' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try {
+                Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerNamingCatalogView)
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the naming settings catalog could not be read: $($_.Exception.Message)" }
+                return 500
+            }
         }
         # 2.4.465 (operator 2026-09-30): Settings > Hybrid Active Directory -- the customer's own naming for PIM for AD.
         # Each knob is its own pim.Settings row (PIM-HybridAdGroups.ps1 catalog); blank = the default derived from the naming.
@@ -10400,6 +11216,28 @@ function Handle-Request {
                 return 500
             }
         }
+        # MAIL-2 item 8 (framework §12.11): the page records the Get Started step status it computed (GET_STARTED_STEPS is
+        # the ONE place a step is decided), so the daily job can remind the alert recipients while a REQUIRED step is open.
+        # Admin+ (a Reader's view may be incomplete). 'installer' = the first admin who recorded it, kept -- the fallback
+        # recipient while no alert recipient is set.
+        if ($path -eq '/api/get-started/status' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to record the Get Started status.' }; return 403 }
+            $sb = Read-RequestJson -Request $req
+            $norm = ConvertTo-PimGetStartedStatus ([ordered]@{ steps = $(if ($sb -and $sb.PSObject.Properties['steps']) { @($sb.steps) } else { @() }) })
+            if (-not @($norm.steps).Count -or @($norm.steps).Count -gt 40) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'Send 1-40 steps.' }; return 400 }
+            try {
+                $prev = $null; try { $prev = ConvertTo-PimGetStartedStatus (Get-PimManagerSetting -Name 'GetStartedStatus') } catch { $prev = $null }
+                $me = "$((Get-PimManagerRole).identity)".Trim()
+                $inst = if ($prev -and "$($prev.installer)".Trim()) { "$($prev.installer)" } elseif ($me -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') { $me } else { '' }
+                $val = [ordered]@{ steps = @($norm.steps | ForEach-Object { [ordered]@{ id = $_.id; title = $_.title; required = $_.required; done = $_.done; deferred = $_.deferred; note = $_.note; what = $_.what } })
+                                   evaluatedUtc = [datetime]::UtcNow.ToString('o'); evaluatedBy = $me; installer = $inst }
+                Set-PimManagerSetting -Name 'GetStartedStatus' -Value $val
+                $openReq = @($norm.steps | Where-Object { $_.required -and -not $_.done -and -not $_.deferred }).Count
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; openRequired = $openReq; evaluatedUtc = $val.evaluatedUtc })
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "not recorded: $($_.Exception.Message)" }; return 500 }
+        }
         if ($path -eq '/api/get-started/confirm' -and $method -eq 'PUT') {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
@@ -10479,6 +11317,12 @@ function Handle-Request {
                 $h = $ns.value
                 $before = "$($h['AdminAccountUpnSuffix'])".Trim()
                 $h['AdminAccountUpnSuffix'] = $(if ($want) { '@' + $want } else { $null })
+                # 🔴 ACC-1 (owner-approved 2026-10-09): remember the domain admins were created at UNTIL NOW, so the engine can
+                # still find (and offboard) an account stored with only a user name after the domain changes
+                # (Get-PimAdminDomainHistory / Get-PimAdminUpnDomainCandidates). Blank before = the tenant's default domain.
+                $prevDom = $before.TrimStart('@')
+                if (-not $prevDom) { try { $prevDom = "$(Get-PimTenantDefaultDomain -Domains @((Get-PimManagerTenantDomains).domains))".Trim() } catch { $prevDom = '' } }
+                [void](Update-PimManagerAdminDomainHistory -Previous $prevDom -New $want)
                 Set-PimManagerSetting -Name 'NamingConventions' -Value $h
                 $global:PIM_NamingConventions['AdminAccountUpnSuffix'] = $h['AdminAccountUpnSuffix']
                 Write-PimManagerAuditEvent -Action 'settings.admin-domain.save' -Target 'settings:AdminAccountUpnSuffix' -Before @{ value = $before } -After @{ value = "$($h['AdminAccountUpnSuffix'])" } -Result 'ok'
@@ -10523,6 +11367,16 @@ function Handle-Request {
                             }
                         } elseif ("$dimStored".Trim()) {
                             $h['DirectGroupDimension'] = $dimStored     # kept in the store, ignored by every reader
+                        }
+                        # 🔴 NAME-1 (owner-approved 2026-10-09): a BLANK name pattern (or one the save drops) is refused HERE,
+                        # server-side -- it used to be stored, and every engine run then stopped at preflight.
+                        if (Get-Command Test-PimNamingSaveAllowed -ErrorAction SilentlyContinue) {
+                            $__nsOk = Test-PimNamingSaveAllowed -New $h -Current $curNaming
+                            if (-not $__nsOk.ok) {
+                                Write-PimManagerAuditEvent -Action 'settings.naming.save' -Target 'settings:naming' -After @{ refused = (@($__nsOk.refused) -join ',') } -Result 'refused'
+                                Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; refused = @($__nsOk.refused); error = "$($__nsOk.message)" }
+                                return 400
+                            }
                         }
                         Set-PimManagerSetting -Name 'NamingConventions' -Value $h
                         if (-not ($global:PIM_NamingConventions -is [hashtable])) { $global:PIM_NamingConventions = @{} }
@@ -12595,12 +13449,92 @@ function Handle-Request {
                 $alertBefore = $null; try { $b0 = Get-PimAlertingConfig; $alertBefore = [ordered]@{ recipients = @($b0.recipients).Count; digestRecipients = @($b0.digestRecipients); tierReportRecipients = @($b0.tierReportRecipients) } } catch {}
                 $cfg = Set-PimAlertingConfig @alertArgs
                 Write-PimManagerAuditEvent -Action 'alerting.save' -Target 'settings:alerting' -Before $alertBefore -After ([ordered]@{ recipients = @($cfg.recipients).Count; digestRecipients = @($cfg.digestRecipients); tierReportRecipients = @($cfg.tierReportRecipients); enabled = [bool]$cfg.enabled; webhook = "$($cfg.webhookKind)"; webhookEnabled = [bool]$cfg.webhookEnabled }) -Result 'ok'
-                Write-JsonResponse -Response $resp -Status 200 -Body $cfg
+                # MAIL-2 item 5: a recipient who is not a Manager user becomes a Reader (said on screen); a removed recipient
+                # KEEPS their role and is listed for the admin to decide.
+                $allBefore = @(); if ($b0) { try { $allBefore = @(Get-PimAlertingAllRecipients -Config $b0) } catch { } }   # $b0 = the config read before the save
+                $allAfter = @(Get-PimAlertingAllRecipients -Config $cfg)
+                $rd = Add-PimManagerRecipientReaders -Addresses $allAfter
+                $removedKeep = @(); try { $removedKeep = @(Get-PimRemovedRecipientReaders -Before $allBefore -After $allAfter -Entries @(Get-PimManagerAccessEntries)) } catch { }
+                $outA = [ordered]@{}; foreach ($k in @($cfg.Keys)) { $outA[$k] = $cfg[$k] }
+                $outA['addedAsReader'] = @($rd.added); $outA['readerError'] = "$($rd.error)"; $outA['removedKeepAccess'] = @($removedKeep)
+                Write-JsonResponse -Response $resp -Status 200 -Body $outA
                 return 200
             } catch {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }
                 return 500
             }
+        }
+
+        # ----- MAIL-2 (framework §12.11, PIM §100.5): per-recipient Notifications + the central report view --------------
+        #   GET  /api/mail-notifications   (any role)  every recipient's audience, report / alert on-off, severity floor,
+        #                                              Manager role; the catalog; per-report attach (link | pdf)
+        #   PUT  /api/mail-notifications   (Admin)     { recipients?: [...], reports?: { <type>: { attach } } } -- stored in SQL
+        #                                              pim.Settings['MailNotifications'], read by every sender at send time;
+        #                                              recipients who are not Manager users are added as Readers
+        #   GET  /api/reports-overview     (any role)  every report / alert: cadence, on/off, recipients, attach, last sent, next run
+        #   PUT  /api/reports-overview     (Admin)     { type, recipients?, attach? } -- recipients go to the report's Alerting
+        #                                              list (cadence is the Job schedule's PUT, SuperAdmin)
+        if ($path -eq '/api/mail-notifications' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerMailNotificationsBody); return 200 }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }; return 500 }
+        }
+        if ($path -eq '/api/mail-notifications' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to change notifications.' }; return 403 }
+            $nb = Read-RequestJson -Request $req
+            $hasR = [bool]($nb -and $nb.PSObject.Properties['recipients']); $hasP = [bool]($nb -and $nb.PSObject.Properties['reports'])
+            if (-not $hasR -and -not $hasP) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'Nothing to save: send recipients and/or reports.' }; return 400 }
+            try {
+                $before = Get-PimMailNotificationPrefsFromStore
+                $saved = Save-PimManagerMailNotifications -Recipients $(if ($hasR) { @($nb.recipients) } else { @() }) -Reports $(if ($hasP) { $nb.reports } else { $null }) -HasRecipients:$hasR -HasReports:$hasP
+                $rd = Add-PimManagerRecipientReaders -Addresses @($saved.recipients | ForEach-Object { "$($_.address)" })
+                Write-PimManagerAuditEvent -Action 'notifications.save' -Target 'settings:MailNotifications' -Before ([ordered]@{ recipients = @($before.recipients).Count; reports = $before.reports }) `
+                    -After ([ordered]@{ recipients = @(foreach ($sr in @($saved.recipients)) { $offList = @(foreach ($k in @($sr.reports.Keys)) { if (-not $sr.reports[$k]) { $k } }) + @(foreach ($k in @($sr.alerts.Keys)) { if (-not $sr.alerts[$k]) { $k } }); [ordered]@{ address = $sr.address; audience = $sr.audience; severityFloor = $sr.severityFloor; off = $offList } }); reports = $saved.reports }) -Result 'ok'
+                $body = Get-PimManagerMailNotificationsBody
+                $body['addedAsReader'] = @($rd.added); $body['readerError'] = "$($rd.error)"
+                Write-JsonResponse -Response $resp -Status 200 -Body $body
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "Not saved: $($_.Exception.Message)" }; return 500 }
+        }
+        if ($path -eq '/api/reports-overview' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            try { Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerReportsOverview); return 200 }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "$($_.Exception.Message)" }; return 500 }
+        }
+        if ($path -eq '/api/reports-overview' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to change a report.' }; return 403 }
+            $rb = Read-RequestJson -Request $req
+            $type = if ($rb -and $rb.PSObject.Properties['type']) { "$($rb.type)".Trim() } else { '' }
+            $cat = @(Get-PimMailReportCatalog | Where-Object { $_.type -eq $type }) | Select-Object -First 1
+            if (-not $cat) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "Unknown report '$type'." }; return 400 }
+            try {
+                $added = @(); $rdErr = ''; $changed = [ordered]@{}
+                if ($rb.PSObject.Properties['recipients']) {
+                    if (-not "$($cat.recipientList)".Trim()) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($cat.label) goes to the people each request concerns -- it has no recipient list." }; return 400 }
+                    $list = @(@($rb.recipients) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+                    $bad = @($list | Where-Object { $_ -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$' })
+                    if ($bad.Count) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "Not a mail address: $($bad -join ', '). Nothing was saved." }; return 400 }
+                    $cur = Get-PimAlertingConfig
+                    $args2 = @{ Recipients = @($cur.recipients); Events = $cur.events; WebhookUrl = "$($cur.webhookUrl)"; WebhookKind = "$($cur.webhookKind)"; DigestRecipients = @($cur.digestRecipients); TierReportRecipients = @($cur.tierReportRecipients) }
+                    switch ("$($cat.recipientList)") { 'digestRecipients' { $args2.DigestRecipients = $list } 'tierReportRecipients' { $args2.TierReportRecipients = $list } default { $args2.Recipients = $list } }
+                    $cfg2 = Set-PimAlertingConfig @args2
+                    $rd = Add-PimManagerRecipientReaders -Addresses $list; $added = @($rd.added); $rdErr = "$($rd.error)"
+                    $changed['recipients'] = @($list)
+                }
+                if ($rb.PSObject.Properties['attach']) {
+                    if ($cat.kind -ne 'report' -or $type -eq 'get-started') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "Only a scheduled report (daily changes, tier report) can carry a PDF." }; return 400 }
+                    $att = "$($rb.attach)".Trim().ToLowerInvariant(); if ($att -notin @('link', 'pdf')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "attach is 'link' or 'pdf'." }; return 400 }
+                    [void](Save-PimManagerMailNotifications -Reports ([ordered]@{ $type = [ordered]@{ attach = $att } }) -HasReports)
+                    $changed['attach'] = $att
+                }
+                Write-PimManagerAuditEvent -Action 'reports.save' -Target "report:$type" -After $changed -Result 'ok'
+                $body = Get-PimManagerReportsOverview
+                $body['addedAsReader'] = @($added); $body['readerError'] = $rdErr
+                Write-JsonResponse -Response $resp -Status 200 -Body $body
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "Not saved: $($_.Exception.Message)" }; return 500 }
         }
 
         # ----- MAIL-1: how this environment sends mail (framework 12.3; PIM REQUIREMENTS 97.1) -------------------------
@@ -12657,6 +13591,56 @@ function Handle-Request {
                 return 200
             } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "Not saved: $($_.Exception.Message)" }; return 500 }
         }
+        # MAIL-NAMING (100.14, owner 2026-10-09: "the only way i could get it to work was to figure out the name and choose
+        # use existing mailbox ... maybe 2 steps - create + validate"): Get Started / Settings > Mail sender, shared mailbox.
+        #   PUT  /api/settings/mail/mailbox      (Admin) step 1 { name, domain, displayName, existing } -> pim.Settings
+        #                                                'MailboxSetup' (the command the page builds carries the same values);
+        #                                                refused field by field (400 { errors }), nothing written
+        #   POST /api/settings/mail/mailbox/use  (Admin) step 2: the step-1 address becomes the sender -- resolved to the key
+        #                                                Microsoft Graph sends as (its UPN, BUG-296) -- and MailMode
+        #                                                sharedMailbox; 400 when the mailbox is not in the directory yet
+        if ($path -eq '/api/settings/mail/mailbox' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to change how mail is sent.' }; return 403 }
+            $mb = Read-RequestJson -Request $req
+            $doms = @(); try { $doms = @((Get-PimManagerTenantDomains).domains) } catch { $doms = @() }
+            $chk = Test-PimManagerMailboxSetup -Body $mb -Domains $doms
+            if (-not $chk.ok) { Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{ ok = $false; error = 'Nothing was saved: ' + (@($chk.errors.Values) -join ' '); errors = $chk.errors }); return 400 }
+            try {
+                $before = $null; try { $before = Get-PimManagerSetting -Name 'MailboxSetup' } catch { }
+                Set-PimManagerSetting -Name 'MailboxSetup' -Value $chk.value
+                Write-PimManagerAuditEvent -Action 'settings.mail.mailbox' -Target 'MailboxSetup' -Result 'ok' -Before $before -After $chk.value
+                Write-JsonResponse -Response $resp -Status 200 -Body (Get-PimManagerMailState -NoChecks)
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "Not saved: $($_.Exception.Message)" }; return 500 }
+        }
+        if ($path -eq '/api/settings/mail/mailbox/use' -and $method -eq 'POST') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to change how mail is sent.' }; return 403 }
+            $st0 = Get-PimManagerMailState -NoChecks
+            $addr = "$($st0.mailbox.address)".Trim()
+            if (-not $st0.mailbox.saved -and -not $addr) { Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = 'Save step 1 (the mailbox name) first.' }; return 400 }
+            $key = $addr; $why = ''
+            try {
+                $f = [uri]::EscapeDataString("mail eq '$addr' or userPrincipalName eq '$addr' or proxyAddresses/any(p:p eq 'smtp:$addr')")
+                $hits = @((Invoke-PimGraph -Path "/users?`$filter=$f&`$select=id,userPrincipalName,mail").value | Where-Object { $_ })
+                if ($hits.Count -eq 1) { $key = "$($hits[0].userPrincipalName)".Trim() }
+                elseif ($hits.Count -gt 1) { $why = "more than one directory object carries $addr" }
+                else { $why = "$addr is not in the directory yet -- run the command in step 1 first (a new mailbox can take a few minutes to appear)" }
+            } catch { $key = $addr }   # the directory could not be read: keep the address; the mail check below says whether Graph resolves it
+            if ($why) { Write-JsonResponse -Response $resp -Status 400 -Body ([ordered]@{ ok = $false; error = $why; errors = @{ mbxName = $why } }); return 400 }
+            try {
+                $before = [ordered]@{ mode = $st0.mode; sender = $st0.sender }
+                Set-PimManagerSetting -Name 'MailSender' -Value $key; $global:PIM_MailSender = $key
+                Set-PimManagerSetting -Name 'MailMode' -Value 'sharedMailbox'; $global:PIM_MailMode = 'sharedMailbox'
+                $script:PimMailCheckCache = $null
+                Write-PimManagerAuditEvent -Action 'settings.mail.save' -Target 'MailMode,MailSender' -Result 'ok' -Before $before -After ([ordered]@{ mode = 'sharedMailbox'; sender = $key; mailbox = $addr })
+                $out = Get-PimManagerMailState -NoChecks
+                $out['used'] = [ordered]@{ address = $addr; sender = $key }
+                Write-JsonResponse -Response $resp -Status 200 -Body $out
+                return 200
+            } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "Not saved: $($_.Exception.Message)" }; return 500 }
+        }
         if ($path -eq '/api/settings/mail/test' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
             if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to send a test mail.' }; return 403 }
@@ -12673,9 +13657,11 @@ function Handle-Request {
                     WhenUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
                 $ok = [bool]$r.sent
                 Save-PimManagerMailLastTest -Ok $ok -Reason "$($r.reason)" -To $to
-                Write-PimManagerAuditEvent -Action 'settings.mail.test' -Target "mail:$to" -Result $(if ($ok) { 'ok' } else { 'failed' }) -After ([ordered]@{ sent = $ok; via = "$($r.sentAs)"; reason = "$($r.reason)" })
+                # MAIL-STEP-PROOF: the same press proves the ENGINE job too -- one engine test send queued, the tick started
+                $eng = Request-PimManagerMailEngineTest -To $to
+                Write-PimManagerAuditEvent -Action 'settings.mail.test' -Target "mail:$to" -Result $(if ($ok) { 'ok' } else { 'failed' }) -After ([ordered]@{ sent = $ok; via = "$($r.sentAs)"; reason = "$($r.reason)"; engineTestQueued = [bool]$eng.queued })
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $ok; to = $to; via = "$($r.sentAs)"; reason = "$($r.reason)"
-                    note = $(if ($ok) { "Test mail sent to $to." } else { "Not sent: $($r.reason)" }) })
+                    note = $(if ($ok) { "Test mail sent to $to." } else { "Not sent: $($r.reason)" }); engineTest = $eng })
                 return 200
             } catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ ok = $false; error = "$($_.Exception.Message)" }; return 500 }
         }
@@ -12691,7 +13677,7 @@ function Handle-Request {
             try {
                 # The test alert intentionally bypasses debounce so an operator always
                 # sees a fresh result (and a fresh recorded-send-proof feed entry).
-                $r = Send-PimManagerAlert -Event 'engine-failure' -Title 'PIM Manager test alert' -Detail 'This is a test alert sent from the Home/Settings alerting panel to confirm delivery.' -LinkTab 'home' -DebounceMinutes 0
+                $r = Send-PimManagerAlert -Event 'engine-failure' -Title 'PIM Manager test alert' -Detail 'This is a test alert sent from the Home/Settings alerting panel to confirm delivery.' -LinkTab 'home' -DebounceMinutes 0 -IgnoreNotifications
                 $ok = ($r.sent -gt 0)
                 # MAIL-1: a test alert that reached the mail path is also proof (or disproof) of the current mail mode
                 if ($r.fired -and @($r.recipients).Count) { Save-PimManagerMailLastTest -Ok $ok -Reason "$($r.reason)" -To (@($r.recipients) -join ';') }
@@ -13086,7 +14072,6 @@ function Handle-Request {
             try {
                 $cfg = Set-PimOperationalPolicy -Policy $payload
                 Write-PimManagerAuditEvent -Action 'settings.operational-policy.save' -Target 'settings:operational-policy' -After ([ordered]@{
-                    defaultActivationDuration = "$($cfg.value.expiry.defaultActivationDuration)"
                     maxActivationDuration     = "$($cfg.value.expiry.maxActivationDuration)"
                     maxEligibilityDuration    = "$($cfg.value.expiry.maxEligibilityDuration)"
                     mfaOnActivation           = [bool]$cfg.value.mfaOnActivation
@@ -13534,7 +14519,9 @@ function Handle-Request {
                 # Mirror to the globals the notify path reads live.
                 $global:PIM_MailKillSwitch = $kill
                 $global:PIM_MailAllowlist = @($allow)
-                if ($redirect) { $global:PIM_MailRedirectAllTo = $redirect }
+                # 🔴 MAIL-2 (owner-approved 2026-10-09): a CLEARED redirect is applied too -- it used to be set only, so the
+                # running Manager kept redirecting every mail until a restart. (Set-PimManagerSetting's mirror applies it as well.)
+                $global:PIM_MailRedirectAllTo = $redirect
                 Write-PimManagerAuditEvent -Action 'settings.email-controls.save' -Target 'settings:email-controls' -After ([ordered]@{ killSwitch=$kill; redirect=$redirect; allowlistCount=$allow.Count }) -Result 'ok'
                 Write-JsonResponse -Response $resp -Status 200 -Body $val
                 return 200
@@ -13636,218 +14623,11 @@ function Handle-Request {
             if ($permRefresh -and (Test-PimManagerRoleAtLeast -Minimum 'Admin') -and (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue)) {
                 try { [void](Add-PimJobTrigger -Type 'workload-prereqs' -Scope 'All' -Reason 'verify-permissions' -JobName 'workload-prereqs') } catch { Write-Verbose "workload-prereqs not queued: $($_.Exception.Message)" }
             }
-            if (-not $permRefresh -and $script:PimPermHealthCache -and ((Get-Date) - $script:PimPermHealthCache.at).TotalSeconds -lt 300) {
-                $cached = $script:PimPermHealthCache.body; $cached['cached'] = $true
-                Write-JsonResponse -Response $resp -Status 200 -Body $cached
-                return 200
-            }
-            if (-not (Get-Command Get-PimPermissionHealth -ErrorAction SilentlyContinue)) {
+            $permBody = Get-PimManagerPermissionHealthBody -Refresh:$permRefresh
+            if ($null -eq $permBody) {
                 Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'permission-health module not loaded'; hint = 'engine/_shared/PIM-PermissionHealth.ps1 is missing from this build' }
                 return 501
             }
-            $identityName = 'the engine identity'; $granted = @(); $readable = $false; $azScopes = @(); $oid = ''; $permReadErr = ''
-            try {
-                # WHO AM I, AND WHO IS THE ENGINE. 🔴 Operator 2026-09-25 on 2.4.423 (internal): "it doesnt show
-                # permissions and have option to fix". Two defects:
-                #   1. The hosted Manager runs as a SYSTEM-assigned managed identity with no AZURE_CLIENT_ID, and
-                #      $global:PIM_RuntimeAppId is set nowhere -- so no app id, no object id, no Graph call at all, and
-                #      "could not be checked" on every environment built that way. The token the Manager really calls
-                #      Graph with names its principal (`appid`), so that is now the fallback.
-                #   2. Even resolved, it was the WRONG principal. The banner speaks for "the engine identity", but a
-                #      hosted Manager holds the READ-ONLY set (§65.4) -- the engine is the scheduled job's own managed
-                #      identity (ca-pim-tick), a different principal. Checking the Manager against the engine's list
-                #      would report every write permission missing. So: find the engine job's identity in the SAME
-                #      resource group as this Manager (a managed identity's alternativeNames carry its resource id)
-                #      and check THAT. Run locally, the Manager and the engine share one app identity -> check itself.
-                $appId = "$($global:PIM_RuntimeAppId)"
-                if (-not $appId) { $appId = "$($env:AZURE_CLIENT_ID)" }
-                if (-not $appId -and (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) {
-                    $tok = $null
-                    try { $tok = Get-PimRestToken -Resource graph } catch { $tok = $null }
-                    $appId = Get-PimTokenAppId -Token "$tok"
-                }
-                if (-not $appId) { throw 'the identity this Manager runs as could not be resolved (no client id configured, and no app id in its Graph token)' }
-                $self = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=appId eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $appId)
-                if (-not $self.value) { throw "no service principal found for this Manager's app id $appId" }
-                $self = $self.value[0]
-                $selfRid = @(@($self.alternativeNames) | Where-Object { "$_" -match '^/subscriptions/' }) | Select-Object -First 1
-                if ("$($self.servicePrincipalType)" -eq 'ManagedIdentity' -and $selfRid) {
-                    $engineJob = if ("$($env:PIM_ENGINE_JOB_NAME)".Trim()) { "$($env:PIM_ENGINE_JOB_NAME)".Trim() } else { 'ca-pim-tick' }
-                    $rgPrefix = ("$selfRid" -replace '(?i)^(/subscriptions/[^/]+/resourcegroups/[^/]+/).*$', '$1').ToLowerInvariant()
-                    $cands = Invoke-PimGraph -Path ("/servicePrincipals?`$filter=displayName eq '{0}'&`$select=id,displayName,servicePrincipalType,alternativeNames" -f $engineJob)
-                    $eng = @(@($cands.value) | Where-Object { @($_.alternativeNames) | Where-Object { "$_".ToLowerInvariant().StartsWith($rgPrefix) } }) | Select-Object -First 1
-                    if (-not $eng) { throw "the engine job's managed identity '$engineJob' was not found in this Manager's resource group ($rgPrefix) -- is the engine job deployed with a system-assigned identity?" }
-                    $oid = "$($eng.id)"; $identityName = "$($eng.displayName) (engine job)"
-                } else {
-                    $oid = "$($self.id)"; $identityName = "$($self.displayName)"
-                }
-                if ($oid) {
-                    $graphSp = Invoke-PimGraph -Path "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id,appRoles"
-                    $gid = "$($graphSp.value[0].id)"
-                    $roleById = @{}; foreach ($r in $graphSp.value[0].appRoles) { $roleById["$($r.id)"] = "$($r.value)" }
-                    $asg = @(Invoke-PimGraph -All -Path "/servicePrincipals/$oid/appRoleAssignments")
-                    $granted = @($asg | Where-Object { "$($_.resourceId)" -eq $gid } | ForEach-Object { $roleById["$($_.appRoleId)"] } | Where-Object { $_ })
-                    $readable = $true
-                }
-            } catch {
-                # 🪤 UNREADABLE IS NOT HEALTHY. Leaving $readable=$false makes the verdict say the
-                # CHECK failed -- the one thing this endpoint must never report as a clean bill.
-                $readable = $false
-                $permReadErr = "$($_.Exception.Message)"
-            }
-            if (-not $readable -and -not $permReadErr -and -not $oid) { $permReadErr = 'the identity this Manager runs as could not be resolved (no client id configured, and no app id in its Graph token)' }
-            # Azure: can it manage role assignments anywhere? Any scope will do for the verdict.
-            # 🔴 Operator 2026-09-25 on 2.4.424 ("why can you not fix this" -- "Core functionality is BLOCKED -- no Azure
-            # role-management scope"): the verdict came from $global:PIM_AzureScopes, which the hosted Manager never sets,
-            # so it said NO while ca-pim-tick held User Access Administrator at the tenant root. ASK AZURE: every
-            # subscription this Manager can read, role assignments assignedTo() the engine identity -- that filter also
-            # returns the ones INHERITED from management groups, which is where the tenant-root grant lives.
-            try {
-                if ($global:PIM_AzureScopes) { $azScopes = @($global:PIM_AzureScopes) }
-            } catch { }
-            if (-not @($azScopes).Count -and $oid -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) {
-                # Owner, User Access Administrator, Role Based Access Control Administrator -- the roles that can write role assignments.
-                $rbacWriters = @('8e3af657-a8ff-443c-a75c-2fe8c4bcb635', '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9', 'f58310d9-a9f6-439a-9e8d-f62e7b41a168')
-                try {
-                    $subs = @((Invoke-PimArm -Path '/subscriptions' -ApiVersion '2022-12-01').value | Select-Object -First 10)
-                    $found = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
-                    foreach ($s in $subs) {
-                        $ra = Invoke-PimArm -Path ("/subscriptions/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $s.subscriptionId, $oid)
-                        foreach ($a in @($ra.value)) {
-                            $rd = "$($a.properties.roleDefinitionId)".ToLowerInvariant()
-                            if ($rbacWriters | Where-Object { $rd.EndsWith($_) }) { [void]$found.Add("$($a.properties.scope)") }
-                        }
-                        if ($found.Count) { break }
-                    }
-                    $azScopes = @($found)
-                } catch { }
-            }
-            # BUG-237's fix, on THIS surface too (operator 2026-09-25 on 2.4.426, "still wrong": "no mail sender configured"
-            # right after a restart, while the sender is set). The sender is hydrated from SQL lazily -- by the send path
-            # and the Alerting status -- so a fresh Manager process read it here as empty. Read it the same way they do.
-            if (-not "$($global:PIM_MailSender)".Trim() -and (Get-Command Initialize-PimEmailControlsFromStore -ErrorAction SilentlyContinue)) {
-                try { [void](Initialize-PimEmailControlsFromStore -Force) } catch { }
-            }
-            $mailSender = "$($global:PIM_MailSender)".Trim()
-            # MAIL-1: an SMTP relay environment sends as the relay's From address -- it has no sender MAILBOX to report.
-            if ((Get-Command Get-PimMailMode -ErrorAction SilentlyContinue) -and (Get-PimMailMode) -eq 'smtp') {
-                $rl = Get-PimSmtpRelayConfig; $mailSender = if ($rl.ok) { "$($rl.config.from)" } else { '' }
-            }
-            # Mail: the PROOF is the alert feed -- every alert records how many recipients it was actually sent to. The latest
-            # real (not dry-run) attempt decides: delivered -> proven; attempted and failed -> broken; none recorded -> unknown.
-            $mailProof = $null
-            if ($mailSender -and $script:PimSqlCs -and (Get-Command Read-PimAlertFeedSql -ErrorAction SilentlyContinue)) {
-                try {
-                    $lastReal = @(Read-PimAlertFeedSql -ConnectionString $script:PimSqlCs) |
-                        Where-Object { $_ -and $_.fired -and -not $_.whatIf -and ([int]$_.sent -gt 0 -or "$($_.reason)" -match '(?i)forbidden|denied|403|failed|error') } |
-                        Sort-Object { "$($_.ts)" } -Descending | Select-Object -First 1
-                    if ($lastReal) { $mailProof = ([int]$lastReal.sent -gt 0) }
-                } catch { $mailProof = $null }
-            }
-            # Operator 2026-10-04 (RIDE): Azure rights are needed only when Azure resource delegations are DEFINED. -1 = the
-            # store could not be counted -> the strict rule stays (a gap is never hidden by a failed read).
-            $azDefs = -1
-            if ($script:PimSqlCs -and (Get-Command Get-PimSqlRows -ErrorAction SilentlyContinue)) {
-                try { $azDefs = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Assignments-Azure-Resources').Count } catch { $azDefs = -1 }
-            }
-            # §97 (owner 2026-10-08): what the engine holds AT THE TENANT ROOT management group -- Reader (required: Discovery
-            # cannot see Azure without it) and User Access Administrator (optional; needed only to assign Azure resource roles).
-            # ASK AZURE: the root's own assignments when this Manager may read them, else a subscription's assignedTo() list,
-            # which carries the ones INHERITED from the root. Unreadable = $null = "not checked", never "missing".
-            $permTid = $(if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() })
-            $rootReader = $null; $rootUaa = $null
-            if ($oid -and $permTid -and (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue) -and (Get-Command Get-PimRootAzureHoldings -ErrorAction SilentlyContinue)) {
-                $rootAsg = $null
-                try { $rootAsg = @((Invoke-PimArm -Path ("/providers/Microsoft.Management/managementGroups/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $permTid, $oid)).value) } catch { $rootAsg = $null }
-                if ($null -eq $rootAsg) {
-                    try {
-                        $s1 = @((Invoke-PimArm -Path '/subscriptions' -ApiVersion '2022-12-01').value | Select-Object -First 1)
-                        if ($s1.Count) { $rootAsg = @((Invoke-PimArm -Path ("/subscriptions/{0}/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{1}')" -f $s1[0].subscriptionId, $oid)).value) }
-                    } catch { $rootAsg = $null }
-                }
-                if ($null -ne $rootAsg) {
-                    $rh = Get-PimRootAzureHoldings -Assignments $rootAsg -TenantId $permTid
-                    $rootReader = $rh.reader; $rootUaa = $rh.userAccessAdmin
-                }
-            }
-            $health = Get-PimPermissionHealth -GrantedGraphRoles $granted -AzureRoleScopes $azScopes `
-                        -IdentityName $identityName -GraphReadable $readable -MailSender $mailSender -MailSendOk $mailProof `
-                        -AzureDelegationCount $azDefs -RootReaderHeld $rootReader -RootUaaHeld $rootUaa -TenantId $permTid -EngineObjectId $oid
-            # Say WHY the check failed -- "could not be checked" with no cause left the operator nothing to act on.
-            if (-not $readable -and $permReadErr -and $health.PSObject.Properties['detail']) { $health.detail = "$($health.detail) Cause: $permReadErr" }
-            $identities = @()
-            if ($oid) {
-                $identities += (New-PimIdentityRecord -Name $identityName -Kind ManagedIdentity -ObjectId $oid `
-                                  -Purpose 'Runs the engine: applies every committed change to the tenant' -IsRuntime $true -Health $health)
-            }
-            # 🔴 §70.18 / §70.19 (operator 2026-09-13: "why have you not told me that you are missing permissions --
-            # fundamentally an issue"). This check reads THIS process's identity -- the Manager's. The ENGINE runs as
-            # a different managed identity (the scheduled job), and on internal that identity lacked
-            # RoleManagement.ReadWrite.Directory: every new role-assignable group got HTTP 403 while this banner
-            # stayed green. The engine's own refusals are the ground truth, so they now decide the banner first.
-            $engineDenied = @()
-            if (Get-Command Get-PimEngineItemFailures -ErrorAction SilentlyContinue) {
-                try { $engineDenied = @(@(Get-PimEngineItemFailures) | Where-Object { $_ -and "$($_.code)" -eq 'PERMISSION-DENIED' }) } catch { $engineDenied = @() }
-            }
-            # §97 (owner 2026-10-08): Discovery's management-group / subscription LIST refused (AZURE-NOT-VISIBLE) is the engine
-            # not SEEING Azure. With NO Azure resource delegation defined nothing waits on it -> AMBER "Discovery: Azure not
-            # visible" with the fix; with delegations defined (or the count unknown) it is a real refusal -> RED like any other.
-            $azNotVisible = @()
-            if (Get-Command Get-PimEngineItemFailures -ErrorAction SilentlyContinue) {
-                try { $azNotVisible = @(@(Get-PimEngineItemFailures) | Where-Object { $_ -and "$($_.code)" -eq 'AZURE-NOT-VISIBLE' }) } catch { $azNotVisible = @() }
-            }
-            $azNotVisibleAmber = ($azNotVisible.Count -gt 0 -and $azDefs -eq 0)
-            if ($azNotVisible.Count -and -not $azNotVisibleAmber) { $engineDenied = @($engineDenied) + @($azNotVisible) }
-            $hOk = [bool]$health.ok; $hSev = "$($health.severity)"; $hHead = "$($health.headline)"; $hDetail = "$($health.detail)"
-            if ($azNotVisibleAmber -and -not $engineDenied.Count) {
-                $rootFix = Get-PimRootAzureFixCommand -TenantId $permTid -EngineObjectId $oid -Roles @('Reader')
-                $hOk = $false
-                if ($hSev -ne 'error') { $hSev = 'warning' }
-                if ($hSev -eq 'warning') { $hHead = 'Discovery: Azure not visible -- the engine cannot list management groups or subscriptions (grant Reader at the tenant root)' }
-                $hDetail = "Discovery: Azure not visible. The engine identity was refused the Azure management-group / subscription list ($($azNotVisible.Count) item(s)); no Azure resource delegation is defined, so nothing waits on it. Grant Reader (read-only) at the tenant root management group -- run: " +
-                           ($rootFix -replace "`n", ' ; ') + "  $hDetail"
-            }
-            if ($engineDenied.Count) {
-                $hOk = $false; $hSev = 'error'
-                $hHead = "The ENGINE was refused a permission on $($engineDenied.Count) item(s) -- those changes are NOT being deployed."
-                $ex = @($engineDenied | Select-Object -First 3 | ForEach-Object {
-                    $what = if ("$($_.label)".Trim()) { "$($_.label)" } else { "$($_.scope) $($_.key)" }
-                    "$what [$($_.scope)]: $("$($_.message)".Substring(0, [Math]::Min(180, "$($_.message)".Length)))" })
-                $hDetail = "The scheduled engine job's managed identity (not this Manager's) was denied by Graph/Azure: " + ($ex -join ' | ') +
-                           ". Grant the missing permission to the engine identity; a new grant can take up to ~30 minutes to reach its token. " +
-                           "Jobs > Engine logs & errors lists every item. (Manager identity check: $($health.headline))"
-            }
-            $permBody = ([ordered]@{
-                ok         = $hOk
-                severity   = $hSev
-                headline   = $hHead
-                detail     = $hDetail
-                engineDenied = @($engineDenied | ForEach-Object { [ordered]@{ scope = "$($_.scope)"; key = "$($_.key)"; label = "$($_.label)"; message = "$($_.message)"; lastSeenUtc = "$($_.lastSeenUtc)"; count = $_.count } })
-                identity   = "$($health.identity)"
-                objectId   = "$oid"
-                tenantId   = $(if ("$($global:PIM_TenantId)".Trim()) { "$($global:PIM_TenantId)".Trim() } else { "$($env:PIM_TenantId)".Trim() })
-                grantedCount = @($granted).Count
-                # BUG-250 (§78 live GUI sweep, 2026-09-24): when the check itself cannot run, $health carries none of
-                # these lists and `@($null)` serialises as [null] -- the page then threw on m.role and the Home banner
-                # stayed on "Checking permissions..." forever, hiding the very explanation it exists to show.
-                missingRequired = @(@($health.missingRequired) | Where-Object { $null -ne $_ })
-                missingOptional = @(@($health.missingOptional) | Where-Object { $null -ne $_ })
-                unavailableConnectors = @(@($health.unavailableConnectors) | Where-Object { $null -ne $_ -and "$_".Trim() })
-                azureOk    = $health.azureOk
-                azureNeeded = $health.azureNeeded
-                # §97: Reader + User Access Administrator at the tenant root, each with its exact fix (Get Started + Home).
-                azureRoot  = $health.azureRoot
-                azureNotVisible = [ordered]@{ count = @($azNotVisible).Count; amber = [bool]$azNotVisibleAmber }
-                mail       = $health.mail
-                # MAIL CHECK: every mail prerequisite as its own line (amber, never red -- mail is optional); Verify permissions re-reads it
-                mailChecks = $(try { Get-PimManagerMailChecks -Refresh:$permRefresh } catch { $null })
-                identities = @($identities)
-                connectors = @(Get-PimWorkloadConnectorRequirements | ForEach-Object { [ordered]@{ connector="$($_.connector)"; surface="$($_.surface)"; model="$($_.model)"; tier="$($_.tier)"; grant="$($_.grant)" } })
-                checkedUtc = (Get-Date).ToUniversalTime().ToString('o')
-                cached     = $false
-            })
-            # an UNREADABLE check is not cached: the next load tries again
-            if ([bool]$readable) { $script:PimPermHealthCache = @{ at = (Get-Date); body = $permBody } } else { $script:PimPermHealthCache = $null }
             Write-JsonResponse -Response $resp -Status 200 -Body $permBody
             return 200
         }
@@ -16453,8 +17233,148 @@ function Handle-Request {
             foreach ($c in @(Read-PimWorkloadConnectors -ConnectorsDir $dir)) {
                 [void]$list.Add([ordered]@{ id = "$($c.id)"; name = "$($c.name)"; auth = "$($c.auth)"; permissionsNeeded = @($c.permissionsNeeded) })
             }
-            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ workloads = $list.ToArray() })
+            # 100.17 CUSTOM-WORKLOAD: the environment's custom (group-only) workloads, listed beside the connectors (the
+            # picker badges them CUSTOM). An unreadable store is SAID (customError), never shown as "no custom workloads".
+            $customErr = ''
+            try {
+                foreach ($cw in @(Read-PimCustomWorkloads -Strict)) {
+                    [void]$list.Add([ordered]@{ id = "$($cw.id)"; name = "$($cw.name)"; auth = 'none'; kind = 'group-only'; custom = $true
+                        description = "$($cw.description)"; accessModel = "$($cw.accessModel)"; scopeLevels = @($cw.scopeLevels)
+                        roles = @(@($cw.roles) | ForEach-Object { [ordered]@{ name = "$($_.name)"; tier = $_.tier; description = "$($_.description)"; defaultPolicyTemplate = "$($_.defaultPolicyTemplate)" } })
+                        permissionsNeeded = @() })
+                }
+            } catch { $customErr = "$($_.Exception.Message)" }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ workloads = $list.ToArray(); customError = $customErr })
             return 200
+        }
+
+        # -------------------------------------------------------------------
+        # 100.17 CUSTOM-WORKLOAD -- Templates > Custom workloads (engine/_shared/PIM-CustomWorkloads.ps1).
+        #   GET  /api/custom-workloads          -> { workloads (each with usage), accessModels, sample, patternTokens, defaultPattern }  (any role)
+        #   POST /api/custom-workloads          -> { workload, mode: create | update }  (Admin+, audited 'customworkload.save')
+        #   POST /api/custom-workloads/delete   -> { id }  refused (409) while any row uses it  (Admin+, audited)
+        #   GET  /api/custom-workloads/export?id=  -> the template JSON (definition + its delegations' structure, no people)
+        #   POST /api/custom-workloads/import   -> { template, overwrite }  saves the definition (Admin+, audited) and returns the
+        #                                          pack plan (missing rows) the page stages as PENDING changes -- the rows go
+        #                                          through Review & Save like every other row.
+        # A custom workload is a DEFINITION, not a tenant change: saving one writes pim.Settings['CustomWorkloads'] only.
+        # -------------------------------------------------------------------
+        if ($path -like '/api/custom-workloads*') {
+            $script:lastHeartbeat = Get-Date
+            $__cwStore = Get-PimCustomWorkloadStoreName
+            $__cwUsageBases = @('PIM-Assignments-Workloads') + @(Get-PimTemplatePackKnownBases | Where-Object { "$_" -like 'PIM-Definitions-*' -and "$_" -ne 'PIM-Definitions-AU' })
+            $__cwReadRows = {
+                $h = @{}
+                foreach ($b in $__cwUsageBases) { if (Get-PimCsvSpec -BaseName $b) { $h[$b] = @((Read-PimRows -BaseName $b -NoScope).rows | ForEach-Object { [pscustomobject]$_ }) } }
+                $h
+            }
+            $__cwRead = { @(Read-PimCustomWorkloads -Strict) }
+            $__cwSave = { param($list) Set-PimManagerSettingObject -Name $__cwStore -Value (ConvertTo-PimCustomWorkloadStoreValue -List @($list)) }
+            if ($path -eq '/api/custom-workloads' -and $method -eq 'GET') {
+                $list = $null; $rowsBy = $null; $err = ''
+                try { $list = & $__cwRead } catch { $err = "The custom workloads could not be read from the store: $($_.Exception.Message)" }
+                $usageErr = ''
+                try { $rowsBy = & $__cwReadRows } catch { $usageErr = "$($_.Exception.Message)" }
+                $out = @(foreach ($d in @($list)) {
+                    $u = if ($null -ne $rowsBy) { Get-PimCustomWorkloadUsage -Id "$($d.id)" -RowsByBase $rowsBy } else { $null }
+                    $o = [ordered]@{}; foreach ($k in $d.Keys) { $o[$k] = $d[$k] }
+                    $o['usage'] = $u
+                    $o
+                })
+                $pat = ''; try { $__nc = Get-PimNamingConventions; if ($__nc) { $pat = "$($__nc['ResourceGroupPattern'])" } } catch { $pat = '' }
+                Write-JsonResponse -Response $resp -Status $(if ($err) { 503 } else { 200 }) -Body ([ordered]@{
+                    ok = (-not $err); error = $err; usageError = $usageErr
+                    canEdit = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin')
+                    workloads = @($out); accessModels = (Get-PimCustomWorkloadAccessModels)
+                    patternTokens = @(Get-PimCustomWorkloadPatternTokens); defaultPattern = $pat
+                    sample = (Get-PimCustomWorkloadSample -Kind 'sap')
+                })
+                return $(if ($err) { 503 } else { 200 })
+            }
+            if ($path -eq '/api/custom-workloads/export' -and $method -eq 'GET') {
+                $id = ''; if ($req.Url.Query -match '(\?|&)id=([^&]+)') { $id = [uri]::UnescapeDataString($Matches[2]) }
+                try {
+                    $d = Find-PimCustomWorkload -List (& $__cwRead) -Id $id
+                    if (-not $d) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "There is no custom workload with id '$id'." }; return 404 }
+                    $tp = 'PIM-{Role}'; try { $__nc = Get-PimNamingConventions; if ($__nc -and "$($__nc['PimGroupPattern'])".Trim()) { $tp = "$($__nc['PimGroupPattern'])" } } catch { }
+                    $ver = ''; try { $ver = "$((Get-Content -LiteralPath (Join-Path $solutionRoot 'VERSION') -Raw -ErrorAction Stop))".Trim() } catch { }
+                    $tpl = ConvertTo-PimCustomWorkloadTemplate -Definition $d -RowsByBase (& $__cwReadRows) -GroupNamePattern $tp -ProductVersion $ver
+                    Write-PimManagerAuditEvent -Action 'customworkload.export' -Target "CustomWorkloads:$id" -Result 'ok'
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; template = $tpl })
+                    return 200
+                } catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "Export failed: $($_.Exception.Message)" }; return 503 }
+            }
+            if ($path -in @('/api/custom-workloads', '/api/custom-workloads/delete', '/api/custom-workloads/import') -and $method -eq 'POST') {
+                if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                    Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to change custom workloads.' }
+                    return 403
+                }
+                $body = Read-RequestJson -Request $req
+                $who = Get-PimManagerActorName
+                $list = $null
+                try { $list = & $__cwRead } catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "Not saved -- the custom workloads could not be read from the store: $($_.Exception.Message)" }; return 503 }
+                if ($path -eq '/api/custom-workloads') {
+                    $mode = "$($body.mode)".Trim().ToLowerInvariant(); if ($mode -notin @('create', 'update')) { $mode = 'create' }
+                    $r = Set-PimCustomWorkloadEntry -List $list -Definition $body.workload -Mode $mode -By $who
+                    if (-not $r.ok) {
+                        Write-PimManagerAuditEvent -Action 'customworkload.save' -Target "CustomWorkloads:$($r.id)" -Result 'refused' -After @{ error = "$($r.error)" }
+                        Write-JsonResponse -Response $resp -Status ([int]$r.code) -Body ([ordered]@{ ok = $false; error = "$($r.error)"; errors = @($r.errors) })
+                        return [int]$r.code
+                    }
+                    try { & $__cwSave $r.list } catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "Not saved -- the store refused the write: $($_.Exception.Message)" }; return 503 }
+                    Write-PimManagerAuditEvent -Action 'customworkload.save' -Target "CustomWorkloads:$($r.id)" -Result 'ok' -Before $r.before -After $r.after
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; mode = $mode; workload = $r.after })
+                    return 200
+                }
+                if ($path -eq '/api/custom-workloads/delete') {
+                    $id = "$($body.id)".Trim()
+                    $usage = $null
+                    try { $usage = Get-PimCustomWorkloadUsage -Id $id -RowsByBase (& $__cwReadRows) }
+                    catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "Not deleted -- PIM could not read which delegations use it: $($_.Exception.Message)" }; return 503 }
+                    $r = Remove-PimCustomWorkloadEntry -List $list -Id $id -Usage $usage
+                    if (-not $r.ok) {
+                        Write-PimManagerAuditEvent -Action 'customworkload.delete' -Target "CustomWorkloads:$id" -Result 'refused' -After @{ error = "$($r.error)" }
+                        Write-JsonResponse -Response $resp -Status ([int]$r.code) -Body ([ordered]@{ ok = $false; error = "$($r.error)"; usage = $usage })
+                        return [int]$r.code
+                    }
+                    try { & $__cwSave $r.list } catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "Not deleted -- the store refused the write: $($_.Exception.Message)" }; return 503 }
+                    Write-PimManagerAuditEvent -Action 'customworkload.delete' -Target "CustomWorkloads:$id" -Result 'ok' -Before $r.before
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; id = $id })
+                    return 200
+                }
+                # import
+                $imp = ConvertFrom-PimCustomWorkloadTemplate -Template $body.template
+                if (-not $imp.ok) {
+                    Write-PimManagerAuditEvent -Action 'customworkload.import' -Target 'CustomWorkloads' -Result 'refused' -After @{ error = "$($imp.error)" }
+                    Write-JsonResponse -Response $resp -Status 400 -Body @{ ok = $false; error = "$($imp.error)" }
+                    return 400
+                }
+                $exists = [bool](Find-PimCustomWorkload -List $list -Id "$($imp.definition.id)")
+                if ($exists -and -not [bool]$body.overwrite) {
+                    Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; exists = $true; error = "A custom workload with id '$($imp.definition.id)' already exists here -- import again with 'replace the definition' ticked to overwrite it." }
+                    return 409
+                }
+                $r = Set-PimCustomWorkloadEntry -List $list -Definition $imp.definition -Mode $(if ($exists) { 'update' } else { 'create' }) -By $who
+                if (-not $r.ok) { Write-JsonResponse -Response $resp -Status ([int]$r.code) -Body @{ ok = $false; error = "$($r.error)" }; return [int]$r.code }
+                # The plan BEFORE the save, so a store that cannot read the rows saves nothing.
+                $plan = $null
+                try {
+                    $tenantPat = ''; try { $__nc = Get-PimNamingConventions; if ($__nc) { $tenantPat = "$($__nc['PimGroupPattern'])" } } catch { $tenantPat = '' }
+                    $__known = @(Get-PimTemplatePackKnownBases | Where-Object { Get-PimCsvSpec -BaseName $_ })
+                    $cur = @{}
+                    foreach ($b in @(Get-PimTemplatePackBases -Pack $imp.pack -KnownBases $__known)) { $cur[$b] = @((Read-PimRows -BaseName $b -NoScope).rows | ForEach-Object { [pscustomobject]$_ }) }
+                    $allDefs = New-Object System.Collections.Generic.List[object]
+                    foreach ($db in @($__known | Where-Object { "$_" -like 'PIM-Definitions-*' -and "$_" -ne 'PIM-Definitions-AU' })) { foreach ($x in @((Read-PimRows -BaseName $db -NoScope).rows)) { if ($null -ne $x) { $allDefs.Add([pscustomobject]$x) } } }
+                    $plan = Get-PimTemplatePackPlan -Pack $imp.pack -CurrentRowsByBase $cur -TenantGroupPattern $tenantPat -KnownBases $__known -ExistingDefinitionRows @($allDefs.ToArray())
+                } catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "Not imported -- the current rows could not be read: $($_.Exception.Message)" }; return 503 }
+                try { & $__cwSave $r.list } catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "Not imported -- the store refused the write: $($_.Exception.Message)" }; return 503 }
+                Write-PimManagerAuditEvent -Action 'customworkload.import' -Target "CustomWorkloads:$($r.id)" -Result 'ok' -Before $r.before -After $r.after
+                Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; workload = $r.after; replaced = $exists
+                    missing = $plan.missing; missingCount = $plan.missingCount; units = @($plan.units); adopted = @($plan.adopted) })
+                return 200
+            }
+            Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "unknown custom-workload route: $method $path" }
+            return 404
         }
 
         if ($path -eq '/api/workload-roles' -and $method -eq 'GET') {
@@ -16462,6 +17382,16 @@ function Handle-Request {
             $wid = ''
             if ($req.Url.Query -match '(\?|&)id=([^&]+)') { $wid = [uri]::UnescapeDataString($Matches[2]) }
             if (-not $wid) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'id query parameter is required' }; return 400 }
+            # 100.17 CUSTOM-WORKLOAD: a custom workload's roles are its DEFINITION (no live call, no tenant connection).
+            if (Test-PimCustomWorkloadId -Id $wid) {
+                try {
+                    $cw = Find-PimCustomWorkload -List @(Read-PimCustomWorkloads -Strict) -Id $wid
+                    if (-not $cw) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "unknown custom workload: $wid" }; return 404 }
+                    $roles = @(@($cw.roles) | ForEach-Object { [ordered]@{ name = "$($_.name)"; tier = $_.tier; description = "$($_.description)"; defaultPolicyTemplate = "$($_.defaultPolicyTemplate)" } })
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ id = $wid; custom = $true; roles = $roles; scopeLevels = @($cw.scopeLevels) })
+                    return 200
+                } catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "The custom workload could not be read from the store: $($_.Exception.Message)" }; return 503 }
+            }
             $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
             if (-not (Get-Command Get-PimWorkloadRoles -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
                 Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
@@ -16953,6 +17883,17 @@ function Handle-Request {
                 if ("$($b.tier)"  -match '(\d+)') { $wx['Tier']  = [int]$Matches[1] }
                 if ("$($b.plane)".Trim())  { $wx['Plane']  = "$($b.plane)".Trim() }
                 if ("$($b.domain)".Trim()) { $wx['Domain'] = "$($b.domain)".Trim() }
+                # 100.17 CUSTOM-WORKLOAD: a custom workload derives with its own name segment, the chosen ROLE's tier and
+                # its own group-name pattern (Get-PimCustomWorkloadDerivation -- the same Get-PimWorkloadDerivation inside).
+                if ($target -eq 'workload' -and (Test-PimCustomWorkloadId -Id "$($b.workload)")) {
+                    $cw = Find-PimCustomWorkload -List @(Read-PimCustomWorkloads -Strict) -Id "$($b.workload)"
+                    if (-not $cw) { throw "unknown custom workload '$($b.workload)' -- define it under Templates > Custom workloads first" }
+                    $cx = @{}
+                    foreach ($k in @('Level', 'Tier', 'Plane', 'Domain')) { if ($wx.ContainsKey($k)) { $cx[$k] = $wx[$k] } }
+                    $d = Get-PimCustomWorkloadDerivation -Definition $cw -Roles $roles -Scope "$($b.scope)" -BundleName "$($b.bundleName)" @cx
+                    Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; derivation = $d })
+                    return 200
+                }
                 $d = Get-PimWizardDerivation -Target $target -Roles $roles @wx `
                     -AuScope "$($b.auScope)" `
                     -ScopeType "$($b.scopeType)" -ScopePath "$($b.scopePath)" -ScopeName "$($b.scopeName)" -ManagementGroupDepth $depth `
@@ -17906,6 +18847,34 @@ function Handle-Request {
             }
         }
 
+        # -------------------------------------------------------------------
+        # §12.8 ENV-REPORT-1: GET /api/environment-report -- the architecture & security report of THIS environment (summary,
+        # architecture, identities, permissions expected / missing / extra, features, data flows, change history, findings),
+        # read live at request time. ADMIN / SUPERADMIN ONLY: it names every identity, id and grant -- a sensitive document.
+        # ?refresh=1 reads again (otherwise kept 5 minutes). Names and ids only, never a secret value. Every read is audited.
+        # -------------------------------------------------------------------
+        if ($path -eq '/api/environment-report' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = "The environment report is for an Admin or a SuperAdmin -- it names every identity and permission of this environment. Your role is '$((Get-PimManagerRole).role)'." }
+                return 403
+            }
+            if (-not (Get-Command Get-PimEnvironmentReport -ErrorAction SilentlyContinue)) {
+                Write-JsonResponse -Response $resp -Status 501 -Body @{ error = 'the environment report builder is not loaded'; hint = 'engine/_shared/PIM-EnvironmentReport.ps1 is missing from this build' }
+                return 501
+            }
+            $erRefresh = $false; try { $erRefresh = ("$($req.Url.Query)" -match '(?:^|[?&])refresh=1') } catch { }
+            try {
+                $er = Get-PimManagerEnvironmentReport -Refresh:$erRefresh
+                try { Write-PimManagerAuditEvent -Action 'manager.environment-report' -Target 'environment-report' -Result 'ok' -After ([ordered]@{ refresh = [bool]$erRefresh; cached = [bool]$er['cached']; findings = $er['counts']['findings'] }) } catch { Write-Verbose "audit: $($_.Exception.Message)" }
+                Write-JsonResponse -Response $resp -Status 200 -Body $er
+                return 200
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the environment report could not be built: $($_.Exception.Message)" }
+                return 500
+            }
+        }
+
         if ($path -eq '/api/support/bundle' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
             try {
@@ -18419,13 +19388,13 @@ function Handle-Request {
         #                                 used to run on this ONE request loop and froze every page for minutes.
         #                                 ?refresh=1 (Admin+) queues a 'drift-snapshot' trigger and starts the tick.
         #                                 snapshotMissing=true when the job has not run yet.
-        #   POST /api/drift/remediate  -> Admin-gated "apply now": run the engine
-        #                                 create/update path for ONLY the selected
-        #                                 drift (Get-PimDriftRemediationPlan +
-        #                                 Invoke-PimEngine -Changes). Destructive
-        #                                 removal of an 'extra' needs explicit
-        #                                 allowRemove (-> engine -Mode Full -Prune);
-        #                                 never a single-click destructive bypass.
+        #   POST /api/drift/remediate  -> Admin-gated "apply now": QUEUES an engine-delta reconcile
+        #                                 (trigger:engine-delta:All -- a Delta run: create/update only,
+        #                                 it never prunes and never runs the daily reconcile's removal).
+        #                                 It NEVER removes, deletes or imports an EXTRA: allowRemove is
+        #                                 refused (409), and the page leaves ticked extras out of
+        #                                 selectKeys (DRIFT-EXTRAS, PIM 100.12) -- an extra is changed only
+        #                                 by its own explicit Import into PIM / Delete / Ignore.
         # The 'drift' alert is raised by the scheduler job when it finds drift (Invoke-PimDriftSnapshotJob).
         # -------------------------------------------------------------------
         # §79.4 IGNORE / UN-IGNORE a drift finding (operator 2026-09-25). Admin+, reason required, audited. A standing
@@ -18590,7 +19559,7 @@ function Handle-Request {
             }
             if ($allowRemove) {
                 Write-JsonResponse -Response $resp -Status 409 -Body @{ ok = $false; gate = 'no-prune'
-                    error = 'Removing an EXTRA (live access with no desired row) is not done from the Drift page: the engine reconcile never prunes. Revoke it from Maintenance & Revoke (a queued, audited action), or add the missing desired row if it should stay. Nothing was queued.' }
+                    error = 'Apply now never removes an EXTRA (live access with no desired row): the engine reconcile it queues never prunes. Choose Delete (a queued, audited removal), Import into PIM (stage the row that defines it) or Ignore for the extra on the Drift page. Nothing was queued.' }
                 return 409
             }
             $who = try { (Get-PimManagerRole).identity } catch { '' }

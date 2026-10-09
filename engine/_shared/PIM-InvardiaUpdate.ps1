@@ -179,6 +179,60 @@ function Invoke-PimInstallKeyJob {
     [pscustomobject]@{ ran = ($r.action -ne 'none'); whatIf = [bool]$WhatIf; detail = "install-key: $($r.action) -- $($r.message)" }
 }
 
+# ---- 2026-10-09 -- THE REPLAY WATERMARK IS PER RING -------------------------------------------------------------------
+# MEASURED (2026-10-09 03:00 UTC, two ring-2 environments rolled ahead through ring 1 by the operator's ops script, which
+# sets PIM_UPDATE_RING=1 for one run and back to 2): "Invardia: REPLAY refused: sequence 7 is lower than the 24 already
+# applied here". Invardia numbers its sequences PER RING (ring 1 was at 24, ring 2 at 7), while this environment kept ONE
+# applied value (PIM_UPDATE_INVARDIA_SEQ). After any ring move the home ring's lower sequence was refused as a replay forever.
+# So the watermark is kept per ring -- PIM_UPDATE_INVARDIA_SEQ_R<ring> -- and only the CURRENT ring's is read and written.
+# Within a ring the replay rule is unchanged.
+function Get-PimInvardiaSequenceVariableName {
+    <# PURE. The job env variable holding the applied Invardia sequence for one ring ('' when the ring is not 0-3). #>
+    param([AllowEmptyString()][AllowNull()][string]$Ring)
+    $n = -1
+    if (-not [int]::TryParse("$Ring".Trim(), [ref]$n) -or $n -lt 0 -or $n -gt 3) { return '' }
+    return "PIM_UPDATE_INVARDIA_SEQ_R$n"
+}
+
+function Resolve-PimInvardiaAppliedSequence {
+    <#
+      PURE. Which applied sequence guards THIS ring's pull. -JobEnv is the update job's environment (any IDictionary, or
+      $env-like object read by name). Returns @{ applied; unprovenLegacy; source; variable; reason }:
+        source 'ring'               PIM_UPDATE_INVARDIA_SEQ_R<ring> -- the per-ring watermark (strict replay check)
+               'legacy-same-ring'   the legacy single value, recorded with PIM_UPDATE_INVARDIA_SEQ_RING = this ring
+               'legacy-other-ring'  the legacy value belongs to ANOTHER ring (evidence: _SEQ_RING) -> no watermark here yet
+               'legacy-unproven'    a legacy value with NO ring recorded beside it -> applied 0, unprovenLegacy = that value:
+                                    the caller refuses a lower manifest sequence as NEEDS ATTENTION (it cannot tell a ring
+                                    move from a replay), and accepts an equal or higher one (that is the old rule anyway)
+               'none'               nothing recorded
+      🔒 Never guesses a ring for a legacy value: without evidence, a lower sequence still does not pass.
+    #>
+    # Not named $Env: that is the environment-variable drive, and shadowing it is a trap for the next editor.
+    param([AllowNull()][object]$JobEnv, [AllowEmptyString()][AllowNull()][string]$Ring)
+    $get = { param($n)
+        if ($null -eq $JobEnv) { return '' }
+        if ($JobEnv -is [System.Collections.IDictionary]) { if ($JobEnv.Contains($n)) { return "$($JobEnv[$n])".Trim() }; return '' }
+        $p = $JobEnv.PSObject.Properties[$n]; if ($p) { return "$($p.Value)".Trim() }; return '' }
+    $res = @{ applied = 0; unprovenLegacy = 0; source = 'none'; variable = (Get-PimInvardiaSequenceVariableName -Ring $Ring); reason = '' }
+    $ringN = -1; [void][int]::TryParse("$Ring".Trim(), [ref]$ringN)
+    $x = 0
+    if ($res.variable -and [int]::TryParse((& $get $res.variable), [ref]$x) -and $x -ge 0) {
+        $res.applied = $x; $res.source = 'ring'; $res.reason = "applied sequence for ring $ringN`: $x ($($res.variable))"; return $res
+    }
+    $legacy = 0
+    if (-not ([int]::TryParse((& $get 'PIM_UPDATE_INVARDIA_SEQ'), [ref]$legacy) -and $legacy -gt 0)) { $res.reason = "no applied sequence recorded for ring $ringN yet"; return $res }
+    $lr = -1
+    if ([int]::TryParse((& $get 'PIM_UPDATE_INVARDIA_SEQ_RING'), [ref]$lr)) {
+        if ($lr -eq $ringN) { $res.applied = $legacy; $res.source = 'legacy-same-ring'; $res.reason = "applied sequence $legacy (PIM_UPDATE_INVARDIA_SEQ, recorded for ring $lr)"; return $res }
+        $res.source = 'legacy-other-ring'
+        $res.reason = "ring changed: the recorded sequence $legacy belongs to ring $lr, so ring $ringN has no applied sequence yet"
+        return $res
+    }
+    $res.unprovenLegacy = $legacy; $res.source = 'legacy-unproven'
+    $res.reason = "applied sequence $legacy (PIM_UPDATE_INVARDIA_SEQ, recorded before watermarks were kept per ring -- its ring is not recorded)"
+    return $res
+}
+
 function Get-PimInvardiaUpdateTarget {
     <#
       The update job's whole Invardia step, seams injected: pull, verify, and (when a build is needed) download + re-pack.
@@ -187,13 +241,22 @@ function Get-PimInvardiaUpdateTarget {
         ok=$true + hold              verified but held (manual step, minFrom)  -> the job reports 'none' with the reason
         ok=$true + version           the approved version; contextPath set when -NeedBuild (the tar.gz to build)
         ok=$false                    refused or failed                          -> the job reports 'failed', nothing moves
+        ok=$false + attention        the replay watermark's ring is unknown     -> the job reports 'attention', nothing moves
+        ok=$true + ahead             the ring approves an OLDER version         -> the job reports 'ahead', exit 0, nothing fetched
     #>
     param([Parameter(Mandatory)][scriptblock]$Http, [AllowEmptyString()][string]$InstallKey = '', [AllowEmptyString()][string]$LicenceText = '',
           [string]$BaseUrl = '', [int]$AppliedSequence = 0, [string]$RunningVersion = '', [string]$LastBuiltVersion = '',
           [object[]]$TrustedKeys = $script:PimInvardiaUpdateTrustedKeys, [scriptblock]$Download, [string]$WorkDir = ([IO.Path]::GetTempPath()),
           # UPDATE-1.7: the environment's OWN ring (PIM_UPDATE_RING), sent with the pull; the manifest must be for it.
-          [string]$Ring = '')
-    $res = @{ ok = $false; version = ''; sequence = 0; hold = $false; reason = ''; contextPath = '' }
+          [string]$Ring = '',
+          # 2026-10-09: a legacy applied sequence whose ring is NOT recorded (Resolve-PimInvardiaAppliedSequence
+          # 'legacy-unproven'). A manifest sequence below it is refused as NEEDS ATTENTION, never accepted on a guess.
+          [int]$UnprovenLegacySequence = 0,
+          # 2026-10-09: the highest version this environment is known to have reached (running / last built / last good).
+          # A manifest naming an OLDER version that is not a signed rollback is AHEAD: nothing is downloaded.
+          [string]$HighestKnownVersion = '',
+          [switch]$AllowDowngrade)
+    $res = @{ ok = $false; version = ''; sequence = 0; hold = $false; reason = ''; contextPath = ''; ahead = $false; attention = $false }
     if (-not "$InstallKey".Trim()) { $res.reason = 'this install has no install key (PIM_UPLINK_KEY, or claimed by the install-key job)'; return $res }
     if (-not "$LicenceText".Trim()) { $res.reason = 'no licence is installed -- Pro updates need the Invardia-issued Pro licence'; return $res }
     $ringN = -1
@@ -205,9 +268,30 @@ function Get-PimInvardiaUpdateTarget {
     if ($p.status -ne 200) { $res.reason = $p.reason; return $res }
     $v = Test-PimInvardiaManifest -Response $p.body -TrustedKeys $TrustedKeys -AppliedSequence $AppliedSequence -RunningVersion $RunningVersion -Ring $ringN
     if (-not $v.ok) { $res.reason = $v.reason; return $res }
+    if ($UnprovenLegacySequence -gt 0 -and $v.sequence -lt $UnprovenLegacySequence) {
+        # 🔒 Not a guess either way: the legacy value may be another ring's (a ring move -- harmless) or this ring's (a
+        # replay -- refused). Without the ring recorded beside it nothing moves, and the operator is told the one fix.
+        $res.attention = $true; $res.sequence = $v.sequence
+        $rn = "$Ring".Trim()
+        $res.reason = ("replay check needs a decision: ring $rn is at sequence $($v.sequence), but this environment last applied sequence " +
+                       "$UnprovenLegacySequence (PIM_UPDATE_INVARDIA_SEQ), recorded before watermarks were kept per ring, so a ring move " +
+                       "cannot be told from a replay. Nothing moved. Fix: if this environment was moved between rings, set " +
+                       "PIM_UPDATE_INVARDIA_SEQ_RING=<the ring that sequence came from> on the update job; to accept ring $rn's current " +
+                       "release, set PIM_UPDATE_INVARDIA_SEQ_R$rn=$($v.sequence) on the update job.")
+        return $res
+    }
     $res.sequence = $v.sequence; $res.reason = $v.reason
     if ($v.hold) { $res.ok = $true; $res.hold = $true; return $res }
     $res.version = $v.version
+    # 2026-10-09 (BUG-162 kept): an environment rolled AHEAD of its ring is not moved back and nothing is fetched for it.
+    # Only a SIGNED ROLLBACK (a higher sequence than this ring's applied one, which must exist) or the operator's
+    # PIM_UPDATE_ALLOW_DOWNGRADE may go down -- the same rule the update job applies after this.
+    $signedRollback = ($AppliedSequence -gt 0 -and $v.sequence -gt $AppliedSequence)
+    if ("$HighestKnownVersion".Trim() -and (Compare-PimReleaseVersion $v.version "$HighestKnownVersion".Trim()) -lt 0 -and -not $signedRollback -and -not $AllowDowngrade) {
+        $res.ok = $true; $res.ahead = $true
+        $res.reason = "$($v.reason) -- this environment already runs $("$HighestKnownVersion".Trim()), newer than the ring approves: nothing to fetch"
+        return $res
+    }
     if ("$LastBuiltVersion".Trim() -eq $v.version) { $res.ok = $true; $res.reason = "$($v.reason) -- already built here"; return $res }
     $zip = Join-Path $WorkDir ("$($script:PimInvardiaProduct)-src-$($v.version).zip")
     $ctx = Join-Path $WorkDir ("pim-src-$($v.version).tar.gz")

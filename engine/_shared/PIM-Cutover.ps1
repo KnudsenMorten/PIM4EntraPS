@@ -422,6 +422,18 @@ function Get-PimHealthState {
     return @{ status = 'unhealthy'; httpStatus = 503; consecutiveFailures = $n }
 }
 
+function Get-PimCutoverMspRowSql {
+    # PURE. §100.6 gap E -- the cutover import's two statements over one entity (@e): -Select lists the [Key] of every
+    # row the managing tenant sent (Owner=MSP, any case); -Delete removes every OTHER row. A row whose DataJson is not
+    # JSON, or has no Owner, is the customer's (absent provenance = Local) and is replaced as before.
+    param([switch]$Select, [switch]$Delete)
+    # CASE, not AND: SQL Server does not promise to short-circuit, and JSON_VALUE over text that is not JSON throws.
+    $isMsp = "(UPPER(LTRIM(RTRIM(ISNULL(CASE WHEN ISJSON(DataJson) = 1 THEN JSON_VALUE(DataJson, '$.Owner') END, N'')))) = N'MSP')"
+    if ($Select) { return "SELECT [Key] FROM pim.Rows WHERE Entity = @e AND $isMsp" }
+    if ($Delete) { return "DELETE FROM pim.Rows WHERE Entity = @e AND NOT $isMsp" }
+    throw 'Get-PimCutoverMspRowSql: give -Select or -Delete.'
+}
+
 # --- TRANSACTIONAL IMPORT (stage 3): CSV -> pim.Rows, all-or-nothing -------------
 # Reads each <base>.custom.csv (READ-ONLY -- the CSV is never written), and applies
 # a FULL-SET replace of every entity inside ONE transaction. On any failure the
@@ -479,14 +491,25 @@ function Invoke-PimCutoverImport {
                        'export or a truncated copy. Re-export it, or pass -AllowEmptyEntities to clear it deliberately.')
             }
             # Replace this entity's rows wholesale, inside the shared transaction.
+            # 🔴 §100.6 MSP-COLLIDE gap E: EXCEPT the rows the managing tenant sent (Owner=MSP). A v1 CSV is the
+            # customer's own data; it never held the master's rows, so a wholesale DELETE wiped every replicated row and
+            # the next pull re-created them (or, inside its budget, nothing did). They are kept, and a CSV row with the
+            # SAME key is skipped (reported in mspKept/skippedMsp) -- the customer's import never overwrites a master row.
+            $mspKeys = @{}
+            $selCmd = $conn.CreateCommand(); $selCmd.Transaction = $tx
+            $selCmd.CommandText = Get-PimCutoverMspRowSql -Select
+            [void]$selCmd.Parameters.AddWithValue('@e', $base)
+            $rd = $selCmd.ExecuteReader()
+            try { while ($rd.Read()) { $mspKeys["$($rd.GetValue(0))".ToLowerInvariant()] = $true } } finally { $rd.Close() }
             $delCmd = $conn.CreateCommand(); $delCmd.Transaction = $tx
-            $delCmd.CommandText = "DELETE FROM pim.Rows WHERE Entity = @e"
+            $delCmd.CommandText = Get-PimCutoverMspRowSql -Delete
             [void]$delCmd.Parameters.AddWithValue('@e', $base)
             [void]$delCmd.ExecuteNonQuery()
-            $n = 0
+            $n = 0; $skippedMsp = 0
             foreach ($r in $rows) {
                 $k = Get-PimStoreRowKey -Base $base -Row $r
                 if (-not $k) { continue }
+                if ($mspKeys.ContainsKey("$k".ToLowerInvariant())) { $skippedMsp++; continue }
                 $json = $r | ConvertTo-Json -Depth 12 -Compress
                 $insCmd = $conn.CreateCommand(); $insCmd.Transaction = $tx
                 $insCmd.CommandText = "INSERT INTO pim.Rows (Entity, [Key], DataJson, UpdatedUtc) VALUES (@e, @k, @d, SYSUTCDATETIME())"
@@ -496,7 +519,7 @@ function Invoke-PimCutoverImport {
                 [void]$insCmd.ExecuteNonQuery()
                 $n++
             }
-            $entities.Add([pscustomobject]@{ base = $base; rows = $n }); $total += $n
+            $entities.Add([pscustomobject]@{ base = $base; rows = $n; mspKept = $mspKeys.Count; skippedMsp = $skippedMsp }); $total += $n
         }
         $tx.Commit()
         return [pscustomobject]@{ ok = $true; whatIf = $false; total = $total; entities = $entities.ToArray() }

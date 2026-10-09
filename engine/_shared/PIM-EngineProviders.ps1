@@ -951,6 +951,9 @@ function Get-PimEntraRoleKey {
 # and WHO decides an extension is Resolve-PimAutoExtendDecision (access review Keep > owner Deny > row > default ON).
 $script:PimAssignmentRenewWithinDays = 14   # the fallback only; the policy decides (Get-PimAutoExtendContext)
 if (-not (Get-Command Resolve-PimAutoExtendDecision -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-AutoExtend.ps1') }
+# 95.2c / 100.15: the ONE role-assignable rule (Resolve-PimRoleAssignableForCreate) the Groups provider creates with.
+if (-not (Get-Command Resolve-PimRoleAssignableForCreate -ErrorAction SilentlyContinue) -or
+    -not (Get-Command Get-PimRoleAssignableFacts -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-RoleAssignable.ps1') }
 
 function Test-PimRowIsRemove {
     param([object]$Row)
@@ -1511,6 +1514,7 @@ function Get-PimGroupDefinitionRows {
                 GroupDescription      = (Get-PimRowProp -Row $r -Names @('GroupDescription'))
                 IsRoleAssignable      = (Get-PimRowProp -Row $r -Names @('IsRoleAssignable'))
                 AdministrativeUnitTag = (Get-PimRowProp -Row $r -Names @('AdministrativeUnitTag'))
+                TierLevel             = (Get-PimRowProp -Row $r -Names @('TierLevel'))   # 95.2c: the role-assignable rule reads it
                 Owners                = (Get-PimRowProp -Row $r -Names @('Owners'))
                 SponsorUpn            = (Get-PimRowProp -Row $r -Names @('SponsorUpn'))
                 Department            = (Get-PimRowProp -Row $r -Names @('Department','DepartmentTag'))
@@ -1521,6 +1525,8 @@ function Get-PimGroupDefinitionRows {
                 # released fix never saw it (live run 8 still made a second group) -- carried now, and pinned by the test.
                 PreviousGroupName     = (Get-PimRowProp -Row $r -Names @('PreviousGroupName'))
                 Lifecycle             = $life
+                # §100.6: provenance (MSP | Local/empty) -- Get-PimTagToGroupName lets the managing tenant's definition win.
+                Owner                 = (Get-PimRowProp -Row $r -Names @('Owner'))
                 SourceEntity          = $e
             })
         }
@@ -1529,7 +1535,37 @@ function Get-PimGroupDefinitionRows {
 }
 
 function Get-PimTagToGroupName {
-    $h = @{}; foreach ($d in (Get-PimGroupDefinitionRows -IncludeRetired)) { $t = "$($d.GroupTag)"; if ($t) { $h[$t.ToLowerInvariant()] = $d.GroupName } }; $h
+    # 🔴 §100.6 MSP-COLLIDE gap D -- ONE TAG, ONE GROUP. This was last-entity-wins: a customer's local definition of the
+    # master's tag (in a later entity) silently re-pointed every membership of that tag -- the managing tenant's included --
+    # at the LOCAL group. Now a definition the managing tenant sent (Owner=MSP) is NEVER displaced by a local one, and every
+    # conflict (same tag, different GroupName) is FLAGGED by name -- a warning once per process and
+    # $global:PIM_TagNameConflicts -- never resolved silently. A local-vs-local conflict keeps its previous resolution (the
+    # later entity) on purpose: flipping it would move live memberships at customers that already carry one. The Manager's
+    # validator refuses the duplicate (PIM-DEFDUP-001) and its commit gate refuses a local definition of an MSP-owned tag.
+    $h = @{}; $own = @{}; $conf = New-Object System.Collections.Generic.List[object]
+    foreach ($d in (Get-PimGroupDefinitionRows -IncludeRetired)) {
+        $t = "$($d.GroupTag)"; if (-not $t) { continue }
+        $lt = $t.ToLowerInvariant()
+        $isMsp = ("$($d.Owner)".Trim() -ieq 'msp')
+        if (-not $h.ContainsKey($lt)) { $h[$lt] = $d.GroupName; $own[$lt] = $isMsp; continue }
+        if ("$($h[$lt])" -ieq "$($d.GroupName)") { if ($isMsp) { $own[$lt] = $true }; continue }
+        $prev = "$($h[$lt])"
+        if ($own[$lt] -and -not $isMsp) {
+            $conf.Add([pscustomobject]@{ GroupTag = $t; Kept = $prev; Ignored = "$($d.GroupName)"; Entity = "$($d.SourceEntity)" })
+        } else {
+            $h[$lt] = $d.GroupName; $own[$lt] = $isMsp
+            $conf.Add([pscustomobject]@{ GroupTag = $t; Kept = "$($d.GroupName)"; Ignored = $prev; Entity = "$($d.SourceEntity)" })
+        }
+    }
+    $global:PIM_TagNameConflicts = @($conf.ToArray())
+    foreach ($c in $conf) {
+        $ck = "$($c.GroupTag)|$($c.Kept)|$($c.Ignored)".ToLowerInvariant()
+        if (-not $script:PimTagConflictWarned) { $script:PimTagConflictWarned = @{} }
+        if ($script:PimTagConflictWarned.ContainsKey($ck)) { continue }
+        $script:PimTagConflictWarned[$ck] = $true
+        Write-Warning ("  [groups] GroupTag '{0}' is defined for TWO groups ('{1}' and '{2}') -- memberships resolve to '{1}' (a managing-tenant definition is never displaced by a local one). Remove the duplicate definition." -f $c.GroupTag, $c.Kept, $c.Ignored)
+    }
+    $h
 }
 function Get-PimTagToAuName {
     $h = @{}; foreach ($r in @(Get-PimDesiredRows -Entity 'PIM-Definitions-AU')) {
@@ -1724,6 +1760,35 @@ function Get-PimAdminUpnDomain {
     if (-not $dom) { $dom = "$(Get-PimTargetDefaultDomain)".Trim() }
     return $dom
 }
+function Get-PimAdminDomainHistory {
+    <#
+      🔴 ACC-1 (owner-approved 2026-10-09, PIM REQUIREMENTS §100.3): the admin account domains this tenant USED BEFORE the
+      current one -- pim.Settings 'AdminDomainHistory' (a list, newest first), written by the Manager's Settings > Admin
+      account domain save whenever the domain changes. $global:PIM_AdminDomainHistory is the test seam. Every value is a
+      bare domain (no '@'), de-duplicated.
+    #>
+    $raw = $null
+    if ($null -ne $global:PIM_AdminDomainHistory) { $raw = $global:PIM_AdminDomainHistory }
+    elseif ($global:PIM_NamingConventions -is [System.Collections.IDictionary] -and $global:PIM_NamingConventions.Contains('AdminDomainHistory')) { $raw = $global:PIM_NamingConventions['AdminDomainHistory'] }
+    elseif (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { try { $raw = Get-PimSetting -Name 'AdminDomainHistory' } catch { $raw = $null } }
+    if ($raw -is [string]) { $s = "$raw".Trim(); if ($s.StartsWith('[')) { try { $raw = $s | ConvertFrom-Json } catch { $raw = @($s -split '[,;\s]+') } } else { $raw = @($s -split '[,;\s]+') } }
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($d in @($raw)) { $v = "$d".Trim().TrimStart('@').ToLowerInvariant(); if ($v -and -not $out.Contains($v)) { $out.Add($v) } }
+    return @($out.ToArray())
+}
+function Get-PimAdminUpnDomainCandidates {
+    <#
+      ACC-1: every domain an admin with a BARE UserName may have been created at, in the order to look: the current admin
+      domain (Get-PimAdminUpnDomain), the domains used before it (Get-PimAdminDomainHistory, newest first), the tenant's
+      default domain. Only domains this tenant set as its admin domain or holds as default -- never every verified domain,
+      so a same-named account of another person at an unrelated domain is never matched.
+    #>
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($d in @(@("$(Get-PimAdminUpnDomain)".Trim()) + @(Get-PimAdminDomainHistory) + @("$(Get-PimTargetDefaultDomain)".Trim()))) {
+        $v = "$d".Trim().TrimStart('@'); if ($v -and -not ($list | Where-Object { $_ -ieq $v })) { $list.Add($v) }
+    }
+    return @($list.ToArray())
+}
 function Get-PimTargetDefaultDomain {
     # The TARGET tenant's default (primary) verified domain -- the tenant the engine
     # token currently authenticates to (Invoke-PimGraph always hits that tenant). Used
@@ -1797,7 +1862,8 @@ function Resolve-PimPrincipalId {
     if ("$UpnOrId" -notmatch '@') {
         # REQ-T: an admin built at this tenant's Admin account domain is looked for THERE first, then at the
         # default domain (an account created before the setting was changed keeps its old UPN).
-        foreach ($dom in @(@("$(Get-PimAdminUpnDomain)".Trim(), "$(Get-PimTargetDefaultDomain)".Trim()) | Where-Object { $_ } | Select-Object -Unique)) {
+        # ACC-1 (2026-10-09): and at every admin domain this tenant used BEFORE the current one (Get-PimAdminDomainHistory).
+        foreach ($dom in @(Get-PimAdminUpnDomainCandidates)) {
             $upn = "$UpnOrId@$dom"
             $cu = @($Global:Users_All_ID) | Where-Object { "$($_.UserPrincipalName)" -eq "$upn" } | Select-Object -First 1
             if ($cu) { return "$($cu.Id)" }
@@ -2486,6 +2552,30 @@ function Add-PimWorkloadGateWarnings {
     } catch { Write-Warning "  [engine] Groups: the workload-binding check could not run: $($_.Exception.Message)" }
 }
 
+function Get-PimRoleAssignableFactsForContext {
+    <#
+      95.2c: the facts Resolve-PimRoleAssignableForCreate needs (who holds an Entra role, who nests into a Tier-0 one),
+      built ONCE per run and kept on the context. Only read when a definition leaves IsRoleAssignable BLANK -- an
+      explicit value never needs them. A failed read yields NO facts, and the rule then falls back to the row's own
+      tier / type (never to TRUE by default). Never throws.
+    #>
+    param([System.Collections.IDictionary]$Context, [object]$Row)
+    if ($Row -and (ConvertTo-PimRoleAssignableFlag (Get-PimRowProp -Row $Row -Names @('IsRoleAssignable')))) { return @{} }
+    if ($Context -and $Context['__pimRoleAssignableFacts'] -is [hashtable]) { return $Context['__pimRoleAssignableFacts'] }
+    $facts = @{}
+    try {
+        $defs = @(Get-PimGroupDefinitionRows -IncludeRetired)
+        $bind = @(@(Get-PimDesiredRows -Entity 'PIM-Assignments-Roles-Groups') + @(Get-PimDesiredRows -Entity 'PIM-Assignments-Roles-AUs') | Where-Object { $_ -and -not (Test-PimRowIsRemove -Row $_) })
+        $nest = @(@(Get-PimDesiredRows -Entity 'PIM-Assignments-Groups') | Where-Object { $_ -and -not (Test-PimRowIsRemove -Row $_) })
+        $facts = Get-PimRoleAssignableFacts -Definitions $defs -RoleBindings $bind -Nestings $nest
+    } catch {
+        Write-Warning "  [engine] Groups: the role-assignable facts could not be read ($($_.Exception.Message)) -- a blank IsRoleAssignable falls back to the group's own tier and type."
+        $facts = @{}
+    }
+    if ($Context) { $Context['__pimRoleAssignableFacts'] = $facts }
+    return $facts
+}
+
 function New-PimGroupsProvider {
     @{
         scope = 'Groups'; entity = 'PIM-Definitions'; order = 20
@@ -2545,7 +2635,15 @@ function New-PimGroupsProvider {
             # connectors.workload stayed off and 140 workload groups were never created. GetDesired's warning
             # (Add-PimWorkloadGateWarnings) says why the role is not assigned yet; only the ASSIGNMENT waits
             # (Get-PimWorkloadAssignmentHold, in the binding providers).
-            $assignable = (Get-PimRowProp -Row $d -Names @('IsRoleAssignable')) -match '(?i)true'
+            # 🔴 95.2c / 100.15 (owner 2026-10-09: "any groups are being created as role assignable group"): ONE rule,
+            # Resolve-PimRoleAssignableForCreate -- an explicit IsRoleAssignable on the definition wins; a BLANK one takes the
+            # 95.2c rule (holds an Entra role -> TRUE; a direct group nested into a Tier-0 Entra-role group or on Tier 0 ->
+            # TRUE; everything else FALSE). It never defaults to TRUE by itself. CREATE ONLY: isAssignableToRole is
+            # immutable in Entra, so an existing group is never touched (ApplyUpdate writes description only).
+            $raFacts = Get-PimRoleAssignableFactsForContext -Context $ctx -Row $d
+            $raDecision = Resolve-PimRoleAssignableForCreate -Row $d -Facts $raFacts
+            $assignable = [bool]$raDecision.Assignable
+            if ($raDecision.Source -eq 'rule') { Write-Host ("    [i] {0}: role-assignable={1} ({2})" -f $gn, $assignable, $raDecision.Reason) -ForegroundColor DarkGray }
             $body = @{
                 displayName = $gn; mailNickname = (Get-PimMailNickname $gn)
                 securityEnabled = $true; mailEnabled = $false; groupTypes = @()
@@ -4081,6 +4179,19 @@ function Get-PimEnginePolicyTemplates {
     }
     $out = @{}
     $haveResolver = [bool](Get-Command Resolve-PimPolicyTemplateKey -ErrorAction SilentlyContinue)
+    # 🔴 OPPOL-1 (owner-approved 2026-10-09, PIM REQUIREMENTS §100.3): the Settings > Operational policy FLOORS
+    # (Require MFA on activation, max activation duration, max eligibility duration) are applied HERE -- the one template
+    # accessor every policy provider (GroupsPolicies, EntraRolePolicies, AzResPolicies) reads -- so the plan, the policy
+    # mass-change guard and the apply all see the same floored template, on the defined objects only. Before this nothing
+    # read them: switching "Require MFA on activation" changed no policy anywhere.
+    if (-not (Get-Command ConvertTo-PimOperationalFloorRules -ErrorAction SilentlyContinue) -and $PSScriptRoot) {
+        $opLib = Join-Path $PSScriptRoot 'PIM-OperationalPolicy.ps1'
+        if (Test-Path -LiteralPath $opLib) { . $opLib }
+    }
+    $opPolicy = $null
+    if (Get-Command Get-PimEngineOperationalPolicy -ErrorAction SilentlyContinue) {
+        try { $opPolicy = Get-PimEngineOperationalPolicy } catch { Write-Warning "  [policy] the operational policy could not be read -- its floors are not applied this run: $($_.Exception.Message)"; $opPolicy = $null }
+    }
     foreach ($id in @($byId.Keys)) {
         $j = $byId[$id]; $rules = @{}
         # 'extends' resolves like a row's PolicyTemplate: id, current name, former id ('default' -> Groups_Standard).
@@ -4088,6 +4199,12 @@ function Get-PimEnginePolicyTemplates {
         $extKey = if (-not $ext) { '' } elseif ($haveResolver) { Resolve-PimPolicyTemplateKey -Map $byId -Id $ext } elseif ($byId.ContainsKey($ext)) { $ext } else { '' }
         if ($extKey) { $base = $byId[$extKey]; if ($base.rules) { foreach ($p in $base.rules.PSObject.Properties) { $rules[$p.Name] = $p.Value } } }
         if ($j.rules) { foreach ($p in $j.rules.PSObject.Properties) { $rules[$p.Name] = $p.Value } }
+        if ($opPolicy) {
+            $fl = ConvertTo-PimOperationalFloorRules -Rules $rules -Policy $opPolicy
+            $rules = $fl.rules
+            if (@($fl.changes).Count) { Write-Host ("    [policy] template '{0}': operational policy applied -- {1}" -f $id, (@($fl.changes) -join '; ')) -ForegroundColor DarkCyan }
+            foreach ($n in @($fl.notes)) { Write-Host ("    [policy] template '{0}' {1}" -f $id, $n) -ForegroundColor DarkYellow }
+        }
         $out[$id] = [pscustomobject]@{ id = $id; name = "$($j.name)"; rules = $rules }
     }
     $out
@@ -7518,6 +7635,7 @@ function Invoke-PimAdminOffboardSteps {
     $now = { [datetime]::UtcNow.ToString('o') }
     $save = {
         $st['kind'] = "$($Live.kind)"
+        if ("$uid".Trim()) { $st['principalId'] = "$uid".Trim() }   # ACC-1: the STABLE id, so a later run finds the account even if its UPN changed
         $store.map[$upnL] = $st
         if (-not (Save-PimAdminLifecycleStore -Name 'AdminOffboardState' -Map $store.map)) {
             throw "offboarding state for $upn could not be saved -- stopping here so the next run resumes from what is recorded"
@@ -7633,13 +7751,18 @@ function New-PimOffboardingProvider {
                 $c = Get-PimAdminOffboardCandidate -Row $a -NowUtc $now
                 if (-not $c) { continue }
                 $upn = (Get-PimRowProp -Row $a -Names @('UserPrincipalName','UPN','upn')).Trim()
+                $alts = @()
                 if ($upn -notmatch '@') {
                     $local = if ($upn) { $upn } else { (Get-PimRowProp -Row $a -Names @('UserName','Username')).Trim() }
                     $dom = if ($local) { "$(Get-PimAdminUpnDomain)".Trim() } else { '' }   # REQ-T: pin -> Admin account domain -> default
                     if ($local -and $dom) { $upn = "$local@$dom" }
+                    # 🔴 ACC-1 (owner-approved 2026-10-09): a row stored with only a user name was looked for ONLY at the CURRENT
+                    # admin domain -- after the domain changed, an account created at the old one was "not found" and never
+                    # offboarded. The other domains this tenant used (history + default) are tried when the current one misses.
+                    if ($local) { $alts = @(Get-PimAdminUpnDomainCandidates | Where-Object { $_ -and $_ -ine $dom } | ForEach-Object { "$local@$_" }) }
                 }
                 if ($upn -notmatch '@') { Write-Host "    [AdminOffboarding] a row flagged for offboarding has no resolvable UPN -- skipped." -ForegroundColor Yellow; continue }
-                [void]$cands.Add([pscustomobject]@{ upn = $upn; kind = $c.kind; reason = $c.reason; key = (Get-PimAdminRowKey -Row ([pscustomobject]@{ UserPrincipalName = $upn })) })
+                [void]$cands.Add([pscustomobject]@{ upn = $upn; kind = $c.kind; reason = $c.reason; key = (Get-PimAdminRowKey -Row ([pscustomobject]@{ UserPrincipalName = $upn })); altUpns = @($alts) })
                 [void]$rows.Add($a)
             }
             $ctx['offboardCandidates'] = $cands.ToArray()
@@ -7677,14 +7800,29 @@ function New-PimOffboardingProvider {
             foreach ($c in $cands) {
                 $r = & $rec $c $false ''
                 $u = $null; $found = $false
-                try {
-                    $u = Invoke-PimGraph -Path ("/users/{0}?`$select=id,userPrincipalName,displayName,accountEnabled" -f [uri]::EscapeDataString($c.upn))
-                    $found = [bool]("$($u.id)".Trim())
-                } catch {
-                    if ("$($_.Exception.Message)" -notmatch '(?i)404|ResourceNotFound|does not exist|not found') {
-                        $r.blocked = "the account could not be read: $($_.Exception.Message)"
-                        [void]$live.Add($r); continue
+                # ACC-1: look the account up by its STABLE id first when an earlier run recorded it (a UPN can change), then by
+                # the UPN, then -- for a row stored with only a user name -- at the other admin domains this tenant used.
+                $stPrev = @{}
+                if ($store.ok -and $store.map.ContainsKey($c.upn.ToLowerInvariant())) { $stPrev = $store.map[$c.upn.ToLowerInvariant()] }
+                $knownId = if ($stPrev -is [System.Collections.IDictionary] -and $stPrev.Contains('principalId')) { "$($stPrev['principalId'])".Trim() } else { '' }
+                $lookups = @(); if ($knownId) { $lookups += $knownId }; $lookups += $c.upn; $lookups += @($c.altUpns | Where-Object { $_ })
+                $readErr = ''
+                foreach ($lk in $lookups) {
+                    try {
+                        $u = Invoke-PimGraph -Path ("/users/{0}?`$select=id,userPrincipalName,displayName,accountEnabled" -f [uri]::EscapeDataString($lk))
+                        $found = [bool]("$($u.id)".Trim())
+                    } catch {
+                        $u = $null; $found = $false
+                        if ("$($_.Exception.Message)" -notmatch '(?i)404|ResourceNotFound|does not exist|not found') { $readErr = "$($_.Exception.Message)"; break }
                     }
+                    if ($found) {
+                        if ($lk -ne $c.upn -and $lk -ne $knownId) { Write-Host ("    [AdminOffboarding] {0}: found at a domain this tenant used before -- {1}" -f $c.upn, "$($u.userPrincipalName)") -ForegroundColor DarkYellow }
+                        break
+                    }
+                }
+                if ($readErr) {
+                    $r.blocked = "the account could not be read: $readErr"
+                    [void]$live.Add($r); continue
                 }
                 $probe = [pscustomobject]@{ userPrincipalName = $c.upn; id = "$($u.id)" }
                 if ($bg.Count -gt 0 -and (Get-Command Test-PimRowIsBreakGlass -ErrorAction SilentlyContinue) -and (Test-PimRowIsBreakGlass -Row $probe -Identifiers $bg)) {
@@ -8662,7 +8800,7 @@ function New-PimEntraAppRoleProvider {
 # REQ-U wave 2: PIM-WorkloadRoles.ps1 = the Defender role spec, the Groups hold, live orphan warnings, workload role discovery.
 # REQ-W (2.4.380): PIM-WorkloadPrereqs.ps1 carries the ONE assignment-gate rule (Get-PimWorkloadAssignmentGate) the
 # workload providers apply before they create an assignment (Get-PimWorkloadAssignmentHold, PIM-WorkloadRoles.ps1).
-foreach ($__pimWlFile in @('PIM-WorkloadConnectors.ps1', 'PIM-WorkloadMap.ps1', 'PIM-WorkloadRoles.ps1', 'PIM-WorkloadPrereqs.ps1')) {
+foreach ($__pimWlFile in @('PIM-WorkloadConnectors.ps1', 'PIM-WorkloadMap.ps1', 'PIM-WorkloadRoles.ps1', 'PIM-WorkloadPrereqs.ps1', 'PIM-CustomWorkloads.ps1')) {   # 100.17: + custom (group-only) workloads
     if ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot $__pimWlFile))) { . (Join-Path $PSScriptRoot $__pimWlFile) }
 }
 

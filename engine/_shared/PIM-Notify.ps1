@@ -26,6 +26,12 @@ if ($PSScriptRoot) {
     # MAIL-1: the transport (shared mailbox | SMTP relay | none) -- the one setting every mail of this environment follows.
     $__pimMailTransport = Join-Path $PSScriptRoot 'PIM-MailTransport.ps1'
     if (Test-Path -LiteralPath $__pimMailTransport) { . $__pimMailTransport }
+    # MAIL-2 (framework §12.11, PIM §100.5): the designed layout (logo, summary, blue audience button, footer) and the
+    # per-recipient notification preferences the senders read at send time.
+    foreach ($__pimMail2 in 'PIM-MailLayout.ps1', 'PIM-MailNotifications.ps1', 'PIM-GetStartedReminder.ps1') {
+        $__pimMail2Path = Join-Path $PSScriptRoot $__pimMail2
+        if (Test-Path -LiteralPath $__pimMail2Path) { . $__pimMail2Path }
+    }
 }
 
 # --- EMAIL CONTROLS authority (the GUI-state == actual-behavior fix) -----------
@@ -43,7 +49,12 @@ function Set-PimEmailControlsGlobals {
     # string (SQL keeps scalars as text). FAIL-SAFE: an ON kill switch is only ever turned
     # ON here, never OFF (a malformed/blank record can't silently re-enable sending); the
     # allowlist/redirect are only set from a well-formed record. Returns the applied shape.
-    param([object]$EmailControls)
+    # -Authoritative: the record is the operator's SAVE (the Manager applies its own save through this) -- the kill switch
+    # follows it both ways. Without it (a store hydrate) the kill switch is only ever ARMED here.
+    # MAIL-2 (owner-approved 2026-10-09): a well-formed record whose redirectAllTo is present and BLANK clears the redirect
+    # (it used to be set-only, so a cleared redirect stayed in force in a running process until a restart). A record
+    # without the key, or a malformed one, leaves the redirect as it is.
+    param([object]$EmailControls, [switch]$Authoritative)
     $rec = $EmailControls
     if ($rec -is [string]) { $s = "$rec".Trim(); if ($s) { try { $rec = $s | ConvertFrom-Json } catch { $rec = $null } } else { $rec = $null } }
     $get = {
@@ -52,10 +63,18 @@ function Set-PimEmailControlsGlobals {
         if ($obj -is [System.Collections.IDictionary]) { if ($obj.Contains($name)) { return $obj[$name] } ; return $null }
         $p = $obj.PSObject.Properties[$name]; if ($p) { return $p.Value } else { return $null }
     }
+    $has = {
+        param($obj, $name)
+        if ($null -eq $obj) { return $false }
+        if ($obj -is [System.Collections.IDictionary]) { return [bool]$obj.Contains($name) }
+        return [bool]$obj.PSObject.Properties[$name]
+    }
     $kill = & $get $rec 'killSwitch'
-    if ($null -ne $kill -and [bool]$kill) { $global:PIM_MailKillSwitch = $true }   # only ever ARM, never disarm
+    if ($null -ne $kill -and [bool]$kill) { $global:PIM_MailKillSwitch = $true }   # a hydrate only ever ARMS
+    elseif ($Authoritative -and $null -ne $kill) { $global:PIM_MailKillSwitch = $false }   # the operator's save disarms
     $redir = & $get $rec 'redirectAllTo'
     if ($null -ne $redir -and "$redir".Trim()) { $global:PIM_MailRedirectAllTo = "$redir".Trim() }
+    elseif ((& $has $rec 'redirectAllTo') -and -not "$redir".Trim()) { $global:PIM_MailRedirectAllTo = '' }
     $allow = & $get $rec 'allowlist'
     if ($null -ne $allow) { $global:PIM_MailAllowlist = @(@($allow) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
     return [pscustomobject]@{ killSwitch = [bool]$global:PIM_MailKillSwitch; redirectAllTo = "$($global:PIM_MailRedirectAllTo)"; allowlist = @($global:PIM_MailAllowlist) }
@@ -281,6 +300,91 @@ function Save-PimMailSendProof {
     } catch { Write-Verbose "  [Mail] the send proof could not be recorded: $($_.Exception.Message)" }
 }
 
+# =====================================================================================================================
+# MAIL-STEP-PROOF (owner 2026-10-09: "i have run 3 cmdlet, and test mail works - but it still shows eros"). "Send test mail"
+# proves BOTH sending identities: the Manager sends its own test at once, and queues ONE engine test send in pim.Settings
+# 'MailEngineTest'. The engine job (ca-pim-tick, Start-PimScheduler -Once) sends it at the start of its next run as ITS OWN
+# identity through Send-PimNotifyMail -- so the proof is recorded exactly as a real engine send records it (MailSendProof
+# .engine: ok, or FAILED with the reason, e.g. 403 ErrorAccessDenied).
+#   record: @{ id; status = queued | sending | sent | failed; to; by; sender; mode; queuedUtc; claimedUtc; at; reason }
+# =====================================================================================================================
+function New-PimMailEngineTestRequest {
+    # PURE. The record the Manager writes when Send test mail is pressed.
+    param([Parameter(Mandatory)][string]$To, [string]$By = '', [string]$Mode = 'sharedMailbox', [string]$Sender = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    return [ordered]@{ id = [guid]::NewGuid().ToString(); status = 'queued'; to = "$To".Trim(); by = "$By".Trim(); sender = "$Sender".Trim(); mode = "$Mode".Trim()
+                       queuedUtc = $NowUtc.ToUniversalTime().ToString('o'); claimedUtc = ''; at = ''; reason = '' }
+}
+
+function Get-PimMailEngineTestAction {
+    <#
+      PURE. Should THIS engine run send the queued engine test mail? Returns @{ act; reason }.
+        queued                                  -> act
+        sending, claimed more than 15 min ago   -> act again (the run that claimed it died)
+        older than -MaxAgeHours (24)            -> no (a stale request is never sent days later)
+        no / invalid recipient, sent, failed    -> no
+    #>
+    param([AllowNull()]$Request, [datetime]$NowUtc = [datetime]::UtcNow, [int]$MaxAgeHours = 24)
+    $g = { param($n) if ($null -eq $Request) { $null } elseif ($Request -is [System.Collections.IDictionary]) { $Request[$n] } elseif ($Request.PSObject.Properties[$n]) { $Request.$n } else { $null } }
+    if ($null -eq $Request) { return @{ act = $false; reason = 'no engine test mail is queued' } }
+    $st = "$(& $g 'status')".Trim().ToLowerInvariant()
+    $to = "$(& $g 'to')".Trim()
+    $parse = { param($s) $d = [datetime]::MinValue; $sty = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
+               if ("$s".Trim() -and [datetime]::TryParse("$s", [Globalization.CultureInfo]::InvariantCulture, $sty, [ref]$d)) { $d.ToUniversalTime() } else { $null } }
+    $now = $NowUtc.ToUniversalTime()
+    if ($st -notin @('queued', 'sending')) { return @{ act = $false; reason = "the engine test mail is already $(if ($st) { $st } else { 'handled' })" } }
+    if ($to -notmatch '^[^@\s;,<>]+@[^@\s;,<>]+\.[^@\s;,<>]+$') { return @{ act = $false; reason = 'the queued engine test mail has no valid recipient' } }
+    $q = & $parse (& $g 'queuedUtc')
+    if (-not $q -or ($now - $q).TotalHours -gt $MaxAgeHours) { return @{ act = $false; reason = "the queued engine test mail is older than $MaxAgeHours h -- not sent (press Send test mail again)" } }
+    if ($st -eq 'sending') {
+        $c = & $parse (& $g 'claimedUtc')
+        if ($c -and ($now - $c).TotalMinutes -lt 15) { return @{ act = $false; reason = 'another engine run is sending the test mail' } }
+    }
+    return @{ act = $true; reason = 'an engine test mail is queued' }
+}
+
+function Invoke-PimMailEngineTest {
+    <#
+      The ENGINE side (called by Start-PimScheduler -Once before the tick, main instance only). Sends the queued engine test
+      mail as this process's identity (the engine job's) and records the result on the request; the send proof itself is
+      recorded by Send-PimNotifyMail (role engine), unthrottled for this one send. Returns @{ ran; sent; detail }. NEVER throws.
+      -Reader / -Writer: test seams (param($Name) / param($Name, $Value)); default Get-PimSetting / Set-PimSetting.
+    #>
+    param([datetime]$NowUtc = [datetime]::UtcNow, [scriptblock]$Reader, [scriptblock]$Writer, [switch]$WhatIf)
+    try {
+        if (-not $Reader) { if (Get-Command Get-PimSetting -ErrorAction SilentlyContinue) { $Reader = { param($n) Get-PimSetting -Name $n } } else { return @{ ran = $false; sent = $false; detail = 'no settings store in this process' } } }
+        if (-not $Writer) { if (Get-Command Set-PimSetting -ErrorAction SilentlyContinue) { $Writer = { param($n, $v) Set-PimSetting -Name $n -Value $v | Out-Null } } else { return @{ ran = $false; sent = $false; detail = 'no settings store in this process' } } }
+        $req = & $Reader 'MailEngineTest'
+        if ($req -is [string]) { try { $req = $req | ConvertFrom-Json } catch { $req = $null } }
+        $plan = Get-PimMailEngineTestAction -Request $req -NowUtc $NowUtc
+        if (-not $plan.act) { return @{ ran = $false; sent = $false; detail = $plan.reason } }
+        if ($WhatIf) { return @{ ran = $false; sent = $false; detail = 'whatif -- the queued engine test mail would be sent' } }
+        $rec = [ordered]@{}
+        if ($req -is [System.Collections.IDictionary]) { foreach ($k in @($req.Keys)) { $rec["$k"] = $req[$k] } }
+        else { foreach ($p in @($req.PSObject.Properties)) { $rec[$p.Name] = $p.Value } }
+        $rec['status'] = 'sending'; $rec['claimedUtc'] = $NowUtc.ToUniversalTime().ToString('o')
+        & $Writer 'MailEngineTest' $rec
+        $prevRole = $global:PIM_MailProofRole
+        $global:PIM_MailProofRole = 'engine'
+        $script:PimMailProofLast = $null   # this one send is always recorded (never throttled away)
+        $r = $null
+        try {
+            $r = Send-PimNotifyMail -Type 'alert-notice' -Recipient "$($rec['to'])" -Tokens @{
+                AlertTitle = 'PIM Manager engine test mail'; AlertEvent = 'mail-test'; AlertTab = 'getstarted'
+                AlertDetail = 'This test mail was sent by the PIM engine job as its own identity, because Send test mail was pressed in Get Started / Settings > Mail & alerting. It proves that the engine can send TAP codes, reminders and alerts.'
+                AlertHeadline = 'Mail from the PIM engine works.'; AlertAction = 'Nothing to do -- this was a test.'
+                WhenUtc = $NowUtc.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC' }
+        } catch { $r = @{ sent = $false; reason = "$($_.Exception.Message)" } }
+        finally { $global:PIM_MailProofRole = $prevRole }
+        $ok = ("$($r.sent)" -match '(?i)^true$')
+        $one = "$($r.reason)" -replace "[\r\n]+", ' '; if ($one.Length -gt 300) { $one = $one.Substring(0, 300) }
+        $rec['status'] = $(if ($ok) { 'sent' } else { 'failed' }); $rec['at'] = (Get-Date).ToUniversalTime().ToString('o'); $rec['reason'] = $(if ($ok) { '' } else { $one })
+        try { & $Writer 'MailEngineTest' $rec } catch { Write-Warning "  [Mail] the engine test mail result could not be recorded: $($_.Exception.Message)" }
+        return @{ ran = $true; sent = $ok; detail = $(if ($ok) { "engine test mail sent to $($rec['to'])" } else { "engine test mail NOT sent: $one" }) }
+    } catch {
+        return @{ ran = $false; sent = $false; detail = "the engine test mail failed: $($_.Exception.Message)" }
+    }
+}
+
 function Send-PimNotifyMail {
     # Render type+tokens and send via Graph sendMail. Returns @{ sent; recipient; subject;
     # rendered; reason }. No send (returns rendered only) when -WhatIf / $global:WhatIfMode,
@@ -341,8 +445,12 @@ function Send-PimNotifyMail {
     }
     $r = ConvertTo-PimNotifyRendering -TemplateText $tpl.text -Tokens $Tokens
     if ($portal.url -and $r.BodyHtml -notmatch [regex]::Escape($portal.base)) {
-        $block = '<p style="margin:18px 0 0 0;font-family:''Segoe UI'',Helvetica,Arial,sans-serif;font-size:14px;"><a href="' + [System.Net.WebUtility]::HtmlEncode($portal.url) +
-                 '" style="display:inline-block;background:#0969da;color:#ffffff;text-decoration:none;padding:8px 14px;border-radius:6px;">Open in PIM Manager &rarr;</a></p>'
+        # MAIL-2 item 1: the bulletproof blue button (a table cell carries the colour, so Outlook draws it too).
+        $block = if (Get-Command New-PimMailButton -ErrorAction SilentlyContinue) { New-PimMailButton -Url $portal.url -Label 'Open in PIM Manager' } else { '' }
+        if (-not $block) {
+            $block = '<p style="margin:18px 0 0 0;font-family:''Segoe UI'',Helvetica,Arial,sans-serif;font-size:14px;"><a href="' + [System.Net.WebUtility]::HtmlEncode($portal.url) +
+                     '" style="display:inline-block;background:#0969da;color:#ffffff;text-decoration:none;padding:8px 14px;border-radius:6px;">Open in PIM Manager &rarr;</a></p>'
+        }
         $r.BodyHtml = if ($r.BodyHtml -match '(?i)</body>') { [regex]::Replace($r.BodyHtml, '(?i)</body>', ($block -replace '\$', '$$$$') + '</body>', 1) } else { $r.BodyHtml + $block }
         $r.BodyText = "$($r.BodyText)`r`n`r`nOpen in PIM Manager: $($portal.url)"
     }
@@ -353,6 +461,10 @@ function Send-PimNotifyMail {
     if ($envInfo.name) {
         # StartsWith, never -like: '[...]' is a wildcard character SET to -like ("[Contoso]*" matched "CUSTOM ...")
         if (-not "$($r.Subject)".StartsWith("[$($envInfo.name)]", [System.StringComparison]::OrdinalIgnoreCase)) { $r.Subject = "[$($envInfo.name)] $($r.Subject)" }
+    }
+    # MAIL-2: a designed mail (PIM-MailLayout.ps1 New-PimMailDocument) carries its OWN footer with the same facts -- one footer,
+    # not two. Every other mail gets the MAIL-1 footer here, as before.
+    if ($envInfo.name -and $r.BodyHtml -notmatch 'class="pim-env-footer"') {
         $enc = { param($v) [System.Net.WebUtility]::HtmlEncode("$v") }
         $foot = '<p class="pim-env-footer" style="margin:22px 0 0 0;padding-top:8px;border-top:1px solid #d0d7de;font-family:''Segoe UI'',Helvetica,Arial,sans-serif;font-size:12px;color:#57606a;">' +
                 'Environment: <b>' + (& $enc $envInfo.name) + '</b>' +
@@ -363,6 +475,21 @@ function Send-PimNotifyMail {
         $r.BodyText = "$($r.BodyText)`r`n`r`n-- Environment: $($envInfo.name)" + $(if ($envInfo.tenantName -or $envInfo.tenantId) { " | tenant $($envInfo.tenantName) ($($envInfo.tenantId))" } else { '' }) +
                       $(if ($envInfo.version) { " | PIM Manager $($envInfo.version)" } else { '' }) + $(if ($envInfo.portal) { " | $($envInfo.portal)" } else { '' })
     }
+    # MAIL-2 item 4: the LOGO. A designed mail references it as cid:pim-logo; it travels as an INLINE attachment (the PNG the
+    # docs already ship -- SVG is not drawn by Outlook or most webmail). No PNG in this runtime -> the text wordmark takes its
+    # place, so a mail never shows a broken image. A mail that does not reference it gets no logo attachment.
+    $Attachments = @(@($Attachments) | Where-Object { $_ })
+    if ($r.BodyHtml -match 'cid:pim-logo') {
+        $logo = if (Get-Command Get-PimMailLogoAttachment -ErrorAction SilentlyContinue) { Get-PimMailLogoAttachment } else { $null }
+        if ($logo) {
+            if (-not @($Attachments | Where-Object { "$($_.contentId)" -eq 'pim-logo' }).Count) { $Attachments = @($Attachments) + @($logo) }
+        } else {
+            $wm = if (Get-Command Get-PimMailWordmarkHtml -ErrorAction SilentlyContinue) { Get-PimMailWordmarkHtml } else { '<b>PIM Manager</b>' }
+            $r.BodyHtml = [regex]::Replace($r.BodyHtml, '(?s)<!--pim-logo-->.*?<!--/pim-logo-->', ($wm -replace '\$', '$$$$'))
+            $r.BodyHtml = [regex]::Replace($r.BodyHtml, '<img\b[^>]*cid:pim-logo[^>]*>', ($wm -replace '\$', '$$$$'))
+        }
+    }
+    $r['Attachments'] = @($Attachments | ForEach-Object { "$($_.name)" })
     $sender = "$($global:PIM_MailSender)".Trim()
     # MAIL-1 (framework 12.3, owner 2026-10-08: "2 options: shared mailbox or smtp relay"): ONE setting picks the transport.
     # 'none' is checked BEFORE -WhatIf on purpose: Test-PimTapMailReady probes with -WhatIf, and a switched-off environment
@@ -390,8 +517,11 @@ function Send-PimNotifyMail {
     $body = @{ message = @{ subject = $r.Subject; body = @{ contentType = 'HTML'; content = $r.BodyHtml }
                             toRecipients = @($rcptList | ForEach-Object { @{ emailAddress = @{ address = $_ } } }) }; saveToSentItems = $false }
     $att = @(@($Attachments) | Where-Object { $_ -and $_.bytes -and "$($_.name)".Trim() } | ForEach-Object {
-        @{ '@odata.type' = '#microsoft.graph.fileAttachment'; name = "$($_.name)"; contentType = $(if ("$($_.contentType)".Trim()) { "$($_.contentType)" } else { 'application/octet-stream' })
-           contentBytes = [Convert]::ToBase64String([byte[]]$_.bytes) } })
+        $ga = @{ '@odata.type' = '#microsoft.graph.fileAttachment'; name = "$($_.name)"; contentType = $(if ("$($_.contentType)".Trim()) { "$($_.contentType)" } else { 'application/octet-stream' })
+           contentBytes = [Convert]::ToBase64String([byte[]]$_.bytes) }
+        # MAIL-2: an inline image (the logo) carries its Content-ID, so <img src="cid:..."> finds it
+        if ("$($_.contentId)".Trim()) { $ga['contentId'] = "$($_.contentId)".Trim(); $ga['isInline'] = [bool]$_.isInline }
+        $ga })
     if ($att.Count) { $body.message['attachments'] = $att }
     $sendAs = Resolve-PimMailSendIdentity
     # Splat the switch only when it is set: offline suites stub Invoke-PimGraph with a fixed

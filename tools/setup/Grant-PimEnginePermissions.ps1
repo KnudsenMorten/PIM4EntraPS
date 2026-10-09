@@ -1,9 +1,11 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Give the PIM Manager engine identity the Microsoft Graph (and other API) application permissions and Azure role
     assignments it is missing. Run once, as a Global Administrator (or Privileged Role Administrator for the
-    application permissions; Owner / User Access Administrator at the scope for an Azure role).
+    application permissions; Owner / User Access Administrator at the scope for an Azure role). -WhatIf shows every
+    grant first and changes nothing.
 
 .DESCRIPTION
     PIM Manager shows this command with your environment's exact values (Overview > permission check, and the Get
@@ -41,7 +43,8 @@
 .PARAMETER ArmAccessToken
     Automation: an Azure Resource Manager token instead of the second browser sign-in.
 .PARAMETER PlanOnly
-    Read and report what would be granted; change nothing.
+    Read and report what would be granted; change nothing. (-WhatIf does the same and prints each grant as a
+    "What if:" line.)
 .PARAMETER PassThru
     Also return the result rows as objects.
 
@@ -55,8 +58,14 @@
     default; run this when the installing account could not. Add
     ,'User Access Administrator@/providers/Microsoft.Management/managementGroups/<tenant id>' only when the engine must
     assign the Azure resource roles you delegate (optional).
+.EXAMPLE
+    .\Grant-PimEnginePermissions.ps1 -TenantId '<tenant id>' -EngineObjectId '<object id>' -GraphPermissions 'Group.ReadWrite.All' -WhatIf
+    Signs in and reads, then prints what it would grant ("What if: ...") -- nothing is changed.
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Grant-PimEnginePermissions/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$TenantId,
     [Parameter(Mandatory)][string]$EngineObjectId,
@@ -71,6 +80,11 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimEnginePermissions.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Grant-PimEnginePermissions'
+try {
+# -WhatIf = -PlanOnly (sign in, read, report "would grant", write nothing) plus a "What if:" line per grant.
+$previewOnly = [bool]$PlanOnly -or [bool]$WhatIfPreference
 
 Write-Host "Grant-PimEnginePermissions -- PIM Manager $(Get-PimEpSolutionVersion)" -ForegroundColor Cyan
 Write-Host "PowerShell : $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))" -ForegroundColor Cyan
@@ -121,7 +135,7 @@ if ($appSpecs.Count) {
         throw "Could not read the engine identity: $_"
     }
     Write-Host "Engine identity: $($eng.displayName) ($($eng.servicePrincipalType), object id $EngineObjectId)" -ForegroundColor Cyan
-    foreach ($r in @(Invoke-PimEpAppRoleGrant -EngineObjectId $EngineObjectId -Specs $appSpecs.ToArray() -PlanOnly:$PlanOnly)) { $results.Add($r) }
+    foreach ($r in @(Invoke-PimEpAppRoleGrant -EngineObjectId $EngineObjectId -Specs $appSpecs.ToArray() -PlanOnly:$previewOnly)) { $results.Add($r) }
 }
 
 # ---- Azure role assignments -------------------------------------------------------------------------------------------
@@ -134,15 +148,24 @@ if ($azSpecs.Count) {
     }
     [void](& $assertTenant $aTok 'Azure')
     Set-PimEpToken -Api arm -AccessToken $aTok
-    foreach ($r in @(Invoke-PimEpAzureRoleGrant -EngineObjectId $EngineObjectId -Specs $azSpecs.ToArray() -PlanOnly:$PlanOnly)) { $results.Add($r) }
+    foreach ($r in @(Invoke-PimEpAzureRoleGrant -EngineObjectId $EngineObjectId -Specs $azSpecs.ToArray() -PlanOnly:$previewOnly)) { $results.Add($r) }
 }
 
 # ---- report -------------------------------------------------------------------------------------------------------------
 Write-Host ''
-Write-Host $(if ($PlanOnly) { 'Plan (nothing was changed):' } else { 'Result:' }) -ForegroundColor Cyan
+Write-Host $(if ($previewOnly) { 'Plan (nothing was changed):' } else { 'Result:' }) -ForegroundColor Cyan
 foreach ($l in @(Format-PimEpResults -Results $results.ToArray())) {
     $color = if ($l -match '^\s+refused') { 'Red' } elseif ($l -match '^\s+granted') { 'Green' } else { 'Gray' }
     Write-Host $l -ForegroundColor $color
+}
+if ($WhatIfPreference) {
+    # PowerShell's own "What if:" line for every grant the run would make (ShouldProcess answers $false under -WhatIf).
+    foreach ($w in @($results | Where-Object { $_.status -eq 'would grant' })) {
+        $target = if ($w.kind -eq 'Azure role') { "engine identity $EngineObjectId at Azure scope $($w.where)" } else { "engine identity $EngineObjectId on $($w.where)" }
+        $action = if ($w.kind -eq 'Azure role') { "assign Azure role '$($w.what)'" } else { "grant application permission $($w.what)" }
+        [void]$PSCmdlet.ShouldProcess($target, $action)
+    }
+    if (-not @($results | Where-Object { $_.status -eq 'would grant' }).Count) { Write-Host 'What if: nothing to grant -- the engine identity already holds everything asked for (or it was refused above).' }
 }
 $refused = @($results | Where-Object { $_.status -eq 'refused' }).Count
 $granted = @($results | Where-Object { $_.status -eq 'granted' }).Count
@@ -151,3 +174,4 @@ if ($granted) { Write-Host "A new grant reaches the engine's token within about 
 if ($refused) { Write-Host "$refused permission(s) were refused -- see the reasons above." -ForegroundColor Red }
 if ($PassThru) { $results.ToArray() }
 if ($refused) { exit 1 }
+} finally { Stop-PimScriptRun -Script 'Grant-PimEnginePermissions' }

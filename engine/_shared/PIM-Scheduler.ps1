@@ -994,13 +994,31 @@ function Send-PimDigestJobMail {
       every send refused (kill switch, disabled email feature, allowlist, no sender) is ran=$false
       with the reason -- the old handlers counted a digest nobody received as a successful run.
     #>
-    param([Parameter(Mandatory)][string]$Type, [Parameter(Mandatory)][hashtable]$Tokens, [string]$What = '', [object]$Result, [switch]$WhatIf)
+    param([Parameter(Mandatory)][string]$Type, [Parameter(Mandatory)][hashtable]$Tokens, [string]$What = '', [object]$Result, [switch]$WhatIf,
+          # MAIL-2 (framework §12.11): the tokens for ONE audience (soc|posture|manager) -- each recipient's blue button leads
+          # to the page for their audience. Absent = -Tokens for everyone.
+          [scriptblock]$TokensForAudience,
+          # MAIL-2 item 3: files attached to every copy (the print-ready report when the report is set to 'PDF attached').
+          [object[]]$Attachments = @())
     $rc = if (Get-Command Get-PimDigestRecipients -ErrorAction SilentlyContinue) { Get-PimDigestRecipients -Kind $Type } else { [pscustomobject]@{ recipients = @(); source = 'none' } }
     $rcpts = @(@($rc.recipients) | Where-Object { "$_".Trim() })
     if (-not $rcpts.Count) {
         return [pscustomobject]@{ ran=$false; noRecipients=$true; whatIf=[bool]$WhatIf; result=$Result
             detail=("{0} built ({1}) but NOT sent -- no recipients: add them under Settings > Alerting" -f $Type, $What) }
     }
+    # MAIL-2 item 2: each recipient's Notifications (on/off per report) -- read at SEND time from SQL, so a switch in the GUI
+    # applies to the next mail. A recipient with no stored preference gets everything, as before.
+    $sel = $null
+    if ((Get-Command Get-PimMailNotificationPrefsFromStore -ErrorAction SilentlyContinue) -and (Get-Command Select-PimNotificationRecipients -ErrorAction SilentlyContinue)) {
+        $sel = Select-PimNotificationRecipients -Prefs (Get-PimMailNotificationPrefsFromStore) -Recipients $rcpts -Type $Type -Kind 'report'
+        $offTxt = if (@($sel.skipped).Count) { " ({0} switched off in their notifications)" -f @($sel.skipped).Count } else { '' }
+        $rcpts = @($sel.keep)
+        if (-not $rcpts.Count) {
+            return [pscustomobject]@{ ran=$false; noRecipients=$true; switchedOff=$true; whatIf=[bool]$WhatIf; result=$Result
+                detail=("{0} built ({1}) but NOT sent -- every recipient has switched this report off{2}" -f $Type, $What, $offTxt) }
+        }
+    }
+    $tokCache = @{}
     if (-not (Get-Command Send-PimNotifyMail -ErrorAction SilentlyContinue)) {
         return [pscustomobject]@{ ran=$false; whatIf=[bool]$WhatIf; result=$Result
             detail=("{0} built ({1}) but NOT sent -- the mail path (Send-PimNotifyMail) is not loaded in this process" -f $Type, $What) }
@@ -1008,7 +1026,19 @@ function Send-PimDigestJobMail {
     $sent = 0; $would = 0; $refused = New-Object System.Collections.Generic.List[string]
     foreach ($r in $rcpts) {
         $res = $null
-        try { $res = Send-PimNotifyMail -Type $Type -Tokens $Tokens -Recipient "$r" -WhatIf:$WhatIf }
+        try {
+            $tk = $Tokens
+            if ($TokensForAudience) {
+                $aud = 'manager'
+                if ($sel -and $sel.prefs.ContainsKey("$r".Trim().ToLowerInvariant())) { $aud = "$($sel.prefs["$r".Trim().ToLowerInvariant()].audience)" }
+                if (-not $tokCache.ContainsKey($aud)) { $tokCache[$aud] = (& $TokensForAudience $aud) }
+                $tk = $tokCache[$aud]
+            }
+            # splatted: the offline suites stub Send-PimNotifyMail without -Attachments
+            $sendArgs = @{ Type = $Type; Tokens = $tk; Recipient = "$r"; WhatIf = [bool]$WhatIf }
+            if (@($Attachments | Where-Object { $_ }).Count) { $sendArgs['Attachments'] = @($Attachments | Where-Object { $_ }) }
+            $res = Send-PimNotifyMail @sendArgs
+        }
         catch { $res = @{ sent = $false; reason = "$($_.Exception.Message)" } }
         if ("$($res.sent)" -match '(?i)^true$') { $sent++ }
         elseif ("$($res.reason)" -eq 'whatif') { $would++ }
@@ -1023,6 +1053,8 @@ function Send-PimDigestJobMail {
         return [pscustomobject]@{ ran=$false; sent=0; recipients=$rcpts.Count; whatIf=$false; result=$Result
             detail=("{0} built ({1}) but NOT sent --{2}" -f $Type, $What, $refTxt) }
     }
+    # MAIL-2 item 6: "last sent" for the central report view (Settings > Reports). Best-effort -- never fails the run.
+    if (Get-Command Save-PimMailReportLastSent -ErrorAction SilentlyContinue) { Save-PimMailReportLastSent -Type $Type -Sent $sent -Recipients $rcpts.Count }
     return [pscustomobject]@{ ran=$true; sent=$sent; recipients=$rcpts.Count; whatIf=$false; result=$Result
         detail=("{0} sent={1}/{2} ({3}){4}" -f $Type, $sent, $rcpts.Count, $What, $refTxt) }
 }
@@ -1469,7 +1501,7 @@ function Initialize-PimDefaultJobHandlers {
     # nothing sets -- so it recorded ran=true, "changes=0 recipients=0", every day, and never mailed.
     # Now: events from the SQL audit trail, a Manager commit counted by what it changed, recipients
     # from pim.Settings['Alerting']. ran=true only when a digest was actually handed to the mailer.
-    Register-PimJobHandler -Type 'daily-summary' -Handler {
+    $script:PimDailySummaryCore = {
         param($job,$now,$whatIf)
         if (-not (Get-Command Get-PimDailySummary -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ ran=$false; detail='no-handler:Get-PimDailySummary' } }
         if (-not (Get-Command Get-PimDailySummaryEventsFromStore -ErrorAction SilentlyContinue)) { return [pscustomobject]@{ ran=$false; detail='no-handler:Get-PimDailySummaryEventsFromStore' } }
@@ -1478,14 +1510,50 @@ function Initialize-PimDefaultJobHandlers {
             return [pscustomobject]@{ ran=$false; unimplemented=$true; whatIf=[bool]$whatIf
                 detail=("unimplemented:daily-summary -- {0} (cannot answer, not 'nothing due')" -f $src.error) }
         }
-        $sum = Get-PimDailySummary -Events @($src.events) -NowUtc $now
-        if ([int]$sum.totalChanges -eq 0) {
+        # MAIL-2 / §100.5: the DAILY CHANGES report -- one row per changed row (before -> after), safety events too, risky first.
+        $rep = if (Get-Command Get-PimDailyChangesReport -ErrorAction SilentlyContinue) { Get-PimDailyChangesReport -Events @($src.events) -NowUtc $now } else { $null }
+        $sum = if ($rep) { $rep.summary } else { Get-PimDailySummary -Events @($src.events) -NowUtc $now }
+        $total = if ($rep) { [int]$rep.total } else { [int]$sum.totalChanges }
+        if ($total -eq 0) {
             return [pscustomobject]@{ ran=$false; nothingDue=$true; whatIf=[bool]$whatIf; summary=$sum
                 detail=("nothing due -- 0 delegation/assignment changes in the last 24h ({0} audit event(s) read from {1})" -f @($src.events).Count, $src.source) }
         }
-        return (Send-PimDigestJobMail -Type 'daily-summary' -WhatIf:$whatIf -Result $sum `
-                    -Tokens (ConvertTo-PimDailySummaryTokens -Summary $sum -TenantLabel "$($global:PIM_TenantLabel)") `
-                    -What ("changes={0} (admins={1} delegations={2} removals={3}; {4} audit event(s) from {5})" -f $sum.totalChanges, @($sum.admins).Count, @($sum.delegations).Count, @($sum.removals).Count, @($src.events).Count, $src.source))
+        $tl = "$($global:PIM_TenantLabel)"
+        if (-not $rep) {
+            return (Send-PimDigestJobMail -Type 'daily-summary' -WhatIf:$whatIf -Result $sum -Tokens (ConvertTo-PimDailySummaryTokens -Summary $sum -TenantLabel $tl) `
+                        -What ("changes={0} (admins={1} delegations={2} removals={3}; {4} audit event(s) from {5})" -f $sum.totalChanges, @($sum.admins).Count, @($sum.delegations).Count, @($sum.removals).Count, @($src.events).Count, $src.source))
+        }
+        $base = if (Get-Command Get-PimPortalBaseUrl -ErrorAction SilentlyContinue) { Get-PimPortalBaseUrl } else { '' }
+        $envI = if (Get-Command Get-PimMailEnvironmentInfo -ErrorAction SilentlyContinue) { Get-PimMailEnvironmentInfo -PortalBase $base } else { @{} }
+        # MAIL-2 item 3: 'PDF attached' -> the print-ready report rides along (an HTML document that prints to PDF with
+        # page numbers, date and tenant -- no PDF renderer ships in the image, PIM §100.5).
+        $att = @()
+        $prefs = if (Get-Command Get-PimMailNotificationPrefsFromStore -ErrorAction SilentlyContinue) { Get-PimMailNotificationPrefsFromStore } else { $null }
+        if ($prefs -and "$($prefs.reports['daily-summary'].attach)" -eq 'pdf') {
+            $doc = ConvertTo-PimDailyChangesHtml -Report $rep -Audience 'manager' -PortalBase $base -Environment $envI -Print
+            $att = @(@{ name = ('daily-changes-{0}.html' -f $now.ToUniversalTime().ToString('yyyy-MM-dd')); contentType = 'text/html'; bytes = [System.Text.Encoding]::UTF8.GetBytes($doc) })
+        }
+        $dcRep = $rep; $dcTl = $tl; $dcBase = $base; $dcEnv = $envI
+        # no GetNewClosure: a closure is bound to a new module scope and cannot see functions loaded into PIM-Functions.psm1;
+        # the block runs inside Send-PimDigestJobMail, which this handler calls, so the dc* variables resolve by scope.
+        $tfa = { param($aud) ConvertTo-PimDailyChangesTokens -Report $dcRep -TenantLabel $dcTl -Audience $aud -PortalBase $dcBase -Environment $dcEnv }
+        return (Send-PimDigestJobMail -Type 'daily-summary' -WhatIf:$whatIf -Result $sum -Tokens (& $tfa 'manager') -TokensForAudience $tfa -Attachments $att `
+                    -What ("changes={0} risky={1} people={2} (admins={3} delegations={4} removals={5}; {6} audit event(s) from {7})" -f $rep.total, @($rep.risky).Count, $rep.actorCount, @($sum.admins).Count, @($sum.delegations).Count, @($sum.removals).Count, @($src.events).Count, $src.source))
+    }
+    # The daily job also carries MAIL-2 item 8, the Get Started reminder (PIM-GetStartedReminder.ps1): once a day while a
+    # REQUIRED step is open. It runs whether or not there were changes, and its outcome is added to the run's detail.
+    Register-PimJobHandler -Type 'daily-summary' -Handler {
+        param($job,$now,$whatIf)
+        $gsr = $null
+        if (Get-Command Invoke-PimGetStartedReminder -ErrorAction SilentlyContinue) {
+            try { $gsr = Invoke-PimGetStartedReminder -NowUtc $now -WhatIf:([bool]$whatIf) } catch { $gsr = [pscustomobject]@{ sent = 0; detail = "failed: $($_.Exception.Message)" } }
+        }
+        $res = & $script:PimDailySummaryCore $job $now $whatIf
+        if ($gsr -and $res) {
+            $res | Add-Member -NotePropertyName getStartedReminder -NotePropertyValue $gsr -Force
+            $res.detail = "$($res.detail); get-started reminder: $($gsr.detail)"
+        }
+        return $res
     }
     # (2) Tier 0/1 report. 🔴 HOLLOW (found 2026-09-12): it read $global:PIM_TierReportAssignments
     # and $global:PIM_TierReportRecipients, which nothing sets -- "users=0 recipients=0", ran=true.
@@ -1513,8 +1581,23 @@ function Initialize-PimDefaultJobHandlers {
         }
         $rep = @(Get-PimTierZeroOneReport -Assignments $rows)
         $t0 = @($rep | Where-Object { [int]$_.highestTier -eq 0 }).Count
-        return (Send-PimDigestJobMail -Type 'tier-report' -WhatIf:$whatIf -Result $rep `
-                    -Tokens (ConvertTo-PimTierReportTokens -Report $rep -TenantLabel "$($global:PIM_TenantLabel)") `
+        # MAIL-2: the designed report per audience, and the print-ready copy when the report is set to 'PDF attached'.
+        $trTfa = $null; $trAtt = @()
+        if (Get-Command ConvertTo-PimTierReportDesignedTokens -ErrorAction SilentlyContinue) {
+            $trRep = $rep; $trTl = "$($global:PIM_TenantLabel)"; $trNow = $now
+            $trBase = if (Get-Command Get-PimPortalBaseUrl -ErrorAction SilentlyContinue) { Get-PimPortalBaseUrl } else { '' }
+            $trEnv = if (Get-Command Get-PimMailEnvironmentInfo -ErrorAction SilentlyContinue) { Get-PimMailEnvironmentInfo -PortalBase $trBase } else { @{} }
+            $trTfa = { param($aud) ConvertTo-PimTierReportDesignedTokens -Report $trRep -TenantLabel $trTl -Audience $aud -PortalBase $trBase -Environment $trEnv -NowUtc $trNow }
+            $trPrefs = if (Get-Command Get-PimMailNotificationPrefsFromStore -ErrorAction SilentlyContinue) { Get-PimMailNotificationPrefsFromStore } else { $null }
+            if ($trPrefs -and "$($trPrefs.reports['tier-report'].attach)" -eq 'pdf') {
+                $trDoc = (ConvertTo-PimTierReportDesignedTokens -Report $trRep -TenantLabel $trTl -Audience 'manager' -PortalBase $trBase -Environment $trEnv -NowUtc $trNow -Print).ReportHtml
+                $trAtt = @(@{ name = ('tier-report-{0}.html' -f $now.ToUniversalTime().ToString('yyyy-MM-dd')); contentType = 'text/html'; bytes = [System.Text.Encoding]::UTF8.GetBytes($trDoc) })
+            }
+        }
+        $trTokens = if ($trTfa) { & $trTfa 'manager' } else { ConvertTo-PimTierReportTokens -Report $rep -TenantLabel "$($global:PIM_TenantLabel)" }
+        $trArgs = @{}; if ($trTfa) { $trArgs['TokensForAudience'] = $trTfa; $trArgs['Attachments'] = $trAtt }
+        return (Send-PimDigestJobMail -Type 'tier-report' -WhatIf:$whatIf -Result $rep @trArgs `
+                    -Tokens $trTokens `
                     -What ("users={0} (T0={1} T1={2}) from {3}{4}" -f $rep.Count, $t0, ($rep.Count - $t0), $srcTxt, $liveTxt))
     }
     # (4) ServiceNow intake poll -- read the store-and-forward drop store, route each

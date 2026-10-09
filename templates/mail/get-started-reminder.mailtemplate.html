@@ -1,0 +1,12 @@
+<!-- subject: PIM Manager setup is not complete: {{OpenCount}} required Get Started step(s) open -->
+<!-- tokens: ReportHtml, OpenCount, OpenSteps -->
+<!-- GET STARTED REMINDER (MAIL-2 item 8): once a day while a REQUIRED Get Started step is open, to this environment's alert
+     recipients (the installing admin while none are set). {{ReportHtml}} lists the open steps, why each matters, a button to
+     each step and its documentation; skipped and optional steps are listed separately. It stops by itself when every
+     required step is done. To customize: edit it in the Manager (Settings > Mail templates); the edited copy is kept in SQL. -->
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f6f8fa;">
+{{ReportHtml}}
+</body>
+</html>

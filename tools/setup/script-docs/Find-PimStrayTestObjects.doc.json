@@ -1,0 +1,30 @@
+{
+  "script": "Find-PimStrayTestObjects.ps1",
+  "product": "pim",
+  "title": "Find objects left behind by test runs",
+  "purpose": "Finds groups and administrative units left behind by test runs (names starting with a test marker) in a tenant, and reports the directory roles they hold and who are their members and owners. Read-only: it changes nothing.",
+  "whenToRun": "After live test runs against a tenant, or on a schedule (-FailIfFound) as a sweep. It looks OUTSIDE PIM's own filters on purpose: test objects carry a marker prefix that PIM's filters never match, so drift checks cannot see them. Cleanup is a separate, deliberate act.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Find-PimStrayTestObjects.ps1",
+  "runAs": [
+    { "kind": "other", "name": "A Microsoft Graph identity already connected in this PowerShell session (PIM's REST context: tenant, application + certificate, or interactive) with Group.Read.All, AdministrativeUnit.Read.All, RoleManagement.Read.Directory and GroupMember.Read.All -- or a Global Reader / Directory Readers user", "scope": "the tenant", "why": "Lists marker-prefixed groups and administrative units, the directory role assignments, and the members and owners of each group. Read-only; with no tenant context the script scans nothing and says so." }
+  ],
+  "changes": [],
+  "parameters": [
+    { "name": "Marker", "required": false, "default": "PIMCOREENGINE-, PIMTEST-", "help": "Object-name prefix(es) to look for." },
+    { "name": "FailIfFound", "required": false, "default": false, "help": "Exit 3 when anything is found, so a scheduled run surfaces as a failure. Default: exit 0 (report only)." }
+  ],
+  "readsOnly": [
+    "groups whose display name starts with a marker (id, name, created date, role-assignable)",
+    "administrative units whose display name starts with a marker",
+    "directory role assignments (to report the directory role each found group holds)",
+    "members and owners of each found group"
+  ],
+  "network": [
+    "login.microsoftonline.com (token)",
+    "graph.microsoft.com"
+  ],
+  "whatIf": "The script is read-only, so -WhatIf changes nothing about the run: it prints 'What if: this script is read-only ...' and then the same report.",
+  "undo": "Nothing to undo -- the script changes nothing.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Find-PimStrayTestObjects/"
+}
