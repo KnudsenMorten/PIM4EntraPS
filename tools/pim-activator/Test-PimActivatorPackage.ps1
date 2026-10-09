@@ -25,7 +25,10 @@
                  supported sign-in path is still wired).
       NOMULTI    multi-tenant config is policy/catalog driven, never a free-text
                  "add any tenant" entry box (security constraint).
-      BRANDING   required branding strings present (name, attribution footer).
+      BRANDING   name is "PIM Activator", the footer names PIM Manager and links
+                 Support + Invardia (Error), and no shipped file carries legacy
+                 branding (PIM4EntraPS / a personal name / the GitHub repo) except
+                 the fixed update feed (Error).
       NOSECRET   no secrets / tenant ids / subscription ids hard-coded in the
                  shipped extension files.
       HOSTS      manifest host_permissions are EXACTLY the allowed hosts (SEC-38) --
@@ -66,7 +69,7 @@ $script:CanonicalExtensionId = 'eheocihmlppcophaeakmdenhgcookkab'
 #   graph.microsoft.com         PIM eligibility / activation / role reads
 #   management.azure.com        Azure RBAC eligibility / activation
 #   knudsenmorten.github.io/... Diagnostics "Run checks" reads the update feed
-# (window.open to github.com / the logout page and chrome.identity.launchWebAuthFlow
+# (window.open to the support portal / the logout page and chrome.identity.launchWebAuthFlow
 # need no host permission.) Adding a host means adding it HERE, on purpose.
 $script:AllowedHostPermissions = @(
     'https://login.microsoftonline.com/*'
@@ -200,10 +203,26 @@ function Test-PimActivatorPackage {
         & $add (New-Finding -Check 'BRANDING' -Ok $nameOk -Message (Pick $nameOk 'extension name is "PIM Activator".' "extension name is '$($manifest.name)', expected 'PIM Activator'.") -Severity 'Warn')
     }
     if (Test-Path -LiteralPath $popupHtml) {
+        # Owner 2026-10-09: the customer-facing product is PIM Manager (Invardia). The footer names it and links
+        # Support (portal.invardia.com) + Invardia (invardia.com); no person's name, no GitHub link.
         $html2 = Get-Content -LiteralPath $popupHtml -Raw
-        $footerOk = $html2 -match 'aka\.ms/morten'
-        & $add (New-Finding -Check 'BRANDING' -Ok $footerOk -Message (Pick $footerOk 'attribution footer present.' 'attribution footer (aka.ms/morten) missing.') -Severity 'Warn')
+        $footer = [regex]::Match($html2, '(?s)<footer[^>]*id="popup-footer".*?</footer>').Value
+        $footerOk = ($footer -match 'part of\s*<span[^>]*>PIM Manager</span>') -and ($footer -match 'href="https://portal\.invardia\.com"') -and ($footer -match 'href="https://invardia\.com"')
+        & $add (New-Finding -Check 'BRANDING' -Ok $footerOk -Message (Pick $footerOk 'footer names PIM Manager and links Support + Invardia.' 'footer must say "part of PIM Manager" and link https://portal.invardia.com (Support) + https://invardia.com (Invardia).'))
     }
+    # No legacy branding in any shipped extension file. The update feed + its host permission
+    # (knudsenmorten.github.io/PIM4EntraPS/...) is the extension's fixed update_url and is exempt.
+    $legacyHits = New-Object System.Collections.Generic.List[string]
+    foreach ($f in @('popup.js', 'popup-config.js', 'popup-net.js', 'popup-storage.js', 'popup-report.js', 'popup.html', 'background.js', 'version-badge.js', 'manifest.json', 'managed-schema.json')) {
+        $fp = Join-Path $Path $f
+        if (-not (Test-Path -LiteralPath $fp)) { continue }
+        $txt = (Get-Content -LiteralPath $fp -Raw) -replace 'https://knudsenmorten\.github\.io/PIM4EntraPS/', '<update-feed>/'
+        foreach ($rx in @('PIM4EntraPS', 'Morten', 'KnudsenMorten', 'github\.com/KnudsenMorten', '2linkit', 'aka\.ms/morten')) {
+            if ($txt -match $rx) { $legacyHits.Add("$f ($($rx -replace '\\', ''))") }
+        }
+    }
+    $legacyOk = $legacyHits.Count -eq 0
+    & $add (New-Finding -Check 'BRANDING' -Ok $legacyOk -Message (Pick $legacyOk 'no legacy branding (PIM4EntraPS / personal name / GitHub repo) in shipped files.' ("legacy branding in shipped files: " + (($legacyHits | Select-Object -Unique) -join ', '))))
 
     # ---- NOSECRET (shipped extension files only) -----------------------------
     # Real GUID tenant/subscription ids must never be baked into the extension.

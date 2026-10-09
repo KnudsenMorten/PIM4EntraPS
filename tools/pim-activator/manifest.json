@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
   "name": "PIM Activator",
-  "version": "1.6.136",
+  "version": "1.6.137",
   "update_url": "https://knudsenmorten.github.io/PIM4EntraPS/updates.xml",
-  "description": "Bulk-activate your eligible Entra ID, Azure and PIM for Groups (incl. workload RBAC) PIM assignments in one click. Companion to PIM4EntraPS module (https://github.com/KnudsenMorten/PIM4EntraPS)",
-  "author": "Morten Knudsen (Microsoft MVP)",
-  "homepage_url": "https://github.com/KnudsenMorten/PIM4EntraPS",
+  "description": "Bulk-activate your eligible Entra ID, Azure and PIM for Groups (incl. workload RBAC) PIM assignments in one click. Part of PIM Manager by Invardia.",
+  "author": "Invardia",
+  "homepage_url": "https://invardia.com",
   "action": {
     "default_popup": "popup.html",
     "default_title": "PIM Activator",
