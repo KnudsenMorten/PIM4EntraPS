@@ -833,15 +833,22 @@ function Get-PimGroupActivityFromTenant {
     $batched = @{}
     if ($tagged.Count -and (Get-Command Invoke-PimGraphBatchGet -ErrorAction SilentlyContinue)) {
         $res = @(Invoke-PimGraphBatchGet -Paths @($tagged | ForEach-Object { "/identityGovernance/privilegedAccess/group/assignmentScheduleRequests?`$filter=groupId eq '$_'&`$select=action,status,createdDateTime" }))
-        $bad = @()
+        $bad = @(); $transient = 0
         for ($i = 0; $i -lt $tagged.Count; $i++) {
             $r = $res[$i]
             if ($r -and $r.ok) { $batched[$tagged[$i]] = @($r.items); continue }
             $msg = if ($r) { "$($r.error)" } else { 'no answer' }
             if (Test-PimTenantSyncPermissionError -Message $msg) { throw "PERMISSION: PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup is not granted to the engine identity ($msg)" }
+            # 2.4.541 (internal 2026-10-09 20:37): after the batch's retries a throttled read comes back with NO answer (or
+            # status 429/5xx). That is still throttling -- say so, so the refresh keeps the last list (stale) instead of failing.
+            $code = if ($r) { [int]"0$($r.status)" } else { 0 }
+            if (-not $r -or $msg -match '(?i)no answer' -or $code -eq 429 -or $code -ge 500) { $transient++ }
             $bad += "$($tagged[$i]): $msg"
         }
-        if ($bad.Count) { throw ("{0} of {1} group activity read(s) failed: {2}" -f $bad.Count, $tagged.Count, (@($bad | Select-Object -First 3) -join '; ')) }
+        if ($bad.Count) {
+            $what = if ($transient -eq $bad.Count) { 'THROTTLED (HTTP 429) -- ' } else { '' }
+            throw ("{0}{1} of {2} group activity read(s) failed: {3}" -f $what, $bad.Count, $tagged.Count, (@($bad | Select-Object -First 3) -join '; '))
+        }
     }
     foreach ($gid in @($owned.byId.Keys)) {
         $tag = "$($owned.byId[$gid].tag)".Trim(); if (-not $tag) { continue }
