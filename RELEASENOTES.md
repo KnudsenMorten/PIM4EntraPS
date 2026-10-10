@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.560 -- 2026-10-10
+
+- Setup works on non-English Windows: protected working folders use security IDs, not English account names ("identity references could not be translated").
+
 ## 2.4.559 -- 2026-10-10
 
 - Setup: a browser sign-in now shows as waiting in the installation progress, so a sign-in window is never missed.

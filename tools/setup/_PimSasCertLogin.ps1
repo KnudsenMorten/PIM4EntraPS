@@ -44,8 +44,9 @@ function New-PimRestrictedProfileDir {
     New-Item -ItemType Directory -Force -Path $Path | Out-Null
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
     $acl.SetAccessRuleProtection($true, $false)
-    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    foreach ($id in @($me, 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') | Select-Object -Unique) {
+    # SIDs, never names (2026-10-10: on a Danish Windows 'BUILTIN\Administrators' / 'NT AUTHORITY\SYSTEM' do not exist --
+    # 'Some or all identity references could not be translated' stopped a customer's install): current user, SYSTEM, Administrators.
+    foreach ($id in @([System.Security.Principal.WindowsIdentity]::GetCurrent().User, (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')), (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')))) {
         $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
     }
     Set-Acl -Path $Path -AclObject $acl
