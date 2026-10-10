@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.561 -- 2026-10-10
+
+- Managed-tenant install: a failed step now reports its real error in the installation progress.
+
 ## 2.4.560 -- 2026-10-10
 
 - Setup works on non-English Windows: protected working folders use security IDs, not English account names ("identity references could not be translated").

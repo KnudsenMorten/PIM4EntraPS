@@ -508,8 +508,18 @@ try {
                 }
                 $env:PIM_HANDOFF_TOKENS = ($handoff | ConvertTo-Json -Compress)
             }
-            try { & $exe @childArgs } finally { $env:PIM_HANDOFF_TOKENS = $null }
+            # 2026-10-10: the step's console stays visible AND its last lines are kept, so a failed step's event carries the
+            # real cause (a customer's hosting step failed with only "the step failed" in the progress feed).
+            $stepLines = New-Object System.Collections.Generic.List[string]
+            try { & $exe @childArgs 2>&1 | ForEach-Object { $l = "$_"; $stepLines.Add($l); if ($stepLines.Count -gt 60) { $stepLines.RemoveAt(0) }; $_ } | Out-Host }
+            finally { $env:PIM_HANDOFF_TOKENS = $null }
             $ok = ($LASTEXITCODE -eq 0)
+            if (-not $ok) {
+                $errL = @($stepLines | Where-Object { $_ -match '(?i)\b(error|failed|threw|refused|exception|denied|forbidden|HTTP [45]\d\d)\b' } | Select-Object -Last 4)
+                if (-not $errL.Count) { $errL = @($stepLines | Where-Object { "$_".Trim() } | Select-Object -Last 3) }
+                $script:PimMspFailMessage = (("$($s.id): " + (($errL | ForEach-Object { "$_".Trim() }) -join ' | ')) -replace '\s+', ' ')
+                if ($script:PimMspFailMessage.Length -gt 900) { $script:PimMspFailMessage = $script:PimMspFailMessage.Substring(0, 900) + ' ...' }
+            }
             Remove-Item -LiteralPath $argsFile -Force -ErrorAction SilentlyContinue   # it may carry a resolved read link
             $output = if ($s.capturesOutput -and (Test-Path -LiteralPath $outFile)) { (Get-Content -LiteralPath $outFile -Raw).Trim() } else { '' }
             Remove-Item -LiteralPath $outFile -Force -ErrorAction SilentlyContinue
