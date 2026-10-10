@@ -13,6 +13,26 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.547 -- 2026-10-10
+
+- Existing installations converge to new install defaults on update (alert recipients, engine start wiring, role checks).
+
+## 2.4.547
+
+- **Existing installations now get today's install defaults on their next update, not only new ones.** The nightly update
+  checks the settings a new installation is given and brings an older installation to the same state, without changing
+  anything you chose yourself:
+  - **Alert recipients:** an installation whose alert recipient list is empty now gets its SuperAdmins' mailboxes, as a new
+    installation does. A list you set is never replaced. When the update cannot look up the mailboxes, it says so in its log
+    and points to Settings > Alerting > Recipients.
+  - **Start the engine right after a commit:** when PIM Manager already has the right to start the engine job, the update
+    switches on the immediate start, as the hosting setup does. A value you set yourself is kept.
+  - **Access the installation grants itself:** the update now checks PIM Manager's read access to its own resource group,
+    its right to start the engine job, and the engine job's read access to itself. The update may not grant access itself,
+    so a missing one is one line in the update log that names the setup script that grants it.
+  - **Installations running ahead of their update ring** now get the engine sizing, the database size rule and the checks
+    above on every update too. Before, they skipped them because no new version was due.
+
 ## 2.4.546 -- 2026-10-10
 
 - Status telemetry also reports the number of Entra groups (adoption dashboard).

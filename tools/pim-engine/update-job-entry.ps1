@@ -67,8 +67,83 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateState.ps1')      # §71.43 the SAME run, recorded IN the environment
 . (Join-Path $solRoot 'engine\_shared\PIM-FailureCatalog.ps1')   # 100.31 the OOM code the sizing self-correct reads
 . (Join-Path $solRoot 'engine\_shared\PIM-TenantSizing.ps1')     # 100.31 the tick's size for this tenant + the SQL tier / max size (100.37)
+. (Join-Path $solRoot 'engine\_shared\PIM-ConvergeDefaults.ps1') # 100.40 / framework 12.16 the install defaults an EXISTING install converges to
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
+
+# ---- 100.40 / framework 12.16 CONVERGE-DEFAULTS -- one step, two call sites -----------------------------------------
+# 🔴 A changed install default reaches only NEW installs unless the updater brings the existing ones there (owner
+# 2026-10-09, "important finding"). This is that step: 2a the tick's size + the database tier / max size (100.31 /
+# 100.37), 2d the other install defaults the updater's identity can reach (engine/_shared/PIM-ConvergeDefaults.ps1).
+# Called after the tick roll (step 2a below) AND on the 'ahead' exit -- an environment running ahead of its ring is
+# healthy and must still converge; it used to exit before any of this ran. Never throws, never fails the update.
+function Invoke-PimUpdaterConvergeStep {
+    param([string]$When = 'update')
+    $csSize = $null; try { $csSize = Get-PimSqlConnectionString } catch { $csSize = $null }
+    if (-not "$csSize".Trim()) {
+        # the EFIF/RIDE shape (no PIM_SqlServer on this job): the Manager names the store -- same self-heal as the schema step.
+        try {
+            $heal = Resolve-PimUpdaterStoreSettings -JobServer "$($global:PIM_SqlServer)" -JobDatabase "$($global:PIM_SqlDatabase)" `
+                        -ManagerStore (Get-PimAcaStoreSettings -Resource $app) -ManagerApp $managerApp
+            if ($heal.source -eq 'manager' -and "$($heal.server)".Trim()) {
+                Set-Variable -Name 'PIM_SqlServer' -Scope Global -Value "$($heal.server)"
+                if ("$($heal.database)".Trim()) { Set-Variable -Name 'PIM_SqlDatabase' -Scope Global -Value "$($heal.database)" }
+                try { $csSize = Get-PimSqlConnectionString } catch { $csSize = $null }
+            }
+        } catch { }
+    }
+    $armSeam = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
+    # ---- 2a. 100.31 / framework 12.15 -- THE TICK'S SIZE FOR THIS TENANT, ON EVERY UPDATE -------------------------------
+    # Same rule as the install (engine/_shared/PIM-TenantSizing.ps1): users + groups + service principals by Graph $count,
+    # else the counts recorded on the job; raise only; PIM_Bootstrap_*_Tick on this job wins. SELF-CORRECT: a run that ran
+    # out of memory or hit the time limit since the job was last sized raises it one band and one timeout step (max 6 h).
+    # The pim.Settings database: Basic -> S0 (raise only; owner 2026-10-09: S0 for every install, Pro too; never on a database
+    # tagged pim-sql-tier-pin) and EVERY Standard database gets its 250 GB max size (100.37: a tier raise does not grow it;
+    # an existing DB at 2 GB is fixed HERE, on its next update).
+    try {
+        $runs = @()
+        if ($csSize) {
+            try { $rawRuns = Get-PimSqlSettingRaw -ConnectionString $csSize -Name 'JobRunHistory'; if ("$rawRuns".Trim()) { $tmpRuns = "$rawRuns" | ConvertFrom-Json; if ($tmpRuns -is [string]) { $tmpRuns = $tmpRuns | ConvertFrom-Json }; $runs = @($tmpRuns) } }
+            catch { Say "  sizing: the run history could not be read ($($_.Exception.Message)) -- no self-correct this run" 'Yellow' }
+        }
+        $graphSeam = { param($p) Invoke-PimGraph -Path $p -Headers @{ ConsistencyLevel = 'eventual' } }
+        $envMap = @{}; foreach ($ev in [Environment]::GetEnvironmentVariables().GetEnumerator()) { $envMap["$($ev.Key)"] = "$($ev.Value)" }
+        $stored = $null   # 2.4.544: the counts the tick recorded -- the fallback when this identity's Graph count is refused (403)
+        if ($csSize) { try { $rawC = Get-PimSqlSettingRaw -ConnectionString $csSize -Name 'TenantObjectCounts'; if ("$rawC".Trim()) { $stored = "$rawC" | ConvertFrom-Json; if ($stored -is [string]) { $stored = $stored | ConvertFrom-Json } } } catch { $stored = $null } }
+        $sz = Invoke-PimJobSizingUpdate -SubscriptionId $sub -ResourceGroup $rg -JobName $tickJob -Arm $armSeam -Graph $graphSeam -Runs $runs -Environment $envMap -StoredCounts $stored
+        foreach ($l in @($sz.log)) { Say "  sizing: $l" 'DarkGray' }
+        Say ("sizing: $($sz.detail)") $(if (-not $sz.ok) { 'Yellow' } elseif ($sz.changed) { 'Cyan' } else { 'DarkGray' })
+        $sqlSrv = $(if ("$($env:PIM_SqlServer)".Trim()) { "$($env:PIM_SqlServer)".Trim() } else { "$($global:PIM_SqlServer)".Trim() })
+        $sqlDb = $(if ("$($env:PIM_SqlDatabase)".Trim()) { "$($env:PIM_SqlDatabase)".Trim() } elseif ("$($global:PIM_SqlDatabase)".Trim()) { "$($global:PIM_SqlDatabase)".Trim() } else { 'PimPlatform' })
+        $sqlSz = Invoke-PimSqlTierUpdate -SubscriptionId $sub -Server $sqlSrv -Database $sqlDb -Arm $armSeam
+        Say ("sizing: $($sqlSz.detail)") $(if (-not $sqlSz.ok) { 'Yellow' } elseif ($sqlSz.changed) { 'Cyan' } else { 'DarkGray' })
+    } catch { Say "  sizing skipped: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2d. 100.40 -- THE OTHER INSTALL DEFAULTS (alert recipients, immediate engine start, the install's role checks) ----
+    try {
+        $storeSeam = $null
+        if ("$csSize".Trim()) {
+            $cvCs = "$csSize"
+            $storeSeam = {
+                param($op, $name, $value)
+                switch ($op) {
+                    'get'   { return (Get-PimSqlSetting -ConnectionString $cvCs -Name $name) }
+                    'set'   { Set-PimSqlSetting -ConnectionString $cvCs -Name $name -Value $value; return $null }
+                    'audit' {
+                        $act = if ($value -is [System.Collections.IDictionary] -and $value.Contains('action')) { "$($value['action'])" } elseif ($name -eq 'Alerting') { 'settings.alerting.save' } else { "settings.$name".ToLowerInvariant() }
+                        Write-PimSqlAuditEvent -ConnectionString $cvCs -Actor $selfJob -ActorSource 'update' -Action $act -Target $name -Before $value.before -After $value.after
+                        return $null
+                    }
+                }
+            }
+        }
+        $graphGet = { param($p) Invoke-PimGraph -Path ('/' + "$p".TrimStart('/')) }
+        $cv = Invoke-PimUpdateConvergeDefaults -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -TickJob $tickJob `
+                  -Arm $armSeam -Store $storeSeam -Graph $graphGet -SqlServer "$($global:PIM_SqlServer)" -TenantId "$($env:PIM_TenantId)" `
+                  -AlertRecipientsScript (Join-Path $solRoot 'tools/setup/Set-PimAlertRecipients.ps1')
+        foreach ($l in @($cv.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+        Say ("converge ($When): $($cv.changed) changed, $($cv.warnings) to fix by hand") $(if ($cv.warnings) { 'Yellow' } elseif ($cv.changed) { 'Cyan' } else { 'DarkGray' })
+    } catch { Say "  converge skipped: $($_.Exception.Message)" 'Yellow' }
+}
 
 # 🔴 2026-09-18 (§71.43) -- THE STORE IS NEEDED BEFORE THE FIRST EXIT PATH, NOT ONLY AT THE SCHEMA STEP.
 # Every refusal below (no resource group, a ring with no source, nothing approved, a refused downgrade)
@@ -429,6 +504,9 @@ if ($isAhead) {
     Say "ahead of ring: $ringWord approves $($plan.version); this environment runs $aheadFrom (newer). Nothing to do." 'Green'
     Say '  It is NOT rolled back (an unattended update never goes backward -- BUG-162), and nothing is fetched or built.' 'DarkGray'
     Say "  It takes the ring's next release once that is newer than $aheadFrom." 'DarkGray'
+    # 100.40: no version moves, but the install defaults still converge (sizing, database, 2d) -- an environment kept ahead
+    # of its ring used to exit before any of that ran, so it never got them.
+    Invoke-PimUpdaterConvergeStep -When 'ahead of the ring'
     Send-PimUpdateOutcome -Action 'none' -Outcome 'ahead'
     exit 0
 }
@@ -890,32 +968,11 @@ if ($tickJob) {
     } catch { $jobFailed += $tickJob; Say "  tick job not rolled: $($_.Exception.Message)" 'Yellow' }
 }
 
-# ---- 2a. 100.31 / framework 12.15 -- THE TICK'S SIZE FOR THIS TENANT, ON EVERY UPDATE -----------------------------------
-# Same rule as the install (engine/_shared/PIM-TenantSizing.ps1): users + groups + service principals by Graph $count, else
-# the counts recorded on the job; raise only; PIM_Bootstrap_*_Tick on this job wins. SELF-CORRECT: a run that ran out of
-# memory or hit the time limit since the job was last sized raises it one band and one timeout step (max 6 h). Never fails
-# the update -- a sizing problem is reported, the roll stands.
-# The pim.Settings database: Basic -> S0 (raise only; owner 2026-10-09: S0 for every install, Pro too; never on a database tagged
-# pim-sql-tier-pin) and EVERY Standard database gets its 250 GB max size (100.37: a tier raise does not grow it; an existing
-# DB at 2 GB is fixed HERE, on its next update).
-try {
-    $runs = @()
-    $csSize = $null; try { $csSize = Get-PimSqlConnectionString } catch { $csSize = $null }
-    if ($csSize) {
-        try { $rawRuns = Get-PimSqlSettingRaw -ConnectionString $csSize -Name 'JobRunHistory'; if ("$rawRuns".Trim()) { $tmpRuns = "$rawRuns" | ConvertFrom-Json; if ($tmpRuns -is [string]) { $tmpRuns = $tmpRuns | ConvertFrom-Json }; $runs = @($tmpRuns) } }
-        catch { Say "  sizing: the run history could not be read ($($_.Exception.Message)) -- no self-correct this run" 'Yellow' }
-    }
-    $armSeam = { param($m, $p, $b) if ($null -ne $b) { Invoke-PimArm -Method $m -Path $p -Body $b } else { Invoke-PimArm -Method $m -Path $p } }
-    $graphSeam = { param($p) Invoke-PimGraph -Path $p -Headers @{ ConsistencyLevel = 'eventual' } }
-    $envMap = @{}; foreach ($ev in [Environment]::GetEnvironmentVariables().GetEnumerator()) { $envMap["$($ev.Key)"] = "$($ev.Value)" }
-    $stored = $null   # 2.4.544: the counts the tick recorded -- the fallback when this identity's Graph count is refused (403)
-    if ($csSize) { try { $rawC = Get-PimSqlSettingRaw -ConnectionString $csSize -Name 'TenantObjectCounts'; if ("$rawC".Trim()) { $stored = "$rawC" | ConvertFrom-Json; if ($stored -is [string]) { $stored = $stored | ConvertFrom-Json } } } catch { $stored = $null } }
-    $sz = Invoke-PimJobSizingUpdate -SubscriptionId $sub -ResourceGroup $rg -JobName $tickJob -Arm $armSeam -Graph $graphSeam -Runs $runs -Environment $envMap -StoredCounts $stored
-    foreach ($l in @($sz.log)) { Say "  sizing: $l" 'DarkGray' }
-    Say ("sizing: $($sz.detail)") $(if (-not $sz.ok) { 'Yellow' } elseif ($sz.changed) { 'Cyan' } else { 'DarkGray' })
-    $sqlSz = Invoke-PimSqlTierUpdate -SubscriptionId $sub -Server "$($env:PIM_SqlServer)" -Database $(if ("$($env:PIM_SqlDatabase)".Trim()) { "$($env:PIM_SqlDatabase)".Trim() } else { 'PimPlatform' }) -Arm $armSeam
-    Say ("sizing: $($sqlSz.detail)") $(if (-not $sqlSz.ok) { 'Yellow' } elseif ($sqlSz.changed) { 'Cyan' } else { 'DarkGray' })
-} catch { Say "  sizing skipped: $($_.Exception.Message)" 'Yellow' }
+# ---- 2a + 2d. 100.31 / 100.37 / 100.40 (framework 12.15 + 12.16) -- CONVERGE THE INSTALL DEFAULTS, ON EVERY UPDATE ----
+# The tick's size for this tenant (Invoke-PimJobSizingUpdate with the run history = self-correct), the database tier / max
+# size (Invoke-PimSqlTierUpdate), then the other install defaults (Invoke-PimUpdateConvergeDefaults). ONE function
+# (Invoke-PimUpdaterConvergeStep, top of this file), also run on the 'ahead' exit. Never fails the update.
+Invoke-PimUpdaterConvergeStep -When 'after the roll'
 
 # ---- 2b. §53.5 -- EVERY OTHER JOB IN THIS ENVIRONMENT THAT RUNS THE SAME IMAGE -----------------
 # 🔴 The hardcoded three (Manager, tick, self) left everything else to drift FOREVER. Measured at an

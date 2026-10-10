@@ -48,6 +48,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimSetupShared.ps1')
 . (Join-Path $PSScriptRoot '_PimSetupSql.ps1')
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ConvergeDefaults.ps1')   # 100.40 Set-PimTickJobIdSetting
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 $sub = @('--subscription', $SubscriptionId)
@@ -108,10 +109,18 @@ if (-not $SkipTickStart) {
     $cur = "$(Get-PimSqlSetting -ConnectionString $cs -Name 'SchedulerTickJobId')".Trim().Trim('"')
     if ($cur -eq $tickId) { Note 'already set' }
     elseif ($PSCmdlet.ShouldProcess('SchedulerTickJobId', 'set')) {
-        Set-PimSqlSetting -ConnectionString $cs -Name 'SchedulerTickJobId' -Value $tickId
-        $back = "$(Get-PimSqlSetting -ConnectionString $cs -Name 'SchedulerTickJobId')".Trim().Trim('"')
-        if ($back -ne $tickId) { throw "read-back FAILED: SchedulerTickJobId is '$back'" }
-        Write-PimSetupAudit -ConnectionString $cs -Action 'settings.scheduler.tickjobid' -Target 'SchedulerTickJobId' -Before $cur -After $tickId
+        # 100.40: the ONE write of this setting (engine/_shared/PIM-ConvergeDefaults.ps1) -- the updater's step 2d uses the
+        # same function on an existing install (only when absent). -Overwrite: the install knows the tick it deployed.
+        $tickStore = {
+            param($op, $name, $value)
+            switch ($op) {
+                'get'   { return (Get-PimSqlSetting -ConnectionString $cs -Name $name) }
+                'set'   { Set-PimSqlSetting -ConnectionString $cs -Name $name -Value $value; return $null }
+                'audit' { Write-PimSetupAudit -ConnectionString $cs -Action 'settings.scheduler.tickjobid' -Target $name -Before $value.before -After $value.after; return $null }
+            }
+        }
+        $r = Set-PimTickJobIdSetting -TickJobId $tickId -Store $tickStore -Overwrite
+        if ($r.action -eq 'set' -and $r.after -ne $tickId) { throw "read-back FAILED: SchedulerTickJobId is '$($r.after)'" }
         Note 'set and read back (the Manager starts the tick immediately after a commit)'
     }
 }
