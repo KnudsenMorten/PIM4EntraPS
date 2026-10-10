@@ -62,6 +62,7 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/Rebuild-PimEnvExternal.ps1';                  Standalone = $false }
     @{ Path = 'setup/Remove-PimContainerStack.ps1';                Standalone = $false }
     @{ Path = 'setup/New-PimHostingPrerequisites.ps1';             Standalone = $false }
+    @{ Path = 'setup/Convert-PimToPrivate.ps1';                    Standalone = $false }
 )
 
 function Get-PimScriptDocName {

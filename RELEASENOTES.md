@@ -13,6 +13,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.579 -- 2026-10-10
+
+- Convert a public environment to private with one command (Convert-PimToPrivate.ps1: plan, -Apply, -Resume, stops where your network team acts).
+
+- **Convert a public environment to private with one command.** `Convert-PimToPrivate.ps1` runs the conversion guide's steps in order (safety copy, private registry, remove and redeploy internal-only, check from inside the network, optional custom name, optional private SQL) by calling the existing setup scripts. It shows the full plan first, signs in once for your tenant, remembers its progress so `-Resume` continues after a stop or a failure, and stops with exit code 10 where your network team must act (the hub side of the peering, and the check from inside the network before anything public is closed). Your data is never touched.
 ## 2.4.578 -- 2026-10-10
 
 - Hub owner preparation script without the Azure CLI; custom host name: right DNS zone for nested names, PEM certificates, existing VNet links, -Remove; region step titled Azure services in the chosen region.

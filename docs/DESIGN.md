@@ -3121,6 +3121,19 @@ place:
   managed tenant from a machine-local file of ids and names, on the same container topology.
   *(Retired in v2.4.370: the earlier per-customer MSP setup script, which deployed v1 worker apps
   with a cross-tenant SQL connection string and named rings. The one-shot build replaces it.)*
+- **Convert public to private** — `Convert-PimToPrivate.ps1` (REQUIREMENTS 100.64, built, live proof pending) is one
+  command for the conversion guide. A Container Apps environment's internal/external setting cannot change, so it
+  orchestrates the existing scripts in the guide's order instead of re-implementing them: a safety copy (a capture of the
+  live apps and the keep-list, plus the SQL point-in-time restore point; the run refuses to continue without it), the
+  private registry (prerequisites script with the existing names), then either *Redeploy* (default: remove the Container
+  Apps stack, deploy it again internal-only from the install's saved deploy profile — the route that grants the new
+  identities their Graph permissions, Azure roles and database users in one session) or *Rebuild* (capture, recreate and
+  restore the live apps), the install check from inside the network, an optional custom name and, last, the SQL private
+  endpoint. It plans by default (every child command printed, nothing signed in to), keeps a per-tenant + resource-group
+  state file without secrets so `-Resume` continues after a stop or a failure, and exits 10 at the two points where the
+  customer's network team acts (the hub side of the peering with `-SkipPeering`; the check from inside before any public
+  endpoint is closed). One REST session pinned to the tenant serves every step in the same process; a session of another
+  tenant is refused. No Azure CLI, no PowerShell modules.
 - **Engine app registration** — a REST + certificate installer (no PowerShell Graph/Az
   modules required) that creates/updates the engine app + service principal, issues or
   reuses a self-signed certificate in the machine store, grants the engine Graph roles,
