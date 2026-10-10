@@ -505,6 +505,14 @@ try {
             if ($authMode -eq 'SignedIn') {
                 $handoff = [ordered]@{}
                 foreach ($aud in 'https://graph.microsoft.com', 'https://management.azure.com', 'https://database.windows.net', 'https://vault.azure.net', 'https://storage.azure.com') {
+                    # framework 8.13 (REQ 100.66): when Invardia's bootstrap handed the install its sign-in, the OPTIONAL
+                    # audiences it did not cover (Key Vault, Storage) are minted here only when that needs no browser window
+                    # (a refresh token from an earlier browser sign-in, or the Support-app session) -- a step that needs one
+                    # signs in for it itself, so a build that never touches Key Vault never opens a window for it.
+                    if (($aud -in @('https://vault.azure.net', 'https://storage.azure.com')) -and ($global:PimHandoffTokens -is [hashtable]) -and
+                        -not (Get-PimHandoffToken -Audience $aud -TenantId "$($config.tenantId)") -and
+                        -not (($global:PimInteractiveRefresh -is [hashtable]) -and $global:PimInteractiveRefresh.Count) -and
+                        -not (Get-Command Get-InvardiaSupportToken -ErrorAction SilentlyContinue)) { continue }
                     try { $tk = "$(Get-PimRestToken -Resource $aud -TenantId "$($config.tenantId)")".Trim(); if ($tk) { $handoff[$aud] = $tk } } catch { Write-Verbose "no handed-over token for ${aud}: $($_.Exception.Message)" }
                 }
                 $env:PIM_HANDOFF_TOKENS = ($handoff | ConvertTo-Json -Compress)

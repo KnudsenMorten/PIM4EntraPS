@@ -372,6 +372,143 @@ function Get-PimInteractiveToken {
   return [pscustomobject]@{ token = $r.access_token; expiresUtc = (Get-Date).ToUniversalTime().AddSeconds([int]$r.expires_in - 60) }
 }
 
+# ---- framework 8.13 INSTALL-HANDOFF: one sign-in across Invardia's bootstrap and the product installer ----
+# Invardia's bootstrap (Install-Invardia) signs the person in ONCE (browser PKCE, or the Cloud Shell user token) and, in
+# the SAME process, just before it calls Install-PimManager, sets $env:PIM_HANDOFF_TOKENS =
+#   { "https://management.azure.com/": { "access_token": "...", "expires_on": <epoch seconds> }, "https://graph.microsoft.com/": {...},
+#     "https://database.windows.net/": {...} }
+# ACCESS tokens only (no refresh token crosses the boundary); an audience it could not get is simply absent; it removes
+# the variable in a finally block. Install-PimManager reads it ONCE (Import-PimHandoffTokens), clears it, and keeps only
+# the tokens that pass the checks below in $global:PimHandoffTokens -- memory only, never a file, log, transcript or event.
+# Every check is on the token's OWN claims (no signature check: this is our own process boundary, and the resource still
+# validates the signature on every call).
+#   tid       == the installation's tenant (config.tenantId). A mismatch on ANY audience refuses the WHOLE handoff: the
+#                bootstrap signed in to a different tenant than the answers name, so none of it is trusted.
+#   a USER    the token must be DELEGATED: Entra puts 'scp' only in delegated (user) tokens and 'roles' only (no scp) in
+#                application tokens; 'idtyp' is an OPTIONAL claim, so 'idtyp = app' refuses but its absence proves nothing.
+#                Rule: idtyp is not 'app' AND scp is present AND oid is a GUID. ('roles' beside scp is allowed: a user can
+#                hold app roles.)
+#   expiry    the earlier of expires_on and the JWT's exp must be more than 5 minutes away.
+# A token failing a check (other than the tenant) is refused for ITS audience only; that audience falls back to PIM's own
+# browser sign-in (Get-PimInteractiveToken, pinned to the tenant) when it is first needed, and that sign-in's in-memory
+# refresh token then covers the other audiences PIM needs later.
+
+function Get-PimHandoffAudienceKey {
+  # PURE. The comparison key of an audience: 'https://management.azure.com/' and 'https://management.azure.com' are one.
+  param([string]$Audience)
+  return "$Audience".Trim().TrimEnd('/').ToLowerInvariant()
+}
+
+function ConvertFrom-PimHandoffJwt {
+  # PURE. The payload claims of a JWT, or $null for anything that is not one. Never throws; never returns the token.
+  param([string]$Token)
+  try {
+    $parts = "$Token".Split('.')
+    if ($parts.Count -ne 3 -or -not $parts[1]) { return $null }
+    $p = $parts[1].Replace('-', '+').Replace('_', '/')
+    while ($p.Length % 4) { $p += '=' }
+    $c = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $c -or $c -is [string] -or $c -is [ValueType]) { return $null }
+    return $c
+  } catch { return $null }
+}
+
+function ConvertTo-PimHandoffExpiry {
+  # PURE. expires_on as a bootstrap hands it over -- epoch seconds (number or digit string: the MSAL / managed-identity /
+  # Cloud Shell shape) or a date -- as a UTC [datetime], or $null when it cannot be read.
+  param($Value)
+  if ($null -eq $Value) { return $null }
+  if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+  if ($Value -is [DateTimeOffset]) { return $Value.UtcDateTime }
+  $s = "$Value".Trim()
+  if (-not $s) { return $null }
+  if ($s -match '^\d{9,11}(\.\d+)?$') { try { return [DateTimeOffset]::FromUnixTimeSeconds([long][math]::Floor([double]$s)).UtcDateTime } catch { return $null } }
+  $d = [DateTimeOffset]::MinValue
+  if ([DateTimeOffset]::TryParse($s, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$d)) { return $d.UtcDateTime }
+  return $null
+}
+
+function Test-PimHandoffToken {
+  <#
+    PURE given -NowUtc. Check ONE handed-over access token (see the block above). Returns
+    @{ ok; tenantMismatch; reason; expiresUtc; userName }. The reason never contains token text.
+  #>
+  param([string]$Token, $ExpiresOn, [Parameter(Mandatory)][string]$TenantId, [datetime]$NowUtc = [datetime]::UtcNow, [int]$MinValidityMinutes = 5)
+  $no = { param($why, [bool]$mismatch = $false) @{ ok = $false; tenantMismatch = $mismatch; reason = $why; expiresUtc = $null; userName = '' } }
+  if (-not "$Token".Trim()) { return (& $no 'no access token was handed over') }
+  $c = ConvertFrom-PimHandoffJwt -Token $Token
+  if (-not $c) { return (& $no 'it is not a readable access token') }
+  $want = "$TenantId".Trim().ToLowerInvariant()
+  $tid = "$($c.tid)".Trim().ToLowerInvariant()
+  if (-not $tid) { return (& $no 'it names no tenant (no tid claim)') }
+  if ($tid -ne $want) { return (& $no "it is for tenant $tid, not this installation's tenant $want" $true) }
+  $idtyp = "$($c.idtyp)".Trim().ToLowerInvariant()
+  if ($idtyp -eq 'app' -or -not "$($c.scp)".Trim()) { return (& $no 'it is an application token, not a signed-in user''s (idtyp=app or no delegated scp claim)') }
+  if ("$($c.oid)".Trim() -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { return (& $no 'it carries no user object id (oid)') }
+  $given = ConvertTo-PimHandoffExpiry -Value $ExpiresOn
+  $jwtExp = $null
+  if ("$($c.exp)".Trim() -match '^\d+$') { try { $jwtExp = [DateTimeOffset]::FromUnixTimeSeconds([long]"$($c.exp)".Trim()).UtcDateTime } catch { $jwtExp = $null } }
+  $eff = @(@($given, $jwtExp) | Where-Object { $_ } | Sort-Object) | Select-Object -First 1
+  if (-not $eff) { return (& $no 'it carries no expiry (no expires_on and no exp claim)') }
+  if ($eff -le $NowUtc.ToUniversalTime().AddMinutes($MinValidityMinutes)) {
+    return (& $no ("it expires at {0:yyyy-MM-dd HH:mm} UTC -- less than {1} minutes left" -f $eff, $MinValidityMinutes))
+  }
+  $upn = "$(if ($c.upn) { $c.upn } elseif ($c.unique_name) { $c.unique_name } elseif ($c.preferred_username) { $c.preferred_username } else { '' })".Trim()
+  return @{ ok = $true; tenantMismatch = $false; reason = ''; expiresUtc = $eff; userName = $upn }
+}
+
+function Import-PimHandoffTokens {
+  <#
+    PURE given -NowUtc. Read the bootstrap's PIM_HANDOFF_TOKENS JSON and check every audience against -TenantId.
+    Returns @{ present; refused; reason; accepted = @{ <audience key> = @{ token; expiresUtc } }; fallback = @(@{ audience; reason }) }.
+      refused = a token for ANOTHER tenant was handed over: NOTHING is accepted (reason names the audience and both tenants).
+      fallback = audiences that were handed over but refused (each falls back to the browser sign-in when it is needed).
+    The values in 'accepted' are the only place the tokens go; the caller keeps them in memory and never prints them.
+  #>
+  param([string]$Json, [Parameter(Mandatory)][string]$TenantId, [datetime]$NowUtc = [datetime]::UtcNow)
+  $out = @{ present = $false; refused = $false; reason = ''; accepted = @{}; fallback = @() }
+  if (-not "$Json".Trim()) { return $out }
+  $out.present = $true
+  $o = $null
+  try { $o = $Json | ConvertFrom-Json -ErrorAction Stop } catch { $o = $null }
+  if ($null -eq $o -or $o -is [string] -or $o -is [ValueType] -or $o -is [System.Array]) {
+    $out.fallback = @(@{ audience = '(all)'; reason = 'the handed-over sign-in could not be read (not a JSON object)' })
+    return $out
+  }
+  $mismatch = @()
+  foreach ($p in $o.PSObject.Properties) {
+    $v = $p.Value
+    $tok = ''; $exp = $null
+    if ($v -is [string]) { $tok = $v }
+    elseif ($null -ne $v -and $v.PSObject.Properties['access_token']) { $tok = "$($v.access_token)"; if ($v.PSObject.Properties['expires_on']) { $exp = $v.expires_on } }
+    $t = Test-PimHandoffToken -Token $tok -ExpiresOn $exp -TenantId $TenantId -NowUtc $NowUtc
+    if ($t.tenantMismatch) { $mismatch += "$($p.Name): $($t.reason)" }
+    elseif ($t.ok) { $out.accepted[(Get-PimHandoffAudienceKey $p.Name)] = @{ token = $tok; expiresUtc = $t.expiresUtc; userName = $t.userName } }
+    else { $out.fallback += @{ audience = "$($p.Name)"; reason = $t.reason } }
+    $tok = $null
+  }
+  if ($mismatch.Count) {
+    $out.refused = $true
+    $out.accepted = @{}
+    $out.reason = ('the sign-in handed over by Invardia''s installer is REFUSED as a whole -- ' + ($mismatch -join '; ') +
+                   '. It signed in to a different tenant than the installation answers name; nothing from it is used.')
+  }
+  return $out
+}
+
+function Get-PimHandoffToken {
+  <# The validated handed-over access token for -Audience in -TenantId ($global:PimHandoffTokens, memory only), or '' when
+     there is none, it is for another tenant, or it has under 2 minutes left (then the normal sign-in answers). #>
+  param([string]$Audience, [string]$TenantId)
+  $h = $global:PimHandoffTokens
+  if (-not ($h -is [hashtable]) -or -not ($h.tokens -is [hashtable]) -or -not $h.tokens.Count) { return '' }
+  if (-not "$TenantId".Trim() -or "$($h.tenantId)".Trim().ToLowerInvariant() -ne "$TenantId".Trim().ToLowerInvariant()) { return '' }
+  $e = $h.tokens[(Get-PimHandoffAudienceKey $Audience)]
+  if (-not $e -or -not "$($e.token)".Trim()) { return '' }
+  if ($e.expiresUtc -le [datetime]::UtcNow.AddMinutes(2)) { return '' }
+  return "$($e.token)"
+}
+
 # ---- the one entry point: get a token for a resource ----------------------
 function Get-PimRestToken {
   [CmdletBinding()]
@@ -430,6 +567,15 @@ function Get-PimRestToken {
   if (-not $Force -and $script:PimTokenCache.ContainsKey($key)) {
     $e = $script:PimTokenCache[$key]
     if ($e.expiresUtc -gt (Get-Date).ToUniversalTime().AddMinutes(2)) { return $e.token }
+  }
+
+  # Framework 8.13 INSTALL-HANDOFF (REQ 100.66): the sign-in Invardia's bootstrap handed this process, already validated by
+  # Import-PimHandoffTokens (this tenant, a USER, >5 min left) and held in memory only, answers FIRST for its audiences --
+  # but never for a caller that named an explicit identity, and never for an explicit browser request (-Interactive, which
+  # may need scopes the handed-over token does not carry). An audience it does not cover falls through to the sign-in below.
+  if (-not $explicitIdentity -and -not ($Interactive -or $global:PIM_Interactive)) {
+    $hk = Get-PimHandoffToken -Audience $aud -TenantId $tenant
+    if ($hk) { return $hk }
   }
 
   $res = $null
@@ -497,12 +643,18 @@ function Get-PimRestToken {
   # was requested (the refusal above still throws for one that cannot be honoured).
   # 2026-10-10: a setup step's OWN child processes (e.g. the schema step) inherit PIM_HANDOFF_TOKENS from the build -- answer
   # from it first, so no grandchild process opens a silent browser sign-in.
+  # 8.13: either shape is read -- the build's own (audience -> token string) or the bootstrap's (audience -> {access_token,
+  # expires_on}) -- and a token whose tid is not the requested tenant is never returned (SEC-12).
   if (-not $res -and "$env:PIM_HANDOFF_TOKENS".Trim() -and -not $explicitIdentity) {
     try {
       $ho = "$env:PIM_HANDOFF_TOKENS" | ConvertFrom-Json
       foreach ($pp in $ho.PSObject.Properties) {
-        if ("$($pp.Name)".TrimEnd('/').ToLowerInvariant() -eq "$aud".TrimEnd('/').ToLowerInvariant() -and "$($pp.Value)".Trim()) {
-          return "$($pp.Value)"
+        if ("$($pp.Name)".TrimEnd('/').ToLowerInvariant() -eq "$aud".TrimEnd('/').ToLowerInvariant()) {
+          $hv = if ($pp.Value -is [string]) { "$($pp.Value)" } elseif ($pp.Value -and $pp.Value.PSObject.Properties['access_token']) { "$($pp.Value.access_token)" } else { '' }
+          if (-not "$hv".Trim()) { continue }
+          $hvTid = Get-PimTokenTenantId -Token $hv
+          if ("$tenant".Trim() -and $hvTid -and $hvTid -ne "$tenant".Trim().ToLowerInvariant()) { Write-Verbose "PIM_HANDOFF_TOKENS: the token for $aud is for another tenant -- not used"; continue }
+          return $hv
         }
       }
     } catch { Write-Verbose "PIM_HANDOFF_TOKENS unreadable: $($_.Exception.Message)" }
