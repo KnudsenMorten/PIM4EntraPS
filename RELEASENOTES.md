@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.567 -- 2026-10-10
+
+- Setup resume from a different internet address: the temporary SQL firewall rule moves to the current address.
+
 ## 2.4.566 -- 2026-10-10
 
 - Setup no longer waits for Exchange: if the mail sender cannot be set up yet, it is deferred with a warning and the installation continues.

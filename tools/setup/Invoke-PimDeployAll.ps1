@@ -1604,7 +1604,11 @@ function Open-PimSetupHostWindow {
     $script:PimSetupHostWindow = @{ plan = $p; target = $t; opened = $false }
     if (-not $applicable) { return }
     Info "sql setup-host window: $($p.reason)"
-    if (-not $p.open) { return }
+    # 2026-10-10 (a customer's RESUME hours later from a new public IP: "Client with IP address ... is not allowed"): when the
+    # caller owns the window (-KeepSetupHostRule: the install/MSP build) and the rule already exists, it is OUR window -- move
+    # it to this host's CURRENT address if that changed. A rule someone else owns (no -KeepSetupHostRule) is still left alone.
+    $refresh = (-not $p.open) -and [bool]$ruleIp -and [bool]$KeepSetupHostRule
+    if (-not $p.open -and -not $refresh) { return }
     $ip = "$SetupHostIp".Trim()
     if (-not $ip) {
         # Stated every time: the deploy asks a THIRD-PARTY web service for this host's public address.
@@ -1615,6 +1619,8 @@ function Open-PimSetupHostWindow {
         Warn "sql setup-host window NOT opened: this host's public IP could not be determined ('$ip'). Host-side SQL steps will be refused by the firewall; pass -SetupHostIp."
         return
     }
+    if ($refresh -and $ip -eq $ruleIp) { Info "  'AllowSetupHost' already allows this host ($ip)"; return }
+    if ($refresh) { Info "  this host's public IP changed ($ruleIp -> $ip) -- moving 'AllowSetupHost' to it" }
     try { [void](Set-PimArmSqlFirewallRule -SubscriptionId $t.sub -ResourceGroup $t.rg -Server $t.server -Name AllowSetupHost -StartIp $ip -EndIp $ip) } catch { Write-Verbose "AllowSetupHost write failed: $($_.Exception.Message)" }
     if ((Get-PimSetupHostRuleIp $t) -ne $ip) {
         Warn "sql setup-host window NOT opened: 'AllowSetupHost' for $ip did not read back on $($t.server). Host-side SQL steps will be refused by the firewall."
@@ -1635,7 +1641,7 @@ function Close-PimSetupHostWindow {
     try { [void](Remove-PimArmSqlFirewallRule -SubscriptionId $t.sub -ResourceGroup $t.rg -Server $t.server -Name AllowSetupHost) } catch { Write-Verbose "AllowSetupHost delete failed: $($_.Exception.Message)" }
     if (Get-PimSetupHostRuleIp $t) {
         Warn "sql setup-host window NOT CLOSED: 'AllowSetupHost' is still on $($t.server) -- this host keeps SQL network access until it is removed:"
-        Warn "  az sql server firewall-rule delete --subscription $($t.sub) -g $($t.rg) -s $($t.server) -n AllowSetupHost"
+        Warn "  Azure portal > SQL servers > $($t.server) > Networking > Firewall rules: delete 'AllowSetupHost' (resource group $($t.rg))"
     } else { Info "sql setup-host window CLOSED: 'AllowSetupHost' removed from $($t.server) and read back" }
 }
 
