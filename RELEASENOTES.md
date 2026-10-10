@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.550 -- 2026-10-10
+
+- Guard alerts reach Invardia again: the guard report area is sent in the format Invardia accepts (it refused every guard report before).
+
 ## 2.4.549 -- 2026-10-10
 
 - Setup and install scripts no longer need the Azure CLI for hosting, containers, deploy, Easy Auth, rolling updates and the update / downlink jobs: they talk to Azure directly (browser sign-in, the Invardia Support app, or a certificate).

@@ -119,7 +119,9 @@ function New-PimGuardUplinkRecord {
     $o['GuardId'] = $gid
     $oc = "$($Entry.outcome)".Trim().ToLowerInvariant(); if ($oc -notin $script:PimGuardOutcomes) { $oc = 'warning' }
     $o['GuardOutcome'] = $oc; $o['Severity'] = Get-PimGuardSeverity -Outcome $oc
-    if ("$($Entry.area)".Trim()) { $a = "$($Entry.area)".Trim(); $o['Area'] = $(if ($a.Length -gt 60) { $a.Substring(0, 60) } else { $a }) }
+    # Invardia: Area ^[a-z0-9][a-z0-9.-]{0,59}$ (lower-case) -- 'AdminMembers' / 'GroupsPolicies' were refused with 422 'Area'
+    # (2026-10-10, every guard record since GUARD-1); normalised exactly like Job.
+    $a = ("$($Entry.area)".Trim().ToLowerInvariant() -replace '[^a-z0-9.-]', '-') -replace '^[^a-z0-9]+', ''; if ($a.Length -gt 60) { $a = $a.Substring(0, 60) }; if ($a) { $o['Area'] = $a }
     $j = ("$($Entry.job)".Trim().ToLowerInvariant() -replace '[^a-z0-9.-]', '-') -replace '^[^a-z0-9]+', ''; if ($j.Length -gt 60) { $j = $j.Substring(0, 60) }; if ($j) { $o['Job'] = $j }
     $m = ConvertTo-PimGuardNumbers $Entry.measured; if ($m.Count) { $o['Measured'] = [pscustomobject]$m }
     $t = ConvertTo-PimGuardNumbers $Entry.thresholds; if ($t.Count) { $o['Thresholds'] = [pscustomobject]$t }
