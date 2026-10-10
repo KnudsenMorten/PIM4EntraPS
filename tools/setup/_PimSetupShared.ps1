@@ -7,8 +7,8 @@
 .DESCRIPTION
     Dot-source this from any Setup-Pim*.ps1 / Install-Pim*.ps1 script. It provides:
 
-      * Show-PimSetupBanner       -- SI-parity deploy banner (PowerShell + .NET +
-                                     az CLI + Graph SDK versions printed up front).
+      * Show-PimSetupBanner       -- SI-parity deploy banner (PowerShell + .NET
+                                     versions printed up front; Azure over REST).
       * Get-PimSetupSolutionVersion -- the VERSION file value.
       * Assert-PimSetupRegion     -- region guard: West Europe / Denmark East /
                                      Sweden Central only; France is explicitly
@@ -38,7 +38,8 @@
                                      not a pointer. Pairs with the pure reference
                                      helpers in engine/_shared/PIM-ImageRef.ps1.
 
-    Everything is REST / az-CLI based and PS 5.1-safe (no ?./??, no
+    Everything is ARM / Graph REST (engine/_shared/PIM-ArmSetup.ps1 over PIM-Rest's token client -- no az CLI, 100.41)
+    and PS 5.1-safe (no ?./??, no
     RSA.ImportFromPem, no PS7-only members). No real tenant/subscription/customer
     values are baked in -- callers pass them.
 #>
@@ -58,11 +59,16 @@
 # fix command the Manager's Get Started step shows, so a refused grant reads the same everywhere.
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-PermissionHealth.ps1')
 
-# The guarded `az` shadow. Every script that dot-sources this file is az-driven, so the guard
-# belongs here rather than in each of them: az writes ordinary WARNINGS to stderr, and under
-# $ErrorActionPreference='Stop' PowerShell 5.1 makes any such write terminating. See _PimAz.ps1.
-# 🪤 A script that calls az BEFORE dot-sourcing this file is not covered -- Update-PimContainers,
-# Invoke-PimUpdate and Build-PimManagerImage therefore load _PimAz.ps1 themselves, at the top.
+# REQUIREMENTS 100.41 / framework 12.17 NO-AZ: this file's own Azure calls go over ARM / Graph REST through PIM-Rest's ONE
+# token client (engine/_shared/PIM-ArmSetup.ps1). Loaded only when the caller has not loaded them: dot-sourcing PIM-Rest
+# again would reset its token cache (a browser sign-in the caller already made would be asked for again).
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ArmSetup.ps1') }
+
+# The guarded `az` shadow -- kept ONLY for the setup scripts that still call az themselves (the 100.41 remainder, listed
+# in tests/_shared/no-az-allowlist.json); nothing in THIS file invokes az any more. az writes ordinary WARNINGS to stderr,
+# and under $ErrorActionPreference='Stop' PowerShell 5.1 makes any such write terminating. See _PimAz.ps1.
+# 🪤 A script that calls az BEFORE dot-sourcing this file is not covered -- such scripts load _PimAz.ps1 themselves.
 . (Join-Path $PSScriptRoot '_PimAz.ps1')
 
 # Region allow-list. EU-only hosting. France is REFUSED (data-residency).
@@ -101,12 +107,8 @@ function Show-PimSetupBanner {
     Write-Host ("  PowerShell : {0} ({1})" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition) -ForegroundColor Cyan
     $dotnet = try { [System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription } catch { [System.Environment]::Version.ToString() }
     Write-Host ("  .NET       : {0}" -f $dotnet) -ForegroundColor Cyan
-    $azv = $null
-    try {
-        $azJson = az version -o json 2>$null | ConvertFrom-Json
-        if ($azJson) { $azv = $azJson.'azure-cli' }
-    } catch {}
-    Write-Host ("  az CLI     : {0}" -f $(if ($azv) { "v$azv" } else { 'not found (install Azure CLI)' })) -ForegroundColor Cyan
+    # 100.41: Azure is reached over ARM / Graph REST (PIM-Rest's token client) -- no az CLI to report or require.
+    Write-Host  "  Azure      : ARM / Graph REST (no az CLI, no modules)" -ForegroundColor Cyan
     foreach ($m in @($GraphModules | Where-Object { $_ })) {
         $mod = Get-Module -ListAvailable -Name $m -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
         Write-Host ("  {0,-10}: {1}" -f $m, $(if ($mod) { "v$($mod.Version)" } else { 'not installed' })) -ForegroundColor Cyan
@@ -579,6 +581,23 @@ function Update-PimLauncherIdentityBlock {
     return $out + $begin + $nl + ((@($Lines)) -join $nl) + $nl + $end + $nl
 }
 
+function Get-PimSetupGraphToken {
+    <#
+      100.41 -- a Microsoft Graph token for the SETUP identity, from PIM-Rest's ONE token client (no az), pinned to the
+      target tenant: -ExpectedTenantId, else the tenant -SubscriptionId belongs to (resolved without a token), else the
+      tenant PIM-Rest is already pinned to. '' on failure, the reason in $global:PimSetupGraphTokenError. Never printed.
+    #>
+    param([string]$SubscriptionId, [string]$ExpectedTenantId)
+    $global:PimSetupGraphTokenError = ''
+    $tid = "$ExpectedTenantId".Trim()
+    if (-not $tid -and "$SubscriptionId".Trim() -and (Get-Command Resolve-PimArmSubscriptionTenant -ErrorAction SilentlyContinue)) { $tid = Resolve-PimArmSubscriptionTenant -SubscriptionId "$SubscriptionId".Trim() }
+    $tok = ''
+    try {
+        $tok = if ($tid) { "$(Get-PimRestToken -Resource 'graph' -TenantId $tid)" } else { "$(Get-PimRestToken -Resource 'graph')" }
+    } catch { $global:PimSetupGraphTokenError = "$($_.Exception.Message)"; $tok = '' }
+    return "$tok".Trim()
+}
+
 function Grant-PimMiGraph {
     <#
       BUG-45 -- a DENIED app-role assignment is not a warning, it is a broken deployment.
@@ -610,11 +629,10 @@ function Grant-PimMiGraph {
     # failure; the worst is issuing app-role grants against the wrong directory.
     # 🔑 So: pin the subscription when the caller knows it, and ALWAYS decode the token and assert
     # the tenant before using it. Verification, not hope -- the same rule the engine already follows.
-    $tokArgs = @('account','get-access-token','--resource','https://graph.microsoft.com','-o','json')
-    if ("$SubscriptionId".Trim()) { $tokArgs += @('--subscription', "$SubscriptionId") }
-    $gtokRaw = (& az @tokArgs 2>$null) | ConvertFrom-Json
-    $gtok = "$($gtokRaw.accessToken)"
-    if (-not $gtok) { throw "Grant-PimMiGraph: no Graph token (run 'az login' as a role-assigner)." }
+    # 100.41: the token comes from PIM-Rest's ONE client (no az), pinned to the target tenant -- -ExpectedTenantId, else the
+    # tenant -SubscriptionId belongs to.
+    $gtok = Get-PimSetupGraphToken -SubscriptionId $SubscriptionId -ExpectedTenantId $ExpectedTenantId
+    if (-not $gtok) { throw "Grant-PimMiGraph: no Graph token (sign in as a role-assigner: the setup identity could not get one -- $($global:PimSetupGraphTokenError))." }
     if ("$ExpectedTenantId".Trim()) {
         $seg = $gtok.Split('.')[1].Replace('-','+').Replace('_','/')
         switch ($seg.Length % 4) { 2 { $seg += '==' } 3 { $seg += '=' } }
@@ -622,7 +640,7 @@ function Grant-PimMiGraph {
         try { $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($seg)) | ConvertFrom-Json } catch { }
         if (-not $claims -or "$($claims.tid)" -ne "$ExpectedTenantId") {
             throw ("Grant-PimMiGraph: REFUSING to grant -- the Graph token is for tenant '{0}', expected '{1}'. " -f "$($claims.tid)", "$ExpectedTenantId") +
-                  "Pass -SubscriptionId for the target tenant, or 'az login' to it. (A grant issued against the wrong directory is not recoverable by re-running this.)"
+                  "Pass -SubscriptionId for the target tenant, or sign in to it. (A grant issued against the wrong directory is not recoverable by re-running this.)"
         }
     }
     $gh = @{ Authorization = "Bearer $gtok"; 'Content-Type' = 'application/json' }
@@ -732,19 +750,13 @@ function Resolve-PimMiAppId {
         [scriptblock]$Lookup = {
             param($oid)
             $script:PimMiLookupErr = ''
-            $out = & az ad sp show --id $oid --query appId -o tsv 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                # 🪤 $out IS EMPTY UNDER THE az SHADOW, and the shadow is what every setup script
-                # runs with. _PimAz's Invoke-PimAz splits stderr out of its return value (that is
-                # how it stays quiet on success), so `2>&1` here captures nothing and this variable
-                # stayed '' -- which made the refusal check below dead code for exactly the case it
-                # was written for. $global:PimAzLastError is the shadow's published failure text;
-                # $out remains the fallback for a real, unshadowed az.
-                $script:PimMiLookupErr = (@($out) -join ' ').Trim()
-                if (-not $script:PimMiLookupErr) { $script:PimMiLookupErr = "$($global:PimAzLastError)".Trim() }
-                return ''
-            }
-            "$out".Trim()
+            # 100.41: Microsoft Graph over REST (Get-PimGraphServicePrincipal: by appId, then by object id -- what
+            # `az ad sp show --id` did). Not found yet = '' (a replication delay); a REFUSAL throws, and its text is kept
+            # so the check below can tell the two apart (the error text was the whole point of BUG-131).
+            $sp = $null
+            try { $sp = Get-PimGraphServicePrincipal -Id $oid } catch { $script:PimMiLookupErr = "$($_.Exception.Message)".Trim(); return '' }
+            if (-not $sp) { return '' }
+            "$($sp.appId)".Trim()
         },
         [scriptblock]$Sleep  = { param($sec) Start-Sleep -Seconds $sec }
     )
@@ -810,19 +822,20 @@ function Resolve-PimAcrImageDigest {
         [string]$SubscriptionId = $(if ($env:PIM_SUBSCRIPTION_ID) { $env:PIM_SUBSCRIPTION_ID } else { '' })
     )
     $ref = "$Repository`:$Tag"
-    # `az acr manifest show-metadata` is the current command; `az acr repository show` is the
-    # older one that still ships. Try both before concluding the tag is absent -- an az version
-    # difference must not read as "the image was never built".
-    # 🔴 IMP-49 o -- $digest WAS NEVER INITIALISED, and the show-metadata half this comment promises was missing. PowerShell
-    # scoping is DYNAMIC: an unset local reads the CALLER's variable of the same name, so a deploy script that already held
-    # a `$digest` (say, the previous image's) had it tested here, found well-formed, and RETURNED -- the registry was never
-    # asked, and the deploy wrote the wrong image's digest. Start empty; ask the registry, both commands.
+    # 100.41: the registry's own data plane over REST (Get-PimAcrImageDigest: /acr/v1/<repo>/_tags/<tag>, the call
+    # `az acr repository show --image` made), the AAD token from PIM-Rest's ONE client. With -SubscriptionId the
+    # registry's login server is read from ARM in THAT subscription (the scoping the az --subscription gave).
+    # 🔴 IMP-49 o -- $digest WAS NEVER INITIALISED. PowerShell scoping is DYNAMIC: an unset local reads the CALLER's
+    # variable of the same name, so a deploy script that already held a `$digest` (say, the previous image's) had it
+    # tested here, found well-formed, and RETURNED -- the registry was never asked, and the deploy wrote the wrong image's
+    # digest. Start empty; ask the registry.
     $digest = ''
-    $acrSubArgs = @(); if ("$SubscriptionId".Trim()) { $acrSubArgs = @('--subscription', "$SubscriptionId".Trim()) }
-    $digest = "$(az acr manifest show-metadata @acrSubArgs -r $AcrName -n $ref --query digest -o tsv --only-show-errors 2>$null)".Trim()
-    if (-not (Test-PimImageDigest -Digest $digest)) {
-        $digest = az acr repository show @acrSubArgs -n $AcrName --image $ref --query digest -o tsv --only-show-errors 2>$null
+    $loginServer = ''
+    if ("$SubscriptionId".Trim()) {
+        $reg = Get-PimArmAcr -SubscriptionId "$SubscriptionId".Trim() -Name $AcrName -ErrorAsNull
+        if ($reg) { $loginServer = "$($reg.properties.loginServer)".Trim() }
     }
+    $digest = Get-PimAcrImageDigest -Registry $AcrName -Repository $Repository -Tag $Tag -LoginServer $loginServer
     $digest = "$digest".Trim()
     if (-not (Test-PimImageDigest -Digest $digest)) {
         throw ("Could not resolve a digest for '$AcrName.azurecr.io/$ref' (got '$digest'). Either the tag " +
@@ -848,12 +861,17 @@ function Set-PimSqlNoAutoPause {
     # Named "...sub..." on purpose: that is this codebase's scoping convention, and the hygiene gate
     # recognises a scoped call by it. A splat called $sa scopes the call correctly and still reads
     # as unscoped to the gate -- correct code that fails its own guard is a guard that gets muted.
-    $subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
-    $delay = az sql db show @subArgs -g $ResourceGroup -s $SqlServerName -n $SqlDatabase --query autoPauseDelay -o tsv 2>$null
+    # 100.41: ARM REST (no az). ARM needs the subscription in the path, so an unscoped call is impossible by construction --
+    # no subscription = nothing readable = the same "could not read" skip the bare az read ended in.
+    $sub = "$SubscriptionId".Trim()
+    $db = $null
+    if ($sub) { $db = Get-PimArmSqlDb -SubscriptionId $sub -ResourceGroup $ResourceGroup -Server $SqlServerName -Name $SqlDatabase -ErrorAsNull }
+    $delay = if ($db -and $null -ne $db.properties.autoPauseDelay) { "$($db.properties.autoPauseDelay)" } else { '' }
     if (-not $delay) { Write-Warning "  could not read autoPauseDelay for $SqlServerName/$SqlDatabase (skip; may be provisioned compute)."; return }
     if ([string]$delay -eq '-1') { Write-Host "  SQL persistent compute already enforced (autoPauseDelay = -1)." -ForegroundColor DarkGray; return }
     if ($PSCmdlet.ShouldProcess("$SqlServerName/$SqlDatabase", 'disable serverless auto-pause (set autoPauseDelay -1)')) {
-        az sql db update @subArgs -g $ResourceGroup -s $SqlServerName -n $SqlDatabase --auto-pause-delay -1 -o none 2>$null
+        try { [void](Set-PimArmSqlDb -SubscriptionId $sub -ResourceGroup $ResourceGroup -Server $SqlServerName -Name $SqlDatabase -Properties @{ autoPauseDelay = -1 }) }
+        catch { Write-Verbose "auto-pause update failed: $($_.Exception.Message)" }
         Write-Host "  SQL auto-pause disabled (autoPauseDelay -1) -- persistent compute enforced." -ForegroundColor Green
     }
 }
@@ -911,11 +929,12 @@ function Set-PimVnetPeering {
     # Read the address spaces so the PURE planner can refuse an overlap by name rather than
     # letting az refuse it with a message that names neither range. Unreadable => $null =>
     # the planner treats overlap as UNKNOWN and proceeds (Azure remains the backstop).
-    $spokeCidr = az network vnet show -g $SpokeResourceGroup -n $SpokeVnetName --subscription $SpokeSubscriptionId `
-                    --query "addressSpace.addressPrefixes[0]" -o tsv --only-show-errors 2>$null
+    # 100.41: ARM REST (Get-PimArmVnet) -- no az.
+    $spokeVnet = Get-PimArmVnet -SubscriptionId $SpokeSubscriptionId -ResourceGroup $SpokeResourceGroup -Name $SpokeVnetName -ErrorAsNull
+    $spokeCidr = if ($spokeVnet) { "$(@($spokeVnet.properties.addressSpace.addressPrefixes)[0])" } else { '' }
     $hubSub    = $(if ("$HubSubscriptionId".Trim()) { $HubSubscriptionId } else { $SpokeSubscriptionId })
-    $hubCidr   = az network vnet show -g $HubResourceGroup -n $HubVnetName --subscription $hubSub `
-                    --query "addressSpace.addressPrefixes[0]" -o tsv --only-show-errors 2>$null
+    $hubVnet   = Get-PimArmVnet -SubscriptionId $hubSub -ResourceGroup $HubResourceGroup -Name $HubVnetName -ErrorAsNull
+    $hubCidr   = if ($hubVnet) { "$(@($hubVnet.properties.addressSpace.addressPrefixes)[0])" } else { '' }
 
     $plan = Get-PimPeeringPlan -SpokeVnetName $SpokeVnetName -SpokeResourceGroup $SpokeResourceGroup `
                 -SpokeSubscriptionId $SpokeSubscriptionId -HubVnetName $HubVnetName `
@@ -925,8 +944,8 @@ function Set-PimVnetPeering {
     Write-Host "    $($plan.reason)" -ForegroundColor DarkGray
 
     foreach ($p in $plan.pairs) {
-        $existing = az network vnet peering show -g $p.resourceGroup --vnet-name $p.vnetName -n $p.name `
-                        --subscription $p.subscriptionId --query "remoteVirtualNetwork.id" -o tsv --only-show-errors 2>$null
+        $peer = Get-PimArmVnetPeering -SubscriptionId $p.subscriptionId -ResourceGroup $p.resourceGroup -VnetName $p.vnetName -Name $p.name -ErrorAsNull
+        $existing = if ($peer) { "$($peer.properties.remoteVirtualNetwork.id)" } else { '' }
         if ("$existing".Trim() -and "$existing".Trim().ToLowerInvariant() -eq $p.remoteVnetId.ToLowerInvariant()) {
             Write-Host "    peering $($p.name): exists" -ForegroundColor DarkGray
         } elseif ($PSCmdlet.ShouldProcess("$($p.vnetName)/$($p.name)", "peer -> $($p.remoteVnetId)")) {
@@ -938,10 +957,11 @@ function Set-PimVnetPeering {
                        "Refusing to leave a peering whose name says one thing and whose target says another -- " +
                        "delete it (az network vnet peering delete -g $($p.resourceGroup) --vnet-name $($p.vnetName) -n $($p.name)) and re-run.")
             }
-            az network vnet peering create -g $p.resourceGroup --vnet-name $p.vnetName -n $p.name `
-                --remote-vnet $p.remoteVnetId --allow-vnet-access --subscription $p.subscriptionId -o none --only-show-errors
-            if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-                $code = $LASTEXITCODE
+            $peerErr = ''
+            try { [void](New-PimArmVnetPeering -SubscriptionId $p.subscriptionId -ResourceGroup $p.resourceGroup -VnetName $p.vnetName -Name $p.name -RemoteVnetId $p.remoteVnetId -AllowVnetAccess $true) }
+            catch { $peerErr = "$($_.Exception.Message)" }
+            if ($peerErr) {
+                $code = $peerErr
                 # §95.2 item 9: the hub usually belongs to another team -- write THEIR script, with the exact names, instead
                 # of leaving a person to work them out from an az error.
                 $prep = ''
@@ -952,7 +972,7 @@ function Set-PimVnetPeering {
                         if ($g.ok) { $prep = Join-Path ([IO.Path]::GetTempPath()) $g.fileName; [IO.File]::WriteAllText($prep, $g.text, (New-Object Text.UTF8Encoding $false)) }
                     } catch { $prep = '' }
                 }
-                throw ("az network vnet peering create failed for '$($p.name)' on $($p.vnetName) (exit $code). Cross-subscription peering needs Network Contributor on BOTH sides." +
+                throw ("VNet peering create failed for '$($p.name)' on $($p.vnetName) ($code). Cross-subscription peering needs Network Contributor on BOTH sides." +
                        $(if ($prep) { " The owner of '$HubVnetName' can create the hub side with the script written to $prep -- then run setup again." } else { '' }))
             }
             Write-Host "    peering $($p.name): created" -ForegroundColor Green
@@ -964,8 +984,8 @@ function Set-PimVnetPeering {
     # peering, and it is indistinguishable from a working one unless you read peeringState.
     $bad = New-Object System.Collections.Generic.List[string]
     foreach ($p in $plan.pairs) {
-        $state = az network vnet peering show -g $p.resourceGroup --vnet-name $p.vnetName -n $p.name `
-                    --subscription $p.subscriptionId --query peeringState -o tsv --only-show-errors 2>$null
+        $peerNow = Get-PimArmVnetPeering -SubscriptionId $p.subscriptionId -ResourceGroup $p.resourceGroup -VnetName $p.vnetName -Name $p.name -ErrorAsNull
+        $state = if ($peerNow) { "$($peerNow.properties.peeringState)" } else { '' }
         Write-Host ("    {0,-40} {1}" -f $p.name, $(if ("$state".Trim()) { "$state".Trim() } else { 'UNREADABLE' })) -ForegroundColor DarkGray
         if ("$state".Trim() -ne 'Connected') { $bad.Add("$($p.name)=$(if ("$state".Trim()) { "$state".Trim() } else { 'unreadable' })") | Out-Null }
     }
@@ -1006,35 +1026,31 @@ function Set-PimPrivateDnsZone {
 
     if (-not $PSCmdlet.ShouldProcess($plan.zoneName, "private DNS zone -> $($plan.staticIp)")) { return }
 
-    az network private-dns zone create -g $ResourceGroup -n $plan.zoneName --subscription $SubscriptionId `
-        -o none --only-show-errors 2>$null | Out-Null
-    $zoneOk = az network private-dns zone show -g $ResourceGroup -n $plan.zoneName --subscription $SubscriptionId `
-                  --query name -o tsv --only-show-errors 2>$null
+    # 100.41: ARM REST (PIM-ArmSetup private-DNS wrappers) -- no az. The create's own failure is not trusted either way:
+    # the zone is READ BACK, as before.
+    try { [void](New-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $plan.zoneName) } catch { Write-Verbose "zone create: $($_.Exception.Message)" }
+    $zoneObj = Get-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $plan.zoneName -ErrorAsNull
+    $zoneOk = if ($zoneObj) { "$($zoneObj.name)" } else { '' }
     if (-not "$zoneOk".Trim()) {
         throw "could not create or read private DNS zone '$($plan.zoneName)' in $ResourceGroup. Without it the Manager FQDN does not resolve for any client."
     }
 
     foreach ($r in $plan.records) {
         # 🔴 READ BEFORE WRITING, and do NOTHING when it already matches.
-        # The write below is delete-then-add, because `add-record` is create-or-append: a re-run
-        # would STACK a second A record rather than replace one whose IP has moved, and only
-        # delete-then-add converges when an ACA environment is recreated with a new static IP.
-        # But on an environment that is ALREADY CORRECT -- which is every idempotent re-deploy,
-        # and the common case -- that same delete would briefly remove the record the Manager is
-        # reached through. A deploy that re-runs cleanly must not blink the name it just published.
-        $have = @(az network private-dns record-set a show -g $ResourceGroup -z $plan.zoneName -n $r.name `
-                      --subscription $SubscriptionId --query "aRecords[].ipv4Address" -o tsv --only-show-errors 2>$null)
-        $have = @($have | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        # The write REPLACES the record set whole (one PUT with exactly this address): the az path needed
+        # delete-then-add because `add-record` is create-or-append and a re-run would STACK a second A record
+        # rather than replace one whose IP has moved. The PUT converges in one call and never leaves the name
+        # without a record. On an environment that is ALREADY CORRECT -- every idempotent re-deploy -- nothing is
+        # written at all: a deploy that re-runs cleanly must not touch the name it just published.
+        $rs = Get-PimArmPrivateDnsARecord -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ZoneName $plan.zoneName -Name $r.name -ErrorAsNull
+        $have = @(@($rs.properties.aRecords) | Where-Object { $_ } | ForEach-Object { "$($_.ipv4Address)".Trim() } | Where-Object { $_ })
         if ($have.Count -eq 1 -and $have[0] -eq $r.ipv4Address) {
             Write-Host ("    A {0,-12} -> {1}   (already correct)" -f $r.name, $r.ipv4Address) -ForegroundColor DarkGray
             continue
         }
         if ($have.Count) { Write-Host ("    A {0,-12} currently {1} -> replacing with {2}" -f $r.name, ($have -join ','), $r.ipv4Address) -ForegroundColor Yellow }
-        az network private-dns record-set a delete -g $ResourceGroup -z $plan.zoneName -n $r.name `
-            --subscription $SubscriptionId --yes -o none --only-show-errors 2>$null | Out-Null
-        az network private-dns record-set a add-record -g $ResourceGroup -z $plan.zoneName -n $r.name `
-            -a $r.ipv4Address --subscription $SubscriptionId -o none --only-show-errors
-        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "could not write A record '$($r.name)' in zone '$($plan.zoneName)' (exit $LASTEXITCODE)." }
+        try { [void](Set-PimArmPrivateDnsARecord -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ZoneName $plan.zoneName -Name $r.name -Ipv4 $r.ipv4Address) }
+        catch { throw "could not write A record '$($r.name)' in zone '$($plan.zoneName)' ($($_.Exception.Message))." }
         Write-Host ("    A {0,-12} -> {1}   ({2})" -f $r.name, $r.ipv4Address, $r.purpose) -ForegroundColor DarkGray
     }
 
@@ -1047,8 +1063,8 @@ function Set-PimPrivateDnsZone {
     # The link NAME is arbitrary metadata; the only thing that decides whether clients on a VNet
     # can resolve the zone is whether SOME link points at that VNet. Probe the capability being
     # used, not the artefact this script happens to name (the BUG-46 lesson).
-    $linkedVnetIds = @(az network private-dns link vnet list -g $ResourceGroup -z $plan.zoneName `
-                          --subscription $SubscriptionId --query "[].virtualNetwork.id" -o tsv --only-show-errors 2>$null)
+    $linkedVnetIds = @(Get-PimArmPrivateDnsLinks -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ZoneName $plan.zoneName -ErrorAsNull |
+                          ForEach-Object { "$($_.properties.virtualNetwork.id)" })
     $linkedVnetIds = @($linkedVnetIds | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ })
     foreach ($l in $plan.links) {
         $want = "$($l.vnetId)".Trim().ToLowerInvariant()
@@ -1056,23 +1072,35 @@ function Set-PimPrivateDnsZone {
             Write-Host "    link -> $(($l.vnetId -split '/')[-1]): already linked" -ForegroundColor DarkGray
             continue
         }
-        az network private-dns link vnet create -g $ResourceGroup -z $plan.zoneName -n $l.name `
-            -v $l.vnetId -e $(if ($l.registrationEnabled) { 'true' } else { 'false' }) `
-            --subscription $SubscriptionId -o none --only-show-errors
-        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-            throw "could not link VNet '$($l.vnetId)' to zone '$($plan.zoneName)' (exit $LASTEXITCODE). Without the link, clients on that VNet cannot resolve the Manager."
+        try { New-PimArmPrivateDnsLink -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ZoneName $plan.zoneName -Name $l.name -VnetId $l.vnetId -RegistrationEnabled ([bool]$l.registrationEnabled) }
+        catch {
+            throw "could not link VNet '$($l.vnetId)' to zone '$($plan.zoneName)' ($($_.Exception.Message)). Without the link, clients on that VNet cannot resolve the Manager."
         }
         Write-Host "    link $($l.name): created" -ForegroundColor Green
     }
 
     # Read back the record that actually matters. A zone with no A records looks like a
     # configured zone right up until the first client resolves NXDOMAIN.
-    $apex = az network private-dns record-set a show -g $ResourceGroup -z $plan.zoneName -n '@' `
-                --subscription $SubscriptionId --query "aRecords[0].ipv4Address" -o tsv --only-show-errors 2>$null
+    $apexRs = Get-PimArmPrivateDnsARecord -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ZoneName $plan.zoneName -Name '@' -ErrorAsNull
+    $apex = if ($apexRs) { "$(@($apexRs.properties.aRecords)[0].ipv4Address)" } else { '' }
     if ("$apex".Trim() -ne $plan.staticIp) {
         throw "private DNS zone '$($plan.zoneName)' apex resolves to '$apex', not $($plan.staticIp). Do NOT assume the records landed."
     }
     Write-Host "    zone verified: $($plan.zoneName) apex -> $apex" -ForegroundColor DarkGray
+}
+
+function Get-PimSetupHeldRole {
+    <#
+      100.41 -- `az role assignment list --assignee P --scope S --role R --query "[0].roleDefinitionName" -o tsv` over ARM
+      REST: -Role when P holds it AT exactly S (az's default: inherited assignments do not count), else ''. Never throws
+      (an unreadable list is "not held", which the callers then try to grant and read back).
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$PrincipalId, [Parameter(Mandatory)][string]$Scope, [Parameter(Mandatory)][string]$Role)
+    try {
+        $hit = @(Get-PimArmRoleAssignments -SubscriptionId $SubscriptionId -PrincipalId $PrincipalId -Scope $Scope -Role $Role) | Select-Object -First 1
+        if ($hit) { return $Role }
+    } catch { Write-Verbose "role assignment list: $($_.Exception.Message)" }
+    return ''
 }
 
 function Grant-PimMiAzureRbac {
@@ -1110,16 +1138,14 @@ function Grant-PimMiAzureRbac {
     $failed = New-Object System.Collections.Generic.List[string]
     $granted = 0
     foreach ($a in $plan.assignments) {
-        $have = az role assignment list --subscription $SubscriptionId --assignee $a.principalId --scope $a.scope --role $a.role `
-                    --query "[0].roleDefinitionName" -o tsv --only-show-errors 2>$null
+        $have = Get-PimSetupHeldRole -SubscriptionId $SubscriptionId -PrincipalId $a.principalId -Scope $a.scope -Role $a.role
         if ("$have".Trim() -eq $a.role) { continue }
         if (-not $PSCmdlet.ShouldProcess("$($a.principalName) @ $($a.scope)", "grant $($a.role)")) { continue }
-        az role assignment create --subscription $SubscriptionId --assignee-object-id $a.principalId --assignee-principal-type ServicePrincipal `
-            --role $a.role --scope $a.scope -o none --only-show-errors 2>$null
-        # Read back rather than trust the exit code: a duplicate assignment exits non-zero
-        # (RoleAssignmentExists) and IS success, and a silent no-op exits zero and is not.
-        $now = az role assignment list --subscription $SubscriptionId --assignee $a.principalId --scope $a.scope --role $a.role `
-                   --query "[0].roleDefinitionName" -o tsv --only-show-errors 2>$null
+        try { [void](New-PimArmRoleAssignment -SubscriptionId $SubscriptionId -PrincipalId $a.principalId -PrincipalType ServicePrincipal -Role $a.role -Scope $a.scope) }
+        catch { Write-Verbose "role assignment create: $($_.Exception.Message)" }
+        # Read back rather than trust the call: a duplicate assignment answers RoleAssignmentExists
+        # and IS success, and a silent no-op answers nothing and is not.
+        $now = Get-PimSetupHeldRole -SubscriptionId $SubscriptionId -PrincipalId $a.principalId -Scope $a.scope -Role $a.role
         if ("$now".Trim() -eq $a.role) { $granted++ }
         else { $failed.Add("$($a.role) @ $($a.scopeKind) $($a.scope)") | Out-Null }
     }
@@ -1172,19 +1198,16 @@ function Grant-PimManagerRgReader {
     $oid = "$MiObjectId".Trim()
     $cmd = "az role assignment create --subscription $SubscriptionId --assignee-object-id $oid --assignee-principal-type ServicePrincipal --role Reader --scope $scope"
     $read = {
-        $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        # the scopes listed, filtered HERE (a JMESPath filter with quotes is fragile through az.cmd): Reader AT the resource group
-        try { $v = @(az role assignment list --subscription $SubscriptionId --assignee $oid --scope $scope --role Reader --query "[].scope" -o tsv --only-show-errors 2>$null) }
-        finally { $ErrorActionPreference = $eap }
-        $global:LASTEXITCODE = 0
-        return [bool](@($v | ForEach-Object { "$_" -split "`r?`n" } | Where-Object { "$_".Trim().TrimEnd('/') -ieq $scope }).Count)
+        # 100.41: ARM REST. The scopes listed, filtered HERE: Reader AT the resource group (a Reader inherited from the
+        # subscription is listed by ARM too and must NOT count as this explicit grant).
+        $v = @()
+        try { $v = @(Get-PimArmRoleAssignments -SubscriptionId $SubscriptionId -PrincipalId $oid -Scope $scope -Role Reader -IncludeInherited | ForEach-Object { "$($_.scope)" }) } catch { $v = @() }
+        return [bool](@($v | Where-Object { "$_".Trim().TrimEnd('/') -ieq $scope }).Count)
     }
     if (& $read) { Write-Host "    Reader for $Name on the resource group ${ResourceGroup}: already assigned" -ForegroundColor DarkGray; return @{ ok = $true; present = $true; created = $false; scope = $scope; reason = 'already assigned' } }
     if (-not $PSCmdlet.ShouldProcess("$Name @ $scope", 'grant Reader (resource group only)')) { return @{ ok = $false; present = $false; created = $false; scope = $scope; reason = 'skipped by ShouldProcess' } }
-    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { az role assignment create --subscription $SubscriptionId --assignee-object-id $oid --assignee-principal-type ServicePrincipal --role Reader --scope $scope -o none --only-show-errors 2>$null }
-    finally { $ErrorActionPreference = $eap }
-    $global:LASTEXITCODE = 0
+    try { [void](New-PimArmRoleAssignment -SubscriptionId $SubscriptionId -PrincipalId $oid -PrincipalType ServicePrincipal -Role Reader -Scope $scope) }
+    catch { Write-Verbose "role assignment create: $($_.Exception.Message)" }
     if (& $read) { Write-Host "    Reader for $Name on the resource group ${ResourceGroup}: assigned and read back" -ForegroundColor DarkGray; return @{ ok = $true; present = $false; created = $true; scope = $scope; reason = 'assigned and read back' } }
     $msg = "Reader for '$Name' ($oid) on the resource group $ResourceGroup was NOT granted (the deploying identity needs User Access Administrator or Owner on the resource group). The Environment report cannot read the architecture until it is. Grant it with: $cmd"
     if ($Required) { throw $msg }
@@ -1234,22 +1257,18 @@ function Grant-PimEngineRootAzureAccess {
         [switch]$IncludeUserAccessAdministrator
     )
     $plan = Get-PimEngineRootAzurePlan -TenantId $TenantId -IncludeUserAccessAdministrator:$IncludeUserAccessAdministrator
-    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'   # native az stderr must not be fatal on 5.1; every call is read back
+    # 100.41: ARM REST (Get-PimSetupHeldRole / New-PimArmRoleAssignment); every grant is read back.
     $rows = New-Object System.Collections.Generic.List[object]
-    try {
-        foreach ($role in $plan.roles) {
-            $have = az role assignment list --subscription $SubscriptionId --assignee $MiObjectId --scope $plan.scope --role $role `
-                        --query "[0].roleDefinitionName" -o tsv --only-show-errors 2>$null
-            if ("$have".Trim() -eq $role) { $rows.Add([pscustomobject]@{ role = $role; state = 'already there' }) | Out-Null; continue }
-            if (-not $PSCmdlet.ShouldProcess("$Name @ $($plan.scope)", "grant $role")) { $rows.Add([pscustomobject]@{ role = $role; state = 'would grant' }) | Out-Null; continue }
-            az role assignment create --subscription $SubscriptionId --assignee-object-id $MiObjectId --assignee-principal-type ServicePrincipal `
-                --role $role --scope $plan.scope -o none --only-show-errors 2>$null
-            # Read back rather than trust the exit code: RoleAssignmentExists exits non-zero and IS success.
-            $now = az role assignment list --subscription $SubscriptionId --assignee $MiObjectId --scope $plan.scope --role $role `
-                       --query "[0].roleDefinitionName" -o tsv --only-show-errors 2>$null
-            $rows.Add([pscustomobject]@{ role = $role; state = $(if ("$now".Trim() -eq $role) { 'granted' } else { 'refused' }) }) | Out-Null
-        }
-    } finally { $ErrorActionPreference = $eap }
+    foreach ($role in $plan.roles) {
+        $have = Get-PimSetupHeldRole -SubscriptionId $SubscriptionId -PrincipalId $MiObjectId -Scope $plan.scope -Role $role
+        if ("$have".Trim() -eq $role) { $rows.Add([pscustomobject]@{ role = $role; state = 'already there' }) | Out-Null; continue }
+        if (-not $PSCmdlet.ShouldProcess("$Name @ $($plan.scope)", "grant $role")) { $rows.Add([pscustomobject]@{ role = $role; state = 'would grant' }) | Out-Null; continue }
+        try { [void](New-PimArmRoleAssignment -SubscriptionId $SubscriptionId -PrincipalId $MiObjectId -PrincipalType ServicePrincipal -Role $role -Scope $plan.scope) }
+        catch { Write-Verbose "role assignment create at the tenant root: $($_.Exception.Message)" }
+        # Read back rather than trust the call: RoleAssignmentExists is success, a silent no-op is not.
+        $now = Get-PimSetupHeldRole -SubscriptionId $SubscriptionId -PrincipalId $MiObjectId -Scope $plan.scope -Role $role
+        $rows.Add([pscustomobject]@{ role = $role; state = $(if ("$now".Trim() -eq $role) { 'granted' } else { 'refused' }) }) | Out-Null
+    }
 
     $refused = @($rows | Where-Object { $_.state -eq 'refused' } | ForEach-Object { $_.role })
     $fix = ''
@@ -1313,19 +1332,17 @@ function Show-PimGsaPrivateLinkGuidance {
 function Get-PimSetupTenantObjectCounts {
     <#
       100.31 / framework 12.15 -- the tenant's users, groups and service principals by Microsoft Graph $count
-      (ConsistencyLevel: eventual), as the INSTALLING identity (its az context, pinned to -SubscriptionId). The token's
-      tenant is asserted against -ExpectedTenantId (BUG-150: the default az context on a host with two logins is another
-      company's tenant). Never throws: Get-PimTenantObjectCounts' @{ ok; Users; Groups; ServicePrincipals; Objects; error }.
+      (ConsistencyLevel: eventual), as the INSTALLING identity (PIM-Rest's token, pinned to the tenant -SubscriptionId
+      belongs to). The token's tenant is asserted against -ExpectedTenantId (BUG-150: a token for the wrong tenant must
+      never be used to count -- or grant). Never throws: Get-PimTenantObjectCounts' @{ ok; Users; Groups; ServicePrincipals; Objects; error }.
       Needs engine/_shared/PIM-TenantSizing.ps1 loaded.
     #>
     param([string]$SubscriptionId, [string]$ExpectedTenantId)
     $none = { param($why) [pscustomobject]@{ ok = $false; Users = $null; Groups = $null; ServicePrincipals = $null; Objects = $null; error = $why } }
-    $tokArgs = @('account', 'get-access-token', '--resource', 'https://graph.microsoft.com', '--query', 'accessToken', '-o', 'tsv')
-    if ("$SubscriptionId".Trim()) { $tokArgs += @('--subscription', "$SubscriptionId") }
-    $tok = ''
-    try { $tok = "$(& az @tokArgs 2>$null)".Trim() } catch { $tok = '' }
-    $global:LASTEXITCODE = 0
-    if (-not $tok) { return (& $none 'no Microsoft Graph token from the az context') }
+    # 100.41: the token from PIM-Rest's ONE client (Get-PimSetupGraphToken, pinned to the tenant -SubscriptionId belongs
+    # to when -ExpectedTenantId is not given) -- no az.
+    $tok = Get-PimSetupGraphToken -SubscriptionId $SubscriptionId -ExpectedTenantId $ExpectedTenantId
+    if (-not $tok) { return (& $none "no Microsoft Graph token for the setup identity ($($global:PimSetupGraphTokenError))") }
     if ("$ExpectedTenantId".Trim()) {
         $tid = ''
         try {

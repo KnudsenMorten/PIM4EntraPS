@@ -141,6 +141,9 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimSqlAdminGroup.ps1')     # the SQL admin group (plan + converge + read-back)
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-TenantSizing.ps1')   # Get-PimSqlTierPlan
+# 100.41 NO-AZ (framework 12.17): every Azure call below is ARM / Graph REST through PIM-Rest's ONE token client.
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-Rest.ps1')
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ArmSetup.ps1')
 
 function Get-PimEffective { param([string]$Override,[string]$Derived)
     if ("$Override".Trim()) { "$Override".Trim() } else { $Derived }
@@ -223,37 +226,45 @@ if ($UseSignedInAccount) {
     $signedIn = Get-PimSignedInIdentity -TenantId $TenantId -SubscriptionId $SubscriptionId
     if (-not $signedIn.ok) { throw "REFUSED: $($signedIn.reason)" }
     Write-Host "  auth         : SIGNED-IN user $($signedIn.userName) ($($signedIn.objectId))" -ForegroundColor DarkGray
+    # The person's own tokens, from PIM-Rest's client (browser sign-in where no session token exists). No app identity.
+    [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId)
 } else {
 if (-not "$AdminAppId".Trim()) { throw 'give -AdminAppId with -AdminCertPem (or -AdminSecret), or -UseSignedInAccount.' }
-# isolated az profile so the shared context on this host is never disturbed
-$cfg = Join-Path ([IO.Path]::GetTempPath()) "azcfg-$Token"
-New-Item -ItemType Directory -Force $cfg | Out-Null
-$env:AZURE_CONFIG_DIR = $cfg
-# Drop the cached token before signing in -- this directory persists between runs, so a permission
-# granted BETWEEN runs is otherwise invisible to the next one and surfaces as "Insufficient
-# privileges" against a permission that is already correct. See the long note at the same point in
-# Setup-PimContainers.ps1; the three sign-ins must not disagree. `az account clear` keeps `config`,
-# so extension.use_dynamic_install survives and an unattended run cannot hang on an install prompt.
-az account clear --only-show-errors 2>&1 | Out-Null
-az config set extension.use_dynamic_install=yes_without_prompt --only-show-errors 2>&1 | Out-Null
+# No az profile, no token cache on disk: PIM-Rest mints every token in THIS process, so a permission granted between two
+# runs always takes effect on the next one (the stale-cached-token trap of the old az sign-in cannot happen here).
 # Exactly one credential. Refusing BOTH is not pedantry: silently preferring one would make a
 # production run that *thought* it was cert-authenticating actually use a secret.
 if ($AdminSecret -and $AdminCertPem) { throw 'pass EITHER -AdminSecret OR -AdminCertPem, not both.' }
 if (-not $AdminSecret -and -not $AdminCertPem) { throw 'one of -AdminSecret / -AdminCertPem is required.' }
-if ($AdminCertPem) {
-    if (-not (Test-Path $AdminCertPem)) { throw "certificate PEM not found: $AdminCertPem" }
-    Write-Host "  auth         : CERTIFICATE ($AdminAppId)" -ForegroundColor DarkGray
-    az login --service-principal -u $AdminAppId --certificate $AdminCertPem --tenant $TenantId --only-show-errors -o none
-} else {
-    Write-Host "  auth         : client secret ($AdminAppId)" -ForegroundColor DarkGray
-    az login --service-principal -u $AdminAppId -p $AdminSecret --tenant $TenantId --only-show-errors -o none
+if ($AdminCertPem -and -not (Test-Path $AdminCertPem)) { throw "certificate PEM not found: $AdminCertPem" }
+try {
+    if ($AdminCertPem) {
+        Write-Host "  auth         : CERTIFICATE ($AdminAppId)" -ForegroundColor DarkGray
+        [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId -ClientId $AdminAppId -CertificatePem $AdminCertPem)
+    } else {
+        Write-Host "  auth         : client secret ($AdminAppId)" -ForegroundColor DarkGray
+        [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret)
+    }
+} catch { throw "sign-in failed for $AdminAppId in ${TenantId}: $($_.Exception.Message)" }
 }
-if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az login failed for $AdminAppId in $TenantId." }
-az account set --subscription $SubscriptionId --only-show-errors
-}
-# Every az call below is scoped explicitly as well: on a host with two logins the default context can
-# change under a long run (another shell's `az account set`), and a bare call then acts in that one.
-$subArgs = @('--subscription', $SubscriptionId)
+# FAIL LOUDLY on a bad sign-in instead of running every step against nothing: the first token is minted HERE, and the
+# subscription must be visible to it (the REST equivalent of the old `az login` exit check + `az account set`).
+$subObj = $null
+try { $subObj = Get-PimArmSubscription -SubscriptionId $SubscriptionId }
+catch { throw "sign-in failed for $(if ($signedIn) { $signedIn.userName } else { $AdminAppId }) in ${TenantId}: $($_.Exception.Message)" }
+if (-not $subObj) { throw "subscription $SubscriptionId is not visible to $(if ($signedIn) { $signedIn.userName } else { $AdminAppId }) in tenant $TenantId -- REFUSING (nothing below could be created)." }
+if ("$($subObj.tenantId)".Trim() -and "$($subObj.tenantId)".Trim() -ine "$TenantId".Trim()) { throw "subscription $SubscriptionId belongs to tenant '$($subObj.tenantId)', not $TenantId -- REFUSING." }
+
+# Graph + ARM callers for the SQL admin group step (_PimSqlAdminGroup.ps1's contract: param($Method, $Path, $Body), throw
+# "<METHOD> <path> -> HTTP <code> : <detail>") -- over the same REST session, never an az context.
+$prereqGraph = { param([string]$Method = 'GET', [string]$Path, [object]$Body)
+    $u = if ($Path -match '^https://') { $Path } else { "https://graph.microsoft.com/v1.0$Path" }
+    Invoke-PimSetupRest -Method $Method -Url $u -Body $Body -Resource 'graph' }
+$prereqArm = { param([string]$Method = 'GET', [string]$Path, [object]$Body)
+    $u = if ($Path -match '^https://') { $Path } else { "https://management.azure.com$Path" }
+    Invoke-PimSetupRest -Method $Method -Url $u -Body $Body -Resource 'arm' }
+# Print a REST failure the way az printed its stderr, and go on (the call sites that ignored az's exit code).
+function Write-PrereqRestNote { param([string]$Text) if ("$Text".Trim()) { Write-Host "    $Text" -ForegroundColor DarkYellow } }
 
 # ---- 1. resource providers --------------------------------------------------
 # A fresh subscription has none of these. Registration is asynchronous, so wait: creating a
@@ -271,19 +282,21 @@ Write-Host "[1] resource providers ..." -ForegroundColor Yellow
 # failed with 409 MissingSubscriptionRegistration at step signingkey -- every provider the build uses is registered HERE.
 $providers = 'Microsoft.App','Microsoft.ContainerRegistry','Microsoft.OperationalInsights','Microsoft.Network','Microsoft.Sql','Microsoft.Storage','Microsoft.KeyVault'
 foreach ($p in $providers) {
-    $state = az provider show @subArgs --namespace $p --query registrationState -o tsv --only-show-errors 2>$null
+    $state = Get-PimArmProviderState -SubscriptionId $SubscriptionId -Namespace $p
     if ($state -ne 'Registered') {
         Write-Host "    registering $p ..."
-        az provider register @subArgs --namespace $p --wait --only-show-errors 2>&1 | Out-Null
+        try { [void](Register-PimArmProvider -SubscriptionId $SubscriptionId -Namespace $p -Wait) } catch { Write-PrereqRestNote $_.Exception.Message }
     }
-    $state = az provider show @subArgs --namespace $p --query registrationState -o tsv --only-show-errors 2>$null
+    $state = Get-PimArmProviderState -SubscriptionId $SubscriptionId -Namespace $p
     Write-Host ("    {0,-32} {1}" -f $p, $state)
     if ($state -ne 'Registered') { throw "provider $p is '$state' -- cannot continue" }
 }
 
 # ---- 2. resource group ------------------------------------------------------
 Write-Host "[2] resource group ..." -ForegroundColor Yellow
-az group create @subArgs -n $rg -l $Location --only-show-errors -o none
+# An existing group keeps its own location (metadata only -- see step 3); a failure is printed and the VNet step below
+# stops the run on a missing group, as before.
+try { [void](Set-PimArmResourceGroup -SubscriptionId $SubscriptionId -Name $rg -Location $Location) } catch { Write-PrereqRestNote $_.Exception.Message }
 Write-Host "    $rg"
 
 # ---- 3. VNet + ACA subnet ---------------------------------------------------
@@ -296,10 +309,10 @@ Write-Host "    $rg"
 # not accepting new customers" -- the exact constraint the -Location default exists to avoid.
 # An RG's location is metadata only, so a swedencentral VNet in a westeurope RG is fine.
 Write-Host "[3] vnet + delegated subnet ..." -ForegroundColor Yellow
-$vnetId = az network vnet show @subArgs -g $rg -n $vnet --query id -o tsv --only-show-errors 2>$null
+$vnetId = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -ErrorAsNull).id)"
 if (-not $vnetId) {
-    az network vnet create @subArgs -g $rg -n $vnet -l $Location --address-prefixes $vnetCidr `
-        --subnet-name $subnet --subnet-prefixes $subnetCidr --only-show-errors -o none
+    try { [void](New-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -Location $Location -AddressPrefixes $vnetCidr -SubnetName $subnet -SubnetPrefix $subnetCidr) }
+    catch { Write-PrereqRestNote $_.Exception.Message }
     # 🔴 STOP HERE IF THE CREATE DID NOT HAPPEN. Measured at a customer 2026-09-11: Azure Policy
     # denied the VNet, the denial was printed -- and the script carried on to `subnet update` and
     # `subnet show` against a VNet that does not exist, finally dying several lines later with
@@ -307,16 +320,17 @@ if (-not $vnetId) {
     # useful line on screen and the crash was the first thing the operator read, so the real cause
     # was above the noise rather than at the point of failure.
     # A create whose result is never read is the unverified-write class this repo keeps finding.
-    $vnetId = az network vnet show @subArgs -g $rg -n $vnet --query id -o tsv --only-show-errors 2>$null
+    $vnetId = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -ErrorAsNull).id)"
     if (-not $vnetId) {
         throw ("the VNet '$vnet' was NOT created in '$rg' -- see the failure printed immediately above " +
                "(an Azure Policy denial names its assignment and the field it evaluated). Nothing further " +
                "can be built on it, so this stops here rather than failing further down on a null.")
     }
 }
-az network vnet subnet update @subArgs -g $rg --vnet-name $vnet -n $subnet `
-    --delegations Microsoft.App/environments --only-show-errors -o none
-$sn = az network vnet subnet show @subArgs -g $rg --vnet-name $vnet -n $subnet --query "{cidr:addressPrefix,deleg:delegations[0].serviceName}" -o tsv --only-show-errors
+try { [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $subnet -Delegation 'Microsoft.App/environments') }
+catch { Write-PrereqRestNote $_.Exception.Message }
+$snObj = Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $subnet -ErrorAsNull
+$sn = if ($snObj) { "$($snObj.properties.addressPrefix)`t$(@($snObj.properties.delegations)[0].properties.serviceName)" } else { '' }
 if (-not "$sn".Trim()) {
     throw ("subnet '$subnet' is missing or not readable in '$vnet'. The ACA environment cannot be " +
            "created without a subnet delegated to Microsoft.App/environments.")
@@ -325,8 +339,8 @@ Write-Host "    $vnet / $subnet -> $sn"
 
 # ---- 4. Log Analytics (ACA requires a workspace) ----------------------------
 Write-Host "[4] log analytics ..." -ForegroundColor Yellow
-az monitor log-analytics workspace create @subArgs -g $rg -n $law -l $Location --only-show-errors -o none 2>$null | Out-Null
-$lawId = az monitor log-analytics workspace show @subArgs -g $rg -n $law --query customerId -o tsv --only-show-errors
+try { [void](New-PimArmLogAnalytics -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $law -Location $Location) } catch { Write-PrereqRestNote $_.Exception.Message }
+$lawId = "$((Get-PimArmLogAnalytics -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $law -ErrorAsNull).properties.customerId)"
 if (-not "$lawId".Trim()) {
     throw ("the Log Analytics workspace '$law' was NOT created in '$rg' -- see the failure printed " +
            "immediately above. The ACA environment cannot be created without a workspace, and " +
@@ -336,7 +350,7 @@ Write-Host "    $law ($lawId)"
 
 # ---- 5. container registry --------------------------------------------------
 Write-Host "[5] container registry ..." -ForegroundColor Yellow
-$acrExisting = az acr show @subArgs -g $rg -n $acr --query sku.name -o tsv --only-show-errors 2>$null
+$acrExisting = "$((Get-PimArmAcr -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $acr -ErrorAsNull).sku.name)"
 if ("$acrExisting".Trim()) {
     Write-Host "    reusing existing registry ($acrExisting)"
     # Upgrade only ever UPWARDS, and only when asked. A downgrade would silently drop private
@@ -344,19 +358,22 @@ if ("$acrExisting".Trim()) {
     $rank = @{ Basic = 1; Standard = 2; Premium = 3 }
     if ($rank[$AcrSku] -gt $rank["$acrExisting".Trim()]) {
         Write-Host "    upgrading $acrExisting -> $AcrSku"
-        az acr update @subArgs -g $rg -n $acr --sku $AcrSku --only-show-errors -o none 2>$null | Out-Null
+        try { [void](Update-PimArmAcr -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $acr -Sku $AcrSku) } catch { Write-Verbose "acr sku update: $($_.Exception.Message)" }
     } elseif ($rank[$AcrSku] -lt $rank["$acrExisting".Trim()]) {
         Write-Warning "    registry is $acrExisting and -AcrSku is $AcrSku -- NOT downgrading (that would drop private endpoints and firewall rules)."
     }
 } else {
-    $acrArgs = @('acr','create','-g',$rg,'-n',$acr,'--sku',$AcrSku,'-l',$Location)
-    # Only pass the flag when the caller chose one: on a tenant with no such policy the ARM default
+    # Only pass the property when the caller chose one: on a tenant with no such policy the ARM default
     # is correct, and passing it explicitly would be a change nobody asked for.
-    if ($AcrPublicAccess -ne 'Default') { $acrArgs += @('--public-network-enabled', $AcrPublicAccess) }
-    az @acrArgs @subArgs --only-show-errors -o none 2>$null | Out-Null
+    $acrProps = @{}
+    if ($AcrPublicAccess -ne 'Default') { $acrProps['publicNetworkAccess'] = $(if ($AcrPublicAccess -eq 'true') { 'Enabled' } else { 'Disabled' }) }
+    # A denied create is printed (a policy denial is summarised) and the read-back below stops the run.
+    try { [void](New-PimArmAcr -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $acr -Location $Location -Sku $AcrSku -Properties $acrProps) }
+    catch { Write-PrereqRestNote $_.Exception.Message }
 }
-$acrLogin = az acr show @subArgs -g $rg -n $acr --query loginServer -o tsv --only-show-errors
-$acrId    = az acr show @subArgs -g $rg -n $acr --query id -o tsv --only-show-errors
+$acrObj   = Get-PimArmAcr -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $acr -ErrorAsNull
+$acrLogin = "$($acrObj.properties.loginServer)"
+$acrId    = "$($acrObj.id)"
 # 🔴 Same unverified-create class as the VNet above: a DENIED create left $acrId null, and the run
 # carried on to the AcrPull role assignment and later to the image build before dying on a null --
 # so the policy denial scrolled past and a null-reference crash was what the operator read.
@@ -385,7 +402,7 @@ if (-not "$acrId".Trim()) {
 if ($AcrPublicAccess -eq 'false') {
     Write-Host "[5a] private endpoint for $acr ..." -ForegroundColor Yellow
     $peSubnet = $PrivateEndpointSubnetName
-    $peSubnetId = az network vnet subnet show @subArgs -g $rg --vnet-name $vnet -n $peSubnet --query id -o tsv --only-show-errors 2>$null
+    $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
     if (-not "$peSubnetId".Trim()) {
         if (-not "$PrivateEndpointSubnetAddressPrefix".Trim()) {
             throw ("-AcrPublicAccess false needs a subnet for the private endpoint, and '$peSubnet' does " +
@@ -394,20 +411,21 @@ if ($AcrPublicAccess -eq 'false') {
                    "-PrivateEndpointSubnetAddressPrefix <cidr inside $vnetCidr> (a /26 is plenty; each " +
                    "endpoint takes one address). Refusing to pick a range inside the customer's VNet.")
         }
-        az network vnet subnet create @subArgs -g $rg --vnet-name $vnet -n $peSubnet `
-            --address-prefixes $PrivateEndpointSubnetAddressPrefix --only-show-errors -o none 2>$null | Out-Null
-        $peSubnetId = az network vnet subnet show @subArgs -g $rg --vnet-name $vnet -n $peSubnet --query id -o tsv --only-show-errors 2>$null
+        try { [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -AddressPrefix $PrivateEndpointSubnetAddressPrefix) }
+        catch { Write-PrereqRestNote $_.Exception.Message }
+        $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
         if (-not "$peSubnetId".Trim()) { throw "could not create the private-endpoint subnet '$peSubnet' ($PrivateEndpointSubnetAddressPrefix) -- see the failure above." }
         Write-Host "    subnet $peSubnet $PrivateEndpointSubnetAddressPrefix"
     } else { Write-Host "    subnet $peSubnet (exists)" }
 
     $peName = "pe-$acr"
-    $peId = az network private-endpoint show @subArgs -g $rg -n $peName --query id -o tsv --only-show-errors 2>$null
+    $peId = "$((Get-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -ErrorAsNull).id)"
     if (-not "$peId".Trim()) {
-        az network private-endpoint create @subArgs -g $rg -n $peName --vnet-name $vnet --subnet $peSubnet `
-            --private-connection-resource-id $acrId --group-id registry --connection-name acr `
-            --only-show-errors -o none 2>$null | Out-Null
-        $peId = az network private-endpoint show @subArgs -g $rg -n $peName --query id -o tsv --only-show-errors 2>$null
+        # A private endpoint lives in its VNet's region (the VNet is pinned to -Location in step 3).
+        $peLoc = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -ErrorAsNull).location)"; if (-not $peLoc) { $peLoc = $Location }
+        try { [void](New-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -Location $peLoc -SubnetId $peSubnetId -TargetResourceId $acrId -GroupId registry -ConnectionName acr) }
+        catch { Write-PrereqRestNote $_.Exception.Message }
+        $peId = "$((Get-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -ErrorAsNull).id)"
         if (-not "$peId".Trim()) { throw "the private endpoint '$peName' was NOT created -- see the failure above. Without it '$acr' is unreachable." }
     }
     Write-Host "    $peName"
@@ -415,18 +433,15 @@ if ($AcrPublicAccess -eq 'false') {
     # The zone lives in the customer's OWN resource group by default -- never in a shared hub RG,
     # which an operator may have no mandate to write into.
     $dnsRg = $(if ("$PrivateDnsResourceGroup".Trim()) { $PrivateDnsResourceGroup } else { $rg })
-    az network private-dns zone create @subArgs -g $dnsRg -n 'privatelink.azurecr.io' --only-show-errors -o none 2>$null | Out-Null
-    $zoneId = az network private-dns zone show @subArgs -g $dnsRg -n 'privatelink.azurecr.io' --query id -o tsv --only-show-errors 2>$null
+    try { [void](New-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg -Name 'privatelink.azurecr.io') } catch { Write-Verbose "zone create: $($_.Exception.Message)" }
+    $zoneId = "$((Get-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg -Name 'privatelink.azurecr.io' -ErrorAsNull).id)"
     if (-not "$zoneId".Trim()) { throw "could not create the 'privatelink.azurecr.io' zone in '$dnsRg' -- the registry name will not resolve." }
-    az network private-dns link vnet create @subArgs -g $dnsRg -z 'privatelink.azurecr.io' -n "link-$vnet" `
-        --virtual-network $(az network vnet show @subArgs -g $rg -n $vnet --query id -o tsv --only-show-errors) `
-        --registration-enabled false --only-show-errors -o none 2>$null | Out-Null
+    try { New-PimArmPrivateDnsLink -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg -ZoneName 'privatelink.azurecr.io' -Name "link-$vnet" -VnetId $vnetId -RegistrationEnabled $false } catch { Write-Verbose "zone link: $($_.Exception.Message)" }
     # 🪤 BOTH records come from the zone group. Hand-built A records routinely miss
     # <name>.<region>.data.azurecr.io, which is where layers move -- giving a login that works and a
     # pull that hangs.
-    az network private-endpoint dns-zone-group create @subArgs -g $rg --endpoint-name $peName -n zg `
-        --private-dns-zone $zoneId --zone-name acr --only-show-errors -o none 2>$null | Out-Null
-    $recs = @(az network private-dns record-set a list @subArgs -g $dnsRg -z 'privatelink.azurecr.io' --query "[].name" -o tsv --only-show-errors 2>$null)
+    try { Set-PimArmPrivateDnsZoneGroup -SubscriptionId $SubscriptionId -ResourceGroup $rg -EndpointName $peName -Name zg -ZoneId $zoneId -ConfigName acr } catch { Write-Verbose "zone group: $($_.Exception.Message)" }
+    $recs = @(Get-PimArmPrivateDnsARecords -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg -ZoneName 'privatelink.azurecr.io' -ErrorAsNull | ForEach-Object { "$($_.name)" } | Where-Object { $_ })
     Write-Host ("    privatelink.azurecr.io in $dnsRg -- {0} record(s): {1}" -f $recs.Count, ($recs -join ', '))
     if ($recs.Count -lt 2) {
         Write-Warning ("    expected TWO records (the registry and its .data endpoint). Only $($recs.Count) " +
@@ -440,13 +455,14 @@ if ($AcrPublicAccess -eq 'false') {
 if ("$AcrAgentPoolName".Trim()) {
     Write-Host "[5c] acr agent pool $AcrAgentPoolName ..." -ForegroundColor Yellow
     if ($AcrSku -ne 'Premium') { throw "-AcrAgentPoolName needs a Premium registry (this one is $AcrSku): agent pools are a Premium feature." }
-    $poolState = az acr agentpool show @subArgs -r $acr -n $AcrAgentPoolName --query provisioningState -o tsv --only-show-errors 2>$null
+    $poolState = "$((Get-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $rg -Registry $acr -Name $AcrAgentPoolName -ErrorAsNull).properties.provisioningState)"
     if (-not "$poolState".Trim()) {
-        $poolSubnetId = az network vnet subnet show @subArgs -g $rg --vnet-name $vnet -n $PrivateEndpointSubnetName --query id -o tsv --only-show-errors 2>$null
-        $poolArgs = @('acr','agentpool','create','-r',$acr,'-n',$AcrAgentPoolName,'--tier',$AcrAgentPoolTier,'--count',"$AcrAgentPoolCount")
-        if ("$poolSubnetId".Trim()) { $poolArgs += @('--subnet-id', $poolSubnetId) }
-        az @poolArgs @subArgs --only-show-errors -o none 2>$null | Out-Null
-        $poolState = az acr agentpool show @subArgs -r $acr -n $AcrAgentPoolName --query provisioningState -o tsv --only-show-errors 2>$null
+        $poolSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $PrivateEndpointSubnetName -ErrorAsNull).id)"
+        # The pool lives in the registry's region (as `acr agentpool create` placed it).
+        $poolLoc = "$($acrObj.location)"; if (-not $poolLoc) { $poolLoc = $Location }
+        try { [void](New-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $rg -Registry $acr -Name $AcrAgentPoolName -Location $poolLoc -Tier $AcrAgentPoolTier -Count $AcrAgentPoolCount -SubnetId $poolSubnetId) }
+        catch { Write-PrereqRestNote $_.Exception.Message }
+        $poolState = "$((Get-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $rg -Registry $acr -Name $AcrAgentPoolName -ErrorAsNull).properties.provisioningState)"
         if (-not "$poolState".Trim()) { throw "the ACR agent pool '$AcrAgentPoolName' was NOT created -- see the failure above. Without it 'az acr build' cannot reach a private registry." }
     }
     Write-Host "    $AcrAgentPoolName ($poolState) -- pass -AcrAgentPool $AcrAgentPoolName to the build"
@@ -466,9 +482,10 @@ Write-Host "    $acr ($acrLogin)"
 # system-assigned identity for SQL + Graph -- this one is for the registry pull ONLY.
 $uami = "id-pim-$Token"
 Write-Host "[5b] pull identity ..." -ForegroundColor Yellow
-az identity create @subArgs -g $rg -n $uami -l $Location --only-show-errors -o none 2>$null | Out-Null
-$uamiId       = az identity show @subArgs -g $rg -n $uami --query id -o tsv --only-show-errors
-$uamiPrincipal= az identity show @subArgs -g $rg -n $uami --query principalId -o tsv --only-show-errors
+try { [void](New-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $uami -Location $Location) } catch { Write-PrereqRestNote $_.Exception.Message }
+$uamiObj      = Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $uami -ErrorAsNull
+$uamiId       = "$($uamiObj.id)"
+$uamiPrincipal= "$($uamiObj.properties.principalId)"
 if (-not "$uamiId".Trim() -or -not "$uamiPrincipal".Trim()) {
     throw ("the pull identity '$uami' was NOT created in '$rg' -- see the failure printed immediately " +
            "above. Every container app pulls its image through this identity, so nothing can start " +
@@ -478,9 +495,10 @@ if (-not "$uamiId".Trim() -or -not "$uamiPrincipal".Trim()) {
 # -and $acrId)` with the result discarded -- so a denied or unauthorised role assignment produced a
 # perfectly green prereq, and the first symptom was every container app failing to pull its image
 # with an authentication error pointing at the registry rather than at the missing grant.
-$raOut = az role assignment create @subArgs --assignee-object-id $uamiPrincipal --assignee-principal-type ServicePrincipal `
-            --role AcrPull --scope $acrId --only-show-errors -o none 2>&1
-if ($LASTEXITCODE -ne 0 -and "$raOut" -notmatch 'already exists|RoleAssignmentExists') {
+$raOut = ''
+try { [void](New-PimArmRoleAssignment -Scope $acrId -PrincipalId $uamiPrincipal -Role AcrPull -PrincipalType ServicePrincipal -SubscriptionId $SubscriptionId) }
+catch { $raOut = "$($_.Exception.Message)" }
+if ($raOut -and "$raOut" -notmatch 'already exists|RoleAssignmentExists') {
     throw ("could not grant AcrPull on '$acr' to '$uami': $raOut`n" +
            "Without it every container app fails to pull its image, and the error names the " +
            "registry rather than this grant.")
@@ -521,7 +539,9 @@ if ($SkipSql) {
     # The takeover therefore happens ONLY where the in-cloud path is the one being used -- i.e.
     # where SQL is private and no deploy host has a route to it.
     $sqlUami = $null; $sqlUamiId = $null; $sqlUamiOid = $null; $sqlUamiCid = $null
-    $spOid  = if ($signedIn) { $signedIn.objectId } else { az ad sp show --id $AdminAppId --query id -o tsv --only-show-errors }
+    $deploySp = if ($signedIn) { $null } else { Get-PimGraphServicePrincipal -Id $AdminAppId -ErrorAsNull }
+    if (-not $signedIn -and -not $deploySp -and "$global:PimSetupRestLastError".Trim()) { Write-PrereqRestNote $global:PimSetupRestLastError }
+    $spOid  = if ($signedIn) { $signedIn.objectId } else { "$($deploySp.id)" }
     $deployWho = if ($signedIn) { "(signed-in user $($signedIn.userName))" } else { "$AdminAppId" }
     # ---- 6a-group. 2026-09-15 -- converge the Entra admin onto the SQL ADMIN GROUP ---------------------
     # 🔑 A single-principal admin could administer the database alone; every other identity that must --
@@ -540,8 +560,9 @@ if ($SkipSql) {
         param([object[]]$ExtraMembers)
         if ($SkipSqlAdminGroup) { $script:sqlAdminGroupSkipped = '-SkipSqlAdminGroup'; return }
         Write-Host "    [6a] sql admin GROUP '$SqlAdminGroupName' ..." -ForegroundColor Yellow
-        $inv = $null
-        try { $inv = New-PimSqlAdminGroupInvokers -SubscriptionId $SubscriptionId -TenantId $TenantId }
+        # The SAME REST session as every other step (no az context): the deploy identity, or the signed-in person.
+        $inv = [pscustomobject]@{ Graph = $prereqGraph; Arm = $prereqArm; TenantId = "$TenantId".Trim().ToLowerInvariant() }
+        try { [void](Get-PimRestToken -Resource 'graph') }
         catch {
             $script:sqlAdminGroupSkipped = "no Graph/ARM token for the group step ($($_.Exception.Message))"
             Write-Warning "the SQL admin group step could not start: $($_.Exception.Message) -- the server keeps its current admin."
@@ -564,15 +585,18 @@ if ($SkipSql) {
     }
     if (-not $SqlPrivateEndpoint) {
         Write-Host "    [6a] sql admin: the DEPLOY SPN at create, then the SQL admin group (external/public SQL)" -ForegroundColor Yellow
-        $spName = if ($signedIn) { $signedIn.userName } else { az ad sp show --id $AdminAppId --query displayName -o tsv --only-show-errors }
-        $sqlId = az sql server show @subArgs -g $rg -n $sqlSrv --query id -o tsv --only-show-errors 2>$null
+        $spName = if ($signedIn) { $signedIn.userName } else { "$($deploySp.displayName)" }
+        $sqlId = "$((Get-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -ErrorAsNull).id)"
         if (-not $sqlId) {
-            az sql server create @subArgs -g $rg -n $sqlSrv -l $Location `
-                --enable-ad-only-auth --external-admin-principal-type $(if ($signedIn) { 'User' } else { 'Application' }) `
-                --external-admin-name $spName --external-admin-sid $spOid --only-show-errors -o none
+            # Entra-only authentication with the deploy identity as the create-time Entra admin (az sql server create
+            # --enable-ad-only-auth --external-admin-*), TLS 1.2 minimum as the CLI set it.
+            $sqlProps = @{ minimalTlsVersion = '1.2'
+                           administrators = @{ administratorType = 'ActiveDirectory'; azureADOnlyAuthentication = $true
+                                               principalType = $(if ($signedIn) { 'User' } else { 'Application' }); login = "$spName"; sid = "$spOid"; tenantId = "$TenantId" } }
             # §94 (live 2026-10-03): 'West Europe is not accepting creation of new SQL servers' for a sponsorship
             # subscription -- the run went on and failed at the admin GROUP, which then took the blame. Stop HERE.
-            if ($LASTEXITCODE) { throw ("could NOT create the SQL server '$sqlSrv' in '$Location' (az exit $LASTEXITCODE -- the az error is printed above; " +
+            try { [void](New-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -Location $Location -Properties $sqlProps) }
+            catch { throw ("could NOT create the SQL server '$sqlSrv' in '$Location' ($($_.Exception.Message); " +
                                         "'RegionDoesNotAllowProvisioning' means the region refuses new SQL servers for this subscription: deploy with another -Location).") }
         }
         # The deploy identity stays able to administer the database through the group -- it is what
@@ -584,10 +608,11 @@ if ($SkipSql) {
 
     $sqlUami = "id-pim-sql-$Token"
     Write-Host "    [6a] sql admin identity $sqlUami (private SQL -- the environment administers itself)" -ForegroundColor Yellow
-    az identity create @subArgs -g $rg -n $sqlUami -l $Location --only-show-errors -o none 2>$null | Out-Null
-    $sqlUamiId   = az identity show @subArgs -g $rg -n $sqlUami --query id -o tsv --only-show-errors 2>$null
-    $sqlUamiOid  = az identity show @subArgs -g $rg -n $sqlUami --query principalId -o tsv --only-show-errors 2>$null
-    $sqlUamiCid  = az identity show @subArgs -g $rg -n $sqlUami --query clientId -o tsv --only-show-errors 2>$null
+    try { [void](New-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlUami -Location $Location) } catch { Write-PrereqRestNote $_.Exception.Message }
+    $sqlUamiObj  = Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlUami -ErrorAsNull
+    $sqlUamiId   = "$($sqlUamiObj.id)"
+    $sqlUamiOid  = "$($sqlUamiObj.properties.principalId)"
+    $sqlUamiCid  = "$($sqlUamiObj.properties.clientId)"
     if (-not "$sqlUamiOid".Trim() -or -not "$sqlUamiCid".Trim()) {
         throw ("the SQL admin identity '$sqlUami' was NOT created in '$rg' -- see the failure above. " +
                "Without it the environment cannot administer its own database and SQL would have to " +
@@ -595,15 +620,16 @@ if ($SkipSql) {
     }
     Write-Host "         principal $sqlUamiOid  client $sqlUamiCid"
 
-    $sqlId = az sql server show @subArgs -g $rg -n $sqlSrv --query id -o tsv --only-show-errors 2>$null
+    $sqlId = "$((Get-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -ErrorAsNull).id)"
     if (-not $sqlId) {
         # 🪤 AZURE SQL ALLOWS EXACTLY ONE ENTRA ADMIN. Naming the identity here means the deploy SPN
         # is NOT an admin -- by design. Everything that administers this database runs inside the
         # VNet on this identity; nothing outside needs, or gets, a way in.
-        az sql server create @subArgs -g $rg -n $sqlSrv -l $Location `
-            --enable-ad-only-auth --external-admin-principal-type Application `
-            --external-admin-name $sqlUami --external-admin-sid $sqlUamiOid --only-show-errors -o none
-        if ($LASTEXITCODE) { throw ("could NOT create the SQL server '$sqlSrv' in '$Location' (az exit $LASTEXITCODE -- the az error is printed above; " +
+        $sqlProps = @{ minimalTlsVersion = '1.2'
+                       administrators = @{ administratorType = 'ActiveDirectory'; azureADOnlyAuthentication = $true
+                                           principalType = 'Application'; login = "$sqlUami"; sid = "$sqlUamiOid"; tenantId = "$TenantId" } }
+        try { [void](New-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -Location $Location -Properties $sqlProps) }
+        catch { throw ("could NOT create the SQL server '$sqlSrv' in '$Location' ($($_.Exception.Message); " +
                                     "'RegionDoesNotAllowProvisioning' means the region refuses new SQL servers for this subscription: deploy with another -Location).") }
     }
     # The SQL identity MUST be a member: the in-cloud bootstrap job administers the database as it.
@@ -611,8 +637,9 @@ if ($SkipSql) {
         [pscustomobject]@{ objectId = "$sqlUamiOid".Trim();    label = "SQL identity $sqlUami" }
         [pscustomobject]@{ objectId = "$uamiPrincipal".Trim(); label = "environment identity $uami" }
         [pscustomobject]@{ objectId = "$spOid".Trim();         label = "deploy identity $deployWho" })
-    $adminNowSid   = "$(az sql server ad-admin list @subArgs -g $rg -s $sqlSrv --query "[0].sid" -o tsv --only-show-errors 2>$null)".Trim()
-    $adminNowLogin = "$(az sql server ad-admin list @subArgs -g $rg -s $sqlSrv --query "[0].login" -o tsv --only-show-errors 2>$null)".Trim()
+    $admin0        = @(Get-PimArmSqlAdmins -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv) | Select-Object -First 1
+    $adminNowSid   = "$($admin0.sid)".Trim()
+    $adminNowLogin = "$($admin0.login)".Trim()
     if ($sqlAdminGroupOk) {
         Write-Host "         Entra admin verified: the SQL admin group '$SqlAdminGroupName' (holds $sqlUami)"
     } elseif ($adminNowLogin -and $adminNowLogin -ieq "$SqlAdminGroupName".Trim()) {
@@ -624,8 +651,8 @@ if ($SkipSql) {
         # Legacy single-principal design (no group rights, or -SkipSqlAdminGroup): the SQL identity is the admin.
         if ($adminNowSid -ne "$sqlUamiOid".Trim()) {
             Write-Host "         moving the Entra admin to $sqlUami (was $adminNowSid)"
-            az sql server ad-admin create @subArgs -g $rg -s $sqlSrv --display-name $sqlUami --object-id $sqlUamiOid --only-show-errors -o none 2>$null | Out-Null
-            $adminNowSid = "$(az sql server ad-admin list @subArgs -g $rg -s $sqlSrv --query "[0].sid" -o tsv --only-show-errors 2>$null)".Trim()
+            try { Set-PimArmSqlAdmin -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Login $sqlUami -ObjectId $sqlUamiOid -TenantId $TenantId } catch { Write-Verbose "ad-admin: $($_.Exception.Message)" }
+            $adminNowSid = "$((@(Get-PimArmSqlAdmins -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv) | Select-Object -First 1).sid)".Trim()
         }
         if ($adminNowSid -ne "$sqlUamiOid".Trim()) {
             throw ("the SQL Entra admin is '$adminNowSid', not '$sqlUamiOid' ($sqlUami) or the SQL admin group. Nothing inside the " +
@@ -639,24 +666,37 @@ if ($SkipSql) {
     # by itself -- an S2 with Basic's 2 GB limit filled up and every write failed "has reached its size quota").
     # Never Basic (owner 2026-10-09: S0 is the minimum): a -SqlServiceObjective Basic is created as S0, and said.
     if ("$SqlServiceObjective" -match '^(?i)basic$') { Write-Warning "    -SqlServiceObjective Basic is below PIM's minimum -- the database is created as S0 (100.37)"; $SqlServiceObjective = 'S0' }
-    $createMax = @(); if ("$SqlServiceObjective" -match '^(?i)S\d+$') { $createMax = @('--max-size', '250GB') }
-    az sql db create @subArgs -g $rg -s $sqlSrv -n $sqlDb --service-objective $SqlServiceObjective @createMax `
-        --tags purpose=automateit estate=$Token --only-show-errors -o none 2>$null | Out-Null
-    # 100.31 / 100.37 -- the create above is a no-op on an EXISTING database, so its tier, max size and tier pin are read
+    # The DTU sku of an objective as ARM takes it (S0..S12 Standard, P1.. Premium, Basic); any other objective by name only.
+    $dbSku = { param([string]$So) $t = if ($So -match '^(?i)S\d+$') { 'Standard' } elseif ($So -match '^(?i)P\d+$') { 'Premium' } elseif ($So -match '^(?i)Basic$') { 'Basic' } else { '' }
+               if ($t) { @{ name = $So; tier = $t } } else { @{ name = $So } } }
+    # The read the plan works from (az sql db show: so / pool / max / tags), $null when the database cannot be read.
+    $readDb = {
+        $d = Get-PimArmSqlDb -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Name $sqlDb -ErrorAsNull
+        if (-not $d) { return $null }
+        [pscustomobject]@{ so = (Resolve-PimSqlServiceObjective -Database $d); pool = $(if ("$($d.properties.elasticPoolId)".Trim()) { ("$($d.properties.elasticPoolId)" -split '/')[-1] } else { '' })
+                           max = $d.properties.maxSizeBytes; tags = $d.tags; status = "$($d.properties.status)" } }
+    $createMax = @{}; if ("$SqlServiceObjective" -match '^(?i)S\d+$') { $createMax = @{ maxSizeBytes = [int64]268435456000 } }   # 250 GB
+    # Created ONLY when absent: an existing database keeps its tier and size here -- the plan below is the one place that
+    # changes them (raise only, never on a pinned database, never lowered).
+    if (-not (& $readDb)) {
+        try { [void](Set-PimArmSqlDb -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Name $sqlDb -Create -Sku (& $dbSku $SqlServiceObjective) -Properties $createMax -Tags @{ purpose = 'automateit'; estate = "$Token" }) }
+        catch { Write-PrereqRestNote $_.Exception.Message }
+    }
+    # 100.31 / 100.37 -- an EXISTING database's tier, max size and tier pin are read
     # back: Basic -> S0 (never on a 'pim-sql-tier-pin' database), every Standard database gets the 250 GB max size
     # (Get-PimSqlTierPlan; never lowered; owner 2026-10-09: PIM's database is S0, Pro too -- no S2 rule).
-    $dbCur = $null
-    try { $dbCur = (az sql db show @subArgs -g $rg -s $sqlSrv -n $sqlDb --query '{so:currentServiceObjectiveName, pool:elasticPoolName, max:maxSizeBytes, tags:tags}' -o json --only-show-errors 2>$null | Out-String) | ConvertFrom-Json } catch { $dbCur = $null }
+    $dbCur = & $readDb
     $dbPin = $null; if ($dbCur -and $dbCur.tags -and $dbCur.tags.PSObject.Properties['pim-sql-tier-pin']) { $dbPin = "$($dbCur.tags.'pim-sql-tier-pin')" }
     $tier = Get-PimSqlTierPlan -Current "$($dbCur.so)" -ElasticPool "$($dbCur.pool)" -CurrentMaxSizeBytes $dbCur.max -Pin $dbPin
     if ($tier.action -eq 'raise' -or $tier.maxSizeAction -eq 'set') {
         Write-Host "    SQL database ${sqlDb}: $($tier.reason)"
-        $updArgs = @()
-        if ($tier.action -eq 'raise') { $updArgs += @('--service-objective', $tier.target) }
-        if ($tier.maxSizeAction -eq 'set') { $updArgs += @('--max-size', '250GB') }
-        az sql db update @subArgs -g $rg -s $sqlSrv -n $sqlDb @updArgs --only-show-errors -o none 2>$null | Out-Null
+        $updSku = $null; $updProps = @{}
+        if ($tier.action -eq 'raise') { $updSku = & $dbSku $tier.target }
+        if ($tier.maxSizeAction -eq 'set') { $updProps['maxSizeBytes'] = [int64]$tier.maxSizeBytes }
+        try { [void](Set-PimArmSqlDb -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Name $sqlDb -Sku $updSku -Properties $updProps) } catch { Write-Verbose "sql db update: $($_.Exception.Message)" }
+        # A GET right after a tier change can answer 404 for a few seconds while the scale runs: read back with a short retry.
         $after = $null
-        try { $after = (az sql db show @subArgs -g $rg -s $sqlSrv -n $sqlDb --query '{so:currentServiceObjectiveName, max:maxSizeBytes}' -o json --only-show-errors 2>$null | Out-String) | ConvertFrom-Json } catch { $after = $null }
+        for ($rb = 0; $rb -lt 6 -and -not $after; $rb++) { $after = & $readDb; if (-not $after) { Start-Sleep -Seconds 10 } }
         $gb = { param($b) if ("$b" -match '^\d+$') { '{0:N0} GB' -f ([int64]$b / 1GB) } else { 'unknown' } }
         Write-Host ("    SQL database {0}: {1}, max size {2} -> {3} (read back)" -f $sqlDb, "$($after.so)", (& $gb $dbCur.max), (& $gb $after.max))
         if ($tier.action -eq 'raise' -and "$($after.so)" -ne $tier.target) { Write-Warning "    the database is '$($after.so)' after the raise to $($tier.target) (a tier change can take minutes; the updater raises it again on its next run)" }
@@ -664,8 +704,7 @@ if ($SkipSql) {
     } else { Write-Host "    SQL database ${sqlDb}: $($tier.reason)" -ForegroundColor DarkGray }
     $global:LASTEXITCODE = 0
     # ACA reaches SQL from inside the VNet; allow Azure services + this host for setup/tests.
-    az sql server firewall-rule create @subArgs -g $rg -s $sqlSrv -n AllowAzureServices `
-        --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0 --only-show-errors -o none 2>$null | Out-Null
+    try { [void](Set-PimArmSqlFirewallRule -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Name AllowAzureServices -StartIp '0.0.0.0' -EndIp '0.0.0.0') } catch { Write-Verbose "firewall AllowAzureServices: $($_.Exception.Message)" }
     try {
         # IMP-49 t: say WHERE the address comes from. It used to ask a third-party web service
         # silently; an operator (or a customer's security review) is entitled to know that.
@@ -676,8 +715,7 @@ if ($SkipSql) {
             Write-Host "    setup host IP: $myIp -- read from https://api.ipify.org (a third-party service; pass -SetupHostIp to skip the lookup)"
         }
         if ($myIp -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { throw "not an IPv4 address: '$myIp'" }
-        az sql server firewall-rule create @subArgs -g $rg -s $sqlSrv -n AllowSetupHost `
-            --start-ip-address $myIp --end-ip-address $myIp --only-show-errors -o none 2>$null | Out-Null
+        try { [void](Set-PimArmSqlFirewallRule -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Name AllowSetupHost -StartIp $myIp -EndIp $myIp) } catch { Write-Verbose "firewall AllowSetupHost: $($_.Exception.Message)" }
         Write-Host ("    'AllowSetupHost' ($myIp) is the SETUP WINDOW for this deploy, not a standing grant: Invoke-PimDeployAll " +
                     "removes it at the end of its run. Standalone, remove it when done: az sql server firewall-rule delete " +
                     "--subscription $SubscriptionId -g $rg -s $sqlSrv -n AllowSetupHost") -ForegroundColor DarkGray
@@ -686,14 +724,14 @@ if ($SkipSql) {
     # an environment that was built before this parameter existed must be able to acquire it by
     # re-running the (idempotent) prereq step rather than by a remembered manual command.
     if ($SqlConnectionPolicy -ne 'Default') {
-        $curPol = az sql server conn-policy show @subArgs -g $rg -s $sqlSrv --query connectionType -o tsv --only-show-errors 2>$null
+        $curPol = Get-PimArmSqlConnectionPolicy -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv
         if ("$curPol".Trim() -ieq $SqlConnectionPolicy) {
             Write-Host "    connection policy already '$SqlConnectionPolicy'"
         } else {
-            az sql server conn-policy update @subArgs -g $rg -s $sqlSrv --connection-type $SqlConnectionPolicy --only-show-errors -o none 2>$null | Out-Null
+            try { Set-PimArmSqlConnectionPolicy -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -ConnectionType $SqlConnectionPolicy } catch { Write-Verbose "conn-policy: $($_.Exception.Message)" }
             # Read it back. A connection policy that silently failed to apply looks identical to one
             # that applied, right up until the first connection hangs behind a firewall.
-            $newPol = az sql server conn-policy show @subArgs -g $rg -s $sqlSrv --query connectionType -o tsv --only-show-errors 2>$null
+            $newPol = Get-PimArmSqlConnectionPolicy -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv
             if ("$newPol".Trim() -ieq $SqlConnectionPolicy) { Write-Host "    connection policy '$curPol' -> '$SqlConnectionPolicy'" }
             else { Write-Warning "    connection policy is still '$newPol', wanted '$SqlConnectionPolicy' -- behind a firewall that allows only 1433, connections will hang after authenticating." }
         }
@@ -707,43 +745,39 @@ if ($SkipSql) {
     if ($SqlPrivateEndpoint) {
         Write-Host "    [6b] private endpoint for $sqlSrv ..." -ForegroundColor Yellow
         $peSubnet = $PrivateEndpointSubnetName
-        $peSubnetId = az network vnet subnet show @subArgs -g $rg --vnet-name $vnet -n $peSubnet --query id -o tsv --only-show-errors 2>$null
+        $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
         if (-not "$peSubnetId".Trim()) {
             if (-not "$PrivateEndpointSubnetAddressPrefix".Trim()) {
                 throw ("-SqlPrivateEndpoint needs a subnet for it, and '$peSubnet' does not exist. The ACA " +
                        "subnet cannot be used (delegated to Microsoft.App/environments). Pass " +
                        "-PrivateEndpointSubnetAddressPrefix <cidr inside $vnetCidr>.")
             }
-            az network vnet subnet create @subArgs -g $rg --vnet-name $vnet -n $peSubnet `
-                --address-prefixes $PrivateEndpointSubnetAddressPrefix --only-show-errors -o none 2>$null | Out-Null
-            $peSubnetId = az network vnet subnet show @subArgs -g $rg --vnet-name $vnet -n $peSubnet --query id -o tsv --only-show-errors 2>$null
+            try { [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -AddressPrefix $PrivateEndpointSubnetAddressPrefix) } catch { Write-Verbose "pe subnet: $($_.Exception.Message)" }
+            $peSubnetId = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $peSubnet -ErrorAsNull).id)"
             if (-not "$peSubnetId".Trim()) { throw "could not create the private-endpoint subnet '$peSubnet'." }
         }
-        $sqlSrvId = az sql server show @subArgs -g $rg -n $sqlSrv --query id -o tsv --only-show-errors 2>$null
+        $sqlSrvId = "$((Get-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -ErrorAsNull).id)"
         $peName = "pe-$sqlSrv"
-        $peId = az network private-endpoint show @subArgs -g $rg -n $peName --query id -o tsv --only-show-errors 2>$null
+        $peId = "$((Get-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -ErrorAsNull).id)"
         if (-not "$peId".Trim()) {
-            az network private-endpoint create @subArgs -g $rg -n $peName --vnet-name $vnet --subnet $peSubnet `
-                --private-connection-resource-id $sqlSrvId --group-id sqlServer --connection-name sql `
-                --only-show-errors -o none 2>$null | Out-Null
-            $peId = az network private-endpoint show @subArgs -g $rg -n $peName --query id -o tsv --only-show-errors 2>$null
+            $peLoc = "$((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -ErrorAsNull).location)"; if (-not $peLoc) { $peLoc = $Location }
+            try { [void](New-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -Location $peLoc -SubnetId $peSubnetId -TargetResourceId $sqlSrvId -GroupId sqlServer -ConnectionName sql) }
+            catch { Write-PrereqRestNote $_.Exception.Message }
+            $peId = "$((Get-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $peName -ErrorAsNull).id)"
             if (-not "$peId".Trim()) { throw "the private endpoint '$peName' was NOT created -- see the failure above. Without it '$sqlSrv' is reachable from nowhere." }
         }
         $dnsRg2 = $(if ("$PrivateDnsResourceGroup".Trim()) { $PrivateDnsResourceGroup } else { $rg })
-        az network private-dns zone create @subArgs -g $dnsRg2 -n 'privatelink.database.windows.net' --only-show-errors -o none 2>$null | Out-Null
-        $zoneId2 = az network private-dns zone show @subArgs -g $dnsRg2 -n 'privatelink.database.windows.net' --query id -o tsv --only-show-errors 2>$null
+        try { [void](New-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg2 -Name 'privatelink.database.windows.net') } catch { Write-Verbose "zone create: $($_.Exception.Message)" }
+        $zoneId2 = "$((Get-PimArmPrivateDnsZone -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg2 -Name 'privatelink.database.windows.net' -ErrorAsNull).id)"
         if (-not "$zoneId2".Trim()) { throw "could not create the 'privatelink.database.windows.net' zone in '$dnsRg2' -- the server name will not resolve." }
-        az network private-dns link vnet create @subArgs -g $dnsRg2 -z 'privatelink.database.windows.net' -n "link-$vnet" `
-            --virtual-network (az network vnet show @subArgs -g $rg -n $vnet --query id -o tsv --only-show-errors) `
-            --registration-enabled false --only-show-errors -o none 2>$null | Out-Null
-        az network private-endpoint dns-zone-group create @subArgs -g $rg --endpoint-name $peName -n zg `
-            --private-dns-zone $zoneId2 --zone-name sql --only-show-errors -o none 2>$null | Out-Null
-        $recs2 = @(az network private-dns record-set a list @subArgs -g $dnsRg2 -z 'privatelink.database.windows.net' --query "[].name" -o tsv --only-show-errors 2>$null)
+        try { New-PimArmPrivateDnsLink -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg2 -ZoneName 'privatelink.database.windows.net' -Name "link-$vnet" -VnetId $vnetId -RegistrationEnabled $false } catch { Write-Verbose "zone link: $($_.Exception.Message)" }
+        try { Set-PimArmPrivateDnsZoneGroup -SubscriptionId $SubscriptionId -ResourceGroup $rg -EndpointName $peName -Name zg -ZoneId $zoneId2 -ConfigName sql } catch { Write-Verbose "zone group: $($_.Exception.Message)" }
+        $recs2 = @(Get-PimArmPrivateDnsARecords -SubscriptionId $SubscriptionId -ResourceGroup $dnsRg2 -ZoneName 'privatelink.database.windows.net' -ErrorAsNull | ForEach-Object { "$($_.name)" } | Where-Object { $_ })
         Write-Host ("         privatelink.database.windows.net in $dnsRg2 -- {0} record(s): {1}" -f $recs2.Count, ($recs2 -join ', '))
         if (-not $recs2.Count) { Write-Warning "         no A record yet -- the zone group may still be settling; re-run to confirm." }
     }
 
-    $fqdn = az sql server show @subArgs -g $rg -n $sqlSrv --query fullyQualifiedDomainName -o tsv --only-show-errors
+    $fqdn = "$((Get-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -ErrorAsNull).properties.fullyQualifiedDomainName)"
     Write-Host "    $sqlSrv / $sqlDb ($fqdn)"
     if ($sqlUami) {
         Write-Host "    sql admin identity : $sqlUami (client $sqlUamiCid) -- the environment administers its own database" -ForegroundColor Green
@@ -764,28 +798,27 @@ function Chk($label, $cond, $detail) {
     if ($cond) { Write-Host ("  {0,-22}: {1}" -f $label, $detail) }
     else { Write-Host ("  {0,-22}: MISSING" -f $label) -ForegroundColor Red; $script:ok = $false }
 }
-$vnetOk   = az network vnet show @subArgs -g $rg -n $vnet --query addressSpace.addressPrefixes[0] -o tsv --only-show-errors 2>$null
-$snOk     = az network vnet subnet show @subArgs -g $rg --vnet-name $vnet -n $subnet --query delegations[0].serviceName -o tsv --only-show-errors 2>$null
-$lawOk    = az monitor log-analytics workspace show @subArgs -g $rg -n $law --query customerId -o tsv --only-show-errors 2>$null
-$acrOk    = az acr show @subArgs -g $rg -n $acr --query loginServer -o tsv --only-show-errors 2>$null
+$vnetOk   = "$(@((Get-PimArmVnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $vnet -ErrorAsNull).properties.addressSpace.addressPrefixes)[0])"
+$snOk     = "$(@((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $rg -VnetName $vnet -Name $subnet -ErrorAsNull).properties.delegations)[0].properties.serviceName)"
+$lawOk    = "$((Get-PimArmLogAnalytics -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $law -ErrorAsNull).properties.customerId)"
+$acrOk    = "$((Get-PimArmAcr -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $acr -ErrorAsNull).properties.loginServer)"
 Chk 'vnet'          ([bool]$vnetOk) $vnetOk
 Chk 'aca subnet'    ($snOk -eq 'Microsoft.App/environments') "$subnetCidr delegated to $snOk"
 Chk 'log analytics' ([bool]$lawOk)  $law
 Chk 'acr'           ([bool]$acrOk)  $acrOk
 # Verify the ROLE, not just the identity: an identity without AcrPull looks identical to a
 # working one right up until the first image pull fails.
-$uamiOk = az identity show @subArgs -g $rg -n $uami --query id -o tsv --only-show-errors 2>$null
+$uamiOk = "$((Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $uami -ErrorAsNull).id)"
 $pullOk = $null
 if ($uamiPrincipal -and $acrId) {
-    $pullOk = az role assignment list @subArgs --assignee $uamiPrincipal --scope $acrId --role AcrPull `
-                  --query "[0].roleDefinitionName" -o tsv --only-show-errors 2>$null
+    try { $pullOk = "$((@(Get-PimArmRoleAssignments -Scope $acrId -PrincipalId $uamiPrincipal -Role AcrPull -SubscriptionId $SubscriptionId) | Select-Object -First 1).roleDefinitionName)" } catch { $pullOk = $null }
 }
 Chk 'pull identity'  ([bool]$uamiOk) $uami
 Chk 'acrpull grant'  ($pullOk -eq 'AcrPull') "$uami -> AcrPull on $acr"
 if (-not $SkipSql) {
-    $dbOk = az sql db show @subArgs -g $rg -s $sqlSrv -n $sqlDb --query status -o tsv --only-show-errors 2>$null
+    $dbOk = "$((Get-PimArmSqlDb -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Name $sqlDb -ErrorAsNull).properties.status)"
     Chk 'sql database' ($dbOk -eq 'Online') "$sqlSrv/$sqlDb ($dbOk)"
-    $adminLoginNow = "$(az sql server ad-admin list @subArgs -g $rg -s $sqlSrv --query "[0].login" -o tsv --only-show-errors 2>$null)".Trim()
+    $adminLoginNow = "$((@(Get-PimArmSqlAdmins -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv) | Select-Object -First 1).login)".Trim()
     Chk 'sql entra admin' ([bool]$adminLoginNow) $(if ($sqlAdminGroupOk) { "$adminLoginNow (SQL admin group, members read back)" } else { "$adminLoginNow (single-principal admin: $sqlAdminGroupSkipped)" })
 
     # 🔴 A DATABASE THAT IS "Online" IS NOT A DATABASE THIS HOST CAN REACH, and until now nothing
@@ -798,9 +831,9 @@ if (-not $SkipSql) {
     # Reported, NOT failed: a deploy host INSIDE the VNet (private endpoint) is a legitimate and
     # policy-preferred topology, and prereq cannot tell from here whether this host is in it. So say
     # precisely what will break and how to fix it, and let the operator decide.
-    # BUG-215: --subscription on both (the only two calls in this script that relied on the default).
-    $pna     = "$(az sql server show @subArgs -g $rg -n $sqlSrv --query publicNetworkAccess -o tsv --only-show-errors 2>$null)".Trim()
-    $fwSetup = "$(az sql server firewall-rule show @subArgs -g $rg -s $sqlSrv -n AllowSetupHost --query name -o tsv --only-show-errors 2>$null)".Trim()
+    # BUG-215: both reads are scoped to -SubscriptionId explicitly (REST paths carry it; there is no default context).
+    $pna     = "$((Get-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $rg -Name $sqlSrv -ErrorAsNull).properties.publicNetworkAccess)".Trim()
+    $fwSetup = "$((Get-PimArmSqlFirewallRule -SubscriptionId $SubscriptionId -ResourceGroup $rg -Server $sqlSrv -Name AllowSetupHost -ErrorAsNull).name)".Trim()
     if ($pna -eq 'Disabled') {
         Write-Host ("  {0,-22}: PUBLIC ACCESS DISABLED" -f 'sql reachability') -ForegroundColor Yellow
         Write-Warning ("SQL server '$sqlSrv' has publicNetworkAccess=Disabled, so THIS host cannot reach it. " +

@@ -100,7 +100,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $PSCommandPath
-. (Join-Path $here '_PimAz.ps1')                        # the guarded az shadow
+# REQUIREMENTS 100.41 / framework 12.17 NO-AZ: every Azure call below is ARM / Graph / registry REST through
+# engine\_shared\PIM-ArmSetup.ps1 and PIM-Rest's ONE token client -- no az CLI, no module.
+$solRootR = Split-Path -Parent (Split-Path -Parent $here)
+# PIM-Rest only when not loaded yet: dot-sourcing it again resets its token cache (a caller's sign-in would be asked again).
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootR 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootR 'engine\_shared\PIM-ArmSetup.ps1') }
 . (Join-Path $here '_PimUpdateRing.ps1')                # ring + source enforcement, ARM-safe env writes
 . (Join-Path $here '_PimSqlAdminGroup.ps1')             # the SQL admin group: membership for the updater identity
 
@@ -108,7 +113,12 @@ function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 function Warn($m) { Write-Host "    $m" -ForegroundColor Yellow }
 
-$sub   = @('--subscription', $SubscriptionId)
+# WHO the REST calls run as: the identity a calling deploy already set up for PIM-Rest in this process (kept as it is),
+# else Connect-PimSetupRest -- the Invardia Support app's REST session for this tenant, or the person signed in.
+if (-not ("$($global:PIM_SetupRestMode)".Trim() -and (-not "$TenantId".Trim() -or "$($global:PIM_TenantId)".Trim() -ieq "$TenantId".Trim()))) {
+    [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId)
+}
+
 $image = "$AcrName.azurecr.io/$ImageRepo" + ':' + $(if ("$ImageTag".Trim()) { "$ImageTag".Trim() } else { 'latest' })
 
 Write-Host "`n=== PIM nightly updater ($JobName) ===" -ForegroundColor Cyan
@@ -129,30 +139,24 @@ Note "cron         $Cron (UTC)"
 # that cannot possibly run.
 function Test-PimAcrTag {
     param([string]$Registry, [string]$Repository, [string]$Tag)
+    # The tag LIST + a match in PowerShell, never a "show this one tag" read: absent is a legitimate answer here and that
+    # form answers it with an ERROR (same reasoning as the deploy path). 100.41: the registry's own data plane over REST
+    # (Get-PimAcrRepositoryTags: /acr/v1/<repo>/_tags, paged), the login server read from ARM in THIS subscription.
+    # 🔴 "I COULD NOT READ THE REGISTRY" MUST NOT LOOK LIKE "THE TAG IS ABSENT". The tag list is a DATA-PLANE call, so
+    # against a registry with public access off it fails from a deploy host outside the VNet. On the az path that failure
+    # once arrived here AS A TAG LIST (az printed a "Username:" prompt on stdout), the match failed, and this returned
+    # $false -- "the image does NOT exist" -- about an image built 90 seconds earlier (measured at a customer 2026-09-12).
+    # Over REST an unreadable registry is an EMPTY list with the reason kept -- and empty is "cannot tell" ($null).
+    $result = $null
     try {
-        # show-tags + match in PowerShell, never `show --image repo:tag`: absent is a legitimate
-        # answer here and that form prints an ERROR for it (same reasoning as the deploy path).
-        $global:LASTEXITCODE = 0
-        $raw  = @(az acr repository show-tags @sub -n $Registry --repository $Repository -o tsv 2>$null)
-        $code = $LASTEXITCODE
-        $tags = @($raw | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-        # 🔴 "I COULD NOT READ THE REGISTRY" MUST NOT LOOK LIKE "THE TAG IS ABSENT" -- and an empty
-        # result is not the only way that happens. `az acr repository show-tags` is a DATA-PLANE
-        # call, so against a registry with public access off it fails from a deploy host outside
-        # the VNet and prints its own text:
-        #     WARNING: Unable to get AAD authorization tokens ... CONNECTIVITY_REFRESH_TOKEN_ERROR
-        #     Username:                                   <- an interactive prompt, on stdout
-        # That text arrived here AS A TAG LIST, so `$tags` was non-empty, the match failed, and this
-        # returned $false -- "the image does NOT exist" -- about an image built 90 seconds earlier.
-        # The empty-result guard below was already right; it simply could not see this shape.
-        # Measured at a customer 2026-09-12, the FOURTH place this private-registry assumption has
-        # surfaced (after the roller's pre-roll guard, its digest pin, and the agent pool).
-        if ($code -ne 0) { return $null }
-        $noise = @($tags | Where-Object { $_ -match '(?i)^(Username|Password|WARNING|ERROR|Traceback):' })
-        if ($noise.Count) { return $null }
-        if (-not $tags.Count) { return $null }   # cannot see the registry at all -- NOT the same as absent
-        return ([bool](@($tags) -contains "$Tag".Trim()))
-    } catch { return $null }
+        $ls = ''
+        $reg = Get-PimArmAcr -SubscriptionId $SubscriptionId -Name $Registry -ErrorAsNull
+        if ($reg) { $ls = "$($reg.properties.loginServer)".Trim() }
+        $global:PimSetupRestLastError = ''
+        $tags = @(Get-PimAcrRepositoryTags -Registry $Registry -Repository $Repository -LoginServer $ls | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        if ($tags.Count) { $result = [bool](@($tags) -contains "$Tag".Trim()) }   # empty = cannot see the registry -- NOT the same as absent
+    } catch { $result = $null }
+    return $result
 }
 
 $jobTag   = if ("$ImageTag".Trim()) { "$ImageTag".Trim() } else { 'latest' }
@@ -217,7 +221,7 @@ if ("$TargetImage".Trim() -and -not "$SourceUrlTemplate".Trim()) {
 # is the NORMAL answer the first time this runs, so the very first line a customer saw was
 # "az exit 1: ERROR: (ResourceNotFound)" during a completely healthy install. Same defect, same
 # fix, as the image-tag probe in Invoke-PimDeployAll: ask "what is there", not "show me this one".
-$exists = @(az containerapp job list @sub -g $ResourceGroup --query "[].name" -o tsv 2>$null) |
+$exists = @(Get-PimArmAcaJobList -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ErrorAsNull | ForEach-Object { "$($_.name)" }) |
           Where-Object { "$_".Trim() -eq $JobName }
 
 $envVars = @(
@@ -243,7 +247,12 @@ if ("$TargetVersion".Trim())     { $envVars += "PIM_UPDATE_TARGET_VERSION=$("$Ta
 # already carried (HOLD, LAST_GOOD, ...) -- a redeploy must never silently unfreeze or re-pin anything.
 
 # ---- 0c. the RING and its SOURCE, decided BEFORE anything is changed ---------------------------
-$armInvoker = New-PimSubscriptionArmInvoker -SubscriptionId $SubscriptionId
+# The ARM caller the ring/env helpers take (same parameter shape as New-PimSubscriptionArmInvoker), over PIM-Rest's ONE
+# token client -- pinned to this subscription's tenant by Connect-PimSetupRest above, so no az token and no az account read.
+$armInvoker = {
+    param([string]$Method = 'GET', [string]$Path, [object]$Body, [string]$ApiVersion, [switch]$All)
+    Invoke-PimSetupArm -Method $Method -Path $Path -Body $Body -ApiVersion $ApiVersion -All:$All
+}
 $jobArmPath = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$JobName"
 $existingEnv = [ordered]@{}
 if ($exists) {
@@ -294,16 +303,14 @@ foreach ($m in @($ringPlan.messages)) { if ($m -match '(?i)CHANGES|default ring|
 
 $entry = '/app/PIM4EntraPS/tools/pim-engine/update-job-entry.ps1'
 
-# 🔴 --yaml, NEVER A MULTI-TOKEN --command. `az containerapp job create --command pwsh -NoProfile
-# -File <x>` fails with "unrecognized arguments: -NoProfile -ExecutionPolicy Bypass -File ..."
-# because az takes only the FIRST token as the command and then tries to parse the rest as its own
-# arguments. Measured on the first live install, 2026-09-09 -- and this repo already knew: the
-# worker containers use --yaml for exactly this reason, and a standing assertion in
-# Test-PimSetupHosting says so ("uses --ingress external + worker --yaml (NOT multi-token
-# --command)"). A rule that lives in a test for one script does not protect the next one.
-$envId = "$(az containerapp env show @sub -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null)".Trim()
+# 🔴 THE COMMAND IS AN ARRAY, NEVER A MULTI-TOKEN STRING. `az containerapp job create --command pwsh -NoProfile
+# -File <x>` failed with "unrecognized arguments: -NoProfile -ExecutionPolicy Bypass -File ..." (first live install,
+# 2026-09-09): az took only the FIRST token as the command. The az path then used a --yaml document; over ARM REST the
+# job is the resource itself, and command/args are real JSON arrays in it (the shape the YAML existed to produce).
+$envObj = Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
+$envId = if ($envObj) { "$($envObj.id)".Trim() } else { '' }
 if (-not $envId) { throw "Deploy-PimUpdateJob: Container Apps environment '$EnvName' not found in $ResourceGroup." }
-$location = "$(az containerapp env show @sub -g $ResourceGroup -n $EnvName --query location -o tsv 2>$null)".Trim()
+$location = "$($envObj.location)".Trim()
 
 # 🔴 WHICH IDENTITY PULLS THE IMAGE -- and getting this wrong produces a job that runs, says
 # NOTHING, and reports status "Unknown" forever.
@@ -317,63 +324,59 @@ $location = "$(az containerapp env show @sub -g $ResourceGroup -n $EnvName --que
 # holds AcrPull. Asking it which identity it uses is both correct and self-configuring -- no new
 # parameter for the operator to know about, and no new role assignment to wait for.
 if (-not "$RegistryIdentityResourceId".Trim()) {
-    $mgrRegId = "$(az containerapp show @sub -g $ResourceGroup -n $ManagerApp --query "configuration.registries[0].identity" -o tsv 2>$null)".Trim()
-    if (-not $mgrRegId) {
-        $mgrRegId = "$(az containerapp show @sub -g $ResourceGroup -n $ManagerApp --query "properties.configuration.registries[0].identity" -o tsv 2>$null)".Trim()
-    }
+    $mgrApp = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
+    $mgrRegId = if ($mgrApp) { "$(@($mgrApp.properties.configuration.registries)[0].identity)".Trim() } else { '' }
     if ($mgrRegId -and $mgrRegId -ne 'system') {
         $RegistryIdentityResourceId = $mgrRegId
         Note "registry identity inherited from $ManagerApp (it already pulls this image)"
     }
 }
 
-$identityYaml = 'identity: { type: SystemAssigned }'
-$registryYaml = "    registries: [ { server: `"$AcrName.azurecr.io`", identity: `"system`" } ]"
+$jobIdentity = @{ type = 'SystemAssigned' }
+$jobRegistry = @{ server = "$AcrName.azurecr.io"; identity = 'system' }
 if ("$RegistryIdentityResourceId".Trim()) {
     # SystemAssigned as well: the system identity is what gets Contributor to ROLL, while the
     # user-assigned one PULLS. Two identities, two jobs, neither able to do the other's.
-    $identityYaml = "identity: { type: `"SystemAssigned, UserAssigned`", userAssignedIdentities: { `"$("$RegistryIdentityResourceId".Trim())`": {} } }"
-    $registryYaml = "    registries: [ { server: `"$AcrName.azurecr.io`", identity: `"$("$RegistryIdentityResourceId".Trim())`" } ]"
+    $jobIdentity = @{ type = 'SystemAssigned,UserAssigned'; userAssignedIdentities = @{ "$("$RegistryIdentityResourceId".Trim())" = @{} } }
+    $jobRegistry = @{ server = "$AcrName.azurecr.io"; identity = "$("$RegistryIdentityResourceId".Trim())" }
 } else {
     Warn 'no registry identity found: the job will pull as its SYSTEM identity, which cannot hold AcrPull'
     Warn '  until after the job exists -- so the FIRST execution will fail to pull. AcrPull is granted'
     Warn '  below and the next execution will succeed; pass -RegistryIdentityResourceId to avoid the gap.'
 }
-$envYaml = "        env: [ " + (($envVars | ForEach-Object {
-                $kv = "$_" -split '=', 2; "{ name: $($kv[0]), value: `"$($kv[1])`" }" }) -join ', ') + " ]"
+$jobEnv = @($envVars | ForEach-Object { $kv = "$_" -split '=', 2; @{ name = $kv[0]; value = $kv[1] } })
 
-# 🔴 THE IDENTITY BLOCK BELONGS TO `create` ONLY.
-# `az containerapp job update --yaml <doc with identity:>` fails with
+# 🔴 THE IDENTITY BLOCK BELONGS TO CREATE ONLY.
+# An update carrying an identity block failed with
 #     (FailedIdentityOperation) ... "The request format was unexpected : Request requires
 #     identities to be assigned."
 # because the update path does not accept an identity assignment inside the document -- identity is
-# established at CREATE and changed afterwards with `az containerapp job identity assign`. Measured
-# on the third live install. The same YAML therefore cannot serve both verbs, which is the sort of
-# thing that only shows up on the RE-RUN of an installer, never on the first one.
-$y = New-Object System.Collections.Generic.List[string]
-[void]$y.Add("location: $location")
-if (-not $exists) { [void]$y.Add($identityYaml) }
-[void]$y.Add('properties:')
-[void]$y.Add("  environmentId: $envId")
-[void]$y.Add('  configuration:')
-[void]$y.Add('    triggerType: Schedule')
-[void]$y.Add('    replicaTimeout: 1800')
-[void]$y.Add('    replicaRetryLimit: 0')
-[void]$y.Add('    scheduleTriggerConfig:')
-[void]$y.Add("      cronExpression: `"$Cron`"")
-[void]$y.Add('      parallelism: 1')
-[void]$y.Add('      replicaCompletionCount: 1')
-[void]$y.Add($registryYaml)
-[void]$y.Add('  template:')
-[void]$y.Add('    containers:')
-[void]$y.Add("      - name: $JobName")
-[void]$y.Add("        image: $image")
-[void]$y.Add('        command: [pwsh]')
-[void]$y.Add("        args: [`"-NoProfile`", `"-ExecutionPolicy`", `"Bypass`", `"-File`", `"$entry`"]")
-[void]$y.Add($envYaml)
-[void]$y.Add('        resources: { cpu: 0.5, memory: 1.0Gi }')
-$yamlPath = Join-Path ([IO.Path]::GetTempPath()) ("pim-update-job-{0}.yaml" -f ([guid]::NewGuid().ToString('N').Substring(0,8)))
-Set-Content -LiteralPath $yamlPath -Value (($y.ToArray()) -join "`n") -Encoding ascii
+# established at CREATE and changed afterwards with an identity assignment of its own (Set-PimArmAcaJobIdentity
+# below). Measured on the third live install (az `job update --yaml`); the ARM PATCH this sends is the same request.
+$jobResource = @{
+    location   = $location
+    properties = @{
+        environmentId = $envId
+        configuration = @{
+            triggerType           = 'Schedule'
+            replicaTimeout        = 1800
+            replicaRetryLimit     = 0
+            scheduleTriggerConfig = @{ cronExpression = "$Cron"; parallelism = 1; replicaCompletionCount = 1 }
+            registries            = @($jobRegistry)
+        }
+        template = @{
+            containers = @(@{
+                name      = $JobName
+                image     = $image
+                command   = @('pwsh')
+                args      = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $entry)
+                env       = $jobEnv
+                resources = @{ cpu = 0.5; memory = '1.0Gi' }
+            })
+        }
+    }
+}
+if (-not $exists) { $jobResource.identity = $jobIdentity }
 
 # 🔴 AN ARM OPERATION ALREADY IN FLIGHT IS NOT A FAILURE -- IT IS A WAIT.
 # Measured on the second live install: the first attempt created the job and then errored on a
@@ -384,11 +387,18 @@ Set-Content -LiteralPath $yamlPath -Value (($y.ToArray()) -join "`n") -Encoding 
 # is precisely when this happens. An idempotent installer that cannot be run twice in a row is not
 # idempotent. Wait for the job to go idle first, then retry the call itself on the same error --
 # the same bounded-backoff shape this repo already uses for Graph replication (BUG-44).
+function Get-PimUpdJobState {
+    param([string]$Name)
+    $j = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull
+    $st = ''
+    if ($j) { $st = "$($j.properties.provisioningState)".Trim() }
+    $st
+}
 function Wait-PimJobIdle {
     param([string]$Name, [int]$TimeoutSeconds = 300)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        $st = "$(az containerapp job show @sub -g $ResourceGroup -n $Name --query properties.provisioningState -o tsv 2>$null)".Trim()
+        $st = Get-PimUpdJobState -Name $Name
         if (-not $st) { return 'Absent' }                       # not created yet -- nothing to wait for
         if ($st -notmatch '(?i)InProgress|Deleting|Waiting') { return $st }
         Note "  an operation is still in progress ($st) -- waiting"
@@ -397,40 +407,42 @@ function Wait-PimJobIdle {
     return 'TimedOut'
 }
 
-try {
-    $action = if ($exists) { 'update' } else { 'create' }
-    if ($exists) {
-        [void](Wait-PimJobIdle -Name $JobName)
-        # An EXISTING job keeps whatever identity it has; if the registry identity we resolved is
-        # not attached yet, attach it the only way the update path allows.
-        if ("$RegistryIdentityResourceId".Trim()) {
-            $attached = @(az containerapp job show @sub -g $ResourceGroup -n $JobName `
-                            --query "identity.userAssignedIdentities" -o json 2>$null) -join ''
-            if ("$attached" -notmatch [regex]::Escape("$RegistryIdentityResourceId".Trim())) {
+$action = if ($exists) { 'update' } else { 'create' }
+if ($exists) {
+    [void](Wait-PimJobIdle -Name $JobName)
+    # An EXISTING job keeps whatever identity it has; if the registry identity we resolved is
+    # not attached yet, attach it the only way the update path allows.
+    if ("$RegistryIdentityResourceId".Trim()) {
+        $curJob = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+        $attached = if ($curJob -and $curJob.identity -and $curJob.identity.userAssignedIdentities) { ($curJob.identity.userAssignedIdentities | ConvertTo-Json -Depth 5 -Compress) } else { '' }
+        if ("$attached" -notmatch [regex]::Escape("$RegistryIdentityResourceId".Trim())) {
+            if ($PSCmdlet.ShouldProcess($JobName, 'attach the registry identity to the existing job')) {
                 Step 'attach the registry identity to the existing job'
-                az containerapp job identity assign @sub -g $ResourceGroup -n $JobName `
-                    --user-assigned "$("$RegistryIdentityResourceId".Trim())" -o none 2>$null
-                $global:LASTEXITCODE = 0
+                try { [void](Set-PimArmAcaJobIdentity -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $JobName -UserAssigned "$("$RegistryIdentityResourceId".Trim())") }
+                catch { Write-Verbose "registry identity assignment: $($_.Exception.Message)" }
                 [void](Wait-PimJobIdle -Name $JobName)
             }
         }
     }
-    if ($PSCmdlet.ShouldProcess($JobName, "$action the nightly update job")) {
-        Step "$action $JobName$(if ($exists) { ' (already exists)' })"
-        $ok = $false
-        foreach ($wait in @(0, 15, 30, 60)) {
-            if ($wait) { Note "  retrying in ${wait}s"; Start-Sleep -Seconds $wait }
-            $global:LASTEXITCODE = 0
-            az containerapp job $action @sub -g $ResourceGroup -n $JobName --yaml $yamlPath -o none
-            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
-            # Only the in-flight-operation case is worth retrying; anything else is a real failure
-            # and retrying it just delays the report.
-            $st = "$(az containerapp job show @sub -g $ResourceGroup -n $JobName --query properties.provisioningState -o tsv 2>$null)".Trim()
-            if ($st -notmatch '(?i)InProgress|Waiting') { break }
-        }
-        if (-not $ok) { throw "Deploy-PimUpdateJob: 'az containerapp job $action' FAILED for $JobName (see the error above)." }
+}
+if ($PSCmdlet.ShouldProcess($JobName, "$action the nightly update job")) {
+    Step "$action $JobName$(if ($exists) { ' (already exists)' })"
+    $ok = $false
+    $jobErr = ''
+    foreach ($wait in @(0, 15, 30, 60)) {
+        if ($wait) { Note "  retrying in ${wait}s"; Start-Sleep -Seconds $wait }
+        $jobErr = ''
+        try { [void](Set-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $JobName -Resource $jobResource -Create:(-not $exists)) }
+        catch { $jobErr = "$($_.Exception.Message)" }
+        if (-not $jobErr) { $ok = $true; break }
+        Warn ("  the job $action was refused: " + (Hide-PimSasText $jobErr))
+        # Only the in-flight-operation case is worth retrying; anything else is a real failure
+        # and retrying it just delays the report.
+        $st = Get-PimUpdJobState -Name $JobName
+        if ($st -notmatch '(?i)InProgress|Waiting' -and $jobErr -notmatch '(?i)OperationInProgress|active provisioning operation') { break }
     }
-} finally { Remove-Item -LiteralPath $yamlPath -Force -ErrorAction SilentlyContinue }
+    if (-not $ok) { throw "Deploy-PimUpdateJob: the container apps job $action FAILED for $JobName ($(Hide-PimSasText $jobErr))." }
+}
 
 # ---- 1b. ring, source, last-built (+ everything the YAML would have dropped) -- over ARM ---------
 if (-not $WhatIfPreference) {
@@ -446,27 +458,48 @@ if (-not $WhatIfPreference) {
     Note ("-WhatIf: would write over ARM: " + ((@($ringPlan.writes.Keys) + @($storePlan.writes.Keys)) -join ', '))
 }
 
+# 100.41 -- the job identity and its Azure roles over ARM REST (az role assignment list/create, az containerapp job show).
+function Get-PimUpdJobPrincipal {
+    param([string]$Name)
+    $j = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull
+    $oid = ''
+    if ($j -and $j.identity) { $oid = "$($j.identity.principalId)".Trim() }
+    $oid
+}
+function Get-PimUpdJobRoleNames {
+    # the role NAMES the principal holds AT -Scope (az's default; inherited ones do not count). Unreadable = none.
+    param([string]$PrincipalId, [string]$Scope)
+    $names = @()
+    try { $names = @(Get-PimArmRoleAssignments -SubscriptionId $SubscriptionId -PrincipalId $PrincipalId -Scope $Scope | ForEach-Object { "$($_.roleDefinitionName)" }) } catch { $names = @() }
+    $names
+}
+function Add-PimUpdJobRole {
+    # best effort, as the az call was: every caller READS THE ROLE BACK and decides from that, not from this call.
+    param([string]$PrincipalId, [string]$Role, [string]$Scope)
+    try { [void](New-PimArmRoleAssignment -SubscriptionId $SubscriptionId -PrincipalId $PrincipalId -PrincipalType ServicePrincipal -Role $Role -Scope $Scope) }
+    catch { Write-Verbose "role assignment $Role @ ${Scope}: $($_.Exception.Message)" }
+}
+
 # ---- 2. the identity must be allowed to ROLL ---------------------------------------------------
 # 🔴 WITHOUT THIS THE JOB RUNS NIGHTLY AND CHANGES NOTHING, reporting an ARM 403 into a log nobody
 # reads. Contributor on the RESOURCE GROUP is the smallest role that can PATCH a container app and
 # a job; it is scoped to this environment's own resource group and nothing wider.
 if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
-    $mi = "$(az containerapp job show @sub -g $ResourceGroup -n $JobName --query identity.principalId -o tsv 2>$null)".Trim()
+    $mi = Get-PimUpdJobPrincipal -Name $JobName
     if (-not $mi) {
         Warn 'could not read the job managed identity -- grant Contributor on this resource group by hand, or the nightly roll will 403.'
     } else {
         $scope = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
-        $has = @(az role assignment list @sub --assignee $mi --scope $scope --query "[].roleDefinitionName" -o tsv 2>$null) |
+        $has = @(Get-PimUpdJobRoleNames -PrincipalId $mi -Scope $scope) |
                Where-Object { "$_".Trim() -in @('Contributor','Owner') }
         if ($has) { Note "identity already holds $($has -join ', ') on the resource group" }
         else {
             Step 'grant the job identity Contributor on this resource group'
-            az role assignment create @sub --assignee-object-id $mi --assignee-principal-type ServicePrincipal `
-                --role Contributor --scope $scope -o none 2>$null
+            Add-PimUpdJobRole -PrincipalId $mi -Role Contributor -Scope $scope
             # 🪤 Read it back. A role assignment that silently failed is indistinguishable from one
             # that worked until the first nightly run 403s at 03:00 -- see the deploy path's own
             # history of creates that were trusted rather than verified.
-            $after = @(az role assignment list @sub --assignee $mi --scope $scope --query "[].roleDefinitionName" -o tsv 2>$null) |
+            $after = @(Get-PimUpdJobRoleNames -PrincipalId $mi -Scope $scope) |
                      Where-Object { "$_".Trim() -in @('Contributor','Owner') }
             if ($after) { Note 'granted + verified' }
             else { Warn 'the role assignment did NOT take. The nightly roll will fail with 403 until it is granted.' }
@@ -486,7 +519,8 @@ if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
         # different resource group would pass every check here and then fail its first build with
         # a 403, at 03:00, in a customer tenant.
         if ("$($ringPlan.sourceUrl)".Trim()) {
-            $acrGroup ="$(az acr show @sub -n $AcrName --query resourceGroup -o tsv 2>$null)".Trim()
+            $acrObj = Get-PimArmAcr -SubscriptionId $SubscriptionId -Name $AcrName -ErrorAsNull
+            $acrGroup = if ($acrObj) { (Get-PimArmIdPart -Id "$($acrObj.id)" -Segment 'resourceGroups') } else { '' }
             if ($acrGroup -and $acrGroup -ne $ResourceGroup) {
                 # 🔴 §55.3 -- GRANT IT, DO NOT WARN ABOUT IT.
                 # This used to print three yellow lines and carry on reporting success. A warning
@@ -495,20 +529,18 @@ if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
                 # said OK. An installer that can see the exact missing grant and does not make it is
                 # handing the operator a bug with a receipt.
                 Step "grant the job identity Contributor on registry '$AcrName' (it lives in '$acrGroup', not '$ResourceGroup')"
-                $acrScope = "$(az acr show @sub -n $AcrName --query id -o tsv 2>$null)".Trim()
+                $acrScope = if ($acrObj) { "$($acrObj.id)".Trim() } else { '' }
                 if (-not $acrScope) {
                     Warn "registry '$AcrName' could not be resolved -- cannot grant build rights; the first nightly build will 403."
                 } else {
-                    $hasBuild = @(az role assignment list @sub --assignee $mi --scope $acrScope --query "[].roleDefinitionName" -o tsv 2>$null) |
+                    $hasBuild = @(Get-PimUpdJobRoleNames -PrincipalId $mi -Scope $acrScope) |
                                 Where-Object { "$_".Trim() -in @('Contributor','Owner') }
                     if ($hasBuild) { Note "identity already holds $($hasBuild -join ', ') on the registry" }
                     else {
-                        az role assignment create @sub --assignee-object-id $mi --assignee-principal-type ServicePrincipal `
-                            --role Contributor --scope $acrScope -o none 2>$null
-                        $global:LASTEXITCODE = 0
+                        Add-PimUpdJobRole -PrincipalId $mi -Role Contributor -Scope $acrScope
                         # 🔑 VERIFY. A role assignment that did not take looks exactly like one that
                         # did from here, and the difference only surfaces on the first build.
-                        $buildAfter = @(az role assignment list @sub --assignee $mi --scope $acrScope --query "[].roleDefinitionName" -o tsv 2>$null) |
+                        $buildAfter = @(Get-PimUpdJobRoleNames -PrincipalId $mi -Scope $acrScope) |
                                       Where-Object { "$_".Trim() -in @('Contributor','Owner') }
                         if ($buildAfter) { Note 'build rights granted + verified on the registry' }
                         else {
@@ -523,18 +555,18 @@ if (-not $SkipRoleAssignment -and -not $WhatIfPreference) {
             }
         }
 
-        $acrId = "$(az acr show @sub -n $AcrName --query id -o tsv 2>$null)".Trim()
+        $acrIdObj = Get-PimArmAcr -SubscriptionId $SubscriptionId -Name $AcrName -ErrorAsNull
+        $acrId = if ($acrIdObj) { "$($acrIdObj.id)".Trim() } else { '' }
         if (-not $acrId) {
             Warn "registry '$AcrName' not found in this subscription -- cannot grant AcrPull; the job may be unable to pull its image."
         } else {
-            $hasPull = @(az role assignment list @sub --assignee $mi --scope $acrId --query "[].roleDefinitionName" -o tsv 2>$null) |
+            $hasPull = @(Get-PimUpdJobRoleNames -PrincipalId $mi -Scope $acrId) |
                        Where-Object { "$_".Trim() -in @('AcrPull','Contributor','Owner') }
             if ($hasPull) { Note "identity already holds $($hasPull -join ', ') on the registry" }
             else {
                 Step 'grant the job identity AcrPull on the registry'
-                az role assignment create @sub --assignee-object-id $mi --assignee-principal-type ServicePrincipal `
-                    --role AcrPull --scope $acrId -o none 2>$null
-                $pullAfter = @(az role assignment list @sub --assignee $mi --scope $acrId --query "[].roleDefinitionName" -o tsv 2>$null) |
+                Add-PimUpdJobRole -PrincipalId $mi -Role AcrPull -Scope $acrId
+                $pullAfter = @(Get-PimUpdJobRoleNames -PrincipalId $mi -Scope $acrId) |
                              Where-Object { "$_".Trim() -in @('AcrPull','Contributor','Owner') }
                 if ($pullAfter) { Note 'AcrPull granted + verified' }
                 else { Warn 'AcrPull did NOT take -- the job will not be able to pull its image and will report status Unknown.' }
@@ -553,7 +585,7 @@ $sqlGrantProblem = ''
 # Decided here so that, on private SQL, the seed can ride the bootstrap-job run the grant below may start anyway.
 $seedDbInitExists = $false
 if ($SqlPrivate -and -not $SkipUpdateStateSeed -and -not $WhatIfPreference) {
-    $seedDbInitExists = [bool](@(az containerapp job list @sub -g $ResourceGroup --query "[].name" -o tsv 2>$null) |
+    $seedDbInitExists = [bool](@(Get-PimArmAcaJobList -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ErrorAsNull | ForEach-Object { "$($_.name)" }) |
                                Where-Object { "$_".Trim() -eq $DbInitJobName })
 }
 $seedPlan = Get-PimUpdateStateSeedPlan -Skip ([bool]$SkipUpdateStateSeed) -WhatIf ([bool]$WhatIfPreference) `
@@ -615,7 +647,7 @@ if (-not $WhatIfPreference -and $storePlan.hasStore) {
     if ($UseSignedInAccount -and "$TenantId".Trim()) { $haveCred = $true }   # 71.33
     $dbInitExists = $false
     if ($SqlPrivate) {
-        $dbInitExists = [bool](@(az containerapp job list @sub -g $ResourceGroup --query "[].name" -o tsv 2>$null) |
+        $dbInitExists = [bool](@(Get-PimArmAcaJobList -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ErrorAsNull | ForEach-Object { "$($_.name)" }) |
                                Where-Object { "$_".Trim() -eq $DbInitJobName })
     }
     $grantPlan = Get-PimUpdaterSqlGrantPlan -HasStore $true -SqlPrivate ([bool]$SqlPrivate) -HaveAdminCredential $haveCred `
@@ -633,7 +665,7 @@ if (-not $WhatIfPreference -and $storePlan.hasStore) {
     } else {
         Note $grantPlan.message
         try {
-            $updOid = "$(az containerapp job show @sub -g $ResourceGroup -n $JobName --query identity.principalId -o tsv 2>$null)".Trim()
+            $updOid = Get-PimUpdJobPrincipal -Name $JobName
             if (-not $updOid) { throw "$JobName has no system-assigned identity -- nothing to grant." }
             . (Join-Path $here '_PimSetupShared.ps1')                  # Resolve-PimMiAppId / Grant-PimMiSql
             $updAppId = Resolve-PimMiAppId -ObjectId $updOid -What $JobName
@@ -642,7 +674,7 @@ if (-not $WhatIfPreference -and $storePlan.hasStore) {
                     throw "$ManagerApp carries no PIM_SqlDatabase -- refusing to guess which database to create the user in."
                 }
                 $solRootG = Split-Path -Parent (Split-Path -Parent $here)
-                . (Join-Path $solRootG 'engine\_shared\PIM-Rest.ps1')      # Get-PimRestToken
+                if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootG 'engine\_shared\PIM-Rest.ps1') }   # Get-PimRestToken
                 . (Join-Path $solRootG 'engine\_shared\PIM-SqlStore.ps1')  # New-PimSqlConnection
                 if ($UseSignedInAccount) {
                     Grant-PimMiSql -DbUserName $JobName -MiAppId $updAppId -SqlServerFqdn "$($storePlan.writes['PIM_SqlServer'])" `
@@ -668,13 +700,13 @@ if (-not $WhatIfPreference -and $storePlan.hasStore) {
                     if ($seedPlan.action -eq 'dbinit') { $dbWrites['PIM_DBINIT_UPDATE_SEED'] = ($seedInfo | ConvertTo-Json -Compress); $seedRode = $true }
                     [void](Invoke-PimUpdateJobEnvWrites -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $DbInitJobName `
                                -Writes $dbWrites -ContainerName $DbInitJobName -ArmInvoker $armInvoker)
-                    $exec = "$(az containerapp job start @sub -g $ResourceGroup -n $DbInitJobName --query name -o tsv 2>$null)".Trim()
+                    $exec = Start-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName
                     if (-not $exec) { throw "could not start '$DbInitJobName'." }
                     Note "execution $exec -- waiting"
                     $status = ''
                     for ($i = 0; $i -lt 60; $i++) {
                         Start-Sleep -Seconds 10
-                        $status = "$(az containerapp job execution show @sub -g $ResourceGroup -n $DbInitJobName --job-execution-name $exec --query properties.status -o tsv 2>$null)".Trim()
+                        $status = "$((Get-PimArmAcaJobExecution -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -Execution $exec).properties.status)".Trim()
                         if ($status -in @('Succeeded', 'Failed', 'Degraded')) { break }
                     }
                     if ($status -ne 'Succeeded') { throw "the database bootstrap '$exec' ended '$status' (az containerapp job logs show -g $ResourceGroup -n $DbInitJobName --execution $exec --subscription $SubscriptionId)." }
@@ -690,8 +722,8 @@ if (-not $WhatIfPreference -and $storePlan.hasStore) {
 
 # ---- 3. read the job back ----------------------------------------------------------------------
 if (-not $WhatIfPreference) {
-    $back = az containerapp job show @sub -g $ResourceGroup -n $JobName `
-                --query "{name:name,trigger:properties.configuration.triggerType,cron:properties.configuration.scheduleTriggerConfig.cronExpression,image:properties.template.containers[0].image}" -o json 2>$null
+    $backJob = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+    $back = if ($backJob) { ([ordered]@{ name = "$($backJob.name)"; trigger = "$($backJob.properties.configuration.triggerType)"; cron = "$($backJob.properties.configuration.scheduleTriggerConfig.cronExpression)"; image = "$(@($backJob.properties.template.containers)[0].image)" } | ConvertTo-Json -Compress) } else { '' }
     if (-not $back) { throw "Deploy-PimUpdateJob: '$JobName' cannot be read back after deployment -- do not treat this as installed." }
     Note "verified: $back"
 
@@ -769,13 +801,13 @@ switch ($seedPlan.action) {
             try {
                 [void](Invoke-PimUpdateJobEnvWrites -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -JobName $DbInitJobName `
                            -Writes ([ordered]@{ PIM_DBINIT_UPDATE_SEED = ($seedInfo | ConvertTo-Json -Compress) }) -ContainerName $DbInitJobName -ArmInvoker $armInvoker)
-                $sx = "$(az containerapp job start @sub -g $ResourceGroup -n $DbInitJobName --query name -o tsv 2>$null)".Trim()
+                $sx = Start-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName
                 if (-not $sx) { throw "could not start '$DbInitJobName'." }
                 Note "execution $sx -- waiting"
                 $sst = ''
                 for ($i = 0; $i -lt 60; $i++) {
                     Start-Sleep -Seconds 10
-                    $sst = "$(az containerapp job execution show @sub -g $ResourceGroup -n $DbInitJobName --job-execution-name $sx --query properties.status -o tsv 2>$null)".Trim()
+                    $sst = "$((Get-PimArmAcaJobExecution -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -Execution $sx).properties.status)".Trim()
                     if ($sst -in @('Succeeded', 'Failed', 'Degraded')) { break }
                 }
                 if ($sst -eq 'Succeeded') { Note "update state recorded from inside the environment ($sx) -- an older '$DbInitJobName' image ignores it, and then '$JobName' records it on its first run" }

@@ -31,9 +31,10 @@
     Print the plan without creating anything.
 
 .NOTES
-    Re-runnable. Existing resources are reused/updated. Requires: az CLI logged in to
-    the target tenant/subscription; the SQL AAD-admin SPN creds (to mint the contained
-    DB users); the DnsServer RSAT module (for the AD DNS records).
+    Re-runnable. Existing resources are reused/updated. No az CLI and no PowerShell module for
+    Azure (§100.41): every Azure call is ARM / Graph REST with a token from PIM-Rest (certificate,
+    client secret, or the person's browser sign-in). Requires: the SQL AAD-admin SPN creds (to mint
+    the contained DB users); the DnsServer RSAT module (for the AD DNS records).
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -312,19 +313,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-# 🔴 BUG-215 -- THE CALLER'S az PROFILE IS PUT BACK ON EVERY EXIT. The sign-in below points
-# AZURE_CONFIG_DIR at an isolated profile; Invoke-PimDeployAll restores it after calling this script,
-# but a STANDALONE run left the operator's shell reading the deploy SPN's profile afterwards.
-$script:PimCallerAzureConfigDir    = $env:AZURE_CONFIG_DIR
-$script:PimCallerAzureConfigDirSet = [bool]$env:AZURE_CONFIG_DIR
-function Restore-PimCallerAzConfigDir {
-    if ($script:PimCallerAzureConfigDirSet) { $env:AZURE_CONFIG_DIR = $script:PimCallerAzureConfigDir }
-    # Unset the VARIABLE (never the directory: its config carries extension.use_dynamic_install).
-    elseif (Test-Path Env:\AZURE_CONFIG_DIR) { $env:AZURE_CONFIG_DIR = $null }
-}
-# A bare `throw` in a trap replaces the real error with "ScriptHalted" -- rethrow $_ (the lesson
-# Invoke-PimDeployAll recorded at a customer).
-trap { Restore-PimCallerAzConfigDir; throw $_ }
+# 🔴 BUG-215 -- THE CALLER'S SHELL IS NEVER CHANGED. This script used to point the az profile directory at an
+# isolated one for its own sign-in and had to put it back on every exit; on the REST path (§100.41) the identity
+# lives in this process only (PIM-Rest's token client), so there is no profile, no directory and nothing to restore.
 function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m){ Write-Host "    $m" -ForegroundColor DarkGray }
 # 🔴 THIS WAS MISSING, AND IT TOOK DOWN STEP 6 OF EVERY ESTATE DEPLOY THAT PASSED A CERT.
@@ -343,6 +334,8 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\PIM4EntraPS
 # Set-PimSqlNoAutoPause) + the engine REST/SQL cores the SQL grant needs.
 . "$here\_PimSetupShared.ps1"
 . "$solRoot\engine\_shared\PIM-Rest.ps1"
+. "$solRoot\engine\_shared\PIM-ArmSetup.ps1"          # §100.41 NO-AZ: ARM / Graph REST for every Azure call (one connect path)
+. "$solRoot\engine\_shared\PIM-ArmContainerApps.ps1"
 . "$solRoot\engine\_shared\PIM-SqlStore.ps1"
 . "$solRoot\engine\_shared\PIM-TenantSizing.ps1"   # 100.31 the tick's size for this tenant (pure; Get-PimContainerJobResources)
 # §84 P1: the cron check is Test-PimJobCron (_PimSetupShared.ps1) -- this used to dot-source PIM-DownlinkJob.ps1, an MSP
@@ -369,9 +362,8 @@ $Location = Assert-PimSetupRegion -Location $Location   # West Europe / Denmark 
 $imageTagRef = "$AcrName.azurecr.io/$ImageRepo`:$ImageTag"
 $image = $imageTagRef
 $subnetId = "/subscriptions/$SubscriptionId/resourceGroups/$VnetResourceGroup/providers/Microsoft.Network/virtualNetworks/$VnetName/subnets/$SubnetName"
-# Every az call is scoped explicitly, not only through `az account set`: the default context on a
-# host with two logins is not reliably the one this run set (ESTATE-14 / BUG-102).
-$subArgs = @('--subscription', $SubscriptionId)
+# Every Azure call names $SubscriptionId in its ARM path (ESTATE-14 / BUG-102: a default context on a host
+# with two logins is not reliably the one this run set -- there is no default context on the REST path at all).
 
 # ESTATE-06: in cron mode the scheduler WORKERS are replaced by one scheduled Job, so the app
 # set collapses to the Manager alone. Done here (not by asking the caller to pass -Workers)
@@ -401,65 +393,42 @@ if ($WhatIfPreference) { Note 'WhatIf — plan only, nothing created.'; }
 # would make a run that THOUGHT it was cert-authenticating actually use a secret. Same contract as
 # New-PimHostingPrerequisites / Build-PimManagerImage, so the three sign-ins cannot disagree.
 if ($AdminSecret -and $AdminCertPem) { throw 'pass EITHER -AdminSecret OR -AdminCertPem, not both.' }
+# 🔒 §100.41 / framework 12.17 NO-AZ: ONE connect path. Every Azure call below is ARM / Graph REST through
+# engine\_shared\PIM-ArmSetup.ps1, and the token comes from PIM-Rest's own client -- never `az login`.
+#   * -AdminAppId with -AdminCertPem : the certificate, found in the store BY THE PEM's THUMBPRINT (no key read from a file)
+#   * -AdminAppId with -AdminSecret  : the client secret (the Invardia Support app / an estate test SPN)
+#   * neither                        : the person at the keyboard (PIM-Rest's browser sign-in)
+# Every token is pinned to -TenantId, so the old "default az account is in another tenant" trap (BUG-215) cannot
+# happen: there is no default context any more, and nothing here changes anybody else's.
 if ($AdminAppId -and ($AdminSecret -or $AdminCertPem)) {
-    $cfgDir = Join-Path ([IO.Path]::GetTempPath()) "azcfg-containers-$AcrName"
-    New-Item -ItemType Directory -Force $cfgDir | Out-Null
-    $env:AZURE_CONFIG_DIR = $cfgDir
-    # 🔴 DROP THE CACHED TOKEN BEFORE SIGNING IN. This directory PERSISTS between runs, and az
-    # keeps its MSAL token cache in it. So a permission granted BETWEEN two runs is invisible to
-    # the second one: az serves the still-valid token minted before the grant, the call fails with
-    # "Insufficient privileges to complete the operation", and the operator goes off to check a
-    # permission that is already correct.
-    # Measured at a live customer 2026-09-08. The deploy SPN was granted Directory.Read.All,
-    # AppRoleAssignment.ReadWrite.All and Application.ReadWrite.All; its freshly-minted token was
-    # decoded and CARRIED ALL THREE; and the very next deploy still failed on the same refusal --
-    # because `az account clear` had been run against the DEFAULT profile while this step reads its
-    # own isolated one. Two clean runs were lost to it.
-    # 🔒 `az account clear`, NOT deleting the directory: the profile and token cache go, while
-    # `config` survives -- and that config holds extension.use_dynamic_install, without which a
-    # fresh dir makes `az containerapp` PROMPT to install its extension and an unattended run HANGS
-    # (the 30-minute stall of 2026-09-03). Isolation is here to stop an ambient context leaking in;
-    # it was never meant to carry credentials forward.
-    az account clear --only-show-errors 2>&1 | Out-Null
-    az config set extension.use_dynamic_install=yes_without_prompt --only-show-errors 2>&1 | Out-Null
     if ($AdminCertPem) {
         if (-not (Test-Path $AdminCertPem)) { throw "certificate PEM not found: $AdminCertPem" }
-        Step "az login (service principal, CERTIFICATE) -> tenant $TenantId"
-        az login --service-principal -u $AdminAppId --certificate $AdminCertPem --tenant $TenantId --only-show-errors -o none
+        Step "sign-in (service principal, CERTIFICATE) -> tenant $TenantId"
+        $conn = Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId -ClientId $AdminAppId -CertificatePem $AdminCertPem
     } else {
-        Step "az login (service principal, client secret) -> tenant $TenantId"
-        az login --service-principal -u $AdminAppId -p $AdminSecret --tenant $TenantId --only-show-errors -o none
+        Step "sign-in (service principal, client secret) -> tenant $TenantId"
+        $conn = Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret
     }
-    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az login failed for tenant $TenantId (exit $LASTEXITCODE)." }
-    # Our OWN isolated profile, created above for this run: setting its default touches nobody else.
-    az account set --subscription $SubscriptionId 2>$null | Out-Null
+} else {
+    $conn = Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId
 }
-# 🔴 BUG-215 -- NEVER `az account set` IN THE CALLER'S PROFILE. It used to run here unconditionally,
-# so a run on the operator's own sign-in silently moved the MACHINE-WIDE default subscription under
-# every other shell and session on the host. Every ARM call below carries --subscription; the ones
-# that cannot (Graph via `az ad` / `az rest`) use the default ACCOUNT's tenant, so that tenant is
-# ASSERTED instead of changed -- and a mismatch is refused with the command to fix it.
 
-# FAIL FAST. Without this the script ran on with NO usable az context: every call failed
+# FAIL FAST. Without this the script ran on with NO usable identity: every call failed
 # quietly, `env static IP =` printed empty, and the run only died four steps later inside a SQL
 # grant with "Cannot bind argument to parameter 'MiAppId' because it is an empty string" -- an
-# error that points at the wrong thing entirely. Prove the context BEFORE creating anything.
-$activeSub = "$(az account show --subscription $SubscriptionId --query id -o tsv --only-show-errors 2>$null)".Trim()
-$activeTid = "$(az account show --subscription $SubscriptionId --query tenantId -o tsv --only-show-errors 2>$null)".Trim()
+# error that points at the wrong thing entirely. Prove the subscription is readable, in the right
+# tenant, BEFORE creating anything.
+$subObj = Get-PimArmSubscription -SubscriptionId $SubscriptionId -ErrorAsNull
+$activeSub = "$($subObj.subscriptionId)".Trim()
+$activeTid = "$($subObj.tenantId)".Trim()
 if (-not $activeSub -or $activeSub -ne $SubscriptionId -or ($activeTid -and $activeTid -ne $TenantId)) {
-    throw ("No usable az context for subscription $SubscriptionId in tenant $TenantId (found: '$activeSub' in '$activeTid'). " +
+    throw ("No usable sign-in for subscription $SubscriptionId in tenant $TenantId (found: '$activeSub' in '$activeTid'" +
+           $(if ("$($global:PimSetupRestLastError)".Trim()) { "; $($global:PimSetupRestLastError)" } else { '' }) + "). " +
            "Pass -AdminAppId with -AdminCertPem (or -AdminSecret) so this script can sign in, " +
-           "or run 'az login' first. " +
-           "Refusing to continue -- every subsequent az call would fail silently.")
+           "or run it as a person who can read that subscription. " +
+           "Refusing to continue -- every subsequent call would fail.")
 }
-$defaultTid = "$(az account show --query tenantId -o tsv --only-show-errors 2>$null)".Trim()
-if ($defaultTid -ne $TenantId) {
-    throw ("The DEFAULT az account is in tenant '$defaultTid', not $TenantId. The directory calls this script makes " +
-           "(managed-identity lookups, Graph grants) use the default account, so they would act on another tenant. " +
-           "This script does not change your default. Either pass -AdminAppId with -AdminCertPem to run in an isolated " +
-           "profile, or select it yourself first: az account set --subscription $SubscriptionId")
-}
-Note "az context OK -> subscription $activeSub (tenant $activeTid)"
+Note "sign-in OK ($($conn.mode)) -> subscription $activeSub (tenant $activeTid)"
 
 # ---- Existing shape: the cron default must not silently reshape an ALWAYS-ON environment ----------
 # 'cron' became the default (§33.28, 2.4.373: v2 and Invoke-PimMspBuild run the tick Job; the v1-named scheduler
@@ -469,7 +438,7 @@ Note "az context OK -> subscription $activeSub (tenant $activeTid)"
 # explicit -WorkerMode always wins (pass -WorkerMode cron to migrate, then delete the worker apps).
 if (-not $PSBoundParameters.ContainsKey('WorkerMode') -and $WorkerMode -eq 'cron') {
     $schedNames = @($workersAll | Where-Object { $_.entry -eq 'scheduler' } | ForEach-Object { "$($_.name)" })
-    $existingApps = @(az containerapp list @subArgs -g $ResourceGroup --query "[].name" -o tsv --only-show-errors 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $existingApps = @(Get-PimArmAcaAppNames -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup)
     $liveWorkers = @($schedNames | Where-Object { $existingApps -contains $_ })
     if ($liveWorkers.Count -gt 0) {
         Warn ("this environment already runs the ALWAYS-ON worker matrix (" + ($liveWorkers -join ', ') + "), so this run keeps " +
@@ -522,16 +491,18 @@ if (-not $WhatIfPreference) {
 
 Step 'Register resource providers (idempotent)'
 if ($PSCmdlet.ShouldProcess('Microsoft.App / Microsoft.OperationalInsights','register')) {
-    az provider register @subArgs -n Microsoft.App --wait 2>$null | Out-Null
-    az provider register @subArgs -n Microsoft.OperationalInsights --wait 2>$null | Out-Null
+    foreach ($ns in 'Microsoft.App', 'Microsoft.OperationalInsights') {
+        try { [void](Register-PimArmProvider -SubscriptionId $SubscriptionId -Namespace $ns -Wait) }
+        catch { Write-Verbose "provider register $ns : $($_.Exception.Message)" }   # as before: a refusal here surfaces at the create that needs it
+    }
 }
 
 Step "Subnet $SubnetName delegated to Microsoft.App/environments"
 if ($PSCmdlet.ShouldProcess($SubnetName,'create/delegate')) {
-    $exists = az network vnet subnet show @subArgs -g $VnetResourceGroup --vnet-name $VnetName -n $SubnetName --query name -o tsv 2>$null
+    $exists = "$((Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $VnetResourceGroup -VnetName $VnetName -Name $SubnetName -ErrorAsNull).name)"
     if (-not $exists) {
-        az network vnet subnet create @subArgs -g $VnetResourceGroup --vnet-name $VnetName -n $SubnetName `
-            --address-prefixes $SubnetPrefix --delegations Microsoft.App/environments -o none
+        [void](Set-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $VnetResourceGroup -VnetName $VnetName -Name $SubnetName `
+            -AddressPrefix $SubnetPrefix -Delegation 'Microsoft.App/environments')
     } else { Note 'subnet exists' }
 }
 
@@ -540,7 +511,8 @@ if ($PSCmdlet.ShouldProcess($SubnetName,'create/delegate')) {
 # that contradicts what the step is doing is how a wrong exposure goes unnoticed until DNS says so.
 Step "ACA environment $EnvName ($Exposure, workload-profile)"
 if ($PSCmdlet.ShouldProcess($EnvName,'create')) {
-    $exists = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query name -o tsv 2>$null
+    $envObj = Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
+    $exists = "$($envObj.name)"
     if (-not $exists) {
         # BUG-37: hand ACA the workspace we already created. Without --logs-workspace-id it
         # GENERATES one and writes every log there, leaving `law-pim-<token>` empty and billed --
@@ -562,35 +534,46 @@ if ($PSCmdlet.ShouldProcess($EnvName,'create')) {
         Note ("ACA environment exposure: --internal-only $internalOnly" + $(if ($internalOnly -eq 'true') {
                   ' (VNet-private; reachable only from peered/hub clients -- and NOT changeable later)' }
               else { ' (external-capable; lock the Manager down later with `az containerapp ingress update --type internal`)' }))
-        $envCreateArgs = @('containerapp','env','create') + $subArgs + @('-g',$ResourceGroup,'-n',$EnvName,
-                           '--location',$Location,
-                           '--infrastructure-subnet-resource-id',$subnetId,'--internal-only',$internalOnly,
-                           '--enable-workload-profiles','--logs-destination','log-analytics')
+        # The environment as ARM takes it (what `az containerapp env create --infrastructure-subnet-resource-id
+        # --internal-only --enable-workload-profiles --logs-destination log-analytics` sent): the Consumption
+        # workload profile, the delegated subnet, the exposure, and the Log Analytics workspace by id + key.
+        $envProps = @{
+            vnetConfiguration = @{ infrastructureSubnetId = $subnetId; internal = ($internalOnly -eq 'true') }
+            workloadProfiles  = @(@{ name = 'Consumption'; workloadProfileType = 'Consumption' })
+        }
         if ("$LogAnalyticsWorkspaceName".Trim()) {
             $lawRg  = $(if ("$LogAnalyticsResourceGroup".Trim()) { $LogAnalyticsResourceGroup } else { $ResourceGroup })
-            $lawCid = az monitor log-analytics workspace show @subArgs -g $lawRg -n $LogAnalyticsWorkspaceName --query customerId -o tsv --only-show-errors 2>$null
-            $lawKey = az monitor log-analytics workspace get-shared-keys @subArgs -g $lawRg -n $LogAnalyticsWorkspaceName --query primarySharedKey -o tsv --only-show-errors 2>$null
+            $lawCid = "$((Get-PimArmLogAnalytics -SubscriptionId $SubscriptionId -ResourceGroup $lawRg -Name $LogAnalyticsWorkspaceName -ErrorAsNull).properties.customerId)"
+            $lawKey = Get-PimArmLogAnalyticsKey -SubscriptionId $SubscriptionId -ResourceGroup $lawRg -Name $LogAnalyticsWorkspaceName
             if (-not "$lawCid".Trim() -or -not "$lawKey".Trim()) {
                 throw ("Could not read Log Analytics workspace '$LogAnalyticsWorkspaceName' in RG '$lawRg' " +
                        "(customerId='$lawCid', key=$(if ("$lawKey".Trim()) { 'present' } else { 'MISSING' })). " +
                        "Refusing to create the ACA environment without it -- ACA would silently generate a " +
                        "SECOND workspace and write every log there (BUG-37).")
             }
-            $envCreateArgs += @('--logs-workspace-id',$lawCid,'--logs-workspace-key',$lawKey)
             Note "logs -> $LogAnalyticsWorkspaceName ($lawCid)"
         } else {
             Write-Warning ("no -LogAnalyticsWorkspaceName given: ACA will GENERATE its own Log Analytics " +
                            "workspace and write every log there. Any workspace you created for this " +
                            "environment will sit empty and still be billed (BUG-37).")
+            # What `az containerapp env create` did client-side when no workspace was named: create one beside the
+            # environment ("workspace-<rg><random>") and log there. ARM itself will not -- it needs a workspace.
+            $genLaw = ('workspace-' + (($ResourceGroup -replace '[^A-Za-z0-9-]', '').ToLowerInvariant()) + ([guid]::NewGuid().ToString('N').Substring(0, 4)))
+            if ($genLaw.Length -gt 63) { $genLaw = $genLaw.Substring(0, 59) + $genLaw.Substring($genLaw.Length - 4) }
+            $gen = New-PimArmLogAnalytics -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $genLaw -Location $Location
+            $lawCid = "$($gen.properties.customerId)"
+            $lawKey = Get-PimArmLogAnalyticsKey -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $genLaw
+            Note "logs -> generated workspace $genLaw ($lawCid)"
         }
-        az @envCreateArgs -o none
-        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az containerapp env create failed (exit $LASTEXITCODE)." }
+        $envProps.appLogsConfiguration = @{ destination = 'log-analytics'; logAnalyticsConfiguration = @{ customerId = "$lawCid".Trim(); sharedKey = "$lawKey".Trim() } }
+        try { [void](Set-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -Properties $envProps -Create -Location $Location) }
+        catch { throw "Container Apps environment create failed: $($_.Exception.Message)" }
     } else {
         # §38.2a -- an existing environment KEEPS whatever exposure it was created with, and
         # nothing here can change it. Silently skipping would let a deploy that asked for
         # external quietly produce an internal-only environment (or the reverse) and still report
         # success -- the split-brain shape this file already guards against elsewhere. Say it.
-        $actualInternal = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query "properties.vnetConfiguration.internal" -o tsv 2>$null
+        $actualInternal = "$($envObj.properties.vnetConfiguration.internal)"
         $wantInternal   = $(if ($Exposure -eq 'internal') { 'true' } else { 'false' })
         if ("$actualInternal".Trim() -and "$actualInternal".Trim().ToLowerInvariant() -ne $wantInternal) {
             Write-Warning ("env exists with --internal-only=$actualInternal but this deploy asked for " +
@@ -606,9 +589,9 @@ if ($PSCmdlet.ShouldProcess($EnvName,'create')) {
 # quietly fell back to a generated workspace looks identical to a correct one until someone queries
 # logs and finds nothing -- which is exactly how BUG-37 surfaced.
 if (-not $WhatIfPreference -and "$LogAnalyticsWorkspaceName".Trim()) {
-    $envCid = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query "properties.appLogsConfiguration.logAnalyticsConfiguration.customerId" -o tsv 2>$null
+    $envCid = "$((Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull).properties.appLogsConfiguration.logAnalyticsConfiguration.customerId)"
     $lawRg2 = $(if ("$LogAnalyticsResourceGroup".Trim()) { $LogAnalyticsResourceGroup } else { $ResourceGroup })
-    $wantCid = az monitor log-analytics workspace show @subArgs -g $lawRg2 -n $LogAnalyticsWorkspaceName --query customerId -o tsv --only-show-errors 2>$null
+    $wantCid = "$((Get-PimArmLogAnalytics -SubscriptionId $SubscriptionId -ResourceGroup $lawRg2 -Name $LogAnalyticsWorkspaceName -ErrorAsNull).properties.customerId)"
     if ("$envCid".Trim() -and "$wantCid".Trim() -and "$envCid".Trim() -ne "$wantCid".Trim()) {
         # 🪤 THIS USED TO SAY "delete and recreate it to move the logs", AND THAT WAS WRONG --
         # dangerously so: deleting an ACA environment takes the Manager app and the tick Job with
@@ -620,18 +603,19 @@ if (-not $WhatIfPreference -and "$LogAnalyticsWorkspaceName".Trim()) {
         # So this now REPAIRS the environment instead of telling the operator to destroy it.
         Write-Warning ("ACA environment '$EnvName' logs to workspace $envCid, NOT the intended " +
                        "'$LogAnalyticsWorkspaceName' ($wantCid) -- repairing it in place (BUG-37).")
-        $lawKey2 = az monitor log-analytics workspace get-shared-keys @subArgs -g $lawRg2 -n $LogAnalyticsWorkspaceName --query primarySharedKey -o tsv --only-show-errors 2>$null
+        $lawKey2 = Get-PimArmLogAnalyticsKey -SubscriptionId $SubscriptionId -ResourceGroup $lawRg2 -Name $LogAnalyticsWorkspaceName
         if (-not "$lawKey2".Trim()) {
             throw ("ACA environment '$EnvName' logs to the WRONG workspace ($envCid) and the shared key for " +
                    "'$LogAnalyticsWorkspaceName' could not be read, so it cannot be repaired. Grant the " +
                    "deploying identity read on that workspace and re-run (BUG-37).")
         }
-        az containerapp env update @subArgs -g $ResourceGroup -n $EnvName `
-            --logs-destination log-analytics --logs-workspace-id $wantCid --logs-workspace-key $lawKey2 -o none
-        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az containerapp env update (log workspace repair) failed (exit $LASTEXITCODE)." }
+        try {
+            [void](Set-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -Properties @{
+                appLogsConfiguration = @{ destination = 'log-analytics'; logAnalyticsConfiguration = @{ customerId = "$wantCid".Trim(); sharedKey = "$lawKey2".Trim() } } })
+        } catch { throw "Container Apps environment update (log workspace repair) failed: $($_.Exception.Message)" }
         # Read back AGAIN -- a repair that reports success and changes nothing is the whole reason
         # this verification block exists in the first place.
-        $envCid2 = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query "properties.appLogsConfiguration.logAnalyticsConfiguration.customerId" -o tsv 2>$null
+        $envCid2 = "$((Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull).properties.appLogsConfiguration.logAnalyticsConfiguration.customerId)"
         if ("$envCid2".Trim() -ne "$wantCid".Trim()) {
             throw ("ACA environment '$EnvName' still logs to $envCid2 after the repair (wanted $wantCid). " +
                    "Do NOT assume the logs moved (BUG-37).")
@@ -641,8 +625,9 @@ if (-not $WhatIfPreference -and "$LogAnalyticsWorkspaceName".Trim()) {
         Note "logs verified -> $LogAnalyticsWorkspaceName ($envCid)"
     }
 }
-$envStatic = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query properties.staticIp -o tsv 2>$null
-$envDomain = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query properties.defaultDomain -o tsv 2>$null
+$envNow    = Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
+$envStatic = "$($envNow.properties.staticIp)"
+$envDomain = "$($envNow.properties.defaultDomain)"
 Note "env static IP = $envStatic   domain = $envDomain"
 
 # --- BUG-49: MAKE THE ENVIRONMENT REACHABLE ----------------------------------
@@ -761,7 +746,7 @@ if ($UseInCloudDbInit) {
     }
 }
 
-$acrId = az acr show @subArgs -n $AcrName --query id -o tsv 2>$null
+$acrId = "$((Get-PimArmAcr -SubscriptionId $SubscriptionId -Name $AcrName -ErrorAsNull).id)"
 # 🪤 A RESOURCE ID THAT ARRIVES LOOKING LIKE A LOCAL PATH WAS MANGLED BY THE CALLER'S SHELL.
 # Measured rebuilding mfnpr 2026-09-10: the value reached here as
 #     C:/Program Files/Git/subscriptions/<sub>/resourceGroups/.../id-pim-mfnpr
@@ -787,8 +772,9 @@ if ($useRegistryIdentity) {
     # Legacy path. `az acr credential show` returns EMPTY unless the registry was created with
     # --admin-enabled, and an empty username/password does not fail loudly -- it produces a
     # container app that cannot pull. Say so here rather than let it surface as a pull error.
-    $acrU = az acr credential show @subArgs -n $AcrName --query username -o tsv 2>$null
-    $acrP = az acr credential show @subArgs -n $AcrName --query "passwords[0].value" -o tsv 2>$null
+    $acrCred = if ("$acrId".Trim()) { Get-PimArmAcrCredential -SubscriptionId $SubscriptionId -ResourceId $acrId } else { $null }
+    $acrU = if ($acrCred) { "$($acrCred.username)".Trim() } else { $null }
+    $acrP = if ($acrCred) { "$($acrCred.password)".Trim() } else { $null }
     if (-not $acrU -or -not $acrP) {
         throw ("Registry '$AcrName' has no admin credentials (admin account not enabled), and " +
                "-RegistryIdentityResourceId was not supplied. Pass the user-assigned identity that " +
@@ -844,8 +830,8 @@ function Invoke-PimDbInitJob {
     # single principal as a set of properties. Force an array shape.
     if ($payload -notmatch '^\s*\[') { $payload = "[$payload]" }
 
-    # (The identities are attached through the YAML document below, not with --mi-user-assigned:
-    # the whole job definition goes through one --yaml for the reason explained there.)
+    # (The identities are attached in the ARM resource body below -- the whole job definition is ONE
+    # write, for the reason explained there.)
 
     $envVars = @(
         "PIM_SqlServer=$SqlServerFqdn"
@@ -865,16 +851,16 @@ function Invoke-PimDbInitJob {
     if (@($FeatureGatesDisable).Count) { $envVars += "PIM_DBINIT_FEATURE_DISABLE=$((@($FeatureGatesDisable) | Where-Object { "$_".Trim() }) -join ',')" }
     $sa = @($ManagerSuperAdmins | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if ($sa.Count) {
-        # 🪤 Compressed JSON, and the YAML writer quotes + escapes it -- an unquoted JSON array is
-        # YAML flow syntax and the document would parse into something else entirely.
+        # Compressed JSON, carried as ONE string value in the ARM body.
         $saJson = ConvertTo-Json -Compress -InputObject @($sa | ForEach-Object { @{ identity = $_; role = 'SuperAdmin' } })
         if ($saJson -notmatch '^\s*\[') { $saJson = "[$saJson]" }   # a one-element array collapses to an object
         $envVars += "PIM_DBINIT_MANAGER_ACCESS=$saJson"
     }
 
-    $exists = az containerapp job show @subArgs -g $ResourceGroup -n $DbInitJobName --query name -o tsv 2>$null
+    $exists = "$((Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -ErrorAsNull).name)"
 
-    # 🔴 --yaml, NEVER A MULTI-TOKEN --command. THIRD SCRIPT, SAME DEFECT.
+    # 🔴 THE COMMAND IS AN ARRAY IN THE RESOURCE BODY, NEVER A MULTI-TOKEN --command. THIRD SCRIPT, SAME DEFECT
+    # (the history, from the az days, below): command = @('pwsh') and args = the token list, in the ARM body.
     #     az exit 2: ERROR: unrecognized arguments: -NoProfile,-File,/app/.../dbinit-job-entry.ps1
     # az takes only the FIRST token after --command and then tries to parse the rest as its own
     # arguments; --args does not rescue it. The worker containers learned this, Deploy-PimUpdateJob
@@ -886,9 +872,10 @@ function Invoke-PimDbInitJob {
     # before the change too -- for a DIFFERENT script. A ratcheted gate that is already red cannot
     # report the next instance, which is the whole reason this defect reached a customer deploy.
     $entry    = '/app/PIM4EntraPS/tools/pim-engine/dbinit-job-entry.ps1'
-    $envId    = "$(az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null)".Trim()
+    $dbEnv    = Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
+    $envId    = "$($dbEnv.id)".Trim()
     if (-not $envId) { throw "Container Apps environment '$EnvName' not found in '$ResourceGroup' -- the bootstrap job has nowhere to run." }
-    $location = "$(az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query location -o tsv 2>$null)".Trim()
+    $location = "$($dbEnv.location)".Trim()
 
     # The job carries the SQL admin identity (to authenticate to the database) and, when they
     # differ, the pull identity (to get the image). Two identities, two jobs, neither able to do
@@ -898,62 +885,64 @@ function Invoke-PimDbInitJob {
     if ($useRegistryIdentity -and "$RegistryIdentityResourceId".Trim() -and ("$RegistryIdentityResourceId".Trim() -ne "$SqlAdminIdentityResourceId".Trim())) {
         $uaIds += "$RegistryIdentityResourceId".Trim()
     }
-    $identityYaml = 'identity: { type: "SystemAssigned" }'
+    $dbIdentity = @{ type = 'SystemAssigned' }
     if ($uaIds.Count) {
-        $identityYaml = 'identity: { type: "SystemAssigned, UserAssigned", userAssignedIdentities: { ' +
-                        (($uaIds | ForEach-Object { '"' + $_ + '": {}' }) -join ', ') + ' } }'
+        # 🪤 'SystemAssigned,UserAssigned' is ONE value (the YAML era lost the second half to flow-mapping syntax and ARM
+        # refused the identity ids with InvalidResourceIdentityType). As a hashtable value it cannot split.
+        $uaMap = [ordered]@{}; foreach ($u in $uaIds) { $uaMap[$u] = @{} }
+        $dbIdentity = @{ type = 'SystemAssigned,UserAssigned'; userAssignedIdentities = $uaMap }
     }
     $regIdent = $(if ($useRegistryIdentity -and "$RegistryIdentityResourceId".Trim()) { "$RegistryIdentityResourceId".Trim() } else { 'system' })
-    $registryYaml = "    registries: [ { server: `"$AcrName.azurecr.io`", identity: `"$regIdent`" } ]"
-    # 🪤 Values are QUOTED. PIM_DBINIT_PRINCIPALS is a JSON array -- unquoted it is YAML flow
-    # syntax and the document parses into something else entirely.
-    $envYaml = '        env: [ ' + (($envVars | ForEach-Object {
-                    $kv = "$_" -split '=', 2
-                    '{ name: ' + $kv[0] + ', value: "' + ("$($kv[1])" -replace '\\','\\\\' -replace '"','\"') + '" }' }) -join ', ') + ' ]'
+    # Values travel as JSON strings in the ARM body -- PIM_DBINIT_PRINCIPALS is a JSON array, and it stays one string
+    # value (the YAML era had to quote + escape it so the document did not parse it as flow syntax).
+    $dbEnvList = @($envVars | ForEach-Object { $kv = "$_" -split '=', 2; @{ name = $kv[0]; value = "$($kv[1])" } })
 
-    $y = New-Object System.Collections.Generic.List[string]
-    [void]$y.Add("location: $location")
-    # The identity block belongs to CREATE only -- `job update --yaml` with an identity: block
-    # fails as "Request requires identities to be assigned" (Deploy-PimUpdateJob, third install).
-    if (-not "$exists".Trim()) { [void]$y.Add($identityYaml) }
-    [void]$y.Add('properties:')
-    [void]$y.Add("  environmentId: $envId")
-    [void]$y.Add('  configuration:')
-    [void]$y.Add('    triggerType: Manual')
-    [void]$y.Add('    replicaTimeout: 900')
-    [void]$y.Add('    replicaRetryLimit: 0')
-    [void]$y.Add('    manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }')
-    [void]$y.Add($registryYaml)
-    [void]$y.Add('  template:')
-    [void]$y.Add('    containers:')
-    [void]$y.Add("      - name: $DbInitJobName")
-    [void]$y.Add("        image: $image")
-    [void]$y.Add('        command: [pwsh]')
-    [void]$y.Add("        args: [`"-NoProfile`", `"-ExecutionPolicy`", `"Bypass`", `"-File`", `"$entry`"]")
-    [void]$y.Add($envYaml)
-    [void]$y.Add('        resources: { cpu: 0.5, memory: 1.0Gi }')
-    $yamlPath = Join-Path ([IO.Path]::GetTempPath()) ("pim-dbinit-job-{0}.yaml" -f ([guid]::NewGuid().ToString('N').Substring(0,8)))
-    Set-Content -LiteralPath $yamlPath -Value (($y.ToArray()) -join "`n") -Encoding ascii
+    $dbProps = @{
+        environmentId = $envId
+        configuration = @{
+            triggerType         = 'Manual'
+            replicaTimeout      = 900
+            replicaRetryLimit   = 0
+            manualTriggerConfig = @{ parallelism = 1; replicaCompletionCount = 1 }
+            registries          = @(@{ server = "$AcrName.azurecr.io"; identity = $regIdent })
+        }
+        template = @{
+            containers = @(@{
+                name      = $DbInitJobName
+                image     = $image
+                command   = @('pwsh')
+                args      = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $entry)
+                env       = @($dbEnvList)
+                resources = @{ cpu = 0.5; memory = '1.0Gi' }
+            })
+        }
+    }
+    $dbResource = @{ location = $location; properties = $dbProps }
+    # The identity block belongs to CREATE only -- an update carrying an identity block failed as
+    # "Request requires identities to be assigned" (Deploy-PimUpdateJob, third install).
+    if (-not "$exists".Trim()) { $dbResource.identity = $dbIdentity }
     try {
-        if ("$exists".Trim()) { az containerapp job update @subArgs -g $ResourceGroup -n $DbInitJobName --yaml $yamlPath -o none 2>$null | Out-Null }
-        else                  { az containerapp job create @subArgs -g $ResourceGroup -n $DbInitJobName --yaml $yamlPath -o none 2>$null | Out-Null }
-    } finally { Remove-Item -LiteralPath $yamlPath -Force -ErrorAction SilentlyContinue }
-    if (-not "$(az containerapp job show @subArgs -g $ResourceGroup -n $DbInitJobName --query name -o tsv 2>$null)".Trim()) {
+        if ("$exists".Trim()) { [void](Set-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -Resource $dbResource) }
+        else                  { [void](Set-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -Resource $dbResource -Create) }
+    } catch { Write-Host "    $DbInitJobName create/update: $($_.Exception.Message)" -ForegroundColor DarkYellow }
+    if (-not "$((Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -ErrorAsNull).name)".Trim()) {
         throw "the bootstrap job '$DbInitJobName' was NOT created -- see the failure above. Without it no database user can be created, because this host has no route to a private SQL server."
     }
 
-    $exec = "$(az containerapp job start @subArgs -g $ResourceGroup -n $DbInitJobName --query name -o tsv 2>$null)".Trim()
+    $exec = "$(Start-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName)".Trim()
     if (-not $exec) { throw "could not start '$DbInitJobName'." }
     Note "execution $exec -- waiting"
     $status = ''
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Seconds 10
-        $status = "$(az containerapp job execution show @subArgs -g $ResourceGroup -n $DbInitJobName --job-execution-name $exec --query properties.status -o tsv 2>$null)".Trim()
+        $status = "$((Get-PimArmAcaJobExecution -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -Execution $exec).properties.status)".Trim()
         if ($status -in @('Succeeded','Failed','Degraded')) { break }
     }
     if ($status -ne 'Succeeded') {
-        throw ("the database bootstrap '$exec' ended '$status'. Read its log:`n" +
-               "  az containerapp job logs show --subscription $SubscriptionId -g $ResourceGroup -n $DbInitJobName --execution $exec --container $DbInitJobName --tail 100`n" +
+        $logTail = @(Get-PimArmAcaJobLogs -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $DbInitJobName -Execution $exec -Tail 100 -EnvironmentName $EnvName)
+        throw ("the database bootstrap '$exec' ended '$status'. " +
+               $(if ($logTail.Count) { "Its log (from the environment's Log Analytics workspace):`n  " + ($logTail -join "`n  ") + "`n" }
+                 else { "Its log is in the environment's Log Analytics workspace (ContainerAppConsoleLogs_CL, ContainerGroupName_s startswith '$exec'; it arrives a few minutes after the run).`n" }) +
                "Until it succeeds the apps have NO database users and will crash-loop on " +
                "'Login failed for user <token-identified principal>' -- so this deploy stops here rather than exposing that.")
     }
@@ -970,12 +959,13 @@ function Assert-PimDeployedImage {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$Expected
     )
-    $q = 'properties.template.containers[0].image'
-    $running = if ($Kind -eq 'job') {
-        az containerapp job show @subArgs -g $ResourceGroup -n $Name --query $q -o tsv 2>$null
+    # properties.template.containers[0].image, as the platform reports it now
+    $obj = if ($Kind -eq 'job') {
+        Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull
     } else {
-        az containerapp show @subArgs     -g $ResourceGroup -n $Name --query $q -o tsv 2>$null
+        Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull
     }
+    $running = "$(@($obj.properties.template.containers)[0].image)"
     $v = Test-PimImageDeployed -Expected $Expected -Running "$running".Trim()
     if (-not $v.ok) { throw "$Kind '$Name': $($v.reason)" }
     Note "image verified: $($v.reason)"
@@ -985,7 +975,7 @@ $commonEnv = @(
     "PIM_HOSTED=1","PIM_StorageBackend=sql",
     "PIM_SqlServer=$SqlServerFqdn","PIM_SqlDatabase=$SqlDatabase","PIM_TenantId=$TenantId"
 )
-# IMP-06a: carry the sender to BOTH the Manager and the tick Job -- $commonEnv feeds the job YAML
+# IMP-06a: carry the sender to BOTH the Manager and the tick Job -- $commonEnv feeds the job definition
 # too, and the tick Job is the process that actually mints TAPs and mails them, so a sender that
 # reached only the Manager would look configured in the GUI and still never send.
 if ("$MailSender".Trim()) {
@@ -1067,22 +1057,47 @@ if ("$EngineClientId".Trim()) {
     Note "  Graph app-roles are granted to it by this deploy, and a failed grant stops the deploy rather than warning."
 }
 
-function Get-PimContainerEnvYaml {
-    # Renders the container `env:` block. A secret is emitted as `secretRef`, never `value`.
+function Get-PimContainerEnvList {
+    # The container `env` array as ARM takes it. A secret is emitted as `secretRef`, never `value`.
     param([string[]]$Pairs, [bool]$WithEngineSecret, [string]$SecretName)
-    $lines = @($Pairs | ForEach-Object { $kv = $_ -split '=', 2; "          - { name: $($kv[0]), value: `"$($kv[1])`" }" })
-    if ($WithEngineSecret) { $lines += "          - { name: AZURE_CLIENT_SECRET, secretRef: $SecretName }" }
-    return ($lines -join "`n")
+    $list = @(@($Pairs) | Where-Object { "$_".Trim() } | ForEach-Object {
+        $kv = "$_" -split '=', 2
+        if ("$($kv[1])" -match '^secretref:(.+)$') { @{ name = $kv[0]; secretRef = $Matches[1] } } else { @{ name = $kv[0]; value = "$($kv[1])" } } })
+    if ($WithEngineSecret) { $list += @{ name = 'AZURE_CLIENT_SECRET'; secretRef = $SecretName } }
+    return ,@($list)
 }
-function Get-PimContainerSecretsYaml {
+function Get-PimContainerSecretList {
     # Merges the engine secret into whatever secrets the registry mode already needs, so the two
-    # cannot overwrite each other's `secrets:` key (only one is allowed per configuration).
+    # cannot overwrite each other (configuration carries ONE `secrets` array).
     param([bool]$WithAcrPwd, [string]$AcrPwd, [bool]$WithEngineSecret, [string]$SecretName, [string]$SecretValue)
     $items = @()
-    if ($WithAcrPwd)       { $items += "{ name: acr-pwd, value: `"$AcrPwd`" }" }
-    if ($WithEngineSecret) { $items += "{ name: $SecretName, value: `"$SecretValue`" }" }
-    if (-not $items.Count) { return '' }
-    return "    secrets: [ $($items -join ', ') ]"
+    if ($WithAcrPwd)       { $items += @{ name = 'acr-pwd'; value = "$AcrPwd" } }
+    if ($WithEngineSecret) { $items += @{ name = $SecretName; value = "$SecretValue" } }
+    return ,@($items)
+}
+function Get-PimContainerIdentityAndRegistry {
+    # The identity block + the registries array for one workload, by registry auth mode.
+    # 🪤 'SystemAssigned,UserAssigned' is ONE value: the YAML era wrote it unquoted once, flow-mapping syntax split it,
+    # and ARM refused the identity ids with "(InvalidResourceIdentityType) The identity ids are only supported for
+    # 'UserAssigned' identity type." As a hashtable value it cannot split.
+    if ($useRegistryIdentity) {
+        $ua = [ordered]@{}; $ua["$RegistryIdentityResourceId"] = @{}
+        return @{ identity = @{ type = 'SystemAssigned,UserAssigned'; userAssignedIdentities = $ua }
+                  registries = @(@{ server = "$AcrName.azurecr.io"; identity = "$RegistryIdentityResourceId" }) }
+    }
+    # Legacy admin path: the password travels as the `acr-pwd` secret, referenced by name.
+    return @{ identity = @{ type = 'SystemAssigned' }
+              registries = @(@{ server = "$AcrName.azurecr.io"; username = "$acrU"; passwordSecretRef = 'acr-pwd' }) }
+}
+function Set-PimContainerAppImageHere {
+    # `az containerapp update --image` (+ --set-env-vars): read-modify-write of the app's container -- the one named
+    # like the app, or the only one -- then one PATCH of the whole template (PIM-ArmSetup: Set-PimArmAcaAppEnvVars).
+    param([Parameter(Mandatory)][string]$App, [string]$Image, [hashtable]$Env = @{})
+    $cur = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App
+    if (-not $cur) { throw "container app '$App' not found in $ResourceGroup." }
+    $cs = @($cur.properties.template.containers)
+    $cn = if ($cs.Count -gt 1) { $App } else { '' }
+    [void](Set-PimArmAcaAppEnvVars -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Env $Env -ContainerName $cn -Image $Image)
 }
 
 $script:PimManagerCreatedClosed = $false
@@ -1099,9 +1114,16 @@ function Close-PimNewManagerUntilEasyAuth {
     $eaClose = @{ App = $App; ResourceGroup = $ResourceGroup; SubscriptionId = $SubscriptionId; TenantId = $TenantId; CloseIngressOnly = $true }
     Step "SECURE BY DEFAULT: '$App' is created CLOSED and stays closed until Easy Auth is configured and verified"
     & $ea @eaClose | Out-Host
-    az containerapp ingress update @subArgs -g $ResourceGroup -n $App --type external -o none
-    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "could not switch '$App' to external ingress (exit $LASTEXITCODE) -- it stays on INTERNAL ingress (closed)." }
-    $ext = "$(az containerapp show @subArgs -g $ResourceGroup -n $App --query properties.configuration.ingress.external -o tsv 2>$null)".Trim()
+    # `az containerapp ingress update --type external`: read-modify-write of the configuration (the closing access
+    # restriction, the secrets and the registries stay), one PATCH.
+    try {
+        [void](Set-PimArmAcaAppConfiguration -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Mutate {
+            param($cfg)
+            if (-not $cfg.ingress) { throw "'$App' has no ingress block to switch" }
+            $cfg.ingress.external = $true
+        }.GetNewClosure())
+    } catch { throw "could not switch '$App' to external ingress ($($_.Exception.Message)) -- it stays on INTERNAL ingress (closed)." }
+    $ext = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull).properties.configuration.ingress.external)".Trim()
     if ($ext -notmatch '(?i)^true$') { throw "read-back: '$App' ingress.external reads '$ext' after the switch -- refusing to continue." }
     # The ingress switch rewrites the ingress block: prove the closing rule survived it (re-applied if not).
     & $ea @eaClose | Out-Host
@@ -1119,110 +1141,76 @@ foreach ($w in $Workers) {
     if ($w.entry -eq 'manager' -and $managerBaselineEnv.Count) { $envVars += $managerBaselineEnv }
 
     # create or update
-    $exists = az containerapp show @subArgs -g $ResourceGroup -n $w.name --query name -o tsv 2>$null
+    $exists = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -ErrorAsNull).name)"
     if (-not $exists) {
+        # The app as ARM takes it -- one PUT of the whole resource (what `az containerapp create` sent).
+        $wEnvId = "$((Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull).id)".Trim()
+        if (-not $wEnvId) { throw "Container Apps environment '$EnvName' not found in '$ResourceGroup' -- '$($w.name)' has nowhere to run." }
+        $ir = Get-PimContainerIdentityAndRegistry
+        # Identity + registry differ by auth mode. With a user-assigned identity there is no REGISTRY secret -- but the
+        # engine client secret (when that is the credential in use) still has to be declared, so the secrets array is built
+        # centrally rather than per-branch: `configuration` carries ONE `secrets` array, and each branch writing its own is
+        # how one silently overwrites the other.
+        $wSecrets = Get-PimContainerSecretList -WithAcrPwd (-not $useRegistryIdentity) -AcrPwd $acrP `
+                        -WithEngineSecret $useEngineSecret -SecretName $engineSecretName -SecretValue $EngineClientSecret
+        $wEnv = Get-PimContainerEnvList -Pairs $envVars -WithEngineSecret $useEngineSecret -SecretName $engineSecretName
+        $wConfig = @{ activeRevisionsMode = 'Single'; registries = $ir.registries }
+        if (@($wSecrets).Count) { $wConfig.secrets = @($wSecrets) }
+        $wContainer = @{ name = $w.name; image = $image; env = @($wEnv); resources = @{ cpu = 0.5; memory = '1Gi' } }
         if ($w.entry -eq 'manager') {
-            # --system-assigned is kept in BOTH paths: the app still needs its own identity for
+            # The system-assigned identity is kept in BOTH paths: the app still needs its own identity for
             # SQL + Graph. The user-assigned one is attached purely so the registry pull has a
             # principal that already holds AcrPull at create time.
-            # 🔴 SEC-31 -- CREATED CLOSED. The Manager used to be created with --ingress external and
+            # 🔴 SEC-31 -- CREATED CLOSED. The Manager used to be created with external ingress and
             # nothing in front of it until the Easy Auth step ran later -- and in hosted mode a caller
             # with no principal is a READER, so every assignment and admin row was readable by anyone
             # who found the URL, for as long as that took (or for good, if the Easy Auth step failed:
-            # the deploy rolled back CODE only). Now: create it on INTERNAL ingress (reachable only
-            # from inside the environment), put the closing access restriction on it, and only then
-            # switch it to the intended --ingress external. Set-PimManagerEasyAuth.ps1 removes the
+            # the deploy rolled back CODE only). Now: create it on INTERNAL ingress (external = $false:
+            # reachable only from inside the environment), put the closing access restriction on it, and
+            # only then switch it to the intended external ingress. Set-PimManagerEasyAuth.ps1 removes the
             # restriction once Easy Auth is configured AND verified -- nothing else does.
             # An EXISTING Manager is never touched by this (the update path below), so a re-deploy of
             # an environment that already has Easy Auth keeps serving exactly as before.
-            $createArgs = @('containerapp','create') + $subArgs + @(
-                '-g',$ResourceGroup,'-n',$w.name,'--environment',$EnvName,
-                '--workload-profile-name','Consumption','--image',$image,
-                '--registry-server',"$AcrName.azurecr.io",
-                '--ingress','internal','--target-port','8080','--transport','http',
-                # min-replicas 0 = scale to zero: ACA keeps the HTTP scale rule and cold-starts
-                # the Manager on the first request. Safe here because the Manager holds NO state
-                # of its own -- it is a front end over the SQL store.
-                '--min-replicas',"$ManagerMinReplicas",'--max-replicas','1','--system-assigned')
-            if ($useRegistryIdentity) {
-                $createArgs += @('--user-assigned',$RegistryIdentityResourceId,
-                                 '--registry-identity',$RegistryIdentityResourceId)
-            } else {
-                $createArgs += @('--registry-username',$acrU,'--registry-password',$acrP)
-            }
-            if ($useEngineSecret) {
-                # As an ACA secret + a secretref env var, so the value never appears in the
-                # container spec as clear text.
-                $createArgs += @('--secrets', "$engineSecretName=$EngineClientSecret")
-                $envVars += "AZURE_CLIENT_SECRET=secretref:$engineSecretName"
-            }
-            $createArgs += @('--env-vars') + $envVars + @('-o','none')
-            az @createArgs
-            if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az containerapp create failed for '$($w.name)' (exit $LASTEXITCODE)." }
-            Close-PimNewManagerUntilEasyAuth -App $w.name
+            $wConfig.ingress = @{ external = $false; targetPort = 8080; transport = 'http'; allowInsecure = $false }
+            # min-replicas 0 = scale to zero: ACA keeps the HTTP scale rule and cold-starts
+            # the Manager on the first request. Safe here because the Manager holds NO state
+            # of its own -- it is a front end over the SQL store.
+            $wScale = @{ minReplicas = [int]$ManagerMinReplicas; maxReplicas = 1 }
+            if ($useEngineSecret) { Note "  engine secret: an ACA secret ($engineSecretName) + a secretRef env var -- never clear text in the container spec" }
         } else {
-            # worker via YAML (reliable command/args array) — same image, scheduler entrypoint
-            $envId = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null
-            $envYaml = Get-PimContainerEnvYaml -Pairs $envVars -WithEngineSecret $useEngineSecret -SecretName $engineSecretName
-            # Identity + registry blocks differ by auth mode. With a user-assigned identity there
-            # is no REGISTRY secret in this YAML -- but the engine client secret (when that is the
-            # credential in use) still has to be declared, so the secrets block is built centrally
-            # rather than per-branch: `configuration` allows only ONE `secrets:` key, and having
-            # each branch write its own is how one silently overwrites the other.
-            $secretsYaml = Get-PimContainerSecretsYaml -WithAcrPwd (-not $useRegistryIdentity) -AcrPwd $acrP `
-                             -WithEngineSecret $useEngineSecret -SecretName $engineSecretName -SecretValue $EngineClientSecret
-            if ($useRegistryIdentity) {
-                # 🪤 `type` MUST be a QUOTED string. In a YAML flow mapping,
-                # `{ type: SystemAssigned, UserAssigned, ... }` parses as `type: SystemAssigned`
-                # plus a separate null-valued key `UserAssigned` -- so the type silently became
-                # SystemAssigned-only and ARM rejected the identity ids with
-                # "(InvalidResourceIdentityType) The identity ids are only supported for
-                # 'UserAssigned' identity type." The comma is part of the VALUE, not a separator.
-                $identityYaml = "identity: { type: `"SystemAssigned, UserAssigned`", userAssignedIdentities: { `"$RegistryIdentityResourceId`": {} } }"
-                $registryYaml = "    registries: [ { server: $AcrName.azurecr.io, identity: `"$RegistryIdentityResourceId`" } ]"
-            } else {
-                $identityYaml = 'identity: { type: SystemAssigned }'
-                $registryYaml = "    registries: [ { server: $AcrName.azurecr.io, username: $acrU, passwordSecretRef: acr-pwd } ]"
-            }
-            if ($secretsYaml) { $registryYaml = "$secretsYaml`n$registryYaml" }
-            $y = @"
-location: $Location
-$identityYaml
-properties:
-  environmentId: $envId
-  workloadProfileName: Consumption
-  configuration:
-    activeRevisionsMode: Single
-$registryYaml
-  template:
-    containers:
-      - name: $($w.name)
-        image: $image
-        command: [pwsh]
-        args: ["-NoProfile","-File","/app/PIM4EntraPS/tools/pim-scheduler/Start-PimScheduler.ps1"]
-        env:
-$envYaml
-        resources: { cpu: 0.5, memory: 1Gi }
-    scale: { minReplicas: 1, maxReplicas: 1 }
-"@
-            # 🔴 KEYED BY RESOURCE GROUP + PID -- see the Job yaml below for the measured failure.
-            # The app names are identical in every environment ('ca-pim-manager'), so a bare
-            # "pim-<name>.yaml" is the SAME PATH for every tenant, and the estate orchestrator
-            # deploys 6 environments CONCURRENTLY by default.
-            $tmp = Join-Path ([IO.Path]::GetTempPath()) "pim-$($w.name)-$ResourceGroup-$PID.yaml"; Set-Content -LiteralPath $tmp -Value $y -Encoding utf8
-            az containerapp create @subArgs -g $ResourceGroup -n $w.name --yaml $tmp -o none
+            # worker: same image, scheduler entrypoint. The command is a real ARRAY in the body (the reason the YAML era
+            # existed: a multi-token --command was split by the CLI's own parser).
+            $wContainer.command = @('pwsh')
+            $wContainer.args    = @('-NoProfile', '-File', '/app/PIM4EntraPS/tools/pim-scheduler/Start-PimScheduler.ps1')
+            $wScale = @{ minReplicas = 1; maxReplicas = 1 }
         }
+        $wResource = @{
+            location = $Location
+            identity = $ir.identity
+            properties = @{
+                managedEnvironmentId = $wEnvId
+                workloadProfileName  = 'Consumption'
+                configuration        = $wConfig
+                template             = @{ containers = @($wContainer); scale = $wScale }
+            }
+        }
+        try { [void](Set-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -Resource $wResource -Create) }
+        catch { throw "container app create failed for '$($w.name)': $($_.Exception.Message)" }
+        if ($w.entry -eq 'manager') { Close-PimNewManagerUntilEasyAuth -App $w.name }
     } else {
-        az containerapp update @subArgs -g $ResourceGroup -n $w.name --image $image -o none
-        Note 'updated existing'
         # 71.40: an EXISTING Manager gets the baseline pin + URL too -- the create path above is not the only way in.
-        # --set-env-vars MERGES (never --replace-env-vars). Safe through az.cmd: the values are validated key ids and a
-        # URL that carries no query string, so there is no '&' for cmd.exe to split (the B9 trap).
-        if ($w.entry -eq 'manager' -and $managerBaselineEnv.Count) {
-            az containerapp update @subArgs -g $ResourceGroup -n $w.name --set-env-vars @managerBaselineEnv -o none
-            if ($LASTEXITCODE -ne 0) { throw "could not set the baseline pin/URL on $($w.name) ($(@($managerBaselineEnv | ForEach-Object { ($_ -split '=', 2)[0] }) -join ', '))" }
-            $mbeNames = @($managerBaselineEnv | ForEach-Object { ($_ -split '=', 2)[0] })
-            $got = @(az containerapp show @subArgs -g $ResourceGroup -n $w.name --query "properties.template.containers[0].env[].name" -o tsv 2>$null)
+        # The env vars MERGE (read-modify-write; never a replace of the list), in the same write as the image.
+        $mbeEnv = @{}
+        if ($w.entry -eq 'manager' -and $managerBaselineEnv.Count) { foreach ($pair in $managerBaselineEnv) { $kv = "$pair" -split '=', 2; $mbeEnv[$kv[0]] = "$($kv[1])" } }
+        try { Set-PimContainerAppImageHere -App $w.name -Image $image -Env $mbeEnv }
+        catch {
+            if ($mbeEnv.Count) { throw "could not set the baseline pin/URL on $($w.name) ($(@($mbeEnv.Keys) -join ', ')): $($_.Exception.Message)" }
+            throw "container app update failed for '$($w.name)': $($_.Exception.Message)"
+        }
+        Note 'updated existing'
+        if ($mbeEnv.Count) {
+            $mbeNames = @($mbeEnv.Keys)
+            $got = @(@(@((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -ErrorAsNull).properties.template.containers)[0].env) | ForEach-Object { "$($_.name)" })
             $miss = @($mbeNames | Where-Object { $got -notcontains $_ })
             if ($miss.Count) { throw "read-back: $($w.name) does not carry $($miss -join ', ') after the update" }
             Note "baseline trust on $($w.name): $($mbeNames -join ', ') set and read back"
@@ -1234,14 +1222,14 @@ $envYaml
     # identity.principalId is the SYSTEM-assigned principal even when a user-assigned identity
     # is also attached (those live under identity.userAssignedIdentities), so SQL + Graph keep
     # targeting the app's own identity in both auth modes.
-    $oid = az containerapp show @subArgs -g $ResourceGroup -n $w.name --query identity.principalId -o tsv 2>$null
+    $oid = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -ErrorAsNull).identity.principalId)".Trim()
     if (-not $oid) {
         # A failed create shows up HERE as an empty identity. Left unchecked it flowed into
         # Grant-PimMiSql and surfaced as "Cannot bind argument to parameter 'MiAppId' because it
         # is an empty string" -- an error that blames the grant for the create's failure. Name
         # the real problem at the point it is detectable.
         throw ("Container app '$($w.name)' has no identity -- it was not created successfully. " +
-               "Check the az error above (the container app create step), not this grant.")
+               "Check the error above (the container app create step), not this grant.")
     }
     # BUG-44: retry -- the SP behind a just-created identity is eventually consistent. This call
     # site happened to survive because `containerapp create` blocks on provisioning; the tick Job
@@ -1260,8 +1248,18 @@ $envYaml
     if (-not $useRegistryIdentity) {
         # Legacy path only: move the registry off the admin credential and onto the app's own
         # identity now that it exists and can be granted AcrPull.
-        az role assignment create @subArgs --assignee-object-id $oid --assignee-principal-type ServicePrincipal --role AcrPull --scope $acrId -o none 2>$null
-        az containerapp registry set @subArgs -g $ResourceGroup -n $w.name --server "$AcrName.azurecr.io" --identity system -o none 2>$null
+        # (Both best-effort, as they always were: a failure is visible at the next pull, never fatal here.)
+        try { [void](New-PimArmRoleAssignment -Scope $acrId -PrincipalId $oid -Role 'AcrPull' -PrincipalType ServicePrincipal -SubscriptionId $SubscriptionId) }
+        catch { Write-Verbose "AcrPull for $($w.name): $($_.Exception.Message)" }
+        # `az containerapp registry set --server <acr> --identity system`: that registry entry, now on the system identity.
+        try {
+            [void](Set-PimArmAcaAppConfiguration -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $w.name -Mutate {
+                param($cfg)
+                $srv = "$AcrName.azurecr.io"
+                $others = @(@($cfg.registries) | Where-Object { $_ -and "$($_.server)" -ine $srv })
+                $cfg | Add-Member -NotePropertyName registries -NotePropertyValue (@($others) + @([pscustomobject]@{ server = $srv; identity = 'system' })) -Force
+            }.GetNewClosure())
+        } catch { Write-Verbose "registry identity for $($w.name): $($_.Exception.Message)" }
     }
     # In identity mode the registry is ALREADY on the user-assigned identity, which already
     # holds AcrPull. Re-pointing it at the system identity here would undo that and force an
@@ -1311,30 +1309,21 @@ if ($WorkerMode -eq 'cron') {
     Step "Scheduled tick Job '$TickJobName' (cron '$TickCron' UTC)"
     $jobExists = $false
     if (-not $WhatIfPreference) {
-        $jn = az containerapp job show @subArgs -g $ResourceGroup -n $TickJobName --query name -o tsv 2>$null
+        $jn = "$((Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull).name)"
         if ("$jn".Trim()) { $jobExists = $true }
     }
-    # 🪤 YAML, not `--command`. `az ... --command pwsh -NoProfile -File <x> -Once` FAILS with
-    # "unrecognized arguments: -NoProfile -File ... -Once": the CLI's parser treats any token
-    # starting with '-' as a new OPTION rather than a value, so a command whose arguments carry
-    # leading dashes cannot be expressed that way AT ALL. The worker apps above already learned
-    # this ("worker via YAML (reliable command/args array)") and a test pins it; the shared
-    # Build-PimDownlinkJobArgs did NOT, so it carried the same latent break -- BUG-38, now fixed
-    # there too (it renders the same YAML shape via Get-PimDownlinkJobYaml).
-    # Same proven YAML shape as the workers, plus the Job's schedule trigger.
+    # 🪤 THE COMMAND IS A REAL ARRAY IN THE RESOURCE BODY, never a `--command`. `az ... --command pwsh -NoProfile -File <x>
+    # -Once` FAILED with "unrecognized arguments: -NoProfile -File ... -Once": the CLI's parser treated any token starting
+    # with '-' as a new OPTION rather than a value, so a command whose arguments carry leading dashes could not be
+    # expressed that way AT ALL. The worker apps above learned this first; the shared Build-PimDownlinkJobArgs carried the
+    # same latent break (BUG-38). Here the body carries command = @('pwsh') and args = the token list -- no CLI parser.
+    # Same shape as the workers, plus the Job's schedule trigger.
     # THIS is the process that runs the engine, so the engine SPN identity matters most here.
-    $envYamlJob = Get-PimContainerEnvYaml -Pairs $commonEnv -WithEngineSecret $useEngineSecret -SecretName $engineSecretName
-    $jobSecretsYaml = Get-PimContainerSecretsYaml -WithAcrPwd (-not $useRegistryIdentity) -AcrPwd $acrP `
-                        -WithEngineSecret $useEngineSecret -SecretName $engineSecretName -SecretValue $EngineClientSecret
-    if ($useRegistryIdentity) {
-        $jobIdentityYaml = "identity: { type: `"SystemAssigned, UserAssigned`", userAssignedIdentities: { `"$RegistryIdentityResourceId`": {} } }"
-        $jobRegistryYaml = "    registries: [ { server: $AcrName.azurecr.io, identity: `"$RegistryIdentityResourceId`" } ]"
-    } else {
-        $jobIdentityYaml = 'identity: { type: SystemAssigned }'
-        $jobRegistryYaml = "    registries: [ { server: $AcrName.azurecr.io, username: $acrU, passwordSecretRef: acr-pwd } ]"
-    }
-    if ($jobSecretsYaml) { $jobRegistryYaml = "$jobSecretsYaml`n$jobRegistryYaml" }
-    $envIdForJob = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null
+    $jobEnvList = Get-PimContainerEnvList -Pairs $commonEnv -WithEngineSecret $useEngineSecret -SecretName $engineSecretName
+    $jobSecrets = Get-PimContainerSecretList -WithAcrPwd (-not $useRegistryIdentity) -AcrPwd $acrP `
+                    -WithEngineSecret $useEngineSecret -SecretName $engineSecretName -SecretValue $EngineClientSecret
+    $jobIr = Get-PimContainerIdentityAndRegistry
+    $envIdForJob = "$((Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull).id)".Trim()
 
     # 🔴 100.31 / framework 12.15 -- THE TICK'S SIZE FOR THIS TENANT (Get-PimContainerJobResources decides; this only reads).
     # What the job runs now and what was recorded on it are read first: an existing job is never made smaller, and a failed
@@ -1342,7 +1331,7 @@ if ($WorkerMode -eq 'cron') {
     $tickCur = $null; $tickRec = $null
     if ($jobExists) {
         try {
-            $jo = (az containerapp job show @subArgs -g $ResourceGroup -n $TickJobName -o json 2>$null | Out-String) | ConvertFrom-Json
+            $jo = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull
             $jr = @($jo.properties.template.containers)[0].resources
             $tickCur = @{ Cpu = "$($jr.cpu)"; Memory = "$($jr.memory)"; ReplicaTimeout = "$($jo.properties.configuration.replicaTimeout)" }
             $tickRec = ConvertFrom-PimTenantSizingTags -Tags $jo.tags -Job $TickJobName
@@ -1362,57 +1351,46 @@ if ($WorkerMode -eq 'cron') {
     Note ("tick size: {0} CPU / {1}, replicaTimeout {2} s ({3}; counts: {4})" -f $tickSize.Cpu, $tickSize.Memory, $tickSize.ReplicaTimeout, $tickSize.Source, $tickCountSource)
     foreach ($tn in @($tickSize.Notes)) { Note "  $tn" }
     $TickReplicaTimeout = [int]$tickSize.ReplicaTimeout
-    $jobYaml = @"
-location: $Location
-$jobIdentityYaml
-properties:
-  environmentId: $envIdForJob
-  workloadProfileName: Consumption
-  configuration:
-    triggerType: Schedule
-    replicaTimeout: $TickReplicaTimeout
-    replicaRetryLimit: 1
-    scheduleTriggerConfig:
-      cronExpression: "$TickCron"
-      parallelism: 1
-      replicaCompletionCount: 1
-$jobRegistryYaml
-  template:
-    containers:
-      - name: $TickJobName
-        image: $image
-        command: [pwsh]
-        args: ["-NoProfile","-File","/app/PIM4EntraPS/tools/pim-scheduler/Start-PimScheduler.ps1","-Once"]
-        env:
-$envYamlJob
-        resources: { cpu: $($tickSize.Cpu), memory: $($tickSize.Memory) }
-"@
+    $jobConfig = @{
+        triggerType           = 'Schedule'
+        replicaTimeout        = $TickReplicaTimeout
+        replicaRetryLimit     = 1
+        scheduleTriggerConfig = @{ cronExpression = "$TickCron"; parallelism = 1; replicaCompletionCount = 1 }
+        registries            = $jobIr.registries
+    }
+    if (@($jobSecrets).Count) { $jobConfig.secrets = @($jobSecrets) }
+    $jobResource = @{
+        location = $Location
+        identity = $jobIr.identity
+        properties = @{
+            environmentId       = $envIdForJob
+            workloadProfileName = 'Consumption'
+            configuration       = $jobConfig
+            template            = @{ containers = @(@{
+                name      = $TickJobName
+                image     = $image
+                command   = @('pwsh')
+                args      = @('-NoProfile', '-File', '/app/PIM4EntraPS/tools/pim-scheduler/Start-PimScheduler.ps1', '-Once')
+                env       = @($jobEnvList)
+                resources = @{ cpu = [double]::Parse("$($tickSize.Cpu)", [Globalization.CultureInfo]::InvariantCulture); memory = "$($tickSize.Memory)" }
+            }) }
+        }
+    }
     $jobAction = $(if ($jobExists) { 'update' } else { 'create' })
-    Note "job yaml: triggerType=Schedule cron='$TickCron' timeout=${TickReplicaTimeout}s parallelism=1"
+    Note "job definition: triggerType=Schedule cron='$TickCron' timeout=${TickReplicaTimeout}s parallelism=1"
     if ($PSCmdlet.ShouldProcess($TickJobName, "$jobAction scheduled job")) {
-        # 🔴 THIS PATH WAS SHARED BY EVERY ENVIRONMENT, AND IT CORRUPTED A CONCURRENT DEPLOY.
-        # $TickJobName is 'ca-pim-tick' in EVERY tenant, so "pim-$TickJobName.yaml" resolved to the
-        # SAME file for all of them -- while Invoke-PlatformEstateDeployment runs 6 environments
-        # CONCURRENTLY by default. MEASURED 2026-09-03: EFIF (wa678) and RIDE (rj466) deployed in
-        # parallel; EFIF's yaml won the write, RIDE then ran
-        #   az containerapp job create -g rg-automateit-rj466 --yaml <EFIF's yaml>
-        # and Azure refused with "The environment 'cae-pim' in resource group 'rg-automateit-wa678'
-        # was not found" -- an error naming a resource group the failing environment never mentions,
-        # which is why it reads as nonsense.
-        # 🪤 THE CRASH WAS THE LUCKY OUTCOME. It only failed because the two environments are in
-        # DIFFERENT subscriptions, so the foreign environmentId was unresolvable. Two environments
-        # in ONE subscription would have SUCCEEDED and written one tenant's job definition -- image,
-        # identity, SQL server, engine credential -- into the other tenant's resource group.
-        $jobTmp = Join-Path ([IO.Path]::GetTempPath()) "pim-$TickJobName-$ResourceGroup-$PID.yaml"
-        Set-Content -LiteralPath $jobTmp -Value $jobYaml -Encoding utf8
-        # 🪤 CAPTURE az's OWN ERROR. This used to throw "failed (exit 1)" and nothing else, with
-        # `-o none` swallowing the rest -- so the yaml-collision above surfaced as a bare exit code
-        # and the one sentence that identified it ("the environment 'cae-pim' in resource group
-        # 'rg-automateit-wa678' was not found") never reached the step log at all. An exit code is
-        # not a diagnosis, and this runs unattended where nobody is watching the console.
-        $jobOut = az containerapp job $jobAction @subArgs -g $ResourceGroup -n $TickJobName --yaml $jobTmp -o none 2>&1
-        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-            throw "az containerapp job $jobAction failed (exit $LASTEXITCODE): $(($jobOut | Out-String).Trim())"
+        # 🔴 THE DEFINITION IS BUILT IN MEMORY, PER RUN -- NEVER A SHARED FILE. In the YAML era the document went through
+        # "pim-$TickJobName.yaml", the SAME file for every tenant ($TickJobName is 'ca-pim-tick' everywhere), while
+        # Invoke-PlatformEstateDeployment runs 6 environments CONCURRENTLY by default. MEASURED 2026-09-03: EFIF (wa678) and
+        # RIDE (rj466) deployed in parallel; EFIF's file won the write, RIDE then created its job FROM IT and Azure refused
+        # with "The environment 'cae-pim' in resource group 'rg-automateit-wa678' was not found". In ONE subscription it
+        # would have SUCCEEDED and written one tenant's job definition into the other's resource group.
+        # 🪤 THE SERVICE'S OWN ERROR IS KEPT. A bare "failed (exit 1)" is not a diagnosis, and this runs unattended.
+        try {
+            if ($jobExists) { [void](Set-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -Resource $jobResource) }
+            else            { [void](Set-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -Resource $jobResource -Create) }
+        } catch {
+            throw "container apps job $jobAction failed for '$TickJobName': $($_.Exception.Message)"
         }
         # BUG-40 was MEASURED on this Job: the update succeeded and the next executions still ran
         # the old image. A Job has no revisions to inspect, so the deployed reference is the only
@@ -1423,17 +1401,17 @@ $envYamlJob
         try {
             $tickJobId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$TickJobName"
             $sizeTags = Get-PimTenantSizingTags -Counts $tickCounts -Size $tickSize -CountSource $tickCountSource
-            $tagArgs = @($sizeTags.Keys | Where-Object { "$($sizeTags[$_])".Trim() } | ForEach-Object { "$_=$($sizeTags[$_])" })
-            if ($tagArgs.Count) {
-                az tag update @subArgs --resource-id $tickJobId --operation Merge --tags @tagArgs --only-show-errors -o none 2>$null | Out-Null
-                if ($LASTEXITCODE) { Warn "could not record the tick's sizing tags on $TickJobName (exit $LASTEXITCODE) -- the size is applied; the next update records it" } else { Note "recorded the sizing on $TickJobName ($($sizeTags['pim-sizing-size']), $($sizeTags['pim-sizing-objects']) objects)" }
-                $global:LASTEXITCODE = 0
+            $tagMap = @{}; foreach ($tk in @($sizeTags.Keys)) { if ("$($sizeTags[$tk])".Trim()) { $tagMap["$tk"] = "$($sizeTags[$tk])" } }
+            if ($tagMap.Count) {
+                # Merge (az tag update --operation Merge): the customer's own tags on the job stay.
+                [void](Merge-PimArmTags -ResourceId $tickJobId -Tags $tagMap)
+                Note "recorded the sizing on $TickJobName ($($sizeTags['pim-sizing-size']), $($sizeTags['pim-sizing-objects']) objects)"
             }
-        } catch { Warn "could not record the tick's sizing tags: $($_.Exception.Message)" }
+        } catch { Warn "could not record the tick's sizing tags on $TickJobName ($($_.Exception.Message)) -- the size is applied; the next update records it" }
         # The Job's SYSTEM identity needs exactly what a worker app needed: a contained DB user
         # and the directory app-roles. Without these the tick starts and then 403s/`Login failed`,
         # which looks like a scheduling problem and is not.
-        $jobOid = az containerapp job show @subArgs -g $ResourceGroup -n $TickJobName --query identity.principalId -o tsv 2>$null
+        $jobOid = "$((Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull).identity.principalId)"
         if (-not "$jobOid".Trim()) {
             throw "Job '$TickJobName' has no system identity -- it was not created as expected; refusing to leave it unable to reach SQL/Graph."
         }
@@ -1494,7 +1472,7 @@ if ("$SupportDbAppId".Trim()) {
 # is installed AFTER this step on a first deploy (Deploy-PimUpdateJob grants it then); every later INFRA
 # run keeps it granted here. LIST, not show: "not installed yet" is a normal answer.
 $updJobs = $null
-try { $updJobs = ((az containerapp job list --subscription $SubscriptionId -g $ResourceGroup --query "[].{name:name,oid:identity.principalId}" -o json 2>$null) | Out-String) | ConvertFrom-Json } catch { $updJobs = $null }
+try { $updJobs = @(Get-PimArmAcaJobList -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ErrorAsNull | ForEach-Object { [pscustomobject]@{ name = "$($_.name)"; oid = "$($_.identity.principalId)" } }) } catch { $updJobs = $null }
 $updJob = @($updJobs | Where-Object { $_ -and "$($_.name)" -eq $UpdateJobName }) | Select-Object -First 1
 if ($updJob -and "$($updJob.oid)".Trim()) {
     $updAppId = Resolve-PimMiAppId -ObjectId "$($updJob.oid)".Trim() -What $UpdateJobName
@@ -1522,7 +1500,8 @@ if (-not $SkipPersistentSqlCheck) {
 $mgr = $Workers | Where-Object { $_.entry -eq 'manager' } | Select-Object -First 1
 $mgrFqdn = $null
 if ($mgr) {
-    $mgrFqdn = az containerapp ingress show @subArgs -g $ResourceGroup -n $mgr.name --query fqdn -o tsv 2>$null
+    $mgrFqdn = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $mgr.name -ErrorAsNull).properties.configuration.ingress.fqdn)".Trim()
+    if (-not $mgrFqdn) { $mgrFqdn = $null }
     if ($mgrFqdn -and $DnsServer) {
         Step "DNS: $mgrFqdn -> $envStatic on $DnsServer"
         Write-PimDnsRecord -DnsServer $DnsServer -Fqdn $mgrFqdn -EnvDomain $envDomain -StaticIp $envStatic
@@ -1558,7 +1537,6 @@ if ($mgrFqdn) {
         Write-Host "  (to lock it down completely later, reversibly: az containerapp ingress update --subscription $SubscriptionId -g $ResourceGroup -n $ManagerApp --type internal)" -ForegroundColor DarkGray
     }
 }
-Restore-PimCallerAzConfigDir
 # GSA / Private Access + private-link / DNS guidance -- for a PRIVATE Manager only. On an external
 # environment none of it applies: the name resolves publicly, there is no private FQDN to publish
 # through Global Secure Access, and no privatelink zone for the app.

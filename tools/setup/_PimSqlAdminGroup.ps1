@@ -663,7 +663,7 @@ function Write-PimSqlAdminGroupReport {
 function New-PimSqlAdminGroupInvokers {
     <#
       Graph + ARM callers for one subscription's tenant. Two credential sources, never a secret:
-        default                         -- the signed-in az context (the deploy scripts sign in with a certificate)
+        default                         -- the identity PIM-Rest is set up for in this process (no az, 100.41)
         -ClientId + -CertThumbprint     -- a certificate in the local store, via Get-PimRestToken
       The token's tenant is checked against -TenantId (or the subscription's tenant): on a host holding
       several logins the default az context is frequently another directory.
@@ -690,12 +690,27 @@ function New-PimSqlAdminGroupInvokers {
         $graphTok = "$(Get-PimRestToken -Resource 'https://graph.microsoft.com' -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint)"
         $armTok   = "$(Get-PimRestToken -Resource 'https://management.azure.com' -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint)"
     } else {
-        if (-not $want) {
-            try { $want = "$(((az account show --subscription $SubscriptionId -o json 2>$null) | Out-String | ConvertFrom-Json).tenantId)".Trim().ToLowerInvariant() } catch { $want = '' }
-        }
+        # 100.41 (no az): the identity PIM-Rest's ONE token client is set up for in this process (the signed-in person,
+        # the Invardia Support app's REST session, or a certificate), pinned to the subscription's tenant.
+        $rest = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-Rest.ps1'
+        if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $rest)) { . $rest }
         $graphTok = ''; $armTok = ''
-        try { $graphTok = "$(((az account get-access-token --subscription $SubscriptionId --resource https://graph.microsoft.com/ -o json 2>$null) | Out-String | ConvertFrom-Json).accessToken)" } catch { }
-        try { $armTok   = "$(((az account get-access-token --subscription $SubscriptionId --resource https://management.azure.com/ -o json 2>$null) | Out-String | ConvertFrom-Json).accessToken)" } catch { }
+        if (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) {
+            if (-not $want -and (Get-Command Resolve-PimArmSubscriptionTenant -ErrorAction SilentlyContinue)) { $want = "$(Resolve-PimArmSubscriptionTenant -SubscriptionId $SubscriptionId)".Trim().ToLowerInvariant() }
+            if (-not $want) { $want = "$($global:PIM_TenantId)".Trim().ToLowerInvariant() }
+            if ($want) {
+                try { $graphTok = "$(Get-PimRestToken -Resource 'https://graph.microsoft.com' -TenantId $want)" } catch { }
+                try { $armTok   = "$(Get-PimRestToken -Resource 'https://management.azure.com' -TenantId $want)" } catch { }
+            }
+        } else {
+            # 100.41 REMAINDER: the published STANDALONE Initialize-PimSqlAdminGroup.ps1 (tools/setup/Build-PimSupportScripts.ps1)
+            # carries no engine\_shared\PIM-Rest.ps1 -- only there does this still read the signed-in az context.
+            if (-not $want) {
+                try { $want = "$(((az account show --subscription $SubscriptionId -o json 2>$null) | Out-String | ConvertFrom-Json).tenantId)".Trim().ToLowerInvariant() } catch { $want = '' }
+            }
+            try { $graphTok = "$(((az account get-access-token --subscription $SubscriptionId --resource https://graph.microsoft.com/ -o json 2>$null) | Out-String | ConvertFrom-Json).accessToken)" } catch { }
+            try { $armTok   = "$(((az account get-access-token --subscription $SubscriptionId --resource https://management.azure.com/ -o json 2>$null) | Out-String | ConvertFrom-Json).accessToken)" } catch { }
+        }
     }
     if (-not $graphTok -or -not $armTok) { throw "New-PimSqlAdminGroupInvokers: no Graph/ARM token for subscription $SubscriptionId (sign in first)." }
     foreach ($t in @($graphTok, $armTok)) {

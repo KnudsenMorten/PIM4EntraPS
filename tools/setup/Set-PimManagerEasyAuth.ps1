@@ -123,7 +123,11 @@ if (-not "$StableIdentifierUri".Trim()) { $StableIdentifierUri = "api://$TenantI
 # One comma-separated string (what crosses `pwsh -File`) or an array -- either way, one entry per principal.
 $AllowedPrincipals = @(@($AllowedPrincipals) | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $here = Split-Path -Parent $PSCommandPath
-. (Join-Path $here '_PimAz.ps1')            # the guarded az shadow
+# REQUIREMENTS 100.41 / framework 12.17 NO-AZ: every Azure + Graph call below is REST through PIM-Rest's ONE token client
+# (PIM-ArmSetup.ps1 wrappers). No az CLI, no module.
+$sharedDir = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) 'engine\_shared'
+if (-not (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) { . (Join-Path $sharedDir 'PIM-Rest.ps1') }
+. (Join-Path $sharedDir 'PIM-ArmSetup.ps1')
 # BUG-169: the sign-in consent scopes + the pure consent plan.
 . (Join-Path $here '_PimDeployGraph.ps1')
 
@@ -149,7 +153,7 @@ function Get-PimManagerGateRuleSpec {
               description = 'PIM4EntraPS closed until Easy Auth is configured and verified' }
 }
 function Get-PimManagerGateState {
-    # PURE. Judge an `access-restriction list -o json` answer. 'unknown' (unreadable) is NEVER 'open'.
+    # PURE. Judge the app's ingress ipSecurityRestrictions (as JSON). 'unknown' (unreadable) is NEVER 'open'.
     param([string]$ListJson)
     $spec = Get-PimManagerGateRuleSpec
     if (-not "$ListJson".Trim()) { return @{ state = 'unknown'; rules = @(); reason = 'the access-restriction list could not be read' } }
@@ -163,27 +167,47 @@ function Get-PimManagerGateState {
 function Set-PimManagerIngressGate {
     <#
       Close or open the gate on one app, and READ IT BACK. Returns @{ ok; changed; state; rules; reason }.
-      -Az is the test seam: a scriptblock param([string[]]$AzArgs) returning az's stdout (default: real az).
+      The rules are the app's properties.configuration.ingress.ipSecurityRestrictions, over ARM REST (read-modify-write
+      of the configuration: every other rule, the ingress and the secrets stay as they are).
+      -Io is the test seam: a scriptblock param([string]$Op, [object]$Arg, [string]$SubscriptionId) where Op is
+      'list' (return the rules as JSON, '' when unreadable), 'add' (Arg = the rule spec) or 'remove' (Arg = the rule name).
       Fail closed: a Close that cannot be read back is ok=$false; an Open that cannot be read back is ok=$false.
     #>
     param([Parameter(Mandatory)][ValidateSet('Close', 'Open')][string]$Mode,
           [Parameter(Mandatory)][string]$App, [Parameter(Mandatory)][string]$ResourceGroup,
-          [string[]]$SubArgs = @(), [scriptblock]$Az)
-    if (-not $Az) { $Az = { param([string[]]$AzArgs) $ErrorActionPreference = 'Continue'; & az @AzArgs 2>$null } }
+          [Parameter(Mandatory)][string]$SubscriptionId, [scriptblock]$Io)
+    if (-not $Io) {
+        $Io = {
+            param([string]$Op, [object]$Arg, [string]$Sub)
+            if ($Op -eq 'list') {
+                $a = Get-PimArmAcaApp -SubscriptionId $Sub -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull
+                if (-not $a) { return '' }
+                $rules = @(@($a.properties.configuration.ingress.ipSecurityRestrictions) | Where-Object { $_ })
+                return (ConvertTo-Json -InputObject @($rules) -Depth 6 -Compress)
+            }
+            # A refused write is not reported here: the READ-BACK below decides (as the az path did).
+            $gateApp = "$App"; $gateRg = "$ResourceGroup"   # locals, so the closure below captures them
+            try {
+                Set-PimArmAcaAppConfiguration -SubscriptionId $Sub -ResourceGroup $gateRg -Name $gateApp -Mutate {
+                    param($cfg)
+                    $ing = $cfg.ingress
+                    if (-not $ing) { throw "'$gateApp' has no ingress -- there is nothing to restrict." }
+                    $name = if ($Op -eq 'add') { "$($Arg.name)" } else { "$Arg" }
+                    $keep = @(@($ing.ipSecurityRestrictions) | Where-Object { $_ -and "$($_.name)" -ne $name })
+                    if ($Op -eq 'add') { $keep += [pscustomobject]@{ name = "$($Arg.name)"; description = "$($Arg.description)"; ipAddressRange = "$($Arg.ipAddress)"; action = "$($Arg.action)" } }
+                    $ing | Add-Member -NotePropertyName ipSecurityRestrictions -NotePropertyValue @($keep) -Force
+                }.GetNewClosure() | Out-Null
+            } catch { Write-Verbose "ingress access-restriction $Op on $gateApp refused: $($_.Exception.Message)" }
+        }
+    }
     $spec = Get-PimManagerGateRuleSpec
-    $base = @('containerapp', 'ingress', 'access-restriction')
-    $tgt  = @($SubArgs) + @('-g', $ResourceGroup, '-n', $App)
-    $read = { Get-PimManagerGateState -ListJson ((@(& $Az (@($base) + @('list') + $tgt + @('-o', 'json'))) -join "`n")) }
+    $read = { Get-PimManagerGateState -ListJson ("$(& $Io 'list' $null $SubscriptionId)") }
     $before = & $read
     if ($before.state -eq 'unknown') { return @{ ok = $false; changed = $false; state = 'unknown'; rules = @(); reason = $before.reason } }
     $want = $(if ($Mode -eq 'Close') { 'closed' } else { 'open' })
     if ($before.state -eq $want) { return @{ ok = $true; changed = $false; state = $want; rules = $before.rules; reason = "already $want" } }
-    if ($Mode -eq 'Close') {
-        [void](& $Az (@($base) + @('set') + $tgt + @('--rule-name', $spec.name, '--ip-address', $spec.ipAddress,
-                                                     '--action', $spec.action, '--description', $spec.description, '-o', 'none')))
-    } else {
-        [void](& $Az (@($base) + @('remove') + $tgt + @('--rule-name', $spec.name, '-o', 'none')))
-    }
+    if ($Mode -eq 'Close') { [void](& $Io 'add' $spec $SubscriptionId) }
+    else { [void](& $Io 'remove' $spec.name $SubscriptionId) }
     $after = & $read
     if ($after.state -ne $want) {
         $why = $(if ($after.state -eq 'unknown') { $after.reason } else { "the rule list reads [$(@($after.rules) -join ', ')] after the $($Mode.ToLowerInvariant())" })
@@ -214,7 +238,7 @@ function Get-PimRevisionRestartVerdict {
     param([int]$RestartExitCode = 0, [string[]]$ReplicasBefore = @(), [string[]]$ReplicasAfter = @())
     $b = @($ReplicasBefore | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
     $a = @($ReplicasAfter  | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
-    if ($RestartExitCode -ne 0) { return @{ ok = $false; done = $true; reason = "az refused the restart (exit $RestartExitCode)" } }
+    if ($RestartExitCode -ne 0) { return @{ ok = $false; done = $true; reason = "the revision restart was refused (code $RestartExitCode)" } }
     if (-not $b.Count) { return @{ ok = $true; done = $true; reason = 'no replica was running, so the next one to start reads the new secret' } }
     $still = @($b | Where-Object { $a -contains $_ })
     if (-not $still.Count) { return @{ ok = $true; done = $true; reason = "replica(s) replaced ($($b.Count) before, $($a.Count) now)" } }
@@ -242,14 +266,45 @@ function Test-PimManagerMembersGroup {
     return @{ ok = $true; reason = '' }
 }
 
-# 🪤 Every --query below is free of ( ) & | < > ^ -- see §46.1. az on Windows is az.cmd, PowerShell
-# does not quote an argument with no spaces, and cmd.exe then eats those characters.
-$subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
+# ---- who the REST calls run as -----------------------------------------------------------------
+# This script is run IN-PROCESS by Invoke-PimDeployAll / Setup-PimContainers / Rebuild-PimEnvExternal, so it uses the
+# identity their PIM-Rest session already carries (certificate, Support-app secret, or the signed-in person). Run on its
+# own, it connects PIM-Rest as the person at the keyboard for -TenantId. Either way: no az, no default context.
+$SubscriptionId = "$SubscriptionId".Trim()
+if (-not $SubscriptionId) {
+    $result.reason = '-SubscriptionId is required (the container app is addressed over ARM REST -- there is no az default context to fall back to)'
+    Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
+}
+if (-not "$($global:PIM_SetupRestMode)".Trim() -and -not "$($global:PIM_ClientId)".Trim()) {
+    [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId)
+} elseif (-not "$($global:PIM_TenantId)".Trim()) { $global:PIM_TenantId = "$TenantId".Trim() }
+
+function Test-PimEaGraphRefusal([string]$Text) {
+    # Graph refusing the CALLER: say what the token actually carries (a token minted before a grant has none of it).
+    if ("$Text" -match 'Insufficient privileges|Authorization_RequestDenied|HTTP 403') { Write-PimGraphTokenRolesHint }
+}
+function Get-PimEaAssignedPrincipalIds {
+    # The principals assigned to the Manager's enterprise application ($spOid), @() when unreadable.
+    $r = Invoke-PimSetupGraph -Path "https://graph.microsoft.com/v1.0/servicePrincipals/$spOid/appRoleAssignedTo" -All -ErrorAsNull
+    return @(@($r) | Where-Object { $_ } | ForEach-Object { "$($_.principalId)".Trim() } | Where-Object { $_ })
+}
+function Get-PimEaDeployAppId {
+    # The appid of the DEPLOY identity when the calls run as an application (idtyp=app, or no user claims) -- '' for a
+    # person (whose token's appid is only the sign-in client, not an identity to assign). Never prints the token.
+    try {
+        $t = Get-PimRestToken -Resource 'graph'
+        $seg = "$t".Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($seg.Length % 4) { $seg += '=' }
+        $c = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($seg)) | ConvertFrom-Json
+        $isApp = ("$($c.idtyp)" -ieq 'app') -or (-not "$($c.upn)$($c.unique_name)$($c.preferred_username)$($c.scp)".Trim())
+        if ($isApp) { return "$($c.appid)".Trim() }
+    } catch { Write-Verbose "deploy identity not read from the token: $($_.Exception.Message)" }
+    return ''
+}
 
 if ($CloseIngressOnly) {
     Write-Host "`n=== PIM Manager ingress: CLOSE until Easy Auth is verified ($App) ===" -ForegroundColor Cyan
     if ($WhatIfPreference) { Note "WhatIf: would apply the access restriction '$((Get-PimManagerGateRuleSpec).name)' and read it back"; $result.ok = $true; Write-ResultFile; return }
-    $g = Set-PimManagerIngressGate -Mode Close -App $App -ResourceGroup $ResourceGroup -SubArgs $subArgs
+    $g = Set-PimManagerIngressGate -Mode Close -App $App -ResourceGroup $ResourceGroup -SubscriptionId $SubscriptionId
     $result.ingress = $g.state
     if (-not $g.ok) {
         $result.reason = "could not close the Manager's ingress: $($g.reason)"
@@ -267,8 +322,8 @@ Write-Host "`n=== PIM Manager Easy Auth ($App) ===" -ForegroundColor Cyan
 
 # ---- 1. the app's public address -------------------------------------------------------------
 Step 'resolve the ingress FQDN'
-$fqdn = @(az containerapp show @subArgs -g $ResourceGroup -n $App --query "properties.configuration.ingress.fqdn" -o tsv 2>$null) |
-        Where-Object { "$_".Trim() } | Select-Object -First 1
+$caApp = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull
+$fqdn = "$($caApp.properties.configuration.ingress.fqdn)".Trim()
 if (-not "$fqdn".Trim()) {
     $result.reason = "no ingress FQDN on $App -- is ingress enabled?"
     Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
@@ -285,17 +340,28 @@ Note "fqdn:   $fqdn"
 Note "reply:  $reply"
 
 # ---- 2. the app registration -----------------------------------------------------------------
-# `az ad ...` addresses the GRAPH plane and REJECTS --subscription (§46 / the hygiene gate exempts
-# it for exactly this reason), so no $subArgs on any of these calls.
+# Microsoft Graph (v1.0), through PIM-Rest's token -- the tenant is the one PIM-Rest was pointed at above.
 $appId = "$ClientId".Trim()
+# Graph reads that the az path made with `2>$null` (any failure = "not there"): the first appId of a lookup, or ''.
+function Get-PimEaFirstAppId([string]$IdentifierUri, [string]$DisplayName) {
+    try {
+        $hits = if ("$IdentifierUri".Trim()) { @(Find-PimGraphApplications -IdentifierUri $IdentifierUri) } else { @(Find-PimGraphApplications -DisplayName $DisplayName) }
+        return "$(@($hits | ForEach-Object { "$($_.appId)".Trim() } | Where-Object { $_ }) | Select-Object -First 1)".Trim()
+    } catch { return '' }
+}
+# A Graph application PATCH whose failure the read-back below judges (the az path ran these with `2>$null`).
+function Update-PimEaApp([hashtable]$Properties) {
+    try { Update-PimGraphApplication -Id $appId -Properties $Properties; return $true }
+    catch { Write-Verbose "application update refused: $($_.Exception.Message)"; return $false }
+}
 # SEC-44: decided BEFORE anything is created or changed. An existing application that is already
 # assignment-required keeps its restriction; anything else needs the caller's explicit choice.
 $script:PimEaAccess = $null
 function Assert-PimEaAccessChoice([string]$ExistingAppId) {
     $already = $false
     if ("$ExistingAppId".Trim()) {
-        $req = "$(az ad sp show --id $ExistingAppId --query appRoleAssignmentRequired -o tsv 2>$null)".Trim()
-        $global:LASTEXITCODE = 0
+        $sp0 = Get-PimGraphServicePrincipal -Id $ExistingAppId -ErrorAsNull
+        $req = "$($sp0.appRoleAssignmentRequired)".Trim()
         $already = ($req -match '(?i)^true$')
     }
     $script:PimEaAccess = Get-PimEasyAuthAccessDecision -AllowedPrincipals $AllowedPrincipals -AllowAllTenantUsers:$AllowAllTenantUsers -AlreadyRestricted:$already
@@ -321,8 +387,7 @@ if (-not $appId) {
     # display-name lookup is kept as a FALLBACK purely to ADOPT installs that predate this -- and
     # adoption then stamps the stable uri on, so each environment migrates itself exactly once.
     Step "find or create the app registration (stable id: $StableIdentifierUri)"
-    $appId = @(az ad app list --identifier-uri $StableIdentifierUri --query "[].appId" -o tsv 2>$null) |
-             Where-Object { "$_".Trim() } | Select-Object -First 1
+    $appId = Get-PimEaFirstAppId -IdentifierUri $StableIdentifierUri
     if ("$appId".Trim()) {
         $appId = "$appId".Trim()
         Note "reusing registration $appId (matched on the stable identifier uri)"
@@ -332,8 +397,7 @@ if (-not $appId) {
         # instead of adopting -- the exact defect this whole block exists to end.
         foreach ($nm in @(@($AppDisplayName) + @($LegacyDisplayNames))) {
             if (-not "$nm".Trim()) { continue }
-            $appId = @(az ad app list --display-name "$nm" --query "[].appId" -o tsv 2>$null) |
-                     Where-Object { "$_".Trim() } | Select-Object -First 1
+            $appId = Get-PimEaFirstAppId -DisplayName "$nm"
             if ("$appId".Trim()) {
                 $appId = "$appId".Trim()
                 Note "adopting existing registration $appId (found as '$nm') -- stamping the stable identifier uri so this cannot recur"
@@ -345,9 +409,12 @@ if (-not $appId) {
     if ("$appId".Trim()) {
         # no-op: resolved above
     } elseif ($PSCmdlet.ShouldProcess($AppDisplayName, 'create the Easy Auth app registration')) {
-        $appId = @(az ad app create --display-name $AppDisplayName `
-                        --web-redirect-uris $reply --enable-id-token-issuance true `
-                        --query appId -o tsv 2>$null) | Where-Object { "$_".Trim() } | Select-Object -First 1
+        $appId = ''
+        try {
+            $newApp = New-PimGraphApplication -Body @{ displayName = $AppDisplayName
+                                                       web = @{ redirectUris = @($reply); implicitGrantSettings = @{ enableIdTokenIssuance = $true } } }
+            $appId = "$($newApp.appId)".Trim()
+        } catch { Write-Host "    Graph refused the create: $($_.Exception.Message)" -ForegroundColor DarkYellow; Test-PimEaGraphRefusal "$($_.Exception.Message)" }
         if (-not "$appId".Trim()) {
             $result.reason = 'could not create the app registration (does the signed-in identity hold Application.ReadWrite or Application Administrator?)'
             Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
@@ -366,8 +433,7 @@ if (-not $appId) {
         # Capped backoff, and NOT fatal on its own: the caller decides what a still-invisible
         # registration means, and the steps below report their own failures.
         foreach ($wait in @(2, 4, 8, 16, 30, 30)) {
-            $seen = @(az ad app show --id $appId --query appId -o tsv 2>$null) |
-                    Where-Object { "$_".Trim() } | Select-Object -First 1
+            $seen = "$((Get-PimGraphApplication -Id $appId -ErrorAsNull).appId)".Trim()
             if ("$seen".Trim()) { Note "registration is readable after the create"; break }
             Note "  waiting ${wait}s for the registration to replicate..."
             Start-Sleep -Seconds $wait
@@ -389,10 +455,10 @@ if ($PSCmdlet.ShouldProcess($appId, 'ensure reply URL, identifier URI and ID-tok
     $replyOk = $false
     foreach ($wait in @(0, 3, 6, 12, 20, 30)) {
         if ($wait) { Start-Sleep -Seconds $wait }
-        $existingReplies = @(az ad app show --id $appId --query "web.redirectUris" -o tsv 2>$null) | Where-Object { "$_".Trim() }
+        $existingReplies = @(@((Get-PimGraphApplication -Id $appId -ErrorAsNull).web.redirectUris) | Where-Object { "$_".Trim() })
         $replies = @(@($existingReplies) + @($wantReplies) | Sort-Object -Unique)
-        az ad app update --id $appId --web-redirect-uris @replies --enable-id-token-issuance true -o none 2>$null
-        $nowReplies = @(az ad app show --id $appId --query "web.redirectUris" -o tsv 2>$null) | Where-Object { "$_".Trim() }
+        [void](Update-PimEaApp @{ web = @{ redirectUris = @($replies); implicitGrantSettings = @{ enableIdTokenIssuance = $true } } })
+        $nowReplies = @(@((Get-PimGraphApplication -Id $appId -ErrorAsNull).web.redirectUris) | Where-Object { "$_".Trim() })
         if (-not @($wantReplies | Where-Object { $nowReplies -notcontains $_ }).Count) { $replyOk = $true; break }
     }
     if ($replyOk) { Note 'reply URL present' }
@@ -409,10 +475,10 @@ if ($PSCmdlet.ShouldProcess($appId, 'ensure reply URL, identifier URI and ID-tok
     # Bring an adopted app onto the current name, so a tenant does not keep whatever it was called
     # when it was first deployed. Safe now, and only now: identity is the stable uri, so the name
     # is a label rather than a key. Best-effort -- a failed rename is cosmetic, not functional.
-    $curName = "$(az ad app show --id $appId --query displayName -o tsv 2>$null)".Trim()
+    $curName = "$((Get-PimGraphApplication -Id $appId -ErrorAsNull).displayName)".Trim()
     if ($curName -and $curName -ne $AppDisplayName) {
-        az ad app update --id $appId --display-name $AppDisplayName -o none 2>$null
-        $nowName = "$(az ad app show --id $appId --query displayName -o tsv 2>$null)".Trim()
+        [void](Update-PimEaApp @{ displayName = $AppDisplayName })
+        $nowName = "$((Get-PimGraphApplication -Id $appId -ErrorAsNull).displayName)".Trim()
         if ($nowName -eq $AppDisplayName) { Note "renamed '$curName' -> '$AppDisplayName' (consistent with the sibling registrations)" }
         else { Warn "could not rename '$curName' to '$AppDisplayName' -- cosmetic only; identity is the stable uri." }
     }
@@ -421,12 +487,12 @@ if ($PSCmdlet.ShouldProcess($appId, 'ensure reply URL, identifier URI and ID-tok
     $idOk = $false
     foreach ($wait in @(0, 3, 6, 12, 20, 30)) {
         if ($wait) { Start-Sleep -Seconds $wait }
-        $ids = @(az ad app show --id $appId --query "identifierUris" -o tsv 2>$null) | Where-Object { "$_".Trim() }
+        $ids = @(@((Get-PimGraphApplication -Id $appId -ErrorAsNull).identifierUris) | Where-Object { "$_".Trim() })
         if ((@($ids) -contains "api://$appId") -and (@($ids) -contains $StableIdentifierUri)) { $idOk = $true; break }
         # Keep anything the tenant already had -- another product may have added one, and replacing
         # the list would take it away.
         $merged = @(@($ids) + @($wantIds) | Where-Object { "$_".Trim() } | Sort-Object -Unique)
-        az ad app update --id $appId --identifier-uris @merged -o none 2>$null
+        [void](Update-PimEaApp @{ identifierUris = @($merged) })   # identifierUris REPLACES the list: pass the merged set
     }
     if ($idOk) { Note "identifiers present: api://$appId + $StableIdentifierUri" }
     else { Warn "could not set both identifier URIs -- the gate may not mint a token, and the next deploy may not FIND this app and could create a duplicate." }
@@ -434,13 +500,13 @@ if ($PSCmdlet.ShouldProcess($appId, 'ensure reply URL, identifier URI and ID-tok
     # Same replication story as the create above: a service principal is not visible the instant it
     # is made, and `az ad sp create` on a registration Graph has not caught up with fails outright.
     # Retried, then VERIFIED -- "the command exited 0" is not the same as "the object is there".
-    $spOid = @(az ad sp show --id $appId --query id -o tsv 2>$null) | Where-Object { "$_".Trim() } | Select-Object -First 1
+    $spOid = "$((Get-PimGraphServicePrincipal -Id $appId -ErrorAsNull).id)".Trim()
     if (-not "$spOid".Trim()) {
         Note 'creating the service principal for the registration'
         foreach ($wait in @(0, 3, 6, 12, 20, 30)) {
             if ($wait) { Start-Sleep -Seconds $wait }
-            az ad sp create --id $appId -o none 2>$null
-            $spOid = @(az ad sp show --id $appId --query id -o tsv 2>$null) | Where-Object { "$_".Trim() } | Select-Object -First 1
+            try { [void](New-PimGraphServicePrincipal -AppId $appId) } catch { Write-Verbose "service principal create refused: $($_.Exception.Message)" }
+            $spOid = "$((Get-PimGraphServicePrincipal -Id $appId -ErrorAsNull).id)".Trim()
             if ("$spOid".Trim()) { break }
         }
         if ("$spOid".Trim()) { Note "service principal $spOid" }
@@ -453,8 +519,9 @@ if ($PSCmdlet.ShouldProcess($appId, 'ensure reply URL, identifier URI and ID-tok
 # `az ad app credential reset` without --append REVOKES every existing secret -- and on a reused
 # registration those may belong to something else that is working.
 if ($PSCmdlet.ShouldProcess($App, 'ensure the Easy Auth client secret')) {
-    $haveSecret = @(az containerapp secret list @subArgs -g $ResourceGroup -n $App --query "[].name" -o tsv 2>$null) |
-                  Where-Object { "$_".Trim() -eq $SecretName }
+    # The secret NAMES come with the app itself (a GET carries no secret values) -- the az `secret list` answer.
+    $haveSecret = @(@((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull).properties.configuration.secrets) |
+                    ForEach-Object { "$($_.name)".Trim() } | Where-Object { $_ -eq $SecretName })
     if ($haveSecret -and $RotateSecret) {
         # 🔑 ROTATION, IN THE ONLY SAFE ORDER: mint the new credential, put it in place, verify --
         # and leave the OLD one valid. Both work simultaneously (Entra allows multiple secrets), so
@@ -462,15 +529,18 @@ if ($PSCmdlet.ShouldProcess($App, 'ensure the Easy Auth client secret')) {
         # verification being perfect. Revoking the old one is a separate decision, taken once real
         # users have signed in on the new one.
         Step "ROTATE the client secret on $appId (the old one stays valid until you revoke it)"
-        $new = @(az ad app credential reset --id $appId --append --years $SecretYears `
-                    --display-name "easyauth-$(Get-Date -Format yyyyMMdd)" --query password -o tsv 2>$null) |
-               Where-Object { "$_".Trim() } | Select-Object -First 1
+        # addPassword ADDS a credential (the old ones stay valid) -- the REST form of `credential reset --append`.
+        $new = ''
+        try { $new = Add-PimGraphAppPassword -Id $appId -Years $SecretYears -DisplayName "easyauth-$(Get-Date -Format yyyyMMdd)" }
+        catch { Write-Host "    Graph refused the new credential: $($_.Exception.Message)" -ForegroundColor DarkYellow; Test-PimEaGraphRefusal "$($_.Exception.Message)" }
         if (-not "$new".Trim()) {
             $result.reason = 'could not mint a replacement client secret'
             Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
         }
-        az containerapp secret set @subArgs -g $ResourceGroup -n $App --secrets "$SecretName=$("$new".Trim())" -o none
-        if ($LASTEXITCODE -ne 0) {
+        $stored = $true
+        try { [void](Set-PimArmAcaAppSecret -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -SecretName $SecretName -Value "$new".Trim()) }
+        catch { $stored = $false; Write-Host "    $($_.Exception.Message)" -ForegroundColor DarkYellow }
+        if (-not $stored) {
             $result.reason = 'minted a new secret but could not store it on the container app -- the OLD secret is still in place, so sign-in still works'
             Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
         }
@@ -487,24 +557,23 @@ if ($PSCmdlet.ShouldProcess($App, 'ensure the Easy Auth client secret')) {
         # used -- while the rotation above reported success. No pipe in the JMESPath: list the
         # active names and pick the first in PowerShell (the same fix Invoke-PimDeployAll carries).
         # And a restart is READ BACK: the replica set must change (or there must be none to change).
-        $rev = @(az containerapp revision list @subArgs -g $ResourceGroup -n $App --query '[?properties.active].name' -o tsv 2>$null) |
-               Where-Object { "$_".Trim() } | Select-Object -First 1
-        $rev = "$rev".Trim()
+        $rev = "$(@(Get-PimArmAcaRevisions -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull) |
+                   Where-Object { $_.properties.active } | ForEach-Object { "$($_.name)".Trim() } | Where-Object { $_ } | Select-Object -First 1)".Trim()
         if (-not $rev) {
             $result.reason = 'the secret was rotated but the active revision could not be found, so nothing was restarted -- the Manager still signs in with the OLD secret (which is still valid)'
             Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason). Restart it: az containerapp revision restart -g $ResourceGroup -n $App --revision <active revision>"
         }
-        $replicasBefore = @(az containerapp replica list @subArgs -g $ResourceGroup -n $App --revision $rev --query '[].name' -o tsv 2>$null) | Where-Object { "$_".Trim() }
-        az containerapp revision restart @subArgs -g $ResourceGroup -n $App --revision $rev -o none 2>$null | Out-Null
-        $restartExit = $LASTEXITCODE
+        $replicasBefore = @(Get-PimArmAcaReplicas -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Revision $rev)
+        $restartExit = 0
+        try { [void](Invoke-PimArmAcaRevisionAction -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Revision $rev -Action restart) }
+        catch { $restartExit = 1; Write-Host "    the restart was refused: $($_.Exception.Message)" -ForegroundColor DarkYellow }
         $rs = $null
         for ($attempt = 1; $attempt -le 8; $attempt++) {
-            $replicasAfter = @(az containerapp replica list @subArgs -g $ResourceGroup -n $App --revision $rev --query '[].name' -o tsv 2>$null) | Where-Object { "$_".Trim() }
+            $replicasAfter = @(Get-PimArmAcaReplicas -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Revision $rev)
             $rs = Get-PimRevisionRestartVerdict -RestartExitCode $restartExit -ReplicasBefore $replicasBefore -ReplicasAfter $replicasAfter
             if ($rs.done) { break }
             Start-Sleep -Seconds 10
         }
-        $global:LASTEXITCODE = 0
         if (-not $rs.ok) {
             $result.reason = "the secret was rotated but the restart of $rev could not be confirmed: $($rs.reason)"
             Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason). The OLD secret is still valid, so sign-in keeps working; restart the revision and re-check."
@@ -521,17 +590,19 @@ if ($PSCmdlet.ShouldProcess($App, 'ensure the Easy Auth client secret')) {
         # that it is present: without it, `credential reset` REVOKES every existing secret on the
         # registration -- so the wrong fix (dropping the argument) would quietly break whatever
         # else was using a reused app.
-        $pwd = @(az ad app credential reset --id $appId --append --years $SecretYears `
-                    --display-name 'easyauth' --query password -o tsv 2>$null) |
-               Where-Object { "$_".Trim() } | Select-Object -First 1
+        $pwd = ''
+        try { $pwd = Add-PimGraphAppPassword -Id $appId -Years $SecretYears -DisplayName 'easyauth' }
+        catch { Write-Host "    Graph refused the credential: $($_.Exception.Message)" -ForegroundColor DarkYellow; Test-PimEaGraphRefusal "$($_.Exception.Message)" }
         if (-not "$pwd".Trim()) {
             $result.reason = 'could not mint a client secret for the app registration'
             Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
         }
         # As an ACA secret, referenced by NAME -- so the value never appears in the container spec
-        # or in `az containerapp show`, the same rule the engine secret follows.
-        az containerapp secret set @subArgs -g $ResourceGroup -n $App --secrets "$SecretName=$("$pwd".Trim())" -o none
-        if ($LASTEXITCODE -ne 0) {
+        # or in the app's ARM definition, the same rule the engine secret follows.
+        $stored = $true
+        try { [void](Set-PimArmAcaAppSecret -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -SecretName $SecretName -Value "$pwd".Trim()) }
+        catch { $stored = $false; Write-Host "    $($_.Exception.Message)" -ForegroundColor DarkYellow }
+        if (-not $stored) {
             $result.reason = 'could not store the client secret on the container app'
             Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
         }
@@ -580,15 +651,22 @@ if (-not $WhatIfPreference -and "$appId".Trim()) {
     # LIST them on the registration too: the portal's "Grant admin consent" consents what is listed,
     # so a human fallback then covers every scope instead of User.Read alone.
     $listed = @()
-    $permJson = (@(az ad app permission list --id $appId -o json 2>$null) -join "`n")
-    # PS 5.1: assign ConvertFrom-Json first -- a JSON array arrives as ONE object and @(...) would nest it.
-    try { $permParsed = ConvertFrom-Json $permJson
-          $listed = @(@($permParsed) | Where-Object { $_.resourceAppId -eq $graphAppId } |
-                      ForEach-Object { @($_.resourceAccess) } | ForEach-Object { "$($_.id)".ToLowerInvariant() }) } catch { $listed = @() }
+    # The registration's requiredResourceAccess (what `permission list` printed).
+    $rraNow = @(@((Get-PimGraphApplication -Id $appId -ErrorAsNull).requiredResourceAccess) | Where-Object { $_ })
+    $listed = @($rraNow | Where-Object { "$($_.resourceAppId)" -eq $graphAppId } |
+                ForEach-Object { @($_.resourceAccess) } | Where-Object { $_ } | ForEach-Object { "$($_.id)".ToLowerInvariant() })
     $toList = @($scopeIds.Keys | Where-Object { $listed -notcontains $scopeIds[$_].ToLowerInvariant() })
     if ($toList.Count) {
         $apiPerms = @($toList | ForEach-Object { "$($scopeIds[$_])=Scope" })
-        az ad app permission add --id $appId --api $graphAppId --api-permissions @apiPerms -o none 2>$null
+        # `permission add` = the whole requiredResourceAccess written back with the Graph entry widened: every other API's
+        # entry and every permission already listed stay (requiredResourceAccess REPLACES the list on a PATCH).
+        $graphAccess = @(@($rraNow | Where-Object { "$($_.resourceAppId)" -eq $graphAppId } | ForEach-Object { @($_.resourceAccess) }) | Where-Object { $_ } |
+                         ForEach-Object { @{ id = "$($_.id)"; type = "$($_.type)" } })
+        $graphAccess += @($apiPerms | ForEach-Object { $pp = "$_" -split '='; @{ id = $pp[0]; type = $pp[1] } })
+        $newRra = @($rraNow | Where-Object { "$($_.resourceAppId)" -ne $graphAppId } | ForEach-Object {
+                        @{ resourceAppId = "$($_.resourceAppId)"; resourceAccess = @(@($_.resourceAccess) | Where-Object { $_ } | ForEach-Object { @{ id = "$($_.id)"; type = "$($_.type)" } }) } })
+        $newRra += @{ resourceAppId = $graphAppId; resourceAccess = @($graphAccess) }
+        [void](Update-PimEaApp @{ requiredResourceAccess = @($newRra) })
         Note "listed on the registration: $($toList -join ', ')"
     } else { Note 'every sign-in scope is already listed on the registration' }
 
@@ -596,15 +674,15 @@ if (-not $WhatIfPreference -and "$appId".Trim()) {
     # 🔴 BUG-161 -- `az ad app permission admin-consent` only works with a USER token; under a
     # certificate SPN (every scripted deploy) it is refused with S2S17001 'UnsupportedAccessTokenType'.
     # The Graph grant works for both, so it goes FIRST and admin-consent is only the user-token fallback.
-    $clientSp = "$(az ad sp show --id $appId --query id -o tsv 2>$null)".Trim()
-    $graphSp  = "$(az ad sp show --id $graphAppId --query id -o tsv 2>$null)".Trim()
+    $clientSp = "$((Get-PimGraphServicePrincipal -Id $appId -ErrorAsNull).id)".Trim()
+    $graphSp  = "$((Get-PimGraphServicePrincipal -Id $graphAppId -ErrorAsNull).id)".Trim()
     function Read-PimEaConsentGrant {
-        # Every grant this client holds, filtered here: no $filter, so the URL carries no quote or space
-        # for az.cmd to mangle (§46.1). 🪤 "could NOT read" is not "absent" (BUG-166's lesson): an
-        # unreadable answer returns ok=$false and is never planned as a create.
-        $j = (@(az rest --method GET --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$clientSp/oauth2PermissionGrants" -o json 2>$null) -join "`n")
-        if ($LASTEXITCODE -ne 0 -or -not "$j".Trim()) { return @{ ok = $false; grant = $null } }
-        try { $v = @((ConvertFrom-Json $j).value) } catch { return @{ ok = $false; grant = $null } }
+        # Every grant this client holds, filtered here (no $filter in the URL -- one call shape, nothing to encode).
+        # 🪤 "could NOT read" is not "absent" (BUG-166's lesson): an unreadable answer returns ok=$false and is never
+        # planned as a create.
+        $r = Invoke-PimSetupGraph -Path "https://graph.microsoft.com/v1.0/servicePrincipals/$clientSp/oauth2PermissionGrants" -ErrorAsNull
+        if ($null -eq $r) { return @{ ok = $false; grant = $null } }
+        $v = @(@($r.value) | Where-Object { $_ })
         return @{ ok = $true; grant = (@($v | Where-Object { $_.consentType -eq 'AllPrincipals' -and $_.resourceId -eq $graphSp }) | Select-Object -First 1) }
     }
     function Wait-PimEaConsent {
@@ -625,26 +703,23 @@ if (-not $WhatIfPreference -and "$appId".Trim()) {
     } else {
         $rd = Read-PimEaConsentGrant
         if (-not $rd.ok) {
-            $consentWhy = "could not READ the existing consent grants, so refusing to guess: $("$($global:PimAzLastError)".Trim())"
+            $consentWhy = "could not READ the existing consent grants, so refusing to guess: $("$($global:PimSetupRestLastError)".Trim())"
         } else {
             $plan = Get-PimEasyAuthConsentPlan -ExistingScope "$($rd.grant.scope)" -GrantExists:([bool]$rd.grant)
             if ($plan.Action -eq 'none') {
                 Note "consent already in place (tenant-wide): $($rd.grant.scope)"
             } else {
-                $bodyFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-consent-" + [guid]::NewGuid().ToString('N') + '.json')
-                try {
-                    if ($plan.Action -eq 'create') {
-                        $method = 'POST'; $uri = 'https://graph.microsoft.com/v1.0/oauth2PermissionGrants'
-                        $body = @{ clientId = $clientSp; consentType = 'AllPrincipals'; resourceId = $graphSp; scope = $plan.Scope }
-                    } else {
-                        # PATCH to the UNION -- never narrow a grant someone else widened.
-                        $method = 'PATCH'; $uri = "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($rd.grant.id)"
-                        $body = @{ scope = $plan.Scope }
-                    }
-                    Set-Content -LiteralPath $bodyFile -Encoding ascii -NoNewline -Value ($body | ConvertTo-Json -Compress)
-                    az rest --method $method --uri $uri --headers Content-Type=application/json --body "@$bodyFile" -o none 2>$null
-                    if ($LASTEXITCODE -ne 0) { $consentWhy = "Microsoft Graph refused the consent $method`: $("$($global:PimAzLastError)".Trim())" }
-                } finally { Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue }
+                if ($plan.Action -eq 'create') {
+                    $method = 'POST'; $uri = 'https://graph.microsoft.com/v1.0/oauth2PermissionGrants'
+                    $body = @{ clientId = $clientSp; consentType = 'AllPrincipals'; resourceId = $graphSp; scope = $plan.Scope }
+                } else {
+                    # PATCH to the UNION -- never narrow a grant someone else widened.
+                    $method = 'PATCH'; $uri = "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($rd.grant.id)"
+                    $body = @{ scope = $plan.Scope }
+                }
+                # The JSON body goes straight to Graph (REST) -- no temp file, no shell quoting in between.
+                try { [void](Invoke-PimSetupGraph -Method $method -Path $uri -Body $body) }
+                catch { $consentWhy = "Microsoft Graph refused the consent $method`: $("$($_.Exception.Message)".Trim())"; Test-PimEaGraphRefusal "$($_.Exception.Message)" }
                 if (-not $consentWhy) {
                     $got = Wait-PimEaConsent
                     if ($got) { Note "consented (tenant-wide, $($plan.Action)): $got" }
@@ -652,16 +727,17 @@ if (-not $WhatIfPreference -and "$appId".Trim()) {
                 }
             }
         }
-        # The user-token fallback (a human running this interactively): consents what is LISTED above.
+        # The fallback: admin-consent of everything LISTED on the registration (Grant-PimGraphAdminConsent -- the REST
+        # form of `az ad app permission admin-consent`, which works for a user token and an application token alike).
         if ($consentWhy) {
-            az ad app permission admin-consent --id $appId -o none 2>$null
-            if ($LASTEXITCODE -eq 0) {
+            $acOk = $true
+            try { [void](Grant-PimGraphAdminConsent -AppId $appId) } catch { $acOk = $false; Write-Verbose "admin-consent refused: $($_.Exception.Message)" }
+            if ($acOk) {
                 $got = Wait-PimEaConsent
-                if ($got) { Note "consented via admin-consent (user token): $got"; $consentWhy = '' }
+                if ($got) { Note "consented via admin-consent: $got"; $consentWhy = '' }
             }
         }
     }
-    $global:LASTEXITCODE = 0
     if ($consentWhy) {
         $consentOk = $false
         $result.consent = 'MISSING'
@@ -670,26 +746,59 @@ if (-not $WhatIfPreference -and "$appId".Trim()) {
     } else { $result.consent = 'ok' }
     # ID-token issuance, on the REUSE path too -- the create call sets it, and a reused
     # registration never got it (the same create-path-only defect as the permission above).
-    az ad app update --id $appId --enable-id-token-issuance true -o none 2>$null
-    $global:LASTEXITCODE = 0
+    # 🪤 The reply URLs travel in the same web object, so they are re-sent as they read now: the ID-token switch must
+    # never be the call that takes a reply URL away.
+    $webNow = (Get-PimGraphApplication -Id $appId -ErrorAsNull).web
+    $webBody = @{ implicitGrantSettings = @{ enableIdTokenIssuance = $true } }
+    if ($webNow -and @($webNow.redirectUris).Count) { $webBody.redirectUris = @($webNow.redirectUris) }
+    [void](Update-PimEaApp @{ web = $webBody })
 }
 
 # ---- 5. configure + enable ---------------------------------------------------------------------
 if ($PSCmdlet.ShouldProcess($App, 'configure the Microsoft identity provider and enable Easy Auth')) {
+    # The app's authConfigs/current, READ-MODIFY-WRITE (Set-PimArmAcaAuthConfig): only the properties named here change.
+    # PURE helper: the child object at -Path under -Node, created (as an empty object) where it is missing.
+    function Get-PimEaAuthNode($Node, [string[]]$Path) {
+        $cur = $Node
+        foreach ($p in $Path) {
+            if ($null -eq $cur.$p) { $cur | Add-Member -NotePropertyName $p -NotePropertyValue ([pscustomobject]@{}) -Force }
+            $cur = $cur.$p
+        }
+        return $cur
+    }
+    function Set-PimEaAuthValue($Node, [string]$Name, $Value) { $Node | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force }
+    $eaIssuer = "https://login.microsoftonline.com/$TenantId/v2.0"
     Step 'configure the Microsoft identity provider'
-    az containerapp auth microsoft update @subArgs -g $ResourceGroup -n $App `
-        --client-id $appId --client-secret-name $SecretName `
-        --issuer "https://login.microsoftonline.com/$TenantId/v2.0" `
-        --allowed-audiences "api://$appId" --yes -o none
-    if ($LASTEXITCODE -ne 0) {
-        $result.reason = 'az containerapp auth microsoft update failed'
+    # = `auth microsoft update --client-id --client-secret-name --issuer --allowed-audiences`: the AAD provider enabled,
+    # its registration (client id, the ACA secret's NAME, the v2 issuer) and the allowed audience.
+    try {
+        [void](Set-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Mutate {
+            param($p)
+            $aad = Get-PimEaAuthNode $p @('identityProviders', 'azureActiveDirectory')
+            Set-PimEaAuthValue $aad 'enabled' $true
+            $reg = Get-PimEaAuthNode $aad @('registration')
+            Set-PimEaAuthValue $reg 'clientId' $appId
+            Set-PimEaAuthValue $reg 'clientSecretSettingName' $SecretName
+            Set-PimEaAuthValue $reg 'openIdIssuer' $eaIssuer
+            $val = Get-PimEaAuthNode $aad @('validation')
+            Set-PimEaAuthValue $val 'allowedAudiences' @("api://$appId")
+        })
+    } catch {
+        $result.reason = "configuring the Microsoft identity provider failed: $($_.Exception.Message)"
         Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
     }
     Step 'enable Easy Auth (unauthenticated requests -> login page)'
-    az containerapp auth update @subArgs -g $ResourceGroup -n $App `
-        --enabled true --action RedirectToLoginPage --redirect-provider azureactivedirectory -o none
-    if ($LASTEXITCODE -ne 0) {
-        $result.reason = 'az containerapp auth update failed'
+    # = `auth update --enabled true --action RedirectToLoginPage --redirect-provider azureactivedirectory`
+    try {
+        [void](Set-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Mutate {
+            param($p)
+            Set-PimEaAuthValue (Get-PimEaAuthNode $p @('platform')) 'enabled' $true
+            $gv = Get-PimEaAuthNode $p @('globalValidation')
+            Set-PimEaAuthValue $gv 'unauthenticatedClientAction' 'RedirectToLoginPage'
+            Set-PimEaAuthValue $gv 'redirectToProvider' 'azureactivedirectory'
+        })
+    } catch {
+        $result.reason = "enabling Easy Auth failed: $($_.Exception.Message)"
         Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
     }
 }
@@ -701,11 +810,11 @@ if ($PSCmdlet.ShouldProcess($App, 'configure the Microsoft identity provider and
 # shape that fools a writer-only check.
 if (-not $WhatIfPreference) {
     Step 'read the configuration back'
-    $aud = @(az containerapp auth show @subArgs -g $ResourceGroup -n $App `
-                --query "identityProviders.azureActiveDirectory.validation.allowedAudiences" -o tsv 2>$null) |
-           Where-Object { "$_".Trim() } | Select-Object -First 1
-    $enabled = @(az containerapp auth show @subArgs -g $ResourceGroup -n $App --query "platform.enabled" -o tsv 2>$null) |
-               Where-Object { "$_".Trim() } | Select-Object -First 1
+    # The authConfigs/current resource as ARM now holds it (az's `containerapp auth show`).
+    $authNow = (Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull).properties
+    $aad = $authNow.identityProviders.azureActiveDirectory
+    $aud = @(@($aad.validation.allowedAudiences) | Where-Object { "$_".Trim() }) | Select-Object -First 1
+    $enabled = "$($authNow.platform.enabled)".Trim()
     if (-not "$aud".Trim()) {
         $result.reason = 'Easy Auth reports NO allowed audience after configuration -- the release gate will still not be able to mint a token'
         Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason)"
@@ -718,9 +827,7 @@ if (-not $WhatIfPreference) {
     # RETIRED Azure AD Graph resource and every human sign-in dies with AADSTS650056, while the
     # audience and platform.enabled checks above both pass. Two green assertions over a Manager
     # nobody can open is precisely what happened.
-    $iss = @(az containerapp auth show @subArgs -g $ResourceGroup -n $App `
-                --query "identityProviders.azureActiveDirectory.registration.openIdIssuer" -o tsv 2>$null) |
-           Where-Object { "$_".Trim() } | Select-Object -First 1
+    $iss = "$($aad.registration.openIdIssuer)".Trim()
     if ("$iss".Trim() -notmatch '(?i)/v2\.0/?$') {
         $result.reason = "Easy Auth issuer reads '$iss', which is not the v2 endpoint"
         Write-ResultFile
@@ -742,19 +849,17 @@ function Resolve-PimManagerMembersGroup {
     # SEC-44: the "every member, never a guest" group. Found by its mailNickname (stable), created when
     # absent, and VERIFIED to still carry the members-only rule before it is trusted with sign-in.
     $spec = Get-PimManagerMembersGroupSpec -DisplayName $MembersGroupName -MailNickname $MembersGroupMailNickname
-    $ids = @(az ad group list --filter "mailNickname eq '$MembersGroupMailNickname'" --query "[].id" -o tsv 2>$null) | Where-Object { "$_".Trim() }
-    if ($LASTEXITCODE -ne 0) { throw "could not search for the members group '$MembersGroupMailNickname': $("$($global:PimAzLastError)".Trim())" }
+    try { $ids = @(Find-PimGraphGroups -Filter "mailNickname eq '$MembersGroupMailNickname'" | ForEach-Object { "$($_.id)".Trim() } | Where-Object { $_ }) }
+    catch { throw "could not search for the members group '$MembersGroupMailNickname': $("$($_.Exception.Message)".Trim())" }
     if (@($ids).Count -gt 1) { throw "more than one group has the mailNickname '$MembersGroupMailNickname' ($(@($ids) -join ', ')) -- refusing to guess which one admits people." }
     $gid = "$(@($ids) | Select-Object -First 1)".Trim()
     if (-not $gid) {
         Step "create the dynamic group '$MembersGroupName' -- every enabled MEMBER account, never a guest"
-        $bodyFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-ea-grp-" + [guid]::NewGuid().ToString('N') + '.json')
-        try {
-            Set-Content -LiteralPath $bodyFile -Encoding ascii -NoNewline -Value ($spec.body | ConvertTo-Json -Compress -Depth 5)
-            $gid = "$(@(az rest --method POST --uri 'https://graph.microsoft.com/v1.0/groups' --headers Content-Type=application/json --body "@$bodyFile" --query id -o tsv 2>$null) | Select-Object -First 1)".Trim()
-        } finally { Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue }
+        $grpWhy = ''
+        try { $gid = "$((Invoke-PimSetupGraph -Method POST -Path 'https://graph.microsoft.com/v1.0/groups' -Body $spec.body).id)".Trim() }
+        catch { $gid = ''; $grpWhy = "$($_.Exception.Message)".Trim(); Test-PimEaGraphRefusal $grpWhy }
         if (-not $gid) {
-            throw ("could not create the dynamic group '$MembersGroupName': $("$($global:PimAzLastError)".Trim()). The deploy identity needs " +
+            throw ("could not create the dynamic group '$MembersGroupName': $grpWhy. The deploy identity needs " +
                    'Group.Create (or Group.ReadWrite.All), and dynamic groups need Entra ID P1/P2. Or name who may sign in with -AllowedPrincipals.')
         }
         Note "created group $gid (Entra evaluates its membership in the background -- people are admitted once it has)"
@@ -762,11 +867,9 @@ function Resolve-PimManagerMembersGroup {
     $g = $null
     foreach ($wait in @(0, 3, 6, 12, 20, 30)) {
         if ($wait) { Start-Sleep -Seconds $wait }
-        $j = (@(az rest --method GET --uri "https://graph.microsoft.com/v1.0/groups/$gid" -o json 2>$null) -join "`n")
-        if ("$j".Trim()) { try { $g = ConvertFrom-Json -InputObject $j } catch { $g = $null } }
+        $g = Invoke-PimSetupGraph -Path "https://graph.microsoft.com/v1.0/groups/$gid" -ErrorAsNull
         if ($g) { break }
     }
-    $global:LASTEXITCODE = 0
     $v = Test-PimManagerMembersGroup -Group $g -Rule $spec.rule
     if (-not $v.ok) { throw "the members group is not safe to admit sign-in with: $($v.reason)" }
     return $gid
@@ -788,10 +891,10 @@ if (-not $WhatIfPreference -and "$spOid".Trim()) {
         $unresolved = New-Object System.Collections.Generic.List[string]
         foreach ($p in @($AllowedPrincipals | Where-Object { "$_".Trim() })) {
             $pv = "$p".Trim(); $oid = ''; $kind = ''
-            $oid = "$(az ad user show --id $pv --query id -o tsv 2>$null)".Trim()
+            $oid = "$((Get-PimGraphUser -Id $pv -ErrorAsNull).id)".Trim()
             if ($oid) { $kind = 'user' }
             if (-not $oid) {
-                $oid = "$(az ad group show --group $pv --query id -o tsv 2>$null)".Trim()
+                $oid = "$((Get-PimGraphGroup -Id $pv -ErrorAsNull).id)".Trim()
                 if ($oid) { $kind = 'group' }
             }
             if (-not $oid -and $pv -match '^[0-9a-fA-F-]{36}$') {
@@ -819,9 +922,11 @@ if (-not $WhatIfPreference -and "$spOid".Trim()) {
         }
         # 🪤 The deploying identity needs an assignment too, or the post-deploy release gate can no
         # longer mint its token for api://<appId> and the deploy fails on its own security fix.
-        $meAppId = "$(az account show --query user.name -o tsv 2>$null)".Trim()
+        # WHO the calls run as, from PIM-Rest's own Graph token: an APPLICATION token (certificate / Support-app secret)
+        # names the deploy identity's appid; a person's token does not (az printed a UPN there and this was skipped).
+        $meAppId = Get-PimEaDeployAppId
         if ($meAppId -match '^[0-9a-fA-F-]{36}$') {
-            $meOid = "$(az ad sp show --id $meAppId --query id -o tsv 2>$null)".Trim()
+            $meOid = "$((Get-PimGraphServicePrincipal -Id $meAppId -ErrorAsNull).id)".Trim()
             if ($meOid -and -not (@($resolved | Where-Object { $_.id -eq $meOid }).Count)) {
                 [void]$resolved.Add([pscustomobject]@{ input = "$meAppId (the deploy identity)"; id = $meOid; kind = 'servicePrincipal' })
                 Note 'including the deploy identity, so the post-deploy release gate can still mint its token'
@@ -834,28 +939,19 @@ if (-not $WhatIfPreference -and "$spOid".Trim()) {
         # Why each assignment was refused, if it was. Empty means "nothing was rejected", which is
         # what separates a slow directory from a denied one below.
         $script:PimEaAssignErrors = @{}
-        $existing = @(az rest --method GET --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$spOid/appRoleAssignedTo" `
-                        --query "value[].principalId" -o tsv 2>$null) | Where-Object { "$_".Trim() }
+        $existing = @(Get-PimEaAssignedPrincipalIds)
         foreach ($r in $resolved) {
             if ($existing -contains $r.id) { Note "already assigned: $($r.input)"; continue }
-            # 🪤 --body @file, not an inline JSON string: an inline body is a single argument full
-            # of double quotes, and how those survive to the CLI depends on the host and on whether
-            # az is a batch file (§46.1). A file has no quoting problem to get wrong.
-            $bodyFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-ea-{0}.json" -f ([guid]::NewGuid().ToString('N').Substring(0,8)))
-            ([ordered]@{ principalId = $r.id; resourceId = $spOid; appRoleId = '00000000-0000-0000-0000-000000000000' } |
-                ConvertTo-Json -Compress) | Set-Content -LiteralPath $bodyFile -Encoding ascii
-            # 🪤 DO NOT SWALLOW THE POST'S OWN ERROR. This used to end in `-o none 2>$null`, so a
-            # rejected assignment produced no reason at all and the only evidence was the read-back
-            # failing afterwards -- which reads as "the grant did not stick" and says nothing about
-            # why. Keep whatever Graph answered and report it alongside the missing principal.
-            $post = az rest --method POST --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$spOid/appRoleAssignedTo" `
-                        --headers Content-Type=application/json --body "@$bodyFile" -o none 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                $why = "$(@($post) -join ' ')".Trim()
-                if (-not $why) { $why = "$($global:PimAzLastError)".Trim() }
-                $script:PimEaAssignErrors["$($r.input)"] = $why
+            # 🪤 DO NOT SWALLOW THE POST'S OWN ERROR. A rejected assignment that produced no reason left the
+            # read-back failing afterwards as the only evidence -- which reads as "the grant did not stick"
+            # and says nothing about why. Keep whatever Graph answered and report it alongside the missing principal.
+            try {
+                [void](Invoke-PimSetupGraph -Method POST -Path "https://graph.microsoft.com/v1.0/servicePrincipals/$spOid/appRoleAssignedTo" `
+                           -Body ([ordered]@{ principalId = $r.id; resourceId = $spOid; appRoleId = '00000000-0000-0000-0000-000000000000' }))
+            } catch {
+                $script:PimEaAssignErrors["$($r.input)"] = "$($_.Exception.Message)".Trim()
+                Test-PimEaGraphRefusal "$($_.Exception.Message)"
             }
-            Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue
             $assignedNow++
         }
         # READ BACK -- the whole file's standard, and this is the assertion that matters most: an
@@ -871,8 +967,7 @@ if (-not $WhatIfPreference -and "$spOid".Trim()) {
         $missing = @()
         $delay = 2; $waited = 0
         for ($attempt = 1; $attempt -le 6; $attempt++) {
-            $after = @(az rest --method GET --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$spOid/appRoleAssignedTo" `
-                         --query "value[].principalId" -o tsv 2>$null) | Where-Object { "$_".Trim() }
+            $after = @(Get-PimEaAssignedPrincipalIds)
             $missing = @($resolved | Where-Object { $after -notcontains $_.id })
             if (-not $missing.Count) {
                 if ($attempt -gt 1) { Note "directory caught up after ${waited}s ($attempt attempts)" }
@@ -904,16 +999,13 @@ if (-not $WhatIfPreference -and "$spOid".Trim()) {
         # immediate, on a service principal created by this same run. Measured at a customer
         # 2026-09-11, one step after the identical defect in the loop above: every assignment landed
         # and THIS read came back 'false'.
-        $upd = az ad sp update --id $spOid --set appRoleAssignmentRequired=true -o none 2>&1
         $updErr = ''
-        if ($LASTEXITCODE -ne 0) {
-            $updErr = "$(@($upd) -join ' ')".Trim()
-            if (-not $updErr) { $updErr = "$($global:PimAzLastError)".Trim() }
-        }
+        try { [void](Update-PimGraphServicePrincipal -ObjectId $spOid -Properties @{ appRoleAssignmentRequired = $true }) }
+        catch { $updErr = "$($_.Exception.Message)".Trim(); Test-PimEaGraphRefusal $updErr }
         $req = ''
         $delay = 2; $waited = 0
         for ($attempt = 1; $attempt -le 6; $attempt++) {
-            $req = "$(az ad sp show --id $spOid --query appRoleAssignmentRequired -o tsv 2>$null)".Trim()
+            $req = "$((Get-PimGraphServicePrincipal -Id $spOid -ErrorAsNull).appRoleAssignmentRequired)".Trim()
             if ($req -match '(?i)^true$') {
                 if ($attempt -gt 1) { Note "directory caught up after ${waited}s ($attempt attempts)" }
                 break
@@ -937,8 +1029,7 @@ if (-not $WhatIfPreference -and "$spOid".Trim()) {
     } else {
         # SEC-44: the only way to get here without a choice is an application that was ALREADY
         # assignment-required -- and that is re-read now, not trusted from the earlier look.
-        $reqNow = "$(az ad sp show --id $spOid --query appRoleAssignmentRequired -o tsv 2>$null)".Trim()
-        $global:LASTEXITCODE = 0
+        $reqNow = "$((Get-PimGraphServicePrincipal -Id $spOid -ErrorAsNull).appRoleAssignmentRequired)".Trim()
         if ($reqNow -notmatch '(?i)^true$') {
             $result.reason = "sign-in is not restricted (appRoleAssignmentRequired reads '$reqNow') and no choice was given"
             Write-ResultFile
@@ -969,7 +1060,7 @@ if (-not $consentOk) {
 # restriction that Setup-PimContainers put on a NEW Manager removed. Any throw above leaves it closed.
 if (-not $WhatIfPreference) {
     Step 'open the Manager (remove the closed-until-Easy-Auth access restriction)'
-    $gate = Set-PimManagerIngressGate -Mode Open -App $App -ResourceGroup $ResourceGroup -SubArgs $subArgs
+    $gate = Set-PimManagerIngressGate -Mode Open -App $App -ResourceGroup $ResourceGroup -SubscriptionId $SubscriptionId
     $result.ingress = $gate.state
     if (-not $gate.ok) {
         $result.reason = "Easy Auth is configured, but the Manager could not be opened: $($gate.reason)"
