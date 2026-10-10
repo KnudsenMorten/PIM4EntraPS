@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.572 -- 2026-10-10
+
+- Setup: a customer installation no longer runs the developer GUI smoke test after deploying the code; the installation checks the Manager over REST instead.
+
 ## 2.4.571 -- 2026-10-10
 
 - Setup: revision restart, registry credential and Log Analytics key reads send the request body Azure expects.

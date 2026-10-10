@@ -148,7 +148,7 @@ param(
     # §100.41 (owner 2026-10-10): OUR dev / release gates from tests\live -- the hosted smoke (az-based) and the Pester
     # deploy-validation tests. OFF by default: a customer install never runs Pester or the az CLI; it gets the community
     # verify (REST: Manager up, page served, engine job present). Internal rebuilds pass -RunDevGates.
-    [switch]$RunDevGates,
+    [switch]$RunDevGates,   # 2026-10-10: also tells Update-PimContainers (PIM_DEPLOY_DEV_GATES) whether its GUI smoke may run
 
     # --- target tenant / subscription (no real ids baked in; pass your own) ---
     [string]$TenantId,
@@ -529,6 +529,9 @@ param(
     [scriptblock]$EnrollmentSleep,
     [int]$EnrollmentTimeoutSeconds = 900
 )
+# customer installs (no -RunDevGates) never run the dev-only GUI smoke in the code step (Update-PimContainers reads this)
+$env:PIM_DEPLOY_DEV_GATES = $(if ($RunDevGates) { '1' } else { '0' })
+
 $ErrorActionPreference = 'Stop'
 # framework 12.7: the Documentation line first, and a transcript of the run -- stopped by the file-scope finally at the end
 # of this script on every exit (the plan-only return, the refused enrollment, the trap's rethrow, the final exit), and by
