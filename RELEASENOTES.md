@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.571 -- 2026-10-10
+
+- Setup: revision restart, registry credential and Log Analytics key reads send the request body Azure expects.
+
 ## 2.4.570 -- 2026-10-10
 
 - Setup: storing the PIM Manager sign-in secret works (Azure refused the secret read with HTTP 415).

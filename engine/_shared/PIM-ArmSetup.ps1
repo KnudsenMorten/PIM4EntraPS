@@ -599,7 +599,7 @@ function New-PimArmLogAnalytics {
 function Get-PimArmLogAnalyticsKey {
     <# az monitor log-analytics workspace get-shared-keys --query primarySharedKey -> the key, or '' #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name)
-    $k = Invoke-PimSetupArm -Method POST -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.OperationalInsights/workspaces' $Name 'sharedKeys') -ApiVersion (Get-PimSetupApiVersion logAnalytics) -ErrorAsNull
+    $k = Invoke-PimSetupArm -Method POST -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.OperationalInsights/workspaces' $Name 'sharedKeys') -Body @{} -ApiVersion (Get-PimSetupApiVersion logAnalytics) -ErrorAsNull
     if ($k) { return "$($k.primarySharedKey)" }
     return ''
 }
@@ -670,7 +670,7 @@ function Update-PimArmAcr {
 function Get-PimArmAcrCredential {
     <# az acr credential show : @{ username; password } (passwords[0]) or $null. #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceId)
-    $c = Invoke-PimSetupArm -Method POST -Path ("$ResourceId".TrimEnd('/') + '/listCredentials') -ApiVersion (Get-PimSetupApiVersion acr) -ErrorAsNull
+    $c = Invoke-PimSetupArm -Method POST -Path ("$ResourceId".TrimEnd('/') + '/listCredentials') -Body @{} -ApiVersion (Get-PimSetupApiVersion acr) -ErrorAsNull
     if (-not $c) { return $null }
     return @{ username = "$($c.username)"; password = "$(@($c.passwords)[0].value)" }
 }
@@ -1174,7 +1174,7 @@ function Invoke-PimArmAcaRevisionAction {
     <# az containerapp revision activate | deactivate | restart --revision R #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name,
           [Parameter(Mandatory)][string]$Revision, [Parameter(Mandatory)][ValidateSet('activate', 'deactivate', 'restart')][string]$Action)
-    Invoke-PimSetupArm -Method POST -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/containerApps' $Name "revisions/$Revision/$Action") -ApiVersion (Get-PimSetupApiVersion aca)
+    Invoke-PimSetupArm -Method POST -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/containerApps' $Name "revisions/$Revision/$Action") -Body @{} -ApiVersion (Get-PimSetupApiVersion aca)
 }
 
 function Get-PimArmAcaReplicas {
