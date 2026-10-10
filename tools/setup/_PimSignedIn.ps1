@@ -5,15 +5,18 @@
 
 .DESCRIPTION
     Operator 2026-09-17: "I thought I could just do interactive login to deploy." A customer deploys by signing in
-    with `az login` as a human administrator; certificates are the MSP management host's automation pattern only. So
-    every step the build runs inside ONE tenant accepts -UseSignedInAccount (or, where the script already had that
-    convention, simply no credential) and then authenticates as the account signed in to az -- no certificate, no
-    secret, nothing written to disk by this code, and no token ever printed or logged.
+    as a human administrator; certificates are the MSP management host's automation pattern only. So every step the
+    build runs inside ONE tenant accepts -UseSignedInAccount (or, where the script already had that convention, simply
+    no credential) and then authenticates through the ONE sign-in rule (framework 12.17, REQ 100.42): the Invardia
+    Support session open in this window (Use-PimSupportAppRestSession / Get-InvardiaSupportToken), otherwise the
+    person's own browser sign-in (auth code + PKCE, never device code), registered into PIM-Rest as
+    $global:PIM_TokenProvider. No command-line tool, no module, no certificate, no secret, nothing written to disk by
+    this code, and no token ever printed or logged.
 
-    WHAT IS ASSERTED BEFORE ANYTHING IS USED (a wrong default az context on a multi-tenant machine is a real trap):
-      * the az account for the named subscription is a USER (a service principal is refused -- that is the certificate
-        mode's job, and a signed-in SPN would silently change who the audit trail names);
-      * its tenant equals the build config's tenantId, and the subscription is the one named explicitly;
+    WHAT IS ASSERTED BEFORE ANYTHING IS USED (a wrong default context on a multi-tenant machine is a real trap):
+      * the signed-in principal is a USER (an application is refused -- that is the certificate mode's job, and a
+        signed-in SPN would silently change who the audit trail names) -- or exactly the Invardia Support app;
+      * its tenant equals the build config's tenantId, and the subscription is the one named explicitly and visible;
       * every token minted from it (ARM, SQL) is decoded and its tenant and user-ness checked;
       * no environment variable is set that would make a token call quietly authenticate as somebody else
         (AZURE_CLIENT_SECRET, PIM_CERT_THUMBPRINT, a managed identity endpoint ...).
@@ -21,7 +24,7 @@
     SQL: Azure SQL here is Entra-only, so the signed-in user needs database rights -- by being a MEMBER of the SQL admin
     group (grp-pim-sql-admins) that is the server's Entra admin. Invoke-PimSignedInSqlAdminMembership adds the user as a
     member (members-only: it never creates the group and never moves the admin).
-    TRAP: an Entra token carries group membership as of when it was issued, and az caches tokens for up to about an
+    TRAP: an Entra token carries group membership as of when it was issued, and a token is reused for up to about an
     hour. A user added to the group in THIS run may be refused by SQL until their token refreshes -- the helper says so.
 
     Pure parts are offline-tested in tests/Test-PimMspBuild.ps1 (section S).
@@ -44,10 +47,11 @@ function ConvertFrom-PimJwtClaims {
 
 function Get-PimSupportAppSession {
     <#
-      PURE given -Environment (name -> value; default: this process). The Invardia Support app session that Invardia's
-      Connect-InvardiaSupport.ps1 -AzCli opened in THIS shell (framework 4.1a: the one agreed access method), or $null.
-      It is recognised only when the connect script's private az profile IS the active one (INVARDIA_SUPPORT_AZCONFIG ==
-      AZURE_CONFIG_DIR) -- a service principal signed in any other way is never treated as the support app.
+      PURE given -Environment (name -> value; default: this process). The Invardia Support app session that an older
+      Invardia connect script announced in THIS shell through environment variables (framework 4.1a), or $null. It is
+      recognised only when the connect script's private profile folder IS the active one (INVARDIA_SUPPORT_AZCONFIG ==
+      AZURE_CONFIG_DIR) -- a service principal signed in any other way is never treated as the support app. Used only to
+      ACCEPT that app's token; the token itself always comes from PIM-Rest's one client.
       Returns @{ tenantId; subscriptions[]; environment } or $null.
     #>
     param([hashtable]$Environment)
@@ -58,48 +62,6 @@ function Get-PimSupportAppSession {
     if ($tid -notmatch $script:PimSignedInGuid) { return $null }
     $subs = @("$(& $get 'INVARDIA_SUPPORT_SUBSCRIPTIONS')" -split '[,;\s]+' | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ -match $script:PimSignedInGuid })
     return @{ tenantId = $tid; subscriptions = $subs; environment = "$(& $get 'INVARDIA_SUPPORT_ENVIRONMENT')".Trim() }
-}
-
-function Test-PimSignedInAccount {
-    <#
-      PURE. Judge an `az account show` object for the signed-in build. Returns @{ ok; reason; userName; supportAppId }.
-      Refused: no account, a service principal / managed identity, another tenant, another subscription.
-      ONE exception (operator 2026-10-06: "we have only one agreed method"): the Invardia Support app, signed in by
-      Invardia's connect script for exactly this tenant and an allowed subscription (Get-PimSupportAppSession).
-    #>
-    param([object]$Account, [string]$TenantId, [string]$SubscriptionId, [hashtable]$Environment)
-    $want = "$TenantId".Trim().ToLowerInvariant(); $sub = "$SubscriptionId".Trim().ToLowerInvariant()
-    if ($want -notmatch $script:PimSignedInGuid -or $sub -notmatch $script:PimSignedInGuid) {
-        return @{ ok = $false; reason = 'the tenant id and the subscription id must both be given explicitly (GUIDs) -- a signed-in build never relies on the default az context' }
-    }
-    if ($null -eq $Account -or -not "$($Account.id)".Trim()) {
-        return @{ ok = $false; reason = "no az sign-in covers subscription $sub. Sign in first: az login --tenant $want" }
-    }
-    $type = "$($Account.user.type)".Trim().ToLowerInvariant()
-    $name = "$($Account.user.name)".Trim()
-    $supportAppId = ''
-    if ($type -eq 'serviceprincipal') {
-        $sess = Get-PimSupportAppSession -Environment $Environment
-        if ($sess -and $sess.tenantId -eq $want -and ($sess.subscriptions -contains $sub) -and $name -match $script:PimSignedInGuid) {
-            $supportAppId = $name.ToLowerInvariant()
-            if ("$($Account.tenantId)".Trim().ToLowerInvariant() -ne $want) { return @{ ok = $false; reason = "the support app session is in tenant '$($Account.tenantId)', not '$want' -- REFUSING" } }
-            if ("$($Account.id)".Trim().ToLowerInvariant() -ne $sub) { return @{ ok = $false; reason = "az answered for subscription '$($Account.id)', not the requested '$sub' -- REFUSING" } }
-            return @{ ok = $true; reason = "signed in as the Invardia Support app $supportAppId (support environment '$($sess.environment)', tenant $want, subscription $sub)"; userName = "Invardia Support app ($supportAppId)"; supportAppId = $supportAppId }
-        }
-        if ($sess -and $sess.tenantId -ne $want) { return @{ ok = $false; reason = "the Invardia Support session in this shell is for tenant '$($sess.tenantId)', but the build config names '$want' -- REFUSING" } }
-        if ($sess -and -not ($sess.subscriptions -contains $sub)) { return @{ ok = $false; reason = "subscription $sub is not one the support environment allows ($($sess.subscriptions -join ', ')) -- REFUSING" } }
-    }
-    if ($type -ne 'user') {
-        return @{ ok = $false; reason = ("az is signed in as a $(if ($type) { $type } else { 'non-user account' }) ('$name'), not a person. " +
-                 'The signed-in build runs as the administrator at the keyboard; an application identity belongs in deployIdentity (certificate mode).') }
-    }
-    if ("$($Account.tenantId)".Trim().ToLowerInvariant() -ne $want) {
-        return @{ ok = $false; reason = "the az sign-in for subscription $sub is in tenant '$($Account.tenantId)', but the build config names tenant '$want' -- REFUSING (a wrong default context acts in somebody else's directory)" }
-    }
-    if ("$($Account.id)".Trim().ToLowerInvariant() -ne $sub) {
-        return @{ ok = $false; reason = "az answered for subscription '$($Account.id)', not the requested '$sub' -- REFUSING" }
-    }
-    return @{ ok = $true; reason = "signed in as $name (tenant $want, subscription $sub)"; userName = $name }
 }
 
 function Test-PimSignedInToken {
@@ -167,7 +129,7 @@ function Get-PimSignedInConflictHint {
 function Use-PimSupportAppRestSession {
     <#
       100.41 / framework 4.1a -- the Invardia Support app's REST session ($global:InvardiaSupportState, set by
-      Connect-InvardiaSupport.ps1 WITHOUT -AzCli) for -TenantId (+ an allowed -SubscriptionId): point PIM-Rest's ONE token
+      Connect-InvardiaSupport.ps1 -Environment <handle>) for -TenantId (+ an allowed -SubscriptionId): point PIM-Rest's ONE token
       client at it (client credentials with the app's secret -- the one agreed support method). Returns the app id
       (lowercase) or '' when no such session covers this tenant + subscription. Nothing is printed; the secret only moves
       into PIM-Rest's process-local global. -State is the test seam (default: the session in this shell).
@@ -192,39 +154,25 @@ function Get-PimSignedInIdentity {
     <#
       Read and ASSERT the signed-in identity for one tenant + subscription. Returns @{ ok; reason; userName; objectId;
       tenantId; subscriptionId }. The ARM token is minted only to read the user's object id and is then discarded.
-      100.41 (NO-AZ): over REST by default -- the token comes from PIM-Rest's ONE client (the Invardia Support app's REST
-      session when one covers this tenant, else the person's own sign-in), its claims are asserted, and the subscription
-      is read over ARM to prove it is visible and in -TenantId.
-      -Az is the LEGACY test seam (a scriptblock param([string[]]$AzArgs) returning az's stdout): only when a caller
-      passes one is the az-shaped path below used. Nothing in this file invokes az itself.
+      100.41 / 100.42 (NO-AZ, framework 12.17): over REST only -- the token comes from PIM-Rest's ONE client (the Invardia
+      Support app's REST session when one covers this tenant, else the person's own browser sign-in), its claims are
+      asserted, and the subscription is read over ARM to prove it is visible and in -TenantId. There is no second path.
       -Token / -Arm are the REST test seams: { param($Resource, $TenantId) <jwt> } and { param($Path) <ARM object> }.
     #>
-    param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$SubscriptionId, [scriptblock]$Az, [scriptblock]$Token, [scriptblock]$Arm)
+    param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$SubscriptionId, [scriptblock]$Token, [scriptblock]$Arm)
     $conf = @(Get-PimSignedInEnvironmentConflicts)
     if ($conf.Count) {
         return @{ ok = $false; reason = ("REFUSED: $($conf -join ', ') $(if ($conf.Count -eq 1) { 'is' } else { 'are' }) set in this session -- a token call would authenticate as " +
                  'that identity instead of the signed-in user. ' + (Get-PimSignedInConflictHint -Names $conf)) }
     }
-    if (-not $Az) { return (Get-PimSignedInIdentityRest -TenantId $TenantId -SubscriptionId $SubscriptionId -Token $Token -Arm $Arm) }
-    $acct = $null
-    try { $acct = ((& $Az @('account', 'show', '--subscription', "$SubscriptionId", '-o', 'json')) | Out-String | ConvertFrom-Json) } catch { $acct = $null }
-    $a = Test-PimSignedInAccount -Account $acct -TenantId $TenantId -SubscriptionId $SubscriptionId
-    if (-not $a.ok) { return $a }
-    $tok = $null
-    try { $tok = "$(((& $Az @('account', 'get-access-token', '--subscription', "$SubscriptionId", '--resource', 'https://management.azure.com/', '-o', 'json')) | Out-String | ConvertFrom-Json).accessToken)" } catch { $tok = $null }
-    if (-not "$tok".Trim()) { return @{ ok = $false; reason = "az could not issue a token for subscription $SubscriptionId (sign in again: az login --tenant $TenantId)" } }
-    $t = Test-PimSignedInToken -Token $tok -TenantId $TenantId -AllowedAppId "$($a.supportAppId)"
-    $tok = $null
-    if (-not $t.ok) { return $t }
-    return @{ ok = $true; reason = $a.reason; userName = $(if ($t.userName) { $t.userName } else { $a.userName }); objectId = $t.objectId
-              tenantId = "$TenantId".Trim().ToLowerInvariant(); subscriptionId = "$SubscriptionId".Trim().ToLowerInvariant(); supportAppId = "$($a.supportAppId)" }
+    return (Get-PimSignedInIdentityRest -TenantId $TenantId -SubscriptionId $SubscriptionId -Token $Token -Arm $Arm)
 }
 
 function Get-PimSignedInToken {
     <#
       REQ 100.42 / framework 12.17 (owner 2026-10-09: "modern single connect only"; owner token rule: tools get TOKENS from
       Get-InvardiaSupportToken). THE token source of a signed-in setup run, registered into PIM-Rest by
-      Set-PimSignedInGlobals ($global:PIM_TokenProvider). No az CLI, no module:
+      Set-PimSignedInGlobals ($global:PIM_TokenProvider). No command-line tool, no module:
         * the Invardia Support-app session is open in this shell (Get-InvardiaSupportToken exists) -> its token;
         * otherwise the signed-in person -> Get-PimInteractiveToken (browser, auth-code + PKCE; never device code).
       Returns the token string (Support app) or PIM-Rest's @{ token; expiresUtc } (interactive). PIM-Rest verifies the tid.
@@ -274,7 +222,7 @@ function Get-PimSignedInIdentityRest {
     }
     $allow = $supportApp
     if (-not $allow) {
-        # the az-profile support session (Connect-InvardiaSupport -AzCli), recognised by its environment: the token's own app id
+        # an older connect script's support session, recognised by its environment variables: the token's own app id
         $sess = Get-PimSupportAppSession
         if ($sess -and $sess.tenantId -eq $want -and ($sess.subscriptions -contains $sub)) {
             $c = ConvertFrom-PimJwtClaims -Token $tok
@@ -311,7 +259,7 @@ function Set-PimSignedInGlobals {
     $global:PIM_NoManagedIdentity = $true
     $global:PIM_UseGraphSdk = $false
     $global:PIM_SignedInAccount = $true
-    # REQ 100.42: register the signed-in token source (Support app / browser) -- PIM-Rest no longer falls back to az.
+    # REQ 100.42: register the signed-in token source (Support app / browser) -- PIM-Rest has no other fallback.
     $global:PIM_TokenProvider = ${function:Get-PimSignedInToken}
 }
 
@@ -336,7 +284,7 @@ function Connect-PimSignedInSql {
     }
     $tok = Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId
     if (-not $allowApp) {
-        # the az-profile support session (Connect-InvardiaSupport -AzCli): accept exactly the app its token names
+        # an older connect script's support session (environment variables): accept exactly the app its token names
         $sess = Get-PimSupportAppSession
         if ($sess -and $sess.tenantId -eq "$TenantId".Trim().ToLowerInvariant()) {
             $c = ConvertFrom-PimJwtClaims -Token "$tok"
@@ -358,7 +306,7 @@ function Invoke-PimSignedInSqlAdminMembership {
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$ResourceGroup,
           [Parameter(Mandatory)][string]$SqlServerName, [Parameter(Mandatory)][string]$UserObjectId, [string]$GroupName = 'grp-pim-sql-admins',
-          # test seam: @{ Graph; Arm; TenantId } instead of the signed-in az context
+          # test seam: @{ Graph; Arm; TenantId } instead of the signed-in session's REST invokers
           [object]$Invokers)
     # Loaded on demand through a variable path: Build-PimSupportScripts.ps1 inlines the literal dot-source-of-a-Join-Path
     # lines, and a standalone script that inlines THIS file (Initialize-PimMailSender.ps1) never calls this function.
@@ -391,7 +339,7 @@ function Invoke-PimSignedInSqlAdminMembership {
     if ($r.blocked) { return @{ ok = $true; blocked = $true; added = $false; reason = "the Entra admin of $srv is not '$GroupName' ($($r.blocked)) -- membership grants nothing there. Converge the server onto the group first (Initialize-PimSqlAdminGroup.ps1), or make the signed-in user the Entra admin." } }
     if ($added) {
         Write-Host ("    NOTE: you were ADDED to '$GroupName' just now. An Entra token carries group membership as of when it was issued, " +
-                    'and az caches tokens for up to about an hour -- if SQL refuses the next step, sign in again (az logout; az login --tenant <tenant>) and resume.') -ForegroundColor Yellow
+                    'and a sign-in token is reused for up to about an hour -- if SQL refuses the next step, open a NEW PowerShell window, sign in again (browser, or Connect-InvardiaSupport.ps1) and resume.') -ForegroundColor Yellow
     }
     return @{ ok = $true; blocked = $false; added = $added; reason = '' }
 }

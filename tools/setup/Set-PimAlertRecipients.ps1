@@ -14,8 +14,9 @@
     Written, READ BACK, audited ('settings.alerting.save', like the Manager).
     Exit codes: 0 set or kept; 2 nothing could be set (no address, no mailbox -- the GUI path is printed); 1 failed.
 
-    Identity: -UseSignedInAccount (the signed-in az user or the Invardia Support app, a member of the SQL admin group), or a
-    certificate identity (-ClientId / -CertThumbprint). Graph is read with the signed-in az context (pinned to -SubscriptionId).
+    Identity: -UseSignedInAccount (the signed-in user or the Invardia Support app, a member of the SQL admin group), or a
+    certificate identity (-ClientId / -CertThumbprint). Graph is read with the same identity through PIM-Rest's token client
+    (pinned to -TenantId; no az CLI).
 
 .EXAMPLE
     .\Set-PimAlertRecipients.ps1 -SqlServerFqdn sql-pim-x.database.windows.net -TenantId <t> -SubscriptionId <s> -SuperAdmins admin@contoso.com -UseSignedInAccount
@@ -38,7 +39,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimInstallVerify.ps1')
-$result = [ordered]@{ ok = $false; action = ''; recipients = @(); skipped = @(); reason = '' }
+# -SubscriptionId fed `az --subscription` before 100.41 (no az now); callers still pass it, so it names the environment in the result.
+$result = [ordered]@{ ok = $false; action = ''; recipients = @(); skipped = @(); reason = ''; subscriptionId = "$SubscriptionId".Trim() }
 function Write-Out { if ("$OutFile".Trim()) { try { $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OutFile -Encoding UTF8 } catch { } } }
 $norm = { param($l) @(@($l) | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
 $AlertRecipients = @(& $norm $AlertRecipients); $SuperAdmins = @(& $norm $SuperAdmins)
@@ -56,13 +58,13 @@ if (-not $Store) {
     }
 }
 if (-not $Graph) {
+    # 100.41 (NO-AZ): the Graph token comes from PIM-Rest's ONE token client, pinned to -TenantId -- the identity the store
+    # connection above set up (the signed-in user / the Invardia Support app, or the certificate identity). No az CLI.
+    if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-Rest.ps1') }
     $Graph = {
         param($path)
-        $ta = @('account', 'get-access-token', '--resource', 'https://graph.microsoft.com', '--query', 'accessToken', '-o', 'tsv')
-        if ("$SubscriptionId".Trim()) { $ta += @('--subscription', "$SubscriptionId".Trim()) } else { $ta += @('--tenant', $TenantId) }
-        $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        $tok = "$(& az @ta 2>$null)".Trim(); $ErrorActionPreference = $eap
-        if (-not $tok) { throw 'no Microsoft Graph token from the signed-in az context' }
+        $tok = ''; try { $tok = "$(Get-PimRestToken -Resource 'graph' -TenantId $TenantId)".Trim() } catch { $tok = '' }
+        if (-not $tok) { throw "no Microsoft Graph token for tenant $TenantId from the signed-in identity" }
         Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/$path" -Headers @{ Authorization = "Bearer $tok" } -TimeoutSec 30
     }
 }

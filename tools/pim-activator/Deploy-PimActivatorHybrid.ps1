@@ -222,7 +222,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# 12.7 run frame: "Documentation: <page>" as the first line + a transcript in the temp folder (its path printed at the end).
+# 12.7 run frame: "<Script> version <x.y.z> - documentation: <page>" as the first line (100.52) + a transcript in the temp folder (its path printed at the end).
 . (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
 $null = Start-PimScriptRun -Script 'Deploy-PimActivatorHybrid'
 try {

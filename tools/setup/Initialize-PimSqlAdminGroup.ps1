@@ -5,8 +5,8 @@
     Make a role-assignable security group (default grp-pim-sql-admins) the Microsoft Entra admin of a PIM Manager
     environment's Azure SQL server, with the environment's managed identities, the nightly updater and the Invardia
     Support app as its members. One command, idempotent, every change read back; -WhatIf shows every change first.
-    Runs as the account signed in to az (az login), or a certificate identity from the repository -- never a client
-    secret.
+    Signs in in the browser as the person running it (or, inside an Invardia support session, as the Invardia Support
+    app), or uses a certificate identity from the repository -- never a client secret, no other tools or modules.
 
 .DESCRIPTION
     Makes a security group (default 'grp-pim-sql-admins') the SQL server's Microsoft Entra admin, with
@@ -42,12 +42,15 @@
     Read everything and print the plan. Changes nothing. (-WhatIf does the same and prints each change as a
     "What if:" line.)
 
+.PARAMETER TenantId
+    The tenant of the environment. Required for the browser sign-in (the sign-in and every token are pinned to it).
+
 .PARAMETER ClientId
     Automation from the repository only: with -CertThumbprint, a certificate identity in the local store instead of
-    the az sign-in. Not needed for the downloaded script.
+    the browser sign-in. Not needed for the downloaded script.
 
 .EXAMPLE
-    az login --tenant <tenant id>
+    # A browser window opens: sign in as yourself (an administrator of the tenant).
     .\Initialize-PimSqlAdminGroup.ps1 -SubscriptionId <subscription id> -ResourceGroup <resource group> -SqlServerName <sql server> `
         -TenantId <tenant id> -SupportAppId <Invardia Support app id> -WhatIf
     Preview, then run the same command without -WhatIf.
@@ -71,7 +74,7 @@ param(
     [Alias('TroubleshootingAppId')][string]$SupportAppId,
     [Alias('TroubleshootingObjectId')][string]$SupportObjectId,
     [string[]]$ExtraMemberObjectIds = @(),
-    # Certificate auth from the local store. Omit both to use the signed-in az context.
+    # Certificate auth from the local store. Omit both to sign in in the browser (or use the Invardia support session).
     [string]$ClientId,
     [string]$CertThumbprint,
     [switch]$MembersOnly,
@@ -79,6 +82,8 @@ param(
     [switch]$PlanOnly
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')   # the ONE token client (framework 12.17)
+. (Join-Path $PSScriptRoot '_PimSignedIn.ps1')                    # the sign-in rule: the Support session, else the browser
 . (Join-Path $PSScriptRoot '_PimSqlAdminGroup.ps1')
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 $null = Start-PimScriptRun -Script 'Initialize-PimSqlAdminGroup'
@@ -90,8 +95,18 @@ $server = ("$SqlServerName".Trim() -split '\.')[0]
 Write-Host "`n=== SQL admin group: $GroupName -> $server ===" -ForegroundColor Cyan
 Write-Host "    subscription $SubscriptionId / $ResourceGroup$(if ($PlanOnly) { '   (PLAN ONLY -- nothing is changed)' })" -ForegroundColor DarkGray
 
+# Framework 12.17 -- ONE sign-in rule. Without a certificate: the Invardia Support session open in this window
+# (Use-PimSupportAppRestSession), otherwise the person's own browser sign-in (Set-PimSignedInGlobals registers it in PIM-Rest;
+# auth code + PKCE, never device code). Every token is pinned to -TenantId and checked.
+$authLabel = "certificate ($ClientId)"
+if (-not "$CertThumbprint".Trim()) {
+    if ("$TenantId".Trim() -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { throw 'Initialize-PimSqlAdminGroup: pass -TenantId <tenant id> -- the sign-in is pinned to that tenant.' }
+    $supportApp = Use-PimSupportAppRestSession -TenantId $TenantId -SubscriptionId $SubscriptionId
+    if ($supportApp) { $authLabel = "the Invardia Support app $supportApp (support session)" }
+    else { Set-PimSignedInGlobals -TenantId $TenantId; $authLabel = 'your browser sign-in' }
+}
 $inv = New-PimSqlAdminGroupInvokers -SubscriptionId $SubscriptionId -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint
-Write-Host "    auth: $(if ("$CertThumbprint".Trim()) { "certificate ($ClientId)" } else { 'signed-in az context' }) in tenant $($inv.TenantId)" -ForegroundColor DarkGray
+Write-Host "    auth: $authLabel in tenant $($inv.TenantId)" -ForegroundColor DarkGray
 
 $r = Invoke-PimSqlAdminGroupStep -Graph $inv.Graph -Arm $inv.Arm -TenantId $inv.TenantId -SubscriptionId $SubscriptionId `
         -ResourceGroup $ResourceGroup -SqlResourceGroup $SqlResourceGroup -SqlServerName $server -GroupName $GroupName -GroupObjectId $GroupObjectId `

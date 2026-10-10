@@ -514,7 +514,7 @@ if (-not @($SlaveAdminPrefixes | Where-Object { "$_".Trim() }).Count -and -not $
 if (@($SlaveAdminPrefixes | Where-Object { "$_".Trim() }).Count) {
     Note ("admin naming prefixes: {0} (recognisability guard ARMED for every scheduled run)" -f (@($SlaveAdminPrefixes) -join ', '))
 } else {
-    Warn '-AllowUncheckedAdminNaming given -- the recognisability guard stays INERT for this tenant.'
+    Warn 'admin naming check off until the tenant sets its admin account patterns in Settings (-AllowUncheckedAdminNaming; the pull job reads AdminAccountPatterns from the store on every run).'
 }
 
 if (-not "$SqlServerFqdn".Trim()) {

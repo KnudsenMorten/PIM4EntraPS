@@ -161,7 +161,7 @@
     { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The store's database." },
     { "name": "ClientId", "required": false, "default": null, "help": "Automation from the repository only: a certificate identity (with -CertThumbprint). Never shown by PIM Manager." },
     { "name": "CertThumbprint", "required": false, "default": null, "help": "Automation from the repository only: the certificate of -ClientId." },
-    { "name": "UseSignedInAccount", "required": false, "default": "off", "help": "Use the account signed in to az in this window (the Invardia Support app session, or a person) instead of the browser sign-in." },
+    { "name": "UseSignedInAccount", "required": false, "default": "off", "help": "Use the signed-in session of this window (the Invardia Support app session opened by Invardia's connect script; without one, your own browser sign-in)." },
     { "name": "UseEdge", "required": false, "default": "$true", "help": "$true opens Microsoft Edge for the sign-in; $false the default browser." },
     { "name": "EngineObjectId", "required": false, "default": "the tick job's identity", "help": "The engine identity's object id (shown in PIM Manager)." },
     { "name": "EngineAppId", "required": false, "default": null, "help": "The engine application's id, instead of -EngineObjectId." },

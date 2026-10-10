@@ -634,6 +634,44 @@ function Get-PimGroupActivityFromTenant {
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+# §100.45: when the group-activity list ('pim-activity') was last READ from Graph. Kept in pim.Settings
+# 'PimActivityReadUtc' (and in this process), not inside the cache document: its keys are group tags.
+$script:PimActivityRefreshHours = 24
+$script:PimActivityLastReadMem = $null
+function Test-PimActivityReadDue {
+    # PURE. Due when never read, unreadable, or at least -Hours ago (a stamp in the future counts as due).
+    param([AllowNull()][object]$LastReadUtc, [datetime]$NowUtc = [datetime]::UtcNow, [double]$Hours = $script:PimActivityRefreshHours)
+    if ($null -eq $LastReadUtc) { return $true }
+    $t = $null; try { $t = ([datetime]$LastReadUtc).ToUniversalTime() } catch { return $true }
+    $age = ($NowUtc.ToUniversalTime() - $t).TotalHours
+    return ($age -lt 0 -or $age -ge $Hours)
+}
+function Get-PimActivityLastReadUtc {
+    # [datetime] UTC of the last group-activity read, or $null. Never throws.
+    if ($script:PimActivityLastReadMem -is [datetime]) { return $script:PimActivityLastReadMem }
+    $cs = Get-PimTenantCacheStoreCs
+    if ($cs -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) {
+        try {
+            $v = Get-PimSqlSetting -ConnectionString $cs -Name 'PimActivityReadUtc'
+            if ($v -is [datetime]) { return $v.ToUniversalTime() }
+            $d = [datetime]::MinValue
+            if ("$v".Trim() -and [datetime]::TryParse("$v".Trim('"'), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal', [ref]$d)) { return $d }
+        } catch { }
+    }
+    return $null
+}
+function Set-PimActivityLastReadUtc {
+    param([Parameter(Mandatory)][datetime]$WhenUtc)
+    $script:PimActivityLastReadMem = $WhenUtc.ToUniversalTime()
+    $cs = Get-PimTenantCacheStoreCs
+    if ($cs -and (Get-Command Set-PimSqlSetting -ErrorAction SilentlyContinue)) {
+        # A failed write is reported, never swallowed: the in-memory value still holds for this process, so the only cost is
+        # one extra activity read after a restart.
+        try { Set-PimSqlSetting -ConnectionString $cs -Name 'PimActivityReadUtc' -Value $WhenUtc.ToUniversalTime().ToString('o') | Out-Null }
+        catch { Write-Warning "[tenant-sync] pim-activity: the last-read time was not saved ($($_.Exception.Message)) -- the next restart reads the activity list again." }
+    }
+}
+
 # Single-flight lock so concurrent UI refresh requests don't hammer Graph.
 $script:PimTenantRefreshInProgress = $false
 
@@ -671,8 +709,21 @@ function Invoke-PimTenantListRefresh {
         )) {
             $kind  = $step.kind
             $label = $step.label
+            # §100.45: the group-activity read (one request per owned group, ~366 on internal) runs at most once per
+            # $script:PimActivityRefreshHours -- run on every refresh it overlapped the policy / drift reads and multiplied
+            # the 429s. In between the last value is kept and its age reported.
+            if ($kind -eq 'pim-activity') {
+                $lastAct = Get-PimActivityLastReadUtc
+                if (-not (Test-PimActivityReadDue -LastReadUtc $lastAct)) {
+                    $ageH = [Math]::Round(((Get-Date).ToUniversalTime() - $lastAct).TotalHours, 1)
+                    if (-not $Quiet) { Write-Host ("    {0,-22} KEPT -- read {1} h ago (refreshed every {2} h)" -f $label, $ageH, $script:PimActivityRefreshHours) -ForegroundColor DarkGray }
+                    $results[$kind] = @{ ok = $true; kept = $true; count = 0; ageHours = $ageH; lastReadUtc = $lastAct.ToString('o'); reason = "kept: read $ageH h ago, refreshed every $($script:PimActivityRefreshHours) h" }
+                    continue
+                }
+            }
             try {
                 $items = & $step.fn
+                if ($kind -eq 'pim-activity') { Set-PimActivityLastReadUtc -WhenUtc (Get-Date).ToUniversalTime() }
                 if ($step.map) {
                     $path  = Set-PimTenantCacheEntry -Kind $kind -Value $items
                     $count = @($items.PSObject.Properties).Count

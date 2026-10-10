@@ -61,7 +61,7 @@
   Mail.Send, NOT Exchange.ManageAsApp, and no directory role at all -- its EXO token came back with
   an empty `roles` claim and the admin endpoint answered 401.
 
-  REST-only: no ExchangeOnlineManagement module, no Graph SDK, no `az`. Exchange is driven through
+  REST-only: no ExchangeOnlineManagement module, no Graph SDK, no command-line tools. Exchange is driven through
   the `/adminapi/beta/<tenant>/InvokeCommand` endpoint that the EXO V3 module itself uses.
 
   🔒 HOW IT SIGNS IN (MAIL-1, framework 12.3, owner 2026-10-08: "we dont use certificates here, either interactive
@@ -73,7 +73,8 @@
     * -AdminAppId -AdminSecret -> the Invardia Support app (the setup / support identity; its secret is the one
                                   allowed exception, framework 4.1a). It activates its own time-boxed Exchange
                                   Administrator through PIM.
-    * -UseSignedInAccount      -> the signed-in az session (the deploy's own run as the Support app, or a person).
+    * -UseSignedInAccount      -> the signed-in session of this window: the Invardia Support session when one is
+                                  open for this tenant, otherwise the person's own browser sign-in.
     * -AdminCertThumbprint     -> still accepted for old callers; never what a page or a document prints.
   Published standalone at https://invardia.com/support/pim/Initialize-PimMailSender.ps1 (Build-PimSupportScripts.ps1).
 
@@ -154,9 +155,9 @@ param(
     # defect, which is why the offline gate now audits the whole family instead of naming them.
     [string]$AdminSecret,
     [string]$AdminCertThumbprint,
-    # 2026-10-07 (operator, at a customer: "you are welcome to fix this at <customer>"): run as the SIGNED-IN az session
-    # instead -- the Invardia Support app (Connect-InvardiaSupport -AzCli) or a person -- with no secret or certificate
-    # passed. -AdminAppId is then the signed-in app (it activates its own short-lived Exchange Administrator role).
+    # 2026-10-07 (operator, at a customer: "you are welcome to fix this at <customer>"): run as the SIGNED-IN session
+    # instead -- the Invardia Support session open in this window (Connect-InvardiaSupport), else the person's browser
+    # sign-in (framework 12.17: one sign-in rule, _PimSignedIn.ps1) -- with no secret or certificate passed. -AdminAppId is then the signed-in app (it activates its own short-lived Exchange Administrator role).
     [switch]$UseSignedInAccount,
     # The engine SPN. It receives the scoped Mail.Send ONLY when no managed identity is named below
     # (a non-hosted engine sends as the SPN). With a managed identity it is still checked for a
@@ -233,10 +234,11 @@ $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvoca
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Rest.ps1')
 . (Join-Path $PSScriptRoot '_PimMailSenderPlan.ps1')          # pure planners (tested offline)
 . (Join-Path $PSScriptRoot '_PimMailSetup.ps1')               # how it signs in + the browser sign-in
+. (Join-Path $PSScriptRoot '_PimSignedIn.ps1')                # -UseSignedInAccount: the Support session, else the browser
 $null = Start-PimScriptRun -Script 'Initialize-PimMailSender'
 try {
 
-# EITHER a secret OR a certificate (or the signed-in az session, or the browser), never two at once. Checked before
+# EITHER a secret OR a certificate (or the signed-in session, or the browser), never two at once. Checked before
 # anything is provisioned: this script creates a mailbox and grants Exchange rights, and finding out the credential was
 # unusable halfway through leaves a half-configured tenant nobody asked for. ("pass EITHER" / "-AdminAppId is required"
 # are the refusals; the decision is Resolve-PimMailSetupAuthMode in _PimMailSetup.ps1, tested offline.)
@@ -245,13 +247,22 @@ if ($authPlan.reason) { throw "Initialize-PimMailSender: $($authPlan.reason)" }
 $script:PimMailAuthMode = $authPlan.mode
 $browserMode = ($script:PimMailAuthMode -eq 'browser')
 # INSTALL-HARDEN-1 (owner 2026-10-08; the trial runs in the customer's Cloud Shell as a PERSON): -UseSignedInAccount with no
-# -AdminAppId is the signed-in PERSON's delegated az token -- like the browser sign-in, that person's own Exchange
+# -AdminAppId is the signed-in PERSON's delegated token -- like the browser sign-in, that person's own Exchange
 # Administrator / Global Administrator role does the work and no app is granted anything.
 $personSignedIn = ($script:PimMailAuthMode -eq 'signedIn' -and -not "$AdminAppId".Trim())
 $delegatedMode = ($browserMode -or $personSignedIn)
+# Framework 12.17 (ONE sign-in rule): a signed-in run takes every token from the source _PimSignedIn.ps1 registers in
+# PIM-Rest ($global:PIM_TokenProvider) -- the Invardia Support session open in this window (Get-InvardiaSupportToken),
+# otherwise the person's own browser sign-in (auth code + PKCE, never device code). PIM-Rest checks each token's tenant.
+if ($script:PimMailAuthMode -eq 'signedIn') { Set-PimSignedInGlobals -TenantId $TenantId }
 function Get-PimMailSignedInUpn {
     if ($browserMode) { return (Get-PimMsSignedInUpn) }
-    if ($personSignedIn) { try { return "$(az account show --query user.name -o tsv 2>$null)".Trim() } catch { return '' } }
+    if ($personSignedIn) {
+        try {
+            $c = ConvertFrom-PimJwtClaims -Token (Get-PimMailAdminToken -Resource 'graph')
+            return "$(if ($c.upn) { $c.upn } elseif ($c.unique_name) { $c.unique_name } else { $c.preferred_username })".Trim()
+        } catch { return '' }
+    }
     return ''
 }
 if ($browserMode -and -not (Test-PimMsInteractiveHost)) {
@@ -260,14 +271,14 @@ if ($browserMode -and -not (Test-PimMsInteractiveHost)) {
 
 function Get-PimMailAdminToken {
     # The admin (onboarding) identity's token for 'graph' | 'arm' | a resource URL: the browser sign-in (the person),
-    # the signed-in az session with -UseSignedInAccount, else the app's own secret / certificate. Never cached across
-    # identities (-Force).
+    # the signed-in session with -UseSignedInAccount (PIM-Rest's registered token source: the Invardia Support session,
+    # else the person's browser sign-in), else the app's own secret / certificate. Never cached across identities (-Force).
     param([Parameter(Mandatory)][string]$Resource)
     if ($script:PimMailAuthMode -eq 'browser') { return (Get-PimMsBrowserToken -Resource $Resource -TenantId $TenantId) }
     if ($UseSignedInAccount) {
-        $url = switch ($Resource) { 'graph' { 'https://graph.microsoft.com' } 'arm' { 'https://management.azure.com' } default { $Resource } }
-        $tok = "$(az account get-access-token --tenant $TenantId --resource $url --query accessToken -o tsv 2>$null)".Trim()
-        if (-not $tok) { throw "Initialize-PimMailSender: the signed-in az session has no token for $url in tenant $TenantId (sign in first)." }
+        if (-not ($global:PIM_TokenProvider -is [scriptblock])) { Set-PimSignedInGlobals -TenantId $TenantId }
+        $tok = "$(Get-PimRestToken -Resource $Resource -TenantId $TenantId)".Trim()
+        if (-not $tok) { throw "Initialize-PimMailSender: the signed-in session gave no token for $Resource in tenant $TenantId -- connect with the Invardia Support app (Connect-InvardiaSupport.ps1 -Environment <handle>), or run it in a PowerShell window and sign in in the browser." }
         return $tok
     }
     return (Get-PimRestToken -Resource $Resource -TenantId $TenantId -ClientId $AdminAppId -ClientSecret $AdminSecret -CertThumbprint $AdminCertThumbprint -Force)
@@ -439,12 +450,12 @@ function GrAll {
     return $items
 }
 if ($browserMode) { Note "signed in as $(Get-PimMsSignedInUpn) (browser sign-in; no app identity is used or granted anything)" 'DarkGray' }
-elseif ($personSignedIn) { Note "signed in as $(Get-PimMailSignedInUpn) (a person's signed-in az session; no app identity is used or granted anything)" 'DarkGray' }
+elseif ($personSignedIn) { Note "signed in as $(Get-PimMailSignedInUpn) (a person's own sign-in; no app identity is used or granted anything)" 'DarkGray' }
 else { Note "onboarding SPN: $AdminAppId" 'DarkGray' }
 
 # 🔴 THE ONBOARDING SPN CANNOT GRANT ITSELF. The header says this script's identity "already
 # elevates itself to Global Administrator + Owner" -- true of the estate's onboarding SPN, and NOT
-# true of a customer deploy SPN created with `az ad sp create-for-rbac --role Owner`, which holds
+# true of a customer deploy SPN that was only given the Azure Owner role (create-for-rbac), which holds
 # Azure RBAC and nothing in Graph. Every Graph call here uses that SPN's own token, so the two
 # grants below -- Exchange.ManageAsApp and the Exchange Administrator role -- ask the SPN to assign
 # roles TO ITSELF, needing AppRoleAssignment.ReadWrite.All and RoleManagement.ReadWrite.Directory.
@@ -453,9 +464,8 @@ else { Note "onboarding SPN: $AdminAppId" 'DarkGray' }
 #
 # The directive this script opens with is "the onboarding scripts must handle this prep unattended",
 # so refusing with an instruction to go and grant it by hand is the wrong answer. Instead: fall back
-# to the AMBIENT az context for the grant only. The operator running onboarding is signed in as a
-# Global Administrator (the identity phase requires it for exactly the same reason), which is the
-# same borrowed-token pattern Install-PimEngineAppRegistration.ps1 already uses.
+# to a Global Administrator's BROWSER sign-in for the grant only (framework 12.17: no command-line tool session is
+# borrowed any more). Only where a person is at the console -- an unattended run gets the refusal, naming the grant.
 #
 # 🔒 Scope of the fallback is deliberately narrow: READS stay on the SPN token, and only these two
 # POSTs may elevate. Anything that is not an authorization failure is rethrown untouched -- a
@@ -470,22 +480,22 @@ function Invoke-PimGrant {
         # so a second run died before the step that actually still needed doing.
         if (Test-PimAlreadyExistsError -Text $m) { return 'already held (nothing granted)' }
         if ($m -notmatch 'Authorization_RequestDenied|Insufficient privileges|\b403\b|Forbidden') { throw }
-        Note "$What refused for the onboarding SPN (it cannot grant itself) -- retrying with the signed-in az context" 'DarkYellow'
-        $azTok = az account get-access-token --tenant $TenantId --resource https://graph.microsoft.com --query accessToken -o tsv 2>$null
-        if (-not "$azTok".Trim()) {
-            throw ("$What was denied to the onboarding SPN, and no az context is available to fall back to. " +
-                   "Sign in as a Global Administrator (az login) and re-run, or grant $AdminAppId " +
-                   "AppRoleAssignment.ReadWrite.All + RoleManagement.ReadWrite.Directory.")
-        }
+        $deny = ("$What was denied to the onboarding SPN. Re-run in a PowerShell window and sign in in the browser as a " +
+                 "Global Administrator when asked, or grant $AdminAppId AppRoleAssignment.ReadWrite.All + RoleManagement.ReadWrite.Directory.")
+        if (-not (Test-PimMsInteractiveHost)) { throw $deny }
+        Note "$What refused for the onboarding SPN (it cannot grant itself) -- sign in in the browser as a Global Administrator for this grant" 'DarkYellow'
+        $gaTok = ''
+        try { $gaTok = "$(Get-PimMsBrowserToken -Resource 'graph' -TenantId $TenantId)".Trim() } catch { throw "$deny ($($_.Exception.Message))" }
+        if (-not $gaTok) { throw $deny }
         try {
             Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/v1.0/$Path" `
-                -Headers @{ Authorization = "Bearer $azTok"; 'Content-Type' = 'application/json' } `
+                -Headers @{ Authorization = "Bearer $gaTok"; 'Content-Type' = 'application/json' } `
                 -Body ($Body | ConvertTo-Json -Depth 20) | Out-Null
         } catch {
             if (Test-PimAlreadyExistsError -Text "$($_.Exception.Message) $($_.ErrorDetails.Message)") { return 'already held (nothing granted)' }
             throw
         }
-        return 'signed-in az context'
+        return 'Global Administrator browser sign-in'
     }
 }
 
@@ -1159,7 +1169,7 @@ if (-not "$SqlServerFqdn".Trim()) {
         # The person's own SQL token (Azure PowerShell public client, from the browser sign-in). No app credential is set,
         # managed identity is switched off (a VM's own would otherwise win), and the token is placed in the store's
         # per-identity token cache under the "no app credential" key -- the cache is read before any other source, so
-        # the connection presents exactly this person and nothing ambient (never the az CLI's default account).
+        # the connection presents exactly this person and nothing ambient (never a tool's default account).
         foreach ($n in 'PIM_ClientId', 'PIM_ClientSecret', 'PIM_CertThumbprint', 'PIM_SqlClientId', 'PIM_SqlClientSecret', 'PIM_SqlCertThumbprint', 'PIM_SqlAccessToken') { Set-Variable -Scope Global -Name $n -Value $null }
         $global:PIM_NoManagedIdentity = $true
         try {

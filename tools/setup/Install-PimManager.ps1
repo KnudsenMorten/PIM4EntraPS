@@ -99,10 +99,74 @@ $sol = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $here '_PimSignedIn.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-License.ps1')
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')     # framework 12.7: the Documentation line + the transcript
+# §100.41 (NO-AZ, framework 12.17): the installer's reads go over ARM / Graph REST with PIM-Rest's ONE token client (the
+# Invardia Support-app session, else the person's browser sign-in -- Get-PimSignedInIdentity). Loaded at FILE scope (71.32).
+. (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
+. (Join-Path $sol 'engine\_shared\PIM-ArmSetup.ps1')
 $null = Start-PimScriptRun -Script 'Install-PimManager'
 try {
 
-if (-not $Az) { $Az = { param([string[]]$AzArgs) $ErrorActionPreference = 'Continue'; & az @AzArgs 2>$null } }
+# -Az is the LEGACY az-shaped TEST seam (tests/Test-PimGuidedInstall.ps1 scripts az's answers). Without it -- every real
+# install -- the same az-shaped reads are answered over REST by Invoke-PimInstallRestRead: no az CLI is needed or invoked.
+$azSeam = [bool]$Az
+function Invoke-PimInstallRestRead {
+    <#
+      The installer's az-shaped reads, answered over ARM / Graph REST (PIM-ArmSetup.ps1). ONLY the shapes this script uses
+      are known; anything else THROWS (fails closed -- never a silent empty answer that would read as "absent").
+      Output = what az printed: JSON text (-o json / no --query) or the --query value as text (-o tsv); '' when absent.
+    #>
+    param([string[]]$AzArgs)
+    $words = @(); $opt = @{}; $i = 0
+    while ($i -lt $AzArgs.Count -and "$($AzArgs[$i])" -notmatch '^-') { $words += "$($AzArgs[$i])"; $i++ }
+    while ($i -lt $AzArgs.Count) {
+        $k = "$($AzArgs[$i])"; $v = $true
+        if ($i + 1 -lt $AzArgs.Count -and "$($AzArgs[$i + 1])" -notmatch '^--?[a-z]') { $v = "$($AzArgs[$i + 1])"; $i++ }
+        $opt[$k] = $v; $i++
+    }
+    $o = { param($names) foreach ($n in $names) { if ($opt.ContainsKey($n)) { return "$($opt[$n])" } }; '' }
+    $sub = & $o @('--subscription'); $rg = & $o @('-g', '--resource-group'); $name = & $o @('-n', '--name')
+    $cmd = $words -join ' '
+    $val = switch ($cmd) {
+        'account show' {
+            $s = Get-PimArmSubscription -SubscriptionId $sub
+            if ($s) { [pscustomobject]@{ id = "$($s.subscriptionId)"; tenantId = "$($s.tenantId)"; name = "$($s.displayName)"; state = "$($s.state)" } }
+        }
+        'account get-access-token' { [pscustomobject]@{ accessToken = "$(Get-PimRestToken -Resource (& $o @('--resource')) -TenantId $cfg.tenantId)" } }
+        'role assignment list' {
+            # --include-groups: assignedTo() returns the principal's own AND its groups' assignments; --include-inherited
+            # keeps the ones AT the scope or above it (az --scope never lists the ones below).
+            $scope = (& $o @('--scope')).TrimEnd('/'); $oid = & $o @('--assignee')
+            $f = [uri]::EscapeDataString("assignedTo('$oid')")
+            @(Invoke-PimSetupArm -Path "$scope/providers/Microsoft.Authorization/roleAssignments?`$filter=$f" -ApiVersion (Get-PimSetupApiVersion authorization) -All |
+                Where-Object { $_ -and $scope.StartsWith("$($_.properties.scope)".TrimEnd('/'), [StringComparison]::OrdinalIgnoreCase) } |
+                ForEach-Object { [pscustomobject]@{ roleDefinitionName = (Get-PimArmRoleName -RoleDefinitionId "$($_.properties.roleDefinitionId)") } })
+        }
+        'provider show' { [pscustomobject]@{ registrationState = (Get-PimArmProviderState -SubscriptionId $sub -Namespace $name) } }
+        'group show' { Get-PimArmResourceGroup -SubscriptionId $sub -Name $name }
+        'sql server show' { Get-PimArmSqlServer -SubscriptionId $sub -ResourceGroup $rg -Name $name }
+        'acr check-name' {
+            Invoke-PimSetupArm -Method POST -Path "/subscriptions/$sub/providers/Microsoft.ContainerRegistry/checkNameAvailability" -ApiVersion (Get-PimSetupApiVersion acr) `
+                -Body @{ name = $name; type = 'Microsoft.ContainerRegistry/registries' }
+        }
+        'acr show' { Get-PimArmAcr -SubscriptionId $sub -ResourceGroup $rg -Name $name }
+        'containerapp job show' { Get-PimArmAcaJob -SubscriptionId $sub -ResourceGroup $rg -Name $name }
+        'containerapp show' { Get-PimArmAcaApp -SubscriptionId $sub -ResourceGroup $rg -Name $name }
+        'monitor log-analytics workspace show' { Get-PimArmLogAnalytics -SubscriptionId $sub -ResourceGroup $rg -Name $name }
+        default { throw "Invoke-PimInstallRestRead: no REST form for 'az $cmd'" }
+    }
+    $q = & $o @('--query')
+    if ($q) {
+        # the --query forms this script uses: a dotted path, or '[].<field>' over a list
+        if ($q -match '^\[\]\.(\w+)$') { $f = $Matches[1]; return (@(@($val) | ForEach-Object { "$($_.$f)" } | Where-Object { $_ }) -join "`n") }
+        $cur = $val; foreach ($p in ($q -split '\.')) { if ($null -eq $cur) { break }; $cur = $cur.$p }
+        if ($cur -is [bool]) { return "$cur".ToLowerInvariant() }
+        return "$cur"
+    }
+    if ($null -eq $val) { return '' }
+    return ($val | ConvertTo-Json -Depth 20)
+}
+# A failed READ answers '' exactly as the az wrapper did (2>$null); a shape with no REST form is a code defect and throws.
+if (-not $Az) { $Az = { param([string[]]$AzArgs) try { Invoke-PimInstallRestRead -AzArgs $AzArgs } catch { if ("$($_.Exception.Message)" -like 'Invoke-PimInstallRestRead: no REST form*') { throw }; Write-Verbose "$($_.Exception.Message)"; '' } } }
 if (-not $ResolveHost) { $ResolveHost = { param([string]$HostName) try { @([System.Net.Dns]::GetHostAddresses($HostName)).Count -gt 0 } catch { $false } } }
 
 $events = New-Object System.Collections.Generic.List[object]
@@ -213,8 +277,10 @@ function Pre([string]$Id, [scriptblock]$Body) {
 }
 
 Pre 'preflight-signin' {
-    $script:who = Get-PimSignedInIdentity -TenantId $cfg.tenantId -SubscriptionId $cfg.subscriptionId -Az $Az
-    if (-not $script:who.ok) { return @{ state = 'failed'; message = $script:who.reason; actionText = 'Sign in as yourself in this shell:'; actionCommand = "az login --tenant $($cfg.tenantId)" } }
+    # §100.41: a real install signs in over REST (Get-PimSignedInIdentity: the Support-app session, else the browser);
+    # the az-shaped -Az seam (Get-PimInstallSignedInIdentity, _PimGuidedInstall.ps1) is for the offline tests only.
+    $script:who = if ($azSeam) { Get-PimInstallSignedInIdentity -TenantId $cfg.tenantId -SubscriptionId $cfg.subscriptionId -Az $Az } else { Get-PimSignedInIdentity -TenantId $cfg.tenantId -SubscriptionId $cfg.subscriptionId }
+    if (-not $script:who.ok) { return @{ state = 'failed'; message = $script:who.reason; actionText = 'Run the installation in a PowerShell window (a browser sign-in opens), or connect the Invardia Support app first:'; actionCommand = 'Connect-InvardiaSupport.ps1 -Environment <handle>' } }
     # 2026-10-06 (SI finding K): with no superAdmins named, the PERSON who installs becomes the Manager's first SuperAdmin.
     # The Invardia Support app is an application -- it must never be that admin. Refused before anything is written.
     if ("$($script:who.supportAppId)".Trim() -and -not @($cfg.superAdmins | Where-Object { "$_".Trim() }).Count) {

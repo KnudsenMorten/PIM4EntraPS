@@ -13,6 +13,34 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.554 -- 2026-10-10
+
+- Managed-tenant install without the Azure CLI or PowerShell modules, admin prefix optional, version line in every script; throttling no longer alerts.
+
+- **Microsoft throttling no longer sends failure alerts.** When Microsoft rate-limits a job (or its service is briefly
+  unavailable) and the job changed nothing, the run is now shown as **throttled -- retrying** (amber) instead of failed,
+  and the job simply retries on its next run. This applies to every job. You are only mailed when PIM cannot work through
+  it: the same job has been throttled 12 runs in a row or for 6 hours -- then one mail says the job is stuck. A run that
+  applied part of its changes, or that failed for any other reason (a missing permission, bad data), still alerts at once.
+- The engine tries a throttled tenant-wide read once more, after a short pause, before it gives up for that run.
+- The group activity list behind the stale-access check is refreshed once a day instead of every hour, which takes load
+  off Microsoft Graph on large tenants.
+- PIM reports in to Invardia every 4 hours instead of once a day, so a stopped installation is noticed the same day.
+- The automatic update no longer skips sizing the engine job when Azure is still applying the engine roll a moment earlier: it waits (up to about two minutes) and retries. If the job stays busy, the update log says so in one plain line and the sizing is retried on the next update; the update itself is never marked failed for it.
+- The automatic update records the release it applied in a single write again. Before, the record was refused on every run, so the protection against re-applying an older release was not kept up to date.
+- Environments that update from the built-in source (not through Invardia) no longer report that the updater could not move itself to the new version.
+- **Quieter logs, lower Log Analytics cost.** The engine's scheduled run (every 5 minutes) prints its start-up details only
+  when they change, at the first run of each day, or when you set `PIM_LOG_VERBOSE=1` -- otherwise one line. Messages that
+  repeat run after run (for example "the store defines nothing", a workload warning on a group, a skipped job, "waiting for
+  another job") are printed the first time, again when they change, and once a day as a reminder. Errors and failures are
+  always printed, and every line is still kept in the job's own log in PIM Manager (Jobs > Logs).
+- PIM Manager writes a request line to its log only for a failed or slow request (set `PIM_MANAGER_TRACE_REQUESTS=1` to
+  log every request). The Azure sign-in (Easy Auth) component logs requests on its own; that part is set by Azure.
+- Every setup and support script now starts by printing its own name, version and documentation link (for example "Install-PimManager version 2.4.553 - documentation: https://invardia.com/docs/pim/scripts/Install-PimManager/"), so a saved transcript shows exactly which script and version ran.
+- A managed-tenant install no longer asks for the admin account prefix: it is optional. The naming check stays off until the tenant sets its admin account patterns in Settings; replication is not affected.
+- The managed-tenant installation no longer needs the Azure CLI: the installer's checks, the managed-tenant build and every step it runs (hosting and image build, SQL admin group, access, mail sender, pull network, enrollment report, support access, end-of-install check, closing the setup firewall rule) now talk to Azure directly, signed in through the Invardia Support app or your own browser sign-in.
+- The downloadable setup scripts for the mail sender, the SQL admin group and the workload prerequisites no longer need or mention the Azure CLI. They sign you in through the browser, or use the Invardia support session when one is open in the window, and their help and error messages now describe that. If the setup account cannot grant the mail sender its Exchange rights, a Global Administrator now signs in in the browser for that one step. The SQL admin group script now needs `-TenantId` when you sign in in the browser.
+
 ## 2.4.552 -- 2026-10-10
 
 - More setup scripts no longer need the Azure CLI: the deploy identity, the update run, the custom Manager address, the external/internal environment rebuild, SQL network access and the baseline store (storage and private endpoint) now talk to Azure directly. The rebuild no longer writes a restore file holding secret values, and a Key Vault certificate for a custom address is no longer saved to a temporary file.

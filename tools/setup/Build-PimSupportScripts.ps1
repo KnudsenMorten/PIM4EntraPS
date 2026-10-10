@@ -8,7 +8,9 @@
 .DESCRIPTION
     Each published script is ONE file: the script with every helper it dot-sources via
     `. (Join-Path $PSScriptRoot '<helper>.ps1')` inlined at the place it was loaded (resolved against the folder of the
-    file that loads it, recursively, once each), plus a header naming the PIM version it was built from. Nothing else
+    file that loads it, recursively, once each), plus a header naming the PIM version it was built from, and that version
+    stamped into the inlined _PimScriptDoc.ps1 (its BUILD-VERSION line) so the script's first output line names it
+    ("<Script> version <x.y.z> - documentation: <page>", REQUIREMENTS 100.52). Nothing else
     changes -- the script runs exactly as it does from the repository. The built file must parse; a script from
     outside tools\setup must also not dot-source anything. The output folder gets a SHA256SUMS.txt and a README.txt for Invardia.
 
@@ -146,6 +148,21 @@ function Set-PimScriptDocHelp {
     return $Text.Substring(0, $m.Index) + '<#' + $body + '#>' + $Text.Substring($m.Index + $m.Length)
 }
 
+function Set-PimScriptBuildVersion {
+    # PURE. 100.52: "$script:PimScriptDocVersion = ''   # BUILD-VERSION" (in _PimScriptDoc.ps1) -> the version, so the
+    # standalone's banner names the version it was built from.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Version)
+    if ($Version -notmatch '^[0-9A-Za-z.+-]+$') { throw "VERSION '$Version' is not a version string" }
+    $rx = [regex]("(?m)^(?<indent>[ \t]*)\`$script:PimScriptDocVersion = ''[ \t]*# BUILD-VERSION[ \t]*(?=\r?$)")
+    return $rx.Replace($Text, { param($m) "$($m.Groups['indent'].Value)`$script:PimScriptDocVersion = '$Version'   # BUILD-VERSION stamped by Build-PimSupportScripts" })
+}
+
+function Test-PimScriptBuildVersionStamped {
+    # PURE. True when the text carries the stamped version line for -Version.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Version)
+    return ($Text -match ("(?m)^[ \t]*\`$script:PimScriptDocVersion = '" + [regex]::Escape($Version) + "'[ \t]*# BUILD-VERSION stamped"))
+}
+
 function Expand-PimSupportScript {
     # Inline every `. (Join-Path $PSScriptRoot '<helper>.ps1')` line with that helper's content (recursively, once
     # each). -BaseDir is the folder of the file whose text this is: a helper resolves against it, and the helper's
@@ -259,6 +276,11 @@ foreach ($s in $Scripts) {
     $manifest = Read-PimScriptDocManifest -Name $docName
     $docUrl = Get-PimScriptDocUrl -Script $docName
     if ($manifest) { $body = Set-PimScriptDocHelp -Text $body -Notes (ConvertTo-PimScriptDocNotes -Manifest $manifest -DocUrl $docUrl) -DocUrl $docUrl }
+    # 100.52: the header names the version for a reader; the banner ("<Script> version <x.y.z> - documentation: <page>")
+    # reads it from the inlined _PimScriptDoc.ps1, whose BUILD-VERSION line is stamped here (no repository, no VERSION
+    # file next to a downloaded script). An in-scope script whose standalone carries no stamp fails the build.
+    $body = Set-PimScriptBuildVersion -Text $body -Version $version
+    if ($manifest -and -not (Test-PimScriptBuildVersionStamped -Text $body -Version $version)) { throw "$name`: the inlined _PimScriptDoc.ps1 has no stamped version (BUILD-VERSION line) -- its banner would not name the version" }
     $body = ConvertTo-PimPublicScriptText -Text $body -Name $name   # public: no customer / internal names (100.14)
     # keep '#Requires' first if the script starts with it
     if ($body -match '^(#Requires[^\r\n]*\r?\n)') { $body = $Matches[1] + $hdr + $body.Substring($Matches[1].Length) } else { $body = $hdr + $body }

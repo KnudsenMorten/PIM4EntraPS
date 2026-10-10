@@ -118,7 +118,9 @@ function Build-PimContext {
                   elseif (Get-Command Get-PimGroupNamePrefix -ErrorAction SilentlyContinue) { "$(Get-PimGroupNamePrefix)".Trim() }
                   else { 'PIM' }
         if ($lean) {
-            Write-Host "[context] LEAN fetch (REST): users on-demand; groups startswith '$prefix'; AUs + roles bulk..."
+            # §100.46: in the tick a start-up diagnostic (printed with the start-up block; always kept in the job's run log)
+            $__lean = "[context] LEAN fetch (REST): users on-demand; groups startswith '$prefix'; AUs + roles bulk..."
+            if (Get-Command Write-PimStartupLine -ErrorAction SilentlyContinue) { Write-PimStartupLine -Message $__lean } else { Write-Host $__lean }
             $Global:Users_All_ID  = @()   # resolved on-demand (no 500k bulk list)
             $hdr = @{ ConsistencyLevel = 'eventual' }
             $Global:Groups_All_ID = if ($prefix) {
@@ -145,7 +147,9 @@ function Build-PimContext {
                             if ($g -and $g.Id -and -not $have.ContainsKey("$($g.Id)")) { $Global:Groups_All_ID += $g; $have["$($g.Id)"] = $true; $added++ }
                         }
                     }
-                    Write-Host ("[context] + {0} managed group(s) outside the '{1}' prefix resolved by name ({2} named by the definitions)" -f $added, $prefix, $extra.Count)
+                    $__xg = ("[context] + {0} managed group(s) outside the '{1}' prefix resolved by name ({2} named by the definitions)" -f $added, $prefix, $extra.Count)
+                    # §100.46: on change + daily
+                    if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key 'context.extra-groups' -Message $__xg } else { Write-Host $__xg }
                 }
             } catch { Write-Warning "[context] groups named outside the '$prefix' prefix could not be resolved (they are resolved one by one on demand instead): $($_.Exception.Message)" }
         }

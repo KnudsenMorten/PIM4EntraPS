@@ -90,22 +90,22 @@ $ErrorActionPreference = 'Stop'
 # 🔒 Scoped PER CALL rather than by `az account set`, because this machine runs ~3 sessions at once
 # and flipping the shared default would break whichever of them is legitimately using the other
 # tenant. A build must not have side effects on somebody else's shell.
-$acrSubArgs = @()
-if ("$SubscriptionId".Trim()) { $acrSubArgs = @('--subscription', "$SubscriptionId".Trim()) }
+# 100.41 NO-AZ: the hosted build is the registry's own build over ARM REST (engine\_shared\PIM-AcrBuild.ps1 -- the same
+# four calls the in-cloud updater makes), scoped by -SubscriptionId (never a default context).
 # 🔑 A PRIVATE REGISTRY CANNOT BE BUILT FROM OUTSIDE ITS VNET. ACR Tasks run in ACR's own
-# infrastructure and reach the registry over its data plane, so with public access off `az acr
-# build` fails from any host that is not on the network -- which would make the deploy depend on
+# infrastructure and reach the registry over its data plane, so with public access off the
+# build fails from any host that is not on the network -- which would make the deploy depend on
 # WHERE it was run from. A dedicated agent pool runs the task inside the VNet instead, so the same
 # command reproduces from anywhere. Created by New-PimHostingPrerequisites -AcrAgentPoolName.
 if ("$AcrAgentPool".Trim()) {
-    $acrSubArgs += @('--agent-pool', "$AcrAgentPool".Trim())
     Write-Host "  build runs on agent pool '$AcrAgentPool' (inside the VNet)" -ForegroundColor DarkGray
 }
 $here     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-# Guarded `az` shadow -- see _PimAz.ps1. The digest lookup at the end of this script already
-# had to hand-roll half of this (BUG-128); the guard makes it the default for every az call.
-. "$here\_PimAz.ps1"
 $solRoot  = Split-Path -Parent (Split-Path -Parent $here)          # SOLUTIONS/PIM4EntraPS
+# 100.41 NO-AZ: ARM REST through PIM-Rest's ONE token client -- never the az CLI.
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+if (-not (Get-Command Invoke-PimAcrRestBuild -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-AcrBuild.ps1') }
 $repoRoot = (Resolve-Path (Join-Path $here '..\..\..\..')).Path     # AutomateIT repo root
 $mgrDir   = Join-Path $solRoot 'tools\pim-manager'
 function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
@@ -124,33 +124,64 @@ if ($buildLayout -eq 'flat') {
     Write-Host "  layout: FLAT (public community edition) -- the image context is staged as SOLUTIONS/PIM4EntraPS" -ForegroundColor DarkGray
 }
 
-# Explicit sign-in, when the caller supplied one. Isolated AZURE_CONFIG_DIR keyed on the
-# registry so concurrent per-environment builds cannot trample each other's profile.
+# Explicit sign-in, when the caller supplied one: PIM-Rest's token client as that application (certificate from the
+# store by the PEM's thumbprint, or the client secret). No az profile, no token cache on disk -- every token is minted
+# in-process, so a permission granted BETWEEN runs is always seen by the next one.
 if ($AdminSecret -and $AdminCertPem) { throw 'pass EITHER -AdminSecret OR -AdminCertPem, not both.' }
-if ($TenantId -and $AdminAppId -and ($AdminSecret -or $AdminCertPem)) {
-    $cfgDir = Join-Path ([IO.Path]::GetTempPath()) ("azcfg-build-" + $(if ($AcrName) { $AcrName } else { 'pim' }))
-    New-Item -ItemType Directory -Force $cfgDir | Out-Null
-    $env:AZURE_CONFIG_DIR = $cfgDir
-    # Drop the cached token before signing in -- this directory persists between runs, so a
-    # permission granted BETWEEN runs is otherwise invisible to the next one and surfaces as
-    # "Insufficient privileges" against a permission that is already correct. See the long note at
-    # the same point in Setup-PimContainers.ps1; the three sign-ins must not disagree.
-    az account clear --only-show-errors 2>&1 | Out-Null
-    az config set extension.use_dynamic_install=yes_without_prompt --only-show-errors 2>&1 | Out-Null
-    if ($AdminCertPem) {
-        if (-not (Test-Path $AdminCertPem)) { throw "certificate PEM not found: $AdminCertPem" }
-        Step "az login (service principal, CERTIFICATE) -> tenant $TenantId"
-        az login --service-principal -u $AdminAppId --certificate $AdminCertPem --tenant $TenantId --only-show-errors -o none
-    } else {
-        Step "az login (service principal, client secret) -> tenant $TenantId"
-        az login --service-principal -u $AdminAppId -p $AdminSecret --tenant $TenantId --only-show-errors -o none
+function Connect-BuildRest {
+    if ($TenantId -and $AdminAppId -and ($AdminSecret -or $AdminCertPem)) {
+        $c = @{ TenantId = $TenantId; ClientId = $AdminAppId }
+        if ("$SubscriptionId".Trim()) { $c['SubscriptionId'] = "$SubscriptionId".Trim() }
+        if ($AdminCertPem) {
+            if (-not (Test-Path $AdminCertPem)) { throw "certificate PEM not found: $AdminCertPem" }
+            Step "sign in (service principal, CERTIFICATE) -> tenant $TenantId"
+            $c['CertificatePem'] = $AdminCertPem
+        } else {
+            Step "sign in (service principal, client secret) -> tenant $TenantId"
+            $c['ClientSecret'] = $AdminSecret
+        }
+        [void](Connect-PimSetupRest @c)
+        return
     }
-    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az login failed for tenant $TenantId (exit $LASTEXITCODE)." }
-    if ($SubscriptionId) {
-        az account set --subscription $SubscriptionId --only-show-errors
-        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az account set failed for subscription $SubscriptionId (exit $LASTEXITCODE)." }
-    }
-    Info "signed in; subscription $(az account show --query id -o tsv --only-show-errors 2>$null)"
+    # No credential: keep the identity the caller already set up in this process (Invoke-PimDeployAll / the signed-in
+    # build / the Support-app session); otherwise the signed-in person (browser) or the Support-app REST session.
+    if ($global:PIM_SetupRestMode -or "$($global:PIM_ClientId)".Trim() -or $global:PIM_TokenProvider -or $global:PIM_UseManagedIdentity) { return }
+    $c = @{}
+    if ("$TenantId".Trim()) { $c['TenantId'] = "$TenantId".Trim() }
+    if ("$SubscriptionId".Trim()) { $c['SubscriptionId'] = "$SubscriptionId".Trim() }
+    [void](Connect-PimSetupRest @c)
+}
+function Invoke-BuildRest([string]$ContextPath) {
+    # The registry builds the uploaded context (listBuildSourceUploadUrl -> PUT -> scheduleRun -> poll). The run's own
+    # output image digest is returned in the az-shaped line the digest reader below already understands.
+    if (-not "$SubscriptionId".Trim()) { throw '-SubscriptionId is required for the hosted ACR build (it is never taken from a default context).' }
+    Connect-BuildRest
+    $sub = "$SubscriptionId".Trim()
+    $reg = Find-PimArmAcr -SubscriptionId $sub -Name $AcrName
+    if (-not $reg -or "$($reg.id)" -notmatch '(?i)/resourceGroups/([^/]+)/') { throw "registry '$AcrName' was not found in subscription $sub$(if ($global:PimSetupRestLastError) { " ($($global:PimSetupRestLastError))" })." }
+    $rg = $Matches[1]
+    $b = Invoke-PimAcrRestBuild -SubscriptionId $sub -ResourceGroup $rg -RegistryName $AcrName -ContextPath $ContextPath `
+            -ImageNames @("$ImageRepo`:$ImageTag") -DockerFilePath $Dockerfile -Arguments @{ PIM_MANAGER_CONTENT_HASH = "$contentHash" } `
+            -AgentPoolName "$AcrAgentPool".Trim() -OnPoll { param($st) Info "  ACR run: $st" }
+    $out = @("run $($b.runId): $($b.status) after $($b.seconds)s ($($b.bytes) bytes uploaded)")
+    if (-not $b.ok) { $out | Out-Host; throw "ACR build failed (run $($b.runId): $($b.status))." }
+    try {
+        $run = Invoke-PimArm -Method GET -Path ((Get-PimAcrRegistryPath -SubscriptionId $sub -ResourceGroup $rg -RegistryName $AcrName) + "/runs/$($b.runId)") -ApiVersion '2019-06-01-preview'
+        foreach ($img in @($run.properties.outputImages)) { if ("$($img.digest)" -match '^sha256:[0-9a-f]{64}$') { $out += "$($img.tag): digest: $($img.digest)" } }
+    } catch { Warn "could not read the run's output images: $($_.Exception.Message)" }
+    $out | Out-Host
+    return $out
+}
+function New-BuildContextArchive([string]$Dir, [string[]]$Items, [string]$OutFile) {
+    # tar.gz with RELATIVE names from the archive's own folder (GNU tar reads a Windows "C:" as host:path; bsdtar has no
+    # --force-local) -- the same rule as the git-archive extraction below.
+    $items2 = @($Items | Where-Object { Test-Path -LiteralPath (Join-Path $Dir $_) })
+    if (-not $items2.Count) { throw "nothing to pack in $Dir" }
+    Push-Location (Split-Path -Parent $OutFile)
+    try {
+        & tar -czf (Split-Path -Leaf $OutFile) -C $Dir @items2
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "tar of the build context failed (exit $LASTEXITCODE)." }
+    } finally { Pop-Location }
 }
 function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
@@ -221,15 +252,14 @@ Info "pulled Manager content hash: $contentHash"
 # from the managing tenant are unchanged -- this only decides how the FIRST image gets into the managed tenant's own
 # registry, which nothing else does.
 $buildSource = $Source
-if ($buildSource -ne 'sync-automateit' -and "$AcrName".Trim() -and (Have 'az')) {
+if ($buildSource -ne 'sync-automateit' -and "$AcrName".Trim()) {
     Step "hosted registry '$AcrName' supplied -- building INTO it (the update source stays '$Source')"
     Info '  a local package cannot be pulled by Container Apps; the managed tenant needs a real image in its own ACR.'
     $buildSource = 'sync-automateit'
 }
 
 if ($buildSource -eq 'sync-automateit') {
-    # ---- HOSTED: az acr build ------------------------------------------------
-    if (-not (Have 'az')) { Warn 'azure CLI (az) not found -- hosted build needs az. Nothing done.'; return }
+    # ---- HOSTED: the registry's own build over ARM REST (no az, no docker) -----
     if (-not "$AcrName".Trim()) { throw "-AcrName is required for -Source sync-automateit (hosted ACR build)." }
     if ($buildLayout -ne 'flat') {
         $dfPath = if ([System.IO.Path]::IsPathRooted($Dockerfile)) { $Dockerfile } else { Join-Path $repoRoot $Dockerfile }
@@ -244,8 +274,8 @@ if ($buildSource -eq 'sync-automateit') {
     # worktree prefix is added) aborts the tar walk with WinError 3. `git archive` emits
     # only tracked files in the repo layout the Dockerfile expects — no worktrees, no
     # untracked junk — so the context is small, deterministic, and walk-safe.
-    Step "az acr build $ImageRepo`:$ImageTag in $AcrName (clean git-archive context of HEAD)"
-    if ($PSCmdlet.ShouldProcess("$AcrName/$ImageRepo`:$ImageTag", 'az acr build')) {
+    Step "ACR build $ImageRepo`:$ImageTag in $AcrName (clean git-archive context of HEAD)"
+    if ($PSCmdlet.ShouldProcess("$AcrName/$ImageRepo`:$ImageTag", 'ACR build (REST)')) {
       if ($buildLayout -eq 'flat') {
         # BUG-154: stage SOLUTIONS/PIM4EntraPS from the public clone, then build exactly as the
         # monorepo does. Short root for the same MAX_PATH reason as the git-archive branch below.
@@ -255,16 +285,12 @@ if ($buildSource -eq 'sync-automateit') {
         try {
             $ctx = New-PimFlatBuildContext -SolutionRoot $solRoot -OutDir $flatCtx
             Info ("staged build context ({0}, {1} files) at {2}" -f $ctx.Method, $ctx.Files, $ctx.Path)
-            Push-Location $flatCtx
-            try {
-                az acr build @acrSubArgs -r $AcrName -t "$ImageRepo`:$ImageTag" -f $Dockerfile . `
-                    --build-arg "PIM_MANAGER_CONTENT_HASH=$contentHash" 2>&1 |
-                    Tee-Object -Variable acrBuildOut | Out-Host
-                $script:PimAcrBuildOutput = $acrBuildOut
-                if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az acr build failed (exit $LASTEXITCODE)." }
-            } finally { Pop-Location }
+            $flatTgz = "$flatCtx.tar.gz"
+            New-BuildContextArchive -Dir $flatCtx -Items @(Get-ChildItem -LiteralPath $flatCtx -Force | ForEach-Object { $_.Name }) -OutFile $flatTgz
+            $script:PimAcrBuildOutput = @(Invoke-BuildRest -ContextPath $flatTgz)
         } finally {
             Remove-Item -LiteralPath $flatCtx -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "$flatCtx.tar.gz" -Force -ErrorAction SilentlyContinue
         }
       } else {
         $haveGit = [bool](Get-Command git  -ErrorAction SilentlyContinue)
@@ -308,78 +334,41 @@ if ($buildSource -eq 'sync-automateit') {
         # helper is BUG-117 exactly -- Setup-PimContainers.ps1 shipped a Warn-less script and killed
         # every estate deploy that reached the line. A log helper must never be the thing that fails.
         if (-not $isRepo) { Write-Host "    build context: '$repoRoot' is not a git clone (synced/released tree) -- using it directly instead of a git-archive export." -ForegroundColor DarkGray }
-        if ($haveGit -and $haveTar -and $isRepo) {
-            # Short temp ROOT (not %TEMP%\<guid>): keeps extracted paths well under
-            # Windows MAX_PATH. Archive ONLY the paths the image context needs
-            # (.dockerignore whitelists SOLUTIONS/PIM4EntraPS) -- this also keeps the
-            # long-named sample files of OTHER solutions (e.g. SecurityInsight) entirely
-            # out of the context, so neither the tar walk nor extraction can choke.
+        if ($haveGit -and $isRepo) {
+            # Short temp ROOT (not %TEMP%\<guid>): keeps paths well under Windows MAX_PATH. Archive ONLY the paths the
+            # image context needs (.dockerignore whitelists SOLUTIONS/PIM4EntraPS) -- this also keeps the long-named
+            # sample files of OTHER solutions (e.g. SecurityInsight) entirely out of the context.
+            # git archive writes the .tar.gz the registry takes as it is: no extraction, no re-pack.
             $ctxRoot = Join-Path $(if ($env:SystemDrive) { $env:SystemDrive } else { [IO.Path]::GetTempPath() }) 'pimbld'
             New-Item -ItemType Directory -Force $ctxRoot | Out-Null
-            $tmpCtx = Join-Path $ctxRoot ("c" + (Get-Random -Maximum 99999))
-            $tarPath = "$tmpCtx.tar"
-            New-Item -ItemType Directory -Force $tmpCtx | Out-Null
+            $tgzPath = Join-Path $ctxRoot ("c" + (Get-Random -Maximum 99999) + '.tar.gz')
             try {
-                git -C $repoRoot archive --format=tar -o $tarPath HEAD -- .dockerignore SOLUTIONS/PIM4EntraPS
+                git -C $repoRoot archive --format=tar.gz -o $tgzPath HEAD -- .dockerignore SOLUTIONS/PIM4EntraPS
                 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "git archive failed (exit $LASTEXITCODE)." }
-                # Extract with RELATIVE paths, from the directory that holds both the archive
-                # and the context folder.
-                #
-                # This used to pass absolute paths plus --force-local, because GNU tar reads
-                # a Windows path's "C:" as a remote host (host:path) and aborts. That worked
-                # only where `tar` was GNU tar. Windows now ships bsdtar as System32\tar.exe,
-                # which REJECTS the flag outright --
-                #     tar.exe: Option --force-local is not supported
-                # -- so every deploy on such a host died at the build step (observed
-                # 2026-08-07, blocking the whole fleet roll).
-                #
-                # No absolute path means no colon, which means neither tar can mistake the
-                # archive for a remote host -- so the flag is not needed by either. Works
-                # with GNU tar and bsdtar, which is what "runs on the operator's machine"
-                # has to mean.
-                Push-Location $ctxRoot
-                try {
-                    tar -x -f (Split-Path -Leaf $tarPath) -C (Split-Path -Leaf $tmpCtx)
-                    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "tar extract of git archive failed (exit $LASTEXITCODE)." }
-                } finally { Pop-Location }
-                Push-Location $tmpCtx
-                try {
-                    # 🔑 CAPTURE THE BUILD OUTPUT: on a registry with public access OFF, the digest
-                    # CANNOT be looked up afterwards from this host -- that query goes over the
-                    # registry's data plane, which is exactly what is closed. But ACR prints the
-                    # digest it just pushed, so read it from there rather than asking the registry.
-                    az acr build @acrSubArgs -r $AcrName -t "$ImageRepo`:$ImageTag" -f $Dockerfile . `
-                        --build-arg "PIM_MANAGER_CONTENT_HASH=$contentHash" 2>&1 |
-                        Tee-Object -Variable acrBuildOut | Out-Host
-                    $script:PimAcrBuildOutput = $acrBuildOut
-                    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az acr build failed (exit $LASTEXITCODE)." }
-                } finally { Pop-Location }
+                # 🔑 CAPTURE THE BUILD OUTPUT: on a registry with public access OFF, the digest CANNOT be looked up
+                # afterwards from this host (the registry's data plane is closed) -- the run's own output images carry it.
+                $script:PimAcrBuildOutput = @(Invoke-BuildRest -ContextPath $tgzPath)
             } finally {
-                Remove-Item $tarPath -Force -ErrorAction SilentlyContinue
-                Remove-Item $tmpCtx  -Recurse -Force -ErrorAction SilentlyContinue
-            }
-        } else {
+                Remove-Item $tgzPath -Force -ErrorAction SilentlyContinue
+            }        } else {
             # Fallback (no git/tar): build from the repo root directly. Works when the
             # tree carries no deep-path worktrees.
             # Say WHICH condition sent us here. "git/tar not found" was printed on the synced-tree
             # path too, where git IS installed -- sending anyone who read the log to diagnose a
             # missing tool that was never missing.
-            $why = if (-not $isRepo) { "'$repoRoot' is not a git clone" } else { 'git/tar not found' }
+            $why = if (-not $isRepo) { "'$repoRoot' is not a git clone" } else { 'git not found' }
             Warn "$why -- falling back to repo-root build context (no clean export)."
-            Push-Location $repoRoot
+            # 🪤 THE SAME CAPTURE AS THE GIT-ARCHIVE BRANCH ABOVE, AND IT WAS MISSED HERE ONCE.
+            # A SYNCED tree (not a git clone -- which is every customer install) takes this path. Measured at a customer
+            # 2026-09-11: "'D:\AutomateIT' is not a git clone -- falling back to repo-root build context", then
+            # "could not resolve the built image's digest". Only the paths .dockerignore whitelists are packed.
+            $ctxRoot = Join-Path $(if ($env:SystemDrive) { $env:SystemDrive } else { [IO.Path]::GetTempPath() }) 'pimbld'
+            New-Item -ItemType Directory -Force $ctxRoot | Out-Null
+            $tgzPath = Join-Path $ctxRoot ("r" + (Get-Random -Maximum 99999) + '.tar.gz')
             try {
-                # 🪤 THE SAME CAPTURE AS THE GIT-ARCHIVE BRANCH ABOVE, AND IT WAS MISSED HERE.
-                # Only one of the two branches was patched, so a SYNCED tree (not a git clone --
-                # which is every customer install) took this path, produced no captured output, and
-                # fell back to querying a registry it cannot reach. Measured at a customer
-                # 2026-09-11: "'D:\AutomateIT' is not a git clone -- falling back to repo-root
-                # build context", then "could not resolve the built image's digest".
-                az acr build @acrSubArgs -r $AcrName -t "$ImageRepo`:$ImageTag" -f $Dockerfile . `
-                    --build-arg "PIM_MANAGER_CONTENT_HASH=$contentHash" 2>&1 |
-                    Tee-Object -Variable acrBuildOut | Out-Host
-                $script:PimAcrBuildOutput = $acrBuildOut
-                if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az acr build failed (exit $LASTEXITCODE)." }
-            } finally { Pop-Location }
+                New-BuildContextArchive -Dir $repoRoot -Items @('.dockerignore', 'SOLUTIONS/PIM4EntraPS') -OutFile $tgzPath
+                $script:PimAcrBuildOutput = @(Invoke-BuildRest -ContextPath $tgzPath)
+            } finally { Remove-Item $tgzPath -Force -ErrorAction SilentlyContinue }
         }
       }   # end of the monorepo/synced-tree branch (BUG-154)
         Write-Host "  built $AcrName.azurecr.io/$ImageRepo`:$ImageTag (content $contentHash)" -ForegroundColor Green

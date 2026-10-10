@@ -606,6 +606,17 @@ function Get-PimEntraJwks {
     return $null
 }
 
+function Test-PimManagerRequestLogged {
+    # PURE (reads only the two opt-in env vars). §100.46: does this served request get a console line? Hosted = WARNING
+    # level: only a failed (>= 400) or slow (>= 1 s) request, unless PIM_MANAGER_TRACE_REQUESTS=1 or PIM_LOG_VERBOSE=1.
+    # Local (not hosted) runs log every request, as before.
+    param([bool]$Hosted, [int]$Status, [double]$Seconds)
+    if (-not $Hosted) { return $true }
+    if ($Status -ge 400 -or $Seconds -ge 1) { return $true }
+    if ("$($env:PIM_MANAGER_TRACE_REQUESTS)" -eq '1') { return $true }
+    return ("$($env:PIM_LOG_VERBOSE)".Trim() -match '^(?i:1|true|yes|on)$')
+}
+
 function Get-PimManagerMcpAuthConfig {
     # REQ 93 -- what /mcp pins a token to: audiences from PIM_MCP_AUDIENCE (written by Set-PimManagerMcpAuth.ps1 -Apply),
     # issuers = THIS tenant (v1 + v2). Not configured = /mcp refuses every hosted call (fail closed, 503 with the remedy).
@@ -8189,7 +8200,7 @@ function Get-PimHomeOverview {
                 historyCount  = [int]$histCount
                 failedJobs    = @($failed  | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; scope = "$($_.scope)"; lastRunUtc = "$($_.lastRunUtc)"; detail = "$($_.lastResult)"; runId = "$($_.lastRunId)" } } | Select-Object -First 12)
                 runningJobs   = @($running | ForEach-Object { [ordered]@{ name = "$($_.name)"; type = "$($_.type)"; scope = "$($_.scope)"; runId = "$($_.runningRunId)" } } | Select-Object -First 12)
-                lastRun       = $(if ($lastRunJob) { [ordered]@{ name = "$($lastRunJob.name)"; whenUtc = "$($lastRunJob.lastRunUtc)"; ok = [bool]$lastRunJob.lastOk; detail = "$($lastRunJob.lastResult)" } } else { $null })
+                lastRun       = $(if ($lastRunJob) { [ordered]@{ name = "$($lastRunJob.name)"; whenUtc = "$($lastRunJob.lastRunUtc)"; ok = [bool]$lastRunJob.lastOk; detail = "$($lastRunJob.lastResult)"; status = "$($lastRunJob.status)"; throttleStuck = [bool]$lastRunJob.throttleStuck } } else { $null })
                 nextRun       = $(if ($nextRunJob) { [ordered]@{ name = "$($nextRunJob.name)"; whenUtc = "$($nextRunJob.nextRunUtc)"; synthesized = [bool]$nextRunJob.nextRunSynthesized } } else { $null })
                 drift         = $drift
             }
@@ -8468,7 +8479,7 @@ function Get-PimSupportDiagnostics {
             $vm  = if ($eff.Count -gt 0) { Get-PimJobsStatus -Jobs $eff } else { Get-PimJobsStatus }
             $jobs = @($vm.jobs)
             $lrj = @($jobs | Where-Object { "$($_.lastRunUtc)".Trim() } | Sort-Object { "$($_.lastRunUtc)" } -Descending) | Select-Object -First 1
-            if ($lrj) { $lastRun = @{ name = "$($lrj.name)"; whenUtc = "$($lrj.lastRunUtc)"; ok = [bool]$lrj.lastOk; detail = "$($lrj.lastResult)" } }
+            if ($lrj) { $lastRun = @{ name = "$($lrj.name)"; whenUtc = "$($lrj.lastRunUtc)"; ok = [bool]$lrj.lastOk; detail = "$($lrj.lastResult)"; status = "$($lrj.status)"; throttleStuck = [bool]$lrj.throttleStuck } }
         }
     } catch {}
     $health = Get-PimSupportHealthSummary -StorageMode $script:PimStorageMode -CacheFreshness $freshness `
@@ -10586,7 +10597,12 @@ function Invoke-Server {
             $ts = $started.ToString('HH:mm:ss')
             # BUG-264: the loop is single-threaded, so a slow request holds every request behind it -- name its duration.
             $took = ((Get-Date) - $started).TotalSeconds
+            # §100.46 (owner 2026-10-10): request logs at WARNING level when hosted -- the console is billed per GB in Log
+            # Analytics and every page poll / probe wrote a line. A request that FAILED (>= 400) or was SLOW (>= 1 s) is
+            # always logged; a fast success only locally, or with PIM_MANAGER_TRACE_REQUESTS=1 / PIM_LOG_VERBOSE=1.
+            if (Test-PimManagerRequestLogged -Hosted ([bool]$script:PimHosted) -Status $status -Seconds $took) {
             Write-Host ("  [{0}] {1,-6} {2,-40} -> {3}{4}" -f $ts, $ctx.Request.HttpMethod, $ctx.Request.Url.PathAndQuery, $status, $(if ($took -ge 1) { " ({0:N1}s{1})" -f $took, $(if ($took -ge 5) { ' SLOW -- every request behind it waited' } else { '' }) } else { '' })) -ForegroundColor $(if ($took -ge 5) { 'Yellow' } else { 'DarkGray' })
+            }
             # A served request IS client activity. Long-running endpoints
             # (active-assignments took 90s on a real tenant) block the
             # single-threaded loop, so the browser's 10s heartbeats queue

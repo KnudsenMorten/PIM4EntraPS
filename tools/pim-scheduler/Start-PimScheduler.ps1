@@ -81,6 +81,17 @@ $shared = Resolve-Path "$here\..\..\engine\_shared"
 
 $global:PIM_UseGraphSdk = $false   # REST-first; no Graph/Az modules
 if ($UseManagedIdentity -or "$env:PIM_UseManagedIdentity".Trim() -eq '1') { $global:PIM_UseManagedIdentity = $true }
+# §100.46 QUIETER LOGS (owner 2026-10-10, "approved 1-3"): this runs 288 times a day and its console is billed per GB in
+# Log Analytics. The start-up block ("... wired", [sql] auth plan, [mi] token, LEAN fetch) prints only when it changed, at
+# the first start of a UTC day, or with PIM_LOG_VERBOSE=1 / -Verbose -- otherwise one summary line. Repeating per-run
+# messages print on change + once a day (Write-PimLogOnce). Errors and warnings of these steps always print; every
+# quiet line stays in the job's own run log. Loaded FIRST so the lines PIM-Rest / PIM-SqlStore print are covered too.
+. "$shared\PIM-LogOnce.ps1"
+$global:PIM_LogQuiet = $true
+$global:PIM_StartupLogMode = $null; $global:PIM_StartupLogBuffer = $null
+if ($PSBoundParameters.ContainsKey('Verbose') -and $PSBoundParameters['Verbose']) { $global:PIM_LogVerbose = $true }
+# A start that FAILS shows its whole start-up block (the lines it buffered are the diagnosis).
+trap { if (Get-Command Complete-PimStartupLog -ErrorAction SilentlyContinue) { try { [void](Complete-PimStartupLog -Force) } catch { } }; break }
 . "$shared\PIM-Rest.ps1"
 . "$shared\PIM-PortalAccess.ps1"      # Get-PimPolicySetting (config-driven schedule)
 . "$shared\PIM-ChangeQueue.ps1"       # Get-PimQueueApplyPlan (queue-apply handler)
@@ -208,7 +219,7 @@ if (Test-Path -LiteralPath "$shared\..\consultant-lifecycle\PIM-CompanyReviewJob
 $tenantSync = Resolve-Path "$here\..\pim-manager\_tenantSync.ps1" -ErrorAction SilentlyContinue
 if ($tenantSync) {
     . "$tenantSync"
-    Write-Host "[scheduler] tenant-cache refresher wired (Invoke-PimTenantListRefresh)" -ForegroundColor Cyan
+    Write-PimStartupLine -Message "[scheduler] tenant-cache refresher wired (Invoke-PimTenantListRefresh)" -ForegroundColor Cyan
 } else {
     Write-Host "[scheduler] tenant-cache refresher NOT found (_tenantSync.ps1 absent) -- 'tenant-cache' job will no-op" -ForegroundColor DarkYellow
 }
@@ -270,7 +281,7 @@ if ($_schedSqlConfigured) {
         if (-not (Get-Command Set-PimSetting -ErrorAction SilentlyContinue)) {
             function Set-PimSetting { param([Parameter(Mandatory)][string]$Name, [object]$Value) Set-PimSqlSetting -ConnectionString $global:PIM_SqlConnectionString -Name $Name -Value $Value }
         }
-        Write-Host "[scheduler] SQL store wired -> $($global:PIM_SqlServer)/$($global:PIM_SqlDatabase) (state + lease persist in pim.Settings)" -ForegroundColor Cyan
+        Write-PimStartupLine -Message "[scheduler] SQL store wired -> $($global:PIM_SqlServer)/$($global:PIM_SqlDatabase) (state + lease persist in pim.Settings)" -ForegroundColor Cyan
         # BUG-45: PROVE the store opens. "Wired" only means a connection string was built -- the
         # token is minted locally and the string is a string, so both succeed against a database
         # this identity cannot log into. On mfnpr that gap produced four green Job executions in
@@ -282,7 +293,7 @@ if ($_schedSqlConfigured) {
         try {
             [void](Invoke-PimSqlScalar -ConnectionString $global:PIM_SqlConnectionString -Sql 'SELECT 1')
             $_schedProbeOk = $true
-            Write-Host "[scheduler] SQL store reachable (login probe succeeded)" -ForegroundColor DarkGray
+            Write-PimStartupLine -Message "[scheduler] SQL store reachable (login probe succeeded)" -ForegroundColor DarkGray
         } catch {
             $_schedProbeErr = "$($_.Exception.Message)"
         }
@@ -291,7 +302,7 @@ if ($_schedSqlConfigured) {
         if ($_schedProbeOk -and (Get-Command Update-PimMailTemplateStore -ErrorAction SilentlyContinue)) {
             try {
                 $_mt = Update-PimMailTemplateStore -ConnectionString $global:PIM_SqlConnectionString -TemplateDir (Join-Path (Resolve-Path "$here\..\..").Path 'templates\mail') -Actor 'scheduler'
-                Write-Host "[scheduler] mail templates: $($_mt.count) in SQL ($($_mt.reason))" -ForegroundColor DarkGray
+                Write-PimStartupLine -Message "[scheduler] mail templates: $($_mt.count) in SQL ($($_mt.reason))" -ForegroundColor DarkGray
             } catch { Write-Warning "[scheduler] mail template store could NOT be updated: $($_.Exception.Message)" }
         }
     }
@@ -304,6 +315,8 @@ switch ($_schedVerdict.level) {
     'fatal' {
         # Non-zero exit is the ONLY signal a scheduled ACA Job gives an operator. Exiting 0 from
         # a tick that cannot reach its store is what let mfnpr look healthy while doing nothing.
+        # §100.46: a refused start shows everything it wired
+        [void](Complete-PimStartupLog -Force)
         throw "[scheduler] REFUSING to run ($($_schedVerdict.reason)): $($_schedVerdict.detail)"
     }
     'warn' { Write-Warning "[scheduler] $($_schedVerdict.detail) State and the single-runner lease will NOT persist, so every job looks due every tick and overlapping runs cannot be arbitrated." }
@@ -314,22 +327,22 @@ Register-PimDefaultEngineProviders     # register the REST scope providers (Admi
 # §70.1b option 2: the REAL 'active-assignments-snapshot' handler. Registered ONLY here -- the default handler
 # declares itself unimplemented, so the Manager (which also initialises the default handlers) can never run it.
 Register-PimActiveAssignmentsSnapshotHandler
-Write-Host "[scheduler] active-assignments snapshot wired (pim.TenantCache/active-assignments; the Manager reads it)" -ForegroundColor Cyan
+Write-PimStartupLine -Message "[scheduler] active-assignments snapshot wired (pim.TenantCache/active-assignments; the Manager reads it)" -ForegroundColor Cyan
 # Drift page: the REAL 'drift-snapshot' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
 Register-PimDriftSnapshotHandler
-Write-Host "[scheduler] drift snapshot wired (pim.TenantCache/drift; the Manager's Drift page reads it)" -ForegroundColor Cyan
+Write-PimStartupLine -Message "[scheduler] drift snapshot wired (pim.TenantCache/drift; the Manager's Drift page reads it)" -ForegroundColor Cyan
 # REQ-I + REQ-U: the REAL 'coverage' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
 Register-PimJobHandler -Type 'coverage' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimCoverageJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
-Write-Host "[scheduler] coverage report wired (pim.TenantCache/coverage-report; the Manager's Coverage & gaps page reads it)" -ForegroundColor Cyan
+Write-PimStartupLine -Message "[scheduler] coverage report wired (pim.TenantCache/coverage-report; the Manager's Coverage & gaps page reads it)" -ForegroundColor Cyan
 # §79.1: the REAL 'target-check' handler -- registered ONLY here, after the defaults (which declare it unimplemented).
 Register-PimJobHandler -Type 'target-check' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimTargetCheckJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
-Write-Host "[scheduler] target check wired (pim.TenantCache/target-check; missing Azure scopes / roles are reported, never removed)" -ForegroundColor Cyan
+Write-PimStartupLine -Message "[scheduler] target check wired (pim.TenantCache/target-check; missing Azure scopes / roles are reported, never removed)" -ForegroundColor Cyan
 # §95.2: the REAL 'licence-request' handler. A network failure is reported in the result (asked again next run), never thrown.
 # §95.3: the REAL 'uplink' handler. A failed send is reported in the result and sent again next run, never thrown.
 Register-PimJobHandler -Type 'uplink' -Handler {
@@ -393,13 +406,13 @@ Register-PimJobHandler -Type 'owner-review' -Handler {
     if ($r.failed) { throw "[owner-review] $($r.detail)" }
     $r
 }
-Write-Host "[scheduler] pending check wired (uncommitted staged changes + queued actions older than a day are mailed)" -ForegroundColor Cyan
+Write-PimStartupLine -Message "[scheduler] pending check wired (uncommitted staged changes + queued actions older than a day are mailed)" -ForegroundColor Cyan
 # REQ-AR-2: the REAL 'access-review-cycle' handler. A review that could not be started FAILS the run (it is retried next time).
 Register-PimJobHandler -Type 'access-review-cycle' -Handler {
     param($job, $now, $whatIf)
     Invoke-PimAccessReviewCycleJob -Job $job -NowUtc $now -WhatIf:$whatIf
 }
-Write-Host "[scheduler] access review cycle wired (per-department campaigns from Settings > Access reviews)" -ForegroundColor Cyan
+Write-PimStartupLine -Message "[scheduler] access review cycle wired (per-department campaigns from Settings > Access reviews)" -ForegroundColor Cyan
 # §82: the REAL 'rfa-sync' / 'company-review' handlers -- only when the Pro libraries are present (Community has neither).
 # A run with errors (a row or a mail that failed) FAILS, so status = latest run shows it and the next run retries.
 if (Get-Command Invoke-PimRfaSyncJob -ErrorAction SilentlyContinue) {
@@ -409,7 +422,7 @@ if (Get-Command Invoke-PimRfaSyncJob -ErrorAction SilentlyContinue) {
         if ($r.failed) { throw "[rfa-sync] $($r.detail)" }
         $r
     }
-    Write-Host "[scheduler] rfa-sync wired (RFA store -> requests -> admin rows; inert until the RFA portal is deployed)" -ForegroundColor Cyan
+    Write-PimStartupLine -Message "[scheduler] rfa-sync wired (RFA store -> requests -> admin rows; inert until the RFA portal is deployed)" -ForegroundColor Cyan
 }
 if (Get-Command Invoke-PimCompanyReviewJob -ErrorAction SilentlyContinue) {
     Register-PimJobHandler -Type 'company-review' -Handler {
@@ -418,7 +431,7 @@ if (Get-Command Invoke-PimCompanyReviewJob -ErrorAction SilentlyContinue) {
         if ($r.failed) { throw "[company-review] $($r.detail)" }
         $r
     }
-    Write-Host "[scheduler] company-review wired (consultant lifecycle; inert until a company is defined)" -ForegroundColor Cyan
+    Write-PimStartupLine -Message "[scheduler] company-review wired (consultant lifecycle; inert until a company is defined)" -ForegroundColor Cyan
 }
 
 # Wire the per-scope engine-delta / engine-full jobs to the NEW REST engine.
@@ -517,7 +530,11 @@ $engineHandler = {
             }
         }
         if (-not $parts.Count) { $parts += (@($bad | ForEach-Object { "$($_.detail)" }) -join '; ') }
-        throw ("[scheduler] engine job '$($job.name)' FAILED: " + ($parts -join ' | '))
+        # §100.45: how much this run DID apply. A failed run that applied something is a partial apply -- a real failure even
+        # when its only errors are throttling (Test-PimRunFailureTransient reads "applied=N").
+        $__appliedN = 0; foreach ($__x in @($res)) { if ($__x -and $__x.PSObject.Properties['applied']) { $__appliedN += [int]$__x.applied } }
+        $__appliedTxt = if ($__appliedN -gt 0) { " (applied=$__appliedN this run)" } else { '' }
+        throw ("[scheduler] engine job '$($job.name)' FAILED: " + ($parts -join ' | ') + $__appliedTxt)
     }
     $sum = @($res) | ForEach-Object { "$($_.scope):c$($_.create)/u$($_.update)/r$($_.remove)" }
     # REQ-U (2.4.378): scope WARNINGS (e.g. "group X has a Workload but its binding provider is turned off", or an area
@@ -545,7 +562,7 @@ Register-PimJobHandler -Type 'emergency-override' -Handler {
     param($job,$now,$whatIf)
     Invoke-PimEmergencyOverrideStep -NowUtc $now -WhatIf:$whatIf
 }
-Write-Host "[scheduler] emergency override wired (pim.Settings/EmergencyOverride -> approval off / restore at expiry)" -ForegroundColor Cyan
+Write-PimStartupLine -Message "[scheduler] emergency override wired (pim.Settings/EmergencyOverride -> approval off / restore at expiry)" -ForegroundColor Cyan
 
 # --- THE TRUST JOB: prove DESIRED == LIVE, cheaply, and keep proving it ---------
 # Operator, 2026-09-12: "it is critical that we can trust that the delegation is actual deployed
@@ -654,8 +671,8 @@ Register-PimJobHandler -Type 'verify-convergence' -Handler {
     }
     [pscustomobject]@{ ran=$true; detail=$detail; unconverged=$verdict.total; whatIf=[bool]$whatIf }
 }
-Write-Host "[scheduler] convergence verification wired (scopes: $(($convScopes | ForEach-Object { $_.scope }) -join ', '))" -ForegroundColor Cyan
-Write-Host "[scheduler] REST engine wired (scopes: $((Get-PimEngineScopes) -join ', '))" -ForegroundColor Cyan
+Write-PimStartupLine -Message "[scheduler] convergence verification wired (scopes: $(($convScopes | ForEach-Object { $_.scope }) -join ', '))" -ForegroundColor Cyan
+Write-PimStartupLine -Message "[scheduler] REST engine wired (scopes: $((Get-PimEngineScopes) -join ', '))" -ForegroundColor Cyan
 
 # Wire the REAL discovery handler (the three discovery jobs: Azure / PowerBI / Entra).
 # It reconciles the live enumerated scopes against the current definitions, surfaces
@@ -724,7 +741,7 @@ Register-PimDiscoveryHandler `
     } `
     -AutoImportPowerBI:([bool]$global:PIM_DiscoveryAutoImportPowerBi)
 $script:__discoDupes = 0
-Write-Host "[scheduler] discovery handler wired (Azure/PowerBI scope-discovery + Entra role-catalog -> change queue: SQL pim.ChangeQueue, de-duplicated)" -ForegroundColor Cyan
+Write-PimStartupLine -Message "[scheduler] discovery handler wired (Azure/PowerBI scope-discovery + Entra role-catalog -> change queue: SQL pim.ChangeQueue, de-duplicated)" -ForegroundColor Cyan
 
 # Worker-container scoping: $env:PIM_SCHED_JOBS (comma list of job types) makes this
 # container run only those jobs -- so the SAME image is deployed N times as
@@ -733,10 +750,14 @@ Write-Host "[scheduler] discovery handler wired (Azure/PowerBI scope-discovery +
 if ("$env:PIM_SCHED_JOBS".Trim()) {
     $only = "$env:PIM_SCHED_JOBS" -split '[,; ]+' | Where-Object { $_ }
     $kept = Select-PimJobHandlers -Only $only
-    Write-Host ("[scheduler] job filter PIM_SCHED_JOBS -> running ONLY: {0}" -f ($kept -join ', ')) -ForegroundColor Yellow
+    Write-PimStartupLine -Message ("[scheduler] job filter PIM_SCHED_JOBS -> running ONLY: {0}" -f ($kept -join ', ')) -ForegroundColor Yellow
 } else {
-    Write-Host ("[scheduler] no job filter -> running ALL: {0}" -f ((Get-PimJobHandlerTypes) -join ', ')) -ForegroundColor DarkCyan
+    Write-PimStartupLine -Message ("[scheduler] no job filter -> running ALL: {0}" -f ((Get-PimJobHandlerTypes) -join ', ')) -ForegroundColor DarkCyan
 }
+# §100.46: the start-up block above -- printed in full (changed / first start of the UTC day / verbose / no store) or one line.
+$_verFile0 = Join-Path $here '..\..\VERSION'
+$_ver0 = if (Test-Path -LiteralPath $_verFile0) { (Get-Content -LiteralPath $_verFile0 -Raw).Trim() } else { '' }
+[void](Complete-PimStartupLog -Summary ("[scheduler] started{0}{1}" -f $(if ($_ver0) { " v$_ver0" } else { '' }), $(if ("$Instance".Trim() -or "$env:PIM_SCHED_INSTANCE".Trim()) { " (instance $("$Instance$env:PIM_SCHED_INSTANCE".Trim()))" } else { '' })))
 
 $iv = if ($IntervalSeconds -gt 0) { $IntervalSeconds } elseif ($env:PIM_SCHED_INTERVAL) { [int]$env:PIM_SCHED_INTERVAL } else { 300 }
 
@@ -791,7 +812,10 @@ if ($Once) {
     if ("$Instance".Trim() -eq 'hybrid' -and (Get-Command Invoke-PimHybridSyncWatchdogCheck -ErrorAction SilentlyContinue)) {
         # every continuous lane has its own liveness stamp; each is judged on its own (a lane that never ran has none: no action)
         foreach ($lane in @('hybrid-ad-sync', 'hybrid-ad-sync-servers', 'hybrid-ad-changes')) {
-            try { $wd = Invoke-PimHybridSyncWatchdogCheck -Lane $lane; if ($wd.action -ne 'none' -or $lane -eq 'hybrid-ad-sync') { Write-Host "  [$lane watchdog] $($wd.action): $($wd.detail)" -ForegroundColor $(if ($wd.action -eq 'killed') { 'Yellow' } else { 'DarkGray' }) } }
+            # §100.46: the 'none' line of hybrid-ad-sync repeats every 5 min -- on change + daily; any action always prints
+            try { $wd = Invoke-PimHybridSyncWatchdogCheck -Lane $lane
+                  if ($wd.action -ne 'none') { Write-Host "  [$lane watchdog] $($wd.action): $($wd.detail)" -ForegroundColor $(if ($wd.action -eq 'killed') { 'Yellow' } else { 'DarkGray' }) }
+                  elseif ($lane -eq 'hybrid-ad-sync') { Write-PimLogOnce -Key "hybrid.watchdog|$lane" -Message "  [$lane watchdog] $($wd.action): $($wd.detail)" -ForegroundColor DarkGray } }
             catch { Write-Host "  [$lane watchdog] check failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         }
     }
@@ -803,8 +827,11 @@ if ($Once) {
         try { $_met = Invoke-PimMailEngineTest; if ($_met.ran) { Write-Host "  [mail] $($_met.detail)" -ForegroundColor $(if ($_met.sent) { 'Green' } else { 'Yellow' }) } }
         catch { Write-Host "  [mail] engine test mail skipped: $($_.Exception.Message)" -ForegroundColor Yellow }
     }
-    @(Invoke-PimSchedulerTick -WhatIf:$WhatIf -LeaseTtlMinutes $ttl) | ForEach-Object { Write-Host ("  {0,-20} {1}" -f $_.name, $_.detail) }
+    # §100.46: a failed / held result always prints; an unchanged one ("skipped -- ...", "waiting for ...", "drained 0")
+    # prints the first time, on change and once a day (Write-PimTickResultLine).
+    @(Invoke-PimSchedulerTick -WhatIf:$WhatIf -LeaseTtlMinutes $ttl) | ForEach-Object { Write-PimTickResultLine -Result $_ -Format '  {0,-20} {1}' }
     if (-not $WhatIf) { Invoke-PimUpdaterWatchdogIfConfigured }
+    [void](Save-PimLogOnceState)
     return
 }
 Start-PimScheduler -IntervalSeconds $iv -LeaseTtlMinutes $ttl -WhatIf:$WhatIf

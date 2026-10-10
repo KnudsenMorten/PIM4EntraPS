@@ -12,8 +12,8 @@
 
     Removes ONLY 'AllowSetupHost'. It never touches 'AllowAzureServices' or a virtual network rule: on a public store the
     environment itself may reach SQL through those, and removing them would cut it off its own database.
-    Idempotent: a rule that is already gone is reported, not an error. Every az call carries --subscription; the az
-    default context is never changed.
+    Idempotent: a rule that is already gone is reported, not an error. ARM REST only (100.41, no az CLI): every call names
+    the subscription; no default context exists to change.
 
 .EXAMPLE
     .\Close-PimSqlSetupHostRule.ps1 -SubscriptionId <sub> -ResourceGroup rg-automateit-<token> -SqlServerName sql-ait-<token>
@@ -25,19 +25,26 @@ param(
     [Parameter(Mandatory)][string]$SqlServerName
 )
 $ErrorActionPreference = 'Stop'
-$sub = @('--subscription', "$SubscriptionId".Trim())
+# 100.41 (NO-AZ): ARM REST (engine/_shared/PIM-ArmSetup.ps1) over PIM-Rest's ONE token client. A caller that already set up
+# PIM-Rest's identity (the MSP build's step launcher) keeps it; otherwise sign in: the Invardia Support app's REST session for
+# this tenant, else the person at the keyboard. Every path names the subscription; there is no default context to change.
+$solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+$subId = "$SubscriptionId".Trim()
 $srv = ("$SqlServerName".Trim() -split '\.')[0]
-$acct = "$(az account show @sub --query id -o tsv 2>$null)".Trim()
-if ($acct -ne "$SubscriptionId".Trim()) { throw "az cannot see subscription '$SubscriptionId' (read '$acct') -- refusing." }
+if (-not $global:PIM_SetupRestMode -and -not "$($global:PIM_ClientId)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $subId) }
+$acctObj = Get-PimArmSubscription -SubscriptionId $subId -ErrorAsNull
+$acct = if ($acctObj) { "$($acctObj.subscriptionId)".Trim() } else { '' }
+if ($acct -ne $subId) { throw "the signed-in identity cannot see subscription '$SubscriptionId' (read '$acct') -- refusing." }
 Write-Host "==> SQL setup-host rule: close on $srv" -ForegroundColor Cyan
-$ErrorActionPreference = 'Continue'
-$readRule = { "$(az sql server firewall-rule list @sub -g $ResourceGroup -s $srv --query "[?name=='AllowSetupHost'].startIpAddress" -o tsv --only-show-errors 2>$null)".Trim() }
-$exists = "$(az sql server show @sub -g $ResourceGroup -n $srv --query name -o tsv --only-show-errors 2>$null)".Trim()
+$readRule = { $r = Get-PimArmSqlFirewallRule -SubscriptionId $subId -ResourceGroup $ResourceGroup -Server $srv -Name 'AllowSetupHost' -ErrorAsNull; if ($r -and $r.properties) { "$($r.properties.startIpAddress)".Trim() } else { '' } }
+$exists = Get-PimArmSqlServer -SubscriptionId $subId -ResourceGroup $ResourceGroup -Name $srv -ErrorAsNull
 if (-not $exists) { throw "SQL server '$srv' not found in $ResourceGroup (subscription $SubscriptionId)" }
 $ip = & $readRule
 if (-not $ip) { Write-Host "    'AllowSetupHost' is not present -- nothing to close." -ForegroundColor DarkGray; return }
 if ($PSCmdlet.ShouldProcess("$srv/AllowSetupHost ($ip)", 'delete firewall rule')) {
-    az sql server firewall-rule delete @sub -g $ResourceGroup -s $srv -n AllowSetupHost -o none --only-show-errors
+    [void](Remove-PimArmSqlFirewallRule -SubscriptionId $subId -ResourceGroup $ResourceGroup -Server $srv -Name AllowSetupHost)
     $after = & $readRule
     if ($after) { throw "'AllowSetupHost' ($after) is STILL present on $srv after the delete -- the build host keeps SQL access; remove it by hand." }
     Write-Host "    CLOSED: 'AllowSetupHost' ($ip) removed from $srv (read back). AllowAzureServices / VNet rules untouched." -ForegroundColor Green

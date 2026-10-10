@@ -38,6 +38,7 @@ $script:PimImportNeverCopyExact = @(
     'AzResPolicyMassChangeApproval', 'GroupsPolicyMassHold', 'RemoveRowAbsentSeen', 'TenantCacheState', 'RingOrder',
     'EnvironmentName',  # this environment's own display name ("EFIF (test)") -- never carried to another one
     'DemoMode', 'DemoGuestGroup',   # s98: a live demo's own switch -- an import never turns another environment into a demo
+    'LogRepeatSeen',    # §100.46: which repeating log lines THIS environment already printed (runtime state)
     'WorkloadPrereqs'   # checks made against the SOURCE's engine identity (2026-10-04: r1-pro-ca showed mfnpr's green checks)
 )
 $script:PimImportNeverCopyPrefix = @('JobRunOutput:', 'SchedulerState', 'SchedulerLease', 'JobScope')

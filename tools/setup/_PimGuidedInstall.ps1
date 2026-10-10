@@ -132,7 +132,8 @@ function Test-PimInstallConfig {
     $c.mspRole = $role
     if ($role -eq 'managed') {
         $ap = @(@(& $get 'adminPrefixes') | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-        if (-not $ap.Count) { $err.Add('adminPrefixes is required for a managed tenant (the prefix of the admin accounts your managing company manages here, e.g. Admin-)') }
+        # OPTIONAL since the owner 2026-10-10 ("remove the admin pattern question"): the prefixes are REPORT-ONLY since 2.4.412
+        # and the pull job prefers the tenant's own AdminAccountPatterns setting. Absent = accepted; a given entry is still checked.
         foreach ($p in $ap) { if ($p -notmatch '^[A-Za-z0-9._-]{1,20}$') { $err.Add("adminPrefixes entry '$p' is not a name prefix") } }
         $c.adminPrefixes = @($ap)
         $sr = "$(& $get 'slaveRing')".Trim(); if (-not $sr) { $sr = '2' }
@@ -367,4 +368,79 @@ function Save-PimInstallState {
     if (-not (Test-Path -LiteralPath $StatePath)) { New-Item -ItemType Directory -Force -Path $StatePath | Out-Null }
     $doc = [ordered]@{ schema = 1; installId = $InstallId; completed = @($Completed | Select-Object -Unique); updatedUtc = [datetime]::UtcNow.ToString('o') }
     Set-Content -LiteralPath (Join-Path $StatePath 'state.json') -Value ($doc | ConvertTo-Json -Depth 4) -Encoding utf8
+}
+
+# ---- the guided install's sign-in check (moved here from _PimSignedIn.ps1, 2026-10-10) -----------------------------------
+# Framework 12.17 / REQ 100.42: _PimSignedIn.ps1 is inlined into the PUBLISHED support scripts (Initialize-PimMailSender),
+# and those carry no second connect path. Install-PimManager.ps1 still reads its sign-in through its -Az seam (it is on the
+# PIM 100.41 port list, tests\_shared\no-az-allowlist.json), so the CLI-shaped account check lives with the guided install
+# and leaves when Install-PimManager is ported. Needs _PimSignedIn.ps1 loaded (the token + environment checks).
+function Test-PimSignedInAccount {
+    <#
+      PURE. Judge an account object ({ id; tenantId; user = { name; type } }) for the signed-in install. Returns
+      @{ ok; reason; userName; supportAppId }. Refused: no account, a service principal / managed identity, another
+      tenant, another subscription. ONE exception (operator 2026-10-06: "we have only one agreed method"): the Invardia
+      Support app, announced by Invardia's connect script for exactly this tenant and an allowed subscription
+      (Get-PimSupportAppSession).
+    #>
+    param([object]$Account, [string]$TenantId, [string]$SubscriptionId, [hashtable]$Environment)
+    $guid = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $want = "$TenantId".Trim().ToLowerInvariant(); $sub = "$SubscriptionId".Trim().ToLowerInvariant()
+    if ($want -notmatch $guid -or $sub -notmatch $guid) {
+        return @{ ok = $false; reason = 'the tenant id and the subscription id must both be given explicitly (GUIDs) -- a signed-in install never relies on a default context' }
+    }
+    if ($null -eq $Account -or -not "$($Account.id)".Trim()) {
+        return @{ ok = $false; reason = "no sign-in in this shell covers subscription $sub (tenant $want) -- sign in first" }
+    }
+    $type = "$($Account.user.type)".Trim().ToLowerInvariant()
+    $name = "$($Account.user.name)".Trim()
+    $supportAppId = ''
+    if ($type -eq 'serviceprincipal') {
+        $sess = Get-PimSupportAppSession -Environment $Environment
+        if ($sess -and $sess.tenantId -eq $want -and ($sess.subscriptions -contains $sub) -and $name -match $guid) {
+            $supportAppId = $name.ToLowerInvariant()
+            if ("$($Account.tenantId)".Trim().ToLowerInvariant() -ne $want) { return @{ ok = $false; reason = "the support app session is in tenant '$($Account.tenantId)', not '$want' -- REFUSING" } }
+            if ("$($Account.id)".Trim().ToLowerInvariant() -ne $sub) { return @{ ok = $false; reason = "the sign-in answered for subscription '$($Account.id)', not the requested '$sub' -- REFUSING" } }
+            return @{ ok = $true; reason = "signed in as the Invardia Support app $supportAppId (support environment '$($sess.environment)', tenant $want, subscription $sub)"; userName = "Invardia Support app ($supportAppId)"; supportAppId = $supportAppId }
+        }
+        if ($sess -and $sess.tenantId -ne $want) { return @{ ok = $false; reason = "the Invardia Support session in this shell is for tenant '$($sess.tenantId)', but the build config names '$want' -- REFUSING" } }
+        if ($sess -and -not ($sess.subscriptions -contains $sub)) { return @{ ok = $false; reason = "subscription $sub is not one the support environment allows ($($sess.subscriptions -join ', ')) -- REFUSING" } }
+    }
+    if ($type -ne 'user') {
+        return @{ ok = $false; reason = ("the shell is signed in as a $(if ($type) { $type } else { 'non-user account' }) ('$name'), not a person. " +
+                 'The signed-in build runs as the administrator at the keyboard; an application identity belongs in deployIdentity (certificate mode).') }
+    }
+    if ("$($Account.tenantId)".Trim().ToLowerInvariant() -ne $want) {
+        return @{ ok = $false; reason = "the sign-in for subscription $sub is in tenant '$($Account.tenantId)', but the build config names tenant '$want' -- REFUSING (a wrong default context acts in somebody else's directory)" }
+    }
+    if ("$($Account.id)".Trim().ToLowerInvariant() -ne $sub) {
+        return @{ ok = $false; reason = "the sign-in answered for subscription '$($Account.id)', not the requested '$sub' -- REFUSING" }
+    }
+    return @{ ok = $true; reason = "signed in as $name (tenant $want, subscription $sub)"; userName = $name }
+}
+
+function Get-PimInstallSignedInIdentity {
+    <#
+      Install-PimManager's preflight sign-in, through its -Az seam (a scriptblock param([string[]]$AzArgs) returning the
+      tool's stdout; mocked offline in tests\Test-PimGuidedInstall.ps1 / Test-PimMspBuild.ps1). Every call pins
+      --subscription. Returns the same shape as Get-PimSignedInIdentity (_PimSignedIn.ps1).
+    #>
+    param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][scriptblock]$Az)
+    $conf = @(Get-PimSignedInEnvironmentConflicts)
+    if ($conf.Count) {
+        return @{ ok = $false; reason = ("REFUSED: $($conf -join ', ') $(if ($conf.Count -eq 1) { 'is' } else { 'are' }) set in this session -- a token call would authenticate as " +
+                 'that identity instead of the signed-in user. ' + (Get-PimSignedInConflictHint -Names $conf)) }
+    }
+    $acct = $null
+    try { $acct = ((& $Az @('account', 'show', '--subscription', "$SubscriptionId", '-o', 'json')) | Out-String | ConvertFrom-Json) } catch { $acct = $null }
+    $a = Test-PimSignedInAccount -Account $acct -TenantId $TenantId -SubscriptionId $SubscriptionId
+    if (-not $a.ok) { return $a }
+    $tok = $null
+    try { $tok = "$(((& $Az @('account', 'get-access-token', '--subscription', "$SubscriptionId", '--resource', 'https://management.azure.com/', '-o', 'json')) | Out-String | ConvertFrom-Json).accessToken)" } catch { $tok = $null }
+    if (-not "$tok".Trim()) { return @{ ok = $false; reason = "no token could be issued for subscription $SubscriptionId (tenant $TenantId) -- sign in again" } }
+    $t = Test-PimSignedInToken -Token $tok -TenantId $TenantId -AllowedAppId "$($a.supportAppId)"
+    $tok = $null
+    if (-not $t.ok) { return $t }
+    return @{ ok = $true; reason = $a.reason; userName = $(if ($t.userName) { $t.userName } else { $a.userName }); objectId = $t.objectId
+              tenantId = "$TenantId".Trim().ToLowerInvariant(); subscriptionId = "$SubscriptionId".Trim().ToLowerInvariant(); supportAppId = "$($a.supportAppId)" }
 }

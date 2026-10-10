@@ -107,6 +107,8 @@ $here = $PSScriptRoot
 #      had the same hole. Loaded at file scope, both identities reach every store read.
 # Always loaded (never "only if a caller has not"): what a caller happened to load is exactly what hid cause 1 inside an install.
 . (Join-Path $here '_PimSetupSql.ps1')
+# §100.41: the ARM / Graph REST layer for the live reads (no az) -- file scope, always (same 71.32 rule).
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ArmSetup.ps1')
 # 🔴 INSTALL-FIX-EVIDA (100.25 item 1, 2026-10-09): the licence functions -- loaded HERE, AT FILE SCOPE, ALWAYS. The licence
 # line loaded PIM-License.ps1 only "if Get-PimLicense is not loaded yet", INSIDE Get-CvFact. Install-PimManager (the caller)
 # has it loaded, so nothing was loaded here, and the caller's Get-PimLicense ran in THIS script, where its $script: trusted
@@ -124,23 +126,34 @@ $idArgs = if ($UseSignedInAccount) { @{ UseSignedInAccount = $true } } else { @{
 
 # ============================================================================ live reads (replaced by -Probe in tests)
 $script:cv = @{}
-function Invoke-CvAz([string[]]$A) {
-    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $o = & az @A --subscription $SubscriptionId --only-show-errors 2>$null; $code = $LASTEXITCODE } finally { $ErrorActionPreference = $eap }
-    $global:LASTEXITCODE = 0
-    if ($code) { throw "az $($A[0..([Math]::Min(2, $A.Count - 1))] -join ' ') failed (exit $code)" }
-    return ("$(@($o) -join "`n")".Trim())
+# §100.41 (NO-AZ, framework 12.17): every live read goes over ARM / Graph REST (engine\_shared\PIM-ArmSetup.ps1) with a
+# token from PIM-Rest's ONE client -- the signed-in session (Invardia Support app / browser) or the certificate identity.
+# Connected lazily (the first live read), so a -Probe run never signs in.
+function Connect-CvRest {
+    if ($script:cv.ContainsKey('rest')) { return }
+    # (PIM-Rest via _PimSetupSql.ps1 and PIM-ArmSetup.ps1 are loaded at FILE scope above -- 71.32: never inside a function)
+    if ($UseSignedInAccount) {
+        # the build's step launcher / the guided install already pointed PIM-Rest at the signed-in session: keep it
+        if (-not $global:PIM_SetupRestMode -and -not $global:PIM_SignedInAccount) { [void](Connect-PimSetupRest -TenantId $TenantId -SubscriptionId $SubscriptionId) }
+    } elseif ("$ClientId".Trim() -and "$CertThumbprint".Trim()) {
+        [void](Connect-PimSetupRest -TenantId $TenantId @idArgs)   # the certificate identity ($idArgs: ClientId + CertThumbprint)
+    }
+    $script:cv['rest'] = $true
 }
-function Invoke-CvAzJson([string[]]$A) { $t = Invoke-CvAz ($A + @('-o', 'json')); if (-not $t) { return $null }; return ($t | ConvertFrom-Json) }
 function Get-CvToken([string]$Resource) {
-    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $t = "$(& az account get-access-token --subscription $SubscriptionId --resource $Resource --query accessToken -o tsv 2>$null)".Trim() } finally { $ErrorActionPreference = $eap }
-    $global:LASTEXITCODE = 0
+    Connect-CvRest
+    $t = ''; try { $t = "$(Get-PimRestToken -Resource $Resource -TenantId $TenantId)".Trim() } catch { $t = '' }
     return $t
 }
+function Get-CvArm([string]$Path, [string]$Api = 'aca', [switch]$All) {
+    # a failed read THROWS (the line is "not checked: <reason>"); a missing resource answers $null
+    Connect-CvRest
+    Invoke-PimSetupArm -Path $Path -ApiVersion (Get-PimSetupApiVersion $Api) -NotFoundOk -All:$All
+}
+function Get-CvResId([string]$Type, [string]$Name, [string]$Child = '', [string]$Rg = $ResourceGroup) { Connect-CvRest; Get-PimArmResourceId $SubscriptionId $Rg $Type $Name $Child }
 function Invoke-CvGraph([string]$Path, [switch]$All) {
     $tok = Get-CvToken 'https://graph.microsoft.com'
-    if (-not $tok) { throw 'no Microsoft Graph token from the signed-in az context' }
+    if (-not $tok) { throw 'no Microsoft Graph token for the signed-in identity' }
     $u = if ($Path -match '^https://') { $Path } else { "https://graph.microsoft.com/v1.0/$Path" }
     if (-not $All) { return (Invoke-RestMethod -Uri $u -Headers @{ Authorization = "Bearer $tok" } -TimeoutSec 60) }
     $items = @()
@@ -179,9 +192,8 @@ function Get-CvSetting([string]$Name) {
 }
 function Get-CvMiOid([string]$Kind, [string]$Name) {
     $k = "mi:${Kind}:${Name}"; if ($script:cv.ContainsKey($k)) { return $script:cv[$k] }
-    $a = if ($Kind -eq 'job') { @('containerapp', 'job', 'show') } else { @('containerapp', 'show') }
-    $o = Invoke-CvAz ($a + @('-g', $ResourceGroup, '-n', $Name, '--query', 'identity.principalId', '-o', 'tsv'))
-    $script:cv[$k] = "$o".Trim(); return $script:cv[$k]
+    $res = Get-CvArm (Get-CvResId $(if ($Kind -eq 'job') { 'Microsoft.App/jobs' } else { 'Microsoft.App/containerApps' }) $Name)
+    $script:cv[$k] = "$($res.identity.principalId)".Trim(); return $script:cv[$k]
 }
 
 function Get-CvFact([string]$Id) {
@@ -195,13 +207,9 @@ function Get-CvFact([string]$Id) {
             }
             'updater' {
                 if ($NoUpdater) { return @{ readable = $true; notApplicable = $true; reason = 'community edition without a release feed: no in-cloud updater by design -- keep it current with tools\setup\Update-PimCommunity.ps1 -Apply' } }
-                $jobEnv = $null
-                try { $jobEnv = Invoke-CvAzJson @('containerapp', 'job', 'show', '-g', $ResourceGroup, '-n', $UpdateJobName, '--query', 'properties.template.containers[0].env') } catch { $jobEnv = $null }
-                if ($null -eq $jobEnv) {
-                    $exists = $false
-                    try { $exists = [bool](Invoke-CvAz @('containerapp', 'job', 'list', '-g', $ResourceGroup, '--query', "[?name=='$UpdateJobName'].name", '-o', 'tsv')) } catch { throw }
-                    if (-not $exists) { return @{ readable = $true; jobExists = $false } }
-                }
+                $updJob = Get-CvArm (Get-CvResId 'Microsoft.App/jobs' $UpdateJobName)
+                if (-not $updJob) { return @{ readable = $true; jobExists = $false } }
+                $jobEnv = @($updJob.properties.template.containers)[0].env
                 $ring = "$(@(@($jobEnv) | Where-Object { "$($_.name)" -eq 'PIM_UPDATE_RING' }) | Select-Object -First 1 | ForEach-Object { $_.value })".Trim()
                 $us = Get-CvSetting 'UpdateState'
                 $seed = [bool](Select-String -LiteralPath (Join-Path $here '_PimUpdateRing.ps1') -Pattern 'function Get-PimUpdateStateSeedPlan' -Quiet)
@@ -276,7 +284,7 @@ function Get-CvFact([string]$Id) {
                 $oid = Get-CvMiOid 'job' $TickJobName
                 if (-not $oid) { return @{ readable = $false; error = "the engine job '$TickJobName' has no managed identity" } }
                 $scope = Get-PimTenantRootScope -TenantId $TenantId
-                $asg = @(Invoke-CvAzJson @('role', 'assignment', 'list', '--assignee', $oid, '--scope', $scope, '--include-inherited'))
+                $asg = @(Get-PimArmRoleAssignments -Scope $scope -PrincipalId $oid -IncludeInherited -SubscriptionId $SubscriptionId)
                 $hold = Get-PimRootAzureHoldings -Assignments $asg -TenantId $TenantId
                 return @{ readable = $true; reader = [bool]$hold.reader; scope = $scope; objectId = $oid }
             }
@@ -286,19 +294,19 @@ function Get-CvFact([string]$Id) {
                 $oid = Get-CvMiOid 'app' $ManagerApp
                 if (-not $oid) { return @{ readable = $false; error = "the Manager '$ManagerApp' has no managed identity" } }
                 $scope = Get-PimManagerRgReaderScope -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
-                $asg = @(Invoke-CvAzJson @('role', 'assignment', 'list', '--assignee', $oid, '--scope', $scope, '--role', 'Reader'))
+                $asg = @(Get-PimArmRoleAssignments -Scope $scope -PrincipalId $oid -Role 'Reader' -SubscriptionId $SubscriptionId)
                 $held = @($asg | Where-Object { $_ -and "$($_.scope)".TrimEnd('/') -ieq $scope })
                 return @{ readable = $true; reader = [bool]$held.Count; scope = $scope; objectId = $oid }
             }
             'engine-first-run' {
-                $ex = @(Invoke-CvAzJson @('containerapp', 'job', 'execution', 'list', '-g', $ResourceGroup, '-n', $TickJobName))
+                $ex = @(Get-CvArm (Get-CvResId 'Microsoft.App/jobs' $TickJobName 'executions') -All | Where-Object { $_ })
                 $last = @($ex | Sort-Object { "$($_.properties.startTime)" } -Descending) | Select-Object -First 1
                 return @{ readable = $true; status = "$($last.properties.status)"; at = "$($last.properties.startTime)" }
             }
             'engine-size' {
                 # 100.31 / framework 12.15: the job's size vs the tier for the tenant count RECORDED on it at install (its
                 # pim-sizing-* tags); no recorded count -> counted now (Graph $count as the installer). Never a stop.
-                $jo = Invoke-CvAzJson @('containerapp', 'job', 'show', '-g', $ResourceGroup, '-n', $TickJobName)
+                $jo = Get-CvArm (Get-CvResId 'Microsoft.App/jobs' $TickJobName)
                 if (-not $jo) { return @{ readable = $false; error = "the engine job '$TickJobName' was not found" } }
                 $res = @($jo.properties.template.containers)[0].resources
                 $rec = ConvertFrom-PimTenantSizingTags -Tags $jo.tags -Job $TickJobName
@@ -315,7 +323,8 @@ function Get-CvFact([string]$Id) {
                 return @{ readable = $true; undersized = [bool]$u.undersized; reason = "$($u.reason) ($from)"; command = "$($u.command)" }
             }
             'easyauth' {
-                $auth = Invoke-CvAzJson @('containerapp', 'auth', 'show', '-g', $ResourceGroup, '-n', $ManagerApp)
+                # ARM's authConfigs/current carries platform / identityProviders under .properties (az flattened them)
+                $auth = (Get-CvArm (Get-CvResId 'Microsoft.App/containerApps' $ManagerApp 'authConfigs/current')).properties
                 $enabled = [bool]$auth.platform.enabled
                 $appId = "$($auth.identityProviders.azureActiveDirectory.registration.clientId)".Trim()
                 if (-not $enabled -or -not $appId) { return @{ readable = $true; ok = $false; reason = $(if (-not $enabled) { 'Easy Auth is NOT enabled on the PIM Manager' } else { 'Easy Auth has no Microsoft Entra registration' }) } }
@@ -334,8 +343,8 @@ function Get-CvFact([string]$Id) {
             }
             'sql-host-rule' {
                 if ($SetupHostRuleOwner -eq 'none') { return @{ readable = $true; notApplicable = $true; reason = 'no setup-host window in this install (private store or no host-side SQL)' } }
-                $n = Invoke-CvAz @('sql', 'server', 'firewall-rule', 'list', '-g', $sqlRg, '-s', $sqlServer, '--query', "[?name=='AllowSetupHost'].name", '-o', 'tsv')
-                return @{ readable = $true; present = [bool]"$n".Trim(); owner = $SetupHostRuleOwner; closingStep = $ClosingStep }
+                $n = Get-CvArm (Get-CvResId 'Microsoft.Sql/servers' $sqlServer 'firewallRules/AllowSetupHost' $sqlRg) 'sql'
+                return @{ readable = $true; present = [bool]$n; owner = $SetupHostRuleOwner; closingStep = $ClosingStep }
             }
             'msp-registered' {
                 return @{ readable = $false; value = $null; step = $(if ("$ManagingTenantStep".Trim()) { "$ManagingTenantStep" } else { 'the managing tenant registers this tenant in its build (Invoke-PimMspBuild -Role Master -From register-<n>), or by itself with an enrollment key' }) }
@@ -343,16 +352,17 @@ function Get-CvFact([string]$Id) {
             'msp-subnet' {
                 $step = if ("$ManagingTenantStep".Trim()) { "$ManagingTenantStep" } else { 'the managing tenant allows this subnet (Invoke-PimMspBuild -Role Master -From network-<n>), or by itself with an enrollment key' }
                 if (-not "$MasterSubscriptionId".Trim() -or -not "$MasterStorageAccount".Trim() -or -not "$EnvName".Trim()) { return @{ readable = $false; value = $null; step = $step } }
-                $subnet = Invoke-CvAz @('containerapp', 'env', 'show', '-g', $ResourceGroup, '-n', $EnvName, '--query', 'properties.vnetConfiguration.infrastructureSubnetId', '-o', 'tsv')
-                $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-                $rules = "$(& az storage account show -n $MasterStorageAccount --subscription $MasterSubscriptionId --query 'networkRuleSet.virtualNetworkRules[].virtualNetworkResourceId' -o tsv --only-show-errors 2>$null)"
-                $code = $LASTEXITCODE; $ErrorActionPreference = $eap; $global:LASTEXITCODE = 0
-                if ($code) { return @{ readable = $false; value = $null; step = $step } }
-                $hit = @("$rules" -split "`r?`n" | Where-Object { "$_".Trim() -and "$_".Trim() -ieq "$subnet".Trim() }).Count -gt 0
+                $subnet = "$((Get-CvArm (Get-CvResId 'Microsoft.App/managedEnvironments' $EnvName)).properties.vnetConfiguration.infrastructureSubnetId)"
+                # the managing tenant's account, found by name in ITS subscription (az storage account show -n, no -g)
+                $acct = $null
+                try { $acct = @(Get-CvArm "/subscriptions/$MasterSubscriptionId/providers/Microsoft.Storage/storageAccounts" 'storage' -All | Where-Object { $_ -and "$($_.name)" -ieq $MasterStorageAccount }) | Select-Object -First 1 } catch { $acct = $null }
+                if (-not $acct) { return @{ readable = $false; value = $null; step = $step } }
+                $rules = @(@($acct.properties.networkAcls.virtualNetworkRules) | ForEach-Object { "$($_.id)" })
+                $hit = @($rules | Where-Object { "$_".Trim() -and "$_".Trim() -ieq "$subnet".Trim() }).Count -gt 0
                 return @{ readable = $true; value = $hit; detail = $(if ($hit) { "this subnet is allowed on $MasterStorageAccount" } else { "this subnet is NOT allowed on $MasterStorageAccount -- $step" }); step = $step }
             }
             'msp-first-pull' {
-                $ex = @(Invoke-CvAzJson @('containerapp', 'job', 'execution', 'list', '-g', $ResourceGroup, '-n', $DownlinkJobName))
+                $ex = @(Get-CvArm (Get-CvResId 'Microsoft.App/jobs' $DownlinkJobName 'executions') -All | Where-Object { $_ })
                 $last = @($ex | Sort-Object { "$($_.properties.startTime)" } -Descending) | Select-Object -First 1
                 return @{ readable = $true; status = "$($last.properties.status)"; at = "$($last.properties.startTime)" }
             }
@@ -382,7 +392,7 @@ function Invoke-CvRepair([string]$Id, $Fact) {
             }
             'updater' {
                 if ($NoUpdater -or -not "$AcrName".Trim() -or -not "$EnvName".Trim()) { return $false }
-                $img = Invoke-CvAz @('containerapp', 'show', '-g', $ResourceGroup, '-n', $ManagerApp, '--query', 'properties.template.containers[0].image', '-o', 'tsv')
+                $img = "$(@((Get-CvArm (Get-CvResId 'Microsoft.App/containerApps' $ManagerApp)).properties.template.containers)[0].image)".Trim()
                 $tag = if ("$img" -match ':([^:/@]+)$') { $Matches[1] } else { '' }
                 if (-not $tag) { return $false }
                 $a = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; EnvName = $EnvName; AcrName = $AcrName; ImageRepo = $ImageRepo; ImageTag = $tag
@@ -420,7 +430,8 @@ function Invoke-CvRepair([string]$Id, $Fact) {
             'sql-host-rule' {
                 if ($SetupHostRuleOwner -ne 'this' -or -not $CloseSetupHostRule) { return $false }
                 Write-Host "    repair: remove this run's 'AllowSetupHost' from $sqlServer" -ForegroundColor Yellow
-                [void](Invoke-CvAz @('sql', 'server', 'firewall-rule', 'delete', '-g', $sqlRg, '-s', $sqlServer, '-n', 'AllowSetupHost'))
+                Connect-CvRest
+                [void](Remove-PimArmSqlFirewallRule -SubscriptionId $SubscriptionId -ResourceGroup $sqlRg -Server $sqlServer -Name 'AllowSetupHost')
                 return $true
             }
         }

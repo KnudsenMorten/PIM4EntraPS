@@ -15,7 +15,8 @@
   -Remove       takes back BOTH levels: the membership, the ownerships and the contained user.
 
   The support app's Azure roles and API permissions are granted by Invardia's New-InvardiaSupportApp.ps1, not here.
-  Runs as the signed-in account (Cloud Shell) or the az profile it runs in; never a secret. Every change is read back.
+  Runs as the signed-in account (PIM-Rest: the Invardia Support app's REST session, else the browser sign-in; no az CLI);
+  never a stored secret. Every change is read back.
   Adding a member to the role-assignable SQL admin group needs Privileged Role Administrator; without it that part is
   reported and the rest continues (exit 1). Container installs have no Key Vault, so there is no vault grant.
 
@@ -45,19 +46,23 @@ $here = $PSScriptRoot
 . (Join-Path $here '_PimSetupShared.ps1')
 
 $G = 'https://graph.microsoft.com/v1.0'
-# Every token is PINNED: to the subscription when one is given (its tenant), else to the tenant -- never the default az
-# context, which on a machine holding several logins is another directory (found by the code audit, 2026-10-04: this
-# line was missing and the token calls fell back to the default account).
-$tokSubArgs = if ("$SubscriptionId".Trim()) { @('--subscription', "$SubscriptionId".Trim()) } else { @('--tenant', $TenantId) }
-# No -SqlServer given: the PIM store in -ResourceGroup (a guided install has exactly one). Pinned like the tokens.
+# 100.41 (NO-AZ): every token comes from PIM-Rest's ONE token client, PINNED to -TenantId -- never a default context, which
+# on a machine holding several logins is another directory (code audit 2026-10-04). A caller that already set up PIM-Rest's
+# identity keeps it; otherwise sign in: the Invardia Support app's REST session for this tenant, else the person's browser.
+$needRest = (-not $Graph) -or (-not $Sql -and ("$SqlServer".Trim() -or ("$ResourceGroup".Trim() -and "$SubscriptionId".Trim())))
+if ($needRest -and -not $global:PIM_SetupRestMode -and -not "$($global:PIM_ClientId)".Trim()) {
+    if ("$SubscriptionId".Trim()) { [void](Connect-PimSetupRest -SubscriptionId "$SubscriptionId".Trim() -TenantId $TenantId) } else { [void](Connect-PimSetupRest -TenantId $TenantId) }
+}
+# No -SqlServer given: the PIM store in -ResourceGroup (a guided install has exactly one). az sql server list -g over ARM.
 if (-not "$SqlServer".Trim() -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and -not $Sql) {
-    $found = @(az sql server list -g $ResourceGroup --subscription $SubscriptionId --query '[].fullyQualifiedDomainName' -o tsv 2>$null | Where-Object { "$_".Trim() })
+    $found = @(@(Invoke-PimSetupArm -Path "/subscriptions/$("$SubscriptionId".Trim())/resourceGroups/$ResourceGroup/providers/Microsoft.Sql/servers" -ApiVersion (Get-PimSetupApiVersion sql) -All -ErrorAsNull) |
+                 Where-Object { $_ } | ForEach-Object { "$($_.properties.fullyQualifiedDomainName)".Trim() } | Where-Object { $_ })
     if ($found.Count -eq 1) { $SqlServer = "$($found[0])".Trim(); Write-Host "  SQL server in $($ResourceGroup): $SqlServer" -ForegroundColor DarkGray }
     elseif ($found.Count -gt 1) { throw "resource group '$ResourceGroup' holds $($found.Count) SQL servers -- name the PIM one with -SqlServer" }
 }
 if (-not $Graph) {
-    $gTok = "$(az account get-access-token --resource https://graph.microsoft.com @tokSubArgs --query accessToken -o tsv 2>$null)".Trim()
-    if (-not $gTok) { throw "no Graph token for tenant $TenantId -- sign in first: az login --tenant $TenantId" }
+    $gTok = ''; try { $gTok = "$(Get-PimRestToken -Resource 'graph' -TenantId $TenantId)".Trim() } catch { $gTok = '' }
+    if (-not $gTok) { throw "no Graph token for tenant $TenantId -- sign in to that tenant (a browser sign-in opens in a PowerShell window), or connect its Invardia Support app (Connect-InvardiaSupport.ps1 -Environment <handle>)" }
     $Graph = {
         param([string]$Method, [string]$Path, $Body)
         $h = @{ Authorization = "Bearer $gTok"; ConsistencyLevel = 'eventual' }
@@ -68,7 +73,7 @@ if (-not $Graph) {
 }
 if (-not $Sql -and "$SqlServer".Trim()) {
     . (Join-Path (Split-Path -Parent (Split-Path -Parent $here)) 'engine\_shared\PIM-SqlStore.ps1')
-    $sTok = "$(az account get-access-token --resource https://database.windows.net/ @tokSubArgs --query accessToken -o tsv 2>$null)".Trim()
+    $sTok = ''; try { $sTok = "$(Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId)".Trim() } catch { $sTok = '' }
     $cs = "Server=tcp:$SqlServer,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
     $Sql = {
         param([string]$Query)

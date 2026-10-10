@@ -80,7 +80,7 @@ function New-PimSqlConnection {
     # Single place connections are created, so MANAGED IDENTITY (the chosen auth for
     # Azure SQL) works passwordless: an MI access token for https://database.windows.net/
     # is set on the connection (.AccessToken). If one isn't pre-minted, mint it via
-    # PIM-Rest (MI / SPN / az) here. No password in the connection string. Skipped when
+    # PIM-Rest (MI / SPN / signed-in source) here. No password in the connection string. Skipped when
     # the CS uses Integrated auth (dev/on-prem) -- the two are mutually exclusive.
     param([Parameter(Mandatory)][string]$ConnectionString)
     $type = Resolve-PimSqlClientType
@@ -161,8 +161,10 @@ function New-PimSqlConnection {
                              elseif ($env:PIM_ManagedIdentityClientId) { "user-assigned $($env:PIM_ManagedIdentityClientId)" } else { 'default (system, or the only one attached)' }
                 $credKind = if ("$sqlSec".Trim()) { 'secret' } elseif ("$sqlThumb".Trim()) { "cert $sqlThumb" }
                             elseif ($env:AZURE_CLIENT_SECRET) { 'secret via $env:AZURE_CLIENT_SECRET (NOT counted by $explicitSpn)' } else { 'none' }
-                Write-Host ("  [sql] auth plan: explicitSpn={0} sqlClientId='{1}' credential={2} | MI available={3} identity={4}" -f `
-                                $explicitSpn, "$sqlCid", $credKind, $miAvail, $miIdLabel) -ForegroundColor DarkGray
+                $__sap = ("  [sql] auth plan: explicitSpn={0} sqlClientId='{1}' credential={2} | MI available={3} identity={4}" -f `
+                                $explicitSpn, "$sqlCid", $credKind, $miAvail, $miIdLabel)
+                # §100.46: in the tick a start-up diagnostic (printed on change / first of the day / PIM_LOG_VERBOSE=1)
+                if (Get-Command Write-PimStartupLine -ErrorAction SilentlyContinue) { Write-PimStartupLine -Message $__sap -ForegroundColor DarkGray } else { Write-Host $__sap -ForegroundColor DarkGray }
             }
             # 🪤 ONCE PER PROCESS, NOT ONCE PER CONNECTION. The first version of this logged the
             # winning branch on EVERY connection: a single downlink run emitted ~80 identical
@@ -172,7 +174,7 @@ function New-PimSqlConnection {
             if (-not $tok -and $explicitSpn) {
                 $spnErr = $null
                 try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -ClientId $sqlCid -ClientSecret $sqlSec -CertThumbprint $sqlThumb
-                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Host -ForegroundColor DarkGray "  [sql] token source: EXPLICIT SPN $sqlCid" } }
+                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; if (Get-Command Write-PimStartupLine -ErrorAction SilentlyContinue) { Write-PimStartupLine -Message "  [sql] token source: EXPLICIT SPN $sqlCid" -ForegroundColor DarkGray } else { Write-Host -ForegroundColor DarkGray "  [sql] token source: EXPLICIT SPN $sqlCid" } } }
                 catch { $spnErr = "$($_.Exception.Message)"; Write-Warning "  [sql] SPN token failed: $spnErr" }
                 # =============================================================================
                 # 🔴 SEC-12b -- SAME DEFECT AS SEC-12, ONE LAYER DOWN, AND IT WAS STILL LIVE.
@@ -202,7 +204,7 @@ function New-PimSqlConnection {
             }
             if (-not $tok -and $miAvail) {
                 try { $tok = Get-PimRestToken -Resource 'https://database.windows.net' -UseManagedIdentity
-                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; Write-Host '  [sql] token source: MANAGED IDENTITY' -ForegroundColor DarkGray } }
+                      if ($tok -and -not $script:PimSqlSourceLogged) { $script:PimSqlSourceLogged = $true; if (Get-Command Write-PimStartupLine -ErrorAction SilentlyContinue) { Write-PimStartupLine -Message '  [sql] token source: MANAGED IDENTITY' -ForegroundColor DarkGray } else { Write-Host '  [sql] token source: MANAGED IDENTITY' -ForegroundColor DarkGray } } }
                 catch { Write-Warning "  [sql] MI token failed: $($_.Exception.Message)" }
             }
             elseif (-not $tok -and -not $miAvail -and -not $script:PimSqlSourceLogged) {

@@ -824,8 +824,10 @@ function Invoke-PimEngineScope {
             if ($null -eq $__ledger -and $__ledgerErr) {
                 Write-Warning ("[engine] {0}: the managed-key ledger could not be read ({1}) -- the prune removes NOTHING this run ({2} item(s) left alone)." -f $Scope, $__ledgerErr, $__unmanaged.Count)
             }
-            Write-Host ("[engine] {0,-20} {1} live item(s) are not defined in PIM Manager -- left alone, never pruned (report only): {2}{3}" -f `
-                $Scope, $__unmanaged.Count, ((@($__unmanaged | Select-Object -First 5 | ForEach-Object { $_.key })) -join ', '), $(if ($__unmanaged.Count -gt 5) { ', ...' } else { '' })) -ForegroundColor DarkYellow
+            $__um = ("[engine] {0,-20} {1} live item(s) are not defined in PIM Manager -- left alone, never pruned (report only): {2}{3}" -f `
+                $Scope, $__unmanaged.Count, ((@($__unmanaged | Select-Object -First 5 | ForEach-Object { $_.key })) -join ', '), $(if ($__unmanaged.Count -gt 5) { ', ...' } else { '' }))
+            # §100.46: the same report every run -- on change + daily
+            if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key "engine.unmanaged|$Scope" -Message $__um -ForegroundColor DarkYellow } else { Write-Host $__um -ForegroundColor DarkYellow }
         }
         $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @($__keepRm); nochange = @($diff.nochange)
                                    absent = @($diff.absent); conflicts = @($diff.conflicts) }
@@ -907,9 +909,14 @@ function Invoke-PimEngineScope {
             # and that should be removed"). These are live admin accounts the desired set does not
             # contain. Seeing them is useful; acting on them is not, because "absent from the
             # desired set" and "half the desired set failed to load" look exactly the same here.
-            Write-Host ("[engine] {0}: {1} UNMANAGED admin account(s) are NOT in the desired set: {2}" -f `
-                $Scope, @($sel.unmanaged).Count, (($sel.unmanaged) -join ', ')) -ForegroundColor Yellow
-            Write-Host ("[engine] {0}: REPORT ONLY -- PIM never disables an account because it is absent from the desired set. To disable one of these, say so on its row (AccountStatus=Disabled, or an AutoDisableDate in the past); to stop seeing it, add it to the definitions." -f $Scope) -ForegroundColor Yellow
+            $__ua = ("[engine] {0}: {1} UNMANAGED admin account(s) are NOT in the desired set: {2}" -f $Scope, @($sel.unmanaged).Count, (($sel.unmanaged) -join ', '))
+            $__ub = ("[engine] {0}: REPORT ONLY -- PIM never disables an account because it is absent from the desired set. To disable one of these, say so on its row (AccountStatus=Disabled, or an AutoDisableDate in the past); to stop seeing it, add it to the definitions." -f $Scope)
+            # §100.46: the same report every run -- on change + daily (the Manager shows the list)
+            if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) {
+                Write-PimLogOnce -Key "engine.unmanaged-admins|$Scope" -Message $__ua -ForegroundColor Yellow
+                Write-PimLogOnce -Key "engine.unmanaged-admins-note|$Scope" -Message $__ub -ForegroundColor Yellow
+            }
+            else { Write-Host $__ua -ForegroundColor Yellow; Write-Host $__ub -ForegroundColor Yellow }
         }
         $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @($sel.remove); nochange = @($diff.nochange) }
     }
@@ -1027,8 +1034,12 @@ function Invoke-PimEngineScope {
 
     # Progress logging (the old engine logged every step; customers expect to see it).
     $tag = if ($WhatIf) { 'PLAN' } else { 'APPLY' }
-    Write-Host ("[engine] {0,-20} {1} {2}  desired={3} live={4}  create={5} update={6} remove={7} nochange={8}" -f `
-        $Scope, $Mode, $tag, @($desired).Count, @($live).Count, $diff.create.Count, $diff.update.Count, $diff.remove.Count, $diff.nochange.Count) -ForegroundColor Cyan
+    $__sum = ("[engine] {0,-20} {1} {2}  desired={3} live={4}  create={5} update={6} remove={7} nochange={8}" -f `
+        $Scope, $Mode, $tag, @($desired).Count, @($live).Count, $diff.create.Count, $diff.update.Count, $diff.remove.Count, $diff.nochange.Count)
+    # §100.46: a run with work to do always prints; an unchanged no-op line (same counts as last time) prints on change + daily.
+    $__hasWork = ($diff.create.Count + $diff.update.Count + $diff.remove.Count) -gt 0
+    if ($__hasWork -or -not (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue)) { Write-Host $__sum -ForegroundColor Cyan }
+    else { Write-PimLogOnce -Key "engine.scope|$Scope|$Mode|$tag" -Message $__sum -ForegroundColor Cyan }
 
     $plan = New-Object System.Collections.Generic.List[object]
     # §88 commit watcher: what this run did with each item, by its pim.Rows entity + key (Get-PimCommitWatchItemRef).
@@ -1302,7 +1313,11 @@ function Invoke-PimEngineScope {
         }
     }
     if ([int]$script:__reportedShown -gt 3) { Write-Host ("    [r] ... and {0} more reported only -- NOT applied (same reason as above)" -f ([int]$script:__reportedShown - 3)) -ForegroundColor DarkYellow }
-    Write-Host ("[engine] {0,-20} done  applied={1} skipped={2} errors={3}" -f $Scope, $script:__applied, $script:__skipped, $script:__errors) -ForegroundColor $(if ($script:__errors) { 'Yellow' } else { 'Green' })
+    $__done = ("[engine] {0,-20} done  applied={1} skipped={2} errors={3}" -f $Scope, $script:__applied, $script:__skipped, $script:__errors)
+    # §100.46: "done applied=0 skipped=0 errors=0" after a no-op is the same line every run -- on change + daily; anything else prints.
+    if (([int]$script:__applied + [int]$script:__skipped + [int]$script:__errors) -gt 0 -or -not (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue)) {
+        Write-Host $__done -ForegroundColor $(if ($script:__errors) { 'Yellow' } else { 'Green' })
+    } else { Write-PimLogOnce -Key "engine.done|$Scope|$Mode" -Message $__done -ForegroundColor Green }
     # The CURRENTLY-FAILING set for this scope (SQL). A WhatIf run applied nothing, so it proves nothing
     # about what is failing and must not clear or replace the record.
     if (-not $WhatIf -and (Get-Command Update-PimEngineItemFailures -ErrorAction SilentlyContinue)) {
@@ -1694,7 +1709,9 @@ function Invoke-PimEngine {
     $__managed = Get-PimStoreManagedRowCount
     if ($__managed -le 0) {
         $why = if ($__managed -lt 0) { 'the managed rows could not be counted' } else { 'the store defines nothing (0 managed rows)' }
-        Write-Host ("[engine] CRITICAL GATE: {0} -- the engine touches NOTHING (no admins, no groups, no policies, no assignments). Define what PIM manages first." -f $why) -ForegroundColor Red
+        # §100.46: a STATE that repeats every run, not a failure (nothing is applied, nothing fails) -- first, on change, daily.
+        $__cg = ("[engine] CRITICAL GATE: {0} -- the engine touches NOTHING (no admins, no groups, no policies, no assignments). Define what PIM manages first." -f $why)
+        if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key 'engine.critical-gate' -Message $__cg -ForegroundColor Red } else { Write-Host $__cg -ForegroundColor Red }
         foreach ($s in @($res.scopes)) {
             # BUG-286 (ig798, 2026-10-04): a store that defines nothing has NOTHING failing. The scopes never run under this
             # gate, so their failure slice was never replaced and the last failures (deleted E2E rows) kept the banner red

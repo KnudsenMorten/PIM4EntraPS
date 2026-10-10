@@ -29,7 +29,7 @@ function Get-PimJobManagedIdentityPrincipalId {
       (user-assigned) and the system-assigned identity otherwise (PIM-Rest.ps1
       Get-PimManagedIdentityToken). Picking by the same rule is the only way the send right lands
       on the identity that sends.
-      Input: the job resource (ARM GET / `az containerapp job show -o json`). Returns
+      Input: the job resource (ARM GET of the Container Apps job). Returns
       { principalId; kind = system|user; reason }; reason non-empty = could not decide.
     #>
     [CmdletBinding()] param([object]$Job, [string]$ManagedIdentityClientId = '')
@@ -562,7 +562,7 @@ function New-PimMailSenderCommand {
 
 function Resolve-PimDeployMailSignedIn {
     <#
-      MAIL-1 (framework 12.3 (a)): in a SIGNED-IN deploy, may the mail-sender step run? PURE over `az account show`.
+      MAIL-1 (framework 12.3 (a)): in a SIGNED-IN deploy, may the mail-sender step run? PURE over the signed-in account (Get-PimSetupAccount: { tenantId; user = { name; type } }).
         * the signed-in principal is an APPLICATION (user.type servicePrincipal -- the Invardia Support app) in the
           deploy's tenant -> run = $true, appId = user.name: Initialize-PimMailSender -UseSignedInAccount -AdminAppId
           <appId> activates its own time-boxed Exchange Administrator through PIM and creates the mailbox now;
@@ -573,7 +573,7 @@ function Resolve-PimDeployMailSignedIn {
     #>
     # INSTALL-HARDEN-1 (owner 2026-10-08, the trial runs in the customer's Cloud Shell as a PERSON): a signed-in person who
     # holds an ACTIVE Exchange Administrator or Global Administrator role (-PersonRoleTemplateIds: the 'wids' of their token,
-    # or their directory roles) AND for whom az mints an Exchange Online token (-PersonExoToken) runs it too: run = $true,
+    # or their directory roles) AND for whom the signed-in session mints an Exchange Online token (-PersonExoToken) runs it too: run = $true,
     # person = $true, appId = '' -> Initialize-PimMailSender -UseSignedInAccount with no -AdminAppId (their own role; no app
     # is granted anything). Anyone else stays the loud, non-fatal skip with the Get Started follow-up.
     [CmdletBinding()] param([object]$Account, [string]$TenantId, [string[]]$ManagedIdentityObjectId = @(), [string]$SubscriptionId, [string]$ResourceGroup,
@@ -589,10 +589,10 @@ function Resolve-PimDeployMailSignedIn {
     $name = "$($Account.user.name)".Trim()
     $tid  = "$($Account.tenantId)".Trim()
     if (-not $Account -or -not $name) {
-        return @{ run = $false; appId = ''; why = 'no signed-in az account'; lines = @('mail sender: NOT RUN -- no signed-in az account could be read.') + $after }
+        return @{ run = $false; appId = ''; why = 'no signed-in account'; lines = @('mail sender: NOT RUN -- no signed-in account could be read.') + $after }
     }
     if ("$TenantId".Trim() -and $tid -and $tid -ine "$TenantId".Trim()) {
-        return @{ run = $false; appId = ''; why = 'signed in to another tenant'; lines = @("mail sender: NOT RUN -- the signed-in az account is in tenant $tid, not $TenantId.") + $after }
+        return @{ run = $false; appId = ''; why = 'signed in to another tenant'; lines = @("mail sender: NOT RUN -- the signed-in account is in tenant $tid, not $TenantId.") + $after }
     }
     if ($type -ieq 'servicePrincipal' -and $name -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
         return @{ run = $true; appId = $name; why = 'signed-in application'; lines = @(); person = $false }

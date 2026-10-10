@@ -245,7 +245,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# 12.7 run frame: "Documentation: <page>" as the first line + a transcript in the temp folder (its path printed at the end).
+# 12.7 run frame: "<Script> version <x.y.z> - documentation: <page>" as the first line (100.52) + a transcript in the temp folder (its path printed at the end).
 # To run it on a server on its own, use the standalone download: it has this helper (and the two below) inlined.
 . (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
 $null = Start-PimScriptRun -Script 'Deploy-PimActivatorClient'

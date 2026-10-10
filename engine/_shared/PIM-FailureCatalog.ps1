@@ -603,6 +603,54 @@ function New-PimEngineItemFailure {
     }
 }
 
+# §100.45 (owner 2026-10-10, after an alert mail for 'delta-pim-entra' whose only cause was HTTP 429 on the role schedule
+# preload: "did you not fix this across all jobs" / "maybe even have a throttle category ... it is not to alert me about,
+# except if you cannot handle it, but this is normal"). ONE rule for every job: a failed run whose every cause is Microsoft
+# throttling or a Microsoft-side outage, and which applied nothing, is THROTTLED -- retried on the next run, never mailed.
+$script:PimRunTransientCodes = @('THROTTLED', 'SERVICE-ERROR')
+$script:PimRunTransientSignal = '(?i)\b429\b|Too ?Many ?Requests|throttl|\bHTTP 5\d\d\b|\b50[0234]\b|Service ?Unavailable|Bad ?Gateway|Gateway ?Time-?out|InternalServerError|timed out|\btimeout\b|TaskCanceledException|A task was canceled'
+# Anything here means a cause that is NOT throttling: a permission, a bad request / missing object, a code fault, a hold,
+# an unbound scope. Deliberately broad -- a doubt keeps the run FAILED (an alert too many beats a silent failure).
+$script:PimRunNonTransientSignal = '(?i)\bHTTP 4(?!29)\d\d\b|->\s*4(?!29)\d\d\b|\b40[13]\b|Forbidden|Unauthori[sz]ed|AuthorizationFailed|Authorization_RequestDenied|InsufficientPermissions|Insufficient privileges|BadRequest|\bNotFound\b|ResourceNotFound|no provider for scope|NEEDS APPROVAL|MASS-HOLD|REMOVE-BUDGET-HELD|OutOfMemory|NullReference|null-valued expression|Cannot index into|cannot be found|is not recognized|ParameterBinding|Exception calling'
+
+function Test-PimRunFailureTransient {
+    <#
+      PURE. §100.45. TRUE when a failed run is THROTTLED: every failing cause is HTTP 429 / "Too Many Requests" / throttling,
+      an HTTP 5xx / service unavailable / gateway error, or a timeout -- including the engine's "the live state could not be
+      read ... preload was INCOMPLETE (... -> HTTP 429 | ... -> HTTP 503)" -- AND the run applied nothing.
+        -Text   the run's failure text (the job detail / the thrown error).
+        -Items  the classified failing items (New-PimEngineItemFailure), when the caller has them.
+      FALSE when: any cause is something else (403, bad data, a code fault, a hold, an unknown catalog code); a cause of the
+      preload list ("<what> -> <answer>") carries no throttling signal; the run applied something ("applied=N", N > 0: a
+      PARTIAL apply is a real failure); or there is no throttling signal at all.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Text = '', [object[]]$Items = @())
+    $t = "$Text"
+    $its = @(@($Items) | Where-Object { $_ })
+    if (-not $t.Trim() -and -not $its.Count) { return $false }
+    foreach ($x in $its) {
+        $c = "$($x.code)".Trim().ToUpperInvariant()
+        if ($c) { if ($c -notin $script:PimRunTransientCodes) { return $false }; continue }
+        $m = "$($x.message)"
+        if (-not ($m -match $script:PimRunTransientSignal) -or $m -match $script:PimRunNonTransientSignal) { return $false }
+    }
+    if (-not $t.Trim()) { return $true }
+    # A partial apply is not "nothing happened": the engine (and queue-apply) state how much they applied.
+    if ($t -match '(?i)\bapplied\s*[=:]\s*[1-9]\d*') { return $false }
+    if ($t -match $script:PimRunNonTransientSignal) { return $false }
+    # Every catalog code the summary names must be a throttling / service code (UNCLASSIFIED included as "not").
+    $known = @{}; foreach ($k in @(Get-PimFailureCatalogCodes)) { $known["$k"] = $true }
+    foreach ($mm in [regex]::Matches($t, '\[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)\]')) {   # single-word codes too: THROTTLED, UNCLASSIFIED
+        $code = $mm.Groups[1].Value
+        if ($known.ContainsKey($code) -and $code -notin $script:PimRunTransientCodes) { return $false }
+    }
+    # Each listed cause ("<request> -> <answer>", separated by ' | ' or '; ') must itself be throttling / service-side.
+    foreach ($seg in @($t -split '\s\|\s|;\s')) {
+        if ($seg -match '->' -and -not ($seg -match $script:PimRunTransientSignal)) { return $false }
+    }
+    return [bool]($t -match $script:PimRunTransientSignal)
+}
+
 function Test-PimEngineFailuresAreAllTransient {
     <#
       PURE. TRUE when every failed item in a run is a transient, retryable one -- today that is

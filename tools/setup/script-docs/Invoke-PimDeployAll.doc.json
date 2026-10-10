@@ -160,6 +160,7 @@
     { "name": "OnStep", "required": false, "default": null, "help": "Callback per step event (used by the guided install)." },
     { "name": "AlertRecipients", "required": false, "default": "the SuperAdmins' mailboxes", "help": "Alert recipients when none are stored." },
     { "name": "SkipInstallVerify", "required": false, "default": false, "help": "Skip the end-of-install check (a caller that runs its own)." },
+    { "name": "RunDevGates", "required": false, "default": false, "help": "Developer gates only: run the hosted smoke and the deploy-validation tests from the tests folder (needs the Azure CLI and Pester). Off for every customer install, which runs the built-in check instead." },
     { "name": "LicenceExpected", "required": false, "default": false, "help": "The licence line of the end-of-install check is required." },
     { "name": "InvardiaInstallToken", "required": false, "default": "$env:INVARDIA_INSTALL_TOKEN", "help": "Tracked install: report each step to Invardia." },
     { "name": "InvardiaInstallEventsUrl", "required": false, "default": "https://invardia.com/api/install/events", "help": "Where tracked steps are reported." },

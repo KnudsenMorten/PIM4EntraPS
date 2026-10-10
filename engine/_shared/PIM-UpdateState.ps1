@@ -658,3 +658,35 @@ function Save-PimUpdateState {
         return @{ ok = $false; reason = "$($_.Exception.Message)" }
     }
 }
+
+function Get-PimUpdaterSelfRecordWrites {
+    <#
+      100.50 -- PURE. What the updater records on ITS OWN job at the end of a good run, as ONE ordered set of variables that
+      Set-PimAcaJobEnvValues (PIM-ArmContainerApps.ps1) writes in ONE PATCH (DESIGN: "after a good roll the job records the
+      applied sequence on itself"):
+        PIM_UPDATE_LAST_GOOD          the image this run started from, when the job is about to move off it (§56.5)
+        PIM_UPDATE_INVARDIA_SEQ_R<n>  the applied Invardia sequence for THIS ring (§95.4; per ring since 2026-10-09)
+        PIM_UPDATE_INVARDIA_SEQ       + the legacy pair beside it, so an older updater image still reads the value and it
+        PIM_UPDATE_INVARDIA_SEQ_RING    always says which ring it belongs to
+      The sequence is recorded only when it is HIGHER than the one this ring already applied, for a ring 0-3.
+      🪤 Lives HERE, not in PIM-InvardiaUpdate.ps1: the updater loads that file only on the Invardia path, and the per-ring
+      name rule it used at this step (Get-PimInvardiaSequenceVariableName, 2026-10-09) was therefore UNDEFINED on a pim-src
+      environment -- a CommandNotFound that skipped the self-stamp. The name rule (PIM_UPDATE_INVARDIA_SEQ_R<0-3>) is
+      repeated below on purpose; Test-PimUpdaterArmBusy proves both give the same name.
+      Returns @{ writes = [ordered]; lastGood = [bool]; sequence = [bool]; variable = 'PIM_UPDATE_INVARDIA_SEQ_R<n>' | '' }.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$SelfImageNow, [AllowEmptyString()][AllowNull()][string]$TargetImage,
+          [AllowEmptyString()][AllowNull()][string]$Ring, [int]$Sequence = 0, [int]$AppliedSequence = 0)
+    $w = [ordered]@{}
+    $lg = [bool]("$SelfImageNow".Trim() -and "$SelfImageNow".Trim() -ne "$TargetImage".Trim())
+    if ($lg) { $w['PIM_UPDATE_LAST_GOOD'] = "$SelfImageNow".Trim() }
+    $n = -1; $var = ''
+    if ([int]::TryParse("$Ring".Trim(), [ref]$n) -and $n -ge 0 -and $n -le 3) { $var = "PIM_UPDATE_INVARDIA_SEQ_R$n" }
+    $sq = [bool]($var -and $Sequence -gt 0 -and $Sequence -gt $AppliedSequence)
+    if ($sq) {
+        $w[$var] = "$Sequence"
+        $w['PIM_UPDATE_INVARDIA_SEQ'] = "$Sequence"
+        $w['PIM_UPDATE_INVARDIA_SEQ_RING'] = "$n"
+    }
+    return @{ writes = $w; lastGood = $lg; sequence = $sq; variable = $var }
+}

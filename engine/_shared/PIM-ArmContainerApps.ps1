@@ -314,6 +314,105 @@ function Start-PimAcaJobExecution {
     return @{ ok = $false; execution = ''; reason = $lastErr }
 }
 
+function Test-PimArmBusyError {
+    <#
+      100.50 -- PURE. Is this ARM failure "another operation on the same Container Apps job/app is still running"?
+      ARM answers HTTP 409 ContainerAppsJobOperationInProgress (apps: ...OperationInProgress / "active provisioning operation")
+      to a write that arrives while the previous write's provisioning is still in flight. That is a WAIT, never a failure.
+      🔒 A bare 409 is NOT enough: a 409 Conflict for any other reason is a real answer, and retrying it costs two minutes.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$Message)
+    return ("$Message" -match '(?i)OperationInProgress|active provisioning operation')
+}
+
+function Invoke-PimArmBusyRetry {
+    <#
+      100.50 -- run ONE ARM write on a Container Apps job/app and wait out "an operation is in progress" (Test-PimArmBusyError),
+      bounded: -Waits seconds between attempts (default 6 x 20 s), the service's Retry-After when it sent one (at most 120 s).
+      Any other failure is rethrown AT ONCE; the last busy failure is rethrown after the last wait (its message still says
+      OperationInProgress, so the caller can word it as "busy" -- never as a broken update).
+      MEASURED 2026-10-10 (live, every updater run on a production tenant and two MSP test environments):
+        sizing: ca-pim-tick not sized: PATCH .../jobs/ca-pim-tick -> HTTP 409 : ContainerAppsJobOperationInProgress
+        could not record the applied Invardia sequence ...: PATCH .../jobs/ca-pim-update -> HTTP 409 : ContainerAppsJob...
+      Both writes came seconds after a write to the SAME job (the tick roll; the previous env-variable PATCH).
+      -Write is the write (a scriptblock; invoked in the caller's scope chain -- dynamic scope, so it sees the caller's
+      variables). -Sleep is a test seam. Locals carry a __pimBr prefix so they can never shadow a variable -Write uses.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Write, [int[]]$Waits = @(20, 20, 20, 20, 20, 20), [scriptblock]$Sleep)
+    if (-not $Sleep) { $Sleep = { param($s) Start-Sleep -Seconds $s } }
+    $__pimBrTry = 0
+    while ($true) {
+        $__pimBrT0 = [datetime]::UtcNow
+        try {
+            $__pimBrRes = & $Write
+            return $__pimBrRes
+        } catch {
+            if (-not (Test-PimArmBusyError -Message "$($_.Exception.Message)") -or $__pimBrTry -ge @($Waits).Count) { throw }
+            $__pimBrWait = [int]@($Waits)[$__pimBrTry]; $__pimBrTry++
+            $__pimBrLast = $global:PimLastRestError
+            if ($__pimBrLast -and $__pimBrLast.PSObject.Properties['retryAfter'] -and [int]$__pimBrLast.retryAfter -gt 0 -and
+                $__pimBrLast.PSObject.Properties['atUtc'] -and [datetime]$__pimBrLast.atUtc -ge $__pimBrT0) {
+                $__pimBrWait = [Math]::Min(120, [int]$__pimBrLast.retryAfter)
+            }
+            if ($__pimBrWait -gt 0) { & $Sleep $__pimBrWait }
+        }
+    }
+}
+
+function Set-PimAcaJobEnvValues {
+    <#
+      100.50 -- set SEVERAL environment variables on a Container Apps Job in ONE read-modify-write PATCH, wait out a busy job
+      (Invoke-PimArmBusyRetry), then READ EVERY ONE BACK. Same rules as Set-PimAcaJobEnvValue (never a fragment PATCH, never
+      echo a value), one PATCH instead of one per variable.
+      🔴 WHY ONE PATCH: the updater recorded its applied Invardia sequence as THREE back-to-back Set-PimAcaJobEnvValue calls
+      (right after a fourth, PIM_UPDATE_LAST_GOOD). Every PATCH starts a provisioning operation on the job, so the next one,
+      a second later, was refused "HTTP 409 ContainerAppsJobOperationInProgress" -- on every ring-1 run (2026-10-10). The
+      watermark that stops a replay was therefore never (fully) written. One PATCH = nothing for it to collide with.
+      -Values: an ordered dictionary name -> value. -Waits / -Sleep: passed to Invoke-PimArmBusyRetry.
+      Returns @{ written = names[] }. Throws on a refused write or a read-back mismatch.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SubscriptionId,
+        [Parameter(Mandatory)][string]$ResourceGroup,
+        [Parameter(Mandatory)][string]$JobName,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Values,
+        [string]$ContainerName,
+        [int[]]$Waits = @(20, 20, 20, 20, 20, 20),
+        [scriptblock]$Sleep
+    )
+    $path = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$JobName"
+    $pick = {
+        param($jobObj)
+        $cs = @($jobObj.properties.template.containers)
+        if ("$ContainerName".Trim()) { return (@($cs | Where-Object { "$($_.name)" -eq "$ContainerName".Trim() }) | Select-Object -First 1) }
+        if ($cs.Count -eq 1) { return $cs[0] }
+        return $null
+    }
+    if (-not $Values.Count) { return [pscustomobject]@{ written = @() } }
+    # The GET is inside the retried write: a read taken BEFORE a wait would PATCH back a template that is stale by then.
+    $writeAll = {
+        $job = Invoke-PimArm -Method GET -Path $path -ApiVersion $script:PimAcaApi
+        if (-not $job) { throw "Set-PimAcaJobEnvValues: job '$JobName' not found in $ResourceGroup." }
+        $target = & $pick $job
+        if (-not $target) { throw "Set-PimAcaJobEnvValues: pass -ContainerName; '$JobName' has $(@($job.properties.template.containers).Count) containers." }
+        $envList = New-Object System.Collections.Generic.List[object]
+        foreach ($v in @($target.env)) { if ($v -and -not $Values.Contains("$($v.name)")) { $envList.Add($v) | Out-Null } }
+        foreach ($k in @($Values.Keys)) { $envList.Add([pscustomobject]@{ name = "$k"; value = "$($Values[$k])" }) | Out-Null }
+        $target | Add-Member -NotePropertyName 'env' -NotePropertyValue @($envList.ToArray()) -Force
+        Invoke-PimArm -Method PATCH -Path $path -Body @{ properties = @{ template = $job.properties.template } } -ApiVersion $script:PimAcaApi
+    }
+    [void](Invoke-PimArmBusyRetry -Write $writeAll -Waits $Waits -Sleep $Sleep)
+    $back = Invoke-PimArm -Method GET -Path $path -ApiVersion $script:PimAcaApi
+    $bt = & $pick $back
+    foreach ($k in @($Values.Keys)) {
+        $stored = $null
+        foreach ($v in @($bt.env)) { if ($v -and "$($v.name)" -eq "$k") { $stored = "$($v.value)"; break } }
+        if ($null -eq $stored) { throw "Set-PimAcaJobEnvValues [$JobName]: wrote $k but it is ABSENT on read-back." }
+        if ($stored -cne "$($Values[$k])") { throw "Set-PimAcaJobEnvValues [$JobName]: wrote $k but read back a DIFFERENT value (wrote $("$($Values[$k])".Length) chars, read back $($stored.Length))." }
+    }
+    return [pscustomobject]@{ written = @(@($Values.Keys) | ForEach-Object { "$_" }) }
+}
+
 function Get-PimAcaImageRepo {
     <#
       The REPOSITORY half of a container image reference, with the tag or digest removed.
