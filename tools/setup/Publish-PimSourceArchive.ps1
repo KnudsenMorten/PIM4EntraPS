@@ -73,7 +73,67 @@ if ("$CustomerId".Trim()) {
 }
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $PSCommandPath
-. (Join-Path $here '_PimAz.ps1')
+# 100.41 (framework 12.17 NO-AZ): the upload is ARM REST (account lookup, listKeys, container, listServiceSas) through
+# PIM-Rest's one token client, plus the blob data plane signed with the account key in-process. No az CLI.
+$solRootPsa = Split-Path -Parent (Split-Path -Parent $here)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootPsa 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootPsa 'engine\_shared\PIM-ArmSetup.ps1') }
+
+function Invoke-PimSharedKeyBlob {
+    <#
+      ONE blob-service data-plane call authorised with the storage account KEY (Shared Key, HMAC-SHA256 over the
+      canonical request) -- what `az storage ... --account-key` did, in-process. The key never leaves this call (no
+      header other than the signature carries it, nothing is logged). -Query is the request's query (e.g.
+      @{ restype = 'container'; comp = 'acl' }); -Body is bytes; -Headers are extra x-ms-* headers.
+      Returns @{ status; headers; content } and THROWS "<METHOD> <url> -> HTTP <code> : <storage error code>" on a failure.
+      Test seam: $global:PIM_SetupBlobStub = { param($Method, $Url, $Headers, $Body) @{ status; headers; content } }.
+    #>
+    param([Parameter(Mandatory)][string]$Method, [Parameter(Mandatory)][string]$Account, [Parameter(Mandatory)][string]$Key,
+          [Parameter(Mandatory)][string]$Path, [hashtable]$Query = @{}, [byte[]]$Body, [string]$ContentType = '', [hashtable]$Headers = @{})
+    $ver = '2021-08-06'
+    $h = @{ 'x-ms-date' = [DateTime]::UtcNow.ToString('R'); 'x-ms-version' = $ver }
+    foreach ($k in $Headers.Keys) { $h["$k".ToLowerInvariant()] = "$($Headers[$k])" }
+    $len = if ($Body) { $Body.Length } else { 0 }
+    $canonHeaders = (@($h.Keys | Where-Object { $_ -like 'x-ms-*' } | Sort-Object) | ForEach-Object { "$($_):$($h[$_])" }) -join "`n"
+    $canonRes = "/$Account$Path"
+    foreach ($q in @($Query.Keys | Sort-Object)) { $canonRes += "`n$("$q".ToLowerInvariant()):$($Query[$q])" }
+    $sts = (@($Method, '', '', $(if ($len) { "$len" } else { '' }), '', $ContentType, '', '', '', '', '', '') -join "`n") + "`n" + $canonHeaders + "`n" + $canonRes
+    $hmac = New-Object System.Security.Cryptography.HMACSHA256 (, [Convert]::FromBase64String($Key))
+    try { $sig = [Convert]::ToBase64String($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($sts))) } finally { $hmac.Dispose() }
+    $h['Authorization'] = "SharedKey $($Account):$sig"
+    $qs = (@($Query.Keys | Sort-Object) | ForEach-Object { "$_=$([uri]::EscapeDataString("$($Query[$_])"))" }) -join '&'
+    $url = "https://$Account.blob.core.windows.net$Path" + $(if ($qs) { "?$qs" } else { '' })
+    if ($global:PIM_SetupBlobStub) { return (& $global:PIM_SetupBlobStub $Method $url $h $Body) }
+    $iw = @{ Method = $Method; Uri = $url; Headers = $h; UseBasicParsing = $true; TimeoutSec = 600 }
+    if ($len) { $iw.Body = $Body }
+    if ($ContentType) { $iw.ContentType = $ContentType }
+    try {
+        $r = Invoke-WebRequest @iw
+        return @{ status = [int]$r.StatusCode; headers = $r.Headers; content = $r.Content }
+    } catch {
+        $code = $null; try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+        $err = ''; try { $err = "$($_.Exception.Response.Headers['x-ms-error-code'])" } catch { }
+        if (-not $err) { $err = "$($_.ErrorDetails.Message)" -replace '\s+', ' ' }
+        throw "$Method https://$Account.blob.core.windows.net$Path -> HTTP $code : $err"
+    }
+}
+
+function Get-PimContainerAclState {
+    <# The container's stored access policies + public-access level (data plane, Shared Key): @{ publicAccess; ids = @{ name -> @{ start; expiry; permission } } }. #>
+    param([Parameter(Mandatory)][string]$Account, [Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][string]$Container)
+    $r = Invoke-PimSharedKeyBlob -Method GET -Account $Account -Key $Key -Path "/$Container" -Query @{ restype = 'container'; comp = 'acl' }
+    $pub = ''; try { $pub = "$($r.headers['x-ms-blob-public-access'])" } catch { }
+    $ids = [ordered]@{}
+    $txt = "$($r.content)" -replace '^﻿', ''
+    if ($txt.Trim()) {
+        $x = [xml]$txt
+        foreach ($si in @($x.SignedIdentifiers.SignedIdentifier)) {
+            if (-not $si) { continue }
+            $ids["$($si.Id)"] = @{ start = "$($si.AccessPolicy.Start)"; expiry = "$($si.AccessPolicy.Expiry)"; permission = "$($si.AccessPolicy.Permission)" }
+        }
+    }
+    return @{ publicAccess = $pub; ids = $ids }
+}
 
 function Hide-PimSourceUrlQuery {
     <#
@@ -206,38 +266,51 @@ if ((-not $WhatIfPreference) -and ($Verify -or $StorageAccount)) {
 
 # ---- 3. upload + read link ----------------------------------------------------------------------
 if ($StorageAccount -and -not $WhatIfPreference) {
-    $subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
     $blob = "pim-src-$Version.tar.gz"
+    # Sign in: a calling session's REST identity as it is; otherwise the Invardia Support app's session or the person.
+    if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId "$SubscriptionId".Trim()) }
+    # The account BY ARM PATH: in -SubscriptionId, or (as az's account-name lookup did) in any subscription this identity sees.
+    $saId = ''; $saSub = ''
+    $saSubs = if ("$SubscriptionId".Trim()) { @("$SubscriptionId".Trim()) } else { @(Get-PimArmSubscriptions) }
+    foreach ($s in $saSubs) {
+        $all = Invoke-PimSetupArm -Path "/subscriptions/$("$s".Trim())/providers/Microsoft.Storage/storageAccounts" -ApiVersion (Get-PimSetupApiVersion storage) -All -ErrorAsNull
+        $hit = @($all | Where-Object { $_ -and "$($_.name)" -ieq "$StorageAccount".Trim() }) | Select-Object -First 1
+        if ($hit) { $saId = "$($hit.id)"; $saSub = "$s".Trim(); break }
+    }
+    if (-not $saId) { throw "Publish-PimSourceArchive: storage account '$StorageAccount' was not found$(if ("$SubscriptionId".Trim()) { " in subscription $SubscriptionId" }) -- the publishing identity needs management rights on it." }
+    $saRg = Get-PimArmIdPart -Id $saId -Segment 'resourceGroups'
 
     Step "upload $blob to $StorageAccount/$Container"
-    # 🔑 THE KEY IS READ HERE AND NEVER LEAVES HERE. Reading it is a MANAGEMENT-plane call, which
+    # 🔑 THE KEY IS READ HERE AND NEVER LEAVES HERE. Reading it is a MANAGEMENT-plane call (ARM listKeys), which
     # the publishing identity can already make; what gets distributed is a read-only SAS to one
     # blob, never the key. This followed the pattern of the baseline SAS rotation (retired
     # 2026-09-18, SEC-27) for the same job -- data-plane operations against a freshly-created account otherwise need a separate
     # RBAC grant on the caller, and a publish step that fails until somebody grants a role by hand
     # is a publish step nobody runs.
     # 🪤 Never write the key to a log, a file, or a variable that outlives this call.
-    $key = "$(az storage account keys list --account-name $StorageAccount @subArgs --query "[0].value" -o tsv 2>$null)".Trim()
+    $keys = Invoke-PimSetupArm -Method POST -Path "$saId/listKeys" -ApiVersion (Get-PimSetupApiVersion storage) -ErrorAsNull
+    $key = "$(@($keys.keys)[0].value)".Trim(); $keys = $null
     if (-not $key) { throw "Publish-PimSourceArchive: could not read a key for '$StorageAccount' -- the publishing identity needs management rights on it." }
 
     # -PublicRead: anonymous blob access, for editions whose source is public anyway. No token is
     # issued, so there is nothing to expire, leak or rotate -- the rotation question stops existing
     # rather than getting a better answer.
-    $pubArgs = @(); if ($PublicRead) { $pubArgs = @('--public-access', 'blob') }
     # SEC-23: the create used to be `... 2>$null` with no exit check, so a refusal (a policy that forbids
     # public containers, a firewall, a wrong account) vanished and surfaced one line later as a baffling
-    # upload failure. An EXISTING container is not an error here (az answers created=false, exit 0).
-    $global:LASTEXITCODE = 0
-    $cOut = az storage container create --account-name $StorageAccount --name $Container `
-        --account-key $key @pubArgs -o none 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw ("Publish-PimSourceArchive: could not create/ensure container '$Container' on '$StorageAccount' (exit $LASTEXITCODE): " +
-               (Hide-PimSourceUrlQuery (($cOut | Out-String).Trim())))
+    # upload failure. An EXISTING container is not an error here and keeps its access level (az's created=false).
+    try {
+        $cur = Get-PimArmBlobContainer -SubscriptionId $saSub -ResourceGroup $saRg -Account $StorageAccount -Name $Container
+        if (-not $cur) {
+            [void](Set-PimArmBlobContainer -SubscriptionId $saSub -ResourceGroup $saRg -Account $StorageAccount -Name $Container -Create -PublicAccess $(if ($PublicRead) { 'Blob' } else { 'None' }))
+        }
+    } catch {
+        throw ("Publish-PimSourceArchive: could not create/ensure container '$Container' on '$StorageAccount': " +
+               (Hide-PimSourceUrlQuery "$($_.Exception.Message)"))
     }
-    $global:LASTEXITCODE = 0
-    az storage blob upload --account-name $StorageAccount --container-name $Container `
-        --name $blob --file $archive --overwrite --account-key $key -o none
-    if ($LASTEXITCODE -ne 0) { throw "Publish-PimSourceArchive: blob upload FAILED for $blob." }
+    try {
+        [void](Invoke-PimSharedKeyBlob -Method PUT -Account $StorageAccount -Key $key -Path "/$Container/$blob" `
+                -Body ([IO.File]::ReadAllBytes($archive)) -ContentType 'application/octet-stream' -Headers @{ 'x-ms-blob-type' = 'BlockBlob' })
+    } catch { throw "Publish-PimSourceArchive: blob upload FAILED for $blob ($($_.Exception.Message))." }
     Note 'uploaded'
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -257,6 +330,7 @@ if ($StorageAccount -and -not $WhatIfPreference) {
     # only tokens minted against the policy gain central control. That is why this had to land
     # before the next customer was issued one.
     if ($PublicRead) {
+        $key = $null
         # No token at all. Report the plain URL and stop -- minting a SAS for an anonymous
         # container would imply a control that does not exist.
         $url = "https://$StorageAccount.blob.core.windows.net/$Container/$blob"
@@ -275,17 +349,30 @@ if ($StorageAccount -and -not $WhatIfPreference) {
 
     Step "stored access policy '$PolicyName' on $Container (central expiry + revocation)"
     $expiry = (Get-Date).ToUniversalTime().AddDays($SasDays).ToString('yyyy-MM-ddTHH:mm:ssZ')
-    # Idempotent: create, and if it is already there just move its expiry forward.
-    az storage container policy create --account-name $StorageAccount -c $Container `
-        -n $PolicyName --permissions r --expiry $expiry --account-key $key -o none 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        az storage container policy update --account-name $StorageAccount -c $Container `
-            -n $PolicyName --permissions r --expiry $expiry --account-key $key -o none 2>$null
-    }
-    $global:LASTEXITCODE = 0
+    # Idempotent: create, and if it is already there just move its expiry forward. The container ACL is written WHOLE
+    # (Set Container ACL replaces every policy AND the public-access level), so it is read first and written back with
+    # only this policy changed -- the other policies (up to five) and the access level survive, as `az storage
+    # container policy create/update` kept them.
+    try {
+        $acl = Get-PimContainerAclState -Account $StorageAccount -Key $key -Container $Container
+        $acl.ids[$PolicyName] = @{ start = ''; expiry = $expiry; permission = 'r' }
+        $xmlIds = foreach ($n in $acl.ids.Keys) {
+            $p = $acl.ids[$n]
+            '<SignedIdentifier><Id>' + [Security.SecurityElement]::Escape("$n") + '</Id><AccessPolicy>' +
+                $(if ("$($p.start)".Trim()) { '<Start>' + [Security.SecurityElement]::Escape("$($p.start)") + '</Start>' } else { '' }) +
+                $(if ("$($p.expiry)".Trim()) { '<Expiry>' + [Security.SecurityElement]::Escape("$($p.expiry)") + '</Expiry>' } else { '' }) +
+                $(if ("$($p.permission)".Trim()) { '<Permission>' + [Security.SecurityElement]::Escape("$($p.permission)") + '</Permission>' } else { '' }) +
+                '</AccessPolicy></SignedIdentifier>'
+        }
+        $aclXml = '<?xml version="1.0" encoding="utf-8"?><SignedIdentifiers>' + ($xmlIds -join '') + '</SignedIdentifiers>'
+        $aclHdr = @{}; if ("$($acl.publicAccess)".Trim()) { $aclHdr['x-ms-blob-public-access'] = "$($acl.publicAccess)".Trim() }
+        [void](Invoke-PimSharedKeyBlob -Method PUT -Account $StorageAccount -Key $key -Path "/$Container" -Query @{ restype = 'container'; comp = 'acl' } `
+                -Body ([Text.Encoding]::UTF8.GetBytes($aclXml)) -ContentType 'application/xml' -Headers $aclHdr)
+    } catch { Warn "stored access policy write refused: $($_.Exception.Message)" }
     # 🔴 READ IT BACK. A policy that was not stored yields a SAS that authenticates against nothing
     # and fails at the customer, at 03:00, as "cannot fetch source".
-    $polBack = "$(az storage container policy show --account-name $StorageAccount -c $Container -n $PolicyName --account-key $key --query expiry -o tsv 2>$null)".Trim()
+    $polBack = ''
+    try { $polBack = "$((Get-PimContainerAclState -Account $StorageAccount -Key $key -Container $Container).ids[$PolicyName].expiry)".Trim() } catch { $polBack = '' }
     if (-not $polBack) { throw "Publish-PimSourceArchive: stored access policy '$PolicyName' could not be read back on '$Container'." }
     Note "policy verified, expires $polBack"
 
@@ -295,17 +382,22 @@ if ($StorageAccount -and -not $WhatIfPreference) {
     # signature does not match, and every version except the one it was minted for fails
     # authentication. Measured on the first real publish: the link verified 200 for 2.4.308 and
     # would have 403'd for 2.4.309 -- at 03:00, in a customer tenant, as "cannot fetch source".
-    # 🔒 --policy-name and NOTHING ELSE: no --permissions, no --expiry inline. Both come from the
+    # 🔒 the policy name (signedIdentifier) and NOTHING ELSE: no permissions, no expiry inline. Both come from the
     # stored policy, which is the entire point -- a token that carried its own would be ad-hoc
-    # again, and az REFUSES to combine the two anyway. Read only; the container holds nothing but
+    # again. Read only; the container holds nothing but
     # published source archives, so read across it is exactly the reach an environment needs.
-    $sas = "$(az storage container generate-sas --account-name $StorageAccount --name $Container `
-                --policy-name $PolicyName --https-only --account-key $key `
-                -o tsv 2>$null)".Trim()
+    # Minted by ARM (listServiceSas: the storage service signs it with the account key) -- no az, no signing here.
+    $key = $null
+    $sas = ''
+    try {
+        $sasResp = Invoke-PimSetupArm -Method POST -Path "$saId/listServiceSas" -ApiVersion (Get-PimSetupApiVersion storage) -Body @{
+            canonicalizedResource = "/blob/$StorageAccount/$Container"; signedResource = 'c'; signedIdentifier = $PolicyName; signedProtocol = 'https' }
+        $sas = "$($sasResp.serviceSasToken)".Trim().TrimStart('?')
+    } catch { $sas = ''; Write-Verbose ("listServiceSas refused: " + (Hide-PimSourceUrlQuery "$($_.Exception.Message)")) }
     if (-not $sas) {
         # SEC-23: this is a CONTAINER SAS signed against the stored access policy -- not a
         # user-delegation SAS, which is what this line used to call it.
-        Warn "could not mint the stored-policy ('$PolicyName') container SAS -- the archive is uploaded; generate a read link by hand (az storage container generate-sas --policy-name $PolicyName)."
+        Warn "could not mint the stored-policy ('$PolicyName') container SAS -- the archive is uploaded; generate a read link by hand (a container SAS on '$Container' with signed identifier '$PolicyName')."
     } else {
         $url = "https://$StorageAccount.blob.core.windows.net/$Container/$blob`?$sas"
         # 🪤 READ IT BACK. A link that does not actually fetch is discovered by a customer

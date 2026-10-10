@@ -34,39 +34,43 @@ param(
 $ErrorActionPreference = 'Stop'
 function Step($m) { Write-Host "[grant] $m" -ForegroundColor Cyan }
 function Info($m) { Write-Host "        $m" -ForegroundColor Gray }
-function AzJson { $ErrorActionPreference = 'Continue'; $o = & az @args 2>$null; if ($LASTEXITCODE -ne 0) { throw "az $($args[0..3] -join ' ') failed (exit $LASTEXITCODE)" }; if ("$o".Trim()) { ($o -join "`n") | ConvertFrom-Json } }
-$acct = AzJson account show --subscription $SubscriptionId -o json
-if ("$($acct.tenantId)" -ne $TenantId) { throw "the az profile is signed in to tenant '$($acct.tenantId)', not '$TenantId' -- set AZURE_CONFIG_DIR (Graph calls follow the profile, not --subscription)" }
+# 100.41 (framework 12.17 NO-AZ): Graph / ARM / SQL tokens come from PIM-Rest's ONE token client (engine/_shared/PIM-ArmSetup.ps1):
+# a calling run's REST session as it is; standalone, the Invardia Support app's session or the person signed in. No az.
+$solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId) }
+# Graph calls follow the session's tenant, so the session must be pinned to -TenantId (was: the az profile's tenant).
+if ("$($global:PIM_TenantId)".Trim() -and "$($global:PIM_TenantId)".Trim().ToLowerInvariant() -ne "$TenantId".Trim().ToLowerInvariant()) {
+    throw "the REST session is signed in to tenant '$($global:PIM_TenantId)', not '$TenantId' -- refusing (Graph calls follow the session's tenant)"
+}
+$acct = Get-PimArmSubscription -SubscriptionId $SubscriptionId
+if ("$($acct.tenantId)" -ne $TenantId) { throw "subscription $SubscriptionId reads tenant '$($acct.tenantId)', not '$TenantId' -- refusing" }
 
-$sp = AzJson rest --method GET --url "https://graph.microsoft.com/v1.0/servicePrincipals/$PrincipalId`?`$select=id,appId,displayName" -o json
+$sp = Invoke-PimSetupGraph -Path "/servicePrincipals/$PrincipalId`?`$select=id,appId,displayName" -NotFoundOk
 if (-not $sp.appId) { throw "no service principal $PrincipalId in tenant $TenantId" }
 Step "identity $($sp.displayName) (object $($sp.id), app $($sp.appId))"
 
 # ---- Graph app roles (read only)
-$graph = AzJson rest --method GET --url "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id,appRoles" -o json
-$gsp = @($graph.value)[0]
+$gsp = @(Invoke-PimSetupGraph -Path "/servicePrincipals?`$filter=appId eq '00000003-0000-0000-c000-000000000000'&`$select=id,appRoles" -All | Where-Object { $_ })[0]
 $want = @('Group.Read.All', 'User.Read.All', 'PrivilegedAssignmentSchedule.Read.AzureADGroup'); if ($GrantMailSend) { $want += 'Mail.Send' }
-$have = @((AzJson rest --method GET --url "https://graph.microsoft.com/v1.0/servicePrincipals/$PrincipalId/appRoleAssignments" -o json).value | Where-Object { $_.resourceId -eq $gsp.id } | ForEach-Object { $_.appRoleId })
+$have = @(@(Invoke-PimSetupGraph -Path "/servicePrincipals/$PrincipalId/appRoleAssignments" -All) | Where-Object { $_ } | Where-Object { $_.resourceId -eq $gsp.id } | ForEach-Object { $_.appRoleId })
 foreach ($name in $want) {
     $role = $gsp.appRoles | Where-Object { $_.value -eq $name -and $_.allowedMemberTypes -contains 'Application' } | Select-Object -First 1
     if (-not $role) { throw "Graph has no application role '$name'" }
     if ($have -contains $role.id) { Info "Graph ${name}: already granted"; continue }
     if ($PSCmdlet.ShouldProcess($sp.displayName, "grant Graph $name")) {
-        $body = Join-Path $env:TEMP "pim-approle-$([guid]::NewGuid().ToString('N')).json"
-        try {
-            @{ principalId = $sp.id; resourceId = $gsp.id; appRoleId = $role.id } | ConvertTo-Json -Compress | Set-Content -LiteralPath $body -Encoding ascii
-            [void](AzJson rest --method POST --url "https://graph.microsoft.com/v1.0/servicePrincipals/$($gsp.id)/appRoleAssignedTo" --headers 'Content-Type=application/json' --body "@$body" -o json)
-        } finally { Remove-Item -LiteralPath $body -Force -ErrorAction SilentlyContinue }
+        [void](Invoke-PimSetupGraph -Method POST -Path "/servicePrincipals/$($gsp.id)/appRoleAssignedTo" -Body @{ principalId = $sp.id; resourceId = $gsp.id; appRoleId = $role.id })
         Info "Graph ${name}: granted (a new app-role grant takes ~25 min to reach the identity's tokens)"
     }
 }
 
 # ---- source container
 if ($SourceContainerId) {
-    $ra = @(@(AzJson role assignment list --assignee $sp.id --scope $SourceContainerId --role 'Storage Blob Data Reader' --subscription $SubscriptionId -o json) | Where-Object { $_ -and $_.principalId })   # @($null).Count is 1
+    $ra = @(@(Get-PimArmRoleAssignments -Scope $SourceContainerId -PrincipalId $sp.id -Role 'Storage Blob Data Reader' -SubscriptionId $SubscriptionId) | Where-Object { $_ -and $_.principalId })   # @($null).Count is 1
     if ($ra.Count) { Info 'Storage Blob Data Reader on the source container: already granted' }
     elseif ($PSCmdlet.ShouldProcess($SourceContainerId, 'Storage Blob Data Reader')) {
-        [void](AzJson role assignment create --assignee-object-id $sp.id --assignee-principal-type ServicePrincipal --role 'Storage Blob Data Reader' --scope $SourceContainerId --subscription $SubscriptionId -o json)
+        [void](New-PimArmRoleAssignment -Scope $SourceContainerId -PrincipalId $sp.id -PrincipalType ServicePrincipal -Role 'Storage Blob Data Reader' -SubscriptionId $SubscriptionId)
         Info 'Storage Blob Data Reader on the source container: granted'
     }
 }
@@ -75,7 +79,7 @@ if ($SourceContainerId) {
 if ($SqlServer) {
     if ($SqlUserName -notmatch '^[A-Za-z0-9_-]{1,64}$') { throw "invalid SQL user name '$SqlUserName'" }
     $sid = '0x' + ((([guid]$sp.appId).ToByteArray() | ForEach-Object { $_.ToString('X2') }) -join '')
-    $tok = (AzJson account get-access-token --resource https://database.windows.net/ --tenant $TenantId -o json).accessToken
+    $tok = "$(Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId)"
     $cn = New-Object System.Data.SqlClient.SqlConnection("Server=tcp:$SqlServer,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=60")
     $cn.AccessToken = $tok
     $cn.Open()

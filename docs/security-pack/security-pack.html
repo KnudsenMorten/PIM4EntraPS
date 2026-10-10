@@ -27,7 +27,7 @@ th { background:var(--soft); }
 caption { text-align:left; font-weight:600; padding:4px 0; }
 footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); margin-top:32px; padding-top:10px; }
 @page { size:A4; margin:18mm 14mm 18mm 14mm;
-  @bottom-left { content:"PIM Manager Security Pack -- version 2.4.538 -- 2026-10-09"; font-size:8pt; color:#57606a; }
+  @bottom-left { content:"PIM Manager Security Pack -- version 2.4.554 -- 2026-10-10"; font-size:8pt; color:#57606a; }
   @bottom-right { content:"Page " counter(page) " of " counter(pages); font-size:8pt; color:#57606a; } }
 @page :first { @bottom-left { content:none; } @bottom-right { content:none; } }
 @media print {
@@ -47,7 +47,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <div class="kicker">Security review pack</div>
 <h1>PIM Manager -- Security review pack</h1>
 <div>This pack is for the CISO and the security team who must approve PIM Manager before it is installed. It describes the product and this version, not one customer&#39;s environment. Every statement was checked against the product&#39;s code for this version, not only against its design documents. Where the product does NOT yet control a risk, the pack says so and names the open item (SP-GAP-n) on the product&#39;s backlog.</div>
-<div class="meta"><b>Product:</b> PIM Manager &nbsp; <b>Version:</b> 2.4.538 &nbsp; <b>Date:</b> 2026-10-09<br>
+<div class="meta"><b>Product:</b> PIM Manager &nbsp; <b>Version:</b> 2.4.554 &nbsp; <b>Date:</b> 2026-10-10<br>
 <b>Contact:</b> <a href="mailto:info@invardia.com">info@invardia.com</a> &nbsp; <b>Support:</b> <a href="https://portal.invardia.com/">portal.invardia.com</a><br>
 <b>Online:</b> <a href="https://invardia.com/products/pim-manager/security/">https://invardia.com/products/pim-manager/security/</a></div>
 </section>
@@ -72,7 +72,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <li><strong>Engine job</strong> <code>ca-pim-tick</code> -- an Azure Container Apps job on a schedule. It reads the desired state from SQL and applies it to Entra ID, PIM for Groups, Azure RBAC, Intune and Defender XDR role management through REST calls with its managed identity.</li>
 <li><strong>Manager</strong> <code>ca-pim-manager</code> -- the web GUI (Container App). Administrators sign in with Entra ID (App Service Authentication, &quot;Easy Auth&quot;). Its Microsoft Graph rights are read-only; changes are queued in SQL and applied by the engine.</li>
 <li><strong>Updater job</strong> <code>ca-pim-update</code> -- builds the new version from source inside your own container registry and rolls the Manager and jobs (chapter 6).</li>
-<li><strong>Azure SQL Database</strong> -- the desired state, settings, audit log and commit journal. Entra-only authentication.</li>
+<li><strong>Azure SQL Database</strong> -- the desired state, settings, audit log and commit journal. Entra-only authentication. The installer creates it on the Standard tier, S0 at minimum (never Basic, never serverless), with a 250 GB maximum size; a higher tier you set is kept, and a <code>pim-sql-tier-pin</code> tag stops the product changing its tier.</li>
 <li><strong>Azure Container Registry</strong> -- holds the images built in your subscription (Premium for private network setups, Basic otherwise).</li>
 <li><strong>Log Analytics workspace</strong> -- receives the Container Apps logs.</li>
 <li><strong>Key Vault</strong> -- only when a feature needs a secret (SMTP relay password, emergency passphrase, MSP signing key). A plain install creates none.</li>
@@ -258,7 +258,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <h3>Data sent to Invardia</h3>
 <p>All outbound, HTTPS, to invardia.com. Nothing is sent about users, groups or roles by design; the exact fields are below.</p>
 <ul>
-<li><strong>Telemetry uplink</strong> (hourly; feature gate <code>telemetry.uplink</code>, <strong>on by default</strong>, switch off in Settings &gt; Features; switching off sends one final opt-out record and then nothing). Two modes: <strong>anonymous</strong> (no licence install key: a random install id, bucketed counts, no tenant, host or text) and <strong>identified</strong> (with an install key: adds tenant id, host name and redacted error text). The redaction removes tokens, keys, SAS signatures and PEM blocks; it does <strong>not</strong> remove e-mail addresses, UPNs or object names that can appear in an error message (SP-GAP-9).</li>
+<li><strong>Telemetry uplink</strong> (run reports hourly, a heartbeat every 4 hours; feature gate <code>telemetry.uplink</code>, <strong>on by default</strong>, switch off in Settings &gt; Features; switching off sends one final opt-out record and then nothing). Two modes: <strong>anonymous</strong> (no licence install key: a random install id, bucketed counts, no tenant, host or text) and <strong>identified</strong> (with an install key: adds tenant id, host name and redacted error text). The redaction removes tokens, keys, SAS signatures and PEM blocks; it does <strong>not</strong> remove e-mail addresses, UPNs or object names that can appear in an error message (SP-GAP-9).</li>
 <li><strong>Licence request</strong> (every 30 minutes until a licence is installed; gate <code>licence.autoRequest</code>, on by default): product, version, tenant id, install id, current licence id and expiry. No contact details.</li>
 <li><strong>Install-key claim and update manifest</strong> (Pro, gate <code>updates.invardia</code>): product, tenant id, licence, ring.</li>
 <li><strong>Install tracking</strong> (only when an install is started from an Invardia install token): the step names and outcomes.</li>
@@ -274,7 +274,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <p>See chapter 10. Your SQL database (and so all stored data) remains until you delete the resource group or the database.</p>
 <div class="tablewrap"><table><caption>Telemetry uplink -- exact fields</caption><thead><tr><th>Record</th><th>Fields</th><th>Mode</th></tr></thead><tbody>
 <tr><td>Every record</td><td>Schema, Kind, Product (pim-manager), Version, Ring, LastSeenUtc</td><td>Both</td></tr>
-<tr><td>Heartbeat (daily)</td><td>Edition (community / pro / trial), Hosting (container), RuntimeIdentity (managed identity / certificate), LicenceState</td><td>Both</td></tr>
+<tr><td>Heartbeat (every 4 hours)</td><td>Edition (community / pro / trial), Hosting (container), RuntimeIdentity (managed identity / certificate), LicenceState</td><td>Both</td></tr>
 <tr><td>Run report (per job, per cycle)</td><td>Job name, Outcome, DurationMs, ErrorClass, run count</td><td>Both</td></tr>
 <tr><td>Guard record</td><td>GuardId, GuardOutcome, Severity, Area, Job, measured and threshold numbers, HeldCount, TripCount, FirstSeenUtc</td><td>Both</td></tr>
 <tr><td>Anonymous mode adds</td><td>InstallId (random, stored in settings); counts bucketed</td><td>Anonymous</td></tr>
@@ -335,7 +335,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <li><strong>No PowerShell modules</strong> at runtime: the engine, Manager, updater and the published setup scripts use REST and .NET only, with browser sign-in.</li>
 <li>The container base images are pinned by digest; the container runs as a non-root user.</li>
 <li>One NuGet package (Microsoft.Data.SqlClient) is pinned by version but not by hash (SP-GAP-2).</li>
-<li>Exceptions, outside the runtime: the on-premises hybrid worker uses the Windows ActiveDirectory and GroupPolicy modules (RSAT) on your domain host; some local-only operator modes of the Manager can use Microsoft Graph / Az modules when already installed.</li>
+<li>Exceptions, outside the runtime: the hybrid worker for on-premises AD uses the Windows ActiveDirectory and GroupPolicy modules (RSAT) on its worker VM (an Azure VM the setup builds, domain-joined, in its own VNet peered to your domain controllers; a worker on your own on-premises server is designed but not built); some local-only operator modes of the Manager can use Microsoft Graph / Az modules when already installed.</li>
 </ul>
 </section>
 <section id="change-control">
@@ -357,7 +357,8 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); m
 <li>Never disable accounts when the desired admin set is empty or could not be read; account disable is opt-in.</li>
 <li><strong>Mass-disable breaker:</strong> default 5 accounts or 10 %, hard ceilings 50 and 25 %.</li>
 <li><strong>Removal budget per scope:</strong> default 5, hard ceiling 5; a trip drops the whole removal set for that run.</li>
-<li>A guard can be released only by a SuperAdmin, bound to the exact plan, for one run or at most 24 hours, and the release is audited. The break-glass exclusion, account deletion and objects the product does not own can never be released. The product never deletes a user account.</li>
+<li>A guard can be released only by a SuperAdmin, bound to the exact plan, for one run or at most 24 hours, and the release is audited. The break-glass exclusion, account deletion by a prune or reconcile, and objects the product does not own can never be released.</li>
+<li><strong>Account deletion -- one operator-controlled path.</strong> The product never deletes an account it does not manage, and a prune or reconcile never deletes anything: an undefined account is only reported. The only delete is an operator&#39;s <strong>Delete account</strong> on a PIM-managed admin account (a SuperAdmin, an Admin, or a delegated operator for admins at or below its level, typing DELETE; that confirmation is the approval). The engine then deletes it once -- sessions revoked first, never a break-glass account, never an enabled account the disable circuit breaker did not allow, at most 5 per run, and never on a managed tenant on the managing tenant&#39;s word (there it is disabled). Entra keeps a deleted user restorable for 30 days. Turn the path off per environment with <code>PIM_ADMIN_ACCOUNT_DELETE=0</code>.</li>
 <li>Every guard trip is mailed, audited and reported.</li>
 <li><strong>Break-glass accounts</strong> in Settings are never removed, disabled or revoked; if the list cannot be read, every account is treated as protected.</li>
 <li>The engine has a dry-run (-WhatIf) mode; scheduled jobs can be paused one by one or all at once.</li>

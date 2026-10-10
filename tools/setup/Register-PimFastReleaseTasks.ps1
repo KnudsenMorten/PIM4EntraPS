@@ -59,7 +59,7 @@ if ($EnvironmentsFile -and (Test-Path -LiteralPath $EnvironmentsFile)) {
         -TriggerXml "<TimeTrigger><StartBoundary>$wStart</StartBoundary><Repetition><Interval>PT${WatchEveryMinutes}M</Interval></Repetition></TimeTrigger>" `
         -Arguments ('-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot 'Invoke-PimPostRollSmoke.ps1') + '" -EnvironmentsFile "' + $EnvironmentsFile + '" -IfChanged') -LimitHours 1
 } else {
-    Write-Host "  (no -EnvironmentsFile: the post-roll watcher is not defined -- a JSON list of { name, subscriptionId, resourceGroup, azureConfigDir })" -ForegroundColor Yellow
+    Write-Host "  (no -EnvironmentsFile: the post-roll watcher is not defined -- a JSON list of { name, subscriptionId, resourceGroup, tenantId?, clientId?, certThumbprint? })" -ForegroundColor Yellow
 }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 foreach ($name in $tasks.Keys) {

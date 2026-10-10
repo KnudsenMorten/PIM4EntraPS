@@ -38,21 +38,25 @@ $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
-$sub = @('--subscription', "$SubscriptionId".Trim())
+# 100.41 (framework 12.17 NO-AZ): ARM REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1). A calling
+# build's REST session is used as it is; standalone, the Invardia Support app's session or the person signed in. No az.
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+$S = "$SubscriptionId".Trim()
 $srv = ("$SqlServerName".Trim() -split '\.')[0]
-# BUG-215: every call below carries --subscription, so the DEFAULT context is irrelevant -- asserting
-# it (as this did) only pushed operators into `az account set`, which moves the machine-wide default
-# under every other session. Assert instead that THIS subscription is visible to the signed-in az.
-$acct = "$(az account show --subscription "$SubscriptionId".Trim() --query id -o tsv 2>$null)".Trim()
-if ($acct -ne "$SubscriptionId".Trim()) { throw "az cannot see subscription '$SubscriptionId' (read '$acct') -- refusing." }
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) }
+# BUG-215: every call below names the subscription in its ARM path, so no DEFAULT context exists to depend on.
+# Assert instead that THIS subscription is visible to the signed-in identity.
+$acct = "$((Get-PimArmSubscription -SubscriptionId $S -ErrorAsNull).subscriptionId)".Trim()
+if ($acct -ne $S) { throw "this sign-in cannot see subscription '$SubscriptionId' (read '$acct') -- refusing." }
 Write-Host "==> SQL build window: $Mode on $srv" -ForegroundColor Cyan
-$ErrorActionPreference = 'Continue'
 $readState = {
-    $pna = "$(az sql server show @sub -g $ResourceGroup -n $srv --query publicNetworkAccess -o tsv --only-show-errors 2>$null)".Trim()
-    $fw = @(az sql server firewall-rule list @sub -g $ResourceGroup -s $srv -o json --only-show-errors 2>$null | Out-String | ConvertFrom-Json)
-    $vr = @(az sql server vnet-rule list @sub -g $ResourceGroup -s $srv --query "[].name" -o tsv --only-show-errors 2>$null | Where-Object { "$_".Trim() })
-    $pe = @(az network private-endpoint list @sub -g $ResourceGroup -o json --only-show-errors 2>$null | Out-String | ConvertFrom-Json |
-            Where-Object { "$(@($_.privateLinkServiceConnections)[0].privateLinkServiceId)" -match "/servers/$srv$" })
+    $pna = "$((Get-PimArmSqlServer -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $srv -ErrorAsNull).properties.publicNetworkAccess)".Trim()
+    $fw = @(Get-PimArmSqlFirewallRules -SubscriptionId $S -ResourceGroup $ResourceGroup -Server $srv)
+    $vr = @(Get-PimArmSqlVnetRules -SubscriptionId $S -ResourceGroup $ResourceGroup -Server $srv | ForEach-Object { "$($_.name)" } | Where-Object { "$_".Trim() })
+    # az network private-endpoint list: ARM nests the connection's target under .properties (az flattened it).
+    $pe = @(@(Invoke-PimSetupArm -Path "/subscriptions/$S/resourceGroups/$ResourceGroup/providers/Microsoft.Network/privateEndpoints" -ApiVersion (Get-PimSetupApiVersion network) -All -ErrorAsNull) |
+            Where-Object { $_ -and "$(@($_.properties.privateLinkServiceConnections)[0].properties.privateLinkServiceId)" -match "/servers/$srv$" })
     @{ publicNetworkAccess = $pna; firewallRules = @($fw | Where-Object { $_ } | ForEach-Object { "$($_.name)" }); vnetRules = $vr; privateEndpoints = @($pe | ForEach-Object { $_.name }) }
 }
 $cur = & $readState
@@ -77,19 +81,21 @@ if ($Mode -eq 'Open') {
         # BUG-246 (§73.9, a customer build 2026-09-23): the enable was not checked, so a policy refusal (Deny on public network
         # access) surfaced only as the firewall rule's 'DenyPublicEndpointEnabled' -- the real cause never shown.
         if ($cur.publicNetworkAccess -ne 'Enabled') {
-            $enOut = @(az sql server update @sub -g $ResourceGroup -n $srv --enable-public-network true -o none --only-show-errors 2>&1)
-            if ($LASTEXITCODE -ne 0) {
-                throw ("build window did NOT open: Azure refused to enable public network access on '$srv': " + (($enOut | ForEach-Object { "$_" }) -join ' ').Trim() +
+            $enErr = ''
+            try { [void](Update-PimArmSqlServer -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $srv -Properties @{ publicNetworkAccess = 'Enabled' }) } catch { $enErr = "$($_.Exception.Message)" }
+            if ($enErr) {
+                throw ("build window did NOT open: Azure refused to enable public network access on '$srv': " + $enErr.Trim() +
                        " -- a policy may forbid public access here; reach SQL through the private endpoint instead (run the build from a host on that network).")
             }
             $mid = & $readState
             if ($mid.publicNetworkAccess -ne 'Enabled') { throw "build window did NOT open: public network access on '$srv' reads '$($mid.publicNetworkAccess)' after the enable (a policy may reset it)." }
         }
-        $fwOut = @(az sql server firewall-rule create @sub -g $ResourceGroup -s $srv -n AllowSetupHost --start-ip-address $HostIp --end-ip-address $HostIp -o none --only-show-errors 2>&1)
-        if ($LASTEXITCODE -ne 0) { throw ("build window did NOT open: the firewall rule AllowSetupHost was refused: " + (($fwOut | ForEach-Object { "$_" }) -join ' ').Trim()) }
+        $fwErr = ''
+        try { [void](Set-PimArmSqlFirewallRule -SubscriptionId $S -ResourceGroup $ResourceGroup -Server $srv -Name AllowSetupHost -StartIp $HostIp -EndIp $HostIp) } catch { $fwErr = "$($_.Exception.Message)" }
+        if ($fwErr) { throw ("build window did NOT open: the firewall rule AllowSetupHost was refused: " + $fwErr.Trim()) }
     }
     $after = & $readState
-    $fwIp = "$(az sql server firewall-rule show @sub -g $ResourceGroup -s $srv -n AllowSetupHost --query startIpAddress -o tsv --only-show-errors 2>$null)".Trim()
+    $fwIp = "$((Get-PimArmSqlFirewallRule -SubscriptionId $S -ResourceGroup $ResourceGroup -Server $srv -Name AllowSetupHost -ErrorAsNull).properties.startIpAddress)".Trim()
     Note "read back: publicNetworkAccess=$($after.publicNetworkAccess) AllowSetupHost=$fwIp"
     if ($after.publicNetworkAccess -ne 'Enabled' -or $fwIp -ne $HostIp) { throw 'build window did NOT open (see above)' }
     Write-Host "    OPEN for $HostIp -- 'AllowSetupHost' STAYS until -Mode Close runs (the build's last step does). A build that stops early leaves it open for the resume; close it by hand if you do not resume:" -ForegroundColor Yellow
@@ -100,13 +106,16 @@ if ($Mode -eq 'Open') {
 # Close
 if ($shape -eq 'privateEndpoint') {
     if ($PSCmdlet.ShouldProcess($srv, 'close build window (public network access Disabled)') -and $cur.publicNetworkAccess -ne 'Disabled') {
-        az sql server update @sub -g $ResourceGroup -n $srv --enable-public-network false -o none --only-show-errors
+        # az sql server update --enable-public-network false. A refusal is reported by the read-back below, as before.
+        try { [void](Update-PimArmSqlServer -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $srv -Properties @{ publicNetworkAccess = 'Disabled' }) }
+        catch { Write-Host "    $($_.Exception.Message)" -ForegroundColor Red }
     }
 } else {
     if (-not @($cur.vnetRules).Count) { throw "REFUSED: '$srv' has NO virtual network rule -- removing its firewall rules would cut the environment off its own database. Run the hosting step (sqlaccess) first." }
     foreach ($r in @('AllowSetupHost', 'AllowAzureServices')) {
         if ($cur.firewallRules -contains $r -and $PSCmdlet.ShouldProcess("$srv/$r", 'delete firewall rule')) {
-            az sql server firewall-rule delete @sub -g $ResourceGroup -s $srv -n $r -o none --only-show-errors
+            try { [void](Remove-PimArmSqlFirewallRule -SubscriptionId $S -ResourceGroup $ResourceGroup -Server $srv -Name $r) }
+            catch { Write-Host "    $($_.Exception.Message)" -ForegroundColor Red }
         }
     }
 }

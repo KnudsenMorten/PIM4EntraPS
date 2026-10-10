@@ -104,6 +104,7 @@ $sol = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-ArmSetup.ps1')
 $null = Start-PimScriptRun -Script 'Install-PimManager'
+$script:PimInstallVersion = $(try { "$((Get-Content -LiteralPath (Join-Path $sol 'VERSION') -Raw -ErrorAction Stop))".Trim() } catch { 'unknown' })   # in every config-OK event (2026-10-10)
 try {
 
 # -Az is the LEGACY az-shaped TEST seam (tests/Test-PimGuidedInstall.ps1 scripts az's answers). Without it -- every real
@@ -256,16 +257,16 @@ if ($enrolling) {
     # framework 8.6: the licence comes from the enrollment (claimed after the preflight, step 'enroll'); a licence file is not used.
     if ("$LicencePath".Trim()) { Write-Host "    the licence file '$LicencePath' is not used: the enrollment returns this tenant's licence" -ForegroundColor Yellow }
     Write-Host ("    enrollment key: {0} -- sent only in the claim to Invardia, never written to a log, the state file or the support outputs" -f (Get-PimEnrollmentKeyMask -Key $enrolKey)) -ForegroundColor DarkGray
-    Emit 'config' 'ok' ("installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: from your Invardia enrollment (after the checks)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
+    Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: from your Invardia enrollment (after the checks)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
 } elseif (-not "$LicencePath".Trim() -and $licenceDone) {
-    Emit 'config' 'ok' ("installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: already registered (resume)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
+    Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: already registered (resume)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
 } else {
     if (-not "$LicencePath".Trim()) { Emit 'config' 'failed' 'no licence: give the licence file (-LicencePath) or an Invardia enrollment key (enrollmentKey in the answers)' 'Download the installation bundle again from invardia.com, or contact support.'; Finish 3 }
     try { $licText = Get-Content -Raw -LiteralPath $LicencePath -ErrorAction Stop } catch { $licText = '' }
     $lp = Get-InstallLicenceProblem -Text $licText -What "the licence file '$LicencePath'"
     $lic = $lp.lic
     if ($lp.why) { Emit 'config' 'failed' $lp.why 'Download the installation bundle again from invardia.com, or contact support.'; Finish 3 }
-    Emit 'config' 'ok' ("installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: $($lic.Customer), valid until $($lic.ValidTo)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
+    Emit 'config' 'ok' ("PIM Manager $($script:PimInstallVersion): installing into resource group '$($cfg.resourceGroup)' in $($cfg.location); licence: $($lic.Customer), valid until $($lic.ValidTo)") -Detail @{ resourceGroup = $cfg.resourceGroup; location = $cfg.location; edition = $cfg.edition }
 }
 $names = Get-PimInstallNames -Config $cfg
 

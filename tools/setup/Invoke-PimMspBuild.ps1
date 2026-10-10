@@ -515,7 +515,12 @@ try {
             finally { $env:PIM_HANDOFF_TOKENS = $null }
             $ok = ($LASTEXITCODE -eq 0)
             if (-not $ok) {
-                $errL = @($stepLines | Where-Object { $_ -match '(?i)\b(error|failed|threw|refused|exception|denied|forbidden|HTTP [45]\d\d)\b' } | Select-Object -Last 4)
+                # the CAUSE first (the real error text), the summary lines ("step 'x' FAILED", "DONE. status=failed") only as a
+                # fallback -- 2026-10-10 the event said "step 'schema' FAILED" while the cause was "Client with IP ... not allowed".
+                $isSummary = { param($l) "$l" -match "(?i)^\s*(step '[^']+' FAILED|==> DONE\.|failed steps:|subject: PIM update|-> ok=False|STEP FAILED:)" }
+                $errL = @($stepLines | Where-Object { $_ -match '(?i)(UPDATE FAILED|STEP THREW|Exception calling|is not allowed|not recognized|refused|denied|forbidden|HTTP [45]\d\d|could not|cannot )' -and -not (& $isSummary $_) } | Select-Object -First 3)
+                if (-not $errL.Count) { $errL = @($stepLines | Where-Object { $_ -match '(?i)\b(error|failed|threw|exception)\b' -and -not (& $isSummary $_) } | Select-Object -Last 3) }
+                if (-not $errL.Count) { $errL = @($stepLines | Where-Object { $_ -match '(?i)\b(error|failed|threw|refused|exception|denied|forbidden|HTTP [45]\d\d)\b' } | Select-Object -Last 4) }
                 if (-not $errL.Count) { $errL = @($stepLines | Where-Object { "$_".Trim() } | Select-Object -Last 3) }
                 $script:PimMspFailMessage = (("$($s.id): " + (($errL | ForEach-Object { "$_".Trim() }) -join ' | ')) -replace '\s+', ' ')
                 if ($script:PimMspFailMessage.Length -gt 900) { $script:PimMspFailMessage = $script:PimMspFailMessage.Substring(0, 900) + ' ...' }

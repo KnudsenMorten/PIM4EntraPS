@@ -207,6 +207,38 @@ function ConvertTo-PimMailCssString {
     return ("$Value" -replace '["\\\r\n<>]', ' ').Trim()
 }
 
+function ConvertTo-PimMailLayoutFrame {
+    <#
+      PURE. §100.5 MAIL-2 leftover (b), 2.4.555: an ALERT or TRANSACTIONAL mail (a template that is not itself built with
+      New-PimMailDocument) is put in the ONE designed layout -- logo header with the environment, the subject as the heading,
+      the template's own body content unchanged, the blue button and the designed footer (environment / tenant / version,
+      Open PIM Manager, Change what you receive). A customer-EDITED template keeps every word: only its <html>/<body>
+      wrapper is replaced by the frame. Returns the new body HTML, or the input unchanged when:
+        * the body is already a designed mail (class="pim-mail"),
+        * the template opts out with <!-- pim-no-layout --> (e.g. a mail that must stay plain).
+      -Subject: the rendered subject; leading [..] tags ("[PIM Alert]", the environment) are dropped for the heading.
+    #>
+    param([AllowEmptyString()][string]$BodyHtml, [string]$Subject = '', [hashtable]$Button = $null, [string]$HomeUrl = '', [string]$NotificationsUrl = '',
+          [hashtable]$Environment = @{})
+    $h = "$BodyHtml"
+    if ($h -match 'class="pim-mail"' -or $h -match '<!--\s*pim-no-layout\s*-->') { return $h }
+    $inner = $h
+    $m = [regex]::Match($h, '(?is)<body\b[^>]*>(.*)</body>')
+    if ($m.Success) { $inner = $m.Groups[1].Value }
+    else { $inner = [regex]::Replace($inner, '(?is)</?html\b[^>]*>', '') }
+    $inner = [regex]::Replace($inner, '(?s)<!--.*?-->', '').Trim()   # template comments (subject / tokens) are not content
+    $title = ("$Subject" -replace '^\s*(\[[^\]]*\]\s*)+', '').Trim()
+    if (-not $title) { $title = 'PIM Manager' }
+    # the button goes AFTER the content (an alert reads first, then "Open ..."); none when the content already links there
+    $btn = ''
+    if ($Button -and "$($Button.url)".Trim() -and $inner -notmatch [regex]::Escape(("$($Button.url)" -split '\?')[0])) {
+        $btn = New-PimMailButton -Url "$($Button.url)" -Label $(if ("$($Button.label)".Trim()) { "$($Button.label)" } else { 'Open in PIM Manager' })
+    }
+    $b = Get-PimMailBrand
+    return (New-PimMailDocument -Title $title -Preheader $title -BodyHtml ('<div class="pim-mail-content" style="margin:14px 0 0 0;font-family:' + $b.font + ';font-size:14px;line-height:1.5;color:' + $b.text + ';">' + $inner + '</div>' + $btn) `
+                -HomeUrl $HomeUrl -NotificationsUrl $NotificationsUrl -Environment $Environment)
+}
+
 function New-PimMailDocument {
     <#
       The whole designed mail (or, with -Print, the print-ready report document). Returns HTML.

@@ -3874,6 +3874,26 @@ function Get-PimManagerAccessEntries {
     return @(if ($raw.PSObject.Properties['managerAccess']) { $raw.managerAccess } else { $raw })
 }
 
+function Resolve-PimManagerRecipientUpns {
+    <#
+      §100.5 MAIL-2 leftover (a), 2.4.555. address (lower-case) -> @{ upn } for every address the directory resolves to
+      exactly ONE user by mail, userPrincipalName or a proxyAddress (smtp:). The Manager signs people in by UPN, so a Reader
+      entry written under a mail address that differs from the UPN never matched. Never throws: an address the directory
+      does not resolve (or a directory that cannot be read) is simply left out -- the caller then uses the address as before.
+    #>
+    param([string[]]$Addresses = @())
+    $out = @{}
+    if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) { return $out }
+    foreach ($a in @($Addresses | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^[^@\s;,'']+@[^@\s;,'']+\.[^@\s;,'']+$' } | Select-Object -Unique)) {
+        try {
+            $f = [uri]::EscapeDataString("mail eq '$a' or userPrincipalName eq '$a' or proxyAddresses/any(p:p eq 'smtp:$a')")
+            $hits = @((Invoke-PimGraph -Path "/users?`$filter=$f&`$select=id,userPrincipalName,mail&`$count=true" -Headers @{ ConsistencyLevel = 'eventual' }).value | Where-Object { $_ })
+            if ($hits.Count -eq 1 -and "$($hits[0].userPrincipalName)".Trim()) { $out[$a.ToLowerInvariant()] = @{ upn = "$($hits[0].userPrincipalName)".Trim() } }
+        } catch { Write-Verbose "recipient UPN lookup for ${a}: $($_.Exception.Message)" }
+    }
+    return $out
+}
+
 function Add-PimManagerRecipientReaders {
     <#
       MAIL-2 item 5 (framework §12.11) -- AUTO-READER. Every mail recipient who is not yet a Manager user is added to SQL
@@ -3895,7 +3915,10 @@ function Add-PimManagerRecipientReaders {
         $entries = @(Get-PimManagerAccessEntries)
         $envIds = @(("$env:PIM_SuperAdmins;$env:PIM_Admins;$env:PIM_DelegatedAdmins" -split '[,;]+') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         $who = ''; try { $who = "$((Get-PimManagerRole).identity)" } catch { }
-        $m = Merge-PimManagerReaderEntries -Entries $entries -Addresses $Addresses -AlsoKnown $envIds -AddedBy $who -Source $Source
+        # §100.5 (a): resolve each address to the UPN people sign in with (mail, UPN or proxyAddresses) -- best effort
+        $resolved = @{}
+        if (Get-Command Resolve-PimManagerRecipientUpns -ErrorAction SilentlyContinue) { $resolved = Resolve-PimManagerRecipientUpns -Addresses $Addresses }
+        $m = Merge-PimManagerReaderEntries -Entries $entries -Addresses $Addresses -AlsoKnown $envIds -AddedBy $who -Source $Source -Resolved $resolved
         $out.known = @($m.known); $out.invalid = @($m.invalid)
         if (-not @($m.added).Count) { return $out }
         $value = [pscustomobject]@{ managerAccess = @($m.entries) }
@@ -9281,13 +9304,19 @@ function Get-PimActiveAssignmentsCached {
         $entry = Get-PimTenantCacheEntry -Kind 'active-assignments'
     }
     $queued = $false; $qErr = ''
-    if ($QueueRefresh -or $null -eq $entry) {
+    # §100.47 (a) (owner 2026-10-10): a read already queued or RUNNING is never asked for again -- Refresh (and the
+    # missing-snapshot auto-queue) is idempotent, and the page shows "Loading current delegations..." from this state.
+    $rs = $null
+    if (Get-Command Read-PimActiveAssignmentsRefreshState -ErrorAction SilentlyContinue) { try { $rs = Read-PimActiveAssignmentsRefreshState -NowUtc $NowUtc } catch { $rs = $null } }
+    $already = ($null -ne $rs -and [bool]$rs.pending)
+    if (($QueueRefresh -or $null -eq $entry) -and -not $already) {
         $why = if ($null -eq $entry -and -not $QueueRefresh) { "$Reason`:snapshot-missing" } else { $Reason }
         $q = Request-PimActiveAssignmentsSnapshotRefresh -Reason $why
         $queued = [bool]$q.queued; $qErr = "$($q.error)"
     }
     return (ConvertTo-PimActiveAssignmentsSnapshotView -Entry $entry -NowUtc $NowUtc `
-                -CadenceMinutes (Get-PimActiveAssignmentsSnapshotCadenceMinutes) -RefreshQueued $queued -QueueError $qErr)
+                -CadenceMinutes (Get-PimActiveAssignmentsSnapshotCadenceMinutes) -RefreshQueued $queued -QueueError $qErr `
+                -RefreshState $rs -RefreshAlreadyQueued ([bool]($QueueRefresh -and $already)))
 }
 
 function Get-PimDriftSnapshotCadenceMinutes {
@@ -10428,7 +10457,7 @@ function New-PimManagerOffboardQueueInvoker {
         if ($intent.accountStatus) {
             return [pscustomobject]@{ ok = $true; detail = "queued: AccountStatus=$($intent.accountStatus) on the admin row (queue entry $($change.id))$tail -- commit it in Pending changes; the engine acts on its next run" }
         }
-        return [pscustomobject]@{ ok = $true; detail = "queued: AutoDisableDate set on the admin row (queue entry $($change.id))$tail -- commit it in Pending changes; the engine disables the account on its next run (PIM never deletes an account)" }
+        return [pscustomobject]@{ ok = $true; detail = "queued: AutoDisableDate set on the admin row (queue entry $($change.id))$tail -- commit it in Pending changes; the engine disables the account on its next run (offboarding never deletes an account)" }
     }
     return [pscustomobject]@{ Invoker = $invoker; State = $state }
 }
@@ -16747,8 +16776,21 @@ function Handle-Request {
             try { $rules = Get-PimManagerSettingObject -Name 'AccessReviewRules'; $state = Get-PimManagerSettingObject -Name 'AccessReviewCycleState' } catch {
                 Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "the review rules could not be read: $($_.Exception.Message)" }; return 503
             }
-            $depts = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Definitions-Departments' | ForEach-Object { "$(if ($_.Department) { $_.Department } else { $_.Name })".Trim() } | Where-Object { $_ } | Sort-Object -Unique)
-            Write-JsonResponse -Response $resp -Status 200 -Body @{ rules = $rules; defaults = $script:PimAccessReviewRuleDefaults; departments = @($depts); state = $state
+            $deptRowsAr = @(Get-PimSqlRows -ConnectionString $script:PimSqlCs -Entity 'PIM-Definitions-Departments')
+            $depts = @($deptRowsAr | ForEach-Object { "$(if ($_.Department) { $_.Department } else { $_.Name })".Trim() } | Where-Object { $_ } | Sort-Object -Unique)
+            # §100.28 REVIEW-OWNERS-VISIBLE: WHO will actually review each department under its saved rule -- the same pure
+            # Get-PimEffectiveReviewers the access-review-cycle job uses (owners + the rule's reviewers, or rule-only).
+            $effective = [ordered]@{}
+            foreach ($dn in $depts) {
+                $ownArr = @($deptRowsAr | Where-Object { "$(if ($_.Department) { $_.Department } else { $_.Name })".Trim().ToLowerInvariant() -eq $dn.ToLowerInvariant() } | ForEach-Object { "$($_.Owners)" -split '[,;\s]+' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+                $ov = $null; $off = $false
+                if ($rules -and $rules.departments) { foreach ($pp in @($rules.departments.PSObject.Properties)) { if ("$($pp.Name)".Trim().ToLowerInvariant() -eq $dn.ToLowerInvariant()) { $ov = $pp.Value } } }
+                if ($ov -and [bool]$ov.off) { $off = $true }
+                $eff = $null
+                try { $eff = Get-PimEffectiveReviewers -Rule (ConvertTo-PimAccessReviewRule -Base $(if ($rules) { $rules.default } else { $null }) -Override $(if ($off) { $null } else { $ov })) -Owners $ownArr } catch { $eff = $null }
+                $effective[$dn] = [ordered]@{ off = $off; owners = @($ownArr); reviewers = @(if ($eff) { $eff.reviewers }); entries = @(if ($eff) { $eff.entries }); source = "$(if ($eff) { $eff.source } else { 'invalid' })" }
+            }
+            Write-JsonResponse -Response $resp -Status 200 -Body @{ rules = $rules; defaults = $script:PimAccessReviewRuleDefaults; departments = @($depts); state = $state; effective = $effective
                 canEdit = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') }
             return 200
         }
@@ -20144,7 +20186,13 @@ function Handle-Request {
             $who = try { (Get-PimManagerRole).identity } catch { '' }
             $queuedD = $false; $qErrD = ''
             if (Get-Command Add-PimJobTrigger -ErrorAction SilentlyContinue) {
-                try { [void](Add-PimJobTrigger -Type 'engine-delta' -Scope 'All' -Reason "drift-remediate:$who"); $queuedD = $true } catch { $qErrD = "$($_.Exception.Message)" }
+                # §100.12 DRIFT-EXTRAS (i), 2.4.555: the trigger CARRIES the ticked (scope,key) pairs; the scheduler's engine
+                # handler hands them to the engine as its change filter, so only the ticked items are re-applied (all=true = everything).
+                try {
+                    if ($selAll) { [void](Add-PimJobTrigger -Type 'engine-delta' -Scope 'All' -Reason "drift-remediate:$who") }
+                    else { [void](Add-PimJobTrigger -Type 'engine-delta' -Scope 'All' -Reason "drift-remediate:$who" -Changes @($selectKeys)) }
+                    $queuedD = $true
+                } catch { $qErrD = "$($_.Exception.Message)" }
             } else { $qErrD = 'the scheduler trigger queue is not loaded in this Manager' }
             Write-PimManagerAuditEvent -Action 'governance.drift.remediate.queued' -Target $(if ($selAll) { 'all' } else { "selected=$($selectKeys.Count)" }) `
                 -After ([ordered]@{ selectKeys = @($selectKeys); all = $selAll; queued = $queuedD; error = $qErrD; by = $who }) -Result $(if ($queuedD) { 'ok' } else { 'error' })
@@ -20158,7 +20206,7 @@ function Handle-Request {
                 ok = $true; queued = $true; status = 'queued'; mode = 'engine-delta'
                 selected = $(if ($selAll) { 'all' } else { $selectKeys.Count })
                 engineStarted = [bool]($kickD -and $kickD.started)
-                detail = ("Queued an engine reconcile (trigger:engine-delta:All){0}. The engine re-applies the desired state -- which corrects the selected create/update drift -- under its own identity; refresh the drift check afterwards to confirm. The Manager never changes the tenant itself." -f $(if ($kickD) { " -- $($kickD.detail)" } else { '' }))
+                detail = ("Queued an engine run (trigger:engine-delta:All){0}. The engine re-applies {1} under its own identity; refresh the drift check afterwards to confirm. The Manager never changes the tenant itself." -f $(if ($kickD) { " -- $($kickD.detail)" } else { '' }), $(if ($selAll) { 'the whole desired state' } else { "ONLY the $($selectKeys.Count) ticked item(s)" }))
             })
             return 202
         }

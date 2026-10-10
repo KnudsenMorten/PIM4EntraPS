@@ -239,8 +239,14 @@ function Merge-PimManagerReaderEntries {
       Matching is case-insensitive on the identity (the Manager matches the same way).
       -Source: why the entry was added -- 'mail-recipient' (MAIL-2) or 'department-owner' (PIM 100.24 DEPT-OWNER-ACCESS).
     #>
+    # -Resolved (§100.5 MAIL-2 leftover (a), 2.4.555): address (lower-case) -> @{ upn } from the directory (matched on mail,
+    # UPN or a proxyAddress). The Manager signs people in by their UPN, so a recipient whose mail address differs from the
+    # UPN gets a Reader entry under the UPN (the address kept as 'mail'); KNOWN is checked on the UPN. An
+    # address the directory did not resolve behaves as before (the address itself). A LEGACY entry written under the mail
+    # address (it never matched a sign-in) does not count as the user: the UPN entry is added beside it, the old entry is
+    # left unchanged.
     param([object[]]$Entries = @(), [string[]]$Addresses = @(), [string[]]$AlsoKnown = @(), [string]$AddedBy = '', [string]$NowUtc = '',
-          [string]$Source = 'mail-recipient')
+          [string]$Source = 'mail-recipient', [hashtable]$Resolved = @{})
     $src = if ("$Source".Trim()) { "$Source".Trim() } else { 'mail-recipient' }
     $stamp = if ("$NowUtc".Trim()) { "$NowUtc".Trim() } else { [datetime]::UtcNow.ToString('o') }
     $known = @{}
@@ -262,6 +268,19 @@ function Merge-PimManagerReaderEntries {
         $lk = $addr.ToLowerInvariant()
         if ($seen.ContainsKey($lk)) { continue }; $seen[$lk] = $true
         if ($addr -notmatch '^[^@\s;,]+@[^@\s;,]+\.[^@\s;,]+$') { $bad.Add($addr); continue }
+        $res = $null; if ($Resolved -and $Resolved.ContainsKey($lk)) { $res = $Resolved[$lk] }
+        $upn = if ($res -and "$(Get-PimMailPrefField $res 'upn')".Trim()) { "$(Get-PimMailPrefField $res 'upn')".Trim() } else { '' }
+        if ($upn -and $upn.ToLowerInvariant() -ne $lk) {
+            # the sign-in identity differs from the address: KNOWN only when the UPN is (an entry under the address alone
+            # never matched a sign-in, so it does not make them a user)
+            $ulk = $upn.ToLowerInvariant()
+            if ($seen.ContainsKey("upn:$ulk")) { continue }; $seen["upn:$ulk"] = $true
+            if ($known.ContainsKey($ulk)) { $kn.Add([pscustomobject]@{ identity = $upn; mail = $addr; role = $known[$ulk] }); continue }
+            $out.Add([pscustomobject]@{ identity = $upn; mail = $addr; role = 'Reader'; source = $src; addedBy = "$AddedBy"; addedUtc = $stamp })
+            $known[$ulk] = 'Reader'
+            $added.Add($upn)
+            continue
+        }
         if ($known.ContainsKey($lk)) { $kn.Add([pscustomobject]@{ identity = $addr; role = $known[$lk] }); continue }
         $out.Add([pscustomobject]@{ identity = $addr; role = 'Reader'; source = $src; addedBy = "$AddedBy"; addedUtc = $stamp })
         $known[$lk] = 'Reader'

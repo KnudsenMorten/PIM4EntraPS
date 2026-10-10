@@ -487,24 +487,15 @@ same pattern but without a `.locked.*` default — customer-specific by nature.
 
 ## 5. Engine core & pipeline
 
-### 5.1 Engine taxonomy (module-based reference engines)
+### 5.1 Engine taxonomy (v1 module-based engines -- removed)
 
-The original `PIM-Baseline-Management-*` engines are **module-based** (Graph/Az
-PowerShell SDK, interactive sign-in) and remain the reference for *behaviour*:
-
-| Engine | Reads | Writes | Frequency |
-|---|---|---|---|
-| `PIM-Baseline-Management-CSV` | All config CSVs | Tenant PIM state (full sync) | Hourly / daily |
-| `PIM-Baseline-Management-CSV-<X>Only` | Subset of CSVs | Subset of tenant (faster iteration) | Ad-hoc |
-| `PIM-Baseline-Management-SQL` | Azure SQL tables | Tenant PIM state | Same as CSV variant |
-| `PIM-Assignment-Exporter` | Tenant | CSV snapshot under `output/` | Daily |
-| `PIM-Assignment-Wizard` | CSV + interactive prompts | Tenant | Manual |
-| `PIM-Assignment-Revoker` | Tenant | Active activations (revoke) | Incident response |
-| `Check-PIM-Groups-IsRoleAssignable` | Tenant | (diagnostic stdout) | Ad-hoc |
-
-The `*-Only` variants exist for **fast iteration during model development** — add
-5 permission groups and run only `...-EntraIDRolesOnly` instead of the whole
-pipeline.
+**Removed (2026-10-10).** The original module-based v1 engines (the baseline management
+engines and their per-scope variants, the assignment exporter / wizard / revoker), their
+launchers and the retired-components folder are gone from the product: they depended on
+PowerShell modules and an interactive connect, which the product no longer allows. The
+REST + SQL engine below replaced every one of them. The v1 policy values that the v2
+policy templates must still match are kept as a frozen test fixture, so the parity check
+keeps working without shipping v1.
 
 ### 5.2 The REST + SQL engine (current)
 
@@ -698,6 +689,15 @@ top of the engine delta — it does NOT reimplement reconciliation.**
   **Apply now** sends only the ticked missing / changed items (`driftApplySelection`), asks no question about extras and
   says to choose Import, Delete or Ignore for them. Review & commit names a drift-staged add **IMPORT** (green) or
   **DELETE** (red, any `Lifecycle=Retire` row); the change queue leads every queued removal with a red **DELETE**.
+- **Apply now applies only the ticked items (2.4.555).** The ticked `scope|key` pairs travel end to end: `POST
+  /api/drift/remediate` queues `Add-PimJobTrigger -Type engine-delta -Scope All -Changes <selectKeys>` (`all=true` queues the
+  plain trigger), the trigger stores them as `changes` (`ConvertTo-PimTriggerChanges`, split on the first `|`), the trigger
+  drain copies them onto the job, and the engine handler runs `Invoke-PimEngine -Mode Delta -Changes`. The engine's queue
+  filter keeps a diff item when a pair names its provider entity (the commit queue's shape) or its scope (the Drift page's
+  area). Merging on the trigger list: two selections are unioned (with a new `requestedUtc`, so a run draining the older
+  selection leaves the union queued); a plain trigger (a commit, Run now) and a selection make a plain trigger -- it already
+  re-applies everything. An imported group's definition row takes `IsRoleAssignable` from the live group: every group read
+  selects `isAssignableToRole`.
 - **Stop managing and Import an admin (2.4.455).** **Stop managing** (Admin accounts, and an admin node on the Access map)
   stages the removal of every row that names the admin -- the definition row and the assignment rows, by sign-in name or
   short user name in any case -- and takes the name out of owner / sponsor / approver / notify cells. Nothing changes in
@@ -822,6 +822,12 @@ persisted *before* the trigger fires, so a crash mid-trigger can't loop forever 
 is safe (the engine is idempotent), a missed one is not; if the entity map cannot be advanced, the
 next change arms `All`.
 
+**SQL tier (2.4.554, framework §12.15).** The installer creates the database on the **Standard tier, S0 at
+minimum** — never Basic (a `-SqlServiceObjective Basic` is created as S0, with a warning) and never serverless — with a
+**250 GB maximum size** (`New-PimHostingPrerequisites.ps1`). The installer, the updater and `Set-PimSqlTier.ps1` apply the
+same plan to an existing database (`Get-PimSqlTierPlan`): Basic is raised to S0, a Standard database gets the 250 GB
+maximum, a tier is never lowered, and a database tagged `pim-sql-tier-pin` keeps its tier.
+
 **Persistent SQL compute + resilient `/health`.** The hosted SQL compute MUST run persistent
 (serverless **auto-pause disabled** / provisioned) so neither the health probe nor the first
 post-idle request cold-starts; `Test-PimSqlPersistentCompute` is the validator (a serverless
@@ -863,9 +869,10 @@ reversible**. The logic lives in a pure, injectable core
 - **Retention.** `Get-PimBackupRetentionPlan` (pure) keeps the newest N per entity (default 10) and
   prunes the oldest; applied after each commit. Snapshots live in `pim.Backups`.
 - **Deleting an admin account (2.4.513).** PIM never deletes a user account on its own: a reconcile or prune only reports an
-  account that is not defined. The one exception is an operator decision: a SuperAdmin chooses **Delete account** on Admin
-  accounts and types DELETE; the row is staged as `AccountStatus=Deleted` with every delegation removed, the commit holds it
-  for the offboard approval, and after that the engine deletes the account once -- sessions revoked first, never a
+  account that is not defined. The one exception is an operator decision: a SuperAdmin, an Admin, or a delegated operator for
+  admins at or below its own level chooses **Delete account** on Admin accounts and types DELETE; the row is staged as
+  `AccountStatus=Deleted` with every delegation removed, the typed DELETE is the approval (it is never parked for a second
+  person, and it is audited as operator-approved), and after the commit the engine deletes the account once -- sessions revoked first, never a
   break-glass account, at most five per run, never an enabled account the disable circuit breaker did not allow, and a
   switch per environment turns it off. Entra keeps a deleted user restorable for 30 days. A deleted account's row is never
   provisioned again.
@@ -1126,17 +1133,23 @@ dropped from desired.
 
 ### 6.2 Auto-disable — per admin, on its own schedule (`AdminOffboarding`)
 
-> 🔴 **PIM never deletes a user account, and never disables one for being absent.** Two things this
-> sweep used to do, it no longer does anywhere in the product:
-> * **It does not delete.** There is no code path that deletes a user — not in a single tenant, not
->   on a managing tenant, not on a managed tenant, and not behind a setting. An offboarded admin ends as
->   a **disabled account that stays in the directory**, with no sessions, no memberships and no
->   eligibilities, until a person deletes it by hand. The retention field (`DeleteAfterDays`) is
+> 🔴 **This sweep never deletes a user account, and nothing disables one for being absent.** Two things
+> this sweep used to do, it no longer does anywhere in the product:
+> * **It does not delete.** The auto-disable sweep, offboarding, a reconcile and a prune never delete a
+>   user. An offboarded admin ends as a **disabled account that stays in the directory**, with no
+>   sessions, no memberships and no eligibilities. The product's **one** user delete is a separate,
+>   operator-controlled path (§96.5 D1, 2.4.513): an operator's *Delete account* on a PIM-managed admin
+>   row stages `AccountStatus=Deleted` (SuperAdmin, Admin, or a delegated operator at or below its
+>   level — `Test-PimPortalCanDeleteAdmin`; the typed DELETE is the approval), and the `Admins` provider's
+>   `Remove-PimAdminAccountApproved` deletes it once — kill switch `PIM_ADMIN_ACCOUNT_DELETE=0`, fail
+>   closed without a circuit-breaker decision, never break-glass, never an enabled account the breaker
+>   did not allow, at most 5 per run, sessions revoked first; a central row from the managing tenant is
+>   disabled, never deleted. PIM never deletes an account it does not manage. The retention field (`DeleteAfterDays`) is
 >   **removed and not supported** — no column, no parameter, no setting, no validator finding and no
 >   disabled switch; a row that still carries the value is accepted in silence and the schema preflight
 >   drops the column (dropping, rather than blanking, is what keeps re-adding it later a one-line change
->   with no data to reconcile). `tests/Test-PimNoAccountDelete.ps1` fails the suite if a user-object
->   delete — or the retention field — reappears.
+>   with no data to reconcile). `tests/Test-PimNoAccountDelete.ps1` fails the suite if any user-object
+>   delete other than that one marked call — or the retention field — appears.
 > * **It does not disable an account merely for being missing from the desired set.** That was a
 >   third disable flow (the "unmanaged admin" removal in the `Admins` provider); it is removed, with
 >   its setting. The run still **reports** every live admin account that is not in the definitions —
@@ -1510,7 +1523,10 @@ on-prem action and best-effort write the work package to
 
 ### 6.5a The hybrid worker — PIM for Active Directory, as built (2.4.458 – 2.4.467)
 
-A domain-joined Windows server in its own network, peered to the PIM environment (cutting the peering isolates it). It
+A domain-joined **Azure VM** (Windows Server 2022 Azure Edition Core, system-assigned managed identity, built by
+`New-PimHybridWorkerInfra.ps1`) in its own VNet, peered to the network with the domain controllers and the PIM environment
+(cutting the peering isolates it). Only this Azure VM worker is built; a worker on the customer's own on-premises server
+(with an Azure Arc identity) is designed, not built. It
 replaces the older "PIM for Active Directory" scripts and runs the same scheduler as the cloud engine, with its own
 scheduler instances, so its state and lease never collide with the main tick. SQL, Graph (read) and the source store are
 reached with the server's managed identity; Active Directory is written by **group managed service accounts** only — no
@@ -1700,9 +1716,13 @@ alignment check. The hosted/SQL Manager GUI smoke is the live gate.
 
 **Access reviews per department (2.4.448).** PIM runs the department reviews itself. **Review rules** (Access reviews ›
 Review rules) set a default rule and, per department, the default, **Off** (opt out) or its own rule: the cadence in days,
-how long a round stays open, the reviewers (empty = the department owner), 1 or 2 approvers, **parallel** (both decide;
+how long a round stays open, the reviewers, 1 or 2 approvers, **parallel** (both decide;
 any Remove wins) or **serial** (approver 1 first, approver 2 has the final word), and the reminders (default a reminder every
-7 days, three times). The job `access-review-cycle` checks every six hours: it starts a round for each department that is
+7 days, three times). **Who reviews (2.4.555):** the department's **owners always review**; the people typed on the rule
+("also review") review with them; only a rule that says **only these reviewers** (`reviewersOnly`) and names someone replaces
+the owners. One function decides (`Get-PimEffectiveReviewers`), used by the job and by the rules page, whose **Who reviews**
+column lists each department's reviewers with where each comes from (owner / rule) and flags a department with nobody.
+The job `access-review-cycle` checks every six hours: it starts a round for each department that is
 due and has none open, listing every admin account of the department with the access it holds; it reminds reviewers after
 the due date; after the last reminder it tells the alert recipients and closes the round. What happens to undecided people
 is the rule's **Not answered** setting: **keep access** (the default) or **request removal**, which raises an offboard approval
@@ -1882,7 +1902,7 @@ this into the **existing** `POST /api/revoke` commit handler (additive, no route
 `preview` now reports `approvalRequired`, and an over-threshold commit without an Approved request is
 blocked **409** with `gate=no-approval` and instructions to raise a `revoke` approval on the Approvals
 tab; on a successful over-threshold commit the Approved request is latched Executed. The **Maintenance**
-tab is renamed **Maintenance & Revoke** with a destructive tooltip + in-context guidance (today the screen is **Review current delegations**, §18.1g). Covered
+tab is renamed **Maintenance & Revoke** with a destructive tooltip + in-context guidance (today the screen is **Delegation overview**, §18.1g). Covered
 offline by `tests/PIM.RevokeExecution.Tests.ps1` (6/6, mocked pipeline) + live-HTTP asserts in
 `tests/Test-PimManagerEndpoints.ps1` + the GUI↔engine alignment check; the hosted/SQL Manager GUI smoke
 remains the live gate.
@@ -2447,6 +2467,19 @@ resolves custom-over-locked and routes through `$global:PIM_NotificationChannels
 Mail-template types, token list, subject-line convention, and the
 contacts/email-flow routing layer are detailed in §17.6 / §17.17.
 
+**One layout for every mail (2.4.555).** The designed reports (daily changes, tier report, Get Started reminder) are built
+with `New-PimMailDocument`. Every other template -- alerts and transactional mails (TAP, approvals, reminders, ...) -- is put
+into the same layout at the chokepoint by `ConvertTo-PimMailLayoutFrame`: the logo and environment header, the subject
+(without its `[..]` tags) as the heading, the template's own body unchanged (only its `<html>`/`<body>` wrapper and comments
+are dropped, so an edited template keeps its words), the blue button after the content, and the one footer with
+environment, tenant, version, the Manager link and "Change what you receive". The subject keeps the environment prefix. A
+template that carries `<!-- pim-no-layout -->` is sent as written, with the plain button and environment footer.
+
+**Reader access for mail recipients (2.4.555).** A recipient saved on Alerting, Notifications or Reports (and a department
+owner) who is not a Manager user yet becomes a Reader. The address is first looked up in the directory -- by mail, sign-in
+name or any proxy address -- and when it resolves to exactly one user, the Reader entry is written under that user's sign-in
+name (people sign in by it), with the address kept beside it. An address the directory does not resolve is used as is.
+
 **GUI mail-template editor — supported-tokens legend.** When an
 operator edits a template in Settings → Mail templates, the editor renders a
 **per-template** legend of the `{{token}}` placeholders that template type provides
@@ -2541,7 +2574,7 @@ below is the **private-only** reference topology.
  │                                                            + portal-admins scoped      │
  │                                                                 │ VNet integration     │
  │                                                                 ▼ (outbound, route-all)│
- │                                   pe-pim-sql ──────► Azure SQL Basic  (PimPlatform)    │
+ │                                   pe-pim-sql ──────► Azure SQL S0+    (PimPlatform)    │
  │                                                       • AAD-only, public disabled      │
  │                                                       • MI = contained DB user         │
  │                                                       • pim.Rows / pim.Settings /      │
@@ -2588,7 +2621,7 @@ remain as a fallback for the local (on-box) edition where the modules exist.
 surfacing.** The live read takes minutes in a large tenant, so it never runs in the Manager's
 request loop. Scheduler job `active-assignments-snapshot` (default every **120 min**, editable on the
 Job schedule page; `PIM-ActiveAssignments.ps1`) performs the read and stores the result in SQL
-`pim.TenantCache` kind `active-assignments` with its timestamp. **Review current delegations**, the
+`pim.TenantCache` kind `active-assignments` with its timestamp. **Delegation overview**, the
 revoke list and the Home expiring-access tile (`GET /api/active-assignments` →
 `Get-PimActiveAssignmentsCached`) serve that stored snapshot instantly, showing "as of" and flagging
 it stale when older than two cadences. **Refresh** queues an `active-assignments-snapshot` trigger
@@ -6410,7 +6443,10 @@ primitives.
   `expiring-access`). On **My people** an owner sees their departments (an administrator everyone) with
   Approve / Deny / Undo (`/api/autoextend/upcoming`, `/api/autoextend/decide`: owner of the department or
   Admin; Deny needs a reason; a person the review decided is changed in the review; compare-and-set,
-  audited), and a SuperAdmin sets the lead time and the default (`/api/settings/autoextend`).
+  audited). The lead time and the default are ONE setting for the whole environment: a SuperAdmin sets them in
+  **Settings › Automation** (`/api/settings/autoextend`, labels and More info from the settings catalog); since 2.4.555 My
+  people shows them as one read-only line ("PIM extends permissions automatically N days before they end") with a link to
+  the setting for SuperAdmins.
 
 ### 17.10 Offboarding
 
@@ -6423,7 +6459,8 @@ off**: everything v1 enforced is on by default (same settings source), never opt
    eligibilities → notice mail → **stop**. Each step is audited and recorded in a SQL progress record
    (`pim.Settings['AdminOffboardState']`), so an interrupted run resumes.
    🔴 The v1 retention-delete step and its `DeleteAfterDays` column are **removed from the product**:
-   PIM never deletes a user account, and the field is not supported (see §6.2).
+   the auto-disable date never deletes a user account, and the field is not supported (see §6.2; the
+   only delete is the operator's *Delete account*, also §6.2).
 2. **Disabled and revoked stay disabled.** The `Admins` provider disables an account whose
    `AccountStatus` is `Disabled` or `Revoked`, or that is past its `AutoDisableDate` (revoking its
    sessions when revoked), and never re-enables it; the auto-disable sweep adds the membership
@@ -7396,7 +7433,7 @@ what the screen does, and an entry may deep-link to a *section* of a tab via `an
 | **Access** | Access map · Look up a role · Create access · Change existing access · Admin accounts & TAP · Invite a guest or consultant · **Departments & owners** (its own page since 2026-09-19, §18.9) · **Delegations — all rows** (§71.26: the records table scoped to the assignment entities) · All records (the raw view) |
 | **Pending changes** | Check for problems · Review & commit queue (§18.1f) |
 | **Jobs** | Jobs & status · Engine logs & errors · Job schedule (§11.3a) |
-| **Reviews & controls** | Review current delegations · Approvals · Drift: live vs desired (§5.2) · **Coverage & gaps** · Access reviews · Tenant conformance · Reports · Managed tenants · **Managed tenant registry** and **Replication overview** (managing tenant only) |
+| **Reviews & controls** | Delegation overview · Approvals · Drift: live vs desired (§5.2) · **Coverage & gaps** · Access reviews · Tenant conformance · Reports · Managed tenants · **Managed tenant registry** and **Replication overview** (managing tenant only) |
 | **Audit & Settings** | Audit trail · Settings · Newly discovered resources · **Manager access & roles** · **Emergency access (break-glass)** (the break-glass accounts and the emergency override, one page) · **Mail templates** · **Policy templates** (read-only) · Support. Each is its own page since 2026-09-19 — a menu item never deep-links into Settings, so each page can be permissioned on its own. |
 
 The former *Daily operations* menu is folded into Reviews & controls, and the former *Governance*
@@ -7610,16 +7647,54 @@ Queue entries move `pending → committed → applying → applied | failed`, or
   taken into account. If blocking errors remain the page stays on Pending changes and lists each
   error with the rows it concerns and a link to its fix. Info-only findings are a quiet one-line note
   that can be hidden per browser until the warning count changes; errors can never be hidden.
+- **An old row never blocks an unrelated commit (2.4.555, PIM-WL-005).** A workload binding row without the
+  Resource its connector needs is an error only when the commit adds or changes it. The validator compares each
+  pending `PIM-Assignments-Workloads` row with the saved rows by content (`Get-PimValidatorRowSignature`:
+  non-blank columns, bookkeeping columns ignored); a row identical to a saved one -- or the whole table when the
+  commit does not touch it -- is reported as a warning that says "fix or remove". Editing the row makes it an
+  error again until its Resource is filled in.
 - **One-click fixes land here.** Fixes offered by validation (e.g. **Set to Eligible**, §3.1) and by
   **Engine logs & errors** (§11.3a) stage rows into this queue; nothing is applied until an
   administrator commits.
 
-### 18.1g Review current delegations and the Drift page
+### 18.1g Delegation overview and the Drift page
 
-![Review current delegations — active assignments from the snapshot, with the revoke-queued marker](img/manager-standing-access.png)
-*Review current delegations, served from the scheduler's active-assignments snapshot, with queued revokes marked. (Synthetic demo data.)*
+![Delegation overview, Graph view — the live assignments as the Access map board](img/manager-standing-access.png)
+*Delegation overview (All privileged permissions), Graph view: the live assignments as the Access map board, one person selected with its revocable live assignments. (Synthetic demo data.)*
 
-**Review current delegations** (Reviews & controls) renders the stored active-assignments snapshot
+![Delegation overview, List view — active assignments from the snapshot, with the revoke-queued marker](img/manager-delegation-list.png)
+*List view of the same page, served from the scheduler's active-assignments snapshot, with queued revokes marked. (Synthetic demo data.)*
+
+**Delegation overview (All privileged permissions)** (Reviews & controls; renamed in 2.4.554 from *Review current
+delegations*, tab id still `revoke`) shows the same stored snapshot in two views, chosen by a **Graph view | List view**
+toggle (default Graph, remembered per browser in `localStorage` `pim.revoke.view`). Every page filter -- the type chips,
+the deleted / managed / own-identity / support-app / break-glass ticks and the text filter -- applies to both, because
+both are drawn from the same filtered rows (`applyRevokeFilter`).
+
+- **Graph view (§100.47).** The Access map board, reused: the same four columns and headers, `.map-item` boxes with
+  dots and counts, per-column filters, collapse-to-path on select, and the same wire drawing (`mapDrawWires` /
+  `mapHiliteWires`, given the graph's board, svg and first column) and path walk (`mapBfs`). The model is built from
+  the **live** rows, not from delegation rows: a principal (person / app / deleted) -> the group it is a live member of
+  (PIM for Groups) -> the group that group is nested in -> the role @ scope (Entra, AU-scoped Entra, Azure). A group that
+  is itself a live member of another group is column 3 of the board ("what that includes"); every other group column 2.
+  Each wire carries its live rows. **Revoke only:** no Give / Add buttons, no drag, no Ctrl+click linking (the Access
+  map's `mapItem` / `mapSelect` / `mapRenderDetail` carry that staging of delegation rows and are deliberately not
+  reused). Selecting a box or a wire lists its live assignments with a tick each; **Revoke** puts exactly the ticked
+  rows into the page's selection and calls the list's revoke (`submitRevoke`): server preview, break-glass skipped,
+  large-batch count confirmation, maker/checker approval, queued under Pending changes, rows marked *revoke queued*.
+  The confirmation (both views) says that revoking does not change the delegation row. Below Admin the list is
+  read-only (the ticks are disabled, no Revoke button).
+- **Loading state (§100.47).** `GET /api/active-assignments` also answers whether a read is **already queued or
+  running** (`refreshPending`, `refreshState` = queued / running, `refreshSinceUtc`) from the scheduler's own records:
+  a live job lock of an `active-assignments-snapshot` run (running) or a pending trigger of that type (queued). While
+  one is, `?refresh=1` and the missing-snapshot auto-queue do **not** queue another (`refreshAlreadyQueued`); the page
+  shows **Loading current delegations...** with the start time when there is no snapshot yet (the stored snapshot, with
+  its age, when there is one), keeps Refresh disabled with an "already loading" note, and polls the stored snapshot
+  until the read has landed.
+- **List view column widths.** Scope has a 22ch floor and breaks only after `/` (a `<wbr>` after each slash, the full
+  path as the tooltip); Principal and Role / Group are capped with an ellipsis + tooltip; Type and the dates never wrap.
+
+**Delegation overview** (Reviews & controls) renders the stored active-assignments snapshot
 (§11.1): the snapshot time and cadence, one row per active Entra role / Azure / PIM for Groups
 assignment, and the approval-gated bulk revoke (§6 approvals). Rows held by principals the directory
 no longer resolves are hidden by default; **show deleted principals (N)** reveals them and a
@@ -7655,7 +7730,7 @@ one statement, so two administrators at once cannot both add it). The key is the
 the assignment it removes (role-assignment id, role definition or group), plus the eligibility scope, an
 administrative-unit scope for an Entra role and the owner access for a group, so different removals never
 collide. A repeat answers that row `ok` + `alreadyQueued` with the id of the entry already waiting, and
-`alreadyQueuedCount` counts them; Review current delegations shows **ALREADY QUEUED** on the row and the
+`alreadyQueuedCount` counts them; Delegation overview shows **ALREADY QUEUED** on the row and the
 drift Delete message says "already queued for removal (nothing added)". A committed, applied, failed or
 discarded entry never blocks a new request.
 
@@ -8029,7 +8104,7 @@ with an override toggle).
     and reports `preservedCount` — closing the wholesale-replace gap that motivated it.
 - **Validator**: missing-GroupTag detector, stale Entra-role detector, tier-safety
   lint, plus the PIM-* validator rules across the lifecycle features (§17).
-- **Review current delegations**: active assignments + approval-gated revoke (§18.1g); Workload
+- **Delegation overview**: active assignments + approval-gated revoke (§18.1g); Workload
   Delegation panel (§15.2).
 - **Audit & Settings** (role-gated): audit trail, Settings sections for mail templates, emergency
   override and Manager access, Newly discovered resources, contacts/email-flow (§17.11–17.17).
@@ -9404,7 +9479,7 @@ A delivered licence is installed only after PIM has checked it here: the file's 
 signers, that it is Pro, and that it names this tenant, the tenant the managed identity's own token is issued in. A
 rejection is shown in Settings > Licence and never asked again automatically.
 
-**A re-issued licence (2.4.539).** When Invardia re-issues a licence, the answer to the daily heartbeat (29.2) names the
+**A re-issued licence (2.4.539).** When Invardia re-issues a licence, the answer to the heartbeat (every 4 hours, 29.2) names the
 licence that replaces the installed one (`supersededBy`). PIM keeps that id in its settings (`LicenceSupersededBy`) and the
 next licence request run -- within 30 minutes -- asks for the new licence, sending the installed licence's id, even though
 the installed licence is still valid. Invardia approves the successor of a re-issued licence by itself; the delivery goes
@@ -9413,7 +9488,7 @@ note is removed once the new licence is installed. A missing or malformed answer
 stops further requests until the administrator asks again.
 
 ### 29.2 Status telemetry (job `uplink`, feature `telemetry.uplink`)
-Every hour PIM sends one report per job that ran since the last send, and once a day a heartbeat. A job that ran many times
+Every hour PIM sends one report per job that ran since the last send, and every 4 hours a heartbeat. A job that ran many times
 sends one report: *failed* if any of its runs failed (with that run's failure), *warning* if one was held for approval,
 otherwise *ok*. Skipped and unimplemented runs are not reported, because nothing ran. The heartbeat carries the version, the
 edition, the hosting type, the runtime identity and the licence state.

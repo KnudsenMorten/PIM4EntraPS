@@ -444,6 +444,29 @@ function Send-PimNotifyMail {
         foreach ($k in 'ReviewUrl', 'ApprovalUrl') { if (-not "$($Tokens[$k])".Trim()) { $Tokens[$k] = $portal.url } }
     }
     $r = ConvertTo-PimNotifyRendering -TemplateText $tpl.text -Tokens $Tokens
+    # §100.5 MAIL-2 leftover (b), 2.4.555: an alert / transactional template (not built with New-PimMailDocument) is put in
+    # the ONE designed layout here -- logo + environment header, its own content unchanged, the blue button AFTER it and the
+    # designed footer (environment, tenant, version, Open PIM Manager, Change what you receive). A template that opts out
+    # (<!-- pim-no-layout -->) or is already designed keeps its body; the old button / MAIL-1 footer below then apply.
+    if ((Get-Command ConvertTo-PimMailLayoutFrame -ErrorAction SilentlyContinue) -and $r.BodyHtml -notmatch 'class="pim-mail"' -and $tpl.text -notmatch '<!--\s*pim-no-layout\s*-->') {
+        $envF = Get-PimMailEnvironmentInfo -PortalBase "$($portal.base)"
+        $homeF = ''; $notifF = ''
+        if ("$($portal.base)".Trim()) {
+            $homeF = "$($portal.base)".Trim()
+            if (Get-Command Get-PimAudienceLink -ErrorAction SilentlyContinue) { try { $notifF = "$((Get-PimAudienceLink -Type 'settings' -Base $portal.base -LinkTab 'settings' -Query 'section=notifications').url)" } catch { $notifF = '' } }
+        }
+        try {
+            $framed = ConvertTo-PimMailLayoutFrame -BodyHtml $r.BodyHtml -Subject "$($r.Subject)" -Button $(if ($portal.url) { @{ url = $portal.url; label = 'Open in PIM Manager' } } else { $null }) `
+                        -HomeUrl $homeF -NotificationsUrl $notifF -Environment @{ name = $envF.name; tenantName = $envF.tenantName; tenantId = $envF.tenantId; version = $envF.version }
+            if ("$framed".Trim()) { $r.BodyHtml = $framed }
+        } catch { Write-Verbose "  [Mail] the designed layout could not be applied ($($_.Exception.Message)) -- the template is sent as it is" }
+        if ($portal.url -and "$($r.BodyText)" -notmatch [regex]::Escape($portal.url)) { $r.BodyText = "$($r.BodyText)`r`n`r`nOpen in PIM Manager: $($portal.url)" }
+        # MAIL-1: the plain-text part names the environment too (the HTML footer is the designed one, so the block below skips)
+        if ($envF.name -and "$($r.BodyHtml)" -match 'class="pim-env-footer"' -and "$($r.BodyText)" -notmatch '-- Environment: ') {
+            $r.BodyText = "$($r.BodyText)`r`n`r`n-- Environment: $($envF.name)" + $(if ($envF.tenantName -or $envF.tenantId) { " | tenant $($envF.tenantName) ($($envF.tenantId))" } else { '' }) +
+                          $(if ($envF.version) { " | PIM Manager $($envF.version)" } else { '' }) + $(if ($portal.base) { " | $($portal.base)" } else { '' })
+        }
+    }
     if ($portal.url -and $r.BodyHtml -notmatch [regex]::Escape($portal.base)) {
         # MAIL-2 item 1: the bulletproof blue button (a table cell carries the colour, so Outlook draws it too).
         $block = if (Get-Command New-PimMailButton -ErrorAction SilentlyContinue) { New-PimMailButton -Url $portal.url -Label 'Open in PIM Manager' } else { '' }

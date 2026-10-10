@@ -449,12 +449,13 @@ function Get-PimAcrImportArgs {
 function Invoke-PimAcrImport {
     <#
     .SYNOPSIS
-        Mirror the engine image into the customer ACR via `az acr import`.
+        Mirror the engine image into the customer ACR (what `az acr import` did) -- ARM importImage, no az CLI.
     .DESCRIPTION
-        Thin wrapper over Get-PimAcrImportArgs + the az CLI. Honours -WhatIf:
-        prints the plan (token redacted) and runs nothing. The actual `az` call
-        is only made on a real run -- the arg-building is what the offline tests
-        cover. Returns $true on success.
+        100.41 / framework 12.17 NO-AZ: POST <registry>/importImage over PIM-Rest's one token client (Invoke-PimArm).
+        Get-PimAcrImportArgs stays the pure description of the import (what the offline tests cover); this turns the
+        same inputs into the ARM body. Honours -WhatIf: prints the plan (token redacted) and runs nothing.
+        The target registry is found by name in -SubscriptionId (or every subscription the identity can see) unless
+        -TargetAcrResourceId names it. Returns $true when ARM accepted the import (it runs asynchronously in the registry).
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -464,19 +465,38 @@ function Invoke-PimAcrImport {
         [Parameter(Mandatory)][string]$Tag,
         [string]$SourceToken,
         [string]$SourceRegistryResourceId,
-        [switch]$Force
+        [switch]$Force,
+        [string]$SubscriptionId,
+        [string]$TargetAcrResourceId
     )
     $argList = Get-PimAcrImportArgs -TargetAcrName $TargetAcrName -SourceLoginServer $SourceLoginServer `
         -Repository $Repository -Tag $Tag -SourceToken $SourceToken `
         -SourceRegistryResourceId $SourceRegistryResourceId -Force:$Force
     $redacted = @($argList | ForEach-Object { if ($_ -eq $SourceToken -and $SourceToken) { '***' } else { $_ } })
     $target = "{0}/{1}:{2} -> {3}" -f $SourceLoginServer, $Repository, $Tag, $TargetAcrName
-    if (-not $PSCmdlet.ShouldProcess($target, 'az acr import')) {
-        Write-Host "  [whatif] az $($redacted -join ' ')" -ForegroundColor Yellow
+    if (-not $PSCmdlet.ShouldProcess($target, 'ARM importImage')) {
+        Write-Host "  [whatif] importImage: $($redacted -join ' ')" -ForegroundColor Yellow
         return $true
     }
-    Write-Host "  az $($redacted -join ' ')" -ForegroundColor Gray
-    & az @argList
-    if ($LASTEXITCODE -ne 0) { throw "az acr import failed (exit $LASTEXITCODE) for $target" }
+    if (-not (Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-Rest.ps1') }
+    $acrApi = '2023-07-01'
+    $regId = "$TargetAcrResourceId".Trim().TrimEnd('/')
+    if (-not $regId) {
+        $subs = if ("$SubscriptionId".Trim()) { @("$SubscriptionId".Trim()) } else { @(@(Invoke-PimArm -Method GET -Path '/subscriptions' -ApiVersion '2022-12-01' -All) | ForEach-Object { "$($_.subscriptionId)" } | Where-Object { $_ }) }
+        foreach ($s in $subs) {
+            $hit = @(@(Invoke-PimArm -Method GET -Path "/subscriptions/$s/providers/Microsoft.ContainerRegistry/registries" -ApiVersion $acrApi -All) | Where-Object { "$($_.name)" -ieq $TargetAcrName.Trim() })
+            if ($hit.Count) { $regId = "$($hit[0].id)".TrimEnd('/'); break }
+        }
+        if (-not $regId) { throw "ARM importImage: registry '$TargetAcrName' not found in $(if ($subs.Count) { $subs -join ', ' } else { 'any visible subscription' })" }
+    }
+    $image = "{0}:{1}" -f $Repository.Trim('/'), $Tag
+    $source = @{ sourceImage = $image }
+    if ($SourceRegistryResourceId) { $source.resourceId = $SourceRegistryResourceId } else { $source.registryUri = $SourceLoginServer.TrimEnd('/') }
+    # ACR token convention: username is the all-zero GUID, password is the token (as Get-PimAcrImportArgs describes).
+    if ($SourceToken) { $source.credentials = @{ username = '00000000-0000-0000-0000-000000000000'; password = $SourceToken } }
+    $body = @{ source = $source; targetTags = @($image); mode = $(if ($Force) { 'Force' } else { 'NoForce' }) }
+    Write-Host "  importImage: $($redacted -join ' ')" -ForegroundColor Gray
+    try { [void](Invoke-PimArm -Method POST -Path "$regId/importImage" -ApiVersion $acrApi -Body $body) }
+    catch { throw "ARM importImage failed for ${target}: $($_.Exception.Message)" }
     $true
 }

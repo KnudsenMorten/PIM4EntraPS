@@ -296,18 +296,25 @@ if ("$SyncScript".Trim()) {
         [void]$w.AppendLine("    else { Write-Host `"WARNING: env var '$SyncTokenEnvVar' is empty in this process -- the scheduler did not inject the secret. Falling back to the puller's own credential resolution.`" }")
     } elseif ("$SyncTokenKeyVault".Trim()) {
         if (-not "$SyncTokenSecretName".Trim()) { throw "-SyncTokenKeyVault requires -SyncTokenSecretName." }
+        # 100.41 / framework 12.17: no Az modules -- the vault is read over its data plane with a PIM-Rest token for the
+        # VAULT'S OWN tenant (the documented bootstrap certificate). An unattended task inherits no login, so without the
+        # bootstrap config there is no identity to read with: the wrapper says so and the puller uses its own credential.
+        $restLib = Join-Path (Split-Path -Parent (Split-Path -Parent $here)) 'engine\_shared'
         if ("$SyncTokenBootstrapConfig".Trim()) {
             if (-not (Test-Path -LiteralPath $SyncTokenBootstrapConfig)) { throw "-SyncTokenBootstrapConfig '$SyncTokenBootstrapConfig' not found." }
-            # Connect to the VAULT'S OWN tenant with the documented bootstrap cert. An unattended
-            # task inherits no login, so without this there is no operator context to read with.
             [void]$w.AppendLine("    try {")
+            [void]$w.AppendLine("        . '$restLib\PIM-Rest.ps1'; . '$restLib\PIM-ArmSetup.ps1'")
             [void]$w.AppendLine("        `$bc = Get-Content -LiteralPath '$SyncTokenBootstrapConfig' -Raw | ConvertFrom-Json")
-            [void]$w.AppendLine("        Connect-AzAccount -ServicePrincipal -Tenant `$bc.TenantId -ApplicationId `$bc.BootstrapAppId -CertificateThumbprint `$bc.BootstrapThumbprint -WarningAction SilentlyContinue -ErrorAction Stop | Out-Null")
-            [void]$w.AppendLine("        Write-Host `"pull token: bootstrap-connected to the vault's tenant (`$(`$bc.TenantId))`"")
-            [void]$w.AppendLine("    } catch { Write-Host `"WARNING: bootstrap connect for the vault failed: `$(`$_.Exception.Message)`" }")
+            [void]$w.AppendLine("        [void](Connect-PimSetupRest -TenantId `$bc.TenantId -ClientId `$bc.BootstrapAppId -CertThumbprint `$bc.BootstrapThumbprint)")
+            [void]$w.AppendLine("        Write-Host `"pull token: signed in to the vault's tenant (`$(`$bc.TenantId)) with the bootstrap certificate`"")
+            [void]$w.AppendLine("        `$tok = Get-PimKeyVaultSecretValue -VaultName '$SyncTokenKeyVault' -Name '$SyncTokenSecretName'")
+            [void]$w.AppendLine("        if (-not `"`$tok`".Trim()) { Write-Host `"WARNING: could not read '$SyncTokenSecretName' from '$SyncTokenKeyVault': `$(`$global:PimSetupRestLastError)`" }")
+            [void]$w.AppendLine("    } catch { Write-Host `"WARNING: Key Vault read for the pull token failed: `$(`$_.Exception.Message)`" }")
+            # The vault's tenant is the OPERATOR'S; the update that follows must not inherit that identity.
+            [void]$w.AppendLine("    foreach (`$n in 'PIM_SetupRestMode', 'PIM_ClientId', 'PIM_ClientSecret', 'PIM_CertThumbprint', 'PIM_TenantId') { Set-Variable -Scope Global -Name `$n -Value `$null }")
+        } else {
+            [void]$w.AppendLine("    Write-Host `"WARNING: -SyncTokenKeyVault without -SyncTokenBootstrapConfig: an unattended task has no identity to read '$SyncTokenKeyVault' with -- the puller uses its own credential.`"")
         }
-        [void]$w.AppendLine("    try { `$tok = Get-AzKeyVaultSecret -VaultName '$SyncTokenKeyVault' -Name '$SyncTokenSecretName' -AsPlainText -ErrorAction Stop }")
-        [void]$w.AppendLine("    catch { Write-Host `"WARNING: could not read '$SyncTokenSecretName' from '$SyncTokenKeyVault': `$(`$_.Exception.Message)`" }")
         [void]$w.AppendLine("    if (`"`$tok`".Trim()) { Write-Host 'pull token: from Key Vault' }")
     }
 }
@@ -318,16 +325,10 @@ if ("$PreAuthScript".Trim()) {
     [void]$w.AppendLine("    if (`$LASTEXITCODE -and `$LASTEXITCODE -ne 0) { Write-Host `"ABORT: pre-auth failed (exit `$LASTEXITCODE) -- not running the update without a verified context.`"; exit 3 }")
 }
 if ("$SubscriptionId".Trim()) {
-    # 🔴 ASSERT, never assume: `az account set` is SILENT when the subscription is not visible to
-    # this login, and leaves you on the previous one. Measured 2026-09-03: the first armed run
-    # built against the wrong subscription and failed as "the ACR could not be found".
-    [void]$w.AppendLine("    az account set --subscription '$SubscriptionId' -o none 2>`$null")
-    [void]$w.AppendLine("    `$ctx = (az account show --query id -o tsv 2>`$null)")
-    [void]$w.AppendLine("    if (`"`$ctx`".Trim() -ne '$SubscriptionId') {")
-    [void]$w.AppendLine("        Write-Host (`"ABORT: az context is '`" + `$ctx + `"', expected '$SubscriptionId' -- refusing to update the wrong subscription.`")")
-    [void]$w.AppendLine("        exit 2")
-    [void]$w.AppendLine("    }")
-    [void]$w.AppendLine("    Write-Host (`"az context asserted: `" + `$ctx)")
+    # 100.41: there is no ambient az context to assert any more (the old `az account set` was SILENT on a subscription the
+    # login could not see -- measured 2026-09-03). The subscription is FORWARDED to the update (-SubscriptionId, above),
+    # which names it in every ARM path and asserts it is visible to its own REST sign-in before touching anything.
+    [void]$w.AppendLine("    Write-Host 'subscription: $SubscriptionId (forwarded to the update; every ARM call names it -- no ambient context)'")
 }
 # ---- THE PULL, emitted BEFORE the update ------------------------------------------------------
 # 🔴 ORDER IS THE WHOLE POINT. The update builds from `git archive HEAD` of the LOCAL clone, so if
@@ -365,9 +366,9 @@ $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$wrapperPath`""
 Note "wrapper   : $wrapperPath"
 Note "log       : $LogDir\$TaskName-<timestamp>.log"
 if ("$SubscriptionId".Trim()) { Note "subscription: $SubscriptionId (asserted before the update runs)" }
-else { Warn 'no -SubscriptionId: the update will run against whatever az context is ambient. In an MSP estate that is almost never what you want.' }
+else { Warn 'no -SubscriptionId: the update skips its Azure reads and the updater pin (it never aims at an ambient context, 100.41). Pass -SubscriptionId.' }
 if (-not "$PreAuthScript".Trim() -and $RunAsUser -notmatch '\\\\|@') {
-    Warn "no -PreAuthScript: '$RunAsUser' does not inherit your az login, so the run may have NO credential at all. Point -PreAuthScript at a script that leaves a usable az context."
+    Warn "no -PreAuthScript: '$RunAsUser' inherits no sign-in, so the update may have NO identity at all. Point -PreAuthScript at a script that sets the run's REST identity (certificate), or run as a managed identity."
 }
 
 if ($PSCmdlet.ShouldProcess($TaskName, 'register daily sync task')) {

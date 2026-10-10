@@ -1,6 +1,6 @@
 # PIM Manager -- Security review pack
 
-**Product:** PIM Manager &nbsp;|&nbsp; **Version:** 2.4.538 &nbsp;|&nbsp; **Date:** 2026-10-09
+**Product:** PIM Manager &nbsp;|&nbsp; **Version:** 2.4.554 &nbsp;|&nbsp; **Date:** 2026-10-10
 
 This pack is for the CISO and the security team who must approve PIM Manager before it is installed. It describes the product and this version, not one customer's environment. Every statement was checked against the product's code for this version, not only against its design documents. Where the product does NOT yet control a risk, the pack says so and names the open item (SP-GAP-n) on the product's backlog.
 
@@ -27,7 +27,7 @@ PIM Manager keeps privileged access in Microsoft Entra ID and Azure in line with
 - **Engine job** `ca-pim-tick` -- an Azure Container Apps job on a schedule. It reads the desired state from SQL and applies it to Entra ID, PIM for Groups, Azure RBAC, Intune and Defender XDR role management through REST calls with its managed identity.
 - **Manager** `ca-pim-manager` -- the web GUI (Container App). Administrators sign in with Entra ID (App Service Authentication, "Easy Auth"). Its Microsoft Graph rights are read-only; changes are queued in SQL and applied by the engine.
 - **Updater job** `ca-pim-update` -- builds the new version from source inside your own container registry and rolls the Manager and jobs (chapter 6).
-- **Azure SQL Database** -- the desired state, settings, audit log and commit journal. Entra-only authentication.
+- **Azure SQL Database** -- the desired state, settings, audit log and commit journal. Entra-only authentication. The installer creates it on the Standard tier, S0 at minimum (never Basic, never serverless), with a 250 GB maximum size; a higher tier you set is kept, and a `pim-sql-tier-pin` tag stops the product changing its tier.
 - **Azure Container Registry** -- holds the images built in your subscription (Premium for private network setups, Basic otherwise).
 - **Log Analytics workspace** -- receives the Container Apps logs.
 - **Key Vault** -- only when a feature needs a secret (SMTP relay password, emergency passphrase, MSP signing key). A plain install creates none.
@@ -213,7 +213,7 @@ Every permission the product grants or requires, per identity, read from the ins
 
 ### Data sent to Invardia
 All outbound, HTTPS, to invardia.com. Nothing is sent about users, groups or roles by design; the exact fields are below.
-- **Telemetry uplink** (hourly; feature gate `telemetry.uplink`, **on by default**, switch off in Settings > Features; switching off sends one final opt-out record and then nothing). Two modes: **anonymous** (no licence install key: a random install id, bucketed counts, no tenant, host or text) and **identified** (with an install key: adds tenant id, host name and redacted error text). The redaction removes tokens, keys, SAS signatures and PEM blocks; it does **not** remove e-mail addresses, UPNs or object names that can appear in an error message (SP-GAP-9).
+- **Telemetry uplink** (run reports hourly, a heartbeat every 4 hours; feature gate `telemetry.uplink`, **on by default**, switch off in Settings > Features; switching off sends one final opt-out record and then nothing). Two modes: **anonymous** (no licence install key: a random install id, bucketed counts, no tenant, host or text) and **identified** (with an install key: adds tenant id, host name and redacted error text). The redaction removes tokens, keys, SAS signatures and PEM blocks; it does **not** remove e-mail addresses, UPNs or object names that can appear in an error message (SP-GAP-9).
 - **Licence request** (every 30 minutes until a licence is installed; gate `licence.autoRequest`, on by default): product, version, tenant id, install id, current licence id and expiry. No contact details.
 - **Install-key claim and update manifest** (Pro, gate `updates.invardia`): product, tenant id, licence, ring.
 - **Install tracking** (only when an install is started from an Invardia install token): the step names and outcomes.
@@ -232,7 +232,7 @@ See chapter 10. Your SQL database (and so all stored data) remains until you del
 | Record | Fields | Mode |
 |---|---|---|
 | Every record | Schema, Kind, Product (pim-manager), Version, Ring, LastSeenUtc | Both |
-| Heartbeat (daily) | Edition (community / pro / trial), Hosting (container), RuntimeIdentity (managed identity / certificate), LicenceState | Both |
+| Heartbeat (every 4 hours) | Edition (community / pro / trial), Hosting (container), RuntimeIdentity (managed identity / certificate), LicenceState | Both |
 | Run report (per job, per cycle) | Job name, Outcome, DurationMs, ErrorClass, run count | Both |
 | Guard record | GuardId, GuardOutcome, Severity, Area, Job, measured and threshold numbers, HeldCount, TripCount, FirstSeenUtc | Both |
 | Anonymous mode adds | InstallId (random, stored in settings); counts bucketed | Anonymous |
@@ -286,7 +286,7 @@ The app's tenant rights are created by Invardia's own setup script (published at
 - **No PowerShell modules** at runtime: the engine, Manager, updater and the published setup scripts use REST and .NET only, with browser sign-in.
 - The container base images are pinned by digest; the container runs as a non-root user.
 - One NuGet package (Microsoft.Data.SqlClient) is pinned by version but not by hash (SP-GAP-2).
-- Exceptions, outside the runtime: the on-premises hybrid worker uses the Windows ActiveDirectory and GroupPolicy modules (RSAT) on your domain host; some local-only operator modes of the Manager can use Microsoft Graph / Az modules when already installed.
+- Exceptions, outside the runtime: the hybrid worker for on-premises AD uses the Windows ActiveDirectory and GroupPolicy modules (RSAT) on its worker VM (an Azure VM the setup builds, domain-joined, in its own VNet peered to your domain controllers; a worker on your own on-premises server is designed but not built); some local-only operator modes of the Manager can use Microsoft Graph / Az modules when already installed.
 
 <a id="change-control"></a>
 ## 7. Change control and audit
@@ -305,7 +305,8 @@ The app's tenant rights are created by Invardia's own setup script (published at
 - Never disable accounts when the desired admin set is empty or could not be read; account disable is opt-in.
 - **Mass-disable breaker:** default 5 accounts or 10 %, hard ceilings 50 and 25 %.
 - **Removal budget per scope:** default 5, hard ceiling 5; a trip drops the whole removal set for that run.
-- A guard can be released only by a SuperAdmin, bound to the exact plan, for one run or at most 24 hours, and the release is audited. The break-glass exclusion, account deletion and objects the product does not own can never be released. The product never deletes a user account.
+- A guard can be released only by a SuperAdmin, bound to the exact plan, for one run or at most 24 hours, and the release is audited. The break-glass exclusion, account deletion by a prune or reconcile, and objects the product does not own can never be released.
+- **Account deletion -- one operator-controlled path.** The product never deletes an account it does not manage, and a prune or reconcile never deletes anything: an undefined account is only reported. The only delete is an operator's **Delete account** on a PIM-managed admin account (a SuperAdmin, an Admin, or a delegated operator for admins at or below its level, typing DELETE; that confirmation is the approval). The engine then deletes it once -- sessions revoked first, never a break-glass account, never an enabled account the disable circuit breaker did not allow, at most 5 per run, and never on a managed tenant on the managing tenant's word (there it is disabled). Entra keeps a deleted user restorable for 30 days. Turn the path off per environment with `PIM_ADMIN_ACCOUNT_DELETE=0`.
 - Every guard trip is mailed, audited and reported.
 - **Break-glass accounts** in Settings are never removed, disabled or revoked; if the list cannot be read, every account is treated as protected.
 - The engine has a dry-run (-WhatIf) mode; scheduled jobs can be paused one by one or all at once.

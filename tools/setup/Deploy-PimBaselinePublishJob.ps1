@@ -22,7 +22,7 @@
          i.e. full administration of the store, and the job only reads. An identity an earlier version put in the
          group is taken OUT of it (read back), after the reader user is proven.
     It does NOT start the job: the build's 'publish' step does (Start-PimBaselinePublish.ps1), after this has converged.
-    The SQL step connects from THIS host as the az context the build established (a member of the SQL admin group),
+    The SQL step connects from THIS host as the identity the build established (a member of the SQL admin group),
     so this host must reach the SQL server -- the same requirement every other store step of the build has.
 
     NETWORK. The job runs in the managing tenant's Container Apps subnet. The bundle store's firewall allows that subnet (the
@@ -55,7 +55,7 @@ param(
     [string]$RegistryIdentityResourceId,
     # SEC-39: only used to take the job's identity OUT of the group if an earlier version put it there.
     [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
-    # (71.33: no -UseSignedInAccount -- every call here runs as the az context the build established, the signed-in
+    # (71.33: no -UseSignedInAccount -- every call here runs as the REST identity the build established, the signed-in
     # administrator or the certificate identity alike; there is no identity choice to make.)
     # Skip the SQL reader-user step (the job then cannot read the store until its user is created another way).
     [Alias('SkipSqlAdminGroup')][switch]$SkipSqlGrant
@@ -65,13 +65,17 @@ $here = $PSScriptRoot
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $solRoot 'engine\msp\PIM-Baseline.ps1')
 . (Join-Path $solRoot 'engine\msp\PIM-BaselinePublish.ps1')
-. (Join-Path $here '_PimAz.ps1')                 # the guarded az shadow (an az WARNING on stderr must not abort)
+# 100.41 (framework 12.17 NO-AZ): ARM / Graph / SQL tokens through PIM-Rest's ONE token client (engine/_shared/PIM-ArmSetup.ps1).
+# A calling build's REST session is used as it is; standalone, the Invardia Support app's session or the person signed in. No az.
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
 . (Join-Path $here '_PimUpdateRing.ps1')          # New-PimSubscriptionArmInvoker, ConvertTo-PimJobEnvMap
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 function Warn($m) { Write-Host "    $m" -ForegroundColor Yellow }
 
-$sub = @('--subscription', $SubscriptionId)
+$S = "$SubscriptionId".Trim()
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) }
 if (-not "$StorageResourceGroup".Trim()) { $StorageResourceGroup = $ResourceGroup }
 if (-not "$KeyVaultResourceGroup".Trim()) { $KeyVaultResourceGroup = $ResourceGroup }
 if (-not "$ImageTag".Trim()) {
@@ -95,13 +99,14 @@ $signingKeyId = "$($key.properties.keyUriWithVersion)".Trim()
 Note "signing key $signingKeyId"
 
 # ---- 2. the job ---------------------------------------------------------------------------------------------------
-$envId = "$(az containerapp env show @sub -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null)".Trim()
+$envObj = Get-PimArmAcaEnv -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
+$envId = if ($envObj) { "$($envObj.id)".Trim() } else { '' }
 if (-not $envId) { throw "Container Apps environment '$EnvName' not found in $ResourceGroup." }
-$location = "$(az containerapp env show @sub -g $ResourceGroup -n $EnvName --query location -o tsv 2>$null)".Trim()
-$exists = [bool](@(az containerapp job list @sub -g $ResourceGroup --query "[].name" -o tsv 2>$null) | Where-Object { "$_".Trim() -eq $JobName })
+$location = "$($envObj.location)".Trim()
+$exists = [bool](@(Get-PimArmAcaJobList -SubscriptionId $S -ResourceGroup $ResourceGroup -ErrorAsNull) | Where-Object { "$($_.name)".Trim() -eq $JobName })
 if (-not "$RegistryIdentityResourceId".Trim()) {
-    $mgrReg = "$(az containerapp show @sub -g $ResourceGroup -n $ManagerApp --query "properties.configuration.registries[0].identity" -o tsv 2>$null)".Trim()
-    if (-not $mgrReg) { $mgrReg = "$(az containerapp show @sub -g $ResourceGroup -n $ManagerApp --query "configuration.registries[0].identity" -o tsv 2>$null)".Trim() }
+    $mgrApp = Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
+    $mgrReg = if ($mgrApp) { "$(@($mgrApp.properties.configuration.registries)[0].identity)".Trim() } else { '' }
     if ($mgrReg -and $mgrReg -ne 'system') { $RegistryIdentityResourceId = $mgrReg; Note "registry identity inherited from $ManagerApp (it already pulls this image)" }
 }
 $spec = Get-PimBaselinePublishJobSpec -JobName $JobName -Image $image -EnvironmentId $envId -Location $location -Cron $Cron `
@@ -111,23 +116,23 @@ $spec = Get-PimBaselinePublishJobSpec -JobName $JobName -Image $image -Environme
             -DeployedUtc ([datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture))
 if (-not $spec.ok) { throw "REFUSED: $($spec.reason)" }
 Note ("env: " + ((@($spec.env.Keys) | ForEach-Object { "$_=$($spec.env[$_])" }) -join '  '))
-$yamlPath = Join-Path ([IO.Path]::GetTempPath()) ("pim-publish-job-{0}.yaml" -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+# The job definition is the ARM resource itself (spec.resource -- the same values as spec.yaml): create = PUT, update = PATCH
+# (an update carries no identity block, exactly as the YAML did). Nothing is written to disk.
 $action = if ($exists) { 'update' } else { 'create' }
 if ($PSCmdlet.ShouldProcess($JobName, "$action the publish job")) {
-    Set-Content -LiteralPath $yamlPath -Value $spec.yaml -Encoding ascii
-    try {
-        Step "$action $JobName"
-        $ok = $false
-        foreach ($wait in @(0, 15, 30, 60)) {
-            if ($wait) { Note "  retrying in ${wait}s"; Start-Sleep -Seconds $wait }
-            $global:LASTEXITCODE = 0
-            az containerapp job $action @sub -g $ResourceGroup -n $JobName --yaml $yamlPath -o none
-            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
-            $st = "$(az containerapp job show @sub -g $ResourceGroup -n $JobName --query properties.provisioningState -o tsv 2>$null)".Trim()
-            if ($st -notmatch '(?i)InProgress|Waiting') { break }
-        }
-        if (-not $ok) { throw "'az containerapp job $action' FAILED for $JobName (see the error above)." }
-    } finally { Remove-Item -LiteralPath $yamlPath -Force -ErrorAction SilentlyContinue }
+    Step "$action $JobName"
+    $ok = $false; $jobErr = ''
+    foreach ($wait in @(0, 15, 30, 60)) {
+        if ($wait) { Note "  retrying in ${wait}s"; Start-Sleep -Seconds $wait }
+        $jobErr = ''
+        try { [void](Set-PimArmAcaJob -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $JobName -Resource $spec.resource -Create:(-not $exists)) }
+        catch { $jobErr = "$($_.Exception.Message)" }
+        if (-not $jobErr) { $ok = $true; break }
+        Warn "  the job $action was refused: $jobErr"
+        $st = "$((Get-PimArmAcaJob -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull).properties.provisioningState)".Trim()
+        if ($st -notmatch '(?i)InProgress|Waiting') { break }
+    }
+    if (-not $ok) { throw "the job $action FAILED for ${JobName}: $jobErr" }
 }
 if ($WhatIfPreference) { Note 'WhatIf: stopping before the read-back and the grants'; return }
 
@@ -147,15 +152,19 @@ Note "read back: provisioningState Succeeded, env exact, system identity $oid"
 $grants = @(Get-PimBaselinePublishJobGrants -SubscriptionId $SubscriptionId -StorageResourceGroup $StorageResourceGroup -StorageAccount $StorageAccount `
                -Container $Container -KeyVaultResourceGroup $KeyVaultResourceGroup -KeyVaultName $KeyVaultName -KeyName $KeyName)
 if (-not "$RegistryIdentityResourceId".Trim()) {
-    $acrId = "$(az acr show @sub -n $AcrName --query id -o tsv 2>$null)".Trim()
+    $acrId = "$((Find-PimArmAcr -SubscriptionId $S -Name $AcrName).id)".Trim()
     if ($acrId) { $grants += [pscustomobject]@{ role = 'AcrPull'; scope = $acrId; why = 'pull its own image (no registry identity to inherit)' } }
 }
+# az role assignment list --assignee X --scope S: the role names X holds AT that scope (a refused read = none, as az's 2>$null).
+$roleNamesAt = { param($scope) @(try { Get-PimArmRoleAssignments -Scope $scope -PrincipalId $oid -SubscriptionId $S } catch { @() }) | ForEach-Object { "$($_.roleDefinitionName)".Trim() } }
 foreach ($gr in $grants) {
     Step "$($gr.role) on $($gr.scope) -- $($gr.why)"
-    $have = @(az role assignment list @sub --assignee $oid --scope $gr.scope --query "[].roleDefinitionName" -o tsv 2>$null | ForEach-Object { "$_".Trim() })
+    $have = @(& $roleNamesAt $gr.scope)
     if ($have -contains $gr.role) { Note 'already assigned'; continue }
-    az role assignment create @sub --assignee-object-id $oid --assignee-principal-type ServicePrincipal --role $gr.role --scope $gr.scope -o none --only-show-errors
-    $after = @(az role assignment list @sub --assignee $oid --scope $gr.scope --query "[].roleDefinitionName" -o tsv 2>$null | ForEach-Object { "$_".Trim() })
+    # A refusal is reported by the read-back below (az printed it and went on).
+    try { [void](New-PimArmRoleAssignment -Scope $gr.scope -PrincipalId $oid -PrincipalType ServicePrincipal -Role $gr.role -SubscriptionId $S) }
+    catch { Warn "  $($_.Exception.Message)" }
+    $after = @(& $roleNamesAt $gr.scope)
     if ($after -notcontains $gr.role) { throw "read-back FAILED: '$($gr.role)' is not assigned on $($gr.scope) -- the publish would 403." }
     Note 'granted + read back'
 }
@@ -187,13 +196,17 @@ if (-not $SkipSqlGrant) {
         try { "$((& $graphInv -Method GET -Path ("/servicePrincipals/$id" + '?$select=appId')).appId)".Trim() } catch { '' }
     }
     if (-not "$miAppId".Trim()) { throw "could not resolve the app id of $JobName's identity ($oid) -- cannot create its database user." }
-    # A SQL token for the az context the build established -- scoped to THIS subscription, and its tenant checked.
-    $tokRaw = @(az account get-access-token --subscription $SubscriptionId --resource https://database.windows.net/ -o json 2>$null) -join "`n"
-    $tokObj = $null; try { $tokObj = $tokRaw | ConvertFrom-Json } catch { $tokObj = $null }
-    if (-not $tokObj -or -not "$($tokObj.accessToken)".Trim()) { throw "no Azure SQL token for subscription $SubscriptionId (sign in first) -- cannot create $JobName's database user." }
-    if ("$($tokObj.tenant)".Trim() -and "$($tokObj.tenant)".Trim().ToLowerInvariant() -ne "$($inv.TenantId)".Trim().ToLowerInvariant()) {
-        throw "the SQL token is for tenant '$($tokObj.tenant)', not '$($inv.TenantId)' -- REFUSING."
+    # A SQL token for the identity the build established -- PIM-Rest's ONE token client, pinned to THIS subscription's
+    # tenant ($inv.TenantId, resolved by the invokers), and the token's own tid claim checked before it is used.
+    $sqlTok = ''
+    try { $sqlTok = "$(Get-PimRestToken -Resource 'https://database.windows.net' -TenantId "$($inv.TenantId)")".Trim() } catch { $sqlTok = '' }
+    if (-not $sqlTok) { throw "no Azure SQL token for subscription $SubscriptionId (sign in first) -- cannot create $JobName's database user." }
+    $sqlTid = ''
+    try { $pl = $sqlTok.Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($pl.Length % 4) { $pl += '=' }; $sqlTid = "$(([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($pl)) | ConvertFrom-Json).tid)".Trim() } catch { $sqlTid = '' }
+    if ($sqlTid -and $sqlTid.ToLowerInvariant() -ne "$($inv.TenantId)".Trim().ToLowerInvariant()) {
+        throw "the SQL token is for tenant '$sqlTid', not '$($inv.TenantId)' -- REFUSING."
     }
+    $tokObj = [pscustomobject]@{ accessToken = $sqlTok }; $sqlTok = $null
     $grantSql = Get-PimSqlContainedUserSql -DbUserName $JobName -AppId $miAppId -SelectObjects $sqlSel -WriteObjects $sqlWrite -RevokeRoles $revoke
     $readSql  = Get-PimSqlContainedUserReadBackSql -DbUserName $JobName -AppId $miAppId -Roles $revoke -SelectObjects $sqlSel -WriteObjects $sqlWrite
     $rowBack = $null
@@ -216,7 +229,7 @@ if (-not $SkipSqlGrant) {
         } finally { $rd.Close() }
     } catch {
         throw ("could not create $JobName's database user on $SqlServerFqdn/$SqlDatabase from this host: $($_.Exception.Message). " +
-               'This host must reach the SQL server and its az identity must be a member of the SQL admin group (as for every store step of the build).')
+               'This host must reach the SQL server and its identity must be a member of the SQL admin group (as for every store step of the build).')
     } finally { $conn.Close(); $conn.Dispose(); $tokObj = $null }
     # FAIL CLOSED on a missing table: the producer reads a SELECT that is refused exactly like a table that is absent, and
     # for pim.TenantRoleProjection "absent" means "project everything". A managing tenant registry without these is not ready.

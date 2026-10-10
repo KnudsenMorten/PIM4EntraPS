@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  §95.3 -- PIM's status telemetry (job 'uplink'): a daily HEARTBEAT and one RUN report per job that ran, sent to the
+  §95.3 -- PIM's status telemetry (job 'uplink'): a HEARTBEAT every 4 h and one RUN report per job that ran, sent to the
   Invardia-hosted uplink through the FRAMEWORK client (sync/_AitUplink.ps1 Schema 2; a byte-identical copy ships as
   engine/_shared/AitUplink.framework.ps1 because sync/ is never in the container -- Test-PimUplink pins the copy).
   Contract: Invardia docs/design/TELEMETRY-UPLINK.md (owner decisions 2026-10-03); framework DOCS/REQUIREMENTS.md §8.

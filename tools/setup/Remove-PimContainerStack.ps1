@@ -25,34 +25,62 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
-$sub = @('--subscription', "$SubscriptionId".Trim())
-$acct = "$(az account show --query id -o tsv 2>$null)".Trim()
-if ($acct -ne "$SubscriptionId".Trim()) { throw "az context is '$acct', not '$SubscriptionId' -- refusing." }
+# 100.41 (framework 12.17 NO-AZ): ARM REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1). A calling
+# build's REST session is used as it is; standalone, the Invardia Support app's session or the person signed in. No az.
+$solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+$S = "$SubscriptionId".Trim()
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) }
+# Every call names the subscription in its ARM path (no default context to depend on): assert THIS subscription is visible.
+$acct = "$((Get-PimArmSubscription -SubscriptionId $S -ErrorAsNull).subscriptionId)".Trim()
+if ($acct -ne $S) { throw "this sign-in cannot see subscription '$SubscriptionId' (read '$acct') -- refusing." }
+$authV = Get-PimSetupApiVersion authorization
+function Get-StackResources {
+    # az resource list -g RG, filtered to Microsoft.App/*: name, type, id.
+    @(Invoke-PimSetupArm -Path "/subscriptions/$S/resourceGroups/$ResourceGroup/resources" -ApiVersion (Get-PimSetupApiVersion resources) -All -ErrorAsNull |
+        Where-Object { $_ -and "$($_.type)" -like 'Microsoft.App/*' } | ForEach-Object { [pscustomobject]@{ n = "$($_.name)"; t = "$($_.type)"; id = "$($_.id)" } })
+}
+function Remove-Logged([string]$Id, [string]$Kind, [string]$Label, [switch]$Wait) {
+    # az ... delete --yes: DELETE by id (a missing resource is success). The outcome is said, never swallowed.
+    try { Remove-PimArmResource -ResourceId $Id -Kind $Kind -Wait:$Wait; Note "$Label delete: ok" }
+    catch { Note "$Label delete FAILED: $($_.Exception.Message)" }
+}
 Write-Host "==> Container Apps stack in $ResourceGroup ($(if ($Apply) { 'APPLY' } else { 'PLAN ONLY' }))" -ForegroundColor Cyan
-$res = @(az resource list @sub -g $ResourceGroup --query "[].{n:name,t:type,id:id}" -o json --only-show-errors 2>$null | Out-String | ConvertFrom-Json | Where-Object { "$($_.t)" -like 'Microsoft.App/*' })
+$res = @(Get-StackResources)
 $jobs = @($res | Where-Object { $_.t -eq 'Microsoft.App/jobs' }); $apps = @($res | Where-Object { $_.t -eq 'Microsoft.App/containerApps' }); $envs = @($res | Where-Object { $_.t -eq 'Microsoft.App/managedEnvironments' })
 $pids = @()
 foreach ($x in @($jobs) + @($apps)) {
-    $p = "$(az resource show @sub --ids $x.id --query identity.principalId -o tsv --only-show-errors 2>$null)".Trim()
+    $p = "$((Get-PimArmResource -ResourceId $x.id -Kind aca -ErrorAsNull).identity.principalId)".Trim()
     if ($p) { $pids += $p }
     Note ("{0,-32} {1,-30} system identity {2}" -f $x.n, $x.t, $(if ($p) { $p } else { '(none)' }))
 }
 foreach ($e in $envs) { Note ("{0,-32} {1}" -f $e.n, $e.t) }
 $ras = @()
-foreach ($p in $pids) { $ras += @(az role assignment list @sub --all --assignee $p --query "[].{id:id,role:roleDefinitionName,scope:scope}" -o json --only-show-errors 2>$null | Out-String | ConvertFrom-Json) }
+foreach ($p in $pids) {
+    # az role assignment list --all --assignee P: every assignment of P at, above or below the subscription.
+    $f = [uri]::EscapeDataString("principalId eq '$p'")
+    foreach ($a in @(Invoke-PimSetupArm -Path "/subscriptions/$S/providers/Microsoft.Authorization/roleAssignments?`$filter=$f" -ApiVersion $authV -All -ErrorAsNull)) {
+        if (-not $a -or "$($a.properties.principalId)" -ine $p) { continue }
+        $ras += [pscustomobject]@{ id = "$($a.id)"; role = (Get-PimArmRoleName -RoleDefinitionId "$($a.properties.roleDefinitionId)"); scope = "$($a.properties.scope)" }
+    }
+}
 foreach ($r in $ras) { Note "role assignment: $($r.role) @ $($r.scope)" }
 if (-not $Apply) { Write-Host "    PLAN ONLY: $($jobs.Count) job(s), $($apps.Count) app(s), $($envs.Count) environment(s), $($ras.Count) role assignment(s). Re-run with -Apply." -ForegroundColor Yellow; return }
-foreach ($j in $jobs) { az containerapp job delete @sub -g $ResourceGroup -n $j.n --yes -o none --only-show-errors; Note "job $($j.n) delete exit=$LASTEXITCODE" }
-foreach ($a in $apps) { az containerapp delete @sub -g $ResourceGroup -n $a.n --yes -o none --only-show-errors; Note "app $($a.n) delete exit=$LASTEXITCODE" }
-foreach ($r in $ras) { if ("$($r.scope)" -like "/subscriptions/$SubscriptionId*") { az role assignment delete @sub --ids $r.id -o none --only-show-errors; Note "role assignment $($r.role) delete exit=$LASTEXITCODE" } }
-foreach ($e in $envs) { az containerapp env delete @sub -g $ResourceGroup -n $e.n --yes -o none --only-show-errors; Note "environment $($e.n) delete exit=$LASTEXITCODE (can take ~10 minutes)" }
-# The resource list lags a completed delete by minutes (measured: an environment whose delete had returned 0 was still
+# Jobs and apps are waited on (gone before the environment that hosts them is deleted); the environment is polled below.
+foreach ($j in $jobs) { Remove-Logged -Id $j.id -Kind aca -Label "job $($j.n)" -Wait }
+foreach ($a in $apps) { Remove-Logged -Id $a.id -Kind aca -Label "app $($a.n)" -Wait }
+foreach ($r in $ras) { if ("$($r.scope)" -like "/subscriptions/$SubscriptionId*") { Remove-Logged -Id $r.id -Kind authorization -Label "role assignment $($r.role)" } }
+foreach ($e in $envs) { Remove-Logged -Id $e.id -Kind aca -Label "environment $($e.n) (can take ~10 minutes)" }
+# The resource list lags a completed delete by minutes (measured: an environment whose delete had returned was still
 # listed) -- poll before calling it a failure.
+$left = @()
 for ($w = 0; $w -lt 20; $w++) {
-    $left = @(az resource list @sub -g $ResourceGroup --query "[].{n:name,t:type}" -o json --only-show-errors 2>$null | Out-String | ConvertFrom-Json | Where-Object { "$($_.t)" -like 'Microsoft.App/*' } | ForEach-Object { $_.n })
+    $left = @(Get-StackResources | ForEach-Object { $_.n })
     if (-not $left.Count) { break }
     Note "still listed: $($left -join ', ') -- waiting 30s"; Start-Sleep -Seconds 30
 }
-$raIdsNow = @(az role assignment list @sub --all --query "[].id" -o tsv --only-show-errors 2>$null); $raLeft = @($ras | Where-Object { $raIdsNow -contains $_.id })
+# A deleted role assignment reads back 404 by its own id.
+$raLeft = @($ras | Where-Object { "$($_.scope)" -like "/subscriptions/$SubscriptionId*" -and $null -ne (Invoke-PimSetupArm -Path $_.id -ApiVersion $authV -NotFoundOk -ErrorAsNull) })
 if ($left.Count -or $raLeft.Count) { throw "read-back: still present -- Microsoft.App: $($left -join ', '); role assignments: $($raLeft.Count)" }
 Write-Host '    PASS: no Container Apps resource and none of the listed role assignments remain' -ForegroundColor Green

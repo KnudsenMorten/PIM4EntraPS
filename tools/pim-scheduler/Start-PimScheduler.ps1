@@ -450,7 +450,12 @@ $engineHandler = {
         if ($__gate) { return $__gate }
         $__rrMode = Get-PimReconcileRemovalMode
     }
-    $res = if ($__rrMode) { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf -ReconcileRemoval $__rrMode } else { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf }
+    # §100.12 DRIFT-EXTRAS (i): a trigger that carries a selection (Drift "Apply now") applies ONLY those (scope,key) pairs --
+    # Invoke-PimEngine -Changes restricts every scope's diff to them. A Delta only; never the daily reconcile.
+    $__sel = @(if ($mode -eq 'Delta' -and $job.PSObject.Properties['changes']) { @($job.changes) | Where-Object { $_ } })
+    $res = if ($__rrMode) { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf -ReconcileRemoval $__rrMode }
+           elseif ($__sel.Count) { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf -Changes $__sel }
+           else { Invoke-PimEngine -Scope $scope -Mode $mode -WhatIf:$whatIf }
     # 🔴 BUG-134 -- A SCOPE NO PROVIDER SERVES IS A NO-OP THAT REPORTS SUCCESS, FOR EVER.
     # Invoke-PimEngineScope answers an unknown scope with { ok=$false; detail="no provider for
     # scope '<x>'" } and NO create/update/remove. This handler ignored `ok` and formatted the

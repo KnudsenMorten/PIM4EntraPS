@@ -58,7 +58,7 @@ $script:PimTickOnlyJobTypes += 'pending-check'
 # Inert unless the feature 'licence.autoRequest' is ON (ON by default since the owner's decision 2026-10-05; switchable).
 $script:PimJobTypes += 'licence-request'
 $script:PimTickOnlyJobTypes += 'licence-request'
-# §95.3 (2026-10-04): 'uplink' sends PIM's status telemetry (a daily heartbeat + one run report per job) to the Invardia-hosted
+# §95.3 (2026-10-04): 'uplink' sends PIM's status telemetry (a heartbeat every 4 h + one run report per job) to the Invardia-hosted
 # uplink through the framework client (PIM-Uplink.ps1). Inert unless the feature 'telemetry.uplink' is ON (it ships OFF).
 $script:PimJobTypes += 'uplink'
 $script:PimTickOnlyJobTypes += 'uplink'
@@ -369,7 +369,7 @@ function Get-PimDefaultJobSchedule {
         # §95.2: every 30 min (Invardia's poll interval); inert until 'licence.autoRequest' is ON. Does nothing while the licence is
         # valid for more than 30 days.
         [pscustomobject]@{ name='licence-request'; type='licence-request'; intervalMinutes=30; enabled=$true }
-        # §95.3: hourly; inert until 'telemetry.uplink' is ON. One report per job that ran, a heartbeat once a day.
+        # §95.3: hourly; inert until 'telemetry.uplink' is ON. One report per job that ran, a heartbeat every 4 h.
         [pscustomobject]@{ name='uplink'; type='uplink'; intervalMinutes=60; enabled=$true }
         # §95.4: every 6 h; inert until 'updates.invardia' is ON. Asks only while this install has no key and a Pro licence.
         [pscustomobject]@{ name='install-key'; type='install-key'; intervalMinutes=360; enabled=$true }
@@ -3319,9 +3319,18 @@ function Add-PimJobTrigger {
     # or from a monitor that detects a SQL change. Deduped by type+scope.
     # -JobName (BUG-235, 77.4): the scheduled job a "Run now" was pressed on. The drain records the run under THAT
     # name, so the job's own row shows the run; without it the run is recorded as 'trigger:<type>:<scope>'.
-    param([Parameter(Mandatory)][string]$Type, [string]$Scope = 'All', [string]$Reason = '', [string]$JobName = '', [datetime]$NowUtc = [datetime]::UtcNow)
+    # -Changes (§100.12 DRIFT-EXTRAS (i), 2.4.555): a SELECTION-LIMITED run -- the (scope,key) pairs the Drift page's
+    # "Apply now" ticked. The trigger carries them as 'changes'; the engine handler passes them to Invoke-PimEngine -Changes,
+    # so only those items are created / updated. Merging: a trigger WITHOUT changes already covers everything (a selection
+    # joining it adds nothing; a plain trigger joining a selection-limited one widens it to everything); two selections
+    # are UNIONED, and the merged trigger gets a new requestedUtc so a run already draining the old selection does not
+    # remove it (the union runs next).
+    param([Parameter(Mandatory)][string]$Type, [string]$Scope = 'All', [string]$Reason = '', [string]$JobName = '', [datetime]$NowUtc = [datetime]::UtcNow,
+          [object[]]$Changes)
     $jn = "$JobName".Trim()
     $req = $NowUtc.ToUniversalTime().ToString('o')
+    $chg = @(ConvertTo-PimTriggerChanges -Changes $Changes)
+    $hasChg = ($PSBoundParameters.ContainsKey('Changes') -and $chg.Count -gt 0)
     $res = Update-PimJobTriggerList -Mutate {
         param($t)
         $t = @($t)
@@ -3329,14 +3338,50 @@ function Add-PimJobTrigger {
         if (-not $same.Count) {
             $o = [ordered]@{ type = $Type; scope = $Scope; reason = $Reason; requestedUtc = $req }
             if ($jn) { $o['job'] = $jn }
+            if ($hasChg) { $o['changes'] = @($chg) }
             $t += [pscustomobject]$o
-        } elseif ($jn -and -not @($same | Where-Object { $_.PSObject.Properties['job'] -and "$($_.job)".Trim() }).Count) {
+        } else {
+            $cur = $same[0]
+            $curChg = @(if ($cur.PSObject.Properties['changes']) { ConvertTo-PimTriggerChanges -Changes @($cur.changes) })
+            if ($curChg.Count -and -not $hasChg) {
+                # a plain run joins a selection-limited one: it now re-applies everything
+                $cur.PSObject.Properties.Remove('changes')
+            } elseif ($curChg.Count -and $hasChg) {
+                $seenK = @{}; foreach ($c in $curChg) { $seenK["$($c.scope)|$($c.key)".ToLowerInvariant()] = $true }
+                $added = @($chg | Where-Object { -not $seenK.ContainsKey("$($_.scope)|$($_.key)".ToLowerInvariant()) })
+                if ($added.Count) {
+                    $cur | Add-Member -NotePropertyName changes -NotePropertyValue @($curChg + $added) -Force
+                    $cur | Add-Member -NotePropertyName requestedUtc -NotePropertyValue $req -Force
+                }
+            }
+            # a trigger without changes already covers any selection -- nothing to add
+        }
+        if ($same.Count -and $jn -and -not @($same | Where-Object { $_.PSObject.Properties['job'] -and "$($_.job)".Trim() }).Count) {
             # already queued anonymously (e.g. by a commit): name it, so the run still lands on the job the operator pressed
             $same[0] | Add-Member -NotePropertyName job -NotePropertyValue $jn -Force
         }
         $t
     }
     return @($res).Count
+}
+function ConvertTo-PimTriggerChanges {
+    # PURE. A trigger's selection -> [{ scope; key }], blanks dropped, duplicates (case-insensitive) dropped. Accepts
+    # objects / hashtables with scope+key (Entity is read as scope when scope is absent) or "scope|key" strings (split on
+    # the FIRST '|' -- an engine key may itself contain '|').
+    param([object[]]$Changes)
+    $out = New-Object System.Collections.Generic.List[object]; $seen = @{}
+    foreach ($c in @($Changes)) {
+        if ($null -eq $c) { continue }
+        $s = ''; $k = ''
+        if ($c -is [string]) { $i = $c.IndexOf('|'); if ($i -gt 0) { $s = $c.Substring(0, $i); $k = $c.Substring($i + 1) } }
+        elseif ($c -is [System.Collections.IDictionary]) { $s = "$(if ($c.Contains('scope')) { $c['scope'] } elseif ($c.Contains('Scope')) { $c['Scope'] } elseif ($c.Contains('Entity')) { $c['Entity'] })"; $k = "$(if ($c.Contains('key')) { $c['key'] } elseif ($c.Contains('Key')) { $c['Key'] })" }
+        else { $s = "$(if ($c.PSObject.Properties['scope']) { $c.scope } elseif ($c.PSObject.Properties['Entity']) { $c.Entity })"; $k = "$(if ($c.PSObject.Properties['key']) { $c.key })" }
+        $s = $s.Trim(); $k = $k.Trim()
+        if (-not $s -or -not $k) { continue }
+        $id = "$s|$k".ToLowerInvariant(); if ($seen.ContainsKey($id)) { continue }; $seen[$id] = $true
+        $out.Add([pscustomobject]@{ scope = $s; key = $k })
+    }
+    return $out.ToArray()
 }
 function Request-PimCommit {
     # Call this ONLY when the user COMMITS (not when they queue). Enqueues a recompute +
@@ -3928,6 +3973,8 @@ function Invoke-PimSchedulerTriggerDrain {
         # BUG-235 (77.4): a Run-now trigger carries the job it was pressed on -- record the run under that name.
         $tname = if ($tg.PSObject.Properties['job'] -and "$($tg.job)".Trim()) { "$($tg.job)".Trim() } else { "trigger:$($tg.type):$($tg.scope)" }
         $tjob = [pscustomobject]@{ name = $tname; type = "$($tg.type)"; scope = "$($tg.scope)"; enabled = $true }
+        # §100.12 (i): a selection-limited trigger (Drift "Apply now") hands its (scope,key) pairs to the handler.
+        if ($tg.PSObject.Properties['changes'] -and @($tg.changes).Count) { $tjob | Add-Member -NotePropertyName changes -NotePropertyValue @(ConvertTo-PimTriggerChanges -Changes @($tg.changes)) -Force }
         # 🔴 §70.19: only what actually ran is removed (type + scope + requestedUtc), never the whole list -- a "Run now"
         # pressed while these run must survive.
         $key = "$($tg.type)|$($tg.scope)|$($tg.requestedUtc)"

@@ -7726,7 +7726,7 @@ function Invoke-PimAdminOffboardSteps {
                        OffboardDate = "$((Get-PimAdminAutoDisableDate -Row $Desired).value)"   # 71.23: the mail token keeps its name; the value is AutoDisableDate
                        AutoDisableDate = "$((Get-PimAdminAutoDisableDate -Row $Desired).value)"
                        # 71.21: no "deletion scheduled" sentence -- PIM never deletes the account.
-                       Steps = 'PIM schedules cancelled, group memberships removed, account disabled, sessions revoked. The account itself is KEPT (disabled); PIM never deletes an account -- delete it by hand in Entra if that is wanted.'
+                       Steps = 'PIM schedules cancelled, group memberships removed, account disabled, sessions revoked. The account itself is KEPT (disabled); offboarding never deletes an account -- delete it in Entra ID, or with Delete account in PIM Manager, if that is wanted.'
                        Date = [datetime]::UtcNow.ToString('yyyy-MM-dd') }
             $res = $null
             try { $res = Send-PimNotifyMail -Type 'offboarding-notice' -Tokens $toks -Recipient $rcpt } catch { $res = @{ sent = $false; reason = "send threw: $($_.Exception.Message)" } }

@@ -499,7 +499,7 @@ function Get-PimOffboardSequencePlan {
     param([Parameter(Mandatory)][string]$Target, [datetime]$NowUtc = [datetime]::UtcNow)
     return @(
         [pscustomobject]@{ order = 1; step = 'disable';         target = "$Target"; description = "Set accountEnabled=`$false for $Target (sign-out everywhere)" }
-        [pscustomobject]@{ order = 2; step = 'revoke-active';    target = "$Target"; description = "Revoke every active/eligible PIM activation + direct group membership for $Target. The account itself is KEPT, disabled -- PIM never deletes an account." }
+        [pscustomobject]@{ order = 2; step = 'revoke-active';    target = "$Target"; description = "Revoke every active/eligible PIM activation + direct group membership for $Target. The account itself is KEPT, disabled -- offboarding never deletes an account." }
     )
 }
 
@@ -700,7 +700,7 @@ function Get-PimDefaultOffboardActionInvoker {
         # It is a no-op, and it says so -- PIM never deletes a user account, so an old stored
         # plan must neither delete nor fail the whole sequence.
         if ($s -eq 'schedule-delete') {   # 71.21-allow: recognises an OLD stored plan in order to REFUSE it; deletes nothing
-            return [pscustomobject]@{ ok = $true; detail = 'IGNORED: PIM never deletes an account. The account stays, disabled -- delete it by hand in Entra if that is wanted.' }
+            return [pscustomobject]@{ ok = $true; detail = 'IGNORED: an offboard never deletes an account. The account stays, disabled -- delete it by hand in Entra if that is wanted.' }
         }
         if (-not (Get-Command Invoke-PimAccountStatusChange -ErrorAction SilentlyContinue)) {
             return [pscustomobject]@{ ok = $false; detail = 'Invoke-PimAccountStatusChange pipeline not loaded' }

@@ -60,7 +60,11 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $PSCommandPath
-. (Join-Path $here '_PimAz.ps1')
+# 100.41 (framework 12.17 NO-AZ): ARM / registry REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1).
+# A calling run's REST session is used as it is; standalone, the Invardia Support app's session or the person signed in.
+$solRootRest = (Resolve-Path (Join-Path $here '..\..')).Path
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootRest 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootRest 'engine\_shared\PIM-ArmSetup.ps1') }
 
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
@@ -73,7 +77,7 @@ if (-not "$Version".Trim()) {
     if (-not (Test-Path -LiteralPath $vf)) { throw "Enable-PimSelfUpdate: no -Version and no VERSION file at '$vf'." }
     $Version = (Get-Content -LiteralPath $vf -Raw).Trim()
 }
-$sub = @('--subscription', $SubscriptionId)
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId) }
 
 Write-Host "`n=== Make $ResourceGroup self-updating (on $Version) ===" -ForegroundColor Cyan
 Note "registry   $AcrName"
@@ -95,7 +99,7 @@ if ("$SourceUrlTemplate".Trim()) {
 # first run, and that form prints an ERROR for it -- teaching the reader to ignore errors on a
 # command that is working correctly.
 Step "is $ImageRepo`:$Version already in $AcrName?"
-$tags = @(az acr repository show-tags @sub -n $AcrName --repository $ImageRepo -o tsv 2>$null) |
+$tags = @(Get-PimAcrRepositoryTags -Registry $AcrName -Repository $ImageRepo) |
         ForEach-Object { "$_".Trim() } | Where-Object { $_ }
 if (@($tags) -contains $Version) {
     Note 'yes -- skipping the bootstrap build'
@@ -103,7 +107,7 @@ if (@($tags) -contains $Version) {
     Step "bootstrap build $ImageRepo`:$Version (the ONE build this environment will ever need from here)"
     $bld = Join-Path $here 'Build-PimManagerImage.ps1'
     if (-not (Test-Path $bld)) { throw "Enable-PimSelfUpdate: builder not found at '$bld'." }
-    if ($PSCmdlet.ShouldProcess("$ImageRepo`:$Version", 'az acr build')) {
+    if ($PSCmdlet.ShouldProcess("$ImageRepo`:$Version", 'registry build')) {
         $global:LASTEXITCODE = 0
         & $bld -ImageTag $Version -AcrName $AcrName -ImageRepo $ImageRepo -SubscriptionId $SubscriptionId | Out-Host
         if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Enable-PimSelfUpdate: the bootstrap build FAILED (exit $LASTEXITCODE)." }
@@ -111,7 +115,7 @@ if (@($tags) -contains $Version) {
     # 🔴 READ IT BACK. A build that reported success and pushed nothing leaves a job pointed at an
     # image that does not exist, whose executions then report "Unknown" and log nothing at all --
     # the §55 defect that cost two rounds of diagnosis at a live customer.
-    $tags2 = @(az acr repository show-tags @sub -n $AcrName --repository $ImageRepo -o tsv 2>$null) |
+    $tags2 = @(Get-PimAcrRepositoryTags -Registry $AcrName -Repository $ImageRepo) |
              ForEach-Object { "$_".Trim() } | Where-Object { $_ }
     if (-not ($PSCmdlet.ShouldProcess($AcrName, 'verify') -eq $false) -and -not (@($tags2) -contains $Version) -and -not $WhatIfPreference) {
         throw "Enable-PimSelfUpdate: '$ImageRepo`:$Version' is STILL not in $AcrName after the build."
@@ -150,14 +154,14 @@ if ($WhatIfPreference) { Write-Host "`n==> -WhatIf: nothing was changed." -Foreg
 # blob-scoped SAS, a mis-called helper -- was invisible until an execution ran. An install that
 # does not prove itself is a report, not a result.
 Step "run $JobName once, now"
-$exec = "$(az containerapp job start @sub -g $ResourceGroup -n $JobName --query name -o tsv 2>$null)".Trim()
-if (-not $exec) { throw "Enable-PimSelfUpdate: could not start '$JobName'." }
+$exec = "$(Start-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $JobName)".Trim()
+if (-not $exec) { throw "Enable-PimSelfUpdate: could not start '$JobName'. $($global:PimSetupRestLastError)" }
 Note "execution $exec"
 $deadline = (Get-Date).AddSeconds($RunTimeoutSeconds)
 $status = 'Unknown'
 while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 15
-    $status = "$(az containerapp job execution list @sub -g $ResourceGroup -n $JobName --query "[?name=='$exec'].properties.status" -o tsv 2>$null)".Trim()
+    $status = "$((Get-PimArmAcaJobExecution -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $JobName -Execution $exec).properties.status)".Trim()
     if (-not $status) { $status = 'Unknown' }
     Note "  $status"
     if ($status -eq 'Succeeded' -or $status -eq 'Failed') { break }
@@ -171,6 +175,7 @@ if ($status -eq 'Succeeded') {
     exit 0
 }
 Fail "the first execution ended '$status' -- this environment is NOT yet self-updating."
-Fail 'Read what it actually did before changing anything:'
-Write-Host "      az containerapp job logs show -g $ResourceGroup -n $JobName --subscription $SubscriptionId --container $JobName --execution $exec --tail 60" -ForegroundColor White
+Fail 'Read what it actually did before changing anything (the last lines of that execution):'
+foreach ($l in @(Get-PimArmAcaJobLogs -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $JobName -Execution $exec -Tail 60 -EnvironmentName $EnvName)) { Write-Host "      $l" -ForegroundColor White }
+Write-Host "      (portal: Container Apps job '$JobName' > Execution history > $exec > Console logs)" -ForegroundColor DarkGray
 exit 1

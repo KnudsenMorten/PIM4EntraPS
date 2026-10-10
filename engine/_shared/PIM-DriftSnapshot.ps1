@@ -341,7 +341,7 @@ function Invoke-PimDriftSnapshot {
     }
     } finally { $global:PIM_DriftReadPlan = $null }
     try { Add-PimDriftPayloadNames -ScopeResults @($results.ToArray()) } catch { Write-Warning "[drift-snapshot] names for drift items could not be resolved: $($_.Exception.Message)" }
-    # 2026-10-07: the live identities the engine MATCHED to a definition, for Review current delegations (managed / not).
+    # 2026-10-07: the live identities the engine MATCHED to a definition, for Delegation overview (All privileged permissions) (managed / not).
     # Kept apart from the drift document (it is large and the Drift page does not need it); complete = every scope read.
     $script:PimLastManagedLive = Get-PimManagedLiveSet -ScopeResults @($results.ToArray()) -NowUtc $NowUtc
     $sw.Stop()
@@ -513,10 +513,10 @@ function Invoke-PimDriftSnapshotJob {
     $doc['source'] = 'scheduler'
     $doc['correlationId'] = "$($global:PIM_JobCorrelationId)"
     $where = Set-PimTenantCacheEntry -Kind $kind -Value $doc
-    # Review current delegations reads which live assignments are MANAGED from here (pim.TenantCache kind 'managed-live').
+    # Delegation overview (All privileged permissions) reads which live assignments are MANAGED from here (pim.TenantCache kind 'managed-live').
     if ($script:PimLastManagedLive) {
         try { [void](Set-PimTenantCacheEntry -Kind 'managed-live' -Value $script:PimLastManagedLive) }
-        catch { Write-Warning "[drift-snapshot] the managed list for Review current delegations was not stored: $($_.Exception.Message)" }
+        catch { Write-Warning "[drift-snapshot] the managed list for Delegation overview (All privileged permissions) was not stored: $($_.Exception.Message)" }
     }
     $scopeDocs = @($doc.scopes)
     $failedNames = @($scopeDocs | Where-Object { -not $_.ok } | ForEach-Object { "$($_.scope)" })
@@ -749,7 +749,7 @@ function Get-PimDriftExtraActions {
     if ((& $f 'AzScope') -and $prin) {
         if ($type -ieq 'Eligible' -and (& $f 'roleDefinitionId')) {
             $out.revoke = [ordered]@{ type = 'azure-rbac'; principalId = $prin; roleDefinitionId = (& $f 'roleDefinitionId'); scope = (& $f 'AzScope'); assignmentType = 'Eligible'; principal = $pname }
-        } else { $out.revokeWhy = 'an ACTIVE Azure assignment is removed by its assignment id -- revoke it from Reviews & controls > Review current delegations' }
+        } else { $out.revokeWhy = 'an ACTIVE Azure assignment is removed by its assignment id -- revoke it from Reviews & controls > Delegation overview (All privileged permissions)' }
         $out.keepWhy = 'an Azure role is kept by adding its row on the Azure resources page (the role name is needed)'
         return $out
     }
@@ -794,6 +794,10 @@ function Get-PimDriftExtraActions {
         $gid = & $f 'id'; if (-not $gid) { $gid = & $f 'Id' }
         $out.revokeWhy = 'a group is not a delegation the revoke queue removes -- Delete queues the deletion of the whole group instead (its own commit)'
         $row = [ordered]@{ GroupName = $dn; GroupDescription = $desc }
+        # §100.12 (ii), 2.4.555: IsRoleAssignable is taken from the LIVE group (the lean read selects isAssignableToRole), so
+        # the imported definition says what the group really is. Absent on the live row = left out (never guessed).
+        $ra = Get-PimDriftSnapshotField $Payload 'isAssignableToRole'; if ($null -eq $ra -or "$ra" -eq '') { $ra = Get-PimDriftSnapshotField $Payload 'IsAssignableToRole' }
+        if ($null -ne $ra -and "$ra".Trim() -ne '') { $row['IsRoleAssignable'] = $(if ("$ra".Trim() -ieq 'true') { 'TRUE' } else { 'FALSE' }) }
         $out.keep = [ordered]@{ base = 'PIM-Definitions-Roles'; kind = 'group'; groupId = $gid; row = $row }
         if ("$gid".Trim()) { $out['groupDelete'] = [ordered]@{ action = 'group-delete'; kind = 'group'; groupId = "$gid".Trim(); groupName = "$dn".Trim() } }
         return $out

@@ -12,7 +12,12 @@
 
     A brand-new identity's Key Vault / storage role assignments can take minutes to reach the data plane, so a Failed
     execution is retried (Get-PimBaselinePublishExecutionVerdict) before the step fails. The final execution's console log
-    is printed when az can fetch it (best effort; it is diagnostics, never the verdict).
+    is printed when it can be read from the environment's Log Analytics workspace (best effort; it is diagnostics, never
+    the verdict).
+
+    100.41 (framework 12.17 NO-AZ): ARM / Log Analytics REST through PIM-Rest's ONE token client
+    (engine/_shared/PIM-ArmSetup.ps1). A calling build's REST session is used as it is; standalone, the Invardia Support
+    app's session or the person signed in. No az.
 #>
 [CmdletBinding()]
 param(
@@ -21,34 +26,37 @@ param(
     [string]$JobName = 'ca-pim-publish',
     [ValidateRange(1, 10)][int]$MaxAttempts = 4,
     [ValidateRange(1, 60)][int]$ExecutionTimeoutMinutes = 20,
-    # (71.33: no -UseSignedInAccount -- the az context the build established is used in either identity mode.)
+    # (71.33: no -UseSignedInAccount -- the REST identity the build established is used in either identity mode.)
     [ValidateRange(0, 600)][int]$RetryDelaySeconds = 180
 )
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-. (Join-Path $PSScriptRoot '_PimAz.ps1')         # the guarded az shadow (an az WARNING on stderr must not abort)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
 . (Join-Path $solRoot 'engine\msp\PIM-BaselinePublish.ps1')
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
-$sub = @('--subscription', $SubscriptionId)
+$S = "$SubscriptionId".Trim()
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) }
 
 for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
     Step "start $JobName (attempt $attempt of $MaxAttempts)"
-    $exec = "$(az containerapp job start @sub -g $ResourceGroup -n $JobName --query name -o tsv 2>$null)".Trim()
-    if (-not $exec) { throw "could not start '$JobName' in $ResourceGroup -- deploy it first (Deploy-PimBaselinePublishJob.ps1)." }
+    # was: az containerapp job start --query name
+    $exec = "$(Start-PimArmAcaJob -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $JobName)".Trim()
+    if (-not $exec) { throw "could not start '$JobName' in $ResourceGroup -- deploy it first (Deploy-PimBaselinePublishJob.ps1).$(if ($global:PimSetupRestLastError) { " ($($global:PimSetupRestLastError))" })" }
     Note "execution $exec -- waiting (timeout $ExecutionTimeoutMinutes min)"
     $status = ''
     $deadline = (Get-Date).AddMinutes($ExecutionTimeoutMinutes)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 15
-        $status = "$(az containerapp job execution show @sub -g $ResourceGroup -n $JobName --job-execution-name $exec --query properties.status -o tsv 2>$null)".Trim()
+        # was: az containerapp job execution show --query properties.status
+        $status = "$((Get-PimArmAcaJobExecution -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $JobName -Execution $exec).properties.status)".Trim()
         if ($status -in @('Succeeded', 'Failed', 'Degraded', 'Stopped')) { break }
     }
-    $ErrorActionPreference = 'Continue'
-    $logs = @(az containerapp job logs show @sub -g $ResourceGroup -n $JobName --execution $exec --container $JobName --format text 2>$null)
-    $ErrorActionPreference = 'Stop'
+    # The execution's console lines from the environment's Log Analytics workspace (diagnostics only; @() when unreadable).
+    $logs = @(Get-PimArmAcaJobLogs -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $JobName -Execution $exec -Tail 200 | Where-Object { "$_".Trim() })
     if ($logs.Count) { $logs | Where-Object { "$_" -match '\[publish-job\]' } | Select-Object -Last 12 | ForEach-Object { Note "  $_" } }
-    else { Note "  (console log not available from here yet: az containerapp job logs show -g $ResourceGroup -n $JobName --execution $exec $($sub -join ' '))" }
+    else { Note "  (console log not available from here yet: ContainerAppConsoleLogs_CL in the environment's Log Analytics workspace, execution $exec -- it arrives a few minutes after the run)" }
     # The job gates itself on the cadence set in the Manager (PIM-JobCadence.ps1): a Succeeded execution may have SKIPPED.
     # The deploy step just before this one stamps the job, so its first execution publishes; the log says which it was.
     $v = Get-PimBaselinePublishExecutionVerdict -Status $status -Attempt $attempt -MaxAttempts $MaxAttempts -LogText (@($logs) -join "`n")

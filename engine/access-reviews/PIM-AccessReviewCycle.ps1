@@ -16,7 +16,7 @@
     licence ("Tenant is not authorized for Custom Scoping Conditions Feature"); recurrence is weekly at the fastest.
 
     MODEL -- pim.Settings:
-      'AccessReviewRules'     { default = { enabled; cadenceDays; durationDays; reviewers[]; approvers 1|2; mode parallel|serial;
+      'AccessReviewRules'     { default = { enabled; cadenceDays; durationDays; reviewers[]; reviewersOnly; approvers 1|2; mode parallel|serial;
                                             undecided keep|remove; remindEveryDays; reminders }
                                 departments = { '<dept>' = { off } | { <fields overriding the default> } } }
       'AccessReviewCampaigns' { campaigns = @( { id; department; status open|closed; startedUtc; dueUtc; closedUtc; closeReason;
@@ -41,7 +41,10 @@
 #>
 Set-StrictMode -Off
 
-$script:PimAccessReviewRuleDefaults = [ordered]@{ enabled = $false; cadenceDays = 90; durationDays = 14; reviewers = @(); approvers = 1; mode = 'parallel'; undecided = 'keep'; remindEveryDays = 7; reminders = 3 }
+# reviewersOnly (2.4.555, §100.28 REVIEW-OWNERS-VISIBLE): the department OWNERS always review their department; a rule's
+# reviewers are reviewers NEXT TO them. Only reviewersOnly = true (and at least one reviewer named) makes the rule's list
+# replace the owners. Before 2.4.555 a typed reviewer silently replaced every department's owners.
+$script:PimAccessReviewRuleDefaults = [ordered]@{ enabled = $false; cadenceDays = 90; durationDays = 14; reviewers = @(); reviewersOnly = $false; approvers = 1; mode = 'parallel'; undecided = 'keep'; remindEveryDays = 7; reminders = 3 }
 
 function Get-PimArField { param($O, [string]$N) if ($null -eq $O) { return $null }; if ($O -is [System.Collections.IDictionary]) { if ($O.Contains($N)) { return $O[$N] } else { return $null } }; $p = $O.PSObject.Properties[$N]; if ($p) { return $p.Value }; return $null }
 
@@ -57,6 +60,7 @@ function ConvertTo-PimAccessReviewRule {
     $r.cadenceDays = [int]"$($r.cadenceDays)"; if ($r.cadenceDays -lt 1 -or $r.cadenceDays -gt 3650) { throw "access review rule: cadenceDays must be 1..3650 (got $($r.cadenceDays))" }
     $r.durationDays = [int]"$($r.durationDays)"; if ($r.durationDays -lt 1 -or $r.durationDays -gt 180) { throw "access review rule: durationDays must be 1..180 (got $($r.durationDays))" }
     $r.reviewers = @(@($r.reviewers) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    $r.reviewersOnly = ("$($r.reviewersOnly)".Trim().ToLowerInvariant() -in 'true', '1', 'yes', 'on')
     $r.approvers = [int]"$($r.approvers)"; if ($r.approvers -notin 1, 2) { throw "access review rule: approvers must be 1 or 2 (got $($r.approvers))" }
     $r.mode = "$($r.mode)".Trim().ToLowerInvariant(); if ($r.mode -notin 'parallel', 'serial') { throw "access review rule: mode must be parallel or serial (got '$($r.mode)')" }
     $r.undecided = "$($r.undecided)".Trim().ToLowerInvariant(); if ($r.undecided -notin 'keep', 'remove') { throw "access review rule: undecided must be keep or remove (got '$($r.undecided)')" }
@@ -79,6 +83,32 @@ function Resolve-PimDepartmentReviewRule {
     $rule = ConvertTo-PimAccessReviewRule -Base $def -Override $ov
     if (-not $rule.enabled) { return $null }
     return $rule
+}
+
+function Get-PimEffectiveReviewers {
+    <#
+      PURE (§100.28 REVIEW-OWNERS-VISIBLE, owner 2026-10-09: "why does access review not pick up the approvers on the dept").
+      WHO actually reviews one department under a rule: the department's OWNERS first, then the rule's reviewers (deduplicated,
+      case-insensitive) -- unless the rule says reviewersOnly and names at least one reviewer, then only the rule's list.
+      Returns { reviewers[] (campaign order); entries[] = { upn; source owner|rule }; source owners|owners+rule|rule|rule-only|none }.
+      The job and the Manager's rules page both call this, so the page shows exactly who the job will ask.
+    #>
+    param($Rule, [string[]]$Owners = @())
+    $own = @(@($Owners) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $ruleRev = @(@(Get-PimArField $Rule 'reviewers') | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $only = [bool](Get-PimArField $Rule 'reviewersOnly') -and $ruleRev.Count -gt 0
+    $cand = @()
+    if (-not $only) { foreach ($o in $own) { $cand += ,@("$o", 'owner') } }
+    foreach ($x in $ruleRev) { $cand += ,@("$x", 'rule') }
+    $entries = @(); $seen = @{}
+    foreach ($c in $cand) {
+        $k = "$($c[0])".ToLowerInvariant()
+        if ($seen.ContainsKey($k)) { continue }
+        $seen[$k] = $true
+        $entries += [pscustomobject]@{ upn = "$($c[0])"; source = "$($c[1])" }
+    }
+    $src = if ($only) { 'rule-only' } elseif ($own.Count -and $ruleRev.Count) { 'owners+rule' } elseif ($own.Count) { 'owners' } elseif ($ruleRev.Count) { 'rule' } else { 'none' }
+    return [pscustomobject]@{ reviewers = @($entries | ForEach-Object { $_.upn }); entries = @($entries); source = $src }
 }
 
 function Get-PimDepartmentsWithoutOwner {
@@ -411,7 +441,8 @@ function Invoke-PimAccessReviewCycleJob {
         if (@($mine | Where-Object { "$($_.status)" -eq 'open' }).Count) { continue }
         $last = @($mine | ForEach-Object { ConvertTo-PimUtcDate $_.startedUtc } | Sort-Object -Descending | Select-Object -First 1)
         if ($last.Count -and ($NowUtc.ToUniversalTime() - $last[0]).TotalDays -lt $rule.cadenceDays) { continue }
-        $rev = @(@(if (@($rule.reviewers).Count) { $rule.reviewers } else { $owners[$d.ToLowerInvariant()] }) | Where-Object { "$_".Trim() })
+        # §100.28: the department owners ALWAYS review (the rule's reviewers join them) unless the rule says reviewersOnly.
+        $rev = @((Get-PimEffectiveReviewers -Rule $rule -Owners @($owners[$d.ToLowerInvariant()])).reviewers)
         if (-not $rev.Count) { $log.Add("$($d): not started -- no reviewer (the rule names none and the department has no owner)"); continue }
         if ($rule.approvers -eq 2 -and $rev.Count -lt 2) { $log.Add("$($d): not started -- the rule needs 2 approvers and names 1"); continue }
         $people = @(Get-PimDepartmentReviewPeople -Department $d -Admins $admins -Assignments $assign)

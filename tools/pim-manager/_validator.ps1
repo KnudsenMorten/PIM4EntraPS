@@ -182,6 +182,27 @@ function Get-PimRowValue {
     return ''
 }
 
+function Get-PimValidatorRowSignature {
+    <#
+      PURE. §100.26 (2.4.555). A row's CONTENT as one comparable string: every non-blank column (name lower-cased, value
+      trimmed + lower-cased), sorted; store / grid bookkeeping (a leading '_', Id, RowId, Created*/Updated*, Version, ETag)
+      left out. A pending row with the same signature as a saved row is a row the commit does not touch.
+    #>
+    param($Row)
+    if ($null -eq $Row) { return '' }
+    $pairs = New-Object System.Collections.Generic.List[string]
+    $names = if ($Row -is [System.Collections.IDictionary]) { @($Row.Keys) } else { @($Row.PSObject.Properties | ForEach-Object { $_.Name }) }
+    foreach ($n in $names) {
+        $ln = "$n".Trim().ToLowerInvariant()
+        if (-not $ln -or $ln.StartsWith('_') -or $ln -in @('id', 'rowid', 'createdutc', 'createdby', 'updatedutc', 'updatedby', 'version', 'rowversion', 'etag')) { continue }
+        $v = if ($Row -is [System.Collections.IDictionary]) { $Row[$n] } else { $Row.$n }
+        $sv = "$v".Trim()
+        if ($sv) { $pairs.Add("$ln=$($sv.ToLowerInvariant())") }
+    }
+    $arr = $pairs.ToArray(); [Array]::Sort($arr, [StringComparer]::Ordinal)
+    return ($arr -join [string][char]31)
+}
+
 function Test-PimRowIsBlank {
     # Treats a row with every column null/empty as a separator (matches
     # how the engines read these CSVs).
@@ -384,6 +405,7 @@ function Invoke-PimPreflightValidation {
     $bases = Get-PimCsvBases
     $loaded = @{}
     $savedDefTags = @{}   # PIM 100.22 (f): definition entity -> @{ tag (lower) = $true } in the SAVED store
+    $savedWlSigs = @{}    # §100.26: content signature of every SAVED PIM-Assignments-Workloads row
     # SQL-only (2026-09-12): data lives in pim.Rows. Read-PimRows is the single chokepoint; there is
     # no on-disk presence check any more (PIM-IO-001 "file not present" is gone with the file store).
     foreach ($spec in $bases) {
@@ -409,6 +431,11 @@ function Invoke-PimPreflightValidation {
                 if ($st) { $savedTags[$st.ToLowerInvariant()] = $true }
             }
             $savedDefTags[$base] = $savedTags
+        }
+        # §100.26 (2.4.555): the SAVED rows of the workload bindings, by content -- a row the commit does not touch (same
+        # content as a saved row, or the entity not in the overlay at all) is never a commit-blocking PIM-WL-005 error.
+        if ($base -eq 'PIM-Assignments-Workloads') {
+            foreach ($sr in @($loaded[$base].rows)) { if ($null -ne $sr) { $savedWlSigs[(Get-PimValidatorRowSignature -Row $sr)] = $true } }
         }
         if ($PendingRows -and $PendingRows.ContainsKey($base)) {
             $pend = @($PendingRows[$base])
@@ -1833,7 +1860,7 @@ function Invoke-PimPreflightValidation {
                     -Suggestion "Keep the date you mean in AutoDisableDate and clear OffboardDate."))
             } elseif ($offPlan.source -eq 'legacy') {
                 [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-OFF-003' -Csv 'Account-Definitions-Admins' -Row $i -Column 'OffboardDate' `
-                    -Message "'$upn' still uses the old column name OffboardDate. It is read, so nothing is broken -- but the column is now AutoDisableDate, because the sweep only DISABLES the account (PIM never deletes an account)." `
+                    -Message "'$upn' still uses the old column name OffboardDate. It is read, so nothing is broken -- but the column is now AutoDisableDate, because the sweep only DISABLES the account (it never deletes an account)." `
                     -Suggestion "Move the date to AutoDisableDate and clear OffboardDate."))
             }
             $offRaw = "$($offPlan.value)".Trim()
@@ -2155,9 +2182,19 @@ function Invoke-PimPreflightValidation {
                 $fmtTxt = if ($rf -and "$($rf.format)".Trim()) { "$($rf.format)$(if ("$($rf.example)".Trim()) { ", e.g. $("$($rf.example)" -replace '\{tenantId\}', '<tenant-id>')" })" } elseif ($cdef.prerequisites -and "$($cdef.prerequisites.perRowResource)".Trim()) { "$($cdef.prerequisites.perRowResource)" } else { 'see the connector''s prerequisites' }
                 $lbl = if ($rf -and "$($rf.label)".Trim()) { "$($rf.label)" } else { 'Resource' }
                 if (-not $res) {
+                    # §100.26 (owner 2026-10-10, 2.4.555): only a row this commit ADDS or CHANGES is an error. A row already in
+                    # the store unchanged (internal's two old business-central rows) is a WARNING -- it never blocks an
+                    # unrelated commit -- with the same fix: fill in the Resource, or remove the row.
+                    $untouched = $savedWlSigs.ContainsKey((Get-PimValidatorRowSignature -Row $r))
+                    if ($untouched) {
+                        [void]$violations.Add((New-PimViolation -Severity 'warning' -Code 'PIM-WL-005' -Csv 'PIM-Assignments-Workloads' -Row $i -Column 'Resource' `
+                            -Message "Resource is empty on an EXISTING row -- workload '$wl' works per target ($lbl), so the engine fails this binding (WORKLOAD-RESOURCE-MISSING) on every run. It does not block your commit (this row is not part of it)." `
+                            -Suggestion "Fix or remove it: set Resource to the $lbl ($fmtTxt), or delete the row (a binding PIM never applied is dropped without touching the workload)."))
+                    } else {
                     [void]$violations.Add((New-PimViolation -Severity 'error' -Code 'PIM-WL-005' -Csv 'PIM-Assignments-Workloads' -Row $i -Column 'Resource' `
                         -Message "Resource is empty -- workload '$wl' works per target ($lbl), so the engine cannot apply this binding and fails it (WORKLOAD-RESOURCE-MISSING) on every run." `
                         -Suggestion "Set Resource to the $lbl ($fmtTxt). The Create resource delegation wizard asks for it."))
+                    }
                 } elseif ($rf -and "$($rf.pattern)".Trim()) {
                     $okPat = $true; try { $okPat = [bool]($res -match "$($rf.pattern)") } catch { $okPat = $true }
                     if (-not $okPat) {

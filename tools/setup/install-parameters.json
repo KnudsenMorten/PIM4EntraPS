@@ -1,7 +1,7 @@
 {
   "_comment": "The guided-install contract of the PIM Manager (GUIDED-INSTALL 4.1-4.6). Invardia's wizard asks exactly these questions and writes the answers to config.json for tools/setup/Install-PimManager.ps1, which validates them again (Test-PimInstallConfig). 'maps' = what the answer drives. Kept in step with Install-PimManager by tests/Test-PimGuidedInstall.ps1.",
   "product": "pim-manager",
-  "version": "2.4.574",
+  "version": "2.4.575",
   "entryPoint": "Install-PimManager -ConfigPath <config.json> [-LicencePath <file>] -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]",
   "licenceOrKey": "-LicencePath is required unless config.json carries enrollmentKey: an enrollment key (framework 8.6) makes the install claim the tenant at Invardia, which returns the licence and the install key.",
   "exitCodes": { "0": "succeeded (warnings allowed)", "1": "a step failed -- fix it and -Resume", "2": "preflight failed -- nothing was changed", "3": "bad answers or a bad licence -- nothing was changed" },
@@ -77,7 +77,7 @@
     "Exchange Administrator or Global Administrator, active, for the notification mailbox (optional -- without it the end-of-install check ends with the Get Started > Mail sender follow-up)",
     "Owner or User Access Administrator at the tenant root management group (recommended; a Global Administrator who turned on Access management for Azure resources) -- the install gives the engine Reader there; without that right the end-of-install check ends with a WARNING and the exact command for that person (the install is not stopped -- owner decision of 2026-10-08)"
   ],
-  "runsIn": "Azure Cloud Shell (PowerShell 7) as the signed-in account -- never a secret. Also PowerShell 7 or Windows PowerShell 5.1 on Windows with the Azure CLI.",
+  "runsIn": "Azure Cloud Shell (PowerShell 7) as the signed-in account -- never a secret. Also PowerShell 7 or Windows PowerShell 5.1 on Windows with a browser sign-in. No Azure CLI and no PowerShell modules are needed.",
   "licence": "A Pro licence bound to the tenant above (a trial or a paid licence). A licence for another tenant, or one that names no tenant, is refused (exit 3).",
-  "costStatement": "About 27 USD a month (Azure Container Apps scale to zero, Basic registry, Azure SQL serverless-sized, external)."
+  "costStatement": "About 27 USD a month (Azure Container Apps scale to zero, Basic registry, Azure SQL Standard S0 -- the minimum, never Basic, 250 GB maximum size -- external)."
 }

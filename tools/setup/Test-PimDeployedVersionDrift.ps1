@@ -103,16 +103,12 @@ param(
     [switch]$Quiet
 )
 $ErrorActionPreference = 'Stop'
-# Guarded `az` shadow -- see _PimAz.ps1. az writes ordinary WARNINGS to stderr and PowerShell 5.1
-# makes any such write terminating under $ErrorActionPreference='Stop'. A DRIFT check is the worst
-# place to inherit that: it would report "cannot read the deployed image" on a host that is simply
-# noisy, which reads as drift-unknown rather than as a broken probe.
+# 100.41 (framework 12.17 NO-AZ): the live half reads ARM + the registry over REST through PIM-Rest's ONE token client
+# (engine/_shared/PIM-ArmSetup.ps1) -- no az CLI, so no az stderr noise to misread as "cannot read the deployed image".
 # 🪤 Assign first. `Join-Path (if (...) {...} else {...}) 'x'` PARSES and then fails at RUNTIME with
 # "The term 'if' is not recognized as a name of a cmdlet" -- the same shape already recorded in
 # Sync-AutomateIT-Engine.ps1. An `if` is a statement, not an argument expression.
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-. (Join-Path $here '_PimAz.ps1')
-
 # ---------------------------------------------------------------------------
 # PURE decision core -- no az, no network. This is what the offline suite tests.
 # ---------------------------------------------------------------------------
@@ -281,7 +277,7 @@ function Get-PimAcrNameFromImage {
     return ''
 }
 
-# Dot-sourced for the offline test -> stop before touching az.
+# Dot-sourced for the offline test -> stop before touching Azure.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 # ---------------------------------------------------------------------------
@@ -300,32 +296,25 @@ if (-not "$ResourceGroup".Trim()) {
     exit 2
 }
 
-if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
-    Write-Host "  CANNOT CHECK: azure CLI (az) not found." -ForegroundColor Red
-    exit 2
-}
-$acct = & az account show -o json 2>$null
-if ($LASTEXITCODE -ne 0 -or -not $acct) {
-    Write-Host "  CANNOT CHECK: not logged in to az (run az login)." -ForegroundColor Red
-    exit 2
-}
-
 # --- WHICH subscription, said out loud ---------------------------------------------------------
-# 🔑 "Logged in" was never the question. `az account show` succeeding proves only that SOME context
-# exists, and this check used to accept that as readiness -- which is how it ended up ready to
-# query another company's tenant. Every az call below is scoped explicitly instead.
-$subArgs = @()
-if ("$SubscriptionId".Trim()) {
-    $subArgs = @('--subscription', "$SubscriptionId".Trim())
-    Write-Host ("  subscription: {0} (explicit)" -f $SubscriptionId) -ForegroundColor DarkGray
-} else {
-    $ctx = $null
-    try { $ctx = $acct | ConvertFrom-Json } catch { }
-    # NOT a failure -- a single-directory machine has one context and it is the right one. But it
-    # is stated, because an ambient default is a fact about the machine, not about this fleet.
-    Write-Host ("  subscription: AMBIENT DEFAULT '{0}' ({1}) -- pass -SubscriptionId to pin it" -f `
-        "$($ctx.name)", "$($ctx.id)") -ForegroundColor Yellow
+# 🔑 An ambient default context was how this check once ended up querying another company's tenant. Over REST there is
+# no ambient context at all: every ARM path names the subscription, so without -SubscriptionId there is nothing to read.
+$S = "$SubscriptionId".Trim()
+if (-not $S) {
+    Write-Host "  CANNOT CHECK: no -SubscriptionId (or `$env:PIM_SUBSCRIPTION_ID). There is no ambient default subscription to fall back on." -ForegroundColor Red
+    exit 2
 }
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+try { if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) } }
+catch { Write-Host "  CANNOT CHECK: could not sign in for subscription $S -- $($_.Exception.Message)" -ForegroundColor Red; exit 2 }
+if ("$((Get-PimArmSubscription -SubscriptionId $S -ErrorAsNull).subscriptionId)".Trim() -ne $S) {
+    Write-Host "  CANNOT CHECK: this sign-in cannot see subscription $S. $($global:PimSetupRestLastError)" -ForegroundColor Red
+    exit 2
+}
+# Kept in its old shape for Get-PimEnvironmentUpdaterEnv (_PimUpdateRing.ps1), which reads the id out of it.
+$subArgs = @('--subscription', $S)
+Write-Host ("  subscription: {0} (explicit)" -f $S) -ForegroundColor DarkGray
 
 # --- WHAT this environment is approved to run (BUG-171) ------------------------------------------
 # The ring entry in channel.json, read through the environment's OWN updater -- never the repo
@@ -353,17 +342,17 @@ function Resolve-PimDigestTag {
       Returns '' when it cannot be resolved -- which keeps `unknown` reachable rather than
       inventing a tag, because a guessed version is worse than an admitted gap.
     #>
-    param([string]$Image, [string]$Acr, [string[]]$SubArgs)
+    param([string]$Image, [string]$Acr)
     if (-not "$Acr".Trim()) { return '' }
     if ("$Image" -notmatch '@(sha256:[0-9a-f]+)$') { return '' }
     $digest = $Matches[1]
     if ($script:digestTag.ContainsKey($digest)) { return $script:digestTag[$digest] }
     $repo = ("$Image" -split '@')[0]; $repo = ($repo -split '/')[-1]
     $tag = ''
+    # az acr manifest list-metadata --query "[?digest=='D'].tags[0]" = the registry data plane's manifest read for D.
     try {
-        $t = & az acr manifest list-metadata --registry $Acr --name $repo @SubArgs `
-                --query "[?digest=='$digest'].tags[0]" -o tsv 2>$null
-        if ($LASTEXITCODE -eq 0 -and "$t".Trim()) { $tag = ("$t".Trim() -split "\r?\n")[0] }
+        $t = @(Get-PimAcrManifestTags -LoginServer "$("$Acr".Trim().ToLowerInvariant()).azurecr.io" -Repository $repo -Digest $digest)
+        if ($t.Count -and "$($t[0])".Trim()) { $tag = "$($t[0])".Trim() }
     } catch { }
     $script:digestTag[$digest] = $tag
     return $tag
@@ -376,22 +365,21 @@ function Resolve-PimDigestTag {
 # update job excepted (it re-stamps itself and lags one run by design). A listing that FAILS is an
 # open question (exit 2), never "nothing to check".
 if (-not @($Apps | Where-Object { "$_".Trim() }).Count) {
-    $global:LASTEXITCODE = 0
-    $appNames = @(& az containerapp list -g $ResourceGroup @subArgs --query "[].name" -o tsv 2>$null)
-    if ($LASTEXITCODE -ne 0) { Write-Host "  CANNOT CHECK: could not list the container apps in $ResourceGroup." -ForegroundColor Red; exit 2 }
+    $appNames = @(); $listErr = ''
+    # containerapp list --query "[].name" -- read WITHOUT -ErrorAsNull: a listing that fails must stay CANNOT CHECK, never "no apps".
+    try { $appNames = @(@(Invoke-PimSetupArm -Path "/subscriptions/$S/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps" -ApiVersion (Get-PimSetupApiVersion aca) -All) | Where-Object { $_ } | ForEach-Object { "$($_.name)" }) } catch { $listErr = "$($_.Exception.Message)" }
+    if ($listErr) { Write-Host "  CANNOT CHECK: could not list the container apps in $ResourceGroup. $listErr" -ForegroundColor Red; exit 2 }
     $Apps = @($appNames | ForEach-Object { "$_".Trim() } | Where-Object { $_ -like 'ca-pim-*' })
     Write-Host ("  apps (discovered): {0}" -f $(if ($Apps.Count) { $Apps -join ', ' } else { '(none)' })) -ForegroundColor DarkGray
 }
 if (-not @($Jobs | Where-Object { "$_".Trim() }).Count) {
-    $global:LASTEXITCODE = 0
-    $mgrImg = "$(& az containerapp show -g $ResourceGroup -n $ManagerApp @subArgs --query "properties.template.containers[0].image" -o tsv 2>$null)".Trim()
-    $global:LASTEXITCODE = 0
-    $jobsJson = (@(& az containerapp job list -g $ResourceGroup @subArgs -o json 2>$null) -join "`n")
-    if ($LASTEXITCODE -ne 0 -or -not $mgrImg) {
+    $mgrImg = "$(@((Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.template.containers)[0].image)".Trim()
+    $jobObjs = @(); $jobsRead = $true
+    try { $jobObjs = @(Get-PimArmAcaJobList -SubscriptionId $S -ResourceGroup $ResourceGroup) } catch { $jobsRead = $false }
+    if (-not $jobsRead -or -not $mgrImg) {
         Write-Host ("  CANNOT CHECK: could not read {0} -- the jobs that must follow it cannot be determined." -f $(if (-not $mgrImg) { "$ManagerApp's image" } else { "the jobs in $ResourceGroup" })) -ForegroundColor Red
         exit 2
     }
-    $jobObjs = @(); try { $jobObjs = @((ConvertFrom-Json $jobsJson) | ForEach-Object { $_ }) } catch { }
     $jobPlan = Get-PimAcaJobRollPlan -Jobs $jobObjs -TargetImage $mgrImg -Exclude @("$UpdateJobName".Trim())
     $Jobs = @(@($jobPlan.roll) | ForEach-Object { "$($_.name)" })
     Write-Host ("  jobs (discovered, same image repository as {0}): {1}" -f $ManagerApp, $(if ($Jobs.Count) { $Jobs -join ', ' } else { '(none)' })) -ForegroundColor DarkGray
@@ -406,23 +394,23 @@ foreach ($j in @($Jobs)) { $targets += ,@{ name = $j; kind = 'job' } }
 
 foreach ($t in $targets) {
     $app = $t.name
-    if ($t.kind -eq 'job') { $json = & az containerapp job show -g $ResourceGroup -n $app @subArgs -o json 2>$null }
-    else                   { $json = & az containerapp show     -g $ResourceGroup -n $app @subArgs -o json 2>$null }
-    if ($LASTEXITCODE -ne 0 -or -not $json) { $queryFailed.Add($app); continue }
+    # containerapp job show / containerapp show = ARM GET; a missing OR unreadable resource is an open question.
     $o = $null
-    try { $o = $json | ConvertFrom-Json } catch { $queryFailed.Add($app); continue }
+    if ($t.kind -eq 'job') { $o = Get-PimArmAcaJob -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $app -ErrorAsNull }
+    else                   { $o = Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $app -ErrorAsNull }
+    if (-not $o) { $queryFailed.Add($app); continue }
     $rev = ''; $created = ''
     if ($t.kind -eq 'app') {
         $rev = "$($o.properties.latestRevisionName)"
-        $rj = & az containerapp revision show -g $ResourceGroup -n $app --revision $rev @subArgs --query "properties.createdTime" -o tsv 2>$null
-        if ($LASTEXITCODE -eq 0 -and $rj) { $created = "$rj".Trim() }
+        # containerapp revision show --query properties.createdTime
+        if ($rev) { $rj = Get-PimArmAcaRevision -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $app -Revision $rev -ErrorAsNull; if ($rj -and "$($rj.properties.createdTime)".Trim()) { $created = "$($rj.properties.createdTime)".Trim() } }
     }
     $img = "$($o.properties.template.containers[0].image)"
     $deployed.Add([pscustomobject]@{
         app = $app; image = $img; revision = $rev; createdUtc = $created
         # Resolved here rather than inside the pure core, which must stay network-free.
         # No -AcrName: the image names its own registry (BUG-171 -- every v2 roll is digest-pinned).
-        resolvedTag = (Resolve-PimDigestTag -Image $img -Acr $(if ("$AcrName".Trim()) { $AcrName } else { Get-PimAcrNameFromImage -Image $img }) -SubArgs $subArgs)
+        resolvedTag = (Resolve-PimDigestTag -Image $img -Acr $(if ("$AcrName".Trim()) { $AcrName } else { Get-PimAcrNameFromImage -Image $img }))
     })
 }
 
