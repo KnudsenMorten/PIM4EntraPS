@@ -1736,8 +1736,8 @@ function Close-PimManagerAfterEasyAuthFailure {
             try { & $EaScript @closeArgs | Out-Host; return "The Manager had NO working Easy Auth (platform.enabled='$enabled'), so it was CLOSED now (access restriction applied and read back)." }
             catch {
                 Warn "COULD NOT CLOSE the Manager: $($_.Exception.Message)"
-                Warn "  Lock it down by hand NOW: az containerapp ingress update --subscription $SubscriptionId -g $ResourceGroup -n $ManagerApp --type internal"
-                return "The Manager has NO working Easy Auth and could NOT be closed ($($_.Exception.Message)) -- lock it down by hand: az containerapp ingress update --subscription $SubscriptionId -g $ResourceGroup -n $ManagerApp --type internal"
+                Warn "  Lock it down by hand NOW: Azure portal > Container Apps > $ManagerApp > Ingress: set Ingress traffic to 'Limited to Container Apps Environment' and Save"
+                return "The Manager has NO working Easy Auth and could NOT be closed ($($_.Exception.Message)) -- lock it down by hand: Azure portal > Container Apps > $ManagerApp > Ingress: set Ingress traffic to 'Limited to Container Apps Environment' and Save"
             }
         }
     }
