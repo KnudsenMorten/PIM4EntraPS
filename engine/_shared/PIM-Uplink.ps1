@@ -265,12 +265,20 @@ function Send-PimUplinkRecord {
       -Transport is a test seam: { <Invoke-RestMethod's arguments> } -> the response. Default = the real cmdlet.
     #>
     param([Parameter(Mandatory)][object]$Record, [AllowNull()][string]$Endpoint, [AllowNull()][string]$AccessCode, [scriptblock]$Transport = $null)
-    $box = @{ body = $null }
+    $box = @{ body = $null; err = '' }
     $xport = if ($Transport) { $Transport } else { { Microsoft.PowerShell.Utility\Invoke-RestMethod @args } }
-    function Invoke-RestMethod { $resp = & $xport @args; $box.body = $resp; $resp }
+    # 2.4.551: keep the ERROR body too -- Invardia's 422 is {error:'invalid', fields:[...]} and names the refused field; it was lost.
+    function Invoke-RestMethod { try { $resp = & $xport @args; $box.body = $resp; $resp } catch { try { $box.err = "$($_.ErrorDetails.Message)" } catch { }; throw } }
     $r = $null
     try { $r = Send-AitUplink -Record $Record -Endpoint $Endpoint -AccessCode $AccessCode } catch { $r = [pscustomobject]@{ Status = 'failed'; Reason = "uplink POST failed: $($_.Exception.Message)"; Sent = $false } }
-    $o = [ordered]@{ Status = "$($r.Status)"; Reason = "$($r.Reason)"; Sent = [bool]$r.Sent; Body = $null }
+    $reason = "$($r.Reason)"
+    if ("$($r.Status)" -ne 'ok' -and "$($box.err)".Trim()) {
+        $detail = "$($box.err)".Trim()
+        try { $ej = $detail | ConvertFrom-Json -ErrorAction Stop; if ($ej.fields) { $detail = "fields: $(@($ej.fields) -join ', ')" } } catch { }
+        if ($detail.Length -gt 300) { $detail = $detail.Substring(0, 300) }
+        $reason = "$reason [$detail]"
+    }
+    $o = [ordered]@{ Status = "$($r.Status)"; Reason = $reason; Sent = [bool]$r.Sent; Body = $null }
     if ("$($r.Status)" -eq 'ok') { $o['Body'] = $box.body }
     return [pscustomobject]$o
 }
