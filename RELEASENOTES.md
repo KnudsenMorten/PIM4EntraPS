@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.551 -- 2026-10-10
+
+- Guard reports carry the exact UTC times, and a refused telemetry report now names the field Invardia rejected.
+
 ## 2.4.550 -- 2026-10-10
 
 - Guard alerts reach Invardia again: the guard report area is sent in the format Invardia accepts (it refused every guard report before).

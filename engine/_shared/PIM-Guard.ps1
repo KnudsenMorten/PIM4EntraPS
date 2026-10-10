@@ -26,6 +26,17 @@ function Get-PimGuardSeverity {
     if ("$Outcome".Trim().ToLowerInvariant() -in @('halted', 'refused')) { 'critical' } else { 'warning' }
 }
 
+function Format-PimGuardRecordUtc {
+    <# PURE. A guard timestamp -> 'yyyy-MM-ddTHH:mm:ssZ'. PS 7's ConvertFrom-Json hands ISO strings back as a DateTime, and a
+       stringified DateTime re-parsed as local shifted every timestamp by the server's UTC offset (2026-10-10). #>
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value -or "$Value" -eq '') { return $null }
+    $u = if ($Value -is [datetime]) { if ($Value.Kind -eq [DateTimeKind]::Unspecified) { [datetime]::SpecifyKind($Value, [DateTimeKind]::Utc) } else { $Value.ToUniversalTime() } }
+         elseif ($Value -is [datetimeoffset]) { $Value.UtcDateTime }
+         else { [datetimeoffset]::Parse("$Value", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime }
+    return $u.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
+}
+
 function ConvertTo-PimGuardNumbers {
     <# PURE. Up to 10 numeric values, keys ^[a-z][A-Za-z0-9]{0,30}$ (the record's Measured / Thresholds rule). #>
     param([AllowNull()][object]$Values)
@@ -127,7 +138,7 @@ function New-PimGuardUplinkRecord {
     $t = ConvertTo-PimGuardNumbers $Entry.thresholds; if ($t.Count) { $o['Thresholds'] = [pscustomobject]$t }
     $o['HeldCount'] = [int]("0$($Entry.heldCount)" -replace '[^0-9]', '')
     $o['TripCount'] = [int]("0$($Entry.tripCount)" -replace '[^0-9]', '')
-    if ("$($Entry.firstSeenUtc)") { $o['FirstSeenUtc'] = ([datetimeoffset]::Parse("$($Entry.firstSeenUtc)", [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+    $fs = Format-PimGuardRecordUtc $Entry.firstSeenUtc; if ($fs) { $o['FirstSeenUtc'] = $fs }
     if ($Mode -eq 'identified') {
         if ("$TenantId".Trim()) { $o['ClaimedTenantId'] = "$TenantId".Trim() }
         $at = "$($Entry.actionText)".Trim()
@@ -137,7 +148,7 @@ function New-PimGuardUplinkRecord {
     } else {
         $o['InstallId'] = "$InstallId"
     }
-    $o['LastSeenUtc'] = ([datetimeoffset]::Parse("$($Entry.lastSeenUtc)", [Globalization.CultureInfo]::InvariantCulture)).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $o['LastSeenUtc'] = Format-PimGuardRecordUtc $Entry.lastSeenUtc
     return [pscustomobject]$o
 }
 
