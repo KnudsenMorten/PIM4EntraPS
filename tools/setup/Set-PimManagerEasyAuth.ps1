@@ -201,9 +201,9 @@ function Set-PimManagerIngressGate {
                     if ($Op -eq 'add') { $keep += [pscustomobject]@{ name = "$($Arg.name)"; description = "$($Arg.description)"; ipAddressRange = "$($Arg.ipAddress)"; action = "$($Arg.action)" } }
                     $ing | Add-Member -NotePropertyName ipSecurityRestrictions -NotePropertyValue @($keep) -Force
                 }.GetNewClosure() | Out-Null
-            }.GetNewClosure()
+            }   # NOT .GetNewClosure(): a closure cannot see the PIM-ArmSetup functions this script dot-sourced
             try {
-                if (Get-Command Invoke-PimArmBusyRetry -ErrorAction SilentlyContinue) { [void](Invoke-PimArmBusyRetry -Write $gateWrite) } else { [void](& $gateWrite) }
+                [void](Invoke-PimEaBusyRetry -Write $gateWrite)
             } catch { $global:PimGateWriteError = "$($_.Exception.Message)"; Write-Verbose "ingress access-restriction $Op on $gateApp refused: $($global:PimGateWriteError)" }
         }
     }
@@ -289,6 +289,20 @@ if (-not "$($global:PIM_SetupRestMode)".Trim() -and -not "$($global:PIM_ClientId
     [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId)
 } elseif (-not "$($global:PIM_TenantId)".Trim()) { $global:PIM_TenantId = "$TenantId".Trim() }
 
+function Invoke-PimEaBusyRetry {
+    # A Container App that was just created / changed answers its next write with 409 "OperationInProgress" until the revision
+    # settles (2026-10-10, a customer's fresh install). Wait that out, bounded (6 x 20 s); any other error is thrown at once.
+    param([Parameter(Mandatory)][scriptblock]$Write, [int[]]$Waits = @(20, 20, 20, 20, 20, 20))
+    $n = 0
+    while ($true) {
+        try { return (& $Write) }
+        catch {
+            if ("$($_.Exception.Message)" -notmatch '(?i)OperationInProgress|active provisioning operation|another operation is in progress' -or $n -ge $Waits.Count) { throw }
+            Write-Host "    the container app is still busy with a previous change -- waiting $($Waits[$n]) s" -ForegroundColor DarkGray
+            Start-Sleep -Seconds $Waits[$n]; $n++
+        }
+    }
+}
 function Test-PimEaGraphRefusal([string]$Text) {
     # Graph refusing the CALLER: say what the token actually carries (a token minted before a grant has none of it).
     if ("$Text" -match 'Insufficient privileges|Authorization_RequestDenied|HTTP 403') { Write-PimGraphTokenRolesHint }
@@ -610,7 +624,8 @@ if ($PSCmdlet.ShouldProcess($App, 'ensure the Easy Auth client secret')) {
         # As an ACA secret, referenced by NAME -- so the value never appears in the container spec
         # or in the app's ARM definition, the same rule the engine secret follows.
         $stored = $true
-        try { [void](Set-PimArmAcaAppSecret -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -SecretName $SecretName -Value "$pwd".Trim()) }
+        $eaSecretValue = "$pwd".Trim()
+        try { [void](Invoke-PimEaBusyRetry -Write { Set-PimArmAcaAppSecret -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -SecretName $SecretName -Value $eaSecretValue }) }
         catch { $stored = $false; Write-Host "    $($_.Exception.Message)" -ForegroundColor DarkYellow }
         if (-not $stored) {
             $result.reason = 'could not store the client secret on the container app'

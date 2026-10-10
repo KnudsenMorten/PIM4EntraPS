@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.569 -- 2026-10-10
+
+- Setup: closing the PIM Manager and storing its sign-in secret work again on a new installation (wait for a busy app; no hidden scope error).
+
 ## 2.4.568 -- 2026-10-10
 
 - Setup: the non-blocking mail sender step no longer stops on its own wait setting.
