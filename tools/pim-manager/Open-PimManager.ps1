@@ -12940,6 +12940,58 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; enabled = [bool]$val.enabled; approvalsAfterHours = $val.approvalsAfterHours; getStartedAfterHours = $val.getStartedAfterHours; repeatHours = $val.repeatHours })
             return 200
         }
+        # ----- PIM 100.61 (framework 8.12): THE AS-BUILT DOCUMENT, rendered HERE, inside the customer's environment. ------------
+        # GET /api/asbuilt      -> the model as JSON (what the PDF shows: facts, endpoints, answered questions, ids left out)
+        # GET /api/asbuilt/pdf  -> the A4 PDF (PDFsharp + MigraDoc, bundled in the image; engine/_shared/PIM-AsBuilt.ps1)
+        # Admin+ (it describes the configuration), audited. Never a secret, a person, a user name or an object id: lists of people
+        # are reduced to counts before the model is built, and every value passes Test-PimAsBuiltSafeValue. Nothing is sent
+        # anywhere -- the caj-pim-asbuilt job runs the SAME generator for Invardia support (with the customer's consent).
+        if (($path -eq '/api/asbuilt' -or $path -eq '/api/asbuilt/pdf') -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required for the as-built document.' }; return 403 }
+            $wantPdf = ($path -eq '/api/asbuilt/pdf')
+            $abLib = Join-Path $solutionRoot 'engine\_shared\PIM-AsBuilt.ps1'
+            try {
+                $ab = & {
+                    param($lib, $pdf)
+                    . $lib
+                    $cs = Get-PimManagerSettingCs
+                    # the RAW stored text (an empty list stays a list), reduced by the generator itself
+                    $get = { param($n) $j = Invoke-PimSqlScalar -ConnectionString $cs -Sql 'SELECT ValueJson FROM pim.Settings WHERE Name=@n' -Parameters @{ n = "$n" }; if ($null -eq $j -or $j -is [DBNull]) { $null } else { "$j" } }
+                    $fo = { param($k) if (Get-Command Test-PimFeatureEnabled -ErrorAction SilentlyContinue) { [bool](Test-PimFeatureEnabled -Key $k) } else { $null } }
+                    $lic = $null; $pro = $null
+                    try {
+                        $lic = Get-PimLicense
+                        $tid = if (Get-Command Resolve-PimLicenseTenantId -ErrorAction SilentlyContinue) { Resolve-PimLicenseTenantId } else { "$($global:PIM_TenantId)" }
+                        $pro = [bool](Test-PimLicenseIsProForTenant -License $lic -TenantId $tid).pro
+                    } catch { $lic = $null; $pro = $null }
+                    $vf = Join-Path $solutionRoot 'VERSION'
+                    $ver = if (Test-Path -LiteralPath $vf) { "$(Get-Content -Raw -LiteralPath $vf)".Trim().TrimStart([char]0xFEFF) } else { '' }
+                    $so = { Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT CAST(DATABASEPROPERTYEX(DB_NAME(), 'ServiceObjective') AS nvarchar(64))" }
+                    $facts = Read-PimAsBuiltFacts -GetSetting $get -FeatureOn $fo -Version $ver -License $lic -ProHere $pro -SqlServiceObjective $so
+                    $model = New-PimAsBuiltModel -Facts $facts -GeneratedBy manager
+                    $bytes = $null
+                    if ($pdf) { $bytes = ConvertTo-PimAsBuiltPdf -Model $model }
+                    [pscustomobject]@{ model = $model; bytes = $bytes; file = (Get-PimAsBuiltFileName) }
+                } $abLib $wantPdf
+            } catch {
+                Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the as-built document could not be built: $($_.Exception.Message)" }
+                return 500
+            }
+            $answered = (@($ab.model.sections | ForEach-Object { @($_.rows).Count }) | Measure-Object -Sum).Sum
+            try { Write-PimManagerAuditEvent -Action $(if ($wantPdf) { 'asbuilt.download' } else { 'asbuilt.view' }) -Target 'as-built' -After ([ordered]@{ answered = [int]$answered; omitted = @($ab.model.omitted).Count; generatedUtc = "$($ab.model.generatedUtc)" }) -Result 'ok' }
+            catch { Write-Host ("  [audit] could not record the as-built download: {0}" -f $_.Exception.Message) -ForegroundColor Yellow }
+            if (-not $wantPdf) { Write-JsonResponse -Response $resp -Status 200 -Body $ab.model; return 200 }
+            try {
+                $resp.StatusCode = 200
+                $resp.ContentType = 'application/pdf'
+                $resp.AddHeader('Content-Disposition', "attachment; filename=""$($ab.file)""")
+                $resp.ContentLength64 = $ab.bytes.Length
+                $resp.OutputStream.Write($ab.bytes, 0, $ab.bytes.Length)
+                $resp.OutputStream.Close()
+            } catch { Write-Host ("  [net] as-built PDF client gone before response written: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray }
+            return 200
+        }
         # POST /api/guards/<guardId>/release { scope, planHash, mode: one-run|until, untilUtc, reason } -- SuperAdmin, audited.
         # POST /api/guards/<guardId>/release/<releaseId>/approve -- the second person (a DIFFERENT SuperAdmin), audited.
         # DELETE /api/guards/<guardId>/release/<releaseId> -- revoke, SuperAdmin, audited.

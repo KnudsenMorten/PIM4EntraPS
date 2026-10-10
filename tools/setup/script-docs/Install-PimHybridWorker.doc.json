@@ -1,0 +1,41 @@
+{
+  "script": "Install-PimHybridWorker.ps1",
+  "product": "pim",
+  "title": "PIM for Active Directory: install and configure the hybrid worker on the worker machine",
+  "purpose": "Installs and configures the PIM for Active Directory hybrid worker on the worker machine itself (an Azure VM or an Azure Arc-enabled on-premises server): the gMSAs, the PIM code for its update ring and the scheduled tasks.",
+  "whenToRun": "On the worker, as SYSTEM or a local administrator -- normally delivered through run-command by Invoke-PimHybridWorkerRunCommand.ps1: -Phase Join (Azure VM, then it reboots), -Phase Configure after the grants (with -PlanOnly first if you like). The daily task runs -Phase Update by itself.",
+  "standalone": true,
+  "sourcePath": "tools/pim-hybrid-worker/Install-PimHybridWorker.ps1",
+  "runAs": [
+    { "kind": "other", "name": "Local Administrator / SYSTEM on the worker (run-command runs it as SYSTEM)", "scope": "the worker machine", "why": "installs PowerShell 7, the gMSAs, user rights, the C:\\PIM folder and scheduled tasks" }
+  ],
+  "changes": [
+    { "target": "the worker machine (-Phase Join, Azure VM)", "action": "update", "object": "offline domain join from the blob, then a reboot", "why": "the Azure VM joins the domain without line of sight", "undo": "unjoin the machine" },
+    { "target": "the worker machine (-Phase Configure)", "action": "create", "object": "PowerShell 7 (Microsoft-signed MSI from github.com); the gMSA(s) installed and tested; 'log on as a batch job' for them; C:\\PIM (inheritance removed: SYSTEM + Administrators write, the gMSAs read); the PIM code for the ring; the run wrapper; six scheduled tasks (PIM Hybrid Worker, PIM Hybrid AD Sync, PIM Hybrid AD Sync Servers, PIM Hybrid AD Changes, PIM Hybrid Servers with -ServerGmsaName, PIM Hybrid Worker Update)", "why": "the worker itself; no password, secret or certificate is stored", "undo": "delete the 'PIM Hybrid *' scheduled tasks and C:\\PIM; remove the gMSAs from 'log on as a batch job'" },
+    { "target": "the worker machine (Azure Arc)", "action": "update", "object": "the gMSA(s) added to the local group 'Hybrid agent extension applications' (never Administrators)", "why": "the tasks run as the gMSAs and must answer the Arc agent's key-file challenge for the machine identity", "undo": "remove them from that group" },
+    { "target": "the worker machine (Azure VM, -Phase Configure)", "action": "update", "object": "the machine account password is changed once (nltest /sc_change_pwd)", "why": "makes the offline-join blob worthless", "undo": "none needed" }
+  ],
+  "parameters": [
+    { "name": "Phase", "required": true, "default": null, "help": "Join (Azure VM), Configure, Update or Layout." },
+    { "name": "OdjBlob", "required": false, "default": null, "help": "-Phase Join: the offline domain-join blob (gz:...)." },
+    { "name": "GmsaName", "required": false, "default": null, "help": "-Phase Configure (required): DOMAIN\\gMSA-PIM-L1-T0." },
+    { "name": "ServerGmsaName", "required": false, "default": null, "help": "DOMAIN\\gMSA-PIM-L2-T1 for server onboarding in its own task." },
+    { "name": "SqlServer", "required": false, "default": null, "help": "-Phase Configure (required): the PIM SQL server FQDN." },
+    { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The PIM database." },
+    { "name": "TenantId", "required": false, "default": null, "help": "-Phase Configure (required): the tenant." },
+    { "name": "SourceContainerUrl", "required": false, "default": null, "help": "-Phase Configure (required): https://<store>.blob.core.windows.net/<container> with the PIM code and channel.json." },
+    { "name": "Ring", "required": false, "default": null, "help": "The update ring the worker follows (the environment's)." },
+    { "name": "Version", "required": false, "default": null, "help": "Pin a version instead of a ring." },
+    { "name": "AdServer", "required": false, "default": null, "help": "A specific domain controller for the worker's AD calls." },
+    { "name": "Root", "required": false, "default": "C:\\PIM", "help": "The worker's folder." },
+    { "name": "IntervalMinutes", "required": false, "default": 5, "help": "The safety-net task's interval." },
+    { "name": "NoReboot", "required": false, "default": false, "help": "-Phase Join: do not reboot (reboot yourself)." },
+    { "name": "PlanOnly", "required": false, "default": false, "help": "Every run plans and logs, nothing is written to AD until Configure is re-run without it." },
+    { "name": "HostType", "required": false, "default": "Auto", "help": "Auto, AzureVm (IMDS identity) or Arc (the Azure Arc agent's identity)." }
+  ],
+  "readsOnly": [ "the domain-join state, the host type (the himds service / the Arc variables), channel.json for the ring, the installed version" ],
+  "network": [ "the source store (<store>.blob.core.windows.net) with the machine identity; api.github.com / github.com / objects.githubusercontent.com once (PowerShell 7); the identity endpoint on the machine (IMDS on an Azure VM, the Arc agent on localhost:40342). Modules: only the owner-approved in-box Windows ScheduledTasks and CimCmdlets (framework 12.17); no ActiveDirectory module" ],
+  "whatIf": "Prints what the phase would do on this host (join, gMSAs, Arc group, the code and the six tasks) and changes nothing.",
+  "undo": "Delete the 'PIM Hybrid *' scheduled tasks and C:\\PIM; on Arc remove the gMSAs from 'Hybrid agent extension applications'.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Install-PimHybridWorker/"
+}

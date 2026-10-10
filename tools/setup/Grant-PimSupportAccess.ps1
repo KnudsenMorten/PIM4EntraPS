@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-  Gives (or with -Remove takes back) the customer's Invardia Support app its access to this PIM Manager installation: troubleshoot = a read-only contained SQL user; setup = member of the SQL admin group and owner of PIM's own app registrations and groups. Every change is read back.
+  Gives (or with -Remove takes back) the customer's Invardia Support app its access to this PIM Manager installation: troubleshoot = a read-only contained SQL user; setup = member of the SQL admin group and owner of PIM's own app registrations and groups; asbuilt = start the as-built job (caj-pim-asbuilt) and read the PDFs it writes, nothing else (troubleshoot and setup include it). Every change is read back.
 
 .DESCRIPTION
   §95.2 / GUIDED-INSTALL §4.6.
@@ -14,7 +14,13 @@
   setup         member of the SQL admin group (grp-pim-sql-admins: create users, deploy schema, repair) AND owner of PIM's
                 own app registrations and groups -- the Manager's sign-in app, the access request API app, the members
                 group and the SQL admin group -- so the support app's Application.ReadWrite.OwnedBy is enough later.
-  -Remove       takes back BOTH levels: the membership, the ownerships and the contained user.
+  asbuilt       (PIM 100.61, framework 8.12) ONLY the as-built document: the custom role 'PIM Manager as-built runner (<rg>)'
+                (Microsoft.App/jobs/start/action + Microsoft.App/jobs/executions/read) on the ONE job caj-pim-asbuilt, and
+                Storage Blob Data Reader on the ONE container 'asbuilt' of the PIM storage account (the account the job names in
+                PIM_ASBUILT_STORAGE). troubleshoot and setup include it when -SubscriptionId and -ResourceGroup are given; there a
+                failure is reported and the rest of the access stands. Needs Owner / User Access Administrator (or Role Based
+                Access Control Administrator once the role exists) on the PIM resource group.
+  -Remove       takes back every level: the membership, the ownerships, the contained user and the as-built assignments.
 
   The support app's Azure roles and API permissions are granted by Invardia's New-InvardiaSupportApp.ps1, not here.
   Runs as the signed-in account (PIM-Rest: the Invardia Support app's REST session, else the browser sign-in; no az CLI);
@@ -32,7 +38,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')][string]$AppId,
-    [ValidateSet('troubleshoot', 'setup')][string]$Level = 'troubleshoot',
+    [ValidateSet('troubleshoot', 'setup', 'asbuilt')][string]$Level = 'troubleshoot',
     [Parameter(Mandatory)][string]$TenantId,
     [string]$SubscriptionId = '',
     [string]$ResourceGroup = '',
@@ -41,10 +47,13 @@ param(
     [ValidatePattern('^$|^[a-z0-9][a-z0-9-]{0,19}$')][string]$EnvLabel = '',
     [string]$SqlAdminGroupName = 'grp-pim-sql-admins',
     [string]$DbUserName = 'invardia-support',
+    [string]$AsBuiltJobName = 'caj-pim-asbuilt',
     [switch]$Remove,
     # --- test seams (tests/Test-PimSupportAccess.ps1) ---
     [scriptblock]$Graph,
-    [scriptblock]$Sql
+    [scriptblock]$Sql,
+    # ARM: param([string]$Method, [string]$Path, $Body, [string]$ApiVersion) -> the response object ($null = not found)
+    [scriptblock]$Arm
 )
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -58,12 +67,21 @@ $G = 'https://graph.microsoft.com/v1.0'
 # 100.41 (NO-AZ): every token comes from PIM-Rest's ONE token client, PINNED to -TenantId -- never a default context, which
 # on a machine holding several logins is another directory (code audit 2026-10-04). A caller that already set up PIM-Rest's
 # identity keeps it; otherwise sign in: the Invardia Support app's REST session for this tenant, else the person's browser.
-$needRest = (-not $Graph) -or (-not $Sql -and ("$SqlServer".Trim() -or ("$ResourceGroup".Trim() -and "$SubscriptionId".Trim())))
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $here)) 'engine\_shared\PIM-AsBuilt.ps1')   # 100.61: the as-built grants (pure)
+# 100.61 (framework 8.12): the as-built document access -- start the ONE job caj-pim-asbuilt + read its executions, and
+# Storage Blob Data Reader on the ONE container 'asbuilt'. Level asbuilt grants ONLY that; troubleshoot and setup include it
+# (it is less than either); -Remove takes it back. Needs the subscription + resource group (where the job is).
+$abWanted = ($Level -eq 'asbuilt') -or ($Level -in @('troubleshoot', 'setup')) -or $Remove
+$abScoped = [bool]("$SubscriptionId".Trim() -and "$ResourceGroup".Trim())
+# A failure is a PROBLEM (exit 1) when the as-built access is the point of the run (-Level asbuilt) or when it is taken back
+# (-Remove); with troubleshoot / setup it is REPORTED and the rest of the access stands.
+$abHard = ($Level -eq 'asbuilt') -or $Remove
+$needRest = (-not $Graph) -or (-not $Sql -and $Level -ne 'asbuilt' -and ("$SqlServer".Trim() -or ("$ResourceGroup".Trim() -and "$SubscriptionId".Trim()))) -or ($abWanted -and $abScoped -and -not $Arm)
 if ($needRest -and -not $global:PIM_SetupRestMode -and -not "$($global:PIM_ClientId)".Trim()) {
     if ("$SubscriptionId".Trim()) { [void](Connect-PimSetupRest -SubscriptionId "$SubscriptionId".Trim() -TenantId $TenantId) } else { [void](Connect-PimSetupRest -TenantId $TenantId) }
 }
 # No -SqlServer given: the PIM store in -ResourceGroup (a guided install has exactly one). az sql server list -g over ARM.
-if (-not "$SqlServer".Trim() -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and -not $Sql) {
+if ($Level -ne 'asbuilt' -and -not "$SqlServer".Trim() -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and -not $Sql) {
     $found = @(@(Invoke-PimSetupArm -Path "/subscriptions/$("$SubscriptionId".Trim())/resourceGroups/$ResourceGroup/providers/Microsoft.Sql/servers" -ApiVersion (Get-PimSetupApiVersion sql) -All -ErrorAsNull) |
                  Where-Object { $_ } | ForEach-Object { "$($_.properties.fullyQualifiedDomainName)".Trim() } | Where-Object { $_ })
     if ($found.Count -eq 1) { $SqlServer = "$($found[0])".Trim(); Write-Host "  SQL server in $($ResourceGroup): $SqlServer" -ForegroundColor DarkGray }
@@ -80,7 +98,7 @@ if (-not $Graph) {
         Invoke-RestMethod @a
     }.GetNewClosure()
 }
-if (-not $Sql -and "$SqlServer".Trim()) {
+if ($Level -ne 'asbuilt' -and -not $Sql -and "$SqlServer".Trim()) {
     . (Join-Path (Split-Path -Parent (Split-Path -Parent $here)) 'engine\_shared\PIM-SqlStore.ps1')
     $sTok = ''; try { $sTok = "$(Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId)".Trim() } catch { $sTok = '' }
     $cs = "Server=tcp:$SqlServer,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
@@ -157,6 +175,64 @@ if (($Level -eq 'troubleshoot' -or $Remove) -and $Sql) {
         }
     } catch { $problems.Add("SQL on $SqlServer : $($_.Exception.Message) (the signed-in account must be a member of '$SqlAdminGroupName' or the server's Entra admin)") }
 } elseif (($Level -eq 'troubleshoot' -or $Remove) -and -not $Sql) { $problems.Add('no -SqlServer given -- the SQL part was not done') }
+
+# ---- 100.61 as-built: start + read executions on the job caj-pim-asbuilt, Storage Blob Data Reader on the container 'asbuilt'
+$abNotes = New-Object System.Collections.Generic.List[string]
+$abProblem = { param($m) if ($abHard) { $problems.Add("as-built: $m") } else { $abNotes.Add($m) } }
+if ($abWanted -and -not $abScoped) {
+    if ($abHard) { $problems.Add('as-built: no -SubscriptionId / -ResourceGroup given -- the as-built access was not done') }
+} elseif ($abWanted) {
+    if (-not $Arm) {
+        $Arm = {
+            param([string]$Method, [string]$Path, $Body, [string]$ApiVersion)
+            if ($Method -eq 'GET') { return (Invoke-PimSetupArm -Path $Path -ApiVersion $ApiVersion -NotFoundOk) }
+            if ($null -ne $Body) { return (Invoke-PimSetupArm -Method $Method -Path $Path -Body $Body -ApiVersion $ApiVersion) }
+            return (Invoke-PimSetupArm -Method $Method -Path $Path -ApiVersion $ApiVersion)
+        }
+    }
+    $sub = "$SubscriptionId".Trim(); $rg = "$ResourceGroup".Trim()
+    $apiAuth = Get-PimSetupApiVersion authorization; $apiAca = Get-PimSetupApiVersion aca
+    try {
+        $job = & $Arm 'GET' "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.App/jobs/$AsBuiltJobName" $null $apiAca
+        if (-not $job) { & $abProblem "the as-built job '$AsBuiltJobName' is not deployed in $rg (tools/setup/Deploy-PimAsBuiltJob.ps1 installs it) -- nothing granted for it" }
+        else {
+            # where the job writes: its own env (Deploy-PimAsBuiltJob stamped it) -- never a guess
+            $jenv = @{}; foreach ($c in @($job.properties.template.containers)) { foreach ($e in @($c.env)) { if ($e -and "$($e.name)") { $jenv["$($e.name)"] = "$($e.value)" } } }
+            $acct = "$($jenv['PIM_ASBUILT_STORAGE'])".Trim(); $cont = "$($jenv['PIM_ASBUILT_CONTAINER'])".Trim(); if (-not $cont) { $cont = 'asbuilt' }
+            if ($acct -notmatch '^[a-z0-9]{3,24}$') { & $abProblem "the job '$AsBuiltJobName' names no storage account (PIM_ASBUILT_STORAGE) -- re-run Deploy-PimAsBuiltJob.ps1" }
+            else {
+                $grants = @(Get-PimAsBuiltSupportGrants -SubscriptionId $sub -ResourceGroup $rg -StorageAccount $acct -JobName $AsBuiltJobName -Container $cont)
+                # the custom role (start + read executions only) must exist before it can be assigned
+                $rd = Get-PimAsBuiltRoleDefinition -SubscriptionId $sub -ResourceGroup $rg
+                if (-not $Remove -and $PSCmdlet.ShouldProcess($rd.body.properties.roleName, 'create / converge the custom role (start the as-built job + read its executions)')) {
+                    $have = $null; try { $have = & $Arm 'GET' $rd.path $null $apiAuth } catch { $have = $null }
+                    if (-not $have) { [void](& $Arm 'PUT' $rd.path $rd.body $apiAuth); Say "custom role created: $($rd.body.properties.roleName)" 'Green' }
+                }
+                foreach ($g in $grants) {
+                    $wantGuid = (("$($g.roleDefinitionId)" -split '/')[-1]).ToLowerInvariant()
+                    $f = [uri]::EscapeDataString("principalId eq '$($sp.id)'")
+                    $list = & $Arm 'GET' "$($g.scope)/providers/Microsoft.Authorization/roleAssignments?`$filter=$f" $null $apiAuth
+                    $mine = @(@($list.value) | Where-Object { $_ -and "$($_.properties.principalId)" -eq "$($sp.id)" -and "$($_.properties.scope)".TrimEnd('/') -ieq $g.scope -and (("$($_.properties.roleDefinitionId)" -split '/')[-1]).ToLowerInvariant() -eq $wantGuid })
+                    if ($Remove) {
+                        foreach ($a in $mine) {
+                            if ($PSCmdlet.ShouldProcess($g.scope, "remove: $($g.what)")) { [void](& $Arm 'DELETE' "$($a.id)" $null $apiAuth); Say "removed: $($g.what)" 'Green' }
+                        }
+                        continue
+                    }
+                    if ($mine.Count) { Say "(already) $($g.what)"; continue }
+                    if (-not $PSCmdlet.ShouldProcess($g.scope, "grant: $($g.what)")) { continue }
+                    $body = @{ properties = @{ roleDefinitionId = $g.roleDefinitionId; principalId = "$($sp.id)"; principalType = 'ServicePrincipal' } }
+                    try { [void](& $Arm 'PUT' "$($g.scope)/providers/Microsoft.Authorization/roleAssignments/$([guid]::NewGuid().ToString())" $body $apiAuth) }
+                    catch { if ("$($_.Exception.Message)" -notmatch '(?i)RoleAssignmentExists|already exists') { throw } }
+                    $back = & $Arm 'GET' "$($g.scope)/providers/Microsoft.Authorization/roleAssignments?`$filter=$f" $null $apiAuth
+                    $ok = @(@($back.value) | Where-Object { $_ -and "$($_.properties.principalId)" -eq "$($sp.id)" -and (("$($_.properties.roleDefinitionId)" -split '/')[-1]).ToLowerInvariant() -eq $wantGuid }).Count -gt 0
+                    if ($ok) { Say "granted (read back): $($g.what)" 'Green' } else { & $abProblem "not read back: $($g.what) on $($g.scope)" }
+                }
+            }
+        }
+    } catch { & $abProblem "$($_.Exception.Message) (assigning Azure roles needs Owner, User Access Administrator or Role Based Access Control Administrator on the PIM resource group; creating the custom role needs Owner or User Access Administrator)" }
+}
+foreach ($n in $abNotes) { Write-Host "  as-built access NOT given: $n (the rest of the access stands)" -ForegroundColor Yellow }
 
 if ($problems.Count) {
     Write-Host 'NOT everything was done:' -ForegroundColor Yellow

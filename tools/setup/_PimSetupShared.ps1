@@ -668,17 +668,33 @@ function Grant-PimMiGraph {
     # MAP, WHATEVER -RoleSet SAID. $roles was resolved and printed ("role set: Manager (15)") and then never used, so a
     # deploy handed the read-only Manager identity every ReadWrite/Remove role in the engine set -- the widening §65.4
     # exists to prevent, invisible because nothing fails. Every loop now uses the requested set.
+    # 2026-10-11 (trial test, fresh tenant): a brand-new managed identity answers some POSTs with 404 for a minute or two
+    # while Entra replicates its service principal -- 25 of 28 landed, 3 got 404, and the deploy stopped. 404 / 429 / 5xx are
+    # retried with a growing wait (up to ~4 min in total); any other status fails at once, as before (BUG-45).
+    $pimGrantWaits = @(10, 20, 30, 45, 60, 75)
     foreach ($r in $roles.GetEnumerator()) {
         if ("$($r.Value)" -in $have) { continue }   # already assigned -- nothing to do
-        try {
-            Invoke-RestMethod -Method POST -Headers $gh -Uri $assignUri `
-                -Body (@{ principalId = $MiObjectId; resourceId = $graphSp.id; appRoleId = $r.Value } | ConvertTo-Json) -ErrorAction Stop | Out-Null
-            $granted++
-        } catch {
-            # The BODY carries the reason; the exception message carries only the status line.
-            $body = ''
-            try { $body = "$($_.ErrorDetails.Message)" } catch { }
-            $failed.Add("$($r.Key): $($_.Exception.Message)$(if ("$body".Trim()) { " -- $body" })")
+        $attempt = 0
+        while ($true) {
+            try {
+                Invoke-RestMethod -Method POST -Headers $gh -Uri $assignUri `
+                    -Body (@{ principalId = $MiObjectId; resourceId = $graphSp.id; appRoleId = $r.Value } | ConvertTo-Json) -ErrorAction Stop | Out-Null
+                $granted++
+                break
+            } catch {
+                $code = 0
+                try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+                if (($code -eq 404 -or $code -eq 429 -or $code -ge 500) -and $attempt -lt $pimGrantWaits.Count) {
+                    Write-Host ("    {0}: HTTP {1} (new identity still replicating?) -- retry in {2} s" -f $r.Key, $code, $pimGrantWaits[$attempt]) -ForegroundColor DarkGray
+                    Start-Sleep -Seconds $pimGrantWaits[$attempt]; $attempt++
+                    continue
+                }
+                # The BODY carries the reason; the exception message carries only the status line.
+                $body = ''
+                try { $body = "$($_.ErrorDetails.Message)" } catch { }
+                $failed.Add("$($r.Key): $($_.Exception.Message)$(if ("$body".Trim()) { " -- $body" })")
+                break
+            }
         }
     }
     if ($failed.Count) {

@@ -93,6 +93,72 @@ function Complete-PimInstallTracker {
     return (Send-PimInstallTrackEvent -Tracker $Tracker -StepId 'done' -State completed -Outputs $Outputs)
 }
 
+# ================================================================== hosting SUB-STEP progress (2026-10-11, setup-polish lane)
+# The multi-tenant build (Invoke-PimMspBuild) runs its 'hosting' step -- Invoke-PimDeployAll, 10-40 minutes -- in a CHILD
+# process, so the deploy's own step events (-OnStep / its tracker) never reached the build's reporter: the tracked install
+# showed 'hosting started' and then minutes of silence (EFIF managed install 2026-10-10). The child now writes ONE marker
+# line per deploy step event on its console when the build asks for it ($env:PIM_SUBSTEP_EVENTS = '1', set by the build for
+# the step process only); the build reads its step's output as it streams, turns each marker into a step event with the
+# id '<parent>.<sub-step>' and relays it exactly like its own steps (Invardia install tracking + -OnStep -> the guided
+# install's -Reporter). Same event schema ({seq, step{id,title}, state, message}); a marker line is never echoed.
+#
+# STABLE SUB-STEP IDS of the hosting step (= Invoke-PimDeployAll's step keys, engine/_shared/PIM-DeployAll.ps1), reported as
+# 'hosting.<id>': enroll, prereq, image, infra, sqlaccess, schema, mailsender, features, licence, easyauth, code, updater,
+# access, alerting, verify, verify-install. 'appreg' is never shown (a build runs on managed identities). A key outside
+# [a-z0-9-] is dropped, never relayed.
+$script:PimSubStepLinePrefix = '##pim-substep '
+
+function Get-PimHostingSubStepCatalog {
+    <# PURE. The hosting step's stable sub-step ids -> customer-language titles (documented above; DESIGN "Install progress"). #>
+    return [ordered]@{
+        'enroll'         = 'Link to your Invardia account'
+        'prereq'         = 'Network, registry, identity and database'
+        'image'          = 'Container image'
+        'infra'          = 'Container Apps environment and apps'
+        'sqlaccess'      = 'Database access'
+        'schema'         = 'Database schema'
+        'mailsender'     = 'Notification mailbox'
+        'features'       = 'Feature settings'
+        'licence'        = 'Your licence'
+        'easyauth'       = 'Sign-in for the PIM Manager'
+        'code'           = 'Roll out the application'
+        'updater'        = 'Updates'
+        'access'         = 'PIM Manager access'
+        'alerting'       = 'Alert recipients'
+        'verify'         = 'Deployment health check'
+        'verify-install' = 'End-of-install check'
+    }
+}
+
+function Format-PimSubStepEventLine {
+    <# PURE. One deploy step event -> the marker line the child writes (one line, JSON; nothing secret goes in: scrubbed). #>
+    param([Parameter(Mandatory)][string]$Key, [string]$Name = '', [Parameter(Mandatory)][string]$State, [string]$Detail = '')
+    $o = [ordered]@{ key = "$Key".Trim(); name = (Protect-PimInstallTrackMessage $Name); state = "$State".Trim(); detail = (Protect-PimInstallTrackMessage $Detail) }
+    return ($script:PimSubStepLinePrefix + ($o | ConvertTo-Json -Compress))
+}
+
+function ConvertFrom-PimSubStepEventLine {
+    <#
+      PURE. One console line of a step process -> $null (not a marker, or a malformed / unknown-state / bad-key marker) or
+      { StepId = '<ParentStepId>.<key>'; Title = '<ParentTitle>: <sub-step title>'; State; Message (scrubbed, one line) }.
+      'appreg' is dropped (never shown). States: started | ok | warning | failed | skipped | waiting.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Line, [Parameter(Mandatory)][string]$ParentStepId, [string]$ParentTitle = '')
+    $l = "$Line"
+    $ix = $l.IndexOf($script:PimSubStepLinePrefix.Trim(), [StringComparison]::Ordinal)
+    if ($ix -lt 0) { return $null }
+    $json = $l.Substring($ix + $script:PimSubStepLinePrefix.Trim().Length).Trim()
+    $o = $null; try { $o = $json | ConvertFrom-Json -ErrorAction Stop } catch { return $null }
+    if ($null -eq $o) { return $null }
+    $key = "$($o.key)".Trim().ToLowerInvariant(); $state = "$($o.state)".Trim().ToLowerInvariant()
+    if ($key -notmatch '^[a-z0-9][a-z0-9-]{0,39}$' -or $key -eq 'appreg') { return $null }
+    if ($state -notin @('started', 'ok', 'warning', 'failed', 'skipped', 'waiting')) { return $null }
+    $cat = Get-PimHostingSubStepCatalog
+    $sub = if ($cat.Contains($key)) { $cat[$key] } elseif ("$($o.name)".Trim()) { "$($o.name)".Trim() } else { $key }
+    $title = if ("$ParentTitle".Trim()) { "$("$ParentTitle".Trim()): $sub" } else { $sub }
+    return [pscustomobject]@{ StepId = "$("$ParentStepId".Trim()).$key"; Title = (Protect-PimInstallTrackMessage $title); State = $state; Message = (Protect-PimInstallTrackMessage "$($o.detail)") }
+}
+
 function Open-PimInvardiaTrackedInstall {
     <#
       Open a tracked install at Invardia (ops and the guided path; the RUNNER only posts). -AccessToken: the platform / staff

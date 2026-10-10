@@ -1,0 +1,34 @@
+{
+    "_comment": "Sample build config for a MANAGING tenant (the MSP's own PIM Manager that publishes the signed baseline). Copy it to managing-tenant.json, replace every value, then run tools/setup/Invoke-PimMspBuild.ps1 -Role Master -ConfigPath <file> (plan), and again with -Apply. Ids and names only -- never a secret. No 'deployIdentity' = the build runs as the administrator signed in in the browser. See config-msp/README.md.",
+    "role": "Master",
+    "tenantId": "00000000-0000-0000-0000-000000000001",
+    "subscriptionId": "00000000-0000-0000-0000-000000000002",
+    "resourceGroup": "rg-pim-msp",
+    "location": "swedencentral",
+    "token": "msp1",
+    "sqlServerName": "sql-pim-msp1",
+    "acrName": "acrpimmsp1",
+    "envName": "cae-pim",
+    "keyVaultName": "kv-pim-msp1",
+    "managerSuperAdmins": "admin@contoso.com",
+    "updater": {
+        "ring": 2,
+        "source": "invardia"
+    },
+    "network": {
+        "vnetAddressPrefix": "10.220.0.0/21",
+        "subnetAddressPrefix": "10.220.0.0/23"
+    },
+    "baseline": {
+        "storageAccount": "stpimbaselinemsp1",
+        "container": "baselines"
+    },
+    "slaves": [
+        {
+            "tenantId": "00000000-0000-0000-0000-000000000011",
+            "displayName": "Customer A",
+            "ring": 2,
+            "tags": [ "region:eu" ]
+        }
+    ]
+}

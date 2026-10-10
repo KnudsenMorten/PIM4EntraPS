@@ -1,0 +1,42 @@
+{
+  "script": "Initialize-PimHybridWorkerAd.ps1",
+  "product": "pim",
+  "title": "PIM for Active Directory: prepare Active Directory for the hybrid worker",
+  "purpose": "Prepares Active Directory for the PIM for Active Directory hybrid worker: its group managed service accounts, their least-privilege rights, the servers GPO and, for an Azure VM, the offline domain-join blob.",
+  "whenToRun": "Once per worker, by the AD administrator on a domain controller (or a domain-joined admin host with dsacls.exe and the Group Policy Management tools), after the infrastructure step. Re-run safely after changing OUs or adding server onboarding.",
+  "standalone": true,
+  "sourcePath": "tools/pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1",
+  "runAs": [
+    { "kind": "other", "name": "Domain Admins", "scope": "the domain", "why": "creates gMSAs, groups and the servers GPO, and delegates OU rights (dsacls)" },
+    { "kind": "other", "name": "Enterprise Admins (only with -CreateKdsRootKey)", "scope": "the forest", "why": "creates the forest's KDS root key" }
+  ],
+  "changes": [
+    { "target": "Active Directory (-GmsaOu)", "action": "create", "object": "per identity: the gMSA (AES256), <name>-PermissionGroup (the gMSA its only member) and <name>-PrincipalsAllowedAccess (the worker computer)", "why": "AD is written only by gMSAs, one per privilege tier; every right goes to the PermissionGroup", "undo": "delete the gMSAs and their two groups" },
+    { "target": "Active Directory OUs", "action": "update", "object": "ACEs for <GmsaName>-PermissionGroup: -GroupsOu read + create groups + write member/displayName/description; each -AdminAccountsOu create users + full control below; AdminSDHolder write member only with -GrantProtectedGroupMembership (Tier 0)", "why": "least privilege per OU", "undo": "dsacls <dn> /R <DOMAIN>\\<GmsaName>-PermissionGroup" },
+    { "target": "Group Policy (only with -ServerGmsaName + -ServerOu)", "action": "create", "object": "a GPO (Restricted Groups: <ServerGmsaName>-PermissionGroup member of BUILTIN\\Administrators, adds only) linked to each -ServerOu", "why": "server onboarding by the Tier-1 identity", "undo": "unlink and delete the GPO" },
+    { "target": "Active Directory (-ProvisionOdj, Azure VM)", "action": "create", "object": "the worker's computer account in -ComputerOu and the offline domain-join blob (printed)", "why": "joins the Azure VM without line of sight; an Azure Arc server is already joined", "undo": "delete the computer account" },
+    { "target": "the forest (-CreateKdsRootKey)", "action": "create", "object": "a KDS root key (Add-KdsRootKey), usable about 10 hours later", "why": "no gMSA exists without one", "undo": "none (forest-wide; leave it)" }
+  ],
+  "parameters": [
+    { "name": "WorkerComputerName", "required": true, "default": null, "help": "The worker's computer name (Azure VM name or the Arc server's name)." },
+    { "name": "ComputerOu", "required": true, "default": null, "help": "The OU of the worker's computer account." },
+    { "name": "GmsaName", "required": false, "default": "gMSA-PIM-L1-T0", "help": "The Tier-0 worker identity." },
+    { "name": "GmsaOu", "required": true, "default": null, "help": "Where the gMSAs and their groups are created." },
+    { "name": "GroupsOu", "required": true, "default": null, "help": "Where PIM creates and maintains AD groups." },
+    { "name": "AdminAccountsOu", "required": false, "default": null, "help": "OU(s) of the AD admin accounts PIM creates." },
+    { "name": "GrantProtectedGroupMembership", "required": false, "default": false, "help": "Write member on AdminSDHolder (protected groups) -- the worker becomes Tier 0." },
+    { "name": "ServerGmsaName", "required": false, "default": null, "help": "The Tier-1 server onboarding identity; needs -ServerOu." },
+    { "name": "ServerOu", "required": false, "default": null, "help": "The servers OU(s) for the GPO. Keep the worker out of them (the script warns)." },
+    { "name": "ServerAdminGpoName", "required": false, "default": "PIM for AD: <ServerGmsaName>-PermissionGroup is local administrator (servers)", "help": "The GPO name." },
+    { "name": "UsedBy", "required": false, "default": "PIM Manager hybrid worker", "help": "Text written into the gMSA descriptions." },
+    { "name": "ProvisionOdj", "required": false, "default": false, "help": "Azure VM: create the computer account and print the offline domain-join blob." },
+    { "name": "ReuseComputer", "required": false, "default": false, "help": "With -ProvisionOdj: re-provision an existing computer account (resets its password)." },
+    { "name": "CreateKdsRootKey", "required": false, "default": false, "help": "Create the forest's KDS root key when there is none (usable ~10 hours later; the script prints when)." },
+    { "name": "TriggerSdProp", "required": false, "default": false, "help": "Apply AdminSDHolder on the PDC emulator now instead of within the hour." }
+  ],
+  "readsOnly": [ "the domain (RootDSE, partitions), the OUs, existing gMSAs / groups / computer, the KDS root keys and their age, the AD Privileged Access Management feature (detected, never enabled), the GPO and its links" ],
+  "network": [ "the domain controllers only (LDAP through .NET System.DirectoryServices, dsacls.exe, djoin.exe, SYSVOL); no internet. Modules: only the owner-approved Windows GroupPolicy module (to create the GPO) and Add-KdsRootKey (with -CreateKdsRootKey), framework 12.17" ],
+  "whatIf": "Prints every object, right, GPO setting and link it would create; creates nothing.",
+  "undo": "Unlink and delete the servers GPO, remove the ACEs (dsacls <dn> /R <DOMAIN>\\<GmsaName>-PermissionGroup) on -GroupsOu, each -AdminAccountsOu and AdminSDHolder, then delete the gMSAs, their groups and (for an Azure VM) the computer account.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Initialize-PimHybridWorkerAd/"
+}

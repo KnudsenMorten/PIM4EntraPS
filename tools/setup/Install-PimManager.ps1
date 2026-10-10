@@ -433,7 +433,7 @@ if ($WhatIfPreference) {
         catch { Write-Host "    the deploy plan could not be read: $($_.Exception.Message)" -ForegroundColor Yellow }
         Write-Host "  What if: register the $($cfg.edition) licence in the PIM database (pim.Settings License + the install key; Set-PimLicense.ps1)" -ForegroundColor Yellow
         if ("$($cfg.supportAppId)".Trim()) {
-            Write-Host "  What if: give the Invardia Support app $($cfg.supportAppId) '$($cfg.supportAccess)' access (Grant-PimSupportAccess.ps1: a contained SQL user with db_datareader + VIEW DEFINITION; at 'setup' also membership of the SQL admin group and ownership of PIM's own app registrations and groups)" -ForegroundColor Yellow
+            Write-Host "  What if: give the Invardia Support app $($cfg.supportAppId) '$($cfg.supportAccess)' access (Grant-PimSupportAccess.ps1: at 'asbuilt' ONLY start the as-built job + read its PDF container; at 'troubleshoot' also a contained SQL user with db_datareader + VIEW DEFINITION; at 'setup' also membership of the SQL admin group and ownership of PIM's own app registrations and groups)" -ForegroundColor Yellow
         }
         Write-Host '  What if: run the end-of-install check (Confirm-PimInstall.ps1). It REPAIRS what it can, so it is not run under -WhatIf -- run without -WhatIf to apply.' -ForegroundColor Yellow
     }

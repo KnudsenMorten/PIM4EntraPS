@@ -137,3 +137,33 @@ if (-not $SkipManagerRgReader) {
         if ($rgr.ok) { Note "$($rgr.reason)" } else { throw "$($rgr.reason)" }
     }
 }
+
+# PIM 100.61: the as-built job the in-cloud updater created on an EXISTING environment needs the two rights its Contributor
+# identity cannot give (Invoke-PimAsBuiltConverge reports them and names this script): the job identity's Storage Blob
+# Data Contributor on the 'asbuilt' container ONLY, and the support custom role definition (start the job + read its
+# executions; ASSIGNED to the Support app only by Grant-PimSupportAccess.ps1, with the customer's consent). Skipped when
+# the job does not exist. Idempotent, read back.
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-AsBuilt.ps1')
+$abJob = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name (Get-PimAsBuiltJobName) -ErrorAsNull
+if ($abJob -and "$($abJob.identity.principalId)".Trim()) {
+    $abOid = "$($abJob.identity.principalId)".Trim()
+    $abAcct = "$(@(@($abJob.properties.template.containers)[0].env) | Where-Object { "$($_.name)" -eq 'PIM_ASBUILT_STORAGE' } | ForEach-Object { $_.value } | Select-Object -First 1)".Trim()
+    if ($abAcct -match '^[a-z0-9]{3,24}$') {
+        $abScope = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Storage/storageAccounts' $abAcct "blobServices/default/containers/$(Get-PimAsBuiltContainerName)"
+        Step "'Storage Blob Data Contributor' for $(Get-PimAsBuiltJobName) on $abAcct/$(Get-PimAsBuiltContainerName) only (it writes the as-built PDF)"
+        $abHave = { [bool](@(try { Get-PimArmRoleAssignments -SubscriptionId $SubscriptionId -PrincipalId $abOid -Scope $abScope -Role 'Storage Blob Data Contributor' } catch { @() }).Count) }
+        if (& $abHave) { Note 'already assigned' }
+        elseif ($PSCmdlet.ShouldProcess($abScope, 'role assignment Storage Blob Data Contributor (as-built job)')) {
+            [void](New-PimArmRoleAssignment -SubscriptionId $SubscriptionId -PrincipalId $abOid -PrincipalType ServicePrincipal -Role 'Storage Blob Data Contributor' -Scope $abScope)
+            if (-not (& $abHave)) { throw "read-back FAILED: Storage Blob Data Contributor is not listed on $abScope." }
+            Note 'assigned and read back'
+        }
+    }
+    $abRd = Get-PimAsBuiltRoleDefinition -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
+    Step "custom role '$($abRd.body.properties.roleName)' (definition only -- nobody is assigned here)"
+    if (Invoke-PimSetupArm -Path $abRd.path -ApiVersion (Get-PimSetupApiVersion authorization) -NotFoundOk -ErrorAsNull) { Note 'exists' }
+    elseif ($PSCmdlet.ShouldProcess($abRd.path, 'create the custom role definition')) {
+        [void](Invoke-PimSetupArm -Method PUT -Path $abRd.path -Body $abRd.body -ApiVersion (Get-PimSetupApiVersion authorization))
+        Note 'created'
+    }
+}

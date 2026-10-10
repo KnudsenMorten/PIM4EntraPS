@@ -1,0 +1,37 @@
+{
+  "script": "Set-PimSqlPublicAccess.ps1",
+  "product": "pim",
+  "title": "Turn the PIM SQL server's public network access off or on",
+  "purpose": "Turns the public network access of the PIM Manager's Azure SQL server off (-Disable) or back on (-Enable), over Azure Resource Manager REST. -Disable is refused unless the server has at least one private endpoint connection in the state Approved, because without one the PIM Manager and the engine could no longer reach their database. It reads the server and its private endpoint connections, prints the plan, and changes nothing unless -Apply is given; after the change it reads the server back.",
+  "whenToRun": "Last, when an environment is made private: after the SQL private endpoint exists (New-PimHostingPrerequisites.ps1 -SqlPrivateEndpoint) and the PIM Manager is verified from inside the network (the guide convert-external-to-private.md, Step 7). Convert-PimToPrivate.ps1 -SqlPrivate runs it for you as its last step. Run it with -Enable to roll back. Run it from the PIM Manager release package folder (part of the package, not a standalone download).",
+  "standalone": false,
+  "sourcePath": "tools/setup/Set-PimSqlPublicAccess.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "SQL Server Contributor (or Contributor / Owner)", "scope": "the PIM SQL server (or its resource group)", "why": "Reads the server and its private endpoint connections and changes the server's publicNetworkAccess property." },
+    { "kind": "other", "name": "One REST session: a calling script's session, the Invardia Support app session for -TenantId, or your own browser sign-in", "scope": "the target tenant + subscription", "why": "A session of another tenant than -TenantId is refused. No Azure CLI, no PowerShell modules." }
+  ],
+  "changes": [
+    { "target": "Azure (the PIM resource group)", "action": "update", "object": "the SQL server's public network access (properties.publicNetworkAccess = Disabled with -Disable, Enabled with -Enable), read back after the change", "scope": "the one SQL server named by -ServerName", "why": "A private environment reaches its database through the private endpoint only; with public access off the server's firewall and VNet rules no longer apply.", "undo": "Run the same command with -Enable instead of -Disable (or the reverse)." }
+  ],
+  "parameters": [
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The subscription of the SQL server." },
+    { "name": "ResourceGroup", "required": true, "default": null, "help": "The resource group of the SQL server." },
+    { "name": "ServerName", "required": true, "default": null, "help": "The SQL server name or its FQDN (sql-x or sql-x.database.windows.net)." },
+    { "name": "Disable", "required": false, "default": false, "help": "Turn public network access OFF. Refused unless the server has an Approved private endpoint connection. Give exactly one of -Disable or -Enable." },
+    { "name": "Enable", "required": false, "default": false, "help": "Turn public network access back ON (the rollback). The existing firewall and VNet rules apply again." },
+    { "name": "TenantId", "required": false, "default": null, "help": "The tenant. Pins the sign-in; a session or subscription of another tenant is refused." },
+    { "name": "Apply", "required": false, "default": false, "help": "Make the change. Without it (and always with -WhatIf) the script reads the server, prints the plan and changes nothing." }
+  ],
+  "readsOnly": [
+    "the subscription (visible, and in -TenantId when given)",
+    "the SQL server (its publicNetworkAccess)",
+    "the SQL server's private endpoint connections and their approval state"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in)",
+    "management.azure.com (Azure Resource Manager)"
+  ],
+  "whatIf": "Reads the server and its private endpoint connections and prints the current public network access, the Approved and not-approved private endpoints, and 'PLAN ONLY -- would set public network access ... -> Disabled' (or the refusal when no private endpoint is Approved, or 'already Disabled -- nothing to do'). -WhatIf wins over -Apply; nothing is changed.",
+  "undo": "Run the same command with the other switch: -Enable turns public network access back on (the firewall and VNet rules apply again), -Disable turns it off again.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Set-PimSqlPublicAccess/"
+}

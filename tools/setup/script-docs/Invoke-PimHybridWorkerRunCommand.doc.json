@@ -1,0 +1,36 @@
+{
+  "script": "Invoke-PimHybridWorkerRunCommand.ps1",
+  "product": "pim",
+  "title": "PIM for Active Directory: run the hybrid worker installer through Azure run-command",
+  "purpose": "Runs the hybrid worker installer on the worker machine (an Azure VM or an Azure Arc-enabled server) through Azure run-command, so nothing inbound is needed, or writes it as a self-contained script for the server's administrator.",
+  "whenToRun": "For each install phase: -Phase Join (Azure VM only, with the offline-join blob), then -Phase Configure after the grants; -Phase Update to move the worker to its ring's version at once. Deploy-PimHybridWorker.ps1 runs it for you.",
+  "standalone": false,
+  "sourcePath": "tools/pim-hybrid-worker/Invoke-PimHybridWorkerRunCommand.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Virtual Machine Contributor", "scope": "the worker VM (Azure VM)", "why": "creates and deletes the run-command resource; it runs as SYSTEM on the worker" },
+    { "kind": "other", "name": "Azure Connected Machine Resource Administrator (Azure RBAC)", "scope": "the Arc machine (Arc)", "why": "creates and deletes the run-command resource on the Arc machine; it runs as SYSTEM on the server" }
+  ],
+  "changes": [
+    { "target": "the worker machine's Azure resource", "action": "create", "object": "a managed run-command pim-hybrid-worker-<phase> carrying Install-PimHybridWorker.ps1 and its arguments (the offline-join blob only as a protected parameter); DELETED after the run", "why": "delivers the install without anything inbound", "undo": "nothing is left; the install phase itself is undone as Install-PimHybridWorker.ps1 describes" },
+    { "target": "this computer", "action": "create", "object": "only when run-command cannot be used or with -PrintOnly: the self-contained install script (-OutScript), without the secret", "why": "the server's administrator runs it locally", "undo": "delete the file" }
+  ],
+  "parameters": [
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The machine's subscription; another one is refused." },
+    { "name": "TenantId", "required": true, "default": null, "help": "The tenant." },
+    { "name": "MachineResourceId", "required": true, "default": null, "help": "The worker: .../Microsoft.Compute/virtualMachines/<vm> or .../Microsoft.HybridCompute/machines/<server>." },
+    { "name": "Phase", "required": true, "default": null, "help": "Join (Azure VM only), Configure, Update or Layout." },
+    { "name": "InstallParameters", "required": false, "default": "@{}", "help": "Install-PimHybridWorker.ps1's parameters (GmsaName, SqlServer, TenantId, SourceContainerUrl, Ring, ...); HostType Arc is added for an Arc machine." },
+    { "name": "ProtectedParameterNames", "required": false, "default": "OdjBlob", "help": "Arguments sent only as protected (write-only) parameters, never in the script text." },
+    { "name": "PrintOnly", "required": false, "default": false, "help": "Do not use run-command: write the self-contained script." },
+    { "name": "OutScript", "required": false, "default": "pim-hybrid-worker-<phase>-<machine>.ps1 in the current folder", "help": "Where the self-contained script is written." },
+    { "name": "TimeoutMinutes", "required": false, "default": 45, "help": "Run-command timeout." },
+    { "name": "PollSeconds", "required": false, "default": 15, "help": "How often the result is read." },
+    { "name": "ComputeApiVersion", "required": false, "default": "2024-03-01", "help": "Microsoft.Compute api-version (Azure VM)." },
+    { "name": "ArcApiVersion", "required": false, "default": "2024-07-31-preview", "help": "Microsoft.HybridCompute api-version (Arc run-command)." }
+  ],
+  "readsOnly": [ "the machine (location; for Arc its status and OS)", "the run-command result: state, exit code, output, error" ],
+  "network": [ "management.azure.com (ARM REST) and login.microsoftonline.com -- browser sign-in or an Invardia support session; nothing to the machine directly; no Azure CLI, no PowerShell module" ],
+  "whatIf": "Reads the machine and prints the run-command it would create; creates nothing and runs nothing.",
+  "undo": "The run-command resource is deleted after every run; undo the install phase as Install-PimHybridWorker.ps1 describes.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Invoke-PimHybridWorkerRunCommand/"
+}

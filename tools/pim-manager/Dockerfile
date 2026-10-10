@@ -34,6 +34,21 @@ RUN dotnet new classlib -n shim -o shim \
  && dotnet add package Microsoft.Data.SqlClient --version 5.2.2 \
  && dotnet publish -c Release -o /drv/out
 
+# ---- stage 1b: the pinned PDF library for the as-built document (PIM §100.61, owner 2026-10-10) ----
+# PDFsharp + MigraDoc (MIT, empira; NOT QuestPDF) -- .NET ASSEMBLIES, no PowerShell module, version frozen here. The same
+# SDK image as stage 1 (no new base image). engine/_shared/PIM-AsBuilt.ps1 Add-Types them from $env:PIM_PDF_DLL_DIR.
+# The build FAILS if an assembly the renderer loads is missing. Licence: tools/pim-manager/third-party/ (copied below).
+FROM mcr.microsoft.com/dotnet/sdk:8.0@sha256:5ef85cc12cb25be6ec319a7392d1e9efd53c3bc8abb971c53d8058a473f09053 AS pdflib
+WORKDIR /pdf
+RUN dotnet new classlib -n pdfshim -o pdfshim \
+ && cd pdfshim \
+ && dotnet add package PDFsharp-MigraDoc --version 6.2.4 \
+ && dotnet publish -c Release -o /pdf/out \
+ && rm -f /pdf/out/pdfshim.* \
+ && test -f /pdf/out/MigraDoc.Rendering.dll \
+ && test -f /pdf/out/MigraDoc.DocumentObjectModel.dll \
+ && test -f /pdf/out/PdfSharp.dll
+
 # ---- stage 2: the solution tree, PRUNED to what runs in a container (PIM §100.52, owner 2026-10-10) ----
 # Owner: "the base container image should be stripped also so it doesnt contain old az cli and ps modules that we
 # have now removed of the dependencies". The image used to COPY the WHOLE solution folder: the unsupported v1 code
@@ -60,7 +75,11 @@ RUN rm -rf tests internal legacy launcher diagnostics output \
  && test -f engine/_shared/PIM-Rest.ps1 \
  && test -f setup/Invoke-PimScenarioRun.ps1 \
  && test -f tools/setup/Set-PimAlertRecipients.ps1 \
- && test -f docs/img/brand/pim-manager-512w.png
+ && test -f docs/img/brand/pim-manager-512w.png \
+ && echo "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954  tools/pim-manager/third-party/fonts/DejaVuSans.ttf" | sha256sum -c - \
+ && echo "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724  tools/pim-manager/third-party/fonts/DejaVuSans-Bold.ttf" | sha256sum -c -
+# ^ §100.61: the PDF font is VENDORED in the repo (DejaVu Sans 2.37, tools/pim-manager/third-party/fonts, pinned by SHA-256
+#   in third-party/NOTICE.txt) -- no package manager and no extra network at build time; a changed file fails the build.
 
 # ---- stage 3: runtime ----
 FROM mcr.microsoft.com/powershell:7.4-ubuntu-22.04@sha256:62300a213a9293916333df2b014cd3a8f22fb0b0b65f2bb446aaf436bcf8c868
@@ -110,6 +129,13 @@ RUN groupadd --system --gid 10001 pim \
 # the pinned SQL driver + its dependency closure (assemblies only -- no module)
 COPY --from=sqldriver /drv/out/*.dll /opt/sqlclient/
 ENV PIM_SQLCLIENT_DLL=/opt/sqlclient/Microsoft.Data.SqlClient.dll
+
+# §100.61: the pinned PDF library + its licence, and the font (assemblies and files only -- no module)
+COPY --from=pdflib /pdf/out/*.dll /opt/pdf/
+COPY --from=src /src/PIM4EntraPS/tools/pim-manager/third-party/PDFsharp-MigraDoc-LICENSE.txt /opt/pdf/PDFsharp-MigraDoc-LICENSE.txt
+COPY --from=src /src/PIM4EntraPS/tools/pim-manager/third-party/fonts/ /opt/pdf/fonts/
+ENV PIM_PDF_DLL_DIR=/opt/pdf
+ENV PIM_PDF_FONT_DIR=/opt/pdf/fonts
 
 WORKDIR /app
 # the PRUNED solution tree from stage 2 (§100.52) -- not the build context: tests / internal / legacy / launcher /

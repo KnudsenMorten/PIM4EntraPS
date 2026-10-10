@@ -1,0 +1,27 @@
+{
+  "script": "Set-PimHybridWorkerPeering.ps1",
+  "product": "pim",
+  "title": "PIM for Active Directory: show, cut or restore the hybrid worker's network reach",
+  "purpose": "Shows, cuts or restores the hybrid worker's network reach by turning its VNet peerings off and on, without deleting anything.",
+  "whenToRun": "-State Show to check the Azure VM worker's peerings after the build; -State Disconnected to stop the worker acting at once (its AD jobs then fail visibly); -State Connected to restore. Not used for an Azure Arc worker (its network is yours).",
+  "standalone": false,
+  "sourcePath": "tools/pim-hybrid-worker/Set-PimHybridWorkerPeering.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Network Contributor", "scope": "the worker VNet and every VNet it is peered with", "why": "updates allowVirtualNetworkAccess on both sides of each peering. -State Show needs only Reader." }
+  ],
+  "changes": [
+    { "target": "VNet peerings of the worker VNet (both sides)", "action": "update", "object": "allowVirtualNetworkAccess = false (Disconnected) or true (Connected); the peerings stay", "why": "an isolation switch that keeps the topology", "undo": "run it again with the other -State" }
+  ],
+  "parameters": [
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The worker's subscription." },
+    { "name": "TenantId", "required": true, "default": null, "help": "The tenant; the script refuses a subscription in another one." },
+    { "name": "State", "required": true, "default": null, "help": "Show, Disconnected or Connected." },
+    { "name": "ResourceGroup", "required": false, "default": "rg-pimhybridwrk", "help": "The worker's resource group." },
+    { "name": "VnetName", "required": false, "default": "vnet-pimhybridwrk", "help": "The worker VNet." }
+  ],
+  "readsOnly": [ "the subscription's tenant", "the peerings of the worker VNet and of each remote VNet" ],
+  "network": [ "management.azure.com (ARM REST) and login.microsoftonline.com -- browser sign-in or an Invardia support session; no Azure CLI, no PowerShell module" ],
+  "whatIf": "Prints each peering and the access change it would make; changes nothing. -State Show is read-only by itself.",
+  "undo": "Run it again with the other -State; nothing is ever deleted.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Set-PimHybridWorkerPeering/"
+}

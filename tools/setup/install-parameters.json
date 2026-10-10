@@ -1,7 +1,7 @@
 {
   "_comment": "The guided-install contract of the PIM Manager (GUIDED-INSTALL 4.1-4.6). Invardia's wizard asks exactly these questions and writes the answers to config.json for tools/setup/Install-PimManager.ps1, which validates them again (Test-PimInstallConfig). 'maps' = what the answer drives. Kept in step with Install-PimManager by tests/Test-PimGuidedInstall.ps1.",
   "product": "pim-manager",
-  "version": "2.4.580",
+  "version": "2.4.581",
   "entryPoint": "Install-PimManager -ConfigPath <config.json> [-LicencePath <file>] -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]",
   "licenceOrKey": "-LicencePath is required unless config.json carries enrollmentKey: an enrollment key (framework 8.6) makes the install claim the tenant at Invardia, which returns the licence and the install key.",
   "exitCodes": { "0": "succeeded (warnings allowed)", "1": "a step failed -- fix it and -Resume", "2": "preflight failed -- nothing was changed", "3": "bad answers or a bad licence -- nothing was changed" },
@@ -30,7 +30,7 @@
     { "key": "mailSender", "page": "access", "type": "email", "help": "The mailbox PIM sends from. Created by the install when the installer holds an ACTIVE Exchange Administrator or Global Administrator role (both sending identities get the scoped send right); without one the install completes and the end-of-install check shows the Get Started > Mail sender command.", "maps": "MailSender" },
     { "key": "alertRecipients", "page": "access", "type": "emailList", "help": "Who gets the alerts (engine failures, drift, break-glass use, ...). Default: the super-admins' mailboxes. A list that is already set is never overwritten.", "maps": "AlertRecipients" },
     { "key": "supportAppId", "page": "support", "type": "guid", "help": "The Invardia Support app of this tenant (pre-filled from the support environment). Empty = no support access.", "maps": "Grant-PimSupportAccess -AppId" },
-    { "key": "supportAccess", "page": "support", "type": "enum", "default": "troubleshoot", "options": ["troubleshoot", "setup"], "help": "troubleshoot = read the database and its schema; setup = also repair and upgrade (SQL admin group member, owner of PIM's own apps and groups).", "maps": "Grant-PimSupportAccess -Level" }
+    { "key": "supportAccess", "page": "support", "type": "enum", "default": "troubleshoot", "options": ["troubleshoot", "setup", "asbuilt"], "help": "troubleshoot = read the database and its schema; setup = also repair and upgrade (SQL admin group member, owner of PIM's own apps and groups); asbuilt = ONLY start the as-built job and read the PDF it writes (troubleshoot and setup include that too).", "maps": "Grant-PimSupportAccess -Level" }
   ],
   "steps": [
     { "id": "config", "title": "Check your answers" },

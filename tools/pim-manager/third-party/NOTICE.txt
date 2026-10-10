@@ -1,0 +1,19 @@
+PIM Manager -- third-party components bundled in the container image (PIM REQUIREMENTS 100.61, the as-built PDF)
+
+PDFsharp + MigraDoc 6.2.4 (NuGet package PDFsharp-MigraDoc, pinned in tools/pim-manager/Dockerfile stage 'pdflib';
+restored from nuget.org like the SQL driver)
+  Licence: MIT -- PDFsharp-MigraDoc-LICENSE.txt in this folder (copied into the image as /opt/pdf/PDFsharp-MigraDoc-LICENSE.txt).
+  Copyright (c) 2001-2026 empira Software GmbH. https://docs.pdfsharp.net
+  Its NuGet dependencies (Microsoft.Extensions.Logging.Abstractions, System.Security.Cryptography.Pkcs) are MIT (.NET Foundation).
+
+DejaVu Sans 2.37 -- VENDORED in fonts/ (copied into the image as /opt/pdf/fonts/; no package manager at build time)
+  Source: the upstream release https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2
+          (archive SHA-256 fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7), files ttf/DejaVuSans.ttf,
+          ttf/DejaVuSans-Bold.ttf and LICENSE, unchanged.
+  Licence: the Bitstream Vera / DejaVu free font licence -- fonts/DejaVu-LICENSE.txt.
+  SHA-256 (the Dockerfile's prune stage checks the two fonts and fails the build on any change):
+    7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954  fonts/DejaVuSans.ttf
+    e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724  fonts/DejaVuSans-Bold.ttf
+    7a083b136e64d064794c3419751e5c7dd10d2f64c108fe5ba161eae5e5958a93  fonts/DejaVu-LICENSE.txt
+
+Assemblies and files only -- no PowerShell module, nothing installed at runtime, nothing downloaded by a running container.

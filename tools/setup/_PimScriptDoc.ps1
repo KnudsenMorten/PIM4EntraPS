@@ -63,6 +63,16 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/Remove-PimContainerStack.ps1';                Standalone = $false }
     @{ Path = 'setup/New-PimHostingPrerequisites.ps1';             Standalone = $false }
     @{ Path = 'setup/Convert-PimToPrivate.ps1';                    Standalone = $false }
+    @{ Path = 'setup/Set-PimSqlPublicAccess.ps1';                  Standalone = $false }
+    @{ Path = 'pim-hybrid-worker/Deploy-PimHybridWorker.ps1';      Standalone = $false }
+    @{ Path = 'pim-hybrid-worker/New-PimHybridWorkerInfra.ps1';    Standalone = $false }
+    @{ Path = 'pim-hybrid-worker/Set-PimHybridWorkerPeering.ps1';  Standalone = $false }
+    @{ Path = 'pim-hybrid-worker/Set-PimHybridWorkerEgress.ps1';   Standalone = $false }
+    @{ Path = 'pim-hybrid-worker/Grant-PimHybridWorkerAccess.ps1'; Standalone = $false }
+    @{ Path = 'pim-hybrid-worker/Invoke-PimHybridWorkerRunCommand.ps1'; Standalone = $false }
+    # self-contained on the machine they run on (a domain controller; the worker itself): published as one file each
+    @{ Path = 'pim-hybrid-worker/Initialize-PimHybridWorkerAd.ps1'; Standalone = $true }
+    @{ Path = 'pim-hybrid-worker/Install-PimHybridWorker.ps1';     Standalone = $true }
 )
 
 function Get-PimScriptDocName {

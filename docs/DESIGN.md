@@ -1525,12 +1525,24 @@ on-prem action and best-effort write the work package to
 
 A domain-joined **Azure VM** (Windows Server 2022 Azure Edition Core, system-assigned managed identity, built by
 `New-PimHybridWorkerInfra.ps1`) in its own VNet, peered to the network with the domain controllers and the PIM environment
-(cutting the peering isolates it). Only this Azure VM worker is built; a worker on the customer's own on-premises server
-(with an Azure Arc identity) is designed, not built. It
+(cutting the peering isolates it) — **or** the customer's own **on-premises Windows server that is Azure Arc-enabled**
+(see *The on-premises worker (Azure Arc)* below). It
 replaces the older "PIM for Active Directory" scripts and runs the same scheduler as the cloud engine, with its own
 scheduler instances, so its state and lease never collide with the main tick. SQL, Graph (read) and the source store are
 reached with the server's managed identity; Active Directory is written by **group managed service accounts** only — no
-password, secret or certificate on the server.
+password, secret or certificate on the server. No gallery PowerShell module on the worker: only the in-box Windows
+ScheduledTasks and CimCmdlets modules (owner-approved 2026-10-10) for its scheduled tasks and the domain-join check.
+
+**One command.** `Deploy-PimHybridWorker.ps1 -Target Azure|Arc` runs the steps below in the right order: plan first (it
+changes nothing without `-Apply`), it stops for the Active Directory step (printing the exact command for the AD
+administrator), stops again when a new KDS root key is younger than ~10 hours, and continues with `-Resume` from a state
+file that holds no secret. The install reaches the worker through **Azure run-command** (Azure VM and Arc alike, one
+helper: `Invoke-PimHybridWorkerRunCommand.ps1`), so nothing inbound and no remote PowerShell is needed; when run-command
+is not available the same self-contained script is written for the server's administrator to run locally.
+
+Order (Azure VM): infrastructure → peering check → egress check → AD preparation on a domain controller → domain join
+(run-command) → grants → Configure (run-command; it fetches the code with the identity, so the grants come first) →
+verify. Arc: the same without infrastructure, peering, egress and join.
 
 **Network — never a public IP (2.4.491).** The worker can write Tier-0 groups, so it is a Tier-0 machine:
 - its NIC carries **no public IP**;
@@ -1539,7 +1551,9 @@ password, secret or certificate on the server.
   Azure's implicit default outbound access switched off.
 
 `New-PimHybridWorkerInfra.ps1` builds it that way (`-Egress NatGateway`, the default; `-Egress None` when the network
-already routes outbound). Builds before 2.4.491 put a public IP on the NIC (`-Egress PublicIp`, now removed).
+already routes outbound). The worker subnet carries the `Microsoft.Sql` and `Microsoft.Storage` service endpoints (the
+store admits the subnet by a VNet rule). During Configure the worker downloads PowerShell 7 from github.com (an outbound
+requirement for that one step; the MSI's Microsoft signature is checked before it is installed). Builds before 2.4.491 put a public IP on the NIC (`-Egress PublicIp`, now removed).
 `Set-PimHybridWorkerEgress.ps1` migrates such a worker: it detaches the IP from the NIC, makes the same address the NAT
 gateway's outbound address, so an allow-list naming it keeps working, and verifies that no public IP is left.
 
@@ -1556,14 +1570,25 @@ gateway's outbound address, so an allow-list naming it keeps working, and verifi
 installs and **tests** each gMSA before it registers a task. A worker identity is never put into a PIM just-in-time
 group — those groups' members are the people with an active elevation, and the membership sync removes anyone else.
 
+A new KDS root key is usable by the domain controllers only ~10 hours after it is created: the AD step prints when the
+gMSAs will work, and the one-command deploy waits for it before Configure (the backdated key is a single-DC lab shortcut
+only, never the default).
+
 **Jobs and tasks.**
 
 | Job | Cadence | Task / identity | What it does |
 |---|---|---|---|
-| `hybrid-ad-apply` | every 5 min | PIM Hybrid Worker / L1-T0 | creates and updates the admin accounts in AD |
-| `hybrid-ad-groups` | hourly | PIM Hybrid Worker / L1-T0 | mirrors each defined AD-marked PIM group to an AD group; a protected group (`adminCount=1`) keeps its cosmetic drift (reported, never retried) |
-| `hybrid-ad-sync` | **continuous** (5 s pause) | PIM Hybrid AD Sync / L1-T0 | the ACTIVE PIM-for-Groups members of each mirrored group → AD group membership, with a time-to-live equal to the time left on the activation when the forest has the PAM feature; re-added when the TTL is more than 2 min off; removes only accounts carrying the AD-admin suffix |
-| `hybrid-ad-servers` | hourly | PIM Hybrid Servers / L2-T1 | lists the servers for Discovery; puts each defined per-server group (+ the optional shared group) into that server's local Administrators, add only; "adopt" when the group already exists, "no access" (a grant fixes it) vs "unreachable" (off) |
+| `hybrid-ad-apply` | every 5 min (+ on a definition change) | PIM Hybrid Worker, PIM Hybrid AD Changes / L1-T0 | creates and updates the admin accounts in AD |
+| `hybrid-ad-groups` | hourly (+ on a definition change) | PIM Hybrid Worker, PIM Hybrid AD Changes / L1-T0 | mirrors each defined AD-marked PIM group to an AD group; a protected group (`adminCount=1`) keeps its cosmetic drift (reported, never retried) |
+| `hybrid-ad-sync` | **continuous** (5 s pause) | PIM Hybrid AD Sync / L1-T0 | the CRITICAL (non-server) groups: the ACTIVE PIM-for-Groups members of each mirrored group → AD group membership, with a time-to-live equal to the time left on the activation when the forest has the PAM feature; re-added when the TTL is more than 2 min off; removes only accounts carrying the AD-admin suffix |
+| `hybrid-ad-sync-servers` | **continuous** | PIM Hybrid AD Sync Servers / L1-T0 | the same for the per-server groups, in parallel batches, so thousands of servers never delay the critical groups |
+| `hybrid-ad-changes` | **continuous** | PIM Hybrid AD Changes / L1-T0 | AD accounts and AD groups the moment their definitions change (runs apply + groups then) |
+| `hybrid-ad-servers` | hourly | PIM Hybrid Servers / L2-T1 (PIM Hybrid Worker when no server identity) | lists the servers for Discovery; puts each defined per-server group (+ the optional shared group) into that server's local Administrators, add only; "adopt" when the group already exists, "no access" (a grant fixes it) vs "unreachable" (off) |
+
+The six scheduled tasks: **PIM Hybrid Worker** (every 5 min, the safety net), **PIM Hybrid AD Sync**, **PIM Hybrid AD
+Sync Servers** and **PIM Hybrid AD Changes** (each continuous: started at boot and re-checked every minute, one instance,
+no time limit), **PIM Hybrid Servers** (every 5 min, only with a separate server identity) and **PIM Hybrid Worker Update**
+(daily 04:30 as SYSTEM). Every task except the update runs as a gMSA.
 
 The worker writes a per-job heartbeat; the main tick leaves a job to the worker while its heartbeat is fresh, and the
 Manager's Jobs view shows it per job (live / plan-only / not seen). A version change stops the continuous loop and the
@@ -1585,6 +1610,37 @@ list.
 deviation, and each add / correction / removal, plus the last 40 group changes). The worker publishes it to
 `pim.Settings['HybridAdSyncLive']` **only while the view is open** (the page renews `HybridAdSyncLiveWatch`; the worker
 reads it at most every 10 s) — nothing is written when nobody watches.
+
+**The on-premises worker (Azure Arc).** The worker can run on the customer's own Windows server instead of an Azure VM,
+provided the server is **Azure Arc-enabled** (a plain on-premises server has no managed identity) and already
+domain-joined. Same scheduler, same jobs and tasks, same gMSA model; only where the identity comes from and how the
+server is reached differ:
+- **Nothing is built in Azure.** `New-PimHybridWorkerInfra.ps1 -ArcMachineResourceId` reads the Arc machine
+  (`Microsoft.HybridCompute/machines`: connected, Windows, a system-assigned identity) and returns its identity; no
+  resource group, VNet, NSG, NAT gateway, peering or VM. The on-premises network is the customer's.
+- **The identity.** The Arc agent serves the machine's identity on the server itself (`localhost:40342`, announced by the
+  machine-wide `IDENTITY_ENDPOINT` / `IMDS_ENDPOINT`). Its token call is a challenge: the first request is answered 401
+  with the path of a one-time key file; the caller reads the file and asks again with its content. The shared token
+  client recognises an Arc host (those variables without App Service's `IDENTITY_HEADER`, or the `himds` service), checks
+  that the named file is a `.key` directly in the agent's token folder (at most 4 KB) before reading it, and bypasses any
+  system proxy for the local call. One path for every audience the worker uses (SQL, Graph, the source store). The
+  Azure VM (IMDS) and Container Apps paths are unchanged.
+- **Who may read the key file.** Only local Administrators and the local group **Hybrid agent extension applications**
+  (created by the Arc agent). The worker's tasks run as the gMSAs, so Configure adds each worker gMSA to that group —
+  never to Administrators.
+- **The same rights.** `Grant-PimHybridWorkerAccess.ps1 -ArcMachineResourceId` reads the machine's identity from ARM and
+  grants exactly what the VM worker's identity gets: a contained SQL user created from its application id
+  (db_datareader + db_datawriter), the Graph read roles, Storage Blob Data Reader on the source container.
+- **Delivery.** Run-command on the Arc machine (`Microsoft.HybridCompute/machines/<server>/runCommands`), the same
+  helper as for the VM; fallback: a self-contained script the server's administrator runs locally, elevated.
+- **Network: outbound HTTPS only, nothing inbound.** The Arc agent's endpoints, Entra sign-in and Graph, the PIM store
+  (a private endpoint over VPN / ExpressRoute, or the public endpoint with a firewall rule for the site's egress address
+  — `-SqlAllowedPublicIp`), the source store, github.com for PowerShell 7 during Configure, and the domain controllers on
+  the customer's own network.
+- **Tier 0.** The server can write Tier-0 groups, so it is a Tier-0 machine: no inbound management beyond what the
+  customer's Tier-0 model allows, administrators only, kept out of the servers OU whose GPO makes the Tier-1 server
+  identity a local administrator (the AD step warns when it is in it). PIM Manager cannot enforce the on-premises
+  hardening; it documents it.
 
 ### 6.6 Access Review overview (read-only data layer)
 
@@ -3128,8 +3184,11 @@ place:
   private registry (prerequisites script with the existing names), then either *Redeploy* (default: remove the Container
   Apps stack, deploy it again internal-only from the install's saved deploy profile — the route that grants the new
   identities their Graph permissions, Azure roles and database users in one session) or *Rebuild* (capture, recreate and
-  restore the live apps), the install check from inside the network, an optional custom name and, last, the SQL private
-  endpoint. It plans by default (every child command printed, nothing signed in to), keeps a per-tenant + resource-group
+  restore the live apps), the install check from inside the network, the registry's public access off (Redeploy; the
+  same change and decision as Rebuild's `-LockRegistry`, refused until the registry has an approved private endpoint,
+  the build pool runs in the VNet and the updater job carries `PIM_ACR_AGENT_POOL`), an optional custom name and, last,
+  the SQL private endpoint followed by `Set-PimSqlPublicAccess.ps1 -Disable` (refused without an approved SQL private
+  endpoint). It plans by default (every child command printed, nothing signed in to), keeps a per-tenant + resource-group
   state file without secrets so `-Resume` continues after a stop or a failure, and exits 10 at the two points where the
   customer's network team acts (the hub side of the peering with `-SkipPeering`; the check from inside before any public
   endpoint is closed). One REST session pinned to the tenant serves every step in the same process; a session of another
@@ -9709,6 +9768,24 @@ step stays the last event. Reporting is best effort: a report that fails is warn
 fails or slows the install. Messages are scrubbed of anything credential-shaped, and the token travels only as a request
 header. The guided install does not post itself: Invardia's bootstrap reports its steps.
 
+**Sub-step progress of the hosting step (multi-tenant build).** The build's `hosting` step deploys the whole environment
+and runs for many minutes in its own process. While it runs, each of its parts is reported as its own step with the id
+`hosting.<part>` and the title "<hosting step title>: <part title>", through the same events (one sequence, the same
+states, scrubbed one-line messages) to Invardia and to the guided install's reporter. The part ids are stable:
+`enroll`, `prereq`, `image`, `infra`, `sqlaccess`, `schema`, `mailsender`, `features`, `licence`, `easyauth`, `code`,
+`updater`, `access`, `alerting`, `verify`, `verify-install` (the deploy's own step keys; the app-registration step is
+never shown). The deploy process writes one marker line per step event only when the build asks for it, and the build
+turns each marker into an event; a marker is never shown as console output or used as a failure cause. A single-tenant
+guided install already reports the same parts as top-level steps.
+
+**The SQL half of the region check on a new subscription.** Azure refuses to describe Azure SQL's capabilities in a
+region while the Microsoft.Sql provider is not registered. The region check then says so ("Microsoft.Sql is not
+registered yet -- setup registers it in the prerequisites step; the region check for SQL runs then") instead of
+warning that it could not check, and the prerequisites step, right after it registers the provider and before it creates
+anything, checks that the region is open to the subscription and offers the Standard S0 database; if not, it stops and
+says to choose another region. A provider that is registered but whose answer cannot be read is still reported as not
+checked.
+
 ### 30.7 The mail check: exactly what mail needs, line by line
 Mail is optional: an install never fails on it, the Home banner shows it in amber at most, and the Get Started step
 Mail sender can be skipped for now (Admins are then reminded once per session until it is complete). What mail needs is
@@ -9731,3 +9808,60 @@ Each sending identity records the result of its own last real send, so a send ri
 that is not complete shows its fix: the published setup script with this environment's values (an Exchange or Global
 Administrator signs in in the browser; it creates or scopes the mailbox, gives both identities their send right and
 removes a tenant-wide permission), the SMTP password script, or the PIM Manager page. Never a certificate.
+
+### 30.8 The as-built document (rendered inside the environment)
+PIM Manager can describe its own installation as a plain, table-style A4 PDF -- the answer to each question of the PIM
+Manager design configurator (the questions' ids are a stable contract) plus the environment facts: version, update ring,
+edition, MSP role, network mode, region, the endpoints the heartbeat reports, the administration model, reviews and
+alerting. It is rendered **inside the customer's environment**; nothing is sent anywhere for it.
+
+**One generator, two callers.** `engine/_shared/PIM-AsBuilt.ps1` reads the facts, builds a model and renders the PDF.
+* **Admins** download it from Settings > Copy & tools > As-built document (`GET /api/asbuilt/pdf`; `GET /api/asbuilt`
+  returns the model as JSON). Admin role or higher; every download is written to the audit trail (counts only).
+* **Support on request**: a Container Apps job, `caj-pim-asbuilt`, with a manual trigger runs the same generator and
+  writes `https://<PIM storage account>.blob.core.windows.net/asbuilt/<execution name>.pdf`. A lifecycle rule deletes the
+  blobs in `asbuilt` one day after they were written. The Invardia Support app can start that job, read its executions
+  and read that one container -- nothing else -- and only after the customer runs `Grant-PimSupportAccess.ps1`
+  (level `asbuilt`, also included in `troubleshoot` and `setup`; `-Remove` takes it back).
+
+**Read, never guessed, never personal.** Each configurator question names its as-built source (a setting, a feature
+switch, the licence, the store's own service objective, or what the setup recorded about the Container Apps
+environment); a question that cannot be read from an installation is left out and listed by id at the end of the
+document. Lists of people (SuperAdmins, break-glass accounts, alert recipients) become counts before the model is built;
+the webhook URL, the install key, salts and the licence document never reach it; every value passes a final filter that
+drops anything shaped like an e-mail address, a GUID, a token, a key or a URL with credentials or a query string.
+
+**How the job reads the store.** The job's managed identity has a contained database user with SELECT on one view,
+`pim.vw_AsBuiltSettings`, and nothing else. The view lists exactly the settings the document needs and reduces the rows
+that hold people or secrets in SQL (to a count, a kind or a yes/no), so they never leave the database. The Manager reduces
+the same rows in PowerShell to the same shapes, so both callers produce the same document. The job's only Azure right is
+Storage Blob Data Contributor on the `asbuilt` container; the storage account allows no shared key and no anonymous access.
+
+**Who can read the PDF the job writes.** On every installation, internal ones included, the storage account keeps a public
+endpoint that accepts only Entra tokens -- no shared key, no anonymous access. The blob is readable **only by the
+Invardia Support app's identity, after the customer grants it** with `Grant-PimSupportAccess.ps1` (level `asbuilt`), and
+it is **deleted after 24 hours** by the lifecycle rule. The job's own identity can write to the container; nobody else
+has any right on it. Admins do not need this path: they download the same PDF from PIM Manager.
+
+**Defaults are marked.** Where nothing is stored and PIM Manager uses its built-in behaviour (single tenant, no second
+approver, no second person for a guard release, the longest activation, audit retention, backup retention), the value is
+printed followed by "(default)", so it is clear that nobody chose it.
+
+**The PDF library.** PDFsharp + MigraDoc (MIT licence) are pinned in the image as .NET assemblies (a separate build stage,
+like the SQL driver) and loaded with `Add-Type`; no PowerShell module, no browser. PDFsharp has no font lookup on Linux, so
+PIM supplies a small font resolver that serves the DejaVu Sans fonts the image carries. The fonts are kept in the
+repository (pinned by checksum, checked when the image is built), so building the image needs no package manager and no
+extra network. The licences ship in the image next to the assemblies and fonts.
+
+**Setup.** `tools/setup/Deploy-PimAsBuiltJob.ps1` (run by the deploy together with the updater, best effort) creates or
+converges the storage account, the private `asbuilt` container and its lifecycle rule, the job, the job identity's storage
+right, the custom role the support app is later assigned (start the job + read its executions, assignable in the PIM
+resource group), the view, the job's database user and a small record of the install facts the store cannot know (region,
+internal or external network, resource group). REST / ARM only.
+
+**Existing environments.** The in-cloud updater brings an installation that predates the as-built job to the same setup
+on its next run: the storage account, the container and its lifecycle rule, the job (always on the Manager's current
+image), and -- over its own database connection, so a private database works too -- the view, the job's database user and
+the install facts. The updater cannot assign Azure roles; the job's right to write its container and the support custom
+role are reported in the update log and given by `Initialize-PimHostingAccess.ps1`, run once by an Owner of the resource
+group. The guided install can grant Invardia support the `asbuilt` level on its own.

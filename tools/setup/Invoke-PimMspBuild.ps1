@@ -285,6 +285,17 @@ function Send-PimMspStepEvent {
     if ($OnStep) { try { & $OnStep ([pscustomobject]@{ key = $StepId; name = $Title; state = $State; detail = $Message }) | Out-Null } catch { } }
     return (Send-PimInstallTrackEvent -Tracker $Tracker -StepId $StepId -Title $Title -State $State -Message $Message)
 }
+function Receive-PimMspSubStepLine {
+    # 2026-10-11: one console line of a step process. A sub-step marker (_PimInstallTracking.ps1) is relayed as the step
+    # event '<step>.<sub-step>' (Invardia + -OnStep) and $true is returned (the caller drops the line); anything else -> $false.
+    param([string]$Line, [object]$Step)
+    $sub = ConvertFrom-PimSubStepEventLine -Line $Line -ParentStepId "$($Step.id)" -ParentTitle "$($Step.title)"
+    if ($null -eq $sub) { return $false }
+    [void](Send-PimMspStepEvent -Tracker $tracker -StepId $sub.StepId -Title $sub.Title -State $sub.State -Message $sub.Message)
+    $c = switch ($sub.State) { 'failed' { 'Red' } 'warning' { 'Yellow' } 'ok' { 'Green' } default { 'DarkGray' } }
+    Write-Host ("    [{0,-8}] {1}{2}" -f $sub.State, $sub.StepId, $(if ($sub.Message) { " -- $($sub.Message)" } else { '' })) -ForegroundColor $c
+    return $true
+}
 $prevInstallTokenEnv = $env:INVARDIA_INSTALL_TOKEN
 if ($null -ne $prevInstallTokenEnv) { Remove-Item Env:\INVARDIA_INSTALL_TOKEN -ErrorAction SilentlyContinue }
 if ($tracker.enabled) { Write-Host "    install tracking: every step is reported to Invardia ($($tracker.url)); a failed report never fails the build" -ForegroundColor DarkGray }
@@ -483,6 +494,8 @@ try {
         $scriptPath = [IO.Path]::GetFullPath((Join-Path $solRoot (ConvertTo-PimMspStepScriptPath -Path $s.script)))   # Linux: '/' separators
         if ($StepRunner) {
             $res = & $StepRunner $s $argsOut
+            # test seam: the step's console lines (res.lines) take the same path as a real step process's output
+            foreach ($tl in @($res.lines | Where-Object { $null -ne $_ })) { [void](Receive-PimMspSubStepLine -Line "$tl" -Step $s) }
             $ok = [bool]$res.ok; $output = "$($res.output)"
         } else {
             if (-not (Test-Path -LiteralPath $scriptPath)) { throw "step '$($s.id)': script not found: $scriptPath" }
@@ -520,8 +533,12 @@ try {
             # 2026-10-10: the step's console stays visible AND its last lines are kept, so a failed step's event carries the
             # real cause (a customer's hosting step failed with only "the step failed" in the progress feed).
             $stepLines = New-Object System.Collections.Generic.List[string]
-            try { & $exe @childArgs 2>&1 | ForEach-Object { $l = "$_"; $stepLines.Add($l); if ($stepLines.Count -gt 60) { $stepLines.RemoveAt(0) }; $_ } | Out-Host }
-            finally { $env:PIM_HANDOFF_TOKENS = $null }
+            # 2026-10-11 hosting sub-step progress: the step process writes one marker line per deploy step event (only when
+            # asked, for this process only); each is relayed as '<step>.<sub-step>' and never echoed or kept as a cause line.
+            $prevSubStepEnv = $env:PIM_SUBSTEP_EVENTS
+            $env:PIM_SUBSTEP_EVENTS = '1'
+            try { & $exe @childArgs 2>&1 | ForEach-Object { $l = "$_"; if (Receive-PimMspSubStepLine -Line $l -Step $s) { return }; $stepLines.Add($l); if ($stepLines.Count -gt 60) { $stepLines.RemoveAt(0) }; $_ } | Out-Host }
+            finally { $env:PIM_HANDOFF_TOKENS = $null; $env:PIM_SUBSTEP_EVENTS = $prevSubStepEnv }
             $ok = ($LASTEXITCODE -eq 0)
             if (-not $ok) {
                 # the CAUSE first (the real error text), the summary lines ("step 'x' FAILED", "DONE. status=failed") only as a

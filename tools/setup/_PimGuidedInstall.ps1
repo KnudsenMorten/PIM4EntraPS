@@ -168,7 +168,7 @@ function Test-PimInstallConfig {
     if ($sa -and $sa -notmatch $script:PimInstallGuid) { $err.Add('supportAppId must be a GUID (the Invardia Support app''s client id)') }
     $c.supportAppId = $sa
     $lvl = "$(& $get 'supportAccess')".Trim().ToLowerInvariant(); if (-not $lvl) { $lvl = 'troubleshoot' }
-    if ($lvl -notin 'troubleshoot', 'setup') { $err.Add("supportAccess must be troubleshoot or setup (got '$lvl')") }
+    if ($lvl -notin 'troubleshoot', 'setup', 'asbuilt') { $err.Add("supportAccess must be troubleshoot, setup or asbuilt (got '$lvl')") }   # 100.61: asbuilt = only the as-built job + its container
     $c.supportAccess = $lvl
     # §95.4 (2026-10-06): the update ring a PRO install follows -- 2 = design partners, 3 = broad (default). Ring 0/1 are
     # Invardia's own and never a customer's. Not on the wizard page: an operator-run production install sets it in config.

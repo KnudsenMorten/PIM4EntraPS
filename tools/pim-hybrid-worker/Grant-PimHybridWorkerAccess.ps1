@@ -1,9 +1,14 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     §80.2 PIMHYBRIDWRK -- what the worker VM's managed identity may do outside AD. Least privilege, read-before-write.
 
 .DESCRIPTION
+    Grants the hybrid worker's managed identity (Azure VM or Azure Arc server) exactly what it needs outside Active
+    Directory: a database user in the PIM store, read-only Microsoft Graph roles and read access to the PIM source
+    store.
+
       SQL     a contained user created from the identity's appId SID (no server identity / Directory Readers needed), in
               db_datareader + db_datawriter. NEVER db_ddladmin: the worker changes rows (its scheduler state, run history,
               audit), never the schema.
@@ -16,15 +21,30 @@
 
     Run in Windows PowerShell 5.1 (the SQL login with an access token is reliable there). -WhatIf prints the plan.
 
+    §100.63(b) ON-PREMISES (Azure Arc): -ArcMachineResourceId instead of -PrincipalId reads the Arc machine's
+    system-assigned identity from ARM (Microsoft.HybridCompute/machines, identity.principalId) and grants it the SAME
+    rights. Name the SQL user per worker (-SqlUserName) when you run more than one.
+
+.EXAMPLE
+    powershell.exe -File .\Grant-PimHybridWorkerAccess.ps1 -SubscriptionId <sub> -TenantId <tenant> `
+        -ArcMachineResourceId /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.HybridCompute/machines/<server> `
+        -SqlServer <server>.database.windows.net -SourceContainerId <storage-id>/blobServices/default/containers/pim-src
+
 .EXAMPLE
     powershell.exe -File .\Grant-PimHybridWorkerAccess.ps1 -SubscriptionId <sub> -TenantId <tenant> -PrincipalId <mi-object-id> `
         -SqlServer <server>.database.windows.net -SqlDatabase PimPlatform -SourceContainerId <storage-id>/blobServices/default/containers/pim-src
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Grant-PimHybridWorkerAccess/
 #>
-[CmdletBinding(SupportsShouldProcess)]
+[CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Principal')]
 param(
     [Parameter(Mandatory)][string]$SubscriptionId,
     [Parameter(Mandatory)][string]$TenantId,
-    [Parameter(Mandatory)][string]$PrincipalId,
+    [Parameter(Mandatory, ParameterSetName = 'Principal')][string]$PrincipalId,
+    # §100.63(b) the on-premises worker: the Azure Arc machine whose system-assigned identity gets exactly the same rights
+    [Parameter(Mandatory, ParameterSetName = 'Arc')][string]$ArcMachineResourceId,
+    [string]$ArcApiVersion = '2024-07-10',
     [string]$SqlServer = '',
     [string]$SqlDatabase = 'PimPlatform',
     [string]$SqlUserName = 'PIMHYBRIDWRK',
@@ -32,6 +52,12 @@ param(
     [switch]$GrantMailSend
 )
 $ErrorActionPreference = 'Stop'
+
+# 12.7 run frame: "<Script> version <x.y.z> - documentation: <page>" as the first line + a transcript in the temp folder.
+. (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Grant-PimHybridWorkerAccess'
+try {
+
 function Step($m) { Write-Host "[grant] $m" -ForegroundColor Cyan }
 function Info($m) { Write-Host "        $m" -ForegroundColor Gray }
 # 100.41 (framework 12.17 NO-AZ): Graph / ARM / SQL tokens come from PIM-Rest's ONE token client (engine/_shared/PIM-ArmSetup.ps1):
@@ -46,6 +72,17 @@ if ("$($global:PIM_TenantId)".Trim() -and "$($global:PIM_TenantId)".Trim().ToLow
 }
 $acct = Get-PimArmSubscription -SubscriptionId $SubscriptionId
 if ("$($acct.tenantId)" -ne $TenantId) { throw "subscription $SubscriptionId reads tenant '$($acct.tenantId)', not '$TenantId' -- refusing" }
+
+if ($PSCmdlet.ParameterSetName -eq 'Arc') {
+    # The Arc machine's system-assigned identity (identity.principalId on Microsoft.HybridCompute/machines) -- every grant
+    # below is then the SAME code as for the Azure VM worker, with this principal.
+    if ($ArcMachineResourceId -notmatch '^/subscriptions/([^/]+)/resourceGroups/[^/]+/providers/Microsoft\.HybridCompute/machines/[^/]+$') { throw "not an Azure Arc machine resource id: '$ArcMachineResourceId'" }
+    $arcMachine = Invoke-PimSetupArm -Path $ArcMachineResourceId -ApiVersion $ArcApiVersion -NotFoundOk
+    if (-not $arcMachine) { throw "Arc machine not found: $ArcMachineResourceId" }
+    $PrincipalId = "$($arcMachine.identity.principalId)"
+    if (-not $PrincipalId) { throw "the Arc machine $($arcMachine.name) carries no system-assigned identity (identity.principalId) -- is the Connected Machine agent connected?" }
+    Step "Arc machine $($arcMachine.name) ($("$($arcMachine.properties.status)")): identity $PrincipalId"
+}
 
 $sp = Invoke-PimSetupGraph -Path "/servicePrincipals/$PrincipalId`?`$select=id,appId,displayName" -NotFoundOk
 if (-not $sp.appId) { throw "no service principal $PrincipalId in tenant $TenantId" }
@@ -98,3 +135,5 @@ if ($SqlServer) {
     } finally { $cn.Close() }
 }
 Step 'done'
+
+} finally { Stop-PimScriptRun -Script 'Grant-PimHybridWorkerAccess' }

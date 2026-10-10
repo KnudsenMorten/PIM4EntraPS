@@ -1,10 +1,14 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     The hybrid worker's OUTBOUND path: a NAT gateway on its subnet, and NO public IP on the VM. Also MIGRATES a worker
     installed with the old default (-Egress PublicIp put a public IP on the VM's NIC).
 
 .DESCRIPTION
+    Puts the hybrid worker VM's outbound traffic behind a NAT gateway and makes sure the VM itself has no public IP
+    address.
+
     🔒 The worker writes AD (its gMSA can change AdminSDHolder-protected groups): it is a Tier-0 machine. It may reach
        Graph, the PIM store, its update source and Windows Update OUTBOUND, through the subnet's default gateway -- but it
        never has a public IP of its own, and nothing can open a connection to it (operator, 2026-10-04: "it just cannot
@@ -25,6 +29,9 @@
 
 .EXAMPLE
     .\Set-PimHybridWorkerEgress.ps1 -SubscriptionId <sub> -TenantId <tenant> -ResourceGroup rg-pimhybridwrk -WhatIf
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Set-PimHybridWorkerEgress/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -39,6 +46,12 @@ param(
     [string]$PublicIpName = ''
 )
 $ErrorActionPreference = 'Stop'
+
+# 12.7 run frame: "<Script> version <x.y.z> - documentation: <page>" as the first line + a transcript in the temp folder.
+. (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Set-PimHybridWorkerEgress'
+try {
+
 function Step($m) { Write-Host "[egress] $m" -ForegroundColor Cyan }
 function Info($m) { Write-Host "         $m" -ForegroundColor Gray }
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -64,7 +77,11 @@ $acct = Get-PimArmSubscription -SubscriptionId $SubscriptionId
 if ("$($acct.tenantId)" -ne $TenantId) { throw "subscription $SubscriptionId reads tenant '$($acct.tenantId)', not '$TenantId' -- refusing" }
 $subnetId = NetId 'virtualNetworks' $VnetName "subnets/$SubnetName"
 $subnet = ArmTry $subnetId
-if (-not $subnet) { throw "subnet $VnetName/$SubnetName not found in $ResourceGroup" }
+if (-not $subnet) {
+    # a -WhatIf of the infrastructure build calls this before the subnet exists: say what will happen, do not fail the plan
+    if ($WhatIfPreference) { Step "plan only (-WhatIf): subnet $VnetName/$SubnetName does not exist yet -- once it does, it gets NAT gateway $NatGatewayName (no public IP on the VM)"; return }
+    throw "subnet $VnetName/$SubnetName not found in $ResourceGroup"
+}
 if (-not $Location) { $Location = "$((Invoke-PimSetupArm -Path (NetId 'virtualNetworks' $VnetName) -ApiVersion $net).location)" }
 Step "worker $VmName in $ResourceGroup ($Location): outbound through NAT gateway $NatGatewayName, no public IP on the VM"
 
@@ -151,3 +168,5 @@ if ("$($s2.properties.natGateway.id)" -notmatch "/natGateways/$([regex]::Escape(
 if ($bad.Count) { throw ("egress NOT as required: " + ($bad -join '; ')) }
 $ip = "$((Invoke-PimSetupArm -Path $pipId -ApiVersion $net).properties.ipAddress)"
 Step "done: $VmName has NO public IP; outbound leaves through $NatGatewayName as $ip; inbound stays denied by the NSG"
+
+} finally { Stop-PimScriptRun -Script 'Set-PimHybridWorkerEgress' }

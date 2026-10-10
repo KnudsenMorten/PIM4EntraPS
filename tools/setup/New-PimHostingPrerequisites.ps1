@@ -152,6 +152,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ArmSetup.ps1')
 . (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+. (Join-Path $PSScriptRoot '_PimRegions.ps1')            # BUG-300: the SQL region check after Microsoft.Sql is registered
 $null = Start-PimScriptRun -Script 'New-PimHostingPrerequisites'
 try {
 
@@ -313,15 +314,25 @@ Write-Host "[1] resource providers ..." -ForegroundColor Yellow
 # Microsoft.KeyVault (2026-10-08, a production MSP build on an EMPTY subscription): the managing tenant's signing-key vault
 # failed with 409 MissingSubscriptionRegistration at step signingkey -- every provider the build uses is registered HERE.
 $providers = 'Microsoft.App','Microsoft.ContainerRegistry','Microsoft.OperationalInsights','Microsoft.Network','Microsoft.Sql','Microsoft.Storage','Microsoft.KeyVault','Microsoft.ManagedIdentity','Microsoft.Insights'   # ManagedIdentity: a fresh subscription refused the pull identity (MissingSubscriptionRegistration, 2026-10-10)
+$sqlJustRegistered = $false
 foreach ($p in $providers) {
     $state = Get-PimArmProviderState -SubscriptionId $SubscriptionId -Namespace $p
     if ($state -ne 'Registered') {
         Write-Host "    registering $p ..."
+        if ($p -eq 'Microsoft.Sql') { $sqlJustRegistered = $true }
         try { [void](Register-PimArmProvider -SubscriptionId $SubscriptionId -Namespace $p -Wait) } catch { Write-PrereqRestNote $_.Exception.Message }
     }
     $state = Get-PimArmProviderState -SubscriptionId $SubscriptionId -Namespace $p
     Write-Host ("    {0,-32} {1}" -f $p, $state)
     if ($state -ne 'Registered') { throw "provider $p is '$state' -- cannot continue" }
+}
+# BUG-300: the install's region preflight could not read Azure SQL's capabilities while Microsoft.Sql was unregistered and
+# said "the region check for SQL runs then" -- THIS is "then": right after the registration, before anything is created.
+if ($sqlJustRegistered -and -not $SkipSql) {
+    $sqlCapNow = Invoke-PimSetupArm -Path "/subscriptions/$SubscriptionId/providers/Microsoft.Sql/locations/$(ConvertTo-PimRegionKey $Location)/capabilities" -ApiVersion '2021-11-01' -ErrorAsNull
+    $sqlRegion = Test-PimSqlRegionAfterRegistration -Capabilities $sqlCapNow -Location (ConvertTo-PimRegionKey $Location)
+    Write-Host "    SQL region check: $($sqlRegion.message)" -ForegroundColor $(switch ($sqlRegion.state) { 'ok' { 'Gray' } 'warning' { 'Yellow' } default { 'Red' } })
+    if ($sqlRegion.state -eq 'failed') { throw "REFUSED -- $($sqlRegion.message)" }
 }
 
 # ---- 2. resource group ------------------------------------------------------
