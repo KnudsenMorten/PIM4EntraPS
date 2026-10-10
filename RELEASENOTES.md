@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.573 -- 2026-10-10
+
+- Setup: once sign-in is in front of it, the PIM Manager is made reachable (external ingress) even when an earlier run left it closed.
+
 ## 2.4.572 -- 2026-10-10
 
 - Setup: a customer installation no longer runs the developer GUI smoke test after deploying the code; the installation checks the Manager over REST instead.

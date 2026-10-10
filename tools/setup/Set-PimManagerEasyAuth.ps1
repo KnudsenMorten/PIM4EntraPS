@@ -1095,6 +1095,26 @@ if (-not $WhatIfPreference) {
     }
     Note $(if ($gate.changed) { 'OPENED: the closing access restriction was removed and read back' } else { 'nothing to open (the closing access restriction is not on this app)' })
     if (@($gate.rules).Count) { Note "access restrictions still in force (yours, untouched): $(@($gate.rules) -join ', ')" }
+    # 2026-10-10 (a customer's resume): the infra step creates the Manager on INTERNAL ingress, closes it, then switches it to
+    # external. When the close failed on the first run the switch never happened, and every resume skipped infra as current --
+    # so the Manager stayed internal (unreachable) with Easy Auth working. Easy Auth is verified here, so on an EXTERNAL
+    # environment put the app on external ingress now (read back). An internal-only environment is left alone.
+    try {
+        $mApp = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull
+        $envId = "$($mApp.properties.managedEnvironmentId)$($mApp.properties.environmentId)".Trim()
+        $envObj = $(if ($envId) { Invoke-PimSetupArm -Path $envId -ApiVersion (Get-PimSetupApiVersion aca) -ErrorAsNull } else { $null })
+        $envInternal = "$($envObj.properties.vnetConfiguration.internal)".Trim()
+        $isExt = "$($mApp.properties.configuration.ingress.external)".Trim()
+        if ($mApp -and $isExt -notmatch '(?i)^true$' -and $envInternal -notmatch '(?i)^true$') {
+            Step "put '$App' on external ingress (Easy Auth is in front of it)"
+            [void](Invoke-PimEaBusyRetry -Write {
+                Set-PimArmAcaAppConfiguration -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Mutate { param($cfg) if ($cfg.ingress) { $cfg.ingress.external = $true } }
+            })
+            $back = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull).properties.configuration.ingress.external)".Trim()
+            if ($back -match '(?i)^true$') { Note "EXPOSED behind Easy Auth: '$App' is on external ingress (read back)" }
+            else { Write-Host "    '$App' ingress.external still reads '$back' -- it stays internal (closed); re-run to retry" -ForegroundColor Yellow }
+        }
+    } catch { Write-Host "    could not put '$App' on external ingress: $($_.Exception.Message) -- it stays internal (closed); re-run to retry" -ForegroundColor Yellow }
 }
 
 $result.ok = $true
