@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.564 -- 2026-10-10
+
+- Setup resume: the image-pull identity created by an earlier run is found again, so the container apps are created.
+
 ## 2.4.563 -- 2026-10-10
 
 - Setup: closing a newly created PIM Manager while Azure still provisions it now waits and retries, and reports the real error if it cannot.

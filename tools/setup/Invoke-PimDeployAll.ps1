@@ -1924,12 +1924,24 @@ function Invoke-DefaultStepRunner {
             # a well-formed id for an identity that may not exist, turning a clear refusal into an
             # opaque ACA failure at app-create time. If the read comes back empty we forward nothing
             # and the existing refusal stands, naming the real problem.
-            if (-not "$RegistryIdentityResourceId".Trim() -and "$PrereqIdentityName".Trim() -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and (Test-PimDeployRest)) {
-                $derivedPull = "$((Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $PrereqIdentityName -ErrorAsNull).id)"
+            # 2026-10-10 (a customer's RESUME after a partial first run): the name was empty on the resume path, so nothing was
+            # resolved and the refusal fired although id-pim-<token> existed. The name now falls back to the token, then to the
+            # registry name (acrpim<token>), and last to the ONE 'id-pim-*' identity in the resource group (not id-pim-sql-*).
+            $pullName = "$PrereqIdentityName".Trim()
+            if (-not $pullName -and "$PrereqToken".Trim()) { $pullName = "id-pim-$("$PrereqToken".Trim())" }
+            if (-not $pullName -and "$AcrName".Trim() -match '^acrpim(?<t>[a-z0-9]+)$') { $pullName = "id-pim-$($Matches['t'])" }
+            if (-not "$RegistryIdentityResourceId".Trim() -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and (Test-PimDeployRest)) {
+                $derivedPull = ''
+                if ($pullName) { $derivedPull = "$((Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $pullName -ErrorAsNull).id)" }
+                if ("$derivedPull".Trim() -notmatch '^/subscriptions/') {
+                    $ids = @(Invoke-PimSetupArm -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.ManagedIdentity/userAssignedIdentities" -ApiVersion (Get-PimSetupApiVersion msi) -All -ErrorAsNull |
+                             Where-Object { $_ -and "$($_.name)" -match '^id-pim-' -and "$($_.name)" -notmatch '^id-pim-sql-' })
+                    if ($ids.Count -eq 1) { $derivedPull = "$($ids[0].id)"; $pullName = "$($ids[0].name)" }
+                }
                 if ("$derivedPull".Trim() -match '^/subscriptions/') {
                     $RegistryIdentityResourceId = "$derivedPull".Trim()
-                    Write-Host "    pull identity: $PrereqIdentityName (resolved -- no -RegistryIdentityResourceId needed)" -ForegroundColor DarkGray
-                }
+                    Write-Host "    pull identity: $pullName (resolved -- no -RegistryIdentityResourceId needed)" -ForegroundColor DarkGray
+                } else { Write-Host "    pull identity: NOT found in $ResourceGroup (looked for '$pullName' and any id-pim-*)" -ForegroundColor Yellow }
             }
             $registryIdentity = @{}
             if ($RegistryIdentityResourceId) { $registryIdentity['RegistryIdentityResourceId'] = $RegistryIdentityResourceId }
