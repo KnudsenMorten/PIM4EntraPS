@@ -1,4 +1,4 @@
-﻿<#
+<#
   PIM4EntraPS -- pure-REST auth + data plane (NO Graph/Az/MSAL modules).
 
   One place the whole solution gets tokens and calls Microsoft REST APIs, so the
@@ -245,7 +245,9 @@ function Get-PimInteractiveClientId {
      (pre-authorised for Graph only); everything else (ARM, Azure SQL, Key Vault, Storage) -> the Microsoft Azure CLI
      client APP ID (an app registration id used over REST, not the az program). AADSTS650057 on ARM, 2026-10-10. #>
   param([string]$Audience)
-  if ("$Audience" -match 'graph\.microsoft\.com') { return '14d82eec-204b-4c2f-b7e8-296a70dab67e' }
+  # ONE client for every audience (2026-10-10, a customer's install stalled on a hidden SECOND sign-in window when Graph
+  # used a different client): the Azure CLI first-party public client is pre-authorised for Graph AND ARM / SQL / Key
+  # Vault / Storage in every tenant, so ONE browser sign-in serves all of them through its refresh token.
   return '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
 }
 
@@ -261,6 +263,20 @@ function Get-PimInteractiveToken {
   # Manager, Azure SQL, Key Vault and Storage use the Microsoft Azure CLI first-party public client APP ID
   # (04b07795-..., an app registration id used over REST -- not the az program), pre-authorised for those in every tenant.
   $cid = if ($ClientId) { $ClientId } elseif ($global:PIM_InteractiveClientId) { $global:PIM_InteractiveClientId } else { Get-PimInteractiveClientId -Audience $Audience }
+
+  # ONE sign-in: a refresh token from an earlier browser sign-in (same tenant + client) is exchanged for this audience --
+  # no second window. Falls through to the browser only when there is none or the exchange is refused.
+  if (-not $script:PimInteractiveRefresh) { $script:PimInteractiveRefresh = @{} }
+  $rtKey = "$tenant|$cid".ToLowerInvariant()
+  if ($script:PimInteractiveRefresh.ContainsKey($rtKey) -and -not $ForceFreshAccount) {
+    try {
+      $rr = Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$tenant/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{
+        client_id = $cid; grant_type = 'refresh_token'; refresh_token = $script:PimInteractiveRefresh[$rtKey]
+        scope = "$Audience/.default offline_access openid profile" }
+      if ($rr.refresh_token) { $script:PimInteractiveRefresh[$rtKey] = $rr.refresh_token }
+      if ($rr.access_token) { return [pscustomobject]@{ token = $rr.access_token; expiresUtc = (Get-Date).ToUniversalTime().AddSeconds([int]$rr.expires_in - 60) } }
+    } catch { Write-Verbose "refresh-token exchange for $Audience refused: $($_.Exception.Message) -- browser sign-in" }
+  }
 
   $bytes = New-Object byte[] 32
   [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
@@ -349,6 +365,7 @@ function Get-PimInteractiveToken {
     } catch { $tid = '' }
     if ($tid -and $tid -ne $tenant) { throw "You signed in to tenant $tid, but this is for tenant $tenant -- sign in with an account of $tenant (use that admin's browser profile)." }
   }
+  if ($r.refresh_token) { $script:PimInteractiveRefresh["$tenant|$cid".ToLowerInvariant()] = $r.refresh_token }   # in memory only, never written
   return [pscustomobject]@{ token = $r.access_token; expiresUtc = (Get-Date).ToUniversalTime().AddSeconds([int]$r.expires_in - 60) }
 }
 

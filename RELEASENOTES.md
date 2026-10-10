@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.556 -- 2026-10-10
+
+- Setup signs you in once: one browser sign-in now covers Microsoft Graph and Azure (no second sign-in window).
+
 ## 2.4.555 -- 2026-10-10
 
 - Browser sign-in: Azure sign-in no longer fails with AADSTS650057, opens a private browser window, refuses another tenant.
