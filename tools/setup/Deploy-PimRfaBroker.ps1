@@ -1,10 +1,11 @@
 ﻿#Requires -Version 5.1
+
 <#
 .SYNOPSIS
-  §82 P4 -- deploy the PUBLIC RFA broker (Pro): its store, its network, its Container Apps environment and app, the
-  rights, Easy Auth. REQUIREMENTS §82.6 (Shared / Island placement), §90.
+  Deploys the public access-request (RFA) broker of PIM Manager Pro: its storage account and tables, its network, its Container Apps environment and app, the storage rights and Easy Auth; with the inputs given it also registers the API audience, the broker's mail sender and PIM's RFA settings. Plan only unless -Apply.
 
 .DESCRIPTION
+  §82 P4. REQUIREMENTS §82.6 (Shared / Island placement), §90.
   PLAN ONLY unless -Apply: prints every step (Get-PimRfaBrokerDeployPlan, offline-tested). With -Apply each step runs
   over ARM REST (PIM-Rest's one token client: the calling run's session, else the Invardia Support app's session, else
   the person signed in in the browser -- no az, 100.41 / framework 12.17), every call naming its step's subscription in
@@ -27,8 +28,11 @@
   .\Deploy-PimRfaBroker.ps1 -SubscriptionId <pim sub> -ResourceGroup rg-automateit-x -VnetName vnet-pim -SubnetPrefix 10.20.8.0/27 `
      -PimSubnetPrefixes 10.20.0.0/23 -StorageAccountName strfax01 -Image acrx.azurecr.io/pim-manager:2.4.478 -AcrName acrx `
      -SenderMailbox pim-noreply@contoso.com -EngineIdentityPrincipalIds <tick MI principal id>          # plan only
+
+.LINK
+  https://invardia.com/docs/pim/scripts/Deploy-PimRfaBroker/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
     [ValidateSet('Shared', 'Island')][string]$Placement = 'Shared',
@@ -50,6 +54,9 @@ param(
     [switch]$Apply
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Deploy-PimRfaBroker'
+try {
 if ("$AzureConfigDir".Trim()) { Write-Host '  -AzureConfigDir is ignored: this script no longer uses the az CLI (100.41) -- it signs in through PIM-Rest.' -ForegroundColor DarkYellow }
 . (Join-Path $PSScriptRoot '_PimRfaBrokerPlan.ps1')
 $plan = Get-PimRfaBrokerDeployPlan -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Placement $Placement -RfaSubscriptionId $RfaSubscriptionId `
@@ -57,6 +64,8 @@ $plan = Get-PimRfaBrokerDeployPlan -SubscriptionId $SubscriptionId -ResourceGrou
     -StorageAccountName $StorageAccountName -EnvironmentName $EnvironmentName -AppName $AppName -Image $Image -AcrName $AcrName -SenderMailbox $SenderMailbox `
     -TenantName $TenantName -EngineIdentityPrincipalIds $EngineIdentityPrincipalIds -ApiAllowedIps $ApiAllowedIps -MinReplicas $MinReplicas -ExistingEnvironmentName $ExistingEnvironmentName
 if (-not $plan.ok) { throw "REFUSED: $($plan.reason)" }
+# -WhatIf wins over -Apply: the plan is printed, nothing runs.
+if ($Apply -and -not $PSCmdlet.ShouldProcess("$($plan.placement) RFA broker in $ResourceGroup", "deploy $(@($plan.steps).Count) step(s)")) { $Apply = $false }
 Write-Host "RFA broker deploy -- placement $($plan.placement)$(if (-not $Apply) { ' -- PLAN ONLY (add -Apply to run)' })" -ForegroundColor Cyan
 $i = 0; foreach ($s in $plan.steps) { $i++; Write-Host ("  {0,2}. [{1}] {2}" -f $i, $s.id, $s.what) }
 if (-not $Apply) { return }
@@ -257,3 +266,4 @@ foreach ($s in $plan.steps) {
 foreach ($f in $followUps) { Write-Host "   follow-up -- $f" -ForegroundColor $(if ($f -match 'FAILED') { 'Yellow' } else { 'Green' }) }
 Write-Host 'RFA broker deployed. The engine starts publishing on its next rfa-sync run once the settings name the store.' -ForegroundColor Green
 if (@($followUps | Where-Object { $_ -match 'FAILED' }).Count) { $global:LASTEXITCODE = 1; exit 1 }
+} finally { Stop-PimScriptRun -Script 'Deploy-PimRfaBroker' }

@@ -17,6 +17,9 @@
   WHEN
     * heartbeat: every 4 h (owner 2026-10-10; was 24 h). Identified only (PIM 100.36): Counts { sqlUsedMb, sqlMaxMb } -- the store's allocated data
       pages and max size, MB (Get-PimUplinkSqlSpace); a failed / empty read leaves both out, never a 0.
+      Identified only (PIM 100.56, framework 8.9): Endpoints [ { kind; url; label? } ] -- the Manager, the RFA portal, the
+      access request API, the MCP server, each only where it exists (Get-PimUplinkEndpoints); a guard record's Link is a deep
+      link into that Manager (Get-PimGuardLink, PIM-Guard.ps1).
     * run: per job NAME, the newest finished run since the last send; Outcome = failed if ANY run of it failed since,
       warning if one was held, else ok. One report per job per cycle -- never one per run: rfa-sync runs every tick and
       Invardia allows 30 POSTs a minute per IP (shared behind a NAT): at most 20 per cycle, 2.5 s apart,
@@ -265,6 +268,102 @@ function Get-PimUplinkField {
     return $null
 }
 
+# PIM 100.56 / framework §8.9 ENDPOINTS (owner 2026-10-10, via Invardia: "it would be great that the url for the customers env
+# is included in the email so i dont have to find it"): the IDENTIFIED heartbeat carries Endpoints [ { kind; url; label? } ].
+# Invardia (packages/core endpoints.ts) refuses the WHOLE report on one bad entry -- so PIM checks every entry to the same rules
+# first and leaves a bad one out: kind from the closed list and at most once, https, a DNS host, no user / password, no query
+# string or fragment (secrets travel there), no white space / quotes, at most 400 characters, at most 12 entries; label at most
+# 60 characters without control characters or < >. PIM adds: never an '.internal.' host (an internal Container Apps environment
+# is unreachable from Invardia), never localhost / an IP / a single-label or .local name.
+$script:PimUplinkEndpointKinds = @('manager', 'portal', 'api', 'activator', 'mcp', 'webapp')
+$script:PimUplinkMaxEndpoints = 12
+
+function ConvertTo-PimUplinkEndpointUrl {
+    <# PURE. The url as sent (trailing '/' removed), or '' when Invardia would refuse it or it is not reachable from outside. #>
+    param([AllowNull()][object]$Url)
+    if ($Url -isnot [string]) { return '' }
+    $s = $Url.Trim().TrimEnd('/')
+    if (-not $s -or $s.Length -gt 400 -or $s -notmatch '^(?i)https://') { return '' }
+    foreach ($ch in $s.ToCharArray()) { if ([int]$ch -le 32 -or [int]$ch -gt 126 -or '"''<>\`{}|^?#'.IndexOf($ch) -ge 0) { return '' } }
+    $u = $null
+    if (-not [Uri]::TryCreate($s, [UriKind]::Absolute, [ref]$u)) { return '' }
+    if ($u.Scheme -ne 'https' -or -not $u.Host -or "$($u.UserInfo)" -or "$($u.Query)" -or "$($u.Fragment)") { return '' }
+    $h = $u.Host.ToLowerInvariant()
+    if ($u.HostNameType -ne [UriHostNameType]::Dns -or $h -notmatch '\.' -or $h -match '(^|\.)internal(\.|$)' -or $h -match '(^|\.)localhost$' -or $h -match '\.local$') { return '' }
+    return $s
+}
+
+function Select-PimUplinkEndpoints {
+    <#
+      PURE. The Endpoints list as sent: each entry { kind; url; label? } (a dictionary or an object) checked; a bad entry is LEFT
+      OUT (never sent -- one bad entry refuses Invardia's whole report); a kind already listed is left out (first wins); at most
+      -Max (12). Returns an array of [pscustomobject] (empty when nothing is valid). Never throws.
+    #>
+    param([AllowNull()][object[]]$Endpoints = @(), [int]$Max = $script:PimUplinkMaxEndpoints)
+    $out = New-Object System.Collections.Generic.List[object]
+    if ($Max -le 0 -or $Max -gt 12) { $Max = 12 }
+    foreach ($e in @($Endpoints)) {
+        if ($null -eq $e -or $out.Count -ge $Max) { continue }
+        try {
+            $k = "$(Get-PimUplinkField $e 'kind')".Trim().ToLowerInvariant()
+            if ($k -notin @('manager', 'portal', 'api', 'activator', 'mcp', 'webapp')) { continue }   # literal: child-scope safe
+            if (@($out | Where-Object { $_.kind -eq $k }).Count) { continue }
+            $url = ConvertTo-PimUplinkEndpointUrl (Get-PimUplinkField $e 'url')
+            if (-not $url) { continue }
+            $o = [ordered]@{ kind = $k; url = $url }
+            $lab = Get-PimUplinkField $e 'label'
+            if ($lab -is [string] -and $lab.Trim() -and $lab.Trim().Length -le 60 -and $lab -notmatch '[\x00-\x1f<>]') { $o['label'] = $lab.Trim() }
+            $out.Add([pscustomobject]$o)
+        } catch { continue }
+    }
+    # Unrolled on purpose: every caller wraps the call in @(); 'return , $arr' would nest the list inside one element.
+    return $out.ToArray()
+}
+
+function New-PimUplinkEndpoints {
+    <#
+      PURE. What PIM has, as the §8.9 list: the hosted Manager (kind manager), the RFA portal (kind portal, label 'RFA portal')
+      when the broker is deployed, the access request API on that broker (kind api, <portal>/api/v1) when 'api.broker' is on,
+      the MCP server on the Manager (kind mcp, <manager>/mcp) when 'mcp.server' is on. The Activator backend is an app
+      registration -- no url; PIM has no web app. A missing / unusable url leaves that entry (and what hangs off it) out.
+    #>
+    param([string]$ManagerUrl = '', [string]$RfaPortalUrl = '', [bool]$ApiEnabled = $false, [bool]$McpEnabled = $false)
+    $m = ConvertTo-PimUplinkEndpointUrl "$ManagerUrl".Trim().Trim('"')
+    $p = ConvertTo-PimUplinkEndpointUrl "$RfaPortalUrl".Trim().Trim('"')
+    $c = New-Object System.Collections.Generic.List[object]
+    if ($m) { $c.Add(@{ kind = 'manager'; url = $m; label = 'PIM Manager' }) }
+    if ($p) { $c.Add(@{ kind = 'portal'; url = $p; label = 'RFA portal' }) }
+    if ($p -and $ApiEnabled) { $c.Add(@{ kind = 'api'; url = "$p/api/v1"; label = 'Access request API' }) }
+    if ($m -and $McpEnabled) { $c.Add(@{ kind = 'mcp'; url = "$m/mcp"; label = 'MCP server' }) }
+    return @(Select-PimUplinkEndpoints -Endpoints $c.ToArray())
+}
+
+function Get-PimUplinkEndpoints {
+    <#
+      PIM 100.56. The environment's endpoints from what it ALREADY records -- no ARM read in the tick:
+        manager  pim.Settings 'ManagerUrl' (the hosted Manager writes its own public address there on its first signed-in
+                 request: the custom hostname when one is set, else the ingress FQDN -- R25-14 / §80.1), else the mail-link
+                 resolver Get-PimPortalBaseUrl, else env PIM_MANAGER_URL;
+        portal   pim.Settings 'RfaSettings'.portalUrl (written by Deploy-PimRfaBroker / Settings > RFA broker & API);
+        api/mcp  the features 'api.broker' / 'mcp.server' (-FeatureOn { param($Key) } -> bool; default Test-PimFeatureAvailable).
+      Never throws: anything unreadable is left out.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$GetSetting, [scriptblock]$FeatureOn = $null)
+    $mgr = ''; $portal = ''; $api = $false; $mcp = $false
+    try { $v = & $GetSetting 'ManagerUrl'; if ($v -is [string]) { $mgr = $v.Trim().Trim('"') } } catch { }
+    if (-not $mgr -and (Get-Command Get-PimPortalBaseUrl -ErrorAction SilentlyContinue)) { try { $mgr = "$(Get-PimPortalBaseUrl)" } catch { } }
+    if (-not $mgr -and "$env:PIM_MANAGER_URL".Trim()) { $mgr = "$env:PIM_MANAGER_URL".Trim() }
+    try {
+        $rs = & $GetSetting 'RfaSettings'
+        if ($rs -is [string] -and $rs.Trim().StartsWith('{')) { $rs = $rs | ConvertFrom-Json }
+        $pu = Get-PimUplinkField $rs 'portalUrl'; if ($pu -is [string]) { $portal = $pu.Trim() }
+    } catch { }
+    if (-not $FeatureOn) { $FeatureOn = { param($k) [bool]((Get-Command Test-PimFeatureAvailable -ErrorAction SilentlyContinue) -and (Test-PimFeatureAvailable -Key $k -Quiet)) } }
+    try { $api = [bool](& $FeatureOn 'api.broker') } catch { $api = $false }
+    try { $mcp = [bool](& $FeatureOn 'mcp.server') } catch { $mcp = $false }
+    return @(New-PimUplinkEndpoints -ManagerUrl $mgr -RfaPortalUrl $portal -ApiEnabled $api -McpEnabled $mcp)
+}
+
 function Send-PimUplinkRecord {
     <#
       §100.39 (framework §12.6b): the framework's Send-AitUplink, WITH the response body. Send-AitUplink throws the body away
@@ -332,6 +431,9 @@ function Invoke-PimUplinkCycle {
           # framework 8.11 ASSET-COUNTS (owner 2026-10-10): @{ users; guests; servicePrincipals } the tick recorded
           # (pim.Settings 'TenantObjectCounts') -> the IDENTIFIED heartbeat's Counts; a missing / non-number key is left out.
           [AllowNull()][hashtable]$AssetCounts = $null,
+          # PIM 100.56 / framework 8.9 ENDPOINTS: [ { kind; url; label? } ] (Get-PimUplinkEndpoints) -> the IDENTIFIED heartbeat's
+          # Endpoints, checked entry by entry (Select-PimUplinkEndpoints); the manager url is also the base of every guard's Link.
+          [AllowNull()][object[]]$Endpoints = @(),
           # PIM 100.34: send FixKind unless PIM_UPLINK_FIXKIND is 0/false/off/no (ON by default -- Invardia live 6f2dce4).
           [bool]$FixKind = (Test-PimUplinkFixKindEnabled))
     $NowUtc = $NowUtc.ToUniversalTime()
@@ -363,6 +465,12 @@ function Invoke-PimUplinkCycle {
     if ($state -and $state.PSObject.Properties['jobMarks'] -and $state.jobMarks) {
         if ($state.jobMarks -is [System.Collections.IDictionary]) { foreach ($k in $state.jobMarks.Keys) { $marks["$k"] = "$($state.jobMarks[$k])" } }
         else { foreach ($p in $state.jobMarks.PSObject.Properties) { $marks["$($p.Name)"] = "$($p.Value)" } }
+    }
+    # PIM 100.56: the checked endpoints -- IDENTIFIED only (an anonymous Community install names no host). Best-effort.
+    $eps = @(); $mgrBase = ''
+    if ($sender.Mode -eq 'identified') {
+        try { $eps = @(Select-PimUplinkEndpoints -Endpoints @($Endpoints)) } catch { $eps = @() }
+        $mgrBase = "$(@($eps | Where-Object { $_.kind -eq 'manager' } | Select-Object -First 1).url)"
     }
     $common = @{ Mode = $sender.Mode; Product = $script:PimUplinkProduct; Version = $Version; Ring = $Ring; InstallId = $iid; TenantId = $TenantId; Now = $NowUtc }
     $sent = 0; $failed = 0; $why = @(); $supNote = ''; $hbSent = $false; $stopped = $false; $budget = [Math]::Max(1, $MaxPerCycle)
@@ -400,6 +508,7 @@ function Invoke-PimUplinkCycle {
         if ($hb -and $sender.Mode -eq 'identified' -and $lid -match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') {
             $hb | Add-Member -NotePropertyName 'LicenceId' -NotePropertyValue $lid -Force
         }
+        if ($hb -and $sender.Mode -eq 'identified' -and $eps.Count) { $hb | Add-Member -NotePropertyName 'Endpoints' -NotePropertyValue ([object[]]$eps) -Force }
         $r = & $post $hb
         if ("$($r.Status)" -eq 'ok') { $sent++; $hbSent = $true; $lastHb = $NowUtc.ToString('o') } else { $failed++; $stopped = $true; $why += "heartbeat: $($r.Reason)" }
         # §100.39: Invardia re-issued the installed licence -> keep its successor's id for the licence-request job. Only a
@@ -457,7 +566,7 @@ function Invoke-PimUplinkCycle {
         if ($gs -is [string]) { try { $gs = $gs | ConvertFrom-Json } catch { $gs = $null } }
         foreach ($e in @(Select-PimGuardTelemetryDue -State $gs)) {
             if ($stopped -or $sent -ge $budget) { $left++; continue }
-            $rec = New-PimGuardUplinkRecord -Entry $e -Mode $sender.Mode -Product $script:PimUplinkProduct -Version $Version -Ring $Ring -InstallId $iid -TenantId $TenantId
+            $rec = New-PimGuardUplinkRecord -Entry $e -Mode $sender.Mode -Product $script:PimUplinkProduct -Version $Version -Ring $Ring -InstallId $iid -TenantId $TenantId -ManagerUrl $mgrBase
             if (-not $rec) { continue }
             $r = & $post $rec
             if ("$($r.Status)" -eq 'ok') { $sent++; $guardsSent++; $e | Add-Member -NotePropertyName lastSentUtc -NotePropertyValue $NowUtc.ToString('o') -Force }
@@ -526,8 +635,11 @@ function Invoke-PimUplinkJob {
         $tc = & $get 'TenantObjectCounts'; if ($tc -is [string] -and "$tc".Trim()) { $tc = $tc | ConvertFrom-Json }
         if ($tc) { $assets = @{ users = $tc.Members; guests = $tc.Guests; servicePrincipals = $tc.ServicePrincipals; groups = $tc.Groups } }
     } catch { $assets = $null }
+    # PIM 100.56 / framework 8.9: the endpoints from what the environment already records (identified only; no ARM read).
+    $endpoints = @()
+    if ($on -and "$key".Trim()) { try { $endpoints = @(Get-PimUplinkEndpoints -GetSetting $get) } catch { $endpoints = @() } }
     $r = Invoke-PimUplinkCycle -GetSetting $get -SetSetting $set -Send $send -Enabled $on -InstallKey $key -Version $ver -Ring $ring `
             -Runs $runs -License $lic -ProHere $proHere -TenantId $tid -RuntimeIdentity $rid -NowUtc $NowUtc -PauseMs $(if ($WhatIf) { 0 } else { 2500 }) `
-            -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets
+            -SetupEnabled $setupOn -SetupFacts $facts -SetupExtended (Test-PimUplinkSetupExtended) -SqlSpace $sqlSpace -AssetCounts $assets -Endpoints $endpoints
     [pscustomobject]@{ ran = [bool]$r.ran; whatIf = [bool]$WhatIf; detail = "uplink: $($r.message)" }
 }

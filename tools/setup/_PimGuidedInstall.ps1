@@ -14,6 +14,8 @@
 #>
 
 $script:PimInstallGuid = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+# BUG-299: the ONE hosting-region list (Test-PimSetupRegion) -- checked in the config step, before anything is created
+. (Join-Path $PSScriptRoot '_PimRegions.ps1')
 
 # The stable step ids (the status page and support tickets refer to them) and their titles in customer language.
 # Order = run order. DeployAll's 'appreg' step is never shown: a guided install runs on managed identities only.
@@ -102,6 +104,12 @@ function Test-PimInstallConfig {
     if ($c.installId -and $c.installId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$') { $err.Add('installId must be 3-64 letters, digits, dot, dash or underscore') }
     $loc = "$(& $get 'location')".Trim(); if (-not $loc) { $loc = 'swedencentral' }
     if ($loc -notmatch '^[a-z0-9]{3,30}$') { $err.Add("location '$loc' is not an Azure region name") }
+    else {
+        # BUG-299: refuse a region PIM is not hosted in HERE (exit 3, nothing created) -- the deploy used to refuse it at the
+        # infra step, after the resource group, network, registry and database already existed.
+        $why = Test-PimSetupRegion -Location $loc
+        if ($why) { $err.Add("location: $why") }
+    }
     $c.location = $loc
     $rg = "$(& $get 'resourceGroup')".Trim(); if (-not $rg) { $rg = 'rg-pim' }
     if ($rg -notmatch '^[A-Za-z0-9._()-]{1,89}[A-Za-z0-9_()-]$') { $err.Add("resourceGroup '$rg' is not a valid resource group name") }

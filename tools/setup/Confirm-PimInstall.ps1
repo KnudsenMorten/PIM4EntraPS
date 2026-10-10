@@ -1,10 +1,12 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
-    INSTALL-HARDEN-1 (PIM REQUIREMENTS §99, owner 2026-10-08) -- the END-OF-INSTALL VERIFY: read every result an install
-    must leave behind, repair what can be repaired, print ONE table, and refuse "done" when a required line fails.
+    Verifies a PIM Manager installation at the end of the install (and any time later): it reads every result an install must leave behind, repairs what can be repaired, prints one table with the fix for each line, and refuses "done" when a required line fails.
 
 .DESCRIPTION
+    INSTALL-HARDEN-1 (PIM REQUIREMENTS §99, owner 2026-10-08) -- the END-OF-INSTALL VERIFY.
+    -WhatIf (or -NoRepair): every line is read and the table printed; no repair runs (each one is previewed as "What if:").
     The last step of every install path: Invoke-PimDeployAll ('verify-install'), the MSP build Master + Slave
     ('verify-install'), and the guided / trial install (Install-PimManager 'verify-install').
 
@@ -32,8 +34,11 @@
 .NOTES
     TEST seams: -Probe param($lineId, $ctx) -> the fact for that line (replaces every live read); -Repair param($lineId, $ctx)
     -> $true when the repair ran (replaces every live repair). tests/Test-PimInstallVerify.ps1.
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Confirm-PimInstall/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateSet('Single', 'Master', 'Slave')][string]$Role = 'Single',
     [Parameter(Mandatory)][string]$TenantId,
@@ -94,7 +99,7 @@ $here = $PSScriptRoot
 # 100.31: the engine job's size for the tenant (Test-PimJobUndersized / ConvertFrom-PimTenantSizingTags), pure
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-TenantSizing.ps1')
 # SCRIPT-DOC-1 (framework 12.7): every fix command this check prints carries the script's doc page + the checksum check
-. (Join-Path $here '_PimScriptDoc.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 # 🔴 The store: Connect-PimSetupStore + its token provider (PIM-Rest: Get-PimRestToken) + the reads (PIM-SqlStore:
 # Get-PimSqlSetting / Invoke-PimSqlScalar) -- loaded HERE, AT FILE SCOPE. The live proof on a managing tenant
 # (2026-10-08, the check run ON ITS OWN through the Invardia Support app) failed every store line twice over, and both
@@ -115,6 +120,10 @@ $here = $PSScriptRoot
 # signing certificates do not exist -- every licence read "Invalid", and a production install refused "done" while its licence
 # step had just stored and read back a Valid licence. Loaded here, the certificates live in this script's own scope.
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-License.ps1')
+$null = Start-PimScriptRun -Script 'Confirm-PimInstall'
+$script:cvRc = 0
+$script:cvCmdlet = $PSCmdlet
+try {
 $norm = { param($l) @(@($l) | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
 $SuperAdmins = @(& $norm $SuperAdmins); $AlertRecipients = @(& $norm $AlertRecipients)
 $sqlServer = ("$SqlServerFqdn".Trim() -split '\.')[0]
@@ -377,6 +386,8 @@ function Get-CvFact([string]$Id) {
 # ============================================================================ repairs (replaced by -Repair in tests)
 function Invoke-CvRepair([string]$Id, $Fact) {
     if ($NoRepair) { return $false }
+    # -WhatIf: the repair is previewed ("What if: ... repair <line>"), never run -- the line keeps its state.
+    if (-not $script:cvCmdlet.ShouldProcess("install check '$Id'", 'repair')) { return $false }
     if ($Repair) { return [bool](& $Repair $Id $ctx) }
     $global:LASTEXITCODE = 0
     try {
@@ -503,5 +514,6 @@ Write-Host ''
 Write-Host "    $($verdict.sentence)" -ForegroundColor $(if ($verdict.done) { 'Green' } else { 'Red' })
 if ("$OutFile".Trim()) { try { [ordered]@{ done = $verdict.done; failed = $verdict.failed; warnings = $verdict.warnings; sentence = $verdict.sentence; rows = $rows } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $OutFile -Encoding UTF8 } catch { } }
 [pscustomobject]@{ done = $verdict.done; failed = $verdict.failed; warnings = $verdict.warnings; sentence = $verdict.sentence; rows = $rows }
-if (-not $verdict.done) { exit 1 }
-exit 0
+if (-not $verdict.done) { $script:cvRc = 1 }
+} finally { Stop-PimScriptRun -Script 'Confirm-PimInstall' }
+exit $script:cvRc

@@ -116,13 +116,47 @@ function Select-PimGuardTelemetryDue {
     return @($out | Sort-Object { "$($_.lastSeenUtc)" })
 }
 
+function Get-PimGuardLink {
+    <#
+      PURE. PIM 100.56 (owner 2026-10-10, via Invardia): the deep link where the person ACTS on this guard, in the hosted
+      Manager -ManagerUrl (the §8.9 'manager' endpoint). '' when no usable Manager address is known (https, a DNS host, no
+      query / fragment / user, never an '.internal.' host) -- the record then carries no Link, never a guessed one.
+        held guard (a policy change set the mass-change breaker holds)  -> Approvals, opened on THAT change set:
+                                                                           /?tab=approvals&changeset=<provider, e.g. GroupsPolicies>
+        msp.licence                                                     -> Settings > Licence: /?tab=settings&section=licence
+        any other guard                                                 -> the Guards page on that guard (its state, holds,
+                                                                           release and second-person setting): /?tab=guards&guard=<id>
+      The page reads these parameters (pim-manager.html, the boot deep-link block) and checks every value against what it knows.
+    #>
+    param([AllowNull()][object]$Entry, [string]$ManagerUrl = '')
+    if ($null -eq $Entry) { return '' }
+    $b = "$ManagerUrl".Trim().Trim('"').TrimEnd('/')
+    if (-not $b -or $b.Length -gt 300 -or $b -notmatch '^(?i)https://[A-Za-z0-9.-]+(:\d{1,5})?(/[A-Za-z0-9._~/-]*)?$') { return '' }
+    $u = $null; if (-not [Uri]::TryCreate($b, [UriKind]::Absolute, [ref]$u)) { return '' }
+    $h = $u.Host.ToLowerInvariant()
+    if ($u.HostNameType -ne [UriHostNameType]::Dns -or $h -notmatch '\.' -or $h -match '(^|\.)internal(\.|$)' -or $h -match '(^|\.)localhost$' -or $h -match '\.local$') { return '' }
+    $gv = { param($n) if ($Entry -is [System.Collections.IDictionary]) { $Entry[$n] } elseif ($Entry.PSObject.Properties[$n]) { $Entry.$n } }
+    $id = "$(& $gv 'guardId')".Trim().ToLowerInvariant()
+    if ($id -notmatch '^[a-z0-9][a-z0-9.-]{0,99}$') { return '' }
+    $oc = "$(& $gv 'outcome')".Trim().ToLowerInvariant()
+    if ($oc -eq 'held') {
+        $cs = "$(& $gv 'area')".Trim()
+        return "$b/?tab=approvals" + $(if ($cs -match '^[A-Za-z0-9-]{1,40}$') { "&changeset=$cs" } else { '' })
+    }
+    if ($id -eq 'msp.licence') { return "$b/?tab=settings&section=licence" }
+    return "$b/?tab=guards&guard=$id"
+}
+
 function New-PimGuardUplinkRecord {
     <#
       PURE. One GUARD-1.3 record: Schema 2, Kind 'guard', PascalCase. ActionText (redacted, <= 500) and Link (https) only for
       an IDENTIFIED install; an anonymous one carries the install id and no tenant / text.
+      PIM 100.56: Link = Get-PimGuardLink (-ManagerUrl = the heartbeat's 'manager' endpoint); without a usable Manager address
+      a link the guard itself recorded is kept when it is https and fits Invardia's rule (<= 400, no white space / quotes / < >).
     #>
     param([Parameter(Mandatory)][object]$Entry, [ValidateSet('anonymous', 'identified')][string]$Mode = 'anonymous',
-          [string]$Product = 'pim-manager', [string]$Version = '', [AllowNull()][object]$Ring, [string]$InstallId = '', [string]$TenantId = '')
+          [string]$Product = 'pim-manager', [string]$Version = '', [AllowNull()][object]$Ring, [string]$InstallId = '', [string]$TenantId = '',
+          [string]$ManagerUrl = '')
     $o = [ordered]@{ Schema = 2; Kind = 'guard'; Product = $Product }
     $ver = "$Version".Trim(); if ($ver -match '^[0-9A-Za-z.+-]{1,50}$') { $o['Version'] = $ver }
     $rp = 0; if ($null -ne $Ring -and "$Ring" -ne '' -and [int]::TryParse("$Ring", [ref]$rp) -and $rp -ge 0 -and $rp -le 10) { $o['Ring'] = $rp }
@@ -144,7 +178,9 @@ function New-PimGuardUplinkRecord {
         $at = "$($Entry.actionText)".Trim()
         if (Get-Command ConvertTo-AitUplinkRedacted -ErrorAction SilentlyContinue) { $at = ConvertTo-AitUplinkRedacted -Text $at }
         if ($at) { $o['ActionText'] = $(if ($at.Length -gt 500) { $at.Substring(0, 500) } else { $at }) }
-        if ("$($Entry.link)" -match '^https://') { $o['Link'] = "$($Entry.link)" }
+        $lk = ''; try { $lk = Get-PimGuardLink -Entry $Entry -ManagerUrl $ManagerUrl } catch { $lk = '' }
+        if (-not $lk -and "$($Entry.link)" -match '^https://[^\s"<>]{1,392}$' -and "$($Entry.link)" -notmatch '(?i)^https://([^/]*\.)?internal[.:/]') { $lk = "$($Entry.link)" }
+        if ($lk) { $o['Link'] = $lk }
     } else {
         $o['InstallId'] = "$InstallId"
     }

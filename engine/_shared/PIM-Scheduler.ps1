@@ -1543,20 +1543,12 @@ function Initialize-PimDefaultJobHandlers {
         return (Send-PimDigestJobMail -Type 'daily-summary' -WhatIf:$whatIf -Result $sum -Tokens (& $tfa 'manager') -TokensForAudience $tfa -Attachments $att `
                     -What ("changes={0} risky={1} people={2} (admins={3} delegations={4} removals={5}; {6} audit event(s) from {7})" -f $rep.total, @($rep.risky).Count, $rep.actorCount, @($sum.admins).Count, @($sum.delegations).Count, @($sum.removals).Count, @($src.events).Count, $src.source))
     }
-    # The daily job also carries MAIL-2 item 8, the Get Started reminder (PIM-GetStartedReminder.ps1): once a day while a
-    # REQUIRED step is open. It runs whether or not there were changes, and its outcome is added to the run's detail.
+    # §100.57: the Get Started reminder (MAIL-2 item 8) is no longer sent by this job -- it is part of the pending-actions
+    # reminder the TICK sends (PIM-PendingReminders.ps1, Invoke-PimPendingReminder), so a Get Started step is never mailed
+    # twice and the cadence follows the PendingReminders setting.
     Register-PimJobHandler -Type 'daily-summary' -Handler {
         param($job,$now,$whatIf)
-        $gsr = $null
-        if (Get-Command Invoke-PimGetStartedReminder -ErrorAction SilentlyContinue) {
-            try { $gsr = Invoke-PimGetStartedReminder -NowUtc $now -WhatIf:([bool]$whatIf) } catch { $gsr = [pscustomobject]@{ sent = 0; detail = "failed: $($_.Exception.Message)" } }
-        }
-        $res = & $script:PimDailySummaryCore $job $now $whatIf
-        if ($gsr -and $res) {
-            $res | Add-Member -NotePropertyName getStartedReminder -NotePropertyValue $gsr -Force
-            $res.detail = "$($res.detail); get-started reminder: $($gsr.detail)"
-        }
-        return $res
+        return (& $script:PimDailySummaryCore $job $now $whatIf)
     }
     # (2) Tier 0/1 report. 🔴 HOLLOW (found 2026-09-12): it read $global:PIM_TierReportAssignments
     # and $global:PIM_TierReportRecipients, which nothing sets -- "users=0 recipients=0", ran=true.
@@ -4224,6 +4216,23 @@ function Invoke-PimSchedulerTick {
                         }
                     } catch { }
                 }
+            }
+        }
+    }
+    # (d) §100.57 PENDING-ACTIONS REMINDER: every tick of the MAIN instance (no job of its own) asks whether something has
+    # waited on a SuperAdmin long enough -- open Get Started steps, held change sets, approval / access requests, guard holds
+    # and releases -- and mails ONE reminder per cycle (PIM-PendingReminders.ps1: cadence from the PendingReminders setting,
+    # the cycle claimed by compare-and-set so two runs never both send, stops by itself). It never breaks the tick; a run
+    # that sent, was muted or failed is listed in the results, a quiet "not due" only in the log (once per change).
+    if (-not $secondary -and (Get-Command Invoke-PimPendingReminder -ErrorAction SilentlyContinue)) {
+        $prr = $null
+        try { $prr = Invoke-PimPendingReminder -NowUtc $now -WhatIf:$WhatIf } catch { $prr = [pscustomobject]@{ sent = 0; held = 0; failed = 1; detail = "failed: $($_.Exception.Message)" } }
+        if ($prr) {
+            if ([int]$prr.sent -gt 0 -or [int]$prr.held -gt 0 -or [int]$prr.failed -gt 0) {
+                $results.Add([pscustomobject]@{ name = 'pending-reminder'; type = 'pending-reminder'; ok = ([int]$prr.failed -eq 0); ran = ([int]$prr.sent -gt 0); detail = "$($prr.detail)" })
+            } else {
+                $__pm = "[scheduler] pending-reminder: $($prr.detail)"
+                if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key 'sched.pending-reminder' -Message $__pm -ForegroundColor DarkGray } else { Write-Verbose $__pm }
             }
         }
     }

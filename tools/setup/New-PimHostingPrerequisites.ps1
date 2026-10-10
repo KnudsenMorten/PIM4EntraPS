@@ -3,6 +3,8 @@
   Everything a tenant needs BEFORE Setup-PimContainers.ps1 can run. Unattended, idempotent.
 
 .DESCRIPTION
+  Creates, or finds and reuses, what a PIM Manager environment needs in the subscription before the containers are deployed: the resource providers, the resource group, the VNet with its delegated Container Apps subnet, Log Analytics, the container registry (optionally Premium with a private endpoint and a build pool), the image-pull identity, and the SQL server and database with Entra-only sign-in and the SQL admin group. Every step is find-or-create and read back at the end.
+
   Setup-PimContainers.ps1 assumes the plumbing already exists: registered resource providers,
   a VNet with a delegated Container Apps subnet (/27+ for workload profiles), a Log Analytics workspace, a container
   registry, and a SQL server the Manager's managed identity can actually use. On a FRESH
@@ -25,8 +27,13 @@
 
 .NOTES
   Idempotent: every step is find-or-create and safe to re-run.
+  -WhatIf: the names, address plan and options are checked and the plan printed; nothing is signed in to and nothing
+  is created.
+
+.LINK
+  https://invardia.com/docs/pim/scripts/New-PimHostingPrerequisites/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$TenantId,
     [Parameter(Mandatory)][string]$SubscriptionId,
@@ -144,6 +151,9 @@ $ErrorActionPreference = 'Stop'
 # 100.41 NO-AZ (framework 12.17): every Azure call below is ARM / Graph REST through PIM-Rest's ONE token client.
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ArmSetup.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'New-PimHostingPrerequisites'
+try {
 
 function Get-PimEffective { param([string]$Override,[string]$Derived)
     if ("$Override".Trim()) { "$Override".Trim() } else { $Derived }
@@ -218,6 +228,28 @@ Write-Host "  subscription : $SubscriptionId"
 Write-Host "  location     : $Location"
 Write-Host "  vnet/subnet  : $vnet $vnetCidr  /  $subnet $subnetCidr"
 Write-Host "  acr / law    : $acr / $law"
+
+# 12.7 -WhatIf: everything above is checked from the parameters alone; below this line every step signs in and creates.
+# The plan is printed from the same derived names, and the run stops before the first token is requested.
+if ($WhatIfPreference) {
+    $sqlPlan = $(if ($SkipSql) { 'skipped (-SkipSql)' } else { "$sqlSrv / $sqlDb ($SqlServiceObjective, Entra-only, connection policy $SqlConnectionPolicy$(if ($SqlPrivateEndpoint) { ', private endpoint' }))" })
+    $acrPlan = "$acr ($AcrSku$(if ($AcrPublicAccess -ne 'Default') { ", public access $AcrPublicAccess" })$(if ("$AcrAgentPoolName".Trim()) { ", build pool $AcrAgentPoolName ($AcrAgentPoolTier x $AcrAgentPoolCount)" }))"
+    foreach ($w in @(
+        "register the resource providers Microsoft.App, Microsoft.ContainerRegistry, Microsoft.OperationalInsights, Microsoft.Network, Microsoft.Sql, Microsoft.Storage, Microsoft.KeyVault, Microsoft.ManagedIdentity, Microsoft.Insights in $SubscriptionId",
+        "find or create resource group $rg in $Location",
+        "find or create VNet $vnet ($vnetCidr) with subnet $subnet ($subnetCidr) delegated to Microsoft.App/environments",
+        "find or create Log Analytics workspace $law",
+        "find or create container registry $acrPlan",
+        $(if ($AcrPublicAccess -eq 'false' -or $SqlPrivateEndpoint) { "find or create private-endpoint subnet $PrivateEndpointSubnetName ($PrivateEndpointSubnetAddressPrefix) and the privatelink DNS zone(s)$(if ("$PrivateDnsResourceGroup".Trim()) { " in $PrivateDnsResourceGroup" })" }),
+        "find or create the image-pull identity id-pim-$Token with AcrPull on $acr",
+        "find or create SQL server and database $sqlPlan",
+        $(if (-not $SkipSql -and $SqlPrivateEndpoint) { "find or create the SQL identity id-pim-sql-$Token (it administers the private database from inside the network)" }),
+        $(if (-not $SkipSql -and -not $SkipSqlAdminGroup) { "converge the SQL server's Entra admin on the group $SqlAdminGroupName$(if ("$SupportAppId".Trim()) { ' (with the Invardia Support app)' })" }))) {
+        if ("$w".Trim()) { Write-Host "What if: would $w" }
+    }
+    Write-Host 'RESULT: WHAT-IF -- nothing was signed in to and nothing was created.' -ForegroundColor Yellow
+    return
+}
 
 $signedIn = $null
 if ($UseSignedInAccount) {
@@ -857,3 +889,4 @@ if (-not $SkipSql) {
 Write-Host ""
 if ($ok) { Write-Host "RESULT: OK -- $Token is ready for Setup-PimContainers" -ForegroundColor Green; exit 0 }
 else     { Write-Host "RESULT: FAILED" -ForegroundColor Red; exit 1 }
+} finally { Stop-PimScriptRun -Script 'New-PimHostingPrerequisites' }

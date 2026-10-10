@@ -39,8 +39,12 @@ function Get-PimMailReportCatalog {
             plain = 'Every delegation, admin account and safety change of the last 24 hours: who changed what, before and after, with anything risky first.' }
         [pscustomobject]@{ type = 'tier-report'; kind = 'report'; label = 'Tier 0 / Tier 1 access report'; job = 'tier-report'; recipientList = 'tierReportRecipients'; severity = ''
             plain = 'Everyone who holds Tier 0 or Tier 1 access, with the highest tier and the levels they hold.' }
-        [pscustomobject]@{ type = 'get-started'; kind = 'report'; label = 'Get Started not complete'; job = 'daily-summary'; recipientList = 'recipients'; severity = ''
-            plain = 'Once a day while a required Get Started step is open: which steps, why they matter, a button to each. Stops by itself when they are done.' }
+        # §100.57: both parts of the pending-actions reminder (PIM-PendingReminders.ps1), sent by the scheduler tick -- no job of
+        # their own; the cadence is the PendingReminders setting. Each part is switched per recipient here.
+        [pscustomobject]@{ type = 'get-started'; kind = 'report'; label = 'Get Started not complete'; job = ''; recipientList = 'recipients'; severity = ''
+            plain = 'While a required Get Started step is open (first after 24 hours, then daily): which steps, why they matter, a button to each. Goes to the SuperAdmins and the alert recipients. Stops by itself when they are done.' }
+        [pscustomobject]@{ type = 'pending-approvals'; kind = 'report'; label = 'Approvals waiting for you'; job = ''; recipientList = 'superAdmins'; severity = ''
+            plain = 'To the SuperAdmins while something waits on them (first after 4 hours, then daily): held policy change sets, approval requests, access requests, guard holds and releases, a break-glass change, staged changes -- each with a button to that entry. Stops by itself.' }
         [pscustomobject]@{ type = 'engine-failure'; kind = 'alert'; label = 'Engine / job run failure'; job = ''; recipientList = 'recipients'; severity = 'critical'; plain = 'A run of the engine or a scheduled job failed.' }
         [pscustomobject]@{ type = 'break-glass'; kind = 'alert'; label = 'Break-glass / emergency override used'; job = ''; recipientList = 'recipients'; severity = 'critical'; plain = 'Somebody used the emergency override or a break-glass account.' }
         [pscustomobject]@{ type = 'drift'; kind = 'alert'; label = 'Configuration drift detected'; job = 'drift-snapshot'; recipientList = 'recipients'; severity = 'warning'; plain = 'Live access differs from what is defined.' }

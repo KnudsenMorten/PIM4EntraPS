@@ -1,0 +1,48 @@
+{
+  "script": "Grant-PimSupportAccess.ps1",
+  "product": "pim",
+  "title": "Give (or take back) Invardia support access to a PIM Manager installation",
+  "purpose": "Gives (or with -Remove takes back) the customer's Invardia Support app its access to this PIM Manager installation: troubleshoot = a read-only contained SQL user; setup = member of the SQL admin group and owner of PIM's own app registrations and groups. Every change is read back.",
+  "whenToRun": "When the customer wants Invardia support to look at (troubleshoot) or repair (setup) their installation, and to take that access back afterwards (-Remove). The guided public install runs it for you when a support app is named. For a private installation, run it from inside the network (the SQL server has no public endpoint). It is part of the PIM Manager release package, not a separate download: run it from the package folder that Install-Invardia (or the guided install) downloaded and verified (.\\tools\\setup\\Grant-PimSupportAccess.ps1). Invardia's New-InvardiaSupportApp.ps1 must have created the support app in the tenant first.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Grant-PimSupportAccess.ps1",
+  "runAs": [
+    { "kind": "entraRole", "name": "Privileged Role Administrator", "scope": "the tenant (only for -Level setup / -Remove)", "why": "The SQL admin group is role-assignable: adding or removing a member needs this role. Without it that part is reported and the rest continues (exit 1)." },
+    { "kind": "other", "name": "Owner of PIM's app registrations and groups (or Application Administrator / Groups Administrator)", "scope": "PIM's own objects in the tenant (only for -Level setup / -Remove)", "why": "Adds or removes the support app as an owner of the Manager's sign-in app, the access request API app, the Manager members group and the SQL admin group." },
+    { "kind": "other", "name": "Member of the environment's SQL admin group (grp-pim-sql-admins) or the server's Entra admin, signed in through the browser or the Invardia Support app session (no Azure CLI)", "scope": "the environment's SQL database (only for -Level troubleshoot / -Remove)", "why": "Creates or drops the support app's contained database user." },
+    { "kind": "azureRbac", "name": "Reader", "scope": "the PIM resource group (only when -SqlServer is not given)", "why": "Finds the PIM SQL server in -ResourceGroup." }
+  ],
+  "changes": [
+    { "target": "Environment SQL database", "action": "grant", "object": "contained user [invardia-support] created from the support app's SID (never FROM EXTERNAL PROVIDER)", "permission": "db_datareader + VIEW DEFINITION (db_datawriter, db_ddladmin and db_owner are revoked if it had them)", "scope": "the environment's SQL database", "why": "-Level troubleshoot: Invardia can read the store and its schema, nothing else.", "undo": "Run the script with -Remove (drops the user)." },
+    { "target": "Microsoft Entra ID", "action": "grant", "object": "the support app's service principal as a member of the SQL admin group (members/$ref)", "permission": "member of grp-pim-sql-admins (the SQL server's admin group)", "scope": "the environment's SQL server", "why": "-Level setup: Invardia can create users, deploy the schema and repair the store.", "undo": "Run the script with -Remove (takes back the membership)." },
+    { "target": "Microsoft Entra ID", "action": "grant", "object": "the support app's service principal as an owner (owners/$ref) of the Manager's sign-in app, the access request API app, the Manager members group and the SQL admin group", "permission": "owner of those four objects", "scope": "PIM's own app registrations and groups only", "why": "-Level setup: the support app's Application.ReadWrite.OwnedBy is then enough to repair PIM's own objects later, without a tenant-wide right.", "undo": "Run the script with -Remove (takes back every ownership)." },
+    { "target": "Microsoft Entra ID and the SQL database", "action": "remove", "object": "the membership, the ownerships and the contained user (only with -Remove)", "scope": "this installation", "why": "Ends Invardia's access.", "undo": "Run the script again without -Remove." }
+  ],
+  "parameters": [
+    { "name": "AppId", "required": true, "default": null, "help": "The Invardia Support app's application (client) id in this tenant." },
+    { "name": "Level", "required": false, "default": "troubleshoot", "help": "troubleshoot (read-only SQL user) or setup (SQL admin group member + owner of PIM's objects)." },
+    { "name": "TenantId", "required": true, "default": null, "help": "The tenant id. Every token is pinned to it." },
+    { "name": "SubscriptionId", "required": false, "default": "", "help": "The PIM subscription (used to find the SQL server when -SqlServer is not given)." },
+    { "name": "ResourceGroup", "required": false, "default": "", "help": "The PIM resource group (used to find the SQL server when -SqlServer is not given)." },
+    { "name": "SqlServer", "required": false, "default": "", "help": "The store's SQL server FQDN (<server>.database.windows.net)." },
+    { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The database." },
+    { "name": "EnvLabel", "required": false, "default": "", "help": "The per-environment label the deploy used (-EnvLabel), so the right app registrations and groups are found." },
+    { "name": "SqlAdminGroupName", "required": false, "default": "grp-pim-sql-admins", "help": "The SQL admin group's name." },
+    { "name": "DbUserName", "required": false, "default": "invardia-support", "help": "The contained database user's name." },
+    { "name": "Remove", "required": false, "default": false, "help": "Take back BOTH levels: the membership, the ownerships and the contained user." }
+  ],
+  "readsOnly": [
+    "the support app's service principal, PIM's app registrations and groups and their owners / members (Microsoft Graph)",
+    "the SQL servers in -ResourceGroup (only when -SqlServer is not given)",
+    "sys.database_role_members (read-back of the contained user)"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in)",
+    "graph.microsoft.com",
+    "management.azure.com (only to find the SQL server)",
+    "<server>.database.windows.net:1433"
+  ],
+  "whatIf": "Reads the support app and PIM's objects and prints 'What if: Performing the operation \"add owner\" / \"add member\" / \"contained user [invardia-support] (db_datareader + VIEW DEFINITION)\" on target ...' for every change it would make, then 'preview only -- nothing was changed'. Nothing is written.",
+  "undo": "Run the script again with -Remove: it drops the contained user and takes back the membership and every ownership.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Grant-PimSupportAccess/"
+}

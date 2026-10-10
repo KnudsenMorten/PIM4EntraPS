@@ -1,9 +1,11 @@
 ﻿#Requires -Version 5.1
+
 <#
 .SYNOPSIS
-  §95.2 / GUIDED-INSTALL §4.6 -- give (or take back) the customer's Invardia Support app its access to THIS PIM install.
+  Gives (or with -Remove takes back) the customer's Invardia Support app its access to this PIM Manager installation: troubleshoot = a read-only contained SQL user; setup = member of the SQL admin group and owner of PIM's own app registrations and groups. Every change is read back.
 
 .DESCRIPTION
+  §95.2 / GUIDED-INSTALL §4.6.
   Grant-PimSupportAccess -AppId <support app client id> -Level troubleshoot|setup [-Remove]
       -TenantId <t> -SubscriptionId <s> -ResourceGroup <rg> -SqlServer <server>.database.windows.net [-EnvLabel <label>]
 
@@ -23,6 +25,9 @@
 .EXAMPLE
   ./Grant-PimSupportAccess.ps1 -AppId 00000000-0000-0000-0000-000000000000 -Level setup -TenantId <t> -SubscriptionId <s> `
       -ResourceGroup rg-pim -SqlServer sql-pim-ab12cd.database.windows.net
+
+.LINK
+  https://invardia.com/docs/pim/scripts/Grant-PimSupportAccess/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -44,6 +49,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 . (Join-Path $here '_PimSetupShared.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Grant-PimSupportAccess'
+$script:grantRc = 0
+try {
 
 $G = 'https://graph.microsoft.com/v1.0'
 # 100.41 (NO-AZ): every token comes from PIM-Rest's ONE token client, PINNED to -TenantId -- never a default context, which
@@ -152,9 +161,12 @@ if (($Level -eq 'troubleshoot' -or $Remove) -and $Sql) {
 if ($problems.Count) {
     Write-Host 'NOT everything was done:' -ForegroundColor Yellow
     foreach ($p in $problems) { Write-Host "  - $p" -ForegroundColor Yellow }
-    $global:LASTEXITCODE = 1
-    exit 1
+    $script:grantRc = 1
+} elseif ($WhatIfPreference) {
+    Write-Host 'preview only -- nothing was changed' -ForegroundColor Green
+} else {
+    Write-Host 'done' -ForegroundColor Green
 }
-Write-Host 'done' -ForegroundColor Green
-$global:LASTEXITCODE = 0
-exit 0
+} finally { Stop-PimScriptRun -Script 'Grant-PimSupportAccess' }
+$global:LASTEXITCODE = $script:grantRc
+exit $script:grantRc

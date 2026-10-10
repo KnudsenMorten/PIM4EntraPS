@@ -2480,6 +2480,38 @@ owner) who is not a Manager user yet becomes a Reader. The address is first look
 name or any proxy address -- and when it resolves to exactly one user, the Reader entry is written under that user's sign-in
 name (people sign in by it), with the address kept beside it. An address the directory does not resolve is used as is.
 
+**Reminder: what waits on you (§100.57).** Every run of the scheduler tick (main instance only, no job of its own) asks
+whether something has waited on a SuperAdmin long enough and, if so, sends ONE designed mail per recipient that lists
+everything waiting (`PIM-PendingReminders.ps1`, `Invoke-PimPendingReminder`). What counts as waiting follows the Manager's
+attention badge: the open *required* Get Started steps (the status the Get Started page records), policy change sets held
+by the circuit breaker, maker/checker approval requests that have not expired (and approved offboards not yet queued, for
+7 days), access requests waiting for a decision, holds of a releasable guard that no active or pending release covers,
+guard releases waiting for a second SuperAdmin, an open break-glass change request, and staged changes a second
+administrator must commit. Each item carries a deep link to its exact entry -- `?tab=getstarted&step=<id>`,
+`?tab=approvals&request=<id>` or `&hold=<breaker code>`, `?tab=guards&guard=<id>&scope=<scope>` or `&release=<id>`,
+`?tab=accessrequests&request=<id>`, `?tab=emergency`, `?tab=save` -- and the page opens that tab, scrolls to the entry and
+outlines it (every value is matched against a strict pattern, never evaluated).
+
+| Setting `PendingReminders` | Default | Meaning |
+|---|---|---|
+| `enabled` | on | off = nothing is read, sent or written |
+| `approvalsAfterHours` | 4 (1-168) | first reminder once an approval-side item has waited this long |
+| `getStartedAfterHours` | 24 (1-336) | first reminder once a Get Started step has been open this long |
+| `repeatHours` | 24 (1-168) | repeat while anything waits |
+
+An item's wait counts from its own timestamp (requested / held / created / first seen by the guard) and otherwise from the
+first tick that saw it. A newly ripe item sends the mail early, but never sooner than the smallest of the three hours after
+the previous mail, so there is one mail per cycle. When nothing waits the state is cleared: it stops by itself, and a later
+item gets its first reminder after its hours again. The state (`PendingRemindersState`: first sighting per item, last send,
+the items it listed, retry time) lives in the settings store, and a cycle is **claimed by compare-and-set before anything is
+sent**, so two scheduler executions can never both send it. A mail held by the email controls (kill switch, feature off,
+allowlist, no sender) is recorded as the cycle and never fails the run; a real delivery failure keeps the previous stamp and
+is retried after one hour. Recipients are the customer's only (never Invardia): the SuperAdmins get every item, alert
+recipients who are not SuperAdmins get the Get Started part, the admin who recorded Get Started is the last resort, and each
+person can switch the Get Started part (`get-started`) or the approvals part (`pending-approvals`) off in Notifications. A
+recipient is mailed only when one of their own items has waited long enough. This replaces the daily job's separate Get
+Started mail, so a step is never mailed twice.
+
 **GUI mail-template editor — supported-tokens legend.** When an
 operator edits a template in Settings → Mail templates, the editor renders a
 **per-template** legend of the `{{token}}` placeholders that template type provides
@@ -9513,6 +9545,34 @@ failure to send never affects any other job. An endpoint other than Invardia's c
 - **Switched off:** nothing is ever sent, and invardia.com is never called.
 
 The install key is the Container Apps secret, or else the key claimed by the job `install-key` (§29.3).
+
+**Endpoints and guard links (with an install key only).** The heartbeat names the environment's addresses, so support can
+open them from the customer record and from every mail about the environment (framework contract §8.9):
+
+| kind | address | sent when |
+|---|---|---|
+| `manager` | the PIM Manager's public address: the custom host name when one is set, otherwise the ingress address. The Manager records it in the `ManagerUrl` setting on its first signed-in request; `PIM_MANAGER_URL` is the fallback | the address is known |
+| `portal` (label "RFA portal") | the request-for-authorization portal (the `RfaSettings` portal address the broker deploy writes) | the broker is deployed |
+| `api` | the access request API on that broker, `<portal>/api/v1` | the feature `api.broker` is on |
+| `mcp` | the MCP server on the Manager, `<manager>/mcp` | the feature `mcp.server` is on |
+
+The Activator has no address of its own (its backend is an app registration), and PIM has no separate web app. The tick
+reads only what the environment already records; it makes no Azure resource read for this. Every entry is checked before it
+is sent, because Invardia refuses the whole report on one bad entry. A bad entry is left out. The rules: https; a DNS host
+name (never an `.internal.` host, localhost, an IP address or a `.local` name); no user name or password; no query string or
+fragment; at most 400 characters; each kind once; at most 12 entries; a label of at most 60 characters. When nothing is
+valid, the field is left out. An anonymous heartbeat never carries it.
+
+Every guard report from an installation with a key carries `Link`, the deep link into that Manager where a person acts:
+
+| guard | Link |
+|---|---|
+| held (a policy change set waiting for approval) | `/?tab=approvals&changeset=<provider>`: Approvals opens on that change set |
+| `msp.licence` | `/?tab=settings&section=licence`: Settings > Licence |
+| any other | `/?tab=guards&guard=<id>`: the Guards page, scrolled to that guard (its holds and its release) |
+
+When the Manager address is not known, there is no Link, never a guessed one. The page checks each parameter against what
+it knows before it acts on it.
 
 ### 29.3 Pro updates from Invardia (job `install-key`, feature `updates.invardia`, `PIM_UPDATE_SOURCE=invardia`)
 A Pro installation can take its updates from Invardia's update platform instead of the source archives. PIM owns the

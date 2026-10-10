@@ -695,6 +695,7 @@ function Get-PimDeployJobEnvValue {
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateLifecycle.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-DeployAll.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-ScenarioProfile.ps1')     # s31 scenario -> knob resolver
+. (Join-Path $here '_PimRegions.ps1')                                # BUG-299: the ONE hosting-region list (preflight below)
 
 # ---- the registry SKU follows the EXPOSURE unless the caller said otherwise -------------------
 # Stated rather than silent: this is a cost difference (~10x) and a security posture, so a deploy
@@ -1077,7 +1078,17 @@ if ($WorkerMode -eq 'cron' -and -not $PSBoundParameters.ContainsKey('Apps')) {
     $Apps = @($ManagerApp)
 }
 
-Write-Host "=== PIM4EntraPS DEPLOY-ALL ($Source; $(if($ValidateOnly){'VALIDATE-ONLY'}elseif($Apply){'APPLY'}else{'WHATIF / PLAN-ONLY'})) ===" -ForegroundColor Cyan
+# 🔴 BUG-299 -- THE REGION IS A PREFLIGHT CHECK. Setup-PimContainers refuses a region PIM is not hosted in (Assert-PimSetupRegion)
+# -- but it runs at the INFRA step, after the prereq step has already created the resource group, network, registry, identity
+# and database in that region (install-parameters.json offered northeurope / germanywestcentral, so a guided install got that
+# far). Refuse here, before anything is created, with the same list and the same reason. Only a hosted deploy creates
+# Azure hosting in -Location; a VM-hosted / code-only run does not use it.
+if ($hosted) {
+    $regionWhy = Test-PimSetupRegion -Location $Location
+    if ($regionWhy) { throw "Invoke-PimDeployAll: REFUSED (nothing was touched) -- -Location: $regionWhy" }
+}
+
+Write-Host "=== PIM4EntraPS DEPLOY-ALL ($Source;$(if($ValidateOnly){'VALIDATE-ONLY'}elseif($Apply){'APPLY'}else{'WHATIF / PLAN-ONLY'})) ===" -ForegroundColor Cyan
 Info "hosted=$hosted; tenant=$(if($TenantId){'set'}else{'(not set)'}); sub=$(if($SubscriptionId){'set'}else{'(not set)'})"
 
 # =============================================================================

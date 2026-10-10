@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     71.36 -- remove ONE environment's Container Apps stack (every Container Apps job + app + the managed environment in the
@@ -6,6 +7,8 @@
     with a different EXPOSURE. Plan-only unless -Apply.
 
 .DESCRIPTION
+    Removes the Container Apps part of one PIM Manager environment (every Container Apps job and app and the Container Apps environment in the resource group, plus the Azure role assignments held by their system identities) so the environment can be deployed again with a different exposure. Data is kept: the SQL database, the registry, Key Vault, storage, the VNet, the user-assigned identities and Log Analytics. It only lists what it would remove unless -Apply is given.
+
     A Container Apps environment's internal/external setting is IMMUTABLE. Moving a live environment from external to
     internal ("private only") therefore means: delete the stack, then run the build with exposure internal. Everything
     else is KEPT and re-used by the build: the SQL server + database (all data), the registry + its images, the Key Vault,
@@ -16,14 +19,28 @@
     with the identity; the build grants the new identities again.
     NOT touched: user-assigned identities and their grants, anything outside the resource group, Entra objects.
     READ BACK after -Apply: no Microsoft.App resource left, no listed role assignment left.
+    -WhatIf: the plan (the same reads and the same list as a run without -Apply); nothing is deleted, even with -Apply.
+
+.EXAMPLE
+    ./Remove-PimContainerStack.ps1 -SubscriptionId <subscription-id> -ResourceGroup rg-pim            # plan
+    ./Remove-PimContainerStack.ps1 -SubscriptionId <subscription-id> -ResourceGroup rg-pim -Apply     # delete
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Remove-PimContainerStack/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$SubscriptionId,
     [Parameter(Mandatory)][string]$ResourceGroup,
     [switch]$Apply
 )
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Remove-PimContainerStack'
+try {
+# 12.7: -WhatIf is the plan -- it wins over -Apply, nothing is deleted.
+if ($WhatIfPreference -and $Apply) { Write-Host '  -WhatIf: plan only -- -Apply is ignored, nothing is deleted.' -ForegroundColor Yellow }
+if ($WhatIfPreference) { $Apply = $false }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 # 100.41 (framework 12.17 NO-AZ): ARM REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1). A calling
 # build's REST session is used as it is; standalone, the Invardia Support app's session or the person signed in. No az.
@@ -84,3 +101,4 @@ for ($w = 0; $w -lt 20; $w++) {
 $raLeft = @($ras | Where-Object { "$($_.scope)" -like "/subscriptions/$SubscriptionId*" -and $null -ne (Invoke-PimSetupArm -Path $_.id -ApiVersion $authV -NotFoundOk -ErrorAsNull) })
 if ($left.Count -or $raLeft.Count) { throw "read-back: still present -- Microsoft.App: $($left -join ', '); role assignments: $($raLeft.Count)" }
 Write-Host '    PASS: no Container Apps resource and none of the listed role assignments remain' -ForegroundColor Green
+} finally { Stop-PimScriptRun -Script 'Remove-PimContainerStack' }

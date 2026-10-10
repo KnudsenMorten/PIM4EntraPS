@@ -471,6 +471,10 @@ if (Test-Path -LiteralPath $_guardLib) { . $_guardLib }
 # §96.6 / GUARD-1.6: releasing a guard (Operations > Guards; /api/guards/<id>/release)
 $_guardRelLib = Join-Path $solutionRoot 'engine\_shared\PIM-GuardRelease.ps1'
 if (Test-Path -LiteralPath $_guardRelLib) { . $_guardRelLib }
+# §100.57: the pending-actions reminder -- the Manager reads its setting (ConvertTo-PimPendingReminderConfig) for the Settings
+# card and the Reports overview; the tick sends it.
+$_pendRemLib = Join-Path $solutionRoot 'engine\_shared\PIM-PendingReminders.ps1'
+if (Test-Path -LiteralPath $_pendRemLib) { . $_pendRemLib }
 
 # Classified engine item failures (engine/_shared/PIM-FailureCatalog.ps1) -- the SAME catalog the engine
 # writes with, so the Manager shows exactly the cause/remedy/fixes the engine recorded.
@@ -4049,16 +4053,31 @@ function Get-PimManagerReportsOverview {
     } catch { }
     $feedLast = @{}
     try { foreach ($f in @(Get-PimManagerAlertFeed)) { $ev = "$($f.event)"; $at = "$($f.timestampUtc)"; if (-not $at) { $at = "$($f.ts)" }; if ($ev -and [int]"$($f.sent)" -gt 0 -and (-not $feedLast.ContainsKey($ev) -or "$at" -gt "$($feedLast[$ev])")) { $feedLast[$ev] = $at } } } catch { }
+    # §100.57: the pending-actions reminder (get-started + pending-approvals) has no job -- its cadence and on/off are the
+    # PendingReminders setting, its recipients the SuperAdmins, its last send the PendingRemindersState stamp.
+    $pr = $null; $prLast = ''; $superAdmins = @()
+    try { if (Get-Command ConvertTo-PimPendingReminderConfig -ErrorAction SilentlyContinue) { $pr = ConvertTo-PimPendingReminderConfig (Get-PimManagerSettingObject -Name 'PendingReminders'); $prLast = "$((ConvertTo-PimPendingReminderState (Get-PimManagerSettingObject -Name 'PendingRemindersState')).lastSentUtc)" } } catch { $pr = $null }
+    try {
+        $ma = Get-PimManagerSettingObject -Name 'ManagerAccess'
+        if ($ma -and -not ($ma -is [array]) -and $ma.PSObject.Properties['managerAccess']) { $ma = $ma.managerAccess }
+        $superAdmins = @(@($ma) | Where-Object { $_ -and "$($_.role)".Trim() -eq 'SuperAdmin' } | ForEach-Object { if ($_.PSObject.Properties['mail'] -and "$($_.mail)".Trim()) { "$($_.mail)".Trim() } else { "$($_.identity)".Trim() } } | Where-Object { $_ -match '^[^@\s;,]+@[^@\s;,]+\.[^@\s;,]+$' } | Select-Object -Unique)
+    } catch { $superAdmins = @() }
     $rows = foreach ($c in @(Get-PimMailReportCatalog)) {
-        $list = switch ("$($c.recipientList)") { 'digestRecipients' { if (@($cfg.digestRecipients).Count) { @($cfg.digestRecipients) } else { @($cfg.recipients) } } 'tierReportRecipients' { if (@($cfg.tierReportRecipients).Count) { @($cfg.tierReportRecipients) } else { @($cfg.recipients) } } 'recipients' { @($cfg.recipients) } default { @() } }
+        $list = switch ("$($c.recipientList)") { 'digestRecipients' { if (@($cfg.digestRecipients).Count) { @($cfg.digestRecipients) } else { @($cfg.recipients) } } 'tierReportRecipients' { if (@($cfg.tierReportRecipients).Count) { @($cfg.tierReportRecipients) } else { @($cfg.recipients) } } 'recipients' { @($cfg.recipients) } 'superAdmins' { @($superAdmins) } default { @() } }
         $ownList = switch ("$($c.recipientList)") { 'digestRecipients' { @($cfg.digestRecipients) } 'tierReportRecipients' { @($cfg.tierReportRecipients) } 'recipients' { @($cfg.recipients) } default { @() } }
         $sel = if ($c.kind -ne 'transactional' -and $list.Count) { Select-PimNotificationRecipients -Prefs $prefs -Recipients $list -Type $c.type -Kind $c.kind } else { $null }
         $j = if ("$($c.job)".Trim() -and $jobs.ContainsKey("$($c.job)")) { $jobs["$($c.job)"] } else { $null }
         $enabled = if ($c.kind -eq 'alert') { [bool]($cfg.events.ContainsKey($c.type) -and $cfg.events[$c.type]) } elseif ($j) { [bool]$j.enabled } else { $true }
         $ls = if ($last.ContainsKey($c.type)) { "$(Get-PimMailPrefField $last[$c.type] 'at')" } elseif ($feedLast.ContainsKey($c.type)) { "$($feedLast[$c.type])" } else { '' }
+        $cad = if ($j) { "$($j.cadence)" } elseif ($c.kind -eq 'alert') { 'when it happens' } else { '' }
+        if ($pr -and $c.type -in @('get-started', 'pending-approvals')) {
+            $enabled = [bool]$pr.enabled
+            $cad = ("first after {0} h, then every {1} h while it waits" -f $(if ($c.type -eq 'get-started') { $pr.getStartedAfterHours } else { $pr.approvalsAfterHours }), $pr.repeatHours)
+            if ($prLast) { $ls = $prLast }
+        }
         [ordered]@{
             type = $c.type; kind = $c.kind; label = $c.label; plain = $c.plain; severity = $c.severity
-            job = "$($c.job)"; cadence = $(if ($j) { "$($j.cadence)" } elseif ($c.kind -eq 'alert') { 'when it happens' } else { '' }); intervalMinutes = $(if ($j) { [int]$j.intervalMinutes } else { $null })
+            job = "$($c.job)"; cadence = $cad; intervalMinutes = $(if ($j) { [int]$j.intervalMinutes } else { $null })
             enabled = $enabled
             recipientList = "$($c.recipientList)"; ownRecipients = @($ownList); usesFallback = [bool]($c.recipientList -in @('digestRecipients', 'tierReportRecipients') -and -not $ownList.Count)
             recipients = $(if ($sel) { @($sel.keep) } else { @() }); switchedOff = $(if ($sel) { @($sel.skipped | ForEach-Object { $_.address }) } else { @() })
@@ -12883,6 +12902,44 @@ function Handle-Request {
             Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; enabled = [bool]$body.enabled })
             return 200
         }
+        # §100.57: the pending-actions reminder to the SuperAdmins (pim.Settings 'PendingReminders') -- GET any role (+ the
+        # last cycle from 'PendingRemindersState'), PUT Admin (a notification setting, like Alerting), validated, audited.
+        if ($path -eq '/api/settings/pending-reminders' -and $method -eq 'GET') {
+            $script:lastHeartbeat = Get-Date
+            $raw = $null; try { $raw = Get-PimManagerSettingObject -Name 'PendingReminders' } catch { $raw = $null }
+            $c = ConvertTo-PimPendingReminderConfig $raw
+            $st = $null; try { $st = ConvertTo-PimPendingReminderState (Get-PimManagerSettingObject -Name 'PendingRemindersState') } catch { $st = $null }
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ enabled = [bool]$c.enabled; approvalsAfterHours = [int]$c.approvalsAfterHours; getStartedAfterHours = [int]$c.getStartedAfterHours; repeatHours = [int]$c.repeatHours
+                stored = [bool]($null -ne $raw); defaults = (Get-PimPendingReminderDefaults)
+                lastSentUtc = "$(if ($st) { $st.lastSentUtc })"; lastResult = "$(if ($st) { $st.lastResult })"; waiting = $(if ($st) { @($st.firstSeen.Keys).Count } else { 0 })
+                canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'Admin') })
+            return 200
+        }
+        if ($path -eq '/api/settings/pending-reminders' -and $method -eq 'PUT') {
+            $script:lastHeartbeat = Get-Date
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to change the pending-actions reminder.' }; return 403 }
+            $body = Read-RequestJson -Request $req
+            if ($null -eq $body -or -not $body.PSObject.Properties['enabled']) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'enabled (true / false) is required' }; return 400 }
+            $lim = @{ approvalsAfterHours = @(1, 168); getStartedAfterHours = @(1, 336); repeatHours = @(1, 168) }
+            $before = $null; try { $before = Get-PimManagerSettingObject -Name 'PendingReminders' } catch { $before = $null }
+            $cur = ConvertTo-PimPendingReminderConfig $before
+            $val = [ordered]@{ enabled = [bool]$body.enabled }
+            foreach ($k in 'approvalsAfterHours', 'getStartedAfterHours', 'repeatHours') {
+                $v = $cur[$k]
+                if ($body.PSObject.Properties[$k]) {
+                    $n = 0
+                    if (-not [int]::TryParse("$($body.$k)".Trim(), [ref]$n) -or $n -lt $lim[$k][0] -or $n -gt $lim[$k][1]) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$k must be a whole number of hours from $($lim[$k][0]) to $($lim[$k][1]). Nothing was saved." }; return 400 }
+                    $v = $n
+                }
+                $val[$k] = [int]$v
+            }
+            $val['by'] = "$((Get-PimManagerRole).identity)"; $val['atUtc'] = [datetime]::UtcNow.ToString('o')
+            try { Set-PimManagerSettingObject -Name 'PendingReminders' -Value $val }
+            catch { Write-JsonResponse -Response $resp -Status 500 -Body @{ error = "the setting was NOT saved: $($_.Exception.Message)" }; return 500 }
+            Write-PimManagerAuditEvent -Action 'settings.pending-reminders' -Target 'PendingReminders' -Before $before -After $val -Result 'ok'
+            Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; enabled = [bool]$val.enabled; approvalsAfterHours = $val.approvalsAfterHours; getStartedAfterHours = $val.getStartedAfterHours; repeatHours = $val.repeatHours })
+            return 200
+        }
         # POST /api/guards/<guardId>/release { scope, planHash, mode: one-run|until, untilUtc, reason } -- SuperAdmin, audited.
         # POST /api/guards/<guardId>/release/<releaseId>/approve -- the second person (a DIFFERENT SuperAdmin), audited.
         # DELETE /api/guards/<guardId>/release/<releaseId> -- revoke, SuperAdmin, audited.
@@ -14011,6 +14068,7 @@ function Handle-Request {
                 $added = @(); $rdErr = ''; $changed = [ordered]@{}
                 if ($rb.PSObject.Properties['recipients']) {
                     if (-not "$($cat.recipientList)".Trim()) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($cat.label) goes to the people each request concerns -- it has no recipient list." }; return 400 }
+                    if ("$($cat.recipientList)" -eq 'superAdmins') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "$($cat.label) goes to the SuperAdmins (Settings > Manager access & roles) -- it has no recipient list of its own." }; return 400 }
                     $list = @(@($rb.recipients) | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
                     $bad = @($list | Where-Object { $_ -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$' })
                     if ($bad.Count) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "Not a mail address: $($bad -join ', '). Nothing was saved." }; return 400 }
@@ -14022,7 +14080,7 @@ function Handle-Request {
                     $changed['recipients'] = @($list)
                 }
                 if ($rb.PSObject.Properties['attach']) {
-                    if ($cat.kind -ne 'report' -or $type -eq 'get-started') { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "Only a scheduled report (daily changes, tier report) can carry a PDF." }; return 400 }
+                    if ($cat.kind -ne 'report' -or $type -in @('get-started', 'pending-approvals')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "Only a scheduled report (daily changes, tier report) can carry a PDF." }; return 400 }
                     $att = "$($rb.attach)".Trim().ToLowerInvariant(); if ($att -notin @('link', 'pdf')) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "attach is 'link' or 'pdf'." }; return 400 }
                     [void](Save-PimManagerMailNotifications -Reports ([ordered]@{ $type = [ordered]@{ attach = $att } }) -HasReports)
                     $changed['attach'] = $att

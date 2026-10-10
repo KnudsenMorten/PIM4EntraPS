@@ -8072,14 +8072,16 @@
     let h = '<table class="set-table" id="reportsTable" style="font-size:12px;"><tr><th>Report / alert</th><th>Kind</th><th>Cadence</th><th>On</th><th>Recipients</th><th>Delivery</th><th>Last sent</th><th>Next run</th>' + (can ? '<th></th>' : '') + '</tr>';
     list.forEach((r, i) => {
       const recip = r.kind === 'transactional' ? '<span style="color:#57606a;">' + esc(r.plain || '') + '</span>'
-        : (can ? '<textarea class="rptRecips" rows="2" style="width:230px;font-size:11.5px;font-family:inherit;" placeholder="' + (r.usesFallback ? 'blank = the alert recipients' : 'name@example.com') + '">' + esc((r.ownRecipients || []).join('\n')) + '</textarea>' : esc((r.recipients || []).join(', ')))
+        : r.recipientList === 'superAdmins' ? esc((r.recipients || []).join(', ') || 'no SuperAdmin with a mail address') + '<div style="color:#57606a;font-size:11px;">the SuperAdmins (Settings &gt; Manager access &amp; roles)</div>'
+          + ((r.switchedOff || []).length ? '<div style="color:#9a6700;font-size:11px;">switched off by: ' + esc(r.switchedOff.join(', ')) + '</div>' : '')
+        : (can ?'<textarea class="rptRecips" rows="2" style="width:230px;font-size:11.5px;font-family:inherit;" placeholder="' + (r.usesFallback ? 'blank = the alert recipients' : 'name@example.com') + '">' + esc((r.ownRecipients || []).join('\n')) + '</textarea>' : esc((r.recipients || []).join(', ')))
           + ((r.switchedOff || []).length ? '<div style="color:#9a6700;font-size:11px;">switched off by: ' + esc(r.switchedOff.join(', ')) + '</div>' : '')
           + (r.recipientList === 'recipients' ? '<div style="color:#57606a;font-size:11px;">the alert recipients (shared by every alert)</div>' : '');
       const cad = r.intervalMinutes && canCad && r.job ? '<input class="rptCad" type="number" min="5" max="43200" value="' + Number(r.intervalMinutes) + '" style="width:70px;font-size:11.5px;"> min <div style="color:#57606a;font-size:11px;">' + esc(r.cadence || '') + '</div>' : esc(r.cadence || '');
-      const del = (r.kind === 'report' && r.type !== 'get-started') ? (can ? '<select class="rptAttach" style="font-size:11.5px;"><option value="link"' + (r.attach !== 'pdf' ? ' selected' : '') + '>link only</option><option value="pdf"' + (r.attach === 'pdf' ? ' selected' : '') + '>PDF attached</option></select>' : esc(r.attach === 'pdf' ? 'PDF attached' : 'link only')) : '<span style="color:#57606a;">mail</span>';
+      const del = (r.kind === 'report' && r.type !== 'get-started' && r.type !== 'pending-approvals') ?(can ? '<select class="rptAttach" style="font-size:11.5px;"><option value="link"' + (r.attach !== 'pdf' ? ' selected' : '') + '>link only</option><option value="pdf"' + (r.attach === 'pdf' ? ' selected' : '') + '>PDF attached</option></select>' : esc(r.attach === 'pdf' ? 'PDF attached' : 'link only')) : '<span style="color:#57606a;">mail</span>';
       h += '<tr class="rptRow" data-i="' + i + '"><td><b>' + esc(r.label) + '</b><div style="color:#57606a;font-size:11px;max-width:260px;">' + esc(r.plain || '') + '</div></td><td>' + esc(kindLbl[r.kind] || r.kind) + (r.severity ? ' <span style="color:#57606a;">(' + esc(r.severity) + ')</span>' : '') + '</td>' +
         '<td>' + cad + '</td><td>' + (r.enabled ? 'on' : '<span style="color:#9a6700;">off</span>') + '</td><td>' + recip + '</td><td>' + del + '</td><td>' + when(r.lastSentUtc) + '</td><td>' + when(r.nextRunUtc) + '</td>' +
-        (can ? '<td>' + (r.kind !== 'transactional' ? '<button class="btn-sec rptSave">Save</button>' : '') + '</td>' : '') + '</tr>';
+        (can ? '<td>' + (r.kind !== 'transactional' && r.recipientList !== 'superAdmins' ? '<button class="btn-sec rptSave">Save</button>' : '') + '</td>' : '') + '</tr>';
     });
     h += '</table><div id="rptMsg" style="margin-top:6px;font-size:12px;"></div>';
     h += '<div style="margin-top:6px;font-size:11.5px;color:#57606a;">Alerts are switched on or off for everyone in <b>Alerting</b> above; per person in <b>Notifications</b>. The cadence is the job schedule (SuperAdmin). &ldquo;PDF attached&rdquo; adds the print-ready report (open it and print / Save as PDF; page numbers, date and tenant on every page).</div>';
@@ -8104,6 +8106,72 @@
         const m2 = document.getElementById('rptMsg'); if (m2) { m2.innerHTML = '<span style="color:#116329;">Saved ✓</span>' + pimReaderNoteHtml(res); }
       } catch (e) { msg.textContent = 'Not saved: ' + e.message; msg.style.color = '#cf222e'; }
     });
+  }
+
+  // §100.57: Settings > Mail & alerting > Reminders: what waits on you (pim.Settings 'PendingReminders'). Admin+ changes it.
+  async function renderPendingRemindersCard() {
+    const host = document.getElementById('setPendingRemindersBody');
+    if (!host) return;
+    const esc = escapeHtml;
+    let d;
+    try { d = await api('GET', '/api/settings/pending-reminders'); }
+    catch (e) { host.innerHTML = '<div style="color:#cf222e;font-size:12px;">The reminder setting could not be read: ' + esc(e.message) + '</div>'; return; }
+    const can = !!(d && d.canWrite);
+    const num = (id, v, max) => '<input id="' + id + '" type="number" min="1" max="' + max + '" value="' + Number(v) + '" style="width:64px;font-size:12px;"' + (can ? '' : ' disabled') + '>';
+    host.innerHTML =
+      '<div style="font-size:12.5px;display:flex;flex-direction:column;gap:6px;">' +
+        '<label><input type="checkbox" id="prEnabled" data-setting-key="PendingReminders"' + (d.enabled ? ' checked' : '') + (can ? '' : ' disabled') + '> Mail the SuperAdmins when something waits on them' + settingInfoBtn('PendingReminders') + '</label>' +
+        '<div>First reminder when an approval has waited ' + num('prApprH', d.approvalsAfterHours, 168) + ' hours, a Get Started step ' + num('prGsH', d.getStartedAfterHours, 336) + ' hours; then every ' + num('prRepH', d.repeatHours, 168) + ' hours while anything waits.</div>' +
+        '<div id="prStatus" style="color:#57606a;font-size:11.5px;">' + (d.lastSentUtc ? 'Last reminder: ' + esc(fmtTime(d.lastSentUtc)) + (d.lastResult ? ' (' + esc(d.lastResult.replace(/^\S+\s/, '')) + ')' : '') : 'No reminder sent yet.') +
+          ' Each person can switch the Get Started part or the approvals part off for themselves in Notifications.</div>' +
+        (can ? '<div><button class="btn-sec" id="prSave">Save</button> <span id="prMsg" style="font-size:12px;"></span></div>' : '<div style="color:#57606a;font-size:11.5px;">An Admin or SuperAdmin changes this.</div>') +
+      '</div>';
+    if (!can) return;
+    document.getElementById('prSave').onclick = async () => {
+      const msg = document.getElementById('prMsg');
+      msg.textContent = 'Saving…'; msg.style.color = '#57606a';
+      try {
+        await api('PUT', '/api/settings/pending-reminders', { enabled: document.getElementById('prEnabled').checked,
+          approvalsAfterHours: Number(document.getElementById('prApprH').value), getStartedAfterHours: Number(document.getElementById('prGsH').value), repeatHours: Number(document.getElementById('prRepH').value) });
+        await renderPendingRemindersCard();
+        const m2 = document.getElementById('prMsg'); if (m2) { m2.textContent = 'Saved'; m2.style.color = '#116329'; }
+      } catch (e) { msg.textContent = 'Not saved: ' + ((e && e.body && e.body.error) || e.message); msg.style.color = '#cf222e'; }
+    };
+  }
+
+  // §100.57: a reminder mail links ONE entry -- ?tab=approvals&request=<id> | &hold=<code>, ?tab=guards&guard=<id>[&scope=<s>]
+  // | &release=<id>, ?tab=accessrequests&request=<id>. Every value is checked against a strict pattern (never evaluated); the
+  // page opens the tab as usual and, once that entry has rendered, scrolls to it and outlines it.
+  var PIM_DEEP_FOCUS_APPR_ALL = false;
+  function pimDeepFocusSelector(tab, params) {
+    const ok = v => !!v && /^[A-Za-z0-9._:-]{1,100}$/.test(v);
+    const q = v => '"' + String(v) + '"';
+    if (tab === 'approvals') {
+      const r = params.get('request'), h = params.get('hold');
+      if (ok(r)) { PIM_DEEP_FOCUS_APPR_ALL = true; return '.appr-card[data-request-id=' + q(r) + ']'; }
+      if (ok(h)) return '.apprPolicyHold[data-code=' + q(h) + ']';
+    }
+    if (tab === 'guards') {
+      const rel = params.get('release'), g = params.get('guard'), s = params.get('scope');
+      if (ok(rel)) return '.gp-rel[data-id=' + q(rel) + ']';
+      if (ok(g)) return '.gp-guard[data-guard=' + q(g) + ']' + (ok(s) ? ' .gp-hold[data-scope=' + q(s) + ']' : '');
+    }
+    if (tab === 'accessrequests') { const r = params.get('request'); if (ok(r)) return '.rfaDec[data-id=' + q(r) + ']'; }
+    return '';
+  }
+  function pimDeepFocus(sel) {
+    if (!sel) return;
+    let n = 0;
+    const t = setInterval(() => {
+      n++;
+      let el = null; try { el = document.querySelector(sel); } catch (_) { clearInterval(t); return; }
+      if (!el) { if (n >= 60) clearInterval(t); return; }
+      clearInterval(t);
+      const box = el.closest('.appr-card, .apprPolicyHold, .gp-hold, tr') || el;
+      try { box.scrollIntoView({ block: 'center' }); } catch (_) { }
+      box.classList.add('pim-deep-focus'); box.style.outline = '3px solid #0969da'; box.style.outlineOffset = '2px';
+      setTimeout(() => { box.style.outline = ''; box.style.outlineOffset = ''; }, 8000);
+    }, 250);
   }
 
   async function renderAlertingCard() {
@@ -8285,7 +8353,7 @@
     { key: 'approvals', label: 'Approvals & policy',     match: ['setSelfApproveHost', 'setOpPolicyCard'] },
     { key: 'automation', label: 'Automation',            match: ['setAutomationHost'] },   // §100.49: auto-extend policy
     { key: 'rings',     label: 'Deployment rings',       match: ['setRingsHost'] },
-    { key: 'mail',      label: 'Mail & alerting',        match: ['setMailTransportCard', 'setEmailControlsCard', 'setAlertingCard'] },
+    { key: 'mail',      label: 'Mail & alerting',        match: ['setMailTransportCard', 'setEmailControlsCard', 'setAlertingCard', 'setPendingRemindersCard'] },   // §100.57: Reminders: what waits on you
     { key: 'reports',   label: 'Reports',                match: ['setReportsCard'] },   // MAIL-2 item 6: every report + alert in one view
     { key: 'access',    label: 'Access requests (RFA)',  match: ['setRfaBrandingHost', 'setRfaBrokerHost'] },
     { key: 'hybrid',    label: 'Hybrid AD & workloads',  match: ['setHybridAdHost', /AD OU placement/i, 'setWorkloadExemptCard', 'setTemplatePacksHost'] },
@@ -8712,6 +8780,11 @@
          `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Every report and alert PIM Manager mails, in one place: how often it goes out, who gets it, whether the PDF is attached, when it was last sent and when it runs next. Change the recipients and the delivery here (Admin); the cadence needs SuperAdmin.</div>` +
          `<div id="setReportsBody"><div style="color:#57606a;font-size:12px;">Loading reports&hellip;</div></div></div>`;
 
+    // --- §100.57: the reminder to the SuperAdmins while something waits on them (Get Started + approvals). Admin+.
+    h += `<div class="set-card" id="setPendingRemindersCard"><h3 style="margin:0 0 4px;font-size:14px;">Reminders: what waits on you</h3>` +
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">PIM Manager mails the SuperAdmins one reminder that lists everything waiting on them -- open Get Started steps, held change sets, approval and access requests, guard holds and releases -- each with a link to the exact place. It repeats while anything waits and stops by itself.</div>` +
+         `<div id="setPendingRemindersBody"><div style="color:#57606a;font-size:12px;">Loading&hellip;</div></div></div>`;
+
     // --- Workload exemptions (pim.Settings['WorkloadExemptions']): Admin+ editable, like Alerting.
     h += `<div class="set-card" id="setWorkloadExemptCard"><h3 style="margin:0 0 4px;font-size:14px;">Workload exemptions${settingInfoBtn('WorkloadExemptions')}</h3>` +
          `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">Excuse a desired workload role binding that is deliberately not created. Each exemption needs a reason and an expiry (or No expiry); an expired exemption stops excusing the binding. The workload reconciliation shows exempted bindings, and the engine reports them instead of creating them. Stored in the SQL settings store.</div>` +
@@ -8760,6 +8833,7 @@
     renderAlertingCard();
     renderDriftReportSetting();
     renderReportsCard();   // MAIL-2 item 6
+    renderPendingRemindersCard();   // §100.57
     renderWorkloadExemptionsCard();
 
     if (!canEdit) return;
@@ -10176,6 +10250,14 @@
   // "Approve all" button. The approval carries over to the next run as long as that run adds no new weakening (engine
   // Test-PimPolicyBreaker), and the policy jobs are started straight away so nobody has to find "Run now".
   const POLICY_HOLD_JOBS = { 'GroupsPolicies': 'delta-policies', 'EntraRolePolicies': 'delta-policies', 'AzResPolicies': 'delta-pim-azure-policies' };
+  // PIM 100.56: a guard record's Link opens Approvals on ONE held change set (?changeset=<provider>, lower-cased); used once.
+  let APPR_FOCUS_CHANGESET = '';
+  let GUARDS_FOCUS = '';   // ?tab=guards&guard=<id>: the Guards page scrolls to that guard once
+  function focusDeepLinkTarget(el) {
+    if (!el) return;
+    try { el.scrollIntoView({ block: 'start' }); } catch (_) { }
+    el.classList.add('deeplink-focus'); el.style.outline = '2px solid #0969da'; el.style.outlineOffset = '2px';
+  }
   async function renderApprovalsPolicyHolds(hostArg) {
     // 97.1: Get Started's "Policies" step renders this same panel (same Approve all) into its own card (hostArg).
     const host = hostArg || document.getElementById('apprPolicyHolds');
@@ -10207,6 +10289,11 @@
       box.setAttribute('data-code', x.code);
       host.appendChild(box);
       await renderPolicyHold(box, x.code);
+    }
+    if (APPR_FOCUS_CHANGESET && !hostArg) {
+      const want = APPR_FOCUS_CHANGESET; APPR_FOCUS_CHANGESET = '';
+      const hit = held.find(x => String(POLICY_HOLD_PROVIDERS[x.code].provider).toLowerCase() === want);
+      if (hit) focusDeepLinkTarget(host.querySelector('.apprPolicyHold[data-code="' + hit.code + '"]'));
     }
     const btn = host.querySelector('#apprAllBtn');
     if (btn) btn.onclick = async () => {
@@ -10260,7 +10347,8 @@
     const body = document.getElementById('apprBody');
     const esc = escapeHtml;
     const reqs = (_apprData.requests || []).slice();
-    const statusFilter = (document.getElementById('apprStatusFilter') ? document.getElementById('apprStatusFilter').value : 'Pending') || 'Pending';
+    // §100.57: a reminder's link to ONE request (?tab=approvals&request=<id>) opens the list on All, so an approved offboard is shown too
+    const statusFilter = (document.getElementById('apprStatusFilter') ? document.getElementById('apprStatusFilter').value : (PIM_DEEP_FOCUS_APPR_ALL ? 'all' : 'Pending')) || 'Pending';
     let rows = reqs;
     if (statusFilter && statusFilter !== 'all') rows = rows.filter(r => r.status === statusFilter);
 
@@ -10323,7 +10411,7 @@
     } else {
       for (const r of rows) {
         const canDecide = !!r.canDecideThis;
-        h.push(`<div class="appr-card" style="border:1px solid #d0d7de;border-radius:8px;padding:12px;margin-bottom:10px;">`);
+        h.push(`<div class="appr-card" data-request-id="${esc(r.id || '')}" style="border:1px solid #d0d7de;border-radius:8px;padding:12px;margin-bottom:10px;">`);
         h.push(`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">${actionPill(r.action)} <b>${esc(r.target)}</b> ${statusPill(r.status)}${r.expired ? ' <span style="color:#bc4c00;font-size:11px;">(expired)</span>' : ''}</div>`);
         h.push(`<div style="font-size:12px;color:#57606a;margin-top:6px;">Requested by <b>${esc(r.requestor)}</b> ${fmtDate(r.requestedUtc)}${r.ticket ? ' &middot; ticket ' + esc(r.ticket) : ''}</div>`);
         h.push(`<div style="font-size:12.5px;margin-top:4px;"><span style="color:#8c959f;">Justification:</span> ${esc(r.justification || '(none)')}</div>`);
@@ -18071,6 +18159,11 @@
         : '<div id="gpReleases" style="color:#8c959f;font-size:12px;">No releases in the last 7 days.</div>') +
       '<h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#0969da;margin:16px 0 4px;">Never releasable</h3>' +
       '<ul id="gpNever" style="font-size:12px;margin:0 0 0 18px;padding:0;">' + never.map(g => '<li data-guard="' + escapeHtml(g.guardId) + '"><b>' + escapeHtml(g.title) + '</b> -- ' + escapeHtml(g.what || '') + '</li>').join('') + '</ul>';
+    if (GUARDS_FOCUS) {   // PIM 100.56: a guard record's Link (?tab=guards&guard=<id>) -- scroll to that guard once
+      const want = GUARDS_FOCUS; GUARDS_FOCUS = '';
+      const row = Array.from(body.querySelectorAll('tr.gp-guard')).find(r => r.dataset.guard === want || want.startsWith(r.dataset.guard + '.'));
+      focusDeepLinkTarget(row);
+    }
     const say = (msg, bad) => { const n = document.createElement('div'); n.className = 'gp-msg'; n.style.cssText = 'font-size:12px;margin:6px 0;color:' + (bad ? '#cf222e' : '#1a7f37'); n.textContent = msg; body.insertBefore(n, body.firstChild); };
     body.querySelectorAll('.gp-release-form').forEach(f => {
       const mode = f.querySelector('.gp-mode'), until = f.querySelector('.gp-until');
@@ -20117,8 +20210,11 @@
     if (Array.isArray(b.scripts) && b.scripts.length) return b.scripts;
     return ['Initialize-PimSqlAdminGroup', 'Deploy-PimActivatorBackend', 'Publish-PimActivatorRemediation', 'Deploy-PimActivatorClient',
             'Grant-PimEnginePermissions', 'Initialize-PimWorkloadPrereqs', 'Initialize-PimMailSender', 'Set-PimSmtpRelayPassword', 'Set-PimSqlTier',
+            'New-PimHubPrepareScript',
             'Install-PimManager', 'Invoke-PimDeployAll', 'Invoke-PimMspBuild', 'Copy-PimSettings', 'Set-PimManagerAccess',
-            'Set-PimBreakGlassAccounts', 'Set-PimEmergencyPassphrase', 'Find-PimStrayTestObjects', 'Set-PimLicense', 'Deploy-PimActivatorHybrid'];
+            'Set-PimBreakGlassAccounts', 'Set-PimEmergencyPassphrase', 'Find-PimStrayTestObjects', 'Set-PimLicense', 'Deploy-PimActivatorHybrid',
+            'Update-PimCommunity', 'Grant-PimSupportAccess', 'Confirm-PimInstall', 'Set-PimManagerCustomHost', 'Deploy-PimRfaBroker',
+            'Rebuild-PimEnvInternal', 'Rebuild-PimEnvExternal', 'Remove-PimContainerStack', 'New-PimHostingPrerequisites'];
   }
   function pimScriptDocName(script) { return String(script || '').replace(/^.*[\\/]/, '').replace(/\.ps1$/i, ''); }
   function pimScriptDocUrl(script) { return pimScriptDocBase() + pimScriptDocName(script) + '/'; }
@@ -35503,7 +35599,15 @@
     if (want === 'settings' && params.get('section') === 'notifications') pimAlertNotifOpenNext = true;
     // MAIL-2 item 8: the Get Started reminder's button opens that step (?tab=getstarted&step=<id>)
     if (want === 'getstarted') { const st = params.get('step'); if (st && /^[a-z0-9-]{1,40}$/.test(st) && GET_STARTED_STEPS.some(s => s.id === st)) GS_OPEN_AT = st; }
+    // PIM 100.56: a guard record's Link (Invardia's mails + Customer health) -- ?tab=approvals&changeset=<provider> opens the
+    // held policy change set, ?tab=guards&guard=<id> that guard, ?tab=settings&section=licence Settings > Licence.
+    if (want === 'approvals') { const cs = params.get('changeset'); if (cs && /^[A-Za-z0-9-]{1,40}$/.test(cs)) APPR_FOCUS_CHANGESET = cs.toLowerCase(); }
+    if (want === 'guards') { const gd = params.get('guard'); if (gd && /^[a-z0-9][a-z0-9.-]{0,99}$/.test(gd)) GUARDS_FOCUS = gd; }
+    // §100.57: the pending-actions reminder links the exact Approvals / Guards / Access requests entry
+    const deepSel = pimDeepFocusSelector(want, params);
     if (want && /^[a-z0-9-]+$/.test(want) && document.getElementById(want + 'Tab')) switchTab(want);
+    if (want === 'settings' && params.get('section') === 'licence') { try { navScrollToAnchor('setLicenceCard'); } catch (_) { } }
+    if (deepSel) pimDeepFocus(deepSel);
   } catch (e) { }
   if (isServer) { try { renderEnvironmentName(); } catch (e) { } }   // operator 2026-10-04: the environment name, left of Mode
   if (isServer) { try { renderTenantModeBadge(); } catch (e) { } }   // 68.6 row 36: tenant mode in the header

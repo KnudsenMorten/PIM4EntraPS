@@ -1,0 +1,14 @@
+<!-- subject: PIM Manager: {{ItemCount}} item(s) waiting for you -->
+<!-- tokens: ReportHtml, ItemCount, ItemList -->
+<!-- PENDING-ACTIONS REMINDER (PIM REQUIREMENTS 100.57): to this environment's SuperAdmins whenever something waits on them --
+     open Get Started steps, policy change sets held by the circuit breaker, approval requests, access requests, guard holds
+     and releases, a break-glass change, staged changes a second administrator must commit. {{ReportHtml}} lists every item
+     with how long it has waited and a button straight to that entry. First after N hours, then repeating, and it stops by
+     itself when nothing waits (Settings > Mail & alerting > Reminders: what waits on you). To customize: edit it in the
+     Manager (Settings > Mail templates); the edited copy is kept in SQL. -->
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f6f8fa;">
+{{ReportHtml}}
+</body>
+</html>
