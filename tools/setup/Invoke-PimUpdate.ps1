@@ -922,7 +922,12 @@ try {
     } else { Info 'no SQL update needed.' }
 
     # ---- STEP 4 -- VERIFY: hosted smoke; auto-rollback on failure -----------
-    if ($deployed -and -not $SkipVerify) {
+    # 2026-10-10 (a customer's managed install rolled back here): the hosted smoke is a DEV gate (az CLI + a reachable
+    # Manager). Inside a customer install (Invoke-PimDeployAll without -RunDevGates sets PIM_DEPLOY_DEV_GATES=0) the deploy's
+    # own verify step checks the Manager over REST -- defer to it instead of rolling back a healthy Manager.
+    $verifyDeferred = ($deployed -and -not $SkipVerify -and "$env:PIM_DEPLOY_DEV_GATES" -eq '0')
+    if ($verifyDeferred) { Step '4. VERIFY [deferred -- customer install: the deploy verify step checks the Manager over REST]' }
+    if ($deployed -and -not $SkipVerify -and -not $verifyDeferred) {
         Step '4. VERIFY (hosted smoke: Test-PimManagerHostedSmoke.ps1)'
         $smoke = Join-Path $solRoot 'tests\live\Test-PimManagerHostedSmoke.ps1'
         $code = 0
@@ -1002,7 +1007,8 @@ try {
                 $errDetail += " -- NO rollback target captured; MANUAL rollback required"
             }
         }
-    } elseif ($SkipVerify) { Step '4. VERIFY [skip -- -SkipVerify]' }
+    } elseif ($verifyDeferred) { }
+    elseif ($SkipVerify) { Step '4. VERIFY [skip -- -SkipVerify]' }
     else { Step '4. VERIFY [skip -- nothing deployed]' }
 }
 catch {
