@@ -40,7 +40,7 @@ if ($spec.signedIn) {
     # falls back to the signed-in provider above.
     if ("$env:PIM_HANDOFF_TOKENS".Trim()) {
         try { $script:PimHandoff = "$env:PIM_HANDOFF_TOKENS" | ConvertFrom-Json } catch { $script:PimHandoff = $null }
-        $env:PIM_HANDOFF_TOKENS = $null
+        # kept in this process's environment on purpose: processes this step starts inherit it (the build clears it afterwards)
         if ($script:PimHandoff) {
             $script:PimHandoffFallback = $global:PIM_TokenProvider
             $global:PIM_TokenProvider = {
