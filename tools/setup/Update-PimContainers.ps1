@@ -426,6 +426,13 @@ function Invoke-ManagerSmokeGate {
     if (-not $PSCmdlet.ShouldProcess('ca-pim-manager','post-deploy GUI smoke gate')) { return 'NOT RUN (-WhatIf)' }
     if ($SkipSmoke) { Write-Host "==> -SkipSmoke set: skipping post-deploy GUI smoke gate (NOT recommended)." -ForegroundColor Yellow; return 'SKIPPED (-SkipSmoke -- NOT a pass)' }
     if ('ca-pim-manager' -notin $RolledApps) { return 'not applicable (the Manager was not rolled)' }  # gate only when the Manager was actually rolled
+    # 2026-10-10 (a customer's managed install failed the 'code' step here): the GUI smoke is a DEV gate (az CLI, a reachable
+    # Manager). Inside a customer install (Invoke-PimDeployAll without -RunDevGates) the deploy's verify step runs the REST
+    # community verify instead -- so this gate defers to it rather than failing a gate that cannot run on a customer host.
+    if ("$env:PIM_DEPLOY_DEV_GATES" -eq '0') {
+        Write-Host "==> post-deploy GUI smoke: not run inside a customer install -- the deploy's verify step checks the Manager over REST (up, page served, engine job present)." -ForegroundColor DarkGray
+        return 'DEFERRED to the deploy verify step (customer install, no dev gates)'
+    }
     $smoke = Join-Path $RepoRoot 'SOLUTIONS/PIM4EntraPS/tests/live/Test-PimManagerHostedSmoke.ps1'
     if (-not (Test-Path -LiteralPath $smoke)) {
         Write-Host "::warning:: post-deploy GUI smoke not found at $smoke -- cannot gate the deploy." -ForegroundColor Yellow
