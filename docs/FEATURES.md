@@ -75,6 +75,11 @@ deployment is a supported choice) and no credentials lying around.
   browser session or web process therefore cannot write to Entra directly.
 
 ## 3. Setup / Deploy
+- **Setup never touches your DNS, and checks the region first.** ✅ 2026-10-10 — With a custom host name, setup prints
+  the one DNS record to add (name, zone, address) with paste-ready lines and a check command; it never writes Active
+  Directory DNS, never adds a wildcard and never creates a zone named after your domain (an Azure private zone is only
+  written when it already exists). Before anything is created, setup checks that the chosen Azure region offers every
+  service PIM Manager needs, so an unsuitable region stops the install at the start instead of halfway.
 - **One command to stand up — or update — the whole solution.** A single "deploy
   everything" entry brings up (or updates) the entire solution for an environment in the
   right order: it makes sure the engine identity and its permissions exist, stands up the
@@ -196,6 +201,9 @@ deployment is a supported choice) and no credentials lying around.
   instead. *(2.4.488)*
 
 ## 4. MSP
+- **Support sees where your environment lives.** ✅ 2026-10-10 — With an install key, the heartbeat names the
+  environment's public addresses (PIM Manager, and the access request portal, its API and the MCP server where used;
+  https only, never an internal address), and each guard report links to the page where you act on it.
 - **A managed tenant only works when something changed -- much lower running cost.** ✅ 2026-10-02
   The managed tenant's pull compares the signed set it fetched (and everything that decides what it projects) with the last
   one it applied, and stops in seconds when nothing changed; the engine pass that follows only runs for the areas not
@@ -1571,6 +1579,12 @@ deployment is a supported choice) and no credentials lying around.
   message rather than failing, and renders sample data so the surface is never blank.)
 
 ## 12. Notifications / Email
+- **One reminder when something waits on you.** ✅ 2026-10-10 — PIM Manager mails your SuperAdmins a single reminder
+  listing everything waiting on them: open Get Started steps, policy change sets held by the circuit breaker, approval and
+  access requests, guard holds, a break-glass change and staged changes a second administrator must commit, each with a
+  link straight to that entry. The first reminder goes out after 4 hours for an approval and 24 hours for a Get Started
+  step, then daily while anything waits, and it stops by itself. Tune or switch it off under Settings > Mail & alerting;
+  each person can opt out in Notifications. It replaces the separate daily "Get Started not complete" mail.
 - **Built-in, template-driven email.** The engine sends notifications (new admin, new role,
   new permission, time-limited access pass delivery) by rendering HTML templates with simple
   placeholder tokens. Templates are fully customizable, and a lab redirect option keeps test

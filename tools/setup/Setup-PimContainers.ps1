@@ -54,7 +54,7 @@ param(
     # identity at all and INFRA silently fell back to the AMBIENT az context: the very hole
     # SS34.2c closed for secret-holders. The secret path stays for community/local callers.
     [string]$AdminCertPem,                             # PEM (key+cert) that `az login --certificate` wants
-    [string]$Location       = 'westeurope',            # West Europe / Denmark East only (never France)
+    [string]$Location       = 'westeurope',            # 100.62: any Azure region (the customer decides; checked before anything is created)
 
     # --- resource group + networking (spoke VNet peered to hub) ---
     [Parameter(Mandatory)][string]$ResourceGroup,
@@ -354,7 +354,7 @@ if (@($BaselineTrustedKeys | Where-Object { "$_".Trim() }).Count -or "$BaselineD
 }
 
 Show-PimSetupBanner -ScriptName 'Setup-PimContainers' -SolutionRoot $solRoot
-$Location = Assert-PimSetupRegion -Location $Location   # West Europe / Denmark East only; refuse France
+$Location = Assert-PimSetupRegion -Location $Location   # 100.62: the customer decides the region; a malformed name is refused
 
 # BUG-40: this is the TAG reference -- provenance for humans and logs only. What actually gets
 # deployed is $image, which is re-pointed at the immutable DIGEST once there is an az context to

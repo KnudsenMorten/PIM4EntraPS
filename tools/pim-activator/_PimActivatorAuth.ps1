@@ -39,7 +39,7 @@ function Show-PimActivatorBanner {
         [string[]]$AzModules,
         [switch]$GraphOptional
     )
-    Write-Host "$ScriptName -- PIM4EntraPS $(Get-PimActivatorSolutionVersion)" -ForegroundColor Cyan
+    Write-Host "$ScriptName -- PIM Manager $(Get-PimActivatorSolutionVersion)" -ForegroundColor Cyan
     foreach ($m in @(@($GraphModules) + @($AzModules) | Where-Object { $_ })) {
         $mod = Get-Module -Name $m -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $mod) { $mod = Get-Module -ListAvailable -Name $m -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1 }
