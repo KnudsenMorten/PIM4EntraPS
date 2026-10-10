@@ -43,13 +43,20 @@ $script:PimSetupApi = @{
     aca           = '2024-03-01'
     storage       = '2023-01-01'
     keyVault      = '2023-07-01'
+    # batch 2: a VNet link's resolutionPolicy (NxDomainRedirect) exists from this version on; the data planes' versions.
+    privateDnsLink = '2024-06-01'
+    keyVaultData  = '7.4'
+    storageData   = '2021-08-06'
 }
 $script:PimSetupGraph = 'https://graph.microsoft.com/v1.0'
+$global:PimSetupApiPins = $script:PimSetupApi
 
 function Get-PimSetupApiVersion {
     param([Parameter(Mandatory)][string]$Kind)
-    if (-not $script:PimSetupApi) { throw 'PIM-ArmSetup.ps1 is not loaded in this scope.' }
-    $v = $script:PimSetupApi[$Kind]
+    # A caller's CHILD script (`& .\Set-PimSqlNetworkAccess.ps1`) sees these functions but not this file's script scope: the pins are mirrored to global.
+    $pins = if ($script:PimSetupApi) { $script:PimSetupApi } else { $global:PimSetupApiPins }
+    if (-not $pins) { throw 'PIM-ArmSetup.ps1 is not loaded in this scope.' }
+    $v = $pins[$Kind]
     if (-not $v) { throw "Get-PimSetupApiVersion: no api-version pinned for '$Kind'." }
     return $v
 }
@@ -444,7 +451,10 @@ function Set-PimArmSubnet {
       -Delegation '' leaves delegations as they are; a value sets exactly that one delegation.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$VnetName,
-          [Parameter(Mandatory)][string]$Name, [string]$AddressPrefix, [string]$Delegation, [string]$PrivateEndpointNetworkPolicies)
+          [Parameter(Mandatory)][string]$Name, [string]$AddressPrefix, [string]$Delegation, [string]$PrivateEndpointNetworkPolicies,
+          # az network vnet subnet update --service-endpoints A B : the list is written AS GIVEN (REPLACES it, as the flag
+          # did) -- a caller that only means to add reads the current list and passes the union.
+          [string[]]$ServiceEndpoints)
     $id = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Network/virtualNetworks' $VnetName "subnets/$Name"
     $cur = Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -VnetName $VnetName -Name $Name
     $props = @{}
@@ -452,6 +462,7 @@ function Set-PimArmSubnet {
     if ("$AddressPrefix".Trim()) { $props.addressPrefix = "$AddressPrefix".Trim(); $props.Remove('addressPrefixes') }
     if ("$Delegation".Trim()) { $props.delegations = @(@{ name = 'delegation'; properties = @{ serviceName = "$Delegation".Trim() } }) }
     if ("$PrivateEndpointNetworkPolicies".Trim()) { $props.privateEndpointNetworkPolicies = "$PrivateEndpointNetworkPolicies".Trim() }
+    if ($PSBoundParameters.ContainsKey('ServiceEndpoints')) { $props.serviceEndpoints = @(@($ServiceEndpoints) | Where-Object { "$_".Trim() } | ForEach-Object { @{ service = "$_".Trim() } }) }
     [void](Invoke-PimSetupArm -Method PUT -Path $id -Body @{ properties = $props } -ApiVersion (Get-PimSetupApiVersion network))
     [void](Wait-PimArmProvisioned -Path $id -ApiVersion (Get-PimSetupApiVersion network))
     Get-PimArmSubnet -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -VnetName $VnetName -Name $Name
@@ -786,6 +797,9 @@ $script:PimSetupBuiltInRoles = @{
     'sql server contributor'                 = '6d8ee4ec-f05a-4a1d-8b00-a9b17e38b437'
 }
 
+$global:PimSetupBuiltInRolesMap = $script:PimSetupBuiltInRoles
+function Get-PimSetupBuiltInRoles { if ($script:PimSetupBuiltInRoles) { return $script:PimSetupBuiltInRoles }; if ($global:PimSetupBuiltInRolesMap) { return $global:PimSetupBuiltInRolesMap }; return @{} }
+
 function Get-PimArmRoleDefinitionId {
     <#
       A role NAME (or a GUID, or a full roleDefinitions id) -> the full role definition id at -SubscriptionId.
@@ -796,7 +810,7 @@ function Get-PimArmRoleDefinitionId {
     if ($r -match '(?i)/providers/Microsoft\.Authorization/roleDefinitions/[0-9a-f-]{36}$') { return $r }
     $guid = $null
     if ($r -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') { $guid = $r.ToLowerInvariant() }
-    elseif ($script:PimSetupBuiltInRoles.ContainsKey($r.ToLowerInvariant())) { $guid = $script:PimSetupBuiltInRoles[$r.ToLowerInvariant()] }
+    elseif ((Get-PimSetupBuiltInRoles).ContainsKey($r.ToLowerInvariant())) { $guid = (Get-PimSetupBuiltInRoles)[$r.ToLowerInvariant()] }
     else {
         if (-not $script:PimSetupRoleCache) { $script:PimSetupRoleCache = @{} }
         $key = "$SubscriptionId|$($r.ToLowerInvariant())"
@@ -818,7 +832,8 @@ function Get-PimArmRoleName {
     param([Parameter(Mandatory)][string]$RoleDefinitionId)
     $g = (("$RoleDefinitionId" -split '/')[-1]).ToLowerInvariant()
     $builtIn = ''
-    foreach ($k in @($script:PimSetupBuiltInRoles.Keys)) { if ($script:PimSetupBuiltInRoles[$k] -eq $g) { $builtIn = "$k" } }
+    $bi = Get-PimSetupBuiltInRoles
+    foreach ($k in @($bi.Keys)) { if ($bi[$k] -eq $g) { $builtIn = "$k" } }
     if ($builtIn) {
         # the canonical casing az prints
         $special = @{ 'acrpull' = 'AcrPull'; 'acrpush' = 'AcrPush'; 'sql db contributor' = 'SQL DB Contributor'; 'sql server contributor' = 'SQL Server Contributor' }
@@ -1069,7 +1084,7 @@ function Set-PimArmAcaApp {
       configuration; template } }. Waits for provisioning; returns the app as it reads back.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name,
-          [Parameter(Mandatory)][hashtable]$Resource, [switch]$Create, [int]$TimeoutSeconds = 900)
+          [Parameter(Mandatory)][object]$Resource, [switch]$Create, [int]$TimeoutSeconds = 900)   # a hashtable, or a captured resource object (Rebuild)
     $id = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/containerApps' $Name
     $m = if ($Create) { 'PUT' } else { 'PATCH' }
     [void](Invoke-PimSetupArm -Method $m -Path $id -Body $Resource -ApiVersion (Get-PimSetupApiVersion aca))
@@ -1206,7 +1221,7 @@ function Set-PimArmAcaJob {
       -Resource: @{ location; identity; properties = @{ environmentId; configuration; template } }. Waits; returns it.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name,
-          [Parameter(Mandatory)][hashtable]$Resource, [switch]$Create, [int]$TimeoutSeconds = 900)
+          [Parameter(Mandatory)][object]$Resource, [switch]$Create, [int]$TimeoutSeconds = 900)   # a hashtable, or a captured resource object (Rebuild)
     $id = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/jobs' $Name
     $m = if ($Create) { 'PUT' } else { 'PATCH' }
     [void](Invoke-PimSetupArm -Method $m -Path $id -Body $Resource -ApiVersion (Get-PimSetupApiVersion aca))
@@ -1523,4 +1538,315 @@ function Remove-PimArmAcaJobSecret {
     [void](Invoke-PimSetupArm -Method PATCH -Path $path -Body @{ properties = @{ configuration = $cfg } } -ApiVersion (Get-PimSetupApiVersion aca))
     $st = Wait-PimArmProvisioned -Path $path -ApiVersion (Get-PimSetupApiVersion aca)
     if ($st -match '(?i)^(Failed|Canceled|NotFound|TimedOut)') { throw "job '$Name' did not provision after removing secret '$SecretName' ($st)." }
+}
+
+# ======================================================================================================================
+# ---- added for batch 2 (REQUIREMENTS 100.41): storage, private DNS links, SQL VNet rules, Key Vault, ACA host names,
+#      deletes, app certificates
+# ======================================================================================================================
+
+function Get-PimArmResource {
+    <# A GET of any ARM id (az ... show --ids ID): -Kind names the pinned api-version ('network', 'aca', ...). $null on 404. #>
+    param([Parameter(Mandatory)][string]$ResourceId, [Parameter(Mandatory)][string]$Kind, [switch]$ErrorAsNull)
+    Invoke-PimSetupArm -Path "$ResourceId".Trim() -ApiVersion (Get-PimSetupApiVersion $Kind) -NotFoundOk -ErrorAsNull:$ErrorAsNull
+}
+
+function Remove-PimArmResource {
+    <# az ... delete --yes : DELETE by id (a missing resource is success), then wait until it reads back 404 (-Wait). #>
+    param([Parameter(Mandatory)][string]$ResourceId, [Parameter(Mandatory)][string]$Kind, [switch]$Wait, [int]$TimeoutSeconds = 900)
+    $v = Get-PimSetupApiVersion $Kind
+    [void](Invoke-PimSetupArm -Method DELETE -Path "$ResourceId".Trim() -ApiVersion $v -NotFoundOk)
+    if (-not $Wait) { return }
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if ($null -eq (Invoke-PimSetupArm -Path "$ResourceId".Trim() -ApiVersion $v -NotFoundOk -ErrorAsNull)) { return }
+        Start-Sleep -Seconds 10
+    }
+}
+
+function Get-PimArmSubscriptions {
+    <# az account list --query "[].id" : every subscription id the signed-in identity can see. #>
+    $r = Invoke-PimSetupArm -Path '/subscriptions' -ApiVersion (Get-PimSetupApiVersion subscriptions) -All -ErrorAsNull
+    return @(@($r | Where-Object { $_ }) | ForEach-Object { "$($_.subscriptionId)".Trim() } | Where-Object { $_ })
+}
+
+function Get-PimArmLogAnalyticsList {
+    <# az monitor log-analytics workspace list [-g RG] : every workspace (.name, .properties.customerId). #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [string]$ResourceGroup)
+    $scope = if ("$ResourceGroup".Trim()) { "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup" } else { "/subscriptions/$SubscriptionId" }
+    $r = Invoke-PimSetupArm -Path "$scope/providers/Microsoft.OperationalInsights/workspaces" -ApiVersion (Get-PimSetupApiVersion logAnalytics) -All -ErrorAsNull
+    return @($r | Where-Object { $_ })
+}
+
+# ---- storage (control plane + the blob data plane) ----
+
+function Get-PimArmStorageAccount {
+    <# az storage account show : .id, .location, .properties.publicNetworkAccess / allowBlobPublicAccess / networkAcls. #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name, [switch]$ErrorAsNull)
+    Invoke-PimSetupArm -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Storage/storageAccounts' $Name) -ApiVersion (Get-PimSetupApiVersion storage) -NotFoundOk -ErrorAsNull:$ErrorAsNull
+}
+
+function New-PimArmStorageAccount {
+    <#
+      az storage account create --sku S --kind K --allow-blob-public-access B : PUT, then wait until it reads back Succeeded
+      (the create answers 202 and the account is not readable at once -- a 404 while it is created is waited through).
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name,
+          [Parameter(Mandatory)][string]$Location, [string]$Sku = 'Standard_LRS', [string]$Kind = 'StorageV2', [bool]$AllowBlobPublicAccess = $false,
+          [int]$TimeoutSeconds = 600)
+    $id = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Storage/storageAccounts' $Name
+    $body = @{ location = $Location; sku = @{ name = $Sku }; kind = $Kind
+               properties = @{ allowBlobPublicAccess = $AllowBlobPublicAccess; minimumTlsVersion = 'TLS1_2'; supportsHttpsTrafficOnly = $true } }
+    [void](Invoke-PimSetupArm -Method PUT -Path $id -Body $body -ApiVersion (Get-PimSetupApiVersion storage))
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ($true) {
+        $sa = Get-PimArmStorageAccount -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull
+        $st = "$($sa.properties.provisioningState)"
+        if ($sa -and $st -match '(?i)^Succeeded$') { return $sa }
+        if ($sa -and $st -match '(?i)^(Failed|Canceled)$') { throw "the storage account '$Name' did not provision ($st)." }
+        if ((Get-Date) -ge $deadline) { throw "the storage account '$Name' did not provision within $TimeoutSeconds s (state '$st')." }
+        Start-Sleep -Seconds 5
+    }
+}
+
+function Update-PimArmStorageAccount {
+    <# az storage account update --public-network-access X | --allow-blob-public-access B : PATCH of the named properties only. #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][hashtable]$Properties)
+    Invoke-PimSetupArm -Method PATCH -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Storage/storageAccounts' $Name) -Body @{ properties = $Properties } -ApiVersion (Get-PimSetupApiVersion storage)
+}
+
+function Get-PimArmBlobContainer {
+    <# az storage container-rm show : .properties.publicAccess ('None' | 'Blob' | 'Container'), $null when absent. #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Account, [Parameter(Mandatory)][string]$Name, [switch]$ErrorAsNull)
+    Invoke-PimSetupArm -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Storage/storageAccounts' $Account "blobServices/default/containers/$Name") -ApiVersion (Get-PimSetupApiVersion storage) -NotFoundOk -ErrorAsNull:$ErrorAsNull
+}
+
+function Set-PimArmBlobContainer {
+    <#
+      az storage container-rm create (-Create: PUT) | az storage container-rm update --public-access X (PATCH). CONTROL plane:
+      no data role and no allowed network needed, so a re-run behind a Deny firewall still works.
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Account, [Parameter(Mandatory)][string]$Name,
+          [switch]$Create, [ValidateSet('', 'None', 'Blob', 'Container')][string]$PublicAccess = '')
+    $props = @{}
+    if ($PublicAccess) { $props.publicAccess = $PublicAccess }
+    Invoke-PimSetupArm -Method $(if ($Create) { 'PUT' } else { 'PATCH' }) -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Storage/storageAccounts' $Account "blobServices/default/containers/$Name") -Body @{ properties = $props } -ApiVersion (Get-PimSetupApiVersion storage)
+}
+
+function Invoke-PimBlobData {
+    <#
+      az storage blob upload | download | delete --auth-mode login : ONE blob call on the data plane with an Entra token
+      (audience https://storage.azure.com) -- never an account key, never a SAS. PUT writes -Content as a block blob.
+      Throws "<METHOD> <url> -> HTTP <code> : ..." like every other wrapper (a data-plane RBAC gap is HTTP 403).
+    #>
+    param([Parameter(Mandatory)][ValidateSet('PUT', 'GET', 'DELETE')][string]$Method, [Parameter(Mandatory)][string]$Account,
+          [Parameter(Mandatory)][string]$Container, [Parameter(Mandatory)][string]$Blob, [string]$Content)
+    $h = @{ 'x-ms-version' = (Get-PimSetupApiVersion storageData) }
+    if ($Method -eq 'PUT') { $h['x-ms-blob-type'] = 'BlockBlob' }
+    $url = "https://$Account.blob.core.windows.net/$Container/$Blob"
+    Invoke-PimSetupRest -Method $Method -Url $url -Body $(if ($Method -eq 'PUT') { "$Content" } else { $null }) -Resource 'https://storage.azure.com' -Headers $h
+}
+
+# ---- network: NIC, private DNS links (resolution policy), zone groups ----
+
+function Get-PimArmPrivateDnsLink {
+    <# az network private-dns link vnet show -z Z -n N : .id, .properties.resolutionPolicy, .properties.virtualNetwork.id. #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$ZoneName, [Parameter(Mandatory)][string]$Name, [switch]$ErrorAsNull)
+    Invoke-PimSetupArm -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Network/privateDnsZones' $ZoneName "virtualNetworkLinks/$Name") -ApiVersion (Get-PimSetupApiVersion privateDnsLink) -NotFoundOk -ErrorAsNull:$ErrorAsNull
+}
+
+function Set-PimArmPrivateDnsLink {
+    <#
+      az network private-dns link vnet create|update --virtual-network ID --registration-enabled false [--resolution-policy P]
+      PUT of the whole link (idempotent), waited on. -ResolutionPolicy 'NxDomainRedirect': a name this zone has no record for
+      still resolves publicly instead of failing.
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$ZoneName,
+          [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$VnetId, [bool]$RegistrationEnabled = $false, [string]$ResolutionPolicy)
+    $id = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Network/privateDnsZones' $ZoneName "virtualNetworkLinks/$Name"
+    $props = @{ virtualNetwork = @{ id = $VnetId }; registrationEnabled = $RegistrationEnabled }
+    if ("$ResolutionPolicy".Trim()) { $props.resolutionPolicy = "$ResolutionPolicy".Trim() }
+    [void](Invoke-PimSetupArm -Method PUT -Path $id -Body @{ location = 'global'; properties = $props } -ApiVersion (Get-PimSetupApiVersion privateDnsLink))
+    [void](Wait-PimArmProvisioned -Path $id -ApiVersion (Get-PimSetupApiVersion privateDnsLink))
+}
+
+function Get-PimArmPrivateDnsZoneGroups {
+    <# az network private-endpoint dns-zone-group list --endpoint-name E #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$EndpointName)
+    $r = Invoke-PimSetupArm -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Network/privateEndpoints' $EndpointName 'privateDnsZoneGroups') -ApiVersion (Get-PimSetupApiVersion network) -All -NotFoundOk -ErrorAsNull
+    return @($r | Where-Object { $_ })
+}
+
+# ---- Azure SQL: virtual network rules ----
+
+function Get-PimArmSqlVnetRules {
+    <# az sql server vnet-rule list -s S : every rule (.name, .properties.virtualNetworkSubnetId). #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Server)
+    $r = Invoke-PimSetupArm -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Sql/servers' $Server 'virtualNetworkRules') -ApiVersion (Get-PimSetupApiVersion sql) -All -ErrorAsNull
+    return @($r | Where-Object { $_ })
+}
+
+function New-PimArmSqlVnetRule {
+    <# az sql server vnet-rule create -n N --subnet ID [--ignore-missing-endpoint] : PUT, waited on. #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Server,
+          [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$SubnetId, [switch]$IgnoreMissingEndpoint)
+    $id = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Sql/servers' $Server "virtualNetworkRules/$Name"
+    [void](Invoke-PimSetupArm -Method PUT -Path $id -Body @{ properties = @{ virtualNetworkSubnetId = $SubnetId; ignoreMissingVnetServiceEndpoint = [bool]$IgnoreMissingEndpoint } } -ApiVersion (Get-PimSetupApiVersion sql))
+    [void](Wait-PimArmProvisioned -Path $id -ApiVersion (Get-PimSetupApiVersion sql))
+}
+
+# ---- Key Vault data plane ----
+
+function Get-PimKeyVaultSecretValue {
+    <#
+      az keyvault secret show|download --vault-name V -n N : the secret's VALUE (for a certificate: the PFX, base64), over the
+      vault's data plane with an Entra token. '' when it cannot be read (reason in $global:PimSetupRestLastError). Never printed.
+    #>
+    param([Parameter(Mandatory)][string]$VaultName, [Parameter(Mandatory)][string]$Name)
+    $r = Invoke-PimSetupRest -Url "https://$VaultName.vault.azure.net/secrets/$Name`?api-version=$(Get-PimSetupApiVersion keyVaultData)" -Resource 'https://vault.azure.net' -ErrorAsNull
+    if ($r) { return "$($r.value)" }
+    return ''
+}
+
+# ---- Container Apps: environment certificates, custom host names ----
+
+function Set-PimArmAcaEnvCertificate {
+    <#
+      az containerapp env certificate upload --certificate-file PFX --certificate-name N [--password P] : PUT of the
+      environment's certificates/N with the PFX (base64) -- returns the certificate resource (its .id binds a host name).
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$EnvironmentName,
+          [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$PfxBase64, [string]$Password, [string]$Location)
+    $loc = "$Location".Trim()
+    if (-not $loc) { $loc = "$((Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvironmentName).location)" }
+    $props = @{ value = $PfxBase64 }
+    if ("$Password") { $props.password = "$Password" }
+    $id = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/managedEnvironments' $EnvironmentName "certificates/$Name"
+    [void](Invoke-PimSetupArm -Method PUT -Path $id -Body @{ location = $loc; properties = $props } -ApiVersion (Get-PimSetupApiVersion aca))
+    $st = Wait-PimArmProvisioned -Path $id -ApiVersion (Get-PimSetupApiVersion aca)
+    if ($st -match '(?i)^(Failed|Canceled|NotFound|TimedOut)') { throw "the certificate '$Name' was not accepted by environment '$EnvironmentName' ($st)." }
+    Invoke-PimSetupArm -Path $id -ApiVersion (Get-PimSetupApiVersion aca)
+}
+
+function New-PimArmAcaManagedCertificate {
+    <#
+      The free managed certificate `az containerapp hostname bind --validation-method CNAME` requests: PUT of the
+      environment's managedCertificates/N (subjectName = the host name, CNAME validation), waited on (validation takes
+      minutes). Returns the certificate resource.
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$EnvironmentName,
+          [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$HostName, [string]$Location, [int]$TimeoutSeconds = 1200)
+    $loc = "$Location".Trim()
+    if (-not $loc) { $loc = "$((Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvironmentName).location)" }
+    $id = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/managedEnvironments' $EnvironmentName "managedCertificates/$Name"
+    [void](Invoke-PimSetupArm -Method PUT -Path $id -Body @{ location = $loc; properties = @{ subjectName = $HostName; domainControlValidation = 'CNAME' } } -ApiVersion (Get-PimSetupApiVersion aca))
+    $st = Wait-PimArmProvisioned -Path $id -ApiVersion (Get-PimSetupApiVersion aca) -TimeoutSeconds $TimeoutSeconds
+    if ($st -match '(?i)^(Failed|Canceled|NotFound|TimedOut)') { throw "the managed certificate for '$HostName' did not issue ($st) -- are the CNAME and TXT (asuid) records in public DNS?" }
+    Invoke-PimSetupArm -Path $id -ApiVersion (Get-PimSetupApiVersion aca)
+}
+
+function Set-PimArmAcaAppCustomDomain {
+    <#
+      az containerapp hostname add (no -CertificateId: binding Disabled) | az containerapp hostname bind --certificate C
+      (SniEnabled with that certificate id): read-modify-write of configuration.ingress.customDomains -- every other host
+      name, the ingress and the secrets (with their values) are kept.
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name,
+          [Parameter(Mandatory)][string]$HostName, [string]$CertificateId)
+    Set-PimArmAcaAppConfiguration -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -Mutate {
+        param($cfg)
+        # $HostName / $CertificateId resolve dynamically from this function's scope (no bound closure -- see Set-PimArmAcaAppSecret).
+        $keep = @(@($cfg.ingress.customDomains) | Where-Object { $_ -and "$($_.name)" -ine $HostName })
+        $d = [ordered]@{ name = $HostName; bindingType = $(if ("$CertificateId".Trim()) { 'SniEnabled' } else { 'Disabled' }) }
+        if ("$CertificateId".Trim()) { $d.certificateId = "$CertificateId".Trim() }
+        $cfg.ingress | Add-Member -NotePropertyName customDomains -NotePropertyValue (@($keep) + @([pscustomobject]$d)) -Force
+    }
+}
+
+function Set-PimArmAcaJobEnvVars {
+    <#
+      az containerapp job update --container-name C --set-env-vars K=V ... : read-modify-write of ONE container's env (every
+      other variable, secret ref and container stays -- --set-env-vars ADDS OR UPDATES), one PATCH of the template, waited on.
+    #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name,
+          [Parameter(Mandatory)][hashtable]$Env, [string]$ContainerName)
+    $job = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name
+    if (-not $job) { throw "container apps job '$Name' not found in $ResourceGroup." }
+    $cs = @($job.properties.template.containers)
+    $t = if ("$ContainerName".Trim()) { @($cs | Where-Object { "$($_.name)" -eq "$ContainerName".Trim() }) | Select-Object -First 1 } elseif ($cs.Count -eq 1) { $cs[0] } else { $null }
+    if (-not $t) { throw "container apps job '$Name': cannot tell which of $($cs.Count) containers to change -- pass -ContainerName." }
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($e in @($t.env)) { if ($e -and -not $Env.ContainsKey("$($e.name)")) { $list.Add($e) } }
+    foreach ($k in $Env.Keys) { $list.Add([pscustomobject]@{ name = "$k"; value = "$($Env[$k])" }) }
+    $t | Add-Member -NotePropertyName env -NotePropertyValue @($list.ToArray()) -Force
+    Set-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -Resource @{ properties = @{ template = $job.properties.template } }
+}
+
+function Get-PimAcrManifestTags {
+    <# az acr repository show -n R --image REPO@sha256:... --query tags : the tags pointing at that digest, @() when unreadable. #>
+    param([Parameter(Mandatory)][string]$LoginServer, [Parameter(Mandatory)][string]$Repository, [Parameter(Mandatory)][string]$Digest)
+    try {
+        $r = Invoke-PimAcrData -LoginServer $LoginServer -Repository $Repository -Path "/acr/v1/$Repository/_manifests/$Digest"
+        return @(@($r.manifest.tags) | Where-Object { "$_".Trim() })
+    } catch { $global:PimSetupRestLastError = "$($_.Exception.Message)"; return @() }
+}
+
+# ---- Microsoft Graph: an application's certificate credentials, a sign-in as another identity ----
+
+function ConvertTo-PimKeyIdentifierHex {
+    # PURE. Graph's keyCredential.customKeyIdentifier is the certificate thumbprint's BYTES, base64 -- az printed it as hex.
+    param([AllowEmptyString()][string]$Value)
+    $v = "$Value".Trim()
+    if (-not $v) { return '' }
+    if ($v -match '^[0-9a-fA-F]{40}$') { return $v.ToUpperInvariant() }
+    try { return (([Convert]::FromBase64String($v) | ForEach-Object { $_.ToString('X2') }) -join '') } catch { return $v.ToUpperInvariant() }
+}
+
+function Get-PimGraphAppCertificateKeyId {
+    <# az ad app credential list --id X --cert --query "[?customKeyIdentifier=='THUMB'].keyId" : the keyId bound for -Thumbprint, or ''. #>
+    param([Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][string]$Thumbprint)
+    $app = Get-PimGraphApplication -Id $Id -ErrorAsNull
+    $t = ("$Thumbprint" -replace '\s', '').ToUpperInvariant()
+    foreach ($k in @($app.keyCredentials | Where-Object { $_ })) {
+        if ((ConvertTo-PimKeyIdentifierHex -Value "$($k.customKeyIdentifier)") -eq $t) { return "$($k.keyId)" }
+    }
+    return ''
+}
+
+function Add-PimGraphAppCertificate {
+    <#
+      az ad app credential reset --id X --cert @file.cer --append --years N : PATCH keyCredentials with the existing entries
+      (as Graph returns them, by keyId) plus the new certificate (DER, base64). Callers only aim this at a registration the
+      same run created (New-PimDeployIdentity) -- an existing identity's credentials are never touched.
+    #>
+    param([Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][byte[]]$CertificateDer, [int]$Years = 2)
+    $app = Get-PimGraphApplication -Id $Id
+    if (-not $app) { throw "application '$Id' not found." }
+    $x = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (, $CertificateDer)
+    $end = $x.NotAfter.ToUniversalTime()
+    $cap = (Get-Date).ToUniversalTime().AddYears([Math]::Max(1, $Years))
+    if ($end -gt $cap) { $end = $cap }
+    $keep = @(@($app.keyCredentials | Where-Object { $_ }) | ForEach-Object { @{ keyId = "$($_.keyId)"; type = "$($_.type)"; usage = "$($_.usage)" } })
+    $new = @{ type = 'AsymmetricX509Cert'; usage = 'Verify'; key = [Convert]::ToBase64String($CertificateDer); endDateTime = $end.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+    [void](Invoke-PimSetupGraph -Method PATCH -Path "/applications/$($app.id)" -Body @{ keyCredentials = @($keep) + @($new) })
+}
+
+function Test-PimSignInAs {
+    <#
+      az login --service-principal -u APP --tenant T --certificate PEM (+ az rest GET -GraphProbePath) in a throwaway profile:
+      can THAT identity sign in -- and, with -GraphProbePath, read the directory -- right now? PIM-Rest mints the token for the
+      named identity (certificate from the store by thumbprint, forced fresh: a cached token predates a grant); the caller's own
+      session is untouched. Returns @{ signedIn; read; error }. Test seam: $global:PIM_SetupSignInStub = { param($TenantId, $ClientId, $Thumbprint, $GraphProbePath) @{...} }.
+    #>
+    param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$ClientId, [Parameter(Mandatory)][string]$CertThumbprint, [string]$GraphProbePath)
+    if ($global:PIM_SetupSignInStub) { return (& $global:PIM_SetupSignInStub $TenantId $ClientId $CertThumbprint $GraphProbePath) }
+    $out = @{ signedIn = $false; read = $false; error = '' }
+    try { $tok = Get-PimRestToken -Resource 'graph' -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint -Force; $out.signedIn = [bool]"$tok".Trim() }
+    catch { $out.error = "$($_.Exception.Message)"; return $out }
+    if (-not $out.signedIn -or -not "$GraphProbePath".Trim()) { return $out }
+    try {
+        $null = Invoke-RestMethod -Method GET -Uri ("https://graph.microsoft.com/v1.0" + "$GraphProbePath".Trim()) -Headers @{ Authorization = "Bearer $tok" } -TimeoutSec 60 -ErrorAction Stop
+        $out.read = $true
+    } catch { $out.error = "$($_.Exception.Message)" }
+    return $out
 }

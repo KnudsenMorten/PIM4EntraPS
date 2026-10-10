@@ -35,6 +35,11 @@ if ($spec.signedIn) {
     . (Join-Path $PSScriptRoot '_PimSignedIn.ps1')
     Set-PimSignedInGlobals -TenantId "$($spec.signedIn.tenantId)"
 }
+# 100.41: the identity above IS this step's REST session. Saying so (PIM_SetupRestMode) keeps a ported step from opening its
+# own (Connect-PimSetupRest with no credential would clear the build's certificate identity and fall to a browser sign-in).
+if ("$($global:PIM_ClientId)".Trim() -and "$($global:PIM_CertThumbprint)$($global:PIM_ClientSecret)".Trim()) {
+    $global:PIM_SetupRestMode = $(if ("$($global:PIM_CertThumbprint)".Trim()) { 'certificate' } else { 'secret' })
+} elseif ($spec.signedIn) { $global:PIM_SetupRestMode = 'signedIn' }
 # REQ 100.42 / framework 12.17 (owner 2026-10-09: "modern single connect only", no PowerShell modules): a step is NEVER given
 # an Az PowerShell context. Every step authenticates through PIM-Rest's one token client with the identity in the globals
 # above. A spec that still asks for one (an older runner) is refused rather than silently run without it.

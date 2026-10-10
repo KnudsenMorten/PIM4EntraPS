@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     Create (or find) the DEPLOY identity a first deploy needs, and hand back the three forms of it
-    the rest of the toolchain wants: appId, certificate thumbprint, and a PEM on disk for az.
+    the rest of the toolchain wants: appId, certificate thumbprint, and a PEM on disk (-AdminCertPem).
 
 .DESCRIPTION
     🔴 WHY THIS EXISTS. `Invoke-PimDeployAll`'s prereq step refuses without -AdminAppId plus a
@@ -17,7 +17,7 @@
 
     🔒 CERTIFICATE, NEVER A SECRET. A real customer tenant authenticates with a certificate
     (repo-root CLAUDE.md). The private key stays in the caller's certificate store; the PEM written
-    for az holds the same key because az has no other way to use one -- protect it accordingly and
+    (-AdminCertPem) holds the same key -- protect it accordingly and
     delete it when the engagement ends.
 
 .NOTES
@@ -66,14 +66,13 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimDeployGraph.ps1')
-# 🔴 BUG-158 -- THE GUARDED az. This was the one setup script that called the CLI raw, and it
-# captured `az ... 2>&1` straight into VALUES. On a host whose az writes a warning to stderr (the
-# 32-bit Python "cryptography" notice, printed on EVERY call and immune to PYTHONWARNINGS because
-# az runs python in isolated mode) the warning text BECAME the app id: "reusing app registration
-# D:\a\_work\...UserWarning: ..." and then "the service principal for <warning> did not become
-# readable". Measured 2026-09-14 on the first public-edition install, step 1. The shadow returns
-# STDOUT only, keeps $LASTEXITCODE, and publishes the error text in $global:PimAzLastError.
-. (Join-Path $PSScriptRoot '_PimAz.ps1')
+# 100.41 (framework 12.17 NO-AZ): Graph + ARM REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1).
+# 🔴 BUG-158 was az's stderr WARNING captured as the app id ("reusing app registration D:\a\_work\...UserWarning: ...",
+# measured 2026-09-14). There is no CLI text to capture any more: every value is a property of a parsed REST answer, and a
+# refusal is an exception carrying the service's own error ("<METHOD> <url> -> HTTP <code> : <code> -- <message>").
+$solRootDi = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootDi 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootDi 'engine\_shared\PIM-ArmSetup.ps1') }
 
 function Say ($m){ Write-Host "    $m" -ForegroundColor DarkGray }
 function Ok  ($m){ Write-Host "    [ok] $m" -ForegroundColor Green }
@@ -90,7 +89,6 @@ function Warn($m){ Write-Host "    [warn] $m" -ForegroundColor Yellow }
 # because "it's under the profile so it must be private" is an assumption, and this is a key.
 if (-not "$PemDir".Trim()) { $PemDir = Join-Path $env:LOCALAPPDATA 'pim\deploy-certs' }
 $pemPath = Join-Path $PemDir ("deploy-$TenantId.pem")
-$cerPath = Join-Path $PemDir ("deploy-$TenantId.cer")
 $subject = "CN=pim-deploy-$TenantId"
 
 if (-not $Apply) {
@@ -134,58 +132,58 @@ try {
 # ---- 1. the app registration -------------------------------------------------------------------
 # Find by display name first. Creating a second registration with the same name is legal in Entra
 # and produces two identities that look identical in the portal -- a trap worth not setting.
-# 🪤 "CANNOT SEE IT" AND "DOES NOT EXIST" LOOK IDENTICAL HERE. `az ad app list` returns an EMPTY
-# result -- not an error -- when the signed-in identity cannot read the directory. A deploy SPN has
+# 🪤 "CANNOT SEE IT" AND "DOES NOT EXIST" MUST NOT LOOK IDENTICAL HERE. az's `ad app list` returned an
+# EMPTY result -- not an error -- when the signed-in identity could not read the directory. A deploy SPN has
 # Owner on the SUBSCRIPTION (ARM) and usually no Graph rights at all, so the lookup came back empty,
 # the script went straight to create, and failed with "Insufficient privileges to complete the
 # operation" -- which names neither the identity that lacked them nor the registration that already
 # existed under that very display name. Measured at a customer 2026-09-11, mid-deploy.
-# So: prove the directory is READABLE before treating "not found" as "absent".
-$listOut = az ad app list --display-name $DisplayName --query "[0].appId" -o tsv 2>&1
-$listOk  = ($LASTEXITCODE -eq 0)
-$appId   = $(if ($listOk) { "$listOut".Trim() } else { '' })
-if (-not $listOk) {
-    $who = "$(az ad signed-in-user show --query userPrincipalName -o tsv 2>$null)".Trim()
-    if (-not $who) { $who = "$(az account show --query 'user.name' -o tsv 2>$null)".Trim() }
+# So: the directory must be READABLE before "not found" counts as "absent" -- a refused list THROWS.
+# The session: a calling deploy's, else the Invardia Support app's for this tenant, else the person signing in.
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId) }
+$listErr = ''
+try { $appId = "$(@(Find-PimGraphApplications -DisplayName $DisplayName)[0].appId)".Trim() } catch { $listErr = "$($_.Exception.Message)"; $appId = '' }
+if ($listErr) {
+    $who = "$((Get-PimSetupAccount -SubscriptionId $SubscriptionId -TenantId $TenantId).user.name)".Trim()
     throw ("cannot read app registrations in tenant $TenantId as '$who' -- so whether " +
            "'$DisplayName' already exists is UNKNOWN, and creating one blindly would either fail on " +
            "privileges or make a duplicate. This is normal for a deploy SPN: Owner on the " +
            "subscription is ARM, not Graph. Either sign in as an account that can manage app " +
-           "registrations (az login --tenant $TenantId), or skip this step entirely by passing " +
-           "-AdminAppId/-AdminCertPem for an identity you already have. az said: $listOut")
+           "registrations, or skip this step entirely by passing " +
+           "-AdminAppId/-AdminCertPem for an identity you already have. Graph said: $listErr")
 }
 $created = $false
 if ($appId) { Ok "reusing app registration $appId ('$DisplayName')" }
 else {
-    $appId = "$(az ad app create --display-name $DisplayName --sign-in-audience AzureADMyOrg --query appId -o tsv 2>&1)".Trim()
+    try { $appId = "$((New-PimGraphApplication -Body @{ displayName = $DisplayName; signInAudience = 'AzureADMyOrg' }).appId)".Trim() }
+    catch { $appId = "$($_.Exception.Message)" }
     if (-not ($appId -match '^[0-9a-f-]{36}$')) {
         throw ("could not create the app registration '$DisplayName' in tenant $TenantId. The " +
                "directory was readable and no registration of that name existed, so this is a " +
                "privilege to CREATE one (Application Administrator, or Application.ReadWrite.All). " +
-               "az said: $appId")
+               "Graph said: $appId")
     }
     $created = $true
     Ok "created app registration $appId"
 }
 
-# The service principal. `az ad sp create` fails if it already exists, which is not an error here.
-$spId = "$(az ad sp show --id $appId --query id -o tsv 2>$null)".Trim()
+# The service principal. A create of one that already exists is refused, which is not an error here.
+$spId = "$((Get-PimGraphServicePrincipal -Id $appId -Select 'id' -ErrorAsNull).id)".Trim()
 if (-not $spId) {
     # 🪤 Graph is eventually consistent: a registration created a second ago is not always readable
     # yet, and the failure reads as "does not exist" rather than "not yet replicated".
-    # 🔴 BUG-159 -- RETRY THE CREATE, NOT JUST THE READ. `az ad sp create` issued seconds after
-    # `az ad app create` is itself refused on replication ("The appId ... does not reference a valid
+    # 🔴 BUG-159 -- RETRY THE CREATE, NOT JUST THE READ. A service principal create issued seconds after
+    # the application create is itself refused on replication ("The appId ... does not reference a valid
     # application object"); the loop used to re-READ ten times after that single refused create, so
     # nothing ever created the principal. And a re-run could not recover: the registration now
     # "already existed", so the certificate step refused to bind a credential. Measured 2026-09-14,
     # public-edition install step 1.
     for ($i = 0; $i -lt 20 -and -not $spId; $i++) {
-        $null = az ad sp create --id $appId 2>&1
-        if ($LASTEXITCODE -eq 0) { $spId = "$(az ad sp show --id $appId --query id -o tsv 2>$null)".Trim() }
+        try { $spId = "$((New-PimGraphServicePrincipal -AppId $appId).id)".Trim() } catch { $spId = '' }
         if (-not $spId) {
             Say "application not replicated yet -- retrying the service principal create ($([int](($i+1)*5))s)..."
             Start-Sleep -Seconds 5
-            $spId = "$(az ad sp show --id $appId --query id -o tsv 2>$null)".Trim()
+            $spId = "$((Get-PimGraphServicePrincipal -Id $appId -Select 'id' -ErrorAsNull).id)".Trim()
         }
     }
     if (-not $spId) { throw "the service principal for $appId did not become readable." }
@@ -222,7 +220,7 @@ else {
 }
 $thumb = $cert.Thumbprint
 
-# The PEM az needs (key + cert, in that order). Written every run so a reused certificate whose PEM
+# The PEM -AdminCertPem takes (key + cert, in that order). Written every run so a reused certificate whose PEM
 # was cleaned up still produces a usable file.
 #
 # 🪤 THE OBJECT NEW-SELFSIGNEDCERTIFICATE RETURNS DOES NOT ALWAYS CARRY AN ATTACHED KEY HANDLE, so
@@ -258,7 +256,7 @@ Ok "wrote $pemPath"
 
 # ---- 3. bind the certificate to the registration -----------------------------------------------
 # 🔴 NEVER TOUCH THE CREDENTIALS OF A REGISTRATION THIS RUN DID NOT CREATE.
-# This used `az ad app credential reset --append`. "reset" is the wrong verb to aim at an existing
+# This used az's `ad app credential reset --append`. "reset" is the wrong verb to aim at an existing
 # identity under any flag: the operator reported credentials being reset in a live tenant, and the
 # risk is not worth the convenience -- an app registration shared with anything else loses whatever
 # was authenticating with it, silently, and the breakage shows up somewhere entirely different.
@@ -267,7 +265,7 @@ Ok "wrote $pemPath"
 # that did not exist a moment ago and therefore has none to lose. An EXISTING registration is left
 # completely alone -- if its certificate is not on this host, that is for the operator to resolve
 # by supplying one, not for this script to "fix" by writing to the directory.
-$bound = "$(az ad app credential list --id $appId --cert --query "[?customKeyIdentifier=='$thumb'].keyId" -o tsv 2>$null | Select-Object -First 1)".Trim()   # no '|' inside --query: az is az.cmd
+$bound = Get-PimGraphAppCertificateKeyId -Id $appId -Thumbprint $thumb
 if ($bound) { Ok 'certificate already bound to the registration' }
 elseif (-not $created) {
     throw ("app registration '$DisplayName' ($appId) already existed, and the certificate on this " +
@@ -278,28 +276,26 @@ elseif (-not $created) {
            "The PEM for this host's certificate is at $pemPath if you want to use THAT one.")
 }
 else {
-    $null = Export-Certificate -Cert $cert -FilePath $cerPath -Type CERT
     # Safe only because $created is true: the registration was made seconds ago by this run and has
-    # no other credential that could be revoked.
-    $res = az ad app credential reset --id $appId --cert "@$cerPath" --append --years $CertYears 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "could not upload the certificate: $res $($global:PimAzLastError)" }
-    Remove-Item -LiteralPath $cerPath -Force -ErrorAction SilentlyContinue
+    # no other credential that could be revoked. The public certificate (DER) goes up in the PATCH; no file.
+    try { Add-PimGraphAppCertificate -Id $appId -CertificateDer $cert.RawData -Years $CertYears }
+    catch { throw "could not upload the certificate: $($_.Exception.Message)" }
     Ok 'certificate bound to the newly-created registration'
 }
 
 # ---- 4. the Azure role -------------------------------------------------------------------------
 $scope = "/subscriptions/$SubscriptionId"
-$has = "$(az role assignment list --subscription $SubscriptionId --assignee $appId --scope $scope --query "[?roleDefinitionName=='$RoleName'].id" -o tsv 2>$null | Select-Object -First 1)".Trim()
+$has = "$(@(Get-PimArmRoleAssignments -Scope $scope -PrincipalId $spId -Role $RoleName -SubscriptionId $SubscriptionId)[0].id)".Trim()
 if ($has) { Ok "'$RoleName' already assigned on the subscription" }
 else {
     # 🪤 A brand-new service principal is not yet visible to the RBAC service: the assignment fails
     # with "PrincipalNotFound" and reads as a rights problem. Retry rather than stop.
     $assigned = $false
     for ($i = 0; $i -lt 12 -and -not $assigned; $i++) {
-        $out = az role assignment create --subscription $SubscriptionId --assignee-object-id $spId --assignee-principal-type ServicePrincipal `
-                 --role $RoleName --scope $scope 2>&1
-        if ($LASTEXITCODE -eq 0) { $assigned = $true; break }
-        if ("$out $($global:PimAzLastError)" -notmatch 'PrincipalNotFound|does not exist') { throw "role assignment failed: $out $($global:PimAzLastError)" }
+        $out = ''
+        try { [void](New-PimArmRoleAssignment -Scope $scope -PrincipalId $spId -PrincipalType ServicePrincipal -Role $RoleName -SubscriptionId $SubscriptionId); $assigned = $true; break }
+        catch { $out = "$($_.Exception.Message)" }
+        if ($out -notmatch 'PrincipalNotFound|does not exist') { throw "role assignment failed: $out" }
         Say "waiting for the principal to replicate to RBAC ($([int](($i+1)*5))s)..."
         Start-Sleep -Seconds 5
     }
@@ -311,38 +307,33 @@ else {
 $graphGranted = @()
 if ($GrantGraph) {
     $graphAppId = '00000003-0000-0000-c000-000000000000'
-    $graphSpId = "$(az ad sp show --id $graphAppId --query id -o tsv 2>$null)".Trim()
+    $graphSpId = "$((Get-PimGraphServicePrincipal -Id $graphAppId -Select 'id' -ErrorAsNull).id)".Trim()
     if (-not ($graphSpId -match '^[0-9a-f-]{36}$')) { throw "could not read the Microsoft Graph service principal in tenant $TenantId." }
     # One GET, then a pure plan: only what is missing is written, nothing is ever removed.
-    $existingRaw = az rest --method GET --url "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/appRoleAssignments" --query "value[?resourceId=='$graphSpId'].appRoleId" -o tsv 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "could not list the deploy identity's app-role assignments: $existingRaw" }
-    $existing = @("$existingRaw" -split "\s+" | Where-Object { $_ -match '^[0-9a-f-]{36}$' })
+    try { $existingRaw = @(Invoke-PimSetupGraph -Path "/servicePrincipals/$spId/appRoleAssignments" -All) }
+    catch { throw "could not list the deploy identity's app-role assignments: $($_.Exception.Message)" }
+    $existing = @($existingRaw | Where-Object { $_ -and "$($_.resourceId)" -eq $graphSpId } | ForEach-Object { "$($_.appRoleId)" } | Where-Object { $_ -match '^[0-9a-f-]{36}$' })
     $plan = Get-PimDeployIdentityGraphPlan -AssignedRoleIds $existing
     if (@($plan).Count -eq 0) { Ok 'Microsoft Graph application roles already granted' }
     foreach ($p in @($plan)) {
-        # 🪤 az is az.cmd: a JSON body on the command line is mangled by cmd.exe quoting, and a
-        # multi-line one is truncated after line 1. Always hand it a FILE.
-        $bodyFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-approle-" + [guid]::NewGuid().ToString('N') + '.json')
-        try {
-            Set-Content -LiteralPath $bodyFile -Value (New-PimAppRoleAssignmentBody -PrincipalId $spId -ResourceId $graphSpId -AppRoleId $p.Id) -Encoding ascii -NoNewline
-            $done = $false
-            for ($i = 0; $i -lt 12 -and -not $done; $i++) {
-                $out = az rest --method POST --url "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/appRoleAssignments" `
-                         --headers 'Content-Type=application/json' --body "@$bodyFile" -o none 2>&1
-                if ($LASTEXITCODE -eq 0) { $done = $true; break }
-                $azSaid = "$out $($global:PimAzLastError)"   # the guarded az returns stdout only
-                if ($azSaid -match 'Permission being assigned already exists') { $done = $true; break }
-                if ($azSaid -match 'Authorization_RequestDenied|Insufficient privileges|Forbidden') {
-                    throw ("your sign-in cannot grant application permissions ('$($p.Name)'). Sign in as a " +
-                           "Global Administrator or Privileged Role Administrator and re-run -- everything is idempotent. az said: $azSaid")
-                }
-                Say "waiting for the new principal to replicate before granting $($p.Name) ($([int](($i+1)*5))s)..."
-                Start-Sleep -Seconds 5
+        # The body is the one New-PimAppRoleAssignmentBody builds (JSON), POSTed as it is -- no command line in between.
+        $body = New-PimAppRoleAssignmentBody -PrincipalId $spId -ResourceId $graphSpId -AppRoleId $p.Id
+        $done = $false
+        for ($i = 0; $i -lt 12 -and -not $done; $i++) {
+            $said = ''
+            try { [void](Invoke-PimSetupGraph -Method POST -Path "/servicePrincipals/$spId/appRoleAssignments" -Body $body); $done = $true; break }
+            catch { $said = "$($_.Exception.Message)" }
+            if ($said -match 'Permission being assigned already exists') { $done = $true; break }
+            if ($said -match 'Authorization_RequestDenied|Insufficient privileges|Forbidden') {
+                throw ("your sign-in cannot grant application permissions ('$($p.Name)'). Sign in as a " +
+                       "Global Administrator or Privileged Role Administrator and re-run -- everything is idempotent. Graph said: $said")
             }
-            if (-not $done) { throw "could not grant Microsoft Graph role '$($p.Name)' to $appId." }
-            $graphGranted += $p.Name
-            Ok "granted Microsoft Graph application role $($p.Name)"
-        } finally { Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue }
+            Say "waiting for the new principal to replicate before granting $($p.Name) ($([int](($i+1)*5))s)..."
+            Start-Sleep -Seconds 5
+        }
+        if (-not $done) { throw "could not grant Microsoft Graph role '$($p.Name)' to $appId." }
+        $graphGranted += $p.Name
+        Ok "granted Microsoft Graph application role $($p.Name)"
     }
 }
 
@@ -351,12 +342,13 @@ if ("$PeerVnetResourceId".Trim()) {
     # The hub VNet may live in ANOTHER subscription: scope these calls to the one its id names.
     $peerSubId = @("$PeerVnetResourceId".Trim() -split '/' | Where-Object { $_ })[1]
     if ("$PeerVnetResourceId" -notmatch '(?i)^/subscriptions/[0-9a-f-]{36}/') { throw "PeerVnetResourceId '$PeerVnetResourceId' is not a full /subscriptions/<id>/... resource id." }
-    $hubHas = "$(az role assignment list --subscription $peerSubId --assignee $appId --scope $PeerVnetResourceId --query "[?roleDefinitionName=='$PeerRoleName'].id" -o tsv 2>$null | Select-Object -First 1)".Trim()
+    $hubHas = ''
+    try { $hubHas = "$(@(Get-PimArmRoleAssignments -Scope $PeerVnetResourceId -PrincipalId $spId -Role $PeerRoleName -SubscriptionId $peerSubId)[0].id)".Trim() } catch { $hubHas = '' }
     if ($hubHas) { Ok "'$PeerRoleName' already assigned on the hub VNet" }
     else {
-        $out = az role assignment create --subscription $peerSubId --assignee-object-id $spId --assignee-principal-type ServicePrincipal `
-                 --role $PeerRoleName --scope $PeerVnetResourceId 2>&1
-        if ($LASTEXITCODE -eq 0) { Ok "'$PeerRoleName' assigned on the hub VNet" }
+        $peerOk = $false
+        try { [void](New-PimArmRoleAssignment -Scope $PeerVnetResourceId -PrincipalId $spId -PrincipalType ServicePrincipal -Role $PeerRoleName -SubscriptionId $peerSubId); $peerOk = $true } catch { $peerOk = $false }
+        if ($peerOk) { Ok "'$PeerRoleName' assigned on the hub VNet" }
         else {
             # Do NOT fail the run. The hub usually belongs to a different team, and the deploy can
             # still build everything except the peering -- which the reachability step reports
@@ -371,39 +363,27 @@ if ("$PeerVnetResourceId".Trim()) {
 # ---- 5. prove it can actually sign in -----------------------------------------------------------
 # The whole point is that the NEXT step authenticates as this identity. Proving it here means a
 # failure is attributed to identity creation, where it belongs, instead of to the deploy.
-$probe = Join-Path ([IO.Path]::GetTempPath()) "pim-identity-probe-$([guid]::NewGuid().ToString('N'))"
-$null = New-Item -ItemType Directory -Force -Path $probe
-$prev = $env:AZURE_CONFIG_DIR
-try {
-    $env:AZURE_CONFIG_DIR = $probe
-    $signed = $false
-    for ($i = 0; $i -lt 10 -and -not $signed; $i++) {
-        $null = az login --service-principal -u $appId --tenant $TenantId --certificate $pemPath --allow-no-subscriptions -o none 2>&1
-        if ($LASTEXITCODE -eq 0) { $signed = $true; break }
-        Say "credential not replicated yet, retrying ($([int](($i+1)*6))s)..."
-        Start-Sleep -Seconds 6
+# Signed in AS the new identity (its certificate from the store, by thumbprint) -- this run's own session is untouched.
+$signed = $false
+for ($i = 0; $i -lt 10 -and -not $signed; $i++) {
+    if ((Test-PimSignInAs -TenantId $TenantId -ClientId $appId -CertThumbprint $thumb).signedIn) { $signed = $true; break }
+    Say "credential not replicated yet, retrying ($([int](($i+1)*6))s)..."
+    Start-Sleep -Seconds 6
+}
+if (-not $signed) { throw "the identity was created but cannot sign in yet. Wait a minute and re-run -- everything is idempotent." }
+Ok 'the deploy identity signs in'
+if ($GrantGraph) {
+    # BUG-155: prove the capability the infra step USES -- a real directory read AS this identity
+    # -- not that a grant call returned 200. App-role grants reach new tokens only after
+    # replication, so retry (each try mints a FRESH token), and say so plainly rather than fail an otherwise good identity.
+    $read = $false
+    for ($i = 0; $i -lt 20 -and -not $read; $i++) {
+        if ((Test-PimSignInAs -TenantId $TenantId -ClientId $appId -CertThumbprint $thumb -GraphProbePath "/servicePrincipals?`$top=1").read) { $read = $true; break }
+        Say "Graph read not yet effective for the new roles, retrying ($([int](($i+1)*15))s)..."
+        Start-Sleep -Seconds 15
     }
-    if (-not $signed) { throw "the identity was created but cannot sign in yet. Wait a minute and re-run -- everything is idempotent." }
-    Ok 'the deploy identity signs in'
-    if ($GrantGraph) {
-        # BUG-155: prove the capability the infra step USES -- a real directory read AS this identity
-        # -- not that a grant call returned 200. App-role grants reach new tokens only after
-        # replication, so retry, and say so plainly rather than fail an otherwise good identity.
-        $read = $false
-        for ($i = 0; $i -lt 20 -and -not $read; $i++) {
-            # no '&' in the URL: az is az.cmd, and cmd.exe splits the command line at it
-            $null = az rest --method GET --url "https://graph.microsoft.com/v1.0/servicePrincipals?`$top=1" -o none 2>&1
-            if ($LASTEXITCODE -eq 0) { $read = $true; break }
-            Say "Graph read not yet effective for the new roles, retrying ($([int](($i+1)*15))s)..."
-            Start-Sleep -Seconds 15
-            $null = az login --service-principal -u $appId --tenant $TenantId --certificate $pemPath --allow-no-subscriptions -o none 2>&1
-        }
-        if ($read) { Ok 'the deploy identity can read the directory (Microsoft Graph)' }
-        else { Warn 'Graph roles are granted but not yet effective for this identity; wait a few minutes before the deploy (they are cached per token).' }
-    }
-} finally {
-    $env:AZURE_CONFIG_DIR = $prev
-    Remove-Item -LiteralPath $probe -Recurse -Force -ErrorAction SilentlyContinue
+    if ($read) { Ok 'the deploy identity can read the directory (Microsoft Graph)' }
+    else { Warn 'Graph roles are granted but not yet effective for this identity; wait a few minutes before the deploy (they are cached per token).' }
 }
 
 [pscustomobject]@{
