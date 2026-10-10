@@ -2266,6 +2266,26 @@
       }
     },
     {
+      "key": "PendingReminders",
+      "label": "Reminders: what waits on you",
+      "where": "Settings > Mail & alerting > Reminders: what waits on you",
+      "route": "/api/settings/pending-reminders",
+      "type": "boolean",
+      "default": "On -- first reminder after 4 hours for an approval and 24 hours for a Get Started step, then every 24 hours",
+      "feature": "alerts-and-notifications",
+      "confirmOn": false,
+      "confirmOff": true,
+      "info": {
+        "what": "Whether PIM Manager mails your SuperAdmins when something waits on them: open required Get Started steps, policy change sets held by the circuit breaker, approval and access requests, guard holds and releases, a break-glass change, and staged changes a second administrator must commit. One mail lists everything, each item with a link to the exact place where you act. It is sent by your own PIM Manager, not by Invardia.",
+        "enabled": "When on (the default): the first reminder goes out when an approval has waited the set number of hours (default 4) or a Get Started step has been open that long (default 24), then it repeats every set number of hours (default 24) while anything waits. It stops by itself when nothing waits. Alert recipients who are not SuperAdmins get the Get Started part. Each person can switch either part off for themselves under Notifications.",
+        "disabled": "When off: no reminder is sent. Held changes, requests and open Get Started steps still show on the Home page and their own pages, but nobody is told by mail.",
+        "risk": "Off means a held change set, a guard hold or an access request can wait unnoticed, and the engine skips what is held until someone acts. Very short hours mean more mail. Reversible at any time; the next scheduler run uses the new values.",
+        "requires": "Admin or SuperAdmin to change it. Free (Community) and Pro. A mail sender must be set up (Settings > Mail & alerting > Mail sending); while mail is muted or no sender is set, the reminder is recorded but not delivered.",
+        "recommended": "On, with the defaults. Lower the approval hours if people wait on approvals during the working day.",
+        "docUrl": "https://invardia.com/docs/pim/settings/PendingReminders/"
+      }
+    },
+    {
       "key": "BreakGlassAccounts",
       "label": "Break-glass accounts",
       "where": "Settings > Emergency access (break-glass); also Get Started > Break-glass",

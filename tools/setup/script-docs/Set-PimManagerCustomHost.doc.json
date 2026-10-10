@@ -1,0 +1,57 @@
+{
+  "script": "Set-PimManagerCustomHost.ps1",
+  "product": "pim",
+  "title": "Give the PIM Manager a custom host name",
+  "purpose": "Gives the PIM Manager a custom host name (for example pim-manager.<your domain>) next to its generated Container Apps address: it adds and binds the name with a certificate, writes or prints the DNS records, and adds the name to the Manager's known host names and its sign-in reply URLs.",
+  "whenToRun": "After the installation, when people should reach the Manager on a name in your own domain. A public environment takes a public subdomain you own and a free managed certificate (create the printed CNAME and TXT records first, then re-run with -PublicDnsReady); a private environment needs your own certificate (Key Vault or PFX) and gets a private DNS record. It is part of the PIM Manager release package, not a separate download: run it from the package folder that Install-Invardia (or the guided install) downloaded and verified (.\\tools\\setup\\Set-PimManagerCustomHost.ps1).",
+  "standalone": false,
+  "sourcePath": "tools/setup/Set-PimManagerCustomHost.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Contributor", "scope": "the PIM resource group", "why": "Adds the host name and the certificate to the Manager container app and its environment, and sets PIM_MANAGER_HOSTNAMES (a new revision)." },
+    { "kind": "azureRbac", "name": "Private DNS Zone Contributor", "scope": "-PrivateDnsResourceGroup (default: the PIM resource group); only for a private environment with -Dns Auto / PrivateDnsZone", "why": "Creates the private DNS zone, the A record and the virtual network links." },
+    { "kind": "azureRbac", "name": "Network Contributor", "scope": "each virtual network in -LinkVnetIds (only when links are created)", "why": "Linking a private DNS zone to a virtual network needs join rights on that network." },
+    { "kind": "azureRbac", "name": "Key Vault Secrets User", "scope": "the Key Vault named by -KeyVaultName (only with a Key Vault certificate)", "why": "Reads the certificate (its secret half is the PFX) straight into the upload; it is never written to disk." },
+    { "kind": "entraRole", "name": "Application Administrator (or owner of the Manager's sign-in app registration)", "scope": "the Manager's Easy Auth app registration (skipped with -SkipEasyAuth)", "why": "Adds https://<name>/.auth/login/aad/callback to its reply URLs." },
+    { "kind": "other", "name": "DNS administrator on the AD DNS server (only with -Dns AdDns)", "scope": "the zone on -AdDnsServer", "why": "Writes the A record on an Active Directory DNS server instead of a private DNS zone." }
+  ],
+  "changes": [
+    { "target": "Manager container app (ingress)", "action": "update", "object": "custom domain <name> (hostname add), then bound to its certificate (SNI)", "scope": "the Manager app only; the other names and the app's secrets are kept", "why": "The point of the script: the Manager answers on the new name.", "undo": "Remove the custom domain from the Manager app (Azure portal > Container App > Custom domains)." },
+    { "target": "Container Apps environment", "action": "create", "object": "a managed certificate (public environment) or an uploaded certificate from Key Vault / PFX (private environment), named after the host name", "scope": "the PIM Container Apps environment", "why": "The name needs a certificate; a private environment cannot validate a free managed one.", "undo": "Delete the certificate from the environment after removing the custom domain." },
+    { "target": "Private DNS (private environment)", "action": "create", "object": "the zone named after the rest of the host name, the A record <label> -> the environment's static IP, and a link to each -LinkVnetIds network (only those missing)", "scope": "-PrivateDnsResourceGroup", "why": "So clients in those networks resolve the name. The record is read before it is written.", "undo": "Delete the A record (and the zone and links if nothing else uses them)." },
+    { "target": "AD DNS server (only with -Dns AdDns)", "action": "create", "object": "A record <name> -> the environment's static IP", "scope": "the zone on -AdDnsServer", "why": "For networks that resolve through Active Directory DNS.", "undo": "Delete the A record on the DNS server." },
+    { "target": "Manager container app (environment variables)", "action": "update", "object": "PIM_MANAGER_HOSTNAMES (the name appended once) -- a new revision", "scope": "the Manager app", "why": "Mail links and the Manager use the custom name.", "undo": "Remove the name from PIM_MANAGER_HOSTNAMES." },
+    { "target": "Microsoft Entra ID", "action": "update", "object": "the Manager's sign-in app registration: reply URL https://<name>/.auth/login/aad/callback", "scope": "that one app registration", "why": "Sign-in on the new name returns to the Manager.", "undo": "Remove the reply URL from the app registration." }
+  ],
+  "parameters": [
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The PIM subscription." },
+    { "name": "TenantId", "required": true, "default": null, "help": "The tenant id. The REST session is pinned to it; a session of any other tenant is refused." },
+    { "name": "ResourceGroup", "required": true, "default": null, "help": "The PIM resource group." },
+    { "name": "HostName", "required": true, "default": null, "help": "The custom name, at least three labels (name.domain.tld). A public environment refuses private top-level names (.local, .corp, .lan, ...)." },
+    { "name": "ManagerApp", "required": false, "default": "ca-pim-manager", "help": "The Manager container app's name." },
+    { "name": "KeyVaultName", "required": false, "default": null, "help": "The Key Vault holding your certificate (with -KeyVaultCertName)." },
+    { "name": "KeyVaultCertName", "required": false, "default": null, "help": "The certificate's name in that Key Vault." },
+    { "name": "PfxPath", "required": false, "default": null, "help": "Your certificate as a PFX file, instead of Key Vault." },
+    { "name": "PfxPassword", "required": false, "default": null, "help": "The PFX password (a SecureString)." },
+    { "name": "Dns", "required": false, "default": "Auto", "help": "Auto (private environment: private DNS zone; public: print the public records), PrivateDnsZone, AdDns or None." },
+    { "name": "PrivateDnsResourceGroup", "required": false, "default": "the PIM resource group", "help": "Where the private DNS zone lives (for example the hub's DNS resource group)." },
+    { "name": "LinkVnetIds", "required": false, "default": "none", "help": "Resource ids of the virtual networks whose clients must resolve the name (the zone is linked to each)." },
+    { "name": "AdDnsServer", "required": false, "default": null, "help": "The AD DNS server for -Dns AdDns." },
+    { "name": "PublicDnsReady", "required": false, "default": false, "help": "Public environment: the printed CNAME and TXT records exist, so the name can be validated and bound." },
+    { "name": "SkipEasyAuth", "required": false, "default": false, "help": "Do not add the reply URL to the sign-in app registration." }
+  ],
+  "readsOnly": [
+    "the Manager container app and its Container Apps environment (internal or external, static IP, default domain, verification id)",
+    "the existing private DNS record and links (before writing them)",
+    "the Manager's Easy Auth configuration and its app registration's reply URLs"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in)",
+    "management.azure.com",
+    "graph.microsoft.com (the reply URL)",
+    "<vault>.vault.azure.net (only with a Key Vault certificate)",
+    "the AD DNS server (only with -Dns AdDns)"
+  ],
+  "whatIf": "Reads the Manager app and its environment, prints the plan (certificate type, DNS mode and every DNS record), then 'What if: Performing the operation \"custom host name <name>\" on target \"ca-pim-manager\"' and 'preview only -- nothing was changed'. Nothing is written.",
+  "undo": "Remove the custom domain from the Manager app, delete its certificate from the environment, delete the DNS record, remove the name from PIM_MANAGER_HOSTNAMES and the reply URL from the sign-in app registration.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Set-PimManagerCustomHost/"
+}

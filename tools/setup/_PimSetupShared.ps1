@@ -24,8 +24,9 @@
                                      the GSA / Private Access + private-link/DNS
                                      advice (which zones to add) printed at the end
                                      of a deploy.
-      * Write-PimDnsRecord        -- register the Manager FQDN -> env static IP on an
-                                     AD DNS server (extracted from Setup-PimContainers).
+      * Show-PimAdDnsRecord       -- PRINT the AD DNS record(s) an admin adds for a host
+                                     -> env static IP (BUG-298, owner "Manual only": PIM
+                                     never writes AD DNS, no RSAT module; Get-PimAdDnsRecordPlan).
       * Set-PimVnetPeering        -- BUG-49: peer the PIM spoke VNet to the hub, BOTH
                                      directions, and verify both read Connected.
       * Set-PimPrivateDnsZone     -- BUG-49: publish the ACA env default domain to the
@@ -77,8 +78,9 @@ if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Jo
 # New-PimHostingPrerequisites.ps1's -Location default. Until that was allowed here, step 3 built
 # the estate in a region Setup-PimContainers then threw on, so the container steps could never
 # run against what the estate actually is. Sweden Central is EU; the explicit denial is France.
-$script:PimAllowedRegions = @('westeurope','denmarkeast','swedencentral')
-$script:PimDeniedRegions  = @('francecentral','francesouth')
+# BUG-299 (2026-10-10): the list now lives in _PimRegions.ps1 ONLY (install-parameters.json, the guided install's
+# config check and Invoke-PimDeployAll's preflight read the same list) -- sets $script:PimAllowedRegions / PimDeniedRegions.
+. (Join-Path $PSScriptRoot '_PimRegions.ps1')
 
 function Get-PimSetupSolutionVersion {
     [CmdletBinding()] param([string]$SolutionRoot)
@@ -121,15 +123,11 @@ function Show-PimSetupBanner {
 }
 
 function Assert-PimSetupRegion {
+    # BUG-299: the list and the reason come from _PimRegions.ps1 (the one source; also checked in every preflight).
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Location)
-    $norm = ($Location -replace '\s','').ToLowerInvariant()
-    if ($norm -in $script:PimDeniedRegions) {
-        throw "Region '$Location' is not allowed for PIM hosting (data residency). Use West Europe ('westeurope'), Denmark East ('denmarkeast') or Sweden Central ('swedencentral') -- never France."
-    }
-    if ($norm -notin $script:PimAllowedRegions) {
-        throw "Region '$Location' is not an approved PIM hosting region. Approved: $($script:PimAllowedRegions -join ', '). (France is explicitly disallowed.)"
-    }
-    return $norm
+    $why = Test-PimSetupRegion -Location $Location
+    if ($why) { throw $why }
+    return ($Location -replace '\s','').ToLowerInvariant()
 }
 
 function ConvertTo-PimSqlSidFromAppId {
@@ -876,29 +874,80 @@ function Set-PimSqlNoAutoPause {
     }
 }
 
-function Write-PimDnsRecord {
-    [CmdletBinding(SupportsShouldProcess)]
+function Get-PimAdDnsRecordPlan {
+    <#
+      PURE (BUG-298, owner decision 2026-10-10 "Manual only"). PIM NEVER writes into an AD DNS server and never needs the
+      DnsServer (RSAT) module: this decides the exact record(s) the admin adds, and the lines that tell them how.
+        - a custom name (pim.contoso.local): ONE A record, `pim` in `contoso.local` -> the environment static IP. Never a
+          wildcard, never a zone to create -- the zone is the customer's;
+        - -AcaEnvironmentZone (Setup-PimContainers -DnsServer): the environment's OWN default domain
+          (*.azurecontainerapps.io, PIM's name): the host + `*` records, and that zone (created by the admin if missing).
+      Returns @{ ok; reason; fqdn; zone; records[] @{type;zone;name;value}; lines[] } -- lines = the text to print: the
+      record, a ready-to-paste DNS PowerShell line and dnscmd line per record, and the Resolve-DnsName check.
+      Before the BUG-298 fix the writer created a forest zone whenever none was found and ALWAYS wrote '*' next to the
+      host: -Dns AdDns with pim.contoso.local pointed *.contoso.local at PIM in the customer's own AD DNS.
+    #>
     param(
-        [Parameter(Mandatory)][string]$DnsServer,
+        [Parameter(Mandatory)][string]$Fqdn,
+        [Parameter(Mandatory)][string]$Zone,
+        [Parameter(Mandatory)][string]$StaticIp,
+        [switch]$AcaEnvironmentZone,
+        [string]$DnsServer = ''
+    )
+    $f = "$Fqdn".Trim().ToLowerInvariant().TrimEnd('.')
+    $z = "$Zone".Trim().ToLowerInvariant().TrimEnd('.')
+    $ip = "$StaticIp".Trim()
+    $refuse = { param($why) @{ ok = $false; reason = $why; fqdn = $f; zone = $z; records = @(); lines = @() } }
+    if ($ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { return (& $refuse "'$StaticIp' is not an IPv4 address") }
+    if (-not $f -or -not $z) { return (& $refuse 'a host name and a zone are both needed') }
+    if ($f -eq $z) { return (& $refuse "'$f' is the zone itself -- PIM never touches a zone apex") }
+    if (-not $f.EndsWith('.' + $z)) { return (& $refuse "'$f' is not inside the zone '$z'") }
+    if ($AcaEnvironmentZone -and $z -notmatch '\.azurecontainerapps\.io$') {
+        return (& $refuse "'$z' is not a Container Apps environment domain (*.azurecontainerapps.io) -- the environment wildcard belongs only in PIM's own environment zone")
+    }
+    $label = $f.Substring(0, $f.Length - $z.Length - 1)
+    $records = @(@{ type = 'A'; zone = $z; name = $label; value = $ip })
+    if ($AcaEnvironmentZone) { $records += @{ type = 'A'; zone = $z; name = '*'; value = $ip } }
+    $srv = if ("$DnsServer".Trim()) { "$DnsServer".Trim() } else { '<your-dns-server>' }
+    $cn = if ("$DnsServer".Trim()) { " -ComputerName $srv" } else { '' }
+    $lines = @("PIM does not write to your DNS. Add $(if (@($records).Count -eq 1) {'this record'} else {'these records'}) on your AD DNS server:")
+    if ($AcaEnvironmentZone) {
+        $lines += "  zone  $z  (the environment's own domain; if your DNS has no such zone, create it first:)"
+        $lines += "        Add-DnsServerPrimaryZone$cn -Name '$z' -ReplicationScope Forest"
+        $lines += "        dnscmd $srv /ZoneAdd $z /DsPrimary /dp /forest"
+    } else {
+        $lines += "  zone  $z  (your existing zone -- add the record there; PIM creates no zone)"
+    }
+    foreach ($r in $records) {
+        $lines += ("  A     {0}.{1} -> {2}" -f $r.name, $r.zone, $r.value)
+        $lines += ("        Add-DnsServerResourceRecordA{0} -ZoneName '{1}' -Name '{2}' -IPv4Address {3}" -f $cn, $r.zone, $r.name, $r.value)
+        $lines += ("        dnscmd {0} /RecordAdd {1} {2} A {3}" -f $srv, $r.zone, $r.name, $r.value)
+    }
+    $chk = if ("$DnsServer".Trim()) { " -Server $srv" } else { '' }
+    $lines += "  then check (expect $ip):"
+    $lines += "        Resolve-DnsName $f$chk -Type A"
+    return @{
+        ok = $true; fqdn = $f; zone = $z; records = $records; lines = $lines
+        reason = "AD DNS (manual): $(@($records).Count) A record(s) for the admin to add in zone $z$(if (-not $AcaEnvironmentZone) {' -- host record only, no wildcard'})"
+    }
+}
+
+function Show-PimAdDnsRecord {
+    <#
+      BUG-298 (owner 2026-10-10 "Manual only"): PRINT the AD DNS record(s) an admin adds for a host name -> environment
+      static IP. Writes NOTHING and calls no DnsServer cmdlet, so it needs no RSAT module and behaves the same under
+      -WhatIf. Throws when the plan is refused (a name outside the zone, a customer zone with -AcaEnvironmentZone).
+    #>
+    param(
+        [string]$DnsServer = '',
         [Parameter(Mandatory)][string]$Fqdn,
         [Parameter(Mandatory)][string]$EnvDomain,
-        [Parameter(Mandatory)][string]$StaticIp
+        [Parameter(Mandatory)][string]$StaticIp,
+        [switch]$AcaEnvironmentZone
     )
-    if (-not (Get-Command Add-DnsServerResourceRecordA -ErrorAction SilentlyContinue)) {
-        Write-Warning "  DnsServer module not available -- skip AD DNS registration for $Fqdn (add manually: A '$Fqdn' -> $StaticIp)."
-        return
-    }
-    if (-not $PSCmdlet.ShouldProcess($DnsServer, "A $Fqdn -> $StaticIp")) { return }
-    $zone = $EnvDomain
-    $name = $Fqdn.Substring(0, $Fqdn.Length - $zone.Length - 1)
-    if (-not (Get-DnsServerZone -ComputerName $DnsServer -Name $zone -ErrorAction SilentlyContinue)) {
-        Add-DnsServerPrimaryZone -ComputerName $DnsServer -Name $zone -ReplicationScope Forest
-    }
-    foreach ($n in @('*', $name)) {
-        $old = Get-DnsServerResourceRecord -ComputerName $DnsServer -ZoneName $zone -Name $n -RRType A -ErrorAction SilentlyContinue
-        if ($old) { Remove-DnsServerResourceRecord -ComputerName $DnsServer -ZoneName $zone -Name $n -RRType A -Force -ErrorAction SilentlyContinue }
-        Add-DnsServerResourceRecordA -ComputerName $DnsServer -ZoneName $zone -Name $n -IPv4Address $StaticIp -ErrorAction SilentlyContinue
-    }
+    $plan = Get-PimAdDnsRecordPlan -Fqdn $Fqdn -Zone $EnvDomain -StaticIp $StaticIp -AcaEnvironmentZone:$AcaEnvironmentZone -DnsServer $DnsServer
+    if (-not $plan.ok) { throw "AD DNS refused: $($plan.reason)" }
+    foreach ($l in $plan.lines) { Write-Host "    $l" -ForegroundColor White }
 }
 
 function Set-PimVnetPeering {

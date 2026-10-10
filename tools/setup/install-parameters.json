@@ -1,7 +1,7 @@
 {
   "_comment": "The guided-install contract of the PIM Manager (GUIDED-INSTALL 4.1-4.6). Invardia's wizard asks exactly these questions and writes the answers to config.json for tools/setup/Install-PimManager.ps1, which validates them again (Test-PimInstallConfig). 'maps' = what the answer drives. Kept in step with Install-PimManager by tests/Test-PimGuidedInstall.ps1.",
   "product": "pim-manager",
-  "version": "2.4.575",
+  "version": "2.4.576",
   "entryPoint": "Install-PimManager -ConfigPath <config.json> [-LicencePath <file>] -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]",
   "licenceOrKey": "-LicencePath is required unless config.json carries enrollmentKey: an enrollment key (framework 8.6) makes the install claim the tenant at Invardia, which returns the licence and the install key.",
   "exitCodes": { "0": "succeeded (warnings allowed)", "1": "a step failed -- fix it and -Resume", "2": "preflight failed -- nothing was changed", "3": "bad answers or a bad licence -- nothing was changed" },
@@ -14,7 +14,7 @@
   "parameters": [
     { "key": "tenantId", "page": "target", "type": "guid", "required": true, "help": "The Microsoft Entra tenant PIM manages. The licence is bound to it.", "maps": "TenantId" },
     { "key": "subscriptionId", "page": "target", "type": "guid", "required": true, "help": "The Azure subscription that hosts PIM (Container Apps, Azure SQL).", "maps": "SubscriptionId" },
-    { "key": "location", "page": "target", "type": "region", "default": "swedencentral", "options": ["swedencentral", "westeurope", "northeurope", "denmarkeast", "germanywestcentral"], "help": "Some subscriptions cannot create new Azure SQL servers in West Europe -- the installer checks the region first.", "maps": "Location" },
+    { "key": "location", "page": "target", "type": "region", "default": "swedencentral", "options": ["swedencentral", "westeurope", "denmarkeast"], "help": "The regions PIM is hosted in (EU data residency). Some subscriptions cannot create new Azure SQL servers in West Europe -- the installer checks the region first, before anything is created.", "maps": "Location" },
     { "key": "resourceGroup", "page": "target", "type": "resourceGroupName", "default": "rg-pim", "help": "Created when it does not exist; an existing one is reused.", "maps": "ResourceGroup" },
     { "key": "edition", "page": "target", "type": "enum", "options": ["trial", "pro"], "setBy": "invardia", "help": "Set from the licence in the bundle, not asked.", "maps": "the licence in the bundle" },
     { "key": "exposure", "page": "network", "type": "enum", "default": "external", "options": ["external"], "help": "The guided install builds the external shape: the PIM Manager is reachable on the internet behind Microsoft Entra sign-in. A private-network install is a consultant-led setup.", "maps": "Exposure" },

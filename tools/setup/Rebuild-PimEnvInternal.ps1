@@ -1,10 +1,13 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     REQ 92 NET-2 -- rebuild a PIM environment that was built EXTERNAL so it is INTERNAL-ONLY (reachable only from its
     VNet and the networks peered to it). PLANS by default; changes nothing without -Apply.
 
 .DESCRIPTION
+    Converts a public (external) PIM Manager environment to private (internal-only): it captures the live PIM Manager and jobs, deletes and recreates the Container Apps environment internal-only on the same subnet and workspace, restores the apps from the capture and compares them, repairs what is keyed to the new identities, attaches sign-in and publishes the private DNS zone for the new address. Data is kept. It plans unless -Apply is given.
+
     The Container Apps environment's internal-only flag is IMMUTABLE, so the only way to change it is to delete and
     recreate the environment. This is the SAME tool as Rebuild-PimEnvExternal.ps1 run in the other direction: a fresh
     capture of the live environment, delete the jobs / Manager / environment, recreate it --internal-only true on the
@@ -29,8 +32,13 @@
     # 2. do it
     ./Rebuild-PimEnvInternal.ps1 ... -EasyAuthTenantId <tenant> -HostingAccessTenantId <tenant> `
         -HostingAccessClientId <cert SPN> -HostingAccessCertThumbprint <thumb> -SqlServer <server> -Apply
+
+    -WhatIf: the plan (it wins over -Apply) -- the live environment is read, nothing is deleted or created.
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Rebuild-PimEnvInternal/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$Tag,
     [Parameter(Mandatory)][string]$SubscriptionId,
@@ -60,6 +68,12 @@ param(
     [switch]$Apply
 )
 $ErrorActionPreference = 'Stop'
-$p = @{} + $PSBoundParameters
-$p['ToExposure'] = 'Internal'
-& (Join-Path $PSScriptRoot 'Rebuild-PimEnvExternal.ps1') @p
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Rebuild-PimEnvInternal'
+try {
+    # -WhatIf travels in $PSBoundParameters: the rebuild then runs as its plan (it wins over -Apply). The banner and the
+    # transcript stay this script's (the rebuild prints no second banner in the same process).
+    $p = @{} + $PSBoundParameters
+    $p['ToExposure'] = 'Internal'
+    & (Join-Path $PSScriptRoot 'Rebuild-PimEnvExternal.ps1') @p
+} finally { Stop-PimScriptRun -Script 'Rebuild-PimEnvInternal' }

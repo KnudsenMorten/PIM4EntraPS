@@ -1,0 +1,67 @@
+{
+  "script": "Rebuild-PimEnvInternal.ps1",
+  "product": "pim",
+  "title": "Convert a public PIM Manager environment to private",
+  "purpose": "Converts a public (external) PIM Manager environment to private (internal-only): it captures the live PIM Manager and jobs, deletes and recreates the Container Apps environment internal-only on the same subnet and workspace, restores the apps from the capture and compares them, repairs what is keyed to the new identities, attaches sign-in and publishes the private DNS zone for the new address. Data is kept. It plans unless -Apply is given.",
+  "whenToRun": "Once, to convert a public environment to private (the 'rebuild' route of the conversion guide), after the registry has a private endpoint and the network is prepared. Plan a maintenance window (the delete of a VNet-integrated environment takes 15-30 minutes). It runs on Windows (the capture protects secret values with Windows DPAPI). It is part of the PIM Manager release package and runs Rebuild-PimEnvExternal.ps1 next to it: run it from the package folder that Install-Invardia or the guided install downloaded (signed), or, for Community, from the public repository at the release tag.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Rebuild-PimEnvInternal.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Owner, or Contributor + User Access Administrator", "scope": "the PIM resource group (role re-grants: their original scopes)", "why": "Deletes and recreates the Container Apps environment, the PIM Manager and the jobs, and grants the new system identities the Azure roles the old ones had. Signed in through the browser or the Invardia Support app session (no Azure CLI, no modules)." },
+    { "kind": "entraRole", "name": "Application Administrator (or owner of the PIM Manager's sign-in app)", "scope": "the PIM Manager's sign-in app registration", "why": "Sign-in (Easy Auth) is attached to the new private address; the reply address is added to the app registration." },
+    { "kind": "other", "name": "Optional: an identity in the SQL admin group (grp-pim-sql-admins) with a certificate (-SqlAdminClientId + -SqlAdminCertThumbprint)", "scope": "the environment's SQL database", "why": "Repairs the database users of the recreated apps. Without it the Azure roles are still repaired and the script says the database half is owed." },
+    { "kind": "entraRole", "name": "Optional: Privileged Role Administrator (with -HostingAccessTenantId)", "scope": "the tenant", "why": "Re-grants the new identities' Microsoft Graph application permissions (Initialize-PimHostingAccess.ps1)." }
+  ],
+  "changes": [
+    { "target": "Local file (temp folder)", "action": "create", "object": "the capture of the live environment, the PIM Manager and every job (secret values DPAPI-protected) in -CaptureDir", "scope": "this computer, this Windows user", "why": "The rebuild restores from it and resumes from it; files holding secret values are shredded when the rebuild completes.", "undo": "Delete the capture folder once the rebuild has completed." },
+    { "target": "Azure (the PIM resource group)", "action": "remove", "object": "the Container Apps jobs, the PIM Manager app and the public Container Apps environment (only with -Apply)", "scope": "the resource group given", "why": "The internal/external setting of a Container Apps environment cannot be changed in place.", "undo": "Re-run with -ResumeFromCapture -CaptureDir <the printed folder>; or rebuild public again with Rebuild-PimEnvExternal.ps1." },
+    { "target": "Azure (the PIM resource group)", "action": "create", "object": "the internal-only Container Apps environment on the same subnet and workspace, the PIM Manager (ingress internal first) and every job, from the capture", "scope": "the resource group given", "why": "The conversion itself; the restore is compared with the capture.", "undo": "Rebuild-PimEnvExternal.ps1 -Apply (the same tool in the other direction)." },
+    { "target": "Azure (role assignments)", "action": "grant", "object": "each recreated app's and job's new system identity gets the Azure role assignments its old identity had", "permission": "the same Azure roles the old identity held (recorded before the delete)", "scope": "the scopes recorded before the delete", "why": "A recreated app gets a new identity.", "undo": "Remove the role assignments of the new identities." },
+    { "target": "Environment SQL database", "action": "update", "object": "the database users of the recreated apps, created again from the new identities with their recorded roles (only with a SQL admin credential)", "scope": "the environment's SQL database", "why": "Without the repair the PIM Manager cannot sign in to SQL.", "undo": "None needed; the users match the live identities." },
+    { "target": "Entra ID and the PIM Manager", "action": "update", "object": "sign-in (Easy Auth) on the new private address and its reply address on the sign-in app registration; then ingress on for the VNet", "scope": "the PIM Manager and its sign-in app", "why": "Without sign-in the PIM Manager stays on internal ingress.", "undo": "Remove the reply address." },
+    { "target": "Azure (private DNS)", "action": "create", "object": "the private DNS zone for the new default domain (apex and wildcard to the static IP), linked to the PIM VNet and each -HubVnetId", "scope": "the PIM resource group or -PrivateDnsResourceGroup", "why": "Clients in the VNet and the peered networks must resolve the new private address.", "undo": "Delete the zone." },
+    { "target": "Azure (container registry)", "action": "update", "object": "public network access OFF (only with -LockRegistry; refused unless the registry is Premium with a private endpoint)", "scope": "the registry in the resource group", "why": "A private environment pulls images and builds over the private endpoint.", "undo": "Turn public network access back on for the registry." }
+  ],
+  "parameters": [
+    { "name": "Tag", "required": true, "default": null, "help": "A short label for the capture files (any short name)." },
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The PIM subscription." },
+    { "name": "ResourceGroup", "required": true, "default": null, "help": "The PIM resource group." },
+    { "name": "EnvName", "required": false, "default": "cae-pim", "help": "The Container Apps environment." },
+    { "name": "ManagerApp", "required": false, "default": "ca-pim-manager", "help": "The PIM Manager app." },
+    { "name": "CaptureDir", "required": false, "default": "<temp>\\pim-rebuild-<tag>-<time>", "help": "Where the capture is written (and read from with -ResumeFromCapture)." },
+    { "name": "EasyAuthTenantId", "required": false, "default": null, "help": "The tenant whose Entra ID signs users in to the PIM Manager. Without it (and no sign-in configured) the PIM Manager stays on internal ingress." },
+    { "name": "AzureConfigDir", "required": false, "default": null, "help": "Accepted for older callers and ignored: the rebuild uses no Azure CLI." },
+    { "name": "SkipEasyAuth", "required": false, "default": false, "help": "Attach no sign-in (the PIM Manager stays on internal ingress)." },
+    { "name": "ResumeFromCapture", "required": false, "default": false, "help": "Continue a run that stopped after the delete, from the capture in -CaptureDir." },
+    { "name": "DeleteTimeoutSeconds", "required": false, "default": 2700, "help": "How long to wait for the environment delete." },
+    { "name": "SqlServer", "required": false, "default": null, "help": "The SQL server (FQDN), for the database-user repair and the Graph re-grant." },
+    { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The database." },
+    { "name": "SqlAdminClientId", "required": false, "default": null, "help": "An identity in the SQL admin group used for the database-user repair (with -SqlAdminCertThumbprint)." },
+    { "name": "SqlAdminClientSecret", "required": false, "default": null, "help": "Legacy only: a client secret for -SqlAdminClientId. Prefer -SqlAdminCertThumbprint." },
+    { "name": "SqlAdminCertThumbprint", "required": false, "default": null, "help": "The thumbprint of -SqlAdminClientId's certificate in the local certificate store." },
+    { "name": "SkipIdentityRepair", "required": false, "default": false, "help": "Do not repair the database users or the role assignments of the new identities." },
+    { "name": "EasyAuthAllowedPrincipals", "required": false, "default": [], "help": "Who may sign in to the PIM Manager (users or groups)." },
+    { "name": "EasyAuthAllowAllTenantUsers", "required": false, "default": false, "help": "Every member account of the tenant may sign in (never guests)." },
+    { "name": "HubVnetId", "required": false, "default": [], "help": "The hub VNet(s) the new private DNS zone is also linked to. Without it only the PIM VNet resolves the PIM Manager." },
+    { "name": "PrivateDnsResourceGroup", "required": false, "default": null, "help": "Where the new private DNS zone goes (same subscription; default the PIM resource group)." },
+    { "name": "LockRegistry", "required": false, "default": false, "help": "Turn the registry's public network access off (refused unless Premium with a private endpoint)." },
+    { "name": "HostingAccessTenantId", "required": false, "default": null, "help": "Re-grant the new identities' Microsoft Graph permissions and the Run-now right in this tenant (Initialize-PimHostingAccess.ps1), in your own session. Needs -SqlServer." },
+    { "name": "HostingAccessClientId", "required": false, "default": null, "help": "Optional: a certificate identity for that re-grant instead of your session." },
+    { "name": "HostingAccessCertThumbprint", "required": false, "default": null, "help": "Its certificate thumbprint in the local certificate store." },
+    { "name": "Apply", "required": false, "default": false, "help": "Do it. Without it (and always with -WhatIf) the script prints the plan." }
+  ],
+  "readsOnly": [
+    "the Container Apps environment, the PIM Manager app (with its secrets and sign-in configuration) and every job",
+    "the data-bearing resources of the resource group -- recorded before and checked after",
+    "the system identities' Azure role assignments and application ids; the registry and SQL server's private endpoints"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in)",
+    "management.azure.com (Azure Resource Manager)",
+    "graph.microsoft.com (identities, the sign-in app registration)",
+    "<server>.database.windows.net:1433 (only for the database-user repair and the Graph re-grant's one setting)"
+  ],
+  "whatIf": "Reads the live environment and prints the plan: 'direction : EXTERNAL -> INTERNAL-ONLY', the captured PIM Manager and jobs, the keep-list, then 'PLAN ONLY -- nothing was changed' with the would DELETE / CREATE ('--internal-only true') / RESTORE lines, the private DNS zone it would create, notes on the registry and SQL, and 'capture NOT written (-WhatIf)'. -WhatIf wins over -Apply. Nothing is deleted or created.",
+  "undo": "Rebuild-PimEnvExternal.ps1 -Tag <tag> -SubscriptionId <subscription> -ResourceGroup <rg> -EasyAuthTenantId <tenant> -Apply rebuilds the environment public again. A run that stopped part-way resumes with -ResumeFromCapture -CaptureDir <the printed folder>. Data is never touched.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Rebuild-PimEnvInternal/"
+}

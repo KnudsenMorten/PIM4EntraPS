@@ -1,0 +1,73 @@
+{
+  "script": "Deploy-PimRfaBroker.ps1",
+  "product": "pim",
+  "title": "Deploy the access-request (RFA) broker",
+  "purpose": "Deploys the public access-request (RFA) broker of PIM Manager Pro: its storage account and tables, its network, its Container Apps environment and app, the storage rights and Easy Auth; with the inputs given it also registers the API audience, the broker's mail sender and PIM's RFA settings. Plan only unless -Apply.",
+  "whenToRun": "After the main installation, when the access-request portal (Pro add-on) is wanted. The broker is always public by design (an internal environment is refused); -ApiAllowedIps restricts it to known systems. Placement Shared puts it in its own subnet of the PIM VNet; Island in its own subscription. It is part of the PIM Manager release package, not a separate download: run it from the package folder that Install-Invardia (or the guided install) downloaded and verified (.\\tools\\setup\\Deploy-PimRfaBroker.ps1). When the store's SQL server is private, run it from inside the network so the settings step can reach it.",
+  "standalone": false,
+  "sourcePath": "tools/setup/Deploy-PimRfaBroker.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Owner (or Contributor + User Access Administrator)", "scope": "the PIM resource group (Shared) or the RFA subscription (Island)", "why": "Creates the storage account, tables, NSG, subnet, Container Apps environment, Log Analytics workspace and app, and assigns Storage Table Data Contributor on the storage account." },
+    { "kind": "azureRbac", "name": "Network Contributor", "scope": "the PIM VNet (Shared placement)", "why": "Adds the broker's subnet (delegated to Microsoft.App/environments) and its NSG." },
+    { "kind": "entraRole", "name": "Application Administrator", "scope": "the tenant (only with -TenantId: the API audience follow-up)", "why": "Set-PimRfaBrokerApiAuth.ps1 registers the 'PIM access request API' app so Entra application tokens are accepted." },
+    { "kind": "other", "name": "Admin application with Exchange.ManageAsApp (-AdminAppId + -AdminCertThumbprint), only for the mail follow-up", "scope": "Exchange Online (the sender mailbox only)", "why": "Initialize-PimMailSender.ps1 scopes the broker identity's send right to the sender mailbox; Exchange RBAC needs an application identity. Without it the step is printed as NEXT." },
+    { "kind": "other", "name": "Member of the environment's SQL admin group (grp-pim-sql-admins) via -UseSignedInAccount, or the admin application", "scope": "the environment's SQL database (only with -SqlServerFqdn: the settings follow-up)", "why": "Writes pim.Settings RfaSettings and switches the rfa.portal and api.broker feature gates on." }
+  ],
+  "changes": [
+    { "target": "Azure (PIM resource group or RFA subscription)", "action": "create", "object": "storage account (Tables; shared-key access disabled, TLS 1.2, no public blob) and the RFA tables", "scope": "the broker's resource group", "why": "The broker's only data store: requests, reviews, PINs, API keys.", "undo": "Delete the storage account." },
+    { "target": "Azure network", "action": "create", "object": "NSG nsg-<app> (deny to the PIM subnets) and the broker subnet delegated to Microsoft.App/environments (Shared), or its own VNet (Island)", "scope": "the PIM VNet or the RFA subscription", "why": "The broker is isolated from PIM's own subnets.", "undo": "Delete the subnet and the NSG (Island: the VNet)." },
+    { "target": "Azure Container Apps", "action": "create", "object": "the public Container Apps environment (with a Log Analytics workspace beside it) and the container app ca-pim-rfa with a system-assigned identity", "scope": "the broker's resource group", "why": "Runs the broker (the PIM image, scale to zero by default).", "undo": "Delete the container app, the environment and the workspace." },
+    { "target": "Azure RBAC", "action": "grant", "object": "the broker app's identity and each engine identity (-EngineIdentityPrincipalIds)", "permission": "Storage Table Data Contributor", "scope": "the broker's storage account only", "why": "The broker writes requests; the engine pulls them. It is the broker's ONLY Azure right.", "undo": "Remove the role assignments." },
+    { "target": "Container app", "action": "update", "object": "Easy Auth (Entra provider, unauthenticated = allow) and, with -ApiAllowedIps, the ingress allow-list", "scope": "the broker app", "why": "The portal is PIN-based; /api/v1 needs a validated token or an API key. The allow-list makes the whole broker non-public.", "undo": "Disable Easy Auth / remove the ingress rules." },
+    { "target": "Microsoft Entra ID (only with -TenantId)", "action": "create", "object": "the 'PIM access request API' app registration (Set-PimRfaBrokerApiAuth.ps1)", "scope": "the tenant", "why": "So Entra application tokens are accepted on the API.", "undo": "Delete the app registration." },
+    { "target": "Exchange Online (only with the admin application)", "action": "grant", "object": "the broker identity", "permission": "send as the sender mailbox only (Exchange-scoped application RBAC, Initialize-PimMailSender.ps1)", "scope": "the sender mailbox", "why": "The broker mails PINs and decisions.", "undo": "Remove the management role assignment and scope (see Initialize-PimMailSender)." },
+    { "target": "Environment SQL database (only with -SqlServerFqdn)", "action": "update", "object": "pim.Settings RfaSettings (store + portal URL, existing API app ids kept) and FeatureGates (rfa.portal + api.broker ON)", "scope": "this environment", "why": "Tells PIM where the broker is; read back.", "undo": "Manager > Settings > RFA broker & API: clear the store, and switch the two gates off." }
+  ],
+  "parameters": [
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The PIM subscription (GUID)." },
+    { "name": "ResourceGroup", "required": true, "default": null, "help": "The PIM resource group." },
+    { "name": "Placement", "required": false, "default": "Shared", "help": "Shared (own subnet in the PIM VNet) or Island (own subscription, own VNet, not peered)." },
+    { "name": "RfaSubscriptionId", "required": false, "default": "", "help": "Island: the broker's own subscription (must differ from PIM's)." },
+    { "name": "RfaResourceGroup", "required": false, "default": "rg-pim-rfa", "help": "Island: the broker's resource group." },
+    { "name": "Location", "required": false, "default": "westeurope", "help": "The Azure region." },
+    { "name": "VnetName", "required": false, "default": "", "help": "Shared: the PIM VNet (the broker gets its own subnet there). Island: its own VNet (default vnet-pim-rfa)." },
+    { "name": "SubnetName", "required": false, "default": "snet-pim-rfa", "help": "The broker subnet's name." },
+    { "name": "SubnetPrefix", "required": false, "default": "", "help": "The broker subnet, an IPv4 CIDR of /27 or larger." },
+    { "name": "PimSubnetPrefixes", "required": false, "default": "none", "help": "Shared: the PIM subnet prefixes the broker subnet's NSG denies traffic to." },
+    { "name": "StorageAccountName", "required": true, "default": null, "help": "The broker's storage account (3-24 lower-case letters / digits)." },
+    { "name": "EnvironmentName", "required": false, "default": "cae-pim-rfa", "help": "The broker's Container Apps environment." },
+    { "name": "AppName", "required": false, "default": "ca-pim-rfa", "help": "The broker's container app." },
+    { "name": "Image", "required": true, "default": null, "help": "The PIM Manager image (same as the jobs), e.g. <registry>.azurecr.io/pim-manager@sha256:<digest>." },
+    { "name": "AcrName", "required": false, "default": "", "help": "The registry name, pulled with the app's system identity." },
+    { "name": "SenderMailbox", "required": true, "default": null, "help": "The PIM mail sender the broker sends as." },
+    { "name": "TenantName", "required": false, "default": "", "help": "The tenant name shown on the portal." },
+    { "name": "EngineIdentityPrincipalIds", "required": true, "default": null, "help": "The engine (tick job) managed identity object id(s): they pull the requests from the store." },
+    { "name": "ApiAllowedIps", "required": false, "default": "none", "help": "Allow ingress only from these IPv4 addresses / CIDRs (the API-only shape: the portal is then not public)." },
+    { "name": "MinReplicas", "required": false, "default": 0, "help": "0 (scale to zero) .. 2; 1 keeps one warm." },
+    { "name": "ExistingEnvironmentName", "required": false, "default": "", "help": "Shared only: join an existing PUBLIC Container Apps environment instead of building one." },
+    { "name": "TenantId", "required": false, "default": "", "help": "Pins the sign-in to the PIM tenant; also runs the API audience follow-up." },
+    { "name": "ApiAppDisplayName", "required": false, "default": "PIM access request API", "help": "The API app registration's name." },
+    { "name": "AzureConfigDir", "required": false, "default": "", "help": "Ignored (the script no longer uses the Azure CLI); kept so older command lines still run." },
+    { "name": "AdminAppId", "required": false, "default": "", "help": "Admin application (client) id for the mail and settings follow-ups (with -AdminCertThumbprint)." },
+    { "name": "AdminCertThumbprint", "required": false, "default": "", "help": "Thumbprint of the admin application's certificate in the local machine store." },
+    { "name": "UseSignedInAccount", "required": false, "default": false, "help": "The settings follow-up writes the store as the signed-in person (a member of the SQL admin group)." },
+    { "name": "SqlServerFqdn", "required": false, "default": "", "help": "The store's SQL server: runs the settings follow-up." },
+    { "name": "SqlDatabase", "required": false, "default": "PimPlatform", "help": "The database." },
+    { "name": "Apply", "required": false, "default": false, "help": "Run the steps. Without it the plan is printed only." }
+  ],
+  "readsOnly": [
+    "the storage account, VNet, NSG, subnet, Container Apps environment and app (each step creates only what is missing)",
+    "the existing role assignments on the storage account",
+    "pim.Settings RfaSettings and FeatureGates (settings follow-up, before writing)"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in)",
+    "management.azure.com",
+    "graph.microsoft.com (API audience follow-up)",
+    "outlook.office365.com (mail follow-up, Exchange admin API)",
+    "<server>.database.windows.net:1433 (settings follow-up)"
+  ],
+  "whatIf": "Validates the inputs and prints 'What if: Performing the operation \"deploy <n> step(s)\" on target \"<placement> RFA broker in <resource group>\"' and the numbered plan ('RFA broker deploy -- placement <p> -- PLAN ONLY'). -WhatIf wins over -Apply; no step runs and nothing is signed in to.",
+  "undo": "Delete the broker's container app, Container Apps environment, Log Analytics workspace, storage account, subnet and NSG (Island: the resource group), the 'PIM access request API' app registration and the broker's Exchange send scope; clear RfaSettings and switch rfa.portal / api.broker off in the Manager.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Deploy-PimRfaBroker/"
+}

@@ -34,7 +34,8 @@
     Re-runnable. Existing resources are reused/updated. No az CLI and no PowerShell module for
     Azure (§100.41): every Azure call is ARM / Graph REST with a token from PIM-Rest (certificate,
     client secret, or the person's browser sign-in). Requires: the SQL AAD-admin SPN creds (to mint
-    the contained DB users); the DnsServer RSAT module (for the AD DNS records).
+    the contained DB users). -DnsServer needs no module: the AD DNS records are printed for the admin
+    to add (BUG-298), never written.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -1496,15 +1497,18 @@ if (-not $SkipPersistentSqlCheck) {
     catch { Write-Warning "  persistent-SQL assert skipped: $($_.Exception.Message)" }
 }
 
-# --- DNS: register the manager's external FQDN on the AD DNS server -----------
+# --- DNS: the AD DNS records for the manager's FQDN (PRINTED, never written) ---
 $mgr = $Workers | Where-Object { $_.entry -eq 'manager' } | Select-Object -First 1
 $mgrFqdn = $null
 if ($mgr) {
     $mgrFqdn = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $mgr.name -ErrorAsNull).properties.configuration.ingress.fqdn)".Trim()
     if (-not $mgrFqdn) { $mgrFqdn = $null }
     if ($mgrFqdn -and $DnsServer) {
-        Step "DNS: $mgrFqdn -> $envStatic on $DnsServer"
-        Write-PimDnsRecord -DnsServer $DnsServer -Fqdn $mgrFqdn -EnvDomain $envDomain -StaticIp $envStatic
+        Step "DNS: the records to add on $DnsServer for $mgrFqdn -> $envStatic"
+        # BUG-298 (owner 2026-10-10 "Manual only"): PIM never writes AD DNS and needs no RSAT module -- it prints the
+        # environment zone's records (host + '*', in the environment's own *.azurecontainerapps.io domain) for the admin.
+        try { Show-PimAdDnsRecord -DnsServer $DnsServer -Fqdn $mgrFqdn -EnvDomain $envDomain -StaticIp $envStatic -AcaEnvironmentZone }
+        catch { Warn "AD DNS: $($_.Exception.Message) -- register A '$mgrFqdn' -> $envStatic on your DNS manually." }
         Note "Manager URL: https://$mgrFqdn/"
     } elseif ($mgrFqdn -and $Exposure -eq 'internal') {
         Note "Manager FQDN: $mgrFqdn  (no -DnsServer given; register A '$mgrFqdn' -> $envStatic on your DNS manually)"

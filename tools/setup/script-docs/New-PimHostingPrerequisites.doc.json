@@ -1,0 +1,70 @@
+{
+  "script": "New-PimHostingPrerequisites.ps1",
+  "product": "pim",
+  "title": "Create the Azure prerequisites of a PIM Manager environment",
+  "purpose": "Creates, or finds and reuses, what a PIM Manager environment needs in the subscription before the containers are deployed: the resource providers, the resource group, the VNet with its delegated Container Apps subnet, Log Analytics, the container registry (optionally Premium with a private endpoint and a build pool), the image-pull identity, and the SQL server and database with Entra-only sign-in and the SQL admin group. Every step is find-or-create and read back at the end.",
+  "whenToRun": "Normally never by hand: Invoke-PimDeployAll.ps1 runs it as its 'prereq' step. Run it yourself to change an existing environment's prerequisites with the same names, for example to make the registry private (Premium, private endpoint, build pool) or to add the SQL private endpoint before or after a conversion to private. It is part of the PIM Manager release package (it loads the engine's REST libraries next to it): run it from the package folder that Install-Invardia or the guided install downloaded (signed), or, for Community, from the public repository at the release tag.",
+  "standalone": false,
+  "sourcePath": "tools/setup/New-PimHostingPrerequisites.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Owner, or Contributor + User Access Administrator", "scope": "the PIM subscription", "why": "Registers resource providers, creates the resource group and everything in it, and grants the image-pull identity AcrPull on the registry. Signed in through the browser or the Invardia Support app session (-UseSignedInAccount; no Azure CLI, no modules)." },
+    { "kind": "entraRole", "name": "Privileged Role Administrator", "scope": "the tenant", "why": "Creates the role-assignable SQL admin group (grp-pim-sql-admins) and adds its members." }
+  ],
+  "changes": [
+    { "target": "Azure (subscription)", "action": "update", "object": "resource provider registrations: Microsoft.App, Microsoft.ContainerRegistry, Microsoft.OperationalInsights, Microsoft.Network, Microsoft.Sql, Microsoft.Storage, Microsoft.KeyVault, Microsoft.ManagedIdentity, Microsoft.Insights", "scope": "the subscription", "why": "A fresh subscription refuses the creates without them.", "undo": "Not needed (a registration costs nothing); unregister in the portal if required." },
+    { "target": "Azure (the PIM resource group)", "action": "create", "object": "the resource group, the VNet and the Container Apps subnet (delegated to Microsoft.App/environments), the Log Analytics workspace and the container registry (find-or-create; an existing registry is upgraded to the requested SKU, never downgraded)", "scope": "the resource group (-ResourceGroupName)", "why": "Everything the container deploy assumes exists.", "undo": "Delete the resources (or the resource group) -- only when the environment is removed." },
+    { "target": "Azure (private networking)", "action": "create", "object": "with -AcrPublicAccess false / -SqlPrivateEndpoint: the private-endpoint subnet, the registry's and SQL server's private endpoints, the privatelink.azurecr.io / privatelink.database.windows.net zones linked to the VNet, and the registry build pool (-AcrAgentPoolName)", "scope": "the resource group or -PrivateDnsResourceGroup (same subscription)", "why": "A private registry and database are reachable only through private endpoints; the build pool builds images inside the VNet.", "undo": "Delete the private endpoints, zones and build pool." },
+    { "target": "Azure (identities)", "action": "grant", "object": "the image-pull identity id-pim-<token> (created) gets AcrPull on the registry; with private SQL the SQL identity id-pim-sql-<token> is created", "permission": "AcrPull", "scope": "the container registry", "why": "The Container Apps pull images with this identity; no registry password is kept.", "undo": "Remove the role assignment and the identity." },
+    { "target": "Azure SQL", "action": "create", "object": "the SQL server (Entra-only authentication, TLS 1.2) and the database PimPlatform (S0 minimum), the connection policy (-SqlConnectionPolicy), the AllowAzureServices rule only when no subnet path exists, and the temporary AllowSetupHost rule for this host", "scope": "the resource group", "why": "The PIM store. The setup-host rule is the setup window; Invoke-PimDeployAll removes it at the end of its run.", "undo": "Delete the AllowSetupHost rule when done (standalone run); the server and database hold the data and are never removed by PIM." },
+    { "target": "Entra ID", "action": "grant", "object": "the SQL server's Entra admin converges on the role-assignable group grp-pim-sql-admins; members: the environment identities, the SQL identity, the person or identity running the deploy and the Invardia Support app (-SupportAppId)", "permission": "SQL Entra admin (through the group membership)", "scope": "the SQL server", "why": "One admin model for public and private SQL; nobody loses access when the admin moves.", "undo": "Remove members from the group, or set another Entra admin on the SQL server." }
+  ],
+  "parameters": [
+    { "name": "TenantId", "required": true, "default": null, "help": "The tenant." },
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The PIM subscription (must belong to -TenantId)." },
+    { "name": "Token", "required": true, "default": null, "help": "Short name every default resource name is derived from (rg-automateit-<token>, vnet-pim-<token>, ...); override any name with the parameters below." },
+    { "name": "Index", "required": false, "default": -1, "help": "Address-plan index for the <AddressBase>.<Index*8>.0/21 scheme. Give this OR -VnetAddressPrefix + -SubnetAddressPrefix." },
+    { "name": "AdminAppId", "required": false, "default": null, "help": "Automation: the deploy identity's client id (with -AdminCertPem). Customers use -UseSignedInAccount." },
+    { "name": "UseSignedInAccount", "required": false, "default": false, "help": "Create everything as the person signed in (browser) or the Invardia Support app session. The recommended way." },
+    { "name": "AdminSecret", "required": false, "default": null, "help": "Legacy automation only: a client secret for -AdminAppId. Not for customer use." },
+    { "name": "AdminCertPem", "required": false, "default": null, "help": "Automation: PEM file (key + certificate) of -AdminAppId." },
+    { "name": "Location", "required": false, "default": "swedencentral", "help": "The Azure region." },
+    { "name": "SqlServiceObjective", "required": false, "default": "S0", "help": "The database tier (S0 minimum)." },
+    { "name": "SqlConnectionPolicy", "required": false, "default": "Default", "help": "Default, Proxy or Redirect. Proxy when your firewall allows only port 1433 to SQL." },
+    { "name": "AcrSku", "required": false, "default": "Basic", "help": "Basic, Standard or Premium. Only Premium has network controls (private endpoint, public access off)." },
+    { "name": "AcrPublicAccess", "required": false, "default": "Default", "help": "Default, true or false. false needs Premium, a private-endpoint subnet and a build pool. On an existing registry the private endpoint is added and public access is turned off later (the conversion's -LockRegistry)." },
+    { "name": "PrivateEndpointSubnetName", "required": false, "default": "pim-endpoints", "help": "The private-endpoint subnet (it cannot be the Container Apps subnet)." },
+    { "name": "PrivateEndpointSubnetAddressPrefix", "required": false, "default": null, "help": "Its address range (a /26 is enough)." },
+    { "name": "PrivateDnsResourceGroup", "required": false, "default": null, "help": "Where the privatelink zones go (same subscription; default the PIM resource group)." },
+    { "name": "SqlPrivateEndpoint", "required": false, "default": false, "help": "Create the SQL server's private endpoint and the privatelink.database.windows.net zone." },
+    { "name": "AcrAgentPoolName", "required": false, "default": null, "help": "The registry build pool (Premium), placed in the private-endpoint subnet." },
+    { "name": "AcrAgentPoolCount", "required": false, "default": 1, "help": "Number of build agents." },
+    { "name": "AcrAgentPoolTier", "required": false, "default": "S1", "help": "S1, S2 or S3." },
+    { "name": "AddressBase", "required": false, "default": "10.220", "help": "The /16 the -Index scheme carves from." },
+    { "name": "ResourceGroupName", "required": false, "default": "rg-automateit-<token>", "help": "Your own resource group name." },
+    { "name": "VnetName", "required": false, "default": "vnet-pim-<token>", "help": "Your own VNet name." },
+    { "name": "SubnetName", "required": false, "default": "snet-pim-aca", "help": "Your own Container Apps subnet name." },
+    { "name": "VnetAddressPrefix", "required": false, "default": null, "help": "Your VNet range (with -SubnetAddressPrefix)." },
+    { "name": "SubnetAddressPrefix", "required": false, "default": null, "help": "Your Container Apps subnet range (/27 or larger; /24 or /23 recommended)." },
+    { "name": "AcrName", "required": false, "default": "acrpim<token>", "help": "Your own registry name (letters and digits)." },
+    { "name": "LogAnalyticsName", "required": false, "default": "law-pim-<token>", "help": "Your own Log Analytics workspace name." },
+    { "name": "SqlServerName", "required": false, "default": "sql-ait-<token>", "help": "Your own SQL server name (without .database.windows.net)." },
+    { "name": "SkipSql", "required": false, "default": false, "help": "Create no SQL server (a central store is used)." },
+    { "name": "SqlAdminGroupName", "required": false, "default": "grp-pim-sql-admins", "help": "The SQL admin group." },
+    { "name": "SupportAppId", "required": false, "default": null, "help": "The Invardia Support app's application id, added to the SQL admin group (alias -TroubleshootingAppId)." },
+    { "name": "SkipSqlAdminGroup", "required": false, "default": false, "help": "Keep a single-principal SQL admin instead of the group." },
+    { "name": "SetupHostIp", "required": false, "default": null, "help": "This host's public IP for the temporary AllowSetupHost rule; without it the IP is read from api.ipify.org (said on screen)." }
+  ],
+  "readsOnly": [
+    "the subscription (it must be visible to the sign-in and belong to -TenantId)",
+    "every resource before it is created (find-or-create), and all of them again at the end (=== VERIFY ===)"
+  ],
+  "network": [
+    "login.microsoftonline.com (sign-in)",
+    "management.azure.com (Azure Resource Manager)",
+    "graph.microsoft.com (the SQL admin group)",
+    "api.ipify.org (only without -SetupHostIp and only when SQL is created with a public endpoint)"
+  ],
+  "whatIf": "Checks the names, the address plan and the options from the parameters, prints the summary (subscription, location, VNet / subnet, registry / workspace) and one 'What if: would ...' line per step (providers, resource group, VNet, Log Analytics, registry, private endpoints, pull identity with AcrPull, SQL server and database, SQL admin group), then 'RESULT: WHAT-IF'. Nothing is signed in to and nothing is created.",
+  "undo": "The resources are find-or-create and hold the environment; remove them only together with the environment (delete the resource group, the SQL admin group and the sign-in app registration). After a standalone run, delete the temporary AllowSetupHost SQL firewall rule once the deploy's SQL steps are done.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/New-PimHostingPrerequisites/"
+}

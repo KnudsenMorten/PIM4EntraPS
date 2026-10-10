@@ -1,8 +1,8 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
-    Keep a COMMUNITY (free) installation on the latest release: pull it from GitHub, then re-run the
-    deploy with the parameters the last successful deploy saved.
+    Keeps a Community (free) PIM Manager installation on the latest release: it fetches the public GitHub clone, says which version it would move to, and only with -Apply pulls it (fast-forward only) and re-runs the deploy with the parameters the last successful deploy saved.
 
 .DESCRIPTION
     The community edition has no in-cloud updater (that needs the published release feed of a Pro
@@ -27,21 +27,36 @@
     Re-run the deploy on the code you already have (no fetch, no pull).
 .PARAMETER Apply
     Pull and deploy. Without it nothing changes: the target version is reported and the deploy plan printed.
+    -WhatIf wins over -Apply: nothing is fetched or pulled and the deploy runs as a -WhatIf plan.
+.PARAMETER StepRunner
+    Test seam only (tests\script-docs): handed to Invoke-PimDeployAll.ps1 -StepRunner.
 
 .EXAMPLE
     .\tools\setup\Update-PimCommunity.ps1            # what would change
     .\tools\setup\Update-PimCommunity.ps1 -Apply     # update to the latest release
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Update-PimCommunity/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$TenantId,
     [string]$ProfilePath,
     [switch]$SkipPull,
-    [switch]$Apply
+    [switch]$Apply,
+    # --- test seam (tests\script-docs\Update-PimCommunity.case.ps1) ---
+    [scriptblock]$StepRunner
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_PimDeployProfile.ps1')
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$null = Start-PimScriptRun -Script 'Update-PimCommunity'
+$script:updRc = 0
+try {
+# -WhatIf wins over -Apply: nothing is fetched, nothing is pulled, the deploy prints its plan only.
+$whatIfOnly = [bool]$WhatIfPreference
+if ($Apply -and -not $PSCmdlet.ShouldProcess($solRoot, 'pull the latest release (fast-forward only) and deploy it')) { $Apply = $false }
 
 # --- which profile -----------------------------------------------------------------------------------
 if (-not "$ProfilePath".Trim()) {
@@ -65,8 +80,12 @@ if ($SkipPull) {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'git is not installed -- it is needed to fetch the latest release (or pass -SkipPull)' }
     $inside = "$(& git -C $solRoot rev-parse --is-inside-work-tree 2>$null)".Trim()
     if ($inside -ne 'true') { throw "$solRoot is not a git clone -- get the code with 'git clone' (README step 1), or pass -SkipPull" }
-    & git -C $solRoot fetch --quiet 2>&1 | Out-Host
-    if ($LASTEXITCODE) { throw "git fetch failed (exit $LASTEXITCODE)" }
+    if ($whatIfOnly) {
+        Write-Host "What if: would fetch the clone's upstream (git fetch) -- skipped; the versions below are from the last fetch" -ForegroundColor DarkYellow
+    } else {
+        & git -C $solRoot fetch --quiet 2>&1 | Out-Host
+        if ($LASTEXITCODE) { throw "git fetch failed (exit $LASTEXITCODE)" }
+    }
     $upstream = "$(& git -C $solRoot rev-parse --abbrev-ref '@{u}' 2>$null)".Trim()
     if (-not $upstream) { throw 'this branch has no upstream to update from -- check out the default branch of the GitHub clone' }
     $remoteVer = "$(& git -C $solRoot show '@{u}:./VERSION' 2>$null)".Trim()
@@ -91,7 +110,12 @@ if ($SkipPull) {
 # --- the deploy ----------------------------------------------------------------------------------------
 $deployArgs = $prof.parameters
 if ($Apply) { $deployArgs['Apply'] = $true }
+if ($whatIfOnly) { $deployArgs['WhatIf'] = $true }
+if ($StepRunner) { $deployArgs['StepRunner'] = $StepRunner }
 $global:LASTEXITCODE = 0
 & (Join-Path $PSScriptRoot 'Invoke-PimDeployAll.ps1') @deployArgs
-# The deploy's own verdict is the update's verdict (an unverified or failed deploy is not a success).
-exit $LASTEXITCODE
+$script:updRc = $LASTEXITCODE
+} finally { Stop-PimScriptRun -Script 'Update-PimCommunity' }
+# The deploy's own verdict is the update's verdict (an unverified or failed deploy is not a success):
+# exit $LASTEXITCODE of the deploy, carried past the finally that closes the transcript.
+exit $script:updRc

@@ -1,10 +1,13 @@
 ﻿#Requires -Version 5.1
+
 <#
 .SYNOPSIS
     §33.0 B4 -- rebuild a PIM environment that was built INTERNAL-ONLY so it is EXTERNAL, without
     ever exposing the Manager unauthenticated. PLANS by default; changes nothing without -Apply.
 
 .DESCRIPTION
+    Rebuilds the Container Apps part of a PIM Manager environment with the other exposure (private to public by default; Rebuild-PimEnvInternal.ps1 runs it from public to private): it captures the live PIM Manager and jobs, deletes and recreates the Container Apps environment on the same subnet and workspace, restores the apps from the capture and compares them, repairs what is keyed to the new identities, and attaches sign-in before the PIM Manager is reachable. Data is kept. It plans unless -Apply is given.
+
     🔴 WHY THIS SCRIPT EXISTS. An ACA managed environment's `internal-only` setting is IMMUTABLE --
     `az containerapp env create` has `--internal-only`, `az containerapp env update` has no such
     option. Four environments were built internal-only and CANNOT be opened; the only fix is to
@@ -52,8 +55,15 @@
     # 2. do it
     ./Rebuild-PimEnvExternal.ps1 -Tag wa678 -SubscriptionId <sub> -ResourceGroup rg-automateit-wa678 `
         -EasyAuthTenantId <tenant> -Apply
+
+.NOTES
+    -WhatIf: the plan (it wins over -Apply) -- the live environment is read and the plan printed; nothing is deleted or
+    created and no capture is written.
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Rebuild-PimEnvExternal/
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     # Names the capture files. For the estate this is the naming token (wa678 / rj466); for a
     # customer it is any short label.
@@ -138,6 +148,12 @@ $wantInternal = ($ToExposure -eq 'Internal')
 $fromWord = $(if ($wantInternal) { 'EXTERNAL' } else { 'INTERNAL-ONLY' }); $toWord = $(if ($wantInternal) { 'INTERNAL-ONLY' } else { 'EXTERNAL' })
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Rebuild-PimEnvExternal'
+try {
+# 12.7: -WhatIf is the plan -- it wins over -Apply. The capture writes below honour -WhatIf too (nothing on disk).
+if ($WhatIfPreference -and $Apply) { Write-Host '  -WhatIf: plan only -- -Apply is ignored, nothing is deleted or created.' -ForegroundColor Yellow }
+if ($WhatIfPreference) { $Apply = $false }
 $here = Split-Path -Parent $PSCommandPath
 $sol  = Split-Path -Parent $here
 
@@ -174,7 +190,9 @@ function Get-RoleAssignmentsOf([string]$PrincipalId) {
 }
 function SaveCap($name, $obj) {
     $p = Join-Path $CaptureDir "$Tag-$name.json"
-    $obj | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $p -Encoding UTF8
+    $json = $obj | ConvertTo-Json -Depth 40
+    if ($null -ne $json) { Set-Content -LiteralPath $p -Value $json -Encoding UTF8 }
+    elseif (-not $WhatIfPreference) { @() | Set-Content -LiteralPath $p -Encoding UTF8 }   # an empty list: exactly what the pipeline always did (nothing to preview under -WhatIf)
     return $p
 }
 function DropNulls($x) {
@@ -640,7 +658,7 @@ if (-not $Apply) {
     if ($wantInternal) { foreach ($n in @(Get-PimInternalSwitchNotes -LockRegistry:$LockRegistry)) { Say "NOTE         : $n" 'Yellow' } }
     if (-not $wantInternal -and $staleZone -and -not $KeepOldPrivateDnsZone) { Say "would DELETE : stale private DNS zone '$oldDomain'" }
     if (-not "$HostingAccessTenantId".Trim()) { Say 'NOTE         : no -HostingAccessTenantId -- the Graph app roles of the NEW identities are NOT re-granted; run Initialize-PimHostingAccess.ps1 afterwards' 'Yellow' }
-    Say "capture written to $CaptureDir" 'Green'
+    if ($WhatIfPreference) { Say 'capture NOT written (-WhatIf)' 'Green' } else { Say "capture written to $CaptureDir" 'Green' }
     Say 'Re-run with -Apply to execute.' 'Yellow'
     return
 }
@@ -1140,4 +1158,5 @@ Say "capture    : $CaptureDir (configuration only -- every file that held a secr
 if (-not $SkipEasyAuth) { Say $(if ($wantInternal) { 'verify FROM A VNET / HUB CLIENT: the FQDN should answer 302 to Entra, never 200 (from the internet it must not resolve or answer).' } else { 'verify: the public FQDN should answer 302 to Entra, never 200.' }) 'Yellow' }
 # §92 NET-4: what the rebuild cannot see and does not remove
 Warn "leftovers to remove by hand: reply URLs for *.$oldDomain on the Manager's Entra app registration; any AD / public DNS record for $oldDomain or a custom domain pointing at it."
+} finally { Stop-PimScriptRun -Script 'Rebuild-PimEnvExternal' }
 

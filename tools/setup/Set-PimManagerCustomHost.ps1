@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-  §80.1 -- give the PIM Manager a custom DNS name, e.g. pim-manager.<internal dns domain>, next to its generated
-  Container Apps address.
+  Gives the PIM Manager a custom host name (for example pim-manager.<your domain>) next to its generated Container Apps address: it adds and binds the name with a certificate, writes or prints the DNS records, and adds the name to the Manager's known host names and its sign-in reply URLs.
 
 .DESCRIPTION
+  §80.1.
   Operator 2026-09-29: "We need option to add custom dns name to the url, like pim-manager.<internal dns domain>."
 
   What it does, in order (every step idempotent; -WhatIf shows the plan and changes nothing):
@@ -14,9 +14,13 @@
            PFX file (-PfxPath). A free managed certificate cannot be validated on a private environment.
          - EXTERNAL environment: a free managed certificate (CNAME validation) once the public records exist;
     4. DNS:
-         - INTERNAL: an A record <label> -> environment static IP in a Private DNS zone named after the rest of the host
-           name (pim-manager.corp.local -> zone corp.local, record pim-manager), linked to -LinkVnetIds; or on an AD DNS
-           server (-Dns AdDns -AdDnsServer dc1);
+         - INTERNAL: an A record <label> -> environment static IP in the Azure Private DNS zone named after the rest of
+           the host name (pim-manager.corp.local -> zone corp.local, record pim-manager) -- ONLY when that zone already
+           exists in -PrivateDnsResourceGroup (PIM never creates a zone named after your domain: on a linked VNet it would
+           answer for ALL of corp.local; when it is missing, the zone, record and links to create are printed), links
+           added for -LinkVnetIds; or -Dns AdDns: PIM does NOT write to your AD DNS (and needs no RSAT module) -- it
+           prints the one host A record to add, ready-to-paste DNS PowerShell / dnscmd lines and a Resolve-DnsName check
+           (-AdDnsServer only fills the server name into those lines) (BUG-298);
          - EXTERNAL: prints the CNAME + TXT (asuid) records for your public DNS;
     5. adds the name to PIM_MANAGER_HOSTNAMES on the app (mail links then use it -- Resolve-PimManagerMailUrl);
     6. adds https://<name>/.auth/login/aad/callback to the Manager's Easy Auth app registration (Graph).
@@ -29,6 +33,9 @@
   .\Set-PimManagerCustomHost.ps1 -SubscriptionId <sub> -TenantId <tenant> -ResourceGroup <pim-rg> `
       -HostName pim-manager.corp.local -KeyVaultName kv-x -KeyVaultCertName pim-manager-corp-local `
       -PrivateDnsResourceGroup <dns-rg> -LinkVnetIds <hubVnetId>,<pimVnetId> -WhatIf
+
+.LINK
+  https://invardia.com/docs/pim/scripts/Set-PimManagerCustomHost/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -44,7 +51,7 @@ param(
     [ValidateSet('Auto', 'PrivateDnsZone', 'AdDns', 'None')][string]$Dns = 'Auto',
     [string]$PrivateDnsResourceGroup,
     [string[]]$LinkVnetIds = @(),
-    [string]$AdDnsServer,
+    [string]$AdDnsServer,         # optional: only named in the printed AD DNS lines (BUG-298: PIM never writes AD DNS)
     [switch]$PublicDnsReady,
     [switch]$SkipEasyAuth
 )
@@ -90,7 +97,8 @@ function Get-PimManagerCustomHostPlan {
     }
     if ($dnsMode -in @('privatezone', 'addns') -and -not $Internal) { return (& $refuse 'a private DNS record only makes sense for an INTERNAL environment; an external one is published in your public DNS (-Dns Auto)') }
     if ($dnsMode -in @('privatezone', 'addns') -and "$EnvStaticIp" -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { return (& $refuse 'the environment has no static private IP to point the record at') }
-    if ($dnsMode -eq 'addns' -and -not $AdDnsServer) { return (& $refuse '-Dns AdDns needs -AdDnsServer') }
+    # BUG-298: -Dns AdDns only PRINTS the record (PIM never writes AD DNS), so -AdDnsServer is optional -- it is only named
+    # in the printed lines.
     $records = @()
     if ($dnsMode -in @('privatezone', 'addns')) { $records += @{ type = 'A'; zone = $zone; name = $label; value = $EnvStaticIp } }
     if ($dnsMode -eq 'public') {
@@ -105,6 +113,26 @@ function Get-PimManagerCustomHostPlan {
     }
 }
 
+function Get-PimPrivateZoneMissingLines {
+    <#
+      PURE (BUG-298 b). -Dns PrivateDnsZone when the zone named after the customer's domain does NOT exist: PIM does not
+      create it (linked to a VNet that resolves through Azure DNS, a private zone `corp.local` answers for ALL of
+      corp.local, and the customer's other names stop resolving there). These lines tell the admin what to create.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Zone, [Parameter(Mandatory)][string]$ResourceGroup,
+        [Parameter(Mandatory)][string]$Label, [Parameter(Mandatory)][string]$StaticIp, [string[]]$LinkVnetIds = @()
+    )
+    $l = @("PIM did NOT create the Azure Private DNS zone '$Zone' (it does not exist in resource group '$ResourceGroup').",
+           "  A private zone named after your domain answers for EVERY name in $Zone on each VNet linked to it -- create it",
+           "  only if no other DNS serves $Zone for those VNets. Otherwise add A $Label.$Zone -> $StaticIp in the DNS that does.",
+           "  To use a private zone: create zone '$Zone' in '$ResourceGroup', then re-run this script -- it adds:",
+           "    A     $Label.$Zone -> $StaticIp")
+    foreach ($v in @($LinkVnetIds | Where-Object { "$_".Trim() })) { $l += "    link  $Zone -> $v (registration off)" }
+    $l += "  then check (expect $StaticIp): Resolve-DnsName $Label.$Zone -Type A"
+    return $l
+}
+
 function Merge-PimManagerHostnames {
     # PURE. The comma-separated PIM_MANAGER_HOSTNAMES value with $Add appended once (case-insensitive, order kept).
     param([string]$Current, [Parameter(Mandatory)][string]$Add)
@@ -114,6 +142,9 @@ function Merge-PimManagerHostnames {
 }
 
 if ($MyInvocation.InvocationName -eq '.') { return }   # dot-sourced by the tests: functions only
+. (Join-Path $PSScriptRoot '_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Set-PimManagerCustomHost'
+try {
 
 # 100.41 (framework 12.17 NO-AZ): ARM + Graph REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1),
 # pinned to -TenantId -- the Graph step can no longer follow "the active az profile" into another tenant. No az.
@@ -138,7 +169,21 @@ $plan = Get-PimManagerCustomHostPlan -HostName $HostName -Internal $internal -En
 if (-not $plan.ok) { throw "refused: $($plan.reason)" }
 Write-Host "  $($plan.reason)" -ForegroundColor DarkGray
 foreach ($r in $plan.records) { Write-Host ("  DNS  {0,-5} {1}.{2} -> {3}" -f $r.type, $r.name, $r.zone, $r.value) -ForegroundColor White }
-if (-not $PSCmdlet.ShouldProcess($ManagerApp, "custom host name $($plan.host)")) { return }
+$zrg = if ($PrivateDnsResourceGroup) { $PrivateDnsResourceGroup } else { $ResourceGroup }
+$zoneExists = $false
+if ($plan.dns -eq 'addns') {
+    # BUG-298 (owner 2026-10-10 "Manual only"): PIM never writes AD DNS -- print the exact record for the admin (also
+    # under -WhatIf), BEFORE anything is touched.
+    . (Join-Path $PSScriptRoot '_PimSetupShared.ps1')
+    Show-PimAdDnsRecord -DnsServer "$AdDnsServer" -Fqdn $plan.host -EnvDomain $plan.zone -StaticIp $plan.records[0].value
+} elseif ($plan.dns -eq 'privatezone') {
+    # BUG-298 b: read whether the zone exists (a read; -WhatIf shows the answer). PIM never CREATES a zone named after the
+    # customer's domain.
+    $zoneExists = [bool]"$((Get-PimArmPrivateDnsZone -SubscriptionId $S -ResourceGroup $zrg -Name $plan.zone -ErrorAsNull).name)".Trim()
+    if ($zoneExists) { Write-Host "  private DNS zone $($plan.zone) exists in $zrg -- the record + links will be written there" -ForegroundColor DarkGray }
+    else { foreach ($l in (Get-PimPrivateZoneMissingLines -Zone $plan.zone -ResourceGroup $zrg -Label $plan.label -StaticIp $plan.records[0].value -LinkVnetIds $LinkVnetIds)) { Write-Host "  $l" -ForegroundColor Yellow } }
+}
+if (-not $PSCmdlet.ShouldProcess($ManagerApp, "custom host name $($plan.host)")) { Write-Host '  preview only -- nothing was changed' -ForegroundColor DarkGray; return }
 
 # 1-2. host name + certificate + bind
 $hasHost = @($app.properties.configuration.ingress.customDomains | Where-Object { "$($_.name)" -ieq $plan.host }).Count -gt 0
@@ -172,9 +217,9 @@ switch ($plan.certificate) {
 Write-Host "  bound $($plan.host) ($($plan.certificate) certificate)" -ForegroundColor Green
 
 # 3. DNS
-if ($plan.dns -eq 'privatezone') {
-    $zrg = if ($PrivateDnsResourceGroup) { $PrivateDnsResourceGroup } else { $ResourceGroup }
-    [void](New-PimArmPrivateDnsZone -SubscriptionId $S -ResourceGroup $zrg -Name $plan.zone)
+if ($plan.dns -eq 'privatezone' -and -not $zoneExists) {
+    Write-Host "  private DNS: NOT written -- zone $($plan.zone) does not exist in $zrg (see the lines above; PIM creates no zone named after your domain)." -ForegroundColor Yellow
+} elseif ($plan.dns -eq 'privatezone') {
     # read the record before writing it (no blink of a correct record)
     $have = @((Get-PimArmPrivateDnsARecord -SubscriptionId $S -ResourceGroup $zrg -ZoneName $plan.zone -Name $plan.label -ErrorAsNull).properties.aRecords | Where-Object { $_ } | ForEach-Object { "$($_.ipv4Address)".Trim() } | Where-Object { $_ })
     if (-not ($have.Count -eq 1 -and $have[0] -eq $plan.records[0].value)) {
@@ -188,8 +233,7 @@ if ($plan.dns -eq 'privatezone') {
     }
     Write-Host "  private DNS: $($plan.label).$($plan.zone) -> $($plan.records[0].value) (zone in $zrg, $(@($LinkVnetIds).Count) link(s))" -ForegroundColor Green
 } elseif ($plan.dns -eq 'addns') {
-    . (Join-Path $PSScriptRoot '_PimSetupShared.ps1')
-    Write-PimDnsRecord -DnsServer $AdDnsServer -Fqdn $plan.host -EnvDomain $plan.zone -StaticIp $plan.records[0].value
+    Write-Host "  AD DNS: PIM wrote nothing -- add the record printed above on your DNS server, then run the Resolve-DnsName check." -ForegroundColor Yellow
 }
 
 # 4. mail links + known names
@@ -217,3 +261,4 @@ if (-not $SkipEasyAuth) {
     }
 }
 Write-Host "== done: https://$($plan.host)" -ForegroundColor Cyan
+} finally { Stop-PimScriptRun -Script 'Set-PimManagerCustomHost' }

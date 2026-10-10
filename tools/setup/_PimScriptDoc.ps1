@@ -42,6 +42,7 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/Initialize-PimMailSender.ps1';                Standalone = $true }
     @{ Path = 'setup/Set-PimSmtpRelayPassword.ps1';                Standalone = $true }
     @{ Path = 'setup/Set-PimSqlTier.ps1';                          Standalone = $true }
+    @{ Path = 'setup/New-PimHubPrepareScript.ps1';                 Standalone = $true }
     @{ Path = 'setup/Install-PimManager.ps1';                      Standalone = $false }
     @{ Path = 'setup/Invoke-PimDeployAll.ps1';                     Standalone = $false }
     @{ Path = 'setup/Invoke-PimMspBuild.ps1';                      Standalone = $false }
@@ -52,6 +53,15 @@ $script:PimScriptDocScripts = @(
     @{ Path = 'setup/Find-PimStrayTestObjects.ps1';                Standalone = $false }
     @{ Path = 'setup/Set-PimLicense.ps1';                          Standalone = $false }
     @{ Path = 'pim-activator/Deploy-PimActivatorHybrid.ps1';       Standalone = $false }
+    @{ Path = 'setup/Update-PimCommunity.ps1';                     Standalone = $false }
+    @{ Path = 'setup/Grant-PimSupportAccess.ps1';                  Standalone = $false }
+    @{ Path = 'setup/Confirm-PimInstall.ps1';                      Standalone = $false }
+    @{ Path = 'setup/Set-PimManagerCustomHost.ps1';                Standalone = $false }
+    @{ Path = 'setup/Deploy-PimRfaBroker.ps1';                     Standalone = $false }
+    @{ Path = 'setup/Rebuild-PimEnvInternal.ps1';                  Standalone = $false }
+    @{ Path = 'setup/Rebuild-PimEnvExternal.ps1';                  Standalone = $false }
+    @{ Path = 'setup/Remove-PimContainerStack.ps1';                Standalone = $false }
+    @{ Path = 'setup/New-PimHostingPrerequisites.ps1';             Standalone = $false }
 )
 
 function Get-PimScriptDocName {

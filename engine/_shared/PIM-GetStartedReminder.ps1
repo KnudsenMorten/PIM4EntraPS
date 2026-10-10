@@ -123,7 +123,10 @@ function ConvertTo-PimGetStartedReminderHtml {
 
 function Invoke-PimGetStartedReminder {
     <#
-      The daily send (called by the scheduler's daily job). Reads the recorded Get Started status, the alert recipients, the
+      §100.57: NO LONGER CALLED by the scheduler -- the Get Started part is sent by the pending-actions reminder
+      (PIM-PendingReminders.ps1, every tick), which reuses this file's status reader, recipient rule and doc link. Kept for
+      a direct / manual send.
+      The daily send (formerly called by the scheduler's daily job). Reads the recorded Get Started status, the alert recipients, the
       last-sent stamp and the mail readiness; plans; filters by each recipient's Notifications ('get-started' report); sends
       the 'get-started-reminder' mail; records the day. Returns @{ sent; planned; detail }. Never throws.
     #>

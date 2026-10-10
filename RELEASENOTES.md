@@ -13,10 +13,17 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.576 -- 2026-10-10
+
+- SuperAdmin reminders for open Get Started steps and approvals; environment links in the status reports and guard alerts; AD DNS records printed for you (PIM never writes your DNS); region check before anything is created; Manager close fix.
+
+- **Support sees where your environment lives.** With an install key, the heartbeat now names the environment's addresses (the PIM Manager, and the access request portal, its API and the MCP server where you use them; https only, never an internal address or a query string), and each guard report links to the page where you act on it: Approvals for a held change set, otherwise that guard on the Guards page.
 ## 2.4.575 -- 2026-10-10
 
 - No Azure CLI or PowerShell modules anywhere in PIM; old v1 code removed; slimmer container image; corrected public statements; customer fixes (access reviews, drift, mail layout, validator); Delegation overview with graph view.
 
+- Custom host name and your own DNS: setup no longer changes your Active Directory DNS and no longer needs the DNS Server tools. It prints the one record to add (name, zone and address), with lines you can paste and a command to check it afterwards. It never adds a wildcard record and never creates a zone named after your domain. With an Azure private zone, setup only writes into a zone that already exists; otherwise it tells you what to create.
+- **A reminder when something waits on you.** PIM Manager now mails your SuperAdmins one reminder listing everything that waits on them -- open Get Started steps, policy change sets held by the circuit breaker, approval and access requests, guard holds and releases, a break-glass change, staged changes a second administrator must commit -- each with a link straight to that entry. The first reminder goes out after 4 hours for an approval and 24 hours for a Get Started step, then daily while anything waits, and it stops by itself. Change or switch it off under Settings > Mail & alerting > Reminders: what waits on you; each person can switch either part off in Notifications. **Upgrade note:** this replaces the separate daily "Get Started not complete" mail (alert recipients who are not SuperAdmins still get the Get Started part).
 - The container image is slimmer: the PowerShell gallery tools and the line editor are removed from it, and test suites, internal notes, unsupported v1 code and documentation screenshots are no longer copied in (no Azure CLI or Azure / Graph PowerShell modules, as before)
 - The last setup and support scripts no longer need the Azure CLI or any PowerShell module: the deploy report, removing a container stack, the version-drift and credential-expiry checks, enabling self-update, the post-roll smoke and rollback, importing an environment backup, the hybrid worker's Azure side (VM, network, NAT egress, peering, access) and the RFA broker deploy now talk to Azure directly. The only module left is Windows Group Policy on the on-premises hybrid worker. The old version 1 engines and launchers, which needed PowerShell modules, are removed from the product.
 - More setup scripts no longer need the Azure CLI: the baseline store's network access and private DNS, the SQL build window, the baseline publish job and its signing key, the source archive publish, the controlled container auto-update and the Manager's MCP sign-in now talk to Azure directly.

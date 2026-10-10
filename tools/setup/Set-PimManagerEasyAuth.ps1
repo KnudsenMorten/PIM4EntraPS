@@ -186,22 +186,27 @@ function Set-PimManagerIngressGate {
                 return (ConvertTo-Json -InputObject @($rules) -Depth 6 -Compress)
             }
             # A refused write is not reported here: the READ-BACK below decides (as the az path did).
-            $gateApp = "$App"; $gateRg = "$ResourceGroup"   # locals, so the closure below captures them
+            $gateApp = "$App"; $gateRg = "$ResourceGroup"
             # 2026-10-10 (a customer's fresh install): the write came seconds after the app was created and ARM refused it as
             # busy (409 OperationInProgress); the refusal was swallowed and only the empty read-back surfaced. Now: wait out a
             # busy app (Invoke-PimArmBusyRetry, bounded) and keep the write's own error for the reason.
             $global:PimGateWriteError = ''
             $gateWrite = {
+                # 🪤 .GetNewClosure() captures ONLY the variables LOCAL to the scope it is called in -- here, this scriptblock's
+                # scope, not $Io's. So copy what the mutate needs into locals HERE first; without this the mutate saw an empty
+                # $Op/$Arg, added no rule, and the PATCH went out unchanged (the read-back then waited 60 s and failed).
+                $mOp = "$Op"; $mApp = "$gateApp"
+                $mRule = [pscustomobject]@{ name = $(if ($Op -eq 'add') { "$($Arg.name)" } else { "$Arg" })
+                                            description = "$($Arg.description)"; ipAddressRange = "$($Arg.ipAddress)"; action = "$($Arg.action)" }
                 Set-PimArmAcaAppConfiguration -SubscriptionId $Sub -ResourceGroup $gateRg -Name $gateApp -Mutate {
                     param($cfg)
                     $ing = $cfg.ingress
-                    if (-not $ing) { throw "'$gateApp' has no ingress -- there is nothing to restrict." }
-                    $name = if ($Op -eq 'add') { "$($Arg.name)" } else { "$Arg" }
-                    $keep = @(@($ing.ipSecurityRestrictions) | Where-Object { $_ -and "$($_.name)" -ne $name })
-                    if ($Op -eq 'add') { $keep += [pscustomobject]@{ name = "$($Arg.name)"; description = "$($Arg.description)"; ipAddressRange = "$($Arg.ipAddress)"; action = "$($Arg.action)" } }
+                    if (-not $ing) { throw "'$mApp' has no ingress -- there is nothing to restrict." }
+                    $keep = @(@($ing.ipSecurityRestrictions) | Where-Object { $_ -and "$($_.name)" -ne "$($mRule.name)" })
+                    if ($mOp -eq 'add') { $keep += [pscustomobject]@{ name = "$($mRule.name)"; description = "$($mRule.description)"; ipAddressRange = "$($mRule.ipAddressRange)"; action = "$($mRule.action)" } }
                     $ing | Add-Member -NotePropertyName ipSecurityRestrictions -NotePropertyValue @($keep) -Force
-                }.GetNewClosure() | Out-Null
-            }   # NOT .GetNewClosure(): a closure cannot see the PIM-ArmSetup functions this script dot-sourced
+                }.GetNewClosure() | Out-Null   # the MUTATE may be a closure: it calls only cmdlets, never a dot-sourced function
+            }   # $gateWrite itself is NOT .GetNewClosure(): a closure cannot see the PIM-ArmSetup functions this script dot-sourced
             try {
                 [void](Invoke-PimEaBusyRetry -Write $gateWrite)
             } catch { $global:PimGateWriteError = "$($_.Exception.Message)"; Write-Verbose "ingress access-restriction $Op on $gateApp refused: $($global:PimGateWriteError)" }

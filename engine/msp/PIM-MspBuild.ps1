@@ -1,5 +1,7 @@
 #Requires -Version 5.1
 if (-not (Get-Command Test-PimRingValue -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot '..\_shared\PIM-Rings.ps1') }   # §91.2: the DEFINED deployment rings
+# BUG-299: the ONE hosting-region list (tools\setup\_PimRegions.ps1) -- the config check refuses a region before anything is built.
+if (-not (Get-Command Test-PimSetupRegion -ErrorAction SilentlyContinue)) { $__pimRegions = Join-Path $PSScriptRoot '..\..\tools\setup\_PimRegions.ps1'; if (Test-Path -LiteralPath $__pimRegions) { . $__pimRegions } }
 <#
 .SYNOPSIS
     71.18 -- THE ONE-SHOT MSP BUILD (pure core). Decides, for a managing tenant (S3) or a MANAGED tenant (S6, locally hosted
@@ -398,6 +400,9 @@ function Test-PimMspBuildConfig {
     foreach ($p in 'resourceGroup', 'location', 'token', 'sqlServerName', 'acrName', 'envName', 'managerSuperAdmins') {
         if (-not "$(& $V $p)".Trim()) { $errors.Add("'$p' is required") }
     }
+    # BUG-299: a region PIM is not hosted in is refused HERE (the plan), not at the infra step after the build created things.
+    $locV = "$(& $V 'location')".Trim()
+    if ($locV -and (Get-Command Test-PimSetupRegion -ErrorAction SilentlyContinue)) { $locWhy = Test-PimSetupRegion -Location $locV; if ($locWhy) { $errors.Add("'location': $locWhy") } }
     if ($authMode -eq 'Certificate' -and "$(& $V 'deployIdentity.certThumbprint')".Trim() -notmatch '^[0-9a-fA-F]{40}$') { $errors.Add("'deployIdentity.certThumbprint' must be a 40-hex certificate thumbprint (or remove 'deployIdentity' entirely to build as the signed-in az user)") }
     $ring = & $V 'updater.ring'
     if ($null -eq $ring -or "$ring" -notmatch '^[0-3]$') { $errors.Add("'updater.ring' must be 0..3") }
