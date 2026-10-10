@@ -41,7 +41,7 @@
     { "name": "EnrollmentTimeoutSeconds", "required": false, "default": 900, "help": "How long to wait for Invardia to sign the licence." }
   ],
   "readsOnly": [
-    "Checks: az account show / get-access-token (who you are, tenant, subscription), your Azure role assignments on the subscription, your directory roles (transitiveMemberOf: Global Administrator, Privileged Role Administrator, Application Administrator), the resource providers, the resource group, the SQL server and registry names, Azure SQL capabilities in the region.",
+    "Checks: az account show / get-access-token (who you are, tenant, subscription), your Azure role assignments on the subscription, your directory roles (transitiveMemberOf: Global Administrator, Privileged Role Administrator, Application Administrator), the resource providers, the resource group, the SQL server and registry names, and the chosen region (any Azure region): the subscription's regions, where every service PIM Manager creates is offered (Container Apps, Azure SQL, Container Registry, Key Vault, Storage, Log Analytics, managed identities) and Azure SQL's capabilities there (Standard S0) -- names what is missing and the nearest region that has everything.",
     "After the deploy: the tick job's identity, the Manager's address, the SQL server and Log Analytics ids for the outputs; the end-of-install check reads every result back (SuperAdmins, updater, licence, mail sender, alerts, engine rights, sign-in, the SQL window) and repairs what it can -- a required line that would fail stops the install with its fix.",
     "Database role db_owner is only checked, never granted."
   ],

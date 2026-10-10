@@ -13,8 +13,14 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.577 -- 2026-10-10
+
+- The customer chooses any Azure region: setup checks before anything is created that every service PIM Manager needs is offered there and suggests the nearest region that has them; banners say PIM Manager; the install wizard no longer asks for admin prefixes.
+
+- **The PIM Activator shows the Invardia shield.** The extension's toolbar and extension-page icons are now the official Invardia PIM Manager shield instead of the plain blue "PIM" square (it takes effect with the next Activator package). Setup and deploy scripts now print "PIM Manager" in their console banners. The Manager header (per edition), favicon, access request portal and mail logo already use the official PIM Manager logos; a new check keeps every copy identical to the logo set.
 ## 2.4.576 -- 2026-10-10
 
+- **You choose the Azure region.** PIM Manager can be installed in any Azure region -- the fixed list of three regions is gone, and so is the exclusion of France: where your data lives is your decision. Before anything is created, the installer checks that every service PIM Manager needs (Container Apps, Azure SQL with the Standard S0 database, Container Registry, Key Vault, Storage, Log Analytics and managed identities) is available in that region for your subscription. If something is missing it says exactly which service and suggests the nearest region that has them all.
 - SuperAdmin reminders for open Get Started steps and approvals; environment links in the status reports and guard alerts; AD DNS records printed for you (PIM never writes your DNS); region check before anything is created; Manager close fix.
 
 - **Support sees where your environment lives.** With an install key, the heartbeat now names the environment's addresses (the PIM Manager, and the access request portal, its API and the MCP server where you use them; https only, never an internal address or a query string), and each guard report links to the page where you act on it: Approvals for a held change set, otherwise that guard on the Guards page.

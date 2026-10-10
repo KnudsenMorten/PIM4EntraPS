@@ -6,16 +6,16 @@
   §95.2 -- the GUIDED INSTALL of the PIM Manager: the one command Invardia's bootstrap calls (GUIDED-INSTALL §4.2).
 
 .DESCRIPTION
-  -WhatIf: runs the checks (sign-in, subscription, rights, resource providers, names, SQL in the region -- reads only),
+  -WhatIf: runs the checks (sign-in, subscription, rights, resource providers, names, every service PIM Manager needs in the chosen region -- reads only),
   then prints what the installation WOULD do -- the deploy's own plan included -- and stops before the first change
   (no Invardia enrollment claim, no Azure / Entra / SQL change, no state file outside the temp folder).
 
   Install-PimManager -ConfigPath <config.json> -LicencePath <file> -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]
 
-  Runs in Azure Cloud Shell (PowerShell 7, Linux) or PowerShell 7 / Windows PowerShell 5.1 on Windows, as the SIGNED-IN
-  account -- never a secret. It:
+  Runs in PowerShell 7 on the administrator's own machine, signed in in the browser as that administrator -- never a
+  secret, no Azure CLI, no PowerShell modules (2.4.554+). It:
     1. checks the answers (config.json, keys as in install-parameters.json) and the licence file      -> exit 3 when bad
-    2. preflight: sign-in, tenant + subscription, rights, providers, names, SQL in the region          -> exit 2 when failed
+    2. preflight: sign-in, tenant + subscription, rights, providers, names, services in the region     -> exit 2 when failed
        (-PreflightOnly stops here, exit 0)
     3. deploys with Invoke-PimDeployAll (the external, signed-in Container Apps shape; the public release), reporting
        every step                                                                                        -> exit 1 when failed
@@ -350,11 +350,18 @@ Pre 'preflight-names' {
     @{ state = 'ok'; message = ($msgs -join ' ') }
 }
 
+# 100.62 THE CUSTOMER DECIDES THE REGION: no region list -- this step reads, for THIS subscription, whether every service PIM
+# Manager creates is offered in the chosen region (ARM provider locations + Azure SQL's capabilities: region open, Standard S0),
+# names exactly what is missing and suggests the nearest region that has all of it. Reads only; the step id is kept (the
+# progress feed and Invardia's wizard know it).
 Pre 'preflight-sql-region' {
-    $cap = Get-InstallRest "https://management.azure.com/subscriptions/$($cfg.subscriptionId)/providers/Microsoft.Sql/locations/$($cfg.location)/capabilities?api-version=2021-11-01" 'https://management.azure.com/'
-    if (-not $cap) { return @{ state = 'warning'; message = "could not read Azure SQL's capabilities in $($cfg.location) -- the database step will tell" } }
-    if ("$($cap.status)" -eq 'Disabled') { return @{ state = 'failed'; message = "Azure SQL is not available for this subscription in $($cfg.location) -- choose another region in the wizard (Sweden Central is a good default)" } }
-    @{ state = 'ok'; message = "Azure SQL is offered in $($cfg.location) ($($cap.status))" }
+    $rv = Invoke-PimRegionPreflight -SubscriptionId $cfg.subscriptionId -Location $cfg.location -Get { param($u) Get-InstallRest $u 'https://management.azure.com/' }
+    if (-not $rv.ok) {
+        return @{ state = 'failed'; message = $rv.message; actionText = 'Choose another region in the wizard, then start the installation again:'
+                  actionCommand = $(if ($rv.suggestion) { "`"location`": `"$($rv.suggestion)`"" } else { '' }) }
+    }
+    if (@($rv.unknown).Count) { return @{ state = 'warning'; message = "$($rv.message) -- the deploy steps will tell" } }
+    @{ state = 'ok'; message = $rv.message }
 }
 if ($preflightFailed) { Finish 2 }
 if ($PreflightOnly) { Write-Host 'preflight passed -- nothing was changed (-PreflightOnly)' -ForegroundColor Green; Finish 0 }

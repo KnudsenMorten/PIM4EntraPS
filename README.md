@@ -1352,8 +1352,9 @@ Run it **without `-Apply`** first to see the plan — nothing is changed. With
 network, registry, logs, SQL server), the Manager image build from your clone, the
 Container Apps environment with the Manager and the engine job, database access
 and schema, the feature baseline, Entra sign-in in front of the Manager, and the
-Manager administrators. Allowed regions are West Europe, Denmark East and Sweden
-Central.
+Manager administrators. Any Azure region can be used; before anything is created
+the deploy checks that every service PIM Manager needs is available there and
+suggests the nearest region that has them.
 
 **Who may sign in is required.** `-EasyAuthAllowedPrincipals <upn-or-group>[,...]`
 admits exactly those accounts or groups (assignment required). A new Manager is

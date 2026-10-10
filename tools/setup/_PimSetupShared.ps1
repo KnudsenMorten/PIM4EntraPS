@@ -10,9 +10,9 @@
       * Show-PimSetupBanner       -- SI-parity deploy banner (PowerShell + .NET
                                      versions printed up front; Azure over REST).
       * Get-PimSetupSolutionVersion -- the VERSION file value.
-      * Assert-PimSetupRegion     -- region guard: West Europe / Denmark East /
-                                     Sweden Central only; France is explicitly
-                                     refused (data-residency).
+      * Assert-PimSetupRegion     -- region guard: the customer decides the region
+                                     (100.62); refuses only an empty / malformed
+                                     name. Service availability = live preflight.
       * Grant-PimMiSql            -- create/refresh a contained SQL DB user for a
                                      managed-identity/app appId (SID-from-appId,
                                      TYPE=E). MI-only, no SQL login.
@@ -72,14 +72,10 @@ if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Jo
 # 🪤 A script that calls az BEFORE dot-sourcing this file is not covered -- such scripts load _PimAz.ps1 themselves.
 . (Join-Path $PSScriptRoot '_PimAz.ps1')
 
-# Region allow-list. EU-only hosting. France is REFUSED (data-residency).
-# swedencentral added 2026-08-09 (operator decision): the 28-tenant test estate is provisioned
-# there because a FRESH subscription refuses new resources in westeurope/northeurope -- see
-# New-PimHostingPrerequisites.ps1's -Location default. Until that was allowed here, step 3 built
-# the estate in a region Setup-PimContainers then threw on, so the container steps could never
-# run against what the estate actually is. Sweden Central is EU; the explicit denial is France.
-# BUG-299 (2026-10-10): the list now lives in _PimRegions.ps1 ONLY (install-parameters.json, the guided install's
-# config check and Invoke-PimDeployAll's preflight read the same list) -- sets $script:PimAllowedRegions / PimDeniedRegions.
+# 100.62 (owner 2026-10-10, "customer decide region"): THE CUSTOMER DECIDES THE REGION. The BUG-299 three-region allow-list
+# and the France denial are gone -- data residency is the customer's. _PimRegions.ps1 holds the offline name check
+# (Test-PimSetupRegion) and the live capability preflight (Invoke-PimRegionPreflight) every entry point runs before
+# anything is created. There is no region list anywhere.
 . (Join-Path $PSScriptRoot '_PimRegions.ps1')
 
 function Get-PimSetupSolutionVersion {
@@ -104,7 +100,7 @@ function Show-PimSetupBanner {
     $ver = Get-PimSetupSolutionVersion -SolutionRoot $SolutionRoot
     Write-Host ''
     Write-Host "==========================================================================" -ForegroundColor Cyan
-    Write-Host " $ScriptName -- PIM4EntraPS $ver" -ForegroundColor Cyan
+    Write-Host " $ScriptName -- PIM Manager $ver" -ForegroundColor Cyan
     Write-Host "==========================================================================" -ForegroundColor Cyan
     Write-Host ("  PowerShell : {0} ({1})" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition) -ForegroundColor Cyan
     $dotnet = try { [System.Runtime.InteropServices.RuntimeInformation]::FrameworkDescription } catch { [System.Environment]::Version.ToString() }
@@ -123,7 +119,8 @@ function Show-PimSetupBanner {
 }
 
 function Assert-PimSetupRegion {
-    # BUG-299: the list and the reason come from _PimRegions.ps1 (the one source; also checked in every preflight).
+    # 100.62: a plausible region NAME only (_PimRegions.ps1) -- which region is the customer's choice; whether every service
+    # is offered there is the live preflight (Invoke-PimRegionPreflight), run before anything is created.
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Location)
     $why = Test-PimSetupRegion -Location $Location
     if ($why) { throw $why }

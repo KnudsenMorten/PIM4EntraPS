@@ -33,9 +33,10 @@
     not automated.
 
     WHO THE BUILD RUNS AS (71.33) -- decided by the config alone:
-      * no 'deployIdentity'  -> SIGNED-IN mode: the administrator signed in with `az login`. Before anything is touched the
-        build REFUSES unless the az account for config.subscriptionId is a USER in config.tenantId (a service principal,
-        another tenant or another subscription is refused; with no sign-in it runs `az login --tenant <tenantId>`), and
+      * no 'deployIdentity'  -> SIGNED-IN mode: the administrator signs in in the browser (PIM-Rest, no Azure CLI). Before anything
+        is touched the build REFUSES unless that sign-in is a USER in config.tenantId with access to config.subscriptionId (a
+        service principal, another tenant or another subscription is refused; with no sign-in it opens the browser sign-in
+        for <tenantId>), and
         unless no AZURE_CLIENT_SECRET / PIM_CERT_THUMBPRINT / managed-identity variable would make a step authenticate as
         somebody else. The signed-in user is made a member of grp-pim-sql-admins (the store steps connect as that user).
         (71.35: the daily publish is a Container Apps job on the managing tenant's managed identity, so a signed-in master build has

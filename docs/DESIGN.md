@@ -3129,8 +3129,12 @@ place:
   identity into the engine launcher config (§11.5.0).
 
 **Shared deploy library.** Every script prints a version banner (PowerShell / .NET /
-Azure CLI) up front, **refuses any region outside its EU allow-list** (West Europe, Denmark East,
-Sweden Central; France is explicitly denied for data residency), and
+Azure CLI) up front, **lets the customer choose the region** — any Azure region; before
+anything is created a capability preflight reads, for the chosen subscription, where every
+service PIM Manager creates is offered (Container Apps environments and jobs, Azure SQL servers
+with the region open to the subscription and the Standard S0 database, Container Registry,
+Key Vault, Storage, Log Analytics, user-assigned managed identities), names exactly what is
+missing and suggests the nearest region (great-circle distance) that has all of it — and
 ends by printing **exactly which DNS and private-link zones to add** for Entra Global
 Secure Access (Private Access) so cloud-only users reach the internal Manager without
 a VPN — the SQL `database.windows.net` zone,
@@ -3296,8 +3300,10 @@ edition; pass the values as parameters as shown.
 
 The setup scripts are **idempotent, re-runnable, parameter-driven** (no portal
 clicking), share one helper library (`tools/setup/_PimSetupShared.ps1`), print a
-version banner, and **refuse any region outside the EU allow-list** (West Europe, Denmark East,
-Sweden Central).
+version banner, and **accept any Azure region the customer chooses**: the region is checked
+before anything is created (a plausible region name offline; live, that every service PIM Manager
+needs is offered there for the subscription, with the nearest complete region suggested
+otherwise). There is no region allow-list — data residency is the customer's decision.
 
 **A. App registration** — §11.5.0 step 2 (`Install-PimEngineAppRegistration.ps1`).
 
@@ -4383,8 +4389,8 @@ and acts on the plan the core returns.
   revision reactivate, or the pre-update image when the revision is gone — and fail loudly so
   the operator is alerted. A skip is never kept as healthy.
 
-REST/cert + MI throughout (the orchestrator only shells `az`); PS 5.1-safe; EU allow-list
-region (West Europe, Denmark East, Sweden Central; inherited from the deployment); ACA workers via `--yaml`
+REST/cert + MI throughout (the orchestrator only shells `az`); PS 5.1-safe; the customer's
+chosen region (inherited from the deployment); ACA workers via `--yaml`
 (through the reused roller / setup script).
 
 ### Full update-lifecycle (`Invoke-PimUpdate.ps1`)
@@ -4460,7 +4466,7 @@ the rollback target, runs each needed step in order, rolls back on a failed veri
 and **always notifies** the outcome (success or failure). Idempotent: a second run
 with nothing changed and the monitor in place is a no-op. It is foldable into
 `sync-automateit` and a git post-merge hook. REST/cert + MI throughout; PS 5.1-safe;
-Azure SQL single store; EU allow-list regions (West Europe, Denmark East, Sweden Central).
+Azure SQL single store; any Azure region the customer chooses (checked before anything is created).
 
 > **Dependency note (mailer + monitor).** The update-lifecycle depends on the
 > synthetic-monitor work (`feat/synthetic-monitor`) by **interface**: the mailer via
@@ -9055,6 +9061,10 @@ configurable threshold + getting-started tip).
 extension id, permissions and `update_url` are unchanged. The load-failure card's **Report bug** still shows the
 scrubbed text for review first (SEC-41); its button now copies that text and opens the support portal
 (`https://portal.invardia.com`) instead of a public GitHub issue.
+The extension's icons (`icons/icon-16/32/48/128.png`, the sizes the manifest names) are the Invardia shield from the
+official PIM Manager icon set on a transparent tile (2026-10-10; before that a plain blue "PIM" square). Every other
+copy of the logo -- the Manager header per edition, its favicon, the access request portal header and the mail logo --
+is taken from `docs/img/brand`, the one in-repo logo set, and a test keeps each copy identical to it.
 
 ### Companion projects (combinable, same author)
 

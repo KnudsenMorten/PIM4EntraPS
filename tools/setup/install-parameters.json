@@ -1,7 +1,7 @@
 {
   "_comment": "The guided-install contract of the PIM Manager (GUIDED-INSTALL 4.1-4.6). Invardia's wizard asks exactly these questions and writes the answers to config.json for tools/setup/Install-PimManager.ps1, which validates them again (Test-PimInstallConfig). 'maps' = what the answer drives. Kept in step with Install-PimManager by tests/Test-PimGuidedInstall.ps1.",
   "product": "pim-manager",
-  "version": "2.4.576",
+  "version": "2.4.577",
   "entryPoint": "Install-PimManager -ConfigPath <config.json> [-LicencePath <file>] -Reporter <scriptblock> [-StatePath <dir>] [-Resume] [-PreflightOnly]",
   "licenceOrKey": "-LicencePath is required unless config.json carries enrollmentKey: an enrollment key (framework 8.6) makes the install claim the tenant at Invardia, which returns the licence and the install key.",
   "exitCodes": { "0": "succeeded (warnings allowed)", "1": "a step failed -- fix it and -Resume", "2": "preflight failed -- nothing was changed", "3": "bad answers or a bad licence -- nothing was changed" },
@@ -14,7 +14,7 @@
   "parameters": [
     { "key": "tenantId", "page": "target", "type": "guid", "required": true, "help": "The Microsoft Entra tenant PIM manages. The licence is bound to it.", "maps": "TenantId" },
     { "key": "subscriptionId", "page": "target", "type": "guid", "required": true, "help": "The Azure subscription that hosts PIM (Container Apps, Azure SQL).", "maps": "SubscriptionId" },
-    { "key": "location", "page": "target", "type": "region", "default": "swedencentral", "options": ["swedencentral", "westeurope", "denmarkeast"], "help": "The regions PIM is hosted in (EU data residency). Some subscriptions cannot create new Azure SQL servers in West Europe -- the installer checks the region first, before anything is created.", "maps": "Location" },
+    { "key": "location", "page": "target", "type": "region", "default": "swedencentral", "help": "Any Azure region; the installer checks before anything is created that every service PIM Manager needs is available there and suggests the nearest region that has them.", "maps": "Location" },
     { "key": "resourceGroup", "page": "target", "type": "resourceGroupName", "default": "rg-pim", "help": "Created when it does not exist; an existing one is reused.", "maps": "ResourceGroup" },
     { "key": "edition", "page": "target", "type": "enum", "options": ["trial", "pro"], "setBy": "invardia", "help": "Set from the licence in the bundle, not asked.", "maps": "the licence in the bundle" },
     { "key": "exposure", "page": "network", "type": "enum", "default": "external", "options": ["external"], "help": "The guided install builds the external shape: the PIM Manager is reachable on the internet behind Microsoft Entra sign-in. A private-network install is a consultant-led setup.", "maps": "Exposure" },
@@ -22,7 +22,6 @@
     { "key": "subnetAddressPrefix", "page": "network", "type": "cidr", "default": "10.220.0.0/23", "help": "A /23 or larger (Azure Container Apps), inside the VNet range.", "maps": "PrereqSubnetAddressPrefix" },
     { "key": "mspRole", "page": "network", "type": "enum", "default": "single", "options": ["single", "managed"], "help": "single = this tenant only. managed = a tenant managed by an MSP (managing company): needs the enrollment key that company got from Invardia; the install links it to the managing tenant. A managing tenant is set up with support.", "maps": "single: Scenario S2 + the licence; managed: Invoke-PimMspBuild -Role Slave (S6) -EnrollmentKey" },
     { "key": "enrollmentKey", "page": "target", "type": "secret", "setBy": "invardia", "help": "Optional for single, required for managed. The Invardia enrollment key (ek-...). With it no licence file is needed: the install claims this tenant at Invardia, which returns the licence and the install key. A bearer secret: never shown, never logged, removed from config.json once the licence is registered.", "maps": "the enroll step (claim) + the licence step" },
-    { "key": "adminPrefixes", "page": "network", "type": "stringList", "help": "Managed tenant only, optional: the name prefix(es) of the admin accounts the managing company manages in this tenant (e.g. Admin-). Used only to report a naming mismatch; leave it empty and set the admin account patterns in Settings later.", "maps": "adminPrefixes of the managed-tenant build" },
     { "key": "slaveRing", "page": "network", "type": "enum", "default": "2", "options": ["0", "1", "2"], "help": "Managed tenant only: the ring of this tenant for the managing company's policy bundle (2 = production).", "maps": "slaveRing of the managed-tenant build" },
     { "key": "portalUsers", "page": "access", "type": "upnList", "help": "Who may sign in to the PIM Manager. Default: the super-admins.", "maps": "EasyAuthAllowedPrincipals" },
     { "key": "allowAllMembers", "page": "access", "type": "bool", "default": false, "help": "Every member account of the tenant may sign in (guests never).", "maps": "EasyAuthAllowAllTenantUsers" },
@@ -77,7 +76,7 @@
     "Exchange Administrator or Global Administrator, active, for the notification mailbox (optional -- without it the end-of-install check ends with the Get Started > Mail sender follow-up)",
     "Owner or User Access Administrator at the tenant root management group (recommended; a Global Administrator who turned on Access management for Azure resources) -- the install gives the engine Reader there; without that right the end-of-install check ends with a WARNING and the exact command for that person (the install is not stopped -- owner decision of 2026-10-08)"
   ],
-  "runsIn": "Azure Cloud Shell (PowerShell 7) as the signed-in account -- never a secret. Also PowerShell 7 or Windows PowerShell 5.1 on Windows with a browser sign-in. No Azure CLI and no PowerShell modules are needed.",
+  "runsIn": "PowerShell 7 on the admin's own machine, signed in in the browser as your own administrator -- never a secret; no Azure CLI, no modules (PIM 2.4.554+)",
   "licence": "A Pro licence bound to the tenant above (a trial or a paid licence). A licence for another tenant, or one that names no tenant, is refused (exit 3).",
   "costStatement": "About 27 USD a month (Azure Container Apps scale to zero, Basic registry, Azure SQL Standard S0 -- the minimum, never Basic, 250 GB maximum size -- external)."
 }
