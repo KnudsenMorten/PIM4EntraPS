@@ -7,7 +7,7 @@
     through the containers in the slave".
 
 .DESCRIPTION
-    Creates/updates (idempotent) an `az containerapp job` of trigger-type Schedule
+    Creates/updates (idempotent) a Container Apps job (ARM REST, no az CLI -- 100.41) of trigger-type Schedule
     with a configurable cron expression. On its cadence the Job runs the pim-manager
     image with the in-container entrypoint tools/pim-engine/downlink-job-entry.ps1,
     which pulls -> verifies -> stages -> applies the ring-gated downlink + the engine
@@ -28,7 +28,7 @@
     whose thumbprint/clientId are read from the store and passed as env (not a value).
 
     PURE plan brain: engine/msp/PIM-DownlinkJob.ps1 (offline-tested in
-    tests/Test-PimDownlinkJob.ps1). This wrapper only probes existence + invokes az.
+    tests/Test-PimDownlinkJob.ps1). This wrapper only probes existence + writes the job over ARM REST (engine/_shared/PIM-ArmSetup.ps1).
     PS 5.1-safe; REST/cert + MI only (no PowerShell modules).
 
 .PARAMETER Scenario      S5 | S6 (placement + identity model).
@@ -54,7 +54,7 @@
 .PARAMETER SyncRootCentral / SyncRootLocal  In-container sync-file staging roots.
 .PARAMETER Start         After deploy (or standalone), START one on-demand execution (verification).
 .PARAMETER Unregister    DELETE the Job (and exit). The clean teardown path.
-.PARAMETER WhatIf        Print the exact `az containerapp job` commands; invoke nothing.
+.PARAMETER WhatIf        Print every ARM operation and the job resource it would send (secret values withheld); write nothing.
 
 .EXAMPLE
     # S6 -- deploy the Job (trigger every 5 minutes; the cadence itself is set in the tenant's Manager, daily by default):
@@ -108,7 +108,7 @@ param(
     [string]$SqlAdminClientId,
     [string]$SqlAdminClientSecret,
     [string]$SqlAdminCertThumbprint,
-    # 71.33: create the job identity's contained user as the SIGNED-IN az user (only needed off the SQL admin group model).
+    # 71.33: create the job identity's contained user as the SIGNED-IN user (only needed off the SQL admin group model).
     [switch]$UseSignedInAccount,
     # Deliberate escape hatch, e.g. when the contained user is created by another process.
     [switch]$SkipSqlGrant,
@@ -157,6 +157,9 @@ $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInv
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)   # SOLUTIONS\PIM4EntraPS
 . (Join-Path $solRoot 'engine\msp\PIM-DownlinkJob.ps1')
 . (Join-Path $solRoot 'engine\_shared\PIM-JobCadence.ps1')   # the cadence gate's skip marker (-Verify)
+# 100.41: the ONE token client + the ARM REST layer (loaded only when absent: re-loading PIM-Rest resets its token cache)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
 
 # Shared setup helpers. NOT best-effort any more: this script now needs
 # Resolve-PimAcrImageDigest + the pure image-reference helpers it dot-sources (BUG-40), so a
@@ -190,65 +193,73 @@ $engineSystemMi = -not ("$EngineClientId".Trim() -and "$EngineClientSecret".Trim
 if ($engineSystemMi) { Note "engine identity: the job's own SYSTEM managed identity (no secret) -- granted Graph app-roles + SQL admin group membership below" }
 else { Warn "engine identity: SPN client id + SECRET (-EngineClientSecret). Omit both to run the engine as the job's system managed identity instead." }
 
-# Helper: run an az arg set (or print it under -WhatIf).
+# Helper: run ONE Azure operation over ARM REST (or print it under -WhatIf). 100.41 (NO-AZ): every operation below
+# goes through engine\_shared\PIM-ArmSetup.ps1 -- PIM-Rest's ONE token client -- never the az CLI.
 #
 # 🪤 BUG-43 -- THE PARAMETER IS NOT CALLED $Args, AND MUST NEVER BE AGAIN.
 # `$Args` is a PowerShell AUTOMATIC variable. Declaring `param([string[]]$Args)` does not fail --
-# it binds nothing: the caller's array is silently discarded and the function sees count=0. So
-# `& az @AzArgs` ran BARE `az`, which prints help and exits 0, so nothing threw. Every az call in
-# this script -- create, update, delete, start -- did NOTHING while reporting success.
-# Measured live 2026-08-09: a deploy printed "az " with no arguments and created no Job at all.
-# Same class as the `$pid` collision recorded in Test-PimAssignmentKeys (an automatic variable
-# quietly swallowing a value), and the same consequence as the two scripts in session 12 that
-# "declared success having done nothing at all".
-function Invoke-Az {
-    param([string[]]$AzArgs, [string]$What)
-    if (-not @($AzArgs).Count) {
-        # Refuse to run a no-op and call it a deploy. This is what BUG-43 did for the life of the
-        # script, and it is only invisible because bare `az` succeeds.
-        throw "Invoke-Az called with NO arguments for '$What' -- refusing to run bare az and report success."
+# it binds nothing: the caller's array is silently discarded and the function sees count=0. In the
+# az era that ran BARE `az`, which prints help and exits 0, so nothing threw: every create, update,
+# delete and start did NOTHING while reporting success (measured live 2026-08-09).
+# The same rule holds for this helper: an operation with no description or no body is REFUSED, never
+# run as a silent no-op.
+function Invoke-DownlinkJobOp {
+    param([string]$Operation, [string]$What, [scriptblock]$Do)
+    if (-not "$Operation".Trim() -or -not $Do) {
+        # Refuse to run a no-op and call it a deploy -- the BUG-43 shape.
+        throw "Invoke-DownlinkJobOp called with NO operation for '$What' -- refusing to run nothing and report success."
     }
-    # BUG-215: every job create/update/delete/start is scoped to -SubscriptionId (the builder's arg sets carry none, and
-    # this script no longer moves the az default to make up for it).
-    $full = @($AzArgs)
-    if (@($script:subArgs).Count -and ($full -notcontains '--subscription')) { $full += @($script:subArgs) }
-    $pretty = 'az ' + (@($full) -join ' ')
-    if ($WhatIfPreference) { Write-Host "WHATIF> $pretty" -ForegroundColor Yellow; return '' }
-    if (-not $PSCmdlet.ShouldProcess($What, 'az')) { return '' }
-    Note $pretty
-    $out = & az @full 2>&1
-    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "az failed (exit $LASTEXITCODE): $out" }
-    return $out
+    if ($WhatIfPreference) { Write-Host "WHATIF> $Operation" -ForegroundColor Yellow; return $null }
+    if (-not $PSCmdlet.ShouldProcess($What, $Operation)) { return $null }
+    Note $Operation
+    & $Do
 }
 
-# 🔴 BUG-215 -- NEVER CHANGE THE MACHINE'S az DEFAULT. This line used to run `az account set --subscription` and never
-# restore it, so a standalone deploy silently moved every later az call on the box (other sessions included) to this
-# subscription -- the other-company default-context hazard in reverse. Every az call below is scoped with --subscription instead.
-# 🪤 What --subscription CANNOT scope is a DIRECTORY call (az ad sp show, via Resolve-PimMiAppId): that follows the
-# default context's tenant. The old `account set` hid that by moving the default; now the deploy REFUSES when the
-# default context is a different tenant than the subscription's, instead of reading the wrong directory.
-$subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
-if ("$SubscriptionId".Trim() -and -not $WhatIfPreference) {
-    $subTenant = "$(az account show @subArgs --query tenantId -o tsv --only-show-errors 2>$null)".Trim()
-    $ctxTenant = "$(az account show --query tenantId -o tsv --only-show-errors 2>$null)".Trim()
+# A job resource's ARM path in THE subscription (every operation is scoped to it -- BUG-215).
+function Get-DownlinkJobPath { "/subscriptions/$($script:sub)/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$JobName" }
+
+# az containerapp job delete --yes: DELETE, then wait until the job is gone (a create right after must not race it).
+function Remove-DownlinkJob {
+    param([string]$Why)
+    Invoke-DownlinkJobOp -Operation "DELETE $(Get-DownlinkJobPath)" -What $Why -Do {
+        [void](Invoke-PimSetupArm -Method DELETE -Path (Get-DownlinkJobPath) -ApiVersion (Get-PimSetupApiVersion aca) -NotFoundOk)
+        $deadline = (Get-Date).AddMinutes(10)
+        while ((Get-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 10 }
+        if (Get-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull) { throw "job '$JobName' still exists 10 minutes after its delete was accepted." }
+    } | Out-Null
+}
+
+# 🔴 BUG-215 -- NEVER CHANGE A MACHINE-WIDE DEFAULT. The az era ran `az account set --subscription` here and never restored
+# it, so a standalone deploy silently moved every later az call on the box (other sessions included). Over ARM REST there
+# is no default context at all: every path names -SubscriptionId, and every token PIM-Rest issues is pinned to that
+# subscription's tenant -- so a directory call (Resolve-PimMiAppId, Grant-PimMiGraph) can no longer read the wrong tenant.
+$script:sub = "$SubscriptionId".Trim()
+if (-not $script:sub) { $script:sub = "$env:PIM_SUBSCRIPTION_ID".Trim() }
+$subTenant = ''
+if ($script:sub -and -not $WhatIfPreference) {
+    # A caller that already set up PIM-Rest's identity (the MSP build's step launcher, a deploy in this process) keeps it;
+    # otherwise sign in: the Invardia Support app's REST session for this tenant, else the person at the keyboard.
+    if (-not $global:PIM_SetupRestMode -and -not "$($global:PIM_ClientId)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $script:sub) }
+    $subObj = Get-PimArmSubscription -SubscriptionId $script:sub -ErrorAsNull
+    $subTenant = if ($subObj) { "$($subObj.tenantId)".Trim().ToLowerInvariant() } else { '' }
     if (-not $subTenant) {
-        throw ("REFUSED: subscription $SubscriptionId is not visible to the signed-in az context. Sign in to its tenant in an " +
-               'isolated AZURE_CONFIG_DIR (the Invardia Support app connect) and re-run -- this script does not change the az default.')
+        throw ("REFUSED: subscription $($script:sub) is not visible to the signed-in identity ($($global:PimSetupRestLastError)). " +
+               'Sign in to its tenant (or connect its Invardia Support app) and re-run -- this script changes no default.')
     }
-    if ($ctxTenant -ne $subTenant) {
-        throw ("REFUSED: the az DEFAULT context is tenant '$ctxTenant' but subscription $SubscriptionId belongs to tenant '$subTenant'. " +
-               'Directory calls in this deploy follow the default context, and this script does not switch it. ' +
-               'Select that tenant in an isolated AZURE_CONFIG_DIR (the Invardia Support app connect) and re-run.')
+    $tokTenant = "$($global:PIM_TenantId)".Trim().ToLowerInvariant()
+    if ($tokTenant -and $tokTenant -ne $subTenant) {
+        throw ("REFUSED: the REST session is pinned to tenant '$tokTenant' but subscription $($script:sub) belongs to tenant '$subTenant'. " +
+               'Directory calls in this deploy would read the wrong tenant. Sign in to that tenant and re-run.')
     }
-} elseif (-not "$SubscriptionId".Trim()) {
-    Warn 'no -SubscriptionId: every az call runs against the az DEFAULT context. Pass -SubscriptionId to scope them.'
+} elseif (-not $script:sub -and -not $WhatIfPreference) {
+    throw ('-SubscriptionId is required: every Azure call goes over ARM REST, which addresses the subscription explicitly ' +
+           '(there is no default context to fall back on).')
 }
 
 # ---- UNREGISTER (delete) -------------------------------------------------------
 if ($Unregister) {
-    $del = Build-PimDownlinkJobArgs -Action delete -JobName $JobName -ResourceGroup $ResourceGroup
     Step "Unregister (delete) job $JobName"
-    Invoke-Az -AzArgs $del.args -What "delete job $JobName" | Out-Null
+    Remove-DownlinkJob -Why "delete job $JobName"
     Step 'Done (unregistered).'
     return
 }
@@ -273,14 +284,15 @@ $acrServer = "$AcrName.azurecr.io"
 # BUG-40: deploy the immutable DIGEST, not the mutable tag. Rebuilding a tag moves the pointer but
 # leaves the Job's image FIELD identical, so ARM sees no change and the platform keeps running the
 # image it already pulled -- measured on the ESTATE-06 tick Job, where a rebuild + update reported
-# success and the next executions ran the OLD code. Resolved after the az context is set below.
+# success and the next executions ran the OLD code. Resolved after the REST session is set up below.
 $imageTagRef = "$acrServer/$ImageRepo`:$ImageTag"
 $image       = $imageTagRef
 
 # Existence probe (idempotent: create vs update).
 $exists = $false
 if (-not $WhatIfPreference) {
-    $name = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query name -o tsv 2>$null
+    $jobNow = Get-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+    $name = if ($jobNow) { "$($jobNow.name)" } else { '' }
     if ("$name".Trim()) { $exists = $true }
 }
 Note "image=$image  exists=$exists  cron='$Cron'"
@@ -294,12 +306,10 @@ Note "image=$image  exists=$exists  cron='$Cron'"
 # in an operator's head -- it is the difference between a script that repairs an environment and one
 # that needs someone who already knows the answer.
 if ($exists -and -not $WhatIfPreference) {
-    $existingProv = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query "properties.provisioningState" -o tsv 2>$null
-    $existingProv = "$existingProv".Trim()
+    $existingProv = "$($jobNow.properties.provisioningState)".Trim()
     if ($existingProv -and $existingProv -ne 'Succeeded') {
         Warn "existing job '$JobName' is provisioningState='$existingProv' -- an update cannot repair that; deleting and recreating it."
-        $delArgs = Build-PimDownlinkJobArgs -Action delete -JobName $JobName -ResourceGroup $ResourceGroup
-        Invoke-Az -AzArgs $delArgs.args -What "delete failed job $JobName" | Out-Null
+        Remove-DownlinkJob -Why "delete failed job $JobName"
         $exists = $false
         Note "deleted the failed job; it will be recreated below with a pull-capable identity."
     }
@@ -308,7 +318,8 @@ if ($exists -and -not $WhatIfPreference) {
 
 # S6 prereq guard: warn loudly that the managed tenant ACA env must already exist.
 if ($Scenario -eq 'S6' -and -not $WhatIfPreference) {
-    $envOk = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query name -o tsv 2>$null
+    $envObj = Get-PimArmAcaEnv -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
+    $envOk = if ($envObj) { "$($envObj.name)" } else { '' }
     if (-not "$envOk".Trim()) {
         Warn "S6 PREREQ: the managed tenant ACA env '$EnvName' (RG $ResourceGroup) does not exist."
         Warn "          Stand it up first: Setup-PimContainers.ps1 -SubscriptionId <slave-sub> -TenantId $TenantId -ResourceGroup $ResourceGroup -EnvName $EnvName ... (internal-only, private)."
@@ -342,9 +353,7 @@ if ($Scenario -eq 'S6' -and -not $WhatIfPreference) {
 # exactly like a create: the YAML is a FULL document, so anything it omits is not "left alone",
 # it is REMOVED.
 if (-not "$IdentityResourceId".Trim() -and -not $WhatIfPreference) {
-    $uamiJson = az identity list @subArgs -g $ResourceGroup --query "[].{id:id,name:name}" -o json 2>$null
-    $uamis = @()
-    if ("$uamiJson".Trim()) { try { $uamis = @($uamiJson | ConvertFrom-Json) } catch { $uamis = @() } }
+    $uamis = @(Get-PimArmIdentities -SubscriptionId $script:sub -ResourceGroup $ResourceGroup | ForEach-Object { [pscustomobject]@{ id = "$($_.id)"; name = "$($_.name)" } })
     $pick = @($uamis | Where-Object { "$($_.name)" -like 'id-pim*' })
     if (-not $pick.Count) { $pick = @($uamis) }
     if ($pick.Count -eq 1) {
@@ -378,19 +387,16 @@ if (-not "$IdentityResourceId".Trim() -and -not $WhatIfPreference) {
 # so the deploy went straight back to the failing update path. A guard that depends on a value
 # computed later is not a guard, and it fails in the quiet direction.
 if ($exists -and -not $WhatIfPreference -and "$IdentityResourceId".Trim()) {
-    # Read the identity block as text and look for the MI by NAME. Deliberately not a JMESPath
-    # `keys(...)` expression: the backticks a JSON-literal default needs are PowerShell's own
-    # escape character, so the query arrives at az malformed and returns nothing -- which this
-    # branch would read as "no identity attached" for the wrong reason.
-    $curIdentity = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query identity -o json 2>$null
+    # Read the identity block as text and look for the MI by NAME (the ARM job's identity object, as JSON).
+    $curJob = Get-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+    $curIdentity = if ($curJob -and $curJob.identity) { $curJob.identity | ConvertTo-Json -Depth 6 -Compress } else { '' }
     $wantedName  = Split-Path "$IdentityResourceId".Trim() -Leaf
     # §71.10: adding the SYSTEM identity to a job that has only the user-assigned one is an identity change
     # too -- ACA refuses it on update just the same, so it takes the same delete + recreate.
     $missingSystem = $engineSystemMi -and -not ("$curIdentity" -match 'SystemAssigned')
     if ($missingSystem -or -not ("$curIdentity" -match [regex]::Escape($wantedName))) {
         Warn "existing job '$JobName' does not carry the intended user-assigned identity '$wantedName' -- ACA cannot swap an identity on update; deleting and recreating."
-        $delArgs2 = Build-PimDownlinkJobArgs -Action delete -JobName $JobName -ResourceGroup $ResourceGroup
-        Invoke-Az -AzArgs $delArgs2.args -What "delete job $JobName (identity change)" | Out-Null
+        Remove-DownlinkJob -Why "delete job $JobName (identity change)"
         $exists = $false
         # the plan below is built from $exists, so it now emits a CREATE
         $plan = $null
@@ -406,22 +412,24 @@ $miClientId = ''
 # §71.10: never name the user-assigned MI when the engine runs as the system identity -- a named client id
 # makes every token call pick the role-less UAMI again.
 if (-not $WhatIfPreference -and "$IdentityResourceId".Trim() -and -not $engineSystemMi) {
-    $miClientId = az identity show @subArgs --ids "$IdentityResourceId" --query clientId -o tsv --only-show-errors 2>$null
+    $miObj = Get-PimArmIdentity -ResourceId "$IdentityResourceId" -ErrorAsNull
+    $miClientId = if ($miObj) { "$($miObj.properties.clientId)" } else { '' }
     if ("$miClientId".Trim()) { Note "managed identity client id: $miClientId" }
     else { Warn "could not read the client id of '$IdentityResourceId' -- the container may be unable to obtain a managed-identity token." }
 }
 
-# --- facts the YAML deploy needs (BUG-38) + the digest pin (BUG-40) -------------
-# The Job is deployed via --yaml because `--command pwsh -NoProfile -File x` is rejected outright
-# by the CLI parser (see Get-PimDownlinkJobYaml). YAML needs the environment's ARM id and region,
-# which only a live probe knows -- so they are gathered HERE and passed to the pure planner.
+# --- facts the job resource needs (BUG-38) + the digest pin (BUG-40) -------------
+# The Job is written as ONE ARM resource (command + a separate args array -- the BUG-38 split, where a leading dash is
+# just a string). It needs the environment's ARM id and region, which only a live probe knows -- gathered HERE and
+# passed to the pure planner.
 $envId = ''; $envLocation = ''
 if (-not $WhatIfPreference) {
-    $envId       = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query id -o tsv 2>$null
-    $envLocation = az containerapp env show @subArgs -g $ResourceGroup -n $EnvName --query location -o tsv 2>$null
-    if (-not "$envId".Trim()) { throw "could not read the ACA environment '$EnvName' in RG $ResourceGroup -- cannot build the Job YAML." }
+    $envRes      = Get-PimArmAcaEnv -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
+    $envId       = if ($envRes) { "$($envRes.id)" } else { '' }
+    $envLocation = if ($envRes) { "$($envRes.location)" } else { '' }
+    if (-not "$envId".Trim()) { throw "could not read the ACA environment '$EnvName' in RG $ResourceGroup -- cannot build the Job resource." }
 
-    $digest = Resolve-PimAcrImageDigest -AcrName $AcrName -Repository $ImageRepo -Tag $ImageTag -SubscriptionId "$SubscriptionId".Trim()
+    $digest = Resolve-PimAcrImageDigest -AcrName $AcrName -Repository $ImageRepo -Tag $ImageTag -SubscriptionId $script:sub
     $image  = New-PimImageReference -Registry $acrServer -Repository $ImageRepo -Digest $digest
     Note "tag $ImageTag => $digest"
     Note "deploying $image"
@@ -430,12 +438,45 @@ if (-not $WhatIfPreference) {
     $envLocation = '<location>'
     Note "WhatIf -- the tag would be resolved to a digest here; plan shows $imageTagRef."
 }
-# 🔴 KEYED BY RESOURCE GROUP + PID. $JobName defaults per SCENARIO, not per tenant, so every S5
-# slave shares one filename -- and this yaml can carry the engine credential.
-# Setup-PimContainers had the identical defect and it corrupted a concurrent estate deploy on
-# 2026-09-03 (see the Job-yaml note there). Fixed here at the same time rather than waiting for it
-# to happen a second time on the downlink path, where the file's contents are secrets.
-$yamlPath = Join-Path ([IO.Path]::GetTempPath()) "pim-$JobName-$ResourceGroup-$PID.yaml"
+# 100.41: NO FILE. The az era wrote the job definition to a YAML file in %TEMP% (keyed by resource group + PID, BUG-72:
+# it could carry the engine secret) and shredded it afterwards. The definition is now an in-memory ARM body sent over
+# REST, so a secret value never touches the disk. The pure planner still renders its YAML text (its tests read it) and
+# takes a path label; nothing is ever written to it.
+$yamlPath = "in-memory:pim-$JobName-$ResourceGroup"
+
+# The ARM job resource -- the same document Get-PimDownlinkJobYaml renders, field for field (identity, Schedule trigger,
+# registry by managed identity, command + args, env with secretRef, the secrets block, resources).
+function New-PimDownlinkJobResource {
+    param([string]$Location, [string]$EnvironmentId, [string]$Image, [string]$Cron, [string[]]$Command = @(), [string[]]$EnvVars = @(),
+          [string]$AcrServer, [string]$IdentityResourceId, [switch]$SystemAssigned, [string]$RegistryIdentity = '',
+          [object[]]$Secrets = @(), [double]$Cpu = 0.5, [string]$Memory = '1Gi', [int]$ReplicaTimeout = 1800, [int]$ReplicaRetryLimit = 1)
+    if ("$IdentityResourceId".Trim()) {
+        $ua = @{}; $ua["$IdentityResourceId".Trim()] = @{}
+        $identity = @{ type = $(if ($SystemAssigned) { 'SystemAssigned,UserAssigned' } else { 'UserAssigned' }); userAssignedIdentities = $ua }
+    } else { $identity = @{ type = 'SystemAssigned' } }
+    $cfg = [ordered]@{ triggerType = 'Schedule'; replicaTimeout = $ReplicaTimeout; replicaRetryLimit = $ReplicaRetryLimit
+                       scheduleTriggerConfig = [ordered]@{ cronExpression = $Cron; parallelism = 1; replicaCompletionCount = 1 } }
+    if (@($Secrets).Count) { $cfg.secrets = @($Secrets) }
+    if ("$AcrServer".Trim()) {
+        # BUG-42: '' = AUTO -- the user-assigned MI pulls when one is attached, else the system identity. Explicit wins.
+        $regId = "$RegistryIdentity".Trim()
+        if (-not $regId) { $regId = if ("$IdentityResourceId".Trim()) { "$IdentityResourceId".Trim() } else { 'system' } }
+        $cfg.registries = @(@{ server = "$AcrServer".Trim(); identity = $regId })
+    }
+    $cmd = @($Command)
+    $container = [ordered]@{ name = $JobName; image = $Image; command = @($(if ($cmd.Count) { "$($cmd[0])" } else { 'pwsh' })) }
+    if ($cmd.Count -gt 1) { $container.args = @($cmd[1..($cmd.Count - 1)] | ForEach-Object { "$_" }) }
+    if (@($EnvVars).Count) {
+        $container.env = @(@($EnvVars) | ForEach-Object {
+            $kv = "$_" -split '=', 2
+            $v = if ($kv.Count -gt 1) { $kv[1] } else { '' }
+            if ("$v" -match '^(?i)secretref:(.+)$') { @{ name = $kv[0]; secretRef = $Matches[1] } } else { @{ name = $kv[0]; value = "$v" } }
+        })
+    }
+    $container.resources = @{ cpu = $Cpu; memory = $Memory }
+    return @{ location = $Location; identity = $identity
+              properties = [ordered]@{ environmentId = $EnvironmentId; workloadProfileName = 'Consumption'; configuration = $cfg; template = @{ containers = @($container) } } }
+}
 
 # 🔴 REFUSE A SQL-BACKED JOB WITH NO SQL SERVER. Get-PimDownlinkJobEnv emits
 # PIM_StorageBackend=sql and PIM_SqlDatabase UNCONDITIONALLY, but PIM_SqlServer only when one was
@@ -518,35 +559,39 @@ if ($plan.jobArgs.hasInlineSecret) { throw "REFUSED: the arg set contains an inl
 Step ("{0} job {1} (cron '{2}')" -f $plan.action, $JobName, $Cron)
 Note ("command: " + (@($plan.command) -join ' '))
 Note ("env: " + (@($plan.envVars) -join '  '))
+# The secrets this definition carries: exactly the ones the plan references (by name), with their values. Today that is
+# the engine client secret, when one is given -- a name the planner does not know how to value is a planner change this
+# deploy must not guess at.
+$jobSecrets = @()
+foreach ($sn in @($plan.secretNames)) {
+    if ($sn -eq 'pim-engine-client-secret' -and "$EngineClientSecret".Trim()) { $jobSecrets += @{ name = $sn; value = "$EngineClientSecret" } }
+    else { throw "the deploy plan references a secret '$sn' this script has no value for -- refusing to deploy a job that would fail on it." }
+}
+$jobResource = New-PimDownlinkJobResource -Location $envLocation -EnvironmentId $envId -Image $image -Cron $Cron `
+    -Command @($plan.command) -EnvVars @($plan.envVars) -AcrServer $acrServer -IdentityResourceId $IdentityResourceId `
+    -SystemAssigned:$engineSystemMi -RegistryIdentity $RegistryIdentity -Secrets $jobSecrets
+$verb = if ($plan.action -eq 'create') { 'PUT' } else { 'PATCH' }
 if ($WhatIfPreference) {
-    Write-Host "WHATIF> job yaml (would be written to $yamlPath):" -ForegroundColor Yellow
-    Write-Host $plan.jobArgs.yaml -ForegroundColor DarkGray
-} else {
-    Set-Content -LiteralPath $yamlPath -Value $plan.jobArgs.yaml -Encoding utf8
+    # the definition as it would be sent -- secret VALUES withheld (the plan names them, it never prints them)
+    $shown = $jobResource | ConvertTo-Json -Depth 12
+    foreach ($s in $jobSecrets) { $shown = $shown.Replace([string]$s.value, '<secret withheld>') }
+    Write-Host "WHATIF> job resource ($verb $(Get-DownlinkJobPath)):" -ForegroundColor Yellow
+    Write-Host $shown -ForegroundColor DarkGray
 }
-try {
-    Invoke-Az -AzArgs $plan.jobArgs.args -What "$($plan.action) job $JobName" | Out-Null
-}
-finally {
-    # 🔒 BUG-72 -- THE YAML MAY CARRY SECRET VALUES (the engine client secret, when one is given;
-    # the SAS-bearing baseline URL of BUG-73 is retired, SEC-27), because that is what an ACA `secrets:` block is. It is written to
-    # $env:TEMP, which on a shared build/deploy host outlives this script and is world-readable to
-    # anyone on the box. Shred it in `finally`, so a failed deploy does not leave the credential
-    # behind precisely when someone is about to go poking around to find out what broke.
-    if (-not $WhatIfPreference -and (Test-Path -LiteralPath $yamlPath)) {
-        try {
-            $len = (Get-Item -LiteralPath $yamlPath).Length
-            if ($len -gt 0) { Set-Content -LiteralPath $yamlPath -Value ([string]::new('0', [int]$len)) -Encoding ascii -NoNewline }
-            Remove-Item -LiteralPath $yamlPath -Force
-            Note "deploy yaml overwritten + deleted (it carried secret values)"
-        } catch { Warn "could not remove the deploy yaml '$yamlPath' -- it may contain secret values: $($_.Exception.Message)" }
-    }
-}
+# 🔒 BUG-72: the definition can carry a secret VALUE (the engine client secret, when one is given -- that is what an ACA
+# secrets block is). It is built in memory and sent over REST; it is never written to a file.
+Invoke-DownlinkJobOp -Operation "$verb $(Get-DownlinkJobPath) ($($plan.action) job)" -What "$($plan.action) job $JobName" -Do {
+    # A write ARM accepted that then ended in a non-Succeeded state is judged by the provisioningState verification below
+    # (BUG-71b, with its cause); any other failure stops here with ARM's code + message.
+    try { [void](Set-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -Resource $jobResource -Create:($plan.action -eq 'create')) }
+    catch { if ("$($_.Exception.Message)" -match 'did not provision') { Warn "$($_.Exception.Message)" } else { throw } }
+} | Out-Null
 
 # BUG-40: VERIFY the deployed reference. A Job has no revisions to inspect, so the image field is
 # the only thing checkable -- which is exactly why it has to be a digest to mean anything.
 if (-not $WhatIfPreference) {
-    $running = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query "properties.template.containers[0].image" -o tsv 2>$null
+    $jobAfter = Get-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+    $running = if ($jobAfter) { "$(@($jobAfter.properties.template.containers)[0].image)" } else { '' }
     $v = Test-PimImageDeployed -Expected $image -Running "$running".Trim()
     if (-not $v.ok) { throw "job '$JobName': $($v.reason)" }
     Note "image verified: $($v.reason)"
@@ -557,8 +602,8 @@ if (-not $WhatIfPreference) {
     # the field records what ARM was ASKED to run, not what it managed to run. So the deploy printed
     # "image verified", then "Done.", and exited 0 over a job that could never execute.
     # A deploy that cannot say whether the thing it deployed came up is not a deploy gate.
-    $prov = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query "properties.provisioningState" -o tsv 2>$null
-    $prov = "$prov".Trim()
+    $jobProv = Get-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+    $prov = if ($jobProv) { "$($jobProv.properties.provisioningState)".Trim() } else { '' }
     if (-not $prov) { throw "job '$JobName': could not read provisioningState -- refusing to report a deploy as successful when its outcome is unknown." }
     if ($prov -ne 'Succeeded') {
         throw ("job '$JobName' deployed but provisioningState='$prov' (expected 'Succeeded'). " +
@@ -569,17 +614,35 @@ if (-not $WhatIfPreference) {
 }
 
 # --- NO LEFTOVER SECRETS (lead 2026-09-18, measured on RIDE: "legacy leftovers are not allowed") -----------------------
-# `job update --yaml` leaves every secret the YAML does not list IN PLACE. So after a redeploy with the PLAIN -BaselineUrl,
+# An update leaves every secret the definition does not list IN PLACE. So after a redeploy with the PLAIN -BaselineUrl,
 # the retired SAS transport's 'pim-baseline-url' (a SAS link -- a standing credential to the managing tenant's bundle store)
-# stayed on the job, referenced by nothing. Every secret the deployed definition does not reference is removed here
-# (`--yes`: the command prompts otherwise), and the removal is READ BACK: a secret still listed fails the deploy.
+# stayed on the job, referenced by nothing. Every secret the deployed definition does not reference is removed here, and
+# the removal is READ BACK: a secret still listed fails the deploy.
 if ($WhatIfPreference) {
-    Write-Host "WHATIF> az containerapp job secret list/remove: every secret on $JobName not referenced by this definition ($(@($plan.secretNames) -join ', ')) would be removed, pim-baseline-url always" -ForegroundColor Yellow
+    Write-Host "WHATIF> job secrets (ARM listSecrets + PATCH configuration.secrets): every secret on $JobName not referenced by this definition ($(@($plan.secretNames) -join ', ')) would be removed, pim-baseline-url always" -ForegroundColor Yellow
 } else {
-    # The az seam: Invoke-PimDownlinkJobSecretCleanup (PIM-DownlinkJob.ps1) is offline-tested with a mocked az.
-    $azSeam = { param([string[]]$AzArgs) $o = @(& az @AzArgs 2>$null); [pscustomobject]@{ exitCode = $LASTEXITCODE; output = ($o -join "`n") } }
-    $clean = Invoke-PimDownlinkJobSecretCleanup -JobName $JobName -ResourceGroup $ResourceGroup -SubscriptionId "$SubscriptionId".Trim() `
-                 -Referenced @($plan.secretNames) -Az $azSeam -Log { param($m) Note $m }
+    # Invoke-PimDownlinkJobSecretCleanup (engine\msp\PIM-DownlinkJob.ps1, offline-tested with a mocked seam) decides and
+    # reads back; this seam answers its two requests over ARM REST (100.41: no az) -- 'secret list' = the job's secret
+    # names, 'secret remove' = Remove-PimArmAcaJobSecret (every other secret kept, WITH its value).
+    $restSeam = {
+        param([string[]]$AzArgs)
+        $j = @($AzArgs) -join ' '
+        $exit = 0; $out = ''
+        try {
+            if ($j -match '^containerapp job secret list\b') {
+                $names = @(Get-PimArmAcaJobSecretNames -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName)
+                $out = '[' + ((@($names) | ForEach-Object { '{"name":' + (ConvertTo-Json -InputObject "$_" -Compress) + '}' }) -join ',') + ']'
+            } elseif ($j -match '^containerapp job secret remove\b') {
+                $i = [Array]::IndexOf(@($AzArgs), '--secret-names')
+                $sn = if ($i -ge 0 -and $i + 1 -lt @($AzArgs).Count) { "$(@($AzArgs)[$i + 1])" } else { '' }
+                if (-not $sn) { throw 'no secret name to remove' }
+                Remove-PimArmAcaJobSecret -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -SecretName $sn
+            } else { throw "unexpected request: $j" }
+        } catch { $exit = 1; $out = "$($_.Exception.Message)" }
+        [pscustomobject]@{ exitCode = $exit; output = $out }
+    }
+    $clean = Invoke-PimDownlinkJobSecretCleanup -JobName $JobName -ResourceGroup $ResourceGroup -SubscriptionId $script:sub `
+                 -Referenced @($plan.secretNames) -Az $restSeam -Log { param($m) Note $m }
     if (-not $clean.ok) { throw "secrets on ${JobName}: $($clean.reason)" }
     if (@($clean.removed).Count) { Step "secrets on ${JobName}: $($clean.reason)" } else { Note "secrets on ${JobName}: $($clean.reason)" }
 }
@@ -588,16 +651,20 @@ if ($WhatIfPreference) {
 # (best-effort) the SQL contained DB user the engine needs. Mirrors Setup-PimContainers.
 if ($plan.action -eq 'create' -and -not $WhatIfPreference -and -not "$IdentityResourceId".Trim()) {
     try {
-        $oid = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query identity.principalId -o tsv 2>$null
-        $acrId = az acr show @subArgs -n $AcrName --query id -o tsv 2>$null
+        $jobMi = Get-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+        $oid = if ($jobMi) { "$($jobMi.identity.principalId)" } else { '' }
+        $acrRes = Get-PimArmAcr -SubscriptionId $script:sub -Name $AcrName -ErrorAsNull
+        $acrId = if ($acrRes) { "$($acrRes.id)" } else { '' }
         if ("$oid".Trim() -and "$acrId".Trim()) {
-            # 🪤 BUG-71c -- this used to swallow its own failure with `2>$null` and then print
-            # "granted ... AcrPull" unconditionally, so the log CLAIMED a grant that had not
-            # happened. Measured: the system MI of the broken job held no role on the ACR at all,
-            # while the deploy log said otherwise. Report what actually happened.
-            az role assignment create @subArgs --assignee-object-id $oid --assignee-principal-type ServicePrincipal --role AcrPull --scope $acrId -o none
-            if ($LASTEXITCODE -eq 0) { Note "granted the Job's system MI AcrPull on $AcrName" }
-            else { Warn "AcrPull grant to the Job's system MI FAILED (az exit $LASTEXITCODE) -- the job will not be able to pull." }
+            # 🪤 BUG-71c -- this used to swallow its own failure and then print "granted ... AcrPull"
+            # unconditionally, so the log CLAIMED a grant that had not happened. Measured: the system MI
+            # of the broken job held no role on the ACR at all, while the deploy log said otherwise.
+            # Report what actually happened.
+            $grantErr = ''
+            try { [void](New-PimArmRoleAssignment -SubscriptionId $script:sub -Scope $acrId -PrincipalId "$oid".Trim() -PrincipalType ServicePrincipal -Role AcrPull) }
+            catch { $grantErr = "$($_.Exception.Message)" }
+            if (-not $grantErr) { Note "granted the Job's system MI AcrPull on $AcrName" }
+            else { Warn "AcrPull grant to the Job's system MI FAILED ($grantErr) -- the job will not be able to pull." }
         }
     } catch { Warn "post-create grant skipped: $($_.Exception.Message)" }
 }
@@ -627,13 +694,14 @@ if ($plan.action -eq 'create' -and -not $WhatIfPreference -and -not "$IdentityRe
 # same step Deploy-PimUpdateJob runs for the updater. A member needs no contained user.
 $sqlGroupMember = $false
 if (-not $WhatIfPreference -and $engineSystemMi) {
-    $jobOid = "$(az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query identity.principalId -o tsv --only-show-errors 2>$null)".Trim()
+    $jobSys = Get-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+    $jobOid = if ($jobSys) { "$($jobSys.identity.principalId)".Trim() } else { '' }
     if (-not $jobOid) { throw "$JobName has no SYSTEM identity after the deploy -- the engine could not authenticate; refusing to report success." }
     if (Get-Command Resolve-PimMiAppId -ErrorAction SilentlyContinue) { [void](Resolve-PimMiAppId -ObjectId $jobOid -What $JobName) }   # BUG-44: wait for the SP to exist
     if ($SkipGraphGrant) { Warn "-SkipGraphGrant: $JobName's system identity ($jobOid) gets NO Graph app-roles here -- the pull cannot read the tenant's domain and the engine apply cannot write the directory until they are granted." }
     else {
         Step "Graph app-roles for $JobName's system identity ($jobOid)"
-        $tidForGrant = "$(az account show @subArgs --query tenantId -o tsv 2>$null)".Trim()
+        $tidForGrant = $subTenant   # the subscription's own tenant, read over ARM above
         Grant-PimMiGraph -MiObjectId $jobOid -SubscriptionId $SubscriptionId -ExpectedTenantId $tidForGrant -RoleSet Engine
         Note "Graph app-roles ensured for $JobName"
     }
@@ -675,9 +743,11 @@ if (-not $WhatIfPreference -and -not $SkipSqlGrant -and -not $sqlGroupMember -an
     # container presents), else the job's system-assigned MI.
     $miAppId = ''
     if ("$IdentityResourceId".Trim() -and -not $engineSystemMi) {
-        $miAppId = az identity show @subArgs --ids "$IdentityResourceId" --query clientId -o tsv --only-show-errors 2>$null
+        $miRes = Get-PimArmIdentity -ResourceId "$IdentityResourceId" -ErrorAsNull
+        $miAppId = if ($miRes) { "$($miRes.properties.clientId)" } else { '' }
     } else {
-        $oid2 = az containerapp job show @subArgs -g $ResourceGroup -n $JobName --query identity.principalId -o tsv --only-show-errors 2>$null
+        $jobId2 = Get-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+        $oid2 = if ($jobId2) { "$($jobId2.identity.principalId)" } else { '' }
         # BUG-44: a just-created identity is eventually consistent in the directory; this retries.
         if ("$oid2".Trim() -and (Get-Command Resolve-PimMiAppId -ErrorAction SilentlyContinue)) {
             # 🪤 The parameter is -ObjectId (+ -What). This call named -PrincipalId, which does not exist, so the
@@ -694,6 +764,9 @@ if (-not $WhatIfPreference -and -not $SkipSqlGrant -and -not $sqlGroupMember -an
     foreach ($dep in @('engine\_shared\PIM-Rest.ps1','engine\_shared\PIM-SqlStore.ps1')) {
         $depPath = Join-Path $solRoot $dep
         if (-not (Test-Path -LiteralPath $depPath)) { throw "required for the SQL grant and not found: $depPath" }
+        # never re-load PIM-Rest when it is already loaded: that would reset its token cache (a browser sign-in made
+        # earlier in this run would be asked for again)
+        if ($dep -match 'PIM-Rest\.ps1$' -and (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { continue }
         . $depPath
     }
     Step "granting $JobName's identity ($miAppId) a contained user on $SqlServerFqdn/$SqlDatabase"
@@ -711,9 +784,12 @@ if (-not $WhatIfPreference -and -not $SkipSqlGrant -and -not $sqlGroupMember -an
 
 # ---- START one on-demand execution (verification) ------------------------------
 if ($Start) {
-    $startArgs = Build-PimDownlinkJobArgs -Action start -JobName $JobName -ResourceGroup $ResourceGroup
     Step "Start one on-demand execution of $JobName"
-    Invoke-Az -AzArgs $startArgs.args -What "start job $JobName" | Out-Null
+    Invoke-DownlinkJobOp -Operation "POST $(Get-DownlinkJobPath)/start" -What "start job $JobName" -Do {
+        $exec = Start-PimArmAcaJob -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName
+        if (-not "$exec".Trim()) { throw "starting job '$JobName' FAILED: $($global:PimSetupRestLastError)" }
+        Note "execution: $exec"
+    } | Out-Null
     # (no backticks inside this string: "`a" is the BELL escape, and it ate the 'a' of 'az' in the live log)
     Note "execution queued. Verify with: -Verify  (or: az containerapp job execution list -g $ResourceGroup -n $JobName)"
 }
@@ -736,18 +812,10 @@ function Get-PimDownlinkJobExecutionStatus {
         [Parameter(Mandatory)][string]$JobName,
         [Parameter(Mandatory)][string]$ResourceGroup
     )
-    # last execution name + status (newest first).
-    # 🔴 NO '&' IN A --query, EVER. `az` on Windows is az.cmd, and cmd.exe splits the command line
-    # on '&' even INSIDE the double quotes: the server never sees the expression, az reports
-    # `invalid jmespath_type value: 'reverse(sort_by([],'` and cmd then tries to run the remainder
-    # as a command. Measured 2026-09-08. JMESPath's expression-reference operator (sort_by/max_by/
-    # min_by) is therefore unusable from here -- fetch the rows and sort in PowerShell instead.
-    # Both values come from ONE call now: two calls also meant two chances to disagree.
+    # last execution name + status (newest first): ONE ARM list (100.41, no az), sorted in PowerShell by start time --
+    # names and statuses from the same call, so they cannot disagree.
     $execs = @()
-    # 🪤 Joined, then parsed, then ENUMERATED: az prints the JSON over many lines, and Windows PowerShell 5.1 emits a JSON
-    # array from ConvertFrom-Json as ONE object -- piping either straight on handed the sort a single "execution" whose
-    # name was every name joined.
-    try { $parsed = (@(az containerapp job execution list @subArgs -g $ResourceGroup -n $JobName -o json 2>$null) -join "`n") | ConvertFrom-Json; foreach ($x in @($parsed)) { if ($x) { $execs += $x } } } catch {}
+    try { foreach ($x in @(Get-PimArmAcaJobExecutions -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName)) { if ($x) { $execs += $x } } } catch {}
     $sorted = @($execs | Where-Object { $_ } | Sort-Object { try { [datetime]$_.properties.startTime } catch { [datetime]::MinValue } } -Descending)
     # 🔑 THE CADENCE GATE: the trigger fires every 5 minutes and most executions are a one-line "[cadence] SKIPPED:" exit 0
     # (PIM-JobCadence.ps1). Verifying the NEWEST execution would judge a skip, which never carries downlink evidence -- so
@@ -756,7 +824,8 @@ function Get-PimDownlinkJobExecutionStatus {
     $execName = ''; $status = ''; $log = ''; $skips = @()
     foreach ($e in @($sorted | Select-Object -First 12)) {
         $n = "$($e.name)"; $st = "$($e.properties.status)"; $lg = ''
-        if ("$n".Trim()) { try { $lg = (az containerapp job logs show @subArgs -g $ResourceGroup -n $JobName --execution "$n" --tail 200 2>$null) -join "`n" } catch {} }
+        # the execution's console lines from the environment's Log Analytics workspace (az's `job logs show` replacement)
+        if ("$n".Trim()) { try { $lg = @(Get-PimArmAcaJobLogs -SubscriptionId $script:sub -ResourceGroup $ResourceGroup -Name $JobName -Execution "$n" -Tail 200) -join "`n" } catch {} }
         $sk = Get-PimJobCadenceSkipFromLog -LogText $lg
         if ($sk.skipped -and $st -eq 'Succeeded') { $skips += "$n ($($sk.code))"; continue }
         $execName = $n; $status = $st; $log = $lg; break

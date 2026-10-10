@@ -648,14 +648,40 @@ trap {
     throw $_
 }
 $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-# Guarded `az` shadow -- see _PimAz.ps1. az writes ordinary WARNINGS to stderr and PowerShell 5.1
-# makes any such write terminating under $ErrorActionPreference='Stop'. Must precede the first az call.
+# 🔒 REQUIREMENTS 100.41 / framework 12.17 NO-AZ: THIS script invokes no az. Its fact probes and reads go over ARM / Graph /
+# the registry's data plane through engine\_shared\PIM-ArmSetup.ps1, with the token from PIM-Rest's ONE client (the deploy
+# identity's certificate or secret, or the signed-in person). The guarded az shadow (_PimAz.ps1) is still loaded ONLY for
+# the child steps run in this process that have not been ported yet (they inherit it): az writes ordinary WARNINGS to
+# stderr and PowerShell 5.1 makes any such write terminating under $ErrorActionPreference='Stop'.
 . "$here\_PimAz.ps1"
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)            # SOLUTIONS/PIM4EntraPS
+. (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')
+. (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1')
 function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
 function Info($m){ Write-Host "    $m" -ForegroundColor DarkGray }
 function Warn($m){ Write-Host "    $m" -ForegroundColor Yellow }
 function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
+# The REST session of THIS script's own probes and reads (100.41) -- it replaces "is az on PATH?". Set once the deploy
+# identity is known (below); RE-APPLIED before every use, so a child step that pointed PIM-Rest at its own identity (the
+# store-writing steps set the SQL admin's) never leaves a later probe reading as somebody else. $false = no session: every
+# probe answers "unknown" (=> NEEDED), exactly what a host without a signed-in az answered before.
+$script:PimDeployRestArgs = $null
+function Test-PimDeployRest {
+    if (-not $script:PimDeployRestArgs) { return $false }
+    $a = $script:PimDeployRestArgs
+    $ok = $true
+    try { [void](Connect-PimSetupRest @a) } catch { $ok = $false }
+    return $ok
+}
+function Get-PimDeployJobEnvValue {
+    # The value of ONE env var on a Container Apps job's first container ('' when the job, the variable or the read is absent).
+    param([Parameter(Mandatory)][string]$Job, [Parameter(Mandatory)][string]$Name)
+    if (-not "$SubscriptionId".Trim() -or -not "$ResourceGroup".Trim()) { return '' }
+    $j = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Job -ErrorAsNull
+    $c = @($j.properties.template.containers) | Select-Object -First 1
+    $v = @(@($c.env) | Where-Object { $_ -and "$($_.name)" -eq $Name }) | Select-Object -First 1
+    return "$($v.value)"
+}
 
 # ---- load the pure decision core (REUSE; never re-implement) ----
 . (Join-Path $solRoot 'engine\_shared\PIM-SyncAutomateIT.ps1')
@@ -847,6 +873,31 @@ if (-not "$AdminAppId".Trim() -and -not $ValidateOnly -and -not $StepRunner -and
     }
 }
 
+# 100.41 -- the REST session for this script's own probes and reads: the deploy identity (its certificate from the store,
+# found by the PEM's thumbprint, or its secret), else the signed-in person -- PIM-Rest's one token client, no az. Not under
+# the -StepRunner seam (offline suites: no probe runs). Without a subscription or a tenant there is nothing to point it at.
+if (-not $StepRunner -and ("$SubscriptionId".Trim() -or "$TenantId".Trim())) {
+    $restArgs = @{}
+    if ("$SubscriptionId".Trim()) { $restArgs['SubscriptionId'] = "$SubscriptionId".Trim() }
+    if ("$TenantId".Trim())       { $restArgs['TenantId'] = "$TenantId".Trim() }
+    $restCred = @{}
+    if (-not $UseSignedInAccount -and "$AdminAppId".Trim() -and "$AdminCertPem".Trim()) { $restCred = @{ ClientId = "$AdminAppId".Trim(); CertificatePem = "$AdminCertPem".Trim() } }
+    elseif (-not $UseSignedInAccount -and "$AdminAppId".Trim() -and "$AdminSecret".Trim()) { $restCred = @{ ClientId = "$AdminAppId".Trim(); ClientSecret = "$AdminSecret" } }
+    $restConn = $null
+    if ($restCred.Count) {
+        try { $restConn = Connect-PimSetupRest @restArgs @restCred; foreach ($k in $restCred.Keys) { $restArgs[$k] = $restCred[$k] } }
+        catch { Warn "fact probes: the deploy identity cannot be used for this script's reads ($($_.Exception.Message)) -- reading as the signed-in account instead." }
+    }
+    if (-not $restConn) {
+        try { $restConn = Connect-PimSetupRest @restArgs } catch { Warn "fact probes: no REST session ($($_.Exception.Message)) -- every probe answers 'unknown', so every step is NEEDED." }
+    }
+    if ($restConn) {
+        $restArgs['TenantId'] = "$($restConn.tenantId)"
+        $script:PimDeployRestArgs = $restArgs
+        Info "fact probes + reads: REST as the $($restConn.mode) identity (tenant $($restConn.tenantId)) -- no az"
+    }
+}
+
 # ---- s31: a -Scenario resolves the deploy topology, overriding -Source ----
 # The DeployAll CORE (Get-PimDeployAllPlan) + the local fact-probes only model git-pull |
 # sync-automateit (hosted vs community), so from-master is mapped to a PLAN source by managed
@@ -872,12 +923,9 @@ if ($OverrideRingGate) {
 # been forgotten once, and a detect that cannot authenticate reports "unknown" instead of failing,
 # so a second omission would be silent. Empty unless a SQL admin identity was supplied, which keeps
 # every existing caller's behaviour byte-for-byte unchanged.
-# Explicit subscription for this script's OWN az calls. mgmt1 (and any deploy host that has ever
-# signed into two directories) carries more than one context, and the default is not always the one
-# you want -- a bare call then reads somebody else's subscription and answers "not found", which is
-# indistinguishable from "not deployed yet". BUG-102's rule, applied here.
-$azSubArgs = @()
-if ("$SubscriptionId".Trim()) { $azSubArgs = @('--subscription', $SubscriptionId) }
+# BUG-102's rule for this script's OWN reads: every ARM path names -SubscriptionId explicitly (100.41: they are REST now,
+# so there is no "default context" left to read somebody else's subscription by accident -- a read without a subscription
+# answers "unknown" instead).
 $sqlAuthArgs   = @{}
 if ("$SqlAdminClientId".Trim()) {
     $sqlAuthArgs['SqlAdminClientId'] = $SqlAdminClientId
@@ -1032,19 +1080,15 @@ Info "hosted=$hosted; tenant=$(if($TenantId){'set'}else{'(not set)'}); sub=$(if(
 # =============================================================================
 function Invoke-PimTenantGraphGet {
     <#
-      🔴 BUG-215 -- A GRAPH READ PINNED TO -TenantId. `az rest` and `az ad` take no --subscription: they
-      use the DEFAULT az account's tenant, which on a host signed in to more than one directory is
-      regularly ANOTHER COMPANY's (the other-company default recorded in the repo rules). The token is
-      minted for THIS tenant by name instead. $null = "could not read", never "empty".
+      🔴 BUG-215 -- A GRAPH READ PINNED TO -TenantId. `az rest` and `az ad` took no --subscription: they
+      used the DEFAULT az account's tenant, which on a host signed in to more than one directory is
+      regularly ANOTHER COMPANY's (the other-company default recorded in the repo rules). The token comes
+      from PIM-Rest's client for THIS tenant by name (Connect-PimSetupRest pins it; 100.41, no az).
+      $null = "could not read", never "empty".
     #>
     param([Parameter(Mandatory)][string]$Path)
-    if (-not "$TenantId".Trim() -or -not (Have 'az')) { return $null }
-    $tok = "$(az account get-access-token --tenant $TenantId --resource https://graph.microsoft.com --query accessToken -o tsv 2>$null)".Trim()
-    $global:LASTEXITCODE = 0
-    if (-not $tok) { return $null }
-    try { return (Invoke-RestMethod -Headers @{ Authorization = "Bearer $tok" } -Uri ("https://graph.microsoft.com/v1.0" + $Path) -ErrorAction Stop) }
-    catch { return $null }
-    finally { $tok = $null }
+    if (-not "$TenantId".Trim() -or -not (Test-PimDeployRest)) { return $null }
+    return (Invoke-PimSetupGraph -Path $Path -ErrorAsNull)
 }
 function Test-EngineAppRegPresent {
     # present when an app with the engine display name exists AND has a credential. Best-effort
@@ -1057,7 +1101,7 @@ function Test-EngineAppRegPresent {
     # name search stays, and says so -- an unexplained inconsistency between the two would look like
     # one of them had been forgotten.
     # 🔑 The installer downstream is what owns identity, and it is the place to key stably.
-    if (-not (Have 'az')) { return $null }
+    if (-not (Test-PimDeployRest)) { return $null }
     try {
         # BUG-215: asked of -TenantId by name -- `az ad app list` would ask the DEFAULT account's tenant,
         # and an app of the same name in another company's directory would read as "present here".
@@ -1094,20 +1138,20 @@ function Test-HostingPrereqsPresent {
       a permanently half-built tenant.
     #>
     if (-not $hosted) { return $false }
-    if (-not (Have 'az') -or -not "$ResourceGroup".Trim() -or -not "$AcrName".Trim()) { return $null }
+    if (-not (Test-PimDeployRest) -or -not "$ResourceGroup".Trim() -or -not "$AcrName".Trim() -or -not "$SubscriptionId".Trim()) { return $null }
     try {
-        $g = az group show @azSubArgs -n $ResourceGroup --query name -o tsv 2>$null
+        $g = "$((Get-PimArmResourceGroup -SubscriptionId $SubscriptionId -Name $ResourceGroup -ErrorAsNull).name)"
         if (-not "$g".Trim()) { return $false }
-        $acrId = az acr show @azSubArgs -n $AcrName --query id -o tsv 2>$null
+        $acrId = "$((Get-PimArmAcr -SubscriptionId $SubscriptionId -Name $AcrName -ErrorAsNull).id)"
         if (-not "$acrId".Trim()) { return $false }
         # the identity AND its role -- see above.
-        $uamiPrincipal = az identity show @azSubArgs -g $ResourceGroup -n $PrereqIdentityName --query principalId -o tsv 2>$null
+        $uamiPrincipal = "$((Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $PrereqIdentityName -ErrorAsNull).properties.principalId)"
         if (-not "$uamiPrincipal".Trim()) {
             Write-Host "  prereq: registry '$AcrName' exists but pull identity '$PrereqIdentityName' does NOT -- half-built; re-running PREREQ." -ForegroundColor Yellow
             return $false
         }
-        $pull = az role assignment list @azSubArgs --assignee $uamiPrincipal --scope $acrId --role AcrPull `
-                    --query "[0].roleDefinitionName" -o tsv 2>$null
+        $pull = ''
+        try { $pull = "$(@(Get-PimArmRoleAssignments -Scope $acrId -PrincipalId "$uamiPrincipal".Trim() -Role AcrPull -SubscriptionId $SubscriptionId)[0].roleDefinitionName)" } catch { $pull = '' }
         if (-not "$pull".Trim()) {
             Write-Host "  prereq: '$PrereqIdentityName' exists but holds NO AcrPull on '$AcrName' -- every image pull would fail in INFRA; re-running PREREQ." -ForegroundColor Yellow
             return $false
@@ -1115,7 +1159,7 @@ function Test-HostingPrereqsPresent {
         if (-not $PrereqSkipSql) {
             $srv = ("$SqlServerFqdn" -split '\.')[0]
             if ("$srv".Trim()) {
-                $s = az sql server show @azSubArgs -g $ResourceGroup -n $srv --query name -o tsv 2>$null
+                $s = "$((Get-PimArmSqlServer -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $srv -ErrorAsNull).name)"
                 if (-not "$s".Trim()) {
                     Write-Host "  prereq: SQL server '$srv' does NOT exist -- SCHEMA would have nothing to talk to; re-running PREREQ." -ForegroundColor Yellow
                     return $false
@@ -1134,17 +1178,17 @@ function Test-HostingPrereqsPresent {
                 # the second one can be reached from inside the VNet.
                 if ($SqlPrivateEndpoint) {
                     $sqlUamiName = "id-pim-sql-$PrereqToken"
-                    $sqlUamiOid  = az identity show @azSubArgs -g $ResourceGroup -n $sqlUamiName --query principalId -o tsv 2>$null
+                    $sqlUamiOid  = "$((Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $sqlUamiName -ErrorAsNull).properties.principalId)"
                     if (-not "$sqlUamiOid".Trim()) {
                         Write-Host "  prereq: -SqlPrivateEndpoint is set but the SQL admin identity '$sqlUamiName' does NOT exist -- nothing inside the environment could create its database users; re-running PREREQ." -ForegroundColor Yellow
                         return $false
                     }
-                    $curAdmin = az sql server ad-admin list @azSubArgs -g $ResourceGroup -s $srv --query "[0].sid" -o tsv 2>$null
+                    $curAdmin = "$(@(Get-PimArmSqlAdmins -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Server $srv)[0].sid)"
                     if ("$curAdmin".Trim() -ne "$sqlUamiOid".Trim()) {
                         Write-Host "  prereq: the Entra admin on '$srv' is '$curAdmin', not '$sqlUamiName' -- the in-cloud bootstrap would authenticate as an identity with no rights; re-running PREREQ." -ForegroundColor Yellow
                         return $false
                     }
-                    $pe = az network private-endpoint show @azSubArgs -g $ResourceGroup -n "pe-$srv" --query id -o tsv 2>$null
+                    $pe = "$((Get-PimArmPrivateEndpoint -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name "pe-$srv" -ErrorAsNull).id)"
                     if (-not "$pe".Trim()) {
                         Write-Host "  prereq: no private endpoint 'pe-$srv' -- with its public endpoint disabled the server is reachable from NOWHERE; re-running PREREQ." -ForegroundColor Yellow
                         return $false
@@ -1167,7 +1211,7 @@ function Test-ManagerImagePresent {
       on an existing tag is cheap next to a deploy that cannot start.
     #>
     if (-not $hosted) { return $false }
-    if (-not (Have 'az') -or -not "$AcrName".Trim()) { return $null }
+    if (-not (Test-PimDeployRest) -or -not "$AcrName".Trim()) { return $null }
     try {
         $tag = Get-EffectiveImageTag
         if (-not "$tag".Trim()) { return $null }
@@ -1179,9 +1223,9 @@ function Test-ManagerImagePresent {
         # printed by a probe whose job is to ask a question, on a deploy that then proceeded
         # perfectly. An error message that appears during correct operation teaches the reader to
         # ignore error messages.
-        # Listing the tags and matching in PowerShell asks the same question with no error, and
-        # keeps the JMESPath free of characters cmd.exe would eat.
-        $tags = @(az acr repository show-tags @azSubArgs -n $AcrName --repository $ImageRepo -o tsv 2>$null) |
+        # Listing the tags and matching in PowerShell asks the same question with no error (the
+        # registry's own data plane, 100.41 -- no az; an unreadable registry answers no tags).
+        $tags = @(Get-PimAcrRepositoryTags -Registry $AcrName -Repository $ImageRepo) |
                 Where-Object { "$_".Trim() }
         return ([bool](@($tags) -contains "$tag".Trim()))
     } catch { return $null }
@@ -1219,12 +1263,13 @@ function Test-AcaEnvPresent {
       wrong in that direction costs one re-run; being wrong the other way costs a tenant.
     #>
     if (-not $hosted) { return $false }       # non-hosted: infra step is the VM host (handled below)
-    if (-not (Have 'az') -or -not "$ResourceGroup".Trim()) { return $null }
+    if (-not (Test-PimDeployRest) -or -not "$ResourceGroup".Trim() -or -not "$SubscriptionId".Trim()) { return $null }
     try {
-        $e = az containerapp env show @azSubArgs -g $ResourceGroup -n $EnvName --query "name" -o tsv 2>$null
+        $e = "$((Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull).name)"
         if (-not "$e".Trim()) { return $false }
         # The environment exists. Now the part that actually matters: does the MANAGER app exist?
-        $m = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "name" -o tsv 2>$null
+        $mApp = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
+        $m = "$($mApp.name)"
         if (-not "$m".Trim()) {
             Write-Host "  infra: ACA environment '$EnvName' exists but app '$ManagerApp' does NOT -- half-built; re-running INFRA." -ForegroundColor Yellow
             return $false
@@ -1243,8 +1288,8 @@ function Test-AcaEnvPresent {
         # has landed creates the app cleanly, which is exactly what this probe must allow to happen.
         # Same §45.1 rule as the comments above: a repair gated on a condition that cannot observe
         # the thing being repaired is not a repair.
-        $mState = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "properties.provisioningState" -o tsv 2>$null
-        $mFqdn  = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "properties.configuration.ingress.fqdn" -o tsv 2>$null
+        $mState = "$($mApp.properties.provisioningState)"
+        $mFqdn  = "$($mApp.properties.configuration.ingress.fqdn)"
         if ("$mState".Trim() -and "$mState".Trim() -notmatch '(?i)^Succeeded$') {
             Write-Host "  infra: app '$ManagerApp' exists but provisioningState='$mState' (not Succeeded) -- it never came up; re-running INFRA." -ForegroundColor Yellow
             Write-Host "         On a greenfield this is usually AcrPull RBAC that had not propagated when the app was first created." -ForegroundColor DarkGray
@@ -1266,8 +1311,7 @@ function Test-AcaEnvPresent {
         # above, which is why this belongs in the probe and not in a warning.
         if ($SqlPrivateEndpoint -and "$ManagerSuperAdmins".Trim()) {
             $wantSa = @("$ManagerSuperAdmins" -split '[,;]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
-            $jobEnv = az containerapp job show @azSubArgs -g $ResourceGroup -n $DbInitJobName `
-                        --query "properties.template.containers[0].env[?name=='PIM_DBINIT_MANAGER_ACCESS'].value" -o tsv 2>$null
+            $jobEnv = Get-PimDeployJobEnvValue -Job $DbInitJobName -Name 'PIM_DBINIT_MANAGER_ACCESS'
             $haveSa = @()
             if ("$jobEnv".Trim()) {
                 try { $haveSa = @(("$jobEnv".Trim() | ConvertFrom-Json) | ForEach-Object { "$($_.identity)".Trim().ToLowerInvariant() }) } catch { $haveSa = @() }
@@ -1288,7 +1332,7 @@ function Test-AcaEnvPresent {
         if ("$HubVnetName".Trim() -and "$HubVnetResourceGroup".Trim() -and "$VnetName".Trim()) {
             $spokeShort = "$VnetName".ToLowerInvariant(); if ($spokeShort -like 'vnet-*') { $spokeShort = $spokeShort.Substring(5) }
             $hubShort   = "$HubVnetName".ToLowerInvariant(); if ($hubShort -like 'vnet-*') { $hubShort = $hubShort.Substring(5) }
-            $peerState = az network vnet peering show @azSubArgs -g $VnetResourceGroup --vnet-name $VnetName -n "$spokeShort-to-$hubShort" --query peeringState -o tsv 2>$null
+            $peerState = "$((Get-PimArmVnetPeering -SubscriptionId $SubscriptionId -ResourceGroup $VnetResourceGroup -VnetName $VnetName -Name "$spokeShort-to-$hubShort" -ErrorAsNull).properties.peeringState)"
             if ("$peerState".Trim() -ne 'Connected') {
                 Write-Host "  infra: spoke VNet '$VnetName' is NOT peered to '$HubVnetName' (state='$peerState') -- the Manager has no route from any client; re-running INFRA." -ForegroundColor Yellow
                 return $false
@@ -1297,11 +1341,13 @@ function Test-AcaEnvPresent {
         # ARM rights on the identity that actually reconciles: the tick Job in cron mode, the
         # Manager otherwise. Zero role assignments = PIM's Azure half is blind (BUG-51).
         if (-not $SkipAzureRbac -and "$SubscriptionId".Trim()) {
-            # BUG-215: --subscription on both -- a bare call read whatever subscription was the default.
-            $rbacOid = $(if ($WorkerMode -eq 'cron') { az containerapp job show @azSubArgs -g $ResourceGroup -n $TickJobName --query "identity.principalId" -o tsv 2>$null }
-                         else { az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "identity.principalId" -o tsv 2>$null })
+            # BUG-215: the subscription is named on both -- a bare call read whatever subscription was the default.
+            $rbacOid = $(if ($WorkerMode -eq 'cron') { "$((Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull).identity.principalId)" }
+                         else { "$($mApp.identity.principalId)" })
             if ("$rbacOid".Trim()) {
-                $armRoles = @(az role assignment list @azSubArgs --assignee "$rbacOid".Trim() --scope "/subscriptions/$SubscriptionId" --query "[].id" -o tsv 2>$null | Where-Object { "$_".Trim() }).Count
+                $armRoles = @()
+                try { $armRoles = @(Get-PimArmRoleAssignments -Scope "/subscriptions/$SubscriptionId" -PrincipalId "$rbacOid".Trim() -SubscriptionId $SubscriptionId | ForEach-Object { "$($_.id)" } | Where-Object { "$_".Trim() }) } catch { $armRoles = @() }
+                $armRoles = @($armRoles).Count
                 if ("$armRoles".Trim() -and [int]"$armRoles".Trim() -eq 0) {
                     Write-Host "  infra: workload identity holds NO Azure role assignment on /subscriptions/$SubscriptionId -- PIM's Azure half is blind (azure-scopes=0); re-running INFRA." -ForegroundColor Yellow
                     return $false
@@ -1312,7 +1358,7 @@ function Test-AcaEnvPresent {
         # always-on mode: the worker apps are the workload and the Manager standing means the loop
         # ran. cron mode: the tick Job is the workload, so keep going.
         if ($WorkerMode -ne 'cron') { return $true }
-        $jobOid = az containerapp job show @azSubArgs -g $ResourceGroup -n $TickJobName --query "identity.principalId" -o tsv 2>$null
+        $jobOid = "$((Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull).identity.principalId)"
         if (-not "$jobOid".Trim()) {
             Write-Host "  infra: tick Job '$TickJobName' is missing (or has no identity) -- half-built; re-running INFRA." -ForegroundColor Yellow
             return $false
@@ -1534,19 +1580,19 @@ function Get-PimSetupHostSqlTarget {
     $srv = ("$SqlServerFqdn".Trim() -split '\.')[0]
     $sqlSub = $(if ("$SqlSubscriptionId".Trim()) { "$SqlSubscriptionId".Trim() } else { "$SubscriptionId".Trim() })
     if (-not $srv -or -not $sqlSub) { return $null }
-    $rg = "$(@(az sql server list --subscription $sqlSub --query "[?name=='$srv'].resourceGroup" -o tsv 2>$null) | Select-Object -First 1)".Trim()
-    $global:LASTEXITCODE = 0
+    $hit = @(Get-PimArmSqlServers -SubscriptionId $sqlSub | Where-Object { "$($_.name)" -eq $srv }) | Select-Object -First 1
+    $rg = "$(if ($hit) { Get-PimArmIdPart -Id "$($hit.id)" -Segment 'resourceGroups' })".Trim()
     if (-not $rg) { return @{ server = $srv; sub = $sqlSub; rg = ''; exists = $false } }
     return @{ server = $srv; sub = $sqlSub; rg = $rg; exists = $true }
 }
 function Get-PimSetupHostRuleIp([hashtable]$T) {
-    $ip = "$(@(az sql server firewall-rule list --subscription $T.sub -g $T.rg -s $T.server --query "[?name=='AllowSetupHost'].startIpAddress" -o tsv 2>$null) | Select-Object -First 1)".Trim()
-    $global:LASTEXITCODE = 0
+    $rule = @(Get-PimArmSqlFirewallRules -SubscriptionId $T.sub -ResourceGroup $T.rg -Server $T.server | Where-Object { "$($_.name)" -eq 'AllowSetupHost' }) | Select-Object -First 1
+    $ip = "$($rule.properties.startIpAddress)".Trim()
     return $ip
 }
 function Open-PimSetupHostWindow {
     $applicable = [bool]($hosted -and $applyGate -and -not $ValidateOnly -and -not $StepRunner -and "$SqlServerFqdn".Trim() -and
-                         -not $SqlPrivateEndpoint -and -not $PrereqSkipSql -and (Have 'az'))
+                         -not $SqlPrivateEndpoint -and -not $PrereqSkipSql -and (Test-PimDeployRest))
     $t = $(if ($applicable) { Get-PimSetupHostSqlTarget } else { $null })
     if ($applicable -and -not $t) { $applicable = $false }
     $ruleIp = $(if ($t -and $t.exists) { Get-PimSetupHostRuleIp $t } else { '' })
@@ -1565,8 +1611,7 @@ function Open-PimSetupHostWindow {
         Warn "sql setup-host window NOT opened: this host's public IP could not be determined ('$ip'). Host-side SQL steps will be refused by the firewall; pass -SetupHostIp."
         return
     }
-    az sql server firewall-rule create --subscription $t.sub -g $t.rg -s $t.server -n AllowSetupHost --start-ip-address $ip --end-ip-address $ip -o none 2>$null
-    $global:LASTEXITCODE = 0
+    try { [void](Set-PimArmSqlFirewallRule -SubscriptionId $t.sub -ResourceGroup $t.rg -Server $t.server -Name AllowSetupHost -StartIp $ip -EndIp $ip) } catch { Write-Verbose "AllowSetupHost write failed: $($_.Exception.Message)" }
     if ((Get-PimSetupHostRuleIp $t) -ne $ip) {
         Warn "sql setup-host window NOT opened: 'AllowSetupHost' for $ip did not read back on $($t.server). Host-side SQL steps will be refused by the firewall."
         return
@@ -1579,11 +1624,11 @@ function Close-PimSetupHostWindow {
     $w = $script:PimSetupHostWindow
     if (-not $w -or -not $w.plan.closeAtEnd) { return }
     $script:PimSetupHostWindow = $null           # once, whichever exit path gets here first
+    [void](Test-PimDeployRest)                    # back on this script's own identity (a step may have re-pointed PIM-Rest)
     $t = $(if ($w.target -and $w.target.exists) { $w.target } else { Get-PimSetupHostSqlTarget })
     if (-not $t -or -not $t.exists) { return }
     if (-not (Get-PimSetupHostRuleIp $t)) { Info "sql setup-host window: nothing to close ('AllowSetupHost' is not on $($t.server))"; return }
-    az sql server firewall-rule delete --subscription $t.sub -g $t.rg -s $t.server -n AllowSetupHost -o none 2>$null
-    $global:LASTEXITCODE = 0
+    try { [void](Remove-PimArmSqlFirewallRule -SubscriptionId $t.sub -ResourceGroup $t.rg -Server $t.server -Name AllowSetupHost) } catch { Write-Verbose "AllowSetupHost delete failed: $($_.Exception.Message)" }
     if (Get-PimSetupHostRuleIp $t) {
         Warn "sql setup-host window NOT CLOSED: 'AllowSetupHost' is still on $($t.server) -- this host keeps SQL network access until it is removed:"
         Warn "  az sql server firewall-rule delete --subscription $($t.sub) -g $($t.rg) -s $($t.server) -n AllowSetupHost"
@@ -1607,8 +1652,7 @@ if ($plan.whatIf -and $easyAuthInPlan -and -not $StepRunner -and
 if ($easyAuthPlanned -and -not $plan.whatIf -and -not $StepRunner -and
     -not @($EasyAuthAllowedPrincipals | Where-Object { "$_".Trim() }).Count -and -not $EasyAuthAllowAllTenantUsers) {
     $mgrExistsNow = ''
-    if ((Have 'az') -and "$ResourceGroup".Trim()) { $mgrExistsNow = "$(az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query name -o tsv 2>$null)".Trim() }
-    $global:LASTEXITCODE = 0
+    if ((Test-PimDeployRest) -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim()) { $mgrExistsNow = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).name)".Trim() }
     if (-not $mgrExistsNow) {
         throw ("REFUSED before any deploy step ran: say who may sign in to the Manager. Pass -EasyAuthAllowedPrincipals " +
                "<upn-or-group>[,...] to admit exactly those, or -EasyAuthAllowAllTenantUsers to admit every member account " +
@@ -1664,12 +1708,15 @@ function Close-PimManagerAfterEasyAuthFailure {
     # SEC-31 -- the easyauth step failed: make sure the Manager is not left open. Returns one sentence
     # for the step's detail; every branch is stated, none is silent.
     param([string]$EaScript, [hashtable]$EaArgs)
-    $enabled = "$(@(az containerapp auth show @azSubArgs -g $ResourceGroup -n $ManagerApp --query platform.enabled -o tsv 2>$null) | Select-Object -First 1)".Trim()
-    $gateJson = (@(az containerapp ingress access-restriction list @azSubArgs -g $ResourceGroup -n $ManagerApp -o json 2>$null) -join "`n")
-    $global:LASTEXITCODE = 0
-    $gatePresent = $null
-    # PS 5.1: ConvertFrom-Json emits an array as ONE object -- assign first, then enumerate.
-    if ("$gateJson".Trim()) { try { $gateRules = ConvertFrom-Json -InputObject $gateJson; $gatePresent = [bool](@($gateRules) | Where-Object { "$($_.name)" -eq 'pim-closed-until-easyauth' }) } catch { $gatePresent = $null } }
+    $enabled = ''; $gatePresent = $null
+    if ((Test-PimDeployRest) -and "$SubscriptionId".Trim()) {
+        # az's `auth show --query platform.enabled -o tsv` printed True/False; the same text, from authConfigs/current.
+        $authCfg = Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
+        if ($authCfg -and $null -ne $authCfg.properties.platform.enabled) { $enabled = "$($authCfg.properties.platform.enabled)".Trim() }
+        # the ingress access restrictions (az's `ingress access-restriction list`); unreadable app = cannot tell ($null).
+        $gateApp = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
+        if ($gateApp) { $gatePresent = [bool](@($gateApp.properties.configuration.ingress.ipSecurityRestrictions) | Where-Object { $_ -and "$($_.name)" -eq 'pim-closed-until-easyauth' }) }
+    }
     switch (Get-PimEasyAuthFailureAction -AuthEnabled $enabled -GatePresent $gatePresent) {
         'already-closed'            { return 'The Manager stays CLOSED: it still carries the closing access restriction, which only a successful Easy Auth run removes.' }
         'keep-behind-existing-auth' { return "The Manager keeps serving behind the Easy Auth configuration it ALREADY had (platform.enabled=$enabled); it was not closed, because that would take a protected console offline over a failed re-run." }
@@ -1873,8 +1920,8 @@ function Invoke-DefaultStepRunner {
             # a well-formed id for an identity that may not exist, turning a clear refusal into an
             # opaque ACA failure at app-create time. If the read comes back empty we forward nothing
             # and the existing refusal stands, naming the real problem.
-            if (-not "$RegistryIdentityResourceId".Trim() -and "$PrereqIdentityName".Trim() -and "$ResourceGroup".Trim() -and (Have 'az')) {
-                $derivedPull = az identity show @azSubArgs -g $ResourceGroup -n $PrereqIdentityName --query id -o tsv 2>$null
+            if (-not "$RegistryIdentityResourceId".Trim() -and "$PrereqIdentityName".Trim() -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and (Test-PimDeployRest)) {
+                $derivedPull = "$((Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $PrereqIdentityName -ErrorAsNull).id)"
                 if ("$derivedPull".Trim() -match '^/subscriptions/') {
                     $RegistryIdentityResourceId = "$derivedPull".Trim()
                     Write-Host "    pull identity: $PrereqIdentityName (resolved -- no -RegistryIdentityResourceId needed)" -ForegroundColor DarkGray
@@ -1976,10 +2023,11 @@ function Invoke-DefaultStepRunner {
                         # id would be impossible anyway, but even the resource id must be READ: handing
                         # the bootstrap job a well-formed id for an identity that does not exist turns
                         # this clear refusal into a container that starts and cannot authenticate.
-                        if (-not $dbInit.ContainsKey('SqlAdminIdentityClientId') -and "$PrereqToken".Trim() -and "$ResourceGroup".Trim() -and (Have 'az')) {
+                        if (-not $dbInit.ContainsKey('SqlAdminIdentityClientId') -and "$PrereqToken".Trim() -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and (Test-PimDeployRest)) {
                             $sqlIdName = "id-pim-sql-$PrereqToken"
-                            $sqlIdRes  = az identity show @azSubArgs -g $ResourceGroup -n $sqlIdName --query id -o tsv 2>$null
-                            $sqlIdCid  = az identity show @azSubArgs -g $ResourceGroup -n $sqlIdName --query clientId -o tsv 2>$null
+                            $sqlIdObj  = Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $sqlIdName -ErrorAsNull
+                            $sqlIdRes  = "$($sqlIdObj.id)"
+                            $sqlIdCid  = "$($sqlIdObj.properties.clientId)"
                             if ("$sqlIdRes".Trim() -match '^/subscriptions/' -and "$sqlIdCid".Trim()) {
                                 $dbInit['SqlAdminIdentityResourceId'] = "$sqlIdRes".Trim()
                                 $dbInit['SqlAdminIdentityClientId']   = "$sqlIdCid".Trim()
@@ -2076,15 +2124,16 @@ function Invoke-DefaultStepRunner {
                     # Administrator through PIM and creates the mailbox + the scoped send right in this run (proven live
                     # 2026-10-07/08). Only a signed-in PERSON is skipped -- loud, not fatal, and saying how to finish it.
                     $mailAcct = $null
-                    try { $mailAcct = ((az account show @azSubArgs -o json 2>$null) | Out-String | ConvertFrom-Json) } catch { $mailAcct = $null }
+                    # 100.41: az account show -> who PIM-Rest's token says this deploy runs as (same shape).
+                    if (Test-PimDeployRest) { $mailAcct = Get-PimSetupAccount -SubscriptionId $SubscriptionId -TenantId $TenantId }
                     if (-not (Get-Command Resolve-PimDeployMailSignedIn -ErrorAction SilentlyContinue)) { . (Join-Path $here '_PimMailSenderPlan.ps1') }
                     # INSTALL-HARDEN-1 (the trial: a PERSON in Cloud Shell): does the person hold an ACTIVE Exchange / Global
                     # Administrator role, and does az mint them an Exchange Online token? Then their own role creates the
                     # mailbox (no app is granted anything). Read from the token's 'wids' claim, else their directory roles.
                     $personRoles = @(); $personExo = $false
                     if ("$($mailAcct.user.type)" -ieq 'user') {
-                        $exoTok = "$(az account get-access-token @azSubArgs --resource https://outlook.office365.com --query accessToken -o tsv 2>$null)".Trim()
-                        $global:LASTEXITCODE = 0
+                        $exoTok = ''
+                        try { $exoTok = "$(Get-PimRestToken -Resource 'https://outlook.office365.com' -TenantId $TenantId)".Trim() } catch { $exoTok = '' }
                         $personExo = [bool]$exoTok
                         if ($exoTok) {
                             try { $seg = $exoTok.Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($seg.Length % 4) { $seg += '=' }
@@ -2139,8 +2188,8 @@ function Invoke-DefaultStepRunner {
                 # environment whose infra is up is exactly when this step still has work to do.
                 $engineForMail = "$EngineClientId".Trim()
                 if (-not $engineForMail) { $engineForMail = "$($global:PIM_ManagerMiAppId)".Trim() }
-                if (-not $engineForMail -and "$ResourceGroup".Trim() -and (Have 'az')) {
-                    $mgrOid = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query identity.principalId -o tsv 2>$null
+                if (-not $engineForMail -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and (Test-PimDeployRest)) {
+                    $mgrOid = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).identity.principalId)"
                     if ("$mgrOid".Trim()) {
                         # BUG-215: tenant-pinned (az ad reads the DEFAULT account's directory).
                         $mgrApp = "$((Invoke-PimTenantGraphGet -Path "/servicePrincipals/$("$mgrOid".Trim())").appId)"
@@ -2157,15 +2206,15 @@ function Invoke-DefaultStepRunner {
                 # notices). Picked by the same rule the token call uses (PIM_ManagedIdentityClientId ->
                 # that user-assigned identity, else system-assigned), in _PimMailSenderPlan.ps1.
                 $mailMiOids = @()
-                if ("$ResourceGroup".Trim() -and (Have 'az')) {
+                if ("$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and (Test-PimDeployRest)) {
                     . (Join-Path $here '_PimMailSenderPlan.ps1')
                     $senderResources = @()
-                    if ($WorkerMode -eq 'cron') { $senderResources += @{ what = "tick job '$TickJobName'"; json = (az containerapp job show @azSubArgs -g $ResourceGroup -n $TickJobName -o json 2>$null) } }
-                    $senderResources += @{ what = "Manager '$ManagerApp'"; json = (az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp -o json 2>$null) }
+                    if ($WorkerMode -eq 'cron') { $senderResources += @{ what = "tick job '$TickJobName'"; obj = (Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull) } }
+                    $senderResources += @{ what = "Manager '$ManagerApp'"; obj = (Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull) }
                     foreach ($res in $senderResources) {
-                        if (-not "$($res.json)".Trim()) { continue }
+                        if ($null -eq $res.obj) { continue }
                         $pick = $null
-                        try { $pick = Get-PimJobManagedIdentityPrincipalId -Job ((@($res.json) -join "`n") | ConvertFrom-Json) } catch { $pick = $null }
+                        try { $pick = Get-PimJobManagedIdentityPrincipalId -Job $res.obj } catch { $pick = $null }
                         if ($pick -and $pick.principalId) {
                             if ($mailMiOids -notcontains $pick.principalId) { $mailMiOids += $pick.principalId }
                             Write-Host "    mail: $($res.what) sends as its $($pick.kind)-assigned managed identity $($pick.principalId)" -ForegroundColor DarkGray
@@ -2545,9 +2594,8 @@ function Invoke-DefaultStepRunner {
             # that access has NOT been applied and how to apply it, rather than reporting success.
             if ($SqlPrivateEndpoint) {
                 $jobHasIt = $false
-                if ((Have 'az') -and "$ResourceGroup".Trim()) {
-                    $jobEnv = az containerapp job show @azSubArgs -g $ResourceGroup -n $DbInitJobName `
-                                --query "properties.template.containers[0].env[?name=='PIM_DBINIT_MANAGER_ACCESS'].value" -o tsv 2>$null
+                if ((Test-PimDeployRest) -and "$ResourceGroup".Trim()) {
+                    $jobEnv = Get-PimDeployJobEnvValue -Job $DbInitJobName -Name 'PIM_DBINIT_MANAGER_ACCESS'
                     if ("$jobEnv".Trim()) {
                         $parsed = $null
                         try { $parsed = "$jobEnv".Trim() | ConvertFrom-Json } catch { }
@@ -2707,7 +2755,8 @@ function Get-PimCommunityVerifyVerdict {
 function Invoke-PimCommunityVerify {
     $f = @{ appState = ''; latestRevision = ''; readyRevision = ''; httpStatus = 0; tickState = '' }
     try {
-        $app = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp -o json 2>$null | ConvertFrom-Json
+        $app = $null
+        if ((Test-PimDeployRest) -and "$SubscriptionId".Trim()) { $app = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull }
         if ($app) {
             $f.appState = "$($app.properties.provisioningState)"; $f.latestRevision = "$($app.properties.latestRevisionName)"; $f.readyRevision = "$($app.properties.latestReadyRevisionName)"
             $fqdn = "$($app.properties.configuration.ingress.fqdn)".Trim()
@@ -2728,8 +2777,7 @@ function Invoke-PimCommunityVerify {
             }
         }
     } catch { }
-    try { $f.tickState = "$(az containerapp job show @azSubArgs -g $ResourceGroup -n $TickJobName --query properties.provisioningState -o tsv 2>$null)".Trim() } catch { }
-    $global:LASTEXITCODE = 0
+    try { if ("$SubscriptionId".Trim() -and (Test-PimDeployRest)) { $f.tickState = "$((Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull).properties.provisioningState)".Trim() } } catch { }
     $v = Get-PimCommunityVerifyVerdict -Facts $f
     foreach ($ch in $v.checks) { if ($ch.ok) { Info "verify (community): PASS $($ch.name) -- $($ch.detail)" } else { Warn "verify (community): FAIL $($ch.name) -- $($ch.detail)" } }
     return $v.exit
@@ -2779,10 +2827,10 @@ function Invoke-DeployValidation {
             # therefore weaker than the gate that ran inside the roll -- the same DOC-06(b) shape
             # as §44.3: this step, whose result decides the deploy, was given less than its
             # sibling. Ask the app, exactly as the roller does.
-            if (-not "$EasyAuthAudience".Trim() -and $hosted -and "$ResourceGroup".Trim()) {
+            if (-not "$EasyAuthAudience".Trim() -and $hosted -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and (Test-PimDeployRest)) {
                 try {
-                    $derivedAud = @(az containerapp auth show -n $ManagerApp -g $ResourceGroup @azSubArgs `
-                                      --query "identityProviders.azureActiveDirectory.validation.allowedAudiences" -o tsv 2>$null) |
+                    $authCfgV = Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
+                    $derivedAud = @($authCfgV.properties.identityProviders.azureActiveDirectory.validation.allowedAudiences) |
                                   Where-Object { "$_".Trim() } | Select-Object -First 1
                     if ("$derivedAud".Trim()) {
                         $EasyAuthAudience = "$derivedAud".Trim()
@@ -2801,11 +2849,11 @@ function Invoke-DeployValidation {
             # the run that checks it is simply false, and a false warning on every deploy is how
             # the true one gets ignored. Only claim blindness when the environment cannot answer.
             $envSubnetProbe = ''
-            if (-not "$LogAnalyticsWorkspaceId".Trim() -and $hosted -and "$ResourceGroup".Trim()) {
+            if (-not "$LogAnalyticsWorkspaceId".Trim() -and $hosted -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim() -and (Test-PimDeployRest)) {
                 try {
-                    $envId = az containerapp show @azSubArgs -n $ManagerApp -g $ResourceGroup --query properties.environmentId -o tsv 2>$null
+                    $envId = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.environmentId)"
                     if ("$envId".Trim()) {
-                        $envSubnetProbe = "$(az containerapp env show @azSubArgs --ids "$("$envId".Trim())" --query properties.appLogsConfiguration.logAnalyticsConfiguration.customerId -o tsv 2>$null)".Trim()
+                        $envSubnetProbe = "$((Get-PimArmAcaEnv -ResourceId "$envId".Trim() -ErrorAsNull).properties.appLogsConfiguration.logAnalyticsConfiguration.customerId)".Trim()
                     }
                 } catch { }
             }
@@ -2825,7 +2873,7 @@ function Invoke-DeployValidation {
             # BUG-216: the smoke's contract is 0 = passed, 1 = failed, 2 = SKIPPED checks (not a pass).
             if ($smokeExit -eq 2) { Warn 'verify: the hosted smoke SKIPPED checks (exit 2) -- UNVERIFIED, not a pass; nothing is rolled back for it.' }
         }
-    } elseif ($hosted -and -not (Test-Path $smoke) -and (Have 'az') -and "$ResourceGroup".Trim()) {
+    } elseif ($hosted -and -not (Test-Path $smoke) -and (Test-PimDeployRest) -and "$ResourceGroup".Trim()) {
         # §79.11: the public edition (no tests/) -- run the check that ships with it, as the smoke layer.
         Info 'verify: the hosted smoke is not part of this edition -- running the community verify (Manager up, page served, engine job present)'
         if ($PSCmdlet.ShouldProcess($ManagerApp, 'community verify')) { $smokeExit = Invoke-PimCommunityVerify }
@@ -2976,7 +3024,7 @@ if ($script:PimEnrollResult) { $ctx['enrollLicencePath'] = "$($script:PimEnrollR
 # Skipped under the -StepRunner test seam (would hit real az and probe a non-existent RG).
 $prevRev = ''
 $prevImage = ''
-if (-not $StepRunner -and $hosted -and -not $ValidateOnly -and (Have 'az') -and "$ResourceGroup".Trim()) {
+if (-not $StepRunner -and $hosted -and -not $ValidateOnly -and (Test-PimDeployRest) -and "$ResourceGroup".Trim() -and "$SubscriptionId".Trim()) {
     # 🔴 NO PIPE IN A JMESPath ON WINDOWS. `az` is az.cmd, and cmd.exe treats the `|` inside
     # "[?properties.active].name | [0]" as a SHELL PIPE: it splits the command there and dies with
     # "-o was unexpected at this time" (exit 255). The read then returns nothing, the rollback
@@ -2986,19 +3034,18 @@ if (-not $StepRunner -and $hosted -and -not $ValidateOnly -and (Have 'az') -and 
     # 🪤 This is the third instance tonight of cmd.exe mangling an az argument (the cost-management
     # --query, the `az rest` JSON body, and now this). The rule: keep JMESPath free of cmd
     # metacharacters -- | & < > ^ -- and do the list-picking in PowerShell, which never re-parses.
-    try {
-        $prevRev = @(az containerapp revision list @azSubArgs -g $ResourceGroup -n $ManagerApp `
-                        --query "[?properties.active].name" -o tsv 2>$null |
-                     Where-Object { "$_".Trim() }) | Select-Object -First 1
-    } catch { Write-Verbose "active-revision read failed: $($_.Exception.Message)" }
-    if (-not "$prevRev".Trim()) { try { $prevRev = az containerapp revision list @azSubArgs -g $ResourceGroup -n $ManagerApp --query "[0].name" -o tsv 2>$null } catch { Write-Verbose "fallback-revision read failed: $($_.Exception.Message)" } }
+    # (100.41: the list is ARM REST now, picked in PowerShell -- in the order ARM returns it, as az did.)
+    $revList = @()
+    try { $revList = @(Get-PimArmAcaRevisions -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull) } catch { Write-Verbose "revision list read failed: $($_.Exception.Message)" }
+    $prevRev = "$(@($revList | Where-Object { $_.properties.active -and "$($_.name)".Trim() } | ForEach-Object { "$($_.name)" }) | Select-Object -First 1)"
+    if (-not "$prevRev".Trim()) { $prevRev = "$(@($revList | ForEach-Object { "$($_.name)" }) | Select-Object -First 1)" }
     Info "pre-deploy revision (rollback target): $(if($prevRev){$prevRev}else{'(unknown)'})"
     # §53.6 -- capture the IMAGE too, because the revision may not survive to be rolled back to.
     # Container Apps garbage-collects inactive revisions; on the internal environment 2026-09-10
     # the captured target was already gone by the time the rollback ran, and the safety net told
     # the operator to roll back by hand during a failed deploy. The image is the durable anchor.
     try {
-        $prevImage = "$(az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query 'properties.template.containers[0].image' -o tsv 2>$null)".Trim()
+        $prevImage = "$(@((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.template.containers)[0].image)".Trim()
     } catch { Write-Verbose "pre-deploy image read failed: $($_.Exception.Message)" }
     Info "pre-deploy image (rollback fallback): $(if($prevImage){$prevImage}else{'(unknown)'})"
 }
@@ -3192,7 +3239,7 @@ if ($summary.failedSteps.Count) { Warn "failed steps: $($summary.failedSteps -jo
 if ($hosted -and -not $WhatIfPreference -and $summary.status -eq 'success') {
     $mgrFqdn = ''
     try {
-        $mgrFqdn = "$(az containerapp show @azSubArgs -n $ManagerApp -g $ResourceGroup --query properties.configuration.ingress.fqdn -o tsv 2>$null)".Trim()
+        if ("$SubscriptionId".Trim() -and (Test-PimDeployRest)) { $mgrFqdn = "$((Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.configuration.ingress.fqdn)".Trim() }
     } catch { }
     Write-Host ''
     Write-Host '=============================================================================' -ForegroundColor Cyan

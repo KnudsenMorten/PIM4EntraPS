@@ -237,16 +237,24 @@ function New-PimSubscriptionArmInvoker {
       on mgmt1 the default az context is frequently another company's tenant.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId)
-    $raw = az account get-access-token --subscription $SubscriptionId --resource https://management.azure.com/ -o json 2>$null
-    $tokObj = $null; try { $tokObj = ($raw | Out-String) | ConvertFrom-Json } catch { $tokObj = $null }
-    if (-not $tokObj -or -not "$($tokObj.accessToken)") { throw "New-PimSubscriptionArmInvoker: no ARM token for subscription $SubscriptionId (az login?)." }
-    $acct = $null; try { $acct = ((az account show --subscription $SubscriptionId -o json 2>$null) | Out-String) | ConvertFrom-Json } catch { $acct = $null }
-    $want = "$($acct.tenantId)".Trim().ToLowerInvariant()
-    $p = "$($tokObj.accessToken)".Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($p.Length % 4) { $p += '=' }
+    # 100.41 (no az): the subscription's tenant is resolved WITHOUT a token (ARM's 401 challenge names it --
+    # Resolve-PimArmSubscriptionTenant), the token comes from PIM-Rest's ONE client pinned to that tenant, and its tid claim
+    # is still checked before it is used.
+    $shared = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared'
+    if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) { . (Join-Path $shared 'PIM-Rest.ps1') }
+    if (-not (Get-Command Resolve-PimArmSubscriptionTenant -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $shared 'PIM-ArmSetup.ps1'))) { . (Join-Path $shared 'PIM-ArmSetup.ps1') }
+    if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { throw 'New-PimSubscriptionArmInvoker: engine\_shared\PIM-Rest.ps1 is not loaded.' }
+    $want = ''
+    if (Get-Command Resolve-PimArmSubscriptionTenant -ErrorAction SilentlyContinue) { $want = "$(Resolve-PimArmSubscriptionTenant -SubscriptionId $SubscriptionId)".Trim().ToLowerInvariant() }
+    if (-not $want) { throw "New-PimSubscriptionArmInvoker: the tenant of subscription $SubscriptionId could not be resolved -- REFUSING (a token for a guessed tenant acts in somebody else's directory)." }
+    $accessToken = ''
+    try { $accessToken = "$(Get-PimRestToken -Resource 'arm' -TenantId $want)" } catch { $accessToken = '' }
+    if (-not $accessToken) { throw "New-PimSubscriptionArmInvoker: no ARM token for subscription $SubscriptionId (sign in to tenant $want)." }
+    $p = "$accessToken".Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($p.Length % 4) { $p += '=' }
     $tid = ''
     try { $tid = "$(([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json).tid)".Trim().ToLowerInvariant() } catch { $tid = '' }
     if (-not $want -or $tid -ne $want) { throw "New-PimSubscriptionArmInvoker: the ARM token is for tenant '$tid', not subscription $SubscriptionId's tenant '$want' -- REFUSING." }
-    $token = "$($tokObj.accessToken)"
+    $token = "$accessToken"
     # Rehearsal 2026-09-17 (tests/Test-PimMspBuild.ps1 R1): GetNewClosure() binds this block to a new module that
     # cannot see functions dot-sourced into a CALLER's script scope, so every ARM error (incl. the expected 404 of a key
     # that does not exist yet) became "Hide-PimSasText is not recognized". Capture the function as a variable instead.
@@ -661,7 +669,7 @@ function Get-PimEnvironmentEdition {
 }
 function Get-PimEnvironmentUpdaterEnv {
     <#
-      Read an environment's update job env (az, subscription-scoped). Returns
+      Read an environment's update job env (ARM REST, subscription-scoped -- no az, 100.41). Returns
       @{ ok; found; env; reason } -- ok=$false means "could not read", which is NOT the same as
       "there is no updater" (found=$false). -GetJobs is the offline seam: it returns
       @{ ok; jobs; apps; reason } where jobs are job objects carrying properties.template.containers
@@ -678,28 +686,33 @@ function Get-PimEnvironmentUpdaterEnv {
     )
     if (-not $GetJobs) {
         $GetJobs = {
-            $global:LASTEXITCODE = 0
-            $raw = az containerapp job list @SubscriptionArgs -g $ResourceGroup -o json 2>$null
-            $code = $LASTEXITCODE
-            $jobs = @(); $apps = @(); $ok = ($code -eq 0)
-            if ($ok) { try { $jobs = @((($raw | Out-String) | ConvertFrom-Json)) } catch { $ok = $false } }
-            $why = ''
+            # 100.41 (no az): ARM REST through PIM-Rest's ONE token client. -SubscriptionArgs keeps its old shape
+            # (@('--subscription', <id>)) so no caller changes; the id is read out of it.
+            $sub = ''
+            for ($i = 0; $i -lt @($SubscriptionArgs).Count - 1; $i++) { if ("$($SubscriptionArgs[$i])" -eq '--subscription') { $sub = "$($SubscriptionArgs[$i + 1])".Trim() } }
+            if (-not $sub) { $sub = "$env:PIM_SUBSCRIPTION_ID".Trim() }
+            if (-not $sub) { return [pscustomobject]@{ ok = $false; jobs = @(); apps = @(); reason = 'no subscription to read the update job from (pass --subscription)' } }
+            $shared = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared'
+            if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) { . (Join-Path $shared 'PIM-Rest.ps1') }
+            if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $shared 'PIM-ArmSetup.ps1'))) { . (Join-Path $shared 'PIM-ArmSetup.ps1') }
+            $jobs = @(); $apps = @(); $ok = $true; $why = ''
             $rgMissing = $false
+            try { $jobs = @(Get-PimArmAcaJobList -SubscriptionId $sub -ResourceGroup $ResourceGroup) }
+            catch { $ok = $false; $why = "container apps job list: $($_.Exception.Message)" }
             if (-not $ok) {
                 # A GREENFIELD install: the resource group does not exist yet, so there is no updater and
                 # nothing to gate. Only a listing failure against a group that EXISTS is "unreadable".
-                $global:LASTEXITCODE = 0
-                $rgExists = "$(az group exists --name $ResourceGroup @SubscriptionArgs 2>$null)".Trim()
-                if ($LASTEXITCODE -eq 0 -and $rgExists -eq 'false') { $ok = $true; $jobs = @(); $rgMissing = $true }
-                else { $why = "az containerapp job list exit $code" }
+                $rg = $null; $rgErr = $false
+                try { $rg = Get-PimArmResourceGroup -SubscriptionId $sub -Name $ResourceGroup } catch { $rgErr = $true }
+                if (-not $rgErr -and $null -eq $rg) { $ok = $true; $jobs = @(); $rgMissing = $true; $why = '' }
             }
             if ($ok -and -not $rgMissing) {
                 # The apps as well: an environment can run a Manager and no job at all (the always-on
                 # shape), and "no jobs" must not read as "nothing deployed".
-                $global:LASTEXITCODE = 0
-                $appRaw = az containerapp list @SubscriptionArgs -g $ResourceGroup --query "[].name" -o tsv 2>$null
-                if ($LASTEXITCODE -ne 0) { $ok = $false; $why = "az containerapp list exit $LASTEXITCODE" }
-                else { $apps = @(@($appRaw) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
+                try {
+                    $appObjs = @(Invoke-PimSetupArm -Path "/subscriptions/$sub/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps" -ApiVersion (Get-PimSetupApiVersion aca) -All)
+                    $apps = @($appObjs | Where-Object { $_ } | ForEach-Object { "$($_.name)".Trim() } | Where-Object { $_ })
+                } catch { $ok = $false; $why = "container apps list: $($_.Exception.Message)" }
             }
             [pscustomobject]@{ ok = $ok; jobs = $jobs; apps = $apps; reason = $why }
         }

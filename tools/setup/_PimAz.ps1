@@ -264,6 +264,9 @@ function Invoke-PimAz {
     # With no declared parameters every token lands in $args untouched, which is the only way
     # a shadow can be transparent to ~50 existing call sites.
     $AzArgs = $args
+    # 100.41 NO-AZ GUARD: PIM_NO_AZ=1 makes ANY az invocation through this shadow throw, so a run can PROVE it never
+    # reached for the CLI (a ported path that still calls az fails loudly instead of quietly using a logged-in CLI).
+    if ("$env:PIM_NO_AZ".Trim() -eq '1') { throw ("NO-AZ: az was invoked while PIM_NO_AZ=1: az " + (@($AzArgs) -join ' ')) }
     $exe = Get-PimAzExecutable
     if (-not $exe) {
         # A missing CLI is a real problem, but it is the CALLER's to report -- the same way an

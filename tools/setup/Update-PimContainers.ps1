@@ -5,12 +5,13 @@
 
 .DESCRIPTION
     One image (pim-manager:<tag>) runs every worker. This builds a new tag in ACR (unless
-    -SkipBuild) and rolls each container app to it via `az containerapp update --image`,
-    which creates a NEW REVISION and shifts traffic with no downtime (min-1 replica). Apps
-    pull via their AcrPull managed identity, so no registry creds are needed at update time.
+    -SkipBuild) and rolls each container app to it over ARM REST (read-modify-write of the app
+    template -- no az CLI, REQUIREMENTS 100.41), which creates a NEW REVISION and shifts traffic
+    with no downtime (min-1 replica). Apps pull via their AcrPull managed identity, so no registry
+    creds are needed at update time. -SubscriptionId (or PIM_SUBSCRIPTION_ID) is required.
 
     -Rollback <revisionSuffix> reactivates a prior revision instead of building/updating
-    (instant rollback). List revisions with: az containerapp revision list -n <app> -g <rg>.
+    (instant rollback). The revisions are listed in the Azure portal (Container App > Revisions).
 
 .EXAMPLE
     .\Update-PimContainers.ps1 -ImageTag 1.1.7
@@ -135,8 +136,10 @@ param(
     [string]$SqlConnectionString
 )
 
-# Built once, spliced into every az invocation. Empty => ambient (a single-directory machine),
-# which is stated out loud below rather than assumed.
+# 100.41 (framework 12.17 NO-AZ): every Azure call this script makes goes over ARM REST through PIM-Rest's ONE token
+# client (engine/_shared/PIM-ArmSetup.ps1 + PIM-ArmContainerApps.ps1) -- ARM addresses a resource BY subscription, so an
+# ambient default context does not exist any more. $subArgs survives ONLY for the ring gate (_PimUpdateRing.ps1, the
+# 100.41 remainder), which still takes the az-shaped scope.
 $subArgs = @()
 if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
 $ErrorActionPreference = 'Stop'
@@ -148,14 +151,12 @@ if (-not $Rollback -and -not "$RollbackImage".Trim() -and -not "$ImageTag".Trim(
     throw "Update-PimContainers: -ImageTag is required unless you are rolling back. Pass -ImageTag <tag> to roll, or -Rollback <revision> (or -RollbackImage <image>) to roll back."
 }
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-# 🔴 BEFORE THE FIRST az CALL, AND BEFORE _PimSetupShared (which is loaded much further down).
-# Defines a guarded `az` shadow so a WARNING on az's stderr cannot abort this script under
-# $ErrorActionPreference='Stop'. That is not hypothetical: it stopped internal prod deploying
-# a correctly-built image on 2026-09-05. Read the header of _PimAz.ps1 before removing this;
-# in particular, the `2>$null` on the az calls below does NOT prevent it.
-. "$here\_PimAz.ps1"
 . "$here\_PimUpdateRing.ps1"    # Assert-PimRollRingGate -- the ring decides, not whoever runs this
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)        # ...\PIM4EntraPS
+# 100.41: the REST layer. PIM-Rest is loaded only when the caller has not loaded it -- dot-sourcing it again would reset its
+# token cache (a browser sign-in the calling deploy already made would be asked for again).
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
 $repoRoot = (Resolve-Path (Join-Path $here '..\..\..\..')).Path   # AutomateIT repo root
 # 🔴 §71.41 -- WHICH OTHER JOBS FOLLOW THE MANAGER is decided by the SAME pure function the in-cloud
 # updater uses (Get-PimAcaJobRollPlan, §53.5), loaded -- not copied -- so the host and the cloud roller
@@ -192,22 +193,11 @@ function Get-PimShippedBaseline {
 }
 function Get-PimRecordedBaseline {
     param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$Name)
-    # 🪤 DO NOT USE `--query tags.<key>` HERE. Two independent things break it, and together they
-    # made this gate silently never fire -- caught only by rolling twice against a live estate
-    # environment (the first roll RECORDED the tag, the second still reported "none"):
-    #   1. JMESPath: `tags.pim-policy-baseline` is not a lookup, the dashes parse as SUBTRACTION.
-    #      It needs `tags."pim-policy-baseline"`.
-    #   2. PowerShell strips those inner quotes when passing the string to a native command, so az
-    #      receives the unquoted form anyway and answers `invalid jmespath_type value`.
-    # Fetching the object and indexing it in PowerShell sidesteps both. `$obj.tags.$Name` resolves
-    # a property by VARIABLE, so the dashes never reach a parser.
-    # 🪤 `2>$null` is load-bearing: az on this host emits a cryptography UserWarning on stderr that
-    # otherwise contaminates the stream and makes ConvertFrom-Json throw on "D:\a\_work...".
-    $raw = if ($Kind -eq 'job') { az containerapp job show @subArgs -g $ResourceGroup -n $Name -o json 2>$null }
-           else                 { az containerapp show @subArgs     -g $ResourceGroup -n $Name -o json 2>$null }
-    if (-not "$raw".Trim()) { return '' }
-    $obj = $null
-    try { $obj = ($raw | Out-String) | ConvertFrom-Json } catch { return '' }
+    # The whole ARM object is read and the tag indexed in PowerShell: `$obj.tags.$key` resolves a property by
+    # VARIABLE, so the dashes in 'pim-policy-baseline' never reach a query parser (the az --query trap: JMESPath read
+    # them as SUBTRACTION and the gate silently never fired). Unreadable = '' (UNKNOWN), as before.
+    $obj = if ($Kind -eq 'job') { Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull }
+           else                 { Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull }
     if (-not $obj -or -not $obj.tags) { return '' }
     $key = $script:PimBaselineTagName
     $v = "$($obj.tags.$key)".Trim()
@@ -216,17 +206,18 @@ function Get-PimRecordedBaseline {
 }
 function Set-PimRecordedBaseline {
     param([Parameter(Mandatory)][string]$Kind, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Hash)
-    # 🪤 `az containerapp update --tags` REPLACES the resource's whole tag set, which would quietly
-    # delete a customer's cost-centre/owner tags as a side effect of a deploy. `az tag update
-    # --operation Merge` is the ARM tags API and adds this one key without touching the others.
+    # 🪤 Writing the resource's `tags` property REPLACES its whole tag set, which would quietly delete a customer's
+    # cost-centre/owner tags as a side effect of a deploy. The ARM tags API with operation Merge (Merge-PimArmTags)
+    # adds this one key without touching the others.
     # Best-effort: failing to RECORD must not fail a roll that already succeeded -- it degrades to
     # "unknown" on the next roll, which warns rather than blocks.
     try {
-        $rid = if ($Kind -eq 'job') { az containerapp job show @subArgs -g $ResourceGroup -n $Name --query id -o tsv 2>$null }
-               else                 { az containerapp show @subArgs     -g $ResourceGroup -n $Name --query id -o tsv 2>$null }
+        $obj = if ($Kind -eq 'job') { Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull }
+               else                 { Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull }
+        $rid = if ($obj) { "$($obj.id)" } else { '' }
         if (-not "$rid".Trim()) { Write-Warning "  could not resolve the resource id of $Kind '$Name' -- policy baseline NOT recorded."; return }
-        az tag update @subArgs --resource-id "$("$rid".Trim())" --operation Merge --tags "$($script:PimBaselineTagName)=$Hash" -o none 2>$null
-        if ($LASTEXITCODE -ne 0) { Write-Warning "  could not record the policy baseline on $Kind '$Name' (az tag update exit $LASTEXITCODE) -- the next roll will report it as UNKNOWN." }
+        try { [void](Merge-PimArmTags -ResourceId "$("$rid".Trim())" -Tags @{ $script:PimBaselineTagName = $Hash }) }
+        catch { Write-Warning "  could not record the policy baseline on $Kind '$Name' ($($_.Exception.Message)) -- the next roll will report it as UNKNOWN." }
     } catch { Write-Warning "  could not record the policy baseline on $Kind '$Name': $($_.Exception.Message)" }
 }
 
@@ -284,6 +275,47 @@ function Get-PimAppRollPlan {
     return [pscustomobject]@{ roll=$roll; missing=$missing; ok=$true; reason='' }
 }
 
+function Set-PimRollJobImage {
+    <#
+      100.41 -- `az containerapp job update --image I` over ARM REST: read-modify-write of the job's ONE container
+      (Set-PimAcaJobImage -- never a fragment PATCH, which would drop the env vars and probes), then WAIT until ARM has
+      finished (az waited for the operation too). THROWS on a refused write or a provisioning that does not succeed.
+    #>
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Image)
+    [void](Set-PimAcaJobImage -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -Image $Image)
+    $st = Wait-PimArmProvisioned -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/jobs' $Name) -ApiVersion (Get-PimSetupApiVersion aca)
+    if ($st -notmatch '(?i)^Succeeded$') { throw "job '$Name' provisioning ended '$st'" }
+}
+function Get-PimRollJobLiveImage {
+    # `az containerapp job show --query properties.template.containers[0].image` -- '' when unreadable.
+    param([Parameter(Mandatory)][string]$Name)
+    $j = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull
+    if (-not $j) { return '' }
+    return "$(@($j.properties.template.containers)[0].image)".Trim()
+}
+function Get-PimRollAppLiveImage {
+    # `az containerapp show --query properties.template.containers[0].image` -- '' when unreadable.
+    param([Parameter(Mandatory)][string]$Name)
+    $a = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $Name -ErrorAsNull
+    if (-not $a) { return '' }
+    return "$(@($a.properties.template.containers)[0].image)".Trim()
+}
+
+function Get-PimRollRevisionRows {
+    # `az containerapp revision list` -> rows { name; active; created; image } (@() when unreadable -- az's '' too).
+    param([Parameter(Mandatory)][string]$App)
+    @(Get-PimArmAcaRevisions -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -ErrorAsNull | ForEach-Object {
+        [pscustomobject]@{ name = "$($_.name)"; active = [bool]$_.properties.active; created = "$($_.properties.createdTime)"
+                           image = "$(@($_.properties.template.containers)[0].image)" } })
+}
+function Get-PimRollNewestActiveRevision {
+    # The ACTIVE revision, NEWEST by creation time -- never [0], which the API hands back OLDEST first.
+    param([Parameter(Mandatory)][string]$App)
+    @(Get-PimRollRevisionRows -App $App) | Where-Object { $_.active } |
+        Sort-Object { try { [datetimeoffset]$_.created } catch { [datetimeoffset]::MinValue } } |
+        Select-Object -Last 1
+}
+
 function Invoke-PimRollSameRepoJobs {
     <#
       §71.41 -- roll every OTHER job in the resource group that runs the Manager's image REPOSITORY
@@ -306,15 +338,12 @@ function Invoke-PimRollSameRepoJobs {
     param([Parameter(Mandatory)][string]$TargetImage, [string]$Label = '')
     $out = [pscustomobject]@{ rolled = New-Object System.Collections.Generic.List[string]
                               failed = New-Object System.Collections.Generic.List[string]; checked = $false }
-    $jobsJson = (@(az containerapp job list @subArgs -g $ResourceGroup -o json 2>$null) -join "`n")
-    $ok = ($LASTEXITCODE -eq 0 -and "$jobsJson".Trim())
+    $ok = $true
     $allJobs = @()
-    if ($ok) {
-        # 🪤 PS 5.1: ConvertFrom-Json emits a JSON array as ONE object; piping it enumerates the items.
-        try { $allJobs = @((ConvertFrom-Json $jobsJson) | ForEach-Object { $_ }) } catch { $ok = $false }
-    }
+    $listErr = ''
+    try { $allJobs = @(Get-PimArmAcaJobList -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup) } catch { $ok = $false; $listErr = "$($_.Exception.Message)" }
     if (-not $ok) {
-        [void]$out.failed.Add("<job enumeration> -- az containerapp job list failed in $ResourceGroup, so jobs other than the tick Job were NOT checked")
+        [void]$out.failed.Add("<job enumeration> -- listing the jobs failed in $ResourceGroup ($listErr), so jobs other than the tick Job were NOT checked")
         return $out
     }
     $out.checked = $true
@@ -329,13 +358,14 @@ function Invoke-PimRollSameRepoJobs {
         }
         if (-not $PSCmdlet.ShouldProcess($j.name, "job update --image $TargetImage")) { continue }
         Step "Roll job $($j.name)$Label (same repository as the Manager)"
-        az containerapp job update @subArgs -g $ResourceGroup -n $j.name --image $TargetImage -o none
-        if ($LASTEXITCODE -ne 0) {
-            [void]$out.failed.Add("$($j.name) -- 'az containerapp job update' exit $LASTEXITCODE (still on $("$($j.from)" -replace '.*[@:]',''))")
+        $updErr = ''
+        try { [void](Set-PimRollJobImage -Name $j.name -Image $TargetImage) } catch { $updErr = "$($_.Exception.Message)" }
+        if ($updErr) {
+            [void]$out.failed.Add("$($j.name) -- the job image update FAILED: $updErr (still on $("$($j.from)" -replace '.*[@:]',''))")
             continue
         }
         # Same evidence standard as the apps and the tick Job: a tag match is not proof (BUG-40).
-        $live = az containerapp job show @subArgs -g $ResourceGroup -n $j.name --query "properties.template.containers[0].image" -o tsv 2>$null
+        $live = Get-PimRollJobLiveImage -Name $j.name
         $jv = Test-PimImageDeployed -Expected $TargetImage -Running "$live".Trim()
         if (-not $jv.ok) { [void]$out.failed.Add("$($j.name) -- post-roll verification FAILED: $($jv.reason)"); continue }
         [void]$out.rolled.Add($j.name)
@@ -349,6 +379,27 @@ if ($MyInvocation.InvocationName -eq '.') { return }
 
 . "$here\_PimSetupShared.ps1"
 Show-PimSetupBanner -ScriptName 'Update-PimContainers' -SolutionRoot $solRoot
+
+# 100.41: WHO the ARM calls run as. ARM is addressed by subscription, so there is no ambient context to fall back on.
+if (-not "$SubscriptionId".Trim()) {
+    throw ("Update-PimContainers: -SubscriptionId is required (or set PIM_SUBSCRIPTION_ID). Azure Resource Manager is " +
+           "addressed by subscription; without the az CLI there is no ambient default context to guess from -- and guessing " +
+           "is how a roll was once aimed at another company's subscription.")
+}
+$SubscriptionId = "$SubscriptionId".Trim()
+# A calling deploy that already opened a REST session (Connect-PimSetupRest) is used as it is. Otherwise this script opens
+# one for the person / session running it -- and puts the caller's PIM-Rest identity BACK when it ends (finally, at the
+# bottom): an unported caller (Invoke-PimUpdate) points those globals at its SQL admin identity between rolls, and a roller
+# that changed them under it would break its next SQL step.
+$script:PimRollerRestoreGlobals = $null
+if (-not "$($global:PIM_SetupRestMode)".Trim()) {
+    $script:PimRollerRestoreGlobals = @{}
+    foreach ($n in 'PIM_TenantId', 'PIM_ClientId', 'PIM_ClientSecret', 'PIM_CertThumbprint', 'PIM_UseManagedIdentity', 'PIM_NoManagedIdentity', 'PIM_Interactive', 'PIM_InteractiveFallback', 'PIM_SetupRestMode') {
+        $script:PimRollerRestoreGlobals[$n] = (Get-Variable -Scope Global -Name $n -ValueOnly -ErrorAction SilentlyContinue)
+    }
+    [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId)
+}
+try {
 
 # Post-deploy GUI smoke gate. After ca-pim-manager rolls to the new image we run the live
 # hosted smoke (tests/live/Test-PimManagerHostedSmoke.ps1) and FAIL the deploy if the GUI
@@ -423,10 +474,9 @@ function Invoke-ManagerSmokeGate {
     # (The Log Analytics workspace is derived the same way, but inside the smoke script, where
     # ad-hoc runs benefit from it too.)
     if (-not $smokeArgs.ContainsKey('EasyAuthAud')) {
-        $subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
         try {
-            $aud = @(az containerapp auth show -n $smokeArgs['App'] -g $ResourceGroup @subArgs `
-                        --query "identityProviders.azureActiveDirectory.validation.allowedAudiences" -o tsv 2>$null) |
+            $authCfg = Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $smokeArgs['App'] -ErrorAsNull
+            $aud = @($authCfg.properties.identityProviders.azureActiveDirectory.validation.allowedAudiences) |
                    Where-Object { "$_".Trim() } | Select-Object -First 1
             if ("$aud".Trim()) {
                 $smokeArgs['EasyAuthAud'] = "$aud".Trim()
@@ -460,10 +510,8 @@ function Invoke-ManagerSmokeGate {
     # cold start happened. We deliberately do not care about the status code here; the gate's own
     # live-HTTP layer is what judges the response.
     $wakeFqdn = if ($smokeArgs.ContainsKey('Fqdn')) { "$($smokeArgs['Fqdn'])".Trim() } else {
-        $wakeSubArgs = @(); if ("$SubscriptionId".Trim()) { $wakeSubArgs = @('--subscription', "$SubscriptionId".Trim()) }
-        @(az containerapp show @wakeSubArgs -g $ResourceGroup -n $smokeArgs['App'] `
-            --query "properties.configuration.ingress.fqdn" -o tsv 2>$null) |
-          Where-Object { "$_".Trim() } | Select-Object -First 1
+        $wakeApp = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $smokeArgs['App'] -ErrorAsNull
+        @("$($wakeApp.properties.configuration.ingress.fqdn)") | Where-Object { "$_".Trim() } | Select-Object -First 1
     }
     if ("$wakeFqdn".Trim()) {
         Write-Host "    waking $($smokeArgs['App']) (min-replicas 0: no replica = no boot log for the gate to read)" -ForegroundColor DarkGray
@@ -476,13 +524,14 @@ function Invoke-ManagerSmokeGate {
         # "could not reach ... to wake the app", and the container was coming up the whole time.
         # 🔑 The request is a TRIGGER, not a measurement. Fire it, ignore whatever it does, and ask
         # AZURE whether a replica exists -- that is the thing we actually need to be true.
-        $replicaSubArgs = @(); if ("$SubscriptionId".Trim()) { $replicaSubArgs = @('--subscription', "$SubscriptionId".Trim()) }
         $wakeUrl = "https://$("$wakeFqdn".Trim())/"
         $reps    = @()
         foreach ($attempt in 1..20) {
             try { [void](Invoke-WebRequest -Uri $wakeUrl -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop) } catch { }
-            $reps = @(az containerapp replica list @replicaSubArgs -g $ResourceGroup -n $smokeArgs['App'] `
-                        --query "[].name" -o tsv 2>$null) | Where-Object { "$_".Trim() }
+            # the replicas of the ACTIVE revision (what `az containerapp replica list` answered without --revision)
+            $reps = @()
+            $wakeRev = Get-PimRollNewestActiveRevision -App $smokeArgs['App']
+            if ($wakeRev) { $reps = @(Get-PimArmAcaReplicas -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $smokeArgs['App'] -Revision "$($wakeRev.name)") | Where-Object { "$_".Trim() } }
             if ($reps.Count) { Write-Host "    replica up after ~$($attempt * 15)s -- the gate has a boot log to read." -ForegroundColor DarkGray; break }
             Start-Sleep -Seconds 5
         }
@@ -492,15 +541,10 @@ function Invoke-ManagerSmokeGate {
             # start, or it starts and dies -- and they need opposite responses. The gate cannot
             # tell them apart from Log Analytics, because both look like silence. ACA knows.
             Write-Host "    no replica after ~5 minutes of waking attempts. Asking Azure why:" -ForegroundColor Yellow
-            $activeRev = @(az containerapp revision list @replicaSubArgs -g $ResourceGroup -n $smokeArgs['App'] `
-                            --query "[].{name:name,active:properties.active,created:properties.createdTime}" -o json 2>$null | ConvertFrom-Json) |
-                         Where-Object { $_.active } |
-                         Sort-Object { try { [datetimeoffset]$_.created } catch { [datetimeoffset]::MinValue } } |
-                         Select-Object -Last 1
+            $activeRev = Get-PimRollNewestActiveRevision -App $smokeArgs['App']
             if ($activeRev) {
-                $state = az containerapp revision show @replicaSubArgs -g $ResourceGroup -n $smokeArgs['App'] `
-                            --revision "$($activeRev.name)" `
-                            --query "{running:properties.runningState,health:properties.healthState,replicas:properties.replicas}" -o json 2>$null
+                $revObj = Get-PimArmAcaRevision -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $smokeArgs['App'] -Revision "$($activeRev.name)" -ErrorAsNull
+                $state = if ($revObj) { ([pscustomobject]@{ running = $revObj.properties.runningState; health = $revObj.properties.healthState; replicas = $revObj.properties.replicas } | ConvertTo-Json -Compress) } else { '' }
                 Write-Host "      revision $($activeRev.name): $state" -ForegroundColor Yellow
                 Write-Host "      A 'Failed'/'Degraded' running state is the app CRASHING ON START -- read its logs." -ForegroundColor Yellow
                 Write-Host "      A 'Running'/'RunningAtMaxScale' state with no replica means it scaled back to zero" -ForegroundColor Yellow
@@ -515,7 +559,7 @@ function Invoke-ManagerSmokeGate {
     & $smoke @smokeArgs
     $code = $LASTEXITCODE
     if ($code -ne 0) {
-        throw "Update-PimContainers: post-deploy GUI smoke FAILED (exit $code). Either the hosted Manager is broken (render mode / active-assignments / tenant cache / read-write) or the gate could not RUN (az login / -EasyAuthAud / FQDN) -- a gate that did not run is not a pass. Roll back with -Rollback <oldRevision>."
+        throw "Update-PimContainers: post-deploy GUI smoke FAILED (exit $code). Either the hosted Manager is broken (render mode / active-assignments / tenant cache / read-write) or the gate could not RUN (sign-in / -EasyAuthAud / FQDN) -- a gate that did not run is not a pass. Roll back with -Rollback <oldRevision>."
     }
     Write-Host "==> Post-deploy GUI smoke gate PASSED (all probes ran; skips count as failures here)." -ForegroundColor Green
     return 'PASSED'
@@ -534,16 +578,16 @@ if (-not $Apps.Count) {
     # nothing. If discovery finds none, say so plainly rather than proceeding with an empty list
     # (Get-PimAppRollPlan already refuses "rolled zero apps", and this makes the reason readable).
     Step "no -Apps given: DISCOVERING container apps in $ResourceGroup"
-    $discovered = @(az containerapp list @subArgs -g $ResourceGroup --query "[].name" -o tsv 2>$null |
+    $discovered = @(Get-PimArmAcaAppNames -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup |
                     ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     if (-not $discovered.Count) {
-        throw "Update-PimContainers: no container apps found in '$ResourceGroup'. Nothing to roll -- check the resource group and the az context (a context you cannot see returns EMPTY, not an error)."
+        throw "Update-PimContainers: no container apps found in '$ResourceGroup'. Nothing to roll -- check the resource group, the subscription and the signed-in identity (a resource group you cannot see lists EMPTY, not an error)."
     }
     $Apps = @($discovered)
     Note ("discovered: " + ($Apps -join ', '))
 }
 Step ("apps requested: " + ($Apps -join ', '))
-$existing = @($Apps | Where-Object { az containerapp show @subArgs -g $ResourceGroup -n $_ --query name -o tsv 2>$null })
+$existing = @($Apps | Where-Object { Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $_ -ErrorAsNull })
 
 $plan = Get-PimAppRollPlan -Requested $Apps -Existing $existing -AllowMissing:$AllowMissingApps
 if ($plan.missing.Count -gt 0) {
@@ -566,7 +610,7 @@ if ($Rollback -or "$RollbackImage".Trim()) {   # §53.6: EITHER anchor puts us i
         # No name, no name lookup.
         $rev = $null
         if ("$Rollback".Trim()) {
-            $rev = @(az containerapp revision list @subArgs -g $ResourceGroup -n $app --query "[].name" -o tsv 2>$null) |
+            $rev = @(Get-PimRollRevisionRows -App $app | ForEach-Object { $_.name }) |
                        Where-Object { "$_".Trim() -and "$_" -like "*$Rollback*" } | Select-Object -First 1
         }
         if (-not $rev) { [void]$noRevision.Add($app); continue }
@@ -591,17 +635,23 @@ if ($Rollback -or "$RollbackImage".Trim()) {   # §53.6: EITHER anchor puts us i
             # 🔑 Ask the API instead of parsing a message. "Is this revision already the one
             # serving?" is a question with a definite answer, and it does not depend on error text,
             # locale, or which layer swallowed the stream.
-            $alreadyActive = @(az containerapp revision list @subArgs -g $ResourceGroup -n $app `
-                                --query "[].{name:name,active:properties.active}" -o json 2>$null | ConvertFrom-Json) |
+            $alreadyActive = @(Get-PimRollRevisionRows -App $app) |
                              Where-Object { $_.active -and "$($_.name)" -eq "$rev" }
             if ($alreadyActive) {
                 Write-Host "  $app is ALREADY on $rev -- nothing to roll back." -ForegroundColor Green
                 [void]$rolledBack.Add($app)
                 continue
             }
-            az containerapp revision activate @subArgs -g $ResourceGroup -n $app --revision $rev -o none
-            if ($LASTEXITCODE -ne 0) { throw "Update-PimContainers: revision activate FAILED (exit $LASTEXITCODE) for $app -> $rev." }
-            az containerapp ingress traffic set @subArgs -g $ResourceGroup -n $app --revision-weight "$rev=100" -o none 2>$null
+            try { [void](Invoke-PimArmAcaRevisionAction -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $app -Revision $rev -Action activate) }
+            catch { throw "Update-PimContainers: revision activate FAILED ($($_.Exception.Message)) for $app -> $rev." }
+            # `ingress traffic set --revision-weight <rev>=100`: read-modify-write of configuration.ingress.traffic.
+            # Best-effort, as before (single-revision mode serves the active revision anyway).
+            try {
+                [void](Set-PimArmAcaAppConfiguration -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $app -Mutate {
+                    param($cfg)
+                    if ($cfg.ingress) { $cfg.ingress | Add-Member -NotePropertyName traffic -NotePropertyValue @([pscustomobject]@{ revisionName = $rev; weight = 100 }) -Force }
+                }.GetNewClosure())
+            } catch { Write-Verbose "traffic weight for $app -> ${rev}: $($_.Exception.Message)" }
             Write-Host "  $app -> $rev (100%)" -ForegroundColor Green
             [void]$rolledBack.Add($app)
         }
@@ -618,15 +668,15 @@ if ($Rollback -or "$RollbackImage".Trim()) {   # §53.6: EITHER anchor puts us i
             Step ("revision '{0}' is gone -- falling back to the pre-deploy IMAGE: {1}" -f $Rollback, $RollbackImage)
             foreach ($app in @($noRevision.ToArray())) {
                 if (-not $PSCmdlet.ShouldProcess($app, "rollback to image $RollbackImage")) { continue }
-                $global:LASTEXITCODE = 0
-                az containerapp update @subArgs -g $ResourceGroup -n $app --image "$RollbackImage" -o none
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Host ("  image rollback FAILED for {0} (az exit {1})" -f $app, $LASTEXITCODE) -ForegroundColor Red
+                $rbErr = ''
+                try { [void](Set-PimArmAcaAppEnvVars -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $app -Env @{} -Image "$RollbackImage") } catch { $rbErr = "$($_.Exception.Message)" }
+                if ($rbErr) {
+                    Write-Host ("  image rollback FAILED for {0} ({1})" -f $app, $rbErr) -ForegroundColor Red
                     continue
                 }
                 # Prove it, the same way the forward roll does -- a rollback believed but not
                 # verified is the failure mode this whole block exists to close.
-                $now = "$(az containerapp show @subArgs -g $ResourceGroup -n $app --query 'properties.template.containers[0].image' -o tsv 2>$null)".Trim()
+                $now = Get-PimRollAppLiveImage -Name $app
                 $ver = Test-PimImageDeployed -Expected "$RollbackImage" -Running $now
                 if (-not $ver.ok) {
                     Write-Host ("  {0} is NOT on the rollback image -- {1}. Not counting it as rolled back." -f $app, $ver.reason) -ForegroundColor Red
@@ -657,14 +707,17 @@ if ($Rollback -or "$RollbackImage".Trim()) {   # §53.6: EITHER anchor puts us i
     # further along the same script.
     if (-not $SkipTickJob -and "$TickJobName".Trim()) {
         $jn = "$TickJobName".Trim()
-        $jobImg = "$(az containerapp job show @subArgs -g $ResourceGroup -n $jn --query "properties.template.containers[0].image" -o tsv 2>$null)".Trim()
+        $jobImg = Get-PimRollJobLiveImage -Name $jn
         if ($jobImg) {
             # The image the ROLLED-BACK-TO revision actually runs. Take it from the Manager when it
             # is among the rolled apps (the Job runs the Manager's image), else the first one.
             $srcApp = @(@($rolledBack.ToArray()) | Where-Object { "$_" -eq "$ManagerApp" }) + @($rolledBack.ToArray()) | Select-Object -First 1
-            $srcRev = @(az containerapp revision list @subArgs -g $ResourceGroup -n $srcApp `
-                          --query "[?properties.active].{name:name,image:properties.template.containers[0].image}" -o json 2>$null | ConvertFrom-Json) |
-                      Where-Object { "$($_.name)" -like "*$Rollback*" } | Select-Object -First 1
+            # the ACTIVE revisions with their own image (image = properties.template.containers[0].image of the revision)
+            $srcRev = $null
+            if ("$srcApp".Trim()) {
+                $srcRev = @(Get-PimRollRevisionRows -App $srcApp) | Where-Object { $_.active } |
+                          Where-Object { "$($_.name)" -like "*$Rollback*" } | Select-Object -First 1
+            }
             $wantImg = "$($srcRev.image)".Trim()
             if (-not $wantImg) {
                 Write-Warning ("  Rollback reactivated app REVISIONS only, and the image of the rolled-back revision could not be read " +
@@ -674,8 +727,8 @@ if ($Rollback -or "$RollbackImage".Trim()) {   # §53.6: EITHER anchor puts us i
                 Write-Host "  tick Job '$jn' is already on the rolled-back image -- no skew." -ForegroundColor Green
             } elseif ($PSCmdlet.ShouldProcess($jn, "roll the tick Job back to $wantImg")) {
                 Step "Roll tick Job $jn back -> the image of $($srcRev.name)"
-                az containerapp job update @subArgs -g $ResourceGroup -n $jn --image $wantImg -o none
-                $jobNow = "$(az containerapp job show @subArgs -g $ResourceGroup -n $jn --query "properties.template.containers[0].image" -o tsv 2>$null)".Trim()
+                try { [void](Set-PimRollJobImage -Name $jn -Image $wantImg) } catch { Write-Verbose "tick Job rollback update: $($_.Exception.Message)" }
+                $jobNow = Get-PimRollJobLiveImage -Name $jn
                 if ($jobNow -eq $wantImg) {
                     Write-Host "  tick Job '$jn' rolled back $($jobImg -replace '.*@','') -> $($jobNow -replace '.*@','') and verified." -ForegroundColor Green
                 } else {
@@ -753,10 +806,14 @@ if (-not $WhatIfPreference) {
     # back to it, and only a registry that answered -- and answered without this tag -- refuses.
     # Same class as Resolve-PimMiAppId's "a refusal is not a delay": an error must not be read as
     # a negative result. Third place this private-registry assumption has surfaced.
-    $global:LASTEXITCODE = 0
-    $existingTags = @(az acr repository show-tags @subArgs -n $AcrName --repository $ImageRepo -o tsv 2>$null)
-    $tagReadFailed = ($LASTEXITCODE -ne 0) -or
-                     (@($existingTags | Where-Object { "$_" -match '(?i)^(Username|Password|WARNING|ERROR):' }).Count -gt 0)
+    # 100.41: the registry's data plane over REST (Get-PimAcrRepositoryTags), its login server read from ARM in THIS
+    # subscription. A failed read answers @() with the reason in $global:PimSetupRestLastError -- cleared first, so an
+    # earlier call's error is never read as this one's.
+    $acrObj = Get-PimArmAcr -SubscriptionId $SubscriptionId -Name $AcrName -ErrorAsNull
+    $acrLogin = if ($acrObj) { "$($acrObj.properties.loginServer)".Trim() } else { '' }
+    $global:PimSetupRestLastError = ''
+    $existingTags = @(Get-PimAcrRepositoryTags -Registry $AcrName -Repository $ImageRepo -LoginServer $acrLogin)
+    $tagReadFailed = [bool]"$($global:PimSetupRestLastError)".Trim()
     if ($tagReadFailed) {
         $builtDigest = "$($global:PIM_LastBuiltDigest)".Trim()
         if ($builtDigest -match '^sha256:') {
@@ -875,11 +932,11 @@ if ($script:PimShippedBaseline -and $script:PimShippedBaseline.count -gt 0) {
 # scheduler jobs and the update mailer, it degraded honestly and so was never chased.
 try { . (Join-Path $solRoot 'engine\_shared\PIM-PolicyBaseline.ps1') } catch { }
 
-$mgrHashArgs = @()
+$mgrHashEnv = @{}
 try {
     . (Join-Path $solRoot 'engine\_shared\PIM-UpdateLifecycle.ps1')
     $mgrHash = Get-PimSolutionContentHash -SolutionRoot $solRoot
-    if ("$mgrHash".Trim()) { $mgrHashArgs = @('--set-env-vars', "PIM_MANAGER_CONTENT_HASH=$mgrHash") }
+    if ("$mgrHash".Trim()) { $mgrHashEnv = @{ PIM_MANAGER_CONTENT_HASH = "$mgrHash" } }
 } catch { Write-Host "  (could not compute the Manager content hash: $($_.Exception.Message) -- the next deploy will rebuild)" -ForegroundColor DarkGray }
 
 $rolled = New-Object System.Collections.Generic.List[string]
@@ -887,13 +944,13 @@ foreach ($app in $existing) {
     Step "Roll $app -> $ImageTag"
     if ($PSCmdlet.ShouldProcess($app,"update --image $image")) {
         # Only the MANAGER carries the stamp -- it is the app whose GUI content the hash describes,
-        # and the only one the updater reads it from. --set-env-vars adds/updates just this key and
-        # leaves every other variable alone.
-        $stamp = @(); if ("$app" -eq "$ManagerApp") { $stamp = $mgrHashArgs }
-        az containerapp update @subArgs -g $ResourceGroup -n $app --image $image @stamp -o none
-        # BUG-09: `az containerapp update` failing was never checked -- a failed roll
-        # counted the same as a successful one.
-        if ($LASTEXITCODE -ne 0) { throw "Update-PimContainers: 'az containerapp update' FAILED (exit $LASTEXITCODE) for $app -- deploy aborted. Roll back with -Rollback <oldRevision> if a partial roll is a problem." }
+        # and the only one the updater reads it from. Set-PimArmAcaAppEnvVars is read-modify-write: it adds/updates just
+        # this key, swaps the image, and leaves every other variable, probe and limit alone (one PATCH of the whole
+        # template, then it waits for provisioning -- what `az containerapp update --image --set-env-vars` did).
+        $stamp = @{}; if ("$app" -eq "$ManagerApp") { $stamp = $mgrHashEnv }
+        # BUG-09: a failed update must never count the same as a successful one.
+        try { [void](Set-PimArmAcaAppEnvVars -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $app -Env $stamp -Image $image) }
+        catch { throw "Update-PimContainers: the container app update FAILED ($($_.Exception.Message)) for $app -- deploy aborted. Roll back with -Rollback <oldRevision> if a partial roll is a problem." }
         # 🔴 `[0].name` IS NOT THE NEW REVISION. It is whatever the API happens to return first --
         # in practice the OLDEST. Measured at a live customer 2026-09-08: every roll reported
         # "new revision: ca-pim-manager--yt1y3qs" while the revision actually serving was
@@ -902,17 +959,8 @@ foreach ($app in $existing) {
         # captures as its ROLLBACK TARGET -- so auto-rollback kept trying to activate a revision
         # that was already active ("RevisionAlreadyInRequestedState"), reported AUTO-ROLLBACK
         # FAILED, and left a scary message about a fleet that was never in danger.
-        # Read the ACTIVE revision and take the NEWEST by creation time. Sorted in PowerShell:
-        # sort_by() cannot be used here (see the --query rule -- cmd.exe eats the parentheses).
-        $revRows = @()
-        try {
-            $revRows = @(az containerapp revision list @subArgs -g $ResourceGroup -n $app `
-                            --query "[].{name:name,created:properties.createdTime,active:properties.active}" `
-                            -o json 2>$null | ConvertFrom-Json)
-        } catch {}
-        $rev = @($revRows | Where-Object { $_.active }) |
-                   Sort-Object { try { [datetimeoffset]$_.created } catch { [datetimeoffset]::MinValue } } |
-                   Select-Object -Last 1 | ForEach-Object { $_.name }
+        # Read the ACTIVE revision and take the NEWEST by creation time (Get-PimRollNewestActiveRevision).
+        $rev = @(Get-PimRollNewestActiveRevision -App $app) | ForEach-Object { $_.name }
         if (-not "$rev".Trim()) { $rev = '(could not resolve the active revision)' }
         Write-Host "  $app new revision: $rev" -ForegroundColor Green
         [void]$rolled.Add($app)
@@ -931,7 +979,7 @@ foreach ($app in $existing) {
 if (-not $WhatIfPreference -and $rolled.Count -gt 0) {
     $notOnImage = New-Object System.Collections.Generic.List[string]
     foreach ($app in $rolled) {
-        $live = az containerapp show @subArgs -g $ResourceGroup -n $app --query "properties.template.containers[0].image" -o tsv 2>$null
+        $live = Get-PimRollAppLiveImage -Name $app
         $v = Test-PimImageDeployed -Expected $image -Running "$live".Trim()
         if (-not $v.ok) { [void]$notOnImage.Add("$app -- $($v.reason)") }
     }
@@ -957,19 +1005,20 @@ if (-not $SkipTickJob) {
         Write-Host "  tick Job: -TickJobName is blank -- skipping." -ForegroundColor DarkGray
     }
     else {
-        $jobExists = az containerapp job show @subArgs -g $ResourceGroup -n $jobName --query name -o tsv 2>$null
+        $jobObj = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $jobName -ErrorAsNull
+        $jobExists = if ($jobObj) { "$($jobObj.name)" } else { '' }
         if (-not "$jobExists".Trim()) {
             Write-Host "  tick Job '$jobName' does not exist in $ResourceGroup -- nothing to roll (expected in always-on mode)." -ForegroundColor DarkGray
         }
         elseif ($PSCmdlet.ShouldProcess($jobName, "job update --image $image")) {
             Step "Roll tick Job $jobName -> $ImageTag"
-            $jobBefore = az containerapp job show @subArgs -g $ResourceGroup -n $jobName --query "properties.template.containers[0].image" -o tsv 2>$null
-            az containerapp job update @subArgs -g $ResourceGroup -n $jobName --image $image -o none
-            if ($LASTEXITCODE -ne 0) {
-                throw "Update-PimContainers: 'az containerapp job update' FAILED (exit $LASTEXITCODE) for $jobName -- the APPS are already on $ImageTag, so the deploy is now SKEWED: the apps and the scheduled job are on different images. Re-run this script, or stamp the Job by hand: az containerapp job update -g $ResourceGroup -n $jobName --image $image"
+            $jobBefore = Get-PimRollJobLiveImage -Name $jobName
+            try { [void](Set-PimRollJobImage -Name $jobName -Image $image) }
+            catch {
+                throw "Update-PimContainers: the tick Job update FAILED ($($_.Exception.Message)) for $jobName -- the APPS are already on $ImageTag, so the deploy is now SKEWED: the apps and the scheduled job are on different images. Re-run this script, or stamp the Job by hand: az containerapp job update -g $ResourceGroup -n $jobName --image $image"
             }
             # Same evidence standard as the apps: a tag match is not proof (BUG-40).
-            $jobLive = az containerapp job show @subArgs -g $ResourceGroup -n $jobName --query "properties.template.containers[0].image" -o tsv 2>$null
+            $jobLive = Get-PimRollJobLiveImage -Name $jobName
             $jv = Test-PimImageDeployed -Expected $image -Running "$jobLive".Trim()
             if (-not $jv.ok) {
                 throw "Update-PimContainers: tick Job '$jobName' post-roll verification FAILED -- $($jv.reason). The apps are on $image but the Job is not; do NOT treat this deploy as done."
@@ -1026,3 +1075,9 @@ $smokeVerdict = Invoke-ManagerSmokeGate -RepoRoot $repoRoot -RolledApps @($rolle
 # on the four paths where it never ran.
 Step ("Done. {0} app(s) verified on {1}; other job(s) verified on it: {2}; post-deploy GUI smoke gate: {3} (rollback with -Rollback <oldRevision>)." -f `
       $rolled.Count, $ImageTag, $(if ($otherJobsRolled.Count) { $otherJobsRolled -join ', ' } else { 'none' }), $smokeVerdict)
+} finally {
+    # 100.41: hand the caller's PIM-Rest identity back exactly as it was (see the connect above).
+    if ($script:PimRollerRestoreGlobals) {
+        foreach ($n in @($script:PimRollerRestoreGlobals.Keys)) { Set-Variable -Scope Global -Name $n -Value $script:PimRollerRestoreGlobals[$n] -WhatIf:$false }
+    }
+}
