@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.566 -- 2026-10-10
+
+- Setup no longer waits for Exchange: if the mail sender cannot be set up yet, it is deferred with a warning and the installation continues.
+
 ## 2.4.565 -- 2026-10-10
 
 - Setup: the one sign-in also reaches the helper processes a setup step starts (no hidden extra sign-in).
