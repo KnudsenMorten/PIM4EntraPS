@@ -219,7 +219,7 @@ param(
     [string]$ExchangeAdminDuration = 'PT4H',
     # INSTALL-HARDEN-1 item 4: how long to wait for a just-hydrated Exchange organization that still refuses RBAC creates
     # ("you must be assigned a delegating role assignment"; measured ~40-60 min), and how often to try again.
-    [ValidateRange(1, 240)][int]$ExchangeReadyMinutes = 75,
+    [ValidateRange(0, 240)][int]$ExchangeReadyMinutes = 75,   # 0 = do not wait (the install defers the mail sender instead, 2026-10-10)
     [ValidateRange(10, 900)][int]$ExchangeReadyIntervalSeconds = 150,
     # one plain progress line per wait (the deploy forwards it to the install's reporter as a 'waiting' event)
     [scriptblock]$OnProgress
