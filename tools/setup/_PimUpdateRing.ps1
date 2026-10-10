@@ -832,20 +832,27 @@ function Update-PimRingChannelVersion {
     }
     if (-not $Upload) {
         $Upload = { param($account, $container, $file)
-            $saved = $env:AZURE_CONFIG_DIR
+            # IMP-36: Entra ID, not the storage ACCOUNT KEY. A key is the whole account's master
+            # credential; the ring advance needs one blob in one container.
+            # 100.41 NO-AZ: a Blob REST PUT (x-ms-blob-type: BlockBlob) with a storage token from PIM-Rest's ONE client,
+            # pinned to the channel subscription's tenant (resolved without a token) -- no az profile, so -AzureConfigDir is
+            # no longer used. The writing identity needs 'Storage Blob Data Contributor' on the source container.
+            $shared = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared'
+            if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) { . (Join-Path $shared 'PIM-Rest.ps1') }
+            if (-not (Get-Command Resolve-PimArmSubscriptionTenant -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $shared 'PIM-ArmSetup.ps1'))) { . (Join-Path $shared 'PIM-ArmSetup.ps1') }
             try {
-                if ("$AzureConfigDir".Trim()) { $env:AZURE_CONFIG_DIR = "$AzureConfigDir".Trim() }
-                # IMP-36: Entra ID, not the storage ACCOUNT KEY. A key is the whole account's master
-                # credential; the ring advance needs one blob in one container.
-                $global:LASTEXITCODE = 0
-                $out = az storage blob upload --subscription $SubscriptionId --account-name $account --container-name $container --name channel.json --file $file --overwrite --content-type application/json --auth-mode login -o none 2>&1
-                if ($LASTEXITCODE -ne 0) {
-                    $txt = (Hide-PimSasText (($out | Out-String).Trim()))
-                    if ($txt.Length -gt 300) { $txt = $txt.Substring(0, 300) + '...' }
-                    return ("az storage blob upload (--auth-mode login) exit $LASTEXITCODE -- the identity in this az profile needs 'Storage Blob Data Contributor' on $account/$container. $txt").Trim()
-                }
+                $tid = "$(Resolve-PimArmSubscriptionTenant -SubscriptionId $SubscriptionId)".Trim()
+                if (-not $tid) { return "the tenant of subscription $SubscriptionId could not be resolved -- channel.json not written" }
+                $tok = "$(Get-PimRestToken -Resource 'https://storage.azure.com' -TenantId $tid)".Trim()
+                if (-not $tok) { return "no storage token for tenant $tid -- channel.json not written" }
+                $h = @{ Authorization = "Bearer $tok"; 'x-ms-version' = '2021-08-06'; 'x-ms-blob-type' = 'BlockBlob'; 'x-ms-blob-content-type' = 'application/json' }
+                Invoke-RestMethod -Method PUT -Uri "https://$account.blob.core.windows.net/$container/channel.json" -Headers $h -ContentType 'application/json' -Body ([IO.File]::ReadAllBytes($file)) -TimeoutSec 60 | Out-Null
                 return ''
-            } finally { $env:AZURE_CONFIG_DIR = $saved }
+            } catch {
+                $txt = (Hide-PimSasText ("$($_.Exception.Message) $($_.ErrorDetails.Message)".Trim()))
+                if ($txt.Length -gt 300) { $txt = $txt.Substring(0, 300) + '...' }
+                return ("blob PUT of channel.json (Entra ID) failed -- the signed-in identity needs 'Storage Blob Data Contributor' on $account/$container. $txt").Trim()
+            }
         }
     }
     $before = $null

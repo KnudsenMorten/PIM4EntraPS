@@ -37,7 +37,7 @@ function Resolve-PimMailSetupAuthMode {
         * nothing passed                       -> 'browser' (the person signs in; -AdminAppId is not needed)
         * -AdminSecret (+ -AdminAppId)         -> 'secret'  (the Invardia Support app)
         * -AdminCertThumbprint (+ -AdminAppId) -> 'certificate' (back-compat; never printed)
-        * -UseSignedInAccount                  -> 'signedIn' (the signed-in az session)
+        * -UseSignedInAccount                  -> 'signedIn' (the Invardia Support session, else the browser)
       Refused: both a secret and a certificate; -UseSignedInAccount with a credential; a credential without -AdminAppId;
       -AdminAppId without a credential (ambiguous: was a secret forgotten?).
     #>

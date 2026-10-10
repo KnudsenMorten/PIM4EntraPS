@@ -1,6 +1,8 @@
 ﻿# IMP-02: the locale-safe stamp reader. Loaded defensively so this file stays correct
 # when a test dot-sources it on its own (PIM-Functions.psm1 also loads it up front).
 if (-not (Get-Command Get-PimUtcStamp -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot 'PIM-DateSafe.ps1') }
+# §100.46: Write-PimLogOnce / Write-PimStartupLine (quiet only in the tick; everywhere else they print as before).
+if (-not (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-LogOnce.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-LogOnce.ps1') }
 <#
   PIM4EntraPS -- scheduler / job runner.
 
@@ -748,7 +750,8 @@ function Write-PimJobScopeBindingReport {
     if ($v.indeterminate) { return }          # engine core not loaded here; nothing to claim
     $script:PimJobBindingReported = $true
     if ($v.ok) {
-        Write-Host "[scheduler] job->provider binding OK ($($v.checked) engine job(s) all resolve)" -ForegroundColor DarkGray
+        $__bm = "[scheduler] job->provider binding OK ($($v.checked) engine job(s) all resolve)"
+        if (Get-Command Write-PimStartupLine -ErrorAction SilentlyContinue) { Write-PimStartupLine -Message $__bm -ForegroundColor DarkGray } else { Write-Host $__bm -ForegroundColor DarkGray }
         return
     }
     foreach ($u in $v.unbound) {
@@ -2043,19 +2046,22 @@ function Add-PimJobOutputRecord {
         $md = $Record.MessageData
         $text = if ($md -is [System.Management.Automation.HostInformationMessage]) { "$($md.Message)" } else { "$md" }
         $Capture.lines.Add("$stamp $text")
+        # §100.46: a line the tick keeps off the console (Write-PimQuietLine, tag 'PimQuiet') is kept in the run's own log
+        # and NOT echoed -- the console goes to Log Analytics, which the customer pays for per GB.
+        $quiet = (@($Record.Tags) -contains 'PimQuiet')
         # 🔴 2.4.357 LIVE REGRESSION (internal, 2026-09-14 20:40Z): in the Linux container a Write-Host with no colour
         # carries ForegroundColor/BackgroundColor = -1 (the console has no colour), and re-echoing that value threw
         # "Cannot process the color because -1 is not a valid color" INSIDE the handler's pipeline -- every engine job
         # failed at its first colourless line. Only a defined ConsoleColor is passed on, and the echo can NEVER fail
         # the job: the console copy is a courtesy, the run is not.
-        try {
+        if (-not $quiet) { try {
             if ($md -is [System.Management.Automation.HostInformationMessage]) {
                 $p = @{ Object = $md.Message; NoNewline = [bool]$md.NoNewLine }
                 if (Test-PimConsoleColorValue $md.ForegroundColor) { $p.ForegroundColor = $md.ForegroundColor }
                 if (Test-PimConsoleColorValue $md.BackgroundColor) { $p.BackgroundColor = $md.BackgroundColor }
                 Write-Host @p
             } else { Write-Host $text }
-        } catch { try { Write-Host $text } catch { } }
+        } catch { try { Write-Host $text } catch { } } }
     } elseif ($Record -is [System.Management.Automation.WarningRecord]) {
         $Capture.lines.Add("$stamp WARNING: $($Record.Message)")
         try { Write-Warning $Record.Message } catch { }
@@ -2377,8 +2383,11 @@ function Get-PimRunFailureHistory {
             scope        = "$($r.scope)"
             ok           = [bool]$r.ok
             # §95.2o: an INTERRUPTED run (an update restart, a platform stop) is not a failed run -- listed, never counted.
-            failed       = (-not [bool]$r.ok -and "$($r.status)" -ne 'interrupted')
+            # §100.45: a THROTTLED run is not a failed run either (amber, retried) -- until its streak is stuck.
+            failed       = (-not [bool]$r.ok -and "$($r.status)" -ne 'interrupted' -and -not ("$($r.status)" -eq 'throttled' -and -not ($r.PSObject.Properties['throttleStuck'] -and [bool]$r.throttleStuck)))
             interrupted  = ("$($r.status)" -eq 'interrupted')
+            throttled    = ("$($r.status)" -eq 'throttled')
+            throttleStuck = [bool]("$($r.status)" -eq 'throttled' -and $r.PSObject.Properties['throttleStuck'] -and [bool]$r.throttleStuck)
             status       = "$($r.status)"
             detail       = "$($r.detail)"
             startedUtc   = "$($r.startedUtc)"
@@ -2687,8 +2696,12 @@ function Get-PimJobsStatus {
         $finishedRuns = @($runs | Where-Object { "$($_.status)" -ne 'running' -and "$($_.finishedUtc)".Trim() })
         $recentWindow = @($finishedRuns | Sort-Object { "$($_.startedUtc)" } -Descending | Select-Object -First 10)
         # §95.2o: an interrupted run (update restart, platform stop) is not a failed run; two in a row at the head are (below).
-        $allNotOk     = @($recentWindow | Where-Object { -not [bool]$_.ok -and "$($_.status)" -ne 'interrupted' })
+        # §100.45: a THROTTLED run (Microsoft rate-limited it, nothing applied, retried by the next run) is not a failed run --
+        # amber, never red -- until its streak is STUCK (throttleStuck: PIM is not handling it), then it is failing.
+        $isThrottleOk = { param($x) "$($x.status)" -eq 'throttled' -and -not ($x.PSObject.Properties['throttleStuck'] -and [bool]$x.throttleStuck) }
+        $allNotOk     = @($recentWindow | Where-Object { -not [bool]$_.ok -and "$($_.status)" -ne 'interrupted' -and -not (& $isThrottleOk $_) })
         $interruptedRuns = @($recentWindow | Where-Object { "$($_.status)" -eq 'interrupted' })
+        $throttledRuns   = @($recentWindow | Where-Object { "$($_.status)" -eq 'throttled' })
         # 🔴 BUG-113 -- "NO HANDLER HERE" IS NOT A FAILED RUN, IT IS A MISSING CAPABILITY.
         # Measured in prod 2026-08-30: every single red count in the Jobs view -- tenant-cache 9,
         # reminders 9, daily-summary 9, tier-report 9, discovery-entra/azure/powerbi 5 each,
@@ -2727,6 +2740,7 @@ function Get-PimJobsStatus {
             $st = "$($r.status)"
             if ($st -in @('unimplemented', 'skipped') -or "$($r.detail)" -match '^no-handler') { continue }
             if ($st -eq 'interrupted') { if (-not $headFails.Count) { [void]$intrHead.Add($r) }; continue }
+            if (& $isThrottleOk $r) { if (-not $headFails.Count) { break }; continue }   # §100.45: the newest throttled run decides: retrying, not failing
             if ([bool]$r.ok -or $st -eq 'held') { break }
             if (-not $headFails.Count) { $healedBy = Get-PimCoveringCleanRun -FailedRun $r -ScopeKeys $jobScopeKeys -History $history; if ($healedBy) { break } }
             [void]$headFails.Add($r)
@@ -2858,7 +2872,10 @@ function Get-PimJobsStatus {
             waitingForSlot     = [bool]$waitingSlot
             waitingSinceUtc    = "$waitingSince"
             interruptedCount   = $interruptedRuns.Count
-            healedBy           = $(if ($healedBy) { "$($healedBy.name)" } else { '' })
+            # §100.45: throttled runs in the recent window, and whether the latest run's throttled streak is STUCK
+            throttledCount     = $throttledRuns.Count
+            throttleStuck      = [bool]($last -and "$($last.status)" -eq 'throttled' -and $last.PSObject.Properties['throttleStuck'] -and [bool]$last.throttleStuck)
+            healedBy          = $(if ($healedBy) { "$($healedBy.name)" } else { '' })
             healedAtUtc        = $(if ($healedBy) { "$($healedBy.startedUtc)" } else { '' })
         })
     }
@@ -2935,6 +2952,40 @@ function ConvertTo-PimRunLogText {
     }
     return ($lines -join "`n")
 }
+function Set-PimRunThrottleState {
+    <#
+      §100.45 (owner 2026-10-10: "did you not fix this across all jobs" / "maybe even have a throttle category ... it is not
+      to alert me about, except if you cannot handle it, but this is normal"). THE ONE PLACE, for EVERY job: both completion
+      paths (Write-PimJobRunRecord and Invoke-PimJobForceStart) pass their finished record through here before it is stored.
+      A 'failed' record whose every cause is Microsoft throttling / a Microsoft-side outage / a timeout and which applied
+      nothing (Test-PimRunFailureTransient) becomes status 'throttled' -- ok stays $false (the run did not do its work) --
+      and carries its streak (Get-PimThrottleStreak): throttleCount, throttleSinceUtc, throttleStuck, throttleAlert.
+      Anything else is returned unchanged. Never throws: a fault here leaves the record 'failed' (it alerts as before).
+      -Previous is for tests; otherwise the job's previous run that says something about its health is read from history.
+    #>
+    param([Parameter(Mandatory)][object]$Run, [object]$Previous, [switch]$PreviousGiven)
+    try {
+        if ("$($Run.status)" -ne 'failed') { return $Run }
+        if (-not (Get-Command Test-PimRunFailureTransient -ErrorAction SilentlyContinue)) { return $Run }
+        if (-not (Test-PimRunFailureTransient -Text "$($Run.detail)")) { return $Run }
+        $prev = $Previous
+        if (-not $PreviousGiven -and $null -eq $prev) {
+            $prev = @(Get-PimJobRunHistory -Name "$($Run.name)" | Where-Object {
+                "$($_.runId)" -ne "$($Run.runId)" -and "$($_.finishedUtc)".Trim() -and "$($_.status)" -notin @('running', 'skipped', 'unimplemented', 'interrupted') }) | Select-Object -First 1
+        }
+        $thr = if (Get-Command Get-PimThrottleAlertThresholds -ErrorAction SilentlyContinue) { Get-PimThrottleAlertThresholds } else { [pscustomobject]@{ afterRuns = 12; afterHours = 6 } }
+        $s = if (Get-Command Get-PimThrottleStreak -ErrorAction SilentlyContinue) { Get-PimThrottleStreak -Previous $prev -Run $Run -AfterRuns $thr.afterRuns -AfterHours $thr.afterHours } else { [pscustomobject]@{ count = 1; sinceUtc = "$($Run.startedUtc)"; stuck = $false; alert = $false } }
+        $Run | Add-Member -NotePropertyName status -NotePropertyValue 'throttled' -Force
+        $Run | Add-Member -NotePropertyName throttled -NotePropertyValue $true -Force
+        $Run | Add-Member -NotePropertyName throttleCount -NotePropertyValue ([int]$s.count) -Force
+        $Run | Add-Member -NotePropertyName throttleSinceUtc -NotePropertyValue "$($s.sinceUtc)" -Force
+        $Run | Add-Member -NotePropertyName throttleStuck -NotePropertyValue ([bool]$s.stuck) -Force
+        $Run | Add-Member -NotePropertyName throttleAlert -NotePropertyValue ([bool]$s.alert) -Force
+        $Run | Add-Member -NotePropertyName detail -NotePropertyValue ("Microsoft throttled this run; it retries automatically ($([int]$s.count) in a row). " + "$($Run.detail)") -Force
+    } catch { Write-Verbose "[scheduler] throttle classification skipped: $($_.Exception.Message)" }
+    return $Run
+}
+
 function Write-PimJobRunRecord {
     # Persist a finished run (called from the tick for every scheduled + trigger run).
     # 'ran' reflects whether the handler actually did work (vs a logged no-op stub);
@@ -2992,6 +3043,7 @@ function Write-PimJobRunRecord {
         scopes      = @(Get-PimRunCleanScopes -Job $Job -Result $Result)
         version     = (Get-PimRunningVersion)
     }
+    $rec = Set-PimRunThrottleState -Run $rec   # §100.45: throttling is a retry, not a failure -- one rule for every job
     Add-PimJobRunRecord -Run $rec
     # ALERT-01: a finished run raises the failure alert HERE. Previously the ONLY
     # engine-failure producer was the Manager's POST /api/jobs/run handler, so a job
@@ -3192,6 +3244,7 @@ function Invoke-PimJobForceStart {
         scopes      = @(Get-PimRunCleanScopes -Job $Job -Result $res)   # §95.2o, as Write-PimJobRunRecord
         version     = (Get-PimRunningVersion)
     }
+    $rec = Set-PimRunThrottleState -Run $rec   # §100.45, as Write-PimJobRunRecord
     Add-PimJobRunRecord -Run $rec
     # ALERT-01: a finished run raises the failure alert HERE. Previously the ONLY
     # engine-failure producer was the Manager's POST /api/jobs/run handler, so a job
@@ -3804,7 +3857,8 @@ function Invoke-PimTickJobRun {
             $res = [pscustomobject]@{ name = $name; type = "$($Job.type)"; ok = $true; ran = $false; covered = $true
                 detail = ("covered -- its scopes were reconciled cleanly earlier in this tick by {0}; next run on its own cadence" -f (@($coveredBy) -join ', '))
                 ranUtc = $jobStart.ToString('o'); correlationId = $runId }
-            Write-Host ("[scheduler] {0}: {1}" -f $name, $res.detail) -ForegroundColor DarkGray
+            $__cm = ("[scheduler] {0}: {1}" -f $name, $res.detail)
+            if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key "sched.covered|$name" -Message $__cm -ForegroundColor DarkGray } else { Write-Host $__cm -ForegroundColor DarkGray }
         } else {
             if (-not $WhatIf) { [void](Write-PimJobRunningRecord -Job $Job -RunId $runId -StartedUtc $started -Trigger:$isTrig -Reason $Reason -Areas @($al.areas)) }
             # The scope gate belongs to THIS run only: a queue action applied between the scopes of an outer engine run (the
@@ -3881,7 +3935,10 @@ function Invoke-PimSchedulerTriggerDrain {
                 -Owner $(if ($tc) { $tc.owner } else { '' }) -UseLocks:([bool]($tc -and $tc.useLocks)) -LeaseTtlMinutes $(if ($tc) { $tc.ttl } else { 15 }) `
                 -History $(if ($tc) { @($tc.history) } else { @() }) -TimeLimitSeconds $(if ($tc) { $tc.limit } else { 0 }) -ExecWallStart $(if ($tc) { $tc.wall } else { $drainWall })
         if ($o.outcome -eq 'ran') { $out.Add($o.result) }
-        elseif ($o.outcome -ne 'elsewhere') { Write-Host ("[scheduler] {0}: {1}" -f $tname, $o.detail) -ForegroundColor DarkYellow }
+        elseif ($o.outcome -ne 'elsewhere') {
+            $__tm = ("[scheduler] {0}: {1}" -f $tname, $o.detail)
+            if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key "sched.trigger-wait|$tname" -Message $__tm -ForegroundColor DarkYellow } else { Write-Host $__tm -ForegroundColor DarkYellow }
+        }
     }
     return $out.ToArray()
 }
@@ -4099,7 +4156,9 @@ function Invoke-PimSchedulerTick {
             } elseif ($o.outcome -ne 'elsewhere') {
                 # waiting for an area / a free slot / the next execution: the job stays due, nothing is recorded as a run
                 $results.Add([pscustomobject]@{ name = "$($j.name)"; type = "$($j.type)"; ok = $true; ran = $false; waiting = $true; outcome = "$($o.outcome)"; detail = "$($o.detail)" })
-                Write-Host ("[scheduler] {0}: {1}" -f $j.name, $o.detail) -ForegroundColor DarkYellow
+                # §100.46: "waiting for <job> (area job:<job>)" repeats every 5-minute run while a long job holds the area
+                $__wm = ("[scheduler] {0}: {1}" -f $j.name, $o.detail)
+                if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key "sched.waiting|$($j.name)" -Message $__wm -ForegroundColor DarkYellow } else { Write-Host $__wm -ForegroundColor DarkYellow }
                 continue
             } else { continue }
             # Renew mid-tick: a scheduled run can outlive the TTL (a full reconcile is not quick), and a lapsed lock
@@ -4208,7 +4267,11 @@ function Start-PimScheduler {
         # rather than leaving it alongside the real one matters: two half-guards read as
         # defence-in-depth while neither actually arbitrates.
         $res = @(Invoke-PimSchedulerTick -NowUtc $now -WhatIf:$WhatIf -Owner $Owner -LeaseTtlMinutes $LeaseTtlMinutes)
-        foreach ($r in $res) { Write-Host ("[scheduler] {0,-16} {1}" -f $r.name, $r.detail) -ForegroundColor DarkGray }
+        foreach ($r in $res) {
+            if (Get-Command Write-PimTickResultLine -ErrorAction SilentlyContinue) { Write-PimTickResultLine -Result $r -Format '[scheduler] {0,-16} {1}' -ForegroundColor DarkGray }
+            else { Write-Host ("[scheduler] {0,-16} {1}" -f $r.name, $r.detail) -ForegroundColor DarkGray }
+        }
+        if (Get-Command Save-PimLogOnceState -ErrorAction SilentlyContinue) { [void](Save-PimLogOnceState) }
         $tick++
         if ($MaxTicks -gt 0 -and $tick -ge $MaxTicks) { break }
         Start-Sleep -Seconds $IntervalSeconds

@@ -19,8 +19,9 @@
 
     Idempotent: Grant-PimMiGraph adds only what is missing (and refuses a token for the wrong tenant); the role assignment
     is created only when absent; the setting is written only when it differs, then READ BACK and audited.
-    Certificate identity only: az must already be logged in to -SubscriptionId (Invoke-PimMspBuild does that), and the
-    store is reached with -ClientId/-CertThumbprint.
+    100.41 (NO-AZ): every Azure read and write is ARM REST (engine/_shared/PIM-ArmSetup.ps1) over PIM-Rest's ONE token
+    client -- the certificate identity (-ClientId/-CertThumbprint), or with -UseSignedInAccount the Invardia Support app's
+    REST session / the person's browser sign-in. No az CLI is needed on the machine.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -51,12 +52,17 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-ConvergeDefaults.ps1')   # 100.40 Set-PimTickJobIdSetting
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
-$sub = @('--subscription', $SubscriptionId)
-$ErrorActionPreference = 'Continue'   # native az stderr (warnings) must not be fatal on 5.1; every az call is checked
-$tickId = az containerapp job show @sub -g $ResourceGroup -n $TickJobName --query id -o tsv --only-show-errors 2>$null
-$tickOid = az containerapp job show @sub -g $ResourceGroup -n $TickJobName --query identity.principalId -o tsv --only-show-errors 2>$null
-$mgrOid = az containerapp show @sub -g $ResourceGroup -n $ManagerApp --query identity.principalId -o tsv --only-show-errors 2>$null
-$ErrorActionPreference = 'Stop'
+# 100.41: PIM-Rest's identity -- kept when the caller (the MSP build's step launcher) already set one up; else the
+# certificate identity, else the signed-in one (the Invardia Support app's REST session, or the browser).
+if (-not $global:PIM_SetupRestMode -and -not "$($global:PIM_ClientId)".Trim()) {
+    if ("$ClientId".Trim() -and "$CertThumbprint".Trim() -and -not $UseSignedInAccount) { [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint) }
+    else { [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId) }
+}
+$tickJob = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $TickJobName -ErrorAsNull
+$mgrObj  = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
+$tickId  = if ($tickJob) { "$($tickJob.id)" } else { '' }
+$tickOid = if ($tickJob -and $tickJob.identity) { "$($tickJob.identity.principalId)" } else { '' }
+$mgrOid  = if ($mgrObj -and $mgrObj.identity) { "$($mgrObj.identity.principalId)" } else { '' }
 if (-not "$tickId".Trim() -or -not "$tickOid".Trim()) { throw "tick job '$TickJobName' (or its system identity) not found in $ResourceGroup -- run the hosting step first." }
 if (-not "$mgrOid".Trim()) { throw "Manager app '$ManagerApp' (or its system identity) not found in $ResourceGroup -- run the hosting step first." }
 $tickId = "$tickId".Trim(); $tickOid = "$tickOid".Trim(); $mgrOid = "$mgrOid".Trim()
@@ -79,30 +85,26 @@ if (-not $SkipAzureRootAccess) {
 
 if (-not $SkipTickStart) {
     Step "'Container Apps Jobs Operator' for $ManagerApp on $TickJobName only"
-    $ErrorActionPreference = 'Continue'
-    $have = az role assignment list @sub --assignee $mgrOid --scope $tickId --role 'Container Apps Jobs Operator' --query "[].id" -o tsv --only-show-errors 2>$null
-    if ("$have".Trim()) { Note 'already assigned' }
+    # 100.41: ARM REST -- Get-PimArmRoleAssignments / New-PimArmRoleAssignment (az role assignment list / create), exact scope.
+    $haveRole = { param($oid, $role) try { [bool](@(Get-PimArmRoleAssignments -SubscriptionId $SubscriptionId -PrincipalId $oid -Scope $tickId -Role $role).Count) } catch { $false } }
+    if (& $haveRole $mgrOid 'Container Apps Jobs Operator') { Note 'already assigned' }
     elseif ($PSCmdlet.ShouldProcess($tickId, 'role assignment Container Apps Jobs Operator')) {
-        az role assignment create @sub --assignee-object-id $mgrOid --assignee-principal-type ServicePrincipal --role 'Container Apps Jobs Operator' --scope $tickId -o none --only-show-errors 2>$null
-        if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = 'Stop'; throw "could not assign 'Container Apps Jobs Operator' to $ManagerApp on $TickJobName (the deploying identity needs User Access Administrator or Owner on the resource group)." }
-        $have = az role assignment list @sub --assignee $mgrOid --scope $tickId --role 'Container Apps Jobs Operator' --query "[].id" -o tsv --only-show-errors 2>$null
-        if (-not "$have".Trim()) { $ErrorActionPreference = 'Stop'; throw "read-back FAILED: the role assignment is not listed on $tickId." }
+        try { [void](New-PimArmRoleAssignment -SubscriptionId $SubscriptionId -PrincipalId $mgrOid -PrincipalType ServicePrincipal -Role 'Container Apps Jobs Operator' -Scope $tickId) }
+        catch { throw "could not assign 'Container Apps Jobs Operator' to $ManagerApp on $TickJobName (the deploying identity needs User Access Administrator or Owner on the resource group): $($_.Exception.Message)" }
+        if (-not (& $haveRole $mgrOid 'Container Apps Jobs Operator')) { throw "read-back FAILED: the role assignment is not listed on $tickId." }
         Note 'assigned and read back'
     }
 
     # BUG-268: the tick reads the status of the execution that holds its lease, so a lease left by an execution the
     # platform ended is taken over at the next tick instead of after its 15-minute TTL. Read-only, this job only.
     Step "'Reader' for $TickJobName on itself (lease holder's execution status)"
-    $have = az role assignment list @sub --assignee $tickOid --scope $tickId --role 'Reader' --query "[].id" -o tsv --only-show-errors 2>$null
-    if ("$have".Trim()) { Note 'already assigned' }
+    if (& $haveRole $tickOid 'Reader') { Note 'already assigned' }
     elseif ($PSCmdlet.ShouldProcess($tickId, 'role assignment Reader (tick identity)')) {
-        az role assignment create @sub --assignee-object-id $tickOid --assignee-principal-type ServicePrincipal --role 'Reader' --scope $tickId -o none --only-show-errors 2>$null
-        if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = 'Stop'; throw "could not assign 'Reader' to $TickJobName on itself (the deploying identity needs User Access Administrator or Owner on the resource group)." }
-        $have = az role assignment list @sub --assignee $tickOid --scope $tickId --role 'Reader' --query "[].id" -o tsv --only-show-errors 2>$null
-        if (-not "$have".Trim()) { $ErrorActionPreference = 'Stop'; throw "read-back FAILED: the Reader assignment is not listed on $tickId." }
+        try { [void](New-PimArmRoleAssignment -SubscriptionId $SubscriptionId -PrincipalId $tickOid -PrincipalType ServicePrincipal -Role 'Reader' -Scope $tickId) }
+        catch { throw "could not assign 'Reader' to $TickJobName on itself (the deploying identity needs User Access Administrator or Owner on the resource group): $($_.Exception.Message)" }
+        if (-not (& $haveRole $tickOid 'Reader')) { throw "read-back FAILED: the Reader assignment is not listed on $tickId." }
         Note 'assigned and read back'
     }
-    $ErrorActionPreference = 'Stop'
 
     Step "pim.Settings SchedulerTickJobId = $tickId"
     $cs = Connect-PimSetupStore -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint -UseSignedInAccount:$UseSignedInAccount

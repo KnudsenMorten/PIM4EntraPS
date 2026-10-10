@@ -9,10 +9,11 @@
     * Managed Identity  -- App Service ($env:IDENTITY_ENDPOINT) or IMDS (VM)
     * Client secret     -- SPN client_credentials (v2 token endpoint)
     * Client certificate-- SPN, signed RS256 JWT client_assertion (no secret, no MSAL)
-    * az CLI fallback   -- dev convenience when already `az login`-ed
+    * Signed-in source  -- a registered $global:PIM_TokenProvider (tools\setup\_PimSignedIn.ps1): the Invardia
+                           Support session, else the person's browser sign-in (auth code + PKCE). No CLI, no module.
 
   Resolution order for credentials (all overridable via params):
-    explicit params -> $global:PIM_* -> Managed Identity -> az CLI.
+    explicit params -> $global:PIM_* -> Managed Identity -> the signed-in token source -> (opt-in) browser sign-in.
 
   Data plane: Invoke-PimGraph / -PimArm / -PimPowerBI / -PimRest with @odata/nextLink
   paging (-All) and 429/Retry-After backoff. PS 5.1 + 7 compatible (cert signing uses
@@ -132,7 +133,8 @@ function Get-PimManagedIdentityToken {
              elseif ($env:PIM_ManagedIdentityClientId) { "$($env:PIM_ManagedIdentityClientId)".Trim() } else { '' }
     if ($miCid) { $u += "&client_id=$([uri]::EscapeDataString($miCid))" }
     $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER } -TimeoutSec 60
-    if ("$($r.access_token)") { try { [System.Console]::Out.WriteLine("  [mi] token via IDENTITY_ENDPOINT (len $($r.access_token.Length))") } catch {} }  # Console.Out (not Write-Host): headless-safe from any scope (App Service has no console buffer; Write-Host throws there even from module scope)
+    # §100.46: in the tick this is a start-up diagnostic (printed with the start-up block: on change / first of the day / PIM_LOG_VERBOSE=1)
+    if ("$($r.access_token)") { $__mil = "  [mi] token via IDENTITY_ENDPOINT (len $($r.access_token.Length))"; if ($global:PIM_LogQuiet -and (Get-Command Write-PimStartupLine -ErrorAction SilentlyContinue)) { Write-PimStartupLine -Message $__mil } else { try { [System.Console]::Out.WriteLine($__mil) } catch {} } }  # Console.Out (not Write-Host): headless-safe from any scope (App Service has no console buffer; Write-Host throws there even from module scope)
     Set-PimManagedIdentityHomeTenant -Token "$($r.access_token)"; return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
   }
   # App Service (older / some Linux SKUs): MSI_ENDPOINT + MSI_SECRET (api 2017-09-01, header 'Secret')
@@ -348,7 +350,7 @@ function Get-PimRestToken {
   # Deliberately keyed on $thumb (the thumbprint that was REQUESTED), never on $cert (the object
   # that was RESOLVED): a certificate that was named and could not be loaded is a FAILURE TO
   # HONOUR the request, not the absence of one. Reading $cert here is exactly how a missing cert
-  # became "no explicit identity was asked for" and slid onto the ambient az fallback below.
+  # became "no explicit identity was asked for" and slid onto the (since removed) ambient command-line fallback.
   $explicitIdentity = [bool]("$tenant".Trim()) -and [bool]("$cid".Trim()) -and
                       ([bool]("$sec".Trim()) -or [bool]("$thumb".Trim()) -or [bool]$Certificate)
 
@@ -414,9 +416,9 @@ function Get-PimRestToken {
   # client id + its certificate thumbprint, and got back a token for ANOTHER company's tenant
   # (A DIFFERENT COMPANY's tenant) with a different appid. Nothing in the return value
   # said so. The certificate had failed to resolve, the failure went to Write-Verbose, and the
-  # "dev convenience" az fallback below then minted a token for whatever subscription happened
-  # to be the az DEFAULT context -- which on the dev machine is frequently another tenant
-  # entirely, a hazard CLAUDE.md already documents for hand-typed az commands.
+  # "dev convenience" command-line fallback (since removed, REQ 100.42) then minted a token for whatever
+  # subscription happened to be that tool's DEFAULT context -- which on the dev machine is frequently another
+  # tenant entirely.
   #
   # 🔑 THE POINT IS NOT THAT THE FALLBACK EXISTS. It is that it ran AFTER the caller had named a
   # tenant, a client id and a credential. That caller has said exactly who it wants to be, and
@@ -426,7 +428,7 @@ function Get-PimRestToken {
   #
   # 📌 Same family as BUG-34, which fixed precisely this shape one layer down in
   # New-PimSqlConnection ("a valid-but-wrong-tenant token was taken, so the explicitly
-  # configured SPN never got a turn") and left the az branch here standing.
+  # configured SPN never got a turn") and left the command-line branch here standing (removed since, REQ 100.42).
   # =====================================================================================
   if (-not $res -and $explicitIdentity) {
     $why = if ("$thumb".Trim() -and -not $cert) {
@@ -438,9 +440,9 @@ function Get-PimRestToken {
            'principal succeeds and then fails far away as a permissions error.')
   }
 
-  # §100.42 / framework §12.17 (owner 2026-10-09: "modern single connect only"): the az CLI fallback
-  # (`az account get-access-token`, "reuse whoever is signed in to az") is GONE. A signed-in setup run does not borrow an
-  # az session any more: tools\setup\_PimSignedIn.ps1 (Set-PimSignedInGlobals) REGISTERS its token source here --
+  # §100.42 / framework §12.17 (owner 2026-10-09: "modern single connect only"): the command-line fallback ("reuse
+  # whoever is signed in to the CLI") is GONE. A signed-in setup run does not borrow a tool's session any more:
+  # tools\setup\_PimSignedIn.ps1 (Set-PimSignedInGlobals) REGISTERS its token source here --
   # the Invardia Support-app session's Get-InvardiaSupportToken when that session is open in the shell, otherwise the
   # person's own browser sign-in (Get-PimInteractiveToken, auth-code + PKCE). Only reached when NO explicit identity
   # was requested (the refusal above still throws for one that cannot be honoured).
@@ -690,7 +692,12 @@ function Invoke-PimRest {
         # 2026-09-21 (operator: "can you provide graph or arm errors in here as i have nothing to work with"): the
         # thrown message stays code+message (above), but the full body of the LAST failure is kept for a caller that
         # needs more -- e.g. a policy-rule PATCH that adds the request-id and what it sent (Invoke-PimPolicyRulePatch).
-        $global:PimLastRestError = [pscustomobject]@{ method = $Method; url = $next; status = $code; body = "$body"; atUtc = [datetime]::UtcNow }
+        # 100.50: the Retry-After of that failure too (seconds; 0 = none) -- an ARM write refused with 409 OperationInProgress
+        # is waited out by Invoke-PimArmBusyRetry (PIM-ArmContainerApps.ps1), which honours it when the service sent one.
+        $raLast = 0
+        try { $d = $_.Exception.Response.Headers.RetryAfter.Delta; if ($d) { $raLast = [int][Math]::Ceiling($d.TotalSeconds) } } catch { }
+        if (-not $raLast) { try { [void][int]::TryParse("$($_.Exception.Response.Headers['Retry-After'])", [ref]$raLast) } catch { } }
+        $global:PimLastRestError = [pscustomobject]@{ method = $Method; url = $next; status = $code; body = "$body"; atUtc = [datetime]::UtcNow; retryAfter = $raLast }
         if ($detail) { throw "$Method $next -> HTTP $code : $detail$hintText" }
         throw "$Method $next -> HTTP $code : (no error body returned by the service)$hintText"
       }

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    CERTIFICATE-ONLY az login into a restricted, per-run profile directory. Dot-sourced by the one-shot MSP build
+    CERTIFICATE-ONLY sign-in (PIM-Rest, no az) with its PEM in a restricted, per-run directory. Dot-sourced by the one-shot MSP build
     (tools/setup/Invoke-PimMspBuild.ps1); the file name is historical.
 
 .DESCRIPTION
@@ -14,9 +14,9 @@
 
       * ConvertTo-PimCertificatePem   -- a LocalMachine\My certificate WITH its key as the PEM az expects;
       * New-PimRestrictedProfileDir   -- a directory only SYSTEM, Administrators and the running account can read;
-      * Invoke-PimCertAzLogin         -- az logs in as ONE certificate identity into that directory (an isolated
-                                         AZURE_CONFIG_DIR -- never the machine's default profile) and the context is
-                                         read back. The caller removes the directory when the run ends.
+      * Invoke-PimCertAzLogin         -- PIM-Rest's token client signs in as ONE certificate identity (100.41: no az,
+                                         no az profile), the PEM lands in that directory, and the subscription is read
+                                         back over ARM. The caller removes the directory when the run ends.
 #>
 
 function ConvertTo-PimCertificatePem {
@@ -54,31 +54,36 @@ function New-PimRestrictedProfileDir {
 
 function Invoke-PimCertAzLogin {
     <#
-      71.18 -- log az in as ONE certificate identity into -ProfileDir (created + ACL'd) and select -SubscriptionId. Used by the
-      one-shot MSP build (Invoke-PimMspBuild.ps1). Returns @{ ok; reason; pemPath }. The PEM stays in -ProfileDir for the
-      steps that need a PEM file (the hosting prerequisites) and is removed with the directory by the CALLER.
-      The `az account set` below runs INSIDE the isolated -ProfileDir (AZURE_CONFIG_DIR), never the machine's default profile.
+      71.18 -- sign in as ONE certificate identity and prove it can see -SubscriptionId. Used by the one-shot MSP build
+      (Invoke-PimMspBuild.ps1). Returns @{ ok; reason; pemPath }. The PEM is written into -ProfileDir (created + ACL'd)
+      for the steps that take a PEM path ({{pem:deploy}} -- they find the certificate BY THUMBPRINT in the store), and is
+      removed with the directory by the CALLER. The name is historical.
+      100.41 NO-AZ: no az, no AZURE_CONFIG_DIR. PIM-Rest's ONE token client is pointed at the certificate
+      (Connect-PimSetupRest, certificate mode) and the subscription is read back over ARM: it must exist, be visible to
+      that identity, and belong to -TenantId. -Connect / -ReadSubscription are the offline test seams.
     #>
     param([Parameter(Mandatory)][string]$TenantId, [Parameter(Mandatory)][string]$ClientId, [Parameter(Mandatory)][string]$CertThumbprint,
-          [Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ProfileDir, [string]$Name = 'deploy')
+          [Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ProfileDir, [string]$Name = 'deploy',
+          [scriptblock]$Connect, [scriptblock]$ReadSubscription)
     $null = New-PimRestrictedProfileDir -Path $ProfileDir
-    $env:AZURE_CONFIG_DIR = $ProfileDir
-    # az spawns a DETACHED telemetry uploader that keeps writing into the profile after the command returns, which
-    # stops the caller from removing the directory. No telemetry, nothing left behind.
-    $env:AZURE_CORE_COLLECT_TELEMETRY = 'false'
-    # Windows PowerShell 5.1 turns ANY native stderr line into a terminating NativeCommandError under
-    # $ErrorActionPreference='Stop' -- and az prints a harmless 32-bit-Python warning on login. The exit code is checked.
-    $ErrorActionPreference = 'Continue'
     $cert = Get-Item -LiteralPath "Cert:\LocalMachine\My\$CertThumbprint" -ErrorAction SilentlyContinue
     if (-not $cert) { return @{ ok = $false; reason = "certificate $CertThumbprint is not in Cert:\LocalMachine\My" } }
     try { $pem = ConvertTo-PimCertificatePem -Certificate $cert } catch { return @{ ok = $false; reason = "$($_.Exception.Message)" } }
     $pemPath = Join-Path $ProfileDir "$Name.pem"
     [IO.File]::WriteAllText($pemPath, $pem, [Text.Encoding]::ASCII); $pem = $null
-    az login --service-principal -u $ClientId --tenant $TenantId --certificate $pemPath --allow-no-subscriptions -o none --only-show-errors 2>$null
-    if ($LASTEXITCODE -ne 0) { return @{ ok = $false; reason = "az certificate login failed for $ClientId in $TenantId" } }
-    az account set --subscription $SubscriptionId --only-show-errors 2>$null
-    if ($LASTEXITCODE -ne 0) { return @{ ok = $false; reason = "$ClientId cannot select subscription $SubscriptionId" } }
-    $cur = az account show --query "{s:id,t:tenantId}" -o json --only-show-errors 2>$null | ConvertFrom-Json
-    if ("$($cur.s)" -ne $SubscriptionId -or "$($cur.t)" -ne $TenantId) { return @{ ok = $false; reason = "az context read back as $($cur.s)/$($cur.t), expected $SubscriptionId/$TenantId" } }
-    return @{ ok = $true; reason = "az logged in by certificate as $ClientId (tenant $TenantId, subscription $SubscriptionId)"; pemPath = $pemPath }
+    if (-not $Connect) {
+        if (-not (Get-Command Connect-PimSetupRest -ErrorAction SilentlyContinue)) {
+            $sh = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared'
+            if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $sh 'PIM-Rest.ps1') }
+            . (Join-Path $sh 'PIM-ArmSetup.ps1')
+        }
+        $Connect = { param($t, $c, $th, $s) [void](Connect-PimSetupRest -TenantId $t -ClientId $c -CertThumbprint $th -SubscriptionId $s) }
+    }
+    if (-not $ReadSubscription) { $ReadSubscription = { param($s) Get-PimArmSubscription -SubscriptionId $s -ErrorAsNull } }
+    try { & $Connect $TenantId $ClientId $CertThumbprint $SubscriptionId } catch { return @{ ok = $false; reason = "certificate sign-in failed for $ClientId in ${TenantId}: $($_.Exception.Message)"; pemPath = $pemPath } }
+    $cur = $null
+    try { $cur = & $ReadSubscription $SubscriptionId } catch { $cur = $null }
+    if (-not $cur) { return @{ ok = $false; reason = "$ClientId cannot see subscription $SubscriptionId$(if ($global:PimSetupRestLastError) { " ($($global:PimSetupRestLastError))" })"; pemPath = $pemPath } }
+    if ("$($cur.subscriptionId)" -ne $SubscriptionId -or "$($cur.tenantId)" -ne $TenantId) { return @{ ok = $false; reason = "subscription read back as $($cur.subscriptionId)/$($cur.tenantId), expected $SubscriptionId/$TenantId"; pemPath = $pemPath } }
+    return @{ ok = $true; reason = "signed in by certificate as $ClientId (tenant $TenantId, subscription $SubscriptionId)"; pemPath = $pemPath }
 }

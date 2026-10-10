@@ -365,7 +365,7 @@ function Get-PimSetupFindingStates {
     $out = New-Object System.Collections.Generic.List[object]
     $add = { param($id, $n) if ($n -gt 0) { [void]$out.Add([ordered]@{ id = $id; severity = $def[$id].severity; area = $def[$id].area; count = [int]$n }) } }
     $groups = Get-PimSetupRunGroups -Runs @($Facts.Runs)
-    & $add 'job-failing' @($groups.Values | Where-Object { "$($_.run.status)".Trim().ToLowerInvariant() -eq 'failed' -or ($_.run.PSObject.Properties['ok'] -and -not [bool]$_.run.ok -and "$($_.run.status)" -notin @('skipped', 'running', 'held', 'interrupted', 'unimplemented')) }).Count
+    & $add 'job-failing' @($groups.Values | Where-Object { "$($_.run.status)".Trim().ToLowerInvariant() -eq 'failed' -or ($_.run.PSObject.Properties['ok'] -and -not [bool]$_.run.ok -and "$($_.run.status)" -notin @('skipped', 'running', 'held', 'interrupted', 'unimplemented', 'throttled')) }).Count   # §100.45: throttled is not failing
     $us = $Facts.UpdateState
     & $add 'update-failing' $(if ($us -and "$(Get-PimSetupField $us 'outcome')" -eq 'failed') { 1 } else { 0 })
     $fails = @($Facts.EngineFailures | Where-Object { $_ })

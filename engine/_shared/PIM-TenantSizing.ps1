@@ -442,8 +442,12 @@ function Invoke-PimJobSizingUpdate {
           [datetime]$NowUtc = [datetime]::UtcNow,
           # 2.4.544: the counts the TICK recorded (pim.Settings 'TenantObjectCounts') -- used when the updater's own Graph
           # count is refused (its identity has no directory read right: HTTP 403 on every environment, 2026-10-09).
-          [AllowNull()][object]$StoredCounts = $null)
+          [AllowNull()][object]$StoredCounts = $null,
+          # 100.50: the job PATCH and the tags PATCH wait out "HTTP 409 ContainerAppsJobOperationInProgress" (the tick roll
+          # one step earlier is still provisioning) through Invoke-PimArmBusyRetry (PIM-ArmContainerApps.ps1). -Sleep: test seam.
+          [int[]]$BusyWaits = @(20, 20, 20, 20, 20, 20), [scriptblock]$Sleep)
     $log = New-Object System.Collections.Generic.List[string]
+    $jobWho = $(if ($JobName -eq 'ca-pim-tick') { 'the tick job' } else { "the job $JobName" })
     $path = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/jobs/$JobName"
     try {
         $job = & $Arm 'GET' "$path`?api-version=$($script:PimTenantSizingAcaApi)" $null
@@ -473,25 +477,40 @@ function Invoke-PimJobSizingUpdate {
         if ($same) {
             # Unchanged: the tags are refreshed only when nothing is recorded yet, so the self-correct window ('pim-sizing-utc')
             # keeps meaning "since the job was last RESIZED" and old evidence is not counted twice.
-            if (-not $rec.recorded -and $counts) { try { [void](& $Arm 'PATCH' "$path/providers/Microsoft.Resources/tags/default?api-version=2021-04-01" @{ operation = 'Merge'; properties = @{ tags = $tags } }) } catch { $log.Add("tags not recorded: $($_.Exception.Message)") } }
+            if (-not $rec.recorded -and $counts) { try { [void](Invoke-PimArmBusyRetry -Waits $BusyWaits -Sleep $Sleep -Write { & $Arm 'PATCH' "$path/providers/Microsoft.Resources/tags/default?api-version=2021-04-01" @{ operation = 'Merge'; properties = @{ tags = $tags } } }) } catch { $log.Add("tags not recorded: $($_.Exception.Message)") } }
             return [pscustomobject]@{ ok = $true; changed = $false; size = $size; selfCorrect = $sc
                 detail = ("{0}: {1} CPU / {2}, replicaTimeout {3} s -- unchanged ({4}; counts: {5})" -f $JobName, $size.Cpu, $size.Memory, $size.ReplicaTimeout, $size.Source, $countSrc); log = @($log.ToArray()) }
         }
-        foreach ($c in $containers) {
-            if ($null -eq $c.resources) { $c | Add-Member -NotePropertyName resources -NotePropertyValue ([pscustomobject]@{}) -Force }
-            $c.resources | Add-Member -NotePropertyName cpu -NotePropertyValue ([double](ConvertTo-PimJobCpu $size.Cpu)) -Force
-            $c.resources | Add-Member -NotePropertyName memory -NotePropertyValue "$($size.Memory)" -Force
+        # The PATCH body from a job object: its containers' resources + configuration.replicaTimeout, configuration WITHOUT its
+        # secrets (a GET returns them without values, and sending them back would blank them).
+        $sizeBody = {
+            param($j)
+            foreach ($c in @($j.properties.template.containers)) {
+                if ($null -eq $c.resources) { $c | Add-Member -NotePropertyName resources -NotePropertyValue ([pscustomobject]@{}) -Force }
+                $c.resources | Add-Member -NotePropertyName cpu -NotePropertyValue ([double](ConvertTo-PimJobCpu $size.Cpu)) -Force
+                $c.resources | Add-Member -NotePropertyName memory -NotePropertyValue "$($size.Memory)" -Force
+            }
+            $cfg = [ordered]@{}
+            foreach ($p in @($j.properties.configuration.PSObject.Properties)) { if ($p.Name -ne 'secrets') { $cfg[$p.Name] = $p.Value } }
+            $cfg['replicaTimeout'] = [int]$size.ReplicaTimeout
+            @{ properties = @{ configuration = $cfg; template = $j.properties.template } }
         }
-        # configuration WITHOUT its secrets: a GET returns them without values, and sending them back would blank them.
-        $cfg = [ordered]@{}
-        foreach ($p in @($job.properties.configuration.PSObject.Properties)) { if ($p.Name -ne 'secrets') { $cfg[$p.Name] = $p.Value } }
-        $cfg['replicaTimeout'] = [int]$size.ReplicaTimeout
-        [void](& $Arm 'PATCH' "$path`?api-version=$($script:PimTenantSizingAcaApi)" @{ properties = @{ configuration = $cfg; template = $job.properties.template } })
-        try { [void](& $Arm 'PATCH' "$path/providers/Microsoft.Resources/tags/default?api-version=2021-04-01" @{ operation = 'Merge'; properties = @{ tags = $tags } }) } catch { $log.Add("tags not recorded: $($_.Exception.Message)") }
+        # 100.50: the tick was rolled one step earlier, so its provisioning is often still running -- wait it out, bounded.
+        # After a wait the job is READ AGAIN: a template read before the roll finished must never be written back over it.
+        $sizeTry = @{ n = 0 }
+        [void](Invoke-PimArmBusyRetry -Waits $BusyWaits -Sleep $Sleep -Write {
+            $sizeTry.n++
+            $jw = $job; if ($sizeTry.n -gt 1) { $fresh = & $Arm 'GET' "$path`?api-version=$($script:PimTenantSizingAcaApi)" $null; if ($fresh) { $jw = $fresh } }
+            & $Arm 'PATCH' "$path`?api-version=$($script:PimTenantSizingAcaApi)" (& $sizeBody $jw) })
+        try { [void](Invoke-PimArmBusyRetry -Waits $BusyWaits -Sleep $Sleep -Write { & $Arm 'PATCH' "$path/providers/Microsoft.Resources/tags/default?api-version=2021-04-01" @{ operation = 'Merge'; properties = @{ tags = $tags } } }) } catch { $log.Add("tags not recorded: $($_.Exception.Message)") }
         return [pscustomobject]@{ ok = $true; changed = $true; size = $size; selfCorrect = $sc
             detail = ("{0}: {1} CPU / {2}, replicaTimeout {3} s -> {4} CPU / {5}, replicaTimeout {6} s ({7}; counts: {8})" -f $JobName, $cur.Cpu, $cur.Memory, $cur.ReplicaTimeout, $size.Cpu, $size.Memory, $size.ReplicaTimeout, $size.Source, $countSrc)
             log = @($log.ToArray()) }
     } catch {
+        # 100.50: still busy after the bounded wait = a plain note, never "not sized: <ARM error>" and never a failed update.
+        if ("$($_.Exception.Message)" -match '(?i)OperationInProgress|active provisioning operation') {
+            return [pscustomobject]@{ ok = $false; changed = $false; busy = $true; size = $null; detail = "$jobWho was busy; sizing retried next update"; log = @($log.ToArray()) }
+        }
         return [pscustomobject]@{ ok = $false; changed = $false; size = $null; detail = "$JobName not sized: $((("$($_.Exception.Message)") -split "`n")[0])"; log = @($log.ToArray()) }
     }
 }

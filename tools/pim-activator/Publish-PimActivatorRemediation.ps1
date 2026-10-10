@@ -86,7 +86,7 @@ $ErrorActionPreference = 'Stop'
 # The pure builder (catalog + the filled pair) and the shipped Detect / Remediate text. Loaded with the literal form below
 # so Build-PimSupportScripts inlines it (with the two scripts embedded) into the standalone download.
 . (Join-Path $PSScriptRoot '_PimActivatorBuild.ps1')
-# 12.7 run frame: "Documentation: <page>" as the first line + a transcript in the temp folder (its path printed at the end).
+# 12.7 run frame: "<Script> version <x.y.z> - documentation: <page>" as the first line (100.52) + a transcript in the temp folder (its path printed at the end).
 . (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
 $null = Start-PimScriptRun -Script 'Publish-PimActivatorRemediation'
 try {

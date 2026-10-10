@@ -1944,6 +1944,40 @@ function Invoke-PimScheduleCreate {
     throw "schedule create still rejected after duration ladder ($Path)"
 }
 
+# §100.45: a tenant-wide schedule preload that Microsoft THROTTLED (or answered 5xx / timed out) is tried ONCE more, after a
+# bounded pause (the Retry-After the error names, else 15 s; never more than 30 s), before it is declared INCOMPLETE. The
+# whole list is read again (no half-collected page is kept). Any other error is not retried. Sleep is injectable for tests.
+$script:PimPreloadRetryMaxSeconds = 30
+$script:PimPreloadRetryDefaultSeconds = 15
+$script:PimPreloadSleep = { param([int]$Seconds) Start-Sleep -Seconds $Seconds }
+function Test-PimPreloadErrorRetryable {
+    # PURE. Is this preload error throttling / service-side (worth one more try)?
+    param([string]$Message)
+    $m = "$Message"
+    if ($m -match '(?i)\bHTTP 4(?!29)\d\d\b|\b40[13]\b|Forbidden|Unauthori[sz]ed|Authorization_RequestDenied') { return $false }
+    return [bool]($m -match '(?i)\b429\b|Too ?Many ?Requests|throttl|\bHTTP 5\d\d\b|\b50[0234]\b|Service ?Unavailable|Bad ?Gateway|Gateway ?Time-?out|timed out|\btimeout\b|TaskCanceledException')
+}
+function Get-PimPreloadRetryWaitSeconds {
+    # PURE. The pause before the one retry: the Retry-After the message names (bounded), else the default.
+    param([string]$Message)
+    $s = $script:PimPreloadRetryDefaultSeconds
+    if ("$Message" -match '(?i)Retry-?After\D{0,4}(\d+)') { $s = [int]$Matches[1] }
+    return [int][Math]::Max(1, [Math]::Min($script:PimPreloadRetryMaxSeconds, $s))
+}
+function Invoke-PimPreloadList {
+    # One tenant-wide list for a preload, with the §100.45 single retry. Returns the items; throws the last error.
+    param([Parameter(Mandatory)][string]$Path)
+    try { return @(Invoke-PimGraph -Path $Path -All) }
+    catch {
+        $msg = "$($_.Exception.Message)"
+        if (-not (Test-PimPreloadErrorRetryable -Message $msg)) { throw }
+        $w = Get-PimPreloadRetryWaitSeconds -Message $msg
+        Write-Warning ("  [engine] preload of {0} throttled / unavailable -- trying once more in {1} s: {2}" -f $Path, $w, $msg)
+        & $script:PimPreloadSleep $w
+        return @(Invoke-PimGraph -Path $Path -All)
+    }
+}
+
 function Get-PimGroupSchedulePreload {
     # TENANT-WIDE preload of ALL PIM-for-Groups eligibility + assignment schedules, indexed
     # by groupId -- ported from Get-PimGroupSchedulesPreloaded (the func lib). One bulk read
@@ -1961,7 +1995,7 @@ function Get-PimGroupSchedulePreload {
     $errs = New-Object System.Collections.Generic.List[string]
     foreach ($pair in @(@{ ep = 'eligibilitySchedules'; idx = $elig }, @{ ep = 'assignmentSchedules'; idx = $act })) {
         try {
-            foreach ($s in @(Invoke-PimGraph -Path "/identityGovernance/privilegedAccess/group/$($pair.ep)" -All)) {
+            foreach ($s in @(Invoke-PimPreloadList -Path "/identityGovernance/privilegedAccess/group/$($pair.ep)")) {
                 $gid = "$($s.groupId)"; if (-not $gid) { continue }
                 if (-not $pair.idx.ContainsKey($gid)) { $pair.idx[$gid] = New-Object System.Collections.ArrayList }
                 [void]$pair.idx[$gid].Add($s)
@@ -2277,7 +2311,7 @@ function Get-PimDirRoleSchedulePreload {
     $errs = New-Object System.Collections.Generic.List[string]
     foreach ($pair in @(@{ ep = 'roleEligibilityScheduleInstances'; idx = $elig }, @{ ep = 'roleAssignmentScheduleInstances'; idx = $act })) {
         try {
-            foreach ($s in @(Invoke-PimGraph -Path "/roleManagement/directory/$($pair.ep)?`$expand=roleDefinition" -All)) {
+            foreach ($s in @(Invoke-PimPreloadList -Path "/roleManagement/directory/$($pair.ep)?`$expand=roleDefinition")) {
                 $pp = "$($s.principalId)"; if (-not $pp) { continue }
                 if (-not $pair.idx.ContainsKey($pp)) { $pair.idx[$pp] = New-Object System.Collections.ArrayList }
                 [void]$pair.idx[$pp].Add($s)
@@ -2546,7 +2580,8 @@ function Add-PimWorkloadGateWarnings {
             $held[$k] = if (Get-Command Get-PimWorkloadPrereqHeldReasons -ErrorAction SilentlyContinue) { Get-PimWorkloadPrereqHeldReasons -Kind $k } else { $null }
         }
         foreach ($w in @(Get-PimWorkloadGateWarnings -Rows $Rows -BindingAvailable $avail -Reason $reason -BoundTagsByKind $bound -PrereqHeldByKind $held)) {
-            Write-Warning "  [engine] Groups: $w"
+            # §100.46: the same gate warning every run -- first, on change, daily (it still reaches the run's summary below)
+            if (Get-Command Write-PimLogOnce -ErrorAction SilentlyContinue) { Write-PimLogOnce -Key "engine.groups.gate|$w" -Message "  [engine] Groups: $w" -Level Warning } else { Write-Warning "  [engine] Groups: $w" }
             if ($Context -and $Context['__pimScopeWarnings'] -is [System.Collections.Generic.List[string]]) { $Context['__pimScopeWarnings'].Add("$w") }
         }
     } catch { Write-Warning "  [engine] Groups: the workload-binding check could not run: $($_.Exception.Message)" }

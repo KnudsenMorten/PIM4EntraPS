@@ -55,6 +55,27 @@ function Get-PimJobFailureAlert {
     $detail = "$(Get-PimJobAlertField -Item $Run -Name 'detail')".Trim()
     $scope  = "$(Get-PimJobAlertField -Item $Run -Name 'scope')".Trim()
 
+    # §100.45: THROTTLED (Microsoft rate-limited / was unavailable, nothing applied) is NORMAL and retried by the next run --
+    # never mailed, EXCEPT the one run where the streak crossed the "PIM cannot handle it" line (throttleAlert, set by
+    # Set-PimRunThrottleState): then ONE mail that the job is STUCK, not that it failed.
+    if ($status -eq 'throttled') {
+        $esc = Get-PimJobAlertField -Item $Run -Name 'throttleAlert'
+        if (-not ($null -ne $esc -and [bool]$esc) -or -not $name) {
+            $out.reason = 'throttled by Microsoft -- retried on the next run, not alerted'
+            return $out
+        }
+        $n = 0; try { $n = [int](Get-PimJobAlertField -Item $Run -Name 'throttleCount') } catch { $n = 0 }
+        $since = "$(Get-PimJobAlertField -Item $Run -Name 'throttleSinceUtc')".Trim()
+        $out.fire  = $true
+        $out.title = "Job '$name' is STUCK: Microsoft has throttled it for $n run(s) in a row"
+        $bits = New-Object System.Collections.Generic.List[string]
+        $bits.Add("Every run since $since was throttled (or Microsoft was unavailable), so the job has not completed for that long. PIM retries it on every run; this mail is sent once per streak.")
+        if ($detail) { $bits.Add("Last answer: $detail") }
+        if ($type)   { $bits.Add("type=$type") }
+        if ($scope)  { $bits.Add("scope=$scope") }
+        $out.detail = ($bits.ToArray() -join ' ')
+        return $out
+    }
     # ONLY a real failure -- or a HOLD (71.13): a safety breaker stopped a change set and it needs an
     # operator's approval, so someone must be told. 'skipped' (out of scope for this deployment) and
     # 'unimplemented' (a placeholder handler) are neither -- see the header.
@@ -97,6 +118,11 @@ function Get-PimJobAlertMailParts {
     $status = "$(Get-PimJobAlertField -Item $Run -Name 'status')".Trim().ToLowerInvariant()
     $name   = "$(Get-PimJobAlertField -Item $Run -Name 'name')".Trim()
     $out = [ordered]@{ title = "$($Alert.title)"; headline = ''; detailHtml = (& $enc "$($Alert.detail)"); actionHtml = ''; skip = $false }
+    if ($status -eq 'throttled') {
+        $out.headline = "The job '$name' is stuck: Microsoft keeps throttling it, so it has not completed for a long time."
+        $out.actionHtml = 'Nothing is broken in your setup and PIM keeps retrying. If it does not recover, spread the job cadence (Jobs &rsaquo; Job schedule) or check the Microsoft service health. Open the PIM Manager, <b>Jobs &rsaquo; Engine logs &amp; errors</b>, for the runs.'
+        return [pscustomobject]$out
+    }
     if ($status -ne 'held') {
         $out.headline = "The job '$name' failed."
         $out.actionHtml = 'Open the PIM Manager, <b>Jobs &rsaquo; Engine logs &amp; errors</b>: every failing item is listed there with its cause and, where there is one, a fix.'
@@ -214,7 +240,8 @@ function Invoke-PimJobRunAlert {
         $d = Get-PimJobFailureAlert -Run $Run
         if (-not $d.fire) { return 'none' }
         # SETTLING: a failure during a commit's rollout is held, not mailed (a HOLD is never delayed).
-        if ("$(Get-PimJobAlertField -Item $Run -Name 'status')".Trim().ToLowerInvariant() -ne 'held') {
+        # §100.45: nor is a THROTTLED streak's one "stuck" mail (it is decided on the crossing run only; held = lost).
+        if ("$(Get-PimJobAlertField -Item $Run -Name 'status')".Trim().ToLowerInvariant() -notin @('held', 'throttled')) {
             $lastChange = Get-PimLastDesiredChangeUtc
             if (Test-PimAlertSettling -LastChangeUtc $lastChange) {
                 Write-Host ("[alert] '{0}' failed while the commit of {1:u} is still rolling out -- not mailed now; mailed if it still fails after {2} minutes" -f (Get-PimJobAlertField -Item $Run -Name 'name'), $lastChange, $script:PimAlertSettleMinutes) -ForegroundColor DarkYellow
@@ -375,4 +402,72 @@ function Send-PimJobAlertViaNotify {
         }
     }
     return $true
+}
+
+# ---------------------------------------------------------------------------
+# §100.45 THROTTLED STREAK: when is throttling something PIM "cannot handle"?
+# ---------------------------------------------------------------------------
+# Owner 2026-10-10: "it is not to alert me about, except if you cannot handle it, but this is normal". Generous defaults:
+# 12 throttled runs in a row OR 6 hours without a completed run. Both are settings in pim.Settings['Alerting']
+# (throttledAfterRuns / throttledAfterHours), the same value that holds the recipients and event switches.
+$script:PimThrottledAfterRunsDefault  = 12
+$script:PimThrottledAfterHoursDefault = 6
+
+function Get-PimThrottleAlertThresholds {
+    <# @{ afterRuns; afterHours } from pim.Settings['Alerting'] (throttledAfterRuns / throttledAfterHours), else the defaults.
+       A missing / unreadable / non-positive value keeps its default. Never throws. #>
+    param([AllowNull()][object]$Alerting)
+    $out = [ordered]@{ afterRuns = $script:PimThrottledAfterRunsDefault; afterHours = [double]$script:PimThrottledAfterHoursDefault }
+    $raw = $Alerting
+    if ($null -eq $raw) {
+        try {
+            $cs = $null
+            if (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue) { $cs = Get-PimSqlSettingsConnectionString }
+            if ("$cs".Trim() -and (Get-Command Get-PimSqlSetting -ErrorAction SilentlyContinue)) { $raw = Get-PimSqlSetting -ConnectionString $cs -Name 'Alerting' }
+        } catch { $raw = $null }
+    }
+    if ($raw -is [string]) { try { $raw = $raw | ConvertFrom-Json } catch { $raw = $null } }
+    $r = 0; $h = 0.0
+    try { if ([int]::TryParse("$(Get-PimJobAlertField -Item $raw -Name 'throttledAfterRuns')", [ref]$r) -and $r -gt 0) { $out.afterRuns = $r } } catch { }
+    try { if ([double]::TryParse("$(Get-PimJobAlertField -Item $raw -Name 'throttledAfterHours')", [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$h) -and $h -gt 0) { $out.afterHours = $h } } catch { }
+    return [pscustomobject]$out
+}
+
+function Get-PimThrottleStreak {
+    <#
+      PURE. The throttled streak a new THROTTLED run belongs to. -Previous = the job's previous finished run that says
+      something about its health (the caller steps over running / skipped / unimplemented / interrupted), or $null.
+      Returns @{ count; sinceUtc; stuck; alert }:
+        count    -- throttled runs in a row, this one included (the previous record carries its own count)
+        sinceUtc -- when the streak started (the first throttled run's start)
+        stuck    -- count >= -AfterRuns, or the streak is -AfterHours old: PIM is not handling it
+        alert    -- stuck NOW and not already stuck on the previous run: the ONE run that mails. The next completed run
+                    ends the streak by itself (no acknowledgement -- the self-heal rule).
+    #>
+    param([AllowNull()][object]$Previous, [Parameter(Mandatory)][object]$Run, [int]$AfterRuns = $script:PimThrottledAfterRunsDefault,
+          [double]$AfterHours = $script:PimThrottledAfterHoursDefault)
+    $styles = [System.Globalization.DateTimeStyles]'AdjustToUniversal,AssumeUniversal'
+    $parse = { param($v) if ($v -is [datetime]) { return $v.ToUniversalTime() }; $d = [datetime]::MinValue; if ("$v".Trim() -and [datetime]::TryParse("$v", [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d)) { return $d }; return $null }
+    $start = & $parse (Get-PimJobAlertField -Item $Run -Name 'startedUtc')
+    $end   = & $parse (Get-PimJobAlertField -Item $Run -Name 'finishedUtc')
+    if ($null -eq $end) { $end = $start }
+    $count = 1; $since = $start; $prevStuck = $false
+    $prevSt = "$(Get-PimJobAlertField -Item $Previous -Name 'status')".Trim().ToLowerInvariant()
+    if ($Previous -and $prevSt -eq 'throttled') {
+        $pc = 0; try { $pc = [int](Get-PimJobAlertField -Item $Previous -Name 'throttleCount') } catch { $pc = 0 }
+        $count = [Math]::Max(1, $pc) + 1
+        $ps = & $parse (Get-PimJobAlertField -Item $Previous -Name 'throttleSinceUtc')
+        if ($null -eq $ps) { $ps = & $parse (Get-PimJobAlertField -Item $Previous -Name 'startedUtc') }
+        if ($null -ne $ps) { $since = $ps }
+        $pst = Get-PimJobAlertField -Item $Previous -Name 'throttleStuck'
+        $prevStuck = ($null -ne $pst -and [bool]$pst)
+    }
+    $ageH = 0.0; if ($null -ne $since -and $null -ne $end) { $ageH = ($end - $since).TotalHours }
+    $stuck = ($count -ge [Math]::Max(1, $AfterRuns)) -or ($AfterHours -gt 0 -and $ageH -ge $AfterHours)
+    return [pscustomobject]@{
+        count    = [int]$count
+        sinceUtc = $(if ($null -ne $since) { $since.ToString('o') } else { '' })
+        stuck    = [bool]$stuck
+        alert    = [bool]($stuck -and -not $prevStuck)
+    }
 }

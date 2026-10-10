@@ -372,7 +372,7 @@ function Test-PimMspBuildConfig {
       deployIdentity.clientId + deployIdentity.certThumbprint: OPTIONAL since 71.33. Present = certificate mode (then both
       are required and validated exactly as before); absent = signed-in mode (Get-PimMspBuildAuthMode).
       Master: baseline.storageAccount; managed tenants[] each tenantId + displayName (+ ring, tags).
-      Slave : adminPrefixes; master.tenantId, master.subscriptionId, master.storageAccount; master.deployIdentity.* in
+      Slave : adminPrefixes (OPTIONAL since the owner 2026-10-10); master.tenantId, master.subscriptionId, master.storageAccount; master.deployIdentity.* in
               certificate mode (a signed-in managed-tenant build never holds the managing tenant's certificate -- the steps that need it
               are planned as NOT RUNNABLE, see Get-PimMspBuildPlan).
     #>
@@ -516,7 +516,10 @@ function Test-PimMspBuildConfig {
         }
         $sep = "$(& $V 'baselineServiceEndpoint')".Trim()
         if ($sep -and $sep -notin @('Microsoft.Storage', 'Microsoft.Storage.Global')) { $errors.Add("'baselineServiceEndpoint' must be Microsoft.Storage (master storage in the SAME region) or Microsoft.Storage.Global (any region)") }
-        if (-not @(& $V 'adminPrefixes' | Where-Object { "$_".Trim() }).Count) { $errors.Add("'adminPrefixes' is required on a managed tenant (IMP-13: the MSP admin prefix is mandatory)") }
+        # IMP-13 ("the MSP admin prefix is mandatory") is SUPERSEDED by the owner 2026-10-10 ("remove the admin pattern question"):
+        # the prefixes are REPORT-ONLY since 2.4.412 (they flag a naming mismatch, never withhold an admin) and the pull job prefers
+        # the tenant's own AdminAccountPatterns setting. Absent = accepted; the downlink step then passes -AllowUncheckedAdminNaming.
+        if (-not @(& $V 'adminPrefixes' | Where-Object { "$_".Trim() }).Count) { $warnings.Add("'adminPrefixes' not set -- admin naming check off until the tenant sets its admin account patterns in Settings") }
         # BUG-175: slaveRing is THE ring of this tenant (every ring is local in the managed tenant) -- the managing tenant's managed tenants[i].ring is
         # only its copy. A value that is set but not 0..2 used to fall silently to 2; a typo in the one authoritative ring
         # is refused instead.
@@ -984,6 +987,9 @@ function Get-PimMspBuildPlan {
         # 'downlinkCron' overrides the TRIGGER only -- a slower trigger caps how fast the GUI cadence can be honoured.
         if ("$(& $V 'downlinkCron')".Trim()) { $dl['Cron'] = "$(& $V 'downlinkCron')".Trim() }
         $dlSwitches = if ($signedIn) { @('Start', 'UseSignedInAccount') } else { @('Start') }
+        # Owner 2026-10-10: adminPrefixes is optional (report-only since 2.4.412). Without it Deploy-PimDownlinkJob refuses unless
+        # told the check is deliberately off; the build says so, and the job uses the tenant's AdminAccountPatterns once set.
+        if (-not @($dl['SlaveAdminPrefixes']).Count) { $dlSwitches = @($dlSwitches) + 'AllowUncheckedAdminNaming' }
         $steps.Add((New-PimMspBuildStep -Id 'downlink' -Title "pull job $job (plain blob URL, signature-verified; system managed identity, Engine Graph set, SQL admin group; retraction report-only)" `
             -Script 'tools\setup\Deploy-PimDownlinkJob.ps1' -Arguments $dl -Switches $dlSwitches -Why 'no engine secret and no link secret: the job runs as its own system identity and reads a public-but-signed blob'))
     }

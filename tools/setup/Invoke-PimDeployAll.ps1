@@ -145,6 +145,10 @@ param(
     [string]$Descriptor,
     [switch]$Apply,
     [switch]$ValidateOnly,
+    # §100.41 (owner 2026-10-10): OUR dev / release gates from tests\live -- the hosted smoke (az-based) and the Pester
+    # deploy-validation tests. OFF by default: a customer install never runs Pester or the az CLI; it gets the community
+    # verify (REST: Manager up, page served, engine job present). Internal rebuilds pass -RunDevGates.
+    [switch]$RunDevGates,
 
     # --- target tenant / subscription (no real ids baked in; pass your own) ---
     [string]$TenantId,
@@ -2801,8 +2805,8 @@ function Invoke-DeployValidation {
         Warn '  confirmed the hosted Manager works; verify it from inside the VNet or a peered client.'
         $smokeExit = -1
     }
-    elseif ($hosted -and (Test-Path $smoke)) {
-        Info 'verify: hosted smoke (Test-PimManagerHostedSmoke.ps1)'
+    elseif ($hosted -and $RunDevGates -and (Test-Path $smoke)) {
+        Info 'verify: hosted smoke (Test-PimManagerHostedSmoke.ps1, -RunDevGates)'
         if ($PSCmdlet.ShouldProcess($ManagerApp, 'run hosted smoke')) {
             # 🔴 THE GATE WAS GIVEN THE APP AND NOTHING ELSE, AND THEN BELIEVED.
             # The smoke takes its evidence from TWO places: the app's boot logs in Log Analytics
@@ -2873,14 +2877,19 @@ function Invoke-DeployValidation {
             # BUG-216: the smoke's contract is 0 = passed, 1 = failed, 2 = SKIPPED checks (not a pass).
             if ($smokeExit -eq 2) { Warn 'verify: the hosted smoke SKIPPED checks (exit 2) -- UNVERIFIED, not a pass; nothing is rolled back for it.' }
         }
-    } elseif ($hosted -and -not (Test-Path $smoke) -and (Test-PimDeployRest) -and "$ResourceGroup".Trim()) {
+    } elseif ($hosted -and (-not $RunDevGates -or -not (Test-Path $smoke)) -and (Test-PimDeployRest) -and "$ResourceGroup".Trim()) {
         # §79.11: the public edition (no tests/) -- run the check that ships with it, as the smoke layer.
-        Info 'verify: the hosted smoke is not part of this edition -- running the community verify (Manager up, page served, engine job present)'
+        # §100.41: also every install without -RunDevGates (the dev smoke needs the az CLI; a customer host has none).
+        Info 'verify: running the community verify (Manager up, page served, engine job present) -- the dev smoke runs only with -RunDevGates'
         if ($PSCmdlet.ShouldProcess($ManagerApp, 'community verify')) { $smokeExit = Invoke-PimCommunityVerify }
     } else { Info 'verify: hosted smoke skipped (community/local or smoke not found)' }
 
     $val = Join-Path $solRoot 'tests\live\PIM.DeployValidation.Tests.ps1'
-    if (Test-Path $val) {
+    # §100.41 (owner 2026-10-10): Pester is a dev tool -- the deploy-validation layer runs ONLY with -RunDevGates, through the
+    # dev runner tests\live\Invoke-PimDeployValidation.ps1 in a child process (no module is loaded by shipped code).
+    $valRunner = Join-Path $solRoot 'tests\live\Invoke-PimDeployValidation.ps1'
+    if (-not $RunDevGates) { Info 'verify: deploy-validation tests are a dev gate (-RunDevGates) -- not run' }
+    elseif ((Test-Path $val) -and (Test-Path $valRunner)) {
         Info 'verify: deploy-validation tests (PIM.DeployValidation.Tests.ps1)'
         if ($PSCmdlet.ShouldProcess($SqlDatabase, 'run deploy-validation tests')) {
             $env:PIM_TenantId      = $TenantId
@@ -2953,8 +2962,11 @@ function Invoke-DeployValidation {
             }
             try {
                 if ($pesterMajor -ge 5) {
-                    $r = Invoke-Pester -Path $val -PassThru -Output Minimal
-                    $valExit = if ($r.FailedCount -gt 0) { 1 } else { 0 }
+                    $valPs = $(if (Get-Command -Name 'pwsh' -CommandType Application -ErrorAction SilentlyContinue) { 'pwsh' } else { (Get-Process -Id $PID).Path })
+                    & $valPs -NoProfile -ExecutionPolicy Bypass -File $valRunner -Path $val | Out-Host
+                    $valCode = $LASTEXITCODE; $global:LASTEXITCODE = 0
+                    if ($valCode -eq 3) { throw 'the deploy-validation runner could not start Pester 5' }
+                    $valExit = if ($valCode) { 1 } else { 0 }
                 } else {
                     $found = if ($pesterMajor -gt 0) { "Pester $pesterMajor.x" } else { 'no Pester module' }
                     Warn "deploy-validation tests SKIPPED -- they need Pester 5, and this host has $found."

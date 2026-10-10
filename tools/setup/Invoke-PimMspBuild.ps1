@@ -293,6 +293,10 @@ try {
     if (-not $StepRunner) {
         $null = New-PimEnrollmentRunDirectory -Path $runDir   # the same ACL as New-PimRestrictedProfileDir on Windows; mode 700 in Cloud Shell (Linux)
         if ($extDir) { $env:AZURE_EXTENSION_DIR = $extDir; Write-Host "    az extensions for this run: $extDir" -ForegroundColor DarkGray }
+        # §100.41 (NO-AZ): PIM-Rest's ONE token client + the ARM / Graph REST layer, loaded at script scope (71.32) BEFORE the
+        # sign-in, so the identity check and the build's own reads share one token client.
+        . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1')
+        . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1')
         if ($authMode -eq 'Certificate') {
             Write-Host "`n==> az certificate login as the deploy identity $($config.deployIdentity.clientId)" -ForegroundColor Cyan
             $login = Invoke-PimCertAzLogin -TenantId $config.tenantId -ClientId $config.deployIdentity.clientId -CertThumbprint $config.deployIdentity.certThumbprint `
@@ -305,19 +309,15 @@ try {
             . (Join-Path $here '_PimSignedIn.ps1')
             Write-Host "`n==> signed-in identity for tenant $($config.tenantId) / subscription $($config.subscriptionId)" -ForegroundColor Cyan
             $who = Get-PimSignedInIdentity -TenantId $config.tenantId -SubscriptionId $config.subscriptionId
-            if (-not $who.ok -and $who.reason -match 'no az sign-in covers') {
-                Write-Host "    not signed in for this subscription -- starting: az login --tenant $($config.tenantId)" -ForegroundColor Yellow
-                $ErrorActionPreference = 'Continue'; az login --tenant $config.tenantId -o none; $ErrorActionPreference = 'Stop'
-                $who = Get-PimSignedInIdentity -TenantId $config.tenantId -SubscriptionId $config.subscriptionId
-            }
             if (-not $who.ok) { throw "REFUSED (nothing was touched): $($who.reason)" }
             Write-Host "    $($who.reason) -- object id $($who.objectId)" -ForegroundColor DarkGray
             $Resolved['{{signed-in-user}}'] = $who.objectId
-            # Some steps judge the az DEFAULT subscription; pin it for the run and put the caller's back afterwards.
-            $ErrorActionPreference = 'Continue'
-            $prevSubscription = "$(az account show --query id -o tsv 2>$null)".Trim()
-            az account set --subscription $config.subscriptionId -o none 2>$null
-            $ErrorActionPreference = 'Stop'
+            # §100.41 (NO-AZ): no az profile is read or pinned -- every step names the subscription and authenticates
+            # through PIM-Rest (the Support-app session or the browser sign-in Get-PimSignedInIdentity just made).
+        }
+        if ($authMode -eq 'Certificate') {
+            # §100.41: the build's OWN reads (the Manager image on a resume, the {{mi-...}} principal ids) go over ARM REST.
+            [void](Connect-PimSetupRest -TenantId "$($config.tenantId)" -ClientId "$($config.deployIdentity.clientId)" -CertThumbprint "$($config.deployIdentity.certThumbprint)")
         }
     }
     if ($authMode -eq 'Certificate') {
@@ -335,9 +335,8 @@ try {
         if ($StepRunner) { $mgrImage = "$($Resolved['{{manager-image}}'])" }
         else {
             $mgrName = if ("$(Get-PimMspBuildValue -Object $config -Path 'managerApp')".Trim()) { "$(Get-PimMspBuildValue -Object $config -Path 'managerApp')".Trim() } else { 'ca-pim-manager' }
-            $ErrorActionPreference = 'Continue'
-            $mgrImage = "$(az containerapp show --subscription $config.subscriptionId -g $config.resourceGroup -n $mgrName --query 'properties.template.containers[0].image' -o tsv --only-show-errors 2>$null)".Trim()
-            $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = 0
+            $mgrApp = Get-PimArmAcaApp -SubscriptionId "$($config.subscriptionId)" -ResourceGroup "$($config.resourceGroup)" -Name $mgrName -ErrorAsNull
+            $mgrImage = "$(@($mgrApp.properties.template.containers)[0].image)".Trim()
         }
     }
     $pin = Resolve-PimMspBuildImageTag -Explicit "$ImageTag" -ConfigTag $cfgTag -Resuming ([bool]"$From".Trim()) -ManagerImage $mgrImage
@@ -469,10 +468,10 @@ try {
                     # blames the WRONG step. {{mi-job:...}} worked by luck (two elements), {{mi-app:...}} NEVER did,
                     # so EVERY MSP build failed at step 3 of 10 (sqlgroup) on any machine. Measured on dp998+du660.
                     # Same unwrapping trap the $members line in PIM-MspBuild.ps1 already carries a comment about.
-                    $kind = [string[]]$(if ($m.Groups[1].Value -eq 'job') { @('containerapp', 'job') } else { @('containerapp') })
-                    $ErrorActionPreference = 'Continue'
-                    $oid = az @kind show --subscription $config.subscriptionId -g $config.resourceGroup -n $m.Groups[2].Value --query identity.principalId -o tsv --only-show-errors 2>$null
-                    $ErrorActionPreference = 'Stop'
+                    # §100.41: over ARM REST now (Get-PimArmAcaJob / Get-PimArmAcaApp) -- no az argument splat left to unwrap.
+                    $miRes = if ($m.Groups[1].Value -eq 'job') { Get-PimArmAcaJob -SubscriptionId "$($config.subscriptionId)" -ResourceGroup "$($config.resourceGroup)" -Name $m.Groups[2].Value -ErrorAsNull }
+                             else { Get-PimArmAcaApp -SubscriptionId "$($config.subscriptionId)" -ResourceGroup "$($config.resourceGroup)" -Name $m.Groups[2].Value -ErrorAsNull }
+                    $oid = "$($miRes.identity.principalId)"
                     if ("$oid".Trim()) { $Resolved[$m.Value] = "$oid".Trim() }
                 }
             }
@@ -531,9 +530,6 @@ try {
         if (Test-Path -LiteralPath $runDir) { Write-Warning "could not remove the per-run directory $runDir (it holds a certificate PEM) -- delete it." }
     }
     if ($extDir -and -not $prevExtDirSet -and -not $StepRunner) { Remove-Item Env:\AZURE_EXTENSION_DIR -ErrorAction SilentlyContinue }
-    if ($prevSubscription -and $prevSubscription -ne "$($config.subscriptionId)") {
-        $ErrorActionPreference = 'Continue'; az account set --subscription $prevSubscription -o none 2>$null; $ErrorActionPreference = 'Stop'
-    }
 }
 & $printOps
 if ($exitCode) {

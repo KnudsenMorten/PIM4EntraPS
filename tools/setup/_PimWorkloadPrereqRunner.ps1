@@ -8,7 +8,7 @@
 .DESCRIPTION
     Every call goes through Invoke-PimGraph / Invoke-PimArm / Invoke-PimRest (engine\_shared\PIM-Rest.ps1) as the
     CALLER's identity -- the certificate identity or the signed-in user Connect-PimSetupStore set up -- so there is no
-    az, no second identity and nothing interactive. tests\Test-PimWorkloadPrereqs.ps1 dot-sources this file and
+    command-line tool, no second identity and nothing interactive. tests\Test-PimWorkloadPrereqs.ps1 dot-sources this file and
     replaces those three functions with stubs, so the whole run is proven offline.
 
     The APIs used (all documented; cited per call below):

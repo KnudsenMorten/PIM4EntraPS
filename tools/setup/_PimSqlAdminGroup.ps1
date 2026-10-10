@@ -56,9 +56,9 @@
         4. only after the read-back, delete the OLD group; pass the new name (-SqlAdminGroupName) on later deploys.
       Contained database users are keyed by SID, not by group, so none of them changes.
 
-  Certificate or managed-identity auth only: the invokers take a token from the signed-in az context
-  (which the deploy scripts sign in with a certificate) or mint one from a certificate in the local
-  store. There is no client-secret parameter anywhere in this file.
+  No client-secret parameter anywhere in this file: the invokers take their tokens from PIM-Rest's ONE token client --
+  the identity this process is set up for (a deploy's certificate or managed identity, the Invardia Support session, or
+  the signed-in person's browser sign-in; framework 12.17) -- or mint one from a certificate in the local store.
   ASCII only: read by Windows PowerShell 5.1 on deploy hosts.
 #>
 
@@ -666,7 +666,7 @@ function New-PimSqlAdminGroupInvokers {
         default                         -- the identity PIM-Rest is set up for in this process (no az, 100.41)
         -ClientId + -CertThumbprint     -- a certificate in the local store, via Get-PimRestToken
       The token's tenant is checked against -TenantId (or the subscription's tenant): on a host holding
-      several logins the default az context is frequently another directory.
+      several logins the default context is frequently another directory.
       Returns { Graph; Arm; TenantId }.
     #>
     param(
@@ -703,13 +703,9 @@ function New-PimSqlAdminGroupInvokers {
                 try { $armTok   = "$(Get-PimRestToken -Resource 'https://management.azure.com' -TenantId $want)" } catch { }
             }
         } else {
-            # 100.41 REMAINDER: the published STANDALONE Initialize-PimSqlAdminGroup.ps1 (tools/setup/Build-PimSupportScripts.ps1)
-            # carries no engine\_shared\PIM-Rest.ps1 -- only there does this still read the signed-in az context.
-            if (-not $want) {
-                try { $want = "$(((az account show --subscription $SubscriptionId -o json 2>$null) | Out-String | ConvertFrom-Json).tenantId)".Trim().ToLowerInvariant() } catch { $want = '' }
-            }
-            try { $graphTok = "$(((az account get-access-token --subscription $SubscriptionId --resource https://graph.microsoft.com/ -o json 2>$null) | Out-String | ConvertFrom-Json).accessToken)" } catch { }
-            try { $armTok   = "$(((az account get-access-token --subscription $SubscriptionId --resource https://management.azure.com/ -o json 2>$null) | Out-String | ConvertFrom-Json).accessToken)" } catch { }
+            # Framework 12.17 (one connect path): there is no other token source. The published standalone
+            # Initialize-PimSqlAdminGroup.ps1 inlines engine\_shared\PIM-Rest.ps1 + _PimSignedIn.ps1, so it never gets here.
+            throw 'New-PimSqlAdminGroupInvokers: engine\_shared\PIM-Rest.ps1 is not loaded -- the token client is missing.'
         }
     }
     if (-not $graphTok -or -not $armTok) { throw "New-PimSqlAdminGroupInvokers: no Graph/ARM token for subscription $SubscriptionId (sign in first)." }

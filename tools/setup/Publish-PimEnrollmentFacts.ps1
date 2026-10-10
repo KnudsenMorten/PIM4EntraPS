@@ -64,50 +64,57 @@ if ($Role -eq 'Master') {
     foreach ($p in @(@{ n = 'SubscriptionId'; v = $SubscriptionId }, @{ n = 'ResourceGroup'; v = $ResourceGroup }, @{ n = 'StorageAccount'; v = $StorageAccount })) {
         if (-not "$($p.v)".Trim()) { throw "-$($p.n) is required for -Role Master" }
     }
-    $sub = @('--subscription', "$SubscriptionId".Trim())
-    $ErrorActionPreference = 'Continue'
-    $acctId = "$(az storage account show @sub -g $ResourceGroup -n $StorageAccount --query id -o tsv --only-show-errors 2>$null)".Trim()
-    $ErrorActionPreference = 'Stop'
+    # 100.41 (NO-AZ): ARM REST (engine/_shared/PIM-ArmSetup.ps1) over PIM-Rest's ONE token client -- the certificate
+    # identity, or the signed-in one (the Invardia Support app's REST session / the browser). No az CLI.
+    if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+    if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+    $subId = "$SubscriptionId".Trim()
+    if (-not $global:PIM_SetupRestMode -and -not "$($global:PIM_ClientId)".Trim()) {
+        if ("$ClientId".Trim() -and "$CertThumbprint".Trim() -and -not $UseSignedInAccount) { [void](Connect-PimSetupRest -SubscriptionId $subId -TenantId $TenantId -ClientId $ClientId -CertThumbprint $CertThumbprint) }
+        else { [void](Connect-PimSetupRest -SubscriptionId $subId -TenantId $TenantId) }
+    }
+    $acctObj = Get-PimArmStorageAccount -SubscriptionId $subId -ResourceGroup $ResourceGroup -Name $StorageAccount -ErrorAsNull
+    $acctId = if ($acctObj) { "$($acctObj.id)".Trim() } else { '' }
     if (-not $acctId) { throw "storage account '$StorageAccount' not found in $ResourceGroup -- run the build's storage step first" }
 
     if ($Access -eq 'publicSigned') {
         Step "the tick may manage the network rules of $StorageAccount (and nothing else)"
         if ("$TickPrincipalId".Trim() -notmatch '^[0-9a-fA-F-]{36}$') { throw '-TickPrincipalId must be the object id of the tick''s managed identity' }
         $roleName = "PIM Manager bundle store network rules - $StorageAccount"
-        $ErrorActionPreference = 'Continue'
-        $haveRole = "$(az role definition list @sub --name $roleName --scope $acctId --custom-role-only true --query '[0].name' -o tsv --only-show-errors 2>$null)".Trim()
-        $ErrorActionPreference = 'Stop'
+        $authApi = Get-PimSetupApiVersion authorization
+        # az role definition list --name N --scope S --custom-role-only true
+        $findRole = {
+            $f = [uri]::EscapeDataString("roleName eq '$($roleName.Replace("'", "''"))'")
+            $d = @(Invoke-PimSetupArm -Path "$acctId/providers/Microsoft.Authorization/roleDefinitions?`$filter=$f" -ApiVersion $authApi -All -ErrorAsNull)
+            @($d | Where-Object { $_ -and "$($_.properties.type)" -eq 'CustomRole' -and "$($_.properties.roleName)" -eq $roleName }) | Select-Object -First 1
+        }
+        $haveRole = & $findRole
         if (-not $haveRole) {
             $def = [ordered]@{ Name = $roleName; IsCustom = $true
                                Description = 'PIM Manager enrolled-tenants job: read the bundle store and set its network rules. No data access, no keys, this storage account only.'
                                Actions = @('Microsoft.Storage/storageAccounts/read', 'Microsoft.Storage/storageAccounts/write'); NotActions = @(); DataActions = @(); NotDataActions = @()
                                AssignableScopes = @($acctId) }
-            # A FILE, not an inline argument: az is az.cmd on Windows and drops everything after the first line of an argument.
-            $defFile = Join-Path ([IO.Path]::GetTempPath()) ("pim-role-{0}.json" -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
-            try {
-                ConvertTo-Json -InputObject $def -Depth 5 | Set-Content -LiteralPath $defFile -Encoding ASCII
-                $ErrorActionPreference = 'Continue'
-                az role definition create @sub --role-definition "@$defFile" -o none --only-show-errors
-                $code = $LASTEXITCODE
-                $ErrorActionPreference = 'Stop'
-                if ($code -ne 0) { throw "could not create the custom role '$roleName' (az exit $code) -- the build identity needs Owner or User Access Administrator on the subscription" }
-            } finally { Remove-Item -LiteralPath $defFile -Force -ErrorAction SilentlyContinue }
+            # az role definition create = PUT roleDefinitions/<new guid> at the account scope, the same definition in ARM's shape.
+            $roleGuid = [guid]::NewGuid().ToString()
+            $body = @{ properties = @{ roleName = $def.Name; description = $def.Description; type = 'CustomRole'; assignableScopes = @($def.AssignableScopes)
+                                       permissions = @(@{ actions = @($def.Actions); notActions = @(); dataActions = @(); notDataActions = @() }) } }
+            try { [void](Invoke-PimSetupArm -Method PUT -Path "$acctId/providers/Microsoft.Authorization/roleDefinitions/$roleGuid" -Body $body -ApiVersion $authApi) }
+            catch { throw "could not create the custom role '$roleName' ($($_.Exception.Message)) -- the build identity needs Owner or User Access Administrator on the subscription" }
             Note "custom role created: $roleName"
+            $haveRole = [pscustomobject]@{ name = $roleGuid; id = "/subscriptions/$subId/providers/Microsoft.Authorization/roleDefinitions/$roleGuid" }
         } else { Note "custom role present: $roleName" }
-        $ErrorActionPreference = 'Continue'
-        $haveAsg = @(az role assignment list @sub --assignee $TickPrincipalId --scope $acctId --query '[].roleDefinitionName' -o tsv --only-show-errors 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ -eq $roleName })
-        $ErrorActionPreference = 'Stop'
+        $roleDefGuid = "$($haveRole.name)".Trim().ToLowerInvariant()
+        $haveAsg = @()
+        try { $haveAsg = @(Get-PimArmRoleAssignments -SubscriptionId $subId -PrincipalId $TickPrincipalId -Scope $acctId | Where-Object { (("$($_.roleDefinitionId)" -split '/')[-1]).ToLowerInvariant() -eq $roleDefGuid }) } catch { $haveAsg = @() }
         if ($haveAsg.Count) { Note 'the tick already holds it' }
         else {
             # A new custom role takes a moment to replicate; the assignment is retried on that one error only.
             $ok = $false
             for ($try = 1; $try -le 12 -and -not $ok; $try++) {
-                $ErrorActionPreference = 'Continue'
-                $out = az role assignment create @sub --assignee-object-id $TickPrincipalId --assignee-principal-type ServicePrincipal --role $roleName --scope $acctId -o none --only-show-errors 2>&1
-                $code = $LASTEXITCODE
-                $ErrorActionPreference = 'Stop'
-                if ($code -eq 0) { $ok = $true; break }
-                if ("$out" -notmatch '(?i)does not exist|RoleDefinitionDoesNotExist|not found') { throw "could not assign '$roleName' to the tick (az exit $code): $out" }
+                $out = ''
+                try { [void](New-PimArmRoleAssignment -SubscriptionId $subId -PrincipalId $TickPrincipalId -PrincipalType ServicePrincipal -Role "/subscriptions/$subId/providers/Microsoft.Authorization/roleDefinitions/$roleDefGuid" -Scope $acctId); $ok = $true; break }
+                catch { $out = "$($_.Exception.Message)" }
+                if ("$out" -notmatch '(?i)does not exist|RoleDefinitionDoesNotExist|not found') { throw "could not assign '$roleName' to the tick: $out" }
                 Note "the new role has not replicated yet -- retry $try/12 in 15s"
                 Start-Sleep -Seconds 15
             }
@@ -117,10 +124,8 @@ if ($Role -eq 'Master') {
     } else { Note 'private-endpoint store: no network rules to manage (managed tenants reach it over VNet peering) -- no role granted' }
 
     Step "the signing key ids $ManagerApp pins (the signingkey step pinned them)"
-    $ErrorActionPreference = 'Continue'
-    $envJson = az containerapp show @sub -g $ResourceGroup -n $ManagerApp --query 'properties.template.containers[0].env' -o json --only-show-errors 2>$null | Out-String
-    $ErrorActionPreference = 'Stop'
-    $envList = @(); try { $envList = @("$envJson" | ConvertFrom-Json) } catch { $envList = @() }
+    $mgrObj = Get-PimArmAcaApp -SubscriptionId $subId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
+    $envList = @(); try { $envList = @(@($mgrObj.properties.template.containers)[0].env | Where-Object { $_ }) } catch { $envList = @() }
     $pinVal = "$(@($envList | Where-Object { "$($_.name)" -eq 'PIM_BaselineTrustedKeys' }) | Select-Object -First 1 | ForEach-Object { $_.value })"
     $keyIds = @("$pinVal" -split '[,;\s]+' | Where-Object { $_ -cmatch '^[A-Za-z0-9_-]{43}$' })
     $given = @(@($SigningKeyIds) | ForEach-Object { "$_" -split '[,;\s]+' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })

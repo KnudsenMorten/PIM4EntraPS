@@ -9,10 +9,10 @@
 .DESCRIPTION
     The pure-REST companion to the engine. The legacy setup/Install-PimEngineAppRegistration.ps1
     drives the Microsoft.Graph PowerShell SDK; this one talks to Graph + ARM over REST
-    (matching the module-free engine), so it runs on a bare PS 5.1 box with only az CLI.
+    (matching the module-free engine), so it runs on a bare PS 5.1 box -- no modules, no az CLI (100.41).
 
     The caller authenticates ONCE as a role-assigner (Global Administrator or
-    Privileged Role Administrator) via `az login`; this script borrows that az token for
+    Privileged Role Administrator) in the browser (or as the Invardia Support app); this script uses that token for
     Graph + ARM. It then, idempotently:
 
       1. Creates (or reuses) a self-signed certificate in LocalMachine\My (default;
@@ -90,7 +90,7 @@
     Plan only -- create nothing, write nothing.
 
 .EXAMPLE
-    az login --tenant <tenant>          # as Global Admin / Privileged Role Admin
+    # run in a PowerShell window as Global Admin / Privileged Role Admin (a browser sign-in opens)
     .\Install-PimEngineAppRegistration.ps1 -GrantConsent -IncludeExchange
 
 .NOTES
@@ -154,15 +154,38 @@ $exoRoleValue = 'Exchange.ManageAsApp'
 
 Show-PimSetupBanner -ScriptName 'Install-PimEngineAppRegistration' -SolutionRoot $solRoot
 
-# --- az-borrowed Graph token (caller is GA / Privileged Role Admin via az login) ---
-function Get-AzGraphToken { az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>$null }
-$gtok = Get-AzGraphToken
-if (-not $gtok) {
-    Write-Host "Not logged in to az. Run as a role-assigner first:" -ForegroundColor Yellow
-    Write-Host "  az login --tenant <tenant>     # Global Admin or Privileged Role Admin" -ForegroundColor Yellow
-    throw "az login required (the script borrows the az token for Graph + ARM REST)."
+# --- the signed-in role-assigner's token (GA / Privileged Role Admin) -- 100.41 NO-AZ ---
+# PIM-Rest's ONE token client: the token source the caller already registered in this process (a signed-in deploy),
+# else the Invardia Support app's REST session for this tenant, else the person in the browser (auth code + PKCE).
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Use-PimSupportAppRestSession -ErrorAction SilentlyContinue)) { . (Join-Path $here '_PimSignedIn.ps1') }
+function Get-PimAppRegSignedInToken {
+    param([Parameter(Mandatory)][string]$Url)
+    if (-not "$TenantId".Trim()) {
+        # no -TenantId: the person signs in to their home tenant; the token's own tid names it.
+        $st = Get-PimSignedInToken -Audience $Url
+        $tok = if ($st -is [System.Collections.IDictionary]) { "$($st.token)" } else { "$st" }
+        $tid = "$((ConvertFrom-PimJwtClaims -Token $tok).tid)".Trim()
+        if ($tid) { $script:TenantId = $tid }
+        return $tok
+    }
+    if (-not ($global:PIM_TokenProvider -is [scriptblock]) -and -not $global:PIM_SetupRestMode) {
+        if (-not (Use-PimSupportAppRestSession -TenantId $TenantId)) {
+            Set-PimSignedInGlobals -TenantId $TenantId
+            $interactive = $true
+            try { if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) { $interactive = $false } } catch { }
+            $global:PIM_InteractiveFallback = $interactive
+        }
+    }
+    return "$(Get-PimRestToken -Resource $Url -TenantId $TenantId)".Trim()
 }
-if (-not $TenantId) { $TenantId = az account show --query tenantId -o tsv 2>$null }
+$gtok = ''
+try { $gtok = Get-PimAppRegSignedInToken -Url 'https://graph.microsoft.com' } catch { $gtok = ''; Write-Host "  sign-in failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+if (-not $gtok) {
+    Write-Host "Not signed in. Run it in a PowerShell window as a role-assigner (a browser sign-in opens):" -ForegroundColor Yellow
+    Write-Host "  Global Administrator or Privileged Role Administrator -- or connect the Invardia Support app first" -ForegroundColor Yellow
+    throw "sign-in required (the script uses the signed-in administrator's token for Graph + ARM REST)."
+}
 $GH = @{ Authorization = "Bearer $gtok"; 'Content-Type' = 'application/json' }
 function Gr { param([string]$Method='GET',[string]$Path,[object]$Body)
     $u = if ($Path -like 'http*') { $Path } else { "https://graph.microsoft.com/v1.0/$Path" }
@@ -465,7 +488,7 @@ if ($doRootUaa -and $sp) {
     $rootScope = "/providers/Microsoft.Management/managementGroups/$TenantId"
     $uaaRoleId = '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9'   # User Access Administrator (built-in)
     try {
-        $armTok = az account get-access-token --tenant $TenantId --resource https://management.azure.com --query accessToken -o tsv 2>$null
+        $armTok = Get-PimAppRegSignedInToken -Url 'https://management.azure.com'
         if (-not $armTok) { throw "no ARM token" }
         $aH = @{ Authorization = "Bearer $armTok"; 'Content-Type' = 'application/json' }
         $raId = [guid]::NewGuid().ToString()

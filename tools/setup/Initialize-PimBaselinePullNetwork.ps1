@@ -15,7 +15,7 @@
 
     Nothing is exchanged with the managing tenant except the subnet id this script prints. No credential, no link, nothing that
     expires. The subnet is READ FROM THE CONTAINER APPS ENVIRONMENT (authoritative; -SubnetId is only the fallback), and
-    the endpoint list is MERGED (az --service-endpoints replaces the whole list) and read back.
+    the endpoint list is MERGED (writing service endpoints replaces the whole list) and read back. ARM REST only (100.41).
 
     TRAP: adding a service endpoint changes the SOURCE ADDRESS of this subnet's traffic to Azure Storage from a public IP to
     the subnet's private address. A storage account elsewhere that admits this environment by an IP rule stops matching
@@ -42,34 +42,47 @@ $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
-$sub = @('--subscription', "$SubscriptionId".Trim())
+# 100.41 (NO-AZ): ARM REST (engine/_shared/PIM-ArmSetup.ps1) over PIM-Rest's ONE token client. A caller that already set
+# up PIM-Rest's identity (the MSP build's step launcher) keeps it; otherwise sign in: the Invardia Support app's REST
+# session for this tenant, else the person at the keyboard (browser).
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+$subId = "$SubscriptionId".Trim()
+if (-not $global:PIM_SetupRestMode -and -not "$($global:PIM_ClientId)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $subId) }
+# The subnet's own parts (it may live in another resource group, even another subscription, than the environment).
+function Get-PullSubnetServices([string]$Id) {
+    $s = Get-PimArmSubnet -SubscriptionId (Get-PimArmIdPart -Id $Id -Segment 'subscriptions') -ResourceGroup (Get-PimArmIdPart -Id $Id -Segment 'resourceGroups') `
+             -VnetName (Get-PimArmIdPart -Id $Id -Segment 'virtualNetworks') -Name (Get-PimArmIdPart -Id $Id -Segment 'subnets') -ErrorAsNull
+    if (-not $s -or -not $s.properties) { return @() }
+    return @(@($s.properties.serviceEndpoints) | ForEach-Object { "$($_.service)".Trim() } | Where-Object { $_ })
+}
 
 Step "pull network: $ServiceEndpoint on this environment's subnet"
-$ErrorActionPreference = 'Continue'
 if ("$EnvName".Trim()) {
-    $fromEnv = "$(az containerapp env show @sub -g $ResourceGroup -n $EnvName --query properties.vnetConfiguration.infrastructureSubnetId -o tsv --only-show-errors 2>$null)".Trim()
+    $envObj = Get-PimArmAcaEnv -SubscriptionId $subId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
+    $fromEnv = if ($envObj -and $envObj.properties -and $envObj.properties.vnetConfiguration) { "$($envObj.properties.vnetConfiguration.infrastructureSubnetId)".Trim() } else { '' }
     if ($fromEnv) { $SubnetId = $fromEnv; Note "subnet read from the Container Apps environment '$EnvName' (authoritative)" }
 }
-$ErrorActionPreference = 'Stop'
 $chk = Test-PimBaselineNetworkSource -Value "$SubnetId"
 if (-not $chk.ok -or $chk.kind -ne 'subnet') {
     throw "no usable subnet: the environment '$EnvName' did not name one and -SubnetId is '$SubnetId'. $($chk.reason)"
 }
 
-$ErrorActionPreference = 'Continue'
-$cur = @(az network vnet subnet show @sub --ids $SubnetId --query "serviceEndpoints[].service" -o tsv --only-show-errors 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-$ErrorActionPreference = 'Stop'
+$cur = @(Get-PullSubnetServices $SubnetId)
 $plan = Get-PimPullSubnetEndpointPlan -Current $cur -Want $ServiceEndpoint
 Note $plan.reason
 if ($plan.action -eq 'refuse') { throw "REFUSED: $($plan.reason)" }
 if ($plan.action -eq 'add' -and $PSCmdlet.ShouldProcess($SubnetId, "service endpoints = $(@($plan.endpoints) -join ', ')")) {
-    $ErrorActionPreference = 'Continue'
-    az network vnet subnet update @sub --ids $SubnetId --service-endpoints @($plan.endpoints) -o none --only-show-errors
-    $code = $LASTEXITCODE
-    $back = @(az network vnet subnet show @sub --ids $SubnetId --query "serviceEndpoints[].service" -o tsv --only-show-errors 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-    $ErrorActionPreference = 'Stop'
-    if ($code -ne 0 -or $back -notcontains $ServiceEndpoint) {
-        throw ("read-back FAILED: the subnet carries '$($back -join ', ')' after the update (az exit $code). If the subnet is delegated to " +
+    # Set-PimArmSubnet = az network vnet subnet update --service-endpoints (read-modify-write: the list is written AS GIVEN,
+    # every other subnet property is kept). The plan's list is already the merge of the current endpoints + the wanted one.
+    $why = ''
+    try {
+        [void](Set-PimArmSubnet -SubscriptionId (Get-PimArmIdPart -Id $SubnetId -Segment 'subscriptions') -ResourceGroup (Get-PimArmIdPart -Id $SubnetId -Segment 'resourceGroups') `
+                   -VnetName (Get-PimArmIdPart -Id $SubnetId -Segment 'virtualNetworks') -Name (Get-PimArmIdPart -Id $SubnetId -Segment 'subnets') -ServiceEndpoints @($plan.endpoints))
+    } catch { $why = "$($_.Exception.Message)" }
+    $back = @(Get-PullSubnetServices $SubnetId)
+    if ($why -or $back -notcontains $ServiceEndpoint) {
+        throw ("read-back FAILED: the subnet carries '$($back -join ', ')' after the update$(if ($why) { " ($why)" }). If the subnet is delegated to " +
                'Microsoft.App/environments and the platform refused the endpoint, the fallback is a private endpoint to the managing tenant store (DESIGN 13.7 option 1).')
     }
     Note "read back: $($back -join ', ')"

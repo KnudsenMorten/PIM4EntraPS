@@ -1041,28 +1041,26 @@ if ($selfJob) {
             $sc = @($selfJobObj.properties.template.containers)
             if ($sc.Count -eq 1) { $selfNow = "$($sc[0].image)" }
         } catch { }
-        if ($selfNow -and $selfNow -ne $targetImg) {
+        # §56.5 last-known-good + §95.4 the Invardia sequence this environment APPLIED (a lower one is refused from now on --
+        # no replay). 2026-10-09: PER RING -- PIM_UPDATE_INVARDIA_SEQ_R<ring> is the watermark this ring's next pull is
+        # checked against; the legacy pair (PIM_UPDATE_INVARDIA_SEQ + PIM_UPDATE_INVARDIA_SEQ_RING) is written beside it, so
+        # the single value always says which ring it belongs to (an older updater image still reads the value).
+        # 🔴 100.50 (live 2026-10-10, every ring-1 run): these were FOUR back-to-back PATCHes of this job, and every PATCH
+        # starts a provisioning operation -- the next one was refused "HTTP 409 ContainerAppsJobOperationInProgress", so the
+        # watermark was never (fully) written: "could not record the applied Invardia sequence". Now ONE PATCH carries all
+        # of them (Get-PimUpdaterSelfRecordWrites -> Set-PimAcaJobEnvValues, which waits out a busy job and reads back).
+        $selfRec = Get-PimUpdaterSelfRecordWrites -SelfImageNow $selfNow -TargetImage $targetImg -Ring $ring `
+                       -Sequence $script:PimInvardiaSequence -AppliedSequence $script:PimInvardiaApplied
+        $seqVar = $selfRec.variable
+        if ($selfRec.writes.Count) {
             try {
-                [void](Set-PimAcaJobEnvValue -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob `
-                         -VariableName 'PIM_UPDATE_LAST_GOOD' -Value $selfNow)
-                Say "  recorded last-known-good updater image: $selfNow" 'DarkGray'
-            } catch { Say "  could not record the last-known-good image: $($_.Exception.Message)" 'Yellow' }
-        }
-        # §95.4: the Invardia sequence this environment APPLIED -- a lower one is refused from now on (no replay).
-        # 2026-10-09: PER RING -- PIM_UPDATE_INVARDIA_SEQ_R<ring> is the watermark this ring's next pull is checked
-        # against. The legacy pair (PIM_UPDATE_INVARDIA_SEQ + PIM_UPDATE_INVARDIA_SEQ_RING) is written beside it, so the
-        # single value always says which ring it belongs to from now on (an older updater image still reads the value).
-        $seqVar = Get-PimInvardiaSequenceVariableName -Ring $ring
-        if ($script:PimInvardiaSequence -gt $script:PimInvardiaApplied -and $seqVar) {
-            try {
-                [void](Set-PimAcaJobEnvValue -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob `
-                         -VariableName $seqVar -Value "$($script:PimInvardiaSequence)")
-                [void](Set-PimAcaJobEnvValue -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob `
-                         -VariableName 'PIM_UPDATE_INVARDIA_SEQ' -Value "$($script:PimInvardiaSequence)")
-                [void](Set-PimAcaJobEnvValue -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob `
-                         -VariableName 'PIM_UPDATE_INVARDIA_SEQ_RING' -Value "$ring")
-                Say "  recorded the applied Invardia sequence for ring $ring`: $($script:PimInvardiaSequence) ($seqVar)" 'DarkGray'
-            } catch { Say "  could not record the applied Invardia sequence (the same release is simply seen again next run): $($_.Exception.Message)" 'Yellow' }
+                [void](Set-PimAcaJobEnvValues -SubscriptionId $sub -ResourceGroup $rg -JobName $selfJob -Values $selfRec.writes)
+                if ($selfRec.lastGood) { Say "  recorded last-known-good updater image: $selfNow" 'DarkGray' }
+                if ($selfRec.sequence) { Say "  recorded the applied Invardia sequence for ring $ring`: $($script:PimInvardiaSequence) ($seqVar)" 'DarkGray' }
+            } catch {
+                if ($selfRec.lastGood) { Say "  could not record the last-known-good image: $($_.Exception.Message)" 'Yellow' }
+                if ($selfRec.sequence) { Say "  could not record the applied Invardia sequence (the same release is simply seen again next run): $($_.Exception.Message)" 'Yellow' }
+            }
         }
         Say "stamping $selfJob (takes effect on the NEXT run, by design)"
         # 🔴 B8 (2026-09-10) -- AN ARM OPERATION ALREADY IN FLIGHT IS A WAIT, NOT A FAILURE.

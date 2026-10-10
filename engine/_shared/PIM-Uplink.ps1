@@ -15,7 +15,7 @@
                           secret (secretref) -> environment variable. The key proves the environment; the tenant in the
                           body is only compared for mismatch. Error text shortened + redacted before it leaves.
   WHEN
-    * heartbeat: once per 24 h. Identified only (PIM 100.36): Counts { sqlUsedMb, sqlMaxMb } -- the store's allocated data
+    * heartbeat: every 4 h (owner 2026-10-10; was 24 h). Identified only (PIM 100.36): Counts { sqlUsedMb, sqlMaxMb } -- the store's allocated data
       pages and max size, MB (Get-PimUplinkSqlSpace); a failed / empty read leaves both out, never a 0.
     * run: per job NAME, the newest finished run since the last send; Outcome = failed if ANY run of it failed since,
       warning if one was held, else ok. One report per job per cycle -- never one per run: rfa-sync runs every tick and
@@ -56,6 +56,9 @@ function Get-PimUplinkRunOutcome {
     # §95.2o: an INTERRUPTED run (the scheduler restarted for an update, the platform stopped the execution) is not a
     # product failure -- reported as a warning, never as a failed run (Invardia fix request d0217f96).
     if ($st -eq 'interrupted') { return 'warning' }
+    # §100.45: a THROTTLED run (Microsoft rate-limited it, nothing applied, retried) is normal -- a warning with ErrorClass
+    # 'throttled', never a failed run, so it never opens a fix request (owner 2026-10-10). Checked before ok: it carries ok=false.
+    if ($st -eq 'throttled') { return 'warning' }
     if ($st -eq 'failed' -or ($Run.PSObject.Properties['ok'] -and -not [bool]$Run.ok)) { return 'failed' }
     if ($Run.PSObject.Properties['held'] -and [bool]$Run.held) { return 'warning' }
     if ($st -eq 'held') { return 'warning' }
@@ -85,11 +88,12 @@ function Get-PimUplinkRunPlan {
         $out = Get-PimUplinkRunOutcome -Run $r
         if (-not $out) { continue }
         if (-not $newest -or $fin -gt $newest) { $newest = $fin }
-        if (-not $byJob.Contains($job)) { $byJob[$job] = @{ job = $job; latest = $r; latestFin = $fin; failed = $null; held = $false; count = 0 } }
+        if (-not $byJob.Contains($job)) { $byJob[$job] = @{ job = $job; latest = $r; latestFin = $fin; failed = $null; held = $false; throttled = $null; count = 0 } }
         $e = $byJob[$job]; $e.count++
         if ($fin -gt $e.latestFin) { $e.latest = $r; $e.latestFin = $fin }
         if ($out -eq 'failed' -and (-not $e.failed -or $fin -gt ([datetime]"$($e.failed.finishedUtc)").ToUniversalTime())) { $e.failed = $r }
         if ($out -eq 'warning') { $e.held = $true }
+        if ("$($r.status)".Trim().ToLowerInvariant() -eq 'throttled' -and (-not $e.throttled -or $fin -gt ([datetime]"$($e.throttled.finishedUtc)").ToUniversalTime())) { $e.throttled = $r }
     }
     $reports = New-Object System.Collections.Generic.List[object]
     # Failures first (they matter most when the rate limit leaves some for the next cycle), then the oldest first.
@@ -101,17 +105,24 @@ function Get-PimUplinkRunPlan {
         $src = if ($e.failed) { $e.failed } else { $e.latest }
         $dur = $null; if ($src.PSObject.Properties['durationMs']) { $dur = $src.durationMs }
         $txt = if ($outcome -eq 'failed') { "$($src.detail)" } else { '' }
-        [void]$reports.Add(@{ job = $e.job; outcome = $outcome; durationMs = $dur; errorText = $txt; finishedUtc = $e.latestFin.ToString('o'); runCount = $e.count })
+        # §100.45: a warning because Microsoft throttled the job carries ErrorClass THROTTLED (and the throttled run's text).
+        $cls = ''
+        if ($outcome -eq 'warning' -and $e.throttled) { $cls = 'THROTTLED'; $txt = "$($e.throttled.detail)" }
+        [void]$reports.Add(@{ job = $e.job; outcome = $outcome; durationMs = $dur; errorText = $txt; errorClass = $cls; finishedUtc = $e.latestFin.ToString('o'); runCount = $e.count })
     }
     $wm = $null; if ($newest) { $wm = ([datetime]$newest).ToString('o') }
     $arr = $reports.ToArray()
     return @{ reports = $arr; watermarkUtc = $wm }
 }
 
+# Owner 2026-10-10: "pim heartbeat should be more often ... otherwise we dont know if it runs" + "make it every 4 hr" -- every 4 h (was 24 h). Invardia
+# allows 30 POSTs a minute per IP; one heartbeat per 4 h is far inside that and still a liveness signal.
+$script:PimUplinkHeartbeatHours = 4
 function Get-PimUplinkHeartbeatDue {
-    <# PURE. True when no heartbeat was sent in the last 24 h (or ever). #>
-    param([AllowNull()][object]$LastHeartbeatUtc, [datetime]$NowUtc = [datetime]::UtcNow)
-    try { if ("$LastHeartbeatUtc") { return ($NowUtc.ToUniversalTime() -ge ([datetime]"$LastHeartbeatUtc").ToUniversalTime().AddHours(24)) } } catch { }
+    <# PURE. True when no heartbeat was sent in the last $script:PimUplinkHeartbeatHours (4 h) -- or ever. #>
+    param([AllowNull()][object]$LastHeartbeatUtc, [datetime]$NowUtc = [datetime]::UtcNow, [double]$Hours = $script:PimUplinkHeartbeatHours)
+    if (-not $Hours -or $Hours -le 0) { $Hours = 4 }
+    try { if ("$LastHeartbeatUtc") { return ($NowUtc.ToUniversalTime() -ge ([datetime]"$LastHeartbeatUtc").ToUniversalTime().AddHours($Hours)) } } catch { }
     return $true
 }
 
@@ -427,12 +438,13 @@ function Invoke-PimUplinkCycle {
     foreach ($p in @($plan.reports)) {
         # STOP at the first failure (a 429 says "wait") and at the per-cycle budget: the rest keep their watermark.
         if ($stopped -or $sent -ge $budget) { $left++; continue }
-        $cls = if ($p.outcome -eq 'failed') { Get-PimUplinkErrorClass -Text $p.errorText } else { '' }
+        $cls = if ($p.outcome -eq 'failed') { Get-PimUplinkErrorClass -Text $p.errorText } elseif ($p.ContainsKey('errorClass') -and "$($p.errorClass)") { "$($p.errorClass)" } else { '' }
         $rec = New-AitUplinkReport -Kind run @common -Job $p.job -Outcome $p.outcome -DurationMs $p.durationMs -ErrorClass $cls -ErrorText $p.errorText `
                  -Counts @{ runs = $p.runCount }
         # 100.34: fixKind beside the class -- added HERE, not in the framework client (sync/_AitUplink.ps1 must stay
         # byte-identical), and only behind PIM_UPLINK_FIXKIND until Invardia's schema has the field.
-        if ($rec -and $cls -and $FixKind) { $rec | Add-Member -NotePropertyName 'FixKind' -NotePropertyValue (Get-PimUplinkFixKind -ErrorClass $cls) -Force }
+        # §100.45: only a FAILED report carries FixKind -- a throttled warning is not a defect to fix, so it never opens one.
+        if ($rec -and $cls -and $FixKind -and $p.outcome -eq 'failed') { $rec | Add-Member -NotePropertyName 'FixKind' -NotePropertyValue (Get-PimUplinkFixKind -ErrorClass $cls) -Force }
         $r = & $post $rec
         if ("$($r.Status)" -eq 'ok') { $sent++; $marks[$p.job] = $p.finishedUtc }
         else { $failed++; $stopped = $true; $left++; $why += "$($p.job): $($r.Reason)" }

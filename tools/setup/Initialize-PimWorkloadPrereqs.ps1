@@ -47,8 +47,9 @@
     IDENTITY, one of:
       (default)            browser sign-in as you (auth code + PKCE; Microsoft Edge, the default browser when Edge is
                            missing): Microsoft Graph, plus Azure when the workload needs it. No modules, no secret.
-      -UseSignedInAccount  the account signed in to az in this window -- the Invardia Support app session opened by
-                           Invardia's connect script, or a person (az login).
+      -UseSignedInAccount  the signed-in session of this window -- the Invardia Support app session opened by
+                           Invardia's connect script (Connect-InvardiaSupport.ps1 -Environment <handle>); without one,
+                           your own browser sign-in.
       -ClientId + -CertThumbprint  a certificate identity (repository only; kept for existing automation, never shown by
                            PIM Manager).
     The caller needs, for the checks: Application.Read.All, Group.Read.All, Organization.Read.All, the Defender / Intune
@@ -75,7 +76,7 @@ param(
     [Parameter(Mandatory)][ValidateSet('DefenderXdr', 'Intune', 'PowerBI', 'AzureRbac', 'EntraRoles')][string]$Workload,
     [Parameter(Mandatory)][string]$TenantId,
     # The HOSTING subscription + resource group (where ca-pim-tick runs): finds the engine identity when -EngineObjectId is
-    # not given, and holds the dedicated Sentinel workspace. Every ARM call names its full path -- no default az context.
+    # not given, and holds the dedicated Sentinel workspace. Every ARM call names its full path -- no default context.
     [string]$SubscriptionId,
     [string]$ResourceGroup,
     [string]$TickJobName = 'ca-pim-tick',
@@ -106,6 +107,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-WorkloadPrereqs.ps1')
 . (Join-Path $PSScriptRoot '_PimWorkloadPrereqRunner.ps1')
 . (Join-Path $PSScriptRoot '_PimEnginePermissions.ps1')   # browser sign-in (auth code + PKCE) -- the Grant-PimEnginePermissions pattern
+. (Join-Path $PSScriptRoot '_PimSignedIn.ps1')            # -UseSignedInAccount: the Support session, else the browser (framework 12.17)
 # Repository-only helpers: the store (Connect-PimSetupStore, the SQL writer) and the one Graph role map. The published
 # standalone file has neither; it then fixes and checks, and PIM's own self-check records the result.
 foreach ($__f in @('_PimSetupShared.ps1', '_PimSetupSql.ps1')) { $__p = Join-Path $PSScriptRoot $__f; if (Test-Path -LiteralPath $__p) { . $__p } }
@@ -133,9 +135,13 @@ if ($mode -eq 'certificate') {
 } elseif ($mode -eq 'signedIn' -and $hasStoreHelpers -and "$SqlServerFqdn".Trim()) {
     $cs = Connect-PimSetupStore -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -TenantId $TenantId -UseSignedInAccount
 } elseif ($mode -eq 'signedIn') {
-    # The az session in this window (the Invardia Support app, or a person) -- PIM-Rest's az path, tenant asserted per token.
+    # Framework 12.17 -- ONE sign-in rule: the Invardia Support session in this window (Use-PimSupportAppRestSession), else
+    # the person's own browser sign-in, both registered in PIM-Rest as its token source (tenant asserted per token).
     foreach ($g in 'PIM_ClientId', 'PIM_CertThumbprint', 'PIM_ClientSecret') { Set-Variable -Scope Global -Name $g -Value $null -WhatIf:$false }
     $global:PIM_UseManagedIdentity = $false; $global:PIM_Interactive = $false; $global:PIM_TenantId = "$TenantId".Trim()
+    $supportApp = Use-PimSupportAppRestSession -TenantId "$TenantId".Trim()
+    if ($supportApp) { Note "signed in as the Invardia Support app $supportApp (support session)" }
+    else { Set-PimSignedInGlobals -TenantId "$TenantId".Trim(); Note 'no Invardia support session in this window -- you sign in in the browser' }
 } else {
     # Browser sign-in (97.1, framework rule 3). Graph with the delegated scopes THIS workload's checks and fixes need;
     # Azure (+ the store / Fabric through its refresh token) only when the workload needs them.

@@ -5082,7 +5082,7 @@
       if (j.heldCount > 0) { attn += j.heldCount; homeAddAttn('amber', j.heldCount + ' job(s) NEED APPROVAL (a safety breaker held a change set): ' + esc((j.heldJobs || []).map(f => f.name).slice(0, 3).join(', ')), 'jobs'); }
       if (j.skippedCount > 0) { homeAddAttn('info', j.skippedCount + ' job(s) not scheduled on this deployment (by design): ' + esc((j.skippedJobs || []).map(f => f.name).slice(0, 3).join(', ')), 'jobs'); }
       const lines = [];
-      if (j.lastRun) lines.push('Last: <b>' + esc(j.lastRun.name) + '</b> ' + (j.lastRun.ok ? '<span style="color:#1f883d">ok</span>' : '<span style="color:#cf222e">failed</span>') + ' ' + esc(homeFmtWhen(j.lastRun.whenUtc)));
+      if (j.lastRun) lines.push('Last: <b>' + esc(j.lastRun.name) + '</b> ' + (j.lastRun.ok ? '<span style="color:#1f883d">ok</span>' : (j.lastRun.status === 'throttled' && !j.lastRun.throttleStuck) ? '<span style="color:#9a6700" title="Microsoft throttled this run; it retries automatically">throttled -- retrying</span>' : '<span style="color:#cf222e">failed</span>') + ' ' + esc(homeFmtWhen(j.lastRun.whenUtc)));
       if (j.nextRun) lines.push('Next: <b>' + esc(j.nextRun.name) + '</b> ' + esc(homeFmtWhen(j.nextRun.whenUtc)) + (j.nextRun.synthesized ? ' (est.)' : ''));
       // Drift (REQUIREMENTS §26b): the last engine reconcile applied changes -> the
       // live estate had drifted from desired and was corrected; a clean delta = no drift.
@@ -5508,7 +5508,7 @@
             '<td style="padding:3px 0; color:#57606a; vertical-align:top;">' + esc(c.hint || '') + '</td>' +
           '</tr>').join('');
         const h = d.health || {};
-        const lr = h.lastRun ? (esc(h.lastRun.name || '') + ' · ' + esc(fmtTime(h.lastRun.whenUtc)) + ' · ' + (h.lastRun.ok ? 'ok' : 'FAILED')) : '(no run recorded)';
+        const lr = h.lastRun ? (esc(h.lastRun.name || '') + ' · ' + esc(fmtTime(h.lastRun.whenUtc)) + ' · ' + (h.lastRun.ok ? 'ok' : ((h.lastRun.status === 'throttled' && !h.lastRun.throttleStuck) ? 'throttled -- retrying' : 'FAILED'))) : '(no run recorded)';
         out.innerHTML =
           '<table style="border-collapse:collapse; width:100%; margin-bottom:12px;">' + checkRows + '</table>' +
           '<div style="border-top:1px solid #eaeef2; padding-top:10px; font-size:12px; color:#1a1a1a;">' +
@@ -17195,6 +17195,10 @@
     // row it counts as failing (unackedFailureCount) and is shown red.
     else if (j.status === 'interrupted' && !((Number(j.unackedFailureCount) || 0) > 0)) { bg = '#eaeef2'; fg = '#57606a'; label = 'interrupted -- runs again'; }
     else if (j.status === 'interrupted') { bg = '#ffebe9'; fg = '#cf222e'; label = 'interrupted again'; }
+    // §100.45: Microsoft throttled the last run -- normal, retried automatically: amber "retrying", never red. Red only once
+    // the throttled streak is STUCK (PIM is not handling it; that is also when the one alert mail goes out).
+    else if (j.status === 'throttled' && !j.throttleStuck) { bg = '#fff1d6'; fg = '#9a6700'; label = 'throttled -- retrying'; }
+    else if (j.status === 'throttled') { bg = '#ffebe9'; fg = '#cf222e'; label = 'throttled -- stuck'; }
     else if (j.status === 'failed') { bg = '#ffebe9'; fg = '#cf222e'; label = 'failed'; }
     // 2026-10-07 (operator: "what is no-op ... people dont understand ... why not just ok ... state is green"): a run that
     // completed with nothing to do IS ok -- green "ok", the same as a run that changed something. The result text says which.
@@ -18289,7 +18293,7 @@
       rows: jobs.map(j => [
         j.name || '', j.type || '', j.scope || '', j.cadence || '',
         (j.enabled ? 'yes' : 'no'),
-        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.status === 'held' ? (j.approvedPending ? 'approved -- applies next run' : 'needs approval') : (j.status === 'interrupted' ? 'interrupted' : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown')))))),
+        (j.inProgress ? 'running' : (j.neverRun ? 'never run' : (j.status === 'held' ? (j.approvedPending ? 'approved -- applies next run' : 'needs approval') : (j.status === 'interrupted' ? 'interrupted' : j.status === 'throttled' ? (j.throttleStuck ? 'throttled -- stuck' : 'throttled -- retrying') : (j.lastOk === false ? 'failed' : (j.lastOk === true ? 'ok' : 'unknown')))))),
         (j.neverRun ? '' : (j.lastRunUtc || '')),
         (j.lastResult || ''),
         (j.lastOk === true ? 'true' : (j.lastOk === false ? 'false' : '')),
@@ -18426,6 +18430,8 @@
         ? '<span style="color:#9a6700;font-weight:600;">HELD &mdash; needs approval</span>'
         : (r.status === 'interrupted')
         ? ('<span class="histInterrupted" style="color:#57606a;font-weight:600;" title="An update restart or a platform stop cut this run short -- not a failure; the next run decides.">INTERRUPTED</span>' + (histOpen.has(r.runId) ? ' <span style="color:#cf222e;">(again -- counts as failing)</span>' : ''))
+        : (r.status === 'throttled')
+        ? ('<span class="histThrottled" style="color:#9a6700;font-weight:600;" title="Microsoft throttled this run; it retries automatically. Not a failure.">THROTTLED &mdash; retrying</span>' + (r.throttleStuck ? ' <span style="color:#cf222e;">(stuck -- not completed for a long time)</span>' : ''))
         : ok
         ? '<span style="color:#1a7f37;font-weight:600;">PASS</span>'
         : ('<span style="color:#cf222e;font-weight:600;">FAIL</span>' + (histOpen.has(r.runId) ? '' : ' <span style="color:#8c959f;" title="a later run succeeded -- nothing to do">(healed)</span>'));
@@ -18470,6 +18476,8 @@
       for (const r of list) {
         if (r.status === 'unimplemented' || r.status === 'skipped' || /^no-handler/.test(String(r.detail || ''))) continue;
         if (r.status === 'interrupted') { if (!failedAny && r.runId) intr.push(r.runId); continue; }
+        // §100.45: a throttled run (retrying) is not failing -- the newest one ends the head; a STUCK one is failing
+        if (r.status === 'throttled' && !r.throttleStuck) { if (!failedAny) break; continue; }
         if (r.ok || r.status === 'held') break;
         failedAny = true;
         if (r.runId) open.add(r.runId);
@@ -18510,7 +18518,7 @@
     const runs = all.filter(r => (!engineLogsState.failuresOnly || !r.ok) &&
       (!f || String(r.name || '').toLowerCase().indexOf(f) >= 0 || String(r.detail || '').toLowerCase().indexOf(f) >= 0))
       .map((r, i) => ({ r, i })).sort((a, b) => (band(a.r) - band(b.r)) || (a.i - b.i)).map(x => x.r);
-    const failed = all.filter(r => !r.ok);
+    const failed = all.filter(r => !r.ok && !(r.status === 'throttled' && !r.throttleStuck));   // §100.45: throttled is not failed
     const unacked = failed.filter(r => openIds.has(r.runId)).length;   // failing NOW (latest run of its job failed)
     let h = '';
     h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">' +
@@ -18958,7 +18966,7 @@
         const d = await loadJobLog(window._jobLogRunId);
         // The run ENDED while we were watching: stop, untick, and disable -- with the label saying why,
         // so this reads as "it finished" rather than "the checkbox turned itself off".
-        if (d && (d.status === 'completed' || d.status === 'failed')) {
+        if (d && (d.status === 'completed' || d.status === 'failed' || d.status === 'throttled')) {
           const t = document.getElementById('jobLogTail'); t.checked = false;
           setJobLogTail(false);
           setJobLogTailAvailable(false);
