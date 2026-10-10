@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Create (or find) the DEPLOY identity a first deploy needs, and hand back the three forms of it
@@ -107,7 +107,7 @@ try {
     $acl = Get-Acl -LiteralPath $PemDir
     $acl.SetAccessRuleProtection($true, $false)   # protect from inheritance, drop inherited rules
     foreach ($r in @($acl.Access)) { $null = $acl.RemoveAccessRule($r) }
-    foreach ($id in @("$env:USERDOMAIN\$env:USERNAME", 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
+    foreach ($id in @([System.Security.Principal.WindowsIdentity]::GetCurrent().User, (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')), (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')))) {   # SIDs: names fail on non-English Windows (2026-10-10)
         try {
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
                 $id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
