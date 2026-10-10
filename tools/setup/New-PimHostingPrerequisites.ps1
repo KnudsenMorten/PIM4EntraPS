@@ -280,7 +280,7 @@ Write-Host "[1] resource providers ..." -ForegroundColor Yellow
 # list. Registering here costs nothing when it is already registered (the loop probes first).
 # Microsoft.KeyVault (2026-10-08, a production MSP build on an EMPTY subscription): the managing tenant's signing-key vault
 # failed with 409 MissingSubscriptionRegistration at step signingkey -- every provider the build uses is registered HERE.
-$providers = 'Microsoft.App','Microsoft.ContainerRegistry','Microsoft.OperationalInsights','Microsoft.Network','Microsoft.Sql','Microsoft.Storage','Microsoft.KeyVault'
+$providers = 'Microsoft.App','Microsoft.ContainerRegistry','Microsoft.OperationalInsights','Microsoft.Network','Microsoft.Sql','Microsoft.Storage','Microsoft.KeyVault','Microsoft.ManagedIdentity','Microsoft.Insights'   # ManagedIdentity: a fresh subscription refused the pull identity (MissingSubscriptionRegistration, 2026-10-10)
 foreach ($p in $providers) {
     $state = Get-PimArmProviderState -SubscriptionId $SubscriptionId -Namespace $p
     if ($state -ne 'Registered') {

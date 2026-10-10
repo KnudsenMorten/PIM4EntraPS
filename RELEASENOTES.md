@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.562 -- 2026-10-10
+
+- Setup on a brand-new subscription: the Microsoft.ManagedIdentity (and Microsoft.Insights) resource providers are registered before they are used.
+
 ## 2.4.561 -- 2026-10-10
 
 - Managed-tenant install: a failed step now reports its real error in the installation progress.
