@@ -34,6 +34,24 @@ if ($spec.globals) { foreach ($g in $spec.globals.PSObject.Properties) { Set-Var
 if ($spec.signedIn) {
     . (Join-Path $PSScriptRoot '_PimSignedIn.ps1')
     Set-PimSignedInGlobals -TenantId "$($spec.signedIn.tenantId)"
+    # 2026-10-10 (a customer's managed install opened a NEW browser sign-in in every step process and looked frozen): the
+    # build signs in ONCE and hands this process short-lived ACCESS tokens per audience in PIM_HANDOFF_TOKENS (this
+    # process's environment only -- never a file, never an argument). They answer first; an audience not handed over
+    # falls back to the signed-in provider above.
+    if ("$env:PIM_HANDOFF_TOKENS".Trim()) {
+        try { $script:PimHandoff = "$env:PIM_HANDOFF_TOKENS" | ConvertFrom-Json } catch { $script:PimHandoff = $null }
+        $env:PIM_HANDOFF_TOKENS = $null
+        if ($script:PimHandoff) {
+            $script:PimHandoffFallback = $global:PIM_TokenProvider
+            $global:PIM_TokenProvider = {
+                param($Audience, $TenantId)
+                $k = "$Audience".Trim().TrimEnd('/').ToLowerInvariant()
+                foreach ($p in $script:PimHandoff.PSObject.Properties) { if ("$($p.Name)".TrimEnd('/').ToLowerInvariant() -eq $k -and "$($p.Value)".Trim()) { return "$($p.Value)" } }
+                if ($script:PimHandoffFallback) { return (& $script:PimHandoffFallback $Audience $TenantId) }
+                throw "no handed-over token for $Audience"
+            }
+        }
+    }
 }
 # 100.41: the identity above IS this step's REST session. Saying so (PIM_SetupRestMode) keeps a ported step from opening its
 # own (Connect-PimSetupRest with no credential would clear the build's certificate identity and fall to a browser sign-in).

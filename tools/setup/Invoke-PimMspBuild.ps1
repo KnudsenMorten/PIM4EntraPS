@@ -499,7 +499,16 @@ try {
             $launcher = Join-Path $here '_PimInvokeStep.ps1'
             $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcher, '-Script', $scriptPath, '-ArgsFile', $argsFile)
             if ($s.capturesOutput) { $childArgs += @('-OutFile', $outFile) }
-            & $exe @childArgs
+            # 2026-10-10: ONE sign-in for the whole build -- the step process gets short-lived access tokens (this build's own
+            # signed-in session, refreshed in memory) in its environment only, so no step opens a browser window of its own.
+            if ($authMode -eq 'SignedIn') {
+                $handoff = [ordered]@{}
+                foreach ($aud in 'https://graph.microsoft.com', 'https://management.azure.com', 'https://database.windows.net', 'https://vault.azure.net', 'https://storage.azure.com') {
+                    try { $tk = "$(Get-PimRestToken -Resource $aud -TenantId "$($config.tenantId)")".Trim(); if ($tk) { $handoff[$aud] = $tk } } catch { Write-Verbose "no handed-over token for ${aud}: $($_.Exception.Message)" }
+                }
+                $env:PIM_HANDOFF_TOKENS = ($handoff | ConvertTo-Json -Compress)
+            }
+            try { & $exe @childArgs } finally { $env:PIM_HANDOFF_TOKENS = $null }
             $ok = ($LASTEXITCODE -eq 0)
             Remove-Item -LiteralPath $argsFile -Force -ErrorAction SilentlyContinue   # it may carry a resolved read link
             $output = if ($s.capturesOutput -and (Test-Path -LiteralPath $outFile)) { (Get-Content -LiteralPath $outFile -Raw).Trim() } else { '' }
