@@ -207,13 +207,15 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $here    = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-# Guarded `az` shadow -- see _PimAz.ps1. Must precede the first az call (step 1 DETECT).
-. "$here\_PimAz.ps1"
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)            # SOLUTIONS/PIM4EntraPS
-# Splatted into every az call in this script. Named "...Sub..." because that is the codebase's
-# scoping convention and the hygiene gate recognises a scoped call by it.
+# 100.41 (framework 12.17 NO-AZ): this script's own Azure reads/writes are ARM REST (engine/_shared/PIM-ArmSetup.ps1), addressed
+# BY -SubscriptionId -- there is no ambient az context any more. Test-PimUpdateArm (below) is what `Have 'az'` was.
+# $azSubArgs survives ONLY for the ring gate / ring env read (_PimUpdateRing.ps1, the 100.41 remainder), which still take
+# the az-shaped scope.
 $azSubArgs = @()
 if ("$SubscriptionId".Trim()) { $azSubArgs = @('--subscription', "$SubscriptionId".Trim()) }
+# The guarded `az` shadow, kept ONLY for that remainder (the channel publish in _PimUpdateRing.ps1); this file calls no az.
+. "$here\_PimAz.ps1"
 function Step($m){ Write-Host "==> $m" -ForegroundColor Cyan }
 function Info($m){ Write-Host "    $m" -ForegroundColor DarkGray }
 function Warn($m){ Write-Host "    $m" -ForegroundColor Yellow }
@@ -245,6 +247,16 @@ function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 . (Join-Path $solRoot 'engine\_shared\PIM-SqlStore.ps1')              # Initialize-PimSqlStore (core tables)
 . (Join-Path $solRoot 'engine\_shared\PIM-UpdateSource.ps1')          # Get-PimSchemaFileApplyPlan -- the SAME guard update-job-entry uses
 . (Join-Path $here '_PimUpdateRing.ps1')                               # ring gate + channel advance (2026-09-13)
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }   # ARM REST (100.41)
+function Test-PimUpdateArm {
+    # 100.41: replaces `Have 'az'`. ARM is addressed by subscription, so no -SubscriptionId = no Azure read/write (it used to
+    # fall into whatever the ambient az context was). A calling deploy's REST session is used as it is; standalone, one is
+    # opened once (the Invardia Support app's session for -TenantId, or the person signed in). $false when none can be had.
+    if (-not "$SubscriptionId".Trim()) { return $false }
+    if ("$($global:PIM_SetupRestMode)".Trim()) { return $true }
+    try { [void](Connect-PimSetupRest -SubscriptionId "$SubscriptionId".Trim() -TenantId "$TenantId".Trim()); return $true }
+    catch { Warn "no Azure REST session ($($_.Exception.Message)) -- the Azure reads/writes of this run are skipped."; return $false }
+}
 # the mailer (same path as the synthetic-monitor work). Loading PIM-Notify pulls in Send-PimNotifyMail.
 $notifyLib = Join-Path $solRoot 'engine\_shared\PIM-Notify.ps1'
 if (Test-Path $notifyLib) { . $notifyLib }
@@ -335,24 +347,23 @@ function Get-PulledManagerContentHash {
     Get-PimSolutionContentHash -SolutionRoot $solRoot
 }
 function Get-RunningManagerInfo {
-    # hosted: read the running image tag + its baked-in content hash label via az (best-effort).
+    # hosted: read the running image tag + its baked-in content hash label over ARM REST (best-effort).
     # community: read the local package marker if present. Blank hash => detection treats as needs-update.
     $info = @{ version = ''; versionNote = ''; contentHash = '' }
-    if ($profile.isHosted -and (Have 'az')) {
+    if ($profile.isHosted -and (Test-PimUpdateArm)) {
         try {
-            $img = az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "properties.template.containers[0].image" -o tsv 2>$null
+            $mgr = Get-PimArmAcaApp -SubscriptionId "$SubscriptionId".Trim() -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
+            $img = "$(@($mgr.properties.template.containers)[0].image)"
             # BUG-230: a digest-pinned image is resolved to its version tag in the registry, else UNKNOWN.
             $rv = Resolve-PimRunningVersionFromImage -Image "$img" -TagResolver {
                 param($repo, $digest)
                 $reg = ($repo -split '/')[0]; $name = ($repo -split '/', 2)[1]
                 if (-not $reg -or -not $name -or $reg -notmatch '\.azurecr\.io$') { return @() }
-                $j = az acr repository show @azSubArgs -n ($reg -replace '\.azurecr\.io$', '') --image "$name@$digest" -o json 2>$null
-                if ($LASTEXITCODE -ne 0 -or -not "$j".Trim()) { return @() }
-                @(("$j" | ConvertFrom-Json).tags)
+                @(Get-PimAcrManifestTags -LoginServer $reg -Repository $name -Digest $digest)
             }
             $info.version = $rv.version; $info.versionNote = $rv.note
             # content hash is published as an image env/label; read the app env var if present.
-            $h = @(az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query "properties.template.containers[0].env[?name=='PIM_MANAGER_CONTENT_HASH'].value" -o tsv 2>$null) | Select-Object -First 1
+            $h = @(@(@($mgr.properties.template.containers)[0].env) | Where-Object { $_ -and $_.name -eq 'PIM_MANAGER_CONTENT_HASH' } | ForEach-Object { "$($_.value)" }) | Select-Object -First 1
             if ("$h".Trim()) { $info.contentHash = "$h".Trim() }
         } catch {}
     } else {
@@ -378,8 +389,9 @@ function Get-RunningManagerInfo {
 #   1. the SQL admin identity passed in -- the identity the infra step made the server's Entra
 #      admin, so it is the one that is actually authorised. Explicit beats ambient.
 #   2. the engine SPN globals -- correct when this runs on an installed engine host.
-#   3. the signed-in `az` context -- correct on a deploy host where the operator signed in as
-#      someone with admin rights, and the only candidate that needs no configuration at all.
+#   3. the signed-in REST session (PIM-Rest: the Invardia Support app's session or the person signed in -- 100.41, it
+#      was `az account get-access-token`) -- correct on a deploy host where the operator signed in as someone with
+#      admin rights, and the only candidate that needs no configuration at all.
 # A connection string that already carries its own credential is left alone.
 function Get-PimSqlAccessToken {
     param([string]$ConnString)
@@ -399,11 +411,11 @@ function Get-PimSqlAccessToken {
             if ("$t".Trim()) { Info 'SQL token: the configured engine identity'; return $t }
         }
     } catch { Warn "the engine identity could not mint a SQL token: $($_.Exception.Message)" }
-    if (Have 'az') {
+    if (Test-PimUpdateArm) {
         try {
-            $t = az account get-access-token @azSubArgs --resource $res --query accessToken -o tsv 2>$null
-            if ("$t".Trim()) { Info 'SQL token: the signed-in az context'; return "$t".Trim() }
-        } catch { Warn "the signed-in az context could not mint a SQL token: $($_.Exception.Message)" }
+            $t = Get-PimRestToken -Resource $res
+            if ("$t".Trim()) { Info 'SQL token: the signed-in REST session'; return "$t".Trim() }
+        } catch { Warn "the signed-in REST session could not mint a SQL token: $($_.Exception.Message)" }
     }
     return $null
 }
@@ -545,8 +557,8 @@ function Get-DeployedColumns {
 function Test-MonitorDeployed {
     # Is the synthetic health monitor deployed? Best-effort: hosted = an ACA job named *monitor*;
     # community = a scheduled task. Returns $false (treat as needs-deploy) when it can't tell.
-    if ($profile.isHosted -and (Have 'az')) {
-        try { $j = @(az containerapp job list @azSubArgs -g $ResourceGroup --query "[].name" -o tsv 2>$null) | Where-Object { "$_" -like "*monitor*" } | Select-Object -First 1; if ("$j".Trim()) { return $true } } catch {}
+    if ($profile.isHosted -and (Test-PimUpdateArm)) {
+        try { $j = @(Get-PimArmAcaJobList -SubscriptionId "$SubscriptionId".Trim() -ResourceGroup $ResourceGroup -ErrorAsNull | ForEach-Object { "$($_.name)" }) | Where-Object { "$_" -like "*monitor*" } | Select-Object -First 1; if ("$j".Trim()) { return $true } } catch {}
         return $false
     }
     try { $t = Get-ScheduledTask -TaskName 'PIM-SyntheticMonitor' -ErrorAction SilentlyContinue; if ($t) { return $true } } catch {}
@@ -641,9 +653,10 @@ try {
     }
 
     # ---- capture pre-update revision (rollback target) BEFORE any change -----
-    if ($profile.isHosted -and (Have 'az')) {
-        try { $prevRev = @(az containerapp revision list @azSubArgs -g $ResourceGroup -n $ManagerApp --query "[?properties.active].name" -o tsv 2>$null) | Select-Object -First 1 } catch {}
-        if (-not "$prevRev".Trim()) { try { $prevRev = az containerapp revision list @azSubArgs -g $ResourceGroup -n $ManagerApp --query "[0].name" -o tsv 2>$null } catch {} }
+    if ($profile.isHosted -and (Test-PimUpdateArm)) {
+        $revs = @(); try { $revs = @(Get-PimArmAcaRevisions -SubscriptionId "$SubscriptionId".Trim() -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull) } catch {}
+        $prevRev = "$(@($revs | Where-Object { $_.properties.active } | ForEach-Object { "$($_.name)" }) | Select-Object -First 1)"
+        if (-not "$prevRev".Trim()) { $prevRev = "$(@($revs)[0].name)" }
         Info "pre-update revision (rollback target): $(if($prevRev){$prevRev}else{'(unknown)'})"
         # 🔴 §53.6 -- AND THE IMAGE, because Container Apps garbage-collects inactive revisions.
         # This is the NIGHTLY, UNATTENDED path: by the time a rollback is needed, nobody is
@@ -651,7 +664,7 @@ try {
         # internal environment 2026-09-10 (only one revision survived), where the safety net could
         # only say "ROLL BACK BY HAND". The image is still in ACR and cannot be pruned away.
         try {
-            $prevImage = "$(az containerapp show @azSubArgs -g $ResourceGroup -n $ManagerApp --query 'properties.template.containers[0].image' -o tsv 2>$null)".Trim()
+            $prevImage = "$(@((Get-PimArmAcaApp -SubscriptionId "$SubscriptionId".Trim() -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.template.containers)[0].image)".Trim()
         } catch { Write-Verbose "pre-update image read failed: $($_.Exception.Message)" }
         Info "pre-update image (rollback fallback): $(if($prevImage){$prevImage}else{'(unknown)'})"
     }
@@ -887,15 +900,16 @@ try {
                 # Restarting the active revision is the whole fix: the app holds no state of its
                 # own, so a restart is cheap and safe, and it is the only way the store decision
                 # gets made again.
-                if ($createdBaseSchema -and $profile.isHosted -and (Have 'az')) {
+                if ($createdBaseSchema -and $profile.isHosted -and (Test-PimUpdateArm)) {
                     Step '   restart the Manager so it re-resolves its store (it booted before the schema existed)'
-                    $active = @(az containerapp revision list @azSubArgs -g $ResourceGroup -n $ManagerApp `
-                                    --query "[?properties.active].name" -o tsv 2>$null |
-                                Where-Object { "$_".Trim() }) | Select-Object -First 1
+                    $active = @(Get-PimArmAcaRevisions -SubscriptionId "$SubscriptionId".Trim() -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull |
+                                Where-Object { $_.properties.active } | ForEach-Object { "$($_.name)" } | Where-Object { "$_".Trim() }) | Select-Object -First 1
                     if ("$active".Trim()) {
-                        az containerapp revision restart @azSubArgs -g $ResourceGroup -n $ManagerApp --revision "$active".Trim() -o none 2>$null
-                        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-                            Warn "could not restart $ManagerApp revision '$active' -- it may still be serving STATIC content over the new schema. Restart it before using the GUI."
+                        $restartErr = ''
+                        try { [void](Invoke-PimArmAcaRevisionAction -SubscriptionId "$SubscriptionId".Trim() -ResourceGroup $ResourceGroup -Name $ManagerApp -Revision "$active".Trim() -Action restart) }   # revision restart
+                        catch { $restartErr = "$($_.Exception.Message)" }
+                        if ($restartErr) {
+                            Warn "could not restart $ManagerApp revision '$active' -- it may still be serving STATIC content over the new schema. Restart it before using the GUI. ($restartErr)"
                         } else {
                             Info "restarted $ManagerApp revision $active"
                         }
@@ -1034,15 +1048,17 @@ catch {
 if ($Apply -and $profile.isHosted -and $deployed -and $outcome -eq 'success' -and -not $SkipPinAdvance) {
     $pinImage = "$AcrName.azurecr.io/$ImageRepo" + ':' + "$($buildPlan.imageTag)".Trim()
     Step "4b. ADVANCE THE UPDATER PIN ($UpdateJobName -> $pinImage)"
-    $pinSub = @(); if ("$SubscriptionId".Trim()) { $pinSub = @('--subscription', "$SubscriptionId".Trim()) }
-    if (-not "$SubscriptionId".Trim()) {
-        Info 'no -SubscriptionId / $env:PIM_SubscriptionId -- using the ambient az context for the pin only.'
-    }
+    # 100.41: ARM is addressed BY subscription -- without one there is no job to address (az used to fall into the ambient
+    # context here). Said loudly, because an un-advanced pin rolls this environment back at 03:00.
+    $pinSubId = "$SubscriptionId".Trim()
+    $pinSub = $azSubArgs   # the ring env read below (_PimUpdateRing.ps1) still takes the az-shaped scope
     try {
-        # 🪤 LIST, NOT SHOW. `job show` on an absent job ERRORS, and "this environment has no
-        # in-cloud updater yet" is the normal answer almost everywhere -- the same trap the §53
-        # installer and the deploy path's image probe both had to learn.
-        $hasJob = @(az containerapp job list @pinSub -g $ResourceGroup --query "[].name" -o tsv 2>$null) |
+        if (-not (Test-PimUpdateArm)) {
+            throw "no -SubscriptionId / `$env:PIM_SUBSCRIPTION_ID (or no Azure REST session) -- the updater pin cannot be addressed"
+        }
+        # 🪤 LIST, NOT SHOW. "this environment has no in-cloud updater yet" is the normal answer almost everywhere -- the same
+        # trap the §53 installer and the deploy path's image probe both had to learn: absence is an answer, not an error.
+        $hasJob = @(Get-PimArmAcaJobList -SubscriptionId $pinSubId -ResourceGroup $ResourceGroup | ForEach-Object { "$($_.name)" }) |
                   Where-Object { "$_".Trim() -eq $UpdateJobName }
         if (-not $hasJob) {
             Info "no '$UpdateJobName' in $ResourceGroup -- nothing to pin (this environment has no in-cloud updater)."
@@ -1055,7 +1071,7 @@ if ($Apply -and $profile.isHosted -and $deployed -and $outcome -eq 'success' -an
             # shape the §53 installer uses, for the same reason.
             $deadline = (Get-Date).AddMinutes(5)
             while ((Get-Date) -lt $deadline) {
-                $st = "$(az containerapp job show @pinSub -g $ResourceGroup -n $UpdateJobName --query properties.provisioningState -o tsv 2>$null)".Trim()
+                $st = "$((Get-PimArmAcaJob -SubscriptionId $pinSubId -ResourceGroup $ResourceGroup -Name $UpdateJobName -ErrorAsNull).properties.provisioningState)".Trim()
                 if (-not $st -or $st -notmatch '(?i)InProgress|Deleting|Waiting') { break }
                 Info "  an operation is still in progress ($st) -- waiting"
                 Start-Sleep -Seconds 10
@@ -1063,27 +1079,19 @@ if ($Apply -and $profile.isHosted -and $deployed -and $outcome -eq 'success' -an
             $pinned = $false
             foreach ($wait in @(0, 15, 30)) {
                 if ($wait) { Info "  retrying in ${wait}s"; Start-Sleep -Seconds $wait }
-                $global:LASTEXITCODE = 0
-                # --set-env-vars ADDS OR UPDATES the named variable and leaves the rest alone.
-                # --replace-env-vars would wipe PIM_SubscriptionId / PIM_ManagerApp / PIM_TickJobName
+                # Set-PimArmAcaJobEnvVars ADDS OR UPDATES the named variable and leaves the rest alone (az's
+                # --set-env-vars). Replacing the list would wipe PIM_SubscriptionId / PIM_ManagerApp / PIM_TickJobName
                 # and leave a job that starts, reads nothing, and exits 2 every night.
-                az containerapp job update @pinSub -g $ResourceGroup -n $UpdateJobName `
-                    --container-name $UpdateJobName `
-                    --set-env-vars "PIM_UPDATE_TARGET_IMAGE=$pinImage" -o none 2>$null
-                if ($LASTEXITCODE -eq 0) { $pinned = $true; break }
+                try { [void](Set-PimArmAcaJobEnvVars -SubscriptionId $pinSubId -ResourceGroup $ResourceGroup -Name $UpdateJobName -ContainerName $UpdateJobName -Env @{ PIM_UPDATE_TARGET_IMAGE = $pinImage }); $pinned = $true; break }
+                catch { Info "  pin write refused: $($_.Exception.Message)" }
             }
             # 🪤 READ IT BACK. A pin that silently did not take is INVISIBLE until 03:00 the next
             # night, when the job rolls the environment back to the old image and reports success at
-            # having done so. An exit code is not evidence; the stored value is.
-            # No `| [0]` in the JMESPath -- cmd.exe eats the pipe (az is az.cmd). Parse in PowerShell.
+            # having done so. A write that returned is not evidence; the stored value is.
             $seen = ''
             try {
-                $cj = az containerapp job show @pinSub -g $ResourceGroup -n $UpdateJobName `
-                        --query "properties.template.containers" -o json 2>$null
-                if ($cj) {
-                    foreach ($c in (@($cj) -join '' | ConvertFrom-Json)) {
-                        foreach ($v in @($c.env)) { if ($v.name -eq 'PIM_UPDATE_TARGET_IMAGE') { $seen = "$($v.value)".Trim() } }
-                    }
+                foreach ($c in @((Get-PimArmAcaJob -SubscriptionId $pinSubId -ResourceGroup $ResourceGroup -Name $UpdateJobName -ErrorAsNull).properties.template.containers)) {
+                    foreach ($v in @($c.env)) { if ($v.name -eq 'PIM_UPDATE_TARGET_IMAGE') { $seen = "$($v.value)".Trim() } }
                 }
             } catch { }
             if ($seen -eq $pinImage) { Info "pin advanced + verified: $UpdateJobName -> $seen" }

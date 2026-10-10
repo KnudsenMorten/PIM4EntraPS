@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.552 -- 2026-10-10
+
+- More setup scripts no longer need the Azure CLI: the deploy identity, the update run, the custom Manager address, the external/internal environment rebuild, SQL network access and the baseline store (storage and private endpoint) now talk to Azure directly. The rebuild no longer writes a restore file holding secret values, and a Key Vault certificate for a custom address is no longer saved to a temporary file.
+
 ## 2.4.551 -- 2026-10-10
 
 - Guard reports carry the exact UTC times, and a refused telemetry report now names the field Invardia rejected.

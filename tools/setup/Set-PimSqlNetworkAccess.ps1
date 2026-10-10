@@ -65,7 +65,11 @@ param(
     [string]$RuleName = 'pim-aca-subnet'
 )
 $ErrorActionPreference = 'Stop'
-. (Join-Path (Split-Path -Parent $PSCommandPath) '_PimAz.ps1')   # the guarded az shadow
+# 100.41 (framework 12.17 NO-AZ): ARM REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1). A calling
+# deploy's REST session is used as it is; standalone, the Invardia Support app's session or the person signed in. No az.
+$solRootSna = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootSna 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootSna 'engine\_shared\PIM-ArmSetup.ps1') }
 
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
@@ -85,14 +89,15 @@ function Get-PimSqlFirewallBeltDecision {
 
 $result = @{ ok = $false; vnetRule = $false; firewallRule = $false; serviceEndpoint = $false; reason = ''
              notApplicable = $false }
-$sub    = @('--subscription', "$SubscriptionId".Trim())
+$S      = "$SubscriptionId".Trim()
 $srv    = ("$SqlServerFqdn".Trim() -split '\.')[0]
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) }
 
 Step "SQL network access: let this environment reach $srv"
 
 # ---- 1. WHICH SUBNET? Ask the environment; fall back to what the caller derived. ---------------
 if (-not "$SubnetId".Trim() -and "$EnvName".Trim() -and "$ResourceGroup".Trim()) {
-    $SubnetId = "$(az containerapp env show @sub -g $ResourceGroup -n $EnvName --query properties.vnetConfiguration.infrastructureSubnetId -o tsv 2>$null)".Trim()
+    $SubnetId = "$((Get-PimArmAcaEnv -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull).properties.vnetConfiguration.infrastructureSubnetId)".Trim()
     if ($SubnetId) { Note "subnet read from the Container Apps environment (authoritative)" }
 }
 if (-not "$SubnetId".Trim() -and "$VnetName".Trim() -and "$SubnetName".Trim()) {
@@ -108,17 +113,20 @@ if (-not "$SubnetId".Trim() -and "$VnetName".Trim() -and "$SubnetName".Trim()) {
 # subscription first (the common case, one call), then every subscription this identity can see.
 # The VNet rule itself is cross-subscription-capable -- it references the subnet by RESOURCE ID.
 $sqlSub = $(if ("$SqlSubscriptionId".Trim()) { "$SqlSubscriptionId".Trim() } else { "$SubscriptionId".Trim() })
-$sqlRg  = "$(az sql server list --subscription $sqlSub --query "[?name=='$srv'].resourceGroup" -o tsv 2>$null | Select-Object -First 1)".Trim()
+# az's "[?name=='X'].resourceGroup": the resource group is the segment of the server's ARM id.
+$findRg = { param($inSub) "$(@(Get-PimArmSqlServers -SubscriptionId $inSub | Where-Object { "$($_.name)" -eq $srv } | ForEach-Object { Get-PimArmIdPart -Id "$($_.id)" -Segment 'resourceGroups' }) | Select-Object -First 1)".Trim() }
+$sqlRg  = & $findRg $sqlSub
 if (-not $sqlRg -and -not "$SqlSubscriptionId".Trim()) {
     Note "not in subscription $sqlSub -- searching the other subscriptions this identity can see"
-    foreach ($s in @(az account list --query "[].id" -o tsv 2>$null | Where-Object { "$_".Trim() -and "$_".Trim() -ne $sqlSub })) {
-        $cand = "$(az sql server list --subscription "$s".Trim() --query "[?name=='$srv'].resourceGroup" -o tsv 2>$null | Select-Object -First 1)".Trim()
+    foreach ($s in @(Get-PimArmSubscriptions | Where-Object { "$_".Trim() -and "$_".Trim() -ne $sqlSub })) {
+        $cand = & $findRg "$s".Trim()
         if ($cand) { $sqlRg = $cand; $sqlSub = "$s".Trim(); Note "found '$srv' in subscription $sqlSub (resource group $sqlRg)"; break }
     }
 }
-# Every SQL call below is scoped to the subscription the SERVER is in, which is not necessarily
+# Every SQL call below is addressed in the subscription the SERVER is in, which is not necessarily
 # the one the rest of the deploy runs against.
-$sqlSubArgs = @('--subscription', $sqlSub)
+$ruleNames = { @(Get-PimArmSqlVnetRules -SubscriptionId $sqlSub -ResourceGroup $sqlRg -Server $srv | Where-Object { "$($_.name)" -eq $RuleName } | ForEach-Object { "$($_.name)" }) -join '' }
+$fwNames   = { @(Get-PimArmSqlFirewallRules -SubscriptionId $sqlSub -ResourceGroup $sqlRg -Server $srv | Where-Object { "$($_.name)" -eq 'AllowAzureServices' } | ForEach-Object { "$($_.name)" }) -join '' }
 if (-not $sqlRg) {
     # 🔴 NOT-APPLICABLE, NOT FAILED -- and the difference is a whole deploy.
     # A central/shared store in another subscription is a legitimate topology; nothing here can
@@ -139,16 +147,19 @@ if (-not $sqlRg) {
 
 # ---- 3. SERVICE ENDPOINT on the subnet (MERGED -- the flag REPLACES the list) ------------------
 if ("$SubnetId".Trim()) {
-    $svcNow = @(az network vnet subnet show @sub --ids $SubnetId --query "serviceEndpoints[].service" -o tsv 2>$null) |
-              Where-Object { "$_".Trim() }
+    $readSvc = { @((Get-PimArmResource -ResourceId $SubnetId -Kind network -ErrorAsNull).properties.serviceEndpoints | Where-Object { $_ } | ForEach-Object { "$($_.service)" }) | Where-Object { "$_".Trim() } }
+    $svcNow = @(& $readSvc)
     if ($svcNow -notcontains 'Microsoft.Sql') {
-        # 🪤 --service-endpoints REPLACES what is there. Reading first is what keeps an existing
+        # 🪤 the service-endpoint list is written WHOLE (it REPLACES what is there). Reading first is what keeps an existing
         # endpoint (Storage, KeyVault) from being silently removed by a call that only meant to add.
         $svcWant = @(@($svcNow) + 'Microsoft.Sql' | Where-Object { "$_".Trim() } | Select-Object -Unique)
         if ($PSCmdlet.ShouldProcess($SubnetId, 'add the Microsoft.Sql service endpoint')) {
-            az network vnet subnet update @sub --ids $SubnetId --service-endpoints @svcWant -o none 2>$null
-            $svcNow = @(az network vnet subnet show @sub --ids $SubnetId --query "serviceEndpoints[].service" -o tsv 2>$null) |
-                      Where-Object { "$_".Trim() }
+            # A refused update (policy, delegation) is reported by the read-back below, as before -- never thrown from here.
+            try {
+                [void](Set-PimArmSubnet -SubscriptionId (Get-PimArmIdPart -Id $SubnetId -Segment 'subscriptions') -ResourceGroup (Get-PimArmIdPart -Id $SubnetId -Segment 'resourceGroups') `
+                    -VnetName (Get-PimArmIdPart -Id $SubnetId -Segment 'virtualNetworks') -Name (Get-PimArmIdPart -Id $SubnetId -Segment 'subnets') -ServiceEndpoints $svcWant)
+            } catch { Write-Verbose "service endpoint update refused: $($_.Exception.Message)" }
+            $svcNow = @(& $readSvc)
         }
     }
     $result.serviceEndpoint = ($svcNow -contains 'Microsoft.Sql')
@@ -156,13 +167,13 @@ if ("$SubnetId".Trim()) {
            else { 'subnet has NO Microsoft.Sql service endpoint (policy? delegation?) -- relying on the firewall rule' })
 
     # ---- 4. THE VNET RULE ---------------------------------------------------------------------
-    $have = "$(az sql server vnet-rule list @sqlSubArgs -g $sqlRg -s $srv --query "[?name=='$RuleName'].name" -o tsv 2>$null)".Trim()
+    $have = "$(& $ruleNames)".Trim()
     if (-not $have -and $PSCmdlet.ShouldProcess("$srv/$RuleName", 'create the SQL VNet rule for this subnet')) {
-        # --ignore-missing-endpoint so the rule can still exist when the endpoint could not be
-        # added: the repair must not be all-or-nothing.
-        az sql server vnet-rule create @sqlSubArgs -g $sqlRg -s $srv -n $RuleName --subnet $SubnetId `
-            --ignore-missing-endpoint -o none 2>$null
-        $have = "$(az sql server vnet-rule list @sqlSubArgs -g $sqlRg -s $srv --query "[?name=='$RuleName'].name" -o tsv 2>$null)".Trim()
+        # -IgnoreMissingEndpoint so the rule can still exist when the endpoint could not be
+        # added: the repair must not be all-or-nothing. A refusal is reported by the read-back.
+        try { New-PimArmSqlVnetRule -SubscriptionId $sqlSub -ResourceGroup $sqlRg -Server $srv -Name $RuleName -SubnetId $SubnetId -IgnoreMissingEndpoint }
+        catch { Write-Verbose "VNet rule create refused: $($_.Exception.Message)" }
+        $have = "$(& $ruleNames)".Trim()
     }
     $result.vnetRule = [bool]$have
 } else {
@@ -178,20 +189,20 @@ if ("$SubnetId".Trim()) {
 # deploy -- "prereq swallowed the failure" was the wrong inference: the rule had been REMOVED on
 # purpose. Decided now from what the server actually has: when the subnet's VNet rule AND its
 # Microsoft.Sql service endpoint are in place, that IS the path and the belt is not re-created.
-$pna = "$(az sql server show @sqlSubArgs -g $sqlRg -n $srv --query publicNetworkAccess -o tsv 2>$null)".Trim()
-$fw = "$(az sql server firewall-rule list @sqlSubArgs -g $sqlRg -s $srv --query "[?name=='AllowAzureServices'].name" -o tsv 2>$null)".Trim()
+$pna = "$((Get-PimArmSqlServer -SubscriptionId $sqlSub -ResourceGroup $sqlRg -Name $srv -ErrorAsNull).properties.publicNetworkAccess)".Trim()
+$fw = "$(& $fwNames)".Trim()
 $belt = Get-PimSqlFirewallBeltDecision -VnetRule ([bool]$result.vnetRule) -ServiceEndpoint ([bool]$result.serviceEndpoint) `
             -FirewallRulePresent ([bool]$fw) -PublicNetworkAccess $pna
 Note "Azure-services rule: $($belt.reason)"
 if ($belt.create -and $PSCmdlet.ShouldProcess("$srv/AllowAzureServices", 'create the Azure-services firewall rule')) {
-    az sql server firewall-rule create @sqlSubArgs -g $sqlRg -s $srv -n AllowAzureServices `
-        --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0 -o none 2>$null
+    try { [void](Set-PimArmSqlFirewallRule -SubscriptionId $sqlSub -ResourceGroup $sqlRg -Server $srv -Name AllowAzureServices -StartIp 0.0.0.0 -EndIp 0.0.0.0) }
+    catch { Write-Verbose "firewall rule create refused: $($_.Exception.Message)" }
 }
 # READ THE FINAL STATE BACK -- what is reported is what the server has now, not what was intended.
-$fw = "$(az sql server firewall-rule list @sqlSubArgs -g $sqlRg -s $srv --query "[?name=='AllowAzureServices'].name" -o tsv 2>$null)".Trim()
+$fw = "$(& $fwNames)".Trim()
 $result.firewallRule = [bool]$fw
 if ("$SubnetId".Trim()) {
-    $result.vnetRule = [bool]"$(az sql server vnet-rule list @sqlSubArgs -g $sqlRg -s $srv --query "[?name=='$RuleName'].name" -o tsv 2>$null)".Trim()
+    $result.vnetRule = [bool]"$(& $ruleNames)".Trim()
 }
 $global:LASTEXITCODE = 0
 

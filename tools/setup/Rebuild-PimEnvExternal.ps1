@@ -55,8 +55,8 @@
 #>
 [CmdletBinding()]
 param(
-    # Names the isolated az profile (C:\ProgramData\pim\az-<Tag>) and the capture files. For the
-    # estate this is the naming token (wa678 / rj466); for a customer it is any short label.
+    # Names the capture files. For the estate this is the naming token (wa678 / rj466); for a
+    # customer it is any short label.
     [Parameter(Mandatory)][string]$Tag,
     [Parameter(Mandatory)][string]$SubscriptionId,
     [Parameter(Mandatory)][string]$ResourceGroup,
@@ -65,6 +65,7 @@ param(
     [string]$CaptureDir,
     # Required unless -SkipEasyAuth: the tenant whose Entra signs users in to the Manager.
     [string]$EasyAuthTenantId,
+    # 100.41: no az any more -- accepted so existing callers keep working, and ignored.
     [string]$AzureConfigDir,
     [switch]$SkipEasyAuth,
     [switch]$KeepOldPrivateDnsZone,
@@ -140,26 +141,36 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $PSCommandPath
 $sol  = Split-Path -Parent $here
 
-# 🪤 Isolate the az profile. A rebuild run from a scheduled task or a second session must not
-# disturb the machine-wide default context another session is relying on.
-if (-not "$AzureConfigDir".Trim()) { $AzureConfigDir = "C:\ProgramData\pim\az-$Tag" }
-if (Test-Path -LiteralPath $AzureConfigDir) { $env:AZURE_CONFIG_DIR = $AzureConfigDir }
+# 100.41 (framework 12.17 NO-AZ): every Azure call is ARM / Graph REST through PIM-Rest's one token client
+# (engine/_shared/PIM-ArmSetup.ps1), addressed BY subscription -- nothing touches a machine-wide default context, so there
+# is no az profile to isolate any more (-AzureConfigDir is accepted and ignored). The session: a calling script's, else the
+# Invardia Support app's for this tenant, else the person signed in.
+$solRoot = Split-Path -Parent (Split-Path -Parent $here)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId) }
+if ("$AzureConfigDir".Trim()) { Write-Host "  ! -AzureConfigDir '$AzureConfigDir' is ignored: this rebuild uses no az CLI (ARM / Graph REST)." -ForegroundColor Yellow }
 if (-not "$CaptureDir".Trim()) {
     $CaptureDir = Join-Path ([IO.Path]::GetTempPath()) "pim-rebuild-$Tag-$(Get-Date -Format yyyyMMdd-HHmmss)"
 }
 $null = New-Item -ItemType Directory -Force -Path $CaptureDir
 
-$subG = @('--subscription', $SubscriptionId, '-g', $ResourceGroup)
 $script:fail = 0
 function Say($m, $c='Gray'){ Write-Host "  $m" -ForegroundColor $c }
 function Step($m){ Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Warn($m){ Write-Host "  ! $m" -ForegroundColor Yellow }
 function Bad($m){ Write-Host "  X $m" -ForegroundColor Red; $script:fail++ }
-function AzJson([string[]]$CliArgs) {
-    # 🪤 NOT named $Args -- that is an automatic variable, and binding it silently yields nothing.
-    $raw = & az @CliArgs -o json 2>$null
-    if (-not $raw) { return $null }
-    try { return ($raw | ConvertFrom-Json) } catch { return $null }
+function RgList([string]$Type, [string]$Kind, [string]$Child) {
+    # az <type> list -g RG: every resource of one type in the resource group ($null-free; @() when unreadable).
+    $path = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/$Type" + $(if ("$Child".Trim()) { "/$Child" } else { '' })
+    @(Invoke-PimSetupArm -Path $path -ApiVersion (Get-PimSetupApiVersion $Kind) -All -ErrorAsNull) | Where-Object { $null -ne $_ }
+}
+function Get-RoleAssignmentsOf([string]$PrincipalId) {
+    # az role assignment list --assignee P --all: every assignment of P in the subscription (any scope), as @{ role; scope }.
+    $f = [uri]::EscapeDataString("principalId eq '$PrincipalId'")
+    @(Invoke-PimSetupArm -Path "/subscriptions/$SubscriptionId/providers/Microsoft.Authorization/roleAssignments?`$filter=$f" -ApiVersion (Get-PimSetupApiVersion authorization) -All -ErrorAsNull) |
+        Where-Object { $_ -and "$($_.properties.principalId)" -eq $PrincipalId } |
+        ForEach-Object { @{ role = (Get-PimArmRoleName -RoleDefinitionId "$($_.properties.roleDefinitionId)"); scope = "$($_.properties.scope)" } }
 }
 function SaveCap($name, $obj) {
     $p = Join-Path $CaptureDir "$Tag-$name.json"
@@ -320,21 +331,13 @@ function Get-SqlConn {
     # what is owed rather than pretending the repair happened).
     if (-not "$SqlServer".Trim() -or -not "$SqlAdminClientId".Trim()) { return $null }
     if (-not "$SqlAdminClientSecret".Trim() -and -not "$SqlAdminCertThumbprint".Trim()) { return $null }
-    $tid = $(if ("$EasyAuthTenantId".Trim()) { $EasyAuthTenantId } else { "$(az account show --query tenantId -o tsv 2>$null)".Trim() })
-    if ("$SqlAdminClientSecret".Trim()) {
-        $body = @{ client_id=$SqlAdminClientId; client_secret=$SqlAdminClientSecret
-                   scope='https://database.windows.net/.default'; grant_type='client_credentials' }
-        $tok = (Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$tid/oauth2/v2.0/token" -Body $body).access_token
-    } else {
-        # Certificate path: reuse the repo's own token helper rather than re-implementing JWT
-        # assertion signing here.
-        $shared = Join-Path $PSScriptRoot '_PimSetupShared.ps1'
-        if (-not (Test-Path -LiteralPath $shared)) { throw "cert auth for SQL needs $shared" }
-        . $shared
-        $global:PIM_TenantId = $tid; $global:PIM_ClientId = $SqlAdminClientId
-        $global:PIM_ClientSecret = $null; $global:PIM_CertThumbprint = $SqlAdminCertThumbprint
-        $tok = Get-PimRestToken -Resource 'https://database.windows.net/'
-    }
+    # The tenant of THIS run's REST session (pinned to the subscription's tenant by Connect-PimSetupRest).
+    $tid = $(if ("$EasyAuthTenantId".Trim()) { $EasyAuthTenantId } else { "$($global:PIM_TenantId)".Trim() })
+    # PIM-Rest's token client with the SQL admin identity named EXPLICITLY -- the run's own session (its globals) is left
+    # alone, so the ARM calls after this still run as the identity that started the rebuild.
+    $sqlTok = @{ Resource = 'https://database.windows.net/'; TenantId = $tid; ClientId = $SqlAdminClientId }
+    if ("$SqlAdminClientSecret".Trim()) { $sqlTok['ClientSecret'] = $SqlAdminClientSecret } else { $sqlTok['CertThumbprint'] = $SqlAdminCertThumbprint }
+    $tok = Get-PimRestToken @sqlTok
     if (-not "$tok".Trim()) { throw 'could not obtain a SQL access token for the identity repair.' }
     $c = New-Object System.Data.SqlClient.SqlConnection "Server=tcp:$SqlServer,1433;Database=$SqlDatabase;Encrypt=True;Connection Timeout=30;"
     $c.AccessToken = $tok
@@ -353,17 +356,16 @@ function SqlRows($conn, [string]$sql) {
 }
 function SqlExec($conn, [string]$sql) { $k = $conn.CreateCommand(); $k.CommandText = $sql; [void]$k.ExecuteNonQuery() }
 
-function Invoke-AzChecked {
+function Invoke-Checked {
     # 🔴 A CREATE THAT FAILED MUST NOT PRINT "restored".
     # The first live restore printed "restored (ingress INTERNAL, 1 secret(s))" for an app that
     # ARM had just rejected, because nothing read az's exit code -- so three consecutive failures
     # were reported as three successes, and only the verify step (by luck, indexing a null) stopped
     # the run. That is the same unverified-write defect this repo keeps finding; here it would have
-    # ended with an empty environment reported as rebuilt.
+    # ended with an empty environment reported as rebuilt. (100.41: a REST refusal throws; it is
+    # re-thrown here with WHAT failed.)
     param([string]$What, [scriptblock]$Do)
-    $global:LASTEXITCODE = 0
-    & $Do
-    if ($LASTEXITCODE -ne 0) { throw "$What FAILED (az exit $LASTEXITCODE) -- refusing to continue." }
+    try { [void](& $Do) } catch { throw "$What FAILED ($($_.Exception.Message)) -- refusing to continue." }
 }
 
 function Get-PimRegistryLockDecision {
@@ -381,15 +383,15 @@ function Get-PimRegistryLockDecision {
 }
 function Get-PimInternalSwitchNotes {
     # §92 NET-3: what an internal environment still needs that the environment rebuild itself does not change.
-    param([string[]]$SubG, [switch]$LockRegistry)
+    param([switch]$LockRegistry)
     $notes = New-Object System.Collections.Generic.List[string]
-    foreach ($r in @(AzJson (@('acr','list') + $SubG))) {
-        $pe = @($r.privateEndpointConnections).Count
-        $d = Get-PimRegistryLockDecision -Sku "$($r.sku.name)" -PublicNetworkAccess "$($r.publicNetworkAccess)" -PrivateEndpointCount $pe -Requested:$LockRegistry
+    foreach ($r in @(RgList 'Microsoft.ContainerRegistry/registries' acr)) {
+        $pe = @($r.properties.privateEndpointConnections | Where-Object { $_ }).Count
+        $d = Get-PimRegistryLockDecision -Sku "$($r.sku.name)" -PublicNetworkAccess "$($r.properties.publicNetworkAccess)" -PrivateEndpointCount $pe -Requested:$LockRegistry
         $notes.Add("registry $($r.name): $($d.reason)") | Out-Null
     }
-    foreach ($s in @(AzJson (@('sql','server','list') + $SubG))) {
-        $pe = @($s.privateEndpointConnections).Count
+    foreach ($s in @(RgList 'Microsoft.Sql/servers' sql)) {
+        $pe = @($s.properties.privateEndpointConnections | Where-Object { $_ }).Count
         $notes.Add("sql $($s.name): " + $(if ($pe) { "private endpoint present ($pe)" } else { 'NO private endpoint -- the store is still reached over its public endpoint (VNet rule); add one with New-PimHostingPrerequisites -SqlPrivateEndpoint for a fully private store' })) | Out-Null
     }
     return @($notes)
@@ -398,7 +400,7 @@ function Get-PimInternalSwitchNotes {
 Write-Host "=== Rebuild PIM environment as $toWord -- $Tag / $EnvName ===" -ForegroundColor Cyan
 Say "subscription : $SubscriptionId"
 Say "resource grp : $ResourceGroup"
-Say "az profile   : $AzureConfigDir"
+Say "Azure        : ARM / Graph REST ($($global:PIM_SetupRestMode) session, tenant $($global:PIM_TenantId))"
 Say "capture dir  : $CaptureDir"
 Say ("mode         : " + $(if ($Apply) { 'APPLY' } else { 'PLAN (nothing will change)' })) `
     $(if ($Apply) { 'Yellow' } else { 'Green' })
@@ -430,7 +432,7 @@ if ($ResumeFromCapture) {
 
 Step '0. capture the live environment (fresh -- an older capture is never reused)'
 Say "direction    : $fromWord -> $toWord" 'Cyan'
-$envCap = @(AzJson (@('containerapp','env','list') + $subG)) | Where-Object { $_.name -eq $EnvName }
+$envCap = @(RgList 'Microsoft.App/managedEnvironments' aca) | Where-Object { $_.name -eq $EnvName }
 if (-not $envCap) { throw "environment '$EnvName' not found in $ResourceGroup. If a previous run already deleted it, re-run with -CaptureDir <that run's dir> -ResumeFromCapture." }
 $envCap = @($envCap)[0]
 [void](SaveCap 'env' $envCap)
@@ -456,8 +458,7 @@ Say "subnet       : $subnetId"
 if (($wantInternal -and $isInternal -eq 'True') -or (-not $wantInternal -and $isInternal -ne 'True')) {
     Warn "environment '$EnvName' is ALREADY $toWord (internal=$isInternal). NOTHING TO REBUILD -- stopping."
     Warn "This script is a ONE-TIME migration for an environment built $fromWord. It is not a deploy step."
-    Warn 'To change only who can reach the Manager, use the APP (reversible, no downtime):'
-    Warn "  az containerapp ingress update -g $ResourceGroup -n $ManagerApp --type external|internal"
+    Warn "To change only who can reach the Manager, use the APP's ingress (reversible, no downtime): '$ManagerApp' ingress external|internal."
     Warn 'To deploy code, use Update-PimContainers.ps1 -- it never deletes an environment.'
     return
 }
@@ -466,16 +467,17 @@ if (-not $subnetId) { throw 'the environment has no infrastructure subnet -- ref
 # log there, leaving the real workspace empty and billed -- and anyone reading logs looking at the
 # wrong place. Resolve the name now, while the environment still exists to be asked.
 if (-not $lawCid) { throw 'the environment reports no Log Analytics workspace -- refusing to recreate without it. The container logs would be lost with nowhere to go.' }
-$lawName = az monitor log-analytics workspace list @subG --query "[?customerId=='$lawCid'].name" -o tsv 2>$null | Select-Object -First 1   # no '|' inside --query: az is az.cmd
+$lawName = "$(@(Get-PimArmLogAnalyticsList -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup | Where-Object { "$($_.properties.customerId)" -eq "$lawCid" } | ForEach-Object { "$($_.name)" }) | Select-Object -First 1)"
 if (-not "$lawName".Trim()) { throw "no workspace with customerId $lawCid in $ResourceGroup -- refusing to recreate the environment without its log destination." }
 Say "log analytics: $lawName ($lawCid)"
 
-$appCap = AzJson (@('containerapp','show') + $subG + @('-n',$ManagerApp))
+$appCap = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
 if (-not $appCap) { throw "Manager app '$ManagerApp' not found in $ResourceGroup." }
 [void](SaveCap "app-$ManagerApp-full" $appCap)
-$appSec = @(DropNulls (AzJson (@('containerapp','secret','list') + $subG + @('-n',$ManagerApp,'--show-values'))))
+$appSec = @(DropNulls (Get-PimArmAcaAppSecrets -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp))   # throws when unreadable: a capture without values cannot restore
 [void](SaveSecretCap "app-$ManagerApp-secrets" $appSec)
-$authCap = AzJson (@('containerapp','auth','show') + $subG + @('-n',$ManagerApp))
+# az's `auth show` shape (the properties of authConfigs/current), so a resume from an older capture reads the same way.
+$authCap = (Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties
 [void](SaveCap "app-$ManagerApp-auth" $authCap)
 $hadEasyAuth = [bool]($authCap.identityProviders.azureActiveDirectory.registration.clientId)
 Say "manager      : $ManagerApp  image=$($appCap.properties.template.containers[0].image)"
@@ -483,24 +485,22 @@ Say "  secrets    : $(if ($appSec.Count) { (@($appSec)|ForEach-Object{$_.name}) 
 Say ("  easy auth  : " + $(if ($hadEasyAuth) { "already configured ($($authCap.identityProviders.azureActiveDirectory.registration.clientId))" } else { 'NONE -- the internal-only env IS the access control today' })) `
     $(if ($hadEasyAuth) { 'Gray' } else { 'Yellow' })
 
-$jobsCap = @(DropNulls (AzJson (@('containerapp','job','list') + $subG)))
+$jobsCap = @(DropNulls (Get-PimArmAcaJobList -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ErrorAsNull))
 [void](SaveCap 'jobs' $jobsCap)
 foreach ($j in $jobsCap) {
-    [void](SaveCap "job-$($j.name)-full"    (AzJson (@('containerapp','job','show') + $subG + @('-n',$j.name))))
-    [void](SaveSecretCap "job-$($j.name)-secrets" @(AzJson (@('containerapp','job','secret','list') + $subG + @('-n',$j.name,'--show-values'))))
+    [void](SaveCap "job-$($j.name)-full"    (Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $j.name -ErrorAsNull))
+    [void](SaveSecretCap "job-$($j.name)-secrets" @(Get-PimArmAcaJobSecrets -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $j.name))
 }
 Say "jobs         : $(if ($jobsCap.Count) { (@($jobsCap)|ForEach-Object{$_.name}) -join ', ' } else { '(none)' })"
 
 # 🔒 The keep-list, recorded so a mistaken deletion of any of it is instantly visible as a diff.
-foreach ($k in @(@('keep-identities','identity'), @('keep-acr','acr'), @('keep-sql','sql'),
-                 @('keep-vnet','vnet'), @('keep-law','law'), @('keep-kv','kv'))) { }
-[void](SaveCap 'keep-identities' (AzJson (@('identity','list') + $subG)))
-[void](SaveCap 'keep-acr'        (AzJson (@('acr','list') + $subG)))
-[void](SaveCap 'keep-sql'        (AzJson (@('sql','server','list') + $subG)))
-[void](SaveCap 'keep-vnet'       (AzJson (@('network','vnet','list') + $subG)))
-[void](SaveCap 'keep-law'        (AzJson (@('monitor','log-analytics','workspace','list') + $subG)))
-[void](SaveCap 'keep-kv'         (AzJson (@('keyvault','list') + $subG)))
-$dnsZones = @(AzJson (@('network','private-dns','zone','list') + $subG))
+[void](SaveCap 'keep-identities' @(RgList 'Microsoft.ManagedIdentity/userAssignedIdentities' msi))
+[void](SaveCap 'keep-acr'        @(RgList 'Microsoft.ContainerRegistry/registries' acr))
+[void](SaveCap 'keep-sql'        @(RgList 'Microsoft.Sql/servers' sql))
+[void](SaveCap 'keep-vnet'       @(RgList 'Microsoft.Network/virtualNetworks' network))
+[void](SaveCap 'keep-law'        @(RgList 'Microsoft.OperationalInsights/workspaces' logAnalytics))
+[void](SaveCap 'keep-kv'         @(RgList 'Microsoft.KeyVault/vaults' keyVault))
+$dnsZones = @(RgList 'Microsoft.Network/privateDnsZones' privateDns)
 [void](SaveCap 'private-dns' $dnsZones)
 
 }   # end of the fresh-capture branch
@@ -510,9 +510,9 @@ $subnetId  = $envCap.properties.vnetConfiguration.infrastructureSubnetId
 $location  = $envCap.location
 $oldDomain = $envCap.properties.defaultDomain
 $lawCid    = $envCap.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId
-$lawName   = az monitor log-analytics workspace list @subG --query "[?customerId=='$lawCid'].name" -o tsv 2>$null | Select-Object -First 1
+$lawName   = "$(@(Get-PimArmLogAnalyticsList -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup | Where-Object { "$($_.properties.customerId)" -eq "$lawCid" } | ForEach-Object { "$($_.name)" }) | Select-Object -First 1)"
 if (-not "$lawName".Trim()) { throw "no workspace with customerId $lawCid in $ResourceGroup -- refusing to recreate the environment without its log destination." }
-$dnsZones  = @(AzJson (@('network','private-dns','zone','list') + $subG))
+$dnsZones  = @(RgList 'Microsoft.Network/privateDnsZones' privateDns)
 $staleZone = @($dnsZones | Where-Object { $_.name -eq $oldDomain }) | Select-Object -First 1
 
 # 🔴 THE KEEP-LIST IS ENFORCED, NOT DOCUMENTED (operator: "we cannot delete data like sql").
@@ -520,21 +520,26 @@ $staleZone = @($dnsZones | Where-Object { $_.name -eq $oldDomain }) | Select-Obj
 # rebuild. A comment saying "we never touch SQL" is worth nothing on a sensitive environment; a
 # list that is compared afterwards is evidence. If any of it is missing at the end, the run says so
 # loudly rather than reporting a successful rebuild over a data loss.
-$script:KeepBefore = [ordered]@{
-    'sql server'    = @(AzJson (@('sql','server','list') + $subG)           | ForEach-Object { $_.name }) | Sort-Object
-    'sql database'  = @()
-    'acr'           = @(AzJson (@('acr','list') + $subG)                    | ForEach-Object { $_.name }) | Sort-Object
-    'key vault'     = @(AzJson (@('keyvault','list') + $subG)               | ForEach-Object { $_.name }) | Sort-Object
-    'vnet'          = @(AzJson (@('network','vnet','list') + $subG)         | ForEach-Object { $_.name }) | Sort-Object
-    'log analytics' = @(AzJson (@('monitor','log-analytics','workspace','list') + $subG) | ForEach-Object { $_.name }) | Sort-Object
-    'identity'      = @(AzJson (@('identity','list') + $subG)               | ForEach-Object { $_.name }) | Sort-Object
-    'storage'       = @(AzJson (@('storage','account','list') + $subG)      | ForEach-Object { $_.name }) | Sort-Object
+function Get-PimKeepList {
+    # Every DATA-bearing resource in the resource group, by name (the same list before and after the rebuild).
+    $k = [ordered]@{
+        'sql server'    = @(RgList 'Microsoft.Sql/servers' sql                                | ForEach-Object { $_.name }) | Sort-Object
+        'sql database'  = @()
+        'acr'           = @(RgList 'Microsoft.ContainerRegistry/registries' acr               | ForEach-Object { $_.name }) | Sort-Object
+        'key vault'     = @(RgList 'Microsoft.KeyVault/vaults' keyVault                       | ForEach-Object { $_.name }) | Sort-Object
+        'vnet'          = @(RgList 'Microsoft.Network/virtualNetworks' network                | ForEach-Object { $_.name }) | Sort-Object
+        'log analytics' = @(RgList 'Microsoft.OperationalInsights/workspaces' logAnalytics    | ForEach-Object { $_.name }) | Sort-Object
+        'identity'      = @(RgList 'Microsoft.ManagedIdentity/userAssignedIdentities' msi     | ForEach-Object { $_.name }) | Sort-Object
+        'storage'       = @(RgList 'Microsoft.Storage/storageAccounts' storage                | ForEach-Object { $_.name }) | Sort-Object
+    }
+    # Databases are the ones that actually hold the customer's data, so they are enumerated per server.
+    foreach ($srv in $k['sql server']) {
+        $k['sql database'] += @(RgList 'Microsoft.Sql/servers' sql "$srv/databases" | ForEach-Object { "$srv/$($_.name)" })
+    }
+    $k['sql database'] = @($k['sql database']) | Sort-Object
+    return $k
 }
-# Databases are the ones that actually hold the customer's data, so they are enumerated per server.
-foreach ($srv in $script:KeepBefore['sql server']) {
-    $script:KeepBefore['sql database'] += @(AzJson (@('sql','db','list') + $subG + @('-s',$srv)) | ForEach-Object { "$srv/$($_.name)" })
-}
-$script:KeepBefore['sql database'] = @($script:KeepBefore['sql database']) | Sort-Object
+$script:KeepBefore = Get-PimKeepList
 Say 'KEEP (recorded now, re-verified after the rebuild -- NOT just a promise):' 'Green'
 foreach ($k in $script:KeepBefore.Keys) {
     $v = @($script:KeepBefore[$k])
@@ -567,15 +572,14 @@ Step '0c. record identity-keyed state (SQL users + role assignments) BEFORE the 
 $script:IdentBefore = @()
 $identTargets = @(@{ kind='app'; name=$ManagerApp }) + @($jobsCap | ForEach-Object { @{ kind='job'; name=$_.name } })
 foreach ($t in $identTargets) {
-    $show = if ($t.kind -eq 'app') { AzJson (@('containerapp','show') + $subG + @('-n',$t.name)) }
-            else                   { AzJson (@('containerapp','job','show') + $subG + @('-n',$t.name)) }
+    $show = if ($t.kind -eq 'app') { Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $t.name -ErrorAsNull }
+            else                   { Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $t.name -ErrorAsNull }
     $pid2 = "$($show.identity.principalId)".Trim()
     if (-not $pid2) { Say "  $($t.name): no system-assigned identity -- nothing keyed to it" 'DarkGray'; continue }
     # The SID a contained SQL user is created from is the APP ID, not the object id. Resolve it now:
     # after the delete this principal no longer exists and the lookup returns nothing.
-    $appIdOf = "$(az ad sp show --id $pid2 --query appId -o tsv 2>$null)".Trim()
-    $ras = @(AzJson @('role','assignment','list','--assignee',$pid2,'--all') |
-             ForEach-Object { @{ role = "$($_.roleDefinitionName)"; scope = "$($_.scope)" } })
+    $appIdOf = "$((Get-PimGraphServicePrincipal -Id $pid2 -Select 'appId' -ErrorAsNull).appId)".Trim()
+    $ras = @(Get-RoleAssignmentsOf $pid2)
     $script:IdentBefore += @{ kind=$t.kind; name=$t.name; principalId=$pid2; appId=$appIdOf; roles=$ras }
     Say ("  {0,-16} principal={1} appId={2} roles={3}" -f $t.name, $pid2, $(if ($appIdOf) { $appIdOf } else { '?' }), $ras.Count)
 }
@@ -633,7 +637,7 @@ if (-not $Apply) {
     Say "would RESTORE: '$ManagerApp' with ingress INTERNAL, then $(@($jobsCap).Count) job(s)"
     Say ("would THEN   : " + $(if ($SkipEasyAuth) { 'stop (Manager stays INTERNAL)' } else { 'attach Easy Auth, verify it, then flip ingress to external' + $(if ($wantInternal) { ' (inside an internal-only environment = the VNet and its peers only)' } else { '' }) }))
     if ($wantInternal) { Say ("would CREATE : private DNS zone for the NEW default domain -> the static IP, linked to the spoke VNet" + $(if (@($HubVnetId).Count) { " + $(@($HubVnetId).Count) hub VNet(s)" } else { ' (no -HubVnetId: peered clients will not resolve it)' })) }
-    if ($wantInternal) { foreach ($n in @(Get-PimInternalSwitchNotes -SubG $subG -LockRegistry:$LockRegistry)) { Say "NOTE         : $n" 'Yellow' } }
+    if ($wantInternal) { foreach ($n in @(Get-PimInternalSwitchNotes -LockRegistry:$LockRegistry)) { Say "NOTE         : $n" 'Yellow' } }
     if (-not $wantInternal -and $staleZone -and -not $KeepOldPrivateDnsZone) { Say "would DELETE : stale private DNS zone '$oldDomain'" }
     if (-not "$HostingAccessTenantId".Trim()) { Say 'NOTE         : no -HostingAccessTenantId -- the Graph app roles of the NEW identities are NOT re-granted; run Initialize-PimHostingAccess.ps1 afterwards' 'Yellow' }
     Say "capture written to $CaptureDir" 'Green'
@@ -652,7 +656,7 @@ if (-not $Apply) {
 # while the environment is still the OLD internal-only one.
 # 🔑 Decide from the LIVE state, not from the switch: if the environment is already external, the
 # deletes are done and the run belongs at the restore step.
-$envNow = AzJson (@('containerapp','env','show') + $subG + @('-n',$EnvName))
+$envNow = Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
 $envNowInternal = ($envNow -and "$($envNow.properties.vnetConfiguration.internal)" -eq 'True')
 $skipDeletes = ($envNow -and ($envNowInternal -eq $wantInternal))
 if ($skipDeletes) {
@@ -661,12 +665,17 @@ if ($skipDeletes) {
 } else {
 
 Step '1. delete the jobs'
-foreach ($j in $jobsCap) { Say "deleting job $($j.name)"; az containerapp job delete @subG -n $j.name --yes -o none 2>$null }
+# A refused delete is not fatal here, as before: the async wait below is what decides (an environment that still has
+# children, or is still there, is never created over).
+foreach ($j in $jobsCap) {
+    Say "deleting job $($j.name)"
+    try { Remove-PimArmResource -ResourceId (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/jobs' $j.name) -Kind aca -Wait -TimeoutSeconds 600 } catch { Warn "job delete: $($_.Exception.Message)" }
+}
 Step "2. delete the app '$ManagerApp'"
-az containerapp delete @subG -n $ManagerApp --yes -o none 2>$null
+try { Remove-PimArmResource -ResourceId (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/containerApps' $ManagerApp) -Kind aca -Wait -TimeoutSeconds 600 } catch { Warn "app delete: $($_.Exception.Message)" }
 Step "3. delete the environment '$EnvName' (the immutable flag being changed)"
-az containerapp env delete @subG -n $EnvName --yes -o none 2>$null
-# 🔴 `az containerapp env delete` RETURNS BEFORE THE DELETION COMPLETES. The environment sits in
+try { Remove-PimArmResource -ResourceId (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/managedEnvironments' $EnvName) -Kind aca } catch { Warn "environment delete: $($_.Exception.Message)" }
+# 🔴 THE ENVIRONMENT DELETE RETURNS BEFORE THE DELETION COMPLETES. The environment sits in
 # `ScheduledForDelete` for a long time -- with VNet integration it must release the subnet
 # delegation first -- and a create issued in that window is REJECTED:
 #     (ManagedEnvironmentScheduledForDelete) The environment 'x' is under deletion.
@@ -676,7 +685,9 @@ az containerapp env delete @subG -n $EnvName --yes -o none 2>$null
 Step "3b. wait for '$EnvName' to actually be gone (delete is ASYNC)"
 $waited = 0
 while ($true) {
-    $still = az containerapp env list @subG --query "[?name=='$EnvName'].properties.provisioningState" -o tsv 2>$null | Select-Object -First 1
+    $stillEnv = Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
+    $still = ''
+    if ($stillEnv) { $still = "$($stillEnv.properties.provisioningState)".Trim(); if (-not $still) { $still = 'present' } }
     if (-not "$still".Trim()) { Say "gone after ${waited}s" 'Green'; break }
     if ($waited -ge $DeleteTimeoutSeconds) {
         throw ("environment '$EnvName' is still '$still' after ${waited}s. It is NOT safe to create " +
@@ -693,24 +704,27 @@ while ($true) {
 # 4. RECREATE the environment, EXTERNAL-capable.
 # =================================================================================================
 $internalFlag = $(if ($wantInternal) { 'true' } else { 'false' })
-Step "4. create the environment with --internal-only $internalFlag"
-$lawKey = az monitor log-analytics workspace get-shared-keys @subG -n $lawName --query primarySharedKey -o tsv 2>$null
+Step "4. create the environment with internal-only = $internalFlag"
+$lawKey = Get-PimArmLogAnalyticsKey -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $lawName
 if (-not "$lawKey".Trim()) { throw "could not read the shared key for workspace '$lawName' -- refusing to recreate the environment without its log destination." }
 # 🔑 IDEMPOTENT ON RESUME. A resumed run may find the environment already recreated by the run
 # that failed later on -- recreating it would delete the work and start the 15-30 minute wait
 # again. Re-use it when it is already EXTERNAL; refuse if it somehow came back internal.
-$existing = AzJson (@('containerapp','env','show') + $subG + @('-n',$EnvName))
+$existing = Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
 $existingInternal = ($existing -and "$($existing.properties.vnetConfiguration.internal)" -eq 'True')
 if ($existing -and ($existingInternal -eq $wantInternal)) {
     Say "environment '$EnvName' already exists and is $toWord -- reusing it" 'Green'
 } else {
     if ($existing) { throw "environment '$EnvName' exists and is still $fromWord -- delete it before resuming." }
-    Invoke-AzChecked "create environment '$EnvName'" { az containerapp env create @subG -n $EnvName --location $location `
-        --infrastructure-subnet-resource-id $subnetId --internal-only $internalFlag `
-        --enable-workload-profiles --logs-destination log-analytics `
-        --logs-workspace-id $lawCid --logs-workspace-key $lawKey -o none }
+    # The same subnet, the same workspace, workload profiles (Consumption), internal = the target exposure.
+    $envProps = @{
+        vnetConfiguration    = @{ infrastructureSubnetId = $subnetId; internal = $wantInternal }
+        workloadProfiles     = @(@{ name = 'Consumption'; workloadProfileType = 'Consumption' })
+        appLogsConfiguration = @{ destination = 'log-analytics'; logAnalyticsConfiguration = @{ customerId = "$lawCid"; sharedKey = "$lawKey" } }
+    }
+    Invoke-Checked "create environment '$EnvName'" { Set-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -Properties $envProps -Create -Location $location -TimeoutSeconds $DeleteTimeoutSeconds }
 }
-$newEnv = AzJson (@('containerapp','env','show') + $subG + @('-n',$EnvName))
+$newEnv = Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull
 if (-not $newEnv) { throw 'the environment was not created.' }
 # VERIFY, never assume -- this is the one property the whole exercise exists to change.
 if ((("$($newEnv.properties.vnetConfiguration.internal)" -eq 'True')) -ne $wantInternal) {
@@ -741,15 +755,13 @@ if ($appSec.Count) {
 # restored app behind, and re-creating it would discard it for no gain. Skipping is safe ONLY
 # because step 7 diffs whatever is live against the capture and refuses to expose a mismatch --
 # so a reused app still has to prove itself.
-if (AzJson (@('containerapp','show') + $subG + @('-n',$ManagerApp))) {
+if (Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull) {
     Say "'$ManagerApp' already exists -- reusing it (step 7 will diff it against the capture)" 'Green'
 } else {
-    # SEC-35: the document carries secret VALUES, so it lives only for the one call that reads it.
-    $appDoc = Join-Path $CaptureDir "$Tag-restore-$ManagerApp.json"
-    try {
-        $doc | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $appDoc -Encoding UTF8
-        Invoke-AzChecked "create app '$ManagerApp'" { az containerapp create @subG -n $ManagerApp --yaml $appDoc -o none }
-    } finally { Remove-PimSecretFile $appDoc }
+    # SEC-35: the document carries secret VALUES -- it goes straight into the ARM PUT and is never written to disk
+    # (az's --yaml needed a file; REST does not).
+    Invoke-Checked "create app '$ManagerApp'" { Set-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Resource $doc -Create }
+    $doc = $null
     Say "restored (ingress INTERNAL, $($appSec.Count) secret(s))" 'Green'
 }
 
@@ -763,15 +775,12 @@ foreach ($j in $jobsCap) {
             @('provisioningState','runningState','outboundIpAddresses','eventStreamEndpoint')
     $jd.properties.environmentId = $newEnvId
     if ($js.Count) { $jd.properties.configuration.secrets = @($js | ForEach-Object { [ordered]@{ name = $_.name; value = $_.value } }) }
-    if (AzJson (@('containerapp','job','show') + $subG + @('-n',$n))) {
+    if (Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $n -ErrorAsNull) {
         Say "job '$n' already exists -- reusing it (verified below)" 'Green'
     } else {
-        # SEC-35: same rule as the app -- the document with the values exists for one call only.
-        $jDoc = Join-Path $CaptureDir "$Tag-restore-job-$n.json"
-        try {
-            $jd | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $jDoc -Encoding UTF8
-            Invoke-AzChecked "create job '$n'" { az containerapp job create @subG -n $n --yaml $jDoc -o none }
-        } finally { Remove-PimSecretFile $jDoc }
+        # SEC-35: same rule as the app -- the document with the values goes into the PUT, never onto disk.
+        Invoke-Checked "create job '$n'" { Set-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $n -Resource $jd -Create }
+        $jd = $null
         Say "restored job $n$(if ($js.Count) { " (+$($js.Count) secret(s))" })" 'Green'
     }
 }
@@ -786,7 +795,7 @@ Step '6b. verify the restored jobs against their captures'
 foreach ($j in $jobsCap) {
     $n = $j.name
     $was = LoadCap "job-$n-full"
-    $nowJ = AzJson (@('containerapp','job','show') + $subG + @('-n',$n))
+    $nowJ = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $n -ErrorAsNull
     if (-not $nowJ) { Bad "job '$n' does not exist after the restore"; continue }
     $wc = $was.properties.template.containers[0]; $nc = $nowJ.properties.template.containers[0]
     if ("$($wc.image)" -ne "$($nc.image)") { Bad "job '$n' image DIFFERS: was='$($wc.image)' now='$($nc.image)'" }
@@ -826,8 +835,8 @@ Step '6c. repair identity-keyed state (new system-assigned MIs)'
 # numbers in tests/Test-PimRebuildIdentityRepair.ps1.
 $identNow = @()
 foreach ($b in $script:IdentBefore) {
-    $show = if ($b.kind -eq 'app') { AzJson (@('containerapp','show') + $subG + @('-n',$b.name)) }
-            else                   { AzJson (@('containerapp','job','show') + $subG + @('-n',$b.name)) }
+    $show = if ($b.kind -eq 'app') { Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $b.name -ErrorAsNull }
+            else                   { Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $b.name -ErrorAsNull }
     $newPid = "$($show.identity.principalId)".Trim()
     # 🪤 Graph lags behind ARM: a principal minted seconds ago is often not yet resolvable, and the
     # lookup returns EMPTY rather than erroring -- which would silently produce an empty SID and a
@@ -835,7 +844,7 @@ foreach ($b in $script:IdentBefore) {
     $newAppId = ''
     if ($newPid) {
         for ($i = 0; $i -lt 12 -and -not $newAppId; $i++) {
-            $newAppId = "$(az ad sp show --id $newPid --query appId -o tsv 2>$null)".Trim()
+            $newAppId = "$((Get-PimGraphServicePrincipal -Id $newPid -Select 'appId' -ErrorAsNull).appId)".Trim()
             if (-not $newAppId) { Start-Sleep -Seconds 5 }
         }
     }
@@ -857,11 +866,12 @@ Say ("  plan: {0} role assignment(s), {1} SQL user(s) to remap, {2} unchanged" -
 Step '6c-a. role assignments'
 $raDone = 0
 foreach ($g in @($plan.roleGrants)) {
-    $out = az role assignment create --subscription $SubscriptionId --assignee-object-id $g.principalId --assignee-principal-type ServicePrincipal `
-             --role "$($g.role)" --scope "$($g.scope)" 2>&1
-    if ($LASTEXITCODE -eq 0)                                    { $raDone++; Say "    + $($g.role) on $($g.scope)" 'Green' }
-    elseif ("$out" -match 'already exists|RoleAssignmentExists') { $raDone++; Say "    = $($g.role) already present" 'DarkGray' }
-    else { Bad "could not grant '$($g.role)' on '$($g.scope)' to $($g.name): $(@($out)[-1])" }
+    $ra = $null; $out = ''
+    try { $ra = New-PimArmRoleAssignment -Scope "$($g.scope)" -PrincipalId $g.principalId -PrincipalType ServicePrincipal -Role "$($g.role)" -SubscriptionId $SubscriptionId }
+    catch { $out = "$($_.Exception.Message)" }
+    if ($ra -and $ra.PSObject.Properties['existed']) { $raDone++; Say "    = $($g.role) already present" 'DarkGray' }
+    elseif (-not $out)                                { $raDone++; Say "    + $($g.role) on $($g.scope)" 'Green' }
+    else { Bad "could not grant '$($g.role)' on '$($g.scope)' to $($g.name): $out" }
 }
 Say ("  {0} of {1} assignment(s) in place" -f $raDone, @($plan.roleGrants).Count) 'Green'
 
@@ -946,7 +956,7 @@ if ("$HostingAccessTenantId".Trim() -and "$SqlServer".Trim()) {
 }
 
 Step '7. verify the restore against the capture'
-$now = AzJson (@('containerapp','show') + $subG + @('-n',$ManagerApp))
+$now = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
 function Cmp($what, $a, $b) {
     if ("$a" -eq "$b") { Say "  same: $what" } else { Bad "DIFFERS: $what  was='$a' now='$b'" }
 }
@@ -980,8 +990,9 @@ if ("$CustomDomain".Trim()) {
     # 🪤 READ THE VERIFICATION ID FROM THE APP THAT EXISTS NOW, never from the capture. It is a
     # per-app value, and this app was just recreated -- a stale id makes the TXT record fail
     # validation with a message about DNS, sending you to debug the zone instead of the value.
-    $vid = az containerapp show @subG -n $ManagerApp --query "properties.customDomainVerificationId" -o tsv 2>$null
-    $acaFqdn = az containerapp show @subG -n $ManagerApp --query "properties.configuration.ingress.fqdn" -o tsv 2>$null
+    $appNow = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
+    $vid = "$($appNow.properties.customDomainVerificationId)"
+    $acaFqdn = "$($appNow.properties.configuration.ingress.fqdn)"
     $sub1 = ("$CustomDomain".Split('.')[0])
     Write-Host ''
     Write-Host '  CREATE THESE TWO DNS RECORDS (only you can do this):' -ForegroundColor Yellow
@@ -994,19 +1005,18 @@ if ("$CustomDomain".Trim()) {
         Write-Host '  -- the Manager stays INTERNAL and nothing is exposed).' -ForegroundColor Yellow
         [void](Read-Host '  press Enter when DNS is ready')
     }
-    Invoke-AzChecked "add hostname '$CustomDomain'" {
-        az containerapp hostname add @subG -n $ManagerApp --hostname $CustomDomain -o none
+    Invoke-Checked "add hostname '$CustomDomain'" {
+        Set-PimArmAcaAppCustomDomain -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -HostName $CustomDomain
     }
     # A free MANAGED certificate. CNAME validation matches the record we just asked for, so there
     # is nothing extra to publish.
     $certName = ($CustomDomain -replace '[^A-Za-z0-9-]', '-')
-    Invoke-AzChecked "managed certificate for '$CustomDomain'" {
-        az containerapp env certificate create @subG -n $EnvName --certificate-name $certName `
-            --hostname $CustomDomain --validation-method CNAME -o none
+    $script:mcert = $null
+    Invoke-Checked "managed certificate for '$CustomDomain'" {
+        $script:mcert = New-PimArmAcaManagedCertificate -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -EnvironmentName $EnvName -Name $certName -HostName $CustomDomain -Location $location
     }
-    Invoke-AzChecked "bind '$CustomDomain'" {
-        az containerapp hostname bind @subG -n $ManagerApp --hostname $CustomDomain `
-            --environment $EnvName --validation-method CNAME -o none
+    Invoke-Checked "bind '$CustomDomain'" {
+        Set-PimArmAcaAppCustomDomain -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -HostName $CustomDomain -CertificateId "$($script:mcert.id)"
     }
     $publicHost = $CustomDomain
     Say "bound. the stable address is https://$CustomDomain" 'Green'
@@ -1017,7 +1027,7 @@ if ("$CustomDomain".Trim()) {
 # =================================================================================================
 if ($SkipEasyAuth) {
     Step '8. Easy Auth SKIPPED by request -- the Manager stays on INTERNAL ingress'
-    Warn "attach auth, then expose with: az containerapp ingress update -g $ResourceGroup -n $ManagerApp --type external"
+    Warn "attach auth, then expose '$ManagerApp' (ingress external) -- e.g. re-run this script without -SkipEasyAuth, or Set-PimManagerEasyAuth.ps1."
 } else {
     Step '8. attach Easy Auth to the NEW FQDN'
     $easyAuth = Join-Path $here 'Set-PimManagerEasyAuth.ps1'
@@ -1035,7 +1045,7 @@ if ($SkipEasyAuth) {
 
     # 🔒 PROVE IT before exposing. A failed auth attach that returns 0 would otherwise publish the
     # Manager wide open, which is the exact outcome this script exists to prevent.
-    $authNow = AzJson (@('containerapp','auth','show') + $subG + @('-n',$ManagerApp))
+    $authNow = (Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties
     $boundId = $authNow.identityProviders.azureActiveDirectory.registration.clientId
     if (-not $boundId) { throw "Easy Auth is still not configured on '$ManagerApp' -- REFUSING to expose it." }
     if ("$($authNow.globalValidation.unauthenticatedClientAction)" -notmatch 'RedirectToLoginPage|Return401|Return403') {
@@ -1046,9 +1056,12 @@ if ($SkipEasyAuth) {
     Step '9. expose the Manager (ingress -> external)'
     # SEC-35: checked AND read back. This flip used to be a bare call whose failure nobody saw, so the
     # run printed a "public FQDN" for an app that was still internal -- or, worse, never noticed which.
-    Invoke-AzChecked "switch '$ManagerApp' to external ingress" { az containerapp ingress update @subG -n $ManagerApp --type external -o none }
-    $extNow = "$(az containerapp show @subG -n $ManagerApp --query "properties.configuration.ingress.external" -o tsv 2>$null)".Trim()
-    $fq = "$(az containerapp show @subG -n $ManagerApp --query "properties.configuration.ingress.fqdn" -o tsv 2>$null)".Trim()
+    Invoke-Checked "switch '$ManagerApp' to external ingress" {
+        Set-PimArmAcaAppConfiguration -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Mutate { param($cfg) $cfg.ingress.external = $true }
+    }
+    $appExt = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
+    $extNow = "$($appExt.properties.configuration.ingress.external)".Trim()
+    $fq = "$($appExt.properties.configuration.ingress.fqdn)".Trim()
     if ($extNow -notmatch '(?i)^true$' -or -not $fq) { throw "read-back: '$ManagerApp' ingress.external='$extNow' fqdn='$fq' after the switch -- the Manager is NOT exposed as intended." }
     Say "public FQDN  : https://$fq (ingress external, read back)" 'Green'
 }
@@ -1076,23 +1089,23 @@ if ($wantInternal) {
     Set-PimPrivateDnsZone -EnvDomain $newDomain -StaticIp "$($newEnv.properties.staticIp)" -ResourceGroup $dnsRg -SubscriptionId $SubscriptionId -LinkVnetIds $links
     if (-not @($HubVnetId).Count) { Warn 'no -HubVnetId: only the spoke VNet resolves the Manager. Link the hub (or add the record to your AD DNS) for clients outside it.' }
     # §92 NET-3: the registry (only on request, only when safe) and what the store still needs
-    foreach ($r in @(AzJson (@('acr','list') + $subG))) {
-        $d = Get-PimRegistryLockDecision -Sku "$($r.sku.name)" -PublicNetworkAccess "$($r.publicNetworkAccess)" -PrivateEndpointCount @($r.privateEndpointConnections).Count -Requested:$LockRegistry
+    foreach ($r in @(RgList 'Microsoft.ContainerRegistry/registries' acr)) {
+        $d = Get-PimRegistryLockDecision -Sku "$($r.sku.name)" -PublicNetworkAccess "$($r.properties.publicNetworkAccess)" -PrivateEndpointCount @($r.properties.privateEndpointConnections | Where-Object { $_ }).Count -Requested:$LockRegistry
         if ($d.lock) {
-            Invoke-AzChecked "turn public network access OFF on registry '$($r.name)'" { az acr update --subscription $SubscriptionId -n $r.name --public-network-enabled false -o none }
-            $pna = "$(az acr show --subscription $SubscriptionId -n $r.name --query publicNetworkAccess -o tsv 2>$null)".Trim()
+            Invoke-Checked "turn public network access OFF on registry '$($r.name)'" { Update-PimArmAcr -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $r.name -Properties @{ publicNetworkAccess = 'Disabled' } }
+            $pna = "$((Get-PimArmAcr -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $r.name -ErrorAsNull).properties.publicNetworkAccess)".Trim()
             if ($pna -ne 'Disabled') { Bad "registry '$($r.name)' still reports publicNetworkAccess=$pna after the switch" } else { Say "registry $($r.name): public network access OFF (read back)" 'Green' }
         } else { Say "registry $($r.name): $($d.reason)" 'Yellow' }
     }
-    foreach ($n in @(Get-PimInternalSwitchNotes -SubG $subG | Where-Object { $_ -like 'sql *' })) { Warn $n }
+    foreach ($n in @(Get-PimInternalSwitchNotes | Where-Object { $_ -like 'sql *' })) { Warn $n }
 } elseif ($staleZone -and -not $KeepOldPrivateDnsZone) {
     Step "10. remove the stale private DNS zone '$oldDomain'"
-    # Links must go first; a zone with virtual-network links refuses to delete.
-    foreach ($lnk in @(AzJson (@('network','private-dns','link','vnet','list') + $subG + @('-z',$oldDomain)))) {
+    # Links must go first; a zone with virtual-network links refuses to delete. A refused delete is reported, not fatal.
+    foreach ($lnk in @(Get-PimArmPrivateDnsLinks -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -ZoneName $oldDomain -ErrorAsNull)) {
         Say "unlinking $($lnk.name)"
-        az network private-dns link vnet delete @subG -z $oldDomain -n $lnk.name --yes -o none 2>$null
+        try { Remove-PimArmResource -ResourceId "$($lnk.id)" -Kind privateDns -Wait -TimeoutSeconds 600 } catch { Warn "unlink $($lnk.name): $($_.Exception.Message)" }
     }
-    az network private-dns zone delete @subG -n $oldDomain --yes -o none 2>$null
+    try { Remove-PimArmResource -ResourceId (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Network/privateDnsZones' $oldDomain) -Kind privateDns -Wait -TimeoutSeconds 600 } catch { Warn "zone delete: $($_.Exception.Message)" }
     Say 'removed.' 'Green'
 } elseif ($staleZone) {
     Warn "private DNS zone '$oldDomain' KEPT by request -- it will shadow the new public name for VNet clients."
@@ -1103,20 +1116,7 @@ if ($wantInternal) {
 #     DATA survives it. Prove that, do not assert it.
 # =================================================================================================
 Step '11. re-verify everything that holds data is still there'
-$keepAfter = [ordered]@{
-    'sql server'    = @(AzJson (@('sql','server','list') + $subG)           | ForEach-Object { $_.name }) | Sort-Object
-    'sql database'  = @()
-    'acr'           = @(AzJson (@('acr','list') + $subG)                    | ForEach-Object { $_.name }) | Sort-Object
-    'key vault'     = @(AzJson (@('keyvault','list') + $subG)               | ForEach-Object { $_.name }) | Sort-Object
-    'vnet'          = @(AzJson (@('network','vnet','list') + $subG)         | ForEach-Object { $_.name }) | Sort-Object
-    'log analytics' = @(AzJson (@('monitor','log-analytics','workspace','list') + $subG) | ForEach-Object { $_.name }) | Sort-Object
-    'identity'      = @(AzJson (@('identity','list') + $subG)               | ForEach-Object { $_.name }) | Sort-Object
-    'storage'       = @(AzJson (@('storage','account','list') + $subG)      | ForEach-Object { $_.name }) | Sort-Object
-}
-foreach ($srv in $keepAfter['sql server']) {
-    $keepAfter['sql database'] += @(AzJson (@('sql','db','list') + $subG + @('-s',$srv)) | ForEach-Object { "$srv/$($_.name)" })
-}
-$keepAfter['sql database'] = @($keepAfter['sql database']) | Sort-Object
+$keepAfter = Get-PimKeepList
 $lost = 0
 foreach ($k in $script:KeepBefore.Keys) {
     $missing = @(@($script:KeepBefore[$k]) | Where-Object { $_ -and ($keepAfter[$k] -notcontains $_) })

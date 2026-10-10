@@ -21,12 +21,11 @@
     5. adds the name to PIM_MANAGER_HOSTNAMES on the app (mail links then use it -- Resolve-PimManagerMailUrl);
     6. adds https://<name>/.auth/login/aad/callback to the Manager's Easy Auth app registration (Graph).
 
-  Graph step: needs an az profile signed in to the ENVIRONMENT's tenant (AZURE_CONFIG_DIR); the script refuses when the
-  active tenant differs from -TenantId (memory: Graph follows the default az profile, which on mgmt1 is another company).
+  Every call is ARM / Graph REST (no az CLI, 100.41) through ONE session pinned to -TenantId: the Invardia Support app's
+  session for that tenant, or the person signing in. The script refuses a session of any other tenant before the first call.
 
 .EXAMPLE
   # internal environment, certificate in Key Vault, private DNS zone in the hub RG, linked to the hub + PIM VNets
-  $env:AZURE_CONFIG_DIR = '<an az profile signed in to this tenant>'
   .\Set-PimManagerCustomHost.ps1 -SubscriptionId <sub> -TenantId <tenant> -ResourceGroup <pim-rg> `
       -HostName pim-manager.corp.local -KeyVaultName kv-x -KeyVaultCertName pim-manager-corp-local `
       -PrivateDnsResourceGroup <dns-rg> -LinkVnetIds <hubVnetId>,<pimVnetId> -WhatIf
@@ -116,18 +115,22 @@ function Merge-PimManagerHostnames {
 
 if ($MyInvocation.InvocationName -eq '.') { return }   # dot-sourced by the tests: functions only
 
-$sub = @('--subscription', $SubscriptionId)
-function Az-Json([string]$what, [scriptblock]$cmd) {
-    $out = & $cmd 2>$null
-    if ($LASTEXITCODE -ne 0) { throw "$what failed (az exit $LASTEXITCODE)" }
-    if ("$out".Trim()) { return ($out | ConvertFrom-Json) } else { return $null }
-}
+# 100.41 (framework 12.17 NO-AZ): ARM + Graph REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1),
+# pinned to -TenantId -- the Graph step can no longer follow "the active az profile" into another tenant. No az.
+$solRootCh = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootCh 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootCh 'engine\_shared\PIM-ArmSetup.ps1') }
+$S = "$SubscriptionId".Trim()
+$conn = Connect-PimSetupRest -SubscriptionId $S -TenantId $TenantId
+if ("$($conn.tenantId)" -ne "$TenantId".Trim().ToLowerInvariant()) { throw "the REST session is for tenant '$($conn.tenantId)', not '$TenantId' -- refusing (Graph must act in the environment's own tenant)." }
 
 Write-Host "== PIM Manager custom host name: $HostName" -ForegroundColor Cyan
-$app = Az-Json 'read the Manager app' { az containerapp show @sub -g $ResourceGroup -n $ManagerApp -o json }
+$app = Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp
+if (-not $app) { throw "read the Manager app failed: '$ManagerApp' not found in $ResourceGroup" }
 $envId = "$($app.properties.managedEnvironmentId)"
 $envName = $envId.Split('/')[-1]
-$envObj = Az-Json 'read the environment' { az containerapp env show --ids $envId -o json }
+$envObj = Get-PimArmAcaEnv -ResourceId $envId
+if (-not $envObj) { throw "read the environment failed: $envId" }
 $internal = [bool]$envObj.properties.vnetConfiguration.internal
 $plan = Get-PimManagerCustomHostPlan -HostName $HostName -Internal $internal -EnvDefaultDomain "$($envObj.properties.defaultDomain)" `
     -EnvStaticIp "$($envObj.properties.staticIp)" -KeyVaultName "$KeyVaultName" -KeyVaultCertName "$KeyVaultCertName" -PfxPath "$PfxPath" `
@@ -143,27 +146,27 @@ if ($plan.dns -eq 'public' -and -not $PublicDnsReady) {
     Write-Host '  Create the CNAME and TXT records above in your public DNS, then re-run with -PublicDnsReady.' -ForegroundColor Yellow
     return
 }
-if (-not $hasHost) { Az-Json 'add the host name' { az containerapp hostname add @sub -g $ResourceGroup -n $ManagerApp --hostname $plan.host -o json } | Out-Null }
+if (-not $hasHost) { [void](Set-PimArmAcaAppCustomDomain -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -HostName $plan.host) }   # hostname add
 $certName = ($plan.host -replace '[^a-z0-9-]', '-')
 switch ($plan.certificate) {
     'managed' {
-        Az-Json 'bind with a managed certificate' { az containerapp hostname bind @sub -g $ResourceGroup -n $ManagerApp --hostname $plan.host --environment $envName --validation-method CNAME -o json } | Out-Null
+        # hostname bind --validation-method CNAME: the environment issues a free managed certificate, then the name binds to it.
+        $mc = New-PimArmAcaManagedCertificate -SubscriptionId $S -ResourceGroup $ResourceGroup -EnvironmentName $envName -Name $certName -HostName $plan.host -Location "$($envObj.location)"
+        [void](Set-PimArmAcaAppCustomDomain -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -HostName $plan.host -CertificateId "$($mc.id)")
     }
     default {
-        $tmp = $null
-        try {
-            $pfx = $PfxPath; $pw = $PfxPassword
-            if ($plan.certificate -eq 'keyvault') {
-                # The certificate's secret half is the PFX (base64); downloaded to a temp file only for the upload, then deleted.
-                $tmp = Join-Path ([IO.Path]::GetTempPath()) ("pimcert-" + [guid]::NewGuid().ToString('N') + '.pfx')
-                az keyvault secret download @sub --vault-name $KeyVaultName -n $KeyVaultCertName -f $tmp --encoding base64 -o none 2>$null
-                if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tmp)) { throw "could not read certificate '$KeyVaultCertName' from Key Vault '$KeyVaultName'" }
-                $pfx = $tmp
-            }
-            $pwArgs = @(); if ($pw) { $pwArgs = @('--password', [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw))) }
-            Az-Json 'upload the certificate to the environment' { az containerapp env certificate upload @sub -g $ResourceGroup -n $envName --certificate-file $pfx --certificate-name $certName @pwArgs -o json } | Out-Null
-        } finally { if ($tmp -and (Test-Path $tmp)) { Remove-Item -LiteralPath $tmp -Force } }
-        Az-Json 'bind the certificate' { az containerapp hostname bind @sub -g $ResourceGroup -n $ManagerApp --hostname $plan.host --environment $envName --certificate $certName -o json } | Out-Null
+        # The certificate's secret half IS the PFX (base64): read from Key Vault straight into the upload -- never written to
+        # disk. A -PfxPath file is read into memory the same way.
+        if ($plan.certificate -eq 'keyvault') {
+            $pfxB64 = Get-PimKeyVaultSecretValue -VaultName $KeyVaultName -Name $KeyVaultCertName
+            if (-not "$pfxB64".Trim()) { throw "could not read certificate '$KeyVaultCertName' from Key Vault '$KeyVaultName' ($($global:PimSetupRestLastError))" }
+        } else {
+            $pfxB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $PfxPath).Path))
+        }
+        $pwPlain = ''; if ($PfxPassword) { $pwPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($PfxPassword)) }
+        $ec = Set-PimArmAcaEnvCertificate -SubscriptionId $S -ResourceGroup $ResourceGroup -EnvironmentName $envName -Name $certName -PfxBase64 $pfxB64 -Password $pwPlain -Location "$($envObj.location)"
+        $pfxB64 = $null; $pwPlain = $null
+        [void](Set-PimArmAcaAppCustomDomain -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -HostName $plan.host -CertificateId "$($ec.id)")   # hostname bind
     }
 }
 Write-Host "  bound $($plan.host) ($($plan.certificate) certificate)" -ForegroundColor Green
@@ -171,16 +174,17 @@ Write-Host "  bound $($plan.host) ($($plan.certificate) certificate)" -Foregroun
 # 3. DNS
 if ($plan.dns -eq 'privatezone') {
     $zrg = if ($PrivateDnsResourceGroup) { $PrivateDnsResourceGroup } else { $ResourceGroup }
-    az network private-dns zone create @sub -g $zrg -n $plan.zone -o none --only-show-errors 2>$null | Out-Null
-    $have = @(az network private-dns record-set a show @sub -g $zrg -z $plan.zone -n $plan.label --query "aRecords[].ipv4Address" -o tsv 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    [void](New-PimArmPrivateDnsZone -SubscriptionId $S -ResourceGroup $zrg -Name $plan.zone)
+    # read the record before writing it (no blink of a correct record)
+    $have = @((Get-PimArmPrivateDnsARecord -SubscriptionId $S -ResourceGroup $zrg -ZoneName $plan.zone -Name $plan.label -ErrorAsNull).properties.aRecords | Where-Object { $_ } | ForEach-Object { "$($_.ipv4Address)".Trim() } | Where-Object { $_ })
     if (-not ($have.Count -eq 1 -and $have[0] -eq $plan.records[0].value)) {
-        if ($have.Count) { az network private-dns record-set a delete @sub -g $zrg -z $plan.zone -n $plan.label --yes -o none 2>$null | Out-Null }
-        az network private-dns record-set a add-record @sub -g $zrg -z $plan.zone -n $plan.label -a $plan.records[0].value -o none
+        # the record set is written WHOLE: exactly the environment's static IP (what delete + add-record left)
+        [void](Set-PimArmPrivateDnsARecord -SubscriptionId $S -ResourceGroup $zrg -ZoneName $plan.zone -Name $plan.label -Ipv4 @($plan.records[0].value))
     }
     foreach ($v in $LinkVnetIds) {
         $ln = 'link-' + ($v.Split('/')[-1])
-        $exists = az network private-dns link vnet show @sub -g $zrg -z $plan.zone -n $ln --query id -o tsv 2>$null
-        if (-not "$exists".Trim()) { az network private-dns link vnet create @sub -g $zrg -z $plan.zone -n $ln -v $v -e false -o none }
+        $exists = "$((Get-PimArmPrivateDnsLink -SubscriptionId $S -ResourceGroup $zrg -ZoneName $plan.zone -Name $ln -ErrorAsNull).id)"
+        if (-not "$exists".Trim()) { Set-PimArmPrivateDnsLink -SubscriptionId $S -ResourceGroup $zrg -ZoneName $plan.zone -Name $ln -VnetId $v -RegistrationEnabled $false }
     }
     Write-Host "  private DNS: $($plan.label).$($plan.zone) -> $($plan.records[0].value) (zone in $zrg, $(@($LinkVnetIds).Count) link(s))" -ForegroundColor Green
 } elseif ($plan.dns -eq 'addns') {
@@ -192,23 +196,22 @@ if ($plan.dns -eq 'privatezone') {
 $curHosts = "$(@($app.properties.template.containers[0].env | Where-Object { $_.name -eq 'PIM_MANAGER_HOSTNAMES' })[0].value)"
 $newHosts = Merge-PimManagerHostnames -Current $curHosts -Add $plan.host
 if ($newHosts -ne $curHosts.ToLowerInvariant()) {
-    Az-Json 'set PIM_MANAGER_HOSTNAMES' { az containerapp update @sub -g $ResourceGroup -n $ManagerApp --set-env-vars "PIM_MANAGER_HOSTNAMES=$newHosts" -o json } | Out-Null
+    [void](Set-PimArmAcaAppEnvVars -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -Env @{ PIM_MANAGER_HOSTNAMES = $newHosts } -ContainerName "$($app.properties.template.containers[0].name)")
     Write-Host "  PIM_MANAGER_HOSTNAMES = $newHosts (new revision)" -ForegroundColor Green
 }
 
-# 5. Easy Auth reply URL (Graph -- right tenant only)
+# 5. Easy Auth reply URL (Graph -- in -TenantId: the REST session above is pinned to it)
 if (-not $SkipEasyAuth) {
-    $active = "$(az account show --query tenantId -o tsv 2>$null)".Trim()
-    if ($active -ne $TenantId) { throw "the active az profile is tenant '$active', not '$TenantId' -- set AZURE_CONFIG_DIR to a profile of the environment's tenant (Graph follows the ACTIVE account, not --subscription)" }
-    $auth = Az-Json 'read Easy Auth' { az containerapp auth show @sub -g $ResourceGroup -n $ManagerApp -o json }
-    $clientId = "$($auth.identityProviders.azureActiveDirectory.registration.clientId)"
+    $auth = Get-PimArmAcaAuthConfig -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp
+    $clientId = "$($auth.properties.identityProviders.azureActiveDirectory.registration.clientId)"
     if (-not $clientId) { Write-Warning '  Easy Auth has no Entra registration on this app -- no reply URL to add.' }
     else {
         $reply = "https://$($plan.host)/.auth/login/aad/callback"
-        $uris = @(az ad app show --id $clientId --query "web.redirectUris" -o json 2>$null | ConvertFrom-Json)
+        $ea = Get-PimGraphApplication -Id $clientId
+        if (-not $ea) { throw "the Easy Auth app registration '$clientId' is not readable in tenant '$TenantId'" }
+        $uris = @($ea.web.redirectUris | Where-Object { "$_".Trim() })
         if ($uris -notcontains $reply) {
-            az ad app update --id $clientId --web-redirect-uris @($uris + $reply) -o none
-            if ($LASTEXITCODE -ne 0) { throw 'could not add the Easy Auth reply URL' }
+            Update-PimGraphApplication -Id $clientId -Properties @{ web = @{ redirectUris = @($uris + $reply) } }
             Write-Host "  Easy Auth reply URL added: $reply" -ForegroundColor Green
         }
     }

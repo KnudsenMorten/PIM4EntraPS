@@ -106,63 +106,62 @@ if ($StorageAccount -notmatch '^[a-z0-9]{3,24}$') {
 }
 
 # --- context must be the MASTER's subscription --------------------------------
-# Every call below passes --subscription, so what matters is that THIS subscription is reachable by the signed-in context --
-# not which subscription happens to be the machine-wide default. (The old check refused on the default and told the
-# operator to `az account set`, i.e. to change the default context every other session on the host uses.)
-$acct = az account show --subscription $SubscriptionId --query id -o tsv 2>$null
-if ($LASTEXITCODE -ne 0 -or -not "$acct".Trim()) { throw "no az context for subscription '$SubscriptionId'. Log in to the managing tenant first." }
+# 100.41 (framework 12.17 NO-AZ): every call below is ARM / blob REST through PIM-Rest's one token client
+# (engine/_shared/PIM-ArmSetup.ps1), addressed BY subscription -- there is no machine-wide default context to change or to
+# fall into. A calling build's REST session is used as it is; standalone, the Invardia Support app's session or the person.
+$solRootBs = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootBs 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootBs 'engine\_shared\PIM-ArmSetup.ps1') }
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId) }
+$acct = "$((Get-PimArmSubscription -SubscriptionId $SubscriptionId -ErrorAsNull).subscriptionId)"
+if (-not "$acct".Trim()) { throw "the signed-in identity cannot read subscription '$SubscriptionId'. Sign in to the managing tenant first." }
 if ("$acct".Trim() -ne "$SubscriptionId".Trim()) {
     # Same family as ESTATE-14: "a context exists" is not "the right context".
-    throw "az resolved subscription '$acct', not the managing tenant '$SubscriptionId' -- refusing to create storage in the wrong subscription."
+    throw "ARM resolved subscription '$acct', not the managing tenant '$SubscriptionId' -- refusing to create storage in the wrong subscription."
 }
-Note "az context verified: $acct"
-# 🔴 Every call below splats this. It was referenced by the create calls but never DEFINED, so it
-# expanded to nothing and those calls ran in whatever the default context was (2026-09-13).
-$subArgs = @('--subscription', $SubscriptionId)
+Note "subscription verified: $acct"
 
 # --- 1) provider ---------------------------------------------------------------
 Step 'Microsoft.Storage provider registration'
-$state = az provider show @subArgs -n Microsoft.Storage --query registrationState -o tsv 2>$null
+$state = Get-PimArmProviderState -SubscriptionId $SubscriptionId -Namespace Microsoft.Storage
 if ("$state" -eq 'Registered') { Note 'already Registered' }
 elseif ($PSCmdlet.ShouldProcess('Microsoft.Storage', 'register provider')) {
     Note "state '$state' -- registering (this can take a minute)"
-    az provider register @subArgs -n Microsoft.Storage --wait -o none 2>&1 | Out-Null
-    $state = az provider show @subArgs -n Microsoft.Storage --query registrationState -o tsv 2>$null
+    $state = Register-PimArmProvider -SubscriptionId $SubscriptionId -Namespace Microsoft.Storage -Wait
     if ("$state" -ne 'Registered') { throw "Microsoft.Storage did not reach Registered (state '$state'). Every step below would fail as (SubscriptionNotFound)." }
     Note 'Registered'
 }
 
 # --- 2) account + container ----------------------------------------------------
 Step "storage account $StorageAccount"
-$exists = az storage account show @subArgs -n $StorageAccount -g $ResourceGroup --query name -o tsv 2>$null
+$exists = "$((Get-PimArmStorageAccount -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $StorageAccount -ErrorAsNull).name)"
 if ("$exists".Trim()) { Note 'account exists (find-or-create)' }
 elseif ($PSCmdlet.ShouldProcess($StorageAccount, 'create storage account')) {
-    az storage account create @subArgs -n $StorageAccount -g $ResourceGroup -l $Location `
-        --sku Standard_LRS --kind StorageV2 --allow-blob-public-access $(if ($PublicSignedRead) { 'true' } else { 'false' }) -o none 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "az storage account create failed (exit $LASTEXITCODE)." }
+    try { [void](New-PimArmStorageAccount -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $StorageAccount -Location $Location -Sku Standard_LRS -Kind StorageV2 -AllowBlobPublicAccess ([bool]$PublicSignedRead)) }
+    catch { throw "storage account create failed: $($_.Exception.Message)" }
     # DOC-17 k: say what was actually created -- with -PublicSignedRead blob public access is ON (anonymous read of the
     # signed bundle blob from the networks the firewall allows); it said "DISABLED" either way.
     Note "created ($Location, Standard_LRS, public blob access $(if ($PublicSignedRead) { 'ENABLED (anonymous read of the signed bundle blob; the firewall names who can reach it)' } else { 'DISABLED' }))"
 }
-$saId = az storage account show @subArgs -n $StorageAccount -g $ResourceGroup --query id -o tsv 2>$null
+$saId = "$((Get-PimArmStorageAccount -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $StorageAccount -ErrorAsNull).id)"
 if (-not "$saId".Trim()) { throw "could not read the resource id of '$StorageAccount' after create." }
 
-# 🔴 --auth-mode login, NOT an account key. A key would work and would also mean this script
+# 🔴 An Entra token, NOT an account key. A key would work and would also mean this script
 # handled a credential it never needs: container creation is an RBAC operation for the caller.
 Step "container $Container"
-# 71.35: CONTROL PLANE (container-rm). The data-plane form needs a data role for the caller AND a network the firewall
-# allows -- and once default-action is Deny, a re-run of this step from a build host would fail on a container that exists.
-$hasC = az storage container-rm exists @subArgs -g $ResourceGroup --storage-account $StorageAccount -n $Container --query exists -o tsv 2>$null
-if ("$hasC".Trim() -eq 'true') { Note 'container exists' }
+# 71.35: CONTROL PLANE (blobServices/default/containers). The data-plane form needs a data role for the caller AND a network
+# the firewall allows -- and once default-action is Deny, a re-run of this step from a build host would fail on a container that exists.
+$hasC = [bool](Get-PimArmBlobContainer -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Account $StorageAccount -Name $Container -ErrorAsNull)
+if ($hasC) { Note 'container exists' }
 elseif ($PSCmdlet.ShouldProcess($Container, 'create container')) {
-    az storage container-rm create @subArgs -g $ResourceGroup --storage-account $StorageAccount -n $Container -o none 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "az storage container-rm create failed (exit $LASTEXITCODE)." }
+    try { [void](Set-PimArmBlobContainer -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Account $StorageAccount -Name $Container -Create) }
+    catch { throw "container create failed: $($_.Exception.Message)" }
     Note 'created'
 }
 
 # 71.35: the managing tenant's own Container Apps subnet is the publisher network (the cloud publish job runs there).
 if ("$PublisherEnvName".Trim()) {
-    $pubSubnet = "$(az containerapp env show @subArgs -g $ResourceGroup -n $PublisherEnvName --query properties.vnetConfiguration.infrastructureSubnetId -o tsv 2>$null)".Trim()
+    $pubSubnet = "$((Get-PimArmAcaEnv -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $PublisherEnvName -ErrorAsNull).properties.vnetConfiguration.infrastructureSubnetId)".Trim()
     if (-not $pubSubnet) { throw "the Container Apps environment '$PublisherEnvName' names no infrastructure subnet -- the publish job's network cannot be allowed on the store." }
     Note "publisher network: the '$PublisherEnvName' subnet $pubSubnet (the cloud publish job)"
     $PublisherSubnetResourceIds = @(@($PublisherSubnetResourceIds) + $pubSubnet | Where-Object { "$_".Trim() } | Select-Object -Unique)
@@ -174,18 +173,16 @@ if ($NoHostPublisher) {
 } else {
 if (-not "$PublisherObjectId".Trim()) {
     if (-not "$PublisherAppId".Trim()) { throw 'pass -PublisherObjectId or -PublisherAppId (the managing tenant ENGINE SPN, not the bootstrap SPN).' }
-    $PublisherObjectId = az ad sp show --id $PublisherAppId --query id -o tsv 2>$null
+    $PublisherObjectId = "$((Get-PimGraphServicePrincipal -Id $PublisherAppId -Select 'id' -ErrorAsNull).id)"
     if (-not "$PublisherObjectId".Trim()) { throw "could not resolve an object id for app id '$PublisherAppId'." }
     Note "publisher appId $PublisherAppId -> objectId $PublisherObjectId"
 }
 Step "'Storage Blob Data Contributor' for $PublisherObjectId"
-$have = az role assignment list @subArgs --assignee $PublisherObjectId --scope $saId `
-        --query "[?roleDefinitionName=='Storage Blob Data Contributor'].id" -o tsv 2>$null
-if ("$have".Trim()) { Note 'already assigned' }
+$have = @(Get-PimArmRoleAssignments -Scope $saId -PrincipalId $PublisherObjectId -Role 'Storage Blob Data Contributor' -SubscriptionId $SubscriptionId)
+if ($have.Count) { Note 'already assigned' }
 elseif ($PSCmdlet.ShouldProcess($StorageAccount, 'grant Storage Blob Data Contributor')) {
-    az role assignment create @subArgs --assignee-object-id $PublisherObjectId --assignee-principal-type $PublisherPrincipalType `
-        --role 'Storage Blob Data Contributor' --scope $saId -o none 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "role assignment failed (exit $LASTEXITCODE)." }
+    try { [void](New-PimArmRoleAssignment -Scope $saId -PrincipalId $PublisherObjectId -PrincipalType $PublisherPrincipalType -Role 'Storage Blob Data Contributor' -SubscriptionId $SubscriptionId) }
+    catch { throw "role assignment failed: $($_.Exception.Message)" }
     Note 'granted'
 }
 }
@@ -211,30 +208,24 @@ if ($NoHostPublisher) {
 }
 Step 'verifying the publish target with a real write + read (RBAC can lag several minutes)'
 $probe   = "_publish-probe.json"
-$tmp     = Join-Path ([System.IO.Path]::GetTempPath()) "pim-baseline-probe-$PID.json"
-Set-Content -LiteralPath $tmp -Value (@{ probe = 'New-PimBaselineStorage'; utc = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json) -Encoding utf8
+$probeBody = (@{ probe = 'New-PimBaselineStorage'; utc = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json)
 $deadline = (Get-Date).AddMinutes($VerifyTimeoutMinutes)
 $ok = $false; $lastErr = ''; $waited = 0
 while ((Get-Date) -lt $deadline) {
-    $out = az storage blob upload @subArgs --account-name $StorageAccount -c $Container -n $probe -f $tmp --overwrite --auth-mode login -o none 2>&1
-    if ($LASTEXITCODE -eq 0) { $ok = $true; break }
-    $lastErr = ($out | Out-String).Trim()
-    # 🪤 az DOES NOT SAY "403" HERE. The first cut of this matched 401|403|not authorized and threw
-    # on the very case it exists to wait through, because the CLI's actual wording for a data-plane
-    # RBAC gap is "You do not have the required permissions needed to perform this operation.
-    # Depending on your operation, you may need to be assigned one of the following roles: ...".
-    # No status code, no "not authorized". Measured on the greenfield master 2026-09-03, seconds
-    # after the role assignment succeeded.
-    # 🔑 Matching on a phrase list is what caused this, so the list is now broad and the TIMEOUT is
-    # what bounds the wait -- a wrong configuration costs $VerifyTimeoutMinutes and then reports
-    # the real error, which is far better than a correct one failing instantly on new phrasing.
+    try { [void](Invoke-PimBlobData -Method PUT -Account $StorageAccount -Container $Container -Blob $probe -Content $probeBody); $ok = $true; break }
+    catch { $lastErr = "$($_.Exception.Message)".Trim() }
+    # 🪤 A data-plane RBAC gap right after the grant is "wait", not "wrong" -- and its wording is not stable (az said
+    # "You do not have the required permissions needed to perform this operation" with no status code; REST says
+    # HTTP 403 AuthorizationPermissionMismatch). Measured on the greenfield master 2026-09-03, seconds after the grant.
+    # 🔑 Matching on a phrase list is what caused that, so the list is broad and the TIMEOUT is what bounds the wait --
+    # a wrong configuration costs $VerifyTimeoutMinutes and then reports the real error, which is far better than a
+    # correct one failing instantly on new phrasing.
     if ($lastErr -notmatch '(?i)401|403|Authorization|not authorized|required permissions|assigned one of the following roles|AuthenticationFailed') {
         throw "upload failed for a reason that is NOT propagation: $lastErr"
     }
     Warn "  not yet authorised on the data plane -- ${waited}s elapsed, waiting 30s (RBAC propagation)"
     Start-Sleep -Seconds 30; $waited += 30
 }
-Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
 if (-not $ok) {
     throw ("could not write to $StorageAccount/$Container within $VerifyTimeoutMinutes minute(s). " +
            $(if ($PublicSignedRead) { "With -PublicSignedRead a 403 'AuthorizationFailure' also means THIS host's network is not one of the allowed sources (same region as the account => a subnet rule, not an IP rule). " } else { '' }) +
@@ -242,15 +233,14 @@ if (-not $ok) {
            "(the bootstrap SPN is Key Vault data-plane only). Last error: $lastErr")
 }
 Note "write OK$(if ($waited) { " after ${waited}s of RBAC propagation" })"
-$read = az storage blob download @subArgs --account-name $StorageAccount -c $Container -n $probe --file (Join-Path ([System.IO.Path]::GetTempPath()) "pim-probe-read-$PID.json") --auth-mode login -o none 2>&1
-if ($LASTEXITCODE -ne 0) { throw "wrote the probe but could not read it back: $(($read | Out-String).Trim())" }
-Remove-Item -LiteralPath (Join-Path ([System.IO.Path]::GetTempPath()) "pim-probe-read-$PID.json") -Force -ErrorAction SilentlyContinue
+try { [void](Invoke-PimBlobData -Method GET -Account $StorageAccount -Container $Container -Blob $probe) }
+catch { throw "wrote the probe but could not read it back: $($_.Exception.Message)" }
 if ($PublicSignedRead) {
     # The reader's path, proven: an ANONYMOUS GET (no token, no SAS) of the blob from an allowed network.
     try { $null = Invoke-RestMethod -Method GET -Uri ("https://{0}.blob.core.windows.net/{1}/{2}" -f $StorageAccount, $Container, $probe) -Headers @{ 'x-ms-version' = '2021-08-06' } -ErrorAction Stop; Note 'anonymous read OK (no credential)' }
     catch { throw "anonymous read of the probe blob FAILED from an allowed network -- the public-but-signed posture is not effective: $($_.Exception.Message)" }
 }
-az storage blob delete @subArgs --account-name $StorageAccount -c $Container -n $probe --auth-mode login -o none 2>&1 | Out-Null
+try { [void](Invoke-PimBlobData -Method DELETE -Account $StorageAccount -Container $Container -Blob $probe) } catch { Write-Verbose "probe delete: $($_.Exception.Message)" }
 Note 'read OK, probe removed'
 
 Step 'Done.'

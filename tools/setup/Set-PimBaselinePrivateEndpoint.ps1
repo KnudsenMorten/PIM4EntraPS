@@ -28,6 +28,10 @@
     apply to anything. Undo = Set-PimBaselinePrivateEndpoint.ps1 ... -Rollback (public access back to Enabled; the
     endpoint and zone stay, harmless).
 
+    100.41 (framework 12.17 NO-AZ): every call is ARM REST through PIM-Rest's one token client (engine/_shared/
+    PIM-ArmSetup.ps1) -- a calling build's REST session is used as it is, else the Invardia Support app's session or the
+    person signed in. No az CLI.
+
 .EXAMPLE
     .\Set-PimBaselinePrivateEndpoint.ps1 -SubscriptionId <sub> -ResourceGroup rg-automateit-<token> -StorageAccount stpimbaseline<token> -VnetName vnet-pim-<token> -PrivateEndpointSubnetName pim-endpoints
 #>
@@ -46,91 +50,91 @@ param(
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
-function AzJson { $A = @($args | ForEach-Object { $_ }); $o = & az @A -o json --only-show-errors 2>$null; if ($LASTEXITCODE -ne 0 -or -not "$o".Trim()) { return $null }; return ($o | Out-String | ConvertFrom-Json) }
-$sub = @('--subscription', "$SubscriptionId".Trim())
+$S = "$SubscriptionId".Trim()
 $zone = 'privatelink.blob.core.windows.net'
 if (-not "$VnetName".Trim()) { $tok = $ResourceGroup -replace '^rg-automateit-', ''; if ($tok -eq $ResourceGroup) { throw 'pass -VnetName (cannot derive it from the resource group name)' }; $VnetName = "vnet-pim-$tok" }
 $dnsRg = if ("$PrivateDnsResourceGroup".Trim()) { "$PrivateDnsResourceGroup".Trim() } else { $ResourceGroup }
 $peName = "pe-$StorageAccount-blob"
 
-$acct = "$(az account show --query id -o tsv 2>$null)".Trim()
-if ($acct -ne "$SubscriptionId".Trim()) { throw "az context is '$acct', not the managing tenant subscription '$SubscriptionId' -- refusing." }
-$ErrorActionPreference = 'Continue'
-$sa = AzJson storage account show @sub -g $ResourceGroup -n $StorageAccount
+# A calling build's REST session is used as it is; otherwise open one (Support app session / the person signed in).
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) }
+$acct = "$((Get-PimArmSubscription -SubscriptionId $S -ErrorAsNull).subscriptionId)".Trim()
+if ($acct -ne $S) { throw "the signed-in identity cannot read the managing tenant subscription '$SubscriptionId' (read '$acct') -- refusing." }
+$sa = Get-PimArmStorageAccount -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $StorageAccount -ErrorAsNull
 if (-not $sa) { throw "storage account '$StorageAccount' not found in $ResourceGroup -- run the storage step (New-PimBaselineStorage.ps1) first." }
 
 if ($Rollback) {
     Step "ROLLBACK: public network access Enabled on $StorageAccount (endpoint and zone left in place)"
-    az storage account update @sub -g $ResourceGroup -n $StorageAccount --public-network-access Enabled -o none --only-show-errors
-    $pna = "$(az storage account show @sub -g $ResourceGroup -n $StorageAccount --query publicNetworkAccess -o tsv 2>$null)".Trim()
+    [void](Update-PimArmStorageAccount -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $StorageAccount -Properties @{ publicNetworkAccess = 'Enabled' })
+    $pna = "$((Get-PimArmStorageAccount -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $StorageAccount -ErrorAsNull).properties.publicNetworkAccess)".Trim()
     Note "publicNetworkAccess = $pna"
     if ($pna -ne 'Enabled') { throw "rollback read-back: publicNetworkAccess is '$pna'" }
     return
 }
 
 Step "1. private-endpoint subnet '$PrivateEndpointSubnetName' in $VnetName"
-$sn = AzJson network vnet subnet show @sub -g $ResourceGroup --vnet-name $VnetName -n $PrivateEndpointSubnetName
+$sn = Get-PimArmSubnet -SubscriptionId $S -ResourceGroup $ResourceGroup -VnetName $VnetName -Name $PrivateEndpointSubnetName -ErrorAsNull
 if (-not $sn) {
     if (-not "$PrivateEndpointSubnetAddressPrefix".Trim()) { throw "subnet '$PrivateEndpointSubnetName' does not exist in $VnetName and no -PrivateEndpointSubnetAddressPrefix was given (a free CIDR inside the VNet; NOT the Container Apps subnet, which is delegated)." }
     if ($PSCmdlet.ShouldProcess($PrivateEndpointSubnetName, 'create subnet')) {
-        az network vnet subnet create @sub -g $ResourceGroup --vnet-name $VnetName -n $PrivateEndpointSubnetName --address-prefixes $PrivateEndpointSubnetAddressPrefix -o none --only-show-errors
-        $sn = AzJson network vnet subnet show @sub -g $ResourceGroup --vnet-name $VnetName -n $PrivateEndpointSubnetName
+        $sn = Set-PimArmSubnet -SubscriptionId $S -ResourceGroup $ResourceGroup -VnetName $VnetName -Name $PrivateEndpointSubnetName -AddressPrefix $PrivateEndpointSubnetAddressPrefix
         if (-not $sn) { throw "could not create subnet '$PrivateEndpointSubnetName'" }
-        Note "created $($sn.addressPrefix)"
+        Note "created $($sn.properties.addressPrefix)"
     }
-} else { Note "exists ($($sn.addressPrefix))" }
-if (@($sn.delegations).Count) { throw "subnet '$PrivateEndpointSubnetName' is delegated ($(@($sn.delegations | ForEach-Object { $_.serviceName }) -join ', ')) -- a private endpoint cannot live there. Use a separate, undelegated subnet." }
+} else { Note "exists ($($sn.properties.addressPrefix))" }
+if (@($sn.properties.delegations | Where-Object { $_ }).Count) { throw "subnet '$PrivateEndpointSubnetName' is delegated ($(@($sn.properties.delegations | ForEach-Object { $_.properties.serviceName }) -join ', ')) -- a private endpoint cannot live there. Use a separate, undelegated subnet." }
 
 Step "2. private endpoint $peName -> $StorageAccount (blob)"
-$pe = AzJson network private-endpoint show @sub -g $ResourceGroup -n $peName
+$pe = Get-PimArmPrivateEndpoint -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $peName -ErrorAsNull
 if (-not $pe -and $PSCmdlet.ShouldProcess($peName, 'create private endpoint')) {
-    az network private-endpoint create @sub -g $ResourceGroup -n $peName --subnet $sn.id --private-connection-resource-id $sa.id --group-id blob --connection-name blob -l $sa.location -o none --only-show-errors
-    $pe = AzJson network private-endpoint show @sub -g $ResourceGroup -n $peName
+    $pe = New-PimArmPrivateEndpoint -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $peName -Location "$($sa.location)" -SubnetId "$($sn.id)" -TargetResourceId "$($sa.id)" -GroupId blob -ConnectionName blob
     if (-not $pe) { throw "the private endpoint '$peName' was NOT created (see the error above)" }
     Note 'created'
 } else { Note 'exists' }
-$conn = "$(@($pe.privateLinkServiceConnections)[0].privateLinkServiceConnectionState.status)"
+$conn = "$(@($pe.properties.privateLinkServiceConnections)[0].properties.privateLinkServiceConnectionState.status)"
 if ($conn -ne 'Approved') { throw "private endpoint connection state is '$conn', expected Approved" }
 
 Step "3. private DNS zone $zone in $dnsRg, linked to $VnetName (NxDomainRedirect), zone group on the endpoint"
-$vnetId = "$(az network vnet show @sub -g $ResourceGroup -n $VnetName --query id -o tsv 2>$null)".Trim()
+$vnetId = "$((Get-PimArmVnet -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $VnetName -ErrorAsNull).id)".Trim()
 if (-not $vnetId) { throw "VNet '$VnetName' not found in $ResourceGroup" }
-$z = AzJson network private-dns zone show @sub -g $dnsRg -n $zone
-if (-not $z) { az network private-dns zone create @sub -g $dnsRg -n $zone -o none --only-show-errors; $z = AzJson network private-dns zone show @sub -g $dnsRg -n $zone }
+$z = New-PimArmPrivateDnsZone -SubscriptionId $S -ResourceGroup $dnsRg -Name $zone
 if (-not $z) { throw "could not create zone $zone in $dnsRg" }
 $linkName = "link-$VnetName"
-$lk = AzJson network private-dns link vnet show @sub -g $dnsRg -z $zone -n $linkName
-if (-not $lk) { az network private-dns link vnet create @sub -g $dnsRg -z $zone -n $linkName --virtual-network $vnetId --registration-enabled false --resolution-policy NxDomainRedirect -o none --only-show-errors }
-elseif ("$($lk.resolutionPolicy)" -ne 'NxDomainRedirect') { az network private-dns link vnet update @sub -g $dnsRg -z $zone -n $linkName --resolution-policy NxDomainRedirect -o none --only-show-errors }
-$zg = AzJson network private-endpoint dns-zone-group list @sub -g $ResourceGroup --endpoint-name $peName
-if (-not @($zg).Count) { az network private-endpoint dns-zone-group create @sub -g $ResourceGroup --endpoint-name $peName -n zg --private-dns-zone $z.id --zone-name blob -o none --only-show-errors }
+$lk = Get-PimArmPrivateDnsLink -SubscriptionId $S -ResourceGroup $dnsRg -ZoneName $zone -Name $linkName -ErrorAsNull
+if (-not $lk -or "$($lk.properties.resolutionPolicy)" -ne 'NxDomainRedirect') {
+    Set-PimArmPrivateDnsLink -SubscriptionId $S -ResourceGroup $dnsRg -ZoneName $zone -Name $linkName -VnetId $(if ($lk) { "$($lk.properties.virtualNetwork.id)" } else { $vnetId }) -ResolutionPolicy NxDomainRedirect
+}
+if (-not @(Get-PimArmPrivateDnsZoneGroups -SubscriptionId $S -ResourceGroup $ResourceGroup -EndpointName $peName).Count) {
+    Set-PimArmPrivateDnsZoneGroup -SubscriptionId $S -ResourceGroup $ResourceGroup -EndpointName $peName -Name zg -ZoneId "$($z.id)" -ConfigName blob
+}
 
 Step '4. anonymous read of the blob (no listing) -- the pull job has no cross-tenant identity; the signature is the trust'
-if (-not [bool]$sa.allowBlobPublicAccess) { az storage account update @sub -g $ResourceGroup -n $StorageAccount --allow-blob-public-access true -o none --only-show-errors }
-$ca = "$(az storage container-rm show @sub -g $ResourceGroup --storage-account $StorageAccount -n $Container --query publicAccess -o tsv 2>$null)".Trim()
-if ($ca -ne 'Blob') { az storage container-rm update @sub -g $ResourceGroup --storage-account $StorageAccount -n $Container --public-access blob -o none --only-show-errors }
+if (-not [bool]$sa.properties.allowBlobPublicAccess) { [void](Update-PimArmStorageAccount -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $StorageAccount -Properties @{ allowBlobPublicAccess = $true }) }
+$ca = "$((Get-PimArmBlobContainer -SubscriptionId $S -ResourceGroup $ResourceGroup -Account $StorageAccount -Name $Container -ErrorAsNull).properties.publicAccess)".Trim()
+if ($ca -ne 'Blob') { [void](Set-PimArmBlobContainer -SubscriptionId $S -ResourceGroup $ResourceGroup -Account $StorageAccount -Name $Container -PublicAccess Blob) }
 
 Step '5. public network access DISABLED (last: the private path exists now)'
-if ("$($sa.publicNetworkAccess)" -ne 'Disabled' -and $PSCmdlet.ShouldProcess($StorageAccount, 'disable public network access')) {
-    az storage account update @sub -g $ResourceGroup -n $StorageAccount --public-network-access Disabled -o none --only-show-errors
+if ("$($sa.properties.publicNetworkAccess)" -ne 'Disabled' -and $PSCmdlet.ShouldProcess($StorageAccount, 'disable public network access')) {
+    [void](Update-PimArmStorageAccount -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $StorageAccount -Properties @{ publicNetworkAccess = 'Disabled' })
 }
 
 Step 'read back'
 Start-Sleep -Seconds 5
-$sa2 = AzJson storage account show @sub -g $ResourceGroup -n $StorageAccount
-$ca2 = "$(az storage container-rm show @sub -g $ResourceGroup --storage-account $StorageAccount -n $Container --query publicAccess -o tsv 2>$null)".Trim()
-$pe2 = AzJson network private-endpoint show @sub -g $ResourceGroup -n $peName
+$sa2 = Get-PimArmStorageAccount -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $StorageAccount -ErrorAsNull
+$ca2 = "$((Get-PimArmBlobContainer -SubscriptionId $S -ResourceGroup $ResourceGroup -Account $StorageAccount -Name $Container -ErrorAsNull).properties.publicAccess)".Trim()
+$pe2 = Get-PimArmPrivateEndpoint -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $peName -ErrorAsNull
 $nicIp = ''
-$nicId = "$(@($pe2.networkInterfaces)[0].id)"
-if ($nicId) { $nicIp = "$(az network nic show @sub --ids $nicId --query 'ipConfigurations[0].privateIPAddress' -o tsv 2>$null)".Trim() }
-$recs = AzJson network private-dns record-set a show @sub -g $dnsRg -z $zone -n $StorageAccount
-$recIps = @($recs.aRecords | ForEach-Object { "$($_.ipv4Address)" })
-$lk2 = AzJson network private-dns link vnet show @sub -g $dnsRg -z $zone -n $linkName
-$ErrorActionPreference = 'Stop'
-$v = Test-PimBaselinePrivateEndpointState -State @{ publicNetworkAccess = "$($sa2.publicNetworkAccess)"; allowBlobPublicAccess = [bool]$sa2.allowBlobPublicAccess; containerPublicAccess = $ca2
-        endpointIp = $nicIp; dnsRecordIps = $recIps; linkResolutionPolicy = "$($lk2.resolutionPolicy)"; linkVnetId = "$($lk2.virtualNetwork.id)"; expectedVnetId = $vnetId }
+$nicId = "$(@($pe2.properties.networkInterfaces)[0].id)"
+if ($nicId) { $nicIp = "$(@((Get-PimArmResource -ResourceId $nicId -Kind network -ErrorAsNull).properties.ipConfigurations)[0].properties.privateIPAddress)".Trim() }
+$recs = Get-PimArmPrivateDnsARecord -SubscriptionId $S -ResourceGroup $dnsRg -ZoneName $zone -Name $StorageAccount -ErrorAsNull
+$recIps = @($recs.properties.aRecords | Where-Object { $_ } | ForEach-Object { "$($_.ipv4Address)" })
+$lk2 = Get-PimArmPrivateDnsLink -SubscriptionId $S -ResourceGroup $dnsRg -ZoneName $zone -Name $linkName -ErrorAsNull
+$v = Test-PimBaselinePrivateEndpointState -State @{ publicNetworkAccess = "$($sa2.properties.publicNetworkAccess)"; allowBlobPublicAccess = [bool]$sa2.properties.allowBlobPublicAccess; containerPublicAccess = $ca2
+        endpointIp = $nicIp; dnsRecordIps = $recIps; linkResolutionPolicy = "$($lk2.properties.resolutionPolicy)"; linkVnetId = "$($lk2.properties.virtualNetwork.id)"; expectedVnetId = $vnetId }
 foreach ($line in $v.lines) { Note $line }
 if (-not $v.ok) { throw "private-endpoint posture NOT effective: $($v.reasons -join '; ')" }
 Write-Host "    PASS: $StorageAccount is private-endpoint only (public network access Disabled), $zone $StorageAccount -> $nicIp" -ForegroundColor Green
