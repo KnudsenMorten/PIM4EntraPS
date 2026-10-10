@@ -29,6 +29,7 @@ $script:PimInstallGuid = '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
 function Get-PimInstallStepCatalog { return [ordered]@{
     'config'               = 'Check your answers'
     'preflight-signin'     = 'Your sign-in'
+    'signin'               = 'How you signed in'
     'preflight-target'     = 'Tenant and subscription'
     'preflight-rights'     = 'Your Azure and Entra rights'
     'preflight-providers'  = 'Azure resource providers'

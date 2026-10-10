@@ -5094,6 +5094,23 @@ PowerShell 7 (the installer's own process). If no PowerShell executable can be f
 reason instead of being started. Each step's script path is written with the host's own path separator, and the other
 child PowerShell launches on the install path (the hosted health check, the monitor deployment) follow the same rule.
 
+**One sign-in across Invardia's installer and the guided install (built, not yet released).** Invardia's installer signs
+the person in once (in the browser, or with the Cloud Shell user's own token) and, in the same PowerShell process, hands
+the guided installer short-lived access tokens for Azure Resource Manager, Microsoft Graph and Azure SQL in one
+environment variable -- access tokens only, never a refresh token, and an audience it could not get is simply left out. It
+removes the variable as soon as the guided installer returns. The guided installer takes the variable out of its
+environment at once and checks every token on its own claims before using it: it must be for the installation's tenant,
+it must be a signed-in person's (delegated) token rather than an application's, and it must have more than five minutes
+left. A token that fails, or an audience that was not handed over, is not used: the installer prints which one and why,
+and signs the person in in the browser for that audience only, the first time it is needed (that sign-in then serves the
+remaining audiences without another window). A token for a different tenant on any audience means the two installers
+disagree about the tenant, so nothing from the handover is used and the installation stops before any check. Accepted
+tokens are held in memory only and dropped when the installer ends; they never reach a file, a log, the transcript or the
+progress feed. The progress feed carries one step, "How you signed in", that says whether the person signed in once through
+Invardia or in the browser. Build steps that run in their own processes keep getting their tokens from the build itself,
+as before; with a handover, optional audiences such as Key Vault are fetched for them only when that needs no new browser
+window.
+
 #### Implementation note (2026-09-17) — the provider's Manager verifies the bundle the way a managed tenant does
 
 The MSP view in the managing tenant's Manager plans against a signed bundle. Its banner verdict uses the managed tenant's

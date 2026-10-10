@@ -13,6 +13,12 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.580 -- 2026-10-10
+
+- One sign-in through Invardia's installer: PIM accepts the access tokens Invardia hands over (checked: your tenant, a user, not expiring) and only opens the browser for what is missing.
+
+- **One sign-in when you install through Invardia.** When Invardia's installer has already signed you in, PIM Manager's installer uses that sign-in instead of opening a second browser window. Each handed-over sign-in is checked first (your tenant, a person and not an application, more than five minutes left); one that does not pass is not used and you sign in in the browser for that part only, and a sign-in for a different tenant stops the installation before anything is checked or changed. The sign-in is held in memory only -- never written to a file, a log or the progress feed -- and the progress feed shows how you signed in.
+
 ## 2.4.579 -- 2026-10-10
 
 - Convert a public environment to private with one command (Convert-PimToPrivate.ps1: plan, -Apply, -Resume, stops where your network team acts).

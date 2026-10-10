@@ -104,6 +104,13 @@ $sol = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $sol 'engine\_shared\PIM-Rest.ps1')
 . (Join-Path $sol 'engine\_shared\PIM-ArmSetup.ps1')
 $null = Start-PimScriptRun -Script 'Install-PimManager'
+# framework 8.13 INSTALL-HANDOFF (REQ 100.66): Invardia's bootstrap may have signed the person in already and handed this
+# process ACCESS tokens in PIM_HANDOFF_TOKENS. Take them out of the environment at once -- from here they live in memory
+# only (checked after the answers are read, below). Child processes never inherit this variable: the managed-tenant build
+# hands each step process its own short-lived tokens. A previous run's handoff in this session is never reused.
+$script:PimHandoffRaw = "$env:PIM_HANDOFF_TOKENS"
+if ($script:PimHandoffRaw.Trim()) { $env:PIM_HANDOFF_TOKENS = $null }
+$global:PimHandoffTokens = $null
 $script:PimInstallVersion = $(try { "$((Get-Content -LiteralPath (Join-Path $sol 'VERSION') -Raw -ErrorAction Stop))".Trim() } catch { 'unknown' })   # in every config-OK event (2026-10-10)
 try {
 
@@ -270,6 +277,33 @@ if ($enrolling) {
 }
 $names = Get-PimInstallNames -Config $cfg
 
+# ================================================================== 1b. framework 8.13: the handed-over sign-in
+# Each audience is checked on its own claims (Import-PimHandoffTokens, PIM-Rest.ps1): this installation's tenant, a signed-in
+# USER (not an application), more than 5 minutes left. A token for ANOTHER tenant refuses the whole handoff and stops here
+# (the bootstrap and the answers disagree about the tenant -- nothing is used and no browser opens). Any other refusal, or an
+# audience that was not handed over, falls back to PIM's own browser sign-in for that audience only, when it is first needed.
+# Only the reasons are ever printed or reported -- never token text.
+$script:handoff = Import-PimHandoffTokens -Json $script:PimHandoffRaw -TenantId $cfg.tenantId
+$script:PimHandoffRaw = $null
+$script:handoffBrowserFor = @()
+if ($script:handoff.present) {
+    if ($script:handoff.refused) {
+        Emit 'signin' 'failed' "$($script:handoff.reason)" 'Start the installation again from invardia.com and sign in with an account of the tenant the answers name (or correct the tenant in the wizard):' ''
+        Finish 2
+    }
+    foreach ($f in @($script:handoff.fallback)) {
+        $script:handoffBrowserFor += "$($f.audience)"
+        Write-Host "    the sign-in handed over for $($f.audience) is not used: $($f.reason) -- you sign in in the browser for it when it is needed" -ForegroundColor Yellow
+    }
+    foreach ($need in 'https://management.azure.com', 'https://graph.microsoft.com', 'https://database.windows.net') {
+        if (-not $script:handoff.accepted.ContainsKey((Get-PimHandoffAudienceKey $need)) -and -not @($script:handoff.fallback | Where-Object { (Get-PimHandoffAudienceKey $_.audience) -eq (Get-PimHandoffAudienceKey $need) }).Count) {
+            $script:handoffBrowserFor += $need
+            Write-Host "    no sign-in was handed over for $need -- you sign in in the browser for it when it is needed" -ForegroundColor DarkGray
+        }
+    }
+    if ($script:handoff.accepted.Count) { $global:PimHandoffTokens = @{ tenantId = "$($cfg.tenantId)".Trim().ToLowerInvariant(); tokens = $script:handoff.accepted } }
+}
+
 # ================================================================== 2. preflight
 $who = $null
 $preflightFailed = $false
@@ -294,6 +328,16 @@ Pre 'preflight-signin' {
     @{ state = 'ok'; message = "signed in as $($script:who.userName)" }
 }
 if ($preflightFailed) { Finish 2 }
+# framework 8.13: ONE event says HOW the person signed in, so Invardia's tracked install can show it. Audience names and
+# the source only -- never token content. "Through Invardia" = the Azure (ARM) sign-in the checks above used was handed over.
+$hoAccepted = @(if ($script:handoff -and $script:handoff.accepted) { @($script:handoff.accepted.Keys) | Sort-Object })
+if ($hoAccepted -contains (Get-PimHandoffAudienceKey 'https://management.azure.com')) {
+    Emit 'signin' 'ok' 'signed in once through Invardia (handoff)' -Detail ([ordered]@{ source = 'handoff'; handedOver = @($hoAccepted); browserFor = @($script:handoffBrowserFor) })
+} elseif ("$($who.supportAppId)".Trim()) {
+    Emit 'signin' 'ok' 'signed in as the Invardia Support app' -Detail ([ordered]@{ source = 'support-app'; handedOver = @($hoAccepted) })
+} else {
+    Emit 'signin' 'ok' 'signed in in the browser' -Detail ([ordered]@{ source = 'browser'; handedOver = @($hoAccepted) })
+}
 
 Pre 'preflight-target' {
     $acc = Az-Json @('account', 'show', '--subscription', $cfg.subscriptionId)
@@ -576,4 +620,9 @@ $outputs = [ordered]@{
 Mark 'completed'
 Emit 'completed' 'completed' $(if ($outputs.portalUrl) { "open the PIM Manager: $($outputs.portalUrl)" } else { 'installation complete' }) -Outputs $outputs
 Finish 0
-} finally { Stop-PimScriptRun -Script 'Install-PimManager' }   # framework 12.7: "Log written: <path>" on every exit
+} finally {
+    # framework 8.13: the handed-over tokens never outlive this run -- the bootstrap runs this script in ITS session, so a
+    # global left behind would sit in the caller's memory after the install returns.
+    $global:PimHandoffTokens = $null; $script:handoff = $null; $script:PimHandoffRaw = $null
+    Stop-PimScriptRun -Script 'Install-PimManager'   # framework 12.7: "Log written: <path>" on every exit
+}
