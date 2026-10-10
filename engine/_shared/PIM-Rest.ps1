@@ -310,6 +310,9 @@ function Get-PimInteractiveToken {
     (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe')
   ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
   Write-Host "  [interactive] sign-in required for $Audience (loopback $redirect)" -ForegroundColor Yellow
+  # 2026-10-10: tell the installer's progress feed BEFORE a browser window opens (a hidden window waited silently and the
+  # customer saw "nothing happening"); the installer registers $global:PIM_SignInNotify.
+  if ($global:PIM_SignInNotify -is [scriptblock]) { try { & $global:PIM_SignInNotify $Audience $tenant } catch { } }
   # A person whose browser opens in the wrong profile can paste the address into the right one (2026-10-10).
   Write-Host "  If the browser opens in the wrong profile or account, open this address in the browser profile of an admin of tenant ${tenant}:" -ForegroundColor Yellow
   Write-Host "  $authUrl" -ForegroundColor DarkGray

@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.559 -- 2026-10-10
+
+- Setup: a browser sign-in now shows as waiting in the installation progress, so a sign-in window is never missed.
+
 ## 2.4.558 -- 2026-10-10
 
 - Setup: the one browser sign-in is shared by every script of the installation (no second prompt when the managed-tenant build starts).

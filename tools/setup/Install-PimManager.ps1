@@ -186,6 +186,10 @@ function Emit([string]$Id, [string]$State, [string]$Message = '', [string]$Actio
     if ($Outputs) { $a['Outputs'] = $Outputs }
     Send-Event (New-PimInstallEvent @a)
 }
+# 2026-10-10 (a customer's install looked frozen while a browser sign-in waited in a hidden window): every browser sign-in
+# announces itself in the progress feed first, so Invardia and the person see WHAT is waiting.
+$global:PIM_SignInNotify = { param($Audience, $Tenant)
+    try { Emit 'preflight-signin' 'waiting' "sign-in required for $Audience in tenant $Tenant -- complete it in the private (InPrivate) browser window, or open the address printed in this PowerShell window" } catch { } }
 function Az-Text([string[]]$AzArgs) { "$(@(& $Az $AzArgs) -join "`n")".Trim() }
 function Az-Json([string[]]$AzArgs) { $t = Az-Text ($AzArgs + @('-o', 'json')); if ($t) { try { return ($t | ConvertFrom-Json) } catch { } }; return $null }
 # A REST read with a token taken FOR THE TARGET SUBSCRIPTION (its tenant). Never `az rest`: it has no --subscription and
