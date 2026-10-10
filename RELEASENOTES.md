@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.565 -- 2026-10-10
+
+- Setup: the one sign-in also reaches the helper processes a setup step starts (no hidden extra sign-in).
+
 ## 2.4.564 -- 2026-10-10
 
 - Setup resume: the image-pull identity created by an earlier run is found again, so the container apps are created.

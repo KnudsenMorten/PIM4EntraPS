@@ -495,6 +495,18 @@ function Get-PimRestToken {
   # the Invardia Support-app session's Get-InvardiaSupportToken when that session is open in the shell, otherwise the
   # person's own browser sign-in (Get-PimInteractiveToken, auth-code + PKCE). Only reached when NO explicit identity
   # was requested (the refusal above still throws for one that cannot be honoured).
+  # 2026-10-10: a setup step's OWN child processes (e.g. the schema step) inherit PIM_HANDOFF_TOKENS from the build -- answer
+  # from it first, so no grandchild process opens a silent browser sign-in.
+  if (-not $res -and "$env:PIM_HANDOFF_TOKENS".Trim() -and -not $explicitIdentity) {
+    try {
+      $ho = "$env:PIM_HANDOFF_TOKENS" | ConvertFrom-Json
+      foreach ($pp in $ho.PSObject.Properties) {
+        if ("$($pp.Name)".TrimEnd('/').ToLowerInvariant() -eq "$aud".TrimEnd('/').ToLowerInvariant() -and "$($pp.Value)".Trim()) {
+          return "$($pp.Value)"
+        }
+      }
+    } catch { Write-Verbose "PIM_HANDOFF_TOKENS unreadable: $($_.Exception.Message)" }
+  }
   if (-not $res -and ($global:PIM_TokenProvider -is [scriptblock])) {
     $pt = $null
     try { $pt = & $global:PIM_TokenProvider $aud $tenant } catch { throw "PIM-Rest: the signed-in token source failed for '$Resource': $($_.Exception.Message)" }
