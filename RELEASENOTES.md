@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.555 -- 2026-10-10
+
+- Browser sign-in: Azure sign-in no longer fails with AADSTS650057, opens a private browser window, refuses another tenant.
+
 ## 2.4.554 -- 2026-10-10
 
 - Managed-tenant install without the Azure CLI or PowerShell modules, admin prefix optional, version line in every script; throttling no longer alerts.

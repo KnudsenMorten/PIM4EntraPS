@@ -240,6 +240,15 @@ function Resolve-PimCertificate {
 # Returns a raw access token for $Audience. Edge is launched explicitly to avoid
 # the system-default-browser state-mismatch bug; any first-party public client
 # accepts an arbitrary localhost redirect port.
+function Get-PimInteractiveClientId {
+  <# PURE. The first-party public client for a browser sign-in to -Audience: Graph -> the Microsoft Graph CLI client
+     (pre-authorised for Graph only); everything else (ARM, Azure SQL, Key Vault, Storage) -> the Microsoft Azure CLI
+     client APP ID (an app registration id used over REST, not the az program). AADSTS650057 on ARM, 2026-10-10. #>
+  param([string]$Audience)
+  if ("$Audience" -match 'graph\.microsoft\.com') { return '14d82eec-204b-4c2f-b7e8-296a70dab67e' }
+  return '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
+}
+
 function Get-PimInteractiveToken {
   param([Parameter(Mandatory)][string]$Audience,[string]$TenantId,[string]$ClientId,
         # section 9 account sign-in clarity: force a brand-new credential prompt (prompt=login)
@@ -247,9 +256,11 @@ function Get-PimInteractiveToken {
         # differs, also forces a fresh prompt so a stale account is never used silently.
         [switch]$ForceFreshAccount,[string]$ExpectedAccount)
   $tenant = if ($TenantId) { $TenantId } elseif (Get-PimTenantId) { Get-PimTenantId } else { 'organizations' }
-  # Default to the Microsoft Graph CLI public client (same app Connect-MgGraph uses);
-  # it has consent for delegated tokens to Graph/ARM/Azure SQL via .default.
-  $cid = if ($ClientId) { $ClientId } elseif ($global:PIM_InteractiveClientId) { $global:PIM_InteractiveClientId } else { '14d82eec-204b-4c2f-b7e8-296a70dab67e' }
+  # Default public client PER AUDIENCE (2026-10-10, a customer's managed install failed with AADSTS650057 "Invalid
+  # resource" for ARM): the Microsoft Graph CLI client (14d82eec-...) is pre-authorised for GRAPH only. Azure Resource
+  # Manager, Azure SQL, Key Vault and Storage use the Microsoft Azure CLI first-party public client APP ID
+  # (04b07795-..., an app registration id used over REST -- not the az program), pre-authorised for those in every tenant.
+  $cid = if ($ClientId) { $ClientId } elseif ($global:PIM_InteractiveClientId) { $global:PIM_InteractiveClientId } else { Get-PimInteractiveClientId -Audience $Audience }
 
   $bytes = New-Object byte[] 32
   [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
@@ -283,7 +294,15 @@ function Get-PimInteractiveToken {
     (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe')
   ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
   Write-Host "  [interactive] sign-in required for $Audience (loopback $redirect)" -ForegroundColor Yellow
-  if ($edge) { Start-Process -FilePath $edge -ArgumentList @('--new-window', $authUrl) -WhatIf:$false }
+  # A person whose browser opens in the wrong profile can paste the address into the right one (2026-10-10).
+  Write-Host "  If the browser opens in the wrong profile or account, open this address in the browser profile of an admin of tenant ${tenant}:" -ForegroundColor Yellow
+  Write-Host "  $authUrl" -ForegroundColor DarkGray
+  # 2026-10-10 (a customer's install): a normal Edge window opens the DEFAULT profile, whose saved account signs in silently
+  # -- the person never got a credential prompt and landed in the wrong tenant. An InPrivate window has no saved account,
+  # so the sign-in form always appears. PIM_SIGNIN_BROWSER=none: open nothing, the person pastes the address above.
+  $mode = "$env:PIM_SIGNIN_BROWSER".Trim().ToLowerInvariant()
+  if ($mode -eq 'none') { Write-Host '  (PIM_SIGNIN_BROWSER=none: no browser opened -- paste the address above into the right browser)' -ForegroundColor Yellow }
+  elseif ($edge) { Start-Process -FilePath $edge -ArgumentList @('--inprivate', '--new-window', $authUrl) -WhatIf:$false }
   else { Start-Process $authUrl -WhatIf:$false }   # fall back to default browser if Edge absent
 
   $query = $null
@@ -319,6 +338,16 @@ function Get-PimInteractiveToken {
     redirect_uri  = $redirect
     code_verifier = $verifier
     scope         = $scope
+  }
+  # The account must belong to the TARGET tenant: a token from another tenant (wrong browser profile / account) stops here,
+  # before any call is made with it.
+  if ($tenant -match '^[0-9a-fA-F-]{36}$') {
+    $tid = ''
+    try {
+      $pp = "$($r.access_token)".Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($pp.Length % 4) { $pp += '=' }
+      $tid = "$(([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($pp)) | ConvertFrom-Json).tid)".Trim()
+    } catch { $tid = '' }
+    if ($tid -and $tid -ne $tenant) { throw "You signed in to tenant $tid, but this is for tenant $tenant -- sign in with an account of $tenant (use that admin's browser profile)." }
   }
   return [pscustomobject]@{ token = $r.access_token; expiresUtc = (Get-Date).ToUniversalTime().AddSeconds([int]$r.expires_in - 60) }
 }
