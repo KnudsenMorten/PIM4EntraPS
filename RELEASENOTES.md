@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.557 -- 2026-10-10
+
+- Managed-tenant install: one sign-in for the whole installation -- the build steps reuse it instead of each opening a browser window.
+
 ## 2.4.556 -- 2026-10-10
 
 - Setup signs you in once: one browser sign-in now covers Microsoft Graph and Azure (no second sign-in window).
