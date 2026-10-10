@@ -1141,7 +1141,7 @@ function Get-PimArmAcaAppSecrets {
       back WITH these values, and an unread list written back as "no secrets" would DELETE every secret on the app.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name, [switch]$ErrorAsNull)
-    $r = Invoke-PimSetupArm -Method POST -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/containerApps' $Name 'listSecrets') -ApiVersion (Get-PimSetupApiVersion aca) -ErrorAsNull:$ErrorAsNull
+    $r = Invoke-PimSetupArm -Method POST -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/containerApps' $Name 'listSecrets') -ApiVersion (Get-PimSetupApiVersion aca) -Body @{} -ErrorAsNull:$ErrorAsNull   # a body-less POST is refused with 415 (2026-10-10)
     return @(@($r.value) | Where-Object { $_ })
 }
 
@@ -1508,7 +1508,7 @@ function Get-PimArmAcaJobSecrets {
       🔴 THROWS when the list cannot be read: a configuration written back from an unread list would DELETE the secrets.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [Parameter(Mandatory)][string]$Name)
-    $r = Invoke-PimSetupArm -Method POST -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/jobs' $Name 'listSecrets') -ApiVersion (Get-PimSetupApiVersion aca)
+    $r = Invoke-PimSetupArm -Method POST -Path (Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.App/jobs' $Name 'listSecrets') -ApiVersion (Get-PimSetupApiVersion aca) -Body @{}
     return @(@($r.value) | Where-Object { $_ })
 }
 
