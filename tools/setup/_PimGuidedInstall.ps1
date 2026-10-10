@@ -33,7 +33,7 @@ function Get-PimInstallStepCatalog { return [ordered]@{
     'preflight-rights'     = 'Your Azure and Entra rights'
     'preflight-providers'  = 'Azure resource providers'
     'preflight-names'      = 'Resource names'
-    'preflight-sql-region' = 'Azure SQL in the chosen region'
+    'preflight-sql-region' = 'Azure services in the chosen region'
     'enroll'               = 'Link to your Invardia account'
     'prereq'             = 'Network, registry, identity and database'
     'image'                = 'Container image'
