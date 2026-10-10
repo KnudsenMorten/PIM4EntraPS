@@ -874,7 +874,9 @@ function Invoke-PimEngineScope {
         foreach ($c in @($Changes)) {
             $ce = "$(if ($c.Entity) { $c.Entity } else { $c.entity })"
             $ck = "$(if ($c.Key) { $c.Key } else { $c.key })"
-            if ($ce -and $ce.ToLowerInvariant() -eq $ent.ToLowerInvariant() -and $ck) { $allow[$ck.Trim().ToLowerInvariant()] = $true }
+            # §100.12 (i): a Drift "Apply now" selection names the engine SCOPE (the Drift page's area) instead of the entity.
+            $cScope = "$(if ($c.PSObject.Properties['scope']) { $c.scope } elseif ($c -is [System.Collections.IDictionary] -and $c.Contains('scope')) { $c['scope'] })"
+            if ($ck -and (($ce -and $ce.ToLowerInvariant() -eq $ent.ToLowerInvariant()) -or ($cScope -and $cScope.Trim().ToLowerInvariant() -eq "$Scope".ToLowerInvariant()))) { $allow[$ck.Trim().ToLowerInvariant()] = $true }
         }
         $sel = { param($arr) @($arr | Where-Object { $allow.ContainsKey("$($_.key)".Trim().ToLowerInvariant()) }) }
         # NB: re-wrap each result in @() at the call site -- `& $sel` unwraps a single-element

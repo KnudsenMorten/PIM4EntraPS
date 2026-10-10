@@ -298,11 +298,19 @@ deployment is a supported choice) and no credentials lying around.
   separately because they are fixed in different places: an administrator with **no department** (fix
   the administrator) and a department with **no owners** (fix the department). If the owner list could
   not be read at all, the column says *owners not checked* rather than claiming there are none.
-- **PIM never deletes an account, and never disables one just for being missing.** ✅ 2026-09-16
-  Two things the product deliberately will not do, on any tenant: it **never deletes a user
-  account** — offboarding disables the account, revokes its sessions and removes its privileged
-  access, and the account then stays in your directory, disabled, until a person removes it by
-  hand; and it **never disables an account merely because it is absent from your definitions** — a
+- **PIM deletes an account only when an operator says so, and never disables one just for being missing.** ✅ 2026-09-16 (delete path 2026-10-06)
+  Two things the product deliberately will not do, on any tenant: it **never deletes an account on
+  its own** — offboarding and the auto-disable date disable the account, revoke its sessions and
+  remove its privileged access, and the account then stays in your directory, disabled; a reconcile
+  or prune never deletes anything, and PIM never deletes an account it does not manage. There is
+  **one** delete path, and it is an operator's decision: **Delete account** on a PIM-managed admin
+  account (a SuperAdmin, an Admin, or a delegated operator for admins at or below its own level,
+  who types DELETE to confirm — that confirmation is the approval). The engine then deletes the
+  account once: sessions revoked first, never a break-glass account, never an enabled account the
+  disable safety brake did not allow, **at most five per run**, and on a managed tenant a delete sent
+  by the managing tenant only disables the account. Entra keeps a deleted user restorable for 30
+  days, and the path can be switched off per environment (`PIM_ADMIN_ACCOUNT_DELETE=0`). It also
+  **never disables an account merely because it is absent from your definitions** — a
   live administrator account you have not defined is **reported** in every run so you can see it,
   and switching it off is your decision, made on its record. The date that switches an account off
   is called **Auto-disable date**, it is shown and editable on the Admin accounts screen, and it
@@ -929,7 +937,7 @@ deployment is a supported choice) and no credentials lying around.
   assignments added ✅ 2026-06-17) — the **Reports**, **Delegation Map**, **Validate**, **Access Review**
   and **Audit** views each carry an **Export CSV** and **Print** action, so any screen can become evidence
   for a review, a ticket or a management report without re-keying. The same one-click export now also covers
-  the **Role Lookup** tab — in all four of its modes — and the "active assignments" list on **Review current delegations**:
+  the **Role Lookup** tab — in all four of its modes — and the "active assignments" list on **Delegation overview**:
   - **Role permissions for a least-privilege ticket.** From *what a role can do*, export the role's concrete
     permissions (every allowed and excluded action, with its area) straight into a ticket — no retyping a
     permission set by hand.
@@ -939,7 +947,7 @@ deployment is a supported choice) and no credentials lying around.
   - **Who can activate a role — with the path.** From *who can activate a role*, export every person who can
     reach it together with the exact granting path, as genuine audit evidence.
   - **A role-vs-role split.** From *compare two roles*, export who can activate both versus only one.
-  - **Who has what is active right now.** From **Review current delegations**, export the currently-active
+  - **Who has what is active right now.** From **Delegation overview**, export the currently-active
     privileged assignments shown (principal, role/group, scope, type, when it was activated and when it
     expires, and the justification) as a point-in-time "who has access" extract for a review or audit.
 
@@ -1061,8 +1069,9 @@ deployment is a supported choice) and no credentials lying around.
   request**; and only then can an administrator **execute** it. Executing runs the **guided offboard
   sequence** — disable the account and revoke its active access — through the platform's existing
   account-status path, and the request is **consumed once** so it can never run a second time.
-  **The account itself is always kept:** PIM never deletes a user account (see *PIM never deletes an
-  account* below), so the sequence ends with a disabled, stripped account that stays in the directory. The flow **cannot run automatically** and refuses to act on
+  **The account itself is kept:** an offboard never deletes the account (only an operator's separate
+  *Delete account* does — see *PIM deletes an account only when an operator says so*), so the sequence
+  ends with a disabled, stripped account that stays in the directory. The flow **cannot run automatically** and refuses to act on
   an **empty** target outright or on a **bulk / multi-account** target without an explicit extra
   confirmation; the platform's mass-change safety brake and the protection for break-glass / emergency
   accounts **still apply and are never overridden** by an approval. *Why it matters:* offboarding is
@@ -1086,15 +1095,15 @@ deployment is a supported choice) and no credentials lying around.
   estate with no preview and no record — exactly the class of incident the platform's mass-change safety
   brake exists to prevent; bulk revoke now gets the same human-approved, fully-recorded treatment as
   offboarding.
-- **Review current delegations opens instantly — for everyone.** ✅ 2026-09-13 Reading every active Entra
+- **Delegation overview opens instantly — for everyone.** ✅ 2026-09-13 Reading every active Entra
   role, Azure and PIM for Groups assignment live takes minutes in a large tenant, and used to hold up
   every other Manager user while it ran. The scheduler now takes an **active-assignments snapshot every
-  2 hours** (the cadence is editable on the Job schedule page), and **Review current delegations**, the
+  2 hours** (the cadence is editable on the Job schedule page), and **Delegation overview**, the
   revoke list and the Home expiring-access tile open from it at once, showing when it was taken.
   **Refresh** queues a fresh read for the scheduler instead of reading while you wait, and a completed
   revoke queues one automatically. A row you revoke is marked **revoke queued** until the next snapshot
   no longer contains it.
-- **Clean up access held by deleted accounts quickly.** ✅ 2026-09-14 Review current delegations hides rows
+- **Clean up access held by deleted accounts quickly.** ✅ 2026-09-14 Delegation overview hides rows
   held by principals that no longer exist in the directory by default. Tick **show deleted principals**
   to list them, and a "deleted" filter selects only those rows for a bulk revoke.
 - **"Revoke selected" tells you what it staged — and refuses a row it cannot address, one row at a
@@ -1107,9 +1116,24 @@ deployment is a supported choice) and no credentials lying around.
   re-arms the button, so it is never present, enabled and inert. The confirmation says the rows are
   **staged as pending changes**, not that access is being removed: nothing is revoked until you commit,
   and the queued entries carry your justification and the real names of what they target.
+- **Delegation overview (All privileged permissions) — a graph of who holds what, right now.** ✅ 2026-10-10
+  The page that lists every privileged permission held in the tenant (Entra roles, Azure roles, PIM for Groups) is
+  renamed and opens in a **Graph view**: the live assignments drawn exactly like the Access map — people, the groups
+  they are in, the groups those are nested in, and the roles and scopes they reach. Click a person, a group, a role or a
+  line and the board collapses to that path, with its live assignments listed underneath; tick the ones to take away and
+  press **Revoke**. The graph only takes access away — it has no give or add — and revoking goes through the same
+  safeguards as the list: queued under Pending changes, break-glass accounts always skipped, a second administrator's
+  approval for a large batch, and a reminder that the delegation that granted the access is not changed. **List view**
+  is one click away; every filter on the page applies to both views, and the page remembers which one you use.
+  While a new read of the tenant is under way the page says **Loading current delegations…** with when it started and
+  updates by itself — Refresh stays disabled, so nobody asks for the same read twice. In the list, Scope gets room and
+  long Azure paths wrap at "/", while names and roles no longer crowd it out.
 
-  ![Review current delegations — active assignments from the snapshot, with the revoke-queued marker](img/manager-standing-access.png)
-  *Review current delegations: who holds active privileged access, read from the scheduler's snapshot, with queued revokes marked. (Synthetic demo data.)*
+  ![Delegation overview, Graph view — the live assignments as the Access map board, one person selected with the Revoke list](img/manager-standing-access.png)
+  *Delegation overview (All privileged permissions), Graph view: the live assignments drawn like the Access map; selecting a person shows their path and the live assignments you can revoke. (Synthetic demo data.)*
+
+  ![Delegation overview, List view — the same live assignments as a table](img/manager-delegation-list.png)
+  *Delegation overview, List view: the same assignments as a table, read from the scheduler's snapshot, with queued revokes marked. (Synthetic demo data.)*
 - **Onboarding panel.** ✅ 2026-06-15 — a dedicated **Onboarding** tab to **invite an external
   consultant as a guest** straight into the delegation model (it prepares the invitation and the
   account + group placement for you to review and commit) and to **enable or disable a managed
@@ -1188,7 +1212,7 @@ deployment is a supported choice) and no credentials lying around.
   eligible, because Entra allows them no other way; everything else is added as active. The buttons need the
   Admin role.
 - **…and it removes a delegation — as its own, clearly separate action.** ✅ 2026-09-22 Until now the map could
-  only add: asked to remove a link it pointed at *Review current delegations*, which lists the access that is
+  only add: asked to remove a link it pointed at *Delegation overview*, which lists the access that is
   **live in your tenant** and never contained these rows — so searching there for the group came back empty.
   Selecting anything now offers **two kinds of button**: **➕ Give access / Add people / Add permissions** in
   blue, and **➖ Remove access / Remove people / Remove permissions** in red. Each opens a list of only that
@@ -1210,7 +1234,7 @@ deployment is a supported choice) and no credentials lying around.
   rows rather than live assignments, and offers to **open exactly those rows, already filtered**, so you can
   remove them first. If it is live assignments that block the delete, it offers to open *Review current
   delegations* filtered on the group instead.
-- **Review current delegations understands group tags, and an empty result explains itself.** ✅ 2026-09-22 A
+- **Delegation overview understands group tags, and an empty result explains itself.** ✅ 2026-09-22 A
   live assignment carries the group's **display name**, while the rest of the Manager speaks **group tags**, so
   searching this page by tag returned nothing — which reads as "there is no such access". The search now matches
   either. And when nothing matches, the page says what it actually lists — access that is **live in the tenant
@@ -1516,7 +1540,7 @@ deployment is a supported choice) and no credentials lying around.
   trail.
 - **Delete, Keep or Ignore what is extra.** ✅ 2026-09-27 An **extra** item on the Drift page — in the tenant but not
   in PIM — now has three answers, on one item or on the ticked items. **Delete** queues its removal with the same
-  safeguards as Review current delegations, and it runs once committed. **Keep** stages the PIM row that defines it,
+  safeguards as Delegation overview, and it runs once committed. **Keep** stages the PIM row that defines it,
   so PIM manages it from then on and it stops being drift. **Ignore** is one click (no reason needed), and ignored
   items can be re-added. An Administrative Unit made outside PIM can be kept the same way (its definition is staged
   under its name); PIM never deletes an Administrative Unit, so remove it in Entra if it should go.
@@ -1595,8 +1619,9 @@ deployment is a supported choice) and no credentials lying around.
     kept up to date in AD, in the organisational unit and with the names your naming settings produce.
     Their initial password is mailed to the owner's office address and is never stored or logged; they
     are never touched in Entra ID and raise no cloud-only warnings.
-  - **PIM for Active Directory, run by a hybrid worker.** ✅ 2026-09-30 — a small domain-joined server
-    replaces the older PIM-for-AD scripts. PIM groups marked for Active Directory are mirrored to AD
+  - **PIM for Active Directory, run by a hybrid worker.** ✅ 2026-09-30 — a small domain-joined
+    Azure VM, which the setup builds in its own network peered to your domain controllers (no public IP),
+    replaces the older PIM-for-AD scripts. A worker on your own on-premises server is not available yet. PIM groups marked for Active Directory are mirrored to AD
     groups; people who activate such a group in PIM are put into its AD group within seconds (the sync
     runs continuously), for exactly the time left on their activation, and are taken out when it ends.
     Groups Active Directory protects are handled without failing, and servers are onboarded: each

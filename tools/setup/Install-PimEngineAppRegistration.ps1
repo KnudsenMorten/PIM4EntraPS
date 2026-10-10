@@ -32,9 +32,9 @@
          ROOT management group so the engine can manage Azure RBAC PIM tenant-wide. Standing
          tier-0 in Azure, so it is no longer done by default (SEC-34); grant it at the
          narrowest scope the engine manages instead when you can.
-      7. Writes the resolved tenantId / clientId / cert thumbprint into the engine
-         launcher's LauncherConfig.custom.ps1 ($global:HighPriv_Modern_* contract),
-         unless -NoWriteLauncherConfig. The block is REPLACED on every run, never appended
+      7. Only with -LauncherConfigPath: writes the resolved tenantId / clientId / cert thumbprint
+         into that LauncherConfig.custom.ps1 ($global:HighPriv_Modern_* contract; the v1 launcher
+         tree it used to default to is deleted). The block is REPLACED on every run, never appended
          (IMP-49 p).
 
 .PARAMETER DisplayName
@@ -80,8 +80,8 @@
     (-GrantRootUserAccessAdministrator), so this only wins over that switch.
 
 .PARAMETER LauncherConfigPath
-    Path to the engine launcher's LauncherConfig.custom.ps1. Defaults to
-    launcher/PIM-Baseline-Management-CSV/LauncherConfig.custom.ps1 under the solution.
+    Optional file to write the engine identity block into (LauncherConfig.custom.ps1 format). No default since the v1
+    launcher/ tree was deleted (2026-10-10): without this parameter nothing is written.
 
 .PARAMETER NoWriteLauncherConfig
     Do not write the resolved identity into LauncherConfig.custom.ps1.
@@ -521,10 +521,9 @@ if ($doRootUaa -and $sp) {
 }
 
 # --- Write the identity into the engine launcher config ---------------------------
-if (-not $NoWriteLauncherConfig -and $app -and $app.appId) {
-    if (-not $LauncherConfigPath) {
-        $LauncherConfigPath = Join-Path $solRoot 'launcher\PIM-Baseline-Management-CSV\LauncherConfig.custom.ps1'
-    }
+# v1's launcher/ tree is DELETED (owner 2026-10-10): there is no default target any more -- the identity block is written only
+# where a caller names a file with -LauncherConfigPath (v2 reads its engine identity from SQL / the container, not this file).
+if (-not $NoWriteLauncherConfig -and "$LauncherConfigPath".Trim() -and $app -and $app.appId) {
     if ($PSCmdlet.ShouldProcess($LauncherConfigPath, 'write engine identity ($global:HighPriv_Modern_*)')) {
         # (the begin/end markers are added by Update-PimLauncherIdentityBlock)
         $lines = @(

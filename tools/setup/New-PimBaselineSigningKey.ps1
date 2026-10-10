@@ -18,7 +18,7 @@
       4. the key id: printed, and written to the pipeline. It is NOT a secret -- it is the value each managed tenant puts
          in master.signingKeyIds. Several ids may be pinned at once, so a key roll never breaks a managed tenant.
 
-    Works in certificate mode and in signed-in mode (71.33): it uses the az context the build established.
+    Works in certificate mode and in signed-in mode (71.33): it uses the REST identity the build established (no az).
 
 .OUTPUTS
     The key id (43-character base64url string).
@@ -44,13 +44,22 @@ $here = $PSScriptRoot
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)
 . (Join-Path $solRoot 'engine\msp\PIM-Baseline.ps1')
 . (Join-Path $solRoot 'engine\msp\PIM-BaselinePublish.ps1')
-. (Join-Path $here '_PimAz.ps1')                 # the guarded az shadow (an az WARNING on stderr must not abort)
+# 100.41 (framework 12.17 NO-AZ): ARM + Key Vault data-plane REST through PIM-Rest's ONE token client
+# (engine/_shared/PIM-ArmSetup.ps1). A calling build's REST session is used as it is; standalone, the Invardia Support
+# app's session or the person signed in. No az.
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
 . (Join-Path $here '_PimUpdateRing.ps1')          # New-PimSubscriptionArmInvoker (tenant-checked ARM caller)
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 
 if ("$KeyName" -notmatch '^[A-Za-z0-9-]{1,127}$') { throw "key name '$KeyName' is invalid (letters, digits, '-')" }
 if (-not "$KeyVaultResourceGroup".Trim()) { $KeyVaultResourceGroup = $ResourceGroup }
+$S = "$SubscriptionId".Trim()
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) }
+# The subscription's tenant, resolved WITHOUT a token (ARM's 401 challenge); every token below is pinned to it.
+$subTenant = "$(Resolve-PimArmSubscriptionTenant -SubscriptionId $S)".Trim().ToLowerInvariant()
+if (-not $subTenant) { $subTenant = "$($global:PIM_TenantId)".Trim().ToLowerInvariant() }
 $arm = New-PimSubscriptionArmInvoker -SubscriptionId $SubscriptionId
 $kvApi = '2023-07-01'
 $vaultPath = "/subscriptions/$SubscriptionId/resourceGroups/$KeyVaultResourceGroup/providers/Microsoft.KeyVault/vaults/$KeyVaultName"
@@ -62,7 +71,9 @@ try { $vault = & $arm -Method GET -Path $vaultPath -ApiVersion $kvApi } catch { 
 if (-not $vault) {
     if (-not $CreateVaultIfMissing) { throw "Key Vault '$KeyVaultName' does not exist in $KeyVaultResourceGroup. Run the build's keyvault step, name an existing vault (baseline.signingKeyVaultName), or pass -CreateVaultIfMissing." }
     if ($PSCmdlet.ShouldProcess($KeyVaultName, 'create Key Vault (RBAC, purge protection)')) {
-        $tid = "$(((az account show --subscription $SubscriptionId -o json 2>$null) | Out-String | ConvertFrom-Json).tenantId)".Trim()
+        $tid = "$((Get-PimArmSubscription -SubscriptionId $S -ErrorAsNull).tenantId)".Trim()
+        if (-not $tid) { $tid = $subTenant }
+        if (-not $tid) { throw "could not read the tenant of subscription $S -- the vault needs it." }
         $vault = & $arm -Method PUT -Path $vaultPath -ApiVersion $kvApi -Body @{ location = $Location; properties = @{ tenantId = $tid; sku = @{ family = 'A'; name = 'standard' }; enableRbacAuthorization = $true; enablePurgeProtection = $true; enableSoftDelete = $true; softDeleteRetentionInDays = 90 } }
         for ($i = 0; $i -lt 30 -and "$($vault.properties.provisioningState)" -ne 'Succeeded'; $i++) { Start-Sleep -Seconds 5; $vault = & $arm -Method GET -Path $vaultPath -ApiVersion $kvApi }
         Note 'created (standard, RBAC, purge protection)'
@@ -91,31 +102,35 @@ $keyUriWithVersion = "$($back.properties.keyUriWithVersion)".Trim()
 Note "read back: $($back.properties.kty) $($back.properties.keySize) ops=$(@($back.properties.keyOps) -join '+') $keyUriWithVersion"
 
 # ---- 3. the public half, read as the identity running the build (Key Vault Reader on THIS KEY only) ----------------
-$tokRaw = (az account get-access-token --subscription $SubscriptionId --resource https://management.azure.com/ -o json 2>$null) | Out-String | ConvertFrom-Json
-$pl = "$($tokRaw.accessToken)".Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($pl.Length % 4) { $pl += '=' }
-$claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($pl)) | ConvertFrom-Json
+# WHO runs the build: the claims of the ARM token PIM-Rest's ONE client issues for this subscription's tenant.
+$armTok = ''
+try { $armTok = "$(if ($subTenant) { Get-PimRestToken -Resource 'arm' -TenantId $subTenant } else { Get-PimRestToken -Resource 'arm' })" } catch { $armTok = '' }
+$claims = $null
+try { $pl = "$armTok".Split('.')[1].Replace('-', '+').Replace('_', '/'); while ($pl.Length % 4) { $pl += '=' }; $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($pl)) | ConvertFrom-Json } catch { $claims = $null }
+$armTok = $null
 $callerOid = "$($claims.oid)".Trim()
 $callerType = if ("$($claims.idtyp)" -eq 'app' -or -not "$($claims.upn)$($claims.unique_name)".Trim()) { 'ServicePrincipal' } else { 'User' }
 if (-not $callerOid) { throw 'could not read the object id of the identity running the build from its ARM token.' }
 $keyScope = "$vaultPath/keys/$KeyName"
 Step "Key Vault Reader on the key for the build identity ($callerType $callerOid) -- read the public half only"
-# (single-line --query with no '|' -- az is az.cmd on Windows; the filter is applied here, not in JMESPath)
-$has = @(az role assignment list --subscription $SubscriptionId --assignee $callerOid --scope $keyScope --query "[].roleDefinitionName" -o tsv 2>$null |
-         ForEach-Object { "$_".Trim() } | Where-Object { $_ -in @('Key Vault Reader', 'Key Vault Crypto User', 'Key Vault Crypto Officer', 'Key Vault Administrator') })
+# The role names the caller holds AT the key scope (a refused read = none, as before); the filter is applied here.
+$has = @(@(try { Get-PimArmRoleAssignments -Scope $keyScope -PrincipalId $callerOid -SubscriptionId $S } catch { @() }) |
+         ForEach-Object { "$($_.roleDefinitionName)".Trim() } | Where-Object { $_ -in @('Key Vault Reader', 'Key Vault Crypto User', 'Key Vault Crypto Officer', 'Key Vault Administrator') })
 if ($has.Count) { Note "already holds $($has -join ', ')" }
 else {
-    az role assignment create --subscription $SubscriptionId --assignee-object-id $callerOid --assignee-principal-type $callerType --role 'Key Vault Reader' --scope $keyScope -o none --only-show-errors
-    if ($LASTEXITCODE -ne 0) { throw "could not grant Key Vault Reader on $keyScope to the build identity (az exit $LASTEXITCODE) -- it needs Owner or User Access Administrator." }
+    try { [void](New-PimArmRoleAssignment -Scope $keyScope -PrincipalId $callerOid -PrincipalType $callerType -Role 'Key Vault Reader' -SubscriptionId $S) }
+    catch { throw "could not grant Key Vault Reader on $keyScope to the build identity ($($_.Exception.Message)) -- it needs Owner or User Access Administrator." }
     Note 'granted'
 }
 $deadline = (Get-Date).AddMinutes($PropagationTimeoutMinutes)
 $pub = $null; $lastErr = ''; $waited = 0
+$kvApiData = Get-PimSetupApiVersion keyVaultData
 while ((Get-Date) -lt $deadline) {
-    $kvTok = "$(((az account get-access-token --subscription $SubscriptionId --resource https://vault.azure.net -o json 2>$null) | Out-String | ConvertFrom-Json).accessToken)"
-    try { $pub = Invoke-RestMethod -Method GET -Uri ($keyUriWithVersion + '?api-version=7.4') -Headers @{ Authorization = "Bearer $kvTok" } -ErrorAction Stop; break }
+    # The key's public half over the vault's DATA PLANE (resource https://vault.azure.net), token from PIM-Rest's one client.
+    try { $pub = Invoke-PimSetupRest -Url ($keyUriWithVersion + "?api-version=$kvApiData") -Resource 'https://vault.azure.net'; break }
     catch {
         $lastErr = "$($_.Exception.Message)"
-        $code = 0; try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+        $code = 0; if ($lastErr -match 'HTTP (\d{3})\b') { $code = [int]$Matches[1] }
         if ($code -ne 403 -and $code -ne 401) { throw "reading the public key failed (not an RBAC delay): $lastErr" }
         Note "  not yet authorised on the data plane (${waited}s) -- waiting 30s for RBAC propagation"
         Start-Sleep -Seconds 30; $waited += 30
@@ -135,7 +150,9 @@ Write-Host '  A managed tenant REFUSES a bundle signed by a key it does not pin.
 if ("$PinOnManagerApp".Trim()) {
     . (Join-Path $solRoot 'engine\msp\PIM-DownlinkManager.ps1')
     Step "pin the key id on the Manager $PinOnManagerApp (PIM_BaselineTrustedKeys, merged)"
-    $cur = "$(@(az containerapp show --subscription $SubscriptionId -g $ResourceGroup -n $PinOnManagerApp --query "properties.template.containers[0].env[?name=='PIM_BaselineTrustedKeys'].value" -o tsv 2>$null) -join ',')".Trim()
+    # The value of PIM_BaselineTrustedKeys on the app's first container ('' when the app or the variable is absent).
+    $readPin = { "$(@(@((Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $PinOnManagerApp -ErrorAsNull).properties.template.containers)[0].env) | Where-Object { $_ -and "$($_.name)" -eq 'PIM_BaselineTrustedKeys' } | ForEach-Object { "$($_.value)" }) -join ',')".Trim() }
+    $cur = & $readPin
     $merge = Get-PimManagerBaselineEnvPlan -TrustedKeys @($cur, $keyId)
     if (-not $merge.ok) { throw "the Manager's existing pins could not be merged: $($merge.reason)" }
     $curKeys = @("$cur" -split '[,;\s]+' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
@@ -143,9 +160,13 @@ if ("$PinOnManagerApp".Trim()) {
         Note "already pinned ($($merge.keys -join ', '))"
     } elseif ($PSCmdlet.ShouldProcess($PinOnManagerApp, "set PIM_BaselineTrustedKeys=$($merge.keys -join ',')")) {
         $pinEnv = @($merge.env | Where-Object { $_ -like 'PIM_BaselineTrustedKeys=*' })
-        az containerapp update --subscription $SubscriptionId -g $ResourceGroup -n $PinOnManagerApp --set-env-vars @pinEnv -o none --only-show-errors
-        if ($LASTEXITCODE -ne 0) { throw "could not set PIM_BaselineTrustedKeys on $PinOnManagerApp (az exit $LASTEXITCODE)." }
-        $back = "$(@(az containerapp show --subscription $SubscriptionId -g $ResourceGroup -n $PinOnManagerApp --query "properties.template.containers[0].env[?name=='PIM_BaselineTrustedKeys'].value" -o tsv 2>$null) -join ',')".Trim()
+        # Read-modify-write of the Manager's env (every other variable, secret ref and probe kept) -- az's --set-env-vars.
+        $pinMap = @{}; foreach ($e in $pinEnv) { $kv = "$e" -split '=', 2; $pinMap[$kv[0]] = $kv[1] }
+        $mgr = Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $PinOnManagerApp -ErrorAsNull
+        $first = if ($mgr) { "$(@($mgr.properties.template.containers)[0].name)" } else { '' }
+        try { [void](Set-PimArmAcaAppEnvVars -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $PinOnManagerApp -Env $pinMap -ContainerName $first) }
+        catch { throw "could not set PIM_BaselineTrustedKeys on $PinOnManagerApp ($($_.Exception.Message))." }
+        $back = & $readPin
         if ((@($back -split '[,;\s]+') -notcontains $keyId)) { throw "read-back FAILED: $PinOnManagerApp's PIM_BaselineTrustedKeys reads '$back', which does not contain $keyId." }
         Note "pinned and read back: $back"
     }

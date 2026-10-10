@@ -27,17 +27,19 @@
 
 .PARAMETER SourceConnectionString
     The restored backup database (read only).
-.PARAMETER TargetServer / -TargetDatabase / -TargetTenantId / -AzureConfigDir
-    The running environment's store. Signed in with an Entra token for Azure SQL from az, in that tenant (use the az
-    profile of an identity that is a member of the store's SQL admin group). Windows PowerShell 5.1 is recommended for
-    the SQL login: pwsh 7 dropped the same login twice on mgmt1.
+.PARAMETER TargetServer / -TargetDatabase / -TargetTenantId / -ClientId / -CertThumbprint
+    The running environment's store. Signed in with an Entra token for Azure SQL from PIM-Rest's one token client, in
+    that tenant (no az, no module -- REQUIREMENTS 100.41, framework 12.17): -ClientId + -CertThumbprint = a certificate
+    identity in the store's SQL admin group; without them the Invardia Support app's session, else the person signs in
+    in the browser (a member of the store's SQL admin group). Windows PowerShell 5.1 is recommended for the SQL login:
+    pwsh 7 dropped the same login twice on mgmt1.
 .PARAMETER SourceLabel
     Names the source in the audit marker (e.g. 'mfnpr 2026-10-02 19:01 BACPAC').
 .PARAMETER Apply / -ResumeEngine
     -Apply writes (and pauses the engine). -ResumeEngine only switches the scheduled jobs back on.
 .EXAMPLE
     .\Import-PimEnvironmentBackup.ps1 -SourceConnectionString 'Server=.\SQLEXPRESS;Database=PimRestore_old;Integrated Security=True;TrustServerCertificate=True' `
-        -TargetServer sql-x.database.windows.net -TargetTenantId <tenant> -AzureConfigDir C:\az-profile -SourceLabel 'old env 2026-10-02'
+        -TargetServer sql-x.database.windows.net -TargetTenantId <tenant> -SourceLabel 'old env 2026-10-02'
 #>
 [CmdletBinding()]
 param(
@@ -45,7 +47,8 @@ param(
     [Parameter(Mandatory)][string]$TargetServer,
     [string]$TargetDatabase = 'PimPlatform',
     [Parameter(Mandatory)][string]$TargetTenantId,
-    [string]$AzureConfigDir = '',
+    [string]$ClientId = '',
+    [string]$CertThumbprint = '',
     [string]$SourceLabel = 'backup',
     [string]$BackupDir = (Join-Path ([IO.Path]::GetTempPath()) 'pim-import-backup'),
     [switch]$Apply,
@@ -56,11 +59,18 @@ $ErrorActionPreference = 'Stop'
 function Say($m, $c = 'Gray') { Write-Host "[import] $m" -ForegroundColor $c }
 
 # ---- connections -------------------------------------------------------------------------------------------------
-if ($AzureConfigDir) { $env:AZURE_CONFIG_DIR = $AzureConfigDir }
-$prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-$tok = "$(az account get-access-token --resource https://database.windows.net/ --tenant $TargetTenantId --query accessToken -o tsv 2>$null)".Trim()
-$ErrorActionPreference = $prevEap
-if (-not $tok) { throw "no Azure SQL token for tenant $TargetTenantId (az login with an identity in the store's SQL admin group; -AzureConfigDir)" }
+# 100.41 (framework 12.17 NO-AZ): the SQL token comes from PIM-Rest's one token client, pinned to -TargetTenantId.
+$solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+if (-not "$($global:PIM_SetupRestMode)".Trim() -or "$($global:PIM_TenantId)".Trim().ToLowerInvariant() -ne "$TargetTenantId".Trim().ToLowerInvariant()) {
+    $cn = @{ TenantId = "$TargetTenantId".Trim() }
+    if ("$ClientId".Trim() -and "$CertThumbprint".Trim()) { $cn.ClientId = "$ClientId".Trim(); $cn.CertThumbprint = "$CertThumbprint".Trim() }
+    [void](Connect-PimSetupRest @cn)
+}
+$tok = ''
+try { $tok = "$(Get-PimRestToken -Resource 'https://database.windows.net/' -TenantId "$TargetTenantId".Trim())".Trim() } catch { Say "SQL token: $($_.Exception.Message)" 'Yellow' }
+if (-not $tok) { throw "no Azure SQL token for tenant $TargetTenantId (sign in with an identity in the store's SQL admin group: -ClientId/-CertThumbprint, the Invardia Support app, or the browser)" }
 $tgt = New-Object System.Data.SqlClient.SqlConnection "Server=tcp:$TargetServer,1433;Database=$TargetDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30"
 $tgt.AccessToken = $tok; $tgt.Open()
 function Invoke-Sql {

@@ -11,8 +11,8 @@
 
       1. identifier URI  api://<app id>                     (merged -- existing URIs kept)
       2. one delegated scope  'mcp.access'                  (merged -- existing scopes kept, never disabled or removed)
-      3. Azure CLI pre-authorised for that scope            (so `az account get-access-token --scope api://<id>/mcp.access`
-                                                              works for a signed-in admin without a consent prompt)
+      3. Azure CLI pre-authorised for that scope            (so a person who uses the CLI as their MCP token source gets
+                                                              api://<id>/mcp.access without a consent prompt)
       4. Easy Auth allowed audiences += api://<app id>, <app id>   (the page sign-in is untouched)
       5. the Manager's env PIM_MCP_AUDIENCE = api://<app id>,<app id> -- what /mcp pins a token to (BUG-283: the Manager
          verifies the bearer itself; without this it refuses every MCP call). Setting it rolls a new revision.
@@ -24,8 +24,15 @@
     It grants NOTHING by itself: a token only proves who the person is -- the Manager's role for that person (Reader /
     Admin / SuperAdmin) decides what the MCP tools may do, exactly as on the page.
 
-    Connect (example):
-      claude mcp add --transport http pim https://<manager host>/mcp --header "Authorization: Bearer $(az account get-access-token --scope api://<app id>/mcp.access --query accessToken -o tsv)"
+    Connect (example -- the token is the PERSON's own, from whatever client they already use; the Azure CLI is
+    pre-authorised above only so that a person who has it gets the token without a consent prompt. This script itself
+    never runs the CLI):
+      claude mcp add --transport http pim https://<manager host>/mcp --header "Authorization: Bearer <access token for api://<app id>/mcp.access>"
+      e.g. the token from: az account get-access-token --scope api://<app id>/mcp.access --query accessToken -o tsv
+
+    100.41 (framework 12.17 NO-AZ): every call is ARM / Graph REST through PIM-Rest's ONE token client
+    (engine/_shared/PIM-ArmSetup.ps1): a calling deploy's REST session as it is, else the Invardia Support app's session,
+    else the person signed in in the browser. -AzureConfigDir is OBSOLETE and ignored (kept so existing callers still bind).
 #>
 [CmdletBinding()]
 param(
@@ -33,11 +40,14 @@ param(
     [Parameter(Mandatory)][string]$ResourceGroup,
     [Parameter(Mandatory)][string]$TenantId,
     [string]$ManagerApp = 'ca-pim-manager',
-    [string]$AzureConfigDir,
+    [string]$AzureConfigDir,   # OBSOLETE (100.41): ignored -- no az profile is used any more
     [switch]$Apply
 )
 $ErrorActionPreference = 'Stop'
-if ("$AzureConfigDir".Trim()) { $env:AZURE_CONFIG_DIR = $AzureConfigDir }
+if ("$AzureConfigDir".Trim()) { Write-Warning "-AzureConfigDir '$AzureConfigDir' is ignored: this script no longer uses an az profile (100.41) -- it signs in through PIM-Rest." }
+$solRootMcp = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRootMcp 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRootMcp 'engine\_shared\PIM-ArmSetup.ps1') }
 $script:AzCliAppId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'   # Microsoft Azure CLI (first-party, the same in every tenant)
 
 function Get-PimManagerMcpAuthPlan {
@@ -96,19 +106,26 @@ function Get-PimManagerMcpAuthPlan {
         patch = [ordered]@{ identifierUris = @($uris); api = [ordered]@{ oauth2PermissionScopes = @($scopes); preAuthorizedApplications = @($pre) } }; reason = $why }
 }
 
-function Invoke-AzJson([string[]]$A) {
-    $ErrorActionPreference = 'Continue'
-    $o = & az @A -o json --only-show-errors 2>$null
-    $code = $LASTEXITCODE; $ErrorActionPreference = 'Stop'
-    if ($code -ne 0) { throw "az $($A[0..2] -join ' ') failed (exit $code)" }
-    $t = (@($o) -join "`n").Trim(); if (-not $t) { return $null }
-    return ($t | ConvertFrom-Json)
-}
-function Invoke-AzJsonRetry([string[]]$A, [int]$Tries = 8) {
+function Invoke-PimMcpRetry([scriptblock]$Call, [int]$Tries = 8) {
     # Graph replication: pre-authorising a scope seconds after it was created fails (seen live on internal 2026-10-02)
     for ($i = 1; $i -le $Tries; $i++) {
-        try { return (Invoke-AzJson $A) } catch { if ($i -eq $Tries) { throw }; Start-Sleep -Seconds (5 * $i) }
+        try { return (& $Call) } catch { if ($i -eq $Tries) { throw }; Start-Sleep -Seconds (5 * $i) }
     }
+}
+function Get-PimMcpAuthNode($Node, [string[]]$Path) {
+    # the child object at -Path under -Node, created (empty) where it is missing -- for the authConfigs read-modify-write
+    $cur = $Node
+    foreach ($p in $Path) {
+        if ($null -eq $cur.$p) { $cur | Add-Member -NotePropertyName $p -NotePropertyValue ([pscustomobject]@{}) -Force }
+        $cur = $cur.$p
+    }
+    return $cur
+}
+function Get-PimMcpAuthState {
+    # authConfigs/current's PROPERTIES (identityProviders, globalValidation ... -- the shape `az containerapp auth show` printed)
+    $r = Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
+    if ($r -and $r.properties) { return $r.properties }
+    return $null
 }
 
 function Resolve-PimManagerImageVersion {
@@ -127,21 +144,38 @@ function Resolve-PimManagerImageVersion {
     return "${repo}:$($vers[0])"
 }
 function Get-PimManagerImageForGate([string]$Image) {
-    # the registry's tags for a digest-pinned image (az acr: --subscription per call, never az account set)
+    # the registry's tags for a digest-pinned image, with their digests (ACR data plane /acr/v1/<repo>/_tags, paged with `last`)
     if ("$Image" -notmatch '^(?<reg>[^/.]+)\.azurecr\.io/(?<repo>[^@:]+)@sha256:') { return "$Image" }
-    $tags = @(try { Invoke-AzJson @('acr', 'repository', 'show-tags', '--subscription', $SubscriptionId, '-n', $Matches['reg'], '--repository', $Matches['repo'], '--detail') } catch { @() })
+    $ls = "$($Matches['reg'].ToLowerInvariant()).azurecr.io"; $repo = $Matches['repo']
+    $tags = New-Object System.Collections.Generic.List[object]
+    try {
+        $last = ''
+        for ($page = 0; $page -lt 100; $page++) {
+            $r = Invoke-PimAcrData -LoginServer $ls -Repository $repo -Path ("/acr/v1/$repo/_tags?n=1000" + $(if ($last) { "&last=$([uri]::EscapeDataString($last))" } else { '' }))
+            $pageTags = @(@($r.tags) | Where-Object { $_ -and "$($_.name)".Trim() })
+            foreach ($t in $pageTags) { $tags.Add($t) }
+            if ($pageTags.Count -lt 1000) { break }
+            $last = "$($pageTags[-1].name)"
+        }
+    } catch { $tags.Clear() }   # unreadable = no tags (the gate then defers -- fail closed), as before
     return (Resolve-PimManagerImageVersion -Image $Image -Tags @($tags | ForEach-Object { [pscustomobject]@{ name = "$($_.name)"; digest = "$($_.digest)" } }))
 }
 
 if ($MyInvocation.InvocationName -eq '.') { return }
 
-$acct = Invoke-AzJson @('account', 'show')
-if ("$($acct.tenantId)" -ne $TenantId) { throw "the az profile is signed in to tenant '$($acct.tenantId)', not '$TenantId' -- refusing. Use -AzureConfigDir with a profile for $TenantId." }
-$auth = Invoke-AzJson @('containerapp', 'auth', 'show', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $ManagerApp)
+# WHO: a calling deploy's REST session is used as it is (it must be for -TenantId); standalone, Connect-PimSetupRest pins
+# -TenantId (the Invardia Support app's session when one covers it, else the person signs in in the browser).
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId) }
+elseif ("$($global:PIM_TenantId)".Trim() -and "$($global:PIM_TenantId)".Trim().ToLowerInvariant() -ne "$TenantId".Trim().ToLowerInvariant()) {
+    throw "the REST session in this shell is for tenant '$($global:PIM_TenantId)', not '$TenantId' -- refusing."
+}
+$auth = Get-PimMcpAuthState
 $appId = "$($auth.identityProviders.azureActiveDirectory.registration.clientId)".Trim()
 if (-not $appId) { throw "$ManagerApp has no Easy Auth application -- run Set-PimManagerEasyAuth.ps1 first (the page sign-in comes before MCP)" }
-$app = Invoke-AzJson @('ad', 'app', 'show', '--id', $appId)   # never a Graph URL with parentheses through 'az rest': az is az.cmd and cmd.exe breaks the argument at them
-$ca = Invoke-AzJson @('containerapp', 'show', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $ManagerApp)
+$app = Get-PimGraphApplication -Id $appId
+if (-not $app) { throw "the Easy Auth application $appId was not found in tenant $TenantId" }
+$ca = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
+if (-not $ca) { throw "container app $ManagerApp not found in $ResourceGroup" }
 $c0 = @($ca.properties.template.containers)[0]
 $plan = Get-PimManagerMcpAuthPlan -App $app -Auth $auth -NewScopeId ([guid]::NewGuid().ToString()) -EnvVars @($c0.env) -ManagerImage (Get-PimManagerImageForGate "$($c0.image)")
 Write-Host "==> $ManagerApp / application $appId : $($plan.reason)" -ForegroundColor Cyan
@@ -151,27 +185,34 @@ if (-not $Apply) { Write-Host '    PLAN ONLY -- re-run with -Apply.' -Foreground
 
 if (@($plan.steps | Where-Object { $_ -in @('identifier-uri', 'scope', 'preauthorize-azure-cli') }).Count) {
     # a scope must exist BEFORE it is pre-authorised: write URIs + scopes first, then the pre-authorisation
-    $f = [IO.Path]::GetTempFileName()
-    try {
-        [IO.File]::WriteAllText($f, ([ordered]@{ identifierUris = $plan.patch.identifierUris; api = [ordered]@{ oauth2PermissionScopes = $plan.patch.api.oauth2PermissionScopes } } | ConvertTo-Json -Depth 8))
-        [void](Invoke-AzJson @('rest', '--method', 'patch', '--url', "https://graph.microsoft.com/v1.0/applications/$($app.id)", '--headers', 'Content-Type=application/json', '--body', "@$f"))
-        [IO.File]::WriteAllText($f, ([ordered]@{ api = [ordered]@{ preAuthorizedApplications = $plan.patch.api.preAuthorizedApplications } } | ConvertTo-Json -Depth 8))
-        [void](Invoke-AzJsonRetry @('rest', '--method', 'patch', '--url', "https://graph.microsoft.com/v1.0/applications/$($app.id)", '--headers', 'Content-Type=application/json', '--body', "@$f"))
-    } finally { [IO.File]::Delete($f) }
+    # Graph PATCH /applications/{object id} -- the body goes straight to Graph (no temp file, no az.cmd quoting)
+    $patchUrl = "/applications/$($app.id)"
+    [void](Invoke-PimSetupGraph -Method PATCH -Path $patchUrl -Body ([ordered]@{ identifierUris = @($plan.patch.identifierUris); api = [ordered]@{ oauth2PermissionScopes = @($plan.patch.api.oauth2PermissionScopes) } }))
+    [void](Invoke-PimMcpRetry { Invoke-PimSetupGraph -Method PATCH -Path $patchUrl -Body ([ordered]@{ api = [ordered]@{ preAuthorizedApplications = @($plan.patch.api.preAuthorizedApplications) } }) })
 }
 if ($plan.steps -contains 'audiences') {
-    [void](Invoke-AzJson @('containerapp', 'auth', 'microsoft', 'update', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $ManagerApp, '--allowed-audiences', ($plan.audiences -join ','), '--yes'))
+    # az containerapp auth microsoft update --allowed-audiences: read-modify-write of authConfigs/current (all else kept)
+    [void](Set-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Mutate {
+        param($p)
+        $val = Get-PimMcpAuthNode $p @('identityProviders', 'azureActiveDirectory', 'validation')
+        $val | Add-Member -NotePropertyName allowedAudiences -NotePropertyValue @($plan.audiences) -Force
+    })
 }
 if ($plan.steps -contains 'mcp-audience-env') {
     # the env var BEFORE the exclusion: a Manager without it refuses /mcp (503), never trusts anything
-    [void](Invoke-AzJson @('containerapp', 'update', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $ManagerApp, '--set-env-vars', "PIM_MCP_AUDIENCE=$($plan.envValue)"))
+    [void](Set-PimArmAcaAppEnvVars -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Env @{ PIM_MCP_AUDIENCE = "$($plan.envValue)" })
 }
 if ($plan.steps -contains 'exclude-paths') {
-    [void](Invoke-AzJson @('containerapp', 'auth', 'update', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $ManagerApp, '--excluded-paths', ($plan.excludedPaths -join ','), '--yes'))
+    # az containerapp auth update --excluded-paths: the merged list (the plan keeps every existing path)
+    [void](Set-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp -Mutate {
+        param($p)
+        $gv = Get-PimMcpAuthNode $p @('globalValidation')
+        $gv | Add-Member -NotePropertyName excludedPaths -NotePropertyValue @($plan.excludedPaths) -Force
+    })
 }
-$app2 = Invoke-AzJson @('ad', 'app', 'show', '--id', $appId)
-$auth2 = Invoke-AzJson @('containerapp', 'auth', 'show', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $ManagerApp)
-$ca2 = Invoke-AzJson @('containerapp', 'show', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $ManagerApp)
+$app2 = Get-PimGraphApplication -Id $appId
+$auth2 = Get-PimMcpAuthState
+$ca2 = Get-PimArmAcaApp -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $ManagerApp
 $c2 = @($ca2.properties.template.containers)[0]
 $after = Get-PimManagerMcpAuthPlan -App $app2 -Auth $auth2 -NewScopeId ([guid]::NewGuid().ToString()) -EnvVars @($c2.env) -ManagerImage (Get-PimManagerImageForGate "$($c2.image)")
 if ($after.steps.Count) { throw "read-back: still $($after.reason)" }

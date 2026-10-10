@@ -13,6 +13,32 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.575 -- 2026-10-10
+
+- No Azure CLI or PowerShell modules anywhere in PIM; old v1 code removed; slimmer container image; corrected public statements; customer fixes (access reviews, drift, mail layout, validator); Delegation overview with graph view.
+
+- The container image is slimmer: the PowerShell gallery tools and the line editor are removed from it, and test suites, internal notes, unsupported v1 code and documentation screenshots are no longer copied in (no Azure CLI or Azure / Graph PowerShell modules, as before)
+- The last setup and support scripts no longer need the Azure CLI or any PowerShell module: the deploy report, removing a container stack, the version-drift and credential-expiry checks, enabling self-update, the post-roll smoke and rollback, importing an environment backup, the hybrid worker's Azure side (VM, network, NAT egress, peering, access) and the RFA broker deploy now talk to Azure directly. The only module left is Windows Group Policy on the on-premises hybrid worker. The old version 1 engines and launchers, which needed PowerShell modules, are removed from the product.
+- More setup scripts no longer need the Azure CLI: the baseline store's network access and private DNS, the SQL build window, the baseline publish job and its signing key, the source archive publish, the controlled container auto-update and the Manager's MCP sign-in now talk to Azure directly.
+- **Access reviews ask the department owners.** The owners of a department now always review their department; people typed under "also review" on a review rule review with them, instead of replacing them. Tick "only these reviewers (not the owners)" to keep the previous behaviour. The review rules page shows who will actually review each department, and flags a department with nobody to review it. **Upgrade note:** a rule that had a reviewer typed in now also asks the department owners.
+- **Drift "Apply now" applies only what you ticked.** Before, it re-applied every missing and changed item; now only the ticked items are created or updated. A group imported from the Drift page also takes its role-assignable setting from the live group.
+- **Mail recipients whose address differs from their sign-in name now get working Reader access.** PIM looks the address up in the directory (mail, sign-in name or any of the user's addresses) and grants the Reader role under the name people sign in with.
+- **Alert and transactional mails use the new mail layout** (logo, environment in the header and footer, the button after the content). A customer-edited template keeps its text.
+- **An old workload row without a Resource no longer blocks your commits.** It is shown as a warning with "fix or remove"; only a row your commit adds or changes must have its Resource filled in.
+- **The auto-extend policy moved to Settings > Automation.** It is one setting for the whole environment; My people now shows one read-only line ("PIM extends permissions automatically N days before they end") with a link to the setting for SuperAdmins.
+- **Delegation overview (All privileged permissions).** The page that lists who holds privileged access right now is
+  renamed (it was *Review current delegations*) and gets a **Graph view**, now the default: the live assignments drawn
+  exactly like the Access map -- people, the groups they are in, the groups those are nested in, and the roles and scopes
+  they reach. Click a box or a line to collapse the board to its path and see its live assignments; tick the ones to take
+  away and press **Revoke**. The graph only takes access away (no give / add); revoking is queued under Pending changes
+  with the same safeguards as the list (break-glass accounts skipped, a second administrator's approval for large
+  batches). **List view** is one click away, every filter applies to both views, and the page remembers your choice.
+- **No more "Click Refresh" while it is already loading.** While a read of the tenant is queued or running, the page
+  says **Loading current delegations...** with when it started and updates by itself when the read is ready. Refresh is
+  disabled meanwhile and never asks for a second read; PIM Manager also ignores a duplicate request.
+- **Readable columns in the list.** Scope gets proper room and long Azure paths wrap at "/" (the full path is the
+  tooltip); Principal and Role / Group no longer take most of the width; dates and type stay on one line.
+- The revoke confirmation now also says that revoking does not change the delegation that granted the access.
 ## 2.4.574 -- 2026-10-10
 
 - Setup: a customer installation no longer rolls the PIM Manager back on the developer smoke test; the installation verifies it over REST.
@@ -120,7 +146,6 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 - A managed-tenant install no longer asks for the admin account prefix: it is optional. The naming check stays off until the tenant sets its admin account patterns in Settings; replication is not affected.
 - The managed-tenant installation no longer needs the Azure CLI: the installer's checks, the managed-tenant build and every step it runs (hosting and image build, SQL admin group, access, mail sender, pull network, enrollment report, support access, end-of-install check, closing the setup firewall rule) now talk to Azure directly, signed in through the Invardia Support app or your own browser sign-in.
 - The downloadable setup scripts for the mail sender, the SQL admin group and the workload prerequisites no longer need or mention the Azure CLI. They sign you in through the browser, or use the Invardia support session when one is open in the window, and their help and error messages now describe that. If the setup account cannot grant the mail sender its Exchange rights, a Global Administrator now signs in in the browser for that one step. The SQL admin group script now needs `-TenantId` when you sign in in the browser.
-
 ## 2.4.552 -- 2026-10-10
 
 - More setup scripts no longer need the Azure CLI: the deploy identity, the update run, the custom Manager address, the external/internal environment rebuild, SQL network access and the baseline store (storage and private endpoint) now talk to Azure directly. The rebuild no longer writes a restore file holding secret values, and a Key Vault certificate for a custom address is no longer saved to a temporary file.

@@ -7,7 +7,7 @@
   "standalone": false,
   "sourcePath": "tools/setup/Set-PimManagerAccess.ps1",
   "runAs": [
-    { "kind": "other", "name": "Member of the environment's SQL admin group (grp-pim-sql-admins), signed in with az login", "scope": "the environment's SQL database", "why": "The access model lives in pim.Settings; only the SQL admin group may write it. With -UseSignedInAccount the signed-in az user is used (asserted to be a user in -TenantId). Alternatively the admin application's certificate (-AdminAppId + -AdminCertThumbprint)." }
+    { "kind": "other", "name": "Member of the environment's SQL admin group (grp-pim-sql-admins), signed in through the browser or the Invardia Support app session (no Azure CLI)", "scope": "the environment's SQL database", "why": "The access model lives in pim.Settings; only the SQL admin group may write it. With -UseSignedInAccount the signed-in az user is used (asserted to be a user in -TenantId). Alternatively the admin application's certificate (-AdminAppId + -AdminCertThumbprint)." }
   ],
   "changes": [
     { "target": "Environment SQL database", "action": "update", "object": "pim.Settings row 'ManagerAccess' (the list of identity = role entries: Reader, Admin, SuperAdmin, Delegated)", "scope": "this environment's PIM Manager", "why": "Decides who may use PIM Manager and at what level. Merged with what is stored, keyed on identity; -Replace drops entries that are not in the input. A model with no SuperAdmin is refused unless -AllowNoSuperAdmin.", "undo": "Run the script again with the previous entries (and -Replace to drop what was added)." },

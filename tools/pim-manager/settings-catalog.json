@@ -276,8 +276,8 @@
       "confirmOn": true,
       "confirmOff": false,
       "info": {
-        "what": "Runs the uplink job every hour. It reports to Invardia which jobs ran and whether they succeeded (one report per job, never one per run), and once a day a heartbeat with version, edition and licence state. Without an install key it is anonymous: no tenant, no server name, no error text, only an error class and rounded counts. With a Pro install key, reports carry the error text with secrets removed.",
-        "enabled": "From the next hourly run, the job reports at most 20 job results per cycle and the daily heartbeat. A failed send never fails anything else and is retried on the next cycle.",
+        "what": "Runs the uplink job every hour. It reports to Invardia which jobs ran and whether they succeeded (one report per job, never one per run), and every 4 hours a heartbeat with version, edition and licence state. Without an install key it is anonymous: no tenant, no server name, no error text, only an error class and rounded counts. With a Pro install key, reports carry the error text with secrets removed.",
+        "enabled": "From the next hourly run, the job reports at most 20 job results per cycle and the heartbeat every 4 hours. A failed send never fails anything else and is retried on the next cycle.",
         "disabled": "Nothing is sent. If it was on before, one opt-out notice is sent once, then nothing more.",
         "risk": "When on, it sends status data out of your environment to invardia.com. With a Pro install key that includes shortened, redacted error messages. Reversible: switch it off and the next run sends only the one-time opt-out notice.",
         "requires": "Free (Community) and Pro. SuperAdmin to change it. 'Scheduled jobs' must be on. Outbound HTTPS to Invardia's uplink.",
@@ -298,7 +298,7 @@
       "info": {
         "what": "Adds a setup report to the hourly uplink run: once a day and whenever something changes, the state of the critical settings (updater deployed and scheduled, update ring, install key, licence, mail sender, alert recipients, engine permissions, last successful run, backup, update pinned) as ok, missing, wrong or unknown, plus how many engine permissions are expected, missing and extra. The same list drives the health lines on Home.",
         "enabled": "With a Pro install key, the next uplink run sends the setup report, then one a day and one on every change. Invardia support sees what is missing and can help before you call. Without an install key nothing of this is sent.",
-        "disabled": "No setup report is sent. The hourly job reports and the daily heartbeat are not affected (they have their own switch).",
+        "disabled": "No setup report is sent. The hourly job reports and the 4-hourly heartbeat are not affected (they have their own switch).",
         "risk": "When on, it sends the state of your settings (ids, ok / missing / wrong / unknown, counts and the names of missing Graph permissions) to invardia.com. Never names of people or groups, tenant data, error text or secrets. Reversible: switch it off and nothing more is sent.",
         "requires": "A Pro install key (identified telemetry). 'Send status telemetry to Invardia' on. SuperAdmin to change it. Outbound HTTPS to Invardia's uplink.",
         "recommended": "On, so Invardia support can see an unfinished setup or a broken updater before it becomes an incident.",
@@ -536,8 +536,8 @@
       "confirmOn": false,
       "confirmOff": false,
       "info": {
-        "what": "Shows or hides the Review current delegations page (Reviews & controls > Review current delegations): who holds an active assignment right now, with revoke of what is not needed (break-glass accounts are protected; large batches need a second approver).",
-        "enabled": "Reviews & controls > Review current delegations is listed in the menu after the next page reload.",
+        "what": "Shows or hides the Delegation overview (All privileged permissions) page (Reviews & controls > Delegation overview (All privileged permissions)): who holds an active assignment right now, with revoke of what is not needed (break-glass accounts are protected; large batches need a second approver).",
+        "enabled": "Reviews & controls > Delegation overview (All privileged permissions) is listed in the menu after the next page reload.",
         "disabled": "After the next page reload the page is hidden from the menu and tab strip. Nothing is revoked or restored by the switch itself, and the page is turned off also through a direct link; revokes started from other pages still work.",
         "risk": "Medium: your administrators lose the quick way to see and cut live standing access, so access that should be removed stays longer. A direct link (/?tab=revoke) shows \"this page is turned off\" instead. Reversible: switch it on and reload.",
         "requires": "SuperAdmin role to change. Free (Community) and Pro.",
@@ -2188,7 +2188,7 @@
     {
       "key": "AutoExtend.LeadDays",
       "label": "Extend ... days before a permission ends",
-      "where": "Reviews & controls > My people > Auto-extend policy",
+      "where": "Settings > Automation > Auto-extend",
       "route": "/api/settings/autoextend",
       "type": "number",
       "default": "14 days",
@@ -2208,7 +2208,7 @@
     {
       "key": "AutoExtend.DefaultOn",
       "label": "Rows without an AutoExtend value are extended",
-      "where": "Reviews & controls > My people > Auto-extend policy",
+      "where": "Settings > Automation > Auto-extend",
       "route": "/api/settings/autoextend",
       "type": "boolean",
       "default": "On",

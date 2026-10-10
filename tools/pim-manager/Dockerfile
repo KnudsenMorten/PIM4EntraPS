@@ -9,7 +9,7 @@
 # REST-only: NO PowerShell modules at all (Graph/ARM/Power BI go over REST via
 # PIM-Rest.ps1). The SQL data plane has no REST API, so a TDS driver is unavoidable --
 # but it's a pinned .NET ASSEMBLY, NOT a PowerShell module. Stage 1 uses the .NET SDK to
-# fetch a pinned Microsoft.Data.SqlClient + its dependency closure; stage 2 copies the
+# fetch a pinned Microsoft.Data.SqlClient + its dependency closure; stage 3 (runtime) copies the
 # DLLs into the runtime image and PIM-SqlStore Add-Types them ($env:PIM_SQLCLIENT_DLL).
 # No Install-Module, no gallery, no auto-update -- the version is frozen in the image.
 #
@@ -34,8 +34,59 @@ RUN dotnet new classlib -n shim -o shim \
  && dotnet add package Microsoft.Data.SqlClient --version 5.2.2 \
  && dotnet publish -c Release -o /drv/out
 
-# ---- stage 2: runtime ----
+# ---- stage 2: the solution tree, PRUNED to what runs in a container (PIM §100.52, owner 2026-10-10) ----
+# Owner: "the base container image should be stripped also so it doesnt contain old az cli and ps modules that we
+# have now removed of the dependencies". The image used to COPY the WHOLE solution folder: the unsupported v1 code
+# (legacy/, launcher/ -- Connect-AzAccount / Install-Module era), the test suites, the internal runbooks and the
+# documentation screenshots shipped in every customer's image although no container ever runs or reads them.
+# This stage copies the tree, removes them, and the runtime stage copies only what is left -- so they are not in ANY
+# layer of the final image (a RUN rm in the runtime stage would only hide them behind a whiteout).
+# KEPT on purpose: docs/img/brand (the mail logo, PIM-MailLayout.ps1 Get-PimMailBrandDir) and everything else -- the
+# Manager, the jobs, tools/setup (the updater's converge step runs Set-PimAlertRecipients.ps1; the scheduler and the
+# Manager load _PimScriptDoc / _PimWorkloadPrereqRunner), setup/ (the downlink runs Invoke-PimScenarioRun.ps1 /
+# Invoke-PimMspFanout.ps1), engine/, sql/, templates/, config*/.
+# The same pinned PowerShell image as the runtime (already pulled for stage 3: no new base image, no new digest).
+# tests/Test-PimImageNoAzNoModules.ps1 proves no in-container code path reads a pruned folder, and the last RUN
+# below fails the BUILD (never a running container) if a file the runtime needs went missing.
+FROM mcr.microsoft.com/powershell:7.4-ubuntu-22.04@sha256:62300a213a9293916333df2b014cd3a8f22fb0b0b65f2bb446aaf436bcf8c868 AS src
+COPY SOLUTIONS/PIM4EntraPS /src/PIM4EntraPS
+WORKDIR /src/PIM4EntraPS
+RUN rm -rf tests internal legacy launcher diagnostics output \
+ && find . -type d -name node_modules -prune -exec rm -rf {} + \
+ && if [ -d docs ]; then find docs -mindepth 1 -maxdepth 1 ! -name img -exec rm -rf {} + ; fi \
+ && if [ -d docs/img ]; then find docs/img -mindepth 1 -maxdepth 1 ! -name brand -exec rm -rf {} + ; fi \
+ && test -f tools/pim-manager/Open-PimManager.ps1 \
+ && test -f tools/pim-engine/update-job-entry.ps1 \
+ && test -f engine/_shared/PIM-Rest.ps1 \
+ && test -f setup/Invoke-PimScenarioRun.ps1 \
+ && test -f tools/setup/Set-PimAlertRecipients.ps1 \
+ && test -f docs/img/brand/pim-manager-512w.png
+
+# ---- stage 3: runtime ----
 FROM mcr.microsoft.com/powershell:7.4-ubuntu-22.04@sha256:62300a213a9293916333df2b014cd3a8f22fb0b0b65f2bb446aaf436bcf8c868
+
+# 🔒 PIM §100.52 (owner 2026-10-10) -- NO GALLERY / SDK POWERSHELL MODULE AND NO AZURE CLI IN THE IMAGE.
+# The base image has never carried the az CLI or Az / Microsoft.Graph / ExchangeOnlineManagement (and nothing here
+# installs them: framework §12.17). It DOES ship the gallery tooling -- PowerShellGet, PackageManagement,
+# Microsoft.PowerShell.PSResourceGet (what Install-Module / Install-PSResource are) -- and PSReadLine (the
+# interactive line editor; a container is never interactive). No code in this image uses any of them
+# (tests/Test-PimImageNoAzNoModules.ps1), so they are removed: a module can no longer even be installed at runtime.
+# KEPT: the in-box engine modules (Microsoft.PowerShell.Management / Utility / Security / Host / Diagnostics,
+# Microsoft.PowerShell.Archive -- the Invardia update zip is unpacked with Expand-Archive, PIM-InvardiaUpdate.ps1 --
+# CimCmdlets, PSDiagnostics, ThreadJob). The owner-approved module exceptions (GroupPolicy + Add-KdsRootKey,
+# framework §12.17) belong to the on-prem Windows hybrid worker, which is not a container and is not built here.
+# The check after the removal fails the BUILD if any such module or an az binary is still present, or if
+# Expand-Archive went missing.
+RUN pwsh -NoLogo -NoProfile -NonInteractive -Command '$ErrorActionPreference = "Stop"; \
+    $drop = @("PowerShellGet", "PackageManagement", "Microsoft.PowerShell.PSResourceGet", "PSReadLine"); \
+    $isBanned = { param($n) ($drop -contains $n) -or ($n -like "Az") -or ($n -like "Az.*") -or ($n -like "Microsoft.Graph*") -or ($n -like "ExchangeOnline*") -or ($n -like "MicrosoftTeams*") -or ($n -like "SqlServer*") }; \
+    foreach ($p in @($env:PSModulePath -split ":" | Where-Object { $_ -and (Test-Path -LiteralPath $_) })) { \
+        Get-ChildItem -LiteralPath $p -Directory | Where-Object { & $isBanned $_.Name } | Remove-Item -Recurse -Force }; \
+    $left = @(Get-Module -ListAvailable | Where-Object { & $isBanned $_.Name } | ForEach-Object { $_.Name } | Sort-Object -Unique); \
+    if ($left.Count) { throw ("modules still in the image: " + ($left -join ", ")) }; \
+    if (Get-Command az -CommandType Application -ErrorAction SilentlyContinue) { throw "the az CLI is in the image" }; \
+    $null = Get-Command Expand-Archive -ErrorAction Stop; \
+    Write-Host ("module strip ok; left: " + ((Get-Module -ListAvailable | ForEach-Object { $_.Name } | Sort-Object -Unique) -join ", "))'
 
 # 🔒 §33.28 (2.4.373) -- THE IMAGE RUNS AS A NON-ROOT USER (uid/gid 10001). It ran as root: no USER at all.
 # Every entry point this ONE image runs (the Manager, and the tick / update / downlink / publish / dbinit jobs, which
@@ -61,7 +112,9 @@ COPY --from=sqldriver /drv/out/*.dll /opt/sqlclient/
 ENV PIM_SQLCLIENT_DLL=/opt/sqlclient/Microsoft.Data.SqlClient.dll
 
 WORKDIR /app
-COPY --chown=10001:10001 SOLUTIONS/PIM4EntraPS /app/PIM4EntraPS
+# the PRUNED solution tree from stage 2 (§100.52) -- not the build context: tests / internal / legacy / launcher /
+# documentation never reach a layer of this image.
+COPY --from=src --chown=10001:10001 /src/PIM4EntraPS /app/PIM4EntraPS
 ENV HOME=/home/pim
 
 # 🔴 §52.12 -- THE BUILD ARG NOTHING DECLARED, SO NOTHING RECEIVED.

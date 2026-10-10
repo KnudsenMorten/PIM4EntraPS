@@ -18,6 +18,9 @@
     Idempotent; READ BACK. Nothing here is a credential. The VNet is READ FROM THE CONTAINER APPS ENVIRONMENT (its
     infrastructure subnet), -VnetName is the fallback.
     This environment's Container Apps subnet needs NO storage service endpoint in this mode (and one is not added).
+
+    100.41 (framework 12.17 NO-AZ): every call is ARM REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1).
+    A calling build's REST session is used as it is; standalone, the Invardia Support app's session or the person signed in.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -32,53 +35,69 @@ param(
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
-$sub = @('--subscription', "$SubscriptionId".Trim())
+$S = "$SubscriptionId".Trim()
 $zone = 'privatelink.blob.core.windows.net'
 $store = "$MasterStorageAccount".Trim().ToLowerInvariant()
 if ($store -notmatch '^[a-z0-9]{3,24}$') { throw "'$MasterStorageAccount' is not a storage account name" }
 if (-not (Test-PimPrivateIPv4 -Value $PrivateEndpointIp)) { throw "-PrivateEndpointIp '$PrivateEndpointIp' is not a private (RFC 1918) IPv4 address" }
 $dnsRg = if ("$PrivateDnsResourceGroup".Trim()) { "$PrivateDnsResourceGroup".Trim() } else { $ResourceGroup }
-$acct = "$(az account show --query id -o tsv 2>$null)".Trim()
-if ($acct -ne "$SubscriptionId".Trim()) { throw "az context is '$acct', not '$SubscriptionId' -- refusing." }
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) }
+# az --subscription X refused a subscription this identity cannot see; the REST read is the same assertion.
+$acct = "$((Get-PimArmSubscription -SubscriptionId $S -ErrorAsNull).subscriptionId)".Trim()
+if ($acct -ne $S) { throw "subscription '$S' is not visible to this sign-in$(if ($global:PimSetupRestLastError) { " ($($global:PimSetupRestLastError))" }) -- refusing." }
 
 Step "private DNS for the managing tenant's bundle store: $store.$zone -> $PrivateEndpointIp"
-$ErrorActionPreference = 'Continue'
 $vnetId = ''
 if ("$EnvName".Trim()) {
-    $snId = "$(az containerapp env show @sub -g $ResourceGroup -n $EnvName --query properties.vnetConfiguration.infrastructureSubnetId -o tsv --only-show-errors 2>$null)".Trim()
+    $snId = "$((Get-PimArmAcaEnv -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $EnvName -ErrorAsNull).properties.vnetConfiguration.infrastructureSubnetId)".Trim()
     if ($snId -match '^(.*/virtualNetworks/[^/]+)/subnets/') { $vnetId = $Matches[1]; Note "VNet read from the Container Apps environment '$EnvName' (authoritative)" }
 }
-if (-not $vnetId -and "$VnetName".Trim()) { $vnetId = "$(az network vnet show @sub -g $ResourceGroup -n $VnetName --query id -o tsv --only-show-errors 2>$null)".Trim() }
+if (-not $vnetId -and "$VnetName".Trim()) { $vnetId = "$((Get-PimArmVnet -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $VnetName -ErrorAsNull).id)".Trim() }
 if (-not $vnetId) { throw "no VNet: the environment '$EnvName' names no subnet and -VnetName '$VnetName' was not found" }
 $vnetShort = ($vnetId -split '/')[-1]
 Note "VNet $vnetId"
 
-if (-not "$(az network private-dns zone show @sub -g $dnsRg -n $zone --query id -o tsv --only-show-errors 2>$null)".Trim()) {
-    if ($PSCmdlet.ShouldProcess($zone, 'create private DNS zone')) { az network private-dns zone create @sub -g $dnsRg -n $zone -o none --only-show-errors }
+if (-not (Get-PimArmPrivateDnsZone -SubscriptionId $S -ResourceGroup $dnsRg -Name $zone -ErrorAsNull)) {
+    if ($PSCmdlet.ShouldProcess($zone, 'create private DNS zone')) { [void](New-PimArmPrivateDnsZone -SubscriptionId $S -ResourceGroup $dnsRg -Name $zone) }
 }
 $linkName = "link-$vnetShort"
-$lkPol = "$(az network private-dns link vnet show @sub -g $dnsRg -z $zone -n $linkName --query resolutionPolicy -o tsv --only-show-errors 2>$null)".Trim()
-$lkExists = "$(az network private-dns link vnet show @sub -g $dnsRg -z $zone -n $linkName --query id -o tsv --only-show-errors 2>$null)".Trim()
-if (-not $lkExists) {
-    if ($PSCmdlet.ShouldProcess($linkName, 'link zone to VNet')) { az network private-dns link vnet create @sub -g $dnsRg -z $zone -n $linkName --virtual-network $vnetId --registration-enabled false --resolution-policy NxDomainRedirect -o none --only-show-errors }
+$lkNow = Get-PimArmPrivateDnsLink -SubscriptionId $S -ResourceGroup $dnsRg -ZoneName $zone -Name $linkName -ErrorAsNull
+$lkPol = "$($lkNow.properties.resolutionPolicy)".Trim()
+if (-not $lkNow) {
+    if ($PSCmdlet.ShouldProcess($linkName, 'link zone to VNet')) { Set-PimArmPrivateDnsLink -SubscriptionId $S -ResourceGroup $dnsRg -ZoneName $zone -Name $linkName -VnetId $vnetId -RegistrationEnabled $false -ResolutionPolicy NxDomainRedirect }
 } elseif ($lkPol -ne 'NxDomainRedirect') {
-    az network private-dns link vnet update @sub -g $dnsRg -z $zone -n $linkName --resolution-policy NxDomainRedirect -o none --only-show-errors
+    # az ... link vnet update --resolution-policy: the link is written WHOLE, keeping the VNet it already points at.
+    $lkVnet = "$($lkNow.properties.virtualNetwork.id)"; if (-not $lkVnet) { $lkVnet = $vnetId }
+    Set-PimArmPrivateDnsLink -SubscriptionId $S -ResourceGroup $dnsRg -ZoneName $zone -Name $linkName -VnetId $lkVnet -RegistrationEnabled ([bool]$lkNow.properties.registrationEnabled) -ResolutionPolicy NxDomainRedirect
 }
-$cur = @(az network private-dns record-set a show @sub -g $dnsRg -z $zone -n $store --query "aRecords[].ipv4Address" -o tsv --only-show-errors 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+$readIps = { @(@((Get-PimArmPrivateDnsARecord -SubscriptionId $S -ResourceGroup $dnsRg -ZoneName $zone -Name $store -ErrorAsNull).properties.aRecords) | Where-Object { $_ } | ForEach-Object { "$($_.ipv4Address)".Trim() } | Where-Object { $_ }) }
+$cur = @(& $readIps)
 $plan = Get-PimBaselinePrivateDnsPlan -CurrentIps $cur -WantIp $PrivateEndpointIp
 Note "record plan: $($plan.summary)"
+# az add-record / remove-record --keep-empty-record-set: the record set is written WHOLE with the addresses that remain.
+$want = New-Object System.Collections.Generic.List[string]
+foreach ($ip in $cur) { $want.Add($ip) }
+$changed = $false
 foreach ($a in $plan.actions) {
     if (-not $PSCmdlet.ShouldProcess("$store -> $($a.ip)", $a.op)) { continue }
-    if ($a.op -eq 'add') { az network private-dns record-set a add-record @sub -g $dnsRg -z $zone -n $store -a $a.ip -o none --only-show-errors }
-    else { az network private-dns record-set a remove-record @sub -g $dnsRg -z $zone -n $store -a $a.ip --keep-empty-record-set -o none --only-show-errors }
+    if ($a.op -eq 'add') { if (-not $want.Contains("$($a.ip)")) { $want.Add("$($a.ip)") } }
+    else { [void]$want.Remove("$($a.ip)") }
+    $changed = $true
+}
+if ($changed) {
+    # an empty set is kept (as --keep-empty-record-set did): the A record set exists with no address.
+    [void](Invoke-PimSetupArm -Method PUT -Path (Get-PimArmResourceId $S $dnsRg 'Microsoft.Network/privateDnsZones' $zone "A/$store") -ApiVersion (Get-PimSetupApiVersion privateDns) `
+        -Body @{ properties = @{ ttl = 3600; aRecords = @($want | ForEach-Object { @{ ipv4Address = $_ } }) } })
 }
 
 Step 'read back'
-$ips = @(az network private-dns record-set a show @sub -g $dnsRg -z $zone -n $store --query "aRecords[].ipv4Address" -o tsv --only-show-errors 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-$lk = az network private-dns link vnet show @sub -g $dnsRg -z $zone -n $linkName -o json --only-show-errors 2>$null | Out-String | ConvertFrom-Json
-$ErrorActionPreference = 'Stop'
+$ips = @(& $readIps)
+$lkObj = Get-PimArmPrivateDnsLink -SubscriptionId $S -ResourceGroup $dnsRg -ZoneName $zone -Name $linkName -ErrorAsNull
+$lk = if ($lkObj) { [pscustomobject]@{ virtualNetwork = $lkObj.properties.virtualNetwork; resolutionPolicy = "$($lkObj.properties.resolutionPolicy)"; virtualNetworkLinkState = "$($lkObj.properties.virtualNetworkLinkState)" } } else { $null }
 $okRec = ($ips.Count -eq 1 -and $ips[0] -eq "$PrivateEndpointIp".Trim())
 $okLink = ($lk -and "$($lk.virtualNetwork.id)" -ieq $vnetId -and "$($lk.resolutionPolicy)" -eq 'NxDomainRedirect')
 Note "A $store = $($ips -join ', ') (want $PrivateEndpointIp): $okRec"

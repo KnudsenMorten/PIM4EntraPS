@@ -30,9 +30,10 @@
          OR a skipped check (a skip is not a pass) -- AUTO-ROLLS-BACK to the captured pre-update
          revision (Update-PimContainers.ps1 -Rollback).
 
-    REST/cert + MI only via az (the apps pull through their AcrPull MI; no registry creds at
-    update time). Every az call names -SubscriptionId when it is given. PS 5.1-safe. The region
-    is whatever the existing deployment uses; nothing here chooses one.
+    ARM / registry REST only, through PIM-Rest's ONE token client -- no az CLI (100.41 / framework
+    12.17; the apps pull through their AcrPull MI; no registry creds at update time). Every call is
+    addressed in -SubscriptionId. PS 5.1-safe. The region is whatever the existing deployment uses;
+    nothing here chooses one.
 
 .PARAMETER PinnedTag
     Update to THIS exact tag (still only if it is newer than the deployed one, and still subject to
@@ -80,8 +81,9 @@ param(
     # build indefinitely. Inert where it does not apply: the roller SKIPS a Job that does not
     # exist, which is the normal always-on shape.
     [string]$TickJobName     = 'ca-pim-tick',
-    # Scopes every az call to this subscription. Optional (unchanged behaviour when blank), and
-    # defaults to the deploy's own env var like _PimSetupShared.ps1 does.
+    # The subscription every ARM call is addressed in. Defaults to the deploy's own env var like
+    # _PimSetupShared.ps1 does; without one nothing can be read, so nothing is done (100.41: there is
+    # no ambient az context to fall back to any more).
     [string]$SubscriptionId  = $(if ($env:PIM_SUBSCRIPTION_ID) { $env:PIM_SUBSCRIPTION_ID } else { '' }),
     [switch]$Apply,
     [switch]$SkipHealthCheck,
@@ -91,13 +93,16 @@ param(
     [string]$Reason,
     [string]$UpdateJobName   = 'ca-pim-update'
 )
+# The ring reader (_PimUpdateRing.ps1 Get-PimEnvironmentUpdaterEnv) still takes the subscription in its old
+# @('--subscription', <id>) DATA shape and reads the id out of it over REST -- nothing here invokes az.
 $subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
+$S = "$SubscriptionId".Trim()
 $ErrorActionPreference = 'Stop'
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-# Guarded `az` shadow -- see _PimAz.ps1. az writes ordinary WARNINGS to stderr and PowerShell 5.1
-# makes any such write terminating under $ErrorActionPreference='Stop'. Must precede the first az call.
-. "$here\_PimAz.ps1"
 $solRoot = Split-Path -Parent (Split-Path -Parent $here)        # SOLUTIONS/PIM4EntraPS
+# 100.41 (framework 12.17 NO-AZ): ARM / registry REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1).
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
 . (Join-Path $solRoot 'engine\_shared\PIM-SyncAutomateIT.ps1')
 . "$here\_PimUpdateRing.ps1"    # the environment's ring + what channel.json approves for it (BUG-172)
 # Every roller call gets the subscription too, so the roll, its gate and its rollback read the SAME one.
@@ -110,15 +115,13 @@ function Have($cmd){ [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
 Write-Host "=== PIM4EntraPS sync-automateit (controlled container auto-update) ===" -ForegroundColor Cyan
 
-# ---- preconditions: az present + logged in --------------------------------
-if (-not (Have 'az')) {
-    Warn 'azure CLI (az) not found -- this orchestrator needs az to query/roll Container Apps. Nothing done.'
-    return
-}
-$acct = $null
-try { $acct = az account show @subArgs -o json 2>$null | ConvertFrom-Json } catch {}
-if (-not $acct) { Warn 'az not logged in (az login) -- nothing done.'; return }
-Info ("az context: {0} / sub {1}{2}" -f $acct.user.name, $acct.id, $(if ($subArgs.Count) { ' (explicit)' } else { ' (AMBIENT default -- pass -SubscriptionId)' }))
+# ---- preconditions: a subscription + a REST sign-in that can read it ------
+if (-not $S) { Warn 'no -SubscriptionId (and no PIM_SUBSCRIPTION_ID) -- every read is addressed in a subscription. Nothing done.'; return }
+try { if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) } }
+catch { Warn "could not sign in for subscription $S ($($_.Exception.Message)) -- nothing done."; return }
+$acct = Get-PimArmSubscription -SubscriptionId $S -ErrorAsNull
+if (-not $acct) { Warn "subscription $S is not readable by this identity$(if ($global:PimSetupRestLastError) { " ($($global:PimSetupRestLastError))" }) -- nothing done."; return }
+Info ("REST session: {0} / sub {1} ({2}, explicit)" -f "$($global:PIM_SetupRestMode)", "$($acct.subscriptionId)", "$($acct.displayName)")
 
 # ---- 1. the version this environment's RING approves ----------------------
 # 🔴 BUG-172: NOT the newest tag in the registry. What was BUILT is not what was APPROVED; the ring
@@ -155,8 +158,9 @@ if ("$PinnedTag".Trim()) {
 # ---- 2. currently-deployed tag on the manager app -------------------------
 Step "Resolve currently-deployed tag on $ManagerApp"
 $currentTag = ''
+$img = ''
 try {
-    $img = az containerapp show @subArgs -g $ResourceGroup -n $ManagerApp --query "properties.template.containers[0].image" -o tsv 2>$null
+    $img = "$(@((Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.template.containers)[0].image)".Trim()
     if ("$img".Trim()) { $currentTag = ("$img" -split ':')[-1] }
 } catch {}
 if (-not "$currentTag".Trim()) { Warn "could not read the deployed image tag for $ManagerApp (is it deployed in $ResourceGroup?). Nothing done."; return }
@@ -172,13 +176,17 @@ if (-not (ConvertTo-PimSemVer -Tag $currentTag).valid) {
         $dig = $Matches['dig']; $repoName = $Matches['repo']
         $acrForLookup = if ("$AcrName".Trim()) { "$AcrName".Trim() } else { $acrFromImg }
         try {
-            $global:LASTEXITCODE = 0
-            $tagsRaw = @(az acr manifest list-metadata @subArgs --registry $acrForLookup --name $repoName --query "[?digest=='$dig'].tags[]" -o tsv 2>$null)
-            if ($LASTEXITCODE -eq 0) {
-                foreach ($tg in @($tagsRaw | ForEach-Object { "$_".Trim() } | Where-Object { $_ })) {
-                    $sv = ConvertTo-PimSemVer -Tag $tg
-                    if ($sv.valid -and (-not $resolved -or (Compare-PimSemVer -A $sv -B (ConvertTo-PimSemVer -Tag $resolved)) -gt 0)) { $resolved = $tg }
-                }
+            # The tags on that manifest, from the registry's own data plane (Get-PimAcrManifestTags: /acr/v1/<repo>/_manifests/<digest>,
+            # what `az acr manifest list-metadata` read). The login server: -AcrName's (read from ARM), else the image's own host.
+            $ls = $Matches['reg']
+            if ("$AcrName".Trim()) {
+                $reg = Find-PimArmAcr -SubscriptionId $S -Name "$AcrName".Trim()
+                $ls = if ($reg -and "$($reg.properties.loginServer)".Trim()) { "$($reg.properties.loginServer)".Trim() } else { "$($acrForLookup.ToLowerInvariant()).azurecr.io" }
+            }
+            $tagsRaw = @(Get-PimAcrManifestTags -LoginServer $ls -Repository $repoName -Digest $dig)
+            foreach ($tg in @($tagsRaw | ForEach-Object { "$_".Trim() } | Where-Object { $_ })) {
+                $sv = ConvertTo-PimSemVer -Tag $tg
+                if ($sv.valid -and (-not $resolved -or (Compare-PimSemVer -A $sv -B (ConvertTo-PimSemVer -Tag $resolved)) -gt 0)) { $resolved = $tg }
             }
         } catch { $resolved = '' }
     }
@@ -208,15 +216,17 @@ $targetTag = $decision.targetTag
 # ---- 4. capture pre-update revision (rollback target) ---------------------
 Step "Capture $ManagerApp current revision (rollback target)"
 $prevRev = ''
-try { $prevRev = @(az containerapp revision list @subArgs -g $ResourceGroup -n $ManagerApp --query "[?properties.active].name" -o tsv 2>$null) | Select-Object -First 1 } catch {}
-if (-not "$prevRev".Trim()) { try { $prevRev = az containerapp revision list @subArgs -g $ResourceGroup -n $ManagerApp --query "[0].name" -o tsv 2>$null } catch {} }
+$revs = @()
+try { $revs = @(Get-PimArmAcaRevisions -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull) } catch {}
+$prevRev = "$(@($revs | Where-Object { $_.properties.active -eq $true } | ForEach-Object { "$($_.name)" }) | Select-Object -First 1)".Trim()
+if (-not $prevRev) { $prevRev = "$(@($revs | ForEach-Object { "$($_.name)" }) | Select-Object -First 1)".Trim() }
 Info ("pre-update revision: " + $(if ($prevRev) { $prevRev } else { '(unknown -- auto-rollback will be unavailable)' }))
 # 🔴 §53.6 -- the revision name is not a durable anchor: Container Apps prunes inactive revisions,
 # so the target captured here can be gone by the time the health check fails. This path runs
 # unattended against customer environments, which is precisely where "ROLL BACK BY HAND" is the
 # least useful sentence available. The IMAGE survives in ACR; roll to it when the revision is gone.
 $prevImage = ''
-try { $prevImage = "$(az containerapp show @subArgs -g $ResourceGroup -n $ManagerApp --query 'properties.template.containers[0].image' -o tsv 2>$null)".Trim() } catch { Write-Verbose "pre-update image read failed: $($_.Exception.Message)" }
+try { $prevImage = "$(@((Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull).properties.template.containers)[0].image)".Trim() } catch { Write-Verbose "pre-update image read failed: $($_.Exception.Message)" }
 Info ("pre-update image: " + $(if ($prevImage) { $prevImage } else { '(unknown)' }))
 
 # ---- 5. roll to the new tag via the existing zero-downtime roller ----------
@@ -281,7 +291,7 @@ if ($rb.action -eq 'rollback') {
         }
         throw "sync-automateit: post-update health check FAILED -- rolled back to the pre-update image $prevImage."
     }
-    throw "sync-automateit: post-update health check FAILED and NEITHER a rollback revision nor a pre-update image was captured -- MANUAL rollback required (az containerapp revision list -n $ManagerApp -g $ResourceGroup$(if ($subArgs.Count) { ' ' + ($subArgs -join ' ') }))."
+    throw "sync-automateit: post-update health check FAILED and NEITHER a rollback revision nor a pre-update image was captured -- MANUAL rollback required (activate the previous revision of $ManagerApp in resource group $ResourceGroup, subscription ${S}: Azure portal > the Container App > Revisions)."
 }
 
 Step "Done. Rolled to $targetTag and health check PASSED (kept the new revision)."

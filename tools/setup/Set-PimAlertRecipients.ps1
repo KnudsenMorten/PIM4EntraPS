@@ -44,6 +44,8 @@ $result = [ordered]@{ ok = $false; action = ''; recipients = @(); skipped = @();
 function Write-Out { if ("$OutFile".Trim()) { try { $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OutFile -Encoding UTF8 } catch { } } }
 $norm = { param($l) @(@($l) | ForEach-Object { "$_" -split '[,;]' } | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }
 $AlertRecipients = @(& $norm $AlertRecipients); $SuperAdmins = @(& $norm $SuperAdmins)
+# -SubscriptionId scoped the old az token call; SQL + Graph need none (100.41). Kept so the build's existing command lines bind.
+if ("$SubscriptionId".Trim()) { Write-Verbose "-SubscriptionId $SubscriptionId is not needed any more (SQL + Graph only, no az)." }
 
 if (-not $Store) {
     . (Join-Path $PSScriptRoot '_PimSetupSql.ps1')

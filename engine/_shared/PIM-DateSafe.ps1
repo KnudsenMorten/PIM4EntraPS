@@ -105,7 +105,7 @@ function Get-PimAdminAutoDisableDate {
     if ($old) {
         return [pscustomobject]@{
             value = $old; raw = $oldRaw; source = 'legacy'; legacy = $true; conflict = $false
-            reason = "read from the legacy column OffboardDate. Rename it to AutoDisableDate -- the sweep only disables the account (PIM never deletes an account)."
+            reason = "read from the legacy column OffboardDate. Rename it to AutoDisableDate -- the sweep only disables the account (it never deletes an account)."
         }
     }
     return [pscustomobject]@{ value = ''; raw = ''; source = 'none'; legacy = $false; conflict = $false; reason = '' }

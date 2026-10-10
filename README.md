@@ -60,7 +60,7 @@ owns the detail. (Screenshot uses synthetic demo data.)*
   - [Create access the natural way round](#create-access-the-natural-way-round)
   - [Pending changes — one queue, reviewed before commit](#pending-changes--one-queue-reviewed-before-commit)
   - [Drift — is the tenant what PIM says it should be?](#drift--is-the-tenant-what-pim-says-it-should-be)
-  - [Review current delegations](#review-current-delegations)
+  - [Delegation overview (All privileged permissions)](#delegation-overview-all-privileged-permissions)
   - [Reports — "who can do what", and the reverse](#reports--who-can-do-what-and-the-reverse)
   - [Role Lookup — the questions every admin asks about roles](#role-lookup--the-questions-every-admin-asks-about-roles)
   - [Validate — catch problems before they ship](#validate--catch-problems-before-they-ship)
@@ -494,7 +494,9 @@ creation:
   on-premises Active Directory admins are created in AD with an initial password
   that is mailed, never stored.
 - **Hybrid worker for on-premises Active Directory (preview, Pro).** A small
-  domain-joined server applies the AD side and replaces the older PIM-for-AD scripts:
+  domain-joined Azure VM, built by the setup in its own network peered to your domain controllers
+  (no public IP), applies the AD side and replaces the older PIM-for-AD scripts (a worker on your
+  own on-premises server is not available yet):
   admin accounts, PIM groups mirrored to AD groups, and just-in-time AD membership — a
   person who activates a PIM group is in its AD group within seconds, for exactly the
   time left on the activation. It onboards servers (each server's own administrator
@@ -637,7 +639,7 @@ description. (Synthetic demo data.)*
 | **Access** | The Access map, Look up a role, Create access (guided wizards), Change existing access, Admin accounts & TAP, Invite a guest or consultant, Departments & owners, and All records. |
 | **Pending changes** | Check for problems (validation) and the Review & commit queue. |
 | **Jobs** | Jobs & status, Engine logs & errors, and the Job schedule. |
-| **Reviews & controls** | Review current delegations, Approvals, Drift: live vs desired, **Coverage & gaps** (what every workload has delegated and what it has not), Access reviews, Tenant conformance, Reports, Managed tenants, and on a managing tenant the **Managed tenant registry** and **Replication overview**. |
+| **Reviews & controls** | Delegation overview, Approvals, Drift: live vs desired, **Coverage & gaps** (what every workload has delegated and what it has not), Access reviews, Tenant conformance, Reports, Managed tenants, and on a managing tenant the **Managed tenant registry** and **Replication overview**. |
 | **Audit & Settings** | Audit trail, Settings, Newly discovered resources, Manager access & roles, Emergency access (break-glass), Mail templates, **Policy templates**, and Support. |
 
 A **global search box** in the header jumps to any person, group, role, scope or
@@ -748,12 +750,21 @@ manages it from then on) or **ignored** with one click — on one item or on the
 ticked items. The drift alert mail goes out monthly by default; a SuperAdmin can
 make it daily, weekly or quarterly.
 
-### Review current delegations
+### Delegation overview (All privileged permissions)
 
-![Review current delegations — the current assignments snapshot with its timestamp](docs/img/manager-standing-access.png)
-*Review current delegations lists who holds privileged access right now — Entra
-roles, Azure RBAC and PIM for Groups — from a snapshot stamped with its time.
+![Delegation overview, Graph view — the live assignments as the Access map board, one person selected](docs/img/manager-standing-access.png)
+*Delegation overview (All privileged permissions), Graph view: who holds privileged access right now — Entra
+roles, Azure RBAC and PIM for Groups — drawn like the Access map, from a snapshot stamped with its time.
 (Synthetic demo data.)*
+
+![Delegation overview, List view — the same live assignments as a table](docs/img/manager-delegation-list.png)
+*The same page in List view. (Synthetic demo data.)*
+
+*(New in 2.4.554.)* The page opens in **Graph view**: people, the groups they are in, the groups those are nested in,
+and the roles and scopes they reach — the Access map's board, fed from the live assignments. Select a box or a line to
+collapse the board to its path and revoke what is not needed (the graph only takes access away). **List view** shows
+the same rows as a table; every filter applies to both, and your choice is remembered. While a new read of the tenant
+is under way the page says **Loading current delegations…** and updates by itself; Refresh never asks for it twice.
 
 Standing access, the revoke view and the Home "expiring access" tile read from an
 **active-assignments snapshot** refreshed every two hours, so they open instantly
@@ -969,7 +980,7 @@ environment's own database.
   database live: in the provider's tenant (so the provider runs the infrastructure
   for the customer), or in the customer's own tenant (so the customer does).
 - **What the provider sent is read-only in the managed tenant, and shown as such.** On the Access map it carries a
-  **CENTRAL** badge and teal links; in Review current delegations a standing central assignment cannot be revoked. A
+  **CENTRAL** badge and teal links; in Delegation overview a standing central assignment cannot be revoked. A
   central administrator can still be given the customer's own, local access, which the customer manages as usual.
 - **You can start alone, be taken on later, and leave again.** A tenant that starts
   on its own can be brought under a provider afterwards, and a managed tenant can be
@@ -1257,7 +1268,7 @@ Two jobs talk to Invardia. Both are **on by default** in a new installation, and
 - **Request the licence automatically** -- asks Invardia for this installation's licence when none is valid or yours ends
   within 30 days, then installs the signed file only after checking it here. It sends the tenant, the version and an
   installation id.
-- **Send status telemetry** -- every hour, which jobs ran and whether they succeeded, and once a day the version, edition
+- **Send status telemetry** -- every hour, which jobs ran and whether they succeeded, and every 4 hours the version, edition
   and licence state. Without a Pro install key it is **anonymous**: no tenant, no server name, no error text -- only a
   failure class and rounded counts, under a random id of its own. With a Pro install key the reports also carry the error
   text, with secrets removed, so support can see a failure before you call. Switch it off at any time.
@@ -1286,7 +1297,8 @@ finally the two app registrations (the Manager sign-in and the deploy identity).
 
 - A **Windows** machine with **PowerShell 7**, run **as Administrator** (the deploy
   identity's certificate is placed in the machine certificate store), plus
-  **Azure CLI** and **git**.
+  **git**. No Azure CLI and no PowerShell modules are needed: the scripts talk to
+  Azure and Microsoft Graph directly and sign you in through the browser.
 - An Azure **subscription** in the tenant you want to govern.
 - A sign-in that is **Global Administrator** (or Privileged Role Administrator +
   Application Administrator) in the tenant **and Owner** of the subscription. It is
@@ -1304,9 +1316,7 @@ cd PIM4EntraPS
 ### 2. Create the deploy identity
 
 ```powershell
-az login --tenant <tenant-id>
-az account set --subscription <subscription-id>
-
+# A browser sign-in opens for the tenant; no Azure CLI login is needed.
 $id = .\tools\setup\New-PimDeployIdentity.ps1 -TenantId <tenant-id> -SubscriptionId <subscription-id> -GrantGraph -Apply
 ```
 
@@ -1539,7 +1549,6 @@ PIM4EntraPS/
   sql/                        # idempotent schema
   templates/                  # admin, mail and policy templates
   workloads/                  # workload connector definitions
-  launcher/  legacy/          # v1-compatible launchers and reference engines
   docs/                       # FEATURES.md · DESIGN.md · img/
   FUNCTIONS/                  # bundled shared PowerShell modules
   README.md  RELEASENOTES.md  LICENSE  VERSION

@@ -63,23 +63,55 @@ param(
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $solRoot 'engine\msp\PIM-MspBuild.ps1')
+# 100.41 (framework 12.17 NO-AZ): ARM REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1). A calling
+# build's REST session is used as it is; standalone, the Invardia Support app's session or the person signed in. No az.
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Note($m) { Write-Host "    $m" -ForegroundColor DarkGray }
 
-$sub = @('--subscription', "$SubscriptionId".Trim())
+$S = "$SubscriptionId".Trim()
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) }
 function Read-PimBaselineStoreNetwork {
-    $ErrorActionPreference = 'Continue'
-    $acct = $null
-    try { $acct = (az storage account show @sub -g $ResourceGroup -n $StorageAccount -o json --only-show-errors 2>$null) | Out-String | ConvertFrom-Json } catch { $acct = $null }
-    $cont = ''
-    try { $cont = "$(az storage container-rm show @sub -g $ResourceGroup --storage-account $StorageAccount -n $Container --query publicAccess -o tsv --only-show-errors 2>$null)".Trim() } catch { $cont = '' }
+    # ARM names the firewall networkAcls (virtualNetworkRules[].id, ipRules[].value); az renamed them networkRuleSet
+    # (virtualNetworkResourceId, ipAddressOrRange). The plan below reads the same shape either way.
+    $acct = Get-PimArmStorageAccount -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $StorageAccount -ErrorAsNull
     if (-not $acct) { return $null }
+    $cont = "$((Get-PimArmBlobContainer -SubscriptionId $S -ResourceGroup $ResourceGroup -Account $StorageAccount -Name $Container -ErrorAsNull).properties.publicAccess)".Trim()
+    $acl = $acct.properties.networkAcls
     return @{
-        defaultAction         = "$($acct.networkRuleSet.defaultAction)"
-        allowBlobPublicAccess = [bool]$acct.allowBlobPublicAccess
+        defaultAction         = "$($acl.defaultAction)"
+        allowBlobPublicAccess = [bool]$acct.properties.allowBlobPublicAccess
         containerPublicAccess = $cont
-        subnetIds             = @(@($acct.networkRuleSet.virtualNetworkRules) | Where-Object { $_ } | ForEach-Object { "$($_.virtualNetworkResourceId)" })
-        ipRules               = @(@($acct.networkRuleSet.ipRules) | Where-Object { $_ } | ForEach-Object { "$($_.ipAddressOrRange)" })
+        subnetIds             = @(@($acl.virtualNetworkRules) | Where-Object { $_ } | ForEach-Object { "$($_.id)" })
+        ipRules               = @(@($acl.ipRules) | Where-Object { $_ } | ForEach-Object { "$($_.value)" })
+    }
+}
+function Set-PimBaselineStoreAcl {
+    <# az storage account network-rule add|remove / update --default-action: READ-MODIFY-WRITE of the whole networkAcls
+       (bypass and every other rule kept), PATCHed as one property. #>
+    param([Parameter(Mandatory)][string]$Op, [string]$Value)
+    $acct = Get-PimArmStorageAccount -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $StorageAccount
+    $acl = $acct.properties.networkAcls
+    $vnet = @(@($acl.virtualNetworkRules) | Where-Object { $_ } | ForEach-Object { @{ id = "$($_.id)"; action = $(if ("$($_.action)") { "$($_.action)" } else { 'Allow' }) } })
+    $ips  = @(@($acl.ipRules) | Where-Object { $_ } | ForEach-Object { @{ value = "$($_.value)"; action = $(if ("$($_.action)") { "$($_.action)" } else { 'Allow' }) } })
+    $deflt = if ("$($acl.defaultAction)") { "$($acl.defaultAction)" } else { 'Allow' }
+    switch ($Op) {
+        'add-subnet'    { if (-not @($vnet | Where-Object { $_.id -ieq $Value }).Count) { $vnet = @($vnet) + @(@{ id = $Value; action = 'Allow' }) } }
+        'remove-subnet' { $vnet = @($vnet | Where-Object { $_.id -ine $Value }) }
+        'add-ip'        { if (-not @($ips | Where-Object { $_.value -eq $Value }).Count) { $ips = @($ips) + @(@{ value = $Value; action = 'Allow' }) } }
+        'remove-ip'     { $ips = @($ips | Where-Object { $_.value -ne $Value }) }
+        'default-deny'  { $deflt = 'Deny' }
+    }
+    $new = @{ defaultAction = $deflt; bypass = $(if ("$($acl.bypass)") { "$($acl.bypass)" } else { 'AzureServices' }); virtualNetworkRules = @($vnet); ipRules = @($ips) }
+    [void](Update-PimArmStorageAccount -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $StorageAccount -Properties @{ networkAcls = $new })
+}
+function Invoke-PimBaselineStoreAction {
+    param([Parameter(Mandatory)][string]$Op, [string]$Value)
+    switch ($Op) {
+        'allow-blob-public-access' { [void](Update-PimArmStorageAccount -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $StorageAccount -Properties @{ allowBlobPublicAccess = $true }) }
+        'container-public-access'  { [void](Set-PimArmBlobContainer -SubscriptionId $S -ResourceGroup $ResourceGroup -Account $StorageAccount -Name $Container -PublicAccess Blob) }
+        default                    { Set-PimBaselineStoreAcl -Op $Op -Value $Value }
     }
 }
 
@@ -92,40 +124,29 @@ if (-not @($plan.actions).Count) { Note 'already as requested -- nothing to chan
 
 foreach ($a in @($plan.actions)) {
     if (-not $PSCmdlet.ShouldProcess("$StorageAccount", "$($a.op) $($a.value)")) { continue }
-    $azArgs = switch ($a.op) {
-        'add-subnet'               { @('storage', 'account', 'network-rule', 'add', '-g', $ResourceGroup, '--account-name', $StorageAccount, '--subnet', $a.value) }
-        'remove-subnet'            { @('storage', 'account', 'network-rule', 'remove', '-g', $ResourceGroup, '--account-name', $StorageAccount, '--subnet', $a.value) }
-        'add-ip'                   { @('storage', 'account', 'network-rule', 'add', '-g', $ResourceGroup, '--account-name', $StorageAccount, '--ip-address', $a.value) }
-        'remove-ip'                { @('storage', 'account', 'network-rule', 'remove', '-g', $ResourceGroup, '--account-name', $StorageAccount, '--ip-address', $a.value) }
-        'allow-blob-public-access' { @('storage', 'account', 'update', '-g', $ResourceGroup, '-n', $StorageAccount, '--allow-blob-public-access', 'true') }
-        'container-public-access'  { @('storage', 'container-rm', 'update', '-g', $ResourceGroup, '--storage-account', $StorageAccount, '-n', $Container, '--public-access', 'blob') }
-        'default-deny'             { @('storage', 'account', 'update', '-g', $ResourceGroup, '-n', $StorageAccount, '--default-action', 'Deny') }
-    }
     Note "$($a.op) $($a.value)"
-    $ErrorActionPreference = 'Continue'
-    $out = az @azArgs @sub -o none --only-show-errors 2>&1
-    $code = $LASTEXITCODE
+    $out = ''
+    try { Invoke-PimBaselineStoreAction -Op $a.op -Value $a.value } catch { $out = "$($_.Exception.Message)" }
     # 🪤 MEASURED on EFIF 2026-09-18: on an EXISTING account, the container call straight after 'allow-blob-public-access'
     # answers PublicAccessNotPermitted because the account setting has not propagated yet (it read back True seconds
     # later). Retry only THAT error on only THAT step, bounded. A real policy refusal fails on the account update
     # above, not here.
     $tries = 0
     $retryDelay = if ("$env:PIM_NETWORK_RETRY_SECONDS" -match '^\d+$') { [int]$env:PIM_NETWORK_RETRY_SECONDS } else { 10 }   # tests set 0
-    while ($code -ne 0 -and $a.op -eq 'container-public-access' -and "$out" -match 'PublicAccessNotPermitted' -and $tries -lt 12) {
+    while ($out -and $a.op -eq 'container-public-access' -and "$out" -match 'PublicAccessNotPermitted' -and $tries -lt 12) {
         $tries++
         Note "the account's anonymous-access setting has not propagated yet -- retry $tries/12 in $($retryDelay)s"
         Start-Sleep -Seconds $retryDelay
-        $out = az @azArgs @sub -o none --only-show-errors 2>&1
-        $code = $LASTEXITCODE
+        $out = ''
+        try { Invoke-PimBaselineStoreAction -Op $a.op -Value $a.value } catch { $out = "$($_.Exception.Message)" }
     }
-    if ($code -ne 0 -and "$out".Trim()) { Write-Host "$out" -ForegroundColor Red }
-    $ErrorActionPreference = 'Stop'
-    if ($code -ne 0) {
+    if ($out) { Write-Host "$out" -ForegroundColor Red }
+    if ($out) {
         $hint = if ($a.op -eq 'allow-blob-public-access') { ' (an Azure Policy that forbids anonymous blob access on storage accounts refuses exactly this -- it needs an exemption for this one account)' }
                 elseif ($a.op -like '*subnet') { (' (the subnet must exist and carry a Microsoft.Storage / Microsoft.Storage.Global service endpoint. A LinkedAuthorizationFailed here means ARM wanted ' +
                                                   'this identity to hold Microsoft.Network/virtualNetworks/subnets/joinViaServiceEndpoint/action on a subnet in ANOTHER tenant -- the managed tenant grants that ' +
                                                   'once on its subnet, or the pull uses a private endpoint to this store instead, DESIGN 13.7 option 1)') } else { '' }
-        throw "az failed ($code) on '$($a.op) $($a.value)'$hint. Nothing after it was applied; re-run after fixing (idempotent)."
+        throw "ARM refused '$($a.op) $($a.value)'$hint. Nothing after it was applied; re-run after fixing (idempotent)."
     }
 }
 

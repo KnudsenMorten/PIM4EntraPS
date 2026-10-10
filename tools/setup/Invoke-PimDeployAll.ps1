@@ -2995,7 +2995,8 @@ function Invoke-DeployValidation {
                 } else {
                     $found = if ($pesterMajor -gt 0) { "Pester $pesterMajor.x" } else { 'no Pester module' }
                     Warn "deploy-validation tests SKIPPED -- they need Pester 5, and this host has $found."
-                    Warn '  Install-Module Pester -MinimumVersion 5.0 -Scope AllUsers -Force   (then re-run to enable them)'
+                    # 100.41/100.42: a shipped script never tells anyone to install a module; Pester is dev-host tooling (-RunDevGates).
+                    Warn '  These are DEV gates (-RunDevGates): run them from a dev host that has Pester 5 -- customers never need them.'
                     Warn '  This layer is UNVERIFIED. It is NOT a deployment failure and does NOT roll anything back --'
                     Warn '  the post-deploy GUI gate above is what proves the Manager works.'
                     $valExit = -1

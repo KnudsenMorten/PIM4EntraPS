@@ -124,7 +124,7 @@ function Build-PimContext {
             $Global:Users_All_ID  = @()   # resolved on-demand (no 500k bulk list)
             $hdr = @{ ConsistencyLevel = 'eventual' }
             $Global:Groups_All_ID = if ($prefix) {
-                @(Invoke-PimGraph -Headers $hdr -Path "/groups?`$filter=startswith(displayName,'$($prefix -replace "'", "''")')&`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description&`$count=true&`$top=999" -All | ConvertTo-PimSdkShape)
+                @(Invoke-PimGraph -Headers $hdr -Path "/groups?`$filter=startswith(displayName,'$($prefix -replace "'", "''")')&`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description,isAssignableToRole&`$count=true&`$top=999" -All | ConvertTo-PimSdkShape)
             } else {
                 Write-Host "[context] the tenant's group pattern has no literal prefix -- groups are resolved by the names the definitions give" -ForegroundColor DarkGray
                 @()
@@ -143,7 +143,7 @@ function Build-PimContext {
                     for ($i = 0; $i -lt $extra.Count; $i += 15) {
                         $slice = @($extra[$i..([Math]::Min($i + 14, $extra.Count - 1))])
                         $in = (@($slice | ForEach-Object { "'" + ("$_" -replace "'", "''") + "'" }) -join ',')
-                        foreach ($g in @(Invoke-PimGraph -Headers $hdr -Path "/groups?`$filter=displayName in ($in)&`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description&`$count=true" -All | ConvertTo-PimSdkShape)) {
+                        foreach ($g in @(Invoke-PimGraph -Headers $hdr -Path "/groups?`$filter=displayName in ($in)&`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description,isAssignableToRole&`$count=true" -All | ConvertTo-PimSdkShape)) {
                             if ($g -and $g.Id -and -not $have.ContainsKey("$($g.Id)")) { $Global:Groups_All_ID += $g; $have["$($g.Id)"] = $true; $added++ }
                         }
                     }
@@ -156,7 +156,7 @@ function Build-PimContext {
         else {
             Write-Host '[context] FULL fetch (REST): users + groups + AUs + roles...'
             $Global:Users_All_ID  = @(Invoke-PimGraph -Path "/users?`$select=id,userPrincipalName,displayName,mail,accountEnabled" -All | ConvertTo-PimSdkShape)
-            $Global:Groups_All_ID = @(Invoke-PimGraph -Path "/groups?`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description" -All | ConvertTo-PimSdkShape)
+            $Global:Groups_All_ID = @(Invoke-PimGraph -Path "/groups?`$select=id,displayName,groupTypes,securityEnabled,mailNickname,description,isAssignableToRole" -All | ConvertTo-PimSdkShape)
         }
         $Global:AU_All_ID     = @(Invoke-PimGraph -Path "/directory/administrativeUnits?`$select=id,displayName,visibility" -All | ConvertTo-PimSdkShape)
         $Global:Roles_All_ID  = @(Invoke-PimGraph -Path "/roleManagement/directory/roleDefinitions?`$select=id,displayName,isBuiltIn,templateId" -All | ConvertTo-PimSdkShape)

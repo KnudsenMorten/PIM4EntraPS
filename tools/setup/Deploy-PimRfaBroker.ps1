@@ -6,8 +6,10 @@
 
 .DESCRIPTION
   PLAN ONLY unless -Apply: prints every step (Get-PimRfaBrokerDeployPlan, offline-tested). With -Apply each step runs
-  through az with an explicit --subscription; every step is idempotent (create-or-skip) and the run stops at the first
-  failure. Use an isolated AZURE_CONFIG_DIR signed in for the PIM tenant -- never the machine's default context.
+  over ARM REST (PIM-Rest's one token client: the calling run's session, else the Invardia Support app's session, else
+  the person signed in in the browser -- no az, 100.41 / framework 12.17), every call naming its step's subscription in
+  the path; every step is idempotent (create-or-skip) and the run stops at the first failure. Pass -TenantId to pin the
+  sign-in to the PIM tenant.
 
   Cost (West Europe, 2026-10): the public environment's load balancer ~125 kr./month when no public environment can be
   shared; the app scales to zero (cold start ~10-20 s; -MinReplicas 1 keeps one warm: ~50-80 kr./month); storage
@@ -40,12 +42,15 @@ param(
     [Parameter(Mandatory)][string[]]$EngineIdentityPrincipalIds,
     [string[]]$ApiAllowedIps = @(), [int]$MinReplicas = 0, [string]$ExistingEnvironmentName = '',
     # --- the follow-up steps (see FOLLOW-UP STEPS) ---
-    [string]$TenantId = '', [string]$ApiAppDisplayName = 'PIM access request API', [string]$AzureConfigDir = '',
+    [string]$TenantId = '', [string]$ApiAppDisplayName = 'PIM access request API',
+    [string]$AzureConfigDir = '',   # IGNORED since 100.41 (no az): kept so existing command lines still bind
+
     [string]$AdminAppId = '', [string]$AdminCertThumbprint = '', [switch]$UseSignedInAccount,
     [string]$SqlServerFqdn = '', [string]$SqlDatabase = 'PimPlatform',
     [switch]$Apply
 )
 $ErrorActionPreference = 'Stop'
+if ("$AzureConfigDir".Trim()) { Write-Host '  -AzureConfigDir is ignored: this script no longer uses the az CLI (100.41) -- it signs in through PIM-Rest.' -ForegroundColor DarkYellow }
 . (Join-Path $PSScriptRoot '_PimRfaBrokerPlan.ps1')
 $plan = Get-PimRfaBrokerDeployPlan -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Placement $Placement -RfaSubscriptionId $RfaSubscriptionId `
     -RfaResourceGroup $RfaResourceGroup -Location $Location -VnetName $VnetName -SubnetName $SubnetName -SubnetPrefix $SubnetPrefix -PimSubnetPrefixes $PimSubnetPrefixes `
@@ -56,20 +61,25 @@ Write-Host "RFA broker deploy -- placement $($plan.placement)$(if (-not $Apply) 
 $i = 0; foreach ($s in $plan.steps) { $i++; Write-Host ("  {0,2}. [{1}] {2}" -f $i, $s.id, $s.what) }
 if (-not $Apply) { return }
 
-function Invoke-Az {
-    # az with an explicit subscription; returns parsed JSON (or $null), throws with az's own message on failure.
-    param([Parameter(Mandatory)][string]$Sub, [Parameter(Mandatory)][string[]]$AzArgs, [switch]$AllowNotFound)
-    $out = & az @AzArgs --subscription $Sub -o json 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $txt = (@($out) | ForEach-Object { "$_" }) -join ' '
-        if ($AllowNotFound -and $txt -match '(?i)not ?found|ResourceNotFound|could not be found') { return $null }
-        throw "az $($AzArgs[0..2] -join ' ') failed: $txt"
-    }
-    # stdout only: az writes warnings (e.g. the 32-bit cryptography notice) to stderr, which 2>&1 mixes in as ErrorRecords
-    # -- parsed as part of the JSON they made every result $null (found deploying internal, 2026-10-02)
-    $j = (@($out) | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }) -join "`n"
-    if ("$j".Trim()) { try { return ($j | ConvertFrom-Json) } catch { return $null } }
-    return $null
+# 100.41 (framework 12.17 NO-AZ): every step is ARM REST through PIM-Rest's ONE token client (engine/_shared/PIM-ArmSetup.ps1),
+# each call naming its step's subscription in the path. A calling run's REST session is used as it is; standalone, the
+# Invardia Support app's session or the person signed in. No az, no default context.
+$solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+if (-not "$($global:PIM_SetupRestMode)".Trim()) {
+    $cn = @{ SubscriptionId = $SubscriptionId }; if ("$TenantId".Trim()) { $cn.TenantId = $TenantId }
+    [void](Connect-PimSetupRest @cn)
+}
+$net = Get-PimSetupApiVersion network
+function Get-RfaArm([string]$Id, [string]$Kind = 'network') { Invoke-PimSetupArm -Path $Id -ApiVersion (Get-PimSetupApiVersion $Kind) -NotFoundOk }
+function Set-RfaArm([string]$Id, $Body, [string]$Kind = 'network') {
+    # PUT then wait: a create that returns as soon as ARM accepts it is not done (BUG-44)
+    $v = Get-PimSetupApiVersion $Kind
+    [void](Invoke-PimSetupArm -Method PUT -Path $Id -Body $Body -ApiVersion $v)
+    $st = Wait-PimArmProvisioned -Path $Id -ApiVersion $v
+    if ($st -match '(?i)^(Failed|Canceled|NotFound|TimedOut)') { throw "$(($Id -split '/')[-1]) did not provision ($st)" }
+    Invoke-PimSetupArm -Path $Id -ApiVersion $v
 }
 
 $appPrincipal = $null; $storageId = $null; $appFqdn = ''
@@ -78,47 +88,83 @@ foreach ($s in $plan.steps) {
     Write-Host "== [$($s.id)] $($s.what)" -ForegroundColor Cyan
     $a = $s.args
     switch -Wildcard ($s.id) {
-        'rg' { [void](Invoke-Az -Sub $s.sub -AzArgs @('group', 'create', '-n', $a.name, '-l', $a.location)) }
+        'rg' { [void](Set-PimArmResourceGroup -SubscriptionId $s.sub -Name $a.name -Location $a.location) }
         'storage' {
-            $st = Invoke-Az -Sub $s.sub -AzArgs @('storage', 'account', 'show', '-g', $s.rg, '-n', $a.name) -AllowNotFound
-            if (-not $st) { $st = Invoke-Az -Sub $s.sub -AzArgs @('storage', 'account', 'create', '-g', $s.rg, '-n', $a.name, '-l', $a.location, '--sku', 'Standard_LRS', '--kind', 'StorageV2', '--allow-shared-key-access', 'false', '--min-tls-version', $a.minTls, '--allow-blob-public-access', 'false', '--https-only', 'true') }
-            if ("$($st.allowSharedKeyAccess)" -ne 'False' -and "$($st.allowSharedKeyAccess)" -ne 'false') { [void](Invoke-Az -Sub $s.sub -AzArgs @('storage', 'account', 'update', '-g', $s.rg, '-n', $a.name, '--allow-shared-key-access', 'false')) }
+            $st = Get-PimArmStorageAccount -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.name
+            if (-not $st) { $st = New-PimArmStorageAccount -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.name -Location $a.location -Sku Standard_LRS -Kind StorageV2 -AllowBlobPublicAccess $false }
+            # az storage account create --allow-shared-key-access false --min-tls-version T --https-only true: ARM's create
+            # above sets TLS 1.2 + https-only; shared-key access (and a different TLS floor) is a PATCH of just those.
+            $fix = @{}
+            if ("$($st.properties.allowSharedKeyAccess)" -notmatch '^(?i)false$') { $fix.allowSharedKeyAccess = $false }
+            if ("$($a.minTls)".Trim() -and "$($st.properties.minimumTlsVersion)" -ne "$($a.minTls)") { $fix.minimumTlsVersion = "$($a.minTls)" }
+            if ($fix.Count) { [void](Update-PimArmStorageAccount -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.name -Properties $fix) }
             $storageId = "$($st.id)"
         }
-        'tables' { foreach ($t in $a.tables) { [void](Invoke-Az -Sub $s.sub -AzArgs @('storage', 'table', 'create', '--account-name', $a.account, '--auth-mode', 'login', '-n', $t)) } }
+        'tables' {
+            # az storage table create --auth-mode login: the CONTROL-plane table PUT (idempotent; no data role, no network rule needed)
+            foreach ($t in $a.tables) {
+                [void](Invoke-PimSetupArm -Method PUT -Path (Get-PimArmResourceId $s.sub $s.rg 'Microsoft.Storage/storageAccounts' $a.account "tableServices/default/tables/$t") -Body @{ properties = @{} } -ApiVersion (Get-PimSetupApiVersion storage))
+            }
+        }
         'vnet' {
-            if (-not (Invoke-Az -Sub $s.sub -AzArgs @('network', 'vnet', 'show', '-g', $s.rg, '-n', $a.name) -AllowNotFound)) { [void](Invoke-Az -Sub $s.sub -AzArgs @('network', 'vnet', 'create', '-g', $s.rg, '-n', $a.name, '-l', $a.location, '--address-prefixes', $a.prefix)) }
+            if (-not (Get-PimArmVnet -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.name)) { [void](New-PimArmVnet -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.name -Location $a.location -AddressPrefixes @($a.prefix)) }
         }
         'nsg' {
-            if (-not (Invoke-Az -Sub $s.sub -AzArgs @('network', 'nsg', 'show', '-g', $s.rg, '-n', $a.name) -AllowNotFound)) { [void](Invoke-Az -Sub $s.sub -AzArgs @('network', 'nsg', 'create', '-g', $s.rg, '-n', $a.name, '-l', $a.location)) }
+            $nsgId = Get-PimArmResourceId $s.sub $s.rg 'Microsoft.Network/networkSecurityGroups' $a.name
+            if (-not (Get-RfaArm $nsgId)) { [void](Set-RfaArm $nsgId @{ location = $a.location; properties = @{} }) }
             $prio = 100
             foreach ($d in @($a.denyTo)) {
-                [void](Invoke-Az -Sub $s.sub -AzArgs @('network', 'nsg', 'rule', 'create', '-g', $s.rg, '--nsg-name', $a.name, '-n', "deny-pim-$prio", '--priority', "$prio", '--direction', 'Outbound', '--access', 'Deny', '--protocol', '*', '--destination-address-prefixes', $d, '--destination-port-ranges', '*'))
+                # az network nsg rule create deny-pim-<prio> (PUT by name: a re-run rewrites the same rule)
+                [void](Set-RfaArm "$nsgId/securityRules/deny-pim-$prio" @{ properties = @{ priority = $prio; direction = 'Outbound'; access = 'Deny'; protocol = '*'
+                    sourceAddressPrefix = '*'; sourcePortRange = '*'; destinationAddressPrefix = "$d"; destinationPortRange = '*' } })
                 $prio++
             }
         }
         'subnet' {
-            $sn = Invoke-Az -Sub $s.sub -AzArgs @('network', 'vnet', 'subnet', 'show', '-g', $s.rg, '--vnet-name', $a.vnet, '-n', $a.name) -AllowNotFound
-            if (-not $sn) { [void](Invoke-Az -Sub $s.sub -AzArgs @('network', 'vnet', 'subnet', 'create', '-g', $s.rg, '--vnet-name', $a.vnet, '-n', $a.name, '--address-prefixes', $a.prefix, '--network-security-group', $a.nsg, '--delegations', $a.delegation)) }
+            $snId = Get-PimArmResourceId $s.sub $s.rg 'Microsoft.Network/virtualNetworks' $a.vnet "subnets/$($a.name)"
+            if (-not (Get-RfaArm $snId)) {
+                [void](Set-RfaArm $snId @{ properties = @{ addressPrefix = $a.prefix
+                    networkSecurityGroup = @{ id = (Get-PimArmResourceId $s.sub $s.rg 'Microsoft.Network/networkSecurityGroups' $a.nsg) }
+                    delegations = @(@{ name = 'delegation'; properties = @{ serviceName = $a.delegation } }) } })
+            }
         }
         'env' {
-            if (-not (Invoke-Az -Sub $s.sub -AzArgs @('containerapp', 'env', 'show', '-g', $s.rg, '-n', $a.name) -AllowNotFound)) {
-                $snId = "$((Invoke-Az -Sub $s.sub -AzArgs @('network', 'vnet', 'subnet', 'show', '-g', $s.rg, '--vnet-name', $a.vnet, '-n', $a.subnet)).id)"
-                [void](Invoke-Az -Sub $s.sub -AzArgs @('containerapp', 'env', 'create', '-g', $s.rg, '-n', $a.name, '-l', $a.location, '--infrastructure-subnet-resource-id', $snId, '--internal-only', 'false'))
+            if (-not (Get-PimArmAcaEnv -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.name)) {
+                $sn = Get-PimArmSubnet -SubscriptionId $s.sub -ResourceGroup $s.rg -VnetName $a.vnet -Name $a.subnet
+                if (-not $sn) { throw "subnet $($a.vnet)/$($a.subnet) not found" }
+                # What `az containerapp env create` did client-side when no workspace was named: create one beside the
+                # environment ("workspace-<rg><random>") and log there. ARM itself will not -- it needs a workspace.
+                $genLaw = ('workspace-' + (($s.rg -replace '[^A-Za-z0-9-]', '').ToLowerInvariant()) + ([guid]::NewGuid().ToString('N').Substring(0, 4)))
+                if ($genLaw.Length -gt 63) { $genLaw = $genLaw.Substring(0, 59) + $genLaw.Substring($genLaw.Length - 4) }
+                $gen = New-PimArmLogAnalytics -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $genLaw -Location $a.location
+                $lawKey = Get-PimArmLogAnalyticsKey -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $genLaw
+                [void](Set-PimArmAcaEnv -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.name -Create -Location $a.location -Properties @{
+                    vnetConfiguration    = @{ infrastructureSubnetId = "$($sn.id)"; internal = $false }
+                    workloadProfiles     = @(@{ name = 'Consumption'; workloadProfileType = 'Consumption' })
+                    appLogsConfiguration = @{ destination = 'log-analytics'; logAnalyticsConfiguration = @{ customerId = "$($gen.properties.customerId)".Trim(); sharedKey = "$lawKey".Trim() } } })
             }
         }
         'env-existing' {
-            $ev = Invoke-Az -Sub $s.sub -AzArgs @('containerapp', 'env', 'show', '-g', $s.rg, '-n', $a.name)
+            $ev = Get-PimArmAcaEnv -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.name
+            if (-not $ev) { throw "the environment '$($a.name)' was not found in $($s.rg)" }
             if ("$($ev.properties.vnetConfiguration.internal)" -match '^(?i)true$') { throw "the environment '$($a.name)' is INTERNAL -- the broker must be reachable from the internet; deploy it in its own public environment (omit -ExistingEnvironmentName)" }
         }
         'app' {
-            $app = Invoke-Az -Sub $s.sub -AzArgs @('containerapp', 'show', '-g', $s.rg, '-n', $a.name) -AllowNotFound
-            $envVars = @($a.envVars.Keys | ForEach-Object { "$_=$($a.envVars[$_])" })
+            $app = Get-PimArmAcaApp -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.name
             if (-not $app) {
-                $cargs = @('containerapp', 'create', '-g', $s.rg, '-n', $a.name, '--environment', $a.environment, '--image', $a.image, '--system-assigned', '--ingress', 'external', '--target-port', "$($a.targetPort)",
-                           '--min-replicas', "$($a.minReplicas)", '--max-replicas', "$($a.maxReplicas)", '--cpu', '0.25', '--memory', '0.5Gi', '--command') + @($a.command[0]) + @('--args') + @($a.command[1..($a.command.Count - 1)]) + @('--env-vars') + $envVars
-                if ("$($a.acr)".Trim()) { $cargs += @('--registry-server', "$($a.acr).azurecr.io", '--registry-identity', 'system') }
-                $app = Invoke-Az -Sub $s.sub -AzArgs $cargs
+                # az containerapp create --system-assigned --ingress external --cpu 0.25 --memory 0.5Gi --command/--args
+                # --env-vars [--registry-identity system]: the app as ARM takes it, one PUT of the whole resource.
+                $ev = Get-PimArmAcaEnv -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.environment
+                if (-not $ev) { throw "Container Apps environment '$($a.environment)' not found in '$($s.rg)'" }
+                $cfg = @{ activeRevisionsMode = 'Single'; ingress = @{ external = $true; targetPort = [int]$a.targetPort; transport = 'auto'; allowInsecure = $false } }
+                if ("$($a.acr)".Trim()) { $cfg.registries = @(@{ server = "$($a.acr).azurecr.io"; identity = 'system' }) }
+                $container = @{ name = $a.name; image = $a.image; resources = @{ cpu = 0.25; memory = '0.5Gi' }
+                                command = @($a.command[0]); args = @($a.command[1..($a.command.Count - 1)])
+                                env = @($a.envVars.Keys | ForEach-Object { @{ name = "$_"; value = "$($a.envVars[$_])" } }) }
+                $props = @{ managedEnvironmentId = "$($ev.id)"; configuration = $cfg
+                            template = @{ containers = @($container); scale = @{ minReplicas = [int]$a.minReplicas; maxReplicas = [int]$a.maxReplicas } } }
+                if (@($ev.properties.workloadProfiles | Where-Object { $_ -and "$($_.name)" -eq 'Consumption' }).Count) { $props.workloadProfileName = 'Consumption' }
+                $app = Set-PimArmAcaApp -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.name -Create -Resource @{ location = "$($ev.location)"; identity = @{ type = 'SystemAssigned' }; properties = $props }
             }
             $appPrincipal = "$($app.identity.principalId)"
             $appFqdn = "$($app.properties.configuration.ingress.fqdn)"
@@ -127,27 +173,54 @@ foreach ($s in $plan.steps) {
         'role-*' {
             $principal = if ($a.principal -eq 'app') { $appPrincipal } else { $a.principal }
             if (-not $principal) { throw 'the app identity is unknown (the app step did not run)' }
-            if (-not $storageId) { $storageId = "$((Invoke-Az -Sub $plan.steps[0].sub -AzArgs @('storage', 'account', 'show', '-g', $s.rg, '-n', $StorageAccountName)).id)" }
-            $have = @(Invoke-Az -Sub $s.sub -AzArgs @('role', 'assignment', 'list', '--assignee', $principal, '--scope', $storageId))
+            if (-not $storageId) { $storageId = "$((Get-PimArmStorageAccount -SubscriptionId $plan.steps[0].sub -ResourceGroup $s.rg -Name $StorageAccountName).id)" }
+            if (-not $storageId) { throw "storage account $StorageAccountName not found" }
+            $have = @(Get-PimArmRoleAssignments -Scope $storageId -PrincipalId $principal -SubscriptionId $s.sub)
             if (-not @($have | Where-Object { "$($_.roleDefinitionName)" -eq $a.role }).Count) {
-                [void](Invoke-Az -Sub $s.sub -AzArgs @('role', 'assignment', 'create', '--assignee-object-id', $principal, '--assignee-principal-type', 'ServicePrincipal', '--role', $a.role, '--scope', $storageId))
+                [void](New-PimArmRoleAssignment -Scope $storageId -PrincipalId $principal -PrincipalType ServicePrincipal -Role $a.role -SubscriptionId $s.sub)
             }
         }
         'auth' {
             # Easy Auth only serves the Entra APPLICATION tokens on /api/v1 (the PIN portal and API keys work without it),
             # so a failure here is a warning with the next step, never a stopped deploy.
-            try { [void](Invoke-Az -Sub $s.sub -AzArgs @('containerapp', 'auth', 'update', '-g', $s.rg, '-n', $a.app, '--unauthenticated-client-action', 'AllowAnonymous', '--enabled', 'true')) }
+            # az containerapp auth update --unauthenticated-client-action AllowAnonymous --enabled true: authConfigs/current, read-modify-write
+            try {
+                [void](Set-PimArmAcaAuthConfig -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.app -Mutate {
+                    param($p)
+                    $pl = if ($p.PSObject.Properties['platform'] -and $p.platform) { $p.platform } else { [pscustomobject]@{} }
+                    $pl | Add-Member -NotePropertyName enabled -NotePropertyValue $true -Force
+                    $p | Add-Member -NotePropertyName platform -NotePropertyValue $pl -Force
+                    $gv = if ($p.PSObject.Properties['globalValidation'] -and $p.globalValidation) { $p.globalValidation } else { [pscustomobject]@{} }
+                    $gv | Add-Member -NotePropertyName unauthenticatedClientAction -NotePropertyValue 'AllowAnonymous' -Force
+                    $p | Add-Member -NotePropertyName globalValidation -NotePropertyValue $gv -Force
+                })
+            }
             catch { Write-Warning "   Easy Auth could not be switched on yet ($($_.Exception.Message)) -- Entra application tokens are refused until it is; API keys and the portal work." }
             if ("$TenantId".Trim()) {
                 $aa = @{ SubscriptionId = $s.sub; ResourceGroup = $s.rg; BrokerApp = $a.app; TenantId = $TenantId; ApiAppDisplayName = $ApiAppDisplayName; Apply = $true }
-                if ("$AzureConfigDir".Trim()) { $aa['AzureConfigDir'] = $AzureConfigDir }
                 try { & (Join-Path $PSScriptRoot 'Set-PimRfaBrokerApiAuth.ps1') @aa | Out-Host; $followUps.Add('api audience: registered') }
                 catch { Write-Warning "   the API audience could not be registered: $($_.Exception.Message)"; $followUps.Add('api audience: FAILED -- re-run Set-PimRfaBrokerApiAuth.ps1 -Apply') }
             } else {
                 Write-Host "   NEXT: Set-PimRfaBrokerApiAuth.ps1 -SubscriptionId $($s.sub) -ResourceGroup $($s.rg) -BrokerApp $($a.app) -TenantId <tenant>  (registers the API audience so Entra application tokens are accepted; plans unless -Apply)" -ForegroundColor Yellow
             }
         }
-        'ip' { foreach ($ip in @($a.allow)) { [void](Invoke-Az -Sub $s.sub -AzArgs @('containerapp', 'ingress', 'access-restriction', 'set', '-g', $s.rg, '-n', $a.app, '--rule-name', ("allow-" + ($ip -replace '[./]', '-')), '--ip-address', $ip, '--action', 'Allow')) } }
+        'ip' {
+            # az containerapp ingress access-restriction set --rule-name allow-<ip> --ip-address IP --action Allow (per IP):
+            # one read-modify-write of the ingress; a rule of the same name is replaced, every other rule is kept.
+            $allowIps = @($a.allow)
+            [void](Set-PimArmAcaAppConfiguration -SubscriptionId $s.sub -ResourceGroup $s.rg -Name $a.app -Mutate {
+                param($cfg)
+                $ing = $cfg.ingress
+                if (-not $ing) { throw "container app '$($a.app)' has no ingress" }
+                $rules = @(@($ing.ipSecurityRestrictions) | Where-Object { $_ })
+                foreach ($ip in $allowIps) {
+                    $rn = "allow-" + ($ip -replace '[./]', '-')
+                    $range = if ("$ip" -match '/') { "$ip" } else { "$ip/32" }
+                    $rules = @($rules | Where-Object { "$($_.name)" -ne $rn }) + @([pscustomobject]@{ name = $rn; ipAddressRange = $range; action = 'Allow' })
+                }
+                $ing | Add-Member -NotePropertyName ipSecurityRestrictions -NotePropertyValue @($rules) -Force
+            })
+        }
         'mail' {
             if ("$TenantId".Trim() -and "$AdminAppId".Trim() -and "$AdminCertThumbprint".Trim() -and $appPrincipal) {
                 $mb, $dom = "$SenderMailbox".Split('@', 2)

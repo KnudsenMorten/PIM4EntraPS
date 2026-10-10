@@ -19,8 +19,9 @@
     OWN application id is allow-listed in the PIM Manager (Settings > Access requests > API applications). Allow-listing
     stays in PIM, where it is audited -- Easy Auth only proves the token is genuine and meant for this API.
 
-    Run in an az profile signed in to the tenant (certificate identity that may create app registrations); the script
-    refuses to write to any other tenant than -TenantId.
+    Graph + ARM REST through PIM-Rest's one token client (no az, 100.41 / framework 12.17): the calling run's session, else
+    the Invardia Support app's session, else the person signed in in the browser -- an identity that may create app
+    registrations; the script refuses to write to any other tenant than -TenantId.
 #>
 [CmdletBinding()]
 param(
@@ -29,11 +30,11 @@ param(
     [Parameter(Mandatory)][string]$TenantId,
     [string]$BrokerApp = 'ca-pim-rfa',
     [string]$ApiAppDisplayName = 'PIM access request API',
-    [string]$AzureConfigDir,
+    [string]$AzureConfigDir,   # IGNORED since 100.41 (no az): kept so existing command lines still bind
     [switch]$Apply
 )
 $ErrorActionPreference = 'Stop'
-if ("$AzureConfigDir".Trim()) { $env:AZURE_CONFIG_DIR = $AzureConfigDir }
+if ("$AzureConfigDir".Trim()) { Write-Host '  -AzureConfigDir is ignored: this script no longer uses the az CLI (100.41) -- it signs in through PIM-Rest.' -ForegroundColor DarkYellow }
 
 function Get-PimRfaApiAuthPlan {
     <#
@@ -60,47 +61,76 @@ function Get-PimRfaApiAuthPlan {
     return [pscustomobject]@{ steps = @($steps); audience = $uri; issuer = $wantIssuer; reason = $why }
 }
 
-function Invoke-AzJson([string[]]$A) {
-    $ErrorActionPreference = 'Continue'
-    $o = & az @A -o json --only-show-errors 2>$null
-    $code = $LASTEXITCODE; $ErrorActionPreference = 'Stop'
-    if ($code -ne 0) { throw "az $($A[0..2] -join ' ') failed (exit $code)" }
-    $t = (@($o) -join "`n").Trim(); if (-not $t) { return $null }
-    return ($t | ConvertFrom-Json)
-}
-
-function Invoke-AzJsonRetry([string[]]$A, [int]$Tries = 8) {
+function Invoke-PimRfaRetry([scriptblock]$Call, [int]$Tries = 8) {
     # a just-created application is not readable at once (directory replication: "Resource ... does not exist") -- retry
     for ($i = 1; $i -le $Tries; $i++) {
-        try { return (Invoke-AzJson $A) } catch { if ($i -eq $Tries) { throw }; Start-Sleep -Seconds (5 * $i) }
+        try { return (& $Call) } catch { if ($i -eq $Tries) { throw }; Start-Sleep -Seconds (5 * $i) }
     }
+}
+
+function ConvertTo-PimRfaAuthView($AuthResource) {
+    # The authConfigs/current resource -> the shape `az containerapp auth show` printed (its .properties at the top), which
+    # is what Get-PimRfaApiAuthPlan reads.
+    if ($AuthResource -and $AuthResource.PSObject.Properties['properties'] -and $AuthResource.properties) { return $AuthResource.properties }
+    return $null
 }
 
 if ($MyInvocation.InvocationName -eq '.') { return }   # dot-sourced by a test: the pure plan only
 
-# 🔒 the tenant az would write to -- Graph follows the profile's DEFAULT tenant, not --subscription
-$acct = Invoke-AzJson @('account', 'show')
-if ("$($acct.tenantId)" -ne $TenantId) { throw "the az profile is signed in to tenant '$($acct.tenantId)', not '$TenantId' -- refusing to write app registrations there. Use -AzureConfigDir with a profile for $TenantId." }
+# 100.41 (framework 12.17 NO-AZ): Graph + ARM REST through PIM-Rest's ONE token client (engine/_shared/PIM-ArmSetup.ps1). A
+# calling run's REST session is used as it is; standalone, the Invardia Support app's session or the person signed in.
+$solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $SubscriptionId -TenantId $TenantId) }
 
-$app = @(Invoke-AzJson @('ad', 'app', 'list', '--display-name', $ApiAppDisplayName)) | Where-Object { $_ } | Select-Object -First 1
-$sp = if ($app) { Invoke-AzJson @('ad', 'sp', 'list', '--filter', "appId eq '$($app.appId)'") | Select-Object -First 1 } else { $null }
-$auth = Invoke-AzJson @('containerapp', 'auth', 'show', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $BrokerApp)
+# 🔒 the tenant Graph would write to -- the REST session's tenant, which must be -TenantId
+if ("$($global:PIM_TenantId)".Trim().ToLowerInvariant() -ne "$TenantId".Trim().ToLowerInvariant()) { throw "the REST session is signed in to tenant '$($global:PIM_TenantId)', not '$TenantId' -- refusing to write app registrations there." }
+
+$app = @(Find-PimGraphApplications -DisplayName $ApiAppDisplayName) | Where-Object { $_ } | Select-Object -First 1
+$sp = if ($app) { Get-PimGraphServicePrincipal -Id "$($app.appId)" } else { $null }
+$auth = ConvertTo-PimRfaAuthView (Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $BrokerApp)
 $plan = Get-PimRfaApiAuthPlan -App $app -Sp $sp -Auth $auth -TenantId $TenantId
 Write-Host "==> broker '$BrokerApp' / API application '$ApiAppDisplayName': $($plan.reason)" -ForegroundColor Cyan
 if (-not $plan.steps.Count) { return $plan }
 if (-not $Apply) { Write-Host '    PLAN ONLY -- re-run with -Apply.' -ForegroundColor Yellow; return $plan }
 
-if ($plan.steps -contains 'create-app') { $app = Invoke-AzJson @('ad', 'app', 'create', '--display-name', $ApiAppDisplayName, '--sign-in-audience', 'AzureADMyOrg'); Write-Host "    created application $($app.appId)" }
+if ($plan.steps -contains 'create-app') { $app = New-PimGraphApplication -Body @{ displayName = $ApiAppDisplayName; signInAudience = 'AzureADMyOrg' }; Write-Host "    created application $($app.appId)" }
 $uri = "api://$($app.appId)"
-if ($plan.steps -contains 'set-uri' -or $plan.steps -contains 'create-app') { [void](Invoke-AzJsonRetry @('ad', 'app', 'update', '--id', "$($app.appId)", '--identifier-uris', $uri)); Write-Host "    identifier URI $uri" }
-if (-not $sp) { $sp = Invoke-AzJsonRetry @('ad', 'sp', 'create', '--id', "$($app.appId)"); Write-Host "    service principal $($sp.id)" }
-[void](Invoke-AzJsonRetry @('containerapp', 'auth', 'microsoft', 'update', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $BrokerApp,
-    '--client-id', "$($app.appId)", '--issuer', $plan.issuer, '--allowed-audiences', "$uri,$($app.appId)", '--yes'))   # ONE comma-separated value (two arguments = 'unrecognized arguments')
-[void](Invoke-AzJson @('containerapp', 'auth', 'update', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $BrokerApp, '--unauthenticated-client-action', 'AllowAnonymous', '--enabled', 'true'))
+if ($plan.steps -contains 'set-uri' -or $plan.steps -contains 'create-app') {
+    $appIdForUri = "$($app.appId)"
+    [void](Invoke-PimRfaRetry { Update-PimGraphApplication -Id $appIdForUri -Properties @{ identifierUris = @($uri) } }); Write-Host "    identifier URI $uri"
+}
+if (-not $sp) { $newAppId = "$($app.appId)"; $sp = Invoke-PimRfaRetry { New-PimGraphServicePrincipal -AppId $newAppId }; Write-Host "    service principal $($sp.id)" }
+# az containerapp auth microsoft update --client-id --issuer --allowed-audiences "<uri>,<appId>" + az containerapp auth update
+# --unauthenticated-client-action AllowAnonymous --enabled true: ONE read-modify-write of authConfigs/current (token VALIDATION
+# only -- no client secret).
+$apiAppId = "$($app.appId)"; $issuer = $plan.issuer
+[void](Invoke-PimRfaRetry { Set-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $BrokerApp -Mutate {
+    param($p)
+    $ip = if ($p.PSObject.Properties['identityProviders'] -and $p.identityProviders) { $p.identityProviders } else { [pscustomobject]@{} }
+    $aad = if ($ip.PSObject.Properties['azureActiveDirectory'] -and $ip.azureActiveDirectory) { $ip.azureActiveDirectory } else { [pscustomobject]@{} }
+    $reg = if ($aad.PSObject.Properties['registration'] -and $aad.registration) { $aad.registration } else { [pscustomobject]@{} }
+    $reg | Add-Member -NotePropertyName clientId -NotePropertyValue $apiAppId -Force
+    $reg | Add-Member -NotePropertyName openIdIssuer -NotePropertyValue $issuer -Force
+    $val = if ($aad.PSObject.Properties['validation'] -and $aad.validation) { $aad.validation } else { [pscustomobject]@{} }
+    $val | Add-Member -NotePropertyName allowedAudiences -NotePropertyValue @($uri, $apiAppId) -Force
+    $aad | Add-Member -NotePropertyName enabled -NotePropertyValue $true -Force
+    $aad | Add-Member -NotePropertyName registration -NotePropertyValue $reg -Force
+    $aad | Add-Member -NotePropertyName validation -NotePropertyValue $val -Force
+    $ip | Add-Member -NotePropertyName azureActiveDirectory -NotePropertyValue $aad -Force
+    $p | Add-Member -NotePropertyName identityProviders -NotePropertyValue $ip -Force
+    $pl = if ($p.PSObject.Properties['platform'] -and $p.platform) { $p.platform } else { [pscustomobject]@{} }
+    $pl | Add-Member -NotePropertyName enabled -NotePropertyValue $true -Force
+    $p | Add-Member -NotePropertyName platform -NotePropertyValue $pl -Force
+    $gv = if ($p.PSObject.Properties['globalValidation'] -and $p.globalValidation) { $p.globalValidation } else { [pscustomobject]@{} }
+    $gv | Add-Member -NotePropertyName unauthenticatedClientAction -NotePropertyValue 'AllowAnonymous' -Force
+    $p | Add-Member -NotePropertyName globalValidation -NotePropertyValue $gv -Force
+} })
 
 # read back
-$app2 = Invoke-AzJson @('ad', 'app', 'show', '--id', "$($app.appId)")
-$auth2 = Invoke-AzJson @('containerapp', 'auth', 'show', '--subscription', $SubscriptionId, '-g', $ResourceGroup, '-n', $BrokerApp)
+$app2 = Get-PimGraphApplication -Id "$($app.appId)"
+$auth2 = ConvertTo-PimRfaAuthView (Get-PimArmAcaAuthConfig -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $BrokerApp)
 $after = Get-PimRfaApiAuthPlan -App $app2 -Sp $sp -Auth $auth2 -TenantId $TenantId
 if ($after.steps.Count) { throw "read-back: still $($after.reason)" }
 Write-Host "==> done. Callers request a token with scope '$uri/.default' and their client id is allow-listed in the PIM Manager." -ForegroundColor Green

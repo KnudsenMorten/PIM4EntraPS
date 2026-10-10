@@ -529,7 +529,31 @@ function Get-PimBaselinePublishJobSpec {
     [void]$y.Add("        args: [`"-NoProfile`", `"-ExecutionPolicy`", `"Bypass`", `"-File`", `"$EntryPath`"]")
     [void]$y.Add('        env: [ ' + ((@($env.Keys) | ForEach-Object { "{ name: $_, value: `"$($env[$_])`" }" }) -join ', ') + ' ]')
     [void]$y.Add('        resources: { cpu: 0.5, memory: 1.0Gi }')
-    return @{ ok = $true; reason = ''; env = $env; yaml = (($y.ToArray()) -join "`n") }
+    # 100.41 (no az): the SAME definition as the ARM resource the deploy PUTs (create) / PATCHes (update) -- the YAML above
+    # stays as the readable form the tests and docs check; both are built from the same values here, so they cannot drift.
+    $identity = @{ type = 'SystemAssigned' }
+    if ($regId -ne 'system') { $identity = @{ type = 'SystemAssigned,UserAssigned'; userAssignedIdentities = @{ $regId = @{} } } }
+    $resource = @{
+        location   = "$Location"
+        properties = @{
+            environmentId = "$EnvironmentId"
+            configuration = @{
+                triggerType = 'Schedule'; replicaTimeout = 1200; replicaRetryLimit = 1
+                scheduleTriggerConfig = @{ cronExpression = "$("$Cron".Trim())"; parallelism = 1; replicaCompletionCount = 1 }
+                registries = @(@{ server = "$RegistryServer"; identity = $regId })
+            }
+            template = @{
+                containers = @(@{
+                    name = "$JobName"; image = "$Image"; command = @('pwsh')
+                    args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$EntryPath")
+                    env = @(@($env.Keys) | ForEach-Object { @{ name = "$_"; value = "$($env[$_])" } })
+                    resources = @{ cpu = 0.5; memory = '1.0Gi' }
+                })
+            }
+        }
+    }
+    if (-not $Exists) { $resource.identity = $identity }
+    return @{ ok = $true; reason = ''; env = $env; yaml = (($y.ToArray()) -join "`n"); resource = $resource }
 }
 
 function Get-PimBaselineSigningKeyPlan {

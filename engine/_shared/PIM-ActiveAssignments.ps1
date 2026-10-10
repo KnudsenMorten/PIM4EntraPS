@@ -992,6 +992,52 @@ function Request-PimActiveAssignmentsSnapshotRefresh {
     }
 }
 
+function Get-PimActiveAssignmentsRefreshState {
+    <#
+      PURE. §100.47 (a) (owner 2026-10-10): is a read of the active-assignments snapshot ALREADY queued or running?
+      The Delegation overview page used to say "Click Refresh to load" while the scheduler was reading in the background,
+      so people pressed Refresh and asked for a second read. This answers from the scheduler's own records, never a guess:
+        * running -- a live lock of a run of this job type (every run holds the area 'job:<name>' while it runs; the name
+          is the job's own or 'trigger:<type>:<scope>' for a queued Run now / Refresh)
+        * queued  -- a pending trigger of this job type in pim.Settings SchedulerTriggers (it stays there until it has run)
+      Returns @{ pending; state = '' | 'queued' | 'running'; sinceUtc = ISO or '' }. Running wins over queued.
+    #>
+    param([object[]]$Triggers = @(), [AllowNull()][System.Collections.IDictionary]$LockMap, [datetime]$NowUtc = [datetime]::UtcNow,
+          [string]$JobType = $script:PimActiveAssignmentsSnapshotJobType)
+    $now = $NowUtc.ToUniversalTime()
+    $iso = { param($v) if ($null -eq $v) { '' } else { "$(ConvertTo-PimActiveAssignmentsIsoStamp -Value $v)" } }
+    $rx = '(^|[:])' + [regex]::Escape($JobType) + '($|[:])'
+    if ($null -ne $LockMap) {
+        foreach ($k in @($LockMap.Keys)) {
+            $l = $LockMap[$k]
+            if ($null -eq $l) { continue }
+            $jn = "$($l.job)"; $area = "$k"
+            if (-not (($area -match '^job:' -and ($area -replace '^job:', '') -match $rx) -or ($jn -replace '^job:', '') -match $rx)) { continue }
+            # a lock past its expiry belongs to a run that is gone (Test-PimAreaLockLive's rule, inlined: this file is pure)
+            $live = $true
+            $exp = [datetime]::MinValue
+            $raw = if ($l.expiresUtc -is [datetime]) { $l.expiresUtc.ToUniversalTime().ToString('o') } else { "$($l.expiresUtc)" }
+            $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+            if ("$raw".Trim() -and [datetime]::TryParse($raw, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$exp)) { $live = ($now -lt $exp.ToUniversalTime()) }
+            if (-not $live) { continue }
+            return [pscustomobject]@{ pending = $true; state = 'running'; sinceUtc = (& $iso $l.acquiredUtc) }
+        }
+    }
+    $q = @(@($Triggers) | Where-Object { $_ -and "$($_.type)" -eq $JobType }) | Sort-Object { "$($_.requestedUtc)" } | Select-Object -First 1
+    if ($q) { return [pscustomobject]@{ pending = $true; state = 'queued'; sinceUtc = (& $iso $q.requestedUtc) } }
+    return [pscustomobject]@{ pending = $false; state = ''; sinceUtc = '' }
+}
+
+function Read-PimActiveAssignmentsRefreshState {
+    # The store half of Get-PimActiveAssignmentsRefreshState: the trigger queue + the lock map, each read guarded (a read that
+    # fails counts as "nothing pending", so the page still serves and Refresh still works).
+    param([datetime]$NowUtc = [datetime]::UtcNow)
+    $trig = @(); $locks = $null
+    if (Get-Command Get-PimPendingTriggers -ErrorAction SilentlyContinue) { try { $trig = @(Get-PimPendingTriggers) } catch { $trig = @() } }
+    if (Get-Command Get-PimSchedulerLocksRaw -ErrorAction SilentlyContinue) { try { $locks = (Get-PimSchedulerLocksRaw).Map } catch { $locks = $null } }
+    return (Get-PimActiveAssignmentsRefreshState -Triggers $trig -LockMap $locks -NowUtc $NowUtc)
+}
+
 function ConvertTo-PimActiveAssignmentsIsoStamp {
     # 🪤 pwsh 7's ConvertFrom-Json turns an ISO string into a [datetime], and "$([datetime])" then renders in the
     # CURRENT CULTURE ("09/13/2026 10:00:00") -- which the GUI's "as of HH:MM" parser cannot read. 5.1 keeps the
@@ -1019,14 +1065,23 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
         [datetime]$NowUtc = [datetime]::UtcNow,
         [int]$CadenceMinutes = 0,
         [bool]$RefreshQueued = $false,
-        [string]$QueueError = ''
+        [string]$QueueError = '',
+        # §100.47 (a): a read already queued / running (Get-PimActiveAssignmentsRefreshState) -- the page shows "Loading..."
+        # and keeps Refresh disabled; -RefreshAlreadyQueued = this request asked for one and was NOT queued again.
+        [AllowNull()][object]$RefreshState = $null,
+        [bool]$RefreshAlreadyQueued = $false
     )
     if ($CadenceMinutes -le 0) { $CadenceMinutes = $script:PimActiveAssignmentsSnapshotDefaultCadenceMinutes }
     $now = $NowUtc.ToUniversalTime()
+    $rsPending = [bool]$RefreshQueued; $rsState = if ($RefreshQueued) { 'queued' } else { '' }; $rsSince = ''
+    if ($null -ne $RefreshState -and [bool]$RefreshState.pending) { $rsPending = $true; $rsState = "$($RefreshState.state)"; $rsSince = "$($RefreshState.sinceUtc)" }
+    if ($rsPending -and -not $rsSince -and $RefreshQueued) { $rsSince = $now.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture) }
+    $rsWord = if ($rsState -eq 'running') { 'is running' } else { 'is queued' }
     $refreshedIso = if ($null -ne $Entry) { ConvertTo-PimActiveAssignmentsIsoStamp -Value $Entry.refreshedUtc } else { $null }
     $hasEntry = ($null -ne $Entry) -and ("$refreshedIso".Trim() -ne '')
     if (-not $hasEntry) {
-        $hint = if ($RefreshQueued) { 'No snapshot yet -- queued. The scheduler builds it within ~5 min; this page does not wait for it.' }
+        $hint = if ($rsPending -and -not $RefreshQueued) { "No snapshot yet -- a read $rsWord (since $rsSince); not queued again. This page does not wait for it." }
+                elseif ($RefreshQueued) { 'No snapshot yet -- queued. The scheduler builds it within ~5 min; this page does not wait for it.' }
                 else { "No snapshot yet, and a refresh could NOT be queued ($QueueError). The scheduler job 'active-assignments-snapshot' builds it on its cadence." }
         return [ordered]@{
             ok              = $true
@@ -1041,6 +1096,10 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
             snapshot        = $true
             snapshotMissing = $true
             refreshQueued   = [bool]$RefreshQueued
+            refreshPending  = [bool]$rsPending
+            refreshState    = $rsState
+            refreshSinceUtc = $rsSince
+            refreshAlreadyQueued = [bool]$RefreshAlreadyQueued
             cadenceMinutes  = $CadenceMinutes
             stale           = $false
             hint            = $hint
@@ -1064,7 +1123,8 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
     }
     $asOf = if ($refreshed) { $refreshed.ToString('HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) + ' UTC' } else { "$refreshedIso" }
     $hint = "as of $asOf (the scheduler refreshes it every $CadenceMinutes min)"
-    if ($RefreshQueued) { $hint += '; a refresh is queued -- the scheduler picks it up within ~5 min' }
+    if ($rsPending -and -not $RefreshQueued) { $hint += "; a read $rsWord (since $rsSince) -- not queued again" }
+    elseif ($RefreshQueued) { $hint += '; a refresh is queued -- the scheduler picks it up within ~5 min' }
     elseif ("$QueueError".Trim()) { $hint += "; a refresh could NOT be queued ($QueueError)" }
     if ($stale) { $hint += "; STALE -- older than two cadences, check the 'active-assignments-snapshot' job on the Jobs page" }
     # A stored all-surfaces-failed read stays ok=$false so the Revoke tab shows the actionable error.
@@ -1085,6 +1145,10 @@ function ConvertTo-PimActiveAssignmentsSnapshotView {
         snapshot        = $true
         snapshotMissing = $false
         refreshQueued   = [bool]$RefreshQueued
+        refreshPending  = [bool]$rsPending
+        refreshState    = $rsState
+        refreshSinceUtc = $rsSince
+        refreshAlreadyQueued = [bool]$RefreshAlreadyQueued
         cadenceMinutes  = $CadenceMinutes
         stale           = [bool]$stale
         durationMs      = $Entry.durationMs

@@ -21,7 +21,7 @@
   operator makes per customer rather than a default someone has to remember to override.
 
   WHAT IT COLLECTS
-    1. Run context      -- versions (PowerShell/.NET/az/module), OS, UTC timestamp, PIM version.
+    1. Run context      -- versions (PowerShell/.NET), OS, UTC timestamp, PIM version, who is signed in (REST).
     2. The deploy run   -- full transcript of Invoke-PimDeployAll (unless -CollectOnly).
     3. Resource state   -- the RG inventory, ACA env, every app + its image + revision + replicas,
                            the SQL database and its SKU/status.
@@ -89,20 +89,43 @@ $sb = [System.Text.StringBuilder]::new()
 $rg     = $DeployArgs['ResourceGroup']
 $sub    = $DeployArgs['SubscriptionId']
 $envN   = $DeployArgs['EnvName']
-$subArg = if ($sub) { @('--subscription', $sub) } else { @() }
+# 100.41 (framework 12.17 NO-AZ): every read below is ARM / Log Analytics REST through PIM-Rest's one token client
+# (engine/_shared/PIM-ArmSetup.ps1) -- a calling run's REST session as it is; standalone, the Invardia Support app's session
+# or the person signed in. No az, no module.
+$solRoot = Split-Path (Split-Path $here -Parent) -Parent
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+$restReady = $false
+if ($sub) {
+    try {
+        if (-not "$($global:PIM_SetupRestMode)".Trim()) {
+            $cn = @{ SubscriptionId = $sub }
+            if ("$($DeployArgs['TenantId'])".Trim()) { $cn.TenantId = "$($DeployArgs['TenantId'])".Trim() }
+            [void](Connect-PimSetupRest @cn)
+        }
+        $restReady = $true
+    } catch { Write-Host "    sign-in for the state reads failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+function Get-ReportArmList([string]$Path, [string]$Kind) {
+    # One ARM list (paged) under the report's subscription; @() when unreadable (the reason is reported by the caller).
+    @(Invoke-PimSetupArm -Path "/subscriptions/$sub/resourceGroups/$rg$Path" -ApiVersion (Get-PimSetupApiVersion $Kind) -All -ErrorAsNull | Where-Object { $_ })
+}
 
 Add-Section $sb '1. RUN CONTEXT' {
     "PowerShell : $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
     "OS         : $([System.Environment]::OSVersion.VersionString)"
-    "az CLI     : $(try { (az version --output json 2>$null | ConvertFrom-Json).'azure-cli' } catch { 'n/a' })"
+    "az CLI     : not used (REST, framework 12.17)"
     # IMP-49 c: VERSION is at the SOLUTION root (tools\setup -> tools -> PIM4EntraPS). This read it from
     # tools\, where it never exists, so every report said "unknown".
     $vf = Join-Path (Split-Path (Split-Path $here -Parent) -Parent) 'VERSION'
     "PIM version: $(if (Test-Path $vf) { (Get-Content $vf -Raw).Trim() } else { 'unknown' })"
-    # BUG-215: report the context of the subscription this report is ABOUT, and the default separately --
-    # a bare `az account show` described whichever subscription happened to be the default.
-    if ($sub) { "az context : $(try { az account show --subscription $sub --query '{name:name,tenant:tenantId,id:id}' -o json 2>$null } catch { 'not visible to this az login' })" }
-    "az default : $(try { az account show --query '{tenant:tenantId,id:id}' -o json 2>$null } catch { 'not logged in' })"
+    # BUG-215: report the subscription this report is ABOUT (never a "default" context -- REST has none), and who reads it.
+    if ($sub) {
+        $sa = if ($restReady) { Get-PimArmSubscription -SubscriptionId $sub -ErrorAsNull } else { $null }
+        "subscription: $(if ($sa) { ([ordered]@{ name = "$($sa.displayName)"; tenant = "$($sa.tenantId)"; id = "$($sa.subscriptionId)" } | ConvertTo-Json -Compress) } else { 'not visible to this sign-in' })"
+        $who = if ($restReady) { Get-PimSetupAccount -SubscriptionId $sub } else { $null }
+        "signed in  : $(if ($who) { "$($who.user.type) $($who.user.name) (tenant $($who.tenantId), mode $($global:PIM_SetupRestMode))" } else { 'not signed in' })"
+    }
 }
 
 if (-not $CollectOnly) {
@@ -126,30 +149,56 @@ if (-not $CollectOnly) {
 Add-Section $sb '3. RESOURCE STATE' {
     if (-not $rg) { '<no -ResourceGroup in DeployArgs; skipping>' ; return }
     # BUG-215: never read a resource group out of whatever the DEFAULT subscription is.
-    if (-not $sub) { '<no -SubscriptionId in DeployArgs; skipping -- the default az subscription may belong to another tenant>' ; return }
+    if (-not $sub) { '<no -SubscriptionId in DeployArgs; skipping -- a resource group is never read from a guessed subscription>' ; return }
+    if (-not $restReady) { '<not signed in; skipping>' ; return }
     "--- resource group inventory ---"
-    az resource list -g $rg @subArg --query "[].{name:name,type:type,location:location}" -o table --only-show-errors 2>&1
+    $inv = Get-ReportArmList '/resources' 'resources'
+    if (-not $inv.Count -and $global:PimSetupRestLastError) { "<unreadable: $($global:PimSetupRestLastError)>" }
+    $inv | ForEach-Object { [pscustomobject]@{ name = $_.name; type = $_.type; location = $_.location } } | Format-Table -AutoSize | Out-String -Width 250
     "`n--- container apps env ---"
-    az containerapp env list -g $rg @subArg --query "[].{name:name,state:properties.provisioningState}" -o table --only-show-errors 2>&1
+    Get-ReportArmList '/providers/Microsoft.App/managedEnvironments' 'aca' | ForEach-Object { [pscustomobject]@{ name = $_.name; state = $_.properties.provisioningState } } | Format-Table -AutoSize | Out-String -Width 250
     "`n--- container apps (image + revision + replicas) ---"
-    az containerapp list -g $rg @subArg --query "[].{name:name,image:properties.template.containers[0].image,minReplicas:properties.template.scale.minReplicas,revision:properties.latestRevisionName,fqdn:properties.configuration.ingress.fqdn}" -o table --only-show-errors 2>&1
+    Get-ReportArmList '/providers/Microsoft.App/containerApps' 'aca' | ForEach-Object {
+        [pscustomobject]@{ name = $_.name; image = @($_.properties.template.containers)[0].image; minReplicas = $_.properties.template.scale.minReplicas
+                           revision = $_.properties.latestRevisionName; fqdn = $_.properties.configuration.ingress.fqdn }
+    } | Format-Table -AutoSize | Out-String -Width 250
     "`n--- container app JOBS (cron tick) ---"
-    az containerapp job list -g $rg @subArg --query "[].{name:name,cron:properties.configuration.scheduleTriggerConfig.cronExpression,image:properties.template.containers[0].image}" -o table --only-show-errors 2>&1
+    Get-PimArmAcaJobList -SubscriptionId $sub -ResourceGroup $rg -ErrorAsNull | ForEach-Object {
+        [pscustomobject]@{ name = $_.name; cron = $_.properties.configuration.scheduleTriggerConfig.cronExpression; image = @($_.properties.template.containers)[0].image }
+    } | Format-Table -AutoSize | Out-String -Width 250
     "`n--- sql ---"
-    az sql db list -g $rg @subArg --query "[].{server:location,name:name,sku:currentServiceObjectiveName,status:status}" -o table --only-show-errors 2>&1
+    $dbs = foreach ($srv in @(Get-ReportArmList '/providers/Microsoft.Sql/servers' 'sql')) {
+        foreach ($db in @(Get-ReportArmList "/providers/Microsoft.Sql/servers/$($srv.name)/databases" 'sql')) {
+            [pscustomobject]@{ server = $srv.name; name = $db.name; sku = $db.properties.currentServiceObjectiveName; status = $db.properties.status }
+        }
+    }
+    @($dbs) | Format-Table -AutoSize | Out-String -Width 250
 }
 
 # 🪤 NOT `'a ' + $x + ' b'` in argument position: PowerShell treats each `+` as another ARGUMENT,
 # so the scriptblock lands on the wrong parameter and Body gets "+". Interpolate instead.
 Add-Section $sb "4. CONTAINER LOGS (last $TailLines lines per app)" {
     if (-not $rg) { '<no -ResourceGroup; skipping>' ; return }
-    if (-not $sub) { '<no -SubscriptionId; skipping -- the default az subscription may belong to another tenant>' ; return }
-    $apps = @()
-    try { $apps = az containerapp list -g $rg @subArg --query "[].name" -o tsv --only-show-errors 2>$null } catch { }
-    if (-not $apps) { '<no container apps found>'; return }
-    foreach ($a in @($apps | Where-Object { $_ })) {
-        "`n########## $a ##########"
-        az containerapp logs show -n $a -g $rg @subArg --tail $TailLines --only-show-errors 2>&1
+    if (-not $sub) { '<no -SubscriptionId; skipping -- a resource group is never read from a guessed subscription>' ; return }
+    if (-not $restReady) { '<not signed in; skipping>' ; return }
+    # The CLI's `logs show` streamed the replica console; over REST the same lines are the environment's Log Analytics
+    # table ContainerAppConsoleLogs_CL (the workspace the environment sends to -- appLogsConfiguration).
+    $apps = @(Get-ReportArmList '/providers/Microsoft.App/containerApps' 'aca')
+    if (-not $apps.Count) { '<no container apps found>'; return }
+    $wsByEnv = @{}
+    foreach ($a in $apps) {
+        "`n########## $($a.name) ##########"
+        $envId = "$($a.properties.managedEnvironmentId)"
+        if (-not $wsByEnv.ContainsKey($envId)) {
+            $e = if ($envId) { Get-PimArmAcaEnv -ResourceId $envId -ErrorAsNull } else { $null }
+            $wsByEnv[$envId] = "$($e.properties.appLogsConfiguration.logAnalyticsConfiguration.customerId)".Trim()
+        }
+        $ws = $wsByEnv[$envId]
+        if (-not $ws) { '<the environment sends no logs to Log Analytics -- read the console log in the Azure portal: the app > Monitoring > Log stream>'; continue }
+        $q = "ContainerAppConsoleLogs_CL | where ContainerAppName_s == '$($a.name)' | top $TailLines by TimeGenerated desc | sort by TimeGenerated asc | project TimeGenerated, RevisionName_s, Log_s"
+        $rows = @(Invoke-PimLogAnalyticsQuery -WorkspaceCustomerId $ws -Query $q -Timespan 'P1D')
+        if (-not $rows.Count) { "<no log lines in the last 24 h readable by this sign-in (needs Log Analytics Reader on the workspace) -- or read them in the Azure portal: the app > Monitoring > Log stream>"; continue }
+        foreach ($r in $rows) { "$($r.TimeGenerated) [$($r.RevisionName_s)] $($r.Log_s)" }
     }
 }
 

@@ -7,7 +7,7 @@
   "standalone": false,
   "sourcePath": "tools/setup/Set-PimBreakGlassAccounts.ps1",
   "runAs": [
-    { "kind": "other", "name": "Member of the environment's SQL admin group (grp-pim-sql-admins), signed in with az login", "scope": "the environment's SQL database", "why": "The list lives in pim.Settings and every write is audited; only the SQL admin group may write it. With -UseSignedInAccount the signed-in az user is used. Alternatively the admin application's certificate (-AdminAppId + -AdminCertThumbprint), or a ready -ConnectionString to a local SQL Server." }
+    { "kind": "other", "name": "Member of the environment's SQL admin group (grp-pim-sql-admins), signed in through the browser or the Invardia Support app session (no Azure CLI)", "scope": "the environment's SQL database", "why": "The list lives in pim.Settings and every write is audited; only the SQL admin group may write it. With -UseSignedInAccount the signed-in az user is used. Alternatively the admin application's certificate (-AdminAppId + -AdminCertThumbprint), or a ready -ConnectionString to a local SQL Server." }
   ],
   "changes": [
     { "target": "Environment SQL database", "action": "update", "object": "pim.Settings row 'BreakGlassAccounts' (the complete list of UPNs / object ids)", "scope": "this environment: PIM Manager and its engine", "why": "Accounts on the list are exempt from every disable, revoke and offboard PIM does. Written compare-and-set against the list just read, then read back.", "undo": "Run the script again with the previous list (it is printed as 'stored now' at the start of every run)." },

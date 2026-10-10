@@ -44,7 +44,13 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$subArgs = @(); if ("$SubscriptionId".Trim()) { $subArgs = @('--subscription', "$SubscriptionId".Trim()) }
+# 100.41 (framework 12.17 NO-AZ): ARM + Graph REST through PIM-Rest's one token client (engine/_shared/PIM-ArmSetup.ps1).
+# A calling run's REST session is used as it is; standalone, the Invardia Support app's session or the person signed in.
+$solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
+if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
+$S = "$SubscriptionId".Trim()
+if (-not "$($global:PIM_SetupRestMode)".Trim()) { [void](Connect-PimSetupRest -SubscriptionId $S) }
 $rows = @()
 $worst = [int]::MaxValue
 # 🔴 BUG-196 -- WHAT COULD NOT BE READ. Every read below used to fail quietly into "no rows", and the
@@ -82,14 +88,14 @@ Write-Host "=== PIM credential expiry -- $ResourceGroup ===" -ForegroundColor Cy
 # a given environment's sign-in depends on.
 # One read, checked: an unreadable auth config is recorded, not taken as "no Easy Auth".
 $easyAuthAppId = ''; $secretSettingName = ''
-$authJson = (@(az containerapp auth show @subArgs -g $ResourceGroup -n $ManagerApp -o json 2>$null) -join "`n")
-if ($LASTEXITCODE -ne 0 -or -not "$authJson".Trim()) { $unread.Add("the Easy Auth configuration of $ManagerApp") }
+# az containerapp auth show = GET authConfigs/current. A 404 (no Easy Auth) answers $null; any other failure is UNREAD.
+$authRead = $true
+$auth = $null
+try { $auth = Get-PimArmAcaAuthConfig -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp } catch { $authRead = $false }
+if (-not $authRead -or -not $auth) { $unread.Add("the Easy Auth configuration of $ManagerApp") }
 else {
-    try {
-        $auth = ConvertFrom-Json -InputObject $authJson
-        $easyAuthAppId     = "$($auth.identityProviders.azureActiveDirectory.registration.clientId)".Trim()
-        $secretSettingName = "$($auth.identityProviders.azureActiveDirectory.registration.clientSecretSettingName)".Trim()
-    } catch { $unread.Add("the Easy Auth configuration of $ManagerApp (not JSON)") }
+    $easyAuthAppId     = "$($auth.properties.identityProviders.azureActiveDirectory.registration.clientId)".Trim()
+    $secretSettingName = "$($auth.properties.identityProviders.azureActiveDirectory.registration.clientSecretSettingName)".Trim()
 }
 if ($easyAuthAppId) {
     Write-Host "  easy auth app : $easyAuthAppId  (secret setting: $(if ($secretSettingName) { $secretSettingName } else { '(none -- implicit flow)' }))" -ForegroundColor DarkGray
@@ -101,32 +107,32 @@ if ($easyAuthAppId) {
 
 # ---- 2. app-registration credentials -----------------------------------------------------------
 foreach ($id in (@($AppId) | Where-Object { "$_".Trim() } | Select-Object -Unique)) {
-    $disp = "$(az ad app show --id $id --query displayName -o tsv 2>$null)".Trim()
+    # az ad app show + az ad app credential list [--cert] = ONE Graph read of the application: its passwordCredentials
+    # (secrets) and keyCredentials (certificates) carry displayName + endDateTime. Unreadable = UNREAD, never "none".
+    $app = $null; $appErr = ''
+    try { $app = Get-PimGraphApplication -Id $id } catch { $appErr = "$($_.Exception.Message)" }
+    if (-not $app) {
+        Write-Warning "  cannot read credentials for $id -- this identity may lack directory read$(if ($appErr) { " ($appErr)" })"
+        $unread.Add("the secrets of $id"); $unread.Add("the certificates of $id"); continue
+    }
+    $disp = "$($app.displayName)".Trim()
     $label = $(if ($disp) { "$disp" } else { $id })
     $scope = $(if ($id -eq $easyAuthAppId) { 'easy-auth' } else { 'spn' })
-
-    $pw = az ad app credential list --id $id --query "[].{n:displayName,e:endDateTime}" -o json 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "  cannot read credentials for $label -- this identity may lack directory read"
-        $unread.Add("the secrets of $label"); $unread.Add("the certificates of $label"); continue
+    foreach ($c in @($app.passwordCredentials)) {
+        if ($c) { Add-Row $scope 'secret' "$label / $(if ($c.displayName) { $c.displayName } else { '(unnamed)' })" $c.endDateTime $id }
     }
-    try { $pwRows = (@($pw) -join "`n") | ConvertFrom-Json; foreach ($c in @($pwRows)) {   # 5.1: assign first -- a JSON array arrives as ONE object
-        if ($c) { Add-Row $scope 'secret' "$label / $(if ($c.n) { $c.n } else { '(unnamed)' })" $c.e $id }
-    } } catch { $unread.Add("the secrets of $label (not JSON)") }
-    $cert = az ad app credential list --id $id --cert --query "[].{n:displayName,e:endDateTime}" -o json 2>$null
-    # BUG-196: this second read was never checked at all.
-    if ($LASTEXITCODE -ne 0) { $unread.Add("the certificates of $label"); continue }
-    try { $certRows = (@($cert) -join "`n") | ConvertFrom-Json; foreach ($c in @($certRows)) {
-        if ($c) { Add-Row $scope 'certificate' "$label / $(if ($c.n) { $c.n } else { '(unnamed)' })" $c.e $id }
-    } } catch { $unread.Add("the certificates of $label (not JSON)") }
+    foreach ($c in @($app.keyCredentials)) {
+        if ($c) { Add-Row $scope 'certificate' "$label / $(if ($c.displayName) { $c.displayName } else { '(unnamed)' })" $c.endDateTime $id }
+    }
 }
 
 # ---- 3. what the environment actually references ------------------------------------------------
 # A secret NAME present on the app is not proof the credential behind it is valid -- but its ABSENCE
 # is proof sign-in is broken, so it is worth stating either way.
-$acaSecretNames = @(az containerapp secret list @subArgs -g $ResourceGroup -n $ManagerApp --query "[].name" -o tsv 2>$null) | Where-Object { "$_".Trim() }
-$acaSecretNames = @($acaSecretNames)
-$secretsRead = ($LASTEXITCODE -eq 0)
+# az containerapp secret list --query "[].name" = POST listSecrets; only the NAMES are kept (values are never printed).
+$secretsRead = $true
+$acaSecretNames = @()
+try { $acaSecretNames = @(Get-PimArmAcaAppSecrets -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp | ForEach-Object { "$($_.name)".Trim() } | Where-Object { $_ }) } catch { $secretsRead = $false }
 if (-not $secretsRead) { $unread.Add("the secret names on $ManagerApp") }
 Write-Host ("  aca secrets   : {0}" -f $(if ($acaSecretNames.Count) { $acaSecretNames -join ', ' } else { '(none)' })) -ForegroundColor DarkGray
 if ($secretsRead -and $secretSettingName -and $acaSecretNames -notcontains $secretSettingName) {

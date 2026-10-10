@@ -323,12 +323,12 @@
      Add/Remove buttons (2.4.409/410) the help text was squeezed into a narrow column many lines tall, the
      toolbar grew to that height and the board (min-height:0) shrank to nothing. Now: the row wraps, the help
      text has its own full-width line, labels never break, and the board keeps a floor. */
-  #mapToolbar { display:flex; flex-wrap:wrap; gap:8px 10px; align-items:center; padding:8px 14px; border-bottom:1px solid #d0d7de; background:#ffffff; flex:0 0 auto; }
-  #mapToolbar button { white-space:nowrap; }
-  #mapToolbar .map-hint { flex:1 1 100%; order:99; }
+  #mapToolbar, #dgvToolbar { display:flex; flex-wrap:wrap; gap:8px 10px; align-items:center; padding:8px 14px; border-bottom:1px solid #d0d7de; background:#ffffff; flex:0 0 auto; }
+  #mapToolbar button, #dgvToolbar button { white-space:nowrap; }
+  #mapToolbar .map-hint, #dgvToolbar .map-hint { flex:1 1 100%; order:99; }
   #mapSearch { min-width:280px; padding:5px 9px; border:1px solid #d0d7de; border-radius:6px; font-size:12.5px; background:#ffffff; color:#1a1a1a; }
   .map-hint { color:#57606a; font-size:11px; }
-  #mapBoard { flex:1 1 auto; min-height:320px; display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; padding:12px 14px; position:relative; background:#f6f8fa; overflow:hidden; }
+  #mapBoard, #dgvBoard { flex:1 1 auto; min-height:320px; display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; padding:12px 14px; position:relative; background:#f6f8fa; overflow:hidden; }
   /* 🔴 REGRESSION I SHIPPED IN v2.4.254, AND ITS CORRECTION.
      BUG-86 was "the board is impossible to read -- wires stroked over every label they
      cross". I fixed it by putting the wires BEHIND the columns (z-index:0 under a new
@@ -343,10 +343,10 @@
          to a 74-edge fan, because it shows one path at full strength instead of hiding all
          of them.
      Net: still far more readable than v2.4.253, with nothing hidden. */
-  #mapWires { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:5; }
-  #mapWires path { opacity:.55; transition:opacity .12s ease, stroke-width .12s ease; }
-  #mapWires.mw-isolating path { opacity:.10; }
-  #mapWires.mw-isolating path.mw-hi { opacity:1; stroke-width:2.6; }
+  #mapWires, #dgvWires { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:5; }
+  #mapWires path, #dgvWires path { opacity:.55; transition:opacity .12s ease, stroke-width .12s ease; }
+  #mapWires.mw-isolating path, #dgvWires.mw-isolating path { opacity:.10; }
+  #mapWires.mw-isolating path.mw-hi, #dgvWires.mw-isolating path.mw-hi { opacity:1; stroke-width:2.6; }
   .map-col { position:relative; display:flex; flex-direction:column; min-height:0; background:#ffffff; border:1px solid #d0d7de; border-radius:8px; overflow:hidden; }
   .map-col h3 { margin:0; padding:8px 12px; font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:#0969da; background:#f6f8fa; border-bottom:1px solid #d0d7de; }
   .map-col-sub { display:block; font-size:10px; color:#57606a; text-transform:none; letter-spacing:0; font-weight:400; margin-top:1px; }
@@ -415,14 +415,14 @@
   /* Pressed state for the board's two MODE toggles. Both are state toggles, not
      actions: the label never changes, the pressed styling + leading box glyph
      say whether the mode is currently ON. */
-  #mapRiskToggle.on, #mapFocusToggle.on { background:#ddf4ff; border-color:#0969da; color:#0550ae; font-weight:600; }
+  #mapRiskToggle.on, #mapFocusToggle.on, #dgvFocusToggle.on, .rev-view-toggle button.on { background:#ddf4ff; border-color:#0969da; color:#0550ae; font-weight:600; }
   .map-item .map-dot { width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
   .map-item .map-label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* Long Azure scopes / role names: two-line target items (name bold,
      scope small + muted), and FULL wrapping in step-2 focus where the
      board only holds the selected path. */
   .map-item .map-label .map-sub-line { display:block; font-size:10px; color:#57606a; font-weight:400; overflow:hidden; text-overflow:ellipsis; }
-  #mapBoard.focused .map-item .map-label, #mapBoard.focused .map-item .map-label .map-sub-line { white-space:normal; word-break:break-word; }
+  #mapBoard.focused .map-item .map-label, #mapBoard.focused .map-item .map-label .map-sub-line, #dgvBoard.focused .map-item .map-label, #dgvBoard.focused .map-item .map-label .map-sub-line { white-space:normal; word-break:break-word; }
   .map-item .map-count { font-size:10px; color:#57606a; flex:0 0 auto; }
   /* Assign mode: linking the selected node to candidates in the next column
      (admin -> role groups, or role group -> capability bundles). The
@@ -445,6 +445,7 @@
   #mapBoard .map-item.link-cand { border-style:dashed; }
   /* §86.2: the per-column filter. A box on the selected path is never hidden by it. */
   #mapBoard .map-item.cf-hide:not(.sel):not(.path) { display:none !important; }
+  #dgvBoard .map-item.cf-hide:not(.sel):not(.path) { display:none !important; }
   .map-col-tools { padding:0 10px 4px; text-align:right; }
   .map-col-filter { font-size:11px; font-weight:400; text-transform:none; letter-spacing:0; margin-left:6px; padding:1px 4px; border:1px solid #d0d7de; border-radius:4px; background:#fff; color:#24292f; }
   #mapBoard .map-item.link-cand:hover { opacity:1; background:#ddf4ff; border-color:#0969da; }
@@ -498,8 +499,8 @@
   /* Staged for REMOVAL, on the board: red and struck through -- the mirror of staged-amber, and it
      says the word, because colour alone is not a message. A box that is BOTH (one link added,
      another removed) keeps the amber body and still carries the red chip, so neither is hidden. */
-  #mapBoard .map-item.removing { border-color:#cf222e; border-style:dashed; background:#ffebe9; }
-  #mapBoard .map-item.removing .map-label { text-decoration:line-through; }
+  #mapBoard .map-item.removing, #dgvBoard .map-item.removing { border-color:#cf222e; border-style:dashed; background:#ffebe9; }
+  #mapBoard .map-item.removing .map-label, #dgvBoard .map-item.removing .map-label { text-decoration:line-through; }
   #mapBoard .map-item .map-removing { color:#82071e !important; background:#ffcecb !important; border-color:#cf222e !important;
                                       text-decoration:none; }
   /* The picker and the lit column while REMOVING: red, never the giving blue. */
@@ -521,7 +522,7 @@
   #mapDetail .map-pick-empty { padding:8px 9px; font-size:11.5px; color:#57606a; }
   /* Step-2 focus: with a selection active the board collapses to the
      transitive path; the toolbar toggle switches back to dimmed-overview. */
-  #mapBoard.focused .map-item.dim { display:none; }
+  #mapBoard.focused .map-item.dim, #dgvBoard.focused .map-item.dim { display:none; }
   .map-item .map-pend { font-size:10px; color:#9a6700; font-weight:600; flex:0 0 auto; }
   #mapDetail button { margin-left:8px; padding:3px 10px; font-size:11.5px; }
   #mapDetail .assign-banner { color:#0969da; font-weight:600; }
@@ -530,14 +531,14 @@
      at the very bottom of a full-height board, off-screen, in plain white. It now sticks to the
      bottom of the viewport with its own tint and a lifted edge, so the actions are visible wherever
      you are on the board. It scrolls with the page only once it reaches its place in the flow. */
-  #mapDetail { flex:0 0 auto; position:sticky; bottom:0; z-index:12; padding:9px 14px;
+  #mapDetail, #dgvDetail { flex:0 0 auto; position:sticky; bottom:0; z-index:12; padding:9px 14px;
                border-top:2px solid #0969da; background:#f6f8fa; box-shadow:0 -4px 12px rgba(27,31,36,.10);
                font-size:12px; color:#1a1a1a; min-height:38px; max-height:52vh; overflow:auto; }
-  #mapDetail.has-sel { background:#ffffff; }
+  #mapDetail.has-sel, #dgvDetail.has-sel { background:#ffffff; }
   /* While a Give/Remove session is open the bar is unmistakable: blue for giving, red for removing. */
   #mapDetail.picking { border-top-color:#1a7f37; background:#f2fbf5; }
   #mapDetail.picking-remove { border-top-color:#cf222e; background:#fff5f5; }
-  #mapDetail .empty { color:#57606a; font-style:italic; }
+  #mapDetail .empty, #dgvDetail .empty { color:#57606a; font-style:italic; }
   #mapDetail a { color:#0969da; cursor:pointer; text-decoration:none; }
   #mapDetail a:hover { text-decoration:underline; }
   /* PERMISSIONS & TARGETS breakdown for a selected capability/permission group.
@@ -833,7 +834,46 @@
   table.rev-table td.rev-type-cell.type-entra-role     { color:#b35900; }
   table.rev-table td.rev-type-cell.type-azure-rbac     { color:#0969da; }
   table.rev-table td.rev-type-cell.type-pim-for-groups { color:#1a7f37; }
-  table.rev-table td.rev-scope-cell { font-family:Consolas,monospace; font-size:11px; color:#6e7681; max-width:340px; word-break:break-all; }
+  /* §100.47 (d) (owner 2026-10-10): Principal and Role/Group took most of the width while SCOPE wrapped one character
+     per line (word-break:break-all made its min-content one character, so the auto layout squeezed it to nothing).
+     Scope now has a floor of 22ch and breaks only after a '/' (<wbr> inserted by revScopeHtml, full path as tooltip);
+     Principal and Role/Group are capped with an ellipsis + tooltip; Type / Activated / Expires never wrap. */
+  table.rev-table td.rev-scope-cell { font-family:Consolas,monospace; font-size:11px; color:#6e7681; }
+  table.rev-table th.rev-col-scope, table.rev-table .rev-scope-wrap { min-width:22ch; }
+  table.rev-table .rev-scope-wrap { display:block; max-width:64ch; word-break:normal; overflow-wrap:normal; }
+  table.rev-table .rev-ell { display:block; max-width:32ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  table.rev-table .rev-p-wrap { max-width:34ch; }
+  table.rev-table .rev-p-wrap .rev-p-main { display:inline-block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; }
+  table.rev-table .rev-p-wrap .rev-p-id, table.rev-table .rev-p-wrap .rev-p-unres { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  table.rev-table td.rev-type-cell, table.rev-table th.rev-col-type, table.rev-table th.rev-col-start, table.rev-table th.rev-col-end { white-space:nowrap; }
+  table.rev-table .rev-just { display:block; max-width:40ch; overflow-wrap:anywhere; }
+  /* §100.47 (c) + (a): the view toggle, the "already loading" note, the loading state and the graph view. */
+  .rev-view-toggle { display:inline-flex; border:1px solid #d0d7de; border-radius:6px; overflow:hidden; flex:0 0 auto; }
+  #revTopBar .rev-view-toggle button { border:0; border-radius:0; margin:0; padding:4px 12px; background:#ffffff; color:#24292f; cursor:pointer; }
+  #revTopBar .rev-view-toggle button + button { border-left:1px solid #d0d7de; }
+  #revTopBar .rev-view-toggle button.on { background:#ddf4ff; color:#0550ae; font-weight:600; }
+  .rev-refresh-note { font-size:11.5px; color:#0969da; font-weight:600; display:inline-flex; align-items:center; gap:6px; }
+  #revResults .rev-loading .rev-load-age { font-weight:400; color:#57606a; }
+  #revResults .rev-loading.warn { color:#9a6700; }
+  #revResults .rev-loading-sub { color:#57606a; font-size:11.5px; padding:0 2px 12px 22px; }
+  #revGraph { flex:1 1 auto; min-height:460px; display:flex; flex-direction:column; overflow:hidden; }
+  #dgvWires path[data-click] { pointer-events:stroke; cursor:pointer; }
+  #dgvBoard .map-item .dgv-badge { flex:0 0 auto; font-size:9.5px; font-weight:700; letter-spacing:.3px; color:#fff; border-radius:9px; padding:0 5px; }
+  #dgvBoard .map-item .dgv-queued { flex:0 0 auto; font-size:9.5px; font-weight:600; letter-spacing:.3px; text-transform:uppercase; color:#82071e;
+                                    background:#ffcecb; border:1px solid #cf222e; border-radius:9px; padding:0 5px; }
+  #dgvDetail .dgv-head { font-weight:600; margin-bottom:4px; }
+  #dgvDetail .dgv-sub { color:#57606a; font-weight:400; }
+  #dgvDetail .dgv-list { border:1px solid #d0d7de; border-radius:6px; background:#ffffff; max-height:30vh; overflow:auto; margin:4px 0 6px 0; }
+  #dgvDetail .dgv-sec { padding:4px 8px 2px 8px; font-size:10px; text-transform:uppercase; letter-spacing:.4px; color:#57606a; font-weight:600; background:#f6f8fa; }
+  #dgvDetail .dgv-row { display:flex; gap:8px; align-items:baseline; padding:3px 8px; border-bottom:1px solid #f2f4f7; cursor:pointer; }
+  #dgvDetail .dgv-row:hover { background:#fff5f5; }
+  #dgvDetail .dgv-row.dis { color:#8c959f; cursor:default; }
+  #dgvDetail .dgv-row .dgv-what { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
+  #dgvDetail .dgv-act { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0 2px 0; }
+  #dgvDetail .dgv-act button { padding:3px 10px; font-size:11.5px; }
+  #dgvDetail .dgv-act button.rev-danger { color:#fff; background:#cf222e; border-color:#cf222e; }
+  #dgvDetail .dgv-act button.rev-danger:disabled { background:#eaeef2; border-color:#d0d7de; color:#57606a; cursor:not-allowed; }
+  #dgvDetail .dgv-note { color:#57606a; font-size:11.5px; }
   table.rev-table td.rev-when-cell { font-family:Consolas,monospace; font-size:10.5px; color:#57606a; white-space:nowrap; }
   table.rev-table tr.rev-row-sel td { background:#ddf4ff; }
   table.rev-table tr:hover td { background:#eaeef2; }
@@ -1238,7 +1278,7 @@
     <div class="tab" data-tab="map" title="Visualise who can reach what — the live delegation graph (admins → {{DIMS}} → nested groups → targets), with a risk overlay and per-grant removal.">Delegation Map</div>
     <div class="tab" data-tab="validate" title="Check the desired store for problems (orphans, naming, ownership, stale roles) before you deploy — each finding has a suggested fix.">Validate <span id="validateErrBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div class="tab" data-tab="save" title="Review every staged change with a keyed diff, then commit — each save is backed up first, all-or-nothing, and reversible.">Pending changes <span id="saveDirtyBadge" class="badge" style="display:none">0</span></div>
-    <div class="tab" data-tab="revoke" title="Revoke live active PIM assignments. Destructive: break-glass accounts are protected and large batches require maker/checker approval.">Review current delegations <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
+    <div class="tab" data-tab="revoke" title="Every privileged permission held right now -- as a graph or a list -- and revoke what is not needed. Destructive: break-glass accounts are protected and large batches require maker/checker approval.">Delegation overview (All privileged permissions) <span id="revokeCountBadge" class="badge" style="display:none;background:#cf222e">0</span></div>
     <div class="tab" data-tab="accounts" title="Admin accounts and their Temporary Access Pass. Re-issue a TAP whose lifetime has expired -- the admin gets a new one by mail.">Accounts &amp; TAP <span id="tapExpiredBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
     <div class="tab" data-tab="approvals" title="The maker/checker approval queue — raise an offboard/revoke/sensitive change, approve or deny one (a different admin must approve), and execute an approved request.">Approvals <span id="apprPendBadge" class="badge" style="display:none;background:#bc4c00">0</span></div>
     <div class="tab" data-tab="accessreview" title="Run access reviews end-to-end — attest (approve / deny / recertify) with justification, assign reviewers, send reminders, and export the evidence.">Access Review <span id="arOpenBadge" class="badge" style="display:none">0</span></div>
@@ -1914,7 +1954,15 @@
       <span id="wlStatus" style="font-size:11.5px; color:#57606a;"></span>
     </div>
     <div id="revTopBar">
-      <button id="revBtnRefresh" class="primary" title="Queues a new read of every active assignment for the scheduler (within ~5 min). The table shows the stored snapshot; it never waits for the tenant.">Refresh</button>
+      <!-- §100.47 (c) (owner 2026-10-10): Graph view (default) | List view -- one choice per browser (localStorage
+           'pim.revoke.view'). Every filter in this bar applies to both views. -->
+      <span id="revViewToggle" class="rev-view-toggle" role="group" aria-label="How to show the delegations">
+        <button type="button" id="revViewGraph" data-view="graph" aria-pressed="true" title="Draw the live delegations like the Access map: people, the groups they are in, what those include, and the roles they reach">Graph view</button>
+        <button type="button" id="revViewList" data-view="list" aria-pressed="false" title="Show the live delegations as a table">List view</button>
+      </span>
+      <button id="revBtnRefresh" class="primary" title="Asks the scheduler for a new read of every active assignment (within ~5 min). The page shows the stored read; it never waits for the tenant. Disabled while a read is already queued or running.">Refresh</button>
+      <!-- §100.47 (a): said next to the button while a read is already queued / running, so Refresh is never pressed twice. -->
+      <span id="revRefreshNote" class="rev-refresh-note" role="status" aria-live="polite" style="display:none;"></span>
       <!-- BUG-97: the counts start as an EM DASH, never 0. This load takes 5-10s, and a
            hard-coded 0 during it is indistinguishable from a finished "there are none" -- on
            this screen that reads as "nobody holds standing privileged access". A zero that
@@ -1968,8 +2016,39 @@
       <button id="revBtnRevoke" class="rev-danger" disabled>Revoke selected</button>
       <button id="revBtnClear">Clear</button>
     </div>
+    <!-- §100.47 (a) (owner 2026-10-10): the page starts LOADING -- it reads the stored snapshot the moment it opens.
+         It used to say "Click Refresh to load", so people pressed Refresh while the read was already under way. -->
     <div id="revResults">
-      <div class="rev-empty">Click <b>Refresh</b> to load currently-active PIM assignments from this tenant.</div>
+      <div class="rev-loading" id="revLoadingState"><span class="rev-spin"></span>Loading current delegations&hellip;</div>
+    </div>
+    <!-- §100.47 (c): the GRAPH view -- the Access map board (same columns, boxes, dots, counts, column filters, collapse to
+         path), fed from the LIVE active assignments. Revoke only: no Give / Add, no drag, no Ctrl+click linking. -->
+    <div id="revGraph" style="display:none;">
+      <div id="dgvToolbar">
+        <button id="dgvClear" style="display:none">Back to overview</button>
+        <button id="dgvFocusToggle" style="display:none" aria-pressed="true"></button>
+        <span class="map-hint" id="dgvHint"><b>See:</b> click a person (left) or a role (right) &mdash; the board collapses to what connects them. People hold the second column <b>directly</b>; everything further right is <b>inherited</b> through group nesting. <b style="color:#cf222e;">Revoke:</b> select a box or a line, tick the live assignments to take away, then <b>Revoke</b> &mdash; queued under Pending changes, the same as the list. This view only takes access away; to give access use the <b>Access map</b>.</span>
+      </div>
+      <div id="dgvBoard">
+        <svg id="dgvWires"></svg>
+        <div class="map-col">
+          <h3>People <span class="map-col-sub">who holds the access &mdash; accounts and apps</span></h3>
+          <div class="map-col-body" id="dgvCol0"></div>
+        </div>
+        <div class="map-col">
+          <h3>What they&rsquo;re assigned to <span class="map-col-sub">the groups they are in &mdash; <b>assigned directly</b></span></h3>
+          <div class="map-col-body" id="dgvCol1"></div>
+        </div>
+        <div class="map-col">
+          <h3>What that includes <span class="map-col-sub">groups those groups are nested in &mdash; <b>inherited, not assigned</b></span></h3>
+          <div class="map-col-body" id="dgvCol2"></div>
+        </div>
+        <div class="map-col">
+          <h3>What it lets them do <span class="map-col-sub">the roles, and where they apply &mdash; Entra &middot; AU &middot; Azure</span></h3>
+          <div class="map-col-body" id="dgvCol3"></div>
+        </div>
+      </div>
+      <div id="dgvDetail"><span class="empty">Nothing selected &mdash; click a person, group or role above to see its live assignments.</span></div>
     </div>
     <div id="revResultsPane" style="display:none"></div>
   </div>
@@ -2732,12 +2811,13 @@
           desc: 'Which job runs when, what area it covers, and the mail jobs — on/off and how often' },
       ] },
     // §70.22 (operator 2026-09-14: "2x items in daily operations menu should be moved to reviews and controls and then
-    // daily operation should be removed"): 'Daily operations' held only Review current delegations + Approvals -- both are
+    // daily operation should be removed"): 'Daily operations' held only Delegation overview (All privileged permissions) + Approvals -- both are
     // reviews/controls. 'accounts' had already MOVED to the Access menu (operator, 2026-09-12: "it should be under access").
     { id: 'governance', label: 'Reviews & controls',
       title: 'Standing access, approvals, recertification, drift, proof of who-can-do-what',
       items: [
-        { tab: 'revoke',    label: 'Review current delegations', desc: 'Who holds access right now, and revoke what is not needed' },
+        // §100.47 (owner 2026-10-10): renamed from the old 'Review current ...' page name; the tab id stays 'revoke' (deep links, tests).
+        { tab: 'revoke',    label: 'Delegation overview (All privileged permissions)', desc: 'Every privileged permission held right now, as a graph or a list -- revoke what is not needed' },
         { tab: 'approvals', label: 'Approvals',              desc: 'Requests waiting for a decision' },
         // 2026-09-14 (operator: "why is this option not its own page and automatically run and why does it not show a
         // comparison to expand"): drift is its own page, loads by itself from the scheduler's stored check. The old
@@ -3170,7 +3250,7 @@
   // ===================================================================
   var TAB_GUIDANCE = {
     home:        { title: 'What this is & how to use it', what: 'Your landing overview &mdash; "what needs my attention" aggregated from the engine, validator, scheduler and audit trail.', how: ['Start here each session; red items first, then amber.', 'Click any tile or attention row to jump to the tab that owns the detail.'] },
-    map:         { title: 'What this is & how to use it', what: 'The live delegation map &mdash; who can reach what, through which groups and scopes, and where you map them together.', how: ['Pick a person (left) or a permission (right) to collapse the board to their path.', 'To LINK, three ways, all the same change: (1) <b>select the source, then Ctrl+click each target</b> &mdash; a person then the groups they should be in, or a group then the permissions it should have; (2) <b>drag</b> one box onto another (only boxes that can accept it light up); (3) select a box and use the <b>&#x2795; buttons</b> in the toolbar, which open a searchable list to pick from.', 'To REMOVE an existing delegation, do exactly the same on a link that is already there &mdash; Ctrl+click it, drop on it, or click the <b>already linked</b> entry in the list. It asks you to confirm by name, then shows red and struck through; click it again to take the removal back. (Review current delegations is the other thing: it revokes <b>live</b> assignments in the tenant, and does not list delegation rows.)', 'Every link and every removal is a <b>staged change</b> (dashed line, Pending changes badge) &mdash; nothing reaches the tenant until you commit under <b>Pending changes</b>.', 'On a managed tenant, boxes marked <b>CENTRAL</b> and <b>teal</b> wires came from the managing tenant: they are <b>read-only</b> here and change on the next pull. A central admin can still be given <b>local</b> access &mdash; link it to one of this tenant&rsquo;s own groups.', 'Use Risk overlay to flag orphan / stale / over-privileged delegation; export or print for review.'], legend: true },
+    map:         { title: 'What this is & how to use it', what: 'The live delegation map &mdash; who can reach what, through which groups and scopes, and where you map them together.', how: ['Pick a person (left) or a permission (right) to collapse the board to their path.', 'To LINK, three ways, all the same change: (1) <b>select the source, then Ctrl+click each target</b> &mdash; a person then the groups they should be in, or a group then the permissions it should have; (2) <b>drag</b> one box onto another (only boxes that can accept it light up); (3) select a box and use the <b>&#x2795; buttons</b> in the toolbar, which open a searchable list to pick from.', 'To REMOVE an existing delegation, do exactly the same on a link that is already there &mdash; Ctrl+click it, drop on it, or click the <b>already linked</b> entry in the list. It asks you to confirm by name, then shows red and struck through; click it again to take the removal back. (Delegation overview (All privileged permissions) is the other thing: it shows and revokes <b>live</b> assignments in the tenant, and does not list delegation rows.)', 'Every link and every removal is a <b>staged change</b> (dashed line, Pending changes badge) &mdash; nothing reaches the tenant until you commit under <b>Pending changes</b>.', 'On a managed tenant, boxes marked <b>CENTRAL</b> and <b>teal</b> wires came from the managing tenant: they are <b>read-only</b> here and change on the next pull. A central admin can still be given <b>local</b> access &mdash; link it to one of this tenant&rsquo;s own groups.', 'Use Risk overlay to flag orphan / stale / over-privileged delegation; export or print for review.'], legend: true },
     new:         { title: 'What this is & how to use it', what: 'Create delegation from approved templates &mdash; the guided way to add admins, groups and scopes.', how: ['Pick a template, fill the wizard, then review the staged rows under Pending changes before committing.'] },
     validate:    { title: 'What this is & how to use it', what: 'Validates the pending configuration against the delegation rules before you commit.', how: ['Re-run after edits (it also auto-runs after every commit); fix any errors before you commit under Pending changes.'] },
     save:        { title: 'What this is & how to use it', what: 'Pending changes &mdash; the single commit point. Staged changes here are what the engine applies.', how: ['Review every staged row, then commit; nothing reaches the tenant until you do.'] },
@@ -3179,7 +3259,7 @@
     // (PIM-QueueActions.ps1) and is NEVER written to pim.Rows -- so the delegation row is untouched,
     // and if it still says Assign the engine simply creates the access again on its next run. Revoke
     // alone does not make access stay away; only Removing the row does.
-    revoke:      { title: 'What this is & how to use it', what: 'Review current delegations &mdash; review and <b>revoke</b> currently-active PIM assignments. This is the most destructive operation in the Manager.', how: ['Refresh to load live active assignments.', 'Revoking is <b>queued</b>, not immediate: it lands in the Change queue, is committed on Pending changes and the engine removes the assignments on its next run &mdash; once applied it cannot be undone. Break-glass/emergency accounts are always protected (skipped), and a large batch requires a maker/checker approval (raised + approved on the Approvals tab) before it can run.', '<b>Revoking does NOT change the delegation that granted the access.</b> This page acts on the LIVE assignment in the tenant only; the delegation row is left exactly as it is. If that row still says Assign, the engine will create the access again on its next run. To make it stay away, also <b>Remove</b> the delegation &mdash; the &#x2296; on its row in <b>All records</b>, or on the <b>Access map</b>.'] },
+    revoke:      { title: 'What this is & how to use it', what: 'Delegation overview (All privileged permissions) &mdash; every privileged permission held in the tenant right now (Entra roles, Azure roles, PIM for Groups), and <b>revoke</b> what is not needed. Revoking is the most destructive operation in the Manager.', how: ['<b>Graph view</b> (the default) draws the live assignments like the Access map: people &rarr; the groups they are in &rarr; the groups those are nested in &rarr; the roles and scopes they reach. Click a box to collapse the board to its path and see its live assignments; tick the ones to take away and press <b>Revoke</b>. The graph only takes access away &mdash; to give access, use the Access map. <b>List view</b> shows the same assignments as a table. The filters above apply to both views, and the page remembers which view you used.', 'The page shows the stored read of the tenant (it refreshes on a schedule). While a new read is running it says <b>Loading current delegations&hellip;</b> with when it started, and updates by itself when the read is ready; <b>Refresh</b> asks for a new read only when none is already running.','Revoking is <b>queued</b>, not immediate: it lands in the Change queue, is committed on Pending changes and the engine removes the assignments on its next run &mdash; once applied it cannot be undone. Break-glass/emergency accounts are always protected (skipped), and a large batch requires a maker/checker approval (raised + approved on the Approvals tab) before it can run.', '<b>Revoking does NOT change the delegation that granted the access.</b> This page acts on the LIVE assignment in the tenant only; the delegation row is left exactly as it is. If that row still says Assign, the engine will create the access again on its next run. To make it stay away, also <b>Remove</b> the delegation &mdash; the &#x2296; on its row in <b>All records</b>, or on the <b>Access map</b>.'] },
     approvals:   { title: 'What this is & how to use it', what: 'The maker/checker approval queue &mdash; the gate for sensitive changes (approver &ne; requestor).', how: ['Open a request to see the engine-derived plan, then approve or deny; offboarding never runs automatically.'] },
     accessreview:{ title: 'What this is & how to use it', what: 'Access reviews &mdash; scope, reviewers, recurrence and current status of each review.', how: ['Filter or search to find a review.', 'Open a review&rsquo;s evidence to record a decision (Approve / Deny / Don&rsquo;t know, with a justification) on a pending item &mdash; it is written to the review in Entra (needs AccessReview.ReadWrite.All). You can also send reminders and change reviewers.'] },
     grid:        { title: 'What this is & how to use it', what: 'All records &mdash; the raw records behind every screen, one record type at a time.', how: ['Pick a record type in the list on the left (the filter box narrows the list); its rows fill the rest of the page.', 'Edits stage into Pending changes for Pending changes; the list can be collapsed with the arrow to give the table the full width.'] },
@@ -3526,7 +3606,7 @@
          // 🔴 71.23 (operator 2026-09-16: "i need to have this field on the admin overview so i cna
          // devine an AutoDisableDate"). The date the engine disables this account -- and nothing more
          // than disable: PIM never deletes an account.
-         '<th title="On this date the engine DISABLES the account, revokes its sessions and removes its PIM access. PIM never deletes accounts.">Auto-disable</th>' +
+         '<th title="On this date the engine DISABLES the account, revokes its sessions and removes its PIM access. Auto-disable never deletes the account.">Auto-disable</th>' +
          // 97.1 (owner 2026-10-08: "remove this manager mail, as we dont use that anymore. we link the manager to a dept and
          // link the admin to a dept"): no ManagerEmail column -- mail (TAP included) goes to the sponsor department's owners.
          // A stored ManagerEmail is kept (the editor no longer sends it, and the server leaves a field not sent untouched).
@@ -3552,7 +3632,7 @@
         '<td style="font-size:11.5px;" class="acctDeptCell">' + acctSponsorDeptCell(a) + '</td>' +
         '<td style="font-size:11.5px;color:' + stColor + ';font-weight:600;">' + escapeHtml(st) +
           // 71.21: never the word "deletion" -- PIM keeps the account, disabled, for ever.
-          (flagged ? '<div style="color:#bc4c00;font-size:10.5px;font-weight:400;" title="Offboarding disables the account, revokes its sessions and removes its PIM access. PIM never deletes the account itself.">marked for manual removal</div>' : '') + '</td>' +
+          (flagged ? '<div style="color:#bc4c00;font-size:10.5px;font-weight:400;" title="Offboarding disables the account, revokes its sessions and removes its PIM access. Offboarding never deletes the account itself.">marked for manual removal</div>' : '') + '</td>' +
         '<td style="font-size:11.5px;" class="acctAutoDisableCell">' + acctAutoDisableCell(a) + '</td>' +
         '<td style="font-size:11.5px;">' + (a.createTAP ? 'enforced' : '<span style="color:#8c959f;" title="TargetPlatform=AD: a TAP is Entra-only">n/a (AD only)</span>') + '</td>' +
         // Operator, 2026-09-12: "mail forward must be shown above in the list" -- where this admin's
@@ -3777,7 +3857,7 @@
       // date EXPRESSION (e.g. FirstDayNextMonth) cannot be shown in a date picker: it is named and KEPT unless a date is picked.
       '<input class="acctEditFldTop" data-k="autoDisableDate" type="date" data-orig="' + esc(add) + '" value="' + (/^\d{4}-\d{2}-\d{2}/.test(add) ? esc(add.slice(0, 10)) : '') + '" style="width:150px;">' +
       (add && !/^\d{4}-\d{2}-\d{2}/.test(add) ? '<div style="color:#57606a;font-size:10.5px;">now: <code>' + esc(add) + '</code> (kept unless you pick a date)</div>' : '') +
-      '<div style="color:#57606a;font-size:10.5px;max-width:240px;">On this date the account is <b>disabled</b>, its sessions revoked and its PIM access removed. <b>PIM never deletes accounts.</b> Leave blank for none.</div>' +
+      '<div style="color:#57606a;font-size:10.5px;max-width:240px;">On this date the account is <b>disabled</b>, its sessions revoked and its PIM access removed. <b>Auto-disable never deletes the account.</b> Leave blank for none.</div>' +
       (a.autoDisableConflict ? '<div style="color:#cf222e;font-size:10.5px;max-width:240px;">This row also carries the old <code>OffboardDate</code> with a different date, so the engine refuses it. Saving here clears the old column.</div>' : ''));
     // REQUIREMENTS 68.6 row 35 -- MSP downlink, defined on the admin: sync on/off (ManagementMode),
     // which managed tenants (Ring: 0 dev, 1 test, 2 broad -- §77.20; tags are set on the ring, not here).
@@ -4153,7 +4233,7 @@
     let colour = '#57606a', note = '';
     if (a.autoDisablePast) { colour = '#cf222e'; note = 'in the past &mdash; the engine should have disabled this account'; }
     else if (a.autoDisableSoon) { colour = '#bc4c00'; note = 'due within 14 days'; }
-    let h = '<span style="color:' + colour + ';font-weight:600;" title="On this date the engine disables the account, revokes its sessions and removes its PIM access. PIM never deletes accounts.">' + esc(short) + '</span>';
+    let h = '<span style="color:' + colour + ';font-weight:600;" title="On this date the engine disables the account, revokes its sessions and removes its PIM access. Auto-disable never deletes the account.">' + esc(short) + '</span>';
     if (note) h += '<div style="color:' + colour + ';font-size:10.5px;font-weight:400;">' + note + '</div>';
     if (a.autoDisableLegacy) h += '<div style="color:#bc4c00;font-size:10.5px;" title="' + esc(a.autoDisableWhy || '') + '">from the old column OffboardDate &mdash; rename it</div>';
     return h;
@@ -4366,7 +4446,7 @@
       const why = (window.prompt('Justification for offboarding ' + upn + ' (required -- recorded on the request and in the audit trail):', '') || '').trim();
       if (!why) { if (msg) { msg.textContent = 'Not raised: a justification is required.'; msg.style.color = '#9a6700'; } return; }
       await api('POST', '/api/approvals', { action: 'offboard', target: upn, justification: why,
-        reason: 'marked for manual removal from the account grid (PIM never deletes the account)' });
+        reason: 'marked for manual removal from the account grid (offboarding never deletes the account)' });
       if (msg) { msg.textContent = 'Offboard request raised for ' + upn + ' — it now needs a second administrator to approve it on Approvals.'; msg.style.color = '#bc4c00'; }
     } catch (e) {
       if (msg) { msg.textContent = 'Could not raise the request: ' + String(e.message || e); msg.style.color = '#cf222e'; }
@@ -6962,7 +7042,7 @@
   //   * Locked = /api/license says so. Unknown (not loaded yet, unreadable, the static build) = NOT locked: the page
   //     opens with its own notice and the server still refuses. The menu is rebuilt once the licence is read.
   // ===================================================================
-  // Operator 2026-09-26 (wizard): Access reviews = the WHOLE page is Pro; Review current delegations = a free page whose
+  // Operator 2026-09-26 (wizard): Access reviews = the WHOLE page is Pro; Delegation overview (All privileged permissions) = a free page whose
   // Revoke action is Pro (its in-page notice), so it is NOT listed here.
   var PIM_PRO_PAGES = { coverage: 'coverage.gaps', discovery: 'discovery.sweep', accessreview: 'reviews.campaigns',
                         downlink: 'msp', msptenants: 'msp', replication: 'msp' };
@@ -8203,6 +8283,7 @@
     { key: 'naming',    label: 'Naming & accounts',      match: ['setEnvNameHost', 'setAdminDomainHost', 'setGroupNamingCard', /admin name prefixes/i, /naming conventions/i, /naming words/i, /^filters/i] },
     { key: 'features',  label: 'Features & edition',     match: ['setFeaturesCard', 'setDemoModeHost', 'setGovPreviewCard', 'setLicenceCard', 'setEditionCard', 'setScenarioCard', 'setFeatureGatesCard'] },
     { key: 'approvals', label: 'Approvals & policy',     match: ['setSelfApproveHost', 'setOpPolicyCard'] },
+    { key: 'automation', label: 'Automation',            match: ['setAutomationHost'] },   // §100.49: auto-extend policy
     { key: 'rings',     label: 'Deployment rings',       match: ['setRingsHost'] },
     { key: 'mail',      label: 'Mail & alerting',        match: ['setMailTransportCard', 'setEmailControlsCard', 'setAlertingCard'] },
     { key: 'reports',   label: 'Reports',                match: ['setReportsCard'] },   // MAIL-2 item 6: every report + alert in one view
@@ -8400,6 +8481,7 @@
     h += `<div id="setRfaBrandingHost"></div>`;   // operator 2026-10-05: the portal's company name + support e-mail
     h += `<div id="setRfaBrokerHost"></div>`;   // §82/§90: RFA broker & API (Pro; SuperAdmin)
     h += `<div id="setSelfApproveHost"></div>`;   // single-administrator tenants: allow self-approval (SuperAdmin)
+    h += `<div id="setAutomationHost"></div>`;   // §100.49: the global auto-extend policy (moved here from My people)
     // §91.2 (operator 2026-10-02): the deployment rings are also defined HERE (managing tenant only; the card removes itself elsewhere)
     h += `<div id="setRingsHost" class="set-card" style="font-size:12.5px;"></div>`;
 
@@ -8659,6 +8741,7 @@
     renderRfaBrandingSection(document.getElementById('setRfaBrandingHost'));
     renderRfaBrokerSection(document.getElementById('setRfaBrokerHost'));
     renderSelfApproveSection(document.getElementById('setSelfApproveHost'));
+    renderAutoExtendSettingsSection(document.getElementById('setAutomationHost'));
     pimTenantMode().then(() => { const rh = document.getElementById('setRingsHost'); if (!rh) return; if (pimIsMspMaster()) renderDeploymentRingsCard(rh); else rh.remove(); }).catch(() => { });
 
     // Operational-policy + Alerting cards load asynchronously (host containers
@@ -10391,7 +10474,7 @@
     const prompt = looksBulk
       ? 'BULK offboard: "' + t + '" looks like more than one principal. The Manager marks each for offboarding in Pending changes; the engine performs it on its next run. Type EXECUTE to confirm.'
       // 71.21 + 71.23: the column is AutoDisableDate, and nothing is ever deleted.
-      : 'Queue the approved offboard for "' + t + '"?\n\nThe Manager does not change the directory itself: it sets the admin\'s AutoDisableDate to now, as a change in Pending changes. After you commit it, the engine disables the account, revokes its sessions and memberships and sends the notice on its next run.\n\nThe account itself is KEPT, disabled — PIM never deletes an account. This approval cannot be used again.';
+      : 'Queue the approved offboard for "' + t + '"?\n\nThe Manager does not change the directory itself: it sets the admin\'s AutoDisableDate to now, as a change in Pending changes. After you commit it, the engine disables the account, revokes its sessions and memberships and sends the notice on its next run.\n\nThe account itself is KEPT, disabled — an offboard never deletes an account. This approval cannot be used again.';
     if (looksBulk) {
       const typed = window.prompt(prompt);
       if (String(typed || '').trim().toUpperCase() !== 'EXECUTE') { if (msgEl) { msgEl.textContent = 'Cancelled.'; msgEl.style.color = '#57606a'; } return; }
@@ -10497,15 +10580,14 @@
       });
       h.push('</tbody></table>');
     }
-    if (typeof roleAtLeast === 'function' && roleAtLeast('SuperAdmin')) {
-      if (!aeState.policy) { try { aeState.policy = await api('GET', '/api/settings/autoextend'); } catch (_) { aeState.policy = null; } }
-      const pol = aeState.policy || { leadDays: d.leadDays || 14, defaultOn: d.defaultOn !== false };
-      h.push('<details id="aePolicy" style="font-size:12px; margin-bottom:10px;"><summary>Auto-extend policy (SuperAdmin)</summary><div style="padding:6px 0;">' +
-        'Extend <input type="number" id="aeLead" aria-label="Days before a permission ends to extend it" title="Days before a permission ends to extend it" min="1" max="90" value="' + escapeHtml(String(pol.leadDays)) + '" style="width:60px;"> days before a permission ends.' + settingInfoBtn('AutoExtend.LeadDays') + ' ' +
-        '<label><input type="checkbox" id="aeDefaultOn" data-setting-key="AutoExtend.DefaultOn"' + (pol.defaultOn ? ' checked' : '') + '> Rows without an AutoExtend value are extended (default ON)</label>' + settingInfoBtn('AutoExtend.DefaultOn') + ' ' +
-        '<button class="btn" id="aePolicySave">Save</button></div></details>');
-    }
+    // §100.49 (owner 2026-10-10: "is this a global setting found under my people that should go into settings - or is this
+    // per dept/approver"): the auto-extend policy is ONE global setting, so it is EDITED in Settings > Automation only. My
+    // people shows one read-only line; a SuperAdmin gets a link to the setting.
+    h.push('<div id="aePolicyLine" style="font-size:12px; color:#57606a; margin-bottom:10px;">' + autoExtendPolicyLineHtml(d) +
+      ((typeof roleAtLeast === 'function' && roleAtLeast('SuperAdmin')) ? ' <a href="#" id="aePolicyToSettings">Change in Settings</a>' : '') + '</div>');
     host.innerHTML = h.join('');
+    const toSetAe = document.getElementById('aePolicyToSettings');
+    if (toSetAe) toSetAe.onclick = function (ev) { ev.preventDefault(); switchTab('settings'); setTimeout(function () { showSettingsSection('setAutomationHost'); }, 600); };
     const chk = document.getElementById('aeAllChk'); if (chk) chk.onchange = () => { aeState.all = chk.checked; renderOwnerAutoExtend(); };
     const decide = async (i, decision) => {
       const it = items[i]; if (!it) return;
@@ -10523,15 +10605,37 @@
     host.querySelectorAll('[data-ae-approve]').forEach(b => b.onclick = () => decide(+b.dataset.aeApprove, 'approve'));
     host.querySelectorAll('[data-ae-deny]').forEach(b => b.onclick = () => decide(+b.dataset.aeDeny, 'deny'));
     host.querySelectorAll('[data-ae-clear]').forEach(b => b.onclick = () => decide(+b.dataset.aeClear, 'clear'));
-    const ps = document.getElementById('aePolicySave');
-    if (ps) ps.onclick = async () => {
-      aeState.msg = ''; aeState.err = '';
+  }
+  // §100.49: PURE -- the read-only policy line on My people, from the owner list's leadDays / defaultOn.
+  function autoExtendPolicyLineHtml(d) {
+    const n = Number(d && d.leadDays) || 14;
+    const on = !(d && d.defaultOn === false);
+    return 'PIM extends permissions automatically <b>' + escapeHtml(String(n)) + '</b> day' + (n === 1 ? '' : 's') + ' before they end (set by your administrator)' +
+      (on ? '.' : ' -- only rows set to extend; rows without an AutoExtend value end on their date.');
+  }
+  // §100.49: Settings > Automation -- the ONE place the global auto-extend policy is edited (SuperAdmin; others read it).
+  // Labels and "More info" come from the settings catalog (AutoExtend.LeadDays / AutoExtend.DefaultOn).
+  async function renderAutoExtendSettingsSection(host) {
+    if (!host || !isServer) return;
+    let pol = null;
+    try { pol = await api('GET', '/api/settings/autoextend'); } catch (e) { host.innerHTML = ''; return; }
+    try { await pimSettingInfoLoad(); } catch (_) { }
+    const can = (typeof roleAtLeast === 'function' && roleAtLeast('SuperAdmin'));
+    const lbl = (k, dflt) => { const s = pimSettingInfoEntry(k); return escapeHtml(String((s && s.label) || dflt)); };
+    const dis = can ? '' : ' disabled';
+    host.innerHTML = '<div class="set-card" id="setAutoExtend"><h3 style="margin:0 0 4px;font-size:14px;">Automation: auto-extend</h3>' +
+      '<div style="color:#57606a;font-size:12px;margin-bottom:6px;">One setting for the whole environment (not per department or approver). Department owners still Deny single extensions on My people; a row\'s own AutoExtend value wins over the default.</div>' +
+      '<div style="margin-bottom:4px;"><label style="font-weight:normal;">' + lbl('AutoExtend.LeadDays', 'Extend ... days before a permission ends') + ': <input type="number" id="setAeLead" min="1" max="90" style="width:60px;" value="' + escapeHtml(String(pol.leadDays)) + '"' + dis + '> days</label>' + settingInfoBtn('AutoExtend.LeadDays') + '</div>' +
+      '<div><label style="font-weight:normal;"><input type="checkbox" id="setAeDefaultOn" data-setting-key="AutoExtend.DefaultOn"' + (pol.defaultOn ? ' checked' : '') + dis + '> ' + lbl('AutoExtend.DefaultOn', 'Rows without an AutoExtend value are extended') + '</label>' + settingInfoBtn('AutoExtend.DefaultOn') + '</div>' +
+      (can ? '<div style="margin-top:8px;"><button class="btn" id="setAePolicySave">Save auto-extend</button> <span class="setMsg" id="setAePolicyMsg"></span></div>' : '<div style="color:#8c959f;font-size:11px;margin-top:4px;">Only a SuperAdmin can change this.</div>') +
+      '</div>';
+    const sv = document.getElementById('setAePolicySave');
+    if (sv) sv.onclick = async function () {
+      const m = document.getElementById('setAePolicyMsg');
       try {
-        const r = await api('PUT', '/api/settings/autoextend', { leadDays: +(document.getElementById('aeLead').value || 0), defaultOn: !!document.getElementById('aeDefaultOn').checked });
-        aeState.policy = { leadDays: r.leadDays, defaultOn: r.defaultOn };
-        aeState.msg = 'Auto-extend policy saved: ' + r.leadDays + ' days before the end; rows without a value are ' + (r.defaultOn ? 'extended.' : 'NOT extended.');
-      } catch (e) { aeState.err = 'Policy not saved: ' + (e.message || String(e)); }
-      renderOwnerAutoExtend();
+        const r = await api('PUT', '/api/settings/autoextend', { leadDays: +(document.getElementById('setAeLead').value || 0), defaultOn: !!document.getElementById('setAeDefaultOn').checked });
+        if (m) { m.textContent = 'Saved: ' + r.leadDays + ' days before the end; rows without a value are ' + (r.defaultOn ? 'extended.' : 'NOT extended.'); m.style.color = '#1a7f37'; }
+      } catch (e) { if (m) { m.textContent = 'Not saved: ' + (e.message || String(e)); m.style.color = '#cf222e'; } }
     };
   }
   // §82 ACCESS REQUESTS (operator 2026-09-30 / 2026-10-02): the Manager's half of RFA + the company reviews. The engine
@@ -10920,12 +11024,24 @@
       '<label style="margin-right:10px;">approvers <select id="' + pfx + 'App"' + d + '><option value="1"' + (String(v('approvers', 1)) === '1' ? ' selected' : '') + '>1</option><option value="2"' + (String(v('approvers', 1)) === '2' ? ' selected' : '') + '>2</option></select></label>' +
       '<label style="margin-right:10px;"><select id="' + pfx + 'Mode"' + d + '><option value="parallel"' + (v('mode', 'parallel') === 'parallel' ? ' selected' : '') + '>parallel</option><option value="serial"' + (v('mode', 'parallel') === 'serial' ? ' selected' : '') + '>serial</option></select></label>' +
       '<label style="margin-right:10px;">not answered: <select id="' + pfx + 'Und"' + d + '><option value="keep"' + (v('undecided', 'keep') !== 'remove' ? ' selected' : '') + '>keep access</option><option value="remove"' + (v('undecided', 'keep') === 'remove' ? ' selected' : '') + '>request removal</option></select></label>' +
-      '<label>reviewers <input id="' + pfx + 'Rev" style="width:320px;" placeholder="UPN, UPN (empty = the department owner)" value="' + esc(asList(v('reviewers', [])).join(', ')) + '"' + d + '></label>';
+      // §100.28 REVIEW-OWNERS-VISIBLE: the department owners ALWAYS review; this field ADDS reviewers next to them, and only
+      // "only these reviewers" makes it replace the owners (before 2.4.555 a typed reviewer silently replaced every owner).
+      '<label>also review <input id="' + pfx + 'Rev" style="width:280px;" placeholder="department owners (default) -- add UPNs to review with them" value="' + esc(asList(v('reviewers', [])).join(', ')) + '"' + d + '></label>' +
+      '<label style="margin-left:8px;" title="Ticked: ONLY the people typed here review -- the department owners do not."><input type="checkbox" id="' + pfx + 'Only"' + (v('reviewersOnly', false) === true || String(v('reviewersOnly', '')) === 'true' ? ' checked' : '') + d + '> only these reviewers (not the owners)</label>';
+  }
+  // §100.28: who will actually review a department -- the server's effective list (owners + rule reviewers, or rule only).
+  function arEffectiveHtml(eff) {
+    const esc = escapeHtml;
+    if (!eff) return '<span style="color:#57606a;">--</span>';
+    if (eff.off) return '<span style="color:#57606a;">opted out</span>';
+    const ent = asList(eff.entries);
+    if (!ent.length) return '<span class="arNoReviewer" style="color:#cf222e;font-weight:600;">no reviewer -- name a department owner (it escalates today)</span>';
+    return '<span class="arEffective">&rarr; ' + ent.map(e => esc(String(e.upn || '')) + ' <span style="color:#57606a;">(' + (e.source === 'owner' ? 'owner' : 'rule') + ')</span>').join(', ') + '</span>';
   }
   function arReadRule(pfx) {
     const g = (id) => document.getElementById(pfx + id);
     return { cadenceDays: Number(g('Cad').value), durationDays: Number(g('Dur').value), approvers: Number(g('App').value), mode: g('Mode').value,
-             reviewers: String(g('Rev').value || '').split(/[,;\s]+/).map(s => s.trim()).filter(Boolean), undecided: (g('Und') && g('Und').value === 'remove') ? 'remove' : 'keep' };
+             reviewers: String(g('Rev').value || '').split(/[,;\s]+/).map(s => s.trim()).filter(Boolean), reviewersOnly: !!(g('Only') && g('Only').checked), undecided: (g('Und') && g('Und').value === 'remove') ? 'remove' : 'keep' };
   }
   async function renderAccessReviewRules() {
     const host = document.getElementById('arRulesBody');
@@ -10937,11 +11053,11 @@
     const dis = !can;
     const h = [];
     h.push('<details id="arRules" open style="border:1px solid #d0d7de;border-radius:6px;padding:8px 10px;margin-bottom:10px;"><summary style="font-weight:600;font-size:13px;cursor:pointer;">Review rules -- one review per department</summary>');
-    h.push('<div style="color:#57606a;font-size:11.5px;margin:4px 0 8px;">Each department is reviewed on its own cadence: every group of the department gets a review for the rule\'s reviewers. ' +
+    h.push('<div style="color:#57606a;font-size:11.5px;margin:4px 0 8px;">Each department is reviewed on its own cadence: every group of the department gets a review. <b>The department owners always review</b>; people typed under "also review" review with them, unless you tick "only these reviewers". "Who reviews" shows the result. ' +
       'A person nobody decides on <b>keeps</b> their access, unless the rule says <b>request removal</b> -- then an unanswered review raises a removal request a PIM administrator approves. ' +
       '<b>Parallel</b> = both approvers decide (any Remove wins); <b>serial</b> = approver 1, then approver 2. A reviewer can remove the whole account or only the access they tick.</div>');
     h.push('<div style="font-size:12px;margin-bottom:6px;"><label style="margin-right:12px;"><input type="checkbox" id="arDefOn"' + (def.enabled ? ' checked' : '') + (dis ? ' disabled' : '') + '> <b>Access reviews on</b></label> Default rule: ' + arRuleFields('arDef', def, dis) + '</div>');
-    h.push('<table class="grid" style="font-size:12px;width:100%;"><thead><tr><th>Department</th><th>Rule</th><th>Own rule</th><th>Last started</th></tr></thead><tbody>');
+    h.push('<table class="grid" style="font-size:12px;width:100%;"><thead><tr><th>Department</th><th>Rule</th><th>Own rule</th><th>Who reviews</th><th>Last started</th></tr></thead><tbody>');
     for (const name of asList(d.departments)) {
       const key = Object.keys(depts).find(k => k.toLowerCase() === name.toLowerCase());
       const ov = key ? depts[key] : null;
@@ -10951,9 +11067,10 @@
       h.push('<tr data-dept="' + esc(name) + '" data-id="' + id + '"><td><b>' + esc(name) + '</b></td>' +
         '<td><select class="arDeptMode" data-id="' + id + '"' + (dis ? ' disabled' : '') + '><option value="default"' + (mode === 'default' ? ' selected' : '') + '>Default rule</option><option value="off"' + (mode === 'off' ? ' selected' : '') + '>Off (opt out)</option><option value="own"' + (mode === 'own' ? ' selected' : '') + '>Own rule</option></select></td>' +
         '<td class="arOwn" data-id="' + id + '" style="' + (mode === 'own' ? '' : 'opacity:.35;') + '">' + arRuleFields(id, mode === 'own' ? Object.assign({}, def, ov) : def, dis || mode !== 'own') + '</td>' +
+        '<td class="arWho">' + arEffectiveHtml((d.effective || {})[name]) + '</td>' +
         '<td>' + (st && st.lastStartedUtc ? esc(fmtTime(st.lastStartedUtc)) + ' (' + esc(String(st.reviews || '')) + ')' : '<span style="color:#57606a;">never</span>') + '</td></tr>');
     }
-    if (!asList(d.departments).length) h.push('<tr><td colspan="4" style="color:#57606a;">No departments defined yet (Departments page).</td></tr>');
+    if (!asList(d.departments).length) h.push('<tr><td colspan="5" style="color:#57606a;">No departments defined yet (Departments page).</td></tr>');
     h.push('</tbody></table>');
     if (can) h.push('<div style="margin-top:8px;"><button id="arRulesSave" class="primary">Save review rules</button> <span id="arRulesMsg" style="font-size:11.5px;color:#57606a;"></span></div>');
     else h.push('<div style="color:#57606a;font-size:11.5px;margin-top:6px;">Changing the rules needs the SuperAdmin role.</div>');
@@ -11537,7 +11654,7 @@
         '<span id="govDriftMsg" style="color:#57606a;font-size:11.5px;"></span></div>' +
         // BUG-205: Apply now QUEUES an engine reconcile (the Manager never runs the engine). DRIFT-EXTRAS (100.12): it NEVER
         // removes, deletes or imports an extra -- a ticked extra is left out of what it sends. Each extra gets an explicit choice.
-        '<div id="driftActionsHelp" style="color:#57606a;font-size:11px;margin-top:4px;"><b>Apply now</b> fixes <b>missing</b> and <b>changed</b> items: it queues an engine reconcile (started now) that re-applies PIM&rsquo;s desired state &mdash; create and update only, it removes nothing. It never changes an <b>extra</b>. ' +
+        '<div id="driftActionsHelp" style="color:#57606a;font-size:11px;margin-top:4px;"><b>Apply now</b> fixes <b>missing</b> and <b>changed</b> items: it queues an engine run (started now) that re-applies <b>only the items you ticked</b> &mdash; create and update only, it removes nothing. It never changes an <b>extra</b>. ' +
         'For an extra choose one: <b style="color:#1a7f37;">Import into PIM</b> stages the PIM row that defines the existing object, so PIM manages it from now on (Review &amp; commit &mdash; nothing new is created); ' +
         '<b style="color:#cf222e;">Delete</b> removes it from the tenant (a queued revoke; for a whole group ONE red DELETE item that you commit <b>on its own</b> &mdash; the engine carries it out, every guard and approval applies); ' +
         '<b>Ignore</b> just hides it here and in the drift mail (listed below, Re-add brings it back; nothing is changed).</div>');
@@ -11667,7 +11784,7 @@
     };
   }
 
-  // REQ-DRIFT-2: DELETE an extra = queue its REVOKE through POST /api/revoke -- the same gates as Review current delegations
+  // REQ-DRIFT-2: DELETE an extra = queue its REVOKE through POST /api/revoke -- the same gates as Delegation overview (All privileged permissions)
   // (Pro, break-glass skipped, count confirmation, the approval threshold). Queued, committed on the Queue, run by the engine.
   // The drift items whose removal this page queued (by selection key): shown as "queued for removal" and never queued twice.
   const DRIFT_QUEUED = new Set();
@@ -11683,7 +11800,7 @@
     let pv;
     try { pv = await api('POST', '/api/revoke', { rows, preview: true }); }
     catch (e) { say('Not queued: ' + ((e && e.body && e.body.error) || e.message), true); return false; }
-    if (pv && pv.approvalRequired) { say('Not queued: ' + rows.length + ' removal(s) is over the approval threshold -- use Reviews & controls > Review current delegations, which raises the approval request.', true); return false; }
+    if (pv && pv.approvalRequired) { say('Not queued: ' + rows.length + ' removal(s) is over the approval threshold -- use Reviews & controls > Delegation overview (All privileged permissions), which raises the approval request.', true); return false; }
     try {
       const r = await api('POST', '/api/revoke', { rows, justification: why, confirmCount: (pv && pv.confirmRequired) ? pv.toRevokeCount : undefined });
       const okRes = asList(r && r.results).filter(x => x && x.ok);
@@ -12416,7 +12533,7 @@
     'hybrid-ad-sync':              'CRITICAL groups (everything except the per-server groups): puts the people who have ACTIVATED a PIM group into its on-premises AD group, time-limited when the forest supports it. Runs CONTINUOUSLY on the hybrid worker, a pass every few seconds, so emergency access reaches AD within about 20-30 seconds however many servers there are.',
     'hybrid-ad-sync-servers':      'The per-server groups (local administrators): the same activation sync in its own continuous process, reading the groups in parallel batches, so thousands of servers never slow the critical groups down.',
     'hybrid-ad-changes':           'Change detection: the moment an AD admin or an AD-marked group definition changes, creates or updates the AD account or AD group at once (the timed Apply changes and Group definitions runs stay as a safety net).',
-    'active-assignments-snapshot': 'Reads who holds active privileged access right now, for Review current delegations and Home.',
+    'active-assignments-snapshot': 'Reads who holds active privileged access right now, for Delegation overview (All privileged permissions) and Home.',
     'drift-snapshot':              'Checks whether the tenant still matches what PIM says it should (the Drift page).',
     'coverage':                    'Lists every role, workspace and Azure scope PIM does not delegate yet, orphan groups and groups PIM does not manage (the Coverage & gaps page).',
     'owner-review':                'Asks each department\'s owners, by mail, to confirm who still needs privileged access: on My people they Keep, Extend or Remove each person (a removal is approved by a PIM administrator). Off until you turn it on; its interval is the review cycle.',
@@ -17763,7 +17880,7 @@
         : (nWould ? 'would remove <b class="reconcile-would">' + escapeHtml(nWould) + '</b> leftover(s) PIM had created (report only -- nothing was removed)' : 'everything matches your configuration -- nothing to remove')) +
       '.</div>';
     if (nOther) h += '<div class="reconcile-other" style="font-size:12px;color:#57606a;margin-bottom:6px;">' + escapeHtml(nOther) +
-      ' assignment(s) exist that PIM did not create -- PIM leaves them alone. Clean them up on <a href="#" onclick="try{switchTab(\'revoke\')}catch(_){};return false;">Review current delegations</a>.</div>';
+      ' assignment(s) exist that PIM did not create -- PIM leaves them alone. Clean them up on <a href="#" onclick="try{switchTab(\'revoke\')}catch(_){};return false;">Delegation overview (All privileged permissions)</a>.</div>';
     if (heldTxt) h += '<div style="font-size:11.5px;color:#8c959f;margin-bottom:6px;">Why left alone: ' + heldTxt + '</div>';
     (rep.errors || []).forEach(e => { h += '<div style="font-size:12px;color:#9a6700;">' + escapeHtml(e) + '</div>'; });
     const rows = [];
@@ -23825,7 +23942,7 @@
       // the guessing the engine declined to do, in the one place where being wrong means an account
       // is switched off on a date nobody chose.
       'PIM-OFF-002':    'This row carries an <b>Auto-disable date</b> AND the old <code>OffboardDate</code>, with different dates, so the engine refuses to disable this admin at all. Which date is the right one is a decision only you can make: put it in Auto-disable date (Edit on the admin, Access &rarr; Admin accounts) and clear the old column. Saving the date there clears the old column for you.',
-      'PIM-OFF-003':    'Nothing is broken &mdash; the old column name <code>OffboardDate</code> is still read. The column is now <b>Auto-disable date</b>, because the sweep only DISABLES the account (PIM never deletes an account). Re-enter the date in Auto-disable date with Edit on the admin (Access &rarr; Admin accounts) and the old column is cleared for you; the schema preflight also migrates it on its next pass.',
+      'PIM-OFF-003':    'Nothing is broken &mdash; the old column name <code>OffboardDate</code> is still read. The column is now <b>Auto-disable date</b>, because the sweep only DISABLES the account (it never deletes an account). Re-enter the date in Auto-disable date with Edit on the admin (Access &rarr; Admin accounts) and the old column is cleared for you; the schema preflight also migrates it on its next pass.',
       'PIM-MSP-001':    'Which managed tenants receive this admin is a decision only you can make. Set its Ring (Edit on the admin), or set Management mode to local if it should not be synced.',
       'PIM-MSP-002':    'Pick the managed-tenant tags on the admin (Edit on the admin). A tag no managed tenant carries sends the admin to no managed tenant.',
       'PIM-MSP-003':    'Pick the replication from the dropdown: blank (no replication) or Replicate to managed tenants -- an admin also offers "only where a delegation needs this admin". On an admin it must match Management mode (msp = replicate, local/blank = managing tenant only). Which one is right is your decision -- fix the row in the grid or the wizard.',
@@ -23850,6 +23967,9 @@
       'PIM-WL-001':     'The connector cannot be guessed. Pick the Workload on the row.',
       'PIM-WL-002':     'The role cannot be guessed. Pick the RoleName on the row.',
       'PIM-WL-003':     'Assign and Remove are opposites, so guessing would be dangerous. Set Action to Assign or Remove (blank means Assign).',
+      // §100.26 (2.4.555): an OLD row without a Resource is a warning (it never blocks an unrelated commit); a row your commit
+      // adds or changes is an error. Either way the fix is the same -- fix or remove.
+      'PIM-WL-005':     'Fix or remove: the target (Resource) cannot be guessed. Fill in the row&rsquo;s Resource in the format the finding names, or delete the row (a binding PIM never applied is dropped without touching the workload). An existing row you did not change does not block your commit.',
       'PIM-WL-004':     'Which workload role the group should hold is a decision only you can make. Add its binding row (PIM-Assignments-Workloads / -Intune / -Defender), or clear Workload if the group is bound elsewhere.',
       'PIM-FK-005':     'Only you can say which group this Azure delegation should use. Define the group in PIM-Definitions-Services (the Azure wizards do this now), or remove the binding.',
       // 95.2c -- the role-assignable misconfiguration check. None of these gets a button: Entra cannot change
@@ -24344,7 +24464,7 @@
       does: 'the engine takes that exact assignment away on its next run, then deletes the row (it is a one-time instruction).',
       use: 'this person/group should no longer have this access',
       undo: 'no — add the delegation again to give it back' },
-    { verb: 'Revoke', where: 'Reviews &amp; controls › Review current delegations',
+    { verb: 'Revoke', where: 'Reviews &amp; controls › Delegation overview (All privileged permissions)',
       acts: 'the LIVE assignment in the tenant, now',
       does: 'takes the access away immediately (queued + audited). It does NOT change the delegation row — so if the row still says Assign, the engine puts the access back on its next run.',
       use: 'take it away right now; then Remove the row so it stays away',
@@ -24778,7 +24898,7 @@
       if (window.confirm('"' + (name || tag) + '" cannot be deleted yet -- ' + deps.length +
           ' delegation(s) still give somebody access through it:\n\n  ' + pimDependentSummary(deps) +
           '\n\nThese are PIM delegation ROWS, so they are removed here (or on the Access map) -- not on ' +
-          'Review current delegations, which lists live assignments in the tenant.\n\n' +
+          'Delegation overview (All privileged permissions), which lists live assignments in the tenant.\n\n' +
           'OK = open ' + entityLabel(deps[0].base) + ' filtered on "' + tag + '" so you can remove them first.\n' +
           'Cancel = stay here.')) {
         await pimGotoDependents(deps, tag);
@@ -24791,7 +24911,7 @@
       if (window.confirm('"' + name + '" cannot be deleted yet -- it still has ' + live.count +
           ' live PIM assignment(s) in the tenant' +
           (live.who && live.who.length ? (':\n  ' + live.who.join('\n  ') + (live.count > live.who.length ? '\n  ...' : '')) : '') +
-          '\n\nOK = open Review current delegations filtered on "' + name + '" so you can revoke them first.\n' +
+          '\n\nOK = open Delegation overview (All privileged permissions) filtered on "' + name + '" so you can revoke them first.\n' +
           'Cancel = stay here.')) {
         pimGotoRevoke(name);
       }
@@ -24938,7 +25058,7 @@
       if (window.confirm('"' + name + '" cannot be deleted yet -- it still has ' + live.count +
           ' live PIM assignment(s) in the tenant' +
           (live.who && live.who.length ? (':\n  ' + live.who.join('\n  ') + (live.count > live.who.length ? '\n  ...' : '')) : '') +
-          '\n\nOK = open Review current delegations filtered on "' + name + '" so you can revoke them first.\n' +
+          '\n\nOK = open Delegation overview (All privileged permissions) filtered on "' + name + '" so you can revoke them first.\n' +
           'Cancel = stay here.')) {
         pimGotoRevoke(name);
       }
@@ -31161,8 +31281,20 @@
     cadenceMinutes: 120,    // effective cadence of job 'active-assignments-snapshot'
     stale: false,           // older than two cadences
     snapshotHint: '',       // server's plain-language "as of" / queue note
-    revokeQueued: new Map() // row id -> ISO time the operator queued its revoke (kept until a snapshot no longer has the row)
+    revokeQueued: new Map(), // row id -> ISO time the operator queued its revoke (kept until a snapshot no longer has the row)
+    // §100.47 (a) (owner 2026-10-10): a read of the tenant already queued / running (server: refreshPending). While it is,
+    // the page says "Loading current delegations..." with when it started, polls until the read lands, and Refresh is
+    // disabled (it never asks for a second read).
+    refreshPending: false,
+    refreshState: '',       // 'queued' | 'running' | ''
+    refreshSinceUtc: '',
+    pollTimer: null,
+    pollMs: 15000,
+    // §100.47 (c): 'graph' (default) | 'list' -- remembered per browser (localStorage 'pim.revoke.view').
+    view: 'graph',
+    lastRender: 'message'   // what #revResults holds: 'table' (rows to draw) | 'message' (loading / empty / error)
   };
+  try { const _v = localStorage.getItem('pim.revoke.view'); if (_v === 'list' || _v === 'graph') REV.view = _v; } catch (_) { }
 
   // ----- Workload delegation panel (Maintenance tab) -----
   let _wlInit = false;
@@ -31236,15 +31368,105 @@
     if (!isServer) {
       document.getElementById('revResults').innerHTML =
         '<div class="rev-empty">Revoke is disabled in static mode -- launch via Open-PimManager.ps1 with -Server.</div>';
+      REV.lastRender = 'message'; applyRevView();
       return;
     }
     // First-open: kick a load (a fast read of the stored snapshot). Subsequent opens reuse the rows
     // unless there was no snapshot yet -- then look again, the scheduler may have built it meanwhile.
-    if ((REV.rows.length === 0 || REV.snapshotMissing) && !REV.inFlight) {
-      await loadActiveAssignments(false);
+    // §100.47 (a): ...and also when a read was still running when the page was last shown (it may have landed).
+    if ((REV.rows.length === 0 || REV.snapshotMissing || REV.refreshPending) && !REV.inFlight) {
+      await loadActiveAssignments(false, { quiet: REV.rows.length > 0 });
     } else {
       renderRevokeTable();
     }
+  }
+
+  // ===================================================================
+  // §100.47 (a) (owner 2026-10-10) -- "LOADING", NEVER "CLICK REFRESH", WHILE A READ IS UNDER WAY
+  // The page said "Click Refresh to load currently-active PIM assignments" while the scheduler was already reading the
+  // tenant, so people pressed Refresh -- and asked for another read. Now: while a read is queued or running (the server's
+  // refreshPending, from the scheduler's trigger queue + job locks) the page shows "Loading current delegations..." with
+  // when it started, polls the stored snapshot until the read lands, and Refresh is disabled with an "already loading"
+  // note. A snapshot that exists is shown at once, with its age. The server refuses a duplicate queue too.
+  // ===================================================================
+  function revSinceText(iso) {
+    if (!iso) return '';
+    const t = Date.parse(iso);
+    if (isNaN(t)) return '';
+    const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
+    const loc = fmtTime(iso);
+    const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/.exec(loc);
+    return 'started ' + (m ? m[2] : loc) + ' (' + (mins < 1 ? 'just now' : (mins < 120 ? mins + ' min ago' : Math.round(mins / 60) + ' h ago')) + ')';
+  }
+  function revPendingAgeMinutes() {
+    const t = Date.parse(REV.refreshSinceUtc || '');
+    return isNaN(t) ? 0 : Math.max(0, (Date.now() - t) / 60000);
+  }
+  // The Refresh button + its note: disabled while a read is queued/running or this page is loading.
+  function revSyncRefreshButton() {
+    const b = document.getElementById('revBtnRefresh');
+    const n = document.getElementById('revRefreshNote');
+    const busy = !!(REV.inFlight || REV.refreshPending);
+    if (b) {
+      b.disabled = busy;
+      b.title = REV.refreshPending
+        ? 'A read of the tenant is already ' + (REV.refreshState === 'running' ? 'running' : 'queued') + ' -- the page updates by itself when it is ready. Refresh asks for a new read only when none is under way.'
+        : 'Asks the scheduler for a new read of every active assignment (within ~5 min). The page shows the stored read; it never waits for the tenant. Disabled while a read is already queued or running.';
+    }
+    if (n) {
+      if (REV.refreshPending) {
+        n.innerHTML = '<span class="rev-spin"></span>already loading &mdash; ' + escapeHtml(REV.refreshState === 'running' ? 'reading the tenant' : 'queued for the scheduler') +
+          (REV.refreshSinceUtc ? ', ' + escapeHtml(revSinceText(REV.refreshSinceUtc)) : '');
+        n.style.display = '';
+      } else { n.innerHTML = ''; n.style.display = 'none'; }
+    }
+  }
+  function revStopPoll() { if (REV.pollTimer) { clearTimeout(REV.pollTimer); REV.pollTimer = null; } }
+  // While a read is under way, look at the stored snapshot again every pollMs (only while this page is open).
+  function revSchedulePoll() {
+    revStopPoll();
+    if (!REV.refreshPending || !isServer) return;
+    REV.pollTimer = setTimeout(async () => {
+      REV.pollTimer = null;
+      const tab = document.getElementById('revokeTab');
+      if (!tab || !tab.classList.contains('active')) return;   // reopening the page looks again (openRevokeTab)
+      if (REV.inFlight) { revSchedulePoll(); return; }
+      try { await loadActiveAssignments(false, { quiet: true, poll: true }); } catch (_) { }
+    }, REV.pollMs);
+  }
+  // The loading block shown INSTEAD of rows while there is no snapshot yet and a read is under way.
+  function revLoadingHtml() {
+    const age = revPendingAgeMinutes();
+    const late = age > 30;
+    return '<div class="rev-loading' + (late ? ' warn' : '') + '" id="revLoadingState"><span class="rev-spin"></span>Loading current delegations&hellip; ' +
+      '<span class="rev-load-age">' + escapeHtml(REV.refreshState === 'running' ? 'reading the tenant' : 'queued for the scheduler') +
+      (REV.refreshSinceUtc ? ', ' + escapeHtml(revSinceText(REV.refreshSinceUtc)) : '') + '</span></div>' +
+      '<div class="rev-loading-sub">The scheduler reads every privileged assignment in the tenant (Entra roles, Azure roles, PIM for Groups). ' +
+      'This page updates by itself when the read is ready &mdash; there is no need to press Refresh.' +
+      (late ? ' <b>It has been waiting more than 30 minutes:</b> check the <b>active-assignments-snapshot</b> job on the Jobs page.' : '') + '</div>';
+  }
+
+  // §100.47 (c): which of the two views is on screen. #revResults carries the table AND every message (loading, empty,
+  // error); in graph view it is shown only for a message, and the graph board is shown when there are rows to draw.
+  function revSetView(v, noRender) {
+    REV.view = (v === 'list') ? 'list' : 'graph';
+    try { localStorage.setItem('pim.revoke.view', REV.view); } catch (_) { }
+    if (!noRender) { applyRevView(); if (REV.view === 'graph' && REV.lastRender === 'table') renderRevGraph(); }
+  }
+  function applyRevView() {
+    const g = REV.view === 'graph';
+    ['revViewGraph', 'revViewList'].forEach(id => {
+      const b = document.getElementById(id);
+      if (!b) return;
+      const on = (b.dataset.view === REV.view);
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    const res = document.getElementById('revResults');
+    const gr = document.getElementById('revGraph');
+    const showGraph = g && REV.lastRender === 'table';
+    if (res) res.style.display = showGraph ? 'none' : '';
+    if (gr) gr.style.display = showGraph ? 'flex' : 'none';
   }
 
   // BUG-97. Owns the four count chips so that "not known yet" can never be rendered as 0.
@@ -31312,24 +31534,35 @@
     const b = document.getElementById('revBusy');
     if (b) b.style.display = on ? '' : 'none';
     const r = document.getElementById('revBtnRefresh');
-    if (r) r.disabled = !!on;
+    if (r) r.disabled = !!on || !!REV.refreshPending;
     const s = document.getElementById('revSearch');
     if (s) s.disabled = !!on;
+    revSyncRefreshButton();
   }
 
-  async function loadActiveAssignments(force) {
+  // opts.quiet (§100.47 a): a poll / re-open while rows are on screen -- keep showing them and the selection (pruned to
+  // rows still present) instead of blanking the page for a "Loading..." line.
+  async function loadActiveAssignments(force, opts) {
     if (REV.inFlight) return;
+    const quiet = !!(opts && opts.quiet) && REV.rows.length > 0;
+    const poll = !!(opts && opts.poll);   // a poll while "Loading..." is on screen: no flash, the status line is kept
+    // §100.47 (a): never ask for a second read while one is queued / running -- a plain read of the stored snapshot instead.
+    if (force && REV.refreshPending) force = false;
     REV.inFlight = true;
+    revStopPoll();
     const results = document.getElementById('revResults');
     // §70.1b option 2: this is a read of the STORED snapshot (fast). force=true (Refresh) only QUEUES a new
     // read for the scheduler -- the request never waits for Graph, so there is no long spinner any more.
-    results.innerHTML = '<div class="rev-loading"><span class="rev-spin"></span>' +
-      (force ? 'Queueing a new read for the scheduler and loading the stored snapshot&hellip;' : 'Loading the stored snapshot of active assignments&hellip;') + '</div>';
-    setRevChips(null);
+    if (!quiet && !poll) {
+      results.innerHTML = '<div class="rev-loading" id="revLoadingState"><span class="rev-spin"></span>' +
+        (force ? 'Asking the scheduler for a new read, and loading current delegations&hellip;' : 'Loading current delegations&hellip;') + '</div>';
+      REV.lastRender = 'message'; applyRevView();
+      setRevChips(null);
+      setRevStatus('');
+      document.getElementById('revActionBar').classList.remove('active');
+      document.getElementById('revResultsPane').style.display = 'none';
+    }
     setRevBusy(true);
-    setRevStatus('');
-    document.getElementById('revActionBar').classList.remove('active');
-    document.getElementById('revResultsPane').style.display = 'none';
     try {
       const url = '/api/active-assignments' + (force ? '?refresh=1' : '');
       const data = await api('GET', url);
@@ -31350,20 +31583,32 @@
       REV.cadenceMinutes = (data && data.cadenceMinutes) || 120;
       REV.stale = !!(data && data.stale);
       REV.snapshotHint = (data && data.hint) || '';
+      // §100.47 (a): a read already queued / running. An older server (no refreshPending) only says refreshQueued.
+      const hasPend = !!(data && Object.prototype.hasOwnProperty.call(data, 'refreshPending'));
+      REV.refreshPending = hasPend ? !!data.refreshPending : REV.refreshQueued;
+      REV.refreshState = (data && data.refreshState) || (REV.refreshPending ? 'queued' : '');
+      REV.refreshSinceUtc = (data && data.refreshSinceUtc) || (REV.refreshPending ? (REV.refreshSinceUtc || new Date().toISOString()) : '');
       // A revoke marked "queued" stays marked while the snapshot still carries the row; once a newer snapshot
       // no longer has it, the revoke has landed and the marker is dropped.
       const present = new Set(REV.rows.map(r => r.id));
       for (const id of Array.from(REV.revokeQueued.keys())) { if (!present.has(id)) REV.revokeQueued.delete(id); }
-      REV.selected.clear();
+      if (quiet) { for (const id of Array.from(REV.selected)) { if (!present.has(id)) REV.selected.delete(id); } }
+      else REV.selected.clear();
       updateRevokeBadge();
       renderRevokeTable();
     } catch (e) {
+      if (quiet) {   // a poll that failed keeps what is on screen, and says so
+        setRevStatus('Could not look for the new read: ' + String(e.message || e) + ' -- the rows shown are the previous read.', 'warn');
+        return;
+      }
       results.innerHTML = '<div class="rev-error">Failed to load active assignments: ' + escapeHtml(String(e.message || e)) + '</div>';
+      REV.lastRender = 'message'; applyRevView();
       // A failed load leaves the counts UNKNOWN, not zero -- same rule as the in-flight state.
       setRevChips(null);
     } finally {
       REV.inFlight = false;
       setRevBusy(false);
+      revSchedulePoll();
     }
   }
 
@@ -31372,7 +31617,7 @@
     if (!badge) return;
     // 🔴 REQ-R (operator 2026-09-19: "after i went in here, it now shows a number in the menu even after i go out, why,
     // i dont see need for that"): the row count is a size, not a to-do -- and the menu mirrors every visible tab badge,
-    // so the page's own row count lit "Review current delegations" for the rest of the session. The counts stay on the
+    // so the page's own row count lit "Delegation overview (All privileged permissions)" for the rest of the session. The counts stay on the
     // page (the chips); the menu badge is kept hidden.
     badge.style.display = 'none';
     badge.textContent = '';
@@ -31509,12 +31754,17 @@
 
     // "As of" indicator + snapshot note (§70.1b option 2).
     renderRevSnapshotInfo();
+    revSyncRefreshButton();
+    // §100.47 (c): what #revResults holds decides which view is on screen (applyRevView).
+    const shown = (kind) => { REV.lastRender = kind; applyRevView(); };
 
     if (REV.snapshotMissing) {
-      // No spinner: nothing in this page is waiting. The scheduler builds the snapshot on its next tick.
-      results.innerHTML = '<div class="rev-empty">No snapshot of active assignments yet. ' +
-        (REV.refreshQueued ? 'A read is <b>queued</b> &mdash; the scheduler builds it within ~5 min. Reopen this tab or click <b>Refresh</b> later.'
-                           : 'The scheduler job <b>active-assignments-snapshot</b> builds it on its cadence (see the Jobs page).') + '</div>';
+      // §100.47 (a): a read under way = "Loading current delegations..." with when it started (the page polls); only
+      // when NOTHING is queued or running does it say there is no snapshot, and why.
+      results.innerHTML = REV.refreshPending ? revLoadingHtml()
+        : '<div class="rev-empty">No snapshot of active assignments yet, and no read is queued. ' +
+          'The scheduler job <b>active-assignments-snapshot</b> builds it on its cadence (see the Jobs page), or press <b>Refresh</b> to ask for one now.</div>';
+      shown('message');
       updateActionBar();
       return;
     }
@@ -31539,10 +31789,13 @@
         }
         html += '<div style="margin-top:8px;">Fix the permission/scope above, then click <strong>Refresh</strong>.</div></div>';
         results.innerHTML = html;
+        shown('message');
         updateActionBar();
         return;
       }
-      results.innerHTML = '<div class="rev-empty">No active PIM assignments found for this tenant. (If you expected some, click Refresh.)</div>';
+      results.innerHTML = REV.refreshPending ? revLoadingHtml()
+        : '<div class="rev-empty">No active PIM assignments found for this tenant. (If you expected some, click Refresh.)</div>';
+      shown('message');
       updateActionBar();
       return;
     }
@@ -31567,6 +31820,7 @@
           if (s) { s.value = q; try { s.oninput({ target: s }); s.focus(); } catch (_) { } }
         }, 0);
       };
+      shown('message');
       updateActionBar();
       return;
     }
@@ -31601,14 +31855,15 @@
       // BUG-98: identity first, technical key second -- the same rule as the findings list and
       // IMP-15. A reviewer cannot approve or revoke what they cannot identify, and this column
       // was 689 rows of bare objectIds.
-      out.push('<td class="rev-principal-cell">' + revPrincipalCell(r) + revCentralChip(r) +
-        (queuedAt ? '<span class="rev-queued-chip" title="Queued at ' + escapeHtml(formatRevWhen(queuedAt)) + '. The table is a snapshot, so this row stays until the engine applies the revoke and the next snapshot is read.">revoke queued</span>' : '') + '</td>');
-      out.push('<td>' + escapeHtml(r.role || '') + '</td>');
-      out.push('<td class="rev-scope-cell">' + escapeHtml(r.scope || '') + '</td>');
+      // §100.47 (d): Principal / Role capped (ellipsis + tooltip), Scope floored at 22ch and broken only after '/'.
+      out.push('<td class="rev-principal-cell" title="' + escapeHtml(String(r.principal || r.principalId || '')) + '"><div class="rev-p-wrap">' + revPrincipalCell(r) + revCentralChip(r) +
+        (queuedAt ? '<span class="rev-queued-chip" title="Queued at ' + escapeHtml(formatRevWhen(queuedAt)) + '. The table is a snapshot, so this row stays until the engine applies the revoke and the next snapshot is read.">revoke queued</span>' : '') + '</div></td>');
+      out.push('<td class="rev-role-cell" title="' + escapeHtml(r.role || '') + '"><span class="rev-ell">' + escapeHtml(r.role || '') + '</span></td>');
+      out.push('<td class="rev-scope-cell" title="' + escapeHtml(r.scope || '') + '"><span class="rev-scope-wrap">' + revScopeHtml(r.scope) + '</span></td>');
       out.push('<td class="rev-type-cell type-' + escapeHtml(r.type || '') + '">' + escapeHtml(r.type || '') + '</td>');
       out.push('<td class="rev-when-cell">' + escapeHtml(formatRevWhen(r.start)) + '</td>');
       out.push('<td class="rev-when-cell">' + escapeHtml(r.end ? formatRevWhen(r.end) : 'no expiration') + '</td>');
-      out.push('<td>' + escapeHtml(r.justification || '') + '</td>');
+      out.push('<td class="rev-just-cell"><span class="rev-just">' + escapeHtml(r.justification || '') + '</span></td>');
       out.push('</tr>');
     }
     out.push('</tbody></table>');
@@ -31676,7 +31931,20 @@
       };
     });
 
+    // §100.47 (c): the same filtered rows feed the graph view (drawn only while it is the view on screen).
+    shown('table');
+    if (REV.view === 'graph') {
+      try { renderRevGraph(filtered); }
+      catch (e) { const d = document.getElementById('dgvDetail'); if (d) d.innerHTML = '<span style="color:#cf222e">The graph could not be drawn: ' + escapeHtml(String(e.message || e)) + ' -- use List view.</span>'; }
+    }
+
     updateActionBar();
+  }
+
+  // §100.47 (d): an ARM path breaks only after a '/' -- escaped, then a <wbr> after every slash (a slash-free scope such
+  // as "Directory" is unchanged). The full path is the cell's tooltip.
+  function revScopeHtml(s) {
+    return escapeHtml(String(s == null ? '' : s)).replace(/\//g, '/<wbr>');
   }
 
   function formatRevWhen(s) {
@@ -31974,6 +32242,8 @@
       ' as <b>pending changes</b>. <b>Nothing is revoked yet</b> &mdash; you commit them under ' +
       '<b>Pending changes &rsaquo; Review &amp; commit queue</b> and the engine applies them on its next run.</p>' +
       '<p>Once committed and applied, the affected principals will need to re-activate via PIM if they need access.</p>' +
+      // §100.47: one confirmation for the list AND the graph view, and it carries the delegation-row note.
+      '<p class="rev-confirm-rownote" style="font-size:11.5px;color:#57606a;">Revoking does <b>not</b> change the delegation that granted the access: if that delegation row still says Assign, the engine creates the access again on its next run. To make it stay away, also <b>Remove</b> the delegation (Access map or All records).</p>' +
       refusedHtml +
       skipHtml +
       '<p style="color:#57606a;font-size:11.5px">Justification: <code style="color:#1a1a1a">' +
@@ -32149,7 +32419,9 @@
     }
     if (!note) return;
     const bits = [];
-    if (REV.refreshQueued && !REV.snapshotMissing) bits.push('A new read is <b>queued</b> for the scheduler (within ~5 min). The table below is still the snapshot shown above; reopen the tab or press Refresh later to see it.');
+    // §100.47 (a): the stored read is shown at once with its age; a read under way says so, and the page polls for it.
+    if ((REV.refreshPending || REV.refreshQueued) && !REV.snapshotMissing) bits.push('<span class="rev-spin" style="display:inline-block;vertical-align:-2px;margin-right:5px;"></span>A new read is <b>' + (REV.refreshState === 'running' ? 'running' : 'queued') + '</b>' +
+      (REV.refreshSinceUtc ? ' (' + escapeHtml(revSinceText(REV.refreshSinceUtc)) + ')' : '') + '. What you see is the read shown above; the page updates by itself when the new one is ready.');
     if (REV.stale) bits.push('This snapshot is <b>stale</b> (older than two cadences). Check the <b>active-assignments-snapshot</b> job on the Jobs page.');
     if (REV.revokeQueued.size > 0) bits.push(REV.revokeQueued.size + ' row(s) marked <b>revoke queued</b> stay listed until the engine applies the revoke and the next snapshot is read.');
     // Owner 2026-10-08: when PIM Manager could not tell which rows are its own / the support app's / break-glass, say so --
@@ -32171,7 +32443,22 @@
   // every time the tab is opened, so the controls cannot stay unbound.
   function wireRevokeTab() {
     const btnR = document.getElementById('revBtnRefresh');
-    if (btnR) btnR.onclick = () => loadActiveAssignments(true);
+    // §100.47 (a): Refresh never asks for a second read while one is queued / running (the button is disabled then too).
+    if (btnR) btnR.onclick = () => {
+      if (REV.refreshPending || REV.inFlight) {
+        revSyncRefreshButton();
+        setRevStatus('A read of the tenant is already ' + (REV.refreshState === 'running' ? 'running' : 'queued') + ' -- not asked for again. The page updates by itself when it is ready.', 'warn');
+        return;
+      }
+      loadActiveAssignments(true);
+    };
+    // §100.47 (c): Graph view | List view (remembered per browser).
+    ['revViewGraph', 'revViewList'].forEach(id => {
+      const b = document.getElementById(id);
+      if (b) b.onclick = () => revSetView(b.dataset.view);
+    });
+    applyRevView();
+    dgvWire();
 
     const search = document.getElementById('revSearch');
     if (search) search.oninput = () => { REV.textFilter = search.value; renderRevokeTable(); };
@@ -32213,6 +32500,414 @@
 
     const btnClr = document.getElementById('revBtnClear');
     if (btnClr) btnClr.onclick = () => { REV.selected.clear(); setRevStatus(''); renderRevokeTable(); };
+  }
+
+  // ===================================================================
+  // §100.47 (c) (owner 2026-10-10, screenshots) -- THE GRAPH VIEW of the Delegation overview.
+  // "The graph view looks EXACTLY like the Access map ... but shows the LIVE delegations (all privileged permissions) with
+  // revoke only (no add)". It is the Access map BOARD -- the same four columns and headers, the same .map-item boxes, dots,
+  // counts, column filters, collapse-to-path on select, and the same wire drawing (mapDrawWires / mapHiliteWires with a
+  // ctx) and path walk (mapBfs) -- fed from the LIVE active-assignment rows instead of delegation rows:
+  //     principal (person / app / deleted) -> group (PIM for Groups) -> nested group -> role @ scope (Entra / AU / Azure)
+  // Column rule: a group that is itself a member of another live group is column 2 ("what that includes"); every other
+  // group is column 1. Every filter of the page (type chips, the five ticks, the text filter) applies, because the graph
+  // is drawn from applyRevokeFilter()'s rows -- the same rows as the list.
+  // REVOKE ONLY: no Give / Add, no drag, no Ctrl+click linking. Selecting a box or a wire lists its live assignments; the
+  // ticked ones go through EXACTLY the list's revoke path (REV.selected -> submitRevoke: the server preview, break-glass
+  // skipped, large-batch count confirmation, maker/checker approval, queued under Pending changes).
+  // Not reused from the Access map, on purpose: mapItem / mapSelect / mapRenderDetail carry the Give/Remove/drag/Ctrl+click
+  // staging of delegation ROWS (MAP_LINK_ACTIONS, pendingChanges), which this view must not have; the box, path and wire
+  // primitives and every style are shared.
+  // ===================================================================
+  const DGV = { sel: null, selEdge: null, model: null, focusMode: true, colFilter: null, lastEdges: null, hoverId: null, wired: false };
+  const DGV_PERSON_DOT = { user: '#0969da', servicePrincipal: '#bc4c00', deleted: '#cf222e' };
+  const DGV_COLF = [
+    [['all', 'All'], ['user', 'People'], ['servicePrincipal', 'Apps'], ['deleted', 'Deleted']],
+    [['all', 'All'], ['reach', 'Reaches a role'], ['noreach', 'Reaches no role']],
+    [['all', 'All'], ['reach', 'Reaches a role'], ['noreach', 'Reaches no role']],
+    [['all', 'All'], ['entra', 'Entra roles'], ['azure', 'Azure roles']]
+  ];
+  function dgvCanRevoke() { return !!(isServer && typeof roleAtLeast === 'function' && roleAtLeast('Admin')); }
+  function dgvTargetKind(r) {
+    if (r.type === 'azure-rbac') return 'az-resource';
+    const sc = String(r.directoryScopeId || '').trim();
+    return (sc && sc !== '/') ? 'au-role' : 'entra-role';
+  }
+  function buildRevGraphModel(rows) {
+    const s = (v) => String(v == null ? '' : v).trim();
+    const byId = {}, nodes = [], fwd = {}, back = {}, edgeByKey = {};
+    const add = (id, n) => { if (!byId[id]) { n.id = id; byId[id] = n; nodes.push(n); } return byId[id]; };
+    for (const r of (rows || [])) {
+      const pid = s(r.principalId) || s(r.principal) || '(unknown)';
+      const pk = s(r.principalKind) || 'user';
+      const src = (pk === 'group')
+        ? add('g:' + pid.toLowerCase(), { kind: 'group', label: s(r.principal) || pid, objectId: pid })
+        : add('p:' + pid.toLowerCase(), { kind: 'person', pkind: (pk === 'servicePrincipal' || pk === 'deleted') ? pk : 'user', label: s(r.principal) || pid, objectId: pid, ownKind: '' });
+      if (src.kind === 'person' && revOwnKind(r)) src.ownKind = revOwnKind(r);
+      let tgt;
+      if (r.type === 'pim-for-groups') {
+        const gid = s(r.groupId) || s(r.scope) || '(group)';
+        tgt = add('g:' + gid.toLowerCase(), { kind: 'group', label: s(r.scope) || gid, objectId: gid });
+        if ((!tgt.label || tgt.label === tgt.objectId) && s(r.scope)) tgt.label = s(r.scope);
+      } else {
+        const tk = dgvTargetKind(r);
+        const role = s(r.role) || s(r.roleDefinitionId) || '(role)';
+        const scope = s(r.scope);
+        const where = (r.type === 'azure-rbac') ? scope : (s(r.directoryScopeId) || scope || '/');
+        tgt = add('t:' + s(r.type) + '|' + (s(r.roleDefinitionId) || role).toLowerCase() + '|' + where.toLowerCase(),
+                  { kind: tk, label: role + ((tk !== 'entra-role' && scope) ? ' @ ' + scope : ''), objectId: s(r.roleDefinitionId), rtype: s(r.type) });
+      }
+      if (src.id === tgt.id) continue;
+      const key = src.id + '>' + tgt.id;
+      let e = edgeByKey[key];
+      if (!e) { e = { source: src.id, target: tgt.id, key: key, rows: [] }; edgeByKey[key] = e; (fwd[src.id] = fwd[src.id] || []).push(e); (back[tgt.id] = back[tgt.id] || []).push(e); }
+      e.rows.push(r);
+    }
+    for (const n of nodes) {
+      if (n.kind === 'group') n.col = (back[n.id] || []).some(e => byId[e.source] && byId[e.source].kind === 'group') ? 2 : 1;
+    }
+    const edges = Object.keys(edgeByKey).map(k => edgeByKey[k]);
+    for (const e of edges) {
+      // a wire whose every live assignment already has a revoke queued is drawn as the Access map draws a staged removal
+      e.removing = e.rows.length > 0 && e.rows.every(r => REV.revokeQueued.has(r.id));
+      e.title = byId[e.source].label + ' -> ' + byId[e.target].label + ' (' + e.rows.length + ' live assignment' + (e.rows.length === 1 ? '' : 's') + ') -- click to revoke';
+    }
+    const colOf = (n) => { if (!n) return -1; if (n.kind === 'person') return 0; if (n.kind === 'group') return n.col; return 3; };
+    return { nodes: nodes, byId: byId, fwd: fwd, back: back, colOf: colOf, edges: edges, edgeByKey: edgeByKey };
+  }
+  function dgvReach(m, id) {
+    let t = 0;
+    for (const nid of mapBfs(id, m.fwd, 'target').nodes) { if (m.colOf(m.byId[nid]) === 3) t++; }
+    return t;
+  }
+  // The rows a box is about: what it holds (its wires to the right) and what reaches it directly (its wires to the left).
+  function dgvRowsOf(m, id, dir) {
+    const list = (dir === 'in' ? m.back[id] : m.fwd[id]) || [];
+    const out = [];
+    for (const e of list) for (const r of e.rows) out.push(r);
+    return out;
+  }
+  function dgvItem(m, n, badge) {
+    const el = document.createElement('div');
+    el.className = 'map-item';
+    el.dataset.id = n.id;
+    const dot = document.createElement('span');
+    dot.className = 'map-dot';
+    dot.style.background = n.kind === 'person' ? (DGV_PERSON_DOT[n.pkind] || '#0969da')
+      : (n.kind === 'group' ? MAP_DOT[n.col === 2 ? 'permission-group' : 'role-group'] : (MAP_DOT[n.kind] || '#57606a'));
+    el.appendChild(dot);
+    const lbl = document.createElement('span');
+    lbl.className = 'map-label';
+    const full = String(n.label || n.id);
+    const atIx = (n.kind === 'az-resource' || n.kind === 'au-role') ? full.indexOf(' @ ') : -1;
+    if (atIx > 0) {
+      lbl.textContent = full.substring(0, atIx);
+      const sub = document.createElement('span');
+      sub.className = 'map-sub-line';
+      sub.textContent = full.substring(atIx + 3);
+      lbl.appendChild(sub);
+    } else lbl.textContent = full;
+    lbl.title = full + (n.objectId && n.objectId !== full ? '\n' + n.objectId : '');
+    el.appendChild(lbl);
+    const cnt = document.createElement('span');
+    cnt.className = 'map-count';
+    cnt.textContent = badge || '';
+    el.appendChild(cnt);
+    if (n.ownKind && REV_OWN[n.ownKind]) {
+      const b = document.createElement('span');
+      b.className = 'dgv-badge rev-own-' + n.ownKind;
+      b.textContent = REV_OWN[n.ownKind].label;
+      b.title = REV_OWN[n.ownKind].title;
+      b.style.background = REV_OWN[n.ownKind].bg;
+      el.appendChild(b);
+    }
+    // a revoke already queued on what this box holds (or, for a role, on who holds it): said in words, red like a staged removal
+    const own = dgvRowsOf(m, n.id, m.colOf(n) === 3 ? 'in' : 'out');
+    const q = own.filter(r => REV.revokeQueued.has(r.id)).length;
+    if (q) {
+      const c = document.createElement('span');
+      c.className = 'dgv-queued';
+      c.textContent = 'revoke queued' + (q > 1 ? ' (' + q + ')' : '');
+      c.title = 'A revoke of ' + q + ' live assignment(s) here is queued under Pending changes. The board is the stored read, so it stays until the engine applies it and the next read is taken.';
+      el.appendChild(c);
+      if (q === own.length) el.classList.add('removing');
+    }
+    el.onclick = () => dgvSelect(n.id);
+    return el;
+  }
+  function renderRevGraph(rows) {
+    const board = document.getElementById('dgvBoard');
+    if (!board) return;
+    const m = buildRevGraphModel(rows || applyRevokeFilter());
+    DGV.model = m;
+    const cols = [[], [], [], []];
+    for (const n of m.nodes) { const c = m.colOf(n); if (c >= 0) cols[c].push(n); }
+    for (const c of cols) c.sort((a, b) => String(a.label || a.id).localeCompare(String(b.label || b.id)));
+    const colEls = [0, 1, 2, 3].map(i => document.getElementById('dgvCol' + i));
+    colEls.forEach(c => { if (c) c.innerHTML = ''; });
+    const hdr = (colEl, text) => { const h = document.createElement('div'); h.className = 'map-group-hdr'; h.textContent = text; colEl.appendChild(h); };
+    // col 0: who holds the access, by what it is
+    const pkName = { user: 'People', servicePrincipal: 'Apps and service principals', deleted: 'Deleted principals (no longer in the directory)' };
+    for (const k of ['user', 'servicePrincipal', 'deleted']) {
+      const items = cols[0].filter(n => n.pkind === k);
+      if (!items.length) continue;
+      hdr(colEls[0], pkName[k]);
+      for (const n of items) { const reach = dgvReach(m, n.id); colEls[0].appendChild(dgvItem(m, n, reach ? ('→ ' + reach) : '')); }
+    }
+    // col 1 / col 2: groups -- the count is the wires to the right, as on the Access map
+    if (cols[1].length) hdr(colEls[1], 'PIM for Groups');
+    for (const n of cols[1]) colEls[1].appendChild(dgvItem(m, n, '→ ' + ((m.fwd[n.id] || []).length)));
+    if (cols[2].length) hdr(colEls[2], 'Nested in other groups');
+    for (const n of cols[2]) colEls[2].appendChild(dgvItem(m, n, '→ ' + ((m.fwd[n.id] || []).length)));
+    // col 3: roles by kind, the Access map's headers
+    const kindHdr = { 'entra-role': 'Entra ID roles', 'au-role': 'AU-scoped roles', 'az-resource': 'Azure RBAC @ scope' };
+    for (const k of ['entra-role', 'au-role', 'az-resource']) {
+      const items = cols[3].filter(n => n.kind === k);
+      if (!items.length) continue;
+      hdr(colEls[3], kindHdr[k]);
+      for (const n of items) colEls[3].appendChild(dgvItem(m, n, '← ' + ((m.back[n.id] || []).length)));
+    }
+    const emptyText = ['Nobody holds a live assignment in this filter.', 'No group memberships in this filter.', 'No nested groups in this filter.', 'No roles in this filter.'];
+    colEls.forEach((colEl, i) => {
+      if (!colEl || cols[i].length) return;
+      const e = document.createElement('div');
+      e.className = 'map-empty';
+      e.style.cssText = 'color:#57606a;font-size:12px;font-style:italic;padding:12px 10px;line-height:1.5;';
+      e.textContent = emptyText[i];
+      colEl.appendChild(e);
+    });
+    dgvEnsureColFilters();
+    dgvApplyColFilter();
+    if (DGV.sel && m.byId[DGV.sel]) dgvSelect(DGV.sel, true);
+    else if (DGV.selEdge && m.edgeByKey[DGV.selEdge]) dgvSelectEdge(DGV.selEdge, true);
+    else dgvClearSel();
+  }
+  function dgvColFilterState() {
+    if (!DGV.colFilter) {
+      let st = null; try { st = JSON.parse(localStorage.getItem('pim.revoke.graph.colFilter') || 'null'); } catch (_) { st = null; }
+      DGV.colFilter = [0, 1, 2, 3].map(i => {
+        const v = Array.isArray(st) ? st[i] : 'all';
+        return DGV_COLF[i].some(o => o[0] === v) ? v : 'all';
+      });
+    }
+    return DGV.colFilter;
+  }
+  function dgvEnsureColFilters() {
+    const st = dgvColFilterState();
+    document.querySelectorAll('#dgvBoard .map-col').forEach((col, i) => {
+      const h = col.querySelector('h3'); if (!h || col.querySelector('.map-col-filter')) return;
+      const sel = document.createElement('select');
+      sel.className = 'map-col-filter'; sel.dataset.col = String(i);
+      sel.title = 'Show every box in this column, or only some';
+      sel.innerHTML = DGV_COLF[i].map(o => '<option value="' + o[0] + '">' + escapeHtml(o[1]) + '</option>').join('');
+      sel.value = st[i] || 'all';
+      sel.onclick = (ev) => ev.stopPropagation();
+      sel.onchange = () => {
+        const cur = dgvColFilterState(); cur[i] = sel.value;
+        try { localStorage.setItem('pim.revoke.graph.colFilter', JSON.stringify(cur)); } catch (_) { }
+        dgvApplyColFilter();
+        if (DGV.lastEdges) dgvDraw();
+      };
+      const bar = document.createElement('div');
+      bar.className = 'map-col-tools';
+      bar.appendChild(sel);
+      h.insertAdjacentElement('afterend', bar);
+    });
+  }
+  function dgvApplyColFilter() {
+    const m = DGV.model; if (!m) return;
+    const st = dgvColFilterState();
+    [0, 1, 2, 3].forEach(i => {
+      const colEl = document.getElementById('dgvCol' + i);
+      if (!colEl) return;
+      const f = st[i] || 'all';
+      colEl.querySelectorAll('.map-item').forEach(el => {
+        const n = m.byId[el.dataset.id];
+        let hide = false;
+        if (n && f !== 'all') {
+          if (i === 0) hide = (n.pkind !== f);
+          else if (i === 3) hide = (f === 'entra') ? (n.kind === 'az-resource') : (n.kind !== 'az-resource');
+          else { const r = dgvReach(m, n.id) > 0; hide = (f === 'reach') ? !r : r; }
+        }
+        el.classList.toggle('cf-hide', hide);
+      });
+      const sel = document.querySelector('#dgvBoard .map-col-filter[data-col="' + i + '"]');
+      if (sel && sel.value !== f) sel.value = f;
+    });
+  }
+  function dgvDraw() {
+    mapDrawWires(DGV.lastEdges || [], { board: document.getElementById('dgvBoard'), svg: document.getElementById('dgvWires'),
+      col0: document.getElementById('dgvCol0'), hoverId: DGV.hoverId, clickable: true });
+  }
+  function dgvSetFocusToggle() {
+    const btn = document.getElementById('dgvFocusToggle');
+    if (!btn) return;
+    const on = (DGV.focusMode !== false);
+    btn.textContent = (on ? '☑' : '☐') + ' Hide unrelated rows';
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.title = on ? 'ON -- only the selected item’s path is shown. Click to bring the whole board back, greyed out.'
+                   : 'OFF -- every row is shown, the rows off the selected item’s path greyed out. Click to hide them.';
+  }
+  // Collapse the board to a set of boxes + wires (the Access map's focus mode).
+  function dgvShowPath(nodeSet, pathEdges, selId, rerendered) {
+    const board = document.getElementById('dgvBoard');
+    board.querySelectorAll('.map-item').forEach(el => {
+      const inPath = nodeSet.has(el.dataset.id);
+      el.classList.toggle('dim', !inPath);
+      el.classList.toggle('path', inPath && el.dataset.id !== selId);
+      el.classList.toggle('sel', !!selId && el.dataset.id === selId);
+    });
+    board.classList.toggle('focused', DGV.focusMode !== false);
+    const ft = document.getElementById('dgvFocusToggle'); if (ft) ft.style.display = '';
+    const cl = document.getElementById('dgvClear'); if (cl) cl.style.display = '';
+    dgvSetFocusToggle();
+    if (!rerendered && selId) { const s = board.querySelector('.map-item.sel'); if (s && s.scrollIntoView) s.scrollIntoView({ block: 'nearest' }); }
+    DGV.lastEdges = pathEdges;
+    dgvDraw();
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => { if (DGV.lastEdges === pathEdges) dgvDraw(); });
+  }
+  function dgvSelect(id, rerendered) {
+    const m = DGV.model; if (!m || !m.byId[id]) return;
+    DGV.sel = id; DGV.selEdge = null;
+    const down = mapBfs(id, m.fwd, 'target'), up = mapBfs(id, m.back, 'source');
+    dgvShowPath(new Set([...down.nodes, ...up.nodes]), [...down.edges, ...up.edges], id, rerendered);
+    dgvRenderDetail({ node: id });
+  }
+  function dgvSelectEdge(key, rerendered) {
+    const m = DGV.model; const e = m && m.edgeByKey[key]; if (!e) return;
+    DGV.selEdge = key; DGV.sel = null;
+    const up = mapBfs(e.source, m.back, 'source'), down = mapBfs(e.target, m.fwd, 'target');
+    dgvShowPath(new Set([...up.nodes, ...down.nodes]), [...up.edges, e, ...down.edges], null, rerendered);
+    const board = document.getElementById('dgvBoard');
+    board.querySelectorAll('.map-item').forEach(el => { if (el.dataset.id === e.source || el.dataset.id === e.target) { el.classList.add('sel'); el.classList.remove('path'); } });
+    dgvRenderDetail({ edge: key });
+  }
+  function dgvClearSel() {
+    DGV.sel = null; DGV.selEdge = null; DGV.lastEdges = null;
+    const board = document.getElementById('dgvBoard');
+    if (board) { board.classList.remove('focused'); board.querySelectorAll('.map-item').forEach(el => el.classList.remove('sel', 'path', 'dim')); }
+    const svg = document.getElementById('dgvWires'); if (svg) { svg.innerHTML = ''; svg.classList.remove('mw-isolating'); }
+    const cl = document.getElementById('dgvClear'); if (cl) cl.style.display = 'none';
+    const ft = document.getElementById('dgvFocusToggle'); if (ft) ft.style.display = 'none';
+    const d = document.getElementById('dgvDetail');
+    if (d) { d.classList.remove('has-sel'); d.innerHTML = '<span class="empty">Nothing selected &mdash; click a person, group or role above (or a line) to see its live assignments and revoke what is not needed.</span>'; }
+  }
+  function dgvRowLine(r) {
+    const queued = REV.revokeQueued.has(r.id);
+    const can = revSelectable(r);
+    const why = queued ? 'A revoke of this assignment is already queued' : (revCentralOf(r).readOnly ? 'From the managing tenant (central): read-only here' : '');
+    return '<label class="dgv-row' + (can ? '' : ' dis') + '" data-id="' + escapeHtml(r.id) + '"' + (why ? ' title="' + escapeHtml(why) + '"' : '') + '>' +
+      '<input type="checkbox" class="dgv-check" data-id="' + escapeHtml(r.id) + '"' + (REV.selected.has(r.id) && can ? ' checked' : '') + (can && dgvCanRevoke() ? '' : ' disabled') + '>' +
+      '<span class="dgv-what">' + escapeHtml(revApprovalItemText(r)) + revOwnBadge(r) + revCentralChip(r) +
+      (queued ? '<span class="rev-queued-chip">revoke queued</span>' : '') + '</span></label>';
+  }
+  function dgvRenderDetail(sel) {
+    const d = document.getElementById('dgvDetail');
+    const m = DGV.model;
+    if (!d || !m) return;
+    let head = '', sections = [];
+    if (sel.edge) {
+      const e = m.edgeByKey[sel.edge]; if (!e) { dgvClearSel(); return; }
+      head = escapeHtml(m.byId[e.source].label) + ' &rarr; ' + escapeHtml(m.byId[e.target].label) + ' <span class="dgv-sub">(the line you selected)</span>';
+      sections.push({ h: 'The live assignment' + (e.rows.length === 1 ? '' : 's') + ' on this line', rows: e.rows });
+    } else {
+      const n = m.byId[sel.node];
+      const c = m.colOf(n);
+      const what = c === 0 ? ({ user: 'person', servicePrincipal: 'app', deleted: 'deleted principal' })[n.pkind] || 'principal'
+                 : (c === 3 ? 'role' : 'group');
+      head = escapeHtml(n.label) + ' <span class="dgv-sub">(' + what + ')</span>';
+      if (c === 0) {
+        const reach = dgvReach(m, n.id);
+        head += ' <span class="dgv-sub">&middot; reaches ' + reach + ' role' + (reach === 1 ? '' : 's') + ' (directly and through groups)</span>';
+        sections.push({ h: 'What this ' + what + ' holds directly', rows: dgvRowsOf(m, n.id, 'out') });
+      } else if (c === 3) {
+        sections.push({ h: 'Who holds this role directly', rows: dgvRowsOf(m, n.id, 'in') });
+      } else {
+        sections.push({ h: 'Who is in this group', rows: dgvRowsOf(m, n.id, 'in') });
+        sections.push({ h: 'What this group holds directly', rows: dgvRowsOf(m, n.id, 'out') });
+      }
+    }
+    sections = sections.filter(s => s.rows.length);
+    const can = dgvCanRevoke();
+    let h = '<div class="dgv-head">' + head + '</div>';
+    if (!sections.length) h += '<div class="dgv-note">No live assignment of its own in this filter.</div>';
+    else {
+      h += '<div class="dgv-list">';
+      for (const s of sections) h += '<div class="dgv-sec">' + escapeHtml(s.h) + ' (' + s.rows.length + ')</div>' + s.rows.map(dgvRowLine).join('');
+      h += '</div>';
+      h += '<div class="dgv-act">' + (can
+        ? '<button type="button" id="dgvSelAll">Select all</button><button type="button" id="dgvSelNone">Clear</button>' +
+          '<button type="button" id="dgvRevoke" class="rev-danger" title="Revoke the ticked live assignments -- queued under Pending changes, exactly like Revoke selected in the list">Revoke</button>'
+        : '<span class="dgv-note">Read-only: revoking needs the Admin role in PIM Manager.</span>') + '</div>';
+      h += '<div class="dgv-note">Revoking is <b>queued</b>: it lands in the Change queue, is committed under Pending changes and the engine removes it on its next run. ' +
+        'Break-glass accounts are always skipped, and a large batch needs a second administrator&rsquo;s approval. ' +
+        '<b>Revoking does NOT change the delegation that granted the access</b> &mdash; if that row still says Assign, the engine creates the access again; remove the delegation on the Access map or in All records to make it stay away.</div>';
+    }
+    d.innerHTML = h;
+    d.classList.add('has-sel');
+    const sync = () => {
+      const b = document.getElementById('dgvRevoke');
+      const n = d.querySelectorAll('input.dgv-check:checked').length;
+      if (b) { b.textContent = 'Revoke' + (n ? ' (' + n + ')' : ''); b.disabled = !n; }
+    };
+    d.querySelectorAll('input.dgv-check').forEach(cb => {
+      cb.onchange = () => {
+        if (cb.checked) REV.selected.add(cb.dataset.id); else REV.selected.delete(cb.dataset.id);
+        sync(); updateActionBar();
+      };
+    });
+    const all = document.getElementById('dgvSelAll');
+    if (all) all.onclick = () => { d.querySelectorAll('input.dgv-check:not(:disabled)').forEach(cb => { cb.checked = true; REV.selected.add(cb.dataset.id); }); sync(); updateActionBar(); };
+    const none = document.getElementById('dgvSelNone');
+    if (none) none.onclick = () => { d.querySelectorAll('input.dgv-check').forEach(cb => { cb.checked = false; REV.selected.delete(cb.dataset.id); }); sync(); updateActionBar(); };
+    const rv = document.getElementById('dgvRevoke');
+    if (rv) rv.onclick = () => dgvRevoke();
+    sync();
+  }
+  // The graph's Revoke = the list's Revoke selected, on exactly the ticked rows: REV.selected -> submitRevoke().
+  async function dgvRevoke() {
+    if (!dgvCanRevoke()) return;
+    const d = document.getElementById('dgvDetail');
+    const ids = d ? Array.from(d.querySelectorAll('input.dgv-check:checked')).map(cb => cb.dataset.id) : [];
+    if (!ids.length) { setRevStatus('Tick at least one live assignment under the board first.', 'warn'); return; }
+    REV.selected.clear();
+    for (const id of ids) REV.selected.add(id);
+    updateActionBar();
+    const j = document.getElementById('revJustify');
+    if (!j || !String(j.value || '').trim()) {
+      setRevStatus('Type a justification in the bar above (it is stored with the pending change), then press Revoke again.', 'warn');
+      try { j.focus(); } catch (_) { }
+      return;
+    }
+    await submitRevoke();
+  }
+  // Wired once (the elements are static): toolbar buttons, wire clicks, hover isolation, redraw on scroll / resize.
+  function dgvWire() {
+    if (DGV.wired) return;
+    const board = document.getElementById('dgvBoard'), svg = document.getElementById('dgvWires');
+    if (!board || !svg) return;
+    DGV.wired = true;
+    const cl = document.getElementById('dgvClear'); if (cl) cl.onclick = () => dgvClearSel();
+    const ft = document.getElementById('dgvFocusToggle');
+    if (ft) ft.onclick = () => {
+      DGV.focusMode = (DGV.focusMode === false);
+      if (DGV.sel) dgvSelect(DGV.sel, true); else if (DGV.selEdge) dgvSelectEdge(DGV.selEdge, true);
+    };
+    svg.addEventListener('click', (ev) => {
+      const p = ev.target && ev.target.closest ? ev.target.closest('path[data-click]') : null;
+      if (p) dgvSelectEdge(p.getAttribute('data-s') + '>' + p.getAttribute('data-t'));
+    });
+    board.addEventListener('mouseover', (e) => {
+      const it = e.target.closest && e.target.closest('.map-item');
+      if (it && it.dataset.id) { DGV.hoverId = it.dataset.id; mapHiliteWires(it.dataset.id, svg); }
+    });
+    board.addEventListener('mouseout', (e) => {
+      const it = e.target.closest && e.target.closest('.map-item');
+      if (it && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest('.map-item') === it)) { DGV.hoverId = null; mapHiliteWires(null, svg); }
+    });
+    board.querySelectorAll('.map-col-body').forEach(b => b.addEventListener('scroll', () => { if (DGV.lastEdges) dgvDraw(); }, { passive: true }));
+    window.addEventListener('resize', () => { if (DGV.lastEdges && REV.view === 'graph') dgvDraw(); });
   }
   wireRevokeTab();
 
@@ -33544,9 +34239,14 @@
     } catch (_) { }
   })();
 
-  function mapDrawWires(edges) {
-    const svg = document.getElementById('mapWires');
-    const board = document.getElementById('mapBoard');
+  // §100.47 (c): the SAME wire drawing serves the Delegation overview's graph view -- `ctx` names its board / svg / first
+  // column / hover state ({ board, svg, col0, hoverId, clickable }); without it, the Access map's own (unchanged).
+  function mapDrawWires(edges, ctx) {
+    const svg = (ctx && ctx.svg) || document.getElementById('mapWires');
+    const board = (ctx && ctx.board) || document.getElementById('mapBoard');
+    const col0 = (ctx && ctx.col0) || document.getElementById('mapCol0');
+    const hoverId = ctx ? ctx.hoverId : MAP.hoverId;
+    if (!svg || !board || !col0) return;
     const bRect = board.getBoundingClientRect();
     svg.setAttribute('viewBox', '0 0 ' + bRect.width + ' ' + bRect.height);
     let html = '';
@@ -33555,8 +34255,8 @@
       const key = e.source + '>' + e.target;
       if (seen.has(key)) continue;
       seen.add(key);
-      const sEl = document.querySelector('#mapBoard .map-item[data-id="' + ptAttrEsc(e.source) + '"]');
-      const tEl = document.querySelector('#mapBoard .map-item[data-id="' + ptAttrEsc(e.target) + '"]');
+      const sEl = board.querySelector('.map-item[data-id="' + ptAttrEsc(e.source) + '"]');
+      const tEl = board.querySelector('.map-item[data-id="' + ptAttrEsc(e.target) + '"]');
       if (!sEl || !tEl) continue;
       const sR = sEl.getBoundingClientRect(), tR = tEl.getBoundingClientRect();
       // skip wires to items scrolled out of their column
@@ -33573,7 +34273,7 @@
       // INHERITED and drawn lighter and thinner. Deliberately NOT expressed with dashes --
       // stroke-dasharray already means PENDING/staged above, and overloading it would make a
       // staged change look like an inherited one.
-      const direct = !!(sEl.closest('.map-col') === document.getElementById('mapCol0').closest('.map-col'));
+      const direct = !!(sEl.closest('.map-col') === col0.closest('.map-col'));
       // A wire staged for REMOVAL is red: it is still there today, and it is going away on commit.
       // §91.23: a delegation the managing tenant sent is TEAL -- read-only here (hover says so).
       const central = !!e.central && !e.pending && !e.removing;
@@ -33586,21 +34286,24 @@
               ' class="' + (direct ? 'mw-direct' : 'mw-inherited') + '"' +
               ' d="M ' + x1 + ' ' + y1 + ' C ' + (x1 + dx) + ' ' + y1 + ', ' + (x2 - dx) + ' ' + y2 + ', ' + x2 + ' ' + y2 +
               '" fill="none" stroke="' + stroke + '" stroke-width="' + width + '"' + dash +
-              (central ? ' data-central="1"><title>From the managing tenant -- read-only here</title></path>' : '/>');
+              // §100.47 (c): on the graph view a live wire can be clicked (its live assignments, to revoke)
+              (ctx && ctx.clickable ? ' data-click="1"' : '') +
+              (central ? ' data-central="1"><title>From the managing tenant -- read-only here</title></path>' :
+                (ctx && ctx.clickable && e.title ? '><title>' + escapeHtml(e.title) + '</title></path>' : '/>'));
     }
     svg.innerHTML = html;
     svg.classList.remove('mw-isolating');
     // R25-28: a redraw (the animation-frame draw after a selection, a detail-bar resize) replaced every path and so
     // wiped the hover isolation while the mouse was still on a box. Re-apply it to the new paths.
-    if (MAP.hoverId) mapHiliteWires(MAP.hoverId);
+    if (hoverId) mapHiliteWires(hoverId, svg);
   }
 
   // Hairball control. A node with ~74 edges draws ~74 beziers into the same
   // gutters; no layout makes that readable at rest, so hovering ANY box lifts
   // just the wires that touch it and pushes the rest almost to nothing. Pure
   // presentation -- it never changes the selection or the model.
-  function mapHiliteWires(id) {
-    const svg = document.getElementById('mapWires');
+  function mapHiliteWires(id, svgEl) {
+    const svg = svgEl || document.getElementById('mapWires');
     if (!svg) return;
     if (!id) { svg.classList.remove('mw-isolating'); svg.querySelectorAll('path.mw-hi').forEach(p => p.classList.remove('mw-hi')); return; }
     // The WHOLE chain through the hovered box, not just the wires touching it (operator, 2026-09-25 on
