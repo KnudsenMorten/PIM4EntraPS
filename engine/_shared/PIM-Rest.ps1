@@ -6,7 +6,8 @@
   container -- with nothing to Install-Module and no Azure.Core/Graph version clash.
 
   Token acquisition (auto-detected, override per call):
-    * Managed Identity  -- App Service ($env:IDENTITY_ENDPOINT) or IMDS (VM)
+    * Managed Identity  -- App Service / Container Apps ($env:IDENTITY_ENDPOINT + IDENTITY_HEADER), an Azure Arc-enabled
+                           server (IDENTITY_ENDPOINT + IMDS_ENDPOINT, 401 key-file challenge) or IMDS (VM)
     * Client secret     -- SPN client_credentials (v2 token endpoint)
     * Client certificate-- SPN, signed RS256 JWT client_assertion (no secret, no MSAL)
     * Signed-in source  -- a registered $global:PIM_TokenProvider (tools\setup\_PimSignedIn.ps1): the Invardia
@@ -112,6 +113,96 @@ function Set-PimManagedIdentityHomeTenant {
     if ($tid -match '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$') { $global:PIM_ManagedIdentityTenantId = $tid }
   } catch { }
 }
+# ---- Azure Arc-enabled server (§100.63(b), the on-premises hybrid worker) ---------------------------------------------
+# The Arc agent (himds) serves the machine's system-assigned identity on http://localhost:40342 and sets IDENTITY_ENDPOINT
+# + IMDS_ENDPOINT machine-wide -- but NO IDENTITY_HEADER (that is App Service / Container Apps). Its token call is a
+# CHALLENGE: the first GET answers 401 with `WWW-Authenticate: Basic realm=<path to a .key file>`; the caller proves it may
+# use the identity by READING that file (only local Administrators and the local group "Hybrid agent extension
+# applications" can) and retries with `Authorization: Basic <file content>`. The file is single-use and short-lived.
+# 🔒 The realm is checked before anything is read: a .key file directly under %ProgramData%\AzureConnectedMachineAgent\Tokens,
+# at most 4 KB -- an endpoint that names any other file is refused (else a rogue local listener could make us send it the
+# content of an arbitrary file we can read).
+$script:PimArcDefaultEndpoint = 'http://localhost:40342/metadata/identity/oauth2/token'
+function Get-PimArcTokenDirectory {
+  if ("$($global:PIM_ArcTokenDirectory)".Trim()) { return "$($global:PIM_ArcTokenDirectory)".Trim() }   # offline test seam
+  $pd = if ("$env:ProgramData".Trim()) { $env:ProgramData } else { 'C:\ProgramData' }
+  return (Join-Path $pd 'AzureConnectedMachineAgent\Tokens')
+}
+function Get-PimArcIdentityEndpoint {
+  # '' = not an Arc host. Arc = IDENTITY_ENDPOINT + IMDS_ENDPOINT set and no IDENTITY_HEADER / MSI_SECRET, or (env not yet
+  # visible to this process -- a service started before the agent was installed) the himds service is present.
+  if ($global:PIM_ArcIdentityEndpoint) { return "$($global:PIM_ArcIdentityEndpoint)" }   # offline test seam
+  if ("$env:IDENTITY_HEADER".Trim() -or "$env:MSI_SECRET".Trim()) { return '' }
+  if ("$env:IDENTITY_ENDPOINT".Trim() -and "$env:IMDS_ENDPOINT".Trim()) { return "$env:IDENTITY_ENDPOINT".Trim() }
+  if ($global:PIM_NoManagedIdentity -or $global:PIM_NoArcProbe) { return '' }
+  if ($null -eq $script:PimArcHimdsPresent) {
+    $script:PimArcHimdsPresent = $false
+    if ("$env:OS" -eq 'Windows_NT') { try { $script:PimArcHimdsPresent = [bool](Get-Service -Name 'himds' -ErrorAction Stop) } catch { $script:PimArcHimdsPresent = $false } }
+  }
+  if ($script:PimArcHimdsPresent) { return $script:PimArcDefaultEndpoint }
+  return ''
+}
+function Test-PimArcKeyFilePath {
+  # PURE. Is this realm path a file the Arc agent would hand out? Directly under the token directory, *.key, no traversal.
+  param([AllowEmptyString()][string]$Path, [Parameter(Mandatory)][string]$TokenDirectory)
+  $p = "$Path".Trim().Trim('"')
+  if (-not $p -or $p -match '\.\.' -or $p -notmatch '(?i)\.key$') { return $false }
+  $full = $null; $dir = $null
+  try { $full = [IO.Path]::GetFullPath($p); $dir = [IO.Path]::GetFullPath($TokenDirectory).TrimEnd('\', '/') } catch { $full = $null }
+  if (-not $full -or -not $dir) { return $false }
+  return ([IO.Path]::GetDirectoryName($full).TrimEnd('\', '/') -ieq $dir)
+}
+function Invoke-PimArcIdentityHttp {
+  # ONE GET against the local Arc endpoint that never throws on an HTTP status: returns status, WWW-Authenticate, body.
+  # No proxy (on-premises servers often have a system proxy; localhost must never go through it). Seam: PIM_ArcIdentityHttpStub.
+  param([Parameter(Mandatory)][string]$Uri, [hashtable]$Headers = @{}, [int]$TimeoutSec = 30)
+  if ($global:PIM_ArcIdentityHttpStub -is [scriptblock]) { return (& $global:PIM_ArcIdentityHttpStub $Uri $Headers) }
+  $req = [System.Net.HttpWebRequest][System.Net.WebRequest]::Create($Uri)
+  $req.Method = 'GET'; $req.Proxy = $null; $req.Timeout = $TimeoutSec * 1000; $req.ReadWriteTimeout = $TimeoutSec * 1000
+  foreach ($k in $Headers.Keys) { $req.Headers[$k] = "$($Headers[$k])" }
+  $resp = $null
+  try { $resp = $req.GetResponse() }
+  catch [System.Net.WebException] { $resp = $_.Exception.Response; if (-not $resp) { throw } }
+  catch { if ($_.Exception.InnerException -is [System.Net.WebException] -and $_.Exception.InnerException.Response) { $resp = $_.Exception.InnerException.Response } else { throw } }
+  $out = $null
+  try {
+    $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+    $body = $sr.ReadToEnd(); $sr.Close()
+    $out = [pscustomobject]@{ status = [int]$resp.StatusCode; wwwAuthenticate = "$($resp.Headers['WWW-Authenticate'])"; body = $body }
+  } finally { $resp.Close() }
+  return $out
+}
+function Get-PimArcManagedIdentityToken {
+  param([Parameter(Mandatory)][string]$Audience, [string]$Endpoint = '')
+  $ep = if ("$Endpoint".Trim()) { "$Endpoint".Trim() } else { Get-PimArcIdentityEndpoint }
+  if (-not $ep) { throw 'not an Azure Arc-enabled server (no IDENTITY_ENDPOINT/IMDS_ENDPOINT and no himds service)' }
+  $u = "$($ep)?resource=$([uri]::EscapeDataString($Audience))&api-version=2020-06-01"
+  $first = Invoke-PimArcIdentityHttp -Uri $u -Headers @{ Metadata = 'true' }
+  $r = $first
+  if ($first.status -eq 401) {
+    $m = [regex]::Match("$($first.wwwAuthenticate)", '(?i)Basic\s+realm\s*=\s*"?([^"]+?)"?\s*$')
+    if (-not $m.Success) { throw "Arc identity endpoint answered 401 without a Basic realm (WWW-Authenticate: '$($first.wwwAuthenticate)')" }
+    $keyPath = $m.Groups[1].Value
+    $dir = Get-PimArcTokenDirectory
+    if (-not (Test-PimArcKeyFilePath -Path $keyPath -TokenDirectory $dir)) { throw "Arc identity endpoint named a key file outside '$dir' ('$keyPath') -- refusing to read it" }
+    $len = -1; try { $len = (New-Object IO.FileInfo($keyPath)).Length } catch { $len = -1 }
+    if ($len -gt 4096) { throw "Arc key file '$keyPath' is $len bytes (more than 4 KB) -- refusing" }
+    $secret = $null; $readErr = $null
+    try { $secret = [IO.File]::ReadAllText($keyPath).Trim() } catch { $readErr = $_.Exception }
+    if ($readErr -is [System.UnauthorizedAccessException] -or ($readErr -and $readErr.InnerException -is [System.UnauthorizedAccessException])) {
+      throw "cannot read the Arc key file '$keyPath' as $([Security.Principal.WindowsIdentity]::GetCurrent().Name) -- add this account to the local group 'Hybrid agent extension applications' (or run as a local administrator), then start a new process"
+    }
+    if ($readErr) { throw "cannot read the Arc key file '$keyPath': $($readErr.Message)" }
+    if (-not $secret) { throw "the Arc key file '$keyPath' is empty" }
+    $r = Invoke-PimArcIdentityHttp -Uri $u -Headers @{ Metadata = 'true'; Authorization = "Basic $secret" }
+    $secret = $null
+  }
+  if ($r.status -ne 200) { throw "Arc identity endpoint answered HTTP $($r.status) for $Audience : $("$($r.body)".Substring(0, [Math]::Min(300, "$($r.body)".Length)))" }
+  $j = "$($r.body)" | ConvertFrom-Json
+  if (-not "$($j.access_token)") { throw "Arc identity endpoint returned no access_token for $Audience" }
+  return [pscustomobject]@{ token = "$($j.access_token)"; expiresUtc = (ConvertTo-PimTokenExpiry $j.expires_on) }
+}
+
 function Get-PimManagedIdentityToken {
   param([Parameter(Mandatory)][string]$Audience)
   $res = [uri]::EscapeDataString($Audience)
@@ -143,6 +234,12 @@ function Get-PimManagedIdentityToken {
     $r = Invoke-RestMethod -Method GET -Uri $u -Headers @{ 'Secret' = $env:MSI_SECRET } -TimeoutSec 60
     if ("$($r.access_token)") { try { [System.Console]::Out.WriteLine("  [mi] token via MSI_ENDPOINT (len $($r.access_token.Length))") } catch {} }  # Console.Out: headless-safe from any scope
     Set-PimManagedIdentityHomeTenant -Token "$($r.access_token)"; return [pscustomobject]@{ token = $r.access_token; expiresUtc = (ConvertTo-PimTokenExpiry $r.expires_on) }
+  }
+  # Azure Arc-enabled server (on-premises hybrid worker, §100.63(b)): IDENTITY_ENDPOINT without IDENTITY_HEADER, 401 challenge
+  if (Get-PimArcIdentityEndpoint) {
+    $a = Get-PimArcManagedIdentityToken -Audience $Audience
+    try { [System.Console]::Out.WriteLine("  [mi] token via the Azure Arc agent (len $($a.token.Length))") } catch {}
+    Set-PimManagedIdentityHomeTenant -Token "$($a.token)"; return $a
   }
   # IMDS (Azure VM)
   $u = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=$res"

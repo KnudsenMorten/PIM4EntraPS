@@ -1,95 +1,98 @@
 # config-msp/
 
-MSP-central admin model, pulled from a central source on every engine run.
+Build configs for a **managing tenant** (an MSP's own PIM Manager that publishes a signed baseline) and its
+**managed tenants** (each customer's own PIM Manager that pulls that baseline), for the one-command multi-tenant
+build `tools/setup/Invoke-PimMspBuild.ps1`.
 
-> ⚠️ **v1 only -- the mechanism below is gone (§100.42, 2026-10-09).** `Sync-PimMspConfig` lived in the v1-era
-> library `engine/_shared/PIM-Functions.psm1`, which is deleted (no PowerShell modules, no legacy code). PIM v2 is
-> SQL-only: a managed tenant receives the managing tenant's signed baseline through the downlink job
-> (`tools/pim-engine/downlink-job-entry.ps1`). The text below is kept only as a record of the v1 design.
+| File | What it is |
+|---|---|
+| `managing-tenant.sample.json` | Sample config for the managing tenant (`-Role Master`). |
+| `managed-tenant.sample.json` | Sample config for a managed tenant (`-Role Slave`), enrolled with an Invardia enrollment key. |
+| `managing-tenant.json`, `managed-tenant.json` | **Your** copies -- git-ignored, never committed. |
 
-This folder holds the data files for admins **owned by the MSP** (or any
-central authority -- could be HQ in a multi-subsidiary org). The contents
-are not hand-edited on the tenant VM; they're synced from a central
-source (git / blob / https) at the start of every `-ConfigVariant msp`
-engine run.
+A build config holds **ids and names only**. The build refuses a config that carries anything that looks like a
+credential (a secret, password, SAS URL, account key, connection string or PEM) and names the key it refused.
 
-## How it works
+## What you need
 
-1. On every `-ConfigVariant msp` launcher call, the engine invokes
-   `Sync-PimMspConfig` (function in `engine/_shared/PIM-Functions.psm1`).
-2. Sync-PimMspConfig reads `msp.source.json` in this folder.
-3. It clones/downloads from the source URL, picks out the standard
-   PIM4EntraPS CSV + helper files, atomically stages them here.
-4. The engine then runs as normal -- but reads from `config-msp/` instead
-   of `config/`, writes state to `output/msp/` instead of `output/`, and
-   only touches admins matching the MSP filter (see "Foreign-admin
-   isolation" in `../config-local/README.md`).
+- **PowerShell 7** on your own machine. **No Azure CLI and no PowerShell modules** -- every Azure, Microsoft Graph and
+  SQL call is REST.
+- To **sign in in the browser** as an administrator of the tenant you are building (the build opens the sign-in for
+  that tenant). Rights: Owner (or Contributor + User Access Administrator) on the subscription; in Entra ID
+  Privileged Role Administrator, Application Administrator and Groups Administrator; Exchange Administrator only if
+  the build should set up the notification mailbox.
+- A PIM Manager **Pro** licence for the managing tenant (bought at invardia.com): add `"licence": { "path":
+  "<file>.pimlicense" }` to its config and the build registers it. A managed tenant gets its licence through the
+  **enrollment key** its managing company issues.
 
-The result: a single MSP edit + commit propagates to every customer
-tenant on its next cron tick. Worst-case propagation = the slowest
-tenant's cron interval.
-
-## Setup
+## 1. Build the managing tenant
 
 ```powershell
-# 1. Copy the source manifest template + fill it in.
-Copy-Item msp.source.sample.json msp.source.json
-notepad msp.source.json   # set sourceType, url, branch, subPath, auth
+Copy-Item .\config-msp\managing-tenant.sample.json .\config-msp\managing-tenant.json
+# edit: tenant + subscription ids, resource group, region, names, the bundle storage account, superadmins
 
-# 2. If using a PAT for git auth, set the env var named in msp.source.json
-#    on the tenant VM (e.g. via Set Machine env var, or in the scheduled
-#    task's runtime context):
-[System.Environment]::SetEnvironmentVariable('PIM_MSP_GIT_PAT', '<your-PAT>', 'Machine')
-
-# 3. Test the sync standalone:
-Import-Module .\..\engine\_shared\PIM-Functions.psm1 -Force
-$global:PIM_ConfigVariant = 'msp'
-Sync-PimMspConfig
-
-# 4. Schedule the engine with -ConfigVariant msp. Recommended: stagger
-#    after the local-variant run so they don't compete on Graph throttling.
-#       04:00  PIM-Baseline-Management-CSV  -ConfigVariant local
-#       04:30  PIM-Baseline-Management-CSV  -ConfigVariant msp
+.\tools\setup\Invoke-PimMspBuild.ps1 -Role Master -ConfigPath .\config-msp\managing-tenant.json           # the plan only
+.\tools\setup\Invoke-PimMspBuild.ps1 -Role Master -ConfigPath .\config-msp\managing-tenant.json -Apply    # build
 ```
 
-## Kill-switch model (CISO opt-in per admin)
+The build runs, in order and idempotently: the hosting step (network, registry, identities, database, container
+image, Container Apps environment and apps, database schema, notification mailbox, feature settings, Easy Auth
+sign-in, the application, the updater), the SQL admin group, the engine and PIM Manager identities' Microsoft Graph
+permissions, the scenario, the managed-tenant registry, the signed-baseline storage and its network rules, the
+**signing key** (a non-exportable key in the Key Vault named in `keyVaultName`), the daily publish job, the first
+publish, and the **enrollment** step that records the bundle's address and signing key id and reports them to
+Invardia.
 
-For each MSP-managed admin the customer's CISO wants to allow central
-disable/revoke for:
+- `slaves[]` lists the managed tenants you register up front (ring and tags). It may be empty: enrolled managed tenants
+  are allowed on the bundle store by the managing tenant's daily **enrolled-tenants** job, and you can register a
+  tenant later in PIM Manager.
+- The **signingkey** step prints the signing key id. Managed tenants built with an enrollment key receive it from
+  Invardia; a managed tenant built without one needs it in its `master.signingKeyIds`.
 
-1. **CISO** writes a per-admin secret to the customer's Key Vault:
-   - Vault: the one named in `$global:PIM_StatusChange_KeyVaultName`
-     (set in `repository.custom.ps1`).
-   - Secret name: `pim-status-<slug>` where `<slug>` is the admin UPN
-     lower-cased with `@` and `.` replaced by `-`. Example:
-     `pim-status-admin-msp-mok-t0-id-contoso-onmicrosoft-com`
-   - Secret value: any string. Treat as a shared secret with the MSP.
+## 2. Issue an enrollment key at Invardia
 
-2. CISO tells the MSP the code (out-of-band -- 1Password / encrypted
-   mail / phone).
+For each customer, issue a **managed-tenant enrollment key** at invardia.com. Give the key to the customer over a
+channel you trust. It is a bearer secret: it is used once, for the claim, and is never written to a config file, a log
+or the build's output (it is shown masked).
 
-3. MSP, when they want to disable or revoke this admin tenant-wide:
-   - Sets `AccountStatus = Disabled` or `Revoked` in their central CSV.
-   - Sets `StatusChangeCode = <the agreed code>`.
-   - Commits. Every tenant pulls + the engine acts on next run.
+## 3. Build each managed tenant
 
-If the code doesn't match (or the KV secret doesn't exist), the engine
-**refuses** the status change and writes a row to
-`output/msp/status-change-DENIED-<yyyyMMdd>.csv` for review.
+**The one command from Invardia (recommended).** The customer runs the installation command Invardia's wizard gives them
+(the guided install, with the managed-tenant role and the enrollment key). It runs this same build for them and reports
+every step to the tracked install at Invardia.
 
-Default-deny: no KV secret = central kill-switch off for that admin.
-CISO must opt in per admin.
+**Or run the build yourself:**
 
-## Files in this folder
+```powershell
+Copy-Item .\config-msp\managed-tenant.sample.json .\config-msp\managed-tenant.json
+# edit: tenant + subscription ids, resource group, region, names, superadmins, the address plan
 
-- `msp.source.json`           -- gitignored: customer's actual source config.
-- `msp.source.sample.json`    -- tracked: template to copy.
-- `*.locked.csv`              -- synced from central (engine reads these).
-- `*.locked.ps1`              -- synced from central (engine reads these).
-- `*.custom.csv`              -- gitignored: not used in MSP variant (central
-                                 source is authoritative). Don't create.
+.\tools\setup\Invoke-PimMspBuild.ps1 -Role Slave -ConfigPath .\config-msp\managed-tenant.json -EnrollmentKey <key>          # the plan only
+.\tools\setup\Invoke-PimMspBuild.ps1 -Role Slave -ConfigPath .\config-msp\managed-tenant.json -EnrollmentKey <key> -Apply   # build
+```
 
-A `.custom.sample.*` placeholder may sit here for any file customers
-might want to override locally on top of the MSP sync, but the default
-expectation is "MSP is authoritative -- if you need a local override,
-work it back into the central source instead".
+With the enrollment key the build first **claims** the tenant at Invardia (step `enroll`): Invardia creates the
+environment under the managing company, signs the licence and returns the managing tenant's bundle address and signing
+key ids. Then: hosting, SQL admin group, Graph permissions, scenario, the **licence**, the pull network (its subnet id
+is reported to Invardia, and the managing tenant's enrolled-tenants job allows it -- nothing to hand over by hand), the
+signed-bundle **pull job**, and the end-of-install check.
+
+- After the first build, the build prints the `master` block it was given. Add it to `managed-tenant.json` to re-run
+  the build later **without** the key (every claim issues a new install key, so a re-run never claims again unless you
+  pass `-EnrollmentKey` on purpose).
+- **Without an enrollment key**, add the `master` block yourself (the managing tenant's `tenantId`, `storageAccount`,
+  `container` and `signingKeyIds`), and give the subnet id the `pullnetwork` step prints to the managing company: they
+  add it as `slaves[<n>].subnetResourceId` and re-run their build `-From network-<n>`.
+
+## Progress, resume and exit codes
+
+- Every step -- and, inside the long hosting step, every sub-step (`hosting.prereq`, `hosting.image`, `hosting.infra`,
+  `hosting.sqlaccess`, `hosting.schema`, `hosting.mailsender`, `hosting.features`, `hosting.easyauth`, `hosting.code`,
+  ...) -- is shown on the console and reported to the tracked install at Invardia, so a long step shows progress
+  instead of minutes of silence.
+- A failed step prints the cause and the resume command: `-From <step>`. Every step checks what exists first, so
+  running a step again is safe.
+- Exit codes: `0` complete; `1` refused or a step failed; `2` incomplete (every step that could run succeeded, but a
+  step is waiting for something, for example a managed tenant's subnet id).
+- `-WhatIf` (or leaving out `-Apply`) prints the plan and the steps that need a person; nothing is claimed, signed in,
+  created or granted.

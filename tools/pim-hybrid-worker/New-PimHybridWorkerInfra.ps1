@@ -1,10 +1,15 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     §80.2 PIMHYBRIDWRK -- the Azure half of the hybrid worker: its own resource group + VNet, peered to the networks it
     needs so the peering can be CUT (Set-PimHybridWorkerPeering.ps1 -State Disconnected) without touching anything else.
 
 .DESCRIPTION
+    Builds the Azure side of the PIM for Active Directory hybrid worker -- its own resource group, network, deny-all
+    firewall, NAT gateway egress and Windows VM -- or, for an Azure Arc-enabled on-premises server, checks the machine
+    and builds nothing.
+
     Read-before-write and idempotent; -WhatIf prints the plan. Every ARM call names the subscription in its path (ARM REST
     through PIM-Rest's ONE token client, engine/_shared/PIM-ArmSetup.ps1 -- no az, 100.41 / framework 12.17).
 
@@ -30,11 +35,22 @@
 .EXAMPLE
     .\New-PimHybridWorkerInfra.ps1 -SubscriptionId <sub> -TenantId <tenant> -ResourceGroup rg-pimhybridwrk `
         -PeerVnetId <dc-vnet-id>,<pim-vnet-id> -DnsServers 10.0.1.4,10.0.1.5 -SqlServerId <sql-server-id> -WhatIf
+
+.LINK
+    https://invardia.com/docs/pim/scripts/New-PimHybridWorkerInfra/
 #>
-[CmdletBinding(SupportsShouldProcess)]
+[CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'AzureVm')]
 param(
     [Parameter(Mandatory)][string]$SubscriptionId,
     [Parameter(Mandatory)][string]$TenantId,
+    # §100.63(b) ON-PREMISES: the customer's own Windows server, Azure Arc-enabled. Nothing is built in Azure (no resource
+    # group, VNet, NSG, NAT gateway, peering or VM -- the on-premises network is the customer's); the machine is checked
+    # (connected, Windows, a system-assigned identity) and its identity returned for Grant-PimHybridWorkerAccess.ps1.
+    [Parameter(Mandatory, ParameterSetName = 'Arc')][string]$ArcMachineResourceId,
+    [Parameter(ParameterSetName = 'Arc')][string]$ArcApiVersion = '2024-07-10',
+    # Arc + a PUBLIC SQL endpoint: the on-premises egress address(es) the PIM store must admit (one firewall rule each).
+    # Leave empty when the store is reached over a private endpoint (VPN / ExpressRoute) -- the better choice.
+    [Parameter(ParameterSetName = 'Arc')][string[]]$SqlAllowedPublicIp = @(),
     [string]$ResourceGroup = 'rg-pimhybridwrk',
     [string]$Location = 'westeurope',
     [ValidatePattern('^[A-Za-z0-9-]{1,15}$')][string]$VmName = 'PIMHYBRIDWRK',
@@ -42,13 +58,19 @@ param(
     [string]$VnetName = 'vnet-pimhybridwrk',
     [string]$AddressPrefix = '10.221.16.0/24',
     [string]$SubnetPrefix = '10.221.16.0/27',
-    [Parameter(Mandatory)][string[]]$PeerVnetId,
-    [Parameter(Mandatory)][string[]]$DnsServers,
+    [Parameter(Mandatory, ParameterSetName = 'AzureVm')][string[]]$PeerVnetId,
+    [Parameter(Mandatory, ParameterSetName = 'AzureVm')][string[]]$DnsServers,
     [string]$SqlServerId = '',
     [ValidateSet('NatGateway', 'None')][string]$Egress = 'NatGateway',   # 🔒 never a public IP on the VM (Set-PimHybridWorkerEgress.ps1)
     [string]$Image = 'MicrosoftWindowsServer:WindowsServer:2022-datacenter-azure-edition-core-smalldisk:latest'
 )
 $ErrorActionPreference = 'Stop'
+
+# 12.7 run frame: "<Script> version <x.y.z> - documentation: <page>" as the first line + a transcript in the temp folder.
+. (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'New-PimHybridWorkerInfra'
+try {
+
 function Step($m) { Write-Host "[infra] $m" -ForegroundColor Cyan }
 function Info($m) { Write-Host "        $m" -ForegroundColor Gray }
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -69,6 +91,46 @@ function ArmPut([string]$Id, $Body, [string]$Api = $net, [int]$TimeoutSeconds = 
 $acct = Get-PimArmSubscription -SubscriptionId $SubscriptionId
 if ("$($acct.tenantId)" -ne $TenantId) { throw "subscription $SubscriptionId reads tenant '$($acct.tenantId)', not '$TenantId' -- refusing" }
 Step "tenant $TenantId, subscription $SubscriptionId"
+
+if ($PSCmdlet.ParameterSetName -eq 'Arc') {
+    # ---- §100.63(b) the on-premises worker: READ the Arc machine, build nothing ----
+    if ($ArcMachineResourceId -notmatch '^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/Microsoft\.HybridCompute/machines/([^/]+)$') { throw "not an Azure Arc machine resource id: '$ArcMachineResourceId'" }
+    if ($Matches[1] -ne $SubscriptionId) { throw "the Arc machine is in subscription $($Matches[1]), not -SubscriptionId $SubscriptionId -- refusing" }
+    $arcRg = $Matches[2]; $arcName = $Matches[3]
+    $m = Invoke-PimSetupArm -Path $ArcMachineResourceId -ApiVersion $ArcApiVersion -NotFoundOk
+    if (-not $m) { throw "Arc machine not found: $ArcMachineResourceId (onboard the server to Azure Arc first)" }
+    $status = "$($m.properties.status)"; $os = "$($m.properties.osType)"
+    if ($os -and $os -notmatch '(?i)windows') { throw "the Arc machine $arcName runs '$os' -- the hybrid worker needs Windows Server" }
+    if ($status -ne 'Connected') { throw "the Arc machine $arcName reports status '$status', not Connected -- check the agent on the server (azcmagent show) and its outbound access" }
+    $principalId = "$($m.identity.principalId)"
+    if (-not $principalId) { throw "the Arc machine $arcName carries no system-assigned identity" }
+    Info "Arc machine $arcName ($os, $status, agent $("$($m.properties.agentVersion)")), identity $principalId"
+    Info 'built NOTHING in Azure: no resource group, VNet, NSG, NAT gateway, peering or VM -- the network is yours'
+    if ($SqlServerId -and @($SqlAllowedPublicIp | Where-Object { "$_".Trim() }).Count) {
+        if ($SqlServerId -notmatch '^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/Microsoft.Sql/servers/([^/]+)$') { throw "not a SQL server id: '$SqlServerId'" }
+        $sSub = $Matches[1]; $sRg = $Matches[2]; $sName = $Matches[3]
+        $i = 0
+        foreach ($ip in @($SqlAllowedPublicIp | Where-Object { "$_".Trim() })) {
+            $i++; $rule = "pimhybridwrk-arc-$($arcName.ToLowerInvariant())-$i"
+            if (-not ([System.Net.IPAddress]::TryParse("$ip".Trim(), [ref]$null))) { throw "not an IP address: '$ip'" }
+            $have = Get-PimArmSqlFirewallRule -SubscriptionId $sSub -ResourceGroup $sRg -Server $sName -Name $rule
+            if ($have -and "$($have.properties.startIpAddress)" -eq "$ip".Trim()) { Info "SQL firewall $rule = $ip (already)"; continue }
+            if ($PSCmdlet.ShouldProcess($sName, "SQL firewall rule $rule = $ip")) { [void](Set-PimArmSqlFirewallRule -SubscriptionId $sSub -ResourceGroup $sRg -Server $sName -Name $rule -StartIp "$ip".Trim() -EndIp "$ip".Trim()) }
+            Info "SQL firewall $rule = $ip"
+        }
+    }
+    Write-Host ''
+    Write-Host '[infra] Arc: the server needs OUTBOUND HTTPS (443) only -- NOTHING inbound:' -ForegroundColor Green
+    foreach ($l in @(
+        'Azure Arc agent endpoints (the agent''s own list: azcmagent check)',
+        'login.microsoftonline.com (Entra ID tokens), graph.microsoft.com (Graph, read only)',
+        'the PIM store: <server>.database.windows.net on 1433 -- private endpoint over VPN / ExpressRoute, or public with -SqlAllowedPublicIp',
+        'the source store: <account>.blob.core.windows.net (the PIM code, channel.json)',
+        'github.com + api.github.com + objects.githubusercontent.com (PowerShell 7 MSI, -Phase Configure only)',
+        'the domain controllers (LDAP 389/636, Kerberos 88, the usual AD ports) on your own network')) { Info $l }
+    Write-Host '[infra] done. Next: Initialize-PimHybridWorkerAd.ps1 (on a DC, -WorkerComputerName = this server) -> Grant-PimHybridWorkerAccess.ps1 -ArcMachineResourceId -> Install-PimHybridWorker.ps1 -Phase Configure -HostType Arc (Invoke-PimHybridWorkerRunCommand.ps1)' -ForegroundColor Green
+    return [pscustomobject]@{ hostType = 'Arc'; vmName = $arcName; resourceGroup = $arcRg; principalId = $principalId; subnetId = $null; vnetId = $null; machineId = $ArcMachineResourceId; location = "$($m.location)" }
+}
 
 $subnetName = 'snet-worker'; $nsgName = "nsg-$($VmName.ToLowerInvariant())"; $nicName = "$($VmName.ToLowerInvariant())-nic"
 if (-not (Get-PimArmResourceGroup -SubscriptionId $SubscriptionId -Name $ResourceGroup)) {
@@ -194,5 +256,7 @@ if ($SqlServerId) {
 }
 
 Write-Host ''
-Write-Host "[infra] done. Next: Initialize-PimHybridWorkerAd.ps1 (on a DC) -> Install-PimHybridWorker.ps1 -Phase Join / Configure (on $VmName) -> Grant-PimHybridWorkerAccess.ps1" -ForegroundColor Green
-[pscustomobject]@{ vmName = $VmName; resourceGroup = $ResourceGroup; principalId = $principalId; subnetId = $subnetId; vnetId = $vnetId }
+Write-Host "[infra] done. Next, in this order: Initialize-PimHybridWorkerAd.ps1 -ProvisionOdj (on a DC) -> Install-PimHybridWorker.ps1 -Phase Join (on $VmName) -> Grant-PimHybridWorkerAccess.ps1 -> Install-PimHybridWorker.ps1 -Phase Configure (it fetches the code with the identity, so the blob-reader grant must exist first). Deploy-PimHybridWorker.ps1 runs the whole sequence." -ForegroundColor Green
+[pscustomobject]@{ hostType = 'AzureVm'; vmName = $VmName; resourceGroup = $ResourceGroup; principalId = $principalId; subnetId = $subnetId; vnetId = $vnetId; machineId = $vmId; location = $Location }
+
+} finally { Stop-PimScriptRun -Script 'New-PimHybridWorkerInfra' }

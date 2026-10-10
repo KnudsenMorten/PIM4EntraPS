@@ -8108,6 +8108,30 @@
     });
   }
 
+  // §100.61: Settings > Copy & tools > As-built document. GET /api/asbuilt/pdf (Admin+) renders the PDF in the Manager itself.
+  function wireAsBuiltCard() {
+    const btn = document.getElementById('asBuiltPdfBtn');
+    if (!btn) return;
+    btn.onclick = async () => {
+      const msg = document.getElementById('asBuiltMsg');
+      msg.textContent = 'Building the PDF…'; msg.style.color = '#57606a'; btn.disabled = true;
+      try {
+        const resp = await fetch('/api/asbuilt/pdf', { headers: { 'Authorization': 'Bearer ' + PIM_TOKEN } });
+        if (!resp.ok) {
+          let t = ''; try { const j = await resp.json(); t = j && j.error; } catch (_) { }
+          throw new Error(t || ('HTTP ' + resp.status));
+        }
+        const cd = resp.headers.get('Content-Disposition') || '';
+        const m = /filename="([^"]+)"/.exec(cd);
+        const url = URL.createObjectURL(await resp.blob());
+        const a = document.createElement('a'); a.href = url; a.download = m ? m[1] : 'pim-manager-asbuilt.pdf';
+        document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+        msg.textContent = 'Downloaded'; msg.style.color = '#116329';
+      } catch (e) { msg.textContent = 'The as-built PDF could not be made: ' + e.message; msg.style.color = '#cf222e'; }
+      finally { btn.disabled = false; }
+    };
+  }
+
   // §100.57: Settings > Mail & alerting > Reminders: what waits on you (pim.Settings 'PendingReminders'). Admin+ changes it.
   async function renderPendingRemindersCard() {
     const host = document.getElementById('setPendingRemindersBody');
@@ -8357,7 +8381,7 @@
     { key: 'reports',   label: 'Reports',                match: ['setReportsCard'] },   // MAIL-2 item 6: every report + alert in one view
     { key: 'access',    label: 'Access requests (RFA)',  match: ['setRfaBrandingHost', 'setRfaBrokerHost'] },
     { key: 'hybrid',    label: 'Hybrid AD & workloads',  match: ['setHybridAdHost', /AD OU placement/i, 'setWorkloadExemptCard', 'setTemplatePacksHost'] },
-    { key: 'tools',     label: 'Copy & tools',           match: ['setCopyHost', 'setConfigBackupHost'] },
+    { key: 'tools',     label: 'Copy & tools',           match: ['setCopyHost', 'setConfigBackupHost', 'setAsBuiltCard'] },   // §100.61: As-built document
   ];
   function settingsCategoryOf(el) {
     const id = el.id || '';
@@ -8797,6 +8821,10 @@
     h += `<div id="setCopyHost" style="margin-top:18px;"></div>`;
     // CONFIG-1.3: how long configuration backups are kept (ConfigBackupRetentionDays, default 90; SuperAdmin changes it).
     h += `<div id="setConfigBackupHost" class="set-card" style="margin-top:18px;"></div>`;
+    // §100.61: the as-built document -- a PDF of how THIS installation is configured, rendered inside the environment. Admin+.
+    h += `<div class="set-card" id="setAsBuiltCard" style="margin-top:18px;"><h3 style="margin:0 0 4px;font-size:14px;">As-built document</h3>` +
+         `<div style="color:#57606a;font-size:11.5px;margin-bottom:8px;">A PDF that describes how this PIM Manager installation is configured: version, update ring, edition, network, endpoints, the administration model, reviews and alerting, and the answer to each design-configurator question. It is made here, inside your environment, and nothing is sent anywhere. Values that cannot be read from the installation are left out, never guessed. It never contains secrets, people, user names or object ids.</div>` +
+         `<div><button class="btn-sec" id="asBuiltPdfBtn">Download as-built PDF</button> <span id="asBuiltMsg" style="font-size:12px;"></span></div></div>`;
 
     body.innerHTML = h;
     try { groupSettingsIntoCategories(body); } catch (e) { console.warn('settings categories', e); }   // operator: "restructure into categories"
@@ -8834,6 +8862,7 @@
     renderDriftReportSetting();
     renderReportsCard();   // MAIL-2 item 6
     renderPendingRemindersCard();   // §100.57
+    wireAsBuiltCard();              // §100.61
     renderWorkloadExemptionsCard();
 
     if (!canEdit) return;
@@ -20214,7 +20243,10 @@
             'Install-PimManager', 'Invoke-PimDeployAll', 'Invoke-PimMspBuild', 'Copy-PimSettings', 'Set-PimManagerAccess',
             'Set-PimBreakGlassAccounts', 'Set-PimEmergencyPassphrase', 'Find-PimStrayTestObjects', 'Set-PimLicense', 'Deploy-PimActivatorHybrid',
             'Update-PimCommunity', 'Grant-PimSupportAccess', 'Confirm-PimInstall', 'Set-PimManagerCustomHost', 'Deploy-PimRfaBroker',
-            'Rebuild-PimEnvInternal', 'Rebuild-PimEnvExternal', 'Remove-PimContainerStack', 'New-PimHostingPrerequisites', 'Convert-PimToPrivate'];
+            'Rebuild-PimEnvInternal', 'Rebuild-PimEnvExternal', 'Remove-PimContainerStack', 'New-PimHostingPrerequisites',
+            'Convert-PimToPrivate', 'Set-PimSqlPublicAccess',
+            'Deploy-PimHybridWorker', 'New-PimHybridWorkerInfra', 'Set-PimHybridWorkerPeering', 'Set-PimHybridWorkerEgress',
+            'Grant-PimHybridWorkerAccess', 'Invoke-PimHybridWorkerRunCommand', 'Initialize-PimHybridWorkerAd', 'Install-PimHybridWorker'];
   }
   function pimScriptDocName(script) { return String(script || '').replace(/^.*[\\/]/, '').replace(/\.ps1$/i, ''); }
   function pimScriptDocUrl(script) { return pimScriptDocBase() + pimScriptDocName(script) + '/'; }

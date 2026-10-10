@@ -68,6 +68,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $shared 'PIM-Rest.ps1'))) {
 . (Join-Path $solRoot 'engine\_shared\PIM-FailureCatalog.ps1')   # 100.31 the OOM code the sizing self-correct reads
 . (Join-Path $solRoot 'engine\_shared\PIM-TenantSizing.ps1')     # 100.31 the tick's size for this tenant + the SQL tier / max size (100.37)
 . (Join-Path $solRoot 'engine\_shared\PIM-ConvergeDefaults.ps1') # 100.40 / framework 12.16 the install defaults an EXISTING install converges to
+. (Join-Path $solRoot 'engine\_shared\PIM-AsBuilt.ps1')          # 100.61 the as-built job + store + view an EXISTING install converges to
 
 function Say($m, $c = 'Gray') { Write-Host ("[update] " + $m) -ForegroundColor $c }
 
@@ -143,6 +144,29 @@ function Invoke-PimUpdaterConvergeStep {
         foreach ($l in @($cv.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
         Say ("converge ($When): $($cv.changed) changed, $($cv.warnings) to fix by hand") $(if ($cv.warnings) { 'Yellow' } elseif ($cv.changed) { 'Cyan' } else { 'DarkGray' })
     } catch { Say "  converge skipped: $($_.Exception.Message)" 'Yellow' }
+    # ---- 2e. PIM 100.61 -- THE AS-BUILT JOB ON EXISTING ENVIRONMENTS (no manual Deploy-PimAsBuiltJob) ---------------------
+    # Storage (Entra-only), container + 1-day rule, caj-pim-asbuilt on the Manager's image, and -- over this job's own SQL
+    # connection, so a PRIVATE SQL server works too -- the view, the job's reader user and the install facts. What needs an
+    # Owner (the job's write right, the support custom role) is reported, never failed. Never fails the update.
+    try {
+        $abSql = $null
+        if ("$csSize".Trim()) {
+            $abCs = "$csSize"
+            $abSql = {
+                param($q, $prm)
+                $c = New-PimSqlConnection -ConnectionString $abCs
+                $c.Open()
+                try {
+                    $cmd = $c.CreateCommand(); $cmd.CommandText = $q; $cmd.CommandTimeout = 120
+                    foreach ($k in @($prm.Keys)) { [void]$cmd.Parameters.AddWithValue("@$k", "$($prm[$k])") }
+                    [void]$cmd.ExecuteNonQuery()
+                } finally { $c.Close() }
+            }
+        }
+        $abAppId = { param($oid) "$((Invoke-PimGraph -Path ("/servicePrincipals/$oid" + '?$select=appId')).appId)" }
+        $ab = Invoke-PimAsBuiltConverge -SubscriptionId $sub -ResourceGroup $rg -ManagerApp $managerApp -Arm $armSeam -Sql $abSql -AppIdOf $abAppId
+        foreach ($l in @($ab.lines)) { Say ("converge: " + $l.text) $(switch ($l.level) { 'changed' { 'Cyan' } 'warn' { 'Yellow' } default { 'DarkGray' } }) }
+    } catch { Say "  as-built converge skipped: $($_.Exception.Message)" 'Yellow' }
 }
 
 # 🔴 2026-09-18 (§71.43) -- THE STORE IS NEEDED BEFORE THE FIRST EXIT PATH, NOT ONLY AT THE SCHEMA STEP.

@@ -1,10 +1,14 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     §80.2 PIMHYBRIDWRK -- CUT or RESTORE the hybrid worker's network reach in one command (operator 2026-09-29: "so we can
     disconnect the peering if necessary").
 
 .DESCRIPTION
+    Shows, cuts or restores the hybrid worker's network reach by turning its VNet peerings off and on, without deleting
+    anything.
+
     -State Disconnected sets allowVirtualNetworkAccess = false on BOTH sides of every peering of the worker's VNet: traffic
     stops at once, the peerings stay (so reconnecting restores exactly the same topology, and the remote networks'
     owners see a deliberate "access disabled", not a deleted object). -State Connected turns it back on. -State Show
@@ -17,6 +21,9 @@
 
 .EXAMPLE
     .\Set-PimHybridWorkerPeering.ps1 -SubscriptionId <sub> -TenantId <tenant> -State Disconnected
+
+.LINK
+    https://invardia.com/docs/pim/scripts/Set-PimHybridWorkerPeering/
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -27,6 +34,12 @@ param(
     [string]$VnetName = 'vnet-pimhybridwrk'
 )
 $ErrorActionPreference = 'Stop'
+
+# 12.7 run frame: "<Script> version <x.y.z> - documentation: <page>" as the first line + a transcript in the temp folder.
+. (Join-Path $PSScriptRoot '..\setup\_PimScriptDoc.ps1')
+$null = Start-PimScriptRun -Script 'Set-PimHybridWorkerPeering'
+try {
+
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
 if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-ArmSetup.ps1') }
@@ -65,3 +78,5 @@ foreach ($p in @(Get-PeeringList $SubscriptionId $ResourceGroup $VnetName)) {
         }
     }
 }
+
+} finally { Stop-PimScriptRun -Script 'Set-PimHybridWorkerPeering' }

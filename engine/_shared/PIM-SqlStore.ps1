@@ -65,6 +65,9 @@ function Test-PimManagedIdentityAvailable {
     if ($global:PIM_UseManagedIdentity) { return $true }
     if ($env:IDENTITY_ENDPOINT -and $env:IDENTITY_HEADER) { return $true }
     if ($env:MSI_ENDPOINT -and $env:MSI_SECRET) { return $true }
+    # §100.63(b) an Azure Arc-enabled server (the on-premises hybrid worker): its agent serves the identity on localhost,
+    # never on 169.254.169.254, so the IMDS probe below would answer "no" there.
+    if ((Get-Command Get-PimArcIdentityEndpoint -ErrorAction SilentlyContinue) -and (Get-PimArcIdentityEndpoint)) { return $true }
     if (-not $Force -and $null -ne $script:PimMiAvailable) { return $script:PimMiAvailable }
     $ok = $false
     try {

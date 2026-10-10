@@ -7,7 +7,7 @@
     each one before the next, and can resume after a stop or a failure.
 
 .DESCRIPTION
-    Converts a public (external) PIM Manager environment to private (internal-only) in one command. It runs the conversion guide's steps in order by calling the existing setup scripts (safety copy, private registry, remove and redeploy or rebuild, verify from inside the network, optional custom name, optional private SQL), checks each step before the next, records progress per tenant and resource group so -Resume continues after a stop or a failure, and stops with exit code 10 where your network team must act. Data is kept. It only prints the plan unless -Apply is given.
+    Converts a public (external) PIM Manager environment to private (internal-only) in one command. It runs the conversion guide's steps in order by calling the existing setup scripts (safety copy, private registry, remove and redeploy or rebuild, verify from inside the network, registry public access off, optional custom name, optional private SQL with its public access off), checks each step before the next, records progress per tenant and resource group so -Resume continues after a stop or a failure, and stops with exit code 10 where your network team must act. Data is kept. It only prints the plan unless -Apply is given.
 
     REQUIREMENTS 100.64 (owner 2026-10-10). The internal/external setting of a Container Apps environment is fixed when
     the environment is created, so the conversion deletes and recreates the Container Apps part only. Everything that
@@ -30,11 +30,19 @@
       verify-inside [5]  STOP POINT before any public endpoint is closed: when this machine reaches the PIM Manager's
                          private address, Confirm-PimInstall.ps1 runs here; otherwise it STOPS (exit 10) with what to check
                          from inside. Resume with -ConfirmedFromInside once that check passed.
+      registry-lock [3]  (Route Redeploy; Route Rebuild locks it itself with -LockRegistry) the registry's public network
+                         access OFF -- the same ARM change and the same decision (Get-PimRegistryLockDecision, read from
+                         Rebuild-PimEnvExternal.ps1) as -LockRegistry, then read back. REFUSED (exit 1, nothing changed)
+                         unless the registry is Premium with an Approved private endpoint, the build pool exists, is
+                         Succeeded and runs in the VNet (the in-cloud image build of a private registry runs on it), and
+                         the updater job (when there is one) carries PIM_ACR_AGENT_POOL = that pool.
       custom-host   [6]  -HostName: Set-PimManagerCustomHost.ps1 with your certificate and DNS choice.
       sql-endpoint  [7]  -SqlPrivate (last): New-PimHostingPrerequisites.ps1 -SqlPrivateEndpoint.
       profile       [7]  -SqlPrivate or Route Rebuild: Invoke-PimDeployAll.ps1 -Apply once with the private values, so the
                          saved deploy profile (and Update-PimCommunity.ps1) carries them.
-      finish        [8]  what is left for you (old reply addresses, SQL public access, updates), and the rollback table.
+      sql-public-off [7] -SqlPrivate (the very last change): Set-PimSqlPublicAccess.ps1 -Disable -Apply -- refused unless the
+                         SQL server has an Approved private endpoint.
+      finish        [8]  what is left for you (old reply addresses, updates), and the rollback table.
 
     ROUTE. Default Redeploy (the guide's Route B), because it is the route that completes in ONE REST session: it grants
     the new identities their Graph permissions, Azure roles AND database users, it needs no Windows-only capture, and the
@@ -123,6 +131,14 @@ if (-not (Get-Command Invoke-PimSetupArm -ErrorAction SilentlyContinue)) { . (Jo
 . (Join-Path $PSScriptRoot '_PimDeployProfile.ps1')       # Get-PimDeployProfilePath / Read-PimDeployProfile
 . (Join-Path $PSScriptRoot '_PimInstallTracking.ps1')     # optional Invardia install tracking (best effort)
 Show-PimSetupBanner -ScriptName 'Convert-PimToPrivate'
+# The registry-lock decision is Rebuild -LockRegistry's own (REQUIREMENTS 100.64 (b)): ONLY that function is read from
+# Rebuild-PimEnvExternal.ps1 (running the file would start a rebuild), so both paths refuse for the same reasons.
+if (-not (Get-Command Get-PimRegistryLockDecision -ErrorAction SilentlyContinue)) {
+    $cvRbAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Rebuild-PimEnvExternal.ps1'), [ref]$null, [ref]$null)
+    $cvRbFn = $cvRbAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-PimRegistryLockDecision' }, $true)
+    if (-not $cvRbFn) { throw 'Get-PimRegistryLockDecision was not found in Rebuild-PimEnvExternal.ps1' }
+    . ([scriptblock]::Create($cvRbFn.Extent.Text))
+}
 
 $cvPlanOnly = (-not $Apply) -or [bool]$WhatIfPreference
 if ($WhatIfPreference -and $Apply) { Write-Host '  -WhatIf: plan only -- -Apply is ignored, nothing is changed.' -ForegroundColor Yellow }
@@ -229,6 +245,67 @@ function Test-PimConvertInsideReach {
     } catch { return @{ ok = $false; reason = "$($priv[0]):443: $($_.Exception.Message)" } } finally { $c.Close() }
 }
 
+function Get-PimConvertRegistryLockDecision {
+    <#
+      PURE. May the registry's public network access be turned OFF now? Rebuild -LockRegistry's decision
+      (Get-PimRegistryLockDecision: Premium + a private endpoint), counting only APPROVED private endpoint connections, plus
+      what the in-cloud image build of a private registry needs (update-job-entry.ps1 -> Invoke-PimAcrRestBuild
+      -AgentPoolName $env:PIM_ACR_AGENT_POOL): the build pool exists, is Succeeded and is injected into the VNet, and the
+      updater job carries PIM_ACR_AGENT_POOL = that pool. Without them every nightly build is refused once the registry is
+      locked ("client with IP ... is not allowed access", measured 2026-09-23).
+      Returns @{ lock; done; refuse; reasons[]; notes[] }.
+    #>
+    param($Registry, $Pool, [string]$PoolName, $Job, [string]$JobName)
+    $r = @{ lock = $false; done = $false; refuse = $false; reasons = @(); notes = @() }
+    if (-not $Registry) { $r.refuse = $true; $r.reasons = @('the registry could not be read'); return $r }
+    $conns = @($Registry.properties.privateEndpointConnections | Where-Object { $_ })
+    $approved = @($conns | Where-Object { "$($_.properties.privateLinkServiceConnectionState.status)" -eq 'Approved' })
+    $base = Get-PimRegistryLockDecision -Sku "$($Registry.sku.name)" -PublicNetworkAccess "$($Registry.properties.publicNetworkAccess)" -PrivateEndpointCount $approved.Count -Requested
+    if ("$($Registry.properties.publicNetworkAccess)" -eq 'Disabled') { $r.done = $true; $r.notes = @("$($base.reason)"); return $r }
+    $why = New-Object System.Collections.Generic.List[string]
+    if (-not $base.lock) {
+        if ($conns.Count -and -not $approved.Count) { $why.Add("the registry's private endpoint is not Approved ($(@($conns | ForEach-Object { "$($_.properties.privateLinkServiceConnectionState.status)" }) -join ', ')) -- approve it first") }
+        else { $why.Add("$($base.reason)") }
+    }
+    if (-not $Pool) { $why.Add("the build pool '$PoolName' does not exist -- the in-cloud image build of a private registry runs on it (New-PimHostingPrerequisites.ps1 -AcrAgentPoolName $PoolName)") }
+    else {
+        $ps = "$($Pool.properties.provisioningState)".Trim()
+        if ($ps -ne 'Succeeded') { $why.Add("the build pool '$PoolName' is '$ps', not Succeeded") }
+        if (-not "$($Pool.properties.virtualNetworkSubnetResourceId)".Trim()) { $why.Add("the build pool '$PoolName' is not in the VNet (no subnet) -- it cannot reach a private registry") }
+    }
+    if ($Job) {
+        $envVal = @(@($Job.properties.template.containers) | ForEach-Object { @($_.env) } | Where-Object { $_ -and "$($_.name)" -eq 'PIM_ACR_AGENT_POOL' } | ForEach-Object { "$($_.value)".Trim() }) | Select-Object -First 1
+        if ("$envVal" -ne $PoolName) { $why.Add("the updater job '$JobName' carries PIM_ACR_AGENT_POOL='$envVal', not '$PoolName' -- its nightly build would be refused (re-run Invoke-PimDeployAll.ps1 -AcrAgentPoolName $PoolName -Apply)") }
+    } else { $r.notes = @("no updater job '$JobName' (Community: Update-PimCommunity.ps1 builds with the deploy profile's -AcrAgentPoolName)") }
+    if ($why.Count) { $r.refuse = $true; $r.reasons = @($why); return $r }
+    $r.lock = $true
+    return $r
+}
+
+function Invoke-PimConvertRegistryLock {
+    # Step registry-lock (apply): read the registry, its build pool and the updater job; refuse, or turn public network
+    # access OFF exactly as Rebuild -LockRegistry does (Update-PimArmAcr) and read it back. Returns @{ ok; detail }.
+    param([string]$SubscriptionId, [string]$ResourceGroup, [string]$AcrName, [string]$PoolName, [string]$JobName)
+    $reg = Get-PimArmAcr -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $AcrName -ErrorAsNull
+    $pool = $null; $job = $null
+    if ($reg -and "$($reg.properties.publicNetworkAccess)" -ne 'Disabled') {
+        $pool = Get-PimArmAcrAgentPool -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Registry $AcrName -Name $PoolName -ErrorAsNull
+        $job = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+    }
+    $d = Get-PimConvertRegistryLockDecision -Registry $reg -Pool $pool -PoolName $PoolName -Job $job -JobName $JobName
+    foreach ($n in @($d.notes)) { Say "registry $AcrName : $n" }
+    if ($d.done) { return @{ ok = $true; detail = "registry $AcrName : public network access is already OFF" } }
+    if ($d.refuse) {
+        foreach ($w in @($d.reasons)) { Say "REFUSED -- $w" 'Red' }
+        return @{ ok = $false; detail = "registry lock refused, public access left ON: $(@($d.reasons) -join '; ')" }
+    }
+    try { [void](Update-PimArmAcr -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $AcrName -Properties @{ publicNetworkAccess = 'Disabled' }) }
+    catch { return @{ ok = $false; detail = "Azure refused to turn public network access OFF on registry '$AcrName': $($_.Exception.Message)" } }
+    $pna = "$((Get-PimArmAcr -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $AcrName -ErrorAsNull).properties.publicNetworkAccess)".Trim()
+    if ($pna -ne 'Disabled') { return @{ ok = $false; detail = "registry '$AcrName' still reports publicNetworkAccess=$pna after the switch" } }
+    return @{ ok = $true; detail = "registry $AcrName : public network access OFF (read back); builds run on pool $PoolName" }
+}
+
 # ================================================================================================================ state
 $statePath = Get-PimConvertStatePath -TenantId $cvTid -ResourceGroup $cvRg
 $stateDir  = $statePath -replace '\.json$', ''
@@ -291,6 +368,7 @@ $cvR.PrivateEndpointSubnetName          = Pick 'PrivateEndpointSubnetName' @('Pr
 $cvR.PrivateEndpointSubnetAddressPrefix = Pick 'PrivateEndpointSubnetAddressPrefix' @('PrivateEndpointSubnetAddressPrefix')
 $cvR.AcrAgentPoolName    = Pick 'AcrAgentPoolName' @('AcrAgentPoolName') 'pimbuild'
 $cvR.PrivateDnsResourceGroup = Pick 'PrivateDnsResourceGroup' @('PrivateDnsResourceGroup')
+$cvR.UpdateJobName       = Pick 'UpdateJobName' @('UpdateJobName') 'ca-pim-update'
 $cvR.SqlServerName       = $(if ("$($cvR.SqlServerFqdn)".Trim()) { ("$($cvR.SqlServerFqdn)".Trim() -split '\.')[0] } else { '' })
 $cvHubIds = @($HubVnetId | Where-Object { "$_".Trim() } | ForEach-Object { "$_".Trim() })
 if (-not $cvHubIds.Count -and $cvProf -and "$($cvProf['HubVnetName'])".Trim()) {
@@ -369,6 +447,7 @@ if ($PfxPassword)               { $argHost['PfxPassword'] = $PfxPassword }
 if ("$HostDns".Trim())          { $argHost['Dns'] = "$HostDns".Trim() }
 $hostDnsRg = $(if ("$HostDnsResourceGroup".Trim()) { "$HostDnsResourceGroup".Trim() } else { "$($cvR.PrivateDnsResourceGroup)".Trim() })
 if ($hostDnsRg) { $argHost['PrivateDnsResourceGroup'] = $hostDnsRg }
+$argSqlPublic = @{ TenantId = $cvTid; SubscriptionId = $cvSub; ResourceGroup = $cvRg; ServerName = "$($cvR.SqlServerName)"; Disable = $true; Apply = $true }
 $argHubPrep = @{ SpokeSubscriptionId = $cvSub; SpokeResourceGroup = "$($cvR.VnetResourceGroup)"; SpokeVnetName = "$($cvR.VnetName)" }
 if ($cvHub) { $argHubPrep['HubSubscriptionId'] = $cvHub.subscriptionId; $argHubPrep['HubResourceGroup'] = $cvHub.resourceGroup; $argHubPrep['HubVnetName'] = $cvHub.name }
 if ("$DeployPrincipalObjectId".Trim()) { $argHubPrep['DeployPrincipalObjectId'] = "$DeployPrincipalObjectId".Trim() }
@@ -391,12 +470,14 @@ if ($Route -eq 'Redeploy') {
     AddStep 'rebuild' '4A' 'rebuild the environment internal-only from the live capture' 'Rebuild-PimEnvInternal' $argRebuild
 }
 AddStep 'verify-inside' '5' 'verify from inside the network before any public endpoint is closed (stop point 2)' 'Confirm-PimInstall' $argConfirm
+AddStep 'registry-lock' '3' 'turn the registry''s public network access OFF (after the check from inside)' '' $null $(if ($Route -eq 'Rebuild') { 'route Rebuild locks it itself with -LockRegistry' } else { '' })
 AddStep 'custom-host' '6' 'a stable custom name for the PIM Manager' 'Set-PimManagerCustomHost' $argHost $(if (-not "$HostName".Trim()) { 'no -HostName' } else { '' })
 AddStep 'sql-endpoint' '7' 'the SQL private endpoint (last)' 'New-PimHostingPrerequisites' (Get-PrereqArgs $true) $(if (-not $SqlPrivate) { 'no -SqlPrivate' } else { '' })
 $profSkip = ''
 if (-not $SqlPrivate -and $Route -eq 'Redeploy') { $profSkip = 'the redeploy already saved the private parameters' }
 elseif ($Route -eq 'Rebuild' -and -not $cvProf -and -not $SqlPrivate) { $profSkip = 'no deploy profile to correct' }
 AddStep 'profile' '7' 'save the private values in the deploy profile (one deploy with them)' 'Invoke-PimDeployAll' (Get-DeployArgs ([bool]$SqlPrivate)) $profSkip
+AddStep 'sql-public-off' '7' 'turn the SQL server''s public network access OFF (the very last change)' 'Set-PimSqlPublicAccess' $argSqlPublic $(if (-not $SqlPrivate) { 'no -SqlPrivate' } else { '' })
 AddStep 'finish' '8' 'what is left for you, updates after the conversion'
 
 # ================================================================================================================ events
@@ -417,9 +498,12 @@ function Show-Rollback([string]$FailedStep) {
         '^(preflight|network|safety-copy|registry)$' { Say 'Nothing in the Container Apps part has changed. A registry already upgraded to Premium with a private endpoint is harmless: pulls keep working.' }
         '^(remove-stack|redeploy)$' { Say 'The Container Apps part is removed or partly rebuilt; the data is untouched. Resuming re-runs the deploy (idempotent).'
                                       Say 'Back to public instead: run Invoke-PimDeployAll.ps1 with the original deploy profile (exposure external) and -Apply.' }
+        '^registry-lock$' { Say 'The environment is private and running; the registry''s public network access is still ON (nothing was changed). Fix what is named above, then resume.' }
+        '^sql-public-off$' { Say 'The environment is private and running; the SQL server''s public network access is unchanged. Fix what is named above (an Approved private endpoint), then resume.'
+                             Say "Turn it back on at any time: ${cmdPrefix}Set-PimSqlPublicAccess.ps1 -TenantId '$cvTid' -SubscriptionId '$cvSub' -ResourceGroup '$cvRg' -ServerName '$($cvR.SqlServerName)' -Enable -Apply" }
         '^rebuild$' { Say "Resuming passes -ResumeFromCapture -CaptureDir '$rebuildDir' to the rebuild. KEEP THAT FOLDER until the run completes: once the apps are deleted it is the only copy of their definitions."
                       Say "Back to public instead: ${cmdPrefix}Rebuild-PimEnvExternal.ps1 -Tag '$($cvR.Tag)' -SubscriptionId '$cvSub' -ResourceGroup '$cvRg' -EasyAuthTenantId '$cvTid' -Apply" }
-        default { Say 'The environment is private and running. Registry locked too early: turn its public network access back on (portal). SQL public access off too early: turn it back on, then work through the private endpoint.' }
+        default { Say 'The environment is private and running. Registry locked too early: turn its public network access back on (portal). SQL public access off too early: Set-PimSqlPublicAccess.ps1 -Enable -Apply, then work through the private endpoint.' }
     }
     $cvRp = if ($cvState -and "$($cvState.restorePointUtc)") { "$($cvState.restorePointUtc)" } else { '' }
     Say ("Data is not touched by any step." + $(if ($cvRp) { " Point-in-time restore point: $cvRp (Azure SQL automatic backups)." } else { '' }))
@@ -448,6 +532,7 @@ foreach ($cvS in $cvSteps) {
         Write-Host "        $cvVerb $(Format-PimConvertCommand -Script $cvS.child -Arguments $cvS.args)" -ForegroundColor DarkGray
     }
     if ($cvS.id -eq 'safety-copy') { Write-Host '        + reads the SQL database''s point-in-time restore window (ARM); the run REFUSES to continue without a safety copy' -ForegroundColor DarkGray }
+    if ($cvS.id -eq 'registry-lock' -and -not $cvS.skip) { Write-Host "        turns public network access OFF on registry $($cvR.AcrName) (ARM, as Rebuild -LockRegistry) and reads it back; REFUSED unless Premium + an Approved private endpoint, build pool '$($cvR.AcrAgentPoolName)' Succeeded in the VNet, and the updater job $($cvR.UpdateJobName) carries PIM_ACR_AGENT_POOL=$($cvR.AcrAgentPoolName)" -ForegroundColor DarkGray }
     if ($cvS.id -eq 'verify-inside') { Write-Host '        runs Confirm-PimInstall here when this machine reaches the private address; otherwise STOPS (exit 10) until -ConfirmedFromInside' -ForegroundColor DarkGray }
     if ($cvS.id -eq 'network' -and $SkipPeering) { Write-Host '        STOPS (exit 10) until the hub owner has run that script; resume with -HubSideDone' -ForegroundColor DarkGray }
 }
@@ -518,7 +603,8 @@ $cvI = 0
 foreach ($cvS in $cvSteps) {
     $cvI++
     $cvPrev = Get-StepState $cvS.id
-    if ($cvS.id -ne 'preflight' -and ($cvPrev -eq 'ok' -or $cvPrev -eq 'skipped')) { Send-ConvertEvent $cvS.id $cvS.title 'skipped' 'done in an earlier run'; continue }
+    # a step skipped earlier only because of a missing option (e.g. no -SqlPrivate) runs when the option is given on -Resume
+    if ($cvS.id -ne 'preflight' -and ($cvPrev -eq 'ok' -or ($cvPrev -eq 'skipped' -and $cvS.skip))) { Send-ConvertEvent $cvS.id $cvS.title 'skipped' 'done in an earlier run'; continue }
     if ($cvS.skip) { Set-StepState $cvS.id 'skipped' $cvS.skip; Send-ConvertEvent $cvS.id $cvS.title 'skipped' $cvS.skip; continue }
     Write-Host ''
     Write-Host ("==> {0}. {1} (guide step {2})" -f $cvI, $cvS.title, $cvS.guide) -ForegroundColor Cyan
@@ -583,6 +669,11 @@ foreach ($cvS in $cvSteps) {
                 $cvState | Add-Member -NotePropertyName newAddress -NotePropertyValue "$($cvLive.fqdn) -> $($cvLive.staticIp)" -Force
             }
         }
+        'registry-lock' {
+            $cvLock = Invoke-PimConvertRegistryLock -SubscriptionId $cvSub -ResourceGroup $cvRg -AcrName "$($cvR.AcrName)" -PoolName "$($cvR.AcrAgentPoolName)" -JobName "$($cvR.UpdateJobName)"
+            if (-not $cvLock.ok) { $cvResult = 'failed' }
+            $cvDetail = "$($cvLock.detail)"
+        }
         'finish' {
             $cvDetail = 'converted'
         }
@@ -626,9 +717,8 @@ $cvState.completedUtc = [DateTime]::UtcNow.ToString('o'); Save-ConvertState
 Write-Host ''
 Write-Host '  CONVERSION COMPLETE -- left for you (the scripts cannot see these):' -ForegroundColor Green
 Say "- remove the old reply addresses (*.<old domain>) on the PIM Manager's sign-in app registration in Entra ID, and any DNS record you made for the old address"
-if (-not $SqlPrivate) { Say '- make SQL private later: run again with -Resume -Apply -SqlPrivate (adds the SQL private endpoint)' }
-else { Say '- turn the SQL server''s public network access OFF (portal, or your Azure Policy) once the private endpoint resolves from inside (not yet automated)' }
-if ($Route -eq 'Redeploy') { Say '- the registry''s public network access is still on (route Redeploy does not lock it): turn it off in the portal once pulls go through the private endpoint' }
+if (-not $SqlPrivate) { Say '- make SQL private later: run again with -Resume -Apply -SqlPrivate (adds the SQL private endpoint, then turns the server''s public network access off)' }
+else { Say '- SQL is reached through its private endpoint only (public network access off): deploys and Update-PimCommunity.ps1 run from inside the network' }
 Say '- updates: outbound invardia.com must be allowed (Pro); the updater job carries PIM_ACR_AGENT_POOL. Community: Update-PimCommunity.ps1 -Apply from the deploy host.'
 Say "- from now on Confirm-PimInstall.ps1 and Set-PimLicense.ps1 run from inside the network. State: $statePath"
 exit 0

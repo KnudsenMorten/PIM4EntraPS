@@ -151,6 +151,38 @@ function Test-PimSqlRegionCapability {
     return ''
 }
 
+function Get-PimSqlNotRegisteredText {
+    # PURE. BUG-300: the ONE customer sentence for "Azure SQL's capabilities cannot be read because the provider is not
+    # registered yet" (the preflight message and the deploy's region line; tests assert it verbatim).
+    return 'Microsoft.Sql is not registered yet -- setup registers it in the prerequisites step; the region check for SQL runs then.'
+}
+
+function Test-PimRegionProviderUnregistered {
+    # PURE. BUG-300: $true when a provider answer (GET /subscriptions/{sub}/providers/{ns}) says it is NOT registered
+    # (NotRegistered / Registering / Unregistered / Unregistering). An absent answer, or one without registrationState, is
+    # $false: "could not read" stays unknown -- only a provider ARM itself reports as unregistered defers the check.
+    param([object]$Provider)
+    if ($null -eq $Provider) { return $false }
+    $st = if ($Provider -is [System.Collections.IDictionary]) { "$($Provider['registrationState'])" } elseif ($Provider.PSObject.Properties['registrationState']) { "$($Provider.registrationState)" } else { '' }
+    $st = $st.Trim()
+    return [bool]($st -and $st -ne 'Registered')
+}
+
+function Test-PimSqlRegionAfterRegistration {
+    <#
+      PURE. BUG-300 -- the SQL half of the region check, run by the prerequisites step right AFTER it registered Microsoft.Sql
+      and BEFORE it creates anything. -> { state = ok | failed | warning; message }.
+        failed  : the capabilities answer says the region is closed to this subscription or has no Standard S0 (stop: nothing
+                  has been created yet, choose another region)
+        warning : the answer still cannot be read (the SQL server creation reports a refused region by name)
+    #>
+    param([object]$Capabilities, [Parameter(Mandatory)][string]$Location)
+    $sq = Test-PimSqlRegionCapability -Capabilities $Capabilities -Location $Location
+    if ($sq -eq '?') { return [pscustomobject]@{ state = 'warning'; message = "Microsoft.Sql is registered now, but Azure SQL's capabilities in $Location still cannot be read -- creating the SQL server will tell if the region refuses it" } }
+    if ($sq) { return [pscustomobject]@{ state = 'failed'; message = "Azure SQL is not available for this subscription in $Location -- $sq. Nothing has been created yet: choose another region and run the installation again." } }
+    return [pscustomobject]@{ state = 'ok'; message = "Azure SQL Database (Standard S0) is offered in $Location (checked after Microsoft.Sql was registered)" }
+}
+
 function Get-PimRegionCandidateOrder {
     # PURE. The regions (names) other than -Location where EVERY required resource type is offered, nearest first
     # (great-circle over the locations' latitude / longitude). Regions without coordinates, and canary / staging regions,
@@ -191,8 +223,10 @@ function Test-PimRegionCapability {
         -CandidateSqlCapabilities  : hashtable region -> the same answer for suggested regions (a suggestion needs SQL confirmed)
         -NoSql                     : the environment uses a central store (no SQL server in this region)
       -> { ok; location; displayName; missing[] (customer-language service names); unknown[] (answers not read);
+           deferred[] (checks that run later -- BUG-300: Azure SQL's capabilities while Microsoft.Sql is not registered yet);
            suggestion (region name or ''); suggestionDisplayName; candidates[]; message }
       ok = nothing is missing. An answer that could not be read is listed in unknown[], never as missing (the caller warns).
+      A deferred check is NOT a warning: the prerequisites step registers the provider and runs it before anything is created.
     #>
     param(
         [AllowEmptyString()][string]$Location,
@@ -215,9 +249,17 @@ function Test-PimRegionCapability {
         if ($null -eq $tl) { $unknown.Add($svc.Label); continue }
         if ($name -notin @($tl)) { $missing.Add($svc.Label) }
     }
+    # BUG-300: ARM refuses Microsoft.Sql/locations/{loc}/capabilities while the Microsoft.Sql provider is not registered --
+    # on a FRESH subscription that is every first install, and the unread answer read as a scary "could not check". When the
+    # provider answer says it is not registered (yet), the SQL capability check is DEFERRED to the prerequisites step (which
+    # registers the provider and checks SQL again before it creates anything) -- never listed as unknown.
+    $deferred = New-Object System.Collections.Generic.List[string]
     if (-not $NoSql) {
         $sq = Test-PimSqlRegionCapability -Capabilities $SqlCapabilities -Location $name
-        if ($sq -eq '?') { $unknown.Add('Azure SQL Database capabilities') }
+        if ($sq -eq '?') {
+            if (Test-PimRegionProviderUnregistered -Provider (Get-PimRegionProvider -Providers $Providers -Namespace 'Microsoft.Sql')) { $deferred.Add((Get-PimSqlNotRegisteredText)) }
+            else { $unknown.Add('Azure SQL Database capabilities') }
+        }
         elseif ($sq -and -not ($missing -contains 'Azure SQL Database servers')) { $missing.Add($sq) }
     }
     $candidates = @()
@@ -233,14 +275,15 @@ function Test-PimRegionCapability {
     $disp = Get-PimRegionDisplayName -Name $name -Locations $Locations
     $sugDisp = if ($suggestion) { Get-PimRegionDisplayName -Name $suggestion -Locations $Locations } else { '' }
     $msg = if (-not $missing.Count) {
-        "every service PIM Manager needs is offered in $disp ('$name')" + $(if ($unknown.Count) { " -- could not check: $(@($unknown) -join ', ')" } else { '' })
+        "every service PIM Manager needs is offered in $disp ('$name')" + $(if ($unknown.Count) { " -- could not check: $(@($unknown) -join ', ')" } else { '' }) +
+            $(if ($deferred.Count) { " -- $(@($deferred) -join ' ')" } else { '' })
     } else {
         "PIM Manager cannot be installed in $disp ('$name') for this subscription -- not available there: $(@($missing) -join '; ')." +
             $(if ($suggestion) { " Nearest region that has every service: $sugDisp ('$suggestion') -- choose it, or another region." } else { ' Choose another region.' })
     }
     return [pscustomobject]@{
         ok = (-not $missing.Count); location = $name; displayName = $disp
-        missing = @($missing); unknown = @($unknown)
+        missing = @($missing); unknown = @($unknown); deferred = @($deferred)
         suggestion = $suggestion; suggestionDisplayName = $sugDisp; candidates = @($candidates); message = $msg
     }
 }

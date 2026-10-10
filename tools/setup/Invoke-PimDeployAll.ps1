@@ -2214,7 +2214,7 @@ function Invoke-DefaultStepRunner {
                     }
                 }
                 # INSTALL-HARDEN-1 item 4: the bounded Exchange wait reports each attempt to the install's reporter ('waiting').
-                if ($OnStep) { $mailArgs['OnProgress'] = { param($m) Send-PimDeployStepEvent ([pscustomobject]@{ key = 'mailsender'; name = 'mail sender' }) 'waiting' "$m" } }
+                if ($OnStep -or (Test-PimDeploySubStepMarkers)) { $mailArgs['OnProgress'] = { param($m) Send-PimDeployStepEvent ([pscustomobject]@{ key = 'mailsender'; name = 'mail sender' }) 'waiting' "$m" } }
                 if (-not $mailSignedInApp -and -not $storeAdminArgs.Count) {
                     Warn 'mail sender: SKIPPED -- no SQL admin identity was supplied, and this step cannot authenticate without one.'
                     Warn '  Pass -SqlAdminClientId with -SqlAdminClientSecret, or do it afterwards: PIM Manager > Get Started > Mail sender (shared mailbox: a browser sign-in command; or SMTP relay).'
@@ -2613,7 +2613,23 @@ function Invoke-DefaultStepRunner {
                 catch { return @{ ok=$false; ran=$true; detail="nightly updater NOT installed: $($_.Exception.Message)" } }
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                 $ringTxt = if ($script:PimDeployRingExplicit) { "ring $UpdateRing (as configured)" } else { 'ring kept (or the DEFAULT ring 2 on a new updater -- pass -UpdateRing to decide it)' }
-                return @{ ok=$ok; ran=$true; detail="nightly updater '$UpdateJobName' installed ($UpdateCron UTC) -- builds its own images, $ringTxt" }
+                # PIM 100.61 (framework 8.12): the as-built job caj-pim-asbuilt (manual trigger) + the PIM storage account's
+                # 'asbuilt' container with its 1-day lifecycle rule -- same image, installed with the updater. Best effort: a
+                # failure is REPORTED in this step's detail and never fails a working environment's deploy. Private SQL: this
+                # host has no route, so the job's view + reader user are left to a re-run from inside the network (said so).
+                $abDetail = ''
+                $abj = Join-Path $here 'Deploy-PimAsBuiltJob.ps1'
+                if ($ok -and (Test-Path -LiteralPath $abj) -and "$SqlServerFqdn".Trim()) {
+                    $abArgs = @{ SubscriptionId = $SubscriptionId; ResourceGroup = $ResourceGroup; EnvName = $EnvName; AcrName = $AcrName; ImageRepo = $ImageRepo
+                                 ImageTag = $tag; ManagerApp = $ManagerApp; SqlServerFqdn = "$SqlServerFqdn".Trim(); SqlDatabase = $SqlDatabase }
+                    if ("$RegistryIdentityResourceId".Trim()) { $abArgs['RegistryIdentityResourceId'] = $RegistryIdentityResourceId }
+                    if ($SqlPrivateEndpoint) { $abArgs['SkipSqlGrant'] = $true }
+                    $global:LASTEXITCODE = 0
+                    try { & $abj @abArgs | Out-Host; $abDetail = "; as-built job caj-pim-asbuilt installed$(if ($SqlPrivateEndpoint) { ' (private SQL: the in-cloud updater creates its view + database user on its next run -- it is inside the network)' })" }
+                    catch { $abDetail = "; as-built job NOT installed: $($_.Exception.Message) (re-run tools/setup/Deploy-PimAsBuiltJob.ps1)" }
+                    $global:LASTEXITCODE = 0
+                }
+                return @{ ok=$ok; ran=$true; detail="nightly updater '$UpdateJobName' installed ($UpdateCron UTC) -- builds its own images, $ringTxt$abDetail" }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
         }
@@ -3140,12 +3156,18 @@ $ranKeys  = New-Object System.Collections.Generic.List[string]
 $verifyResult = $null
 $halted = $false
 
+function Test-PimDeploySubStepMarkers { return ("$env:PIM_SUBSTEP_EVENTS".Trim() -eq '1') }
 # §95.2 guided install: one event per step state. A reporter that throws is logged and ignored -- reporting must
 # never be the reason a deploy fails.
 function Send-PimDeployStepEvent([object]$Step, [string]$State, [string]$Detail) {
     # §99 Support-app install tracking: the same event, posted to Invardia (best effort, scrubbed, never fatal).
     if ($script:PimInstallTracker -and $script:PimInstallTracker.enabled) {
         [void](Send-PimInstallTrackEvent -Tracker $script:PimInstallTracker -StepId "$($Step.key)" -Title "$($Step.name)" -State $State -Message "$Detail")
+    }
+    # 2026-10-11 hosting sub-step progress: run as the multi-tenant build's 'hosting' step (a child process), the build asks
+    # for one marker line per event ($env:PIM_SUBSTEP_EVENTS = '1') and relays it as 'hosting.<key>' (_PimInstallTracking.ps1).
+    if (Test-PimDeploySubStepMarkers) {
+        try { Write-Host (Format-PimSubStepEventLine -Key "$($Step.key)" -Name "$($Step.name)" -State $State -Detail "$Detail") } catch { Write-Verbose "sub-step marker failed: $($_.Exception.Message)" }
     }
     if (-not $OnStep) { return }
     try { & $OnStep ([pscustomobject]@{ key = "$($Step.key)"; name = "$($Step.name)"; state = $State; detail = "$Detail" }) | Out-Null }

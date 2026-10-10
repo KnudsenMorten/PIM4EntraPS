@@ -1,0 +1,33 @@
+{
+  "script": "Set-PimHybridWorkerEgress.ps1",
+  "product": "pim",
+  "title": "PIM for Active Directory: NAT gateway egress for the hybrid worker VM (no public IP)",
+  "purpose": "Puts the hybrid worker VM's outbound traffic behind a NAT gateway and makes sure the VM itself has no public IP address.",
+  "whenToRun": "Run for you by New-PimHybridWorkerInfra.ps1 (-Egress NatGateway). Run it yourself to migrate a worker built with a public IP on its VM, or to verify the egress. Azure VM worker only.",
+  "standalone": false,
+  "sourcePath": "tools/pim-hybrid-worker/Set-PimHybridWorkerEgress.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Network Contributor", "scope": "the worker's resource group", "why": "creates the NAT gateway and its public IP, detaches a public IP from the VM's NIC, updates the subnet" }
+  ],
+  "changes": [
+    { "target": "the worker's resource group", "action": "create", "object": "NAT gateway natgw-<vm> (Standard) and, when no address can be reused, the Standard static public IP pip-<vm> as its outbound address", "why": "outbound only; nothing can connect in", "undo": "detach it from the subnet, then delete the NAT gateway and its public IP" },
+    { "target": "the VM's network interface", "action": "update", "object": "a public IP on it is DETACHED (the address is kept and becomes the NAT gateway's)", "why": "the worker is Tier 0: never a public IP of its own", "undo": "none intended" },
+    { "target": "the worker subnet", "action": "update", "object": "natGateway = the NAT gateway; defaultOutboundAccess = false", "why": "outbound through the NAT gateway only", "undo": "remove the NAT gateway from the subnet" }
+  ],
+  "parameters": [
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The worker's subscription." },
+    { "name": "TenantId", "required": true, "default": null, "help": "The tenant; the script refuses a subscription in another one." },
+    { "name": "ResourceGroup", "required": false, "default": "rg-pimhybridwrk", "help": "The worker's resource group." },
+    { "name": "Location", "required": false, "default": "the VNet's region", "help": "Region for the NAT gateway and its IP." },
+    { "name": "VmName", "required": false, "default": "PIMHYBRIDWRK", "help": "The worker VM." },
+    { "name": "VnetName", "required": false, "default": "vnet-pimhybridwrk", "help": "The worker VNet." },
+    { "name": "SubnetName", "required": false, "default": "snet-worker", "help": "The worker subnet." },
+    { "name": "NatGatewayName", "required": false, "default": "natgw-<vm>", "help": "The NAT gateway name." },
+    { "name": "PublicIpName", "required": false, "default": "pip-<vm>", "help": "The NAT gateway's public IP name (when none is reused)." }
+  ],
+  "readsOnly": [ "the subscription's tenant", "the subnet, the VM and its NICs, the NAT gateway and public IP (read-before-write), and at the end a verification that no public IP is left on the VM" ],
+  "network": [ "management.azure.com (ARM REST) and login.microsoftonline.com -- browser sign-in or an Invardia support session; no Azure CLI, no PowerShell module" ],
+  "whatIf": "Prints the NAT gateway, the detach and the subnet change it would make; changes nothing (and, before the subnet exists, says so instead of failing).",
+  "undo": "Remove the NAT gateway from the subnet, delete the NAT gateway and its public IP. A detached public IP is not re-attached to the VM (by design).",
+  "docUrl": "https://invardia.com/docs/pim/scripts/Set-PimHybridWorkerEgress/"
+}

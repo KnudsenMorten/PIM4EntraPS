@@ -1,0 +1,42 @@
+{
+  "script": "New-PimHybridWorkerInfra.ps1",
+  "product": "pim",
+  "title": "PIM for Active Directory: build the hybrid worker's Azure side (or check an Azure Arc server)",
+  "purpose": "Builds the Azure side of the PIM for Active Directory hybrid worker -- its own resource group, network, deny-all firewall, NAT gateway egress and Windows VM -- or, for an Azure Arc-enabled on-premises server, checks the machine and builds nothing.",
+  "whenToRun": "Once per hybrid worker, first step. Azure VM worker: with -PeerVnetId and -DnsServers. On-premises worker: with -ArcMachineResourceId after the server is onboarded to Azure Arc. Deploy-PimHybridWorker.ps1 runs it for you.",
+  "standalone": false,
+  "sourcePath": "tools/pim-hybrid-worker/New-PimHybridWorkerInfra.ps1",
+  "runAs": [
+    { "kind": "azureRbac", "name": "Contributor", "scope": "the worker's subscription (Azure VM); Reader on the Arc machine (Arc)", "why": "creates the resource group, VNet, NSG, NAT gateway and VM; reads the Arc machine" },
+    { "kind": "azureRbac", "name": "Network Contributor", "scope": "every VNet the worker peers with (-PeerVnetId)", "why": "the script creates both sides of each peering" },
+    { "kind": "azureRbac", "name": "SQL Server Contributor", "scope": "the PIM SQL server (-SqlServerId)", "why": "the VNet rule for the worker subnet (Azure VM) or the firewall rules for -SqlAllowedPublicIp (Arc)" }
+  ],
+  "changes": [
+    { "target": "Azure (Azure VM worker)", "action": "create", "object": "resource group, VNet + subnet (Microsoft.Sql and Microsoft.Storage service endpoints, DNS = your DCs), NSG with deny-all inbound, NAT gateway + its public IP (Set-PimHybridWorkerEgress.ps1), peerings in both directions, the VM (Windows Server 2022 Azure Edition Core, Trusted Launch, system-assigned identity, NO public IP), a SQL VNet rule", "why": "the worker's own isolated network and machine; the local admin password is generated, used once and discarded", "undo": "delete the resource group, the remote peerings and the SQL VNet rule 'pimhybridwrk'" },
+    { "target": "PIM SQL server (Arc, -SqlAllowedPublicIp)", "action": "create", "object": "one firewall rule per on-premises egress address (pimhybridwrk-arc-<server>-<n>)", "why": "an on-premises worker reaching a public SQL endpoint; not needed with a private endpoint", "undo": "delete those firewall rules" }
+  ],
+  "parameters": [
+    { "name": "SubscriptionId", "required": true, "default": null, "help": "The worker's subscription (Azure VM) or the Arc machine's." },
+    { "name": "TenantId", "required": true, "default": null, "help": "The tenant; the script refuses a subscription in another one." },
+    { "name": "ArcMachineResourceId", "required": false, "default": null, "help": "On-premises worker: the Azure Arc machine's resource id. Builds nothing; checks it is connected, Windows and has an identity." },
+    { "name": "ArcApiVersion", "required": false, "default": "2024-07-10", "help": "Microsoft.HybridCompute api-version." },
+    { "name": "SqlAllowedPublicIp", "required": false, "default": null, "help": "Arc with a public SQL endpoint: the site's egress address(es)." },
+    { "name": "ResourceGroup", "required": false, "default": "rg-pimhybridwrk", "help": "Azure VM: the worker's resource group." },
+    { "name": "Location", "required": false, "default": "westeurope", "help": "Azure VM: the region (your choice)." },
+    { "name": "VmName", "required": false, "default": "PIMHYBRIDWRK", "help": "Azure VM: VM and computer name, max 15 characters." },
+    { "name": "VmSize", "required": false, "default": "Standard_B2s", "help": "Azure VM: the size (4 GiB recommended)." },
+    { "name": "VnetName", "required": false, "default": "vnet-pimhybridwrk", "help": "Azure VM: the worker VNet." },
+    { "name": "AddressPrefix", "required": false, "default": "10.221.16.0/24", "help": "Azure VM: VNet range (must not overlap the peered networks)." },
+    { "name": "SubnetPrefix", "required": false, "default": "10.221.16.0/27", "help": "Azure VM: the worker subnet." },
+    { "name": "PeerVnetId", "required": false, "default": null, "help": "Azure VM (required there): the VNet(s) with the domain controllers, optionally the PIM environment's." },
+    { "name": "DnsServers", "required": false, "default": null, "help": "Azure VM (required there): the domain controllers' addresses." },
+    { "name": "SqlServerId", "required": false, "default": null, "help": "The PIM SQL server's resource id (VNet rule / firewall rules)." },
+    { "name": "Egress", "required": false, "default": "NatGateway", "help": "Azure VM: NatGateway, or None when your network routes outbound. Never a public IP on the VM." },
+    { "name": "Image", "required": false, "default": "MicrosoftWindowsServer:WindowsServer:2022-datacenter-azure-edition-core-smalldisk:latest", "help": "Azure VM: the image (Publisher:Offer:Sku:Version)." }
+  ],
+  "readsOnly": [ "the subscription's tenant", "what already exists (read-before-write): resource group, NSG, VNet, peerings, VM, SQL rules", "the Arc machine (status, OS, identity)" ],
+  "network": [ "management.azure.com (ARM REST) and login.microsoftonline.com -- browser sign-in or an Invardia support session; no Azure CLI, no PowerShell module" ],
+  "whatIf": "Prints every resource it would create (or, for Arc, the checks and the firewall rules) and changes nothing.",
+  "undo": "Azure VM: delete the worker's resource group, the remote peerings '<remote>-to-pimhybridwrk' and the SQL VNet rule 'pimhybridwrk'. Arc: delete the pimhybridwrk-arc-* SQL firewall rules.",
+  "docUrl": "https://invardia.com/docs/pim/scripts/New-PimHybridWorkerInfra/"
+}
