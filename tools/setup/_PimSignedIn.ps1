@@ -191,9 +191,26 @@ function Get-PimSignedInIdentity {
               tenantId = "$TenantId".Trim().ToLowerInvariant(); subscriptionId = "$SubscriptionId".Trim().ToLowerInvariant(); supportAppId = "$($a.supportAppId)" }
 }
 
+function Get-PimSignedInToken {
+    <#
+      REQ 100.42 / framework 12.17 (owner 2026-10-09: "modern single connect only"; owner token rule: tools get TOKENS from
+      Get-InvardiaSupportToken). THE token source of a signed-in setup run, registered into PIM-Rest by
+      Set-PimSignedInGlobals ($global:PIM_TokenProvider). No az CLI, no module:
+        * the Invardia Support-app session is open in this shell (Get-InvardiaSupportToken exists) -> its token;
+        * otherwise the signed-in person -> Get-PimInteractiveToken (browser, auth-code + PKCE; never device code).
+      Returns the token string (Support app) or PIM-Rest's @{ token; expiresUtc } (interactive). PIM-Rest verifies the tid.
+    #>
+    param([Parameter(Mandatory)][string]$Audience, [string]$TenantId)
+    if (Get-Command Get-InvardiaSupportToken -ErrorAction SilentlyContinue) {
+        return (Get-InvardiaSupportToken -Resource ("$Audience".TrimEnd('/')))
+    }
+    if (-not (Get-Command Get-PimInteractiveToken -ErrorAction SilentlyContinue)) { throw 'Get-PimSignedInToken: engine\_shared\PIM-Rest.ps1 is not loaded.' }
+    return (Get-PimInteractiveToken -Audience $Audience -TenantId $TenantId)
+}
+
 function Set-PimSignedInGlobals {
     <#
-      Make the engine's token helpers (Get-PimRestToken, New-PimSqlConnection) take the signed-in az path in THIS
+      Make the engine's token helpers (Get-PimRestToken, New-PimSqlConnection) take the signed-in token source in THIS
       process: clear every application-identity global, pin the tenant, and switch the managed-identity probe off (a
       deploy host that is an Azure VM has a managed identity of its own, and it would otherwise win).
     #>
@@ -205,6 +222,8 @@ function Set-PimSignedInGlobals {
     $global:PIM_NoManagedIdentity = $true
     $global:PIM_UseGraphSdk = $false
     $global:PIM_SignedInAccount = $true
+    # REQ 100.42: register the signed-in token source (Support app / browser) -- PIM-Rest no longer falls back to az.
+    $global:PIM_TokenProvider = ${function:Get-PimSignedInToken}
 }
 
 function Connect-PimSignedInSql {
@@ -218,10 +237,9 @@ function Connect-PimSignedInSql {
     if ($conf.Count) { throw "REFUSED: $($conf -join ', ') set in this session -- the SQL token would be minted for that identity, not the signed-in user. $(Get-PimSignedInConflictHint -Names $conf)" }
     if (-not (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue)) { throw 'Connect-PimSignedInSql: engine\_shared\PIM-Rest.ps1 is not loaded.' }
     Set-PimSignedInGlobals -TenantId $TenantId
+    # The Support app signs in as ITSELF (an app token): its app id is the one allowed, read from the session -- not az.
     $allowApp = ''
-    if (Get-PimSupportAppSession) {
-        try { $acct = ((az account show -o json 2>$null) | Out-String | ConvertFrom-Json); if ("$($acct.user.type)" -ieq 'servicePrincipal') { $allowApp = "$($acct.user.name)" } } catch { }
-    }
+    if ((Get-Command Get-InvardiaSupportToken -ErrorAction SilentlyContinue) -and $global:InvardiaSupportState -is [hashtable]) { $allowApp = "$($global:InvardiaSupportState.AppId)" }
     $tok = Get-PimRestToken -Resource 'https://database.windows.net' -TenantId $TenantId
     $t = Test-PimSignedInToken -Token "$tok" -TenantId $TenantId -AllowedAppId $allowApp
     $tok = $null

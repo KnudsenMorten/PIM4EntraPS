@@ -288,7 +288,7 @@ function Resolve-PimHybridAdMemberDn {
       is cached for $script:PimHybridAdCacheSeconds (the loop's refresh window; a member's account name does not change between
       passes), so a pass over thousands of groups costs one LDAP read for the groups, not one per member.
     #>
-    param([Parameter(Mandatory)][string]$Entry, [scriptblock]$Lookup = { param($dn) $s = Get-PimHybridAdServerSplat; Get-ADObject -Identity $dn -Properties sAMAccountName, objectClass @s -ErrorAction Stop })
+    param([Parameter(Mandatory)][string]$Entry, [scriptblock]$Lookup = { param($dn) $s = Get-PimHybridAdServerSplat; Get-PimHybridAdLdapObject -Dn $dn @s })
     $ttl = $null; $dn = $Entry
     if ($dn -match '^<TTL=(\d+)>,(.*)$') { $ttl = [int]$Matches[1]; $dn = $Matches[2] }
     $life = [int]$script:PimHybridAdCacheSeconds
@@ -302,67 +302,167 @@ function Resolve-PimHybridAdMemberDn {
     return [pscustomobject]@{ samAccountName = $c.sam; objectClass = $c.cls; ttlSeconds = $ttl }
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# GROUP / COMPUTER LDAP HELPERS (REQ 100.42: no ActiveDirectory module). Built on the LDAP layer in PIM-HybridAd.ps1
+# (Invoke-PimHybridAdLdapSearch / -Modify / -Add, Negotiate + sealed bind as the process identity, -Server = the named DC).
+# The adapters below call ONLY these functions, so the suites stub them by name.
+# ---------------------------------------------------------------------------------------------------------------------
+function Get-PimHybridAdLdapObject {
+    # Get-ADObject -Identity <dn> -Properties sAMAccountName, objectClass: objectClass = the most specific class (the last value).
+    param([Parameter(Mandatory)][string]$Dn, [string]$Server)
+    $r = @(Invoke-PimHybridAdLdapSearch -BaseDn $Dn -Scope Base -Filter '(objectClass=*)' -Attributes @('sAMAccountName', 'objectClass') -Server $Server)
+    if (-not $r.Count) { throw "Cannot find an object with identity: '$Dn'" }
+    $cls = @($r[0]['objectclass'])
+    return [pscustomobject]@{ sAMAccountName = "$(@($r[0]['samaccountname'])[0])"; objectClass = $(if ($cls.Count) { "$($cls[$cls.Count - 1])" } else { '' }); DistinguishedName = $Dn }
+}
+
+function Get-PimHybridAdLdapGroups {
+    # Get-ADGroup -Filter "Name -like '<pattern>'" (paged, 500) -- -WithTtl reads member values as '<TTL=n>,<dn>'.
+    param([Parameter(Mandatory)][string]$Pattern, [string[]]$Attributes = @('displayName', 'description', 'adminCount'), [switch]$WithTtl, [string]$Server)
+    $base = (Get-PimHybridAdLdapRootDse -Server $Server).DefaultNamingContext
+    $f = "(&(objectCategory=group)(name=$(ConvertTo-PimHybridAdLdapFilterValue $Pattern -AllowWildcard)))"
+    return @(Invoke-PimHybridAdLdapSearch -BaseDn $base -Filter $f -Attributes (@('name') + @($Attributes)) -WithTtl:$WithTtl -Server $Server)
+}
+
+function Find-PimHybridAdLdapDnBySam {
+    # Get-ADGroup -Identity / Add-ADGroupMember -Members resolve a sAMAccountName: the one object carrying it (-Class narrows).
+    param([Parameter(Mandatory)][string]$Sam, [ValidateSet('any', 'group')][string]$Class = 'any', [string]$Server)
+    $base = (Get-PimHybridAdLdapRootDse -Server $Server).DefaultNamingContext
+    $k = ConvertTo-PimHybridAdLdapFilterValue "$Sam".Trim()
+    $f = if ($Class -eq 'group') { "(&(objectCategory=group)(sAMAccountName=$k))" } else { "(sAMAccountName=$k)" }
+    $r = @(Invoke-PimHybridAdLdapSearch -BaseDn $base -Filter $f -Attributes @('sAMAccountName') -Server $Server)
+    if (-not $r.Count) { throw "Cannot find an object with identity: '$Sam' under: '$base'." }
+    return "$(@($r[0]['distinguishedname'])[0])"
+}
+
+function New-PimHybridAdLdapGroup {
+    # New-ADGroup -GroupCategory Security -GroupScope Global: groupType 0x80000002.
+    param([Parameter(Mandatory)][string]$Name, [string]$DisplayName, [string]$Description, [Parameter(Mandatory)][string]$Ou, [string]$Server)
+    $attrs = [ordered]@{ objectClass = 'group'; sAMAccountName = $Name; groupType = '-2147483646'; displayName = $DisplayName; description = $Description }
+    Invoke-PimHybridAdLdapAdd -Dn "CN=$(ConvertTo-PimHybridAdRdnValue $Name),$Ou" -Attributes $attrs -Server $Server
+}
+
+function Set-PimHybridAdLdapGroup {
+    # Set-ADGroup -DisplayName -Description: a blank value clears the attribute (what Set-ADGroup did with $null).
+    param([Parameter(Mandatory)][string]$Name, [string]$DisplayName, [string]$Description, [string]$Server)
+    $dn = Find-PimHybridAdLdapDnBySam -Sam $Name -Class group -Server $Server
+    $changes = @(
+        $(if ("$DisplayName".Trim()) { @{ op = 'Replace'; name = 'displayName'; values = @("$DisplayName") } } else { @{ op = 'Replace'; name = 'displayName'; values = @() } }),
+        $(if ("$Description".Trim()) { @{ op = 'Replace'; name = 'description'; values = @("$Description") } } else { @{ op = 'Replace'; name = 'description'; values = @() } }))
+    Invoke-PimHybridAdLdapModify -Dn $dn -Changes $changes -Server $Server
+}
+
+function Test-PimHybridAdLdapBenignMemberError {
+    # PURE. "already a member" (LDAP 20 attributeOrValueExists / ERROR_MEMBER_IN_GROUP) on an add, "not a member" (LDAP 16
+    # noSuchAttribute / ERROR_MEMBER_NOT_IN_GROUP) on a remove: the desired state already holds -- Add-/Remove-ADGroupMember
+    # did not fail on either.
+    param([object]$ErrorRecord, [ValidateSet('Add', 'Remove')][string]$Op)
+    $t = 'System.DirectoryServices.Protocols.DirectoryOperationException' -as [type]
+    if (-not $t) { return $false }
+    $ex = $ErrorRecord.Exception
+    while ($ex -and -not ($ex -is $t) -and $ex.InnerException) { $ex = $ex.InnerException }
+    if ($ex -is $t -and $ex.Response) {
+        $rc = [int]$ex.Response.ResultCode
+        if ($Op -eq 'Add' -and $rc -eq 20) { return $true }
+        if ($Op -eq 'Remove' -and $rc -eq 16) { return $true }
+    }
+    return $false
+}
+
+function Add-PimHybridAdLdapGroupMember {
+    # Add-ADGroupMember [-MemberTimeToLive]: a PAM time-bound link is written as '<TTL=seconds,dn>'.
+    param([Parameter(Mandatory)][string]$Group, [Parameter(Mandatory)][string]$Member, $TtlSeconds = $null, [string]$Server)
+    $gdn = Find-PimHybridAdLdapDnBySam -Sam $Group -Class group -Server $Server
+    $mdn = Find-PimHybridAdLdapDnBySam -Sam $Member -Server $Server
+    $val = if ($null -ne $TtlSeconds) { "<TTL=$([int]$TtlSeconds),$mdn>" } else { $mdn }
+    try { Invoke-PimHybridAdLdapModify -Dn $gdn -Changes @(@{ op = 'Add'; name = 'member'; values = @($val) }) -Server $Server }
+    catch { if (-not (Test-PimHybridAdLdapBenignMemberError -ErrorRecord $_ -Op Add)) { throw } }
+}
+
+function Remove-PimHybridAdLdapGroupMember {
+    param([Parameter(Mandatory)][string]$Group, [Parameter(Mandatory)][string]$Member, [string]$Server)
+    $gdn = Find-PimHybridAdLdapDnBySam -Sam $Group -Class group -Server $Server
+    $mdn = Find-PimHybridAdLdapDnBySam -Sam $Member -Server $Server
+    try { Invoke-PimHybridAdLdapModify -Dn $gdn -Changes @(@{ op = 'Delete'; name = 'member'; values = @($mdn) }) -Server $Server }
+    catch { if (-not (Test-PimHybridAdLdapBenignMemberError -ErrorRecord $_ -Op Remove)) { throw } }
+}
+
+function Get-PimHybridAdLdapComputers {
+    # Get-ADComputer -Filter 'OperatingSystem -like "*Windows Server*"' -Properties Name, DNSHostName, OperatingSystem, Enabled,
+    # whenChanged, primaryGroupID -- the same property names, so Get-PimHybridAdServerCandidates is unchanged.
+    param([string]$Server)
+    $base = (Get-PimHybridAdLdapRootDse -Server $Server).DefaultNamingContext
+    $rows = @(Invoke-PimHybridAdLdapSearch -BaseDn $base -Filter '(&(objectCategory=computer)(operatingSystem=*Windows Server*))' `
+            -Attributes @('name', 'dNSHostName', 'operatingSystem', 'userAccountControl', 'whenChanged', 'primaryGroupID') -Server $Server)
+    return @(foreach ($r in $rows) {
+            $one = { param($n) $v = @($r["$n".ToLowerInvariant()]); if ($v.Count) { "$($v[0])" } else { $null } }
+            $uac = 0; [void][int]::TryParse("$(& $one 'userAccountControl')", [ref]$uac)
+            $wc = & $one 'whenChanged'
+            [pscustomobject]@{ Name = (& $one 'name'); DNSHostName = (& $one 'dNSHostName'); OperatingSystem = (& $one 'operatingSystem'); Enabled = -not ($uac -band 2)
+                whenChanged = $(if ($wc) { ConvertFrom-PimHybridAdLdapValue $wc } else { $null }); primaryGroupID = (& $one 'primaryGroupID') }
+        })
+}
+
 function Get-PimDefaultActiveDirectoryGroupAdapter {
     <#
-      [ ] HYBRID-WORKER-ONLY. The real AD calls for the group mirror + membership sync. Runs as the process identity (the
-      gMSA -- no -Credential); -Server from $global:PIM_HybridAdServer when set. Throws off a host without RSAT-AD.
+      [ ] HYBRID-WORKER-ONLY. The real AD calls for the group mirror + membership sync -- LDAP through .NET (the helpers above),
+      no ActiveDirectory module. Runs as the process identity (the gMSA -- no -Credential); -Server from
+      $global:PIM_HybridAdServer when set. Throws off a host that is not domain-joined.
     #>
-    if (-not (Get-Command Get-ADGroup -ErrorAction SilentlyContinue)) { throw 'ActiveDirectory module not available -- the group adapter is hybrid-worker-only.' }
+    if (-not (Test-PimHybridAdDirectoryAvailable)) { throw 'This host is not joined to an Active Directory domain -- the group adapter is hybrid-worker-only.' }
     # 🔴 NO CLOSURE-STYLE LOCALS in the blocks below: they run long after this function returned (dynamic scoping), so a
     # local such as the old `$srv = { ... }` is $null by then and every AD call failed with "The expression after '&' ...
     # was not valid" -- found by the first plan-only run on the internal worker 2026-09-29. They call a FUNCTION instead.
     return @{
         PamEnabled = {
             $s = Get-PimHybridAdServerSplat
-            $f = Get-ADOptionalFeature -Filter "Name -eq 'Privileged Access Management Feature'" @s -ErrorAction Stop
-            return [bool]($f -and @($f.EnabledScopes).Count)
+            return [bool](Test-PimHybridAdLdapPamEnabled @s)
         }
         GetGroups = {
             param([string]$Pattern)
             $s = Get-PimHybridAdServerSplat
-            $flt = "Name -like '$("$Pattern".Replace("'", "''"))'"
-            @(Get-ADGroup -Filter $flt -Properties DisplayName, Description, adminCount @s -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Name = $_.Name; DisplayName = $_.DisplayName; Description = $_.Description; adminCount = $_.adminCount } })
+            @(Get-PimHybridAdLdapGroups -Pattern $Pattern @s | ForEach-Object {
+                    $g = $_; $one = { param($n) $v = @($g[$n]); if ($v.Count) { "$($v[0])" } else { $null } }
+                    [pscustomobject]@{ Name = (& $one 'name'); DisplayName = (& $one 'displayname'); Description = (& $one 'description'); adminCount = (& $one 'admincount') } })
         }
         NewGroup = {
             param($Item, [string]$Ou)
             $s = Get-PimHybridAdServerSplat
-            New-ADGroup -Name $Item.name -SamAccountName $Item.name -DisplayName $Item.displayName -Description $Item.description `
-                -GroupCategory Security -GroupScope Global -Path $Ou @s -ErrorAction Stop
+            New-PimHybridAdLdapGroup -Name $Item.name -DisplayName $Item.displayName -Description $Item.description -Ou $Ou @s
         }
         SetGroup = {
             param($Item)
             $s = Get-PimHybridAdServerSplat
-            Set-ADGroup -Identity $Item.name -DisplayName $Item.displayName -Description $Item.description @s -ErrorAction Stop
+            Set-PimHybridAdLdapGroup -Name $Item.name -DisplayName $Item.displayName -Description $Item.description @s
         }
         GetMembers = {
             param([string]$Group)
             $s = Get-PimHybridAdServerSplat
-            $g = Get-ADGroup -Identity $Group -Properties member -ShowMemberTimeToLive @s -ErrorAction Stop
-            foreach ($entry in @($g.member)) { Resolve-PimHybridAdMemberDn -Entry "$entry" }
+            $dn = Find-PimHybridAdLdapDnBySam -Sam $Group -Class group @s
+            $g = @(Invoke-PimHybridAdLdapSearch -BaseDn $dn -Scope Base -Filter '(objectClass=*)' -Attributes @('member') -WithTtl @s)
+            foreach ($entry in @($g | ForEach-Object { @($_['member']) })) { Resolve-PimHybridAdMemberDn -Entry "$entry" }
         }
-        # SCALE (2026-10-04): every group's members in ONE paged LDAP read (Get-ADGroup -Filter <pattern> -Properties member),
-        # member DNs resolved once and cached (Resolve-PimHybridAdMemberDn) -- instead of one Get-ADGroup + one Get-ADObject per
+        # SCALE (2026-10-04): every group's members in ONE paged LDAP read (the pattern search, attribute member, TTL control),
+        # member DNs resolved once and cached (Resolve-PimHybridAdMemberDn) -- instead of one group read + one object read per
         # member per group per pass. Returns @{ <group name> = @( @{ samAccountName; objectClass; ttlSeconds } ) }.
         GetMembersMany = {
             param([string]$Pattern)
             $s = Get-PimHybridAdServerSplat
-            $flt = "Name -like '$("$Pattern".Replace("'", "''"))'"
             $map = @{}
-            foreach ($g in @(Get-ADGroup -Filter $flt -Properties member -ShowMemberTimeToLive -ResultPageSize 500 @s -ErrorAction Stop)) {
-                $map["$($g.Name)"] = @(foreach ($entry in @($g.member)) { Resolve-PimHybridAdMemberDn -Entry "$entry" })
+            foreach ($g in @(Get-PimHybridAdLdapGroups -Pattern $Pattern -Attributes @('member') -WithTtl @s)) {
+                $map["$(@($g['name'])[0])"] = @(foreach ($entry in @($g['member'])) { Resolve-PimHybridAdMemberDn -Entry "$entry" })
             }
             $map
         }
         AddMember = {
             param([string]$Group, [string]$Sam, $TtlSeconds)
             $s = Get-PimHybridAdServerSplat
-            if ($null -ne $TtlSeconds) { Add-ADGroupMember -Identity $Group -Members $Sam -MemberTimeToLive ([timespan]::FromSeconds([int]$TtlSeconds)) @s -ErrorAction Stop }
-            else { Add-ADGroupMember -Identity $Group -Members $Sam @s -ErrorAction Stop }
+            Add-PimHybridAdLdapGroupMember -Group $Group -Member $Sam -TtlSeconds $TtlSeconds @s
         }
         RemoveMember = {
             param([string]$Group, [string]$Sam)
             $s = Get-PimHybridAdServerSplat
-            Remove-ADGroupMember -Identity $Group -Members $Sam -Confirm:$false @s -ErrorAction Stop
+            Remove-PimHybridAdLdapGroupMember -Group $Group -Member $Sam @s
         }
     }
 }
@@ -1202,11 +1302,11 @@ function Get-PimDefaultServerAdapter {
       it needs local administrator rights on the servers, e.g. through the group your GPO makes local admin everywhere).
       🔴 No factory locals in the blocks (2.4.459): they call functions only.
     #>
-    if (-not (Get-Command Get-ADComputer -ErrorAction SilentlyContinue)) { throw 'ActiveDirectory module not available -- the server adapter is hybrid-worker-only.' }
+    if (-not (Test-PimHybridAdDirectoryAvailable)) { throw 'This host is not joined to an Active Directory domain -- the server adapter is hybrid-worker-only.' }
     return @{
         GetComputers = {
             $s = Get-PimHybridAdServerSplat
-            @(Get-ADComputer -Filter 'OperatingSystem -like "*Windows Server*"' -Properties Name, DNSHostName, OperatingSystem, Enabled, whenChanged, primaryGroupID @s -ErrorAction Stop)
+            @(Get-PimHybridAdLdapComputers @s)
         }
         GetLocalAdmins = {
             param([string]$Computer)
@@ -1248,7 +1348,7 @@ function Invoke-PimHybridAdServersJob {
         if (-not $Adapter) { $Adapter = Get-PimDefaultServerAdapter }
         if (-not $GroupAdapter) { $GroupAdapter = Get-PimDefaultActiveDirectoryGroupAdapter }
     }
-    if (-not $Netbios) { try { $Netbios = "$((Get-ADDomain -ErrorAction Stop).NetBIOSName)" } catch { $Netbios = '' } }
+    if (-not $Netbios) { try { $nbs = Get-PimHybridAdServerSplat; $Netbios = "$(Get-PimHybridAdLdapNetbiosName @nbs)" } catch { $Netbios = '' } }
     $servers = @(Get-PimHybridAdServerCandidates -Computers @(& $Adapter.GetComputers) -NowUtc $NowUtc)
     $defs = Get-PimHybridAdMirroredDefinitions -Rows $Rows
     if (-not $defs.ok) { return [pscustomobject]@{ ran = $false; unimplemented = $true; whatIf = [bool]$WhatIf; detail = "unimplemented:hybrid-ad-servers -- $($defs.reason)" } }

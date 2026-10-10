@@ -122,7 +122,7 @@ param(
     # 🪤 A PATH, not a command line -- and it is Test-Path'd.
     # Passing "script.ps1 -Arg x" here makes the wrapper run `& '<the whole string>'`, and
     # PowerShell then looks for a COMMAND whose NAME contains the arguments. Measured 2026-09-03:
-    # "The term '...Connect-PimTenantAz.ps1 -TenantShortName ... -Quiet' is not recognized".
+    # "The term '...<pre-auth script>.ps1 -TenantShortName ... -Quiet' is not recognized".
     # Arguments go in -PreAuthArgs.
     [string]$PreAuthScript,
     [string]$PreAuthArgs,

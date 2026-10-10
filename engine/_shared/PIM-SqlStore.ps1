@@ -273,15 +273,12 @@ function Get-PimAzureSqlConnectionString {
 function Get-PimSqlSecretFromKeyVault {
     # Fetch a secret (the connection string, or a password) from Key Vault via the
     # KV REST API with a Bearer token. Prefers a launcher-pre-minted token
-    # ($global:PIM_KeyVaultToken) to avoid pulling the Az module into a Graph
-    # process; falls back to Get-AzAccessToken only if available. NEVER cached to disk.
+    # ($global:PIM_KeyVaultToken); otherwise PIM-Rest mints it (§100.42: the ONE connect path -- no Az module
+    # fallback). NEVER cached to disk.
     param([Parameter(Mandatory)][string]$VaultName, [Parameter(Mandatory)][string]$SecretName, [string]$ApiVersion = '7.4')
     $token = $global:PIM_KeyVaultToken
     if (-not $token) {
-        if (Get-Command Get-AzAccessToken -ErrorAction SilentlyContinue) {
-            $t = (Get-AzAccessToken -ResourceUrl 'https://vault.azure.net' -ErrorAction Stop).Token
-            $token = if ($t -is [securestring]) { [System.Net.NetworkCredential]::new('', $t).Password } else { $t }
-        } elseif (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) {
+        if (Get-Command Get-PimRestToken -ErrorAction SilentlyContinue) {
             # 🔴 REQ-F (2026-09-19): the hosted containers ship NO Az module, so Get-AzAccessToken does not exist
             # there and every vault read through this function failed -- the emergency passphrase in particular
             # (Resolve-PimEmergencyExpectedHash), which made break-glass activation impossible on every hosted
@@ -289,7 +286,7 @@ function Get-PimSqlSecretFromKeyVault {
             # Graph/ARM (its managed identity, or the engine SPN certificate).
             $token = Get-PimRestToken -Resource 'https://vault.azure.net'
         } else {
-            throw 'no way to obtain a Key Vault token in this runtime (neither the Az module nor PIM-Rest.ps1 is loaded)'
+            throw 'no way to obtain a Key Vault token in this runtime (PIM-Rest.ps1 is not loaded -- dot-source it first)'
         }
     }
     $uri = "https://$VaultName.vault.azure.net/secrets/$SecretName" + "?api-version=$ApiVersion"

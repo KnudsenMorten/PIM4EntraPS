@@ -108,8 +108,9 @@ function Get-PimWorkloadCrawlAssignments {
     <#
       Crawl ONE connector's listAssignments into a normalized array:
         @( @{ roleId; roleName; scope; principalIds = string[]; displayName } )
-      Pure-ish: relies on Invoke-PimWorkloadApi / Get-PimWorkloadAssignmentPrincipals
-      from PIM-Functions.psm1 for the live call. Throws are caught by the caller.
+      Uses the v2 REST connector runtime (PIM-WorkloadConnectors.ps1, Invoke-PimWorkloadConnectorApi) -- REQ 100.42:
+      the v1 module helpers (Invoke-PimWorkloadApi / Get-PimWorkloadAssignmentPrincipals) are gone with
+      PIM-Functions.psm1. Throws are caught by the caller.
       $RoleNameById lets the caller pass a roleId->name lookup (from listRoles) so
       the crawl carries human role names for the recon view.
     #>
@@ -121,43 +122,23 @@ function Get-PimWorkloadCrawlAssignments {
     )
     $la = $Connector.api.listAssignments
     if (-not $la) { return @() }
-    # v2 REST runtime (PIM-WorkloadConnectors.ps1) when loaded; the v1 module helpers otherwise.
-    $v2 = [bool](Get-Command Invoke-PimWorkloadConnectorApi -ErrorAction SilentlyContinue)
-    if ($v2) {
-        $resp  = Invoke-PimWorkloadConnectorApi -Connector $Connector -Op $la -Tokens $Tokens
-        $items = @(Get-PimWorkloadConnectorItems -Response $resp -Op $la)
-    } else {
-        $resp  = Invoke-PimWorkloadApi -Connector $Connector -Op $la -Tokens $Tokens
-        $items = if ($la.itemsPath) { @(Get-PimNestedProp $resp $la.itemsPath) } else { @($resp) }
+    if (-not (Get-Command Invoke-PimWorkloadConnectorApi -ErrorAction SilentlyContinue)) {
+        throw 'the workload connector runtime (PIM-WorkloadConnectors.ps1) is not loaded'
     }
+    $resp  = Invoke-PimWorkloadConnectorApi -Connector $Connector -Op $la -Tokens $Tokens
+    $items = @(Get-PimWorkloadConnectorItems -Response $resp -Op $la)
     $out = New-Object System.Collections.ArrayList
     foreach ($it in @($items)) {
-        if ($v2) {
-            $pv = if ($la.principalIds) { Get-PimWorkloadConnectorProp -Object $it -Path "$($la.principalIds)" } else { $null }
-            $norm = @{ principals = @(@($pv) | Where-Object { $null -ne $_ } | ForEach-Object { "$_" }); displayName = "$(Get-PimWorkloadConnectorProp -Object $it -Path 'displayName')" }
-            $rid  = "$(Get-PimWorkloadConnectorProp -Object $it -Path "$($la.roleId)")"
-            $out.Add([ordered]@{
-                roleId       = "$rid"
-                roleName     = $(if ($rid -and $RoleNameById.ContainsKey("$rid")) { "$($RoleNameById["$rid"])" } else { '' })
-                scope        = $(if ($la.scope) { "$(Get-PimWorkloadConnectorProp -Object $it -Path "$($la.scope)")" } elseif ($it.PSObject.Properties['directoryScopeIds']) { "$(@($it.directoryScopeIds) | Select-Object -First 1)" } else { '' })
-                principalIds = @($norm.principals)
-                displayName  = "$($norm.displayName)"
-            }) | Out-Null
-            continue
-        }
-        $norm = Get-PimWorkloadAssignmentPrincipals -Connector $Connector -Item $it
-        $rid  = "$(Get-PimNestedProp $it $la.roleId)"
-        $scope = ''
-        if ($la.scope) { $scope = "$(Get-PimNestedProp $it $la.scope)" }
-        elseif ($it.PSObject.Properties['directoryScopeIds']) { $scope = (@($it.directoryScopeIds) | Select-Object -First 1) }
-        $rname = if ($rid -and $RoleNameById.ContainsKey("$rid")) { "$($RoleNameById["$rid"])" } else { '' }
-        [void]$out.Add([ordered]@{
+        $pv = if ($la.principalIds) { Get-PimWorkloadConnectorProp -Object $it -Path "$($la.principalIds)" } else { $null }
+        $norm = @{ principals = @(@($pv) | Where-Object { $null -ne $_ } | ForEach-Object { "$_" }); displayName = "$(Get-PimWorkloadConnectorProp -Object $it -Path 'displayName')" }
+        $rid  = "$(Get-PimWorkloadConnectorProp -Object $it -Path "$($la.roleId)")"
+        $out.Add([ordered]@{
             roleId       = "$rid"
-            roleName     = "$rname"
-            scope        = "$scope"
+            roleName     = $(if ($rid -and $RoleNameById.ContainsKey("$rid")) { "$($RoleNameById["$rid"])" } else { '' })
+            scope        = $(if ($la.scope) { "$(Get-PimWorkloadConnectorProp -Object $it -Path "$($la.scope)")" } elseif ($it.PSObject.Properties['directoryScopeIds']) { "$(@($it.directoryScopeIds) | Select-Object -First 1)" } else { '' })
             principalIds = @($norm.principals)
             displayName  = "$($norm.displayName)"
-        })
+        }) | Out-Null
     }
     return @($out.ToArray())
 }
@@ -183,8 +164,6 @@ function Update-PimWorkloadCrawlMap {
     if (Get-Command Get-PimWorkloadConnectorCatalog -ErrorAction SilentlyContinue) {
         $cat = Get-PimWorkloadConnectorCatalog -Directory $ConnectorsDir
         $connectors = @($cat.Keys | Sort-Object | ForEach-Object { $cat[$_] })
-    } elseif ((Get-Command Read-PimWorkloadConnectors -ErrorAction SilentlyContinue) -and "$ConnectorsDir".Trim()) {
-        $connectors = @(Read-PimWorkloadConnectors -ConnectorsDir $ConnectorsDir)
     }
     $wl = [ordered]@{}
     foreach ($c in $connectors) {
@@ -193,7 +172,7 @@ function Update-PimWorkloadCrawlMap {
         try {
             $roleMap = @{}
             try {
-                $roles = if (Get-Command Get-PimWorkloadConnectorRoles -ErrorAction SilentlyContinue) { @(Get-PimWorkloadConnectorRoles -Connector $c -Tokens $Tokens) } else { @(Get-PimWorkloadRoles -Connector $c -Tokens $Tokens) }
+                $roles = @(Get-PimWorkloadConnectorRoles -Connector $c -Tokens $Tokens)
                 foreach ($r in $roles) {
                     if ("$($r.id)".Trim()) { $roleMap["$($r.id)"] = "$($r.name)" }
                 }

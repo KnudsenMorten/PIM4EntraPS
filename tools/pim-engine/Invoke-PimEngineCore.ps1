@@ -140,6 +140,7 @@ if ($global:PIM_ActiveScenario) {
 # --- load the engine (identical chain to the scheduler) ------------------------
 . "$shared\PIM-Rest.ps1"
 . "$shared\PIM-SqlStore.ps1"
+. "$shared\PIM-AuditEvent.ps1"        # REQ 100.42 / BUG: Write-PimAuditEvent, the engine's audit writer -- it lived only in the deleted PIM-Functions.psm1, which this entry point never loaded, so every guarded engine audit call (account.create, tap.create, approval.*, license.blocked, rfa.*) was a silent no-op
 . "$shared\PIM-ChangeQueue.ps1"
 . "$shared\PIM-QueueActions.ps1"   # §65 -- the ACTION drain (see PIM-Functions.psm1)
 . "$shared\PIM-PermissionWizard.ps1"      # naming helpers (ConvertTo-PimNameSegment / New-PimPermissionGroupName / scope-depth+plane) for discovery

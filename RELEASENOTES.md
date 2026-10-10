@@ -13,11 +13,29 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.548 -- 2026-10-10
+- **No PowerShell modules, one way to sign in.** PIM Manager no longer loads or falls back to the Microsoft Graph,
+  Az or ExchangeOnline PowerShell modules anywhere it runs for you -- every Graph, Azure and Key Vault call goes over
+  REST with the product's own token client (managed identity, certificate, the support session, or a browser
+  sign-in). The old module-era library is removed, and a release check fails if a module or a second sign-in path
+  comes back.
+- **Setup no longer needs the Az PowerShell modules.** The tenant preparation's Key Vault reads, the SQL tier
+  change, the managed-tenant key vault step and the database export use REST; the separate Az sign-in helper script is
+  gone. (Removing the remaining Azure CLI calls from the install scripts is in progress.)
+- **Engine audit events are recorded again.** The engine's audit writer had been left in the old module library that the
+  current engine never loads, so account creation, Temporary Access Pass, approval, licence and access-request events from
+  the engine were not written to the audit trail (the engine's own change records were). They are recorded now, joined to
+  the job run that made them.
+- **Setup signs you in without the Azure CLI.** When you run a setup script yourself, it no longer borrows whoever is
+  signed in to the Azure CLI: inside an Invardia support session it uses that session, otherwise it signs you in in the
+  browser. **Upgrade note:** complete the browser sign-in when a script asks for it.
+- **Hybrid worker: Active Directory without the RSAT module.** Creating the worker's groups and its group managed
+  service account now talks to Active Directory directly (LDAP); only creating and linking the worker's Group Policy
+  object still uses the Group Policy tools on the domain controller tier.
+
 ## 2.4.547 -- 2026-10-10
 
 - Existing installations converge to new install defaults on update (alert recipients, engine start wiring, role checks).
-
-## 2.4.547
 
 - **Existing installations now get today's install defaults on their next update, not only new ones.** The nightly update
   checks the settings a new installation is given and brings an older installation to the same state, without changing

@@ -501,7 +501,6 @@ PowerShell SDK, interactive sign-in) and remain the reference for *behaviour*:
 | `PIM-Assignment-Wizard` | CSV + interactive prompts | Tenant | Manual |
 | `PIM-Assignment-Revoker` | Tenant | Active activations (revoke) | Incident response |
 | `Check-PIM-Groups-IsRoleAssignable` | Tenant | (diagnostic stdout) | Ad-hoc |
-| `GetNumberOfROles` | Tenant | (diagnostic stdout) | Ad-hoc |
 
 The `*-Only` variants exist for **fast iteration during model development** — add
 5 permission groups and run only `...-EntraIDRolesOnly` instead of the whole
@@ -1340,8 +1339,8 @@ environment's own update job writes, `pim.Settings['UpdateState'].ring` (§11.6.
 stays local to the environment and no managing tenant sets it. `ConvertTo-PimTemplateCatalogRing` (pure)
 and `Get-PimTemplateCatalogRing` (`PIM-Conformance.ps1`) implement it. Every `/api/conformance*`
 answer carries `tenantRing` together with `tenantRingSource` (`update-ring N` or `not recorded`)
-and `tenantRingReason`, and the Template Rollout tab shows both. `Get-PimTenantRing` is not used
-here: it drives the admin↔tenant ring filter, which is a different axis (§13.19).
+and `tenantRingReason`, and the Template Rollout tab shows both. The admin↔tenant ring filter is not used
+here: it is a different axis (§13.19).
 
 **Approvals and promotions are a SQL overlay, never a file edit** (v2.4.370). The shipped
 templates under `workloads/templates` are read-only: they ship with the image and every update
@@ -1844,9 +1843,9 @@ gate**:
 
 Only then does it run the guided sequence from `Get-PimOffboardSequencePlan` (disable → revoke-active
 → **scheduled** delete) through an **injectable** action invoker. The default invoker
-(`Get-PimDefaultOffboardActionInvoker`) routes the disable step to `Invoke-PimAccountStatusChange
--AccountStatus Disabled` and the revoke-active step to `…Revoked` (the same pipeline the MSP
-kill-switch uses) and records the delete step as a scheduled intent — it never deletes immediately.
+(`Get-PimDefaultOffboardActionInvoker`) routes the disable step to the account-status pipeline
+(`AccountStatus=Disabled`) and the revoke-active step to `…Revoked` (the same pipeline the MSP
+kill-switch uses; when that pipeline is not loaded the invoker refuses the step, it never guesses) and records the delete step as a scheduled intent — it never deletes immediately.
 The offline tests inject a **mock** invoker instead, so the full request→approve→execute path is
 proven without ever touching a tenant. The Manager exposes this as `POST /api/approvals/execute`
 (Admin-gated; resolves the desired set so the breaker is satisfied for a deliberate single-target
@@ -2443,7 +2442,7 @@ the existing pass is touched — when no valid recipient, no sender or no mail p
 admin account does have a mailbox, the engine can also set Exchange forwarding to the owner's
 address (off by default). Approval/escalation/lifecycle templates exist for the scheduler.
 
-A single `Send-PimTemplatedMail -Type <type> -To <addr> -Tokens <hashtable>`
+A single `Send-PimNotifyMail -Type <type> -Recipient <addr> -Tokens <hashtable>`
 resolves custom-over-locked and routes through `$global:PIM_NotificationChannels`.
 Mail-template types, token list, subject-line convention, and the
 contacts/email-flow routing layer are detailed in §17.6 / §17.17.
@@ -2460,8 +2459,7 @@ new endpoint — the editor's existing GET already returns the shipped body.
 
 ### 10.1 Notification batch (`PIM-Notifications.ps1`)
 
-The §12 batch lives in `PIM-Notifications.ps1` (dot-sourced by `PIM-Functions.psm1`
-and by `PIM-Notify.ps1`). Every function is a **pure transform** (events/rows/now →
+The §12 batch lives in `PIM-Notifications.ps1` (dot-sourced by `PIM-Notify.ps1`). Every function is a **pure transform** (events/rows/now →
 tokens / decision / store record) with no network, so the whole batch is offline
 unit-testable; the actual send is the existing channel layer, wired from the
 scheduler handlers. All four honour the **two-approval model** — the engine notifies
@@ -5220,8 +5218,8 @@ a file nothing on the pull path read.)
 
    🟡 **What is not built yet.** `Resolve-PimCentralKill`, which verifies a manifest and
    translates each entry into the `AccountStatus=Disabled|Revoked` + `StatusChangeCode` rows the
-   existing engine kill-switch pipeline authorizes (`Test-PimAccountStatusChangeAuthorized`) and
-   applies (`Invoke-PimAccountStatusChange`), has **no caller** in v2: an active kill stops the
+   existing engine kill-switch pipeline authorizes (`Test-PimAdminStatusChangeAuthorized`) and
+   applies (the AccountStatus provider), has **no caller** in v2: an active kill stops the
    pull, but the per-account flips it names are not applied. The design stays **signed
    desired-state**, not a new write path, so the "MSP never writes to a customer tenant"
    invariant holds even for an emergency fleet-wide disable.
@@ -5599,8 +5597,8 @@ rows exist:
    workload exemption (`pim.Settings['WorkloadExemptions']`) excuses a missing `Assign` binding: it is
    reported, not created.
 
-*(v1 applied the same rows with a launcher step, `Apply-PimWorkloadAssignments` in
-`PIM-Functions.psm1`, which the unsupported v1 engine still calls. Nothing in v2 calls it.)*
+*(v1 applied the same rows with a launcher step in the v1-era module library, removed in 2.4.541 -- PIM ships no
+PowerShell modules and loads none.)*
 
 ### 15.4 Auth adapters (the only code; small, stable)
 
@@ -5880,7 +5878,7 @@ Airtable, ClickUp, Calendly — each tagged SCIM / AppRole / Claim per app.
 ### 16.4 What PIM4EntraPS does per mechanism
 
 - **RBAC-API (✅/◑)** — a workload connector lists the app's roles and assigns the
-  PIM group idempotently (`Apply-PimWorkloadAssignments`). Built: Intune, Defender
+  PIM group idempotently (`New-PimWorkloadConnectorsProvider`). Built: Intune, Defender
   XDR. Eligible-but-need-an-auth-adapter: Azure RBAC (ARM), Power BI,
   Dataverse/Dynamics, Business Central, Azure DevOps, Exchange Online. Graph-native
   ones (Entra directory roles, Purview, MDCA, Defender for *) drop in as new
@@ -5933,7 +5931,7 @@ date, possibly relative". One resolver serves them all.
 | `2026-06-28` | fixed date |
 
 - `Resolve-PimDateExpression -Expression <string> [-ReferenceDate <datetime>]` in
-  `engine/_shared/PIM-Functions.psm1`. Pure function. Returns `[datetime]` or
+  `engine/_shared/PIM-DateExpression.ps1`. Pure function. Returns `[datetime]` or
   throws with the grammar in the message.
 - The Manager calls it via `GET /api/resolve-date?expr=...` so the GUI can
   live-preview ("resolves to Mon 2026-07-01 08:00").
@@ -5959,7 +5957,7 @@ the TAP itself only works in its window.
 
 ### 17.3 Scheduled TAP window
 
-- `TAPStartDate` feeds `New-PimTemporaryAccessPass -StartDateTime`; now accepts
+- `TAPStartDate` feeds the AdminTap provider's `startDateTime` (`New-PimAdminTapProvider`); now accepts
   date expressions.
 - New column **`TAPLifetimeHours`** → `lifetimeInMinutes` on the Graph TAP body
   (Graph allows 10–43200 min; validator **PIM-TAP-002** range-checks). Blank =
@@ -6149,7 +6147,7 @@ approval"). Each set shows what changes (current → new) and has its own **Appr
 - A hold is offered only while the engine's current failing set still carries that provider's hold item for the same
   plan hash (`Get-PimPolicyMassHold`), so a stale record is never approved.
 - The Manager's hold and approve handlers dot-source `PIM-EngineProviders.ps1` into their **own child scope on every
-  call**. Several other handlers `Import-Module PIM-Functions.psm1 -Global`, which also carries the providers. Before
+  call**. Until 2.4.541 several other handlers imported the v1-era module library `-Global`, which also carried the providers. Before
   2.4.423 the handlers loaded the file only when the function was missing, so after any of those imports they ran the
   module's copy. That copy runs in module scope, cannot see the Manager's `Get-PimSetting`, and reported no hold at all
   until the Manager restarted.
@@ -6709,8 +6707,8 @@ with the SQL data store onto one v3.0 architecture.)
 
 ### 17.16a Auth / identity diagnostics (built — `engine/_shared/PIM-AuthDiagnostics.ps1`)
 
-A single shared, dependency-free helper file (dot-sourced by `PIM-Functions.psm1`
-right after `PIM-Rest.ps1`, so the engine, Manager and validator all see it; PS 5.1 +
+A single shared, dependency-free helper file (dot-sourced right after `PIM-Rest.ps1`,
+so the engine, Manager and validator all see it; PS 5.1 +
 7 safe, no Graph/Az/MSAL). Each helper separates a **pure decision** from any
 network/host call so the whole layer is offline-testable. Four capabilities:
 

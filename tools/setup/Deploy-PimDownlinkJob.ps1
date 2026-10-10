@@ -233,12 +233,12 @@ if ("$SubscriptionId".Trim() -and -not $WhatIfPreference) {
     $ctxTenant = "$(az account show --query tenantId -o tsv --only-show-errors 2>$null)".Trim()
     if (-not $subTenant) {
         throw ("REFUSED: subscription $SubscriptionId is not visible to the signed-in az context. Sign in to its tenant in an " +
-               'isolated AZURE_CONFIG_DIR (tools\setup\Connect-PimTenantAz.ps1) and re-run -- this script does not change the az default.')
+               'isolated AZURE_CONFIG_DIR (the Invardia Support app connect) and re-run -- this script does not change the az default.')
     }
     if ($ctxTenant -ne $subTenant) {
         throw ("REFUSED: the az DEFAULT context is tenant '$ctxTenant' but subscription $SubscriptionId belongs to tenant '$subTenant'. " +
                'Directory calls in this deploy follow the default context, and this script does not switch it. ' +
-               'Select that tenant in an isolated AZURE_CONFIG_DIR (tools\setup\Connect-PimTenantAz.ps1) and re-run.')
+               'Select that tenant in an isolated AZURE_CONFIG_DIR (the Invardia Support app connect) and re-run.')
     }
 } elseif (-not "$SubscriptionId".Trim()) {
     Warn 'no -SubscriptionId: every az call runs against the az DEFAULT context. Pass -SubscriptionId to scope them.'

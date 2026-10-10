@@ -4,10 +4,11 @@
   WHY THIS IS A PLANNER, NOT AN APPLIER
   -------------------------------------
   The new REST + SQL engine is CLOUD-ONLY at runtime: it runs headless on a Linux
-  container / serverless host with NO line-of-sight to a domain controller and NO
-  ActiveDirectory module. On-prem AD writes (New-ADUser / Set-ADUser, gMSA managed-
-  password retrieval) can only run on a HYBRID WORKER -- a domain-joined Windows host
-  with RSAT-AD and the right credential -- never from the cloud engine.
+  container / serverless host with NO line-of-sight to a domain controller. On-prem AD
+  writes (create / update a user, gMSA managed-password retrieval) can only run on a HYBRID
+  WORKER -- a domain-joined Windows host with the right identity -- never from the cloud engine.
+  They are plain LDAP through .NET (System.DirectoryServices.Protocols): no ActiveDirectory /
+  RSAT module (§100.42).
 
   So this module is split into two halves with a clean seam between them:
 
@@ -21,26 +22,26 @@
         - Get-PimHybridAdPlan         -- the full plan (create / update / nochange + skips)
         - New-PimHybridAdWorkItem     -- one serialisable work item the hybrid worker applies
 
-    * EXECUTE (the SEAM -- an interface a HYBRID WORKER calls; the ActiveDirectory-module
+    * EXECUTE (the SEAM -- an interface a HYBRID WORKER calls; the LDAP
       execution itself is FLAGGED [ ] -- it cannot run from the cloud engine):
         - Export-PimHybridAdWorkPackage / Import-PimHybridAdWorkPackage  -- hand-off file
         - Invoke-PimHybridAdApply  -- the worker entry point. PURE-PLANS by default;
           the real AD writes live behind -Apply + an injectable -ActiveDirectoryAdapter
           so the seam is testable with a fake adapter and the live path is the ONLY
           on-prem-bound code. Get-PimDefaultActiveDirectoryAdapter returns the real
-          ActiveDirectory-module adapter (the [ ] flagged, hybrid-worker-only part).
+          LDAP adapter (the [ ] flagged, hybrid-worker-only part).
 
   HYBRID-WORKER CONTRACT (documented; see DESIGN § 21.x):
     1. The cloud engine (or the Manager) produces a WORK PACKAGE with Get-PimHybridAdPlan
        + Export-PimHybridAdWorkPackage. It contains ONLY desired-state intent and the
        computed plan -- NO passwords, NO secrets, NO live AD data.
-    2. A hybrid worker (domain-joined, RSAT-AD, explicit high-priv credential or gMSA)
+    2. A hybrid worker (domain-joined, explicit high-priv credential or gMSA)
        imports the package, reads LIVE AD, and calls Invoke-PimHybridAdApply -Apply with
        the real adapter. gMSA/sMSA managed passwords are resolved ON THE WORKER from the
        DC (msDS-ManagedPassword), never carried in the package.
     3. The worker returns a result set (created / updated / skipped / failed) that flows
        back as audit + LastApplied. The worker -- not the cloud engine -- is the only AD
-       writer; the cloud engine never imports the ActiveDirectory module.
+       writer; the cloud engine never binds to AD.
 
   PS 5.1-safe (no ?./??/ternary, no RSA.ImportFromPem). No new cloud-module deps.
 #>
@@ -481,73 +482,365 @@ function Import-PimHybridAdWorkPackage {
     return $pkg
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# THE ON-PREM LDAP LAYER (§100.42, owner 2026-10-09: AD operations are .NET System.DirectoryServices, no ActiveDirectory
+# module). Plain LDAP v3 through System.DirectoryServices.Protocols: Negotiate (Kerberos) bind as the PROCESS identity (the
+# gMSA) or an explicit -Credential, signed + sealed (the sealing also carries a new account's password -- AD accepts
+# unicodePwd only over an encrypted channel). -Server = $global:PIM_HybridAdServer when set (§75.3b / §80.2: a named DC),
+# else the computer's domain through the DC locator. Every directory touch goes through these named helpers so the offline
+# suites stub them; nothing here runs in the cloud engine.
+# ---------------------------------------------------------------------------------------------------------------------
+function Test-PimHybridAdDirectoryAvailable {
+    # Is this host joined to an AD domain (= can it bind LDAP as itself)? Replaces "is the ActiveDirectory module present".
+    try { [void][System.DirectoryServices.ActiveDirectory.Domain]::GetComputerDomain(); return $true } catch { return $false }
+}
+
+function Initialize-PimHybridAdLdap {
+    if (-not ('System.DirectoryServices.Protocols.LdapConnection' -as [type])) { Add-Type -AssemblyName System.DirectoryServices.Protocols }
+}
+
+function ConvertTo-PimHybridAdLdapFilterValue {
+    # RFC 4515 escaping. -AllowWildcard keeps '*' (a group pattern such as PIM-*-S_AD is a wildcard by design).
+    param([string]$Value, [switch]$AllowWildcard)
+    $v = "$Value" -replace '\\', '\5c' -replace '\(', '\28' -replace '\)', '\29' -replace "`0", '\00'
+    if (-not $AllowWildcard) { $v = $v -replace '\*', '\2a' }
+    return $v
+}
+
+function ConvertTo-PimHybridAdRdnValue {
+    # RFC 4514: escape the characters a CN value may not carry unescaped.
+    param([string]$Value)
+    $v = "$Value" -replace '([\\,+"<>;=])', '\$1'
+    if ($v.StartsWith('#') -or $v.StartsWith(' ')) { $v = '\' + $v }
+    if ($v.EndsWith(' ')) { $v = $v.Substring(0, $v.Length - 1) + '\ ' }
+    return $v
+}
+
+function Get-PimHybridAdLdapConnection {
+    # One bound connection per (server, identity), reused across a pass; a failed request drops it (Reset-...).
+    param([object]$Credential, [string]$Server)
+    Initialize-PimHybridAdLdap
+    $srv = if ("$Server".Trim()) { "$Server".Trim() } elseif ("$($global:PIM_HybridAdServer)".Trim()) { "$($global:PIM_HybridAdServer)".Trim() } else { [System.DirectoryServices.ActiveDirectory.Domain]::GetComputerDomain().Name }
+    $who = if ($Credential) { "$($Credential.UserName)" } else { '' }
+    $key = "$srv|$who".ToLowerInvariant()
+    if (-not $script:PimHybridAdLdapPool) { $script:PimHybridAdLdapPool = @{} }
+    if ($script:PimHybridAdLdapPool.ContainsKey($key)) { return $script:PimHybridAdLdapPool[$key] }
+    $c = New-Object System.DirectoryServices.Protocols.LdapConnection((New-Object System.DirectoryServices.Protocols.LdapDirectoryIdentifier($srv, 389)))
+    $c.AuthType = [System.DirectoryServices.Protocols.AuthType]::Negotiate
+    $c.SessionOptions.ProtocolVersion = 3
+    $c.SessionOptions.Signing = $true
+    $c.SessionOptions.Sealing = $true
+    $c.SessionOptions.ReferralChasing = [System.DirectoryServices.Protocols.ReferralChasingOptions]::None
+    $c.Timeout = [timespan]::FromMinutes(2)
+    if ($Credential) { $c.Credential = $Credential.GetNetworkCredential() }
+    $c.Bind()
+    $script:PimHybridAdLdapPool[$key] = $c
+    return $c
+}
+
+function Reset-PimHybridAdLdapConnection {
+    if ($script:PimHybridAdLdapPool) { foreach ($c in @($script:PimHybridAdLdapPool.Values)) { try { $c.Dispose() } catch { } } }
+    $script:PimHybridAdLdapPool = @{}
+}
+
+function Send-PimHybridAdLdapRequest {
+    param([Parameter(Mandatory)][object]$Request, [object]$Credential, [string]$Server)
+    $c = Get-PimHybridAdLdapConnection -Credential $Credential -Server $Server
+    try { return $c.SendRequest($Request) } catch { Reset-PimHybridAdLdapConnection; throw }
+}
+
+function ConvertFrom-PimHybridAdLdapValue {
+    # A GeneralizedTime string (whenChanged) -> UTC [datetime]; anything else stays a string.
+    param([string]$Value)
+    if ($Value -match '^\d{14}\.\dZ$') { return [datetime]::ParseExact($Value.Substring(0, 14), 'yyyyMMddHHmmss', [Globalization.CultureInfo]::InvariantCulture, ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)) }
+    return $Value
+}
+
+function Get-PimHybridAdLdapAttributeValues {
+    # Every value of one attribute of a search entry, following AD's ranged retrieval (member;range=0-1499 ...) so a group
+    # with more than 1500 members is read whole, as Get-ADGroup did.
+    param([Parameter(Mandatory)]$Entry, [Parameter(Mandatory)][string]$Name, [object]$Credential, [string]$Server, [object[]]$Controls = @())
+    $vals = New-Object System.Collections.Generic.List[string]
+    $attrName = $null
+    foreach ($n in @($Entry.Attributes.AttributeNames)) { if ("$n" -ieq $Name -or "$n" -like "$Name;range=*") { $attrName = "$n"; break } }
+    if (-not $attrName) { return }
+    foreach ($v in $Entry.Attributes[$attrName].GetValues([string])) { $vals.Add("$v") }
+    while ($attrName -match ';range=(\d+)-(\d+)$') {
+        $next = [int]$Matches[2] + 1
+        $req = New-Object System.DirectoryServices.Protocols.SearchRequest($Entry.DistinguishedName, '(objectClass=*)', [System.DirectoryServices.Protocols.SearchScope]::Base, [string[]]@("$Name;range=$next-*"))
+        foreach ($ctl in @($Controls)) { [void]$req.Controls.Add($ctl) }
+        $r = Send-PimHybridAdLdapRequest -Request $req -Credential $Credential -Server $Server
+        if (-not $r.Entries.Count) { break }
+        $e2 = $r.Entries[0]; $attrName = $null
+        foreach ($n in @($e2.Attributes.AttributeNames)) { if ("$n" -like "$Name;range=*") { $attrName = "$n"; break } }
+        if (-not $attrName) { break }
+        foreach ($v in $e2.Attributes[$attrName].GetValues([string])) { $vals.Add("$v") }
+    }
+    return $vals.ToArray()
+}
+
+function Invoke-PimHybridAdLdapSearch {
+    <#
+      A paged LDAP search. Returns one hashtable per entry: DistinguishedName + each requested attribute as a string array
+      (lower-case keys). -WithTtl adds the LDAP_SERVER_LINK_TTL control (1.2.840.113556.1.4.2309) so a PAM time-bound
+      member reads '<TTL=n>,<dn>' -- what Get-ADGroup -ShowMemberTimeToLive returned.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$BaseDn, [Parameter(Mandatory)][string]$Filter, [string[]]$Attributes = @(),
+          [ValidateSet('Base', 'OneLevel', 'Subtree')][string]$Scope = 'Subtree', [switch]$WithTtl, [object]$Credential, [string]$Server, [int]$PageSize = 500)
+    Initialize-PimHybridAdLdap
+    $req = New-Object System.DirectoryServices.Protocols.SearchRequest($BaseDn, $Filter, [System.DirectoryServices.Protocols.SearchScope]$Scope, [string[]]$Attributes)
+    $ctls = @()
+    if ($WithTtl) { $ctls += New-Object System.DirectoryServices.Protocols.DirectoryControl('1.2.840.113556.1.4.2309', $null, $true, $true) }
+    foreach ($ctl in $ctls) { [void]$req.Controls.Add($ctl) }
+    $page = $null
+    if ($Scope -ne 'Base') { $page = New-Object System.DirectoryServices.Protocols.PageResultRequestControl($PageSize); [void]$req.Controls.Add($page) }
+    $out = New-Object System.Collections.Generic.List[object]
+    while ($true) {
+        $resp = Send-PimHybridAdLdapRequest -Request $req -Credential $Credential -Server $Server
+        foreach ($e in $resp.Entries) {
+            $h = @{ distinguishedname = @("$($e.DistinguishedName)") }
+            foreach ($a in $Attributes) { $h["$a".ToLowerInvariant()] = @(Get-PimHybridAdLdapAttributeValues -Entry $e -Name $a -Credential $Credential -Server $Server -Controls $ctls) }
+            $out.Add($h)
+        }
+        if (-not $page) { break }
+        $prc = @($resp.Controls | Where-Object { $_ -is [System.DirectoryServices.Protocols.PageResultResponseControl] }) | Select-Object -First 1
+        if ($prc -and $prc.Cookie -and $prc.Cookie.Length) { $page.Cookie = $prc.Cookie } else { break }
+    }
+    return $out.ToArray()
+}
+
+function Get-PimHybridAdLdapRootDse {
+    # Cached per server for the process (the naming contexts of a domain do not change).
+    param([object]$Credential, [string]$Server)
+    if (-not $script:PimHybridAdRootDseCache) { $script:PimHybridAdRootDseCache = @{} }
+    $k = "$Server|$($global:PIM_HybridAdServer)".ToLowerInvariant()
+    if ($script:PimHybridAdRootDseCache.ContainsKey($k)) { return $script:PimHybridAdRootDseCache[$k] }
+    $r = @(Invoke-PimHybridAdLdapSearch -BaseDn '' -Filter '(objectClass=*)' -Scope Base -Attributes @('defaultNamingContext', 'configurationNamingContext') -Credential $Credential -Server $Server)
+    if (-not $r.Count) { throw 'LDAP: the domain controller returned no RootDSE' }
+    $o = [pscustomobject]@{ DefaultNamingContext = "$(@($r[0]['defaultnamingcontext'])[0])"; ConfigurationNamingContext = "$(@($r[0]['configurationnamingcontext'])[0])" }
+    $script:PimHybridAdRootDseCache[$k] = $o
+    return $o
+}
+
+function Get-PimHybridAdLdapNetbiosName {
+    # Get-ADDomain .NetBIOSName: the nETBIOSName of the crossRef whose nCName is this domain.
+    param([object]$Credential, [string]$Server)
+    $root = Get-PimHybridAdLdapRootDse -Credential $Credential -Server $Server
+    $r = @(Invoke-PimHybridAdLdapSearch -BaseDn "CN=Partitions,$($root.ConfigurationNamingContext)" -Scope OneLevel -Attributes @('nETBIOSName') `
+            -Filter "(&(objectClass=crossRef)(nCName=$(ConvertTo-PimHybridAdLdapFilterValue $root.DefaultNamingContext)))" -Credential $Credential -Server $Server)
+    if (-not $r.Count) { return '' }
+    return "$(@($r[0]['netbiosname'])[0])"
+}
+
+function Test-PimHybridAdLdapPamEnabled {
+    # Get-ADOptionalFeature 'Privileged Access Management Feature' .EnabledScopes: the feature object's msDS-EnabledFeatureBL.
+    param([object]$Credential, [string]$Server)
+    $root = Get-PimHybridAdLdapRootDse -Credential $Credential -Server $Server
+    $r = @(Invoke-PimHybridAdLdapSearch -BaseDn "CN=Optional Features,CN=Directory Service,CN=Windows NT,CN=Services,$($root.ConfigurationNamingContext)" -Scope OneLevel `
+            -Filter '(&(objectClass=msDS-OptionalFeature)(cn=Privileged Access Management Feature))' -Attributes @('msDS-EnabledFeatureBL') -Credential $Credential -Server $Server)
+    return [bool]($r.Count -and @($r[0]['msds-enabledfeaturebl']).Count)
+}
+
+function Invoke-PimHybridAdLdapModify {
+    # Replace / add / delete attribute values on one object. -Changes: @( @{ op = 'Replace'|'Add'|'Delete'; name; values = @(...) } ).
+    param([Parameter(Mandatory)][string]$Dn, [Parameter(Mandatory)][object[]]$Changes, [object]$Credential, [string]$Server)
+    Initialize-PimHybridAdLdap
+    $req = New-Object System.DirectoryServices.Protocols.ModifyRequest
+    $req.DistinguishedName = $Dn
+    foreach ($ch in $Changes) {
+        $m = New-Object System.DirectoryServices.Protocols.DirectoryAttributeModification
+        $m.Name = "$($ch.name)"
+        $m.Operation = [System.DirectoryServices.Protocols.DirectoryAttributeOperation]"$($ch.op)"
+        foreach ($v in @($ch.values)) { if ($v -is [byte[]]) { [void]$m.Add([byte[]]$v) } elseif ($null -ne $v) { [void]$m.Add("$v") } }
+        [void]$req.Modifications.Add($m)
+    }
+    [void](Send-PimHybridAdLdapRequest -Request $req -Credential $Credential -Server $Server)
+}
+
+function Invoke-PimHybridAdLdapAdd {
+    # Create one object. -Attributes: ordered @{ name = value | values[] }.
+    param([Parameter(Mandatory)][string]$Dn, [Parameter(Mandatory)][System.Collections.IDictionary]$Attributes, [object]$Credential, [string]$Server)
+    Initialize-PimHybridAdLdap
+    $req = New-Object System.DirectoryServices.Protocols.AddRequest
+    $req.DistinguishedName = $Dn
+    foreach ($k in @($Attributes.Keys)) {
+        $vals = @($Attributes[$k] | Where-Object { $null -ne $_ -and "$_" -ne '' })
+        if (-not $vals.Count) { continue }
+        $da = New-Object System.DirectoryServices.Protocols.DirectoryAttribute
+        $da.Name = "$k"
+        foreach ($v in $vals) { [void]$da.Add("$v") }
+        [void]$req.Attributes.Add($da)
+    }
+    [void](Send-PimHybridAdLdapRequest -Request $req -Credential $Credential -Server $Server)
+}
+
+function ConvertTo-PimHybridAdUserObject {
+    # An LDAP user entry -> the shape Get-ADUser returned (the properties Test-PimHybridAdRecordEqual compares).
+    param([Parameter(Mandatory)][hashtable]$Entry)
+    $one = { param($n) $v = @($Entry["$n".ToLowerInvariant()]); if ($v.Count) { "$($v[0])" } else { $null } }
+    $uac = 0; [void][int]::TryParse("$(& $one 'userAccountControl')", [ref]$uac)
+    return [pscustomobject]@{
+        SamAccountName    = (& $one 'sAMAccountName')
+        DistinguishedName = (& $one 'distinguishedName')
+        DisplayName       = (& $one 'displayName')
+        Description       = (& $one 'description')
+        UserPrincipalName = (& $one 'userPrincipalName')
+        GivenName         = (& $one 'givenName')
+        Surname           = (& $one 'sn')
+        EmailAddress      = (& $one 'mail')
+        Enabled           = -not ($uac -band 2)
+    }
+}
+
+function Get-PimHybridAdLdapUser {
+    # The Get-ADUser replacement: one user BY UPN (v1's lookup), else by sAMAccountName. $null when none. A bind / DC fault
+    # THROWS -- never "not found".
+    param([string]$UserPrincipalName, [string]$SamAccountName, [object]$Credential, [string]$Server)
+    $f = if ("$UserPrincipalName".Trim()) { "(&(objectCategory=person)(objectClass=user)(userPrincipalName=$(ConvertTo-PimHybridAdLdapFilterValue "$UserPrincipalName".Trim())))" }
+         else { "(&(objectCategory=person)(objectClass=user)(sAMAccountName=$(ConvertTo-PimHybridAdLdapFilterValue "$SamAccountName".Trim())))" }
+    $base = (Get-PimHybridAdLdapRootDse -Credential $Credential -Server $Server).DefaultNamingContext
+    $r = @(Invoke-PimHybridAdLdapSearch -BaseDn $base -Filter $f -Credential $Credential -Server $Server `
+            -Attributes @('sAMAccountName', 'displayName', 'description', 'userPrincipalName', 'givenName', 'sn', 'mail', 'userAccountControl'))
+    if (-not $r.Count) { return $null }
+    return (ConvertTo-PimHybridAdUserObject -Entry $r[0])
+}
+
+function New-PimHybridAdLdapUser {
+    # The New-ADUser replacement (same parameter names, so the adapter's splat is unchanged): create the user in -Path, set
+    # its password (unicodePwd over the sealed bind), then enable it (userAccountControl 512 = NORMAL_ACCOUNT). Neither
+    # PasswordNeverExpires nor ChangePasswordAtLogon -- v1 set neither.
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$SamAccountName, [Parameter(Mandatory)][string]$Path,
+          [System.Security.SecureString]$AccountPassword, [bool]$Enabled = $true, [string]$GivenName, [string]$Surname, [string]$DisplayName,
+          [string]$Description, [string]$EmailAddress, [string]$UserPrincipalName, [object]$Credential, [string]$Server)
+    $dn = "CN=$(ConvertTo-PimHybridAdRdnValue $Name),$Path"
+    $attrs = [ordered]@{ objectClass = 'user'; sAMAccountName = $SamAccountName; userPrincipalName = $UserPrincipalName; givenName = $GivenName; sn = $Surname
+        displayName = $DisplayName; description = $Description; mail = $EmailAddress }
+    Invoke-PimHybridAdLdapAdd -Dn $dn -Attributes $attrs -Credential $Credential -Server $Server
+    if ($AccountPassword) {
+        $b = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($AccountPassword)
+        try { $pwBytes = [Text.Encoding]::Unicode.GetBytes('"' + [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b) + '"') }
+        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }
+        try { Invoke-PimHybridAdLdapModify -Dn $dn -Changes @(@{ op = 'Replace'; name = 'unicodePwd'; values = @(, $pwBytes) }) -Credential $Credential -Server $Server }
+        finally { [Array]::Clear($pwBytes, 0, $pwBytes.Length) }
+    }
+    if ($Enabled) { Invoke-PimHybridAdLdapModify -Dn $dn -Changes @(@{ op = 'Replace'; name = 'userAccountControl'; values = @('512') }) -Credential $Credential -Server $Server }
+}
+
+function Set-PimHybridAdLdapUser {
+    # The Set-ADUser replacement: replace only the attributes given (a blank desired value is never passed -- never erased).
+    param([Parameter(Mandatory)][object]$Identity, [string]$GivenName, [string]$Surname, [string]$DisplayName, [string]$Description,
+          [string]$EmailAddress, [string]$UserPrincipalName, [object]$Credential, [string]$Server)
+    $dn = "$($Identity.DistinguishedName)"
+    if (-not $dn) { throw 'Set-PimHybridAdLdapUser: the live user has no distinguishedName' }
+    $map = [ordered]@{ GivenName = 'givenName'; Surname = 'sn'; DisplayName = 'displayName'; Description = 'description'; EmailAddress = 'mail'; UserPrincipalName = 'userPrincipalName' }
+    $changes = @(foreach ($k in $map.Keys) { if ($PSBoundParameters.ContainsKey($k) -and "$($PSBoundParameters[$k])".Trim()) { @{ op = 'Replace'; name = $map[$k]; values = @("$($PSBoundParameters[$k])") } } })
+    if ($changes.Count) { Invoke-PimHybridAdLdapModify -Dn $dn -Changes $changes -Credential $Credential -Server $Server }
+}
+
+function ConvertFrom-PimHybridAdManagedPasswordBlob {
+    # PURE. MSDS-MANAGEDPASSWORD_BLOB ([MS-ADTS] 2.2.19): Version(2) Reserved(2) Length(4) CurrentPasswordOffset(2)
+    # PreviousPasswordOffset(2) QueryPasswordIntervalOffset(2) UnchangedPasswordIntervalOffset(2); the current password is
+    # UTF-16LE, NUL-terminated, at CurrentPasswordOffset. Returns it as a read-only SecureString.
+    param([Parameter(Mandatory)][byte[]]$Blob)
+    if ($Blob.Length -lt 16) { throw 'msDS-ManagedPassword: blob too short' }
+    $off = [BitConverter]::ToUInt16($Blob, 8)
+    if ($off -lt 16 -or $off -ge $Blob.Length) { throw 'msDS-ManagedPassword: bad current-password offset' }
+    $sec = New-Object System.Security.SecureString
+    for ($i = $off; $i + 1 -lt $Blob.Length; $i += 2) {
+        $ch = [BitConverter]::ToChar($Blob, $i)
+        if ([int]$ch -eq 0) { break }
+        $sec.AppendChar($ch)
+    }
+    $sec.MakeReadOnly()
+    return $sec
+}
+
+function Get-PimHybridAdLdapManagedCredential {
+    # A gMSA's current password from the DC (msDS-ManagedPassword is returned only to a principal the gMSA allows -- the
+    # worker computer through <name>-PrincipalsAllowedAccess -- and only over the sealed bind). Returns a PSCredential
+    # 'NETBIOS\name$'; THROWS when the DC withholds it.
+    param([Parameter(Mandatory)][string]$SamAccountName, [string]$SearchBase, [object]$Credential, [string]$Server)
+    Initialize-PimHybridAdLdap
+    $sam = "$SamAccountName".Trim(); if (-not $sam.EndsWith('$')) { $sam += '$' }
+    $base = if ("$SearchBase".Trim()) { "$SearchBase".Trim() } else { (Get-PimHybridAdLdapRootDse -Credential $Credential -Server $Server).DefaultNamingContext }
+    $req = New-Object System.DirectoryServices.Protocols.SearchRequest($base, "(&(objectClass=msDS-GroupManagedServiceAccount)(sAMAccountName=$(ConvertTo-PimHybridAdLdapFilterValue $sam)))", [System.DirectoryServices.Protocols.SearchScope]::Subtree, [string[]]@('msDS-ManagedPassword'))
+    $resp = Send-PimHybridAdLdapRequest -Request $req -Credential $Credential -Server $Server
+    if (-not $resp.Entries.Count) { throw "gMSA $sam not found under $base" }
+    $e = $resp.Entries[0]
+    $an = @($e.Attributes.AttributeNames | Where-Object { "$_" -ieq 'msDS-ManagedPassword' }) | Select-Object -First 1
+    if (-not $an) { throw "gMSA ${sam}: the domain controller did not return msDS-ManagedPassword -- is this computer in its PrincipalsAllowedAccess group?" }
+    $blob = [byte[]]($e.Attributes[$an].GetValues([byte[]])[0])
+    try { $sec = ConvertFrom-PimHybridAdManagedPasswordBlob -Blob $blob } finally { [Array]::Clear($blob, 0, $blob.Length) }
+    $nb = ''; try { $nb = Get-PimHybridAdLdapNetbiosName -Credential $Credential -Server $Server } catch { $nb = '' }
+    $user = if ($nb) { "$nb\$sam" } else { $sam }
+    return (New-Object System.Management.Automation.PSCredential($user, $sec))
+}
+
 function Get-PimDefaultActiveDirectoryAdapter {
     <#
       [ ] HYBRID-WORKER-ONLY -- NOT runnable from the cloud engine.
 
-      Returns the REAL adapter the worker uses: a hashtable of scriptblocks that wrap the
-      ActiveDirectory module (Get-ADUser / New-ADUser / Set-ADUser) + gMSA managed-password
-      retrieval. This is the ONLY on-prem-bound code; everything above is pure + testable.
-      The cloud engine never calls this (no ActiveDirectory module, no DC line-of-sight) --
-      it produces the work package; the worker supplies this adapter to Invoke-PimHybridAdApply.
+      Returns the REAL adapter the worker uses: a hashtable of scriptblocks over the LDAP layer above
+      (Get-/New-/Set-PimHybridAdLdapUser -- .NET System.DirectoryServices.Protocols, no ActiveDirectory module)
+      + gMSA managed-password retrieval. This is the ONLY on-prem-bound code; everything above it is pure + testable.
+      The cloud engine never calls this (not domain-joined, no DC line-of-sight) -- it produces the work package;
+      the worker supplies this adapter to Invoke-PimHybridAdApply.
 
       The adapter is intentionally thin so Invoke-PimHybridAdApply (the orchestration) stays
       testable with a FAKE adapter; only these scriptblocks touch AD.
     #>
-    if (-not (Get-Command Get-ADUser -ErrorAction SilentlyContinue)) {
-        throw 'ActiveDirectory module not available -- Get-PimDefaultActiveDirectoryAdapter is hybrid-worker-only (domain-joined host with RSAT-AD). The cloud engine must export a work package instead.'
+    if (-not (Test-PimHybridAdDirectoryAvailable)) {
+        throw 'This host is not joined to an Active Directory domain -- Get-PimDefaultActiveDirectoryAdapter is hybrid-worker-only (a domain-joined host). The cloud engine must export a work package instead.'
     }
     return @{
         # Read the live AD user. v1 looked the account up by UPN (Get-ADUser -Filter
         # 'UserPrincipalName -eq $UserPrincipalName', PIM-Functions.psm1 5849); a row without a UPN
-        # falls back to the sAMAccountName. Explicit -Credential, NOT ambient SYSTEM; -ErrorAction Stop
-        # so an auth/DC fault is an error, never "not found" (v1's hard-fail, 5840-5870).
+        # falls back to the sAMAccountName. Explicit -Credential, NOT ambient SYSTEM; a bind/DC fault
+        # throws, so it is an error, never "not found" (v1's hard-fail, 5840-5870).
         GetUser = {
             param($Sam, $Credential, $Upn)
-            $props = @('DisplayName','Description','UserPrincipalName','GivenName','Surname','EmailAddress','Enabled')
-            $p = if ("$Upn".Trim()) { @{ Filter = "UserPrincipalName -eq '$("$Upn".Trim().Replace("'", "''"))'"; Properties = $props } }
-                 else { @{ Filter = "SamAccountName -eq '$("$Sam".Replace("'", "''"))'"; Properties = $props } }
+            $p = if ("$Upn".Trim()) { @{ UserPrincipalName = "$Upn".Trim() } } else { @{ SamAccountName = "$Sam" } }
             if ($Credential) { $p['Credential'] = $Credential }
             if ("$($global:PIM_HybridAdServer)".Trim()) { $p['Server'] = "$($global:PIM_HybridAdServer)".Trim() }   # §75.3b / §80.2: a named DC
-            Get-ADUser @p -ErrorAction Stop
+            Get-PimHybridAdLdapUser @p
         }
         # Create a standard AD user in the routed OU (v1 New-ADUser, 5911-5922): -Name = the account name,
         # given/surname/display/description, -AccountPassword, -EmailAddress = UPN, -UserPrincipalName,
         # -Path, -Enabled. v1 set no PasswordNeverExpires and no ChangePasswordAtLogon; neither does this.
-        # A blank attribute is omitted (New-ADUser rejects an empty string for most of them).
+        # A blank attribute is omitted (never written as an empty value).
         NewUser = {
             param($Item, $Credential, $AccountPassword)
             $d = $Item.desired
-            $p = @{ Name = $d.samAccountName; SamAccountName = $d.samAccountName; Path = $d.targetOu; AccountPassword = $AccountPassword; Enabled = $true; ErrorAction = 'Stop' }
+            $p = @{ Name = $d.samAccountName; SamAccountName = $d.samAccountName; Path = $d.targetOu; AccountPassword = $AccountPassword; Enabled = $true }
             foreach ($pair in @(@('GivenName','givenName'), @('Surname','surname'), @('DisplayName','displayName'), @('Description','description'), @('EmailAddress','emailAddress'), @('UserPrincipalName','userPrincipalName'))) {
                 $v = "$(Get-PimHybridAdDesiredValue -Desired $d -Name $pair[1])".Trim(); if ($v) { $p[$pair[0]] = $v }
             }
             if ($Credential) { $p['Credential'] = $Credential }
             if ("$($global:PIM_HybridAdServer)".Trim()) { $p['Server'] = "$($global:PIM_HybridAdServer)".Trim() }   # §75.3b / §80.2: a named DC
-            New-ADUser @p
+            New-PimHybridAdLdapUser @p
         }
         # Update the attributes v1 updated (Set-ADUser, 5878-5884). A blank desired value is not written.
         SetUser = {
             param($Item, $Live, $Credential)
             $d = $Item.desired
-            $p = @{ Identity = $Live; ErrorAction = 'Stop' }
+            $p = @{ Identity = $Live }
             foreach ($pair in @(@('GivenName','givenName'), @('Surname','surname'), @('DisplayName','displayName'), @('Description','description'), @('EmailAddress','emailAddress'), @('UserPrincipalName','userPrincipalName'))) {
                 $v = "$(Get-PimHybridAdDesiredValue -Desired $d -Name $pair[1])".Trim(); if ($v) { $p[$pair[0]] = $v }
             }
             if ($Credential) { $p['Credential'] = $Credential }
             if ("$($global:PIM_HybridAdServer)".Trim()) { $p['Server'] = "$($global:PIM_HybridAdServer)".Trim() }   # §75.3b / §80.2: a named DC
-            Set-ADUser @p
+            Set-PimHybridAdLdapUser @p
         }
-        # Resolve a gMSA/sMSA managed password from the DC (msDS-ManagedPassword). On the
-        # worker this would delegate to AutomateITPS.AD\Get-GMSACredential. gMSA/sMSA
-        # accounts are not created via New-ADUser by this engine -- they are pre-created
-        # (New-ADServiceAccount) and this resolves the credential for downstream use.
+        # Resolve a gMSA/sMSA managed password from the DC (msDS-ManagedPassword, read over LDAP by
+        # Get-PimHybridAdLdapManagedCredential -- it used to need the framework's AutomateITPS.AD module).
+        # gMSA/sMSA accounts are not created by this engine -- they are pre-created
+        # (Initialize-PimHybridWorkerAd) and this resolves the credential for downstream use.
         GetManagedCredential = {
             param($Item, $Context)
-            if (Get-Command Get-GMSACredential -ErrorAction SilentlyContinue) {
-                return Get-GMSACredential -Context $Context -GMSAName $Item.samAccountName -Domain $Item.domain -SearchRoot $Item.searchRoot
-            }
-            throw 'Get-GMSACredential (AutomateITPS.AD) not loaded on this worker; cannot resolve managed password.'
+            $p = @{ SamAccountName = "$($Item.samAccountName)" }
+            if ("$($Item.searchRoot)".Trim()) { $p['SearchBase'] = "$($Item.searchRoot)".Trim() }
+            if ("$($global:PIM_HybridAdServer)".Trim()) { $p['Server'] = "$($global:PIM_HybridAdServer)".Trim() }
+            return (Get-PimHybridAdLdapManagedCredential @p)
         }
     }
 }
@@ -658,7 +951,7 @@ function Invoke-PimHybridAdApply {
             }
             # Standard account: read live first; a failed read does NOT cascade to create.
             $live = $null
-            try { $live = & $ActiveDirectoryAdapter.GetUser $it.samAccountName $Credential (& $upnOf $it) } catch { throw "Get-ADUser failed for $($it.samAccountName) with credential '$($Credential.UserName)': $($_.Exception.Message)" }
+            try { $live = & $ActiveDirectoryAdapter.GetUser $it.samAccountName $Credential (& $upnOf $it) } catch { throw "AD user read failed for $($it.samAccountName) with credential '$($Credential.UserName)': $($_.Exception.Message)" }
             if ($live) {
                 $results.Add((& $maintain $it $live))
             } elseif ($DeliverPassword) {
@@ -707,7 +1000,7 @@ function Invoke-PimHybridAdApply {
 # PIM-Baseline-Management-CSV.ps1 367-389) -- were silently never provisioned.
 #
 # The job 'hybrid-ad-apply' runs this on every scheduler worker. v1's condition is kept exactly:
-# it applies only where the ActiveDirectory module AND an AD credential exist. Anywhere else (every
+# it applies only on a domain-joined host AND where an AD credential exists. Anywhere else (every
 # container) it does not plan quietly -- it reports that a HYBRID WORKER is required, naming how
 # many AD rows are waiting, so the gap is visible in the Jobs list instead of looking like success.
 # A hybrid worker is a domain-joined Windows host running the scheduler scoped to this job
@@ -789,17 +1082,18 @@ function Resolve-PimHybridAdCredential {
 }
 
 function Test-PimHybridAdWorkerCapability {
-    # v1's condition (PIM-Baseline-Management-CSV.ps1 367-372): the ActiveDirectory module AND an
-    # AD credential. -AdModulePresent is the test seam.
+    # v1's condition (PIM-Baseline-Management-CSV.ps1 367-372): an AD-capable host AND an AD credential. Since §100.42 the
+    # host test is "joined to an AD domain" (the LDAP layer needs no ActiveDirectory module). -AdModulePresent is the test
+    # seam (name kept: every job and suite passes it).
     param([object]$AdModulePresent = $null, [object]$Credential = $null, [scriptblock]$SecretReader)
-    $ad = if ($null -ne $AdModulePresent) { [bool]$AdModulePresent } else { [bool](Get-Command Get-ADUser -ErrorAction SilentlyContinue) }
+    $ad = if ($null -ne $AdModulePresent) { [bool]$AdModulePresent } else { [bool](Test-PimHybridAdDirectoryAvailable) }
     $cred = $Credential; $src = 'supplied'; $runAs = $false; $credWhy = ''
     if (-not $cred) {
         $r = Resolve-PimHybridAdCredential -SecretReader $SecretReader; $cred = $r.credential; $src = $r.source
         if ($r.PSObject.Properties['runAsGmsa']) { $runAs = [bool]$r.runAsGmsa; $credWhy = "$($r.reason)" }
     }
     $reason = ''
-    if (-not $ad) { $reason = 'this host has no ActiveDirectory module (RSAT-AD) -- a container cannot write on-premises AD' }
+    if (-not $ad) { $reason = 'this host is not joined to an Active Directory domain -- a container cannot write on-premises AD' }
     elseif (-not $cred -and -not $runAs) {
         $reason = if ($credWhy) { "gMSA mode: $credWhy" } else { 'no AD credential is available (set PIM_HybridAdCredential on the worker, or the HybridAdCredentialVault / -UserSecret / -PasswordSecret settings)' }
     }
