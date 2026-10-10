@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.558 -- 2026-10-10
+
+- Setup: the one browser sign-in is shared by every script of the installation (no second prompt when the managed-tenant build starts).
+
 ## 2.4.557 -- 2026-10-10
 
 - Managed-tenant install: one sign-in for the whole installation -- the build steps reuse it instead of each opening a browser window.

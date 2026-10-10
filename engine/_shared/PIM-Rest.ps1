@@ -266,14 +266,14 @@ function Get-PimInteractiveToken {
 
   # ONE sign-in: a refresh token from an earlier browser sign-in (same tenant + client) is exchanged for this audience --
   # no second window. Falls through to the browser only when there is none or the exchange is refused.
-  if (-not $script:PimInteractiveRefresh) { $script:PimInteractiveRefresh = @{} }
+  if (-not $global:PimInteractiveRefresh) { $global:PimInteractiveRefresh = @{} }
   $rtKey = "$tenant|$cid".ToLowerInvariant()
-  if ($script:PimInteractiveRefresh.ContainsKey($rtKey) -and -not $ForceFreshAccount) {
+  if ($global:PimInteractiveRefresh.ContainsKey($rtKey) -and -not $ForceFreshAccount) {
     try {
       $rr = Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$tenant/oauth2/v2.0/token" -ContentType 'application/x-www-form-urlencoded' -Body @{
-        client_id = $cid; grant_type = 'refresh_token'; refresh_token = $script:PimInteractiveRefresh[$rtKey]
+        client_id = $cid; grant_type = 'refresh_token'; refresh_token = $global:PimInteractiveRefresh[$rtKey]
         scope = "$Audience/.default offline_access openid profile" }
-      if ($rr.refresh_token) { $script:PimInteractiveRefresh[$rtKey] = $rr.refresh_token }
+      if ($rr.refresh_token) { $global:PimInteractiveRefresh[$rtKey] = $rr.refresh_token }
       if ($rr.access_token) { return [pscustomobject]@{ token = $rr.access_token; expiresUtc = (Get-Date).ToUniversalTime().AddSeconds([int]$rr.expires_in - 60) } }
     } catch { Write-Verbose "refresh-token exchange for $Audience refused: $($_.Exception.Message) -- browser sign-in" }
   }
@@ -365,7 +365,7 @@ function Get-PimInteractiveToken {
     } catch { $tid = '' }
     if ($tid -and $tid -ne $tenant) { throw "You signed in to tenant $tid, but this is for tenant $tenant -- sign in with an account of $tenant (use that admin's browser profile)." }
   }
-  if ($r.refresh_token) { $script:PimInteractiveRefresh["$tenant|$cid".ToLowerInvariant()] = $r.refresh_token }   # in memory only, never written
+  if ($r.refresh_token) { $global:PimInteractiveRefresh["$tenant|$cid".ToLowerInvariant()] = $r.refresh_token }   # in memory only, never written
   return [pscustomobject]@{ token = $r.access_token; expiresUtc = (Get-Date).ToUniversalTime().AddSeconds([int]$r.expires_in - 60) }
 }
 
