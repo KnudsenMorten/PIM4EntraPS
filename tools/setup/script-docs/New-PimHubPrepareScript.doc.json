@@ -3,12 +3,12 @@
   "product": "pim",
   "title": "Write the hub owner's preparation script (private install)",
   "purpose": "Writes the script the hub network owner runs before (or during) a private PIM Manager installation: the hub side of the peering with exactly the name PIM setup looks for, optionally the rights for the deploy identity, and a check of both sides. It only writes a file; nothing in Azure is touched.",
-  "whenToRun": "Before a private (internal) installation when the hub VNet belongs to another team or another subscription, so the PIM installer cannot create the hub side of the peering. Run it, hand the written prepare-hub-<name>.ps1 to the hub owner (they run it, for example in Azure Cloud Shell), then continue the installation. Setup writes the same file by itself when it cannot create the hub side.",
+  "whenToRun": "Before a private (internal) installation when the hub VNet belongs to another team or another subscription, so the PIM installer cannot create the hub side of the peering. Run it, hand the written prepare-hub-<name>.ps1 to the hub owner, then continue the installation. The hub owner runs it with PowerShell 7 (or Windows PowerShell 5.1) on any machine, with a browser sign-in as the hub owner -- no Azure CLI, no PowerShell modules, nothing to install: first without -Apply (it prints its plan and changes nothing), then with -Apply. Setup writes the same file by itself when it cannot create the hub side.",
   "standalone": true,
   "sourcePath": "tools/setup/New-PimHubPrepareScript.ps1",
   "runAs": [],
   "changes": [
-    { "target": "Local file", "action": "create", "object": "prepare-hub-<name>.ps1 in -OutDirectory (default: the current folder)", "scope": "this computer", "why": "The script the hub owner runs. When THEY run it, it creates the hub-side peering on the hub VNet; with -DeployPrincipalObjectId it also grants that identity Network Contributor on the hub VNet, and with -DnsResourceGroup Private DNS Zone Contributor on that resource group. It never deletes anything and is safe to run twice. This script itself changes nothing in Azure.", "undo": "Delete the file. (What the hub owner's run created is removed by them: the peering on the hub VNet and the role assignments it lists.)" }
+    { "target": "Local file", "action": "create", "object": "prepare-hub-<name>.ps1 in -OutDirectory (default: the current folder)", "scope": "this computer", "why": "The script the hub owner runs. It is one self-contained file: an embedded browser sign-in to the hub's tenant (a sign-in to another tenant is refused), then Azure Resource Manager REST calls -- no Azure CLI, no modules. Without -Apply it only prints its plan. With -Apply it creates the hub-side peering on the hub VNet (virtualNetworkPeerings; waits for provisioningState Succeeded); with -DeployPrincipalObjectId it also makes an Azure role assignment for that identity: Network Contributor on the hub VNet, and with -DnsResourceGroup Private DNS Zone Contributor on that resource group (one fixed assignment name per scope + identity + role, so a second run adds nothing); with -PrivateDnsZoneName it links each existing zone to the hub VNet (virtualNetworkLinks 'link-<hub vnet>'). It never deletes anything and is safe to run twice. This script itself changes nothing in Azure.", "undo": "Delete the file. (What the hub owner's run created is removed by them: the peering on the hub VNet, the role assignments and the DNS zone links it lists.)" }
   ],
   "parameters": [
     { "name": "SpokeSubscriptionId", "required": true, "default": null, "help": "The subscription of the PIM network (the spoke)." },
@@ -21,15 +21,17 @@
     { "name": "DeployPrincipalType", "required": false, "default": "ServicePrincipal", "help": "ServicePrincipal, User or Group: the type of -DeployPrincipalObjectId." },
     { "name": "DnsResourceGroup", "required": false, "default": "", "help": "The resource group of the private DNS zone when it is in the HUB subscription: the written script also grants the deploy identity Private DNS Zone Contributor there." },
     { "name": "EnvironmentLabel", "required": false, "default": "", "help": "A label shown in the written script's header (default: the PIM VNet name)." },
+    { "name": "TenantId", "required": false, "default": "", "help": "The tenant id (GUID) of the hub's tenant, baked into the written script for its browser sign-in. Empty = the written script finds the hub subscription's tenant itself when it runs. Either way a sign-in to another tenant is refused." },
+    { "name": "PrivateDnsZoneName", "required": false, "default": "(none)", "help": "Existing private DNS zones in -DnsResourceGroup (hub subscription) that the written script links to the hub VNet as 'link-<hub vnet>'. Needs -DnsResourceGroup. A zone that does not exist yet is skipped with a message." },
     { "name": "OutDirectory", "required": false, "default": "the current folder", "help": "Where the file is written." }
   ],
   "readsOnly": [
     "nothing in Azure or the directory -- the peering names and resource ids are derived from the parameters"
   ],
   "network": [
-    "none (this script makes no network call; the written script talks to Azure Resource Manager when the hub owner runs it)"
+    "none (this script makes no network call; the written script talks to login.microsoftonline.com (the hub owner's browser sign-in) and Azure Resource Manager (management.azure.com) when the hub owner runs it with -Apply)"
   ],
   "whatIf": "Derives the peering names, prints 'What if: Performing the operation \"write the hub owner's script: peering '<name>' on '<hub vnet>'\" on target \"<folder>\\prepare-hub-<name>.ps1\"' and 'preview only -- nothing was written'. No file is written.",
-  "undo": "Delete the written file. What the hub owner's run created (the hub-side peering and any role assignment it lists) is removed by the hub owner.",
+  "undo": "Delete the written file. What the hub owner's run created (the hub-side peering, any role assignment and DNS zone link it lists) is removed by the hub owner.",
   "docUrl": "https://invardia.com/docs/pim/scripts/New-PimHubPrepareScript/"
 }

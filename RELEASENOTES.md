@@ -13,6 +13,12 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.578 -- 2026-10-10
+
+- Hub owner preparation script without the Azure CLI; custom host name: right DNS zone for nested names, PEM certificates, existing VNet links, -Remove; region step titled Azure services in the chosen region.
+
+- **The hub owner's preparation script needs no Azure CLI.** The file `New-PimHubPrepareScript.ps1` writes for the owner of the hub network is now one self-contained PowerShell script: run it with PowerShell 7 (or Windows PowerShell 5.1) on any machine, without `-Apply` to see the plan and with `-Apply` to make the changes after a browser sign-in as the hub owner (a sign-in to another tenant is refused). It talks to Azure Resource Manager directly: the hub side of the peering, the optional rights for the deploy identity, and new: optional links from existing private DNS zones to the hub (`-PrivateDnsZoneName`) and the hub's tenant baked in (`-TenantId`). Safe to run twice; it never deletes anything.
+- **Custom host name for the Manager: smarter DNS, PEM certificates and a clean undo.** The custom-host script now writes the private DNS record into the existing zone your name actually belongs to (the longest matching private DNS zone, so pim-manager.corp.contoso.local lands in contoso.local as pim-manager.corp), and never creates a zone. A virtual network that is already linked to the zone under any link name is left alone. AD DNS records are printed for your DNS administrator with the zone it assumed; -DnsZone sets it when the default is wrong. A Key Vault certificate in PEM format is converted to PFX in memory (PowerShell 7). On a public environment the script now always waits for -PublicDnsReady, also with -Dns None, instead of waiting 20 minutes for a certificate that cannot issue. New -Remove takes the name off again: binding, certificate, known host names and sign-in reply URL; it prints the DNS record for you to delete. The script's documentation now lists only the rights it really uses.
 ## 2.4.577 -- 2026-10-10
 
 - The customer chooses any Azure region: setup checks before anything is created that every service PIM Manager needs is offered there and suggests the nearest region that has them; banners say PIM Manager; the install wizard no longer asks for admin prefixes.
