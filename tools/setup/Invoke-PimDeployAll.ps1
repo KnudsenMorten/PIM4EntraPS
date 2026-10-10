@@ -2239,6 +2239,10 @@ function Invoke-DefaultStepRunner {
                 }
                 if ($mailMiOids.Count) { $mailArgs['ManagedIdentityObjectId'] = $mailMiOids }
                 if (-not $engineForMail -and -not $mailMiOids.Count) { Warn 'mail sender: no engine identity could be resolved (no -EngineClientId, and neither the tick job nor the Manager has a managed identity) -- this step will not be able to finish.' }
+                # Owner 2026-10-10 ("make the mail sender non-blocking"): a customer's install sat 40+ minutes in the Exchange
+                # "not ready" wait. Inside the deploy the mail sender never waits for Exchange: not ready = DEFERRED with a
+                # warning, the install goes on, and Get Started > Mail sender (or a re-run) finishes it.
+                if (-not $mailArgs.ContainsKey('ExchangeReadyMinutes')) { $mailArgs['ExchangeReadyMinutes'] = 0 }
                 & $init @mailArgs | Out-Host
                 $ok = (-not $LASTEXITCODE) -or ($LASTEXITCODE -eq 0)
                 # 🪤 Not fatal to the deploy, and deliberately so: a tenant whose Exchange org is
@@ -2258,7 +2262,7 @@ function Invoke-DefaultStepRunner {
                     Warn '  the onboarding SPN once, then re-run Initialize-PimMailSender.ps1 -- it will NOT clear by waiting.'
                     Warn '  If it was a missing Exchange plan or a mailbox still provisioning, THAT one does clear -- re-run later.'
                 }
-                return @{ ok=$true; ran=$true; detail=$(if ($ok) { 'sender mailbox + send right ensured' } else { 'DEGRADED: mail sender not provisioned (see warning) -- deploy continued' }) }
+                return @{ ok=$true; ran=$true; detail=$(if ($ok) { 'sender mailbox + send right ensured' } else { 'DEFERRED: mail sender not provisioned yet (Exchange not ready or refused) -- the install continued; finish it in PIM Manager > Get Started > Mail sender, or re-run the installation later' }) }
             }
             return @{ ok=$true; ran=$false; detail='skipped by ShouldProcess' }
         }
