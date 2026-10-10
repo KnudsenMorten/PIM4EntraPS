@@ -92,6 +92,7 @@ if ($UseManagedIdentity -or "$env:PIM_UseManagedIdentity".Trim() -eq '1') { $glo
 # "every gated capability is DEFINED IN A FILE THE TICK LOADS" assertion, which exists for this.
 . "$shared\PIM-QueueActions.ps1"      # Invoke-PimQueueActionDrain (the ACTION half of queue-apply)
 . "$shared\PIM-SqlStore.ps1"          # SQL store (signature read for the change-detector)
+. "$shared\PIM-AuditEvent.ps1"        # REQ 100.42 / BUG: Write-PimAuditEvent, the engine's audit writer -- it lived only in the deleted PIM-Functions.psm1, which this entry point never loaded, so every guarded engine audit call (account.create, tap.create, approval.*, license.blocked, rfa.*) was a silent no-op
 . "$shared\PIM-Cutover.ps1"           # Invoke-PimSqlChangeDetector (on-demand recalc on SQL change)
 . "$shared\PIM-Approvals.ps1"         # escalation logic
 . "$shared\PIM-DelegationDepth.ps1"   # two-approval split + reachability + self-deleg

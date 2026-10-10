@@ -24,8 +24,9 @@
       buildWindow     optional, default true. false = this host already reaches the store; no window is opened or closed.
       identity        EITHER { "clientId", "certThumbprint" } (certificate in LocalMachine\My)
                       OR     { "keyVault", "clientIdSecret", "certThumbprintSecret" } -- secret NAMES, read at run time with
-                             Get-AzKeyVaultSecret -AsPlainText (needs Az.KeyVault and a Connect-AzAccount session that can
-                             read the vault). Secret VALUES are never stored in the config.
+                             the Key Vault REST API (no modules; the vault token comes from PIM-Rest -- managed identity
+                             or your browser sign-in -- for an identity that can read the vault). Secret VALUES are never
+                             stored in the config.
       prereqs         [ { "workload": DefenderXdr|Intune|PowerBI|AzureRbac|EntraRoles,
                           "options": { EnableSentinel, GrantAzureUserAccessAdministrator, SkipDataOperations (booleans),
                                        ConfirmPortalStep: [ids], SentinelWorkspaceId, AzureScope: [scopes] } } ]
@@ -60,6 +61,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $solRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $solRoot 'engine\_shared\PIM-WorkloadPrereqs.ps1')   # the workload names (Get-PimWorkloadPrereqWorkloads)
+# Key Vault identity refs are read over REST (PIM-Rest's token client). Loaded only when the caller has not already
+# (a test stubs Invoke-PimRest, and a re-load here would shadow the stub).
+if (-not (Get-Command Invoke-PimRest -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-Rest.ps1') }
 $tools = if ("$ToolRoot".Trim()) { "$ToolRoot".Trim() } else { $PSScriptRoot }
 $scr = @{
     prereq = Join-Path $tools 'Initialize-PimWorkloadPrereqs.ps1'
@@ -113,18 +117,32 @@ function Get-PimTenantPrepEnvErrors {
     return @($e.ToArray())
 }
 
+function Get-PimTenantPrepVaultSecret {
+    # One Key Vault secret VALUE over the Key Vault REST API (no modules, framework 12.17). The vault token comes from
+    # PIM-Rest's one token client (managed identity, or the browser sign-in of the person at the keyboard).
+    param([Parameter(Mandatory)][string]$VaultName, [Parameter(Mandatory)][string]$Name, [string]$TenantId)
+    if ($VaultName -notmatch '^[a-zA-Z0-9-]{3,24}$') { throw "identity: '$VaultName' is not a Key Vault name." }
+    if ($Name -notmatch '^[0-9a-zA-Z-]{1,127}$') { throw "identity: '$Name' is not a Key Vault secret name." }
+    if ("$TenantId".Trim()) { $global:PIM_TenantId = "$TenantId".Trim() }
+    $prevFb = $global:PIM_InteractiveFallback
+    if ([Environment]::UserInteractive -and $null -eq $prevFb) { $global:PIM_InteractiveFallback = $true }
+    try {
+        $r = Invoke-PimRest -Method GET -Url ("https://$VaultName.vault.azure.net/secrets/$Name" + '?api-version=7.4') -Resource 'https://vault.azure.net'
+    } catch {
+        throw "identity: Key Vault '$VaultName' secret '$Name' could not be read: $($_.Exception.Message)"
+    } finally { $global:PIM_InteractiveFallback = $prevFb }
+    return "$($r.value)"
+}
+
 function Resolve-PimTenantPrepIdentity {
     # -> @{ clientId; certThumbprint; source }. Key Vault refs are read NOW, never stored.
-    param([Parameter(Mandatory)][object]$Identity)
+    param([Parameter(Mandatory)][object]$Identity, [string]$TenantId)
     $cid = "$(Get-PimTenantPrepValue $Identity 'clientId')".Trim(); $thumb = "$(Get-PimTenantPrepValue $Identity 'certThumbprint')".Trim()
     if ($cid -and $thumb) { return @{ clientId = $cid; certThumbprint = $thumb; source = 'config' } }
     $vault = "$(Get-PimTenantPrepValue $Identity 'keyVault')".Trim()
     $cidName = "$(Get-PimTenantPrepValue $Identity 'clientIdSecret')".Trim(); $thumbName = "$(Get-PimTenantPrepValue $Identity 'certThumbprintSecret')".Trim()
-    if (-not (Get-Command Get-AzKeyVaultSecret -ErrorAction SilentlyContinue)) {
-        throw "identity: Key Vault '$vault' is referenced, but Get-AzKeyVaultSecret is not available -- install Az.KeyVault and Connect-AzAccount as an identity that can read the vault first."
-    }
-    $cid = "$(Get-AzKeyVaultSecret -VaultName $vault -Name $cidName -AsPlainText)".Trim()
-    $thumb = "$(Get-AzKeyVaultSecret -VaultName $vault -Name $thumbName -AsPlainText)".Trim()
+    $cid = "$(Get-PimTenantPrepVaultSecret -VaultName $vault -Name $cidName -TenantId $TenantId)".Trim()
+    $thumb = "$(Get-PimTenantPrepVaultSecret -VaultName $vault -Name $thumbName -TenantId $TenantId)".Trim()
     if (-not $cid -or -not $thumb) { throw "identity: Key Vault '$vault' returned an empty value for '$cidName' or '$thumbName'." }
     return @{ clientId = $cid; certThumbprint = $thumb; source = "keyVault $vault ($cidName, $thumbName)" }
 }
@@ -181,7 +199,7 @@ foreach ($ec in $envs) {
         $bad = @(Get-PimTenantPrepEnvErrors -EnvCfg $ec)
         if ($bad.Count) { throw "config: $($bad -join '; ')" }
         $tid = "$(Get-PimTenantPrepValue $ec 'tenantId')".Trim()
-        $ident = Resolve-PimTenantPrepIdentity -Identity (Get-PimTenantPrepValue $ec 'identity')
+        $ident = Resolve-PimTenantPrepIdentity -Identity (Get-PimTenantPrepValue $ec 'identity') -TenantId $tid
         $rec.identitySource = $ident.source
         Note "identity: app $($ident.clientId) ($($ident.source))"
         $common = @{ TenantId = $tid; SqlServerFqdn = $fqdn; SqlDatabase = $db; ClientId = $ident.clientId; CertThumbprint = $ident.certThumbprint }

@@ -685,7 +685,7 @@ try {
             #     ERROR: The resource with name 'acrpimmfnpr' ... could not be found in subscription
             #            'sg-visualstudio 2 (DEMO) (7e867037-...)'
             # which names a missing REGISTRY and reads as "the registry is gone", when the registry was fine
-            # and the context was wrong -- the exact misreading Connect-PimTenantAz.ps1 exists to prevent.
+            # and the context was wrong -- the exact misreading an explicit, asserted subscription prevents.
             # Both sides already had the parameter (Build-PimManagerImage scopes `az acr build` with it and
             # deliberately does NOT mutate the machine context); only the call was missing it. Same shape as
             # the AcrAgentPool gap above and as BUG-46: a value correct at the top of a script that never

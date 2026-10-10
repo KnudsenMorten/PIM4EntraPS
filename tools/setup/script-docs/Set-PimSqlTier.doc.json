@@ -15,7 +15,7 @@
     },
     {
       "kind": "other",
-      "name": "browser sign-in to Azure (first-party public client 'Microsoft Azure PowerShell'), the session's Invoke-AzRestMethod (the Invardia Support app's shim, or an Azure PowerShell sign-in), or the Invardia Support app (-AdminAppId + -AdminSecret)",
+      "name": "browser sign-in to Azure (first-party public client 'Microsoft Azure PowerShell'), the Invardia Support-app session's REST shim (never the Az PowerShell cmdlet), or the Invardia Support app (-AdminAppId + -AdminSecret)",
       "scope": "Azure Resource Manager in your tenant",
       "why": "No PowerShell module and no certificate. The Support app's secret is accepted only for Invardia support; a person signs in in the browser."
     }
@@ -56,7 +56,7 @@
     { "name": "Database", "required": false, "default": "PimPlatform", "help": "The PIM database." },
     { "name": "Tier", "required": false, "default": "the plan: Basic -> S0, any other tier kept", "help": "A Standard tier (S0, S1, S2, S3, S4, S6, S7, S9, S12) to set; never Basic. Changing the tier of a pinned database needs -Pin." },
     { "name": "Pin", "required": false, "default": "off", "help": "Tag the database pim-sql-tier-pin = its tier, so updates never change its tier." },
-    { "name": "TenantId", "required": false, "default": null, "help": "Your tenant id, for the browser sign-in or with -AdminAppId + -AdminSecret. Not needed in a session that has Invoke-AzRestMethod." },
+    { "name": "TenantId", "required": false, "default": null, "help": "Your tenant id, for the browser sign-in or with -AdminAppId + -AdminSecret. Not needed in an Invardia Support-app session." },
     { "name": "AdminAppId", "required": false, "default": null, "help": "Invardia support only: the Invardia Support app's application id (with -AdminSecret and -TenantId) instead of the browser sign-in." },
     { "name": "AdminSecret", "required": false, "default": null, "help": "Invardia support only: the Invardia Support app's secret." },
     { "name": "ReadBackMinutes", "required": false, "default": "20", "help": "How long to wait for the change to be confirmed (a tier change runs online and can take minutes)." },

@@ -95,25 +95,14 @@ function Build-PimContext {
         Write-Verbose 'Build-PimContext: no $global:PIM_Filters (v2) -- raw groups/AUs/roles load; the v1 filtered lists are skipped.'
     }
 
-    # Backend: PURE REST by default (no Graph module -> nothing to Install-Module,
-    # no version drift, no auto-import demanding Connect-MgGraph) so the engine runs
-    # identically on a VM or container. Set $global:PIM_UseGraphSdk = $true to opt
-    # back into the legacy Graph SDK path. REST results are normalized to SDK
-    # property casing so the filters below ($user.UserPrincipalName,
-    # $group.DisplayName, ...) work either way.
-    $useSdk = [bool]$global:PIM_UseGraphSdk
-    if ($useSdk) {
-        Write-Host '[context] Fetching Entra users + groups + AUs + roles from Graph (SDK)...'
-        $Global:Users_All_ID  = Get-MgUser -All
-        $Global:Groups_All_ID = Get-MgGroup -All
-        $Global:AU_All_ID     = Get-MgDirectoryAdministrativeUnit -All
-        $Global:Roles_All_ID  = Get-MgRoleManagementDirectoryRoleDefinition
+    # Backend: PURE REST, the only path (§100.42: no Graph module -> nothing to Install-Module, no version drift,
+    # no Connect-MgGraph; the $global:PIM_UseGraphSdk opt-in is gone). REST results are normalized to SDK property
+    # casing so the filters below ($user.UserPrincipalName, $group.DisplayName, ...) keep working.
+    if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
+        $rest = Join-Path (Split-Path -Parent $PSCommandPath) 'PIM-Rest.ps1'
+        if (Test-Path $rest) { . $rest } else { throw 'Build-PimContext: PIM-Rest.ps1 not found.' }
     }
-    else {
-        if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
-            $rest = Join-Path (Split-Path -Parent $PSCommandPath) 'PIM-Rest.ps1'
-            if (Test-Path $rest) { . $rest } else { throw 'Build-PimContext: no Graph SDK and PIM-Rest.ps1 not found.' }
-        }
+    . {   # dot-invoked: runs in THIS scope (the block only keeps the original indentation of the REST fetch)
         # LEAN context (default for the engine): a real tenant can have 150k+ groups and
         # 500k+ users -- bulk-listing them to manage a few hundred PIM groups + admins is
         # unworkable. So: USERS are never bulk-listed (resolved on-demand + cached by

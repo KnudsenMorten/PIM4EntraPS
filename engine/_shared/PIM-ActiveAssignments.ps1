@@ -21,7 +21,7 @@
 
   Dependencies: engine/_shared/PIM-Rest.ps1 (Invoke-PimGraph / Invoke-PimArm / Invoke-PimGraphBatchGet /
   Get-PimArmActiveRoleAssignmentsViaArg / ConvertTo-PimSdkShape), tools/pim-manager/_tenantSync.ps1
-  (Assert-PimTenantConnectionContext, Connect-PimManagerGraph/Az, Get-/Set-PimTenantCacheEntry) and,
+  (Assert-PimTenantConnectionContext, Get-/Set-PimTenantCacheEntry) and,
   for the trigger, engine/_shared/PIM-Scheduler.ps1 (Add-PimJobTrigger). Runs on pwsh 7 and 5.1.
 #>
 
@@ -38,22 +38,13 @@ $script:PimActiveAssignmentsSnapshotDefaultCadenceMinutes = 120
 # §70.1b option 2: the read is a SCHEDULER job now (see the header). The Manager serves the stored
 # snapshot; Refresh queues a trigger. Three sources are combined into a single row set:
 #
-#   * Entra-role active assignments:
-#       Get-MgRoleManagementDirectoryRoleAssignmentSchedule -All
-#       (TODO v2.4.3 -- add Get-EntraRoleAssignmentsPreloaded helper to the
-#        engine's _shared/PIM-Functions.psm1, mirroring the v2.4.0
-#        Get-PimGroupSchedulesPreloaded pattern. For now we call directly.)
-#
-#   * Azure-RBAC active assignments:
-#       Get-AzActiveRoleAssignmentsViaArg  (v2.4.0 helper, Search-AzGraph)
-#
-#   * PIM-for-Groups active assignments:
-#       Get-PimGroupSchedulesPreloaded     (v2.4.0 helper, single Graph call)
+#   * Entra-role active assignments:  GET /roleManagement/directory/roleAssignmentSchedules (REST, paged)
+#   * Azure-RBAC active assignments:  one Azure Resource Graph query (Get-PimArmActiveRoleAssignmentsViaArg)
+#   * PIM-for-Groups active assignments: one filtered assignmentSchedules read per group, 20 per $batch
+# All REST through PIM-Rest.ps1 (§100.42: no Graph / Az PowerShell module, no SDK fallback).
 #
 # The Revoke tab in the Manager only acts on ACTIVE (Assigned) rows -- not
-# Eligible -- because eligibility removal is a different operator workflow
-# already handled by the Baseline engine. The engine PIM-Assignment-Revoker
-# still supports both; the GUI is the bulk-revoke subset.
+# Eligible -- because eligibility removal is a different operator workflow.
 # ---------------------------------------------------------------------------
 
 function Initialize-PimManagerTenantConnection {
@@ -64,23 +55,18 @@ function Initialize-PimManagerTenantConnection {
     if (-not (Get-Command Assert-PimTenantConnectionContext -ErrorAction SilentlyContinue)) {
         throw "_tenantSync.ps1 helpers not loaded -- file missing next to Open-PimManager.ps1"
     }
-    $tenantId = Assert-PimTenantConnectionContext
-    # A REST-only host (the scheduler tick sets $global:PIM_UseGraphSdk = $false) mints its own tokens per
-    # call through PIM-Rest.ps1. Connect-PimManagerGraph/Az would otherwise try an SDK sign-in whenever the
-    # Graph/Az modules merely happen to be INSTALLED on the host (a VM running the tick from VisualCron),
-    # and throw for want of the SDK-style HighPriv globals the tick never sets.
-    if (-not (Test-PimActiveAssignmentsRestOnly)) {
-        Connect-PimManagerGraph -TenantId $tenantId
-        Connect-PimManagerAz    -TenantId $tenantId
+    [void](Assert-PimTenantConnectionContext)
+    # §100.42 (owner 2026-10-09: "modern single connect only"): there is no SDK sign-in any more. PIM-Rest.ps1 mints a
+    # token per call (managed identity / certificate / Support-app session / browser) -- nothing to connect up front.
+    if (-not (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)) {
+        throw 'PIM-Rest.ps1 is not loaded (Invoke-PimGraph missing) -- the REST client is the only tenant connection'
     }
     $script:PimManagerTenantConnected = $true
 }
 
 function Test-PimActiveAssignmentsRestOnly {
-    # True when this process has explicitly opted out of the Graph/Az SDK ($global:PIM_UseGraphSdk = $false,
-    # which the scheduler tick and the REST engine set) AND the REST client is loaded. Unset keeps the old
-    # detection (SDK cmdlet present or not), so the Manager's behaviour is unchanged.
-    return ([bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) -and ($global:PIM_UseGraphSdk -is [bool]) -and (-not $global:PIM_UseGraphSdk))
+    # §100.42: REST is the only path. Kept as a function (callers ask it) -- true whenever the REST client is loaded.
+    return [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
 }
 
 function Get-PimActiveAssignmentsGroupPrefix {
@@ -236,17 +222,11 @@ function Get-PimManagerLookupCaches {
     Initialize-PimManagerTenantConnection
 
     Write-Host "  [revoke] loading principal + role lookup caches (one-shot per session) ..." -ForegroundColor DarkGray
-    # REST-only (hosted container): no Graph SDK -> pull via PIM-Rest's
-    # Invoke-PimGraph and re-shape to SDK casing (.Id/.DisplayName/.UPN) so the
-    # row-builder + id indexes below are unchanged.
-    $restGraph = ((Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) -and -not (Get-Command Get-MgUser -ErrorAction SilentlyContinue)) -or (Test-PimActiveAssignmentsRestOnly)
+    # REST only (§100.42): pull via PIM-Rest's Invoke-PimGraph and re-shape to SDK casing (.Id/.DisplayName/.UPN) so
+    # the row-builder + id indexes below are unchanged.
 
-    # Users. The admin filter (Get-PimAdminsFiltered) needs the engine module;
-    # without it (REST-only) pull the admin-pattern users directly, else all.
+    # Users.
     try {
-        if ((-not $restGraph) -and (Get-Command Get-PimAdminsFiltered -ErrorAction SilentlyContinue)) {
-            $script:PimManager_Users = @(Get-PimAdminsFiltered)
-        } elseif ($restGraph) {
             # 🔒 DELIBERATELY UNFILTERED (operator, 2026-09-12: "for the revoke solution, we dont
             # filter as it contains legacy assignements").
             # This list resolves PRINCIPAL NAMES for the revoke screen, and that screen must show
@@ -262,18 +242,12 @@ function Get-PimManagerLookupCaches {
             # consumer of the user index sees the same UPN + display name the directory pull gave, for
             # exactly the principals on screen, whether the tenant has 300 users or 250,000.
             $script:PimManager_Users = @()
-        } else {
-            $script:PimManager_Users = @(Get-MgUser -All)
-        }
     } catch {
         Write-Warning "  [revoke] user cache load failed: $($_.Exception.Message). Principal names may be blank."
         $script:PimManager_Users = @()
     }
     # Groups (PIM-prefix filter if naming-conventions present, else full set).
     try {
-        if ((-not $restGraph) -and (Get-Command Get-PimGroupsFiltered -ErrorAction SilentlyContinue)) {
-            $script:PimManager_Groups = @(Get-PimGroupsFiltered)
-        } elseif ($restGraph) {
             # 🔴 BUG-217 (§33.28, operator decision 2026-09-18): the Revoke snapshot covers EVERY PIM-for-Groups group,
             # not only the ones named by our convention -- a legacy or hand-made PIM group's active grants are exactly
             # what the revoke screen must show. So the cache is no longer prefix-filtered: ALL groups, paged 999 at a
@@ -287,31 +261,20 @@ function Get-PimManagerLookupCaches {
                 $gt = @(); if ($null -ne $_.groupTypes) { $gt = @($_.groupTypes) }
                 [pscustomobject]@{ Id = "$($_.id)"; DisplayName = [string]$_.displayName; Description = [string]$_.description; GroupTypes = $gt; SecurityEnabled = $sec }
             })
-        } else {
-            $script:PimManager_Groups = @(Get-MgGroup -All)
-        }
     } catch {
         Write-Warning "  [revoke] group cache load failed: $($_.Exception.Message). Group names may be blank."
         $script:PimManager_Groups = @()
     }
     # Entra role definitions (small, single call, no filtering).
     try {
-        if ($restGraph) {
-            $script:PimManager_EntraRoles = @(Invoke-PimGraph -Path "/roleManagement/directory/roleDefinitions?`$select=id,displayName,isBuiltIn,templateId" -All | ConvertTo-PimSdkShape)
-        } else {
-            $script:PimManager_EntraRoles = @(Get-MgRoleManagementDirectoryRoleDefinition -All)
-        }
+        $script:PimManager_EntraRoles = @(Invoke-PimGraph -Path "/roleManagement/directory/roleDefinitions?`$select=id,displayName,isBuiltIn,templateId" -All | ConvertTo-PimSdkShape)
     } catch {
         Write-Warning "  [revoke] entra role-definition cache load failed: $($_.Exception.Message). Entra role names may be blank."
         $script:PimManager_EntraRoles = @()
     }
     # AU directory cache (for /administrativeUnits/<id> scope display).
     try {
-        if ($restGraph) {
-            $script:PimManager_AUs = @(Invoke-PimGraph -Path "/directory/administrativeUnits?`$select=id,displayName" -All | ConvertTo-PimSdkShape)
-        } else {
-            $script:PimManager_AUs = @(Get-MgDirectoryAdministrativeUnit -All)
-        }
+        $script:PimManager_AUs = @(Invoke-PimGraph -Path "/directory/administrativeUnits?`$select=id,displayName" -All | ConvertTo-PimSdkShape)
     } catch {
         $script:PimManager_AUs = @()
     }
@@ -544,15 +507,10 @@ function Invoke-PimActiveAssignmentsSnapshot {
     # the misleading "Cache may be empty -- click Refresh." (root cause).
     $surfaceErrors = New-Object System.Collections.ArrayList
 
-    # REST-only (hosted container): mint tokens + read Graph/ARM via PIM-Rest.ps1
-    # -- the Graph/Az PowerShell SDK is not installed in the image.
-    $restGraph = ((Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) -and -not (Get-Command Get-MgRoleManagementDirectoryRoleAssignmentSchedule -ErrorAction SilentlyContinue)) -or (Test-PimActiveAssignmentsRestOnly)
-    $restArm   = ((Get-Command Invoke-PimArm   -ErrorAction SilentlyContinue) -and -not (Get-Command Get-AzActiveRoleAssignmentsViaArg -ErrorAction SilentlyContinue)) -or ((Test-PimActiveAssignmentsRestOnly) -and [bool](Get-Command Invoke-PimArm -ErrorAction SilentlyContinue))
+    # REST only (§100.42): mint tokens + read Graph/ARM via PIM-Rest.ps1 -- no Graph/Az PowerShell SDK anywhere.
+    $restArm   = [bool](Get-Command Invoke-PimArm -ErrorAction SilentlyContinue)
 
     # ---- Entra-role active assignments -------------------------------------
-    # TODO v2.4.3: replace with Get-EntraRoleAssignmentsPreloaded helper once
-    # ported into engine/_shared/PIM-Functions.psm1 (mirror of the
-    # Get-PimGroupSchedulesPreloaded pattern). For now: direct -All call.
     # 🔴 100.31 SNAPSHOT-OOM (2026-10-09, a ~10.8k-object tenant at 0.5 CPU / 1 GiB: System.OutOfMemoryException). Every
     # surface is now PROJECTED AS IT IS READ: a raw Graph / Resource Graph page becomes rows and is released before the
     # next page is fetched (Get-PimActiveAssignmentsGraphItems / Get-PimArmActiveRoleAssignmentsViaArg -Stream piped into
@@ -594,13 +552,9 @@ function Invoke-PimActiveAssignmentsSnapshot {
     }
     $entraStart = $rows.Count
     try {
-        if ($restGraph) {
-            # REST, page by page: each schedule becomes a row as its page arrives (property names are case-insensitive,
-            # so the PascalCase reads in the builder resolve on the camelCase REST objects; nested ones are tolerated).
-            Get-PimActiveAssignmentsGraphItems -Path '/roleManagement/directory/roleAssignmentSchedules' | ForEach-Object { & $addEntraRow $_ }
-        } else {
-            foreach ($e in @(Get-MgRoleManagementDirectoryRoleAssignmentSchedule -All -ErrorAction Stop)) { & $addEntraRow $e }
-        }
+        # REST, page by page: each schedule becomes a row as its page arrives (property names are case-insensitive,
+        # so the PascalCase reads in the builder resolve on the camelCase REST objects; nested ones are tolerated).
+        Get-PimActiveAssignmentsGraphItems -Path '/roleManagement/directory/roleAssignmentSchedules' | ForEach-Object { & $addEntraRow $_ }
     } catch {
         $em = "$($_.Exception.Message)"
         Write-Warning "  [revoke] entra-role assignment-schedules load failed: $em"
@@ -703,21 +657,8 @@ function Invoke-PimActiveAssignmentsSnapshot {
             })
             $azRows = @()
         }
-    } elseif (Get-Command Get-AzActiveRoleAssignmentsViaArg -ErrorAction SilentlyContinue) {
-        try {
-            $azRows = @(Get-AzActiveRoleAssignmentsViaArg)
-        } catch {
-            $em = "$($_.Exception.Message)"
-            Write-Warning "  [revoke] Get-AzActiveRoleAssignmentsViaArg failed: $em"
-            [void]$surfaceErrors.Add([ordered]@{
-                surface = 'azure-rbac'
-                error   = $em
-                hint    = (Get-PimActiveAssignmentSurfaceHint -Surface 'azure-rbac' -ErrorMessage $em)
-            })
-            $azRows = @()
-        }
     } else {
-        $em = 'Azure-RBAC reader not available (no ARM REST helper Invoke-PimArm + no engine _shared/PIM-Functions.psm1 reader).'
+        $em = 'Azure-RBAC reader not available (the ARM REST helper Invoke-PimArm is not loaded).'
         Write-Warning "  [revoke] $em Azure RBAC rows will be empty."
         [void]$surfaceErrors.Add([ordered]@{
             surface = 'azure-rbac'
@@ -791,12 +732,8 @@ function Invoke-PimActiveAssignmentsSnapshot {
                 })
             }
             try {
-                if ($restGraph) {
-                    # REST: Invoke-PimGraph posts the JSON batch with its own app-only token.
-                    $resp = Invoke-PimGraph -Method POST -Path 'https://graph.microsoft.com/v1.0/$batch' -Body @{ requests = $requests.ToArray() }
-                } else {
-                    $resp = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/$batch' -Body (@{ requests = $requests.ToArray() } | ConvertTo-Json -Depth 6) -ContentType 'application/json' -ErrorAction Stop
-                }
+                # REST: Invoke-PimGraph posts the JSON batch with its own app-only token.
+                $resp = Invoke-PimGraph -Method POST -Path 'https://graph.microsoft.com/v1.0/$batch' -Body @{ requests = $requests.ToArray() }
                 foreach ($br in @($resp.responses)) {
                     if ($br.status -ge 200 -and $br.status -lt 300 -and $br.body -and $br.body.value) {
                         foreach ($v in @($br.body.value)) { $pimGroupRows.Add($v) }

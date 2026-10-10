@@ -1,8 +1,8 @@
 # Workload connectors — status + mechanism map
 
 A connector binds a PIM group to a workload role so JIT activation actually grants
-access in that workload. The engine (`Apply-PimWorkloadAssignments` in
-`engine/_shared/PIM-Functions.psm1`) drives any connector whose API fits the
+access in that workload. The engine (the v2 REST connector runtime,
+`engine/_shared/PIM-WorkloadConnectors.ps1`) drives any connector whose API fits the
 **flat assignment model**: *list role definitions* + *list assignment objects that
 each carry a `principalId` and a `roleId`* + *create/delete such an object*. Most
 Microsoft role APIs fit this (Graph directory/app roles, ARM, Defender/Intune

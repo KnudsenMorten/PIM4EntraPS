@@ -57,7 +57,6 @@ sit at the top and the last-used justification + duration are remembered.
 | `Deploy-PimActivatorHybrid.ps1`  | Endpoint admin | Without Intune — the same client policies as a domain GPO, local machine policy, or a JSON artifact |
 | `intune-remediation\*.ps1` + `Publish-PimActivatorRemediation.ps1` | Endpoint admin | **Recommended for Edge.** One plain Intune Remediation pair: the extension's settings (no ADMX) + repair when a user or admin sets the RepairStuck flag; the helper uploads it to Intune. Pair them with an Edge management service policy that installs the extension. See [Deploy with the Edge management service + a Remediation](#deploy-with-the-edge-management-service--a-remediation-recommended-for-edge) |
 | `Update-PimActivator-Extension.ps1` | Extension maintainer | Dev loop — pack new CRX, push to `gh-pages`, flush local browser |
-| `Test-PimActivatorFlow.ps1`      | QA / smoke test | Headless verification of the end-to-end activation path |
 
 The tenant catalog reaches the extension through `chrome.storage.managed`
 (`managed-schema.json` documents the keys; on Intune-managed Edge the
@@ -513,17 +512,6 @@ Prereqs (one-time per dev box):
 
 ---
 
-## `Test-PimActivatorFlow.ps1` — smoke test
-
-Headless verification of the end-to-end activation path. Useful in CI to
-catch regressions in the Graph + ARM contracts before publishing a CRX.
-
-```powershell
-.\Test-PimActivatorFlow.ps1 -TenantId '<guid>' -ClientId '<guid>'
-```
-
----
-
 ## Architecture / how config flows
 
 ```
@@ -578,5 +566,4 @@ one browser profile and switch between them from the header.
 | `Deploy-PimActivatorBackend.ps1`     | tenant setup | App reg + admin consent |
 | `Deploy-PimActivatorClient.ps1`      | endpoint setup | ExtensionInstallForcelist policy |
 | `Update-PimActivator-Extension.ps1`  | maintainer dev loop | Pack + push CRX, flush local browser |
-| `Test-PimActivatorFlow.ps1`          | QA | Smoke-test the activation path |
 | `README.md`       | docs | This file |

@@ -2,6 +2,11 @@
 
 MSP-central admin model, pulled from a central source on every engine run.
 
+> ⚠️ **v1 only -- the mechanism below is gone (§100.42, 2026-10-09).** `Sync-PimMspConfig` lived in the v1-era
+> library `engine/_shared/PIM-Functions.psm1`, which is deleted (no PowerShell modules, no legacy code). PIM v2 is
+> SQL-only: a managed tenant receives the managing tenant's signed baseline through the downlink job
+> (`tools/pim-engine/downlink-job-entry.ps1`). The text below is kept only as a record of the v1 design.
+
 This folder holds the data files for admins **owned by the MSP** (or any
 central authority -- could be HQ in a multi-subsidiary org). The contents
 are not hand-edited on the tenant VM; they're synced from a central

@@ -88,13 +88,7 @@ param(
     # SQL database to bind at startup, as 'sql:<db>' (see /api/instances). Instances are SQL databases
     # on the configured server only -- the folder instances (instances.custom.json, -ConfigRoot) are
     # gone with the file store (2026-09-12). Extra databases are listed in $env:PIM_SqlDatabases.
-    [string]$Instance,
-    # Bootstrap the AutomateITPS platform connection (bootstrap cert -> Key
-    # Vault -> Modern SPN -> Graph + Az app-only) in THIS process before
-    # starting, so the Revoke tab + tenant-list refresh work without running a
-    # baseline engine first. Requires FUNCTIONS\AutomateITPS in the repo and a
-    # bootstrap/platform-config.json (the standard mgmt-box setup).
-    [switch]$ConnectPlatform
+    [string]$Instance
 )
 
 $ErrorActionPreference = 'Stop'
@@ -328,6 +322,16 @@ if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\discovery\PIM-Discov
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\hybrid-ad\PIM-HybridAdGroups.ps1')) { . (Join-Path $solutionRoot 'engine\hybrid-ad\PIM-HybridAdGroups.ps1') }   # §84 Pro: loaded only when present
 # REQ-AR-2 (operator 2026-09-26): access reviews PER DEPARTMENT, driven by review rules (Settings > Access reviews).
 if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\access-reviews\PIM-AccessReviewCycle.ps1')) { . (Join-Path $solutionRoot 'engine\access-reviews\PIM-AccessReviewCycle.ps1') }   # §84 Pro: loaded only when present
+# §100.42 (owner 2026-10-09: no PowerShell modules; "we dont use that legacy code"): the access-review and template-
+# conformance libraries load HERE, at boot, as plain dot-sourced files. They used to arrive with a lazy
+# `Import-Module PIM-Functions.psm1 -Global` (the deleted v1 library) on the first request that needed them -- which also
+# re-defined dozens of engine functions in module scope behind the Manager's back (BUG-261's class).
+if (Test-Path -LiteralPath (Join-Path $solutionRoot 'engine\access-reviews\PIM-AccessReviews.ps1')) { . (Join-Path $solutionRoot 'engine\access-reviews\PIM-AccessReviews.ps1') }   # §84 Pro: loaded only when present
+. (Join-Path $solutionRoot 'engine\_shared\PIM-Conformance.ps1')
+# ...and the auth / identity diagnostics (Assert-PimManagerMfa for the opt-in MFA-gated loopback login, the Support >
+# diagnostics checks). They too arrived ONLY with that lazy import -- so at boot, before any access-review / workload /
+# conformance request, the MFA gate's `Get-Command Assert-PimManagerMfa` was false and the gate silently did nothing.
+. (Join-Path $solutionRoot 'engine\_shared\PIM-AuthDiagnostics.ps1')
 # REQ-U (prereqs) -- the workload-prerequisite catalog + view (engine/_shared/PIM-WorkloadPrereqs.ps1): behind
 # GET /api/workload-prereqs, the green / amber / red chips that show whether tools\setup\Initialize-PimWorkloadPrereqs.ps1
 # has run for a workload. The same definitions the setup script and tests\Test-PimWorkloadPrereqs.ps1 use.
@@ -2115,16 +2119,6 @@ if ($script:PimHosted -or $script:PimRestOnly -or $global:PIM_ClientId -or $scri
         elseif ($global:HighPriv_Modern_ApplicationID_Azure)             { "SPN $($global:HighPriv_Modern_ApplicationID_Azure)" }
         else { 'none (tenant reads will fail until configured)' }
     Write-Host ("  [tenant-auth] rest-only={0} mi={1} tenant={2} auth={3}" -f $script:PimRestOnly, $script:PimHasManagedIdentity, "$($global:PIM_TenantId)", $script:PimTenantAuthLabel) -ForegroundColor DarkCyan
-}
-
-if ($ConnectPlatform) {
-    $repoRoot = Split-Path -Parent (Split-Path -Parent $solutionRoot)   # ...\AutomateIT
-    $psd1 = Join-Path $repoRoot 'FUNCTIONS\AutomateITPS\AutomateITPS.psd1'
-    if (-not (Test-Path -LiteralPath $psd1)) { throw "-ConnectPlatform: AutomateITPS module not found at $psd1" }
-    Write-Host "Connecting platform (AutomateITPS bootstrap -> Modern SPN, app-only) ..." -ForegroundColor Cyan
-    Import-Module $psd1 -Global -Force -WarningAction SilentlyContinue
-    $null = Connect-Platform
-    Write-Host ("  connected: tenant {0}" -f $global:AzureTenantID) -ForegroundColor Green
 }
 
 # The 14 CSV bases the mapper edits, in stable UI order, with their default
@@ -8315,10 +8309,6 @@ function Get-PimHomeOverview {
     # ---- 5. Access reviews (pending) -- heavy/live, opt-in -------------------
     if ($IncludeHeavy) {
         try {
-            if ($PSScriptRoot -and -not (Get-Command Get-PimAccessReviewOverview -ErrorAction SilentlyContinue)) {
-                $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
-                if (Test-Path -LiteralPath $shared) { Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue }
-            }
             # 🔴 BUG-195: no SEEDED sample rows on a live environment. This tile used to count the seed's
             # "pending" reviews whenever the live read returned nothing, so a tenant with no reviews showed pending
             # work that did not exist. A failed read is now reported as a failed read; an empty tenant is zero.
@@ -12513,7 +12503,13 @@ function Handle-Request {
                 # satisfied for a real, deliberate single-target offboard (the breaker
                 # exists to stop a mass/empty-desired pass, not a one-by-one approved run).
                 $desired = @()
-                try { if (Get-Command Get-PimDesiredRows -ErrorAction SilentlyContinue) { $desired = @(Get-PimDesiredRows) } } catch {}
+                # §100.42: Get-PimDesiredRows lives in PIM-EngineCore.ps1, which the Manager does not load at boot (it used to
+                # arrive only with the lazy PIM-Functions.psm1 import). Dot-sourced into an ISOLATED child scope, as the
+                # policy-hold handlers do, so no engine function can shadow a Manager one.
+                $engCoreLib = Join-Path $solutionRoot 'engine\_shared\PIM-EngineCore.ps1'
+                # -Entity is MANDATORY: called without it, PowerShell PROMPTS for it and the request thread hangs (the
+                # Manager has no console to answer) -- Test-PimManagerSql timed out on exactly that.
+                try { $desired = @(& { param($lib) . $lib; Get-PimDesiredRows -Entity 'Account-Definitions-Admins' } $engCoreLib) } catch { $desired = @() }
                 # v2: the Manager does NOT change the directory. The approved offboard is staged as ONE
                 # desired-state change (the admin row's AutoDisableDate) for an operator to commit; the
                 # engine's AdminOffboarding provider performs it on its next run.
@@ -12571,10 +12567,6 @@ function Handle-Request {
             }
             # REQ-Y: Pro (hard) -- 403 with the licence line when this environment has no Pro licence.
             if (-not (Test-PimManagerProFeature -Key 'reviews.campaigns' -Response $resp)) { return 403 }
-            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
-            if (-not (Get-Command Set-PimAccessReviewDecision -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
-                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-            }
             if (-not (Get-Command Set-PimAccessReviewDecision -ErrorAction SilentlyContinue)) {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = 'access-review library not loaded' }
                 return 500
@@ -12623,10 +12615,6 @@ function Handle-Request {
             }
             # REQ-Y: Pro (hard) -- 403 with the licence line when this environment has no Pro licence.
             if (-not (Test-PimManagerProFeature -Key 'reviews.campaigns' -Response $resp)) { return 403 }
-            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
-            if (-not (Get-Command Set-PimAccessReviewReviewers -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
-                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-            }
             if (-not (Get-Command Set-PimAccessReviewReviewers -ErrorAction SilentlyContinue)) {
                 Write-JsonResponse -Response $resp -Status 500 -Body @{ error = 'access-review library not loaded' }
                 return 500
@@ -12671,10 +12659,6 @@ function Handle-Request {
             }
             # REQ-Y: Pro (hard) -- 403 with the licence line when this environment has no Pro licence.
             if (-not (Test-PimManagerProFeature -Key 'reviews.campaigns' -Response $resp)) { return 403 }
-            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
-            if (-not (Get-Command Send-PimAccessReviewReminders -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
-                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-            }
             $body = Read-RequestJson -Request $req
             $preview = $false
             try { if ("$($body.preview)" -match '(?i)^(1|true|yes)$') { $preview = $true } } catch {}
@@ -12714,10 +12698,6 @@ function Handle-Request {
         # (real shaper) when the live read is unavailable, so the badge is never dead.
         if ($path -eq '/api/access-reviews/overdue' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
-            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
-            if (-not (Get-Command Get-PimAccessReviewOverdue -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
-                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-            }
             $pimOnly = $false
             try { if ($req.Url.Query -and $req.Url.Query.IndexOf('pimManagedOnly=1') -ge 0) { $pimOnly = $true } } catch {}
             $rows = @(); $source = 'unavailable'; $note = ''
@@ -12742,10 +12722,6 @@ function Handle-Request {
             $script:lastHeartbeat = Get-Date
             # REQ-Y: Pro (hard) -- 403 with the licence line when this environment has no Pro licence.
             if (-not (Test-PimManagerProFeature -Key 'reports.evidence' -Response $resp)) { return 403 }
-            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
-            if (-not (Get-Command Get-PimAccessReviewEvidence -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
-                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-            }
             $defId = ''; $instId = ''
             try {
                 $q = $req.Url.Query
@@ -12776,10 +12752,6 @@ function Handle-Request {
         # `note`) -- the seeded sample rows are never shown in a live Manager.
         if ($path -eq '/api/access-reviews' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
-            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
-            if (-not (Get-Command Get-PimAccessReviewOverview -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
-                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-            }
             $pimOnly = $false
             $withCounts = $true
             $forceSeed = $false
@@ -13326,7 +13298,7 @@ function Handle-Request {
         # Manager does not load at boot -- it is dot-sourced into an ISOLATED child scope per call, so no
         # engine function can shadow a Manager one. Get-/Set-PimSetting resolve to the Manager's SQL bridge.
         # 🔴 BUG-261 (§78 live GUI, 2026-09-24): the load USED to be conditional ("if the function is not there yet") --
-        # and after anyone opened Access reviews it was there: /api/access-reviews does Import-Module PIM-Functions.psm1
+        # and after anyone opened Access reviews it was there: /api/access-reviews did Import-Module PIM-Functions.psm1 (gone, §100.42)
         # -Global, which carries PIM-EngineProviders.ps1. The MODULE's Get-PimPolicyMassHold runs in module scope, cannot
         # see the Manager's Get-PimSetting, and returns $null -- so Approvals showed NO held change set for the rest of the
         # process, and nobody could approve one. Always load it here, in the child scope, so this scope's copy wins.
@@ -17723,10 +17695,6 @@ function Handle-Request {
         # -------------------------------------------------------------------
         if ($path -eq '/api/workloads' -and $method -eq 'GET') {
             $script:lastHeartbeat = Get-Date
-            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
-            if (-not (Get-Command Read-PimWorkloadConnectors -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
-                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-            }
             $dir = Join-Path $solutionRoot 'workloads\connectors'
             $list = New-Object System.Collections.ArrayList
             # 100.26 WIZARD-RESOURCE-REQUIRED: a per-row-resource connector says so, with its own format + an example filled in
@@ -17896,10 +17864,6 @@ function Handle-Request {
                     return 200
                 } catch { Write-JsonResponse -Response $resp -Status 503 -Body @{ error = "The custom workload could not be read from the store: $($_.Exception.Message)" }; return 503 }
             }
-            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
-            if (-not (Get-Command Get-PimWorkloadRoles -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
-                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-            }
             $dir = Join-Path $solutionRoot 'workloads\connectors'
             $conn = @(Read-PimWorkloadConnectors -ConnectorsDir $dir) | Where-Object { "$($_.id)" -ieq $wid } | Select-Object -First 1
             if (-not $conn) { Write-JsonResponse -Response $resp -Status 404 -Body @{ error = "unknown workload connector: $wid" }; return 404 }
@@ -17929,10 +17893,9 @@ function Handle-Request {
                 }
             }
             try {
-                # Live tenant call -- requires the app-only connection
-                # (-ConnectPlatform / per-instance connection).
+                # Live tenant call through the REST connector runtime (PIM-Rest.ps1 token; §100.42 no modules).
                 Initialize-PimManagerTenantConnection
-                $roles = @(Get-PimWorkloadRoles -Connector $conn)
+                $roles = @(Get-PimWorkloadConnectorRoles -Connector $conn)
                 Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ id = $wid; roles = $roles })
                 return 200
             } catch {
@@ -17971,10 +17934,6 @@ function Handle-Request {
                 return 501
             }
             try {
-                $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
-                if (-not (Get-Command Read-PimWorkloadConnectors -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
-                    Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                }
                 Initialize-PimManagerTenantConnection
                 $dir = Join-Path $solutionRoot 'workloads\connectors'
                 $written = Update-PimWorkloadCrawlMap -ConnectorsDir $dir
@@ -18836,17 +18795,14 @@ function Handle-Request {
                 # 🔴 §70.20 (operator 2026-09-13: Role lookup said "No role matches 'Exchange Administrator'"). This read
                 # ran ONLY through the Graph PowerShell SDK (Invoke-MgGraphRequest), which the hosted container does not
                 # ship (REST-only) -- so on every hosted Manager the live read was skipped and every role "did not match".
-                # REST first (Invoke-PimGraph, the Manager's own app-only token), the SDK only where it exists.
+                # REST only (Invoke-PimGraph, the Manager's own app-only token) -- §100.42 removed the SDK fallback.
                 $esc = [uri]::EscapeDataString($roleName.Replace("'", "''"))
                 $u = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$filter=displayName eq '$esc'"
                 if (Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) {
                     Initialize-PimManagerTenantConnection
                     $r = Invoke-PimGraph -Method GET -Path $u
                     if ($r.value -and @($r.value).Count -gt 0) { $def = @($r.value)[0] }
-                } elseif (Get-Command Invoke-MgGraphRequest -ErrorAction SilentlyContinue) {
-                    $r = Invoke-MgGraphRequest -Method GET -Uri $u -ErrorAction Stop
-                    if ($r.value -and @($r.value).Count -gt 0) { $def = @($r.value)[0] }
-                }
+                }   # §100.42: REST only (no Invoke-MgGraphRequest fallback)
                 if ($def) {
                     $fmt = Format-PimRolePermissions -RoleDefinition $def
                     Write-JsonResponse -Response $resp -Status 200 -Body ([ordered]@{ ok = $true; matched = $true; role = $roleName; permissions = $fmt }); return 200
@@ -18855,7 +18811,7 @@ function Handle-Request {
                 # against the known role catalog and offer ranked candidates. 200, never 503.
                 $catalog = @(Get-PimRoleCatalogNames)
                 $res = Resolve-PimRoleQuery -Query $roleName -RoleNames $catalog
-                $hasGraph = [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue) -or [bool](Get-Command Invoke-MgGraphRequest -ErrorAction SilentlyContinue)
+                $hasGraph = [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
                 $hint = if (@($res.candidates).Count -gt 0) {
                     "No directory role is named exactly '$roleName'. Pick one of the suggestions, or correct the spelling."
                 } elseif (-not $hasGraph -and @($catalog).Count -eq 0) {
@@ -18888,7 +18844,7 @@ function Handle-Request {
                 $defs = New-Object System.Collections.ArrayList
                 # §70.20: REST first -- the SDK-only read never ran on the hosted Manager (see /api/role-permissions).
                 $hasRest = [bool](Get-Command Invoke-PimGraph -ErrorAction SilentlyContinue)
-                $hasGraph = $hasRest -or [bool](Get-Command Invoke-MgGraphRequest -ErrorAction SilentlyContinue)
+                $hasGraph = $hasRest   # §100.42: REST only
                 if ($hasGraph) {
                     # Page through every directory role definition WITH its permissions.
                     $u = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$select=id,displayName,isBuiltIn,rolePermissions&`$top=200"
@@ -18896,7 +18852,7 @@ function Handle-Request {
                     $guard = 0
                     while ($u -and $guard -lt 50) {
                         $guard++
-                        $r = if ($hasRest) { Invoke-PimGraph -Method GET -Path $u } else { Invoke-MgGraphRequest -Method GET -Uri $u -ErrorAction Stop }
+                        $r = Invoke-PimGraph -Method GET -Path $u
                         foreach ($d in @($r.value)) { [void]$defs.Add($d) }
                         $u = if ($r.'@odata.nextLink') { "$($r.'@odata.nextLink')" } else { $null }
                     }
@@ -18981,10 +18937,6 @@ function Handle-Request {
         # -------------------------------------------------------------------
         if ($path -like '/api/conformance*') {
             $script:lastHeartbeat = Get-Date
-            $shared = Join-Path $PSScriptRoot '..\..\engine\_shared\PIM-Functions.psm1'
-            if (-not (Get-Command Get-PimConformance -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $shared)) {
-                Import-Module $shared -Global -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-            }
             $confTplDir = Join-Path $solutionRoot 'workloads\templates'
             # Applied-version stamps: SQL pim.Settings['ConformanceTemplateState'] (Get-/Set-PimTemplateState) -- no state file.
             $confTenant = "$script:PimInstanceName"
@@ -19050,7 +19002,7 @@ function Handle-Request {
                 try {
                     $dir = Join-Path $solutionRoot 'workloads\connectors'
                     $conn = @(Read-PimWorkloadConnectors -ConnectorsDir $dir) | Where-Object { "$($_.id)" -ieq "$($tpl.workload)" } | Select-Object -First 1
-                    if ($conn) { Initialize-PimManagerTenantConnection; $liveCat = @(Get-PimWorkloadRoles -Connector $conn | ForEach-Object { "$($_.name)" }) }
+                    if ($conn) { Initialize-PimManagerTenantConnection; $liveCat = @(Get-PimWorkloadConnectorRoles -Connector $conn | ForEach-Object { "$($_.name)" }) }
                 } catch { $liveCat = @() }
                 $c = Get-PimConformance -Template $tpl -TenantRing $confRing -TenantId $confTenant -ActiveExemptionKeys $exKeys -LiveCatalog $liveCat -AppliedVersion $applied
                 $statusMap = [ordered]@{}
@@ -19123,9 +19075,8 @@ function Handle-Request {
                 $r = Remove-PimExemptionEntry -Exemptions (& $readEx) -RevokeKey $rk
                 if ($r.Removed -gt 0) {
                     [void](Set-PimManagerConformanceExemptions -Exemptions @($r.Kept))
-                    if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
-                        try { Write-PimAuditEvent -Action 'conformance.exemption.revoke' -Target $rk -After @{ instance = $confTenant; removed = $r.Removed } -Actor 'manager' -WarningAction SilentlyContinue | Out-Null } catch {}
-                    }
+                    # §100.42: the Manager's own audit writer (the engine's Write-PimAuditEvent arrived only with the deleted v1 module).
+                    try { Write-PimManagerAuditEvent -Action 'conformance.exemption.revoke' -Target $rk -After @{ instance = $confTenant; removed = $r.Removed } | Out-Null } catch {}
                 }
                 Write-JsonResponse -Response $resp -Status 200 -Body @{ ok = $true; removed = $r.Removed; count = @($r.Kept).Count }
                 return 200

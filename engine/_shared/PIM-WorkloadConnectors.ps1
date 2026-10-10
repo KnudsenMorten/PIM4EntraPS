@@ -78,6 +78,29 @@ function Get-PimWorkloadConnectorDirectory {
     return (Join-Path (Join-Path $solutionRoot 'workloads') 'connectors')
 }
 
+function Read-PimWorkloadConnectors {
+    <#
+      The SHIPPED connector descriptors in a directory, sorted by file name (no custom workloads, no injection) --
+      the list the Manager's Templates > Workloads picker shows. REQ 100.42: moved here, module-free, from the deleted
+      v1 library (PIM-Functions.psm1), same name and result shape so its callers did not change. A descriptor that
+      does not parse is reported and skipped.
+    #>
+    param([Parameter(Mandatory)][string]$ConnectorsDir)
+    $out = New-Object System.Collections.ArrayList
+    if (-not (Test-Path -LiteralPath $ConnectorsDir)) { return $out.ToArray() }
+    foreach ($f in @(Get-ChildItem -LiteralPath $ConnectorsDir -Filter '*.connector.json' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($f.FullName, (New-Object System.Text.UTF8Encoding($false)))
+            if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+            [void]$out.Add(($raw | ConvertFrom-Json))
+        } catch {
+            Write-Warning ("  [workloads] connector definition {0} could not be parsed: {1}" -f $f.Name, $_.Exception.Message)
+        }
+    }
+    # Plain return (callers collect with @()); a comma-wrap would nest.
+    return $out.ToArray()
+}
+
 function Get-PimWorkloadConnectorCatalog {
     <#
       id (lower-case) -> connector definition. Injected definitions win (tests); otherwise the

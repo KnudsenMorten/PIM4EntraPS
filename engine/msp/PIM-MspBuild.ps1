@@ -535,11 +535,13 @@ function Test-PimMspBuildConfig {
 
 function New-PimMspBuildStep {
     param([string]$Id, [string]$Title, [string]$Script, [hashtable]$Arguments = @{}, [ValidateSet('pwsh','powershell')][string]$HostExe = 'pwsh',
-          [string[]]$Switches = @(), [string]$Why = '', [switch]$CapturesOutput, [switch]$AzPowerShell, [string]$Blocked = '')
+          [string[]]$Switches = @(), [string]$Why = '', [switch]$CapturesOutput, [string]$Blocked = '')
     # 71.33: -Blocked = WHY this step cannot run under the build's identity. The runner never executes (or resolves the
     # placeholders of) a blocked step; it prints the reason, carries on, and ends the build INCOMPLETE (exit 2).
+    # §100.42: there is no Az PowerShell step any more (the -AzPowerShell context was a second connect path + modules); every
+    # step authenticates through PIM-Rest's one token client.
     [pscustomobject]@{ id = $Id; title = $Title; kind = 'script'; script = $Script; args = $Arguments; switches = @(@($Switches) | Where-Object { "$_".Trim() }); host = $HostExe
-                       why = $Why; capturesOutput = [bool]$CapturesOutput; azPowerShell = [bool]$AzPowerShell; blocked = "$Blocked" }
+                       why = $Why; capturesOutput = [bool]$CapturesOutput; blocked = "$Blocked" }
 }
 
 function Resolve-PimMspStepHost {
@@ -639,8 +641,8 @@ function Get-PimMspBuildPlan {
 
     if ($kv -and $bootApp) {
         $steps.Add((New-PimMspBuildStep -Id 'keyvault' -Title 'tenant Key Vault + the bootstrap identity''s read grant' `
-            -Script '..\PlatformConfiguration\INTERNAL\Provision\New-PlatformKeyVault.ps1' `
-            -Arguments @{ VaultName = $kv; ResourceGroup = $rg; Location = $loc; SubscriptionId = $sub; BootstrapAppId = $bootApp } -AzPowerShell `
+            -Script 'tools\setup\New-PimTenantKeyVault.ps1' `
+            -Arguments @{ VaultName = $kv; ResourceGroup = $rg; Location = $loc; SubscriptionId = $sub; BootstrapAppId = $bootApp } `
             -Why 'the bootstrap cert -> vault -> Modern-AppId/Modern-Thumbprint chain (a deleted resource group takes the vault role assignments with it)'))
     }
 

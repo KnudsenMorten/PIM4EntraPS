@@ -418,9 +418,8 @@ Function Test-PimProFeature {
     } elseif (-not ($grant = Get-PimLicenceFeatureGrant -License $lic -FeatureNames @($Feature)).covers) {   # §100.32 / §12.6a: every Pro licence = every single-tenant Pro feature
         $blockReason = "license for '$($lic.Customer)' does not include feature '$Feature' -- $($grant.text) (features: $($lic.Features -join ', '))"
     } else {
-        if (-not $TenantId) {
-            try { $ctx = Get-MgContext -ErrorAction SilentlyContinue; if ($ctx -and $ctx.TenantId) { $TenantId = $ctx.TenantId } } catch { }
-        }
+        # §100.42: no Graph-SDK context fallback -- Resolve-PimLicenseTenantId takes the PIM-Rest tenant (MI home tenant /
+        # $global:PIM_TenantId) when -TenantId is empty.
         $bind = Test-PimLicenseTenantBinding -License $lic -TenantId $TenantId
         if (-not $bind.ok) { $blockReason = "license for '$($lic.Customer)': $($bind.reason)" }
     }

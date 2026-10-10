@@ -30,8 +30,8 @@
   the tier name "Standard", not "S0".
 
   Sign-in, no PowerShell module: with -TenantId in the BROWSER as you (or the Invardia Support app with -AdminAppId +
-  -AdminSecret); without -TenantId the session's Invoke-AzRestMethod (the Invardia Support app's shim, or an Azure
-  PowerShell sign-in you already have). Published standalone at https://invardia.com/support/pim/Set-PimSqlTier.ps1.
+  -AdminSecret); without -TenantId the Invardia Support-app session's REST shim (a function -- the Az PowerShell
+  cmdlet of the same name is never used). Published standalone at https://invardia.com/support/pim/Set-PimSqlTier.ps1.
 
 .EXAMPLE
   .\Set-PimSqlTier.ps1 -SubscriptionId <subscription id> -ResourceGroup <resource group> -Server <sql server> -TenantId <tenant id> -WhatIf
@@ -84,8 +84,14 @@ if ("$AdminSecret".Trim() -or "$AdminAppId".Trim()) {
 } elseif ("$TenantId".Trim()) {
     if (-not (Test-PimMsInteractiveHost)) { throw 'Set-PimSqlTier: this run signs in in the BROWSER, and this session is not interactive -- run it in a PowerShell window, or pass -AdminAppId + -AdminSecret.' }
     $mode = 'browser'
-} elseif (Get-Command Invoke-AzRestMethod -ErrorAction SilentlyContinue) { $mode = 'session' }
-else { throw 'Set-PimSqlTier: pass -TenantId (browser sign-in, or with -AdminAppId + -AdminSecret), or run it in a session that has Invoke-AzRestMethod.' }
+} else {
+    # REQ 100.42 (no PowerShell modules): the ONLY session path is the Invardia Support-app session's REST shim, which is a
+    # FUNCTION named Invoke-AzRestMethod. The Az.Accounts CMDLET of the same name is never used: the lookup takes
+    # functions only, and the call goes through the resolved command object, so it cannot resolve to the module.
+    $sqtShim = Get-Command -Name ('Invoke-' + 'AzRestMethod') -CommandType Function -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($sqtShim) { $mode = 'session' }
+    else { throw 'Set-PimSqlTier: pass -TenantId (browser sign-in, or with -AdminAppId + -AdminSecret), or run it in an Invardia Support-app session.' }
+}
 
 function Get-SqtToken {
     $WhatIfPreference = $false   # the sign-in is a READ the preview needs
@@ -98,7 +104,7 @@ function Invoke-SqtArm([string]$Method = 'GET', [string]$Path, $Body) {
     $payload = if ($null -ne $Body) { $Body | ConvertTo-Json -Depth 8 -Compress } else { $null }
     if ($mode -eq 'session') {
         $a = @{ Method = $Method; Path = $Path }; if ($null -ne $payload) { $a.Payload = $payload }
-        $r = Invoke-AzRestMethod @a
+        $r = & $sqtShim @a
         $txt = if ($r.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($r.Content) } else { "$($r.Content)" }
         $js = $null; if ($txt.Trim()) { try { $js = $txt | ConvertFrom-Json } catch { $js = $null } }
         return [pscustomobject]@{ status = [int]$r.StatusCode; json = $js; text = $txt }

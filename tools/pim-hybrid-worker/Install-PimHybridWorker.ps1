@@ -8,7 +8,7 @@
 
     -Phase Join       Offline domain join from the blob Initialize-PimHybridWorkerAd.ps1 -ProvisionOdj printed, then reboot.
                       The blob file is deleted before the join returns; nothing else keeps it.
-    -Phase Configure  (after the reboot) RSAT-AD PowerShell; PowerShell 7 (MSI signature checked); the gMSA installed and
+    -Phase Configure  (after the reboot) PowerShell 7 (MSI signature checked); the gMSA installed and
                       TESTED -- a worker that cannot use its gMSA fails HERE, not at 03:00; "log on as a batch job" for the
                       gMSA only; C:\PIM locked down (only SYSTEM / Administrators write the code the gMSA runs -- the default
                       C:\ ACL lets any signed-in user modify files below it, which on a Tier-0 box is an escalation path);
@@ -282,9 +282,40 @@ $nl = & nltest.exe "/sc_change_pwd:$dnsDomain" 2>&1
 if ($LASTEXITCODE -eq 0) { Step 'machine password changed (the join blob is worthless now)' }
 else { Write-Warning "machine password change failed ($LASTEXITCODE): $($nl -join ' ') -- it changes by itself within 30 days; the blob stays valid until then" }
 Get-ChildItem 'C:\Packages\Plugins\Microsoft.CPlat.Core.RunCommandWindows' -Recurse -Filter 'script*.ps1' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-Step 'RSAT: ActiveDirectory PowerShell module'
-if (-not (Get-WindowsFeature RSAT-AD-PowerShell).Installed) { Install-WindowsFeature RSAT-AD-PowerShell | Out-Null }
-Import-Module ActiveDirectory
+# REQ 100.42 (owner 2026-10-09): no ActiveDirectory module on the worker. The runtime (engine/hybrid-ad) talks LDAP through
+# .NET System.DirectoryServices.Protocols, and the gMSA install + test below are logoncli.dll calls -- so RSAT-AD-PowerShell
+# is no longer installed. (GroupPolicy / GPMC is needed only where Initialize-PimHybridWorkerAd creates the servers GPO.)
+# Install-ADServiceAccount / Test-ADServiceAccount without the module: they are thin wrappers over the Netlogon client API
+# (logoncli.dll NetAddServiceAccount / NetIsServiceAccount), called here directly through .NET P/Invoke.
+function Initialize-PimMsaInterop {
+    if ('PimMsaInterop' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class PimMsaInterop {
+    [DllImport("logoncli.dll", CharSet = CharSet.Unicode)]
+    public static extern int NetAddServiceAccount(string ServerName, string AccountName, string Password, int Flags);
+    [DllImport("logoncli.dll", CharSet = CharSet.Unicode)]
+    public static extern int NetIsServiceAccount(string ServerName, string AccountName, [MarshalAs(UnmanagedType.Bool)] out bool IsService);
+}
+'@
+}
+function Install-PimGmsaOnHost([string]$Sam) {
+    # Flags 0 = a group MSA (1 would be LINK_TO_HOST_ONLY, the standalone-MSA case). Tried as given, then with the '$'.
+    Initialize-PimMsaInterop
+    $rc = [PimMsaInterop]::NetAddServiceAccount($null, $Sam, $null, 0)
+    if ($rc -ne 0) { $rc = [PimMsaInterop]::NetAddServiceAccount($null, "$Sam`$", $null, 0) }
+    if ($rc -ne 0) { throw ("NetAddServiceAccount {0} failed (NTSTATUS 0x{1:X8}) -- is this computer in {0}-PrincipalsAllowedAccess? (reboot after adding it)" -f $Sam, $rc) }
+}
+function Test-PimGmsaOnHost([string]$Sam) {
+    Initialize-PimMsaInterop
+    foreach ($n in @($Sam, "$Sam`$")) {
+        $ok = $false
+        $rc = [PimMsaInterop]::NetIsServiceAccount($null, $n, [ref]$ok)
+        if ($rc -eq 0 -and $ok) { return $true }
+    }
+    return $false
+}
 
 $pwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
 if (-not (Test-Path $pwsh)) {
@@ -306,8 +337,8 @@ $sids = @()
 foreach ($g in @($cfg.gmsa, $cfg.serverGmsa) | Where-Object { "$_".Trim() }) {
     Step "gMSA $g`$"
     $sam = ($g -split '\\')[1]
-    Install-ADServiceAccount -Identity $sam
-    if (-not (Test-ADServiceAccount -Identity $sam)) { throw "Test-ADServiceAccount $sam = FALSE -- is this computer in $sam-PrincipalsAllowedAccess? (reboot after adding it)" }
+    Install-PimGmsaOnHost -Sam $sam
+    if (-not (Test-PimGmsaOnHost -Sam $sam)) { throw "gMSA test $sam = FALSE -- is this computer in $sam-PrincipalsAllowedAccess? (reboot after adding it)" }
     $sids += (New-Object System.Security.Principal.NTAccount("$g`$")).Translate([System.Security.Principal.SecurityIdentifier]).Value
 }
 

@@ -21,9 +21,7 @@
       4. -WhatIfMode (default ON): print the plan only.
          Live: provision the ID accounts over PURE REST
          (Invoke-PimRestAccountApply -> New-PimRestAdminAccount, Graph
-         /users create+update). Set $global:PIM_UseGraphSdk = $true to fall
-         back to the legacy Graph-SDK engine path
-         (CreateUpdate-Accounts-From-file-CSV -OnlyID) instead.
+         /users create+update). REST only (§100.42).
 
     The whole fan-out path -- auth, directory reads AND the live account
     write -- is now pure REST (no Microsoft.Graph module). REQUIREMENTS.md §19
@@ -41,8 +39,7 @@
     Default: PimPlatform.
 
 .PARAMETER UseAzureSql
-    Connect to Azure SQL with an Entra access token from the current Az
-    context instead of Windows auth. -ServerInstance must then be the
+    Connect to Azure SQL with an Entra access token (minted by PIM-Rest) instead of Windows auth. -ServerInstance must then be the
     full FQDN (xxx.database.windows.net).
 
 .PARAMETER WhatIfMode
@@ -76,39 +73,16 @@ $shared = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\_shared'
 . (Join-Path $shared 'PIM-Rest.ps1')
 . (Join-Path $shared 'PIM-AccountRest.ps1')
 
-# CRITICAL process-hygiene rule: the SqlServer module (and Az.Accounts) bundle
-# an OLDER Azure.Core than the Microsoft Graph SDK -- loading them into the
-# same process before Connect-MgGraph breaks app-only auth with
-# "Method not found: Azure.Core.TokenRequestContext..ctor". All SQL access
-# therefore runs in a CHILD process; this process only ever loads Graph (+ the
-# engine module, after Graph, in live mode).
+# §100.42 (no PowerShell modules): the registry is read IN PROCESS over raw ADO.NET (PIM-SqlStore.ps1 Invoke-PimSqlQuery).
+# It used to run a CHILD powershell.exe with `Import-Module SqlServer` + Az.Accounts Get-AzAccessToken + Invoke-Sqlcmd,
+# invisible to the module scan because it was a here-string. Azure SQL gets its Entra token from PIM-Rest (the one
+# connect path), set on the connection by New-PimSqlConnection; a non-Azure server uses Windows integrated auth.
+. (Join-Path $shared 'PIM-SqlStore.ps1')
 function Get-PimRegistryRows {
     param([Parameter(Mandatory)][string]$Query)
-    $child = @"
-`$ErrorActionPreference = 'Stop'
-Import-Module SqlServer
-`$sqlArgs = @{ ServerInstance = '$ServerInstance'; Database = '$Database' }
-if ('$UseAzureSql' -eq 'True') {
-    `$tok = (Get-AzAccessToken -ResourceUrl 'https://database.windows.net/').Token
-    if (`$tok -is [securestring]) { `$tok = [System.Net.NetworkCredential]::new('', `$tok).Password }
-    `$sqlArgs['AccessToken'] = `$tok
-} else {
-    `$sqlArgs['TrustServerCertificate'] = `$true
-}
-`$rows = Invoke-Sqlcmd @sqlArgs -Query @'
-$Query
-'@
-`$rows | Select-Object * -ExcludeProperty ItemArray, Table, RowError, RowState, HasErrors | ConvertTo-Json -Depth 4 -Compress
-"@
-    $tmp = Join-Path $env:TEMP ("pim-sqlchild-" + [guid]::NewGuid().ToString('N') + '.ps1')
-    Set-Content -Path $tmp -Value $child -Encoding UTF8
-    try {
-        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tmp 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "registry query child process failed: $($out -join "`n")" }
-        $json = ($out | Where-Object { "$_".TrimStart().StartsWith('[') -or "$_".TrimStart().StartsWith('{') } | Select-Object -Last 1)
-        if (-not $json) { return @() }
-        @($json | ConvertFrom-Json)
-    } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    $cs = if ($UseAzureSql) { Get-PimAzureSqlConnectionString -Fqdn $ServerInstance -Database $Database }
+          else { "Server=$ServerInstance;Database=$Database;Integrated Security=True;TrustServerCertificate=True;Connect Timeout=30" }
+    @(Invoke-PimSqlQuery -ConnectionString $cs -Sql $Query)
 }
 
 Write-Host ""
@@ -273,34 +247,13 @@ foreach ($grp in $byTenant) {
         continue
     }
 
-    # LIVE: provision the ID accounts. Default = pure REST writer
-    # (New-PimRestAdminAccount over Invoke-PimGraph). Opt INTO the legacy
-    # Graph-SDK engine (CreateUpdate-Accounts-From-file-CSV) only when the
-    # caller sets $global:PIM_UseGraphSdk = $true (e.g. to use the EXO
-    # Set-Mailbox forwarding path or the AD/hybrid branch).
+    # LIVE: provision the ID accounts -- pure REST writer (New-PimRestAdminAccount over Invoke-PimGraph). §100.42: the
+    # $global:PIM_UseGraphSdk opt-in into the v1 Graph-SDK account engine (and the v1 module library it loaded) is
+    # gone. The UPNs are already resolved on each row above.
     try {
-        if ($global:PIM_UseGraphSdk) {
-            Write-Host "  [legacy] PIM_UseGraphSdk=$true -- using the Graph-SDK engine path." -ForegroundColor DarkYellow
-            $tmpCsv = Join-Path $env:TEMP ("pim-fanout-{0}.csv" -f $t.TenantId)
-            $rows | Export-Csv -Path $tmpCsv -Delimiter ';' -Encoding UTF8 -NoTypeInformation
-            try {
-                if (-not (Get-Command CreateUpdate-Accounts-From-file-CSV -ErrorAction SilentlyContinue)) {
-                    Import-Module (Join-Path $shared 'PIM-Functions.psm1') -Force -DisableNameChecking
-                }
-                $global:PIM_TenantRing   = [int]$t.TenantRing
-                $global:DefaultDomainUPN = $defaultDomain
-                $global:WhatIfMode       = $false
-                CreateUpdate-Accounts-From-file-CSV -AccountsDefinitionFile $tmpCsv -OnlyID
-            } finally {
-                Remove-Item $tmpCsv -Force -ErrorAction SilentlyContinue
-                $global:DefaultDomainUPN = $null
-            }
-        } else {
-            # pure REST: the UPNs are already resolved on each row above.
-            $applied = @(Invoke-PimRestAccountApply -Rows $rows)
-            $bad = @($applied | Where-Object { "$($_.Action)" -like 'failed:*' })
-            if ($bad.Count) { throw ("{0} of {1} account(s) failed: {2}" -f $bad.Count, $applied.Count, (($bad | ForEach-Object { "$($_.Upn) ($($_.Action))" }) -join '; ')) }
-        }
+        $applied = @(Invoke-PimRestAccountApply -Rows $rows)
+        $bad = @($applied | Where-Object { "$($_.Action)" -like 'failed:*' })
+        if ($bad.Count) { throw ("{0} of {1} account(s) failed: {2}" -f $bad.Count, $applied.Count, (($bad | ForEach-Object { "$($_.Upn) ($($_.Action))" }) -join '; ')) }
         $results += [pscustomobject]@{ Tenant = $t.TenantName; Status = 'applied'; Admins = @($rows).Count }
         if (Get-Command Write-PimAuditEvent -ErrorAction SilentlyContinue) {
             Write-PimAuditEvent -Action 'msp.fanout.apply' -Target $t.TenantName -After @{ tenantId = "$($t.TenantId)"; admins = @($rows | ForEach-Object { $_.UserPrincipalName }) }

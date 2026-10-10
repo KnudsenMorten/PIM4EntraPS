@@ -370,6 +370,7 @@ function Get-PimRestToken {
           elseif ($UseManagedIdentity -or $global:PIM_UseManagedIdentity -or ($env:IDENTITY_ENDPOINT -and -not $cid)) { 'mi' }
           elseif ($sec) { 'secret' }
           elseif ($cert) { "cert:$thumb" }
+          elseif ($global:PIM_TokenProvider -is [scriptblock]) { 'signed-in' }
           else { 'unknown' }
   $key = ("$aud|$tenant|$cid|$mode").ToLowerInvariant()
   # same cross-scope guard as Resolve-PimRestResource: an unseeded cache must mean "cache
@@ -437,40 +438,35 @@ function Get-PimRestToken {
            'principal succeeds and then fails far away as a permissions error.')
   }
 
-  if (-not $res) {
-    # dev convenience: reuse an existing az session. Only reached when NO explicit identity was
-    # requested (see the refusal above), so this is genuinely "whoever the operator is".
-    try {
-      # 🔒 --tenant is not optional. Without it az answers for its DEFAULT context, which on a
-      # machine logged into several directories is a coin flip -- and on this one it lands on a
-      # different company's tenant.
-      $azArgs = @('account','get-access-token','--resource',$aud,'-o','json')
-      if ("$tenant".Trim()) { $azArgs += @('--tenant', "$tenant") }
-      $j = & az @azArgs 2>$null | ConvertFrom-Json
-      if ($j.accessToken) {
-        # 🔒 AND VERIFY IT. Asking for a tenant is not the same as being given one; the whole
-        # defect was trusting a token nobody had looked at. A mismatch is discarded, not used.
-        $claimed = Get-PimTokenTenantId -Token "$($j.accessToken)"
-        if ("$tenant".Trim() -and $claimed -and ($claimed -ne "$tenant".Trim().ToLowerInvariant())) {
-          Write-Warning ("  [rest] DISCARDED an az token for '$Resource': it belongs to tenant $claimed, not the requested $tenant.")
-        } else {
-          $exp = (Get-Date).ToUniversalTime().AddMinutes(50)
-          try { $exp = ([datetime]$j.expiresOn).ToUniversalTime() } catch {}
-          $res = [pscustomobject]@{ token = $j.accessToken; expiresUtc = $exp }
-        }
+  # §100.42 / framework §12.17 (owner 2026-10-09: "modern single connect only"): the az CLI fallback
+  # (`az account get-access-token`, "reuse whoever is signed in to az") is GONE. A signed-in setup run does not borrow an
+  # az session any more: tools\setup\_PimSignedIn.ps1 (Set-PimSignedInGlobals) REGISTERS its token source here --
+  # the Invardia Support-app session's Get-InvardiaSupportToken when that session is open in the shell, otherwise the
+  # person's own browser sign-in (Get-PimInteractiveToken, auth-code + PKCE). Only reached when NO explicit identity
+  # was requested (the refusal above still throws for one that cannot be honoured).
+  if (-not $res -and ($global:PIM_TokenProvider -is [scriptblock])) {
+    $pt = $null
+    try { $pt = & $global:PIM_TokenProvider $aud $tenant } catch { throw "PIM-Rest: the signed-in token source failed for '$Resource': $($_.Exception.Message)" }
+    if ($pt -is [string]) { $pt = [pscustomobject]@{ token = $pt; expiresUtc = (Get-Date).ToUniversalTime().AddMinutes(30) } }
+    if ($pt -and "$($pt.token)".Trim()) {
+      # 🔒 VERIFY IT (SEC-12): asking for a tenant is not the same as being given one.
+      $claimed = Get-PimTokenTenantId -Token "$($pt.token)"
+      if ("$tenant".Trim() -and $claimed -and ($claimed -ne "$tenant".Trim().ToLowerInvariant())) {
+        throw "PIM-Rest: REFUSED a signed-in token for '$Resource': it belongs to tenant $claimed, not the requested $tenant."
       }
-    } catch {}
+      $res = $pt
+    }
   }
   # LAST-RESORT interactive prompt — ONLY when an attended caller opts in via
   # $global:PIM_InteractiveFallback (the interactive admin tools set this; the engine /
   # headless cron NEVER does, so an unattended run still fails fast instead of hanging on
   # a browser prompt). This is what makes the admin deploy scripts "just sign me in" when
-  # no MI/secret/cert/az session is available, rather than throwing.
+  # no MI/secret/cert token is available, rather than throwing.
   if (-not $res -and $global:PIM_InteractiveFallback) {
-    Write-Host "PIM-Rest: no MI/secret/cert/az token for '$Resource' -- falling back to interactive sign-in..." -ForegroundColor Yellow
+    Write-Host "PIM-Rest: no MI/secret/cert token for '$Resource' -- falling back to interactive sign-in..." -ForegroundColor Yellow
     try { $res = Get-PimInteractiveToken -Audience $aud -TenantId $tenant } catch { Write-Verbose "PIM-Rest interactive fallback failed for ${Resource}: $($_.Exception.Message)" }
   }
-  if (-not $res) { throw "PIM-Rest: could not acquire a token for '$Resource'. Provide MI, ClientId+Secret/Cert (+TenantId), -Interactive (break-glass), or run az login." }
+  if (-not $res) { throw "PIM-Rest: could not acquire a token for '$Resource'. Provide a managed identity, ClientId + certificate (+TenantId), the Invardia Support-app session, or -Interactive (browser sign-in)." }
 
   $script:PimTokenCache[$key] = $res
   return $res.token

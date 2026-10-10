@@ -488,11 +488,8 @@ try {
             if (-not (Test-Path -LiteralPath $scriptPath)) { throw "step '$($s.id)': script not found: $scriptPath" }
             $argsFile = Join-Path $runDir "$($s.id).args.json"; $outFile = Join-Path $runDir "$($s.id).out"
             $spec = [ordered]@{ args = $argsOut; switches = @($s.switches); globals = $globals }
-            if ($authMode -eq 'SignedIn') {
-                $spec['signedIn'] = @{ tenantId = "$($config.tenantId)" }
-                if ($s.azPowerShell) { $spec['azPowerShell'] = @{ mode = 'signedIn'; tenantId = "$($config.tenantId)"; subscriptionId = "$($config.subscriptionId)" } }
-            }
-            elseif ($s.azPowerShell) { $spec['azPowerShell'] = @{ tenantId = "$($config.tenantId)"; clientId = "$($config.deployIdentity.clientId)"; certThumbprint = "$($config.deployIdentity.certThumbprint)"; subscriptionId = "$($config.subscriptionId)" } }
+            # §100.42: no step gets an Az PowerShell context any more -- every step authenticates through PIM-Rest.
+            if ($authMode -eq 'SignedIn') { $spec['signedIn'] = @{ tenantId = "$($config.tenantId)" } }
             $spec | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $argsFile -Encoding UTF8
             # PIM 99 (Cloud Shell): 'powershell' is a preference -- Windows PowerShell where the host has it (Windows, unchanged),
             # pwsh where it does not (Azure Cloud Shell, the guided install of a managed tenant).

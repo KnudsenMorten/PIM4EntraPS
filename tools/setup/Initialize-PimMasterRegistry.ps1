@@ -68,7 +68,19 @@ if ("$($global:PIM_TenantId)".Trim() -and $claims.tid -ne $global:PIM_TenantId) 
     throw "token tenant '$($claims.tid)' != requested '$($global:PIM_TenantId)' -- refusing to apply DDL to $SqlServer."
 }
 Note "token verified: tid=$($claims.tid) appid=$($claims.appid)"
-function Q($sql) { Invoke-Sqlcmd -ServerInstance $SqlServer -Database $Database -AccessToken $tok -Encrypt Mandatory -Query $sql -ErrorAction Stop }
+# REQ 100.42 (no PowerShell modules): raw ADO.NET with the PIM-Rest token -- this was Invoke-Sqlcmd (the SqlServer module).
+# Rows come back like Invoke-Sqlcmd's (a NULL column is [DBNull]::Value), so every caller below reads them unchanged.
+if (-not (Get-Command Resolve-PimSqlClientType -ErrorAction SilentlyContinue)) { . (Join-Path $solRoot 'engine\_shared\PIM-SqlStore.ps1') }
+function Q($sql) {
+    $c = (Resolve-PimSqlClientType)::new("Server=tcp:$SqlServer,1433;Database=$Database;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30")
+    $c.AccessToken = $tok
+    try {
+        $c.Open(); $cmd = $c.CreateCommand(); $cmd.CommandText = $sql; $cmd.CommandTimeout = 300
+        $rd = $cmd.ExecuteReader(); $rows = New-Object System.Collections.Generic.List[object]
+        do { while ($rd.Read()) { $o = [ordered]@{}; for ($i = 0; $i -lt $rd.FieldCount; $i++) { $o[$rd.GetName($i)] = $rd.GetValue($i) }; $rows.Add([pscustomobject]$o) } } while ($rd.NextResult())
+        $rd.Close(); return $rows.ToArray()
+    } finally { $c.Dispose() }
+}
 
 # --- apply, batch by batch --------------------------------------------------------------
 $text    = Get-Content -LiteralPath $SchemaPath -Raw
