@@ -187,7 +187,11 @@ function Set-PimManagerIngressGate {
             }
             # A refused write is not reported here: the READ-BACK below decides (as the az path did).
             $gateApp = "$App"; $gateRg = "$ResourceGroup"   # locals, so the closure below captures them
-            try {
+            # 2026-10-10 (a customer's fresh install): the write came seconds after the app was created and ARM refused it as
+            # busy (409 OperationInProgress); the refusal was swallowed and only the empty read-back surfaced. Now: wait out a
+            # busy app (Invoke-PimArmBusyRetry, bounded) and keep the write's own error for the reason.
+            $global:PimGateWriteError = ''
+            $gateWrite = {
                 Set-PimArmAcaAppConfiguration -SubscriptionId $Sub -ResourceGroup $gateRg -Name $gateApp -Mutate {
                     param($cfg)
                     $ing = $cfg.ingress
@@ -197,7 +201,10 @@ function Set-PimManagerIngressGate {
                     if ($Op -eq 'add') { $keep += [pscustomobject]@{ name = "$($Arg.name)"; description = "$($Arg.description)"; ipAddressRange = "$($Arg.ipAddress)"; action = "$($Arg.action)" } }
                     $ing | Add-Member -NotePropertyName ipSecurityRestrictions -NotePropertyValue @($keep) -Force
                 }.GetNewClosure() | Out-Null
-            } catch { Write-Verbose "ingress access-restriction $Op on $gateApp refused: $($_.Exception.Message)" }
+            }.GetNewClosure()
+            try {
+                if (Get-Command Invoke-PimArmBusyRetry -ErrorAction SilentlyContinue) { [void](Invoke-PimArmBusyRetry -Write $gateWrite) } else { [void](& $gateWrite) }
+            } catch { $global:PimGateWriteError = "$($_.Exception.Message)"; Write-Verbose "ingress access-restriction $Op on $gateApp refused: $($global:PimGateWriteError)" }
         }
     }
     $spec = Get-PimManagerGateRuleSpec
@@ -209,8 +216,11 @@ function Set-PimManagerIngressGate {
     if ($Mode -eq 'Close') { [void](& $Io 'add' $spec $SubscriptionId) }
     else { [void](& $Io 'remove' $spec.name $SubscriptionId) }
     $after = & $read
+    # the change lands with a new revision: read back for up to ~60 s before calling it failed
+    for ($w = 0; $w -lt 6 -and $after.state -ne $want -and -not "$($global:PimGateWriteError)".Trim(); $w++) { Start-Sleep -Seconds 10; $after = & $read }
     if ($after.state -ne $want) {
         $why = $(if ($after.state -eq 'unknown') { $after.reason } else { "the rule list reads [$(@($after.rules) -join ', ')] after the $($Mode.ToLowerInvariant())" })
+        if ("$($global:PimGateWriteError)".Trim()) { $why += " -- the write was refused: $($global:PimGateWriteError)" }
         return @{ ok = $false; changed = $false; state = $after.state; rules = $after.rules; reason = $why }
     }
     return @{ ok = $true; changed = $true; state = $want; rules = $after.rules; reason = '' }
@@ -310,7 +320,7 @@ if ($CloseIngressOnly) {
         $result.reason = "could not close the Manager's ingress: $($g.reason)"
         Write-ResultFile
         throw ("Set-PimManagerEasyAuth: $($result.reason). An app that cannot be closed must not be exposed -- " +
-               "keep its ingress internal (az containerapp ingress update --type internal) until this succeeds.")
+               "resume the installation (it closes the ingress first), or run Set-PimManagerEasyAuth.ps1 -CloseIngressOnly -App $App -ResourceGroup $ResourceGroup -SubscriptionId $SubscriptionId -TenantId <tenant>.")
     }
     Note ("ingress CLOSED: access restriction '$((Get-PimManagerGateRuleSpec).name)' " + $(if ($g.changed) { 'applied and read back' } else { 'already in place' }) +
           " -- nobody can reach the Manager until this script has put Easy Auth in front of it and opened it.")
@@ -561,7 +571,7 @@ if ($PSCmdlet.ShouldProcess($App, 'ensure the Easy Auth client secret')) {
                    Where-Object { $_.properties.active } | ForEach-Object { "$($_.name)".Trim() } | Where-Object { $_ } | Select-Object -First 1)".Trim()
         if (-not $rev) {
             $result.reason = 'the secret was rotated but the active revision could not be found, so nothing was restarted -- the Manager still signs in with the OLD secret (which is still valid)'
-            Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason). Restart it: az containerapp revision restart -g $ResourceGroup -n $App --revision <active revision>"
+            Write-ResultFile; throw "Set-PimManagerEasyAuth: $($result.reason). Restart it: Azure portal > Container Apps > $App > Revisions and replicas > Restart, or resume the installation"
         }
         $replicasBefore = @(Get-PimArmAcaReplicas -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $App -Revision $rev)
         $restartExit = 0
@@ -1066,7 +1076,7 @@ if (-not $WhatIfPreference) {
         $result.reason = "Easy Auth is configured, but the Manager could not be opened: $($gate.reason)"
         Write-ResultFile
         throw ("Set-PimManagerEasyAuth: $($result.reason). It stays CLOSED (safe). Re-run this script, or remove the rule " +
-               "by hand once you have checked Easy Auth: az containerapp ingress access-restriction remove -g $ResourceGroup -n $App --rule-name $((Get-PimManagerGateRuleSpec).name)")
+               "by hand once you have checked Easy Auth: Azure portal > Container Apps > $App > Ingress > IP restrictions, delete the rule $((Get-PimManagerGateRuleSpec).name)")
     }
     Note $(if ($gate.changed) { 'OPENED: the closing access restriction was removed and read back' } else { 'nothing to open (the closing access restriction is not on this app)' })
     if (@($gate.rules).Count) { Note "access restrictions still in force (yours, untouched): $(@($gate.rules) -join ', ')" }
