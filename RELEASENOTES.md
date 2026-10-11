@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.591 -- 2026-10-11
+
+- Installer: Azure rights inherited from a management group (e.g. Contributor + User Access Administrator at the tenant root) are counted -- the preflight no longer asks for Owner when they are there
+
 ## 2.4.590 -- 2026-10-11
 
 - Installer: a new tenant's hosting step no longer fails with 'Login failed' at SQL -- the SQL sign-in is made after the new SQL server's admin is set (each step gets a refresh token, not a pre-minted SQL token), and a refused login is retried for about two minutes
