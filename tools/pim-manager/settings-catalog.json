@@ -2357,7 +2357,7 @@
       "confirmOff": false,
       "info": {
         "what": "The policy template the engine applies to the PIM for Groups policy of every group PIM manages whose definition leaves the policy template blank. The template sets how long an activation lasts, what is required to activate (for example MFA, justification) and whether approval is needed.",
-        "enabled": "When set: on its next run the engine compares each such group's live member policy with the chosen template and updates the ones that differ. Only groups PIM manages are touched. A run that would weaken more than 3 policy settings is held by the policy mass-change guard until approved; many changes that weaken nothing are a warning in the daily data quality alert.",
+        "enabled": "When set: on its next run the engine compares each such group's live member policy with the chosen template and updates the ones that differ. Only groups PIM manages are touched. Large policy changes in one run are held by the policy mass-change guard until approved.",
         "disabled": "At the built-in default: these groups follow Groups_Standard.",
         "risk": "Picking a weaker template weakens activation rules on many groups at once; picking one that requires approval makes every such activation wait for an approver. Reversible: pick the previous template; the next run puts the old rules back.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for PIM for Groups. The engine needs RoleManagementPolicy.ReadWrite.AzureADGroup.",
@@ -2377,7 +2377,7 @@
       "confirmOff": false,
       "info": {
         "what": "The policy template the engine applies to the Entra ID role policy of every role your delegations assign (to groups, in administrative units, or directly) when the row leaves the policy template blank. If two rows name the same role with different templates, the one requiring approval wins.",
-        "enabled": "When set: on its next run the engine updates each such role's PIM policy (activation length, activation checks, approval) to match the chosen template. Only roles a delegation names are touched. A run that would weaken more than 3 policy settings is held by the policy mass-change guard until approved; many changes that weaken nothing are a warning in the daily data quality alert.",
+        "enabled": "When set: on its next run the engine updates each such role's PIM policy (activation length, activation checks, approval) to match the chosen template. Only roles a delegation names are touched. A large change in one run is held by the policy mass-change guard until approved.",
         "disabled": "At the built-in default: these roles follow EntraIDRoles_Standard.",
         "risk": "A role policy applies to everyone who holds that role in the tenant, not only PIM's groups. A weaker template weakens it for all of them. Reversible: pick the previous template; the next run restores the old rules.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for Entra ID roles. The engine needs RoleManagementPolicy.ReadWrite.Directory.",
@@ -2397,7 +2397,7 @@
       "confirmOff": false,
       "info": {
         "what": "The policy template the engine applies to the PIM policy of each Azure role and scope pair your Azure delegations assign when the row leaves the policy template blank. If two rows name the same pair with different templates, the one requiring approval wins.",
-        "enabled": "When set: on its next run the engine updates the role policy on each such scope (activation length, activation checks, approval) to match the chosen template. Only role and scope pairs a delegation names are touched. More than 3 weakening changes in one run trip the Azure policy breaker and wait for approval; many changes that weaken nothing are a warning in the daily data quality alert.",
+        "enabled": "When set: on its next run the engine updates the role policy on each such scope (activation length, activation checks, approval) to match the chosen template. Only role and scope pairs a delegation names are touched. Too many or too many weakening changes in one run trip the Azure policy breaker and wait for approval.",
         "disabled": "At the built-in default: these pairs follow AzureRoles_Standard (the same rules as the Entra role standard).",
         "risk": "An Azure role policy applies to everyone eligible for that role on that scope. A weaker template weakens it for all of them. Reversible: pick the previous template; the next run restores the old rules.",
         "requires": "SuperAdmin to change it. Free (Community) and Pro. The template must exist and be written for Azure resource roles. The engine's identity needs a role that may change role management policies on those scopes (for example User Access Administrator or Owner).",

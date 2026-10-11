@@ -486,9 +486,10 @@ deployment is a supported choice) and no credentials lying around.
 - **Blocks only what cannot heal; warns about the rest.** 🟡 Built, not released yet. A safety guard
   now stops a run only where the damage would not fix itself — for example a change that would remove
   the tenant's **last Global Administrator** (held until a SuperAdmin releases exactly that change), or
-  the **last PIM Manager SuperAdmin** (refused: add another one first), or policy changes that weaken
-  more than three settings at once. Everything else is a warning: many policy changes that weaken
-  nothing apply straight away, and anything that looks different from the last runs (each area's key
+  the **last PIM Manager SuperAdmin** (refused: add another one first), or **many policy changes in
+  one run** (more than 25 policies, more than a quarter of them, or more than three weakened settings:
+  held until a SuperAdmin of the tenant approves the change set). Everything else is a warning:
+  anything that looks different from the last runs (each area's key
   numbers compared with the median of its last three runs) is collected into **one daily "Data quality
   alert" mail** that names the likely cause from the settings change log and the fix. Form mistakes are
   plain form errors, and platform problems (database, licence) are reported to support as telemetry —

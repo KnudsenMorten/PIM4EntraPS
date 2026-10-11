@@ -5433,8 +5433,8 @@ $script:PimAzResPolicyStandardRuleIds = @(
 # EntraIDRoles_Standard while a store does not hold AzureRoles_Standard yet.
 $script:PimAzResPolicyDefaultTemplate = 'AzureRoles_Standard'
 # Breaker defaults (pim.Settings 'AzResPolicyBreaker' overrides each key). The percentage only applies
-# once at least this many policies were checked, so a tiny estate is not warned about by a ratio.
-# PIM 100.72 (1): MaxChanges / MaxPercent WARN (daily data-quality mail); only MaxWeakening holds (+ approval).
+# once at least this many policies were checked, so a tiny estate is not blocked by a ratio.
+# PIM 100.82: every trigger HOLDS until a SuperAdmin of the tenant approves (2.4.594 only warned on count / percent).
 $script:PimAzResPolicyBreakerDefaults = @{ MaxChanges = 25; MaxPercent = 25; MaxWeakening = 3 }
 $script:PimAzResPolicyBreakerMinCheckedForPercent = 8
 $script:PimAzResPolicyApprovalValidHours = 24
@@ -6152,10 +6152,11 @@ function Test-PimPolicyBreaker {
     <#
       PURE. The mass-change circuit breaker -- same decision shape as Test-PimDisablePassAllowed:
         { allowed; abort (= hold); tripped; reason; warnings; ... }
-      PIM 100.72 (1) (owner 2026-10-11, framework 12.21): ONLY W > MaxWeakening trips (a HOLD: write nothing) unless an
-      UNEXPIRED approval covers it. N > MaxChanges and (T >= 8 and N/T > MaxPercent %) fire on pure template alignment and
-      heal by themselves -- they are WARNINGS (warnings = @('max-changes' / 'max-percent'), warningReason), never a hold;
-      the caller hands them to the daily "Data quality alert".
+      Trips when N > MaxChanges, OR (T >= 8 and N/T > MaxPercent %), OR W > MaxWeakening. A trip is a HOLD (write
+      nothing) unless an UNEXPIRED approval covers it -- given by a SuperAdmin of the tenant in PIM Manager.
+      PIM 100.82 (owner 2026-10-11: "super admin per tenant must approve mass changes" / "move policy break back to be a
+      guard rail"): 2.4.594 had made the count / percent triggers a warning (100.72 (1)); that is REVERSED -- many policy
+      changes in one run are held again, weakening or not. 'warnings' stays on the decision, always empty.
       -Provider only selects the default thresholds when -Thresholds is not given.
     #>
     [CmdletBinding()]
@@ -6168,17 +6169,15 @@ function Test-PimPolicyBreaker {
     $n = [Math]::Max(0, [int]$Plan.changes - $first); $t = [Math]::Max(0, [int]$Plan.checked - $first); $w = [int]$Plan.weakening
     $tripped = New-Object System.Collections.Generic.List[string]
     $reasons = New-Object System.Collections.Generic.List[string]
-    # PIM 100.72 (1): the count and percent triggers WARN (anomaly), they never hold.
-    $warns = New-Object System.Collections.Generic.List[string]
-    $wreasons = New-Object System.Collections.Generic.List[string]
-    if ($n -gt [int]$Thresholds.MaxChanges) { $warns.Add('max-changes'); $wreasons.Add("would change $n policies (> $($Thresholds.MaxChanges))") }
+    # PIM 100.82 (owner 2026-10-11): the count and percent triggers HOLD again -- 2.4.594 (100.72 (1)) only warned.
+    if ($n -gt [int]$Thresholds.MaxChanges) { $tripped.Add('max-changes'); $reasons.Add("would change $n policies (> cap $($Thresholds.MaxChanges))") }
     if ($t -ge [int]$Thresholds.MinCheckedForPercent -and $t -gt 0) {
         $pct = 100.0 * $n / $t
-        if ($pct -gt [double]$Thresholds.MaxPercent) { $warns.Add('max-percent'); $wreasons.Add(("would change {0} of {1} checked policies ({2:N1}% > {3}%)" -f $n, $t, $pct, $Thresholds.MaxPercent)) }
+        if ($pct -gt [double]$Thresholds.MaxPercent) { $tripped.Add('max-percent'); $reasons.Add(("would change {0} of {1} checked policies ({2:N1}% > cap {3}%)" -f $n, $t, $pct, $Thresholds.MaxPercent)) }
     }
     if ($w -gt [int]$Thresholds.MaxWeakening) { $tripped.Add('max-weakening'); $reasons.Add("$w weakening change(s) (> cap $($Thresholds.MaxWeakening))") }
     $base = @{ changes = $n; checked = $t; weakening = $w; planHash = "$($Plan.planHash)"; thresholds = $Thresholds; tripped = $tripped.ToArray()
-               warnings = $warns.ToArray(); warningReason = $(if ($wreasons.Count) { 'many policy changes in one run (a warning, not a hold): ' + ($wreasons -join '; ') } else { '' }) }
+               warnings = @(); warningReason = '' }   # kept for the decision's shape; always empty since 100.82
     if (-not $tripped.Count) {
         return [pscustomobject](@{ allowed = $true; abort = $false; hold = $false; approved = $false; approvedBy = ''; reason = 'within the mass-change thresholds'; approvalNote = '' } + $base)
     }
@@ -6473,27 +6472,6 @@ function Set-PimGraphPolicyBreakerPlan {
         Write-Host ("    [breaker] {0}: {1} rule change(s) are the FIRST template application to never-modified default policies (new groups/roles) -- counted in N, not in W: {2}" -f $spec.Provider, @($plan.defaultPolicyAligned).Count, ((@($plan.defaultPolicyAligned) | ForEach-Object { $_.name } | Select-Object -Unique) -join ', ')) -ForegroundColor DarkCyan
     }
     if ($dec.hold -or ($Context["__pimWhatIf"] -and [int]$plan.changes -gt 0)) { Write-PimPolicyImpactLog -Provider $spec.Provider -Plan $plan }
-    Submit-PimPolicyBreakerWarning -Provider $spec.Provider -Decision $dec -WhatIf:([bool]$Context["__pimWhatIf"])   # PIM 100.72 (1)
-}
-
-function Submit-PimPolicyBreakerWarning {
-    <#
-      PIM 100.72 (1): the policy breaker's count / percent triggers are a WARNING, never a hold. A run that applies many
-      policy changes at once (template alignment) logs it and hands ONE note to the daily "Data quality alert" (kind
-      'policy-mass-change', per provider -- a repeat counts up). A plan (WhatIf) only logs. NEVER throws.
-    #>
-    param([Parameter(Mandatory)][string]$Provider, [AllowNull()][object]$Decision, [switch]$WhatIf)
-    try {
-        if ($null -eq $Decision -or -not $Decision.PSObject.Properties['warnings'] -or -not @($Decision.warnings).Count) { return $false }
-        Write-Host ("    [breaker] {0}: WARNING [{1}] -- {2} (applied; weakening changes are what holds)" -f $Provider, (@($Decision.warnings) -join ', '), "$($Decision.warningReason)") -ForegroundColor Yellow
-        if ($WhatIf -or -not (Get-Command Add-PimDataQualityNote -ErrorAction SilentlyContinue)) { return $false }
-        return [bool](Add-PimDataQualityNote -Kind 'policy-mass-change' -Area $Provider `
-            -Title ("{0}: {1} policy change(s) in one run ({2} checked)" -f $Provider, [int]$Decision.changes, [int]$Decision.checked) `
-            -Detail ("{0}. Nothing was held: none of these changes weakens a policy beyond the limit ({1} weakening)." -f "$($Decision.warningReason)", [int]$Decision.weakening) `
-            -Cause 'Usually a policy template was changed or newly applied (Get Started > Activation policies / Policy templates), or many groups / roles were added at once.' `
-            -Fix 'If the template change was intended, nothing is needed. If not, put the previous template back -- the next run restores the old rules.' `
-            -Measured @{ changes = [int]$Decision.changes; checked = [int]$Decision.checked; weakening = [int]$Decision.weakening })
-    } catch { return $false }
 }
 
 function Invoke-PimGraphPolicyGuardedApply {
@@ -6809,7 +6787,6 @@ function New-PimAzResPoliciesProvider {
                     @($plan.adminPathAligned).Count, ((@($plan.adminPathAligned | Select-Object -First 5 | ForEach-Object { "$($_.role) @ $($_.scope) $($_.ruleId) $($_.change)" })) -join '; ')) -ForegroundColor DarkCyan
             }
             if ($dec.hold -or ($ctx["__pimWhatIf"] -and [int]$plan.changes -gt 0)) { Write-PimPolicyImpactLog -Provider 'AzResPolicies' -Plan $plan }
-            Submit-PimPolicyBreakerWarning -Provider 'AzResPolicies' -Decision $dec -WhatIf:([bool]$ctx["__pimWhatIf"])   # PIM 100.72 (1)
             $live.ToArray()
         }
         KeyOf = { param($r) Get-PimAzResPolicyKey -Row $r }

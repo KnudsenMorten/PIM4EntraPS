@@ -11220,7 +11220,10 @@ function Handle-Request {
             $script:lastHeartbeat = Get-Date
             $dcfg = Get-PimManagerDemoConfig
             $isDemo = ("$((Get-PimManagerRole).role)" -eq 'Demo')
-            $dBody = [ordered]@{ on = [bool]$dcfg.on; viewer = $isDemo; canWrite = [bool](Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin') }
+            # PIM 100.86 (owner 2026-10-11: "this can NOT be seen inside a prod system ... you must set that parameter on the web app"):
+            # the Demo mode card exists only where the Manager APP is marked a demo environment (PIM_DEMO_MODE=on / true / 1 / yes).
+            $demoAvail = ("$env:PIM_DEMO_MODE".Trim() -match '^(?i:on|true|1|yes)$')
+            $dBody = [ordered]@{ on = [bool]$dcfg.on; viewer = $isDemo; available = [bool]$demoAvail; canWrite = [bool]($demoAvail -and (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) }
             if (-not $isDemo) { $dBody['group'] = "$($dcfg.group)"; $dBody['defaultGroup'] = (Get-PimDemoDefaultGuestGroup) }
             Write-JsonResponse -Response $resp -Status 200 -Body $dBody
             return 200
@@ -11231,6 +11234,8 @@ function Handle-Request {
             $db = Read-RequestJson -Request $req
             if (-not $db -or -not $db.PSObject.Properties['on']) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = "send { on: true|false, group: '<demo guest group>' }" }; return 400 }
             $wantOn = [bool](Test-PimDemoModeValue -Value $db.on)
+            # PIM 100.86: switching it ON needs the web app's own parameter; switching it OFF is always allowed.
+            if ($wantOn -and -not ("$env:PIM_DEMO_MODE".Trim() -match '^(?i:on|true|1|yes)$')) { Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Demo mode is not available in this environment.' }; return 403 }
             $wantGroup = Resolve-PimDemoGuestGroupName -Value $(if ($db.PSObject.Properties['group']) { $db.group } else { $null })
             if ($wantGroup.Length -gt 256) { Write-JsonResponse -Response $resp -Status 400 -Body @{ error = 'The demo guest group name can be at most 256 characters.' }; return 400 }
             # 🔒 Turning it ON must not lock the environment out: membership that cannot be read counts as membership (fail
@@ -13576,8 +13581,8 @@ function Handle-Request {
                 return 200
             }
             # POST approve -- Admin+, audited with the hold (Before) and the approval record (After).
-            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
-                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to approve an Azure policy change set.' }
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {   # PIM 100.82: the tenant's SuperAdmin approves mass policy changes
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to approve an Azure policy change set.' }
                 return 403
             }
             $bodyIn = Read-RequestJson -Request $req
@@ -13667,8 +13672,8 @@ function Handle-Request {
                 return 200
             }
             # POST approve -- Admin+, audited with the hold (Before) and the approval record (After).
-            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
-                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to approve a policy change set.' }
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {   # PIM 100.82
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to approve a policy change set.' }
                 return 403
             }
             $bodyIn = Read-RequestJson -Request $req
@@ -13713,8 +13718,8 @@ function Handle-Request {
         # plan hash, its own audit record). Admin+. An approval now carries over to later plans that add no new weakening.
         if ($path -eq '/api/engine/policy-approve-all' -and $method -eq 'POST') {
             $script:lastHeartbeat = Get-Date
-            if (-not (Test-PimManagerRoleAtLeast -Minimum 'Admin')) {
-                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'Admin role required to approve policy change sets.' }
+            if (-not (Test-PimManagerRoleAtLeast -Minimum 'SuperAdmin')) {   # PIM 100.82
+                Write-JsonResponse -Response $resp -Status 403 -Body @{ error = 'SuperAdmin role required to approve policy change sets.' }
                 return 403
             }
             $engLib = Join-Path $solutionRoot 'engine\_shared\PIM-EngineProviders.ps1'

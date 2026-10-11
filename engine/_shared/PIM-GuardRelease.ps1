@@ -50,9 +50,9 @@ function Get-PimGuardReleaseCatalog {
             what = 'A change that would leave the tenant with no Global Administrator is held (the rest of the run goes ahead). Give another person Global Administrator first; a release lets ONE run apply exactly the held plan.' }
         # PIM 100.72 (4): 'engine.ledger-unreadable' is telemetry, not a guard (Get-PimNotAGuardIds) -- the prune still removes
         # nothing while the ledger cannot be read, and heals on the next run that reads it.
-        # PIM 100.72 (1): only WEAKENING holds; many non-weakening changes are a warning in the daily data-quality mail.
+        # PIM 100.82 (owner 2026-10-11): many policy changes in one run HOLD again (2.4.594 only warned), weakening or not; a SuperAdmin approves.
         [pscustomobject]@{ guardId = 'engine.policy-mass-change'; title = 'Policy mass-change breaker'; release = 'approval'; ceiling = $null; ceilingPercent = $null
-            what = 'Holds a policy change set that weakens more than 3 policy settings; approved by its plan hash on the Approvals / Jobs page (valid 24 h). Many changes that weaken nothing are a warning in the daily data quality alert, never a hold.' }
+            what = 'Holds a run that would change more than 25 policies, more than 25 % of the checked policies, or weaken more than 3 policy settings. A SuperAdmin approves the change set on the Approvals / Jobs page (valid 24 h).' }
         [pscustomobject]@{ guardId = 'engine.offboarding-approval'; title = 'Offboarding approval'; release = 'approval'; ceiling = $null; ceilingPercent = $null
             what = 'A disable or offboarding waits for its approval on the Approvals page.' }
         [pscustomobject]@{ guardId = 'engine.reconcile-paused'; title = 'Daily reconcile paused'; release = 'info'; ceiling = $null; ceilingPercent = $null
