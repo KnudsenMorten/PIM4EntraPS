@@ -121,7 +121,7 @@ function ConvertTo-PimAlertingValue {
       event defaults ON, as the Manager does.
     #>
     param([AllowNull()]$Current, [string[]]$Recipients = @(),
-          [string[]]$EventCatalog = @('engine-failure', 'drift', 'expiring-access', 'break-glass', 'sessions-revoked', 'coverage', 'target-missing', 'pending-uncommitted'))
+          [string[]]$EventCatalog = @('engine-failure', 'drift', 'expiring-access', 'break-glass', 'sessions-revoked', 'coverage', 'target-missing', 'pending-uncommitted', 'data-quality'))
     $cur = $Current
     if ($cur -is [string]) { try { $cur = $cur | ConvertFrom-Json } catch { $cur = $null } }
     $list = { param($v) @(@($v) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) }

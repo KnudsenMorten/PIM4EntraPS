@@ -85,10 +85,15 @@ $script:PimTickOnlyJobTypes += 'audit-retention'
 # "no change") and prunes past ConfigBackupRetentionDays (default 90; pinned kept) -- PIM-ConfigBackup.ps1. SQL only.
 $script:PimJobTypes += 'config-backup'
 $script:PimTickOnlyJobTypes += 'config-backup'
-# GUARD-1 (2026-10-05): 'licence-check' trips the 'msp.licence' guard when this managing / managed tenant's Pro licence no
-# longer covers MSP (refused = critical) or is in grace (warning). A single tenant is not checked (PIM-Guard.ps1).
+# 2026-10-05: 'licence-check' -- this managing / managed tenant's Pro licence no longer covers MSP (refused) or is in grace.
+# PIM 100.72 (4): telemetry, not a guard -- the run is a WARNING (Jobs page + run telemetry). A single tenant is not checked.
 $script:PimJobTypes += 'licence-check'
 $script:PimTickOnlyJobTypes += 'licence-check'
+# PIM 100.72 (6) (owner 2026-10-11, framework 12.21): 'data-quality' sends the ONE daily "Data quality alert" -- the anomalies
+# the engine runs found (key numbers vs the median of the last 3 runs, with the likely cause from the settings change log) and
+# the other warnings handed in (policy mass-change counts, convergence). Warnings only; it never blocks (PIM-DataQuality.ps1).
+$script:PimJobTypes += 'data-quality'
+$script:PimTickOnlyJobTypes += 'data-quality'
 # REQ-AR-2 (operator 2026-09-26): 'access-review-cycle' starts the per-DEPARTMENT access review campaigns the review rules
 # make due (PIM-AccessReviewCycle.ps1). Checks every 6 h; the cadence per department is the rule's cadenceDays.
 $script:PimJobTypes += 'access-review-cycle'
@@ -382,6 +387,8 @@ function Get-PimDefaultJobSchedule {
         # CONFIG-1.3: daily (SCHED-1: the cadence counts from the job's finish); "Back up now" on Backups & restore runs one on demand.
         [pscustomobject]@{ name='config-backup'; type='config-backup'; intervalMinutes=1440; enabled=$true }
         [pscustomobject]@{ name='licence-check'; type='licence-check'; intervalMinutes=60; enabled=$true }
+        # PIM 100.72 (6): daily -- ONE "Data quality alert" when something is off (Alerting event 'data-quality'); otherwise silent.
+        [pscustomobject]@{ name='data-quality'; type='data-quality'; intervalMinutes=1440; enabled=$true }
         # REQ-AR-2: no-op until review rules are saved and enabled (Settings > Access reviews); Pro 'reviews.campaigns'.
         [pscustomobject]@{ name='access-review-cycle'; type='access-review-cycle'; intervalMinutes=360; enabled=$true }
         # §82: every tick (the tick runs every 5 min); inert until the RFA portal is deployed + enabled (Pro 'rfa.portal').
@@ -1437,6 +1444,13 @@ function Initialize-PimDefaultJobHandlers {
         # §95.2: the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimLicenceRequestJob).
         [pscustomobject]@{ ran=$false; unimplemented=$true
             detail='unimplemented:licence-request (wired by Start-PimScheduler)'
+            whatIf=[bool]$whatIf }
+    }
+    Register-PimJobHandler -Type 'data-quality' -Handler {
+        param($job,$now,$whatIf)
+        # PIM 100.72 (6): the REAL handler is registered by tools/pim-scheduler/Start-PimScheduler.ps1 (Invoke-PimDataQualityJob).
+        [pscustomobject]@{ ran=$false; unimplemented=$true
+            detail='unimplemented:data-quality (wired by Start-PimScheduler)'
             whatIf=[bool]$whatIf }
     }
     Register-PimJobHandler -Type 'pending-check' -Handler {

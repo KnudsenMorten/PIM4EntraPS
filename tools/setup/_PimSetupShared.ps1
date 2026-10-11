@@ -1319,7 +1319,7 @@ function Grant-PimEngineRootAzureAccess {
       🔑 NEVER FAILS THE INSTALL. Assigning at the tenant root needs Owner / User Access Administrator THERE (a Global
       Administrator first turns on "Access management for Azure resources"); the deploying identity often has neither. A
       refusal WARNS loudly, prints the exact fix (the published Grant-PimEnginePermissions.ps1 with this tenant and engine
-      object id, and the az equivalent), and returns ok=$false -- and the Manager's Get Started 'Engine permissions' step
+      object id), and returns ok=$false -- and the Manager's Get Started 'Engine permissions' step
       shows the same command until it is done.
     #>
     [CmdletBinding(SupportsShouldProcess)]
@@ -1348,15 +1348,12 @@ function Grant-PimEngineRootAzureAccess {
     $fix = ''
     if ($refused.Count) {
         $fix = Get-PimRootAzureFixCommand -TenantId $TenantId -EngineObjectId $MiObjectId -Roles $refused
-        $azCmd = @($refused | ForEach-Object { "az role assignment create --assignee-object-id $MiObjectId --assignee-principal-type ServicePrincipal --role '$_' --scope $($plan.scope)" }) -join "`n      "
         Write-Warning ("  ENGINE AZURE ACCESS NOT GRANTED: $Name ($MiObjectId) still lacks " + ($refused -join ' + ') + " at the tenant root management group $($plan.scope). " +
                        "Discovery cannot see Azure until Reader is there (the Manager's Get Started > Engine permissions step stays open and shows this command). " +
                        "The installing identity needs Owner or User Access Administrator at the tenant root (a Global Administrator first turns on 'Access management for Azure resources' in Microsoft Entra ID > Properties). " +
                        "The install continues. Fix -- as a Global Administrator, browser sign-in, no modules:")
         # REQUIREMENTS 100.77: plain text -- the doc page as ONE line UNDER the two command lines, outside the block
         Write-Host ("      " + ((Add-PimSupportScriptDocLines -Text $fix) -replace "`n", "`n      ")) -ForegroundColor Yellow
-        Write-Host  "      or with az:" -ForegroundColor Yellow
-        Write-Host ("      " + $azCmd) -ForegroundColor Yellow
     } else {
         foreach ($r in $rows) { Write-Host ("    {0} at the tenant root for {1}: {2}" -f $r.role, $Name, $r.state) -ForegroundColor DarkGray }
     }

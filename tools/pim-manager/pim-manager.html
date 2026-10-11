@@ -8053,7 +8053,8 @@
     'break-glass': 'Break-glass (emergency override) used',
     'coverage': 'New gaps, orphan groups or unmanaged privileged groups (Coverage & gaps)',
     'target-missing': 'Delegations whose Azure resource or role no longer exists (daily target check)',
-    'pending-uncommitted': 'Changes staged or queued more than a day ago and never committed (daily pending check)'
+    'pending-uncommitted': 'Changes staged or queued more than a day ago and never committed (daily pending check)',
+    'data-quality': 'Data quality alert: something looks different from the last runs (one mail a day at most, warnings only)'
   };
   // 2026-10-07 (operator: "Configuration drift detected should be a biweekly report by default, controllable in the
   // settings"): the drift report cadence, under Alerting in Settings -- the same setting (and the same SuperAdmin-gated
@@ -12777,7 +12778,8 @@
     'tier-report':                 'Mails the tier-0 / tier-1 privileged access report.',
     'servicenow-intake':           'Reads requests from the ServiceNow drop store (only when the IntakeEnabled setting is on).',
     'tenant-cache':                'Refreshes the lists of roles, administrative units, groups and Azure scopes the pickers and validation use.',
-    'verify-convergence':          'Re-reads the tenant and proves that what was committed is actually deployed.',
+    'verify-convergence':          'Re-reads the tenant and proves that what was committed is actually deployed. Items still missing after the grace window are a warning in the daily data quality alert.',
+    'data-quality':                'Sends ONE daily "Data quality alert" when something looks different from the last runs (each scope\'s key numbers against the median of its last 3 runs, with the likely cause from the settings change log) or another warning was raised. Warnings only: it never blocks anything.',
     'hybrid-ad-apply':             'Applies on-premises Active Directory changes for hybrid admin accounts.',
     'hybrid-ad-servers':           'Lists the Windows servers in Active Directory for Discovery, and puts each server\'s PIM group into that server\'s local Administrators (adds only; runs on the hybrid worker).',
     'hybrid-ad-groups':            'Mirrors the PIM groups marked for Active Directory to on-premises AD groups (runs on the hybrid worker).',

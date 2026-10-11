@@ -28,6 +28,10 @@ if (-not (Get-Command Split-PimPruneByLedger -ErrorAction SilentlyContinue) -and
 # §96.6 / GUARD-1.6: releasing a guard (one guard, one scope, one run or until <= 24 h, bound to the plan hash). Loaded with
 # the core so a held plan is always recorded for the Guards page and a release is always honoured.
 if (-not (Get-Command Invoke-PimGuardHoldOrRelease -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-GuardRelease.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-GuardRelease.ps1') }
+# PIM 100.72 (7): the last-Global-Administrator guard (BLOCK + release) -- loaded with the core so no run removes the last one.
+if (-not (Get-Command Invoke-PimLastGlobalAdminGuard -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-LastPrivileged.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-LastPrivileged.ps1') }
+# PIM 100.72 (1)(5)(6): warnings go to the ONE daily "Data quality alert" (anomaly detection) -- never a block.
+if (-not (Get-Command Add-PimDataQualityNote -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-DataQuality.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-DataQuality.ps1') }
 # Ledger confirmations (D2) need the newer ledger functions even where an older copy was loaded first.
 if (-not (Get-Command Set-PimManagedKeyConfirmations -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1'))) { . (Join-Path $PSScriptRoot 'PIM-ManagedKeys.ps1') }
 # CONFIG-1.1 / 96.1: the applied outcome per row + the per-key commit resolution (BUG-294) read the change journal.
@@ -783,7 +787,7 @@ function Invoke-PimEngineScope {
     # Fail closed: no ledger (unreadable, no store, module missing) = nothing is pruned. The DRIFT READ (a plan that can
     # never write) still lists every extra -- listing them is its job (BUG-269).
     $__driftReadPlan = [bool]($WhatIf -and $global:PIM_DriftReadPlan)
-    $__ledger = $null; $__ledgerCs = $null; $__ledgerErr = ''
+    $__ledger = $null; $__ledgerCs = $null; $__ledgerErr = ''; $__ledgerUnreadable = $false
     if ($p.ApplyRemove -and (Get-Command Get-PimManagedKeys -ErrorAction SilentlyContinue)) {
         if (-not ($global:PIM_ManagedKeysStore -is [hashtable]) -and (Get-Command Get-PimSqlSettingsConnectionString -ErrorAction SilentlyContinue)) {
             try { $__ledgerCs = Get-PimSqlSettingsConnectionString } catch { $__ledgerCs = $null }
@@ -803,23 +807,18 @@ function Invoke-PimEngineScope {
             $__unmanaged = @(@($diff.remove) | Where-Object { $_ -and -not ($_.PSObject.Properties['targeted'] -and $_.targeted) })
             $__ledgerErr = 'the managed-key ledger module is not loaded'
         }
-        # §96.6: an UNREADABLE ledger is a guard ('engine.ledger-unreadable'): it holds the prune, records the held plan and
-        # trips GUARD-1; a SuperAdmin may release exactly that plan for ONE run (the removal budget below still applies).
-        if ($__unmanaged.Count -and $null -eq $__ledger -and $__ledgerErr -and -not $WhatIf -and $__canRelease) {
-            $__lgKeys = @(@($__unmanaged) | ForEach-Object { "$($_.key)" })
-            $__lg = Invoke-PimGuardHoldOrRelease -GuardId 'engine.ledger-unreadable' -Scope $Scope -Keys $__lgKeys -Count $__unmanaged.Count -RunKind $__runKind -Measured @{ unmanaged = $__unmanaged.Count }
-            if ($__lg.released) {
-                $__guardReleases.Add([pscustomobject]@{ guardId = 'engine.ledger-unreadable'; releaseId = "$($__lg.release.id)"; planHash = $__lg.planHash })
-                Write-Host ("[engine] {0,-20} the managed-key ledger could not be read ({1}) -- prune RELEASED for this run: {2} item(s)" -f $Scope, $__ledgerErr, $__unmanaged.Count) -ForegroundColor Magenta
-                $__keepRm = @(@($__keepRm) + @($__unmanaged)); $__unmanaged = @()
-            } elseif (Get-Command Invoke-PimGuardTrip -ErrorAction SilentlyContinue) {
-                [void](Invoke-PimGuardTrip -GuardId 'engine.ledger-unreadable' -Outcome refused -Area $Scope -Job 'engine' -HeldCount $__unmanaged.Count `
-                    -Title ("{0}: the managed-key ledger could not be read -- {1} prune item(s) held" -f $Scope, $__unmanaged.Count) `
-                    -Detail ("The prune of {0} removes only what PIM manages, and the list of what PIM manages could not be read ({1}). Nothing was removed." -f $Scope, $__ledgerErr) `
-                    -ActionText 'Fix the store access. If the held items must go now, review them on Operations > Guards and release that plan for one run.' `
-                    -Measured @{ held = $__unmanaged.Count })
-            }
-        } elseif ($doPrune -and -not $WhatIf -and $__canRelease -and $null -ne $__ledger) { [void](Clear-PimGuardHold -GuardId 'engine.ledger-unreadable' -Scope $Scope -RunKind $__runKind) }
+        # PIM 100.72 (4) (owner 2026-10-11, framework 12.21: "database and license can never be a guard, that is telemetry
+        # alerts"): an UNREADABLE ledger is a platform failure, not a guard. The behaviour stays FAIL-CLOSED -- the prune removes
+        # nothing this run (it heals: the next run reads the ledger again) -- but it no longer trips GUARD-1, holds a plan on
+        # the Guards page or offers a release. It is telemetry: the scope result says ledgerUnreadable, the tick marks the run
+        # 'warning' (amber on the Jobs page, a Kind 'run' warning to Invardia), and the run's warnings name it.
+        if ($__unmanaged.Count -and $null -eq $__ledger -and $__ledgerErr -and -not $WhatIf) {
+            $__ledgerUnreadable = $true
+            if (-not ($Context['__pimScopeWarnings'] -is [System.Collections.IList])) { $Context['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string] }
+            try { [void]$Context['__pimScopeWarnings'].Add(("the managed-key ledger could not be read ({0}) -- the prune removed nothing ({1} item(s) left alone) [LEDGER-UNREADABLE]" -f $__ledgerErr, $__unmanaged.Count)) } catch { }
+        }
+        # an old hold of the retired guard is cleared once the ledger reads again (nothing shows it any more)
+        if ($doPrune -and -not $WhatIf -and $__canRelease -and $null -ne $__ledger) { [void](Clear-PimGuardHold -GuardId 'engine.ledger-unreadable' -Scope $Scope -RunKind $__runKind) }
         if ($__unmanaged.Count) {
             if ($null -eq $__ledger -and $__ledgerErr) {
                 Write-Warning ("[engine] {0}: the managed-key ledger could not be read ({1}) -- the prune removes NOTHING this run ({2} item(s) left alone)." -f $Scope, $__ledgerErr, $__unmanaged.Count)
@@ -947,35 +946,15 @@ function Invoke-PimEngineScope {
         } catch { }   # a report can never fail the pass
     }
 
-    if ($p.isAccountDisable -and @($diff.remove).Count -gt 0 -and (Get-Command Test-PimDisablePassAllowed -ErrorAction SilentlyContinue)) {
-        $resolvedFlag = $null
-        $ent = if ($p.entity) { "$($p.entity)" } else { "$Scope" }
-        if ($global:PIM_DesiredResolved -is [hashtable] -and $global:PIM_DesiredResolved.ContainsKey($ent)) { $resolvedFlag = [bool]$global:PIM_DesiredResolved[$ent] }
-        $decision = Test-PimDisablePassAllowed -ToDisable (@($diff.remove).Count) -Scanned (@($live).Count) -Desired $desired -DesiredResolved $resolvedFlag -FeatureOverride $p.disableFeatureOverride
-        # §96.6: ONLY the blast-radius trip (G2) is releasable -- never the opt-in (G3) or an unresolved desired set (G1). A
-        # release of exactly this disable set lifts the caps for ONE run to the plan's count, at most 50 accounts and 25 %
-        # (literal ceilings -- the breaker's own). The break-glass accounts were taken out of the set above, before this.
-        if (-not $decision.allowed -and "$($decision.tripped)" -eq 'mass-disable' -and -not $WhatIf -and $__canRelease) {
-            $__dN = @($diff.remove).Count; $__dS = @($live).Count
-            $__dPct = if ($__dS -gt 0) { 100.0 * $__dN / $__dS } else { -1 }
-            $__dg = Invoke-PimGuardHoldOrRelease -GuardId 'engine.disable-guard' -Scope $Scope -Keys @(@($diff.remove) | ForEach-Object { "$($_.key)" }) -Count $__dN -Percent $__dPct `
-                -RunKind $__runKind -Measured @{ toDisable = $__dN; scanned = $__dS }
-            if ($__dg.released) {
-                $__d2 = Test-PimDisablePassAllowed -ToDisable $__dN -Scanned $__dS -Desired $desired -DesiredResolved $resolvedFlag -FeatureOverride $p.disableFeatureOverride `
-                    -MaxCount ([Math]::Min([int]$__dg.release.raiseTo, 50)) -MaxPercent 25
-                if ($__d2.allowed) {
-                    $__guardReleases.Add([pscustomobject]@{ guardId = 'engine.disable-guard'; releaseId = "$($__dg.release.id)"; planHash = $__dg.planHash })
-                    $decision = $__d2
-                }
-            }
-        } elseif (-not $WhatIf -and $__canRelease -and $decision.allowed) { [void](Clear-PimGuardHold -GuardId 'engine.disable-guard' -Scope $Scope -RunKind $__runKind) }
-        if (-not $decision.allowed) {
-            if (Get-Command Write-PimDisableAbortAlert -ErrorAction SilentlyContinue) { Write-PimDisableAbortAlert -Scope $Scope -Decision $decision }
-            else { Write-Host ("[engine] {0}: account-disable ABORTED [{1}] -- {2}" -f $Scope, $decision.tripped, $decision.reason) -ForegroundColor Red }
-            # Drop ALL removes for this scope -- the safe outcome is to disable nothing.
-            $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @(); nochange = @($diff.nochange) }
-            $script:__disableAborted = $decision.tripped
-        }
+    # PIM 100.72: the INFERRED account-disable breaker that stood here ("G2b": Test-PimDisablePassAllowed over the remove
+    # bucket, releasable as engine.disable-guard) is REMOVED -- it was dead code. Since 71.22 Select-PimDisableRemovals
+    # returns an EMPTY remove set for every account-disable scope, so it could never trip. What replaces it is the
+    # invariant itself, with no library probe: an account-disable scope NEVER carries a removal past this point (absence
+    # from the desired set is never a disable instruction). Row-driven disables keep their breaker (G1/G2/G3 in
+    # Update-PimAdminsDisableDecision, releasable as engine.disable-guard) -- unchanged.
+    if ($p.isAccountDisable -and @($diff.remove).Count -gt 0) {
+        Write-Host ("[engine] {0}: {1} removal(s) proposed for an account-disable scope -- DROPPED, PIM never disables an account because it is absent from the desired set (71.22)" -f $Scope, @($diff.remove).Count) -ForegroundColor Yellow
+        $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @(); nochange = @($diff.nochange) }
     }
 
     # --- G4: UNIVERSAL REMOVAL BUDGET (operator directive 2026-08-06) -----------------
@@ -1031,6 +1010,22 @@ function Invoke-PimEngineScope {
             $diff = [pscustomobject]@{ create = @($diff.create); update = $__keepUpdate; remove = @(); nochange = @($diff.nochange) }
             foreach ($__x in $__heldCand) { $__held.Add([pscustomobject]@{ item = $__x; budget = $rb.budget; toRemove = $__rmTotal }) }
             if (-not $script:__disableAborted) { $script:__disableAborted = 'remove-budget' }
+        }
+    }
+
+    # --- PIM 100.72 (7): THE LAST GLOBAL ADMINISTRATOR (BLOCK + release) --------------------------------------------------
+    # A removal that would leave the tenant with NO Global Administrator is damage that does not heal (nobody could repair
+    # it). The Global Administrator assignments (EntraRoles / EntraRolesDirect) and the memberships of the groups that hold
+    # it (AdminMembers) are checked against who holds the role NOW; the held items are dropped from this run, the rest goes
+    # ahead. Releasable for exactly that plan, one run (Operations > Guards). The drift read lists, it never writes: skipped.
+    if (@($diff.remove).Count -gt 0 -and -not $__driftRead -and $Scope -in @('EntraRoles', 'EntraRolesDirect', 'AdminMembers') -and (Get-Command Invoke-PimLastGlobalAdminGuard -ErrorAction SilentlyContinue)) {
+        $__lga = Invoke-PimLastGlobalAdminGuard -Scope $Scope -Remove @($diff.remove) -RunKind $__runKind -WhatIf:([bool]$WhatIf) -CanRelease $__canRelease
+        if ($__lga.released -and $__lga.used) { $__guardReleases.Add($__lga.used) }
+        elseif ($__lga.blocked) {
+            $__lgaKeys = @{}; foreach ($__k in @($__lga.heldKeys)) { $__lgaKeys["$__k"] = $true }
+            $diff = [pscustomobject]@{ create = @($diff.create); update = @($diff.update); remove = @(@($diff.remove) | Where-Object { $_ -and -not $__lgaKeys.ContainsKey("$($_.key)".Trim().ToLowerInvariant()) }); nochange = @($diff.nochange) }
+            if (-not ($Context['__pimScopeWarnings'] -is [System.Collections.IList])) { $Context['__pimScopeWarnings'] = New-Object System.Collections.Generic.List[string] }
+            try { [void]$Context['__pimScopeWarnings'].Add(("{0} removal(s) HELD by the last-Global-Administrator guard: {1} [LAST-GLOBAL-ADMIN]" -f @($__lga.heldKeys).Count, $__lga.reason)) } catch { }
         }
     }
 
@@ -1358,6 +1353,8 @@ function Invoke-PimEngineScope {
         scope=$Scope; mode=$Mode; whatIf=[bool]$WhatIf
         managedLive=$__managedLive                # drift read only: the live identities the engine matched to a definition
         create=$diff.create.Count; update=$diff.update.Count; remove=$diff.remove.Count; nochange=$diff.nochange.Count
+        desiredCount=@($desired).Count; liveCount=@($live).Count   # PIM 100.72 (6): the run's key numbers (anomaly detection)
+        ledgerUnreadable=[bool]$__ledgerUnreadable                 # PIM 100.72 (4): telemetry, not a guard -- the tick marks the run 'warning'
         applied=$script:__applied; skipped=$script:__skipped; errors=$script:__errors; plan=$plan.ToArray(); ok=($script:__errors -eq 0)
         disableAborted=$script:__disableAborted
         failures=$script:__failures.ToArray()
