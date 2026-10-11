@@ -1971,7 +1971,7 @@ function Invoke-DefaultStepRunner {
                 if ($pullName) { $derivedPull = "$((Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $pullName -ErrorAsNull).id)" }
                 if ("$derivedPull".Trim() -notmatch '^/subscriptions/') {
                     $ids = @(Invoke-PimSetupArm -Path "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.ManagedIdentity/userAssignedIdentities" -ApiVersion (Get-PimSetupApiVersion msi) -All -ErrorAsNull |
-                             Where-Object { $_ -and "$($_.name)" -match '^id-pim-' -and "$($_.name)" -notmatch '^id-pim-sql-' })
+                             Where-Object { $_ -and "$($_.name)" -match '^id-pim-' -and "$($_.name)" -notmatch '^id-pim-(sql-|asbuilt)' })   # never the as-built job's identity (HOGYM)
                     if ($ids.Count -eq 1) { $derivedPull = "$($ids[0].id)"; $pullName = "$($ids[0].name)" }
                 }
                 if ("$derivedPull".Trim() -match '^/subscriptions/') {
