@@ -13,6 +13,10 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.584 -- 2026-10-11
+
+- Installer: Azure SQL always uses a sign-in made after the new SQL server's admin is set (the handed-over token predates it -- HOGYM install, Login failed).
+
 ## 2.4.583 -- 2026-10-11
 
 - As-built job runs as its own user-assigned identity (database user made without Graph); the updater no longer re-rolls a job it just moved and waits out a busy job.
