@@ -10,7 +10,9 @@
     Succeeded and reads that ONE blob; a lifecycle rule deletes it after 1 day (tools/setup/Deploy-PimAsBuiltJob.ps1).
     The document is the SAME one an admin downloads from the Manager (engine/_shared/PIM-AsBuilt.ps1 is the one generator).
 
-    Runs as the job's SYSTEM-ASSIGNED managed identity, which holds exactly:
+    Runs as the job's USER-ASSIGNED managed identity id-pim-asbuilt (env PIM_ManagedIdentityClientId = its client id, so
+    PIM-Rest asks the token endpoint for THAT identity -- Container Apps issues no token for a user-assigned identity unless
+    it is named), which holds exactly:
       * SELECT on pim.vw_AsBuiltSettings -- the settings the document needs, with people and secrets REDUCED to counts in SQL
         (never pim.Settings itself);
       * Storage Blob Data Contributor on the container 'asbuilt' only.
@@ -43,7 +45,14 @@ JobLog '==== PIM Manager as-built job starting ===='
 $foreign = @(@('AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_CLIENT_CERTIFICATE_PATH', 'PIM_ClientId', 'PIM_CertThumbprint', 'PIM_CERT_THUMBPRINT') |
              Where-Object { "$([Environment]::GetEnvironmentVariable($_))".Trim() })
 if ($foreign.Count) { JobLog ("REFUSED: $($foreign -join ', ') is set -- this job runs as its managed identity only") 'ERROR'; exit 2 }
-if (-not "$($env:IDENTITY_ENDPOINT)".Trim()) { JobLog 'REFUSED: no managed identity endpoint (IDENTITY_ENDPOINT) -- this entry runs inside a Container Apps job with a system-assigned identity' 'ERROR'; exit 2 }
+if (-not "$($env:IDENTITY_ENDPOINT)".Trim()) { JobLog 'REFUSED: no managed identity endpoint (IDENTITY_ENDPOINT) -- this entry runs inside a Container Apps job with its managed identity' 'ERROR'; exit 2 }
+# Which managed identity: id-pim-asbuilt, named by its client id (Deploy-PimAsBuiltJob / the updater's converge stamp it).
+# Without it (a job deployed before the user-assigned identity, not yet converged) the job's system identity is asked -- said, not hidden.
+$miCid = "$($env:PIM_ManagedIdentityClientId)".Trim()
+$gMi = [guid]::Empty
+if ($miCid -and -not [guid]::TryParse($miCid, [ref]$gMi)) { JobLog "REFUSED: PIM_ManagedIdentityClientId '$miCid' is not a client id" 'ERROR'; exit 2 }
+if ($miCid) { $global:PIM_ManagedIdentityClientId = $miCid; JobLog "identity: user-assigned id-pim-asbuilt (client id $miCid)" }
+else { JobLog 'identity: the job''s system-assigned identity (PIM_ManagedIdentityClientId not set -- the next PIM update switches this job to id-pim-asbuilt)' 'WARN' }
 $missing = @()
 foreach ($pair in @(@('PIM_SqlServer', $SqlServer), @('PIM_ASBUILT_STORAGE', $StorageAccount), @('CONTAINER_APP_JOB_EXECUTION_NAME', $ExecutionName))) { if (-not "$($pair[1])".Trim()) { $missing += $pair[0] } }
 if ($missing.Count) { JobLog "REFUSED: not configured: $($missing -join ', ')" 'ERROR'; exit 2 }
@@ -68,7 +77,7 @@ $view = 'pim.vw_AsBuiltSettings'
 # Every setting through the job's ONE view (never pim.Settings: it also holds who is SuperAdmin).
 $getSetting = { param($n) $j = Invoke-PimSqlScalar -ConnectionString $cs -Sql "SELECT ValueJson FROM $view WHERE Name=@n" -Parameters @{ n = "$n" }; if ($null -eq $j -or $j -is [DBNull]) { $null } else { "$j" } }
 try { [void](& $getSetting 'FeatureGates') }
-catch { JobLog "the store cannot be read through $view as this identity: $($_.Exception.Message) -- re-run tools/setup/Deploy-PimAsBuiltJob.ps1 (it creates the view and the job's reader user)" 'ERROR'; exit 4 }
+catch { JobLog (Get-PimAsBuiltStoreReadFailureText -Message "$($_.Exception.Message)" -View $view -ClientId $miCid) 'ERROR'; exit 4 }
 
 # Features: the stored gate map over the catalog defaults. A feature that is switched on by DATA presence alone (no stored
 # value) cannot be decided from the view -> $null = left out of the document, never guessed.

@@ -12,14 +12,15 @@
          blob is readable only by the Support app's identity after the customer's Grant-PimSupportAccess -Level asbuilt
       2. the container 'asbuilt' (control plane, private) and the lifecycle rule 'pim-asbuilt-delete-after-1-day' (every other
          rule of the account's management policy is kept)
-      3. the job: MANUAL trigger, the same image as the Manager, tools/pim-engine/asbuilt-job-entry.ps1, SYSTEM-ASSIGNED
-         identity (the image pull uses the Manager's registry identity when it has one) -- read back
-      4. the job identity's ONLY Azure right: Storage Blob Data Contributor on the container 'asbuilt' (+ AcrPull on the registry
-         when there is no registry identity to inherit) -- read back
+      3. the job: MANUAL trigger, the same image as the Manager, tools/pim-engine/asbuilt-job-entry.ps1, as the USER-ASSIGNED
+         identity id-pim-asbuilt (created here in the resource group; env PIM_ManagedIdentityClientId names it; an existing
+         system-identity job is switched). The image pull keeps the job's / the Manager's registry identity; without one,
+         id-pim-asbuilt pulls itself (AcrPull granted before the job is written) -- read back
+      4. id-pim-asbuilt's ONLY other Azure right: Storage Blob Data Contributor on the container 'asbuilt' -- read back
       5. the custom role 'PIM Manager as-built runner (<rg>)' (start the job + read its executions; assignable in this resource
          group) -- created here so Grant-PimSupportAccess.ps1 only has to ASSIGN it, with the customer's consent
       6. SQL: the view pim.vw_AsBuiltSettings (people and secrets reduced to counts IN SQL) and the job identity's own contained
-         user (from its app id as a SID) with SELECT on that view only -- read back; and pim.Settings 'AsBuiltInstallFacts'
+         user (from id-pim-asbuilt's ARM clientId = app id as a SID; no Graph) with SELECT on that view only -- read back; and pim.Settings 'AsBuiltInstallFacts'
          { region; network; resourceGroup; recordedUtc } (the facts the store cannot know otherwise)
     It does NOT start the job and grants NOTHING to the Invardia Support app (Grant-PimSupportAccess.ps1 does, on consent).
 
@@ -110,17 +111,59 @@ if ($PSCmdlet.ShouldProcess($StorageAccount, 'create / harden the PIM storage ac
     Note "read back: rule 'pim-asbuilt-delete-after-1-day' (prefix $container/, 1 day)$(if ($keep.Count) { "; $($keep.Count) other rule(s) kept" })"
 }
 
+# ---- 3a. the job's USER-ASSIGNED identity id-pim-asbuilt -------------------------------------------------------------
+# Live 2026-10-11: with a system-assigned identity the in-cloud updater could not make the job's database user (the app id of
+# a system identity needs Graph; the updater has none) and every run failed "Login failed for user '<token-identified
+# principal>'". A user-assigned identity's ARM properties.clientId IS the app id (the SQL SID) and properties.principalId the
+# object id -- both readable over ARM, here and by the updater's converge.
+$uamiName = Get-PimAsBuiltIdentityName
+$uamiId = Get-PimAsBuiltIdentityResourceId -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $uamiName
+$uamiCid = ''; $oid = ''
+if ($PSCmdlet.ShouldProcess($uamiName, 'create the as-built job''s user-assigned identity')) {
+    Step "user-assigned identity $uamiName"
+    $u = New-PimArmIdentity -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $uamiName -Location $location -Tags @{ 'pim-component' = 'asbuilt' }
+    for ($i = 0; $i -lt 6 -and -not "$($u.properties.clientId)".Trim(); $i++) { Start-Sleep -Seconds 5; $u = Get-PimArmIdentity -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $uamiName -ErrorAsNull }
+    $uamiCid = "$($u.properties.clientId)".Trim(); $oid = "$($u.properties.principalId)".Trim()
+    if (-not $uamiCid -or -not $oid) { throw "read-back FAILED: $uamiName has no clientId / principalId yet -- re-run in a minute." }
+    Note "read back: client id $uamiCid, principal $oid"
+}
+
 # ---- 3. the job ---------------------------------------------------------------------------------------------------
-$exists = [bool](Get-PimArmAcaJob -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull)
+$jobCur = Get-PimArmAcaJob -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $JobName -ErrorAsNull
+$exists = [bool]$jobCur
+if (-not "$RegistryIdentityResourceId".Trim() -and $jobCur) {
+    # an existing job keeps the registry identity it pulls with
+    $jobReg = "$(@($jobCur.properties.configuration.registries)[0].identity)".Trim()
+    if ($jobReg -and $jobReg -ne 'system') { $RegistryIdentityResourceId = $jobReg; Note "registry identity kept from $JobName" }
+}
 if (-not "$RegistryIdentityResourceId".Trim()) {
     $mgrApp = Get-PimArmAcaApp -SubscriptionId $S -ResourceGroup $ResourceGroup -Name $ManagerApp -ErrorAsNull
     $mgrReg = if ($mgrApp) { "$(@($mgrApp.properties.configuration.registries)[0].identity)".Trim() } else { '' }
     if ($mgrReg -and $mgrReg -ne 'system') { $RegistryIdentityResourceId = $mgrReg; Note "registry identity inherited from $ManagerApp" }
 }
-$spec = Get-PimAsBuiltJobSpec -JobName $JobName -Image $image -EnvironmentId $envId -Location $location -RegistryServer "$AcrName.azurecr.io" `
-            -RegistryIdentity $(if ("$RegistryIdentityResourceId".Trim()) { "$RegistryIdentityResourceId".Trim() } else { 'system' }) `
-            -SqlServerFqdn $SqlServerFqdn -SqlDatabase $SqlDatabase -StorageAccount $StorageAccount -Container $container -Exists $exists
+# No registry identity to inherit: id-pim-asbuilt pulls the image itself (AcrPull granted to it in step 4).
+$pullWithUami = (-not "$RegistryIdentityResourceId".Trim()) -and [bool]$uamiCid
+if ($pullWithUami) { $RegistryIdentityResourceId = $uamiId }
+$specArgs = @{ JobName = $JobName; Image = $image; EnvironmentId = $envId; Location = $location; RegistryServer = "$AcrName.azurecr.io"
+               RegistryIdentity = $(if ("$RegistryIdentityResourceId".Trim()) { "$RegistryIdentityResourceId".Trim() } else { 'system' })
+               SqlServerFqdn = $SqlServerFqdn; SqlDatabase = $SqlDatabase; StorageAccount = $StorageAccount; Container = $container; Exists = $exists }
+if ($uamiCid) { $specArgs['IdentityResourceId'] = $uamiId; $specArgs['IdentityClientId'] = $uamiCid }
+$spec = Get-PimAsBuiltJobSpec @specArgs
 if (-not $spec.ok) { throw "REFUSED: $($spec.reason)" }
+# id-pim-asbuilt pulls the image itself: AcrPull BEFORE the job exists, so its first execution can pull.
+if ($pullWithUami -and $PSCmdlet.ShouldProcess($AcrName, "AcrPull for $uamiName")) {
+    $acrId = "$((Find-PimArmAcr -SubscriptionId $S -Name $AcrName).id)".Trim()
+    if (-not $acrId) { throw "registry '$AcrName' not found -- $uamiName cannot be given AcrPull." }
+    Step "AcrPull on $acrId for $uamiName -- pull the job's image (no registry identity to inherit)"
+    $haveP = @(try { Get-PimArmRoleAssignments -Scope $acrId -PrincipalId $oid -SubscriptionId $S } catch { @() }) | ForEach-Object { "$($_.roleDefinitionName)".Trim() }
+    if ($haveP -contains 'AcrPull') { Note 'already assigned' }
+    else {
+        try { [void](New-PimArmRoleAssignment -Scope $acrId -PrincipalId $oid -PrincipalType ServicePrincipal -Role 'AcrPull' -SubscriptionId $S) } catch { Warn "  $($_.Exception.Message)" }
+        $afterP = @(try { Get-PimArmRoleAssignments -Scope $acrId -PrincipalId $oid -SubscriptionId $S } catch { @() }) | ForEach-Object { "$($_.roleDefinitionName)".Trim() }
+        if ($afterP -notcontains 'AcrPull') { throw "read-back FAILED: 'AcrPull' is not assigned to $uamiName on $acrId." }
+        Note 'granted + read back'
+    }
+}
 $action = if ($exists) { 'update' } else { 'create' }
 if ($PSCmdlet.ShouldProcess($JobName, "$action the as-built job (manual trigger)")) {
     Step "$action $JobName"
@@ -133,16 +176,12 @@ if ("$($jobObj.properties.configuration.triggerType)" -ne 'Manual') { throw "rea
 $envBack = ConvertTo-PimJobEnvMap -Job $jobObj -ContainerName $JobName
 $bad = @(foreach ($k in @($spec.env.Keys)) { if ("$($envBack[$k])" -cne "$($spec.env[$k])") { $k } })
 if ($bad.Count) { throw "read-back FAILED: env $($bad -join ', ') not stored as planned" }
-$oid = "$($jobObj.identity.principalId)".Trim()
-if (-not $oid) { throw "$JobName has no SYSTEM-ASSIGNED identity -- it could not authenticate to SQL or storage." }
-Note "read back: manual trigger, env exact, system identity $oid"
+$jid = Get-PimAsBuiltJobIdentity -Job $jobObj -Name $uamiName
+if ($jid.kind -ne 'user' -or "$($jid.principalId)" -ne $oid) { throw "read-back FAILED: $JobName does not run as $uamiName (identity: $($jobObj.identity.type)) -- it could not authenticate to SQL or storage." }
+Note "read back: manual trigger, env exact (PIM_ManagedIdentityClientId = $uamiName), identity $($jobObj.identity.type) with $uamiName ($oid)"
 
-# ---- 4. the job identity's grants: the container only (+ AcrPull without a registry identity) ----------------------
+# ---- 4. id-pim-asbuilt's grants: the container only (AcrPull, when it pulls the image itself, was given before step 3) ----
 $grants = @(@{ role = 'Storage Blob Data Contributor'; scope = (Get-PimArmResourceId $S $ResourceGroup 'Microsoft.Storage/storageAccounts' $StorageAccount "blobServices/default/containers/$container"); why = 'write the as-built PDF' })
-if (-not "$RegistryIdentityResourceId".Trim()) {
-    $acrId = "$((Find-PimArmAcr -SubscriptionId $S -Name $AcrName).id)".Trim()
-    if ($acrId) { $grants += @{ role = 'AcrPull'; scope = $acrId; why = 'pull its own image (no registry identity to inherit)' } }
-}
 foreach ($gr in $grants) {
     Step "$($gr.role) on $($gr.scope) -- $($gr.why)"
     $have = @(try { Get-PimArmRoleAssignments -Scope $gr.scope -PrincipalId $oid -SubscriptionId $S } catch { @() }) | ForEach-Object { "$($_.roleDefinitionName)".Trim() }
@@ -173,9 +212,9 @@ if (-not $SkipSqlGrant) {
     $revoke = @('db_owner', 'db_datawriter', 'db_ddladmin', 'db_datareader')
     Step "SQL: $JobName's identity gets SELECT on $view only (people and secrets reduced in SQL)"
     $inv = New-PimSqlAdminGroupInvokers -SubscriptionId $S
-    $graphInv = $inv.Graph
-    $miAppId = Resolve-PimMiAppId -ObjectId $oid -What $JobName -Lookup { param($id) try { "$((& $graphInv -Method GET -Path ("/servicePrincipals/$id" + '?$select=appId')).appId)".Trim() } catch { '' } }
-    if (-not "$miAppId".Trim()) { throw "could not resolve the app id of $JobName's identity ($oid) -- cannot create its database user." }
+    # The SID is id-pim-asbuilt's ARM clientId (= its app id) -- no Graph lookup (the in-cloud updater's converge does the same).
+    $miAppId = $uamiCid
+    if (-not "$miAppId".Trim()) { throw "the client id of $uamiName is not known -- cannot create $JobName's database user." }
     $sqlTok = ''
     try { $sqlTok = "$(Get-PimRestToken -Resource 'https://database.windows.net' -TenantId "$($inv.TenantId)")".Trim() } catch { $sqlTok = '' }
     if (-not $sqlTok) { throw "no Azure SQL token for subscription $S (sign in first) -- cannot create $JobName's database user." }
@@ -207,7 +246,7 @@ if (-not $SkipSqlGrant) {
     } finally { $conn.Close(); $conn.Dispose() }
     $verdict = Test-PimSqlContainedUserReadBack -Row $rowBack -RevokeRoles $revoke -SelectObjects @($view) -DbUserName $JobName
     if (-not $verdict.ok) { throw "read-back FAILED for $JobName's database user: $($verdict.problems -join '; ')" }
-    Note "read back: contained user '$JobName' (SID from app id $miAppId), SELECT on $view, no fixed database role; AsBuiltInstallFacts recorded ($region, $network)"
+    Note "read back: contained user '$JobName' (SID from $uamiName's client id $miAppId), SELECT on $view, no fixed database role; AsBuiltInstallFacts recorded ($region, $network)"
 } else {
     Warn "-SkipSqlGrant: $JobName's identity got NO database user -- the job fails until it can SELECT pim.vw_AsBuiltSettings."
 }

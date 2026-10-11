@@ -145,12 +145,16 @@ if (-not $SkipManagerRgReader) {
 # the job does not exist. Idempotent, read back.
 . (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'engine\_shared\PIM-AsBuilt.ps1')
 $abJob = Get-PimArmAcaJob -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name (Get-PimAsBuiltJobName) -ErrorAsNull
-if ($abJob -and "$($abJob.identity.principalId)".Trim()) {
-    $abOid = "$($abJob.identity.principalId)".Trim()
+# The writer is the job's USER-ASSIGNED identity id-pim-asbuilt (live fix 2026-10-11) -- read over ARM, also before the
+# updater's converge has switched an older system-identity job to it; the job's own system identity only when there is none.
+$abUami = Get-PimArmIdentity -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name (Get-PimAsBuiltIdentityName) -ErrorAsNull
+$abOid = "$($abUami.properties.principalId)".Trim()
+if (-not $abOid -and $abJob) { $abOid = "$((Get-PimAsBuiltJobIdentity -Job $abJob).principalId)".Trim() }
+if ($abJob -and $abOid) {
     $abAcct = "$(@(@($abJob.properties.template.containers)[0].env) | Where-Object { "$($_.name)" -eq 'PIM_ASBUILT_STORAGE' } | ForEach-Object { $_.value } | Select-Object -First 1)".Trim()
     if ($abAcct -match '^[a-z0-9]{3,24}$') {
         $abScope = Get-PimArmResourceId $SubscriptionId $ResourceGroup 'Microsoft.Storage/storageAccounts' $abAcct "blobServices/default/containers/$(Get-PimAsBuiltContainerName)"
-        Step "'Storage Blob Data Contributor' for $(Get-PimAsBuiltJobName) on $abAcct/$(Get-PimAsBuiltContainerName) only (it writes the as-built PDF)"
+        Step "'Storage Blob Data Contributor' for $(Get-PimAsBuiltJobName)$(if ($abUami) { " (identity $(Get-PimAsBuiltIdentityName))" }) on $abAcct/$(Get-PimAsBuiltContainerName) only (it writes the as-built PDF)"
         $abHave = { [bool](@(try { Get-PimArmRoleAssignments -SubscriptionId $SubscriptionId -PrincipalId $abOid -Scope $abScope -Role 'Storage Blob Data Contributor' } catch { @() }).Count) }
         if (& $abHave) { Note 'already assigned' }
         elseif ($PSCmdlet.ShouldProcess($abScope, 'role assignment Storage Blob Data Contributor (as-built job)')) {

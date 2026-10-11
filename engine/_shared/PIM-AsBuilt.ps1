@@ -39,6 +39,12 @@ $script:PimAsBuiltRoleName  = 'PIM Manager as-built runner'
 $script:PimAsBuiltRoleActions = @('Microsoft.App/jobs/start/action', 'Microsoft.App/jobs/executions/read')
 $script:PimAsBuiltBlobReaderRoleId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'   # Storage Blob Data Reader (built-in)
 $script:PimAsBuiltBlobWriterRole   = 'Storage Blob Data Contributor'          # the JOB's own identity, on the container only
+# 100.61 fix (live 2026-10-11): the job runs as a USER-ASSIGNED identity in the PIM resource group. Its ARM properties.clientId
+# IS the app id (the SID of its contained database user) and properties.principalId the object id -- both readable over ARM by
+# the updater's Contributor, so the database user is made WITHOUT Graph (a system identity's app id needs Graph, which the
+# updater's identity does not have: "the app id of caj-pim-asbuilt's identity could not be resolved" on every run).
+$script:PimAsBuiltIdentityName = 'id-pim-asbuilt'
+$script:PimAsBuiltMsiApi       = 'api-version=2023-01-31'
 
 # ---------------------------------------------------------------------------------------------------------------------
 # The pim.Settings rows the generator reads. The job's identity reads them through ONE view (Get-PimAsBuiltViewSql) that
@@ -163,6 +169,35 @@ function Get-PimAsBuiltQuestionCatalog { return @($script:PimAsBuiltQuestions) }
 function Get-PimAsBuiltSettingNames { return @($script:PimAsBuiltSettingNames) }
 function Get-PimAsBuiltJobName { return $script:PimAsBuiltJobName }
 function Get-PimAsBuiltContainerName { return $script:PimAsBuiltContainer }
+function Get-PimAsBuiltIdentityName { return $script:PimAsBuiltIdentityName }
+function Get-PimAsBuiltIdentityResourceId {
+    <# PURE. The ARM id of the job's user-assigned identity id-pim-asbuilt (in the PIM resource group). #>
+    param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup, [string]$Name = $script:PimAsBuiltIdentityName)
+    return "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.ManagedIdentity/userAssignedIdentities/$Name"
+}
+function Get-PimAsBuiltJobIdentity {
+    <#
+      PURE. Which identity a caj-pim-asbuilt ARM object (GET) runs as: @{ kind = user | system | none; principalId; clientId;
+      resourceId }. 'user' = id-pim-asbuilt is attached (principalId / clientId from identity.userAssignedIdentities);
+      'system' = only the former system-assigned identity (an install from before the fix -- the converge switches it).
+    #>
+    param($Job, [string]$Name = $script:PimAsBuiltIdentityName)
+    $out = @{ kind = 'none'; principalId = ''; clientId = ''; resourceId = '' }
+    if (-not $Job -or -not $Job.identity) { return $out }
+    $ua = $Job.identity.userAssignedIdentities
+    if ($ua) {
+        $keys = if ($ua -is [System.Collections.IDictionary]) { @($ua.Keys) } else { @($ua.PSObject.Properties | ForEach-Object { $_.Name }) }
+        foreach ($k in $keys) {
+            if ("$k" -match ('(?i)/userAssignedIdentities/' + [regex]::Escape($Name) + '$')) {
+                $v = if ($ua -is [System.Collections.IDictionary]) { $ua[$k] } else { $ua.$k }
+                $out.kind = 'user'; $out.resourceId = "$k"; $out.principalId = "$($v.principalId)".Trim(); $out.clientId = "$($v.clientId)".Trim()
+                return $out
+            }
+        }
+    }
+    if ("$($Job.identity.principalId)".Trim() -and "$($Job.identity.type)" -match '(?i)SystemAssigned') { $out.kind = 'system'; $out.principalId = "$($Job.identity.principalId)".Trim() }
+    return $out
+}
 
 function Get-PimAsBuiltField {
     # PURE. A property of a PSCustomObject or a dictionary, $null when absent.
@@ -785,8 +820,13 @@ function Get-PimAsBuiltJobSpec {
     <#
       PURE. The Container Apps job caj-pim-asbuilt (framework 8.12): MANUAL trigger (started on demand -- by Invardia support
       with the customer's consent, or by an admin), one replica, no retry, 10 minutes. Runs the same image as the Manager with
-      tools/pim-engine/asbuilt-job-entry.ps1, as its SYSTEM-ASSIGNED identity. Env: the store, the PIM storage account +
-      container 'asbuilt'. REFUSED: a storage name that is not one, an env value that looks like a credential.
+      tools/pim-engine/asbuilt-job-entry.ps1, as the USER-ASSIGNED identity id-pim-asbuilt (-IdentityResourceId +
+      -IdentityClientId; env PIM_ManagedIdentityClientId tells PIM-Rest which identity to ask the token endpoint for). The
+      identity block is written on create AND update (an existing system-identity job is switched): UserAssigned (the
+      registry's user-assigned identity kept beside it); SystemAssigned,UserAssigned only when the image pull uses the job's
+      own system identity ('system' -- the pull must keep working). Without -IdentityResourceId: the former system-assigned
+      shape (create only). Env: the store, the PIM storage account + container 'asbuilt'. REFUSED: a storage name that is not
+      one, an env value that looks like a credential, a client id that is not a GUID.
       Returns @{ ok; reason; env; resource } (resource = the ARM body: create = PUT, update = PATCH).
     #>
     param(
@@ -801,8 +841,16 @@ function Get-PimAsBuiltJobSpec {
         [Parameter(Mandatory)][string]$StorageAccount,
         [string]$Container = $script:PimAsBuiltContainer,
         [bool]$Exists = $false,
-        [string]$EntryPath = '/app/PIM4EntraPS/tools/pim-engine/asbuilt-job-entry.ps1'
+        [string]$EntryPath = '/app/PIM4EntraPS/tools/pim-engine/asbuilt-job-entry.ps1',
+        [string]$IdentityResourceId = '',
+        [string]$IdentityClientId = ''
     )
+    $uami = "$IdentityResourceId".Trim()
+    if ($uami) {
+        if ($uami -notmatch '(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.ManagedIdentity/userAssignedIdentities/[A-Za-z0-9][A-Za-z0-9_-]{2,127}$') { return @{ ok = $false; reason = "'$uami' is not a user-assigned identity resource id" } }
+        $gcid = [guid]::Empty
+        if (-not [guid]::TryParse("$IdentityClientId".Trim(), [ref]$gcid)) { return @{ ok = $false; reason = "'$IdentityClientId' is not the client id of $uami" } }
+    }
     if ("$StorageAccount" -notmatch '^[a-z0-9]{3,24}$') { return @{ ok = $false; reason = "'$StorageAccount' is not a storage account name" } }
     if ("$Container" -notmatch '^[a-z0-9](?!.*--)[a-z0-9-]{1,61}[a-z0-9]$') { return @{ ok = $false; reason = "'$Container' is not a blob container name" } }
     if ("$SqlServerFqdn" -notmatch '^[a-z0-9-]+\.database\.(windows\.net|chinacloudapi\.cn|usgovcloudapi\.net)$') { return @{ ok = $false; reason = "'$SqlServerFqdn' is not an Azure SQL server name" } }
@@ -815,6 +863,7 @@ function Get-PimAsBuiltJobSpec {
         PIM_ASBUILT_STORAGE = "$StorageAccount"
         PIM_ASBUILT_CONTAINER = "$Container"
     }
+    if ($uami) { $env['PIM_ManagedIdentityClientId'] = "$IdentityClientId".Trim().ToLowerInvariant() }
     foreach ($k in @($env.Keys)) {
         $v = "$($env[$k])"
         if ($k -match '(?i)secret|password|thumbprint|sas|accountkey|connectionstring|privatekey' -or $v -match '(?i)([?&]sig=|AccountKey=|SharedAccessKey=|-----BEGIN|secretref:)') {
@@ -822,7 +871,11 @@ function Get-PimAsBuiltJobSpec {
         }
     }
     $regId = "$RegistryIdentity".Trim(); if (-not $regId) { $regId = 'system' }
-    $identity = if ($regId -ne 'system') { @{ type = 'SystemAssigned,UserAssigned'; userAssignedIdentities = @{ $regId = @{} } } } else { @{ type = 'SystemAssigned' } }
+    $identity = if ($uami) {
+        if ($regId -eq 'system') { @{ type = 'SystemAssigned,UserAssigned'; userAssignedIdentities = @{ $uami = @{} } } }
+        elseif ($regId -ieq $uami) { @{ type = 'UserAssigned'; userAssignedIdentities = @{ $uami = @{} } } }
+        else { @{ type = 'UserAssigned'; userAssignedIdentities = @{ $regId = @{}; $uami = @{} } } }
+    } elseif ($regId -ne 'system') { @{ type = 'SystemAssigned,UserAssigned'; userAssignedIdentities = @{ $regId = @{} } } } else { @{ type = 'SystemAssigned' } }
     $envList = @(foreach ($k in @($env.Keys)) { @{ name = $k; value = "$($env[$k])" } })
     $props = @{
         environmentId = $EnvironmentId
@@ -845,7 +898,7 @@ function Get-PimAsBuiltJobSpec {
         }
     }
     $res = @{ location = $Location; properties = $props }
-    if (-not $Exists) { $res['identity'] = $identity }
+    if (-not $Exists -or $uami) { $res['identity'] = $identity }
     return @{ ok = $true; reason = ''; env = $env; resource = $res }
 }
 
@@ -884,6 +937,34 @@ function Get-PimAsBuiltReaderUserSql {
     ) -join "`n")
 }
 
+function Test-PimAsBuiltRollSkip {
+    <#
+      PURE. Does the updater's generic job roll (update-job-entry 2b) SKIP this job? Only caj-pim-asbuilt, and only when the
+      as-built converge of THIS run already left it on exactly the target image (Invoke-PimAsBuiltConverge's jobImage). A
+      second PATCH seconds after the converge's was refused 409 ContainerAppsJobOperationInProgress (live 2026-10-11) and
+      reported the job as "still on the previous build". Any other case: roll it as before.
+    #>
+    param([AllowEmptyString()][string]$JobName, [AllowEmptyString()][string]$ConvergedImage, [AllowEmptyString()][string]$TargetImage)
+    $c = "$ConvergedImage".Trim(); $t = "$TargetImage".Trim()
+    return ([bool]("$JobName".Trim() -eq $script:PimAsBuiltJobName -and $c -and $t -and $c -ieq $t))
+}
+
+function Get-PimAsBuiltStoreReadFailureText {
+    <#
+      PURE. The job's exit-4 line when the store cannot be read through the view -- worded as WHAT TO RUN. A login failure
+      ("Login failed for user '<token-identified principal>'") means the job's identity has no contained database user (yet):
+      the as-built converge of the next PIM update creates it (from id-pim-asbuilt's client id), or Deploy-PimAsBuiltJob.ps1
+      once. A missing view / denied SELECT: the same two fixes. Anything else: the message as it came.
+    #>
+    param([AllowEmptyString()][string]$Message, [string]$View = $script:PimAsBuiltView, [AllowEmptyString()][string]$ClientId = '')
+    $m = ("$Message" -split "`n")[0].Trim()
+    $fix = 'the as-built converge of the next PIM update creates it (the nightly update, or start the update job ca-pim-update once), or run tools/setup/Deploy-PimAsBuiltJob.ps1 once'
+    $who = if ("$ClientId".Trim()) { "the job's identity id-pim-asbuilt (client id $("$ClientId".Trim()))" } else { "the job's identity (system-assigned -- the next PIM update switches it to id-pim-asbuilt)" }
+    if ($m -match '(?i)Login failed|token-identified principal|18456') { return "the store cannot be read: $who has no database user yet ($m) -- $fix" }
+    if ($m -match "(?i)Invalid object name|SELECT permission was denied|permission was denied on the object") { return "the store cannot be read through $View as $who ($m) -- the view or its SELECT grant is missing: $fix" }
+    return "the store cannot be read through $View as $who`: $m -- $fix"
+}
+
 function Invoke-PimAsBuiltConverge {
     <#
       PIM 100.61 ("build all", owner 2026-10-10): the in-cloud UPDATER brings an EXISTING environment to the as-built setup
@@ -893,28 +974,53 @@ function Invoke-PimAsBuiltConverge {
           HTTPS only, no shared key, no anonymous blob, an Entra-only public endpoint (the only reader is the Support app,
           after the customer's grant);
         * the private container 'asbuilt' and the 1-day lifecycle rule (other rules kept);
-        * the job caj-pim-asbuilt (manual trigger) on the Manager's CURRENT image and registry identity; an existing job is
-          moved to that image (so it rolls with every update);
+        * the job's USER-ASSIGNED identity id-pim-asbuilt (created when missing; Contributor may) -- its clientId (= app id)
+          and principalId come from ARM, so nothing here needs Graph (live 2026-10-11: the former system identity's app id
+          could not be read by the updater, so the job's database user was never made and every run failed to log in);
+        * the job caj-pim-asbuilt (manual trigger) on the Manager's CURRENT image, as id-pim-asbuilt; an existing job is moved
+          to that image (so it rolls with every update) and a former system-identity job is SWITCHED to id-pim-asbuilt. The
+          job's existing registry identity is kept (else the Manager's). A write refused "OperationInProgress" is waited out
+          (bounded). The image the job is on afterwards is returned (jobImage) so the generic roll does not PATCH it again;
         * SQL (works for a private SQL server too -- the updater is inside the network): the view pim.vw_AsBuiltSettings, the
-          job identity's reader user (SID from its app id), pim.Settings 'AsBuiltInstallFacts';
-        * REPORT ONLY (Contributor cannot write role assignments / definitions): the job identity's Storage Blob Data
+          job identity's reader user (SID from id-pim-asbuilt's clientId, never FROM EXTERNAL PROVIDER), pim.Settings
+          'AsBuiltInstallFacts';
+        * REPORT ONLY (Contributor cannot write role assignments / definitions): id-pim-asbuilt's Storage Blob Data
           Contributor on the container and the support custom role -- fix: Initialize-PimHostingAccess.ps1 as an Owner.
       Seams: -Arm { param($method, $path, $body) } (path WITH api-version; a GET of an absent resource may throw or return
-      $null), -Sql { param($sql, $parameters) } (one batch; $null = no store), -AppIdOf { param($principalId) } -> app id.
-      Returns @{ lines = @(@{ id; level = info | changed | warn; text }); changed; warnings }. NEVER throws.
+      $null), -Sql { param($sql, $parameters) } (one batch; $null = no store), -Sleep { param($seconds) } (busy waits),
+      -BusyWaits (seconds between the attempts of a busy job write).
+      Returns @{ lines = @(@{ id; level = info | changed | warn; text }); changed; warnings; jobImage; identity }. NEVER throws.
     #>
     param([Parameter(Mandatory)][string]$SubscriptionId, [Parameter(Mandatory)][string]$ResourceGroup,
           [string]$ManagerApp = 'ca-pim-manager', [string]$JobName = $script:PimAsBuiltJobName,
-          [Parameter(Mandatory)][scriptblock]$Arm, [scriptblock]$Sql = $null, [scriptblock]$AppIdOf = $null)
+          [Parameter(Mandatory)][scriptblock]$Arm, [scriptblock]$Sql = $null,
+          [scriptblock]$Sleep = $null, [int[]]$BusyWaits = @(10, 20, 30, 30, 30))
+    if (-not $Sleep) { $Sleep = { param($s) Start-Sleep -Seconds $s } }
     $lines = New-Object System.Collections.Generic.List[object]
     $add = { param($id, $level, $text) $lines.Add([pscustomobject]@{ id = $id; level = $level; text = $text }) }
     $get = { param($p) try { & $Arm 'GET' $p $null } catch { $null } }
+    # A job write that arrives while the job's previous operation is still provisioning is refused 409
+    # ContainerAppsJobOperationInProgress -- a WAIT, never a failure (same rule as Invoke-PimArmBusyRetry; kept local so this
+    # file needs nothing else). Any other failure is rethrown at once.
+    $busyWrite = {
+        param($bm, $bp, $bb)
+        $bn = 0
+        while ($true) {
+            try { return (& $Arm $bm $bp $bb) }
+            catch {
+                if ("$($_.Exception.Message)" -notmatch '(?i)OperationInProgress|active provisioning operation' -or $bn -ge @($BusyWaits).Count) { throw }
+                $bw = [int]@($BusyWaits)[$bn]; $bn++
+                if ($bw -gt 0) { & $Sleep $bw }
+            }
+        }
+    }
+    $jobImage = ''; $idOut = @{ kind = 'none'; principalId = ''; clientId = ''; resourceId = '' }
     $rg = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup"
     $aca = 'api-version=2024-03-01'; $st = 'api-version=2023-01-01'; $az = 'api-version=2022-04-01'
     $ownerFix = "run tools/setup/Initialize-PimHostingAccess.ps1 -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup (an Owner / User Access Administrator of the resource group) -- or Deploy-PimAsBuiltJob.ps1"
     try {
         $mgr = & $get "$rg/providers/Microsoft.App/containerApps/$ManagerApp`?$aca"
-        if (-not $mgr) { & $add 'asbuilt' 'warn' "as-built: the Manager app '$ManagerApp' could not be read -- nothing converged"; return (& { [pscustomobject]@{ lines = @($lines.ToArray()); changed = 0; warnings = 1 } }) }
+        if (-not $mgr) { & $add 'asbuilt' 'warn' "as-built: the Manager app '$ManagerApp' could not be read -- nothing converged"; return (& { [pscustomobject]@{ lines = @($lines.ToArray()); changed = 0; warnings = 1; jobImage = ''; identity = $idOut } }) }
         $mc = @($mgr.properties.template.containers)[0]
         $image = "$($mc.image)".Trim()
         $menv = @{}; foreach ($e in @($mc.env)) { if ($e -and "$($e.name)") { $menv["$($e.name)"] = "$($e.value)" } }
@@ -958,28 +1064,62 @@ function Invoke-PimAsBuiltConverge {
             }
         }
 
-        # ---- the job, on the Manager's current image -------------------------------------------------------------------
+        # ---- the job's user-assigned identity id-pim-asbuilt (clientId = app id, principalId = object id; both over ARM) ----
+        $uamiName = $script:PimAsBuiltIdentityName
+        $uamiId = Get-PimAsBuiltIdentityResourceId -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup -Name $uamiName
+        $uami = & $get "$uamiId`?$($script:PimAsBuiltMsiApi)"
+        if (-not $uami -and $location) {
+            try {
+                [void](& $Arm 'PUT' "$uamiId`?$($script:PimAsBuiltMsiApi)" @{ location = $location; tags = @{ 'pim-component' = 'asbuilt' } })
+                & $add 'asbuilt-identity' 'changed' "as-built: user-assigned identity $uamiName created (the job's identity for SQL + storage)"
+            } catch { & $add 'asbuilt-identity' 'warn' "as-built: the user-assigned identity $uamiName could not be created: $(("$($_.Exception.Message)" -split "`n")[0])" }
+            $uami = & $get "$uamiId`?$($script:PimAsBuiltMsiApi)"
+        }
+        $uamiCid = "$($uami.properties.clientId)".Trim(); $uamiOid = "$($uami.properties.principalId)".Trim()
+        $gtmp = [guid]::Empty
+        if (-not [guid]::TryParse($uamiCid, [ref]$gtmp)) { $uamiCid = '' }
+        if ($uamiCid) { $idOut = @{ kind = 'user'; principalId = $uamiOid; clientId = $uamiCid; resourceId = $uamiId } }
+        elseif ($uami) { & $add 'asbuilt-identity' 'warn' "as-built: $uamiName exists but its client id is not readable yet -- the job keeps its identity this run" }
+
+        # ---- the job, on the Manager's current image, as id-pim-asbuilt -------------------------------------------------
+        $jobReg = if ($job) { @($job.properties.configuration.registries)[0] } else { $null }
+        $regIdentity = if ($jobReg -and "$($jobReg.identity)".Trim()) { "$($jobReg.identity)".Trim() } elseif ("$($reg.identity)".Trim()) { "$($reg.identity)".Trim() } else { 'system' }
+        $regServer = if ($jobReg -and "$($jobReg.server)".Trim()) { "$($jobReg.server)".Trim() } else { "$($reg.server)" }
         if (-not $image -or -not $envId -or -not $reg -or $sqlSrv -notmatch '\.database\.') {
             & $add 'asbuilt-job' 'warn' "as-built: the Manager's image / environment / registry / SQL server could not be read -- the job was not converged ($ownerFix)"
         } else {
-            $spec = Get-PimAsBuiltJobSpec -JobName $JobName -Image $image -EnvironmentId $envId -Location $location -RegistryServer "$($reg.server)" `
-                        -RegistryIdentity $(if ("$($reg.identity)".Trim()) { "$($reg.identity)".Trim() } else { 'system' }) `
-                        -SqlServerFqdn $sqlSrv -SqlDatabase $sqlDb -StorageAccount $acct -Container $cont -Exists ([bool]$job)
-            if (-not $spec.ok) { & $add 'asbuilt-job' 'warn' "as-built: job not converged ($($spec.reason))" }
-            elseif (-not $job) { [void](& $Arm 'PUT' "$rg/providers/Microsoft.App/jobs/$JobName`?$aca" $spec.resource); & $add 'asbuilt-job' 'changed' "as-built: job $JobName created (manual trigger) on $image" }
-            elseif ("$(@($job.properties.template.containers)[0].image)" -ne $image -or "$($jenv['PIM_ASBUILT_STORAGE'])" -ne $acct) {
-                [void](& $Arm 'PATCH' "$rg/providers/Microsoft.App/jobs/$JobName`?$aca" $spec.resource); & $add 'asbuilt-job' 'changed' "as-built: job $JobName moved to $image"
-            } else { & $add 'asbuilt-job' 'info' "as-built: job $JobName current ($image)" }
+            $specArgs = @{ JobName = $JobName; Image = $image; EnvironmentId = $envId; Location = $location; RegistryServer = $regServer; RegistryIdentity = $regIdentity
+                           SqlServerFqdn = $sqlSrv; SqlDatabase = $sqlDb; StorageAccount = $acct; Container = $cont; Exists = [bool]$job }
+            if ($uamiCid) { $specArgs['IdentityResourceId'] = $uamiId; $specArgs['IdentityClientId'] = $uamiCid }
+            $spec = Get-PimAsBuiltJobSpec @specArgs
+            $cur = Get-PimAsBuiltJobIdentity -Job $job -Name $uamiName
+            $why = @()
+            if ($job) {
+                if ("$(@($job.properties.template.containers)[0].image)" -ne $image) { $why += "moved to $image" }
+                if ("$($jenv['PIM_ASBUILT_STORAGE'])" -ne $acct) { $why += "store $acct" }
+                if ($uamiCid -and ($cur.kind -ne 'user' -or "$($jenv['PIM_ManagedIdentityClientId'])".Trim() -ine $uamiCid -or ("$($job.identity.type)" -replace '\s', '') -ne "$($spec.resource.identity.type)")) {
+                    $why += "switched to the user-assigned identity $uamiName (was: $(if ($cur.kind -eq 'none') { 'none' } else { "$($job.identity.type)" }))"
+                }
+            }
+            try {
+                if (-not $spec.ok) { & $add 'asbuilt-job' 'warn' "as-built: job not converged ($($spec.reason))" }
+                elseif (-not $job) { [void](& $busyWrite 'PUT' "$rg/providers/Microsoft.App/jobs/$JobName`?$aca" $spec.resource); $jobImage = $image; & $add 'asbuilt-job' 'changed' "as-built: job $JobName created (manual trigger) on $image$(if ($uamiCid) { " as $uamiName" })" }
+                elseif ($why.Count) {
+                    [void](& $busyWrite 'PATCH' "$rg/providers/Microsoft.App/jobs/$JobName`?$aca" $spec.resource); $jobImage = $image
+                    & $add 'asbuilt-job' 'changed' "as-built: job $JobName $($why -join '; ')"
+                } else { $jobImage = $image; & $add 'asbuilt-job' 'info' "as-built: job $JobName current ($image$(if ($cur.kind -eq 'user') { ", $uamiName" }))" }
+            } catch { & $add 'asbuilt-job' 'warn' "as-built: job $JobName not converged: $(("$($_.Exception.Message)" -split "`n")[0]) -- the next update run retries" }
         }
 
         # ---- report only: the rights an Owner gives (the updater's Contributor cannot write them) ----------------------
-        $job2 = & $get "$rg/providers/Microsoft.App/jobs/$JobName`?$aca"
-        $oid = "$($job2.identity.principalId)".Trim()
+        # The principal that writes the PDF is id-pim-asbuilt; the job's own (former system) identity only until it is switched.
+        $oid = $uamiOid
+        if (-not $oid) { $job2 = & $get "$rg/providers/Microsoft.App/jobs/$JobName`?$aca"; $oid = "$((Get-PimAsBuiltJobIdentity -Job $job2 -Name $uamiName).principalId)".Trim() }
         $contScope = "$saPath/blobServices/default/containers/$cont"
         if ($oid) {
             $ra = & $get ("$contScope/providers/Microsoft.Authorization/roleAssignments?`$filter=assignedTo('{0}')&{1}" -f $oid, $az)
             $has = @(@($ra.value) | Where-Object { $_ -and ("$($_.properties.roleDefinitionId)" -split '/')[-1] -eq 'ba92f5b4-2d11-453d-a403-e96b0029c9fe' }).Count -gt 0
-            if (-not $has) { & $add 'asbuilt-write-right' 'warn' "as-built: the job's identity has no Storage Blob Data Contributor on $acct/$cont -- the job cannot write the PDF until $ownerFix" }
+            if (-not $has) { & $add 'asbuilt-write-right' 'warn' "as-built: the job's identity$(if ($uamiOid) { " $uamiName" }) has no Storage Blob Data Contributor on $acct/$cont -- the job cannot write the PDF until $ownerFix" }
         } else { & $add 'asbuilt-write-right' 'info' 'as-built: the job identity is not readable yet (just created) -- checked on the next run' }
         $rdef = Get-PimAsBuiltRoleDefinition -SubscriptionId $SubscriptionId -ResourceGroup $ResourceGroup
         if (-not (& $get "$($rdef.path)?$az")) { & $add 'asbuilt-support-role' 'warn' "as-built: the support custom role '$($rdef.body.properties.roleName)' does not exist -- Grant-PimSupportAccess.ps1 -Level asbuilt (or $ownerFix) creates it" }
@@ -987,10 +1127,10 @@ function Invoke-PimAsBuiltConverge {
         # ---- SQL: the view, the reader user, the install facts --------------------------------------------------------
         if ($Sql) {
             [void](& $Sql (Get-PimAsBuiltViewSql) @{})
-            $appId = ''
-            if ($oid -and $AppIdOf) { try { $appId = "$(& $AppIdOf $oid)".Trim() } catch { $appId = '' } }
-            if ($appId -match '^[0-9a-fA-F-]{36}$') { [void](& $Sql (Get-PimAsBuiltReaderUserSql -DbUserName $JobName -AppId $appId) @{}) }
-            elseif ($oid) { & $add 'asbuilt-sql-user' 'warn' "as-built: the app id of $JobName's identity could not be resolved -- its database user was not made this run" }
+            # The reader user's SID is id-pim-asbuilt's clientId (= its app id), read over ARM above -- no Graph.
+            $appId = $uamiCid
+            if ($appId) { [void](& $Sql (Get-PimAsBuiltReaderUserSql -DbUserName $JobName -AppId $appId) @{}) }
+            else { & $add 'asbuilt-sql-user' 'warn' "as-built: the user-assigned identity $uamiName (the job's identity) is not readable -- $JobName's database user was not made this run; the next update retries, or run tools/setup/Deploy-PimAsBuiltJob.ps1 once" }
             $envObj = if ($envId) { & $get "$envId`?$aca" } else { $null }
             $facts = [ordered]@{ region = ("$location" -replace '\s', '').ToLowerInvariant(); resourceGroup = $ResourceGroup; recordedUtc = [datetime]::UtcNow.ToString('o') }
             if ($envObj) { $facts['network'] = $(if ([bool]$envObj.properties.vnetConfiguration.internal) { 'internal' } else { 'external' }) }
@@ -999,7 +1139,7 @@ function Invoke-PimAsBuiltConverge {
         } else { & $add 'asbuilt-sql' 'warn' 'as-built: no SQL store in this run -- the view and the job''s reader user were not converged' }
     } catch { & $add 'asbuilt' 'warn' "as-built: converge stopped: $(("$($_.Exception.Message)" -split "`n")[0])" }
     $arr = @($lines.ToArray())
-    return [pscustomobject]@{ lines = $arr; changed = @($arr | Where-Object { $_.level -eq 'changed' }).Count; warnings = @($arr | Where-Object { $_.level -eq 'warn' }).Count }
+    return [pscustomobject]@{ lines = $arr; changed = @($arr | Where-Object { $_.level -eq 'changed' }).Count; warnings = @($arr | Where-Object { $_.level -eq 'warn' }).Count; jobImage = $jobImage; identity = $idOut }
 }
 
 function Get-PimAsBuiltLifecyclePolicy {

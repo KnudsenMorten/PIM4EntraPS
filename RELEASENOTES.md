@@ -13,6 +13,11 @@ Project home: https://github.com/KnudsenMorten/PIM4EntraPS
 ---
 
 <!-- next release entry goes here -->
+## 2.4.583 -- 2026-10-11
+
+- As-built job runs as its own user-assigned identity (database user made without Graph); the updater no longer re-rolls a job it just moved and waits out a busy job.
+
+- **As-built job fixed for existing environments.** The as-built job now runs as its own user-assigned identity (`id-pim-asbuilt`), so the nightly update can create the job's database user without directory permissions -- before, the job could not sign in to the database on environments the update had set up. An existing job is switched to the new identity on the next update. The update no longer reports the as-built job as "not fully updated" right after moving it to the new version, and a job that is still applying a previous change is retried after a short wait. If the job cannot sign in, its log names the fix. Upgrade note: an Owner of the resource group runs `Initialize-PimHostingAccess.ps1` once so the new identity may write the as-built PDF (the update log says so until then).
 ## 2.4.582 -- 2026-10-11
 
 - Export every view to PDF and Excel; company and environment name hidden on the dashboard by default; impact counters; demo mode for demo environments; private downlink by approved private endpoint; hybrid worker: PowerShell 7 SQL step, private SQL, hub gateway peering, Remove-PimHybridWorker.
