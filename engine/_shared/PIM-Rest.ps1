@@ -670,7 +670,11 @@ function Get-PimRestToken {
   # Import-PimHandoffTokens (this tenant, a USER, >5 min left) and held in memory only, answers FIRST for its audiences --
   # but never for a caller that named an explicit identity, and never for an explicit browser request (-Interactive, which
   # may need scopes the handed-over token does not carry). An audience it does not cover falls through to the sign-in below.
-  if (-not $explicitIdentity -and -not ($Interactive -or $global:PIM_Interactive)) {
+  # 🔴 2026-10-11 (HOGYM managed install, live): NEVER for Azure SQL. The handed-over database token is minted by the bootstrap
+  # BEFORE this run creates the SQL server and makes the signed-in admin (or its group) the server's Entra admin -- that token
+  # carries no such membership, and the schema step failed "Login failed for user '<token-identified principal>'". The
+  # database audience always comes from a sign-in made now (after the assignment).
+  if (-not $explicitIdentity -and -not ($Interactive -or $global:PIM_Interactive) -and "$aud" -notmatch '(?i)database\.windows\.net') {
     $hk = Get-PimHandoffToken -Audience $aud -TenantId $tenant
     if ($hk) { return $hk }
   }
